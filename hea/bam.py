@@ -748,7 +748,7 @@ class bam(gam):
     def __init__(
         self,
         formula: str,
-        data: pl.DataFrame,
+        data,
         *,
         method: str = "fREML",
         sp: np.ndarray | None = None,
@@ -761,6 +761,10 @@ class bam(gam):
         rho: float = 0.0,
         ar_start: np.ndarray | list | None = None,
     ):
+        # ``data`` may be a polars DataFrame OR a mapping of name → 1-D /
+        # 2-D ndarray. 2-D entries become matrix columns for mgcv's
+        # summation convention (Wood §7.4.1 distributed-lag models).
+        # ``prepare_design`` normalizes via ``normalize_data``.
         # ---- method aliasing ------------------------------------------------
         # mgcv's bam adds "fREML" on top of gam's {REML, ML, GCV.Cp}. fREML is
         # algorithmically identical to REML on the (R, f, rss_extra) reduced

@@ -164,7 +164,7 @@ class gam:
     def __init__(
         self,
         formula: str,
-        data: pl.DataFrame,
+        data,
         *,
         method: str = "GCV.Cp",
         sp: np.ndarray | None = None,
@@ -173,6 +173,11 @@ class gam:
         gamma: float = 1.0,
         select: bool = False,
     ):
+        # ``data`` may be a polars DataFrame OR a mapping of name → 1-D /
+        # 2-D ndarray. 2-D entries become matrix columns
+        # (``Array(Float64, m)``) for mgcv's summation-convention smooths
+        # (Wood §7.4.1). ``prepare_design`` calls ``normalize_data``
+        # internally; we keep the parameter untyped for flexibility.
         if method not in ("REML", "ML", "GCV.Cp"):
             raise ValueError(
                 f"method must be 'REML', 'ML', or 'GCV.Cp', got {method!r}"
@@ -3514,6 +3519,11 @@ class gam:
                 _smooth_arg_expr_map,
                 materialize,
             )
+            from .design import normalize_data
+
+            # Accept the same dict / DataFrame input as the constructor
+            # so matrix-arg smooths can replay on a {name: 2-D ndarray}.
+            newdata = normalize_data(newdata)
 
             # Re-evaluate any smooth-arg expressions on newdata. e.g. if
             # the fit used ``s(I(b.depth^.5))``, the synthesised column

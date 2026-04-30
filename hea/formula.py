@@ -2344,8 +2344,30 @@ class BasisSpec:
     keep_cols: Optional[np.ndarray] = None
     predict_raw: Optional[_RawBasis] = None
     coef_remap: Optional[tuple[np.ndarray, np.ndarray]] = None
+    # mgcv summation-convention support. When ``summation_dim`` is set
+    # (non-None), the smooth's variables ``matrix_vars`` are matrix-typed
+    # (``Array(Float64, m)``) and the basis is evaluated on a long-form
+    # view (n*m rows), then row-summed in blocks of m to give (n, p).
+    # by/absorb both commute with row-summation (by-mask is repeated m
+    # times within each block, absorb is a column transform), so they
+    # are applied on the long form just as in the scalar path.
+    summation_dim: Optional[int] = None
+    matrix_vars: Optional[tuple[str, ...]] = None
 
     def predict_mat(self, data: pl.DataFrame) -> np.ndarray:
+        if self.summation_dim is not None and self.matrix_vars:
+            from .design import long_form_view
+            long_data, n, m = long_form_view(data, list(self.matrix_vars))
+            raw = self.predict_raw if self.predict_raw is not None else self.raw
+            X = raw.eval(long_data)
+            if self.by is not None:
+                X = self.by.apply(X, long_data)
+            if self.absorb is not None:
+                X = self.absorb.apply(X)
+            if self.keep_cols is not None:
+                X = X[:, self.keep_cols]
+            # Row-block sum: (n*m, p) → (n, m, p) → (n, p).
+            return X.reshape(n, m, X.shape[1]).sum(axis=1)
         raw = self.predict_raw if self.predict_raw is not None else self.raw
         X = raw.eval(data)
         if self.by is not None:
@@ -5941,6 +5963,51 @@ def _build_t2_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     )]
 
 
+def _smooth_matrix_vars(call: Call, data: pl.DataFrame) -> list[str]:
+    """Collect the matrix-typed arg variables for one smooth call.
+
+    Walks the smooth's positional ``args`` and returns the subset of
+    plain-Name arguments whose column in ``data`` is matrix-typed
+    (``Array(Float64, m)``). Expression-typed args (already materialised
+    into synth columns by ``_apply_smooth_arg_exprs``) and ``by=`` exprs
+    are skipped — mgcv's matrix convention only fires on bare-column
+    matrix arguments to ``s()`` / ``te()`` / ``ti()`` / ``t2()``.
+    """
+    from .design import is_matrix_col
+    out: list[str] = []
+    cols = set(data.columns)
+    for a in call.args:
+        if isinstance(a, Name) and a.ident in cols:
+            if is_matrix_col(data[a.ident]):
+                out.append(a.ident)
+    return out
+
+
+def _summation_apply_blocks(
+    blocks: list[SmoothBlock], n: int, m: int, matrix_vars: list[str],
+) -> list[SmoothBlock]:
+    """Reshape each block's long-form X (n*m, p) → (n, p) by summing over
+    the m row-blocks, and stamp summation metadata onto the predict spec."""
+    out: list[SmoothBlock] = []
+    mvars = tuple(matrix_vars)
+    for b in blocks:
+        X = b.X
+        if X.shape[0] != n * m:
+            raise RuntimeError(
+                f"matrix-arg summation: builder for {b.label!r} returned X "
+                f"with {X.shape[0]} rows, expected n*m = {n*m}"
+            )
+        X_summed = X.reshape(n, m, X.shape[1]).sum(axis=1)
+        if b.spec is not None:
+            b.spec.summation_dim = m
+            b.spec.matrix_vars = mvars
+        out.append(SmoothBlock(
+            label=b.label, term=b.term, cls=b.cls,
+            X=X_summed, S=b.S, spec=b.spec,
+        ))
+    return out
+
+
 def materialize_smooths(
     expanded: ExpandedFormula, data: pl.DataFrame,
 ) -> list[list[SmoothBlock]]:
@@ -5956,7 +6023,16 @@ def materialize_smooths(
     columns, then materialised into ``data`` once before the per-smooth
     builders run. Predict-time replay uses the same machinery via
     :func:`_apply_smooth_arg_exprs` against the new dataframe.
+
+    Matrix-typed arguments (``Array(Float64, m)`` columns — mgcv's
+    summation convention, Wood §7.4.1) trigger a long-form expansion: the
+    per-bs builder is dispatched against an n*m-row view of ``data``, then
+    each returned block's X is row-block-summed back to (n, p). The
+    block's BasisSpec records ``summation_dim=m`` so :meth:`predict_mat`
+    replays the same expansion at predict time.
     """
+    from .design import long_form_view, is_matrix_col
+
     # NA-drop on every column the smooths reference. For plain ``Name``
     # args this is just the column name; for expressions we union in every
     # ``Name.ident`` mentioned inside the AST so e.g. ``s(I(b.depth^.5))``
@@ -5975,7 +6051,16 @@ def materialize_smooths(
         # source columns out itself, so we skip walking it here.
     referenced &= set(data.columns)
     if referenced:
-        data = data.drop_nulls(subset=list(referenced))
+        # Polars' ``drop_nulls`` only drops cells flagged null; matrix
+        # columns may carry NaN inside their ``Array`` cells, which mgcv's
+        # ``na.action=na.omit`` would also drop. ``prepare_design`` does the
+        # NaN-aware drop upstream, so here we only need cell-null dropping
+        # for the parametric / smooth-arg side.
+        ref_no_matrix = [
+            c for c in referenced if not is_matrix_col(data[c])
+        ]
+        if ref_no_matrix:
+            data = data.drop_nulls(subset=ref_no_matrix)
 
     # Materialise smooth-arg expressions into synthesised columns. After
     # this, every term name returned by ``_smooth_term_vars`` resolves
@@ -5984,44 +6069,38 @@ def materialize_smooths(
     if expr_map:
         data = _apply_smooth_arg_exprs(data, expr_map)
 
-    out: list[list[SmoothBlock]] = []
-    for call in expanded.smooths:
-        # Tensor-product smooths dispatch by the top-level fn (te/ti/t2),
-        # not by `bs=` (which in their case describes each margin's basis).
+    def _dispatch(call: Call, d: pl.DataFrame) -> list[SmoothBlock]:
         if call.fn in ("te", "ti", "t2"):
             if call.fn == "te":
-                out.append(_build_te_smooth(call, data))
-            elif call.fn == "ti":
-                out.append(_build_ti_smooth(call, data))
-            else:
-                out.append(_build_t2_smooth(call, data))
-            continue
+                return _build_te_smooth(call, d)
+            if call.fn == "ti":
+                return _build_ti_smooth(call, d)
+            return _build_t2_smooth(call, d)
         bs = _smooth_bs(call)
-        if bs == "re":
-            out.append(_build_re_smooth(call, data))
-        elif bs == "cr":
-            out.append(_build_cr_smooth(call, data))
-        elif bs == "cc":
-            out.append(_build_cc_smooth(call, data))
-        elif bs == "tp":
-            out.append(_build_tp_smooth(call, data))
-        elif bs == "ps":
-            out.append(_build_ps_smooth(call, data))
-        elif bs == "cp":
-            out.append(_build_cp_smooth(call, data))
-        elif bs == "bs":
-            out.append(_build_bs_smooth(call, data))
-        elif bs == "gp":
-            out.append(_build_gp_smooth(call, data))
-        elif bs == "fs":
-            out.append(_build_fs_smooth(call, data))
-        elif bs == "sz":
-            out.append(_build_sz_smooth(call, data))
-        elif bs == "ad":
-            out.append(_build_ad_smooth(call, data))
+        if bs == "re":   return _build_re_smooth(call, d)
+        if bs == "cr":   return _build_cr_smooth(call, d)
+        if bs == "cc":   return _build_cc_smooth(call, d)
+        if bs == "tp":   return _build_tp_smooth(call, d)
+        if bs == "ps":   return _build_ps_smooth(call, d)
+        if bs == "cp":   return _build_cp_smooth(call, d)
+        if bs == "bs":   return _build_bs_smooth(call, d)
+        if bs == "gp":   return _build_gp_smooth(call, d)
+        if bs == "fs":   return _build_fs_smooth(call, d)
+        if bs == "sz":   return _build_sz_smooth(call, d)
+        if bs == "ad":   return _build_ad_smooth(call, d)
+        raise NotImplementedError(
+            f"smooth bs={bs!r} (class dispatch for {_smooth_label(call)}) "
+            "not yet implemented"
+        )
+
+    out: list[list[SmoothBlock]] = []
+    for call in expanded.smooths:
+        mvars = _smooth_matrix_vars(call, data)
+        if mvars:
+            long_data, n_orig, m = long_form_view(data, mvars)
+            blocks = _dispatch(call, long_data)
+            blocks = _summation_apply_blocks(blocks, n_orig, m, mvars)
         else:
-            raise NotImplementedError(
-                f"smooth bs={bs!r} (class dispatch for {_smooth_label(call)}) "
-                "not yet implemented"
-            )
+            blocks = _dispatch(call, data)
+        out.append(blocks)
     return out
