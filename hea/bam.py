@@ -42,6 +42,7 @@ mgcv source: ``/tmp/mgcv/R/bam.r`` (1.9-1).
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Optional
 
@@ -564,6 +565,152 @@ def _build_qr_chunked_gaussian(
                   rss_extra=rss_extra)
 
 
+@dataclass
+class _PirlsQR:
+    """Output of one PIRLS-step chunked accumulation. Carries the reduced
+    sufficient statistics ``(R, f, y_norm2, rss_extra)`` plus the full-length
+    quantities (``eta``, ``mu``, ``wt``, ``dev``) needed by the outer PIRLS
+    loop's divergence test and post-fit step."""
+    R: np.ndarray
+    f: np.ndarray
+    y_norm2: float
+    rss_extra: float
+    eta: np.ndarray         # full η (length n) — *with* offset
+    mu: np.ndarray          # length-n
+    wt: np.ndarray          # length-n PIRLS weights (Fisher form)
+    z: np.ndarray           # length-n working response (offset-stripped)
+    dev: float              # Σ family.dev_resids(y, μ, w_prior)
+
+
+def _build_qr_chunked_pirls(
+    data: pl.DataFrame,
+    blocks: list[SmoothBlock],
+    X_param_full: np.ndarray,
+    y: np.ndarray,
+    offset: np.ndarray,
+    family: Family,
+    *,
+    coef: Optional[np.ndarray],
+    eta_init: Optional[np.ndarray],
+    chunk_size: int,
+    use_chol: bool = False,
+    prior_w: Optional[np.ndarray] = None,
+) -> _PirlsQR:
+    """One PIRLS-step chunked QR build for non-Gaussian families.
+
+    Mirrors mgcv ``bgam.fit`` inner accumulation (bam.r:1059-1099). For each
+    chunk:
+
+    * Materialise ``X_chunk`` (parametric + smooth columns).
+    * Compute the chunk's η. If ``coef is not None`` use ``η = X·β + offset``
+      (mgcv bam.r:1066); otherwise fall back to the supplied ``eta_init``
+      (the family-initialised η used on iter 1).
+    * Form Fisher working response and weights (mgcv bam.r:1078-1083):
+
+          z = (η − offset) + (y − μ) / μ_η
+          w = w_prior · μ_η² / V(μ)
+
+    * Drop rows where ``w_prior > 0 & μ_η != 0`` is false (mgcv's ``good``
+      mask, bam.r:1080).
+    * Accumulate ``√w · X_good`` and ``√w · z_good`` into ``(R, f, ‖z‖²)``
+      via :func:`_qr_update`.
+    * Sum chunkwise deviance via ``family.dev_resids(y, μ, w_prior)``.
+
+    Returns a :class:`_PirlsQR` carrying both the reduced sufficient
+    statistics and the full-length (η, μ, w, z, dev) needed by the outer
+    PIRLS step-halving and convergence checks.
+
+    The Newton-form α is **not** applied here — mgcv uses Fisher weights
+    inside the PIRLS loop (gam.fit3.r:270). Newton α enters only at the
+    post-fit score-derivative stage to make the converged Hessian match
+    the observed-info form (Wood 2011 §3.3).
+    """
+    n = data.height
+    if n == 0:
+        raise ValueError("empty data passed to chunked PIRLS build")
+    if (coef is None) and (eta_init is None):
+        raise ValueError("either coef or eta_init must be provided")
+    if prior_w is None:
+        prior_w = np.ones(n, dtype=float)
+
+    link = family.link
+    R: Optional[np.ndarray] = None
+    f: Optional[np.ndarray] = None
+    y_norm2 = 0.0
+    eta_full = np.empty(n, dtype=float)
+    mu_full = np.empty(n, dtype=float)
+    wt_full = np.zeros(n, dtype=float)   # mgcv ``wt`` carries 0 for !good rows
+    z_full = np.zeros(n, dtype=float)
+    dev_total = 0.0
+
+    for start, end in _chunk_indices(n, chunk_size):
+        chunk_data = data[start:end]
+        X_param_chunk = X_param_full[start:end]
+        X_chunk = _materialize_chunk(blocks, chunk_data, X_param_chunk)
+        off_chunk = offset[start:end]
+        y_chunk = y[start:end]
+        wp_chunk = prior_w[start:end]
+
+        # mgcv bam.r:1066: ``if (is.null(coef)) eta1 <- eta[ind] else
+        # eta[ind] <- eta1 <- drop(X %*% coef) + offset[ind]``.
+        if coef is None:
+            eta_chunk = eta_init[start:end]
+        else:
+            eta_chunk = X_chunk @ coef + off_chunk
+
+        mu_chunk = link.linkinv(eta_chunk)
+        mu_eta_chunk = link.mu_eta(eta_chunk)
+        V_chunk = family.variance(mu_chunk)
+
+        # ``good`` mask (mgcv bam.r:1080).
+        good = (wp_chunk > 0) & (mu_eta_chunk != 0)
+        # Avoid div-by-zero in the score computation; ``!good`` rows are
+        # dropped before the QR update so the placeholder values don't
+        # leak into (R, f).
+        safe_mu_eta = np.where(mu_eta_chunk != 0, mu_eta_chunk, 1.0)
+        safe_V = np.where(V_chunk != 0, V_chunk, 1.0)
+
+        z_chunk = (eta_chunk - off_chunk) + (y_chunk - mu_chunk) / safe_mu_eta
+        w_chunk = wp_chunk * mu_eta_chunk * mu_eta_chunk / safe_V
+        # mgcv bam.r:1085: ``w[!good] <- 0``.
+        w_chunk = np.where(good, w_chunk, 0.0)
+
+        dev_total += float(np.sum(family.dev_resids(y_chunk, mu_chunk, wp_chunk)))
+
+        eta_full[start:end] = eta_chunk
+        mu_full[start:end] = mu_chunk
+        wt_full[start:end] = w_chunk
+        z_full[start:end] = z_chunk
+
+        if not np.any(good):
+            # All rows dropped — skip the QR update for this chunk.
+            continue
+        sqrt_w = np.sqrt(w_chunk[good])
+        Xg = sqrt_w[:, None] * X_chunk[good]
+        zg = sqrt_w * z_chunk[good]
+        upd = _qr_update(Xg, zg, R, f, y_norm2, use_chol=use_chol)
+        R = upd["R"]
+        f = upd["f"]
+        y_norm2 = upd["y_norm2"]
+
+    if R is None:
+        raise FloatingPointError(
+            "chunked PIRLS build accumulated zero rows — every observation "
+            "was dropped by the (w_prior > 0 & μ_η != 0) good mask"
+        )
+    if use_chol:
+        R, f = _chol2qr(R, f)
+    rss_extra = float(y_norm2 - float(f @ f))
+    return _PirlsQR(
+        R=np.asarray(R, dtype=float),
+        f=np.asarray(f, dtype=float),
+        y_norm2=float(y_norm2),
+        rss_extra=rss_extra,
+        eta=eta_full, mu=mu_full, wt=wt_full, z=z_full,
+        dev=dev_total,
+    )
+
+
 def _is_identity_link(family: Family) -> bool:
     """Detect Gaussian-identity (canonical Gaussian) — the ``am=TRUE`` case
     in mgcv's ``bam.fit`` dispatch (bam.r:2205)."""
@@ -631,14 +778,6 @@ class bam(gam):
             raise ValueError(f"gamma must be a positive finite number, got {gamma!r}")
 
         family = Gaussian() if family is None else family
-        if not _is_identity_link(family):
-            # bgam.fit / bgam.fitd ports come in subsequent tasks. Until then,
-            # refuse rather than silently dispatching to the wrong fitter.
-            raise NotImplementedError(
-                f"bam currently supports family=Gaussian(link='identity') only; "
-                f"got {family!r}. Non-Gaussian PIRLS chunked-QR fitter "
-                f"(``bgam.fit``) lands in the next iteration."
-            )
 
         # ---- AR1 plumbing (mgcv bam.r:478-498) -----------------------------
         # ``rho`` is the AR1 lag-1 correlation; setting it ≠ 0 wraps the
@@ -653,6 +792,11 @@ class bam(gam):
         if abs(rho) >= 1.0:
             raise ValueError(
                 f"rho must satisfy |rho|<1 for stationary AR1, got rho={rho!r}"
+            )
+        # mgcv bam.r:2360-2361 — AR1 only valid with Gaussian-identity errors.
+        if rho != 0.0 and not _is_identity_link(family):
+            raise NotImplementedError(
+                "AR coefficients (rho != 0) require family=Gaussian(link='identity')"
             )
         self._rho = float(rho)
         if ar_start is not None:
@@ -751,38 +895,7 @@ class bam(gam):
         self.parametric_columns = list(X_param_df.columns)
         self._X_param_full = X_param_full
 
-        # ---- chunked QR build ----------------------------------------------
-        # Single chunked pass over the full data, accumulating (R, f, ‖z‖²).
-        # Mirrors mgcv ``bam.fit`` single-thread loop (bam.r:1576-1613).
-        # ``z = y − offset`` (Gaussian-identity working response under
-        # prior weights = 1; the family's identity link gives μ = η, so
-        # PIRLS converges in one solve and the QR-only path is exact).
-        # When ``rho ≠ 0``, an AR1 inverse-Cholesky transform is applied
-        # to each chunk via :func:`_rw_matrix` so the resulting (R, f)
-        # correspond to the AR1-decorrelated working data.
-        qr = _build_qr_chunked_gaussian(
-            self.data, blocks, X_param_full, y_full, off,
-            chunk_size=chunk_size, use_chol=self._use_chol,
-            rho=self._rho, ar_start=self._ar_start,
-        )
-        self._bam_qr = qr
-        # Sufficient statistics from (R, f). These are exact identities:
-        # X'X = R'R, X'y = R'f, ‖y−off‖² = y_norm2 + 0 (here ‖z‖²; the
-        # offset-aware deviance computation in ``_fit_given_rho`` adds
-        # rss_extra back).
-        self._XtX = qr.R.T @ qr.R
-        self._Xty = qr.R.T @ qr.f
-        self._yty = qr.y_norm2  # = ‖y − off‖² (offset-stripped)
-        # ``_X_full = R`` so inherited score routines see a square p×p design
-        # whose Gram matches the full-data Gram. The trace identity
-        # ``tr(X H⁻¹ X') = tr(R H⁻¹ R')`` keeps log|H|/Hessian-trace
-        # computations exact; per-row diag values that would have been
-        # length-n become length-p, but they are only ever multiplied by
-        # ``∂w/∂η = 0`` (Gaussian-identity has constant w), so the result is
-        # zero either way. mgcv's bam.fit "ML" branch (bam.r:1722-1733)
-        # similarly reuses the gam.fit3 machinery on ``X = R``, ``y = f``.
-        self._X_full = qr.R
-
+        # ---- family-independent post-setup --------------------------------
         # tss for r-squared. We need the full y'y (not the offset-stripped
         # y_norm2) and the intercept-conditioned variance.
         full_yty = float(y_full @ y_full)
@@ -807,112 +920,169 @@ class bam(gam):
         self._Mp = Mp
         self._penalty_rank = p - Mp
 
-        # ---- smoothing-param optimization ----------------------------------
-        # Same outer Newton as gam, but every PIRLS-replacement call to
-        # ``_fit_given_rho`` here goes through the override below.
-        n_sp = len(slots)
         self._log_phi_hat: float | None = None
         self._outer_info: dict | None = None
         self._tw_info: dict | None = None
-        if n_sp == 0:
-            self.sp = np.zeros(0)
-            rho_hat = np.zeros(0)
-            fit = self._fit_given_rho(rho_hat)
-        elif sp is not None:
-            sp_arr = np.asarray(sp, dtype=float)
-            if sp_arr.shape != (n_sp,):
-                raise ValueError(
-                    f"sp must have length {n_sp} (one per penalty slot), "
-                    f"got {sp_arr.shape}"
-                )
-            if np.any(sp_arr < 0):
-                raise ValueError("sp entries must be non-negative")
-            rho_hat = np.log(np.maximum(sp_arr, 1e-10))
-            self.sp = sp_arr
-            fit = self._fit_given_rho(rho_hat)
-            if (not self.family.scale_known) and method in ("REML", "ML"):
-                Dp = float(fit.dev + fit.pen)
-                denom = (max(float(n - self._Mp), 1.0)
-                         if method == "REML" else max(float(n), 1.0))
-                self._log_phi_hat = float(
-                    np.log(max(Dp / denom, 1e-300))
-                )
-        else:
-            include_log_phi = (
-                (not family.scale_known) and method in ("REML", "ML")
+
+        # ---- family dispatch ----------------------------------------------
+        # Gaussian-identity (am=TRUE in mgcv) takes the closed-form chunked
+        # QR path: build (R, f, rss_extra) once, run outer Newton on the
+        # reduced data, then a single chunked walk for full-n quantities.
+        # Mirrors mgcv ``bam.fit`` (bam.r:1503-1771).
+        #
+        # All other families take the PIRLS chunked path: outer loop alternates
+        # rebuilding (R, f) from chunks of √W·X / √W·z (PIRLS Fisher weights
+        # at the current β̂) with sp optimisation on the fixed reduced data.
+        # Mirrors mgcv ``bgam.fit`` (bam.r:909-1353).
+        if _is_identity_link(family):
+            # ---- chunked QR build (Gaussian-identity) -----------------------
+            # Single chunked pass over the full data, accumulating (R, f, ‖z‖²).
+            # Mirrors mgcv ``bam.fit`` single-thread loop (bam.r:1576-1613).
+            # ``z = y − offset`` (Gaussian-identity working response under
+            # prior weights = 1; the family's identity link gives μ = η, so
+            # PIRLS converges in one solve and the QR-only path is exact).
+            # When ``rho ≠ 0``, an AR1 inverse-Cholesky transform is applied
+            # to each chunk via :func:`_rw_matrix` so the resulting (R, f)
+            # correspond to the AR1-decorrelated working data.
+            qr = _build_qr_chunked_gaussian(
+                self.data, blocks, X_param_full, y_full, off,
+                chunk_size=chunk_size, use_chol=self._use_chol,
+                rho=self._rho, ar_start=self._ar_start,
             )
-            include_family_theta = False  # tw / extended families not in this iter
-            if method in ("REML", "ML"):
-                cur_rho = np.zeros(n_sp)
-                if include_log_phi:
-                    try:
-                        fit_seed = self._fit_given_rho(cur_rho)
-                        df_resid_seed = max(self.n - self._Mp, 1.0)
-                        # Gaussian: V(μ)=1, so pearson = ‖y - μ̂‖². At the
-                        # seed the dev returned by ``_fit_given_rho`` already
-                        # includes rss_extra ⇒ direct.
-                        cur_logphi = float(np.log(
-                            max(fit_seed.dev / df_resid_seed, 1e-12)
-                        ))
-                    except Exception:
+            self._bam_qr = qr
+            # Sufficient statistics from (R, f). These are exact identities:
+            # X'X = R'R, X'y = R'f, ‖y−off‖² = y_norm2 + 0 (here ‖z‖²; the
+            # offset-aware deviance computation in ``_fit_given_rho`` adds
+            # rss_extra back).
+            self._XtX = qr.R.T @ qr.R
+            self._Xty = qr.R.T @ qr.f
+            self._yty = qr.y_norm2  # = ‖y − off‖² (offset-stripped)
+            # ``_X_full = R`` so inherited score routines see a square p×p design
+            # whose Gram matches the full-data Gram. The trace identity
+            # ``tr(X H⁻¹ X') = tr(R H⁻¹ R')`` keeps log|H|/Hessian-trace
+            # computations exact; per-row diag values that would have been
+            # length-n become length-p, but they are only ever multiplied by
+            # ``∂w/∂η = 0`` (Gaussian-identity has constant w), so the result is
+            # zero either way. mgcv's bam.fit "ML" branch (bam.r:1722-1733)
+            # similarly reuses the gam.fit3 machinery on ``X = R``, ``y = f``.
+            self._X_full = qr.R
+
+            # ---- smoothing-param optimization ---------------------------------
+            # Same outer Newton as gam, but every PIRLS-replacement call to
+            # ``_fit_given_rho`` here goes through the override below.
+            n_sp = len(slots)
+            if n_sp == 0:
+                self.sp = np.zeros(0)
+                rho_hat = np.zeros(0)
+                fit = self._fit_given_rho(rho_hat)
+            elif sp is not None:
+                sp_arr = np.asarray(sp, dtype=float)
+                if sp_arr.shape != (n_sp,):
+                    raise ValueError(
+                        f"sp must have length {n_sp} (one per penalty slot), "
+                        f"got {sp_arr.shape}"
+                    )
+                if np.any(sp_arr < 0):
+                    raise ValueError("sp entries must be non-negative")
+                rho_hat = np.log(np.maximum(sp_arr, 1e-10))
+                self.sp = sp_arr
+                fit = self._fit_given_rho(rho_hat)
+                if (not self.family.scale_known) and method in ("REML", "ML"):
+                    Dp = float(fit.dev + fit.pen)
+                    denom = (max(float(n - self._Mp), 1.0)
+                             if method == "REML" else max(float(n), 1.0))
+                    self._log_phi_hat = float(
+                        np.log(max(Dp / denom, 1e-300))
+                    )
+            else:
+                include_log_phi = (
+                    (not family.scale_known) and method in ("REML", "ML")
+                )
+                include_family_theta = False  # tw / extended families not in this iter
+                if method in ("REML", "ML"):
+                    cur_rho = np.zeros(n_sp)
+                    if include_log_phi:
+                        try:
+                            fit_seed = self._fit_given_rho(cur_rho)
+                            df_resid_seed = max(self.n - self._Mp, 1.0)
+                            # Gaussian: V(μ)=1, so pearson = ‖y - μ̂‖². At the
+                            # seed the dev returned by ``_fit_given_rho`` already
+                            # includes rss_extra ⇒ direct.
+                            cur_logphi = float(np.log(
+                                max(fit_seed.dev / df_resid_seed, 1e-12)
+                            ))
+                        except Exception:
+                            cur_logphi = 0.0
+                    else:
                         cur_logphi = 0.0
                 else:
+                    cur_rho = self._initial_sp_rho()
                     cur_logphi = 0.0
-            else:
-                cur_rho = self._initial_sp_rho()
-                cur_logphi = 0.0
 
-            theta0_parts = [cur_rho]
-            if include_log_phi:
-                theta0_parts.append(np.array([cur_logphi]))
-            theta0 = np.concatenate(theta0_parts)
+                theta0_parts = [cur_rho]
+                if include_log_phi:
+                    theta0_parts.append(np.array([cur_logphi]))
+                theta0 = np.concatenate(theta0_parts)
 
-            theta_hat = self._outer_newton(
-                theta0,
-                criterion="REML" if method in ("REML", "ML") else "GCV",
-                include_log_phi=include_log_phi,
-                include_family_theta=include_family_theta,
-            )
+                theta_hat = self._outer_newton(
+                    theta0,
+                    criterion="REML" if method in ("REML", "ML") else "GCV",
+                    include_log_phi=include_log_phi,
+                    include_family_theta=include_family_theta,
+                )
 
-            if include_log_phi:
-                rho_hat = theta_hat[:n_sp]
-                log_phi_hat = float(theta_hat[n_sp])
-            else:
-                rho_hat = theta_hat
-                log_phi_hat = None
-            self._log_phi_hat = log_phi_hat
-            self.sp = np.exp(rho_hat)
-            fit = self._fit_given_rho(rho_hat)
+                if include_log_phi:
+                    rho_hat = theta_hat[:n_sp]
+                    log_phi_hat = float(theta_hat[n_sp])
+                else:
+                    rho_hat = theta_hat
+                    log_phi_hat = None
+                self._log_phi_hat = log_phi_hat
+                self.sp = np.exp(rho_hat)
+                fit = self._fit_given_rho(rho_hat)
 
-        # ---- post-fit assembly ---------------------------------------------
-        # Most of gam.__init__'s post-fit code reads ``self._X_full`` and
-        # ``fit.mu``/``fit.eta``. With ``_X_full = R`` and Gaussian-identity
-        # there are no PIRLS weights to rebuild; the things that need full-n
-        # quantities (eta, mu, residuals, leverage) are computed via a
-        # single chunked walk below.
-        self._post_fit_gaussian(fit, rho_hat, X_param_df)
+            # ---- post-fit assembly (Gaussian-identity) ----------------------
+            # Most of gam.__init__'s post-fit code reads ``self._X_full`` and
+            # ``fit.mu``/``fit.eta``. With ``_X_full = R`` and Gaussian-identity
+            # there are no PIRLS weights to rebuild; the things that need full-n
+            # quantities (eta, mu, residuals, leverage) are computed via a
+            # single chunked walk below.
+            self._post_fit_gaussian(fit, rho_hat, X_param_df)
+        else:
+            # ---- non-Gaussian PIRLS chunked path (mgcv bgam.fit) ------------
+            fit, rho_hat = self._bgam_fit_loop(sp_user=sp)
+            self._post_fit_pirls(fit, rho_hat, X_param_df)
 
     # -----------------------------------------------------------------------
     # _fit_given_rho override — uses (R, f, y_norm2, rss_extra)
     # -----------------------------------------------------------------------
 
     def _fit_given_rho(self, rho: np.ndarray) -> "_FitState":
-        """Closed-form Gaussian-identity solve from stored (R, f, ‖z‖², rss_extra).
+        """Closed-form Gaussian-on-(R, f) solve at fixed ρ.
 
-        For Gaussian-identity PIRLS reduces to one weighted-LS solve with
-        ``W = I`` and ``z = y - off``, so β̂(ρ) is the minimiser of
-        ``‖z - Xβ‖² + β'Sλβ``. Using ``X'X = R'R`` and ``X'z = R'f``:
+        For Gaussian-identity (``am=TRUE``) the chunked QR build stores
+        ``(R, f, ‖y−off‖², rss_extra)`` and PIRLS reduces to one solve:
 
             (R'R + Sλ) β̂ = R'f                            # normal equations
-            ‖z - Xβ̂‖²    = ‖f - Rβ̂‖² + rss_extra          # decomposition
+            ‖z − Xβ̂‖²   = ‖f − Rβ̂‖² + rss_extra           # working-RSS
 
-        Returns a ``_FitState`` populated for downstream consumers; ``eta``,
-        ``mu``, ``w``, ``z``, ``alpha`` are left ``None`` here and filled
-        once after outer-Newton convergence by ``_post_fit_gaussian`` (a
-        single chunked pass over the full data).
-        ``is_fisher_fallback=True`` short-circuits ``_fisher_view`` (Newton
-        ≡ Fisher for canonical Gaussian-identity) and tells ``_dw_deta`` to
-        return zero α-derivatives — both are correct here.
+        For non-Gaussian (PIRLS path) the same identity holds with
+        ``z = (η − off) + (y − μ)/μ_η`` and weights ``W = w_prior μ_η²/V`` —
+        the chunked PIRLS build stores ``(R, f, ‖√W·z‖², rss_extra)`` for
+        the *current* working data, so this solve produces β̂ at the next
+        Newton step on the IRLS-linearised problem. The non-Gaussianness
+        is in the *outer* PIRLS loop (rebuilding R/f), not in the inner
+        score evaluation, which is faithful to mgcv ``fast.REML.fit`` /
+        ``magic`` running on the reduced data.
+
+        ``fit.mu`` is the *response-scale* μ = linkinv(η) (not the working
+        response). ``_score_scale`` reads it against ``self._y_arr`` to
+        compute the Pearson sum used by the outer-Newton convergence
+        check; for non-Gaussian families the link inverse is required.
+        ``is_fisher_fallback=True`` keeps Newton≡Fisher for the
+        Gaussian-on-(R,f) inner score, and bam's overridden ``_dw_deta``
+        returns ``zeros(p)`` (length-p so the broadcast against
+        ``self._X_full = R`` lines up).
         """
         Sλ = self._build_S_lambda(rho)
         Sλ = 0.5 * (Sλ + Sλ.T)
@@ -927,36 +1097,42 @@ class bam(gam):
             )
         beta = cho_solve((A_chol, lower), self._Xty)
         if not np.all(np.isfinite(beta)):
-            raise FloatingPointError("non-finite β in Gaussian-identity solve")
+            raise FloatingPointError("non-finite β in bam (R, f) solve")
         pen = float(beta @ Sλ @ beta)
-        # Full-data dev = ‖z - Xβ̂‖² = ‖f - Rβ̂‖² + rss_extra
-        #               = ‖z‖² − 2 β̂' R'f + β̂' R'R β̂
+        # Full-data working RSS = ‖z̃ − X̃β̂‖² = ‖f − Rβ̂‖² + rss_extra
+        #                       = ‖z̃‖² − 2 β̂' R'f + β̂' R'R β̂
+        # (z̃ = √W·z, X̃ = √W·X for non-Gaussian; W=I, z = y−off for Gaussian).
         rss = float(
             self._yty - 2.0 * (beta @ self._Xty) + beta @ self._XtX @ beta
         )
         rss = max(rss, 0.0)  # guard tiny negative from cancellation
         log_det_A = 2.0 * float(np.log(np.abs(np.diag(A_chol))).sum())
-        # ``_score_scale`` (closure in ``_outer_newton``) computes the
-        # Pearson sum ``‖y - μ‖²/V`` for unknown-scale families using
-        # ``fit.mu`` against the full ``self._y_arr``. So ``fit.mu``/
-        # ``fit.eta`` must be length-n. We recover them via a single
-        # chunked ``X·β`` walk per call — O(n·p), the same cost gam pays
-        # implicitly for ``eta = X @ β`` every outer-Newton iteration.
-        # In contrast, ``_dw_deta`` / ``_d2w_deta2`` consumers
-        # (``_dlog_det_H_drho``, ``_d2beta_drho_drho``) multiply against
-        # ``self._X_full = R`` (p×p), requiring length-p arrays — those
-        # methods are overridden below to return ``zeros(p)`` directly,
-        # which is mathematically correct for Gaussian-identity.
+        # ``_score_scale`` reads ``fit.mu`` vs ``self._y_arr`` for the
+        # Pearson sum — must be length-n response-scale μ. Recovered via
+        # a chunked ``X·β`` walk per call (O(n·p), same cost gam pays for
+        # ``eta = X @ β`` every outer-Newton iteration). For non-Gaussian
+        # bam this also gives the response-scale μ at the current β,
+        # which the downstream score-scale calc needs.
         eta_only = self._chunked_xbeta(beta)        # X·β (offset-stripped)
         eta = eta_only + self._offset               # full η, length-n
-        mu = eta                                    # identity link
+        if isinstance(self.family, Gaussian) and self.family.link.name == "identity":
+            mu = eta                                # identity link short-circuit
+            z_full = self._y_arr - self._offset
+        else:
+            mu = self.family.link.linkinv(eta)
+            # Working response on the response-scale; the score-derivative
+            # consumers don't read fit.z (bam's _dw_deta/_d2w_deta2 are
+            # already overridden to zeros), so the value here is informational.
+            mu_eta = self.family.link.mu_eta(eta)
+            safe_mu_eta = np.where(mu_eta != 0, mu_eta, 1.0)
+            z_full = (eta - self._offset) + (self._y_arr - mu) / safe_mu_eta
         n = self.n
         return _FitState(
             beta=beta, dev=rss, pen=pen,
             A_chol=A_chol, A_chol_lower=lower,
             S_full=Sλ, log_det_A=log_det_A,
             eta=eta, mu=mu, w=np.ones(n),
-            z=self._y_arr - self._offset, alpha=np.ones(n),
+            z=z_full, alpha=np.ones(n),
             is_fisher_fallback=True,
         )
 
@@ -1325,3 +1501,506 @@ class bam(gam):
         # mgcv exposes ``object$AR1.rho`` (bam.r:885) for downstream
         # consumers (predict.bam, residuals.bam). Mirror the attribute.
         self.AR1_rho = self._rho
+
+    # -----------------------------------------------------------------------
+    # Non-Gaussian PIRLS chunked — outer loop driver (mgcv bgam.fit)
+    # -----------------------------------------------------------------------
+
+    def _chunked_leverage_diag_weighted(self, A_inv: np.ndarray,
+                                        w_full: np.ndarray) -> np.ndarray:
+        """Weighted hat-matrix diagonal ``hᵢ = wᵢ·(X·A⁻¹·X')ᵢᵢ``.
+
+        ``Σ hᵢ = tr(W X A⁻¹ X') = tr(A⁻¹ X'WX) = edf_total`` at the PIRLS-
+        converged β̂. Walks the data chunk-by-chunk so the n×p design is
+        never materialised. ``w_full`` carries the PIRLS Fisher weights at β̂
+        (zero on rows the ``good`` mask dropped, by construction in
+        :func:`_build_qr_chunked_pirls`).
+        """
+        n = self.n
+        out = np.empty(n, dtype=float)
+        for start, end in _chunk_indices(n, self._chunk_size):
+            X_chunk = _materialize_chunk(
+                self._blocks,
+                self.data[start:end],
+                self._X_param_full[start:end],
+            )
+            HX = X_chunk @ A_inv
+            out[start:end] = w_full[start:end] * (HX * X_chunk).sum(axis=1)
+        return out
+
+    def _bgam_fit_loop(self, *, sp_user) -> tuple["_FitState", np.ndarray]:
+        """Outer PIRLS loop with chunked QR rebuild per iter.
+
+        Direct port of mgcv ``bgam.fit`` (bam.r:909-1353). Each iteration:
+
+        1. Build (R, f, ‖z̃‖², rss_extra) over chunks of √W·X / √W·z, where
+           (W, z) are the Fisher PIRLS weights/working response computed from
+           the chunk's η = X·β + offset (or the family-initialised η on
+           iter 1, when β is still ``None``).
+        2. Update reduced sufficient stats ``self._XtX = R'R``, ``self._Xty
+           = R'f``, ``self._yty = ‖z̃‖²``, ``self._X_full = R``.
+        3. Run ``_outer_newton`` over (ρ, log φ) on the reduced (R, f) data,
+           then recover β̂ at converged ρ̂ via ``_fit_given_rho``.
+        4. Step-halving (mgcv "kk" inner loop): if ``it > 1`` and the new
+           penalised deviance increases, halve β toward ``β₀`` and rebuild.
+
+        Convergence (mgcv:1154): ``|dev - devold| / (0.1+|dev|) < ε`` after
+        ``it > 1`` (= mgcv's ``iter > 2``; the ``dev*2`` seed in step 0 makes
+        the first iter's check meaningless, and the second iter's compares
+        against that synthetic seed).
+
+        Note: at the converged β̂, the (R, f) reduced problem looks Gaussian-
+        on-(R, f) — so the inner Newton sees ``W = I`` after reduction. The
+        non-Gaussianness lives only in the *outer* loop's ``W`` construction.
+        Mirrors how mgcv's ``fast.REML.fit`` runs on (qrx$R, qrx$f) without
+        knowing the original family.
+        """
+        family = self.family
+        link = family.link
+        n = self.n
+        p = self.p
+        n_sp = len(self._slots)
+        method = self.method   # already mapped fREML → REML
+
+        blocks = self._blocks
+        chunk_size = self._chunk_size
+        y = self._y_arr
+        off = self._offset
+        prior_w = np.ones(n)   # user-facing weights= lands later
+
+        include_log_phi = (not family.scale_known) and method in ("REML", "ML")
+
+        # ---- Initialize μ̂, η̂, dev for iter 0 (mgcv bam.r:950-969) -----
+        mu = family.initialize(y, prior_w)
+        eta = link.link(mu)
+        if not (link.valideta(eta) and family.validmu(mu)):
+            raise FloatingPointError(
+                "PIRLS init: cannot find valid starting μ̂ from family.initialize"
+            )
+        coef: Optional[np.ndarray] = None
+        coef0: Optional[np.ndarray] = None
+        eta0: Optional[np.ndarray] = None
+        dev0: Optional[float] = None
+        # mgcv:969 — dev = sum(dev_resids) * 2 to avoid spurious convergence at iter 1.
+        dev = 2.0 * float(np.sum(family.dev_resids(y, mu, prior_w)))
+
+        eps = 1e-7
+        maxit = 200          # mgcv default control$maxit
+        conv = False
+
+        rho_hat: Optional[np.ndarray] = None
+        log_phi_hat: Optional[float] = None
+        fit: Optional[_FitState] = None
+
+        for it in range(maxit):
+            devold = dev
+            kk = 0
+            while True:   # mgcv "repeat" — re-enters on step halving
+                qr = _build_qr_chunked_pirls(
+                    self.data, blocks, self._X_param_full, y, off,
+                    family,
+                    coef=coef,
+                    eta_init=eta if coef is None else None,
+                    chunk_size=chunk_size, use_chol=self._use_chol,
+                    prior_w=prior_w,
+                )
+                self._bam_qr = qr
+                # Reduced-data sufficient stats consumed by ``_outer_newton``
+                # via the inherited ``_fit_given_rho`` machinery. ``_X_full =
+                # R`` keeps the inner-score routines on the (R, f) reduced
+                # design just like the Gaussian-identity path. The bam-class
+                # ``_dw_deta`` / ``_d2w_deta2`` overrides return ``zeros(p)``,
+                # which matches "Gaussian-on-(R, f)" exactly: at the PIRLS-
+                # converged β̂ the inner score sees a constant-W problem.
+                self._XtX = qr.R.T @ qr.R
+                self._Xty = qr.R.T @ qr.f
+                self._yty = float(qr.y_norm2)
+                self._X_full = qr.R
+                self._wt_full = qr.wt
+
+                new_eta = qr.eta
+                new_mu = qr.mu
+                new_dev = qr.dev
+                if not np.isfinite(new_dev):
+                    raise FloatingPointError(
+                        f"non-finite deviance at PIRLS iter {it}"
+                    )
+
+                dev = new_dev
+
+                # Convergence (mgcv:1154). it>1 == mgcv iter>2 (1-based).
+                if it > 1 and abs(dev - devold) / (0.1 + abs(dev)) < eps:
+                    conv = True
+                    eta = new_eta
+                    mu = new_mu
+                    break
+
+                if kk > 0:
+                    # mgcv:1159 — already shrunk this iter's step, accept.
+                    eta = new_eta
+                    mu = new_mu
+                    break
+
+                # Divergence test + step halving (mgcv:1163-1190).
+                if (it > 1 and coef is not None and coef0 is not None
+                        and rho_hat is not None and dev0 is not None):
+                    Sλ_h = self._build_S_lambda(rho_hat)
+                    Sλ_h = 0.5 * (Sλ_h + Sλ_h.T)
+                    Sb0 = Sλ_h @ coef0
+                    Sb = Sλ_h @ coef
+                    old_pdev = float(dev0) + float(coef0 @ Sb0)
+                    new_pdev = float(new_dev) + float(coef @ Sb)
+                    while old_pdev < new_pdev and kk < 6:
+                        coef = (coef0 + coef) / 2
+                        new_eta = (eta0 + new_eta) / 2
+                        new_mu = link.linkinv(new_eta)
+                        Sb = Sλ_h @ coef
+                        new_dev = float(np.sum(
+                            family.dev_resids(y, new_mu, prior_w)
+                        ))
+                        new_pdev = float(new_dev) + float(coef @ Sb)
+                        kk += 1
+                    if kk > 0:
+                        eta = new_eta
+                        mu = new_mu
+                        dev = new_dev
+                        continue   # rebuild (R, f) with halved coef
+
+                eta = new_eta
+                mu = new_mu
+                break
+            # end while
+
+            if conv:
+                break
+
+            # Snapshot for next iter's divergence check (mgcv:1196-1202).
+            if it > 0 and coef is not None:
+                coef0 = coef.copy()
+                eta0 = eta.copy()
+                dev0 = dev
+
+            # ---- sp optimisation on the current (R, f, rss_extra) -----------
+            if n_sp == 0:
+                rho_hat = np.zeros(0)
+                log_phi_hat = None
+                self.sp = np.zeros(0)
+                fit = self._fit_given_rho(rho_hat)
+            elif sp_user is not None:
+                sp_arr = np.asarray(sp_user, dtype=float)
+                if sp_arr.shape != (n_sp,):
+                    raise ValueError(
+                        f"sp must have length {n_sp} (one per penalty slot), "
+                        f"got {sp_arr.shape}"
+                    )
+                if np.any(sp_arr < 0):
+                    raise ValueError("sp entries must be non-negative")
+                rho_hat = np.log(np.maximum(sp_arr, 1e-10))
+                self.sp = sp_arr
+                fit = self._fit_given_rho(rho_hat)
+                if include_log_phi:
+                    Dp = float(fit.dev + fit.pen)
+                    denom = (max(float(n - self._Mp), 1.0)
+                             if method == "REML" else max(float(n), 1.0))
+                    log_phi_hat = float(np.log(max(Dp / denom, 1e-300)))
+            else:
+                # Warm-start from the previous PIRLS iter's converged ρ̂; on
+                # iter 0 use the initial.sp seed against the just-built R.
+                if rho_hat is None:
+                    rho0 = self._initial_sp_rho()
+                else:
+                    rho0 = rho_hat.copy()
+                if include_log_phi:
+                    if log_phi_hat is None:
+                        try:
+                            fit_seed = self._fit_given_rho(rho0)
+                            df_resid_seed = max(n - self._Mp, 1.0)
+                            log_phi0 = float(np.log(
+                                max(fit_seed.dev / df_resid_seed, 1e-12)
+                            ))
+                        except Exception:
+                            log_phi0 = 0.0
+                    else:
+                        log_phi0 = log_phi_hat
+                    theta0 = np.concatenate([rho0, [log_phi0]])
+                else:
+                    theta0 = rho0
+
+                theta_hat = self._outer_newton(
+                    theta0,
+                    criterion="REML" if method in ("REML", "ML") else "GCV",
+                    include_log_phi=include_log_phi,
+                    include_family_theta=False,
+                )
+                if include_log_phi:
+                    rho_hat = theta_hat[:n_sp]
+                    log_phi_hat = float(theta_hat[n_sp])
+                else:
+                    rho_hat = theta_hat
+                    log_phi_hat = None
+                self.sp = np.exp(rho_hat)
+                fit = self._fit_given_rho(rho_hat)
+
+            self._log_phi_hat = log_phi_hat
+
+            new_coef = fit.beta
+            if not np.all(np.isfinite(new_coef)):
+                warnings.warn(
+                    f"non-finite coefficients at PIRLS iteration {it+1}",
+                    stacklevel=2,
+                )
+                break
+            coef = new_coef.copy()
+        # end outer iter loop
+
+        if not conv:
+            warnings.warn("PIRLS algorithm did not converge", stacklevel=2)
+
+        if fit is None:
+            raise FloatingPointError("bgam.fit produced no usable fit")
+
+        self._rho_hat = rho_hat if rho_hat is not None else np.zeros(0)
+        self._log_phi_hat = log_phi_hat
+        self._iter = it + 1
+        return fit, self._rho_hat
+
+    # -----------------------------------------------------------------------
+    # Post-fit assembly (non-Gaussian PIRLS path)
+    # -----------------------------------------------------------------------
+
+    def _post_fit_pirls(self, fit, rho_hat: np.ndarray,
+                        X_param_df: pl.DataFrame) -> None:
+        """Populate user-facing attributes after PIRLS converges.
+
+        Mirrors gam.__init__'s post-fit (gam.py:476-783) on the (R, f) reduced
+        problem. The PIRLS chunked build returns full-length (η, μ, w, z)
+        at the converged β̂; ``self._wt_full`` holds the Fisher weights at β̂
+        and ``self._XtX = R'R = X'WX`` is the Gram of √W·X. So
+        ``Vp = σ²·A⁻¹`` and ``Ve = σ²·A⁻¹·X'WX·A⁻¹`` work directly with
+        ``A⁻¹ = (X'WX + Sλ)⁻¹`` from ``fit.A_chol``.
+        """
+        n, p = self.n, self.p
+        method = self.method
+        n_sp = len(self._slots)
+        family = self.family
+        y = self._y_arr
+        beta = fit.beta
+        Sλ = fit.S_full
+        self._rho_hat = rho_hat
+
+        A_inv = cho_solve((fit.A_chol, fit.A_chol_lower), np.eye(p))
+        XtWX = self._XtX                # = R'R = X'WX at converged β̂
+        A_inv_XtWX = A_inv @ XtWX
+        edf = np.diag(A_inv_XtWX).copy()
+        edf_total = float(edf.sum())
+
+        # Prior weights (=1 for now). Same convention as gam.
+        self._wt = np.ones(n)
+        wt = self._wt
+        df_resid = float(n - edf_total)
+
+        # Pearson scale = Σ wᵢ·(yᵢ - μᵢ)²/V(μᵢ) / df_resid (mgcv gam.fit3.r:606).
+        if df_resid > 0 and not family.scale_known:
+            V = family.variance(fit.mu)
+            pearson_scale = float(
+                np.sum(wt * (y - fit.mu) ** 2 / V)
+            ) / df_resid
+        else:
+            pearson_scale = 1.0 if family.scale_known else float("nan")
+        self._pearson_scale = pearson_scale
+        scale = 1.0 if family.scale_known else pearson_scale
+        sigma_squared = scale
+        sigma = (float(np.sqrt(sigma_squared))
+                 if np.isfinite(sigma_squared) and sigma_squared >= 0
+                 else float("nan"))
+
+        Vp = sigma_squared * A_inv
+        Ve = sigma_squared * A_inv_XtWX @ A_inv
+
+        # Coefficient basis change for t2 smooths (rare).
+        intercept_idx: Optional[int] = (
+            self.column_names.index("(Intercept)")
+            if self._has_intercept else None
+        )
+        if any(b.spec is not None and b.spec.coef_remap is not None
+               for b in self._blocks):
+            G_P = np.eye(p)
+            for b, (a_col, b_col) in zip(self._blocks, self._block_col_ranges):
+                if b.spec is None or b.spec.coef_remap is None:
+                    continue
+                M_b, X_bar_b = b.spec.coef_remap
+                G_P[a_col:b_col, a_col:b_col] = M_b
+                if intercept_idx is not None:
+                    G_P[intercept_idx, a_col:b_col] = X_bar_b
+            beta = G_P @ beta
+            Vp = G_P @ Vp @ G_P.T
+            Ve = G_P @ Ve @ G_P.T
+
+        # ---- β / SE / t / p (parametric Wald) ------------------------------
+        self.bhat = _row_frame(beta, self.column_names)
+        self._beta = beta
+        se = np.sqrt(np.diag(Vp))
+        self.se_bhat = _row_frame(se, self.column_names)
+        self._se = se
+        t_stats = np.divide(beta, se, out=np.full_like(beta, np.nan), where=se > 0)
+        self.t_values = _row_frame(t_stats, self.column_names)
+        if df_resid > 0 and np.isfinite(df_resid):
+            pv = 2 * t_dist.sf(np.abs(t_stats), df_resid)
+        else:
+            pv = np.full_like(t_stats, np.nan)
+        self.p_values = _row_frame(pv, self.column_names)
+
+        # ---- linear predictors / fitted / residuals -------------------------
+        eta = fit.eta
+        mu = fit.mu
+        self.linear_predictors = eta
+        self.fitted_values = mu
+        self.fitted = mu
+        # Deviance residuals: sign(y-μ)·√d_i (default residual type, mgcv).
+        di = family.dev_resids(y, mu, wt)
+        self.residuals = np.sign(y - mu) * np.sqrt(np.maximum(di, 0.0))
+        self.sigma = sigma
+        self.sigma_squared = sigma_squared
+        self.scale = sigma_squared
+
+        # Leverage h_i = w_i·(X A⁻¹ X')_ii via chunked walk.
+        leverage = self._chunked_leverage_diag_weighted(A_inv, self._wt_full)
+        self.leverage = leverage
+        sigma_for_std = sigma if np.isfinite(sigma) and sigma > 0 else 1.0
+        denom = sigma_for_std * np.sqrt(np.clip(1.0 - leverage, 1e-12, None))
+        V_mu = family.variance(mu)
+        pearson_res = (y - mu) * np.sqrt(self._wt / np.maximum(V_mu, 0.0))
+        self.std_dev_residuals = self.residuals / denom
+        self.std_pearson_residuals = pearson_res / denom
+        self.df_residuals = df_resid
+        self.deviance = float(np.sum(di))
+        self.rss = self.deviance     # Gaussian-era alias
+
+        # Null deviance: intercept-only μ̂ = weighted mean of y; without
+        # intercept, η ≡ 0 ⇒ μ ≡ linkinv(0).
+        if self._has_intercept:
+            mu_null_const = float(np.sum(wt * y) / np.sum(wt))
+            mu_null = np.full(n, mu_null_const)
+        else:
+            mu_null = family.link.linkinv(np.zeros(n))
+        self.null_deviance = float(
+            np.sum(family.dev_resids(y, mu_null, wt))
+        )
+        self.df_null = float(n - 1) if self._has_intercept else float(n)
+
+        self.Vp = Vp
+        self.Ve = Ve
+        self._A_inv = A_inv
+        self.edf = edf
+        self.edf_total = edf_total
+        edf_by_smooth: dict[str, float] = {}
+        for b, (a, bcol) in zip(self._blocks, self._block_col_ranges):
+            edf_by_smooth[b.label] = float(edf[a:bcol].sum())
+        self.edf_by_smooth = edf_by_smooth
+
+        # R² / R²_adj / dev_explained.
+        ss_resid_response = float(np.sum(wt * (y - mu) ** 2))
+        if self._has_intercept and self._tss > 0:
+            r_squared = 1.0 - ss_resid_response / self._tss
+        elif self._yty_full > 0:
+            r_squared = 1.0 - ss_resid_response / self._yty_full
+        else:
+            r_squared = float("nan")
+        if df_resid > 0 and n > 1:
+            sqrt_wt = np.sqrt(wt)
+            mean_y_w = float(np.sum(wt * y) / np.sum(wt))
+            v_resid = float(np.var(sqrt_wt * (y - mu), ddof=1))
+            v_total = float(np.var(sqrt_wt * (y - mean_y_w), ddof=1))
+            if v_total > 0:
+                r_squared_adjusted = (
+                    1.0 - v_resid * (n - 1) / (v_total * df_resid)
+                )
+            else:
+                r_squared_adjusted = float("nan")
+        else:
+            r_squared_adjusted = float("nan")
+        self.r_squared = float(r_squared)
+        self.r_squared_adjusted = float(r_squared_adjusted)
+        if self.null_deviance > 0:
+            self.deviance_explained = float(
+                (self.null_deviance - self.deviance) / self.null_deviance
+            )
+        else:
+            self.deviance_explained = float("nan")
+
+        # The (R, f) reduced problem is Gaussian-on-(R, f), so
+        # ``_compute_edf12`` and ``_reml_hessian`` see W=I just like the
+        # Gaussian-identity path. ``self._fisher_w = None`` keeps the inherited
+        # XtWX-rebuild short-circuit on (line 3228 in gam.py).
+        self._fisher_w = None
+
+        if (
+            method in ("REML", "ML")
+            and n_sp > 0
+            and np.isfinite(sigma_squared)
+            and sigma_squared > 0
+        ):
+            log_phi_hat_for_aug = (
+                self._log_phi_hat
+                if self._log_phi_hat is not None
+                else float(np.log(sigma_squared))
+            )
+            H_aug = 0.5 * self._reml_hessian(
+                rho_hat, log_phi_hat_for_aug, fit=fit, include_log_phi=True,
+            )
+            H_aug = 0.5 * (H_aug + H_aug.T)
+        else:
+            H_aug = None
+        self._H_aug = H_aug
+
+        if n_sp > 0:
+            edf2_per_coef, edf1_per_coef, Vc_corr = self._compute_edf12(
+                rho_hat, fit, sigma_squared, A_inv, A_inv_XtWX, edf, H_aug,
+            )
+            self.edf1 = edf1_per_coef
+            self.edf2 = edf2_per_coef
+            self.edf1_total = float(edf1_per_coef.sum())
+            self.edf2_total = float(edf2_per_coef.sum())
+        else:
+            self.edf1 = edf.copy()
+            self.edf2 = edf.copy()
+            self.edf1_total = edf_total
+            self.edf2_total = edf_total
+            Vc_corr = np.zeros_like(Vp)
+        self.Vc = Vp + Vc_corr
+
+        # AIC / BIC.
+        sc_p = 0.0 if family.scale_known else 1.0
+        dev1 = family._aic_dev1(self.deviance, sigma_squared, wt)
+        family_aic = float(family.aic(y, fit.mu, dev1, wt, n))
+        mgcv_aic = family_aic + 2.0 * edf_total
+        logLik = sc_p + edf_total - 0.5 * mgcv_aic
+        df_for_aic = min(self.edf2_total + sc_p, float(p) + sc_p)
+        self.loglike = float(logLik)
+        self.logLik = self.loglike
+        self.npar = float(df_for_aic)
+        self.AIC = -2.0 * logLik + 2.0 * df_for_aic
+        self.BIC = -2.0 * logLik + float(np.log(n)) * df_for_aic
+        self._mgcv_aic = float(mgcv_aic)
+
+        if method in ("REML", "ML"):
+            if n_sp > 0:
+                log_phi_hat = (
+                    self._log_phi_hat
+                    if self._log_phi_hat is not None else 0.0
+                )
+                score = float(self._reml(rho_hat, log_phi_hat, fit=fit))
+            else:
+                score = float("nan")
+            if method == "REML":
+                self.REML_criterion = score
+            else:
+                self.ML_criterion = score
+        else:
+            if n_sp > 0:
+                self.GCV_score = float(self._gcv(rho_hat))
+            else:
+                self.GCV_score = float("nan")
+
+        self.vcomp = self._compute_vcomp()
+        self.AR1_rho = self._rho   # always 0 for the non-Gaussian path
