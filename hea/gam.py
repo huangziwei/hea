@@ -1412,16 +1412,15 @@ class gam:
         X = self._X_full
         S_pinv = self._S_pinv(fit.S_full)
 
-        # Common precomputations. ``M = H⁻¹ X'`` is kept (p × n, used by
-        # ``diag_MtSM`` below). The n × n hat matrix ``P = X H⁻¹ X'`` and
-        # its elementwise square ``Rsq = P*P`` are NOT formed — at large
-        # n that's tens of GB. Instead we mirror mgcv (gdi.c:952
-        # ``get_trA2``) and operate on ``K`` (n × p) with ``K K' = P``.
-        # The bilinear form ``hv_i' Rsq hv_j`` (the only Rsq consumer)
-        # equals ``Σ_{p,q} G_i[p,q]·G_j[p,q]`` with
-        # ``G_k = K' diag(hv_k) K`` (p × p) — see ``G_arr`` precompute
-        # below. ``d_diag = diag(P)`` becomes ``Σ_p K[i,p]²``.
-        M = cho_solve((fit.A_chol, fit.A_chol_lower), X.T)   # (p, n) = H⁻¹ X'
+        # Common precomputations. The n × n hat matrix ``P = X H⁻¹ X'``
+        # and its elementwise square ``Rsq = P*P`` are NOT formed — at
+        # large n that's tens of GB. We mirror mgcv (gdi.c:952
+        # ``get_trA2``) and operate on ``K`` (n × p) with ``K K' = P``;
+        # the bilinear form ``hv_i' Rsq hv_j`` (the only Rsq consumer)
+        # equals ``Σ_{p,q} G_i[p,q]·G_j[p,q]`` with ``G_k = K' diag(hv_k) K``.
+        # ``M = H⁻¹ X'`` is also gated — it's only needed to feed
+        # ``diag_MtSM`` (the WS / SW trace pieces), and those vanish for
+        # families with ``dw/dη ≡ 0``. See the ``needs_w`` branch below.
 
         db_drho = self._dbeta_drho(fit, rho)                   # (p, n_sp)
         dw_deta = self._dw_deta(fit)                           # (n,)
@@ -1431,24 +1430,27 @@ class gam:
         v = X @ db_drho                                        # (n, n_sp)
         hv = dw_deta[:, None] * v                              # h'·v_l, shape (n, n_sp)
 
-        # Build K (n × p) only when an n-side trace actually needs it.
-        # For families with ``dw/dη ≡ 0`` (Gaussian-identity, Gamma+log,
-        # any canonical link satisfying B(μ) = V'/V + g''·μ_η = 0 and the
-        # α'/α path zero) all of ``hv``, ``d2w_deta2`` are zero and the
-        # K-based traces collapse to zero. We still need ``d_diag`` for
-        # the Σ d·h''·v_i·v_j and Σ d·h'·X·d²β pieces — but those vanish
-        # too when the W-derivatives are zero. Skip K entirely.
+        # Build K (n × p) and M (p × n) only when an n-side trace
+        # actually needs them. For families with ``dw/dη ≡ 0``
+        # (Gaussian-identity, Gamma+log, any canonical link satisfying
+        # B(μ) = V'/V + g''·μ_η = 0 and α'/α = 0) all of ``hv``,
+        # ``d2w_deta2`` are zero, the K-based traces collapse, and the
+        # ``diag_MtSM[k]`` consumers (tr_WS / tr_SW) are hv-weighted and
+        # vanish — so neither K nor M is needed. Both are O(p²·n) to
+        # build, which dominates at large n.
         needs_w = bool(np.any(hv)) or bool(np.any(d2w_deta2))
         if needs_w:
-            K = self._make_K(fit.A_chol, fit.A_chol_lower)     # (n, p)
-            d_diag = np.einsum("ij,ij->i", K, K)                # (n,) diag(KK') = diag(P)
+            M = cho_solve((fit.A_chol, fit.A_chol_lower), X.T)   # (p, n) = H⁻¹ X'
+            K = self._make_K(fit.A_chol, fit.A_chol_lower)       # (n, p)
+            d_diag = np.einsum("ij,ij->i", K, K)                  # (n,) diag(KK') = diag(P)
             # G_k = K' diag(hv_k) K, p × p, n_sp of them. Symmetric.
             G_arr = np.empty((n_sp, p, p))
             for k in range(n_sp):
-                Khv = K * hv[:, k:k+1]                          # (n, p)
-                Gk = K.T @ Khv                                  # (p, p)
-                G_arr[k] = 0.5 * (Gk + Gk.T)                    # enforce symmetry
+                Khv = K * hv[:, k:k+1]                            # (n, p)
+                Gk = K.T @ Khv                                    # (p, p)
+                G_arr[k] = 0.5 * (Gk + Gk.T)                      # enforce symmetry
         else:
+            M = None
             d_diag = None
             G_arr = None
 
@@ -1457,7 +1459,9 @@ class gam:
         SpinvS_block: list[np.ndarray] = []
         Sbeta_full = np.zeros((n_sp, p))
         AinvSbeta = np.empty((n_sp, p))
-        diag_MtSM: list[np.ndarray] = []   # diag(M' S_k_full M) = (n,) for each k
+        diag_MtSM: list[np.ndarray] | None = (
+            [] if needs_w else None
+        )  # diag(M' S_k_full M) = (n,) per k; only needed for tr_WS / tr_SW.
         g = np.zeros(n_sp)
         tr_AinvS = np.zeros(n_sp)
         tr_SpinvS = np.zeros(n_sp)
@@ -1475,9 +1479,10 @@ class gam:
             SpinvS_block.append(S_pinv[:, a:b] @ slot.S)
             tr_AinvS[k] = float(np.einsum("ij,ji->", A_inv[a:b, a:b], slot.S))
             tr_SpinvS[k] = float(np.einsum("ij,ji->", S_pinv[a:b, a:b], slot.S))
-            # diag(M' S_k_full M)_i = M[a:b, i]' · S_k · M[a:b, i]
-            SkM = slot.S @ M[a:b, :]                          # (m_k, n)
-            diag_MtSM.append(np.einsum("ji,ji->i", M[a:b, :], SkM))
+            if diag_MtSM is not None:
+                # diag(M' S_k_full M)_i = M[a:b, i]' · S_k · M[a:b, i]
+                SkM = slot.S @ M[a:b, :]                       # (m_k, n)
+                diag_MtSM.append(np.einsum("ji,ji->i", M[a:b, :], SkM))
 
         # ML range-projection correction. Under method="ML" the Hessian
         # log-det is log|U_rᵀ(H+S)U_r|, which by the block-determinant
@@ -1537,13 +1542,16 @@ class gam:
                 # WW: (h'·v_i)' · Rsq · (h'·v_j) where Rsq = P⊙P, P = KK'.
                 # Identity: hv_i' (KK' ⊙ KK') hv_j = Σ_{p,q} G_i[p,q]·G_j[p,q]
                 # with G_k = K' diag(hv_k) K (Wood 2008 §4 + mgcv gdi.c:952).
+                # WS / SW: tr(H⁻¹·A_i·H⁻¹·S_j) = (h'·v_i)' · diag_MtSM[j].
+                # All three are zero when ``hv ≡ 0`` (Gaussian-identity etc.).
                 if G_arr is not None:
                     tr_WW = float(np.sum(G_arr[i] * G_arr[j]))
+                    tr_WS = float(hv[:, i] @ diag_MtSM[j])
+                    tr_SW = float(hv[:, j] @ diag_MtSM[i])
                 else:
                     tr_WW = 0.0
-                # WS: tr(H⁻¹·A_i·H⁻¹·S_j) = (h'·v_i)' · diag_MtSM[j].
-                tr_WS = float(hv[:, i] @ diag_MtSM[j])
-                tr_SW = float(hv[:, j] @ diag_MtSM[i])
+                    tr_WS = 0.0
+                    tr_SW = 0.0
                 # SS: tr(H⁻¹·S_i·H⁻¹·S_j) — Gaussian block trick.
                 tr_SS = float(np.einsum(
                     "ab,ba->",
@@ -2665,15 +2673,13 @@ class gam:
         Sλ_beta = fit.S_full @ fit.beta                    # (p,)
         dD_drho = -2.0 * (Sλ_beta @ db_drho)               # (n_sp,)
 
-        # ∂τ/∂ρ_k. ``M_F = A_F⁻¹·X'`` (p × n). The n × n hat matrix
-        # ``P_F = X·M_F`` is NOT formed — it's tens of GB at large n
-        # (e.g. 23 GB at n=54k). Mirroring mgcv (gdi.c:952), n-side
-        # quantities are computed from ``K_F`` (n × p) with
-        # ``K_F K_F' = P_F``: ``diag(P_F) = Σ_p K_F[i,p]²`` and
-        # ``s_a = Σ_b P_F[a,b]²·w_F[b] = (K_F · M_w · K_F')_{aa}`` with
-        # ``M_w = K_F' diag(w_F) K_F`` (p × p) — see the W-deriv branch.
-        M_F = cho_solve((fit_F.A_chol, fit_F.A_chol_lower), X.T)
-        # Penalty piece: −λ_k · tr(A_F⁻¹·S_k·F_F).  Doesn't need d_diag/s.
+        # ∂τ/∂ρ_k pieces. The n × n hat matrix ``P_F = X·A_F⁻¹·X'`` is
+        # NOT formed — at n=54k that's 23 GB. n-side quantities are
+        # built from ``K_F`` (n × p) with ``K_F K_F' = P_F`` (mgcv
+        # gdi.c:952). For Gaussian-identity / Gamma+log (``dW_F/dη ≡ 0``)
+        # the ``w_piece`` consumer of those n-side quantities is
+        # identically zero, so we skip the K_F build there entirely.
+        # Penalty piece: −λ_k · tr(A_F⁻¹·S_k·F_F).  No n-side quantities.
         pen_piece = np.empty(n_sp)
         for k, slot in enumerate(self._slots):
             a, b = slot.col_start, slot.col_end
@@ -2767,16 +2773,16 @@ class gam:
             Xw = X * np.sqrt(w_F)[:, None]
             XtWX_F = Xw.T @ Xw
 
-        # Fisher precomputations for τ. ``M_F = A_F⁻¹·X'`` is kept
-        # (p × n, used by the Y_full / U_full builds below). The n × n
-        # hat matrix ``P_F = X·M_F`` and its elementwise square ``Rsq``
-        # are NOT formed — at large n that's 2 × 23 GB (mgcv gdi.c:952
-        # ``get_trA2`` works the same way). ``d_diag = diag(P_F)`` and
-        # ``s = (P_F⊙P_F)·w_F`` get rewritten as K-based reductions
-        # below; both are zero in the W-deriv-free branch (Gaussian-
-        # identity, Gamma+log) so we skip K when not needed.
+        # Fisher precomputations for τ. The n × n hat matrix
+        # ``P_F = X·A_F⁻¹·X'`` is NOT formed (~23 GB at n=54k). n-side
+        # quantities are built from ``K_F`` (n × p) with
+        # ``K_F K_F' = P_F`` (mgcv gdi.c:952). The (p × n) ``M_F`` and
+        # its derived ``MhX_k`` builds in the d2tau loop are also
+        # gated behind ``needs_w`` — for Gaussian-identity / Gamma+log
+        # they multiply by zero ``hv`` and the W-deriv contributions
+        # collapse to a closed-form sparse-block expression that
+        # touches only ``AinvS_block`` and ``F_F`` (both p-sized).
         A_F_inv = cho_solve((fit_F.A_chol, fit_F.A_chol_lower), np.eye(p))
-        M_F = cho_solve((fit_F.A_chol, fit_F.A_chol_lower), X.T)   # (p, n)
         F_F = A_F_inv @ XtWX_F                                      # (p, p)
         edf_total = float(np.trace(F_F))
 
@@ -2803,6 +2809,11 @@ class gam:
         # n × n hat matrix off the heap. Mirrors mgcv gdi.c:952.
         needs_w = bool(np.any(hv)) or bool(np.any(d2w_deta2_F))
         if needs_w:
+            # M_F (p × n) feeds the per-slot ``MhX_k = M_F @ (hv·X)`` in
+            # the d2tau loop. K_F (n × p) supports diag(P_F) and the
+            # ``s = (P_F⊙P_F)·w_F`` reduction. Both are O(p²·n) to build
+            # — only paid in this branch.
+            M_F = cho_solve((fit_F.A_chol, fit_F.A_chol_lower), X.T)
             K_F = self._make_K(fit_F.A_chol, fit_F.A_chol_lower)   # (n, p)
             d_diag = np.einsum("ij,ij->i", K_F, K_F)               # (n,) diag(K_F K_F') = diag(P_F)
             M_w = (K_F * w_F[:, None]).T @ K_F                     # (p, p) K_F' diag(w_F) K_F
@@ -2810,6 +2821,7 @@ class gam:
             s = np.einsum("ij,ij->i", KM_w, K_F)                   # (n,) diag(K_F·M_w·K_F') = (P_F⊙P_F)·w_F
             d_minus_s = d_diag - s
         else:
+            M_F = None
             d_minus_s = None
 
         # Per-slot block precomputations.
@@ -2858,53 +2870,94 @@ class gam:
         d2D = 0.5 * (d2D + d2D.T)
 
         # ---- ∂²τ/∂ρ_l∂ρ_k — Fisher A_F, F_F, dW_F. ----------------------
-        # Y_k = A_F⁻¹ P_F,k = M_F·diag(hv_k)·X + λ_k · A_F⁻¹ S_k_full
-        # U_k = A_F⁻¹ Q_F,k = M_F·diag(hv_k)·X
-        Y_full = np.empty((n_sp, p, p))
-        U_full = np.empty((n_sp, p, p))
-        for k in range(n_sp):
-            a, b = self._slots[k].col_start, self._slots[k].col_end
-            MhX_k = M_F @ (hv[:, k:k+1] * X)
-            U_full[k] = MhX_k
-            Y_k = MhX_k.copy()
-            Y_k[:, a:b] += sp[k] * AinvS_block[k]
-            Y_full[k] = Y_k
-
+        # Two paths:
+        #
+        # * needs_w=True (general families): build the dense Y_k = A_F⁻¹·P_F,k
+        #   and U_k = M_F·diag(hv_k)·X (each p × p, n_sp of them) and pair
+        #   them through F_F. This is the literal Wood 2008 §4 form.
+        #
+        # * needs_w=False (Gaussian-identity / Gamma+log): hv = 0 and
+        #   d²W_F/dη² = 0, so U_k ≡ 0 and Y_k = sp[k]·AinvS_block[k]
+        #   embedded sparsely in cols (a_k:b_k). The d²τ formula collapses
+        #   (per the docstring) to
+        #     d²τ_lk = 2·sp[l]·sp[k]·tr(A_F⁻¹·S_l·A_F⁻¹·S_k·F_F)
+        #            − δ_lk·sp[k]·tr(A_F⁻¹·S_k·F_F)
+        #   We compute the doubly-traced piece block-locally on
+        #   AinvS_block (p × k_size) without ever materializing Y_k as a
+        #   dense p × p matrix or running an O(p³) p × p matmul. Mirrors
+        #   mgcv ``get_trA2`` (gdi.c:1132-1158), which uses the
+        #   pre-reduced PtSP / PtSPKtK p × p arrays through ``diagABt``.
         d2tau = np.zeros((n_sp, n_sp))
-        for ll in range(n_sp):
-            for k in range(ll, n_sp):
-                YlYk = Y_full[ll] @ Y_full[k]
-                T_a = float(np.einsum("ij,ji->", YlYk, F_F))
-                if ll == k:
-                    T_b = T_a
-                else:
-                    YkYl = Y_full[k] @ Y_full[ll]
-                    T_b = float(np.einsum("ij,ji->", YkYl, F_F))
-                T1_T2 = T_a + T_b
+        if needs_w:
+            Y_full = np.empty((n_sp, p, p))
+            U_full = np.empty((n_sp, p, p))
+            for k in range(n_sp):
+                a, b = self._slots[k].col_start, self._slots[k].col_end
+                MhX_k = M_F @ (hv[:, k:k+1] * X)
+                U_full[k] = MhX_k
+                Y_k = MhX_k.copy()
+                Y_k[:, a:b] += sp[k] * AinvS_block[k]
+                Y_full[k] = Y_k
 
-                T4 = float(np.einsum("ij,ji->", Y_full[k], U_full[ll]))
-                T5 = float(np.einsum("ij,ji->", Y_full[ll], U_full[k]))
+            for ll in range(n_sp):
+                for k in range(ll, n_sp):
+                    YlYk = Y_full[ll] @ Y_full[k]
+                    T_a = float(np.einsum("ij,ji->", YlYk, F_F))
+                    if ll == k:
+                        T_b = T_a
+                    else:
+                        YkYl = Y_full[k] @ Y_full[ll]
+                        T_b = float(np.einsum("ij,ji->", YkYl, F_F))
+                    T1_T2 = T_a + T_b
 
-                # d²W_F_lk = d²W_F/dη² · v_l v_k + dW_F/dη · X·∂²β̂/(∂ρ_l ∂ρ_k).
-                # Fisher W-derivatives; Newton ∂²β̂/∂ρ² (Newton IFT).
-                # Both summands are zero for Gaussian-identity / Gamma+log,
-                # in which case ``d_minus_s`` was skipped above and the
-                # T6 contribution is identically zero.
-                if d_minus_s is not None:
+                    T4 = float(np.einsum("ij,ji->", Y_full[k], U_full[ll]))
+                    T5 = float(np.einsum("ij,ji->", Y_full[ll], U_full[k]))
+
+                    # d²W_F_lk = d²W_F/dη² · v_l v_k + dW_F/dη · X·∂²β̂/(∂ρ_l ∂ρ_k).
                     Xd2b_lk = X @ d2b[:, ll, k]
                     d2w_lk = (
                         d2w_deta2_F * v[:, ll] * v[:, k]
                         + dw_deta_F * Xd2b_lk
                     )
                     T6_minus_T3B = float(d_minus_s @ d2w_lk)
-                else:
-                    T6_minus_T3B = 0.0
-                delta_S = -sp[k] * tr_AinvSk_F[k] if ll == k else 0.0
+                    delta_S = -sp[k] * tr_AinvSk_F[k] if ll == k else 0.0
 
-                val = T1_T2 - T4 - T5 + T6_minus_T3B + delta_S
-                d2tau[ll, k] = val
-                if ll != k:
-                    d2tau[k, ll] = val
+                    val = T1_T2 - T4 - T5 + T6_minus_T3B + delta_S
+                    d2tau[ll, k] = val
+                    if ll != k:
+                        d2tau[k, ll] = val
+        else:
+            # Block-aware Gaussian-identity / Gamma+log path.
+            #   tr(Y_l·Y_k·F_F) = sp[l]·sp[k]·tr(A_F⁻¹·S_l_full·A_F⁻¹·S_k_full·F_F).
+            # With Y_x sparse in cols (a_x:b_x) holding sp[x]·AinvS_block[x],
+            #   (Y_l·Y_k)[r, c] = sp[l]·sp[k]·(AinvS_block[l] @
+            #                     AinvS_block[k][a_l:b_l, :])[r, c-a_k]
+            # for c ∈ (a_k:b_k), zero elsewhere; trace against F_F reduces to
+            #   sp[l]·sp[k]·tr(M_lk · F_F[a_k:b_k, :])
+            # with M_lk = AinvS_block[l] @ AinvS_block[k][a_l:b_l, :], shape
+            # (p, k_k). Cost per pair: O(p·k_l·k_k + p·k_k), summed over
+            # the n_sp(n_sp+1)/2 pairs.
+            for ll in range(n_sp):
+                a_ll, b_ll = self._slots[ll].col_start, self._slots[ll].col_end
+                k_ll = b_ll - a_ll
+                for k in range(ll, n_sp):
+                    a_k, b_k = self._slots[k].col_start, self._slots[k].col_end
+                    M_lk = AinvS_block[ll] @ AinvS_block[k][a_ll:b_ll, :]   # (p, k_k)
+                    T_a = sp[ll] * sp[k] * float(
+                        np.einsum("rc,cr->", M_lk, F_F[a_k:b_k, :])
+                    )
+                    if ll == k:
+                        T_b = T_a
+                    else:
+                        M_kl = AinvS_block[k] @ AinvS_block[ll][a_k:b_k, :]  # (p, k_ll)
+                        T_b = sp[k] * sp[ll] * float(
+                            np.einsum("rc,cr->", M_kl, F_F[a_ll:b_ll, :])
+                        )
+                    delta_S = -sp[k] * tr_AinvSk_F[k] if ll == k else 0.0
+                    val = T_a + T_b + delta_S
+                    d2tau[ll, k] = val
+                    if ll != k:
+                        d2tau[k, ll] = val
 
         d2tau = 0.5 * (d2tau + d2tau.T)
 
@@ -3966,8 +4019,7 @@ class gam:
             Name of the x-axis covariate. The grid is
             ``np.linspace(min, max, n_grid)`` over the data column (NaNs
             dropped). itsadug only takes the first element if ``view`` is
-            a vector and warns; multi-dimensional differences live in
-            ``plot_diff2`` (not implemented here yet).
+            a vector and warns; the 2D analogue is :meth:`plot_diff2`.
         comp : dict
             Same as :meth:`get_difference`: ``{predictor: (level_a, level_b)}``.
         cond : dict, optional
@@ -4127,6 +4179,285 @@ class gam:
                     print(f"\t{s:f} - {e:f}")
             else:
                 print("\nDifference is not significant.")
+
+        return ax
+
+    def plot_diff2(
+        self,
+        view: tuple[str, str] | list[str],
+        comp: dict,
+        cond: dict | None = None,
+        se: float = 1.96,
+        n_grid: int = 30,
+        rm_ranef: bool | str | list | None = True,
+        plot_ci: bool = False,
+        color: str = "RdBu_r",
+        col: str = "black",
+        ci_col: tuple[str, str] = ("red", "green"),
+        n_levels: int = 10,
+        too_far: float = 0.0,
+        print_summary: bool = False,
+        ax=None,
+        figsize: tuple | None = None,
+        xlim: tuple | None = None,
+        ylim: tuple | None = None,
+        zlim: tuple | None = None,
+        xlab: str | None = None,
+        ylab: str | None = None,
+        title: str | None = None,
+        hide_label: bool = False,
+        add_color_legend: bool = True,
+    ):
+        """Plot the predicted difference *surface* between two conditions —
+        :func:`itsadug::plot_diff2` parity.
+
+        2D analogue of :meth:`plot_diff`: builds an ``n_grid × n_grid``
+        grid over ``view``, calls :meth:`get_difference` over the joint
+        grid, and renders ``(X1 − X2) β̂`` as a colored heatmap with
+        overlaid contour lines. With ``plot_ci=True``, dotted contours of
+        ``diff − CI`` (``ci_col[0]``) and ``diff + CI`` (``ci_col[1]``)
+        are drawn at the same level set — itsadug's ``plotCI=TRUE`` style.
+
+        Parameters
+        ----------
+        view : (str, str)
+            Pair of x- and y-axis covariate names. Both must be numeric in
+            the data. itsadug silently uses only the first two if more are
+            given; we mirror that with a warning.
+        comp : dict
+            Same as :meth:`get_difference`: ``{predictor: (level_a, level_b)}``.
+        cond : dict, optional
+            Other variables to hold fixed. If a ``view`` name is included
+            here, ``cond[v]`` overrides the auto-built linspace (with a
+            warning), matching itsadug.
+        se : float
+            SE multiplier for the pointwise CI used by ``plot_ci``. Default
+            ``1.96`` (≈ 95% pointwise). ``≤ 0`` disables CI computation;
+            ``plot_ci`` is silently a no-op in that case.
+        n_grid : int
+            Per-axis grid resolution. Default 30 (matches itsadug).
+        rm_ranef : bool, str, list of str, or None
+            Same as :meth:`get_difference`.
+        plot_ci : bool
+            Overlay dotted contours of ``diff ± CI`` at the same levels as
+            the bold contour — itsadug's ``plotCI``. Default ``False``.
+        color : str
+            Matplotlib colormap for the heatmap. Default ``"RdBu_r"``
+            (diverging). itsadug's default is ``topo.colors``; pick
+            whichever cmap suits the data — diverging is recommended for
+            differences so 0 sits at the cmap's neutral.
+        col : str
+            Color for the bold-contour overlay on the difference itself.
+        ci_col : (str, str)
+            Lower / upper-band contour colors when ``plot_ci=True`` —
+            matches itsadug's ``ci.col`` default.
+        n_levels : int
+            Approximate number of contour levels. ``f̂`` and ``f̂±CI``
+            share a single ``MaxNLocator(nbins=n_levels)`` level set so
+            level values line up across the three layers.
+        too_far : float
+            Mask grid points whose normalized distance to the nearest
+            data point exceeds this threshold (mgcv's ``exclude.too.far``).
+            ``0`` (default) = no masking. itsadug's ``plot_diff2`` doesn't
+            mask either, but it's useful for irregular boundaries.
+        print_summary : bool
+            Pass-through to :meth:`get_difference`.
+        ax : matplotlib Axes | None
+            Where to draw. ``None`` builds a new figure / axes.
+        figsize : (float, float) | None
+            Only used when creating a new figure.
+        xlim, ylim : (float, float) | None
+            Range for the auto-built grid (mirror of itsadug). ``None``
+            (default) uses the data range with NaNs dropped.
+        zlim : (float, float) | None
+            Color-scale limits. ``None`` (default) uses ``[-m, m]`` if the
+            difference straddles 0 (so a diverging cmap is centered);
+            otherwise the diff's range.
+        xlab, ylab : str | None
+            Axis labels — default to the view names.
+        title : str | None
+            Plot title — default ``"Difference {levels[0]} − {levels[1]}"``.
+        hide_label : bool
+            Suppress the small "difference [, excl. random]" annotation.
+        add_color_legend : bool
+            Draw a colorbar to the right. Default ``True``.
+
+        Returns the matplotlib ``Axes``.
+        """
+        from matplotlib.ticker import MaxNLocator
+        import warnings as _w
+
+        view = list(view)
+        if len(view) < 2:
+            raise ValueError(
+                "view must contain two predictor names for plot_diff2"
+            )
+        if len(view) > 2:
+            _w.warn(
+                f"view has {len(view)} entries; plot_diff2 only uses the "
+                f"first two ({view[0]!r}, {view[1]!r}).",
+                stacklevel=2,
+            )
+            view = view[:2]
+        xvar, yvar = view[0], view[1]
+        for v in (xvar, yvar):
+            if v not in self.data.columns:
+                raise ValueError(
+                    f"view variable {v!r} not in data; available: "
+                    f"{list(self.data.columns)}"
+                )
+        cond = dict(cond) if cond else {}
+
+        # Build the grid axes. cond[name] (if user-supplied) wins with a
+        # warning; otherwise linspace over the data range, with xlim/ylim
+        # narrowing it. Mirrors itsadug's plot_diff2 grid construction.
+        def _build_axis(name, lim, lim_name):
+            if name in cond:
+                _w.warn(
+                    f"Predictor {name!r} specified in view and cond. Values "
+                    f"in cond being used, rather than the whole range of "
+                    f"{name!r}.",
+                    stacklevel=3,
+                )
+                return
+            arr = self.data[name].drop_nulls().to_numpy().astype(float)
+            if arr.size == 0:
+                raise ValueError(
+                    f"view variable {name!r} has no non-null values"
+                )
+            cond[name] = np.linspace(arr.min(), arr.max(), n_grid)
+            if lim is not None:
+                if len(lim) != 2:
+                    _w.warn(
+                        f"Invalid {lim_name} values specified. Argument "
+                        f"{lim_name} is being ignored.",
+                        stacklevel=3,
+                    )
+                else:
+                    cond[name] = np.linspace(lim[0], lim[1], n_grid)
+
+        _build_axis(xvar, xlim, "xlim")
+        _build_axis(yvar, ylim, "ylim")
+
+        result = self.get_difference(
+            comp=comp, cond=cond, rm_ranef=rm_ranef,
+            se=(se > 0), f=(se if se > 0 else 1.96),
+            print_summary=print_summary,
+        )
+
+        # Reshape diff (and CI) onto an Nx × Ny grid in (xvar slow, yvar
+        # fast) order. Sorting independent of expand_grid's column order
+        # keeps this robust to formula-vs-data column order: get_difference
+        # iterates _var_summary keys (data-column order), but lexsort over
+        # (xvar, yvar) reorders into the canonical (slow=x, fast=y) layout.
+        g = result.grid
+        x_arr = g[xvar].to_numpy().astype(float)
+        y_arr = g[yvar].to_numpy().astype(float)
+        Nx = len(np.asarray(cond[xvar]))
+        Ny = len(np.asarray(cond[yvar]))
+        if Nx * Ny != len(result.difference):
+            raise RuntimeError(
+                f"plot_diff2: grid reshape mismatch "
+                f"(expected {Nx}*{Ny}={Nx * Ny}, got {len(result.difference)})"
+            )
+        sort_idx = np.lexsort([y_arr, x_arr])  # primary key is the LAST one
+        Z = result.difference[sort_idx].reshape(Nx, Ny)
+        CI_mat = (
+            result.ci[sort_idx].reshape(Nx, Ny)
+            if result.ci is not None else None
+        )
+
+        x_axis = np.asarray(cond[xvar], dtype=float)
+        y_axis = np.asarray(cond[yvar], dtype=float)
+        if too_far > 0.0:
+            XXm, YYm = np.meshgrid(x_axis, y_axis, indexing="ij")
+            mask = _too_far_mask(
+                XXm.flatten(), YYm.flatten(),
+                self.data[xvar], self.data[yvar], too_far,
+            ).reshape(Nx, Ny)
+            Z = np.where(mask, np.nan, Z)
+            if CI_mat is not None:
+                CI_mat = np.where(mask, np.nan, CI_mat)
+
+        # --- plotting --------------------------------------------------------
+        if ax is None:
+            _fig, ax = plt.subplots(figsize=figsize or (6, 5))
+
+        # contour / pcolormesh expect Z indexed [y, x]; transpose Nx×Ny → Ny×Nx.
+        XX, YY = np.meshgrid(x_axis, y_axis, indexing="xy")
+        Zp = Z.T
+
+        # zlim auto: symmetric around 0 when the diff straddles 0 so a
+        # diverging cmap stays centered; otherwise plain [min, max].
+        if zlim is None:
+            zmin_d = float(np.nanmin(Z)) if np.isfinite(Z).any() else 0.0
+            zmax_d = float(np.nanmax(Z)) if np.isfinite(Z).any() else 0.0
+            if zmin_d < 0 < zmax_d:
+                m = max(-zmin_d, zmax_d)
+                zlim_used = (-m, m)
+            else:
+                zlim_used = (zmin_d, zmax_d)
+        else:
+            zlim_used = (float(zlim[0]), float(zlim[1]))
+
+        im = ax.pcolormesh(
+            XX, YY, Zp, cmap=color, shading="auto",
+            vmin=zlim_used[0], vmax=zlim_used[1],
+        )
+
+        # Shared contour levels for f̂ and (optionally) f̂±CI — same trick
+        # _plot_smooth_2d uses, so the same numeric level lines up across
+        # bold / dashed-lower / dotted-upper.
+        if plot_ci and CI_mat is not None:
+            zmin_b = float(np.nanmin(Z - CI_mat))
+            zmax_b = float(np.nanmax(Z + CI_mat))
+        else:
+            zmin_b = float(np.nanmin(Z)) if np.isfinite(Z).any() else 0.0
+            zmax_b = float(np.nanmax(Z)) if np.isfinite(Z).any() else 0.0
+        if np.isfinite(zmin_b) and np.isfinite(zmax_b) and zmin_b < zmax_b:
+            levels = MaxNLocator(
+                nbins=max(int(n_levels), 1), steps=[1, 2, 5, 10],
+            ).tick_values(zmin_b, zmax_b)
+        else:
+            levels = None
+
+        if levels is not None:
+            cs = ax.contour(
+                XX, YY, Zp, levels=levels,
+                colors=col, linestyles="solid", linewidths=0.8,
+            )
+            ax.clabel(cs, inline=True, fontsize=8, fmt="%g")
+            if plot_ci and CI_mat is not None:
+                ax.contour(
+                    XX, YY, Zp - CI_mat.T, levels=levels,
+                    colors=ci_col[0], linestyles=":", linewidths=0.6,
+                )
+                ax.contour(
+                    XX, YY, Zp + CI_mat.T, levels=levels,
+                    colors=ci_col[1], linestyles=":", linewidths=0.6,
+                )
+
+        if add_color_legend:
+            plt.colorbar(im, ax=ax)
+
+        if title is None:
+            title = f"Difference {result.levels[0]} − {result.levels[1]}"
+        ax.set_title(title)
+        ax.set_xlabel(xlab if xlab is not None else xvar)
+        ax.set_ylabel(ylab if ylab is not None else yvar)
+        if xlim is not None and len(xlim) == 2:
+            ax.set_xlim(xlim)
+        if ylim is not None and len(ylim) == 2:
+            ax.set_ylim(ylim)
+
+        if not hide_label:
+            label = "difference"
+            if rm_ranef not in (None, False) and result.rm_ranef_cancelled:
+                label += ", excl. random"
+            ax.text(
+                0.99, 0.985, label, transform=ax.transAxes,
+                ha="right", va="top", fontsize=8, color="#595959",
+            )
 
         return ax
 
