@@ -4584,8 +4584,23 @@ class gam:
                 edf_b  = float(self.edf[a:bcol].sum())
                 edf1_b = float(self.edf1[a:bcol].sum()) if hasattr(self, "edf1") else edf_b
                 p_b = bcol - a
-                if self._select:
-                    # reTest path — null.space.dim==0 for every block.
+                # Per-smooth dispatch: mgcv summary.gam line 4023-4024 uses
+                # ``reTest`` whenever ``smooth$null.space.dim==0`` (random-
+                # effect-style test, Wood 2013 Biometrika). That covers any
+                # smooth whose combined penalty has full rank — re/fs/sz, the
+                # cyclic bases (cc/cp), and (under select=TRUE) every smooth
+                # after null-space penalty augmentation. testStat is for
+                # smooths with a non-trivial unpenalized null space.
+                if b.S:
+                    S_sum = b.S[0].copy()
+                    for S_i in b.S[1:]:
+                        S_sum = S_sum + S_i
+                    rank_S = int(np.linalg.matrix_rank(S_sum))
+                    null_dim = p_b - rank_S
+                else:
+                    null_dim = p_b
+                if null_dim == 0:
+                    # reTest path — penalty is full-rank on the smooth's block.
                     stat, p_val, ref_df = self._re_test(m_idx, beta_b, Vp_b)
                     if scale_known:
                         # Chi.sq column = stat. F column = stat / rank.
@@ -4644,9 +4659,16 @@ class gam:
             f"R-sq.(adj) = {self.r_squared_adjusted:.3g}  "
             f"Deviance explained = {self.deviance_explained * 100:.3g}%"
         )
+        # mgcv summary.gam line 4058: prepend "-" only for "REML"/"ML"
+        # (and "P-REML"/"P-ML" which we don't expose); leave "fREML"
+        # alone — mgcv prints it as ``fREML = X``. ``_method_in``
+        # preserves the user's choice across bam's internal fREML→REML
+        # rename so the footer label tracks the original.
+        method_label = getattr(self, "_method_in", self.method)
         if self.method == "REML":
+            tag = "fREML" if method_label == "fREML" else "-REML"
             out.append(
-                f"-REML = {self.REML_criterion / 2:.5g}  "
+                f"{tag} = {self.REML_criterion / 2:.5g}  "
                 f"Scale est. = {self.sigma_squared:.5g}  n = {self.n}"
             )
         elif self.method == "ML":

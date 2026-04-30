@@ -1293,21 +1293,22 @@ class bam(gam):
                 score = float(self._reml(rho_hat, log_phi_hat, fit=fit))
             else:
                 score = float("nan")
-            # AR1 correction (mgcv bam.r:795-798). The AR1 transform
+            # AR1 correction (mgcv bam.r:1715, 1737). The AR1 transform
             # changes the log-determinant of the response covariance by
-            # ``(n/γ - df) · log(ld)`` where ``ld = 1/√(1-ρ²)`` and ``df``
+            # ``(n - df) · log(ld)`` where ``ld = 1/√(1-ρ²)`` and ``df``
             # is the number of independent AR sequences (1 if ar_start
-            # is None, else ``sum(ar_start)``). Subtract it from the
-            # otherwise-uncorrected REML score so the final value matches
-            # mgcv's. This shift is constant in (sp, log φ), so the
-            # outer Newton's optimum is unaffected.
+            # is None, else ``sum(ar_start)``). mgcv subtracts that from
+            # gcv.ubre (which holds the score V, not 2V); ``self._reml``
+            # returns 2V, so we double the correction here. The shift is
+            # constant in (sp, log φ), so the outer Newton optimum is
+            # unaffected.
             if self._rho != 0.0 and np.isfinite(score):
                 ld = 1.0 / np.sqrt(1.0 - self._rho ** 2)
                 df_ar = (
                     int(self._ar_start.sum())
                     if self._ar_start is not None else 1
                 )
-                score = score - (n / self._gamma - df_ar) * float(np.log(ld))
+                score = score - 2.0 * (n - df_ar) * float(np.log(ld))
             if method == "REML":
                 self.REML_criterion = score
             else:
