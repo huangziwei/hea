@@ -1162,8 +1162,20 @@ class bam(gam):
         self.std_dev_residuals = self.residuals / denom
         self.std_pearson_residuals = pearson_res / denom
         self.df_residuals = df_resid
-        self.deviance = float(fit.dev)
+        # mgcv bam.r:2774 — ``object$deviance = sum(object$residuals^2)`` where
+        # ``residuals = y - μ`` is *response-space*. For AR1 (rho != 0) the
+        # AR1-decorrelated RSS lives separately in ``std.rsd`` (used for σ²
+        # and AIC scale calcs). The response-space ``deviance`` is what
+        # ``deviance.explained`` reports against ``null.deviance``, both on the
+        # original y scale.
+        self.deviance = float(np.sum(self.residuals ** 2))
         self.rss = self.deviance
+        # AR1-decorrelated residuals (mgcv ``object$std.rsd``, bam.r:2772) —
+        # used by ``acf(rsd)`` checks. For rho=0, equals self.residuals.
+        if self._rho != 0.0:
+            self.std_rsd = _ar_resid(self.residuals, self._rho, self._ar_start)
+        else:
+            self.std_rsd = self.residuals.copy()
 
         # Null deviance — intercept-only Gaussian: weighted mean.
         if self._has_intercept:
