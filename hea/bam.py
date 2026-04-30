@@ -362,10 +362,21 @@ class _BamQR:
 # ---------------------------------------------------------------------------
 
 
-def _chunk_indices(n: int, chunk_size: int) -> list[tuple[int, int]]:
+def _chunk_indices(n: int, chunk_size: int,
+                   *, ar1: bool = False) -> list[tuple[int, int]]:
     """Yield ``(start, end)`` pairs covering ``range(n)`` in chunks of
-    ``chunk_size``. Mirrors mgcv ``bam.fit`` (bam.r:1566-1574, single-thread,
-    rho==0 path).
+    ``chunk_size``.
+
+    Mirrors mgcv ``bam.fit`` (bam.r:1566-1574, single-thread). For
+    ``ar1=False`` (rho==0) chunks tile ``range(n)`` exactly. For
+    ``ar1=True`` (rho≠0) chunks i ≥ 1 start one row earlier than the
+    rho==0 layout: that extra row is the previous row needed by the
+    AR1 transform's sub-diagonal. The transformed first row of each
+    overlapping chunk is dropped after the rwMatrix transform (see
+    :func:`_build_qr_chunked_gaussian`); the chunk indexing here is
+    pre-drop, so consumers must pass the full ``[start:end)`` slice
+    through ``_materialize_chunk`` and only drop the head row when
+    chunk_index > 0.
     """
     if n <= 0:
         return []
@@ -373,10 +384,68 @@ def _chunk_indices(n: int, chunk_size: int) -> list[tuple[int, int]]:
     stub = n % chunk_size
     if stub > 0:
         n_block += 1
-    starts = [i * chunk_size for i in range(n_block)]
-    ends = [s + chunk_size for s in starts]
-    ends[-1] = n
+    if ar1:
+        # mgcv bam.r:1571-1572. The base lattice is the rho==0 layout
+        # (starts = 0, k, 2k, …; ends = k, 2k, 3k, …), then every chunk
+        # past the first has its start dragged back by 1 so it overlaps
+        # the previous chunk by one row — the row needed by the AR1
+        # sub-diagonal of the chunk's first transformed-and-kept row.
+        # ENDs are NOT shifted (they stay on the rho==0 lattice), so
+        # chunks 1..n_block-2 each have N=chunk_size+1 input rows.
+        starts = [0] + [k * chunk_size - 1 for k in range(1, n_block)]
+        ends = [(k + 1) * chunk_size for k in range(n_block)]
+        ends[-1] = n
+    else:
+        starts = [i * chunk_size for i in range(n_block)]
+        ends = [s + chunk_size for s in starts]
+        ends[-1] = n
     return list(zip(starts, ends))
+
+
+def _ar1_rwmatrix_indices(N: int, ld: float, sd: float,
+                          ar_start_block: Optional[np.ndarray] = None,
+                          ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build the ``(stop, row, weight)`` arrays for the AR1 row-recombine.
+
+    Direct port of mgcv ``bam.r:1583-1593`` (single-thread chunk loop)
+    and ``bam.r:483-486`` (full-matrix variant). The first output row
+    is identity (``weight=1`` against ``input_1``); subsequent output
+    rows are ``sd·input_{i-1} + ld·input_i``. Returns 1-based indices
+    matching mgcv's R convention — :func:`_rw_matrix` converts them.
+
+    ``ar_start_block`` (optional length-N) re-anchors the AR chain at
+    ``True`` positions: zero sub-diag, restore identity leading-diag.
+    The first observation in a block needs no correction (no sub-diag
+    exists for it anyway).
+    """
+    if N <= 0:
+        raise ValueError(f"AR1 block must have N>0, got N={N}")
+    # row: c(1, rep(1:N, rep(2,N))[-c(1, 2*N)])  — length 2N-1, 1-based
+    rep2 = np.repeat(np.arange(1, N + 1), 2)  # (1,1,2,2,…,N,N) length 2N
+    row = np.concatenate(([1], rep2[1:-1])).astype(int)  # length 2N-1
+    # weight: c(1, rep(c(sd, ld), N-1))  — length 2N-1
+    if N >= 2:
+        weight = np.concatenate(([1.0], np.tile([sd, ld], N - 1)))
+    else:
+        weight = np.array([1.0])
+    # stop: c(1, 1:(N-1)*2+1)  — output i (1-based) consumes inputs
+    # (stop[i-1]+1):stop[i]; 1-based.
+    if N >= 2:
+        stop = np.concatenate(([1], np.arange(1, N) * 2 + 1)).astype(int)
+    else:
+        stop = np.array([1], dtype=int)
+    if ar_start_block is not None:
+        # 1-based local indices of AR-restart events.
+        ii = np.flatnonzero(np.asarray(ar_start_block, dtype=bool)) + 1
+        if ii.size > 0 and ii[0] == 1:
+            ii = ii[1:]  # first obs in block needs no correction
+        for k in ii:
+            # R: weight[k*2-2]=0 (sub-diag), weight[k*2-1]=1 (leading-diag)
+            # → Python 0-based: weight[(k-1)*2-1]=0, weight[(k-1)*2]=1
+            # but only valid when k≥2 (since k=1 was filtered above).
+            weight[(k - 1) * 2 - 1] = 0.0
+            weight[(k - 1) * 2] = 1.0
+    return stop, row, weight
 
 
 def _materialize_chunk(
@@ -417,29 +486,71 @@ def _build_qr_chunked_gaussian(
     *,
     chunk_size: int,
     use_chol: bool = False,
+    rho: float = 0.0,
+    ar_start: Optional[np.ndarray] = None,
 ) -> _BamQR:
-    """Chunked QR build for the Gaussian-identity (am=TRUE, rho=0) path.
+    """Chunked QR build for the Gaussian-identity (am=TRUE) path.
 
     Walks ``data`` in chunks of ``chunk_size``, materialises each chunk's
     full design via :func:`_materialize_chunk`, and accumulates ``(R, f,
     ‖z‖²)`` with :func:`_qr_update`. ``z = y − offset`` (prior weights = 1
     in this iteration; user-facing ``weights=`` lands later).
 
-    Mirrors mgcv ``bam.fit`` single-thread loop (bam.r:1576-1613) for
-    ``rho==0``. Returns the post-:func:`_chol2qr` factor when ``use_chol``.
+    For ``rho == 0`` this mirrors mgcv ``bam.fit`` single-thread loop
+    (bam.r:1576-1613). For ``rho ≠ 0`` (AR1 error model) each chunk is
+    transformed via :func:`_rw_matrix` using ``(stop, row, weight)``
+    arrays from :func:`_ar1_rwmatrix_indices`; chunks 2+ overlap the
+    previous chunk by one row (the row needed by the AR1 sub-diagonal),
+    and the first transformed row of those chunks is dropped after the
+    rwMatrix transform — see bam.r:1576-1611.
+
+    ``ar_start`` (full-length-n boolean array, optional) re-anchors the
+    AR chain at ``True`` positions; ``True`` at position i means row i
+    starts a fresh AR sequence (sub-diagonal=0, leading-diag=1).
     """
     n = data.height
     if n == 0:
         raise ValueError("empty data passed to chunked QR build")
-    chunks = _chunk_indices(n, chunk_size)
+    if rho < -1.0 + 1e-12 or rho > 1.0 - 1e-12:
+        raise ValueError(
+            f"rho must be in (-1, 1) for stationary AR1, got rho={rho!r}"
+        )
+    ar1 = (rho != 0.0)
+    if ar_start is not None:
+        ar_start = np.asarray(ar_start, dtype=bool).flatten()
+        if ar_start.shape != (n,):
+            raise ValueError(
+                f"ar_start must have length {n}, got {ar_start.shape}"
+            )
+    if ar1:
+        ld = 1.0 / np.sqrt(1.0 - rho ** 2)
+        sd = -rho * ld
+    chunks = _chunk_indices(n, chunk_size, ar1=ar1)
     R: Optional[np.ndarray] = None
     f: Optional[np.ndarray] = None
     y_norm2 = 0.0
-    for start, end in chunks:
+    for chunk_idx, (start, end) in enumerate(chunks):
         chunk_data = data[start:end]
         X_param_chunk = X_param_full[start:end]
         X_chunk = _materialize_chunk(blocks, chunk_data, X_param_chunk)
         z_chunk = y[start:end] - offset[start:end]
+        if ar1:
+            N_block = end - start
+            ar_start_block = (
+                ar_start[start:end] if ar_start is not None else None
+            )
+            stop, row, weight = _ar1_rwmatrix_indices(
+                N_block, ld, sd, ar_start_block,
+            )
+            # rwMatrix returns the transformed n×p design / length-n vector.
+            X_chunk = _rw_matrix(stop, row, weight, X_chunk)
+            z_chunk = _rw_matrix(stop, row, weight, z_chunk)
+            if chunk_idx > 0:
+                # mgcv bam.r:1607-1610: chunks past the first drop the
+                # head row, which already contributed to the previous
+                # chunk's tail (overlap of 1).
+                X_chunk = X_chunk[1:, :]
+                z_chunk = z_chunk[1:]
         upd = _qr_update(X_chunk, z_chunk, R, f, y_norm2, use_chol=use_chol)
         R = upd["R"]
         f = upd["f"]
@@ -500,6 +611,8 @@ class bam(gam):
         select: bool = False,
         chunk_size: int = 10000,
         use_chol: bool = False,
+        rho: float = 0.0,
+        ar_start: np.ndarray | list | None = None,
     ):
         # ---- method aliasing ------------------------------------------------
         # mgcv's bam adds "fREML" on top of gam's {REML, ML, GCV.Cp}. fREML is
@@ -526,6 +639,27 @@ class bam(gam):
                 f"got {family!r}. Non-Gaussian PIRLS chunked-QR fitter "
                 f"(``bgam.fit``) lands in the next iteration."
             )
+
+        # ---- AR1 plumbing (mgcv bam.r:478-498) -----------------------------
+        # ``rho`` is the AR1 lag-1 correlation; setting it ≠ 0 wraps the
+        # observation model with a Gaussian AR1 error process. The
+        # ``rwMatrix`` transform applies the inverse Cholesky factor of
+        # the AR1 correlation matrix to (X, y), producing i.i.d.
+        # transformed errors. ``ar_start`` (length-n boolean) marks
+        # observations that begin a fresh AR sequence — useful for
+        # within-subject AR with multiple subjects in one frame.
+        if not np.isfinite(rho):
+            raise ValueError(f"rho must be finite, got {rho!r}")
+        if abs(rho) >= 1.0:
+            raise ValueError(
+                f"rho must satisfy |rho|<1 for stationary AR1, got rho={rho!r}"
+            )
+        self._rho = float(rho)
+        if ar_start is not None:
+            ar_start_arr = np.asarray(ar_start, dtype=bool).flatten()
+        else:
+            ar_start_arr = None
+        self._ar_start = ar_start_arr
 
         self.formula = formula
         self.method = method
@@ -619,13 +753,17 @@ class bam(gam):
 
         # ---- chunked QR build ----------------------------------------------
         # Single chunked pass over the full data, accumulating (R, f, ‖z‖²).
-        # Mirrors mgcv ``bam.fit`` single-thread loop (bam.r:1576-1613) for
-        # ``rho==0``. ``z = y − offset`` (Gaussian-identity working response
-        # under prior weights = 1; the family's identity link gives μ = η,
-        # so PIRLS converges in one solve and the QR-only path is exact).
+        # Mirrors mgcv ``bam.fit`` single-thread loop (bam.r:1576-1613).
+        # ``z = y − offset`` (Gaussian-identity working response under
+        # prior weights = 1; the family's identity link gives μ = η, so
+        # PIRLS converges in one solve and the QR-only path is exact).
+        # When ``rho ≠ 0``, an AR1 inverse-Cholesky transform is applied
+        # to each chunk via :func:`_rw_matrix` so the resulting (R, f)
+        # correspond to the AR1-decorrelated working data.
         qr = _build_qr_chunked_gaussian(
             self.data, blocks, X_param_full, y_full, off,
             chunk_size=chunk_size, use_chol=self._use_chol,
+            rho=self._rho, ar_start=self._ar_start,
         )
         self._bam_qr = qr
         # Sufficient statistics from (R, f). These are exact identities:
@@ -1143,6 +1281,21 @@ class bam(gam):
                 score = float(self._reml(rho_hat, log_phi_hat, fit=fit))
             else:
                 score = float("nan")
+            # AR1 correction (mgcv bam.r:795-798). The AR1 transform
+            # changes the log-determinant of the response covariance by
+            # ``(n/γ - df) · log(ld)`` where ``ld = 1/√(1-ρ²)`` and ``df``
+            # is the number of independent AR sequences (1 if ar_start
+            # is None, else ``sum(ar_start)``). Subtract it from the
+            # otherwise-uncorrected REML score so the final value matches
+            # mgcv's. This shift is constant in (sp, log φ), so the
+            # outer Newton's optimum is unaffected.
+            if self._rho != 0.0 and np.isfinite(score):
+                ld = 1.0 / np.sqrt(1.0 - self._rho ** 2)
+                df_ar = (
+                    int(self._ar_start.sum())
+                    if self._ar_start is not None else 1
+                )
+                score = score - (n / self._gamma - df_ar) * float(np.log(ld))
             if method == "REML":
                 self.REML_criterion = score
             else:
@@ -1155,3 +1308,7 @@ class bam(gam):
 
         # Variance components — uses Vp, Vc, sp; no full design.
         self.vcomp = self._compute_vcomp()
+
+        # mgcv exposes ``object$AR1.rho`` (bam.r:885) for downstream
+        # consumers (predict.bam, residuals.bam). Mirror the attribute.
+        self.AR1_rho = self._rho
