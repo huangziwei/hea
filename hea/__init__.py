@@ -15,6 +15,7 @@ from .family import (
     quasi,
     tw,
 )
+from .bam import bam
 from .gam import gam
 from .glm import glm
 from .lm import lm
