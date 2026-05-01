@@ -961,7 +961,12 @@ class bam(gam):
         chunk_size = self._chunk_size
         if d.expanded.smooths:
             mf0 = _mini_mf(self.data, chunk_size)
-            sb_lists = materialize_smooths(d.expanded, mf0)
+            # mgcv's `bam` sets sparse.cons = -1 for discrete=FALSE
+            # (sweep-drop absorb), 0 for discrete=TRUE (Householder QR).
+            sparse_cons_arg = 0 if self._discrete else -1
+            sb_lists = materialize_smooths(
+                d.expanded, mf0, sparse_cons=sparse_cons_arg,
+            )
             blocks: list[SmoothBlock] = [b for group in sb_lists for b in group]
         else:
             blocks = []

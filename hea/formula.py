@@ -913,6 +913,23 @@ _ORDERED_COLS_CV: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVa
 )
 
 
+# mgcv's ``smoothCon`` takes a ``sparse.cons`` argument deciding how the
+# smooth's identifiability constraint is absorbed:
+#   *  0 → ``sm$C = colSums(sm$X)`` followed by Householder QR (default, used
+#         by ``gam`` and by ``bam(discrete=TRUE)``).
+#   * -1 → ``sm$C = colMeans(sm$X)`` followed by sweep-drop: drop the
+#         smallest-variance column and de-mean the rest (used by
+#         ``bam(discrete=FALSE)``).
+# The two paths span different parameterisations of the same fit space, so
+# basis-level (coef-level) parity with mgcv requires picking the same one.
+# `materialize_smooths` sets this context-var before walking the smooths;
+# `_apply_by_and_absorb` and `_summation_apply_blocks` consult it to dispatch
+# between ``_absorb_sumzero`` and ``_absorb_sweep_drop``.
+_SPARSE_CONS_CV: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "_hea_sparse_cons", default=0
+)
+
+
 @contextlib.contextmanager
 def with_ordered_cols(cols):
     """Context manager: inside the `with` block, the given column names are
@@ -2293,6 +2310,30 @@ class _AbsorbTransform:
 
 
 @dataclass(slots=True)
+class _SweepDropTransform:
+    """Replay mgcv's ``sparse.cons = -1`` constraint absorption.
+
+    `bam(..., discrete=FALSE)` passes ``sparse.cons = -1`` to ``smoothCon``,
+    which (instead of QR-rotating away the colSums(X) constraint) drops the
+    minimum-variance column and de-means the rest:
+
+        C    = colMeans(X)            # 1×p
+        drop = argmin(var(X[, j]))    # ties → first
+        X'   = X[, -drop] - C[-drop]  # broadcast
+        S'   = S[-drop, -drop]
+
+    Predict-time replay does the same drop + subtraction on new-data rows.
+    """
+    drop_idx: int
+    C_minus: np.ndarray  # (p-1,) — colMeans(X) with the dropped col removed
+
+    def apply(self, X: np.ndarray) -> np.ndarray:
+        keep = np.ones(X.shape[1], dtype=bool)
+        keep[self.drop_idx] = False
+        return X[:, keep] - self.C_minus[None, :]
+
+
+@dataclass(slots=True)
 class _ByMask:
     """Replay ``by=`` masking. Factor: indicator ``by_col == level``. Numeric:
     multiply by ``by_col`` value.
@@ -2340,7 +2381,7 @@ class BasisSpec:
     """
     raw: _RawBasis
     by: Optional[_ByMask] = None
-    absorb: Optional[_AbsorbTransform] = None
+    absorb: Optional[Union[_AbsorbTransform, _SweepDropTransform]] = None
     keep_cols: Optional[np.ndarray] = None
     predict_raw: Optional[_RawBasis] = None
     coef_remap: Optional[tuple[np.ndarray, np.ndarray]] = None
@@ -2348,9 +2389,11 @@ class BasisSpec:
     # (non-None), the smooth's variables ``matrix_vars`` are matrix-typed
     # (``Array(Float64, m)``) and the basis is evaluated on a long-form
     # view (n*m rows), then row-summed in blocks of m to give (n, p).
-    # by/absorb both commute with row-summation (by-mask is repeated m
-    # times within each block, absorb is a column transform), so they
-    # are applied on the long form just as in the scalar path.
+    # mgcv's ``bam(..., discrete=FALSE)`` path uses ``sparse.cons = -1``,
+    # whose sweep-drop absorb is non-linear (it subtracts a constant), so
+    # for matrix-arg te the row-sum runs FIRST, then absorb. The QR
+    # Householder absorb is linear and commutes with row-summation, so the
+    # same predict order works for both transform types.
     summation_dim: Optional[int] = None
     matrix_vars: Optional[tuple[str, ...]] = None
 
@@ -2362,12 +2405,15 @@ class BasisSpec:
             X = raw.eval(long_data)
             if self.by is not None:
                 X = self.by.apply(X, long_data)
+            # Row-block sum FIRST, then absorb. Sweep-drop's de-mean is
+            # non-linear, and mgcv computes both the drop column and the
+            # mean from the row-summed (n, p_raw) matrix.
+            X = X.reshape(n, m, X.shape[1]).sum(axis=1)
             if self.absorb is not None:
                 X = self.absorb.apply(X)
             if self.keep_cols is not None:
                 X = X[:, self.keep_cols]
-            # Row-block sum: (n*m, p) → (n, m, p) → (n, p).
-            return X.reshape(n, m, X.shape[1]).sum(axis=1)
+            return X
         raw = self.predict_raw if self.predict_raw is not None else self.raw
         X = raw.eval(data)
         if self.by is not None:
@@ -3025,10 +3071,14 @@ def _apply_by_and_absorb(
     S_list = [(S + S.T) / 2.0 for S in S_list]
     S_list = _scale_penalty(X, S_list)
 
+    sparse_cons = _SPARSE_CONS_CV.get()
     by_expr = _smooth_by_expr(call)
     base_label = _smooth_label(call)
     if by_expr is None:
-        X2, S2, T = _absorb_sumzero(X, S_list)
+        if sparse_cons == -1:
+            X2, S2, T = _absorb_sweep_drop(X, S_list)
+        else:
+            X2, S2, T = _absorb_sumzero(X, S_list)
         spec = (
             BasisSpec(raw=raw_basis, by=None, absorb=T)
             if raw_basis is not None else None
@@ -3053,7 +3103,14 @@ def _apply_by_and_absorb(
         for lev in levels:
             mask = (by_arr == lev).astype(float)
             X_lev = X * mask[:, None]
-            X2, S2, T = _absorb_sumzero(X_lev, S_list, C_source=X)
+            if sparse_cons == -1:
+                # mgcv-F by-factor + sparse.cons=-1: drop col / de-mean per level.
+                # (mgcv likely shares the drop column across levels via the same
+                # pre-by sm$C; for now per-level matches the no-by case and is
+                # what current bam-F use cases need.)
+                X2, S2, T = _absorb_sweep_drop(X_lev, S_list)
+            else:
+                X2, S2, T = _absorb_sumzero(X_lev, S_list, C_source=X)
             label = f"{base_label}:{by_expr}{lev}"
             spec = (
                 BasisSpec(
@@ -3260,6 +3317,46 @@ def _absorb_sumzero(
     return X_new, S_new, _AbsorbTransform(
         indi=indi, Z_sub=Z_sub, keep_mask=keep_mask,
     )
+
+
+def _absorb_sweep_drop(
+    X: np.ndarray, S_list: list[np.ndarray],
+) -> tuple[np.ndarray, list[np.ndarray], _SweepDropTransform]:
+    """Apply mgcv's ``sparse.cons = -1`` constraint absorption (sweep-drop).
+
+    Mirrors smoothCon's branch (mgcv source ``smooth.r`` ~lines 38-43 +
+    158-175): with ``sparse.cons = -1``, ``sm$C`` is set to colMeans of the
+    smooth's design and the constraint is absorbed by dropping the smallest-
+    variance column and de-meaning the rest::
+
+        C    = colMeans(X)               # 1 × p, the linear constraint
+        vcol = apply(X, 2, var)
+        drop = min((1:p)[vcol == min(vcol)])   # ties → first
+        X'   = X[, -drop] - C[-drop]     # de-mean broadcast
+        S'   = S[-drop, -drop]
+
+    R's ``var`` uses ``ddof = 1``; ``np.argmin`` on a 1-D array returns the
+    first occurrence of the minimum, matching R's ``min(...)`` tie-break.
+
+    This is what ``bam(..., discrete = FALSE)`` runs (``bam`` sets
+    ``sparse.cons <- -1``); ``bam(..., discrete = TRUE)`` and ``gam`` use
+    ``sparse.cons = 0`` instead, which routes through ``_absorb_sumzero``
+    (Householder QR of colSums).
+    """
+    n, p = X.shape
+    if p == 0:
+        return X, list(S_list), _SweepDropTransform(
+            drop_idx=0, C_minus=np.empty(0),
+        )
+    C = X.mean(axis=0)
+    vcol = X.var(axis=0, ddof=1) if n > 1 else np.zeros(p)
+    drop = int(np.argmin(vcol))
+    keep = np.ones(p, dtype=bool)
+    keep[drop] = False
+    C_minus = C[keep]
+    X_new = X[:, keep] - C_minus[None, :]
+    S_new = [S[np.ix_(keep, keep)] for S in S_list]
+    return X_new, S_new, _SweepDropTransform(drop_idx=drop, C_minus=C_minus)
 
 
 def _cr_F_matrix(knots: np.ndarray) -> np.ndarray:
@@ -5650,12 +5747,18 @@ def _tensor_prod_S(Sm: list[np.ndarray]) -> list[np.ndarray]:
 
 
 def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
-                     mc: list[bool] | None = None) -> list[SmoothBlock]:
+                     mc: list[bool] | None = None,
+                     matrix_arg: bool = False) -> list[SmoothBlock]:
     """`te(...)` / `ti(...)` constructor.
 
     Shared code path, differentiated by:
       - `inter=False` (te): raw margins, outer absorb.cons applied.
       - `inter=True` (ti): centered margins (per `mc`), no outer absorb.cons.
+
+    When ``matrix_arg`` is True, ``data`` is the long-form (n*m row) view of
+    a matrix-typed te() call, and the outer absorb.cons + scale.penalty are
+    deferred to ``_summation_apply_blocks`` — mgcv's ``bam(discrete=FALSE)``
+    runs both on the row-summed (n, p_raw) X (sparse.cons=-1 path).
     """
     specs = _te_parse_margins(call, data)
     n_bases = len(specs)
@@ -5726,6 +5829,22 @@ def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
     if inter:
         # Skip outer absorb.cons (C = matrix(0,0,0)).
         S_list = _scale_penalty(X, S_list)
+        return [SmoothBlock(
+            label=label, term=term_all, cls=cls, X=X, S=S_list,
+            spec=BasisSpec(raw=tensor_raw, by=None, absorb=None),
+        )]
+
+    if matrix_arg:
+        # Defer scale.penalty + absorb.cons + check.rank to
+        # _summation_apply_blocks (mgcv's sparse.cons=-1 path: those steps
+        # run on the row-summed (n, p_raw) X). Symmetrize S now so callers
+        # don't need to.
+        S_list = [(S + S.T) / 2.0 for S in S_list]
+        by_expr = _smooth_by_expr(call)
+        if by_expr is not None:
+            raise NotImplementedError(
+                "by= with matrix-arg te() is not yet supported"
+            )
         return [SmoothBlock(
             label=label, term=term_all, cls=cls, X=X, S=S_list,
             spec=BasisSpec(raw=tensor_raw, by=None, absorb=None),
@@ -6030,16 +6149,27 @@ def _check_rank(
 def _summation_apply_blocks(
     blocks: list[SmoothBlock], n: int, m: int, matrix_vars: list[str],
 ) -> list[SmoothBlock]:
-    """Reshape each block's long-form X (n*m, p) → (n, p) by summing over
-    the m row-blocks, and stamp summation metadata onto the predict spec.
+    """Reshape each long-form block's X (n*m, p) → (n, p), then run mgcv's
+    ``smoothCon`` post-construction pipeline on the row-summed design.
 
-    matrixArg=TRUE in mgcv also enables ``check.rank`` (smoothCon line 240),
-    so after summation we drop trailing redundant columns (column-selection
-    commutes with row-summation, so the predict-time replay can apply the
-    same mask on the long-form basis before summing — see
-    ``BasisSpec.predict_mat``)."""
+    For matrix-arg smooths, mgcv runs ``smooth.construct.<bs>.smooth.spec``
+    with ``matrixArg=TRUE``, which returns ``sm$X`` already row-summed
+    (n × p_raw); ``smoothCon`` then applies in this order:
+
+      * ``scale.penalty`` — rescales each ``S`` against ``maXX = norm(X,"I")^2``
+      * ``sparse.cons = -1`` (the ``bam(discrete=FALSE)`` setting):
+        sweep-drop absorb (drop min-variance col, de-mean the rest).
+      * ``check.rank`` — pivoted-Cholesky probe of
+        ``X'X/|X'X|_1 + Σ S_i/|S_i|_1`` to drop trailing redundant cols.
+
+    Each step happens on the row-summed (n, p) matrix, NOT the long form, so
+    the col means/variances and norms match mgcv exactly. The matching
+    predict-time replay (``BasisSpec.predict_mat``) row-sums first, then
+    applies absorb + ``keep_cols``.
+    """
     out: list[SmoothBlock] = []
     mvars = tuple(matrix_vars)
+    sparse_cons = _SPARSE_CONS_CV.get()
     for b in blocks:
         X = b.X
         if X.shape[0] != n * m:
@@ -6049,10 +6179,17 @@ def _summation_apply_blocks(
             )
         X_summed = X.reshape(n, m, X.shape[1]).sum(axis=1)
         S_list = list(b.S)
+        # mgcv smoothCon pipeline on the row-summed design.
+        S_list = _scale_penalty(X_summed, S_list)
+        if sparse_cons == -1:
+            X_summed, S_list, abs_T = _absorb_sweep_drop(X_summed, S_list)
+        else:
+            X_summed, S_list, abs_T = _absorb_sumzero(X_summed, S_list)
         X_summed, S_list, keep_mask = _check_rank(X_summed, S_list)
         if b.spec is not None:
             b.spec.summation_dim = m
             b.spec.matrix_vars = mvars
+            b.spec.absorb = abs_T
             if keep_mask is not None:
                 # Compose with any existing keep_cols (gam.side may have set it).
                 if b.spec.keep_cols is not None:
@@ -6070,6 +6207,7 @@ def _summation_apply_blocks(
 
 def materialize_smooths(
     expanded: ExpandedFormula, data: pl.DataFrame,
+    *, sparse_cons: int = 0,
 ) -> list[list[SmoothBlock]]:
     """Materialize each smooth in `expanded.smooths` to one or more blocks.
 
@@ -6090,6 +6228,12 @@ def materialize_smooths(
     each returned block's X is row-block-summed back to (n, p). The
     block's BasisSpec records ``summation_dim=m`` so :meth:`predict_mat`
     replays the same expansion at predict time.
+
+    ``sparse_cons`` (default 0, matching ``gam`` and ``bam(discrete=TRUE)``):
+    selects mgcv's ``smoothCon(sparse.cons=...)`` regime. ``-1`` switches the
+    identifiability constraint absorber to sweep-drop, the path
+    ``bam(discrete=FALSE)`` follows. Stored in a context var consumed inside
+    ``_apply_by_and_absorb`` and ``_summation_apply_blocks``.
     """
     from .design import long_form_view, is_matrix_col
 
@@ -6129,10 +6273,12 @@ def materialize_smooths(
     if expr_map:
         data = _apply_smooth_arg_exprs(data, expr_map)
 
-    def _dispatch(call: Call, d: pl.DataFrame) -> list[SmoothBlock]:
+    def _dispatch(
+        call: Call, d: pl.DataFrame, *, matrix_arg: bool = False,
+    ) -> list[SmoothBlock]:
         if call.fn in ("te", "ti", "t2"):
             if call.fn == "te":
-                return _build_te_smooth(call, d)
+                return _build_te_smooth(call, d, matrix_arg=matrix_arg)
             if call.fn == "ti":
                 return _build_ti_smooth(call, d)
             return _build_t2_smooth(call, d)
@@ -6153,14 +6299,18 @@ def materialize_smooths(
             "not yet implemented"
         )
 
-    out: list[list[SmoothBlock]] = []
-    for call in expanded.smooths:
-        mvars = _smooth_matrix_vars(call, data)
-        if mvars:
-            long_data, n_orig, m = long_form_view(data, mvars)
-            blocks = _dispatch(call, long_data)
-            blocks = _summation_apply_blocks(blocks, n_orig, m, mvars)
-        else:
-            blocks = _dispatch(call, data)
-        out.append(blocks)
-    return out
+    token = _SPARSE_CONS_CV.set(int(sparse_cons))
+    try:
+        out: list[list[SmoothBlock]] = []
+        for call in expanded.smooths:
+            mvars = _smooth_matrix_vars(call, data)
+            if mvars:
+                long_data, n_orig, m = long_form_view(data, mvars)
+                blocks = _dispatch(call, long_data, matrix_arg=True)
+                blocks = _summation_apply_blocks(blocks, n_orig, m, mvars)
+            else:
+                blocks = _dispatch(call, data)
+            out.append(blocks)
+        return out
+    finally:
+        _SPARSE_CONS_CV.reset(token)
