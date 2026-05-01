@@ -311,6 +311,42 @@ def _is_factor_col(s: pl.Series) -> bool:
     )
 
 
+def _smooth_specs_from_expanded(expanded, data: pl.DataFrame) -> list[dict]:
+    """Build the ``discrete_mf`` ``smooth_specs`` list from an expanded
+    formula, mirroring how mgcv ``bam.r:2206-2215`` derives ``dk`` directly
+    from the formula (not from already-built smooth blocks).
+
+    For each smooth call:
+      * ``term`` — full list of arg variables (``_smooth_term_vars``).
+      * ``by``  — column name from ``by=`` (None if unset / NA / non-name).
+      * ``margins`` — for ``te``/``ti``/``t2`` parsed via
+        ``_te_parse_margins`` (honors the ``d=c(...)`` kwarg); for
+        ``s(...)`` a single margin spanning all vars.
+
+    Used by :class:`bam` for the ``discrete=True`` setup path: the
+    discretised model frame is built before ``materialize_smooths`` so the
+    smooth basis construction runs on the padded scalar mf0, not on the
+    matrix-arg long form.
+    """
+    from .formula import (
+        _smooth_term_vars, _smooth_by_expr, _te_parse_margins,
+    )
+    out: list[dict] = []
+    for call in expanded.smooths:
+        term_vars = _smooth_term_vars(call)
+        by_expr = _smooth_by_expr(call)
+        # discrete_mf only handles plain-column by= — drop complex exprs.
+        if by_expr is not None and by_expr not in data.columns:
+            by_expr = None
+        if call.fn in ("te", "ti", "t2"):
+            te_specs = _te_parse_margins(call, data)
+            margins = [{"term": list(s["term"])} for s in te_specs]
+        else:
+            margins = [{"term": term_vars}]
+        out.append({"term": term_vars, "by": by_expr, "margins": margins})
+    return out
+
+
 # ---------------------------------------------------------------------------
 # AR.resid — AR1 residual computation (bam.r:2056-2076)
 # ---------------------------------------------------------------------------
@@ -960,13 +996,38 @@ class bam(gam):
             self._chunk_size = max(4 * (p_param + 1), 1)
         chunk_size = self._chunk_size
         if d.expanded.smooths:
-            mf0 = _mini_mf(self.data, chunk_size)
-            # mgcv's `bam` sets sparse.cons = -1 for discrete=FALSE
-            # (sweep-drop absorb), 0 for discrete=TRUE (Householder QR).
-            sparse_cons_arg = 0 if self._discrete else -1
-            sb_lists = materialize_smooths(
-                d.expanded, mf0, sparse_cons=sparse_cons_arg,
-            )
+            if self._discrete:
+                # mgcv-T flow (bam.r:2206-2232): basis setup runs on the
+                # discretised scalar ``mf0 = dk$mf`` (padded to ``maxr``),
+                # not on the matrix-arg long form. Build smooth_specs from
+                # the formula directly, run ``discrete_mf`` to get the
+                # padded scalar columns, then ``materialize_smooths`` on
+                # that scalar frame. ``sparse.cons=0`` ⇒ Householder QR
+                # absorb on the padded ``colMeans``.
+                smooth_specs_pre = _smooth_specs_from_expanded(
+                    d.expanded, self.data,
+                )
+                self._discrete_frame = discrete_mf(
+                    smooth_specs_pre, self.data,
+                    names_pmf=list(X_param_df.columns),
+                    m=self._discrete_m,
+                )
+                mf_dict = {
+                    nm: arr for nm, arr in self._discrete_frame.mf.items()
+                    if nm != "(Intercept)"
+                }
+                mf0 = pl.DataFrame(mf_dict) if mf_dict else pl.DataFrame()
+                sb_lists = materialize_smooths(
+                    d.expanded, mf0, sparse_cons=0,
+                )
+            else:
+                # discrete=FALSE: basis setup on a representative subsample
+                # of the original (possibly matrix-arg) data; sparse.cons=-1
+                # (sweep-drop absorb on row-summed colMeans).
+                mf0 = _mini_mf(self.data, chunk_size)
+                sb_lists = materialize_smooths(
+                    d.expanded, mf0, sparse_cons=-1,
+                )
             blocks: list[SmoothBlock] = [b for group in sb_lists for b in group]
         else:
             blocks = []
@@ -1015,52 +1076,13 @@ class bam(gam):
         self._X_param_full = X_param_full
 
         # ---- discrete (compressed) design ----------------------------------
-        # mgcv ``bam(..., discrete=TRUE)`` flow (bam.r:2387-2437): after
-        # basis spec setup, walk the smooths to discretise their marginals
-        # and build the per-marginal Xd / global k / per-variable ks tables.
-        # The same parametric design X_param_full is plugged in as a single
-        # (un-discretised) "term"; the kernels just gather identity rows
-        # for it. Stored on ``self._discrete_design`` and consumed by
-        # :func:`_build_qr_discrete_pirls` in the PIRLS loop.
+        # ``self._discrete_frame`` was populated upstream (before
+        # materialize_smooths) so the basis specs were fitted on the same
+        # padded scalar mf0 mgcv-T uses for ``smoothCon`` (bam.r:2206-2232).
+        # Here we just hand the frozen blocks + frame to
+        # ``build_discrete_design`` to assemble the per-marginal Xd table.
         if self._discrete:
-            smooth_specs = []
-            for blk in blocks:
-                spec = blk.spec
-                if spec is None:
-                    raise ValueError(
-                        "discrete=True requires every smooth block to carry "
-                        f"a basis spec — got block {blk.label!r} with no spec"
-                    )
-                raw = spec.predict_raw if spec.predict_raw is not None else spec.raw
-                from .formula import _TensorRawBasis, _T2RawBasis, _T2PredictRawBasis
-                if isinstance(raw, (_TensorRawBasis, _T2RawBasis, _T2PredictRawBasis)):
-                    margin_raws = list(raw.margins)
-                else:
-                    margin_raws = [raw]
-                # Distribute term variables across margins (matches mgcv's d=
-                # ordering — see _split_term_vars_by_margins in discrete.py).
-                term_vars = list(blk.term)
-                if len(margin_raws) == 1:
-                    margin_specs = [{"term": term_vars}]
-                elif len(term_vars) == len(margin_raws):
-                    margin_specs = [{"term": [v]} for v in term_vars]
-                else:
-                    margin_specs = []
-                    cursor = 0
-                    extra = len(term_vars) - len(margin_raws)
-                    for j in range(len(margin_raws)):
-                        size = 1 + (extra if j == 0 else 0)
-                        margin_specs.append({"term": term_vars[cursor:cursor + size]})
-                        cursor += size
-                        extra = 0
-                smooth_specs.append({
-                    "term": term_vars, "by": None, "margins": margin_specs,
-                })
-            self._discrete_frame = discrete_mf(
-                smooth_specs, self.data,
-                names_pmf=list(X_param_df.columns),
-                m=self._discrete_m,
-            )
+            assert self._discrete_frame is not None
             self._discrete_design = build_discrete_design(
                 blocks, X_param_full, self._discrete_frame,
             )
