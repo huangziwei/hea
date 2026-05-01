@@ -1663,14 +1663,28 @@ class Scat(Family):
         return {"ls": ls0, "lsth1": lsth, "LSTH1": LSTH, "lsth2": lsth2}
 
     def ls(self, y, wt, scale):
-        """Compatibility shim: extended-family callers go through
-        ``ls_extended``; the standard ``Family.ls`` 3-vector contract
-        used by Gaussian/Gamma/etc. doesn't apply here.
+        """Standard 3-vector ``ls`` contract: ``(ls0, d/dlogφ, d²/dlogφ²)``.
+
+        Scat is ``scale_known = True`` — σ lives in θ, not φ — so the
+        log-φ derivatives are identically zero, mirroring Poisson and
+        Binomial. ``ls0`` is the saturated log-lik at μ=y under the
+        current internal θ:
+
+            ls0 = Σᵢ wᵢ · [lgamma((ν+1)/2) − lgamma(ν/2) − log(σ·√(πν))]
+
+        The (y-μ)²/(σ²ν) term vanishes at μ=y so the saturated form
+        carries only the normalising constants. ``_estimate_theta``
+        (Phase D) reads the richer θ-derivative shape via
+        :meth:`ls_extended` instead.
         """
-        raise NotImplementedError(
-            "Scat is an extended family; call ls_extended(y, wt, theta, scale) "
-            "instead of ls(y, wt, scale)."
-        )
+        y = np.asarray(y, dtype=float); wt = np.asarray(wt, dtype=float)
+        nu = float(np.exp(self._theta[0]) + self._min_df)
+        sig = float(np.exp(self._theta[1]))
+        term = (gammaln((nu + 1.0) / 2.0)
+                - gammaln(nu / 2.0)
+                - np.log(sig * np.sqrt(np.pi * nu)))
+        ls0 = float(np.sum(term * wt))
+        return np.array([ls0, 0.0, 0.0], dtype=float)
 
     # ----- Dd: μ- and θ-derivatives of −logL  (mgcv efam.r:3616-3687) ---
 

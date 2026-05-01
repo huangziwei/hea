@@ -1213,23 +1213,43 @@ def _build_qr_chunked_pirls(
             eta_chunk = X_chunk @ coef + off_chunk
 
         mu_chunk = link.linkinv(eta_chunk)
-        mu_eta_chunk = link.mu_eta(eta_chunk)
-        V_chunk = family.variance(mu_chunk)
 
-        # ``good`` mask (mgcv bam.r:1080).
-        good = (wp_chunk > 0) & (mu_eta_chunk != 0)
-        # Avoid div-by-zero in the score computation; ``!good`` rows are
-        # dropped before the QR update so the placeholder values don't
-        # leak into (R, f).
-        safe_mu_eta = np.where(mu_eta_chunk != 0, mu_eta_chunk, 1.0)
-        safe_V = np.where(V_chunk != 0, V_chunk, 1.0)
+        if family.is_extended:
+            # Extended-family Newton branch (mgcv bgam.fitd, bam.r:577-591).
+            # Per-chunk: w = Deta2/2, z = (η-off) - Deta.Deta2; ``good`` is
+            # finiteness of (w, z). See ``_build_qr_discrete_pirls`` for
+            # the full derivation.
+            theta = family.get_theta()
+            deta = family.dDeta(y_chunk, mu_chunk, wp_chunk, theta, level=0)
+            Deta2 = deta["Deta2"]
+            w_chunk = Deta2 * 0.5
+            z_chunk = (eta_chunk - off_chunk) - deta["Deta.Deta2"]
+            good = np.isfinite(z_chunk) & np.isfinite(w_chunk)
+            w_chunk = np.where(good, w_chunk, 0.0)
+            z_chunk = np.where(good, z_chunk, 0.0)
+            dev_total += float(np.sum(
+                family.dev_resids(y_chunk, mu_chunk, wp_chunk, theta=theta)
+            ))
+        else:
+            mu_eta_chunk = link.mu_eta(eta_chunk)
+            V_chunk = family.variance(mu_chunk)
 
-        z_chunk = (eta_chunk - off_chunk) + (y_chunk - mu_chunk) / safe_mu_eta
-        w_chunk = wp_chunk * mu_eta_chunk * mu_eta_chunk / safe_V
-        # mgcv bam.r:1085: ``w[!good] <- 0``.
-        w_chunk = np.where(good, w_chunk, 0.0)
+            # ``good`` mask (mgcv bam.r:1080).
+            good = (wp_chunk > 0) & (mu_eta_chunk != 0)
+            # Avoid div-by-zero in the score computation; ``!good`` rows are
+            # dropped before the QR update so the placeholder values don't
+            # leak into (R, f).
+            safe_mu_eta = np.where(mu_eta_chunk != 0, mu_eta_chunk, 1.0)
+            safe_V = np.where(V_chunk != 0, V_chunk, 1.0)
 
-        dev_total += float(np.sum(family.dev_resids(y_chunk, mu_chunk, wp_chunk)))
+            z_chunk = (eta_chunk - off_chunk) + (y_chunk - mu_chunk) / safe_mu_eta
+            w_chunk = wp_chunk * mu_eta_chunk * mu_eta_chunk / safe_V
+            # mgcv bam.r:1085: ``w[!good] <- 0``.
+            w_chunk = np.where(good, w_chunk, 0.0)
+
+            dev_total += float(np.sum(
+                family.dev_resids(y_chunk, mu_chunk, wp_chunk)
+            ))
 
         eta_full[start:end] = eta_chunk
         mu_full[start:end] = mu_chunk
@@ -1319,23 +1339,59 @@ def _build_qr_discrete_pirls(
         eta_full = Xbd(design, np.asarray(coef, dtype=float)) + offset
 
     mu_full = link.linkinv(eta_full)
-    mu_eta = link.mu_eta(eta_full)
-    V_full = family.variance(mu_full)
 
-    good = (prior_w > 0) & (mu_eta != 0)
-    safe_mu_eta = np.where(mu_eta != 0, mu_eta, 1.0)
-    safe_V = np.where(V_full != 0, V_full, 1.0)
+    if family.is_extended:
+        # Extended-family Newton branch (mgcv bgam.fitd, bam.r:577-591).
+        # ``dDeta`` returns η-space derivatives of ``-logL`` at fixed θ;
+        # the IRLS-equivalent Newton step is
+        #
+        #     w = Deta2 * 0.5     (observed Hessian, rho==0 branch)
+        #     z = (η − offset) − Deta.Deta2
+        #
+        # ``Deta.Deta2 = Dmu / (Dmu2·μ_η − Dmu·g2g)`` for non-identity
+        # link, ``Dmu/Dmu2`` for identity — already computed inside
+        # ``dDeta``. The good-row mask is just finiteness of (w, z);
+        # extended families have no μ_η==0 boundary the way the
+        # standard Fisher branch does. mgcv's ``rho != 0`` AR1 branch
+        # (using ``EDeta2`` / ``Deta.EDeta2``) is not yet wired —
+        # ``rho`` is unsupported on the discrete path today.
+        theta = family.get_theta()
+        deta = family.dDeta(y, mu_full, prior_w, theta, level=0)
+        Deta2 = deta["Deta2"]
+        w_full = Deta2 * 0.5
+        z_full = (eta_full - offset) - deta["Deta.Deta2"]
+        good = np.isfinite(z_full) & np.isfinite(w_full)
+        w_full = np.where(good, w_full, 0.0)
+        z_full = np.where(good, z_full, 0.0)
+        if not np.any(good):
+            raise FloatingPointError(
+                "discrete PIRLS build (extended family) saw zero good "
+                "rows — every observation has non-finite Deta2 or "
+                "Deta.Deta2"
+            )
+        dev_total = float(np.sum(
+            family.dev_resids(y, mu_full, prior_w, theta=theta)
+        ))
+    else:
+        # Standard exponential-family Fisher branch.
+        mu_eta = link.mu_eta(eta_full)
+        V_full = family.variance(mu_full)
 
-    z_full = (eta_full - offset) + (y - mu_full) / safe_mu_eta
-    w_full = prior_w * mu_eta * mu_eta / safe_V
-    w_full = np.where(good, w_full, 0.0)
-    if not np.any(good):
-        raise FloatingPointError(
-            "discrete PIRLS build saw zero good rows — every observation "
-            "was dropped by the (w_prior > 0 & μ_η != 0) good mask"
-        )
+        good = (prior_w > 0) & (mu_eta != 0)
+        safe_mu_eta = np.where(mu_eta != 0, mu_eta, 1.0)
+        safe_V = np.where(V_full != 0, V_full, 1.0)
 
-    dev_total = float(np.sum(family.dev_resids(y, mu_full, prior_w)))
+        z_full = (eta_full - offset) + (y - mu_full) / safe_mu_eta
+        w_full = prior_w * mu_eta * mu_eta / safe_V
+        w_full = np.where(good, w_full, 0.0)
+        if not np.any(good):
+            raise FloatingPointError(
+                "discrete PIRLS build saw zero good rows — every "
+                "observation was dropped by the (w_prior > 0 & μ_η != 0) "
+                "good mask"
+            )
+
+        dev_total = float(np.sum(family.dev_resids(y, mu_full, prior_w)))
 
     XWX = XWXd(design, w_full)
     Xy = XWyd(design, w_full, z_full)

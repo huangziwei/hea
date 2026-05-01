@@ -1302,9 +1302,12 @@ def XWXd(design: DiscreteDesign, w: np.ndarray,
     if X is None and not use_kernel:
         X = discrete_full_X(design)
     if X is not None:
-        sqrt_w = np.sqrt(w_arr)
-        Xw = sqrt_w[:, None] * X
-        return Xw.T @ Xw
+        # Signed-weight-safe form. ``sqrt(w)·X then Xw'·Xw`` is faster
+        # for non-negative ``w`` but NaN's on negative entries — and
+        # extended families (Scat etc) routinely produce per-row
+        # negative Newton-Hessian weights ``Deta2/2``. The direct
+        # ``X' (w·X)`` is the same FLOP count and handles any sign.
+        return X.T @ (w_arr[:, None] * X)
 
     n = design.n
     p = design.p
