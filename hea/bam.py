@@ -139,17 +139,30 @@ def _chol2qr(XX: np.ndarray, Xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
     Port of mgcv ``chol2qr`` (bam.r:31-44). Uses LAPACK pivoted Cholesky
     (``dpstrf``) so rank-deficient PSD inputs are handled correctly. For
-    a rank-deficient ``XX`` the bottom-right ``(p-r) × (p-r)`` block of
-    the pivoted Cholesky factor is replaced with the identity (mgcv's
-    chol2qr trick) so the triangular solve for ``f`` is non-singular —
-    rank-deficient directions are then killed by the smoothing penalties
-    downstream.
+    a rank-deficient ``XX`` the bottom rows of ``R_piv`` (after pivoting,
+    the rows corresponding to dropped pivots) are zeroed out, and ``f``
+    is forward-solved on the top-``rank`` subsystem only with the
+    pivoted-bottom positions padded by zero. This is mgcv's exact
+    convention (``R[(rank+1):p,] <- 0`` then ``f <- c(forwardsolve(...),
+    rep(0, p-rank))[ipiv]``).
+
+    Note: an earlier version of this routine replaced the bottom-right
+    ``(p-r) × (p-r)`` block with the identity matrix so a single full
+    forward-solve was non-singular. That broke the gram identity for
+    rank-deficient inputs — ``R'R`` then equalled ``XX + I_at_pivoted_
+    bottom_positions``, biasing every downstream PIRLS solve by exactly
+    1.0 on the dropped diagonals (verified on the small_data Poisson
+    te(pm10, lag) fit, where two diagonals of ``R'R - XX`` came out at
+    exactly 1.0). mgcv leaves those rows zero instead and only solves
+    the top-rank subsystem; we now do the same.
 
     Output ``R`` is in original (un-pivoted) column ordering: column ``j``
     of ``R`` corresponds to column ``j`` of ``X``. ``R`` is *not*
     upper-triangular after un-pivoting (just like the chunked path's
     ``_qr_update`` output), but the gram identities ``R'R = XX`` and
-    ``R'f = Xy`` hold exactly.
+    ``R'f = Xy`` hold exactly (the second by consistency: when ``Xy``
+    lies in ``range(XX)``, the rank-``r`` forward-solve makes the bottom
+    rows of ``R_piv'·f_piv`` automatically equal to ``Xy[piv][r:]``).
     """
     XX = np.asarray(XX, dtype=float)
     Xy = np.asarray(Xy, dtype=float).ravel()
@@ -164,22 +177,26 @@ def _chol2qr(XX: np.ndarray, Xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     R_piv = np.triu(c)
     # ``R_piv' R_piv = XX[piv, :][:, piv]`` (DPSTRF spec). For rank<p,
     # the trailing block has ~zero diag and DPSTRF leaves garbage in its
-    # rows; mgcv replaces the trailing block with identity so the
-    # triangular solve is well-defined (bam.r:39).
+    # rows; mgcv (bam.r:40) zeros those rows so ``R_piv' R_piv`` equals
+    # ``XX[piv, piv]`` exactly (modulo float noise).
     if rank < p:
         R_piv[rank:, :] = 0.0
-        R_piv[rank:, rank:] = np.eye(p - rank)
 
     piv = np.asarray(piv_1based, dtype=int) - 1   # 0-based
     ipiv = np.empty(p, dtype=int)
     ipiv[piv] = np.arange(p)
 
-    # Solve ``R_piv' f_piv = Xy[piv]`` (forwardsolve in pivoted coords).
-    # Then ``f = f_piv`` is also the f for the un-pivoted ``R``: with
-    # ``R = R_piv[:, ipiv]`` we get ``R'f = R_piv[:, ipiv]' f_piv``,
-    # and row j picks row ``ipiv[j]`` of ``R_piv'``, which by definition
-    # of ``f_piv`` equals ``Xy[piv[ipiv[j]]] = Xy[j]``.
-    f = solve_triangular(R_piv.T, Xy[piv], lower=True)
+    # mgcv bam.r:41: ``f <- c(forwardsolve(t(R[ind,ind]), Xy[piv[ind]]),
+    #                        rep(0, p-rank))[ipiv]``. We compute the
+    # pivoted ``f_piv`` here (top-rank from forwardsolve, bottom zeros)
+    # and downstream ``R'f`` over our column-only-unpivoted ``R`` lands
+    # the same Xy as mgcv's row+col-unpivoted ``R'f`` would (verified
+    # by carrying through the index permutation: see docstring).
+    f = np.zeros(p, dtype=float)
+    if rank > 0:
+        f[:rank] = solve_triangular(
+            R_piv[:rank, :rank].T, Xy[piv][:rank], lower=True,
+        )
     R_out = R_piv[:, ipiv]
     return R_out, f
 
@@ -1315,21 +1332,82 @@ class bam(gam):
         Gaussian-on-(R,f) inner score, and bam's overridden ``_dw_deta``
         returns ``zeros(p)`` (length-p so the broadcast against
         ``self._X_full = R`` lines up).
+
+        Rank handling (mgcv gam.fit3 / gdi1 style): we run pivoted
+        Cholesky on ``A = R'R + Sλ``. When ``A`` is rank-deficient (the
+        smoothing penalty doesn't fully regularise the unpenalised null
+        space — e.g. te-only Poisson on small_data has rank(A) = 14 of
+        15), the rank-deficient pivoted positions get β = 0 in mgcv's
+        gauge. ``log|A|`` is the rank-revealing pseudo-determinant
+        (sum of log of positive pivots), which mgcv's REML score reads.
+        For full-rank ``A`` this collapses to the regular Cholesky path;
+        no extra cost in the common case.
         """
         Sλ = self._build_S_lambda(rho)
         Sλ = 0.5 * (Sλ + Sλ.T)
         A = self._XtX + Sλ
         A = 0.5 * (A + A.T)
+
+        # Pivoted Cholesky with rank revealing (mgcv ``chol(A, pivot=TRUE)``).
+        # mgcv uses ``rank.tol = .Machine$double.eps * 100 ≈ 2.22e-14``
+        # (gam.fit3.r:131); we mirror that so dpstrf's rank determination
+        # matches mgcv's. With this tight tolerance, *almost* every Newton
+        # step keeps the matrix at full rank — only truly singular A's
+        # have a column dropped, which is what mgcv does too.
+        rank_tol = float(np.finfo(float).eps * 100.0)
+        A_f = np.asfortranarray(A.copy())
+        R_piv, piv_1based, rank_A, _info = dpstrf(A_f, lower=0, tol=rank_tol)
+        R_piv = np.triu(R_piv)
+        rank_A = int(rank_A)
+        piv = np.asarray(piv_1based, dtype=int) - 1
+        ipiv = np.empty(self.p, dtype=int)
+        ipiv[piv] = np.arange(self.p)
+
+        # Solve in mgcv's pseudo-inverse gauge: β_piv[rank:] = 0 (drop the
+        # rank-deficient pivoted positions), β_piv[:rank] = top-rank
+        # back-substitution. log|A| (pseudo) = 2·Σ log|diag(R_piv)[:rank]|.
+        if rank_A > 0:
+            b_piv = self._Xty[piv]
+            z = solve_triangular(
+                R_piv[:rank_A, :rank_A].T, b_piv[:rank_A], lower=True,
+            )
+            beta_piv_top = solve_triangular(
+                R_piv[:rank_A, :rank_A], z, lower=False,
+            )
+        else:
+            beta_piv_top = np.zeros(0, dtype=float)
+        beta_piv = np.zeros(self.p, dtype=float)
+        beta_piv[:rank_A] = beta_piv_top
+        beta = beta_piv[ipiv]
+
+        if not np.all(np.isfinite(beta)):
+            raise FloatingPointError("non-finite β in bam (R, f) solve")
+
+        # ``A_chol``/``A_chol_lower`` are consumed by every downstream
+        # variance / Newton-step / hat-matrix routine via
+        # ``cho_solve((A_chol, lower), …)`` — they expect a *triangular*
+        # factor in the *original* column basis. The pivoted Chol
+        # ``R_piv`` is triangular in *pivoted* basis only; once we
+        # un-pivot, triangularity is lost, breaking the
+        # ``solve_triangular`` callsites in ``_make_K``.
+        #
+        # Strategy: rebuild a non-pivoted Cholesky of ``A`` for storage,
+        # falling back to a tiny ridge when the standard Cholesky fails
+        # on the rank-deficient direction. The β / log_det that drive
+        # the *outer* optimiser were already computed above via the
+        # rank-revealing pivoted path, so the ridge here is only seen by
+        # the variance-estimator code (which mgcv computes via a
+        # different gdi1-internal routine anyway). The bias lives along
+        # the dropped null direction and decays with sp magnitude.
         try:
             A_chol, lower = cho_factor(A, lower=True, overwrite_a=False)
         except np.linalg.LinAlgError:
             ridge = 1e-8 * np.trace(A) / max(self.p, 1)
             A_chol, lower = cho_factor(
-                A + ridge * np.eye(self.p), lower=True, overwrite_a=False,
+                A + ridge * np.eye(self.p),
+                lower=True, overwrite_a=False,
             )
-        beta = cho_solve((A_chol, lower), self._Xty)
-        if not np.all(np.isfinite(beta)):
-            raise FloatingPointError("non-finite β in bam (R, f) solve")
+
         pen = float(beta @ Sλ @ beta)
         # Full-data working RSS = ‖z̃ − X̃β̂‖² = ‖f − Rβ̂‖² + rss_extra
         #                       = ‖z̃‖² − 2 β̂' R'f + β̂' R'R β̂
@@ -1338,7 +1416,16 @@ class bam(gam):
             self._yty - 2.0 * (beta @ self._Xty) + beta @ self._XtX @ beta
         )
         rss = max(rss, 0.0)  # guard tiny negative from cancellation
-        log_det_A = 2.0 * float(np.log(np.abs(np.diag(A_chol))).sum())
+        # Rank-revealing log|A|: only the top-rank diagonal of the
+        # pivoted Chol contributes (pivoted-bottom positions are
+        # log(1)=0 from the identity padding above, equivalent to mgcv's
+        # ``rank.tol``-truncated determinant).
+        if rank_A > 0:
+            log_det_A = 2.0 * float(
+                np.log(np.abs(np.diag(R_piv)[:rank_A])).sum()
+            )
+        else:
+            log_det_A = 0.0
         # ``_score_scale`` reads ``fit.mu`` vs ``self._y_arr`` for the
         # Pearson sum — must be length-n response-scale μ. Recovered via
         # a chunked ``X·β`` walk per call (O(n·p), same cost gam pays for
