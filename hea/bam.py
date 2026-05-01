@@ -1012,9 +1012,38 @@ class bam(gam):
                 smooth_specs_pre = _smooth_specs_from_expanded(
                     d.expanded, self.data,
                 )
+                # mgcv's ``pmf.names = names(model.frame(parametric_formula,
+                # data))``, which *includes the response label* (because R's
+                # ``model.frame(y ~ x)`` evaluates the LHS into a column).
+                # ``discrete.mf`` then loops over those names and runs
+                # ``compress.df`` on each — including y. Skipping the
+                # response leaves the RNG state desynced by the unique-value
+                # count of y at the pad loop, breaking bit-exact parity.
+                # Build mgcv's ``pmf.names`` order: response first, then
+                # parametric data covariates (skipping the synthetic
+                # ``(Intercept)`` column).
+                names_pmf: list[str] = []
+                if d.response and d.response not in names_pmf:
+                    names_pmf.append(d.response)
+                for col in X_param_df.columns:
+                    if col == "(Intercept)" or col in names_pmf:
+                        continue
+                    if col in self.data.columns:
+                        names_pmf.append(col)
+                # Ensure the evaluated response is available as a column on
+                # the data frame passed to ``discrete_mf``. For a bare
+                # ``y ~ ...`` formula this is a no-op; for ``log(y) ~ ...``
+                # we attach the deparsed name with the evaluated values
+                # (matching ``model.frame(log(y) ~ ...)`` in R).
+                data_for_discrete = self.data
+                if (d.response
+                        and d.response not in self.data.columns):
+                    data_for_discrete = self.data.with_columns(
+                        pl.Series(name=d.response, values=y_full)
+                    )
                 self._discrete_frame = discrete_mf(
-                    smooth_specs_pre, self.data,
-                    names_pmf=list(X_param_df.columns),
+                    smooth_specs_pre, data_for_discrete,
+                    names_pmf=names_pmf,
                     m=self._discrete_m,
                 )
                 mf_dict = {

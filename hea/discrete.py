@@ -455,9 +455,16 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
             _discretise_marginal(list(marg["term"]), m)
 
     # --- parametric ---
+    # mgcv passes ``pmf.names = names(model.frame(parametric_formula, data))``
+    # which always *includes the response* (since ``model.frame(y ~ ...)``
+    # evaluates the LHS into a column). The response usually has < n unique
+    # values, so its ``compress.df`` shuffle consumes RNG calls that
+    # otherwise wouldn't fire. Skipping it leaves the RNG state desynced
+    # from mgcv at the pad loop. Any column listed in ``names_pmf`` that is
+    # actually present in ``mf`` gets discretised here, response included.
     for nm in pmf_in_mf:
-        # Skip if already discretised (shouldn't happen normally — para
-        # vars don't appear in smooths — but mgcv guards anyway).
+        # Skip if already discretised (a parametric covariate shared with a
+        # smooth — mgcv guards via ``rec``).
         if check_term([nm], rec) != 0:
             continue
         ik += 1
@@ -476,6 +483,17 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
             nr[ik] = mf_entry.size
         ks[ik, 0] = ks[ik - 1, 1] if ik > 0 else 0
         ks[ik, 1] = ks[ik, 0] + 1
+        # Matrix-arg smooth margins may have grown ``k`` past the
+        # pre-counted ``nk``; extend by one column if our write would
+        # otherwise be out-of-bounds (mgcv side: cbind in the smooth loop
+        # already reserved enough room because its pre-count uses
+        # ``length(term)`` with one slot per *variable*; hea's pre-count
+        # uses one slot per margin, which can be smaller for matrix args).
+        if ks[ik, 1] > k.shape[1]:
+            k = np.concatenate(
+                [k, np.zeros((n, ks[ik, 1] - k.shape[1]), dtype=np.int64)],
+                axis=1,
+            )
         k[:, ks[ik, 0]] = ki
         var_order.append(nm)
         mf0[nm] = mf_entry
