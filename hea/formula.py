@@ -5983,11 +5983,61 @@ def _smooth_matrix_vars(call: Call, data: pl.DataFrame) -> list[str]:
     return out
 
 
+def _check_rank(
+    X: np.ndarray, S_list: list[np.ndarray],
+) -> tuple[np.ndarray, list[np.ndarray], np.ndarray | None]:
+    """Mgcv `smoothCon`'s ``check.rank`` block (lines 485-518).
+
+    When matrixArg=TRUE, mgcv probes for redundant columns by pivoted Cholesky
+    of ``X'X / |X'X|_1 + Σ S_i / |S_i|_1`` (one-norm). If the rank ``r`` is
+    less than ``p = ncol(X)``, columns ``r..p-1`` (0-indexed) are dropped from
+    ``X`` and from each ``S_i``.
+
+    Returns ``(X_new, S_list_new, keep_mask)`` with ``keep_mask=None`` when
+    nothing is dropped. The drop is on *original column order*, matching mgcv
+    — the pivot from ``chol(..., pivot=TRUE)`` is used only for rank determi-
+    nation, not for picking which columns to drop. mgcv's tensor product
+    construction places redundant columns at the end so the trailing-cols
+    drop is correct.
+    """
+    from scipy.linalg import lapack
+    p = X.shape[1]
+    if p == 0:
+        return X, S_list, None
+    XX = X.T @ X
+    norm_XX = float(np.abs(XX).sum(axis=0).max())
+    if norm_XX == 0:
+        return X, S_list, None
+    M = XX / norm_XX
+    for S in S_list:
+        normS = float(np.abs(S).sum(axis=0).max())
+        if normS > 0:
+            M = M + S / normS
+    # Pivoted Cholesky → rank. tol=-1 ⇒ LAPACK auto tol = n·eps·max(diag).
+    M_sym = 0.5 * (M + M.T)
+    _c, _piv, rank_c, info = lapack.dpstrf(M_sym, lower=0, tol=-1.0)
+    if info < 0:
+        raise RuntimeError(f"dpstrf reported invalid arg {info}")
+    if rank_c >= p:
+        return X, S_list, None
+    keep_mask = np.zeros(p, dtype=bool)
+    keep_mask[:rank_c] = True
+    X_new = X[:, keep_mask]
+    S_new = [S[np.ix_(keep_mask, keep_mask)] for S in S_list]
+    return X_new, S_new, keep_mask
+
+
 def _summation_apply_blocks(
     blocks: list[SmoothBlock], n: int, m: int, matrix_vars: list[str],
 ) -> list[SmoothBlock]:
     """Reshape each block's long-form X (n*m, p) → (n, p) by summing over
-    the m row-blocks, and stamp summation metadata onto the predict spec."""
+    the m row-blocks, and stamp summation metadata onto the predict spec.
+
+    matrixArg=TRUE in mgcv also enables ``check.rank`` (smoothCon line 240),
+    so after summation we drop trailing redundant columns (column-selection
+    commutes with row-summation, so the predict-time replay can apply the
+    same mask on the long-form basis before summing — see
+    ``BasisSpec.predict_mat``)."""
     out: list[SmoothBlock] = []
     mvars = tuple(matrix_vars)
     for b in blocks:
@@ -5998,12 +6048,22 @@ def _summation_apply_blocks(
                 f"with {X.shape[0]} rows, expected n*m = {n*m}"
             )
         X_summed = X.reshape(n, m, X.shape[1]).sum(axis=1)
+        S_list = list(b.S)
+        X_summed, S_list, keep_mask = _check_rank(X_summed, S_list)
         if b.spec is not None:
             b.spec.summation_dim = m
             b.spec.matrix_vars = mvars
+            if keep_mask is not None:
+                # Compose with any existing keep_cols (gam.side may have set it).
+                if b.spec.keep_cols is not None:
+                    composed = np.zeros_like(b.spec.keep_cols)
+                    composed[b.spec.keep_cols] = keep_mask
+                    b.spec.keep_cols = composed
+                else:
+                    b.spec.keep_cols = keep_mask
         out.append(SmoothBlock(
             label=b.label, term=b.term, cls=b.cls,
-            X=X_summed, S=b.S, spec=b.spec,
+            X=X_summed, S=S_list, spec=b.spec,
         ))
     return out
 
