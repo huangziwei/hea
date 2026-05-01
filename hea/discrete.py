@@ -42,6 +42,7 @@ from typing import Optional, Sequence
 import numpy as np
 import polars as pl
 
+from ._r_random import RMersenneTwister
 from .design import is_matrix_col, matrix_to_2d
 from .formula import (
     BasisSpec,
@@ -91,7 +92,7 @@ class _CompressResult:
 
 
 def compress_df(dat: dict[str, np.ndarray], m: Optional[int] = None,
-                *, rng: Optional[np.random.Generator] = None) -> _CompressResult:
+                *, rng: Optional[RMersenneTwister] = None) -> _CompressResult:
     """Discretise a small dataframe by rounding (numeric) / dedup (factor).
 
     Direct port of mgcv ``compress.df`` (bam.r:122-184). The input
@@ -117,10 +118,11 @@ def compress_df(dat: dict[str, np.ndarray], m: Optional[int] = None,
     would otherwise confuse the ``gam.side`` identifiability check. The
     caller is responsible for fixing the RNG state outside this routine
     (mgcv uses ``temp.seed(8547)`` in :func:`discrete_mf`); supply
-    ``rng=`` to override.
+    ``rng=`` to override. The default :class:`RMersenneTwister` is seeded
+    to match ``discrete.mf``'s ``temp.seed(8547)``.
     """
     if rng is None:
-        rng = np.random.default_rng()
+        rng = RMersenneTwister(8547)
     names = list(dat.keys())
     d = len(names)
     n = next(iter(dat.values())).shape[0]
@@ -198,7 +200,7 @@ def compress_df(dat: dict[str, np.ndarray], m: Optional[int] = None,
         return _CompressResult(xu={nm: work[nm].copy() for nm in names}, k=k_out)
 
     # Shuffle xu rows to break induced dependencies (bam.r:171).
-    perm = rng.permutation(nu)
+    perm = rng.sample_no_replace(nu, nu)
     xu_table = {nm: xu_table[nm][np.argsort(perm)] for nm in names}
     # ``perm[old_pos] = new_pos``; old k pointed to old_pos, after the
     # shuffle the same data should point to new_pos.
@@ -332,7 +334,7 @@ def check_term(term: Sequence[str], rec: dict) -> int:
 
 def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
                 names_pmf: Sequence[str], m: Optional[int] = None,
-                *, rng: Optional[np.random.Generator] = None,
+                *, rng: Optional[RMersenneTwister] = None,
                 full: bool = True) -> DiscretizedFrame:
     """Discretise the model frame ``mf`` per marginal of every smooth.
 
@@ -351,11 +353,11 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
     discretised individually, and finally an intercept index column.
 
     ``rng`` should be supplied with a fixed seed for reproducibility.
-    mgcv uses ``temp.seed(8547)`` (bam.r:233) — set
-    ``rng=np.random.default_rng(8547)`` to match exactly.
+    mgcv uses ``temp.seed(8547)`` (bam.r:233) — the default
+    ``RMersenneTwister(8547)`` matches that exactly.
     """
     if rng is None:
-        rng = np.random.default_rng(8547)
+        rng = RMersenneTwister(8547)
 
     n = mf.height
     # Pre-count how many index columns ``k`` will need: each smooth term
@@ -483,7 +485,7 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
         for nm, arr in list(mf0.items()):
             if arr.size < maxr:
                 # mgcv: ``mf0[[i]][(me+1):maxr] <- sample(mf0[[i]], maxr-me, replace=TRUE)``
-                pad = rng.choice(arr, size=maxr - arr.size, replace=True)
+                pad = arr[rng.sample_replace(arr.size, maxr - arr.size)]
                 mf0[nm] = np.concatenate([arr, pad])
     else:
         maxr = max((arr.size for arr in mf0.values()), default=0)
