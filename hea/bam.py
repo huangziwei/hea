@@ -133,6 +133,208 @@ def _rw_matrix(stop: np.ndarray, row: np.ndarray, weight: np.ndarray,
     return out
 
 
+@dataclass
+class _BlockRepara:
+    """Per-block reparameterization data — mgcv ``Sl.setup`` + ``Sl.
+    initial.repara`` (fast-REML.r:68-402, 490-735) for multi-S blocks.
+
+    For a block at columns ``[col_start, col_end)`` with multiple S
+    matrices, ``D = U`` (eigenvectors of ``S_total = ΣS_j``); the
+    penalised subspace is the top ``rank`` directions and the rest is
+    null. Each ``S_j`` projects to ``U[:, :rank]'·S_j·U[:, :rank]``,
+    shape ``(rank, rank)``.
+
+    For a singleton block (one S), no repara is applied here — hea's
+    ``_absorb_sumzero`` already lives upstream. Keeping the singleton
+    path empty avoids touching designs that already match mgcv at
+    machine precision.
+    """
+    col_start: int
+    col_end: int
+    U: np.ndarray              # (m, rank) basis (m = col_end - col_start)
+    rank: int                  # numerical rank of S_total
+    slot_indices: list         # global slot indices in this block
+    S_proj: list               # projected S matrices, shape (rank, rank) each
+
+
+def _build_init_repara(slots: list, p: int) -> list:
+    """Build per-block reparameterization data for multi-S blocks.
+
+    Mirrors mgcv ``Sl.setup`` (fast-REML.r:335-369) for the
+    ``cholesky=FALSE`` path: eigendecompose ``S_total = ΣS_j`` for each
+    block with multiple penalty matrices, take the top-rank
+    eigenvectors as ``U``, project each ``S_j``.
+
+    Returns: list of ``_BlockRepara`` objects, one per multi-S block.
+    Singleton blocks are not in the list (no repara needed).
+    """
+    # Group slots by col range. Multi-S blocks have multiple slots
+    # sharing the same range.
+    by_range: dict = {}
+    for k, slot in enumerate(slots):
+        key = (int(slot.col_start), int(slot.col_end))
+        by_range.setdefault(key, []).append(k)
+
+    repara_blocks: list = []
+    for (cs, ce), slot_idxs in by_range.items():
+        if len(slot_idxs) <= 1:
+            continue   # singleton, skip
+        # Multi-S block — eigendecompose total penalty.
+        S_total = np.zeros_like(slots[slot_idxs[0]].S)
+        for k in slot_idxs:
+            S_total = S_total + slots[k].S
+        S_total = 0.5 * (S_total + S_total.T)
+        # eigh returns ascending; we want descending (largest first).
+        eigval, U_full = np.linalg.eigh(S_total)
+        order = np.argsort(eigval)[::-1]
+        U_full = U_full[:, order]
+        eigval = eigval[order]
+        m = ce - cs
+        # mgcv rank determination (fast-REML.r:357-358):
+        # ``rank <- sum(D > .Machine$double.eps^.8 * max(D))``.
+        thresh = float(np.finfo(float).eps) ** 0.8 * float(eigval[0])
+        rank = int(np.sum(eigval > thresh))
+        if rank == 0:
+            continue
+        U = U_full[:, :rank]
+        # Project each S_j onto the rank-r range of S_total.
+        S_proj = []
+        for k in slot_idxs:
+            P = U.T @ slots[k].S @ U
+            P = 0.5 * (P + P.T)
+            S_proj.append(P)
+        repara_blocks.append(_BlockRepara(
+            col_start=cs, col_end=ce, U=U, rank=rank,
+            slot_indices=list(slot_idxs), S_proj=S_proj,
+        ))
+    return repara_blocks
+
+
+def _apply_init_repara(
+    XX: np.ndarray, Xy: np.ndarray, repara_blocks: list,
+) -> tuple[np.ndarray, np.ndarray, list]:
+    """Apply mgcv-style ``Sl.initial.repara`` (forward) to ``XX``,
+    ``Xy``. Returns the repara'd matrices plus a "padded" S list
+    (one (m, m) matrix per slot, with the projected ``(rank, rank)``
+    block placed at the top-left of the slot's column range and the
+    null tail zeroed).
+
+    For each multi-S block at ``[cs, ce)`` with basis ``U`` of size
+    ``(m, rank)``:
+
+      * ``XX_new`` = ``D' XX D`` where ``D`` is identity outside the
+        block and ``[U, U_null]`` inside (``U_null`` = orthogonal
+        complement of ``U``). For our purposes only the ``U`` columns
+        are used since the null tail is unpenalised.
+      * ``Xy_new[block]`` = ``[U; U_null]' Xy[block]``.
+
+    Implementation simplification: when ``rank == m`` (the common
+    case for te smooths whose S_total is full-rank within the post-
+    absorb block), ``U`` is square orthogonal and the repara is just
+    a basis change. When ``rank < m``, we still need a square
+    transform — extend ``U`` with an orthonormal completion ``U_null``
+    so ``D = [U, U_null]`` is m×m. ``np.linalg.qr`` on ``U`` produces
+    that completion as a side effect.
+    """
+    XX_new = XX.copy()
+    Xy_new = Xy.copy()
+    for blk in repara_blocks:
+        cs, ce = blk.col_start, blk.col_end
+        m = ce - cs
+        if blk.rank == m:
+            D = blk.U
+        else:
+            # Extend U to an orthogonal basis [U, U_null] of m×m.
+            Q, _ = np.linalg.qr(blk.U, mode="complete")
+            # ``np.linalg.qr(U, mode='complete')`` returns Q of shape
+            # (m, m) whose first ``rank`` columns span the column space
+            # of U (up to sign/orthogonal rotation within that space).
+            # mgcv's convention is ``D = [U, U_null]`` literally — we
+            # keep ``U`` exactly and grab the trailing columns of Q
+            # for the null completion.
+            U_null = Q[:, blk.rank:]
+            # Re-orthogonalise U_null against U (numerical safety).
+            U_null = U_null - blk.U @ (blk.U.T @ U_null)
+            U_null, _ = np.linalg.qr(U_null)
+            D = np.concatenate([blk.U, U_null], axis=1)
+        # XX[block, block] <- D' XX[block, block] D, etc.
+        # Two-sided sandwich on the relevant block range.
+        # Step 1: rows.
+        XX_new[cs:ce, :] = D.T @ XX_new[cs:ce, :]
+        # Step 2: columns.
+        XX_new[:, cs:ce] = XX_new[:, cs:ce] @ D
+        # Xy: rows only.
+        Xy_new[cs:ce] = D.T @ Xy_new[cs:ce]
+
+    return XX_new, Xy_new
+
+
+def _undo_init_repara_beta(
+    beta: np.ndarray, repara_blocks: list,
+) -> np.ndarray:
+    """Inverse of ``_apply_init_repara`` for β: ``β[block] = D ·
+    β_new[block]`` (mgcv ``Sl.initial.repara(..., inverse=TRUE,
+    both.sides=FALSE)``).
+    """
+    out = beta.copy()
+    for blk in repara_blocks:
+        cs, ce = blk.col_start, blk.col_end
+        m = ce - cs
+        if blk.rank == m:
+            D = blk.U
+        else:
+            Q, _ = np.linalg.qr(blk.U, mode="complete")
+            U_null = Q[:, blk.rank:]
+            U_null = U_null - blk.U @ (blk.U.T @ U_null)
+            U_null, _ = np.linalg.qr(U_null)
+            D = np.concatenate([blk.U, U_null], axis=1)
+        out[cs:ce] = D @ out[cs:ce]
+    return out
+
+
+def _build_repara_slots(
+    slots: list, repara_blocks: list,
+) -> tuple[list, list]:
+    """Build a "repara'd slot view" for ``_pi_fit_chol``.
+
+    For each multi-S block, the original slots' S matrices are
+    replaced with the rank×rank projected S, and the slot's effective
+    column range is ``[col_start, col_start + rank)`` (the penalised
+    sub-block). Slots in singleton blocks pass through unchanged.
+
+    Returns ``(slots_pre, slot_idx_map)`` where ``slot_idx_map[k]`` is
+    the global slot index that ``slots_pre[k]`` corresponds to, so
+    callers can recover original ordering for the gradient.
+    """
+    # Map (col_start, col_end) -> _BlockRepara
+    blk_by_range = {(b.col_start, b.col_end): b for b in repara_blocks}
+    slots_pre: list = []
+    for k, slot in enumerate(slots):
+        key = (int(slot.col_start), int(slot.col_end))
+        if key not in blk_by_range:
+            # Singleton block — keep as-is.
+            slots_pre.append(slot)
+            continue
+        # Multi-S — find which entry in this block the slot is.
+        blk = blk_by_range[key]
+        try:
+            local_idx = blk.slot_indices.index(k)
+        except ValueError:
+            # Shouldn't happen if repara was built consistently.
+            slots_pre.append(slot)
+            continue
+        S_proj = blk.S_proj[local_idx]
+        # Wrap a lightweight slot-like object with the projected S
+        # placed at columns [col_start, col_start + rank).
+        from types import SimpleNamespace
+        slots_pre.append(SimpleNamespace(
+            col_start=int(slot.col_start),
+            col_end=int(slot.col_start + blk.rank),
+            S=S_proj,
+        ))
+    return slots_pre
+
+
 def _pi_fit_chol(
     XX: np.ndarray, Xy: np.ndarray, rho: np.ndarray,
     slots: list, p: int, *, yy: float = 0.0,
@@ -2369,6 +2571,16 @@ class bam(gam):
                 # because POI's REML formulas don't apply to GCV/UBRE.
                 if (method in ("REML", "ML")
                         and self._discrete_design is not None):
+                    # Lazily build ``Sl.initial.repara`` data on first
+                    # PIRLS iter — depends only on the slot S matrices,
+                    # not on rho/W.
+                    if not hasattr(self, "_repara_blocks"):
+                        self._repara_blocks = _build_init_repara(
+                            self._slots, self.p,
+                        )
+                        self._repara_slots = _build_repara_slots(
+                            self._slots, self._repara_blocks,
+                        )
                     if rho_hat is None:
                         rho_cur = self._initial_sp_rho()
                         Nstep = np.zeros(n_sp + (1 if include_log_phi else 0))
@@ -2412,13 +2624,30 @@ class bam(gam):
                         ldS_hess = self._d2log_det_S_drho_drho(
                             rho_try, S_pinv=S_pinv_try, S_full=S_full_try,
                         )
+                        # mgcv ``Sl.initial.repara`` (fast-REML.r:490) —
+                        # rotate XX, Xy into the multi-S blocks' eigen
+                        # basis so the pivoted Cholesky in
+                        # ``_pi_fit_chol`` runs in mgcv's gauge. β
+                        # comes back in the repara'd basis and gets
+                        # un-rotated below. Without this step the pivot
+                        # tie-breaking on rank-deficient ``H`` differs
+                        # from mgcv's, leaving a residual coef-gauge gap.
+                        XX_pre, Xy_pre = _apply_init_repara(
+                            self._XtX, self._Xty, self._repara_blocks,
+                        )
                         out = _pi_fit_chol(
-                            self._XtX, self._Xty, rho_try,
-                            self._slots, self.p,
+                            XX_pre, Xy_pre, rho_try,
+                            self._repara_slots, self.p,
                             yy=self._yty, log_phi=log_phi_try, n=n,
                             Mp=self._Mp, gamma=self._gamma,
                             phi_fixed=not include_log_phi,
                             ldet_S_grad=ldS_grad, ldet_S_hess=ldS_hess,
+                        )
+                        # Undo the initial-repara on β — the rest of
+                        # the PIRLS / post-fit machinery (chunked X·β,
+                        # variance, edf) operates in the original basis.
+                        out["beta"] = _undo_init_repara_beta(
+                            out["beta"], self._repara_blocks,
                         )
                         if float(np.max(np.abs(Nstep))) == 0.0:
                             # First call or zero step — accept and
