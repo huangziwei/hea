@@ -51,12 +51,37 @@ class Link:
     def d4link(self, mu: np.ndarray) -> np.ndarray: raise NotImplementedError
     def valideta(self, eta: np.ndarray) -> bool: return True
 
+    # mgcv ``link$g2g``, ``g3g``, ``g4g`` (R/efam.r): higher-order link
+    # curvature ratios needed by ``Family.dDeta`` for extended families
+    # under non-identity links. ``g2g(μ) = g″(μ)/g′(μ) · μ_η`` etc; we
+    # use the equivalent form ``g″(μ)·μ_η = g2g`` direct from mgcv's
+    # source. Identity link has all-zero curvature → IdentityLink
+    # overrides to return zeros without computing.
+    def g2g(self, mu: np.ndarray) -> np.ndarray:
+        raise NotImplementedError(
+            f"{type(self).__name__}.g2g() is not implemented; needed for "
+            "extended families under this non-identity link."
+        )
+    def g3g(self, mu: np.ndarray) -> np.ndarray:
+        raise NotImplementedError(
+            f"{type(self).__name__}.g3g() is not implemented; needed for "
+            "extended families under this non-identity link (level≥1)."
+        )
+    def g4g(self, mu: np.ndarray) -> np.ndarray:
+        raise NotImplementedError(
+            f"{type(self).__name__}.g4g() is not implemented; needed for "
+            "extended families under this non-identity link (level≥2)."
+        )
+
     def __repr__(self) -> str:
         return self.name
 
 
 class IdentityLink(Link):
     name = "identity"
+    def g2g(self, mu): return np.zeros_like(np.asarray(mu, dtype=float))
+    def g3g(self, mu): return np.zeros_like(np.asarray(mu, dtype=float))
+    def g4g(self, mu): return np.zeros_like(np.asarray(mu, dtype=float))
     def link(self, mu): return np.asarray(mu, dtype=float)
     def linkinv(self, eta): return np.asarray(eta, dtype=float)
     def mu_eta(self, eta): return np.ones_like(np.asarray(eta, dtype=float))
@@ -301,6 +326,18 @@ class Family:
     # call ``dscore_extra(...)`` to obtain the score-side ∂(2·V_R)/∂θ_extra
     # contributions for the gradient.
     n_theta: int = 0
+    # Mirrors mgcv ``inherits(family, "extended.family")``. Standard
+    # exponential families (Gaussian, Poisson, ...) leave it ``False``;
+    # extended families (Scat, ziP, ocat, gevlss, ...) flip to ``True``
+    # so the bam(discrete=TRUE) PIRLS path uses the ``Dd → dDeta`` Newton
+    # weights (``w = Deta2/2``, ``z = (η-off) - Deta/Deta2``) instead of
+    # the standard Fisher weights ``w = w_prior · μ_η²/V(μ)``.
+    is_extended: bool = False
+    # Whether the bam outer loop should call ``_estimate_theta`` between
+    # PIRLS iters. Set ``True`` only on extended families with free θ
+    # (Scat with both θ free, nb with k free, etc). Standard families and
+    # extended families with all θ user-locked leave it ``False``.
+    estimate_theta_callback: bool = False
 
     def __init__(self, link=None):
         self.link = _resolve_link(link, self.canonical_link_name)
@@ -330,9 +367,134 @@ class Family:
     def d2var(self, mu): raise NotImplementedError
     def d3var(self, mu): raise NotImplementedError
 
-    def dev_resids(self, y, mu, wt) -> np.ndarray:
-        """Per-observation deviance contributions; sum is the deviance D."""
+    def dev_resids(self, y, mu, wt, theta=None) -> np.ndarray:
+        """Per-observation deviance contributions; sum is the deviance D.
+
+        ``theta`` is accepted but ignored for standard exponential
+        families. Extended families (``is_extended=True``) read it to
+        compute deviance at a probe θ during inner-Newton θ estimation.
+        """
         raise NotImplementedError
+
+    # ----- extended-family hooks (no-ops for standard families) ---------
+    def Dd(self, y, mu, theta, wt, level: int = 0) -> dict:
+        """Mirrors mgcv ``family$Dd``. Returns a dict of derivatives of
+        ``-logL`` wrt μ and θ at fixed (y, μ, θ, w):
+
+        * level 0: ``Dmu``, ``Dmu2``, ``EDmu2`` (all length-n).
+        * level ≥ 1: + ``Dth``, ``Dmuth``, ``Dmu2th``, ``EDmu2th``,
+          ``Dmu3``, ``EDmu3``. ``D*th`` shape ``(n, n_theta)``.
+        * level ≥ 2: + ``Dmu4``, ``Dth2``, ``Dmuth2``, ``Dmu2th2``,
+          ``Dmu3th``. ``D*th2`` packed column-major upper-triangle of
+          shape ``(n, n_theta·(n_theta+1)/2)``.
+
+        Standard families don't implement ``Dd`` — bam's PIRLS path uses
+        the Fisher branch for them. Only extended families override.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__}.Dd() is not implemented; this family "
+            "uses the standard-Fisher PIRLS path. Set is_extended=True "
+            "and implement Dd() to use the extended-family Newton path."
+        )
+
+    def dDeta(self, y, mu, wt, theta, level: int = 0) -> dict:
+        """Convert ``Dd`` (μ-space derivatives) to η-space via the link
+        chain rule. Mirrors mgcv ``dDeta`` (R/efam.r). For identity link
+        it copies ``Dmu → Deta``, ``Dmu2 → Deta2``, ...; for non-identity
+        it applies ``Deta = Dmu · μ_η`` etc with the ``g2g``/``g3g``/
+        ``g4g`` link curvature terms.
+
+        Returns a dict with at minimum ``Deta``, ``Deta2``, ``EDeta2``
+        (level 0). ``Deta.Deta2 = Dmu/(Dmu2·μ_η - Dmu·g2g)`` is the
+        Newton-step working-response numerator that bam's PIRLS reads.
+        """
+        r = self.Dd(y, mu, theta, wt, level=level)
+        link = self.link
+        if link.name == "identity":
+            d = {
+                "Deta": r["Dmu"],
+                "Deta2": r["Dmu2"],
+                "EDeta2": r["EDmu2"],
+                "Deta.Deta2": r["Dmu"] / r["Dmu2"],
+                "Deta.EDeta2": r["Dmu"] / r["EDmu2"],
+            }
+            if level > 0:
+                d.update({
+                    "Dth": r["Dth"],
+                    "Detath": r["Dmuth"],
+                    "Deta3": r["Dmu3"],
+                    "Deta2th": r["Dmu2th"],
+                    "EDeta2th": r["EDmu2th"],
+                    "EDeta3": r.get("EDmu3"),
+                })
+            if level > 1:
+                d.update({
+                    "Deta4": r["Dmu4"],
+                    "Dth2": r["Dth2"],
+                    "Detath2": r["Dmuth2"],
+                    "Deta2th2": r["Dmu2th2"],
+                    "Deta3th": r["Dmu3th"],
+                })
+            return d
+        # Non-identity link path. mgcv ``dDeta`` expects ``link.g2g(μ)``,
+        # ``g3g``, ``g4g`` to be implemented on the link object.
+        ig1 = link.mu_eta(link.link(np.asarray(mu, dtype=float)))
+        ig12 = ig1 * ig1
+        g2g = link.g2g(mu)
+        d = {
+            "Deta": r["Dmu"] * ig1,
+            "Deta2": r["Dmu2"] * ig12 - r["Dmu"] * g2g * ig1,
+            "EDeta2": r["EDmu2"] * ig12,
+        }
+        d["Deta.Deta2"] = r["Dmu"] / (r["Dmu2"] * ig1 - r["Dmu"] * g2g)
+        d["Deta.EDeta2"] = r["Dmu"] / (r["EDmu2"] * ig1)
+        if level > 0:
+            ig13 = ig12 * ig1
+            d["Dth"] = r["Dth"]
+            d["Detath"] = r["Dmuth"] * ig1
+            g3g = link.g3g(mu)
+            d["Deta3"] = (r["Dmu3"] * ig13
+                          - 3.0 * r["Dmu2"] * g2g * ig12
+                          + r["Dmu"] * (3.0 * g2g * g2g - g3g) * ig1)
+            EDmu3 = r.get("EDmu3")
+            if EDmu3 is not None:
+                d["EDeta3"] = EDmu3 * ig13 - 3.0 * r["EDmu2"] * g2g * ig12
+            d["Deta2th"] = r["Dmu2th"] * ig12 - r["Dmuth"] * g2g * ig1
+            EDmu2th = r.get("EDmu2th")
+            if EDmu2th is not None:
+                d["EDeta2th"] = EDmu2th * ig12
+        if level > 1:
+            g4g = link.g4g(mu)
+            ig14 = ig12 * ig12
+            d["Deta4"] = (ig14 * r["Dmu4"]
+                          - 6.0 * r["Dmu3"] * ig13 * g2g
+                          + r["Dmu2"] * (15.0 * g2g * g2g - 4.0 * g3g) * ig12
+                          - r["Dmu"]
+                          * (15.0 * g2g ** 3 - 10.0 * g2g * g3g + g4g)
+                          * ig1)
+            d["Dth2"] = r["Dth2"]
+            d["Detath2"] = r["Dmuth2"] * ig1
+            d["Deta2th2"] = r["Dmu2th2"] * ig12 - r["Dmuth2"] * g2g * ig1
+            d["Deta3th"] = (r["Dmu3th"] * ig13
+                            - 3.0 * r["Dmu2th"] * g2g * ig12
+                            + r["Dmuth"] * (3.0 * g2g * g2g - g3g) * ig1)
+        return d
+
+    def preinitialize(self, y) -> dict | None:
+        """One-shot pre-fit hook. mgcv ``family$preinitialize(y, family)``
+        runs once before the first PIRLS iter and may return ``{"Theta":
+        ...}`` (initial θ override) and/or ``{"y": ...}`` (transformed
+        response). Default: no-op. Extended families with data-dependent
+        θ start (Scat: ``c(1.5, log(0.8·sd(y)))``) override.
+        """
+        return None
+
+    def postproc(self, y, mu, wt) -> dict:
+        """One-shot post-fit hook for display strings. mgcv
+        ``family$postproc`` rewrites ``family$family`` to e.g.
+        ``"Scaled t(5,0.3)"`` reflecting fitted θ. Default: empty dict.
+        """
+        return {}
 
     def initialize(self, y, wt) -> np.ndarray:
         """Starting μ̂ for PIRLS. Return a length-n positive (or family-valid)
@@ -343,9 +505,13 @@ class Family:
     def validmu(self, mu) -> bool:
         return bool(np.all(np.isfinite(mu)))
 
-    def aic(self, y, mu, dev, wt, n) -> float:
+    def aic(self, y, mu, dev, wt, n, theta=None) -> float:
         """``-2·loglik + 2·k_overhead``. Returned without smoothing penalty;
-        the caller adds ``+2·edf`` (or whatever df rule it uses)."""
+        the caller adds ``+2·edf`` (or whatever df rule it uses).
+
+        ``theta`` is accepted but ignored for standard families.
+        Extended families read it for the AIC contribution from θ.
+        """
         raise NotImplementedError
 
     def _aic_dev1(self, dev, scale, wt) -> float:
@@ -388,12 +554,12 @@ class Gaussian(Family):
     def d2var(self, mu): return np.zeros_like(np.asarray(mu, dtype=float))
     def d3var(self, mu): return np.zeros_like(np.asarray(mu, dtype=float))
 
-    def dev_resids(self, y, mu, wt):
+    def dev_resids(self, y, mu, wt, theta=None):
         y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         return wt * (y - mu) ** 2
 
-    def aic(self, y, mu, dev, wt, n):
+    def aic(self, y, mu, dev, wt, n, theta=None):
         n_eff = float(np.sum(wt))
         sigma2 = dev / n_eff
         # mgcv's gaussian()$aic: n·(log(2πσ²)+1) + 2 — note the +2 is the
@@ -435,7 +601,7 @@ class Gamma(Family):
     def d3var(self, mu):
         return np.zeros_like(np.asarray(mu, dtype=float))
 
-    def dev_resids(self, y, mu, wt):
+    def dev_resids(self, y, mu, wt, theta=None):
         y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         # mgcv: -2 wt (log(y/μ) - (y-μ)/μ); use ifelse(y==0, 1, y/μ) so
@@ -453,7 +619,7 @@ class Gamma(Family):
         mu = np.asarray(mu)
         return bool(np.all(np.isfinite(mu)) and np.all(mu > 0))
 
-    def aic(self, y, mu, dev, wt, n):
+    def aic(self, y, mu, dev, wt, n, theta=None):
         wt = np.asarray(wt, dtype=float)
         n_eff = float(wt.sum())
         disp = dev / n_eff
@@ -498,7 +664,7 @@ class Poisson(Family):
     def d2var(self, mu): return np.zeros_like(np.asarray(mu, dtype=float))
     def d3var(self, mu): return np.zeros_like(np.asarray(mu, dtype=float))
 
-    def dev_resids(self, y, mu, wt):
+    def dev_resids(self, y, mu, wt, theta=None):
         # mgcv: 2 wt (y log(y/μ) - (y-μ)); with the convention 0·log(0/μ) = 0
         # so a y=0 row contributes 2 wt μ.
         y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
@@ -523,7 +689,7 @@ class Poisson(Family):
         mu = np.asarray(mu)
         return bool(np.all(np.isfinite(mu)) and np.all(mu > 0))
 
-    def aic(self, y, mu, dev, wt, n):
+    def aic(self, y, mu, dev, wt, n, theta=None):
         y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -561,7 +727,7 @@ class Binomial(Family):
     def d3var(self, mu):
         return np.zeros_like(np.asarray(mu, dtype=float))
 
-    def dev_resids(self, y, mu, wt):
+    def dev_resids(self, y, mu, wt, theta=None):
         # mgcv (C_binomial_dev_resids): 2 wt [ y_log_y(y, μ) + y_log_y(1-y, 1-μ) ]
         # where y_log_y(y, μ) = y log(y/μ) for y>0, else 0.
         y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
@@ -589,7 +755,7 @@ class Binomial(Family):
         mu = np.asarray(mu)
         return bool(np.all(np.isfinite(mu)) and np.all(mu > 0) and np.all(mu < 1))
 
-    def aic(self, y, mu, dev, wt, n):
+    def aic(self, y, mu, dev, wt, n, theta=None):
         # mgcv: m = wt; -2 Σ (wt/m) · dbinom(round(m·y), round(m), μ, log=TRUE).
         # With m = wt this collapses to -2 Σ dbinom(round(wt·y), round(wt), μ, log=TRUE).
         y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
@@ -623,7 +789,7 @@ class InverseGaussian(Family):
     def d3var(self, mu):
         return np.full_like(np.asarray(mu, dtype=float), 6.0)
 
-    def dev_resids(self, y, mu, wt):
+    def dev_resids(self, y, mu, wt, theta=None):
         # mgcv: wt · (y - μ)² / (y · μ²).
         y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
@@ -641,7 +807,7 @@ class InverseGaussian(Family):
         # R/stats: TRUE — boundary handling is via the link's valideta.
         return bool(np.all(np.isfinite(np.asarray(mu, dtype=float))))
 
-    def aic(self, y, mu, dev, wt, n):
+    def aic(self, y, mu, dev, wt, n, theta=None):
         # mgcv: sum(wt) · (1 + log(dev/sum(wt) · 2π)) + 3 · Σ wt · log(y) + 2.
         y = np.asarray(y, dtype=float); wt = np.asarray(wt, dtype=float)
         sw = float(wt.sum())
@@ -711,7 +877,7 @@ class Quasi(Family):
     def d2var(self, mu):    return self._shadow.d2var(mu)
     def d3var(self, mu):    return self._shadow.d3var(mu)
 
-    def dev_resids(self, y, mu, wt):
+    def dev_resids(self, y, mu, wt, theta=None):
         return self._shadow.dev_resids(y, mu, wt)
 
     def initialize(self, y, wt):
@@ -730,7 +896,7 @@ class Quasi(Family):
     def validmu(self, mu):
         return self._shadow.validmu(mu)
 
-    def aic(self, y, mu, dev, wt, n):
+    def aic(self, y, mu, dev, wt, n, theta=None):
         return float("nan")
 
     def ls(self, y, wt, scale):
@@ -936,7 +1102,7 @@ class Tweedie(Family):
         return (self.p * (self.p - 1.0) * (self.p - 2.0)
                 * np.asarray(mu, dtype=float) ** (self.p - 3.0))
 
-    def dev_resids(self, y, mu, wt):
+    def dev_resids(self, y, mu, wt, theta=None):
         # 1<p<2 form (Jorgensen 1987):
         #   y > 0:  d_i = 2·[ y·(y^(1-p) - μ^(1-p))/(1-p) - (y^(2-p) - μ^(2-p))/(2-p) ]
         #   y = 0:  d_i = 2·μ^(2-p)/(2-p)
@@ -991,7 +1157,7 @@ class Tweedie(Family):
             out[~zero] = -np.log(y[~zero]) + la + cumulant[~zero] / phi_i[~zero]
         return out
 
-    def aic(self, y, mu, dev, wt, n):
+    def aic(self, y, mu, dev, wt, n, theta=None):
         # mgcv's ``Tweedie()$aic``: -2·Σ wt·log f at the fitted (μ, φ̂) plus
         # +2 for the φ "extra df". φ̂ is the Pearson moment scale (matches
         # mgcv:::fix.family.aic which expects the post-fit scale).
