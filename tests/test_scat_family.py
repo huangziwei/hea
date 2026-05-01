@@ -165,3 +165,35 @@ def test_scat_link_validation():
     Scat(link="inverse")
     with pytest.raises(ValueError, match="not available for scat"):
         Scat(link="probit")
+
+
+# ---------- _estimate_theta vs mgcv estimate.theta -------------------------
+
+_ETH = Path(__file__).parent / "fixtures" / "scat_estth"
+
+
+@pytest.mark.skipif(
+    not (_ETH / "inputs.csv").exists(),
+    reason="scat estimate.theta oracle missing — run "
+           "tests/r_oracle/dump_scat_estth.R",
+)
+@pytest.mark.parametrize("init_name", ["near", "far"])
+def test_scat_estimate_theta(init_name: str):
+    """mgcv ``estimate.theta`` parity for ``_estimate_theta`` on a
+    Scat family with heavy-tailed residuals (so ν stays finite and
+    both impls converge to a well-defined optimum)."""
+    from hea.bam import _estimate_theta
+    df = pl.read_csv(str(_ETH / "inputs.csv"))
+    y = df["y"].to_numpy().astype(float)
+    mu = df["mu"].to_numpy().astype(float)
+    th0 = np.atleast_1d(np.loadtxt(_ETH / f"{init_name}_init.csv"))
+    th_oracle = np.atleast_1d(np.loadtxt(_ETH / f"{init_name}_out.csv"))
+
+    s = Scat(min_df=4)
+    s.set_theta(th0)
+    th_h = _estimate_theta(s, y, mu, scale=1.0, wt=np.ones(len(y)),
+                           tol=1e-7)
+    err = float(np.max(np.abs(th_h - th_oracle)))
+    assert err < 1e-12, (
+        f"{init_name}-init: hea={th_h}, mgcv={th_oracle}, err={err:.3e}"
+    )

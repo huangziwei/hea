@@ -335,6 +335,208 @@ def _build_repara_slots(
     return slots_pre
 
 
+def _estimate_theta(
+    family: Family,
+    y: np.ndarray,
+    mu: np.ndarray,
+    *,
+    scale: float = 1.0,
+    wt: Optional[np.ndarray] = None,
+    tol: float = 1e-7,
+) -> np.ndarray:
+    """Inner Newton on the family's extra parameters θ at fixed (y, μ).
+
+    Direct port of mgcv ``estimate.theta`` (R/efam.r:5-96). Used inside
+    the bgam.fitd PIRLS loop after iter 1: each PIRLS step updates β at
+    fixed θ, then this routine updates θ at fixed β; the two alternate
+    until both converge.
+
+    Negative log-likelihood objective per mgcv:
+
+        nll(θ) = dev(y, μ, w, θ) / (2·scale) − ls(y, w, θ, scale)
+
+    where ``dev`` is the family's deviance and ``ls`` is the saturated
+    log-likelihood (mgcv ``family$ls`` returning ``{ls, lsth1, lsth2}``).
+    Gradient and Hessian come from ``family.Dd(level=2)`` (μ-side
+    derivatives summed over observations) plus the ``ls`` derivatives.
+
+    For ``scale < 0`` (scale-unknown extended families), an extra
+    log-φ slot is appended to θ and updated jointly. Scat is
+    ``scale_known = True`` (always called with ``scale = 1``) so the
+    scale<0 branches are dead for the user's model — we keep them so
+    future families like ``betar`` plug in unchanged.
+
+    Newton specifics:
+
+    * Eigen-decompose H; if any eigenvalue ≤ 0 use ``|λ_i|`` floored at
+      ``max(λ)·1e-5`` (mgcv R/efam.r:60-64) to make H positive-def.
+    * Step ``= -H⁻¹·g`` capped to ``|step|_∞ ≤ 4`` (R/efam.r:69-70).
+    * Step halving (≤ 25 iters) while uphill (R/efam.r:75-82).
+    * Outer iters capped at 100 (R/efam.r:57).
+    * Componentwise convergence ``|g_i| ≤ tol·(|nll| + 1)`` — only
+      update components flagged by the ``uconv`` mask.
+
+    Returns the converged θ (same shape as the family's internal θ when
+    ``scale ≥ 0``; appended with ``log φ̂`` when ``scale < 0``).
+    """
+    if not family.is_extended:
+        raise ValueError(
+            f"_estimate_theta called with non-extended family "
+            f"{type(family).__name__}"
+        )
+    y = np.asarray(y, dtype=float)
+    mu = np.asarray(mu, dtype=float)
+    if wt is None:
+        wt = np.ones_like(y)
+    else:
+        wt = np.asarray(wt, dtype=float)
+    n_theta = int(family.n_theta)
+    if scale >= 0 and n_theta == 0:
+        raise ValueError(
+            "estimate_theta called with no free parameters: family is "
+            "scale-known and n_theta=0"
+        )
+    theta = family.get_theta().copy()
+    # mgcv: when scale<0 (scale-unknown extended family), append a
+    # starting log φ slot to θ — using either ``log(var(y)*0.1)`` if
+    # μ ≈ y (all data already explained ⇒ score scale init) or
+    # ``log(mean((y-μ)²/V(μ)))`` otherwise.
+    if scale < 0:
+        if np.allclose(y, mu):
+            log_phi0 = float(np.log(np.var(y) * 0.1))
+        else:
+            V = family.variance(mu)
+            log_phi0 = float(np.log(np.mean((y - mu) ** 2 / V)))
+        theta = np.concatenate([theta, [log_phi0]])
+    n_total = theta.shape[0]
+    # ``del.ind`` deletes the first n_theta slots when scale<0 AND
+    # n_theta=0 (the original n_theta-slot was a no-op then). When
+    # n_theta>0 we keep all slots and del.ind is unused. We follow
+    # mgcv's index discipline so future ``betar``-style families
+    # (n_theta=0, scale<0) get the right gradient/Hessian sub-block.
+    del_ind = slice(0, n_theta)
+
+    def _nlogl(theta_eval: np.ndarray, deriv: int):
+        # mgcv R/efam.r:14-45 verbatim. ``theta_eval`` may include a
+        # trailing log φ slot when scale<0; strip it for the family
+        # calls and re-add the φ-direction gradient / Hessian rows.
+        nth = n_theta
+        if scale < 0:
+            scale_eval = float(np.exp(theta_eval[nth]))
+            theta_for_family = theta_eval[:nth]
+            get_scale = True
+        else:
+            scale_eval = float(scale)
+            theta_for_family = theta_eval
+            get_scale = False
+        dev = float(np.sum(
+            family.dev_resids(y, mu, wt, theta=theta_for_family)
+        )) / scale_eval
+        if deriv > 0:
+            Dd = family.Dd(y, mu, theta_for_family, wt, level=deriv)
+        ls = family.ls_extended(y, wt, theta=theta_for_family,
+                                scale=scale_eval)
+        nll = dev / 2.0 - float(ls["ls"])
+
+        if deriv > 0:
+            Dth = np.atleast_2d(Dd["Dth"])
+            g1 = Dth.sum(axis=0) / (2.0 * scale_eval)
+            if get_scale:
+                g = np.concatenate([g1, [-dev / 2.0]])
+            else:
+                g = g1.copy()
+            ind = slice(0, g.shape[0])
+            g = g - np.atleast_1d(ls["lsth1"])[ind]
+        else:
+            g = None
+
+        if deriv > 1:
+            Dth2_packed = np.atleast_2d(Dd["Dth2"])
+            xs = Dth2_packed.sum(axis=0) / (2.0 * scale_eval)
+            Dth2 = np.zeros((nth, nth), dtype=float)
+            k = 0
+            for ii in range(nth):
+                for jj in range(ii, nth):
+                    Dth2[ii, jj] = Dth2[jj, ii] = xs[k]
+                    k += 1
+            if get_scale:
+                # mgcv R/efam.r:41: rbind(cbind(Dth2,-g1), c(-g1,dev/2))
+                top = np.column_stack([Dth2, -g1.reshape(-1, 1)])
+                bot = np.append(-g1, dev / 2.0).reshape(1, -1)
+                Dth2 = np.vstack([top, bot])
+            ls_h2 = np.atleast_2d(ls["lsth2"])
+            H = Dth2 - ls_h2[ind, ind]
+        else:
+            H = None
+        return nll, g, H
+
+    # Initial probe
+    nll, g, H = _nlogl(theta, 2)
+    if n_theta == 0:
+        # Drop the first n_theta=0 slots — no-op slice; this keeps the
+        # mgcv index discipline so betar-style families work.
+        g = g[n_theta:]
+        H = H[n_theta:, n_theta:]
+    eps_thresh = float(np.finfo(float).eps ** 0.75)
+    step_failed = False
+    uconv = np.abs(g) > tol * (abs(nll) + 1.0)
+
+    if np.any(uconv):
+        for _ in range(100):
+            H_act = H[np.ix_(uconv, uconv)]
+            evals, evecs = np.linalg.eigh(0.5 * (H_act + H_act.T))
+            pdef = bool(np.all(evals > 0.0))
+            if not pdef:
+                # mgcv R/efam.r:60-64: |λ| floored at max(|λ|)*1e-5
+                evals = np.abs(evals)
+                thresh = float(evals.max()) * 1e-5 if evals.size > 0 else 0.0
+                evals = np.where(evals < thresh, thresh, evals)
+            # Newton step via eigen: step = −V·diag(1/λ)·Vᵀ·g
+            step0 = -evecs @ ((evecs.T @ g[uconv]) / evals)
+            if n_theta == 0:
+                step0 = np.concatenate([np.zeros(n_theta), step0])
+            ms = float(np.max(np.abs(step0)))
+            if ms > 4.0:
+                step0 = step0 * 4.0 / ms
+            step = np.zeros_like(theta)
+            step[uconv] = step0
+
+            # mgcv R/efam.r:73: deriv-2 probe at the proposed θ+step.
+            # Reused as the next iteration's (g, H) when no halving fires.
+            nll1, g1, H1 = _nlogl(theta + step, 2)
+            it_halv = 0
+            while nll1 - nll > eps_thresh * abs(nll):
+                step = step / 2.0
+                it_halv += 1
+                if np.all(theta == theta + step) or it_halv > 25:
+                    step_failed = True
+                    break
+                # mgcv R/efam.r:81: deriv=0 probe inside halving — only
+                # the nll value matters for the uphill check.
+                nll1, _, _ = _nlogl(theta + step, 0)
+            if step_failed:
+                break
+            theta = theta + step
+            # mgcv R/efam.r:86: if iter>0 (halving fired) re-probe at
+            # the halved θ for fresh (g, H); otherwise reuse the
+            # deriv-2 evaluation at the un-halved θ.
+            if it_halv > 0:
+                nll, g, H = _nlogl(theta, 2)
+            else:
+                nll, g, H = nll1, g1, H1
+            if n_theta == 0:
+                g = g[n_theta:]
+                H = H[n_theta:, n_theta:]
+            uconv = np.abs(g) > tol * (abs(nll) + 1.0)
+            if not np.any(uconv):
+                break
+
+    if step_failed:
+        import warnings
+        warnings.warn("step failure in theta estimation", stacklevel=2)
+    return theta
+
+
 def _pi_fit_chol(
     XX: np.ndarray, Xy: np.ndarray, rho: np.ndarray,
     slots: list, p: int, *, yy: float = 0.0,
