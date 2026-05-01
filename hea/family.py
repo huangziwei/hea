@@ -104,6 +104,12 @@ class LogLink(Link):
     def d2link(self, mu): return -1.0 / np.asarray(mu, dtype=float)**2
     def d3link(self, mu): return 2.0 / np.asarray(mu, dtype=float)**3
     def d4link(self, mu): return -6.0 / np.asarray(mu, dtype=float)**4
+    # log link: g'(μ)=1/μ, g''(μ)=-1/μ², g'''(μ)=2/μ³, g''''(μ)=-6/μ⁴ →
+    # g2g=g''/g'²=-1, g3g=g'''/g'³=2, g4g=g''''/g'⁴=-6.
+    # mgcv gam.fit3.r:2229-2231.
+    def g2g(self, mu): return -np.ones_like(np.asarray(mu, dtype=float))
+    def g3g(self, mu): return 2.0 * np.ones_like(np.asarray(mu, dtype=float))
+    def g4g(self, mu): return -6.0 * np.ones_like(np.asarray(mu, dtype=float))
 
 
 class InverseLink(Link):
@@ -114,6 +120,13 @@ class InverseLink(Link):
     def d2link(self, mu): return 2.0 / np.asarray(mu, dtype=float)**3
     def d3link(self, mu): return -6.0 / np.asarray(mu, dtype=float)**4
     def d4link(self, mu): return 24.0 / np.asarray(mu, dtype=float)**5
+    # inverse link: g'=-1/μ², g''=2/μ³, g'''=-6/μ⁴, g''''=24/μ⁵ →
+    # g2g = g''/g'² = (2/μ³)·μ⁴ = 2μ;  g3g = g'''/g'³ = (-6/μ⁴)·(-μ⁶) = 6μ²;
+    # g4g = g''''/g'⁴ = (24/μ⁵)·μ⁸ = 24μ³.
+    # mgcv gam.fit3.r:2234-2236.
+    def g2g(self, mu): return 2.0 * np.asarray(mu, dtype=float)
+    def g3g(self, mu): return 6.0 * np.asarray(mu, dtype=float)**2
+    def g4g(self, mu): return 24.0 * np.asarray(mu, dtype=float)**3
     def valideta(self, eta):
         eta = np.asarray(eta)
         return bool(np.all(eta != 0))
@@ -1442,6 +1455,402 @@ class tw(Tweedie):
                 f"a={self.a!r}, b={self.b!r})")
 
 
+# ---------------------------------------------------------------------------
+# Scaled-t — mgcv's ``scat()`` extended family
+# ---------------------------------------------------------------------------
+
+
+class Scat(Family):
+    """Scaled-t extended family — direct port of mgcv ``scat()``
+    (efam.r:3552-3768).
+
+    Likelihood (with location ``μ``, scale ``σ``, dof ``ν``):
+
+        f(y | μ, ν, σ) ∝ σ⁻¹ · (1 + ((y-μ)/σ)² / ν)^{-(ν+1)/2}
+
+    Parameters ν and σ are estimated jointly with the smoothing
+    parameters (mgcv ``estimate.theta``). Internally stored in log-form
+    with a lower-bound shift on ν:
+
+        θ₀ = log(ν − min_df)        ⇒  ν = exp(θ₀) + min_df > min_df
+        θ₁ = log(σ)                  ⇒  σ = exp(θ₁) > 0
+
+    ``min_df`` (default 3) prevents degenerate ν → 2 where the variance
+    blows up. Set higher when the data clearly aren't very heavy-tailed.
+
+    Default link ``identity``; ``log`` and ``inverse`` are also accepted
+    (mgcv ``okLinks``).
+    """
+    name = "scat"
+    canonical_link_name = "identity"
+    # mgcv treats scat as a fixed-scale family (``family$scale = 1``):
+    # σ is in θ, not in φ. The bam/gam outer Newton therefore has no
+    # log-φ slot for scat.
+    scale_known = True
+    is_extended = True
+    n_theta = 2
+
+    _OK_LINKS = ("identity", "log", "inverse")
+
+    def __init__(self, theta=None, link: str = "identity",
+                 min_df: float = 3.0):
+        if link not in self._OK_LINKS:
+            raise ValueError(
+                f'link "{link}" not available for scat family; available '
+                f'links are {self._OK_LINKS}'
+            )
+        # Match mgcv's ``min.df`` clamp + theta-sign decoding (efam.r:3576-3587):
+        # * theta=None  → free θ, log-internal start (-2, -1)  → (ν=min_df+e⁻², σ=e⁻¹)
+        # * theta given, all positive → fixed θ, n_theta=0
+        # * theta given, any negative → free θ at |theta| as start
+        # * if |theta[0]| ≤ min_df, lower min_df to 0.9·|theta[0]| with a warning.
+        n_theta = 2
+        if theta is not None and not np.any(np.asarray(theta) == 0.0):
+            t = np.asarray(theta, dtype=float)
+            if t.shape != (2,):
+                raise ValueError(
+                    f"scat theta must be a length-2 array (ν, σ); got "
+                    f"shape {t.shape}"
+                )
+            if abs(t[0]) <= min_df:
+                import warnings
+                min_df = 0.9 * abs(t[0])
+                warnings.warn(
+                    "Supplied df below min.df. min.df reset",
+                    stacklevel=2,
+                )
+            if np.any(t < 0):
+                ini = np.array([np.log(abs(t[0]) - min_df),
+                                np.log(abs(t[1]))], dtype=float)
+            else:
+                ini = np.array([np.log(t[0] - min_df),
+                                np.log(t[1])], dtype=float)
+                n_theta = 0
+        else:
+            ini = np.array([-2.0, -1.0], dtype=float)
+        # Apply the actual instance settings.
+        self.n_theta = int(n_theta)
+        self.estimate_theta_callback = bool(n_theta > 0)
+        self._min_df = float(min_df)
+        self._theta = ini.copy()
+        super().__init__(link=link)
+
+    # ----- θ accessors (mgcv getTheta/putTheta) -------------------------
+
+    def set_theta(self, values) -> None:
+        v = np.asarray(values, dtype=float)
+        if v.shape != (2,):
+            raise ValueError(
+                f"Scat.set_theta expects length-2 array (log θ); got "
+                f"shape {v.shape}"
+            )
+        self._theta = v.copy()
+
+    def get_theta(self, trans: bool = False) -> np.ndarray:
+        """Return current θ. ``trans=True`` returns ``(ν, σ)`` on the
+        original scale; ``trans=False`` returns the log-internal storage.
+        Mirrors mgcv ``getTheta(trans=)``.
+        """
+        if trans:
+            out = np.exp(self._theta).copy()
+            out[0] += self._min_df
+            return out
+        return self._theta.copy()
+
+    @property
+    def min_df(self) -> float:
+        return self._min_df
+
+    # ----- variance / dev_resids / aic / ls -----------------------------
+
+    def variance(self, mu):
+        # Marginal var of σ·T(ν): σ²·ν/(ν-2). Used for sp init / Pearson.
+        nu = float(np.exp(self._theta[0]) + self._min_df)
+        sig = float(np.exp(self._theta[1]))
+        return np.full(np.shape(mu), sig * sig * nu / max(nu - 2.0, 1e-10),
+                       dtype=float)
+
+    def dvar(self, mu):
+        return np.zeros_like(np.asarray(mu, dtype=float))
+
+    def d2var(self, mu):
+        return np.zeros_like(np.asarray(mu, dtype=float))
+
+    def d3var(self, mu):
+        return np.zeros_like(np.asarray(mu, dtype=float))
+
+    def dev_resids(self, y, mu, wt, theta=None):
+        # mgcv: wt * (ν+1) * log1p((1/ν) * ((y-μ)/σ)²)  (efam.r:3609-3614)
+        th = self._theta if theta is None else np.asarray(theta, dtype=float)
+        nu = float(np.exp(th[0]) + self._min_df)
+        sig = float(np.exp(th[1]))
+        y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        return wt * (nu + 1.0) * np.log1p((1.0 / nu) * ((y - mu) / sig) ** 2)
+
+    def initialize(self, y, wt):
+        y = np.asarray(y, dtype=float)
+        if np.any(np.isnan(y)):
+            raise ValueError("NA values not allowed for the scaled t family")
+        # mgcv: mustart <- y + (y == 0) * 0.1   (efam.r:3736-3740)
+        return y + (y == 0.0).astype(float) * 0.1
+
+    def validmu(self, mu) -> bool:
+        return bool(np.all(np.isfinite(mu)))
+
+    def aic(self, y, mu, dev, wt, n, theta=None):
+        # mgcv: -2·logL = 2·Σ wt·[ -lgamma((ν+1)/2) + lgamma(ν/2)
+        #                          + log(σ·sqrt(πν))
+        #                          + (ν+1)·log1p(((y-μ)/σ)²/ν)/2 ]
+        # (efam.r:3690-3697)
+        th = self._theta if theta is None else np.asarray(theta, dtype=float)
+        nu = float(np.exp(th[0]) + self._min_df)
+        sig = float(np.exp(th[1]))
+        y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        term = (-gammaln((nu + 1.0) / 2.0)
+                + gammaln(nu / 2.0)
+                + np.log(sig * np.sqrt(np.pi * nu))
+                + (nu + 1.0) * np.log1p(((y - mu) / sig) ** 2 / nu) / 2.0)
+        return 2.0 * float(np.sum(term * wt))
+
+    def ls_extended(self, y, wt, theta=None, scale: float = 1.0) -> dict:
+        """Saturated log-likelihood and θ-derivatives — mgcv ``ls`` for
+        scat (efam.r:3699-3723). Returns a dict matching mgcv's shape:
+
+            ls    : scalar saturated log-lik, Σᵢ wᵢ · ls_i(θ)
+            lsth1 : (2,)   first derivatives wrt θ summed over i
+            LSTH1 : (n,2)  per-obs first-derivative matrix
+            lsth2 : (2,2)  Hessian wrt θ
+
+        Used by ``_estimate_theta`` (Phase D). The base
+        ``Family.ls(y, wt, scale)`` 3-vector signature is preserved for
+        the standard families; extended-family callers test
+        ``family.is_extended`` and dispatch here.
+        """
+        th = self._theta if theta is None else np.asarray(theta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        w = np.asarray(wt, dtype=float)
+        if w.size == 1:
+            w = np.full(y.shape, float(w))
+        nu = float(np.exp(th[0]) + self._min_df)
+        sig = float(np.exp(th[1]))
+        nu2 = nu - self._min_df       # = exp(th[0])
+        nu2nu = nu2 / nu
+        nu12 = (nu + 1.0) / 2.0
+        # ls_i = lgamma((ν+1)/2) - lgamma(ν/2) - log(σ·sqrt(π·ν))
+        term0 = (gammaln(nu12) - gammaln(nu / 2.0)
+                 - np.log(sig * np.sqrt(np.pi * nu)))
+        ls0 = float(np.sum(term0 * w))
+        # First derivatives (per-obs, then summed):
+        #   ∂ls/∂θ₀ per-obs = nu2 · ψ((ν+1)/2)/2 − nu2 · ψ(ν/2)/2 − 0.5·nu2nu
+        #   ∂ls/∂θ₁ per-obs = -1   (constant)
+        col0 = nu2 * digamma(nu12) / 2.0 - nu2 * digamma(nu / 2.0) / 2.0 \
+            - 0.5 * nu2nu
+        LSTH = np.column_stack([w * col0, -1.0 * w])
+        lsth = LSTH.sum(axis=0)
+        # Hessian (only [1,1] is nonzero per mgcv's ls):
+        #   ∂²ls/∂θ₀² per-obs = nu2² · ψ′((ν+1)/2)/4 + nu2 · ψ((ν+1)/2)/2
+        #                       − nu2² · ψ′(ν/2)/4 − nu2 · ψ(ν/2)/2
+        #                       + 0.5·nu2nu² − 0.5·nu2nu
+        d11 = (nu2 * nu2 * polygamma(1, nu12) / 4.0
+               + nu2 * digamma(nu12) / 2.0
+               - nu2 * nu2 * polygamma(1, nu / 2.0) / 4.0
+               - nu2 * digamma(nu / 2.0) / 2.0
+               + 0.5 * nu2nu * nu2nu - 0.5 * nu2nu)
+        lsth2 = np.zeros((2, 2), dtype=float)
+        lsth2[0, 0] = float(np.sum(d11 * w))
+        return {"ls": ls0, "lsth1": lsth, "LSTH1": LSTH, "lsth2": lsth2}
+
+    def ls(self, y, wt, scale):
+        """Compatibility shim: extended-family callers go through
+        ``ls_extended``; the standard ``Family.ls`` 3-vector contract
+        used by Gaussian/Gamma/etc. doesn't apply here.
+        """
+        raise NotImplementedError(
+            "Scat is an extended family; call ls_extended(y, wt, theta, scale) "
+            "instead of ls(y, wt, scale)."
+        )
+
+    # ----- Dd: μ- and θ-derivatives of −logL  (mgcv efam.r:3616-3687) ---
+
+    def Dd(self, y, mu, theta, wt, level: int = 0) -> dict:
+        # Direct line-by-line port of mgcv ``scat$Dd``. Every variable
+        # name and bracketing matches the source so future diffs against
+        # mgcv stay mechanical.
+        min_df = self._min_df
+        th = np.asarray(theta, dtype=float)
+        nu = float(np.exp(th[0]) + min_df)
+        sig = float(np.exp(th[1]))
+        nu1 = nu + 1.0
+        nu2 = nu - min_df
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
+        w = np.asarray(wt, dtype=float)
+        # mgcv broadcasts ``wt`` if scalar; when w is scalar, multiply
+        # against length-n arrays via numpy broadcasting (works as-is).
+        ym = y - mu
+        a = 1.0 + (ym / sig) ** 2 / nu
+        nu1ym = nu1 * ym
+        sig2a = sig * sig * a
+        nusig2a = nu * sig2a
+        f = nu1ym / nusig2a
+        f1 = ym / nusig2a
+        n = y.shape[0]
+
+        oo: dict = {}
+        oo["Dmu"] = -2.0 * w * f
+        oo["Dmu2"] = 2.0 * w * nu1 * (1.0 / nusig2a - 2.0 * f1 ** 2)
+        # E[Dmu2] is the Fisher information per-obs at expected (y-μ)²:
+        # 2·(ν+1) / (σ²·(ν+3)). Vectorised to length n.
+        EDmu2_scalar = 2.0 * nu1 / (sig * sig) / (nu + 3.0)
+        oo["EDmu2"] = np.full(n, EDmu2_scalar, dtype=float)
+
+        if level > 0:
+            nu1nusig2a = nu1 / nusig2a
+            nu2nu = nu2 / nu
+            fym = f * ym
+            ff1 = f * f1
+            f1ym = f1 * ym
+            fymf1 = fym * f1
+            ymsig2a = ym / sig2a
+
+            Dth = np.zeros((n, 2), dtype=float)
+            Dmuth = np.zeros((n, 2), dtype=float)
+            Dmu2th = np.zeros((n, 2), dtype=float)
+            EDmu2th = np.zeros((n, 2), dtype=float)
+            Dth[:, 0] = w * nu2 * (np.log(a) - fym / nu)
+            Dth[:, 1] = -2.0 * w * fym
+            Dmuth[:, 0] = 2.0 * w * (f - ymsig2a - fymf1) * nu2nu
+            Dmuth[:, 1] = 4.0 * w * f * (1.0 - f1ym)
+            Dmu3 = 4.0 * w * f * (3.0 / nusig2a - 4.0 * f1 ** 2)
+            Dmu2th[:, 0] = 2.0 * w * (
+                -nu1nusig2a + 1.0 / sig2a + 5.0 * ff1
+                - 2.0 * f1ym / sig2a - 4.0 * fymf1 * f1
+            ) * nu2nu
+            Dmu2th[:, 1] = 4.0 * w * (
+                -nu1nusig2a + ff1 * 5.0 - 4.0 * ff1 * f1ym
+            )
+            EDmu3 = np.zeros(n, dtype=float)
+            EDmu2th[:, 0] = (4.0 / (sig * sig * (nu + 3.0) ** 2)
+                             * float(np.exp(th[0])))
+            EDmu2th[:, 1] = -2.0 * oo["EDmu2"]
+
+            oo["Dth"] = Dth
+            oo["Dmuth"] = Dmuth
+            oo["Dmu3"] = Dmu3
+            oo["Dmu2th"] = Dmu2th
+            oo["EDmu3"] = EDmu3
+            oo["EDmu2th"] = EDmu2th
+
+        if level > 1:
+            nu1nu = nu1 / nu
+            fymf1ym = fym * f1ym
+            f1ymf1 = f1ym * f1
+
+            Dmu4 = 12.0 * w * (
+                -nu1nusig2a / nusig2a + 8.0 * ff1 / nusig2a
+                - 8.0 * ff1 * f1 ** 2
+            )
+            n2d = 3
+            Dmu3th = np.zeros((n, 2), dtype=float)
+            Dmu2th2 = np.zeros((n, n2d), dtype=float)
+            Dmuth2 = np.zeros((n, n2d), dtype=float)
+            Dth2 = np.zeros((n, n2d), dtype=float)
+
+            Dmu3th[:, 0] = 4.0 * w * (
+                -6.0 * f / nusig2a + 3.0 * f1 / sig2a
+                + 18.0 * ff1 * f1 - 4.0 * f1ymf1 / sig2a
+                - 12.0 * nu1ym * f1 ** 4
+            ) * nu2nu
+            Dmu3th[:, 1] = 48.0 * w * f * (
+                -1.0 / nusig2a + 3.0 * f1 ** 2 - 2.0 * f1ymf1 * f1
+            )
+
+            Dth2[:, 0] = w * (
+                nu2 * np.log(a)
+                + nu2nu * ym ** 2
+                * (-2.0 * nu2 - nu1 + 2.0 * nu1 * nu2nu
+                   - nu1 * nu2nu * f1ym) / nusig2a
+            )
+            Dth2[:, 1] = 2.0 * w * (fym - ym * ymsig2a - fymf1ym) * nu2nu
+            Dth2[:, 2] = 4.0 * w * fym * (1.0 - f1ym)
+
+            term_a = 2.0 * nu2nu - 2.0 * nu1nu * nu2nu - 1.0 + nu1nu
+            Dmuth2[:, 0] = 2.0 * w * f1 * nu2 * (
+                term_a - 2.0 * nu2nu * f1ym + 4.0 * fym * nu2nu / nu
+                - fym / nu - 2.0 * fymf1ym * nu2nu / nu
+            )
+            Dmuth2[:, 1] = 4.0 * w * (
+                -f + ymsig2a + 3.0 * fymf1
+                - ymsig2a * f1ym - 2.0 * fymf1 * f1ym
+            ) * nu2nu
+            Dmuth2[:, 2] = 8.0 * w * f * (-1.0 + 3.0 * f1ym - 2.0 * f1ym ** 2)
+
+            Dmu2th2[:, 0] = 2.0 * w * nu2 * (
+                -term_a + 10.0 * nu2nu * f1ym - 16.0 * fym * nu2nu / nu
+                - 2.0 * f1ym + 5.0 * nu1nu * f1ym
+                - 8.0 * nu2nu * f1ym ** 2
+                + 26.0 * fymf1ym * nu2nu / nu
+                - 4.0 * nu1nu * f1ym ** 2
+                - 12.0 * nu1nu * nu2nu * f1ym ** 3
+            ) / nusig2a
+            Dmu2th2[:, 1] = 4.0 * w * (
+                nu1nusig2a - 1.0 / sig2a - 11.0 * nu1 * f1 ** 2
+                + 5.0 * f1ym / sig2a + 22.0 * nu1 * f1ymf1 * f1
+                - 4.0 * f1ym ** 2 / sig2a - 12.0 * nu1 * f1ymf1 ** 2
+            ) * nu2nu
+            Dmu2th2[:, 2] = 8.0 * w * (
+                nu1nusig2a - 11.0 * nu1 * f1 ** 2
+                + 22.0 * nu1 * f1ymf1 * f1 - 12.0 * nu1 * f1ymf1 ** 2
+            )
+
+            oo["Dmu4"] = Dmu4
+            oo["Dmu3th"] = Dmu3th
+            oo["Dmu2th2"] = Dmu2th2
+            oo["Dmuth2"] = Dmuth2
+            oo["Dth2"] = Dth2
+
+        return oo
+
+    # ----- preinitialize / postproc / rd  (mgcv efam.r:3725-3757) -------
+
+    def preinitialize(self, y) -> dict | None:
+        # mgcv: when n.theta > 0, start with moderate ν and high σ:
+        #   Theta <- c(1.5, log(0.8 * sd(y)))  (efam.r:3725-3734)
+        # When all θ are user-fixed (n_theta = 0), no override.
+        if self.n_theta > 0:
+            y = np.asarray(y, dtype=float)
+            sd_y = float(np.std(y, ddof=1)) if y.size > 1 else 1.0
+            sd_y = max(sd_y, 1e-10)  # guard against constant y
+            return {"Theta": np.array([1.5, np.log(0.8 * sd_y)],
+                                      dtype=float)}
+        return None
+
+    def postproc(self, y, mu, wt) -> dict:
+        # mgcv builds "Scaled t(ν, σ)" with values rounded to 3 decimals;
+        # if ν > 999 it's reported as Inf.  (efam.r:3742-3749)
+        nu, sig = self.get_theta(trans=True)
+        nu_disp = float(np.round(nu, 3))
+        sig_disp = float(np.round(sig, 3))
+        if nu_disp > 999.0:
+            nu_disp_str = "Inf"
+        else:
+            nu_disp_str = f"{nu_disp:g}"
+        return {"family_name": f"Scaled t({nu_disp_str},{sig_disp:g})"}
+
+    def rd(self, mu, wt, scale, rng: np.random.Generator | None = None):
+        nu, sig = self.get_theta(trans=True)
+        n = np.asarray(mu, dtype=float).shape[0]
+        gen = rng if rng is not None else np.random.default_rng()
+        return gen.standard_t(nu, size=n) * sig + np.asarray(mu, dtype=float)
+
+    def __repr__(self):
+        nu, sig = self.get_theta(trans=True)
+        return (f"Scat(theta=({nu:.4g}, {sig:.4g}), "
+                f"link={self.link.name}, min_df={self._min_df:g})")
+
+
 # Convenience exports — mirror R's lowercase/CapCase convention so user code
 # reads almost identically: ``gam(..., family=Gamma(link='log'))``.
 gaussian = Gaussian
@@ -1449,6 +1858,7 @@ poisson = Poisson
 binomial = Binomial
 inverse_gaussian = InverseGaussian
 quasi = Quasi
+scat = Scat   # mgcv-style lowercase alias
 __all__ = [
     "Family", "Link",
     "Gaussian", "gaussian",
@@ -1458,6 +1868,7 @@ __all__ = [
     "InverseGaussian", "inverse_gaussian",
     "Quasi", "quasi",
     "Tweedie", "tw",
+    "Scat", "scat",
     "IdentityLink", "LogLink", "InverseLink",
     "SqrtLink", "LogitLink", "ProbitLink", "CauchitLink", "CloglogLink",
     "InverseSquareLink",
