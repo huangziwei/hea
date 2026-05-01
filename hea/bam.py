@@ -49,6 +49,7 @@ from typing import Optional
 import numpy as np
 import polars as pl
 from scipy.linalg import cho_factor, cho_solve, qr as scipy_qr, solve_triangular
+from scipy.linalg.lapack import dpstrf
 from scipy.stats import t as t_dist
 
 from .family import Family, Gaussian
@@ -62,6 +63,16 @@ from .formula import (
     materialize_smooths,
 )
 from .design import prepare_design
+from .discrete import (
+    DiscreteDesign,
+    DiscretizedFrame,
+    Xbd,
+    XWXd,
+    XWyd,
+    build_discrete_design,
+    discrete_full_X,
+    discrete_mf,
+)
 from .gam import (
     _FitState,
     _PenaltySlot,
@@ -126,51 +137,51 @@ def _chol2qr(XX: np.ndarray, Xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Convert ``X'X``, ``X'y`` into ``R``, ``f`` such that ``R'R = X'X``,
     ``R'f = X'y``.
 
-    Port of mgcv ``chol2qr`` (bam.r:31-44). Uses pivoted Cholesky and handles
-    rank-deficient ``X'X`` by zeroing out the trailing rows of ``R``. Used
-    by the ``use.chol=TRUE`` path of :func:`_qr_update` to recover an
-    R-factor after fast (less-stable) ``X'X``-accumulation.
+    Port of mgcv ``chol2qr`` (bam.r:31-44). Uses LAPACK pivoted Cholesky
+    (``dpstrf``) so rank-deficient PSD inputs are handled correctly. For
+    a rank-deficient ``XX`` the bottom-right ``(p-r) × (p-r)`` block of
+    the pivoted Cholesky factor is replaced with the identity (mgcv's
+    chol2qr trick) so the triangular solve for ``f`` is non-singular —
+    rank-deficient directions are then killed by the smoothing penalties
+    downstream.
+
+    Output ``R`` is in original (un-pivoted) column ordering: column ``j``
+    of ``R`` corresponds to column ``j`` of ``X``. ``R`` is *not*
+    upper-triangular after un-pivoting (just like the chunked path's
+    ``_qr_update`` output), but the gram identities ``R'R = XX`` and
+    ``R'f = Xy`` hold exactly.
     """
     XX = np.asarray(XX, dtype=float)
     Xy = np.asarray(Xy, dtype=float).ravel()
     p = Xy.shape[0]
-    # Pivoted Cholesky via LAPACK (numpy lacks pivoted Cholesky; SciPy's
-    # ``cho_factor`` is unpivoted). Use a small jitter to stabilise PSD
-    # matrices that aren't strictly PD.
-    try:
-        c, low = cho_factor(XX, lower=False)
-        R = np.triu(c)
-        # piv = identity
-        piv = np.arange(p)
-        rank = p
-    except np.linalg.LinAlgError:
-        # Fall back to eigendecomp-based pivoted construction. Returns
-        # an upper-triangular R with |diag(R)| matching the spectral
-        # square roots; rank = #(eigenvalue > tol).
-        w, V = np.linalg.eigh(0.5 * (XX + XX.T))
-        order = np.argsort(-w)
-        w_s = w[order]
-        V_s = V[:, order]
-        tol = max(p, 1) * np.finfo(float).eps * float(np.abs(w_s).max() if w_s.size else 1.0)
-        rank = int(np.sum(w_s > tol))
-        sqrt_w = np.zeros(p)
-        sqrt_w[:rank] = np.sqrt(np.maximum(w_s[:rank], 0.0))
-        R_full = (sqrt_w[:, None] * V_s.T)
-        R = R_full
-        piv = np.arange(p)
+    if p == 0:
+        return np.zeros((0, 0), dtype=float), np.zeros(0, dtype=float)
+
+    XX_sym = 0.5 * (XX + XX.T)
+    # ``dpstrf`` overwrites the input — pass a contiguous Fortran copy.
+    A = np.asfortranarray(XX_sym.copy())
+    c, piv_1based, rank, info = dpstrf(A, lower=0)
+    R_piv = np.triu(c)
+    # ``R_piv' R_piv = XX[piv, :][:, piv]`` (DPSTRF spec). For rank<p,
+    # the trailing block has ~zero diag and DPSTRF leaves garbage in its
+    # rows; mgcv replaces the trailing block with identity so the
+    # triangular solve is well-defined (bam.r:39).
     if rank < p:
-        R[rank:, :] = 0.0
-    # f via forwardsolve(R'[:rank, :rank], Xy[piv[:rank]]); pad zeros.
+        R_piv[rank:, :] = 0.0
+        R_piv[rank:, rank:] = np.eye(p - rank)
+
+    piv = np.asarray(piv_1based, dtype=int) - 1   # 0-based
     ipiv = np.empty(p, dtype=int)
     ipiv[piv] = np.arange(p)
-    f = np.zeros(p)
-    if rank > 0:
-        Rkk = R[:rank, :rank]
-        f_top = solve_triangular(Rkk.T, Xy[piv[:rank]], lower=True)
-        f[:rank] = f_top
-    f = f[ipiv]
-    R = R[np.ix_(ipiv, ipiv)]
-    return R, f
+
+    # Solve ``R_piv' f_piv = Xy[piv]`` (forwardsolve in pivoted coords).
+    # Then ``f = f_piv`` is also the f for the un-pivoted ``R``: with
+    # ``R = R_piv[:, ipiv]`` we get ``R'f = R_piv[:, ipiv]' f_piv``,
+    # and row j picks row ``ipiv[j]`` of ``R_piv'``, which by definition
+    # of ``f_piv`` equals ``Xy[piv[ipiv[j]]] = Xy[j]``.
+    f = solve_triangular(R_piv.T, Xy[piv], lower=True)
+    R_out = R_piv[:, ipiv]
+    return R_out, f
 
 
 def _qr_update(Xn: np.ndarray, yn: np.ndarray,
@@ -711,6 +722,95 @@ def _build_qr_chunked_pirls(
     )
 
 
+def _build_qr_discrete_pirls(
+    design: DiscreteDesign,
+    y: np.ndarray,
+    offset: np.ndarray,
+    family: Family,
+    *,
+    coef: Optional[np.ndarray],
+    eta_init: Optional[np.ndarray],
+    use_chol: bool = False,
+    prior_w: Optional[np.ndarray] = None,
+) -> _PirlsQR:
+    """One PIRLS-step build for ``bam(..., discrete=True)``.
+
+    Direct port of the inner accumulation in mgcv ``bgam.fitd``
+    (bam.r:530-620). Mirrors :func:`_build_qr_chunked_pirls` in shape
+    (returns the same :class:`_PirlsQR`) but runs the PIRLS-step
+    sufficient-statistics build via the discrete kernels:
+
+    * ``η = Xβ + offset`` via :func:`Xbd` (or use ``eta_init`` on iter 1
+      when β is still unknown — same convention as the chunked path).
+    * Form Fisher working response ``z`` and weights ``W`` per row.
+    * Drop ``!(w_prior > 0 & μ_η ≠ 0)`` rows by zeroing their weight.
+    * ``X'WX`` via :func:`XWXd`, ``X'Wz`` via :func:`XWyd`, then convert to
+      ``(R, f)`` via :func:`_chol2qr`.
+    * ``y_norm2 = Σ wᵢ·zᵢ²`` (the working-response sum-of-squares — for
+      Gaussian-identity this collapses to ``Σ (yᵢ-offᵢ)²``).
+
+    Relies on the design-level ``X_full`` cache built by
+    :func:`discrete_full_X` on first access. ``Xd_list`` is invariant
+    across PIRLS iters, so the cached X persists across every outer
+    Newton step at no extra cost. The optimised scatter-add kernels in
+    ``Xbd`` / ``XWXd`` / ``XWyd`` (``use_kernel=True``) remain
+    available for very-large-n cases where the full ``n × p`` matrix
+    no longer fits — current default is BLAS-on-cached-X, which beats
+    the kernels at chicago-scale sizes.
+    """
+    n = design.n
+    if n == 0:
+        raise ValueError("empty data passed to discrete PIRLS build")
+    if (coef is None) and (eta_init is None):
+        raise ValueError("either coef or eta_init must be provided")
+    if prior_w is None:
+        prior_w = np.ones(n, dtype=float)
+
+    link = family.link
+
+    # mgcv bam.r:537-539: ``if (is.null(coef)) eta1 <- eta else
+    # eta1 <- Xbd(...) + offset``.
+    if coef is None:
+        eta_full = np.asarray(eta_init, dtype=float)
+    else:
+        eta_full = Xbd(design, np.asarray(coef, dtype=float)) + offset
+
+    mu_full = link.linkinv(eta_full)
+    mu_eta = link.mu_eta(eta_full)
+    V_full = family.variance(mu_full)
+
+    good = (prior_w > 0) & (mu_eta != 0)
+    safe_mu_eta = np.where(mu_eta != 0, mu_eta, 1.0)
+    safe_V = np.where(V_full != 0, V_full, 1.0)
+
+    z_full = (eta_full - offset) + (y - mu_full) / safe_mu_eta
+    w_full = prior_w * mu_eta * mu_eta / safe_V
+    w_full = np.where(good, w_full, 0.0)
+    if not np.any(good):
+        raise FloatingPointError(
+            "discrete PIRLS build saw zero good rows — every observation "
+            "was dropped by the (w_prior > 0 & μ_η != 0) good mask"
+        )
+
+    dev_total = float(np.sum(family.dev_resids(y, mu_full, prior_w)))
+
+    XWX = XWXd(design, w_full)
+    Xy = XWyd(design, w_full, z_full)
+    y_norm2 = float(np.sum(w_full * z_full * z_full))
+
+    R, f = _chol2qr(XWX, Xy)
+    rss_extra = float(y_norm2 - float(f @ f))
+
+    return _PirlsQR(
+        R=np.asarray(R, dtype=float),
+        f=np.asarray(f, dtype=float),
+        y_norm2=y_norm2,
+        rss_extra=rss_extra,
+        eta=eta_full, mu=mu_full, wt=w_full, z=z_full,
+        dev=dev_total,
+    )
+
+
 def _is_identity_link(family: Family) -> bool:
     """Detect Gaussian-identity (canonical Gaussian) — the ``am=TRUE`` case
     in mgcv's ``bam.fit`` dispatch (bam.r:2205)."""
@@ -760,6 +860,8 @@ class bam(gam):
         use_chol: bool = False,
         rho: float = 0.0,
         ar_start: np.ndarray | list | None = None,
+        discrete: bool = False,
+        discrete_m: int | None = None,
     ):
         # ``data`` may be a polars DataFrame OR a mapping of name → 1-D /
         # 2-D ndarray. 2-D entries become matrix columns for mgcv's
@@ -817,6 +919,14 @@ class bam(gam):
         self.family = family
         self._chunk_size = int(chunk_size)
         self._use_chol = bool(use_chol)
+        self._discrete = bool(discrete)
+        self._discrete_m = discrete_m
+        if self._discrete and self._rho != 0.0:
+            raise NotImplementedError(
+                "discrete=True with AR1 (rho != 0) is not yet supported"
+            )
+        self._discrete_design: Optional[DiscreteDesign] = None
+        self._discrete_frame: Optional[DiscretizedFrame] = None
 
         # ---- setup phase (mirror gam.__init__ lines 198-321) ---------------
         d = prepare_design(formula, data)
@@ -899,6 +1009,57 @@ class bam(gam):
         self.parametric_columns = list(X_param_df.columns)
         self._X_param_full = X_param_full
 
+        # ---- discrete (compressed) design ----------------------------------
+        # mgcv ``bam(..., discrete=TRUE)`` flow (bam.r:2387-2437): after
+        # basis spec setup, walk the smooths to discretise their marginals
+        # and build the per-marginal Xd / global k / per-variable ks tables.
+        # The same parametric design X_param_full is plugged in as a single
+        # (un-discretised) "term"; the kernels just gather identity rows
+        # for it. Stored on ``self._discrete_design`` and consumed by
+        # :func:`_build_qr_discrete_pirls` in the PIRLS loop.
+        if self._discrete:
+            smooth_specs = []
+            for blk in blocks:
+                spec = blk.spec
+                if spec is None:
+                    raise ValueError(
+                        "discrete=True requires every smooth block to carry "
+                        f"a basis spec — got block {blk.label!r} with no spec"
+                    )
+                raw = spec.predict_raw if spec.predict_raw is not None else spec.raw
+                from .formula import _TensorRawBasis, _T2RawBasis, _T2PredictRawBasis
+                if isinstance(raw, (_TensorRawBasis, _T2RawBasis, _T2PredictRawBasis)):
+                    margin_raws = list(raw.margins)
+                else:
+                    margin_raws = [raw]
+                # Distribute term variables across margins (matches mgcv's d=
+                # ordering — see _split_term_vars_by_margins in discrete.py).
+                term_vars = list(blk.term)
+                if len(margin_raws) == 1:
+                    margin_specs = [{"term": term_vars}]
+                elif len(term_vars) == len(margin_raws):
+                    margin_specs = [{"term": [v]} for v in term_vars]
+                else:
+                    margin_specs = []
+                    cursor = 0
+                    extra = len(term_vars) - len(margin_raws)
+                    for j in range(len(margin_raws)):
+                        size = 1 + (extra if j == 0 else 0)
+                        margin_specs.append({"term": term_vars[cursor:cursor + size]})
+                        cursor += size
+                        extra = 0
+                smooth_specs.append({
+                    "term": term_vars, "by": None, "margins": margin_specs,
+                })
+            self._discrete_frame = discrete_mf(
+                smooth_specs, self.data,
+                names_pmf=list(X_param_df.columns),
+                m=self._discrete_m,
+            )
+            self._discrete_design = build_discrete_design(
+                blocks, X_param_full, self._discrete_frame,
+            )
+
         # ---- family-independent post-setup --------------------------------
         # tss for r-squared. We need the full y'y (not the offset-stripped
         # y_norm2) and the intercept-conditioned variance.
@@ -938,7 +1099,13 @@ class bam(gam):
         # rebuilding (R, f) from chunks of √W·X / √W·z (PIRLS Fisher weights
         # at the current β̂) with sp optimisation on the fixed reduced data.
         # Mirrors mgcv ``bgam.fit`` (bam.r:909-1353).
-        if _is_identity_link(family):
+        #
+        # ``discrete=True`` short-circuits both: bgam.fitd unifies all
+        # families on the same PIRLS scaffold, but rebuilds (X'WX, X'Wz)
+        # via the discrete kernels instead of a chunked QR pass. For
+        # Gaussian-identity this still converges in one PIRLS iter
+        # because z = y - offset and W = I are constant.
+        if _is_identity_link(family) and not self._discrete:
             # ---- chunked QR build (Gaussian-identity) -----------------------
             # Single chunked pass over the full data, accumulating (R, f, ‖z‖²).
             # Mirrors mgcv ``bam.fit`` single-thread loop (bam.r:1576-1613).
@@ -1208,7 +1375,14 @@ class bam(gam):
 
     def _chunked_xbeta(self, beta: np.ndarray) -> np.ndarray:
         """Compute ``X·β`` over the full data, chunk by chunk. ``O(n·p)``
-        time, ``O(chunk_size·p)`` peak memory."""
+        time, ``O(chunk_size·p)`` peak memory.
+
+        For ``discrete=True`` this delegates to :func:`Xbd` against the
+        compressed design — same answer, but goes through the
+        per-marginal Xd gather instead of materialising chunks.
+        """
+        if self._discrete_design is not None:
+            return Xbd(self._discrete_design, beta)
         n = self.n
         out = np.empty(n, dtype=float)
         for start, end in _chunk_indices(n, self._chunk_size):
@@ -1519,7 +1693,16 @@ class bam(gam):
         never materialised. ``w_full`` carries the PIRLS Fisher weights at β̂
         (zero on rows the ``good`` mask dropped, by construction in
         :func:`_build_qr_chunked_pirls`).
+
+        For ``discrete=True`` we materialise the cached full-X once via
+        :func:`discrete_full_X` and compute the diag in a single matmul —
+        avoids the per-chunk re-gather, which the discrete kernels make
+        cheap anyway since basis values are stored per unique row.
         """
+        if self._discrete_design is not None:
+            X = discrete_full_X(self._discrete_design)
+            HX = X @ A_inv
+            return w_full * (HX * X).sum(axis=1)
         n = self.n
         out = np.empty(n, dtype=float)
         for start, end in _chunk_indices(n, self._chunk_size):
@@ -1600,14 +1783,23 @@ class bam(gam):
             devold = dev
             kk = 0
             while True:   # mgcv "repeat" — re-enters on step halving
-                qr = _build_qr_chunked_pirls(
-                    self.data, blocks, self._X_param_full, y, off,
-                    family,
-                    coef=coef,
-                    eta_init=eta if coef is None else None,
-                    chunk_size=chunk_size, use_chol=self._use_chol,
-                    prior_w=prior_w,
-                )
+                if self._discrete_design is not None:
+                    qr = _build_qr_discrete_pirls(
+                        self._discrete_design, y, off, family,
+                        coef=coef,
+                        eta_init=eta if coef is None else None,
+                        use_chol=self._use_chol,
+                        prior_w=prior_w,
+                    )
+                else:
+                    qr = _build_qr_chunked_pirls(
+                        self.data, blocks, self._X_param_full, y, off,
+                        family,
+                        coef=coef,
+                        eta_init=eta if coef is None else None,
+                        chunk_size=chunk_size, use_chol=self._use_chol,
+                        prior_w=prior_w,
+                    )
                 self._bam_qr = qr
                 # Reduced-data sufficient stats consumed by ``_outer_newton``
                 # via the inherited ``_fit_given_rho`` machinery. ``_X_full =
