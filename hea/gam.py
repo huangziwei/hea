@@ -2416,6 +2416,56 @@ class gam:
             out[k] = sp[k] * tr_SpinvSk
         return out
 
+    def _d2log_det_S_drho_drho(
+        self, rho: np.ndarray,
+        S_pinv: np.ndarray | None = None,
+        S_full: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """∂²log|Sλ|+/∂ρ_i∂ρ_j Hessian. Shape ``(n_sp, n_sp)``.
+
+        Identity:
+            ∂²log|S|+/∂ρ_i∂ρ_j = -λ_i·λ_j·tr(S⁺·S_i·S⁺·S_j)
+                                + δ_ij·λ_i·tr(S⁺·S_i)
+        Formula matches the in-line version inside ``_reml_hessian``
+        (line 1616-1632), exposed here so the POI optimizer in
+        ``hea.bam._bgam_fit_loop`` can reuse it without re-running the
+        full Hessian path. ``SpinvS_block[k]`` here has shape
+        ``(p, slot_k_size)`` exactly mirroring the structure used in
+        ``_reml_hessian`` so the einsum string ``"ab,ba->"`` indexes
+        the right block sub-slices.
+        """
+        n_sp = len(self._slots)
+        if n_sp == 0:
+            return np.zeros((0, 0))
+        if S_pinv is None:
+            if S_full is None:
+                S_full = self._build_S_lambda(rho)
+            S_pinv = self._S_pinv(S_full)
+        sp = np.exp(rho)
+        # SpinvS_block[k] = S⁺ · slot_k.S applied on the right of S⁺ —
+        # shape (p, slot_k_size). Same layout as ``_reml_hessian``.
+        SpinvS_block: list[np.ndarray] = []
+        tr_SpinvS = np.zeros(n_sp)
+        for k, slot in enumerate(self._slots):
+            a, b = slot.col_start, slot.col_end
+            SpinvS_block.append(S_pinv[:, a:b] @ slot.S)
+            tr_SpinvS[k] = float(np.einsum(
+                "ij,ji->", S_pinv[a:b, a:b], slot.S
+            ))
+        H = np.zeros((n_sp, n_sp))
+        for i in range(n_sp):
+            a_i, b_i = self._slots[i].col_start, self._slots[i].col_end
+            for j in range(i, n_sp):
+                a_j, b_j = self._slots[j].col_start, self._slots[j].col_end
+                tr_SpSiSpSj = float(np.einsum(
+                    "ab,ba->",
+                    SpinvS_block[i][a_j:b_j, :],
+                    SpinvS_block[j][a_i:b_i, :],
+                ))
+                H[i, j] = H[j, i] = -sp[i] * sp[j] * tr_SpSiSpSj
+            H[i, i] += sp[i] * tr_SpinvS[i]
+        return H
+
     def _dlog_det_H_drho(self, fit: "_FitState", rho: np.ndarray,
                          db_drho: np.ndarray | None = None) -> np.ndarray:
         """∂log|H|/∂ρ_k where H = X'WX + Sλ at converged β̂. Length-n_sp.

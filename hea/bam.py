@@ -133,6 +133,289 @@ def _rw_matrix(stop: np.ndarray, row: np.ndarray, weight: np.ndarray,
     return out
 
 
+def _pi_fit_chol(
+    XX: np.ndarray, Xy: np.ndarray, rho: np.ndarray,
+    slots: list, p: int, *, yy: float = 0.0,
+    log_phi: float = 0.0, n: int = 0, Mp: int = 0,
+    gamma: float = 1.0, phi_fixed: bool = True,
+    ldet_S: float = 0.0, ldet_S_grad: Optional[np.ndarray] = None,
+    ldet_S_hess: Optional[np.ndarray] = None,
+) -> dict:
+    """mgcv ``Sl.fitChol`` (fast-REML.r:1348-1444) port — given ``XX =
+    X'WX`` and ``Xy = X'Wy``, solve the penalised LS problem at fixed
+    ``rho`` and return β plus the REML Newton step + grad + Hessian
+    via the Implicit Function Theorem.
+
+    The "POI" (Performance-Oriented Iteration) optimizer mgcv uses for
+    ``discrete=TRUE`` calls this routine *once* per PIRLS iter to
+    propose a single (rho, log φ) Newton step, with step-halving on
+    the outside if the step is "uphill". By contrast hea's existing
+    ``_outer_newton`` runs Newton to convergence at each fixed (W, z),
+    which over-shoots when the basin is flat. Routing the
+    ``discrete=TRUE`` PIRLS through ``_pi_fit_chol`` is what closes
+    the residual auto-sp gap.
+
+    The β solve uses diagonal preconditioning (``D = sqrt(diag(A))``)
+    + pivoted Cholesky with mgcv's ``rank.tol = ε·100``. The gradient
+    of REML w.r.t. ``rho`` is
+
+        REML' = (∂log|A|/∂rho - ∂log|S|/∂rho
+                 + (rss' + bSb')/(φ·γ)) / 2
+
+    where ``rss' = 2 d_β/d_rho · A · d_β/d_rho ≈ 0`` at converged β
+    (drops out by IFT, but kept for completeness) and ``bSb' = β'S_kβ
+    + 2·β'S_k·d_β/d_rho_k``. Hessian similarly via second-order IFT.
+
+    Args:
+        XX: (p, p) X'WX.
+        Xy: (p,) X'Wy.
+        rho: (n_sp,) log smoothing params.
+        slots: list of penalty slots, each with .col_start, .col_end, .S.
+        p: total parameter count.
+        yy: ‖√W·z‖² (only used when phi_fixed=False).
+        log_phi: log φ.
+        n: nobs.
+        Mp: null-space dimension.
+        gamma: γ inflation factor.
+        phi_fixed: True for canonical-link families (Poisson, Binomial).
+        ldet_S, ldet_S_grad, ldet_S_hess: log|S|_+ and its derivatives,
+            computed externally and passed in (they don't depend on XX).
+
+    Returns dict with:
+        beta:        (p,) coefficients.
+        grad:        (n_sp[+1 if !phi_fixed],) REML gradient.
+        hess:        (n_sp[+1], n_sp[+1]) REML Hessian.
+        step:        (n_sp[+1],) regularised Newton step (-H⁻¹g, capped).
+        ldetXXS:     log|X'WX + Sλ| (rank-revealing pseudo-det).
+        rank:        numerical rank of A.
+        PP:          (p, p) ≈ A⁻¹ in original (un-pivoted) basis.
+    """
+    n_sp = len(slots)
+
+    # 1. Build A = XX + Σ exp(rho_k) S_k_padded.
+    A = XX.copy()
+    sp = np.exp(rho)
+    for k, slot in enumerate(slots):
+        cs, ce = int(slot.col_start), int(slot.col_end)
+        A[cs:ce, cs:ce] += sp[k] * slot.S
+    A = 0.5 * (A + A.T)
+
+    # 2. Diagonal preconditioning: D = sqrt(diag(A)).
+    diag_A = np.diag(A).copy()
+    d = np.where(diag_A > 0.0, np.sqrt(np.maximum(diag_A, 0.0)), 1.0)
+    A_pre = (A / d) / d[:, None]
+    A_pre = 0.5 * (A_pre + A_pre.T)
+
+    # 3. Pivoted Cholesky on the preconditioned matrix.
+    rank_tol = float(np.finfo(float).eps * 100.0)
+    A_pre_f = np.asfortranarray(A_pre.copy())
+    R_pre, piv_1based, rank_A, _info = dpstrf(
+        A_pre_f, lower=0, tol=rank_tol,
+    )
+    R_pre = np.triu(R_pre)
+    rank_A = int(rank_A)
+    piv = np.asarray(piv_1based, dtype=int) - 1
+    ipiv = np.empty(p, dtype=int)
+    ipiv[piv] = np.arange(p)
+
+    # 4. β solve in mgcv's gauge (zeros at rank-deficient pivoted
+    #    positions, top-rank back-sub in preconditioned coords, then
+    #    un-precondition).
+    Xy_over_d = Xy / d
+    beta_piv = np.zeros(p, dtype=float)
+    if rank_A > 0:
+        b_piv = Xy_over_d[piv]
+        z = solve_triangular(
+            R_pre[:rank_A, :rank_A].T, b_piv[:rank_A], lower=True,
+        )
+        beta_piv[:rank_A] = solve_triangular(
+            R_pre[:rank_A, :rank_A], z, lower=False,
+        )
+    beta = beta_piv[ipiv] / d
+
+    # 5. log|A| (rank-revealing).
+    if rank_A > 0:
+        ldetXXS = 2.0 * float(
+            np.log(np.abs(np.diag(R_pre)[:rank_A])).sum()
+        ) + 2.0 * float(np.log(d[piv[:rank_A]]).sum())
+    else:
+        ldetXXS = 0.0
+
+    # 6. PP = A⁻¹ (rank-r pseudo-inverse) in preconditioned, pivoted
+    #    coords, then un-pivot and un-precondition.
+    if rank_A > 0:
+        I_r = np.eye(rank_A)
+        z_r = solve_triangular(
+            R_pre[:rank_A, :rank_A].T, I_r, lower=True,
+        )
+        PP_pre_top = solve_triangular(
+            R_pre[:rank_A, :rank_A], z_r, lower=False,
+        )
+    else:
+        PP_pre_top = np.zeros((0, 0))
+    PP_pre = np.zeros((p, p))
+    PP_pre[:rank_A, :rank_A] = PP_pre_top
+    PP = np.zeros((p, p))
+    PP[np.ix_(piv, piv)] = PP_pre
+    PP = (PP / d) / d[:, None]
+    PP = 0.5 * (PP + PP.T)
+
+    # 7. d_β/d_rho_k via IFT (mgcv ``Sl.iftChol``):
+    #     d_β/d_rho_k = -A⁻¹ · (sp_k · S_k_padded · β)
+    #    Using the pivoted/preconditioned chol structure:
+    #     v = sp_k · S_k_padded · β              (length p)
+    #     v_pp[piv] = (v / d)[piv]
+    #     w = -backsolve(R, forwardsolve(R', v_pp[:rank]))
+    #     d_β[piv][:rank] = w; d_β[piv][rank:] = 0
+    #     d_β = (d_β[ipiv]) / d
+    Skb = np.zeros((p, n_sp))
+    for k, slot in enumerate(slots):
+        cs, ce = int(slot.col_start), int(slot.col_end)
+        Skb[cs:ce, k] = sp[k] * (slot.S @ beta[cs:ce])
+
+    db = np.zeros((p, n_sp))
+    if rank_A > 0:
+        Skb_over_d = Skb / d[:, None]
+        Skb_pre = Skb_over_d[piv, :]  # (p, n_sp), pivoted
+        w_top = -solve_triangular(
+            R_pre[:rank_A, :rank_A], solve_triangular(
+                R_pre[:rank_A, :rank_A].T, Skb_pre[:rank_A, :], lower=True,
+            ),
+            lower=False,
+        )
+        db_piv = np.zeros((p, n_sp))
+        db_piv[:rank_A, :] = w_top
+        db = db_piv[ipiv, :] / d[:, None]
+
+    # 8. b'Sb derivatives (Sl.iftChol):
+    #     bSb1[k] = β' · sp_k · S_k_padded · β = β' Skb[:, k]
+    bSb1 = np.einsum("i,ik->k", beta, Skb)
+    # bSb2[k, j] = δ_kj · β' Skb[:,k]
+    #            + 2·(db[:,k]' · (Skb[:,j] + S_db[:,j])
+    #                 + db[:,j]' · Skb[:,k])
+    # where S_db[:, k] = Σ_j sp_j S_j db[:, k] padded — but mgcv's Sl.mult
+    # uses the *current-lambda* S so this is equivalent to
+    # (A - XX) · db[:, k] (since A = XX + Σ sp_j S_j_padded).
+    if n_sp > 0:
+        S_db = np.zeros((p, n_sp))
+        for k_inner in range(n_sp):
+            for j, slot in enumerate(slots):
+                cs, ce = int(slot.col_start), int(slot.col_end)
+                S_db[cs:ce, k_inner] += (
+                    sp[j] * (slot.S @ db[cs:ce, k_inner])
+                )
+        bSb2 = np.diag(bSb1) + 2.0 * (
+            db.T @ (Skb + S_db) + Skb.T @ db
+        )
+        bSb2 = 0.5 * (bSb2 + bSb2.T)
+    else:
+        bSb2 = np.zeros((0, 0))
+
+    # 9. rss' is 0 to first order at converged β (IFT). At PIRLS-
+    #    converged β̂, the gradient w.r.t. rho_k of (½ rss) is just
+    #    ½·d_β/d_rho_k · X'(Xβ−y) = -½·d_β/d_rho_k · S_λ β = ½·bSb1[k]
+    #    via the score equation, so rss1 is rolled into bSb1.
+    #    Following mgcv's convention exactly, rss1[k] = 0.
+    rss1 = np.zeros(n_sp)
+    # rss2[k, j] = 2 · d_β[:,k]' · XX · d_β[:,j]
+    if n_sp > 0:
+        XX_db = XX @ db
+        rss2 = 2.0 * (db.T @ XX_db)
+        rss2 = 0.5 * (rss2 + rss2.T)
+    else:
+        rss2 = np.zeros((0, 0))
+
+    # 10. log|XX+S| derivatives via d.detXXS (fast-REML.r:1219-1237).
+    #     d1[k] = sp_k · tr(S_k · PP[block, block])  (= sp_k * tr(S_k_padded · PP))
+    #     d2[k, j] = -tr((sp_j · S_j · PP)[block_k, block_j]
+    #                  · (sp_k · S_k · PP)[block_j, block_k]) + δ_kj·d1[k]
+    SPP = np.zeros((p, p, n_sp))
+    for k, slot in enumerate(slots):
+        cs, ce = int(slot.col_start), int(slot.col_end)
+        SPP[cs:ce, :, k] = sp[k] * (slot.S @ PP[cs:ce, :])
+    dXXS_d1 = np.zeros(n_sp)
+    for k, slot in enumerate(slots):
+        cs, ce = int(slot.col_start), int(slot.col_end)
+        dXXS_d1[k] = float(np.trace(SPP[cs:ce, cs:ce, k]))
+    dXXS_d2 = np.zeros((n_sp, n_sp))
+    for i in range(n_sp):
+        cs_i, ce_i = int(slots[i].col_start), int(slots[i].col_end)
+        for j in range(i, n_sp):
+            cs_j, ce_j = int(slots[j].col_start), int(slots[j].col_end)
+            # sum over col_start_i:col_end_i (rows) and col_start_j:col_end_j (cols)
+            v = -float(
+                np.sum(
+                    SPP[cs_i:ce_i, cs_j:ce_j, i].T *
+                    SPP[cs_j:ce_j, cs_i:ce_i, j]
+                )
+            )
+            dXXS_d2[i, j] = dXXS_d2[j, i] = v
+        dXXS_d2[i, i] += dXXS_d1[i]
+
+    # 11. REML gradient and Hessian (rho-only; log φ added below if free).
+    phi = float(np.exp(log_phi))
+    if ldet_S_grad is None:
+        ldet_S_grad = np.zeros(n_sp)
+    if ldet_S_hess is None:
+        ldet_S_hess = np.zeros((n_sp, n_sp))
+    grad = (
+        dXXS_d1 - ldet_S_grad
+        + (rss1 + bSb1) / (phi * gamma)
+    ) / 2.0
+    hess = (
+        dXXS_d2 - ldet_S_hess
+        + (rss2 + bSb2) / (phi * gamma)
+    ) / 2.0
+
+    # 12. log φ slot for non-fixed scale (Gaussian etc.).
+    if not phi_fixed:
+        rss_bSb = float(yy - beta @ Xy)
+        grad_phi = (-rss_bSb / (phi * gamma) + n / gamma - Mp) / 2.0
+        grad = np.concatenate([grad, [grad_phi]])
+        # cross derivatives w.r.t. log φ
+        d_phi = np.concatenate([
+            -(rss1 + bSb1), [rss_bSb],
+        ]) / (2.0 * phi * gamma)
+        n_old = hess.shape[0]
+        hess_new = np.zeros((n_old + 1, n_old + 1))
+        hess_new[:n_old, :n_old] = hess
+        hess_new[:n_old, n_old] = d_phi[:n_old]
+        hess_new[n_old, :n_old] = d_phi[:n_old]
+        hess_new[n_old, n_old] = d_phi[n_old]
+        hess = hess_new
+
+    # 13. Newton step from eigen-regularised Hessian (Sl.fitChol:1430-1440).
+    if hess.shape[0] > 0:
+        eig_w, eig_v = np.linalg.eigh(hess)
+        eig_w_abs = np.abs(eig_w)
+        if eig_w_abs.size > 0:
+            me = float(eig_w_abs.max() * float(np.finfo(float).eps) ** 0.5)
+            eig_w_clamped = np.where(eig_w_abs < me, me, eig_w_abs)
+        else:
+            eig_w_clamped = eig_w_abs
+        step = -eig_v @ ((eig_v.T @ grad) / eig_w_clamped)
+        # Cap |step| <= 4 (Sl.fitChol:1438-1439).
+        ms = float(np.max(np.abs(step))) if step.size else 0.0
+        if ms > 4.0:
+            step = step * (4.0 / ms)
+    else:
+        step = np.zeros(0)
+
+    return {
+        "beta": beta,
+        "grad": grad,
+        "hess": hess,
+        "step": step,
+        "ldetXXS": ldetXXS,
+        "rank": rank_A,
+        "PP": PP,
+        "R_pre": R_pre,
+        "d": d,
+        "piv": piv,
+        "ipiv": ipiv,
+    }
+
+
 def _chol2qr(XX: np.ndarray, Xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Convert ``X'X``, ``X'y`` into ``R``, ``f`` such that ``R'R = X'X``,
     ``R'f = X'y``.
@@ -1348,37 +1631,59 @@ class bam(gam):
         A = self._XtX + Sλ
         A = 0.5 * (A + A.T)
 
-        # Pivoted Cholesky with rank revealing (mgcv ``chol(A, pivot=TRUE)``).
-        # mgcv uses ``rank.tol = .Machine$double.eps * 100 ≈ 2.22e-14``
-        # (gam.fit3.r:131); we mirror that so dpstrf's rank determination
-        # matches mgcv's. With this tight tolerance, *almost* every Newton
-        # step keeps the matrix at full rank — only truly singular A's
-        # have a column dropped, which is what mgcv does too.
+        # mgcv ``Sl.fitChol`` (fast-REML.r:1367-1370) preconditions
+        # ``A = XX + Sλ`` by ``D = sqrt(diag(A))`` *before* pivoted
+        # Cholesky:
+        #     A_pre = D⁻¹ A D⁻¹           (unit-diagonal up to noise)
+        #     R = chol(A_pre, pivot=TRUE)
+        #     β[piv] = backsolve(R, forwardsolve(R', (Xy/D)[piv])) / D[piv]
+        # Without preconditioning, ``dpstrf``'s rank determination uses
+        # the relative ``A[i,i] / max(A[k,k])`` ratio, which can drop or
+        # keep the small-eigenvalue direction depending on column scaling
+        # (and that scaling drifts with ``rho``). With preconditioning all
+        # diagonals become 1, so the rank tolerance acts on the relative
+        # eigenvalue spread — that's mgcv's gauge.
+        diag_A = np.diag(A).copy()
+        d = np.where(diag_A > 0.0, np.sqrt(np.maximum(diag_A, 0.0)), 1.0)
+        # A_pre[i, j] = A[i, j] / (d[i] * d[j])
+        A_pre = (A / d) / d[:, None]
+        A_pre = 0.5 * (A_pre + A_pre.T)
+
+        # Pivoted Cholesky with rank revealing (mgcv ``chol(A_pre,
+        # pivot=TRUE)``). mgcv uses ``rank.tol = .Machine$double.eps *
+        # 100 ≈ 2.22e-14`` (gam.fit3.r:131); we mirror that so dpstrf's
+        # rank determination matches mgcv's.
         rank_tol = float(np.finfo(float).eps * 100.0)
-        A_f = np.asfortranarray(A.copy())
-        R_piv, piv_1based, rank_A, _info = dpstrf(A_f, lower=0, tol=rank_tol)
-        R_piv = np.triu(R_piv)
+        A_pre_f = np.asfortranarray(A_pre.copy())
+        R_pre, piv_1based, rank_A, _info = dpstrf(
+            A_pre_f, lower=0, tol=rank_tol,
+        )
+        R_pre = np.triu(R_pre)
         rank_A = int(rank_A)
         piv = np.asarray(piv_1based, dtype=int) - 1
         ipiv = np.empty(self.p, dtype=int)
         ipiv[piv] = np.arange(self.p)
 
-        # Solve in mgcv's pseudo-inverse gauge: β_piv[rank:] = 0 (drop the
-        # rank-deficient pivoted positions), β_piv[:rank] = top-rank
-        # back-substitution. log|A| (pseudo) = 2·Σ log|diag(R_piv)[:rank]|.
+        # Solve in mgcv's pseudo-inverse gauge with the preconditioning
+        # un-applied at the end:
+        #     β[piv][:rank] = backsolve(R, forwardsolve(R', (Xy/D)[piv][:rank]))
+        #     β[piv][rank:] = 0
+        #     β = β / D                       (un-precondition)
+        Xy_over_d = self._Xty / d
         if rank_A > 0:
-            b_piv = self._Xty[piv]
+            b_piv = Xy_over_d[piv]
             z = solve_triangular(
-                R_piv[:rank_A, :rank_A].T, b_piv[:rank_A], lower=True,
+                R_pre[:rank_A, :rank_A].T, b_piv[:rank_A], lower=True,
             )
             beta_piv_top = solve_triangular(
-                R_piv[:rank_A, :rank_A], z, lower=False,
+                R_pre[:rank_A, :rank_A], z, lower=False,
             )
         else:
             beta_piv_top = np.zeros(0, dtype=float)
         beta_piv = np.zeros(self.p, dtype=float)
         beta_piv[:rank_A] = beta_piv_top
-        beta = beta_piv[ipiv]
+        # Un-pivot, then un-precondition.
+        beta = beta_piv[ipiv] / d
 
         if not np.all(np.isfinite(beta)):
             raise FloatingPointError("non-finite β in bam (R, f) solve")
@@ -1416,14 +1721,15 @@ class bam(gam):
             self._yty - 2.0 * (beta @ self._Xty) + beta @ self._XtX @ beta
         )
         rss = max(rss, 0.0)  # guard tiny negative from cancellation
-        # Rank-revealing log|A|: only the top-rank diagonal of the
-        # pivoted Chol contributes (pivoted-bottom positions are
-        # log(1)=0 from the identity padding above, equivalent to mgcv's
-        # ``rank.tol``-truncated determinant).
+        # Rank-revealing log|A|. With the preconditioning, log|A| =
+        # log|D R_pre' R_pre D| = 2·Σ log|diag(R_pre)[:rank]|
+        #                       + 2·Σ log d[piv][:rank]
+        # mirroring mgcv ``Sl.fitChol``'s
+        # ``ldetXXS = 2*sum(log(diag(R)) + log(d[piv]))`` (fast-REML.r:1391).
         if rank_A > 0:
             log_det_A = 2.0 * float(
-                np.log(np.abs(np.diag(R_piv)[:rank_A])).sum()
-            )
+                np.log(np.abs(np.diag(R_pre)[:rank_A])).sum()
+            ) + 2.0 * float(np.log(d[piv[:rank_A]]).sum())
         else:
             log_det_A = 0.0
         # ``_score_scale`` reads ``fit.mu`` vs ``self._y_arr`` for the
@@ -2048,42 +2354,137 @@ class bam(gam):
                              if method == "REML" else max(float(n), 1.0))
                     log_phi_hat = float(np.log(max(Dp / denom, 1e-300)))
             else:
-                # Warm-start from the previous PIRLS iter's converged ρ̂; on
-                # iter 0 use the initial.sp seed against the just-built R.
-                if rho_hat is None:
-                    rho0 = self._initial_sp_rho()
-                else:
-                    rho0 = rho_hat.copy()
-                if include_log_phi:
-                    if log_phi_hat is None:
-                        try:
-                            fit_seed = self._fit_given_rho(rho0)
-                            df_resid_seed = max(n - self._Mp, 1.0)
-                            log_phi0 = float(np.log(
-                                max(fit_seed.dev / df_resid_seed, 1e-12)
-                            ))
-                        except Exception:
-                            log_phi0 = 0.0
+                # mgcv POI ("perf" optimizer, bgam.fitd at bam.r:430-780):
+                # take a *single* Newton step on (ρ, log φ) per PIRLS
+                # iter, with step-halving when the prior step was uphill.
+                # The Newton step / β / REML grad+Hess come from
+                # ``_pi_fit_chol`` (mgcv's ``Sl.fitChol``) which uses
+                # diagonal preconditioning + pivoted Chol + IFT
+                # derivatives. For ``discrete=TRUE`` non-Gaussian fits
+                # this matches mgcv's ``c("perf", "chol")`` optimizer
+                # cadence — joint sp-and-coef updates, not nested
+                # outer-Newton-on-frozen-(R,f).
+                #
+                # ``method == "GCV.Cp"`` falls back to ``_outer_newton``
+                # because POI's REML formulas don't apply to GCV/UBRE.
+                if (method in ("REML", "ML")
+                        and self._discrete_design is not None):
+                    if rho_hat is None:
+                        rho_cur = self._initial_sp_rho()
+                        Nstep = np.zeros(n_sp + (1 if include_log_phi else 0))
                     else:
-                        log_phi0 = log_phi_hat
-                    theta0 = np.concatenate([rho0, [log_phi0]])
-                else:
-                    theta0 = rho0
+                        rho_cur = rho_hat.copy()
+                    if include_log_phi:
+                        if log_phi_hat is None:
+                            try:
+                                fit_seed = self._fit_given_rho(rho_cur)
+                                df_resid_seed = max(n - self._Mp, 1.0)
+                                log_phi_cur = float(np.log(
+                                    max(fit_seed.dev / df_resid_seed, 1e-12)
+                                ))
+                            except Exception:
+                                log_phi_cur = 0.0
+                        else:
+                            log_phi_cur = log_phi_hat
+                        theta_cur = np.concatenate(
+                            [rho_cur, [log_phi_cur]],
+                        )
+                    else:
+                        theta_cur = rho_cur
 
-                theta_hat = self._outer_newton(
-                    theta0,
-                    criterion="REML" if method in ("REML", "ML") else "GCV",
-                    include_log_phi=include_log_phi,
-                    include_family_theta=False,
-                )
-                if include_log_phi:
-                    rho_hat = theta_hat[:n_sp]
-                    log_phi_hat = float(theta_hat[n_sp])
+                    # Newton step + halving (mgcv bam.r:669-682).
+                    halve_max = 30
+                    halves = 0
+                    while True:
+                        theta_try = theta_cur + Nstep
+                        if include_log_phi:
+                            rho_try = theta_try[:n_sp]
+                            log_phi_try = float(theta_try[n_sp])
+                        else:
+                            rho_try = theta_try
+                            log_phi_try = 0.0
+                        S_full_try = self._build_S_lambda(rho_try)
+                        S_full_try = 0.5 * (S_full_try + S_full_try.T)
+                        S_pinv_try = self._S_pinv(S_full_try)
+                        ldS_grad = self._dlog_det_S_drho(
+                            rho_try, S_pinv=S_pinv_try, S_full=S_full_try,
+                        )
+                        ldS_hess = self._d2log_det_S_drho_drho(
+                            rho_try, S_pinv=S_pinv_try, S_full=S_full_try,
+                        )
+                        out = _pi_fit_chol(
+                            self._XtX, self._Xty, rho_try,
+                            self._slots, self.p,
+                            yy=self._yty, log_phi=log_phi_try, n=n,
+                            Mp=self._Mp, gamma=self._gamma,
+                            phi_fixed=not include_log_phi,
+                            ldet_S_grad=ldS_grad, ldet_S_hess=ldS_hess,
+                        )
+                        if float(np.max(np.abs(Nstep))) == 0.0:
+                            # First call or zero step — accept and
+                            # snapshot the new step for next iter.
+                            Nstep = out["step"]
+                            theta_cur = theta_try
+                            break
+                        # mgcv: ``sum(prop$grad * Nstep) > dev * 1e-7`` =
+                        # uphill. Halve and retry.
+                        if (float(np.dot(out["grad"], Nstep))
+                                > abs(dev) * 1e-7
+                                and halves < halve_max):
+                            Nstep = Nstep / 2.0
+                            halves += 1
+                            continue
+                        Nstep = out["step"]
+                        theta_cur = theta_try
+                        break
+
+                    if include_log_phi:
+                        rho_hat = theta_cur[:n_sp]
+                        log_phi_hat = float(theta_cur[n_sp])
+                    else:
+                        rho_hat = theta_cur
+                        log_phi_hat = None
+                    self.sp = np.exp(rho_hat)
+                    fit = self._fit_given_rho(rho_hat)
                 else:
-                    rho_hat = theta_hat
-                    log_phi_hat = None
-                self.sp = np.exp(rho_hat)
-                fit = self._fit_given_rho(rho_hat)
+                    # Non-discrete or GCV path: fall back to the
+                    # converge-fully outer-Newton.
+                    if rho_hat is None:
+                        rho0 = self._initial_sp_rho()
+                    else:
+                        rho0 = rho_hat.copy()
+                    if include_log_phi:
+                        if log_phi_hat is None:
+                            try:
+                                fit_seed = self._fit_given_rho(rho0)
+                                df_resid_seed = max(n - self._Mp, 1.0)
+                                log_phi0 = float(np.log(
+                                    max(fit_seed.dev / df_resid_seed, 1e-12)
+                                ))
+                            except Exception:
+                                log_phi0 = 0.0
+                        else:
+                            log_phi0 = log_phi_hat
+                        theta0 = np.concatenate([rho0, [log_phi0]])
+                    else:
+                        theta0 = rho0
+
+                    theta_hat = self._outer_newton(
+                        theta0,
+                        criterion=(
+                            "REML" if method in ("REML", "ML") else "GCV"
+                        ),
+                        include_log_phi=include_log_phi,
+                        include_family_theta=False,
+                    )
+                    if include_log_phi:
+                        rho_hat = theta_hat[:n_sp]
+                        log_phi_hat = float(theta_hat[n_sp])
+                    else:
+                        rho_hat = theta_hat
+                        log_phi_hat = None
+                    self.sp = np.exp(rho_hat)
+                    fit = self._fit_given_rho(rho_hat)
 
             self._log_phi_hat = log_phi_hat
 

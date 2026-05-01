@@ -110,13 +110,18 @@ def test_chicago_lag():
     fit_hea = np.asarray(m.fitted_values)
     rel_fit = float(np.linalg.norm(fit_hea - fit_mgcv)
                     / np.linalg.norm(fit_mgcv))
-    assert rel_fit < 1e-2, (
-        f"chicago lag fitted rel diff {rel_fit:.3e} > 1e-2"
+    # POI optimizer brings chicago lag to ~5e-9 on fitted; tightened
+    # from the original 1e-2 bound so future regressions are caught.
+    assert rel_fit < 1e-7, (
+        f"chicago lag fitted rel diff {rel_fit:.3e} > 1e-7"
     )
 
     sp_mgcv = np.atleast_1d(np.loadtxt(_FIX / "lag" / "sp.csv"))
     sp_hea = np.asarray(m.sp)
     log_sp_diff = np.abs(np.log(sp_hea) - np.log(sp_mgcv))
-    assert float(log_sp_diff.max()) < 3.0, (
+    # The POI optimizer (Phase 2′.7) lands on the same minimum as
+    # mgcv to 7 significant digits on chicago lag — tighten the bound
+    # so a regression flips this test, not just a quiet drift.
+    assert float(log_sp_diff.max()) < 1e-4, (
         f"chicago lag sp out of basin: hea={sp_hea}, mgcv={sp_mgcv}"
     )
