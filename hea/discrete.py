@@ -401,7 +401,21 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
         if ki.ndim == 1:
             ks[ik, 0] = ks[ik - 1, 1] if ik > 0 else 0
             ks[ik, 1] = ks[ik, 0] + 1
-            k[:, ks[ik, 0]] = ki
+            # A scalar margin following a matrix-arg margin in the same
+            # smooth-spec list can land past hea's pre-counted ``nk``
+            # (which counts one slot per margin, not per matrix-column).
+            # Extend ``k`` here too (mgcv's ``cbind`` happens whenever the
+            # incoming index is a matrix; scalar writes assume room exists,
+            # which is only guaranteed if no prior margin was matrix-arg).
+            if ks[ik, 1] > k.shape[1]:
+                k_ext = np.zeros(
+                    (n, ks[ik, 1] - k.shape[1]), dtype=np.int64,
+                )
+                k_full = np.concatenate([k, k_ext], axis=1)
+                _set_k(k_full)
+                k_full[:, ks[ik, 0]] = ki
+            else:
+                k[:, ks[ik, 0]] = ki
         else:
             ks[ik, 0] = ks[ik - 1, 1] if ik > 0 else 0
             ks[ik, 1] = ks[ik, 0] + ki.shape[1]
