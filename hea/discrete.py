@@ -52,6 +52,7 @@ from .formula import (
     _TensorRawBasis,
     _T2RawBasis,
     _T2PredictRawBasis,
+    _eval_by_col,
 )
 
 
@@ -576,6 +577,11 @@ class _DiscreteTerm:
     absorb: Optional[object] = None
     by: Optional[object] = None
     keep_cols: Optional[np.ndarray] = None
+    # Pre-computed length-n by-mask (factor: indicator; numeric: scalar
+    # multiplier). Cached at design-build time because the by-column lives
+    # in the original input data, not in ``dframe.mf`` (which only carries
+    # discretised marginals). Invariant under PIRLS / outer-Newton.
+    by_mask: Optional[np.ndarray] = None
     # Predict-time replay (used for predict.bamd, not the fitter).
     spec: Optional[BasisSpec] = None
     label: str = ""
@@ -611,6 +617,7 @@ def build_discrete_design(blocks: list[SmoothBlock],
                           dframe: DiscretizedFrame,
                           *,
                           param_terms: Sequence[str] = ("(Intercept)",),
+                          data: Optional[pl.DataFrame] = None,
                           ) -> DiscreteDesign:
     """Build :class:`DiscreteDesign` from a fitted set of
     :class:`SmoothBlock` plus a discretised model frame.
@@ -705,6 +712,32 @@ def build_discrete_design(blocks: list[SmoothBlock],
         # as the authoritative post-transform width.
         p_term = block.X.shape[1]
         kind = "single" if len(margin_raws) == 1 else "tensor"
+
+        # Pre-compute the by-mask on the original n rows so the kernels
+        # (which can't see ``data``) can apply it row-wise. Factor:
+        # indicator (col == level), float; numeric: col values, float.
+        # Both apply identically as ``X *= by_mask[:, None]``.
+        by_mask: Optional[np.ndarray] = None
+        if spec.by is not None:
+            if data is None:
+                raise ValueError(
+                    f"build_discrete_design: smooth {block.label!r} has "
+                    "by= but no data was passed; cannot evaluate the "
+                    "by-column on the original n rows. Pass ``data=`` "
+                    "to build_discrete_design."
+                )
+            col = _eval_by_col(spec.by.expr, data)
+            arr = col.to_numpy() if isinstance(col, pl.Series) else col
+            if spec.by.kind == "factor":
+                by_mask = (arr == spec.by.level).astype(float)
+            elif spec.by.kind == "numeric":
+                by_mask = np.asarray(arr, dtype=float)
+            else:
+                raise ValueError(
+                    f"build_discrete_design: unsupported by.kind="
+                    f"{spec.by.kind!r} on smooth {block.label!r}"
+                )
+
         terms.append(_DiscreteTerm(
             kind=kind,
             Xd_list=Xd_list,
@@ -712,6 +745,7 @@ def build_discrete_design(blocks: list[SmoothBlock],
             coef_slice=slice(p_total, p_total + p_term),
             absorb=spec.absorb,
             by=spec.by,
+            by_mask=by_mask,
             keep_cols=spec.keep_cols,
             spec=spec,
             label=block.label,
@@ -827,16 +861,12 @@ def _term_full_design(term: _DiscreteTerm, k: np.ndarray, n: int) -> np.ndarray:
         else:
             X_full = X_full + Xq
 
-    # Apply by / absorb / keep_cols — these are column transforms.
-    if term.by is not None:
-        # by.apply expects a polars.DataFrame; build a synthetic one
-        # from the original (un-discretised) frame. The kernels operate
-        # on the n original rows so the by-column lives in the input
-        # data, not in dframe.mf. We can't reconstruct it here without
-        # the original data, so we expect the caller to apply ``by``
-        # outside (or pass the data via the kernel API). For now we
-        # leave by application to the discrete-design builder.
-        pass
+    # Apply by-mask, then absorb, then keep_cols. Order matches
+    # ``BasisSpec.predict_mat`` (formula.py:2415-2435): raw → by → absorb.
+    # ``term.by_mask`` is pre-computed length-n at build_discrete_design
+    # time (factor: indicator; numeric: scalar multiplier per row).
+    if term.by_mask is not None:
+        X_full = X_full * term.by_mask[:, None]
     if term.absorb is not None:
         X_full = term.absorb.apply(X_full)
     if term.keep_cols is not None:

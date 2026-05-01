@@ -1621,6 +1621,7 @@ class bam(gam):
             assert self._discrete_frame is not None
             self._discrete_design = build_discrete_design(
                 blocks, X_param_full, self._discrete_frame,
+                data=self.data,
             )
 
         # ---- family-independent post-setup --------------------------------
