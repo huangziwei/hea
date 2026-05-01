@@ -48,6 +48,7 @@ from .formula import (
     BasisSpec,
     SmoothBlock,
     _RawBasis,
+    _LinearTransformRawBasis,
     _TensorRawBasis,
     _T2RawBasis,
     _T2PredictRawBasis,
@@ -636,19 +637,21 @@ def build_discrete_design(blocks: list[SmoothBlock],
         term_vars = list(block.term)
         # Identify margins: tensor smooths have ``raw`` of type
         # ``_TensorRawBasis`` / ``_T2RawBasis`` / ``_T2PredictRawBasis``;
-        # everything else is single-margin. Each margin variable list
-        # comes either from the raw basis machinery (if exposed) or by
-        # falling back to one variable per margin in declaration order.
+        # everything else is single-margin. Each margin variable list comes
+        # from the raw basis itself (``_raw_basis_vars``) — that's the only
+        # source that survives mgcv's ``tero`` reorder, where the block's
+        # declaration order (``block.term``) no longer matches the post-
+        # tero margin order.
         raw = spec.predict_raw if spec.predict_raw is not None else spec.raw
         if isinstance(raw, _TensorRawBasis):
             margin_raws = list(raw.margins)
-            margin_vars = _split_term_vars_by_margins(term_vars, margin_raws)
+            margin_vars = [_raw_basis_vars(m) or term_vars for m in margin_raws]
         elif isinstance(raw, (_T2RawBasis, _T2PredictRawBasis)):
             margin_raws = list(raw.margins)
-            margin_vars = _split_term_vars_by_margins(term_vars, margin_raws)
+            margin_vars = [_raw_basis_vars(m) or term_vars for m in margin_raws]
         else:
             margin_raws = [raw]
-            margin_vars = [term_vars]
+            margin_vars = [_raw_basis_vars(raw) or term_vars]
 
         # Evaluate each marginal raw basis on the discretised unique
         # values for its variables. The frame for marginal j is built
@@ -687,6 +690,26 @@ def build_discrete_design(blocks: list[SmoothBlock],
         terms=terms, k=dframe.k, ks=dframe.ks, nr=dframe.nr,
         n=dframe.n, p=p_total, var_index=var_index,
     )
+
+
+def _raw_basis_vars(raw: _RawBasis) -> list[str]:
+    """Return the variable names a raw basis evaluates on.
+
+    Walks past ``_LinearTransformRawBasis`` wrappers (which do not declare
+    their own ``term`` — they inherit from the inner basis). For mgcv-style
+    leaf classes (``_CRRawBasis``, ``_TPRawBasis``, etc.) ``term`` is either
+    a single string (1-D) or a list of strings (multi-D). Returns a list
+    in either case so callers can iterate uniformly.
+    """
+    inner = raw
+    while isinstance(inner, _LinearTransformRawBasis):
+        inner = inner.inner
+    term_attr = getattr(inner, "term", None)
+    if term_attr is None:
+        return []
+    if isinstance(term_attr, str):
+        return [term_attr]
+    return list(term_attr)
 
 
 def _split_term_vars_by_margins(term_vars: list[str],

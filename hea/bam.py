@@ -329,7 +329,7 @@ def _smooth_specs_from_expanded(expanded, data: pl.DataFrame) -> list[dict]:
     matrix-arg long form.
     """
     from .formula import (
-        _smooth_term_vars, _smooth_by_expr, _te_parse_margins,
+        _smooth_term_vars, _smooth_by_expr, _te_parse_margins, _apply_tero,
     )
     out: list[dict] = []
     for call in expanded.smooths:
@@ -340,6 +340,11 @@ def _smooth_specs_from_expanded(expanded, data: pl.DataFrame) -> list[dict]:
             by_expr = None
         if call.fn in ("te", "ti", "t2"):
             te_specs = _te_parse_margins(call, data)
+            # tero (bam.r:1900-1917, called at bam.r:2109) — discrete=True
+            # only. Putting the largest-k margin last makes ``compress_df``
+            # process small-pool margins first, matching mgcv's MT-state
+            # consumption sequence so the per-margin shuffle order agrees.
+            te_specs = _apply_tero(te_specs)
             margins = [{"term": list(s["term"])} for s in te_specs]
         else:
             margins = [{"term": term_vars}]
@@ -1018,7 +1023,7 @@ class bam(gam):
                 }
                 mf0 = pl.DataFrame(mf_dict) if mf_dict else pl.DataFrame()
                 sb_lists = materialize_smooths(
-                    d.expanded, mf0, sparse_cons=0,
+                    d.expanded, mf0, sparse_cons=0, tero=True,
                 )
             else:
                 # discrete=FALSE: basis setup on a representative subsample

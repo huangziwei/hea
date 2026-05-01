@@ -930,6 +930,21 @@ _SPARSE_CONS_CV: contextvars.ContextVar[int] = contextvars.ContextVar(
 )
 
 
+# mgcv's ``tero`` (bam.r:1900-1917) reorders te/ti/t2 margins so the largest
+# basis (by ``bs.dim``, broken ties by latest position) is *last*. It runs
+# only on the ``discrete=TRUE`` path (bam.r:2103-2129) before ``discrete.mf``,
+# so both the per-margin ``compress.df`` shuffle order AND the tensor
+# ``kron`` ordering reflect the reordered margins. ``bam(discrete=TRUE)``
+# sets this around ``materialize_smooths``; ``_build_te_smooth`` consults it
+# to swap ``specs`` before basis construction. The matching reorder of
+# ``smooth_specs`` for ``discrete_mf`` happens in
+# ``bam._smooth_specs_from_expanded`` (always sorted there since that helper
+# only fires on the discrete path).
+_TERO_CV: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_hea_tero", default=False
+)
+
+
 @contextlib.contextmanager
 def with_ordered_cols(cols):
     """Context manager: inside the `with` block, the given column names are
@@ -5595,6 +5610,33 @@ def _te_parse_margins(call: Call, data: pl.DataFrame) -> list[dict]:
     return specs
 
 
+def _apply_tero(specs: list[dict]) -> list[dict]:
+    """Apply mgcv's ``tero`` margin reorder (bam.r:1900-1917).
+
+    Find the margin with the largest ``k`` (basis dim). If it's not already
+    last, swap it with the last margin. Ties go to the *latest* margin
+    because mgcv loops with ``>=`` and updates ``maxi`` on each match, so the
+    last equal-largest wins.
+
+    This reorder runs once for each te/ti/t2 spec on the discrete=TRUE path
+    so the per-margin ``compress.df`` shuffle order AND the tensor ``kron``
+    ordering both reflect the reordered margins.
+    """
+    if len(specs) < 2:
+        return specs
+    maxd = -1
+    maxi = 0
+    for i, spec in enumerate(specs):
+        if int(spec["k"]) >= maxd:
+            maxi = i
+            maxd = int(spec["k"])
+    if maxi == len(specs) - 1:
+        return specs
+    out = list(specs)
+    out[maxi], out[-1] = out[-1], out[maxi]
+    return out
+
+
 def _te_make_margin_call(spec: dict) -> Call:
     """Build a synthetic `s(term..., k=..., bs=..., m=..., fx=...)` Call
     for a single margin so we can reuse the existing bs-specific raw
@@ -5761,6 +5803,12 @@ def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
     runs both on the row-summed (n, p_raw) X (sparse.cons=-1 path).
     """
     specs = _te_parse_margins(call, data)
+    # tero (bam.r:1900-1917): on the discrete=True path, reorder margins so
+    # the largest ``bs.dim`` is last. ``maxd`` ties go to the *latest* margin
+    # (mgcv uses ``>=`` so a later equal-size margin wins). The user's
+    # original margin order is unchanged on the non-discrete path.
+    if _TERO_CV.get() and not inter:
+        specs = _apply_tero(specs)
     n_bases = len(specs)
 
     if inter:
@@ -6207,7 +6255,7 @@ def _summation_apply_blocks(
 
 def materialize_smooths(
     expanded: ExpandedFormula, data: pl.DataFrame,
-    *, sparse_cons: int = 0,
+    *, sparse_cons: int = 0, tero: bool = False,
 ) -> list[list[SmoothBlock]]:
     """Materialize each smooth in `expanded.smooths` to one or more blocks.
 
@@ -6300,6 +6348,7 @@ def materialize_smooths(
         )
 
     token = _SPARSE_CONS_CV.set(int(sparse_cons))
+    tero_token = _TERO_CV.set(bool(tero))
     try:
         out: list[list[SmoothBlock]] = []
         for call in expanded.smooths:
@@ -6313,4 +6362,5 @@ def materialize_smooths(
             out.append(blocks)
         return out
     finally:
+        _TERO_CV.reset(tero_token)
         _SPARSE_CONS_CV.reset(token)
