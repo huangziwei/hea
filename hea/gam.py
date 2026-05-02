@@ -6198,6 +6198,9 @@ class VisResult:
         cmap: str = "viridis",
         levels: int = 20,
         contour_levels=None,
+        vmin: float | None = None,
+        vmax: float | None = None,
+        extend: str = "neither",
         se_mult: float = 0.0,
         elev: float = 30.0,
         azim: float = -60.0,
@@ -6240,7 +6243,23 @@ class VisResult:
             # contourf's (x, y, Z) call has Z[j, i] for x=m1[i], y=m2[j].
             X, Y = np.meshgrid(m1_num, m2_num, indexing="xy")
             Z = self.fit.T
-            cf = ax.contourf(X, Y, Z, levels=levels, cmap=cmap)
+            # ``vmin``/``vmax`` clip the colormap normalization AND the
+            # colorbar range. Matplotlib's ``contourf`` treats those two
+            # as separate: ``vmin``/``vmax`` only steer the cmap norm,
+            # while the colorbar follows ``levels``. So when the user
+            # supplies ``vmin``/``vmax`` but leaves ``levels`` at its
+            # int default, derive a level array from [vmin, vmax] so
+            # the colorbar matches. Default ``extend`` flips to
+            # ``"both"`` in that case so out-of-range Z stays painted
+            # at the cmap endpoints rather than going blank.
+            extend_used = extend
+            if vmin is not None and vmax is not None and isinstance(levels, int):
+                n_lev = levels
+                levels = np.linspace(float(vmin), float(vmax), n_lev + 1)
+                if extend_used == "neither":
+                    extend_used = "both"
+            cf = ax.contourf(X, Y, Z, levels=levels, cmap=cmap,
+                             vmin=vmin, vmax=vmax, extend=extend_used)
             # Bump line strength when labels are on so the numbers sit on
             # readable lines, not faint guides.
             line_alpha = 0.8 if clabel else 0.5
