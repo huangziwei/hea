@@ -4269,6 +4269,12 @@ class gam:
         n_grid: int = 30,
         rm_ranef: bool | str | list | None = True,
         plot_ci: bool = False,
+        sim_ci: bool = False,
+        n_sim: int = 10_000,
+        rng: np.random.Generator | int | None = None,
+        show_diff: bool = False,
+        alpha_diff: float = 0.5,
+        col_diff: str = "white",
         color: str = "RdBu_r",
         col: str = "black",
         ci_col: tuple[str, str] = ("red", "green"),
@@ -4319,6 +4325,31 @@ class gam:
         plot_ci : bool
             Overlay dotted contours of ``diff ± CI`` at the same levels as
             the bold contour — itsadug's ``plotCI``. Default ``False``.
+        sim_ci : bool
+            Use a simultaneous CI envelope (Wood 2017 §6.10) instead of the
+            pointwise band — itsadug's ``sim.ci``. Wider, controls the
+            family-wise type-I rate over the surface. Both ``plot_ci`` and
+            the ``show_diff`` mask read this band when ``sim_ci=True``.
+        n_sim : int
+            Number of MVN draws for the simultaneous envelope. Default
+            10,000 (matches itsadug). Ignored when ``sim_ci=False``.
+        rng : numpy Generator | int | None
+            RNG for the simultaneous draws. ``None`` is non-deterministic;
+            pass an int for reproducible runs.
+        show_diff : bool
+            Overlay a translucent mask on grid cells where the CI excludes
+            0 — itsadug's ``show.diff``. The mask uses the simultaneous
+            band when ``sim_ci=True``, the pointwise band otherwise. The
+            "significant" region is exactly the union of where ``diff −
+            CI > 0`` and ``diff + CI < 0``.
+        alpha_diff : float
+            Opacity of the ``show_diff`` mask in ``[0, 1]``. Default 0.5.
+            Mirrors itsadug's ``alpha.diff``.
+        col_diff : str
+            Color of the ``show_diff`` mask. Default ``"white"`` so it
+            washes out the heatmap's "significant" cells; pass any
+            matplotlib color (hex, name, RGB tuple). Mirrors itsadug's
+            ``col.diff``.
         color : str
             Matplotlib colormap for the heatmap. Default ``"RdBu_r"``
             (diverging). itsadug's default is ``topo.colors``; pick
@@ -4420,6 +4451,7 @@ class gam:
         result = self.get_difference(
             comp=comp, cond=cond, rm_ranef=rm_ranef,
             se=(se > 0), f=(se if se > 0 else 1.96),
+            sim_ci=sim_ci, n_sim=n_sim, rng=rng,
             print_summary=print_summary,
         )
 
@@ -4440,9 +4472,14 @@ class gam:
             )
         sort_idx = np.lexsort([y_arr, x_arr])  # primary key is the LAST one
         Z = result.difference[sort_idx].reshape(Nx, Ny)
+        # When ``sim_ci=True``, ``result.sim_ci`` carries the simultaneous
+        # envelope's half-width (already includes the f multiplier);
+        # ``result.ci`` is the pointwise version. The downstream contour
+        # overlay and ``show_diff`` mask both read whichever was requested.
+        ci_src = result.sim_ci if sim_ci else result.ci
         CI_mat = (
-            result.ci[sort_idx].reshape(Nx, Ny)
-            if result.ci is not None else None
+            ci_src[sort_idx].reshape(Nx, Ny)
+            if ci_src is not None else None
         )
 
         x_axis = np.asarray(cond[xvar], dtype=float)
@@ -4514,6 +4551,22 @@ class gam:
                     XX, YY, Zp + CI_mat.T, levels=levels,
                     colors=ci_col[1], linestyles=":", linewidths=0.6,
                 )
+
+        # itsadug ``show.diff``: translucent mask on grid cells where the
+        # CI excludes 0. Computed as the union of (Zp − CI > 0) and
+        # (Zp + CI < 0); plotted via ``contourf`` on a binary 0/1 field
+        # with a single-color cmap, alpha-blended over the heatmap.
+        if show_diff and CI_mat is not None:
+            from matplotlib.colors import ListedColormap as _LCM
+            sig = ((Zp - CI_mat.T > 0) | (Zp + CI_mat.T < 0)).astype(float)
+            # Mask non-significant (0) cells so contourf paints only the
+            # 1-valued cells; one-color cmap so ``col_diff`` does the work.
+            ax.contourf(
+                XX, YY, np.where(sig > 0.5, 1.0, np.nan),
+                levels=[0.5, 1.5],
+                colors=[col_diff],
+                alpha=float(alpha_diff),
+            )
 
         if add_color_legend:
             plt.colorbar(im, ax=ax)
