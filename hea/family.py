@@ -1565,8 +1565,8 @@ class Scat(Family):
 
     def variance(self, mu):
         # Marginal var of σ·T(ν): σ²·ν/(ν-2). Used for sp init / Pearson.
-        nu = float(np.exp(self._theta[0]) + self._min_df)
-        sig = float(np.exp(self._theta[1]))
+        nu = np.float64(np.exp(self._theta[0]) + self._min_df)
+        sig = np.float64(np.exp(self._theta[1]))
         return np.full(np.shape(mu), sig * sig * nu / max(nu - 2.0, 1e-10),
                        dtype=float)
 
@@ -1582,8 +1582,8 @@ class Scat(Family):
     def dev_resids(self, y, mu, wt, theta=None):
         # mgcv: wt * (ν+1) * log1p((1/ν) * ((y-μ)/σ)²)  (efam.r:3609-3614)
         th = self._theta if theta is None else np.asarray(theta, dtype=float)
-        nu = float(np.exp(th[0]) + self._min_df)
-        sig = float(np.exp(th[1]))
+        nu = np.float64(np.exp(th[0]) + self._min_df)
+        sig = np.float64(np.exp(th[1]))
         y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         return wt * (nu + 1.0) * np.log1p((1.0 / nu) * ((y - mu) / sig) ** 2)
@@ -1604,8 +1604,8 @@ class Scat(Family):
         #                          + (ν+1)·log1p(((y-μ)/σ)²/ν)/2 ]
         # (efam.r:3690-3697)
         th = self._theta if theta is None else np.asarray(theta, dtype=float)
-        nu = float(np.exp(th[0]) + self._min_df)
-        sig = float(np.exp(th[1]))
+        nu = np.float64(np.exp(th[0]) + self._min_df)
+        sig = np.float64(np.exp(th[1]))
         y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         term = (-gammaln((nu + 1.0) / 2.0)
@@ -1633,8 +1633,8 @@ class Scat(Family):
         w = np.asarray(wt, dtype=float)
         if w.size == 1:
             w = np.full(y.shape, float(w))
-        nu = float(np.exp(th[0]) + self._min_df)
-        sig = float(np.exp(th[1]))
+        nu = np.float64(np.exp(th[0]) + self._min_df)
+        sig = np.float64(np.exp(th[1]))
         nu2 = nu - self._min_df       # = exp(th[0])
         nu2nu = nu2 / nu
         nu12 = (nu + 1.0) / 2.0
@@ -1678,8 +1678,8 @@ class Scat(Family):
         :meth:`ls_extended` instead.
         """
         y = np.asarray(y, dtype=float); wt = np.asarray(wt, dtype=float)
-        nu = float(np.exp(self._theta[0]) + self._min_df)
-        sig = float(np.exp(self._theta[1]))
+        nu = np.float64(np.exp(self._theta[0]) + self._min_df)
+        sig = np.float64(np.exp(self._theta[1]))
         term = (gammaln((nu + 1.0) / 2.0)
                 - gammaln(nu / 2.0)
                 - np.log(sig * np.sqrt(np.pi * nu)))
@@ -1692,10 +1692,17 @@ class Scat(Family):
         # Direct line-by-line port of mgcv ``scat$Dd``. Every variable
         # name and bracketing matches the source so future diffs against
         # mgcv stay mechanical.
+        #
+        # Note: nu/sig are kept as ``np.float64`` (not Python ``float``)
+        # so divisions by zero in the σ→0 / ν→∞ extremes propagate as
+        # ``inf``/``nan`` instead of raising ``ZeroDivisionError``. The
+        # ``_estimate_theta`` Newton then sees a non-finite ``nll1`` and
+        # step-halves naturally — mirroring mgcv R, which silently
+        # produces ``Inf`` here.
         min_df = self._min_df
         th = np.asarray(theta, dtype=float)
-        nu = float(np.exp(th[0]) + min_df)
-        sig = float(np.exp(th[1]))
+        nu = np.float64(np.exp(th[0]) + min_df)
+        sig = np.float64(np.exp(th[1]))
         nu1 = nu + 1.0
         nu2 = nu - min_df
         y = np.asarray(y, dtype=float)
@@ -1747,7 +1754,7 @@ class Scat(Family):
             )
             EDmu3 = np.zeros(n, dtype=float)
             EDmu2th[:, 0] = (4.0 / (sig * sig * (nu + 3.0) ** 2)
-                             * float(np.exp(th[0])))
+                             * np.float64(np.exp(th[0])))
             EDmu2th[:, 1] = -2.0 * oo["EDmu2"]
 
             oo["Dth"] = Dth

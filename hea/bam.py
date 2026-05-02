@@ -2672,6 +2672,16 @@ class bam(gam):
 
         include_log_phi = (not family.scale_known) and method in ("REML", "ML")
 
+        # ---- Extended-family preinit (mgcv bgam.fitd, bam.r:534-541) ----
+        # ``family.preinitialize(y)`` may return ``{"Theta": ...}`` to
+        # override the family's internal θ from data (Scat: c(1.5,
+        # log(0.8·sd(y)))). Standard families return None. Fires once,
+        # before the first PIRLS iter.
+        if family.is_extended:
+            pini = family.preinitialize(y)
+            if pini is not None and "Theta" in pini:
+                family.set_theta(pini["Theta"])
+
         # ---- Initialize μ̂, η̂, dev for iter 0 (mgcv bam.r:950-969) -----
         mu = family.initialize(y, prior_w)
         eta = link.link(mu)
@@ -2696,6 +2706,58 @@ class bam(gam):
 
         for it in range(maxit):
             devold = dev
+
+            # ---- Recompute (η, μ) at the current β before θ-update ------
+            # mgcv bgam.fitd:497-500: at iter > 1 set
+            # ``eta <- Xbd(coef) + offset; mu <- linkinv(eta)``. This makes
+            # the subsequent ``estimate.theta`` see the *post-β* μ, not
+            # the stale initialise'd μ from the previous (R,f) build (which
+            # was ≈ y on iter 0). We do the same for iter ≥ 1 here.
+            if it >= 1 and coef is not None:
+                if self._discrete_design is not None:
+                    eta = (Xbd(self._discrete_design,
+                                np.asarray(coef, dtype=float))
+                            + off)
+                else:
+                    eta = self._chunked_xbeta(
+                        np.asarray(coef, dtype=float)) + off
+                mu = link.linkinv(eta)
+
+            # ---- Extended-family θ update (mgcv bgam.fitd:557-571) ------
+            # mgcv's ``iter > 1`` (1-based) ⇒ our ``it >= 1`` (0-based).
+            # Update θ at the current (μ, β) snapshot via inner Newton on
+            # ``-logL = dev/2 - ls``. Only fires for families whose θ is
+            # actually free (``estimate_theta_callback = True``) — Scat
+            # with both θ user-locked has ``n_theta = 0`` and stays put.
+            if (it >= 1
+                    and family.is_extended
+                    and family.estimate_theta_callback):
+                theta_new = _estimate_theta(
+                    family, y, mu, scale=1.0,
+                    wt=prior_w, tol=1e-7,
+                )
+                family.set_theta(theta_new)
+                # mgcv recomputes the deviance under the new θ before the
+                # convergence check (the alternating cadence: β-step at
+                # old θ → θ-step at new μ → β-step at new θ). Without
+                # this, ``devold`` and the iter-0-style seed compare
+                # against stale θ.
+                dev = 2.0 * float(np.sum(
+                    family.dev_resids(y, mu, prior_w, theta=theta_new)
+                ))
+                # mgcv bgam.fitd:567-569: re-evaluate the previous iter's
+                # ``dev0`` at the saved μ₀ but under the NEW θ. Without
+                # this the step-halving check at iter ≥ 2 compares
+                # ``dev0`` (under old θ) against ``new_dev`` (under new
+                # θ) — apples to oranges, and divergent β iterates slip
+                # through unhalved. eta0 is saved at the end of every
+                # iter > 0; mu0 = linkinv(eta0) is the corresponding μ.
+                if eta0 is not None:
+                    mu0_at_eta0 = link.linkinv(eta0)
+                    dev0 = float(np.sum(family.dev_resids(
+                        y, mu0_at_eta0, prior_w, theta=theta_new
+                    )))
+
             kk = 0
             while True:   # mgcv "repeat" — re-enters on step halving
                 if self._discrete_design is not None:

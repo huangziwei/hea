@@ -4552,9 +4552,27 @@ class gam:
 
     # ------------- printing ------------------------------------------------
 
+    def _family_display_name(self) -> str:
+        """Family display string. Extended families with a ``postproc``
+        hook can override this to embed fitted θ — e.g. mgcv reports
+        ``Scaled t(5,0.3)`` rather than ``scat`` once a ``scat()`` fit
+        has converged. ``postproc`` is allowed to return ``None`` (or
+        no ``family_name`` key) for the default ``family.name`` path.
+        """
+        try:
+            pp = self.family.postproc(
+                self._y_arr, self.fitted_values,
+                np.ones(self.n, dtype=float),
+            )
+        except Exception:
+            return self.family.name
+        if pp and "family_name" in pp:
+            return str(pp["family_name"])
+        return self.family.name
+
     def __repr__(self) -> str:
         out = [
-            f"Family: {self.family.name}",
+            f"Family: {self._family_display_name()}",
             f"Link function: {self.family.link.name}",
             "",
             f"Formula: {self.formula}",
@@ -4571,7 +4589,7 @@ class gam:
         """mgcv-style summary: parametric table + smooth-edf table + fit stats."""
         out = [
             "",
-            f"Family: {self.family.name}",
+            f"Family: {self._family_display_name()}",
             f"Link function: {self.family.link.name}",
             "",
             f"Formula: {self.formula}",
