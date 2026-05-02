@@ -3585,6 +3585,18 @@ class gam:
             if expr_map:
                 newdata = _apply_smooth_arg_exprs(newdata, expr_map)
 
+            # Append stub rows for any fit-time factor level that's
+            # missing from ``newdata``. ``materialize``'s droplevels
+            # semantics (formula.py:1059-1069) would otherwise collapse
+            # the contrast to only the levels present in newdata,
+            # returning a design with fewer columns than ``self._beta``.
+            # This mirrors mgcv's ``xlevels`` mechanism, which carries
+            # the fit-time levels through ``predict.gam`` so the
+            # contrast expansion stays consistent. Stubs are appended
+            # at the end; we slice them off after building ``X_new``.
+            n_user = newdata.height
+            newdata, n_stubs = _add_factor_stub_rows(newdata, self.data)
+
             X_param = materialize(self._expanded, newdata).to_numpy().astype(float)
             cols = [X_param]
             for b in self._blocks:
@@ -3596,13 +3608,19 @@ class gam:
                     )
                 cols.append(np.asarray(b.spec.predict_mat(newdata), dtype=float))
             X_new = np.concatenate(cols, axis=1) if len(cols) > 1 else X_param
+            if n_stubs > 0:
+                X_new = X_new[:n_user]
             n_new = X_new.shape[0]
             # Re-evaluate any formula offset(...) atoms against newdata
-            # — predict.gam does the same.
+            # — predict.gam does the same. Slice off the stubs so the
+            # offset matches the user's row count.
             off_new = np.zeros(n_new)
             for off_node in self._expanded.offsets:
                 blk = _eval_atom(off_node, newdata)
-                off_new = off_new + blk.values.flatten().astype(float)
+                off_full = blk.values.flatten().astype(float)
+                if n_stubs > 0:
+                    off_full = off_full[:n_user]
+                off_new = off_new + off_full
         if offset is not None:
             extra = np.asarray(offset, dtype=float).flatten()
             if extra.shape != off_new.shape:
