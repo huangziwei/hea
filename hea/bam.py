@@ -2047,6 +2047,101 @@ class bam(gam):
             self._post_fit_pirls(fit, rho_hat, X_param_df)
 
     # -----------------------------------------------------------------------
+    # predict — override of gam.predict (newdata=None case)
+    # -----------------------------------------------------------------------
+
+    def predict(
+        self,
+        newdata: pl.DataFrame | None = None,
+        type: str = "response",
+        se_fit: bool = False,
+        offset: np.ndarray | list | None = None,
+    ):
+        """Predict from the fitted bam — :func:`predict.bam` parity.
+
+        Override of :meth:`hea.gam.predict` because ``self._X_full =
+        qr.R`` (p × p) on every bam path: Gaussian-identity stores R for
+        the chunked-QR closed-form solve (bam.py:1961), PIRLS / discrete
+        store R for the inner-Newton's reduced-data scoring
+        (bam.py:2791). The inherited routine assumes ``_X_full`` is the
+        full ``n × p`` design and shape-clashes against ``_offset``
+        (length n) when ``newdata=None``.
+
+        Behaviour for each (newdata, type, se_fit) combination:
+
+        * ``newdata`` not None → delegate to ``super().predict(...)`` —
+          parent rebuilds the design via per-block ``spec.predict_mat``
+          the same way it does for gam fits.
+        * ``newdata=None``, ``type='link' | 'response'``, no
+          ``se_fit``, no extra ``offset`` → cached
+          :attr:`linear_predictors` / :attr:`fitted_values`.
+        * ``newdata=None`` with ``type='lpmatrix'`` → route through
+          ``super().predict(newdata=self.data, type='lpmatrix')``,
+          which re-evaluates each smooth's basis on training rows.
+          For non-discrete bam this is bit-equal to the design used
+          during the fit; for discrete bam it evaluates basis exactly
+          (vs. mgcv's discretize-then-gather via ``Xbd``) — *Phase 5.2
+          will replace this with the discrete-aware path*.
+        * ``newdata=None`` with ``se_fit=True`` → cached eta (+ extra
+          offset, if any) for the link-scale prediction; chunked
+          ``diag(X·Vp·X')`` (via :meth:`_chunked_var_eta_diag`) for
+          per-row link-scale variance; delta-method
+          ``|μ_η|`` multiplier for response-scale SE.
+        """
+        if type not in ("link", "response", "lpmatrix"):
+            raise ValueError(
+                f"type must be 'link', 'response', or 'lpmatrix'; got {type!r}"
+            )
+        if type == "lpmatrix" and se_fit:
+            raise ValueError(
+                "se_fit=True is not allowed with type='lpmatrix'"
+            )
+
+        if newdata is not None:
+            return super().predict(
+                newdata=newdata, type=type, se_fit=se_fit, offset=offset,
+            )
+
+        # ---- newdata=None branch -------------------------------------------
+        extra: Optional[np.ndarray] = None
+        if offset is not None:
+            extra = np.asarray(offset, dtype=float).flatten()
+            if extra.shape != (self.n,):
+                raise ValueError(
+                    f"offset must have length {self.n}, got {extra.shape}"
+                )
+
+        # Fast path: cached arrays cover the most common ask.
+        if type in ("link", "response") and not se_fit and extra is None:
+            if type == "link":
+                return self.linear_predictors.copy()
+            return self.fitted_values.copy()
+
+        if type == "lpmatrix":
+            return super().predict(
+                newdata=self.data, type="lpmatrix", se_fit=False, offset=None,
+            )
+
+        # link / response with se_fit=True or with an extra offset.
+        eta = self.linear_predictors.copy()
+        if extra is not None:
+            eta = eta + extra
+
+        if not se_fit:
+            if type == "link":
+                return eta
+            return self.family.link.linkinv(eta)
+
+        # se_fit=True
+        var_eta = self._chunked_var_eta_diag(self.Vp)
+        se_link = np.sqrt(np.maximum(var_eta, 0.0))
+        if type == "link":
+            return eta, se_link
+        mu = self.family.link.linkinv(eta)
+        mu_eta = self.family.link.mu_eta(eta)
+        return mu, se_link * np.abs(mu_eta)
+
+    # -----------------------------------------------------------------------
     # _fit_given_rho override — uses (R, f, y_norm2, rss_extra)
     # -----------------------------------------------------------------------
 
@@ -2325,6 +2420,55 @@ class bam(gam):
                 self._X_param_full[start:end],
             )
             HX = X_chunk @ A_inv
+            out[start:end] = (HX * X_chunk).sum(axis=1)
+        return out
+
+    def _chunked_var_eta_diag(self, Vp: np.ndarray) -> np.ndarray:
+        """``diag(X·Vp·X')`` over the full data, chunk by chunk.
+
+        Per-row link-scale variance ``Var(η_i) = X_i·Vp·X_iᵀ``. Same chunk
+        walk as :meth:`_chunked_leverage_diag`; passing ``Vp`` instead of
+        ``A_inv`` returns the predict-time link-scale variance used by
+        :meth:`predict` ``se_fit=True``. Discrete bam dispatches on
+        :attr:`_discrete_design`: each chunk's design rows are gathered
+        from ``Xbd``-style per-marginal-Xd lookups, identical to what the
+        fit would use; non-discrete bam re-evaluates basis on the
+        ``self.data`` chunk via :func:`_materialize_chunk`.
+        """
+        n = self.n
+        out = np.empty(n, dtype=float)
+        if self._discrete_design is not None:
+            # Discrete: row gather via predict_mat on training data is
+            # bit-equal to the design used at fit time when the
+            # discretization didn't round (the common case for small or
+            # already-unique covariates). Phase 5.2 will replace this
+            # with a true Xbd-gather.
+            from .formula import materialize
+            X_param_full = self._X_param_full
+            for start, end in _chunk_indices(n, self._chunk_size):
+                cols = [X_param_full[start:end]]
+                for b in self._blocks:
+                    if b.spec is None:
+                        raise RuntimeError(
+                            f"smooth block {b.label!r} (cls={b.cls!r}) "
+                            f"has no BasisSpec; predict requires every "
+                            f"smooth to carry one."
+                        )
+                    cols.append(np.asarray(
+                        b.spec.predict_mat(self.data[start:end]),
+                        dtype=float,
+                    ))
+                X_chunk = np.concatenate(cols, axis=1)
+                HX = X_chunk @ Vp
+                out[start:end] = (HX * X_chunk).sum(axis=1)
+            return out
+        for start, end in _chunk_indices(n, self._chunk_size):
+            X_chunk = _materialize_chunk(
+                self._blocks,
+                self.data[start:end],
+                self._X_param_full[start:end],
+            )
+            HX = X_chunk @ Vp
             out[start:end] = (HX * X_chunk).sum(axis=1)
         return out
 

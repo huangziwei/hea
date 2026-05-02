@@ -1,24 +1,46 @@
-"""
-mgcv-oracle regression tests for hea.gam.
+"""End-to-end tests for ``hea.gam``.
 
-Each test pins the printed numerical outputs of `mgcv::gam(..., method=...)`
-on a fixed dataset so the hea port can be validated against the canonical
-R/mgcv results. Coverage spans:
+Sections (top → bottom):
 
-  - tp / cr / ps basis types
-  - REML and GCV.Cp criteria
-  - parametric + smooth combinations
-  - tensor-product (te) smooths
-  - by=factor multi-block smooths
+1. **mgcv-oracle parity** — each test pins the printed numerical
+   outputs of ``mgcv::gam(..., method=...)`` on a fixed dataset so
+   the hea port can be validated against the canonical R/mgcv
+   results. Coverage spans tp / cr / ps basis types; REML, ML, and
+   GCV.Cp criteria; parametric + smooth combinations; tensor-product
+   (te) smooths; by=factor multi-block smooths; random-effect
+   (bs='re') smooths; family/link plumbing (Gaussian, Gamma, IG,
+   Tweedie/tw, Binomial); LHS expressions; offset(...) handling;
+   plot_smooth dispatching; select=TRUE null-space penalties;
+   gam.check. Tolerances are set per-quantity — ρ=log(sp) typically
+   pins to 4 decimals for tp and ps; edf, σ², and the criterion
+   typically agree to 4–5 decimals. Smooth basis coefficients
+   themselves are not pinned (identifiable only up to mgcv's
+   reparametrization), but per-smooth edf totals are.
 
-Tolerances are set per-quantity. ρ=log(sp) is 4-decimal for tp and ps;
-edf, σ², and the criterion typically agree to 4–5 decimal places. Smooth
-basis coefficients themselves are not pinned (they're identifiable only
-up to mgcv's reparametrization), but per-smooth edf totals are.
+2. **vis()** — port of mgcv's ``vis.gam``. Correctness invariant is
+   ``vis(view) == predict(grid)``: the method just calls predict on a
+   regular grid over two view variables, with all other variables
+   held at their typical (median / modal) value. The predict
+   end-to-end vs mgcv comparison lives in ``test_smooths.py``; here
+   we check grid construction, dtype handling, SE pipeline,
+   ``too_far`` masking, and factor-axis support.
+
+3. **get_difference() — port of itsadug::get_difference** —
+   numerical-equivalence tests against R's ``itsadug``. Per case
+   under ``tests/fixtures/itsadug_plot_diff/``, re-fit the same
+   model in hea, replay the same ``(comp, cond, f, sim_ci,
+   rm_ranef)`` arguments, and compare per-row ``difference`` and
+   ``CI`` against R's output. The deterministic ``se_fit`` lands at
+   high precision; the empirical ``crit`` matches to Monte-Carlo SE
+   (Python and R don't share an RNG).
 """
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+import matplotlib
 import numpy as np
 import polars as pl
 import pytest
@@ -26,11 +48,15 @@ import pytest
 from conftest import load_dataset
 from hea import gam
 from hea.family import Tweedie, tw
+from hea.gam import VisResult
+
+matplotlib.use("Agg")  # headless — must be set before pyplot import below.
+import matplotlib.pyplot as plt   # noqa: E402
 
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 1. mgcv-oracle parity
+# =============================================================================
 
 
 def _allclose(actual, expected, *, atol, name=""):
@@ -1457,3 +1483,386 @@ def test_tw_rejects_fixed_sp():
     df = pl.DataFrame({"y": y, "x": x})
     with pytest.raises(ValueError, match="incompatible"):
         gam("y ~ s(x, k=6)", df, family=tw(), method="REML", sp=np.array([0.1]))
+
+
+# =============================================================================
+# 2. vis() — port of mgcv's vis.gam
+# =============================================================================
+
+
+@pytest.fixture(scope="module")
+def trees_te():
+    """trees with a 2D tensor smooth — the canonical vis.gam example."""
+    data = (
+        load_dataset("mgcv", "trees")
+        .rename({"Volume": "vol", "Girth": "g", "Height": "h"})
+    )
+    m = gam("vol ~ te(g, h)", data=data, method="REML")
+    return m, data
+
+
+@pytest.fixture(scope="module")
+def factor_model():
+    """A model with one numeric and one factor RHS variable."""
+    rng = np.random.RandomState(0)
+    df = pl.DataFrame({
+        "y": rng.randn(120),
+        "x": rng.rand(120),
+        "g": (["a", "b", "c"] * 40),
+    })
+    m = gam("y ~ s(x) + g", data=df)
+    return m, df
+
+
+def test_vis_matches_predict_on_same_grid(trees_te):
+    """vis(view, n_grid) must equal predict(grid) — no extra computation."""
+    m, data = trees_te
+    v = m.vis(view=("g", "h"), n_grid=20, type="link")
+
+    G, H = np.meshgrid(v.m1, v.m2, indexing="ij")
+    new = pl.DataFrame({"g": G.ravel(), "h": H.ravel()}).with_columns(
+        pl.col("g").cast(data["g"].dtype),
+        pl.col("h").cast(data["h"].dtype),
+    )
+    fit_pred = m.predict(new, type="link").reshape(20, 20)
+    assert np.allclose(v.fit, fit_pred, atol=1e-12, rtol=0)
+
+
+def test_vis_se_matches_predict_se(trees_te):
+    """SE on the grid must match predict(se_fit=True) on the same grid."""
+    m, data = trees_te
+    v = m.vis(view=("g", "h"), n_grid=15, type="link", se=True)
+
+    G, H = np.meshgrid(v.m1, v.m2, indexing="ij")
+    new = pl.DataFrame({"g": G.ravel(), "h": H.ravel()}).with_columns(
+        pl.col("g").cast(data["g"].dtype),
+        pl.col("h").cast(data["h"].dtype),
+    )
+    fit_pred, se_pred = m.predict(new, type="link", se_fit=True)
+    assert np.allclose(v.fit, fit_pred.reshape(15, 15), atol=1e-12)
+    assert np.allclose(v.se, se_pred.reshape(15, 15), atol=1e-12)
+
+
+def test_vis_response_scale_matches_link_via_inverse(trees_te):
+    """type='response' = linkinv(η̂); SE scaled by |dμ/dη| (delta method)."""
+    m, _ = trees_te
+    v_link = m.vis(view=("g", "h"), n_grid=10, type="link", se=True)
+    v_resp = m.vis(view=("g", "h"), n_grid=10, type="response", se=True)
+    # Identity link → response == link, identical SEs
+    assert np.allclose(v_link.fit, v_resp.fit)
+    assert np.allclose(v_link.se, v_resp.se)
+
+
+def test_auto_pick_view(trees_te):
+    """No `view`: pick the first two RHS vars with variation."""
+    m, _ = trees_te
+    v = m.vis()
+    assert v.view == ("g", "h")
+    assert v.fit.shape == (30, 30)
+
+
+def test_grid_endpoints(trees_te):
+    """Numeric grids span [min(x), max(x)] of the fit data."""
+    m, data = trees_te
+    v = m.vis(view=("g", "h"), n_grid=8)
+    assert v.m1[0] == float(data["g"].min())
+    assert v.m1[-1] == float(data["g"].max())
+    assert v.m2[0] == float(data["h"].min())
+    assert v.m2[-1] == float(data["h"].max())
+
+
+def test_too_far_masks_distant_points(trees_te):
+    """``too_far > 0`` replaces distant grid cells with NaN."""
+    m, _ = trees_te
+    v0 = m.vis(view=("g", "h"), n_grid=20, too_far=0.0)
+    v1 = m.vis(view=("g", "h"), n_grid=20, too_far=0.1)
+    assert np.all(np.isfinite(v0.fit))
+    assert np.any(np.isnan(v1.fit))
+    # No false-positives: every kept cell in v1 == v0 (NaN-only diff)
+    keep = ~np.isnan(v1.fit)
+    assert np.allclose(v0.fit[keep], v1.fit[keep])
+
+
+def test_cond_overrides_typical_value():
+    """`cond={var: val}` shifts the held-fixed value, changing the surface."""
+    rng = np.random.RandomState(1)
+    df = pl.DataFrame({
+        "y": rng.randn(80),
+        "x1": rng.rand(80),
+        "x2": rng.rand(80),
+        "x3": rng.rand(80),
+    })
+    m = gam("y ~ s(x1) + s(x2) + s(x3)", data=df, method="REML")
+    # x3 is held at median by default; override and the surface changes.
+    v_default = m.vis(view=("x1", "x2"), n_grid=8)
+    v_override = m.vis(view=("x1", "x2"), n_grid=8, cond={"x3": 0.9})
+    # With purely-additive smooths the *shape* of the surface over (x1, x2)
+    # only differs by an offset (the s(x3) at x3=median vs x3=0.9). So check
+    # that fit_default - fit_override is a constant.
+    diff = v_default.fit - v_override.fit
+    assert np.std(diff) < 1e-10
+    assert abs(np.mean(diff)) > 1e-6  # but the offset is non-zero
+
+
+def test_factor_view_axis(factor_model):
+    """Factor view: m2 contains the level names; surface is well-defined."""
+    m, _ = factor_model
+    v = m.vis(view=("x", "g"), n_grid=10)
+    assert v.fit.shape == (10, 10)
+    assert set(np.unique(v.m2)) == {"a", "b", "c"}
+    assert np.all(np.isfinite(v.fit))
+
+
+def test_factor_view_too_far_returns_no_mask(factor_model):
+    """too_far is undefined when an axis is a factor; mgcv would crash, we
+    quietly return all-False."""
+    m, _ = factor_model
+    v = m.vis(view=("x", "g"), n_grid=10, too_far=0.5)
+    assert np.all(np.isfinite(v.fit))
+
+
+def test_invalid_view():
+    """View must be 2 names from the formula's RHS variables."""
+    df = pl.DataFrame({"y": np.arange(10.0), "x": np.arange(10.0)})
+    m = gam("y ~ s(x)", data=df, method="REML")
+    with pytest.raises(ValueError):
+        # only one RHS var with variation — auto-pick fails
+        m.vis()
+    with pytest.raises(ValueError):
+        m.vis(view=("x",))
+    with pytest.raises(ValueError):
+        m.vis(view=("x", "nope"))
+
+
+def test_invalid_type(trees_te):
+    m, _ = trees_te
+    with pytest.raises(ValueError):
+        m.vis(view=("g", "h"), type="bogus")
+
+
+def test_vis_result_repr(trees_te):
+    m, _ = trees_te
+    v = m.vis(view=("g", "h"), n_grid=5)
+    s = repr(v)
+    assert "VisResult" in s and "view=('g', 'h')" in s
+
+
+def test_plot_contour_smoke(trees_te):
+    """``.plot(kind='contour')`` returns an Axes without raising."""
+    m, _ = trees_te
+    v = m.vis(view=("g", "h"), n_grid=10, se=True)
+    ax = v.plot(kind="contour")
+    assert ax is not None
+    plt.close("all")
+
+
+def test_plot_persp_smoke(trees_te):
+    """``.plot(kind='persp')`` with se_mult draws ± envelopes."""
+    m, _ = trees_te
+    v = m.vis(view=("g", "h"), n_grid=10, se=True)
+    ax = v.plot(kind="persp", se_mult=2.0)
+    assert ax is not None
+    plt.close("all")
+
+
+def test_plot_factor_axis_ticks(factor_model):
+    """Factor axis on a contour plot: ticks rendered as level names."""
+    m, _ = factor_model
+    v = m.vis(view=("x", "g"), n_grid=10)
+    ax = v.plot(kind="contour")
+    yticks = [t.get_text() for t in ax.get_yticklabels()]
+    # levels appear repeated in the grid; the unique non-empty labels must
+    # be a subset of {"a", "b", "c"}.
+    assert {t for t in yticks if t} <= {"a", "b", "c"}
+    plt.close("all")
+
+
+def test_invalid_plot_kind(trees_te):
+    m, _ = trees_te
+    v = m.vis(view=("g", "h"), n_grid=5)
+    with pytest.raises(ValueError):
+        v.plot(kind="surface")  # only contour/persp supported
+
+
+# =============================================================================
+# 3. get_difference() — port of itsadug::get_difference
+# =============================================================================
+#
+# For each case under ``tests/fixtures/itsadug_plot_diff/<case_id>/``, we
+# re-fit the same model in hea, replay the same ``(comp, cond, f, sim_ci,
+# rm_ranef)`` arguments, and compare the per-row ``difference`` and ``CI``
+# against R's output. For the ``sim_ci=True`` case we also check the
+# deterministic ``se_fit`` (= ``sqrt(rowSums((X1-X2) Vc (X1-X2)^T))``) to
+# high precision and the empirical ``crit`` to a loose tolerance —
+# Python and R don't share an RNG, so the quantile of the
+# max-abs-standardized-deviation envelope only matches to the Monte-Carlo
+# SE.
+#
+# Fixtures are baked once via
+# ``Rscript tests/scripts/itsadug_plot_diff_fixtures.R``; re-run that
+# script if ``itsadug`` or the model design changes.
+
+_ITSADUG_ROOT = Path(__file__).parent / "fixtures" / "itsadug_plot_diff"
+_ITSADUG_MODEL_DIR = _ITSADUG_ROOT / "_model"
+_ITSADUG_CASE_DIRS = sorted(
+    p for p in _ITSADUG_ROOT.iterdir()
+    if p.is_dir() and not p.name.startswith("_")
+) if _ITSADUG_ROOT.exists() else []
+_ITSADUG_CASE_IDS = [p.name for p in _ITSADUG_CASE_DIRS]
+
+
+def _itsadug_load_data() -> pl.DataFrame:
+    """Load the synthetic dataset and re-attach factor levels — CSV
+    round-trip drops R's factor type, but hea is happy with either pl.Utf8
+    or pl.Enum at materialize time. We use pl.Enum with the explicit level
+    order R wrote (A,B,C / Y,Z) for parity with mgcv's contrasts.
+    """
+    df = pl.read_csv(_ITSADUG_MODEL_DIR / "data.csv", null_values="NA")
+    df = df.with_columns([
+        df["group"].cast(pl.Enum(["A", "B", "C"])),
+        df["cohort"].cast(pl.Enum(["Y", "Z"])),
+    ])
+    return df
+
+
+@pytest.fixture(scope="module")
+def itsadug_fitted_model():
+    data = _itsadug_load_data()
+    m = gam("y ~ group + cohort + s(x, by=group)", data=data, method="REML")
+    return m, data
+
+
+def _itsadug_parse_args(path: Path) -> dict:
+    """args.json round-trip: itsadug's R script wraps each value as a list,
+    so a length-1 vector lands as ``["A"]`` not ``"A"``. We don't unwrap —
+    hea's get_difference accepts list values uniformly.
+    """
+    raw = json.loads(path.read_text())
+    comp = {k: tuple(v) for k, v in raw["comp"].items()}
+    cond = {}
+    for k, v in raw["cond"].items():
+        # numeric arrays come through as list-of-numbers; string fixers
+        # (cohort="Y") come through as list-of-strings.
+        if isinstance(v, list) and all(isinstance(x, (int, float)) for x in v):
+            cond[k] = np.asarray(v, dtype=float)
+        else:
+            cond[k] = list(v) if isinstance(v, list) else [v]
+    return {
+        "case_id": raw["case_id"],
+        "comp": comp,
+        "cond": cond,
+        "f": float(raw["f"]),
+        "sim_ci": bool(raw["sim.ci"]),
+        "rm_ranef": raw["rm.ranef"],
+        "n_grid": int(raw["n_grid"]),
+        "has_sim_ci_col": bool(raw["has_sim_ci_col"]),
+    }
+
+
+@pytest.mark.parametrize("case_id", _ITSADUG_CASE_IDS)
+def test_get_difference_matches_itsadug(itsadug_fitted_model, case_id: str):
+    m, _ = itsadug_fitted_model
+    case_dir = _ITSADUG_ROOT / case_id
+    args = _itsadug_parse_args(case_dir / "args.json")
+    ref = pl.read_csv(case_dir / "diff_table.csv", null_values="NA")
+
+    # rm.ranef arrives as a Python bool here — get_difference accepts it
+    # as-is. None of our cases exercise the substring-grep mode (we don't
+    # have ranef smooths in this v1 fixture set).
+    rm_ranef = args["rm_ranef"]
+    if not isinstance(rm_ranef, bool):
+        rm_ranef = list(rm_ranef) if isinstance(rm_ranef, list) else rm_ranef
+
+    res = m.get_difference(
+        comp=args["comp"],
+        cond=args["cond"],
+        f=args["f"],
+        sim_ci=args["sim_ci"],
+        rm_ranef=rm_ranef,
+        rng=20260430,  # deterministic for the sim.ci path; loose tol on crit
+        n_sim=10_000,
+    )
+
+    assert res.difference.shape[0] == args["n_grid"], (
+        f"{case_id}: got {res.difference.shape[0]} grid rows, "
+        f"want {args['n_grid']}"
+    )
+
+    # difference is a basis-invariant linear functional of β̂, so the
+    # only source of disagreement with mgcv is REML convergence drift
+    # in the smoothing parameters. For this dataset, hea and mgcv agree
+    # on sp[1]/sp[2] to ~1e-6 relative but on sp[3] (group=C, flat
+    # signal) only to ~1% — the REML loglik is very flat there, and
+    # both solvers stop in slightly different places. The resulting
+    # difference noise lands at ~5e-5 absolute (5e-3 relative near
+    # zero crossings) — orders of magnitude below the CI half-width
+    # itself (~0.27 here), so still a tight oracle in any practical sense.
+    np.testing.assert_allclose(
+        res.difference,
+        ref["difference"].to_numpy(),
+        rtol=1e-3,
+        atol=2e-4,
+        err_msg=f"{case_id}: difference diverges from itsadug",
+    )
+
+    # CI is f * sqrt(diag(p Vp p^T)) — same convergence-drift bound.
+    np.testing.assert_allclose(
+        res.ci,
+        ref["CI"].to_numpy(),
+        rtol=1e-3,
+        atol=2e-4,
+        err_msg=f"{case_id}: CI diverges from itsadug",
+    )
+
+    if args["sim_ci"]:
+        assert args["has_sim_ci_col"], "fixture mislabel: sim.ci=TRUE but no sim.CI column"
+        assert res.sim_ci is not None and res.crit is not None
+
+        # se_fit = sim_ci / crit — deterministic given Vc and p. Same
+        # convergence-drift bound as ``CI``: tight in absolute terms,
+        # bounded by REML sp agreement.
+        ref_se_fit = pl.read_csv(case_dir / "se_fit.csv")["se_fit"].to_numpy()
+        ours_se_fit = res.sim_ci / res.crit
+        np.testing.assert_allclose(
+            ours_se_fit,
+            ref_se_fit,
+            rtol=1e-3,
+            atol=2e-4,
+            err_msg=f"{case_id}: simultaneous se_fit diverges",
+        )
+
+        # crit is an empirical 0.95 quantile over n_sim=10000 MVN draws.
+        # Cross-RNG comparison: the two implementations sample
+        # independently so the quantile differs by Monte-Carlo SE. The
+        # standard error of the 0.95 quantile of the MASD with n=10000
+        # draws is roughly 0.5–2% of the value; allow 5% for safety.
+        ref_crit = float(pl.read_csv(case_dir / "crit.csv")["crit"][0])
+        np.testing.assert_allclose(
+            res.crit, ref_crit, rtol=0.05,
+            err_msg=f"{case_id}: simultaneous crit diverges (ours={res.crit}, R={ref_crit})",
+        )
+
+
+def test_cohort_y_matches_basic(itsadug_fitted_model):
+    """Sanity: with the model ``y ~ group + cohort + s(x, by=group)`` and
+    no group:cohort interaction, the (group=A) − (group=B) difference is
+    identical regardless of the cohort the comparison is held at — both
+    p1 and p2 carry the same cohort column, so it cancels. This case
+    exists to exercise the cond-string-coerce path; the numerics should
+    coincide with case_basic to machine precision.
+    """
+    m, _ = itsadug_fitted_model
+    args_b = _itsadug_parse_args(_ITSADUG_ROOT / "case_basic" / "args.json")
+    args_y = _itsadug_parse_args(_ITSADUG_ROOT / "case_cohortY" / "args.json")
+    res_b = m.get_difference(
+        comp=args_b["comp"], cond=args_b["cond"], f=args_b["f"],
+        sim_ci=False, rm_ranef=True,
+    )
+    res_y = m.get_difference(
+        comp=args_y["comp"], cond=args_y["cond"], f=args_y["f"],
+        sim_ci=False, rm_ranef=True,
+    )
+    np.testing.assert_allclose(res_y.difference, res_b.difference,
+                                rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(res_y.ci, res_b.ci,
+                                rtol=1e-12, atol=1e-12)
