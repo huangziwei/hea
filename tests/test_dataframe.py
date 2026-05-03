@@ -789,3 +789,193 @@ def test_chain_then_lm():
     )
     m = hea.lm("Species ~ log_area + Elevation", sub)
     assert m is not None
+
+
+# ---------------------------------------------------------------------------
+# summary() — R's per-column summary
+# ---------------------------------------------------------------------------
+
+
+def _entries(summary, col):
+    for b in summary.blocks:
+        if b.name == col:
+            return b.entries
+    raise KeyError(col)
+
+
+def test_summary_numeric_six_stats():
+    """Numeric columns get Min / 1st Qu / Median / Mean / 3rd Qu / Max
+    using R's ``quantile`` type 7 (linear interpolation)."""
+    df = DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0]})
+    e = _entries(df.summary(width=80), "x")
+    assert [lbl for lbl, _ in e] == [
+        "Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max.",
+    ]
+    by_label = dict(e)
+    assert by_label["Min."] == "1"
+    assert by_label["Max."] == "5"
+    assert by_label["Median"] == "3"
+    # quantile(0.25, linear) on 1..5 = 2 — not the polars default ("nearest")
+    assert by_label["1st Qu."] == "2"
+    assert by_label["3rd Qu."] == "4"
+
+
+def test_summary_format_keeps_integer_means_verbatim():
+    """Integer columns whose Mean has a small fractional part still
+    display as integers (matches R's ``format.default``: signif at
+    digits=4 yields integer-valued stats, so D=0 and the original value
+    rounds to integer)."""
+    g = hea.data("gavote", package="faraway")
+    e = dict(_entries(g.summary(width=120), "votes"))
+    # Mean = 16331.025 — R prints "16331", not signif-rounded "16330".
+    assert e["Mean"] == "16331"
+    # Max stays as the literal integer.
+    assert e["Max."] == "263211"
+
+
+def test_summary_format_decimals_when_signif_is_non_integer():
+    """When any signif'd value has a fractional part, the whole block
+    aligns at common decimals (gavote 'other' Mean=381.7 forces 1
+    decimal across the column)."""
+    g = hea.data("gavote", package="faraway")
+    e = dict(_entries(g.summary(width=120), "other"))
+    assert e["Mean"] == "381.7"
+    assert e["Min."] == "5.0"
+    assert e["Max."] == "7920.0"
+
+
+def test_summary_factor_levels_in_category_order():
+    """Enum columns show all levels with counts, in the dtype's category
+    order — matches R's ``summary.factor`` on a factor with ``levels=``."""
+    g = hea.data("gavote", package="faraway")
+    e = _entries(g.summary(), "equip")
+    # gavote.equip levels are LEVER, OS-CC, OS-PC, PAPER, PUNCH.
+    assert e == [
+        ("LEVER", "74"),
+        ("OS-CC", "44"),
+        ("OS-PC", "22"),
+        ("PAPER", "2"),
+        ("PUNCH", "17"),
+    ]
+
+
+def test_summary_factor_other_collapse():
+    """When more levels than ``maxsum`` exist, the (maxsum-1) most
+    populous are kept and the rest pool into ``(Other)``."""
+    levels = list("abcdefghij")  # 10 levels
+    counts = [50, 30, 20, 10, 8, 6, 4, 3, 2, 1]
+    data = [lvl for lvl, n in zip(levels, counts) for _ in range(n)]
+    df = DataFrame({"f": pl.Series(data, dtype=pl.Enum(levels))})
+    e = _entries(df.summary(maxsum=7), "f")
+    # Top 6 by count + (Other) = 7 entries.
+    labels = [lbl for lbl, _ in e]
+    assert labels == ["a", "b", "c", "d", "e", "f", "(Other)"]
+    counts_out = dict(e)
+    assert counts_out["a"] == "50"
+    # (Other) sums g+h+i+j = 4+3+2+1 = 10.
+    assert counts_out["(Other)"] == "10"
+
+
+def test_summary_string_length_class_mode():
+    """Polars ``String`` columns get R's character-summary shape:
+    Length / Class / Mode rather than per-value counts."""
+    df = DataFrame({"s": ["foo", "bar", "baz", "foo"]})
+    e = _entries(df.summary(), "s")
+    assert e == [
+        ("Length", "4"),
+        ("Class", "character"),
+        ("Mode", "character"),
+    ]
+
+
+def test_summary_boolean():
+    """Boolean columns: Mode / FALSE / TRUE counts."""
+    df = DataFrame({"b": [True, False, True, True, False]})
+    e = _entries(df.summary(), "b")
+    assert e == [
+        ("Mode", "logical"),
+        ("FALSE", "2"),
+        ("TRUE", "3"),
+    ]
+
+
+def test_summary_appends_nas_when_present():
+    """An NA's row appears for any dtype with nulls; absent otherwise."""
+    df_with = DataFrame({"x": [1.0, 2.0, None, 4.0]})
+    e_with = _entries(df_with.summary(), "x")
+    assert ("NA's", "1") in e_with
+
+    df_clean = DataFrame({"x": [1.0, 2.0, 3.0]})
+    e_clean = _entries(df_clean.summary(), "x")
+    assert all(lbl != "NA's" for lbl, _ in e_clean)
+
+
+def test_summary_factor_reserves_slot_for_nas():
+    """When a factor has nulls, the maxsum budget is reduced by 1 so
+    the NA's row fits — matches R's summary.factor."""
+    levels = list("abcdef")
+    data = [lvl for lvl, n in zip(levels, [10, 8, 6, 4, 3, 2]) for _ in range(n)]
+    data += [None, None]  # 2 nulls
+    df = DataFrame({"f": pl.Series(data, dtype=pl.Enum(levels))})
+    e = _entries(df.summary(maxsum=5), "f")
+    # 6 levels > slots(=4 because nulls reserved one) → keep top 3, then (Other), then NA's.
+    labels = [lbl for lbl, _ in e]
+    assert labels == ["a", "b", "c", "(Other)", "NA's"]
+
+
+def test_summary_repr_packs_blocks_horizontally():
+    """The repr lays multiple columns side-by-side within ``width``;
+    columns that would overflow wrap to a new row group separated by
+    a blank line."""
+    df = DataFrame({"x": [1, 2, 3], "y": [10, 20, 30], "z": [100, 200, 300]})
+    s = repr(df.summary(width=200))
+    # All three column headers on the first line — wide enough to fit.
+    first_line = s.split("\n")[0]
+    assert "x" in first_line and "y" in first_line and "z" in first_line
+
+    narrow = repr(df.summary(width=30))
+    # Narrow forces wrapping; expect a blank line separating row groups.
+    assert "" in narrow.split("\n")
+
+
+def test_summary_repr_preserves_block_alignment():
+    """The R-style 'label:value' alignment within each block: labels
+    left-aligned, values right-aligned, both padded to the block max."""
+    df = DataFrame({"x": [1, 2, 3, 4, 5]})
+    s = repr(df.summary(width=80))
+    lines = s.split("\n")
+    # Find the body lines (skip the centered header).
+    body = [l for l in lines if ":" in l]
+    # Every line has the colon at the same column.
+    colon_positions = {l.index(":") for l in body}
+    assert len(colon_positions) == 1
+
+
+def test_summary_empty_dataframe():
+    """No columns → empty string repr; doesn't blow up."""
+    df = DataFrame({})
+    s = repr(df.summary())
+    assert s == ""
+
+
+def test_summary_all_null_numeric():
+    """All-null numeric column: stats are NA, plus an NA's count row."""
+    df = DataFrame({"x": pl.Series([None, None, None], dtype=pl.Float64)})
+    e = _entries(df.summary(), "x")
+    by_label = dict(e)
+    assert by_label["Min."] == "NA"
+    assert by_label["Mean"] == "NA"
+    assert by_label["NA's"] == "3"
+
+
+def test_summary_dates_stay_as_dates():
+    """``Date`` input shouldn't bleed datetime '00:00:00' suffixes
+    into Median / Quartile / Mean rows just because polars promotes
+    those stats to datetime internally."""
+    import datetime as dt
+    df = DataFrame({
+        "d": [dt.date(2020, 1, 1), dt.date(2020, 6, 1), dt.date(2020, 12, 31)],
+    })
+    e = dict(_entries(df.summary(), "d"))
+    for lbl in ("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max."):
+        assert " " not in e[lbl], f"{lbl} = {e[lbl]!r} has time component"
