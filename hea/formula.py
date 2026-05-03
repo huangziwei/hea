@@ -752,8 +752,15 @@ def _collect_bars(node) -> list[BinOp]:
 def _expand_dot(node, data_columns: list[str], response_names: set[str]):
     """Substitute every `Dot()` in the tree with `col1 + col2 + ...` over the
     non-response data columns. Returns a new node.
+
+    Excludes the ``rowname`` column — hea's documented sentinel for R's
+    ``row.names`` (see ``hea.data._normalize_rownames``). In R, rownames
+    aren't a column and ``y ~ .`` skips them; we mirror that so users who
+    load e.g. ``faraway::gala`` (island names preserved as ``rowname``)
+    don't have to manually drop the column before fitting.
     """
-    cols = [c for c in data_columns if c not in response_names]
+    skip = response_names | {"rowname"}
+    cols = [c for c in data_columns if c not in skip]
     if not cols:
         raise ValueError("dot expansion: no non-response columns available")
     # Build `c1 + c2 + ... + cn` as a left-folded BinOp('+').
