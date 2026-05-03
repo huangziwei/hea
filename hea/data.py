@@ -16,6 +16,7 @@ Both run *before* a model is fit; the formula → design pipeline lives in
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import urllib.error
@@ -222,16 +223,97 @@ def _apply_dataset_schema(df: pl.DataFrame, schema_path: Path | None) -> pl.Data
     return df
 
 
-def data(name: str, package: str = "R", save_to: str = "./data",
+@functools.lru_cache(maxsize=1)
+def _rdatasets_index() -> dict[str, frozenset[str]]:
+    """``{name: frozenset(packages)}`` for everything rdatasets carries.
+
+    Cached — rdatasets's package and item lists are static for the
+    process. The ``"datasets"`` package label is rewritten to ``"R"``
+    to match the convention used by hea's bundled directory layout.
+    """
+    try:
+        import rdatasets
+    except ImportError:
+        return {}
+    index: dict[str, set[str]] = {}
+    for rd_pkg in rdatasets.packages():
+        display_pkg = "R" if rd_pkg == "datasets" else rd_pkg
+        for it in rdatasets.items(rd_pkg):
+            name = it.removesuffix(".pkl")
+            index.setdefault(name, set()).add(display_pkg)
+    return {name: frozenset(pkgs) for name, pkgs in index.items()}
+
+
+def _bundled_index() -> dict[str, set[str]]:
+    """``{name: {packages}}`` from local ``datasets/`` (CWD-walk).
+
+    Picks up both ``.csv`` files (bundled data) and ``.schema.json``
+    sidecars (covers entries where the schema is bundled but the CSV
+    is downloaded on first access). Not cached — CWD changes between
+    calls would invalidate the result, and a filesystem walk over
+    ~10 small directories is sub-millisecond.
+    """
+    index: dict[str, set[str]] = {}
+    seen_roots: set[Path] = set()
+    cwd = Path.cwd()
+    for ancestor in (cwd, *cwd.parents):
+        root = ancestor / "datasets"
+        if not root.is_dir():
+            continue
+        try:
+            real = root.resolve()
+        except OSError:
+            real = root
+        if real in seen_roots:
+            continue
+        seen_roots.add(real)
+        for pkg_dir in root.iterdir():
+            if not pkg_dir.is_dir():
+                continue
+            pkg = pkg_dir.name
+            for f in pkg_dir.iterdir():
+                if f.suffix == ".csv":
+                    name = f.stem
+                elif f.name.endswith(".schema.json"):
+                    name = f.name[: -len(".schema.json")]
+                else:
+                    continue
+                index.setdefault(name, set()).add(pkg)
+    return index
+
+
+def _dataset_index() -> dict[str, list[str]]:
+    """Merged ``{name: sorted(packages)}`` index across rdatasets and
+    locally-bundled ``datasets/``. Drives ``data()``'s name-only
+    resolution and clearer error messages on missing entries.
+    """
+    rd = _rdatasets_index()
+    bundled = _bundled_index()
+    merged: dict[str, set[str]] = {n: set(pkgs) for n, pkgs in rd.items()}
+    for name, pkgs in bundled.items():
+        merged.setdefault(name, set()).update(pkgs)
+    return {n: sorted(pkgs) for n, pkgs in merged.items()}
+
+
+def data(name: str, package: str | None = None, save_to: str = "./data",
          overwrite: bool = False) -> DataFrame:
     """Load a named dataset.
 
-    Resolution order:
+    Resolution
+    ----------
+    Pass ``name`` alone and hea searches the merged rdatasets +
+    bundled-``datasets/`` index. If exactly one package carries that
+    name, it's used. If multiple do, you get an error listing the
+    candidates. If none does, you get an error saying so — without a
+    doomed GitHub download.
 
-    1. ``rdatasets`` — tried for any package it carries (``MASS``,
-       ``lme4``, ``nlme``, ``HistData``, ``ggplot2``, ``palmerpenguins``,
-       …75 packages — see ``rdatasets.packages()``). The label ``"R"`` is
-       aliased to rdatasets's ``"datasets"`` (R's built-in data). Offline,
+    Pass ``package`` explicitly to override (or to pick between
+    ambiguous names). Resolution order with ``package`` set:
+
+    1. ``rdatasets`` — for any of its 75 packages (``MASS``, ``lme4``,
+       ``nlme``, ``HistData``, ``ggplot2``, ``palmerpenguins``, …; see
+       ``rdatasets.packages()``). The label ``"R"`` is aliased to
+       rdatasets's ``"datasets"`` (R's built-in data). Offline,
        deterministic, ships with the package. The ``rownames`` column
        rdatasets injects is dropped.
     2. Bundled ``datasets/{package}/{name}.csv`` walked up from CWD —
@@ -241,6 +323,8 @@ def data(name: str, package: str = "R", save_to: str = "./data",
     3. CSV download into ``save_to/{package}/{name}.csv`` — last resort,
        used when ``hea`` is installed outside the source repo and no
        bundled CSV exists. Pass ``overwrite=True`` to force a re-fetch.
+       Now raises a clearer error than the bare 404 when the GitHub URL
+       doesn't exist.
 
     A JSON schema sidecar (``datasets/{package}/{name}.schema.json``) is
     loaded next and used to restore R's factor type — columns listed
@@ -250,6 +334,38 @@ def data(name: str, package: str = "R", save_to: str = "./data",
     even when the data itself came from rdatasets (which strips factor
     info on the way out of pandas).
     """
+    if package is None:
+        idx = _dataset_index()
+        candidates = idx.get(name, [])
+        if not candidates:
+            raise ValueError(
+                f"data(): {name!r} not found in rdatasets or any "
+                "bundled datasets/ directory. Pass `package=` "
+                "explicitly to attempt a GitHub download."
+            )
+        if len(candidates) > 1:
+            quoted = ", ".join(repr(p) for p in candidates)
+            raise ValueError(
+                f"data(): {name!r} is ambiguous — found in {quoted}. "
+                f"Pass `package=` to disambiguate, e.g. "
+                f"data({name!r}, package={candidates[0]!r})."
+            )
+        package = candidates[0]
+    else:
+        # Explicit package: if the local index says the dataset isn't
+        # there, raise immediately rather than launching a doomed
+        # GitHub round-trip. We only short-circuit when ``name`` IS in
+        # the index but under different packages — if ``name`` isn't
+        # in the index at all, fall through to the download path
+        # (covers fresh installs where ``datasets/`` is empty).
+        idx = _dataset_index()
+        if name in idx and package not in idx[name]:
+            quoted = ", ".join(repr(p) for p in idx[name])
+            raise ValueError(
+                f"data(): {name!r} not in package {package!r}. "
+                f"Available packages with this name: {quoted}."
+            )
+
     df: pl.DataFrame | None = None
 
     if not overwrite:
@@ -272,6 +388,27 @@ def data(name: str, package: str = "R", save_to: str = "./data",
             base = f"https://raw.githubusercontent.com/huangziwei/hea/main/datasets/{package}/{name}"
             try:
                 urllib.request.urlretrieve(f"{base}.csv", csv_path)
+            except urllib.error.HTTPError as e:
+                csv_path.unlink(missing_ok=True)
+                for p in reversed(created_dirs):
+                    try:
+                        p.rmdir()
+                    except OSError:
+                        pass
+                if e.code == 404:
+                    suggestions = idx.get(name, [])
+                    if suggestions:
+                        quoted = ", ".join(repr(p) for p in suggestions)
+                        raise ValueError(
+                            f"data(): {name!r} not in package {package!r} "
+                            f"(404 from GitHub). Available in: {quoted}."
+                        ) from None
+                    raise ValueError(
+                        f"data(): {name!r} not in package {package!r} "
+                        "(404 from GitHub) and not in any other known "
+                        "package."
+                    ) from None
+                raise
             except Exception:
                 csv_path.unlink(missing_ok=True)
                 for p in reversed(created_dirs):
