@@ -127,6 +127,8 @@ def anova(*models, test: str | None = None):
                 f"is supported, got {test!r}"
             )
         return _anova_lme(*models, labels=labels)
+    if all(isinstance(m, gam) for m in models):
+        return _anova_gam(*models, labels=labels, test=test)
     # glm before lm: glm is not an lm subclass, but the isinstance order
     # would still matter if it ever became one. Keep the explicit branch.
     if all(isinstance(m, glm) for m in models):
@@ -135,7 +137,9 @@ def anova(*models, test: str | None = None):
         if test is not None:
             raise TypeError("anova(lm): test= is not accepted (always F)")
         return _anova_lm(*models, labels=labels)
-    raise TypeError("anova(): all models must be the same type (lm, glm, or lme)")
+    raise TypeError(
+        "anova(): all models must be the same type (lm, glm, gam, or lme)"
+    )
 
 
 def _anova_lm(*models, labels: list[str]):
@@ -407,6 +411,139 @@ def _anova_gam_single(m: gam):
         )
 
     print("\n".join(out))
+
+
+def _anova_gam_rdf(g: gam) -> float:
+    """mgcv-style residual df for a ``gam`` in a multi-model anova table.
+
+    mgcv's ``anova.gam`` *overrides* each fit's ``df.residual`` before
+    handing the list to ``stats::anova.glmlist``: it uses ``edf1`` (not
+    ``edf``) — the "1-step" effective df designed for hypothesis testing
+    — minus a smoothing-parameter-uncertainty correction ``dfc`` when
+    the fit carries a separate ``edf2`` (REML with unconditional
+    correction). For default GCV fits, ``edf2`` is ``NULL`` and
+    ``dfc = 0``, so the formula reduces to ``n - sum(edf1)``.
+
+    hea's gam always exposes ``edf2``, but sets it equal to ``edf1`` as
+    the no-op sentinel when the unconditional correction wasn't
+    computed — we detect that with ``allclose`` and zero out ``dfc``,
+    matching mgcv's NULL branch numerically.
+    """
+    n = g.n
+    edf1_sum = float(np.sum(g.edf1))
+    edf2 = getattr(g, "edf2", None)
+    if edf2 is not None and not np.allclose(edf2, g.edf1):
+        edf_sum = float(np.sum(g.edf))
+        edf2_sum = float(np.sum(edf2))
+        dfc = edf2_sum - edf_sum
+    else:
+        dfc = 0.0
+    return n - edf1_sum - dfc
+
+
+def _anova_gam(*models: gam, labels: list[str], test: str | None = None):
+    """Approximate F / Chisq deviance table for nested ``gam`` fits.
+
+    Mirrors mgcv's ``anova.gam`` for multiple gam objects: the residual
+    df uses ``edf1`` (see ``_anova_gam_rdf``), the F denominator is the
+    largest model's ``scale`` (mgcv's ``sig2``), and the test selection
+    follows the same auto-pick rule as ``anova.glm`` — ``Chisq`` for
+    scale-known families (Poisson/Binomial), ``F`` for unknown-scale
+    (Gaussian/Gamma/IG).
+    """
+    df_, docstring = _anova_gam_table(*models, labels=labels, test=test)
+    print(docstring)
+    print(format_df(df_))
+    print("---")
+    print("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1")
+
+
+def _anova_gam_table(*models: gam, labels: list[str], test: str | None = None):
+    """Pure builder for the multi-model ``anova(gam, ...)`` table.
+
+    Returns ``(df, docstring)``. See ``_anova_gam`` for semantics.
+    """
+    fam0 = models[0].family
+    if not all(type(m.family) is type(fam0) and
+               m.family.link.name == fam0.link.name for m in models):
+        raise ValueError("anova(): all gam fits must share family and link")
+
+    if test is None:
+        test = "Chisq" if fam0.scale_known else "F"
+    else:
+        t_norm = test.upper()
+        if t_norm == "LRT":
+            test = "Chisq"
+        elif t_norm == "RAO":
+            raise NotImplementedError(
+                "anova(gam, test='Rao'): score test not implemented yet"
+            )
+        elif t_norm == "CHISQ":
+            test = "Chisq"
+        elif t_norm == "F":
+            test = "F"
+        else:
+            raise ValueError(
+                f"anova(gam): test must be 'Chisq', 'LRT', 'F', 'Rao', or None; "
+                f"got {test!r}"
+            )
+
+    rdfs = [_anova_gam_rdf(m) for m in models]
+    devs = [float(m.deviance) for m in models]
+
+    # Sort ascending by npar (= descending by edf1-residual df), matching
+    # mgcv. Smallest model first; full model last.
+    order = sorted(range(len(models)), key=lambda i: rdfs[i], reverse=True)
+    rdfs_sorted = [rdfs[i] for i in order]
+    devs_sorted = [devs[i] for i in order]
+    full = models[order[-1]]
+    disp_full = float(full.scale) if not fam0.scale_known else 1.0
+    rdf_full = rdfs_sorted[-1]
+
+    df_col: list[float | None] = [None]
+    dev_col: list[float | None] = [None]
+    stat_col: list[float | None] = [None]
+    p_col: list[float | None] = [None]
+    sig_col: list[str] = [""]
+    for k in range(1, len(order)):
+        d_df = rdfs_sorted[k - 1] - rdfs_sorted[k]
+        d_dev = devs_sorted[k - 1] - devs_sorted[k]
+        if d_df <= 0:
+            df_col.append(round(d_df, 4))
+            dev_col.append(round(d_dev, 4))
+            stat_col.append(None); p_col.append(None); sig_col.append("")
+            continue
+        if test == "Chisq":
+            stat = d_dev / disp_full
+            p = float(chi2.sf(stat, d_df))
+        else:  # "F"
+            stat = (d_dev / d_df) / disp_full
+            p = float(f.sf(stat, d_df, rdf_full))
+        df_col.append(round(d_df, 4))
+        dev_col.append(round(d_dev, 4))
+        stat_col.append(round(stat, 4))
+        p_col.append(float(f"{p:.4g}"))
+        sig_col.append(significance_code([p])[0])
+
+    docstring = "Analysis of Deviance Table\n\n"
+    for i, m in enumerate(models):
+        docstring += f"{labels[i]}: {m.formula}\n"
+
+    cols: dict[str, list] = {
+        "":           [labels[i] for i in order],
+        "Resid. Df":  [round(r, 4) for r in rdfs_sorted],
+        "Resid. Dev": [round(d, 4) for d in devs_sorted],
+        "Df":         df_col,
+        "Deviance":   dev_col,
+    }
+    if test == "F":
+        cols["F"] = stat_col
+        cols["Pr(>F)"] = p_col
+    else:
+        cols["Pr(>Chi)"] = p_col
+    cols[" "] = sig_col
+
+    return pl.DataFrame(cols), docstring
 
 
 def _anova_glm(*models, labels: list[str], test: str | None = None):
