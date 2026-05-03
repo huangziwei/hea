@@ -1084,6 +1084,41 @@ def test_step_unsupported_model_type():
         step(g)
 
 
+def test_step_handles_NAs_in_predictors():
+    """When some predictors carry NAs and others don't, the original
+    fit drops those rows but a sub-formula that excludes the NA columns
+    would re-include them. step() must pin every refit to a common
+    row set (R does this via na.action) — without that pinning,
+    weights/AIC mismatches crash the refit. Regression test for the
+    Faraway WCGS book example.
+    """
+    np.random.seed(42)
+    n = 500
+    df = pl.DataFrame({
+        "y": np.random.binomial(1, 0.3, n).astype(float),
+        "a": np.random.randn(n),
+        "b": np.random.randn(n),
+        "c": np.random.randn(n),
+        "d": np.random.randn(n),
+        # NAs only in 'e' — dropping 'e' from the formula would
+        # otherwise let those rows back in.
+        "e": [None if i % 30 == 0 else float(np.random.randn())
+              for i in range(n)],
+    })
+    m = glm("y ~ a + b + c + d + e", data=df, family=Binomial())
+    # Original fit drops the 17 rows where e is null.
+    assert m.n == 483
+    # step shouldn't crash; the result's row count stays at 483.
+    m_step = step(m, trace=False)
+    assert m_step.n == 483
+    # Same anchor for drop1 and add1.
+    out_drop = _capture(drop1, m, test="Chisq")
+    assert "Single term deletions" in out_drop
+    m_small = glm("y ~ a + b", data=df, family=Binomial())
+    out_add = _capture(add1, m_small, "a + b + c + d + e", test="Chisq")
+    assert "Single term additions" in out_add
+
+
 def test_step_already_minimal_returns_input():
     """If no move improves AIC (the input is already the minimum),
     step returns the input (or an equivalent fit). The returned

@@ -217,6 +217,50 @@ def _drop_scope(terms) -> list[int]:
     return keep
 
 
+def _refit_kwargs(m, target_n: int) -> dict:
+    """Constructor kwargs for refitting ``m``'s type on a frame of
+    ``target_n`` rows.
+
+    step / drop1 / add1 refit many times; we pin every refit to a
+    common row set so AICs are comparable (matches R's ``na.action``
+    behavior). That row set is ``m._design_data`` for drop1, or the
+    upper model's ``_design_data`` for add1 / step. This helper picks
+    the right ``weights`` to pass:
+
+    * If the original fit didn't supply explicit weights, return
+      ``weights=None`` — the refit gets fresh ``np.ones(target_n)``.
+    * If the original fit had explicit weights *and* ``target_n``
+      matches the original ``_design_data`` row count, pass the same
+      weights through (still aligned).
+    * Otherwise the weights can't be aligned to a different row set
+      without a row index — raise instead of silently producing
+      meaningless numbers.
+    """
+    if isinstance(m, glm):
+        n_orig = len(m._design_data)
+        is_default = np.array_equal(m._prior_w, np.ones(n_orig))
+        if is_default:
+            return {"family": m.family, "weights": None}
+        if target_n != n_orig:
+            raise ValueError(
+                "step/drop1/add1 refit: row count changed (likely due to "
+                "NAs in some predictors) and the original fit had explicit "
+                "weights. Pre-filter NA rows before fitting to avoid this."
+            )
+        return {"family": m.family, "weights": m._prior_w}
+    if isinstance(m, lm):
+        if m.weights is None:
+            return {"weights": None, "method": m.method}
+        if target_n != m.n:
+            raise ValueError(
+                "step/drop1/add1 refit: row count changed (likely due to "
+                "NAs in some predictors) and the original fit had explicit "
+                "weights. Pre-filter NA rows before fitting to avoid this."
+            )
+        return {"weights": m.weights, "method": m.method}
+    raise TypeError(f"_refit_kwargs: unsupported {type(m).__name__}")
+
+
 def _add_scope(current_terms, upper_terms) -> list[int]:
     """Indices into ``upper_terms`` of terms addable to ``current_terms``,
     respecting marginality. R's ``add.scope``.
@@ -280,21 +324,29 @@ def add1(model, scope, *, test: str | None = None, k: float = 2.0):
     lhs = model.formula.split("~", 1)[0].strip()
     upper_formula = f"{lhs} ~ {scope}"
 
+    # Fit upper without weights to determine its NA-cleaned row set;
+    # the ``weights=None`` here is harmless because we only use
+    # upper_model for its terms list and ``_design_data``.
     if isinstance(model, glm):
         upper_model = glm(
-            upper_formula, model.data, family=model.family,
-            weights=model._prior_w,
+            upper_formula, model.data, family=model.family, weights=None,
         )
-        return _add1_glm(model, upper_model._expanded.terms, test=test, k=k)
+        return _add1_glm(
+            model, upper_model._expanded.terms,
+            common_data=upper_model._design_data, test=test, k=k,
+        )
     if isinstance(model, lm):
         upper_model = lm(
-            upper_formula, model.data, weights=model.weights, method=model.method,
+            upper_formula, model.data, weights=None, method=model.method,
         )
-        return _add1_lm(model, upper_model._expanded.terms, test=test, k=k)
+        return _add1_lm(
+            model, upper_model._expanded.terms,
+            common_data=upper_model._design_data, test=test, k=k,
+        )
     raise TypeError(f"add1(): unsupported model type {type(model).__name__}")
 
 
-def _add1_lm(m: lm, upper_terms, *, test: str | None, k: float):
+def _add1_lm(m: lm, upper_terms, *, common_data, test: str | None, k: float):
     """Refit-with-each-term-added implementation behind ``add1(lm)``."""
     if test is not None and test.upper() != "F":
         raise ValueError(
@@ -306,6 +358,14 @@ def _add1_lm(m: lm, upper_terms, *, test: str | None, k: float):
     add_indices = _add_scope(cur_terms, upper_terms)
     if not add_indices:
         raise ValueError("add1(): no terms in scope for adding to model")
+
+    kw = _refit_kwargs(m, len(common_data))
+    # Re-anchor the <none> baseline to the upper's row set if the row
+    # count differs (e.g. upper introduces NA-bearing predictors that
+    # weren't in the current model). Without this, the <none> AIC and
+    # the candidate AICs would be on different row counts.
+    if len(common_data) != m.n:
+        m = lm(m.formula, common_data, **kw)
 
     lhs = m.formula.split("~", 1)[0].strip()
     intercept_str = "1" if m._expanded.intercept else "0"
@@ -327,7 +387,7 @@ def _add1_lm(m: lm, upper_terms, *, test: str | None, k: float):
         new_labels = cur_labels + [t.label]
         sub_rhs = " + ".join(new_labels)
         sub_formula = f"{lhs} ~ {intercept_str} + {sub_rhs}"
-        m_aug = lm(sub_formula, m.data, weights=m.weights, method=m.method)
+        m_aug = lm(sub_formula, common_data, **kw)
         d_df = df_full - m_aug.df_residuals  # positive (params gained)
         d_rss = rss_full - m_aug.rss          # positive (rss reduction)
 
@@ -368,7 +428,7 @@ def _add1_lm(m: lm, upper_terms, *, test: str | None, k: float):
         print("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1")
 
 
-def _add1_glm(m: glm, upper_terms, *, test: str | None, k: float):
+def _add1_glm(m: glm, upper_terms, *, common_data, test: str | None, k: float):
     """Refit-with-each-term-added implementation behind ``add1(glm)``."""
     fam = m.family
     if test is None:
@@ -393,6 +453,11 @@ def _add1_glm(m: glm, upper_terms, *, test: str | None, k: float):
     add_indices = _add_scope(cur_terms, upper_terms)
     if not add_indices:
         raise ValueError("add1(): no terms in scope for adding to model")
+
+    kw = _refit_kwargs(m, len(common_data))
+    # Anchor <none> baseline to the common row set (see _add1_lm).
+    if len(common_data) != m.n:
+        m = glm(m.formula, common_data, **kw)
 
     lhs = m.formula.split("~", 1)[0].strip()
     intercept_str = "1" if m._expanded.intercept else "0"
@@ -429,7 +494,7 @@ def _add1_glm(m: glm, upper_terms, *, test: str | None, k: float):
         new_labels = cur_labels + [t.label]
         sub_rhs = " + ".join(new_labels)
         sub_formula = f"{lhs} ~ {intercept_str} + {sub_rhs}"
-        m_aug = glm(sub_formula, m.data, family=fam, weights=m._prior_w)
+        m_aug = glm(sub_formula, common_data, **kw)
         d_df = df_full - m_aug.df_residual    # positive
         d_dev = dev_full - m_aug.deviance     # positive
         d_loglik = _delta_loglik(m_aug.deviance) if d_df > 0 else 0.0
@@ -571,20 +636,42 @@ def step(
             "or dict {'lower': ..., 'upper': ...}"
         )
 
-    def _refit(formula: str):
-        if is_glm:
-            return glm(
-                formula, model.data, family=model.family,
-                weights=model._prior_w,
-            )
-        return lm(formula, model.data, weights=model.weights, method=model.method)
-
-    upper_model = _refit(f"{lhs} ~ {upper_rhs}")
+    # Fit upper and lower once on the original data, ignoring weights —
+    # we only need their term lists and (for upper) its NA-cleaned row
+    # set. The weights are reapplied via ``_refit_kwargs`` below.
+    if is_glm:
+        upper_model = glm(
+            f"{lhs} ~ {upper_rhs}", model.data, family=model.family, weights=None,
+        )
+        lower_model = glm(
+            f"{lhs} ~ {lower_rhs}", model.data, family=model.family, weights=None,
+        )
+    else:
+        upper_model = lm(
+            f"{lhs} ~ {upper_rhs}", model.data, weights=None, method=model.method,
+        )
+        lower_model = lm(
+            f"{lhs} ~ {lower_rhs}", model.data, weights=None, method=model.method,
+        )
     upper_terms = upper_model._expanded.terms
-    lower_model = _refit(f"{lhs} ~ {lower_rhs}")
     lower_label_set = {t.label for t in lower_model._expanded.terms}
 
-    current = model
+    # Pin every refit to the upper model's NA-cleaned row set so AICs
+    # are comparable across iterations (matches R's na.action behavior
+    # in stepwise selection). Re-anchor the user-supplied current model
+    # to this row set if it differs.
+    common_data = upper_model._design_data
+    kw = _refit_kwargs(model, len(common_data))
+
+    def _refit(formula: str):
+        if is_glm:
+            return glm(formula, common_data, **kw)
+        return lm(formula, common_data, **kw)
+
+    if len(common_data) != model.n:
+        current = _refit(model.formula)
+    else:
+        current = model
     cur_aic = _step_aic(current, k)
 
     if trace:
@@ -713,6 +800,12 @@ def _drop1_lm(m: lm, *, test: str | None, k: float):
     mse_full = rss_full / df_full
 
     scope = _drop_scope(terms)
+    # Hold the row set constant across all refits (matches R's na.action
+    # behavior). Sub-formulas use a subset of m's columns, so any rows
+    # that survived NA-cleaning for m are valid for the sub-formulas
+    # too — m._design_data is the right anchor.
+    common_data = m._design_data
+    kw = _refit_kwargs(m, len(common_data))
 
     df_col: list[int | None] = [None]
     sos_col: list[float | None] = [None]
@@ -730,7 +823,7 @@ def _drop1_lm(m: lm, *, test: str | None, k: float):
             f"{lhs} ~ {intercept_str} + {sub_rhs}" if sub_rhs
             else f"{lhs} ~ {intercept_str}"
         )
-        m_sub = lm(sub_formula, m.data, weights=m.weights, method=m.method)
+        m_sub = lm(sub_formula, common_data, **kw)
         d_df = m_sub.df_residuals - df_full
         d_rss = m_sub.rss - rss_full
 
@@ -804,6 +897,10 @@ def _drop1_glm(m: glm, *, test: str | None, k: float):
     aic_full_table = m.AIC + (k - 2.0) * edf_full
 
     scope = _drop_scope(terms)
+    # Same anchoring as the lm path — pin the row set to m._design_data
+    # so every sub-fit has comparable AIC.
+    common_data = m._design_data
+    kw = _refit_kwargs(m, len(common_data))
 
     df_col: list[int | None] = [None]
     dev_col: list[float] = [round(dev_full, 4)]
@@ -833,7 +930,7 @@ def _drop1_glm(m: glm, *, test: str | None, k: float):
             f"{lhs} ~ {intercept_str} + {sub_rhs}" if sub_rhs
             else f"{lhs} ~ {intercept_str}"
         )
-        m_sub = glm(sub_formula, m.data, family=fam, weights=m._prior_w)
+        m_sub = glm(sub_formula, common_data, **kw)
         d_df = m_sub.df_residual - df_full
         d_dev = m_sub.deviance - dev_full
         d_loglik = _delta_loglik(m_sub.deviance) if d_df > 0 else 0.0
