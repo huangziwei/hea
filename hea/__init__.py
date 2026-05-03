@@ -1,4 +1,4 @@
-from .compare import AIC, BIC, anova, drop1
+from .compare import AIC, BIC, add1, anova, drop1, step
 from .family import (
     Binomial,
     Family,

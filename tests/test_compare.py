@@ -31,11 +31,13 @@ from hea import (
     Gamma,
     Gaussian,
     Poisson,
+    add1,
     anova,
     drop1,
     gam,
     glm,
     lm,
+    step,
 )
 from hea.compare import (
     _anova_gam_rdf,
@@ -813,3 +815,283 @@ def test_drop1_gam_not_implemented():
             data=trees, family=Gamma(link="log"))
     with pytest.raises(NotImplementedError, match="gam"):
         drop1(g)
+
+
+# =============================================================================
+# add1 — single-term additions
+# =============================================================================
+#
+# Mirror image of drop1. The denominator and dispersion-source choices
+# flip: drop1 uses the *current* (full) model, add1 uses the *augmented*
+# (bigger) model — so both use the bigger of the two. AIC recalibration
+# is the dual: ``aic_aug = aic_cur - Δloglik + k*Δdf_added``. Marginality
+# (R's ``add.scope``) blocks adding ``a:b`` while ``a`` or ``b`` is
+# missing.
+
+
+def test_add1_lm_F_pins_to_R_on_iris():
+    """`add1(lm, test='F')` on iris matches R numerics exactly. Pins
+    the augmented-MSE F-denominator and the extractAIC formula.
+    """
+    iris = load_dataset("R", "iris")
+    m0 = lm("Sepal.Length ~ Petal.Length", iris)
+    out = _capture(add1, m0, "Petal.Length + Petal.Width + Species", test="F")
+    # <none> row: current AIC = -267.6411 (extractAIC).
+    assert "-267.6411" in out
+    # Add Petal.Width: Δrss=0.6443, RSS_aug=23.8807, AIC=-269.6347, F=3.9663
+    assert "0.6443" in out
+    assert "23.8807" in out
+    assert "-269.6347" in out
+    assert "3.9663" in out
+    # Add Species: Δrss=7.8434, RSS_aug=16.6817, AIC=-321.4488, F=34.3231
+    assert "7.8434" in out
+    assert "16.6817" in out
+    assert "-321.4488" in out
+    assert "34.3231" in out
+
+
+def test_add1_glm_Chisq_gaussian_uses_n_log_dev_ratio():
+    """Add1's Gaussian Chisq mirrors drop1's: ``n*log(dev_cur/dev_aug)``.
+    For Petal.Width on iris: 150*log(24.525/23.881) ≈ 3.994. The
+    naive Δdev/dispersion alternative would give a different number.
+    """
+    iris = load_dataset("R", "iris")
+    g0 = glm("Sepal.Length ~ Petal.Length", iris, family=Gaussian())
+    out = _capture(add1, g0, "Petal.Length + Petal.Width + Species",
+                   test="Chisq")
+    assert "scaled dev." in out
+    # R's value: 3.9936 (Petal.Width), 57.8077 (Species).
+    assert "3.9936" in out
+    assert "57.8077" in out
+
+
+def test_add1_glm_Chisq_poisson_uses_LRT_label():
+    """Scale-known glm add1: column header is ``LRT`` (= raw Δdev) since
+    dispersion=1. Pinned to R's ``add1.glm(..., test='Chisq')`` on quine.
+    """
+    quine = load_dataset("MASS", "quine")
+    g0 = glm("Days ~ Sex", quine, family=Poisson(link="log"))
+    out = _capture(add1, g0, "Sex + Age + Eth + Lrn", test="Chisq")
+    assert "LRT" in out
+    assert "scaled dev." not in out
+    # R: Age LRT=148.95, Eth=182.14, Lrn=8.03
+    assert "148.9548" in out
+    assert "182.139" in out
+    assert "8.0321" in out
+
+
+def test_add1_glm_Chisq_gamma_uses_current_dispersion():
+    """For non-Gaussian unknown-scale, R uses the *current* model's
+    Pearson dispersion as the Chisq normalizer (different from drop1
+    which also uses the current/full model's dispersion — both are
+    consistent: 'the smaller-residual side's dispersion'). Pin to R.
+    """
+    trees = load_dataset("R", "trees")
+    g0 = glm("Volume ~ log(Girth)", trees, family=Gamma(link="inverse"))
+    out = _capture(add1, g0, "log(Girth) + log(Height)", test="Chisq")
+    # R: scaled dev. = 2.0921 for log(Height).
+    # If we mistakenly used aug's dispersion (0.0266), we'd get 2.2188.
+    assert "2.0921" in out
+    assert "2.2188" not in out
+
+
+def test_add1_glm_F_gamma_uses_aug_residual_mean_deviance():
+    """add1 F-denom is the *augmented* model's dev/df_resid (mirror of
+    drop1's "current model's dev/df_resid"). On Gamma trees adding
+    log(Height): F = 2.0654, not 2.2188 (Pearson dispersion alt).
+    """
+    trees = load_dataset("R", "trees")
+    g0 = glm("Volume ~ log(Girth)", trees, family=Gamma(link="inverse"))
+    out = _capture(add1, g0, "log(Girth) + log(Height)", test="F")
+    assert "2.0654" in out
+
+
+def test_add1_respects_marginality():
+    """add.scope blocks adding ``a:b`` unless both ``a`` and ``b`` are
+    already present. With current=``y~a`` and scope=``y~a*b``, only
+    ``b`` is addable; ``a:b`` is held until ``b`` is in.
+    """
+    iris = load_dataset("R", "iris")
+    m = lm("Sepal.Length ~ Petal.Length", iris)
+    # Scope contains Petal.Width and the interaction Petal.Length:Petal.Width.
+    # add1 should only offer Petal.Width (single addable term).
+    out = _capture(add1, m, "Petal.Length * Petal.Width")
+    # Only one candidate row + <none>.
+    assert "Petal.Width" in out
+    # The interaction shouldn't appear as an addable row (the term label
+    # would be "Petal.Length:Petal.Width" which contains ":").
+    rows = [l for l in out.splitlines() if ":" in l and l.startswith("Petal")]
+    assert not rows, f"unexpected interaction rows: {rows}"
+
+
+def test_add1_raises_on_empty_scope():
+    """If scope adds nothing (already in current), R errors —
+    we match with a ValueError."""
+    iris = load_dataset("R", "iris")
+    m = lm("Sepal.Length ~ Petal.Length", iris)
+    with pytest.raises(ValueError, match="no terms in scope"):
+        add1(m, "Petal.Length")
+
+
+def test_add1_gam_not_implemented():
+    """add1(gam) raises — same boundary as drop1(gam)."""
+    trees = load_dataset("R", "trees")
+    g = gam("Volume ~ s(Girth)",
+            data=trees, family=Gamma(link="log"))
+    with pytest.raises(NotImplementedError, match="gam"):
+        add1(g, "s(Girth) + s(Height)")
+
+
+# =============================================================================
+# step — stepwise model selection
+# =============================================================================
+#
+# step() is built on drop1+add1 plus the AIC = extractAIC convention.
+# The Faraway (2016) Ch.1 ``gavote`` example is the canonical lm test
+# case; for glm we use the Poisson quine model (where the full model
+# is the AIC minimum, so step keeps everything).
+
+
+def test_step_backward_on_gavote_matches_R():
+    """Faraway (2016) Ch.1: starting from the saturated two-way
+    interaction model on gavote, ``step(biglm, trace=FALSE)`` reduces
+    to a smaller model. Pinned against R's actual output (the book
+    text has a typo describing the chosen interactions; R's real
+    output has ``equip:perAA`` not ``econ:perAA``).
+    """
+    from hea.data import data
+    g = data("gavote", package="faraway")
+    g = g.mutate(usage=pl.col("rural")).select(pl.exclude("rural"))
+    g = g.mutate(
+        undercount=(pl.col("ballots") - pl.col("votes")) / pl.col("ballots"),
+        pergore=pl.col("gore") / pl.col("votes"),
+    )
+    biglm = lm(
+        "undercount ~ (equip+econ+usage+atlanta)^2 + "
+        "(equip+econ+usage+atlanta)*(perAA+pergore)",
+        g,
+    )
+    smallm = step(biglm, trace=False)
+    # R produces: equip + econ + usage + perAA + equip:econ + equip:perAA + usage:perAA
+    final_terms = {t.label for t in smallm._expanded.terms}
+    assert final_terms == {
+        "equip", "econ", "usage", "perAA",
+        "equip:econ", "equip:perAA", "usage:perAA",
+    }
+    # atlanta and pergore have been eliminated entirely.
+    assert "atlanta" not in final_terms
+    assert "pergore" not in final_terms
+
+
+def test_step_forward_from_intercept_on_iris():
+    """Forward selection from intercept-only adds Petal.Length and
+    Species (the two strong predictors); Petal.Width's marginal benefit
+    over Petal.Length isn't enough to enter."""
+    iris = load_dataset("R", "iris")
+    m0 = lm("Sepal.Length ~ 1", iris)
+    m_final = step(m0, scope="Petal.Length + Petal.Width + Species",
+                   direction="forward", trace=False)
+    final_terms = {t.label for t in m_final._expanded.terms}
+    assert final_terms == {"Petal.Length", "Species"}
+
+
+def test_step_glm_poisson_keeps_full_when_no_drop_helps():
+    """On quine + Poisson, every term is significant; backward step
+    should keep the full model. Returned model should be ``isinstance``
+    of glm and have the same formula (after step's intercept-explicit
+    rewrite)."""
+    quine = load_dataset("MASS", "quine")
+    g_full = glm("Days ~ Sex + Age + Eth + Lrn", quine, family=Poisson(link="log"))
+    g_step = step(g_full, trace=False)
+    final_terms = {t.label for t in g_step._expanded.terms}
+    assert final_terms == {"Sex", "Age", "Eth", "Lrn"}
+    assert isinstance(g_step, glm)
+
+
+def test_step_trace_prints_expected_output():
+    """trace=True prints a header (Start: AIC=...), the formula, the
+    candidate table, and "Step: AIC=..." for each move. Pinned to R's
+    backward step on iris."""
+    iris = load_dataset("R", "iris")
+    m_full = lm("Sepal.Length ~ Petal.Length + Petal.Width + Species", iris)
+    out = _capture(step, m_full, direction="backward", trace=True)
+    # Header line.
+    assert "Start:  AIC=" in out
+    # Initial AIC value (pinned to R: -319.45).
+    assert "-319.45" in out
+    # First step drops Petal.Width (0.0002 SS, AIC -321.45 wins).
+    assert "- Petal.Width" in out
+    assert "Step:  AIC=-321.45" in out
+    # Final formula appears after the step.
+    assert "Petal.Length + Species" in out
+
+
+def test_step_trace_false_is_silent():
+    """trace=False prints nothing; only the final model is returned."""
+    iris = load_dataset("R", "iris")
+    m_full = lm("Sepal.Length ~ Petal.Length + Petal.Width + Species", iris)
+    out = _capture(step, m_full, trace=False)
+    assert out == ""
+
+
+def test_step_with_BIC_penalty():
+    """Custom k swaps AIC for BIC (k=log(n)). BIC penalizes models
+    more, so step should retain at least as few terms as default AIC.
+    """
+    iris = load_dataset("R", "iris")
+    m_full = lm("Sepal.Length ~ Petal.Length + Petal.Width + Species", iris)
+    n_log = float(np.log(m_full.n))
+    m_aic = step(m_full, trace=False)
+    m_bic = step(m_full, k=n_log, trace=False)
+    # Both should drop Petal.Width (the weak predictor).
+    aic_terms = {t.label for t in m_aic._expanded.terms}
+    bic_terms = {t.label for t in m_bic._expanded.terms}
+    assert "Petal.Width" not in aic_terms
+    assert "Petal.Width" not in bic_terms
+    # BIC is at least as parsimonious as AIC.
+    assert len(bic_terms) <= len(aic_terms)
+
+
+def test_step_dict_scope_with_lower_bound():
+    """A dict scope with both ``lower`` and ``upper`` constrains the
+    walk on both sides. A term in ``lower`` can never be dropped, even
+    if dropping would improve AIC."""
+    iris = load_dataset("R", "iris")
+    m_full = lm("Sepal.Length ~ Petal.Length + Petal.Width + Species", iris)
+    # Force Petal.Width to stay in (it would otherwise be dropped).
+    m_kept = step(m_full,
+                  scope={"lower": "Petal.Width",
+                         "upper": "Petal.Length + Petal.Width + Species"},
+                  trace=False)
+    final_terms = {t.label for t in m_kept._expanded.terms}
+    assert "Petal.Width" in final_terms
+
+
+def test_step_rejects_invalid_direction():
+    """Bogus direction raises ValueError."""
+    iris = load_dataset("R", "iris")
+    m = lm("Sepal.Length ~ Petal.Length", iris)
+    with pytest.raises(ValueError, match="direction must be"):
+        step(m, direction="sideways")
+
+
+def test_step_unsupported_model_type():
+    """step(gam) and step(lme) intentionally raise NotImplementedError."""
+    trees = load_dataset("R", "trees")
+    g = gam("Volume ~ s(Girth)",
+            data=trees, family=Gamma(link="log"))
+    with pytest.raises(NotImplementedError, match="gam"):
+        step(g)
+
+
+def test_step_already_minimal_returns_input():
+    """If no move improves AIC (the input is already the minimum),
+    step returns the input (or an equivalent fit). The returned
+    model should at least share the same term set."""
+    iris = load_dataset("R", "iris")
+    # Petal.Length alone — nothing to drop (intercept stays via lower)
+    # and nothing to add since scope=None means upper=current.
+    m = lm("Sepal.Length ~ Petal.Length", iris)
+    m_out = step(m, trace=False)
+    assert {t.label for t in m_out._expanded.terms} == \
+           {t.label for t in m._expanded.terms}
