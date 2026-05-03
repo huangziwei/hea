@@ -19,7 +19,7 @@ from .lm import lm
 from .lme import lme
 from .utils import _dig_tst, format_df, format_pval, format_signif, significance_code
 
-__all__ = ["anova", "AIC", "BIC"]
+__all__ = ["anova", "AIC", "BIC", "drop1"]
 
 
 def _caller_names(models, frame, fallback: str = "model") -> list[str]:
@@ -140,6 +140,296 @@ def anova(*models, test: str | None = None):
     raise TypeError(
         "anova(): all models must be the same type (lm, glm, gam, or lme)"
     )
+
+
+def drop1(model, *, test: str | None = None, k: float = 2.0):
+    """Single-term deletions, R's ``drop1.lm`` / ``drop1.glm``.
+
+    For each non-intercept term in ``model``, refits with that term
+    removed and prints a one-row-per-term table comparing each reduced
+    fit to the full model (the ``<none>`` row).
+
+    Conventions match R:
+
+    * ``lm``: AIC column uses ``extractAIC``'s Mallows-style formula
+      ``n*log(RSS/n) + k*p``, **not** ``AIC.lm`` — drop1 uses this so
+      the column is comparable across nested fits without the constant
+      offset that ``AIC.lm`` carries. ``test="F"`` adds F-statistic and
+      p-value columns.
+    * ``glm``: AIC column is the standard ``glm.AIC`` (already on the
+      same scale across nested fits). ``test="F"`` (typical for
+      unknown-scale) or ``test="Chisq"``/``"LRT"`` (any family) add the
+      test columns. The Chisq stat label flips between ``"LRT"`` (raw
+      Δdev — appropriate when ``dispersion=1``) and ``"scaled dev."``
+      (Δdev/dispersion_full — what mgcv/R uses for unknown-scale),
+      matching ``drop1.glm`` exactly.
+
+    Parameters
+    ----------
+    test : {None, "F", "Chisq", "LRT", "Rao"}
+        ``None`` (default) prints just the no-test columns. ``"LRT"``
+        is an alias for ``"Chisq"``. ``"Rao"`` is not implemented yet.
+    k : float
+        Penalty multiplier for the AIC parameter count. ``k=log(n)``
+        gives BIC. Only used by the lm path; glm's AIC is family-derived.
+        Matches R's ``drop1.lm(..., k=)``.
+    """
+    if isinstance(model, gam):
+        raise NotImplementedError(
+            "drop1(gam): not implemented yet — mgcv's drop1.gam has "
+            "smoothing-parameter caveats we haven't ported."
+        )
+    if isinstance(model, lme):
+        raise NotImplementedError("drop1(lme): not implemented yet.")
+    # glm before lm: glm is not an lm subclass, but order matters if
+    # that ever changes (mirrors anova()'s dispatch order).
+    if isinstance(model, glm):
+        return _drop1_glm(model, test=test, k=k)
+    if isinstance(model, lm):
+        return _drop1_lm(model, test=test, k=k)
+    raise TypeError(
+        f"drop1(): unsupported model type {type(model).__name__}"
+    )
+
+
+def _drop_scope(terms) -> list[int]:
+    """Indices of terms that respect *marginality* — R's ``drop.scope``.
+
+    A term is droppable iff its factor set is not a strict subset of any
+    other term's factor set. So given ``cpergore + usage + cpergore:usage``,
+    neither ``cpergore`` nor ``usage`` is droppable (they're both
+    contained in the interaction); only ``cpergore:usage`` is. Without
+    this filter, ``drop1`` would happily compute Δrss for "drop the
+    main effect while keeping the interaction" — which is what R's
+    ``drop1`` deliberately avoids, and which the Faraway book example
+    on ``gavote`` shows R skipping over.
+    """
+    factor_sets = [frozenset(t.label.split(":")) for t in terms]
+    keep: list[int] = []
+    for i, fi in enumerate(factor_sets):
+        contained = any(
+            j != i and fi < fj  # strict subset → ``fi`` is "marginal"
+            for j, fj in enumerate(factor_sets)
+        )
+        if not contained:
+            keep.append(i)
+    return keep
+
+
+def _extract_aic_lm(rss: float, df_residuals: int, n: int, k: float) -> float:
+    """R's ``extractAIC.lm`` — Mallows-style ``n*log(RSS/n) + k*p``.
+
+    Differs from ``AIC.lm`` (the logLik-based formula) by a constant
+    that depends only on ``n``, so the differences across nested fits
+    in a drop1 table are the same either way — we use this form to
+    match R's printed values directly.
+    """
+    p = n - df_residuals
+    if rss <= 0:
+        return float("-inf")
+    return n * float(np.log(rss / n)) + k * p
+
+
+def _drop1_lm(m: lm, *, test: str | None, k: float):
+    """Refit-without-each-term implementation behind ``drop1(lm)``."""
+    if test is not None and test.upper() != "F":
+        raise ValueError(
+            f"drop1(lm): test must be 'F' or None; got {test!r}"
+        )
+    use_F = test is not None
+
+    terms = m._expanded.terms
+    if not terms:
+        raise TypeError("drop1(): need at least one RHS term to drop")
+
+    lhs = m.formula.split("~", 1)[0].strip()
+    intercept_str = "1" if m._expanded.intercept else "0"
+    n = m.n
+    rss_full = m.rss
+    df_full = m.df_residuals
+    mse_full = rss_full / df_full
+
+    scope = _drop_scope(terms)
+
+    df_col: list[int | None] = [None]
+    sos_col: list[float | None] = [None]
+    rss_col: list[float] = [round(rss_full, 4)]
+    aic_col: list[float] = [round(_extract_aic_lm(rss_full, df_full, n, k), 4)]
+    f_col: list[float | None] = [None]
+    p_col: list[float | None] = [None]
+    sig_col: list[str] = [""]
+
+    for j in scope:
+        t = terms[j]
+        rest = [terms[i].label for i in range(len(terms)) if i != j]
+        sub_rhs = " + ".join(rest) if rest else ""
+        sub_formula = (
+            f"{lhs} ~ {intercept_str} + {sub_rhs}" if sub_rhs
+            else f"{lhs} ~ {intercept_str}"
+        )
+        m_sub = lm(sub_formula, m.data, weights=m.weights, method=m.method)
+        d_df = m_sub.df_residuals - df_full
+        d_rss = m_sub.rss - rss_full
+
+        df_col.append(d_df)
+        sos_col.append(round(d_rss, 4))
+        rss_col.append(round(m_sub.rss, 4))
+        aic_col.append(round(_extract_aic_lm(m_sub.rss, m_sub.df_residuals, n, k), 4))
+        if use_F and d_df > 0:
+            fstat = (d_rss / d_df) / mse_full
+            p = float(f.sf(fstat, d_df, df_full))
+            f_col.append(round(fstat, 4))
+            p_col.append(float(f"{p:.4g}"))
+            sig_col.append(significance_code([p])[0])
+        else:
+            f_col.append(None); p_col.append(None); sig_col.append("")
+
+    cols: dict[str, list] = {
+        "":          ["<none>"] + [terms[j].label for j in scope],
+        "Df":        df_col,
+        "Sum of Sq": sos_col,
+        "RSS":       rss_col,
+        "AIC":       aic_col,
+    }
+    if use_F:
+        cols["F value"] = f_col
+        cols["Pr(>F)"] = p_col
+        cols[" "] = sig_col
+
+    print(f"Single term deletions\n\nModel:\n{m.formula}\n")
+    print(format_df(pl.DataFrame(cols)))
+    if use_F:
+        print("---")
+        print("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1")
+
+
+def _drop1_glm(m: glm, *, test: str | None, k: float):
+    """Refit-without-each-term implementation behind ``drop1(glm)``."""
+    fam = m.family
+    if test is None:
+        kind = None
+    else:
+        t_norm = test.upper()
+        if t_norm in ("CHISQ", "LRT"):
+            kind = "Chisq"
+        elif t_norm == "F":
+            kind = "F"
+        elif t_norm == "RAO":
+            raise NotImplementedError(
+                "drop1(glm, test='Rao'): score test not implemented yet"
+            )
+        else:
+            raise ValueError(
+                f"drop1(glm): test must be 'F', 'Chisq'/'LRT', 'Rao', or None; "
+                f"got {test!r}"
+            )
+
+    terms = m._expanded.terms
+    if not terms:
+        raise TypeError("drop1(): need at least one RHS term to drop")
+
+    lhs = m.formula.split("~", 1)[0].strip()
+    intercept_str = "1" if m._expanded.intercept else "0"
+    dev_full = m.deviance
+    df_full = m.df_residual
+    disp_full = float(m.dispersion)
+    n = m.n
+    # R's ``drop1.glm`` uses ``extractAIC(full)[2]`` for the <none> row
+    # and shifts every other row by the same constant. extractAIC.glm
+    # gives ``$aic + (k-2)*edf``, equivalent to standard glm AIC at k=2.
+    edf_full = n - df_full
+    aic_full_table = m.AIC + (k - 2.0) * edf_full
+
+    scope = _drop_scope(terms)
+
+    df_col: list[int | None] = [None]
+    dev_col: list[float] = [round(dev_full, 4)]
+    aic_col: list[float] = [round(aic_full_table, 4)]
+    stat_col: list[float | None] = [None]
+    p_col: list[float | None] = [None]
+    sig_col: list[str] = [""]
+
+    def _delta_loglik(dev_drop: float) -> float:
+        """R's drop1.glm "loglik diff" between the dropped and full fit.
+
+        For Gaussian (σ unknown) this is the profile-likelihood form
+        ``n*log(dev_drop/dev_full)``. For other families it's
+        ``Δdev/dispersion_full`` (which equals Δdev when dispersion=1
+        for scale-known Poisson/Binomial). Driving both the Chisq stat
+        column ("scaled dev." / "LRT") and the per-row AIC shift.
+        """
+        if fam.name == "gaussian":
+            return n * float(np.log(dev_drop / dev_full))
+        return (dev_drop - dev_full) / disp_full
+
+    for j in scope:
+        t = terms[j]
+        rest = [terms[i].label for i in range(len(terms)) if i != j]
+        sub_rhs = " + ".join(rest) if rest else ""
+        sub_formula = (
+            f"{lhs} ~ {intercept_str} + {sub_rhs}" if sub_rhs
+            else f"{lhs} ~ {intercept_str}"
+        )
+        m_sub = glm(sub_formula, m.data, family=fam, weights=m._prior_w)
+        d_df = m_sub.df_residual - df_full
+        d_dev = m_sub.deviance - dev_full
+        d_loglik = _delta_loglik(m_sub.deviance) if d_df > 0 else 0.0
+
+        df_col.append(d_df)
+        dev_col.append(round(m_sub.deviance, 4))
+        # Recalibrated AIC matches R: aic_full_table + Δloglik - k*Δdf.
+        # Holds dispersion fixed at the full model's value across all
+        # rows, so AICs are directly comparable across drops (which is
+        # the whole point of drop1's table). For Gaussian this happens
+        # to coincide with the standard glm.AIC, but for Gamma/IG the
+        # standard AIC re-estimates dispersion per fit and would shift
+        # the dropped rows non-uniformly.
+        aic_col.append(round(aic_full_table + d_loglik - k * d_df, 4))
+        if kind == "F" and d_df > 0:
+            # R's ``drop1.glm`` F-denominator is ``dev_full / df_full``
+            # (residual *mean deviance*), not the Pearson dispersion
+            # ``summary(m)$dispersion`` that ``anova.glm`` uses. The two
+            # coincide for Gaussian but differ for Gamma/IG/etc; matches
+            # R's behavior (which warns "F test assumes 'quasi' family"
+            # for Poisson/Binomial since ``dev_full/df_full`` is then a
+            # quasi-likelihood-style scale rather than 1).
+            rms_full = dev_full / df_full
+            fstat = (d_dev / d_df) / rms_full
+            p = float(f.sf(fstat, d_df, df_full))
+            stat_col.append(round(fstat, 4))
+            p_col.append(float(f"{p:.4g}"))
+            sig_col.append(significance_code([p])[0])
+        elif kind == "Chisq" and d_df > 0:
+            stat = d_loglik
+            p = float(chi2.sf(stat, d_df))
+            stat_col.append(round(stat, 4))
+            p_col.append(float(f"{p:.4g}"))
+            sig_col.append(significance_code([p])[0])
+        else:
+            stat_col.append(None); p_col.append(None); sig_col.append("")
+
+    cols: dict[str, list] = {
+        "":         ["<none>"] + [terms[j].label for j in scope],
+        "Df":       df_col,
+        "Deviance": dev_col,
+        "AIC":      aic_col,
+    }
+    if kind == "F":
+        cols["F value"] = stat_col
+        cols["Pr(>F)"] = p_col
+        cols[" "] = sig_col
+    elif kind == "Chisq":
+        # R's drop1.glm flips the column name on scale-known-ness.
+        stat_lbl = "LRT" if fam.scale_known else "scaled dev."
+        cols[stat_lbl] = stat_col
+        cols["Pr(>Chi)"] = p_col
+        cols[" "] = sig_col
+
+    print(f"Single term deletions\n\nModel:\n{m.formula}\n")
+    print(format_df(pl.DataFrame(cols)))
+    if kind:
+        print("---")
+        print("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1")
 
 
 def _anova_lm(*models, labels: list[str]):
