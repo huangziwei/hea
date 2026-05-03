@@ -759,6 +759,103 @@ def test_anova_glm_test_argument():
         anova(m0, m1, test="bogus")
 
 
+def test_anova_glm_F_on_scale_known_pins_to_R():
+    """`test='F'` on a scale-known family (Poisson) overrides the default
+    Chisq. Exercises the F branch with ``dispersion_full = 1``, so
+    ``F = Δdev / Δdf``. Pinned to R's ``anova.glm(..., test='F')`` on
+    MASS::quine — a path the auto-detect oracle doesn't cover.
+    """
+    d = load_dataset("MASS", "quine")
+    fam = Poisson(link="log")
+    m0 = glm("Days ~ Sex + Age", d, family=fam)
+    m1 = glm("Days ~ Sex + Age + Eth + Lrn", d, family=fam)
+    df, _ = _anova_glm_table(m0, m1, labels=["m0", "m1"], test="F")
+    # Schema: F column appears under test='F', not under default Chisq.
+    assert "F" in df.columns and "Pr(>F)" in df.columns
+    assert "Pr(>Chi)" not in df.columns
+    # Numerics from `anova(m0, m1, test='F')`:
+    #   Df=2  Deviance=211.5687  F=105.78436  Pr(>F) < 2.22e-16
+    assert df["Df"][1] == 2
+    np.testing.assert_allclose(df["Deviance"][1], 211.5687, atol=5e-3)
+    np.testing.assert_allclose(df["F"][1], 105.78436, atol=5e-3)
+    # R reports as "< 2.22e-16"; SciPy computes the upper tail more precisely.
+    assert df["Pr(>F)"][1] < 1e-20
+
+
+def test_anova_glm_F_three_model_uses_full_dispersion():
+    """3+ models with ``test='F'``: the F denominator is locked to the
+    largest (full) model's dispersion across all rows — not the
+    immediately-preceding row's dispersion. Pinned to R's
+    ``anova(m0, m1, m2, test='F')`` on Gamma trees.
+    """
+    d = load_dataset("R", "trees")
+    fam = Gamma(link="inverse")
+    m0 = glm("Volume ~ 1", d, family=fam)
+    m1 = glm("Volume ~ log(Girth)", d, family=fam)
+    m2 = glm("Volume ~ log(Height) + log(Girth)", d, family=fam)
+    df, _ = _anova_glm_table(m0, m1, m2, labels=["m0", "m1", "m2"], test="F")
+    # Resid Df / Dev across the three models.
+    assert df["Resid. Df"].to_list() == [30, 29, 28]
+    np.testing.assert_allclose(
+        df["Resid. Dev"].to_numpy(),
+        [8.3172, 0.8592, 0.8002],
+        atol=5e-4,
+    )
+    # Row 1 (m1 vs m0): F uses m2's dispersion (0.02660), so
+    #   F = (7.4580 / 1) / 0.02660 ≈ 280.36, not (7.4580/1) / m1.dispersion.
+    assert df["Df"][1] == 1
+    np.testing.assert_allclose(df["Deviance"][1], 7.4580, atol=5e-4)
+    np.testing.assert_allclose(df["F"][1], 280.35781, atol=5e-3)
+    np.testing.assert_allclose(df["Pr(>F)"][1], 4.0473e-16, rtol=5e-2)
+    # Row 2 (m2 vs m1): F = (0.05902 / 1) / 0.02660 ≈ 2.219.
+    assert df["Df"][2] == 1
+    np.testing.assert_allclose(df["Deviance"][2], 0.05902, atol=5e-4)
+    np.testing.assert_allclose(df["F"][2], 2.21882, atol=5e-4)
+    np.testing.assert_allclose(df["Pr(>F)"][2], 0.14752, atol=5e-4)
+
+
+def test_anova_glm_F_explicit_matches_auto_on_unknown_scale():
+    """Sanity: ``test='F'`` and ``test=None`` produce identical numerics
+    on unknown-scale families (where ``None`` auto-resolves to F).
+    Locks the equivalence so future refactors of the test-selection
+    branch can't drift one path away from the other.
+    """
+    d = load_dataset("R", "trees")
+    fam = Gamma(link="inverse")
+    m0 = glm("Volume ~ log(Girth)", d, family=fam)
+    m1 = glm("Volume ~ log(Height) + log(Girth)", d, family=fam)
+    df_auto, _ = _anova_glm_table(m0, m1, labels=["m0", "m1"], test=None)
+    df_F, _    = _anova_glm_table(m0, m1, labels=["m0", "m1"], test="F")
+    assert df_auto.columns == df_F.columns
+    for col in ["Resid. Df", "Resid. Dev", "Df", "Deviance", "F", "Pr(>F)"]:
+        a, b = df_auto[col].to_list(), df_F[col].to_list()
+        for x, y in zip(a, b):
+            if x is None:
+                assert y is None
+            else:
+                np.testing.assert_allclose(x, y, rtol=0, atol=0)
+
+
+def test_anova_glm_F_printed_table_has_F_and_Pr_columns():
+    """End-to-end: the public ``anova(..., test='F')`` printed table
+    has the F-test header columns and locked numerics — guards against
+    refactors of ``_anova_glm`` (the printer) drifting from
+    ``_anova_glm_table`` (the builder)."""
+    d = load_dataset("R", "trees")
+    fam = Gamma(link="inverse")
+    m0 = glm("Volume ~ log(Girth)", d, family=fam)
+    m1 = glm("Volume ~ log(Height) + log(Girth)", d, family=fam)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        anova(m0, m1, test="F")
+    out = buf.getvalue()
+    # Header must include the F-test columns, not Chisq.
+    assert "F" in out and "Pr(>F)" in out
+    assert "Pr(>Chi)" not in out
+    # F-stat from R: 2.219 (rounded to 4 places by the formatter).
+    assert "2.2188" in out
+
+
 def test_anova_gam_single_pins_to_mgcv_on_trees():
     """``anova(gam_single)`` should produce mgcv's anova.gam single-model
     output: parametric Terms F-table + smooth significance table."""
