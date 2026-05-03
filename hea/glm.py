@@ -45,6 +45,13 @@ def _coerce_response(y_series: pl.Series, family: Family) -> np.ndarray:
     LHS: level 1 → 0 (failure), level 2 → 1 (success). Boolean is the
     same shape (FALSE → 0, TRUE → 1). For other families and numeric y
     we just float-cast.
+
+    Unused factor levels are dropped before the 2-level check — matches
+    R's ``glm()``, which calls ``model.frame(..., drop.unused.levels=
+    TRUE)`` so a 3-level Enum filtered down to 2 actually-present
+    levels still fits cleanly. The filter preserves the declared order
+    of the surviving levels, so ``levels[0]`` (the "failure" reference)
+    matches what R would pick after ``droplevels()``.
     """
     dt = y_series.dtype
     if isinstance(family, Binomial):
@@ -52,15 +59,17 @@ def _coerce_response(y_series: pl.Series, family: Family) -> np.ndarray:
             return y_series.to_numpy().astype(float)
         if dt == pl.String or isinstance(dt, (pl.Categorical, pl.Enum)):
             if isinstance(dt, pl.Enum):
-                levels = list(dt.categories)
+                declared = list(dt.categories)
             else:
                 # No declared order — fall back to alphabetical, which is
                 # R's `factor()` default when `levels=` is unspecified.
-                levels = sorted(y_series.drop_nulls().unique().to_list())
+                declared = sorted(y_series.drop_nulls().unique().to_list())
+            present = set(y_series.drop_nulls().unique().to_list())
+            levels = [lvl for lvl in declared if lvl in present]
             if len(levels) != 2:
                 raise ValueError(
-                    f"Binomial response factor must have 2 levels; "
-                    f"got {len(levels)}: {levels}"
+                    f"Binomial response factor must have 2 levels present "
+                    f"in the data; got {len(levels)}: {levels}"
                 )
             return (y_series.to_numpy() != levels[0]).astype(float)
     return y_series.to_numpy().astype(float).flatten()

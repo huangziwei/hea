@@ -507,6 +507,57 @@ def test_factor_response_binomial_rejects_three_level():
         glm("y ~ x", d, family=Binomial())
 
 
+def test_factor_response_binomial_drops_unused_enum_levels():
+    """An Enum response with N declared levels but only 2 *present* in
+    the data should fit cleanly — R's ``glm()`` does this via
+    ``model.frame(drop.unused.levels=TRUE)``. Common case: ``data("iris")``
+    filtered to two species, where ``Species`` keeps the third level
+    in its dtype but no rows. Pinned to R's coefficients.
+    """
+    iris = load_dataset("R", "iris")
+    irisr = iris.filter(pl.col("Species") != "virginica") \
+                .select("Sepal.Width", "Sepal.Length", "Species")
+    # The Enum still declares all 3 levels; only 2 are present.
+    assert irisr["Species"].dtype.categories.to_list() == \
+        ["setosa", "versicolor", "virginica"]
+    assert set(irisr["Species"].unique().to_list()) == {"setosa", "versicolor"}
+
+    m = glm("Species ~ Sepal.Width + Sepal.Length", data=irisr, family=Binomial())
+    # R's coefficients (data is perfectly separable, R warns about
+    # non-convergence; the betas still match across implementations
+    # because both stop at the same step-halved point).
+    np.testing.assert_allclose(
+        m._bhat_arr,
+        [-360.6100, -110.1258, 131.7941],
+        atol=5e-3,
+    )
+
+
+def test_factor_response_binomial_drops_unused_when_first_level_absent():
+    """Edge case: the first declared level isn't present in the data.
+    R's drop-unused-levels filters it out, so the *remaining* levels
+    in declared order become the {0, 1} reference. Without the drop,
+    the naive ``y != levels[0]`` would map every row to 1.
+    """
+    iris = load_dataset("R", "iris")
+    # Filter to setosa+versicolor, then re-cast Species so virginica
+    # comes first in the level order.
+    irisr = iris.filter(pl.col("Species") != "virginica").with_columns(
+        pl.col("Species").cast(pl.String).cast(
+            pl.Enum(["virginica", "setosa", "versicolor"])
+        )
+    )
+    m = glm("Species ~ Sepal.Width + Sepal.Length", data=irisr, family=Binomial())
+    # After dropping unused virginica, declared order is
+    # [setosa, versicolor] → setosa = 0, versicolor = 1. Same betas
+    # as the previous test (R produces identical coefficients).
+    np.testing.assert_allclose(
+        m._bhat_arr,
+        [-360.6100, -110.1258, 131.7941],
+        atol=5e-3,
+    )
+
+
 def test_factor_response_binomial_boolean():
     d = pl.DataFrame({
         "y": [False, True, False, True, False, True, False, True],
