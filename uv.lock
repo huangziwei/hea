@@ -541,7 +541,6 @@ dependencies = [
     { name = "polars" },
     { name = "pyarrow" },
     { name = "rdatasets" },
-    { name = "scikit-sparse" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
@@ -552,6 +551,9 @@ bench = [
     { name = "formulaic" },
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pandas", version = "3.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+fast = [
+    { name = "scikit-sparse" },
 ]
 
 [package.dev-dependencies]
@@ -573,10 +575,10 @@ requires-dist = [
     { name = "polars", specifier = ">=1.20.0" },
     { name = "pyarrow", specifier = ">=24.0.0" },
     { name = "rdatasets", specifier = ">=0.2.10" },
-    { name = "scikit-sparse", specifier = ">=0.5.0" },
+    { name = "scikit-sparse", marker = "extra == 'fast'", specifier = ">=0.5.0" },
     { name = "scipy", specifier = ">=1.15.1" },
 ]
-provides-extras = ["bench"]
+provides-extras = ["fast", "bench"]
 
 [package.metadata.requires-dev]
 dev = [

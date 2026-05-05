@@ -25,7 +25,7 @@ import numpy as np
 import polars as pl
 from scipy.linalg import solve_triangular
 from scipy.optimize import minimize
-from sksparse.cholmod import (
+from ._cholmod import (
     CholmodError,
     cho_factor,
     csc_array,
@@ -435,10 +435,9 @@ class lme:
         # gradient amplifies into visibly different θ. einsum sidesteps that
         # BLAS path and stays bit-identical.
         cu_sq = float(np.einsum("i,i->", ZLty, M_inv_ZLty))
-        # F.logdet() goes through a slow Python wrapper (~210 µs); for the LLᵀ
-        # factor cholmod returns by default, log|M| = 2·Σ log diag(L). Bit-
-        # identical, ~20× faster.
-        log_det_Lz = float(np.log(F.L.diagonal()).sum())
+        # ½·log|M|: CHOLMOD's LLᵀ ⇒ Σ log diag(L); splu fallback ⇒ ½·Σ log|U.diag|.
+        # Sidesteps sksparse's slow F.logdet() Python wrapper (~210 µs, 20× this).
+        log_det_Lz = F.half_log_det()
         if X.shape[1] > 0:
             ZLtX = np.asarray(ZL.T @ X)
             M_inv_ZLtX = F.solve(ZLtX)
