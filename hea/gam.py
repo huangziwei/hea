@@ -34,6 +34,8 @@ Wood (2017), *Generalized Additive Models* (2nd ed.), §6.2, §6.6.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl

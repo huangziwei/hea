@@ -33,6 +33,7 @@ bench = [
 
 [dependency-groups]
 dev = [
+    "flake8>=7.1.1",
     "pytest>=9.0.3",
     "pyyaml>=6.0.3",
     "ipykernel>=7.2.0",

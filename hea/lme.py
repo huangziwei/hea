@@ -18,6 +18,8 @@ Models Using lme4", J. Stat. Software 67(1), §5 ("Profiled Deviance").
 
 from __future__ import annotations
 
+from typing import Callable
+
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
