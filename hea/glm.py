@@ -426,6 +426,7 @@ class glm:
 
         self._bhat_arr = fit.beta.copy()
         self.bhat = _row_frame(self._bhat_arr, self.column_names)
+        self.coef = self.bhat                           # R-canonical alias
         self.coefficients = self.bhat                   # R-canonical alias
 
         # μ̂, η̂ (η̂ includes offset).

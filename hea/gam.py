@@ -576,6 +576,8 @@ class gam:
 
         # ------------- attribute assembly ----------------------------------
         self.bhat = _row_frame(beta, column_names)
+        self.coef = self.bhat                           # R-canonical alias
+        self.coefficients = self.bhat                   # R-canonical alias
         self._beta = beta
         se = np.sqrt(np.diag(Vp))
         self.se_bhat = _row_frame(se, column_names)

@@ -256,6 +256,8 @@ class lm:
 
         self._bhat_arr = np.asarray(bhat).reshape(-1)
         self.bhat = _row_frame(self._bhat_arr, self.column_names)
+        self.coef = self.bhat                           # R-canonical alias
+        self.coefficients = self.bhat                   # R-canonical alias
 
         # compute predicted (fitted values ŷ = Xβ̂)
         self.yhat = self.compute_yhat()

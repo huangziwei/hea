@@ -2538,6 +2538,8 @@ class bam(gam):
 
         # ---- β / SE / t / p (parametric Wald) ------------------------------
         self.bhat = _row_frame(beta, self.column_names)
+        self.coef = self.bhat                           # R-canonical alias
+        self.coefficients = self.bhat                   # R-canonical alias
         self._beta = beta
         se = np.sqrt(np.diag(Vp))
         self.se_bhat = _row_frame(se, self.column_names)
@@ -3277,6 +3279,8 @@ class bam(gam):
 
         # ---- β / SE / t / p (parametric Wald) ------------------------------
         self.bhat = _row_frame(beta, self.column_names)
+        self.coef = self.bhat                           # R-canonical alias
+        self.coefficients = self.bhat                   # R-canonical alias
         self._beta = beta
         se = np.sqrt(np.diag(Vp))
         self.se_bhat = _row_frame(se, self.column_names)
