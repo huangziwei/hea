@@ -55,11 +55,26 @@ def _coef(model):
     raise TypeError(f"coef(): can't extract from {type(model).__name__}")
 
 
+def _factor(series, levels=None, ordered=False):
+    """Lazy import of ``hea.data.factor`` for the formula-eval env.
+
+    Avoids importing ``hea.data`` at module load time (it pulls in the
+    rdatasets fetcher chain). Same behaviour as R's ``factor()`` — cast
+    a column to a factor; preserves it across plot mappings.
+    """
+    from ..data import factor as _f
+
+    if isinstance(series, pl.Series):
+        return _f(series, levels=levels, ordered=ordered)
+    return _f(pl.Series(values=series), levels=levels, ordered=ordered)
+
+
 DEFAULT_ENV: dict = {
     "residuals": _residuals,
     "fitted": _fitted,
     "coef": _coef,
     "predict": lambda m: _fitted(m),
+    "factor": _factor,
     "log": np.log,
     "log2": np.log2,
     "log10": np.log10,

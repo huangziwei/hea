@@ -24,8 +24,9 @@ from hea.ggplot import (
     geom_ribbon, geom_smooth, geom_step, geom_violin, ggplot,
     position_dodge, position_fill, position_jitter, position_nudge,
     position_stack,
-    scale_x_continuous, scale_x_log10, scale_x_reverse, scale_x_sqrt,
-    scale_y_continuous, scale_y_log10,
+    scale_color_identity, scale_color_manual, scale_fill_identity,
+    scale_fill_manual, scale_x_continuous, scale_x_log10, scale_x_reverse,
+    scale_x_sqrt, scale_y_continuous, scale_y_log10,
 )
 
 
@@ -781,6 +782,138 @@ def test_stat_ydensity_violinwidth_normalised_to_one():
 # ---------------------------------------------------------------------------
 # Phase 1.3d — GG-C9: boxplot + jittered points overlay
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.5 — Color/fill scales: auto-default discrete, manual, identity,
+# plus 1.5a auto-grouping rule.
+# ---------------------------------------------------------------------------
+
+
+def test_gg_c3_aes_color_factor_cyl_assigns_distinct_colors():
+    """GG-C3: ``aes(color = factor(cyl))`` paints points by group."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
+         + geom_point())
+    fig = p.draw()
+    try:
+        fc = fig.axes[0].collections[0].get_facecolors()
+        # 3 unique cyl values → 3 unique facecolors.
+        assert len({tuple(c) for c in fc}) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_user_penguins_string_color_works_end_to_end():
+    """The bug report: ``aes(color="species")`` on string column → 3 colours,
+    no matplotlib RGBA error."""
+    from hea.data import data as _hea_data
+
+    penguins = _hea_data("penguins", package="palmerpenguins")
+    p = (ggplot(penguins, aes(x="flipper_length_mm", y="body_mass_g",
+                              color="species"))
+         + geom_point())
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        fc = ax.collections[0].get_facecolors()
+        assert len({tuple(c) for c in fc}) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_scale_color_manual_applies_user_palette():
+    """``scale_color_manual(values=[...])`` — colours come from the user list,
+    in level order."""
+    from matplotlib.colors import to_rgba
+
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
+         + geom_point()
+         + scale_color_manual(values=["#FF0000", "#00FF00", "#0000FF"]))
+    fig = p.draw()
+    try:
+        fc = fig.axes[0].collections[0].get_facecolors()
+        observed = {tuple(c) for c in fc}
+        expected = {to_rgba(c) for c in ("#FF0000", "#00FF00", "#0000FF")}
+        assert observed == expected
+    finally:
+        plt.close(fig)
+
+
+def test_scale_color_manual_dict_form():
+    """Dict form lets the user pin specific colours per level explicitly."""
+    from matplotlib.colors import to_rgba
+    import polars as pl
+
+    df = pl.DataFrame({"x": [1.0, 2, 3, 4], "y": [1.0, 2, 3, 4],
+                       "g": ["a", "b", "a", "b"]})
+    palette = {"a": "#AA0000", "b": "#00AA00"}
+    p = (ggplot(df, aes("x", "y", colour="g")) + geom_point()
+         + scale_color_manual(values=palette))
+    fig = p.draw()
+    try:
+        fc = fig.axes[0].collections[0].get_facecolors()
+        # Two unique colours, each matching the palette.
+        assert {tuple(c) for c in fc} == {to_rgba("#AA0000"), to_rgba("#00AA00")}
+    finally:
+        plt.close(fig)
+
+
+def test_scale_color_identity_passes_hex_through():
+    """When the column already has hex codes, identity scale skips palette."""
+    from matplotlib.colors import to_rgba
+    import polars as pl
+
+    df = pl.DataFrame({
+        "x": [1.0, 2, 3],
+        "y": [1.0, 2, 3],
+        "c": ["#FF0000", "#00FF00", "#0000FF"],
+    })
+    p = (ggplot(df, aes("x", "y", colour="c")) + geom_point()
+         + scale_color_identity())
+    fig = p.draw()
+    try:
+        fc = fig.axes[0].collections[0].get_facecolors()
+        observed = {tuple(c) for c in fc}
+        assert observed == {to_rgba("#FF0000"), to_rgba("#00FF00"), to_rgba("#0000FF")}
+    finally:
+        plt.close(fig)
+
+
+def test_add_group_auto_creates_group_from_discrete_aesthetic():
+    """Per ggplot2's `add_group` rule: a discrete non-positional aes implies
+    a `group` column when the user didn't set one."""
+    import polars as pl
+
+    from hea.ggplot.build import _add_group
+
+    df = pl.DataFrame({
+        "x": [1, 2, 3, 4, 5, 6],
+        "y": [1, 2, 3, 4, 5, 6],
+        "colour": ["a", "a", "b", "b", "c", "c"],
+    })
+    out = _add_group(df)
+    assert "group" in out.columns
+    # 3 unique levels → 3 distinct group ids
+    assert out["group"].n_unique() == 3
+
+
+def test_aes_color_constant_kwarg_overrides_mapping():
+    """`geom_point(colour="red")` (constant) wins over `aes(colour=…)` mapping."""
+    from matplotlib.colors import to_rgba
+    import polars as pl
+
+    df = pl.DataFrame({"x": [1.0, 2, 3], "y": [1.0, 2, 3], "g": ["a", "b", "c"]})
+    p = (ggplot(df, aes("x", "y", colour="g"))
+         + geom_point(colour="red"))
+    fig = p.draw()
+    try:
+        fc = fig.axes[0].collections[0].get_facecolors()
+        # All red despite the discrete mapping.
+        assert {tuple(c) for c in fc} == {to_rgba("red")}
+    finally:
+        plt.close(fig)
 
 
 def test_gg_c9_boxplot_with_jitter():

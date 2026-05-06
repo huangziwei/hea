@@ -25,11 +25,23 @@ class Scale:
     limits: tuple | None = None
     expand: tuple = (0.05, 0.0)
 
+    def train(self, data) -> None:
+        """Update internal state from a column of values. Default: no-op.
+
+        Subclasses override to track ranges (continuous), levels (discrete),
+        or whatever else they need at map-time."""
+
+    def map(self, data):
+        """Translate raw data values into drawable values. Default: identity.
+
+        Override in non-positional scales (colour, fill, shape, size) where
+        the value the geom draws differs from the value in the data."""
+        return data
+
     def apply_to_axis(self, ax, axis: str) -> None:
-        """Push limits/breaks/labels onto ``ax``. Override in subclasses."""
-        raise NotImplementedError(
-            f"{type(self).__name__}.apply_to_axis not implemented"
-        )
+        """Push limits/breaks/labels onto ``ax``. Default: no-op.
+
+        Only positional scales (``ScaleContinuous`` for now) override this."""
 
 
 def fmt_number(x: float) -> str:

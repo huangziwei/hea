@@ -1,0 +1,110 @@
+"""``ScaleDiscreteColor`` and friends — non-positional discrete scales.
+
+A discrete scale tracks the *unique levels* in its trained data and maps
+each level to a value drawn from a palette function. For colour/fill
+that's a hex code; for shape, a marker glyph; for linetype, a dash spec.
+For now we only ship ``ScaleDiscreteColor``; the rest land in 1.6.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+import polars as pl
+
+from ._palettes import hue_pal, manual_pal
+from .scale import Scale
+
+
+@dataclass
+class ScaleDiscreteColor(Scale):
+    """Maps discrete levels (e.g. species names) to colours via a palette."""
+
+    palette: Any = None  # None = default hue_pal; else a callable n -> list[str]
+    values: Any = None    # explicit dict {level: color} — wins over palette
+    levels: list | None = field(default=None, init=False, repr=False)
+
+    def train(self, data) -> None:
+        if isinstance(data, pl.Series):
+            new_levels = data.drop_nulls().unique(maintain_order=True).to_list()
+        else:
+            new_levels = list(dict.fromkeys(v for v in data if v is not None))
+        if self.levels is None:
+            self.levels = list(new_levels)
+        else:
+            for v in new_levels:
+                if v not in self.levels:
+                    self.levels.append(v)
+
+    def map(self, data):
+        if self.levels is None or len(self.levels) == 0:
+            return data
+
+        if isinstance(self.values, dict):
+            mapping = dict(self.values)
+        else:
+            pal = self.palette if self.palette is not None else hue_pal()
+            colours = pal(len(self.levels))
+            mapping = dict(zip(self.levels, colours))
+
+        if isinstance(data, pl.Series):
+            return data.map_elements(
+                lambda v: mapping.get(v),
+                return_dtype=pl.Utf8,
+            ).alias(data.name)
+        return [mapping.get(v) for v in data]
+
+
+def scale_color_manual(*, values, name=None, breaks="default", labels="default",
+                      limits=None):
+    """Manual qualitative palette. ``values`` may be a list (ordered) or a
+    dict ``{level: hex}`` (explicit per-level)."""
+    if isinstance(values, dict):
+        return ScaleDiscreteColor(
+            aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
+            limits=limits, values=dict(values),
+        )
+    return ScaleDiscreteColor(
+        aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
+        limits=limits, palette=manual_pal(values),
+    )
+
+
+def scale_fill_manual(*, values, name=None, breaks="default", labels="default",
+                     limits=None):
+    if isinstance(values, dict):
+        return ScaleDiscreteColor(
+            aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
+            limits=limits, values=dict(values),
+        )
+    return ScaleDiscreteColor(
+        aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
+        limits=limits, palette=manual_pal(values),
+    )
+
+
+# British/American aliases.
+scale_colour_manual = scale_color_manual
+
+
+@dataclass
+class ScaleIdentity(Scale):
+    """Pass-through scale: the column already holds drawable values."""
+
+    def train(self, data) -> None:
+        pass
+
+    def map(self, data):
+        return data
+
+
+def scale_color_identity(*, name=None):
+    return ScaleIdentity(aesthetics=("colour",), name=name)
+
+
+def scale_fill_identity(*, name=None):
+    return ScaleIdentity(aesthetics=("fill",), name=name)
+
+
+scale_colour_identity = scale_color_identity

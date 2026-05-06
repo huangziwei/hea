@@ -28,38 +28,109 @@ class BuildOutput:
     scales: ScalesList = None
 
 
+_NON_POSITIONAL_AES = ("colour", "fill")
+
+
 def build(plot) -> BuildOutput:
     """Run the build pipeline. Returns per-layer drawable frames.
 
-    Order: mapping → stat → position → aes_params → default_aes. Stat runs
-    *before* aes_params/default_aes because stats like ``stat_bin`` change
-    the row count (counts per bin), and broadcasting a length-N constant
-    aes onto a length-K stat output would mismatch.
+    Order:
 
-    A copy of the plot's :class:`ScalesList` is returned with auto-registered
-    defaults for any positional aesthetic the user mapped but didn't add an
-    explicit scale for.
+    1. Per layer: ``compute_aesthetics`` → ``add_group`` → ``stat`` → ``position``.
+    2. Auto-register default scales (``ScaleContinuous`` for x/y;
+       ``ScaleDiscreteColor`` for string-typed colour/fill).
+    3. Train all scales across all layer data.
+    4. Map non-positional scales — replaces the column with the scale's
+       output (e.g. species names → hex codes for colour).
+    5. Per layer: ``aes_params`` (layer constants override mapped values)
+       → ``default_aes`` (geom defaults fill anything still missing).
+
+    Stat runs before aes_params/default_aes because stats like ``stat_bin``
+    change the row count; broadcasting a length-N constant onto a length-K
+    stat output would mismatch.
+
+    Mapping happens after stat/position because counts per fill *value*
+    (not per fill *colour*) is what stats like ``stat_count`` need.
     """
     layers_data: list[pl.DataFrame] = []
     for layer in plot.layers:
         ld = _layer_data(layer, plot)
         mapping = _resolve_mapping(layer, plot)
         df = _compute_aesthetics(mapping, ld, plot.plot_env)
+        df = _add_group(df)
         df = layer.stat.compute_layer(df, layer.stat_params)
         df = layer.position.compute_layer(df)
-        df = _apply_aes_params(df, layer)
-        df = _apply_default_aes(df, layer.geom)
         layers_data.append(df)
 
     # Independent copy so multiple draw() calls don't accumulate state.
     scales = plot.scales.copy()
-    # Auto-register defaults for any positional aesthetic that has data.
+
+    # Auto-register defaults: positional always; non-positional only when
+    # the data column suggests a discrete scale would help.
     for df in layers_data:
         for axis in ("x", "y"):
             if axis in df.columns:
                 scales.get_or_default(axis)
+        for aes in _NON_POSITIONAL_AES:
+            if aes in df.columns:
+                scales.get_or_default_for_data(aes, df[aes])
+
+    # Train every registered scale on every layer's data.
+    for df in layers_data:
+        for aes_name, scale in list(scales.items()):
+            if aes_name in df.columns:
+                scale.train(df[aes_name])
+
+    # Map non-positional scales — replace the column with mapped values
+    # (e.g. ``["Adelie", "Adelie", …]`` → ``["#FF6B6B", "#FF6B6B", …]``).
+    # Positional scales contribute ticks via ``apply_to_axis`` later, not
+    # via column rewriting.
+    for i, df in enumerate(layers_data):
+        for aes_name, scale in list(scales.items()):
+            if aes_name in ("x", "y"):
+                continue
+            if aes_name in df.columns:
+                mapped = scale.map(df[aes_name])
+                if isinstance(mapped, pl.Series):
+                    df = df.with_columns(mapped.alias(aes_name))
+                elif mapped is not df[aes_name]:
+                    df = df.with_columns(pl.Series(aes_name, mapped))
+        layers_data[i] = df
+
+    # Layer-level constants and geom defaults run last so they override
+    # anything the scale produced.
+    for i, layer in enumerate(plot.layers):
+        df = layers_data[i]
+        df = _apply_aes_params(df, layer)
+        df = _apply_default_aes(df, layer.geom)
+        layers_data[i] = df
 
     return BuildOutput(data=layers_data, scales=scales)
+
+
+def _add_group(df: pl.DataFrame) -> pl.DataFrame:
+    """ggplot2's auto-grouping rule (``utilities-aes.R::add_group``).
+
+    If the user didn't supply ``group``, derive one from any *discrete*
+    non-positional aesthetic mapping. The resulting integer column splits
+    line/path/polygon geoms into per-group lines automatically.
+    """
+    if "group" in df.columns or len(df) == 0:
+        return df
+
+    discrete_cols = [
+        col for col in df.columns
+        if col in _NON_POSITIONAL_AES
+        and df[col].dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean)
+    ]
+    if not discrete_cols:
+        return df.with_columns(group=pl.lit(-1, dtype=pl.Int64))
+    # Hash the tuple of discrete-aesthetic values so identical level
+    # combinations share a group id; downstream group_by gets cheap keys.
+    # ``.hash()`` returns u64 — leave it that way (no cast).
+    return df.with_columns(
+        group=pl.struct(discrete_cols).hash()
+    )
 
 
 def _layer_data(layer, plot) -> pl.DataFrame:

@@ -41,6 +41,31 @@ class ScalesList:
             return sc
         return None
 
+    def get_or_default_for_data(self, aesthetic: str, data) -> Scale | None:
+        """Like :meth:`get_or_default` but inspects the data column to pick
+        the right default scale for non-positional aesthetics.
+
+        For ``colour``/``fill``: discrete-color scale if dtype is
+        string/categorical/enum; otherwise leave unscaled (matplotlib's
+        ``c=`` accepts numeric arrays directly via colormap).
+        """
+        sc = self._by_aes.get(aesthetic)
+        if sc is not None:
+            return sc
+        if aesthetic in ("x", "y"):
+            return self.get_or_default(aesthetic)
+        if aesthetic in ("colour", "fill"):
+            import polars as pl
+            if isinstance(data, pl.Series) and data.dtype in (
+                pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean,
+            ):
+                from .discrete import ScaleDiscreteColor
+
+                sc = ScaleDiscreteColor(aesthetics=(aesthetic,))
+                self._by_aes[aesthetic] = sc
+                return sc
+        return None
+
     def copy(self) -> "ScalesList":
         """Independent copy — each ``draw()`` builds fresh scales so repeated
         builds don't accumulate state."""

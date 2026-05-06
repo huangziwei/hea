@@ -1,6 +1,16 @@
 """Scales — the data-to-axis-appearance contract."""
 
 from .continuous import ScaleContinuous, scale_x_continuous, scale_y_continuous
+from .discrete import (
+    ScaleDiscreteColor,
+    ScaleIdentity,
+    scale_color_identity,
+    scale_color_manual,
+    scale_colour_identity,
+    scale_colour_manual,
+    scale_fill_identity,
+    scale_fill_manual,
+)
 from .list import ScalesList
 from .scale import Scale
 from .transformed import (
@@ -23,6 +33,8 @@ from .transformed import (
 __all__ = [
     "Scale",
     "ScaleContinuous",
+    "ScaleDiscreteColor",
+    "ScaleIdentity",
     "ScalesList",
     "Trans",
     "IdentityTrans",
@@ -40,4 +52,10 @@ __all__ = [
     "scale_y_sqrt",
     "scale_x_reverse",
     "scale_y_reverse",
+    "scale_color_manual",
+    "scale_colour_manual",
+    "scale_fill_manual",
+    "scale_color_identity",
+    "scale_colour_identity",
+    "scale_fill_identity",
 ]
