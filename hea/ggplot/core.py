@@ -40,12 +40,26 @@ class ggplot:
     labels: dict = field(default_factory=dict)
     plot_env: dict = field(default_factory=dict, repr=False)
 
-    def __init__(self, data: pl.DataFrame, mapping: Aes | None = None):
+    def __init__(
+        self,
+        data: pl.DataFrame,
+        mapping: Aes | None = None,
+        *,
+        _env: dict | None = None,
+    ):
         # Captures globals + locals of the constructing frame so aes expressions
         # can resolve names the user had in scope (e.g. helper functions). Same
         # trick `hea.plot.dispatch.plot` uses; see `_frame_env` there.
-        frame = inspect.currentframe().f_back
-        env = {**frame.f_globals, **frame.f_locals} if frame is not None else {}
+        #
+        # ``_env`` lets the caller pass a pre-captured env, used when ``ggplot``
+        # is invoked through a wrapper (e.g. ``hea.DataFrame.ggplot``) — the
+        # wrapper captures *its* caller's frame and passes it through, otherwise
+        # ``f_back`` here would point at the wrapper, not the user.
+        if _env is not None:
+            env = _env
+        else:
+            frame = inspect.currentframe().f_back
+            env = {**frame.f_globals, **frame.f_locals} if frame is not None else {}
 
         self.data = data
         self.mapping = mapping if mapping is not None else Aes()

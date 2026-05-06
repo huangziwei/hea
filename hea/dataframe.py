@@ -848,6 +848,31 @@ class DataFrame(pl.DataFrame):
             return self.to_series(idx)
         return self.get_column(col)
 
+    # ---- ggplot entry point -------------------------------------------
+
+    def ggplot(self, mapping=None):
+        """Start a ggplot from this frame: ``df.ggplot(aes("x", "y")) + geom_point()``.
+
+        Equivalent to ``ggplot(self, mapping)`` but pairs naturally with
+        the tidyverse chain (``df.filter(...).mutate(...).ggplot(aes())``).
+        Layer addition is still via ``+`` (and via fluent methods on the
+        returned ``ggplot``, once Phase B's auto-install lands).
+
+        Captures the caller's frame and passes it through as ``_env=`` so
+        aes-expressions resolve user-defined helpers correctly even when
+        called via this wrapper. See ``hea/ggplot/core.py:ggplot.__init__``
+        for why.
+        """
+        # Lazy import: ggplot package depends on dataframe.py at module load,
+        # so importing it at top-level would create a cycle.
+        import inspect
+
+        from hea.ggplot.core import ggplot as _ggplot
+        from hea.plot.dispatch import _frame_env
+
+        env = _frame_env(inspect.currentframe().f_back)
+        return _ggplot(self, mapping, _env=env)
+
     # ---- lazy frame ---------------------------------------------------
 
     def lazy(self) -> "LazyFrame":
