@@ -20,7 +20,8 @@ from conftest import load_dataset
 
 from hea.ggplot import (
     aes, geom_blank, geom_density, geom_histogram, geom_point, ggplot,
-    scale_x_continuous, scale_y_continuous,
+    scale_x_continuous, scale_x_log10, scale_x_reverse, scale_x_sqrt,
+    scale_y_continuous, scale_y_log10,
 )
 
 
@@ -229,6 +230,80 @@ def test_scale_plus_is_non_mutating():
     # original plot's scales unchanged
     assert base.scales.get("x") is None
     assert extended.scales.get("x") is not None
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.1d — Trans objects: log10, sqrt, reverse, identity
+# ---------------------------------------------------------------------------
+
+
+def test_gg_c6_scale_x_log10():
+    """GG-C6: ``+ scale_x_log10()`` puts x on a log axis. Y stays linear."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("disp", "mpg")) + geom_point()
+         + scale_x_log10())
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xscale() == "log"
+        assert ax.get_yscale() == "linear"
+        # data still drawn on the log axis (matplotlib reinterprets coords).
+        offsets = ax.collections[0].get_offsets()
+        assert offsets.shape == (len(mtcars), 2)
+    finally:
+        plt.close(fig)
+
+
+def test_scale_y_log10():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + scale_y_log10())
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_yscale() == "log"
+        assert ax.get_xscale() == "linear"
+    finally:
+        plt.close(fig)
+
+
+def test_scale_x_sqrt():
+    """sqrt uses matplotlib's FuncScale, exposed as ``"function"``."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("disp", "mpg")) + geom_point()
+         + scale_x_sqrt())
+    fig = p.draw()
+    try:
+        assert fig.axes[0].get_xscale() == "function"
+    finally:
+        plt.close(fig)
+
+
+def test_scale_x_reverse():
+    """Reversed axis: matplotlib treats ``lo > hi`` xlim as inverted."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + scale_x_reverse())
+    fig = p.draw()
+    try:
+        lo, hi = fig.axes[0].get_xlim()
+        assert lo > hi, f"reversed axis should have lo>hi, got ({lo}, {hi})"
+    finally:
+        plt.close(fig)
+
+
+def test_log10_with_explicit_breaks():
+    """When the user gives explicit breaks, they're honored even on a log axis."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("disp", "mpg")) + geom_point()
+         + scale_x_log10(breaks=[100, 200, 400], labels=["100", "200", "400"]))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        ticks = list(ax.get_xticks())
+        assert ticks == [100.0, 200.0, 400.0]
+    finally:
+        plt.close(fig)
 
 
 # ---------------------------------------------------------------------------

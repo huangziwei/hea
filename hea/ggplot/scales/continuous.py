@@ -8,27 +8,58 @@ breaks + labels. User-supplied ``limits=`` overrides autoscale. Wilkinson
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
 from .scale import Scale, fmt_number
+from .transformed import IdentityTrans, Trans
 
 
 @dataclass
 class ScaleContinuous(Scale):
+    transform: Trans = field(default_factory=IdentityTrans)
+
     def apply_to_axis(self, ax, axis: str) -> None:
+        # Set matplotlib axis scale FIRST. Done before limits because some
+        # scales (log) reject non-positive limits and would error on the
+        # default linear-scale autoscaled values otherwise.
+        ms = self.transform.matplotlib_scale()
+        if ms is not None:
+            scale_name, scale_kwargs = ms
+            if axis == "x":
+                ax.set_xscale(scale_name, **scale_kwargs)
+            else:
+                ax.set_yscale(scale_name, **scale_kwargs)
+
         if self.limits is not None:
             if axis == "x":
                 ax.set_xlim(self.limits)
             else:
                 ax.set_ylim(self.limits)
 
+        # Reverse: flip after any other limits are settled. matplotlib
+        # treats lo>hi as an inverted axis automatically.
+        if self.transform.reversed():
+            if axis == "x":
+                lo, hi = ax.get_xlim()
+                ax.set_xlim(hi, lo)
+            else:
+                lo, hi = ax.get_ylim()
+                ax.set_ylim(hi, lo)
+
         if self.breaks is None:
             if axis == "x":
                 ax.set_xticks([])
             else:
                 ax.set_yticks([])
+            return
+
+        # When a non-linear transform is in play and the user didn't ask for
+        # explicit breaks, defer to matplotlib's native locator (LogLocator
+        # for log; default for FuncScale). MaxNLocator-on-linear-coords would
+        # produce e.g. evenly spaced linear ticks on a log axis — wrong.
+        if self.breaks == "default" and ms is not None:
             return
 
         cur_lim = ax.get_xlim() if axis == "x" else ax.get_ylim()

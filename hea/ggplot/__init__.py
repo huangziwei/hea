@@ -17,7 +17,18 @@ from __future__ import annotations
 from .aes import aes
 from .core import ggplot
 from .geoms import geom_bar, geom_blank, geom_col, geom_density, geom_histogram, geom_point
-from .scales import scale_x_continuous, scale_y_continuous
+from .scales import (
+    scale_x_continuous,
+    scale_x_log10,
+    scale_x_log2,
+    scale_x_reverse,
+    scale_x_sqrt,
+    scale_y_continuous,
+    scale_y_log10,
+    scale_y_log2,
+    scale_y_reverse,
+    scale_y_sqrt,
+)
 from .stats import stat_bin, stat_count, stat_density, stat_identity
 
 __all__ = [
@@ -35,4 +46,12 @@ __all__ = [
     "stat_density",
     "scale_x_continuous",
     "scale_y_continuous",
+    "scale_x_log10",
+    "scale_y_log10",
+    "scale_x_log2",
+    "scale_y_log2",
+    "scale_x_sqrt",
+    "scale_y_sqrt",
+    "scale_x_reverse",
+    "scale_y_reverse",
 ]
