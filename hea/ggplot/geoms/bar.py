@@ -4,6 +4,11 @@
 * ``geom_col()`` — uses y as supplied (``stat_identity``).
 
 ``geom_histogram`` lives in ``histogram.py`` and reuses :class:`GeomBar`.
+
+When the build pipeline produces ``ymin``/``ymax`` columns (which positions
+like :class:`PositionStack` / :class:`PositionFill` add for stacking),
+:meth:`GeomBar.draw_panel` reads them as ``bottom``/``top`` of each bar.
+Otherwise bars draw from y=0 up to y.
 """
 
 from __future__ import annotations
@@ -30,18 +35,30 @@ class GeomBar(Geom):
         from .._util import r_color
 
         x = data["x"].to_numpy()
-        y = data["y"].to_numpy()
+
+        if "ymin" in data.columns and "ymax" in data.columns:
+            ymin = data["ymin"].to_numpy()
+            ymax = data["ymax"].to_numpy()
+            height = ymax - ymin
+            bottom = ymin
+        else:
+            height = data["y"].to_numpy()
+            bottom = 0
+
         if "width" in data.columns:
             width = data["width"].to_numpy()
         else:
             width = 0.9
 
-        fill = r_color(_scalar(data, "fill", default="grey35"))
+        # Per-row fill if the column is non-trivial (multiple distinct values
+        # or anything other than the default), else scalar default. Lets
+        # dodge/stack with explicit fills colour each bar individually.
+        fill = _fill_value(data)
         edge = r_color(_edge_colour(data))
         alpha = float(_scalar(data, "alpha", default=1.0))
 
-        ax.bar(x, y, width=width, color=fill, edgecolor=edge, alpha=alpha,
-               linewidth=0.5, align="center")
+        ax.bar(x, height, width=width, bottom=bottom, color=fill,
+               edgecolor=edge, alpha=alpha, linewidth=0.5, align="center")
 
 
 def _scalar(df, col, *, default):
@@ -49,6 +66,21 @@ def _scalar(df, col, *, default):
         return default
     val = df[col][0]
     return default if val is None else val
+
+
+def _fill_value(df):
+    from .._util import r_color
+
+    if "fill" not in df.columns or len(df) == 0:
+        return r_color("grey35")
+    vals = df["fill"].to_list()
+    if all(v is None for v in vals):
+        return r_color("grey35")
+    # Distinct fill values per row → return list; otherwise scalar.
+    distinct = {v for v in vals if v is not None}
+    if len(distinct) <= 1:
+        return r_color(next(iter(distinct), "grey35"))
+    return [r_color(v) if v is not None else r_color("grey35") for v in vals]
 
 
 def _edge_colour(df):
@@ -65,7 +97,7 @@ def _edge_colour(df):
 
 def geom_bar(mapping=None, data=None, *, stat="count", position="stack", **kwargs):
     from ..layer import Layer
-    from ..positions.identity import PositionIdentity
+    from ..positions import resolve_position
     from ..stats.count import StatCount
 
     if stat == "count":
@@ -81,7 +113,7 @@ def geom_bar(mapping=None, data=None, *, stat="count", position="stack", **kwarg
     return Layer(
         geom=GeomBar(),
         stat=stat_obj,
-        position=PositionIdentity(),
+        position=resolve_position(position),
         mapping=mapping,
         data=data,
         aes_params=aes_params,
@@ -90,7 +122,7 @@ def geom_bar(mapping=None, data=None, *, stat="count", position="stack", **kwarg
 
 def geom_col(mapping=None, data=None, *, position="identity", **kwargs):
     from ..layer import Layer
-    from ..positions.identity import PositionIdentity
+    from ..positions import resolve_position
     from ..stats.identity import StatIdentity
 
     aes_params = {k: v for k, v in kwargs.items()
@@ -98,7 +130,7 @@ def geom_col(mapping=None, data=None, *, position="identity", **kwargs):
     return Layer(
         geom=GeomBar(),
         stat=StatIdentity(),
-        position=PositionIdentity(),
+        position=resolve_position(position),
         mapping=mapping,
         data=data,
         aes_params=aes_params,

@@ -27,6 +27,15 @@ from .geoms import (
     geom_point,
     geom_step,
 )
+from .positions import (
+    position_dodge,
+    position_dodge2,
+    position_fill,
+    position_identity,
+    position_jitter,
+    position_nudge,
+    position_stack,
+)
 from .scales import (
     scale_x_continuous,
     scale_x_log10,
@@ -67,4 +76,11 @@ __all__ = [
     "scale_y_sqrt",
     "scale_x_reverse",
     "scale_y_reverse",
+    "position_identity",
+    "position_jitter",
+    "position_nudge",
+    "position_dodge",
+    "position_dodge2",
+    "position_stack",
+    "position_fill",
 ]

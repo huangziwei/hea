@@ -6,9 +6,10 @@ from .bar import GeomBar
 
 
 def geom_histogram(mapping=None, data=None, *, bins=None, binwidth=None,
-                   boundary=None, center=None, closed="right", **kwargs):
+                   boundary=None, center=None, closed="right",
+                   position="stack", **kwargs):
     from ..layer import Layer
-    from ..positions.identity import PositionIdentity
+    from ..positions import resolve_position
     from ..stats.bin import StatBin
 
     aes_params = {k: v for k, v in kwargs.items()
@@ -18,7 +19,7 @@ def geom_histogram(mapping=None, data=None, *, bins=None, binwidth=None,
         geom=GeomBar(),
         stat=StatBin(bins=bins, binwidth=binwidth, boundary=boundary,
                      center=center, closed=closed),
-        position=PositionIdentity(),
+        position=resolve_position(position),
         mapping=mapping,
         data=data,
         aes_params=aes_params,

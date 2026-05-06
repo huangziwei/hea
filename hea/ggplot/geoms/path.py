@@ -121,9 +121,9 @@ def _stairstep(x, y, direction: str):
 # Factories
 # ---------------------------------------------------------------------------
 
-def _layer(geom, mapping, data, kwargs):
+def _layer(geom, mapping, data, position, kwargs):
     from ..layer import Layer
-    from ..positions.identity import PositionIdentity
+    from ..positions import resolve_position
     from ..stats.identity import StatIdentity
 
     aes_params = {k: v for k, v in kwargs.items()
@@ -131,21 +131,21 @@ def _layer(geom, mapping, data, kwargs):
     return Layer(
         geom=geom,
         stat=StatIdentity(),
-        position=PositionIdentity(),
+        position=resolve_position(position),
         mapping=mapping,
         data=data,
         aes_params=aes_params,
     )
 
 
-def geom_path(mapping=None, data=None, **kwargs):
-    return _layer(GeomPath(), mapping, data, kwargs)
+def geom_path(mapping=None, data=None, *, position="identity", **kwargs):
+    return _layer(GeomPath(), mapping, data, position, kwargs)
 
 
-def geom_line(mapping=None, data=None, **kwargs):
-    return _layer(GeomPath(sort_by_x=True), mapping, data, kwargs)
+def geom_line(mapping=None, data=None, *, position="identity", **kwargs):
+    return _layer(GeomPath(sort_by_x=True), mapping, data, position, kwargs)
 
 
-def geom_step(mapping=None, data=None, *, direction="hv", **kwargs):
+def geom_step(mapping=None, data=None, *, direction="hv", position="identity", **kwargs):
     return _layer(GeomPath(sort_by_x=True, step_direction=direction),
-                  mapping, data, kwargs)
+                  mapping, data, position, kwargs)

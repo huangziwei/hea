@@ -1,4 +1,10 @@
-"""``stat_count()`` — counts per discrete x value (used by ``geom_bar``)."""
+"""``stat_count()`` — counts per discrete x value (used by ``geom_bar``).
+
+Preserves ``group``, ``fill``, and ``colour`` aesthetics so downstream
+positions (``position_dodge`` / ``stack`` / ``fill``) can split bars per
+group. Each output row corresponds to a unique combination of ``x`` and
+those aesthetics.
+"""
 
 from __future__ import annotations
 
@@ -15,17 +21,14 @@ class StatCount(Stat):
     default_y_label: str = "count"
 
     def compute_panel(self, data, params):
-        if "group" in data.columns:
-            out = []
-            for _, sub in data.group_by("group", maintain_order=True):
-                out.append(self.compute_group(sub, params))
-            return pl.concat(out) if out else self.compute_group(data, params)
-        return self.compute_group(data, params)
+        groupby_cols = ["x"]
+        for aes in ("group", "fill", "colour"):
+            if aes in data.columns:
+                groupby_cols.append(aes)
 
-    def compute_group(self, data, params):
-        out = data.group_by("x", maintain_order=True).agg(
+        out = data.group_by(groupby_cols, maintain_order=True).agg(
             pl.len().alias("count"),
-        ).sort("x")
+        ).sort(groupby_cols)
         return out.with_columns(
             y=pl.col("count").cast(pl.Float64),
             width=pl.lit(self.width),

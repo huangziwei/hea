@@ -19,8 +19,10 @@ import pytest
 from conftest import load_dataset
 
 from hea.ggplot import (
-    aes, geom_blank, geom_density, geom_histogram, geom_line, geom_path,
-    geom_point, geom_step, ggplot,
+    aes, geom_bar, geom_blank, geom_density, geom_histogram, geom_line,
+    geom_path, geom_point, geom_step, ggplot,
+    position_dodge, position_fill, position_jitter, position_nudge,
+    position_stack,
     scale_x_continuous, scale_x_log10, scale_x_reverse, scale_x_sqrt,
     scale_y_continuous, scale_y_log10,
 )
@@ -429,6 +431,141 @@ def test_geom_line_constant_aes_overrides():
         assert abs(line.get_linewidth() - 2 * 2.83) < 0.01
     finally:
         plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.3 — Positions: jitter, nudge, dodge, stack, fill
+# ---------------------------------------------------------------------------
+
+
+def test_position_jitter_spreads_points():
+    """`position_jitter` makes a discrete-x scatter actually spread along x."""
+    import numpy as np
+
+    mtcars = load_dataset("datasets", "mtcars")
+    # cyl has 3 unique values; raw scatter would have only 3 distinct x's.
+    p = (ggplot(mtcars, aes("cyl", "mpg"))
+         + geom_point(position=position_jitter(seed=42)))
+    fig = p.draw()
+    try:
+        offsets = fig.axes[0].collections[0].get_offsets()
+        assert len(np.unique(offsets[:, 0])) > 3, \
+            "jitter should produce more unique x positions than raw cyl"
+    finally:
+        plt.close(fig)
+
+
+def test_position_jitter_seed_is_deterministic():
+    """Same seed → identical jittered points across draws."""
+    import numpy as np
+
+    mtcars = load_dataset("datasets", "mtcars")
+    fig1 = (ggplot(mtcars, aes("cyl", "mpg"))
+            + geom_point(position=position_jitter(seed=7))).draw()
+    fig2 = (ggplot(mtcars, aes("cyl", "mpg"))
+            + geom_point(position=position_jitter(seed=7))).draw()
+    try:
+        np.testing.assert_array_equal(
+            fig1.axes[0].collections[0].get_offsets(),
+            fig2.axes[0].collections[0].get_offsets(),
+        )
+    finally:
+        plt.close(fig1)
+        plt.close(fig2)
+
+
+def test_position_nudge_shifts_by_constants():
+    import numpy as np
+
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg"))
+         + geom_point(position=position_nudge(x=1.0, y=2.0)))
+    fig = p.draw()
+    try:
+        offsets = np.asarray(fig.axes[0].collections[0].get_offsets())
+        raw = np.column_stack([mtcars["wt"].to_numpy(), mtcars["mpg"].to_numpy()])
+        diff = offsets - raw
+        np.testing.assert_allclose(diff[:, 0], 1.0)
+        np.testing.assert_allclose(diff[:, 1], 2.0)
+    finally:
+        plt.close(fig)
+
+
+def test_position_dodge_splits_bars_per_group():
+    """With aes(group=am), 3 cyl values × 2 groups → 6 bars at distinct x's."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes(x="cyl", group="am"))
+         + geom_bar(position=position_dodge()))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # 3 cyl × 2 am = 6 bars total
+        assert len(ax.patches) == 6
+        centers = sorted(b.get_x() + b.get_width() / 2 for b in ax.patches)
+        # Each cyl ∈ {4, 6, 8} splits into two centers offset by ±slot_width/2.
+        # slot_width = 0.9 / 2 = 0.45 → centers at cyl ± 0.225.
+        assert abs(centers[0] - (4 - 0.225)) < 0.01
+        assert abs(centers[1] - (4 + 0.225)) < 0.01
+        assert abs(centers[2] - (6 - 0.225)) < 0.01
+        assert abs(centers[3] - (6 + 0.225)) < 0.01
+    finally:
+        plt.close(fig)
+
+
+def test_position_stack_stacks_bars_vertically():
+    """With group, second-group bars sit on top of first-group bars."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes(x="cyl", group="am"))
+         + geom_bar(position=position_stack()))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # 6 bars total (3 cyl × 2 am), some with non-zero `bottom`.
+        bottoms = [b.get_y() for b in ax.patches]
+        assert max(bottoms) > 0, "stack should produce bars sitting on others"
+    finally:
+        plt.close(fig)
+
+
+def test_position_fill_normalises_stacks_to_one():
+    """`position_fill` makes every column reach exactly y=1."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes(x="cyl", group="am"))
+         + geom_bar(position=position_fill()))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # For each unique x, the topmost bar's (y + height) should be 1.0.
+        from collections import defaultdict
+        tops = defaultdict(float)
+        for b in ax.patches:
+            x = round(b.get_x() + b.get_width() / 2, 6)
+            tops[x] = max(tops[x], b.get_y() + b.get_height())
+        for x, top in tops.items():
+            assert abs(top - 1.0) < 1e-9, f"stack at x={x} reaches {top}, not 1"
+    finally:
+        plt.close(fig)
+
+
+def test_position_string_resolves_to_class():
+    """`position="jitter"` should work just like `position=position_jitter()`."""
+    mtcars = load_dataset("datasets", "mtcars")
+    # Determinism not asserted (no seed plumbing through string form),
+    # just confirm the dispatch and that points spread.
+    import numpy as np
+    p = ggplot(mtcars, aes("cyl", "mpg")) + geom_point(position="jitter")
+    fig = p.draw()
+    try:
+        offsets = fig.axes[0].collections[0].get_offsets()
+        assert len(np.unique(offsets[:, 0])) > 3
+    finally:
+        plt.close(fig)
+
+
+def test_position_unknown_string_raises():
+    mtcars = load_dataset("datasets", "mtcars")
+    with pytest.raises(ValueError, match="unknown position"):
+        ggplot(mtcars, aes("wt", "mpg")) + geom_point(position="zigzag")
 
 
 # ---------------------------------------------------------------------------

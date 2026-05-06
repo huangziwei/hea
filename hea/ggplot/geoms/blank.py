@@ -10,14 +10,14 @@ class GeomBlank(Geom):
         return  # intentional: blank layer extends scale ranges only
 
 
-def geom_blank(mapping=None, data=None):
+def geom_blank(mapping=None, data=None, *, position="identity"):
     from ..layer import Layer
-    from ..positions.identity import PositionIdentity
+    from ..positions import resolve_position
     from ..stats.identity import StatIdentity
     return Layer(
         geom=GeomBlank(),
         stat=StatIdentity(),
-        position=PositionIdentity(),
+        position=resolve_position(position),
         mapping=mapping,
         data=data,
     )
