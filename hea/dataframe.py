@@ -43,6 +43,7 @@ __all__ = [
     "DataFrame",
     "GroupBy",
     "LazyFrame",
+    "Series",
     "Summary",
     "desc",
     "tbl",
@@ -905,6 +906,146 @@ class DataFrame(pl.DataFrame):
                 _summary_block(col, self.get_column(col), maxsum=maxsum, digits=digits)
             )
         return Summary(blocks, width=width)
+
+
+class Series(pl.Series):
+    """``pl.Series`` that preserves the hea subclass through chains.
+
+    Two leak shapes need handling:
+
+    * **Direct methods** (`head`, `slice`, `cast`, `clone`, …) already
+      route through ``self._from_pyseries(...)`` and propagate the
+      subclass automatically.
+    * **Expression-dispatched methods** (``unique``, ``drop_nulls``,
+      ``shift``, ``top_k``, ``sample``, ``gather_every``, ``not_``, the
+      ``rolling_*`` family, the trig family, etc. — 116 total) have empty
+      function bodies on ``pl.Series`` and are auto-wrapped by polars's
+      ``call_expr`` decorator. Internally they go through
+      ``wrap_s(self._s)`` (`polars/series/utils.py:99`) which hardcodes
+      ``pl.Series._from_pyseries`` — losing subclass identity. Plus two
+      explicit ``wrap_s`` sites: ``set`` and ``shrink_dtype``.
+
+    We install thin wrappers for every leaky method below at class-def
+    time. New polars releases that add expr-dispatched methods are picked
+    up automatically by ``_install_series_subclass_overrides``.
+    """
+
+    def to_frame(self, name: str | None = None) -> "DataFrame":
+        out = super().to_frame(name) if name is not None else super().to_frame()
+        return DataFrame._from_pydf(out._df)
+
+    def to_dummies(self, *args: Any, **kwargs: Any) -> "DataFrame":
+        return DataFrame._from_pydf(super().to_dummies(*args, **kwargs)._df)
+
+    def value_counts(self, *args: Any, **kwargs: Any) -> "DataFrame":
+        return DataFrame._from_pydf(super().value_counts(*args, **kwargs)._df)
+
+    def hist(self, *args: Any, **kwargs: Any) -> "DataFrame":
+        return DataFrame._from_pydf(super().hist(*args, **kwargs)._df)
+
+    def is_close(self, *args: Any, **kwargs: Any) -> "Series":
+        # Bypasses self._from_pyseries; rewrap.
+        out = super().is_close(*args, **kwargs)
+        return type(self)._from_pyseries(out._s)
+
+
+def _install_series_subclass_overrides() -> None:
+    """Install hea.Series-aware wrappers for every method on pl.Series that
+    bypasses ``self._from_pyseries`` (i.e. routes through ``wrap_s``).
+
+    Runs once at module-import time. Picks up future polars expr-dispatched
+    additions automatically — no maintenance treadmill on version bumps.
+    """
+    from polars.series.utils import _is_empty_method, _undecorated
+
+    def _make_wrapper(meth_name: str):
+        pl_method = getattr(pl.Series, meth_name)
+
+        def wrapper(self, *args: Any, **kwargs: Any):
+            out = pl_method(self, *args, **kwargs)
+            if isinstance(out, pl.Series) and not isinstance(out, Series):
+                return type(self)._from_pyseries(out._s)
+            return out
+
+        wrapper.__name__ = meth_name
+        wrapper.__qualname__ = f"Series.{meth_name}"
+        wrapper.__doc__ = pl_method.__doc__
+        return wrapper
+
+    # All expr-dispatched methods (auto-discovered).
+    leaky_names: list[str] = []
+    for name in dir(pl.Series):
+        if name.startswith("_"):
+            continue
+        attr = pl.Series.__dict__.get(name)
+        if attr is None or not hasattr(attr, "__wrapped__"):
+            continue
+        if _is_empty_method(_undecorated(attr)):
+            leaky_names.append(name)
+
+    # Plus the two explicit wrap_s sites in polars/series/series.py.
+    leaky_names += ["set", "shrink_dtype"]
+
+    for name in leaky_names:
+        setattr(Series, name, _make_wrapper(name))
+
+
+_install_series_subclass_overrides()
+
+
+# DataFrame methods that return ``pl.Series``. Re-wrap as ``hea.Series`` so
+# chains like ``df.get_column("x").to_frame()`` stay in hea-land.
+_DF_SERIES_RETURNING = (
+    "drop_in_place",
+    "fold",
+    "get_column",
+    "hash_rows",
+    "is_duplicated",
+    "is_unique",
+    "max_horizontal",
+    "mean_horizontal",
+    "min_horizontal",
+    "sum_horizontal",
+    "to_series",
+    "to_struct",
+)
+
+
+def _install_df_series_overrides() -> None:
+    def _make(meth_name: str):
+        pl_method = getattr(pl.DataFrame, meth_name)
+
+        def wrapper(self, *args: Any, **kwargs: Any):
+            out = pl_method(self, *args, **kwargs)
+            if isinstance(out, pl.Series) and not isinstance(out, Series):
+                return Series._from_pyseries(out._s)
+            return out
+
+        wrapper.__name__ = meth_name
+        wrapper.__qualname__ = f"DataFrame.{meth_name}"
+        wrapper.__doc__ = pl_method.__doc__
+        return wrapper
+
+    for name in _DF_SERIES_RETURNING:
+        setattr(DataFrame, name, _make(name))
+
+    # ``__getitem__`` is polymorphic (Series for str key, DataFrame for slice,
+    # row tuple for int) — handle each branch.
+    pl_getitem = pl.DataFrame.__getitem__
+
+    def __getitem__(self, item):
+        out = pl_getitem(self, item)
+        if isinstance(out, pl.Series) and not isinstance(out, Series):
+            return Series._from_pyseries(out._s)
+        if isinstance(out, pl.DataFrame) and not isinstance(out, DataFrame):
+            return DataFrame._from_pydf(out._df)
+        return out
+
+    __getitem__.__doc__ = pl_getitem.__doc__
+    DataFrame.__getitem__ = __getitem__
+
+
+_install_df_series_overrides()
 
 
 class LazyFrame(pl.LazyFrame):

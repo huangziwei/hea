@@ -40,7 +40,7 @@ from .R import (
     wilcox_test,
 )
 from .data import data, factor
-from .dataframe import DataFrame, GroupBy, LazyFrame, desc, tbl
+from .dataframe import DataFrame, GroupBy, LazyFrame, Series, desc, tbl
 from . import ggplot
 from . import plot
 from . import R

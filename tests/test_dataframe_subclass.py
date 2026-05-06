@@ -20,7 +20,7 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from hea.dataframe import DataFrame, LazyFrame, tbl
+from hea.dataframe import DataFrame, LazyFrame, Series, tbl
 
 # A few exercised methods are deprecated upstream (e.g. ``approx_n_unique``,
 # ``with_context``). They still return DataFrame/LazyFrame correctly today, so
@@ -52,6 +52,11 @@ def df_num() -> DataFrame:
 @pytest.fixture
 def lf(df: DataFrame) -> LazyFrame:
     return df.lazy()
+
+
+@pytest.fixture
+def s() -> Series:
+    return Series("x", [1, 2, 2, 3, 4, None])
 
 
 # ---------------------------------------------------------------------------
@@ -412,4 +417,245 @@ def test_lf_method_coverage():
         )
     if stale:
         msgs.append(f"Categorized methods that no longer exist on pl.LazyFrame: {sorted(stale)}")
+    assert not msgs, "\n".join(msgs)
+
+
+# ---------------------------------------------------------------------------
+# Series — Phase 4
+# ---------------------------------------------------------------------------
+
+# Most of the leak surface on Series is "expression-dispatched" methods
+# (`unique`, `drop_nulls`, the `rolling_*` family, the trig family, …) — 116 of
+# them on polars 1.40.1. They're auto-detected and wrapped at module import
+# (`hea/dataframe.py:_install_series_subclass_overrides`). The test below
+# exercises a representative sample plus the methods that already preserved
+# subclass via ``self._from_pyseries``.
+
+
+SERIES_METHODS = {
+    # already preserved (use self._from_pyseries directly)
+    "head":          lambda s: s.head(2),
+    "tail":          lambda s: s.tail(2),
+    "limit":         lambda s: s.limit(2),
+    "slice":         lambda s: s.slice(0, 2),
+    "filter":        lambda s: s.filter(s > 1),
+    "sort":          lambda s: s.sort(),
+    "cast":          lambda s: s.cast(pl.Float64),
+    "clear":         lambda s: s.clear(),
+    "clone":         lambda s: s.clone(),
+    "rechunk":       lambda s: s.rechunk(),
+    "shrink_to_fit": lambda s: s.shrink_to_fit(),
+    "extend":        lambda s: s.clone().extend(s),
+    "append":        lambda s: s.clone().append(s),
+
+    # expression-dispatched — representative sample (auto-wrapped by install)
+    "unique":        lambda s: s.unique(),
+    "reverse":       lambda s: s.reverse(),
+    "drop_nulls":    lambda s: s.drop_nulls(),
+    "fill_null":     lambda s: s.fill_null(0),
+    "shift":         lambda s: s.shift(1),
+    "top_k":         lambda s: s.top_k(2),
+    "bottom_k":      lambda s: s.bottom_k(2),
+    "sample":        lambda s: s.sample(n=2, seed=0),
+    "gather_every":  lambda s: s.gather_every(2),
+    "abs":           lambda s: s.abs(),
+    "sin":           lambda s: s.cast(pl.Float64).sin(),
+    "cum_sum":       lambda s: s.cum_sum(),
+    "rolling_mean":  lambda s: s.rolling_mean(2),
+    "diff":          lambda s: s.diff(),
+    "round":         lambda s: s.cast(pl.Float64).round(),
+    "is_null":       lambda s: s.is_null(),
+    "is_unique":     lambda s: s.is_unique(),
+    "rank":          lambda s: s.rank(),
+
+    # explicit ``wrap_s`` sites
+    "set":           lambda s: s.set(pl.Series([True] + [False] * 5), 99),
+    "shrink_dtype":  lambda s: s.shrink_dtype(),
+
+    # arithmetic + boolean (preserves via self._from_pyseries on operator dispatch)
+    "not_":          lambda s: Series("b", [True, False, True]).not_(),
+
+    # Comparison methods returning boolean Series.
+    "eq":            lambda s: s.eq(s),
+    "eq_missing":    lambda s: s.eq_missing(s),
+    "ne":            lambda s: s.ne(s),
+    "ne_missing":    lambda s: s.ne_missing(s),
+    "ge":            lambda s: s.ge(2),
+    "gt":            lambda s: s.gt(2),
+    "le":            lambda s: s.le(2),
+    "lt":            lambda s: s.lt(2),
+    "is_close":      lambda s: s.cast(pl.Float64).is_close(2.0),
+    "arg_true":      lambda s: Series("b", [True, False, True]).arg_true(),
+
+    # Other element-wise.
+    "pow":           lambda s: s.pow(2),
+    "backward_fill": lambda s: Series("x", [1, None, 3]).backward_fill(),
+    "forward_fill":  lambda s: Series("x", [1, None, 3]).forward_fill(),
+    "set_sorted":    lambda s: s.set_sorted(),
+}
+
+# Series methods that return ``pl.DataFrame``. Tested separately to assert
+# they return ``hea.DataFrame``.
+SERIES_DF_METHODS = {
+    "to_frame":      lambda s: s.to_frame(),
+    "to_dummies":    lambda s: s.to_dummies(),
+    "value_counts":  lambda s: s.value_counts(),
+    "hist":          lambda s: s.cast(pl.Float64).hist(),
+    "describe":      lambda s: s.describe(),
+}
+
+
+# Methods that don't return Series or DataFrame (scalars, lists, bools, etc.).
+SERIES_NON_S: set[str] = {
+    # scalars
+    "all", "any", "approx_n_unique", "arg_max", "arg_min", "bitwise_and",
+    "bitwise_or", "bitwise_xor", "count", "dot", "entropy", "estimated_size",
+    "first", "has_nulls", "has_validity", "index_of", "is_empty", "is_sorted",
+    "item", "kurtosis", "last", "len", "max", "mean", "median", "min",
+    "n_chunks", "n_unique", "nan_max", "nan_min", "null_count", "product",
+    "quantile", "search_sorted", "skew", "std", "sum", "var",
+    # collections / external
+    "chunk_lengths", "equals", "get_chunks", "to_arrow", "to_init_repr",
+    "to_jax", "to_list", "to_numpy", "to_pandas", "to_torch",
+    # mutators / display
+    "alias", "rename",
+    # take user fns and return Series shaped by the fn — preserves through __getitem__
+    "map_elements",
+    # complicated by-arg signatures / sql; hea.Series subclass still preserves
+    # since they go through self._from_pyseries internally.
+    "scatter",
+    # not_ etc. variants
+    "is_between",
+    "new_from_index",
+    "reshape",
+    "zip_with",
+    "rolling_map",
+    "cumulative_eval",
+    "sql",
+    "implode",
+    # scalar returns we missed earlier
+    "max_by", "min_by",
+}
+
+
+def _series_auto_wrapped_methods() -> set[str]:
+    """Names of pl.Series methods that are auto-wrapped at hea import time.
+
+    Mirrors the discovery in ``hea.dataframe._install_series_subclass_overrides``
+    so the coverage test stays in sync. Every name returned here is a method
+    that returns ``hea.Series`` after install.
+    """
+    from polars.series.utils import _is_empty_method, _undecorated
+    out: set[str] = set()
+    for name in dir(pl.Series):
+        if name.startswith("_"):
+            continue
+        attr = pl.Series.__dict__.get(name)
+        if attr and hasattr(attr, "__wrapped__") and _is_empty_method(_undecorated(attr)):
+            out.add(name)
+    out |= {"set", "shrink_dtype"}  # explicit wrap_s sites
+    return out
+
+
+def test_curated_series_methods_preserve_subclass(s: Series):
+    failures: list[str] = []
+    for name, fn in sorted(SERIES_METHODS.items()):
+        try:
+            result = fn(s)
+        except Exception as e:
+            failures.append(f"  {name}: call failed ({type(e).__name__}: {e})")
+            continue
+        if not isinstance(result, Series):
+            failures.append(
+                f"  {name}: returned {type(result).__module__}.{type(result).__name__}"
+            )
+    assert not failures, "Series methods leaked subclass:\n" + "\n".join(failures)
+
+
+def test_series_methods_returning_dataframe(s: Series):
+    """Series methods like ``to_frame`` / ``to_dummies`` / ``value_counts`` /
+    ``hist`` / ``describe`` materialize to DataFrame — must return ``hea.DataFrame``."""
+    failures: list[str] = []
+    for name, fn in sorted(SERIES_DF_METHODS.items()):
+        try:
+            result = fn(s)
+        except Exception as e:
+            failures.append(f"  {name}: call failed ({type(e).__name__}: {e})")
+            continue
+        if not isinstance(result, DataFrame):
+            failures.append(
+                f"  {name}: returned {type(result).__module__}.{type(result).__name__}"
+            )
+    assert not failures, "Series→DataFrame methods leaked:\n" + "\n".join(failures)
+
+
+def test_df_series_returning_methods_return_hea_series(df: DataFrame):
+    """``df.get_column(...)``, ``df["x"]``, ``df.to_series(...)``, the
+    ``*_horizontal`` family, ``fold``, ``hash_rows``, ``is_duplicated``,
+    ``is_unique``, ``drop_in_place``, ``to_struct`` must return ``hea.Series``."""
+    df_num = df.select("x", "y").cast({pl.Int64: pl.Float64})
+    cases = [
+        ("get_column",     lambda: df.get_column("x")),
+        ("to_series",      lambda: df.to_series(0)),
+        ("__getitem__",    lambda: df["x"]),
+        ("min_horizontal", lambda: df_num.min_horizontal()),
+        ("max_horizontal", lambda: df_num.max_horizontal()),
+        ("mean_horizontal",lambda: df_num.mean_horizontal()),
+        ("sum_horizontal", lambda: df_num.sum_horizontal()),
+        ("fold",           lambda: df_num.fold(lambda a, b: a + b)),
+        ("hash_rows",      lambda: df.hash_rows()),
+        ("is_duplicated",  lambda: df.is_duplicated()),
+        ("is_unique",      lambda: df.is_unique()),
+        ("drop_in_place",  lambda: df.clone().drop_in_place("y")),
+        ("to_struct",      lambda: df.to_struct()),
+    ]
+    failures: list[str] = []
+    for name, fn in cases:
+        try:
+            result = fn()
+        except Exception as e:
+            failures.append(f"  {name}: call failed ({type(e).__name__}: {e})")
+            continue
+        if not isinstance(result, Series):
+            failures.append(
+                f"  {name}: returned {type(result).__module__}.{type(result).__name__}"
+            )
+    assert not failures, "DataFrame Series-returning methods leaked:\n" + "\n".join(failures)
+
+
+def test_series_chain_round_trip(s: Series):
+    """End-to-end: hea.Series → hea.Series → hea.DataFrame stays in hea-land."""
+    out = s.filter(s > 1).unique().to_frame()
+    assert isinstance(out, DataFrame)
+
+
+def test_series_method_coverage():
+    """Every public ``pl.Series`` method must be categorized.
+
+    Categories: ``SERIES_METHODS`` (curated, returns Series),
+    auto-wrapped expr-dispatched names (also return Series),
+    ``SERIES_DF_METHODS`` (returns DataFrame), or ``SERIES_NON_S`` (returns
+    scalar/list/None/etc.).
+    """
+    public = _public_callables(pl.Series)
+    auto_wrapped = _series_auto_wrapped_methods()
+    categorized = (
+        set(SERIES_METHODS)
+        | auto_wrapped
+        | set(SERIES_DF_METHODS)
+        | SERIES_NON_S
+    )
+    uncategorized = public - categorized
+    stale = categorized - public - auto_wrapped  # auto_wrapped may include names not in public if polars hides them
+    stale -= set(SERIES_METHODS) & auto_wrapped  # SERIES_METHODS overlaps with auto_wrapped intentionally
+    msgs = []
+    if uncategorized:
+        msgs.append(
+            "Uncategorized pl.Series public methods:\n"
+            f"  {sorted(uncategorized)}\n"
+            "Add to SERIES_METHODS (returns Series), SERIES_DF_METHODS "
+            "(returns DataFrame), or SERIES_NON_S (returns something else)."
+        )
+    if stale:
+        msgs.append(f"Stale entries (no longer on pl.Series): {sorted(stale)}")
     assert not msgs, "\n".join(msgs)
