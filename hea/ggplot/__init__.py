@@ -16,7 +16,17 @@ from __future__ import annotations
 
 from .aes import aes
 from .core import ggplot
-from .geoms import geom_bar, geom_blank, geom_col, geom_density, geom_histogram, geom_point
+from .geoms import (
+    geom_bar,
+    geom_blank,
+    geom_col,
+    geom_density,
+    geom_histogram,
+    geom_line,
+    geom_path,
+    geom_point,
+    geom_step,
+)
 from .scales import (
     scale_x_continuous,
     scale_x_log10,
@@ -40,6 +50,9 @@ __all__ = [
     "geom_col",
     "geom_histogram",
     "geom_density",
+    "geom_line",
+    "geom_path",
+    "geom_step",
     "stat_identity",
     "stat_bin",
     "stat_count",

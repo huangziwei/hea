@@ -19,7 +19,8 @@ import pytest
 from conftest import load_dataset
 
 from hea.ggplot import (
-    aes, geom_blank, geom_density, geom_histogram, geom_point, ggplot,
+    aes, geom_blank, geom_density, geom_histogram, geom_line, geom_path,
+    geom_point, geom_step, ggplot,
     scale_x_continuous, scale_x_log10, scale_x_reverse, scale_x_sqrt,
     scale_y_continuous, scale_y_log10,
 )
@@ -302,6 +303,130 @@ def test_log10_with_explicit_breaks():
         ax = fig.axes[0]
         ticks = list(ax.get_xticks())
         assert ticks == [100.0, 200.0, 400.0]
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.1c — Wilkinson extended_breaks algorithm
+#
+# These cases lock parity with ggplot2's `labeling::extended` defaults on the
+# canonical R datasets used throughout Faraway's textbook. R-oracle dump
+# fixtures land later (X.1) — these hand-checked values are enough to catch
+# regressions in the meantime.
+# ---------------------------------------------------------------------------
+
+
+def test_extended_breaks_unit_interval():
+    from hea.ggplot.scales._breaks import extended_breaks
+    bk = extended_breaks(0.0, 1.0, m=5)
+    assert list(bk) == [0.0, 0.25, 0.5, 0.75, 1.0]
+
+
+def test_extended_breaks_zero_centered():
+    """Algorithm prefers grids that pass through zero (simplicity bonus)."""
+    from hea.ggplot.scales._breaks import extended_breaks
+    bk = extended_breaks(-50.0, 50.0, m=5)
+    assert list(bk) == [-50.0, -25.0, 0.0, 25.0, 50.0]
+
+
+def test_extended_breaks_mtcars_disp():
+    """mtcars$disp range (71–472) → [100, 200, 300, 400, 500]."""
+    from hea.ggplot.scales._breaks import extended_breaks
+    bk = extended_breaks(71.0, 472.0, m=5)
+    assert list(bk) == [100.0, 200.0, 300.0, 400.0, 500.0]
+
+
+def test_extended_breaks_mtcars_wt():
+    """mtcars$wt range (1.42–5.43) → [1, 2, 3, 4, 5]."""
+    from hea.ggplot.scales._breaks import extended_breaks
+    bk = extended_breaks(1.42, 5.43, m=5)
+    assert list(bk) == [1.0, 2.0, 3.0, 4.0, 5.0]
+
+
+def test_extended_breaks_degenerate_range_returns_single_tick():
+    from hea.ggplot.scales._breaks import extended_breaks
+    bk = extended_breaks(3.14, 3.14, m=5)
+    assert len(bk) == 1
+    assert bk[0] == 3.14
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.2a — geom_line, geom_path, geom_step
+# ---------------------------------------------------------------------------
+
+
+def test_geom_line_sorts_by_x():
+    """`geom_line` connects points sorted by x — what most line plots want."""
+    import numpy as np
+
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_line()
+    fig = p.draw()
+    try:
+        line = fig.axes[0].lines[0]
+        xs = line.get_xdata()
+        assert list(xs) == sorted(xs), "geom_line must sort by x"
+        # all data points present
+        assert len(xs) == len(mtcars)
+    finally:
+        plt.close(fig)
+
+
+def test_geom_path_preserves_data_order():
+    """`geom_path` connects points in data order, not sorted."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_path()
+    fig = p.draw()
+    try:
+        xs = list(fig.axes[0].lines[0].get_xdata())
+        assert xs == list(mtcars["wt"].to_numpy())
+    finally:
+        plt.close(fig)
+
+
+def test_geom_step_default_hv_produces_stairstep():
+    """`geom_step(direction="hv")` (default) emits 2n-1 vertices for n points."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_step()
+    fig = p.draw()
+    try:
+        xs = fig.axes[0].lines[0].get_xdata()
+        assert len(xs) == 2 * len(mtcars) - 1
+    finally:
+        plt.close(fig)
+
+
+def test_geom_step_vh_direction():
+    """`direction="vh"` flips the corner."""
+    import numpy as np
+
+    mtcars = load_dataset("datasets", "mtcars")
+    p_hv = ggplot(mtcars, aes("wt", "mpg")) + geom_step(direction="hv")
+    p_vh = ggplot(mtcars, aes("wt", "mpg")) + geom_step(direction="vh")
+
+    fig_hv = p_hv.draw()
+    fig_vh = p_vh.draw()
+    try:
+        # Different y-trajectories; specifically the second y-value differs.
+        y_hv = fig_hv.axes[0].lines[0].get_ydata()
+        y_vh = fig_vh.axes[0].lines[0].get_ydata()
+        assert not np.array_equal(y_hv, y_vh)
+    finally:
+        plt.close(fig_hv)
+        plt.close(fig_vh)
+
+
+def test_geom_line_constant_aes_overrides():
+    """`geom_line(colour="red", size=2)` applies as a layer constant."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_line(colour="red", size=2)
+    fig = p.draw()
+    try:
+        line = fig.axes[0].lines[0]
+        assert line.get_color() == "red"
+        # size in mm, mapped to ~5.66 pt
+        assert abs(line.get_linewidth() - 2 * 2.83) < 0.01
     finally:
         plt.close(fig)
 

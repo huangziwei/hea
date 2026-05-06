@@ -73,13 +73,10 @@ class ScaleContinuous(Scale):
             ax.set_yticklabels(labels)
 
     def _compute_breaks(self, lim):
-        from matplotlib.ticker import MaxNLocator
-
         if self.breaks == "default":
-            # Phase 1.1: matplotlib MaxNLocator ≈ ggplot2's default. Real
-            # Wilkinson `extended_breaks` port is 1.1c.
-            loc = MaxNLocator(nbins=5, steps=[1, 2, 2.5, 5, 10])
-            return loc.tick_values(*lim)
+            from ._breaks import extended_breaks
+
+            return extended_breaks(lim[0], lim[1], m=5)
         if callable(self.breaks):
             return np.asarray(self.breaks(lim))
         return np.asarray(self.breaks)
