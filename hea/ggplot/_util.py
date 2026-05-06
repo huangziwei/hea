@@ -1,4 +1,4 @@
-"""Small helpers for hea.gg — color/shape parsing, group computation."""
+"""Small helpers for hea.ggplot — color/shape parsing, group computation."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""hea.gg tests — Phase 0 onward.
+"""hea.ggplot tests — Phase 0 onward.
 
 Each test ID matches the inventory in `.claude/plans/ggplot2-port.md` §9.1.
 PNG diff parity (the visual-snapshot tests) come later; Phase 0 just
@@ -18,7 +18,7 @@ import pytest
 
 from conftest import load_dataset
 
-from hea.gg import (
+from hea.ggplot import (
     aes, geom_blank, geom_density, geom_histogram, geom_point, ggplot,
 )
 
@@ -147,7 +147,7 @@ def test_aes_callable_value():
 
 # ---------------------------------------------------------------------------
 # Faraway "Linear Models with R" page 5 — the three exploratory plots.
-# These transliterate the R one-liners directly to hea.gg. They lock the
+# These transliterate the R one-liners directly to hea.ggplot. They lock the
 # minimum viable surface (geom_point + geom_histogram + geom_density) for
 # the use cases the book opens with.
 # ---------------------------------------------------------------------------
