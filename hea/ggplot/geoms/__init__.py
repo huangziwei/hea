@@ -6,6 +6,8 @@ from .density import geom_density
 from .histogram import geom_histogram
 from .path import geom_line, geom_path, geom_step
 from .point import geom_point
+from .ribbon import geom_area, geom_ribbon
+from .smooth import geom_smooth
 
 __all__ = [
     "geom_blank",
@@ -17,4 +19,7 @@ __all__ = [
     "geom_line",
     "geom_path",
     "geom_step",
+    "geom_ribbon",
+    "geom_area",
+    "geom_smooth",
 ]

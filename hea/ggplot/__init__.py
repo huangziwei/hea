@@ -17,6 +17,7 @@ from __future__ import annotations
 from .aes import aes
 from .core import ggplot
 from .geoms import (
+    geom_area,
     geom_bar,
     geom_blank,
     geom_col,
@@ -25,6 +26,8 @@ from .geoms import (
     geom_line,
     geom_path,
     geom_point,
+    geom_ribbon,
+    geom_smooth,
     geom_step,
 )
 from .positions import (
@@ -48,7 +51,7 @@ from .scales import (
     scale_y_reverse,
     scale_y_sqrt,
 )
-from .stats import stat_bin, stat_count, stat_density, stat_identity
+from .stats import stat_bin, stat_count, stat_density, stat_identity, stat_smooth
 
 __all__ = [
     "ggplot",
@@ -62,10 +65,14 @@ __all__ = [
     "geom_line",
     "geom_path",
     "geom_step",
+    "geom_ribbon",
+    "geom_area",
+    "geom_smooth",
     "stat_identity",
     "stat_bin",
     "stat_count",
     "stat_density",
+    "stat_smooth",
     "scale_x_continuous",
     "scale_y_continuous",
     "scale_x_log10",

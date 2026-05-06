@@ -19,8 +19,9 @@ import pytest
 from conftest import load_dataset
 
 from hea.ggplot import (
-    aes, geom_bar, geom_blank, geom_density, geom_histogram, geom_line,
-    geom_path, geom_point, geom_step, ggplot,
+    aes, geom_area, geom_bar, geom_blank, geom_density, geom_histogram,
+    geom_line, geom_path, geom_point, geom_ribbon, geom_smooth,
+    geom_step, ggplot,
     position_dodge, position_fill, position_jitter, position_nudge,
     position_stack,
     scale_x_continuous, scale_x_log10, scale_x_reverse, scale_x_sqrt,
@@ -566,6 +567,131 @@ def test_position_unknown_string_raises():
     mtcars = load_dataset("datasets", "mtcars")
     with pytest.raises(ValueError, match="unknown position"):
         ggplot(mtcars, aes("wt", "mpg")) + geom_point(position="zigzag")
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.4 — Smoothing: stat_smooth + geom_smooth (and the underlying
+# geom_ribbon / geom_area)
+# ---------------------------------------------------------------------------
+
+
+def test_geom_ribbon_draws_filled_band():
+    """geom_ribbon needs aes(x, ymin, ymax)."""
+    import polars as pl
+    from matplotlib.collections import PolyCollection
+
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, 3.0, 4.0],
+        "lo": [0.0, 0.5, 1.0, 1.5],
+        "hi": [1.0, 1.5, 2.0, 2.5],
+    })
+    p = ggplot(df, aes(x="x", ymin="lo", ymax="hi")) + geom_ribbon()
+    fig = p.draw()
+    try:
+        # fill_between yields a PolyCollection subclass
+        # (FillBetweenPolyCollection in modern matplotlib).
+        polys = [c for c in fig.axes[0].collections if isinstance(c, PolyCollection)]
+        assert len(polys) == 1
+    finally:
+        plt.close(fig)
+
+
+def test_geom_area_treats_y_as_ymax_with_zero_floor():
+    import polars as pl
+    from matplotlib.collections import PolyCollection
+
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 1.5]})
+    p = ggplot(df, aes(x="x", y="y")) + geom_area()
+    fig = p.draw()
+    try:
+        polys = [c for c in fig.axes[0].collections if isinstance(c, PolyCollection)]
+        assert len(polys) == 1
+        bbox = polys[0].get_paths()[0].get_extents()
+        assert bbox.y0 == pytest.approx(0.0)
+    finally:
+        plt.close(fig)
+
+
+def test_gg_c2_geom_smooth_lm_with_ci_ribbon():
+    """GG-C2: ``geom_smooth(method="lm")`` produces a fit line + CI band."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + geom_smooth(method="lm"))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # 2 collections: scatter from geom_point + ribbon from geom_smooth
+        assert len(ax.collections) == 2
+        # 1 line: the fitted line from geom_smooth
+        assert len(ax.lines) == 1
+    finally:
+        plt.close(fig)
+
+
+def test_geom_smooth_se_false_omits_ribbon():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_smooth(method="lm", se=False)
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # No ribbon (no scatter either since no geom_point)
+        assert len(ax.collections) == 0
+        assert len(ax.lines) == 1
+    finally:
+        plt.close(fig)
+
+
+def test_geom_smooth_loess_default_method_works():
+    """Default method is loess; should produce a curve + ribbon for non-trivial n."""
+    import numpy as np
+    import polars as pl
+
+    rng = np.random.default_rng(0)
+    x = np.linspace(0, 10, 50)
+    y = np.sin(x) + 0.2 * rng.standard_normal(50)
+    df = pl.DataFrame({"x": x, "y": y})
+
+    p = ggplot(df, aes("x", "y")) + geom_smooth(span=0.5)
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        line_y = ax.lines[0].get_ydata()
+        # Smoothed curve should track the sin shape — peaks/troughs near sin's.
+        # Just check it's bounded, not a constant or a flat line.
+        assert line_y.max() > 0.3
+        assert line_y.min() < -0.3
+    finally:
+        plt.close(fig)
+
+
+def test_geom_smooth_lm_fit_matches_hea_lm():
+    """The fit line from geom_smooth(method="lm") must match a hea.lm fit
+    on the same data — no surprise drift."""
+    import polars as pl
+    from hea import lm
+
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_smooth(method="lm")
+    fig = p.draw()
+    try:
+        line_x = fig.axes[0].lines[0].get_xdata()
+        line_y = fig.axes[0].lines[0].get_ydata()
+
+        m = lm("mpg ~ wt", mtcars)
+        new = pl.DataFrame({"wt": line_x})
+        expected = m.predict(new=new)["Fitted"].to_numpy()
+        import numpy as np
+        np.testing.assert_allclose(line_y, expected, atol=1e-9)
+    finally:
+        plt.close(fig)
+
+
+def test_stat_smooth_gam_glm_unimplemented():
+    import polars as pl
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
+    p = ggplot(df, aes("x", "y")) + geom_smooth(method="gam")
+    with pytest.raises(NotImplementedError, match="method='gam'"):
+        p.draw()
 
 
 # ---------------------------------------------------------------------------
