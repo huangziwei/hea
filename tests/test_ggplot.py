@@ -879,6 +879,41 @@ def test_hcl_to_hex_matches_grdevices():
     assert hcl_to_hex(255, 100, 65) == "#619CFF"
 
 
+def test_discrete_color_levels_sorted_alphabetically():
+    """ggplot2 silently runs character columns through ``factor()`` before
+    mapping, so the level → colour assignment is alphabetical regardless
+    of CSV row order. The penguins dataset lists Adelie/Gentoo/Chinstrap
+    in that order; ggplot2 still gives Chinstrap green and Gentoo blue."""
+    from hea.data import data as _hea_data
+    from matplotlib.colors import to_rgb
+
+    penguins = _hea_data("penguins", package="palmerpenguins")
+    p = (ggplot(penguins, aes("flipper_length_mm", "body_mass_g",
+                              colour="species"))
+         + geom_point())
+    import warnings as _w
+    with _w.catch_warnings():
+        _w.simplefilter("ignore", UserWarning)  # NA-removal warning
+        fig = p.draw()
+    try:
+        # Map each species to its rendered colour.
+        clean = penguins.drop_nulls(["flipper_length_mm", "body_mass_g"])
+        species = clean["species"].to_list()
+        fc = fig.axes[0].collections[0].get_facecolors()
+        observed = {}
+        for sp, c in zip(species, fc):
+            observed.setdefault(sp, tuple(round(float(x), 3) for x in c[:3]))
+
+        expected = {
+            "Adelie": tuple(round(float(x), 3) for x in to_rgb("#F8766D")),
+            "Chinstrap": tuple(round(float(x), 3) for x in to_rgb("#00BA38")),
+            "Gentoo": tuple(round(float(x), 3) for x in to_rgb("#619CFF")),
+        }
+        assert observed == expected
+    finally:
+        plt.close(fig)
+
+
 def test_user_penguins_string_color_works_end_to_end():
     """The bug report: ``aes(color="species")`` on string column → 3 colours,
     no matplotlib RGBA error. Penguins has 2 NA rows so a warning is expected."""

@@ -27,9 +27,19 @@ class ScaleDiscreteColor(Scale):
 
     def train(self, data) -> None:
         if isinstance(data, pl.Series):
-            new_levels = data.drop_nulls().unique(maintain_order=True).to_list()
+            if data.dtype in (pl.Categorical, pl.Enum):
+                # Categorical / Enum carry an explicit level order — honour it
+                # (matches ggplot2's behaviour for factor columns: factor levels
+                # drive the scale order regardless of which row appears first).
+                new_levels = data.cat.get_categories().to_list()
+            else:
+                # Plain string / boolean: sort alphabetically — same as R's
+                # ``factor(...)`` default. ggplot2 silently runs character
+                # columns through ``factor()`` before mapping, so the level
+                # order ends up sorted regardless of CSV row order.
+                new_levels = sorted(data.drop_nulls().unique().to_list())
         else:
-            new_levels = list(dict.fromkeys(v for v in data if v is not None))
+            new_levels = sorted(set(v for v in data if v is not None))
         if self.levels is None:
             self.levels = list(new_levels)
         else:
