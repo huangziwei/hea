@@ -46,3 +46,12 @@ dev = [
 packages = {find = {}}
 include-package-data = true
 
+[tool.ruff.lint]
+# ``from hea.R import *`` is the intentional ergonomic for the R-flavored
+# namespace — see hea/R.py. We commit to NOT using star imports anywhere
+# else, so silencing these globally is safe:
+#   F403 — flags every ``from X import *`` line.
+#   F405 — flags every name that *might* come from a star import (ruff
+#          can't statically resolve our ``__all__``).
+ignore = ["F403", "F405"]
+
