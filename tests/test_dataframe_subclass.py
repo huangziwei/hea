@@ -60,19 +60,12 @@ def lf(df: DataFrame) -> LazyFrame:
 
 # Methods that drop subclass today. Adding to this set should be a deliberate
 # decision; new entries here mark a regression unless paired with a plan.
-DF_ALLOWLIST: set[str] = {
-    "describe",         # builds a fresh frame from primitives, bypasses _from_pydf
-    "corr",             # ditto
-    "unstack",          # ditto
-    "sql",              # ditto
-    "match_to_schema",  # ditto
-}
+DF_ALLOWLIST: set[str] = set()
 
 LF_ALLOWLIST: set[str] = {
-    "describe",         # same shape as DataFrame.describe
-    "match_to_schema",  # bypasses _from_pyldf
-    "pivot",            # streaming pivot has different semantics; revisit when used
-    "sql",              # bypasses _from_pyldf
+    # Streaming pivot needs materialized `on_columns` data; signature
+    # differs from DataFrame.pivot. Revisit when first caller appears.
+    "pivot",
 }
 
 
@@ -107,8 +100,11 @@ DF_NON_DF: set[str] = {
 
 # Public pl.LazyFrame methods whose return is not a LazyFrame.
 LF_NON_DF: set[str] = {
-    # Materializing terminal ops (return DataFrame — tested via DF_METHODS).
-    "collect", "collect_async", "collect_batches", "fetch",
+    # Materializing terminal ops (return DataFrame — tested in
+    # ``test_lf_materializing_methods_return_hea_dataframe``).
+    "collect", "describe",
+    # Materializing ops that return non-DataFrame containers.
+    "collect_async", "collect_batches", "fetch",
     # Sinks — write to disk, return None or async result.
     "sink_batches", "sink_csv", "sink_delta", "sink_iceberg", "sink_ipc",
     "sink_ndjson", "sink_parquet",
@@ -200,6 +196,13 @@ DF_METHODS = {
     "explode":           lambda d: tbl(pl.DataFrame({"a": [[1, 2]]})).explode("a"),
     "pivot":             lambda d: d.pivot(on="g", values="y", aggregate_function="first"),
     "unpivot":           lambda d: d.unpivot(on=["x", "y"], index="g"),
+    "unstack":           lambda d: d.unstack(step=2),
+
+    # bypass-_from_pydf overrides (Phase 3)
+    "describe":          lambda d: d.describe(),
+    "corr":              lambda d: d.select("x", "y").corr(),
+    "sql":               lambda d: d.sql("SELECT * FROM self"),
+    "match_to_schema":   lambda d: d.match_to_schema(d.collect_schema()),
 
     # user functions
     "pipe":              lambda d: d.pipe(lambda x: x.head(1)),
@@ -279,6 +282,10 @@ LF_METHODS = {
     "unpivot":           lambda lf: lf.unpivot(on=["x", "y"], index="g"),
     "unnest":            lambda lf: lf.with_columns(s=pl.struct("x", "y")).select("s").unnest("s"),
 
+    # bypass-_from_pyldf overrides (Phase 3)
+    "match_to_schema":   lambda lf: lf.match_to_schema(lf.collect_schema()),
+    "sql":               lambda lf: lf.sql("SELECT * FROM self"),
+
     # user functions
     "pipe":              lambda lf: lf.pipe(lambda x: x.head(1)),
     "pipe_with_schema":  lambda lf: lf.pipe_with_schema(lambda x, schema: x.head(1)),
@@ -339,9 +346,13 @@ def test_curated_lf_methods_preserve_subclass(lf: LazyFrame):
     assert not failures, "LazyFrame methods leaked subclass:\n" + "\n".join(failures)
 
 
-def test_lazy_collect_returns_hea_dataframe(lf: LazyFrame):
-    """The two leak points polars/lazyframe/frame.py:2510 and dataframe/frame.py:10260
-    are the structural fix. This test pins the round-trip behavior."""
+def test_lf_materializing_methods_return_hea_dataframe(lf: LazyFrame):
+    """LazyFrame methods that materialize must return ``hea.DataFrame``.
+
+    ``collect`` is the structural fix for the lazy round-trip
+    (`polars/lazyframe/frame.py:2510`). ``describe`` materializes too —
+    despite living on LazyFrame it returns a DataFrame.
+    """
     out = lf.collect()
     assert isinstance(out, DataFrame), (
         f"lf.collect() returned {type(out).__module__}.{type(out).__name__}"
@@ -350,6 +361,10 @@ def test_lazy_collect_returns_hea_dataframe(lf: LazyFrame):
     # Multi-step lazy chains should also stay in hea-land.
     out2 = lf.filter(pl.col("x") > 0).with_columns(z=pl.col("x") + pl.col("y")).collect()
     assert isinstance(out2, DataFrame)
+
+    # describe() is on LazyFrame but materializes — must return hea.DataFrame.
+    out3 = lf.describe()
+    assert isinstance(out3, DataFrame)
 
 
 def _public_callables(cls) -> set[str]:

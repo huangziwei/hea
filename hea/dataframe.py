@@ -832,6 +832,27 @@ class DataFrame(pl.DataFrame):
         """
         return LazyFrame._from_pyldf(self._df.lazy())
 
+    # ---- subclass-preserving overrides --------------------------------
+    #
+    # The methods below build a fresh ``pl.DataFrame`` internally rather than
+    # routing through ``self._from_pydf``. We override each to re-wrap so the
+    # subclass is preserved.
+
+    def describe(self, *args: Any, **kwargs: Any) -> "DataFrame":
+        return self._wrap(super().describe(*args, **kwargs))
+
+    def corr(self, *args: Any, **kwargs: Any) -> "DataFrame":
+        return self._wrap(super().corr(*args, **kwargs))
+
+    def unstack(self, *args: Any, **kwargs: Any) -> "DataFrame":
+        return self._wrap(super().unstack(*args, **kwargs))
+
+    def sql(self, *args: Any, **kwargs: Any) -> "DataFrame":
+        return self._wrap(super().sql(*args, **kwargs))
+
+    def match_to_schema(self, *args: Any, **kwargs: Any) -> "DataFrame":
+        return self._wrap(super().match_to_schema(*args, **kwargs))
+
     # ---- summary ------------------------------------------------------
 
     def summary(
@@ -889,16 +910,19 @@ class DataFrame(pl.DataFrame):
 class LazyFrame(pl.LazyFrame):
     """``pl.LazyFrame`` that re-wraps materialized results as ``hea.DataFrame``.
 
-    Empty body for the most part — polars LazyFrame methods route through
+    Mostly empty — polars LazyFrame methods route through
     ``self._from_pyldf(...)``, which respects the subclass, so chains
     (``.filter(...).with_columns(...).join(...)``) propagate
-    ``hea.LazyFrame`` automatically. The override is only needed where
-    polars constructs the materialized frame via ``wrap_df(...)``
-    (`polars/lazyframe/frame.py:2510`), which hardcodes
-    ``pl.DataFrame._from_pydf``. We re-wrap on the way out.
+    ``hea.LazyFrame`` automatically. The overrides below cover the
+    handful of methods that bypass ``self._from_pyldf`` (calling
+    ``wrap_ldf`` / ``wrap_df`` instead) — including the eager-via-lazy
+    leak point at `polars/lazyframe/frame.py:2510` (collect).
     """
 
-    def collect(self, *args, **kwargs):
+    def _wrap(self, lf: pl.LazyFrame) -> "LazyFrame":
+        return type(self)._from_pyldf(lf._ldf)
+
+    def collect(self, *args: Any, **kwargs: Any):
         out = super().collect(*args, **kwargs)
         if isinstance(out, pl.DataFrame):
             return DataFrame._from_pydf(out._df)
@@ -906,6 +930,16 @@ class LazyFrame(pl.LazyFrame):
         # .fetch() / .fetch_blocking() still uses pl.DataFrame. Rare
         # enough to leave un-wrapped for now (allowlisted).
         return out
+
+    def describe(self, *args: Any, **kwargs: Any) -> "DataFrame":
+        # Despite living on LazyFrame, describe() materializes — returns DataFrame.
+        return DataFrame._from_pydf(super().describe(*args, **kwargs)._df)
+
+    def match_to_schema(self, *args: Any, **kwargs: Any) -> "LazyFrame":
+        return self._wrap(super().match_to_schema(*args, **kwargs))
+
+    def sql(self, *args: Any, **kwargs: Any) -> "LazyFrame":
+        return self._wrap(super().sql(*args, **kwargs))
 
 
 class GroupBy:
