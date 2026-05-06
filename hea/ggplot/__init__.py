@@ -219,3 +219,14 @@ __all__ = [
     "position_stack",
     "position_fill",
 ]
+
+
+# Fluent API: install methods on ``ggplot`` for every layer-addable name in
+# ``__all__`` so ``df.ggplot(aes()).geom_point().geom_smooth()`` works as a
+# method-chaining alternative to ``df.ggplot(aes()) + geom_point() + ...``.
+# Mirrors ``hea/dataframe.py:_install_series_subclass_overrides`` — auto-tracks
+# new ggplot exports added in the future.
+from .core import _install_fluent_methods as _install
+
+_install(globals())
+del _install

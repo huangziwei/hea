@@ -1,8 +1,6 @@
-"""Phase B (fluent ggplot API) — entry point tests.
+"""Phase B (fluent ggplot API) — entry point + auto-install tests.
 
-The auto-install loop and full method coverage land in a separate session;
-this file currently covers just the ``df.ggplot(...)`` entry-point work
-(plan: ``.claude/plans/method-based-ggplot-api.md`` Phase B, first checkbox).
+Plan: ``.claude/plans/method-based-ggplot-api.md`` Phase B.
 """
 
 from __future__ import annotations
@@ -15,8 +13,16 @@ import matplotlib.pyplot as plt
 import pytest
 
 import hea
-from hea.ggplot import aes, geom_point
-from hea.ggplot.core import ggplot as ggplot_class
+import hea.ggplot as hg
+from hea.ggplot import aes, geom_point, geom_smooth, scale_x_log10, theme_minimal
+from hea.ggplot.core import (
+    _FLUENT_INSTALL_EXACT,
+    _FLUENT_INSTALL_PREFIXES,
+    _FLUENT_SKIP_EXACT,
+    _FLUENT_SKIP_PREFIXES,
+    _should_install_fluent,
+    ggplot as ggplot_class,
+)
 
 
 @pytest.fixture
@@ -87,3 +93,128 @@ def test_function_form_still_works_after_env_kwarg(df):
     p = ggplot_class(df, aes(x="helper(x)", y="y"))
     assert "helper" in p.plot_env
     assert p.plot_env["helper"] is helper
+
+
+# ---------------------------------------------------------------------------
+# Auto-install: every layer-addable name in hea.ggplot.__all__ has a method
+# ---------------------------------------------------------------------------
+
+
+def _expected_fluent_names() -> set[str]:
+    """Names from ``hea.ggplot.__all__`` that should be installed as methods."""
+    return {n for n in hg.__all__ if _should_install_fluent(n)}
+
+
+def _expected_skipped_names() -> set[str]:
+    """Names from ``hea.ggplot.__all__`` that should NOT be installed."""
+    return {n for n in hg.__all__ if not _should_install_fluent(n)}
+
+
+def test_fluent_methods_installed_for_every_addable_name():
+    """For every name in ``hea.ggplot.__all__`` that pattern-matches an
+    install rule, ``ggplot.<name>`` must exist."""
+    expected = _expected_fluent_names()
+    missing = {name for name in expected if not hasattr(ggplot_class, name)}
+    assert not missing, (
+        f"Auto-install missed: {sorted(missing)}\n"
+        "Check the install loop in hea/ggplot/core.py:_install_fluent_methods."
+    )
+    # Sanity: we matched a non-trivial number of names.
+    assert len(expected) >= 30
+
+
+def test_fluent_skip_list_not_installed():
+    """Names matching the skip rules must NOT have methods on ``ggplot``."""
+    skipped = _expected_skipped_names()
+    leaked = {name for name in skipped if hasattr(ggplot_class, name)}
+    # ``ggplot`` is in __all__ and would otherwise leak (the class itself
+    # showing up as an attribute on instances). _FLUENT_SKIP_EXACT prevents it.
+    # Note: some bound methods that pre-exist on the class (e.g. ``draw``,
+    # ``show``) aren't in __all__ — they'd never enter this set.
+    assert not leaked, f"These skipped names got installed: {sorted(leaked)}"
+
+
+def test_should_install_fluent_predicate():
+    """Direct unit test of the install/skip predicate."""
+    # Install
+    assert _should_install_fluent("geom_point")
+    assert _should_install_fluent("stat_smooth")
+    assert _should_install_fluent("scale_x_log10")
+    assert _should_install_fluent("facet_wrap")
+    assert _should_install_fluent("theme_minimal")
+    assert _should_install_fluent("theme")  # exact
+
+    # Skip
+    assert not _should_install_fluent("position_dodge")
+    assert not _should_install_fluent("element_text")
+    assert not _should_install_fluent("after_stat")
+    assert not _should_install_fluent("after_scale")
+    assert not _should_install_fluent("aes")
+    assert not _should_install_fluent("ggplot")
+
+
+# ---------------------------------------------------------------------------
+# Equivalence: method form produces the same plot as `+` form
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name,call_args,call_kwargs", [
+    ("geom_point", (), {}),
+    ("geom_smooth", (), {"method": "lm"}),
+    ("theme_minimal", (), {}),
+    ("scale_x_log10", (), {}),
+    ("facet_wrap", ("g",), {}),
+])
+def test_fluent_method_matches_plus_form(df, name, call_args, call_kwargs):
+    """For each representative name, the fluent and ``+`` forms produce
+    structurally equivalent plots."""
+    df_with_g = df.with_columns(g=hea.lit("a"))
+    base_args = ("g",) if name == "facet_wrap" else ()
+    fn = getattr(hg, name)
+
+    p_fluent = getattr(df_with_g.ggplot(aes("x", "y")), name)(*call_args, **call_kwargs)
+    p_plus = df_with_g.ggplot(aes("x", "y")) + fn(*call_args, **call_kwargs)
+
+    # Both must be hea ggplot instances with the same number of layers.
+    assert isinstance(p_fluent, ggplot_class)
+    assert isinstance(p_plus, ggplot_class)
+    assert len(p_fluent.layers) == len(p_plus.layers)
+    if p_fluent.layers:
+        assert type(p_fluent.layers[0]) is type(p_plus.layers[0])
+
+
+def test_fluent_chain_full(df):
+    """A realistic chain: tidyverse → ggplot → fluent layers + theme."""
+    p = (
+        df.filter(hea.col("x") > 1)
+        .ggplot(aes("x", "y"))
+        .geom_point()
+        .geom_smooth(method="lm")
+        .theme_minimal()
+    )
+    assert isinstance(p, ggplot_class)
+    assert len(p.layers) == 2
+    assert p.data.height == 3
+
+
+def test_fluent_chain_renders(df):
+    """End-to-end: a fluent-only chain renders to a Figure."""
+    fig = (
+        df.ggplot(aes("x", "y"))
+        .geom_point()
+        .theme_minimal()
+    ).draw()
+    assert fig is not None
+    plt.close(fig)
+
+
+def test_fluent_and_plus_interleaved(df):
+    """Users can mix the two forms freely."""
+    p = (
+        df.ggplot(aes("x", "y"))
+        .geom_point()
+        + geom_smooth(method="lm")
+        + theme_minimal()
+    )
+    assert isinstance(p, ggplot_class)
+    assert len(p.layers) == 2

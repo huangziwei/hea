@@ -189,3 +189,74 @@ def _(thing: list, plot):
     for item in thing:
         plot = plot + item
     return plot
+
+
+# ---------------------------------------------------------------------------
+# Fluent API auto-install (Phase B of `.claude/plans/method-based-ggplot-api.md`)
+# ---------------------------------------------------------------------------
+
+# Names whose `name(...)` produces a value that's `+`-able into a ggplot.
+# Match by prefix:
+_FLUENT_INSTALL_PREFIXES = (
+    "geom_", "stat_", "scale_", "facet_", "coord_", "theme_",
+)
+# Match by exact name (top-level callables that aren't prefix-matched):
+_FLUENT_INSTALL_EXACT = frozenset({
+    "theme",
+    "labs", "ggtitle", "xlab", "ylab", "xlim", "ylim", "lims", "annotate",
+})
+
+# Names that prefix-match but should NOT be installed:
+_FLUENT_SKIP_PREFIXES = (
+    "position_",  # kwargs to geoms, not addable on their own
+    "element_",   # theme components, used inside theme(...) not added
+    "after_",     # aes-modifiers (after_stat, after_scale)
+)
+# Exact names to skip even if they'd otherwise pattern-match:
+_FLUENT_SKIP_EXACT = frozenset({
+    "aes",        # mapping arg, not addable
+    "ggplot",     # the class itself (also not in __all__-style match anyway)
+})
+
+
+def _should_install_fluent(name: str) -> bool:
+    if name in _FLUENT_SKIP_EXACT:
+        return False
+    if any(name.startswith(p) for p in _FLUENT_SKIP_PREFIXES):
+        return False
+    if name in _FLUENT_INSTALL_EXACT:
+        return True
+    return any(name.startswith(p) for p in _FLUENT_INSTALL_PREFIXES)
+
+
+def _install_fluent_methods(namespace: dict) -> None:
+    """Install fluent methods on ``ggplot`` for every layer-addable name.
+
+    Each matched name ``foo`` becomes a method ``ggplot.foo`` such that
+    ``plot.foo(*a, **kw)`` is equivalent to ``plot + foo(*a, **kw)``.
+
+    Called at the end of ``hea/ggplot/__init__.py`` once the package's
+    namespace is fully populated. New geoms/scales/themes/etc. added to
+    ``hea.ggplot.__all__`` automatically get fluent methods on the next
+    package import — no per-name maintenance needed.
+
+    Mirrors ``hea/dataframe.py:_install_series_subclass_overrides`` (Phase 4
+    of the prerequisite plan ``dataframe-subclass-coverage.md``).
+    """
+    names = namespace.get("__all__") or [n for n in namespace if not n.startswith("_")]
+    for name in names:
+        if not _should_install_fluent(name):
+            continue
+        fn = namespace.get(name)
+        if not callable(fn):
+            continue
+
+        # Bind ``fn`` as default arg so each closure captures by value
+        # (avoids the late-binding pitfall in for-loop closures).
+        def method(self, *args, _fn=fn, **kwargs):
+            return self + _fn(*args, **kwargs)
+
+        method.__name__ = name
+        method.__qualname__ = f"ggplot.{name}"
+        method.__doc__ = fn.__doc__
+        setattr(ggplot, name, method)
