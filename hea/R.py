@@ -64,6 +64,13 @@ __all__ = [
     "dgamma", "pgamma", "qgamma", "rgamma",
     "dbeta", "pbeta", "qbeta", "rbeta",
     "set_seed",
+    # model generics (lm / glm / gam / bam / lme)
+    "coef", "coefficients", "fixef", "ranef",
+    "resid", "residuals", "fitted", "fitted_values",
+    "predict", "confint", "vcov",
+    "logLik", "deviance", "nobs", "df_residual",
+    "formula", "model_matrix", "model_frame",
+    "AIC", "BIC",
 ]
 
 
@@ -731,3 +738,275 @@ def set_seed(seed):
     ``hea._r_random``. This wrapper is for ordinary reproducibility.
     """
     np.random.seed(int(seed))
+
+
+# ---- model generics -------------------------------------------------
+#
+# Free-function dispatch over hea's fitted model objects (``lm``, ``glm``,
+# ``gam``, ``bam``, ``lme``). Pure duck typing — no model-class imports
+# needed. Where R has multiple aliases (``coef``/``coefficients``,
+# ``resid``/``residuals``, ``fitted``/``fitted.values``), we expose both.
+
+def _bhat_to_dict(model) -> dict:
+    if not hasattr(model, "bhat") or not isinstance(model.bhat, pl.DataFrame):
+        raise TypeError(
+            f"{model.__class__.__name__} has no .bhat DataFrame"
+        )
+    return dict(zip(model.bhat.columns, model.bhat.row(0)))
+
+
+def coef(model):
+    """R: ``coef()`` — coefficients as ``{name: estimate}``.
+
+    Works for ``lm`` / ``glm`` / ``gam`` / ``bam`` / ``lme``. For ``lme``
+    this returns FIXED effects only (= R's ``fixef(m)``); R's
+    ``coef.lmerMod`` returns per-group BLUPs which hea doesn't compute
+    in the same shape — use ``fixef()`` + ``ranef()`` to assemble.
+    """
+    return _bhat_to_dict(model)
+
+
+def coefficients(model):
+    """R alias for :func:`coef`."""
+    return coef(model)
+
+
+def fixef(model):
+    """R: ``fixef()`` — fixed-effect coefficients (lme).
+
+    For non-mixed models, identical to :func:`coef`.
+    """
+    return coef(model)
+
+
+def ranef(model):
+    """R: ``ranef()`` — random effects (lme only)."""
+    if hasattr(model, "ranef"):
+        return model.ranef
+    raise TypeError(
+        f"ranef(): {model.__class__.__name__} has no random effects"
+    )
+
+
+def resid(model, type=None):
+    """R: ``resid()`` / ``residuals()`` — residuals as 1D ``ndarray``.
+
+    For ``glm`` / ``gam`` / ``bam``, ``type`` selects among
+    ``{"deviance"`` (default, matches R), ``"pearson"``, ``"working"``,
+    ``"response"}``. ``lm`` and ``lme`` only have response residuals;
+    pass ``type=None`` or ``"response"`` (anything else raises).
+    """
+    if hasattr(model, "residuals_of"):
+        return model.residuals_of(type or "deviance")
+    if type not in (None, "response"):
+        raise ValueError(
+            f"resid(): type={type!r} not supported for "
+            f"{model.__class__.__name__} (only 'response' / None)"
+        )
+    r = getattr(model, "residuals", None)
+    if isinstance(r, pl.DataFrame):
+        return r.to_series().to_numpy()
+    if isinstance(r, np.ndarray):
+        return r
+    if isinstance(r, pl.Series):
+        return r.to_numpy()
+    raise TypeError(
+        f"resid(): {model.__class__.__name__} has no usable residuals"
+    )
+
+
+def residuals(model, type=None):
+    """R alias for :func:`resid`."""
+    return resid(model, type)
+
+
+def fitted(model):
+    """R: ``fitted()`` — fitted values as 1D ``ndarray``.
+
+    For lm/glm this is the response-scale prediction (μ̂); for gam/lme
+    same. Equivalent to ``model.predict()`` on the training data.
+    """
+    fv = getattr(model, "fitted_values", None)
+    if fv is not None:
+        return np.asarray(fv)
+    f = getattr(model, "fitted", None)
+    if f is not None and not callable(f):
+        return np.asarray(f)
+    yh = getattr(model, "yhat", None)
+    if isinstance(yh, pl.DataFrame):
+        col = "Fitted" if "Fitted" in yh.columns else yh.columns[0]
+        return yh[col].to_numpy()
+    if isinstance(yh, np.ndarray):
+        return yh
+    raise TypeError(
+        f"fitted(): {model.__class__.__name__} has no fitted values"
+    )
+
+
+def fitted_values(model):
+    """R alias for :func:`fitted`."""
+    return fitted(model)
+
+
+def predict(model, *args, **kwargs):
+    """R: ``predict()`` — dispatches to ``model.predict(...)``.
+
+    Forwards positional and keyword arguments untouched, so
+    ``predict(m, newdata, interval="confidence")`` works exactly like
+    the bound method.
+    """
+    if not hasattr(model, "predict"):
+        raise TypeError(
+            f"predict(): {model.__class__.__name__} has no .predict()"
+        )
+    return model.predict(*args, **kwargs)
+
+
+def confint(model, level=0.95):
+    """R: ``confint()`` — confidence intervals for the coefficients.
+
+    Returns a polars DataFrame with one row per coefficient.
+
+    For ``lm``, ``level`` is honored exactly (refits CIs at
+    ``alpha = 1 - level``). For other models, only ``level=0.95``
+    is wired here — use the model's own method for other levels.
+    """
+    if level == 0.95 and hasattr(model, "ci_bhat"):
+        return model.ci_bhat
+    if hasattr(model, "compute_ci_bhat"):
+        return model.compute_ci_bhat(alpha=1 - level)
+    raise NotImplementedError(
+        f"confint(): level={level} not supported for "
+        f"{model.__class__.__name__}"
+    )
+
+
+def vcov(model):
+    """R: ``vcov()`` — variance-covariance matrix of the coefficients.
+
+    Return type varies by model: lm/glm return ``ndarray`` (``V_bhat``);
+    gam/bam return ``ndarray`` (``Vp``, the Bayesian posterior); lme
+    returns a polars ``DataFrame`` (``vcov_beta``, fixed effects only).
+    """
+    if hasattr(model, "vcov_beta"):  # lme
+        return model.vcov_beta
+    if hasattr(model, "Vp"):  # gam / bam (Bayesian posterior)
+        return model.Vp
+    if hasattr(model, "V_bhat"):  # lm / glm
+        return model.V_bhat
+    raise TypeError(
+        f"vcov(): {model.__class__.__name__} not supported"
+    )
+
+
+def logLik(model):
+    """R: ``logLik()`` — model log-likelihood.
+
+    For REML-fit ``lme`` (no plain ``loglike``), returns the REML
+    log-likelihood ``-REML_criterion / 2``, matching ``logLik.lmerMod``.
+    """
+    if hasattr(model, "loglike"):
+        return float(model.loglike)
+    if hasattr(model, "REML_criterion"):
+        return -float(model.REML_criterion) / 2.0
+    raise TypeError(
+        f"logLik(): {model.__class__.__name__} has no log-likelihood"
+    )
+
+
+def deviance(model):
+    """R: ``deviance()`` — model deviance.
+
+    For ``lm`` (no Gaussian deviance attribute), returns ``rss`` —
+    matches ``deviance.lm = sum(residuals^2)``.
+    """
+    if hasattr(model, "deviance") and not callable(model.deviance):
+        return float(model.deviance)
+    if hasattr(model, "rss"):  # lm
+        return float(model.rss)
+    raise TypeError(
+        f"deviance(): {model.__class__.__name__} has no deviance"
+    )
+
+
+def nobs(model):
+    """R: ``nobs()`` — number of observations used to fit."""
+    return int(model.n)
+
+
+def df_residual(model):
+    """R: ``df.residual()`` — residual degrees of freedom."""
+    for attr in ("df_residual", "df_residuals", "df_resid"):
+        v = getattr(model, attr, None)
+        if v is not None:
+            return float(v)
+    raise TypeError(
+        f"df_residual(): {model.__class__.__name__} has no residual df"
+    )
+
+
+def formula(model):
+    """R: ``formula()`` — extract the model formula (string)."""
+    return model.formula
+
+
+def model_matrix(model):
+    """R: ``model.matrix()`` — design matrix used at fit time.
+
+    Returns a polars DataFrame; columns are the named design columns
+    (intercept, dummy-coded factor levels, spline bases, …). R returns
+    an unnamed numeric matrix; we keep the names attached.
+    """
+    if hasattr(model, "X"):
+        return model.X
+    raise TypeError(
+        f"model_matrix(): {model.__class__.__name__} has no design matrix"
+    )
+
+
+def model_frame(model):
+    """R: ``model.frame()`` — original data passed at fit time."""
+    return model.data
+
+
+def AIC(*models):
+    """R: ``AIC()`` — scalar for one model, comparison table for many.
+
+    With one argument, returns ``model.AIC`` as a float. With two or
+    more, returns a polars DataFrame with row labels recovered from the
+    caller's variable names (R-style), plus columns ``df`` and ``AIC``.
+
+    Note: ``hea.AIC`` (without the ``from hea.R import *``) prints the
+    table and returns ``None``. This R-style version always returns.
+    """
+    if not models:
+        raise TypeError("AIC(): need at least one model")
+    if len(models) == 1:
+        return float(models[0].AIC)
+    import inspect
+    from .compare import _caller_names
+    names = _caller_names(models, inspect.currentframe().f_back)
+    return pl.DataFrame({
+        "":    names,
+        "df":  [m.npar for m in models],
+        "AIC": [float(m.AIC) for m in models],
+    })
+
+
+def BIC(*models):
+    """R: ``BIC()`` — scalar for one model, comparison table for many.
+
+    Same convention as :func:`AIC`.
+    """
+    if not models:
+        raise TypeError("BIC(): need at least one model")
+    if len(models) == 1:
+        return float(models[0].BIC)
+    import inspect
+    from .compare import _caller_names
+    names = _caller_names(models, inspect.currentframe().f_back)
+    return pl.DataFrame({
+        "":    names,
+        "df":  [m.npar for m in models],
+        "BIC": [float(m.BIC) for m in models],
+    })

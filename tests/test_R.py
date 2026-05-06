@@ -378,3 +378,279 @@ def test_rnorm_size_and_params():
     # very loose sanity
     assert abs(np.mean(out) - 10) < 0.5
     assert abs(np.std(out, ddof=1) - 2) < 0.5
+
+
+# ---------------------------------------------------------------------------
+# Model generics
+# ---------------------------------------------------------------------------
+
+
+from hea.R import (  # noqa: E402  — grouped with the model-generic tests
+    AIC as R_AIC, BIC as R_BIC,
+    coef, coefficients, confint, deviance,
+    df_residual, fitted, fitted_values, fixef,
+    formula as R_formula,
+    logLik, model_frame, model_matrix, nobs,
+    predict as R_predict, ranef, resid,
+    residuals as R_residuals, vcov,
+)
+
+
+@pytest.fixture(scope="module")
+def gala():
+    return hea.data("gala", package="faraway")
+
+
+@pytest.fixture(scope="module")
+def m_lm(gala):
+    return hea.lm("Species ~ Area + Elevation", gala)
+
+
+@pytest.fixture(scope="module")
+def m_glm(gala):
+    return hea.glm("Species ~ Area + Elevation", gala, family=hea.poisson())
+
+
+@pytest.fixture(scope="module")
+def m_gam():
+    mt = hea.data("mtcars", package="R")
+    return hea.gam("mpg ~ s(wt) + s(hp)", mt)
+
+
+@pytest.fixture(scope="module")
+def m_lme():
+    sleep = hea.data("sleepstudy", package="lme4")
+    return hea.lme("Reaction ~ Days + (Days|Subject)", sleep)
+
+
+# ---- coef / coefficients / fixef ------------------------------------
+
+
+def test_coef_returns_named_dict(m_lm):
+    c = coef(m_lm)
+    assert isinstance(c, dict)
+    assert set(c.keys()) == {"(Intercept)", "Area", "Elevation"}
+    assert all(isinstance(v, float) for v in c.values())
+
+
+def test_coefficients_alias(m_lm):
+    assert coefficients(m_lm) == coef(m_lm)
+
+
+def test_coef_works_on_glm_gam_lme(m_glm, m_gam, m_lme):
+    assert "(Intercept)" in coef(m_glm)
+    # gam: intercept + 9 wt basis + 9 hp basis
+    assert "(Intercept)" in coef(m_gam)
+    # lme: fixed effects only (= fixef)
+    c = coef(m_lme)
+    assert set(c.keys()) == {"(Intercept)", "Days"}
+
+
+def test_fixef_equals_coef(m_lm, m_lme):
+    assert fixef(m_lm) == coef(m_lm)
+    assert fixef(m_lme) == coef(m_lme)
+
+
+def test_ranef_returns_random_effects(m_lme):
+    re = ranef(m_lme)
+    assert re is not None  # actual structure left to the model
+
+
+def test_ranef_raises_for_non_mixed(m_lm):
+    with pytest.raises(TypeError, match="random effects"):
+        ranef(m_lm)
+
+
+# ---- residuals / fitted / predict -----------------------------------
+
+
+def test_resid_shape_and_alias(m_lm):
+    r = resid(m_lm)
+    assert isinstance(r, np.ndarray)
+    assert r.shape == (30,)
+    np.testing.assert_array_equal(R_residuals(m_lm), r)
+
+
+def test_resid_type_dispatch_glm(m_glm):
+    """For glm/gam, ``type=`` dispatches via ``residuals_of()``."""
+    dev = resid(m_glm)  # default = deviance
+    pearson = resid(m_glm, type="pearson")
+    response = resid(m_glm, type="response")
+    assert dev.shape == pearson.shape == response.shape == (30,)
+    # response residuals are y - mu, easy to verify magnitude differs
+    assert not np.allclose(dev, response)
+
+
+def test_resid_type_invalid_for_lm(m_lm):
+    with pytest.raises(ValueError, match="not supported"):
+        resid(m_lm, type="pearson")
+
+
+def test_fitted_shape_matches_resid(m_lm, m_glm, m_gam, m_lme):
+    for m in (m_lm, m_glm, m_gam, m_lme):
+        f = fitted(m)
+        r = resid(m)
+        assert isinstance(f, np.ndarray)
+        assert f.shape == r.shape
+
+
+def test_fitted_values_alias(m_glm):
+    np.testing.assert_array_equal(fitted_values(m_glm), fitted(m_glm))
+
+
+def test_predict_dispatches_to_method(m_lm):
+    out = R_predict(m_lm)
+    # lm.predict() returns a polars DataFrame with "Fitted" column
+    assert isinstance(out, pl.DataFrame)
+    np.testing.assert_array_almost_equal(
+        out["Fitted"].to_numpy(), fitted(m_lm)
+    )
+
+
+# ---- confint --------------------------------------------------------
+
+
+def test_confint_default_level_returns_cached(m_lm):
+    out = confint(m_lm)
+    assert isinstance(out, pl.DataFrame)
+    assert out.shape[0] == 3
+
+
+def test_confint_custom_level_lm_recomputes(m_lm):
+    """``level=0.99`` is wider than ``level=0.95`` for lm."""
+    ci_95 = confint(m_lm, level=0.95)
+    ci_99 = confint(m_lm, level=0.99)
+    # both have shape (3, 3): coef, low, high (column names differ)
+    assert ci_95.shape == ci_99.shape
+    # 99% CI is strictly wider than 95% CI
+    lo95 = ci_95[ci_95.columns[1]].to_numpy()
+    hi95 = ci_95[ci_95.columns[2]].to_numpy()
+    lo99 = ci_99[ci_99.columns[1]].to_numpy()
+    hi99 = ci_99[ci_99.columns[2]].to_numpy()
+    assert np.all(lo99 < lo95)
+    assert np.all(hi99 > hi95)
+
+
+# ---- vcov -----------------------------------------------------------
+
+
+def test_vcov_shape_lm_glm(m_lm, m_glm):
+    assert vcov(m_lm).shape == (3, 3)
+    assert vcov(m_glm).shape == (3, 3)
+
+
+def test_vcov_gam_uses_Vp(m_gam):
+    """gam's vcov is the Bayesian posterior ``Vp``."""
+    V = vcov(m_gam)
+    assert V.shape == m_gam.Vp.shape
+    np.testing.assert_array_equal(V, m_gam.Vp)
+
+
+def test_vcov_lme_returns_dataframe(m_lme):
+    """lme stores ``vcov_beta`` as a DataFrame with named cols."""
+    V = vcov(m_lme)
+    assert isinstance(V, pl.DataFrame)
+    assert V.shape == (2, 2)
+
+
+# ---- scalars: logLik / deviance / nobs / df_residual ----------------
+
+
+def test_logLik_matches_loglike(m_lm, m_glm, m_gam):
+    for m in (m_lm, m_glm, m_gam):
+        assert logLik(m) == pytest.approx(m.loglike)
+
+
+def test_logLik_lme_REML_uses_minus_half_criterion(m_lme):
+    """R's ``logLik.lmerMod(REML=TRUE) = -REML_criterion / 2``."""
+    expected = -m_lme.REML_criterion / 2.0
+    assert logLik(m_lme) == pytest.approx(expected)
+
+
+def test_deviance_glm_gam(m_glm, m_gam):
+    assert deviance(m_glm) == pytest.approx(m_glm.deviance)
+    assert deviance(m_gam) == pytest.approx(m_gam.deviance)
+
+
+def test_deviance_lm_falls_back_to_rss(m_lm):
+    """``deviance.lm = sum(resid^2) = rss``."""
+    assert deviance(m_lm) == pytest.approx(m_lm.rss)
+    np.testing.assert_allclose(
+        deviance(m_lm), float((resid(m_lm) ** 2).sum())
+    )
+
+
+def test_nobs(m_lm, m_glm, m_gam, m_lme):
+    assert nobs(m_lm) == 30
+    assert nobs(m_glm) == 30
+    assert nobs(m_gam) == 32
+    assert nobs(m_lme) == 180
+
+
+def test_df_residual_lm(m_lm):
+    # n=30, p=3 (intercept + Area + Elevation); df_residuals = 30 - 3 = 27
+    assert df_residual(m_lm) == 27
+
+
+def test_df_residual_raises_for_reml_lme(m_lme):
+    """REML lme fit has no defined residual df; we raise."""
+    with pytest.raises(TypeError, match="residual df"):
+        df_residual(m_lme)
+
+
+# ---- formula / model_matrix / model_frame ---------------------------
+
+
+def test_formula_returns_string(m_lm):
+    assert R_formula(m_lm) == "Species ~ Area + Elevation"
+
+
+def test_model_matrix_returns_design(m_lm):
+    X = model_matrix(m_lm)
+    assert isinstance(X, pl.DataFrame)
+    assert X.columns == ["(Intercept)", "Area", "Elevation"]
+    assert X.height == 30
+
+
+def test_model_frame_returns_data(m_lm, gala):
+    """``model.frame()`` returns the original data passed at fit time."""
+    assert model_frame(m_lm) is gala
+
+
+# ---- AIC / BIC: scalar vs comparison table --------------------------
+
+
+def test_AIC_single_model_returns_scalar(m_lm):
+    assert R_AIC(m_lm) == pytest.approx(m_lm.AIC)
+    assert isinstance(R_AIC(m_lm), float)
+
+
+def test_BIC_single_model_returns_scalar(m_lm):
+    assert R_BIC(m_lm) == pytest.approx(m_lm.BIC)
+    assert isinstance(R_BIC(m_lm), float)
+
+
+def test_AIC_multiple_models_returns_table(gala):
+    m1 = hea.lm("Species ~ Area", gala)
+    m2 = hea.lm("Species ~ Area + Elevation", gala)
+    out = R_AIC(m1, m2)
+    assert isinstance(out, pl.DataFrame)
+    assert out.height == 2
+    assert "df" in out.columns
+    assert "AIC" in out.columns
+    # row labels should recover the caller's variable names
+    label_col = out[""]
+    assert label_col.to_list() == ["m1", "m2"]
+
+
+def test_AIC_no_args_raises():
+    with pytest.raises(TypeError, match="at least one"):
+        R_AIC()
+
+
+def test_R_AIC_does_not_print_or_return_none(m_lm, capsys):
+    """``hea.R.AIC`` must always return; never call ``print()``."""
+    out = R_AIC(m_lm)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert out is not None
