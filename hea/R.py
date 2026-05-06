@@ -2153,6 +2153,9 @@ def terms(model) -> Terms:
     return Terms(formula=f, response=response, term_labels=labels)
 
 
+_UPDATE_AUTO_FORWARD = ("family", "method", "weights", "REML")
+
+
 def update(model, formula, **kwargs):
     """R: ``update()`` — refit on the same data with a new formula.
 
@@ -2165,10 +2168,14 @@ def update(model, formula, **kwargs):
       original ``model.formula`` wrapped in parentheses, so terms can
       be added or removed without retyping.
 
-    ``family`` is auto-forwarded for glm/gam/bam so ``update(m, "y ~ z")``
-    keeps the original family. Other constructor kwargs (``weights``,
-    ``method``, ``REML``, ``offset``, …) are NOT auto-forwarded — pass
-    them explicitly via ``**kwargs`` if you need them carried over.
+    Constructor kwargs auto-forwarded (when the model class accepts the
+    name AND the model exposes a non-``None`` public attribute):
+    ``family`` (glm/gam/bam), ``method`` (lm/gam/bam), ``weights`` (lm),
+    ``REML`` (lme). User-supplied ``**kwargs`` always override the
+    auto-forward. Anything not on this list (``offset``, ``sp``,
+    ``select``, ``control``, …) must be passed explicitly if needed —
+    forwarding ``sp`` for example would tie the new fit's smoothing
+    parameters to the old formula's smooth structure.
     """
     f = formula.strip()
     if "~" not in f:
@@ -2186,8 +2193,18 @@ def update(model, formula, **kwargs):
             new_rhs = new_rhs.replace(".", f"({old_rhs})")
         f = f"{new_lhs} ~ {new_rhs}"
     cls = type(model)
-    if hasattr(model, "family") and "family" not in kwargs:
-        kwargs["family"] = model.family
+    import inspect
+    try:
+        accepted = set(inspect.signature(cls.__init__).parameters)
+    except (TypeError, ValueError):
+        accepted = set()
+    for name in _UPDATE_AUTO_FORWARD:
+        if name in kwargs or name not in accepted:
+            continue
+        v = getattr(model, name, None)
+        if v is None or callable(v):
+            continue
+        kwargs[name] = v
     return cls(f, model.data, **kwargs)
 
 
@@ -2278,19 +2295,21 @@ def rstandard(model, type=None):
 
 
 def _loo_sigma_lm(model) -> np.ndarray:
-    """Leave-one-out σ estimates ``σ_(-i)`` for an unweighted ``lm``.
+    """Leave-one-out σ estimates ``σ_(-i)`` for ``lm`` (weighted-aware).
 
     Uses the closed form
-    ``σ_(-i)^2 = (RSS - e_i^2 / (1 - h_i)) / (n - p - 1)``.
-    Raises if the fit was weighted or if ``n - p - 1 ≤ 0``.
+    ``σ_(-i)^2 = (RSS_w - w_i · e_i^2 / (1 - h_i)) / (n - p - 1)``,
+    with ``RSS_w = Σ w_i · e_i^2`` (the weighted residual sum of squares
+    R's ``summary.lm`` uses for ``deviance(m)``). For unweighted lm,
+    ``w_i = 1`` and this reduces to the standard ``(RSS - e_i^2 /
+    (1-h_i)) / (n-p-1)``. Raises if ``n - p - 1 ≤ 0``.
+
+    Note: hea's ``m.rss`` is the *unweighted* sum of squared residuals
+    even for weighted fits, so we compute ``RSS_w`` from primitives here
+    instead of using ``m.rss``.
     """
-    if getattr(model, "weights", None) is not None:
-        raise NotImplementedError(
-            "deletion diagnostics for weighted lm not implemented yet"
-        )
     e = model.residuals.to_series().to_numpy()
     h = np.asarray(model.leverage)
-    rss = float(model.rss)
     n = int(model.n)
     p = int(model.p)
     df_loo = n - p - 1
@@ -2299,9 +2318,24 @@ def _loo_sigma_lm(model) -> np.ndarray:
             "deletion diagnostics need n - p - 1 > 0; "
             f"got n={n}, p={p}"
         )
+    weights = getattr(model, "weights", None)
+    if weights is None:
+        w = np.ones_like(e)
+    else:
+        w = np.asarray(weights, dtype=float)
+    weighted_rss = float(np.sum(w * e * e))
     one_minus_h = np.clip(1 - h, 1e-12, None)
-    rss_loo = rss - (e ** 2) / one_minus_h
+    rss_loo = weighted_rss - (w * e * e) / one_minus_h
     return np.sqrt(np.maximum(rss_loo, 0.0) / df_loo)
+
+
+def _lm_weights_array(model) -> np.ndarray:
+    """Return the weights as an ``ndarray`` of length ``n`` (all-ones if unweighted)."""
+    e = model.residuals.to_series().to_numpy()
+    weights = getattr(model, "weights", None)
+    if weights is None:
+        return np.ones_like(e)
+    return np.asarray(weights, dtype=float)
 
 
 def _xtwxinv_glm_gam(model) -> np.ndarray:
@@ -2416,23 +2450,15 @@ def rstudent(model):
     where ``d_i`` and ``p_i`` are raw deviance and Pearson residuals.
     Known-scale families fix ``σ_(-i) = 1``.
     """
-    # lm path — closed form on internally studentized residuals
+    # lm path — direct formula ``e_i · √w_i / (σ_(-i) · √(1-h_i))``
+    # (equivalent to the closed form for unweighted lm; weighted-aware).
     if hasattr(model, "std_residuals"):
-        if getattr(model, "weights", None) is not None:
-            raise NotImplementedError(
-                "rstudent(): weighted lm not implemented yet"
-            )
-        r = np.asarray(model.std_residuals)
-        n = int(model.n)
-        p = int(model.p)
-        df_resid = n - p
-        if df_resid - 1 <= 0:
-            raise ValueError(
-                f"rstudent(): need n - p - 1 > 0; got n={n}, p={p}"
-            )
-        return r * np.sqrt(
-            (df_resid - 1) / np.clip(df_resid - r ** 2, 1e-12, None)
-        )
+        e = model.residuals.to_series().to_numpy()
+        h = np.asarray(model.leverage)
+        sigma_loo = _loo_sigma_lm(model)
+        sqrt_w = np.sqrt(_lm_weights_array(model))
+        one_minus_h = np.clip(1 - h, 1e-12, None)
+        return e * sqrt_w / (sigma_loo * np.sqrt(one_minus_h))
 
     # glm / gam / bam path — Williams' likelihood residual
     if not hasattr(model, "residuals_of"):
@@ -2484,9 +2510,14 @@ def dffits(model):
     the raw response-scale Pearson residual.
     """
     if hasattr(model, "std_residuals"):  # lm
-        rs = rstudent(model)
-        h = hatvalues(model)
-        return rs * np.sqrt(h / np.clip(1 - h, 1e-12, None))
+        # ``DFFITS_i = e_i · √w_i · √h_i / (σ_(-i) · (1 - h_i))``
+        # (equivalent to ``rstudent · √(h/(1-h))`` and weighted-aware).
+        e = model.residuals.to_series().to_numpy()
+        h = np.asarray(model.leverage)
+        sigma_loo = _loo_sigma_lm(model)
+        sqrt_w = np.sqrt(_lm_weights_array(model))
+        one_minus_h = np.clip(1 - h, 1e-12, None)
+        return e * sqrt_w * np.sqrt(h) / (sigma_loo * one_minus_h)
 
     if not hasattr(model, "residuals_of"):
         raise TypeError(
@@ -2511,19 +2542,18 @@ def dfbetas(model):
     ``bam``: IRLS closed form using ``Vp/scale`` (or ``V_bhat/dispersion``)
     and IRLS working weights recovered from ``leverage``.
     """
-    # lm path
+    # lm path — closed form
+    # β̂ - β̂_(-i) = (X'WX)^{-1} · X_i · w_i · e_i / (1 - h_i)
+    # (XtXinv stores (X'WX)^{-1} in hea's weighted lm.)
     if hasattr(model, "XtXinv"):
-        if getattr(model, "weights", None) is not None:
-            raise NotImplementedError(
-                "dfbetas(): weighted lm not implemented yet"
-            )
         X = model.X.to_numpy().astype(float)
         XtXinv = np.asarray(model.XtXinv)
         e = model.residuals.to_series().to_numpy()
         h = hatvalues(model)
         one_minus_h = np.clip(1 - h, 1e-12, None)
+        w = _lm_weights_array(model)
         sigma_loo = _loo_sigma_lm(model)
-        delta = (X @ XtXinv) * (e / one_minus_h)[:, None]
+        delta = (X @ XtXinv) * (w * e / one_minus_h)[:, None]
         sd_j = np.sqrt(np.diag(XtXinv))
         sd_j = np.where(sd_j > 0, sd_j, 1.0)
         out = delta / (sigma_loo[:, None] * sd_j[None, :])
@@ -2571,16 +2601,13 @@ def influence(model):
     """
     # lm path
     if hasattr(model, "XtXinv"):
-        if getattr(model, "weights", None) is not None:
-            raise NotImplementedError(
-                "influence(): weighted lm not implemented yet"
-            )
         X = model.X.to_numpy().astype(float)
         XtXinv = np.asarray(model.XtXinv)
         e = model.residuals.to_series().to_numpy()
         h = np.asarray(model.leverage)
         one_minus_h = np.clip(1 - h, 1e-12, None)
-        delta = (X @ XtXinv) * (e / one_minus_h)[:, None]
+        w = _lm_weights_array(model)
+        delta = (X @ XtXinv) * (w * e / one_minus_h)[:, None]
         return {
             "hat": h,
             "sigma": _loo_sigma_lm(model),

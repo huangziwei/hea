@@ -822,14 +822,45 @@ def test_influence_glm_returns_dict(m_glm):
     assert set(infl.keys()) == {"hat", "sigma", "coefficients", "residuals"}
 
 
-def test_diagnostics_raise_for_weighted_lm(gala):
-    """Diagnostics that need leave-one-out σ refuse weighted lm."""
-    w = np.ones(gala.height)
-    w[0] = 2.0
-    m_wt = hea.lm("Species ~ Area + Elevation", gala, weights=w)
-    for fn in (rstudent, dffits, dfbetas, influence):
-        with pytest.raises(NotImplementedError, match="weighted"):
-            fn(m_wt)
+def test_weighted_lm_diagnostics_match_loo_refit(gala):
+    """Closed-form weighted-lm diagnostics should match an actual
+    leave-one-out refit to numerical precision."""
+    rng = np.random.default_rng(0)
+    w = rng.uniform(0.5, 2.0, gala.height)
+    m_w = hea.lm("Species ~ Area + Elevation", gala, weights=w)
+
+    # Refit dropping observation 0
+    m_drop0 = hea.lm(
+        "Species ~ Area + Elevation", gala.slice(1), weights=w[1:]
+    )
+    b_full = np.array(list(coef(m_w).values()))
+    b_drop = np.array(list(coef(m_drop0).values()))
+    delta = b_full - b_drop
+
+    # σ_(-0) from the refit's own weighted RSS
+    e_drop = m_drop0.residuals.to_series().to_numpy()
+    weighted_rss_drop = float(np.sum(w[1:] * e_drop * e_drop))
+    sigma_loo_0 = np.sqrt(weighted_rss_drop / (m_w.n - m_w.p - 1))
+
+    XtXinv = np.asarray(m_w.XtXinv)
+    sd_j = np.sqrt(np.diag(XtXinv))
+    expected_dfbetas_0 = delta / (sigma_loo_0 * sd_j)
+
+    np.testing.assert_allclose(
+        np.array(dfbetas(m_w).row(0)), expected_dfbetas_0, atol=1e-10
+    )
+    # influence(m)['sigma'][0] should equal that LOO σ exactly.
+    assert influence(m_w)["sigma"][0] == pytest.approx(sigma_loo_0, rel=1e-12)
+
+
+def test_weighted_lm_rstudent_dffits_consistent(gala):
+    """``DFFITS_i = rstudent_i · √(h_i / (1 - h_i))`` must hold for weighted lm."""
+    rng = np.random.default_rng(1)
+    w = rng.uniform(0.5, 2.0, gala.height)
+    m_w = hea.lm("Species ~ Area + Elevation", gala, weights=w)
+    h = hatvalues(m_w)
+    expected = rstudent(m_w) * np.sqrt(h / (1 - h))
+    np.testing.assert_allclose(dffits(m_w), expected, rtol=1e-12)
 
 
 # ---------------------------------------------------------------------------
@@ -1504,6 +1535,34 @@ def test_update_lhs_dot_substitution(gala, m_lm):
     new = update(m_lm, "Species ~ . - Area")
     assert "Area" not in coef(new)
     assert "Elevation" in coef(new)
+
+
+def test_update_carries_weights_for_lm(gala):
+    """``weights`` is auto-forwarded when the model was fit with weights."""
+    rng = np.random.default_rng(0)
+    w = rng.uniform(0.5, 2.0, gala.height)
+    m_w = hea.lm("Species ~ Area", gala, weights=w)
+    new = update(m_w, ". ~ . + Elevation")
+    assert new.weights is not None
+    np.testing.assert_array_equal(new.weights, w)
+
+
+def test_update_carries_method_for_gam():
+    """``method`` (REML/ML) is auto-forwarded for gam."""
+    mt = hea.data("mtcars", package="R")
+    m_gam_reml = hea.gam("mpg ~ s(wt)", mt, method="REML")
+    new = update(m_gam_reml, ". ~ . + s(hp)")
+    assert new.method == "REML"
+
+
+def test_update_kwargs_override_auto_forward(gala):
+    """Explicit kwargs win over the auto-forward."""
+    rng = np.random.default_rng(0)
+    w = rng.uniform(0.5, 2.0, gala.height)
+    m_w = hea.lm("Species ~ Area", gala, weights=w)
+    # Override: refit unweighted
+    new = update(m_w, ". ~ . + Elevation", weights=None)
+    assert new.weights is None
 
 
 # ---- terms ----------------------------------------------------------
