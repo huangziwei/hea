@@ -42,6 +42,7 @@ import polars as pl
 __all__ = [
     "DataFrame",
     "GroupBy",
+    "LazyFrame",
     "Summary",
     "desc",
     "tbl",
@@ -820,6 +821,17 @@ class DataFrame(pl.DataFrame):
             return self.to_series(idx)
         return self.get_column(col)
 
+    # ---- lazy frame ---------------------------------------------------
+
+    def lazy(self) -> "LazyFrame":
+        """Start a lazy query; returns a hea.LazyFrame.
+
+        Overrides ``pl.DataFrame.lazy`` (which would return ``pl.LazyFrame``
+        via ``wrap_ldf`` and lose subclass identity through the eager-via-lazy
+        round-trip used by ``with_columns``/``sort``/``join``/etc.).
+        """
+        return LazyFrame._from_pyldf(self._df.lazy())
+
     # ---- summary ------------------------------------------------------
 
     def summary(
@@ -872,6 +884,28 @@ class DataFrame(pl.DataFrame):
                 _summary_block(col, self.get_column(col), maxsum=maxsum, digits=digits)
             )
         return Summary(blocks, width=width)
+
+
+class LazyFrame(pl.LazyFrame):
+    """``pl.LazyFrame`` that re-wraps materialized results as ``hea.DataFrame``.
+
+    Empty body for the most part — polars LazyFrame methods route through
+    ``self._from_pyldf(...)``, which respects the subclass, so chains
+    (``.filter(...).with_columns(...).join(...)``) propagate
+    ``hea.LazyFrame`` automatically. The override is only needed where
+    polars constructs the materialized frame via ``wrap_df(...)``
+    (`polars/lazyframe/frame.py:2510`), which hardcodes
+    ``pl.DataFrame._from_pydf``. We re-wrap on the way out.
+    """
+
+    def collect(self, *args, **kwargs):
+        out = super().collect(*args, **kwargs)
+        if isinstance(out, pl.DataFrame):
+            return DataFrame._from_pydf(out._df)
+        # background=True path — polars returns InProcessQuery whose
+        # .fetch() / .fetch_blocking() still uses pl.DataFrame. Rare
+        # enough to leave un-wrapped for now (allowlisted).
+        return out
 
 
 class GroupBy:
