@@ -659,3 +659,175 @@ def test_R_AIC_does_not_print_or_return_none(m_lm, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert out is not None
+
+
+# ---------------------------------------------------------------------------
+# Regression diagnostics
+# ---------------------------------------------------------------------------
+
+
+from hea.R import (  # noqa: E402  — grouped with the diagnostic tests
+    cooks_distance, dfbetas, dffits, hatvalues, influence,
+    rstandard, rstudent,
+)
+
+
+def test_hatvalues_sum_to_p_full_rank(m_lm):
+    """For an unweighted full-rank lm, ``sum(h_ii) == p``."""
+    assert hatvalues(m_lm).sum() == pytest.approx(m_lm.p)
+
+
+def test_hatvalues_in_unit_interval(m_lm, m_glm, m_gam):
+    for m in (m_lm, m_glm, m_gam):
+        h = hatvalues(m)
+        assert (h >= -1e-9).all()
+        assert (h <= 1 + 1e-9).all()
+
+
+def test_rstandard_matches_cached_attribute(m_lm, m_glm):
+    np.testing.assert_array_equal(
+        rstandard(m_lm), m_lm.std_residuals
+    )
+    np.testing.assert_array_equal(
+        rstandard(m_glm), m_glm.std_dev_residuals
+    )
+
+
+def test_rstandard_pearson_dispatch(m_glm):
+    np.testing.assert_array_equal(
+        rstandard(m_glm, type="pearson"), m_glm.std_pearson_residuals
+    )
+
+
+def test_rstandard_invalid_type_raises(m_glm):
+    with pytest.raises(ValueError, match="not recognized"):
+        rstandard(m_glm, type="bogus")
+
+
+def test_rstandard_algebraic_identity(m_lm):
+    """``rstandard_i = e_i / (σ · √(1 − h_i))`` (unweighted lm)."""
+    e = m_lm.residuals.to_series().to_numpy()
+    h = hatvalues(m_lm)
+    expected = e / (m_lm.sigma * np.sqrt(1 - h))
+    np.testing.assert_allclose(rstandard(m_lm), expected, rtol=1e-10)
+
+
+def test_rstudent_closed_form_matches_loo_refit(m_lm, gala):
+    """Spot-check ``rstudent`` by refitting lm without observation 0.
+
+    R's identity: ``rstudent_i = e_i / (σ_(-i) · √(1 − h_i))``.
+    Refit ``lm`` with row 0 dropped, recompute σ from the new fit, and
+    verify the rstudent value at i=0 lines up with that identity.
+    """
+    rs_full = rstudent(m_lm)
+    h = hatvalues(m_lm)
+    e0 = m_lm.residuals.to_series().to_numpy()[0]
+    h0 = h[0]
+
+    # Refit without row 0
+    gala_drop0 = gala.slice(1)  # drop first row
+    m_drop0 = hea.lm("Species ~ Area + Elevation", gala_drop0)
+    sigma_loo_0 = m_drop0.sigma  # σ from the leave-one-out fit
+
+    expected_rs0 = e0 / (sigma_loo_0 * np.sqrt(1 - h0))
+    assert rs_full[0] == pytest.approx(expected_rs0, rel=1e-8)
+
+
+def test_rstudent_raises_for_glm(m_glm):
+    with pytest.raises(NotImplementedError, match="lm only"):
+        rstudent(m_glm)
+
+
+def test_cooks_distance_matches_unified_formula_lm(m_lm):
+    """``D_i = r_std_i^2 · h_i / ((1 − h_i) · p)`` for lm."""
+    h = hatvalues(m_lm)
+    r = rstandard(m_lm)
+    expected = r ** 2 * h / ((1 - h) * m_lm.p)
+    np.testing.assert_allclose(cooks_distance(m_lm), expected, rtol=1e-12)
+
+
+def test_cooks_distance_glm_uses_pearson_and_sum_hat(m_glm):
+    """``cooks.distance.glm = std_pearson^2 · h / ((1−h) · sum(h))``."""
+    h = hatvalues(m_glm)
+    rp = rstandard(m_glm, type="pearson")
+    expected = rp ** 2 * h / ((1 - h) * h.sum())
+    np.testing.assert_allclose(cooks_distance(m_glm), expected, rtol=1e-12)
+
+
+def test_dffits_matches_rstudent_x_leverage_term(m_lm):
+    """``DFFITS_i = r_i^* · √(h_i / (1 − h_i))``."""
+    expected = rstudent(m_lm) * np.sqrt(hatvalues(m_lm) / (1 - hatvalues(m_lm)))
+    np.testing.assert_allclose(dffits(m_lm), expected, rtol=1e-12)
+
+
+def test_dfbetas_shape_and_columns(m_lm):
+    out = dfbetas(m_lm)
+    assert isinstance(out, pl.DataFrame)
+    assert out.shape == (30, 3)
+    assert out.columns == ["(Intercept)", "Area", "Elevation"]
+
+
+def test_dfbetas_matches_loo_refit_first_obs(m_lm, gala):
+    """Check ``dfbetas[0, j]`` against an actual leave-one-out refit.
+
+    R-faithful formula: ``dfbetas_ij = (β̂_j − β̂_(-i)_j) / (σ_(-i) · √diag(XtXinv)_j)``.
+    Refit dropping row 0 and verify each coefficient agrees.
+    """
+    out = dfbetas(m_lm).row(0)  # dfbetas for observation 0 across all coefs
+
+    gala_drop0 = gala.slice(1)
+    m_drop0 = hea.lm("Species ~ Area + Elevation", gala_drop0)
+    bhat_full = np.array(list(coef(m_lm).values()))
+    bhat_drop = np.array(list(coef(m_drop0).values()))
+    delta = bhat_full - bhat_drop
+    sigma_loo = m_drop0.sigma
+    sd_j = np.sqrt(np.diag(m_lm.XtXinv))
+    expected = delta / (sigma_loo * sd_j)
+
+    np.testing.assert_allclose(np.array(out), expected, rtol=1e-8)
+
+
+def test_influence_returns_dict_with_four_keys(m_lm):
+    infl = influence(m_lm)
+    assert set(infl.keys()) == {"hat", "sigma", "coefficients", "residuals"}
+    assert len(infl["hat"]) == 30
+    assert len(infl["sigma"]) == 30
+    assert len(infl["residuals"]) == 30
+    assert isinstance(infl["coefficients"], pl.DataFrame)
+    assert infl["coefficients"].shape == (30, 3)
+
+
+def test_influence_hat_matches_hatvalues(m_lm):
+    np.testing.assert_array_equal(influence(m_lm)["hat"], hatvalues(m_lm))
+
+
+def test_influence_sigma_at_obs0_matches_loo_refit(m_lm, gala):
+    """``influence(m)['sigma'][0]`` should equal ``σ`` from the row-0-dropped fit."""
+    sigma_full = influence(m_lm)["sigma"]
+    m_drop0 = hea.lm("Species ~ Area + Elevation", gala.slice(1))
+    assert sigma_full[0] == pytest.approx(m_drop0.sigma, rel=1e-8)
+
+
+def test_dfbetas_raises_for_glm(m_glm):
+    with pytest.raises(NotImplementedError, match="lm only"):
+        dfbetas(m_glm)
+
+
+def test_dffits_raises_for_glm(m_glm):
+    with pytest.raises(NotImplementedError, match="lm only"):
+        dffits(m_glm)
+
+
+def test_influence_raises_for_glm(m_glm):
+    with pytest.raises(NotImplementedError, match="lm only"):
+        influence(m_glm)
+
+
+def test_diagnostics_raise_for_weighted_lm(gala):
+    """Diagnostics that need leave-one-out σ refuse weighted lm."""
+    w = np.ones(gala.height)
+    w[0] = 2.0
+    m_wt = hea.lm("Species ~ Area + Elevation", gala, weights=w)
+    for fn in (rstudent, dffits, dfbetas, influence):
+        with pytest.raises(NotImplementedError, match="weighted"):
+            fn(m_wt)

@@ -73,6 +73,9 @@ __all__ = [
     "logLik", "deviance", "nobs", "df_residual",
     "formula", "model_matrix", "model_frame",
     "AIC", "BIC",
+    # regression diagnostics
+    "hatvalues", "rstandard", "rstudent",
+    "cooks_distance", "dffits", "dfbetas", "influence",
 ]
 
 
@@ -1017,3 +1020,211 @@ def BIC(*models):
         "df":  [m.npar for m in models],
         "BIC": [float(m.BIC) for m in models],
     })
+
+
+# ---- regression diagnostics -----------------------------------------
+#
+# Most diagnostics are defined in terms of three primitives that hea
+# already caches at fit time: ``leverage`` (h_ii), the standardized
+# residuals (``std_residuals`` for lm; ``std_dev_residuals`` /
+# ``std_pearson_residuals`` for glm/gam/bam), and the cross-product
+# inverse ``XtXinv`` (lm). The closed-form deletion diagnostics
+# (``rstudent`` / ``dffits`` / ``dfbetas`` / ``influence``) currently
+# implement the lm formulas; glm/gam variants use a different jackknife
+# approximation in R and are deferred to a later pass.
+
+def hatvalues(model):
+    """R: ``hatvalues()`` — leverage ``h_ii`` (hat-matrix diagonal)."""
+    if hasattr(model, "leverage"):
+        return np.asarray(model.leverage)
+    raise TypeError(
+        f"hatvalues(): {model.__class__.__name__} has no leverage"
+    )
+
+
+def rstandard(model, type=None):
+    """R: ``rstandard()`` — internally studentized residuals.
+
+    For ``glm`` / ``gam`` / ``bam``, ``type`` selects between
+    ``"deviance"`` (default, matches ``rstandard.glm``) and ``"pearson"``.
+    For ``lm``, only one form exists (Gaussian) and ``type`` is ignored.
+    """
+    if type == "pearson" and hasattr(model, "std_pearson_residuals"):
+        return np.asarray(model.std_pearson_residuals)
+    if type not in (None, "deviance", "pearson"):
+        raise ValueError(
+            f"rstandard(): type={type!r} not recognized "
+            "(use 'deviance' or 'pearson')"
+        )
+    if hasattr(model, "std_dev_residuals"):
+        return np.asarray(model.std_dev_residuals)
+    if hasattr(model, "std_residuals"):
+        return np.asarray(model.std_residuals)
+    raise TypeError(
+        f"rstandard(): {model.__class__.__name__} has no standardized residuals"
+    )
+
+
+def _loo_sigma_lm(model) -> np.ndarray:
+    """Leave-one-out σ estimates ``σ_(-i)`` for an unweighted ``lm``.
+
+    Uses the closed form
+    ``σ_(-i)^2 = (RSS - e_i^2 / (1 - h_i)) / (n - p - 1)``.
+    Raises if the fit was weighted or if ``n - p - 1 ≤ 0``.
+    """
+    if getattr(model, "weights", None) is not None:
+        raise NotImplementedError(
+            "deletion diagnostics for weighted lm not implemented yet"
+        )
+    e = model.residuals.to_series().to_numpy()
+    h = np.asarray(model.leverage)
+    rss = float(model.rss)
+    n = int(model.n)
+    p = int(model.p)
+    df_loo = n - p - 1
+    if df_loo <= 0:
+        raise ValueError(
+            "deletion diagnostics need n - p - 1 > 0; "
+            f"got n={n}, p={p}"
+        )
+    one_minus_h = np.clip(1 - h, 1e-12, None)
+    rss_loo = rss - (e ** 2) / one_minus_h
+    return np.sqrt(np.maximum(rss_loo, 0.0) / df_loo)
+
+
+def rstudent(model):
+    """R: ``rstudent()`` — externally studentized residuals.
+
+    For ``lm`` (Gaussian), uses the closed form
+    ``r_i^* = r_i √((n-p-1) / (n-p - r_i^2))`` derived from the
+    leave-one-out σ estimate. ``glm`` / ``gam`` use a different jackknife
+    approximation in R and aren't supported yet.
+    """
+    if not hasattr(model, "std_residuals"):
+        raise NotImplementedError(
+            f"rstudent(): {model.__class__.__name__} not yet supported "
+            "(lm only — glm/gam need a different jackknife formula)"
+        )
+    if getattr(model, "weights", None) is not None:
+        raise NotImplementedError(
+            "rstudent(): weighted lm not implemented yet"
+        )
+    r = np.asarray(model.std_residuals)
+    n = int(model.n)
+    p = int(model.p)
+    df_resid = n - p
+    if df_resid - 1 <= 0:
+        raise ValueError(
+            f"rstudent(): need n - p - 1 > 0; got n={n}, p={p}"
+        )
+    return r * np.sqrt((df_resid - 1) / np.clip(df_resid - r ** 2, 1e-12, None))
+
+
+def cooks_distance(model):
+    """R: ``cooks.distance()`` — Cook's distance for each observation.
+
+    Uses the unified formula
+    ``D_i = r_i^2 · h_i / ((1 - h_i) · p)`` where ``r_i`` is the
+    standardized residual (deviance for glm/gam/bam, ordinary for lm)
+    and ``p`` is the effective parameter count. R's ``cooks.distance.lm``
+    uses ``model.p``; ``cooks.distance.glm`` uses ``sum(hat)`` — we
+    follow that split to match R numerically.
+    """
+    h = hatvalues(model)
+    one_minus_h = np.clip(1 - h, 1e-12, None)
+    if hasattr(model, "std_pearson_residuals"):  # glm / gam / bam
+        r = np.asarray(model.std_pearson_residuals)
+        p = float(np.sum(h))  # matches R's cooks.distance.glm
+    elif hasattr(model, "std_residuals"):  # lm
+        r = np.asarray(model.std_residuals)
+        p = float(model.p)
+    else:
+        raise TypeError(
+            f"cooks_distance(): {model.__class__.__name__} not supported"
+        )
+    if p <= 0:
+        raise ValueError("cooks_distance(): effective parameter count is zero")
+    return r ** 2 * h / (one_minus_h * p)
+
+
+def dffits(model):
+    """R: ``dffits()`` — DFFITS = ``r_i^* · √(h_i / (1 - h_i))``.
+
+    Currently lm-only (uses :func:`rstudent`).
+    """
+    rs = rstudent(model)  # raises for non-lm
+    h = hatvalues(model)
+    one_minus_h = np.clip(1 - h, 1e-12, None)
+    return rs * np.sqrt(h / one_minus_h)
+
+
+def dfbetas(model):
+    """R: ``dfbetas()`` — standardized leave-one-out coefficient changes.
+
+    Returns an ``n × p`` polars DataFrame whose columns are the design
+    columns (``(Intercept)``, predictors, …). Element ``[i, j]`` is the
+    change in ``β̂_j`` when observation ``i`` is dropped, scaled by
+    ``σ_(-i) · √((X'X)^{-1}_jj``.
+
+    Currently lm-only (uses ``XtXinv``).
+    """
+    if not hasattr(model, "XtXinv"):
+        raise NotImplementedError(
+            f"dfbetas(): {model.__class__.__name__} not yet supported (lm only)"
+        )
+    if getattr(model, "weights", None) is not None:
+        raise NotImplementedError(
+            "dfbetas(): weighted lm not implemented yet"
+        )
+    X = model.X.to_numpy().astype(float)
+    XtXinv = np.asarray(model.XtXinv)
+    e = model.residuals.to_series().to_numpy()
+    h = hatvalues(model)
+    one_minus_h = np.clip(1 - h, 1e-12, None)
+    sigma_loo = _loo_sigma_lm(model)
+
+    # β̂ - β̂_(-i) = (X·(X'X)^{-1}) · diag(e_i / (1-h_i))   shape (n, p)
+    delta = (X @ XtXinv) * (e / one_minus_h)[:, None]
+    sd_j = np.sqrt(np.diag(XtXinv))
+    sd_j = np.where(sd_j > 0, sd_j, 1.0)  # avoid div-by-zero on zero-variance
+    out = delta / (sigma_loo[:, None] * sd_j[None, :])
+    return pl.DataFrame(
+        {col: out[:, i] for i, col in enumerate(model.column_names)}
+    )
+
+
+def influence(model):
+    """R: ``influence()`` / ``lm.influence()`` — deletion diagnostics bundle.
+
+    Returns a dict mirroring R's ``lm.influence(do.coef=TRUE)``:
+
+    * ``hat`` — leverage ``h_ii`` (ndarray, length ``n``)
+    * ``sigma`` — leave-one-out σ estimates ``σ_(-i)`` (ndarray, length ``n``)
+    * ``coefficients`` — leave-one-out coefficient *deltas*
+      ``β̂ - β̂_(-i)`` as an ``n × p`` DataFrame named like the design
+    * ``residuals`` — response residuals ``e_i`` (ndarray, length ``n``)
+
+    Currently lm-only.
+    """
+    if not hasattr(model, "XtXinv"):
+        raise NotImplementedError(
+            f"influence(): {model.__class__.__name__} not yet supported (lm only)"
+        )
+    if getattr(model, "weights", None) is not None:
+        raise NotImplementedError(
+            "influence(): weighted lm not implemented yet"
+        )
+    X = model.X.to_numpy().astype(float)
+    XtXinv = np.asarray(model.XtXinv)
+    e = model.residuals.to_series().to_numpy()
+    h = np.asarray(model.leverage)
+    one_minus_h = np.clip(1 - h, 1e-12, None)
+    delta = (X @ XtXinv) * (e / one_minus_h)[:, None]
+    return {
+        "hat": h,
+        "sigma": _loo_sigma_lm(model),
+        "coefficients": pl.DataFrame(
+            {col: delta[:, i] for i, col in enumerate(model.column_names)}
+        ),
+        "residuals": e,
+    }
