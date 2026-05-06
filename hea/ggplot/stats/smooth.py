@@ -29,6 +29,7 @@ class StatSmooth(Stat):
     level: float = 0.95
     span: float = 0.75
     n: int = 80  # grid size
+    family: object = None  # for glm — Family instance or name; default Gaussian
 
     def compute_group(self, data, params):
         x = data["x"].to_numpy().astype(float)
@@ -44,7 +45,10 @@ class StatSmooth(Stat):
         x_min, x_max = float(x.min()), float(x.max())
         grid = np.linspace(x_min, x_max, self.n)
 
-        yhat, se = _fit_predict(self.method, self.formula, x, y, grid, self.span)
+        yhat, se = _fit_predict(
+            self.method, self.formula, x, y, grid,
+            span=self.span, family=self.family,
+        )
 
         z = norm.ppf(0.5 + self.level / 2)
         ymin = yhat - z * se
@@ -60,7 +64,8 @@ class StatSmooth(Stat):
 
 
 def _fit_predict(method: str, formula: str | None,
-                 x: np.ndarray, y: np.ndarray, grid: np.ndarray, span: float):
+                 x: np.ndarray, y: np.ndarray, grid: np.ndarray, *,
+                 span: float, family=None):
     """Returns ``(yhat, se)`` evaluated on ``grid`` for the chosen method."""
     if method == "loess":
         from ..._loess import loess
@@ -103,15 +108,57 @@ def _fit_predict(method: str, formula: str | None,
         return np.asarray(yhat), np.asarray(se)
 
     if method == "glm":
-        raise NotImplementedError(
-            f"stat_smooth: method='glm' is not yet implemented; pass "
-            "method='gam' for nonlinear fits or method='lm' for linear."
+        from ...glm import glm
+
+        fml = formula or "y ~ x"
+        fam = _resolve_family(family)
+        fit = glm(fml, pl.DataFrame({"x": x, "y": y}), family=fam)
+        yhat, se = fit.predict(
+            new=pl.DataFrame({"x": grid}),
+            type="response",
+            se_fit=True,
         )
+        return np.asarray(yhat), np.asarray(se)
 
     raise ValueError(f"stat_smooth: unknown method {method!r}")
 
 
+def _resolve_family(family):
+    """Coerce ``family`` to a :class:`hea.family.Family` instance.
+
+    Accepts None (defaults to Gaussian — equivalent to OLS, matching
+    R's ``glm()`` default), a Family instance, or a name string in
+    R's lowercase convention (``"gaussian"``, ``"binomial"``, …).
+    """
+    from ...family import Family, gaussian
+
+    if family is None:
+        return gaussian()
+    if isinstance(family, Family):
+        return family
+    if callable(family):
+        # User passed `binomial` (the class) instead of `binomial()` —
+        # instantiate with default link.
+        result = family()
+        if isinstance(result, Family):
+            return result
+    if isinstance(family, str):
+        import hea.family as _f
+        name = family.lower().replace(".", "_")
+        cls = getattr(_f, name, None)
+        if cls is None:
+            raise ValueError(
+                f"unknown family {family!r}; expected one of gaussian, "
+                "binomial, poisson, Gamma, inverse_gaussian, quasi"
+            )
+        return cls()
+    raise TypeError(
+        f"family must be None, a Family instance, or a string; "
+        f"got {type(family).__name__}"
+    )
+
+
 def stat_smooth(*, method="loess", formula=None, se=True, level=0.95,
-                span=0.75, n=80):
+                span=0.75, n=80, family=None):
     return StatSmooth(method=method, formula=formula, se=se, level=level,
-                      span=span, n=n)
+                      span=span, n=n, family=family)

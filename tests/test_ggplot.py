@@ -741,11 +741,73 @@ def test_stat_smooth_gam_with_per_panel_facets():
         plt.close(fig)
 
 
-def test_stat_smooth_glm_unimplemented():
+def test_stat_smooth_glm_gaussian_matches_lm():
+    """``method="glm"`` with default Gaussian family must match the ``"lm"``
+    fit exactly — Gaussian-identity GLM reduces to OLS."""
+    import numpy as np
+
+    mtcars = load_dataset("datasets", "mtcars")
+    p_lm = ggplot(mtcars, aes("wt", "mpg")) + geom_smooth(method="lm", se=False)
+    p_glm = ggplot(mtcars, aes("wt", "mpg")) + geom_smooth(method="glm", se=False)
+    fig_lm = p_lm.draw()
+    fig_glm = p_glm.draw()
+    try:
+        y_lm = fig_lm.axes[0].lines[0].get_ydata()
+        y_glm = fig_glm.axes[0].lines[0].get_ydata()
+        np.testing.assert_allclose(y_lm, y_glm, atol=1e-9)
+    finally:
+        plt.close(fig_lm)
+        plt.close(fig_glm)
+
+
+def test_stat_smooth_glm_binomial_logistic_regression():
+    """``method="glm", family=binomial()`` fits a logistic curve."""
+    import numpy as np
     import polars as pl
-    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
-    p = ggplot(df, aes("x", "y")) + geom_smooth(method="glm")
-    with pytest.raises(NotImplementedError, match="method='glm'"):
+
+    from hea.family import binomial
+
+    rng = np.random.default_rng(0)
+    x = np.linspace(-3, 3, 80)
+    prob = 1 / (1 + np.exp(-x))
+    y = (rng.random(80) < prob).astype(float)
+    df = pl.DataFrame({"x": x, "y": y})
+
+    p = ggplot(df, aes("x", "y")) + geom_smooth(method="glm", family=binomial())
+    fig = p.draw()
+    try:
+        yhat = fig.axes[0].lines[0].get_ydata()
+        # Sigmoid: monotone in x, sweeping from low to high across the range.
+        assert yhat[0] < 0.2 and yhat[-1] > 0.8
+        assert (np.diff(yhat) >= -1e-9).all(), "logistic curve must be monotone"
+    finally:
+        plt.close(fig)
+
+
+def test_stat_smooth_glm_family_string_form():
+    """``family="binomial"`` (string) resolves to ``hea.family.binomial()``."""
+    import numpy as np
+    import polars as pl
+
+    rng = np.random.default_rng(1)
+    x = np.linspace(-3, 3, 60)
+    y = (rng.random(60) < 1 / (1 + np.exp(-x))).astype(float)
+    df = pl.DataFrame({"x": x, "y": y})
+
+    p = ggplot(df, aes("x", "y")) + geom_smooth(method="glm", family="binomial")
+    fig = p.draw()
+    try:
+        yhat = fig.axes[0].lines[0].get_ydata()
+        assert all(0 <= v <= 1 for v in yhat)
+    finally:
+        plt.close(fig)
+
+
+def test_stat_smooth_glm_unknown_family_errors():
+    import polars as pl
+    df = pl.DataFrame({"x": [1.0, 2, 3], "y": [1.0, 2, 3]})
+    p = ggplot(df, aes("x", "y")) + geom_smooth(method="glm", family="weibull")
+    with pytest.raises(ValueError, match="unknown family"):
         p.draw()
 
 
