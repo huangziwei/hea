@@ -10,11 +10,20 @@ from __future__ import annotations
 
 from .aes import aes
 from .core import ggplot
-from .geoms import geom_blank, geom_point
+from .geoms import geom_bar, geom_blank, geom_col, geom_density, geom_histogram, geom_point
+from .stats import stat_bin, stat_count, stat_density, stat_identity
 
 __all__ = [
     "ggplot",
     "aes",
-    "geom_point",
     "geom_blank",
+    "geom_point",
+    "geom_bar",
+    "geom_col",
+    "geom_histogram",
+    "geom_density",
+    "stat_identity",
+    "stat_bin",
+    "stat_count",
+    "stat_density",
 ]

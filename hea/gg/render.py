@@ -33,4 +33,13 @@ def _default_labels(plot):
     ylabel = mapping.get("y") if "y" in mapping else None
     xlabel = xlabel if isinstance(xlabel, str) else None
     ylabel = ylabel if isinstance(ylabel, str) else None
+    if ylabel is None:
+        # No user-mapped y → fall back to the first layer's stat default,
+        # so histograms get "count" / density gets "density" without
+        # needing labs() (matches ggplot2 deparsing of `after_stat(count)`).
+        for layer in plot.layers:
+            tag = getattr(layer.stat, "default_y_label", None)
+            if tag:
+                ylabel = tag
+                break
     return xlabel, ylabel

@@ -18,7 +18,9 @@ import pytest
 
 from conftest import load_dataset
 
-from hea.gg import aes, geom_blank, geom_point, ggplot
+from hea.gg import (
+    aes, geom_blank, geom_density, geom_histogram, geom_point, ggplot,
+)
 
 
 def test_gg_c1_minimal_scatter_renders():
@@ -139,5 +141,74 @@ def test_aes_callable_value():
     try:
         offsets = fig.axes[0].collections[0].get_offsets()
         np.testing.assert_allclose(offsets[:, 0], mtcars["wt"].to_numpy() * 2)
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Faraway "Linear Models with R" page 5 — the three exploratory plots.
+# These transliterate the R one-liners directly to hea.gg. They lock the
+# minimum viable surface (geom_point + geom_histogram + geom_density) for
+# the use cases the book opens with.
+# ---------------------------------------------------------------------------
+
+
+def test_gg_c8_histogram_pima_diastolic():
+    """`ggplot(pima, aes(x=diastolic)) + geom_histogram()` (Faraway p.5)."""
+    from hea.data import data as _hea_data
+
+    pima = _hea_data("pima", package="faraway")
+    p = ggplot(pima, aes(x="diastolic")) + geom_histogram()
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # Default bins=30; bar heights sum to N (no missing in pima.diastolic).
+        assert len(ax.patches) == 30
+        total = sum(bar.get_height() for bar in ax.patches)
+        assert total == len(pima), f"expected {len(pima)} obs, got {total}"
+        assert ax.get_xlabel() == "diastolic"
+        assert ax.get_ylabel() == "count"
+    finally:
+        plt.close(fig)
+
+
+def test_gg_c10_density_pima_diastolic():
+    """`ggplot(pima, aes(x=diastolic)) + geom_density()` (Faraway p.5)."""
+    from hea.data import data as _hea_data
+
+    pima = _hea_data("pima", package="faraway")
+    p = ggplot(pima, aes(x="diastolic")) + geom_density()
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert len(ax.lines) == 1, f"expected one density curve, got {len(ax.lines)}"
+        xy = ax.lines[0].get_xydata()
+        # 512 points by default, monotone in x, non-negative density.
+        assert xy.shape == (512, 2)
+        assert (xy[:-1, 0] <= xy[1:, 0]).all(), "x grid must be sorted ascending"
+        assert (xy[:, 1] >= 0).all(), "density must be non-negative"
+        # Density integrates to ≈ 1 over its support (3·bw padding on each side).
+        from numpy import trapezoid
+        area = trapezoid(xy[:, 1], xy[:, 0])
+        assert 0.95 < area < 1.05, f"density should integrate to ≈1, got {area:.4f}"
+        assert ax.get_xlabel() == "diastolic"
+        assert ax.get_ylabel() == "density"
+    finally:
+        plt.close(fig)
+
+
+def test_faraway_p5_scatter_pima_diastolic_diabetes():
+    """`ggplot(pima, aes(x=diastolic, y=diabetes)) + geom_point()` (Faraway p.5)."""
+    from hea.data import data as _hea_data
+
+    pima = _hea_data("pima", package="faraway")
+    p = ggplot(pima, aes(x="diastolic", y="diabetes")) + geom_point()
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        offsets = ax.collections[0].get_offsets()
+        assert offsets.shape == (len(pima), 2)
+        assert ax.get_xlabel() == "diastolic"
+        assert ax.get_ylabel() == "diabetes"
     finally:
         plt.close(fig)

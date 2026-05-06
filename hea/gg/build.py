@@ -27,16 +27,22 @@ class BuildOutput:
 
 
 def build(plot) -> BuildOutput:
-    """Run the build pipeline. Returns per-layer drawable frames."""
+    """Run the build pipeline. Returns per-layer drawable frames.
+
+    Order: mapping → stat → position → aes_params → default_aes. Stat runs
+    *before* aes_params/default_aes because stats like ``stat_bin`` change
+    the row count (counts per bin), and broadcasting a length-N constant
+    aes onto a length-K stat output would mismatch.
+    """
     layers_data: list[pl.DataFrame] = []
     for layer in plot.layers:
         ld = _layer_data(layer, plot)
         mapping = _resolve_mapping(layer, plot)
         df = _compute_aesthetics(mapping, ld, plot.plot_env)
-        df = _apply_aes_params(df, layer)
-        df = _apply_default_aes(df, layer.geom)
         df = layer.stat.compute_layer(df, layer.stat_params)
         df = layer.position.compute_layer(df)
+        df = _apply_aes_params(df, layer)
+        df = _apply_default_aes(df, layer.geom)
         layers_data.append(df)
     return BuildOutput(data=layers_data)
 
