@@ -20,6 +20,16 @@ def render(plot, build_output, ax=None) -> "plt.Figure":
     for layer, df in zip(plot.layers, build_output.data):
         layer.geom.draw_panel(df, ax)
 
+    # Apply scales — they read autoscaled limits and set ticks/labels. Geoms
+    # have already drawn (so matplotlib has autoscaled from artist extents),
+    # which lets stat_bin's bar widths still fit even when the scale doesn't
+    # set explicit xlim.
+    if build_output.scales is not None:
+        for axis in ("x", "y"):
+            sc = build_output.scales.get(axis)
+            if sc is not None:
+                sc.apply_to_axis(ax, axis)
+
     # Phase 0 axis labels: derive from the first layer that has x/y mappings.
     # Real label resolution (with `labs(...)`, deparse, etc.) is Phase 6.1.
     xlabel, ylabel = _default_labels(plot)

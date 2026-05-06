@@ -23,6 +23,8 @@ from .facets.facet import Facet
 from .facets.null import FacetNull
 from .labels import Labels
 from .layer import Layer
+from .scales.list import ScalesList
+from .scales.scale import Scale
 from .theme import Theme, theme_default
 
 
@@ -31,6 +33,7 @@ class ggplot:
     data: pl.DataFrame
     mapping: Aes = field(default_factory=Aes)
     layers: list = field(default_factory=list)
+    scales: ScalesList = field(default_factory=ScalesList)
     coordinates: Coord = field(default_factory=CoordCartesian)
     facet: Facet = field(default_factory=FacetNull)
     theme: Theme = field(default_factory=theme_default)
@@ -47,6 +50,7 @@ class ggplot:
         self.data = data
         self.mapping = mapping if mapping is not None else Aes()
         self.layers = []
+        self.scales = ScalesList()
         self.coordinates = CoordCartesian()
         self.facet = FacetNull()
         self.theme = theme_default()
@@ -102,10 +106,12 @@ class ggplot:
 
 
 def _copy_plot(plot: ggplot) -> ggplot:
-    """Shallow copy with independent ``layers``/``labels`` so ``+`` is non-mutating."""
+    """Shallow copy with independent ``layers``/``labels``/``scales`` so
+    ``+`` is non-mutating."""
     out = copy.copy(plot)
     out.layers = list(plot.layers)
     out.labels = dict(plot.labels)
+    out.scales = plot.scales.copy()
     return out
 
 
@@ -121,6 +127,13 @@ def ggplot_add(thing, plot: ggplot) -> ggplot:
 def _(thing: Layer, plot):
     out = _copy_plot(plot)
     out.layers.append(thing)
+    return out
+
+
+@ggplot_add.register
+def _(thing: Scale, plot):
+    out = _copy_plot(plot)
+    out.scales.add(thing)
     return out
 
 

@@ -20,6 +20,7 @@ from conftest import load_dataset
 
 from hea.ggplot import (
     aes, geom_blank, geom_density, geom_histogram, geom_point, ggplot,
+    scale_x_continuous, scale_y_continuous,
 )
 
 
@@ -143,6 +144,91 @@ def test_aes_callable_value():
         np.testing.assert_allclose(offsets[:, 0], mtcars["wt"].to_numpy() * 2)
     finally:
         plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.1 — Continuous scales: scale_x/y_continuous knobs (limits, breaks,
+# labels) plus auto-default registration in build.
+# ---------------------------------------------------------------------------
+
+
+def test_scale_x_continuous_limits_override_autoscale():
+    """``scale_x_continuous(limits=(0, 10))`` should clamp xlim regardless of data."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + scale_x_continuous(limits=(0, 10)))
+    fig = p.draw()
+    try:
+        assert fig.axes[0].get_xlim() == (0, 10)
+    finally:
+        plt.close(fig)
+
+
+def test_scale_x_continuous_explicit_breaks_and_labels():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + scale_x_continuous(breaks=[2, 3, 4], labels=["light", "mid", "heavy"]))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        ticks = ax.get_xticks()
+        assert list(ticks) == [2.0, 3.0, 4.0]
+        labels = [t.get_text() for t in ax.get_xticklabels()]
+        assert labels == ["light", "mid", "heavy"]
+    finally:
+        plt.close(fig)
+
+
+def test_scale_y_continuous_breaks_none_hides_ticks():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + scale_y_continuous(breaks=None))
+    fig = p.draw()
+    try:
+        assert len(fig.axes[0].get_yticks()) == 0
+    finally:
+        plt.close(fig)
+
+
+def test_scale_default_auto_registered_when_user_omits():
+    """Without `+ scale_x_continuous()`, a default ScaleContinuous is created
+    inside build() so render() always has something to apply."""
+    from hea.ggplot.scales import ScaleContinuous
+
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+
+    from hea.ggplot.build import build
+    bo = build(p)
+    assert isinstance(bo.scales.get("x"), ScaleContinuous)
+    assert isinstance(bo.scales.get("y"), ScaleContinuous)
+
+
+def test_repeated_draw_produces_identical_ticks():
+    """build() copies the ScalesList so repeated draws are deterministic — no
+    accumulating range_ state, no break drift."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + scale_x_continuous())
+
+    fig1 = p.draw()
+    ticks1 = list(fig1.axes[0].get_xticks())
+    plt.close(fig1)
+
+    fig2 = p.draw()
+    ticks2 = list(fig2.axes[0].get_xticks())
+    plt.close(fig2)
+
+    assert ticks1 == ticks2
+
+
+def test_scale_plus_is_non_mutating():
+    mtcars = load_dataset("datasets", "mtcars")
+    base = ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+    extended = base + scale_x_continuous(limits=(0, 10))
+    # original plot's scales unchanged
+    assert base.scales.get("x") is None
+    assert extended.scales.get("x") is not None
 
 
 # ---------------------------------------------------------------------------

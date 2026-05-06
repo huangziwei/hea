@@ -17,6 +17,7 @@ from __future__ import annotations
 from .aes import aes
 from .core import ggplot
 from .geoms import geom_bar, geom_blank, geom_col, geom_density, geom_histogram, geom_point
+from .scales import scale_x_continuous, scale_y_continuous
 from .stats import stat_bin, stat_count, stat_density, stat_identity
 
 __all__ = [
@@ -32,4 +33,6 @@ __all__ = [
     "stat_bin",
     "stat_count",
     "stat_density",
+    "scale_x_continuous",
+    "scale_y_continuous",
 ]

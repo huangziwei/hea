@@ -19,11 +19,13 @@ import polars as pl
 
 from .aes import Aes
 from ._util import to_series
+from .scales.list import ScalesList
 
 
 @dataclass
 class BuildOutput:
     data: list[pl.DataFrame]  # one per layer; columns = canonical aes names
+    scales: ScalesList = None
 
 
 def build(plot) -> BuildOutput:
@@ -33,6 +35,10 @@ def build(plot) -> BuildOutput:
     *before* aes_params/default_aes because stats like ``stat_bin`` change
     the row count (counts per bin), and broadcasting a length-N constant
     aes onto a length-K stat output would mismatch.
+
+    A copy of the plot's :class:`ScalesList` is returned with auto-registered
+    defaults for any positional aesthetic the user mapped but didn't add an
+    explicit scale for.
     """
     layers_data: list[pl.DataFrame] = []
     for layer in plot.layers:
@@ -44,7 +50,16 @@ def build(plot) -> BuildOutput:
         df = _apply_aes_params(df, layer)
         df = _apply_default_aes(df, layer.geom)
         layers_data.append(df)
-    return BuildOutput(data=layers_data)
+
+    # Independent copy so multiple draw() calls don't accumulate state.
+    scales = plot.scales.copy()
+    # Auto-register defaults for any positional aesthetic that has data.
+    for df in layers_data:
+        for axis in ("x", "y"):
+            if axis in df.columns:
+                scales.get_or_default(axis)
+
+    return BuildOutput(data=layers_data, scales=scales)
 
 
 def _layer_data(layer, plot) -> pl.DataFrame:
