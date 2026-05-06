@@ -136,6 +136,10 @@ def _apply_theme(theme, fig, axes_list, *, owns_fig: bool) -> None:
         _apply_plot_background(theme, fig)
 
     for ax in axes_list:
+        # ggplot2 draws gridlines / ticks behind the data layers. Without
+        # this, matplotlib gridlines paint on top of geoms regardless of
+        # the ``zorder=`` we pass to ``ax.grid``.
+        ax.set_axisbelow(True)
         _apply_panel_background(theme, ax)
         _apply_grid(theme, ax)
         _apply_spines(theme, ax)

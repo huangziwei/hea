@@ -1464,6 +1464,24 @@ def test_theme_addition_complete_replaces_partial_merges():
     assert final.get("plot.title").colour != "red"
 
 
+def test_theme_gridlines_below_data_artists():
+    """Regression: matplotlib's default puts gridlines above data unless we
+    call ``ax.set_axisbelow(True)``. ggplot2 always draws grid behind data."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_axisbelow() is True
+        grid_z = [g.get_zorder() for g in ax.get_xgridlines() + ax.get_ygridlines()
+                  if g.get_visible()]
+        scatter_z = [c.get_zorder() for c in ax.collections]
+        assert min(grid_z) < min(scatter_z), \
+            f"grid {grid_z} should sit below scatter {scatter_z}"
+    finally:
+        plt.close(fig)
+
+
 def test_theme_dot_separated_dict_form():
     """``theme({"panel.background": ...})`` — direct dotted-name form."""
     mtcars = load_dataset("datasets", "mtcars")
