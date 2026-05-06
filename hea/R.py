@@ -87,6 +87,7 @@ __all__ = [
     "logLik", "deviance", "nobs", "df_residual",
     "formula", "model_matrix", "model_frame",
     "AIC", "BIC",
+    "update", "terms", "Terms",
     # regression diagnostics
     "hatvalues", "rstandard", "rstudent",
     "cooks_distance", "dffits", "dfbetas", "influence",
@@ -1564,15 +1565,23 @@ def prop_test(
             conf_level=conf_level,
             data_name="x and n",
         )
-    if k == 2 and p is None:
+    if k >= 2 and p is None:
+        # k-sample equality of proportions: (k × 2) chi-squared. R applies
+        # Yates' continuity correction only for the 2×2 case; for k > 2
+        # the correction is silently dropped.
         tbl = np.array([
-            [int(x_arr[0]), int(n_arr[0] - x_arr[0])],
-            [int(x_arr[1]), int(n_arr[1] - x_arr[1])],
+            [int(x_arr[i]), int(n_arr[i] - x_arr[i])]
+            for i in range(k)
         ])
-        res = _sps.chi2_contingency(tbl, correction=correct)
+        use_correction = correct and k == 2
+        res = _sps.chi2_contingency(tbl, correction=use_correction)
+        suffix = " with continuity correction" if use_correction else ""
+        if k == 2:
+            method = f"2-sample test for equality of proportions{suffix}"
+        else:
+            method = f"{k}-sample test for equality of proportions{suffix}"
         return HTest(
-            method="2-sample test for equality of proportions"
-            + (" with continuity correction" if correct else ""),
+            method=method,
             statistic={"X-squared": float(res.statistic)},
             parameter={"df": int(res.dof)},
             p_value=float(res.pvalue),
@@ -1582,8 +1591,8 @@ def prop_test(
             data_name="x out of n",
         )
     raise NotImplementedError(
-        "prop_test(): only k=1 (with optional p) and k=2 (without p) "
-        "supported; k>2 not yet wired"
+        "prop_test(): k > 1 with explicit ``p`` (vector hypothesis) "
+        "not yet wired"
     )
 
 
@@ -2103,6 +2112,85 @@ def model_frame(model):
     return model.data
 
 
+@dataclass
+class Terms:
+    """Lightweight stand-in for R's ``terms`` object.
+
+    R's ``terms`` carries a factor matrix and many attributes; we expose
+    only what hea actually keeps around: the formula string, the
+    response (LHS) variable name, and the top-level term labels (the
+    same list ``aov`` / ``anova`` use to build their tables).
+    """
+
+    formula: str
+    response: str
+    term_labels: list
+
+    def __repr__(self) -> str:
+        return (
+            f"Terms(formula={self.formula!r}, response={self.response!r}, "
+            f"term_labels={self.term_labels!r})"
+        )
+
+
+def terms(model) -> Terms:
+    """R: ``terms()`` — formula structure summary.
+
+    Returns a :class:`Terms` with the formula string, response name, and
+    top-level term labels. Less than R's full terms object (no factor
+    matrix, no order vector) but enough to drive things like ``anova``
+    table titles or to round-trip a formula via ``update``.
+    """
+    f = model.formula
+    if "~" not in f:
+        raise ValueError(f"terms(): bad formula on {model.__class__.__name__}")
+    lhs, rhs = f.split("~", 1)
+    response = lhs.strip()
+    if hasattr(model, "_expanded") and hasattr(model._expanded, "term_labels"):
+        labels = list(model._expanded.term_labels)
+    else:
+        labels = [t.strip() for t in rhs.split("+") if t.strip()]
+    return Terms(formula=f, response=response, term_labels=labels)
+
+
+def update(model, formula, **kwargs):
+    """R: ``update()`` — refit on the same data with a new formula.
+
+    Two formula forms supported:
+
+    * **Full formula** (e.g. ``"y ~ x1 + x2"``) — used verbatim.
+    * **Delta formula** with R's ``.`` placeholder (e.g.
+      ``". ~ . + x3"`` or ``"log(y) ~ . - x1"``). On each side of
+      ``~``, ``.`` is substituted with the corresponding side of the
+      original ``model.formula`` wrapped in parentheses, so terms can
+      be added or removed without retyping.
+
+    ``family`` is auto-forwarded for glm/gam/bam so ``update(m, "y ~ z")``
+    keeps the original family. Other constructor kwargs (``weights``,
+    ``method``, ``REML``, ``offset``, …) are NOT auto-forwarded — pass
+    them explicitly via ``**kwargs`` if you need them carried over.
+    """
+    f = formula.strip()
+    if "~" not in f:
+        raise ValueError(f"update(): formula must contain '~'; got {f!r}")
+    if "." in f:
+        old_lhs, old_rhs = (s.strip() for s in model.formula.split("~", 1))
+        new_lhs, new_rhs = (s.strip() for s in f.split("~", 1))
+        if new_lhs == ".":
+            new_lhs = old_lhs
+        elif "." in new_lhs:
+            new_lhs = new_lhs.replace(".", f"({old_lhs})")
+        if new_rhs == ".":
+            new_rhs = old_rhs
+        elif "." in new_rhs:
+            new_rhs = new_rhs.replace(".", f"({old_rhs})")
+        f = f"{new_lhs} ~ {new_rhs}"
+    cls = type(model)
+    if hasattr(model, "family") and "family" not in kwargs:
+        kwargs["family"] = model.family
+    return cls(f, model.data, **kwargs)
+
+
 def AIC(*models):
     """R: ``AIC()`` — scalar for one model, comparison table for many.
 
@@ -2216,32 +2304,148 @@ def _loo_sigma_lm(model) -> np.ndarray:
     return np.sqrt(np.maximum(rss_loo, 0.0) / df_loo)
 
 
+def _xtwxinv_glm_gam(model) -> np.ndarray:
+    """Return the cached ``(X'WX + S)^-1`` for glm/gam/bam (penalty included).
+
+    Derived from the model's vcov: ``V_bhat = dispersion · (X'WX)^-1`` for
+    glm; ``Vp = scale · (X'WX + S)^-1`` for gam/bam.
+    """
+    if hasattr(model, "Vp"):  # gam / bam
+        return np.asarray(model.Vp) / float(model.scale)
+    if hasattr(model, "V_bhat"):  # glm
+        return np.asarray(model.V_bhat) / float(model.dispersion)
+    raise AttributeError(
+        f"{model.__class__.__name__}: no Vp / V_bhat for jackknife inputs"
+    )
+
+
+def _loo_sigma_glm_gam(model) -> np.ndarray:
+    """Leave-one-out σ estimates for glm/gam/bam.
+
+    Known-scale families (Binomial, Poisson, …) return ``ones`` since
+    R's ``influence.glm`` fixes σ at 1. Unknown-scale families use the
+    same closed form as ``lm``, swapping RSS for total deviance:
+    ``σ_(-i)^2 = (deviance - d_i^2 / (1 - h_i)) / (n - p - 1)`` where
+    ``d_i`` is the raw deviance residual (so ``d_i^2`` equals the per-
+    observation deviance contribution).
+    """
+    h = np.asarray(model.leverage)
+    if model.family.scale_known:
+        return np.ones_like(h)
+    n = int(model.n)
+    p = int(model.p)
+    df_loo = n - p - 1
+    if df_loo <= 0:
+        raise ValueError(
+            f"deletion diagnostics need n - p - 1 > 0; got n={n}, p={p}"
+        )
+    d = np.asarray(model.residuals_of("deviance"))
+    one_minus_h = np.clip(1 - h, 1e-12, None)
+    sigma_sq = (float(model.deviance) - d ** 2 / one_minus_h) / df_loo
+    return np.sqrt(np.maximum(sigma_sq, 0.0))
+
+
+def _design_full(model) -> np.ndarray:
+    """Return the full design matrix as an ndarray.
+
+    For ``gam`` / ``bam``, ``model.X`` only carries the parametric
+    columns; the full penalised design (parametric + spline bases) is
+    stashed privately as ``_X_full``.
+    """
+    if hasattr(model, "_X_full"):
+        return np.asarray(model._X_full, dtype=float)
+    return model.X.to_numpy().astype(float)
+
+
+def _irls_inputs(model) -> dict:
+    """Inputs for closed-form glm/gam jackknife diagnostics.
+
+    Returns a dict with:
+
+    * ``X`` — full design matrix (``n × p``) as ndarray
+    * ``XtWXinv`` — penalised cross-product inverse, ``Vp/scale`` or
+      ``V_bhat/dispersion``
+    * ``w_irls`` — IRLS working weights, recovered from leverage via
+      ``h_i = w_i · x_i' (X'WX)^{-1} x_i``
+    * ``working_resid`` — ``(y - μ) / g'(μ)`` (R's ``glm$residuals``)
+    * ``h`` — leverage diagonal
+    * ``sigma_loo`` — leave-one-out σ
+    """
+    h = np.asarray(model.leverage)
+    X = _design_full(model)
+    XtWXinv = _xtwxinv_glm_gam(model)
+
+    hX = X @ XtWXinv
+    quad = (hX * X).sum(axis=1)
+    safe_quad = np.where(quad > 0, quad, 1.0)
+    w_irls = h / safe_quad
+
+    mu = np.asarray(model.fitted_values, dtype=float)
+    eta = np.asarray(model.linear_predictors, dtype=float)
+    y_arr = (
+        model.y.to_numpy().astype(float)
+        if isinstance(model.y, pl.Series)
+        else np.asarray(model.y, dtype=float)
+    )
+    mu_eta = np.asarray(model.family.link.mu_eta(eta), dtype=float)
+    safe_mu_eta = np.where(mu_eta != 0, mu_eta, 1.0)
+    working_resid = (y_arr - mu) / safe_mu_eta
+
+    sigma_loo = _loo_sigma_glm_gam(model)
+
+    return {
+        "X": X,
+        "XtWXinv": XtWXinv,
+        "w_irls": w_irls,
+        "working_resid": working_resid,
+        "h": h,
+        "sigma_loo": sigma_loo,
+    }
+
+
 def rstudent(model):
     """R: ``rstudent()`` — externally studentized residuals.
 
     For ``lm`` (Gaussian), uses the closed form
-    ``r_i^* = r_i √((n-p-1) / (n-p - r_i^2))`` derived from the
-    leave-one-out σ estimate. ``glm`` / ``gam`` use a different jackknife
-    approximation in R and aren't supported yet.
+    ``r_i^* = r_i · √((n-p-1) / (n-p - r_i^2))`` derived from the
+    leave-one-out σ estimate.
+
+    For ``glm`` / ``gam`` / ``bam``, follows R's ``rstudent.glm`` —
+    the Williams (1987) likelihood residual:
+    ``r_i = sign(d_i) · √(d_i² + p_i² · h_i / (1-h_i)) / (σ_(-i) · √(1-h_i))``
+    where ``d_i`` and ``p_i`` are raw deviance and Pearson residuals.
+    Known-scale families fix ``σ_(-i) = 1``.
     """
-    if not hasattr(model, "std_residuals"):
-        raise NotImplementedError(
-            f"rstudent(): {model.__class__.__name__} not yet supported "
-            "(lm only — glm/gam need a different jackknife formula)"
+    # lm path — closed form on internally studentized residuals
+    if hasattr(model, "std_residuals"):
+        if getattr(model, "weights", None) is not None:
+            raise NotImplementedError(
+                "rstudent(): weighted lm not implemented yet"
+            )
+        r = np.asarray(model.std_residuals)
+        n = int(model.n)
+        p = int(model.p)
+        df_resid = n - p
+        if df_resid - 1 <= 0:
+            raise ValueError(
+                f"rstudent(): need n - p - 1 > 0; got n={n}, p={p}"
+            )
+        return r * np.sqrt(
+            (df_resid - 1) / np.clip(df_resid - r ** 2, 1e-12, None)
         )
-    if getattr(model, "weights", None) is not None:
-        raise NotImplementedError(
-            "rstudent(): weighted lm not implemented yet"
+
+    # glm / gam / bam path — Williams' likelihood residual
+    if not hasattr(model, "residuals_of"):
+        raise TypeError(
+            f"rstudent(): {model.__class__.__name__} not supported"
         )
-    r = np.asarray(model.std_residuals)
-    n = int(model.n)
-    p = int(model.p)
-    df_resid = n - p
-    if df_resid - 1 <= 0:
-        raise ValueError(
-            f"rstudent(): need n - p - 1 > 0; got n={n}, p={p}"
-        )
-    return r * np.sqrt((df_resid - 1) / np.clip(df_resid - r ** 2, 1e-12, None))
+    h = np.asarray(model.leverage)
+    one_minus_h = np.clip(1 - h, 1e-12, None)
+    d = np.asarray(model.residuals_of("deviance"))
+    pe = np.asarray(model.residuals_of("pearson"))
+    likelihood_r = np.sign(d) * np.sqrt(d ** 2 + (pe ** 2) * h / one_minus_h)
+    sigma_loo = _loo_sigma_glm_gam(model)
+    return likelihood_r / (sigma_loo * np.sqrt(one_minus_h))
 
 
 def cooks_distance(model):
@@ -2272,14 +2476,27 @@ def cooks_distance(model):
 
 
 def dffits(model):
-    """R: ``dffits()`` — DFFITS = ``r_i^* · √(h_i / (1 - h_i))``.
+    """R: ``dffits()``.
 
-    Currently lm-only (uses :func:`rstudent`).
+    For ``lm``, uses ``DFFITS_i = r_i^* · √(h_i / (1 - h_i))``.
+    For ``glm`` / ``gam`` / ``bam``, follows ``stats:::dffits`` exactly:
+    ``DFFITS_i = p_i · √(h_i) / (σ_(-i) · (1 - h_i))`` where ``p_i`` is
+    the raw response-scale Pearson residual.
     """
-    rs = rstudent(model)  # raises for non-lm
-    h = hatvalues(model)
+    if hasattr(model, "std_residuals"):  # lm
+        rs = rstudent(model)
+        h = hatvalues(model)
+        return rs * np.sqrt(h / np.clip(1 - h, 1e-12, None))
+
+    if not hasattr(model, "residuals_of"):
+        raise TypeError(
+            f"dffits(): {model.__class__.__name__} not supported"
+        )
+    h = np.asarray(model.leverage)
     one_minus_h = np.clip(1 - h, 1e-12, None)
-    return rs * np.sqrt(h / one_minus_h)
+    pe = np.asarray(model.residuals_of("pearson"))
+    sigma_loo = _loo_sigma_glm_gam(model)
+    return pe * np.sqrt(h) / (sigma_loo * one_minus_h)
 
 
 def dfbetas(model):
@@ -2288,29 +2505,51 @@ def dfbetas(model):
     Returns an ``n × p`` polars DataFrame whose columns are the design
     columns (``(Intercept)``, predictors, …). Element ``[i, j]`` is the
     change in ``β̂_j`` when observation ``i`` is dropped, scaled by
-    ``σ_(-i) · √((X'X)^{-1}_jj``.
+    ``σ_(-i) · √(diag((X'X)^{-1})_j)``.
 
-    Currently lm-only (uses ``XtXinv``).
+    For ``lm``: closed form using ``XtXinv``. For ``glm`` / ``gam`` /
+    ``bam``: IRLS closed form using ``Vp/scale`` (or ``V_bhat/dispersion``)
+    and IRLS working weights recovered from ``leverage``.
     """
-    if not hasattr(model, "XtXinv"):
-        raise NotImplementedError(
-            f"dfbetas(): {model.__class__.__name__} not yet supported (lm only)"
+    # lm path
+    if hasattr(model, "XtXinv"):
+        if getattr(model, "weights", None) is not None:
+            raise NotImplementedError(
+                "dfbetas(): weighted lm not implemented yet"
+            )
+        X = model.X.to_numpy().astype(float)
+        XtXinv = np.asarray(model.XtXinv)
+        e = model.residuals.to_series().to_numpy()
+        h = hatvalues(model)
+        one_minus_h = np.clip(1 - h, 1e-12, None)
+        sigma_loo = _loo_sigma_lm(model)
+        delta = (X @ XtXinv) * (e / one_minus_h)[:, None]
+        sd_j = np.sqrt(np.diag(XtXinv))
+        sd_j = np.where(sd_j > 0, sd_j, 1.0)
+        out = delta / (sigma_loo[:, None] * sd_j[None, :])
+        return pl.DataFrame(
+            {col: out[:, i] for i, col in enumerate(model.column_names)}
         )
-    if getattr(model, "weights", None) is not None:
-        raise NotImplementedError(
-            "dfbetas(): weighted lm not implemented yet"
-        )
-    X = model.X.to_numpy().astype(float)
-    XtXinv = np.asarray(model.XtXinv)
-    e = model.residuals.to_series().to_numpy()
-    h = hatvalues(model)
-    one_minus_h = np.clip(1 - h, 1e-12, None)
-    sigma_loo = _loo_sigma_lm(model)
 
-    # β̂ - β̂_(-i) = (X·(X'X)^{-1}) · diag(e_i / (1-h_i))   shape (n, p)
-    delta = (X @ XtXinv) * (e / one_minus_h)[:, None]
-    sd_j = np.sqrt(np.diag(XtXinv))
-    sd_j = np.where(sd_j > 0, sd_j, 1.0)  # avoid div-by-zero on zero-variance
+    # glm / gam / bam path — IRLS closed form
+    if not hasattr(model, "residuals_of"):
+        raise TypeError(
+            f"dfbetas(): {model.__class__.__name__} not supported"
+        )
+    inputs = _irls_inputs(model)
+    X, XtWXinv = inputs["X"], inputs["XtWXinv"]
+    w_irls = inputs["w_irls"]
+    working_resid = inputs["working_resid"]
+    h = inputs["h"]
+    sigma_loo = inputs["sigma_loo"]
+    one_minus_h = np.clip(1 - h, 1e-12, None)
+
+    # IRLS leave-one-out:
+    # β̂ - β̂_(-i) = (X'WX)^{-1} · X_i · w_i · z_i / (1 - h_i)
+    # where z_i is the working residual.
+    delta = (X @ XtWXinv) * (w_irls * working_resid / one_minus_h)[:, None]
+    sd_j = np.sqrt(np.diag(XtWXinv))
+    sd_j = np.where(sd_j > 0, sd_j, 1.0)
     out = delta / (sigma_loo[:, None] * sd_j[None, :])
     return pl.DataFrame(
         {col: out[:, i] for i, col in enumerate(model.column_names)}
@@ -2326,29 +2565,49 @@ def influence(model):
     * ``sigma`` — leave-one-out σ estimates ``σ_(-i)`` (ndarray, length ``n``)
     * ``coefficients`` — leave-one-out coefficient *deltas*
       ``β̂ - β̂_(-i)`` as an ``n × p`` DataFrame named like the design
-    * ``residuals`` — response residuals ``e_i`` (ndarray, length ``n``)
-
-    Currently lm-only.
+    * ``residuals`` — for ``lm``, response residuals; for ``glm`` /
+      ``gam`` / ``bam``, working residuals (matches R's
+      ``influence.glm`` "wt.res")
     """
-    if not hasattr(model, "XtXinv"):
-        raise NotImplementedError(
-            f"influence(): {model.__class__.__name__} not yet supported (lm only)"
+    # lm path
+    if hasattr(model, "XtXinv"):
+        if getattr(model, "weights", None) is not None:
+            raise NotImplementedError(
+                "influence(): weighted lm not implemented yet"
+            )
+        X = model.X.to_numpy().astype(float)
+        XtXinv = np.asarray(model.XtXinv)
+        e = model.residuals.to_series().to_numpy()
+        h = np.asarray(model.leverage)
+        one_minus_h = np.clip(1 - h, 1e-12, None)
+        delta = (X @ XtXinv) * (e / one_minus_h)[:, None]
+        return {
+            "hat": h,
+            "sigma": _loo_sigma_lm(model),
+            "coefficients": pl.DataFrame(
+                {col: delta[:, i] for i, col in enumerate(model.column_names)}
+            ),
+            "residuals": e,
+        }
+
+    # glm / gam / bam path — IRLS closed form
+    if not hasattr(model, "residuals_of"):
+        raise TypeError(
+            f"influence(): {model.__class__.__name__} not supported"
         )
-    if getattr(model, "weights", None) is not None:
-        raise NotImplementedError(
-            "influence(): weighted lm not implemented yet"
-        )
-    X = model.X.to_numpy().astype(float)
-    XtXinv = np.asarray(model.XtXinv)
-    e = model.residuals.to_series().to_numpy()
-    h = np.asarray(model.leverage)
+    inputs = _irls_inputs(model)
+    X, XtWXinv = inputs["X"], inputs["XtWXinv"]
+    w_irls = inputs["w_irls"]
+    working_resid = inputs["working_resid"]
+    h = inputs["h"]
+    sigma_loo = inputs["sigma_loo"]
     one_minus_h = np.clip(1 - h, 1e-12, None)
-    delta = (X @ XtXinv) * (e / one_minus_h)[:, None]
+    delta = (X @ XtWXinv) * (w_irls * working_resid / one_minus_h)[:, None]
     return {
         "hat": h,
-        "sigma": _loo_sigma_lm(model),
+        "sigma": sigma_loo,
         "coefficients": pl.DataFrame(
             {col: delta[:, i] for i, col in enumerate(model.column_names)}
         ),
-        "residuals": e,
+        "residuals": working_resid,
     }

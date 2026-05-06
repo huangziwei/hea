@@ -733,9 +733,12 @@ def test_rstudent_closed_form_matches_loo_refit(m_lm, gala):
     assert rs_full[0] == pytest.approx(expected_rs0, rel=1e-8)
 
 
-def test_rstudent_raises_for_glm(m_glm):
-    with pytest.raises(NotImplementedError, match="lm only"):
-        rstudent(m_glm)
+def test_rstudent_glm_returns_array(m_glm):
+    """Used to raise NotImplementedError; now glm uses Williams' likelihood
+    residual formula (matches ``rstudent.glm`` in R)."""
+    out = rstudent(m_glm)
+    assert isinstance(out, np.ndarray)
+    assert out.shape == (30,)
 
 
 def test_cooks_distance_matches_unified_formula_lm(m_lm):
@@ -808,19 +811,15 @@ def test_influence_sigma_at_obs0_matches_loo_refit(m_lm, gala):
     assert sigma_full[0] == pytest.approx(m_drop0.sigma, rel=1e-8)
 
 
-def test_dfbetas_raises_for_glm(m_glm):
-    with pytest.raises(NotImplementedError, match="lm only"):
-        dfbetas(m_glm)
+def test_dffits_glm_returns_array(m_glm):
+    """glm uses ``p_i · √h_i / (σ_(-i) · (1−h_i))`` (R's ``dffits``)."""
+    out = dffits(m_glm)
+    assert out.shape == (30,)
 
 
-def test_dffits_raises_for_glm(m_glm):
-    with pytest.raises(NotImplementedError, match="lm only"):
-        dffits(m_glm)
-
-
-def test_influence_raises_for_glm(m_glm):
-    with pytest.raises(NotImplementedError, match="lm only"):
-        influence(m_glm)
+def test_influence_glm_returns_dict(m_glm):
+    infl = influence(m_glm)
+    assert set(infl.keys()) == {"hat", "sigma", "coefficients", "residuals"}
 
 
 def test_diagnostics_raise_for_weighted_lm(gala):
@@ -921,9 +920,10 @@ def test_prop_test_two_sample_returns_chisq():
     assert res.estimate == {"prop 1": 0.5, "prop 2": 0.8}
 
 
-def test_prop_test_k_greater_than_2_raises():
-    with pytest.raises(NotImplementedError, match="k>2"):
-        prop_test([1, 2, 3], [10, 10, 10])
+def test_prop_test_p_vector_not_supported():
+    """``p`` as a vector hypothesis (one prob per group) is still deferred."""
+    with pytest.raises(NotImplementedError, match="vector hypothesis"):
+        prop_test([1, 2, 3], [10, 10, 10], p=[0.1, 0.2, 0.3])
 
 
 # ---- binom_test -----------------------------------------------------
@@ -1358,3 +1358,195 @@ def test_addmargins_oneway_appends_sum_row():
     out = addmargins(tbl)
     assert out["value"].to_list() == ["a", "b", "c", "Sum"]
     assert out["n"].to_list() == [3.0, 2.0, 1.0, 6.0]
+
+
+# ---------------------------------------------------------------------------
+# Newly enabled deferred functions: glm/gam jackknife, update, terms,
+# prop_test for k > 2.
+# ---------------------------------------------------------------------------
+
+
+from hea.R import (  # noqa: E402  — grouped with the deferred-fn tests
+    Terms, terms, update,
+)
+
+
+# ---- glm/gam jackknife: rstudent / dffits / dfbetas / influence -----
+
+
+@pytest.fixture(scope="module")
+def m_glm_gauss(gala):
+    """Gaussian glm — used to verify jackknife formulas reduce to lm's."""
+    return hea.glm("Species ~ Area + Elevation", gala, family=hea.gaussian())
+
+
+def test_glm_rstudent_returns_array(m_glm):
+    out = rstudent(m_glm)
+    assert isinstance(out, np.ndarray)
+    assert out.shape == (30,)
+
+
+def test_glm_dffits_returns_array(m_glm):
+    out = dffits(m_glm)
+    assert out.shape == (30,)
+
+
+def test_glm_dfbetas_shape(m_glm):
+    out = dfbetas(m_glm)
+    assert isinstance(out, pl.DataFrame)
+    assert out.shape == (30, 3)
+    assert out.columns == ["(Intercept)", "Area", "Elevation"]
+
+
+def test_glm_dfbetas_closed_form_vs_loo_refit(gala, m_glm):
+    """For a Poisson glm (scale_known=True), the closed-form ``dfbetas[0]``
+    should be a tight first-order approximation to the actual change in
+    coefficients when we drop observation 0 and refit.
+    """
+    predicted = np.array(dfbetas(m_glm).row(0))
+    m_drop0 = hea.glm(
+        "Species ~ Area + Elevation",
+        gala.slice(1),
+        family=hea.poisson(),
+    )
+    bhat_full = np.array(list(coef(m_glm).values()))
+    bhat_drop = np.array(list(coef(m_drop0).values()))
+    delta = bhat_full - bhat_drop
+    # Poisson is scale-known, so sigma_(-i) = 1; closed form scales delta
+    # by sqrt(diag(XtWXinv)).
+    XtWXinv = np.asarray(m_glm.V_bhat) / m_glm.dispersion
+    sd_j = np.sqrt(np.diag(XtWXinv))
+    expected = delta / sd_j
+    # First-order Taylor approximation; tight on this dataset (~3e-4).
+    np.testing.assert_allclose(predicted, expected, atol=1e-3)
+
+
+def test_glm_influence_dict_shape(m_glm):
+    infl = influence(m_glm)
+    assert set(infl.keys()) == {"hat", "sigma", "coefficients", "residuals"}
+    assert len(infl["hat"]) == 30
+    assert isinstance(infl["coefficients"], pl.DataFrame)
+    assert infl["coefficients"].shape == (30, 3)
+
+
+def test_glm_known_scale_keeps_sigma_at_one(m_glm):
+    """Poisson is scale-known → ``influence(m)['sigma']`` is all 1s."""
+    np.testing.assert_array_equal(influence(m_glm)["sigma"], np.ones(30))
+
+
+def test_glm_unknown_scale_uses_loo_deviance(m_glm_gauss):
+    """Gaussian glm is unknown-scale → leave-one-out σ varies by row."""
+    sigma = influence(m_glm_gauss)["sigma"]
+    assert sigma.shape == (30,)
+    assert sigma.std() > 0  # not constant
+
+
+def test_gam_diagnostics_run_end_to_end():
+    """gam uses the penalized full design ``_X_full``; check shapes only."""
+    mt = hea.data("mtcars", package="R")
+    g = hea.gam("mpg ~ s(wt) + s(hp)", mt)
+    assert rstudent(g).shape == (32,)
+    assert dffits(g).shape == (32,)
+    db = dfbetas(g)
+    assert db.shape == (32, 19)
+    assert "(Intercept)" in db.columns
+    infl = influence(g)
+    assert infl["hat"].shape == (32,)
+    assert infl["sigma"].shape == (32,)
+
+
+# ---- update ---------------------------------------------------------
+
+
+def test_update_full_formula_returns_new_fit(gala, m_lm):
+    new = update(m_lm, "Species ~ Area")
+    assert new is not m_lm
+    assert new.p == 2
+    assert "Elevation" not in coef(new)
+
+
+def test_update_delta_add_term(gala, m_lm):
+    """``. ~ . + x`` keeps existing RHS and appends a term."""
+    new = update(m_lm, ". ~ . + Adjacent")
+    assert "Adjacent" in coef(new)
+    # Check that all original terms are still there
+    assert "Area" in coef(new)
+    assert "Elevation" in coef(new)
+
+
+def test_update_delta_drop_term(gala, m_lm):
+    new = update(m_lm, ". ~ . - Area")
+    assert "Area" not in coef(new)
+    assert "Elevation" in coef(new)
+
+
+def test_update_glm_carries_family(gala, m_glm):
+    """``update(glm, …)`` should keep the original family without re-specifying."""
+    new = update(m_glm, ". ~ . + Adjacent")
+    # Same family class as original
+    assert type(new.family).__name__ == type(m_glm.family).__name__
+
+
+def test_update_glm_can_override_family(gala, m_glm):
+    """Explicit ``family=`` in kwargs wins over the auto-forward."""
+    new = update(m_glm, "Species ~ Area + Elevation", family=hea.gaussian())
+    assert type(new.family).__name__ == "Gaussian"
+
+
+def test_update_requires_tilde():
+    with pytest.raises(ValueError, match="must contain '~'"):
+        update(m_lm, "Area + Elevation")
+
+
+def test_update_lhs_dot_substitution(gala, m_lm):
+    """``log(y) ~ . - x`` keeps the original RHS structure even when
+    transforming the LHS."""
+    new = update(m_lm, "Species ~ . - Area")
+    assert "Area" not in coef(new)
+    assert "Elevation" in coef(new)
+
+
+# ---- terms ----------------------------------------------------------
+
+
+def test_terms_returns_dataclass(m_lm):
+    t = terms(m_lm)
+    assert isinstance(t, Terms)
+    assert t.formula == "Species ~ Area + Elevation"
+    assert t.response == "Species"
+    assert t.term_labels == ["Area", "Elevation"]
+
+
+def test_terms_repr_is_human_readable(m_lm):
+    s = repr(terms(m_lm))
+    assert "Species" in s
+    assert "Area" in s
+
+
+def test_terms_for_glm(m_glm):
+    t = terms(m_glm)
+    assert t.response == "Species"
+    assert "Area" in t.term_labels
+
+
+# ---- prop_test extension to k > 2 -----------------------------------
+
+
+def test_prop_test_k_3_returns_chi_squared():
+    """3-sample equality test produces a chi-squared with df=2."""
+    res = prop_test([5, 8, 9], [10, 10, 10])
+    assert res.parameter == {"df": 2}
+    assert "3-sample" in res.method
+    # Continuity correction is silently dropped for k > 2 (matches R).
+    assert "continuity correction" not in res.method
+
+
+def test_prop_test_k_2_still_supports_continuity_correction():
+    """k=2 keeps R's default Yates continuity correction."""
+    res = prop_test([5, 8], [10, 10])
+    assert "continuity correction" in res.method
+
+
+def test_prop_test_estimates_for_k_3():
+    res = prop_test([3, 7, 8], [10, 10, 10])
+    assert res.estimate == {"prop 1": 0.3, "prop 2": 0.7, "prop 3": 0.8}
