@@ -18,10 +18,12 @@ Design rules
 * **R's ``df()`` (PDF of the F distribution) is skipped.** ``df`` is too
   commonly used as a DataFrame variable. Use ``scipy.stats.f.pdf``;
   ``pf`` / ``qf`` / ``rf`` are exposed for CDF / quantile / random.
-* **Indexing functions return 0-based indices** (``which``, ``which_max``,
-  ``which_min``, ``order``) to match Python conventions. ``seq_len`` /
-  ``seq_along`` / ``seq(n)`` keep R's 1-based values, since R users
-  reach for them as values (e.g. ``1:n`` printouts), not as indices.
+* **Sequence and indexing functions are 0-based.** ``which``, ``which_max``,
+  ``which_min``, ``order`` and the one-arg ``seq(n)`` / ``seq_len`` /
+  ``seq_along`` all match Python conventions. For R's ``1:n`` muscle
+  memory, write ``seq(1, n)`` explicitly — the two-arg ``seq(start, stop)``
+  form is still inclusive on both ends, so ``seq(1, 5)`` gives
+  ``[1, 2, 3, 4, 5]``.
 * **R parameter names preserved where possible.** ``mean=`` / ``sd=`` /
   ``df=`` / ``shape=`` / ``rate=`` / ``prob=``. R's ``lower.tail``
   becomes ``lower_tail``. R's ``na.rm`` becomes ``na_rm``. R's
@@ -194,26 +196,31 @@ def na_omit(df):
 def seq(*args, by=None, length_out=None, along_with=None):
     """R: ``seq()`` — flexible sequence constructor.
 
-    Supports the common R call shapes:
+    The one-argument and ``along_with`` forms are 0-based to match Python
+    indexing — different from R's 1-based defaults. The two-argument
+    ``seq(from, to)`` form keeps R's inclusive-on-both-ends semantics, so
+    explicit ``seq(1, n)`` gives ``[1, 2, …, n]``.
 
-    * ``seq(n)`` → ``1, 2, …, n`` (1-based, matches R)
-    * ``seq(from, to)`` → ``from, from+1, …, to`` (inclusive)
+    Call shapes:
+
+    * ``seq(n)`` → ``0, 1, …, n-1`` (Python; for R's ``1:n`` use ``seq(1, n)``)
+    * ``seq(from, to)`` → ``from, from+1, …, to`` (inclusive, R-faithful)
     * ``seq(from, to, by=step)`` → step-spaced, inclusive
     * ``seq(from, to, length_out=n)`` → ``n`` evenly spaced
-    * ``seq(along_with=x)`` → ``1, …, len(x)``
+    * ``seq(along_with=x)`` → ``0, 1, …, len(x)-1``
     """
     if along_with is not None:
-        return np.arange(1, len(along_with) + 1)
+        return np.arange(len(along_with))
     if length_out is not None:
         if len(args) == 0:
-            return np.arange(1, int(length_out) + 1)
+            return np.arange(int(length_out))
         if len(args) == 1:
-            return np.linspace(1, args[0], int(length_out))
+            return np.linspace(0, args[0], int(length_out))
         return np.linspace(args[0], args[1], int(length_out))
     if len(args) == 0:
         raise ValueError("seq(): need at least one positional argument")
     if len(args) == 1:
-        return np.arange(1, int(args[0]) + 1)
+        return np.arange(int(args[0]))
     start, stop = args[0], args[1]
     step = by if by is not None else (1 if stop >= start else -1)
     n_steps = int(np.floor((stop - start) / step + 1e-10)) + 1
@@ -221,13 +228,13 @@ def seq(*args, by=None, length_out=None, along_with=None):
 
 
 def seq_len(n):
-    """R: ``seq_len(n)`` → ``1, 2, …, n`` (1-based, matches R)."""
-    return np.arange(1, int(n) + 1)
+    """R: ``seq_len(n)`` → ``0, 1, …, n-1`` (0-based; differs from R's ``1:n``)."""
+    return np.arange(int(n))
 
 
 def seq_along(x):
-    """R: ``seq_along(x)`` → ``1, 2, …, len(x)`` (1-based, matches R)."""
-    return np.arange(1, len(x) + 1)
+    """R: ``seq_along(x)`` → ``0, 1, …, len(x)-1`` (0-based; differs from R)."""
+    return np.arange(len(x))
 
 
 def rev(x):

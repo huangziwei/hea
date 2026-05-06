@@ -127,12 +127,16 @@ def test_complete_cases_on_array():
 # ---------------------------------------------------------------------------
 
 
-def test_seq_one_arg_is_one_based():
-    assert seq(5).tolist() == [1, 2, 3, 4, 5]
+def test_seq_one_arg_is_zero_based():
+    """One-arg ``seq(n)`` matches ``np.arange(n)``, not R's ``1:n``."""
+    assert seq(5).tolist() == [0, 1, 2, 3, 4]
 
 
-def test_seq_from_to():
+def test_seq_from_to_is_inclusive():
+    """Two-arg ``seq(from, to)`` keeps R's inclusive endpoints."""
     assert seq(2, 6).tolist() == [2, 3, 4, 5, 6]
+    # The R-1:n bridge: explicit start makes 1-based available again.
+    assert seq(1, 5).tolist() == [1, 2, 3, 4, 5]
 
 
 def test_seq_with_by():
@@ -144,13 +148,14 @@ def test_seq_length_out():
     assert seq(0, 1, length_out=5).tolist() == [0.0, 0.25, 0.5, 0.75, 1.0]
 
 
-def test_seq_along_with():
-    assert seq(along_with=["a", "b", "c"]).tolist() == [1, 2, 3]
+def test_seq_along_with_is_zero_based():
+    assert seq(along_with=["a", "b", "c"]).tolist() == [0, 1, 2]
 
 
-def test_seq_len_seq_along_one_based():
-    assert seq_len(4).tolist() == [1, 2, 3, 4]
-    assert seq_along(["x", "y"]).tolist() == [1, 2]
+def test_seq_len_seq_along_zero_based():
+    """Both return Python-style indices, safe for ``x[i]`` iteration."""
+    assert seq_len(4).tolist() == [0, 1, 2, 3]
+    assert seq_along(["x", "y"]).tolist() == [0, 1]
 
 
 def test_rev():
