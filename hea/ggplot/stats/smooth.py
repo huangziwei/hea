@@ -89,10 +89,23 @@ def _fit_predict(method: str, formula: str | None,
         se = (yhat - ci_lo) / t_crit
         return yhat, se
 
-    if method in ("glm", "gam"):
+    if method == "gam":
+        from ...gam import gam
+
+        # ggplot2/mgcv default: smooth term on x with mgcv's default basis.
+        fml = formula or "y ~ s(x)"
+        fit = gam(fml, pl.DataFrame({"x": x, "y": y}))
+        yhat, se = fit.predict(
+            newdata=pl.DataFrame({"x": grid}),
+            type="response",
+            se_fit=True,
+        )
+        return np.asarray(yhat), np.asarray(se)
+
+    if method == "glm":
         raise NotImplementedError(
-            f"stat_smooth: method={method!r} is not yet implemented "
-            "(see Phase 1.4c plan)."
+            f"stat_smooth: method='glm' is not yet implemented; pass "
+            "method='gam' for nonlinear fits or method='lm' for linear."
         )
 
     raise ValueError(f"stat_smooth: unknown method {method!r}")

@@ -694,11 +694,58 @@ def test_geom_smooth_lm_fit_matches_hea_lm():
         plt.close(fig)
 
 
-def test_stat_smooth_gam_glm_unimplemented():
+def test_stat_smooth_gam_method():
+    """`geom_smooth(method="gam")` runs hea.gam under the hood — produces
+    a non-linear curve (different shape from method="lm")."""
+    import numpy as np
+
+    mtcars = load_dataset("datasets", "mtcars")
+    p_lm = ggplot(mtcars, aes("wt", "mpg")) + geom_smooth(method="lm")
+    p_gam = ggplot(mtcars, aes("wt", "mpg")) + geom_smooth(method="gam")
+
+    fig_lm = p_lm.draw()
+    fig_gam = p_gam.draw()
+    try:
+        y_lm = fig_lm.axes[0].lines[0].get_ydata()
+        y_gam = fig_gam.axes[0].lines[0].get_ydata()
+        # The two fits should differ (gam picks up curvature lm misses).
+        assert not np.allclose(y_lm, y_gam, atol=0.1)
+        # gam fit should be non-linear (second-difference > 0 somewhere).
+        d2 = np.diff(y_gam, n=2)
+        assert abs(d2).max() > 0.001
+    finally:
+        plt.close(fig_lm)
+        plt.close(fig_gam)
+
+
+def test_stat_smooth_gam_with_per_panel_facets():
+    """gam stat fits independently per facet — like lm. Use k=4 in the
+    smooth so the fit doesn't choke on small per-panel sample sizes
+    (mtcars cyl=6 has only 7 obs)."""
+    import warnings as _w
+
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg"))
+         + geom_smooth(method="gam", formula="y ~ s(x, k=4)")
+         + facet_wrap("cyl"))
+    with _w.catch_warnings():
+        _w.simplefilter("ignore")
+        fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        # 3 cyl panels each with their own smooth + ribbon.
+        for a in visible:
+            assert len(a.lines) == 1
+            assert len(a.collections) == 1  # ribbon only
+    finally:
+        plt.close(fig)
+
+
+def test_stat_smooth_glm_unimplemented():
     import polars as pl
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
-    p = ggplot(df, aes("x", "y")) + geom_smooth(method="gam")
-    with pytest.raises(NotImplementedError, match="method='gam'"):
+    p = ggplot(df, aes("x", "y")) + geom_smooth(method="glm")
+    with pytest.raises(NotImplementedError, match="method='glm'"):
         p.draw()
 
 
@@ -809,6 +856,27 @@ def test_gg_c3_aes_color_factor_cyl_assigns_distinct_colors():
         assert len({tuple(c) for c in fc}) == 3
     finally:
         plt.close(fig)
+
+
+def test_hue_pal_matches_ggplot2_byte_for_byte():
+    """``hue_pal()(n)`` returns the same hex codes as
+    ``scales::hue_pal()(n)`` from R, for the canonical small ``n`` values."""
+    from hea.ggplot.scales._palettes import hue_pal
+
+    pal = hue_pal()
+    assert pal(2) == ["#F8766D", "#00BFC4"]
+    assert pal(3) == ["#F8766D", "#00BA38", "#619CFF"]
+    assert pal(4) == ["#F8766D", "#7CAE00", "#00BFC4", "#C77CFF"]
+    assert pal(5) == ["#F8766D", "#A3A500", "#00BF7D", "#00B0F6", "#E76BF3"]
+
+
+def test_hcl_to_hex_matches_grdevices():
+    """Spot-check :func:`hcl_to_hex` against ``grDevices::hcl(...)`` output."""
+    from hea.ggplot.scales._palettes import hcl_to_hex
+
+    assert hcl_to_hex(15, 100, 65) == "#F8766D"
+    assert hcl_to_hex(135, 100, 65) == "#00BA38"
+    assert hcl_to_hex(255, 100, 65) == "#619CFF"
 
 
 def test_user_penguins_string_color_works_end_to_end():

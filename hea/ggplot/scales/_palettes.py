@@ -2,40 +2,122 @@
 
 A palette is a callable ``palette(n) -> list[str]`` returning ``n`` colour
 strings (hex codes preferred). ggplot2's default qualitative palette is
-``scales::hue_pal``, equally-spaced hues in HCL space at lightness 65
-and chroma 100.
-
-We approximate via HSV (in :mod:`colorsys`); the colours are
-qualitatively similar but not byte-identical to ggplot2. A faithful HCL
-port (matching `colorspace` package output) is a polish item — file as
-follow-up if oracle parity matters.
+``scales::hue_pal``, equally-spaced hues in CIE LUV (HCLuv) space at
+lightness 65 and chroma 100. We port that conversion below — the
+resulting colours match ``grDevices::hcl(...)`` byte-for-byte at n=3
+(``#F8766D``, ``#00BA38``, ``#619CFF`` — the canonical Adelie-Gentoo-
+Chinstrap colours).
 """
 
 from __future__ import annotations
 
-import colorsys
+import math
 
 
-def hue_pal(*, h_start: float = 15, c: float = 100, l: float = 65):
-    """Default qualitative palette — equally-spaced hues."""
+# ---------------------------------------------------------------------------
+# HCL → sRGB hex (port of grDevices::hcl)
+# ---------------------------------------------------------------------------
+
+# CIE D65 white point. Values are derived from Xn=95.047, Yn=100, Zn=108.883
+# via u_n = 4*Xn / (Xn + 15*Yn + 3*Zn), v_n = 9*Yn / (...). Same constants
+# `colorspace`/`grDevices` use, hard-coded for speed.
+_U_N = 0.1978300664283
+_V_N = 0.4683199493879
+
+
+def _hcl_to_rgb(h: float, c: float, l: float) -> tuple[float, float, float]:
+    """HCL polar in CIE LUV → linear sRGB triple in [0, 1].
+
+    Reference: ``grDevices/src/colors.c::hcl_to_rgb`` (R sources). The path
+    is HCL → Luv → XYZ (D65) → linear RGB → sRGB-gamma.
+    """
+    if l <= 0:
+        return (0.0, 0.0, 0.0)
+
+    # HCL → Luv (Cartesian)
+    h_rad = math.radians(h)
+    u = c * math.cos(h_rad)
+    v = c * math.sin(h_rad)
+
+    # Luv → XYZ. CIE 1976 inverse lightness function.
+    if l > 8:
+        y = ((l + 16) / 116) ** 3
+    else:
+        # CIE 1976: y = L / kappa where kappa = 903.3 = 24389/27.
+        y = l * 27 / 24389
+
+    # When L is non-positive the polar formulae blow up; we already returned.
+    u_prime = u / (13 * l) + _U_N
+    v_prime = v / (13 * l) + _V_N
+
+    x = (9 * y * u_prime) / (4 * v_prime)
+    z = (12 - 3 * u_prime - 20 * v_prime) * y / (4 * v_prime)
+
+    # XYZ → linear sRGB (D65 primaries; standard matrix).
+    r_lin = 3.2404542 * x - 1.5371385 * y - 0.4985314 * z
+    g_lin = -0.9692660 * x + 1.8760108 * y + 0.0415560 * z
+    b_lin = 0.0556434 * x - 0.2040259 * y + 1.0572252 * z
+
+    return (r_lin, g_lin, b_lin)
+
+
+def _to_srgb(c_lin: float) -> float:
+    """Linear-RGB → sRGB gamma curve, clamped to [0, 1]. Matches the IEC
+    sRGB transfer function used by ``grDevices::convertColor``."""
+    if c_lin <= 0:
+        return 0.0
+    if c_lin >= 1:
+        return 1.0
+    if c_lin > 0.0031308:
+        return 1.055 * c_lin ** (1 / 2.4) - 0.055
+    return 12.92 * c_lin
+
+
+def hcl_to_hex(h: float, c: float, l: float) -> str:
+    """``hcl(h, c, l)`` colour as ``#RRGGBB``. Out-of-gamut colours clip
+    per channel (matches ``grDevices::hcl(fixup=TRUE)``)."""
+    r_lin, g_lin, b_lin = _hcl_to_rgb(h, c, l)
+    r = _to_srgb(r_lin)
+    g = _to_srgb(g_lin)
+    b = _to_srgb(b_lin)
+    return f"#{round(r * 255):02X}{round(g * 255):02X}{round(b * 255):02X}"
+
+
+# ---------------------------------------------------------------------------
+# Discrete palettes
+# ---------------------------------------------------------------------------
+
+def hue_pal(*, h: tuple = (15, 375), c: float = 100, l: float = 65,
+            h_start: float = 0, direction: int = 1):
+    """ggplot2's default qualitative palette — equally-spaced hues in HCL.
+
+    Defaults match ``scales::hue_pal``: chroma 100, lightness 65, hues
+    spanning ``[15, 375)`` (i.e. starting at red and going round once).
+    The full-circle range is detected and the last point dropped so
+    consecutive levels don't share a colour.
+    """
+    h_lo, h_hi = float(h[0]), float(h[1])
 
     def palette(n: int) -> list[str]:
         if n <= 0:
             return []
-        # Match ggplot2's behaviour: span 360° among n levels, starting at h_start.
-        hues = [(h_start + i * 360.0 / n) % 360 for i in range(n)]
-        # HSV approximation (real ggplot2 uses HCLuv).
-        s = min(c / 100.0, 1.0)
-        v = l / 100.0 + 0.20  # bump value a bit so colours aren't muddy
-        v = min(v, 1.0)
-        return [_hsv_to_hex(h / 360.0, s, v) for h in hues]
+        # Drop one slot when the range is a full circle, otherwise the
+        # first and last hues coincide (R's `hue_pal` does the same).
+        end = h_hi
+        if (h_hi - h_lo) % 360 < 1 and n > 1:
+            end = h_hi - 360 / n
+        if n == 1:
+            hues = [h_lo]
+        else:
+            step = (end - h_lo) / (n - 1)
+            hues = [h_lo + i * step for i in range(n)]
+        # `h_start` rotates the whole palette; `direction=-1` reverses.
+        rotated = [(hh + h_start) % 360 for hh in hues]
+        if direction == -1:
+            rotated = rotated[::-1]
+        return [hcl_to_hex(hh, c, l) for hh in rotated]
 
     return palette
-
-
-def _hsv_to_hex(h: float, s: float, v: float) -> str:
-    r, g, b = colorsys.hsv_to_rgb(h, s, v)
-    return f"#{int(r * 255):02X}{int(g * 255):02X}{int(b * 255):02X}"
 
 
 def manual_pal(values):
