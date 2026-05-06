@@ -48,6 +48,45 @@ class Aes(dict):
         return f"aes({body})"
 
 
+class AfterStat:
+    """Marker: resolve this aes value *after* the stat has run.
+
+    ggplot2's ``after_stat()`` lets aes mappings reference computed stat
+    columns (``count``, ``density``, ``prop``, …). In R the bare-name form
+    works via NSE; in Python pass a string (``after_stat("count")``) or a
+    callable (``after_stat(lambda d: d["count"] / d["count"].sum())``).
+    """
+
+    __slots__ = ("expr",)
+
+    def __init__(self, expr):
+        self.expr = expr
+
+    def __repr__(self) -> str:
+        return f"after_stat({self.expr!r})"
+
+
+def after_stat(expr) -> "AfterStat":
+    return AfterStat(expr)
+
+
+class AfterScale:
+    """Marker: resolve this aes value *after* the non-positional scale has
+    mapped (e.g. when you want to tweak a scale-output colour value)."""
+
+    __slots__ = ("expr",)
+
+    def __init__(self, expr):
+        self.expr = expr
+
+    def __repr__(self) -> str:
+        return f"after_scale({self.expr!r})"
+
+
+def after_scale(expr) -> "AfterScale":
+    return AfterScale(expr)
+
+
 def aes(*args, **kwargs) -> Aes:
     """Build an :class:`Aes` mapping.
 

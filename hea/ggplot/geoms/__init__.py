@@ -9,6 +9,7 @@ from .path import geom_line, geom_path, geom_step
 from .point import geom_jitter, geom_point
 from .ribbon import geom_area, geom_ribbon
 from .smooth import geom_smooth
+from .text import geom_text
 from .violin import geom_violin
 
 __all__ = [
@@ -27,4 +28,5 @@ __all__ = [
     "geom_smooth",
     "geom_boxplot",
     "geom_violin",
+    "geom_text",
 ]

@@ -14,7 +14,7 @@ circular-statistics extensions in :mod:`hea.ggplot.circular`.
 
 from __future__ import annotations
 
-from .aes import aes
+from .aes import aes, after_scale, after_stat
 from .core import ggplot
 from .facets import facet_wrap
 from .theme import (
@@ -45,6 +45,7 @@ from .geoms import (
     geom_ribbon,
     geom_smooth,
     geom_step,
+    geom_text,
     geom_violin,
 )
 from .positions import (
@@ -122,6 +123,8 @@ from .stats import (
 __all__ = [
     "ggplot",
     "aes",
+    "after_stat",
+    "after_scale",
     "geom_blank",
     "geom_point",
     "geom_jitter",
@@ -137,6 +140,7 @@ __all__ = [
     "geom_smooth",
     "geom_boxplot",
     "geom_violin",
+    "geom_text",
     "stat_identity",
     "stat_bin",
     "stat_count",

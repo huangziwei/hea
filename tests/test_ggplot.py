@@ -19,11 +19,11 @@ import pytest
 from conftest import load_dataset
 
 from hea.ggplot import (
-    aes, element_blank, element_line, element_rect, element_text,
-    facet_wrap, geom_area, geom_bar, geom_blank, geom_boxplot,
+    aes, after_scale, after_stat, element_blank, element_line, element_rect,
+    element_text, facet_wrap, geom_area, geom_bar, geom_blank, geom_boxplot,
     geom_density, geom_histogram, geom_jitter, geom_line, geom_path,
-    geom_point, geom_ribbon, geom_smooth, geom_step, geom_violin, ggplot,
-    position_dodge, position_fill, position_jitter, position_nudge,
+    geom_point, geom_ribbon, geom_smooth, geom_step, geom_text, geom_violin,
+    ggplot, position_dodge, position_fill, position_jitter, position_nudge,
     position_stack,
     scale_alpha_continuous, scale_color_brewer, scale_color_gradient,
     scale_color_gradient2, scale_color_gradientn, scale_color_identity,
@@ -1331,6 +1331,100 @@ def test_facet_wrap_preserves_colour_mapping_per_panel():
 # ---------------------------------------------------------------------------
 # Phase 1.8 — Themes
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.10 — after_stat / after_scale + geom_text (smallest geom needed
+# to test stat-aware aesthetics)
+# ---------------------------------------------------------------------------
+
+
+def test_gg_c11_geom_text_after_stat_count():
+    """GG-C11: ``geom_text(aes(label = after_stat(count)), stat = "count")``
+    paints the bar count above each bar."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes(x="cyl"))
+         + geom_bar()
+         + geom_text(aes(label=after_stat("count")), stat="count", vjust=-0.5))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        labels = [t.get_text() for t in ax.texts]
+        counts_df = mtcars["cyl"].value_counts().sort("cyl")
+        expected = [str(c) for c in counts_df["count"].to_list()]
+        assert labels == expected
+    finally:
+        plt.close(fig)
+
+
+def test_after_stat_density_with_geom_text():
+    """``after_stat("density")`` on a stat that produces a `density` column."""
+    import polars as pl
+
+    df = pl.DataFrame({"x": list(range(20))})
+    p = (ggplot(df, aes(x="x"))
+         + geom_text(
+             aes(y=after_stat("density"), label=after_stat("density")),
+             stat="density",
+         ))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # stat_density emits 512 grid points by default.
+        assert len(ax.texts) == 512
+    finally:
+        plt.close(fig)
+
+
+def test_after_stat_callable_form():
+    """``after_stat(callable)`` evaluates the callable against the stat output."""
+    mtcars = load_dataset("datasets", "mtcars")
+    # Label = "n=<count>" for each bar.
+    p = (ggplot(mtcars, aes(x="cyl"))
+         + geom_bar()
+         + geom_text(
+             aes(label=after_stat(lambda d: ["n=" + str(int(c)) for c in d["count"]])),
+             stat="count",
+             vjust=-0.5,
+         ))
+    fig = p.draw()
+    try:
+        labels = [t.get_text() for t in fig.axes[0].texts]
+        assert all(lbl.startswith("n=") for lbl in labels)
+    finally:
+        plt.close(fig)
+
+
+def test_after_stat_does_not_evaluate_at_compute_aesthetics():
+    """If we evaluated `after_stat("count")` immediately, we'd hit a NameError
+    (no `count` column in the raw data). The marker should defer past stat."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes(x="cyl"))
+         + geom_text(
+             aes(y=after_stat("count"), label=after_stat("count")),
+             stat="count",
+         ))
+    # Just running .draw() should succeed — no exception.
+    fig = p.draw()
+    plt.close(fig)
+
+
+def test_geom_text_basic_label_aes():
+    """geom_text without stat: just place text labels at (x, y)."""
+    import polars as pl
+
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, 3.0],
+        "y": [1.0, 4.0, 9.0],
+        "label": ["a", "b", "c"],
+    })
+    p = ggplot(df, aes("x", "y", label="label")) + geom_text()
+    fig = p.draw()
+    try:
+        labels = [t.get_text() for t in fig.axes[0].texts]
+        assert labels == ["a", "b", "c"]
+    finally:
+        plt.close(fig)
 
 
 def test_default_theme_is_gray_panel():

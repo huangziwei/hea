@@ -58,10 +58,15 @@ def build(plot) -> BuildOutput:
     layout = facet.compute_layout(plot.data)
 
     layers_data: list[pl.DataFrame] = []
+    deferred_after_stat: list[dict] = []  # one per layer
+    deferred_after_scale: list[dict] = []
     for layer in plot.layers:
         ld = _layer_data(layer, plot)
         mapping = _resolve_mapping(layer, plot)
-        df = _compute_aesthetics(mapping, ld, plot.plot_env)
+        # Split out after_stat / after_scale markers — they're evaluated
+        # later, against the post-stat / post-scale frame respectively.
+        immediate, after_stat_map, after_scale_map = _split_deferred(mapping)
+        df = _compute_aesthetics(immediate, ld, plot.plot_env)
         # Carry facet variables alongside aes columns so map_data can
         # assign each row a panel after stat/position run.
         df = _attach_facet_columns(df, ld, facet_vars)
@@ -70,9 +75,13 @@ def build(plot) -> BuildOutput:
         # Stat per panel: each panel's data is computed separately so
         # group-aware stats (count, bin, density) honour facet boundaries.
         df = _stat_per_panel(df, layer, facet_vars)
+        # Resolve after_stat() now that the stat output is in df.
+        df = _apply_deferred(df, after_stat_map, plot.plot_env)
         df = layer.position.compute_layer(df)
         df = facet.map_data(df, layout)
         layers_data.append(df)
+        deferred_after_stat.append(after_stat_map)
+        deferred_after_scale.append(after_scale_map)
 
     # Independent copy so multiple draw() calls don't accumulate state.
     scales = plot.scales.copy()
@@ -107,6 +116,8 @@ def build(plot) -> BuildOutput:
                     df = df.with_columns(mapped.alias(aes_name))
                 elif mapped is not df[aes_name]:
                     df = df.with_columns(pl.Series(aes_name, mapped))
+        # Resolve after_scale() now that scale-mapped columns are in place.
+        df = _apply_deferred(df, deferred_after_scale[i], plot.plot_env)
         layers_data[i] = df
 
     # Layer-level constants and geom defaults run last so they override
@@ -118,6 +129,40 @@ def build(plot) -> BuildOutput:
         layers_data[i] = df
 
     return BuildOutput(data=layers_data, scales=scales, layout=layout)
+
+
+def _split_deferred(mapping):
+    """Return ``(immediate, after_stat_map, after_scale_map)`` from a mapping.
+
+    Markers ``after_stat()`` / ``after_scale()`` push the aes value to a
+    later phase; everything else evaluates against the raw layer data."""
+    from .aes import AfterScale, AfterStat
+
+    immediate = type(mapping)()
+    after_stat_map: dict = {}
+    after_scale_map: dict = {}
+    for name, value in mapping.items():
+        if isinstance(value, AfterStat):
+            after_stat_map[name] = value.expr
+        elif isinstance(value, AfterScale):
+            after_scale_map[name] = value.expr
+        else:
+            immediate[name] = value
+    return immediate, after_stat_map, after_scale_map
+
+
+def _apply_deferred(df: pl.DataFrame, deferred: dict, env: dict) -> pl.DataFrame:
+    """Resolve a deferred-aes dict against the current ``df``. Each value
+    can be a column name, a callable, or an expression string parseable by
+    :func:`hea.formula.parse`."""
+    if not deferred or len(df) == 0:
+        return df
+    for aes_name, expr in deferred.items():
+        value = _eval_aes_value(expr, df, env)
+        # ``_eval_aes_value`` returns a polars Series for column lookups, a
+        # numpy array / list for callables, or a scalar literal otherwise.
+        df = df.with_columns(to_series(value, len(df), name=aes_name).alias(aes_name))
+    return df
 
 
 def _attach_facet_columns(df: pl.DataFrame, source: pl.DataFrame,
