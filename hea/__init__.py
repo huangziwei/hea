@@ -33,6 +33,7 @@ from .stats import (
 from .data import data, factor
 from .dataframe import DataFrame, GroupBy, desc, tbl
 from . import plot
+from . import R
 
 # Expose hea's free-function data-transform helpers on the polars
 # namespace so chains and prep code can stay in one import:
