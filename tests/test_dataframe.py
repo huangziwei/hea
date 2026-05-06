@@ -10,7 +10,7 @@ import polars as pl
 import pytest
 
 import hea
-from hea import DataFrame, GroupBy, desc, tbl
+from hea import DataFrame, GroupBy, desc, factor, tbl
 
 
 # ---------------------------------------------------------------------------
@@ -48,12 +48,17 @@ def test_is_pl_dataframe_subclass(df):
     assert isinstance(df, DataFrame)
 
 
-def test_helpers_exposed_on_polars_namespace():
-    """`import hea` patches free-function helpers onto `pl` so chains
-    can stay in one namespace."""
-    assert pl.desc is desc
-    assert pl.tbl is tbl
-    assert pl.factor is hea.factor
+def test_hea_is_polars_superset():
+    """``hea.*`` is a strict superset of ``polars.__all__`` so users can
+    drop ``import polars as pl`` entirely. Regression-tested in detail in
+    ``tests/test_polars_superset.py``; this is just the smoke check.
+    """
+    hea_public = {n for n in dir(hea) if not n.startswith("_")}
+    assert hea_public >= set(pl.__all__)
+    # And the hea-specific helpers desc / tbl / factor live under hea.*.
+    assert hea.desc is desc
+    assert hea.tbl is tbl
+    assert hea.factor is factor
 
 
 def test_data_returns_subclass():

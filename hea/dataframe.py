@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import polars as pl
+from polars.lazyframe.group_by import LazyGroupBy as _PlLazyGroupBy
 
 __all__ = [
     "DataFrame",
@@ -1081,6 +1082,57 @@ class LazyFrame(pl.LazyFrame):
 
     def sql(self, *args: Any, **kwargs: Any) -> "LazyFrame":
         return self._wrap(super().sql(*args, **kwargs))
+
+    def group_by(self, *args: Any, **kwargs: Any) -> "_HeaLazyGroupBy":
+        return _HeaLazyGroupBy(super().group_by(*args, **kwargs).lgb)
+
+    def group_by_dynamic(self, *args: Any, **kwargs: Any) -> "_HeaLazyGroupBy":
+        return _HeaLazyGroupBy(super().group_by_dynamic(*args, **kwargs).lgb)
+
+    def rolling(self, *args: Any, **kwargs: Any) -> "_HeaLazyGroupBy":
+        return _HeaLazyGroupBy(super().rolling(*args, **kwargs).lgb)
+
+
+class _HeaLazyGroupBy(_PlLazyGroupBy):
+    """Subclass of polars's ``LazyGroupBy`` that re-wraps every LazyFrame
+    return as ``hea.LazyFrame``.
+
+    polars's ``LazyGroupBy.agg`` (and ``head``/``tail``/``sum``/etc.) all
+    use ``wrap_ldf(...)`` (`polars/lazyframe/group_by.py:194,263,…`) which
+    hardcodes ``pl.LazyFrame``. We auto-wrap every LazyFrame-returning
+    method via ``_install_lazy_groupby_overrides`` below so that
+    ``df.lazy().group_by('g').agg(...)`` chains stay in hea-land.
+
+    Private (leading underscore) — only reachable via ``LazyFrame.group_by``,
+    not part of the public API surface.
+    """
+
+
+def _install_lazy_groupby_overrides() -> None:
+    def _make(meth_name: str):
+        pl_method = getattr(_PlLazyGroupBy, meth_name)
+
+        def wrapper(self, *args: Any, **kwargs: Any):
+            out = pl_method(self, *args, **kwargs)
+            if isinstance(out, pl.LazyFrame) and not isinstance(out, LazyFrame):
+                return LazyFrame._from_pyldf(out._ldf)
+            return out
+
+        wrapper.__name__ = meth_name
+        wrapper.__qualname__ = f"_HeaLazyGroupBy.{meth_name}"
+        wrapper.__doc__ = pl_method.__doc__
+        return wrapper
+
+    for name in dir(_PlLazyGroupBy):
+        if name.startswith("_"):
+            continue
+        attr = getattr(_PlLazyGroupBy, name, None)
+        if not callable(attr):
+            continue
+        setattr(_HeaLazyGroupBy, name, _make(name))
+
+
+_install_lazy_groupby_overrides()
 
 
 class GroupBy:
