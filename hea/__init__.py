@@ -41,6 +41,7 @@ from .R import (
 )
 from .data import data, factor
 from .dataframe import DataFrame, GroupBy, desc, tbl
+from . import gg
 from . import plot
 from . import R
 
