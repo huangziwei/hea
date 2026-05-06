@@ -20,14 +20,23 @@ from .gam import gam
 from .glm import glm
 from .lm import lm
 from .lme import lme
-from .stats import (
+from .R import (
     aov,
+    bartlett_test,
+    binom_test,
     chisq_test,
     cor_test,
+    fisher_test,
+    friedman_test,
     kruskal_test,
+    ks_test,
+    mcnemar_test,
+    prop_test,
     rank,
+    shapiro_test,
     signed_rank,
     t_test,
+    var_test,
     wilcox_test,
 )
 from .data import data, factor

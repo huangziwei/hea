@@ -831,3 +831,291 @@ def test_diagnostics_raise_for_weighted_lm(gala):
     for fn in (rstudent, dffits, dfbetas, influence):
         with pytest.raises(NotImplementedError, match="weighted"):
             fn(m_wt)
+
+
+# ---------------------------------------------------------------------------
+# Hypothesis tests (the new batch + verifying the consolidation kept the rest)
+# ---------------------------------------------------------------------------
+
+
+from hea.R import (  # noqa: E402  — grouped with the test-batch tests
+    HTest,
+    bartlett_test, binom_test, chisq_test, cor_test,
+    fisher_test, friedman_test, kruskal_test, ks_test,
+    mcnemar_test, prop_test, shapiro_test,
+    t_test, var_test, wilcox_test,
+)
+
+
+def test_consolidation_preserved_existing_tests():
+    """The existing stats.py functions still work after the move."""
+    out = t_test([1.0, 2.0, 3.0, 4.0, 5.0], mu=3.0)
+    assert isinstance(out, HTest)
+    assert out.method == "One Sample t-test"
+    assert out.p_value == pytest.approx(1.0)
+
+
+def test_chisq_test_still_works():
+    out = chisq_test([10, 10, 10, 10])
+    assert isinstance(out, HTest)
+    assert out.statistic["X-squared"] == pytest.approx(0.0)
+
+
+# ---- fisher_test ----------------------------------------------------
+
+
+def test_fisher_test_2x2_matches_scipy():
+    """Fisher exact on a 2×2 should match ``scipy.stats.fisher_exact``."""
+    from scipy import stats as ss
+    tbl = np.array([[8, 2], [1, 5]])
+    res = fisher_test(tbl)
+    expected = ss.fisher_exact(tbl)
+    assert isinstance(res, HTest)
+    assert res.method == "Fisher's Exact Test for Count Data"
+    assert res.estimate["odds ratio"] == pytest.approx(expected.statistic)
+    assert res.p_value == pytest.approx(expected.pvalue)
+    assert res.null_value == 1.0
+
+
+def test_fisher_test_from_two_vectors():
+    """Passing parallel vectors should produce the same call as a 2x2 table."""
+    x = ["a", "a", "a", "a", "b", "b"]
+    y = ["x", "x", "x", "y", "x", "y"]
+    res = fisher_test(x, y)
+    assert isinstance(res, HTest)
+    assert "odds ratio" in res.estimate
+
+
+def test_fisher_test_rejects_non_2x2():
+    with pytest.raises(NotImplementedError, match="2x2"):
+        fisher_test(np.array([[1, 2, 3], [4, 5, 6]]))
+
+
+# ---- prop_test ------------------------------------------------------
+
+
+def test_prop_test_one_sample_known_value():
+    """1-sample prop.test of x=5, n=10, p=0.5 → X²=0 (or 0.1 with correction)."""
+    res = prop_test(5, 10, p=0.5, correct=False)
+    assert isinstance(res, HTest)
+    assert res.statistic["X-squared"] == pytest.approx(0.0)
+    assert res.estimate == {"p": 0.5}
+
+
+def test_prop_test_one_sample_continuity_correction():
+    """Yates correction subtracts ``0.5/n`` from |p̂ - p₀|."""
+    # x=4, n=10, p=0.5 → diff=0.1, after correction: 0.1 - 0.05 = 0.05
+    # X² = 0.05² / (0.25/10) = 0.0025 / 0.025 = 0.1
+    res = prop_test(4, 10, p=0.5, correct=True)
+    assert res.statistic["X-squared"] == pytest.approx(0.1)
+
+
+def test_prop_test_two_sample_returns_chisq():
+    """2-sample prop.test on (5/10, 8/10) — verify against direct chi-sq."""
+    from scipy import stats as ss
+    tbl = np.array([[5, 5], [8, 2]])
+    res = prop_test([5, 8], [10, 10])
+    expected = ss.chi2_contingency(tbl, correction=True)
+    assert res.statistic["X-squared"] == pytest.approx(expected.statistic)
+    assert res.p_value == pytest.approx(expected.pvalue)
+    assert res.estimate == {"prop 1": 0.5, "prop 2": 0.8}
+
+
+def test_prop_test_k_greater_than_2_raises():
+    with pytest.raises(NotImplementedError, match="k>2"):
+        prop_test([1, 2, 3], [10, 10, 10])
+
+
+# ---- binom_test -----------------------------------------------------
+
+
+def test_binom_test_exact_p_value():
+    """``P(X ≥ 8 | n=10, p=0.5) + P(X ≤ 2 | n=10, p=0.5)``."""
+    res = binom_test(8, 10, p=0.5)
+    # Two-sided exact p for 8/10 at p=0.5 is 0.1093750 (from R)
+    assert res.p_value == pytest.approx(0.109375, rel=1e-5)
+    assert res.estimate == {"probability of success": 0.8}
+    assert res.null_value == 0.5
+
+
+def test_binom_test_with_succ_fail_pair():
+    """Pass ``(succ, fail)`` as ``x``, omit ``n``."""
+    res = binom_test([8, 2])
+    assert res.statistic["number of successes"] == 8
+    assert res.parameter["number of trials"] == 10
+
+
+def test_binom_test_ci_brackets_estimate():
+    res = binom_test(8, 10, p=0.5)
+    lo, hi = res.conf_int
+    assert lo < 0.8 < hi
+
+
+# ---- var_test -------------------------------------------------------
+
+
+def test_var_test_f_statistic_known():
+    """F = var(x)/var(y) when ratio=1."""
+    rng = np.random.default_rng(0)
+    x = rng.normal(0, 2, 50)
+    y = rng.normal(0, 1, 60)
+    res = var_test(x, y)
+    F_expected = float(np.var(x, ddof=1) / np.var(y, ddof=1))
+    assert res.statistic["F"] == pytest.approx(F_expected)
+    assert res.parameter == {"num df": 49, "denom df": 59}
+
+
+def test_var_test_ci_brackets_estimate():
+    rng = np.random.default_rng(1)
+    x = rng.normal(0, 2, 100)
+    y = rng.normal(0, 1, 100)
+    res = var_test(x, y)
+    lo, hi = res.conf_int
+    assert lo < res.estimate["ratio of variances"] < hi
+
+
+def test_var_test_one_sided():
+    rng = np.random.default_rng(2)
+    x = rng.normal(0, 3, 50)
+    y = rng.normal(0, 1, 50)
+    res = var_test(x, y, alternative="greater")
+    assert res.alternative == "greater"
+    assert res.p_value < 1e-3  # variances obviously differ
+
+
+# ---- bartlett_test --------------------------------------------------
+
+
+def test_bartlett_test_matches_scipy():
+    from scipy import stats as ss
+    rng = np.random.default_rng(3)
+    a = rng.normal(0, 1, 30)
+    b = rng.normal(0, 2, 30)
+    c = rng.normal(0, 1.5, 30)
+    x = np.concatenate([a, b, c])
+    g = ["A"] * 30 + ["B"] * 30 + ["C"] * 30
+    res = bartlett_test(x, g)
+    expected = ss.bartlett(a, b, c)
+    assert res.statistic["Bartlett's K-squared"] == pytest.approx(
+        expected.statistic
+    )
+    assert res.p_value == pytest.approx(expected.pvalue)
+    assert res.parameter == {"df": 2}
+
+
+def test_bartlett_test_requires_2_groups():
+    with pytest.raises(ValueError, match="at least 2"):
+        bartlett_test([1.0, 2.0, 3.0], ["A", "A", "A"])
+
+
+# ---- shapiro_test ---------------------------------------------------
+
+
+def test_shapiro_test_high_p_for_normal_sample():
+    rng = np.random.default_rng(4)
+    x = rng.normal(size=50)
+    res = shapiro_test(x)
+    assert isinstance(res, HTest)
+    assert 0 < res.statistic["W"] < 1
+    # plenty of power-but-not-rejection on a clean normal sample
+    assert res.p_value > 0.05
+
+
+def test_shapiro_test_rejects_obvious_nonnormal():
+    """A heavy outlier should drive the W-statistic and p-value down."""
+    rng = np.random.default_rng(5)
+    x = np.concatenate([rng.normal(size=49), [50.0]])
+    res = shapiro_test(x)
+    assert res.p_value < 0.001
+
+
+# ---- ks_test --------------------------------------------------------
+
+
+def test_ks_test_two_sample_matches_scipy():
+    from scipy import stats as ss
+    rng = np.random.default_rng(6)
+    x = rng.normal(0, 1, 100)
+    y = rng.normal(1, 1, 100)  # shifted
+    res = ks_test(x, y)
+    expected = ss.ks_2samp(x, y)
+    assert res.statistic["D"] == pytest.approx(expected.statistic)
+    assert res.p_value == pytest.approx(expected.pvalue)
+
+
+def test_ks_test_one_sample_with_pnorm_string():
+    """R-style 'pnorm' string should map onto scipy's 'norm'."""
+    from scipy import stats as ss
+    rng = np.random.default_rng(7)
+    x = rng.normal(0, 1, 100)
+    res = ks_test(x, "pnorm")
+    expected = ss.kstest(x, "norm")
+    assert res.statistic["D"] == pytest.approx(expected.statistic)
+
+
+# ---- mcnemar_test ---------------------------------------------------
+
+
+def test_mcnemar_test_known_table():
+    """Standard textbook example: ``[[101, 121], [59, 33]]`` → χ² ≈ 21.36."""
+    tbl = np.array([[101, 121], [59, 33]])
+    res = mcnemar_test(tbl, correct=False)
+    # (b - c)^2 / (b + c) = (121 - 59)^2 / (121 + 59) = 3844 / 180
+    expected_stat = (121 - 59) ** 2 / (121 + 59)
+    assert res.statistic["McNemar's chi-squared"] == pytest.approx(
+        expected_stat
+    )
+
+
+def test_mcnemar_test_continuity_correction():
+    """Yates: ``(|b - c| - 1)² / (b + c)``; verify offset is applied."""
+    tbl = np.array([[101, 121], [59, 33]])
+    res_raw = mcnemar_test(tbl, correct=False)
+    res_corr = mcnemar_test(tbl, correct=True)
+    # (62 - 1)^2 / 180 < 62^2 / 180
+    assert res_corr.statistic["McNemar's chi-squared"] < res_raw.statistic[
+        "McNemar's chi-squared"
+    ]
+
+
+def test_mcnemar_test_rejects_non_2x2():
+    with pytest.raises(ValueError, match="2x2"):
+        mcnemar_test(np.array([[1, 2, 3], [4, 5, 6]]))
+
+
+# ---- friedman_test --------------------------------------------------
+
+
+def test_friedman_test_matches_scipy_long_to_wide():
+    """Long-form (y, groups, blocks) reshaped → ``friedmanchisquare(*samples)``."""
+    from scipy import stats as ss
+    # 3 groups × 5 blocks
+    rng = np.random.default_rng(8)
+    samples = [rng.normal(loc=mu, size=5) for mu in (0, 0.5, 1.0)]
+    y, groups, blocks = [], [], []
+    for gi, sample in enumerate(samples):
+        for bi, val in enumerate(sample):
+            y.append(val)
+            groups.append(f"g{gi}")
+            blocks.append(f"b{bi}")
+    res = friedman_test(y, groups, blocks)
+    expected = ss.friedmanchisquare(*samples)
+    assert res.statistic["Friedman chi-squared"] == pytest.approx(
+        expected.statistic
+    )
+    assert res.parameter == {"df": 2}
+
+
+def test_friedman_test_length_mismatch():
+    with pytest.raises(ValueError, match="same length"):
+        friedman_test([1.0, 2.0], ["a", "b", "c"], ["1", "2", "3"])
+
+
+# ---- HTest repr is human-readable -----------------------------------
+
+
+def test_htest_repr_contains_method_and_p():
+    out = t_test([1.0, 2.0, 3.0, 4.0, 5.0], mu=3.0)
+    s = repr(out)
+    assert "One Sample t-test" in s
+    assert "p-value" in s
