@@ -24,11 +24,14 @@ from hea.ggplot import (
     geom_ribbon, geom_smooth, geom_step, geom_violin, ggplot,
     position_dodge, position_fill, position_jitter, position_nudge,
     position_stack,
-    scale_color_brewer, scale_color_gradient, scale_color_gradient2,
-    scale_color_gradientn, scale_color_identity, scale_color_manual,
-    scale_color_viridis_c, scale_color_viridis_d, scale_fill_identity,
-    scale_fill_manual, scale_x_continuous, scale_x_log10, scale_x_reverse,
-    scale_x_sqrt, scale_y_continuous, scale_y_log10,
+    scale_alpha_continuous, scale_color_brewer, scale_color_gradient,
+    scale_color_gradient2, scale_color_gradientn, scale_color_identity,
+    scale_color_manual, scale_color_viridis_c, scale_color_viridis_d,
+    scale_fill_identity, scale_fill_manual, scale_linetype,
+    scale_linetype_manual, scale_shape, scale_shape_manual, scale_size_area,
+    scale_size_continuous, scale_size_manual, scale_x_continuous,
+    scale_x_log10, scale_x_reverse, scale_x_sqrt, scale_y_continuous,
+    scale_y_log10,
 )
 
 
@@ -1046,6 +1049,141 @@ def test_scale_color_brewer_set1():
                     for c in matplotlib.colormaps["Set1"].colors[:3]}
         observed = {tuple(c) for c in fc}
         assert observed == expected
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.6 — Non-colour aes scales: size, alpha, shape, linetype
+# ---------------------------------------------------------------------------
+
+
+def test_gg_c4_aes_size_continuous_qsec():
+    """GG-C4: ``aes(size=qsec)`` produces a continuous size scale (default
+    range 1–6 mm)."""
+    import numpy as np
+
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg", size="qsec")) + geom_point()
+    fig = p.draw()
+    try:
+        sizes = fig.axes[0].collections[0].get_sizes()
+        # Many distinct sizes since qsec is mostly continuous.
+        assert len(np.unique(np.round(sizes, 4))) >= 10
+        # Min size = (1 mm * 2.8454)² ≈ 8.10; max = (6 mm * 2.8454)² ≈ 291.5.
+        assert sizes.min() == pytest.approx(8.097, rel=0.01)
+        assert sizes.max() == pytest.approx(291.5, rel=0.01)
+    finally:
+        plt.close(fig)
+
+
+def test_scale_size_continuous_custom_range():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg", size="qsec")) + geom_point()
+         + scale_size_continuous(range=(2, 4)))
+    fig = p.draw()
+    try:
+        sizes = fig.axes[0].collections[0].get_sizes()
+        # Range mapped to [2, 4] mm → s in [(2*2.8454)², (4*2.8454)²]
+        assert sizes.min() == pytest.approx((2 * 2.8454) ** 2, rel=0.01)
+        assert sizes.max() == pytest.approx((4 * 2.8454) ** 2, rel=0.01)
+    finally:
+        plt.close(fig)
+
+
+def test_aes_alpha_continuous():
+    """``aes(alpha=qsec)`` → alpha varies linearly in [0.1, 1] by default."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg", alpha="qsec")) + geom_point()
+    fig = p.draw()
+    try:
+        fc = fig.axes[0].collections[0].get_facecolors()
+        alphas = sorted({round(c[3], 4) for c in fc})
+        assert alphas[0] == pytest.approx(0.1, abs=0.01)
+        assert alphas[-1] == pytest.approx(1.0, abs=0.01)
+    finally:
+        plt.close(fig)
+
+
+def test_aes_shape_discrete_factor_cyl():
+    """``aes(shape=factor(cyl))`` → 3 scatter calls (one per marker shape)."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg", shape="factor(cyl)"))
+         + geom_point())
+    fig = p.draw()
+    try:
+        # matplotlib scatter takes a single marker per call; one collection
+        # per unique shape.
+        assert len(fig.axes[0].collections) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_aes_shape_continuous_raises():
+    """ggplot2 message: 'A continuous variable cannot be mapped to `shape`'."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg", shape="qsec")) + geom_point()
+    with pytest.raises(ValueError, match="continuous variable cannot be mapped to `shape`"):
+        p.draw()
+
+
+def test_scale_shape_manual_explicit_markers():
+    """User-supplied marker codes are honoured per level."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg", shape="factor(cyl)"))
+         + geom_point()
+         + scale_shape_manual(values=["o", "X", "D"]))
+    fig = p.draw()
+    try:
+        # 3 collections each with a distinct marker glyph → just count
+        # the collection count and assert it matches the number of levels.
+        assert len(fig.axes[0].collections) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_aes_linetype_discrete_on_geom_line():
+    """``aes(linetype=factor(cyl))`` on geom_line → distinct linestyles per group."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg", linetype="factor(cyl)"))
+         + geom_line())
+    fig = p.draw()
+    try:
+        # 3 cyl groups → 3 lines; each with its own linestyle.
+        assert len(fig.axes[0].lines) == 3
+        # Distinct linestyles across the 3 lines.
+        linestyles = {ln.get_linestyle() for ln in fig.axes[0].lines}
+        assert len(linestyles) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_aes_linetype_continuous_raises():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg", linetype="qsec")) + geom_line()
+    with pytest.raises(ValueError, match="continuous variable cannot be mapped to `linetype`"):
+        p.draw()
+
+
+def test_scale_size_area_uses_sqrt_scaling():
+    """scale_size_area: visual *area* is proportional to the value, so
+    radius scales as sqrt — distinct from the linear range mapping."""
+    import polars as pl
+
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, 3.0, 4.0],
+        "y": [1.0, 1.0, 1.0, 1.0],
+        "v": [0.0, 0.25, 0.5, 1.0],
+    })
+    p = (ggplot(df, aes("x", "y", size="v")) + geom_point()
+         + scale_size_area(max_size=4))
+    fig = p.draw()
+    try:
+        sizes = fig.axes[0].collections[0].get_sizes()
+        # area_pal: size_mm = max_size * sqrt(v_normalized).
+        # v=0 → 0 mm; v=1 → max_size mm. s = (size_mm * 2.8454)².
+        assert sizes[0] == pytest.approx(0.0, abs=1e-6)  # v=0 → size 0
+        assert sizes[3] == pytest.approx((4 * 2.8454) ** 2, rel=0.01)
     finally:
         plt.close(fig)
 

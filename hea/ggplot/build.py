@@ -28,7 +28,7 @@ class BuildOutput:
     scales: ScalesList = None
 
 
-_NON_POSITIONAL_AES = ("colour", "fill")
+_NON_POSITIONAL_AES = ("colour", "fill", "size", "alpha", "shape", "linetype")
 
 
 def build(plot) -> BuildOutput:
@@ -166,9 +166,11 @@ def _add_group(df: pl.DataFrame) -> pl.DataFrame:
     if "group" in df.columns or len(df) == 0:
         return df
 
+    # Only colour/fill drive auto-grouping in ggplot2 — adding size/alpha/etc.
+    # would over-fragment groups (e.g. ``aes(size=mpg)`` would split each row).
     discrete_cols = [
         col for col in df.columns
-        if col in _NON_POSITIONAL_AES
+        if col in ("colour", "fill", "shape", "linetype")
         and df[col].dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean)
     ]
     if not discrete_cols:

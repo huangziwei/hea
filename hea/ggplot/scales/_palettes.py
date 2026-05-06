@@ -217,3 +217,99 @@ def brewer_pal_continuous(*, palette: str = "Blues", direction: int = 1):
         return [to_hex(c) for c in cmap(v)]
 
     return pal
+
+
+# ---------------------------------------------------------------------------
+# Non-colour palettes — size, alpha, shape, linetype
+# ---------------------------------------------------------------------------
+
+def rescale_pal(range_: tuple = (1.0, 6.0)):
+    """Linear rescale: ``[0, 1] -> [range_[0], range_[1]]``. Default matches
+    ggplot2's ``scale_size_continuous`` (1 mm to 6 mm)."""
+    import numpy as np
+
+    lo, hi = float(range_[0]), float(range_[1])
+
+    def palette(values) -> list[float]:
+        v = np.asarray(values, dtype=float)
+        return (lo + v * (hi - lo)).tolist()
+
+    return palette
+
+
+def area_pal(range_: tuple = (1.0, 6.0)):
+    """Area-proportional rescale: ``size ∝ √value``. Used by
+    ``scale_size_area`` so visual area (not radius) tracks the underlying
+    quantity — which matches Tufte/Cleveland's recommendation."""
+    import numpy as np
+
+    lo, hi = float(range_[0]), float(range_[1])
+
+    def palette(values) -> list[float]:
+        v = np.sqrt(np.clip(np.asarray(values, dtype=float), 0.0, 1.0))
+        return (lo + v * (hi - lo)).tolist()
+
+    return palette
+
+
+def alpha_pal(range_: tuple = (0.1, 1.0)):
+    """Linear rescale into alpha-friendly range. ggplot2 default is (0.1, 1)."""
+    return rescale_pal(range_)
+
+
+# ggplot2's default shape sequence — `scales::shape_pal`. R uses pch codes
+# 16, 17, 15, 3, 7, 8, … which we map to the closest matplotlib markers.
+# ``"o"`` (filled circle), ``"^"`` (triangle up), ``"s"`` (square), etc.
+_DEFAULT_SHAPES = ["o", "^", "s", "+", "x", "*", "D", "v", "<", ">"]
+
+
+def shape_pal():
+    """Discrete shape palette — cycles through ggplot2's default pch sequence."""
+
+    def palette(n: int) -> list[str]:
+        if n <= 0:
+            return []
+        if n > len(_DEFAULT_SHAPES):
+            # ggplot2 errors at n>6; we cycle to keep things usable.
+            import warnings
+
+            warnings.warn(
+                f"shape palette only has {len(_DEFAULT_SHAPES)} distinct shapes "
+                f"({n} requested); cycling.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return [_DEFAULT_SHAPES[i % len(_DEFAULT_SHAPES)] for i in range(n)]
+
+    return palette
+
+
+# ggplot2's default linetype sequence: solid, dashed, dotted, dotdash,
+# longdash, twodash. Matplotlib has built-in names for the first four;
+# longdash/twodash become explicit dash tuples.
+_DEFAULT_LINETYPES = [
+    "solid",
+    "dashed",
+    "dotted",
+    "dashdot",
+    (0, (10, 3)),     # longdash
+    (0, (5, 1, 1, 1)),  # twodash
+]
+
+
+def linetype_pal():
+    def palette(n: int):
+        if n <= 0:
+            return []
+        if n > len(_DEFAULT_LINETYPES):
+            import warnings
+
+            warnings.warn(
+                f"linetype palette only has {len(_DEFAULT_LINETYPES)} distinct "
+                f"styles ({n} requested); cycling.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return [_DEFAULT_LINETYPES[i % len(_DEFAULT_LINETYPES)] for i in range(n)]
+
+    return palette

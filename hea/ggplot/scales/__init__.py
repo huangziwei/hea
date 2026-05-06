@@ -38,6 +38,19 @@ from .discrete import (
     scale_fill_manual,
     scale_fill_viridis_d,
 )
+from .non_color import (
+    scale_alpha,
+    scale_alpha_continuous,
+    scale_alpha_manual,
+    scale_linetype,
+    scale_linetype_manual,
+    scale_shape,
+    scale_shape_manual,
+    scale_size,
+    scale_size_area,
+    scale_size_continuous,
+    scale_size_manual,
+)
 from .list import ScalesList
 from .scale import Scale
 from .transformed import (
@@ -110,4 +123,15 @@ __all__ = [
     "scale_color_distiller",
     "scale_colour_distiller",
     "scale_fill_distiller",
+    "scale_size",
+    "scale_size_continuous",
+    "scale_size_area",
+    "scale_size_manual",
+    "scale_alpha",
+    "scale_alpha_continuous",
+    "scale_alpha_manual",
+    "scale_shape",
+    "scale_shape_manual",
+    "scale_linetype",
+    "scale_linetype_manual",
 ]

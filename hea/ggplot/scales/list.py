@@ -45,39 +45,113 @@ class ScalesList:
         """Like :meth:`get_or_default` but inspects the data column to pick
         the right default scale for non-positional aesthetics.
 
-        For ``colour``/``fill``:
-        - discrete-color scale (``ScaleDiscreteColor`` with ``hue_pal``) for
-          string / categorical / enum / boolean data;
-        - continuous-color scale (``ScaleContinuousColor`` with the default
-          ``gradient_pal``) for numeric data — matches ggplot2's
-          ``scale_color_continuous`` default.
+        Picks per-aesthetic default palettes that match ggplot2:
+
+        * ``colour`` / ``fill`` — discrete: ``hue_pal``; continuous: ``gradient_pal``
+        * ``size`` — discrete: cycle of small steps; continuous: ``rescale_pal((1, 6))``
+        * ``alpha`` — discrete: cycle in [0.1, 1]; continuous: ``alpha_pal((0.1, 1))``
+        * ``shape`` — discrete only: ``shape_pal``; raises on numeric input
+        * ``linetype`` — discrete only: ``linetype_pal``; raises on numeric input
         """
         sc = self._by_aes.get(aesthetic)
         if sc is not None:
             return sc
         if aesthetic in ("x", "y"):
             return self.get_or_default(aesthetic)
-        if aesthetic in ("colour", "fill"):
-            import polars as pl
 
-            if not isinstance(data, pl.Series):
-                return None
-            dtype = data.dtype
-            if dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean):
+        import polars as pl
+
+        if not isinstance(data, pl.Series):
+            return None
+        dtype = data.dtype
+        is_discrete = dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean)
+        is_numeric = dtype.is_numeric()
+
+        if aesthetic in ("colour", "fill"):
+            if is_discrete:
                 from .discrete import ScaleDiscreteColor
 
                 sc = ScaleDiscreteColor(aesthetics=(aesthetic,))
-                self._by_aes[aesthetic] = sc
-                return sc
-            if dtype.is_numeric():
+            elif is_numeric:
                 from ._palettes import gradient_pal
                 from .color_continuous import ScaleContinuousColor
 
                 sc = ScaleContinuousColor(
                     aesthetics=(aesthetic,), palette=gradient_pal(),
                 )
+            else:
+                return None
+            self._by_aes[aesthetic] = sc
+            return sc
+
+        if aesthetic == "size":
+            from ._palettes import rescale_pal
+            from .color_continuous import ScaleContinuousColor
+            from .discrete import ScaleDiscreteColor
+
+            if is_numeric:
+                sc = ScaleContinuousColor(
+                    aesthetics=("size",), palette=rescale_pal((1.0, 6.0)),
+                )
+            elif is_discrete:
+                sc = ScaleDiscreteColor(
+                    aesthetics=("size",), palette=rescale_pal((1.0, 6.0)),
+                )
+            else:
+                return None
+            self._by_aes[aesthetic] = sc
+            return sc
+
+        if aesthetic == "alpha":
+            from ._palettes import alpha_pal
+            from .color_continuous import ScaleContinuousColor
+            from .discrete import ScaleDiscreteColor
+
+            if is_numeric:
+                sc = ScaleContinuousColor(
+                    aesthetics=("alpha",), palette=alpha_pal((0.1, 1.0)),
+                )
+            elif is_discrete:
+                sc = ScaleDiscreteColor(
+                    aesthetics=("alpha",), palette=alpha_pal((0.1, 1.0)),
+                )
+            else:
+                return None
+            self._by_aes[aesthetic] = sc
+            return sc
+
+        if aesthetic == "shape":
+            if is_numeric:
+                raise ValueError(
+                    "A continuous variable cannot be mapped to `shape`. "
+                    "Convert via factor() or use scale_shape_manual()."
+                )
+            if is_discrete:
+                from ._palettes import shape_pal
+                from .discrete import ScaleDiscreteColor
+
+                sc = ScaleDiscreteColor(aesthetics=("shape",), palette=shape_pal())
                 self._by_aes[aesthetic] = sc
                 return sc
+            return None
+
+        if aesthetic == "linetype":
+            if is_numeric:
+                raise ValueError(
+                    "A continuous variable cannot be mapped to `linetype`. "
+                    "Convert via factor() or use scale_linetype_manual()."
+                )
+            if is_discrete:
+                from ._palettes import linetype_pal
+                from .discrete import ScaleDiscreteColor
+
+                sc = ScaleDiscreteColor(
+                    aesthetics=("linetype",), palette=linetype_pal(),
+                )
+                self._by_aes[aesthetic] = sc
+                return sc
+            return None
+
         return None
 
     def copy(self) -> "ScalesList":

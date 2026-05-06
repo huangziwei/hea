@@ -24,16 +24,42 @@ class GeomPoint(Geom):
     required_aes: tuple = ("x", "y")
 
     def draw_panel(self, data, ax) -> None:
+        import numpy as np
+
+        if len(data) == 0:
+            return
+
+        n = len(data)
         x = data["x"].to_numpy()
         y = data["y"].to_numpy()
-        colour = data["colour"].to_list() if "colour" in data.columns else self.default_aes["colour"]
-        size = data["size"].to_numpy() if "size" in data.columns else self.default_aes["size"]
-        shape = data["shape"].to_list()[0] if "shape" in data.columns else self.default_aes["shape"]
-        alpha = data["alpha"].to_numpy() if "alpha" in data.columns else self.default_aes["alpha"]
 
-        s = (size * _PT_PER_MM) ** 2
+        colour = (data["colour"].to_list() if "colour" in data.columns
+                  else [self.default_aes["colour"]] * n)
+        size_arr = (data["size"].to_numpy() if "size" in data.columns
+                    else np.full(n, self.default_aes["size"]))
+        shape = (data["shape"].to_list() if "shape" in data.columns
+                 else [self.default_aes["shape"]] * n)
+        alpha_arr = (data["alpha"].to_numpy() if "alpha" in data.columns
+                     else np.full(n, self.default_aes["alpha"]))
 
-        ax.scatter(x, y, s=s, c=colour, marker=shape, alpha=alpha)
+        s = (size_arr.astype(float) * _PT_PER_MM) ** 2
+
+        # matplotlib scatter takes a single marker per call. Split by unique
+        # shape so per-row shapes (from aes(shape=...)) actually get drawn.
+        unique_shapes = list(dict.fromkeys(shape))
+        if len(unique_shapes) == 1:
+            ax.scatter(x, y, s=s, c=colour, marker=unique_shapes[0], alpha=alpha_arr)
+            return
+
+        for shp in unique_shapes:
+            mask = np.array([sh == shp for sh in shape])
+            ax.scatter(
+                x[mask], y[mask],
+                s=s[mask],
+                c=[colour[i] for i, m in enumerate(mask) if m],
+                marker=shp,
+                alpha=alpha_arr[mask],
+            )
 
 
 def geom_point(mapping=None, data=None, *, stat="identity", position="identity",
