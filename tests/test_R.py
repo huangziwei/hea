@@ -1119,3 +1119,242 @@ def test_htest_repr_contains_method_and_p():
     s = repr(out)
     assert "One Sample t-test" in s
     assert "p-value" in s
+
+
+# ---------------------------------------------------------------------------
+# DataFrame helpers: cut / findInterval / table / xtabs / prop_table /
+# addmargins
+# ---------------------------------------------------------------------------
+
+
+from hea.R import (  # noqa: E402  — grouped with the helper tests
+    addmargins, cut, findInterval, prop_table, table, xtabs,
+)
+
+
+# ---- cut ------------------------------------------------------------
+
+
+def test_cut_default_is_right_closed():
+    """``cut(x, breaks)`` defaults to ``right=True``: ``(a, b]`` semantics."""
+    out = cut([1, 2, 5, 10, 0, 11], breaks=[0, 2, 5, 10])
+    # boundary value 2 → (0,2]; 5 → (2,5]; 10 → (5,10]; 0 and 11 are out-of-range
+    assert out.to_list() == ["(0,2]", "(0,2]", "(2,5]", "(5,10]", None, None]
+
+
+def test_cut_left_closed_with_right_false():
+    out = cut([0, 2, 5, 10], breaks=[0, 2, 5, 10], right=False)
+    # 0 → [0,2); 2 → [2,5); 5 → [5,10); 10 not in any (right edge open)
+    assert out.to_list() == ["[0,2)", "[2,5)", "[5,10)", None]
+
+
+def test_cut_include_lowest_brings_in_boundary():
+    out = cut(
+        [1, 2, 5, 10, 0, 11], breaks=[0, 2, 5, 10], include_lowest=True
+    )
+    # x=0 now in [0,2]; lowest label changes from "(0,2]" to "[0,2]"
+    assert out.to_list() == [
+        "[0,2]", "[0,2]", "(2,5]", "(5,10]", "[0,2]", None,
+    ]
+
+
+def test_cut_returns_pl_enum_factor():
+    out = cut([1, 3, 7], breaks=[0, 2, 5, 10])
+    assert isinstance(out, pl.Series)
+    assert isinstance(out.dtype, pl.Enum)
+    assert out.dtype.categories.to_list() == ["(0,2]", "(2,5]", "(5,10]"]
+
+
+def test_cut_labels_false_returns_codes():
+    out = cut([1, 3, 7, 100], breaks=[0, 2, 5, 10], labels=False)
+    # 1-based codes (R-faithful): 1, 2, 3; out-of-range → NaN
+    assert isinstance(out, np.ndarray)
+    assert out[0] == 1
+    assert out[1] == 2
+    assert out[2] == 3
+    assert np.isnan(out[3])
+
+
+def test_cut_custom_labels():
+    out = cut([0.5, 2.5, 6.0], breaks=[0, 2, 5, 10],
+              labels=["lo", "med", "hi"])
+    assert out.to_list() == ["lo", "med", "hi"]
+    assert out.dtype.categories.to_list() == ["lo", "med", "hi"]
+
+
+def test_cut_scalar_breaks_makes_n_equal_width_bins():
+    """``breaks=4`` should produce 4 bins covering ``[min - eps, max + eps]``."""
+    out = cut(np.linspace(0, 10, 11), breaks=4)
+    cats = out.dtype.categories.to_list()
+    assert len(cats) == 4
+
+
+def test_cut_breaks_must_be_increasing():
+    with pytest.raises(ValueError, match="strictly increasing"):
+        cut([1, 2, 3], breaks=[2, 1, 5])
+
+
+def test_cut_label_count_must_match_bins():
+    with pytest.raises(ValueError, match="2 labels but 3 bins"):
+        cut([1, 2], breaks=[0, 2, 5, 10], labels=["a", "b"])
+
+
+# ---- findInterval ---------------------------------------------------
+
+
+def test_findInterval_basic():
+    """``findInterval(x, vec)`` returns 0..N where vec[i-1] ≤ x < vec[i]."""
+    out = findInterval([0.5, 2.0, 3.5, 7.0, 10.0, 11.0], [1, 5, 10])
+    # 0.5 < 1 → 0; 2.0 in [1,5) → 1; 3.5 → 1; 7.0 in [5,10) → 2;
+    # 10.0 ≥ 10 → 3 (above all); 11.0 → 3
+    assert out.tolist() == [0, 1, 1, 2, 3, 3]
+
+
+def test_findInterval_rightmost_closed_pulls_back_endpoint():
+    out = findInterval([10.0, 11.0], [1, 5, 10], rightmost_closed=True)
+    # 10.0 now in [5, 10] (last interval) → 2; 11.0 still 3
+    assert out.tolist() == [2, 3]
+
+
+def test_findInterval_all_inside_clips():
+    out = findInterval([0, 11.0], [1, 5, 10], all_inside=True)
+    # 0 normally → 0 but all_inside clamps to [1, len(vec)-1] = [1, 2]
+    assert out.tolist() == [1, 2]
+
+
+def test_findInterval_left_open():
+    out = findInterval([1.0, 5.0, 10.0], [1, 5, 10], left_open=True)
+    # left_open: (vec[i-1], vec[i]]; x=1 not > 1 → 0; x=5 → 1; x=10 → 2
+    assert out.tolist() == [0, 1, 2]
+
+
+def test_findInterval_rejects_unsorted_vec():
+    with pytest.raises(ValueError, match="non-decreasing"):
+        findInterval([1.0], [3, 1, 2])
+
+
+# ---- table ----------------------------------------------------------
+
+
+def test_table_one_way_returns_value_n():
+    out = table(["a", "b", "a", "c", "b", "a"])
+    assert out.columns == ["value", "n"]
+    assert out["value"].to_list() == ["a", "b", "c"]
+    assert out["n"].to_list() == [3, 2, 1]
+
+
+def test_table_two_way_pivots():
+    out = table(["a", "a", "b", "b", "b"], ["x", "y", "x", "y", "y"])
+    # First col is row label; remaining cols are y-levels (sorted).
+    assert out.columns == ["", "x", "y"]
+    assert out[""].to_list() == ["a", "b"]
+    assert out["x"].to_list() == [1, 1]
+    assert out["y"].to_list() == [1, 2]
+
+
+def test_table_dnn_renames_label_column():
+    out = table(["a", "a", "b"], ["x", "y", "y"], dnn=("group", "outcome"))
+    assert out.columns[0] == "group"
+
+
+def test_table_drops_nulls_by_default():
+    out = table([1, 2, None, 2, None])
+    assert out["value"].to_list() == ["1", "2"]
+    assert out["n"].to_list() == [1, 2]
+
+
+# ---- xtabs ----------------------------------------------------------
+
+
+def test_xtabs_one_way():
+    df = pl.DataFrame({"g": ["a", "b", "a", "b", "a"]})
+    out = xtabs("~ g", df)
+    assert out["value"].to_list() == ["a", "b"]
+    assert out["n"].to_list() == [3, 2]
+
+
+def test_xtabs_two_way_uses_dnn():
+    df = pl.DataFrame({
+        "g": ["a", "b", "a", "b", "a"],
+        "h": ["x", "x", "y", "y", "y"],
+    })
+    out = xtabs("~ g + h", df)
+    # The first column carries the row variable's name (left side of +)
+    assert out.columns[0] == "g"
+    assert sorted(out.columns[1:]) == ["x", "y"]
+
+
+def test_xtabs_lhs_form_not_supported():
+    df = pl.DataFrame({"w": [1.0, 2.0], "g": ["a", "b"]})
+    with pytest.raises(NotImplementedError, match="weighted form"):
+        xtabs("w ~ g", df)
+
+
+# ---- prop_table -----------------------------------------------------
+
+
+def test_prop_table_grand_total_sums_to_one():
+    tbl = table(["a", "a", "b", "b", "b"], ["x", "y", "x", "y", "y"])
+    out = prop_table(tbl)
+    counts = out.select(["x", "y"]).to_numpy().astype(float)
+    assert counts.sum() == pytest.approx(1.0)
+
+
+def test_prop_table_row_proportions_sum_to_one():
+    tbl = table(["a", "a", "b", "b", "b"], ["x", "y", "x", "y", "y"])
+    out = prop_table(tbl, margin=1)
+    rows = out.select(["x", "y"]).to_numpy().astype(float)
+    np.testing.assert_allclose(rows.sum(axis=1), 1.0)
+
+
+def test_prop_table_column_proportions_sum_to_one():
+    tbl = table(["a", "a", "b", "b", "b"], ["x", "y", "x", "y", "y"])
+    out = prop_table(tbl, margin=2)
+    cols = out.select(["x", "y"]).to_numpy().astype(float)
+    np.testing.assert_allclose(cols.sum(axis=0), 1.0)
+
+
+def test_prop_table_works_on_ndarray():
+    arr = np.array([[1, 2], [3, 4]], dtype=float)
+    out = prop_table(arr)
+    assert out.sum() == pytest.approx(1.0)
+
+
+def test_prop_table_invalid_margin():
+    tbl = table(["a"], ["x"])
+    with pytest.raises(ValueError, match="must be None, 1, or 2"):
+        prop_table(tbl, margin=3)
+
+
+# ---- addmargins -----------------------------------------------------
+
+
+def test_addmargins_2way_default_adds_both():
+    tbl = table(["a", "a", "b", "b", "b"], ["x", "y", "x", "y", "y"])
+    out = addmargins(tbl)
+    # Adds a "Sum" column AND a "Sum" row (with the grand total at the corner)
+    assert "Sum" in out.columns
+    assert out[""].to_list()[-1] == "Sum"
+    grand_total = float(out.row(-1, named=True)["Sum"])
+    assert grand_total == 5.0
+
+
+def test_addmargins_margin_2_adds_only_row_sums():
+    tbl = table(["a", "a", "b"], ["x", "y", "y"])
+    out = addmargins(tbl, margin=2)
+    assert "Sum" in out.columns
+    assert "Sum" not in out[""].to_list()
+
+
+def test_addmargins_margin_1_adds_only_column_sums():
+    tbl = table(["a", "a", "b"], ["x", "y", "y"])
+    out = addmargins(tbl, margin=1)
+    assert "Sum" in out[""].to_list()
+    assert "Sum" not in out.columns
+
+
+def test_addmargins_oneway_appends_sum_row():
+    tbl = table(["a", "b", "a", "c", "b", "a"])
+    out = addmargins(tbl)
+    assert out["value"].to_list() == ["a", "b", "c", "Sum"]
+    assert out["n"].to_list() == [3.0, 2.0, 1.0, 6.0]

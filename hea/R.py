@@ -51,6 +51,9 @@ __all__ = [
     "which", "which_max", "which_min",
     "cumsum", "cumprod", "cummax", "cummin", "diff",
     "unique", "duplicated", "tabulate",
+    "cut", "findInterval",
+    # contingency tables
+    "table", "xtabs", "prop_table", "addmargins",
     # reductions (R defaults: sd/var use N-1)
     "mean", "median", "var", "sd", "quantile", "cor", "cov",
     # coercion / predicates
@@ -359,6 +362,128 @@ def tabulate(x, nbins=None):
     if nbins == 0:
         return np.zeros(0, dtype=int)
     return np.bincount(arr - 1, minlength=int(nbins))[:int(nbins)]
+
+
+def cut(x, breaks, *, labels=None, right=True, include_lowest=False):
+    """R: ``cut()`` — bin a numeric vector into intervals (a factor).
+
+    Parameters
+    ----------
+    x : array-like
+        Numeric vector to bin.
+    breaks : int or array-like
+        Number of equal-width bins (R's scalar form), or an explicit
+        strictly-increasing sequence of cut points.
+    labels : list, False, or None
+        ``None`` (default): auto-generate ``"(a,b]"`` / ``"[a,b)"``-style
+        labels. A list: custom labels (length must equal ``len(breaks)-1``).
+        ``False``: return integer codes instead of a factor (1-based to
+        match R; ``NaN`` for out-of-range).
+    right : bool, default True
+        If True, bins are right-closed ``(a, b]`` (R's default). If False,
+        left-closed ``[a, b)``.
+    include_lowest : bool, default False
+        If True, include the boundary value in the lowest bin (right=True)
+        or in the highest bin (right=False), matching R's ``include.lowest``.
+
+    Returns
+    -------
+    pl.Series
+        ``pl.Enum`` factor with the bin labels, or a numpy ``float64`` array
+        of 1-based integer codes when ``labels=False``.
+    """
+    arr = np.asarray(x, dtype=float)
+    if isinstance(breaks, (int, np.integer)) and not isinstance(breaks, bool):
+        n = int(breaks)
+        if n < 1:
+            raise ValueError("cut(): need at least 1 bin")
+        if arr.size == 0:
+            raise ValueError("cut(): empty input with scalar breaks")
+        rng = float(arr.max()) - float(arr.min())
+        eps = 0.001 * rng if rng > 0 else 0.001
+        breaks = np.linspace(arr.min() - eps, arr.max() + eps, n + 1)
+    breaks_arr = np.asarray(breaks, dtype=float)
+    if not (np.diff(breaks_arr) > 0).all():
+        raise ValueError("cut(): breaks must be strictly increasing")
+    n_bins = len(breaks_arr) - 1
+    if n_bins < 1:
+        raise ValueError("cut(): need at least 2 break points")
+
+    idx = np.digitize(arr, breaks_arr, right=right) - 1
+    if include_lowest:
+        if right:
+            idx = np.where(arr == breaks_arr[0], 0, idx)
+        else:
+            idx = np.where(arr == breaks_arr[-1], n_bins - 1, idx)
+    out_of_range = (idx < 0) | (idx >= n_bins)
+
+    if labels is False:
+        codes = (idx + 1).astype(float)
+        codes[out_of_range] = np.nan
+        return codes
+
+    if labels is None:
+        if right:
+            lab_list = [
+                f"({_fmt(breaks_arr[i])},{_fmt(breaks_arr[i + 1])}]"
+                for i in range(n_bins)
+            ]
+            if include_lowest:
+                lab_list[0] = (
+                    f"[{_fmt(breaks_arr[0])},{_fmt(breaks_arr[1])}]"
+                )
+        else:
+            lab_list = [
+                f"[{_fmt(breaks_arr[i])},{_fmt(breaks_arr[i + 1])})"
+                for i in range(n_bins)
+            ]
+            if include_lowest:
+                lab_list[-1] = (
+                    f"[{_fmt(breaks_arr[-2])},{_fmt(breaks_arr[-1])}]"
+                )
+    else:
+        lab_list = [str(la) for la in labels]
+        if len(lab_list) != n_bins:
+            raise ValueError(
+                f"cut(): {len(lab_list)} labels but {n_bins} bins"
+            )
+
+    result = [
+        None if out_of_range[i] else lab_list[int(idx[i])]
+        for i in range(len(arr))
+    ]
+    return pl.Series(result, dtype=pl.Utf8).cast(pl.Enum(lab_list))
+
+
+def findInterval(
+    x,
+    vec,
+    *,
+    rightmost_closed: bool = False,
+    all_inside: bool = False,
+    left_open: bool = False,
+):
+    """R: ``findInterval()`` — for each x, the index of its enclosing
+    interval in a sorted ``vec``.
+
+    Returns ``i`` in ``0..len(vec)`` (same convention as R, treating the
+    return as an index into ``vec``):
+
+    * ``i = 0``        → x is below ``vec[0]``
+    * ``vec[i-1] ≤ x < vec[i]`` (default, ``left_open=False``)
+    * ``i = len(vec)`` → x is at or above ``vec[-1]``
+    """
+    arr = np.asarray(x, dtype=float)
+    vec_arr = np.asarray(vec, dtype=float)
+    if not (np.diff(vec_arr) >= 0).all():
+        raise ValueError("findInterval(): vec must be non-decreasing")
+    side = "left" if left_open else "right"
+    idx = np.searchsorted(vec_arr, arr, side=side)
+    if rightmost_closed:
+        idx = np.where(arr == vec_arr[-1], len(vec_arr) - 1, idx)
+    if all_inside:
+        idx = np.clip(idx, 1, len(vec_arr) - 1)
+    return idx
 
 
 # ---- reductions (R defaults) ----------------------------------------
@@ -759,6 +884,161 @@ def set_seed(seed):
     ``hea._r_random``. This wrapper is for ordinary reproducibility.
     """
     np.random.seed(int(seed))
+
+
+# ---- contingency tables ---------------------------------------------
+#
+# ``table`` / ``xtabs`` build frequency tables; ``prop_table`` and
+# ``addmargins`` decorate them. We return polars DataFrames rather than
+# R's "table" object — the first column carries the row labels, with
+# remaining columns one per level of the second variable.
+
+def table(x, y=None, *, dnn=None):
+    """R: ``table()`` — 1- or 2-way frequency table.
+
+    1-way: returns a 2-column DataFrame ``(value, n)`` sorted by value.
+    2-way: returns a wide DataFrame whose first column is the row label
+    (named ``""`` by default; pass ``dnn=("row", "col")`` for R-style
+    dimension names) and remaining columns are the levels of ``y``.
+
+    Nulls are dropped (R's ``useNA="no"`` default).
+    """
+    if y is None:
+        s = pl.Series(x).drop_nulls().cast(pl.Utf8)
+        out = (
+            pl.DataFrame({"value": s})
+            .group_by("value").len(name="n")
+            .sort("value")
+        )
+        if dnn is not None:
+            out = out.rename({"value": str(dnn[0])})
+        return out
+
+    df = pl.DataFrame({
+        "__x__": pl.Series(x).cast(pl.Utf8),
+        "__y__": pl.Series(y).cast(pl.Utf8),
+    }).drop_nulls()
+    counts = df.group_by(["__x__", "__y__"]).len(name="n")
+    pivot = (
+        counts.pivot(values="n", index="__x__", on="__y__")
+        .fill_null(0)
+        .sort("__x__")
+    )
+    # sort columns alphabetically so output is reproducible (polars'
+    # pivot uses encounter order, which depends on group_by ordering)
+    label_col = "__x__"
+    other_cols = sorted(c for c in pivot.columns if c != label_col)
+    pivot = pivot.select([label_col, *other_cols])
+    new_label = str(dnn[0]) if dnn is not None else ""
+    return pivot.rename({label_col: new_label})
+
+
+def xtabs(formula: str, data: pl.DataFrame):
+    """R: ``xtabs()`` — formula-based contingency table.
+
+    Currently supports the count form ``~ a`` or ``~ a + b`` (no LHS).
+    The weighted form ``w ~ a + b`` (sum of ``w`` per cell) is not yet
+    wired.
+    """
+    if "~" not in formula:
+        raise ValueError("xtabs(): formula must contain '~'")
+    lhs, rhs = formula.split("~", 1)
+    if lhs.strip():
+        raise NotImplementedError(
+            "xtabs(): weighted form (with LHS) not yet supported"
+        )
+    cols = [p.strip() for p in rhs.split("+")]
+    if len(cols) == 1:
+        return table(data[cols[0]])
+    if len(cols) == 2:
+        return table(data[cols[0]], data[cols[1]], dnn=(cols[0], cols[1]))
+    raise NotImplementedError(
+        "xtabs(): 3+ way tables not supported in v1"
+    )
+
+
+def prop_table(tbl, margin=None):
+    """R: ``prop.table()`` — convert counts to proportions.
+
+    ``margin=None`` divides by the grand total (default).
+    ``margin=1`` divides each row by its sum (row-conditional).
+    ``margin=2`` divides each column by its sum (column-conditional).
+
+    Accepts the polars DataFrame produced by :func:`table` /
+    :func:`xtabs`, or a plain numpy 2-D array.
+    """
+    if isinstance(tbl, pl.DataFrame):
+        # 1-way table from this module: cols are exactly ['value', 'n'].
+        if tbl.columns == ["value", "n"]:
+            n = tbl["n"].cast(pl.Float64).to_numpy()
+            return tbl.with_columns(pl.Series("n", n / n.sum()))
+        # 2-way: first col carries row labels; rest are counts.
+        label_col = tbl.columns[0]
+        count_cols = tbl.columns[1:]
+        mat = tbl.select(count_cols).to_numpy().astype(float)
+        mat = _apply_margin_proportion(mat, margin)
+        return pl.DataFrame(
+            {label_col: tbl[label_col], **{c: mat[:, i] for i, c in enumerate(count_cols)}}
+        )
+    arr = np.asarray(tbl, dtype=float)
+    return _apply_margin_proportion(arr, margin)
+
+
+def _apply_margin_proportion(mat: np.ndarray, margin) -> np.ndarray:
+    if margin is None:
+        total = mat.sum()
+        if total == 0:
+            return mat.copy()
+        return mat / total
+    if margin == 1:
+        rs = mat.sum(axis=1, keepdims=True)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.where(rs > 0, mat / rs, 0.0)
+    if margin == 2:
+        cs = mat.sum(axis=0, keepdims=True)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.where(cs > 0, mat / cs, 0.0)
+    raise ValueError("prop_table(): margin must be None, 1, or 2")
+
+
+def addmargins(tbl, margin=None):
+    """R: ``addmargins()`` — append ``Sum`` rows / columns to a table.
+
+    ``margin=None``: add both a column-of-row-sums and a row-of-column-sums
+    (plus the grand total at the corner). ``margin=1``: only the column-sum
+    row. ``margin=2``: only the row-sum column.
+    """
+    if not isinstance(tbl, pl.DataFrame):
+        raise NotImplementedError(
+            "addmargins(): only polars DataFrame inputs supported in v1"
+        )
+    if tbl.columns == ["value", "n"]:
+        # 1-way: append a "Sum" row, cast `n` to keep types consistent
+        n_total = float(tbl["n"].sum())
+        n_cast = tbl["n"].cast(pl.Float64)
+        return pl.concat([
+            tbl.with_columns(n_cast),
+            pl.DataFrame({"value": ["Sum"], "n": [n_total]}),
+        ])
+    label_col = tbl.columns[0]
+    count_cols = tbl.columns[1:]
+    mat = tbl.select(count_cols).to_numpy().astype(float)
+    margins = (1, 2) if margin is None else (margin,)
+    # Cast count columns to Float64 so the appended Sum row (float) lines up.
+    new_tbl = tbl.with_columns(*(pl.col(c).cast(pl.Float64) for c in count_cols))
+    if 2 in margins:
+        new_tbl = new_tbl.with_columns(
+            pl.Series("Sum", mat.sum(axis=1))
+        )
+    if 1 in margins:
+        sum_row: dict = {label_col: "Sum"}
+        col_sums = mat.sum(axis=0)
+        for i, c in enumerate(count_cols):
+            sum_row[c] = float(col_sums[i])
+        if 2 in margins:
+            sum_row["Sum"] = float(mat.sum())
+        new_tbl = pl.concat([new_tbl, pl.DataFrame([sum_row])])
+    return new_tbl
 
 
 # ---- result containers ----------------------------------------------
