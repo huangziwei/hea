@@ -9,8 +9,13 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 
 
-def render(plot, build_output) -> "plt.Figure":
-    fig, ax = plt.subplots()
+def render(plot, build_output, ax=None) -> "plt.Figure":
+    if ax is None:
+        fig, ax = plt.subplots()
+        owns_fig = True
+    else:
+        fig = ax.figure
+        owns_fig = False
 
     for layer, df in zip(plot.layers, build_output.data):
         layer.geom.draw_panel(df, ax)
@@ -23,7 +28,10 @@ def render(plot, build_output) -> "plt.Figure":
     if ylabel is not None:
         ax.set_ylabel(ylabel)
 
-    fig.tight_layout()
+    # Only manage layout for the figure we created. Caller-supplied axes
+    # belong to a parent figure that's responsible for its own layout.
+    if owns_fig:
+        fig.tight_layout()
     return fig
 
 

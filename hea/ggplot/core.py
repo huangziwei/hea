@@ -62,10 +62,16 @@ class ggplot:
 
     # ---- output ------------------------------------------------------
 
-    def draw(self):
+    def draw(self, ax=None):
+        """Build the plot and render it to a matplotlib :class:`Figure`.
+
+        ``ax``: optional existing axes to draw into (e.g. one cell from
+        ``plt.subplot_mosaic``). When given, no new figure is created and
+        ``ax.figure`` is returned.
+        """
         from .build import build
         from .render import render
-        return render(self, build(self))
+        return render(self, build(self), ax=ax)
 
     def show(self) -> None:
         import matplotlib.pyplot as plt
@@ -83,9 +89,14 @@ class ggplot:
     def _repr_png_(self):
         import io
 
+        import matplotlib.pyplot as plt
+
         fig = self.draw()
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+        # Close so Jupyter doesn't also auto-display the live figure
+        # alongside the _repr_png_ bytes.
+        plt.close(fig)
         buf.seek(0)
         return buf.read()
 

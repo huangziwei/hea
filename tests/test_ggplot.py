@@ -197,6 +197,29 @@ def test_gg_c10_density_pima_diastolic():
         plt.close(fig)
 
 
+def test_draw_into_existing_axes_via_subplot_mosaic():
+    """`draw(ax=ax)` paints into a caller-supplied axes (e.g. ``plt.subplot_mosaic``)."""
+    from hea.data import data as _hea_data
+
+    pima = _hea_data("pima", package="faraway")
+    fig, axes = plt.subplot_mosaic([["hist", "scatter"]], figsize=(8, 3))
+    try:
+        p1 = ggplot(pima, aes(x="diastolic")) + geom_histogram()
+        p2 = ggplot(pima, aes(x="diastolic", y="diabetes")) + geom_point()
+
+        returned = p1.draw(ax=axes["hist"])
+        assert returned is fig, "draw(ax=) should return the parent Figure"
+
+        p2.draw(ax=axes["scatter"])
+
+        assert len(axes["hist"].patches) == 30
+        assert len(axes["scatter"].collections) == 1
+        assert axes["scatter"].get_xlabel() == "diastolic"
+        assert axes["scatter"].get_ylabel() == "diabetes"
+    finally:
+        plt.close(fig)
+
+
 def test_faraway_p5_scatter_pima_diastolic_diabetes():
     """`ggplot(pima, aes(x=diastolic, y=diabetes)) + geom_point()` (Faraway p.5)."""
     from hea.data import data as _hea_data
