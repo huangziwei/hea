@@ -26,3 +26,4 @@ class Layer:
     stat_params: dict = field(default_factory=dict)
     inherit_aes: bool = True
     show_legend: Any = True
+    na_rm: bool = False

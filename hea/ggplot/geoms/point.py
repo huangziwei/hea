@@ -7,6 +7,12 @@ from dataclasses import dataclass, field
 from .geom import Geom
 
 
+# ggplot2 size is in mm. R's grid graphics uses 72.27 pt/inch (TeX convention),
+# so 1 mm = 72.27 / 25.4 ≈ 2.8454 pt. matplotlib's ``s`` is the marker area in
+# pt² (i.e. diameter² for a circle), so ``s = (size_mm * _PT_PER_MM) ** 2``.
+_PT_PER_MM = 72.27 / 25.4
+
+
 @dataclass
 class GeomPoint(Geom):
     default_aes: dict = field(default_factory=lambda: {
@@ -25,10 +31,7 @@ class GeomPoint(Geom):
         shape = data["shape"].to_list()[0] if "shape" in data.columns else self.default_aes["shape"]
         alpha = data["alpha"].to_numpy() if "alpha" in data.columns else self.default_aes["alpha"]
 
-        # ggplot2 size is in mm; matplotlib `s` is in points² (1pt ≈ 0.353mm).
-        # ggplot2's scaling is `s = (size_mm * pt_per_mm)²`. Approximate constant
-        # of ~6 lines up visually with ggplot2 default at size=1.5.
-        s = (size * 6) ** 2 if hasattr(size, "__len__") else (size * 6) ** 2
+        s = (size * _PT_PER_MM) ** 2
 
         ax.scatter(x, y, s=s, c=colour, marker=shape, alpha=alpha)
 
@@ -53,6 +56,7 @@ def geom_point(mapping=None, data=None, *, stat="identity", position="identity",
         geom_params=geom_params,
         inherit_aes=inherit_aes,
         show_legend=show_legend,
+        na_rm=na_rm,
     )
 
 

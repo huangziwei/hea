@@ -806,14 +806,15 @@ def test_gg_c3_aes_color_factor_cyl_assigns_distinct_colors():
 
 def test_user_penguins_string_color_works_end_to_end():
     """The bug report: ``aes(color="species")`` on string column → 3 colours,
-    no matplotlib RGBA error."""
+    no matplotlib RGBA error. Penguins has 2 NA rows so a warning is expected."""
     from hea.data import data as _hea_data
 
     penguins = _hea_data("penguins", package="palmerpenguins")
     p = (ggplot(penguins, aes(x="flipper_length_mm", y="body_mass_g",
                               color="species"))
          + geom_point())
-    fig = p.draw()
+    with pytest.warns(UserWarning, match=r"Removed 2 rows .*`geom_point\(\)`"):
+        fig = p.draw()
     try:
         ax = fig.axes[0]
         fc = ax.collections[0].get_facecolors()
@@ -897,6 +898,76 @@ def test_add_group_auto_creates_group_from_discrete_aesthetic():
     assert "group" in out.columns
     # 3 unique levels → 3 distinct group ids
     assert out["group"].n_unique() == 3
+
+
+def test_geom_smooth_fits_per_group_when_colour_mapped():
+    """`aes(colour=species)` + `geom_smooth(method="lm")` → one fitted line
+    per species, each in its own colour. Bug repro: previously a single fit
+    was drawn in the default smooth colour."""
+    from hea.data import data as _hea_data
+
+    penguins = _hea_data("penguins", package="palmerpenguins")
+    p = (ggplot(penguins, aes(x="flipper_length_mm", y="body_mass_g",
+                              colour="species"))
+         + geom_smooth(method="lm"))
+    import warnings as _w
+    with _w.catch_warnings():
+        _w.simplefilter("ignore", UserWarning)  # the NA-removal warning
+        fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # 3 species → 3 lines, 3 ribbons.
+        assert len(ax.lines) == 3
+        line_colors = {ln.get_color() for ln in ax.lines}
+        assert len(line_colors) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_geom_point_warns_on_missing_values():
+    """ggplot2-faithful warning: ``Removed N rows containing missing values
+    (`geom_point()`)``."""
+    import polars as pl
+
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, float("nan"), 4.0],
+        "y": [1.0, 2.0, 3.0, float("nan")],
+    })
+    p = ggplot(df, aes("x", "y")) + geom_point()
+    with pytest.warns(UserWarning, match=r"Removed 2 rows .*`geom_point\(\)`"):
+        fig = p.draw()
+    plt.close(fig)
+
+
+def test_geom_point_na_rm_silences_warning():
+    """``geom_point(na_rm=True)`` drops NAs without warning, matching ggplot2."""
+    import polars as pl
+    import warnings as _w
+
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, float("nan"), 4.0],
+        "y": [1.0, 2.0, 3.0, float("nan")],
+    })
+    p = ggplot(df, aes("x", "y")) + geom_point(na_rm=True)
+    with _w.catch_warnings():
+        _w.simplefilter("error")  # any warning fails the test
+        fig = p.draw()
+    plt.close(fig)
+
+
+def test_geom_point_scatter_size_uses_pt_per_mm_conversion():
+    """``size=1.5`` (mm) ⇒ matplotlib s=(1.5·2.8454)² ≈ 18.2 pt²."""
+    import polars as pl
+
+    df = pl.DataFrame({"x": [1.0, 2, 3], "y": [1.0, 2, 3]})
+    p = ggplot(df, aes("x", "y")) + geom_point()
+    fig = p.draw()
+    try:
+        sizes = fig.axes[0].collections[0].get_sizes()
+        # Default size=1.5; expected (1.5 * 72.27/25.4)² ≈ 18.222
+        assert abs(float(sizes[0]) - 18.222) < 0.01
+    finally:
+        plt.close(fig)
 
 
 def test_aes_color_constant_kwarg_overrides_mapping():

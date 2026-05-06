@@ -22,14 +22,6 @@ class StatDensity(Stat):
 
     default_y_label: str = "density"
 
-    def compute_panel(self, data, params):
-        if "group" in data.columns:
-            out = []
-            for _, sub in data.group_by("group", maintain_order=True):
-                out.append(self.compute_group(sub, params))
-            return pl.concat(out) if out else self.compute_group(data, params)
-        return self.compute_group(data, params)
-
     def compute_group(self, data, params):
         x = data["x"].to_numpy().astype(float)
         x = x[~np.isnan(x)]

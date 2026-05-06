@@ -57,6 +57,7 @@ def build(plot) -> BuildOutput:
         ld = _layer_data(layer, plot)
         mapping = _resolve_mapping(layer, plot)
         df = _compute_aesthetics(mapping, ld, plot.plot_env)
+        df = _drop_na(df, layer)
         df = _add_group(df)
         df = layer.stat.compute_layer(df, layer.stat_params)
         df = layer.position.compute_layer(df)
@@ -106,6 +107,53 @@ def build(plot) -> BuildOutput:
         layers_data[i] = df
 
     return BuildOutput(data=layers_data, scales=scales)
+
+
+def _drop_na(df: pl.DataFrame, layer) -> pl.DataFrame:
+    """Drop rows with missing values in any mapped aesthetic, with a
+    ggplot2-style warning unless ``layer.na_rm`` is True.
+
+    Mirrors R: ``Warning: Removed N rows containing missing values
+    (`geom_*()`).``  Catches both polars-null and float NaN.
+    """
+    if len(df) == 0:
+        return df
+
+    na_mask = None
+    for col in df.columns:
+        s = df[col]
+        col_na = s.is_null()
+        if s.dtype.is_float():
+            col_na = col_na | s.is_nan()
+        if col_na.any():
+            na_mask = col_na if na_mask is None else (na_mask | col_na)
+
+    if na_mask is None:
+        return df
+    n_dropped = int(na_mask.sum())
+    if n_dropped == 0:
+        return df
+
+    out = df.filter(~na_mask)
+    if not getattr(layer, "na_rm", False):
+        import warnings
+
+        geom_name = _geom_factory_name(layer.geom)
+        warnings.warn(
+            f"Removed {n_dropped} rows containing missing values "
+            f"(`{geom_name}()`).",
+            UserWarning,
+            stacklevel=4,
+        )
+    return out
+
+
+def _geom_factory_name(geom) -> str:
+    """``GeomPoint`` → ``geom_point``. Used in NA-removal warnings."""
+    cls = type(geom).__name__
+    if cls.startswith("Geom"):
+        return "geom_" + cls[4:].lower()
+    return cls.lower()
 
 
 def _add_group(df: pl.DataFrame) -> pl.DataFrame:

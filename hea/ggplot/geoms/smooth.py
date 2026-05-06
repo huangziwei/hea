@@ -43,7 +43,7 @@ class GeomSmooth(Geom):
 
 def geom_smooth(mapping=None, data=None, *, method="loess", formula=None,
                 se=True, level=0.95, span=0.75, n=80,
-                position="identity", **kwargs):
+                position="identity", na_rm=False, **kwargs):
     from ..layer import Layer
     from ..positions import resolve_position
     from ..stats.smooth import StatSmooth
@@ -59,4 +59,5 @@ def geom_smooth(mapping=None, data=None, *, method="loess", formula=None,
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        na_rm=na_rm,
     )
