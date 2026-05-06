@@ -51,15 +51,34 @@ __all__ = [
 ]
 
 
-def tbl(df: pl.DataFrame) -> "DataFrame":
-    """Re-wrap a plain ``pl.DataFrame`` as ``hea.DataFrame``.
+def tbl(obj):
+    """Re-wrap a plain polars container as the corresponding hea subclass.
 
-    Useful after dropping into native polars methods (e.g.
-    ``df.with_columns(...)``) which return the parent class.
+    Rarely needed in normal code: Phase 1-5 of the subclass-coverage work
+    means every operation hea exposes already returns the right subclass.
+    ``tbl`` is the documented escape hatch for the remaining cases — e.g.
+    when an external library hands you a ``pl.DataFrame`` and you want
+    to chain hea methods on it without copying data:
+
+    >>> import polars as pl, hea
+    >>> raw = pl.DataFrame({"x": [1, 2, 3]})  # plain polars
+    >>> hea.tbl(raw).filter(pl.col("x") > 1)  # hea subclass
     """
-    if isinstance(df, DataFrame):
-        return df
-    return DataFrame._from_pydf(df._df)
+    if isinstance(obj, DataFrame):
+        return obj
+    if isinstance(obj, pl.DataFrame):
+        return DataFrame._from_pydf(obj._df)
+    if isinstance(obj, LazyFrame):
+        return obj
+    if isinstance(obj, pl.LazyFrame):
+        return LazyFrame._from_pyldf(obj._ldf)
+    if isinstance(obj, Series):
+        return obj
+    if isinstance(obj, pl.Series):
+        return Series._from_pyseries(obj._s)
+    raise TypeError(
+        f"tbl(): expected pl.DataFrame / pl.LazyFrame / pl.Series, got {type(obj).__name__}"
+    )
 
 
 class _Desc:
@@ -143,10 +162,16 @@ def _kwargs_to_exprs(args: tuple, kwargs: dict) -> list[pl.Expr]:
 class DataFrame(pl.DataFrame):
     """``pl.DataFrame`` with tidyverse-named methods.
 
-    All tidyverse methods return another ``hea.DataFrame``. Native polars
-    methods (``with_columns``, ``sort``, ``unique``, ``join``, …) are
-    inherited unchanged and return plain ``pl.DataFrame`` — call
-    ``tbl(...)`` to re-wrap.
+    Closed under polars operations: every method that returns a
+    DataFrame/LazyFrame/Series returns the corresponding hea subclass.
+    Native polars methods (``with_columns``, ``sort``, ``join``, …)
+    propagate the subclass through ``self._from_pydf(...)`` automatically;
+    the few methods that bypass that route (``describe``, ``corr``,
+    ``unstack``, ``sql``, ``match_to_schema``, plus the lazy round-trip
+    via ``lazy()`` / ``collect()``) are explicitly re-wrapped below.
+    Series-returning methods (``get_column``, ``__getitem__``, the
+    ``*_horizontal`` family, …) are wrapped via
+    :func:`_install_df_series_overrides`.
     """
 
     # ---- internal -----------------------------------------------------
@@ -159,7 +184,7 @@ class DataFrame(pl.DataFrame):
 
     def filter(self, *predicates: Any, **constraints: Any) -> "DataFrame":
         """Keep rows matching ``predicates``. Polars ``filter`` semantics."""
-        return self._wrap(super().filter(*predicates, **constraints))
+        return super().filter(*predicates, **constraints)
 
     def arrange(self, *cols: Any) -> "DataFrame":
         """Sort rows. Wrap a column in ``desc()`` for descending order.
@@ -184,7 +209,7 @@ class DataFrame(pl.DataFrame):
         from the first row of each unique combination.
         """
         if not cols:
-            return self._wrap(super().unique(maintain_order=True))
+            return super().unique(maintain_order=True)
         subset = list(cols)
         out = super().unique(subset=subset, maintain_order=True)
         if not keep_all:
@@ -349,7 +374,7 @@ class DataFrame(pl.DataFrame):
                 exprs.append(src.alias(new_name))
             else:
                 exprs.append(pl.lit(src).alias(new_name))
-        return self._wrap(super().select(exprs))
+        return super().select(exprs)
 
     def rename(self, mapping: dict | None = None, /, **kwargs: str) -> "DataFrame":
         """Rename columns. Accepts a dict (polars-style) or kwargs.
@@ -360,13 +385,13 @@ class DataFrame(pl.DataFrame):
         are equivalent.
         """
         if mapping is None and not kwargs:
-            return self._wrap(self)
+            return self
         if mapping is not None and kwargs:
             raise ValueError("rename(): pass either a dict or kwargs, not both.")
         if mapping is not None:
-            return self._wrap(super().rename(mapping))
+            return super().rename(mapping)
         # kwargs: new=old → {old: new}
-        return self._wrap(super().rename({old: new for new, old in kwargs.items()}))
+        return super().rename({old: new for new, old in kwargs.items()})
 
     def relocate(
         self,
@@ -426,7 +451,7 @@ class DataFrame(pl.DataFrame):
                 anchor, rest, after=_after is not None, verb="relocate"
             )
             ordered = rest[:idx] + moving + rest[idx:]
-        return self._wrap(super().select(ordered))
+        return super().select(ordered)
 
     # ---- groups -------------------------------------------------------
 
@@ -457,7 +482,7 @@ class DataFrame(pl.DataFrame):
         exprs = _kwargs_to_exprs(args, kwargs)
         if _by is None:
             # Single row from the whole frame.
-            return self._wrap(super().select(exprs))
+            return super().select(exprs)
         by = [_by] if isinstance(_by, str) else list(_by)
         return self._wrap(
             super().group_by(by, maintain_order=True).agg(exprs)
@@ -495,10 +520,10 @@ class DataFrame(pl.DataFrame):
     # ---- slice family (ungrouped; grouped versions live on GroupBy) ---
 
     def slice_head(self, n: int = 1) -> "DataFrame":
-        return self._wrap(super().head(n))
+        return super().head(n)
 
     def slice_tail(self, n: int = 1) -> "DataFrame":
-        return self._wrap(super().tail(n))
+        return super().tail(n)
 
     def slice_min(
         self,
