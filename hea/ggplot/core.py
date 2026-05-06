@@ -153,9 +153,11 @@ def _(thing: Facet, plot):
 
 @ggplot_add.register
 def _(thing: Theme, plot):
-    # Phase 1.8 will replace this with element-by-element merge.
     out = _copy_plot(plot)
-    out.theme = thing
+    # Theme merge semantics: complete themes (presets) replace, partial
+    # ``theme(...)`` calls override field-by-field. Implementation in
+    # ``Theme.__add__``.
+    out.theme = out.theme + thing
     return out
 
 

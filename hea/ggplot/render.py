@@ -11,6 +11,14 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 import polars as pl
 
+from ._util import r_color
+from .theme import element_blank, element_line, element_rect, element_text
+
+
+# ggplot2 sizes are in mm; matplotlib widths/lengths are in pt. R's TeX
+# convention: 72.27 pt/inch, 25.4 mm/inch → ≈ 2.8454 pt/mm.
+_PT_PER_MM = 72.27 / 25.4
+
 
 def render(plot, build_output, ax=None) -> "plt.Figure":
     layout = build_output.layout
@@ -43,6 +51,8 @@ def _render_single(plot, build_output, ax):
         ax.set_xlabel(xlabel)
     if ylabel is not None:
         ax.set_ylabel(ylabel)
+
+    _apply_theme(plot.theme, fig, [ax], owns_fig=owns_fig)
 
     if owns_fig:
         fig.tight_layout()
@@ -108,8 +118,217 @@ def _render_facets(plot, build_output, layout):
     if ylabel is not None:
         fig.supylabel(ylabel)
 
+    _apply_theme(plot.theme, fig, list(flat_axes[:n_panels]), owns_fig=True)
+
     fig.tight_layout()
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Theme application — translates :class:`Theme` elements to matplotlib calls.
+# ---------------------------------------------------------------------------
+
+def _apply_theme(theme, fig, axes_list, *, owns_fig: bool) -> None:
+    if theme is None or not theme.elements:
+        return
+
+    if owns_fig:
+        _apply_plot_background(theme, fig)
+
+    for ax in axes_list:
+        _apply_panel_background(theme, ax)
+        _apply_grid(theme, ax)
+        _apply_spines(theme, ax)
+        _apply_ticks_and_text(theme, ax)
+        _apply_axis_titles(theme, ax)
+        _apply_strip_text(theme, ax)
+
+
+def _apply_plot_background(theme, fig) -> None:
+    pb = theme.get("plot.background")
+    if isinstance(pb, element_blank):
+        fig.patch.set_facecolor("none")
+    elif isinstance(pb, element_rect) and pb.fill:
+        fig.patch.set_facecolor(r_color(pb.fill))
+
+
+def _apply_panel_background(theme, ax) -> None:
+    pnb = theme.get("panel.background")
+    if isinstance(pnb, element_blank):
+        ax.set_facecolor("none")
+    elif isinstance(pnb, element_rect) and pnb.fill:
+        ax.set_facecolor(r_color(pnb.fill))
+
+
+def _apply_grid(theme, ax) -> None:
+    from ..plot._util import r_lty
+
+    for which, key in (("major", "panel.grid.major"), ("minor", "panel.grid.minor")):
+        elem = theme.get(key)
+        if elem is None:
+            elem = theme.get("panel.grid")
+        if isinstance(elem, element_blank):
+            ax.grid(False, which=which)
+            continue
+        if not isinstance(elem, element_line):
+            continue
+        if which == "minor":
+            # matplotlib only draws minor gridlines if minor ticks are on.
+            ax.minorticks_on()
+        ax.grid(
+            True,
+            which=which,
+            color=r_color(elem.colour) or "white",
+            linewidth=(elem.size or 0.5) * _PT_PER_MM,
+            linestyle=r_lty(elem.linetype) if elem.linetype else "-",
+            zorder=0,
+        )
+
+
+def _apply_spines(theme, ax) -> None:
+    """Apply ``panel.border`` (all four sides) or ``axis.line`` (bottom/left
+    only) to matplotlib spines. ``panel.border`` wins when set — it's a
+    superset of ``axis.line`` semantics. With both blank, all four hide
+    (ggplot2's ``theme_gray`` default — coloured panel background carries
+    the visual weight)."""
+    axis_line = theme.get("axis.line")
+    panel_border = theme.get("panel.border")
+
+    all_sides = ("top", "right", "bottom", "left")
+
+    if isinstance(panel_border, element_rect):
+        for side in all_sides:
+            sp = ax.spines[side]
+            sp.set_visible(True)
+            if panel_border.colour:
+                sp.set_color(r_color(panel_border.colour))
+            if panel_border.size:
+                sp.set_linewidth(panel_border.size * _PT_PER_MM)
+        return
+
+    # panel.border is element_blank or None — fall back to axis.line.
+    if isinstance(axis_line, element_line):
+        for side in ("bottom", "left"):
+            sp = ax.spines[side]
+            sp.set_visible(True)
+            if axis_line.colour:
+                sp.set_color(r_color(axis_line.colour))
+            if axis_line.size:
+                sp.set_linewidth(axis_line.size * _PT_PER_MM)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+    else:
+        # Both blank → hide everything (theme_gray / theme_minimal style).
+        for side in all_sides:
+            ax.spines[side].set_visible(False)
+
+
+def _apply_ticks_and_text(theme, ax) -> None:
+    ticks = theme.get("axis.ticks")
+    text = theme.get("axis.text")
+
+    tick_kwargs = {"which": "both"}
+
+    if isinstance(ticks, element_blank):
+        tick_kwargs["length"] = 0
+    elif isinstance(ticks, element_line):
+        if ticks.colour:
+            tick_kwargs["color"] = r_color(ticks.colour)
+        # ggplot2 ``size`` for ticks is line width in mm; the *length* of
+        # the tick mark itself doesn't have a direct theme element. Use a
+        # length proportional to the line width so size scales sensibly.
+        if ticks.size:
+            tick_kwargs["width"] = ticks.size * _PT_PER_MM
+            tick_kwargs["length"] = ticks.size * _PT_PER_MM * 8
+
+    if isinstance(text, element_blank):
+        tick_kwargs["labelleft"] = False
+        tick_kwargs["labelbottom"] = False
+        tick_kwargs["labeltop"] = False
+        tick_kwargs["labelright"] = False
+    elif isinstance(text, element_text):
+        if text.colour:
+            tick_kwargs["labelcolor"] = r_color(text.colour)
+        if text.size:
+            tick_kwargs["labelsize"] = text.size
+
+    if len(tick_kwargs) > 1:  # something beyond just "which"
+        ax.tick_params(**tick_kwargs)
+
+
+def _apply_axis_titles(theme, ax) -> None:
+    base = theme.get("axis.title")
+    x_override = theme.get("axis.title.x")
+    y_override = theme.get("axis.title.y")
+
+    def _resolve(side_override):
+        if isinstance(side_override, element_blank):
+            return side_override
+        if side_override is None:
+            return base
+        if isinstance(base, element_text) and isinstance(side_override, element_text):
+            return _merge_text(base, side_override)
+        return side_override
+
+    x_elem = _resolve(x_override)
+    y_elem = _resolve(y_override)
+
+    _apply_label_element(ax.xaxis.label, x_elem, ax, axis="x")
+    _apply_label_element(ax.yaxis.label, y_elem, ax, axis="y")
+
+
+def _merge_text(base, override):
+    """Merge two element_text objects (override wins on non-None)."""
+    return element_text(
+        family=override.family or base.family,
+        face=override.face or base.face,
+        colour=override.colour or base.colour,
+        size=override.size or base.size,
+        hjust=override.hjust if override.hjust is not None else base.hjust,
+        vjust=override.vjust if override.vjust is not None else base.vjust,
+        angle=override.angle if override.angle is not None else base.angle,
+        lineheight=override.lineheight if override.lineheight is not None else base.lineheight,
+    )
+
+
+def _apply_label_element(text_artist, elem, ax, *, axis):
+    if isinstance(elem, element_blank):
+        if axis == "x":
+            ax.set_xlabel("")
+        else:
+            ax.set_ylabel("")
+        return
+    if not isinstance(elem, element_text):
+        return
+    if elem.colour:
+        text_artist.set_color(r_color(elem.colour))
+    if elem.size:
+        text_artist.set_size(elem.size)
+    if elem.angle is not None:
+        text_artist.set_rotation(elem.angle)
+    if elem.family:
+        text_artist.set_family(elem.family)
+    if elem.face:
+        if "bold" in elem.face:
+            text_artist.set_weight("bold")
+        if "italic" in elem.face:
+            text_artist.set_style("italic")
+
+
+def _apply_strip_text(theme, ax) -> None:
+    """Style the strip label (set as ``ax.set_title`` for facet panels)."""
+    text = theme.get("strip.text")
+    title_artist = ax.title
+    if isinstance(text, element_blank):
+        title_artist.set_text("")
+        return
+    if isinstance(text, element_text):
+        if text.colour:
+            title_artist.set_color(r_color(text.colour))
+        if text.size:
+            title_artist.set_size(text.size)
+        if text.face and "bold" in text.face:
+            title_artist.set_weight("bold")
 
 
 def _default_labels(plot):

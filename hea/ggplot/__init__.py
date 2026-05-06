@@ -17,6 +17,19 @@ from __future__ import annotations
 from .aes import aes
 from .core import ggplot
 from .facets import facet_wrap
+from .theme import (
+    element_blank,
+    element_line,
+    element_rect,
+    element_text,
+    theme,
+    theme_bw,
+    theme_classic,
+    theme_dark,
+    theme_gray,
+    theme_minimal,
+    theme_void,
+)
 from .geoms import (
     geom_area,
     geom_bar,
@@ -183,6 +196,17 @@ __all__ = [
     "scale_linetype",
     "scale_linetype_manual",
     "facet_wrap",
+    "theme",
+    "theme_gray",
+    "theme_bw",
+    "theme_minimal",
+    "theme_classic",
+    "theme_void",
+    "theme_dark",
+    "element_text",
+    "element_line",
+    "element_rect",
+    "element_blank",
     "position_identity",
     "position_jitter",
     "position_nudge",

@@ -19,7 +19,8 @@ import pytest
 from conftest import load_dataset
 
 from hea.ggplot import (
-    aes, facet_wrap, geom_area, geom_bar, geom_blank, geom_boxplot,
+    aes, element_blank, element_line, element_rect, element_text,
+    facet_wrap, geom_area, geom_bar, geom_blank, geom_boxplot,
     geom_density, geom_histogram, geom_jitter, geom_line, geom_path,
     geom_point, geom_ribbon, geom_smooth, geom_step, geom_violin, ggplot,
     position_dodge, position_fill, position_jitter, position_nudge,
@@ -31,7 +32,8 @@ from hea.ggplot import (
     scale_linetype_manual, scale_shape, scale_shape_manual, scale_size_area,
     scale_size_continuous, scale_size_manual, scale_x_continuous,
     scale_x_log10, scale_x_reverse, scale_x_sqrt, scale_y_continuous,
-    scale_y_log10,
+    scale_y_log10, theme, theme_bw, theme_classic, theme_dark, theme_gray,
+    theme_minimal, theme_void,
 )
 
 
@@ -1322,6 +1324,156 @@ def test_facet_wrap_preserves_colour_mapping_per_panel():
                     # Multiple colours present in at least one panel
                     # (penguins has multi-species islands).
                     pass
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.8 — Themes
+# ---------------------------------------------------------------------------
+
+
+def test_default_theme_is_gray_panel():
+    """ggplot2's default ``theme_gray`` puts a gray panel + white grid +
+    no spines on the plot."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        bg = ax.get_facecolor()
+        # ggplot2 panel.background fill is "#EBEBEB" (≈ 0.92, 0.92, 0.92).
+        assert bg[0] == pytest.approx(0.922, abs=0.01)
+        # All spines hidden (gray-panel style).
+        assert not any(ax.spines[s].get_visible()
+                       for s in ("top", "right", "bottom", "left"))
+    finally:
+        plt.close(fig)
+
+
+def test_gg_c7_theme_bw_overrides_default():
+    """GG-C7: ``+ theme_bw()`` switches to white panel + dark-gray border."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + theme_bw()
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # White panel.
+        bg = ax.get_facecolor()
+        assert bg[0] == pytest.approx(1.0, abs=0.01)
+        # All four spines visible (panel.border).
+        assert all(ax.spines[s].get_visible()
+                   for s in ("top", "right", "bottom", "left"))
+    finally:
+        plt.close(fig)
+
+
+def test_theme_minimal_no_spines_no_panel_bg():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + theme_minimal()
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # Transparent panel (set_facecolor("none") → alpha=0).
+        bg = ax.get_facecolor()
+        assert bg[3] == pytest.approx(0.0, abs=0.01)
+        # No spines.
+        assert not any(ax.spines[s].get_visible()
+                       for s in ("top", "right", "bottom", "left"))
+    finally:
+        plt.close(fig)
+
+
+def test_theme_classic_bottom_left_spines_only():
+    """``theme_classic`` shows bottom + left spines but hides top + right."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + theme_classic()
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.spines["bottom"].get_visible()
+        assert ax.spines["left"].get_visible()
+        assert not ax.spines["top"].get_visible()
+        assert not ax.spines["right"].get_visible()
+    finally:
+        plt.close(fig)
+
+
+def test_theme_void_blanks_axis_text_and_titles():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + theme_void()
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xlabel() == ""
+        assert ax.get_ylabel() == ""
+    finally:
+        plt.close(fig)
+
+
+def test_theme_partial_override_panel_background():
+    """``theme(panel_background=element_rect(fill="lightblue"))`` overrides
+    only that element; the rest of theme_gray's defaults survive."""
+    from matplotlib.colors import to_rgba
+
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + theme(panel_background=element_rect(fill="lightblue")))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_facecolor()[:3] == pytest.approx(to_rgba("lightblue")[:3], abs=0.01)
+        # Spines still hidden (theme_gray default survived).
+        assert not any(ax.spines[s].get_visible()
+                       for s in ("top", "right", "bottom", "left"))
+    finally:
+        plt.close(fig)
+
+
+def test_theme_blank_clears_element():
+    """Adding ``theme(panel_grid_major=element_blank())`` removes major grid."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + theme(panel_grid_major=element_blank()))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # `grid(False, which='major')` flips the tick's gridOn flag → no
+        # visible major gridlines on either axis.
+        major_grid = ax.xaxis.get_gridlines() + ax.yaxis.get_gridlines()
+        visible = [g for g in major_grid if g.get_visible()]
+        assert len(visible) == 0
+    finally:
+        plt.close(fig)
+
+
+def test_theme_addition_complete_replaces_partial_merges():
+    """Complete preset replaces wholesale; ``theme(...)`` merges field-by-field."""
+    base = theme_gray()
+    overlay = theme(plot_title=element_text(colour="red"))
+
+    merged = base + overlay
+    # Plot title gained colour="red"; everything else from theme_gray survives.
+    assert merged.get("plot.title").colour == "red"
+    assert merged.get("panel.background") is not None  # theme_gray's panel still there
+
+    # Now add a complete theme on top — it should replace.
+    bw = theme_bw()
+    final = merged + bw
+    # bw has no plot.title.colour="red" override; the overlay was wiped.
+    assert final.get("plot.title").colour != "red"
+
+
+def test_theme_dot_separated_dict_form():
+    """``theme({"panel.background": ...})`` — direct dotted-name form."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + theme({"panel.background": element_rect(fill="#FFE0E0")}))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_facecolor()[0] == pytest.approx(1.0, abs=0.01)  # FF
+        assert ax.get_facecolor()[1] == pytest.approx(0.878, abs=0.01)  # E0
     finally:
         plt.close(fig)
 
