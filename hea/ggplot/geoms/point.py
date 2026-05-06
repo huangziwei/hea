@@ -54,3 +54,13 @@ def geom_point(mapping=None, data=None, *, stat="identity", position="identity",
         inherit_aes=inherit_aes,
         show_legend=show_legend,
     )
+
+
+def geom_jitter(mapping=None, data=None, *, width=None, height=None, seed=None,
+                **kwargs):
+    """``geom_point(position=position_jitter(...))`` — shortcut matching ggplot2."""
+    from ..positions.jitter import position_jitter
+
+    return geom_point(mapping=mapping, data=data,
+                      position=position_jitter(width=width, height=height, seed=seed),
+                      **kwargs)

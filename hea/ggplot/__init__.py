@@ -20,15 +20,18 @@ from .geoms import (
     geom_area,
     geom_bar,
     geom_blank,
+    geom_boxplot,
     geom_col,
     geom_density,
     geom_histogram,
+    geom_jitter,
     geom_line,
     geom_path,
     geom_point,
     geom_ribbon,
     geom_smooth,
     geom_step,
+    geom_violin,
 )
 from .positions import (
     position_dodge,
@@ -51,13 +54,22 @@ from .scales import (
     scale_y_reverse,
     scale_y_sqrt,
 )
-from .stats import stat_bin, stat_count, stat_density, stat_identity, stat_smooth
+from .stats import (
+    stat_bin,
+    stat_boxplot,
+    stat_count,
+    stat_density,
+    stat_identity,
+    stat_smooth,
+    stat_ydensity,
+)
 
 __all__ = [
     "ggplot",
     "aes",
     "geom_blank",
     "geom_point",
+    "geom_jitter",
     "geom_bar",
     "geom_col",
     "geom_histogram",
@@ -68,11 +80,15 @@ __all__ = [
     "geom_ribbon",
     "geom_area",
     "geom_smooth",
+    "geom_boxplot",
+    "geom_violin",
     "stat_identity",
     "stat_bin",
     "stat_count",
     "stat_density",
     "stat_smooth",
+    "stat_boxplot",
+    "stat_ydensity",
     "scale_x_continuous",
     "scale_y_continuous",
     "scale_x_log10",

@@ -19,9 +19,9 @@ import pytest
 from conftest import load_dataset
 
 from hea.ggplot import (
-    aes, geom_area, geom_bar, geom_blank, geom_density, geom_histogram,
-    geom_line, geom_path, geom_point, geom_ribbon, geom_smooth,
-    geom_step, ggplot,
+    aes, geom_area, geom_bar, geom_blank, geom_boxplot, geom_density,
+    geom_histogram, geom_jitter, geom_line, geom_path, geom_point,
+    geom_ribbon, geom_smooth, geom_step, geom_violin, ggplot,
     position_dodge, position_fill, position_jitter, position_nudge,
     position_stack,
     scale_x_continuous, scale_x_log10, scale_x_reverse, scale_x_sqrt,
@@ -692,6 +692,118 @@ def test_stat_smooth_gam_glm_unimplemented():
     p = ggplot(df, aes("x", "y")) + geom_smooth(method="gam")
     with pytest.raises(NotImplementedError, match="method='gam'"):
         p.draw()
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.9c — geom_boxplot
+# ---------------------------------------------------------------------------
+
+
+def test_geom_boxplot_one_box_per_group():
+    """3 unique cyl values → 3 boxes."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes(x="cyl", y="mpg", group="cyl")) + geom_boxplot()
+    fig = p.draw()
+    try:
+        # patches contains the box rectangles (one per group).
+        assert len(fig.axes[0].patches) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_geom_boxplot_stat_matches_numpy_quantiles():
+    """The five-number summary stat should match numpy.quantile."""
+    import numpy as np
+    import polars as pl
+
+    from hea.ggplot.stats.boxplot import StatBoxplot
+
+    rng = np.random.default_rng(0)
+    y = rng.standard_normal(100)
+    df = pl.DataFrame({"x": [0] * len(y), "y": y})
+
+    out = StatBoxplot().compute_panel(df, {})
+    expected = np.quantile(y, [0.25, 0.5, 0.75])
+    assert float(out["lower"][0]) == pytest.approx(expected[0])
+    assert float(out["middle"][0]) == pytest.approx(expected[1])
+    assert float(out["upper"][0]) == pytest.approx(expected[2])
+
+
+def test_geom_boxplot_extracts_outliers():
+    """Outliers beyond 1.5·IQR end up in the outliers column."""
+    import polars as pl
+
+    from hea.ggplot.stats.boxplot import StatBoxplot
+
+    # Most data in [0,1]; throw in an obvious outlier at 100.
+    y = list(range(20)) + [100]
+    df = pl.DataFrame({"x": [0] * len(y), "y": [float(v) for v in y]})
+
+    out = StatBoxplot().compute_panel(df, {})
+    outliers = out["outliers"][0].to_list()
+    assert 100.0 in outliers
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.9d — geom_violin
+# ---------------------------------------------------------------------------
+
+
+def test_geom_violin_one_polygon_per_group():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes(x="cyl", y="mpg", group="cyl")) + geom_violin()
+    fig = p.draw()
+    try:
+        # ax.fill registers patches as Polygon. 3 cyl groups → 3 polygons.
+        assert len(fig.axes[0].patches) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_stat_ydensity_violinwidth_normalised_to_one():
+    """Per group, max(violinwidth) should be exactly 1 (peak of the KDE)."""
+    import numpy as np
+    import polars as pl
+
+    from hea.ggplot.stats.ydensity import StatYdensity
+
+    rng = np.random.default_rng(1)
+    df = pl.DataFrame({
+        "x": [0] * 100 + [1] * 100,
+        "y": np.concatenate([rng.standard_normal(100), rng.standard_normal(100) + 5]),
+    })
+    out = StatYdensity().compute_panel(df, {})
+    for x_val in (0, 1):
+        sub = out.filter(pl.col("x") == x_val)
+        assert float(sub["violinwidth"].max()) == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.3d — GG-C9: boxplot + jittered points overlay
+# ---------------------------------------------------------------------------
+
+
+def test_gg_c9_boxplot_with_jitter():
+    """GG-C9: box-and-whisker with jittered points overlaid."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes(x="cyl", y="mpg", group="cyl"))
+         + geom_boxplot()
+         + geom_jitter(width=0.2, seed=42))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # 3 box patches + 1 scatter collection (the jittered points).
+        assert len(ax.patches) == 3
+        assert len(ax.collections) == 1
+        offsets = ax.collections[0].get_offsets()
+        # All N points present, jittered around their cyl group center.
+        assert offsets.shape == (len(mtcars), 2)
+        # Jittered x's should differ from the integer cyl values.
+        import numpy as np
+        raw_cyl = mtcars["cyl"].to_numpy()
+        assert not np.array_equal(offsets[:, 0], raw_cyl)
+    finally:
+        plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
