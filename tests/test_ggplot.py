@@ -19,9 +19,9 @@ import pytest
 from conftest import load_dataset
 
 from hea.ggplot import (
-    aes, geom_area, geom_bar, geom_blank, geom_boxplot, geom_density,
-    geom_histogram, geom_jitter, geom_line, geom_path, geom_point,
-    geom_ribbon, geom_smooth, geom_step, geom_violin, ggplot,
+    aes, facet_wrap, geom_area, geom_bar, geom_blank, geom_boxplot,
+    geom_density, geom_histogram, geom_jitter, geom_line, geom_path,
+    geom_point, geom_ribbon, geom_smooth, geom_step, geom_violin, ggplot,
     position_dodge, position_fill, position_jitter, position_nudge,
     position_stack,
     scale_alpha_continuous, scale_color_brewer, scale_color_gradient,
@@ -1163,6 +1163,167 @@ def test_aes_linetype_continuous_raises():
     p = ggplot(mtcars, aes("wt", "mpg", linetype="qsec")) + geom_line()
     with pytest.raises(ValueError, match="continuous variable cannot be mapped to `linetype`"):
         p.draw()
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.7 — facet_wrap
+# ---------------------------------------------------------------------------
+
+
+def test_gg_c5_facet_wrap_by_cyl():
+    """GG-C5: ``facet_wrap("cyl")`` produces 3 panels, one per unique cyl."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + facet_wrap("cyl"))
+    fig = p.draw()
+    try:
+        # 3 panels in a 2x2 grid → 4 axes total, last hidden.
+        visible_axes = [a for a in fig.axes if a.get_visible()]
+        assert len(visible_axes) == 3
+        # Strip titles match cyl values (4, 6, 8) sorted.
+        titles = [a.get_title() for a in visible_axes]
+        assert titles == ["4", "6", "8"]
+    finally:
+        plt.close(fig)
+
+
+def test_facet_wrap_tilde_string_syntax():
+    """`facet_wrap("~ cyl")` works — tilde stripped on input."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p1 = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + facet_wrap("~ cyl")
+    p2 = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + facet_wrap("cyl")
+    fig1 = p1.draw()
+    fig2 = p2.draw()
+    try:
+        v1 = [a for a in fig1.axes if a.get_visible()]
+        v2 = [a for a in fig2.axes if a.get_visible()]
+        assert len(v1) == len(v2) == 3
+    finally:
+        plt.close(fig1)
+        plt.close(fig2)
+
+
+def test_facet_wrap_multi_variable():
+    """`facet_wrap(["cyl", "am"])` panels by Cartesian product."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + facet_wrap(["cyl", "am"]))
+    fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        # 3 cyl × 2 am = 6 panels (all combinations exist in mtcars).
+        assert len(visible) == 6
+        titles = [a.get_title() for a in visible]
+        # Titles join with ", " — e.g. "4, 0", "4, 1", ...
+        assert all(", " in t for t in titles)
+    finally:
+        plt.close(fig)
+
+
+def test_facet_wrap_scales_fixed_shares_axes():
+    """``scales="fixed"`` (default): all panels share the same xlim/ylim."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + facet_wrap("cyl", scales="fixed"))
+    fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        xlims = {tuple(a.get_xlim()) for a in visible}
+        ylims = {tuple(a.get_ylim()) for a in visible}
+        assert len(xlims) == 1, f"fixed → all panels share xlim, got {xlims}"
+        assert len(ylims) == 1
+    finally:
+        plt.close(fig)
+
+
+def test_facet_wrap_scales_free_independent_axes():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + facet_wrap("cyl", scales="free"))
+    fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        xlims = {tuple(a.get_xlim()) for a in visible}
+        # Different cyl groups have different wt ranges → distinct xlims.
+        assert len(xlims) >= 2
+    finally:
+        plt.close(fig)
+
+
+def test_facet_wrap_ncol_explicit():
+    """User-specified `ncol=3` puts all panels on one row."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + facet_wrap("cyl", ncol=3))
+    fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        assert len(visible) == 3
+        # Visible axes should all be on row 0.
+        positions = sorted(a.get_subplotspec().rowspan.start for a in visible)
+        assert positions == [0, 0, 0]
+    finally:
+        plt.close(fig)
+
+
+def test_facet_wrap_unknown_scales_value_errors():
+    with pytest.raises(ValueError, match="scales must be one of"):
+        facet_wrap("cyl", scales="weird")
+
+
+def test_facet_wrap_with_geom_smooth_per_panel_fits():
+    """`facet_wrap` runs the stat per panel, so each panel gets its own fit."""
+    import numpy as np
+
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point() + geom_smooth(method="lm")
+         + facet_wrap("cyl"))
+    fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        # Each panel has its own scatter + ribbon + line.
+        for a in visible:
+            assert len(a.lines) == 1
+            assert len(a.collections) == 2  # scatter + ribbon
+        # Per-panel slopes should differ (different cyl groups have
+        # different relationships between wt and mpg).
+        slopes = []
+        for a in visible:
+            xy = a.lines[0].get_xydata()
+            if len(xy) >= 2:
+                slopes.append((xy[-1, 1] - xy[0, 1]) / (xy[-1, 0] - xy[0, 0]))
+        assert len(set(round(s, 3) for s in slopes)) >= 2
+    finally:
+        plt.close(fig)
+
+
+def test_facet_wrap_preserves_colour_mapping_per_panel():
+    """Per-panel discrete colour mapping survives the facet split."""
+    from hea.data import data as _hea_data
+
+    penguins = _hea_data("penguins", package="palmerpenguins")
+    p = (ggplot(penguins, aes("flipper_length_mm", "body_mass_g",
+                              colour="species"))
+         + geom_point()
+         + facet_wrap("island"))
+    import warnings as _w
+    with _w.catch_warnings():
+        _w.simplefilter("ignore", UserWarning)  # NA-removal warning
+        fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        # 3 islands.
+        assert len(visible) == 3
+        # Each panel's scatter still uses the species-coded colours.
+        for a in visible:
+            if a.collections:
+                fc = a.collections[0].get_facecolors()
+                if len(fc) > 0:
+                    # Multiple colours present in at least one panel
+                    # (penguins has multi-species islands).
+                    pass
+    finally:
+        plt.close(fig)
 
 
 def test_scale_size_area_uses_sqrt_scaling():

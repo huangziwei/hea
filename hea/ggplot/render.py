@@ -1,15 +1,27 @@
 """Render — walk per-layer drawable data into a matplotlib :class:`Figure`.
 
-Phase 0 form: single panel, no theme, no facet, no real scales.
-Each layer's geom is asked to draw its data onto one shared axes object.
+Single-panel and faceted modes share the per-axes drawing logic; faceted
+mode adds a subplot grid plus per-panel data filtering. ``scales="free*"``
+modes mean each panel autoscales independently (matplotlib's
+``sharex``/``sharey``).
 """
 
 from __future__ import annotations
 
 import matplotlib.pyplot as plt
+import polars as pl
 
 
 def render(plot, build_output, ax=None) -> "plt.Figure":
+    layout = build_output.layout
+    n_panels = 1 if layout is None else len(layout)
+
+    if n_panels <= 1 or ax is not None:
+        return _render_single(plot, build_output, ax)
+    return _render_facets(plot, build_output, layout)
+
+
+def _render_single(plot, build_output, ax):
     if ax is None:
         fig, ax = plt.subplots()
         owns_fig = True
@@ -20,28 +32,83 @@ def render(plot, build_output, ax=None) -> "plt.Figure":
     for layer, df in zip(plot.layers, build_output.data):
         layer.geom.draw_panel(df, ax)
 
-    # Apply scales — they read autoscaled limits and set ticks/labels. Geoms
-    # have already drawn (so matplotlib has autoscaled from artist extents),
-    # which lets stat_bin's bar widths still fit even when the scale doesn't
-    # set explicit xlim.
     if build_output.scales is not None:
         for axis in ("x", "y"):
             sc = build_output.scales.get(axis)
             if sc is not None:
                 sc.apply_to_axis(ax, axis)
 
-    # Phase 0 axis labels: derive from the first layer that has x/y mappings.
-    # Real label resolution (with `labs(...)`, deparse, etc.) is Phase 6.1.
     xlabel, ylabel = _default_labels(plot)
     if xlabel is not None:
         ax.set_xlabel(xlabel)
     if ylabel is not None:
         ax.set_ylabel(ylabel)
 
-    # Only manage layout for the figure we created. Caller-supplied axes
-    # belong to a parent figure that's responsible for its own layout.
     if owns_fig:
         fig.tight_layout()
+    return fig
+
+
+def _render_facets(plot, build_output, layout):
+    facet = plot.facet
+    n_panels = len(layout)
+    nrow, ncol = facet.grid_dims(n_panels)
+
+    sharex = facet.scales in ("fixed", "free_y")
+    sharey = facet.scales in ("fixed", "free_x")
+
+    fig, axes = plt.subplots(
+        nrow, ncol,
+        sharex=sharex,
+        sharey=sharey,
+        figsize=(3.0 * ncol, 2.5 * nrow),
+        squeeze=False,
+    )
+    flat_axes = axes.flatten()
+
+    for panel_row in layout.iter_rows(named=True):
+        idx = panel_row["PANEL"] - 1
+        panel_ax = flat_axes[idx]
+
+        for layer, df in zip(plot.layers, build_output.data):
+            if "PANEL" not in df.columns:
+                panel_data = df
+            else:
+                panel_data = df.filter(pl.col("PANEL") == panel_row["PANEL"])
+            if len(panel_data) > 0:
+                layer.geom.draw_panel(panel_data, panel_ax)
+
+        # Apply positional scales per axis. With sharex/sharey, matplotlib
+        # propagates limits across the shared axes, so calling apply_to_axis
+        # on each panel is consistent for "fixed" and gives independent
+        # ticks for "free*".
+        if build_output.scales is not None:
+            for axis in ("x", "y"):
+                sc = build_output.scales.get(axis)
+                if sc is not None:
+                    sc.apply_to_axis(panel_ax, axis)
+
+        # Strip label = facet variable values (joined with ", " for multi-facet).
+        strip_text = ", ".join(
+            f"{panel_row[v]}" for v in facet.facet_vars()
+            if v in panel_row
+        )
+        if strip_text:
+            panel_ax.set_title(strip_text)
+
+    # Hide unused panels (when the grid has more cells than panels).
+    for unused_ax in flat_axes[n_panels:]:
+        unused_ax.set_visible(False)
+
+    # Common axis labels — set on the figure rather than per-panel so they
+    # land in the canonical "outer edge only" position.
+    xlabel, ylabel = _default_labels(plot)
+    if xlabel is not None:
+        fig.supxlabel(xlabel)
+    if ylabel is not None:
+        fig.supylabel(ylabel)
+
+    fig.tight_layout()
     return fig
 
 

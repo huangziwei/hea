@@ -26,6 +26,7 @@ from .scales.list import ScalesList
 class BuildOutput:
     data: list[pl.DataFrame]  # one per layer; columns = canonical aes names
     scales: ScalesList = None
+    layout: pl.DataFrame | None = None  # one row per panel from facet.compute_layout
 
 
 _NON_POSITIONAL_AES = ("colour", "fill", "size", "alpha", "shape", "linetype")
@@ -52,15 +53,25 @@ def build(plot) -> BuildOutput:
     Mapping happens after stat/position because counts per fill *value*
     (not per fill *colour*) is what stats like ``stat_count`` need.
     """
+    facet = plot.facet
+    facet_vars = facet.facet_vars()
+    layout = facet.compute_layout(plot.data)
+
     layers_data: list[pl.DataFrame] = []
     for layer in plot.layers:
         ld = _layer_data(layer, plot)
         mapping = _resolve_mapping(layer, plot)
         df = _compute_aesthetics(mapping, ld, plot.plot_env)
+        # Carry facet variables alongside aes columns so map_data can
+        # assign each row a panel after stat/position run.
+        df = _attach_facet_columns(df, ld, facet_vars)
         df = _drop_na(df, layer)
         df = _add_group(df)
-        df = layer.stat.compute_layer(df, layer.stat_params)
+        # Stat per panel: each panel's data is computed separately so
+        # group-aware stats (count, bin, density) honour facet boundaries.
+        df = _stat_per_panel(df, layer, facet_vars)
         df = layer.position.compute_layer(df)
+        df = facet.map_data(df, layout)
         layers_data.append(df)
 
     # Independent copy so multiple draw() calls don't accumulate state.
@@ -106,7 +117,45 @@ def build(plot) -> BuildOutput:
         df = _apply_default_aes(df, layer.geom)
         layers_data[i] = df
 
-    return BuildOutput(data=layers_data, scales=scales)
+    return BuildOutput(data=layers_data, scales=scales, layout=layout)
+
+
+def _attach_facet_columns(df: pl.DataFrame, source: pl.DataFrame,
+                          facet_vars: list[str]) -> pl.DataFrame:
+    """Inject facet variable columns from ``source`` into ``df`` so map_data
+    can assign panels later. Only valid before stat (when row counts match)."""
+    if not facet_vars or len(df) == 0 or len(df) != len(source):
+        return df
+    cols = [source[v].alias(v) for v in facet_vars
+            if v in source.columns and v not in df.columns]
+    return df.with_columns(cols) if cols else df
+
+
+def _stat_per_panel(df: pl.DataFrame, layer, facet_vars: list[str]) -> pl.DataFrame:
+    """Run the layer's stat once per facet-variable combination so
+    group-aware stats (count, bin, density) honour panel boundaries.
+
+    Without this, a histogram faceted by `cyl` would compute bin counts
+    pooled across cyl values and split them later — producing the wrong
+    bar heights per panel.
+    """
+    facet_in_df = [v for v in facet_vars if v in df.columns]
+    if not facet_in_df:
+        return layer.stat.compute_layer(df, layer.stat_params)
+
+    chunks = []
+    for keys, sub in df.group_by(facet_in_df, maintain_order=True):
+        chunk = layer.stat.compute_layer(sub.drop(facet_in_df), layer.stat_params)
+        if chunk is None or len(chunk) == 0:
+            continue
+        # Re-attach facet column values so map_data can assign panels.
+        keys_tuple = keys if isinstance(keys, tuple) else (keys,)
+        for col, val in zip(facet_in_df, keys_tuple):
+            chunk = chunk.with_columns(pl.lit(val).alias(col))
+        chunks.append(chunk)
+    if not chunks:
+        return pl.DataFrame()
+    return pl.concat(chunks, how="diagonal_relaxed")
 
 
 def _drop_na(df: pl.DataFrame, layer) -> pl.DataFrame:

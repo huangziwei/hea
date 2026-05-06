@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from .aes import aes
 from .core import ggplot
+from .facets import facet_wrap
 from .geoms import (
     geom_area,
     geom_bar,
@@ -181,6 +182,7 @@ __all__ = [
     "scale_shape_manual",
     "scale_linetype",
     "scale_linetype_manual",
+    "facet_wrap",
     "position_identity",
     "position_jitter",
     "position_nudge",
