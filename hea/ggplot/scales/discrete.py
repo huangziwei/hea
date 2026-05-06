@@ -13,7 +13,7 @@ from typing import Any
 
 import polars as pl
 
-from ._palettes import hue_pal, manual_pal
+from ._palettes import brewer_pal_discrete, hue_pal, manual_pal, viridis_pal_discrete
 from .scale import Scale
 
 
@@ -108,3 +108,55 @@ def scale_fill_identity(*, name=None):
 
 
 scale_colour_identity = scale_color_identity
+
+
+# ---------------------------------------------------------------------------
+# Discrete palette factories — viridis_d, brewer
+# ---------------------------------------------------------------------------
+
+def scale_color_viridis_d(*, option="viridis", direction=1, begin=0.0, end=1.0,
+                         name=None, breaks="default", labels="default",
+                         limits=None):
+    return ScaleDiscreteColor(
+        aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
+        limits=limits,
+        palette=viridis_pal_discrete(option=option, direction=direction,
+                                      begin=begin, end=end),
+    )
+
+
+def scale_fill_viridis_d(*, option="viridis", direction=1, begin=0.0, end=1.0,
+                        name=None, breaks="default", labels="default",
+                        limits=None):
+    return ScaleDiscreteColor(
+        aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
+        limits=limits,
+        palette=viridis_pal_discrete(option=option, direction=direction,
+                                      begin=begin, end=end),
+    )
+
+
+scale_colour_viridis_d = scale_color_viridis_d
+
+
+def scale_color_brewer(*, palette="Set1", direction=1, name=None,
+                      breaks="default", labels="default", limits=None):
+    """Discrete ColorBrewer palette. Common picks: ``Set1``/``Set2`` (qualitative),
+    ``RdBu``/``Spectral`` (diverging), ``Blues``/``YlOrRd`` (sequential)."""
+    return ScaleDiscreteColor(
+        aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
+        limits=limits,
+        palette=brewer_pal_discrete(palette=palette, direction=direction),
+    )
+
+
+def scale_fill_brewer(*, palette="Set1", direction=1, name=None,
+                     breaks="default", labels="default", limits=None):
+    return ScaleDiscreteColor(
+        aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
+        limits=limits,
+        palette=brewer_pal_discrete(palette=palette, direction=direction),
+    )
+
+
+scale_colour_brewer = scale_color_brewer

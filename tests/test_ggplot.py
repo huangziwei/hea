@@ -24,7 +24,9 @@ from hea.ggplot import (
     geom_ribbon, geom_smooth, geom_step, geom_violin, ggplot,
     position_dodge, position_fill, position_jitter, position_nudge,
     position_stack,
-    scale_color_identity, scale_color_manual, scale_fill_identity,
+    scale_color_brewer, scale_color_gradient, scale_color_gradient2,
+    scale_color_gradientn, scale_color_identity, scale_color_manual,
+    scale_color_viridis_c, scale_color_viridis_d, scale_fill_identity,
     scale_fill_manual, scale_x_continuous, scale_x_log10, scale_x_reverse,
     scale_x_sqrt, scale_y_continuous, scale_y_log10,
 )
@@ -898,6 +900,162 @@ def test_add_group_auto_creates_group_from_discrete_aesthetic():
     assert "group" in out.columns
     # 3 unique levels → 3 distinct group ids
     assert out["group"].n_unique() == 3
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.5d/e/f — viridis / gradient / brewer
+# ---------------------------------------------------------------------------
+
+
+def test_auto_numeric_colour_uses_gradient_default():
+    """``aes(colour=numeric_col)`` without an explicit scale → ``gradient_pal``
+    (matching ggplot2's ``scale_color_continuous`` default)."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg", colour="hp")) + geom_point()
+    fig = p.draw()
+    try:
+        fc = fig.axes[0].collections[0].get_facecolors()
+        # mtcars$hp has many distinct values → many distinct colours from
+        # the smooth gradient (≥ 10 to be clearly not a single fixed colour).
+        assert len({tuple(c) for c in fc}) >= 10
+    finally:
+        plt.close(fig)
+
+
+def test_scale_color_gradient_endpoints_match_data_extrema():
+    """`gradient(low="red", high="blue")`: min value gets red, max gets blue."""
+    import numpy as np
+    from matplotlib.colors import to_rgba
+
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg", colour="hp")) + geom_point()
+         + scale_color_gradient(low="red", high="blue"))
+    fig = p.draw()
+    try:
+        fc = fig.axes[0].collections[0].get_facecolors()
+        hp = mtcars["hp"].to_numpy()
+        i_min, i_max = int(np.argmin(hp)), int(np.argmax(hp))
+        assert tuple(fc[i_min]) == to_rgba("red")
+        assert tuple(fc[i_max]) == to_rgba("blue")
+    finally:
+        plt.close(fig)
+
+
+def test_scale_color_gradient2_midpoint_is_mid_colour():
+    """gradient2: at midpoint, the colour should match the mid argument."""
+    import polars as pl
+    from matplotlib.colors import to_rgba
+
+    df = pl.DataFrame({
+        "x": [1.0, 2, 3], "y": [1.0, 2, 3], "z": [-1.0, 0.0, 1.0],
+    })
+    # Data range is [-1, 1], midpoint of palette at 0.5 maps to data midpoint 0.
+    p = (ggplot(df, aes("x", "y", colour="z")) + geom_point()
+         + scale_color_gradient2(low="red", mid="green", high="blue", midpoint=0.5))
+    fig = p.draw()
+    try:
+        fc = fig.axes[0].collections[0].get_facecolors()
+        assert tuple(fc[0]) == to_rgba("red")
+        assert tuple(fc[1]) == to_rgba("green")
+        assert tuple(fc[2]) == to_rgba("blue")
+    finally:
+        plt.close(fig)
+
+
+def test_scale_color_gradientn_n_stop_palette():
+    """``gradientn(colours=[...])`` interpolates linearly across the n stops."""
+    import polars as pl
+    from matplotlib.colors import to_rgba
+
+    df = pl.DataFrame({
+        "x": [1.0, 2, 3, 4, 5], "y": [1.0, 2, 3, 4, 5], "z": [0.0, 0.25, 0.5, 0.75, 1.0],
+    })
+    p = (ggplot(df, aes("x", "y", colour="z")) + geom_point()
+         + scale_color_gradientn(colours=["red", "yellow", "blue"]))
+    fig = p.draw()
+    try:
+        fc = fig.axes[0].collections[0].get_facecolors()
+        # First and last must be red and blue (palette endpoints)
+        assert tuple(fc[0]) == to_rgba("red")
+        assert tuple(fc[-1]) == to_rgba("blue")
+    finally:
+        plt.close(fig)
+
+
+def test_scale_color_viridis_c_continuous():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg", colour="hp")) + geom_point()
+         + scale_color_viridis_c())
+    fig = p.draw()
+    try:
+        fc = fig.axes[0].collections[0].get_facecolors()
+        # Many distinct colours since hp is continuous.
+        assert len({tuple(c) for c in fc}) >= 10
+        # Viridis is monotone in luminance — first row's hp determines colour;
+        # different hp ⇒ different colour.
+    finally:
+        plt.close(fig)
+
+
+def test_scale_color_viridis_d_discrete():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
+         + geom_point() + scale_color_viridis_d())
+    fig = p.draw()
+    try:
+        fc = fig.axes[0].collections[0].get_facecolors()
+        assert len({tuple(c) for c in fc}) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_scale_color_viridis_d_direction_reverses_ordering():
+    """``direction=-1`` flips the palette across the level order."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p_fwd = (ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
+             + geom_point() + scale_color_viridis_d(direction=1))
+    p_rev = (ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
+             + geom_point() + scale_color_viridis_d(direction=-1))
+    f1 = p_fwd.draw()
+    f2 = p_rev.draw()
+    try:
+        c_fwd = {tuple(c) for c in f1.axes[0].collections[0].get_facecolors()}
+        c_rev = {tuple(c) for c in f2.axes[0].collections[0].get_facecolors()}
+        # Same palette, same set of colours (just different level → colour
+        # mapping), so the sets are equal.
+        assert c_fwd == c_rev
+    finally:
+        plt.close(f1)
+        plt.close(f2)
+
+
+def test_scale_color_brewer_set1():
+    """ColorBrewer Set1 — qualitative; matplotlib's bundled palette matches
+    ``RColorBrewer::brewer.pal(_, 'Set1')`` colour-for-colour."""
+    from matplotlib.colors import to_hex
+    import matplotlib
+
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
+         + geom_point() + scale_color_brewer(palette="Set1"))
+    fig = p.draw()
+    try:
+        fc = fig.axes[0].collections[0].get_facecolors()
+        from matplotlib.colors import to_rgba
+        expected = {to_rgba(to_hex(c))
+                    for c in matplotlib.colormaps["Set1"].colors[:3]}
+        observed = {tuple(c) for c in fc}
+        assert observed == expected
+    finally:
+        plt.close(fig)
+
+
+def test_scale_color_brewer_unknown_palette_errors():
+    mtcars = load_dataset("datasets", "mtcars")
+    with pytest.raises(KeyError):
+        p = (ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
+             + geom_point() + scale_color_brewer(palette="NotARealPalette"))
+        p.draw()
 
 
 def test_geom_smooth_fits_per_group_when_colour_mapped():

@@ -45,9 +45,12 @@ class ScalesList:
         """Like :meth:`get_or_default` but inspects the data column to pick
         the right default scale for non-positional aesthetics.
 
-        For ``colour``/``fill``: discrete-color scale if dtype is
-        string/categorical/enum; otherwise leave unscaled (matplotlib's
-        ``c=`` accepts numeric arrays directly via colormap).
+        For ``colour``/``fill``:
+        - discrete-color scale (``ScaleDiscreteColor`` with ``hue_pal``) for
+          string / categorical / enum / boolean data;
+        - continuous-color scale (``ScaleContinuousColor`` with the default
+          ``gradient_pal``) for numeric data — matches ggplot2's
+          ``scale_color_continuous`` default.
         """
         sc = self._by_aes.get(aesthetic)
         if sc is not None:
@@ -56,12 +59,23 @@ class ScalesList:
             return self.get_or_default(aesthetic)
         if aesthetic in ("colour", "fill"):
             import polars as pl
-            if isinstance(data, pl.Series) and data.dtype in (
-                pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean,
-            ):
+
+            if not isinstance(data, pl.Series):
+                return None
+            dtype = data.dtype
+            if dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean):
                 from .discrete import ScaleDiscreteColor
 
                 sc = ScaleDiscreteColor(aesthetics=(aesthetic,))
+                self._by_aes[aesthetic] = sc
+                return sc
+            if dtype.is_numeric():
+                from ._palettes import gradient_pal
+                from .color_continuous import ScaleContinuousColor
+
+                sc = ScaleContinuousColor(
+                    aesthetics=(aesthetic,), palette=gradient_pal(),
+                )
                 self._by_aes[aesthetic] = sc
                 return sc
         return None
