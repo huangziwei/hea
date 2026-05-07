@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .scale import Scale, fmt_number
+from .scale import Scale, fmt_number, format_breaks
 from .transformed import IdentityTrans, Trans
 
 
@@ -88,15 +88,29 @@ class ScaleContinuous(Scale):
         if self.breaks == "default" and ms is not None:
             return
 
-        # Compute breaks against the trained DATA range (not the axis
-        # view limit) so ticks reflect data extent, not bar-width or
-        # expansion padding. Fall back to the view limit when the scale
-        # wasn't trained (defensive — shouldn't happen on the build path).
+        # Compute breaks against the EXPANDED data range — matches
+        # ggplot2's ``scales::breaks_extended``, which works on the
+        # post-expansion view limits, not the raw data range. Without
+        # this, a density y in ``[4e-5, 1.1e-3]`` gets breaks at
+        # ``2.5e-4`` increments instead of ``3e-4``, and the labels
+        # don't switch to scientific the way R does. We then trim
+        # breaks back inside the expanded range so out-of-view ticks
+        # don't get drawn as labels.
+        #
+        # We DON'T fall back to ``ax.get_xlim()`` here even when
+        # untrained — matplotlib's autoscaled view bakes in artist
+        # extents (bar widths, ribbon padding) that would push the
+        # break range past the data, e.g. bars at ``gear ∈ {3, 4, 5}``
+        # would yield ``[2, 3, 4, 5, 6]`` instead of the expected
+        # ``[3, 4, 5]``.
         if self.range_ is not None:
-            break_range = tuple(self.range_)
+            break_range = self._expanded_break_range()
         else:
             break_range = ax.get_xlim() if axis == "x" else ax.get_ylim()
         breaks = self._compute_breaks(break_range)
+        breaks = np.asarray(
+            [b for b in breaks if break_range[0] <= b <= break_range[1]]
+        )
         labels = self._compute_labels(breaks)
         if axis == "x":
             ax.set_xticks(breaks)
@@ -124,6 +138,29 @@ class ScaleContinuous(Scale):
         else:
             ax.margins(y=mult)
 
+    def _expanded_break_range(self) -> tuple[float, float]:
+        """Trained data range padded by this scale's ``expand`` factor.
+
+        Mirrors ggplot2's call to ``breaks_extended`` on the expanded
+        view limits. Reads ``expand`` in either ``Expansion`` or legacy
+        ``(mult, add)`` form.
+        """
+        from ..expansion import Expansion
+
+        lo, hi = self.range_
+        span = hi - lo
+        exp = self.expand
+        if isinstance(exp, Expansion):
+            m_lo, m_hi, a_lo, a_hi = exp.split()
+        elif isinstance(exp, (list, tuple)):
+            mult = float(exp[0]) if len(exp) >= 1 else 0.0
+            add = float(exp[1]) if len(exp) >= 2 else 0.0
+            m_lo = m_hi = mult
+            a_lo = a_hi = add
+        else:
+            return (lo, hi)
+        return (lo - m_lo * span - a_lo, hi + m_hi * span + a_hi)
+
     def _compute_breaks(self, lim):
         if self.breaks == "default":
             from ._breaks import extended_breaks
@@ -135,7 +172,9 @@ class ScaleContinuous(Scale):
 
     def _compute_labels(self, breaks):
         if self.labels == "default":
-            return [fmt_number(b) for b in breaks]
+            # Per-axis (vector) format choice: scientific only when its
+            # max width strictly beats fixed, matching R's ``format()``.
+            return format_breaks(breaks)
         if callable(self.labels):
             return list(self.labels(breaks))
         return [str(x) for x in self.labels]
