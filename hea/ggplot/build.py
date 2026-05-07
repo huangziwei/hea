@@ -60,13 +60,27 @@ def build(plot) -> BuildOutput:
     facet_vars = facet.facet_vars()
     layout = facet.compute_layout(plot.data)
 
+    # Pre-resolve each layer's effective mapping (after kwarg promotion)
+    # so aes_source tracking + the per-layer build loop see the same
+    # picture. Without this, ``geom_point(color="species",
+    # shape="species")`` would get TWO separate legends (colour and
+    # shape) instead of one merged legend — guide auto-merge keys off
+    # aes_source.
+    resolved: list[tuple] = []  # (layer, ld, mapping, effective_aes_params)
+    for layer in plot.layers:
+        ld = _layer_data(layer, plot)
+        mapping = _resolve_mapping(layer, plot)
+        mapping, layer_eff_params = _promote_string_aes_params(
+            mapping, layer.aes_params, ld,
+        )
+        resolved.append((layer, ld, mapping, layer_eff_params))
+
     # Track the original aes value (column name / expression) per aesthetic
     # so the guide system can name legend titles and detect auto-merge.
     # First layer wins for each aesthetic (matches ggplot2's "first scale"
     # semantics — later layers don't rename the legend).
     aes_source: dict = {}
-    for layer in plot.layers:
-        mapping = _resolve_mapping(layer, plot)
+    for _, _, mapping, _ in resolved:
         for aes_name, value in mapping.items():
             if aes_name in aes_source:
                 continue
@@ -76,9 +90,9 @@ def build(plot) -> BuildOutput:
     layers_data: list[pl.DataFrame] = []
     deferred_after_stat: list[dict] = []  # one per layer
     deferred_after_scale: list[dict] = []
-    for layer in plot.layers:
-        ld = _layer_data(layer, plot)
-        mapping = _resolve_mapping(layer, plot)
+    effective_aes_params: list[dict] = []  # per-layer; reduced after promotion.
+    for layer, ld, mapping, layer_eff_params in resolved:
+        effective_aes_params.append(layer_eff_params)
         # Split out after_stat / after_scale markers — they're evaluated
         # later, against the post-stat / post-scale frame respectively.
         immediate, after_stat_map, after_scale_map = _split_deferred(mapping)
@@ -143,7 +157,7 @@ def build(plot) -> BuildOutput:
     # anything the scale produced.
     for i, layer in enumerate(plot.layers):
         df = layers_data[i]
-        df = _apply_aes_params(df, layer)
+        df = _apply_aes_params(df, layer, effective_aes_params[i])
         df = _apply_default_aes(df, layer.geom)
         layers_data[i] = df
 
@@ -396,16 +410,57 @@ def _eval_aes_value(expr, data: pl.DataFrame, env: dict):
     return expr
 
 
-def _apply_aes_params(df: pl.DataFrame, layer) -> pl.DataFrame:
-    """``geom_point(colour="red")`` — constants set as kwargs override mapping."""
+def _apply_aes_params(df: pl.DataFrame, layer, aes_params=None) -> pl.DataFrame:
+    """``geom_point(colour="red")`` — constants set as kwargs override mapping.
+
+    ``aes_params`` overrides ``layer.aes_params`` — used by the build
+    pipeline after string-valued kwargs that match a data column have
+    been *promoted* into the mapping (so the user-friendly
+    ``geom_point(color="species")`` does what they expect)."""
     n = len(df) if len(df.columns) else 0
-    for k, v in layer.aes_params.items():
+    if aes_params is None:
+        aes_params = layer.aes_params
+    for k, v in aes_params.items():
         from .aes import _canon
         col = _canon(k)
         if n == 0:
             continue
         df = df.with_columns(to_series(v, n, name=col).alias(col))
     return df
+
+
+def _promote_string_aes_params(mapping, aes_params, data):
+    """Move string-valued ``aes_params`` whose value matches a data
+    column INTO the mapping (= map), leaving non-matching entries as
+    constants (= set).
+
+    This makes ``geom_point(color="species")`` behave like
+    ``geom_point(aes(color="species"))`` when ``"species"`` is a real
+    column — symmetric with plot-level kwarg sugar. ``color="red"``
+    (no column called ``red``) stays as SET. To force SET when a
+    column happens to share the literal's name, the user can wrap the
+    value in any non-string (or use ``aes()`` to force MAP).
+
+    Explicit ``aes(color=...)`` always wins over the promoted entry
+    (the promoted one has lower priority in the merge)."""
+    if not aes_params:
+        return mapping, aes_params
+    from .aes import Aes, _canon
+
+    promoted = Aes()
+    keep = {}
+    for k, v in aes_params.items():
+        canon = _canon(k)
+        if isinstance(v, str) and v in data.columns:
+            promoted[canon] = v
+        else:
+            keep[k] = v
+    if not promoted:
+        return mapping, aes_params
+    # promoted has LOWER priority than the existing mapping — explicit
+    # ``aes(color=...)`` should beat a kwarg fallback.
+    new_mapping = promoted + (mapping if mapping is not None else Aes())
+    return new_mapping, keep
 
 
 def _apply_default_aes(df: pl.DataFrame, geom) -> pl.DataFrame:
