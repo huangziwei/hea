@@ -175,7 +175,8 @@ def _palette_to_cmap(palette, n: int = 256, name: str = "hea_pal"):
 
 
 def apply_legends(fig, axes_list, plot, build_output, *,
-                   colorbar_caxes: list | None = None) -> None:
+                   colorbar_caxes: list | None = None,
+                   legend_host_axes: list | None = None) -> None:
     """Render legend groups + colorbars onto the first axes using
     ``theme(legend.position=...)`` / ``theme(legend.direction=...)``.
 
@@ -209,19 +210,38 @@ def apply_legends(fig, axes_list, plot, build_output, *,
         cax = colorbar_caxes[i] if colorbar_caxes and i < len(colorbar_caxes) else None
         _render_colorbar(fig, axes_list, target, spec, pos, direction, cax=cax)
 
-    # Then discrete legends (with stacking offsets if multiple).
+    # Then discrete legends. When the block engine pre-allocates a host
+    # axes per legend group (``legend_host_axes``), render INTO that
+    # axes — the legend stays bounded by the host's bbox, so it can't
+    # extend into a sibling plot's panel area in a patchwork
+    # composition. Falls back to ``target.legend(bbox_to_anchor=...)``
+    # for legacy callers without the block engine.
     legends = []
     for i, group in enumerate(groups):
         handles = [_make_handle(group, j) for j in range(len(group.levels))]
         ncols = len(handles) if direction == "horizontal" else 1
-        kw = _legend_position_kwargs(pos, i, len(groups))
-        leg = target.legend(
-            handles, group.labels, title=group.title, ncols=ncols, **kw,
-        )
+        host = (legend_host_axes[i]
+                if legend_host_axes and i < len(legend_host_axes)
+                else None)
+        if host is not None:
+            host.set_axis_off()
+            leg = host.legend(
+                handles, group.labels, title=group.title, ncols=ncols,
+                loc="center left", bbox_to_anchor=(0.0, 0.5),
+                frameon=False,
+            )
+        else:
+            kw = _legend_position_kwargs(pos, i, len(groups))
+            leg = target.legend(
+                handles, group.labels, title=group.title, ncols=ncols,
+                frameon=False, **kw,
+            )
         legends.append(leg)
-        # ax.legend replaces the previous legend artist on each call. To keep
-        # earlier ones around when stacking, re-add them via add_artist.
-        if i < len(groups) - 1:
+        if host is None and i < len(groups) - 1:
+            # ax.legend replaces the previous legend artist on each call.
+            # Re-add to keep earlier legends visible when stacking. Only
+            # relevant for the legacy bbox_to_anchor path; the host-axes
+            # path uses one host per group so no re-adding needed.
             target.add_artist(leg)
 
 

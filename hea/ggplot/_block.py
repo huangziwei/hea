@@ -289,12 +289,14 @@ def render_block(
     if block.n_panels == 1:
         ax = fig.add_subplot(panel_cell)
         block.panel_axes = [ax]
-        # Pre-allocate cax in the right-margin cell so fig.colorbar
-        # doesn't shrink the panel. Without this matplotlib's auto-
-        # shrink can push the colorbar into the panel area.
+        # Pre-allocate cax/legend host in the right-margin cell so
+        # fig.colorbar doesn't shrink the panel and the legend stays
+        # bounded by its host (no overflow into adjacent figure space).
         cb_caxes = _allocate_colorbar_caxes(fig, gs, 1, 2, plot, build_output)
+        leg_hosts = _allocate_legend_host_axes(fig, gs, 1, 2, plot, build_output)
         _render_single_into(plot, build_output, ax,
-                              colorbar_caxes=cb_caxes)
+                              colorbar_caxes=cb_caxes,
+                              legend_host_axes=leg_hosts)
     else:
         nrow, ncol = block.panel_grid_rows, block.panel_grid_cols
         sharex, sharey = plot.facet.share_axes()
@@ -317,8 +319,10 @@ def render_block(
             axes.append(row_axes)
         block.panel_axes = [ax for row in axes for ax in row]
         cb_caxes = _allocate_colorbar_caxes(fig, gs, 1, 2, plot, build_output)
+        leg_hosts = _allocate_legend_host_axes(fig, gs, 1, 2, plot, build_output)
         _render_facets_into(plot, build_output, axes,
-                              colorbar_caxes=cb_caxes)
+                              colorbar_caxes=cb_caxes,
+                              legend_host_axes=leg_hosts)
 
     # Title/subtitle/caption text rides on the panel ``Axes`` (title via
     # ``ax.set_title(loc='left')``, caption via ``fig.text``). Margin
@@ -332,7 +336,8 @@ def render_block(
 
 
 def _render_single_into(plot, build_output, ax, *,
-                          colorbar_caxes: list | None = None) -> None:
+                          colorbar_caxes: list | None = None,
+                          legend_host_axes: list | None = None) -> None:
     """Run the single-panel rendering pipeline against ``ax``.
 
     ``colorbar_caxes``: pre-allocated dedicated axes for any colorbars
@@ -376,12 +381,14 @@ def _render_single_into(plot, build_output, ax, *,
     from .guides import apply_axis_guides, apply_legends
     apply_axis_guides([ax], plot)
     apply_legends(ax.figure, [ax], plot, build_output,
-                   colorbar_caxes=colorbar_caxes)
+                   colorbar_caxes=colorbar_caxes,
+                   legend_host_axes=legend_host_axes)
 
 
 def _render_facets_into(plot, build_output, axes_grid, *,
                           composing: bool = False,
-                          colorbar_caxes: list | None = None) -> None:
+                          colorbar_caxes: list | None = None,
+                          legend_host_axes: list | None = None) -> None:
     """Render each facet panel into its allocated axes.
 
     ``composing=True`` skips ``fig.supxlabel``/``supylabel`` — those paint
@@ -468,7 +475,8 @@ def _render_facets_into(plot, build_output, axes_grid, *,
     from .guides import apply_axis_guides, apply_legends
     apply_axis_guides(list(flat_axes[:n_panels]), plot)
     apply_legends(fig, list(flat_axes[:n_panels]), plot, build_output,
-                   colorbar_caxes=colorbar_caxes)
+                   colorbar_caxes=colorbar_caxes,
+                   legend_host_axes=legend_host_axes)
 
 
 def _set_facet_axis_labels(fig, panel_axes: list, xlabel, ylabel) -> None:
@@ -1060,7 +1068,12 @@ def _render_leaf_cell(leaf, blk: PlotBlock, fig, gs, panel_cell,
         cb_caxes = _allocate_colorbar_caxes(
             fig, gs, right_cell_row, right_cell_col, leaf, bo,
         )
-        _render_single_into(leaf, bo, ax, colorbar_caxes=cb_caxes)
+        leg_hosts = _allocate_legend_host_axes(
+            fig, gs, right_cell_row, right_cell_col, leaf, bo,
+        )
+        _render_single_into(leaf, bo, ax,
+                              colorbar_caxes=cb_caxes,
+                              legend_host_axes=leg_hosts)
     else:
         sub_nrow = blk.panel_grid_rows
         sub_ncol = blk.panel_grid_cols
@@ -1085,8 +1098,12 @@ def _render_leaf_cell(leaf, blk: PlotBlock, fig, gs, panel_cell,
         cb_caxes = _allocate_colorbar_caxes(
             fig, gs, right_cell_row, right_cell_col, leaf, bo,
         )
+        leg_hosts = _allocate_legend_host_axes(
+            fig, gs, right_cell_row, right_cell_col, leaf, bo,
+        )
         _render_facets_into(leaf, bo, axes, composing=True,
-                              colorbar_caxes=cb_caxes)
+                              colorbar_caxes=cb_caxes,
+                              legend_host_axes=leg_hosts)
 
     # Title/subtitle: render as fig.text. ``title_y_override`` lifts the
     # anchor up to a parent's top-margin (used by nested compositions
@@ -1108,6 +1125,42 @@ def _render_leaf_cell(leaf, blk: PlotBlock, fig, gs, panel_cell,
                 ha="left", va="top",
                 fontsize="large", fontweight="bold",
             )
+
+
+def _allocate_legend_host_axes(fig, gs, panel_row_idx, right_col_idx,
+                                  leaf, bo) -> list:
+    """Carve a host ``Axes`` per discrete legend group inside the right-
+    margin cell. The legend renders inside the host (via
+    :func:`apply_legends` host path), so it stays bounded by the host's
+    bbox — preventing the legend from extending into the next plot's
+    panel area in a horizontal compose.
+
+    Multiple groups stack vertically. Returns ``[]`` when the leaf has
+    no discrete legend or when ``legend.position`` is ``"none"`` /
+    ``"top"`` / ``"bottom"`` / ``"left"`` (those need a different cell;
+    fall back to the legacy panel-relative path)."""
+    from matplotlib.gridspec import GridSpecFromSubplotSpec
+
+    pos = leaf.theme.get("legend.position") if leaf.theme else None
+    if pos not in (None, "right"):
+        return []
+
+    from .guides import build_legend_groups
+    groups = build_legend_groups(leaf, bo)
+    if not groups:
+        return []
+
+    right_cell = gs[panel_row_idx, right_col_idx]
+    sub = GridSpecFromSubplotSpec(
+        len(groups), 1, subplot_spec=right_cell,
+        wspace=0.0, hspace=0.1,
+    )
+    hosts = []
+    for i in range(len(groups)):
+        host = fig.add_subplot(sub[i, 0])
+        host.set_label("<legend>")
+        hosts.append(host)
+    return hosts
 
 
 def _allocate_colorbar_caxes(fig, gs, panel_row_idx, right_col_idx,

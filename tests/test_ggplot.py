@@ -1513,7 +1513,11 @@ def test_facet_wrap_preserves_colour_mapping_per_panel():
         _w.simplefilter("ignore", UserWarning)  # NA-removal warning
         fig = p.draw()
     try:
-        visible = [a for a in fig.axes if a.get_visible()]
+        # Only count panel axes (filter legend host / colorbar cax).
+        visible = [
+            a for a in fig.axes
+            if a.get_visible() and a.get_label() not in ("<legend>", "<colorbar>")
+        ]
         # 3 islands.
         assert len(visible) == 3
         # Each panel's scatter still uses the species-coded colours.
@@ -2500,13 +2504,27 @@ def test_geom_dotplot_stacks_within_bin():
 # ---------------------------------------------------------------------------
 
 
-def _all_legends(ax):
-    """Collect all Legend artists attached to ``ax`` (active + add_artist'd)."""
-    legs = [c for c in ax.get_children() if c.__class__.__name__ == "Legend"]
-    cur = ax.get_legend()
-    if cur is not None:
-        legs.append(cur)
-    return list({id(leg): leg for leg in legs}.values())
+def _all_legends(host):
+    """Collect all Legend artists. ``host`` may be a single ``Axes``
+    (legacy: legend hung on the panel via ``ax.legend(bbox_to_anchor)``)
+    OR a ``Figure``, in which case we walk every Axes since the block
+    engine puts each legend on its own ``<legend>``-labeled host
+    Axes carved out of the right-margin cell."""
+    import matplotlib.figure as _mpl_figure
+
+    if isinstance(host, _mpl_figure.FigureBase):
+        axes = list(host.axes)
+    else:
+        axes = [host]
+    seen: dict[int, object] = {}
+    for ax in axes:
+        for c in ax.get_children():
+            if c.__class__.__name__ == "Legend":
+                seen[id(c)] = c
+        cur = ax.get_legend()
+        if cur is not None:
+            seen[id(cur)] = cur
+    return list(seen.values())
 
 
 def _df_two_groups():
@@ -2524,7 +2542,7 @@ def test_legend_auto_built_for_discrete_shape():
     p = ggplot(df, aes("x", "y", shape="g")) + geom_point()
     fig = p.draw()
     try:
-        legs = _all_legends(fig.axes[0])
+        legs = _all_legends(fig)
         assert len(legs) == 1
         leg = legs[0]
         assert leg.get_title().get_text() == "g"
@@ -2540,7 +2558,7 @@ def test_legend_auto_built_for_discrete_colour():
     p = ggplot(df, aes("x", "y", colour="g")) + geom_point()
     fig = p.draw()
     try:
-        legs = _all_legends(fig.axes[0])
+        legs = _all_legends(fig)
         assert len(legs) == 1
         leg = legs[0]
         # Two colour swatches at distinct hex codes.
@@ -2558,7 +2576,7 @@ def test_legend_auto_merge_same_source_column():
     p = ggplot(df, aes("x", "y", colour="g", shape="g")) + geom_point()
     fig = p.draw()
     try:
-        legs = _all_legends(fig.axes[0])
+        legs = _all_legends(fig)
         assert len(legs) == 1
         leg = legs[0]
         assert leg.get_title().get_text() == "g"
@@ -2581,7 +2599,7 @@ def test_legend_two_groups_when_sources_differ():
     p = ggplot(df, aes("x", "y", colour="g", shape="h")) + geom_point()
     fig = p.draw()
     try:
-        legs = _all_legends(fig.axes[0])
+        legs = _all_legends(fig)
         assert len(legs) == 2
         titles = sorted(leg.get_title().get_text() for leg in legs)
         assert titles == ["g", "h"]
@@ -2596,7 +2614,7 @@ def test_legend_position_none_hides_legends():
          + theme(legend_position="none"))
     fig = p.draw()
     try:
-        assert _all_legends(fig.axes[0]) == []
+        assert _all_legends(fig) == []
     finally:
         plt.close(fig)
 
@@ -2609,7 +2627,7 @@ def test_legend_position_top_horizontal():
          + theme(legend_position="top", legend_direction="horizontal"))
     fig = p.draw()
     try:
-        leg = _all_legends(fig.axes[0])[0]
+        leg = _all_legends(fig)[0]
         # Anchor sits above the axes (y > 1 in axes coords).
         bbox = leg.get_bbox_to_anchor().get_points()
         # bbox is in axes coords thanks to transAxes default.
@@ -2625,7 +2643,7 @@ def test_legend_title_from_labs_overrides_aes():
          + labs(colour="Group"))
     fig = p.draw()
     try:
-        leg = _all_legends(fig.axes[0])[0]
+        leg = _all_legends(fig)[0]
         assert leg.get_title().get_text() == "Group"
     finally:
         plt.close(fig)
@@ -2638,7 +2656,7 @@ def test_legend_constant_aes_param_does_not_create_legend():
     p = ggplot(df, aes("x", "y")) + geom_point(colour="red")
     fig = p.draw()
     try:
-        assert _all_legends(fig.axes[0]) == []
+        assert _all_legends(fig) == []
     finally:
         plt.close(fig)
 
@@ -2655,7 +2673,7 @@ def test_legend_scale_identity_skips_legend():
          + scale_color_identity())
     fig = p.draw()
     try:
-        assert _all_legends(fig.axes[0]) == []
+        assert _all_legends(fig) == []
     finally:
         plt.close(fig)
 
@@ -2778,10 +2796,9 @@ def test_colorbar_and_legend_can_coexist():
         warnings.simplefilter("ignore", UserWarning)
         fig = p.draw()
     try:
-        # 2 axes: main + colorbar.
-        assert len(fig.axes) == 2
-        # And one legend.
-        legs = _all_legends(fig.axes[0])
+        # 3 axes: panel + colorbar cax + legend host axes (block engine).
+        assert len(fig.axes) == 3
+        legs = _all_legends(fig)
         assert len(legs) == 1
         assert legs[0].get_title().get_text() == "g"
     finally:
