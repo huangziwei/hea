@@ -152,16 +152,19 @@ class PlotGrid:
         # Default figsize echoes the per-panel formula used by facet_wrap.
         default_figsize = (3.0 * ncol, 2.5 * nrow)
         fig = plt.figure(figsize=default_figsize)
-        # A 1×1 top spec lets the recursive _draw_into use the same
-        # subgridspec mechanism for the root and every nested PlotGrid.
-        top_spec = fig.add_gridspec(1, 1)[0, 0]
-        self._draw_into(fig, top_spec)
-        # User-provided sizing overrides the default per-panel formula.
+        # Use SubFigures (not subgridspec) so each child plot's supxlabel/
+        # supylabel scopes to its own region rather than the entire figure.
+        # SubFigure has the same API surface as Figure for our needs.
+        self._draw_into(fig)
         _resize_figure(fig, width=width, height=height, units=units,
                        figsize=figsize)
         return fig
 
-    def _draw_into(self, fig, parent_spec) -> None:
+    def _draw_into(self, parent) -> None:
+        """Render this grid inside ``parent`` (a :class:`~matplotlib.figure.Figure`
+        or :class:`~matplotlib.figure.SubFigure`). Each child gets its own
+        SubFigure cell, isolating ``supxlabel``/``supylabel`` to that region.
+        """
         nrow, ncol = self._dims()
         kw = {}
         if self.widths is not None:
@@ -178,14 +181,14 @@ class PlotGrid:
                     f"but the grid has {nrow} rows"
                 )
             kw["height_ratios"] = list(self.heights)
-        sub_gs = parent_spec.subgridspec(nrow, ncol, **kw)
+        subfigs = parent.subfigures(nrow, ncol, squeeze=False, **kw)
         for i, child in enumerate(self.children):
             r, c = self._cell_for(i)
-            cell_spec = sub_gs[r, c]
+            cell = subfigs[r, c]
             if isinstance(child, PlotGrid):
-                child._draw_into(fig, cell_spec)
+                child._draw_into(cell)
             else:
-                child.draw(subplotspec=cell_spec)
+                child.draw(parent=cell)
 
     def show(self, *, width=None, height=None, units="in", figsize=None) -> None:
         import matplotlib.pyplot as plt

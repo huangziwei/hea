@@ -20,18 +20,21 @@ from .theme import element_blank, element_line, element_rect, element_text
 _PT_PER_MM = 72.27 / 25.4
 
 
-def render(plot, build_output, ax=None, subplotspec=None) -> "plt.Figure":
+def render(plot, build_output, ax=None, subplotspec=None,
+           parent=None) -> "plt.Figure":
     layout = build_output.layout
     n_panels = 1 if layout is None else len(layout)
 
     if n_panels <= 1:
-        return _render_single(plot, build_output, ax=ax, subplotspec=subplotspec)
+        return _render_single(plot, build_output, ax=ax,
+                              subplotspec=subplotspec, parent=parent)
     if ax is not None:
         # Single ax requested for a faceted plot — collapse to one panel
-        # (existing limitation; patchwork composition handles facets via
-        # subplotspec= instead).
-        return _render_single(plot, build_output, ax=ax, subplotspec=None)
-    return _render_facets(plot, build_output, layout, subplotspec=subplotspec)
+        # (existing limitation; patchwork composition uses parent= instead).
+        return _render_single(plot, build_output, ax=ax,
+                              subplotspec=None, parent=None)
+    return _render_facets(plot, build_output, layout,
+                          subplotspec=subplotspec, parent=parent)
 
 
 def _is_coord_flip(coord) -> bool:
@@ -40,8 +43,15 @@ def _is_coord_flip(coord) -> bool:
     return type(coord).__name__ == "CoordFlip"
 
 
-def _render_single(plot, build_output, ax, subplotspec=None):
-    if subplotspec is not None:
+def _render_single(plot, build_output, ax, subplotspec=None, parent=None):
+    if parent is not None:
+        # SubFigure (or Figure) — make a single subplot inside it. supxlabel/
+        # supylabel etc. on ``fig`` scope to this subfigure, and we treat it
+        # as "owned" so plot.background/title apply only to this region.
+        fig = parent
+        ax = parent.subplots()
+        owns_fig = True
+    elif subplotspec is not None:
         fig = subplotspec.get_gridspec().figure
         ax = fig.add_subplot(subplotspec)
         owns_fig = False
@@ -96,12 +106,16 @@ def _render_single(plot, build_output, ax, subplotspec=None):
     apply_axis_guides([ax], plot)
     apply_legends(fig, [ax], plot, build_output)
 
-    if owns_fig:
+    # tight_layout only exists on Figure, not SubFigure — when rendering
+    # into a SubFigure (patchwork composition) the parent figure is what
+    # matters, and the patchwork driver leaves it to matplotlib's own
+    # constrained layout.
+    if owns_fig and hasattr(fig, "tight_layout"):
         fig.tight_layout()
     return fig
 
 
-def _render_facets(plot, build_output, layout, subplotspec=None):
+def _render_facets(plot, build_output, layout, subplotspec=None, parent=None):
     facet = plot.facet
     n_panels = len(layout)
     nrow, ncol = facet.grid_dims(n_panels)
@@ -109,9 +123,16 @@ def _render_facets(plot, build_output, layout, subplotspec=None):
     sharex, sharey = facet.share_axes()
     is_flipped = _is_coord_flip(plot.coordinates)
 
-    if subplotspec is not None:
-        # Composition mode — caller owns the figure; lay out our facet
-        # grid inside the given subplotspec via subgridspec.
+    if parent is not None:
+        # Composition mode — render into the given SubFigure. supxlabel/
+        # supylabel and plot-level theming stay scoped to this subfigure
+        # rather than leaking to the entire patchwork figure.
+        fig = parent
+        axes = parent.subplots(
+            nrow, ncol, sharex=sharex, sharey=sharey, squeeze=False,
+        )
+        owns_fig = True
+    elif subplotspec is not None:
         fig = subplotspec.get_gridspec().figure
         sub_gs = subplotspec.subgridspec(nrow, ncol)
         axes = sub_gs.subplots(sharex=sharex, sharey=sharey, squeeze=False)
@@ -194,7 +215,11 @@ def _render_facets(plot, build_output, layout, subplotspec=None):
     apply_axis_guides(list(flat_axes[:n_panels]), plot)
     apply_legends(fig, list(flat_axes[:n_panels]), plot, build_output)
 
-    if owns_fig:
+    # tight_layout only exists on Figure, not SubFigure — when rendering
+    # into a SubFigure (patchwork composition) the parent figure is what
+    # matters, and the patchwork driver leaves it to matplotlib's own
+    # constrained layout.
+    if owns_fig and hasattr(fig, "tight_layout"):
         fig.tight_layout()
     return fig
 

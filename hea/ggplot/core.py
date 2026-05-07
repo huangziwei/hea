@@ -112,19 +112,24 @@ class ggplot:
 
     # ---- output ------------------------------------------------------
 
-    def draw(self, ax=None, *, subplotspec=None,
+    def draw(self, ax=None, *, subplotspec=None, parent=None,
              width=None, height=None, units="in", figsize=None):
         """Build the plot and render it to a matplotlib :class:`Figure`.
 
         ``ax``: optional existing axes to draw into (e.g. one cell from
         ``plt.subplot_mosaic``). When given, no new figure is created and
-        ``ax.figure`` is returned (and ``width``/``height``/``figsize`` are
-        ignored — sizing is the parent figure's responsibility).
+        ``ax.figure`` is returned (and sizing kwargs are ignored — the
+        parent figure owns sizing).
+
+        ``parent``: a :class:`matplotlib.figure.Figure` or
+        :class:`matplotlib.figure.SubFigure` to render into. Used by
+        patchwork composition (:class:`PlotGrid`) so each child — including
+        faceted plots — gets its own SubFigure with correctly-scoped
+        ``supxlabel`` / ``supylabel``.
 
         ``subplotspec``: a :class:`matplotlib.gridspec.SubplotSpec` to draw
-        into. Used by patchwork composition (:class:`PlotGrid`) to host a
-        ggplot — including faceted plots — inside one cell of a parent
-        gridspec. Mutually exclusive with ``ax``.
+        into — useful for manually integrating with a custom matplotlib
+        gridspec. Patchwork uses ``parent`` instead.
 
         Sizing kwargs (interchangeable):
 
@@ -138,8 +143,9 @@ class ggplot:
         """
         from .build import build
         from .render import render
-        fig = render(self, build(self), ax=ax, subplotspec=subplotspec)
-        if ax is None and subplotspec is None:
+        fig = render(self, build(self), ax=ax, subplotspec=subplotspec,
+                     parent=parent)
+        if ax is None and subplotspec is None and parent is None:
             _resize_figure(fig, width=width, height=height,
                            units=units, figsize=figsize)
         return fig

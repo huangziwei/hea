@@ -3551,18 +3551,18 @@ def test_patchwork_grid_plus_non_plot_raises():
 
 
 def test_plot_layout_widths_set_column_ratios():
-    """`(p1 + p2) + plot_layout(widths=[1, 2])` makes col 1 twice as wide."""
+    """`(p1 + p2) + plot_layout(widths=[1, 2])` makes col 1 twice as wide.
+
+    Since each child renders into its own SubFigure, we read the subfigure
+    sizes (figure-relative) rather than the inner axes (subfigure-relative).
+    """
     p1, p2 = _two_simple_plots()
     g = (p1 + p2) + plot_layout(widths=[1, 2])
     assert g.widths == [1, 2]
     fig = g.draw(figsize=(9, 3))
     try:
-        visible = [a for a in fig.axes if a.get_visible()]
-        widths_drawn = [a.get_position().width for a in visible]
-        # Sort so the comparison is order-independent.
-        widths_drawn.sort()
-        # The wider should be ~2× the narrower.
-        assert widths_drawn[1] / widths_drawn[0] == pytest.approx(2.0, abs=0.05)
+        widths = sorted(sf.bbox_relative.width for sf in fig.subfigs)
+        assert widths[1] / widths[0] == pytest.approx(2.0, abs=0.05)
     finally:
         plt.close(fig)
 
@@ -3574,10 +3574,8 @@ def test_plot_layout_heights_set_row_ratios():
     assert g.heights == [2, 1]
     fig = g.draw(figsize=(4, 9))
     try:
-        visible = [a for a in fig.axes if a.get_visible()]
-        heights_drawn = [a.get_position().height for a in visible]
-        heights_drawn.sort()
-        assert heights_drawn[1] / heights_drawn[0] == pytest.approx(2.0, abs=0.05)
+        heights = sorted(sf.bbox_relative.height for sf in fig.subfigs)
+        assert heights[1] / heights[0] == pytest.approx(2.0, abs=0.05)
     finally:
         plt.close(fig)
 
@@ -3595,6 +3593,45 @@ def test_wrap_plots_widths_kwarg():
     p1, p2 = _two_simple_plots()
     g = wrap_plots([p1, p2], ncol=2, widths=[1, 3])
     assert g.widths == [1, 3]
+
+
+def test_patchwork_faceted_child_supxlabel_scoped_to_subfigure():
+    """Regression: a faceted plot inside a composition uses its SubFigure's
+    ``supxlabel``/``supylabel``, not the parent figure's.
+
+    Before the SubFigure refactor the faceted plot's labels painted on the
+    top figure (covering both children's column area), since
+    ``_render_facets`` called ``fig.supxlabel`` on whatever figure it was
+    handed. With ``parent=SubFigure`` plumbed through render, each faceted
+    child gets its own ``supxlabel``.
+    """
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        "g": ["a", "a", "a", "a", "b", "b", "b", "b"],
+    })
+    p_single = ggplot(df, aes("x", "y")) + geom_point()
+    p_faceted = ggplot(df, aes("x", "y")) + geom_point() + facet_grid("~ g")
+
+    fig = (p_single + p_faceted).draw(figsize=(8, 3))
+    try:
+        # The top figure has no supxlabel of its own — that would mean a
+        # label paints across the whole composition.
+        top_supx = getattr(fig, "_supxlabel", None)
+        assert top_supx is None or not top_supx.get_text()
+
+        # The faceted child's SubFigure carries the supxlabel.
+        faceted_subfig = fig.subfigs[1]  # rhs of `+`
+        sf_supx = faceted_subfig._supxlabel
+        assert sf_supx is not None and sf_supx.get_text() == "x"
+
+        # The single-panel child's SubFigure uses ax.set_xlabel (not supxlabel).
+        single_subfig = fig.subfigs[0]
+        single_supx = getattr(single_subfig, "_supxlabel", None)
+        assert single_supx is None or not single_supx.get_text()
+        assert single_subfig.axes[0].get_xlabel() == "x"
+    finally:
+        plt.close(fig)
 
 
 def test_plot_layout_overrides_partial():
