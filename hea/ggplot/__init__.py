@@ -17,6 +17,7 @@ from __future__ import annotations
 from .aes import aes, after_scale, after_stat
 from .core import ggplot
 from .facets import facet_wrap
+from .labels import ggtitle, labs, xlab, ylab
 from .theme import (
     element_blank,
     element_line,
@@ -58,6 +59,7 @@ from .positions import (
     position_stack,
 )
 from .scales import (
+    lims,
     scale_alpha,
     scale_alpha_continuous,
     scale_alpha_manual,
@@ -109,6 +111,8 @@ from .scales import (
     scale_y_log2,
     scale_y_reverse,
     scale_y_sqrt,
+    xlim,
+    ylim,
 )
 from .stats import (
     stat_bin,
@@ -200,6 +204,13 @@ __all__ = [
     "scale_linetype",
     "scale_linetype_manual",
     "facet_wrap",
+    "labs",
+    "xlab",
+    "ylab",
+    "ggtitle",
+    "xlim",
+    "ylim",
+    "lims",
     "theme",
     "theme_gray",
     "theme_bw",

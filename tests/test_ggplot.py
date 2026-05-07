@@ -23,8 +23,8 @@ from hea.ggplot import (
     element_text, facet_wrap, geom_area, geom_bar, geom_blank, geom_boxplot,
     geom_density, geom_histogram, geom_jitter, geom_line, geom_path,
     geom_point, geom_ribbon, geom_smooth, geom_step, geom_text, geom_violin,
-    ggplot, position_dodge, position_fill, position_jitter, position_nudge,
-    position_stack,
+    ggplot, ggtitle, labs, lims, position_dodge, position_fill,
+    position_jitter, position_nudge, position_stack,
     scale_alpha_continuous, scale_color_brewer, scale_color_gradient,
     scale_color_gradient2, scale_color_gradientn, scale_color_identity,
     scale_color_manual, scale_color_viridis_c, scale_color_viridis_d,
@@ -33,7 +33,7 @@ from hea.ggplot import (
     scale_size_continuous, scale_size_manual, scale_x_continuous,
     scale_x_log10, scale_x_reverse, scale_x_sqrt, scale_y_continuous,
     scale_y_log10, theme, theme_bw, theme_classic, theme_dark, theme_gray,
-    theme_minimal, theme_void,
+    theme_minimal, theme_void, xlab, xlim, ylab, ylim,
 )
 
 
@@ -1984,5 +1984,182 @@ def test_faraway_p5_scatter_pima_diastolic_diabetes():
         assert offsets.shape == (len(pima), 2)
         assert ax.get_xlabel() == "diastolic"
         assert ax.get_ylabel() == "diabetes"
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Labels & limits — `labs`, `xlab`, `ylab`, `ggtitle`, `xlim`, `ylim`, `lims`
+# ---------------------------------------------------------------------------
+
+def test_labs_overrides_axis_labels():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + labs(x="Weight", y="MPG")
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xlabel() == "Weight"
+        assert ax.get_ylabel() == "MPG"
+    finally:
+        plt.close(fig)
+
+
+def test_xlab_ylab_shortcuts():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + xlab("X") + ylab("Y")
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xlabel() == "X"
+        assert ax.get_ylabel() == "Y"
+    finally:
+        plt.close(fig)
+
+
+def test_ggtitle_sets_suptitle():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + ggtitle("Cars")
+    fig = p.draw()
+    try:
+        assert fig._suptitle is not None
+        assert fig._suptitle.get_text() == "Cars"
+    finally:
+        plt.close(fig)
+
+
+def test_ggtitle_with_subtitle_renders_both():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + ggtitle("Cars", subtitle="MTcars data")
+    fig = p.draw()
+    try:
+        assert fig._suptitle.get_text() == "Cars"
+        # Subtitle is a fig.text artist; find it among the figure's texts.
+        texts = [t.get_text() for t in fig.texts]
+        assert "MTcars data" in texts
+    finally:
+        plt.close(fig)
+
+
+def test_labs_caption_renders_as_figure_text():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + labs(caption="Source: 1974 Motor Trend")
+    fig = p.draw()
+    try:
+        texts = [t.get_text() for t in fig.texts]
+        assert "Source: 1974 Motor Trend" in texts
+    finally:
+        plt.close(fig)
+
+
+def test_labs_color_aliases_to_colour():
+    """``labs(color=...)`` and ``labs(colour=...)`` collapse to the canonical key."""
+    assert labs(color="C").labels == {"colour": "C"}
+    assert labs(colour="C").labels == {"colour": "C"}
+    # When both supplied, ``color`` (later in the function body) wins. Match
+    # ggplot2's "last assignment wins" semantics rather than erroring.
+    assert labs(colour="A", color="B").labels == {"colour": "B"}
+
+
+def test_labs_explicit_overrides_mapping_deparse():
+    """``labs(x=...)`` beats the auto-derived label from the aes mapping."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + labs(x="Custom X")
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xlabel() == "Custom X"
+        # Y still falls through to the mapping.
+        assert ax.get_ylabel() == "mpg"
+    finally:
+        plt.close(fig)
+
+
+def test_xlim_two_arg_form_sets_axis_limits():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + xlim(0, 10)
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        lo, hi = ax.get_xlim()
+        assert lo == pytest.approx(0)
+        assert hi == pytest.approx(10)
+    finally:
+        plt.close(fig)
+
+
+def test_xlim_tuple_form():
+    """``xlim((lo, hi))`` works the same as ``xlim(lo, hi)``."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + xlim((0, 10))
+    fig = p.draw()
+    try:
+        lo, hi = fig.axes[0].get_xlim()
+        assert (lo, hi) == pytest.approx((0, 10))
+    finally:
+        plt.close(fig)
+
+
+def test_ylim_sets_y_axis_limits():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + ylim(0, 50)
+    fig = p.draw()
+    try:
+        lo, hi = fig.axes[0].get_ylim()
+        assert (lo, hi) == pytest.approx((0, 50))
+    finally:
+        plt.close(fig)
+
+
+def test_lims_returns_list_and_sets_both_axes():
+    """``lims(x=, y=)`` returns a list; ``+ list`` is sugar for adding each item."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + lims(x=(0, 10), y=(0, 50))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xlim() == pytest.approx((0, 10))
+        assert ax.get_ylim() == pytest.approx((0, 50))
+    finally:
+        plt.close(fig)
+
+
+def test_lims_rejects_non_positional_kwargs():
+    """Until guides land, non-positional limits aren't supported."""
+    with pytest.raises(NotImplementedError, match="x= and y= only"):
+        lims(colour=(0, 1))
+
+
+def test_xlim_rejects_too_many_args():
+    with pytest.raises(TypeError):
+        xlim(0, 1, 2)
+
+
+def test_xlim_rejects_wrong_tuple_length():
+    with pytest.raises(ValueError, match="length 2"):
+        xlim((0, 1, 2))
+
+
+def test_labs_fluent_method_form():
+    """Phase B's auto-install picks up ``labs`` via the exact-name allowlist."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")).geom_point().labs(x="W", y="M").ggtitle("T")
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xlabel() == "W"
+        assert ax.get_ylabel() == "M"
+        assert fig._suptitle.get_text() == "T"
+    finally:
+        plt.close(fig)
+
+
+def test_xlim_fluent_method_form():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")).geom_point().xlim(0, 10).ylim(0, 50)
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xlim() == pytest.approx((0, 10))
+        assert ax.get_ylim() == pytest.approx((0, 50))
     finally:
         plt.close(fig)

@@ -21,7 +21,14 @@ from .color_continuous import (
     scale_fill_gradientn,
     scale_fill_viridis_c,
 )
-from .continuous import ScaleContinuous, scale_x_continuous, scale_y_continuous
+from .continuous import (
+    ScaleContinuous,
+    lims,
+    scale_x_continuous,
+    scale_y_continuous,
+    xlim,
+    ylim,
+)
 from .discrete import (
     ScaleDiscreteColor,
     ScaleIdentity,
@@ -85,6 +92,9 @@ __all__ = [
     "ReverseTrans",
     "scale_x_continuous",
     "scale_y_continuous",
+    "xlim",
+    "ylim",
+    "lims",
     "scale_x_log10",
     "scale_y_log10",
     "scale_x_log2",

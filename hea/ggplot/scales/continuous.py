@@ -103,3 +103,60 @@ def scale_y_continuous(*, name=None, breaks="default", labels="default",
         aesthetics=("y",), name=name, breaks=breaks, labels=labels,
         limits=limits, expand=expand,
     )
+
+
+def _coerce_limits(args, kwarg_lo, kwarg_hi):
+    """Accept ``xlim(lo, hi)``, ``xlim((lo, hi))``, ``xlim([lo, hi])``."""
+    if args and (kwarg_lo is not None or kwarg_hi is not None):
+        raise TypeError("pass limits either positionally or as a tuple, not both")
+    if not args:
+        return (kwarg_lo, kwarg_hi)
+    if len(args) == 1:
+        first = args[0]
+        if isinstance(first, (list, tuple)):
+            if len(first) != 2:
+                raise ValueError(f"limits must have length 2; got {len(first)}")
+            return tuple(first)
+        raise TypeError(
+            "single-arg form must be a (lo, hi) tuple/list; "
+            "use xlim(lo, hi) for two-arg form"
+        )
+    if len(args) == 2:
+        return (args[0], args[1])
+    raise TypeError(f"expected 1 tuple or 2 scalars; got {len(args)} args")
+
+
+def xlim(*args, lo=None, hi=None):
+    """Shortcut for ``scale_x_continuous(limits=(lo, hi))``.
+
+    ``xlim(0, 10)``, ``xlim((0, 10))``, and ``xlim(lo=0, hi=10)`` all work.
+    A bound of ``None`` leaves that side to matplotlib's autoscale.
+    """
+    return scale_x_continuous(limits=_coerce_limits(args, lo, hi))
+
+
+def ylim(*args, lo=None, hi=None):
+    """Shortcut for ``scale_y_continuous(limits=(lo, hi))``."""
+    return scale_y_continuous(limits=_coerce_limits(args, lo, hi))
+
+
+def lims(*, x=None, y=None, **rest):
+    """Set limits on multiple aesthetics in one call.
+
+    Currently supports ``x`` and ``y`` only — non-positional limits
+    (``colour=``, ``fill=``, ...) need guide infrastructure that hasn't
+    landed yet. Returns a list of scales, which ``ggplot.__add__`` already
+    accepts (see ``core.py``'s ``list`` dispatch).
+    """
+    if rest:
+        unknown = ", ".join(sorted(rest))
+        raise NotImplementedError(
+            f"lims() supports x= and y= only for now (got {unknown}). "
+            f"Non-positional limits land with guide infrastructure."
+        )
+    out = []
+    if x is not None:
+        out.append(xlim(x))
+    if y is not None:
+        out.append(ylim(y))
+    return out

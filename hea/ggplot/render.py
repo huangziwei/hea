@@ -52,6 +52,9 @@ def _render_single(plot, build_output, ax):
     if ylabel is not None:
         ax.set_ylabel(ylabel)
 
+    if owns_fig:
+        _apply_plot_titles(plot, fig)
+
     _apply_theme(plot.theme, fig, [ax], owns_fig=owns_fig)
 
     if owns_fig:
@@ -118,6 +121,7 @@ def _render_facets(plot, build_output, layout):
     if ylabel is not None:
         fig.supylabel(ylabel)
 
+    _apply_plot_titles(plot, fig)
     _apply_theme(plot.theme, fig, list(flat_axes[:n_panels]), owns_fig=True)
 
     fig.tight_layout()
@@ -336,18 +340,55 @@ def _apply_strip_text(theme, ax) -> None:
 
 
 def _default_labels(plot):
+    """Resolve x/y labels with explicit ``labs()`` overrides taking priority.
+
+    Precedence per axis: ``plot.labels[axis]`` (set by ``labs()``/``xlab()``/
+    ``ylab()``) → mapping deparse → stat default (y only).
+    """
+    explicit = plot.labels
     mapping = plot.mapping
-    xlabel = mapping.get("x") if "x" in mapping else None
-    ylabel = mapping.get("y") if "y" in mapping else None
-    xlabel = xlabel if isinstance(xlabel, str) else None
-    ylabel = ylabel if isinstance(ylabel, str) else None
-    if ylabel is None:
-        # No user-mapped y → fall back to the first layer's stat default,
-        # so histograms get "count" / density gets "density" without
-        # needing labs() (matches ggplot2 deparsing of `after_stat(count)`).
-        for layer in plot.layers:
-            tag = getattr(layer.stat, "default_y_label", None)
-            if tag:
-                ylabel = tag
-                break
+
+    if "x" in explicit:
+        xlabel = str(explicit["x"])
+    else:
+        m = mapping.get("x") if "x" in mapping else None
+        xlabel = m if isinstance(m, str) else None
+
+    if "y" in explicit:
+        ylabel = str(explicit["y"])
+    else:
+        m = mapping.get("y") if "y" in mapping else None
+        ylabel = m if isinstance(m, str) else None
+        if ylabel is None:
+            # No user-mapped y → fall back to the first layer's stat default,
+            # so histograms get "count" / density gets "density" without
+            # needing labs() (matches ggplot2 deparsing of `after_stat(count)`).
+            for layer in plot.layers:
+                tag = getattr(layer.stat, "default_y_label", None)
+                if tag:
+                    ylabel = tag
+                    break
     return xlabel, ylabel
+
+
+def _apply_plot_titles(plot, fig) -> None:
+    """Render ``title`` / ``subtitle`` / ``caption`` from ``plot.labels``.
+
+    Uses ``fig.suptitle`` for the title (interacts well with ``tight_layout``);
+    subtitle and caption land via ``fig.text`` at conventional positions.
+    Theme styling for these elements (``plot.title``, ``plot.subtitle``,
+    ``plot.caption``) is not yet wired — defaults from matplotlib apply.
+    """
+    title = plot.labels.get("title")
+    subtitle = plot.labels.get("subtitle")
+    caption = plot.labels.get("caption")
+    if title is not None:
+        fig.suptitle(str(title))
+    if subtitle is not None:
+        # Sit just below where suptitle lands by default. Slight overlap
+        # with axes is possible on tight layouts; ggplot2 has the same risk.
+        fig.text(0.5, 0.94, str(subtitle), ha="center", va="bottom",
+                 fontsize="medium")
+    if caption is not None:
+        fig.text(0.99, 0.01, str(caption), ha="right", va="bottom",
+                 fontsize="small", style="italic")
