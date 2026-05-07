@@ -21,12 +21,11 @@ class PositionDodge(Position):
     preserve: str = "total"  # ``"total"`` or ``"single"``; phase 1.3 ignores
 
     def compute_layer(self, data: pl.DataFrame) -> pl.DataFrame:
+        """Mirrors ggplot2's ``collide()`` + ``pos_dodge()``: groups are
+        dodged only when they OVERLAP at the same x. A boxplot with
+        ``group=x`` (each x has exactly one group) gets no dodge —
+        ggplot2 leaves x at 3, 4, 5 not 2.75, 4.0, 5.25."""
         if "group" not in data.columns or "x" not in data.columns:
-            return data
-
-        groups = sorted(data["group"].unique().to_list())
-        n_groups = len(groups)
-        if n_groups <= 1:
             return data
 
         if self.width is not None:
@@ -36,21 +35,39 @@ class PositionDodge(Position):
         else:
             base_width = 0.9
 
-        slot_width = base_width / n_groups
-        offsets = pl.DataFrame({
-            "group": groups,
-            "_offset": [(i - (n_groups - 1) / 2) * slot_width for i in range(n_groups)],
-        })
+        # Per-x group rank + count. If only one group at a given x,
+        # offset stays 0 — no dodging.
+        unique_xg = (
+            data.select(["x", "group"])
+            .unique(maintain_order=False)
+            .sort(["x", "group"])
+        )
+        unique_xg = unique_xg.with_columns(
+            _n_at_x=pl.col("group").count().over("x"),
+            _rank_at_x=(pl.col("group").rank("dense").over("x") - 1).cast(pl.Float64),
+        )
+        # Offset = (rank - (n-1)/2) * slot_width; slot_width = base_width/n.
+        unique_xg = unique_xg.with_columns(
+            _offset=pl.when(pl.col("_n_at_x") > 1)
+                      .then(
+                          (pl.col("_rank_at_x") - (pl.col("_n_at_x") - 1) / 2)
+                          * (base_width / pl.col("_n_at_x"))
+                      )
+                      .otherwise(pl.lit(0.0)),
+            _slot_width=pl.when(pl.col("_n_at_x") > 1)
+                          .then(base_width / pl.col("_n_at_x"))
+                          .otherwise(pl.lit(None, dtype=pl.Float64)),
+        ).select(["x", "group", "_offset", "_slot_width"])
 
-        result = data.join(offsets, on="group", how="left")
-        result = result.with_columns(
-            x=pl.col("x") + pl.col("_offset"),
-        ).drop("_offset")
-
+        result = data.join(unique_xg, on=["x", "group"], how="left")
+        result = result.with_columns(x=pl.col("x") + pl.col("_offset"))
         if "width" in result.columns:
-            result = result.with_columns(width=pl.lit(slot_width))
-
-        return result
+            result = result.with_columns(
+                width=pl.when(pl.col("_slot_width").is_not_null())
+                        .then(pl.col("_slot_width"))
+                        .otherwise(pl.col("width")),
+            )
+        return result.drop("_offset", "_slot_width")
 
 
 # ggplot2's position_dodge2 differs from dodge only when boxplot-style geoms
