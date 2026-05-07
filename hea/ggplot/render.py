@@ -439,22 +439,39 @@ def _default_labels(plot):
     """Resolve x/y labels with explicit ``labs()`` overrides taking priority.
 
     Precedence per axis: ``plot.labels[axis]`` (set by ``labs()``/``xlab()``/
-    ``ylab()``) → mapping deparse → stat default (y only).
+    ``ylab()``) → ``plot.mapping`` deparse → first layer mapping deparse →
+    stat default (y only).
+
+    The layer-mapping fallback matches the patchwork-doc idiom
+    ``ggplot(df).geom_point(aes("mpg", "disp"))`` — aes on the layer, not
+    the plot. ggplot2 picks up the labels from the first matching layer;
+    we do the same.
     """
     explicit = plot.labels
-    mapping = plot.mapping
+
+    def _from_mapping(mapping, key):
+        m = mapping.get(key) if key in mapping else None
+        return m if isinstance(m, str) else None
+
+    def _from_layers(key):
+        for layer in plot.layers:
+            m = getattr(layer, "mapping", None)
+            if m is None:
+                continue
+            label = _from_mapping(m, key)
+            if label is not None:
+                return label
+        return None
 
     if "x" in explicit:
         xlabel = str(explicit["x"])
     else:
-        m = mapping.get("x") if "x" in mapping else None
-        xlabel = m if isinstance(m, str) else None
+        xlabel = _from_mapping(plot.mapping, "x") or _from_layers("x")
 
     if "y" in explicit:
         ylabel = str(explicit["y"])
     else:
-        m = mapping.get("y") if "y" in mapping else None
-        ylabel = m if isinstance(m, str) else None
+        ylabel = _from_mapping(plot.mapping, "y") or _from_layers("y")
         if ylabel is None:
             # No user-mapped y → fall back to the first layer's stat default,
             # so histograms get "count" / density gets "density" without
@@ -470,21 +487,28 @@ def _default_labels(plot):
 def _apply_plot_titles(plot, fig) -> None:
     """Render ``title`` / ``subtitle`` / ``caption`` from ``plot.labels``.
 
-    Uses ``fig.suptitle`` for the title (interacts well with ``tight_layout``);
-    subtitle and caption land via ``fig.text`` at conventional positions.
-    Theme styling for these elements (``plot.title``, ``plot.subtitle``,
-    ``plot.caption``) is not yet wired — defaults from matplotlib apply.
+    When both title and subtitle are set, they're packed into a single
+    ``suptitle`` as two lines so matplotlib's ``constrained_layout`` reserves
+    one block of space for both — avoiding the overlap that happens when
+    ``suptitle`` and a separate ``fig.text`` artist sit at adjacent y values
+    inside a SubFigure.
+
+    Theme styling for ``plot.title``/``plot.subtitle``/``plot.caption`` is
+    not wired — matplotlib defaults apply.
     """
     title = plot.labels.get("title")
     subtitle = plot.labels.get("subtitle")
     caption = plot.labels.get("caption")
-    if title is not None:
+    if title is not None and subtitle is not None:
+        # Multi-line suptitle. ggplot2 styles the subtitle smaller/lighter;
+        # we don't yet, so both lines share the suptitle's font.
+        fig.suptitle(f"{title}\n{subtitle}", fontsize="large")
+    elif title is not None:
         fig.suptitle(str(title))
-    if subtitle is not None:
-        # Sit just below where suptitle lands by default. Slight overlap
-        # with axes is possible on tight layouts; ggplot2 has the same risk.
-        fig.text(0.5, 0.94, str(subtitle), ha="center", va="bottom",
-                 fontsize="medium")
+    elif subtitle is not None:
+        # Subtitle alone — no title to align under, so just put it where
+        # the title would have gone.
+        fig.suptitle(str(subtitle))
     if caption is not None:
         fig.text(0.99, 0.01, str(caption), ha="right", va="bottom",
                  fontsize="small", style="italic")

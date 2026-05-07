@@ -4407,14 +4407,18 @@ def test_ggtitle_sets_suptitle():
 
 
 def test_ggtitle_with_subtitle_renders_both():
+    """Title + subtitle pack into a single multi-line ``fig.suptitle`` so
+    matplotlib's ``constrained_layout`` reserves one block of space for both
+    — separate text artists at adjacent y values overlapped inside SubFigures."""
     mtcars = load_dataset("datasets", "mtcars")
     p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + ggtitle("Cars", subtitle="MTcars data")
     fig = p.draw()
     try:
-        assert fig._suptitle.get_text() == "Cars"
-        # Subtitle is a fig.text artist; find it among the figure's texts.
-        texts = [t.get_text() for t in fig.texts]
-        assert "MTcars data" in texts
+        suptitle_text = fig._suptitle.get_text()
+        assert "Cars" in suptitle_text
+        assert "MTcars data" in suptitle_text
+        # Two lines, in order.
+        assert suptitle_text.split("\n") == ["Cars", "MTcars data"]
     finally:
         plt.close(fig)
 

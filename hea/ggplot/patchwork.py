@@ -198,7 +198,12 @@ class PlotGrid:
         nrow, ncol = self._dims()
         # Default figsize echoes the per-panel formula used by facet_wrap.
         default_figsize = (3.0 * ncol, 2.5 * nrow)
-        fig = plt.figure(figsize=default_figsize)
+        # ``constrained_layout`` is the only matplotlib auto-layout that
+        # composes correctly across SubFigure boundaries — it reserves
+        # vertical space for each child's suptitle/strip labels so they
+        # don't pile on top of each other (the visible bug in ex5 of the
+        # patchwork doc walkthrough).
+        fig = plt.figure(figsize=default_figsize, constrained_layout=True)
         # Use SubFigures (not subgridspec) so each child plot's supxlabel/
         # supylabel scopes to its own region rather than the entire figure.
         # SubFigure has the same API surface as Figure for our needs.
