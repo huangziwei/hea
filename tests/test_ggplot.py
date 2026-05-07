@@ -2702,9 +2702,9 @@ def test_continuous_colour_renders_colorbar():
         assert len(fig.axes) == 2
         cb_ax = fig.axes[1]
         assert cb_ax.get_label() == "<colorbar>"
-        # Colorbar label = scale.name fallback to aes-source ("z").
-        cb_label = cb_ax.get_ylabel() or cb_ax.get_xlabel()
-        assert cb_label == "z"
+        # Colorbar title placed ABOVE the bar via cb.ax.set_title (R/ggplot2
+        # default) — falls back to scale.name → aes-source ("z").
+        assert cb_ax.get_title() == "z"
     finally:
         plt.close(fig)
 
@@ -2748,7 +2748,8 @@ def test_colorbar_position_top_horizontal():
 
 
 def test_colorbar_title_from_labs_overrides_aes():
-    """`labs(colour='Z value')` overrides the colorbar label."""
+    """`labs(colour='Z value')` overrides the colorbar title (placed
+    above the bar via cb.ax.set_title — R/ggplot2 default)."""
     import warnings
     df = _df_continuous_colour()
     p = (ggplot(df, aes("x", "y", colour="z")) + geom_point()
@@ -2758,8 +2759,7 @@ def test_colorbar_title_from_labs_overrides_aes():
         fig = p.draw()
     try:
         cb_ax = fig.axes[1]
-        cb_label = cb_ax.get_ylabel() or cb_ax.get_xlabel()
-        assert cb_label == "Z value"
+        assert cb_ax.get_title() == "Z value"
     finally:
         plt.close(fig)
 

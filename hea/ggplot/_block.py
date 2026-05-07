@@ -276,7 +276,12 @@ def render_block(
     if block.n_panels == 1:
         ax = fig.add_subplot(panel_cell)
         block.panel_axes = [ax]
-        _render_single_into(plot, build_output, ax)
+        # Pre-allocate cax in the right-margin cell so fig.colorbar
+        # doesn't shrink the panel. Without this matplotlib's auto-
+        # shrink can push the colorbar into the panel area.
+        cb_caxes = _allocate_colorbar_caxes(fig, gs, 1, 2, plot, build_output)
+        _render_single_into(plot, build_output, ax,
+                              colorbar_caxes=cb_caxes)
     else:
         nrow, ncol = block.panel_grid_rows, block.panel_grid_cols
         sharex, sharey = plot.facet.share_axes()
@@ -298,7 +303,9 @@ def render_block(
                 row_axes.append(ax)
             axes.append(row_axes)
         block.panel_axes = [ax for row in axes for ax in row]
-        _render_facets_into(plot, build_output, axes)
+        cb_caxes = _allocate_colorbar_caxes(fig, gs, 1, 2, plot, build_output)
+        _render_facets_into(plot, build_output, axes,
+                              colorbar_caxes=cb_caxes)
 
     # Title/subtitle/caption text rides on the panel ``Axes`` (title via
     # ``ax.set_title(loc='left')``, caption via ``fig.text``). Margin
@@ -963,26 +970,66 @@ def _render_leaf_cell(leaf, blk: PlotBlock, fig, gs, panel_cell,
 def _allocate_colorbar_caxes(fig, gs, panel_row_idx, right_col_idx,
                                leaf, bo) -> list:
     """Carve a tight cax (or stack of caxes) inside the right-margin
-    cell for each colorbar in ``leaf``."""
+    cell for each colorbar in ``leaf``.
+
+    Only allocates for the default right-side colorbar placement. When
+    the theme requests ``legend.position`` of ``"top"``/``"bottom"``/
+    ``"left"``/``"none"``, we return ``[]`` and let the legacy
+    auto-shrink path handle it — those placements need a cell on a
+    different side which the block engine doesn't reserve yet.
+    """
     from matplotlib.gridspec import GridSpecFromSubplotSpec
     from .guides import build_colorbar_specs
+
+    pos = leaf.theme.get("legend.position") if leaf.theme else None
+    if pos not in (None, "right"):
+        return []
 
     specs = build_colorbar_specs(leaf, bo)
     if not specs:
         return []
 
     right_cell = gs[panel_row_idx, right_col_idx]
+    # Inch-absolute width ratios: panel-side pad, the bar, bar-to-tick pad,
+    # tick text reserve. matplotlib normalizes these against the cell's
+    # actual width — but since `_measure_colorbar_width` already sums to
+    # exactly these inches, the cax lands at its measured size with the
+    # panel-side pad acting as breathing room.
+    tick_reserve = max(
+        0.0,
+        right_cell_width_in_estimate(fig, right_cell)
+        - M.COLORBAR_PANEL_PAD_IN
+        - M.COLORBAR_BAR_WIDTH_IN
+        - M.COLORBAR_BAR_PAD_IN,
+    )
     sub = GridSpecFromSubplotSpec(
-        len(specs) * 2 + 1, 3,
+        len(specs) * 2 + 1, 4,
         subplot_spec=right_cell,
-        width_ratios=[0.05, 0.4, 0.55],
+        width_ratios=[
+            M.COLORBAR_PANEL_PAD_IN,
+            M.COLORBAR_BAR_WIDTH_IN,
+            M.COLORBAR_BAR_PAD_IN,
+            max(tick_reserve, 1e-6),
+        ],
         wspace=0.0, hspace=0.2,
     )
     caxes = []
     for i in range(len(specs)):
+        # cax = the bar column only (col 1). Tick labels render in col 3
+        # because matplotlib renders tick text outside the cax.
         cax = fig.add_subplot(sub[i * 2 + 1, 1])
+        cax.set_label("<colorbar>")
         caxes.append(cax)
     return caxes
+
+
+def right_cell_width_in_estimate(fig, subplotspec) -> float:
+    """Approximate cell width in inches via its subplotspec position."""
+    try:
+        bbox = subplotspec.get_position(fig)
+    except Exception:
+        return 0.0
+    return bbox.width * fig.get_figwidth()
 
 
 def _apply_block_annotation(grid, fig, gs, title_row_offset, ncol,

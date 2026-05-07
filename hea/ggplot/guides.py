@@ -257,7 +257,7 @@ def _render_colorbar(fig, axes_list, target, spec: ColorbarSpec,
     # ``cb.ax.set_title`` so the title sits on top of the cax, matching
     # R/ggplot2's layout. For horizontal colorbars matplotlib's default
     # is already on top, but ``set_title`` works there too.
-    cb.ax.set_title(spec.title, fontsize=10, loc="left", pad=4)
+    cb.ax.set_title(spec.title, fontsize=10, pad=4)
 
 
 def _make_handle(group: LegendGroup, idx: int) -> Line2D:

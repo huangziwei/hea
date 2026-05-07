@@ -146,6 +146,10 @@ def max_label_height_in(
 # Vertical colorbar: bar itself + small pad + tick labels.
 COLORBAR_BAR_WIDTH_IN = 0.20
 COLORBAR_BAR_PAD_IN = 0.10
+# Whitespace reserved between the panel's right edge and the colorbar.
+# Prevents the bar from kissing the panel — matches R/ggplot2's
+# generous gap (more than the typical legend ``COL_GAP_IN``).
+COLORBAR_PANEL_PAD_IN = 0.25
 
 # Legend (right of plot): key glyph + key->text pad + text + outer pad.
 LEGEND_KEY_WIDTH_IN = 0.22
@@ -167,11 +171,17 @@ def colorbar_cell_width_in(
     *,
     fontsize: float = AXIS_TEXT_SIZE_PT,
 ) -> float:
-    """Horizontal extent of a vertical colorbar cell (bar + tick text)."""
+    """Horizontal extent of a vertical colorbar cell (panel pad + bar +
+    bar-to-text pad + tick text)."""
     if not tick_labels:
         return 0.0
     text_w = max_label_width_in(tick_labels, fontsize=fontsize)
-    return COLORBAR_BAR_WIDTH_IN + COLORBAR_BAR_PAD_IN + text_w
+    return (
+        COLORBAR_PANEL_PAD_IN
+        + COLORBAR_BAR_WIDTH_IN
+        + COLORBAR_BAR_PAD_IN
+        + text_w
+    )
 
 
 def legend_cell_size_in(
