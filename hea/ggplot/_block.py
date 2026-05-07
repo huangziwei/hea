@@ -832,7 +832,9 @@ def _annotation_extents(grid) -> tuple[float, float]:
 
 
 def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
-                        tag_iter=None, outer_top_y: float | None = None) -> None:
+                        tag_iter=None, outer_top_y: float | None = None,
+                        lift_top: bool = False,
+                        lift_bottom: bool = False) -> None:
     """Render a :class:`SuperBlock` into ``fig`` at ``parent_subspec``
     (or the whole figure if ``None``).
 
@@ -847,6 +849,14 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
     own topmost-row children. Mirrors R/patchwork's ``simplify_gt``
     behaviour where every title row, regardless of nesting depth, lands
     in the super-gtable's row 3.
+
+    ``lift_top`` / ``lift_bottom``: when True, this SuperBlock's first
+    super-top row / last super-bottom row is collapsed to ~0 height
+    because the parent has reserved that space in its OWN top/bottom
+    margin. This makes the inner panel area extend flush to the cell
+    edges so panels align with sibling leaves' panels at the parent
+    level (e.g. ``p1 | (p2 / p3)`` — p2 and p3 panels share top/bottom
+    bounds with p1 because the nested's inner margins are zeroed).
     """
     from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 
@@ -856,10 +866,21 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
     if sb.annot_title_h_in > 0:
         height_ratios.append(sb.annot_title_h_in)
     for r in range(sb.nrow):
+        # When the parent has lifted our top decoration into its own
+        # top-margin (lift_top), zero out our first super-top row so
+        # the panel sits flush at the cell top — matching the parent
+        # leaf siblings whose panels live at the cell top edge.
+        # Same for lift_bottom on the last row.
+        super_top = sb.row_super_top_in[r]
+        super_bottom = sb.row_super_bottom_in[r]
+        if r == 0 and lift_top:
+            super_top = 0.0
+        if r == sb.nrow - 1 and lift_bottom:
+            super_bottom = 0.0
         height_ratios.extend([
-            sb.row_super_top_in[r],
+            super_top,
             sb.panel_h_in[r],
-            sb.row_super_bottom_in[r],
+            super_bottom,
         ])
     if sb.annot_caption_h_in > 0:
         height_ratios.append(sb.annot_caption_h_in)
@@ -920,10 +941,19 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
                 child_top_y = None  # use inner cell's top as usual
 
             if isinstance(blk, SuperBlock):
+                # Forward simplify_gt-style lifting to the nested grid:
+                # if THIS row is the topmost (and we ourselves were
+                # lifted, or we're the outermost SuperBlock with the
+                # outer top-margin row reserving the title space), the
+                # nested's first super-top row collapses to zero.
+                child_lift_top = (r == 0) and (lift_top or outer_top_y is not None or parent_subspec is None)
+                child_lift_bottom = (r == sb.nrow - 1) and (lift_bottom or parent_subspec is None)
                 render_super_block(blk, fig,
                                     parent_subspec=panel_cell,
                                     tag_iter=tag_iter,
-                                    outer_top_y=child_top_y)
+                                    outer_top_y=child_top_y,
+                                    lift_top=child_lift_top,
+                                    lift_bottom=child_lift_bottom)
             else:
                 _render_leaf_cell(child, blk, fig, gs, panel_cell,
                                    right_cell_row, right_cell_col,
