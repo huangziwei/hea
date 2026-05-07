@@ -57,8 +57,16 @@ class GeomBar(Geom):
         edge = r_color(_edge_colour(data))
         alpha = float(_scalar(data, "alpha", default=1.0))
 
-        ax.bar(x, height, width=width, bottom=bottom, color=fill,
-               edgecolor=edge, alpha=alpha, linewidth=0.5, align="center")
+        # Under coord_flip the data has already been x↔y swapped by render:
+        # ``data["x"]`` now holds the *values* (originally y) and
+        # ``data["y"]`` (== ``height`` here) holds the *positions* (originally
+        # x). Use ax.barh so bars extend along the visible x axis.
+        if getattr(ax, "_hea_coord_flipped", False):
+            ax.barh(height, width=x, height=width, left=bottom, color=fill,
+                    edgecolor=edge, alpha=alpha, linewidth=0.5, align="center")
+        else:
+            ax.bar(x, height, width=width, bottom=bottom, color=fill,
+                   edgecolor=edge, alpha=alpha, linewidth=0.5, align="center")
 
 
 def _scalar(df, col, *, default):

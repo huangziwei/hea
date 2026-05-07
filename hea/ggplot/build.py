@@ -94,7 +94,8 @@ def build(plot) -> BuildOutput:
         # Resolve after_stat() now that the stat output is in df.
         df = _apply_deferred(df, after_stat_map, plot.plot_env)
         df = layer.position.compute_layer(df)
-        df = facet.map_data(df, layout)
+        if not getattr(layer, "broadcast_panels", False):
+            df = facet.map_data(df, layout)
         layers_data.append(df)
         deferred_after_stat.append(after_stat_map)
         deferred_after_scale.append(after_scale_map)

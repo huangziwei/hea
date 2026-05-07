@@ -27,3 +27,6 @@ class Layer:
     inherit_aes: bool = True
     show_legend: Any = True
     na_rm: bool = False
+    # Skip facet.map_data so the layer renders on every panel (used by
+    # annotate() and reference geoms that don't have facet variable columns).
+    broadcast_panels: bool = False

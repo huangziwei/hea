@@ -15,7 +15,9 @@ circular-statistics extensions in :mod:`hea.ggplot.circular`.
 from __future__ import annotations
 
 from .aes import aes, after_scale, after_stat
-from .coords import coord_cartesian, coord_fixed
+from .annotate import annotate, annotation_custom
+from .coords import coord_cartesian, coord_fixed, coord_flip, coord_trans
+from .expansion import Expansion, expansion
 from .core import ggplot
 from .facets import facet_grid, facet_wrap
 from .guides import guide_axis, guide_legend, guides
@@ -304,6 +306,8 @@ __all__ = [
     "guides",
     "coord_cartesian",
     "coord_fixed",
+    "coord_flip",
+    "coord_trans",
     "labs",
     "xlab",
     "ylab",
@@ -311,6 +315,10 @@ __all__ = [
     "xlim",
     "ylim",
     "lims",
+    "annotate",
+    "annotation_custom",
+    "expansion",
+    "Expansion",
     "theme",
     "theme_gray",
     "theme_bw",

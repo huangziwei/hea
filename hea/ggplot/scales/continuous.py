@@ -37,6 +37,10 @@ class ScaleContinuous(Scale):
                 ax.set_xlim(self.limits)
             else:
                 ax.set_ylim(self.limits)
+        else:
+            # Honour an Expansion's symmetric multiplicative padding via
+            # matplotlib's margins (asymmetric / additive is polish).
+            self._apply_expansion(ax, axis)
 
         # Reverse: flip after any other limits are settled. matplotlib
         # treats lo>hi as an inverted axis automatically.
@@ -71,6 +75,25 @@ class ScaleContinuous(Scale):
         else:
             ax.set_yticks(breaks)
             ax.set_yticklabels(labels)
+
+    def _apply_expansion(self, ax, axis: str) -> None:
+        from ..expansion import Expansion
+
+        exp = self.expand
+        if isinstance(exp, Expansion):
+            m_lo, m_hi, _a_lo, _a_hi = exp.split()
+            # Symmetric in matplotlib's margins API.
+            mult = max(m_lo, m_hi)
+        elif isinstance(exp, (list, tuple)) and len(exp) >= 1:
+            mult = float(exp[0])
+        else:
+            return
+        if mult <= 0:
+            return
+        if axis == "x":
+            ax.margins(x=mult)
+        else:
+            ax.margins(y=mult)
 
     def _compute_breaks(self, lim):
         if self.breaks == "default":

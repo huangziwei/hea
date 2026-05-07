@@ -19,11 +19,13 @@ import pytest
 from conftest import load_dataset
 
 from hea.ggplot import (
-    aes, after_scale, after_stat, coord_cartesian, coord_fixed, element_blank,
-    element_line, element_rect,
+    aes, after_scale, after_stat, annotate, annotation_custom,
+    coord_cartesian, coord_fixed,
+    coord_flip, coord_trans, expansion,
+    element_blank, element_line, element_rect,
     element_text, facet_grid, facet_wrap, geom_abline, geom_area, geom_bar, geom_blank,
-    geom_boxplot, geom_contour, geom_contour_filled, geom_count, geom_crossbar,
-    geom_curve, geom_density, geom_dotplot, geom_errorbar, geom_errorbarh,
+    geom_boxplot, geom_col, geom_contour, geom_contour_filled, geom_count,
+    geom_crossbar, geom_curve, geom_density, geom_dotplot, geom_errorbar, geom_errorbarh,
     geom_hex, geom_histogram, geom_hline, geom_jitter,
     geom_label, geom_line, geom_linerange, geom_path, geom_point,
     geom_pointrange, geom_polygon, geom_qq, geom_qq_line, geom_raster,
@@ -2976,6 +2978,300 @@ def test_scale_radius_is_continuous_size_alias():
     try:
         # Just checking it draws without errors and produces a scatter.
         assert len(fig.axes[0].collections) >= 1
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.2 — annotate
+# ---------------------------------------------------------------------------
+
+
+def test_annotate_text_at_data_position():
+    """`annotate('text', x=, y=, label=)` adds one matplotlib text artist."""
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 4, 9]})
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + annotate("text", x=2, y=5, label="midpoint"))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        texts = [t.get_text() for t in ax.texts]
+        assert "midpoint" in texts
+    finally:
+        plt.close(fig)
+
+
+def test_annotate_rect_with_fill_alpha():
+    """`annotate('rect', xmin=, xmax=, ymin=, ymax=, fill=, alpha=)`."""
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 4, 9]})
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + annotate("rect", xmin=1.5, xmax=2.5, ymin=2, ymax=6,
+                    fill="red", alpha=0.3))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # Rect produces a PatchCollection.
+        from matplotlib.collections import PatchCollection
+        assert any(isinstance(c, PatchCollection) for c in ax.collections)
+    finally:
+        plt.close(fig)
+
+
+def test_annotate_segment_constants():
+    """`annotate('segment', x, y, xend, yend)` draws one line segment."""
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 4, 9]})
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + annotate("segment", x=1, y=1, xend=3, yend=9, colour="blue"))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # Segment uses LineCollection.
+        from matplotlib.collections import LineCollection
+        assert any(isinstance(c, LineCollection) for c in ax.collections)
+    finally:
+        plt.close(fig)
+
+
+def test_annotate_broadcast_iterables_with_scalars():
+    """Three annotation rows from a 3-element x list and scalar y."""
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + annotate("text", x=[1, 2, 3], y=2, label=["a", "b", "c"]))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        texts = sorted(t.get_text() for t in ax.texts)
+        assert texts == ["a", "b", "c"]
+    finally:
+        plt.close(fig)
+
+
+def test_annotate_renders_on_every_facet_panel():
+    """Annotation broadcasts to every panel (matches ggplot2 behaviour)."""
+    df = pl.DataFrame({
+        "x": [1, 2, 3, 4, 5, 6, 7, 8],
+        "y": [1, 2, 3, 4, 5, 6, 7, 8],
+        "g": ["a", "a", "a", "a", "b", "b", "b", "b"],
+    })
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + facet_wrap("g")
+         + annotate("text", x=3, y=7, label="ANN"))
+    fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        assert len(visible) == 2
+        for a in visible:
+            assert "ANN" in [t.get_text() for t in a.texts]
+    finally:
+        plt.close(fig)
+
+
+def test_annotate_unknown_geom_errors():
+    with pytest.raises(ValueError, match="unknown geom"):
+        annotate("nonexistent", x=1, y=1)
+
+
+def test_annotate_no_aesthetics_errors():
+    with pytest.raises(ValueError, match="at least one aesthetic"):
+        annotate("text")
+
+
+def test_annotate_inconsistent_lengths_error():
+    with pytest.raises(ValueError, match="inconsistent lengths"):
+        annotate("text", x=[1, 2, 3], y=[1, 2], label="a")
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.4 — coord_flip / coord_trans
+# ---------------------------------------------------------------------------
+
+
+def test_coord_flip_swaps_axis_labels():
+    """`coord_flip()` swaps which aes ends up on which axis."""
+    df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [10.0, 5.0, 15.0]})
+    p = (ggplot(df, aes("cat", "val")) + geom_col() + coord_flip())
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # x label is the original y mapping; y label is the original x mapping.
+        assert ax.get_xlabel() == "val"
+        assert ax.get_ylabel() == "cat"
+    finally:
+        plt.close(fig)
+
+
+def test_coord_flip_renders_horizontal_bars():
+    """`geom_col() + coord_flip()` produces bars extending along the x-axis."""
+    df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [10.0, 5.0, 15.0]})
+    p = (ggplot(df, aes("cat", "val")) + geom_col() + coord_flip())
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # x axis range covers the val span (10, 5, 15 → 0..15+).
+        xlim = ax.get_xlim()
+        assert xlim[0] <= 0.0 and xlim[1] >= 15.0
+    finally:
+        plt.close(fig)
+
+
+def test_coord_flip_swaps_scale_application():
+    """A scale set on the x aesthetic applies to the visible y-axis after flip.
+
+    `scale_x_continuous(limits=(0, 5))` constrains the x aes (`cat`'s
+    integer index) — after flip, that constraint shows up on the y-axis.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + scale_x_continuous(limits=(0, 5))
+         + coord_flip())
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # The (0, 5) limits land on the visible y axis.
+        ylim = ax.get_ylim()
+        assert ylim == pytest.approx((0.0, 5.0), abs=1e-9)
+    finally:
+        plt.close(fig)
+
+
+def test_coord_trans_y_log10_sets_matplotlib_scale():
+    """`coord_trans(y='log10')` sets the y axis to a log scale at render."""
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, 3.0, 4.0],
+        "y": [10.0, 100.0, 1000.0, 10000.0],
+    })
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + coord_trans(y="log10"))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_yscale() == "log"
+    finally:
+        plt.close(fig)
+
+
+def test_coord_trans_x_sqrt_uses_function_scale():
+    """`coord_trans(x='sqrt')` registers a function scale on the x axis."""
+    df = pl.DataFrame({
+        "x": [1.0, 4.0, 9.0, 16.0],
+        "y": [1.0, 2.0, 3.0, 4.0],
+    })
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + coord_trans(x="sqrt"))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xscale() in ("function", "functionlog")
+    finally:
+        plt.close(fig)
+
+
+def test_coord_trans_unknown_name_errors():
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + coord_trans(x="bogus"))
+    with pytest.raises(ValueError, match="unknown transform"):
+        p.draw()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.3 — annotation_custom
+# ---------------------------------------------------------------------------
+
+
+def test_annotation_custom_places_artist_at_bounds():
+    """`annotation_custom(rect, xmin, xmax, ymin, ymax)` adds the artist
+    sized to the given bounding box."""
+    from matplotlib.patches import Rectangle
+
+    df = pl.DataFrame({"x": [0.0, 10.0], "y": [0.0, 10.0]})
+    rect = Rectangle((0, 0), 1, 1, color="red", alpha=0.3)
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + annotation_custom(rect, xmin=2, xmax=4, ymin=2, ymax=4))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # The custom rect now sits in the patches list.
+        rects = [p for p in ax.patches if isinstance(p, Rectangle)]
+        assert len(rects) >= 1
+        # Find one whose bounds match what we asked for.
+        match = next((p for p in rects
+                      if abs(p.get_x() - 2) < 1e-6 and abs(p.get_y() - 2) < 1e-6
+                      and abs(p.get_width() - 2) < 1e-6 and abs(p.get_height() - 2) < 1e-6),
+                     None)
+        assert match is not None
+    finally:
+        plt.close(fig)
+
+
+def test_annotation_custom_requires_all_bounds():
+    """`annotation_custom` rejects None bounds — `-Inf`/`Inf` shorthand
+    isn't supported yet."""
+    from matplotlib.patches import Rectangle
+
+    rect = Rectangle((0, 0), 1, 1)
+    with pytest.raises(ValueError, match="must all be set"):
+        annotation_custom(rect, xmin=0, xmax=10, ymin=0)
+
+
+def test_annotation_custom_renders_on_each_facet_panel():
+    """Like `annotate`, the custom artist broadcasts to every panel."""
+    from matplotlib.patches import Rectangle
+
+    df = pl.DataFrame({
+        "x": [0.0, 5.0, 0.0, 5.0],
+        "y": [0.0, 5.0, 0.0, 5.0],
+        "g": ["a", "a", "b", "b"],
+    })
+    rect = Rectangle((0, 0), 1, 1, color="green", alpha=0.2)
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + facet_wrap("g")
+         + annotation_custom(rect, xmin=1, xmax=3, ymin=1, ymax=3))
+    fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        assert len(visible) == 2
+        for a in visible:
+            rects = [p for p in a.patches if isinstance(p, Rectangle)]
+            assert len(rects) >= 1
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.5 — expansion()
+# ---------------------------------------------------------------------------
+
+
+def test_expansion_scalar_split_returns_four_components():
+    e = expansion(mult=0.1, add=0.5)
+    m_lo, m_hi, a_lo, a_hi = e.split()
+    assert m_lo == 0.1 and m_hi == 0.1
+    assert a_lo == 0.5 and a_hi == 0.5
+
+
+def test_expansion_tuple_split_asymmetric():
+    e = expansion(mult=(0.0, 0.2))
+    m_lo, m_hi, _a_lo, _a_hi = e.split()
+    assert m_lo == 0.0 and m_hi == 0.2
+
+
+def test_expansion_invalid_form_errors():
+    with pytest.raises(ValueError, match="expected scalar or"):
+        expansion(mult="not a number").split()
+
+
+def test_expansion_mult_widens_axis_via_margins():
+    """`scale_x_continuous(expand=expansion(mult=0.5))` widens xlim by 50%."""
+    df = pl.DataFrame({"x": [0.0, 10.0], "y": [0.0, 10.0]})
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + scale_x_continuous(expand=expansion(mult=0.5)))
+    fig = p.draw()
+    try:
+        xlim = fig.axes[0].get_xlim()
+        # 50% margin on each side widens the (0, 10) range to (-5, 15).
+        assert xlim[0] == pytest.approx(-5.0, abs=0.5)
+        assert xlim[1] == pytest.approx(15.0, abs=0.5)
     finally:
         plt.close(fig)
 

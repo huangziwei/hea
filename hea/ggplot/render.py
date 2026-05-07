@@ -29,6 +29,12 @@ def render(plot, build_output, ax=None) -> "plt.Figure":
     return _render_facets(plot, build_output, layout)
 
 
+def _is_coord_flip(coord) -> bool:
+    """``coord_flip()`` swaps x↔y at render time. Detect it without
+    importing the class at module load (avoids a circular import)."""
+    return type(coord).__name__ == "CoordFlip"
+
+
 def _render_single(plot, build_output, ax):
     if ax is None:
         fig, ax = plt.subplots()
@@ -37,16 +43,30 @@ def _render_single(plot, build_output, ax):
         fig = ax.figure
         owns_fig = False
 
+    is_flipped = _is_coord_flip(plot.coordinates)
+    # Stash on ax so geoms that need to branch (e.g. GeomBar uses ax.barh
+    # when flipped) can read without a signature change.
+    ax._hea_coord_flipped = is_flipped
+
     for layer, df in zip(plot.layers, build_output.data):
+        if is_flipped:
+            from .coords.flip import flip_columns
+            df = flip_columns(df)
         layer.geom.draw_panel(df, ax)
 
     if build_output.scales is not None:
         for axis in ("x", "y"):
-            sc = build_output.scales.get(axis)
+            # Under coord_flip, the scale registered for the x aesthetic
+            # applies to the visible y axis (and vice versa) — scales bind
+            # to aesthetics, not axes.
+            scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
+            sc = build_output.scales.get(scale_aes)
             if sc is not None:
                 sc.apply_to_axis(ax, axis)
 
     xlabel, ylabel = _default_labels(plot)
+    if is_flipped:
+        xlabel, ylabel = ylabel, xlabel
     if xlabel is not None:
         ax.set_xlabel(xlabel)
     if ylabel is not None:
@@ -78,6 +98,7 @@ def _render_facets(plot, build_output, layout):
     nrow, ncol = facet.grid_dims(n_panels)
 
     sharex, sharey = facet.share_axes()
+    is_flipped = _is_coord_flip(plot.coordinates)
 
     fig, axes = plt.subplots(
         nrow, ncol,
@@ -91,22 +112,28 @@ def _render_facets(plot, build_output, layout):
     for panel_row in layout.iter_rows(named=True):
         idx = panel_row["PANEL"] - 1
         panel_ax = flat_axes[idx]
+        panel_ax._hea_coord_flipped = is_flipped
 
         for layer, df in zip(plot.layers, build_output.data):
             if "PANEL" not in df.columns:
                 panel_data = df
             else:
                 panel_data = df.filter(pl.col("PANEL") == panel_row["PANEL"])
+            if is_flipped:
+                from .coords.flip import flip_columns
+                panel_data = flip_columns(panel_data)
             if len(panel_data) > 0:
                 layer.geom.draw_panel(panel_data, panel_ax)
 
         # Apply positional scales per axis. With sharex/sharey, matplotlib
         # propagates limits across the shared axes, so calling apply_to_axis
         # on each panel is consistent for "fixed" and gives independent
-        # ticks for "free*".
+        # ticks for "free*". Under coord_flip the scales swap axes (the x
+        # aesthetic's scale lands on the visible y axis).
         if build_output.scales is not None:
             for axis in ("x", "y"):
-                sc = build_output.scales.get(axis)
+                scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
+                sc = build_output.scales.get(scale_aes)
                 if sc is not None:
                     sc.apply_to_axis(panel_ax, axis)
 
@@ -129,6 +156,8 @@ def _render_facets(plot, build_output, layout):
     # Common axis labels — set on the figure rather than per-panel so they
     # land in the canonical "outer edge only" position.
     xlabel, ylabel = _default_labels(plot)
+    if is_flipped:
+        xlabel, ylabel = ylabel, xlabel
     if xlabel is not None:
         fig.supxlabel(xlabel)
     if ylabel is not None:
