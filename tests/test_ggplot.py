@@ -21,13 +21,18 @@ from conftest import load_dataset
 from hea.ggplot import (
     aes, after_scale, after_stat, coord_cartesian, coord_fixed, element_blank,
     element_line, element_rect,
-    element_text, facet_wrap, geom_abline, geom_area, geom_bar, geom_blank,
-    geom_boxplot, geom_density, geom_histogram, geom_hline, geom_jitter,
-    geom_label, geom_line, geom_path, geom_point, geom_ribbon, geom_smooth,
-    geom_step, geom_text, geom_violin, geom_vline, ggplot, ggtitle, labs, lims,
+    element_text, facet_grid, facet_wrap, geom_abline, geom_area, geom_bar, geom_blank,
+    geom_boxplot, geom_contour, geom_contour_filled, geom_count, geom_crossbar,
+    geom_curve, geom_density, geom_dotplot, geom_errorbar, geom_errorbarh,
+    geom_hex, geom_histogram, geom_hline, geom_jitter,
+    geom_label, geom_line, geom_linerange, geom_path, geom_point,
+    geom_pointrange, geom_polygon, geom_qq, geom_qq_line, geom_raster,
+    geom_rect, geom_ribbon, geom_segment, geom_smooth,
+    geom_step, geom_text, geom_tile, geom_violin, geom_vline, ggplot, ggtitle,
+    labs, lims,
     position_dodge, position_fill, position_jitter, position_nudge,
-    position_stack, scale_color_hue, scale_fill_hue, stat_function,
-    geom_function,
+    position_stack, scale_color_hue, scale_fill_hue, stat_ecdf, stat_function,
+    stat_qq, stat_qq_line, stat_sum, stat_summary, stat_unique, geom_function,
     scale_alpha_continuous, scale_color_brewer, scale_color_gradient,
     scale_color_gradient2, scale_color_gradientn, scale_color_identity,
     scale_color_manual, scale_color_viridis_c, scale_color_viridis_d,
@@ -1492,6 +1497,947 @@ def test_facet_wrap_preserves_colour_mapping_per_panel():
                     # Multiple colours present in at least one panel
                     # (penguins has multi-species islands).
                     pass
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.1 — facet_grid
+# ---------------------------------------------------------------------------
+
+
+def test_facet_grid_formula_basic():
+    """`facet_grid("am ~ cyl")` produces a 2×3 grid of panels."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + facet_grid("am ~ cyl"))
+    fig = p.draw()
+    try:
+        # 2 am × 3 cyl = 6 panels.
+        visible = [a for a in fig.axes if a.get_visible()]
+        assert len(visible) == 6
+        # Subplot grid is 2 rows × 3 cols.
+        rows = {a.get_subplotspec().rowspan.start for a in visible}
+        cols = {a.get_subplotspec().colspan.start for a in visible}
+        assert rows == {0, 1}
+        assert cols == {0, 1, 2}
+    finally:
+        plt.close(fig)
+
+
+def test_facet_grid_kwargs_form():
+    """`facet_grid(rows="am", cols="cyl")` matches the formula form."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p1 = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+          + facet_grid("am ~ cyl"))
+    p2 = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+          + facet_grid(rows="am", cols="cyl"))
+    fig1 = p1.draw()
+    fig2 = p2.draw()
+    try:
+        v1 = [a for a in fig1.axes if a.get_visible()]
+        v2 = [a for a in fig2.axes if a.get_visible()]
+        assert len(v1) == len(v2) == 6
+    finally:
+        plt.close(fig1)
+        plt.close(fig2)
+
+
+def test_facet_grid_row_only():
+    """`facet_grid("am ~ .")` → single column, 2 rows."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + facet_grid("am ~ ."))
+    fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        assert len(visible) == 2
+        cols = {a.get_subplotspec().colspan.start for a in visible}
+        assert cols == {0}
+    finally:
+        plt.close(fig)
+
+
+def test_facet_grid_col_only():
+    """`facet_grid(". ~ cyl")` → single row, 3 columns."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + facet_grid(". ~ cyl"))
+    fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        assert len(visible) == 3
+        rows = {a.get_subplotspec().rowspan.start for a in visible}
+        assert rows == {0}
+    finally:
+        plt.close(fig)
+
+
+def test_facet_grid_strip_labels_top_and_right():
+    """Top strip on row 0 (col values); right strip on last col (row values)."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + facet_grid("am ~ cyl"))
+    fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        # Top strip: only row 0 panels have non-empty titles (col values).
+        for a in visible:
+            row = a.get_subplotspec().rowspan.start
+            title = a.get_title()
+            if row == 0:
+                # Titles match the cyl values.
+                assert title in {"4", "6", "8"}
+            else:
+                assert title == ""
+
+        # Right strip: only last-column panels have a right-side text annotation
+        # (rendered via ax.text with transform=transAxes).
+        for a in visible:
+            col = a.get_subplotspec().colspan.start
+            right_texts = [t for t in a.texts
+                           if t.get_transform() == a.transAxes
+                           and t.get_position()[0] > 1.0]
+            if col == 2:  # last column
+                assert len(right_texts) == 1
+                assert right_texts[0].get_text() in {"0", "1"}
+            else:
+                assert len(right_texts) == 0
+    finally:
+        plt.close(fig)
+
+
+def test_facet_grid_scales_fixed_shares_all():
+    """``scales="fixed"`` (default): every panel shares xlim and ylim."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + facet_grid("am ~ cyl"))
+    fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        xlims = {tuple(a.get_xlim()) for a in visible}
+        ylims = {tuple(a.get_ylim()) for a in visible}
+        assert len(xlims) == 1
+        assert len(ylims) == 1
+    finally:
+        plt.close(fig)
+
+
+def test_facet_grid_scales_free_x_shares_within_column():
+    """``scales="free_x"``: x varies between columns, shared within."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + facet_grid("am ~ cyl", scales="free_x"))
+    fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        # Group panels by column: panels in the same column share xlim,
+        # different columns can have different xlims.
+        by_col: dict[int, set] = {}
+        for a in visible:
+            col = a.get_subplotspec().colspan.start
+            by_col.setdefault(col, set()).add(tuple(round(v, 6) for v in a.get_xlim()))
+        # Each column should have a single xlim (panels within share).
+        for col_xlims in by_col.values():
+            assert len(col_xlims) == 1
+        # Across columns, at least two distinct xlims.
+        all_xlims = {next(iter(s)) for s in by_col.values()}
+        assert len(all_xlims) >= 2
+
+        # y stays shared across all panels.
+        ylims = {tuple(round(v, 6) for v in a.get_ylim()) for a in visible}
+        assert len(ylims) == 1
+    finally:
+        plt.close(fig)
+
+
+def test_facet_grid_scales_free_y_shares_within_row():
+    """``scales="free_y"``: y varies between rows, shared within."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + facet_grid("am ~ cyl", scales="free_y"))
+    fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        by_row: dict[int, set] = {}
+        for a in visible:
+            row = a.get_subplotspec().rowspan.start
+            by_row.setdefault(row, set()).add(tuple(round(v, 6) for v in a.get_ylim()))
+        for row_ylims in by_row.values():
+            assert len(row_ylims) == 1
+
+        xlims = {tuple(round(v, 6) for v in a.get_xlim()) for a in visible}
+        assert len(xlims) == 1
+    finally:
+        plt.close(fig)
+
+
+def test_facet_grid_per_panel_stat_fit():
+    """Stat (e.g. lm smooth) fits per facet cell, not pooled.
+
+    Uses ``vs ~ am`` (4 cells, all with enough rows for lm) — ``am ~ cyl``
+    has a 2-row cell which lm can't fit (df_residual = 0).
+    """
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point() + geom_smooth(method="lm")
+         + facet_grid("vs ~ am"))
+    fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        assert len(visible) == 4
+        # Each panel has its own scatter + ribbon + line.
+        for a in visible:
+            assert len(a.lines) == 1
+            assert len(a.collections) == 2  # scatter + ribbon
+        # Slopes should differ across panels.
+        slopes = []
+        for a in visible:
+            xy = a.lines[0].get_xydata()
+            if len(xy) >= 2:
+                slopes.append((xy[-1, 1] - xy[0, 1]) / (xy[-1, 0] - xy[0, 0]))
+        assert len(set(round(s, 3) for s in slopes)) >= 2
+    finally:
+        plt.close(fig)
+
+
+def test_facet_grid_multi_var_rows():
+    """`facet_grid(rows=["am", "vs"], cols="cyl")` — two-var row grouping."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + facet_grid(rows=["am", "vs"], cols="cyl"))
+    fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        # mtcars: am × vs has 4 unique combos × 3 cyl = 12 cells in the grid,
+        # but not every combo appears in mtcars.
+        combos = mtcars.select(["am", "vs"]).unique()
+        n_row = len(combos)
+        # All 12 panels rendered (grid_dims is the full cross).
+        assert len(visible) == n_row * 3
+    finally:
+        plt.close(fig)
+
+
+def test_facet_grid_formula_and_kwargs_conflict_errors():
+    with pytest.raises(ValueError, match="either a formula or"):
+        facet_grid("am ~ cyl", rows="am")
+
+
+def test_facet_grid_bad_formula_errors():
+    with pytest.raises(ValueError, match="must be 'rows ~ cols'"):
+        facet_grid("am cyl")  # missing ~
+
+
+def test_facet_grid_empty_both_sides_errors():
+    with pytest.raises(ValueError, match="at least one of"):
+        facet_grid(". ~ .")
+
+
+def test_facet_grid_unknown_scales_value_errors():
+    with pytest.raises(ValueError, match="scales must be one of"):
+        facet_grid("am ~ cyl", scales="weird")
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.4 — geom_rect, geom_tile, geom_raster, geom_polygon
+# ---------------------------------------------------------------------------
+
+
+def test_geom_rect_two_rectangles():
+    """`geom_rect` with two non-overlapping rectangles."""
+    df = pl.DataFrame({
+        "xmin": [0.0, 2.0], "xmax": [1.0, 3.0],
+        "ymin": [0.0, 2.0], "ymax": [1.0, 3.0],
+    })
+    p = ggplot(df) + geom_rect(
+        aes(xmin="xmin", xmax="xmax", ymin="ymin", ymax="ymax"),
+        fill="red",
+    )
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert len(ax.collections) == 1
+        # The collection holds 2 patches (one per row).
+        coll = ax.collections[0]
+        assert len(coll.get_paths()) == 2
+        # Axes auto-scale to cover the rectangles.
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+        assert xlim[0] <= 0.0 and xlim[1] >= 3.0
+        assert ylim[0] <= 0.0 and ylim[1] >= 3.0
+    finally:
+        plt.close(fig)
+
+
+def test_geom_rect_per_row_fills():
+    """Distinct fill column → per-row colours."""
+    df = pl.DataFrame({
+        "xmin": [0.0, 2.0], "xmax": [1.0, 3.0],
+        "ymin": [0.0, 0.0], "ymax": [1.0, 1.0],
+        "fill": ["#ff0000", "#00ff00"],
+    })
+    p = ggplot(df) + geom_rect(
+        aes(xmin="xmin", xmax="xmax", ymin="ymin", ymax="ymax", fill="fill"),
+    ) + scale_fill_identity()
+    fig = p.draw()
+    try:
+        coll = fig.axes[0].collections[0]
+        facecolors = coll.get_facecolors()
+        # Two distinct colours.
+        assert len(facecolors) == 2
+        # First is reddish, second is greenish.
+        assert facecolors[0][0] > 0.9 and facecolors[0][1] < 0.1
+        assert facecolors[1][1] > 0.9 and facecolors[1][0] < 0.1
+    finally:
+        plt.close(fig)
+
+
+def test_geom_tile_centres_with_default_unit_size():
+    """Tiles centred on (x,y) with default 1×1 size span [x-0.5, x+0.5]."""
+    df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 0.0]})
+    p = ggplot(df) + geom_tile(aes(x="x", y="y"), fill="red")
+    fig = p.draw()
+    try:
+        coll = fig.axes[0].collections[0]
+        # Two tiles → two paths.
+        assert len(coll.get_paths()) == 2
+        # First tile: vertices in [-0.5, 0.5] x [-0.5, 0.5].
+        verts = coll.get_paths()[0].vertices
+        import numpy as np
+        assert np.isclose(verts[:, 0].min(), -0.5)
+        assert np.isclose(verts[:, 0].max(), 0.5)
+    finally:
+        plt.close(fig)
+
+
+def test_geom_tile_with_explicit_width_height():
+    """`width`/`height` aesthetics override the unit default."""
+    df = pl.DataFrame({"x": [0.0], "y": [0.0],
+                       "width": [4.0], "height": [2.0]})
+    p = ggplot(df) + geom_tile(aes(x="x", y="y", width="width", height="height"),
+                                fill="red")
+    fig = p.draw()
+    try:
+        coll = fig.axes[0].collections[0]
+        verts = coll.get_paths()[0].vertices
+        import numpy as np
+        # Tile spans [-2, 2] in x, [-1, 1] in y.
+        assert np.isclose(verts[:, 0].min(), -2.0)
+        assert np.isclose(verts[:, 0].max(), 2.0)
+        assert np.isclose(verts[:, 1].min(), -1.0)
+        assert np.isclose(verts[:, 1].max(), 1.0)
+    finally:
+        plt.close(fig)
+
+
+def test_geom_raster_uses_imshow_on_regular_grid():
+    """A regular x/y grid renders via ax.imshow rather than per-cell patches."""
+    import numpy as np
+    xs, ys = np.meshgrid(range(4), range(3))
+    df = pl.DataFrame({
+        "x": xs.ravel(),
+        "y": ys.ravel(),
+        "fill": ["#" + format(i * 100, "06x") for i in range(12)],
+    })
+    p = ggplot(df) + geom_raster(aes(x="x", y="y", fill="fill")) + scale_fill_identity()
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # imshow lives in ax.images, not ax.collections.
+        assert len(ax.images) == 1
+        # Image extent matches the cell-centred grid: x in [-0.5, 3.5], y in [-0.5, 2.5].
+        ext = ax.images[0].get_extent()
+        assert np.isclose(ext[0], -0.5) and np.isclose(ext[1], 3.5)
+        assert np.isclose(ext[2], -0.5) and np.isclose(ext[3], 2.5)
+    finally:
+        plt.close(fig)
+
+
+def test_geom_raster_falls_back_to_tile_on_irregular():
+    """Non-regular grid → fall back to the tile (PatchCollection) path."""
+    df = pl.DataFrame({
+        "x": [0.0, 1.0, 3.0],  # gap at x=2 → not uniform
+        "y": [0.0, 0.0, 0.0],
+        "fill": ["#ff0000", "#00ff00", "#0000ff"],
+    })
+    p = ggplot(df) + geom_raster(aes(x="x", y="y", fill="fill")) + scale_fill_identity()
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # Should not produce an image; should fall back to patches.
+        assert len(ax.images) == 0
+        assert len(ax.collections) == 1
+    finally:
+        plt.close(fig)
+
+
+def test_geom_polygon_basic_triangle():
+    """Three-vertex polygon renders as one closed shape."""
+    df = pl.DataFrame({"x": [0.0, 1.0, 0.5], "y": [0.0, 0.0, 1.0]})
+    p = ggplot(df) + geom_polygon(aes(x="x", y="y"), fill="blue")
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert len(ax.collections) == 1
+        coll = ax.collections[0]
+        assert len(coll.get_paths()) == 1
+        # Closed polygon: 4 vertices listed (last = first).
+        verts = coll.get_paths()[0].vertices
+        import numpy as np
+        assert verts.shape[0] == 4
+        assert np.allclose(verts[0], verts[-1])
+    finally:
+        plt.close(fig)
+
+
+def test_geom_polygon_multi_group():
+    """Two groups → two distinct polygons in one collection."""
+    df = pl.DataFrame({
+        "x": [0.0, 1.0, 0.5,  3.0, 4.0, 3.5],
+        "y": [0.0, 0.0, 1.0,  0.0, 0.0, 1.0],
+        "group": [1, 1, 1, 2, 2, 2],
+    })
+    p = ggplot(df) + geom_polygon(aes(x="x", y="y", group="group"), fill="green")
+    fig = p.draw()
+    try:
+        coll = fig.axes[0].collections[0]
+        assert len(coll.get_paths()) == 2
+    finally:
+        plt.close(fig)
+
+
+def test_geom_polygon_skips_groups_with_under_three_vertices():
+    """A 2-vertex group can't form a polygon; it gets skipped silently."""
+    df = pl.DataFrame({
+        "x": [0.0, 1.0,  3.0, 4.0, 3.5],  # group 1: 2 vertices, group 2: 3 vertices
+        "y": [0.0, 0.0,  0.0, 0.0, 1.0],
+        "group": [1, 1, 2, 2, 2],
+    })
+    p = ggplot(df) + geom_polygon(aes(x="x", y="y", group="group"), fill="red")
+    fig = p.draw()
+    try:
+        coll = fig.axes[0].collections[0]
+        # Only group 2 (the triangle) renders.
+        assert len(coll.get_paths()) == 1
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.5 — geom_errorbar / errorbarh / linerange / pointrange / crossbar
+# ---------------------------------------------------------------------------
+
+
+def _df_xy_range():
+    return pl.DataFrame({
+        "x": [1.0, 2.0, 3.0],
+        "y": [5.0, 6.0, 7.0],
+        "ymin": [4.5, 5.5, 6.5],
+        "ymax": [5.5, 6.5, 7.5],
+    })
+
+
+def test_geom_linerange_three_lines_no_caps():
+    """`geom_linerange` produces a single vertical-lines collection, no caps."""
+    df = _df_xy_range()
+    p = ggplot(df) + geom_linerange(aes(x="x", ymin="ymin", ymax="ymax"))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # Single LineCollection from vlines.
+        assert len(ax.collections) == 1
+        # 3 segments, one per row.
+        segs = ax.collections[0].get_segments()
+        assert len(segs) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_geom_errorbar_main_line_plus_two_caps():
+    """`geom_errorbar` draws three collections: main line + top cap + bottom cap."""
+    df = _df_xy_range()
+    p = ggplot(df) + geom_errorbar(aes(x="x", ymin="ymin", ymax="ymax"))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # 3 LineCollections total.
+        assert len(ax.collections) == 3
+        # Each cap collection has one horizontal segment per data row.
+        for coll in ax.collections:
+            assert len(coll.get_segments()) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_geom_errorbar_width_controls_cap_span():
+    """`width=` controls the horizontal span of the caps."""
+    df = _df_xy_range()
+    p = ggplot(df) + geom_errorbar(aes(x="x", ymin="ymin", ymax="ymax"), width=0.2)
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # The cap collections have segments whose endpoints span x ± 0.1.
+        # First collection is vertical (vlines); cap collections are 2nd & 3rd.
+        cap_coll = ax.collections[1]
+        seg = cap_coll.get_segments()[0]
+        # seg is a 2-row array (start, end).
+        import numpy as np
+        span = abs(seg[1][0] - seg[0][0])
+        assert np.isclose(span, 0.2)
+    finally:
+        plt.close(fig)
+
+
+def test_geom_errorbarh_horizontal_form():
+    """`geom_errorbarh` swaps axes: line is horizontal, caps vertical."""
+    df = pl.DataFrame({
+        "y": [1.0, 2.0, 3.0],
+        "xmin": [1.0, 2.0, 3.0],
+        "xmax": [2.0, 3.0, 4.0],
+    })
+    p = ggplot(df) + geom_errorbarh(aes(y="y", xmin="xmin", xmax="xmax"))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # Same 3-collection structure (horizontal line + 2 vertical caps).
+        assert len(ax.collections) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_geom_pointrange_line_plus_point():
+    """`geom_pointrange` = linerange + scatter point at (x, y)."""
+    df = _df_xy_range()
+    p = ggplot(df) + geom_pointrange(aes(x="x", y="y", ymin="ymin", ymax="ymax"))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # 1 LineCollection (vlines) + 1 PathCollection (scatter).
+        assert len(ax.collections) == 2
+        # Scatter has 3 points.
+        scat = ax.collections[1]
+        assert len(scat.get_offsets()) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_geom_crossbar_box_plus_median():
+    """`geom_crossbar` draws four box edges plus a thicker median line."""
+    df = _df_xy_range()
+    p = ggplot(df) + geom_crossbar(aes(x="x", y="y", ymin="ymin", ymax="ymax"))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # 5 collections: top, bottom, left, right, median.
+        assert len(ax.collections) == 5
+        # Median (last) line width is 2× the others.
+        median_lw = ax.collections[4].get_linewidth()[0]
+        edge_lw = ax.collections[0].get_linewidth()[0]
+        import numpy as np
+        assert np.isclose(median_lw, edge_lw * 2)
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.6 — geom_segment, geom_curve
+# ---------------------------------------------------------------------------
+
+
+def test_geom_segment_three_segments():
+    """`geom_segment` packs all rows into a single LineCollection."""
+    df = pl.DataFrame({
+        "x": [0.0, 1.0, 2.0],
+        "y": [0.0, 0.0, 0.0],
+        "xend": [1.0, 2.0, 3.0],
+        "yend": [1.0, 1.0, 1.0],
+    })
+    p = ggplot(df) + geom_segment(aes(x="x", y="y", xend="xend", yend="yend"))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert len(ax.collections) == 1
+        segs = ax.collections[0].get_segments()
+        assert len(segs) == 3
+        # First segment endpoints.
+        import numpy as np
+        assert np.allclose(segs[0], [[0.0, 0.0], [1.0, 1.0]])
+    finally:
+        plt.close(fig)
+
+
+def test_geom_segment_per_row_colours():
+    """Mapping ``colour=`` to a discrete column produces per-row colours."""
+    df = pl.DataFrame({
+        "x": [0.0, 1.0],
+        "y": [0.0, 0.0],
+        "xend": [1.0, 2.0],
+        "yend": [1.0, 1.0],
+        "g": ["a", "b"],
+    })
+    p = (ggplot(df)
+         + geom_segment(aes(x="x", y="y", xend="xend", yend="yend", colour="g"))
+         + scale_color_manual(values=["#ff0000", "#00ff00"]))
+    fig = p.draw()
+    try:
+        coll = fig.axes[0].collections[0]
+        colours = coll.get_colors()
+        assert len(colours) == 2
+        # Different RGBA per segment.
+        import numpy as np
+        assert not np.allclose(colours[0], colours[1])
+    finally:
+        plt.close(fig)
+
+
+def test_geom_curve_basic():
+    """`geom_curve` renders one FancyArrowPatch per row."""
+    df = pl.DataFrame({
+        "x": [0.0, 1.0],
+        "y": [0.0, 0.0],
+        "xend": [1.0, 2.0],
+        "yend": [1.0, 1.0],
+    })
+    p = ggplot(df) + geom_curve(aes(x="x", y="y", xend="xend", yend="yend"))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # Two FancyArrowPatch instances, one per row.
+        from matplotlib.patches import FancyArrowPatch
+        curve_patches = [p for p in ax.patches if isinstance(p, FancyArrowPatch)]
+        assert len(curve_patches) == 2
+    finally:
+        plt.close(fig)
+
+
+def test_geom_curve_curvature_kwarg_controls_arc():
+    """``curvature`` kwarg flows through to the connectionstyle."""
+    df = pl.DataFrame({
+        "x": [0.0], "y": [0.0], "xend": [1.0], "yend": [1.0],
+    })
+    p = ggplot(df) + geom_curve(aes(x="x", y="y", xend="xend", yend="yend"),
+                                curvature=0.8)
+    fig = p.draw()
+    try:
+        from matplotlib.patches import FancyArrowPatch
+        patch = next(p for p in fig.axes[0].patches if isinstance(p, FancyArrowPatch))
+        # connectionstyle keeps the rad parameter we passed.
+        cs = patch.get_connectionstyle()
+        assert getattr(cs, "rad", None) == 0.8
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.7 — stat_summary
+# ---------------------------------------------------------------------------
+
+
+def _summary_test_df():
+    return pl.DataFrame({
+        "x": [1, 1, 1, 2, 2, 2, 3, 3, 3],
+        "y": [10.0, 12.0, 11.0, 15.0, 16.0, 14.0, 20.0, 22.0, 21.0],
+    })
+
+
+def test_stat_summary_default_is_mean_se_pointrange():
+    """Default ``stat_summary()`` = mean ± 1 SE rendered as pointrange."""
+    df = _summary_test_df()
+    p = ggplot(df, aes("x", "y")) + stat_summary()
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # Pointrange: linerange (vlines collection) + scatter (point collection).
+        assert len(ax.collections) == 2
+        # The point centres are the means: x=1 → 11, x=2 → 15, x=3 → 21.
+        offsets = ax.collections[1].get_offsets()
+        import numpy as np
+        np.testing.assert_array_almost_equal(
+            sorted(offsets.tolist()), [[1.0, 11.0], [2.0, 15.0], [3.0, 21.0]]
+        )
+    finally:
+        plt.close(fig)
+
+
+def test_stat_summary_mean_cl_normal_errorbar():
+    """``fun_data='mean_cl_normal'`` produces normal-CI bounds; geom='errorbar'
+    renders the line + caps."""
+    df = _summary_test_df()
+    p = (ggplot(df, aes("x", "y"))
+         + stat_summary(fun_data="mean_cl_normal", geom="errorbar"))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # errorbar: 3 LineCollections (vline + 2 caps).
+        assert len(ax.collections) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_stat_summary_componentwise_min_max_median():
+    """Componentwise ``fun=median, fun_min=min, fun_max=max`` works."""
+    df = _summary_test_df()
+    p = (ggplot(df, aes("x", "y"))
+         + stat_summary(fun="median", fun_min="min", fun_max="max"))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # pointrange
+        offsets = ax.collections[1].get_offsets()
+        import numpy as np
+        # x=1: median=11, min=10, max=12; same shape across x.
+        np.testing.assert_array_almost_equal(
+            sorted(offsets.tolist()), [[1.0, 11.0], [2.0, 15.0], [3.0, 21.0]]
+        )
+        # vlines extents match (min..max) per x.
+        segs = ax.collections[0].get_segments()
+        # Sort by x for deterministic order.
+        segs_sorted = sorted(segs, key=lambda s: s[0][0])
+        np.testing.assert_array_almost_equal(segs_sorted[0], [[1.0, 10.0], [1.0, 12.0]])
+        np.testing.assert_array_almost_equal(segs_sorted[1], [[2.0, 14.0], [2.0, 16.0]])
+        np.testing.assert_array_almost_equal(segs_sorted[2], [[3.0, 20.0], [3.0, 22.0]])
+    finally:
+        plt.close(fig)
+
+
+def test_stat_summary_median_hilow():
+    """``fun_data='median_hilow'`` matches numpy quantiles at conf=0.95."""
+    import numpy as np
+    df = _summary_test_df()
+    p = ggplot(df, aes("x", "y")) + stat_summary(fun_data="median_hilow")
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        offsets = ax.collections[1].get_offsets()
+        # Centre is median.
+        for x_val, expected_med in [(1, 11.0), (2, 15.0), (3, 21.0)]:
+            row = next(o for o in offsets if abs(o[0] - x_val) < 1e-9)
+            assert abs(row[1] - expected_med) < 1e-9
+    finally:
+        plt.close(fig)
+
+
+def test_stat_summary_bootstrap_with_seed_is_deterministic():
+    """Bootstrap CI with explicit seed is reproducible across runs."""
+    import numpy as np
+    df = _summary_test_df()
+    p1 = (ggplot(df, aes("x", "y"))
+          + stat_summary(fun_data="mean_cl_boot", fun_args={"seed": 7}))
+    p2 = (ggplot(df, aes("x", "y"))
+          + stat_summary(fun_data="mean_cl_boot", fun_args={"seed": 7}))
+    fig1 = p1.draw()
+    fig2 = p2.draw()
+    try:
+        seg1 = fig1.axes[0].collections[0].get_segments()
+        seg2 = fig2.axes[0].collections[0].get_segments()
+        for s1, s2 in zip(seg1, seg2):
+            np.testing.assert_array_almost_equal(s1, s2)
+    finally:
+        plt.close(fig1)
+        plt.close(fig2)
+
+
+def test_stat_summary_unknown_fun_data_errors():
+    df = _summary_test_df()
+    p = ggplot(df, aes("x", "y")) + stat_summary(fun_data="bogus_summary")
+    with pytest.raises(ValueError, match="unknown summary"):
+        p.draw()
+
+
+def test_stat_summary_unknown_geom_errors():
+    with pytest.raises(ValueError, match="unknown geom"):
+        stat_summary(geom="weirdo")
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.9 — qq, qq_line, ecdf, unique, sum/count, contour, hex, dotplot
+# ---------------------------------------------------------------------------
+
+
+def test_stat_qq_against_normal_quantiles():
+    """`stat_qq()` produces sorted (theoretical, sample) pairs against the
+    standard normal."""
+    import numpy as np
+    rng = np.random.default_rng(0)
+    df = pl.DataFrame({"v": rng.normal(size=200)})
+    p = ggplot(df, aes(sample="v")) + stat_qq()
+    fig = p.draw()
+    try:
+        coll = fig.axes[0].collections[0]
+        offsets = coll.get_offsets()
+        # Points are sorted by x (theoretical quantile).
+        xs = offsets[:, 0]
+        assert np.all(np.diff(xs) >= -1e-9)
+        # x-range covers ~ [-2.6, 2.6] for n=200 standard normal quantiles.
+        assert xs.min() < -2.0 and xs.max() > 2.0
+    finally:
+        plt.close(fig)
+
+
+def test_stat_qq_line_two_endpoints():
+    """`stat_qq_line()` returns a single line drawn over the theoretical x range."""
+    import numpy as np
+    rng = np.random.default_rng(1)
+    df = pl.DataFrame({"v": rng.normal(size=100)})
+    p = ggplot(df, aes(sample="v")) + stat_qq() + stat_qq_line()
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # qq_line uses GeomPath → one line in ax.lines.
+        assert len(ax.lines) == 1
+        line = ax.lines[0]
+        xy = line.get_xydata()
+        # Line is monotone increasing in x.
+        assert xy[1, 0] > xy[0, 0]
+    finally:
+        plt.close(fig)
+
+
+def test_geom_qq_alias_matches_stat_qq():
+    """`geom_qq()` is just `stat_qq()` — same output."""
+    import numpy as np
+    rng = np.random.default_rng(2)
+    df = pl.DataFrame({"v": rng.normal(size=50)})
+    p1 = ggplot(df, aes(sample="v")) + stat_qq()
+    p2 = ggplot(df, aes(sample="v")) + geom_qq()
+    fig1 = p1.draw()
+    fig2 = p2.draw()
+    try:
+        o1 = fig1.axes[0].collections[0].get_offsets()
+        o2 = fig2.axes[0].collections[0].get_offsets()
+        assert np.allclose(o1, o2)
+    finally:
+        plt.close(fig1)
+        plt.close(fig2)
+
+
+def test_stat_ecdf_basic_step_to_one():
+    """`stat_ecdf()` produces a step function from 0 to 1."""
+    import numpy as np
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0]})
+    p = ggplot(df, aes("x")) + stat_ecdf()
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        line = ax.lines[0]
+        xs, ys = line.get_xdata(), line.get_ydata()
+        assert ys[0] == pytest.approx(0.2, abs=1e-9)
+        assert ys[-1] == pytest.approx(1.0, abs=1e-9)
+        # ys is non-decreasing.
+        assert np.all(np.diff(ys) >= -1e-9)
+    finally:
+        plt.close(fig)
+
+
+def test_stat_unique_drops_duplicates():
+    """`stat_unique()` collapses repeated rows before geom_point."""
+    df = pl.DataFrame({
+        "x": [1.0, 1.0, 1.0, 2.0, 2.0, 3.0],
+        "y": [1.0, 1.0, 1.0, 2.0, 2.0, 3.0],
+    })
+    p = ggplot(df, aes("x", "y")) + stat_unique()
+    fig = p.draw()
+    try:
+        offsets = fig.axes[0].collections[0].get_offsets()
+        # 6 rows → 3 unique pairs.
+        assert len(offsets) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_geom_count_size_scales_with_multiplicity():
+    """`geom_count()` sizes points by `(x, y)` multiplicity."""
+    df = pl.DataFrame({
+        "x": [1, 1, 1, 2, 2, 3],
+        "y": [1, 1, 1, 2, 2, 3],
+    })
+    p = ggplot(df, aes("x", "y")) + geom_count()
+    fig = p.draw()
+    try:
+        coll = fig.axes[0].collections[0]
+        # 3 unique (x,y) combinations.
+        assert len(coll.get_offsets()) == 3
+        # Sizes are not all equal — multiplicity shows up.
+        sizes = coll.get_sizes()
+        assert len(set(sizes.tolist())) >= 2
+    finally:
+        plt.close(fig)
+
+
+def test_geom_contour_on_regular_grid():
+    """`geom_contour` produces iso-lines on a 2D Gaussian grid."""
+    import numpy as np
+    xs, ys = np.meshgrid(np.linspace(-3, 3, 20), np.linspace(-3, 3, 20))
+    zs = np.exp(-(xs**2 + ys**2) / 2)
+    df = pl.DataFrame({"x": xs.ravel(), "y": ys.ravel(), "z": zs.ravel()})
+    p = ggplot(df) + geom_contour(aes(x="x", y="y", z="z"), bins=8)
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # contour produces a LineCollection (multiple iso-line paths).
+        assert len(ax.collections) >= 1
+    finally:
+        plt.close(fig)
+
+
+def test_geom_contour_filled_on_regular_grid():
+    """`geom_contour_filled` produces filled bands."""
+    import numpy as np
+    xs, ys = np.meshgrid(np.linspace(-3, 3, 20), np.linspace(-3, 3, 20))
+    zs = np.exp(-(xs**2 + ys**2) / 2)
+    df = pl.DataFrame({"x": xs.ravel(), "y": ys.ravel(), "z": zs.ravel()})
+    p = ggplot(df) + geom_contour_filled(aes(x="x", y="y", z="z"), bins=6)
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert len(ax.collections) >= 1
+    finally:
+        plt.close(fig)
+
+
+def test_geom_contour_irregular_grid_errors():
+    """A grid with missing cells (count mismatch) is rejected."""
+    # 3 unique x × 2 unique y = 6 cells, but only 5 rows present.
+    df = pl.DataFrame({
+        "x": [0.0, 1.0, 2.0, 0.0, 1.0],
+        "y": [0.0, 0.0, 0.0, 1.0, 1.0],
+        "z": [1.0, 2.0, 3.0, 4.0, 5.0],
+    })
+    with pytest.raises(ValueError, match="regular .x, y. grid"):
+        ggplot(df).__add__(geom_contour(aes(x="x", y="y", z="z"))).draw()
+
+
+def test_geom_hex_renders_polycollection():
+    """`geom_hex()` adds a hexbin polycollection to the axes."""
+    import numpy as np
+    rng = np.random.default_rng(0)
+    df = pl.DataFrame({"x": rng.normal(size=300), "y": rng.normal(size=300)})
+    p = ggplot(df, aes("x", "y")) + geom_hex(bins=15)
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # hexbin produces a PolyCollection.
+        from matplotlib.collections import PolyCollection
+        assert any(isinstance(c, PolyCollection) for c in ax.collections)
+    finally:
+        plt.close(fig)
+
+
+def test_geom_dotplot_stacks_within_bin():
+    """`geom_dotplot()` produces one scatter point per data row, stacked
+    vertically within each bin."""
+    import numpy as np
+    df = pl.DataFrame({"x": [1.0] * 5 + [2.0] * 3 + [3.0] * 1})
+    p = ggplot(df, aes("x")) + geom_dotplot()
+    fig = p.draw()
+    try:
+        coll = fig.axes[0].collections[0]
+        # 9 dots total.
+        assert len(coll.get_offsets()) == 9
+        # Dots at x=1 stack to 5 distinct y values.
+        offs = coll.get_offsets()
+        x1 = [o for o in offs if abs(o[0] - 1.0) < 0.5]
+        assert len({round(o[1], 6) for o in x1}) == 5
     finally:
         plt.close(fig)
 

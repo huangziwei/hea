@@ -73,8 +73,7 @@ def _render_facets(plot, build_output, layout):
     n_panels = len(layout)
     nrow, ncol = facet.grid_dims(n_panels)
 
-    sharex = facet.scales in ("fixed", "free_y")
-    sharey = facet.scales in ("fixed", "free_x")
+    sharex, sharey = facet.share_axes()
 
     fig, axes = plt.subplots(
         nrow, ncol,
@@ -107,13 +106,17 @@ def _render_facets(plot, build_output, layout):
                 if sc is not None:
                     sc.apply_to_axis(panel_ax, axis)
 
-        # Strip label = facet variable values (joined with ", " for multi-facet).
-        strip_text = ", ".join(
-            f"{panel_row[v]}" for v in facet.facet_vars()
-            if v in panel_row
-        )
-        if strip_text:
-            panel_ax.set_title(strip_text)
+        labels = facet.panel_labels(panel_row, layout)
+        if labels.get("top"):
+            panel_ax.set_title(labels["top"])
+        if labels.get("right"):
+            # Right-side strip: vertical text outside the right edge,
+            # rotated to read top-to-bottom (ggplot2's strip.text.y default).
+            panel_ax.text(
+                1.02, 0.5, labels["right"],
+                transform=panel_ax.transAxes,
+                rotation=-90, ha="left", va="center",
+            )
 
     # Hide unused panels (when the grid has more cells than panels).
     for unused_ax in flat_axes[n_panels:]:

@@ -7,7 +7,7 @@ DataFrame ready for :func:`render.render`.
 
 Real scale training, position adjustment, coord transformation, and
 faceting come in Phase 1 (checklist 1.1, 1.3, 1.7, plus polar in
-Phase 2).
+Phase 6).
 """
 
 from __future__ import annotations

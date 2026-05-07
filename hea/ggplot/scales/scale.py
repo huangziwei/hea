@@ -49,7 +49,7 @@ def fmt_number(x: float) -> str:
 
     Phase 1.1 form: integer if exact, otherwise ``%g``. Full
     ``scales::label_number`` parity (thousands separators, accuracy=,
-    big.mark, etc.) lands in Phase 5 alongside guides.
+    big.mark, etc.) lands in Phase 3 alongside guides.
     """
     if x == int(x):
         return str(int(x))
