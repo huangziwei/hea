@@ -57,6 +57,12 @@ def _render_single(plot, build_output, ax):
 
     _apply_theme(plot.theme, fig, [ax], owns_fig=owns_fig)
 
+    # Coord-level overrides (e.g. ``coord_cartesian(xlim=...)``) must beat
+    # scale-level limits, so apply after both scales and theme have run.
+    apply = getattr(plot.coordinates, "apply_to_axes", None)
+    if apply is not None:
+        apply(ax)
+
     if owns_fig:
         fig.tight_layout()
     return fig
@@ -123,6 +129,11 @@ def _render_facets(plot, build_output, layout):
 
     _apply_plot_titles(plot, fig)
     _apply_theme(plot.theme, fig, list(flat_axes[:n_panels]), owns_fig=True)
+
+    apply = getattr(plot.coordinates, "apply_to_axes", None)
+    if apply is not None:
+        for panel_ax in flat_axes[:n_panels]:
+            apply(panel_ax)
 
     fig.tight_layout()
     return fig

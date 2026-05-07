@@ -7,9 +7,10 @@ from .density import geom_density
 from .histogram import geom_histogram
 from .path import geom_line, geom_path, geom_step
 from .point import geom_jitter, geom_point
+from .refline import geom_abline, geom_hline, geom_vline
 from .ribbon import geom_area, geom_ribbon
 from .smooth import geom_smooth
-from .text import geom_text
+from .text import geom_label, geom_text
 from .violin import geom_violin
 
 __all__ = [
@@ -29,4 +30,8 @@ __all__ = [
     "geom_boxplot",
     "geom_violin",
     "geom_text",
+    "geom_label",
+    "geom_hline",
+    "geom_vline",
+    "geom_abline",
 ]

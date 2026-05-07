@@ -15,6 +15,7 @@ circular-statistics extensions in :mod:`hea.ggplot.circular`.
 from __future__ import annotations
 
 from .aes import aes, after_scale, after_stat
+from .coords import coord_cartesian, coord_fixed
 from .core import ggplot
 from .facets import facet_wrap
 from .labels import ggtitle, labs, xlab, ylab
@@ -32,6 +33,7 @@ from .theme import (
     theme_void,
 )
 from .geoms import (
+    geom_abline,
     geom_area,
     geom_bar,
     geom_blank,
@@ -39,7 +41,9 @@ from .geoms import (
     geom_col,
     geom_density,
     geom_histogram,
+    geom_hline,
     geom_jitter,
+    geom_label,
     geom_line,
     geom_path,
     geom_point,
@@ -48,6 +52,7 @@ from .geoms import (
     geom_step,
     geom_text,
     geom_violin,
+    geom_vline,
 )
 from .positions import (
     position_dodge,
@@ -69,6 +74,7 @@ from .scales import (
     scale_color_gradient,
     scale_color_gradient2,
     scale_color_gradientn,
+    scale_color_hue,
     scale_color_identity,
     scale_color_manual,
     scale_color_viridis_c,
@@ -79,6 +85,7 @@ from .scales import (
     scale_colour_gradient,
     scale_colour_gradient2,
     scale_colour_gradientn,
+    scale_colour_hue,
     scale_colour_identity,
     scale_colour_manual,
     scale_colour_viridis_c,
@@ -89,6 +96,7 @@ from .scales import (
     scale_fill_gradient,
     scale_fill_gradient2,
     scale_fill_gradientn,
+    scale_fill_hue,
     scale_fill_identity,
     scale_fill_manual,
     scale_fill_viridis_c,
@@ -115,10 +123,12 @@ from .scales import (
     ylim,
 )
 from .stats import (
+    geom_function,
     stat_bin,
     stat_boxplot,
     stat_count,
     stat_density,
+    stat_function,
     stat_identity,
     stat_smooth,
     stat_ydensity,
@@ -145,6 +155,10 @@ __all__ = [
     "geom_boxplot",
     "geom_violin",
     "geom_text",
+    "geom_label",
+    "geom_hline",
+    "geom_vline",
+    "geom_abline",
     "stat_identity",
     "stat_bin",
     "stat_count",
@@ -152,6 +166,8 @@ __all__ = [
     "stat_smooth",
     "stat_boxplot",
     "stat_ydensity",
+    "stat_function",
+    "geom_function",
     "scale_x_continuous",
     "scale_y_continuous",
     "scale_x_log10",
@@ -189,6 +205,9 @@ __all__ = [
     "scale_color_brewer",
     "scale_colour_brewer",
     "scale_fill_brewer",
+    "scale_color_hue",
+    "scale_colour_hue",
+    "scale_fill_hue",
     "scale_color_distiller",
     "scale_colour_distiller",
     "scale_fill_distiller",
@@ -204,6 +223,8 @@ __all__ = [
     "scale_linetype",
     "scale_linetype_manual",
     "facet_wrap",
+    "coord_cartesian",
+    "coord_fixed",
     "labs",
     "xlab",
     "ylab",

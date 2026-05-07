@@ -2,6 +2,7 @@ from .bin import StatBin, stat_bin
 from .boxplot import StatBoxplot, stat_boxplot
 from .count import StatCount, stat_count
 from .density import StatDensity, stat_density
+from .function import geom_function, stat_function
 from .identity import StatIdentity, stat_identity
 from .smooth import StatSmooth, stat_smooth
 from .stat import Stat
@@ -45,5 +46,6 @@ __all__ = [
     "StatSmooth", "stat_smooth",
     "StatBoxplot", "stat_boxplot",
     "StatYdensity", "stat_ydensity",
+    "stat_function", "geom_function",
     "resolve_stat",
 ]

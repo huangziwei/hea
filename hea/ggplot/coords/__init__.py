@@ -1,3 +1,3 @@
-from .cartesian import CoordCartesian, coord_cartesian
+from .cartesian import CoordCartesian, CoordFixed, coord_cartesian, coord_fixed
 
-__all__ = ["CoordCartesian", "coord_cartesian"]
+__all__ = ["CoordCartesian", "CoordFixed", "coord_cartesian", "coord_fixed"]

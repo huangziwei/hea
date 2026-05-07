@@ -170,3 +170,30 @@ def scale_fill_brewer(*, palette="Set1", direction=1, name=None,
 
 
 scale_colour_brewer = scale_color_brewer
+
+
+# ---------------------------------------------------------------------------
+# Default qualitative palette — equally-spaced HCL hues (ggplot2's default).
+# ---------------------------------------------------------------------------
+
+def scale_color_hue(*, h=(15, 375), c=100, l=65, h_start=0, direction=1,
+                    name=None, breaks="default", labels="default", limits=None):
+    """Equally-spaced HCL hues. ggplot2's default discrete-colour palette;
+    explicit form lets you tune chroma / lightness / hue range."""
+    return ScaleDiscreteColor(
+        aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
+        limits=limits,
+        palette=hue_pal(h=h, c=c, l=l, h_start=h_start, direction=direction),
+    )
+
+
+def scale_fill_hue(*, h=(15, 375), c=100, l=65, h_start=0, direction=1,
+                   name=None, breaks="default", labels="default", limits=None):
+    return ScaleDiscreteColor(
+        aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
+        limits=limits,
+        palette=hue_pal(h=h, c=c, l=l, h_start=h_start, direction=direction),
+    )
+
+
+scale_colour_hue = scale_color_hue

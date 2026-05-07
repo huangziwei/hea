@@ -19,12 +19,15 @@ import pytest
 from conftest import load_dataset
 
 from hea.ggplot import (
-    aes, after_scale, after_stat, element_blank, element_line, element_rect,
-    element_text, facet_wrap, geom_area, geom_bar, geom_blank, geom_boxplot,
-    geom_density, geom_histogram, geom_jitter, geom_line, geom_path,
-    geom_point, geom_ribbon, geom_smooth, geom_step, geom_text, geom_violin,
-    ggplot, ggtitle, labs, lims, position_dodge, position_fill,
-    position_jitter, position_nudge, position_stack,
+    aes, after_scale, after_stat, coord_cartesian, coord_fixed, element_blank,
+    element_line, element_rect,
+    element_text, facet_wrap, geom_abline, geom_area, geom_bar, geom_blank,
+    geom_boxplot, geom_density, geom_histogram, geom_hline, geom_jitter,
+    geom_label, geom_line, geom_path, geom_point, geom_ribbon, geom_smooth,
+    geom_step, geom_text, geom_violin, geom_vline, ggplot, ggtitle, labs, lims,
+    position_dodge, position_fill, position_jitter, position_nudge,
+    position_stack, scale_color_hue, scale_fill_hue, stat_function,
+    geom_function,
     scale_alpha_continuous, scale_color_brewer, scale_color_gradient,
     scale_color_gradient2, scale_color_gradientn, scale_color_identity,
     scale_color_manual, scale_color_viridis_c, scale_color_viridis_d,
@@ -2163,3 +2166,369 @@ def test_xlim_fluent_method_form():
         assert ax.get_ylim() == pytest.approx((0, 50))
     finally:
         plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Reference-line geoms — geom_hline / geom_vline / geom_abline
+# ---------------------------------------------------------------------------
+
+def test_geom_hline_single_intercept():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + geom_hline(yintercept=20)
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert len(ax.lines) == 1
+        ydata = ax.lines[0].get_ydata()
+        assert ydata[0] == pytest.approx(20)
+        assert ydata[1] == pytest.approx(20)
+    finally:
+        plt.close(fig)
+
+
+def test_geom_hline_multiple_intercepts():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + geom_hline(yintercept=[10, 20, 30])
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert len(ax.lines) == 3
+        ys = sorted(ln.get_ydata()[0] for ln in ax.lines)
+        assert ys == pytest.approx([10, 20, 30])
+    finally:
+        plt.close(fig)
+
+
+def test_geom_vline_single_intercept():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + geom_vline(xintercept=3.5)
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert len(ax.lines) == 1
+        xdata = ax.lines[0].get_xdata()
+        assert xdata[0] == pytest.approx(3.5)
+    finally:
+        plt.close(fig)
+
+
+def test_geom_abline_default_slope_intercept():
+    """``geom_abline()`` defaults to y = x."""
+    df = pl.DataFrame({"x": [0.0, 1.0, 2.0], "y": [0.0, 1.0, 2.0]})
+    p = ggplot(df, aes("x", "y")) + geom_point() + geom_abline()
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert len(ax.lines) == 1
+        # ``axline`` stores its anchor + slope on private attrs; xdata/ydata
+        # are placeholder [0,1] in matplotlib regardless of the line.
+        ln = ax.lines[0]
+        assert ln._xy1 == (0.0, 0.0)
+        assert ln._slope == pytest.approx(1.0)
+    finally:
+        plt.close(fig)
+
+
+def test_geom_abline_custom_slope_intercept():
+    df = pl.DataFrame({"x": [0.0, 1.0, 2.0], "y": [0.0, 1.0, 2.0]})
+    p = ggplot(df, aes("x", "y")) + geom_point() + geom_abline(slope=2, intercept=1)
+    fig = p.draw()
+    try:
+        ln = fig.axes[0].lines[0]
+        assert ln._xy1 == (0.0, 1.0)
+        assert ln._slope == pytest.approx(2.0)
+    finally:
+        plt.close(fig)
+
+
+def test_geom_hline_aes_params_apply_colour_and_linetype():
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
+    p = ggplot(df, aes("x", "y")) + geom_point() + geom_hline(
+        yintercept=[1.5, 2.5], colour="red", linetype="dashed",
+    )
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert len(ax.lines) == 2
+        for ln in ax.lines:
+            assert ln.get_linestyle() == "--"
+            # matplotlib normalises colour names.
+            from matplotlib.colors import to_rgba
+            assert to_rgba(ln.get_color()) == to_rgba("red")
+    finally:
+        plt.close(fig)
+
+
+def test_geom_abline_broadcasts_scalar_against_iterable():
+    """Common case: many intercepts, one slope. Scalar broadcasts."""
+    df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0]})
+    p = ggplot(df, aes("x", "y")) + geom_point() + geom_abline(slope=1, intercept=[0, 1, 2])
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert len(ax.lines) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_geom_abline_mismatched_lengths_errors():
+    with pytest.raises(ValueError, match="same length"):
+        geom_abline(slope=[1, 2], intercept=[0, 1, 2])
+
+
+def test_geom_hline_does_not_inherit_main_data():
+    """The line layer must not pull rows from the plot's main data — its
+    own length is exactly the number of intercepts."""
+    mtcars = load_dataset("datasets", "mtcars")  # 32 rows
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + geom_hline(yintercept=20)
+    fig = p.draw()
+    try:
+        # One scatter (PathCollection) for points, one line (Line2D) for hline.
+        ax = fig.axes[0]
+        assert len(ax.lines) == 1
+    finally:
+        plt.close(fig)
+
+
+def test_geom_hline_fluent_form():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")).geom_point().geom_hline(yintercept=20)
+    fig = p.draw()
+    try:
+        assert len(fig.axes[0].lines) == 1
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Coords — coord_cartesian, coord_fixed
+# ---------------------------------------------------------------------------
+
+def test_coord_cartesian_default_is_no_op():
+    mtcars = load_dataset("datasets", "mtcars")
+    p_no_coord = ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+    p_default_coord = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + coord_cartesian()
+    f1 = p_no_coord.draw(); f2 = p_default_coord.draw()
+    try:
+        assert f1.axes[0].get_xlim() == pytest.approx(f2.axes[0].get_xlim())
+        assert f1.axes[0].get_ylim() == pytest.approx(f2.axes[0].get_ylim())
+    finally:
+        plt.close(f1); plt.close(f2)
+
+
+def test_coord_cartesian_xlim_zooms_axis():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + coord_cartesian(xlim=(0, 10))
+    fig = p.draw()
+    try:
+        assert fig.axes[0].get_xlim() == pytest.approx((0, 10))
+    finally:
+        plt.close(fig)
+
+
+def test_coord_cartesian_overrides_scale_limits():
+    """Coord-level limits beat scale-level (ggplot2 semantics — coord wins)."""
+    from hea.ggplot import xlim as gg_xlim
+    mtcars = load_dataset("datasets", "mtcars")
+    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
+         + gg_xlim(0, 5)
+         + coord_cartesian(xlim=(0, 10)))
+    fig = p.draw()
+    try:
+        assert fig.axes[0].get_xlim() == pytest.approx((0, 10))
+    finally:
+        plt.close(fig)
+
+
+def test_coord_fixed_sets_aspect_ratio():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + coord_fixed(ratio=2)
+    fig = p.draw()
+    try:
+        assert fig.axes[0].get_aspect() == pytest.approx(2.0)
+    finally:
+        plt.close(fig)
+
+
+def test_coord_fixed_default_ratio_is_one():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + coord_fixed()
+    fig = p.draw()
+    try:
+        assert fig.axes[0].get_aspect() == pytest.approx(1.0)
+    finally:
+        plt.close(fig)
+
+
+def test_coord_fixed_with_xlim():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + coord_fixed(ratio=1, xlim=(0, 10))
+    fig = p.draw()
+    try:
+        assert fig.axes[0].get_xlim() == pytest.approx((0, 10))
+        assert fig.axes[0].get_aspect() == pytest.approx(1.0)
+    finally:
+        plt.close(fig)
+
+
+def test_coord_cartesian_fluent_form():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")).geom_point().coord_cartesian(xlim=(0, 10))
+    fig = p.draw()
+    try:
+        assert fig.axes[0].get_xlim() == pytest.approx((0, 10))
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# scale_color_hue / scale_fill_hue — explicit form of ggplot2's default qual palette
+# ---------------------------------------------------------------------------
+
+def test_scale_color_hue_assigns_distinct_colors_per_level():
+    df = pl.DataFrame({
+        "x": [1, 2, 3, 4],
+        "y": [1, 2, 3, 4],
+        "g": ["a", "b", "c", "d"],
+    })
+    p = ggplot(df, aes("x", "y", color="g")) + geom_point() + scale_color_hue()
+    fig = p.draw()
+    try:
+        sc = fig.axes[0].collections[0]
+        # 4 distinct levels → 4 distinct colours.
+        from matplotlib.colors import to_hex
+        rgba = sc.get_facecolors()
+        hexes = {to_hex(c) for c in rgba}
+        assert len(hexes) == 4
+    finally:
+        plt.close(fig)
+
+
+def test_scale_color_hue_direction_reverses_palette():
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3], "g": ["a", "b", "c"]})
+    p_fwd = ggplot(df, aes("x", "y", color="g")) + geom_point() + scale_color_hue()
+    p_rev = ggplot(df, aes("x", "y", color="g")) + geom_point() + scale_color_hue(direction=-1)
+    f1 = p_fwd.draw(); f2 = p_rev.draw()
+    try:
+        from matplotlib.colors import to_hex
+        c1 = [to_hex(c) for c in f1.axes[0].collections[0].get_facecolors()]
+        c2 = [to_hex(c) for c in f2.axes[0].collections[0].get_facecolors()]
+        assert c1 == c2[::-1]
+    finally:
+        plt.close(f1); plt.close(f2)
+
+
+# ---------------------------------------------------------------------------
+# geom_label — geom_text + background bbox
+# ---------------------------------------------------------------------------
+
+def test_geom_label_renders_text_with_bbox():
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0], "lbl": ["A", "B"]})
+    p = ggplot(df, aes("x", "y", label="lbl")) + geom_label()
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        texts = ax.texts
+        assert len(texts) == 2
+        # Each text artist should have an associated bbox patch — that's the
+        # difference from geom_text.
+        for t in texts:
+            assert t.get_bbox_patch() is not None
+    finally:
+        plt.close(fig)
+
+
+def test_geom_label_fill_kwarg_sets_bbox_facecolor():
+    df = pl.DataFrame({"x": [1.0], "y": [1.0], "lbl": ["A"]})
+    p = ggplot(df, aes("x", "y", label="lbl")) + geom_label(fill="yellow")
+    fig = p.draw()
+    try:
+        bbox = fig.axes[0].texts[0].get_bbox_patch()
+        from matplotlib.colors import to_rgba
+        assert to_rgba(bbox.get_facecolor()) == to_rgba("yellow")
+    finally:
+        plt.close(fig)
+
+
+def test_geom_label_fluent_form():
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0], "lbl": ["A", "B"]})
+    p = ggplot(df, aes("x", "y", label="lbl")).geom_label()
+    fig = p.draw()
+    try:
+        assert len(fig.axes[0].texts) == 2
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# stat_function / geom_function — y = f(x) curves
+# ---------------------------------------------------------------------------
+
+def test_stat_function_explicit_xlim():
+    """``xlim`` directly determines the sampled x range."""
+    import numpy as np
+    df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0]})
+    p = ggplot(df, aes("x", "y")) + stat_function(fun=lambda x: x ** 2, xlim=(-2, 2), n=51)
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # One Line2D for the function curve.
+        assert len(ax.lines) == 1
+        xs = ax.lines[0].get_xdata()
+        ys = ax.lines[0].get_ydata()
+        assert len(xs) == 51
+        assert float(np.min(xs)) == pytest.approx(-2.0)
+        assert float(np.max(xs)) == pytest.approx(2.0)
+        # y = x^2: each y matches its x squared.
+        for x, y in zip(xs, ys):
+            assert y == pytest.approx(x ** 2)
+    finally:
+        plt.close(fig)
+
+
+def test_stat_function_uses_main_data_xrange_when_xlim_omitted():
+    import numpy as np
+    df = pl.DataFrame({"x": [0.0, 5.0], "y": [0.0, 25.0]})
+    p = ggplot(df, aes("x", "y")) + stat_function(fun=lambda x: 2 * x, n=11)
+    fig = p.draw()
+    try:
+        xs = fig.axes[0].lines[0].get_xdata()
+        assert float(np.min(xs)) == pytest.approx(0.0)
+        assert float(np.max(xs)) == pytest.approx(5.0)
+    finally:
+        plt.close(fig)
+
+
+def test_stat_function_passes_args_through():
+    """``args=`` provides additional positional args to ``fun``."""
+    df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0]})
+    p = ggplot(df, aes("x", "y")) + stat_function(
+        fun=lambda x, a, b: a * x + b, xlim=(0, 1), n=11, args=(2, 3),
+    )
+    fig = p.draw()
+    try:
+        xs = fig.axes[0].lines[0].get_xdata()
+        ys = fig.axes[0].lines[0].get_ydata()
+        for x, y in zip(xs, ys):
+            assert y == pytest.approx(2 * x + 3)
+    finally:
+        plt.close(fig)
+
+
+def test_geom_function_alias():
+    """``geom_function`` and ``stat_function(geom='line')`` produce equivalent layers."""
+    df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0]})
+    p1 = ggplot(df, aes("x", "y")) + geom_function(fun=lambda x: x, xlim=(0, 1), n=10)
+    p2 = ggplot(df, aes("x", "y")) + stat_function(fun=lambda x: x, xlim=(0, 1), n=10, geom="line")
+    f1, f2 = p1.draw(), p2.draw()
+    try:
+        xs1 = f1.axes[0].lines[0].get_xdata()
+        xs2 = f2.axes[0].lines[0].get_xdata()
+        assert list(xs1) == pytest.approx(list(xs2))
+    finally:
+        plt.close(f1); plt.close(f2)
+
+
+def test_stat_function_unknown_geom_errors():
+    with pytest.raises(ValueError, match="unknown geom"):
+        stat_function(fun=lambda x: x, geom="bogus")
