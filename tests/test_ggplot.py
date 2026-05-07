@@ -3520,15 +3520,18 @@ def test_patchwork_plus_composes_two_plots():
 
 
 def test_patchwork_plus_chain_flattens_into_one_grid():
-    """`p1 + p2 + p3` flattens into a single 3-cell grid (not nested)."""
+    """`p1 + p2 + p3` flattens into a single 3-cell grid (not nested).
+
+    Auto-layout for n=3 is ``(1, 3)`` per ggplot2's ``wrap_dims`` (which
+    uses ``grDevices::n2mfrow`` for n ≤ 12) — not ``ceil(sqrt)``-style 2×2.
+    """
     p1, p2 = _two_simple_plots()
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})
     p3 = ggplot(df, aes("x", "y")) + geom_point()
     g = p1 + p2 + p3
     assert g.direction == "grid"
     assert len(g.children) == 3
-    # n=3 auto-layout → 2×2 (one cell empty).
-    assert g._dims() == (2, 2)
+    assert g._dims() == (1, 3)
 
 
 def test_patchwork_plus_layer_still_adds_layer():
@@ -4395,30 +4398,31 @@ def test_xlab_ylab_shortcuts():
         plt.close(fig)
 
 
-def test_ggtitle_sets_suptitle():
+def test_ggtitle_sets_axes_title_left_aligned():
+    """``ggtitle("Cars")`` lands on the top-left axes via ``set_title(loc='left')``
+    so it aligns with the panel's left edge (matches ggplot2 default
+    ``plot.title hjust=0``), not the figure edge."""
     mtcars = load_dataset("datasets", "mtcars")
     p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + ggtitle("Cars")
     fig = p.draw()
     try:
-        assert fig._suptitle is not None
-        assert fig._suptitle.get_text() == "Cars"
+        ax = fig.axes[0]
+        # The 'left' title slot on an axes — that's where ggplot2's title goes.
+        assert ax.get_title(loc="left") == "Cars"
     finally:
         plt.close(fig)
 
 
 def test_ggtitle_with_subtitle_renders_both():
-    """Title + subtitle pack into a single multi-line ``fig.suptitle`` so
-    matplotlib's ``constrained_layout`` reserves one block of space for both
-    — separate text artists at adjacent y values overlapped inside SubFigures."""
+    """Title + subtitle pack into one multi-line label on the top-left
+    axes' left title slot."""
     mtcars = load_dataset("datasets", "mtcars")
     p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + ggtitle("Cars", subtitle="MTcars data")
     fig = p.draw()
     try:
-        suptitle_text = fig._suptitle.get_text()
-        assert "Cars" in suptitle_text
-        assert "MTcars data" in suptitle_text
-        # Two lines, in order.
-        assert suptitle_text.split("\n") == ["Cars", "MTcars data"]
+        ax = fig.axes[0]
+        title_text = ax.get_title(loc="left")
+        assert title_text.split("\n") == ["Cars", "MTcars data"]
     finally:
         plt.close(fig)
 
@@ -4531,7 +4535,7 @@ def test_labs_fluent_method_form():
         ax = fig.axes[0]
         assert ax.get_xlabel() == "W"
         assert ax.get_ylabel() == "M"
-        assert fig._suptitle.get_text() == "T"
+        assert ax.get_title(loc="left") == "T"
     finally:
         plt.close(fig)
 

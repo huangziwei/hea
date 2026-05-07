@@ -168,9 +168,7 @@ class PlotGrid:
         if nrow is not None and ncol is not None:
             return (nrow, ncol)
         if nrow is None and ncol is None:
-            ncol = int(ceil(sqrt(n)))
-            nrow = int(ceil(n / ncol))
-            return (nrow, ncol)
+            return _wrap_dims(n)
         if ncol is None:
             return (nrow, int(ceil(n / nrow)))
         return (int(ceil(n / ncol)), ncol)
@@ -201,16 +199,16 @@ class PlotGrid:
         # ``constrained_layout`` is the only matplotlib auto-layout that
         # composes correctly across SubFigure boundaries — it reserves
         # vertical space for each child's suptitle/strip labels so they
-        # don't pile on top of each other (the visible bug in ex5 of the
-        # patchwork doc walkthrough).
+        # don't pile on top of each other.
         fig = plt.figure(figsize=default_figsize, constrained_layout=True)
-        # Use SubFigures (not subgridspec) so each child plot's supxlabel/
-        # supylabel scopes to its own region rather than the entire figure.
-        # SubFigure has the same API surface as Figure for our needs.
-        tag_iter = self._make_tag_iter()
-        self._draw_into(fig, tag_iter=tag_iter)
+        # Apply the figure-level annotation BEFORE creating SubFigures so
+        # constrained_layout knows the suptitle is there and shrinks the
+        # subfigure region to make room. Otherwise the figure suptitle
+        # collides with the per-plot suptitles inside each SubFigure.
         if self.annotation is not None:
             self._apply_figure_annotation(fig)
+        tag_iter = self._make_tag_iter()
+        self._draw_into(fig, tag_iter=tag_iter)
         _resize_figure(fig, width=width, height=height, units=units,
                        figsize=figsize)
         return fig
@@ -476,9 +474,32 @@ def plot_annotation(*, title=None, subtitle=None, caption=None,
     )
 
 
+def _wrap_dims(n: int) -> tuple[int, int]:
+    """Port of ggplot2's ``wrap_dims(n)`` default — which calls R's
+    ``grDevices::n2mfrow`` and transposes so the result is ``(nrow, ncol)``.
+
+    Special cases for small n preferred in R (more aesthetically balanced
+    than blind ``ceil(sqrt)``):
+
+    * n ≤ 3 → ``(1, n)`` (single row)
+    * 4 ≤ n ≤ 6 → ``(2, ceil(n/2))``
+    * 7 ≤ n ≤ 12 → ``(3, ceil(n/3))``
+    * n > 12 → ``(ceil(sqrt(n)), ceil(sqrt(n)))``
+    """
+    if n <= 3:
+        return (1, n)
+    if n <= 6:
+        return (2, (n + 1) // 2)
+    if n <= 12:
+        return (3, (n + 2) // 3)
+    from math import ceil as _ceil, sqrt as _sqrt
+    side = int(_ceil(_sqrt(n)))
+    return (side, side)
+
+
 def _attach_tag(subfig, tag: str) -> None:
-    """Place a bold tag at the upper-left of a SubFigure (patchwork's
-    ``tag_levels`` rendering)."""
+    """Place a bold tag at the upper-left of the SubFigure (patchwork's
+    ``tag_levels`` position)."""
     subfig.text(
         0.02, 0.98, tag,
         fontsize="large", fontweight="bold",

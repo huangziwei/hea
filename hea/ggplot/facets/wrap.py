@@ -34,9 +34,17 @@ class FacetWrap(Facet):
         if nrow is not None and ncol is not None:
             return (nrow, ncol)
         if ncol is None and nrow is None:
-            ncol = int(ceil(sqrt(n_panels)))
-            nrow = int(ceil(n_panels / ncol))
-            return (nrow, ncol)
+            # Match ggplot2's ``wrap_dims`` default — calls R's
+            # ``grDevices::n2mfrow`` and transposes. Special cases for
+            # small n preferred in R: n=3 → 1 row × 3 cols (not 2×2).
+            if n_panels <= 3:
+                return (1, n_panels)
+            if n_panels <= 6:
+                return (2, (n_panels + 1) // 2)
+            if n_panels <= 12:
+                return (3, (n_panels + 2) // 3)
+            side = int(ceil(sqrt(n_panels)))
+            return (side, side)
         if ncol is None:
             return (nrow, int(ceil(n_panels / nrow)))
         return (int(ceil(n_panels / ncol)), ncol)

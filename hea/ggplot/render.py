@@ -92,7 +92,7 @@ def _render_single(plot, build_output, ax, subplotspec=None, parent=None):
         ax.set_ylabel(ylabel)
 
     if owns_fig:
-        _apply_plot_titles(plot, fig)
+        _apply_plot_titles(plot, fig, ax_list=[ax])
 
     _apply_theme(plot.theme, fig, [ax], owns_fig=owns_fig)
 
@@ -203,7 +203,7 @@ def _render_facets(plot, build_output, layout, subplotspec=None, parent=None):
         fig.supylabel(ylabel)
 
     if owns_fig:
-        _apply_plot_titles(plot, fig)
+        _apply_plot_titles(plot, fig, ax_list=list(flat_axes[:n_panels]))
     _apply_theme(plot.theme, fig, list(flat_axes[:n_panels]), owns_fig=owns_fig)
 
     apply = getattr(plot.coordinates, "apply_to_axes", None)
@@ -265,26 +265,49 @@ def _apply_panel_background(theme, ax) -> None:
 
 
 def _apply_grid(theme, ax) -> None:
+    """Draw major / minor gridlines from ``panel.grid.*`` theme elements.
+
+    We do **not** enable matplotlib's minor ticks here. ggplot2's default
+    minor gridlines are technically present but rendered invisibly small,
+    so visually R only ever shows major gridlines. matplotlib renders
+    minor gridlines crisply once minor ticks are on, which would then
+    over-paint the panel. Skip the minor pass unless the theme explicitly
+    sets a non-blank ``panel.grid.minor`` AND we're on a transformed
+    scale (log/sqrt), where matplotlib's locator generates minor ticks
+    on its own.
+    """
     from ..plot._util import r_lty
 
-    for which, key in (("major", "panel.grid.major"), ("minor", "panel.grid.minor")):
-        elem = theme.get(key)
-        if elem is None:
-            elem = theme.get("panel.grid")
-        if isinstance(elem, element_blank):
-            ax.grid(False, which=which)
-            continue
-        if not isinstance(elem, element_line):
-            continue
-        if which == "minor":
-            # matplotlib only draws minor gridlines if minor ticks are on.
-            ax.minorticks_on()
+    elem = theme.get("panel.grid.major")
+    if elem is None:
+        elem = theme.get("panel.grid")
+    if isinstance(elem, element_blank):
+        ax.grid(False, which="major")
+    elif isinstance(elem, element_line):
         ax.grid(
-            True,
-            which=which,
+            True, which="major",
             color=r_color(elem.colour) or "white",
             linewidth=(elem.size or 0.5) * _PT_PER_MM,
             linestyle=r_lty(elem.linetype) if elem.linetype else "-",
+            zorder=0,
+        )
+
+    minor = theme.get("panel.grid.minor")
+    if minor is None:
+        minor = theme.get("panel.grid")
+    if isinstance(minor, element_blank):
+        ax.grid(False, which="minor")
+        return
+    # On linear scales, matplotlib won't show minor gridlines without
+    # minor ticks — and turning those on visually pollutes the axis.
+    # Only render minor gridlines when the locator already supplies minor
+    # ticks (log/symlog/function scales auto-supply them).
+    if isinstance(minor, element_line) and ax.get_xscale() != "linear":
+        ax.grid(
+            True, which="minor",
+            color=r_color(minor.colour) or "white",
+            linewidth=(minor.size or 0.25) * _PT_PER_MM,
+            linestyle=r_lty(minor.linetype) if minor.linetype else "-",
             zorder=0,
         )
 
@@ -484,31 +507,74 @@ def _default_labels(plot):
     return xlabel, ylabel
 
 
-def _apply_plot_titles(plot, fig) -> None:
+def _apply_plot_titles(plot, fig, ax_list=None) -> None:
     """Render ``title`` / ``subtitle`` / ``caption`` from ``plot.labels``.
 
-    When both title and subtitle are set, they're packed into a single
-    ``suptitle`` as two lines so matplotlib's ``constrained_layout`` reserves
-    one block of space for both — avoiding the overlap that happens when
-    ``suptitle`` and a separate ``fig.text`` artist sit at adjacent y values
-    inside a SubFigure.
+    Single-panel plots: ``ax.set_title(loc='left')`` on the (sole) axes so
+    the title aligns with the panel's left edge.
 
-    Theme styling for ``plot.title``/``plot.subtitle``/``plot.caption`` is
-    not wired — matplotlib defaults apply.
+    Faceted plots: ``fig.suptitle`` on the SubFigure with ``x=0.05, ha='left'``
+    — the strip labels (``ax.set_title``) and the plot title would collide
+    on the same row otherwise. ``constrained_layout`` reserves vertical
+    space for the suptitle automatically.
+
+    Caption is figure-level (footer).
     """
     title = plot.labels.get("title")
     subtitle = plot.labels.get("subtitle")
     caption = plot.labels.get("caption")
+
+    title_text = None
     if title is not None and subtitle is not None:
-        # Multi-line suptitle. ggplot2 styles the subtitle smaller/lighter;
-        # we don't yet, so both lines share the suptitle's font.
-        fig.suptitle(f"{title}\n{subtitle}", fontsize="large")
+        title_text = f"{title}\n{subtitle}"
     elif title is not None:
-        fig.suptitle(str(title))
+        title_text = str(title)
     elif subtitle is not None:
-        # Subtitle alone — no title to align under, so just put it where
-        # the title would have gone.
-        fig.suptitle(str(subtitle))
+        title_text = str(subtitle)
+
+    if title_text is not None:
+        is_faceted = ax_list is not None and len(ax_list) > 1
+        loc = _title_loc(plot.theme, "plot.title", default_hjust=0.0)
+        if is_faceted:
+            # On a faceted plot the strip labels (``ax.set_title``) occupy
+            # the y=1.0 axes-coord slot above each panel. We need the plot
+            # title on its own row *above* those strips. Setting the title
+            # on the top-left axes with ``y=1.15`` clears the strip row
+            # (strip + a little padding ≈ 15% of axes height).
+            target_ax = ax_list[0]
+            target_ax.set_title(title_text, loc=loc, y=1.15)
+        else:
+            target_ax = (ax_list or fig.axes)[0]
+            target_ax.set_title(title_text, loc=loc)
+
     if caption is not None:
-        fig.text(0.99, 0.01, str(caption), ha="right", va="bottom",
+        x, ha = _caption_x_ha(plot.theme)
+        fig.text(x, 0.01, str(caption), ha=ha, va="bottom",
                  fontsize="small", style="italic")
+
+
+def _title_loc(theme, element_key: str, *, default_hjust: float) -> str:
+    """Map a theme element's ``hjust`` to ``ax.set_title``'s ``loc=``."""
+    elem = theme.get(element_key)
+    hjust = default_hjust
+    if isinstance(elem, element_text) and elem.hjust is not None:
+        hjust = float(elem.hjust)
+    if hjust <= 0.0:
+        return "left"
+    if hjust >= 1.0:
+        return "right"
+    return "center"
+
+
+def _caption_x_ha(theme) -> tuple:
+    """``plot.caption`` is figure-level; ggplot2 default ``hjust=1`` →
+    right-aligned at the figure edge (with a small inset)."""
+    elem = theme.get("plot.caption")
+    hjust = 1.0
+    if isinstance(elem, element_text) and elem.hjust is not None:
+        hjust = float(elem.hjust)
+    if hjust <= 0.0:
+        return (0.05, "left")
+    if hjust >= 1.0:
+        return (0.95, "right")
+    return (0.5, "center")
