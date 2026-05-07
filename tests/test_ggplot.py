@@ -3277,6 +3277,89 @@ def test_expansion_mult_widens_axis_via_margins():
 
 
 # ---------------------------------------------------------------------------
+# draw()/show()/save() figsize controls
+# ---------------------------------------------------------------------------
+
+
+def test_draw_width_height_inches():
+    """`p.draw(width=8, height=3)` resizes the figure."""
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
+    fig = ggplot(df, aes("x", "y")).geom_point().draw(width=8, height=3)
+    try:
+        size = fig.get_size_inches()
+        assert size[0] == pytest.approx(8.0)
+        assert size[1] == pytest.approx(3.0)
+    finally:
+        plt.close(fig)
+
+
+def test_draw_figsize_shorthand():
+    """`p.draw(figsize=(W, H))` is the matplotlib-style equivalent."""
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
+    fig = ggplot(df, aes("x", "y")).geom_point().draw(figsize=(6, 2))
+    try:
+        size = fig.get_size_inches()
+        assert size[0] == pytest.approx(6.0)
+        assert size[1] == pytest.approx(2.0)
+    finally:
+        plt.close(fig)
+
+
+def test_draw_units_cm():
+    """`units='cm'` converts to inches before sizing."""
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
+    fig = (ggplot(df, aes("x", "y")).geom_point()
+           .draw(width=20, height=8, units="cm"))
+    try:
+        size = fig.get_size_inches()
+        assert size[0] == pytest.approx(20 / 2.54, abs=1e-6)
+        assert size[1] == pytest.approx(8 / 2.54, abs=1e-6)
+    finally:
+        plt.close(fig)
+
+
+def test_draw_figsize_and_width_height_conflict_errors():
+    """Passing both forms raises TypeError."""
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
+    p = ggplot(df, aes("x", "y")).geom_point()
+    with pytest.raises(TypeError, match="figsize"):
+        p.draw(figsize=(6, 2), width=8)
+
+
+def test_draw_size_applies_to_facets():
+    """Faceted plots resize too — the auto-formula isn't sticky."""
+    df = pl.DataFrame({
+        "x": [1, 2, 3, 4, 5, 6],
+        "y": [1, 2, 3, 4, 5, 6],
+        "g": ["a", "a", "a", "b", "b", "b"],
+    })
+    fig = (ggplot(df, aes("x", "y")) + geom_point() + facet_grid("~ g")).draw(
+        width=10, height=3,
+    )
+    try:
+        size = fig.get_size_inches()
+        assert size[0] == pytest.approx(10.0)
+        assert size[1] == pytest.approx(3.0)
+    finally:
+        plt.close(fig)
+
+
+def test_draw_with_ax_skips_resize():
+    """When the user passes ``ax=``, sizing is the parent figure's job."""
+    import matplotlib.pyplot as plt
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
+    parent_fig, ax = plt.subplots(figsize=(4, 4))
+    try:
+        # width/height kwargs should NOT change parent_fig's size.
+        ggplot(df, aes("x", "y")).geom_point().draw(ax=ax, width=20, height=2)
+        size = parent_fig.get_size_inches()
+        assert size[0] == pytest.approx(4.0)
+        assert size[1] == pytest.approx(4.0)
+    finally:
+        plt.close(parent_fig)
+
+
+# ---------------------------------------------------------------------------
 # Phase 1.8 — Themes
 # ---------------------------------------------------------------------------
 

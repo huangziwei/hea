@@ -80,28 +80,43 @@ class ggplot:
 
     # ---- output ------------------------------------------------------
 
-    def draw(self, ax=None):
+    def draw(self, ax=None, *, width=None, height=None, units="in", figsize=None):
         """Build the plot and render it to a matplotlib :class:`Figure`.
 
         ``ax``: optional existing axes to draw into (e.g. one cell from
         ``plt.subplot_mosaic``). When given, no new figure is created and
-        ``ax.figure`` is returned.
+        ``ax.figure`` is returned (and ``width``/``height``/``figsize`` are
+        ignored — sizing is the parent figure's responsibility).
+
+        Sizing kwargs (interchangeable):
+
+        * ``width=``/``height=`` with ``units="in"`` (default; also ``"cm"``
+          or ``"mm"``).
+        * ``figsize=(w, h)`` — matplotlib-style shorthand, always inches.
+
+        ggplot2's grammar deliberately keeps size on the device, not the
+        plot — see ``ggsave`` / ``options(repr.plot.width=...)``. We expose
+        these kwargs as a Python convenience (also a Phase C deviation).
         """
         from .build import build
         from .render import render
-        return render(self, build(self), ax=ax)
+        fig = render(self, build(self), ax=ax)
+        if ax is None:
+            _resize_figure(fig, width=width, height=height,
+                           units=units, figsize=figsize)
+        return fig
 
-    def show(self) -> None:
+    def show(self, *, width=None, height=None, units="in", figsize=None) -> None:
         import matplotlib.pyplot as plt
-        self.draw()
+        self.draw(width=width, height=height, units=units, figsize=figsize)
         plt.show()
 
     def save(self, filename: str, *, width: float | None = None,
-             height: float | None = None, dpi: int = 300, units: str = "in") -> None:
+             height: float | None = None, dpi: int = 300, units: str = "in",
+             figsize=None) -> None:
         fig = self.draw()
-        if width is not None and height is not None:
-            scale = {"in": 1.0, "cm": 1 / 2.54, "mm": 1 / 25.4}[units]
-            fig.set_size_inches(width * scale, height * scale)
+        _resize_figure(fig, width=width, height=height,
+                       units=units, figsize=figsize)
         fig.savefig(filename, dpi=dpi, bbox_inches="tight")
 
     def _repr_png_(self):
@@ -117,6 +132,46 @@ class ggplot:
         plt.close(fig)
         buf.seek(0)
         return buf.read()
+
+
+_UNIT_TO_INCHES = {"in": 1.0, "cm": 1 / 2.54, "mm": 1 / 25.4}
+
+
+def _resize_figure(fig, *, width, height, units, figsize) -> None:
+    """Resize ``fig`` to the requested width/height (in ``units`` or via
+    matplotlib-style ``figsize=(w, h)``). No-op when nothing is requested.
+    Re-runs ``tight_layout`` so the new size doesn't leave dead space.
+    """
+    if figsize is not None:
+        if width is not None or height is not None:
+            raise TypeError(
+                "ggplot.draw/show/save: pass figsize=(w, h) OR width/height, "
+                "not both"
+            )
+        if not (isinstance(figsize, (list, tuple)) and len(figsize) == 2):
+            raise TypeError(
+                f"figsize must be a (width, height) tuple/list; got {figsize!r}"
+            )
+        width, height = float(figsize[0]), float(figsize[1])
+        units_in_inches = 1.0
+    else:
+        if width is None or height is None:
+            return
+        if units not in _UNIT_TO_INCHES:
+            raise ValueError(
+                f"units must be one of {sorted(_UNIT_TO_INCHES)}; got {units!r}"
+            )
+        units_in_inches = _UNIT_TO_INCHES[units]
+
+    fig.set_size_inches(float(width) * units_in_inches,
+                        float(height) * units_in_inches)
+    try:
+        fig.tight_layout()
+    except Exception:
+        # Some figure layouts (e.g. with a colorbar) emit a UserWarning and
+        # may not converge — accept the new size without re-laying out rather
+        # than failing the whole draw.
+        pass
 
 
 def _copy_plot(plot: ggplot) -> ggplot:
