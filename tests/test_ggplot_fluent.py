@@ -252,3 +252,43 @@ def test_top_level_ggplot_accepts_kwargs(df):
     p1 = ggplot(df, aes(x="x", y="y"))
     p2 = ggplot(df, x="x", y="y")
     assert p1.mapping == p2.mapping
+
+
+def test_layer_level_x_y_kwargs_work(df):
+    """Regression: ``geom_point(x="x", y="y")`` should NOT silently lose
+    data. The layer factory's narrow aes filter doesn't list ``x``/``y``
+    so they previously landed in ``geom_params`` (= dropped). Layer now
+    sweeps aes-named keys out of geom_params into aes_params.
+    """
+    from hea.ggplot import geom_point
+    p = df.ggplot().geom_point(x="x", y="y")
+    fig = p.draw()
+    try:
+        assert len(fig.axes[0].collections[0].get_offsets()) == len(df)
+    finally:
+        plt.close(fig)
+
+
+def test_layer_level_color_constant_still_means_set(df):
+    """``geom_point(color="red")`` — "red" is not a column → still SET."""
+    from hea.ggplot import geom_point
+    p = df.ggplot(x="x", y="y").geom_point(color="red")
+    fig = p.draw()
+    try:
+        # Single facecolor matching matplotlib's "red".
+        fc = fig.axes[0].collections[0].get_facecolors()
+        assert tuple(round(c, 3) for c in fc[0]) == (1.0, 0.0, 0.0, 1.0)
+    finally:
+        plt.close(fig)
+
+
+def test_layer_level_color_column_means_map(df):
+    """``geom_point(color="g")`` where "g" is a column → MAP via promotion."""
+    from hea.ggplot import geom_point
+    df_g = df.with_columns(g=hea.lit("a"))
+    p = df_g.ggplot(x="x", y="y").geom_point(color="g")
+    # The promoted mapping should now contain colour: "g".
+    # Inspect via build (no need to draw).
+    from hea.ggplot.build import build
+    bo = build(p)
+    assert bo.aes_source.get("colour") == "g"

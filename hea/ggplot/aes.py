@@ -31,9 +31,50 @@ _AES_ALIASES = {
 # Positional aes args bind to these names in order: aes("wt", "mpg") ⇒ aes(x="wt", y="mpg").
 _POSITIONAL_AES = ("x", "y")
 
+# Every kwarg name that the layer factories should treat as an aesthetic
+# (route to ``Layer.aes_params``) rather than a geom param. Build-time
+# promotion (``_promote_string_aes_params``) then resolves string values
+# against the data: column match → MAP, otherwise SET. Includes American
+# aliases so ``geom_point(color=...)`` is recognised as an aesthetic.
+_ALL_AES_NAMES = frozenset({
+    # Positional
+    "x", "y", "z",
+    "xmin", "xmax", "ymin", "ymax",
+    "xend", "yend",
+    "xintercept", "yintercept", "slope", "intercept",
+    # Style
+    "colour", "color", "fill", "alpha", "size", "shape",
+    "linetype", "linewidth", "stroke",
+    # Text
+    "label", "family", "fontface", "hjust", "vjust", "angle", "lineheight",
+    # Structural
+    "group", "weight",
+    # Boxplot/violin extras
+    "lower", "middle", "upper", "ymin_final", "ymax_final",
+    "outlier_colour", "outlier_color", "outlier_fill",
+    "outlier_shape", "outlier_size", "outlier_stroke", "outlier_alpha",
+})
+
 
 def _canon(name: str) -> str:
     return _AES_ALIASES.get(name, name)
+
+
+def split_layer_kwargs(kwargs: dict) -> tuple[dict, dict]:
+    """Split a geom factory's ``**kwargs`` into ``(aes_params, geom_params)``.
+
+    Keys named after any aesthetic — see :data:`_ALL_AES_NAMES` —
+    become ``aes_params`` (which build-time promotion may further
+    route to the mapping when the value is a string matching a data
+    column). Everything else stays in ``geom_params``."""
+    aes_params: dict = {}
+    geom_params: dict = {}
+    for k, v in kwargs.items():
+        if k in _ALL_AES_NAMES:
+            aes_params[k] = v
+        else:
+            geom_params[k] = v
+    return aes_params, geom_params
 
 
 class Aes(dict):
@@ -88,12 +129,51 @@ def after_scale(expr) -> "AfterScale":
 
 
 def aes(*args, **kwargs) -> Aes:
-    """Build an :class:`Aes` mapping.
+    """Build an :class:`Aes` mapping (variable → aesthetic).
 
-    Positional args fill ``x`` then ``y``: ``aes("wt", "mpg")`` is
-    equivalent to ``aes(x="wt", y="mpg")``. Keyword args set any aes by
-    name; American spellings (``color``, ``gray``) canonicalise to British
-    (``colour``, ``grey``).
+    Positional args fill ``x`` then ``y``: ``aes("wt", "mpg")`` ≡
+    ``aes(x="wt", y="mpg")``. Keyword args set any aes by name; American
+    spellings (``color``, ``gray``) canonicalise to British (``colour``,
+    ``grey``).
+
+    **When you don't need ``aes()``** — direct kwargs are syntactic sugar:
+
+    * Plot-level: ``df.ggplot(x="wt", y="mpg", color="cyl")`` is
+      equivalent to ``df.ggplot(aes(x="wt", y="mpg", color="cyl"))``.
+    * Layer-level: ``geom_point(color="species", x="bill_length_mm")``
+      works too — string values that match a data column become
+      mappings, others (``color="red"``, ``color="#FF0000"``) stay as
+      constants. The "matches a column" rule is the disambiguation.
+
+    **When you DO need ``aes()``** — three cases that kwargs can't
+    cleanly express:
+
+    1. **``after_stat()`` / ``after_scale()`` markers**::
+
+           geom_histogram(aes(y=after_stat("density")))
+
+       The marker wraps the aesthetic value (= reference a stat-output
+       column, not a data column).
+
+    2. **Composing or sharing a mapping** across plots / layers::
+
+           common = aes(x="mpg", y="disp", color="species")
+           p1 = ggplot(df1) + geom_point(common)
+           p2 = ggplot(df2) + geom_point(common)
+
+       A reusable, named mapping object is cleaner than spreading
+       a dict.
+
+    3. **Forcing MAP semantics when the column name collides with a
+       constant**, e.g. a column literally named ``"red"``::
+
+           geom_point(aes(color="red"))   # MAP — column "red"
+           geom_point(color="red")         # SET — the constant
+
+       Inside ``aes()``, every value is unconditionally a column
+       reference / expression — no SET ambiguity.
+
+    For everything else, kwargs are usually clearer.
     """
     out = Aes()
     for i, v in enumerate(args):
