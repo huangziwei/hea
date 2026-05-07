@@ -1738,6 +1738,32 @@ def test_facet_grid_unknown_scales_value_errors():
         facet_grid("am ~ cyl", scales="weird")
 
 
+def test_facet_grid_with_enum_facet_var():
+    """Regression: factor()/Enum-typed facet variables don't break the join.
+
+    Before the dtype-preservation fix in `_stat_per_panel`, the post-stat
+    chunk re-attached the facet column as Utf8 (via ``pl.lit(val)``), which
+    didn't match the layout's original Enum dtype and matplotlib's draw
+    failed with a polars SchemaError on join.
+    """
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        "g": pl.Series(["a", "a", "a", "b", "b", "b"],
+                       dtype=pl.Enum(["a", "b"])),
+    })
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + facet_grid("~ g"))
+    fig = p.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        assert len(visible) == 2
+        # Strip text uses the original Enum-categorised values.
+        assert {a.get_title() for a in visible} == {"a", "b"}
+    finally:
+        plt.close(fig)
+
+
 # ---------------------------------------------------------------------------
 # Phase 2.4 — geom_rect, geom_tile, geom_raster, geom_polygon
 # ---------------------------------------------------------------------------

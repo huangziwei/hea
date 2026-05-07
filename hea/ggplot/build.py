@@ -188,6 +188,11 @@ def _stat_per_panel(df: pl.DataFrame, layer, facet_vars: list[str]) -> pl.DataFr
     if not facet_in_df:
         return layer.stat.compute_layer(df, layer.stat_params)
 
+    # Capture original dtypes so re-attached scalar values keep them
+    # (otherwise an Enum-typed facet variable becomes Utf8 after pl.lit and
+    # the join in facet.map_data fails with a schema mismatch).
+    facet_dtypes = {v: df[v].dtype for v in facet_in_df}
+
     chunks = []
     for keys, sub in df.group_by(facet_in_df, maintain_order=True):
         chunk = layer.stat.compute_layer(sub.drop(facet_in_df), layer.stat_params)
@@ -196,7 +201,9 @@ def _stat_per_panel(df: pl.DataFrame, layer, facet_vars: list[str]) -> pl.DataFr
         # Re-attach facet column values so map_data can assign panels.
         keys_tuple = keys if isinstance(keys, tuple) else (keys,)
         for col, val in zip(facet_in_df, keys_tuple):
-            chunk = chunk.with_columns(pl.lit(val).alias(col))
+            chunk = chunk.with_columns(
+                pl.lit(val).cast(facet_dtypes[col], strict=False).alias(col)
+            )
         chunks.append(chunk)
     if not chunks:
         return pl.DataFrame()
