@@ -41,22 +41,90 @@ from scipy import stats as _sps
 from .formula import set_ordered_cols
 
 
+class _LazyFactor:
+    """Deferred ``factor()`` placeholder, resolved by ``mutate``/``select``.
+
+    Returned by ``factor("colname")`` or ``factor(pl.col(...))`` so the
+    tidyverse-style ``df.mutate(species=hea.factor("species"))`` works.
+    Polars expressions can't ``.to_list()`` mid-pipeline, so auto level
+    detection has to peek at the source frame — the verb that owns the
+    frame calls ``_resolve(self)`` to materialize a real ``pl.Expr``.
+    """
+
+    __slots__ = ("col_ref", "levels", "labels", "ordered")
+
+    def __init__(self, col_ref, levels, labels, ordered):
+        self.col_ref = col_ref  # str column name or pl.Expr
+        self.levels = levels
+        self.labels = labels
+        self.ordered = ordered
+
+    def _column_name(self) -> str | None:
+        if isinstance(self.col_ref, str):
+            return self.col_ref
+        try:
+            return self.col_ref.meta.output_name()
+        except Exception:
+            return None
+
+    def _resolve(self, df: pl.DataFrame, fallback_name: str | None = None) -> pl.Expr:
+        col_name = self._column_name() or fallback_name
+        base = pl.col(self.col_ref) if isinstance(self.col_ref, str) else self.col_ref
+        s_utf8 = base.cast(pl.Utf8)
+
+        if self.labels is not None:
+            old = [str(k) for k in self.labels.keys()]
+            new = [str(v) for v in self.labels.values()]
+            out_expr = s_utf8.replace_strict(old, new, return_dtype=pl.Enum(new))
+        else:
+            if self.levels is None:
+                if col_name is None or col_name not in df.columns:
+                    raise ValueError(
+                        "factor(): can't auto-detect levels — column "
+                        f"{col_name!r} not in the frame. Pass levels= "
+                        "explicitly, or use the eager Series form "
+                        "factor(df['col'])."
+                    )
+                series_utf8 = df[col_name].cast(pl.Utf8)
+                levels_list = series_utf8.drop_nulls().unique().sort().to_list()
+            else:
+                levels_list = [str(v) for v in self.levels]
+            out_expr = s_utf8.cast(pl.Enum(levels_list))
+
+        if self.ordered and col_name:
+            from .formula import _ORDERED_COLS_CV
+            set_ordered_cols(_ORDERED_COLS_CV.get() | frozenset({col_name}))
+        return out_expr
+
+
 def factor(
-    series: pl.Series,
+    series: pl.Series | str | pl.Expr,
     levels=None,
     labels: dict | None = None,
     ordered: bool = False,
-) -> pl.Series:
-    """Polars equivalent of R's ``factor()`` — cast a Series to ``pl.Enum``.
+):
+    """Polars equivalent of R's ``factor()`` — cast a column to ``pl.Enum``.
 
-    Use with ``df.with_columns(factor(df["col"]))``. The returned Series
-    keeps its input name, so ``with_columns`` replaces the original column.
+    Two call forms:
+
+    * **Eager** — ``factor(df["col"])`` takes a ``pl.Series`` and returns
+      a ``pl.Series``. Use with ``df.with_columns(factor(df["col"]))``;
+      the returned Series keeps its input name, so ``with_columns``
+      replaces the original column.
+    * **Deferred** — ``factor("col")`` or ``factor(pl.col("col"))``
+      returns a placeholder that ``DataFrame.mutate`` / ``select``
+      resolves against the receiver, enabling tidyverse-style
+      ``df.mutate(species=hea.factor("species"))``. The placeholder
+      isn't a ``pl.Expr`` and won't work inside polars-native verbs
+      (``with_columns``, ``filter``, etc.); pass a Series there.
 
     Parameters
     ----------
-    series : pl.Series
-        Column to convert. Int64 inputs route through Utf8 (``pl.Enum``
-        can't accept integers directly).
+    series : pl.Series | str | pl.Expr
+        Column to convert. ``pl.Series`` triggers the eager path;
+        ``str`` (column name) or ``pl.Expr`` triggers the deferred
+        path. Int64 inputs route through Utf8 (``pl.Enum`` can't
+        accept integers directly).
     levels : list | None, optional
         Level order, no relabel. If None, auto-detected via
         ``unique().sort()`` on the string-cast values — that's Unicode
@@ -90,6 +158,9 @@ def factor(
             "factor(): `levels=` expects a list/sequence, not a dict. "
             "For {level: label} mapping, pass it as `labels=` instead."
         )
+
+    if isinstance(series, (str, pl.Expr)):
+        return _LazyFactor(series, levels=levels, labels=labels, ordered=ordered)
 
     s = series.cast(pl.Utf8)
 

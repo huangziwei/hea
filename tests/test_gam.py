@@ -447,6 +447,47 @@ def test_factor_helper():
         factor(test, levels={0: "negative", 1: "positive"})
 
 
+def test_factor_deferred_in_mutate_and_select():
+    """`hea.factor("col")` returns a placeholder so the tidyverse-style
+    ``df.mutate(species=hea.factor("species"))`` works — the eager Series
+    form would force ``df.with_columns(hea.factor(df["species"]))``,
+    repeating the frame name. ``mutate`` / ``select`` peek at the frame
+    to auto-detect Enum levels at call time.
+    """
+    import hea
+    from hea import factor
+
+    df = pl.DataFrame({"g": ["b", "a", "b", "a"], "x": [1.0, 2.0, 3.0, 4.0]})
+
+    # Auto-detect levels via mutate(str)
+    out = hea.DataFrame._from_pydf(df._df).mutate(g=factor("g"))
+    assert isinstance(out.schema["g"], pl.Enum)
+    assert out.schema["g"].categories.to_list() == ["a", "b"]
+
+    # Explicit levels via mutate(str, levels=)
+    out2 = hea.DataFrame._from_pydf(df._df).mutate(g=factor("g", levels=["b", "a"]))
+    assert out2.schema["g"].categories.to_list() == ["b", "a"]
+
+    # labels= rename in one pass
+    out3 = hea.DataFrame._from_pydf(df._df).mutate(
+        g=factor("g", labels={"a": "Alpha", "b": "Bravo"})
+    )
+    assert out3["g"].to_list() == ["Bravo", "Alpha", "Bravo", "Alpha"]
+
+    # pl.Expr form also resolves
+    out4 = hea.DataFrame._from_pydf(df._df).mutate(g=factor(pl.col("g")))
+    assert isinstance(out4.schema["g"], pl.Enum)
+
+    # select() integration: rename + factor in one verb
+    out5 = hea.DataFrame._from_pydf(df._df).select("x", grp=factor("g"))
+    assert out5.columns == ["x", "grp"]
+    assert isinstance(out5.schema["grp"], pl.Enum)
+
+    # Auto-detect raises a clear error if the column isn't in the frame
+    with pytest.raises(ValueError, match="auto-detect levels"):
+        hea.DataFrame._from_pydf(df._df).mutate(g=factor("missing"))
+
+
 # ---------------------------------------------------------------------------
 # Cross-cutting: sp passthrough reproduces a fixed-sp fit
 # ---------------------------------------------------------------------------

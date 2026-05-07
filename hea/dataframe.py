@@ -159,6 +159,31 @@ def _kwargs_to_exprs(args: tuple, kwargs: dict) -> list[pl.Expr]:
     return exprs
 
 
+def _resolve_lazy_factors(
+    df: pl.DataFrame, args: tuple, kwargs: dict
+) -> tuple[tuple, dict]:
+    """Replace ``hea.factor("col")`` placeholders with concrete ``pl.Expr``.
+
+    ``factor()`` returns a ``_LazyFactor`` for str/Expr inputs because the
+    Enum's level set has to be detected from the actual data — polars
+    expressions can't ``.to_list()`` mid-pipeline. Verbs that own a
+    materialized frame (``mutate``, ``select``, ``GroupBy.mutate``) call
+    this pre-pass so downstream code only sees real expressions. For
+    kwargs the kwarg name is offered as a fallback column name when the
+    placeholder was built from a ``pl.Expr`` without an output_name.
+    """
+    from .R import _LazyFactor
+
+    new_args = tuple(
+        a._resolve(df) if isinstance(a, _LazyFactor) else a for a in args
+    )
+    new_kwargs = {
+        k: (v._resolve(df, fallback_name=k) if isinstance(v, _LazyFactor) else v)
+        for k, v in kwargs.items()
+    }
+    return new_args, new_kwargs
+
+
 class DataFrame(pl.DataFrame):
     """``pl.DataFrame`` with tidyverse-named methods.
 
@@ -258,6 +283,7 @@ class DataFrame(pl.DataFrame):
                 f"mutate(): _keep must be one of 'all', 'none', 'used', 'unused'; got {_keep!r}"
             )
 
+        args, kwargs = _resolve_lazy_factors(self, args, kwargs)
         exprs = _kwargs_to_exprs(args, kwargs)
         if _by is not None:
             by = [_by] if isinstance(_by, str) else list(_by)
@@ -360,15 +386,24 @@ class DataFrame(pl.DataFrame):
         Non-string non-expression values become literal columns
         (rare in select, but matches mutate semantics).
         """
+        from .R import _LazyFactor
+
         flat: list[Any] = []
         for c in cols:
             if isinstance(c, (list, tuple)):
                 flat.extend(c)
             else:
                 flat.append(c)
-        exprs: list[Any] = list(flat)
+        exprs: list[Any] = []
+        for c in flat:
+            if isinstance(c, _LazyFactor):
+                exprs.append(c._resolve(self))
+            else:
+                exprs.append(c)
         for new_name, src in named.items():
-            if isinstance(src, str):
+            if isinstance(src, _LazyFactor):
+                exprs.append(src._resolve(self, fallback_name=new_name).alias(new_name))
+            elif isinstance(src, str):
                 exprs.append(pl.col(src).alias(new_name))
             elif isinstance(src, pl.Expr):
                 exprs.append(src.alias(new_name))
@@ -1250,6 +1285,7 @@ class GroupBy:
         contrasts with ``summarize`` (collapsing). Result keeps the
         original row count.
         """
+        args, kwargs = _resolve_lazy_factors(self._df, args, kwargs)
         exprs = _kwargs_to_exprs(args, kwargs)
         windowed = [e.over(self._by) for e in exprs]
         return self._df._wrap(
