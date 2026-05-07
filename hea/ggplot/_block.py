@@ -34,13 +34,24 @@ from . import _measure as M
 # tick text doesn't kiss the data area. These are inches.
 _PANEL_MARGIN_PAD_IN = 0.05
 
-# Tick-label reserve when we can't measure actual labels. ggplot2's
-# default fontsize at 11pt with ~5-char labels (e.g. "0.500") is roughly
-# this wide / tall. Refine in Phase F by querying the scale's formatter.
-_DEFAULT_YTICK_RESERVE_IN = M.text_size_in("00000", fontsize=M.AXIS_TEXT_SIZE_PT)[0]
-_DEFAULT_XTICK_RESERVE_IN = (
-    M.text_size_in("0", fontsize=M.AXIS_TEXT_SIZE_PT)[1] + 0.05
+# Tick-label reserve when we can't measure actual labels. matplotlib
+# renders tick text with extra space for the tick mark itself and a pad
+# between mark and label — both default to ``3.5pt ≈ 0.05"`` (rcParams
+# ``xtick.major.size``, ``xtick.major.pad``). Plus a small safety
+# margin. ggplot2's font is 11pt; ~5 char labels (e.g. "0.500") give
+# the width / height seed below.
+_TICK_MARK_PAD_IN = 0.05 + 0.05 + 0.02  # tick size + tick pad + safety
+_DEFAULT_YTICK_RESERVE_IN = (
+    M.text_size_in("00000", fontsize=M.AXIS_TEXT_SIZE_PT)[0]
+    + _TICK_MARK_PAD_IN
 )
+_DEFAULT_XTICK_RESERVE_IN = (
+    M.text_size_in("0", fontsize=M.AXIS_TEXT_SIZE_PT)[1]
+    + _TICK_MARK_PAD_IN
+)
+# Gap between tick text and axis-title text (matplotlib's
+# ``axes.labelpad`` default = 4pt ≈ 0.056").
+_AXIS_LABELPAD_IN = 0.06
 
 
 @dataclass
@@ -134,22 +145,29 @@ def measure_block(plot, build_output) -> PlotBlock:
     if subtitle_h > 0:
         margin_top += subtitle_h + M.ROW_GAP_IN
 
-    # --- LEFT margin: ylab (rotated 90) + ytick reserve
+    # --- LEFT margin: ylab (rotated 90) + ytick reserve.
+    # ylab gap uses ``axes.labelpad`` (matplotlib's actual rendering)
+    # — same rationale as the xlab side.
     xlabel, ylabel = _default_labels(plot)
     ylab_w = M.text_size_in(
         ylabel, fontsize=M.AXIS_TITLE_SIZE_PT, rotation=90.0,
     )[0]
     margin_left = ylab_w + _DEFAULT_YTICK_RESERVE_IN + _PANEL_MARGIN_PAD_IN
     if ylab_w > 0:
-        margin_left += M.COL_GAP_IN
+        margin_left += _AXIS_LABELPAD_IN
 
-    # --- BOTTOM margin: xtick reserve + xlab + caption
+    # --- BOTTOM margin: xtick reserve + xlab + caption.
+    # The xlab pad uses matplotlib's ``axes.labelpad`` (4pt ≈ 0.06")
+    # rather than our generic ROW_GAP_IN — otherwise the reserved
+    # space falls short of what matplotlib actually renders, leaving
+    # the xlab to encroach on the next plot's panel in vertical
+    # compose (e.g. ``p1 / p2``).
     xlab_h = M.text_size_in(xlabel, fontsize=M.AXIS_TITLE_SIZE_PT)[1]
     caption = labels.get("caption")
     caption_h = M.text_size_in(caption, fontsize=M.CAPTION_SIZE_PT)[1]
     margin_bottom = _DEFAULT_XTICK_RESERVE_IN + _PANEL_MARGIN_PAD_IN
     if xlab_h > 0:
-        margin_bottom += xlab_h + M.ROW_GAP_IN
+        margin_bottom += xlab_h + _AXIS_LABELPAD_IN
     if caption_h > 0:
         margin_bottom += caption_h + M.ROW_GAP_IN
 
