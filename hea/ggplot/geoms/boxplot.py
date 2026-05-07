@@ -43,11 +43,20 @@ class GeomBoxplot(Geom):
         # column (``aes(x = species, …)``) we route the strings through
         # matplotlib's category unit — same path ``ax.bar``/``plot`` use
         # internally — so the box positions line up with the axis labels.
+        # Pre-register the levels in the order R/ggplot2's ``factor()``
+        # would produce (sorted for plain strings, category order for
+        # ``Categorical``/``Enum``); otherwise matplotlib registers in
+        # first-appearance order, which can leave the axis labelled
+        # ``Adelie, Gentoo, Chinstrap`` instead of the expected sorted run.
         x_col = data["x"]
         x_is_discrete = x_col.dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean)
         if x_is_discrete:
             string_values = [str(v) for v in x_col.to_list()]
-            ax.xaxis.update_units(string_values)
+            if x_col.dtype in (pl.Categorical, pl.Enum):
+                levels = [str(v) for v in x_col.cat.get_categories().to_list()]
+            else:
+                levels = sorted(set(string_values))
+            ax.xaxis.update_units(levels)
             x_positions = [float(p) for p in ax.convert_xunits(string_values)]
         else:
             x_positions = [float(v) for v in x_col.to_list()]
