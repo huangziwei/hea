@@ -104,11 +104,13 @@ def build(plot) -> BuildOutput:
     scales = plot.scales.copy()
 
     # Auto-register defaults: positional always; non-positional only when
-    # the data column suggests a discrete scale would help.
+    # the data column suggests a discrete scale would help. Pass the
+    # column data to the positional path too so a string ``aes(x="island")``
+    # picks ScaleOrdinal automatically.
     for df in layers_data:
         for axis in ("x", "y"):
             if axis in df.columns:
-                scales.get_or_default(axis)
+                scales.get_or_default(axis, data=df[axis])
         for aes in _NON_POSITIONAL_AES:
             if aes in df.columns:
                 scales.get_or_default_for_data(aes, df[aes])
@@ -311,6 +313,12 @@ def _add_group(df: pl.DataFrame) -> pl.DataFrame:
     If the user didn't supply ``group``, derive one from any *discrete*
     non-positional aesthetic mapping. The resulting integer column splits
     line/path/polygon geoms into per-group lines automatically.
+
+    Group codes are assigned in the SORT ORDER of the discrete columns
+    (matches R's ``interaction()``), not via hashing — so that
+    ``position_stack`` produces stacks in alphabetical / factor-level
+    order (e.g. Adelie at the bottom, Gentoo at the top), matching
+    ggplot2's output.
     """
     if "group" in df.columns or len(df) == 0:
         return df
@@ -324,12 +332,17 @@ def _add_group(df: pl.DataFrame) -> pl.DataFrame:
     ]
     if not discrete_cols:
         return df.with_columns(group=pl.lit(-1, dtype=pl.Int64))
-    # Hash the tuple of discrete-aesthetic values so identical level
-    # combinations share a group id; downstream group_by gets cheap keys.
-    # ``.hash()`` returns u64 — leave it that way (no cast).
-    return df.with_columns(
-        group=pl.struct(discrete_cols).hash()
+
+    # Build a sorted-unique table of the discrete combinations and join
+    # it back to assign 1-based integer codes in sort order.
+    levels = (
+        df.select(discrete_cols)
+        .unique(maintain_order=False)
+        .sort(discrete_cols)
+        .with_row_index(name="group", offset=1)
+        .with_columns(pl.col("group").cast(pl.Int64))
     )
+    return df.join(levels, on=discrete_cols, how="left")
 
 
 def _layer_data(layer, plot) -> pl.DataFrame:

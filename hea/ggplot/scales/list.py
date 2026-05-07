@@ -27,16 +27,31 @@ class ScalesList:
     def has(self, aesthetic: str) -> bool:
         return aesthetic in self._by_aes
 
-    def get_or_default(self, aesthetic: str) -> Scale | None:
+    def get_or_default(self, aesthetic: str, data=None) -> Scale | None:
         """Return the registered scale for ``aesthetic``, auto-creating a
-        :class:`ScaleContinuous` for ``"x"`` / ``"y"`` if missing."""
+        positional scale for ``"x"`` / ``"y"`` if missing.
+
+        With ``data`` supplied, picks :class:`ScaleOrdinal` for discrete
+        dtypes (``Utf8``/``Categorical``/``Enum``/``Boolean``) and
+        :class:`ScaleContinuous` otherwise — matches ggplot2's
+        ``scale_x_discrete`` auto-default for character columns.
+        """
         sc = self._by_aes.get(aesthetic)
         if sc is not None:
             return sc
         if aesthetic in ("x", "y"):
-            from .continuous import ScaleContinuous
-
-            sc = ScaleContinuous(aesthetics=(aesthetic,))
+            import polars as pl
+            is_discrete = (
+                data is not None
+                and isinstance(data, pl.Series)
+                and data.dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean)
+            )
+            if is_discrete:
+                from .ordinal import ScaleOrdinal
+                sc = ScaleOrdinal(aesthetics=(aesthetic,))
+            else:
+                from .continuous import ScaleContinuous
+                sc = ScaleContinuous(aesthetics=(aesthetic,))
             self._by_aes[aesthetic] = sc
             return sc
         return None
@@ -57,7 +72,7 @@ class ScalesList:
         if sc is not None:
             return sc
         if aesthetic in ("x", "y"):
-            return self.get_or_default(aesthetic)
+            return self.get_or_default(aesthetic, data=data)
 
         import polars as pl
 

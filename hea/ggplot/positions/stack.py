@@ -15,11 +15,17 @@ from .position import Position
 
 
 def _sort_within_x(data: pl.DataFrame, reverse: bool) -> tuple[pl.DataFrame, list, list]:
+    """Match R's ``position_stack`` ordering: ``order(x, group,
+    decreasing = !reverse)``. With ``reverse=False`` (default), groups
+    sort DESCENDING so that — under cumsum — the *first* legend level
+    ends up at the TOP of each stack and the *last* legend level at
+    the bottom (e.g. Adelie above Gentoo at Biscoe in
+    ``aes(fill = species)``)."""
     sort_cols = ["x"]
     sort_desc = [False]
     if "group" in data.columns:
         sort_cols.append("group")
-        sort_desc.append(reverse)
+        sort_desc.append(not reverse)
     return data.sort(sort_cols, descending=sort_desc), sort_cols, sort_desc
 
 
