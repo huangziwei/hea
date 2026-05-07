@@ -834,7 +834,9 @@ def _annotation_extents(grid) -> tuple[float, float]:
 def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
                         tag_iter=None, outer_top_y: float | None = None,
                         lift_top: bool = False,
-                        lift_bottom: bool = False) -> None:
+                        lift_bottom: bool = False,
+                        lift_left: bool = False,
+                        lift_right: bool = False) -> None:
     """Render a :class:`SuperBlock` into ``fig`` at ``parent_subspec``
     (or the whole figure if ``None``).
 
@@ -887,10 +889,21 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
 
     width_ratios: list[float] = []
     for c in range(sb.ncol):
+        # Symmetric to the row lift: collapse our outermost super-left /
+        # super-right when the parent has reserved that space — keeps
+        # the leftmost / rightmost child's panel flush with the cell
+        # edges so it aligns with the parent's leaf siblings (e.g.
+        # ``p1 / (p2 | p3)`` — p2.panel.left == p1.panel.left).
+        super_left = sb.col_super_left_in[c]
+        super_right = sb.col_super_right_in[c]
+        if c == 0 and lift_left:
+            super_left = 0.0
+        if c == sb.ncol - 1 and lift_right:
+            super_right = 0.0
         width_ratios.extend([
-            sb.col_super_left_in[c],
+            super_left,
             sb.panel_w_in[c],
-            sb.col_super_right_in[c],
+            super_right,
         ])
 
     gs_h = [max(r, 1e-6) for r in height_ratios]
@@ -941,19 +954,24 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
                 child_top_y = None  # use inner cell's top as usual
 
             if isinstance(blk, SuperBlock):
-                # Forward simplify_gt-style lifting to the nested grid:
-                # if THIS row is the topmost (and we ourselves were
-                # lifted, or we're the outermost SuperBlock with the
-                # outer top-margin row reserving the title space), the
-                # nested's first super-top row collapses to zero.
-                child_lift_top = (r == 0) and (lift_top or outer_top_y is not None or parent_subspec is None)
-                child_lift_bottom = (r == sb.nrow - 1) and (lift_bottom or parent_subspec is None)
+                # Forward simplify_gt-style lifting to the nested grid.
+                # Top/bottom: lift when this child is at row 0 / row
+                # last AND we ourselves were lifted (or we're the
+                # outermost SuperBlock — parent_subspec is None).
+                # Left/right: same logic per col.
+                outermost = parent_subspec is None
+                child_lift_top = (r == 0) and (lift_top or outer_top_y is not None or outermost)
+                child_lift_bottom = (r == sb.nrow - 1) and (lift_bottom or outermost)
+                child_lift_left = (c == 0) and (lift_left or outermost)
+                child_lift_right = (c == sb.ncol - 1) and (lift_right or outermost)
                 render_super_block(blk, fig,
                                     parent_subspec=panel_cell,
                                     tag_iter=tag_iter,
                                     outer_top_y=child_top_y,
                                     lift_top=child_lift_top,
-                                    lift_bottom=child_lift_bottom)
+                                    lift_bottom=child_lift_bottom,
+                                    lift_left=child_lift_left,
+                                    lift_right=child_lift_right)
             else:
                 _render_leaf_cell(child, blk, fig, gs, panel_cell,
                                    right_cell_row, right_cell_col,
