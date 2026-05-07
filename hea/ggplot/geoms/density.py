@@ -29,16 +29,28 @@ class GeomDensity(Geom):
 
         if len(data) == 0:
             return
-        x = data["x"].to_numpy()
-        y = data["y"].to_numpy()
+
+        # Per-group: ``aes(colour = species)`` puts a different colour on
+        # each group's rows, so plotting ``data`` whole would merge all
+        # curves into one line painted in the first group's colour. Split
+        # like geom_path / geom_line do.
+        if "group" in data.columns:
+            for _, sub in data.group_by("group", maintain_order=True):
+                self._draw_one(sub, ax, r_lty)
+        else:
+            self._draw_one(data, ax, r_lty)
+
+    def _draw_one(self, sub, ax, r_lty) -> None:
+        x = sub["x"].to_numpy()
+        y = sub["y"].to_numpy()
         order = np.argsort(x)
         xs, ys = x[order], y[order]
 
-        colour = _first(data, "colour", default="black")
-        fill = _first(data, "fill", default=None)
-        size = float(_first(data, "size", default=0.5))
-        linetype = _first(data, "linetype", default="solid")
-        alpha = float(_first(data, "alpha", default=1.0))
+        colour = _first(sub, "colour", default="black")
+        fill = _first(sub, "fill", default=None)
+        size = float(_first(sub, "size", default=0.5))
+        linetype = _first(sub, "linetype", default="solid")
+        alpha = float(_first(sub, "alpha", default=1.0))
 
         if fill is not None and not (isinstance(fill, float) and np.isnan(fill)):
             ax.fill_between(xs, 0, ys, color=fill, alpha=alpha, linewidth=0)
