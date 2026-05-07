@@ -1,20 +1,27 @@
-"""Patchwork-style plot composition — `p1 | p2`, `p1 / p2`, ``wrap_plots()``.
+"""Patchwork-style plot composition — `p1 + p2`, `p1 | p2`, `p1 / p2`,
+``wrap_plots()``.
 
 A :class:`PlotGrid` is a tree of plots laid out via
-:class:`matplotlib.gridspec.GridSpec`. Operator semantics:
+:class:`matplotlib.gridspec.GridSpec`. Operator semantics mirror R's
+``library(patchwork)``:
 
-* ``p1 | p2`` — side-by-side (horizontal direction).
-* ``p1 / p2`` — stacked (vertical direction).
+* ``p1 + p2`` — auto-layout (square-ish grid, ``ceil(sqrt(n))`` columns).
+  ``+`` is also the ggplot2 layer-add operator; we resolve by rhs type
+  (ggplot/PlotGrid → composition, everything else → layer add).
+* ``p1 | p2`` — explicit side-by-side (horizontal direction).
+* ``p1 / p2`` — explicit stacked (vertical direction).
 * Same-direction extension: ``p1 | p2 | p3`` produces a single 1×3 grid,
   not nested — operators flatten when consecutive operators agree.
+  ``p1 + p2 + p3`` similarly flattens into one 4-cell auto-layout grid.
 * Direction switch nests: ``(p1 | p2) / p3`` is a 2-row grid where
   row 0 is itself a 1×2 sub-grid containing ``p1`` and ``p2``.
 * ``wrap_plots([p1, p2, p3, p4], nrow=2, ncol=2)`` for explicit grids.
 
 Faceted ggplots compose correctly — :func:`render` accepts a
 ``subplotspec=`` argument and lays its facet sub-grid inside the parent
-spec (see ``hea/ggplot/render.py``). ``ggplot + PlotGrid`` (and the
-reverse) raises with a "did you mean ``|`` or ``/``?" message.
+spec (see ``hea/ggplot/render.py``). ``PlotGrid + Theme`` (or other
+non-plot rhs) raises — themes/layers/scales must be applied to
+individual plots before composition, not to a composition wrapper.
 """
 
 from __future__ import annotations
@@ -36,6 +43,11 @@ class PlotGrid:
     nrow: int | None = None
     ncol: int | None = None
     byrow: bool = True
+    # Relative widths per column / heights per row. Length must match the
+    # rendered ``ncol`` / ``nrow`` (matplotlib enforces). Either left None
+    # uses equal sizing.
+    widths: list | None = None
+    heights: list | None = None
 
     # ------------------------------------------------------------------
     # Composition operators
@@ -69,21 +81,28 @@ class PlotGrid:
 
     def __add__(self, other):
         from .core import ggplot
-        if isinstance(other, ggplot):
-            raise TypeError(
-                "can't `+` a ggplot into a PlotGrid — did you mean "
-                "`|` (horizontal) or `/` (vertical)?"
-            )
-        return NotImplemented
+        if isinstance(other, (ggplot, PlotGrid)):
+            return _grid_combine(self, other)
+        if isinstance(other, PlotLayout):
+            return self._with_layout(other)
+        raise TypeError(
+            f"can't add {type(other).__name__} to a PlotGrid — "
+            "themes/layers/scales must be applied to individual plots "
+            "before composing, not to the composition wrapper"
+        )
 
-    def __radd__(self, other):
-        from .core import ggplot
-        if isinstance(other, ggplot):
-            raise TypeError(
-                "can't `+` a PlotGrid into a ggplot — did you mean "
-                "`|` (horizontal) or `/` (vertical)?"
-            )
-        return NotImplemented
+    def _with_layout(self, layout: "PlotLayout") -> "PlotGrid":
+        """Return a copy with layout fields overridden by ``layout`` (only
+        non-None fields take effect)."""
+        return PlotGrid(
+            children=list(self.children),
+            direction=self.direction,
+            nrow=layout.nrow if layout.nrow is not None else self.nrow,
+            ncol=layout.ncol if layout.ncol is not None else self.ncol,
+            byrow=layout.byrow if layout.byrow is not None else self.byrow,
+            widths=layout.widths if layout.widths is not None else self.widths,
+            heights=layout.heights if layout.heights is not None else self.heights,
+        )
 
     # ------------------------------------------------------------------
     # Layout introspection
@@ -144,7 +163,22 @@ class PlotGrid:
 
     def _draw_into(self, fig, parent_spec) -> None:
         nrow, ncol = self._dims()
-        sub_gs = parent_spec.subgridspec(nrow, ncol)
+        kw = {}
+        if self.widths is not None:
+            if len(self.widths) != ncol:
+                raise ValueError(
+                    f"PlotGrid: widths has length {len(self.widths)} "
+                    f"but the grid has {ncol} columns"
+                )
+            kw["width_ratios"] = list(self.widths)
+        if self.heights is not None:
+            if len(self.heights) != nrow:
+                raise ValueError(
+                    f"PlotGrid: heights has length {len(self.heights)} "
+                    f"but the grid has {nrow} rows"
+                )
+            kw["height_ratios"] = list(self.heights)
+        sub_gs = parent_spec.subgridspec(nrow, ncol, **kw)
         for i, child in enumerate(self.children):
             r, c = self._cell_for(i)
             cell_spec = sub_gs[r, c]
@@ -228,19 +262,76 @@ def _v_combine(a, b):
     return PlotGrid(children=out_children, direction=_DIRECTION_V)
 
 
+def _grid_combine(a, b):
+    """``+`` composition — auto-layout (R patchwork semantics). Square-ish
+    grid via ``ceil(sqrt(n))`` columns. Flattens consecutive ``+`` chains:
+    ``p1 + p2 + p3`` produces one 3-element grid, not nested."""
+    a_children, a_dir = _as_children(a)
+    b_children, b_dir = _as_children(b)
+
+    out_children: list = []
+    if a_dir == _DIRECTION_GRID:
+        out_children.extend(a_children)
+    else:
+        out_children.append(a)
+    if b_dir == _DIRECTION_GRID:
+        out_children.extend(b_children)
+    else:
+        out_children.append(b)
+    return PlotGrid(children=out_children, direction=_DIRECTION_GRID)
+
+
 # ---------------------------------------------------------------------------
 # Factories
 # ---------------------------------------------------------------------------
 
 
 def wrap_plots(plots: list, *, nrow: int | None = None, ncol: int | None = None,
-               byrow: bool = True) -> PlotGrid:
+               byrow: bool = True, widths: list | None = None,
+               heights: list | None = None) -> PlotGrid:
     """Programmatic grid layout. ``nrow``/``ncol`` default to ``ceil(sqrt(n))``;
     pass either or both to constrain the shape. ``byrow=True`` (default)
     fills row-major; ``byrow=False`` fills column-major.
+
+    ``widths`` / ``heights`` are length-``ncol`` / length-``nrow`` lists of
+    relative cell sizes (e.g. ``widths=[1, 2]`` makes column 1 twice as wide
+    as column 0).
     """
     return PlotGrid(
         children=list(plots),
         direction=_DIRECTION_GRID,
         nrow=nrow, ncol=ncol, byrow=byrow,
+        widths=widths, heights=heights,
+    )
+
+
+# ---------------------------------------------------------------------------
+# plot_layout — patchwork-style "+ plot_layout(widths=[1, 2])" config
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PlotLayout:
+    """Layout overrides for a :class:`PlotGrid`. Added via ``+`` on a
+    composition: ``(p1 + p2) + plot_layout(widths=[1, 2])``. Only non-None
+    fields take effect; everything else inherits from the grid.
+    """
+
+    widths: list | None = None
+    heights: list | None = None
+    nrow: int | None = None
+    ncol: int | None = None
+    byrow: bool | None = None
+
+
+def plot_layout(*, widths=None, heights=None, nrow=None, ncol=None,
+                byrow=None) -> PlotLayout:
+    """Patchwork-style layout config. Combine with a :class:`PlotGrid` via
+    ``+``::
+
+        (p1 + p2) + plot_layout(widths=[1, 2])
+        wrap_plots([p1, p2, p3, p4]) + plot_layout(heights=[2, 1])
+    """
+    return PlotLayout(
+        widths=widths, heights=heights, nrow=nrow, ncol=ncol, byrow=byrow,
     )

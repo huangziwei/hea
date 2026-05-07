@@ -72,14 +72,12 @@ class ggplot:
         self.plot_env = env
 
     def __add__(self, other):
-        # Patchwork: `ggplot + PlotGrid` is a programming error — `+` is for
-        # adding layers/scales/etc., `|` and `/` are for composition.
-        from .patchwork import PlotGrid
-        if isinstance(other, PlotGrid):
-            raise TypeError(
-                "can't `+` a PlotGrid into a ggplot — did you mean "
-                "`|` (horizontal) or `/` (vertical)?"
-            )
+        # Patchwork: `ggplot + ggplot` and `ggplot + PlotGrid` compose into
+        # an auto-layout grid (R `library(patchwork)` semantics). Layer/Theme/
+        # Scale/etc. on the rhs falls through to the singledispatch table.
+        from .patchwork import PlotGrid, _grid_combine
+        if isinstance(other, (ggplot, PlotGrid)):
+            return _grid_combine(self, other)
         return ggplot_add(other, self)
 
     def __radd__(self, other):

@@ -23,7 +23,7 @@ from hea.ggplot import (
     coord_cartesian, coord_fixed,
     coord_flip, coord_trans, expansion,
     element_blank, element_line, element_rect,
-    wrap_plots,
+    plot_layout, wrap_plots,
     element_text, facet_grid, facet_wrap, geom_abline, geom_area, geom_bar, geom_blank,
     geom_boxplot, geom_col, geom_contour, geom_contour_filled, geom_count,
     geom_crossbar, geom_curve, geom_density, geom_dotplot, geom_errorbar, geom_errorbarh,
@@ -3508,14 +3508,104 @@ def test_wrap_plots_explicit_ncol():
     assert nrow == 2  # ceil(5 / 3)
 
 
-def test_patchwork_plus_ggplot_raises_did_you_mean():
-    """`grid + ggplot` and `ggplot + grid` both raise with a helpful message."""
+def test_patchwork_plus_composes_two_plots():
+    """`p1 + p2` composes via auto-layout (R patchwork convention)."""
     p1, p2 = _two_simple_plots()
-    g = p1 | p2
-    with pytest.raises(TypeError, match=r"did you mean"):
-        g + p2
-    with pytest.raises(TypeError, match=r"did you mean"):
-        p1 + g
+    g = p1 + p2
+    assert isinstance(g, PlotGrid)
+    assert g.direction == "grid"
+    assert len(g.children) == 2
+    # n=2 → 1×2 grid (visually horizontal).
+    assert g._dims() == (1, 2)
+
+
+def test_patchwork_plus_chain_flattens_into_one_grid():
+    """`p1 + p2 + p3` flattens into a single 3-cell grid (not nested)."""
+    p1, p2 = _two_simple_plots()
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})
+    p3 = ggplot(df, aes("x", "y")) + geom_point()
+    g = p1 + p2 + p3
+    assert g.direction == "grid"
+    assert len(g.children) == 3
+    # n=3 auto-layout → 2×2 (one cell empty).
+    assert g._dims() == (2, 2)
+
+
+def test_patchwork_plus_layer_still_adds_layer():
+    """`p + geom_point()` continues to add a layer to a single ggplot —
+    `+`-composition only triggers when the rhs is a ggplot/PlotGrid."""
+    p1, _ = _two_simple_plots()
+    extended = p1 + geom_point(colour="red")
+    # Still a ggplot, not a PlotGrid.
+    from hea.ggplot import ggplot as ggplot_cls
+    assert isinstance(extended, ggplot_cls)
+
+
+def test_patchwork_grid_plus_non_plot_raises():
+    """`PlotGrid + theme(...)` (or other non-plot) raises with a clear hint
+    that themes belong on individual plots, not on a composition wrapper."""
+    p1, p2 = _two_simple_plots()
+    g = p1 + p2
+    with pytest.raises(TypeError, match=r"individual plots"):
+        g + theme(legend_position="top")
+
+
+def test_plot_layout_widths_set_column_ratios():
+    """`(p1 + p2) + plot_layout(widths=[1, 2])` makes col 1 twice as wide."""
+    p1, p2 = _two_simple_plots()
+    g = (p1 + p2) + plot_layout(widths=[1, 2])
+    assert g.widths == [1, 2]
+    fig = g.draw(figsize=(9, 3))
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        widths_drawn = [a.get_position().width for a in visible]
+        # Sort so the comparison is order-independent.
+        widths_drawn.sort()
+        # The wider should be ~2× the narrower.
+        assert widths_drawn[1] / widths_drawn[0] == pytest.approx(2.0, abs=0.05)
+    finally:
+        plt.close(fig)
+
+
+def test_plot_layout_heights_set_row_ratios():
+    """`(p1 / p2) + plot_layout(heights=[2, 1])` makes row 0 twice as tall."""
+    p1, p2 = _two_simple_plots()
+    g = (p1 / p2) + plot_layout(heights=[2, 1])
+    assert g.heights == [2, 1]
+    fig = g.draw(figsize=(4, 9))
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        heights_drawn = [a.get_position().height for a in visible]
+        heights_drawn.sort()
+        assert heights_drawn[1] / heights_drawn[0] == pytest.approx(2.0, abs=0.05)
+    finally:
+        plt.close(fig)
+
+
+def test_plot_layout_wrong_length_raises():
+    """Mismatched widths/heights raises at draw time."""
+    p1, p2 = _two_simple_plots()
+    g = (p1 + p2) + plot_layout(widths=[1, 2, 3])
+    with pytest.raises(ValueError, match=r"widths has length 3"):
+        g.draw()
+
+
+def test_wrap_plots_widths_kwarg():
+    """`wrap_plots(..., widths=[...])` is the alternate path to ratios."""
+    p1, p2 = _two_simple_plots()
+    g = wrap_plots([p1, p2], ncol=2, widths=[1, 3])
+    assert g.widths == [1, 3]
+
+
+def test_plot_layout_overrides_partial():
+    """Only non-None fields on PlotLayout take effect; others inherit."""
+    p1, p2 = _two_simple_plots()
+    base = wrap_plots([p1, p2], ncol=2, widths=[1, 2], heights=[1])
+    # plot_layout that only changes widths leaves heights and ncol intact.
+    g = base + plot_layout(widths=[3, 4])
+    assert g.widths == [3, 4]
+    assert g.heights == [1]
+    assert g.ncol == 2
 
 
 def test_patchwork_figsize_kwarg():
