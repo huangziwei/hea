@@ -832,13 +832,21 @@ def _annotation_extents(grid) -> tuple[float, float]:
 
 
 def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
-                        tag_iter=None) -> None:
+                        tag_iter=None, outer_top_y: float | None = None) -> None:
     """Render a :class:`SuperBlock` into ``fig`` at ``parent_subspec``
     (or the whole figure if ``None``).
 
     Each cell of the grid hosts either a leaf ``PlotBlock`` (rendered via
     the standard panel pipeline) or a nested ``SuperBlock`` (rendered
     recursively into a sub-gridspec).
+
+    ``outer_top_y``: figure-relative y at which titles of *topmost-row*
+    children should anchor. When set, leaves in row 0 lift their title
+    from the inner top-margin cell up to the outer's top-margin row;
+    nested ``SuperBlock`` children in row 0 forward this y to their
+    own topmost-row children. Mirrors R/patchwork's ``simplify_gt``
+    behaviour where every title row, regardless of nesting depth, lands
+    in the super-gtable's row 3.
     """
     from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 
@@ -898,24 +906,36 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
             right_cell_row = title_row_offset + 3*r + 1
             right_cell_col = 3*c + 2
 
+            top_cell_row = title_row_offset + 3*r
+            panel_col = 3*c + 1
+            # Topmost-row children get title-lifting: their titles land
+            # at ``outer_top_y`` if the outer asked, else at this
+            # SuperBlock's own top-margin cell (the row 0 of our grid).
+            if r == 0:
+                if outer_top_y is not None:
+                    child_top_y = outer_top_y
+                else:
+                    child_top_y = gs[top_cell_row, panel_col].get_position(fig).y1
+            else:
+                child_top_y = None  # use inner cell's top as usual
+
             if isinstance(blk, SuperBlock):
-                # Nested grid — recurse into the panel cell.
                 render_super_block(blk, fig,
                                     parent_subspec=panel_cell,
-                                    tag_iter=tag_iter)
+                                    tag_iter=tag_iter,
+                                    outer_top_y=child_top_y)
             else:
-                # Leaf — render its panel(s) plus colorbar caxes.
-                top_cell_row = title_row_offset + 3*r
-                panel_col = 3*c + 1
                 _render_leaf_cell(child, blk, fig, gs, panel_cell,
                                    right_cell_row, right_cell_col,
                                    top_cell_row, panel_col,
-                                   tag_iter=tag_iter)
+                                   tag_iter=tag_iter,
+                                   title_y_override=child_top_y if r == 0 and outer_top_y is not None else None)
 
 
 def _render_leaf_title_in_top_cell(leaf, fig, gs, top_cell_row, panel_col,
                                      *, fontsize_title=None,
-                                     fontsize_subtitle=None) -> None:
+                                     fontsize_subtitle=None,
+                                     y_override: float | None = None) -> None:
     """Render the leaf's title and subtitle as ``fig.text`` artists
     anchored to the TOP of the top-margin cell.
 
@@ -945,7 +965,12 @@ def _render_leaf_title_in_top_cell(leaf, fig, gs, top_cell_row, panel_col,
 
     cell = gs[top_cell_row, panel_col]
     bbox = cell.get_position(fig)
-    y_cursor = bbox.y1 - 0.005
+    # x always comes from this leaf's own panel column (so titles
+    # of side-by-side leaves get distinct x positions). y can be
+    # overridden by a parent compose to lift the title up to the
+    # outer top-margin row.
+    cell_top_y = y_override if y_override is not None else bbox.y1
+    y_cursor = cell_top_y - 0.005
     if title:
         fig.text(
             bbox.x0, y_cursor, str(title),
@@ -967,7 +992,8 @@ def _render_leaf_title_in_top_cell(leaf, fig, gs, top_cell_row, panel_col,
 
 def _render_leaf_cell(leaf, blk: PlotBlock, fig, gs, panel_cell,
                        right_cell_row, right_cell_col,
-                       top_cell_row, panel_col, *, tag_iter=None) -> None:
+                       top_cell_row, panel_col, *, tag_iter=None,
+                       title_y_override: float | None = None) -> None:
     """Render a single ggplot leaf into its assigned cell, with cax for
     colorbars allocated in the right-margin column.
 
@@ -1014,13 +1040,11 @@ def _render_leaf_cell(leaf, blk: PlotBlock, fig, gs, panel_cell,
         _render_facets_into(leaf, bo, axes, composing=True,
                               colorbar_caxes=cb_caxes)
 
-    # Title/subtitle: render as fig.text in the top-margin cell so all
-    # siblings' titles align to the cell's top edge regardless of whether
-    # the sibling has a subtitle. ``_apply_plot_titles`` would use
-    # ``ax.set_title`` which anchors to the panel's top — wrong for
-    # compose mode (a 2-line title pushes the FIRST line above what a
-    # 1-line title shows, leaving them misaligned).
-    _render_leaf_title_in_top_cell(leaf, fig, gs, top_cell_row, panel_col)
+    # Title/subtitle: render as fig.text. ``title_y_override`` lifts the
+    # anchor up to a parent's top-margin (used by nested compositions
+    # so that p1's and p2's titles align in ``p1 | (p2 / p3)``).
+    _render_leaf_title_in_top_cell(leaf, fig, gs, top_cell_row, panel_col,
+                                     y_override=title_y_override)
 
     if tag_iter is not None:
         tag = next(tag_iter, None)
