@@ -20,21 +20,26 @@ from .theme import element_blank, element_line, element_rect, element_text
 _PT_PER_MM = 72.27 / 25.4
 
 
-def render(plot, build_output, ax=None, subplotspec=None,
-           parent=None) -> "plt.Figure":
+def render(plot, build_output, ax=None, subplotspec=None) -> "plt.Figure":
+    """Render into a user-supplied ``ax`` or ``subplotspec``.
+
+    For standalone plotting and patchwork composition use
+    :func:`hea.ggplot._block.render_block` /
+    :func:`hea.ggplot._block.render_super_block` — those own figure
+    sizing and the gridspec layout. This entry point exists for users
+    integrating ggplot output into a custom matplotlib layout.
+    """
     layout = build_output.layout
     n_panels = 1 if layout is None else len(layout)
 
     if n_panels <= 1:
         return _render_single(plot, build_output, ax=ax,
-                              subplotspec=subplotspec, parent=parent)
+                              subplotspec=subplotspec)
     if ax is not None:
-        # Single ax requested for a faceted plot — collapse to one panel
-        # (existing limitation; patchwork composition uses parent= instead).
-        return _render_single(plot, build_output, ax=ax,
-                              subplotspec=None, parent=None)
+        # Single ax requested for a faceted plot — collapse to one panel.
+        return _render_single(plot, build_output, ax=ax, subplotspec=None)
     return _render_facets(plot, build_output, layout,
-                          subplotspec=subplotspec, parent=parent)
+                          subplotspec=subplotspec)
 
 
 def _is_coord_flip(coord) -> bool:
@@ -43,15 +48,8 @@ def _is_coord_flip(coord) -> bool:
     return type(coord).__name__ == "CoordFlip"
 
 
-def _render_single(plot, build_output, ax, subplotspec=None, parent=None):
-    if parent is not None:
-        # SubFigure (or Figure) — make a single subplot inside it. supxlabel/
-        # supylabel etc. on ``fig`` scope to this subfigure, and we treat it
-        # as "owned" so plot.background/title apply only to this region.
-        fig = parent
-        ax = parent.subplots()
-        owns_fig = True
-    elif subplotspec is not None:
+def _render_single(plot, build_output, ax, subplotspec=None):
+    if subplotspec is not None:
         fig = subplotspec.get_gridspec().figure
         ax = fig.add_subplot(subplotspec)
         owns_fig = False
@@ -106,16 +104,12 @@ def _render_single(plot, build_output, ax, subplotspec=None, parent=None):
     apply_axis_guides([ax], plot)
     apply_legends(fig, [ax], plot, build_output)
 
-    # tight_layout only exists on Figure, not SubFigure — when rendering
-    # into a SubFigure (patchwork composition) the parent figure is what
-    # matters, and the patchwork driver leaves it to matplotlib's own
-    # constrained layout.
-    if owns_fig and hasattr(fig, "tight_layout"):
+    if owns_fig:
         fig.tight_layout()
     return fig
 
 
-def _render_facets(plot, build_output, layout, subplotspec=None, parent=None):
+def _render_facets(plot, build_output, layout, subplotspec=None):
     facet = plot.facet
     n_panels = len(layout)
     nrow, ncol = facet.grid_dims(n_panels)
@@ -123,16 +117,7 @@ def _render_facets(plot, build_output, layout, subplotspec=None, parent=None):
     sharex, sharey = facet.share_axes()
     is_flipped = _is_coord_flip(plot.coordinates)
 
-    if parent is not None:
-        # Composition mode — render into the given SubFigure. supxlabel/
-        # supylabel and plot-level theming stay scoped to this subfigure
-        # rather than leaking to the entire patchwork figure.
-        fig = parent
-        axes = parent.subplots(
-            nrow, ncol, sharex=sharex, sharey=sharey, squeeze=False,
-        )
-        owns_fig = True
-    elif subplotspec is not None:
+    if subplotspec is not None:
         fig = subplotspec.get_gridspec().figure
         sub_gs = subplotspec.subgridspec(nrow, ncol)
         axes = sub_gs.subplots(sharex=sharex, sharey=sharey, squeeze=False)
@@ -215,11 +200,7 @@ def _render_facets(plot, build_output, layout, subplotspec=None, parent=None):
     apply_axis_guides(list(flat_axes[:n_panels]), plot)
     apply_legends(fig, list(flat_axes[:n_panels]), plot, build_output)
 
-    # tight_layout only exists on Figure, not SubFigure — when rendering
-    # into a SubFigure (patchwork composition) the parent figure is what
-    # matters, and the patchwork driver leaves it to matplotlib's own
-    # constrained layout.
-    if owns_fig and hasattr(fig, "tight_layout"):
+    if owns_fig:
         fig.tight_layout()
     return fig
 
@@ -507,18 +488,19 @@ def _default_labels(plot):
     return xlabel, ylabel
 
 
-def _apply_plot_titles(plot, fig, ax_list=None) -> None:
+def _apply_plot_titles(plot, fig, ax_list=None, *, skip_caption: bool = False) -> None:
     """Render ``title`` / ``subtitle`` / ``caption`` from ``plot.labels``.
 
     Single-panel plots: ``ax.set_title(loc='left')`` on the (sole) axes so
     the title aligns with the panel's left edge.
 
-    Faceted plots: ``fig.suptitle`` on the SubFigure with ``x=0.05, ha='left'``
-    — the strip labels (``ax.set_title``) and the plot title would collide
-    on the same row otherwise. ``constrained_layout`` reserves vertical
-    space for the suptitle automatically.
+    Faceted plots: ``ax.set_title(loc='left', y=1.15)`` on the top-left
+    panel — the strip labels (``ax.set_title``) occupy ``y=1.0``, so we
+    push the plot title above them with ``y=1.15``.
 
-    Caption is figure-level (footer).
+    Caption is figure-level (footer). Pass ``skip_caption=True`` when
+    composing — per-leaf captions would all stomp on the same
+    ``fig.text`` location.
     """
     title = plot.labels.get("title")
     subtitle = plot.labels.get("subtitle")
@@ -547,7 +529,7 @@ def _apply_plot_titles(plot, fig, ax_list=None) -> None:
             target_ax = (ax_list or fig.axes)[0]
             target_ax.set_title(title_text, loc=loc)
 
-    if caption is not None:
+    if caption is not None and not skip_caption:
         x, ha = _caption_x_ha(plot.theme)
         fig.text(x, 0.01, str(caption), ha=ha, va="bottom",
                  fontsize="small", style="italic")

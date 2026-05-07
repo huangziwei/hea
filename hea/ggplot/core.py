@@ -112,7 +112,7 @@ class ggplot:
 
     # ---- output ------------------------------------------------------
 
-    def draw(self, ax=None, *, subplotspec=None, parent=None,
+    def draw(self, ax=None, *, subplotspec=None,
              width=None, height=None, units="in", figsize=None):
         """Build the plot and render it to a matplotlib :class:`Figure`.
 
@@ -121,15 +121,9 @@ class ggplot:
         ``ax.figure`` is returned (and sizing kwargs are ignored — the
         parent figure owns sizing).
 
-        ``parent``: a :class:`matplotlib.figure.Figure` or
-        :class:`matplotlib.figure.SubFigure` to render into. Used by
-        patchwork composition (:class:`PlotGrid`) so each child — including
-        faceted plots — gets its own SubFigure with correctly-scoped
-        ``supxlabel`` / ``supylabel``.
-
         ``subplotspec``: a :class:`matplotlib.gridspec.SubplotSpec` to draw
         into — useful for manually integrating with a custom matplotlib
-        gridspec. Patchwork uses ``parent`` instead.
+        gridspec.
 
         Sizing kwargs (interchangeable):
 
@@ -143,11 +137,28 @@ class ggplot:
         """
         from .build import build
         from .render import render
-        fig = render(self, build(self), ax=ax, subplotspec=subplotspec,
-                     parent=parent)
-        if ax is None and subplotspec is None and parent is None:
-            _resize_figure(fig, width=width, height=height,
-                           units=units, figsize=figsize)
+
+        if ax is None and subplotspec is None:
+            # Standalone — block engine. Compute figsize up-front so the
+            # gridspec margins (in inches) come out right; matplotlib
+            # normalizes ratios against the actual figure size.
+            from ._block import (
+                default_figsize_for, measure_block, render_block,
+            )
+            import matplotlib.pyplot as plt
+
+            bo = build(self)
+            block = measure_block(self, bo)
+            target = _resolve_figsize(width=width, height=height,
+                                       units=units, figsize=figsize)
+            fig_w, fig_h = target if target is not None else default_figsize_for(block)
+            fig = plt.figure(figsize=(fig_w, fig_h))
+            render_block(self, bo, block, fig=fig)
+            return fig
+
+        # ``ax=`` / ``subplotspec=`` integrate with a user-managed
+        # matplotlib layout — the user owns figure sizing in that case.
+        fig = render(self, build(self), ax=ax, subplotspec=subplotspec)
         return fig
 
     def show(self, *, width=None, height=None, units="in", figsize=None) -> None:
@@ -179,6 +190,34 @@ class ggplot:
 
 
 _UNIT_TO_INCHES = {"in": 1.0, "cm": 1 / 2.54, "mm": 1 / 25.4}
+
+
+def _resolve_figsize(*, width, height, units, figsize) -> tuple[float, float] | None:
+    """Resolve user-supplied size kwargs to ``(w_in, h_in)`` or ``None``.
+
+    Mirrors ``_resize_figure``'s validation but returns inches without
+    touching a figure — the block engine calls this BEFORE creating the
+    figure so the gridspec sees the final size.
+    """
+    if figsize is not None:
+        if width is not None or height is not None:
+            raise TypeError(
+                "ggplot.draw/show/save: pass figsize=(w, h) OR width/height, "
+                "not both"
+            )
+        if not (isinstance(figsize, (list, tuple)) and len(figsize) == 2):
+            raise TypeError(
+                f"figsize must be a (width, height) tuple/list; got {figsize!r}"
+            )
+        return (float(figsize[0]), float(figsize[1]))
+    if width is None or height is None:
+        return None
+    if units not in _UNIT_TO_INCHES:
+        raise ValueError(
+            f"units must be one of {sorted(_UNIT_TO_INCHES)}; got {units!r}"
+        )
+    factor = _UNIT_TO_INCHES[units]
+    return (float(width) * factor, float(height) * factor)
 
 
 def _resize_figure(fig, *, width, height, units, figsize) -> None:

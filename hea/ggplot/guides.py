@@ -174,15 +174,20 @@ def _palette_to_cmap(palette, n: int = 256, name: str = "hea_pal"):
     return LinearSegmentedColormap.from_list(name, list(samples), N=n)
 
 
-def apply_legends(fig, axes_list, plot, build_output) -> None:
+def apply_legends(fig, axes_list, plot, build_output, *,
+                   colorbar_caxes: list | None = None) -> None:
     """Render legend groups + colorbars onto the first axes using
     ``theme(legend.position=...)`` / ``theme(legend.direction=...)``.
 
     Multiple groups stack vertically (right/left) or horizontally
     (top/bottom). With a single group the offset math is a no-op.
-    Colorbars are placed via matplotlib's ``fig.colorbar(..., location=...)``
-    which auto-shrinks the parent axes; legends position themselves over the
-    same edge with ``bbox_to_anchor`` offsets.
+
+    Colorbars are placed via matplotlib's ``fig.colorbar``. By default
+    that *shrinks* the parent axes to make room — which is a panel-
+    alignment hazard for patchwork composition. Pass ``colorbar_caxes``
+    to provide pre-allocated dedicated axes (one per colorbar spec), in
+    which case ``fig.colorbar(cax=...)`` is used instead and the host
+    axes is left untouched.
     """
     pos = plot.theme.get("legend.position") or "right"
     if pos == "none":
@@ -200,8 +205,9 @@ def apply_legends(fig, axes_list, plot, build_output) -> None:
     target = axes_list[0]
 
     # Colorbars first — they reserve space on the figure edge.
-    for spec in cbar_specs:
-        _render_colorbar(fig, axes_list, target, spec, pos, direction)
+    for i, spec in enumerate(cbar_specs):
+        cax = colorbar_caxes[i] if colorbar_caxes and i < len(colorbar_caxes) else None
+        _render_colorbar(fig, axes_list, target, spec, pos, direction, cax=cax)
 
     # Then discrete legends (with stacking offsets if multiple).
     legends = []
@@ -220,8 +226,14 @@ def apply_legends(fig, axes_list, plot, build_output) -> None:
 
 
 def _render_colorbar(fig, axes_list, target, spec: ColorbarSpec,
-                     pos: str, direction: str) -> None:
-    """Render one colorbar with theme-aware location."""
+                     pos: str, direction: str, *,
+                     cax=None) -> None:
+    """Render one colorbar with theme-aware location.
+
+    ``cax``: a pre-allocated dedicated axes. When given, the colorbar
+    fills it exactly and the host ``axes_list`` is left untouched
+    (block-engine path); otherwise matplotlib's auto-shrink applies.
+    """
     import matplotlib as mpl
 
     cmap = _palette_to_cmap(spec.palette, name=f"hea_{spec.aesthetic}")
@@ -233,10 +245,13 @@ def _render_colorbar(fig, axes_list, target, spec: ColorbarSpec,
     # — same vocab as ggplot2's legend.position.
     location = pos if pos in ("right", "left", "top", "bottom") else "right"
     orientation = "horizontal" if location in ("top", "bottom") else "vertical"
-    cb = fig.colorbar(
-        mappable, ax=axes_list, location=location,
-        orientation=orientation, shrink=0.6, pad=0.05,
-    )
+    if cax is not None:
+        cb = fig.colorbar(mappable, cax=cax, orientation=orientation)
+    else:
+        cb = fig.colorbar(
+            mappable, ax=axes_list, location=location,
+            orientation=orientation, shrink=0.6, pad=0.05,
+        )
     cb.set_label(spec.title)
 
 

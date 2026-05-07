@@ -188,29 +188,28 @@ class PlotGrid:
     # ------------------------------------------------------------------
 
     def draw(self, *, width=None, height=None, units="in", figsize=None):
-        """Build the figure and render the whole tree into it."""
+        """Build the figure and render the whole tree into it.
+
+        Uses the gtable-style block engine: each ggplot child contributes a
+        :class:`~hea.ggplot._block.PlotBlock`; nested :class:`PlotGrid`
+        children become :class:`~hea.ggplot._block.SuperBlock`s. The
+        outer super-gridspec takes max margins per side across siblings
+        sharing a row or column so panels align by construction.
+        """
         import matplotlib.pyplot as plt
 
-        from .core import _resize_figure
+        from ._block import compose_super_block, render_super_block
+        from .core import _resolve_figsize
 
-        nrow, ncol = self._dims()
-        # Default figsize echoes the per-panel formula used by facet_wrap.
-        default_figsize = (3.0 * ncol, 2.5 * nrow)
-        # ``constrained_layout`` is the only matplotlib auto-layout that
-        # composes correctly across SubFigure boundaries — it reserves
-        # vertical space for each child's suptitle/strip labels so they
-        # don't pile on top of each other.
-        fig = plt.figure(figsize=default_figsize, constrained_layout=True)
-        # Apply the figure-level annotation BEFORE creating SubFigures so
-        # constrained_layout knows the suptitle is there and shrinks the
-        # subfigure region to make room. Otherwise the figure suptitle
-        # collides with the per-plot suptitles inside each SubFigure.
-        if self.annotation is not None:
-            self._apply_figure_annotation(fig)
+        sb = compose_super_block(self)
+        target = _resolve_figsize(width=width, height=height, units=units,
+                                   figsize=figsize)
+        fig_w = target[0] if target is not None else sb.total_w_in
+        fig_h = target[1] if target is not None else sb.total_h_in
+        fig = plt.figure(figsize=(fig_w, fig_h))
+
         tag_iter = self._make_tag_iter()
-        self._draw_into(fig, tag_iter=tag_iter)
-        _resize_figure(fig, width=width, height=height, units=units,
-                       figsize=figsize)
+        render_super_block(sb, fig, parent_subspec=None, tag_iter=tag_iter)
         return fig
 
     def _make_tag_iter(self):
@@ -225,17 +224,6 @@ class PlotGrid:
         suffix = a.tag_suffix or ""
         return iter(f"{prefix}{t}{suffix}" for t in tags)
 
-    def _apply_figure_annotation(self, fig) -> None:
-        a = self.annotation
-        if a.title is not None:
-            fig.suptitle(str(a.title))
-        if a.subtitle is not None:
-            fig.text(0.5, 0.92, str(a.subtitle), ha="center", va="bottom",
-                     fontsize="medium")
-        if a.caption is not None:
-            fig.text(0.99, 0.01, str(a.caption), ha="right", va="bottom",
-                     fontsize="small", style="italic")
-
     def leaves(self) -> list:
         """Return the depth-first list of leaf plots (reading order)."""
         out = []
@@ -245,42 +233,6 @@ class PlotGrid:
             else:
                 out.append(c)
         return out
-
-    def _draw_into(self, parent, tag_iter=None) -> None:
-        """Render this grid inside ``parent`` (a :class:`~matplotlib.figure.Figure`
-        or :class:`~matplotlib.figure.SubFigure`). Each child gets its own
-        SubFigure cell, isolating ``supxlabel``/``supylabel`` to that region.
-        ``tag_iter`` (when present) supplies the next tag for each leaf in
-        reading order — see :func:`plot_annotation`.
-        """
-        nrow, ncol = self._dims()
-        kw = {}
-        if self.widths is not None:
-            if len(self.widths) != ncol:
-                raise ValueError(
-                    f"PlotGrid: widths has length {len(self.widths)} "
-                    f"but the grid has {ncol} columns"
-                )
-            kw["width_ratios"] = list(self.widths)
-        if self.heights is not None:
-            if len(self.heights) != nrow:
-                raise ValueError(
-                    f"PlotGrid: heights has length {len(self.heights)} "
-                    f"but the grid has {nrow} rows"
-                )
-            kw["height_ratios"] = list(self.heights)
-        subfigs = parent.subfigures(nrow, ncol, squeeze=False, **kw)
-        for i, child in enumerate(self.children):
-            r, c = self._cell_for(i)
-            cell = subfigs[r, c]
-            if isinstance(child, PlotGrid):
-                child._draw_into(cell, tag_iter=tag_iter)
-            else:
-                child.draw(parent=cell)
-                if tag_iter is not None:
-                    tag = next(tag_iter, None)
-                    if tag is not None:
-                        _attach_tag(cell, tag)
 
     def show(self, *, width=None, height=None, units="in", figsize=None) -> None:
         import matplotlib.pyplot as plt
@@ -497,13 +449,14 @@ def _wrap_dims(n: int) -> tuple[int, int]:
     return (side, side)
 
 
-def _attach_tag(subfig, tag: str) -> None:
-    """Place a bold tag at the upper-left of the SubFigure (patchwork's
-    ``tag_levels`` position)."""
-    subfig.text(
-        0.02, 0.98, tag,
+def _attach_tag_to_axes(ax, tag: str) -> None:
+    """Block-engine path: tag at upper-left of the panel axes, rendered as
+    a Text artist outside the data area (above the panel's top edge)."""
+    ax.text(
+        0.0, 1.0, tag,
+        transform=ax.transAxes,
+        ha="left", va="bottom",
         fontsize="large", fontweight="bold",
-        ha="left", va="top",
     )
 
 

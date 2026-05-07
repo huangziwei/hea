@@ -3565,15 +3565,16 @@ def test_patchwork_grid_plus_unknown_type_raises():
 def test_plot_layout_widths_set_column_ratios():
     """`(p1 + p2) + plot_layout(widths=[1, 2])` makes col 1 twice as wide.
 
-    Since each child renders into its own SubFigure, we read the subfigure
-    sizes (figure-relative) rather than the inner axes (subfigure-relative).
+    Block-engine path: each child's panel is a regular Axes; we compare
+    panel widths via ``ax.get_position().width``.
     """
     p1, p2 = _two_simple_plots()
     g = (p1 + p2) + plot_layout(widths=[1, 2])
     assert g.widths == [1, 2]
     fig = g.draw(figsize=(9, 3))
     try:
-        widths = sorted(sf.bbox_relative.width for sf in fig.subfigs)
+        fig.canvas.draw()
+        widths = sorted(ax.get_position().width for ax in fig.axes)
         assert widths[1] / widths[0] == pytest.approx(2.0, abs=0.05)
     finally:
         plt.close(fig)
@@ -3586,7 +3587,8 @@ def test_plot_layout_heights_set_row_ratios():
     assert g.heights == [2, 1]
     fig = g.draw(figsize=(4, 9))
     try:
-        heights = sorted(sf.bbox_relative.height for sf in fig.subfigs)
+        fig.canvas.draw()
+        heights = sorted(ax.get_position().height for ax in fig.axes)
         assert heights[1] / heights[0] == pytest.approx(2.0, abs=0.05)
     finally:
         plt.close(fig)
@@ -3607,15 +3609,13 @@ def test_wrap_plots_widths_kwarg():
     assert g.widths == [1, 3]
 
 
-def test_patchwork_faceted_child_supxlabel_scoped_to_subfigure():
-    """Regression: a faceted plot inside a composition uses its SubFigure's
-    ``supxlabel``/``supylabel``, not the parent figure's.
+def test_patchwork_faceted_child_axis_label_scoped_to_panel_column():
+    """Regression: a faceted plot inside a composition keeps its xlabel
+    inside its panel column (not across the whole composed figure).
 
-    Before the SubFigure refactor the faceted plot's labels painted on the
-    top figure (covering both children's column area), since
-    ``_render_facets`` called ``fig.supxlabel`` on whatever figure it was
-    handed. With ``parent=SubFigure`` plumbed through render, each faceted
-    child gets its own ``supxlabel``.
+    Block engine: instead of fig.supxlabel (which paints across the full
+    figure width), the faceted child sets ``set_xlabel("x")`` on its
+    bottom-row centre panel, so the label lives in the leaf's panel area.
     """
     df = pl.DataFrame({
         "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
@@ -3627,21 +3627,18 @@ def test_patchwork_faceted_child_supxlabel_scoped_to_subfigure():
 
     fig = (p_single + p_faceted).draw(figsize=(8, 3))
     try:
-        # The top figure has no supxlabel of its own — that would mean a
-        # label paints across the whole composition.
+        # No fig.supxlabel — that would paint across the whole composition.
         top_supx = getattr(fig, "_supxlabel", None)
         assert top_supx is None or not top_supx.get_text()
 
-        # The faceted child's SubFigure carries the supxlabel.
-        faceted_subfig = fig.subfigs[1]  # rhs of `+`
-        sf_supx = faceted_subfig._supxlabel
-        assert sf_supx is not None and sf_supx.get_text() == "x"
+        # The single-panel child sets its xlabel on its sole axes.
+        # ``fig.axes`` order: leaves are added left-to-right.
+        single_ax = fig.axes[0]
+        assert single_ax.get_xlabel() == "x"
 
-        # The single-panel child's SubFigure uses ax.set_xlabel (not supxlabel).
-        single_subfig = fig.subfigs[0]
-        single_supx = getattr(single_subfig, "_supxlabel", None)
-        assert single_supx is None or not single_supx.get_text()
-        assert single_subfig.axes[0].get_xlabel() == "x"
+        # Inside the faceted child, at least one panel carries the xlabel.
+        faceted_axes = fig.axes[1:]
+        assert any(ax.get_xlabel() == "x" for ax in faceted_axes)
     finally:
         plt.close(fig)
 
@@ -3677,7 +3674,9 @@ def test_patchwork_doc_ex3_two_plots_compose():
     assert g._dims() == (1, 2)
     fig = g.draw()
     try:
-        assert len(fig.subfigs) == 2
+        # Block engine: 2 leaves × 1 panel each → 2 panel axes (no
+        # subfigures, no extra decoration axes).
+        assert len(fig.axes) == 2
     finally:
         plt.close(fig)
 
@@ -3739,8 +3738,12 @@ def test_patchwork_doc_ex8_nested_h_inside_v():
 
 
 def test_patchwork_doc_ex9_plot_annotation_title():
-    """Ex 9: ``+ plot_annotation(title=...)`` puts a fig.suptitle on the
-    composed figure."""
+    """Ex 9: ``+ plot_annotation(title=...)`` adds a figure-level title.
+
+    Block engine: the title rides as a ``fig.text`` artist in the
+    annotation row reserved above the super-grid (not ``fig.suptitle``,
+    which would interact badly with constrained_layout that we no
+    longer use)."""
     p1, p2, p3, _ = _patchwork_doc_plots()
     g = (p1 | (p2 / p3)) + plot_annotation(
         title="The surprising story about mtcars"
@@ -3748,10 +3751,18 @@ def test_patchwork_doc_ex9_plot_annotation_title():
     assert g.annotation is not None
     fig = g.draw()
     try:
-        assert fig._suptitle is not None
-        assert fig._suptitle.get_text() == "The surprising story about mtcars"
+        title_text = "The surprising story about mtcars"
+        assert any(t.get_text() == title_text for t in fig.texts), \
+            f"expected fig.text with {title_text!r}, got {[t.get_text() for t in fig.texts]}"
     finally:
         plt.close(fig)
+
+
+def _collect_tags_from_panel_axes(fig, expected: set[str]) -> list[str]:
+    """Block engine: tags ride as figure-level Text artists positioned at
+    the upper-left of each leaf's top-margin cell (so they sit ABOVE
+    the title rather than colliding with it). Walk ``fig.texts``."""
+    return [t.get_text() for t in fig.texts if t.get_text() in expected]
 
 
 def test_patchwork_doc_ex10_tag_levels_roman():
@@ -3760,13 +3771,7 @@ def test_patchwork_doc_ex10_tag_levels_roman():
     g = p1 + p2 + p3 + plot_annotation(tag_levels="I")
     fig = g.draw()
     try:
-        # Each subfigure has a tag text artist with the corresponding label.
-        tags = []
-        for sf in fig.subfigs:
-            for t in sf.texts:
-                txt = t.get_text()
-                if txt in {"I", "II", "III"}:
-                    tags.append(txt)
+        tags = _collect_tags_from_panel_axes(fig, {"I", "II", "III"})
         assert tags == ["I", "II", "III"]
     finally:
         plt.close(fig)
@@ -3778,8 +3783,7 @@ def test_patchwork_tag_levels_a_uppercase():
     g = p1 + p2 + p3 + plot_annotation(tag_levels="A")
     fig = g.draw()
     try:
-        tags = sorted(t.get_text() for sf in fig.subfigs for t in sf.texts
-                      if t.get_text() in {"A", "B", "C"})
+        tags = sorted(_collect_tags_from_panel_axes(fig, {"A", "B", "C"}))
         assert tags == ["A", "B", "C"]
     finally:
         plt.close(fig)
@@ -3791,8 +3795,7 @@ def test_patchwork_tag_levels_with_prefix_suffix():
     g = p1 + p2 + plot_annotation(tag_levels="A", tag_prefix="(", tag_suffix=")")
     fig = g.draw()
     try:
-        tags = sorted(t.get_text() for sf in fig.subfigs for t in sf.texts
-                      if t.get_text() in {"(A)", "(B)"})
+        tags = sorted(_collect_tags_from_panel_axes(fig, {"(A)", "(B)"}))
         assert tags == ["(A)", "(B)"]
     finally:
         plt.close(fig)
@@ -3804,8 +3807,7 @@ def test_patchwork_tag_levels_explicit_list():
     g = p1 + p2 + plot_annotation(tag_levels=["foo", "bar"])
     fig = g.draw()
     try:
-        tags = sorted(t.get_text() for sf in fig.subfigs for t in sf.texts
-                      if t.get_text() in {"foo", "bar"})
+        tags = sorted(_collect_tags_from_panel_axes(fig, {"foo", "bar"}))
         assert tags == ["bar", "foo"]
     finally:
         plt.close(fig)
