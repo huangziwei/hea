@@ -20,13 +20,18 @@ from .theme import element_blank, element_line, element_rect, element_text
 _PT_PER_MM = 72.27 / 25.4
 
 
-def render(plot, build_output, ax=None) -> "plt.Figure":
+def render(plot, build_output, ax=None, subplotspec=None) -> "plt.Figure":
     layout = build_output.layout
     n_panels = 1 if layout is None else len(layout)
 
-    if n_panels <= 1 or ax is not None:
-        return _render_single(plot, build_output, ax)
-    return _render_facets(plot, build_output, layout)
+    if n_panels <= 1:
+        return _render_single(plot, build_output, ax=ax, subplotspec=subplotspec)
+    if ax is not None:
+        # Single ax requested for a faceted plot — collapse to one panel
+        # (existing limitation; patchwork composition handles facets via
+        # subplotspec= instead).
+        return _render_single(plot, build_output, ax=ax, subplotspec=None)
+    return _render_facets(plot, build_output, layout, subplotspec=subplotspec)
 
 
 def _is_coord_flip(coord) -> bool:
@@ -35,8 +40,12 @@ def _is_coord_flip(coord) -> bool:
     return type(coord).__name__ == "CoordFlip"
 
 
-def _render_single(plot, build_output, ax):
-    if ax is None:
+def _render_single(plot, build_output, ax, subplotspec=None):
+    if subplotspec is not None:
+        fig = subplotspec.get_gridspec().figure
+        ax = fig.add_subplot(subplotspec)
+        owns_fig = False
+    elif ax is None:
         fig, ax = plt.subplots()
         owns_fig = True
     else:
@@ -92,7 +101,7 @@ def _render_single(plot, build_output, ax):
     return fig
 
 
-def _render_facets(plot, build_output, layout):
+def _render_facets(plot, build_output, layout, subplotspec=None):
     facet = plot.facet
     n_panels = len(layout)
     nrow, ncol = facet.grid_dims(n_panels)
@@ -100,13 +109,22 @@ def _render_facets(plot, build_output, layout):
     sharex, sharey = facet.share_axes()
     is_flipped = _is_coord_flip(plot.coordinates)
 
-    fig, axes = plt.subplots(
-        nrow, ncol,
-        sharex=sharex,
-        sharey=sharey,
-        figsize=(3.0 * ncol, 2.5 * nrow),
-        squeeze=False,
-    )
+    if subplotspec is not None:
+        # Composition mode — caller owns the figure; lay out our facet
+        # grid inside the given subplotspec via subgridspec.
+        fig = subplotspec.get_gridspec().figure
+        sub_gs = subplotspec.subgridspec(nrow, ncol)
+        axes = sub_gs.subplots(sharex=sharex, sharey=sharey, squeeze=False)
+        owns_fig = False
+    else:
+        fig, axes = plt.subplots(
+            nrow, ncol,
+            sharex=sharex,
+            sharey=sharey,
+            figsize=(3.0 * ncol, 2.5 * nrow),
+            squeeze=False,
+        )
+        owns_fig = True
     flat_axes = axes.flatten()
 
     for panel_row in layout.iter_rows(named=True):
@@ -163,8 +181,9 @@ def _render_facets(plot, build_output, layout):
     if ylabel is not None:
         fig.supylabel(ylabel)
 
-    _apply_plot_titles(plot, fig)
-    _apply_theme(plot.theme, fig, list(flat_axes[:n_panels]), owns_fig=True)
+    if owns_fig:
+        _apply_plot_titles(plot, fig)
+    _apply_theme(plot.theme, fig, list(flat_axes[:n_panels]), owns_fig=owns_fig)
 
     apply = getattr(plot.coordinates, "apply_to_axes", None)
     if apply is not None:
@@ -175,7 +194,8 @@ def _render_facets(plot, build_output, layout):
     apply_axis_guides(list(flat_axes[:n_panels]), plot)
     apply_legends(fig, list(flat_axes[:n_panels]), plot, build_output)
 
-    fig.tight_layout()
+    if owns_fig:
+        fig.tight_layout()
     return fig
 
 

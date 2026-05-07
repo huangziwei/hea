@@ -19,10 +19,11 @@ import pytest
 from conftest import load_dataset
 
 from hea.ggplot import (
-    aes, after_scale, after_stat, annotate, annotation_custom,
+    PlotGrid, aes, after_scale, after_stat, annotate, annotation_custom,
     coord_cartesian, coord_fixed,
     coord_flip, coord_trans, expansion,
     element_blank, element_line, element_rect,
+    wrap_plots,
     element_text, facet_grid, facet_wrap, geom_abline, geom_area, geom_bar, geom_blank,
     geom_boxplot, geom_col, geom_contour, geom_contour_filled, geom_count,
     geom_crossbar, geom_curve, geom_density, geom_dotplot, geom_errorbar, geom_errorbarh,
@@ -3357,6 +3358,177 @@ def test_draw_with_ax_skips_resize():
         assert size[1] == pytest.approx(4.0)
     finally:
         plt.close(parent_fig)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — Patchwork composition
+# ---------------------------------------------------------------------------
+
+
+def _two_simple_plots():
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
+    p1 = ggplot(df, aes("x", "y")) + geom_point()
+    p2 = ggplot(df, aes("x", "y")) + geom_col()
+    return p1, p2
+
+
+def test_patchwork_or_creates_horizontal_grid():
+    """`p1 | p2` returns a horizontal :class:`PlotGrid` of length 2."""
+    p1, p2 = _two_simple_plots()
+    g = p1 | p2
+    assert isinstance(g, PlotGrid)
+    assert g.direction == "h"
+    assert len(g.children) == 2
+
+
+def test_patchwork_truediv_creates_vertical_grid():
+    """`p1 / p2` returns a vertical :class:`PlotGrid`."""
+    p1, p2 = _two_simple_plots()
+    g = p1 / p2
+    assert isinstance(g, PlotGrid)
+    assert g.direction == "v"
+
+
+def test_patchwork_same_direction_flattens():
+    """`p1 | p2 | p3` flattens into a single 1×3 grid (no nesting)."""
+    p1, p2 = _two_simple_plots()
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})
+    p3 = ggplot(df, aes("x", "y")) + geom_point()
+    g = p1 | p2 | p3
+    assert g.direction == "h"
+    assert len(g.children) == 3
+    # No PlotGrid children (all are flat ggplot).
+    assert all(not isinstance(c, PlotGrid) for c in g.children)
+
+
+def test_patchwork_direction_switch_nests():
+    """`(p1 | p2) / p3` produces a 2-row grid whose first row is a 1×2 sub-grid."""
+    p1, p2 = _two_simple_plots()
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})
+    p3 = ggplot(df, aes("x", "y")) + geom_point()
+    g = (p1 | p2) / p3
+    assert g.direction == "v"
+    assert len(g.children) == 2
+    assert isinstance(g.children[0], PlotGrid)
+    assert g.children[0].direction == "h"
+
+
+def test_patchwork_flat_horizontal_renders_two_axes():
+    """`p1 | p2`.draw() produces a figure with two visible axes."""
+    p1, p2 = _two_simple_plots()
+    g = p1 | p2
+    fig = g.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        # At least the two main panels (some matplotlib bookkeeping axes may
+        # exist depending on the gridspec — count >= 2 is the contract).
+        assert len(visible) >= 2
+    finally:
+        plt.close(fig)
+
+
+def test_patchwork_flat_vertical_renders_two_axes():
+    p1, p2 = _two_simple_plots()
+    g = p1 / p2
+    fig = g.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        assert len(visible) >= 2
+    finally:
+        plt.close(fig)
+
+
+def test_patchwork_nested_2_deep():
+    """Nested composition: `(p1 | p2) / p3` produces 3 visible axes."""
+    p1, p2 = _two_simple_plots()
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})
+    p3 = ggplot(df, aes("x", "y")) + geom_point()
+    g = (p1 | p2) / p3
+    fig = g.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        assert len(visible) >= 3
+    finally:
+        plt.close(fig)
+
+
+def test_patchwork_with_faceted_child():
+    """A faceted plot inside a composition keeps its facet sub-grid intact."""
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, 3.0, 4.0],
+        "y": [1.0, 2.0, 3.0, 4.0],
+        "g": ["a", "a", "b", "b"],
+    })
+    p_single = ggplot(df, aes("x", "y")) + geom_point()
+    p_faceted = ggplot(df, aes("x", "y")) + geom_point() + facet_grid("~ g")
+    g = p_single | p_faceted
+    fig = g.draw()
+    try:
+        visible = [a for a in fig.axes if a.get_visible()]
+        # 1 single panel + 2 facet panels = 3.
+        assert len(visible) == 3
+    finally:
+        plt.close(fig)
+
+
+def test_wrap_plots_byrow_default():
+    """`wrap_plots([p1, p2, p3, p4])` defaults to row-major filling."""
+    p1, p2 = _two_simple_plots()
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})
+    p3 = ggplot(df, aes("x", "y")) + geom_point()
+    p4 = ggplot(df, aes("x", "y")) + geom_col()
+    g = wrap_plots([p1, p2, p3, p4])
+    nrow, ncol = g._dims()
+    assert (nrow, ncol) == (2, 2)
+    # First plot lands at (0, 0); second at (0, 1) row-major.
+    assert g._cell_for(0) == (0, 0)
+    assert g._cell_for(1) == (0, 1)
+    assert g._cell_for(2) == (1, 0)
+
+
+def test_wrap_plots_bycol():
+    """`byrow=False` fills column-major."""
+    p1, p2 = _two_simple_plots()
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})
+    p3 = ggplot(df, aes("x", "y")) + geom_point()
+    p4 = ggplot(df, aes("x", "y")) + geom_col()
+    g = wrap_plots([p1, p2, p3, p4], byrow=False)
+    # Column-major: first plot at (0, 0), second at (1, 0), third at (0, 1).
+    assert g._cell_for(0) == (0, 0)
+    assert g._cell_for(1) == (1, 0)
+    assert g._cell_for(2) == (0, 1)
+
+
+def test_wrap_plots_explicit_ncol():
+    """`ncol=3` packs into 3 columns."""
+    plots = [_two_simple_plots()[0] for _ in range(5)]
+    g = wrap_plots(plots, ncol=3)
+    nrow, ncol = g._dims()
+    assert ncol == 3
+    assert nrow == 2  # ceil(5 / 3)
+
+
+def test_patchwork_plus_ggplot_raises_did_you_mean():
+    """`grid + ggplot` and `ggplot + grid` both raise with a helpful message."""
+    p1, p2 = _two_simple_plots()
+    g = p1 | p2
+    with pytest.raises(TypeError, match=r"did you mean"):
+        g + p2
+    with pytest.raises(TypeError, match=r"did you mean"):
+        p1 + g
+
+
+def test_patchwork_figsize_kwarg():
+    """`grid.draw(figsize=(W, H))` resizes the composed figure."""
+    p1, p2 = _two_simple_plots()
+    g = p1 | p2
+    fig = g.draw(figsize=(10, 4))
+    try:
+        size = fig.get_size_inches()
+        assert size[0] == pytest.approx(10.0)
+        assert size[1] == pytest.approx(4.0)
+    finally:
+        plt.close(fig)
 
 
 # ---------------------------------------------------------------------------

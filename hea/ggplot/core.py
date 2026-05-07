@@ -72,21 +72,61 @@ class ggplot:
         self.plot_env = env
 
     def __add__(self, other):
+        # Patchwork: `ggplot + PlotGrid` is a programming error — `+` is for
+        # adding layers/scales/etc., `|` and `/` are for composition.
+        from .patchwork import PlotGrid
+        if isinstance(other, PlotGrid):
+            raise TypeError(
+                "can't `+` a PlotGrid into a ggplot — did you mean "
+                "`|` (horizontal) or `/` (vertical)?"
+            )
         return ggplot_add(other, self)
 
     def __radd__(self, other):
         # Supports rare `theme(...) + ggplot(...)` form.
         return ggplot_add(other, self)
 
+    def __or__(self, other):
+        """Patchwork horizontal composition."""
+        from .patchwork import PlotGrid, _h_combine
+        if isinstance(other, (ggplot, PlotGrid)):
+            return _h_combine(self, other)
+        return NotImplemented
+
+    def __ror__(self, other):
+        from .patchwork import PlotGrid, _h_combine
+        if isinstance(other, (ggplot, PlotGrid)):
+            return _h_combine(other, self)
+        return NotImplemented
+
+    def __truediv__(self, other):
+        """Patchwork vertical composition."""
+        from .patchwork import PlotGrid, _v_combine
+        if isinstance(other, (ggplot, PlotGrid)):
+            return _v_combine(self, other)
+        return NotImplemented
+
+    def __rtruediv__(self, other):
+        from .patchwork import PlotGrid, _v_combine
+        if isinstance(other, (ggplot, PlotGrid)):
+            return _v_combine(other, self)
+        return NotImplemented
+
     # ---- output ------------------------------------------------------
 
-    def draw(self, ax=None, *, width=None, height=None, units="in", figsize=None):
+    def draw(self, ax=None, *, subplotspec=None,
+             width=None, height=None, units="in", figsize=None):
         """Build the plot and render it to a matplotlib :class:`Figure`.
 
         ``ax``: optional existing axes to draw into (e.g. one cell from
         ``plt.subplot_mosaic``). When given, no new figure is created and
         ``ax.figure`` is returned (and ``width``/``height``/``figsize`` are
         ignored — sizing is the parent figure's responsibility).
+
+        ``subplotspec``: a :class:`matplotlib.gridspec.SubplotSpec` to draw
+        into. Used by patchwork composition (:class:`PlotGrid`) to host a
+        ggplot — including faceted plots — inside one cell of a parent
+        gridspec. Mutually exclusive with ``ax``.
 
         Sizing kwargs (interchangeable):
 
@@ -100,8 +140,8 @@ class ggplot:
         """
         from .build import build
         from .render import render
-        fig = render(self, build(self), ax=ax)
-        if ax is None:
+        fig = render(self, build(self), ax=ax, subplotspec=subplotspec)
+        if ax is None and subplotspec is None:
             _resize_figure(fig, width=width, height=height,
                            units=units, figsize=figsize)
         return fig
