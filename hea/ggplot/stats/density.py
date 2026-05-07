@@ -30,7 +30,12 @@ class StatDensity(Stat):
 
         bw = self._bandwidth(x)
         x_min, x_max = float(x.min()), float(x.max())
-        grid = np.linspace(x_min - 3 * bw, x_max + 3 * bw, self.n)
+        # Grid spans the DATA RANGE — matches ggplot2 4.0's
+        # ``stat_density`` output. Internally R computes KDE on a wider
+        # grid (extended 3 bandwidths) and clips the output to data
+        # range; the density values at any common x agree, so we just
+        # evaluate directly at the data range — same observable output.
+        grid = np.linspace(x_min, x_max, self.n)
 
         # scipy gaussian_kde takes bw_method as a multiplier on x.std() — pass our
         # absolute bandwidth as bw / x.std to recover the bandwidth we computed.
