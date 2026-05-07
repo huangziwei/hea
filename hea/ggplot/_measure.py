@@ -39,7 +39,8 @@ def _figure() -> Figure:
 # ones. Callers that override the theme should pass an explicit fontsize.
 
 BASE_SIZE_PT = 11.0
-TITLE_SIZE_PT = BASE_SIZE_PT * 1.2          # plot.title, plot.subtitle (subtitle inherits)
+TITLE_SIZE_PT = BASE_SIZE_PT * 1.2          # plot.title — bold, 1.2× base
+SUBTITLE_SIZE_PT = BASE_SIZE_PT             # plot.subtitle — base size, regular weight
 AXIS_TITLE_SIZE_PT = BASE_SIZE_PT           # axis.title
 AXIS_TEXT_SIZE_PT = BASE_SIZE_PT * 0.8      # axis.text
 CAPTION_SIZE_PT = BASE_SIZE_PT * 0.8        # plot.caption

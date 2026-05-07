@@ -114,16 +114,25 @@ def measure_block(plot, build_output) -> PlotBlock:
 
     labels = plot.labels or {}
 
-    # --- TOP margin: title + subtitle + facet strip top (faceted plots)
-    title_lines = [
-        s for s in (labels.get("title"), labels.get("subtitle")) if s
-    ]
-    title_h = M.text_block_size_in(
-        title_lines, fontsize=M.TITLE_SIZE_PT, weight="bold",
+    # --- TOP margin: title + subtitle (matplotlib default sizing).
+    # Reserve room separately for each so sibling plots in compose mode
+    # share a baseline. Faceted plots also need room for strip labels
+    # (added after the facet check below).
+    import matplotlib as mpl
+    title = labels.get("title")
+    subtitle = labels.get("subtitle")
+    title_h = M.text_size_in(
+        title, fontsize=mpl.rcParams["axes.titlesize"],
+        weight=mpl.rcParams["axes.titleweight"],
     )[1]
-    margin_top = title_h
+    subtitle_h = M.text_size_in(
+        subtitle, fontsize="medium",
+    )[1]
+    margin_top = 0.0
     if title_h > 0:
-        margin_top += M.ROW_GAP_IN
+        margin_top += title_h + M.ROW_GAP_IN
+    if subtitle_h > 0:
+        margin_top += subtitle_h + M.ROW_GAP_IN
 
     # --- LEFT margin: ylab (rotated 90) + ytick reserve
     xlabel, ylabel = _default_labels(plot)
@@ -156,6 +165,10 @@ def measure_block(plot, build_output) -> PlotBlock:
     n_panels = 1 if layout is None else len(layout)
     if n_panels > 1:
         nrow, ncol = plot.facet.grid_dims(n_panels)
+        # Strip labels paint ``ax.set_title`` above each facet panel —
+        # they overflow into the leaf's top-margin cell otherwise.
+        # Reserve their height in margin_top so the title stays above.
+        margin_top += M.strip_cell_height_in("Sample")
     else:
         nrow, ncol = 1, 1
 
@@ -900,6 +913,58 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
                                    tag_iter=tag_iter)
 
 
+def _render_leaf_title_in_top_cell(leaf, fig, gs, top_cell_row, panel_col,
+                                     *, fontsize_title=None,
+                                     fontsize_subtitle=None) -> None:
+    """Render the leaf's title and subtitle as ``fig.text`` artists
+    anchored to the TOP of the top-margin cell.
+
+    Matches matplotlib's default ``axes.titlesize`` ("large") /
+    ``axes.titleweight`` ("normal") so the styling stays consistent
+    with our pre-block-engine ``ax.set_title(loc='left')`` rendering.
+    Subtitle uses a smaller font (matches ggplot2's relative sizing).
+
+    Anchoring at the cell top (rather than above the panel) keeps
+    sibling titles aligned even when one sibling has a subtitle and
+    the other doesn't — the super-grid reserves the same top margin
+    for both via :func:`measure_block`.
+    """
+    import matplotlib as mpl
+
+    labels = leaf.labels or {}
+    title = labels.get("title")
+    subtitle = labels.get("subtitle")
+    if not title and not subtitle:
+        return
+
+    if fontsize_title is None:
+        fontsize_title = mpl.rcParams["axes.titlesize"]
+    if fontsize_subtitle is None:
+        # Subtitle smaller than title; matplotlib calls this "medium".
+        fontsize_subtitle = "medium"
+
+    cell = gs[top_cell_row, panel_col]
+    bbox = cell.get_position(fig)
+    y_cursor = bbox.y1 - 0.005
+    if title:
+        fig.text(
+            bbox.x0, y_cursor, str(title),
+            ha="left", va="top",
+            fontsize=fontsize_title,
+            fontweight=mpl.rcParams["axes.titleweight"],
+        )
+        line_h_in = M.text_size_in(
+            title, fontsize=mpl.rcParams["font.size"] * 1.2,
+        )[1]
+        y_cursor -= (line_h_in + M.ROW_GAP_IN) / fig.get_figheight()
+    if subtitle:
+        fig.text(
+            bbox.x0, y_cursor, str(subtitle),
+            ha="left", va="top",
+            fontsize=fontsize_subtitle,
+        )
+
+
 def _render_leaf_cell(leaf, blk: PlotBlock, fig, gs, panel_cell,
                        right_cell_row, right_cell_col,
                        top_cell_row, panel_col, *, tag_iter=None) -> None:
@@ -949,7 +1014,13 @@ def _render_leaf_cell(leaf, blk: PlotBlock, fig, gs, panel_cell,
         _render_facets_into(leaf, bo, axes, composing=True,
                               colorbar_caxes=cb_caxes)
 
-    _apply_plot_titles(leaf, fig, ax_list=blk.panel_axes, skip_caption=True)
+    # Title/subtitle: render as fig.text in the top-margin cell so all
+    # siblings' titles align to the cell's top edge regardless of whether
+    # the sibling has a subtitle. ``_apply_plot_titles`` would use
+    # ``ax.set_title`` which anchors to the panel's top — wrong for
+    # compose mode (a 2-line title pushes the FIRST line above what a
+    # 1-line title shows, leaving them misaligned).
+    _render_leaf_title_in_top_cell(leaf, fig, gs, top_cell_row, panel_col)
 
     if tag_iter is not None:
         tag = next(tag_iter, None)
