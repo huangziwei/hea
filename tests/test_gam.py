@@ -488,6 +488,48 @@ def test_factor_deferred_in_mutate_and_select():
         hea.DataFrame._from_pydf(df._df).mutate(g=factor("missing"))
 
 
+def test_parse_number_and_if_else():
+    """``hea.parse_number`` ports readr's parse_number; ``hea.if_else``
+    ports dplyr's if_else (null in cond → null out, configurable via
+    ``missing=``). Together they make the canonical R one-liner
+    ``parse_number(if_else(age == "five", "5", age))`` work verbatim.
+    """
+    import hea
+    from hea import if_else, parse_number
+
+    df = hea.DataFrame({"age": ["25", "five", "30 yo", "$1,234.56", "12.5", None]})
+
+    # The chained tidyverse pattern
+    out = df.mutate(
+        age_num=parse_number(if_else(pl.col("age") == "five", "5", pl.col("age")))
+    )
+    assert out["age_num"].to_list() == [25.0, 5.0, 30.0, 1234.56, 12.5, None]
+
+    # parse_number alone: handles currency, units, and unparseable → null
+    out2 = df.mutate(age_num=parse_number(pl.col("age")))
+    assert out2["age_num"].to_list() == [25.0, None, 30.0, 1234.56, 12.5, None]
+
+    # parse_number on a Series (eager) returns a Series
+    s = pl.Series("age", ["$5", "12 yo", "five", None])
+    res = parse_number(s)
+    assert isinstance(res, pl.Series)
+    assert res.to_list() == [5.0, 12.0, None, None]
+
+    # if_else: dplyr-style null-in-condition → null-out by default
+    df2 = hea.DataFrame({"cond": [True, None, False], "x": [1, 2, 3], "y": [10, 20, 30]})
+    out3 = df2.mutate(z=if_else(pl.col("cond"), pl.col("x"), pl.col("y")))
+    assert out3["z"].to_list() == [1, None, 30]
+
+    # missing= overrides the null-out value
+    out4 = df2.mutate(z=if_else(pl.col("cond"), pl.col("x"), pl.col("y"), missing=-1))
+    assert out4["z"].to_list() == [1, -1, 30]
+
+    # bare-string scalars in then/otherwise are lifted to pl.lit (not column refs)
+    df3 = hea.DataFrame({"g": ["a", "b", "c"]})
+    out5 = df3.mutate(label=if_else(pl.col("g") == "a", "YES", "NO"))
+    assert out5["label"].to_list() == ["YES", "NO", "NO"]
+
+
 # ---------------------------------------------------------------------------
 # Cross-cutting: sp passthrough reproduces a fixed-sp fit
 # ---------------------------------------------------------------------------

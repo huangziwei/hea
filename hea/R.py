@@ -180,6 +180,71 @@ def factor(
         set_ordered_cols(_ORDERED_COLS_CV.get() | frozenset({series.name}))
     return out
 
+
+def if_else(condition, true_value, false_value, missing=None) -> pl.Expr:
+    """dplyr's ``if_else()`` — vectorized conditional.
+
+    Wraps ``pl.when(condition).then(true_value).otherwise(false_value)``
+    with one dplyr-shaped twist: a null in ``condition`` produces
+    ``missing`` (default ``None`` → null), matching dplyr's ``NA in →
+    NA out``. Polars' raw ``when/then/otherwise`` instead routes nulls
+    through the otherwise branch — use ``pl.when(...)`` directly if
+    that's what you want.
+
+    Returns a ``pl.Expr``. Use inside ``mutate`` / ``select`` / any
+    polars verb. For Series-on-Series eager evaluation, materialize
+    via ``df.select(if_else(...))`` or use ``Series.zip_with``.
+
+    Parameters
+    ----------
+    condition : pl.Expr | pl.Series | bool
+        Boolean predicate.
+    true_value, false_value : pl.Expr | pl.Series | scalar
+        Values for True / False entries. Bare scalars are auto-lifted
+        via ``pl.lit`` by polars' ``when/then`` machinery.
+    missing : scalar, optional
+        Value emitted when ``condition`` is null. Defaults to ``None``
+        (null), matching dplyr's ``NA`` default.
+    """
+    # Polars' .then("x") interprets a bare string as a column name; dplyr's
+    # if_else treats strings as literals. Lift any non-Expr non-Series value
+    # to pl.lit so "5" stays "5".
+    def _lit(v):
+        return v if isinstance(v, (pl.Expr, pl.Series)) else pl.lit(v)
+
+    t, f = _lit(true_value), _lit(false_value)
+    if isinstance(condition, (pl.Expr, pl.Series)):
+        return (
+            pl.when(condition.is_null()).then(pl.lit(missing))
+            .when(condition).then(t)
+            .otherwise(f)
+        )
+    return pl.when(condition).then(t).otherwise(f)
+
+
+def parse_number(x):
+    """readr's ``parse_number()`` — pull the first number out of a string column.
+
+    Strips comma thousand-separators, then extracts the first signed
+    integer or decimal via ``(-?\\d+(?:\\.\\d+)?)`` and casts to
+    ``Float64`` with ``strict=False`` (unparseable → null). Handles
+    currency symbols, trailing units, and mixed text the same way
+    readr does (``"$1,234.56"`` → ``1234.56``, ``"30 yo"`` → ``30``,
+    ``"five"`` → null). Locale-specific thousand/decimal separators
+    aren't supported — US-style only.
+
+    Accepts ``pl.Series`` (returns ``pl.Series``) or ``pl.Expr``
+    (returns ``pl.Expr``); both expose ``.cast`` and the ``.str``
+    namespace, so the same chain works for either.
+    """
+    return (
+        x.cast(pl.Utf8)
+        .str.replace_all(",", "")
+        .str.extract(r"(-?\d+(?:\.\d+)?)")
+        .cast(pl.Float64, strict=False)
+    )
+
+
 __all__ = [
     # shape / preview
     "head", "tail", "nrow", "ncol", "dim", "length",
@@ -200,6 +265,8 @@ __all__ = [
     "as_numeric", "as_integer", "as_character", "as_logical",
     "is_na", "is_null", "is_finite", "is_numeric", "is_factor",
     "factor", "levels", "nlevels",
+    # readr-style parsing + dplyr conditional
+    "parse_number", "if_else",
     # distributions: d/p/q/r families
     "dnorm", "pnorm", "qnorm", "rnorm",
     "dt", "pt", "qt", "rt",
