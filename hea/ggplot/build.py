@@ -34,6 +34,20 @@ class BuildOutput:
 
 _NON_POSITIONAL_AES = ("colour", "fill", "size", "alpha", "shape", "linetype")
 
+# Aesthetics that share the x or y scale's coordinate space. Training the
+# positional scale on every present sibling lets the axis range cover the
+# full data extent — without ``ymin`` the y scale for ``geom_bar`` would
+# train on counts only (e.g. [68, 152]) and miss the bar baseline at 0;
+# without ``lower``/``upper`` ``geom_boxplot`` would have no ``y`` column
+# to train on at all.
+_X_POSITIONAL_AES = ("x", "xmin", "xmax", "xend", "xintercept")
+_Y_POSITIONAL_AES = ("y", "ymin", "ymax", "yend", "yintercept",
+                     "lower", "middle", "upper")
+
+
+def _positional_aes_for(axis: str) -> tuple[str, ...]:
+    return _X_POSITIONAL_AES if axis == "x" else _Y_POSITIONAL_AES
+
 
 def build(plot) -> BuildOutput:
     """Run the build pipeline. Returns per-layer drawable frames.
@@ -120,19 +134,32 @@ def build(plot) -> BuildOutput:
     # Auto-register defaults: positional always; non-positional only when
     # the data column suggests a discrete scale would help. Pass the
     # column data to the positional path too so a string ``aes(x="island")``
-    # picks ScaleOrdinal automatically.
+    # picks ScaleOrdinal automatically. Fall back to a sibling positional
+    # column (``ymin``, ``lower``, …) when the primary axis aesthetic is
+    # absent — geom_boxplot output has no ``y`` column but five y-typed
+    # siblings, and we still need a y scale.
     for df in layers_data:
         for axis in ("x", "y"):
-            if axis in df.columns:
-                scales.get_or_default(axis, data=df[axis])
+            sibling_for_dtype = next(
+                (df[c] for c in _positional_aes_for(axis) if c in df.columns),
+                None,
+            )
+            if sibling_for_dtype is not None:
+                scales.get_or_default(axis, data=sibling_for_dtype)
         for aes in _NON_POSITIONAL_AES:
             if aes in df.columns:
                 scales.get_or_default_for_data(aes, df[aes])
 
-    # Train every registered scale on every layer's data.
+    # Train every registered scale on every layer's data. Positional scales
+    # train on every present sibling (y, ymin, ymax, lower, …) so the axis
+    # range spans the full data extent, not just the primary aesthetic.
     for df in layers_data:
         for aes_name, scale in list(scales.items()):
-            if aes_name in df.columns:
+            if aes_name in ("x", "y"):
+                for col in _positional_aes_for(aes_name):
+                    if col in df.columns:
+                        scale.train(df[col])
+            elif aes_name in df.columns:
                 scale.train(df[aes_name])
 
     # Map non-positional scales — replace the column with mapped values

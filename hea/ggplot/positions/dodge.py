@@ -46,6 +46,12 @@ class PositionDodge(Position):
             _n_at_x=pl.col("group").count().over("x"),
             _rank_at_x=(pl.col("group").rank("dense").over("x") - 1).cast(pl.Float64),
         )
+        # Short-circuit when no x has overlapping groups — the offset would
+        # be 0 everywhere, but ``x + 0`` still requires a numeric x and
+        # would fail on a discrete (string) x like ``geom_boxplot(aes(x =
+        # species, y = body_mass_g))`` where each species has one box.
+        if int(unique_xg["_n_at_x"].max() or 0) <= 1:
+            return data
         # Offset = (rank - (n-1)/2) * slot_width; slot_width = base_width/n.
         unique_xg = unique_xg.with_columns(
             _offset=pl.when(pl.col("_n_at_x") > 1)

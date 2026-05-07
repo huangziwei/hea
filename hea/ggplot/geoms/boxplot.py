@@ -32,16 +32,31 @@ class GeomBoxplot(Geom):
     outlier_alpha: float | None = None
 
     def draw_panel(self, data, ax) -> None:
+        import polars as pl
+
         from .._util import r_color
 
         if len(data) == 0:
             return
 
+        # ``ax.bxp`` only takes numeric ``positions``. When x is a discrete
+        # column (``aes(x = species, …)``) we route the strings through
+        # matplotlib's category unit — same path ``ax.bar``/``plot`` use
+        # internally — so the box positions line up with the axis labels.
+        x_col = data["x"]
+        x_is_discrete = x_col.dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean)
+        if x_is_discrete:
+            string_values = [str(v) for v in x_col.to_list()]
+            ax.xaxis.update_units(string_values)
+            x_positions = [float(p) for p in ax.convert_xunits(string_values)]
+        else:
+            x_positions = [float(v) for v in x_col.to_list()]
+
         # One row per box (per (x, group) tuple).
         boxes = []
         positions = []
         widths = []
-        for row in data.iter_rows(named=True):
+        for i, row in enumerate(data.iter_rows(named=True)):
             fliers = row.get("outliers") or []
             boxes.append({
                 "med": float(row["middle"]),
@@ -51,7 +66,7 @@ class GeomBoxplot(Geom):
                 "whishi": float(row["ymax"]),
                 "fliers": list(fliers),
             })
-            positions.append(float(row["x"]))
+            positions.append(x_positions[i])
             widths.append(float(row.get("width", 0.75)))
 
         fill = r_color(_first(data, "fill", "white"))
