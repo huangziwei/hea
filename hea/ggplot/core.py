@@ -182,6 +182,19 @@ def _(thing: Labels, plot):
     return out
 
 
+# ``guides(...)`` overrides per-aesthetic guide settings; rendering reads
+# them via ``plot.guide_overrides``. Auto-build still covers the common
+# case so this is currently a forward-compatible passthrough.
+from .guides import Guides as _Guides  # noqa: E402
+
+@ggplot_add.register
+def _(thing: _Guides, plot):
+    out = _copy_plot(plot)
+    existing = getattr(out, "guide_overrides", {}) or {}
+    out.guide_overrides = {**existing, **thing.overrides}
+    return out
+
+
 @ggplot_add.register
 def _(thing: list, plot):
     """Sugar: ``p + [geom_point(), geom_smooth()]`` — useful when layers are

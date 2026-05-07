@@ -54,12 +54,32 @@ from .non_color import (
     scale_alpha_manual,
     scale_linetype,
     scale_linetype_manual,
+    scale_radius,
     scale_shape,
     scale_shape_manual,
     scale_size,
     scale_size_area,
     scale_size_continuous,
     scale_size_manual,
+)
+from .ordinal import (
+    ScaleOrdinal,
+    scale_x_discrete,
+    scale_x_ordinal,
+    scale_y_discrete,
+    scale_y_ordinal,
+)
+from .percent import ScalePercent, scale_x_percent, scale_y_percent
+from .temporal import (
+    ScaleDate,
+    ScaleDatetime,
+    ScaleTime,
+    scale_x_date,
+    scale_x_datetime,
+    scale_x_time,
+    scale_y_date,
+    scale_y_datetime,
+    scale_y_time,
 )
 from .list import ScalesList
 from .scale import Scale
@@ -150,4 +170,22 @@ __all__ = [
     "scale_shape_manual",
     "scale_linetype",
     "scale_linetype_manual",
+    "scale_radius",
+    "scale_x_date",
+    "scale_y_date",
+    "scale_x_datetime",
+    "scale_y_datetime",
+    "scale_x_time",
+    "scale_y_time",
+    "scale_x_percent",
+    "scale_y_percent",
+    "scale_x_ordinal",
+    "scale_y_ordinal",
+    "scale_x_discrete",
+    "scale_y_discrete",
+    "ScaleDate",
+    "ScaleDatetime",
+    "ScaleTime",
+    "ScalePercent",
+    "ScaleOrdinal",
 ]

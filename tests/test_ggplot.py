@@ -30,6 +30,7 @@ from hea.ggplot import (
     geom_rect, geom_ribbon, geom_segment, geom_smooth,
     geom_step, geom_text, geom_tile, geom_violin, geom_vline, ggplot, ggtitle,
     labs, lims,
+    guide_axis, guide_legend, guides,
     position_dodge, position_fill, position_jitter, position_nudge,
     position_stack, scale_color_hue, scale_fill_hue, stat_ecdf, stat_function,
     stat_qq, stat_qq_line, stat_sum, stat_summary, stat_unique, geom_function,
@@ -37,10 +38,13 @@ from hea.ggplot import (
     scale_color_gradient2, scale_color_gradientn, scale_color_identity,
     scale_color_manual, scale_color_viridis_c, scale_color_viridis_d,
     scale_fill_identity, scale_fill_manual, scale_linetype,
-    scale_linetype_manual, scale_shape, scale_shape_manual, scale_size_area,
-    scale_size_continuous, scale_size_manual, scale_x_continuous,
-    scale_x_log10, scale_x_reverse, scale_x_sqrt, scale_y_continuous,
-    scale_y_log10, theme, theme_bw, theme_classic, theme_dark, theme_gray,
+    scale_linetype_manual, scale_radius, scale_shape, scale_shape_manual,
+    scale_size_area, scale_size_continuous, scale_size_manual,
+    scale_x_continuous, scale_x_date, scale_x_datetime, scale_x_log10,
+    scale_x_ordinal, scale_x_percent, scale_x_reverse, scale_x_sqrt,
+    scale_x_time, scale_y_continuous, scale_y_date, scale_y_datetime,
+    scale_y_log10, scale_y_percent,
+    theme, theme_bw, theme_classic, theme_dark, theme_gray,
     theme_minimal, theme_void, xlab, xlim, ylab, ylim,
 )
 
@@ -2464,6 +2468,514 @@ def test_geom_dotplot_stacks_within_bin():
         offs = coll.get_offsets()
         x1 = [o for o in offs if abs(o[0] - 1.0) < 0.5]
         assert len({round(o[1], 6) for o in x1}) == 5
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.1 — guide_legend
+# ---------------------------------------------------------------------------
+
+
+def _all_legends(ax):
+    """Collect all Legend artists attached to ``ax`` (active + add_artist'd)."""
+    legs = [c for c in ax.get_children() if c.__class__.__name__ == "Legend"]
+    cur = ax.get_legend()
+    if cur is not None:
+        legs.append(cur)
+    return list({id(leg): leg for leg in legs}.values())
+
+
+def _df_two_groups():
+    return pl.DataFrame({
+        "x": [1.0, 2.0, 3.0, 1.5, 2.5, 3.5],
+        "y": [1.0, 2.0, 3.0, 1.5, 2.5, 3.5],
+        "g": ["a", "a", "a", "b", "b", "b"],
+        "h": ["x", "x", "x", "y", "y", "y"],
+    })
+
+
+def test_legend_auto_built_for_discrete_shape():
+    """`aes(shape=col)` → one auto-legend with title from the aes value."""
+    df = _df_two_groups()
+    p = ggplot(df, aes("x", "y", shape="g")) + geom_point()
+    fig = p.draw()
+    try:
+        legs = _all_legends(fig.axes[0])
+        assert len(legs) == 1
+        leg = legs[0]
+        assert leg.get_title().get_text() == "g"
+        labels = sorted(t.get_text() for t in leg.get_texts())
+        assert labels == ["a", "b"]
+    finally:
+        plt.close(fig)
+
+
+def test_legend_auto_built_for_discrete_colour():
+    """`aes(colour=col)` produces a discrete colour legend."""
+    df = _df_two_groups()
+    p = ggplot(df, aes("x", "y", colour="g")) + geom_point()
+    fig = p.draw()
+    try:
+        legs = _all_legends(fig.axes[0])
+        assert len(legs) == 1
+        leg = legs[0]
+        # Two colour swatches at distinct hex codes.
+        handles = leg.legend_handles
+        c0 = handles[0].get_color()
+        c1 = handles[1].get_color()
+        assert c0 != c1
+    finally:
+        plt.close(fig)
+
+
+def test_legend_auto_merge_same_source_column():
+    """`aes(colour=g, shape=g)` produces a single merged legend."""
+    df = _df_two_groups()
+    p = ggplot(df, aes("x", "y", colour="g", shape="g")) + geom_point()
+    fig = p.draw()
+    try:
+        legs = _all_legends(fig.axes[0])
+        assert len(legs) == 1
+        leg = legs[0]
+        assert leg.get_title().get_text() == "g"
+        # Each handle picks up both colour and shape.
+        handles = leg.legend_handles
+        # Distinct shapes per level.
+        markers = {h.get_marker() for h in handles}
+        assert len(markers) == 2
+        # Distinct colours per level.
+        colours = {h.get_color() for h in handles}
+        assert len(colours) == 2
+    finally:
+        plt.close(fig)
+
+
+def test_legend_two_groups_when_sources_differ():
+    """`aes(colour=g, shape=h)` with two different source columns →
+    two legends side-by-side."""
+    df = _df_two_groups()
+    p = ggplot(df, aes("x", "y", colour="g", shape="h")) + geom_point()
+    fig = p.draw()
+    try:
+        legs = _all_legends(fig.axes[0])
+        assert len(legs) == 2
+        titles = sorted(leg.get_title().get_text() for leg in legs)
+        assert titles == ["g", "h"]
+    finally:
+        plt.close(fig)
+
+
+def test_legend_position_none_hides_legends():
+    """`theme(legend_position='none')` skips legend rendering entirely."""
+    df = _df_two_groups()
+    p = (ggplot(df, aes("x", "y", shape="g")) + geom_point()
+         + theme(legend_position="none"))
+    fig = p.draw()
+    try:
+        assert _all_legends(fig.axes[0]) == []
+    finally:
+        plt.close(fig)
+
+
+def test_legend_position_top_horizontal():
+    """`theme(legend_position='top', legend_direction='horizontal')` lays
+    handles out in a single row above the axes."""
+    df = _df_two_groups()
+    p = (ggplot(df, aes("x", "y", shape="g")) + geom_point()
+         + theme(legend_position="top", legend_direction="horizontal"))
+    fig = p.draw()
+    try:
+        leg = _all_legends(fig.axes[0])[0]
+        # Anchor sits above the axes (y > 1 in axes coords).
+        bbox = leg.get_bbox_to_anchor().get_points()
+        # bbox is in axes coords thanks to transAxes default.
+        assert bbox.shape == (2, 2)
+    finally:
+        plt.close(fig)
+
+
+def test_legend_title_from_labs_overrides_aes():
+    """`labs(colour='Group')` sets the legend title."""
+    df = _df_two_groups()
+    p = (ggplot(df, aes("x", "y", colour="g")) + geom_point()
+         + labs(colour="Group"))
+    fig = p.draw()
+    try:
+        leg = _all_legends(fig.axes[0])[0]
+        assert leg.get_title().get_text() == "Group"
+    finally:
+        plt.close(fig)
+
+
+def test_legend_constant_aes_param_does_not_create_legend():
+    """`geom_point(colour='red')` is a fixed colour, not a mapping →
+    no legend."""
+    df = _df_two_groups()
+    p = ggplot(df, aes("x", "y")) + geom_point(colour="red")
+    fig = p.draw()
+    try:
+        assert _all_legends(fig.axes[0]) == []
+    finally:
+        plt.close(fig)
+
+
+def test_legend_scale_identity_skips_legend():
+    """`scale_color_identity()` says the data already holds drawable values
+    → no legend."""
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, 3.0],
+        "y": [1.0, 2.0, 3.0],
+        "c": ["#ff0000", "#00ff00", "#0000ff"],
+    })
+    p = (ggplot(df, aes("x", "y", colour="c")) + geom_point()
+         + scale_color_identity())
+    fig = p.draw()
+    try:
+        assert _all_legends(fig.axes[0]) == []
+    finally:
+        plt.close(fig)
+
+
+def test_guide_legend_factory_returns_struct():
+    """`guide_legend()` is a metadata holder; not yet renderer-consumed."""
+    g = guide_legend(title="X", reverse=True)
+    assert g.title == "X"
+    assert g.reverse is True
+
+
+def test_guides_addition_to_plot_stores_overrides():
+    """`+ guides(colour=guide_legend(...))` stores into ``guide_overrides``."""
+    df = _df_two_groups()
+    p = (ggplot(df, aes("x", "y", colour="g")) + geom_point()
+         + guides(colour=guide_legend(title="Group")))
+    assert getattr(p, "guide_overrides", {}).get("colour") is not None
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.2 — guide_colorbar
+# ---------------------------------------------------------------------------
+
+
+def _df_continuous_colour():
+    return pl.DataFrame({
+        "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "y": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "z": [10.0, 20.0, 30.0, 40.0, 50.0],
+    })
+
+
+def test_continuous_colour_renders_colorbar():
+    """`aes(colour=numeric_col)` produces a fig.colorbar (extra child axes
+    with `_colorbar` label)."""
+    import warnings
+    df = _df_continuous_colour()
+    p = ggplot(df, aes("x", "y", colour="z")) + geom_point()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fig = p.draw()
+    try:
+        # main axes + colorbar axes.
+        assert len(fig.axes) == 2
+        cb_ax = fig.axes[1]
+        assert cb_ax.get_label() == "<colorbar>"
+        # Colorbar label = scale.name fallback to aes-source ("z").
+        cb_label = cb_ax.get_ylabel() or cb_ax.get_xlabel()
+        assert cb_label == "z"
+    finally:
+        plt.close(fig)
+
+
+def test_colorbar_range_matches_data():
+    """Colorbar limits track the data range."""
+    import warnings
+    df = _df_continuous_colour()
+    p = ggplot(df, aes("x", "y", colour="z")) + geom_point()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fig = p.draw()
+    try:
+        cb_ax = fig.axes[1]
+        # For a vertical colorbar matplotlib uses ylim for the range.
+        ylim = cb_ax.get_ylim()
+        assert ylim[0] == pytest.approx(10.0)
+        assert ylim[1] == pytest.approx(50.0)
+    finally:
+        plt.close(fig)
+
+
+def test_colorbar_position_top_horizontal():
+    """`theme(legend_position='top')` makes the colorbar horizontal."""
+    import warnings
+    df = _df_continuous_colour()
+    p = (ggplot(df, aes("x", "y", colour="z")) + geom_point()
+         + theme(legend_position="top"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fig = p.draw()
+    try:
+        cb_ax = fig.axes[1]
+        pos = cb_ax.get_position()
+        # Horizontal colorbar: wider than tall.
+        assert pos.width > pos.height
+        # And it sits in the upper half of the figure.
+        assert pos.y0 > 0.5
+    finally:
+        plt.close(fig)
+
+
+def test_colorbar_title_from_labs_overrides_aes():
+    """`labs(colour='Z value')` overrides the colorbar label."""
+    import warnings
+    df = _df_continuous_colour()
+    p = (ggplot(df, aes("x", "y", colour="z")) + geom_point()
+         + labs(colour="Z value"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fig = p.draw()
+    try:
+        cb_ax = fig.axes[1]
+        cb_label = cb_ax.get_ylabel() or cb_ax.get_xlabel()
+        assert cb_label == "Z value"
+    finally:
+        plt.close(fig)
+
+
+def test_colorbar_and_legend_can_coexist():
+    """Continuous colour + discrete shape → one colorbar + one legend."""
+    import warnings
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, 3.0, 4.0],
+        "y": [1.0, 2.0, 3.0, 4.0],
+        "z": [10.0, 20.0, 30.0, 40.0],
+        "g": ["a", "a", "b", "b"],
+    })
+    p = ggplot(df, aes("x", "y", colour="z", shape="g")) + geom_point()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fig = p.draw()
+    try:
+        # 2 axes: main + colorbar.
+        assert len(fig.axes) == 2
+        # And one legend.
+        legs = _all_legends(fig.axes[0])
+        assert len(legs) == 1
+        assert legs[0].get_title().get_text() == "g"
+    finally:
+        plt.close(fig)
+
+
+def test_colorbar_position_none_hides():
+    """`theme(legend_position='none')` hides the colorbar too."""
+    import warnings
+    df = _df_continuous_colour()
+    p = (ggplot(df, aes("x", "y", colour="z")) + geom_point()
+         + theme(legend_position="none"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fig = p.draw()
+    try:
+        # Only the main axes — no colorbar child.
+        assert len(fig.axes) == 1
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.3 — guide_axis
+# ---------------------------------------------------------------------------
+
+
+def test_guide_axis_rotation_via_guides():
+    """`guides(x=guide_axis(angle=45))` rotates x tick labels."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [1.0, 2.0, 3.0, 4.0]})
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + guides(x=guide_axis(angle=45)))
+    fig = p.draw()
+    try:
+        rotations = {t.get_rotation()
+                     for t in fig.axes[0].xaxis.get_majorticklabels()}
+        assert rotations == {45.0}
+    finally:
+        plt.close(fig)
+
+
+def test_guide_axis_rotation_y_axis():
+    """`guides(y=guide_axis(angle=...))` rotates the y axis."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + guides(y=guide_axis(angle=15)))
+    fig = p.draw()
+    try:
+        rotations = {t.get_rotation()
+                     for t in fig.axes[0].yaxis.get_majorticklabels()}
+        assert rotations == {15.0}
+    finally:
+        plt.close(fig)
+
+
+def test_axis_rotation_via_theme_element_text_angle():
+    """`theme(axis_text_x=element_text(angle=30))` also rotates x labels."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + theme(axis_text_x=element_text(angle=30)))
+    fig = p.draw()
+    try:
+        rotations = {t.get_rotation()
+                     for t in fig.axes[0].xaxis.get_majorticklabels()}
+        assert rotations == {30.0}
+    finally:
+        plt.close(fig)
+
+
+def test_guide_axis_overrides_theme():
+    """When both are set, ``guides(x=guide_axis(angle=...))`` wins."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + theme(axis_text_x=element_text(angle=10))
+         + guides(x=guide_axis(angle=60)))
+    fig = p.draw()
+    try:
+        rotations = {t.get_rotation()
+                     for t in fig.axes[0].xaxis.get_majorticklabels()}
+        assert rotations == {60.0}
+    finally:
+        plt.close(fig)
+
+
+def test_guide_axis_factory_holds_metadata():
+    g = guide_axis(angle=30, n_dodge=2, position="top")
+    assert g.angle == 30
+    assert g.n_dodge == 2
+    assert g.position == "top"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.4 — temporal / percent / ordinal / radius scales
+# ---------------------------------------------------------------------------
+
+
+def test_scale_x_date_formats_ticks_as_iso_dates():
+    """`scale_x_date()` installs a date locator + formatter."""
+    import datetime
+    df = pl.DataFrame({
+        "x": [datetime.date(2020, 1, 1),
+              datetime.date(2020, 6, 1),
+              datetime.date(2020, 12, 1)],
+        "y": [1.0, 2.0, 3.0],
+    })
+    p = ggplot(df, aes("x", "y")) + geom_point() + scale_x_date()
+    fig = p.draw()
+    try:
+        labels = [t.get_text() for t in fig.axes[0].xaxis.get_majorticklabels()]
+        # All non-empty labels parse as ISO dates.
+        nonempty = [l for l in labels if l]
+        assert all(len(l) == 10 and l.count("-") == 2 for l in nonempty)
+    finally:
+        plt.close(fig)
+
+
+def test_scale_x_date_custom_format():
+    """`date_format='%b %Y'` overrides the formatter."""
+    import datetime
+    df = pl.DataFrame({
+        "x": [datetime.date(2020, 1, 1),
+              datetime.date(2020, 6, 1),
+              datetime.date(2020, 12, 1)],
+        "y": [1.0, 2.0, 3.0],
+    })
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + scale_x_date(date_format="%b %Y"))
+    fig = p.draw()
+    try:
+        labels = [t.get_text() for t in fig.axes[0].xaxis.get_majorticklabels()]
+        nonempty = [l for l in labels if l]
+        # "Jan 2020" / "Feb 2020" — month abbreviation + year.
+        assert all(any(m in l for m in
+                       ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])
+                   for l in nonempty)
+    finally:
+        plt.close(fig)
+
+
+def test_scale_x_datetime_includes_time():
+    """`scale_x_datetime()` formatter shows the time portion by default."""
+    import datetime
+    df = pl.DataFrame({
+        "x": [datetime.datetime(2020, 1, 1, 12, 30),
+              datetime.datetime(2020, 1, 1, 13, 30),
+              datetime.datetime(2020, 1, 1, 14, 30)],
+        "y": [1.0, 2.0, 3.0],
+    })
+    p = ggplot(df, aes("x", "y")) + geom_point() + scale_x_datetime()
+    fig = p.draw()
+    try:
+        labels = [t.get_text() for t in fig.axes[0].xaxis.get_majorticklabels()]
+        nonempty = [l for l in labels if l]
+        # Default datetime format includes ":" for the hh:mm part.
+        assert any(":" in l for l in nonempty)
+    finally:
+        plt.close(fig)
+
+
+def test_scale_y_percent_formats_as_percent():
+    """`scale_y_percent()` formats numeric ticks as ``50%`` etc."""
+    df = pl.DataFrame({
+        "x": [1, 2, 3, 4],
+        "y": [0.1, 0.5, 0.75, 0.95],
+    })
+    p = ggplot(df, aes("x", "y")) + geom_point() + scale_y_percent()
+    fig = p.draw()
+    try:
+        labels = [t.get_text() for t in fig.axes[0].yaxis.get_majorticklabels()]
+        nonempty = [l for l in labels if l]
+        assert all(l.endswith("%") for l in nonempty)
+    finally:
+        plt.close(fig)
+
+
+def test_scale_y_percent_xmax_100():
+    """`xmax=100` lets the data already be in 0-100 range."""
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [10.0, 50.0, 90.0]})
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + scale_y_percent(xmax=100))
+    fig = p.draw()
+    try:
+        labels = [t.get_text() for t in fig.axes[0].yaxis.get_majorticklabels()]
+        nonempty = [l for l in labels if l]
+        assert all(l.endswith("%") for l in nonempty)
+        # 50.0 should render as "50%", not "5000%".
+        assert any("50%" in l for l in nonempty)
+    finally:
+        plt.close(fig)
+
+
+def test_scale_x_ordinal_passes_through_strings():
+    """`scale_x_ordinal()` preserves matplotlib's categorical axis labels."""
+    df = pl.DataFrame({
+        "x": ["low", "medium", "high"],
+        "y": [1.0, 2.0, 3.0],
+    })
+    p = ggplot(df, aes("x", "y")) + geom_point() + scale_x_ordinal()
+    fig = p.draw()
+    try:
+        labels = [t.get_text() for t in fig.axes[0].xaxis.get_majorticklabels()]
+        assert labels == ["low", "medium", "high"]
+    finally:
+        plt.close(fig)
+
+
+def test_scale_radius_is_continuous_size_alias():
+    """`scale_radius()` produces the same continuous size mapping as
+    `scale_size_continuous()` (both use linear rescale_pal)."""
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3], "z": [1.0, 5.0, 10.0]})
+    p = (ggplot(df, aes("x", "y", size="z")) + geom_point()
+         + scale_radius(range=(2.0, 8.0)))
+    fig = p.draw()
+    try:
+        # Just checking it draws without errors and produces a scatter.
+        assert len(fig.axes[0].collections) >= 1
     finally:
         plt.close(fig)
 

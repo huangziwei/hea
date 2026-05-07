@@ -27,6 +27,9 @@ class BuildOutput:
     data: list[pl.DataFrame]  # one per layer; columns = canonical aes names
     scales: ScalesList = None
     layout: pl.DataFrame | None = None  # one row per panel from facet.compute_layout
+    # Original aes mapping value (typically a column name) per aesthetic,
+    # used by the guide system for legend titles and auto-merge keys.
+    aes_source: dict = None
 
 
 _NON_POSITIONAL_AES = ("colour", "fill", "size", "alpha", "shape", "linetype")
@@ -56,6 +59,19 @@ def build(plot) -> BuildOutput:
     facet = plot.facet
     facet_vars = facet.facet_vars()
     layout = facet.compute_layout(plot.data)
+
+    # Track the original aes value (column name / expression) per aesthetic
+    # so the guide system can name legend titles and detect auto-merge.
+    # First layer wins for each aesthetic (matches ggplot2's "first scale"
+    # semantics — later layers don't rename the legend).
+    aes_source: dict = {}
+    for layer in plot.layers:
+        mapping = _resolve_mapping(layer, plot)
+        for aes_name, value in mapping.items():
+            if aes_name in aes_source:
+                continue
+            if isinstance(value, str):
+                aes_source[aes_name] = value
 
     layers_data: list[pl.DataFrame] = []
     deferred_after_stat: list[dict] = []  # one per layer
@@ -128,7 +144,9 @@ def build(plot) -> BuildOutput:
         df = _apply_default_aes(df, layer.geom)
         layers_data[i] = df
 
-    return BuildOutput(data=layers_data, scales=scales, layout=layout)
+    return BuildOutput(
+        data=layers_data, scales=scales, layout=layout, aes_source=aes_source,
+    )
 
 
 def _split_deferred(mapping):

@@ -67,6 +67,18 @@ def scale_size_manual(*, values, name=None, breaks="default",
 scale_size = scale_size_continuous
 
 
+def scale_radius(*, range=(1.0, 6.0), name=None, breaks="default",
+                 labels="default", limits=None):
+    """Linear-radius size scale. Unlike :func:`scale_size_area` (area ∝
+    value), the *radius* tracks the value linearly. Most useful inside
+    ``coord_polar`` for radial geoms, but applies anywhere ``size`` is
+    mapped."""
+    return ScaleContinuousColor(
+        aesthetics=("size",), name=name, breaks=breaks, labels=labels,
+        limits=limits, palette=rescale_pal(range_=range),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Alpha — continuous (default), manual
 # ---------------------------------------------------------------------------

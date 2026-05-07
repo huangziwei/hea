@@ -63,6 +63,10 @@ def _render_single(plot, build_output, ax):
     if apply is not None:
         apply(ax)
 
+    from .guides import apply_axis_guides, apply_legends
+    apply_axis_guides([ax], plot)
+    apply_legends(fig, [ax], plot, build_output)
+
     if owns_fig:
         fig.tight_layout()
     return fig
@@ -137,6 +141,10 @@ def _render_facets(plot, build_output, layout):
     if apply is not None:
         for panel_ax in flat_axes[:n_panels]:
             apply(panel_ax)
+
+    from .guides import apply_axis_guides, apply_legends
+    apply_axis_guides(list(flat_axes[:n_panels]), plot)
+    apply_legends(fig, list(flat_axes[:n_panels]), plot, build_output)
 
     fig.tight_layout()
     return fig
