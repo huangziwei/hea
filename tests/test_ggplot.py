@@ -23,7 +23,7 @@ from hea.ggplot import (
     coord_cartesian, coord_fixed,
     coord_flip, coord_trans, expansion,
     element_blank, element_line, element_rect,
-    plot_layout, wrap_plots,
+    plot_annotation, plot_layout, wrap_plots,
     element_text, facet_grid, facet_wrap, geom_abline, geom_area, geom_bar, geom_blank,
     geom_boxplot, geom_col, geom_contour, geom_contour_filled, geom_count,
     geom_crossbar, geom_curve, geom_density, geom_dotplot, geom_errorbar, geom_errorbarh,
@@ -3541,13 +3541,22 @@ def test_patchwork_plus_layer_still_adds_layer():
     assert isinstance(extended, ggplot_cls)
 
 
-def test_patchwork_grid_plus_non_plot_raises():
-    """`PlotGrid + theme(...)` (or other non-plot) raises with a clear hint
-    that themes belong on individual plots, not on a composition wrapper."""
+def test_patchwork_grid_plus_theme_propagates_to_last():
+    """patchwork's `+` rule: ``grid + theme(...)`` applies the theme to the
+    rightmost leaf plot (mirrors R's behaviour). To apply to ALL children
+    we'd need ``&`` — deferred polish."""
+    p1, p2 = _two_simple_plots()
+    g = (p1 + p2) + theme(legend_position="top")
+    assert g.children[0].theme.get("legend.position") is None
+    assert g.children[1].theme.get("legend.position") == "top"
+
+
+def test_patchwork_grid_plus_unknown_type_raises():
+    """An rhs that's neither a plot nor a ggplot-addable raises with a hint."""
     p1, p2 = _two_simple_plots()
     g = p1 + p2
-    with pytest.raises(TypeError, match=r"individual plots"):
-        g + theme(legend_position="top")
+    with pytest.raises(TypeError, match=r"PlotGrid only accepts"):
+        g + "not a plot or layer"
 
 
 def test_plot_layout_widths_set_column_ratios():
@@ -3632,6 +3641,211 @@ def test_patchwork_faceted_child_supxlabel_scoped_to_subfigure():
         assert single_subfig.axes[0].get_xlabel() == "x"
     finally:
         plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# patchwork doc walkthrough — https://patchwork.data-imaginist.com/articles/patchwork.html
+# Each test maps to a numbered code block in the doc.
+# ---------------------------------------------------------------------------
+
+
+def _patchwork_doc_plots():
+    """The four ggplots set up at the top of the patchwork tutorial."""
+    from hea import data
+
+    mtcars = data("mtcars")
+    p1 = (mtcars.ggplot().geom_point(aes("mpg", "disp"))
+          .ggtitle("Plot 1"))
+    p2 = (mtcars.ggplot().geom_boxplot(aes("gear", "disp", group="gear"))
+          .ggtitle("Plot 2"))
+    p3 = (mtcars.ggplot().geom_point(aes("hp", "wt", colour="mpg"))
+          .ggtitle("Plot 3"))
+    p4 = (mtcars.ggplot().geom_bar(aes("gear")).facet_wrap("~cyl")
+          .ggtitle("Plot 4"))
+    return p1, p2, p3, p4
+
+
+def test_patchwork_doc_ex3_two_plots_compose():
+    """Ex 3: ``p1 + p2`` returns an auto-layout grid (1×2 for n=2)."""
+    p1, p2, _, _ = _patchwork_doc_plots()
+    g = p1 + p2
+    assert isinstance(g, PlotGrid)
+    assert g.direction == "grid"
+    assert g._dims() == (1, 2)
+    fig = g.draw()
+    try:
+        assert len(fig.subfigs) == 2
+    finally:
+        plt.close(fig)
+
+
+def test_patchwork_doc_ex4_labs_propagates_to_last_plot():
+    """Ex 4: ``p1 + p2 + labs(subtitle = '...')`` adds the labs to the
+    last plot in the grid (patchwork's `+`-to-last semantics)."""
+    p1, p2, _, _ = _patchwork_doc_plots()
+    g = p1 + p2 + labs(subtitle="This will appear in the last plot")
+    assert isinstance(g, PlotGrid)
+    # First plot unaffected.
+    assert "subtitle" not in g.children[0].labels
+    # Second plot picks up the subtitle.
+    assert g.children[1].labels["subtitle"] == "This will appear in the last plot"
+
+
+def test_patchwork_doc_ex5_four_plots_auto_grid():
+    """Ex 5: ``p1 + p2 + p3 + p4`` auto-lays out as a 2×2 grid."""
+    p1, p2, p3, p4 = _patchwork_doc_plots()
+    g = p1 + p2 + p3 + p4
+    assert g._dims() == (2, 2)
+
+
+def test_patchwork_doc_ex6_layout_nrow_byrow_false():
+    """Ex 6: ``+ plot_layout(nrow=3, byrow=FALSE)`` overrides the auto-grid
+    and fills column-major."""
+    p1, p2, p3, p4 = _patchwork_doc_plots()
+    g = p1 + p2 + p3 + p4 + plot_layout(nrow=3, byrow=False)
+    assert g.nrow == 3
+    assert g.byrow is False
+    # Column-major fill: 4th plot lands at column 1 row 0.
+    nrow, ncol = g._dims()
+    assert nrow == 3
+    assert ncol == 2  # ceil(4 / 3)
+    assert g._cell_for(0) == (0, 0)
+    assert g._cell_for(1) == (1, 0)
+    assert g._cell_for(2) == (2, 0)
+    assert g._cell_for(3) == (0, 1)
+
+
+def test_patchwork_doc_ex7_vertical_compose():
+    """Ex 7: ``p1 / p2`` stacks vertically."""
+    p1, p2, _, _ = _patchwork_doc_plots()
+    g = p1 / p2
+    assert g.direction == "v"
+    assert g._dims() == (2, 1)
+
+
+def test_patchwork_doc_ex8_nested_h_inside_v():
+    """Ex 8: ``p1 | (p2 / p3)`` is a 1×2 horizontal grid whose right cell
+    is itself a 2×1 vertical sub-grid."""
+    p1, p2, p3, _ = _patchwork_doc_plots()
+    g = p1 | (p2 / p3)
+    assert g.direction == "h"
+    assert len(g.children) == 2
+    assert isinstance(g.children[0], type(p1))
+    assert isinstance(g.children[1], PlotGrid)
+    assert g.children[1].direction == "v"
+
+
+def test_patchwork_doc_ex9_plot_annotation_title():
+    """Ex 9: ``+ plot_annotation(title=...)`` puts a fig.suptitle on the
+    composed figure."""
+    p1, p2, p3, _ = _patchwork_doc_plots()
+    g = (p1 | (p2 / p3)) + plot_annotation(
+        title="The surprising story about mtcars"
+    )
+    assert g.annotation is not None
+    fig = g.draw()
+    try:
+        assert fig._suptitle is not None
+        assert fig._suptitle.get_text() == "The surprising story about mtcars"
+    finally:
+        plt.close(fig)
+
+
+def test_patchwork_doc_ex10_tag_levels_roman():
+    """Ex 10: ``+ plot_annotation(tag_levels='I')`` tags each leaf I, II, III."""
+    p1, p2, p3, _ = _patchwork_doc_plots()
+    g = p1 + p2 + p3 + plot_annotation(tag_levels="I")
+    fig = g.draw()
+    try:
+        # Each subfigure has a tag text artist with the corresponding label.
+        tags = []
+        for sf in fig.subfigs:
+            for t in sf.texts:
+                txt = t.get_text()
+                if txt in {"I", "II", "III"}:
+                    tags.append(txt)
+        assert tags == ["I", "II", "III"]
+    finally:
+        plt.close(fig)
+
+
+def test_patchwork_tag_levels_a_uppercase():
+    """``tag_levels='A'`` produces A, B, C, ..."""
+    p1, p2, p3, _ = _patchwork_doc_plots()
+    g = p1 + p2 + p3 + plot_annotation(tag_levels="A")
+    fig = g.draw()
+    try:
+        tags = sorted(t.get_text() for sf in fig.subfigs for t in sf.texts
+                      if t.get_text() in {"A", "B", "C"})
+        assert tags == ["A", "B", "C"]
+    finally:
+        plt.close(fig)
+
+
+def test_patchwork_tag_levels_with_prefix_suffix():
+    """``tag_prefix='('`` / ``tag_suffix=')'`` wrap each tag."""
+    p1, p2, _, _ = _patchwork_doc_plots()
+    g = p1 + p2 + plot_annotation(tag_levels="A", tag_prefix="(", tag_suffix=")")
+    fig = g.draw()
+    try:
+        tags = sorted(t.get_text() for sf in fig.subfigs for t in sf.texts
+                      if t.get_text() in {"(A)", "(B)"})
+        assert tags == ["(A)", "(B)"]
+    finally:
+        plt.close(fig)
+
+
+def test_patchwork_tag_levels_explicit_list():
+    """A list ``tag_levels=[...]`` is taken literally."""
+    p1, p2, _, _ = _patchwork_doc_plots()
+    g = p1 + p2 + plot_annotation(tag_levels=["foo", "bar"])
+    fig = g.draw()
+    try:
+        tags = sorted(t.get_text() for sf in fig.subfigs for t in sf.texts
+                      if t.get_text() in {"foo", "bar"})
+        assert tags == ["bar", "foo"]
+    finally:
+        plt.close(fig)
+
+
+def test_patchwork_tag_levels_bad_spec_errors():
+    """An unknown spec raises with the list of valid options."""
+    p1, p2, _, _ = _patchwork_doc_plots()
+    with pytest.raises(ValueError, match="unknown tag_levels"):
+        (p1 + p2 + plot_annotation(tag_levels="bogus")).draw()
+
+
+def test_patchwork_plus_to_last_plot_with_theme():
+    """`grid + theme(...)` propagates to the last plot (patchwork ``+`` rule)."""
+    p1, p2, _, _ = _patchwork_doc_plots()
+    g = p1 + p2 + theme(legend_position="top")
+    assert isinstance(g, PlotGrid)
+    last = g.children[-1]
+    # Theme merge happened on the last child.
+    assert last.theme.get("legend.position") == "top"
+    # First child is untouched.
+    assert g.children[0].theme.get("legend.position") is None
+
+
+def test_patchwork_plus_to_last_plot_with_layer():
+    """`grid + geom_line()` adds a layer to the last plot."""
+    p1, p2, _, _ = _patchwork_doc_plots()
+    g = p1 + p2 + geom_point(colour="red")
+    n_first = len(g.children[0].layers)
+    n_last = len(g.children[-1].layers)
+    # Last plot now has one more layer than the first.
+    assert n_last == n_first + 1
+
+
+def test_patchwork_plus_to_last_plot_recurses_into_nested_grid():
+    """A nested grid forwards the rhs to the last leaf at the deepest right."""
+    p1, p2, p3, _ = _patchwork_doc_plots()
+    g = (p1 | (p2 / p3)) + labs(caption="bottom-right caption")
+    # The rhs leaf is p3 — caption lands there.
+    inner = g.children[1]
+    assert inner.children[-1].labels.get("caption") == "bottom-right caption"
+    # p1 untouched.
+    assert "caption" not in g.children[0].labels
 
 
 def test_plot_layout_overrides_partial():

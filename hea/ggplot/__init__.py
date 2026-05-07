@@ -21,7 +21,10 @@ from .expansion import Expansion, expansion
 from .core import ggplot
 from .facets import facet_grid, facet_wrap
 from .guides import guide_axis, guide_legend, guides
-from .patchwork import PlotGrid, PlotLayout, plot_layout, wrap_plots
+from .patchwork import (
+    PlotAnnotation, PlotGrid, PlotLayout,
+    plot_annotation, plot_layout, wrap_plots,
+)
 from .labels import ggtitle, labs, xlab, ylab
 from .theme import (
     element_blank,
@@ -307,8 +310,10 @@ __all__ = [
     "guides",
     "PlotGrid",
     "PlotLayout",
+    "PlotAnnotation",
     "wrap_plots",
     "plot_layout",
+    "plot_annotation",
     "coord_cartesian",
     "coord_fixed",
     "coord_flip",

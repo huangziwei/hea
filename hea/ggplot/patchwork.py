@@ -48,6 +48,8 @@ class PlotGrid:
     # uses equal sizing.
     widths: list | None = None
     heights: list | None = None
+    # Top-level title/subtitle/caption + per-leaf tags via plot_annotation().
+    annotation: "PlotAnnotation | None" = None
 
     # ------------------------------------------------------------------
     # Composition operators
@@ -85,11 +87,19 @@ class PlotGrid:
             return _grid_combine(self, other)
         if isinstance(other, PlotLayout):
             return self._with_layout(other)
-        raise TypeError(
-            f"can't add {type(other).__name__} to a PlotGrid — "
-            "themes/layers/scales must be applied to individual plots "
-            "before composing, not to the composition wrapper"
-        )
+        if isinstance(other, PlotAnnotation):
+            return self._with_annotation(other)
+        # Patchwork's `+`-to-last-plot semantics: anything else
+        # (Theme/Layer/Scale/Labels/Coord/Facet/...) gets applied to the
+        # rightmost leaf plot. ``&`` (apply to all) is deferred polish.
+        try:
+            return self._apply_to_last_plot(other)
+        except TypeError:
+            raise TypeError(
+                f"can't add {type(other).__name__} to a PlotGrid — "
+                "PlotGrid only accepts other plots, plot_layout(), "
+                "plot_annotation(), or anything addable to a ggplot"
+            ) from None
 
     def _with_layout(self, layout: "PlotLayout") -> "PlotGrid":
         """Return a copy with layout fields overridden by ``layout`` (only
@@ -102,6 +112,43 @@ class PlotGrid:
             byrow=layout.byrow if layout.byrow is not None else self.byrow,
             widths=layout.widths if layout.widths is not None else self.widths,
             heights=layout.heights if layout.heights is not None else self.heights,
+            annotation=self.annotation,
+        )
+
+    def _with_annotation(self, annotation: "PlotAnnotation") -> "PlotGrid":
+        """Return a copy with the annotation slot replaced. patchwork's
+        last-`plot_annotation()`-wins semantics fall out of replacing rather
+        than merging."""
+        return PlotGrid(
+            children=list(self.children),
+            direction=self.direction,
+            nrow=self.nrow, ncol=self.ncol, byrow=self.byrow,
+            widths=self.widths, heights=self.heights,
+            annotation=annotation,
+        )
+
+    def _apply_to_last_plot(self, thing) -> "PlotGrid":
+        """Apply ``thing`` (a Theme/Layer/Scale/Labels/...) to the rightmost
+        leaf plot in the tree — patchwork's `+`-on-grid behaviour."""
+        from .core import ggplot
+
+        if not self.children:
+            raise TypeError("can't apply to last plot of an empty PlotGrid")
+        last = self.children[-1]
+        if isinstance(last, PlotGrid):
+            new_last = last._apply_to_last_plot(thing)
+        elif isinstance(last, ggplot):
+            new_last = last + thing  # may itself raise — let it propagate
+        else:
+            raise TypeError(
+                f"unexpected child type {type(last).__name__} in PlotGrid"
+            )
+        return PlotGrid(
+            children=[*self.children[:-1], new_last],
+            direction=self.direction,
+            nrow=self.nrow, ncol=self.ncol, byrow=self.byrow,
+            widths=self.widths, heights=self.heights,
+            annotation=self.annotation,
         )
 
     # ------------------------------------------------------------------
@@ -155,15 +202,53 @@ class PlotGrid:
         # Use SubFigures (not subgridspec) so each child plot's supxlabel/
         # supylabel scopes to its own region rather than the entire figure.
         # SubFigure has the same API surface as Figure for our needs.
-        self._draw_into(fig)
+        tag_iter = self._make_tag_iter()
+        self._draw_into(fig, tag_iter=tag_iter)
+        if self.annotation is not None:
+            self._apply_figure_annotation(fig)
         _resize_figure(fig, width=width, height=height, units=units,
                        figsize=figsize)
         return fig
 
-    def _draw_into(self, parent) -> None:
+    def _make_tag_iter(self):
+        """If ``annotation.tag_levels`` is set, generate tags up front for
+        every leaf and return an iterator. Otherwise return ``None``."""
+        a = self.annotation
+        if a is None or a.tag_levels is None:
+            return None
+        n = len(self.leaves())
+        tags = _generate_tags(a.tag_levels, n)
+        prefix = a.tag_prefix or ""
+        suffix = a.tag_suffix or ""
+        return iter(f"{prefix}{t}{suffix}" for t in tags)
+
+    def _apply_figure_annotation(self, fig) -> None:
+        a = self.annotation
+        if a.title is not None:
+            fig.suptitle(str(a.title))
+        if a.subtitle is not None:
+            fig.text(0.5, 0.92, str(a.subtitle), ha="center", va="bottom",
+                     fontsize="medium")
+        if a.caption is not None:
+            fig.text(0.99, 0.01, str(a.caption), ha="right", va="bottom",
+                     fontsize="small", style="italic")
+
+    def leaves(self) -> list:
+        """Return the depth-first list of leaf plots (reading order)."""
+        out = []
+        for c in self.children:
+            if isinstance(c, PlotGrid):
+                out.extend(c.leaves())
+            else:
+                out.append(c)
+        return out
+
+    def _draw_into(self, parent, tag_iter=None) -> None:
         """Render this grid inside ``parent`` (a :class:`~matplotlib.figure.Figure`
         or :class:`~matplotlib.figure.SubFigure`). Each child gets its own
         SubFigure cell, isolating ``supxlabel``/``supylabel`` to that region.
+        ``tag_iter`` (when present) supplies the next tag for each leaf in
+        reading order — see :func:`plot_annotation`.
         """
         nrow, ncol = self._dims()
         kw = {}
@@ -186,9 +271,13 @@ class PlotGrid:
             r, c = self._cell_for(i)
             cell = subfigs[r, c]
             if isinstance(child, PlotGrid):
-                child._draw_into(cell)
+                child._draw_into(cell, tag_iter=tag_iter)
             else:
                 child.draw(parent=cell)
+                if tag_iter is not None:
+                    tag = next(tag_iter, None)
+                    if tag is not None:
+                        _attach_tag(cell, tag)
 
     def show(self, *, width=None, height=None, units="in", figsize=None) -> None:
         import matplotlib.pyplot as plt
@@ -337,4 +426,97 @@ def plot_layout(*, widths=None, heights=None, nrow=None, ncol=None,
     """
     return PlotLayout(
         widths=widths, heights=heights, nrow=nrow, ncol=ncol, byrow=byrow,
+    )
+
+
+# ---------------------------------------------------------------------------
+# plot_annotation — title/subtitle/caption + per-leaf tags
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PlotAnnotation:
+    """Top-level annotation for a :class:`PlotGrid`.
+
+    * ``title`` / ``subtitle`` / ``caption`` — figure-level text.
+    * ``tag_levels`` — labels every leaf plot in reading order. Accepts:
+      ``"a"``/``"A"``/``"1"`` for sequential letters/numbers,
+      ``"i"``/``"I"`` for Roman numerals, or an explicit list.
+    * ``tag_prefix``/``tag_suffix``/``tag_sep`` — surround/format the
+      generated tag (e.g. ``tag_prefix="("``, ``tag_suffix=")"``).
+    """
+
+    title: str | None = None
+    subtitle: str | None = None
+    caption: str | None = None
+    tag_levels: Any = None
+    tag_prefix: str | None = None
+    tag_suffix: str | None = None
+    tag_sep: str | None = None
+
+
+def plot_annotation(*, title=None, subtitle=None, caption=None,
+                    tag_levels=None, tag_prefix=None, tag_suffix=None,
+                    tag_sep=None) -> PlotAnnotation:
+    """Patchwork-style figure annotation. Combine with a :class:`PlotGrid`
+    via ``+``::
+
+        (p1 | p2 | p3) + plot_annotation(title="Overview")
+        (p1 + p2 + p3) + plot_annotation(tag_levels="A")  # → A, B, C
+    """
+    return PlotAnnotation(
+        title=title, subtitle=subtitle, caption=caption,
+        tag_levels=tag_levels, tag_prefix=tag_prefix, tag_suffix=tag_suffix,
+        tag_sep=tag_sep,
+    )
+
+
+def _attach_tag(subfig, tag: str) -> None:
+    """Place a bold tag at the upper-left of a SubFigure (patchwork's
+    ``tag_levels`` rendering)."""
+    subfig.text(
+        0.02, 0.98, tag,
+        fontsize="large", fontweight="bold",
+        ha="left", va="top",
+    )
+
+
+def _to_roman(n: int) -> str:
+    if n <= 0:
+        raise ValueError(f"can't render {n} as a Roman numeral")
+    vals = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1]
+    syms = ["M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I"]
+    out = []
+    for v, s in zip(vals, syms):
+        while n >= v:
+            out.append(s)
+            n -= v
+    return "".join(out)
+
+
+def _generate_tags(spec, n: int) -> list[str]:
+    """Map a ``tag_levels`` spec onto ``n`` leaves."""
+    if isinstance(spec, (list, tuple)):
+        if len(spec) < n:
+            raise ValueError(
+                f"plot_annotation: tag_levels list has {len(spec)} entries "
+                f"but the grid has {n} leaves"
+            )
+        return [str(s) for s in spec[:n]]
+    if not isinstance(spec, str):
+        raise TypeError(
+            f"tag_levels must be a string or list, got {type(spec).__name__}"
+        )
+    if spec == "a":
+        return [chr(ord("a") + i) for i in range(n)]
+    if spec == "A":
+        return [chr(ord("A") + i) for i in range(n)]
+    if spec == "1":
+        return [str(i + 1) for i in range(n)]
+    if spec == "I":
+        return [_to_roman(i + 1) for i in range(n)]
+    if spec == "i":
+        return [_to_roman(i + 1).lower() for i in range(n)]
+    raise ValueError(
+        f"unknown tag_levels {spec!r}; expected 'a'/'A'/'1'/'i'/'I' or a list"
     )
