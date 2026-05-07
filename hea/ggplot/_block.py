@@ -664,6 +664,44 @@ DEFAULT_PANEL_W_IN = 3.5
 DEFAULT_PANEL_H_IN = 3.0
 
 
+def _has_right_guide(blk) -> bool:
+    """Whether the block (leaf or nested) hosts a colorbar/legend on its
+    right side. Used to skip lift_right — collapsing a column containing
+    a guide would zero out its cax / host axes and the guide would
+    render at zero width."""
+    if isinstance(blk, PlotBlock):
+        plot = blk.plot
+        bo = blk.build_output
+        pos = plot.theme.get("legend.position") if plot.theme else None
+        if pos not in (None, "right"):
+            return False
+        from .guides import build_colorbar_specs, build_legend_groups
+        if build_colorbar_specs(plot, bo):
+            return True
+        if build_legend_groups(plot, bo):
+            return True
+        return False
+    if isinstance(blk, SuperBlock):
+        # Walk children in the rightmost col.
+        for r in range(blk.nrow):
+            cell = blk.cells[r][blk.ncol - 1]
+            if cell is None:
+                continue
+            _, child_blk = cell
+            if _has_right_guide(child_blk):
+                return True
+        return False
+    return False
+
+
+def _has_left_guide(blk) -> bool:
+    """Mirror of :func:`_has_right_guide` for the left side. Today no
+    decoration ever lives in the leftmost col except yticks/ylabel
+    (which we WANT to lift), so this returns False for typical leaves;
+    kept for symmetry / future left-side legend support."""
+    return False
+
+
 @dataclass
 class SuperBlock:
     """Recursively composed block representing a (possibly nested) ``PlotGrid``.
@@ -1009,12 +1047,21 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
                 # Top/bottom: lift when this child is at row 0 / row
                 # last AND we ourselves were lifted (or we're the
                 # outermost SuperBlock — parent_subspec is None).
-                # Left/right: same logic per col.
+                # Left/right: same logic per col, BUT skip when the
+                # nested's right-edge col hosts a colorbar/legend —
+                # collapsing that col would zero out the guide's cax /
+                # host axes and the guide would render at zero width.
                 outermost = parent_subspec is None
                 child_lift_top = (r == 0) and (lift_top or outer_top_y is not None or outermost)
                 child_lift_bottom = (r == sb.nrow - 1) and (lift_bottom or outermost)
-                child_lift_left = (c == 0) and (lift_left or outermost)
-                child_lift_right = (c == sb.ncol - 1) and (lift_right or outermost)
+                child_lift_left = (
+                    (c == 0) and (lift_left or outermost)
+                    and not _has_left_guide(blk)
+                )
+                child_lift_right = (
+                    (c == sb.ncol - 1) and (lift_right or outermost)
+                    and not _has_right_guide(blk)
+                )
                 render_super_block(blk, fig,
                                     parent_subspec=panel_cell,
                                     tag_iter=tag_iter,
