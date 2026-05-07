@@ -218,3 +218,37 @@ def test_fluent_and_plus_interleaved(df):
     )
     assert isinstance(p, ggplot_class)
     assert len(p.layers) == 2
+
+
+# ---------------------------------------------------------------------------
+# Plot-level kwarg mappings — sugar for ``aes(...)`` at the ggplot entry
+# point. Three forms are equivalent; mixing merges with kwargs winning.
+# ---------------------------------------------------------------------------
+
+
+def test_kwargs_form_equals_aes_form(df):
+    """``df.ggplot(x="x", y="y")`` ≡ ``df.ggplot(aes(x="x", y="y"))``."""
+    p_aes = df.ggplot(aes(x="x", y="y"))
+    p_kw = df.ggplot(x="x", y="y")
+    assert p_aes.mapping == p_kw.mapping
+
+
+def test_kwargs_canonicalize_color_to_colour(df):
+    """American ``color=`` kwarg canonicalizes to British ``colour``."""
+    p = df.ggplot(x="x", y="y", color="g")
+    assert p.mapping == aes(x="x", y="y", colour="g")
+
+
+def test_kwargs_merge_with_aes_kwargs_win(df):
+    """When both forms are given, kwargs override matching keys in aes()."""
+    p = df.ggplot(aes(x="a", y="b"), x="z")
+    assert p.mapping["x"] == "z"
+    assert p.mapping["y"] == "b"
+
+
+def test_top_level_ggplot_accepts_kwargs(df):
+    """``ggplot(df, x="x")`` (function form) also accepts kwarg sugar."""
+    from hea.ggplot import ggplot
+    p1 = ggplot(df, aes(x="x", y="y"))
+    p2 = ggplot(df, x="x", y="y")
+    assert p1.mapping == p2.mapping

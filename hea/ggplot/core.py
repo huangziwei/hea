@@ -46,7 +46,19 @@ class ggplot:
         mapping: Aes | None = None,
         *,
         _env: dict | None = None,
+        **aes_kwargs,
     ):
+        """``ggplot(df, aes(x="col"))`` and ``ggplot(df, x="col")`` are
+        equivalent — direct keyword args at the plot level are folded
+        into the mapping. ``aes()`` is still supported for power users
+        (composing/sharing mappings, layer-level overrides, after_stat).
+
+        When both forms appear, kwargs override matching keys in
+        ``mapping``::
+
+            ggplot(df, aes(x="a", y="b"), color="c")  # x="a", y="b", color="c"
+            ggplot(df, aes(x="a"), x="z")              # x="z"
+        """
         # Captures globals + locals of the constructing frame so aes expressions
         # can resolve names the user had in scope (e.g. helper functions). Same
         # trick `hea.plot.dispatch.plot` uses; see `_frame_env` there.
@@ -60,6 +72,13 @@ class ggplot:
         else:
             frame = inspect.currentframe().f_back
             env = {**frame.f_globals, **frame.f_locals} if frame is not None else {}
+
+        if aes_kwargs:
+            kwargs_aes = Aes()
+            from .aes import _canon
+            for k, v in aes_kwargs.items():
+                kwargs_aes[_canon(k)] = v
+            mapping = (mapping if mapping is not None else Aes()) + kwargs_aes
 
         self.data = data
         self.mapping = mapping if mapping is not None else Aes()

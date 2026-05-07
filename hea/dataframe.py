@@ -850,13 +850,19 @@ class DataFrame(pl.DataFrame):
 
     # ---- ggplot entry point -------------------------------------------
 
-    def ggplot(self, mapping=None):
-        """Start a ggplot from this frame: ``df.ggplot(aes("x", "y")) + geom_point()``.
+    def ggplot(self, mapping=None, **aes_kwargs):
+        """Start a ggplot from this frame.
 
-        Equivalent to ``ggplot(self, mapping)`` but pairs naturally with
-        the tidyverse chain (``df.filter(...).mutate(...).ggplot(aes())``).
-        Layer addition is still via ``+`` (and via fluent methods on the
-        returned ``ggplot``, once Phase B's auto-install lands).
+        Three equivalent forms::
+
+            df.ggplot(aes(x="a", y="b", color="c")) + geom_point()
+            df.ggplot(x="a", y="b", color="c") + geom_point()  # kwarg sugar
+            df.ggplot(aes(x="a"), color="c")  # mix; kwargs override
+
+        Direct kwargs are folded into the mapping (Wilkinson's
+        variable-to-aesthetic binding without the ``aes()`` wrapper).
+        ``aes()`` is still the right choice for layer-level overrides
+        and ``after_stat``/``after_scale`` markers.
 
         Captures the caller's frame and passes it through as ``_env=`` so
         aes-expressions resolve user-defined helpers correctly even when
@@ -871,7 +877,7 @@ class DataFrame(pl.DataFrame):
         from hea.plot.dispatch import _frame_env
 
         env = _frame_env(inspect.currentframe().f_back)
-        return _ggplot(self, mapping, _env=env)
+        return _ggplot(self, mapping, _env=env, **aes_kwargs)
 
     # ---- lazy frame ---------------------------------------------------
 
