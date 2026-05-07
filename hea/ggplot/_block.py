@@ -282,7 +282,7 @@ def render_block(
         sharex, sharey = plot.facet.share_axes()
         sub_gs = GridSpecFromSubplotSpec(
             nrow, ncol, subplot_spec=panel_cell,
-            wspace=0.05, hspace=0.05,
+            wspace=0.05, hspace=0.20,
         )
         axes = []
         for r in range(nrow):
@@ -413,25 +413,23 @@ def _render_facets_into(plot, build_output, axes_grid, *,
     for unused_ax in flat_axes[n_panels:]:
         unused_ax.set_visible(False)
 
+    # Hide redundant tick labels on inner panels when scales are shared.
+    # ``sharex`` shares limits across columns/all → tick labels on the
+    # non-bottom rows are redundant; same for ``sharey`` and non-left
+    # columns. matplotlib's ``add_subplot(sharex=other)`` links the axes
+    # but doesn't auto-hide the labels (only ``plt.subplots()`` does).
+    sharex, sharey = facet.share_axes()
+    _hide_redundant_facet_ticks(axes_grid, sharex, sharey, n_panels)
+
     fig = flat_axes[0].figure
     xlabel, ylabel = _default_labels(plot)
     if is_flipped:
         xlabel, ylabel = ylabel, xlabel
     if composing:
-        # Per-panel labels — only the bottom row gets xlabel and only
-        # the leftmost column gets ylabel, mirroring R's facet layout
-        # but keeping the label inside this leaf's panel area.
-        nrow, ncol = len(axes_grid), len(axes_grid[0])
-        if xlabel is not None:
-            mid_col = ncol // 2
-            for c, ax in enumerate(axes_grid[-1]):
-                if c == mid_col:
-                    ax.set_xlabel(xlabel)
-        if ylabel is not None:
-            mid_row = nrow // 2
-            for r, row in enumerate(axes_grid):
-                if r == mid_row:
-                    row[0].set_ylabel(ylabel)
+        # Compose-mode: place axis labels via ``fig.text`` anchored to the
+        # union bbox of the leaf's panel axes. ``fig.supxlabel`` /
+        # ``supylabel`` would paint across the entire composed figure.
+        _set_facet_axis_labels(fig, flat_axes[:n_panels], xlabel, ylabel)
     else:
         if xlabel is not None:
             fig.supxlabel(xlabel)
@@ -451,6 +449,109 @@ def _render_facets_into(plot, build_output, axes_grid, *,
     apply_axis_guides(list(flat_axes[:n_panels]), plot)
     apply_legends(fig, list(flat_axes[:n_panels]), plot, build_output,
                    colorbar_caxes=colorbar_caxes)
+
+
+def _set_facet_axis_labels(fig, panel_axes: list, xlabel, ylabel) -> None:
+    """Place ``xlabel`` / ``ylabel`` via ``fig.text`` at the union bbox of
+    ``panel_axes`` — so the label spans the whole panel area of one facet
+    leaf, not just a single panel.
+
+    Uses gridspec cell positions (no draw needed) for the bbox union;
+    falls back gracefully if the gridspec isn't queryable yet.
+    """
+    if not panel_axes:
+        return
+    if xlabel is None and ylabel is None:
+        return
+
+    bboxes = []
+    for ax in panel_axes:
+        try:
+            bbox = ax.get_subplotspec().get_position(fig)
+        except Exception:
+            continue
+        bboxes.append(bbox)
+    if not bboxes:
+        return
+
+    x0 = min(b.x0 for b in bboxes)
+    x1 = max(b.x1 for b in bboxes)
+    y0 = min(b.y0 for b in bboxes)
+    y1 = max(b.y1 for b in bboxes)
+    cx = (x0 + x1) / 2
+    cy = (y0 + y1) / 2
+
+    if xlabel is not None:
+        # Just below the bottom edge of the panel area. The bottom panel
+        # row's ticks live just above; a small extra offset clears them.
+        fig.text(cx, y0 - 0.05, xlabel,
+                 ha="center", va="top",
+                 fontsize="medium")
+    if ylabel is not None:
+        # Just left of the left edge, rotated 90° (ggplot2 default).
+        fig.text(x0 - 0.04, cy, ylabel,
+                 ha="right", va="center",
+                 rotation=90, fontsize="medium")
+
+
+def _hide_redundant_facet_ticks(axes_grid, sharex, sharey, n_panels: int) -> None:
+    """When facet panels share scales, only the bottom row's xtick labels
+    and the leftmost column's ytick labels are informative — the rest are
+    redundant and visually cluttering when panels pack tightly.
+
+    For ``sharex=True`` / ``'col'``: hide ``labelbottom`` on every row
+    except the lowest row that contains a *visible* panel in that column.
+    Empty trailing cells in :func:`facet_wrap` (e.g. n=5 in a 2×3 grid)
+    expose the panel above them, so we walk each column from the bottom
+    looking for the first visible panel.
+
+    Same logic for ``sharey=True`` / ``'row'`` and the leftmost-visible
+    column per row. ``sharex='row'`` and ``sharey='col'`` are unusual
+    and left untouched."""
+    nrow = len(axes_grid)
+    ncol = len(axes_grid[0]) if nrow else 0
+    if nrow == 0 or ncol == 0:
+        return
+
+    # Visibility map — facet_wrap may hide trailing cells; we treat
+    # those as "not present" for tick-bookkeeping.
+    visible = [
+        [ax.get_visible() for ax in row]
+        for row in axes_grid
+    ]
+
+    if sharex in (True, "col"):
+        # For each column, find the lowest visible panel — that's the one
+        # that keeps labelbottom; everything above it loses both the
+        # tick marks and labels (R hides both on inner panels).
+        for c in range(ncol):
+            bottom_visible_r = None
+            for r in range(nrow - 1, -1, -1):
+                if visible[r][c]:
+                    bottom_visible_r = r
+                    break
+            if bottom_visible_r is None:
+                continue
+            for r in range(bottom_visible_r):
+                axes_grid[r][c].tick_params(
+                    bottom=False, top=False,
+                    labelbottom=False, labeltop=False,
+                )
+
+    if sharey in (True, "row"):
+        for r in range(nrow):
+            left_visible_c = None
+            for c in range(ncol):
+                if visible[r][c]:
+                    left_visible_c = c
+                    break
+            if left_visible_c is None:
+                continue
+            for c in range(left_visible_c + 1, ncol):
+                axes_grid[r][c].tick_params(
+                    left=False, right=False,
+                    labelleft=False, labelright=False,
+                )
 
 
 def _share_anchor(spec, r: int, c: int, axes_grid, row_axes, *, axis: str):
@@ -820,7 +921,7 @@ def _render_leaf_cell(leaf, blk: PlotBlock, fig, gs, panel_cell,
         sharex, sharey = leaf.facet.share_axes()
         sub_gs = GridSpecFromSubplotSpec(
             sub_nrow, sub_ncol, subplot_spec=panel_cell,
-            wspace=0.05, hspace=0.05,
+            wspace=0.05, hspace=0.20,
         )
         axes = []
         for sr in range(sub_nrow):

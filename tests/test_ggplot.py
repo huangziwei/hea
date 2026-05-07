@@ -551,6 +551,26 @@ def test_position_stack_stacks_bars_vertically():
         plt.close(fig)
 
 
+def test_geom_bar_facet_wrap_bars_start_at_zero():
+    """Regression: position_stack must reset per facet panel.
+
+    Without per-panel position adjustment, bars in panel 1 stack on top
+    of panel 0's bars at the same x — visually offset upward instead of
+    starting at y=0.
+    """
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("gear")) + geom_bar() + facet_wrap("~cyl")
+    fig = p.draw()
+    try:
+        for ax in fig.axes:
+            for b in ax.patches:
+                assert b.get_y() == 0.0, (
+                    f"bar at x={b.get_x()} should start at y=0, got {b.get_y()}"
+                )
+    finally:
+        plt.close(fig)
+
+
 def test_position_fill_normalises_stacks_to_one():
     """`position_fill` makes every column reach exactly y=1."""
     mtcars = load_dataset("datasets", "mtcars")
@@ -3614,8 +3634,9 @@ def test_patchwork_faceted_child_axis_label_scoped_to_panel_column():
     inside its panel column (not across the whole composed figure).
 
     Block engine: instead of fig.supxlabel (which paints across the full
-    figure width), the faceted child sets ``set_xlabel("x")`` on its
-    bottom-row centre panel, so the label lives in the leaf's panel area.
+    figure width), the faceted child renders its xlabel via fig.text at
+    the centre of its panel-area bbox. The single-panel child sets the
+    xlabel on its sole axes.
     """
     df = pl.DataFrame({
         "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
@@ -3632,13 +3653,12 @@ def test_patchwork_faceted_child_axis_label_scoped_to_panel_column():
         assert top_supx is None or not top_supx.get_text()
 
         # The single-panel child sets its xlabel on its sole axes.
-        # ``fig.axes`` order: leaves are added left-to-right.
         single_ax = fig.axes[0]
         assert single_ax.get_xlabel() == "x"
 
-        # Inside the faceted child, at least one panel carries the xlabel.
-        faceted_axes = fig.axes[1:]
-        assert any(ax.get_xlabel() == "x" for ax in faceted_axes)
+        # Faceted child: xlabel rides as a fig.text artist (scoped to its
+        # panel column via positioning, not via fig.supxlabel).
+        assert any(t.get_text() == "x" for t in fig.texts)
     finally:
         plt.close(fig)
 

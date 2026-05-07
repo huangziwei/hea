@@ -93,7 +93,7 @@ def build(plot) -> BuildOutput:
         df = _stat_per_panel(df, layer, facet_vars)
         # Resolve after_stat() now that the stat output is in df.
         df = _apply_deferred(df, after_stat_map, plot.plot_env)
-        df = layer.position.compute_layer(df)
+        df = _position_per_panel(df, layer, facet_vars)
         if not getattr(layer, "broadcast_panels", False):
             df = facet.map_data(df, layout)
         layers_data.append(df)
@@ -218,6 +218,35 @@ def _stat_per_panel(df: pl.DataFrame, layer, facet_vars: list[str]) -> pl.DataFr
         if chunk is None or len(chunk) == 0:
             continue
         # Re-attach facet column values so map_data can assign panels.
+        keys_tuple = keys if isinstance(keys, tuple) else (keys,)
+        for col, val in zip(facet_in_df, keys_tuple):
+            chunk = chunk.with_columns(
+                pl.lit(val).cast(facet_dtypes[col], strict=False).alias(col)
+            )
+        chunks.append(chunk)
+    if not chunks:
+        return pl.DataFrame()
+    return pl.concat(chunks, how="diagonal_relaxed")
+
+
+def _position_per_panel(df: pl.DataFrame, layer, facet_vars: list[str]) -> pl.DataFrame:
+    """Run the layer's position adjustment once per facet-variable combination.
+
+    Without this, ``position_stack`` (and ``position_fill``) would
+    cumulative-sum across panels — bars in panel 1 would stack on top
+    of panel 0's bars at the same x. Mirrors :func:`_stat_per_panel`.
+    """
+    facet_in_df = [v for v in facet_vars if v in df.columns]
+    if not facet_in_df:
+        return layer.position.compute_layer(df)
+
+    facet_dtypes = {v: df[v].dtype for v in facet_in_df}
+
+    chunks = []
+    for keys, sub in df.group_by(facet_in_df, maintain_order=True):
+        chunk = layer.position.compute_layer(sub.drop(facet_in_df))
+        if chunk is None or len(chunk) == 0:
+            continue
         keys_tuple = keys if isinstance(keys, tuple) else (keys,)
         for col, val in zip(facet_in_df, keys_tuple):
             chunk = chunk.with_columns(

@@ -19,6 +19,28 @@ from .transformed import IdentityTrans, Trans
 @dataclass
 class ScaleContinuous(Scale):
     transform: Trans = field(default_factory=IdentityTrans)
+    # Trained data range — used for break computation so ticks reflect
+    # *data* extent, not the (expanded) axis view limit. Without this,
+    # bars at gear ∈ {3, 4, 5} get axis xlim ≈ [2, 6] (bar widths +
+    # margins), and matplotlib's auto-locator yields ticks at 2..6
+    # rather than R's preferred 3..5.
+    range_: list | None = field(default=None, init=False, repr=False)
+
+    def train(self, data) -> None:
+        if data is None or len(data) == 0:
+            return
+        try:
+            lo = float(data.min())
+            hi = float(data.max())
+        except (TypeError, ValueError):
+            return
+        if not (lo == lo and hi == hi):  # NaN check
+            return
+        if self.range_ is None:
+            self.range_ = [lo, hi]
+        else:
+            self.range_[0] = min(self.range_[0], lo)
+            self.range_[1] = max(self.range_[1], hi)
 
     def apply_to_axis(self, ax, axis: str) -> None:
         # Set matplotlib axis scale FIRST. Done before limits because some
@@ -66,8 +88,15 @@ class ScaleContinuous(Scale):
         if self.breaks == "default" and ms is not None:
             return
 
-        cur_lim = ax.get_xlim() if axis == "x" else ax.get_ylim()
-        breaks = self._compute_breaks(cur_lim)
+        # Compute breaks against the trained DATA range (not the axis
+        # view limit) so ticks reflect data extent, not bar-width or
+        # expansion padding. Fall back to the view limit when the scale
+        # wasn't trained (defensive — shouldn't happen on the build path).
+        if self.range_ is not None:
+            break_range = tuple(self.range_)
+        else:
+            break_range = ax.get_xlim() if axis == "x" else ax.get_ylim()
+        breaks = self._compute_breaks(break_range)
         labels = self._compute_labels(breaks)
         if axis == "x":
             ax.set_xticks(breaks)
