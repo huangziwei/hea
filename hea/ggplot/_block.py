@@ -28,19 +28,42 @@ import polars as pl
 from . import _measure as M
 
 
-# ---- Defaults that don't depend on the plot content ----------------------
+# ---- Spacing system (all inches) -----------------------------------------
+#
+# Three tiers: (a) intra-decoration pads that match matplotlib's actual
+# rendering so reserved cell sizes equal what gets drawn; (b) the
+# generic ``ELEMENT_GAP`` between any two decoration elements (e.g.
+# colorbar to panel, plot to legend); (c) ``BLOCK_GAP`` between sibling
+# plot blocks in a compose. Define once, reference everywhere — no
+# more inline 0.04 / 0.05 / 0.10 magic numbers scattered through the
+# render path.
 
-# ggplot2 leaves a fixed gap between the panel and its decorations so
-# tick text doesn't kiss the data area. These are inches.
-_PANEL_MARGIN_PAD_IN = 0.05
+# (a) Pads matplotlib actually uses internally (so our reservations
+# match what gets rendered):
+_TICK_MARK_LEN_IN = 0.05      # rcParams['xtick.major.size'] = 3.5pt ≈ 0.05"
+_TICK_TO_LABEL_PAD_IN = 0.05  # rcParams['xtick.major.pad']  = 3.5pt ≈ 0.05"
+_LABEL_PAD_IN = 0.06          # rcParams['axes.labelpad']    = 4pt   ≈ 0.06"
 
-# Tick-label reserve when we can't measure actual labels. matplotlib
-# renders tick text with extra space for the tick mark itself and a pad
-# between mark and label — both default to ``3.5pt ≈ 0.05"`` (rcParams
-# ``xtick.major.size``, ``xtick.major.pad``). Plus a small safety
-# margin. ggplot2's font is 11pt; ~5 char labels (e.g. "0.500") give
-# the width / height seed below.
-_TICK_MARK_PAD_IN = 0.05 + 0.05 + 0.02  # tick size + tick pad + safety
+# (b) Generic separation between any two adjacent decoration elements
+# (e.g. between an axis label and the figure edge, between a legend and
+# a colorbar in stacked guides). Uniform 0.10" — ggplot2's default
+# ``theme(plot.margin)`` would correspond to about this.
+ELEMENT_GAP_IN = 0.10
+
+# (c) Whitespace between sibling plot blocks in a patchwork compose
+# (panel-to-panel gap, also between a plot's panel and an adjacent
+# plot's decorations).
+BLOCK_GAP_IN = 0.20
+
+# (Existing names kept for backwards reference but redefined in terms
+# of the system above.)
+_PANEL_MARGIN_PAD_IN = _TICK_TO_LABEL_PAD_IN
+_AXIS_LABELPAD_IN = _LABEL_PAD_IN
+_TICK_MARK_PAD_IN = _TICK_MARK_LEN_IN + _TICK_TO_LABEL_PAD_IN + 0.02
+
+# Tick-label reserve when we can't measure actual labels. ggplot2's
+# font is 11pt; ~5 char labels (e.g. "0.500") give the width / height
+# seed below; pad covers tick mark + tick-to-label gap + safety.
 _DEFAULT_YTICK_RESERVE_IN = (
     M.text_size_in("00000", fontsize=M.AXIS_TEXT_SIZE_PT)[0]
     + _TICK_MARK_PAD_IN
@@ -49,9 +72,6 @@ _DEFAULT_XTICK_RESERVE_IN = (
     M.text_size_in("0", fontsize=M.AXIS_TEXT_SIZE_PT)[1]
     + _TICK_MARK_PAD_IN
 )
-# Gap between tick text and axis-title text (matplotlib's
-# ``axes.labelpad`` default = 4pt ≈ 0.056").
-_AXIS_LABELPAD_IN = 0.06
 
 
 @dataclass
@@ -470,16 +490,12 @@ def _render_facets_into(plot, build_output, axes_grid, *,
     xlabel, ylabel = _default_labels(plot)
     if is_flipped:
         xlabel, ylabel = ylabel, xlabel
-    if composing:
-        # Compose-mode: place axis labels via ``fig.text`` anchored to the
-        # union bbox of the leaf's panel axes. ``fig.supxlabel`` /
-        # ``supylabel`` would paint across the entire composed figure.
-        _set_facet_axis_labels(fig, flat_axes[:n_panels], xlabel, ylabel)
-    else:
-        if xlabel is not None:
-            fig.supxlabel(xlabel)
-        if ylabel is not None:
-            fig.supylabel(ylabel)
+    # Always use the bbox-aware placement — even for standalone faceted
+    # plots. ``fig.supxlabel`` / ``supylabel`` use matplotlib's default
+    # fig-rel x position which doesn't reserve room for our wider tick
+    # labels, leading to the ylabel kissing or overlapping the leftmost
+    # panel's yticks.
+    _set_facet_axis_labels(fig, flat_axes[:n_panels], xlabel, ylabel)
 
     _apply_theme(
         plot.theme, fig, list(flat_axes[:n_panels]), owns_fig=False,
@@ -502,8 +518,11 @@ def _set_facet_axis_labels(fig, panel_axes: list, xlabel, ylabel) -> None:
     ``panel_axes`` — so the label spans the whole panel area of one facet
     leaf, not just a single panel.
 
-    Uses gridspec cell positions (no draw needed) for the bbox union;
-    falls back gracefully if the gridspec isn't queryable yet.
+    Offsets from the panel area use the SAME inch-based reserves that
+    :func:`measure_block` allocated for tick labels and label-pad,
+    converted to figure-relative units. This keeps the label cleanly
+    outside the tick text — without it the ylabel can overlap with a
+    wide leftmost ytick label like ``"6000"``.
     """
     if not panel_axes:
         return
@@ -527,15 +546,21 @@ def _set_facet_axis_labels(fig, panel_axes: list, xlabel, ylabel) -> None:
     cx = (x0 + x1) / 2
     cy = (y0 + y1) / 2
 
+    fig_w = fig.get_figwidth()
+    fig_h = fig.get_figheight()
+
     if xlabel is not None:
-        # Just below the bottom edge of the panel area. The bottom panel
-        # row's ticks live just above; a small extra offset clears them.
-        fig.text(cx, y0 - 0.05, xlabel,
+        # Reserve room for xtick labels first, then a labelpad gap, then
+        # the xlabel itself. ``y_offset`` measures from panel.y0 down to
+        # the xlabel's TOP edge.
+        y_offset_in = _DEFAULT_XTICK_RESERVE_IN + _AXIS_LABELPAD_IN
+        fig.text(cx, y0 - y_offset_in / fig_h, xlabel,
                  ha="center", va="top",
                  fontsize="medium")
     if ylabel is not None:
-        # Just left of the left edge, rotated 90° (ggplot2 default).
-        fig.text(x0 - 0.04, cy, ylabel,
+        # Same on the left: ytick reserve + labelpad before the ylabel.
+        x_offset_in = _DEFAULT_YTICK_RESERVE_IN + _AXIS_LABELPAD_IN
+        fig.text(x0 - x_offset_in / fig_w, cy, ylabel,
                  ha="right", va="center",
                  rotation=90, fontsize="medium")
 
