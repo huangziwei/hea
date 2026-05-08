@@ -49,8 +49,27 @@ class StatBoxplot(Stat):
     width: float | None = None
 
     def compute_panel(self, data, params):
-        if "x" not in data.columns or len(data) == 0:
+        if len(data) == 0:
             return pl.DataFrame()
+
+        has_x = "x" in data.columns
+        has_y = "y" in data.columns
+        if not has_x and not has_y:
+            return pl.DataFrame()
+
+        # ggplot2's auto-orient: ``aes(x=…)`` alone → horizontal box (x is
+        # the distribution axis); ``aes(y=…)`` alone → vertical box at x=0.
+        # Internally we always run the 5-number summary on ``y``, so when
+        # the distribution lives in x we swap, then rename the output back
+        # to x-prefixed columns so the X scale trains on the right values.
+        flipped = False
+        if has_x and not has_y:
+            flipped = True
+            data = data.rename({"x": "y"}).with_columns(
+                x=pl.lit(0.0).cast(pl.Float64),
+            )
+        elif has_y and not has_x:
+            data = data.with_columns(x=pl.lit(0.0).cast(pl.Float64))
 
         x_is_discrete = data["x"].dtype in _DISCRETE_DTYPES
 
@@ -97,9 +116,26 @@ class StatBoxplot(Stat):
         else:
             xs = out["x"].to_numpy().astype(float)
             final_width = _resolution(xs) * 0.75
-        return out.with_columns(
+        out = out.with_columns(
             width=pl.lit(final_width).cast(pl.Float64),
         )
+
+        if flipped:
+            # Mirror ggplot2's StatBoxplot: when the distribution axis is
+            # x, the per-box stats become x-prefixed and ``y`` carries the
+            # cross-axis position. Renaming (rather than passing a flag
+            # through) lets the X scale auto-train on ``xmin``/``xmax``/…
+            # via the existing ``_X_POSITIONAL_AES`` plumbing.
+            out = out.rename({
+                "x": "y",
+                "ymin": "xmin",
+                "lower": "xlower",
+                "middle": "xmiddle",
+                "upper": "xupper",
+                "ymax": "xmax",
+            })
+            out = out.with_columns(flipped_aes=pl.lit(True))
+        return out
 
     def _row(self, sub, *, keys, groupby_cols, x_is_discrete):
         y = sub["y"].to_numpy().astype(float)

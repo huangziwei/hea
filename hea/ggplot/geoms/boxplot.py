@@ -39,43 +39,56 @@ class GeomBoxplot(Geom):
         if len(data) == 0:
             return
 
-        # ``ax.bxp`` only takes numeric ``positions``. When x is a discrete
-        # column (``aes(x = species, …)``) we route the strings through
-        # matplotlib's category unit — same path ``ax.bar``/``plot`` use
-        # internally — so the box positions line up with the axis labels.
-        # Pre-register the levels in the order R/ggplot2's ``factor()``
-        # would produce (sorted for plain strings, category order for
-        # ``Categorical``/``Enum``); otherwise matplotlib registers in
+        # ``flipped_aes=True`` rows come from ``aes(x=…)`` (no y) and carry
+        # x-prefixed stat columns; the cross-axis position is in ``y``.
+        flipped = (
+            "flipped_aes" in data.columns
+            and bool(data["flipped_aes"].any())
+        )
+        if flipped:
+            pos_col = "y"
+            stat_cols = ("xmiddle", "xlower", "xupper", "xmin", "xmax")
+        else:
+            pos_col = "x"
+            stat_cols = ("middle", "lower", "upper", "ymin", "ymax")
+        med_c, q1_c, q3_c, lo_c, hi_c = stat_cols
+
+        # ``ax.bxp`` only takes numeric ``positions``. When the cross-axis
+        # column is discrete (``aes(x=species)``) we route the strings
+        # through matplotlib's category unit so the box positions line up
+        # with the axis labels. Register levels in the order R/ggplot2's
+        # ``factor()`` would produce (sorted for plain strings, category
+        # order for ``Categorical``/``Enum``); otherwise matplotlib uses
         # first-appearance order, which can leave the axis labelled
         # ``Adelie, Gentoo, Chinstrap`` instead of the expected sorted run.
-        x_col = data["x"]
-        x_is_discrete = x_col.dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean)
-        if x_is_discrete:
-            string_values = [str(v) for v in x_col.to_list()]
-            if x_col.dtype in (pl.Categorical, pl.Enum):
-                levels = [str(v) for v in x_col.cat.get_categories().to_list()]
+        pos_series = data[pos_col]
+        pos_is_discrete = pos_series.dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean)
+        pos_axis = ax.yaxis if flipped else ax.xaxis
+        convert = ax.convert_yunits if flipped else ax.convert_xunits
+        if pos_is_discrete:
+            string_values = [str(v) for v in pos_series.to_list()]
+            if pos_series.dtype in (pl.Categorical, pl.Enum):
+                levels = [str(v) for v in pos_series.cat.get_categories().to_list()]
             else:
                 levels = sorted(set(string_values))
-            ax.xaxis.update_units(levels)
-            x_positions = [float(p) for p in ax.convert_xunits(string_values)]
+            pos_axis.update_units(levels)
+            positions = [float(p) for p in convert(string_values)]
         else:
-            x_positions = [float(v) for v in x_col.to_list()]
+            positions = [float(v) for v in pos_series.to_list()]
 
-        # One row per box (per (x, group) tuple).
+        # One row per box (per (cross-axis, group) tuple).
         boxes = []
-        positions = []
         widths = []
-        for i, row in enumerate(data.iter_rows(named=True)):
+        for row in data.iter_rows(named=True):
             fliers = row.get("outliers") or []
             boxes.append({
-                "med": float(row["middle"]),
-                "q1": float(row["lower"]),
-                "q3": float(row["upper"]),
-                "whislo": float(row["ymin"]),
-                "whishi": float(row["ymax"]),
+                "med": float(row[med_c]),
+                "q1": float(row[q1_c]),
+                "q3": float(row[q3_c]),
+                "whislo": float(row[lo_c]),
+                "whishi": float(row[hi_c]),
                 "fliers": list(fliers),
             })
-            positions.append(x_positions[i])
             widths.append(float(row.get("width", 0.75)))
 
         fill = r_color(_first(data, "fill", "white"))
@@ -88,6 +101,7 @@ class GeomBoxplot(Geom):
             boxes,
             positions=positions,
             widths=widths,
+            orientation="horizontal" if flipped else "vertical",
             patch_artist=True,
             boxprops={"facecolor": fill, "edgecolor": edge, "alpha": alpha},
             medianprops={"color": edge},

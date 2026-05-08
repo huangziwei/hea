@@ -41,9 +41,14 @@ _NON_POSITIONAL_AES = ("colour", "fill", "size", "alpha", "shape", "linetype")
 # without ``lower``/``upper`` ``geom_boxplot`` would have no ``y`` column
 # to train on at all; without ``outliers`` (a list column) boxplot ticks
 # would max out at the upper whisker and miss outlier points drawn beyond.
-_X_POSITIONAL_AES = ("x", "xmin", "xmax", "xend", "xintercept")
+_X_POSITIONAL_AES = ("x", "xmin", "xmax", "xend", "xintercept",
+                     "xlower", "xmiddle", "xupper")
 _Y_POSITIONAL_AES = ("y", "ymin", "ymax", "yend", "yintercept",
-                     "lower", "middle", "upper", "outliers")
+                     "lower", "middle", "upper")
+# ``outliers`` is a list column produced by stat_boxplot. It belongs on
+# the *distribution* axis, which is normally y but flips to x when the
+# layer's data carries ``flipped_aes=True``. Train it dynamically.
+_OUTLIERS_COLUMN = "outliers"
 
 
 def _positional_aes_for(axis: str) -> tuple[str, ...]:
@@ -181,11 +186,24 @@ def build(plot) -> BuildOutput:
     # train on every present sibling (y, ymin, ymax, lower, …) so the axis
     # range spans the full data extent, not just the primary aesthetic.
     for df in layers_data:
+        # ``flipped_aes`` is the per-row flag stat_boxplot tags onto its
+        # output when the distribution lives on x; outliers (and any
+        # other distribution-axis-only column) follow.
+        flipped = (
+            "flipped_aes" in df.columns
+            and bool(df["flipped_aes"].any())
+        )
+        outliers_axis = "x" if flipped else "y"
         for aes_name, scale in list(scales.items()):
             if aes_name in ("x", "y"):
                 for col in _positional_aes_for(aes_name):
                     if col in df.columns:
                         _train_series(scale, df[col])
+                if (
+                    aes_name == outliers_axis
+                    and _OUTLIERS_COLUMN in df.columns
+                ):
+                    _train_series(scale, df[_OUTLIERS_COLUMN])
             elif aes_name in df.columns:
                 scale.train(df[aes_name])
 
