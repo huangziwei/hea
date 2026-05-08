@@ -570,9 +570,19 @@ def _default_labels(plot):
     explicit = plot.labels
 
     def _from_mapping(mapping, key):
+        from .aes import AfterStat
+
         m = mapping.get(key) if key in mapping else None
         if isinstance(m, str):
             return m
+        # ``after_stat("prop")`` → label ``"prop"``. ggplot2 deparses the
+        # post-stat expression for the label (``y=after_stat(count*100)``
+        # gives ``"count * 100"``); since users pass the expression as a
+        # string, we forward it directly. Callables / polars-expr forms
+        # have no useful deparse, so we leave the label unset and let the
+        # stat-default fallback kick in.
+        if isinstance(m, AfterStat):
+            return str(m.expr) if isinstance(m.expr, str) else None
         # Polars expressions: best-effort deparse via the source column
         # name. ``col("carat").log()`` returns ``"carat"`` from
         # ``.meta.output_name()`` — not the full ``log10(carat)`` ggplot2
