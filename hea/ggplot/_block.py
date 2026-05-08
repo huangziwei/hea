@@ -401,12 +401,12 @@ def _render_single_into(plot, build_output, ax, *,
             df = flip_columns(df)
         layer.geom.draw_panel(df, ax)
 
-    if build_output.scales is not None:
-        for axis in ("x", "y"):
-            scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
-            sc = build_output.scales.get(scale_aes)
-            if sc is not None:
-                sc.apply_to_axis(ax, axis)
+    from .render import _panel_scale
+    for axis in ("x", "y"):
+        scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
+        sc = _panel_scale(build_output, 1, scale_aes)
+        if sc is not None:
+            sc.apply_to_axis(ax, axis)
 
     xlabel, ylabel = _default_labels(plot)
     if is_flipped:
@@ -464,12 +464,12 @@ def _render_facets_into(plot, build_output, axes_grid, *,
             if len(panel_data) > 0:
                 layer.geom.draw_panel(panel_data, panel_ax)
 
-        if build_output.scales is not None:
-            for axis in ("x", "y"):
-                scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
-                sc = build_output.scales.get(scale_aes)
-                if sc is not None:
-                    sc.apply_to_axis(panel_ax, axis)
+        from .render import _panel_scale
+        for axis in ("x", "y"):
+            scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
+            sc = _panel_scale(build_output, panel_row["PANEL"], scale_aes)
+            if sc is not None:
+                sc.apply_to_axis(panel_ax, axis)
 
         labels = facet.panel_labels(panel_row, layout)
         if labels.get("top"):

@@ -12,7 +12,7 @@ Phase 6).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import polars as pl
@@ -30,6 +30,11 @@ class BuildOutput:
     # Original aes mapping value (typically a column name) per aesthetic,
     # used by the guide system for legend titles and auto-merge keys.
     aes_source: dict = None
+    # Per-panel positional scales — populated by ``_train_panel_scales``
+    # when ``scales != "fixed"``. For fixed mode every panel maps to the
+    # same global scale instance (kept here for uniform render-time lookup).
+    # Shape: ``{panel_id: {"x": Scale, "y": Scale}}``.
+    panel_scales: dict = field(default_factory=dict)
 
 
 _NON_POSITIONAL_AES = ("colour", "fill", "size", "alpha", "shape", "linetype")
@@ -53,6 +58,109 @@ _OUTLIERS_COLUMN = "outliers"
 
 def _positional_aes_for(axis: str) -> tuple[str, ...]:
     return _X_POSITIONAL_AES if axis == "x" else _Y_POSITIONAL_AES
+
+
+def _share_key(panel_row: dict, mode):
+    """Return the scale-group key for ``panel_row`` under matplotlib-style
+    share mode. Two panels with the same key share an axis scale instance.
+
+    * ``True``        → all panels share (``"_global_"``).
+    * ``False``       → each panel is independent (the panel id).
+    * ``"col"``       → grouped by column (facet_grid free_x).
+    * ``"row"``       → grouped by row (facet_grid free_y).
+    """
+    if mode is True:
+        return "_global_"
+    if mode is False:
+        return ("panel", panel_row.get("PANEL"))
+    if mode == "col":
+        return ("col", panel_row.get("COL"))
+    if mode == "row":
+        return ("row", panel_row.get("ROW"))
+    return "_global_"
+
+
+def _train_panel_scales(plot, scales, layers_data, layout) -> dict:
+    """Build per-panel positional scales by cloning the global x/y scales
+    and re-training each clone on the data inside that panel's group.
+
+    For ``scales="fixed"`` every panel keys into the same group, so the
+    returned dict effectively points at a single trained clone per axis —
+    same range as the global scale, but a fresh instance so per-panel
+    apply_to_axis side-effects don't leak across panels.
+
+    For ``free*`` modes each scale-group (per-col, per-row, or per-panel)
+    sees only its own data, which is what makes the per-column / per-row
+    axis limits in facet_grid correct.
+    """
+    import copy
+
+    panel_scales: dict = {}
+    if layout is None or len(layout) == 0:
+        return panel_scales
+
+    facet = getattr(plot, "facet", None)
+    if facet is None or not hasattr(facet, "share_axes"):
+        return panel_scales
+    sharex, sharey = facet.share_axes()
+
+    global_x = scales.get("x") if scales is not None else None
+    global_y = scales.get("y") if scales is not None else None
+
+    # Group panels by share key per axis. ``key_to_scale_*`` stores one
+    # cloned scale per group, which all panels in the group will share.
+    key_to_scale_x: dict = {}
+    key_to_scale_y: dict = {}
+    for panel_row in layout.iter_rows(named=True):
+        kx = _share_key(panel_row, sharex)
+        ky = _share_key(panel_row, sharey)
+        if global_x is not None and kx not in key_to_scale_x:
+            cloned = copy.deepcopy(global_x)
+            cloned.range_ = None
+            key_to_scale_x[kx] = cloned
+        if global_y is not None and ky not in key_to_scale_y:
+            cloned = copy.deepcopy(global_y)
+            cloned.range_ = None
+            key_to_scale_y[ky] = cloned
+        pid = panel_row["PANEL"]
+        panel_scales[pid] = {
+            "x": key_to_scale_x.get(kx),
+            "y": key_to_scale_y.get(ky),
+        }
+
+    # Train each scale-group's clone on data only from panels in that group.
+    panel_to_keys: dict = {
+        r["PANEL"]: (_share_key(r, sharex), _share_key(r, sharey))
+        for r in layout.iter_rows(named=True)
+    }
+    for df in layers_data:
+        if "PANEL" not in df.columns:
+            continue
+        for pid, (kx, ky) in panel_to_keys.items():
+            sub = df.filter(pl.col("PANEL") == pid)
+            if len(sub) == 0:
+                continue
+            scale_x = key_to_scale_x.get(kx)
+            scale_y = key_to_scale_y.get(ky)
+            if scale_x is not None:
+                for col in _X_POSITIONAL_AES:
+                    if col in sub.columns:
+                        _train_series(scale_x, sub[col])
+            if scale_y is not None:
+                for col in _Y_POSITIONAL_AES:
+                    if col in sub.columns:
+                        _train_series(scale_y, sub[col])
+                # outliers: same flipped/non-flipped routing as the global
+                # training step above. Only consider rows in this panel.
+                if _OUTLIERS_COLUMN in sub.columns:
+                    flipped = (
+                        "flipped_aes" in sub.columns
+                        and bool(sub["flipped_aes"].any())
+                    )
+                    target = scale_x if flipped else scale_y
+                    if target is not None:
+                        _train_series(target, sub[_OUTLIERS_COLUMN])
+    return panel_scales
 
 
 def _train_series(scale, series) -> None:
@@ -207,6 +315,15 @@ def build(plot) -> BuildOutput:
             elif aes_name in df.columns:
                 scale.train(df[aes_name])
 
+    # Per-panel positional scales — for ``scales="free*"`` each panel (or
+    # column / row, in facet_grid) needs its own trained range so axis
+    # limits and ticks reflect that panel's data, not the global pool.
+    # ``_train_panel_scales`` returns ``{panel_id: {"x": scale, "y": scale}}``
+    # — every panel maps to the right scale instance regardless of the
+    # share mode (fixed → one shared object; col/row → grouped clones;
+    # per-panel → fresh clone each).
+    panel_scales = _train_panel_scales(plot, scales, layers_data, layout)
+
     # Map non-positional scales — replace the column with mapped values
     # (e.g. ``["Adelie", "Adelie", …]`` → ``["#FF6B6B", "#FF6B6B", …]``).
     # Positional scales contribute ticks via ``apply_to_axis`` later, not
@@ -235,6 +352,7 @@ def build(plot) -> BuildOutput:
 
     return BuildOutput(
         data=layers_data, scales=scales, layout=layout, aes_source=aes_source,
+        panel_scales=panel_scales,
     )
 
 

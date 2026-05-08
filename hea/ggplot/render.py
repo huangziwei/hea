@@ -50,6 +50,23 @@ def _is_coord_flip(coord) -> bool:
     return type(coord).__name__ == "CoordFlip"
 
 
+def _panel_scale(build_output, panel_id, axis: str):
+    """Return the scale that governs ``axis`` on panel ``panel_id``.
+
+    Prefers ``BuildOutput.panel_scales`` (per-panel clones produced for
+    ``scales="free*"``); falls back to the global scale for fixed mode
+    or unfaceted plots.
+    """
+    panel = build_output.panel_scales.get(panel_id) if build_output.panel_scales else None
+    if panel is not None:
+        sc = panel.get(axis)
+        if sc is not None:
+            return sc
+    if build_output.scales is None:
+        return None
+    return build_output.scales.get(axis)
+
+
 def _render_single(plot, build_output, ax, subplotspec=None):
     if subplotspec is not None:
         fig = subplotspec.get_gridspec().figure
@@ -73,15 +90,14 @@ def _render_single(plot, build_output, ax, subplotspec=None):
             df = flip_columns(df)
         layer.geom.draw_panel(df, ax)
 
-    if build_output.scales is not None:
-        for axis in ("x", "y"):
-            # Under coord_flip, the scale registered for the x aesthetic
-            # applies to the visible y axis (and vice versa) — scales bind
-            # to aesthetics, not axes.
-            scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
-            sc = build_output.scales.get(scale_aes)
-            if sc is not None:
-                sc.apply_to_axis(ax, axis)
+    for axis in ("x", "y"):
+        # Under coord_flip, the scale registered for the x aesthetic
+        # applies to the visible y axis (and vice versa) — scales bind
+        # to aesthetics, not axes.
+        scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
+        sc = _panel_scale(build_output, 1, scale_aes)
+        if sc is not None:
+            sc.apply_to_axis(ax, axis)
 
     xlabel, ylabel = _default_labels(plot)
     if is_flipped:
@@ -151,17 +167,15 @@ def _render_facets(plot, build_output, layout, subplotspec=None):
             if len(panel_data) > 0:
                 layer.geom.draw_panel(panel_data, panel_ax)
 
-        # Apply positional scales per axis. With sharex/sharey, matplotlib
-        # propagates limits across the shared axes, so calling apply_to_axis
-        # on each panel is consistent for "fixed" and gives independent
-        # ticks for "free*". Under coord_flip the scales swap axes (the x
+        # Apply positional scales per axis. ``panel_scales`` carries the
+        # per-panel scale (for ``free*``); fixed mode falls back to the
+        # global. Under coord_flip the scales swap axes (the x
         # aesthetic's scale lands on the visible y axis).
-        if build_output.scales is not None:
-            for axis in ("x", "y"):
-                scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
-                sc = build_output.scales.get(scale_aes)
-                if sc is not None:
-                    sc.apply_to_axis(panel_ax, axis)
+        for axis in ("x", "y"):
+            scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
+            sc = _panel_scale(build_output, panel_row["PANEL"], scale_aes)
+            if sc is not None:
+                sc.apply_to_axis(panel_ax, axis)
 
         labels = facet.panel_labels(panel_row, layout)
         if labels.get("top"):
