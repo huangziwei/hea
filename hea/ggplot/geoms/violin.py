@@ -74,6 +74,7 @@ def geom_violin(mapping=None, data=None, *, bw="nrd0", n=512,
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
+    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
 
     return Layer(
         geom=GeomViolin(),
@@ -82,4 +83,5 @@ def geom_violin(mapping=None, data=None, *, bw="nrd0", n=512,
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )

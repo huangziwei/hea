@@ -172,6 +172,7 @@ def _make_layer(geom, mapping, data, stat, position, kwargs):
     from ..stats import resolve_stat
 
     aes_params = {k: v for k, v in kwargs.items() if k in _AES_PARAM_KEYS}
+    geom_params = {k: v for k, v in kwargs.items() if k not in _AES_PARAM_KEYS}
     return Layer(
         geom=geom,
         stat=resolve_stat(stat) if isinstance(stat, str) else stat,
@@ -179,6 +180,7 @@ def _make_layer(geom, mapping, data, stat, position, kwargs):
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )
 
 

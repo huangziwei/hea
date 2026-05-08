@@ -113,6 +113,7 @@ def geom_contour(mapping=None, data=None, *, stat="identity",
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "size", "linetype", "alpha"}}
+    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
     aes_params["bins"] = bins
     return Layer(
         geom=GeomContour(),
@@ -121,6 +122,7 @@ def geom_contour(mapping=None, data=None, *, stat="identity",
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )
 
 
@@ -135,6 +137,7 @@ def geom_contour_filled(mapping=None, data=None, *, stat="identity",
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"fill", "alpha"}}
+    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
     aes_params["bins"] = bins
     return Layer(
         geom=GeomContourFilled(),
@@ -143,4 +146,5 @@ def geom_contour_filled(mapping=None, data=None, *, stat="identity",
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )

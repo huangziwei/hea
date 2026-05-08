@@ -128,6 +128,7 @@ def _layer(geom, mapping, data, position, kwargs):
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "size", "linetype", "alpha"}}
+    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
     return Layer(
         geom=geom,
         stat=StatIdentity(),
@@ -135,6 +136,7 @@ def _layer(geom, mapping, data, position, kwargs):
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )
 
 

@@ -14,6 +14,7 @@ def geom_histogram(mapping=None, data=None, *, bins=None, binwidth=None,
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
+    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
 
     return Layer(
         geom=GeomBar(),
@@ -23,4 +24,5 @@ def geom_histogram(mapping=None, data=None, *, bins=None, binwidth=None,
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )

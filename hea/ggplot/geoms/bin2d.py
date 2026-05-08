@@ -141,6 +141,7 @@ def geom_hex(mapping=None, data=None, *, position="identity",
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
+    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
 
     return Layer(
         geom=GeomHex(),
@@ -149,6 +150,7 @@ def geom_hex(mapping=None, data=None, *, position="identity",
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )
 
 
@@ -169,6 +171,7 @@ def geom_bin2d(mapping=None, data=None, *, position="identity",
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
+    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
 
     return Layer(
         geom=GeomTile(),
@@ -177,4 +180,5 @@ def geom_bin2d(mapping=None, data=None, *, position="identity",
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )

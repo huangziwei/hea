@@ -64,6 +64,7 @@ def geom_ribbon(mapping=None, data=None, *, position="identity", **kwargs):
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
+    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
     return Layer(
         geom=GeomRibbon(),
         stat=StatIdentity(),
@@ -71,6 +72,7 @@ def geom_ribbon(mapping=None, data=None, *, position="identity", **kwargs):
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )
 
 
@@ -106,6 +108,7 @@ def geom_area(mapping=None, data=None, *, position="stack", **kwargs):
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
+    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
     return Layer(
         geom=GeomArea(),
         stat=StatIdentity(),
@@ -113,4 +116,5 @@ def geom_area(mapping=None, data=None, *, position="stack", **kwargs):
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )

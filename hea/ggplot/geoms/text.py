@@ -89,6 +89,7 @@ def geom_text(mapping=None, data=None, *, stat="identity", position="identity",
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "size", "angle", "hjust", "vjust",
                            "alpha", "family", "fontface", "label"}}
+    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
 
     return Layer(
         geom=GeomText(),
@@ -97,6 +98,7 @@ def geom_text(mapping=None, data=None, *, stat="identity", position="identity",
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
         na_rm=na_rm,
     )
 
@@ -169,6 +171,7 @@ def geom_label(mapping=None, data=None, *, stat="identity", position="identity",
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "angle", "hjust",
                            "vjust", "alpha", "family", "fontface", "label"}}
+    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
 
     return Layer(
         geom=GeomLabel(label_padding=label_padding, label_r=label_r,
@@ -178,5 +181,6 @@ def geom_label(mapping=None, data=None, *, stat="identity", position="identity",
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
         na_rm=na_rm,
     )

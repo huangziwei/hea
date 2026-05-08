@@ -120,6 +120,7 @@ def geom_boxplot(mapping=None, data=None, *, position="dodge2",
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
+    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
 
     return Layer(
         geom=GeomBoxplot(outlier_size=outlier_size,
@@ -130,4 +131,5 @@ def geom_boxplot(mapping=None, data=None, *, position="dodge2",
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )

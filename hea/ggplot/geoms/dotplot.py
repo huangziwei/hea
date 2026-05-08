@@ -101,6 +101,7 @@ def geom_dotplot(mapping=None, data=None, *, stat="identity", position="identity
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "alpha"}}
+    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
     if binwidth is not None:
         aes_params["binwidth"] = binwidth
     return Layer(
@@ -110,4 +111,5 @@ def geom_dotplot(mapping=None, data=None, *, stat="identity", position="identity
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )

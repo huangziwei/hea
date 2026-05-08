@@ -50,6 +50,10 @@ def geom_smooth(mapping=None, data=None, *, method="loess", formula=None,
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
+    # Anything not in the narrow set goes to geom_params; Layer.__post_init__
+    # then promotes aes-named entries (e.g. ``group``, ``weight``) to
+    # aes_params, which build-time promotion routes to the mapping.
+    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
 
     return Layer(
         geom=GeomSmooth(se=se),
@@ -59,5 +63,6 @@ def geom_smooth(mapping=None, data=None, *, method="loess", formula=None,
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
         na_rm=na_rm,
     )

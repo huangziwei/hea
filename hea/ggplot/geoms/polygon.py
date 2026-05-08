@@ -119,6 +119,7 @@ def geom_polygon(mapping=None, data=None, *, stat="identity",
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype",
                            "alpha", "group"}}
+    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
     return Layer(
         geom=GeomPolygon(),
         stat=resolve_stat(stat) if isinstance(stat, str) else stat,
@@ -126,4 +127,5 @@ def geom_polygon(mapping=None, data=None, *, stat="identity",
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )
