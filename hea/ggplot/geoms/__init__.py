@@ -13,7 +13,7 @@ from .errorbar import (
     geom_linerange,
     geom_pointrange,
 )
-from .hex import geom_hex
+from .bin2d import geom_bin2d, geom_hex
 from .histogram import geom_histogram
 from .path import geom_line, geom_path, geom_step
 from .point import geom_jitter, geom_point
@@ -60,6 +60,7 @@ __all__ = [
     "geom_curve",
     "geom_contour",
     "geom_contour_filled",
+    "geom_bin2d",
     "geom_hex",
     "geom_dotplot",
 ]

@@ -1,4 +1,5 @@
 from .bin import StatBin, stat_bin
+from .bin2d import StatBin2d, StatBinhex, stat_bin_2d, stat_binhex
 from .boxplot import StatBoxplot, stat_boxplot
 from .count import StatCount, stat_count
 from .density import StatDensity, stat_density
@@ -17,6 +18,8 @@ from .ydensity import StatYdensity, stat_ydensity
 _NAME_TO_STAT = {
     "identity": StatIdentity,
     "bin": StatBin,
+    "bin_2d": StatBin2d,
+    "binhex": StatBinhex,
     "count": StatCount,
     "density": StatDensity,
     "smooth": StatSmooth,
@@ -52,6 +55,8 @@ __all__ = [
     "Stat",
     "StatIdentity", "stat_identity",
     "StatBin", "stat_bin",
+    "StatBin2d", "stat_bin_2d",
+    "StatBinhex", "stat_binhex",
     "StatCount", "stat_count",
     "StatDensity", "stat_density",
     "StatSmooth", "stat_smooth",
