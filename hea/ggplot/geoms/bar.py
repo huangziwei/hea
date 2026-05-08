@@ -55,8 +55,6 @@ class GeomBar(Geom):
         return data
 
     def draw_panel(self, data, ax) -> None:
-        from .._util import r_color
-
         x = data["x"].to_numpy()
 
         if "ymin" in data.columns and "ymax" in data.columns:
@@ -73,11 +71,13 @@ class GeomBar(Geom):
         else:
             width = 0.9
 
-        # Per-row fill if the column is non-trivial (multiple distinct values
-        # or anything other than the default), else scalar default. Lets
-        # dodge/stack with explicit fills colour each bar individually.
-        fill = _fill_value(data)
-        edge = r_color(_edge_colour(data))
+        # Per-row fill / edge: scalar when uniform, list when varied
+        # (matplotlib's ``ax.bar`` accepts either). Lets dodge / stack /
+        # ``aes(colour=class)`` colour each bar individually.
+        fill = _row_colour(data, "fill", when_all_none="none",
+                           when_missing="grey35")
+        edge = _row_colour(data, "colour", when_all_none="none",
+                           when_missing="none")
         alpha = float(_scalar(data, "alpha", default=1.0))
 
         # Under coord_flip the data has already been x↔y swapped by render:
@@ -99,31 +99,39 @@ def _scalar(df, col, *, default):
     return default if val is None else val
 
 
-def _fill_value(df):
+def _row_colour(df, col, *, when_all_none, when_missing):
+    """Resolve a per-row colour-like aesthetic into a matplotlib value.
+
+    ``when_missing`` — column not in df at all (geom default applies).
+    ``when_all_none`` — column is all-None, i.e. user explicitly wrote
+    ``fill=None`` / ``colour=None`` (matches R's ``fill=NA`` /
+    ``colour=NA`` → transparent / no edge). ``"none"`` is matplotlib's
+    transparent literal.
+
+    Returns:
+      * scalar matplotlib colour when the column is missing, all-None,
+        or uniform across rows;
+      * list of per-row colours when values vary, with any None entries
+        rewritten to ``"none"`` so matplotlib doesn't reject the array.
+    """
     from .._util import r_color
 
-    if "fill" not in df.columns or len(df) == 0:
-        return r_color("grey35")
-    vals = df["fill"].to_list()
-    if all(v is None for v in vals):
-        return r_color("grey35")
-    # Distinct fill values per row → return list; otherwise scalar.
-    distinct = {v for v in vals if v is not None}
+    if col not in df.columns or len(df) == 0:
+        return r_color(when_missing) if when_missing != "none" else "none"
+    vals = df[col].to_list()
+    # Treat NaN floats the same as None — matches R's ``NA_real_``.
+    def _is_na(v):
+        if v is None:
+            return True
+        if isinstance(v, float) and np.isnan(v):
+            return True
+        return False
+    if all(_is_na(v) for v in vals):
+        return when_all_none if when_all_none == "none" else r_color(when_all_none)
+    distinct = {v for v in vals if not _is_na(v)}
     if len(distinct) <= 1:
-        return r_color(next(iter(distinct), "grey35"))
-    return [r_color(v) if v is not None else r_color("grey35") for v in vals]
-
-
-def _edge_colour(df):
-    """Map ggplot2's ``colour = NA`` (no edge) to matplotlib's ``edgecolor='none'``."""
-    if "colour" not in df.columns or len(df) == 0:
-        return "none"
-    val = df["colour"][0]
-    if val is None:
-        return "none"
-    if isinstance(val, float) and np.isnan(val):
-        return "none"
-    return val
+        return r_color(next(iter(distinct)))
+    return ["none" if _is_na(v) else r_color(v) for v in vals]
 
 
 def geom_bar(mapping=None, data=None, *, stat="count", position="stack", **kwargs):
