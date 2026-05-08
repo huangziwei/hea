@@ -319,6 +319,48 @@ def rescale_pal(range_: tuple = (1.0, 6.0)):
     return palette
 
 
+def rescale_pal_discrete(range_: tuple = (0.1, 1.0)):
+    """Discrete linear palette: ``pal(n)`` → n evenly-spaced values in
+    ``[range_[0], range_[1]]``. Used for ``scale_alpha`` on discrete data
+    (matches ggplot2 4.0 ``scale_alpha_ordinal``).
+    """
+    import numpy as np
+
+    lo, hi = float(range_[0]), float(range_[1])
+
+    def palette(n: int) -> list[float]:
+        if n <= 0:
+            return []
+        if n == 1:
+            return [(lo + hi) / 2]
+        return np.linspace(lo, hi, n).tolist()
+
+    return palette
+
+
+def area_pal_discrete(range_: tuple = (2.0, 6.0)):
+    """Discrete area-proportional palette: ``pal(n)`` → n radii whose
+    *areas* (squared values) are evenly spaced in
+    ``[range_[0]², range_[1]²]``. Used for ``scale_size`` on discrete
+    data — matches ggplot2 4.0's discrete-size palette, which area-maps
+    so that consecutive size levels look perceptually similar (not
+    linearly, where the small end visually disappears).
+    """
+    import numpy as np
+
+    lo, hi = float(range_[0]), float(range_[1])
+
+    def palette(n: int) -> list[float]:
+        if n <= 0:
+            return []
+        if n == 1:
+            return [(lo + hi) / 2]
+        areas = np.linspace(lo * lo, hi * hi, n)
+        return np.sqrt(areas).tolist()
+
+    return palette
+
+
 def area_pal(range_: tuple = (1.0, 6.0)):
     """Area-proportional rescale: ``size ∝ √value``. Used by
     ``scale_size_area`` so visual area (not radius) tracks the underlying

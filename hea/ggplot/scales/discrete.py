@@ -17,6 +17,18 @@ from ._palettes import brewer_pal_discrete, hue_pal, manual_pal, viridis_pal_dis
 from .scale import Scale
 
 
+def _polars_dtype_for(values) -> pl.DataType:
+    """Best-fit polars dtype for ``values`` — Float64 if any element is
+    numeric (size/alpha palettes), else Utf8 (colour/shape/linetype
+    palettes return hex strings or marker codes)."""
+    for v in values:
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return pl.Float64
+        if v is not None:
+            return pl.Utf8
+    return pl.Utf8
+
+
 @dataclass
 class ScaleDiscreteColor(Scale):
     """Maps discrete levels (e.g. species names) to colours via a palette."""
@@ -58,10 +70,16 @@ class ScaleDiscreteColor(Scale):
             colours = pal(len(self.levels))
             mapping = dict(zip(self.levels, colours))
 
+        # Pick the polars dtype from the mapped values themselves —
+        # discrete scales for ``size`` / ``alpha`` produce floats, while
+        # ``colour`` / ``fill`` / ``shape`` / ``linetype`` produce
+        # strings. Hardcoding Utf8 here would crash the float case.
+        return_dtype = _polars_dtype_for(mapping.values())
+
         if isinstance(data, pl.Series):
             return data.map_elements(
                 lambda v: mapping.get(v),
-                return_dtype=pl.Utf8,
+                return_dtype=return_dtype,
             ).alias(data.name)
         return [mapping.get(v) for v in data]
 

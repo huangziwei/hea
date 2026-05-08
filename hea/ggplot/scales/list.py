@@ -100,7 +100,7 @@ class ScalesList:
             return sc
 
         if aesthetic == "size":
-            from ._palettes import rescale_pal
+            from ._palettes import area_pal_discrete, rescale_pal
             from .color_continuous import ScaleContinuousColor
             from .discrete import ScaleDiscreteColor
 
@@ -109,8 +109,13 @@ class ScalesList:
                     aesthetics=("size",), palette=rescale_pal((1.0, 6.0)),
                 )
             elif is_discrete:
+                # ggplot2 4.0 area-maps discrete size: per-level radii are
+                # ``sqrt(linspace(2², 6², n))`` so visual areas (not radii)
+                # space evenly. Linear-radius spacing would make the
+                # smallest level vanish next to the largest.
                 sc = ScaleDiscreteColor(
-                    aesthetics=("size",), palette=rescale_pal((1.0, 6.0)),
+                    aesthetics=("size",),
+                    palette=area_pal_discrete((2.0, 6.0)),
                 )
             else:
                 return None
@@ -118,7 +123,7 @@ class ScalesList:
             return sc
 
         if aesthetic == "alpha":
-            from ._palettes import alpha_pal
+            from ._palettes import alpha_pal, rescale_pal_discrete
             from .color_continuous import ScaleContinuousColor
             from .discrete import ScaleDiscreteColor
 
@@ -127,8 +132,10 @@ class ScalesList:
                     aesthetics=("alpha",), palette=alpha_pal((0.1, 1.0)),
                 )
             elif is_discrete:
+                # ggplot2 ``scale_alpha_ordinal``: ``seq(0.1, 1, length.out=n)``.
                 sc = ScaleDiscreteColor(
-                    aesthetics=("alpha",), palette=alpha_pal((0.1, 1.0)),
+                    aesthetics=("alpha",),
+                    palette=rescale_pal_discrete((0.1, 1.0)),
                 )
             else:
                 return None
