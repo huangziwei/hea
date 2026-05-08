@@ -207,6 +207,12 @@ def measure_block(plot, build_output) -> PlotBlock:
         # they overflow into the leaf's top-margin cell otherwise.
         # Reserve their height in margin_top so the title stays above.
         margin_top += M.strip_cell_height_in("Sample")
+        # facet_grid right strips: a vertical strip on the rightmost panel
+        # of each row. Same thickness as a top strip (font + padding).
+        # Without this, the rotated label and grey rect get clipped past
+        # the figure edge.
+        if getattr(plot.facet, "rows", None):
+            margin_right += M.strip_cell_height_in("Sample")
     else:
         nrow, ncol = 1, 1
 
@@ -473,11 +479,8 @@ def _render_facets_into(plot, build_output, axes_grid, *,
             # the title's transform gets shifted ~8 px above the strip.
             panel_ax.set_title(labels["top"], y=1.0, pad=0)
         if labels.get("right"):
-            panel_ax.text(
-                1.02, 0.5, labels["right"],
-                transform=panel_ax.transAxes,
-                rotation=-90, ha="left", va="center",
-            )
+            from .render import _draw_right_strip
+            _draw_right_strip(plot.theme, panel_ax, labels["right"])
 
     for unused_ax in flat_axes[n_panels:]:
         unused_ax.set_visible(False)

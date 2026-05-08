@@ -173,13 +173,7 @@ def _render_facets(plot, build_output, layout, subplotspec=None):
             # ``set_y`` lands ~8 px too high relative to the strip.
             panel_ax.set_title(labels["top"], y=1.0, pad=0)
         if labels.get("right"):
-            # Right-side strip: vertical text outside the right edge,
-            # rotated to read top-to-bottom (ggplot2's strip.text.y default).
-            panel_ax.text(
-                1.02, 0.5, labels["right"],
-                transform=panel_ax.transAxes,
-                rotation=-90, ha="left", va="center",
-            )
+            _draw_right_strip(plot.theme, panel_ax, labels["right"])
 
     # Hide unused panels (when the grid has more cells than panels).
     for unused_ax in flat_axes[n_panels:]:
@@ -451,6 +445,46 @@ def _apply_strip_text(theme, ax) -> None:
             title_artist.set_size(text.size)
         if text.face and "bold" in text.face:
             title_artist.set_weight("bold")
+
+
+def _draw_right_strip(theme, ax, label: str) -> None:
+    """Paint a facet_grid right-side strip — vertical bar at the right
+    edge of the panel with the rotated row label centred inside.
+
+    Mirrors :func:`_apply_strip_background` for the right-side case
+    (``facet_grid(rows ~ cols)``). Called from the per-panel render
+    paths whenever ``facet.panel_labels()`` returns a ``"right"`` entry.
+    """
+    if not label:
+        return
+    fig = ax.figure
+    ax_width_in = ax.get_position().width * fig.get_figwidth()
+    if ax_width_in <= 0:
+        return
+    strip_w_in = strip_cell_height_in(label, fontsize=STRIP_TEXT_SIZE_PT)
+    strip_w_axes = strip_w_in / ax_width_in
+
+    bg = theme.get("strip.background") if theme is not None else None
+    if isinstance(bg, element_rect) and not isinstance(bg, element_blank):
+        facecolor = r_color(bg.fill) if bg.fill else "none"
+        edgecolor = r_color(bg.colour) if bg.colour else "none"
+        linewidth = (bg.size * _PT_PER_MM) if (bg.colour and bg.size) else 0.0
+        rect = Rectangle(
+            (1.0, 0.0), strip_w_axes, 1.0,
+            transform=ax.transAxes,
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            clip_on=False,
+            zorder=-1,  # paints before axes content; matches top strip
+        )
+        fig.add_artist(rect)
+
+    ax.text(
+        1.0 + strip_w_axes / 2.0, 0.5, label,
+        transform=ax.transAxes,
+        rotation=-90, ha="center", va="center",
+    )
 
 
 def _apply_strip_background(theme, ax) -> None:
