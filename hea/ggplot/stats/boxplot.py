@@ -57,11 +57,19 @@ class StatBoxplot(Stat):
         if not has_x and not has_y:
             return pl.DataFrame()
 
-        # ggplot2's auto-orient: ``aes(x=…)`` alone → horizontal box (x is
-        # the distribution axis); ``aes(y=…)`` alone → vertical box at x=0.
-        # Internally we always run the 5-number summary on ``y``, so when
-        # the distribution lives in x we swap, then rename the output back
-        # to x-prefixed columns so the X scale trains on the right values.
+        # ggplot2's auto-orient: pick the *continuous* axis as the
+        # distribution axis. The 5-number summary always runs on ``y``
+        # internally, so when the distribution lives on x we rename
+        # ``x``↔``y`` here and rename the output columns back below.
+        #
+        # Cases:
+        #   * ``aes(x=...)`` alone           → flip (single-distribution; x at 0).
+        #   * ``aes(y=...)`` alone           → no flip; pin x=0.
+        #   * ``aes(x=cont, y=discrete)``    → flip (horizontal boxes).
+        #   * ``aes(x=discrete, y=cont)``    → no flip (vertical boxes, default).
+        #   * both continuous / both discrete → no flip (ggplot2's default).
+        x_discrete = has_x and data["x"].dtype in _DISCRETE_DTYPES
+        y_discrete = has_y and data["y"].dtype in _DISCRETE_DTYPES
         flipped = False
         if has_x and not has_y:
             flipped = True
@@ -70,6 +78,14 @@ class StatBoxplot(Stat):
             )
         elif has_y and not has_x:
             data = data.with_columns(x=pl.lit(0.0).cast(pl.Float64))
+        elif y_discrete and not x_discrete:
+            # Horizontal boxplot: y carries the categorical position,
+            # x carries the distribution. Swap so the rest of compute_panel
+            # (which assumes y == distribution) just works.
+            flipped = True
+            data = data.rename({"x": "_swap_y", "y": "_swap_x"}).rename(
+                {"_swap_y": "y", "_swap_x": "x"}
+            )
 
         x_is_discrete = data["x"].dtype in _DISCRETE_DTYPES
 
@@ -111,15 +127,15 @@ class StatBoxplot(Stat):
             out = pl.concat(rows)
             # Restore Enum / Categorical dtypes on the grouping columns —
             # ``pl.DataFrame(cols)`` in ``_row`` infers Utf8 from Python
-            # strings. Skip the flipped case: there ``x`` was originally
-            # numeric (the cross-axis position), and the rename below
-            # moves the discrete distribution back into ``y``.
-            if not flipped:
-                for col, dtype in preserve_dtypes.items():
-                    if col in out.columns and out[col].dtype != dtype:
-                        out = out.with_columns(
-                            out[col].cast(dtype, strict=False).alias(col)
-                        )
+            # strings, which would undo any user-supplied factor order
+            # (``fct_reorder``, ``pl.Enum`` levels). Done here BEFORE the
+            # flipped-rename below so the swap of ``x``↔``y`` carries the
+            # restored dtype with it.
+            for col, dtype in preserve_dtypes.items():
+                if col in out.columns and out[col].dtype != dtype:
+                    out = out.with_columns(
+                        out[col].cast(dtype, strict=False).alias(col)
+                    )
 
         # Auto width = ``resolution(box-centres) * 0.75``. ggplot2
         # computes resolution on the *raw* layer x, which for binned

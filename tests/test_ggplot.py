@@ -3088,6 +3088,31 @@ def test_fct_reorder_orders_levels_by_aggregate():
         plt.close(fig)
 
 
+def test_fct_reorder_horizontal_boxplot():
+    """``aes(x=continuous, y=fct_reorder(discrete, continuous))`` flips
+    boxplot orientation — boxes are horizontal, the y axis carries the
+    factor levels in reorder order. Mirrors ggplot2's ``has_flipped_aes``
+    auto-orient logic for ``geom_boxplot``."""
+    df = pl.DataFrame({
+        "g": ["A", "A", "B", "B", "C", "C"],
+        "v": [10.0, 11.0, 1.0, 2.0, 5.0, 6.0],
+    })
+    p = (ggplot(df, aes(x="v", y=fct_reorder("g", "v", "median")))
+         + geom_boxplot())
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # y axis carries the categorical labels in median-ascending order:
+        # B (1.5), C (5.5), A (10.5).
+        labels = [t.get_text() for t in ax.get_yticklabels()]
+        assert labels == ["B", "C", "A"]
+        # x axis is the continuous distribution axis.
+        assert ax.get_xlabel() == "v"
+        assert ax.get_ylabel() == "g"
+    finally:
+        plt.close(fig)
+
+
 def test_fct_reorder_desc_reverses_order():
     df = pl.DataFrame({
         "g": ["A", "A", "B", "B", "C", "C"],
