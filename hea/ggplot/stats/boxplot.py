@@ -24,27 +24,84 @@ import polars as pl
 from .stat import Stat
 
 
+_DISCRETE_DTYPES = (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean)
+
+
+def _resolution(arr: np.ndarray) -> float:
+    """Smallest non-zero gap between unique sorted values; mirrors
+    ``ggplot2::resolution`` so the auto box width scales with the x
+    spacing (categorical at integer positions → 1; bin midpoints at 0.1
+    spacing → 0.1)."""
+    arr = arr[np.isfinite(arr)]
+    if len(arr) < 2:
+        return 1.0
+    u = np.unique(arr)
+    if len(u) < 2:
+        return 1.0
+    return float(np.diff(u).min())
+
+
 @dataclass
 class StatBoxplot(Stat):
     coef: float = 1.5
-    width: float = 0.75
+    # ``None`` → auto: ``resolution(x) * 0.75`` per ggplot2's setup_params.
+    # A float passes through as the literal box width (in x-axis units).
+    width: float | None = None
 
     def compute_panel(self, data, params):
-        groupby_cols = ["x"]
+        if "x" not in data.columns or len(data) == 0:
+            return pl.DataFrame()
+
+        x_is_discrete = data["x"].dtype in _DISCRETE_DTYPES
+
+        # ggplot2 groups continuous-x boxplots by the layer's ``group``
+        # aesthetic only — including ``x`` in groupby would over-split,
+        # producing one box per unique x value instead of one per group
+        # (the bug behind ``aes(group=cut_width(carat, 0.1))`` collapsing
+        # to many tiny boxes regardless of bin width).
+        groupby_cols: list[str] = []
+        if x_is_discrete:
+            groupby_cols.append("x")
         for aes in ("group", "fill", "colour"):
             if aes in data.columns and aes not in groupby_cols:
                 groupby_cols.append(aes)
 
-        rows = []
-        for keys, sub in data.group_by(groupby_cols, maintain_order=True):
-            row = self._row(sub, keys, groupby_cols)
-            if row is not None:
-                rows.append(row)
-        if not rows:
-            return pl.DataFrame()
-        return pl.concat(rows)
+        if not groupby_cols:
+            row = self._row(data, keys=None, groupby_cols=(),
+                            x_is_discrete=x_is_discrete)
+            if row is None:
+                return pl.DataFrame()
+            out = row
+        else:
+            rows = []
+            for keys, sub in data.group_by(groupby_cols, maintain_order=True):
+                row = self._row(sub, keys=keys, groupby_cols=tuple(groupby_cols),
+                                x_is_discrete=x_is_discrete)
+                if row is not None:
+                    rows.append(row)
+            if not rows:
+                return pl.DataFrame()
+            out = pl.concat(rows)
 
-    def _row(self, sub, keys, groupby_cols):
+        # Auto width = ``resolution(box-centres) * 0.75``. ggplot2
+        # computes resolution on the *raw* layer x, which for binned
+        # continuous data (e.g. ``cut_width(carat, 0.1)``) returns the
+        # underlying carat tick (~0.01) and produces line-thin boxes.
+        # Using the box centres instead — i.e. the spacing between
+        # adjacent boxes after groupby — gives boxes scaled to the bin
+        # width, which is what users actually want.
+        if self.width is not None:
+            final_width = float(self.width)
+        elif x_is_discrete:
+            final_width = 0.75
+        else:
+            xs = out["x"].to_numpy().astype(float)
+            final_width = _resolution(xs) * 0.75
+        return out.with_columns(
+            width=pl.lit(final_width).cast(pl.Float64),
+        )
+
+    def _row(self, sub, *, keys, groupby_cols, x_is_discrete):
         y = sub["y"].to_numpy().astype(float)
         y = y[~np.isnan(y)]
         if len(y) == 0:
@@ -60,14 +117,34 @@ class StatBoxplot(Stat):
         ymin = float(non_out.min()) if len(non_out) else float(q[0])
         ymax = float(non_out.max()) if len(non_out) else float(q[4])
 
-        cols: dict = {col: [keys[i]] for i, col in enumerate(groupby_cols)}
+        # x position: discrete x → take the group key directly so the box
+        # lines up with the categorical tick label; continuous x → mid of
+        # the x range within the group (matches ggplot2's
+        # ``mean(range(data$x))``).
+        cols: dict = {}
+        if x_is_discrete and "x" in groupby_cols:
+            x_idx = groupby_cols.index("x")
+            keys_tuple = keys if isinstance(keys, tuple) else (keys,)
+            cols["x"] = [keys_tuple[x_idx]]
+        else:
+            x_arr = sub["x"].to_numpy().astype(float)
+            x_arr = x_arr[np.isfinite(x_arr)]
+            if len(x_arr) == 0:
+                return None
+            cols["x"] = [float((x_arr.min() + x_arr.max()) / 2)]
+
+        if keys is not None:
+            keys_tuple = keys if isinstance(keys, tuple) else (keys,)
+            for col, key_val in zip(groupby_cols, keys_tuple):
+                if col == "x":
+                    continue
+                cols[col] = [key_val]
         cols.update({
             "ymin": [ymin],
             "lower": [float(q[1])],
             "middle": [float(q[2])],
             "upper": [float(q[3])],
             "ymax": [ymax],
-            "width": [self.width],
         })
         df = pl.DataFrame(cols)
         # Polars list column needs explicit typing when the inner list is
@@ -79,5 +156,5 @@ class StatBoxplot(Stat):
         return df
 
 
-def stat_boxplot(*, coef=1.5, width=0.75):
+def stat_boxplot(*, coef=1.5, width=None):
     return StatBoxplot(coef=coef, width=width)

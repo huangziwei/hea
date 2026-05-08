@@ -113,7 +113,7 @@ def _first(df, col, default):
 
 def geom_boxplot(mapping=None, data=None, *, position="dodge2",
                  outlier_size=1.5, outlier_colour=None, outlier_alpha=None,
-                 coef=1.5, width=0.75, **kwargs):
+                 coef=1.5, width=None, **kwargs):
     from ..layer import Layer
     from ..positions import resolve_position
     from ..stats.boxplot import StatBoxplot
