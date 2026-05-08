@@ -39,14 +39,31 @@ _NON_POSITIONAL_AES = ("colour", "fill", "size", "alpha", "shape", "linetype")
 # full data extent — without ``ymin`` the y scale for ``geom_bar`` would
 # train on counts only (e.g. [68, 152]) and miss the bar baseline at 0;
 # without ``lower``/``upper`` ``geom_boxplot`` would have no ``y`` column
-# to train on at all.
+# to train on at all; without ``outliers`` (a list column) boxplot ticks
+# would max out at the upper whisker and miss outlier points drawn beyond.
 _X_POSITIONAL_AES = ("x", "xmin", "xmax", "xend", "xintercept")
 _Y_POSITIONAL_AES = ("y", "ymin", "ymax", "yend", "yintercept",
-                     "lower", "middle", "upper")
+                     "lower", "middle", "upper", "outliers")
 
 
 def _positional_aes_for(axis: str) -> tuple[str, ...]:
     return _X_POSITIONAL_AES if axis == "x" else _Y_POSITIONAL_AES
+
+
+def _train_series(scale, series) -> None:
+    """Train ``scale`` on ``series``, flattening list-typed columns first.
+
+    ``stat_boxplot`` stores per-box outlier values in a ``List(Float64)``
+    column; calling ``scale.train`` on the list directly would feed a
+    length-N series of lists to ``min/max`` and miss the outlier extents.
+    Explode the list, drop nulls (empty lists explode to a single null),
+    and then train on the flattened scalars.
+    """
+    import polars as pl
+
+    if isinstance(series.dtype, pl.List):
+        series = series.explode().drop_nulls()
+    scale.train(series)
 
 
 def build(plot) -> BuildOutput:
@@ -141,11 +158,17 @@ def build(plot) -> BuildOutput:
     # picks ScaleOrdinal automatically. Fall back to a sibling positional
     # column (``ymin``, ``lower``, …) when the primary axis aesthetic is
     # absent — geom_boxplot output has no ``y`` column but five y-typed
-    # siblings, and we still need a y scale.
+    # siblings, and we still need a y scale. Skip list-typed columns
+    # (boxplot's ``outliers``) for dtype detection so we always pick a
+    # scalar sibling.
+    import polars as _pl_for_dtype
+
     for df in layers_data:
         for axis in ("x", "y"):
             sibling_for_dtype = next(
-                (df[c] for c in _positional_aes_for(axis) if c in df.columns),
+                (df[c] for c in _positional_aes_for(axis)
+                 if c in df.columns
+                 and not isinstance(df[c].dtype, _pl_for_dtype.List)),
                 None,
             )
             if sibling_for_dtype is not None:
@@ -162,7 +185,7 @@ def build(plot) -> BuildOutput:
             if aes_name in ("x", "y"):
                 for col in _positional_aes_for(aes_name):
                     if col in df.columns:
-                        scale.train(df[col])
+                        _train_series(scale, df[col])
             elif aes_name in df.columns:
                 scale.train(df[aes_name])
 
