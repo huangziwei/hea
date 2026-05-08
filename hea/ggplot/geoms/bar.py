@@ -31,6 +31,29 @@ class GeomBar(Geom):
     })
     required_aes: tuple = ("x", "y")
 
+    def setup_data(self, data):
+        # Expose the bar baseline (y = 0) as ymin/ymax columns so the y
+        # scale trains on it. Without this, ``geom_col`` (default
+        # ``position="identity"``) trains the y scale only on raw y values
+        # like [70, 150], and the auto-computed ticks miss 0. ``position
+        # =stack``/``fill`` already inject ymin/ymax — preserve those.
+        # ``pmin/pmax`` (not just ``ymin=0, ymax=y``) so negative-y bars
+        # hang correctly from 0.
+        import polars as pl
+
+        if (
+            "y" in data.columns
+            and "ymin" not in data.columns
+            and "ymax" not in data.columns
+        ):
+            zero = pl.lit(0.0)
+            y = pl.col("y")
+            data = data.with_columns(
+                ymin=pl.min_horizontal(y, zero).cast(pl.Float64),
+                ymax=pl.max_horizontal(y, zero).cast(pl.Float64),
+            )
+        return data
+
     def draw_panel(self, data, ax) -> None:
         from .._util import r_color
 

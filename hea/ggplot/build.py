@@ -122,6 +122,10 @@ def build(plot) -> BuildOutput:
         # Resolve after_stat() now that the stat output is in df.
         df = _apply_deferred(df, after_stat_map, plot.plot_env)
         df = _position_per_panel(df, layer, facet_vars)
+        # Geom-specific data prep — bar/area geoms expose their implicit
+        # y=0 baseline as ymin/ymax here so the next phase (scale
+        # training) sees 0 in the y data range.
+        df = layer.geom.setup_data(df)
         if not getattr(layer, "broadcast_panels", False):
             df = facet.map_data(df, layout)
         layers_data.append(df)

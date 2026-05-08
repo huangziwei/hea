@@ -21,6 +21,18 @@ class Geom:
     default_aes: dict = field(default_factory=dict)
     required_aes: tuple = ()
 
+    def setup_data(self, data: pl.DataFrame) -> pl.DataFrame:
+        """Geom-specific data preparation, run after stat/position but
+        before scale training. Default: pass-through.
+
+        Bar/area geoms override this to expose their implicit y baseline
+        (0) as ``ymin``/``ymax`` columns. Without it, the y scale trains
+        only on raw y values (e.g. ``[70, 150]``) and the auto-computed
+        ticks miss 0 — so a ``geom_col`` chart shows ticks at ``80, 100,
+        120, 140`` instead of ``0, 50, 100, 150``.
+        """
+        return data
+
     def draw_panel(self, data: pl.DataFrame, ax) -> None:
         """Render ``data`` onto ``ax``. Override in subclasses."""
         raise NotImplementedError(f"{type(self).__name__}.draw_panel not implemented")

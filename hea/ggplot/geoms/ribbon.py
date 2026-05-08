@@ -82,14 +82,21 @@ def geom_ribbon(mapping=None, data=None, *, position="identity", **kwargs):
 class GeomArea(GeomRibbon):
     required_aes: tuple = ("x", "y")
 
-    def draw_panel(self, data, ax) -> None:
-        # Inject ymin/ymax from y if positions hasn't already.
-        if "y" in data.columns and "ymin" not in data.columns:
+    def setup_data(self, data):
+        # Anchor the area baseline at y = 0 so scale training picks 0 up
+        # (otherwise the y axis ticks span only the curve's value range
+        # and miss the floor). ``position=stack``/``fill`` already inject
+        # ymin/ymax — preserve those.
+        if (
+            "y" in data.columns
+            and "ymin" not in data.columns
+            and "ymax" not in data.columns
+        ):
             data = data.with_columns(
                 ymin=pl.lit(0.0).cast(pl.Float64),
                 ymax=pl.col("y").cast(pl.Float64),
             )
-        super().draw_panel(data, ax)
+        return data
 
 
 def geom_area(mapping=None, data=None, *, position="stack", **kwargs):
