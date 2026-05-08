@@ -30,6 +30,7 @@ class GeomBar(Geom):
         "alpha": 1.0,
     })
     required_aes: tuple = ("x", "y")
+    key_glyph: str = "polygon"
 
     def setup_data(self, data):
         # Expose the bar baseline (y = 0) as ymin/ymax columns so the y

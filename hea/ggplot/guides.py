@@ -22,8 +22,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import polars as pl
-from matplotlib.legend_handler import HandlerLine2D
+from matplotlib.legend_handler import HandlerLine2D, HandlerPatch
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch as _MplPatch
 from matplotlib.patches import Rectangle as _MplRect
 
 from ._util import r_color
@@ -35,6 +36,27 @@ from .theme import element_blank, element_rect, element_text
 # ggplot2 sizes are in mm; matplotlib widths/lengths are in pt. R's TeX
 # convention: 72.27 pt/inch, 25.4 mm/inch → ≈ 2.8454 pt/mm.
 _PT_PER_MM = 72.27 / 25.4
+
+
+def _add_key_bg(handlebox, fontsize, *, fc, ec, lw):
+    """Paint ``legend.key`` (panel-colour rect) into ``handlebox`` first.
+
+    Returns the (xdescent, ydescent, width, height, trans) tuple so the
+    caller can position glyphs in the same coordinate space. Used by the
+    Line2D and Patch key handlers to keep a ggplot2-style gray bg behind
+    each legend key.
+    """
+    xdescent = handlebox.xdescent
+    ydescent = handlebox.ydescent
+    width = handlebox.width
+    height = handlebox.height
+    trans = handlebox.get_transform()
+    bg = _MplRect(
+        (-xdescent, -ydescent), width, height,
+        facecolor=fc, edgecolor=ec, linewidth=lw, transform=trans,
+    )
+    handlebox.add_artist(bg)
+    return xdescent, ydescent, width, height, trans
 
 
 class _HandlerLine2DKeyBg(HandlerLine2D):
@@ -56,33 +78,53 @@ class _HandlerLine2DKeyBg(HandlerLine2D):
         self._key_lw = linewidth
 
     def legend_artist(self, legend, orig_handle, fontsize, handlebox):
-        xdescent, ydescent, width, height = self.adjust_drawing_area(
-            legend, orig_handle,
-            handlebox.xdescent, handlebox.ydescent,
-            handlebox.width, handlebox.height,
-            fontsize,
+        xdescent, ydescent, width, height, trans = _add_key_bg(
+            handlebox, fontsize,
+            fc=self._key_fc, ec=self._key_ec, lw=self._key_lw,
         )
-        trans = handlebox.get_transform()
-        bg = _MplRect(
-            (-xdescent, -ydescent), width, height,
-            facecolor=self._key_fc,
-            edgecolor=self._key_ec,
-            linewidth=self._key_lw,
-            transform=trans,
-        )
-        handlebox.add_artist(bg)
         glyphs = self.create_artists(
             legend, orig_handle, xdescent, ydescent, width, height,
             fontsize, trans,
         )
         for g in glyphs:
             handlebox.add_artist(g)
-        return glyphs[0] if glyphs else bg
+        return glyphs[0] if glyphs else None
+
+
+class _HandlerPatchKeyBg(HandlerPatch):
+    """``HandlerPatch`` with ``legend.key`` bg — same trick as
+    :class:`_HandlerLine2DKeyBg`, applied to ``Patch`` legend handles
+    (the polygon key glyph for ``geom_bar`` etc.).
+    """
+
+    def __init__(self, *, facecolor, edgecolor="none", linewidth=0.0, **kw):
+        super().__init__(**kw)
+        self._key_fc = facecolor
+        self._key_ec = edgecolor
+        self._key_lw = linewidth
+
+    def legend_artist(self, legend, orig_handle, fontsize, handlebox):
+        xdescent, ydescent, width, height, trans = _add_key_bg(
+            handlebox, fontsize,
+            fc=self._key_fc, ec=self._key_ec, lw=self._key_lw,
+        )
+        glyphs = self.create_artists(
+            legend, orig_handle, xdescent, ydescent, width, height,
+            fontsize, trans,
+        )
+        for g in glyphs:
+            handlebox.add_artist(g)
+        return glyphs[0] if glyphs else None
 
 
 def _legend_key_handler(theme):
     """Return a ``handler_map`` that paints ``legend.key`` behind each glyph,
-    or ``None`` if the theme blanks/omits the key."""
+    or ``None`` if the theme blanks/omits the key.
+
+    Two handler entries: ``Line2D`` (point/path glyphs) and ``Patch``
+    (polygon glyph for bar/ribbon/etc.). ggplot2's key element shows
+    behind both kinds.
+    """
     elem = theme.get("legend.key")
     if isinstance(elem, element_blank):
         return None
@@ -91,9 +133,10 @@ def _legend_key_handler(theme):
     fc = r_color(elem.fill)
     ec = r_color(elem.colour) if elem.colour else "none"
     lw = (elem.size * _PT_PER_MM) if (elem.colour and elem.size) else 0.0
-    return {Line2D: _HandlerLine2DKeyBg(
-        facecolor=fc, edgecolor=ec, linewidth=lw,
-    )}
+    return {
+        Line2D: _HandlerLine2DKeyBg(facecolor=fc, edgecolor=ec, linewidth=lw),
+        _MplPatch: _HandlerPatchKeyBg(facecolor=fc, edgecolor=ec, linewidth=lw),
+    }
 
 
 def _legend_title_alignment(theme) -> str:
@@ -125,6 +168,16 @@ class LegendGroup:
     # ``aes_values[aesthetic]`` is a list of mapped values, one per level
     # (e.g. ``{"colour": ["#FF0000", "#00FF00"], "shape": ["o", "^"]}``).
     aes_values: dict = field(default_factory=dict)
+    # Geom that contributed to this legend — drives the legend key glyph
+    # (rectangle for bar, line for path, circle for point). ``"point"``
+    # is the safe default when no contributor is found.
+    key_glyph: str = "point"
+    # Layer-level constants the user passed via geom kwargs
+    # (``geom_bar(alpha=1/5, fill=None)``). Applied on top of the
+    # scale-mapped values when building the key, so the legend reflects
+    # the actual layer style — matches ggplot2's ``draw_key_*`` reading
+    # of layer aesthetics.
+    layer_aes_params: dict = field(default_factory=dict)
 
 
 def build_legend_groups(plot, build_output) -> list[LegendGroup]:
@@ -171,17 +224,40 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
                  or aes_source.get(aes_name)
                  or aes_name)
 
+        contributor = _find_layer_for_aes(plot, aes_name)
         if key not in groups:
             groups[key] = LegendGroup(
                 title=title,
                 levels=levels,
                 labels=[str(level) for level in levels],
                 aes_values={},
+                key_glyph=(getattr(contributor.geom, "key_glyph", "point")
+                           if contributor is not None else "point"),
+                layer_aes_params=(dict(getattr(contributor, "aes_params", {}))
+                                   if contributor is not None else {}),
             )
 
         groups[key].aes_values[aes_name] = _scale_mapped_values(scale, levels)
 
     return list(groups.values())
+
+
+def _find_layer_for_aes(plot, aes_name):
+    """Return the first layer whose mapping uses ``aes_name``.
+
+    Looks at the layer's own mapping first, then falls back to the plot-
+    level mapping (when ``inherit_aes=True``) — matches ggplot2's lookup
+    order. The contributing layer drives the legend key glyph + any
+    layer-level aes constants the user supplied via geom kwargs.
+    """
+    plot_mapping = getattr(plot, "mapping", None) or {}
+    for layer in plot.layers:
+        layer_mapping = getattr(layer, "mapping", None) or {}
+        if aes_name in layer_mapping:
+            return layer
+        if getattr(layer, "inherit_aes", True) and aes_name in plot_mapping:
+            return layer
+    return None
 
 
 def _scale_mapped_values(scale, levels):
@@ -373,10 +449,53 @@ def _render_colorbar(fig, axes_list, target, spec: ColorbarSpec,
     cb.ax.set_title(spec.title, fontsize=10, pad=4)
 
 
-def _make_handle(group: LegendGroup, idx: int) -> Line2D:
-    """Build one legend handle with all the group's aesthetics applied at
-    the i-th level. Defaults to a small black dot; aesthetics override.
+def _make_handle(group: LegendGroup, idx: int):
+    """Build one legend handle for the i-th level.
+
+    Dispatches by the contributing geom's ``key_glyph`` (mirrors R's
+    ``draw_key_*`` family). Defaults to a circle marker for unrecognised
+    glyphs.
     """
+    if group.key_glyph == "polygon":
+        return _make_polygon_handle(group, idx)
+    if group.key_glyph == "path":
+        return _make_path_handle(group, idx)
+    return _make_point_handle(group, idx)
+
+
+def _resolve_aes(group: LegendGroup, idx: int, name: str, default):
+    """Resolve aesthetic ``name`` at level ``idx`` — scale-mapped value
+    first, then layer-level constant (``aes_params``) on top, else
+    ``default``. Layer constants override the scale (matches ggplot2:
+    ``geom_bar(alpha=0.2, aes(fill=class))`` makes both the bars AND the
+    legend keys 0.2 alpha)."""
+    val = default
+    aes_values = group.aes_values
+    if name in aes_values:
+        v = aes_values[name][idx]
+        if v is not None:
+            val = v
+    lap = group.layer_aes_params or {}
+    # ``aes_params`` may use the American spelling — canonicalise.
+    for k in (name, "color" if name == "colour" else None):
+        if k and k in lap:
+            val = lap[k]
+            break
+    return val
+
+
+def _is_na(v):
+    if v is None:
+        return True
+    if isinstance(v, float):
+        try:
+            return v != v  # NaN check
+        except TypeError:
+            return False
+    return False
+
+
+def _make_point_handle(group: LegendGroup, idx: int) -> Line2D:
     kwargs = {
         "marker": "o",
         "linestyle": "",
@@ -387,7 +506,6 @@ def _make_handle(group: LegendGroup, idx: int) -> Line2D:
     }
     aes_values = group.aes_values
 
-    # Linetype implies a line glyph (no marker).
     if "linetype" in aes_values:
         from ..plot._util import r_lty
         kwargs["linestyle"] = r_lty(aes_values["linetype"][idx]) or "-"
@@ -398,29 +516,68 @@ def _make_handle(group: LegendGroup, idx: int) -> Line2D:
         if "linetype" not in aes_values:
             kwargs["linestyle"] = ""
 
-    if "colour" in aes_values:
-        c = aes_values["colour"][idx]
-        if c is not None:
-            kwargs["color"] = c
-            kwargs["markeredgecolor"] = c
-            kwargs["markerfacecolor"] = c
+    colour = _resolve_aes(group, idx, "colour", None)
+    if colour is not None:
+        kwargs["color"] = colour
+        kwargs["markeredgecolor"] = colour
+        kwargs["markerfacecolor"] = colour
 
-    if "fill" in aes_values:
-        f = aes_values["fill"][idx]
-        if f is not None:
-            kwargs["markerfacecolor"] = f
+    fill = _resolve_aes(group, idx, "fill", None)
+    if fill is not None:
+        kwargs["markerfacecolor"] = "none" if _is_na(fill) else fill
 
-    if "size" in aes_values:
-        s = aes_values["size"][idx]
-        if s is not None:
-            kwargs["markersize"] = float(s)
+    size = _resolve_aes(group, idx, "size", None)
+    if size is not None:
+        kwargs["markersize"] = float(size)
 
-    if "alpha" in aes_values:
-        a = aes_values["alpha"][idx]
-        if a is not None:
-            kwargs["alpha"] = float(a)
+    alpha = _resolve_aes(group, idx, "alpha", None)
+    if alpha is not None:
+        kwargs["alpha"] = float(alpha)
 
     return Line2D([0], [0], **kwargs)
+
+
+def _make_polygon_handle(group: LegendGroup, idx: int) -> _MplPatch:
+    """Filled rectangle key — for ``geom_bar``/``rect``/``ribbon``/etc.
+
+    Mirrors R's ``draw_key_polygon``: fills with the layer's ``fill``
+    (or ``colour`` when no fill is mapped — for hollow-bar plots), edges
+    with ``colour``, applies ``alpha`` to both. ``fill=NA`` (Python
+    ``None``/NaN) becomes ``"none"`` (transparent), so the panel-colour
+    key bg shows through, matching the ``geom_bar(fill=NA)`` look.
+    """
+    fill = _resolve_aes(group, idx, "fill", None)
+    colour = _resolve_aes(group, idx, "colour", None)
+    alpha = _resolve_aes(group, idx, "alpha", 1.0)
+
+    facecolor = "none" if (fill is None or _is_na(fill)) else fill
+    edgecolor = "none" if (colour is None or _is_na(colour)) else colour
+    return _MplPatch(
+        facecolor=facecolor,
+        edgecolor=edgecolor,
+        alpha=float(alpha) if alpha is not None else None,
+        linewidth=0.5,
+    )
+
+
+def _make_path_handle(group: LegendGroup, idx: int) -> Line2D:
+    """Horizontal-line key — for ``geom_line``/``path``/``segment``/``smooth``.
+    Mirrors R's ``draw_key_path``."""
+    from ..plot._util import r_lty
+
+    colour = _resolve_aes(group, idx, "colour", "black")
+    alpha = _resolve_aes(group, idx, "alpha", 1.0)
+    size = _resolve_aes(group, idx, "size", 0.5)
+    linetype = _resolve_aes(group, idx, "linetype", "solid")
+
+    return Line2D(
+        [0], [0],
+        marker="",
+        color=("black" if (colour is None or _is_na(colour)) else colour),
+        alpha=float(alpha) if alpha is not None else None,
+        linewidth=float(size) * (72.27 / 25.4),
+        linestyle=r_lty(linetype) or "-",
+    )
 
 
 def _legend_position_kwargs(pos: str, idx: int, total: int) -> dict:

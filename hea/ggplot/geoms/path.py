@@ -27,6 +27,7 @@ class GeomPath(Geom):
         "alpha": 1.0,
     })
     required_aes: tuple = ("x", "y")
+    key_glyph: str = "path"
 
     sort_by_x: bool = False
     step_direction: str | None = None  # None | "hv" | "vh" | "mid"

@@ -26,6 +26,7 @@ class GeomBoxplot(Geom):
         "shape": "o",
     })
     required_aes: tuple = ("x", "lower", "middle", "upper", "ymin", "ymax")
+    key_glyph: str = "polygon"
 
     outlier_size: float = 1.5
     outlier_colour: str | None = None

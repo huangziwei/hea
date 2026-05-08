@@ -71,6 +71,7 @@ class GeomSegment(Geom):
         "alpha": 1.0,
     })
     required_aes: tuple = ("x", "y", "xend", "yend")
+    key_glyph: str = "path"
 
     def draw_panel(self, data, ax) -> None:
         from ...plot._util import r_lty

@@ -20,6 +20,15 @@ class Geom:
 
     default_aes: dict = field(default_factory=dict)
     required_aes: tuple = ()
+    # Legend key glyph — controls how this geom's contribution to a legend
+    # is drawn (R's ``draw_key_*`` family). Recognised values:
+    #   * ``"point"``   — circle marker (default; ``geom_point`` etc.)
+    #   * ``"polygon"`` — filled rectangle (``geom_bar``, ``geom_ribbon``,
+    #                     ``geom_rect``/``tile``, ``geom_polygon``, ``geom_violin``)
+    #   * ``"path"``    — horizontal line (``geom_line``, ``geom_path``,
+    #                     ``geom_step``, ``geom_segment``)
+    # Subclasses override the default to opt into the right glyph.
+    key_glyph: str = "point"
 
     def setup_data(self, data: pl.DataFrame) -> pl.DataFrame:
         """Geom-specific data preparation, run after stat/position but

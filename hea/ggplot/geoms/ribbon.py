@@ -24,6 +24,7 @@ class GeomRibbon(Geom):
         "alpha": 0.4,
     })
     required_aes: tuple = ("x", "ymin", "ymax")
+    key_glyph: str = "polygon"
 
     def draw_panel(self, data, ax) -> None:
         if "group" in data.columns:

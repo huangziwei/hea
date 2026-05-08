@@ -23,6 +23,7 @@ class GeomDensity(Geom):
         "alpha": 1.0,
     })
     required_aes: tuple = ("x", "y")
+    key_glyph: str = "polygon"
 
     def draw_panel(self, data, ax) -> None:
         from ...plot._util import r_lty

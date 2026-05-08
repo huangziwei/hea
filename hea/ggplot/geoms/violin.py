@@ -24,6 +24,7 @@ class GeomViolin(Geom):
         "alpha": 1.0,
     })
     required_aes: tuple = ("x", "y", "violinwidth")
+    key_glyph: str = "polygon"
 
     half_width: float = 0.4
 

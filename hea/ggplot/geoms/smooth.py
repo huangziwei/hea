@@ -30,6 +30,7 @@ class GeomSmooth(Geom):
         "weight": 1.0,
     })
     required_aes: tuple = ("x", "y")
+    key_glyph: str = "path"
 
     se: bool = True
 

@@ -53,6 +53,7 @@ class GeomContour(Geom):
         "alpha": 1.0,
     })
     required_aes: tuple = ("x", "y", "z")
+    key_glyph: str = "path"
 
     def draw_panel(self, data, ax) -> None:
         from .._util import r_color
@@ -80,6 +81,7 @@ class GeomContourFilled(Geom):
         "alpha": 1.0,
     })
     required_aes: tuple = ("x", "y", "z")
+    key_glyph: str = "polygon"
 
     def draw_panel(self, data, ax) -> None:
         if len(data) == 0:
