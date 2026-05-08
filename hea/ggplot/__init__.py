@@ -18,6 +18,7 @@ from .aes import aes, after_scale, after_stat
 from .annotate import annotate, annotation_custom
 from .coords import coord_cartesian, coord_fixed, coord_flip, coord_trans
 from .cuts import cut_interval, cut_number, cut_width
+from .factors import fct_infreq, fct_relevel, fct_rev, fct_reorder
 from .expansion import Expansion, expansion
 from .core import ggplot
 from .facets import facet_grid, facet_wrap
@@ -189,6 +190,10 @@ __all__ = [
     "cut_interval",
     "cut_number",
     "cut_width",
+    "fct_infreq",
+    "fct_relevel",
+    "fct_rev",
+    "fct_reorder",
     "geom_blank",
     "geom_point",
     "geom_jitter",

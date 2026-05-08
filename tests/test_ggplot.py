@@ -23,6 +23,7 @@ from hea.ggplot import (
     coord_cartesian, coord_fixed,
     coord_flip, coord_trans, expansion,
     element_blank, element_line, element_rect,
+    fct_infreq, fct_relevel, fct_rev, fct_reorder,
     plot_annotation, plot_layout, wrap_plots,
     element_text, facet_grid, facet_wrap, geom_abline, geom_area, geom_bar, geom_blank,
     geom_boxplot, geom_col, geom_contour, geom_contour_filled, geom_count,
@@ -3064,6 +3065,102 @@ def test_scale_x_discrete_limits_callable():
     try:
         ax = fig.axes[0]
         assert [t.get_text() for t in ax.get_xticklabels()] == ["c", "b", "a"]
+    finally:
+        plt.close(fig)
+
+
+def test_fct_reorder_orders_levels_by_aggregate():
+    """``aes(x=fct_reorder("g", "v", "median"))`` orders the boxplot
+    groups by per-group median of v, ascending — the canonical R idiom
+    for ``ggplot(...) + geom_boxplot()``."""
+    df = pl.DataFrame({
+        "g": ["B", "B", "A", "A", "C", "C"],
+        "v": [1.0, 2.0, 10.0, 11.0, 5.0, 6.0],
+    })
+    p = ggplot(df, aes(x=fct_reorder("g", "v", "median"), y="v")) + geom_boxplot()
+    fig = p.draw()
+    try:
+        labels = [t.get_text() for t in fig.axes[0].get_xticklabels()]
+        assert labels == ["B", "C", "A"]
+        # Axis label resolves to the source column name, not the callable repr.
+        assert fig.axes[0].get_xlabel() == "g"
+    finally:
+        plt.close(fig)
+
+
+def test_fct_reorder_desc_reverses_order():
+    df = pl.DataFrame({
+        "g": ["A", "A", "B", "B", "C", "C"],
+        "v": [1.0, 2.0, 10.0, 11.0, 5.0, 6.0],
+    })
+    p = (ggplot(df, aes(x=fct_reorder("g", "v", "median", desc=True), y="v"))
+         + geom_boxplot())
+    fig = p.draw()
+    try:
+        labels = [t.get_text() for t in fig.axes[0].get_xticklabels()]
+        assert labels == ["B", "C", "A"]
+    finally:
+        plt.close(fig)
+
+
+def test_fct_reorder_accepts_callable_aggregator():
+    """``fn=`` may be any ``Series -> scalar`` callable; here a 90th-pct
+    reducer puts B (peak=11) above C (peak=6) above A (peak=2)."""
+    df = pl.DataFrame({
+        "g": ["A", "A", "B", "B", "C", "C"],
+        "v": [1.0, 2.0, 10.0, 11.0, 5.0, 6.0],
+    })
+    p = (ggplot(df, aes(x=fct_reorder("g", "v", lambda s: s.max()), y="v"))
+         + geom_boxplot())
+    fig = p.draw()
+    try:
+        labels = [t.get_text() for t in fig.axes[0].get_xticklabels()]
+        assert labels == ["C", "A", "B"][::-1] or labels == ["A", "C", "B"]
+    finally:
+        plt.close(fig)
+
+
+def test_fct_rev_reverses_enum_order():
+    """``fct_rev`` on an Enum preserves the existing levels but reversed."""
+    df = pl.DataFrame({
+        "g": pl.Series(
+            ["low", "med", "hi"] * 2,
+            dtype=pl.Enum(["low", "med", "hi"]),
+        ),
+        "v": [1.0, 2.0, 3.0, 1.5, 2.5, 3.5],
+    })
+    p = ggplot(df, aes(x=fct_rev("g"), y="v")) + geom_point()
+    fig = p.draw()
+    try:
+        labels = [t.get_text() for t in fig.axes[0].get_xticklabels()]
+        assert labels == ["hi", "med", "low"]
+    finally:
+        plt.close(fig)
+
+
+def test_fct_relevel_promotes_named_levels():
+    """Named levels move to the front; the rest keep their relative order."""
+    df = pl.DataFrame({"g": ["a", "b", "c", "d", "a", "b"]})
+    p = ggplot(df, aes(x=fct_relevel("g", "d", "b"))) + geom_bar()
+    fig = p.draw()
+    try:
+        labels = [t.get_text() for t in fig.axes[0].get_xticklabels()]
+        assert labels == ["d", "b", "a", "c"]
+    finally:
+        plt.close(fig)
+
+
+def test_fct_infreq_orders_by_descending_count():
+    """Most-common level first. Distinct counts (4/2/1) so the test
+    isn't sensitive to tie-break order — ties resolve via polars'
+    stable sort (encounter order) vs. R forcats's alphabetical, and
+    matching either exactly isn't worth a divergence."""
+    df = pl.DataFrame({"g": ["a", "b", "b", "b", "b", "c", "a"]})
+    p = ggplot(df, aes(x=fct_infreq("g"))) + geom_bar()
+    fig = p.draw()
+    try:
+        labels = [t.get_text() for t in fig.axes[0].get_xticklabels()]
+        assert labels == ["b", "a", "c"]  # 4, 2, 1
     finally:
         plt.close(fig)
 

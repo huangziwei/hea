@@ -614,6 +614,12 @@ def _default_labels(plot):
         m = mapping.get(key) if key in mapping else None
         if isinstance(m, str):
             return m
+        # ``fct_reorder("class", ...)`` and friends return a tagged
+        # callable — pull the source column name back out so the axis
+        # label says ``class``, not ``<function reorder>`` or nothing.
+        hea_label = getattr(m, "__hea_label__", None)
+        if hea_label is not None:
+            return hea_label
         # ``after_stat("prop")`` → label ``"prop"``. ggplot2 deparses the
         # post-stat expression for the label (``y=after_stat(count*100)``
         # gives ``"count * 100"``); since users pass the expression as a

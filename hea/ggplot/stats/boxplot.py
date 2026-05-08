@@ -85,6 +85,14 @@ class StatBoxplot(Stat):
             if aes in data.columns and aes not in groupby_cols:
                 groupby_cols.append(aes)
 
+        # Capture source dtypes for the discrete grouping columns so
+        # ``_row``'s ``pl.DataFrame(cols)`` doesn't downgrade an
+        # ``Enum(['Fair','Good',...])`` x to plain Utf8 — which would
+        # then sort alphabetically downstream and undo a deliberate
+        # ``fct_reorder``. We cast back after concat below.
+        preserve_dtypes = {col: data[col].dtype for col in groupby_cols
+                           if col in data.columns}
+
         if not groupby_cols:
             row = self._row(data, keys=None, groupby_cols=(),
                             x_is_discrete=x_is_discrete)
@@ -101,6 +109,17 @@ class StatBoxplot(Stat):
             if not rows:
                 return pl.DataFrame()
             out = pl.concat(rows)
+            # Restore Enum / Categorical dtypes on the grouping columns —
+            # ``pl.DataFrame(cols)`` in ``_row`` infers Utf8 from Python
+            # strings. Skip the flipped case: there ``x`` was originally
+            # numeric (the cross-axis position), and the rename below
+            # moves the discrete distribution back into ``y``.
+            if not flipped:
+                for col, dtype in preserve_dtypes.items():
+                    if col in out.columns and out[col].dtype != dtype:
+                        out = out.with_columns(
+                            out[col].cast(dtype, strict=False).alias(col)
+                        )
 
         # Auto width = ``resolution(box-centres) * 0.75``. ggplot2
         # computes resolution on the *raw* layer x, which for binned

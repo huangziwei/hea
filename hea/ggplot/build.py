@@ -230,6 +230,13 @@ def build(plot) -> BuildOutput:
                 continue
             if isinstance(value, str):
                 aes_source[aes_name] = value
+                continue
+            # Tagged callables (``fct_reorder("class", ...)`` etc.) carry
+            # the source column name — same role as a bare string mapping
+            # for legend titles + auto-merge keys.
+            tagged = getattr(value, "__hea_aes_source__", None)
+            if isinstance(tagged, str):
+                aes_source[aes_name] = tagged
 
     # Pass 1 (per layer): aesthetics → stat → after_stat. Stop BEFORE
     # position so the scale system can see the original dtype of x / y
