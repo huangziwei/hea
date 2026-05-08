@@ -25,6 +25,97 @@ def to_series(x, length: int, name: str = "value") -> pl.Series:
 _GREY_RX = re.compile(r"^gr(a|e)y(\d{1,3})$", re.IGNORECASE)
 
 
+# ggplot2 shape vocabulary — names + R pch integer codes. Each entry is
+# ``(matplotlib_marker, fill_mode)`` where ``fill_mode`` is:
+#
+# * ``"solid"``    — paint with ``colour`` (matplotlib's default).
+# * ``"open"``     — hollow: face=none, edge=colour. pch 0/1/2/5/6 etc.
+# * ``"fillable"`` — pch 21–25: face=``fill`` aes, edge=``colour`` aes.
+# * ``"stroke"``   — line-only glyphs (``+``/``x``); face never paints.
+#
+# Names are sourced from ggplot2's ``translate_shape_string()``. pch codes
+# 14 has two synonymous names ("square triangle" and "triangle square");
+# both map to the same row.
+_GGPLOT_SHAPE_NAMES: dict[str, tuple[str, str]] = {
+    "square open":         ("s", "open"),
+    "circle open":         ("o", "open"),
+    "triangle open":       ("^", "open"),
+    "plus":                ("+", "stroke"),
+    "cross":               ("x", "stroke"),
+    "diamond open":        ("D", "open"),
+    "triangle down open":  ("v", "open"),
+    "square cross":        ("$⊠$", "solid"),  # ⊠
+    "asterisk":            ("*", "solid"),
+    "diamond plus":        ("$⟐$", "solid"),  # ⟐
+    "circle plus":         ("$⊕$", "solid"),  # ⊕
+    "star":                ("*", "solid"),
+    "square plus":         ("$⊞$", "solid"),  # ⊞
+    "circle cross":        ("$⊗$", "solid"),  # ⊗
+    "square triangle":     ("$⧈$", "solid"),  # ⧈
+    "triangle square":     ("$⧈$", "solid"),
+    "square":              ("s", "solid"),
+    "circle small":        (".", "solid"),
+    "triangle":            ("^", "solid"),
+    "diamond":             ("D", "solid"),
+    "circle":              ("o", "solid"),
+    "bullet":              (".", "solid"),
+    "circle filled":       ("o", "fillable"),
+    "square filled":       ("s", "fillable"),
+    "diamond filled":      ("D", "fillable"),
+    "triangle filled":     ("^", "fillable"),
+    "triangle down filled":("v", "fillable"),
+}
+
+# R pch integer code → ggplot2 shape name. Mirrors
+# ggplot2:::translate_shape_string's reverse table.
+_R_PCH_TO_NAME: dict[int, str] = {
+    0:  "square open",          1:  "circle open",
+    2:  "triangle open",        3:  "plus",
+    4:  "cross",                5:  "diamond open",
+    6:  "triangle down open",   7:  "square cross",
+    8:  "asterisk",             9:  "diamond plus",
+    10: "circle plus",          11: "star",
+    12: "square plus",          13: "circle cross",
+    14: "square triangle",
+    15: "square",               16: "circle small",
+    17: "triangle",             18: "diamond",
+    19: "circle",               20: "bullet",
+    21: "circle filled",        22: "square filled",
+    23: "diamond filled",       24: "triangle filled",
+    25: "triangle down filled",
+}
+
+
+def r_shape(shape):
+    """Translate a ggplot2 / R shape value to ``(matplotlib_marker, fill_mode)``.
+
+    Accepts:
+      * ggplot2 shape NAME (``"circle open"``, ``"square filled"``, …)
+      * R pch INTEGER (0–25)
+      * matplotlib marker (passed through; e.g. ``"o"``, ``"^"``)
+
+    Returns a ``(marker, fill_mode)`` tuple. ``fill_mode`` controls how the
+    geom should colour the marker — see ``_GGPLOT_SHAPE_NAMES`` above.
+    Unknown values fall through as ``(value, "solid")`` so existing
+    matplotlib-flavoured callers keep working.
+    """
+    if shape is None:
+        return ("o", "solid")
+    if isinstance(shape, str):
+        if shape in _GGPLOT_SHAPE_NAMES:
+            return _GGPLOT_SHAPE_NAMES[shape]
+        # Pass-through: matplotlib markers like 'o', 's', '^', '$x$', etc.
+        return (shape, "solid")
+    if isinstance(shape, (bool, np.bool_)):
+        # Bool subclasses int — treat as pass-through to avoid pch=1 mapping.
+        return (shape, "solid")
+    if isinstance(shape, (int, np.integer)):
+        name = _R_PCH_TO_NAME.get(int(shape))
+        if name is not None:
+            return _GGPLOT_SHAPE_NAMES[name]
+    return (shape, "solid")
+
+
 def r_color(c):
     """Translate an R-flavoured colour name into something matplotlib accepts.
 
