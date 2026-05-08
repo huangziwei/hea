@@ -56,12 +56,20 @@ class StatYdensity(Stat):
         density = kde(grid)
         max_d = density.max() if density.max() > 0 else 1.0
         violinwidth = density / max_d
+        # ggplot2's ``stat_ydensity`` also exposes ``ndensity = density /
+        # max(density)`` and ``count = density * n``. With ``scale="area"``
+        # (our default) ndensity equals violinwidth numerically, but
+        # ``after_stat("ndensity")`` is the documented hook so we expose
+        # it explicitly.
+        ndensity = violinwidth
 
         n = len(grid)
         cols: dict = {col: [keys[i]] * n for i, col in enumerate(groupby_cols)}
         cols.update({
             "y": grid,
             "density": density,
+            "ndensity": ndensity,
+            "count": density * len(y),
             "violinwidth": violinwidth,
         })
         return pl.DataFrame(cols)

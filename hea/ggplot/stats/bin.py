@@ -41,12 +41,22 @@ class StatBin(Stat):
         total = counts.sum()
         densities = counts / (total * widths) if total > 0 else counts.astype(float)
 
+        # ggplot2 ``bin_vector``: ``ncount = count / max(|count|)`` and
+        # ``ndensity = density / max(|density|)`` — per-group normalised
+        # forms used via ``after_stat("ncount")`` / ``"ndensity"``.
+        max_count = float(np.abs(counts).max()) if len(counts) else 0.0
+        max_density = float(np.abs(densities).max()) if len(densities) else 0.0
+        ncount = counts / max_count if max_count > 0 else counts.astype(float)
+        ndensity = densities / max_density if max_density > 0 else densities
+
         return pl.DataFrame({
             "x": mids,
             "y": counts.astype(float),
             "width": widths,
             "count": counts.astype(float),
             "density": densities,
+            "ncount": ncount.astype(float),
+            "ndensity": ndensity.astype(float),
         })
 
     def _compute_breaks(self, x):

@@ -70,6 +70,12 @@ class StatBin2d(Stat):
         total = float(flat.sum())
         density = flat / total if total > 0 else flat
 
+        # ``ncount`` / ``ndensity`` — per-group normalised forms (peak=1).
+        max_count = float(np.abs(flat).max()) if len(flat) else 0.0
+        max_density = float(np.abs(density).max()) if len(density) else 0.0
+        ncount = flat / max_count if max_count > 0 else flat.astype(float)
+        ndensity = density / max_density if max_density > 0 else density
+
         out = pl.DataFrame({
             "x": x_mids[ix],
             "y": y_mids[iy],
@@ -77,6 +83,8 @@ class StatBin2d(Stat):
             "height": y_heights[iy],
             "count": flat.astype(float),
             "density": density.astype(float),
+            "ncount": ncount.astype(float),
+            "ndensity": ndensity.astype(float),
             # Default fill = count so ``geom_bin2d()`` colours bins by
             # density without the user needing ``aes(fill=after_stat(count))``.
             "fill": flat.astype(float),
@@ -135,6 +143,11 @@ class StatBinhex(Stat):
         total = float(counts.sum())
         density = counts / total if total > 0 else counts
 
+        max_count = float(np.abs(counts).max()) if len(counts) else 0.0
+        max_density = float(np.abs(density).max()) if len(density) else 0.0
+        ncount = counts / max_count if max_count > 0 else counts.astype(float)
+        ndensity = density / max_density if max_density > 0 else density
+
         n = len(counts)
         return pl.DataFrame({
             "x": offsets[:, 0].astype(float),
@@ -143,6 +156,8 @@ class StatBinhex(Stat):
             "height": np.full(n, hex_h),
             "count": counts.astype(float),
             "density": density.astype(float),
+            "ncount": ncount.astype(float),
+            "ndensity": ndensity.astype(float),
             "fill": counts.astype(float),
         })
 

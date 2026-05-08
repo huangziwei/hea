@@ -43,10 +43,14 @@ class StatDensity(Stat):
         kde = gaussian_kde(x, bw_method=(bw / sigma_x) if sigma_x > 0 else bw)
         density = kde(grid)
 
+        max_d = float(density.max()) if density.size else 0.0
+        ndensity = density / max_d if max_d > 0 else density
+
         return pl.DataFrame({
             "x": grid,
             "y": density,
             "density": density,
+            "ndensity": ndensity,
             "count": density * len(x),
         })
 
