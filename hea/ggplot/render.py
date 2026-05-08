@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import matplotlib.pyplot as plt
 import polars as pl
+from matplotlib.patches import Rectangle
 
+from ._measure import STRIP_TEXT_SIZE_PT, strip_cell_height_in
 from ._util import r_color
 from .theme import element_blank, element_line, element_rect, element_text
 
@@ -163,7 +165,13 @@ def _render_facets(plot, build_output, layout, subplotspec=None):
 
         labels = facet.panel_labels(panel_row, layout)
         if labels.get("top"):
-            panel_ax.set_title(labels["top"])
+            # ``y=1.0`` disables matplotlib's auto-title-positioning
+            # (``_autotitlepos = False``) so ``_apply_strip_background``
+            # can re-center the title without matplotlib yanking it back.
+            # ``pad=0`` removes matplotlib's default 6-pt title pad —
+            # otherwise the title's transform is offset upward and our
+            # ``set_y`` lands ~8 px too high relative to the strip.
+            panel_ax.set_title(labels["top"], y=1.0, pad=0)
         if labels.get("right"):
             # Right-side strip: vertical text outside the right edge,
             # rotated to read top-to-bottom (ggplot2's strip.text.y default).
@@ -189,7 +197,8 @@ def _render_facets(plot, build_output, layout, subplotspec=None):
 
     if owns_fig:
         _apply_plot_titles(plot, fig, ax_list=list(flat_axes[:n_panels]))
-    _apply_theme(plot.theme, fig, list(flat_axes[:n_panels]), owns_fig=owns_fig)
+    _apply_theme(plot.theme, fig, list(flat_axes[:n_panels]),
+                 owns_fig=owns_fig, is_faceted=True)
 
     apply = getattr(plot.coordinates, "apply_to_axes", None)
     if apply is not None:
@@ -209,7 +218,8 @@ def _render_facets(plot, build_output, layout, subplotspec=None):
 # Theme application — translates :class:`Theme` elements to matplotlib calls.
 # ---------------------------------------------------------------------------
 
-def _apply_theme(theme, fig, axes_list, *, owns_fig: bool) -> None:
+def _apply_theme(theme, fig, axes_list, *, owns_fig: bool,
+                 is_faceted: bool = False) -> None:
     if theme is None or not theme.elements:
         return
 
@@ -227,6 +237,10 @@ def _apply_theme(theme, fig, axes_list, *, owns_fig: bool) -> None:
         _apply_ticks_and_text(theme, ax)
         _apply_axis_titles(theme, ax)
         _apply_strip_text(theme, ax)
+        # Only faceted plots have strip titles. Skipping for single-panel
+        # plots avoids painting a strip-bg behind a centered ``labs(title=)``.
+        if is_faceted:
+            _apply_strip_background(theme, ax)
 
 
 def _apply_plot_background(theme, fig) -> None:
@@ -437,6 +451,60 @@ def _apply_strip_text(theme, ax) -> None:
             title_artist.set_size(text.size)
         if text.face and "bold" in text.face:
             title_artist.set_weight("bold")
+
+
+def _apply_strip_background(theme, ax) -> None:
+    """Paint the panel-wide rectangle behind a facet panel's top strip.
+
+    ggplot2's strip is a full-width bar above the panel that carries the
+    facet label. We render it as an axes-relative ``Rectangle`` patch
+    spanning ``x ∈ [0, 1]`` and ``y ∈ [1, 1 + h]`` (axes coords), with the
+    title text re-centered vertically inside the bar.
+    """
+    title = ax.title
+    label = title.get_text()
+    if not label:
+        return
+    bg = theme.get("strip.background")
+    if isinstance(bg, element_blank) or not isinstance(bg, element_rect):
+        return
+
+    fig = ax.figure
+    ax_height_in = ax.get_position().height * fig.get_figheight()
+    if ax_height_in <= 0:
+        return
+    fontsize = title.get_fontsize() or STRIP_TEXT_SIZE_PT
+    strip_h_in = strip_cell_height_in(label, fontsize=fontsize)
+    strip_h_axes = strip_h_in / ax_height_in
+
+    facecolor = r_color(bg.fill) if bg.fill else "none"
+    edgecolor = r_color(bg.colour) if bg.colour else "none"
+    linewidth = (bg.size * _PT_PER_MM) if (bg.colour and bg.size) else 0.0
+
+    rect = Rectangle(
+        (0.0, 1.0), 1.0, strip_h_axes,
+        transform=ax.transAxes,
+        facecolor=facecolor,
+        edgecolor=edgecolor,
+        linewidth=linewidth,
+        clip_on=False,
+        # Lower zorder than the default Axes zorder (0) so the rectangle
+        # paints in the figure's pre-axes pass — axes content (including
+        # ``ax.title``) then renders on top. The strip lives outside the
+        # panel area (y > 1 in axes coords), so being "behind" the axes
+        # doesn't matter visually.
+        zorder=-1,
+    )
+    # Attach to the figure (not ``ax.patches``) so geom-level tests
+    # iterating ``ax.patches`` (counting bars, histogram bins) don't trip
+    # on the strip rectangle.
+    fig.add_artist(rect)
+
+    # Center the title text vertically within the strip bar. ``set_title``
+    # at the call site passed ``y=1.0`` to disable matplotlib's auto-title
+    # positioning, so this ``set_y`` value sticks across draws.
+    title.set_y(1.0 + strip_h_axes / 2.0)
+    title.set_va("center")
 
 
 def _default_labels(plot):

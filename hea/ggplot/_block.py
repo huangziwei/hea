@@ -467,7 +467,11 @@ def _render_facets_into(plot, build_output, axes_grid, *,
 
         labels = facet.panel_labels(panel_row, layout)
         if labels.get("top"):
-            panel_ax.set_title(labels["top"])
+            # ``y=1.0`` disables matplotlib's auto-title-positioning so
+            # ``_apply_strip_background`` can re-center the title.
+            # ``pad=0`` strips matplotlib's default 6-pt offset, otherwise
+            # the title's transform gets shifted ~8 px above the strip.
+            panel_ax.set_title(labels["top"], y=1.0, pad=0)
         if labels.get("right"):
             panel_ax.text(
                 1.02, 0.5, labels["right"],
@@ -499,6 +503,7 @@ def _render_facets_into(plot, build_output, axes_grid, *,
 
     _apply_theme(
         plot.theme, fig, list(flat_axes[:n_panels]), owns_fig=False,
+        is_faceted=True,
     )
 
     apply = getattr(plot.coordinates, "apply_to_axes", None)
