@@ -663,19 +663,25 @@ def _apply_aes_params(df: pl.DataFrame, layer, aes_params=None) -> pl.DataFrame:
 
 
 def _promote_string_aes_params(mapping, aes_params, data):
-    """Move string-valued ``aes_params`` whose value matches a data
-    column INTO the mapping (= map), leaving non-matching entries as
-    constants (= set).
+    """Move ``aes_params`` whose value is a column-reference-shaped
+    thing INTO the mapping (= map), leaving plain constants in
+    ``aes_params`` (= set).
 
-    This makes ``geom_point(color="species")`` behave like
-    ``geom_point(aes(color="species"))`` when ``"species"`` is a real
-    column — symmetric with plot-level kwarg sugar. ``color="red"``
-    (no column called ``red``) stays as SET. To force SET when a
-    column happens to share the literal's name, the user can wrap the
-    value in any non-string (or use ``aes()`` to force MAP).
+    Two shapes promote:
 
-    Explicit ``aes(color=...)`` always wins over the promoted entry
-    (the promoted one has lower priority in the merge)."""
+    * Strings matching a data column — ``geom_point(color="species")``
+      behaves like ``geom_point(aes(color="species"))`` when ``species``
+      exists. ``color="red"`` (no such column) stays SET.
+    * Polars ``Expr`` — ``geom_tile(fill=pl.col("n"))`` or
+      ``geom_tile(fill=pl.len())``. Without this, the Expr would flow
+      through ``to_series`` unevaluated and crash on
+      ``np.asarray(<Expr>)``. Promoting routes it through the build
+      pipeline's ``_eval_aes_value`` (which calls ``data.select(expr)``)
+      so the Expr is computed against the layer data, just like a
+      mapped column.
+
+    Explicit ``aes(color=...)`` still wins (the promoted entry has
+    lower priority in the merge)."""
     if not aes_params:
         return mapping, aes_params
     from .aes import Aes, _canon
@@ -685,6 +691,8 @@ def _promote_string_aes_params(mapping, aes_params, data):
     for k, v in aes_params.items():
         canon = _canon(k)
         if isinstance(v, str) and v in data.columns:
+            promoted[canon] = v
+        elif isinstance(v, pl.Expr):
             promoted[canon] = v
         else:
             keep[k] = v

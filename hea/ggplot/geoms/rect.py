@@ -165,8 +165,16 @@ def _tile_to_rect(data):
     """Inflate (x, y, width, height) → (xmin, xmax, ymin, ymax) for GeomRect."""
     import polars as pl
 
-    x = data["x"]
-    y = data["y"]
+    from ..positions.position import to_numeric_positions
+
+    # Discrete x / y (Enum / Categorical / Utf8) → 0-based integer positions
+    # so the ``x ± w/2`` arithmetic works. Same conversion the position
+    # adjustments use for dodge / jitter on a categorical axis. matplotlib's
+    # category converter still owns the visible tick labels via the scale's
+    # ``setup_axis`` step — we just need a numeric here so the
+    # rectangle math doesn't trip over a Utf8 / Enum subtraction.
+    x = to_numeric_positions(data["x"])
+    y = to_numeric_positions(data["y"])
     if "width" in data.columns:
         w = data["width"]
     else:

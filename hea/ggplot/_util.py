@@ -9,8 +9,17 @@ import polars as pl
 
 
 def to_series(x, length: int, name: str = "value") -> pl.Series:
-    """Coerce a scalar / array / Series into a polars Series of given length."""
+    """Coerce a scalar / array / Series into a polars Series of given length.
+
+    Length-1 Series broadcast to ``length`` — covers the "constant
+    computed from data" idiom, e.g. ``geom_tile(fill=pl.len())``
+    where the Expr evaluates to a single number that we want every
+    row to share. Mirrors :func:`numpy.asarray` 0-dim broadcasting
+    one level up at the Series boundary.
+    """
     if isinstance(x, pl.Series):
+        if len(x) == 1 and length != 1:
+            return pl.Series(name=name, values=[x[0]] * length, dtype=x.dtype)
         if len(x) != length:
             raise ValueError(f"length mismatch: aes value has {len(x)} rows, data has {length}")
         return x.alias(name)

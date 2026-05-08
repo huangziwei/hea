@@ -3088,6 +3088,79 @@ def test_fct_reorder_orders_levels_by_aggregate():
         plt.close(fig)
 
 
+def test_geom_tile_discrete_axes_render():
+    """``geom_tile`` on Enum / Categorical x and y — used to fail with
+    ``failed to determine supertype of enum and f64`` because
+    ``_tile_to_rect`` did ``x ± width/2`` straight on the Enum series.
+    Same numeric-position conversion the dodge / jitter positions use."""
+    df = pl.DataFrame({
+        "x": pl.Series(["a", "b", "c"], dtype=pl.Enum(["a", "b", "c"])),
+        "y": pl.Series(["A", "B", "C"], dtype=pl.Enum(["A", "B", "C"])),
+        "n": [1, 2, 3],
+    })
+    p = ggplot(df, aes("x", "y")) + geom_tile(fill="n")
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert [t.get_text() for t in ax.get_xticklabels()] == ["a", "b", "c"]
+        assert [t.get_text() for t in ax.get_yticklabels()] == ["A", "B", "C"]
+        # GeomRect adds its rectangles via a PatchCollection, not direct
+        # ``ax.patches`` — count the collection paths instead.
+        n_rects = sum(len(c.get_paths()) for c in ax.collections)
+        assert n_rects >= 3
+    finally:
+        plt.close(fig)
+
+
+def test_geom_tile_polars_expr_kwarg_evaluates_against_data():
+    """A polars ``Expr`` passed as a kwarg (``fill=pl.col("n")``) gets
+    promoted into the mapping and evaluated against the layer data —
+    same machinery as a bare column name. Previously it slipped through
+    to ``to_series`` unevaluated and crashed on ``np.asarray(<Expr>)``."""
+    df = pl.DataFrame({
+        "x": pl.Series(["a", "b"], dtype=pl.Enum(["a", "b"])),
+        "y": pl.Series(["A", "B"], dtype=pl.Enum(["A", "B"])),
+        "n": [10, 20],
+    })
+    p = ggplot(df, aes("x", "y")) + geom_tile(fill=pl.col("n"))
+    fig = p.draw()
+    try:
+        # Two distinct n values → two distinct rectangle facecolours via
+        # the continuous fill scale.
+        colors = set()
+        for coll in fig.axes[0].collections:
+            for fc in coll.get_facecolors():
+                colors.add(tuple(fc))
+        assert len(colors) >= 2
+    finally:
+        plt.close(fig)
+
+
+def test_aggregating_polars_expr_broadcasts_to_data_length():
+    """Length-1 results from aggregation Exprs (``pl.len()``,
+    ``pl.col("n").mean()``) broadcast to the data length — they're
+    "constants computed from data", same as ``pl.lit(...)``. Without
+    broadcast we'd get ``length mismatch: 1 vs N``."""
+    df = pl.DataFrame({
+        "x": pl.Series(["a", "b"], dtype=pl.Enum(["a", "b"])),
+        "y": pl.Series(["A", "B"], dtype=pl.Enum(["A", "B"])),
+        "n": [10, 20],
+    })
+    # pl.len() returns the row count of the layer data — broadcast to
+    # every tile, every cell ends up the same fill colour (uniform 2.0).
+    p = ggplot(df, aes("x", "y")) + geom_tile(fill=pl.len())
+    fig = p.draw()
+    try:
+        colors = set()
+        for coll in fig.axes[0].collections:
+            for fc in coll.get_facecolors():
+                colors.add(tuple(fc))
+        # All cells share one fill — exactly one distinct colour.
+        assert len(colors) == 1
+    finally:
+        plt.close(fig)
+
+
 def test_guide_axis_check_overlap_drops_overlapping_labels():
     """``guide_axis(check_overlap=True)`` greedily drops labels whose
     bbox would intersect a previously kept one — first-fit walk in
