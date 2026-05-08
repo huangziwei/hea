@@ -93,7 +93,7 @@ class ScaleOrdinal(Scale):
         else:
             ax.yaxis.update_units(levels)
 
-    def apply_to_axis(self, ax, axis: str) -> None:
+    def apply_to_axis(self, ax, axis: str, view_limits=None) -> None:
         levels = self.resolved_limits()
         n = len(levels)
         if n == 0:
@@ -104,7 +104,12 @@ class ScaleOrdinal(Scale):
         # only set this when ``limits`` is explicit (otherwise let
         # matplotlib autoscale from the artists, which gives a tighter
         # fit that matches existing behaviour for the default-order case).
-        if self.limits is not None:
+        if view_limits is not None:
+            if axis == "x":
+                ax.set_xlim(view_limits)
+            else:
+                ax.set_ylim(view_limits)
+        elif self.limits is not None:
             pad_lo, pad_hi = self._padding()
             lo = -pad_lo
             hi = (n - 1) + pad_hi

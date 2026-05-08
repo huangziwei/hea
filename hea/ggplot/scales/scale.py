@@ -47,8 +47,15 @@ class Scale:
         positions numeric data without registration. Default: no-op.
         """
 
-    def apply_to_axis(self, ax, axis: str) -> None:
+    def apply_to_axis(self, ax, axis: str, view_limits=None) -> None:
         """Push limits/breaks/labels onto ``ax``. Default: no-op.
+
+        ``view_limits`` — when the coord has been zoomed (e.g.
+        ``coord_cartesian(ylim=(0, 50))``), the renderer passes the
+        coord's view extent so the scale can compute breaks for the
+        visible window rather than the trained data range. Without
+        this, ticks would be picked from the full data range and only
+        the few that fall inside the zoom would be visible.
 
         Only positional scales (``ScaleContinuous`` for now) override this."""
 

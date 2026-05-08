@@ -389,7 +389,7 @@ def _render_single_into(plot, build_output, ax, *,
     engine composition allocates these in the right-margin column.
     """
     from .render import (
-        _apply_theme, _is_coord_flip, _default_labels,
+        _apply_theme, _is_coord_flip, _default_labels, _coord_view_limits,
     )
 
     is_flipped = _is_coord_flip(plot.coordinates)
@@ -415,7 +415,9 @@ def _render_single_into(plot, build_output, ax, *,
         scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
         sc = _panel_scale(build_output, 1, scale_aes)
         if sc is not None:
-            sc.apply_to_axis(ax, axis)
+            sc.apply_to_axis(
+                ax, axis, view_limits=_coord_view_limits(plot.coordinates, axis),
+            )
 
     xlabel, ylabel = _default_labels(plot)
     if is_flipped:
@@ -449,7 +451,9 @@ def _render_facets_into(plot, build_output, axes_grid, *,
     sibling plots. In that case we set the axis label on the bottom-row
     centre panel and left-column middle panel so it lives inside this
     leaf's panel column area."""
-    from .render import _apply_theme, _is_coord_flip, _default_labels
+    from .render import (
+        _apply_theme, _is_coord_flip, _default_labels, _coord_view_limits,
+    )
 
     facet = plot.facet
     layout = build_output.layout
@@ -486,7 +490,10 @@ def _render_facets_into(plot, build_output, axes_grid, *,
             scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
             sc = _panel_scale(build_output, panel_row["PANEL"], scale_aes)
             if sc is not None:
-                sc.apply_to_axis(panel_ax, axis)
+                sc.apply_to_axis(
+                    panel_ax, axis,
+                    view_limits=_coord_view_limits(plot.coordinates, axis),
+                )
 
         labels = facet.panel_labels(panel_row, layout)
         if labels.get("top"):

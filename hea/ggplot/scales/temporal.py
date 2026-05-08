@@ -28,7 +28,7 @@ class ScaleDate(ScaleContinuous):
 
     date_format: str | None = None  # passed to mdates.DateFormatter
 
-    def apply_to_axis(self, ax, axis: str) -> None:
+    def apply_to_axis(self, ax, axis: str, view_limits=None) -> None:
         import matplotlib.dates as mdates
 
         target_axis = ax.xaxis if axis == "x" else ax.yaxis
@@ -37,8 +37,12 @@ class ScaleDate(ScaleContinuous):
             mdates.DateFormatter(self.date_format or "%Y-%m-%d")
         )
 
-        # Limits, if user set them, still apply.
-        if self.limits is not None:
+        if view_limits is not None:
+            if axis == "x":
+                ax.set_xlim(view_limits)
+            else:
+                ax.set_ylim(view_limits)
+        elif self.limits is not None:
             if axis == "x":
                 ax.set_xlim(self.limits)
             else:
@@ -51,7 +55,7 @@ class ScaleDatetime(ScaleContinuous):
 
     date_format: str | None = None
 
-    def apply_to_axis(self, ax, axis: str) -> None:
+    def apply_to_axis(self, ax, axis: str, view_limits=None) -> None:
         import matplotlib.dates as mdates
 
         target_axis = ax.xaxis if axis == "x" else ax.yaxis
@@ -60,7 +64,12 @@ class ScaleDatetime(ScaleContinuous):
             mdates.DateFormatter(self.date_format or "%Y-%m-%d %H:%M")
         )
 
-        if self.limits is not None:
+        if view_limits is not None:
+            if axis == "x":
+                ax.set_xlim(view_limits)
+            else:
+                ax.set_ylim(view_limits)
+        elif self.limits is not None:
             if axis == "x":
                 ax.set_xlim(self.limits)
             else:
@@ -73,7 +82,7 @@ class ScaleTime(ScaleContinuous):
 
     date_format: str | None = None
 
-    def apply_to_axis(self, ax, axis: str) -> None:
+    def apply_to_axis(self, ax, axis: str, view_limits=None) -> None:
         import matplotlib.dates as mdates
 
         target_axis = ax.xaxis if axis == "x" else ax.yaxis
@@ -82,7 +91,12 @@ class ScaleTime(ScaleContinuous):
             mdates.DateFormatter(self.date_format or "%H:%M:%S")
         )
 
-        if self.limits is not None:
+        if view_limits is not None:
+            if axis == "x":
+                ax.set_xlim(view_limits)
+            else:
+                ax.set_ylim(view_limits)
+        elif self.limits is not None:
             if axis == "x":
                 ax.set_xlim(self.limits)
             else:

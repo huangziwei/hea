@@ -20,10 +20,15 @@ class ScalePercent(ScaleContinuous):
     xmax: float = 1.0  # data unit corresponding to 100%
     decimals: int | None = None
 
-    def apply_to_axis(self, ax, axis: str) -> None:
+    def apply_to_axis(self, ax, axis: str, view_limits=None) -> None:
         from matplotlib.ticker import PercentFormatter
 
-        if self.limits is not None:
+        if view_limits is not None:
+            if axis == "x":
+                ax.set_xlim(view_limits)
+            else:
+                ax.set_ylim(view_limits)
+        elif self.limits is not None:
             if axis == "x":
                 ax.set_xlim(self.limits)
             else:

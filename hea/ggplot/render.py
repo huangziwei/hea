@@ -50,6 +50,24 @@ def _is_coord_flip(coord) -> bool:
     return type(coord).__name__ == "CoordFlip"
 
 
+def _coord_view_limits(coord, axis: str):
+    """Coord's ``xlim`` / ``ylim`` zoom for ``axis`` (visible axis name).
+
+    Under :func:`coord_flip` the coord's ``xlim`` zooms the visible
+    *y* axis (and vice versa) — coord limits live in data-space, which
+    flips along with the geometry. Returns ``None`` when the coord
+    doesn't constrain that axis, letting the scale fall back to its
+    own (data-driven) range.
+    """
+    if coord is None:
+        return None
+    if _is_coord_flip(coord):
+        attr = "ylim" if axis == "x" else "xlim"
+    else:
+        attr = "xlim" if axis == "x" else "ylim"
+    return getattr(coord, attr, None)
+
+
 def _panel_scale(build_output, panel_id, axis: str):
     """Return the scale that governs ``axis`` on panel ``panel_id``.
 
@@ -106,7 +124,9 @@ def _render_single(plot, build_output, ax, subplotspec=None):
         scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
         sc = _panel_scale(build_output, 1, scale_aes)
         if sc is not None:
-            sc.apply_to_axis(ax, axis)
+            sc.apply_to_axis(
+                ax, axis, view_limits=_coord_view_limits(plot.coordinates, axis),
+            )
 
     xlabel, ylabel = _default_labels(plot)
     if is_flipped:
@@ -191,7 +211,10 @@ def _render_facets(plot, build_output, layout, subplotspec=None):
             scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
             sc = _panel_scale(build_output, panel_row["PANEL"], scale_aes)
             if sc is not None:
-                sc.apply_to_axis(panel_ax, axis)
+                sc.apply_to_axis(
+                    panel_ax, axis,
+                    view_limits=_coord_view_limits(plot.coordinates, axis),
+                )
 
         labels = facet.panel_labels(panel_row, layout)
         if labels.get("top"):

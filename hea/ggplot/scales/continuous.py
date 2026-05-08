@@ -42,7 +42,7 @@ class ScaleContinuous(Scale):
             self.range_[0] = min(self.range_[0], lo)
             self.range_[1] = max(self.range_[1], hi)
 
-    def apply_to_axis(self, ax, axis: str) -> None:
+    def apply_to_axis(self, ax, axis: str, view_limits=None) -> None:
         # Set matplotlib axis scale FIRST. Done before limits because some
         # scales (log) reject non-positive limits and would error on the
         # default linear-scale autoscaled values otherwise.
@@ -54,7 +54,17 @@ class ScaleContinuous(Scale):
             else:
                 ax.set_yscale(scale_name, **scale_kwargs)
 
-        if self.limits is not None:
+        if view_limits is not None:
+            # ``coord_cartesian(xlim=/ylim=)`` zoom — set limits to match
+            # the coord view so break filtering further down sees the
+            # right window. Coord's ``apply_to_axes`` will run again
+            # later but is now a no-op (idempotent set_xlim with the
+            # same value).
+            if axis == "x":
+                ax.set_xlim(view_limits)
+            else:
+                ax.set_ylim(view_limits)
+        elif self.limits is not None:
             if axis == "x":
                 ax.set_xlim(self.limits)
             else:
@@ -103,7 +113,14 @@ class ScaleContinuous(Scale):
         # break range past the data, e.g. bars at ``gear ∈ {3, 4, 5}``
         # would yield ``[2, 3, 4, 5, 6]`` instead of the expected
         # ``[3, 4, 5]``.
-        if self.range_ is not None:
+        if view_limits is not None:
+            # Compute breaks against the coord-zoomed view so e.g.
+            # ``coord_cartesian(ylim=(0, 50))`` on a histogram whose
+            # raw counts reach ~10k yields ticks at 0/10/.../50, not
+            # 0/2500/.../10000 (almost all of which would land outside
+            # the visible window and disappear).
+            break_range = tuple(view_limits)
+        elif self.range_ is not None:
             break_range = self._expanded_break_range()
         else:
             break_range = ax.get_xlim() if axis == "x" else ax.get_ylim()
