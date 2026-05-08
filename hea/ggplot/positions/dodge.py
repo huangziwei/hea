@@ -25,6 +25,8 @@ class PositionDodge(Position):
         dodged only when they OVERLAP at the same x. A boxplot with
         ``group=x`` (each x has exactly one group) gets no dodge —
         ggplot2 leaves x at 3, 4, 5 not 2.75, 4.0, 5.25."""
+        from .position import to_numeric_positions
+
         if "group" not in data.columns or "x" not in data.columns:
             return data
 
@@ -52,6 +54,17 @@ class PositionDodge(Position):
         # species, y = body_mass_g))`` where each species has one box.
         if int(unique_xg["_n_at_x"].max() or 0) <= 1:
             return data
+
+        # ggplot2 maps discrete x to integer positions before applying
+        # the dodge offset; we do the same so ``aes(x=drv)`` (string)
+        # works the same as ``aes(x=cyl)`` (numeric). Convert ``x`` in
+        # both the join keys and the data so the join still aligns.
+        x_was_discrete = data["x"].dtype not in (pl.Float32, pl.Float64) and (
+            not data["x"].dtype.is_numeric()
+        )
+        if x_was_discrete:
+            data = data.with_columns(to_numeric_positions(data["x"]))
+            unique_xg = unique_xg.with_columns(to_numeric_positions(unique_xg["x"]))
         # Offset = (rank - (n-1)/2) * slot_width; slot_width = base_width/n.
         unique_xg = unique_xg.with_columns(
             _offset=pl.when(pl.col("_n_at_x") > 1)

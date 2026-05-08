@@ -231,52 +231,39 @@ def build(plot) -> BuildOutput:
             if isinstance(value, str):
                 aes_source[aes_name] = value
 
-    layers_data: list[pl.DataFrame] = []
+    # Pass 1 (per layer): aesthetics → stat → after_stat. Stop BEFORE
+    # position so the scale system can see the original dtype of x / y
+    # — discrete column → ``ScaleOrdinal``, continuous → ``ScaleContinuous``.
+    # Position adjustments (dodge / nudge / jitter) convert discrete
+    # axes to integer positions for arithmetic; if scale registration
+    # ran after that, ``ScaleContinuous`` would always win and the
+    # discrete tick labels would be lost.
+    pre_position: list[pl.DataFrame] = []
     deferred_after_stat: list[dict] = []  # one per layer
     deferred_after_scale: list[dict] = []
     effective_aes_params: list[dict] = []  # per-layer; reduced after promotion.
     for layer, ld, mapping, layer_eff_params in resolved:
         effective_aes_params.append(layer_eff_params)
-        # Split out after_stat / after_scale markers — they're evaluated
-        # later, against the post-stat / post-scale frame respectively.
         immediate, after_stat_map, after_scale_map = _split_deferred(mapping)
         df = _compute_aesthetics(immediate, ld, plot.plot_env)
-        # Carry facet variables alongside aes columns so map_data can
-        # assign each row a panel after stat/position run.
         df = _attach_facet_columns(df, ld, facet_vars)
         df = _drop_na(df, layer)
         df = _add_group(df)
-        # Stat per panel: each panel's data is computed separately so
-        # group-aware stats (count, bin, density) honour facet boundaries.
         df = _stat_per_panel(df, layer, facet_vars)
-        # Resolve after_stat() now that the stat output is in df.
         df = _apply_deferred(df, after_stat_map, plot.plot_env)
-        df = _position_per_panel(df, layer, facet_vars)
-        # Geom-specific data prep — bar/area geoms expose their implicit
-        # y=0 baseline as ymin/ymax here so the next phase (scale
-        # training) sees 0 in the y data range.
-        df = layer.geom.setup_data(df)
-        if not getattr(layer, "broadcast_panels", False):
-            df = facet.map_data(df, layout)
-        layers_data.append(df)
+        pre_position.append(df)
         deferred_after_stat.append(after_stat_map)
         deferred_after_scale.append(after_scale_map)
 
     # Independent copy so multiple draw() calls don't accumulate state.
     scales = plot.scales.copy()
 
-    # Auto-register defaults: positional always; non-positional only when
-    # the data column suggests a discrete scale would help. Pass the
-    # column data to the positional path too so a string ``aes(x="island")``
-    # picks ScaleOrdinal automatically. Fall back to a sibling positional
-    # column (``ymin``, ``lower``, …) when the primary axis aesthetic is
-    # absent — geom_boxplot output has no ``y`` column but five y-typed
-    # siblings, and we still need a y scale. Skip list-typed columns
-    # (boxplot's ``outliers``) for dtype detection so we always pick a
-    # scalar sibling.
+    # Auto-register defaults from the pre-position data so dtype-based
+    # choice (discrete vs continuous) sees the user's original column
+    # type, not whatever position adjustment hands back.
     import polars as _pl_for_dtype
 
-    for df in layers_data:
+    for df in pre_position:
         for axis in ("x", "y"):
             sibling_for_dtype = next(
                 (df[c] for c in _positional_aes_for(axis)
@@ -290,9 +277,51 @@ def build(plot) -> BuildOutput:
             if aes in df.columns:
                 scales.get_or_default_for_data(aes, df[aes])
 
+    # Train ordinal scales on pre-position data so their level catalogue
+    # is locked in before position rewrites x / y to numeric. Continuous
+    # scales train post-position (need the actual numeric extent).
+    from .scales.ordinal import ScaleOrdinal
+
+    for df in pre_position:
+        for axis in ("x", "y"):
+            sc = scales.get(axis)
+            if isinstance(sc, ScaleOrdinal) and axis in df.columns:
+                _train_series(sc, df[axis])
+
+    # Drop rows outside an explicit ``scale_x_discrete(limits=...)`` /
+    # ``scale_y_discrete(limits=...)`` BEFORE position runs, so the
+    # dodge / jitter rank counts only see the kept categories.
+    for axis in ("x", "y"):
+        sc = scales.get(axis)
+        if not isinstance(sc, ScaleOrdinal) or sc.limits is None:
+            continue
+        keep = [str(v) for v in sc.resolved_limits()]
+        for i, df in enumerate(pre_position):
+            if axis not in df.columns or len(df) == 0:
+                continue
+            mask = df[axis].cast(pl.Utf8).is_in(keep)
+            pre_position[i] = df.filter(mask)
+
+    # Pass 2: position → setup_data → facet map. Ordinal scales already
+    # know their levels at this point, so position can convert discrete
+    # x / y to integer positions without losing axis identity.
+    layers_data: list[pl.DataFrame] = []
+    for layer, df in zip(plot.layers, pre_position):
+        df = _position_per_panel(df, layer, facet_vars)
+        # Geom-specific data prep — bar/area geoms expose their implicit
+        # y=0 baseline as ymin/ymax here so the next phase (scale
+        # training) sees 0 in the y data range.
+        df = layer.geom.setup_data(df)
+        if not getattr(layer, "broadcast_panels", False):
+            df = facet.map_data(df, layout)
+        layers_data.append(df)
+
     # Train every registered scale on every layer's data. Positional scales
     # train on every present sibling (y, ymin, ymax, lower, …) so the axis
     # range spans the full data extent, not just the primary aesthetic.
+    # ``ScaleOrdinal`` already captured its levels in the pre-position
+    # pass; ``train()`` skips numeric data so post-position numeric
+    # positions don't pollute the level list.
     for df in layers_data:
         # ``flipped_aes`` is the per-row flag stat_boxplot tags onto its
         # output when the distribution lives on x; outliers (and any
@@ -314,24 +343,6 @@ def build(plot) -> BuildOutput:
                     _train_series(scale, df[_OUTLIERS_COLUMN])
             elif aes_name in df.columns:
                 scale.train(df[aes_name])
-
-    # Drop rows outside an explicit ``scale_x_discrete(limits=...)`` /
-    # ``scale_y_discrete(limits=...)``. Matches ggplot2's
-    # ``stat_count() removed N rows containing non-finite values outside
-    # the scale range``. Keep this BEFORE per-panel scale training so the
-    # filtered data drives both global and per-panel ranges.
-    from .scales.ordinal import ScaleOrdinal
-
-    for axis in ("x", "y"):
-        sc = scales.get(axis)
-        if not isinstance(sc, ScaleOrdinal) or sc.limits is None:
-            continue
-        keep = [str(v) for v in sc.resolved_limits()]
-        for i, df in enumerate(layers_data):
-            if axis not in df.columns or len(df) == 0:
-                continue
-            mask = df[axis].cast(pl.Utf8).is_in(keep)
-            layers_data[i] = df.filter(mask)
 
     # Per-panel positional scales — for ``scales="free*"`` each panel (or
     # column / row, in facet_grid) needs its own trained range so axis

@@ -40,10 +40,17 @@ class ScaleOrdinal(Scale):
         category order (matches R's factor levels); plain strings sort
         alphabetically (matches R's ``factor()`` default which calls
         ``sort(unique(x))``).
+
+        Numeric data is ignored once levels have been captured — the
+        build pipeline calls ``train`` again post-position-adjustment
+        with integer positions in place of strings, and we don't want
+        those float positions to graft onto the level list.
         """
         if data is None or len(data) == 0:
             return
         if isinstance(data, pl.Series):
+            if data.dtype.is_numeric() and self.levels:
+                return
             if data.dtype in (pl.Categorical, pl.Enum):
                 new_levels = [str(v)
                               for v in data.cat.get_categories().to_list()]
