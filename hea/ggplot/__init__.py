@@ -17,6 +17,7 @@ from __future__ import annotations
 from .aes import aes, after_scale, after_stat
 from .annotate import annotate, annotation_custom
 from .coords import coord_cartesian, coord_fixed, coord_flip, coord_trans
+from .cuts import cut_interval, cut_number, cut_width
 from .expansion import Expansion, expansion
 from .core import ggplot
 from .facets import facet_grid, facet_wrap
@@ -183,6 +184,9 @@ __all__ = [
     "aes",
     "after_stat",
     "after_scale",
+    "cut_interval",
+    "cut_number",
+    "cut_width",
     "geom_blank",
     "geom_point",
     "geom_jitter",
