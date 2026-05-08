@@ -22,10 +22,92 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import polars as pl
+from matplotlib.legend_handler import HandlerLine2D
 from matplotlib.lines import Line2D
+from matplotlib.patches import Rectangle as _MplRect
 
+from ._util import r_color
 from .scales.color_continuous import ScaleContinuousColor
 from .scales.discrete import ScaleDiscreteColor, ScaleIdentity
+from .theme import element_blank, element_rect, element_text
+
+
+# ggplot2 sizes are in mm; matplotlib widths/lengths are in pt. R's TeX
+# convention: 72.27 pt/inch, 25.4 mm/inch → ≈ 2.8454 pt/mm.
+_PT_PER_MM = 72.27 / 25.4
+
+
+class _HandlerLine2DKeyBg(HandlerLine2D):
+    """Wraps the standard ``Line2D`` legend handler with a panel-colour
+    rectangle behind each glyph — matches ggplot2's ``legend.key`` element.
+    Without this, matplotlib draws handles on a transparent background.
+
+    matplotlib's ``DrawingArea`` paints children in *insertion order*
+    (zorder is ignored within an OffsetBox), so we override
+    ``legend_artist`` directly: add the bg first so it paints under the
+    glyph, then the glyph on top, while still returning the glyph as the
+    primary handle for ``Legend.legend_handles``.
+    """
+
+    def __init__(self, *, facecolor, edgecolor="none", linewidth=0.0, **kw):
+        super().__init__(**kw)
+        self._key_fc = facecolor
+        self._key_ec = edgecolor
+        self._key_lw = linewidth
+
+    def legend_artist(self, legend, orig_handle, fontsize, handlebox):
+        xdescent, ydescent, width, height = self.adjust_drawing_area(
+            legend, orig_handle,
+            handlebox.xdescent, handlebox.ydescent,
+            handlebox.width, handlebox.height,
+            fontsize,
+        )
+        trans = handlebox.get_transform()
+        bg = _MplRect(
+            (-xdescent, -ydescent), width, height,
+            facecolor=self._key_fc,
+            edgecolor=self._key_ec,
+            linewidth=self._key_lw,
+            transform=trans,
+        )
+        handlebox.add_artist(bg)
+        glyphs = self.create_artists(
+            legend, orig_handle, xdescent, ydescent, width, height,
+            fontsize, trans,
+        )
+        for g in glyphs:
+            handlebox.add_artist(g)
+        return glyphs[0] if glyphs else bg
+
+
+def _legend_key_handler(theme):
+    """Return a ``handler_map`` that paints ``legend.key`` behind each glyph,
+    or ``None`` if the theme blanks/omits the key."""
+    elem = theme.get("legend.key")
+    if isinstance(elem, element_blank):
+        return None
+    if not isinstance(elem, element_rect) or not elem.fill:
+        return None
+    fc = r_color(elem.fill)
+    ec = r_color(elem.colour) if elem.colour else "none"
+    lw = (elem.size * _PT_PER_MM) if (elem.colour and elem.size) else 0.0
+    return {Line2D: _HandlerLine2DKeyBg(
+        facecolor=fc, edgecolor=ec, linewidth=lw,
+    )}
+
+
+def _legend_title_alignment(theme) -> str:
+    """Map ``legend.title``'s ``hjust`` to matplotlib's ``alignment`` arg.
+    ggplot2's default is left-aligned; matplotlib's is centered."""
+    elem = theme.get("legend.title")
+    if not isinstance(elem, element_text) or elem.hjust is None:
+        return "left"
+    h = float(elem.hjust)
+    if h <= 0:
+        return "left"
+    if h >= 1:
+        return "right"
+    return "center"
 
 
 # Aesthetics that contribute to ``guide_legend`` entries.
@@ -202,6 +284,8 @@ def apply_legends(fig, axes_list, plot, build_output, *,
     direction = plot.theme.get("legend.direction") or (
         "vertical" if pos in ("right", "left") else "horizontal"
     )
+    handler_map = _legend_key_handler(plot.theme)
+    alignment = _legend_title_alignment(plot.theme)
 
     target = axes_list[0]
 
@@ -223,18 +307,27 @@ def apply_legends(fig, axes_list, plot, build_output, *,
         host = (legend_host_axes[i]
                 if legend_host_axes and i < len(legend_host_axes)
                 else None)
+        # ggplot2 sizing: ``legend.key.size = unit(1.2, "lines")`` — keys
+        # are square, ~1.2 fontsize units. matplotlib's defaults are wider
+        # and shorter (handlelength=2, handleheight=0.7). Squaring them
+        # plus ``labelspacing=0`` makes the per-key bg rectangles abut
+        # vertically, matching ggplot2's continuous gray column.
+        sizing = {"handlelength": 1.5, "handleheight": 1.5,
+                  "labelspacing": 0.0}
         if host is not None:
             host.set_axis_off()
             leg = host.legend(
                 handles, group.labels, title=group.title, ncols=ncols,
                 loc="center left", bbox_to_anchor=(0.0, 0.5),
-                frameon=False,
+                frameon=False, alignment=alignment,
+                handler_map=handler_map, **sizing,
             )
         else:
             kw = _legend_position_kwargs(pos, i, len(groups))
             leg = target.legend(
                 handles, group.labels, title=group.title, ncols=ncols,
-                frameon=False, **kw,
+                frameon=False, alignment=alignment,
+                handler_map=handler_map, **sizing, **kw,
             )
         legends.append(leg)
         if host is None and i < len(groups) - 1:

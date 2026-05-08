@@ -152,6 +152,13 @@ def theme_gray() -> Theme:
         "panel.grid.minor": element_line(colour="white", size=0.25),
         "strip.text": element_text(size=8.8, colour="grey10"),
         "strip.background": element_rect(fill="grey85"),
+        # Legend defaults — match ggplot2's ``theme_grey`` look:
+        # title left-aligned to the keys, each key glyph on a panel-colour
+        # rectangle (legend.key).
+        "legend.title": element_text(size=11, colour="black", hjust=0),
+        "legend.text": element_text(size=8.8, colour="grey10"),
+        "legend.key": element_rect(fill="#EBEBEB"),
+        "legend.background": element_rect(fill="white"),
     }, complete=True)
 
 
@@ -215,6 +222,10 @@ def theme_void() -> Theme:
         "plot.background": element_blank(),
         "strip.text": element_blank(),
         "strip.background": element_blank(),
+        "legend.title": element_blank(),
+        "legend.text": element_blank(),
+        "legend.key": element_blank(),
+        "legend.background": element_blank(),
     }, complete=True)
 
 
