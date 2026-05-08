@@ -455,7 +455,19 @@ def _default_labels(plot):
 
     def _from_mapping(mapping, key):
         m = mapping.get(key) if key in mapping else None
-        return m if isinstance(m, str) else None
+        if isinstance(m, str):
+            return m
+        # Polars expressions: best-effort deparse via the source column
+        # name. ``col("carat").log()`` returns ``"carat"`` from
+        # ``.meta.output_name()`` — not the full ``log10(carat)`` ggplot2
+        # would deparse, but a useful default vs. a blank axis label.
+        # Users wanting precise labels should use labs() / xlab() / ylab().
+        if isinstance(m, pl.Expr):
+            try:
+                return m.meta.output_name()
+            except Exception:
+                return None
+        return None
 
     def _from_layers(key):
         for layer in plot.layers:

@@ -441,6 +441,13 @@ def _compute_aesthetics(mapping: Aes, data: pl.DataFrame, env: dict) -> pl.DataF
 
 def _eval_aes_value(expr, data: pl.DataFrame, env: dict):
     """Resolve one aes value. See plan §13 Q3 for disambiguation rules."""
+    # Polars expression — evaluate against the layer's data. Lets users
+    # write ``aes(x=col("carat").log())`` and the like; without this the
+    # Expr would fall through as a "constant" and ``to_series`` would
+    # try to numpy-broadcast it (which fails because Expr can't convert).
+    if isinstance(expr, pl.Expr):
+        return data.select(expr).to_series()
+
     if callable(expr) and not isinstance(expr, str):
         return expr(data)
 
