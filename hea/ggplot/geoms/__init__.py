@@ -14,7 +14,7 @@ from .errorbar import (
     geom_pointrange,
 )
 from .bin2d import geom_bin2d, geom_hex
-from .histogram import geom_histogram
+from .histogram import geom_freqpoly, geom_histogram
 from .path import geom_line, geom_path, geom_step
 from .point import geom_jitter, geom_point
 from .polygon import geom_polygon
@@ -33,6 +33,7 @@ __all__ = [
     "geom_bar",
     "geom_col",
     "geom_histogram",
+    "geom_freqpoly",
     "geom_density",
     "geom_line",
     "geom_path",

@@ -23,6 +23,7 @@ class StatBin(Stat):
     boundary: float | None = None
     center: float | None = None
     closed: str = "right"
+    pad: bool = False
 
     default_y_label: str = "count"
 
@@ -38,6 +39,18 @@ class StatBin(Stat):
         counts = _count_per_bin(x, breaks, self.closed)
         mids = (breaks[:-1] + breaks[1:]) / 2
         widths = np.diff(breaks)
+
+        if self.pad:
+            # ``geom_freqpoly`` default: prepend / append a zero-count
+            # bin on each side so the polygon line returns to the
+            # baseline at the data's edges (ggplot2 ``bin_vector(pad=
+            # TRUE)``). Without padding the line would terminate at the
+            # outermost data bin's height, which reads as a step rather
+            # than a closed shape.
+            mids = np.concatenate(([mids[0] - widths[0]], mids, [mids[-1] + widths[-1]]))
+            widths = np.concatenate(([widths[0]], widths, [widths[-1]]))
+            counts = np.concatenate(([0], counts, [0]))
+
         total = counts.sum()
         densities = counts / (total * widths) if total > 0 else counts.astype(float)
 
@@ -125,6 +138,7 @@ def _count_per_bin(x, breaks, closed: str) -> np.ndarray:
     return counts.astype(int)
 
 
-def stat_bin(*, bins=None, binwidth=None, boundary=None, center=None, closed="right"):
+def stat_bin(*, bins=None, binwidth=None, boundary=None, center=None,
+             closed="right", pad=False):
     return StatBin(bins=bins, binwidth=binwidth, boundary=boundary,
-                   center=center, closed=closed)
+                   center=center, closed=closed, pad=pad)
