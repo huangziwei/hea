@@ -38,6 +38,15 @@ class Scale:
         the value the geom draws differs from the value in the data."""
         return data
 
+    def setup_axis(self, ax, axis: str) -> None:
+        """Pre-render hook: applied to ``ax`` *before* any geom draws.
+
+        Used by discrete scales to register their level order with
+        matplotlib's category unit so geoms place data at the right
+        positions. Continuous scales don't need this — matplotlib
+        positions numeric data without registration. Default: no-op.
+        """
+
     def apply_to_axis(self, ax, axis: str) -> None:
         """Push limits/breaks/labels onto ``ax``. Default: no-op.
 

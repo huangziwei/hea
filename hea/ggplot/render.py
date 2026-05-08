@@ -84,6 +84,15 @@ def _render_single(plot, build_output, ax, subplotspec=None):
     # when flipped) can read without a signature change.
     ax._hea_coord_flipped = is_flipped
 
+    # Pre-axis hook: discrete scales register their category order on
+    # matplotlib's category unit BEFORE geoms draw, so the data lands at
+    # the levels' positions (not row-encounter positions).
+    for axis in ("x", "y"):
+        scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
+        sc = _panel_scale(build_output, 1, scale_aes)
+        if sc is not None:
+            sc.setup_axis(ax, axis)
+
     for layer, df in zip(plot.layers, build_output.data):
         if is_flipped:
             from .coords.flip import flip_columns
@@ -155,6 +164,13 @@ def _render_facets(plot, build_output, layout, subplotspec=None):
         idx = panel_row["PANEL"] - 1
         panel_ax = flat_axes[idx]
         panel_ax._hea_coord_flipped = is_flipped
+
+        # Pre-axis hook: see _render_single for rationale.
+        for axis in ("x", "y"):
+            scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
+            sc = _panel_scale(build_output, panel_row["PANEL"], scale_aes)
+            if sc is not None:
+                sc.setup_axis(panel_ax, axis)
 
         for layer, df in zip(plot.layers, build_output.data):
             if "PANEL" not in df.columns:

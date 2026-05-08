@@ -43,7 +43,8 @@ from hea.ggplot import (
     scale_fill_identity, scale_fill_manual, scale_linetype,
     scale_linetype_manual, scale_radius, scale_shape, scale_shape_manual,
     scale_size_area, scale_size_continuous, scale_size_manual,
-    scale_x_continuous, scale_x_date, scale_x_datetime, scale_x_log10,
+    scale_x_continuous, scale_x_date, scale_x_datetime, scale_x_discrete,
+    scale_x_log10,
     scale_x_ordinal, scale_x_percent, scale_x_reverse, scale_x_sqrt,
     scale_x_time, scale_y_continuous, scale_y_date, scale_y_datetime,
     scale_y_log10, scale_y_percent,
@@ -2991,8 +2992,13 @@ def test_scale_y_percent_xmax_100():
         plt.close(fig)
 
 
-def test_scale_x_ordinal_passes_through_strings():
-    """`scale_x_ordinal()` preserves matplotlib's categorical axis labels."""
+def test_scale_x_ordinal_sorts_plain_strings_alphabetically():
+    """Plain string columns get alphabetical ordering — matches R's
+    ``factor()`` default (``levels = sort(unique(x))``). Semantic order
+    (``low < medium < high``) requires either a ``pl.Enum`` /
+    ``factor()`` cast on the data or
+    ``scale_x_discrete(limits=["low","medium","high"])``.
+    """
     df = pl.DataFrame({
         "x": ["low", "medium", "high"],
         "y": [1.0, 2.0, 3.0],
@@ -3001,7 +3007,63 @@ def test_scale_x_ordinal_passes_through_strings():
     fig = p.draw()
     try:
         labels = [t.get_text() for t in fig.axes[0].xaxis.get_majorticklabels()]
-        assert labels == ["low", "medium", "high"]
+        assert labels == ["high", "low", "medium"]
+    finally:
+        plt.close(fig)
+
+
+def test_scale_x_discrete_limits_overrides_order():
+    """``limits=`` on a discrete scale dictates the axis category order
+    and the bar/point positions, regardless of data row order."""
+    df = pl.DataFrame({
+        "x": ["banana", "apple", "cherry", "apple", "banana", "cherry", "cherry"],
+    })
+    p = ggplot(df, aes(x="x")) + geom_bar() + scale_x_discrete(
+        limits=["cherry", "banana", "apple"],
+    )
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert [t.get_text() for t in ax.get_xticklabels()] == [
+            "cherry", "banana", "apple",
+        ]
+        bars = sorted(
+            ((b.get_x() + b.get_width() / 2, b.get_height())
+             for b in ax.patches if b.get_height() > 0),
+            key=lambda t: t[0],
+        )
+        assert [round(x, 1) for x, _ in bars] == [0.0, 1.0, 2.0]
+        assert [int(h) for _, h in bars] == [3, 2, 2]
+    finally:
+        plt.close(fig)
+
+
+def test_scale_x_discrete_limits_subset_drops_rows():
+    """Values not in ``limits`` are filtered out (matches R's 'Removed
+    N rows containing non-finite values outside the scale range')."""
+    df = pl.DataFrame({"x": ["a", "b", "c", "a", "b", "c", "c"]})
+    p = ggplot(df, aes(x="x")) + geom_bar() + scale_x_discrete(limits=["c", "b"])
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert [t.get_text() for t in ax.get_xticklabels()] == ["c", "b"]
+        heights = sorted(int(b.get_height()) for b in ax.patches if b.get_height() > 0)
+        assert heights == [2, 3]
+    finally:
+        plt.close(fig)
+
+
+def test_scale_x_discrete_limits_callable():
+    """``limits=callable`` is applied to the trained levels — matches
+    ggplot2's ``scale_x_discrete(limits=rev)`` pattern."""
+    df = pl.DataFrame({"x": ["a", "b", "c", "a", "b", "c"]})
+    p = ggplot(df, aes(x="x")) + geom_bar() + scale_x_discrete(
+        limits=lambda x: list(reversed(x)),
+    )
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert [t.get_text() for t in ax.get_xticklabels()] == ["c", "b", "a"]
     finally:
         plt.close(fig)
 

@@ -315,6 +315,24 @@ def build(plot) -> BuildOutput:
             elif aes_name in df.columns:
                 scale.train(df[aes_name])
 
+    # Drop rows outside an explicit ``scale_x_discrete(limits=...)`` /
+    # ``scale_y_discrete(limits=...)``. Matches ggplot2's
+    # ``stat_count() removed N rows containing non-finite values outside
+    # the scale range``. Keep this BEFORE per-panel scale training so the
+    # filtered data drives both global and per-panel ranges.
+    from .scales.ordinal import ScaleOrdinal
+
+    for axis in ("x", "y"):
+        sc = scales.get(axis)
+        if not isinstance(sc, ScaleOrdinal) or sc.limits is None:
+            continue
+        keep = [str(v) for v in sc.resolved_limits()]
+        for i, df in enumerate(layers_data):
+            if axis not in df.columns or len(df) == 0:
+                continue
+            mask = df[axis].cast(pl.Utf8).is_in(keep)
+            layers_data[i] = df.filter(mask)
+
     # Per-panel positional scales — for ``scales="free*"`` each panel (or
     # column / row, in facet_grid) needs its own trained range so axis
     # limits and ticks reflect that panel's data, not the global pool.

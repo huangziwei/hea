@@ -395,13 +395,22 @@ def _render_single_into(plot, build_output, ax, *,
     is_flipped = _is_coord_flip(plot.coordinates)
     ax._hea_coord_flipped = is_flipped
 
+    from .render import _panel_scale
+    # Pre-axis hook: discrete scales register their category order with
+    # matplotlib's category unit BEFORE geoms draw, so the data lands at
+    # the levels' positions (not row-encounter positions).
+    for axis in ("x", "y"):
+        scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
+        sc = _panel_scale(build_output, 1, scale_aes)
+        if sc is not None:
+            sc.setup_axis(ax, axis)
+
     for layer, df in zip(plot.layers, build_output.data):
         if is_flipped:
             from .coords.flip import flip_columns
             df = flip_columns(df)
         layer.geom.draw_panel(df, ax)
 
-    from .render import _panel_scale
     for axis in ("x", "y"):
         scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
         sc = _panel_scale(build_output, 1, scale_aes)
@@ -448,10 +457,19 @@ def _render_facets_into(plot, build_output, axes_grid, *,
     flat_axes = [ax for row in axes_grid for ax in row]
     n_panels = len(layout)
 
+    from .render import _panel_scale
+
     for panel_row in layout.iter_rows(named=True):
         idx = panel_row["PANEL"] - 1
         panel_ax = flat_axes[idx]
         panel_ax._hea_coord_flipped = is_flipped
+
+        # Pre-axis hook: see _render_single_into for rationale.
+        for axis in ("x", "y"):
+            scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
+            sc = _panel_scale(build_output, panel_row["PANEL"], scale_aes)
+            if sc is not None:
+                sc.setup_axis(panel_ax, axis)
 
         for layer, df in zip(plot.layers, build_output.data):
             if "PANEL" not in df.columns:
@@ -464,7 +482,6 @@ def _render_facets_into(plot, build_output, axes_grid, *,
             if len(panel_data) > 0:
                 layer.geom.draw_panel(panel_data, panel_ax)
 
-        from .render import _panel_scale
         for axis in ("x", "y"):
             scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
             sc = _panel_scale(build_output, panel_row["PANEL"], scale_aes)
