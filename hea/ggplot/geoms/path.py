@@ -121,17 +121,19 @@ def _stairstep(x, y, direction: str):
 # Factories
 # ---------------------------------------------------------------------------
 
-def _layer(geom, mapping, data, position, kwargs):
+def _layer(geom, mapping, data, position, stat, kwargs):
     from ..layer import Layer
     from ..positions import resolve_position
-    from ..stats.identity import StatIdentity
+    from ..stats import resolve_stat
+
+    stat_obj = resolve_stat(stat) if isinstance(stat, str) else stat
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "size", "linetype", "alpha"}}
     geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
     return Layer(
         geom=geom,
-        stat=StatIdentity(),
+        stat=stat_obj,
         position=resolve_position(position),
         mapping=mapping,
         data=data,
@@ -140,14 +142,15 @@ def _layer(geom, mapping, data, position, kwargs):
     )
 
 
-def geom_path(mapping=None, data=None, *, position="identity", **kwargs):
-    return _layer(GeomPath(), mapping, data, position, kwargs)
+def geom_path(mapping=None, data=None, *, stat="identity", position="identity", **kwargs):
+    return _layer(GeomPath(), mapping, data, position, stat, kwargs)
 
 
-def geom_line(mapping=None, data=None, *, position="identity", **kwargs):
-    return _layer(GeomPath(sort_by_x=True), mapping, data, position, kwargs)
+def geom_line(mapping=None, data=None, *, stat="identity", position="identity", **kwargs):
+    return _layer(GeomPath(sort_by_x=True), mapping, data, position, stat, kwargs)
 
 
-def geom_step(mapping=None, data=None, *, direction="hv", position="identity", **kwargs):
+def geom_step(mapping=None, data=None, *, stat="identity", direction="hv",
+              position="identity", **kwargs):
     return _layer(GeomPath(sort_by_x=True, step_direction=direction),
-                  mapping, data, position, kwargs)
+                  mapping, data, position, stat, kwargs)

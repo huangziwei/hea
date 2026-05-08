@@ -129,14 +129,9 @@ def _edge_colour(df):
 def geom_bar(mapping=None, data=None, *, stat="count", position="stack", **kwargs):
     from ..layer import Layer
     from ..positions import resolve_position
-    from ..stats.count import StatCount
+    from ..stats import resolve_stat
 
-    if stat == "count":
-        stat_obj = StatCount()
-    elif hasattr(stat, "compute_layer"):
-        stat_obj = stat
-    else:
-        raise ValueError(f"geom_bar: unknown stat {stat!r}")
+    stat_obj = resolve_stat(stat) if isinstance(stat, str) else stat
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}

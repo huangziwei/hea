@@ -57,17 +57,19 @@ def _first(df, col, default):
     return default if val is None else val
 
 
-def geom_ribbon(mapping=None, data=None, *, position="identity", **kwargs):
+def geom_ribbon(mapping=None, data=None, *, stat="identity", position="identity", **kwargs):
     from ..layer import Layer
     from ..positions import resolve_position
-    from ..stats.identity import StatIdentity
+    from ..stats import resolve_stat
+
+    stat_obj = resolve_stat(stat) if isinstance(stat, str) else stat
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
     geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
     return Layer(
         geom=GeomRibbon(),
-        stat=StatIdentity(),
+        stat=stat_obj,
         position=resolve_position(position),
         mapping=mapping,
         data=data,
@@ -101,17 +103,19 @@ class GeomArea(GeomRibbon):
         return data
 
 
-def geom_area(mapping=None, data=None, *, position="stack", **kwargs):
+def geom_area(mapping=None, data=None, *, stat="identity", position="stack", **kwargs):
     from ..layer import Layer
     from ..positions import resolve_position
-    from ..stats.identity import StatIdentity
+    from ..stats import resolve_stat
+
+    stat_obj = resolve_stat(stat) if isinstance(stat, str) else stat
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
     geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
     return Layer(
         geom=GeomArea(),
-        stat=StatIdentity(),
+        stat=stat_obj,
         position=resolve_position(position),
         mapping=mapping,
         data=data,

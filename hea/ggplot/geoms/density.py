@@ -66,18 +66,26 @@ def _first(df, col, *, default):
     return default if val is None else val
 
 
-def geom_density(mapping=None, data=None, *, bw="nrd0", n=512,
+def geom_density(mapping=None, data=None, *, stat="density", bw="nrd0", n=512,
                  position="identity", **kwargs):
     from ..layer import Layer
     from ..positions import resolve_position
+    from ..stats import resolve_stat
     from ..stats.density import StatDensity
+
+    if stat == "density":
+        stat_obj = StatDensity(bw=bw, n=n)
+    elif isinstance(stat, str):
+        stat_obj = resolve_stat(stat)
+    else:
+        stat_obj = stat
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
     geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
     return Layer(
         geom=GeomDensity(),
-        stat=StatDensity(bw=bw, n=n),
+        stat=stat_obj,
         position=resolve_position(position),
         mapping=mapping,
         data=data,

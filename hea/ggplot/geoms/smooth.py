@@ -41,12 +41,21 @@ class GeomSmooth(Geom):
         path.draw_panel(data, ax)
 
 
-def geom_smooth(mapping=None, data=None, *, method="loess", formula=None,
+def geom_smooth(mapping=None, data=None, *, stat="smooth", method="loess", formula=None,
                 se=True, level=0.95, span=0.75, n=80, family=None,
                 position="identity", na_rm=False, **kwargs):
     from ..layer import Layer
     from ..positions import resolve_position
+    from ..stats import resolve_stat
     from ..stats.smooth import StatSmooth
+
+    if stat == "smooth":
+        stat_obj = StatSmooth(method=method, formula=formula, se=se,
+                              level=level, span=span, n=n, family=family)
+    elif isinstance(stat, str):
+        stat_obj = resolve_stat(stat)
+    else:
+        stat_obj = stat
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
@@ -57,8 +66,7 @@ def geom_smooth(mapping=None, data=None, *, method="loess", formula=None,
 
     return Layer(
         geom=GeomSmooth(se=se),
-        stat=StatSmooth(method=method, formula=formula, se=se,
-                        level=level, span=span, n=n, family=family),
+        stat=stat_obj,
         position=resolve_position(position),
         mapping=mapping,
         data=data,

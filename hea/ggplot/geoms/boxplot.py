@@ -125,12 +125,20 @@ def _first(df, col, default):
     return default if val is None else val
 
 
-def geom_boxplot(mapping=None, data=None, *, position="dodge2",
+def geom_boxplot(mapping=None, data=None, *, stat="boxplot", position="dodge2",
                  outlier_size=1.5, outlier_colour=None, outlier_alpha=None,
                  coef=1.5, width=None, **kwargs):
     from ..layer import Layer
     from ..positions import resolve_position
+    from ..stats import resolve_stat
     from ..stats.boxplot import StatBoxplot
+
+    if stat == "boxplot":
+        stat_obj = StatBoxplot(coef=coef, width=width)
+    elif isinstance(stat, str):
+        stat_obj = resolve_stat(stat)
+    else:
+        stat_obj = stat
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
@@ -140,7 +148,7 @@ def geom_boxplot(mapping=None, data=None, *, position="dodge2",
         geom=GeomBoxplot(outlier_size=outlier_size,
                          outlier_colour=outlier_colour,
                          outlier_alpha=outlier_alpha),
-        stat=StatBoxplot(coef=coef, width=width),
+        stat=stat_obj,
         position=resolve_position(position),
         mapping=mapping,
         data=data,

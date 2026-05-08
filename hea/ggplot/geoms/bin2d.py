@@ -128,7 +128,7 @@ def _per_row_color(df, col, default, *, missing_value=None):
 # ---------------------------------------------------------------------------
 
 
-def geom_hex(mapping=None, data=None, *, position="identity",
+def geom_hex(mapping=None, data=None, *, stat="binhex", position="identity",
              bins=30, **kwargs):
     """Hexagonal 2D bin counts. Each non-empty hex is rendered as a
     polygon; ``fill`` defaults to ``count`` (mapped through the fill
@@ -137,7 +137,15 @@ def geom_hex(mapping=None, data=None, *, position="identity",
     """
     from ..layer import Layer
     from ..positions import resolve_position
+    from ..stats import resolve_stat
     from ..stats.bin2d import StatBinhex
+
+    if stat == "binhex":
+        stat_obj = StatBinhex(bins=bins)
+    elif isinstance(stat, str):
+        stat_obj = resolve_stat(stat)
+    else:
+        stat_obj = stat
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
@@ -145,7 +153,7 @@ def geom_hex(mapping=None, data=None, *, position="identity",
 
     return Layer(
         geom=GeomHex(),
-        stat=StatBinhex(bins=bins),
+        stat=stat_obj,
         position=resolve_position(position),
         mapping=mapping,
         data=data,
@@ -154,7 +162,7 @@ def geom_hex(mapping=None, data=None, *, position="identity",
     )
 
 
-def geom_bin2d(mapping=None, data=None, *, position="identity",
+def geom_bin2d(mapping=None, data=None, *, stat="bin_2d", position="identity",
                bins=30, binwidth=None, **kwargs):
     """Rectangular 2D bin counts. Each non-empty bin is rendered as a
     tile (via :class:`GeomTile`); ``fill`` defaults to ``count`` (mapped
@@ -166,8 +174,16 @@ def geom_bin2d(mapping=None, data=None, *, position="identity",
     """
     from ..layer import Layer
     from ..positions import resolve_position
+    from ..stats import resolve_stat
     from ..stats.bin2d import StatBin2d
     from .rect import GeomTile
+
+    if stat == "bin_2d":
+        stat_obj = StatBin2d(bins=bins, binwidth=binwidth)
+    elif isinstance(stat, str):
+        stat_obj = resolve_stat(stat)
+    else:
+        stat_obj = stat
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
@@ -175,7 +191,7 @@ def geom_bin2d(mapping=None, data=None, *, position="identity",
 
     return Layer(
         geom=GeomTile(),
-        stat=StatBin2d(bins=bins, binwidth=binwidth),
+        stat=stat_obj,
         position=resolve_position(position),
         mapping=mapping,
         data=data,

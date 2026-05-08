@@ -66,11 +66,19 @@ def _first(df, col, default):
     return default if val is None else val
 
 
-def geom_violin(mapping=None, data=None, *, bw="nrd0", n=512,
+def geom_violin(mapping=None, data=None, *, stat="ydensity", bw="nrd0", n=512,
                 position="dodge", **kwargs):
     from ..layer import Layer
     from ..positions import resolve_position
+    from ..stats import resolve_stat
     from ..stats.ydensity import StatYdensity
+
+    if stat == "ydensity":
+        stat_obj = StatYdensity(bw=bw, n=n)
+    elif isinstance(stat, str):
+        stat_obj = resolve_stat(stat)
+    else:
+        stat_obj = stat
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
@@ -78,7 +86,7 @@ def geom_violin(mapping=None, data=None, *, bw="nrd0", n=512,
 
     return Layer(
         geom=GeomViolin(),
-        stat=StatYdensity(bw=bw, n=n),
+        stat=stat_obj,
         position=resolve_position(position),
         mapping=mapping,
         data=data,

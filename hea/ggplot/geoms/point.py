@@ -96,7 +96,7 @@ def geom_point(mapping=None, data=None, *, stat="identity", position="identity",
                na_rm=False, show_legend=True, inherit_aes=True, **kwargs):
     from ..layer import Layer
     from ..positions import resolve_position
-    from ..stats.identity import StatIdentity
+    from ..stats import resolve_stat
 
     aes_params = {k: v for k, v in kwargs.items()
                   if k in {"colour", "color", "size", "shape", "alpha", "fill", "stroke"}}
@@ -104,7 +104,7 @@ def geom_point(mapping=None, data=None, *, stat="identity", position="identity",
 
     return Layer(
         geom=GeomPoint(),
-        stat=StatIdentity() if stat == "identity" else stat,
+        stat=resolve_stat(stat) if isinstance(stat, str) else stat,
         position=resolve_position(position),
         mapping=mapping,
         data=data,
