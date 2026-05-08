@@ -15,6 +15,12 @@ from dataclasses import dataclass, field
 from .geom import Geom
 
 
+# ggplot2 sizes (incl. ``outlier.size``) are in mm; matplotlib's Line2D
+# ``markersize`` is the marker DIAMETER in points. R/TeX convention:
+# 72.27 pt/inch, 25.4 mm/inch.
+_PT_PER_MM = 72.27 / 25.4
+
+
 @dataclass
 class GeomBoxplot(Geom):
     default_aes: dict = field(default_factory=lambda: {
@@ -112,7 +118,7 @@ class GeomBoxplot(Geom):
                 "marker": "o",
                 "markerfacecolor": flier_color,
                 "markeredgecolor": flier_color,
-                "markersize": self.outlier_size * 4,
+                "markersize": self.outlier_size * _PT_PER_MM,
                 "alpha": flier_alpha,
             },
             manage_ticks=False,  # let scales handle ticks
