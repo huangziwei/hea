@@ -3088,6 +3088,52 @@ def test_fct_reorder_orders_levels_by_aggregate():
         plt.close(fig)
 
 
+def test_guide_axis_check_overlap_drops_overlapping_labels():
+    """``guide_axis(check_overlap=True)`` greedily drops labels whose
+    bbox would intersect a previously kept one — first-fit walk in
+    spatial axis order. Mirrors ggplot2's ``check.overlap``."""
+    df = pl.DataFrame({
+        # Many long category names crammed into a short axis → overlap.
+        "g": [f"longcategoryname_{i:02d}" for i in range(20)],
+        "v": list(range(20)),
+    })
+    p_off = ggplot(df, aes("g", "v")) + geom_point()
+    p_on = p_off + guides(x=guide_axis(check_overlap=True))
+    fig_off = p_off.draw()
+    fig_on = p_on.draw()
+    try:
+        # Same axes set up identically — count visible labels in each.
+        n_off = sum(1 for lbl in fig_off.axes[0].xaxis.get_majorticklabels()
+                    if lbl.get_visible() and lbl.get_text())
+        n_on = sum(1 for lbl in fig_on.axes[0].xaxis.get_majorticklabels()
+                   if lbl.get_visible() and lbl.get_text())
+        # check_overlap should hide at least some labels at this density.
+        assert n_on < n_off, f"check_overlap kept all {n_on} of {n_off} labels"
+        assert n_on >= 1, "first label should always survive"
+    finally:
+        plt.close(fig_off)
+        plt.close(fig_on)
+
+
+def test_guide_axis_n_dodge_alternates_rows():
+    """``guide_axis(n_dodge=2)`` increases per-tick pad in rows so
+    every other label sits one line lower (or further out, on y)."""
+    df = pl.DataFrame({"g": ["a", "b", "c", "d"], "v": [1, 2, 3, 4]})
+    p = (ggplot(df, aes("g", "v")) + geom_point()
+         + guides(x=guide_axis(n_dodge=2)))
+    fig = p.draw()
+    try:
+        ticks = fig.axes[0].xaxis.get_major_ticks()
+        pads = [t.get_pad() for t in ticks]
+        # Even-indexed ticks keep base pad; odd-indexed get the extra
+        # row offset → distinct pad value, monotonically larger.
+        assert pads[0] < pads[1]
+        assert pads[0] == pads[2]  # row 0 same on indices 0, 2
+        assert pads[1] == pads[3]  # row 1 same on indices 1, 3
+    finally:
+        plt.close(fig)
+
+
 def test_fct_reorder_horizontal_boxplot():
     """``aes(x=continuous, y=fct_reorder(discrete, continuous))`` flips
     boxplot orientation — boxes are horizontal, the y axis carries the

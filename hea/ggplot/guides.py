@@ -674,18 +674,28 @@ class GuideAxis:
 
     * ``angle`` — rotate tick labels (degrees, counter-clockwise).
     * ``n_dodge`` — split labels across this many rows to avoid overlap.
-      v1 only honours 1; values > 1 are accepted but unimplemented.
+      Position ``i`` lands in row ``i % n_dodge`` (0-indexed).
+    * ``check_overlap`` — drop labels that would overlap a previously
+      kept one in spatial order along the axis. Mirrors ggplot2's
+      ``guide_axis(check.overlap = TRUE)``: greedy first-fit, no
+      reflow. Resolved AFTER ``angle`` / ``n_dodge`` so each strategy
+      composes (e.g. dodge first, then drop any survivors that still
+      collide).
     * ``position`` — ``"bottom"``/``"top"`` for x, ``"left"``/``"right"`` for y.
       v1 accepts but doesn't reposition the axis (matplotlib default).
     """
 
     angle: float | None = None
     n_dodge: int = 1
+    check_overlap: bool = False
     position: str | None = None
 
 
-def guide_axis(*, angle=None, n_dodge=1, position=None):
-    return GuideAxis(angle=angle, n_dodge=n_dodge, position=position)
+def guide_axis(*, angle=None, n_dodge=1, check_overlap=False, position=None):
+    return GuideAxis(
+        angle=angle, n_dodge=n_dodge,
+        check_overlap=check_overlap, position=position,
+    )
 
 
 @dataclass
@@ -703,19 +713,33 @@ def guides(**kwargs):
 
 
 def apply_axis_guides(axes_list, plot) -> None:
-    """Apply ``guide_axis`` rotation overrides to every axis. Called after
-    the positional scales have set ticks. Reads from ``plot.guide_overrides``
-    AND from ``theme(axis.text.x/y = element_text(angle=...))`` — either
-    surface produces the same effect."""
+    """Apply ``guide_axis`` overrides to every axis. Called after the
+    positional scales have set ticks.
+
+    Resolves three label-overflow strategies, in this order so they
+    compose: angle → n_dodge → check_overlap. Angle reads from
+    ``plot.guide_overrides`` AND from ``theme(axis.text.x/y =
+    element_text(angle=...))`` — either surface produces the same
+    rotation. n_dodge and check_overlap come from ``guide_axis(...)``
+    only (matches ggplot2: theme can rotate, the guide picks the
+    layout strategy).
+    """
     overrides = getattr(plot, "guide_overrides", {}) or {}
     theme = plot.theme
 
     for ax in axes_list:
         for axis_name in ("x", "y"):
             angle = _resolve_axis_angle(axis_name, overrides, theme)
-            if angle is None:
+            if angle is not None:
+                ax.tick_params(axis=axis_name, rotation=float(angle))
+
+            g = overrides.get(axis_name)
+            if not isinstance(g, GuideAxis):
                 continue
-            ax.tick_params(axis=axis_name, rotation=float(angle))
+            if g.n_dodge and g.n_dodge > 1:
+                _apply_n_dodge(ax, axis_name, int(g.n_dodge))
+            if g.check_overlap:
+                _apply_check_overlap(ax, axis_name)
 
 
 def _resolve_axis_angle(axis_name: str, overrides: dict, theme) -> float | None:
@@ -729,3 +753,65 @@ def _resolve_axis_angle(axis_name: str, overrides: dict, theme) -> float | None:
     if elem is not None and getattr(elem, "angle", None) is not None:
         return elem.angle
     return None
+
+
+def _apply_n_dodge(ax, axis_name: str, n: int) -> None:
+    """Stack tick labels across ``n`` rows: position ``i`` (in tick
+    order) lands in row ``i % n``. Mirrors ggplot2's
+    ``guide_axis(n.dodge = N)``.
+
+    Implementation: shift each row's labels outward by an integer
+    multiple of the line height via matplotlib's per-tick ``set_pad``.
+    Same approach for x and y — pad always means "perpendicular
+    distance from the axis spine to the label" so dodging y labels
+    leftward / rightward just works.
+    """
+    target_axis = ax.xaxis if axis_name == "x" else ax.yaxis
+    ticks = target_axis.get_major_ticks()
+    if not ticks:
+        return
+    label = ticks[0].label1 if axis_name == "x" else ticks[0].label1
+    font_size = float(label.get_fontsize())
+    # 1.2× font size is matplotlib's default line spacing — gives the
+    # alternate row enough clearance to sit fully below (or beside) the
+    # primary row without colliding.
+    line_step = font_size * 1.2
+    base_pad = ticks[0].get_pad()
+    for i, tick in enumerate(ticks):
+        row = i % n
+        tick.set_pad(base_pad + row * line_step)
+
+
+def _apply_check_overlap(ax, axis_name: str) -> None:
+    """Greedy first-fit overlap drop. Walks tick labels in spatial
+    order along ``axis_name``; hides any whose bbox would intersect
+    the previously kept one. Mirrors ggplot2's
+    ``guide_axis(check.overlap = TRUE)``.
+
+    Forces a draw so the bboxes reflect the post-rotation /
+    post-n_dodge layout (otherwise this would test pre-layout
+    extents and miss most collisions on rotated axes).
+    """
+    fig = ax.figure
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+
+    target_axis = ax.xaxis if axis_name == "x" else ax.yaxis
+    labels = [lbl for lbl in target_axis.get_majorticklabels()
+              if lbl.get_text() and lbl.get_visible()]
+    if len(labels) <= 1:
+        return
+
+    # Spatial order along the axis (display coords).
+    if axis_name == "x":
+        labels.sort(key=lambda lbl: lbl.get_window_extent(renderer).x0)
+    else:
+        labels.sort(key=lambda lbl: lbl.get_window_extent(renderer).y0)
+
+    last_bbox = None
+    for lbl in labels:
+        bbox = lbl.get_window_extent(renderer)
+        if last_bbox is not None and bbox.overlaps(last_bbox):
+            lbl.set_visible(False)
+        else:
+            last_bbox = bbox
