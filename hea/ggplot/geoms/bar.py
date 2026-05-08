@@ -20,6 +20,11 @@ import numpy as np
 from .geom import Geom
 
 
+# ggplot2 ``size`` is in mm. matplotlib's ``linewidth`` is in pt
+# (TeX convention: 72.27 pt/inch, 25.4 mm/inch).
+_PT_PER_MM = 72.27 / 25.4
+
+
 @dataclass
 class GeomBar(Geom):
     default_aes: dict = field(default_factory=lambda: {
@@ -80,6 +85,10 @@ class GeomBar(Geom):
         edge = _row_colour(data, "colour", when_all_none="none",
                            when_missing="none")
         alpha = float(_scalar(data, "alpha", default=1.0))
+        # Border thickness — the layer's ``size`` aes is ggplot2-style mm;
+        # matplotlib wants pt. Default ``size=0.5 mm`` becomes ~1.42 pt,
+        # matching ggplot2's bar borders.
+        linewidth = float(_scalar(data, "size", default=0.5)) * _PT_PER_MM
 
         # Under coord_flip the data has already been x↔y swapped by render:
         # ``data["x"]`` now holds the *values* (originally y) and
@@ -87,10 +96,10 @@ class GeomBar(Geom):
         # x). Use ax.barh so bars extend along the visible x axis.
         if getattr(ax, "_hea_coord_flipped", False):
             ax.barh(height, width=x, height=width, left=bottom, color=fill,
-                    edgecolor=edge, alpha=alpha, linewidth=0.5, align="center")
+                    edgecolor=edge, alpha=alpha, linewidth=linewidth, align="center")
         else:
             ax.bar(x, height, width=width, bottom=bottom, color=fill,
-                   edgecolor=edge, alpha=alpha, linewidth=0.5, align="center")
+                   edgecolor=edge, alpha=alpha, linewidth=linewidth, align="center")
 
 
 def _scalar(df, col, *, default):

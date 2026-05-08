@@ -178,6 +178,11 @@ class LegendGroup:
     # the actual layer style — matches ggplot2's ``draw_key_*`` reading
     # of layer aesthetics.
     layer_aes_params: dict = field(default_factory=dict)
+    # Geom-level defaults (``geom_bar.default_aes`` etc.). Used as a
+    # fallback when an aesthetic isn't mapped and isn't in
+    # ``aes_params``, so e.g. ``aes(colour=drv)`` on ``geom_bar`` shows
+    # legend keys with grey35 fill (the bar default), matching R.
+    layer_default_aes: dict = field(default_factory=dict)
 
 
 def build_legend_groups(plot, build_output) -> list[LegendGroup]:
@@ -226,15 +231,17 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
 
         contributor = _find_layer_for_aes(plot, aes_name)
         if key not in groups:
+            geom = getattr(contributor, "geom", None) if contributor else None
             groups[key] = LegendGroup(
                 title=title,
                 levels=levels,
                 labels=[str(level) for level in levels],
                 aes_values={},
-                key_glyph=(getattr(contributor.geom, "key_glyph", "point")
-                           if contributor is not None else "point"),
+                key_glyph=getattr(geom, "key_glyph", "point") if geom else "point",
                 layer_aes_params=(dict(getattr(contributor, "aes_params", {}))
                                    if contributor is not None else {}),
+                layer_default_aes=(dict(getattr(geom, "default_aes", {}))
+                                    if geom is not None else {}),
             )
 
         groups[key].aes_values[aes_name] = _scale_mapped_values(scale, levels)
@@ -383,13 +390,22 @@ def apply_legends(fig, axes_list, plot, build_output, *,
         host = (legend_host_axes[i]
                 if legend_host_axes and i < len(legend_host_axes)
                 else None)
-        # ggplot2 sizing: ``legend.key.size = unit(1.2, "lines")`` — keys
-        # are square, ~1.2 fontsize units. matplotlib's defaults are wider
-        # and shorter (handlelength=2, handleheight=0.7). Squaring them
-        # plus ``labelspacing=0`` makes the per-key bg rectangles abut
-        # vertically, matching ggplot2's continuous gray column.
-        sizing = {"handlelength": 1.5, "handleheight": 1.5,
-                  "labelspacing": 0.0}
+        # Per-glyph spacing: polygon keys are filled rectangles that
+        # *cover* the panel-colour bg, so they need visible vertical gaps
+        # between rows or adjacent colour blocks would butt together.
+        # Point/path keys are small glyphs sitting on the bg, so
+        # ``labelspacing=0`` lets the per-key bgs abut into one
+        # continuous gray column — matches ggplot2.
+        labelspacing = 0.4 if group.key_glyph == "polygon" else 0.0
+        # ggplot2's ``legend.key.size = unit(1.2, "lines")`` produces
+        # square keys. matplotlib's ``handlelength`` and ``handleheight``
+        # are both in font-size units but use different reference
+        # dimensions (length is per-em horizontal, height is per-em
+        # vertical incl. line spacing), so the same numeric value yields
+        # a non-square box — empirically ``(1.2, 1.5)`` gives a square
+        # ~12×12 px bbox at the default 10 pt fontsize.
+        sizing = {"handlelength": 1.2, "handleheight": 1.5,
+                  "labelspacing": labelspacing}
         if host is not None:
             host.set_axis_off()
             leg = host.legend(
@@ -464,24 +480,35 @@ def _make_handle(group: LegendGroup, idx: int):
 
 
 def _resolve_aes(group: LegendGroup, idx: int, name: str, default):
-    """Resolve aesthetic ``name`` at level ``idx`` — scale-mapped value
-    first, then layer-level constant (``aes_params``) on top, else
-    ``default``. Layer constants override the scale (matches ggplot2:
-    ``geom_bar(alpha=0.2, aes(fill=class))`` makes both the bars AND the
-    legend keys 0.2 alpha)."""
-    val = default
+    """Resolve aesthetic ``name`` at level ``idx``.
+
+    Precedence (highest to lowest):
+      1. layer ``aes_params`` — user-supplied constants
+         (``geom_bar(alpha=0.2)``) win over the scale.
+      2. scale-mapped value — when the aes is mapped (``aes(fill=drv)``).
+      3. geom ``default_aes`` — fills in unmapped aes (e.g. ``fill`` is
+         ``grey35`` when only ``colour=drv`` is mapped on ``geom_bar``).
+         Without this fallback, the legend key would render with no
+         fill while the bars show grey35 — the legend would lie.
+      4. caller-supplied ``default``.
+    """
+    lap = group.layer_aes_params or {}
+    # American spelling alias.
+    for k in (name, "color" if name == "colour" else None):
+        if k and k in lap:
+            return lap[k]
+
     aes_values = group.aes_values
     if name in aes_values:
         v = aes_values[name][idx]
         if v is not None:
-            val = v
-    lap = group.layer_aes_params or {}
-    # ``aes_params`` may use the American spelling — canonicalise.
-    for k in (name, "color" if name == "colour" else None):
-        if k and k in lap:
-            val = lap[k]
-            break
-    return val
+            return v
+
+    lda = group.layer_default_aes or {}
+    if name in lda and lda[name] is not None:
+        return lda[name]
+
+    return default
 
 
 def _is_na(v):
@@ -518,13 +545,14 @@ def _make_point_handle(group: LegendGroup, idx: int) -> Line2D:
 
     colour = _resolve_aes(group, idx, "colour", None)
     if colour is not None:
-        kwargs["color"] = colour
-        kwargs["markeredgecolor"] = colour
-        kwargs["markerfacecolor"] = colour
+        c = r_color(colour)
+        kwargs["color"] = c
+        kwargs["markeredgecolor"] = c
+        kwargs["markerfacecolor"] = c
 
     fill = _resolve_aes(group, idx, "fill", None)
     if fill is not None:
-        kwargs["markerfacecolor"] = "none" if _is_na(fill) else fill
+        kwargs["markerfacecolor"] = "none" if _is_na(fill) else r_color(fill)
 
     size = _resolve_aes(group, idx, "size", None)
     if size is not None:
@@ -545,18 +573,28 @@ def _make_polygon_handle(group: LegendGroup, idx: int) -> _MplPatch:
     with ``colour``, applies ``alpha`` to both. ``fill=NA`` (Python
     ``None``/NaN) becomes ``"none"`` (transparent), so the panel-colour
     key bg shows through, matching the ``geom_bar(fill=NA)`` look.
+
+    Border thickness reads the layer's ``size`` aes in mm and converts
+    to matplotlib points (``size_mm * 72.27/25.4``), so ``geom_bar``'s
+    default ``size=0.5 mm`` renders as ~1.42 pt — the same border R
+    paints on the legend key.
+
+    Colour names go through ``r_color()`` so R-flavoured greys
+    (``"grey35"``) — which appear as defaults from geom ``default_aes``
+    — translate to matplotlib-friendly ``"0.35"`` form.
     """
     fill = _resolve_aes(group, idx, "fill", None)
     colour = _resolve_aes(group, idx, "colour", None)
     alpha = _resolve_aes(group, idx, "alpha", 1.0)
+    size_mm = _resolve_aes(group, idx, "size", 0.5)
 
-    facecolor = "none" if (fill is None or _is_na(fill)) else fill
-    edgecolor = "none" if (colour is None or _is_na(colour)) else colour
+    facecolor = "none" if (fill is None or _is_na(fill)) else r_color(fill)
+    edgecolor = "none" if (colour is None or _is_na(colour)) else r_color(colour)
     return _MplPatch(
         facecolor=facecolor,
         edgecolor=edgecolor,
         alpha=float(alpha) if alpha is not None else None,
-        linewidth=0.5,
+        linewidth=float(size_mm) * _PT_PER_MM,
     )
 
 
@@ -573,7 +611,7 @@ def _make_path_handle(group: LegendGroup, idx: int) -> Line2D:
     return Line2D(
         [0], [0],
         marker="",
-        color=("black" if (colour is None or _is_na(colour)) else colour),
+        color=r_color("black" if (colour is None or _is_na(colour)) else colour),
         alpha=float(alpha) if alpha is not None else None,
         linewidth=float(size) * (72.27 / 25.4),
         linestyle=r_lty(linetype) or "-",
