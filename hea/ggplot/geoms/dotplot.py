@@ -25,10 +25,16 @@ _PT_PER_MM = 72.27 / 25.4
 
 @dataclass
 class GeomDotplot(Geom):
+    # Mirrors ggplot2's ``GeomDotplot$default_aes`` (R/geom-dotplot.R):
+    # ``stroke = 2 * borderwidth = 1.0``, ``linetype = "solid"`` —
+    # missing in hea would let users override but no per-row default
+    # means the dot border is always whatever the geom hard-codes.
     default_aes: dict = field(default_factory=lambda: {
         "colour": "black",
         "fill": "black",
         "alpha": 1.0,
+        "stroke": 1.0,
+        "linetype": "solid",
     })
     required_aes: tuple = ("x",)
 

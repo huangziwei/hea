@@ -20,15 +20,19 @@ _PT_PER_MM = 72.27 / 25.4
 
 @dataclass
 class GeomText(Geom):
+    # Mirrors ggplot2's ``GeomText$default_aes`` (R/geom-text.R). ``size``
+    # is in MM (ggplot2's text-size convention) — 11 pt × 25.4 / 72.27 ≈
+    # 3.88 mm. ``lineheight`` is the ratio of line spacing to font size.
     default_aes: dict = field(default_factory=lambda: {
         "colour": "black",
-        "size": 3.88,  # ggplot2 default — 11pt / 2.83 mm/pt
+        "size": 3.88,
         "angle": 0.0,
         "hjust": 0.5,
         "vjust": 0.5,
         "alpha": 1.0,
         "family": "",
         "fontface": "plain",
+        "lineheight": 1.2,
     })
     required_aes: tuple = ("x", "y", "label")
 
@@ -103,7 +107,12 @@ def geom_text(mapping=None, data=None, *, stat="identity", position="identity",
 
 @dataclass
 class GeomLabel(GeomText):
-    """``geom_text`` plus a rounded background box (ggplot2 ``geom_label``)."""
+    """``geom_text`` plus a rounded background box (ggplot2 ``geom_label``).
+
+    Mirrors ggplot2's ``GeomLabel$default_aes`` (R/geom-label.R) — adds
+    ``fill = "white"``, ``linewidth = 0.5 * borderwidth = 0.25``,
+    ``linetype = "solid"`` to ``GeomText``'s defaults.
+    """
     default_aes: dict = field(default_factory=lambda: {
         "colour": "black",
         "fill": "white",
@@ -114,6 +123,9 @@ class GeomLabel(GeomText):
         "alpha": 1.0,
         "family": "",
         "fontface": "plain",
+        "lineheight": 1.2,
+        "linewidth": 0.25,
+        "linetype": "solid",
     })
     label_padding: float = 0.25  # ggplot2 default in lines; we treat as box pad
     label_r: float = 0.15        # corner radius

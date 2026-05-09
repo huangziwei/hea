@@ -16,11 +16,20 @@ _PT_PER_MM = 72.27 / 25.4
 
 @dataclass
 class GeomPoint(Geom):
+    # Mirrors ggplot2's ``GeomPoint$default_aes`` (R/geom-point.R):
+    # ``shape = 19`` (= matplotlib "o"), ``colour = "black"``,
+    # ``size = 1.5``, ``fill = NA``, ``alpha = NA``, ``stroke = 0.5``.
+    # ``fill = None`` is hea's NA stand-in: for fillable pch shapes
+    # 21-25, ``None`` falls back to ``colour`` in :meth:`draw_panel`
+    # (ggplot2 leaves them transparent — minor visible divergence on
+    # filled shapes used without an explicit ``fill`` mapping).
     default_aes: dict = field(default_factory=lambda: {
         "colour": "black",
         "size": 1.5,
         "shape": "o",
         "alpha": 1.0,
+        "fill": None,
+        "stroke": 0.5,
     })
     required_aes: tuple = ("x", "y")
 

@@ -24,8 +24,11 @@ _PT_PER_MM = 72.27 / 25.4
 
 @dataclass
 class GeomBoxplot(Geom):
+    # Mirrors ggplot2's ``GeomBoxplot$default_aes`` (R/geom-boxplot.R):
+    # ``colour = col_mix(ink, paper, 0.2)`` ≈ ``"grey20"`` (the dark-grey
+    # box outline that R uses by default — NOT pure black).
     default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
+        "colour": "grey20",
         "fill": "white",
         "size": 0.5,
         "linetype": "solid",

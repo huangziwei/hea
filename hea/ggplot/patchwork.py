@@ -282,21 +282,14 @@ class PlotGrid:
         """
         import matplotlib.pyplot as plt
 
-        from ._block import (
-            DEFAULT_FIG_H_IN, DEFAULT_FIG_W_IN,
-            compose_super_block, render_super_block,
-        )
+        from ._block import compose_super_block, render_super_block
         from .core import _resolve_figsize
 
         sb = compose_super_block(self)
         target = _resolve_figsize(width=width, height=height, units=units,
                                    figsize=figsize)
-        # Default to R's ``dev.new()`` 7×7 canvas. Decorations stay
-        # absolute (via ``_redistribute_to_leftover``); panels split the
-        # leftover by their relative weights — patchwork's null-unit
-        # behaviour at any device size.
-        fig_w = target[0] if target is not None else DEFAULT_FIG_W_IN
-        fig_h = target[1] if target is not None else DEFAULT_FIG_H_IN
+        fig_w = target[0] if target is not None else sb.total_w_in
+        fig_h = target[1] if target is not None else sb.total_h_in
         fig = plt.figure(figsize=(fig_w, fig_h))
 
         tag_iter = self._make_tag_iter()

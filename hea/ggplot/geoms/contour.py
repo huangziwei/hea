@@ -47,8 +47,11 @@ def _reshape_grid(data):
 
 @dataclass
 class GeomContour(Geom):
+    # Mirrors ggplot2's ``GeomContour$default_aes`` (R/geom-contour.R):
+    # ``colour = accent = "#3366FF"`` — the same blue ``geom_smooth``
+    # uses, NOT pure black.
     default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
+        "colour": "#3366FF",
         "size": 0.5,
         "linetype": "solid",
         "alpha": 1.0,

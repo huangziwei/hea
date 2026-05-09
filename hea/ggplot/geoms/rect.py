@@ -81,10 +81,13 @@ class GeomRect(Geom):
 
 @dataclass
 class GeomTile(Geom):
+    # Mirrors ggplot2's ``GeomTile$default_aes`` (R/geom-tile.R):
+    # ``linewidth = 0.4 * borderwidth = 0.4 * 0.5 = 0.2`` mm — slightly
+    # thinner than the 0.5 used by ``GeomRect`` parent.
     default_aes: dict = field(default_factory=lambda: {
         "colour": None,
         "fill": "grey20",
-        "size": 0.1,
+        "size": 0.2,
         "linetype": "solid",
         "alpha": 1.0,
         "width": 1.0,

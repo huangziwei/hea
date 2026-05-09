@@ -17,12 +17,16 @@ from .geom import Geom
 
 @dataclass
 class GeomRibbon(Geom):
+    # Mirrors ggplot2's ``GeomRibbon$default_aes`` (R/geom-ribbon.R):
+    # ``fill = col_mix(ink, paper, 0.2)`` ≈ ``"grey20"`` and ``alpha = NA``
+    # (= 1.0). ``geom_smooth`` defaults to grey60 + alpha 0.4 — that's a
+    # different geom; don't conflate them here.
     default_aes: dict = field(default_factory=lambda: {
         "colour": None,
-        "fill": "grey60",
+        "fill": "grey20",
         "size": 0.5,
         "linetype": "solid",
-        "alpha": 0.4,
+        "alpha": 1.0,
     })
     required_aes: tuple = ("x", "ymin", "ymax")
     key_glyph: str = "polygon"

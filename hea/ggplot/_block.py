@@ -695,15 +695,6 @@ def _share_anchor(spec, r: int, c: int, axes_grid, row_axes, *, axis: str):
 DEFAULT_PANEL_W_IN = 3.5
 DEFAULT_PANEL_H_IN = 3.0
 
-# Default figure size for the standalone ``draw()`` path. Mirrors R's
-# ``dev.new()`` / ``pdf()`` device default of 7×7 inches, so that a
-# ``ggplot`` printed without an explicit ``figsize=`` lands on the same
-# canvas R would render it on. The per-panel defaults above still drive
-# composition-time sizing for blocks that *don't* hit the figure-level
-# default (e.g., a ``PlotGrid`` cell that needs a min panel size).
-DEFAULT_FIG_W_IN = 7.0
-DEFAULT_FIG_H_IN = 7.0
-
 
 def _has_right_guide(blk) -> bool:
     """Whether the block (leaf or nested) hosts a colorbar/legend on its
@@ -1784,10 +1775,15 @@ def _apply_block_annotation(grid, fig, gs, title_row_offset, ncol,
 def default_figsize_for(block: PlotBlock) -> tuple[float, float]:
     """Default standalone figure size for a measured block.
 
-    Returns ``(DEFAULT_FIG_W_IN, DEFAULT_FIG_H_IN)`` (7×7 inches) — same
-    canvas R's ``dev.new()`` / ``pdf()`` would use, so an unsized
-    ``ggplot.draw()`` matches the equivalent R ``print(p)``. Decorations
-    keep their absolute inch heights and panels split the leftover via
-    :func:`_redistribute_to_leftover`.
+    Per-panel default of 3.5×3.0 inches. R's effective default depends
+    on the rendering context (``dev.new()`` is 7×7, Quarto chunks are
+    7×5, Jupyter is 7×4.32, …), so there's no single "R default" to
+    match — we pick a per-panel size that's reasonable in notebook
+    layouts and let users pass ``figsize=`` for exact parity. Faceted
+    plots scale the panel cell by the grid dims.
     """
-    return (DEFAULT_FIG_W_IN, DEFAULT_FIG_H_IN)
+    panel_w = 3.5 * block.panel_grid_cols
+    panel_h = 3.0 * block.panel_grid_rows
+    fig_w = block.margin_left_in + panel_w + block.margin_right_in
+    fig_h = block.margin_top_in + panel_h + block.margin_bottom_in
+    return (fig_w, fig_h)

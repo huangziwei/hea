@@ -80,12 +80,14 @@ class GeomLinerange(Geom):
 
 @dataclass
 class GeomErrorbar(Geom):
+    # Mirrors ggplot2's ``GeomErrorbar$default_aes`` (R/geom-errorbar.R):
+    # ``width = 0.9`` (90% of bar slot), NOT 0.5.
     default_aes: dict = field(default_factory=lambda: {
         "colour": "black",
         "size": 0.5,
         "linetype": "solid",
         "alpha": 1.0,
-        "width": 0.5,
+        "width": 0.9,
     })
     required_aes: tuple = ("x", "ymin", "ymax")
 
@@ -104,12 +106,15 @@ class GeomErrorbar(Geom):
 
 @dataclass
 class GeomErrorbarh(Geom):
+    # ggplot2 dropped ``GeomErrorbarh`` in favour of ``geom_errorbar`` with
+    # ``orientation = "y"``; we keep it as a separate class but match the
+    # same ``height = 0.9`` (= width=0.9 flipped) default.
     default_aes: dict = field(default_factory=lambda: {
         "colour": "black",
         "size": 0.5,
         "linetype": "solid",
         "alpha": 1.0,
-        "height": 0.5,
+        "height": 0.9,
     })
     required_aes: tuple = ("y", "xmin", "xmax")
 
@@ -128,6 +133,12 @@ class GeomErrorbarh(Geom):
 
 @dataclass
 class GeomPointrange(Geom):
+    # Mirrors ggplot2's ``GeomPointrange$default_aes`` (R/geom-pointrange.R):
+    # ``size = pointsize / 3 = 0.5``, ``linewidth = 0.5``,
+    # ``stroke = 2 * borderwidth = 1.0``. hea conflates point ``size`` and
+    # the bar's line width into one ``size`` aes (the bar takes ``size``
+    # mm, the point dia ≈ 4× that), so ``stroke`` only matters for
+    # fillable shape variants.
     default_aes: dict = field(default_factory=lambda: {
         "colour": "black",
         "fill": None,
@@ -135,6 +146,7 @@ class GeomPointrange(Geom):
         "linetype": "solid",
         "alpha": 1.0,
         "shape": "o",
+        "stroke": 1.0,
     })
     required_aes: tuple = ("x", "y", "ymin", "ymax")
 

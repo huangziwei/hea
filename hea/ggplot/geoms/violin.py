@@ -17,8 +17,11 @@ from .geom import Geom
 
 @dataclass
 class GeomViolin(Geom):
+    # Mirrors ggplot2's ``GeomViolin$default_aes`` (R/geom-violin.R):
+    # ``colour = col_mix(ink, paper, 0.2)`` ≈ ``"grey20"`` for the violin
+    # outline (NOT pure black).
     default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
+        "colour": "grey20",
         "fill": "white",
         "size": 0.5,
         "linetype": "solid",
