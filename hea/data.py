@@ -1,17 +1,17 @@
-"""User-facing data prep: dataset loader and ``factor()``.
+"""User-facing data prep: dataset loaders.
 
 * ``data`` — fetch a named dataset. Pulls from the bundled ``rdatasets``
   Python package when the ``(package, name)`` pair is covered there
   (``R``/``datasets``, ``MASS``, ``lme4``, ``nlme``); otherwise reads a
   CSV from this repo's ``datasets/`` tree (downloading on first access).
-  In both cases, R's factor type is restored from a JSON schema sidecar
-  next to the corresponding CSV path.
-* ``factor`` — polars equivalent of R's ``factor()``: cast a Series to
-  ``pl.Enum`` and (optionally) register it as an ordered factor for poly
-  contrasts.
+  R's factor type is restored from a JSON schema sidecar next to the
+  corresponding CSV path.
+* ``map_data`` — fetch one of the polygon datasets bundled under
+  ``datasets/maps/``, mirroring ``ggplot2::map_data()``.
 
 Both run *before* a model is fit; the formula → design pipeline lives in
-``hea.design`` and consumes whatever data() / factor() produce.
+``hea.design`` and consumes whatever data() produces. ``factor()`` (the
+R-style coercion helper) lives in ``hea.R``.
 """
 
 from __future__ import annotations
@@ -27,11 +27,8 @@ import polars as pl
 
 from .dataframe import DataFrame
 from .formula import set_ordered_cols
-# ``factor`` lives in R.py (R-style coercion helper). Re-imported here so
-# the long-standing ``from hea.data import factor`` keeps working.
-from .R import factor
 
-__all__ = ["data", "factor"]
+__all__ = ["data", "map_data"]
 
 
 # Our only label rewrite for rdatasets: ``"R"`` (hea's name for R's
@@ -360,4 +357,85 @@ def data(name: str, package: str | None = None, save_to: str = "./data",
         df = pl.read_csv(csv_path, null_values="NA")
 
     df = _apply_dataset_schema(df, _find_schema(package, name))
+    return DataFrame._from_pydf(df._df)
+
+
+# ---------------------------------------------------------------------------
+# map_data — polygon datasets ported from R's ``maps`` package (CIA World
+# Data Bank II), bundled as zstd-compressed parquet under
+# ``datasets/maps/{name}.parquet``. Output schema mirrors
+# ``ggplot2::map_data()``: ``long, lat, group, order, region, subregion``.
+# ---------------------------------------------------------------------------
+
+_MAP_DATA_NAMES = (
+    "world", "world2", "usa", "state", "county",
+    "nz", "france", "italy", "lakes",
+)
+
+
+def _find_bundled_map(name: str) -> Path | None:
+    """Walk up from CWD looking for ``datasets/maps/{name}.parquet``."""
+    rel = Path("datasets") / "maps" / f"{name}.parquet"
+    cwd = Path.cwd()
+    for ancestor in (cwd, *cwd.parents):
+        candidate = ancestor / rel
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def map_data(name: str, *, save_to: str = "./data",
+             overwrite: bool = False) -> DataFrame:
+    """Load a bundled map polygon dataset, mirroring ``ggplot2::map_data()``.
+
+    Returns a frame with columns ``long``, ``lat``, ``group``, ``order``,
+    ``region``, ``subregion`` — ready for ``geom_polygon(aes(x=long,
+    y=lat, group=group))``. Pair with ``coord_quickmap()`` for a
+    rough-and-ready Mercator-ish projection.
+
+    Available names: ``world``, ``world2``, ``usa``, ``state``,
+    ``county``, ``nz``, ``france``, ``italy``, ``lakes``. Data was
+    extracted from R's ``maps`` package (originally CIA World Data Bank
+    II — public domain).
+
+    Resolution mirrors :func:`data`: bundled ``datasets/maps/`` walked
+    up from CWD first; on miss, a parquet download into
+    ``save_to/maps/{name}.parquet`` (set ``overwrite=True`` to refetch).
+    """
+    if name not in _MAP_DATA_NAMES:
+        raise ValueError(
+            f"map_data(): unknown map {name!r}. "
+            f"Available: {', '.join(_MAP_DATA_NAMES)}."
+        )
+
+    df: pl.DataFrame | None = None
+    if not overwrite:
+        bundled = _find_bundled_map(name)
+        if bundled is not None:
+            df = pl.read_parquet(bundled)
+
+    if df is None:
+        datapath = os.path.join(save_to, "maps")
+        pq_path = Path(datapath) / f"{name}.parquet"
+        if not pq_path.exists() or overwrite:
+            created_dirs = [Path(p) for p in (save_to, datapath)
+                            if not os.path.exists(p)]
+            os.makedirs(datapath, exist_ok=True)
+            print(f"Downloading map_data({name!r})...")
+            url = (
+                "https://raw.githubusercontent.com/huangziwei/hea/main/"
+                f"datasets/maps/{name}.parquet"
+            )
+            try:
+                urllib.request.urlretrieve(url, pq_path)
+            except Exception:
+                pq_path.unlink(missing_ok=True)
+                for p in reversed(created_dirs):
+                    try:
+                        p.rmdir()
+                    except OSError:
+                        pass
+                raise
+        df = pl.read_parquet(pq_path)
+
     return DataFrame._from_pydf(df._df)

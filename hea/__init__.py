@@ -61,7 +61,8 @@ from .R import (
     var_test,
     wilcox_test,
 )
-from .data import data, factor
+from .data import data, map_data
+from .R import factor
 # These re-bindings shadow the star-imported pl.DataFrame / pl.LazyFrame
 # / pl.Series. Listed in _HEA_OVERRIDES below.
 from .dataframe import DataFrame, GroupBy, LazyFrame, Series, desc, exclude, tbl

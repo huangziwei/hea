@@ -16,7 +16,13 @@ from __future__ import annotations
 
 from .aes import aes, after_scale, after_stat
 from .annotate import annotate, annotation_custom
-from .coords import coord_cartesian, coord_fixed, coord_flip, coord_trans
+from .coords import (
+    coord_cartesian,
+    coord_fixed,
+    coord_flip,
+    coord_quickmap,
+    coord_trans,
+)
 from .cuts import cut_interval, cut_number, cut_width
 from .factors import fct_infreq, fct_relevel, fct_rev, fct_reorder
 from .expansion import Expansion, expansion
@@ -344,6 +350,7 @@ __all__ = [
     "coord_cartesian",
     "coord_fixed",
     "coord_flip",
+    "coord_quickmap",
     "coord_trans",
     "labs",
     "xlab",
