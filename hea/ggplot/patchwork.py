@@ -288,8 +288,15 @@ class PlotGrid:
         sb = compose_super_block(self)
         target = _resolve_figsize(width=width, height=height, units=units,
                                    figsize=figsize)
-        fig_w = target[0] if target is not None else sb.total_w_in
-        fig_h = target[1] if target is not None else sb.total_h_in
+        # Default to R's standalone-device 7×7" — same canvas
+        # ``pdf()``/``dev.new()`` uses, so a saved PDF matches what R's
+        # ``print(g)`` produces for the same composition.
+        # ``_redistribute_to_leftover`` keeps decorations absolute and
+        # splits the leftover among panel rows by their relative weights,
+        # so ``heights = [1, 3, 2, 4]`` lands on patchwork-faithful
+        # ratios at any device size.
+        fig_w = target[0] if target is not None else 7.0
+        fig_h = target[1] if target is not None else 7.0
         fig = plt.figure(figsize=(fig_w, fig_h))
 
         tag_iter = self._make_tag_iter()
