@@ -69,6 +69,11 @@ from . import ggplot
 from . import plot
 from . import R
 
+# R-style alias for len() — ``from hea import n`` is the safe way to get
+# the row-count expression at module scope, since ``from hea import len``
+# would shadow the built-in ``len``.
+n = len
+
 
 # 4. Wrap polars factories (constructors + I/O) so they return hea
 #    subclasses. ``_rewrap`` handles polymorphic returns

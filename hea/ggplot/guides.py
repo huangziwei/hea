@@ -565,7 +565,11 @@ def _make_point_handle(group: LegendGroup, idx: int) -> Line2D:
 
     size = _resolve_aes(group, idx, "size", None)
     if size is not None:
-        kwargs["markersize"] = float(size)
+        # ggplot2 ``size`` is in mm; matplotlib ``markersize`` is in pt.
+        # Without the conversion, geom_point's default ``size=1.5`` renders
+        # the legend marker at 1.5 pt, too small to tell shapes apart when
+        # ``aes(colour=x, shape=x)`` merges into one legend.
+        kwargs["markersize"] = float(size) * _PT_PER_MM
 
     alpha = _resolve_aes(group, idx, "alpha", None)
     if alpha is not None:
