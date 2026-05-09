@@ -92,9 +92,15 @@ def scale_fill_gradient(*, low="#132B43", high="#56B1F7", name=None,
     )
 
 
-def scale_color_gradient2(*, low="#3B4CC0", mid="#DDDDDD", high="#B40426",
-                         midpoint=0.5, name=None, breaks="default",
+def scale_color_gradient2(*, low="#832424", mid="white", high="#3A3A98",
+                         midpoint=0, name=None, breaks="default",
                          labels="default", limits=None):
+    # Mirrors ggplot2's ``scale_colour_gradient2()`` defaults:
+    # ``low = scales::muted("red") = "#832424"``,
+    # ``mid = "white"``,
+    # ``high = scales::muted("blue") = "#3A3A98"``,
+    # ``midpoint = 0`` (NOT 0.5; users want the diverging midpoint at the
+    # data scale's zero, not at 50% of the [0, 1] normalised range).
     return ScaleContinuousColor(
         aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
         limits=limits,
@@ -102,8 +108,8 @@ def scale_color_gradient2(*, low="#3B4CC0", mid="#DDDDDD", high="#B40426",
     )
 
 
-def scale_fill_gradient2(*, low="#3B4CC0", mid="#DDDDDD", high="#B40426",
-                        midpoint=0.5, name=None, breaks="default",
+def scale_fill_gradient2(*, low="#832424", mid="white", high="#3A3A98",
+                        midpoint=0, name=None, breaks="default",
                         labels="default", limits=None):
     return ScaleContinuousColor(
         aesthetics=("fill",), name=name, breaks=breaks, labels=labels,

@@ -17,7 +17,16 @@ from .stat import Stat
 
 @dataclass
 class StatDensity(Stat):
+    # Mirrors ggplot2's ``stat_density()`` parameter defaults
+    # (R/stat-density.R). ``adjust`` multiplies ``bw`` and is the most
+    # common knob users reach for. ``kernel`` is hardcoded to gaussian
+    # (scipy's ``gaussian_kde``); ``trim``/``bounds`` are not yet
+    # honoured — hea's grid spans the data range (= R's ``trim = TRUE``),
+    # while R defaults to ``trim = FALSE`` (extends the curve beyond the
+    # data limits by ~3 bandwidths). Same density values at shared x;
+    # only the rendered tail length differs.
     bw: object = "nrd0"
+    adjust: float = 1.0
     n: int = 512
 
     default_y_label: str = "density"
@@ -28,13 +37,11 @@ class StatDensity(Stat):
         if len(x) < 2:
             return pl.DataFrame({"x": [], "y": [], "density": [], "count": []})
 
-        bw = self._bandwidth(x)
+        bw = self._bandwidth(x) * float(self.adjust)
         x_min, x_max = float(x.min()), float(x.max())
-        # Grid spans the DATA RANGE — matches ggplot2 4.0's
-        # ``stat_density`` output. Internally R computes KDE on a wider
-        # grid (extended 3 bandwidths) and clips the output to data
-        # range; the density values at any common x agree, so we just
-        # evaluate directly at the data range — same observable output.
+        # Grid spans the DATA RANGE (R's ``trim = TRUE`` behaviour;
+        # ggplot2 defaults to ``trim = FALSE`` — wider tails). Tracked
+        # as a known divergence.
         grid = np.linspace(x_min, x_max, self.n)
 
         # scipy gaussian_kde takes bw_method as a multiplier on x.std() — pass our
@@ -73,5 +80,5 @@ class StatDensity(Stat):
         return max(0.9 * scale * n ** (-1 / 5), 1e-10)
 
 
-def stat_density(*, bw="nrd0", n=512):
-    return StatDensity(bw=bw, n=n)
+def stat_density(*, bw="nrd0", adjust=1.0, n=512):
+    return StatDensity(bw=bw, adjust=adjust, n=n)

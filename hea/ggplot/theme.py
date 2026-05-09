@@ -147,7 +147,8 @@ def theme_gray() -> Theme:
         "axis.title.y": element_text(angle=90),
         "axis.ticks": element_line(colour="grey20", size=0.25),
         "axis.line": element_blank(),
-        "plot.title": element_text(size=14, colour="black", hjust=0),
+        # plot.title size = rel(1.2) × base 11pt = 13.2 (NOT 14).
+        "plot.title": element_text(size=13.2, colour="black", hjust=0),
         "plot.background": element_rect(fill="white"),
         "panel.background": element_rect(fill="#EBEBEB"),
         "panel.border": element_blank(),

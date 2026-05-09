@@ -23,9 +23,16 @@ from .stat import Stat
 
 @dataclass
 class StatYdensity(Stat):
+    # Mirrors ggplot2's ``stat_ydensity()`` parameter defaults
+    # (R/stat-ydensity.R). ``adjust`` multiplies ``bw``; ``kernel`` is
+    # hardcoded to gaussian (scipy's ``gaussian_kde``); ``trim`` /
+    # ``bounds`` / ``drop`` / ``quantiles`` are not yet honoured.
+    # ``n`` is an internal grid resolution — ggplot2 doesn't expose it
+    # but we do.
     bw: object = "nrd0"
+    adjust: float = 1.0
     n: int = 512
-    scale: str = "area"  # ggplot2 also has "count" and "width"; we ignore for now
+    scale: str = "area"  # "area" (default) | "count" | "width"
 
     def compute_panel(self, data, params):
         groupby_cols = ["x"]
@@ -49,6 +56,7 @@ class StatYdensity(Stat):
             return None
 
         bw = self.bw if not isinstance(self.bw, str) else StatDensity._nrd0(y)
+        bw = float(bw) * float(self.adjust)
         sigma_y = y.std(ddof=1)
         kde = gaussian_kde(y, bw_method=(bw / sigma_y) if sigma_y > 0 else bw)
         y_min, y_max = float(y.min()), float(y.max())
@@ -75,5 +83,5 @@ class StatYdensity(Stat):
         return pl.DataFrame(cols)
 
 
-def stat_ydensity(*, bw="nrd0", n=512, scale="area"):
-    return StatYdensity(bw=bw, n=n, scale=scale)
+def stat_ydensity(*, bw="nrd0", adjust=1.0, n=512, scale="area"):
+    return StatYdensity(bw=bw, adjust=adjust, n=n, scale=scale)
