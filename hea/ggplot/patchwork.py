@@ -30,7 +30,6 @@ from dataclasses import dataclass, field
 from math import ceil, sqrt
 from typing import Any
 
-
 _DIRECTION_H = "h"
 _DIRECTION_V = "v"
 _DIRECTION_GRID = "grid"
@@ -56,18 +55,21 @@ class GuideArea:
 
     def __or__(self, other):
         from .core import ggplot
+
         if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _h_combine(self, other)
         return NotImplemented
 
     def __truediv__(self, other):
         from .core import ggplot
+
         if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _v_combine(self, other)
         return NotImplemented
 
     def __add__(self, other):
         from .core import ggplot
+
         if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _grid_combine(self, other)
         return NotImplemented
@@ -103,30 +105,35 @@ class PlotGrid:
 
     def __or__(self, other):
         from .core import ggplot
+
         if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _h_combine(self, other)
         return NotImplemented
 
     def __ror__(self, other):
         from .core import ggplot
+
         if isinstance(other, (ggplot, GuideArea)):
             return _h_combine(other, self)
         return NotImplemented
 
     def __truediv__(self, other):
         from .core import ggplot
+
         if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _v_combine(self, other)
         return NotImplemented
 
     def __rtruediv__(self, other):
         from .core import ggplot
+
         if isinstance(other, (ggplot, GuideArea)):
             return _v_combine(other, self)
         return NotImplemented
 
     def __add__(self, other):
         from .core import ggplot
+
         if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _grid_combine(self, other)
         if isinstance(other, PlotLayout):
@@ -153,6 +160,7 @@ class PlotGrid:
         ``GuideArea`` placeholders skip the broadcast.
         """
         from .core import ggplot
+
         new_children = []
         for child in self.children:
             if isinstance(child, GuideArea):
@@ -168,9 +176,13 @@ class PlotGrid:
         return PlotGrid(
             children=new_children,
             direction=self.direction,
-            nrow=self.nrow, ncol=self.ncol, byrow=self.byrow,
-            widths=self.widths, heights=self.heights,
-            annotation=self.annotation, guides=self.guides,
+            nrow=self.nrow,
+            ncol=self.ncol,
+            byrow=self.byrow,
+            widths=self.widths,
+            heights=self.heights,
+            annotation=self.annotation,
+            guides=self.guides,
         )
 
     def _with_layout(self, layout: "PlotLayout") -> "PlotGrid":
@@ -195,9 +207,13 @@ class PlotGrid:
         return PlotGrid(
             children=list(self.children),
             direction=self.direction,
-            nrow=self.nrow, ncol=self.ncol, byrow=self.byrow,
-            widths=self.widths, heights=self.heights,
-            annotation=annotation, guides=self.guides,
+            nrow=self.nrow,
+            ncol=self.ncol,
+            byrow=self.byrow,
+            widths=self.widths,
+            heights=self.heights,
+            annotation=annotation,
+            guides=self.guides,
         )
 
     def _apply_to_last_plot(self, thing) -> "PlotGrid":
@@ -214,25 +230,29 @@ class PlotGrid:
         while idx >= 0 and isinstance(self.children[idx], GuideArea):
             idx -= 1
         if idx < 0:
-            raise TypeError("can't apply to last plot of a PlotGrid that "
-                            "contains only guide_area() placeholders")
+            raise TypeError(
+                "can't apply to last plot of a PlotGrid that "
+                "contains only guide_area() placeholders"
+            )
         last = self.children[idx]
         if isinstance(last, PlotGrid):
             new_last = last._apply_to_last_plot(thing)
         elif isinstance(last, ggplot):
             new_last = last + thing  # may itself raise — let it propagate
         else:
-            raise TypeError(
-                f"unexpected child type {type(last).__name__} in PlotGrid"
-            )
+            raise TypeError(f"unexpected child type {type(last).__name__} in PlotGrid")
         new_children = list(self.children)
         new_children[idx] = new_last
         return PlotGrid(
             children=new_children,
             direction=self.direction,
-            nrow=self.nrow, ncol=self.ncol, byrow=self.byrow,
-            widths=self.widths, heights=self.heights,
-            annotation=self.annotation, guides=self.guides,
+            nrow=self.nrow,
+            ncol=self.ncol,
+            byrow=self.byrow,
+            widths=self.widths,
+            heights=self.heights,
+            annotation=self.annotation,
+            guides=self.guides,
         )
 
     # ------------------------------------------------------------------
@@ -286,17 +306,13 @@ class PlotGrid:
         from .core import _resolve_figsize
 
         sb = compose_super_block(self)
-        target = _resolve_figsize(width=width, height=height, units=units,
-                                   figsize=figsize)
-        # Default to R's standalone-device 7×7" — same canvas
-        # ``pdf()``/``dev.new()`` uses, so a saved PDF matches what R's
-        # ``print(g)`` produces for the same composition.
-        # ``_redistribute_to_leftover`` keeps decorations absolute and
-        # splits the leftover among panel rows by their relative weights,
-        # so ``heights = [1, 3, 2, 4]`` lands on patchwork-faithful
-        # ratios at any device size.
-        fig_w = target[0] if target is not None else 7.0
-        fig_h = target[1] if target is not None else 7.0
+        target = _resolve_figsize(
+            width=width, height=height, units=units, figsize=figsize
+        )
+
+        fig_w = target[0] if target is not None else sb.total_w_in
+        fig_h = target[1] if target is not None else sb.total_h_in
+        fig = plt.figure(figsize=(fig_w, fig_h))
         fig = plt.figure(figsize=(fig_w, fig_h))
 
         tag_iter = self._make_tag_iter()
@@ -344,15 +360,24 @@ class PlotGrid:
 
     def show(self, *, width=None, height=None, units="in", figsize=None) -> None:
         import matplotlib.pyplot as plt
+
         self.draw(width=width, height=height, units=units, figsize=figsize)
         plt.show()
 
-    def save(self, filename: str, *, width=None, height=None, dpi=300,
-             units="in", figsize=None) -> None:
+    def save(
+        self,
+        filename: str,
+        *,
+        width=None,
+        height=None,
+        dpi=300,
+        units="in",
+        figsize=None,
+    ) -> None:
         from .core import _resize_figure
+
         fig = self.draw()
-        _resize_figure(fig, width=width, height=height, units=units,
-                       figsize=figsize)
+        _resize_figure(fig, width=width, height=height, units=units, figsize=figsize)
         fig.savefig(filename, dpi=dpi, bbox_inches="tight")
 
     def _repr_png_(self):
@@ -441,9 +466,15 @@ def _grid_combine(a, b):
 # ---------------------------------------------------------------------------
 
 
-def wrap_plots(plots: list, *, nrow: int | None = None, ncol: int | None = None,
-               byrow: bool = True, widths: list | None = None,
-               heights: list | None = None) -> PlotGrid:
+def wrap_plots(
+    plots: list,
+    *,
+    nrow: int | None = None,
+    ncol: int | None = None,
+    byrow: bool = True,
+    widths: list | None = None,
+    heights: list | None = None,
+) -> PlotGrid:
     """Programmatic grid layout. ``nrow``/``ncol`` default to ``ceil(sqrt(n))``;
     pass either or both to constrain the shape. ``byrow=True`` (default)
     fills row-major; ``byrow=False`` fills column-major.
@@ -455,8 +486,11 @@ def wrap_plots(plots: list, *, nrow: int | None = None, ncol: int | None = None,
     return PlotGrid(
         children=list(plots),
         direction=_DIRECTION_GRID,
-        nrow=nrow, ncol=ncol, byrow=byrow,
-        widths=widths, heights=heights,
+        nrow=nrow,
+        ncol=ncol,
+        byrow=byrow,
+        widths=widths,
+        heights=heights,
     )
 
 
@@ -484,8 +518,9 @@ class PlotLayout:
     guides: str | None = None
 
 
-def plot_layout(*, widths=None, heights=None, nrow=None, ncol=None,
-                byrow=None, guides=None) -> PlotLayout:
+def plot_layout(
+    *, widths=None, heights=None, nrow=None, ncol=None, byrow=None, guides=None
+) -> PlotLayout:
     """Patchwork-style layout config. Combine with a :class:`PlotGrid` via
     ``+``::
 
@@ -499,7 +534,11 @@ def plot_layout(*, widths=None, heights=None, nrow=None, ncol=None,
             f"plot_layout: guides must be 'collect', 'keep', or None — got {guides!r}"
         )
     return PlotLayout(
-        widths=widths, heights=heights, nrow=nrow, ncol=ncol, byrow=byrow,
+        widths=widths,
+        heights=heights,
+        nrow=nrow,
+        ncol=ncol,
+        byrow=byrow,
         guides=guides,
     )
 
@@ -530,9 +569,16 @@ class PlotAnnotation:
     tag_sep: str | None = None
 
 
-def plot_annotation(*, title=None, subtitle=None, caption=None,
-                    tag_levels=None, tag_prefix=None, tag_suffix=None,
-                    tag_sep=None) -> PlotAnnotation:
+def plot_annotation(
+    *,
+    title=None,
+    subtitle=None,
+    caption=None,
+    tag_levels=None,
+    tag_prefix=None,
+    tag_suffix=None,
+    tag_sep=None,
+) -> PlotAnnotation:
     """Patchwork-style figure annotation. Combine with a :class:`PlotGrid`
     via ``+``::
 
@@ -540,8 +586,12 @@ def plot_annotation(*, title=None, subtitle=None, caption=None,
         (p1 + p2 + p3) + plot_annotation(tag_levels="A")  # → A, B, C
     """
     return PlotAnnotation(
-        title=title, subtitle=subtitle, caption=caption,
-        tag_levels=tag_levels, tag_prefix=tag_prefix, tag_suffix=tag_suffix,
+        title=title,
+        subtitle=subtitle,
+        caption=caption,
+        tag_levels=tag_levels,
+        tag_prefix=tag_prefix,
+        tag_suffix=tag_suffix,
         tag_sep=tag_sep,
     )
 
@@ -564,7 +614,9 @@ def _wrap_dims(n: int) -> tuple[int, int]:
         return (2, (n + 1) // 2)
     if n <= 12:
         return (3, (n + 2) // 3)
-    from math import ceil as _ceil, sqrt as _sqrt
+    from math import ceil as _ceil
+    from math import sqrt as _sqrt
+
     side = int(_ceil(_sqrt(n)))
     return (side, side)
 
@@ -573,10 +625,14 @@ def _attach_tag_to_axes(ax, tag: str) -> None:
     """Block-engine path: tag at upper-left of the panel axes, rendered as
     a Text artist outside the data area (above the panel's top edge)."""
     ax.text(
-        0.0, 1.0, tag,
+        0.0,
+        1.0,
+        tag,
         transform=ax.transAxes,
-        ha="left", va="bottom",
-        fontsize="large", fontweight="bold",
+        ha="left",
+        va="bottom",
+        fontsize="large",
+        fontweight="bold",
     )
 
 

@@ -15,21 +15,46 @@ from scipy.stats import gaussian_kde
 from .stat import Stat
 
 
+_PANEL_X_RANGE_KEY = "_stat_density_panel_x_range"
+
+
 @dataclass
 class StatDensity(Stat):
     # Mirrors ggplot2's ``stat_density()`` parameter defaults
     # (R/stat-density.R). ``adjust`` multiplies ``bw`` and is the most
     # common knob users reach for. ``kernel`` is hardcoded to gaussian
-    # (scipy's ``gaussian_kde``); ``trim``/``bounds`` are not yet
-    # honoured — hea's grid spans the data range (= R's ``trim = TRUE``),
-    # while R defaults to ``trim = FALSE`` (extends the curve beyond the
-    # data limits by ~3 bandwidths). Same density values at shared x;
-    # only the rendered tail length differs.
+    # (scipy's ``gaussian_kde``); ``bounds`` is not yet honoured.
+    #
+    # ``trim`` matches R: ``False`` (default) evaluates each group's
+    # density on the panel-wide x range (so all curves share the same
+    # grid and per-group tails extend across the panel); ``True`` clips
+    # each group to its own ``[min(x), max(x)]``. ggplot2 reads this
+    # range from ``scales$x$dimension()``; hea reads it from the panel
+    # data (``compute_panel``) since stats run before scales are trained.
+    # Identical to R when this is the sole layer driving the x scale and
+    # no manual ``xlim()`` is set.
     bw: object = "nrd0"
     adjust: float = 1.0
     n: int = 512
+    trim: bool = False
 
     default_y_label: str = "density"
+
+    def compute_panel(self, data, params):
+        # Capture the panel-wide x range before the base class splits
+        # ``data`` per group. With ``trim = False`` every group's KDE
+        # is evaluated on this shared grid, so a low-mass group's curve
+        # extends across the panel — matching ggplot2's behaviour where
+        # ``scales$x$dimension()`` is the panel x range.
+        if "x" in data.columns and len(data):
+            xs = data["x"].to_numpy().astype(float)
+            xs = xs[~np.isnan(xs)]
+            if xs.size:
+                params = {
+                    **params,
+                    _PANEL_X_RANGE_KEY: (float(xs.min()), float(xs.max())),
+                }
+        return super().compute_panel(data, params)
 
     def compute_group(self, data, params):
         x = data["x"].to_numpy().astype(float)
@@ -38,10 +63,14 @@ class StatDensity(Stat):
             return pl.DataFrame({"x": [], "y": [], "density": [], "count": []})
 
         bw = self._bandwidth(x) * float(self.adjust)
-        x_min, x_max = float(x.min()), float(x.max())
-        # Grid spans the DATA RANGE (R's ``trim = TRUE`` behaviour;
-        # ggplot2 defaults to ``trim = FALSE`` — wider tails). Tracked
-        # as a known divergence.
+        if self.trim:
+            x_min, x_max = float(x.min()), float(x.max())
+        else:
+            panel_range = params.get(_PANEL_X_RANGE_KEY)
+            if panel_range is None:
+                x_min, x_max = float(x.min()), float(x.max())
+            else:
+                x_min, x_max = panel_range
         grid = np.linspace(x_min, x_max, self.n)
 
         # scipy gaussian_kde takes bw_method as a multiplier on x.std() — pass our
@@ -80,5 +109,5 @@ class StatDensity(Stat):
         return max(0.9 * scale * n ** (-1 / 5), 1e-10)
 
 
-def stat_density(*, bw="nrd0", adjust=1.0, n=512):
-    return StatDensity(bw=bw, adjust=adjust, n=n)
+def stat_density(*, bw="nrd0", adjust=1.0, n=512, trim=False):
+    return StatDensity(bw=bw, adjust=adjust, n=n, trim=trim)

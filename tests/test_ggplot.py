@@ -4675,6 +4675,42 @@ def test_gg_c8_histogram_pima_diastolic():
         plt.close(fig)
 
 
+def test_stat_density_trim_false_uses_panel_x_range():
+    """``trim = False`` (R default) evaluates each group's KDE on the panel-wide
+    x range, so per-group curves share the same grid even when their data
+    spans differ — matching ggplot2's ``scales$x$dimension()`` behaviour."""
+    import numpy as np
+    import polars as pl
+
+    from hea.ggplot.stats.density import StatDensity
+
+    rng = np.random.default_rng(0)
+    # Group A is concentrated low; group B sits high. With trim=False each
+    # group's grid must span the union of both groups' x.
+    df = pl.DataFrame({
+        "x": np.concatenate([rng.standard_normal(200) - 5,
+                             rng.standard_normal(200) + 5]),
+        "group": [1] * 200 + [2] * 200,
+    })
+    panel_min = float(df["x"].min())
+    panel_max = float(df["x"].max())
+
+    out_default = StatDensity().compute_panel(df, {})
+    for g in (1, 2):
+        sub = out_default.filter(pl.col("group") == g)
+        assert float(sub["x"].min()) == pytest.approx(panel_min)
+        assert float(sub["x"].max()) == pytest.approx(panel_max)
+        assert len(sub) == 512
+
+    # trim=True clips each group to its own [min, max].
+    out_trim = StatDensity(trim=True).compute_panel(df, {})
+    for g in (1, 2):
+        sub_in = df.filter(pl.col("group") == g)
+        sub_out = out_trim.filter(pl.col("group") == g)
+        assert float(sub_out["x"].min()) == pytest.approx(float(sub_in["x"].min()))
+        assert float(sub_out["x"].max()) == pytest.approx(float(sub_in["x"].max()))
+
+
 def test_gg_c10_density_pima_diastolic():
     """`ggplot(pima, aes(x=diastolic)) + geom_density()` (Faraway p.5)."""
     from hea.data import data as _hea_data

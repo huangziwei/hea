@@ -27,7 +27,6 @@ import polars as pl
 
 from . import _measure as M
 
-
 # ---- Spacing system (all inches) -----------------------------------------
 #
 # Three tiers: (a) intra-decoration pads that match matplotlib's actual
@@ -40,9 +39,9 @@ from . import _measure as M
 
 # (a) Pads matplotlib actually uses internally (so our reservations
 # match what gets rendered):
-_TICK_MARK_LEN_IN = 0.05      # rcParams['xtick.major.size'] = 3.5pt ≈ 0.05"
+_TICK_MARK_LEN_IN = 0.05  # rcParams['xtick.major.size'] = 3.5pt ≈ 0.05"
 _TICK_TO_LABEL_PAD_IN = 0.05  # rcParams['xtick.major.pad']  = 3.5pt ≈ 0.05"
-_LABEL_PAD_IN = 0.06          # rcParams['axes.labelpad']    = 4pt   ≈ 0.06"
+_LABEL_PAD_IN = 0.06  # rcParams['axes.labelpad']    = 4pt   ≈ 0.06"
 
 # (b) Generic separation between any two adjacent decoration elements
 # (e.g. between an axis label and the figure edge, between a legend and
@@ -65,12 +64,10 @@ _TICK_MARK_PAD_IN = _TICK_MARK_LEN_IN + _TICK_TO_LABEL_PAD_IN + 0.02
 # font is 11pt; ~5 char labels (e.g. "0.500") give the width / height
 # seed below; pad covers tick mark + tick-to-label gap + safety.
 _DEFAULT_YTICK_RESERVE_IN = (
-    M.text_size_in("00000", fontsize=M.AXIS_TEXT_SIZE_PT)[0]
-    + _TICK_MARK_PAD_IN
+    M.text_size_in("00000", fontsize=M.AXIS_TEXT_SIZE_PT)[0] + _TICK_MARK_PAD_IN
 )
 _DEFAULT_XTICK_RESERVE_IN = (
-    M.text_size_in("0", fontsize=M.AXIS_TEXT_SIZE_PT)[1]
-    + _TICK_MARK_PAD_IN
+    M.text_size_in("0", fontsize=M.AXIS_TEXT_SIZE_PT)[1] + _TICK_MARK_PAD_IN
 )
 
 
@@ -134,6 +131,7 @@ class PlotBlock:
 
 # ---- Measurement ----------------------------------------------------------
 
+
 def measure_block(plot, build_output) -> PlotBlock:
     """Compute per-side margin sizes (inches) for ``plot``.
 
@@ -150,14 +148,17 @@ def measure_block(plot, build_output) -> PlotBlock:
     # share a baseline. Faceted plots also need room for strip labels
     # (added after the facet check below).
     import matplotlib as mpl
+
     title = labels.get("title")
     subtitle = labels.get("subtitle")
     title_h = M.text_size_in(
-        title, fontsize=mpl.rcParams["axes.titlesize"],
+        title,
+        fontsize=mpl.rcParams["axes.titlesize"],
         weight=mpl.rcParams["axes.titleweight"],
     )[1]
     subtitle_h = M.text_size_in(
-        subtitle, fontsize="medium",
+        subtitle,
+        fontsize="medium",
     )[1]
     margin_top = 0.0
     if title_h > 0:
@@ -170,7 +171,9 @@ def measure_block(plot, build_output) -> PlotBlock:
     # — same rationale as the xlab side.
     xlabel, ylabel = _default_labels(plot)
     ylab_w = M.text_size_in(
-        ylabel, fontsize=M.AXIS_TITLE_SIZE_PT, rotation=90.0,
+        ylabel,
+        fontsize=M.AXIS_TITLE_SIZE_PT,
+        rotation=90.0,
     )[0]
     margin_left = ylab_w + _DEFAULT_YTICK_RESERVE_IN + _PANEL_MARGIN_PAD_IN
     if ylab_w > 0:
@@ -235,6 +238,7 @@ def _measure_legend_size(plot, build_output) -> tuple[float, float]:
         return (0.0, 0.0)
 
     from .guides import build_legend_groups
+
     groups = build_legend_groups(plot, build_output)
     if not groups:
         return (0.0, 0.0)
@@ -257,6 +261,7 @@ def _measure_colorbar_width(plot, build_output) -> float:
         return 0.0
 
     from .guides import build_colorbar_specs
+
     specs = build_colorbar_specs(plot, build_output)
     if not specs:
         return 0.0
@@ -268,6 +273,7 @@ def _measure_colorbar_width(plot, build_output) -> float:
 
 
 # ---- Render ---------------------------------------------------------------
+
 
 def render_block(
     plot,
@@ -312,19 +318,27 @@ def render_block(
 
     if subplotspec is None:
         gs = GridSpec(
-            3, 3, figure=fig,
+            3,
+            3,
+            figure=fig,
             width_ratios=width_ratios,
             height_ratios=height_ratios,
-            left=0.0, right=1.0, top=1.0, bottom=0.0,
-            wspace=0.0, hspace=0.0,
+            left=0.0,
+            right=1.0,
+            top=1.0,
+            bottom=0.0,
+            wspace=0.0,
+            hspace=0.0,
         )
     else:
         gs = GridSpecFromSubplotSpec(
-            3, 3,
+            3,
+            3,
             subplot_spec=subplotspec,
             width_ratios=width_ratios,
             height_ratios=height_ratios,
-            wspace=0.0, hspace=0.0,
+            wspace=0.0,
+            hspace=0.0,
         )
 
     panel_cell = gs[1, 1]
@@ -338,15 +352,18 @@ def render_block(
         # bounded by its host (no overflow into adjacent figure space).
         cb_caxes = _allocate_colorbar_caxes(fig, gs, 1, 2, plot, build_output)
         leg_hosts = _allocate_legend_host_axes(fig, gs, 1, 2, plot, build_output)
-        _render_single_into(plot, build_output, ax,
-                              colorbar_caxes=cb_caxes,
-                              legend_host_axes=leg_hosts)
+        _render_single_into(
+            plot, build_output, ax, colorbar_caxes=cb_caxes, legend_host_axes=leg_hosts
+        )
     else:
         nrow, ncol = block.panel_grid_rows, block.panel_grid_cols
         sharex, sharey = plot.facet.share_axes()
         sub_gs = GridSpecFromSubplotSpec(
-            nrow, ncol, subplot_spec=panel_cell,
-            wspace=0.05, hspace=0.20,
+            nrow,
+            ncol,
+            subplot_spec=panel_cell,
+            wspace=0.05,
+            hspace=0.20,
         )
         axes = []
         for r in range(nrow):
@@ -364,9 +381,13 @@ def render_block(
         block.panel_axes = [ax for row in axes for ax in row]
         cb_caxes = _allocate_colorbar_caxes(fig, gs, 1, 2, plot, build_output)
         leg_hosts = _allocate_legend_host_axes(fig, gs, 1, 2, plot, build_output)
-        _render_facets_into(plot, build_output, axes,
-                              colorbar_caxes=cb_caxes,
-                              legend_host_axes=leg_hosts)
+        _render_facets_into(
+            plot,
+            build_output,
+            axes,
+            colorbar_caxes=cb_caxes,
+            legend_host_axes=leg_hosts,
+        )
 
     # Title/subtitle/caption text rides on the panel ``Axes`` (title via
     # ``ax.set_title(loc='left')``, caption via ``fig.text``). Margin
@@ -374,14 +395,20 @@ def render_block(
     # ``_apply_plot_titles`` does the actual placement so we don't add
     # extra Axes that would break tests counting ``fig.axes``.
     from .render import _apply_plot_titles
+
     if subplotspec is None:
         # Standalone — owns the figure, can use fig.suptitle / fig.text.
         _apply_plot_titles(plot, fig, ax_list=block.panel_axes)
 
 
-def _render_single_into(plot, build_output, ax, *,
-                          colorbar_caxes: list | None = None,
-                          legend_host_axes: list | None = None) -> None:
+def _render_single_into(
+    plot,
+    build_output,
+    ax,
+    *,
+    colorbar_caxes: list | None = None,
+    legend_host_axes: list | None = None,
+) -> None:
     """Run the single-panel rendering pipeline against ``ax``.
 
     ``colorbar_caxes``: pre-allocated dedicated axes for any colorbars
@@ -389,13 +416,17 @@ def _render_single_into(plot, build_output, ax, *,
     engine composition allocates these in the right-margin column.
     """
     from .render import (
-        _apply_theme, _is_coord_flip, _default_labels, _coord_view_limits,
+        _apply_theme,
+        _coord_view_limits,
+        _default_labels,
+        _is_coord_flip,
     )
 
     is_flipped = _is_coord_flip(plot.coordinates)
     ax._hea_coord_flipped = is_flipped
 
     from .render import _panel_scale
+
     # Pre-axis hook: discrete scales register their category order with
     # matplotlib's category unit BEFORE geoms draw, so the data lands at
     # the levels' positions (not row-encounter positions).
@@ -408,6 +439,7 @@ def _render_single_into(plot, build_output, ax, *,
     for layer, df in zip(plot.layers, build_output.data):
         if is_flipped:
             from .coords.flip import flip_columns
+
             df = flip_columns(df)
         layer.geom.draw_panel(df, ax)
 
@@ -416,7 +448,9 @@ def _render_single_into(plot, build_output, ax, *,
         sc = _panel_scale(build_output, 1, scale_aes)
         if sc is not None:
             sc.apply_to_axis(
-                ax, axis, view_limits=_coord_view_limits(plot.coordinates, axis),
+                ax,
+                axis,
+                view_limits=_coord_view_limits(plot.coordinates, axis),
             )
 
     xlabel, ylabel = _default_labels(plot)
@@ -434,16 +468,27 @@ def _render_single_into(plot, build_output, ax, *,
         apply(ax)
 
     from .guides import apply_axis_guides, apply_legends
+
     apply_axis_guides([ax], plot)
-    apply_legends(ax.figure, [ax], plot, build_output,
-                   colorbar_caxes=colorbar_caxes,
-                   legend_host_axes=legend_host_axes)
+    apply_legends(
+        ax.figure,
+        [ax],
+        plot,
+        build_output,
+        colorbar_caxes=colorbar_caxes,
+        legend_host_axes=legend_host_axes,
+    )
 
 
-def _render_facets_into(plot, build_output, axes_grid, *,
-                          composing: bool = False,
-                          colorbar_caxes: list | None = None,
-                          legend_host_axes: list | None = None) -> None:
+def _render_facets_into(
+    plot,
+    build_output,
+    axes_grid,
+    *,
+    composing: bool = False,
+    colorbar_caxes: list | None = None,
+    legend_host_axes: list | None = None,
+) -> None:
     """Render each facet panel into its allocated axes.
 
     ``composing=True`` skips ``fig.supxlabel``/``supylabel`` — those paint
@@ -452,7 +497,10 @@ def _render_facets_into(plot, build_output, axes_grid, *,
     centre panel and left-column middle panel so it lives inside this
     leaf's panel column area."""
     from .render import (
-        _apply_theme, _is_coord_flip, _default_labels, _coord_view_limits,
+        _apply_theme,
+        _coord_view_limits,
+        _default_labels,
+        _is_coord_flip,
     )
 
     facet = plot.facet
@@ -482,6 +530,7 @@ def _render_facets_into(plot, build_output, axes_grid, *,
                 panel_data = df.filter(pl.col("PANEL") == panel_row["PANEL"])
             if is_flipped:
                 from .coords.flip import flip_columns
+
                 panel_data = flip_columns(panel_data)
             if len(panel_data) > 0:
                 layer.geom.draw_panel(panel_data, panel_ax)
@@ -491,7 +540,8 @@ def _render_facets_into(plot, build_output, axes_grid, *,
             sc = _panel_scale(build_output, panel_row["PANEL"], scale_aes)
             if sc is not None:
                 sc.apply_to_axis(
-                    panel_ax, axis,
+                    panel_ax,
+                    axis,
                     view_limits=_coord_view_limits(plot.coordinates, axis),
                 )
 
@@ -504,6 +554,7 @@ def _render_facets_into(plot, build_output, axes_grid, *,
             panel_ax.set_title(labels["top"], y=1.0, pad=0)
         if labels.get("right"):
             from .render import _draw_right_strip
+
             _draw_right_strip(plot.theme, panel_ax, labels["right"])
 
     for unused_ax in flat_axes[n_panels:]:
@@ -529,7 +580,10 @@ def _render_facets_into(plot, build_output, axes_grid, *,
     _set_facet_axis_labels(fig, flat_axes[:n_panels], xlabel, ylabel)
 
     _apply_theme(
-        plot.theme, fig, list(flat_axes[:n_panels]), owns_fig=False,
+        plot.theme,
+        fig,
+        list(flat_axes[:n_panels]),
+        owns_fig=False,
         is_faceted=True,
     )
 
@@ -539,10 +593,16 @@ def _render_facets_into(plot, build_output, axes_grid, *,
             apply(panel_ax)
 
     from .guides import apply_axis_guides, apply_legends
+
     apply_axis_guides(list(flat_axes[:n_panels]), plot)
-    apply_legends(fig, list(flat_axes[:n_panels]), plot, build_output,
-                   colorbar_caxes=colorbar_caxes,
-                   legend_host_axes=legend_host_axes)
+    apply_legends(
+        fig,
+        list(flat_axes[:n_panels]),
+        plot,
+        build_output,
+        colorbar_caxes=colorbar_caxes,
+        legend_host_axes=legend_host_axes,
+    )
 
 
 def _set_facet_axis_labels(fig, panel_axes: list, xlabel, ylabel) -> None:
@@ -586,15 +646,26 @@ def _set_facet_axis_labels(fig, panel_axes: list, xlabel, ylabel) -> None:
         # the xlabel itself. ``y_offset`` measures from panel.y0 down to
         # the xlabel's TOP edge.
         y_offset_in = _DEFAULT_XTICK_RESERVE_IN + _AXIS_LABELPAD_IN
-        fig.text(cx, y0 - y_offset_in / fig_h, xlabel,
-                 ha="center", va="top",
-                 fontsize="medium")
+        fig.text(
+            cx,
+            y0 - y_offset_in / fig_h,
+            xlabel,
+            ha="center",
+            va="top",
+            fontsize="medium",
+        )
     if ylabel is not None:
         # Same on the left: ytick reserve + labelpad before the ylabel.
         x_offset_in = _DEFAULT_YTICK_RESERVE_IN + _AXIS_LABELPAD_IN
-        fig.text(x0 - x_offset_in / fig_w, cy, ylabel,
-                 ha="right", va="center",
-                 rotation=90, fontsize="medium")
+        fig.text(
+            x0 - x_offset_in / fig_w,
+            cy,
+            ylabel,
+            ha="right",
+            va="center",
+            rotation=90,
+            fontsize="medium",
+        )
 
 
 def _hide_redundant_facet_ticks(axes_grid, sharex, sharey, n_panels: int) -> None:
@@ -618,10 +689,7 @@ def _hide_redundant_facet_ticks(axes_grid, sharex, sharey, n_panels: int) -> Non
 
     # Visibility map — facet_wrap may hide trailing cells; we treat
     # those as "not present" for tick-bookkeeping.
-    visible = [
-        [ax.get_visible() for ax in row]
-        for row in axes_grid
-    ]
+    visible = [[ax.get_visible() for ax in row] for row in axes_grid]
 
     if sharex in (True, "col"):
         # For each column, find the lowest visible panel — that's the one
@@ -637,8 +705,10 @@ def _hide_redundant_facet_ticks(axes_grid, sharex, sharey, n_panels: int) -> Non
                 continue
             for r in range(bottom_visible_r):
                 axes_grid[r][c].tick_params(
-                    bottom=False, top=False,
-                    labelbottom=False, labeltop=False,
+                    bottom=False,
+                    top=False,
+                    labelbottom=False,
+                    labeltop=False,
                 )
 
     if sharey in (True, "row"):
@@ -652,8 +722,10 @@ def _hide_redundant_facet_ticks(axes_grid, sharex, sharey, n_panels: int) -> Non
                 continue
             for c in range(left_visible_c + 1, ncol):
                 axes_grid[r][c].tick_params(
-                    left=False, right=False,
-                    labelleft=False, labelright=False,
+                    left=False,
+                    right=False,
+                    labelleft=False,
+                    labelright=False,
                 )
 
 
@@ -708,6 +780,7 @@ def _has_right_guide(blk) -> bool:
         if pos not in (None, "right"):
             return False
         from .guides import build_colorbar_specs, build_legend_groups
+
         if build_colorbar_specs(plot, bo):
             return True
         if build_legend_groups(plot, bo):
@@ -860,11 +933,19 @@ class SuperBlock:
 
     @property
     def total_w_in(self) -> float:
-        return self.outer_margin_left_in + self.total_inner_w_in + self.outer_margin_right_in
+        return (
+            self.outer_margin_left_in
+            + self.total_inner_w_in
+            + self.outer_margin_right_in
+        )
 
     @property
     def total_h_in(self) -> float:
-        return self.outer_margin_top_in + self.total_inner_h_in + self.outer_margin_bottom_in
+        return (
+            self.outer_margin_top_in
+            + self.total_inner_h_in
+            + self.outer_margin_bottom_in
+        )
 
 
 def compute_block(thing, *, collect_state=None):
@@ -876,9 +957,9 @@ def compute_block(thing, *, collect_state=None):
     effect at the outermost grid; nested calls forward it so a
     ``guide_area()`` placeholder inside a sub-grid still gets sized.
     """
+    from .build import build
     from .core import ggplot
     from .patchwork import GuideArea, PlotGrid
-    from .build import build
 
     if isinstance(thing, GuideArea):
         if collect_state is None:
@@ -895,9 +976,7 @@ def compute_block(thing, *, collect_state=None):
         return blk
     if isinstance(thing, PlotGrid):
         return compose_super_block(thing, collect_state=collect_state)
-    raise TypeError(
-        f"compute_block: unsupported child type {type(thing).__name__}"
-    )
+    raise TypeError(f"compute_block: unsupported child type {type(thing).__name__}")
 
 
 def compose_super_block(grid, *, collect_state=None) -> SuperBlock:
@@ -978,7 +1057,8 @@ def compose_super_block(grid, *, collect_state=None) -> SuperBlock:
                 # usually ~0.5–1". Track the legend's natural height; we'll
                 # apply it as a floor below if the user didn't pin heights.
                 guide_area_natural_h[r] = max(
-                    guide_area_natural_h[r], blk.legend_h_in,
+                    guide_area_natural_h[r],
+                    blk.legend_h_in,
                 )
 
     if grid.widths is not None:
@@ -1004,7 +1084,8 @@ def compose_super_block(grid, *, collect_state=None) -> SuperBlock:
 
     return SuperBlock(
         grid=grid,
-        nrow=nrow, ncol=ncol,
+        nrow=nrow,
+        ncol=ncol,
         cells=cells,
         row_super_top_in=row_super_top,
         row_super_bottom_in=row_super_bottom,
@@ -1024,7 +1105,9 @@ def _annotation_extents(grid) -> tuple[float, float]:
     a = grid.annotation
     title_lines = [s for s in (a.title, a.subtitle) if s]
     title_h = M.text_block_size_in(
-        title_lines, fontsize=M.TITLE_SIZE_PT, weight="bold",
+        title_lines,
+        fontsize=M.TITLE_SIZE_PT,
+        weight="bold",
     )[1]
     if title_h > 0:
         title_h += 0.1
@@ -1094,9 +1177,13 @@ def _prepare_collect(grid):
         return PlotGrid(
             children=new_children,
             direction=g.direction,
-            nrow=g.nrow, ncol=g.ncol, byrow=g.byrow,
-            widths=g.widths, heights=g.heights,
-            annotation=g.annotation, guides=g.guides,
+            nrow=g.nrow,
+            ncol=g.ncol,
+            byrow=g.byrow,
+            widths=g.widths,
+            heights=g.heights,
+            annotation=g.annotation,
+            guides=g.guides,
         )
 
     new_grid = _broadcast(grid)
@@ -1114,7 +1201,7 @@ def _wrap_with_guide_area(grid, pos: str):
     on the side indicated by ``pos``. Annotation and ``guides`` flag stay
     on the new outer grid so :func:`_render_guide_area_cell` still has
     access to the merged legend payload."""
-    from .patchwork import GuideArea, PlotGrid, guide_area, _DIRECTION_H, _DIRECTION_V
+    from .patchwork import _DIRECTION_H, _DIRECTION_V, GuideArea, PlotGrid, guide_area
 
     ga = guide_area()
     # Promote the inner grid's annotation onto the outer wrapper so the
@@ -1124,9 +1211,13 @@ def _wrap_with_guide_area(grid, pos: str):
     inner = PlotGrid(
         children=list(grid.children),
         direction=grid.direction,
-        nrow=grid.nrow, ncol=grid.ncol, byrow=grid.byrow,
-        widths=grid.widths, heights=grid.heights,
-        annotation=None, guides=None,
+        nrow=grid.nrow,
+        ncol=grid.ncol,
+        byrow=grid.byrow,
+        widths=grid.widths,
+        heights=grid.heights,
+        annotation=None,
+        guides=None,
     )
     if pos == "top":
         children = [ga, inner]
@@ -1203,9 +1294,9 @@ def _measure_guide_area_block(merged_groups, legend_theme) -> "GuideAreaBlock":
         return GuideAreaBlock()
 
     pos = legend_theme.get("legend.position") if legend_theme else "right"
-    direction = (
-        legend_theme.get("legend.direction") if legend_theme else None
-    ) or ("vertical" if pos in ("right", "left") else "horizontal")
+    direction = (legend_theme.get("legend.direction") if legend_theme else None) or (
+        "vertical" if pos in ("right", "left") else "horizontal"
+    )
 
     widths, heights = [], []
     for g in merged_groups:
@@ -1220,8 +1311,10 @@ def _measure_guide_area_block(merged_groups, legend_theme) -> "GuideAreaBlock":
         legend_w = max(widths)
         legend_h = sum(heights) + (len(heights) - 1) * M.ROW_GAP_IN
     return GuideAreaBlock(
-        legend_w_in=legend_w, legend_h_in=legend_h,
-        merged_groups=merged_groups, legend_theme=legend_theme,
+        legend_w_in=legend_w,
+        legend_h_in=legend_h,
+        merged_groups=merged_groups,
+        legend_theme=legend_theme,
     )
 
 
@@ -1233,7 +1326,9 @@ def _render_guide_area_cell(blk: "GuideAreaBlock", fig, panel_cell) -> None:
     from matplotlib.gridspec import GridSpecFromSubplotSpec
 
     from .guides import (
-        _legend_key_handler, _legend_title_alignment, _make_handle,
+        _legend_key_handler,
+        _legend_title_alignment,
+        _make_handle,
     )
 
     if not blk.merged_groups:
@@ -1241,18 +1336,20 @@ def _render_guide_area_cell(blk: "GuideAreaBlock", fig, panel_cell) -> None:
 
     theme = blk.legend_theme
     pos = (theme.get("legend.position") if theme else None) or "right"
-    direction = (
-        theme.get("legend.direction") if theme else None
-    ) or ("vertical" if pos in ("right", "left") else "horizontal")
+    direction = (theme.get("legend.direction") if theme else None) or (
+        "vertical" if pos in ("right", "left") else "horizontal"
+    )
 
     n = len(blk.merged_groups)
     if direction == "horizontal":
-        sub = GridSpecFromSubplotSpec(1, n, subplot_spec=panel_cell,
-                                       wspace=0.1, hspace=0.0)
+        sub = GridSpecFromSubplotSpec(
+            1, n, subplot_spec=panel_cell, wspace=0.1, hspace=0.0
+        )
         sub_specs = [sub[0, i] for i in range(n)]
     else:
-        sub = GridSpecFromSubplotSpec(n, 1, subplot_spec=panel_cell,
-                                       wspace=0.0, hspace=0.1)
+        sub = GridSpecFromSubplotSpec(
+            n, 1, subplot_spec=panel_cell, wspace=0.0, hspace=0.1
+        )
         sub_specs = [sub[i, 0] for i in range(n)]
 
     handler_map = _legend_key_handler(theme) if theme else None
@@ -1266,13 +1363,20 @@ def _render_guide_area_cell(blk: "GuideAreaBlock", fig, panel_cell) -> None:
         ncols = len(handles) if direction == "horizontal" else 1
         labelspacing = 0.4 if group.key_glyph == "polygon" else 0.0
         sizing = {
-            "handlelength": 1.2, "handleheight": 1.5,
+            "handlelength": 1.2,
+            "handleheight": 1.5,
             "labelspacing": labelspacing,
         }
         host.legend(
-            handles, group.labels, title=group.title, ncols=ncols,
-            loc="center", frameon=False, alignment=alignment,
-            handler_map=handler_map, **sizing,
+            handles,
+            group.labels,
+            title=group.title,
+            ncols=ncols,
+            loc="center",
+            frameon=False,
+            alignment=alignment,
+            handler_map=handler_map,
+            **sizing,
         )
         blk.panel_axes.append(host)
     blk.figure = fig
@@ -1309,12 +1413,17 @@ def _redistribute_to_leftover(ratios, panel_idx, panel_weights, total_in):
         ratios[idx] = leftover * weight / weight_sum
 
 
-def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
-                        tag_iter=None, outer_top_y: float | None = None,
-                        lift_top: bool = False,
-                        lift_bottom: bool = False,
-                        lift_left: bool = False,
-                        lift_right: bool = False) -> None:
+def render_super_block(
+    sb: SuperBlock,
+    fig,
+    parent_subspec=None,
+    tag_iter=None,
+    outer_top_y: float | None = None,
+    lift_top: bool = False,
+    lift_bottom: bool = False,
+    lift_left: bool = False,
+    lift_right: bool = False,
+) -> None:
     """Render a :class:`SuperBlock` into ``fig`` at ``parent_subspec``
     (or the whole figure if ``None``).
 
@@ -1350,7 +1459,7 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
     # of matplotlib's homogeneous height_ratios by pre-scaling panel
     # entries before the gridspec normalizes everything.
     height_ratios: list[float] = []
-    panel_h_idx: list[int] = []        # indices into height_ratios
+    panel_h_idx: list[int] = []  # indices into height_ratios
     panel_h_weights: list[float] = []  # parallel; nominal inch (= weight)
     if sb.annot_title_h_in > 0:
         height_ratios.append(sb.annot_title_h_in)
@@ -1405,10 +1514,16 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
         fig_h_in = fig.get_figheight()
         fig_w_in = fig.get_figwidth()
         _redistribute_to_leftover(
-            height_ratios, panel_h_idx, panel_h_weights, fig_h_in,
+            height_ratios,
+            panel_h_idx,
+            panel_h_weights,
+            fig_h_in,
         )
         _redistribute_to_leftover(
-            width_ratios, panel_w_idx, panel_w_weights, fig_w_in,
+            width_ratios,
+            panel_w_idx,
+            panel_w_weights,
+            fig_w_in,
         )
 
     gs_h = [max(r, 1e-6) for r in height_ratios]
@@ -1417,22 +1532,34 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
 
     if parent_subspec is None:
         gs = GridSpec(
-            len(gs_h), len(gs_w), figure=fig,
-            height_ratios=gs_h, width_ratios=gs_w,
-            left=0.0, right=1.0, top=1.0, bottom=0.0,
-            wspace=0.0, hspace=0.0,
+            len(gs_h),
+            len(gs_w),
+            figure=fig,
+            height_ratios=gs_h,
+            width_ratios=gs_w,
+            left=0.0,
+            right=1.0,
+            top=1.0,
+            bottom=0.0,
+            wspace=0.0,
+            hspace=0.0,
         )
     else:
         gs = GridSpecFromSubplotSpec(
-            len(gs_h), len(gs_w), subplot_spec=parent_subspec,
-            height_ratios=gs_h, width_ratios=gs_w,
-            wspace=0.0, hspace=0.0,
+            len(gs_h),
+            len(gs_w),
+            subplot_spec=parent_subspec,
+            height_ratios=gs_h,
+            width_ratios=gs_w,
+            wspace=0.0,
+            hspace=0.0,
         )
 
     # plot_annotation title/caption (only at the outermost SuperBlock).
     if grid.annotation is not None:
-        _apply_block_annotation(grid, fig, gs, title_row_offset, sb.ncol,
-                                  sb.annot_caption_h_in > 0)
+        _apply_block_annotation(
+            grid, fig, gs, title_row_offset, sb.ncol, sb.annot_caption_h_in > 0
+        )
 
     # Render each cell.
     for r in range(sb.nrow):
@@ -1441,12 +1568,12 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
             if cell is None:
                 continue
             child, blk = cell
-            panel_cell = gs[title_row_offset + 3*r + 1, 3*c + 1]
-            right_cell_row = title_row_offset + 3*r + 1
-            right_cell_col = 3*c + 2
+            panel_cell = gs[title_row_offset + 3 * r + 1, 3 * c + 1]
+            right_cell_row = title_row_offset + 3 * r + 1
+            right_cell_col = 3 * c + 2
 
-            top_cell_row = title_row_offset + 3*r
-            panel_col = 3*c + 1
+            top_cell_row = title_row_offset + 3 * r
+            panel_col = 3 * c + 1
             # The title cell for ANY child at this row is the OUTER's
             # super_top cell at this row. Forward its y1 to a nested
             # child so the nested's leaves anchor their titles there
@@ -1485,33 +1612,53 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
                 child_lift_top = True
                 child_lift_bottom = True
                 child_lift_left = (
-                    (c == 0) and (lift_left or outermost)
-                    and not _has_left_guide(blk)
+                    (c == 0) and (lift_left or outermost) and not _has_left_guide(blk)
                 )
                 child_lift_right = (
-                    (c == sb.ncol - 1) and (lift_right or outermost)
+                    (c == sb.ncol - 1)
+                    and (lift_right or outermost)
                     and not _has_right_guide(blk)
                 )
-                render_super_block(blk, fig,
-                                    parent_subspec=panel_cell,
-                                    tag_iter=tag_iter,
-                                    outer_top_y=child_top_y,
-                                    lift_top=child_lift_top,
-                                    lift_bottom=child_lift_bottom,
-                                    lift_left=child_lift_left,
-                                    lift_right=child_lift_right)
+                render_super_block(
+                    blk,
+                    fig,
+                    parent_subspec=panel_cell,
+                    tag_iter=tag_iter,
+                    outer_top_y=child_top_y,
+                    lift_top=child_lift_top,
+                    lift_bottom=child_lift_bottom,
+                    lift_left=child_lift_left,
+                    lift_right=child_lift_right,
+                )
             else:
-                _render_leaf_cell(child, blk, fig, gs, panel_cell,
-                                   right_cell_row, right_cell_col,
-                                   top_cell_row, panel_col,
-                                   tag_iter=tag_iter,
-                                   title_y_override=outer_top_y if r == 0 and outer_top_y is not None else None)
+                _render_leaf_cell(
+                    child,
+                    blk,
+                    fig,
+                    gs,
+                    panel_cell,
+                    right_cell_row,
+                    right_cell_col,
+                    top_cell_row,
+                    panel_col,
+                    tag_iter=tag_iter,
+                    title_y_override=outer_top_y
+                    if r == 0 and outer_top_y is not None
+                    else None,
+                )
 
 
-def _render_leaf_title_in_top_cell(leaf, fig, gs, top_cell_row, panel_col,
-                                     *, fontsize_title=None,
-                                     fontsize_subtitle=None,
-                                     y_override: float | None = None) -> None:
+def _render_leaf_title_in_top_cell(
+    leaf,
+    fig,
+    gs,
+    top_cell_row,
+    panel_col,
+    *,
+    fontsize_title=None,
+    fontsize_subtitle=None,
+    y_override: float | None = None,
+) -> None:
     """Render the leaf's title and subtitle as ``fig.text`` artists
     anchored to the TOP of the top-margin cell.
 
@@ -1549,27 +1696,44 @@ def _render_leaf_title_in_top_cell(leaf, fig, gs, top_cell_row, panel_col,
     y_cursor = cell_top_y - 0.005
     if title:
         fig.text(
-            bbox.x0, y_cursor, str(title),
-            ha="left", va="top",
+            bbox.x0,
+            y_cursor,
+            str(title),
+            ha="left",
+            va="top",
             fontsize=fontsize_title,
             fontweight=mpl.rcParams["axes.titleweight"],
         )
         line_h_in = M.text_size_in(
-            title, fontsize=mpl.rcParams["font.size"] * 1.2,
+            title,
+            fontsize=mpl.rcParams["font.size"] * 1.2,
         )[1]
         y_cursor -= (line_h_in + M.ROW_GAP_IN) / fig.get_figheight()
     if subtitle:
         fig.text(
-            bbox.x0, y_cursor, str(subtitle),
-            ha="left", va="top",
+            bbox.x0,
+            y_cursor,
+            str(subtitle),
+            ha="left",
+            va="top",
             fontsize=fontsize_subtitle,
         )
 
 
-def _render_leaf_cell(leaf, blk: PlotBlock, fig, gs, panel_cell,
-                       right_cell_row, right_cell_col,
-                       top_cell_row, panel_col, *, tag_iter=None,
-                       title_y_override: float | None = None) -> None:
+def _render_leaf_cell(
+    leaf,
+    blk: PlotBlock,
+    fig,
+    gs,
+    panel_cell,
+    right_cell_row,
+    right_cell_col,
+    top_cell_row,
+    panel_col,
+    *,
+    tag_iter=None,
+    title_y_override: float | None = None,
+) -> None:
     """Render a single ggplot leaf into its assigned cell, with cax for
     colorbars allocated in the right-margin column.
 
@@ -1578,6 +1742,7 @@ def _render_leaf_cell(leaf, blk: PlotBlock, fig, gs, panel_cell,
     instead of overlapping it.
     """
     from matplotlib.gridspec import GridSpecFromSubplotSpec
+
     from .render import _apply_plot_titles
 
     bo = blk.build_output
@@ -1586,21 +1751,34 @@ def _render_leaf_cell(leaf, blk: PlotBlock, fig, gs, panel_cell,
         blk.panel_axes = [ax]
         blk.figure = fig
         cb_caxes = _allocate_colorbar_caxes(
-            fig, gs, right_cell_row, right_cell_col, leaf, bo,
+            fig,
+            gs,
+            right_cell_row,
+            right_cell_col,
+            leaf,
+            bo,
         )
         leg_hosts = _allocate_legend_host_axes(
-            fig, gs, right_cell_row, right_cell_col, leaf, bo,
+            fig,
+            gs,
+            right_cell_row,
+            right_cell_col,
+            leaf,
+            bo,
         )
-        _render_single_into(leaf, bo, ax,
-                              colorbar_caxes=cb_caxes,
-                              legend_host_axes=leg_hosts)
+        _render_single_into(
+            leaf, bo, ax, colorbar_caxes=cb_caxes, legend_host_axes=leg_hosts
+        )
     else:
         sub_nrow = blk.panel_grid_rows
         sub_ncol = blk.panel_grid_cols
         sharex, sharey = leaf.facet.share_axes()
         sub_gs = GridSpecFromSubplotSpec(
-            sub_nrow, sub_ncol, subplot_spec=panel_cell,
-            wspace=0.05, hspace=0.20,
+            sub_nrow,
+            sub_ncol,
+            subplot_spec=panel_cell,
+            wspace=0.05,
+            hspace=0.20,
         )
         axes = []
         for sr in range(sub_nrow):
@@ -1609,27 +1787,45 @@ def _render_leaf_cell(leaf, blk: PlotBlock, fig, gs, panel_cell,
                 share_x = _share_anchor(sharex, sr, sc, axes, row_axes, axis="x")
                 share_y = _share_anchor(sharey, sr, sc, axes, row_axes, axis="y")
                 ax = fig.add_subplot(
-                    sub_gs[sr, sc], sharex=share_x, sharey=share_y,
+                    sub_gs[sr, sc],
+                    sharex=share_x,
+                    sharey=share_y,
                 )
                 row_axes.append(ax)
             axes.append(row_axes)
         blk.panel_axes = [a for row in axes for a in row]
         blk.figure = fig
         cb_caxes = _allocate_colorbar_caxes(
-            fig, gs, right_cell_row, right_cell_col, leaf, bo,
+            fig,
+            gs,
+            right_cell_row,
+            right_cell_col,
+            leaf,
+            bo,
         )
         leg_hosts = _allocate_legend_host_axes(
-            fig, gs, right_cell_row, right_cell_col, leaf, bo,
+            fig,
+            gs,
+            right_cell_row,
+            right_cell_col,
+            leaf,
+            bo,
         )
-        _render_facets_into(leaf, bo, axes, composing=True,
-                              colorbar_caxes=cb_caxes,
-                              legend_host_axes=leg_hosts)
+        _render_facets_into(
+            leaf,
+            bo,
+            axes,
+            composing=True,
+            colorbar_caxes=cb_caxes,
+            legend_host_axes=leg_hosts,
+        )
 
     # Title/subtitle: render as fig.text. ``title_y_override`` lifts the
     # anchor up to a parent's top-margin (used by nested compositions
     # so that p1's and p2's titles align in ``p1 | (p2 / p3)``).
-    _render_leaf_title_in_top_cell(leaf, fig, gs, top_cell_row, panel_col,
-                                     y_override=title_y_override)
+    _render_leaf_title_in_top_cell(
+        leaf, fig, gs, top_cell_row, panel_col, y_override=title_y_override
+    )
 
     if tag_iter is not None:
         tag = next(tag_iter, None)
@@ -1641,14 +1837,17 @@ def _render_leaf_cell(leaf, blk: PlotBlock, fig, gs, panel_cell,
             corner_cell = gs[top_cell_row, panel_col - 1]
             bbox = corner_cell.get_position(fig)
             fig.text(
-                bbox.x0, bbox.y1, tag,
-                ha="left", va="top",
-                fontsize="large", fontweight="bold",
+                bbox.x0,
+                bbox.y1,
+                tag,
+                ha="left",
+                va="top",
+                fontsize="large",
+                fontweight="bold",
             )
 
 
-def _allocate_legend_host_axes(fig, gs, panel_row_idx, right_col_idx,
-                                  leaf, bo) -> list:
+def _allocate_legend_host_axes(fig, gs, panel_row_idx, right_col_idx, leaf, bo) -> list:
     """Carve a host ``Axes`` per discrete legend group inside the right-
     margin cell. The legend renders inside the host (via
     :func:`apply_legends` host path), so it stays bounded by the host's
@@ -1666,14 +1865,18 @@ def _allocate_legend_host_axes(fig, gs, panel_row_idx, right_col_idx,
         return []
 
     from .guides import build_legend_groups
+
     groups = build_legend_groups(leaf, bo)
     if not groups:
         return []
 
     right_cell = gs[panel_row_idx, right_col_idx]
     sub = GridSpecFromSubplotSpec(
-        len(groups), 1, subplot_spec=right_cell,
-        wspace=0.0, hspace=0.1,
+        len(groups),
+        1,
+        subplot_spec=right_cell,
+        wspace=0.0,
+        hspace=0.1,
     )
     hosts = []
     for i in range(len(groups)):
@@ -1683,8 +1886,7 @@ def _allocate_legend_host_axes(fig, gs, panel_row_idx, right_col_idx,
     return hosts
 
 
-def _allocate_colorbar_caxes(fig, gs, panel_row_idx, right_col_idx,
-                               leaf, bo) -> list:
+def _allocate_colorbar_caxes(fig, gs, panel_row_idx, right_col_idx, leaf, bo) -> list:
     """Carve a tight cax (or stack of caxes) inside the right-margin
     cell for each colorbar in ``leaf``.
 
@@ -1695,6 +1897,7 @@ def _allocate_colorbar_caxes(fig, gs, panel_row_idx, right_col_idx,
     different side which the block engine doesn't reserve yet.
     """
     from matplotlib.gridspec import GridSpecFromSubplotSpec
+
     from .guides import build_colorbar_specs
 
     pos = leaf.theme.get("legend.position") if leaf.theme else None
@@ -1719,7 +1922,8 @@ def _allocate_colorbar_caxes(fig, gs, panel_row_idx, right_col_idx,
         - M.COLORBAR_BAR_PAD_IN,
     )
     sub = GridSpecFromSubplotSpec(
-        len(specs) * 2 + 1, 4,
+        len(specs) * 2 + 1,
+        4,
         subplot_spec=right_cell,
         width_ratios=[
             M.COLORBAR_PANEL_PAD_IN,
@@ -1727,7 +1931,8 @@ def _allocate_colorbar_caxes(fig, gs, panel_row_idx, right_col_idx,
             M.COLORBAR_BAR_PAD_IN,
             max(tick_reserve, 1e-6),
         ],
-        wspace=0.0, hspace=0.2,
+        wspace=0.0,
+        hspace=0.2,
     )
     caxes = []
     for i in range(len(specs)):
@@ -1748,27 +1953,40 @@ def right_cell_width_in_estimate(fig, subplotspec) -> float:
     return bbox.width * fig.get_figwidth()
 
 
-def _apply_block_annotation(grid, fig, gs, title_row_offset, ncol,
-                              has_caption_row) -> None:
+def _apply_block_annotation(
+    grid, fig, gs, title_row_offset, ncol, has_caption_row
+) -> None:
     """Render plot_annotation title/caption into the reserved gridspec
     rows. Uses ``fig.text`` (not Axes) so ``fig.axes`` stays clean."""
     a = grid.annotation
     if a.title is not None or a.subtitle is not None:
         title_lines = [s for s in (a.title, a.subtitle) if s]
-        bbox = gs[0, 0:3*ncol].get_position(fig)
+        bbox = gs[0, 0 : 3 * ncol].get_position(fig)
+        # ggplot2's ``plot.title`` (= patchwork's annotation title)
+        # default is rel(1.2) with face NULL, which inherits the text
+        # element's face = "plain" — NOT bold. (Older hea hardcoded
+        # bold; switching to ``axes.titleweight`` mirrors ggplot2 4.x.)
+        import matplotlib as mpl
+
         fig.text(
-            bbox.x0 + 0.01, (bbox.y0 + bbox.y1) / 2,
+            bbox.x0 + 0.01,
+            (bbox.y0 + bbox.y1) / 2,
             "\n".join(str(s) for s in title_lines),
-            ha="left", va="center",
-            fontsize="large", fontweight="bold",
+            ha="left",
+            va="center",
+            fontsize="large",
+            fontweight=mpl.rcParams["axes.titleweight"],
         )
     if a.caption is not None and has_caption_row:
-        bbox = gs[gs.nrows - 1, 0:3*ncol].get_position(fig)
+        bbox = gs[gs.nrows - 1, 0 : 3 * ncol].get_position(fig)
         fig.text(
-            bbox.x1 - 0.01, (bbox.y0 + bbox.y1) / 2,
+            bbox.x1 - 0.01,
+            (bbox.y0 + bbox.y1) / 2,
             str(a.caption),
-            ha="right", va="center",
-            fontsize="small", style="italic",
+            ha="right",
+            va="center",
+            fontsize="small",
+            style="italic",
         )
 
 

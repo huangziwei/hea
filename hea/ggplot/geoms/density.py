@@ -69,14 +69,14 @@ def _first(df, col, *, default):
 
 
 def geom_density(mapping=None, data=None, *, stat="density", bw="nrd0", n=512,
-                 position="identity", **kwargs):
+                 trim=False, position="identity", **kwargs):
     from ..layer import Layer
     from ..positions import resolve_position
     from ..stats import resolve_stat
     from ..stats.density import StatDensity
 
     if stat == "density":
-        stat_obj = StatDensity(bw=bw, n=n)
+        stat_obj = StatDensity(bw=bw, n=n, trim=trim)
     elif isinstance(stat, str):
         stat_obj = resolve_stat(stat)
     else:
