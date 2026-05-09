@@ -99,6 +99,25 @@ def desc(col: str) -> _Desc:
     return _Desc(col)
 
 
+def exclude(*columns: Any) -> pl.Expr:
+    """Like :func:`polars.exclude`, but also accepts a :class:`DataFrame`
+    (uses ``.columns``), :class:`Series` (uses ``.name``), or list/tuple
+    thereof. Lets ``df.select(hea.exclude(df["year":"day"]))`` mirror the
+    positive form ``df.select(df["year":"day"])``.
+    """
+    flat: list[Any] = []
+    for c in columns:
+        if isinstance(c, (list, tuple)):
+            flat.extend(c)
+        elif isinstance(c, pl.DataFrame):
+            flat.extend(c.columns)
+        elif isinstance(c, pl.Series):
+            flat.append(c.name)
+        else:
+            flat.append(c)
+    return pl.exclude(flat)
+
+
 def _split_arrange(cols: tuple) -> tuple[list[str], list[bool]]:
     """Split ``arrange`` args into (column names, descending flags)."""
     names: list[str] = []
@@ -379,6 +398,11 @@ class DataFrame(pl.DataFrame):
         pass the result of :meth:`cols_between` directly:
         ``df.select(df.cols_between("a", "c"))``.
 
+        A :class:`DataFrame` positional arg expands to its column names,
+        and a :class:`Series` arg expands to ``.name``. This makes the
+        slice form ``df.select(df["year":"day"])`` work as the closest
+        Python analog to dplyr's ``select(year:day)``.
+
         Keyword args rename inline. Both forms work:
         ``select(tail_num="tailnum")`` (dplyr-style, string is treated
         as the source column name) and
@@ -392,6 +416,10 @@ class DataFrame(pl.DataFrame):
         for c in cols:
             if isinstance(c, (list, tuple)):
                 flat.extend(c)
+            elif isinstance(c, pl.DataFrame):
+                flat.extend(c.columns)
+            elif isinstance(c, pl.Series):
+                flat.append(c.name)
             else:
                 flat.append(c)
         exprs: list[Any] = []
@@ -410,6 +438,25 @@ class DataFrame(pl.DataFrame):
             else:
                 exprs.append(pl.lit(src).alias(new_name))
         return super().select(exprs)
+
+    def drop(self, *cols: Any, strict: bool = True) -> "DataFrame":
+        """Drop columns. Symmetric with :meth:`select`: accepts column
+        names, lists/tuples, polars selectors, a :class:`DataFrame` (uses
+        ``.columns``), or a :class:`Series` (uses ``.name``). The slice
+        form ``df.drop(df["year":"day"])`` is the negated counterpart of
+        ``df.select(df["year":"day"])``.
+        """
+        flat: list[Any] = []
+        for c in cols:
+            if isinstance(c, (list, tuple)):
+                flat.extend(c)
+            elif isinstance(c, pl.DataFrame):
+                flat.extend(c.columns)
+            elif isinstance(c, pl.Series):
+                flat.append(c.name)
+            else:
+                flat.append(c)
+        return self._wrap(super().drop(*flat, strict=strict))
 
     def rename(self, mapping: dict | None = None, /, **kwargs: str) -> "DataFrame":
         """Rename columns. Accepts a dict (polars-style) or kwargs.

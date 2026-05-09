@@ -64,7 +64,7 @@ from .R import (
 from .data import data, factor
 # These re-bindings shadow the star-imported pl.DataFrame / pl.LazyFrame
 # / pl.Series. Listed in _HEA_OVERRIDES below.
-from .dataframe import DataFrame, GroupBy, LazyFrame, Series, desc, tbl
+from .dataframe import DataFrame, GroupBy, LazyFrame, Series, desc, exclude, tbl
 from . import ggplot
 from . import plot
 from . import R
@@ -174,6 +174,7 @@ _HEA_OVERRIDES = {
     "DataFrame": "subclass with tidyverse verbs",
     "LazyFrame": "subclass that re-wraps on collect",
     "Series": "subclass with hea-aware overrides",
+    "exclude": "wrapper that also accepts DataFrame/Series args",
 }
 for _n in (*_DF_FACTORIES, *_LF_FACTORIES, *_POLY_FACTORIES):
     if hasattr(_pl, _n):
