@@ -667,7 +667,7 @@ def _promote_string_aes_params(mapping, aes_params, data):
     thing INTO the mapping (= map), leaving plain constants in
     ``aes_params`` (= set).
 
-    Two shapes promote:
+    Three shapes promote:
 
     * Strings matching a data column — ``geom_point(color="species")``
       behaves like ``geom_point(aes(color="species"))`` when ``species``
@@ -679,6 +679,12 @@ def _promote_string_aes_params(mapping, aes_params, data):
       pipeline's ``_eval_aes_value`` (which calls ``data.select(expr)``)
       so the Expr is computed against the layer data, just like a
       mapped column.
+    * Callables — ``geom_boxplot(group=cut_width(col("carat"), 0.1))``
+      or ``geom_point(colour=fct_reorder("class", "hwy"))``. The
+      ``cut_*`` / ``fct_*`` helpers return closures that consume a
+      DataFrame; without promotion the closure would land in
+      ``to_series`` and broadcast as a 1-row Object (silent wrong
+      result — one box for the whole panel instead of one per bin).
 
     Explicit ``aes(color=...)`` still wins (the promoted entry has
     lower priority in the merge)."""
@@ -693,6 +699,8 @@ def _promote_string_aes_params(mapping, aes_params, data):
         if isinstance(v, str) and v in data.columns:
             promoted[canon] = v
         elif isinstance(v, pl.Expr):
+            promoted[canon] = v
+        elif callable(v) and not isinstance(v, type):
             promoted[canon] = v
         else:
             keep[k] = v

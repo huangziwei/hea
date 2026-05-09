@@ -292,3 +292,62 @@ def test_layer_level_color_column_means_map(df):
     from hea.ggplot.build import build
     bo = build(p)
     assert bo.aes_source.get("colour") == "g"
+
+
+def test_layer_level_callable_kwarg_promotes_to_mapping():
+    """Regression: ``geom_boxplot(group=cut_width(col("carat"), 0.1))``
+    (no ``aes()`` wrapper) used to broadcast the closure as a 1-row
+    Object column, silently collapsing the boxplot to a single box.
+    Callables now promote into the mapping just like column-name strings
+    and ``pl.Expr`` do — so the bare-kwarg form matches ``aes(group=...)``.
+    """
+    import numpy as np
+    from hea import col
+    from hea.ggplot import cut_width
+    from hea.ggplot.build import build
+    rng = np.random.default_rng(0)
+    df = hea.DataFrame({
+        "carat": rng.uniform(0.2, 2.5, 200),
+        "price": rng.uniform(200, 2000, 200),
+    })
+
+    p_kw = df.ggplot(x="carat", y="price").geom_boxplot(
+        group=cut_width(col("carat"), 0.1),
+    )
+    p_aes = df.ggplot(x="carat", y="price").geom_boxplot(
+        aes(group=cut_width(col("carat"), 0.1)),
+    )
+    bo_kw = build(p_kw)
+    bo_aes = build(p_aes)
+    # Same number of boxes (one per bin) and matching Enum levels.
+    assert len(bo_kw.data[0]) == len(bo_aes.data[0])
+    assert len(bo_kw.data[0]) > 1, "callable kwarg collapsed to a single row"
+    assert bo_kw.data[0]["group"].dtype == bo_aes.data[0]["group"].dtype
+
+
+def test_cut_width_accepts_bare_column_name():
+    """``cut_width("carat", 0.1)`` should work the same as
+    ``cut_width(col("carat"), 0.1)`` — symmetric with ``fct_*`` and
+    documented as supported in :mod:`cuts`."""
+    import numpy as np
+    from hea import col
+    from hea.ggplot import cut_width
+    from hea.ggplot.build import build
+    rng = np.random.default_rng(0)
+    df = hea.DataFrame({
+        "carat": rng.uniform(0.2, 2.5, 200),
+        "price": rng.uniform(200, 2000, 200),
+    })
+
+    p_str = df.ggplot(x="carat", y="price").geom_boxplot(
+        aes(group=cut_width("carat", 0.1)),
+    )
+    p_col = df.ggplot(x="carat", y="price").geom_boxplot(
+        aes(group=cut_width(col("carat"), 0.1)),
+    )
+    bo_str = build(p_str)
+    bo_col = build(p_col)
+    assert len(bo_str.data[0]) == len(bo_col.data[0])
+    cats_str = list(bo_str.data[0]["group"].dtype.categories)
+    cats_col = list(bo_col.data[0]["group"].dtype.categories)
+    assert cats_str == cats_col

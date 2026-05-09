@@ -1,14 +1,14 @@
 """Binning helpers from ggplot2: ``cut_width``, ``cut_interval``, ``cut_number``.
 
-Designed for use inside ``aes()`` to bin a continuous variable into a
-factor for discrete grouping/colouring::
+Bin a continuous variable into a factor for discrete grouping/colouring::
 
-    geom_boxplot(aes(x="carat", y="price",
-                     group=cut_width(col("carat"), 0.1)))
+    geom_boxplot(aes(group=cut_width("carat", 0.1)))            # inside aes()
+    geom_boxplot(group=cut_width("carat", 0.1))                  # bare kwarg
 
 All three accept either eager input (``Series`` / ``ndarray``) or a
-column reference (string column name / ``pl.col()`` expression). The
-column-reference form returns a callable that the build pipeline
+column reference (bare column name string, like ``fct_*``, or a
+``pl.col()`` expression for derived inputs like ``col("carat") * 1000``).
+The column-reference form returns a callable that the build pipeline
 resolves against the layer's data — same convention as
 ``aes(x=lambda d: d["wt"] * 2)``.
 
