@@ -3,6 +3,7 @@ from .bin2d import StatBin2d, StatBinhex, stat_bin_2d, stat_binhex
 from .boxplot import StatBoxplot, stat_boxplot
 from .count import StatCount, stat_count
 from .density import StatDensity, stat_density
+from .density_ridges import StatDensityRidges, stat_density_ridges
 from .ecdf import StatEcdf, stat_ecdf
 from .function import geom_function, stat_function
 from .identity import StatIdentity, stat_identity
@@ -22,6 +23,7 @@ _NAME_TO_STAT = {
     "binhex": StatBinhex,
     "count": StatCount,
     "density": StatDensity,
+    "density_ridges": StatDensityRidges,
     "smooth": StatSmooth,
     "boxplot": StatBoxplot,
     "ydensity": StatYdensity,
@@ -59,6 +61,7 @@ __all__ = [
     "StatBinhex", "stat_binhex",
     "StatCount", "stat_count",
     "StatDensity", "stat_density",
+    "StatDensityRidges", "stat_density_ridges",
     "StatSmooth", "stat_smooth",
     "StatBoxplot", "stat_boxplot",
     "StatYdensity", "stat_ydensity",

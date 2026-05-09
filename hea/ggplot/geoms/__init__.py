@@ -5,6 +5,7 @@ from .blank import geom_blank
 from .boxplot import geom_boxplot
 from .contour import geom_contour, geom_contour_filled
 from .density import geom_density
+from .density_ridges import geom_density_ridges, geom_density_ridges2
 from .dotplot import geom_dotplot
 from .errorbar import (
     geom_crossbar,
@@ -35,6 +36,8 @@ __all__ = [
     "geom_histogram",
     "geom_freqpoly",
     "geom_density",
+    "geom_density_ridges",
+    "geom_density_ridges2",
     "geom_line",
     "geom_path",
     "geom_step",
