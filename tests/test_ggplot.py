@@ -883,6 +883,34 @@ def test_geom_boxplot_stat_matches_numpy_quantiles():
     assert float(out["upper"][0]) == pytest.approx(expected[2])
 
 
+def test_geom_boxplot_per_box_colour():
+    """``aes(colour=drv)`` produces one row per group with its own scale-
+    mapped colour. Each box must render in its own colour — not all boxes
+    sharing the first row's colour (regression for a `_first(data, ...)`
+    bug that applied a single edge/fill to every box in the call)."""
+    import matplotlib.colors as mcolors
+
+    df = pl.DataFrame({
+        "g": ["a"] * 6 + ["b"] * 6 + ["c"] * 6,
+        "y": [1.0, 2, 3, 4, 5, 6] * 3,
+    })
+    p = ggplot(df, aes(x="g", y="y", colour="g")) + geom_boxplot()
+    fig = p.draw()
+    try:
+        # Three boxes → three patches (one per group). Their edge colours
+        # should all differ.
+        patches = fig.axes[0].patches
+        assert len(patches) == 3
+        edges = [tuple(round(c, 4) for c in mcolors.to_rgba(p.get_edgecolor()))
+                 for p in patches]
+        assert len(set(edges)) == 3, (
+            f"all box edges came back identical ({edges[0]}), so "
+            f"per-box colour is broken"
+        )
+    finally:
+        plt.close(fig)
+
+
 def test_geom_boxplot_extracts_outliers():
     """Outliers beyond 1.5·IQR end up in the outliers column."""
     import polars as pl

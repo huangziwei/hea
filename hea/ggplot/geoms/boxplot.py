@@ -84,53 +84,51 @@ class GeomBoxplot(Geom):
         else:
             positions = [float(v) for v in pos_series.to_list()]
 
-        # One row per box (per (cross-axis, group) tuple).
-        boxes = []
-        widths = []
-        for row in data.iter_rows(named=True):
-            fliers = row.get("outliers") or []
-            boxes.append({
+        # ``ax.bxp`` applies a single ``boxprops`` dict to every box in the
+        # call — there's no per-box style sheet. So when the layer maps a
+        # discrete aesthetic (``aes(colour=drv)`` produces one row per
+        # level, each with its own colour) we have to call ``bxp`` once
+        # per row to get per-box styling. The grouped-by-style fast path
+        # is a tempting optimisation, but boxes per panel are typically
+        # ≤ 10 so the per-row call is cheap and keeps the code linear.
+        rows = list(data.iter_rows(named=True))
+        for row, position in zip(rows, positions):
+            box_dict = {
                 "med": float(row[med_c]),
                 "q1": float(row[q1_c]),
                 "q3": float(row[q3_c]),
                 "whislo": float(row[lo_c]),
                 "whishi": float(row[hi_c]),
-                "fliers": list(fliers),
-            })
-            widths.append(float(row.get("width", 0.75)))
+                "fliers": list(row.get("outliers") or []),
+            }
+            width = float(row.get("width") or 0.75)
 
-        fill = r_color(_first(data, "fill", "white"))
-        edge = r_color(_first(data, "colour", "black"))
-        alpha = float(_first(data, "alpha", 1.0))
-        flier_color = r_color(self.outlier_colour or edge)
-        flier_alpha = self.outlier_alpha if self.outlier_alpha is not None else alpha
+            fill = r_color(row.get("fill") or "white")
+            edge = r_color(row.get("colour") or "black")
+            alpha = float(row.get("alpha") or 1.0)
+            flier_color = r_color(self.outlier_colour or edge)
+            flier_alpha = (self.outlier_alpha
+                            if self.outlier_alpha is not None else alpha)
 
-        ax.bxp(
-            boxes,
-            positions=positions,
-            widths=widths,
-            orientation="horizontal" if flipped else "vertical",
-            patch_artist=True,
-            boxprops={"facecolor": fill, "edgecolor": edge, "alpha": alpha},
-            medianprops={"color": edge},
-            whiskerprops={"color": edge},
-            capprops={"color": edge},
-            flierprops={
-                "marker": "o",
-                "markerfacecolor": flier_color,
-                "markeredgecolor": flier_color,
-                "markersize": self.outlier_size * _PT_PER_MM,
-                "alpha": flier_alpha,
-            },
-            manage_ticks=False,  # let scales handle ticks
-        )
-
-
-def _first(df, col, default):
-    if col not in df.columns or len(df) == 0:
-        return default
-    val = df[col][0]
-    return default if val is None else val
+            ax.bxp(
+                [box_dict],
+                positions=[position],
+                widths=[width],
+                orientation="horizontal" if flipped else "vertical",
+                patch_artist=True,
+                boxprops={"facecolor": fill, "edgecolor": edge, "alpha": alpha},
+                medianprops={"color": edge},
+                whiskerprops={"color": edge},
+                capprops={"color": edge},
+                flierprops={
+                    "marker": "o",
+                    "markerfacecolor": flier_color,
+                    "markeredgecolor": flier_color,
+                    "markersize": self.outlier_size * _PT_PER_MM,
+                    "alpha": flier_alpha,
+                },
+                manage_ticks=False,  # let scales handle ticks
+            )
 
 
 def geom_boxplot(mapping=None, data=None, *, stat="boxplot", position="dodge2",
