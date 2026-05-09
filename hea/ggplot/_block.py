@@ -266,10 +266,60 @@ def _measure_colorbar_width(plot, build_output) -> float:
     if not specs:
         return 0.0
 
-    # One colorbar per spec, stacked. We size for the widest tick label
-    # we'd plausibly print (4 sig figs — refine if a diff item complains).
-    sample_labels = ["0.0", "0.5", "1.0"]
-    return max(M.colorbar_cell_width_in(sample_labels) for _ in specs)
+    # Predict each colorbar's tick labels from its (vmin, vmax) instead
+    # of using a fixed sample. Without this, a count-scale colorbar
+    # (e.g. geom_bin2d on diamonds, ticks ``"0".."10000"``) gets sized
+    # for ``"0.0".."1.0"`` and the wider tick text spills past the
+    # right-margin cell — visible as the colorbar overlapping the next
+    # plot's ylabel in side-by-side patchwork composes.
+    return max(
+        M.colorbar_cell_width_in(_predict_colorbar_tick_labels(s.vmin, s.vmax))
+        for s in specs
+    )
+
+
+def _predict_colorbar_tick_labels(vmin: float, vmax: float) -> list[str]:
+    """Plausible tick-label strings for a vertical colorbar over
+    ``[vmin, vmax]``.
+
+    matplotlib's colorbar uses :class:`AutoLocator`, whose tick density
+    depends on the cax's rendered height — but we need labels at MEASURE
+    time, before the figure is sized. Probe ``MaxNLocator`` at several
+    nbins and union the results so we cover the cax-height range and
+    catch the longest label matplotlib might pick (fewer bins → wider
+    intervals → larger numbers, e.g. ``"10000"`` instead of ``"8000"``).
+
+    Tick values BEYOND ``[vmin, vmax]`` are kept (matplotlib draws e.g.
+    a ``"10000"`` tick when ``vmax = 9213``). Formatting is ``"%g"``,
+    matching :class:`ScalarFormatter`'s short form for the ranges
+    typical of ggplot scales.
+    """
+    import matplotlib.ticker as mticker
+
+    if not (vmin == vmin and vmax == vmax) or vmax <= vmin:  # NaN / degenerate
+        return [_format_tick_g(vmax if vmax == vmax else 0.0)]
+
+    candidates: set[float] = set()
+    for n in (3, 5, 7, 9):
+        for t in mticker.MaxNLocator(nbins=n).tick_values(vmin, vmax):
+            candidates.add(float(t))
+    span = vmax - vmin
+    candidates = {t for t in candidates if vmin - span <= t <= vmax + span}
+    if not candidates:
+        candidates = {vmin, vmax}
+    return [_format_tick_g(t) for t in sorted(candidates)]
+
+
+def _format_tick_g(t: float) -> str:
+    """Approximate matplotlib's ``ScalarFormatter`` short form for tick
+    text. Whole numbers render without a trailing ``.0``; otherwise
+    ``"%g"`` strips trailing zeros without going scientific until the
+    magnitude actually warrants it."""
+    if t == 0:
+        return "0"
+    if t == int(t) and abs(t) < 1e16:
+        return f"{int(t)}"
+    return f"{t:g}"
 
 
 # ---- Render ---------------------------------------------------------------

@@ -17,7 +17,7 @@ import polars as pl
 import pytest
 
 from hea.ggplot import (
-    aes, facet_wrap, geom_bar, geom_boxplot, geom_point, ggplot,
+    aes, facet_wrap, geom_bar, geom_bin2d, geom_boxplot, geom_point, ggplot,
     ggtitle, labs,
 )
 
@@ -172,6 +172,47 @@ def test_nested_compose_does_not_crash_with_annotation():
     fig = g.draw()
     try:
         assert any(t.get_text() == "A nested story" for t in fig.texts)
+    finally:
+        plt.close(fig)
+
+
+def test_colorbar_tick_labels_do_not_overlap_next_plot():
+    """Side-by-side compose: a wide-tick colorbar (e.g. ``"10000"`` for a
+    count scale) on the LEFT plot must clear the RIGHT plot's ylabel.
+
+    Regression for ``p1 | p2`` where ``p1`` has a count colorbar — the
+    right-margin column was budgeted for ``"0.0"/"0.5"/"1.0"`` (~0.13"
+    label width), so a 5-char ``"10000"`` tick spilled ~0.27" past the
+    column boundary and overlapped p2's ``ylabel``.
+    """
+    import numpy as np
+    rng = np.random.default_rng(0)
+    df = pl.DataFrame({
+        "x": rng.uniform(0, 3, 5000),
+        "y": rng.uniform(0, 20000, 5000),
+    })
+    p1 = ggplot(df, aes("x", "y")) + geom_bin2d()
+    p2 = ggplot(df, aes("x", "y")) + geom_bin2d()
+    fig = (p1 | p2).draw()
+    try:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        bbs = []
+        for ax in fig.axes:
+            bb = ax.get_tightbbox(renderer)
+            if bb is None:
+                continue
+            fb = bb.transformed(fig.transFigure.inverted())
+            role = "cb" if ax.get_label() == "<colorbar>" else "main"
+            bbs.append((role, fb.xmin, fb.xmax))
+        # Render order is p1.main, p1.cb, p2.main, p2.cb.
+        p1_right = max(bbs[0][2], bbs[1][2])
+        p2_left = min(bbs[2][1], bbs[3][1])
+        assert p2_left > p1_right, (
+            f"p1's colorbar/main right edge {p1_right:.4f} overlaps p2's "
+            f"left edge {p2_left:.4f} — tick text spilled past the "
+            f"reserved colorbar cell"
+        )
     finally:
         plt.close(fig)
 
