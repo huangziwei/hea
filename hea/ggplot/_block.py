@@ -735,6 +735,46 @@ def _has_left_guide(blk) -> bool:
 
 
 @dataclass
+class GuideAreaBlock:
+    """Placeholder block for a :func:`guide_area` cell.
+
+    Sized to the legends collected by ``plot_layout(guides="collect")``.
+    With zero outer margins the legend draws flush inside the cell,
+    consuming the cell's full panel area. ``merged_groups`` is the
+    deduplicated legend list to render; ``legend_theme`` carries the
+    theme used for legend styling.
+    """
+
+    legend_w_in: float = 0.0
+    legend_h_in: float = 0.0
+    merged_groups: list = field(default_factory=list)
+    legend_theme: object | None = None
+    # Filled in during render.
+    panel_axes: list = field(default_factory=list)
+    figure: object | None = None
+
+    @property
+    def n_panels(self) -> int:
+        return 0
+
+    @property
+    def outer_margin_top_in(self) -> float:
+        return 0.0
+
+    @property
+    def outer_margin_bottom_in(self) -> float:
+        return 0.0
+
+    @property
+    def outer_margin_left_in(self) -> float:
+        return 0.0
+
+    @property
+    def outer_margin_right_in(self) -> float:
+        return 0.0
+
+
+@dataclass
 class SuperBlock:
     """Recursively composed block representing a (possibly nested) ``PlotGrid``.
 
@@ -827,17 +867,26 @@ class SuperBlock:
         return self.outer_margin_top_in + self.total_inner_h_in + self.outer_margin_bottom_in
 
 
-def compute_block(thing):
-    """Return a block for ``thing`` (a ``ggplot`` leaf or a ``PlotGrid``).
+def compute_block(thing, *, collect_state=None):
+    """Return a block for ``thing`` (a ``ggplot`` leaf, a ``PlotGrid``, or a
+    :class:`GuideArea` placeholder).
 
-    Recurses into nested grids. The returned object exposes the
-    ``outer_margin_*`` properties so the parent's super-margin
-    computation works uniformly.
+    Recurses into nested grids. ``collect_state`` carries the merged-legend
+    payload from :func:`_prepare_collect` when ``guides="collect"`` is in
+    effect at the outermost grid; nested calls forward it so a
+    ``guide_area()`` placeholder inside a sub-grid still gets sized.
     """
     from .core import ggplot
-    from .patchwork import PlotGrid
+    from .patchwork import GuideArea, PlotGrid
     from .build import build
 
+    if isinstance(thing, GuideArea):
+        if collect_state is None:
+            # No collect mode: empty placeholder consuming a cell but no
+            # ink (matches patchwork: the slot exists but draws nothing).
+            return GuideAreaBlock()
+        merged_groups, legend_theme = collect_state
+        return _measure_guide_area_block(merged_groups, legend_theme)
     if isinstance(thing, ggplot):
         bo = build(thing)
         blk = measure_block(thing, bo)
@@ -845,20 +894,31 @@ def compute_block(thing):
         # re-run build later.
         return blk
     if isinstance(thing, PlotGrid):
-        return compose_super_block(thing)
+        return compose_super_block(thing, collect_state=collect_state)
     raise TypeError(
         f"compute_block: unsupported child type {type(thing).__name__}"
     )
 
 
-def compose_super_block(grid) -> SuperBlock:
+def compose_super_block(grid, *, collect_state=None) -> SuperBlock:
     """Recursively measure a :class:`PlotGrid` → :class:`SuperBlock`.
 
-    Each child is a leaf ``PlotBlock`` or a nested ``SuperBlock``. Super
-    margins per row/col are taken as the max of children's
-    ``outer_margin_*`` along that axis (except the outermost rows/cols
-    which contribute to *this* SuperBlock's outer margins instead).
+    Each child is a leaf ``PlotBlock``, a nested ``SuperBlock``, or a
+    :class:`GuideAreaBlock` placeholder. Super margins per row/col are
+    taken as the max of children's ``outer_margin_*`` along that axis
+    (except the outermost rows/cols which contribute to *this*
+    SuperBlock's outer margins instead).
+
+    When ``grid.guides == "collect"`` and we're at the outermost call
+    (``collect_state`` is ``None``), the collection runs once: leaves are
+    built, their legends de-duplicated, and a fresh tree with per-leaf
+    legends suppressed is composed instead. ``collect_state`` then flows
+    down so any ``guide_area()`` inside a nested sub-grid receives the
+    merged groups too.
     """
+    if grid.guides == "collect" and collect_state is None:
+        grid, collect_state = _prepare_collect(grid)
+
     nrow, ncol = grid._dims()
 
     if grid.widths is not None and len(grid.widths) != ncol:
@@ -875,7 +935,7 @@ def compose_super_block(grid) -> SuperBlock:
     cells: list = [[None] * ncol for _ in range(nrow)]
     for i, child in enumerate(grid.children):
         r, c = grid._cell_for(i)
-        cells[r][c] = (child, compute_block(child))
+        cells[r][c] = (child, compute_block(child, collect_state=collect_state))
 
     # Per-row top/bottom: max across this row's children.
     row_super_top = [0.0] * nrow
@@ -898,6 +958,11 @@ def compose_super_block(grid) -> SuperBlock:
     # panels would scale up to fill a too-large allocation.
     panel_h = [DEFAULT_PANEL_H_IN] * nrow
     panel_w = [DEFAULT_PANEL_W_IN] * ncol
+    # Track which rows/cols are "ink-bearing" — populated by a real plot or
+    # a sized guide_area. A GuideArea sets a *minimum* row height equal to
+    # its legend extent so the cell can't collapse below the legend's
+    # natural size when no explicit ``heights=`` is given.
+    guide_area_natural_h = [0.0] * nrow
     for r in range(nrow):
         for c in range(ncol):
             cell = cells[r][c]
@@ -908,6 +973,13 @@ def compose_super_block(grid) -> SuperBlock:
                 # Nested grid — panel cell must be ≥ nested's inner extent.
                 panel_h[r] = max(panel_h[r], blk.total_inner_h_in)
                 panel_w[c] = max(panel_w[c], blk.total_inner_w_in)
+            elif isinstance(blk, GuideAreaBlock):
+                # The default panel height is 2", but a single-row legend is
+                # usually ~0.5–1". Track the legend's natural height; we'll
+                # apply it as a floor below if the user didn't pin heights.
+                guide_area_natural_h[r] = max(
+                    guide_area_natural_h[r], blk.legend_h_in,
+                )
 
     if grid.widths is not None:
         total = sum(grid.widths)
@@ -917,6 +989,16 @@ def compose_super_block(grid) -> SuperBlock:
         total = sum(grid.heights)
         avg = DEFAULT_PANEL_H_IN * nrow / total if total > 0 else DEFAULT_PANEL_H_IN
         panel_h = [h * avg for h in grid.heights]
+    else:
+        # No explicit heights: use the merged-legend natural height for any
+        # guide_area-only row instead of the much-larger default plot panel.
+        for r in range(nrow):
+            row_has_only_guide_area = guide_area_natural_h[r] > 0 and all(
+                cells[r][c] is None or isinstance(cells[r][c][1], GuideAreaBlock)
+                for c in range(ncol)
+            )
+            if row_has_only_guide_area:
+                panel_h[r] = guide_area_natural_h[r]
 
     annot_title_h, annot_caption_h = _annotation_extents(grid)
 
@@ -950,6 +1032,250 @@ def _annotation_extents(grid) -> tuple[float, float]:
     if caption_h > 0:
         caption_h += 0.05
     return (title_h, caption_h)
+
+
+# ---------------------------------------------------------------------------
+# guides="collect" — cross-leaf legend collection + GuideArea render
+# ---------------------------------------------------------------------------
+
+
+def _prepare_collect(grid):
+    """Implement ``plot_layout(guides="collect")``.
+
+    Walks the leaf plots, builds them once to harvest their
+    :class:`~hea.ggplot.guides.LegendGroup` lists, deduplicates by
+    ``(title, levels, labels, key_glyph)``, and returns a fresh tree
+    with ``theme(legend_position="none")`` broadcast onto every leaf so
+    per-plot legends don't render. The merged groups travel back via
+    ``collect_state`` and are drawn into the first ``guide_area()`` cell
+    by :func:`_render_guide_area_cell`.
+
+    When the tree contains no explicit :func:`guide_area`, a new outer
+    grid is synthesised with a :func:`guide_area` placed at the side
+    indicated by the first leaf's ``theme(legend.position)`` (default
+    ``"right"``). Matches patchwork's auto-placement.
+
+    Returns ``(new_grid, (merged_groups, legend_theme))``. ``legend_theme``
+    is the first leaf's theme (used to style the merged legend); the
+    grid-level ``theme(legend.position=...)`` set via ``& theme(...)`` —
+    which has already been propagated to every leaf — drives the merged
+    legend's orientation.
+    """
+    from .core import ggplot
+    from .patchwork import GuideArea, PlotGrid, guide_area
+    from .theme import theme as theme_fn
+
+    leaves = grid.leaves()
+    if not leaves:
+        return grid, ([], None)
+
+    # Collect+merge BEFORE we override themes — what build_legend_groups
+    # reads (scales) is unaffected by theme changes, but ordering makes
+    # the intent obvious.
+    merged_groups = _collect_legend_groups(leaves)
+    legend_theme = leaves[0].theme
+
+    suppress = theme_fn(legend_position="none")
+
+    def _broadcast(g):
+        new_children = []
+        for child in g.children:
+            if isinstance(child, GuideArea):
+                new_children.append(child)
+            elif isinstance(child, PlotGrid):
+                new_children.append(_broadcast(child))
+            elif isinstance(child, ggplot):
+                new_children.append(child + suppress)
+            else:
+                raise TypeError(
+                    f"unexpected child type {type(child).__name__} "
+                    "in PlotGrid under guides='collect'"
+                )
+        return PlotGrid(
+            children=new_children,
+            direction=g.direction,
+            nrow=g.nrow, ncol=g.ncol, byrow=g.byrow,
+            widths=g.widths, heights=g.heights,
+            annotation=g.annotation, guides=g.guides,
+        )
+
+    new_grid = _broadcast(grid)
+
+    # Auto-place a guide_area when one isn't already in the tree.
+    if merged_groups and new_grid.find_guide_area() is None:
+        pos = legend_theme.get("legend.position") if legend_theme else "right"
+        new_grid = _wrap_with_guide_area(new_grid, pos or "right")
+
+    return new_grid, (merged_groups, legend_theme)
+
+
+def _wrap_with_guide_area(grid, pos: str):
+    """Wrap ``grid`` in an outer 1×2 / 2×1 grid with a :func:`guide_area`
+    on the side indicated by ``pos``. Annotation and ``guides`` flag stay
+    on the new outer grid so :func:`_render_guide_area_cell` still has
+    access to the merged legend payload."""
+    from .patchwork import GuideArea, PlotGrid, guide_area, _DIRECTION_H, _DIRECTION_V
+
+    ga = guide_area()
+    # Promote the inner grid's annotation onto the outer wrapper so the
+    # plot_annotation title still spans the whole figure (it would be
+    # awkward floating only above the panels).
+    inner_annotation = grid.annotation
+    inner = PlotGrid(
+        children=list(grid.children),
+        direction=grid.direction,
+        nrow=grid.nrow, ncol=grid.ncol, byrow=grid.byrow,
+        widths=grid.widths, heights=grid.heights,
+        annotation=None, guides=None,
+    )
+    if pos == "top":
+        children = [ga, inner]
+        direction = _DIRECTION_V
+    elif pos == "bottom":
+        children = [inner, ga]
+        direction = _DIRECTION_V
+    elif pos == "left":
+        children = [ga, inner]
+        direction = _DIRECTION_H
+    else:  # "right" (default)
+        children = [inner, ga]
+        direction = _DIRECTION_H
+    return PlotGrid(
+        children=children,
+        direction=direction,
+        annotation=inner_annotation,
+        guides=grid.guides,
+    )
+
+
+def _collect_legend_groups(leaves) -> list:
+    """Return one :class:`LegendGroup` per distinct
+    ``(title, levels, labels, key_glyph)`` across all leaves.
+
+    Same-key groups are merged: ``aes_values`` gets the union (first plot
+    wins per aesthetic), and ``layer_aes_params`` / ``layer_default_aes``
+    fill in via ``setdefault``. So if p1 maps ``colour=drv`` and p3 maps
+    ``colour=drv, fill=drv`` to the same scale, the merged guide carries
+    both colour AND fill values for each level.
+    """
+    from .build import build
+    from .guides import LegendGroup, build_legend_groups
+
+    seen: dict[tuple, LegendGroup] = {}
+    for leaf in leaves:
+        bo = build(leaf)
+        for g in build_legend_groups(leaf, bo):
+            key = (
+                g.title,
+                tuple(str(v) for v in g.levels),
+                tuple(g.labels),
+                g.key_glyph,
+            )
+            if key in seen:
+                merged = seen[key]
+                for aes_name, vals in g.aes_values.items():
+                    merged.aes_values.setdefault(aes_name, list(vals))
+                for k, v in g.layer_aes_params.items():
+                    merged.layer_aes_params.setdefault(k, v)
+                for k, v in g.layer_default_aes.items():
+                    merged.layer_default_aes.setdefault(k, v)
+            else:
+                seen[key] = LegendGroup(
+                    title=g.title,
+                    levels=list(g.levels),
+                    labels=list(g.labels),
+                    aes_values={k: list(v) for k, v in g.aes_values.items()},
+                    key_glyph=g.key_glyph,
+                    layer_aes_params=dict(g.layer_aes_params),
+                    layer_default_aes=dict(g.layer_default_aes),
+                )
+    return list(seen.values())
+
+
+def _measure_guide_area_block(merged_groups, legend_theme) -> "GuideAreaBlock":
+    """Compute the natural size of the merged legend.
+
+    The collection orientation tracks the legend's theme: vertical for
+    ``"right"``/``"left"``, horizontal for ``"top"``/``"bottom"``. Vertical
+    stacks group-by-group; horizontal lays groups side by side.
+    """
+    if not merged_groups:
+        return GuideAreaBlock()
+
+    pos = legend_theme.get("legend.position") if legend_theme else "right"
+    direction = (
+        legend_theme.get("legend.direction") if legend_theme else None
+    ) or ("vertical" if pos in ("right", "left") else "horizontal")
+
+    widths, heights = [], []
+    for g in merged_groups:
+        w, h = M.legend_cell_size_in(g.title, g.labels)
+        widths.append(w)
+        heights.append(h)
+
+    if direction == "horizontal":
+        legend_w = sum(widths) + (len(widths) - 1) * M.COL_GAP_IN
+        legend_h = max(heights)
+    else:
+        legend_w = max(widths)
+        legend_h = sum(heights) + (len(heights) - 1) * M.ROW_GAP_IN
+    return GuideAreaBlock(
+        legend_w_in=legend_w, legend_h_in=legend_h,
+        merged_groups=merged_groups, legend_theme=legend_theme,
+    )
+
+
+def _render_guide_area_cell(blk: "GuideAreaBlock", fig, panel_cell) -> None:
+    """Draw the merged legends collected by ``plot_layout(guides="collect")``
+    into the :func:`guide_area` slot. Lays out one ``host`` axes per
+    legend group inside the cell and renders into each via the same
+    matplotlib ``Axes.legend`` path the per-plot host uses."""
+    from matplotlib.gridspec import GridSpecFromSubplotSpec
+
+    from .guides import (
+        _legend_key_handler, _legend_title_alignment, _make_handle,
+    )
+
+    if not blk.merged_groups:
+        return
+
+    theme = blk.legend_theme
+    pos = (theme.get("legend.position") if theme else None) or "right"
+    direction = (
+        theme.get("legend.direction") if theme else None
+    ) or ("vertical" if pos in ("right", "left") else "horizontal")
+
+    n = len(blk.merged_groups)
+    if direction == "horizontal":
+        sub = GridSpecFromSubplotSpec(1, n, subplot_spec=panel_cell,
+                                       wspace=0.1, hspace=0.0)
+        sub_specs = [sub[0, i] for i in range(n)]
+    else:
+        sub = GridSpecFromSubplotSpec(n, 1, subplot_spec=panel_cell,
+                                       wspace=0.0, hspace=0.1)
+        sub_specs = [sub[i, 0] for i in range(n)]
+
+    handler_map = _legend_key_handler(theme) if theme else None
+    alignment = _legend_title_alignment(theme) if theme else "left"
+
+    for group, sp in zip(blk.merged_groups, sub_specs):
+        host = fig.add_subplot(sp)
+        host.set_axis_off()
+        host.set_label("<merged-legend>")
+        handles = [_make_handle(group, j) for j in range(len(group.levels))]
+        ncols = len(handles) if direction == "horizontal" else 1
+        labelspacing = 0.4 if group.key_glyph == "polygon" else 0.0
+        sizing = {
+            "handlelength": 1.2, "handleheight": 1.5,
+            "labelspacing": labelspacing,
+        }
+        host.legend(
+            handles, group.labels, title=group.title, ncols=ncols,
+            loc="center", frameon=False, alignment=alignment,
+            handler_map=handler_map, **sizing,
+        )
+        blk.panel_axes.append(host)
+    blk.figure = fig
 
 
 def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
@@ -1074,6 +1400,9 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
             else:
                 child_top_y = None  # use inner cell's top as usual
 
+            if isinstance(blk, GuideAreaBlock):
+                _render_guide_area_cell(blk, fig, panel_cell)
+                continue
             if isinstance(blk, SuperBlock):
                 # Forward simplify_gt-style lifting to the nested grid.
                 # Top/bottom: lift when this child is at row 0 / row

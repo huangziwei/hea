@@ -19,7 +19,7 @@ theme into matplotlib calls.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any
 
 
@@ -69,8 +69,12 @@ class element_blank:
 # ---------------------------------------------------------------------------
 
 def _merge_element(base, override):
-    """Override's non-None fields win over base's."""
+    """Override's non-None fields win over base's. For non-dataclass values
+    (strings/numbers/etc.) the override always wins — there are no fields
+    to merge field-by-field."""
     if type(base) is not type(override):
+        return override
+    if not is_dataclass(base):
         return override
     merged_kwargs = {}
     for f in fields(base):

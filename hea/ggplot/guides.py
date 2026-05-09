@@ -229,17 +229,21 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
                  or aes_source.get(aes_name)
                  or aes_name)
 
-        contributor = _find_layer_for_aes(plot, aes_name)
+        contributor = _find_layer_for_aes(plot, aes_name, visible_only=True)
+        if contributor is None:
+            # Every contributing layer has ``show_legend=False`` — ggplot2's
+            # rule: the scale is still trained, but no guide is produced.
+            continue
+
         if key not in groups:
-            geom = getattr(contributor, "geom", None) if contributor else None
+            geom = getattr(contributor, "geom", None)
             groups[key] = LegendGroup(
                 title=title,
                 levels=levels,
                 labels=[str(level) for level in levels],
                 aes_values={},
                 key_glyph=getattr(geom, "key_glyph", "point") if geom else "point",
-                layer_aes_params=(dict(getattr(contributor, "aes_params", {}))
-                                   if contributor is not None else {}),
+                layer_aes_params=dict(getattr(contributor, "aes_params", {})),
                 layer_default_aes=(dict(getattr(geom, "default_aes", {}))
                                     if geom is not None else {}),
             )
@@ -249,16 +253,21 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
     return list(groups.values())
 
 
-def _find_layer_for_aes(plot, aes_name):
+def _find_layer_for_aes(plot, aes_name, *, visible_only: bool = False):
     """Return the first layer whose mapping uses ``aes_name``.
 
     Looks at the layer's own mapping first, then falls back to the plot-
     level mapping (when ``inherit_aes=True``) — matches ggplot2's lookup
     order. The contributing layer drives the legend key glyph + any
     layer-level aes constants the user supplied via geom kwargs.
+
+    ``visible_only=True`` skips layers with ``show_legend=False`` —
+    ggplot2's rule for whether a scale should produce a guide.
     """
     plot_mapping = getattr(plot, "mapping", None) or {}
     for layer in plot.layers:
+        if visible_only and getattr(layer, "show_legend", True) is False:
+            continue
         layer_mapping = getattr(layer, "mapping", None) or {}
         if aes_name in layer_mapping:
             return layer

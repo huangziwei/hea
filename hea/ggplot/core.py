@@ -94,8 +94,8 @@ class ggplot:
         # Patchwork: `ggplot + ggplot` and `ggplot + PlotGrid` compose into
         # an auto-layout grid (R `library(patchwork)` semantics). Layer/Theme/
         # Scale/etc. on the rhs falls through to the singledispatch table.
-        from .patchwork import PlotGrid, _grid_combine
-        if isinstance(other, (ggplot, PlotGrid)):
+        from .patchwork import GuideArea, PlotGrid, _grid_combine
+        if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _grid_combine(self, other)
         return ggplot_add(other, self)
 
@@ -103,29 +103,35 @@ class ggplot:
         # Supports rare `theme(...) + ggplot(...)` form.
         return ggplot_add(other, self)
 
+    def __and__(self, other):
+        """Patchwork's ``&`` — applied to a single plot, equivalent to ``+``.
+        On a :class:`PlotGrid`, ``&`` broadcasts to every leaf plot.
+        """
+        return self + other
+
     def __or__(self, other):
         """Patchwork horizontal composition."""
-        from .patchwork import PlotGrid, _h_combine
-        if isinstance(other, (ggplot, PlotGrid)):
+        from .patchwork import GuideArea, PlotGrid, _h_combine
+        if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _h_combine(self, other)
         return NotImplemented
 
     def __ror__(self, other):
-        from .patchwork import PlotGrid, _h_combine
-        if isinstance(other, (ggplot, PlotGrid)):
+        from .patchwork import GuideArea, PlotGrid, _h_combine
+        if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _h_combine(other, self)
         return NotImplemented
 
     def __truediv__(self, other):
         """Patchwork vertical composition."""
-        from .patchwork import PlotGrid, _v_combine
-        if isinstance(other, (ggplot, PlotGrid)):
+        from .patchwork import GuideArea, PlotGrid, _v_combine
+        if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _v_combine(self, other)
         return NotImplemented
 
     def __rtruediv__(self, other):
-        from .patchwork import PlotGrid, _v_combine
-        if isinstance(other, (ggplot, PlotGrid)):
+        from .patchwork import GuideArea, PlotGrid, _v_combine
+        if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _v_combine(other, self)
         return NotImplemented
 

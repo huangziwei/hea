@@ -36,6 +36,48 @@ _DIRECTION_V = "v"
 _DIRECTION_GRID = "grid"
 
 
+@dataclass(eq=False)
+class GuideArea:
+    """Patchwork placeholder slot for the legend collected by
+    ``plot_layout(guides="collect")``.
+
+    Insert in a composition to mark *where* the merged legend renders::
+
+        ((guide_area() / (p1 + p2) / p3)
+            + plot_layout(guides="collect", heights=[1, 3, 4]))
+
+    Without ``guides="collect"`` the slot stays empty (matches patchwork:
+    the cell exists in the layout but renders no content).
+    """
+
+    # ``eq=False`` keeps each instance distinct even though there are no
+    # fields — avoids accidental dedup if the same ``guide_area()`` shows up
+    # twice in a composition.
+
+    def __or__(self, other):
+        from .core import ggplot
+        if isinstance(other, (ggplot, PlotGrid, GuideArea)):
+            return _h_combine(self, other)
+        return NotImplemented
+
+    def __truediv__(self, other):
+        from .core import ggplot
+        if isinstance(other, (ggplot, PlotGrid, GuideArea)):
+            return _v_combine(self, other)
+        return NotImplemented
+
+    def __add__(self, other):
+        from .core import ggplot
+        if isinstance(other, (ggplot, PlotGrid, GuideArea)):
+            return _grid_combine(self, other)
+        return NotImplemented
+
+
+def guide_area() -> GuideArea:
+    """Create a :class:`GuideArea` placeholder. See :class:`GuideArea`."""
+    return GuideArea()
+
+
 @dataclass
 class PlotGrid:
     children: list = field(default_factory=list)
@@ -50,6 +92,10 @@ class PlotGrid:
     heights: list | None = None
     # Top-level title/subtitle/caption + per-leaf tags via plot_annotation().
     annotation: "PlotAnnotation | None" = None
+    # ``"collect"`` deduplicates legends across leaf plots (by aes_source +
+    # levels + key glyph) and renders one merged legend. ``None`` / ``"keep"``
+    # keep per-plot legends. Set via ``plot_layout(guides=...)``.
+    guides: str | None = None
 
     # ------------------------------------------------------------------
     # Composition operators
@@ -57,33 +103,31 @@ class PlotGrid:
 
     def __or__(self, other):
         from .core import ggplot
-        if isinstance(other, ggplot):
-            return _h_combine(self, other)
-        if isinstance(other, PlotGrid):
+        if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _h_combine(self, other)
         return NotImplemented
 
     def __ror__(self, other):
         from .core import ggplot
-        if isinstance(other, ggplot):
+        if isinstance(other, (ggplot, GuideArea)):
             return _h_combine(other, self)
         return NotImplemented
 
     def __truediv__(self, other):
         from .core import ggplot
-        if isinstance(other, (ggplot, PlotGrid)):
+        if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _v_combine(self, other)
         return NotImplemented
 
     def __rtruediv__(self, other):
         from .core import ggplot
-        if isinstance(other, ggplot):
+        if isinstance(other, (ggplot, GuideArea)):
             return _v_combine(other, self)
         return NotImplemented
 
     def __add__(self, other):
         from .core import ggplot
-        if isinstance(other, (ggplot, PlotGrid)):
+        if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _grid_combine(self, other)
         if isinstance(other, PlotLayout):
             return self._with_layout(other)
@@ -91,7 +135,7 @@ class PlotGrid:
             return self._with_annotation(other)
         # Patchwork's `+`-to-last-plot semantics: anything else
         # (Theme/Layer/Scale/Labels/Coord/Facet/...) gets applied to the
-        # rightmost leaf plot. ``&`` (apply to all) is deferred polish.
+        # rightmost leaf plot. ``&`` broadcasts to every leaf instead.
         try:
             return self._apply_to_last_plot(other)
         except TypeError:
@@ -100,6 +144,34 @@ class PlotGrid:
                 "PlotGrid only accepts other plots, plot_layout(), "
                 "plot_annotation(), or anything addable to a ggplot"
             ) from None
+
+    def __and__(self, other):
+        """Patchwork's ``&`` — broadcast ``other`` to every leaf plot.
+
+        Used for theme/scale/coord overrides that should apply uniformly
+        across all subplots, e.g. ``(p1 / p2) & theme(legend_position="top")``.
+        ``GuideArea`` placeholders skip the broadcast.
+        """
+        from .core import ggplot
+        new_children = []
+        for child in self.children:
+            if isinstance(child, GuideArea):
+                new_children.append(child)
+            elif isinstance(child, PlotGrid):
+                new_children.append(child & other)
+            elif isinstance(child, ggplot):
+                new_children.append(child + other)
+            else:
+                raise TypeError(
+                    f"unexpected child type {type(child).__name__} in PlotGrid"
+                )
+        return PlotGrid(
+            children=new_children,
+            direction=self.direction,
+            nrow=self.nrow, ncol=self.ncol, byrow=self.byrow,
+            widths=self.widths, heights=self.heights,
+            annotation=self.annotation, guides=self.guides,
+        )
 
     def _with_layout(self, layout: "PlotLayout") -> "PlotGrid":
         """Return a copy with layout fields overridden by ``layout`` (only
@@ -113,6 +185,7 @@ class PlotGrid:
             widths=layout.widths if layout.widths is not None else self.widths,
             heights=layout.heights if layout.heights is not None else self.heights,
             annotation=self.annotation,
+            guides=layout.guides if layout.guides is not None else self.guides,
         )
 
     def _with_annotation(self, annotation: "PlotAnnotation") -> "PlotGrid":
@@ -124,17 +197,26 @@ class PlotGrid:
             direction=self.direction,
             nrow=self.nrow, ncol=self.ncol, byrow=self.byrow,
             widths=self.widths, heights=self.heights,
-            annotation=annotation,
+            annotation=annotation, guides=self.guides,
         )
 
     def _apply_to_last_plot(self, thing) -> "PlotGrid":
         """Apply ``thing`` (a Theme/Layer/Scale/Labels/...) to the rightmost
-        leaf plot in the tree — patchwork's `+`-on-grid behaviour."""
+        leaf plot in the tree — patchwork's `+`-on-grid behaviour. Skips
+        :class:`GuideArea` placeholders so a trailing ``guide_area()``
+        doesn't swallow the override."""
         from .core import ggplot
 
         if not self.children:
             raise TypeError("can't apply to last plot of an empty PlotGrid")
-        last = self.children[-1]
+        # Find the rightmost non-GuideArea child.
+        idx = len(self.children) - 1
+        while idx >= 0 and isinstance(self.children[idx], GuideArea):
+            idx -= 1
+        if idx < 0:
+            raise TypeError("can't apply to last plot of a PlotGrid that "
+                            "contains only guide_area() placeholders")
+        last = self.children[idx]
         if isinstance(last, PlotGrid):
             new_last = last._apply_to_last_plot(thing)
         elif isinstance(last, ggplot):
@@ -143,12 +225,14 @@ class PlotGrid:
             raise TypeError(
                 f"unexpected child type {type(last).__name__} in PlotGrid"
             )
+        new_children = list(self.children)
+        new_children[idx] = new_last
         return PlotGrid(
-            children=[*self.children[:-1], new_last],
+            children=new_children,
             direction=self.direction,
             nrow=self.nrow, ncol=self.ncol, byrow=self.byrow,
             widths=self.widths, heights=self.heights,
-            annotation=self.annotation,
+            annotation=self.annotation, guides=self.guides,
         )
 
     # ------------------------------------------------------------------
@@ -225,14 +309,31 @@ class PlotGrid:
         return iter(f"{prefix}{t}{suffix}" for t in tags)
 
     def leaves(self) -> list:
-        """Return the depth-first list of leaf plots (reading order)."""
+        """Return the depth-first list of leaf plots (reading order).
+        Skips :class:`GuideArea` placeholders — they're not real plots, so
+        consumers like the tag generator and legend collector ignore them."""
         out = []
         for c in self.children:
+            if isinstance(c, GuideArea):
+                continue
             if isinstance(c, PlotGrid):
                 out.extend(c.leaves())
             else:
                 out.append(c)
         return out
+
+    def find_guide_area(self) -> "GuideArea | None":
+        """First :class:`GuideArea` in depth-first order, or ``None``.
+        Used by the renderer to pick the slot for the merged legend when
+        ``guides="collect"``."""
+        for c in self.children:
+            if isinstance(c, GuideArea):
+                return c
+            if isinstance(c, PlotGrid):
+                inner = c.find_guide_area()
+                if inner is not None:
+                    return inner
+        return None
 
     def show(self, *, width=None, height=None, units="in", figsize=None) -> None:
         import matplotlib.pyplot as plt
@@ -369,18 +470,30 @@ class PlotLayout:
     nrow: int | None = None
     ncol: int | None = None
     byrow: bool | None = None
+    # ``"collect"`` deduplicates legends across leaves and renders one merged
+    # legend (in the :func:`guide_area` slot if present, otherwise placed by
+    # ``theme(legend.position)`` at the grid level). ``"keep"`` (or ``None``)
+    # leaves per-plot legends as-is.
+    guides: str | None = None
 
 
 def plot_layout(*, widths=None, heights=None, nrow=None, ncol=None,
-                byrow=None) -> PlotLayout:
+                byrow=None, guides=None) -> PlotLayout:
     """Patchwork-style layout config. Combine with a :class:`PlotGrid` via
     ``+``::
 
         (p1 + p2) + plot_layout(widths=[1, 2])
         wrap_plots([p1, p2, p3, p4]) + plot_layout(heights=[2, 1])
+        ((guide_area() / (p1 + p2))
+            + plot_layout(guides="collect", heights=[1, 4]))
     """
+    if guides is not None and guides not in ("collect", "keep"):
+        raise ValueError(
+            f"plot_layout: guides must be 'collect', 'keep', or None — got {guides!r}"
+        )
     return PlotLayout(
         widths=widths, heights=heights, nrow=nrow, ncol=ncol, byrow=byrow,
+        guides=guides,
     )
 
 

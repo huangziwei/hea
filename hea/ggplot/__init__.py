@@ -24,8 +24,8 @@ from .core import ggplot
 from .facets import facet_grid, facet_wrap
 from .guides import guide_axis, guide_legend, guides
 from .patchwork import (
-    PlotAnnotation, PlotGrid, PlotLayout,
-    plot_annotation, plot_layout, wrap_plots,
+    GuideArea, PlotAnnotation, PlotGrid, PlotLayout,
+    guide_area, plot_annotation, plot_layout, wrap_plots,
 )
 from .labels import ggtitle, labs, xlab, ylab
 from .theme import (
@@ -324,6 +324,8 @@ __all__ = [
     "PlotGrid",
     "PlotLayout",
     "PlotAnnotation",
+    "GuideArea",
+    "guide_area",
     "wrap_plots",
     "plot_layout",
     "plot_annotation",
