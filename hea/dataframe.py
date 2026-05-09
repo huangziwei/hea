@@ -716,6 +716,10 @@ class DataFrame(pl.DataFrame):
                 return [c]
             if cs.is_selector(c):
                 return list(cs.expand_selector(self, c))
+            if isinstance(c, pl.Series):
+                return [c.name]
+            if isinstance(c, pl.DataFrame):
+                return list(c.columns)
             if isinstance(c, pl.Expr):
                 # ``pl.exclude(...)`` and similar non-selector exprs:
                 # resolve by asking polars which columns they cover.
@@ -1092,6 +1096,17 @@ class Series(pl.Series):
     time. New polars releases that add expr-dispatched methods are picked
     up automatically by ``_install_series_subclass_overrides``.
     """
+
+    def __invert__(self):
+        """``~s`` → ``pl.exclude(s.name)``, mirroring ``~df``'s
+        column-exclusion semantics for the single-column case (so
+        ``df.select(~df["x"])`` matches ``df.select(~df["x":"y"])``).
+        Boolean Series fall through to polars's logical-NOT so filter
+        masks like ``df.filter(~mask)`` keep working.
+        """
+        if self.dtype == pl.Boolean:
+            return super().__invert__()
+        return pl.exclude(self.name)
 
     def to_frame(self, name: str | None = None) -> "DataFrame":
         out = super().to_frame(name) if name is not None else super().to_frame()
