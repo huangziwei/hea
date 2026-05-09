@@ -224,6 +224,15 @@ class DataFrame(pl.DataFrame):
         """Re-wrap a polars result as the same subclass as ``self``."""
         return type(self)._from_pydf(df._df)
 
+    def __invert__(self) -> pl.Expr:
+        """``~df`` → ``pl.exclude(df.columns)``. Lets the slice form
+        ``flights.select(~flights["year":"day"])`` mirror dplyr's
+        ``select(!year:day)``: ``~`` is Python's stand-in for ``!`` (which
+        can't be overloaded as a prefix operator), and polars already
+        uses ``~`` for selector negation.
+        """
+        return pl.exclude(self.columns)
+
     # ---- row verbs ----------------------------------------------------
 
     def filter(self, *predicates: Any, **constraints: Any) -> "DataFrame":
@@ -503,6 +512,10 @@ class DataFrame(pl.DataFrame):
                 moving.append(c)
             elif isinstance(c, (list, tuple)):
                 moving.extend(c)
+            elif isinstance(c, pl.DataFrame):
+                moving.extend(c.columns)
+            elif isinstance(c, pl.Series):
+                moving.append(c.name)
             elif cs.is_selector(c):
                 moving.extend(cs.expand_selector(self, c))
             else:

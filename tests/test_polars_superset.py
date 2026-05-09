@@ -133,11 +133,23 @@ def test_merge_sorted_polymorphic():
 @pytest.mark.parametrize("name", [
     "col", "lit", "when", "sum", "mean", "count", "len", "min", "max",
     "first", "last", "nth", "concat_str", "concat_list", "all", "any",
-    "fold", "format", "select", "exclude", "struct", "duration",
+    "fold", "format", "select", "struct", "duration",
     "date_range", "datetime_range",
 ])
 def test_expr_builder_is_polars_function(name):
+    # ``exclude`` is intentionally shadowed (see _HEA_OVERRIDES); covered
+    # separately below.
     assert getattr(hea, name) is getattr(pl, name)
+
+
+def test_hea_exclude_extends_polars_exclude():
+    """``hea.exclude`` accepts everything ``pl.exclude`` does plus
+    DataFrame/Series/list. Names-and-strings path must produce the same
+    Expr as ``pl.exclude`` for a representative input."""
+    df = hea.DataFrame({"a": [1], "b": [2], "c": [3]})
+    assert df.select(hea.exclude("a")).columns == df.select(pl.exclude("a")).columns
+    # Slice-of-DataFrame form (the new affordance).
+    assert df.select(hea.exclude(df["a":"b"])).columns == ["c"]
 
 
 @pytest.mark.parametrize("name", [
