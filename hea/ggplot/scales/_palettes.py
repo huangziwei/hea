@@ -120,6 +120,30 @@ def hue_pal(*, h: tuple = (15, 375), c: float = 100, l: float = 65,
     return palette
 
 
+_OKABE_ITO = (
+    "#000000", "#E69F00", "#56B4E9", "#009E73",
+    "#F0E442", "#0072B2", "#D55E00", "#CC79A7",
+)
+
+
+def colorblind_pal():
+    """ggthemes' ``colorblind_pal`` — the Okabe-Ito 8-colour qualitative
+    palette, designed to be distinguishable under the most common forms
+    of colour-vision deficiency. 8 levels max; raises beyond that.
+    """
+    max_n = len(_OKABE_ITO)
+
+    def palette(n: int) -> list[str]:
+        if n > max_n:
+            raise ValueError(
+                f"Colourblind palette has only {max_n} colours; "
+                f"{n} levels were requested."
+            )
+        return list(_OKABE_ITO[:n])
+
+    return palette
+
+
 def manual_pal(values):
     """Palette from an explicit list (or dict mapping levels → colours)."""
 

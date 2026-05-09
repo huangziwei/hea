@@ -13,7 +13,13 @@ from typing import Any
 
 import polars as pl
 
-from ._palettes import brewer_pal_discrete, hue_pal, manual_pal, viridis_pal_discrete
+from ._palettes import (
+    brewer_pal_discrete,
+    colorblind_pal,
+    hue_pal,
+    manual_pal,
+    viridis_pal_discrete,
+)
 from .scale import Scale
 
 
@@ -215,3 +221,29 @@ def scale_fill_hue(*, h=(15, 375), c=100, l=65, h_start=0, direction=1,
 
 
 scale_colour_hue = scale_color_hue
+
+
+# ---------------------------------------------------------------------------
+# Colourblind-safe palette (ggthemes' Okabe-Ito).
+# ---------------------------------------------------------------------------
+
+def scale_color_colorblind(*, name=None, breaks="default", labels="default",
+                          limits=None):
+    """ggthemes' ``scale_colour_colorblind`` — Okabe-Ito 8-colour qualitative
+    palette designed to remain distinguishable under common colour-vision
+    deficiencies. 8 levels max."""
+    return ScaleDiscreteColor(
+        aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
+        limits=limits, palette=colorblind_pal(),
+    )
+
+
+def scale_fill_colorblind(*, name=None, breaks="default", labels="default",
+                         limits=None):
+    return ScaleDiscreteColor(
+        aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
+        limits=limits, palette=colorblind_pal(),
+    )
+
+
+scale_colour_colorblind = scale_color_colorblind

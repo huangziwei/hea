@@ -30,6 +30,19 @@ class BuildOutput:
     # Original aes mapping value (typically a column name) per aesthetic,
     # used by the guide system for legend titles and auto-merge keys.
     aes_source: dict = None
+    # Effective per-layer mapping after ``_promote_string_aes_params``.
+    # Same length as ``data``; ``layer_mappings[i]`` is what
+    # ``plot.layers[i]`` actually maps after promoting column-shaped
+    # ``aes_params`` (``geom_point(color="species")``) into the mapping.
+    # Used by the guide system: ``_find_layer_for_aes`` would otherwise
+    # only see ``layer.mapping`` and miss kwargs-style mappings.
+    layer_mappings: list[dict] | None = None
+    # Effective per-layer ``aes_params`` after promotion — column-shaped
+    # entries (``geom_point(color="species")``) are stripped because
+    # they're actual mappings, not constants. Without this the legend
+    # would treat ``"species"`` as a literal colour and matplotlib would
+    # choke. Same length as ``data``.
+    layer_aes_params: list[dict] | None = None
     # Per-panel positional scales — populated by ``_train_panel_scales``
     # when ``scales != "fixed"``. For fixed mode every panel maps to the
     # same global scale instance (kept here for uniform render-time lookup).
@@ -386,8 +399,13 @@ def build(plot) -> BuildOutput:
         df = _apply_default_aes(df, layer.geom)
         layers_data[i] = df
 
+    layer_mappings = [dict(m) if m is not None else {}
+                      for _, _, m, _ in resolved]
+    layer_aes_params_out = [dict(p) if p is not None else {}
+                            for _, _, _, p in resolved]
     return BuildOutput(
         data=layers_data, scales=scales, layout=layout, aes_source=aes_source,
+        layer_mappings=layer_mappings, layer_aes_params=layer_aes_params_out,
         panel_scales=panel_scales,
     )
 

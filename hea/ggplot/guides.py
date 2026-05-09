@@ -229,7 +229,11 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
                  or aes_source.get(aes_name)
                  or aes_name)
 
-        contributor = _find_layer_for_aes(plot, aes_name, visible_only=True)
+        contributor_idx, contributor = _find_layer_for_aes(
+            plot, aes_name,
+            layer_mappings=build_output.layer_mappings,
+            visible_only=True,
+        )
         if contributor is None:
             # Every contributing layer has ``show_legend=False`` — ggplot2's
             # rule: the scale is still trained, but no guide is produced.
@@ -237,13 +241,24 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
 
         if key not in groups:
             geom = getattr(contributor, "geom", None)
+            # Effective ``aes_params`` (post-promotion) drops column-shaped
+            # entries that were promoted into the mapping; those aren't
+            # constants for the key glyph. Falls back to the raw layer
+            # field for legacy callers without a build_output.
+            eff_params_list = getattr(build_output, "layer_aes_params", None)
+            if (eff_params_list is not None
+                    and contributor_idx is not None
+                    and contributor_idx < len(eff_params_list)):
+                layer_params = dict(eff_params_list[contributor_idx] or {})
+            else:
+                layer_params = dict(getattr(contributor, "aes_params", {}))
             groups[key] = LegendGroup(
                 title=title,
                 levels=levels,
                 labels=[str(level) for level in levels],
                 aes_values={},
                 key_glyph=getattr(geom, "key_glyph", "point") if geom else "point",
-                layer_aes_params=dict(getattr(contributor, "aes_params", {})),
+                layer_aes_params=layer_params,
                 layer_default_aes=(dict(getattr(geom, "default_aes", {}))
                                     if geom is not None else {}),
             )
@@ -253,27 +268,38 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
     return list(groups.values())
 
 
-def _find_layer_for_aes(plot, aes_name, *, visible_only: bool = False):
-    """Return the first layer whose mapping uses ``aes_name``.
+def _find_layer_for_aes(plot, aes_name, *, layer_mappings=None,
+                         visible_only: bool = False):
+    """Return ``(idx, layer)`` for the first layer whose mapping uses
+    ``aes_name`` — or ``(None, None)`` if none does.
 
     Looks at the layer's own mapping first, then falls back to the plot-
     level mapping (when ``inherit_aes=True``) — matches ggplot2's lookup
     order. The contributing layer drives the legend key glyph + any
     layer-level aes constants the user supplied via geom kwargs.
 
+    ``layer_mappings`` (preferred): per-layer effective mapping from
+    ``BuildOutput.layer_mappings`` — already includes column-shaped
+    ``aes_params`` promoted by ``_promote_string_aes_params``. Without
+    this, ``geom_point(color="species")`` would have an empty
+    ``layer.mapping`` and the legend would be silently dropped.
+
     ``visible_only=True`` skips layers with ``show_legend=False`` —
     ggplot2's rule for whether a scale should produce a guide.
     """
     plot_mapping = getattr(plot, "mapping", None) or {}
-    for layer in plot.layers:
+    for i, layer in enumerate(plot.layers):
         if visible_only and getattr(layer, "show_legend", True) is False:
             continue
-        layer_mapping = getattr(layer, "mapping", None) or {}
+        if layer_mappings is not None and i < len(layer_mappings):
+            layer_mapping = layer_mappings[i] or {}
+        else:
+            layer_mapping = getattr(layer, "mapping", None) or {}
         if aes_name in layer_mapping:
-            return layer
+            return i, layer
         if getattr(layer, "inherit_aes", True) and aes_name in plot_mapping:
-            return layer
-    return None
+            return i, layer
+    return None, None
 
 
 def _scale_mapped_values(scale, levels):
