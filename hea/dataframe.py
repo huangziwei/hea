@@ -242,14 +242,25 @@ class DataFrame(pl.DataFrame):
     def arrange(self, *cols: Any) -> "DataFrame":
         """Sort rows. Wrap a column in ``desc()`` for descending order.
 
-        Nulls are sorted to the **end** (dplyr default), regardless of
-        ascending/descending. This deviates from polars' ``sort``, which
-        puts nulls at the front. Use ``df.sort(...)`` directly for the
-        polars default.
+        Nulls **and NaN** sort to the end regardless of direction (dplyr
+        default). Polars' ``sort`` would put nulls at the front and rank
+        NaN as the largest value (so ``arrange(desc(x))`` would surface
+        NaN at the top). Use ``df.sort(...)`` for the polars default.
         """
         names, desc_flags = _split_arrange(cols)
+        # NaN-as-largest is what makes polars diverge from dplyr; coerce
+        # NaN → null per-column so ``nulls_last=True`` covers both.
+        # Done as a sort-key expression so the underlying values aren't
+        # actually rewritten in the output frame.
+        keys: list[Any] = []
+        for n in names:
+            dtype = self.schema.get(n)
+            if dtype in (pl.Float32, pl.Float64):
+                keys.append(pl.col(n).fill_nan(None))
+            else:
+                keys.append(n)
         return self._wrap(
-            super().sort(names, descending=desc_flags, nulls_last=True)
+            super().sort(keys, descending=desc_flags, nulls_last=True)
         )
 
     def distinct(self, *cols: str, keep_all: bool = False) -> "DataFrame":
