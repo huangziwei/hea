@@ -33,7 +33,9 @@ from __future__ import annotations
 
 import datetime as _dt
 import math
+import re
 import shutil
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -116,6 +118,63 @@ def exclude(*columns: Any) -> pl.Expr:
         else:
             flat.append(c)
     return pl.exclude(flat)
+
+
+_CLEAN_NAMES_REPLACE = (
+    ("'", ""),
+    ('"', ""),
+    ("%", "_percent_"),
+    ("#", "_number_"),
+)
+_CLEAN_NAMES_CAMEL_HEAD = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_CLEAN_NAMES_CAMEL_TAIL = re.compile(r"([a-z])([A-Z])")
+_CLEAN_NAMES_NON_ALNUM = re.compile(r"[^a-zA-Z0-9]+")
+
+
+def _clean_one_name(name: str) -> str:
+    """Snake-case a single column name. Mirrors ``janitor::make_clean_names``
+    with default options (case='snake', transliterations='Latin-ASCII').
+    Disambiguation of duplicates is handled by the caller.
+    """
+    if not isinstance(name, str):
+        name = str(name)
+    for find, repl in _CLEAN_NAMES_REPLACE:
+        name = name.replace(find, repl)
+    # Latin-ASCII transliteration: decompose to base + combining marks,
+    # then drop the combining marks (é → e, ñ → n, ü → u, …).
+    name = unicodedata.normalize("NFKD", name)
+    name = "".join(c for c in name if not unicodedata.combining(c))
+    # camelCase boundaries: ABCDef → ABC_Def, then aB → a_B. Digit↔upper
+    # is intentionally not split (janitor: x1Test → x1test, not x1_test).
+    name = _CLEAN_NAMES_CAMEL_HEAD.sub(r"\1_\2", name)
+    name = _CLEAN_NAMES_CAMEL_TAIL.sub(r"\1_\2", name)
+    name = _CLEAN_NAMES_NON_ALNUM.sub("_", name)
+    name = name.strip("_").lower()
+    if not name:
+        name = "x"
+    if name[0].isdigit():
+        name = "x" + name
+    return name
+
+
+def _disambiguate_clean_names(names: list[str]) -> list[str]:
+    """Resolve collisions in a cleaned-name list by appending ``_2``,
+    ``_3``, … (janitor's behavior — first dup is ``_2``, not ``_1``).
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for n in names:
+        if n not in seen:
+            out.append(n)
+            seen.add(n)
+            continue
+        k = 2
+        while f"{n}_{k}" in seen:
+            k += 1
+        cand = f"{n}_{k}"
+        out.append(cand)
+        seen.add(cand)
+    return out
 
 
 def _split_arrange(cols: tuple) -> tuple[list[str], list[bool]]:
@@ -494,6 +553,24 @@ class DataFrame(pl.DataFrame):
             return super().rename(mapping)
         # kwargs: new=old → {old: new}
         return super().rename({old: new for new, old in kwargs.items()})
+
+    def clean_names(self) -> "DataFrame":
+        """Snake_case all column names — janitor's ``clean_names()``.
+
+        Lowercases, splits camelCase (``mealPlan`` → ``meal_plan``,
+        ``ABCDef`` → ``abc_def``), strips Latin diacritics
+        (``café`` → ``cafe``), replaces ``%`` with ``percent``, ``#``
+        with ``number``, drops apostrophes/quotes, collapses other
+        non-alphanumerics into a single ``_``, prepends ``x`` to
+        names that would start with a digit (``100m`` → ``x100m``)
+        or be empty, and resolves collisions with ``_2``, ``_3``, …
+        suffixes (so the first duplicate is ``_2``, not ``_1`` —
+        matches janitor).
+        """
+        cleaned = _disambiguate_clean_names(
+            [_clean_one_name(c) for c in self.columns]
+        )
+        return self._wrap(super().rename(dict(zip(self.columns, cleaned))))
 
     def relocate(
         self,
