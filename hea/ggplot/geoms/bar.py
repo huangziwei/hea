@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from ..aes import split_layer_kwargs
 from .geom import Geom
 
 
@@ -151,9 +152,7 @@ def geom_bar(mapping=None, data=None, *, stat="count", position="stack", **kwarg
 
     stat_obj = resolve_stat(stat) if isinstance(stat, str) else stat
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
 
     return Layer(
         geom=GeomBar(),
@@ -171,9 +170,7 @@ def geom_col(mapping=None, data=None, *, position="identity", **kwargs):
     from ..positions import resolve_position
     from ..stats.identity import StatIdentity
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
     return Layer(
         geom=GeomBar(),
         stat=StatIdentity(),

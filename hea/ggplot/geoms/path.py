@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from ..aes import split_layer_kwargs
 from .geom import Geom
 
 
@@ -129,9 +130,7 @@ def _layer(geom, mapping, data, position, stat, kwargs):
 
     stat_obj = resolve_stat(stat) if isinstance(stat, str) else stat
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "size", "linetype", "alpha"}}
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
     return Layer(
         geom=geom,
         stat=stat_obj,

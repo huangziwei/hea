@@ -21,6 +21,7 @@ import numpy as np
 from matplotlib.collections import PatchCollection
 from matplotlib.patches import Rectangle
 
+from ..aes import split_layer_kwargs
 from .geom import Geom
 
 
@@ -270,11 +271,7 @@ def _make_layer(geom, mapping, data, stat, position, kwargs):
     from ..positions import resolve_position
     from ..stats import resolve_stat
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "fill", "size", "linetype",
-                           "alpha", "width", "height", "xmin", "xmax",
-                           "ymin", "ymax"}}
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
     return Layer(
         geom=geom,
         stat=resolve_stat(stat) if isinstance(stat, str) else stat,

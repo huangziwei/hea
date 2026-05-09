@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import polars as pl
 
+from ..aes import split_layer_kwargs
 from .geom import Geom
 
 
@@ -65,9 +66,7 @@ def geom_ribbon(mapping=None, data=None, *, stat="identity", position="identity"
 
     stat_obj = resolve_stat(stat) if isinstance(stat, str) else stat
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
     return Layer(
         geom=GeomRibbon(),
         stat=stat_obj,
@@ -111,9 +110,7 @@ def geom_area(mapping=None, data=None, *, stat="identity", position="stack", **k
 
     stat_obj = resolve_stat(stat) if isinstance(stat, str) else stat
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
     return Layer(
         geom=GeomArea(),
         stat=stat_obj,

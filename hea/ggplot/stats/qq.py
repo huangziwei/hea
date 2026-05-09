@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import polars as pl
 
+from ..aes import split_layer_kwargs
 from .stat import Stat
 
 
@@ -128,8 +129,7 @@ def stat_qq(mapping=None, data=None, *, geom="point", distribution="norm",
     else:
         geom_obj = geom
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "fill", "size", "shape", "alpha"}}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
 
     return Layer(
         geom=geom_obj,
@@ -138,6 +138,7 @@ def stat_qq(mapping=None, data=None, *, geom="point", distribution="norm",
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )
 
 
@@ -158,8 +159,7 @@ def stat_qq_line(mapping=None, data=None, *, geom="path", distribution="norm",
     else:
         geom_obj = geom
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "size", "linetype", "alpha"}}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
 
     return Layer(
         geom=geom_obj,
@@ -169,6 +169,7 @@ def stat_qq_line(mapping=None, data=None, *, geom="path", distribution="norm",
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )
 
 

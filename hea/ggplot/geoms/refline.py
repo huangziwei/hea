@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 import polars as pl
 
+from ..aes import split_layer_kwargs
 from .geom import Geom
 
 
@@ -25,15 +26,9 @@ def _ensure_iterable(x, name: str):
     return [x]
 
 
-# Aesthetics that all three line geoms accept as constants on the layer.
-_LINE_AES_PARAM_KEYS = frozenset({"colour", "color", "size", "linetype", "alpha"})
-
-
 def _split_kwargs(kwargs):
     """Partition geom kwargs into aes-params (constants) vs geom-params."""
-    aes_params = {k: v for k, v in kwargs.items() if k in _LINE_AES_PARAM_KEYS}
-    geom_params = {k: v for k, v in kwargs.items() if k not in _LINE_AES_PARAM_KEYS}
-    return aes_params, geom_params
+    return split_layer_kwargs(kwargs)
 
 
 @dataclass

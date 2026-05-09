@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import numpy as np
 import polars as pl
 
+from ..aes import split_layer_kwargs
 from .stat import Stat
 
 
@@ -63,8 +64,7 @@ def stat_ecdf(mapping=None, data=None, *, geom="step", n=None,
     else:
         geom_obj = geom
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "size", "linetype", "alpha"}}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
 
     return Layer(
         geom=geom_obj,
@@ -73,4 +73,5 @@ def stat_ecdf(mapping=None, data=None, *, geom="step", n=None,
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )

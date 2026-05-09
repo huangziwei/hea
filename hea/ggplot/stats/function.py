@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
+from ..aes import split_layer_kwargs
 from .identity import StatIdentity
 
 
@@ -52,8 +53,7 @@ def stat_function(*, fun, n=101, xlim=None, args=(), geom="line",
     else:
         raise ValueError(f"stat_function: unknown geom {geom!r}; expected 'line' or 'point'")
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "size", "linetype", "alpha"}}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
 
     layer = Layer(
         geom=g,
@@ -62,6 +62,7 @@ def stat_function(*, fun, n=101, xlim=None, args=(), geom="line",
         mapping=mapping if mapping is not None else Aes(x="x", y="y"),
         data=_function_data_callable(fun, n, xlim, args),
         aes_params=aes_params,
+        geom_params=geom_params,
         # The synthesised ``{x, y}`` frame already carries the right columns;
         # don't merge in the plot's mapping, which might reference columns
         # that aren't in this layer's data.

@@ -18,6 +18,7 @@ import numpy as np
 from matplotlib.collections import LineCollection
 from matplotlib.patches import FancyArrowPatch
 
+from ..aes import split_layer_kwargs
 from .geom import Geom
 
 
@@ -162,18 +163,12 @@ class GeomCurve(Geom):
 # Factories
 # ---------------------------------------------------------------------------
 
-_AES_PARAM_KEYS = frozenset({
-    "colour", "color", "size", "linetype", "alpha", "curvature",
-})
-
-
 def _make_layer(geom, mapping, data, stat, position, kwargs):
     from ..layer import Layer
     from ..positions import resolve_position
     from ..stats import resolve_stat
 
-    aes_params = {k: v for k, v in kwargs.items() if k in _AES_PARAM_KEYS}
-    geom_params = {k: v for k, v in kwargs.items() if k not in _AES_PARAM_KEYS}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
     return Layer(
         geom=geom,
         stat=resolve_stat(stat) if isinstance(stat, str) else stat,

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from ..aes import split_layer_kwargs
 from .geom import Geom
 
 
@@ -113,9 +114,7 @@ def geom_contour(mapping=None, data=None, *, stat="identity",
     from ..positions import resolve_position
     from ..stats import resolve_stat
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "size", "linetype", "alpha"}}
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
     aes_params["bins"] = bins
     return Layer(
         geom=GeomContour(),
@@ -137,9 +136,7 @@ def geom_contour_filled(mapping=None, data=None, *, stat="identity",
     from ..positions import resolve_position
     from ..stats import resolve_stat
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"fill", "alpha"}}
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
     aes_params["bins"] = bins
     return Layer(
         geom=GeomContourFilled(),

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 import polars as pl
 
+from ..aes import split_layer_kwargs
 from .stat import Stat
 
 
@@ -52,8 +53,7 @@ def stat_sum(mapping=None, data=None, *, geom="point",
     else:
         geom_obj = geom
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "fill", "size", "shape", "alpha"}}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
 
     return Layer(
         geom=geom_obj,
@@ -62,6 +62,7 @@ def stat_sum(mapping=None, data=None, *, geom="point",
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )
 
 

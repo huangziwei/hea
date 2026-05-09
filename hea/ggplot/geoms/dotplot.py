@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import polars as pl
 
+from ..aes import split_layer_kwargs
 from .geom import Geom
 
 
@@ -99,9 +100,7 @@ def geom_dotplot(mapping=None, data=None, *, stat="identity", position="identity
     from ..positions import resolve_position
     from ..stats import resolve_stat
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "fill", "alpha"}}
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
     if binwidth is not None:
         aes_params["binwidth"] = binwidth
     return Layer(

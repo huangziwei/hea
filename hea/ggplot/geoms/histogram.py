@@ -6,6 +6,7 @@ only difference is the geom (line through bin midpoints instead of bars).
 
 from __future__ import annotations
 
+from ..aes import split_layer_kwargs
 from .bar import GeomBar
 from .path import GeomPath
 
@@ -26,9 +27,7 @@ def geom_histogram(mapping=None, data=None, *, stat="bin", bins=None, binwidth=N
     else:
         stat_obj = stat
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
 
     return Layer(
         geom=GeomBar(),
@@ -78,12 +77,10 @@ def geom_freqpoly(mapping=None, data=None, *, stat="bin", bins=None, binwidth=No
     else:
         stat_obj = stat
 
-    # ``GeomPath`` has no ``fill`` — drop it from aes_params (matches
-    # ggplot2: ``geom_freqpoly(fill=...)`` warns "Ignoring unknown
-    # parameters: fill", we just skip silently).
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "size", "linetype", "alpha"}}
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    # ``GeomPath`` has no ``fill`` aes; if a user passes one it lands in
+    # ``aes_params`` as a SET constant and the path geom ignores it
+    # (ggplot2 emits "Ignoring unknown parameters: fill"; we skip silently).
+    aes_params, geom_params = split_layer_kwargs(kwargs)
 
     return Layer(
         geom=GeomPath(),

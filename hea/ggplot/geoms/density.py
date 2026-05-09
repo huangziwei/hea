@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from ..aes import split_layer_kwargs
 from .geom import Geom
 
 
@@ -81,9 +82,7 @@ def geom_density(mapping=None, data=None, *, stat="density", bw="nrd0", n=512,
     else:
         stat_obj = stat
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
     return Layer(
         geom=GeomDensity(),
         stat=stat_obj,

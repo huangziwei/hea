@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..aes import split_layer_kwargs
 from .geom import Geom
 
 
@@ -86,10 +87,7 @@ def geom_text(mapping=None, data=None, *, stat="identity", position="identity",
     from ..positions import resolve_position
     from ..stats import resolve_stat
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "size", "angle", "hjust", "vjust",
-                           "alpha", "family", "fontface", "label"}}
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
 
     return Layer(
         geom=GeomText(),
@@ -168,10 +166,7 @@ def geom_label(mapping=None, data=None, *, stat="identity", position="identity",
     from ..positions import resolve_position
     from ..stats import resolve_stat
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "fill", "size", "angle", "hjust",
-                           "vjust", "alpha", "family", "fontface", "label"}}
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
 
     return Layer(
         geom=GeomLabel(label_padding=label_padding, label_r=label_r,

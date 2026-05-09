@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..aes import split_layer_kwargs
 from .geom import Geom
 from .path import GeomPath
 from .ribbon import GeomRibbon
@@ -58,12 +59,7 @@ def geom_smooth(mapping=None, data=None, *, stat="smooth", method="loess", formu
     else:
         stat_obj = stat
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
-    # Anything not in the narrow set goes to geom_params; Layer.__post_init__
-    # then promotes aes-named entries (e.g. ``group``, ``weight``) to
-    # aes_params, which build-time promotion routes to the mapping.
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
 
     return Layer(
         geom=GeomSmooth(se=se),

@@ -53,6 +53,10 @@ _ALL_AES_NAMES = frozenset({
     "lower", "middle", "upper", "ymin_final", "ymax_final",
     "outlier_colour", "outlier_color", "outlier_fill",
     "outlier_shape", "outlier_size", "outlier_stroke", "outlier_alpha",
+    # Per-row geometry (rect/tile/raster, errorbar, stat_summary)
+    "width", "height",
+    # geom_curve
+    "curvature",
 })
 
 

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import polars as pl
 
+from ..aes import split_layer_kwargs
 from .stat import Stat
 
 
@@ -214,9 +215,7 @@ def stat_summary(mapping=None, data=None, *, geom="pointrange",
             f"stat_summary: geom must be a Geom or string, got {type(geom).__name__}"
         )
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "fill", "size", "linetype",
-                           "alpha", "shape", "width", "height"}}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
 
     return Layer(
         geom=geom_obj,
@@ -228,4 +227,5 @@ def stat_summary(mapping=None, data=None, *, geom="pointrange",
         mapping=mapping,
         data=data,
         aes_params=aes_params,
+        geom_params=geom_params,
     )

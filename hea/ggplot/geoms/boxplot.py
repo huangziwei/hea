@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..aes import split_layer_kwargs
 from .geom import Geom
 
 
@@ -147,9 +148,7 @@ def geom_boxplot(mapping=None, data=None, *, stat="boxplot", position="dodge2",
     else:
         stat_obj = stat
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
 
     return Layer(
         geom=GeomBoxplot(outlier_size=outlier_size,

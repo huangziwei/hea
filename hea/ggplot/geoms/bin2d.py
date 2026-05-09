@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from matplotlib.collections import PolyCollection
 
+from ..aes import split_layer_kwargs
 from .geom import Geom
 
 
@@ -148,9 +149,7 @@ def geom_hex(mapping=None, data=None, *, stat="binhex", position="identity",
     else:
         stat_obj = stat
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
 
     return Layer(
         geom=GeomHex(),
@@ -186,9 +185,7 @@ def geom_bin2d(mapping=None, data=None, *, stat="bin_2d", position="identity",
     else:
         stat_obj = stat
 
-    aes_params = {k: v for k, v in kwargs.items()
-                  if k in {"colour", "color", "fill", "size", "linetype", "alpha"}}
-    geom_params = {k: v for k, v in kwargs.items() if k not in aes_params}
+    aes_params, geom_params = split_layer_kwargs(kwargs)
 
     return Layer(
         geom=GeomTile(),
