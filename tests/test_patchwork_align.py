@@ -176,6 +176,59 @@ def test_nested_compose_does_not_crash_with_annotation():
         plt.close(fig)
 
 
+def test_inter_plot_gap_consistent_across_ytick_widths():
+    """The visible whitespace between sibling plots in ``p1 | p2`` must
+    not change just because one plot's y-tick labels happen to be wider
+    or narrower than another's.
+
+    Regression for the case where the left-margin budget used a fixed
+    ``"00000"`` reserve. A plot with narrow ticks (e.g. ``"0.06"``)
+    over-reserved against ``"00000"``, leaving the slack as visible
+    whitespace at the panel edge — making ``p1 | p2_density`` look more
+    spaced than ``p1 | p2_count`` even though both should align flush.
+    """
+    import numpy as np
+    rng = np.random.default_rng(0)
+    df_wide = pl.DataFrame({"x": rng.uniform(0, 10, 200),
+                            "y": rng.uniform(0, 15000, 200)})
+    df_narrow = pl.DataFrame({"x": rng.uniform(0, 10, 200),
+                              "y": rng.uniform(0, 0.06, 200)})
+
+    def gap_in(combo):
+        fig = combo.draw()
+        try:
+            fig.canvas.draw()
+            r = fig.canvas.get_renderer()
+            xs = []
+            for ax in fig.axes:
+                bb = ax.get_tightbbox(r)
+                if bb is None:
+                    continue
+                fb = bb.transformed(fig.transFigure.inverted())
+                xs.append((fb.xmin, fb.xmax))
+            half = len(xs) // 2
+            p1_right = max(x for _, x in xs[:half])
+            p2_left = min(x for x, _ in xs[half:])
+            return (p2_left - p1_right) * fig.get_figwidth()
+        finally:
+            plt.close(fig)
+
+    g_wide = gap_in(
+        ggplot(df_wide, aes("x", "y")) + geom_point()
+        | ggplot(df_wide, aes("x", "y")) + geom_point()
+    )
+    g_narrow = gap_in(
+        ggplot(df_narrow, aes("x", "y")) + geom_point()
+        | ggplot(df_narrow, aes("x", "y")) + geom_point()
+    )
+    # 0.10" tolerance — within rendering noise once the budget tracks
+    # the actual tick text. Pre-fix this difference was ~0.12".
+    assert abs(g_wide - g_narrow) < 0.10, (
+        f"inter-plot gap drifts with y-tick width: wide={g_wide:.3f}\", "
+        f"narrow={g_narrow:.3f}\""
+    )
+
+
 def test_colorbar_tick_labels_do_not_overlap_next_plot():
     """Side-by-side compose: a wide-tick colorbar (e.g. ``"10000"`` for a
     count scale) on the LEFT plot must clear the RIGHT plot's ylabel.

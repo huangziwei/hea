@@ -175,7 +175,15 @@ def measure_block(plot, build_output) -> PlotBlock:
         fontsize=M.AXIS_TITLE_SIZE_PT,
         rotation=90.0,
     )[0]
-    margin_left = ylab_w + _DEFAULT_YTICK_RESERVE_IN + _PANEL_MARGIN_PAD_IN
+    # Size the ytick reserve from the actual tick labels the trained
+    # y-scale will draw, not a fixed ``"00000"`` sample. Without this,
+    # narrow ticks (``"0.06"`` on a density scale) leave the budgeted
+    # ``"00000"`` slack as visible whitespace at the figure left edge —
+    # and in patchwork composes the inter-plot gap looks "inconsistent"
+    # because plots with wider ticks (``"15000"``) collapse it to zero
+    # while plots with narrower ticks pad it out.
+    ytick_reserve = _predict_axis_tick_reserve_in(build_output, "y")
+    margin_left = ylab_w + ytick_reserve + _PANEL_MARGIN_PAD_IN
     if ylab_w > 0:
         margin_left += _AXIS_LABELPAD_IN
 
@@ -252,6 +260,94 @@ def _measure_legend_size(plot, build_output) -> tuple[float, float]:
         widths.append(w)
         height += h
     return (max(widths), height)
+
+
+def _predict_axis_tick_reserve_in(build_output, axis: str) -> float:
+    """Inch reserve for tick LABEL text on ``axis`` plus tick-mark pad.
+
+    Returns the same number as the legacy ``"00000"``-based default
+    when the scale isn't trained or isn't predictable from here (e.g.
+    log scales that defer to matplotlib's own locator). Otherwise reads
+    the trained scale's breaks/labels and sizes for the widest one,
+    matching what ``apply_to_axis`` will actually draw.
+
+    For ``axis = "y"`` we measure label WIDTH; for ``axis = "x"`` we
+    return the legacy height-based reserve unchanged because horizontal
+    tick text height doesn't depend on label content (rotation isn't
+    wired up yet).
+    """
+    if axis == "x":
+        return _DEFAULT_XTICK_RESERVE_IN
+
+    labels = _predict_axis_tick_labels(build_output, axis)
+    if not labels:
+        return _DEFAULT_YTICK_RESERVE_IN
+    return (
+        M.max_label_width_in(labels, fontsize=M.AXIS_TEXT_SIZE_PT)
+        + _TICK_MARK_PAD_IN
+    )
+
+
+def _predict_axis_tick_labels(build_output, axis: str) -> list[str] | None:
+    """Predict the tick-label strings the ``axis`` will draw at render time.
+
+    Mirrors :meth:`ScaleContinuous.apply_to_axis` and
+    :meth:`ScaleOrdinal.apply_to_axis` so the measurement matches the
+    rendered ticks exactly. Returns ``None`` when prediction can't be
+    done locally (untrained scale, log/transformed scale that hands
+    off to matplotlib's own locator, custom callable breaks that would
+    require an axes object to evaluate).
+    """
+    from .scales.continuous import ScaleContinuous
+    from .scales.ordinal import ScaleOrdinal
+    from .scales.transformed import IdentityTrans
+
+    scales = getattr(build_output, "scales", None)
+    if scales is None:
+        return None
+    scale = scales.get(axis)
+    if scale is None:
+        return None
+
+    if isinstance(scale, ScaleOrdinal):
+        levels = scale.resolved_limits()
+        if not levels:
+            return None
+        if scale.breaks is None:
+            return []
+        if scale.breaks == "default":
+            tick_labels = list(levels)
+        else:
+            tick_labels = [str(b) for b in scale.breaks if str(b) in levels]
+        if scale.labels != "default" and tick_labels:
+            if callable(scale.labels):
+                tick_labels = [str(s) for s in scale.labels(tick_labels)]
+            else:
+                tick_labels = [str(s) for s in scale.labels]
+        return tick_labels
+
+    if isinstance(scale, ScaleContinuous):
+        if scale.range_ is None:
+            return None
+        # Log/log-like scales delegate to matplotlib's locator at render
+        # time — we don't have an axes here to query, so bail.
+        if scale.breaks == "default" and not isinstance(
+            scale.transform, IdentityTrans
+        ):
+            return None
+        if scale.breaks is None:
+            return []
+        try:
+            break_range = scale._expanded_break_range()
+            breaks = scale._compute_breaks(break_range)
+            breaks = [b for b in breaks if break_range[0] <= b <= break_range[1]]
+            if not breaks:
+                return None
+            return list(scale._compute_labels(breaks))
+        except Exception:
+            return None
+
+    return None
 
 
 def _measure_colorbar_width(plot, build_output) -> float:
@@ -1081,6 +1177,23 @@ def compose_super_block(grid, *, collect_state=None) -> SuperBlock:
             row_super_bottom[r] = max(row_super_bottom[r], blk.outer_margin_bottom_in)
             col_super_left[c] = max(col_super_left[c], blk.outer_margin_left_in)
             col_super_right[c] = max(col_super_right[c], blk.outer_margin_right_in)
+
+    # Add a constant BLOCK_GAP_IN of breathing room at every INNER junction
+    # between adjacent cells, independent of whatever decorations
+    # (yticks/xticks/colorbar) the children put there. Without this the
+    # inter-plot gap depends entirely on the per-child decoration sizes,
+    # so two side-by-side composes can render with very different
+    # whitespace just because one plot's tick text happens to be wider
+    # — the visible gap then collapses to zero. Outer edges (col 0
+    # left, last col right; row 0 top, last row bottom) are NOT padded
+    # — they flow through to ``outer_margin_*`` so the parent grid
+    # composes them cleanly against its own siblings.
+    for c in range(ncol):
+        if c < ncol - 1:
+            col_super_right[c] += BLOCK_GAP_IN
+    for r in range(nrow):
+        if r < nrow - 1:
+            row_super_bottom[r] += BLOCK_GAP_IN
 
     # Panel size per row/col. For nested SuperBlocks, the panel cell must
     # accommodate the nested's full inner extent — otherwise the nested's

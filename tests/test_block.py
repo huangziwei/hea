@@ -72,11 +72,14 @@ def test_measure_caption_grows_bottom_margin():
 
 
 def test_measure_ylab_grows_left_margin():
-    p_no = _simple_plot()
-    p_yes = _simple_plot(y="The y-axis values")
-    a = measure_block(p_no, build(p_no))
-    b = measure_block(p_yes, build(p_yes))
-    # y axis title takes some left margin (rotated 90°).
+    # Rotated 90°, ANY single-line ylabel has the same width (= font
+    # height); only its presence vs absence changes the left margin.
+    # Compare a plot with the default ylabel against one whose ylabel is
+    # blanked out — the labelpad gap is dropped along with the text.
+    p_blank = _simple_plot(y="")
+    p_default = _simple_plot()
+    a = measure_block(p_blank, build(p_blank))
+    b = measure_block(p_default, build(p_default))
     assert b.margin_left_in > a.margin_left_in
 
 
