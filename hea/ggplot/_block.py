@@ -1278,6 +1278,37 @@ def _render_guide_area_cell(blk: "GuideAreaBlock", fig, panel_cell) -> None:
     blk.figure = fig
 
 
+def _redistribute_to_leftover(ratios, panel_idx, panel_weights, total_in):
+    """Make absolute (decoration) entries keep their inch values when the
+    figure dimension is smaller than ``sum(ratios)``.
+
+    Patchwork models panel rows as ``unit("null")`` (relative weights) and
+    decoration rows as ``unit(x, "mm")`` (absolute). matplotlib's
+    ``GridSpec(height_ratios=…)`` normalizes everything proportionally
+    instead, so absolute decorations shrink along with panels.
+    Pre-scaling fixes that: keep decoration inch values, and reapportion
+    the remaining ``total_in`` across the panel entries by their relative
+    weights. After this, ``sum(ratios) == total_in`` so matplotlib's
+    normalization is a no-op and each cell ends up at exactly its
+    intended inch size.
+
+    Mutates ``ratios`` in place. No-op when there are no panels, when the
+    panel weights sum to 0, or when the leftover is non-positive (figure
+    too small even for decorations alone — let matplotlib clip).
+    """
+    if not panel_idx or not panel_weights:
+        return
+    weight_sum = sum(panel_weights)
+    if weight_sum <= 0:
+        return
+    abs_sum = sum(ratios) - sum(panel_weights)
+    leftover = total_in - abs_sum
+    if leftover <= 0:
+        return
+    for idx, weight in zip(panel_idx, panel_weights):
+        ratios[idx] = leftover * weight / weight_sum
+
+
 def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
                         tag_iter=None, outer_top_y: float | None = None,
                         lift_top: bool = False,
@@ -1311,7 +1342,16 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
 
     grid = sb.grid
 
+    # Build height/width ratios as inch values. Track which entries are
+    # "absolute" (decorations: titles, axis labels, annotation rows — must
+    # keep their inch height regardless of figure size) vs which are
+    # "panel" (split leftover space, weighted by their nominal inch
+    # size). Patchwork's null-vs-mm distinction; we synthesize it on top
+    # of matplotlib's homogeneous height_ratios by pre-scaling panel
+    # entries before the gridspec normalizes everything.
     height_ratios: list[float] = []
+    panel_h_idx: list[int] = []        # indices into height_ratios
+    panel_h_weights: list[float] = []  # parallel; nominal inch (= weight)
     if sb.annot_title_h_in > 0:
         height_ratios.append(sb.annot_title_h_in)
     for r in range(sb.nrow):
@@ -1326,15 +1366,17 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
             super_top = 0.0
         if r == sb.nrow - 1 and lift_bottom:
             super_bottom = 0.0
-        height_ratios.extend([
-            super_top,
-            sb.panel_h_in[r],
-            super_bottom,
-        ])
+        height_ratios.append(super_top)
+        panel_h_idx.append(len(height_ratios))
+        panel_h_weights.append(sb.panel_h_in[r])
+        height_ratios.append(sb.panel_h_in[r])
+        height_ratios.append(super_bottom)
     if sb.annot_caption_h_in > 0:
         height_ratios.append(sb.annot_caption_h_in)
 
     width_ratios: list[float] = []
+    panel_w_idx: list[int] = []
+    panel_w_weights: list[float] = []
     for c in range(sb.ncol):
         # Symmetric to the row lift: collapse our outermost super-left /
         # super-right when the parent has reserved that space — keeps
@@ -1347,11 +1389,27 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
             super_left = 0.0
         if c == sb.ncol - 1 and lift_right:
             super_right = 0.0
-        width_ratios.extend([
-            super_left,
-            sb.panel_w_in[c],
-            super_right,
-        ])
+        width_ratios.append(super_left)
+        panel_w_idx.append(len(width_ratios))
+        panel_w_weights.append(sb.panel_w_in[c])
+        width_ratios.append(sb.panel_w_in[c])
+        width_ratios.append(super_right)
+
+    # Make absolute decorations stay absolute when the user forces a
+    # figsize smaller than ``sb.total_h_in``: split the leftover (figure
+    # minus decorations) across panel rows by their relative weights.
+    # No-op at auto-size (fig_h == sum(ratios)). Only applies at the
+    # outermost gridspec — nested gridspecs render into a parent_subspec
+    # whose own height was already adjusted here.
+    if parent_subspec is None:
+        fig_h_in = fig.get_figheight()
+        fig_w_in = fig.get_figwidth()
+        _redistribute_to_leftover(
+            height_ratios, panel_h_idx, panel_h_weights, fig_h_in,
+        )
+        _redistribute_to_leftover(
+            width_ratios, panel_w_idx, panel_w_weights, fig_w_in,
+        )
 
     gs_h = [max(r, 1e-6) for r in height_ratios]
     gs_w = [max(r, 1e-6) for r in width_ratios]
@@ -1389,32 +1447,43 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
 
             top_cell_row = title_row_offset + 3*r
             panel_col = 3*c + 1
-            # Topmost-row children get title-lifting: their titles land
-            # at ``outer_top_y`` if the outer asked, else at this
-            # SuperBlock's own top-margin cell (the row 0 of our grid).
-            if r == 0:
-                if outer_top_y is not None:
-                    child_top_y = outer_top_y
-                else:
-                    child_top_y = gs[top_cell_row, panel_col].get_position(fig).y1
+            # The title cell for ANY child at this row is the OUTER's
+            # super_top cell at this row. Forward its y1 to a nested
+            # child so the nested's leaves anchor their titles there
+            # instead of inside the panel cell. ``outer_top_y`` overrides
+            # at r==0 when our own super_top was lifted into a parent.
+            if r == 0 and outer_top_y is not None:
+                child_top_y = outer_top_y
             else:
-                child_top_y = None  # use inner cell's top as usual
+                child_top_y = gs[top_cell_row, panel_col].get_position(fig).y1
 
             if isinstance(blk, GuideAreaBlock):
                 _render_guide_area_cell(blk, fig, panel_cell)
                 continue
             if isinstance(blk, SuperBlock):
-                # Forward simplify_gt-style lifting to the nested grid.
-                # Top/bottom: lift when this child is at row 0 / row
-                # last AND we ourselves were lifted (or we're the
-                # outermost SuperBlock — parent_subspec is None).
-                # Left/right: same logic per col, BUT skip when the
-                # nested's right-edge col hosts a colorbar/legend —
-                # collapsing that col would zero out the guide's cax /
-                # host axes and the guide would render at zero width.
+                # Nested SuperBlocks lift their first/last super-margins
+                # into THIS grid's super_top / super_bottom cells. Without
+                # this, the nested's titles + axis labels would render
+                # inside the panel cell and double-count against the
+                # parent's panel allocation — so ``plot_layout(heights=…)``
+                # weights would apply to (panel + nested decorations)
+                # rather than just panels, drifting panel ratios away
+                # from the user's spec on nested rows. Patchwork
+                # sidesteps this by emitting every plot's 18-row gtable
+                # into the *outer* gtable; we approximate it by lifting
+                # nested edges and forwarding ``outer_top_y``.
+                #
+                # Caveat: matplotlib's gridspec normalises ALL ratios to
+                # fit the figure, so absolute decorations shrink along
+                # with panels when the user forces a small figsize. At
+                # auto-size the outer reserves enough space for clean
+                # rendering; at user-forced small sizes labels can crowd.
+                # patchwork dodges this with grid-native ``unit("null")``
+                # for panel rows and absolute mm for decorations, which
+                # matplotlib doesn't natively support.
                 outermost = parent_subspec is None
-                child_lift_top = (r == 0) and (lift_top or outer_top_y is not None or outermost)
-                child_lift_bottom = (r == sb.nrow - 1) and (lift_bottom or outermost)
+                child_lift_top = True
+                child_lift_bottom = True
                 child_lift_left = (
                     (c == 0) and (lift_left or outermost)
                     and not _has_left_guide(blk)
@@ -1436,7 +1505,7 @@ def render_super_block(sb: SuperBlock, fig, parent_subspec=None,
                                    right_cell_row, right_cell_col,
                                    top_cell_row, panel_col,
                                    tag_iter=tag_iter,
-                                   title_y_override=child_top_y if r == 0 and outer_top_y is not None else None)
+                                   title_y_override=outer_top_y if r == 0 and outer_top_y is not None else None)
 
 
 def _render_leaf_title_in_top_cell(leaf, fig, gs, top_cell_row, panel_col,
