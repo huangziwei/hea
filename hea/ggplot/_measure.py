@@ -214,6 +214,42 @@ def legend_cell_size_in(
     return (width, height)
 
 
+def legend_cell_size_horizontal_in(
+    title: str | None,
+    entries: list[str],
+    *,
+    nrow: int = 1,
+    title_fontsize: float = LEGEND_TITLE_SIZE_PT,
+    text_fontsize: float = LEGEND_TEXT_SIZE_PT,
+) -> tuple[float, float]:
+    """Approximate (w, h) of a horizontal top/bottom legend in inches.
+
+    Entries are laid out as ``nrow`` rows × ``ceil(n/nrow)`` columns.
+    Width = ncol × per-key cell width; height = nrow × line height.
+    Title is placed inline to the left of the keys (matches ggplot2's
+    horizontal legend default).
+    """
+    if not entries:
+        return (0.0, 0.0)
+    n = len(entries)
+    ncol = max(1, -(-n // max(1, nrow)))  # ceil(n / nrow)
+    text_w = max_label_width_in(entries, fontsize=text_fontsize)
+    line_h = max(
+        max_label_height_in(entries, fontsize=text_fontsize),
+        LEGEND_KEY_HEIGHT_IN,
+    )
+    per_key_w = LEGEND_KEY_WIDTH_IN + LEGEND_KEY_PAD_IN + text_w
+    keys_w = ncol * per_key_w + (ncol - 1) * LEGEND_KEY_PAD_IN
+    height = nrow * line_h * LEGEND_LINE_SPACING + 2 * LEGEND_BOX_PAD_IN
+    width = keys_w + 2 * LEGEND_BOX_PAD_IN
+    if title:
+        title_w, title_h = text_size_in(title, fontsize=title_fontsize, weight="bold")
+        # Title sits inline to the left of the keys for horizontal legends.
+        width += title_w + LEGEND_KEY_PAD_IN
+        height = max(height, title_h + 2 * LEGEND_BOX_PAD_IN)
+    return (width, height)
+
+
 def strip_cell_height_in(
     label: str,
     *,

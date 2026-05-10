@@ -90,6 +90,15 @@ class PlotBlock:
     margin_top_in: float = 0.0
     margin_bottom_in: float = 0.0
 
+    # Inch dimensions reserved for the discrete-legend block, broken out
+    # from the margin total so ``_allocate_legend_host_axes`` can carve
+    # the correct slice. The full margin = decoration reserve + legend
+    # reserve (when legend.position pushes the legend onto that side).
+    legend_w_in: float = 0.0  # nonzero when legend.position in ("left", "right", None)
+    legend_h_in: float = 0.0  # nonzero when legend.position in ("top", "bottom")
+    colorbar_w_in: float = 0.0  # right/left side colorbar dims
+    colorbar_h_in: float = 0.0  # top/bottom side colorbar dims
+
     # For faceted plots, the panel cell hosts a nrow×ncol sub-grid of
     # facet panels (each has its own strip / data area). For non-faceted
     # plots, both are 1.
@@ -202,12 +211,45 @@ def measure_block(plot, build_output) -> PlotBlock:
     if caption_h > 0:
         margin_bottom += caption_h + M.ROW_GAP_IN
 
-    # --- RIGHT margin: colorbar + legend (separate, additive)
+    # --- Legend / colorbar margin contribution. ``legend.position``
+    # controls which side the discrete legend goes on; the colorbar
+    # follows the same position. Default ("right"/None) puts both on the
+    # right edge; "bottom"/"top" pushes them under/over the panel;
+    # "left" mirrors right.
+    legend_pos = plot.theme.get("legend.position") if plot.theme else None
     cbar_w = _measure_colorbar_width(plot, build_output)
-    legend_w, _ = _measure_legend_size(plot, build_output)
-    margin_right = cbar_w + legend_w
-    if margin_right > 0:
-        margin_right += M.COL_GAP_IN
+    legend_w_raw, legend_h_raw = _measure_legend_size(plot, build_output)
+
+    # Track separate legend / colorbar dims per side so the renderer can
+    # subdivide the correct margin cell into [decoration | legend].
+    legend_w_field = 0.0
+    legend_h_field = 0.0
+    colorbar_w_field = 0.0
+    colorbar_h_field = 0.0
+
+    margin_right = 0.0
+    if legend_pos in (None, "right"):
+        legend_w_field = legend_w_raw
+        colorbar_w_field = cbar_w
+        margin_right = cbar_w + legend_w_raw
+        if margin_right > 0:
+            margin_right += M.COL_GAP_IN
+    elif legend_pos == "left":
+        legend_w_field = legend_w_raw
+        colorbar_w_field = cbar_w
+        margin_left += legend_w_raw + (M.COL_GAP_IN if legend_w_raw > 0 else 0.0)
+        margin_left += cbar_w + (M.COL_GAP_IN if cbar_w > 0 else 0.0)
+    elif legend_pos == "top":
+        legend_h_field = legend_h_raw
+        colorbar_h_field = cbar_w  # bar width on right == bar height on top
+        margin_top += legend_h_raw + (M.ROW_GAP_IN if legend_h_raw > 0 else 0.0)
+        margin_top += cbar_w + (M.ROW_GAP_IN if cbar_w > 0 else 0.0)
+    elif legend_pos == "bottom":
+        legend_h_field = legend_h_raw
+        colorbar_h_field = cbar_w
+        margin_bottom += legend_h_raw + (M.ROW_GAP_IN if legend_h_raw > 0 else 0.0)
+        margin_bottom += cbar_w + (M.ROW_GAP_IN if cbar_w > 0 else 0.0)
+    # other / unknown values fall through with no extra margin
 
     # --- Facet grid dims
     layout = build_output.layout
@@ -234,32 +276,64 @@ def measure_block(plot, build_output) -> PlotBlock:
         margin_right_in=margin_right,
         margin_top_in=margin_top,
         margin_bottom_in=margin_bottom,
+        legend_w_in=legend_w_field,
+        legend_h_in=legend_h_field,
+        colorbar_w_in=colorbar_w_field,
+        colorbar_h_in=colorbar_h_field,
         panel_grid_rows=nrow,
         panel_grid_cols=ncol,
     )
 
 
 def _measure_legend_size(plot, build_output) -> tuple[float, float]:
-    """Approximate the legend's (w, h) in inches for the right margin."""
+    """Approximate the legend's (w, h) in inches.
+
+    Layout depends on ``legend.position``:
+      * ``"right"`` / ``"left"`` (and ``None``): groups stacked
+        vertically; entries within each group also stacked vertically.
+      * ``"top"`` / ``"bottom"``: groups laid out side-by-side; entries
+        within each group laid out horizontally (a single row by default,
+        wrapped into ``nrow`` rows when ``guides(... = guide_legend(
+        nrow=N))`` is supplied).
+    """
     pos = plot.theme.get("legend.position") if plot.theme else None
     if pos == "none":
         return (0.0, 0.0)
 
-    from .guides import build_legend_groups
+    from .guides import GuideLegend, build_legend_groups
 
     groups = build_legend_groups(plot, build_output)
     if not groups:
         return (0.0, 0.0)
 
-    # Stack groups vertically (ggplot2 default). Width = max group width;
-    # height = sum.
-    widths = []
-    height = 0.0
-    for g in groups:
-        w, h = M.legend_cell_size_in(g.title, g.labels)
-        widths.append(w)
-        height += h
-    return (max(widths), height)
+    overrides = getattr(plot, "guide_overrides", {}) or {}
+
+    def _user_nrow(group) -> int:
+        for aes_name in group.aes_names:
+            spec = overrides.get(aes_name)
+            if isinstance(spec, GuideLegend) and spec.nrow:
+                return max(1, int(spec.nrow))
+        return 1
+
+    if pos in ("top", "bottom"):
+        # Horizontal layout: each group sized by horizontal cell formula,
+        # honouring the user-requested ``nrow`` so wrapping increases
+        # the reserved height proportionally.
+        cell_sizes = [
+            M.legend_cell_size_horizontal_in(
+                g.title, g.labels, nrow=_user_nrow(g),
+            )
+            for g in groups
+        ]
+        widths = [w for w, _ in cell_sizes]
+        heights = [h for _, h in cell_sizes]
+        return (sum(widths) + (len(widths) - 1) * M.COL_GAP_IN, max(heights))
+
+    # Vertical layout (right/left/None): keep existing behaviour.
+    cell_sizes = [M.legend_cell_size_in(g.title, g.labels) for g in groups]
+    widths = [w for w, _ in cell_sizes]
+    heights = [h for _, h in cell_sizes]
+    return (max(widths), sum(heights))
 
 
 def _predict_axis_tick_reserve_in(build_output, axis: str) -> float:
@@ -497,7 +571,9 @@ def render_block(
         # fig.colorbar doesn't shrink the panel and the legend stays
         # bounded by its host (no overflow into adjacent figure space).
         cb_caxes = _allocate_colorbar_caxes(fig, gs, 1, 2, plot, build_output)
-        leg_hosts = _allocate_legend_host_axes(fig, gs, 1, 2, plot, build_output)
+        leg_hosts = _allocate_legend_host_axes(
+            fig, gs, 1, 2, plot, build_output, block=block
+        )
         _render_single_into(
             plot, build_output, ax, colorbar_caxes=cb_caxes, legend_host_axes=leg_hosts
         )
@@ -526,7 +602,9 @@ def render_block(
             axes.append(row_axes)
         block.panel_axes = [ax for row in axes for ax in row]
         cb_caxes = _allocate_colorbar_caxes(fig, gs, 1, 2, plot, build_output)
-        leg_hosts = _allocate_legend_host_axes(fig, gs, 1, 2, plot, build_output)
+        leg_hosts = _allocate_legend_host_axes(
+            fig, gs, 1, 2, plot, build_output, block=block
+        )
         _render_facets_into(
             plot,
             build_output,
@@ -946,10 +1024,90 @@ def _has_right_guide(blk) -> bool:
 
 
 def _has_left_guide(blk) -> bool:
-    """Mirror of :func:`_has_right_guide` for the left side. Today no
-    decoration ever lives in the leftmost col except yticks/ylabel
-    (which we WANT to lift), so this returns False for typical leaves;
-    kept for symmetry / future left-side legend support."""
+    """Whether the block hosts a colorbar/legend on its LEFT side.
+
+    Triggers on ``theme(legend.position="left")``. When True, the
+    parent must NOT lift this block's left margin into its own super
+    margin — collapsing that cell would zero the legend host.
+    """
+    if isinstance(blk, PlotBlock):
+        plot = blk.plot
+        bo = blk.build_output
+        pos = plot.theme.get("legend.position") if plot.theme else None
+        if pos != "left":
+            return False
+        from .guides import build_colorbar_specs, build_legend_groups
+
+        if build_colorbar_specs(plot, bo):
+            return True
+        if build_legend_groups(plot, bo):
+            return True
+        return False
+    if isinstance(blk, SuperBlock):
+        for r in range(blk.nrow):
+            cell = blk.cells[r][0]
+            if cell is None:
+                continue
+            _, child_blk = cell
+            if _has_left_guide(child_blk):
+                return True
+        return False
+    return False
+
+
+def _has_top_guide(blk) -> bool:
+    """Whether the block hosts a colorbar/legend on its TOP side
+    (``theme(legend.position="top")``)."""
+    if isinstance(blk, PlotBlock):
+        plot = blk.plot
+        bo = blk.build_output
+        pos = plot.theme.get("legend.position") if plot.theme else None
+        if pos != "top":
+            return False
+        from .guides import build_colorbar_specs, build_legend_groups
+
+        if build_colorbar_specs(plot, bo):
+            return True
+        if build_legend_groups(plot, bo):
+            return True
+        return False
+    if isinstance(blk, SuperBlock):
+        for c in range(blk.ncol):
+            cell = blk.cells[0][c]
+            if cell is None:
+                continue
+            _, child_blk = cell
+            if _has_top_guide(child_blk):
+                return True
+        return False
+    return False
+
+
+def _has_bottom_guide(blk) -> bool:
+    """Whether the block hosts a colorbar/legend on its BOTTOM side
+    (``theme(legend.position="bottom")``)."""
+    if isinstance(blk, PlotBlock):
+        plot = blk.plot
+        bo = blk.build_output
+        pos = plot.theme.get("legend.position") if plot.theme else None
+        if pos != "bottom":
+            return False
+        from .guides import build_colorbar_specs, build_legend_groups
+
+        if build_colorbar_specs(plot, bo):
+            return True
+        if build_legend_groups(plot, bo):
+            return True
+        return False
+    if isinstance(blk, SuperBlock):
+        for c in range(blk.ncol):
+            cell = blk.cells[blk.nrow - 1][c]
+            if cell is None:
+                continue
+            _, child_blk = cell
+            if _has_bottom_guide(child_blk):
+                return True
+        return False
     return False
 
 
@@ -1213,8 +1371,26 @@ def compose_super_block(grid, *, collect_state=None) -> SuperBlock:
             _, blk = cell
             if isinstance(blk, SuperBlock):
                 # Nested grid — panel cell must be ≥ nested's inner extent.
-                panel_h[r] = max(panel_h[r], blk.total_inner_h_in)
-                panel_w[c] = max(panel_w[c], blk.total_inner_w_in)
+                # When the nested has an edge LEGEND (top/bottom/left/right
+                # via ``theme(legend.position=...)``), the lift logic
+                # disables hoisting that decoration into our super_top/
+                # super_bottom — so the nested keeps its full extent
+                # (panel + legend reserve) and our panel cell must grow
+                # to accommodate it. Without this, matplotlib normalises
+                # the nested's height_ratios down to fit our cell, which
+                # squashes the nested's panel below the default size.
+                inner_h = blk.total_inner_h_in
+                inner_w = blk.total_inner_w_in
+                if _has_top_guide(blk):
+                    inner_h += blk.outer_margin_top_in
+                if _has_bottom_guide(blk):
+                    inner_h += blk.outer_margin_bottom_in
+                if _has_left_guide(blk):
+                    inner_w += blk.outer_margin_left_in
+                if _has_right_guide(blk):
+                    inner_w += blk.outer_margin_right_in
+                panel_h[r] = max(panel_h[r], inner_h)
+                panel_w[c] = max(panel_w[c], inner_w)
             elif isinstance(blk, GuideAreaBlock):
                 # The default panel height is 2", but a single-row legend is
                 # usually ~0.5–1". Track the legend's natural height; we'll
@@ -1667,27 +1843,35 @@ def render_super_block(
         width_ratios.append(sb.panel_w_in[c])
         width_ratios.append(super_right)
 
-    # Make absolute decorations stay absolute when the user forces a
-    # figsize smaller than ``sb.total_h_in``: split the leftover (figure
-    # minus decorations) across panel rows by their relative weights.
-    # No-op at auto-size (fig_h == sum(ratios)). Only applies at the
-    # outermost gridspec — nested gridspecs render into a parent_subspec
-    # whose own height was already adjusted here.
+    # Make absolute decorations stay absolute when the figure dimension
+    # is smaller than ``sum(ratios)``: split the leftover across panel
+    # rows by their relative weights so decorations keep their measured
+    # inch values. At the outermost gridspec the available size IS the
+    # figure size; for nested gridspecs we read the parent_subspec's
+    # allocated bbox (which may be smaller than ``sb.total_h_in`` when
+    # the parent's normalisation shrunk this cell). Without this nested
+    # call, matplotlib proportionally shrinks every nested cell to fit
+    # — collapsing decoration reserves below the size needed by the
+    # actual artists (xlabel/xticks bleed into legend, etc.).
     if parent_subspec is None:
-        fig_h_in = fig.get_figheight()
-        fig_w_in = fig.get_figwidth()
-        _redistribute_to_leftover(
-            height_ratios,
-            panel_h_idx,
-            panel_h_weights,
-            fig_h_in,
-        )
-        _redistribute_to_leftover(
-            width_ratios,
-            panel_w_idx,
-            panel_w_weights,
-            fig_w_in,
-        )
+        avail_h_in = fig.get_figheight()
+        avail_w_in = fig.get_figwidth()
+    else:
+        bbox = parent_subspec.get_position(fig)
+        avail_h_in = bbox.height * fig.get_figheight()
+        avail_w_in = bbox.width * fig.get_figwidth()
+    _redistribute_to_leftover(
+        height_ratios,
+        panel_h_idx,
+        panel_h_weights,
+        avail_h_in,
+    )
+    _redistribute_to_leftover(
+        width_ratios,
+        panel_w_idx,
+        panel_w_weights,
+        avail_w_in,
+    )
 
     gs_h = [max(r, 1e-6) for r in height_ratios]
     gs_w = [max(r, 1e-6) for r in width_ratios]
@@ -1772,8 +1956,8 @@ def render_super_block(
                 # for panel rows and absolute mm for decorations, which
                 # matplotlib doesn't natively support.
                 outermost = parent_subspec is None
-                child_lift_top = True
-                child_lift_bottom = True
+                child_lift_top = not _has_top_guide(blk)
+                child_lift_bottom = not _has_bottom_guide(blk)
                 child_lift_left = (
                     (c == 0) and (lift_left or outermost) and not _has_left_guide(blk)
                 )
@@ -1928,6 +2112,7 @@ def _render_leaf_cell(
             right_cell_col,
             leaf,
             bo,
+            block=blk,
         )
         _render_single_into(
             leaf, bo, ax, colorbar_caxes=cb_caxes, legend_host_axes=leg_hosts
@@ -1973,6 +2158,7 @@ def _render_leaf_cell(
             right_cell_col,
             leaf,
             bo,
+            block=blk,
         )
         _render_facets_into(
             leaf,
@@ -2010,21 +2196,31 @@ def _render_leaf_cell(
             )
 
 
-def _allocate_legend_host_axes(fig, gs, panel_row_idx, right_col_idx, leaf, bo) -> list:
-    """Carve a host ``Axes`` per discrete legend group inside the right-
-    margin cell. The legend renders inside the host (via
-    :func:`apply_legends` host path), so it stays bounded by the host's
-    bbox — preventing the legend from extending into the next plot's
-    panel area in a horizontal compose.
+def _allocate_legend_host_axes(fig, gs, panel_row_idx, right_col_idx, leaf, bo,
+                                block=None) -> list:
+    """Carve a host ``Axes`` per discrete legend group inside the
+    margin cell on the side dictated by ``legend.position``.
 
-    Multiple groups stack vertically. Returns ``[]`` when the leaf has
-    no discrete legend or when ``legend.position`` is ``"none"`` /
-    ``"top"`` / ``"bottom"`` / ``"left"`` (those need a different cell;
-    fall back to the legacy panel-relative path)."""
+    The legend renders inside the host (via :func:`apply_legends` host
+    path), so it stays bounded by the host's bbox — preventing the
+    legend from extending into the next plot's panel area in a
+    patchwork composition. Returns ``[]`` for ``legend.position="none"``
+    or when the leaf has no discrete legend.
+
+    For top/bottom/left positions the margin cell is shared with axis
+    decorations (xlabel/xticks for bottom, title/strip for top, ylabel/
+    yticks for left). The cell is subdivided so the legend gets its own
+    slice on the OUTSIDE edge, with the decorations on the INSIDE next
+    to the panel. ``block`` carries the inch sizes from ``measure_block``
+    so the split happens at the correct ratio.
+    """
     from matplotlib.gridspec import GridSpecFromSubplotSpec
 
     pos = leaf.theme.get("legend.position") if leaf.theme else None
-    if pos not in (None, "right"):
+    if pos == "none":
+        return []
+    if pos not in (None, "right", "left", "top", "bottom"):
+        # Numeric positions etc. — fall back to the legacy bbox path.
         return []
 
     from .guides import build_legend_groups
@@ -2033,13 +2229,108 @@ def _allocate_legend_host_axes(fig, gs, panel_row_idx, right_col_idx, leaf, bo) 
     if not groups:
         return []
 
-    right_cell = gs[panel_row_idx, right_col_idx]
+    # Pick the outer margin cell for this position. ``panel_row_idx``
+    # and ``right_col_idx`` locate the leaf's right-margin cell; the
+    # leaf occupies the surrounding 3×3 (panel + 4 margins). Other
+    # margin cells sit at fixed offsets from these:
+    #   left   = (panel_row_idx,     right_col_idx - 2)
+    #   right  = (panel_row_idx,     right_col_idx)
+    #   top    = (panel_row_idx - 1, right_col_idx - 1)
+    #   bottom = (panel_row_idx + 1, right_col_idx - 1)
+    panel_col_idx = right_col_idx - 1
+    left_col_idx = right_col_idx - 2
+    top_row_idx = panel_row_idx - 1
+    bottom_row_idx = panel_row_idx + 1
+    if pos in (None, "right"):
+        cell = gs[panel_row_idx, right_col_idx]
+    elif pos == "left":
+        cell = gs[panel_row_idx, left_col_idx]
+    elif pos == "top":
+        cell = gs[top_row_idx, panel_col_idx]
+    else:  # "bottom"
+        cell = gs[bottom_row_idx, panel_col_idx]
+
+    # Decoration size = total margin minus legend-and-colorbar reserve.
+    # For top/bottom that's the height; for left/right the width. The
+    # legend slice goes on the OUTSIDE edge (away from the panel) so the
+    # decoration slice (axis labels, ticks, title, etc.) stays adjacent
+    # to the panel where matplotlib expects to render it.
+    if block is not None:
+        if pos in ("top", "bottom"):
+            total = block.margin_top_in if pos == "top" else block.margin_bottom_in
+            legend_size = block.legend_h_in
+            cbar_size = block.colorbar_h_in
+        else:
+            total = block.margin_right_in if pos in (None, "right") else block.margin_left_in
+            legend_size = block.legend_w_in
+            cbar_size = block.colorbar_w_in
+        decoration_size = max(total - legend_size - cbar_size, 0.0)
+    else:
+        # Legacy callers (no block info): split evenly. Won't happen on
+        # the standard render path.
+        decoration_size = 0.0
+        legend_size = 1.0
+        cbar_size = 0.0
+
+    # Build the sub-gridspec inside the margin cell.
+    if pos in ("top", "bottom"):
+        # Vertical stack inside the margin cell. For BOTTOM:
+        #   [decoration | legend]   (decoration on top = closer to panel)
+        # For TOP:
+        #   [legend | decoration]   (decoration on bottom = closer to panel)
+        if pos == "bottom":
+            outer_ratios = [
+                max(decoration_size, 1e-6),
+                max(legend_size, 1e-6),
+            ]
+            legend_row = 1
+        else:  # top
+            outer_ratios = [
+                max(legend_size, 1e-6),
+                max(decoration_size, 1e-6),
+            ]
+            legend_row = 0
+        outer = GridSpecFromSubplotSpec(
+            2, 1, subplot_spec=cell,
+            height_ratios=outer_ratios, hspace=0.0,
+        )
+        # Within the legend slice, lay out groups horizontally.
+        inner = GridSpecFromSubplotSpec(
+            1, len(groups), subplot_spec=outer[legend_row, 0],
+            wspace=0.0,
+        )
+        hosts = []
+        for i in range(len(groups)):
+            host = fig.add_subplot(inner[0, i])
+            host.set_label("<legend>")
+            hosts.append(host)
+        return hosts
+
+    # Right / left positions: vertical stack of groups inside the
+    # margin cell. For RIGHT, the right-margin cell typically has no
+    # axis decorations (only colorbar+legend), so we use the full cell
+    # — preserving the existing behaviour.
+    if pos == "left":
+        outer_ratios = [
+            max(decoration_size, 1e-6),  # ylabel/yticks closer to panel = right
+            max(legend_size, 1e-6),       # legend on outer = left
+        ]
+        # legend slice is column 0 (leftmost = outer)
+        outer = GridSpecFromSubplotSpec(
+            1, 2, subplot_spec=cell,
+            width_ratios=[outer_ratios[1], outer_ratios[0]],  # legend, then decoration
+            wspace=0.0,
+        )
+        legend_subspec = outer[0, 0]
+    else:
+        # Right legend: full cell as before.
+        legend_subspec = cell
+
     sub = GridSpecFromSubplotSpec(
-        len(groups),
-        1,
-        subplot_spec=right_cell,
+        len(groups), 1,
+        subplot_spec=legend_subspec,
         wspace=0.0,
-        hspace=0.1,
+        hspace=0.1 if len(groups) > 1 else 0.0,
     )
     hosts = []
     for i in range(len(groups)):

@@ -558,9 +558,22 @@ def apply_legends(fig, axes_list, plot, build_output, *,
                   "columnspacing": columnspacing}
         if host is not None:
             host.set_axis_off()
+            # Anchor the legend against the panel-facing edge of the
+            # host so the legend hugs the plot. For a right-margin host
+            # that's the LEFT edge; for left-margin host it's the
+            # RIGHT edge; for bottom-margin host it's the TOP edge;
+            # for top-margin host it's the BOTTOM edge.
+            if pos == "left":
+                host_loc, host_anchor = "center right", (1.0, 0.5)
+            elif pos == "top":
+                host_loc, host_anchor = "lower center", (0.5, 0.0)
+            elif pos == "bottom":
+                host_loc, host_anchor = "upper center", (0.5, 1.0)
+            else:  # right (or None)
+                host_loc, host_anchor = "center left", (0.0, 0.5)
             leg = host.legend(
                 handles, labels, title=title, ncols=ncols,
-                loc="center left", bbox_to_anchor=(0.0, 0.5),
+                loc=host_loc, bbox_to_anchor=host_anchor,
                 frameon=False, alignment=alignment,
                 handler_map=handler_map, **sizing,
             )
