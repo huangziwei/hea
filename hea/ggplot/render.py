@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import matplotlib.pyplot as plt
 import polars as pl
+from matplotlib import rcParams
 from matplotlib.patches import Rectangle
+from matplotlib.transforms import offset_copy
 
 from ._measure import STRIP_TEXT_SIZE_PT, strip_cell_height_in
 from ._util import r_color
@@ -460,13 +462,12 @@ def _merge_text(base, override):
     )
 
 
-def _apply_label_element(text_artist, elem, ax, *, axis):
-    if isinstance(elem, element_blank):
-        if axis == "x":
-            ax.set_xlabel("")
-        else:
-            ax.set_ylabel("")
-        return
+def _apply_text_element(text_artist, elem) -> None:
+    """Apply :class:`element_text` styling to a matplotlib ``Text`` artist.
+
+    Skips silently for ``None`` or non-``element_text`` (e.g. ``element_blank``
+    is handled at call sites because the response — hide vs draw nothing —
+    depends on the artist)."""
     if not isinstance(elem, element_text):
         return
     if elem.colour:
@@ -482,6 +483,16 @@ def _apply_label_element(text_artist, elem, ax, *, axis):
             text_artist.set_weight("bold")
         if "italic" in elem.face:
             text_artist.set_style("italic")
+
+
+def _apply_label_element(text_artist, elem, ax, *, axis):
+    if isinstance(elem, element_blank):
+        if axis == "x":
+            ax.set_xlabel("")
+        else:
+            ax.set_ylabel("")
+        return
+    _apply_text_element(text_artist, elem)
 
 
 def _apply_strip_text(theme, ax) -> None:
@@ -689,33 +700,78 @@ def _apply_plot_titles(plot, fig, ax_list=None, *, skip_caption: bool = False) -
     subtitle = plot.labels.get("subtitle")
     caption = plot.labels.get("caption")
 
-    title_text = None
-    if title is not None and subtitle is not None:
-        title_text = f"{title}\n{subtitle}"
-    elif title is not None:
-        title_text = str(title)
-    elif subtitle is not None:
-        title_text = str(subtitle)
-
-    if title_text is not None:
+    if title is not None or subtitle is not None:
         is_faceted = ax_list is not None and len(ax_list) > 1
-        loc = _title_loc(plot.theme, "plot.title", default_hjust=0.0)
-        if is_faceted:
-            # On a faceted plot the strip labels (``ax.set_title``) occupy
-            # the y=1.0 axes-coord slot above each panel. We need the plot
-            # title on its own row *above* those strips. Setting the title
-            # on the top-left axes with ``y=1.15`` clears the strip row
-            # (strip + a little padding ≈ 15% of axes height).
-            target_ax = ax_list[0]
-            target_ax.set_title(title_text, loc=loc, y=1.15)
+        target_ax = ax_list[0] if is_faceted else (ax_list or fig.axes)[0]
+        title_elem = plot.theme.get("plot.title")
+        sub_elem = plot.theme.get("plot.subtitle")
+
+        if title is not None and subtitle is not None:
+            # Render as two SEPARATE text artists so each carries its own
+            # ggplot2 size (title ~13.2pt, subtitle ~11pt). The title goes
+            # via ``set_title`` with an enlarged ``pad=`` so tight_layout
+            # reserves the gap; the subtitle drops into that gap as a
+            # separate artist anchored at axes y=1.0.
+            title_loc = _title_loc(plot.theme, "plot.title", default_hjust=0.0)
+            sub_loc = _title_loc(plot.theme, "plot.subtitle", default_hjust=0.0)
+            sub_size = _text_size(sub_elem, default=11.0)
+            # Reserve subtitle line height + matplotlib's normal title pad,
+            # so tight_layout pushes the axes down enough to avoid clipping.
+            extra_pad = sub_size * 1.2 + rcParams["axes.titlepad"]
+            title_y = 1.15 if is_faceted else None  # facets: clear strip row
+            kw = {"loc": title_loc, "pad": extra_pad}
+            if title_y is not None:
+                kw["y"] = title_y
+            title_artist = target_ax.set_title(str(title), **kw)
+            _apply_text_element(title_artist, title_elem)
+
+            # Subtitle sits a few points above the spine top (or strip top
+            # for facets). va='bottom' anchors the baseline at axes y=1.0,
+            # so the text grows upward into the title's pad.
+            sub_anchor_y = 1.0 if not is_faceted else 1.0
+            sub_lift_pts = 2.0  # small breathing room above spine/strip
+            sub_trans = offset_copy(
+                target_ax.transAxes, fig=fig, x=0, y=sub_lift_pts,
+                units="points",
+            )
+            sub_x, sub_ha = _hjust_to_axes_x_ha(sub_loc)
+            sub_artist = target_ax.text(
+                sub_x, sub_anchor_y, str(subtitle), transform=sub_trans,
+                ha=sub_ha, va="bottom",
+            )
+            _apply_text_element(sub_artist, sub_elem)
         else:
-            target_ax = (ax_list or fig.axes)[0]
-            target_ax.set_title(title_text, loc=loc)
+            # Only one of title/subtitle is set — single Text artist via
+            # set_title, styled from whichever element is present.
+            elem_key = "plot.title" if title is not None else "plot.subtitle"
+            text_str = str(title if title is not None else subtitle)
+            loc = _title_loc(plot.theme, elem_key, default_hjust=0.0)
+            kw = {"loc": loc}
+            if is_faceted:
+                # Strip labels occupy y=1.0 — push the title above them.
+                kw["y"] = 1.15
+            title_artist = target_ax.set_title(text_str, **kw)
+            _apply_text_element(title_artist, plot.theme.get(elem_key))
 
     if caption is not None and not skip_caption:
         x, ha = _caption_x_ha(plot.theme)
-        fig.text(x, 0.01, str(caption), ha=ha, va="bottom",
-                 fontsize="small", style="italic")
+        cap_artist = fig.text(x, 0.01, str(caption), ha=ha, va="bottom")
+        _apply_text_element(cap_artist, plot.theme.get("plot.caption"))
+
+
+def _text_size(elem, *, default: float) -> float:
+    if isinstance(elem, element_text) and elem.size:
+        return float(elem.size)
+    return default
+
+
+def _hjust_to_axes_x_ha(loc: str) -> tuple:
+    """Map ``set_title``-style loc to axes-coord (x, ha) for ``ax.text``."""
+    if loc == "right":
+        return (1.0, "right")
+    if loc == "center":
+        return (0.5, "center")
+    return (0.0, "left")
 
 
 def _title_loc(theme, element_key: str, *, default_hjust: float) -> str:

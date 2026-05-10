@@ -148,7 +148,15 @@ def theme_gray() -> Theme:
         "axis.ticks": element_line(colour="grey20", size=0.25),
         "axis.line": element_blank(),
         # plot.title size = rel(1.2) × base 11pt = 13.2 (NOT 14).
-        "plot.title": element_text(size=13.2, colour="black", hjust=0),
+        # ggplot2 4.0 dropped face="bold" from plot.title — title is plain.
+        "plot.title": element_text(size=13.2, colour="black", hjust=0, vjust=1),
+        # plot.subtitle inherits base size (11pt), left-aligned, plain.
+        "plot.subtitle": element_text(size=11, colour="black", hjust=0, vjust=1),
+        # plot.caption size = rel(0.8) × 11 = 8.8pt, right-aligned, plain
+        # (NOT italic — that was a hea-specific deviation).
+        "plot.caption": element_text(size=8.8, colour="black", hjust=1, vjust=1),
+        # plot.tag size = rel(1.2) × 11 = 13.2pt, centered.
+        "plot.tag": element_text(size=13.2, colour="black", hjust=0.5, vjust=0.5),
         "plot.background": element_rect(fill="white"),
         "panel.background": element_rect(fill="#EBEBEB"),
         "panel.border": element_blank(),

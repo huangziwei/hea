@@ -4820,15 +4820,18 @@ def test_ggtitle_sets_axes_title_left_aligned():
 
 
 def test_ggtitle_with_subtitle_renders_both():
-    """Title + subtitle pack into one multi-line label on the top-left
-    axes' left title slot."""
+    """Title and subtitle render as SEPARATE Text artists so each carries
+    its own ggplot2 size (title 13.2pt, subtitle 11pt). The title sits in
+    the left ``set_title`` slot; the subtitle is an axes-level text artist
+    anchored just above the spine."""
     mtcars = load_dataset("datasets", "mtcars")
     p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + ggtitle("Cars", subtitle="MTcars data")
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        title_text = ax.get_title(loc="left")
-        assert title_text.split("\n") == ["Cars", "MTcars data"]
+        assert ax.get_title(loc="left") == "Cars"
+        subtitle_texts = [t.get_text() for t in ax.texts]
+        assert "MTcars data" in subtitle_texts
     finally:
         plt.close(fig)
 
