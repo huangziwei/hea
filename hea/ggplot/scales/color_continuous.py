@@ -22,7 +22,7 @@ from ._palettes import (
     gradientn_pal,
     viridis_pal,
 )
-from .scale import Scale
+from .scale import Scale, _NAME_MISSING
 
 
 @dataclass
@@ -76,7 +76,7 @@ class ScaleContinuousColor(Scale):
 # Factories — gradient family
 # ---------------------------------------------------------------------------
 
-def scale_color_gradient(*, low="#132B43", high="#56B1F7", name=None,
+def scale_color_gradient(*, low="#132B43", high="#56B1F7", name=_NAME_MISSING,
                         breaks="default", labels="default", limits=None):
     return ScaleContinuousColor(
         aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
@@ -84,7 +84,7 @@ def scale_color_gradient(*, low="#132B43", high="#56B1F7", name=None,
     )
 
 
-def scale_fill_gradient(*, low="#132B43", high="#56B1F7", name=None,
+def scale_fill_gradient(*, low="#132B43", high="#56B1F7", name=_NAME_MISSING,
                        breaks="default", labels="default", limits=None):
     return ScaleContinuousColor(
         aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
@@ -93,7 +93,7 @@ def scale_fill_gradient(*, low="#132B43", high="#56B1F7", name=None,
 
 
 def scale_color_gradient2(*, low="#832424", mid="white", high="#3A3A98",
-                         midpoint=0, name=None, breaks="default",
+                         midpoint=0, name=_NAME_MISSING, breaks="default",
                          labels="default", limits=None):
     # Mirrors ggplot2's ``scale_colour_gradient2()`` defaults:
     # ``low = scales::muted("red") = "#832424"``,
@@ -109,7 +109,7 @@ def scale_color_gradient2(*, low="#832424", mid="white", high="#3A3A98",
 
 
 def scale_fill_gradient2(*, low="#832424", mid="white", high="#3A3A98",
-                        midpoint=0, name=None, breaks="default",
+                        midpoint=0, name=_NAME_MISSING, breaks="default",
                         labels="default", limits=None):
     return ScaleContinuousColor(
         aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
@@ -118,7 +118,7 @@ def scale_fill_gradient2(*, low="#832424", mid="white", high="#3A3A98",
     )
 
 
-def scale_color_gradientn(*, colours, name=None, breaks="default",
+def scale_color_gradientn(*, colours, name=_NAME_MISSING, breaks="default",
                          labels="default", limits=None):
     return ScaleContinuousColor(
         aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
@@ -126,7 +126,7 @@ def scale_color_gradientn(*, colours, name=None, breaks="default",
     )
 
 
-def scale_fill_gradientn(*, colours, name=None, breaks="default",
+def scale_fill_gradientn(*, colours, name=_NAME_MISSING, breaks="default",
                         labels="default", limits=None):
     return ScaleContinuousColor(
         aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
@@ -149,7 +149,7 @@ scale_fill_continuous = scale_fill_gradient
 # Factories — viridis family
 # ---------------------------------------------------------------------------
 
-def scale_color_viridis_c(*, option="viridis", direction=1, name=None,
+def scale_color_viridis_c(*, option="viridis", direction=1, name=_NAME_MISSING,
                          breaks="default", labels="default", limits=None):
     return ScaleContinuousColor(
         aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
@@ -157,7 +157,7 @@ def scale_color_viridis_c(*, option="viridis", direction=1, name=None,
     )
 
 
-def scale_fill_viridis_c(*, option="viridis", direction=1, name=None,
+def scale_fill_viridis_c(*, option="viridis", direction=1, name=_NAME_MISSING,
                         breaks="default", labels="default", limits=None):
     return ScaleContinuousColor(
         aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
@@ -176,7 +176,7 @@ scale_colour_viridis_c = scale_color_viridis_c
 # Factories — brewer continuous (a.k.a. distiller in ggplot2 nomenclature)
 # ---------------------------------------------------------------------------
 
-def scale_color_distiller(*, palette="Blues", direction=1, name=None,
+def scale_color_distiller(*, palette="Blues", direction=1, name=_NAME_MISSING,
                          breaks="default", labels="default", limits=None):
     return ScaleContinuousColor(
         aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
@@ -185,7 +185,7 @@ def scale_color_distiller(*, palette="Blues", direction=1, name=None,
     )
 
 
-def scale_fill_distiller(*, palette="Blues", direction=1, name=None,
+def scale_fill_distiller(*, palette="Blues", direction=1, name=_NAME_MISSING,
                         breaks="default", labels="default", limits=None):
     return ScaleContinuousColor(
         aesthetics=("fill",), name=name, breaks=breaks, labels=labels,

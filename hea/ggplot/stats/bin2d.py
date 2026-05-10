@@ -43,6 +43,10 @@ class StatBin2d(Stat):
     bins: int | tuple[int, int] | None = None
     binwidth: float | tuple[float, float] | None = None
     drop: bool = True
+    # Title for the colorbar when fill is auto-mapped to count by this stat
+    # (no user fill mapping). Mirrors ggplot2's ``after_stat(count)``
+    # default — the colorbar reads "count", not "fill".
+    default_fill_label: str = "count"
 
     def compute_group(self, data, params):
         if "x" not in data.columns or "y" not in data.columns:
@@ -120,6 +124,7 @@ class StatBin2d(Stat):
 class StatBinhex(Stat):
     bins: int = 30
     drop: bool = True
+    default_fill_label: str = "count"
 
     def compute_group(self, data, params):
         if "x" not in data.columns or "y" not in data.columns:

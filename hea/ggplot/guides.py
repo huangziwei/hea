@@ -280,6 +280,30 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
     return list(groups.values())
 
 
+def _stat_default_label_for(plot, aes_name):
+    """If any layer's stat declares a ``default_<aes>_label`` (e.g.
+    ``StatBin2d.default_fill_label = "count"``), return it.
+
+    Mirrors ggplot2's behaviour: ``geom_bin2d()`` auto-maps fill to
+    ``after_stat(count)`` and the colorbar reads "count" by default,
+    not the bare aesthetic name "fill".
+    """
+    attr = f"default_{aes_name}_label"
+    for layer in getattr(plot, "layers", []):
+        stat = getattr(layer, "stat", None)
+        if stat is None:
+            continue
+        # If the user explicitly mapped this aesthetic on the layer,
+        # don't override their choice with the stat default.
+        mapping = getattr(layer, "mapping", None) or {}
+        if aes_name in mapping:
+            continue
+        tag = getattr(stat, attr, None)
+        if tag:
+            return tag
+    return None
+
+
 def _scale_name_or_none(scale):
     """Return ``scale.name`` if it was explicitly set, else ``None``.
 
@@ -411,6 +435,7 @@ def build_colorbar_specs(plot, build_output) -> list[ColorbarSpec]:
         title = (plot_labels.get(aes_name)
                  or _scale_name_or_none(scale)
                  or aes_source.get(aes_name)
+                 or _stat_default_label_for(plot, aes_name)
                  or aes_name)
         lo, hi = scale.range_
         specs.append(ColorbarSpec(
@@ -508,9 +533,19 @@ def apply_legends(fig, axes_list, plot, build_output, *,
         # *cover* the panel-colour bg, so they need visible vertical gaps
         # between rows or adjacent colour blocks would butt together.
         # Point/path keys are small glyphs sitting on the bg, so
-        # ``labelspacing=0`` lets the per-key bgs abut into one
-        # continuous gray column — matches ggplot2.
-        labelspacing = 0.4 if group.key_glyph == "polygon" else 0.0
+        # ``labelspacing=0`` (between rows) and ``columnspacing=0``
+        # (between columns) let the per-key bgs abut into one
+        # continuous gray block — matches ggplot2 regardless of whether
+        # the user added ``guides(... = guide_legend(nrow=...))``. Without
+        # the columnspacing override, multi-column / wrapped layouts
+        # split the bg into separate cells and the legend "style" visibly
+        # changes when guides() introduces wrapping.
+        if group.key_glyph == "polygon":
+            labelspacing = 0.4
+            columnspacing = 1.0  # match matplotlib default-ish
+        else:
+            labelspacing = 0.0
+            columnspacing = 0.0
         # ggplot2's ``legend.key.size = unit(1.2, "lines")`` produces
         # square keys. matplotlib's ``handlelength`` and ``handleheight``
         # are both in font-size units but use different reference
@@ -519,7 +554,8 @@ def apply_legends(fig, axes_list, plot, build_output, *,
         # a non-square box — empirically ``(1.2, 1.5)`` gives a square
         # ~12×12 px bbox at the default 10 pt fontsize.
         sizing = {"handlelength": 1.2, "handleheight": 1.5,
-                  "labelspacing": labelspacing}
+                  "labelspacing": labelspacing,
+                  "columnspacing": columnspacing}
         if host is not None:
             host.set_axis_off()
             leg = host.legend(

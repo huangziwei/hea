@@ -267,43 +267,75 @@ def test_scale_plus_is_non_mutating():
 
 
 def test_gg_c6_scale_x_log10():
-    """GG-C6: ``+ scale_x_log10()`` puts x on a log axis. Y stays linear."""
+    """GG-C6: ``+ scale_x_log10()`` log-transforms the x data BEFORE the
+    stat (matches ggplot2 — bins, smoothers, etc. operate on log values).
+    The matplotlib axis is linear; the plotted x coords are log10(disp).
+    """
+    import numpy as np
+
     mtcars = load_dataset("datasets", "mtcars")
     p = (ggplot(mtcars, aes("disp", "mpg")) + geom_point()
          + scale_x_log10())
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        assert ax.get_xscale() == "log"
+        assert ax.get_xscale() == "linear"
         assert ax.get_yscale() == "linear"
-        # data still drawn on the log axis (matplotlib reinterprets coords).
         offsets = ax.collections[0].get_offsets()
         assert offsets.shape == (len(mtcars), 2)
+        # disp range [71, 472] → log10 range ~[1.85, 2.67]; far below
+        # raw-units autoscale so we know the pre-transform fired.
+        np.testing.assert_allclose(
+            offsets[:, 0],
+            np.log10(mtcars["disp"].to_numpy()),
+            rtol=1e-12,
+        )
     finally:
         plt.close(fig)
 
 
 def test_scale_y_log10():
+    """``scale_y_log10`` pre-transforms the data (matches ggplot2 — stat
+    sees log values), so the matplotlib axis stays linear and the y
+    coordinates the geom plotted live in log10 space."""
+    import numpy as np
+
     mtcars = load_dataset("datasets", "mtcars")
     p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
          + scale_y_log10())
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        assert ax.get_yscale() == "log"
+        # Both axes are linear at the matplotlib level; the data on the
+        # y axis is in log10 space (mtcars$mpg max=33.9 → ~1.53).
+        assert ax.get_yscale() == "linear"
         assert ax.get_xscale() == "linear"
+        offsets = ax.collections[0].get_offsets()
+        # mpg values lie in [10.4, 33.9]; transformed → [1.02, 1.53].
+        assert offsets[:, 1].max() < 2.0
+        assert offsets[:, 1].min() > 1.0
+        # Tick labels use original units (10^k → "10", "100", etc.).
+        labels = [t.get_text() for t in ax.get_yticklabels()]
+        assert any("10" in lab for lab in labels)
     finally:
         plt.close(fig)
 
 
 def test_scale_x_sqrt():
-    """sqrt uses matplotlib's FuncScale, exposed as ``"function"``."""
+    """``scale_x_sqrt`` pre-transforms the data, so the matplotlib axis
+    is linear (data is sqrt'd before reaching the geom). ``coord_trans``
+    is the API that touches the matplotlib axis scale instead."""
     mtcars = load_dataset("datasets", "mtcars")
     p = (ggplot(mtcars, aes("disp", "mpg")) + geom_point()
          + scale_x_sqrt())
     fig = p.draw()
     try:
-        assert fig.axes[0].get_xscale() == "function"
+        ax = fig.axes[0]
+        assert ax.get_xscale() == "linear"
+        offsets = ax.collections[0].get_offsets()
+        # disp range [71, 472] → sqrt range [~8.4, ~21.7].
+        assert offsets[:, 0].max() < 25
+        assert offsets[:, 0].min() > 8
     finally:
         plt.close(fig)
 
@@ -322,7 +354,14 @@ def test_scale_x_reverse():
 
 
 def test_log10_with_explicit_breaks():
-    """When the user gives explicit breaks, they're honored even on a log axis."""
+    """When the user gives explicit breaks (raw units), they're honored
+    on a log10 axis. ``scale_x_log10()`` transforms the data BEFORE the
+    stat runs (matches ggplot2 — see `scale_x_log10` doc), so the
+    matplotlib axis lives in log10-space and the tick positions are
+    ``log10(breaks)``. The DISPLAYED labels remain the raw-unit values.
+    """
+    import numpy as np
+
     mtcars = load_dataset("datasets", "mtcars")
     p = (ggplot(mtcars, aes("disp", "mpg")) + geom_point()
          + scale_x_log10(breaks=[100, 200, 400], labels=["100", "200", "400"]))
@@ -330,7 +369,9 @@ def test_log10_with_explicit_breaks():
     try:
         ax = fig.axes[0]
         ticks = list(ax.get_xticks())
-        assert ticks == [100.0, 200.0, 400.0]
+        np.testing.assert_allclose(ticks, np.log10([100, 200, 400]))
+        labels = [t.get_text() for t in ax.get_xticklabels()]
+        assert labels == ["100", "200", "400"]
     finally:
         plt.close(fig)
 
@@ -2925,9 +2966,12 @@ def test_guide_axis_factory_holds_metadata():
 # ---------------------------------------------------------------------------
 
 
-def test_scale_x_date_formats_ticks_as_iso_dates():
-    """`scale_x_date()` installs a date locator + formatter."""
+def test_scale_x_date_uses_concise_formatter():
+    """`scale_x_date()` defaults to ConciseDateFormatter — labels adapt
+    to tick spacing (year-aligned ticks render as bare years, etc.).
+    Mirrors ggplot2's ``scales::label_date_short()``."""
     import datetime
+    import matplotlib.dates as mdates
     df = pl.DataFrame({
         "x": [datetime.date(2020, 1, 1),
               datetime.date(2020, 6, 1),
@@ -2937,10 +2981,8 @@ def test_scale_x_date_formats_ticks_as_iso_dates():
     p = ggplot(df, aes("x", "y")) + geom_point() + scale_x_date()
     fig = p.draw()
     try:
-        labels = [t.get_text() for t in fig.axes[0].xaxis.get_majorticklabels()]
-        # All non-empty labels parse as ISO dates.
-        nonempty = [l for l in labels if l]
-        assert all(len(l) == 10 and l.count("-") == 2 for l in nonempty)
+        formatter = fig.axes[0].xaxis.get_major_formatter()
+        assert isinstance(formatter, mdates.ConciseDateFormatter)
     finally:
         plt.close(fig)
 

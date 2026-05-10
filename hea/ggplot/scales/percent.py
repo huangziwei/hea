@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .continuous import ScaleContinuous
+from .scale import _NAME_MISSING
 
 
 @dataclass
@@ -39,7 +40,7 @@ class ScalePercent(ScaleContinuous):
         target_axis.set_major_formatter(fmt)
 
 
-def scale_x_percent(*, name=None, breaks="default", labels="default",
+def scale_x_percent(*, name=_NAME_MISSING, breaks="default", labels="default",
                     limits=None, xmax=1.0, decimals=None):
     return ScalePercent(
         aesthetics=("x",), name=name, breaks=breaks, labels=labels,
@@ -47,7 +48,7 @@ def scale_x_percent(*, name=None, breaks="default", labels="default",
     )
 
 
-def scale_y_percent(*, name=None, breaks="default", labels="default",
+def scale_y_percent(*, name=_NAME_MISSING, breaks="default", labels="default",
                     limits=None, xmax=1.0, decimals=None):
     return ScalePercent(
         aesthetics=("y",), name=name, breaks=breaks, labels=labels,

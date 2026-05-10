@@ -20,7 +20,7 @@ from typing import Any
 
 import polars as pl
 
-from .scale import Scale
+from .scale import Scale, _NAME_MISSING
 
 
 @dataclass
@@ -170,7 +170,7 @@ class ScaleOrdinal(Scale):
         return (0.6, 0.6)
 
 
-def scale_x_ordinal(*, name=None, breaks="default", labels="default",
+def scale_x_ordinal(*, name=_NAME_MISSING, breaks="default", labels="default",
                     limits=None, expand=None):
     kwargs = dict(aesthetics=("x",), name=name, breaks=breaks,
                   labels=labels, limits=limits)
@@ -179,7 +179,7 @@ def scale_x_ordinal(*, name=None, breaks="default", labels="default",
     return ScaleOrdinal(**kwargs)
 
 
-def scale_y_ordinal(*, name=None, breaks="default", labels="default",
+def scale_y_ordinal(*, name=_NAME_MISSING, breaks="default", labels="default",
                     limits=None, expand=None):
     kwargs = dict(aesthetics=("y",), name=name, breaks=breaks,
                   labels=labels, limits=limits)

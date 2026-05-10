@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .scale import Scale, fmt_number, format_breaks
+from .scale import Scale, _NAME_MISSING, fmt_number, format_breaks
 from .transformed import IdentityTrans, Trans
 
 
@@ -43,16 +43,12 @@ class ScaleContinuous(Scale):
             self.range_[1] = max(self.range_[1], hi)
 
     def apply_to_axis(self, ax, axis: str, view_limits=None) -> None:
-        # Set matplotlib axis scale FIRST. Done before limits because some
-        # scales (log) reject non-positive limits and would error on the
-        # default linear-scale autoscaled values otherwise.
-        ms = self.transform.matplotlib_scale()
-        if ms is not None:
-            scale_name, scale_kwargs = ms
-            if axis == "x":
-                ax.set_xscale(scale_name, **scale_kwargs)
-            else:
-                ax.set_yscale(scale_name, **scale_kwargs)
+        # The matplotlib axis stays LINEAR for ``ScaleContinuous``.
+        # ``scale_x_log10()`` etc. pre-transform the data in build.py
+        # (matches ggplot2 — stat sees transformed values), so calling
+        # ``set_xscale("log")`` here would log a second time and break
+        # the display. ``Trans.matplotlib_scale()`` is reserved for
+        # ``coord_trans()`` (display-only transform, data untouched).
 
         if view_limits is not None:
             # ``coord_cartesian(xlim=/ylim=)`` zoom — set limits to match
@@ -91,12 +87,31 @@ class ScaleContinuous(Scale):
                 ax.set_yticks([])
             return
 
-        # When a non-linear transform is in play and the user didn't ask for
-        # explicit breaks, defer to matplotlib's native locator (LogLocator
-        # for log; default for FuncScale). MaxNLocator-on-linear-coords would
-        # produce e.g. evenly spaced linear ticks on a log axis — wrong.
-        if isinstance(self.breaks, str) and self.breaks == "default" and ms is not None:
-            return
+        # When a non-linear transform is in play and the user didn't ask
+        # for explicit breaks, ask the transform for nice ticks at
+        # original-units values (e.g. 10/100/1000 for log10) mapped to
+        # the transformed positions of the data. The matplotlib axis is
+        # linear (data is pre-transformed in build); we just place ticks
+        # at the right positions and label them with the inverse-mapped
+        # values. Without this, a log10-transformed axis would get
+        # MaxNLocator's linear ticks (e.g. 1, 2, 3 on a log axis labeled
+        # as 10, 100, 1000) — wrong.
+        if isinstance(self.breaks, str) and self.breaks == "default":
+            tick_spec = self.transform.tick_positions_and_labels(
+                *(view_limits if view_limits is not None
+                  else self._expanded_break_range()
+                  if self.range_ is not None
+                  else (ax.get_xlim() if axis == "x" else ax.get_ylim()))
+            )
+            if tick_spec is not None:
+                positions, labels = tick_spec
+                if axis == "x":
+                    ax.set_xticks(positions)
+                    ax.set_xticklabels(labels)
+                else:
+                    ax.set_yticks(positions)
+                    ax.set_yticklabels(labels)
+                return
 
         # Compute breaks against the EXPANDED data range — matches
         # ggplot2's ``scales::breaks_extended``, which works on the
@@ -125,15 +140,32 @@ class ScaleContinuous(Scale):
         else:
             break_range = ax.get_xlim() if axis == "x" else ax.get_ylim()
         breaks = self._compute_breaks(break_range)
-        breaks = np.asarray(
-            [b for b in breaks if break_range[0] <= b <= break_range[1]]
-        )
+        # Labels reflect the user-supplied (raw-units) break values, not
+        # the transformed positions — so ``breaks=[100,200,400]`` on a
+        # ``scale_x_log10()`` axis still labels as 100/200/400 even
+        # though the underlying tick positions are 2/2.30/2.60.
         labels = self._compute_labels(breaks)
+        # When the data was pre-transformed (scale_x_log10 etc.), the
+        # axis lives in transformed space. User-supplied breaks are in
+        # raw units, so map them through ``transform`` before placing
+        # on the axis. The labels stay in raw units (above).
+        if self.transform.name != "identity":
+            try:
+                tick_positions = np.asarray(self.transform.transform(breaks))
+            except Exception:
+                tick_positions = np.asarray(breaks)
+            mask = (tick_positions >= break_range[0]) & (tick_positions <= break_range[1])
+            tick_positions = tick_positions[mask]
+            labels = [labels[i] for i in range(len(labels)) if mask[i]]
+        else:
+            mask = (np.asarray(breaks) >= break_range[0]) & (np.asarray(breaks) <= break_range[1])
+            tick_positions = np.asarray(breaks)[mask]
+            labels = [labels[i] for i in range(len(labels)) if mask[i]]
         if axis == "x":
-            ax.set_xticks(breaks)
+            ax.set_xticks(tick_positions)
             ax.set_xticklabels(labels)
         else:
-            ax.set_yticks(breaks)
+            ax.set_yticks(tick_positions)
             ax.set_yticklabels(labels)
 
     def _apply_expansion(self, ax, axis: str) -> None:
@@ -205,7 +237,7 @@ class ScaleContinuous(Scale):
         return [str(x) for x in self.labels]
 
 
-def scale_x_continuous(*, name=None, breaks="default", labels="default",
+def scale_x_continuous(*, name=_NAME_MISSING, breaks="default", labels="default",
                        limits=None, expand=(0.05, 0.0)):
     return ScaleContinuous(
         aesthetics=("x",), name=name, breaks=breaks, labels=labels,
@@ -213,7 +245,7 @@ def scale_x_continuous(*, name=None, breaks="default", labels="default",
     )
 
 
-def scale_y_continuous(*, name=None, breaks="default", labels="default",
+def scale_y_continuous(*, name=_NAME_MISSING, breaks="default", labels="default",
                        limits=None, expand=(0.05, 0.0)):
     return ScaleContinuous(
         aesthetics=("y",), name=name, breaks=breaks, labels=labels,

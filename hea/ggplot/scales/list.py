@@ -31,24 +31,34 @@ class ScalesList:
         """Return the registered scale for ``aesthetic``, auto-creating a
         positional scale for ``"x"`` / ``"y"`` if missing.
 
-        With ``data`` supplied, picks :class:`ScaleOrdinal` for discrete
-        dtypes (``Utf8``/``Categorical``/``Enum``/``Boolean``) and
-        :class:`ScaleContinuous` otherwise — matches ggplot2's
-        ``scale_x_discrete`` auto-default for character columns.
+        Dtype-driven choice mirrors ggplot2's ``scale_*_discrete`` /
+        ``scale_*_date`` / ``scale_*_datetime`` auto-defaults:
+
+        * ``Utf8`` / ``Categorical`` / ``Enum`` / ``Boolean`` →
+          :class:`ScaleOrdinal`
+        * ``Date`` → :class:`ScaleDate`
+        * ``Datetime`` → :class:`ScaleDatetime`
+        * ``Time`` → :class:`ScaleTime`
+        * everything else (numeric, etc.) → :class:`ScaleContinuous`
         """
         sc = self._by_aes.get(aesthetic)
         if sc is not None:
             return sc
         if aesthetic in ("x", "y"):
             import polars as pl
-            is_discrete = (
-                data is not None
-                and isinstance(data, pl.Series)
-                and data.dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean)
-            )
-            if is_discrete:
+            dtype = data.dtype if (data is not None and isinstance(data, pl.Series)) else None
+            if dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean):
                 from .ordinal import ScaleOrdinal
                 sc = ScaleOrdinal(aesthetics=(aesthetic,))
+            elif dtype == pl.Date:
+                from .temporal import ScaleDate
+                sc = ScaleDate(aesthetics=(aesthetic,))
+            elif isinstance(dtype, pl.Datetime):
+                from .temporal import ScaleDatetime
+                sc = ScaleDatetime(aesthetics=(aesthetic,))
+            elif isinstance(dtype, pl.Time) or dtype == pl.Time:
+                from .temporal import ScaleTime
+                sc = ScaleTime(aesthetics=(aesthetic,))
             else:
                 from .continuous import ScaleContinuous
                 sc = ScaleContinuous(aesthetics=(aesthetic,))

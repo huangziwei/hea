@@ -40,33 +40,40 @@ def _to_mpl_dates(values):
     return list(values)
 
 
-def _apply_date_axis(scale, ax, axis: str, *, default_format: str,
-                     view_limits) -> None:
+def _apply_date_axis(scale, ax, axis: str, *, view_limits) -> None:
     """Shared ``apply_to_axis`` body for date / datetime / time scales.
 
     Honours explicit ``breaks=`` (list / Series of dates) by installing a
-    :class:`FixedLocator`; falls back to matplotlib's
-    :class:`AutoDateLocator` for ``"default"``. The formatter pattern
-    comes from ``date_format`` (== R's ``date_labels``)."""
+    :class:`FixedLocator`; falls back to :class:`AutoDateLocator` (tuned
+    to ``minticks=4, maxticks=6`` to match ggplot2's
+    ``scales::breaks_pretty(n=5)``) for ``"default"``.
+
+    Default formatter is :class:`ConciseDateFormatter`, which mirrors
+    R's ``scales::label_date_short()``: year-aligned ticks render as
+    ``"1960"``, month-aligned as ``"Jan"`` plus a year tag at the
+    transition, etc. A user-supplied ``date_format``/``date_labels``
+    overrides with a fixed strftime pattern."""
     import matplotlib.dates as mdates
     from matplotlib.ticker import FixedLocator
 
     target_axis = ax.xaxis if axis == "x" else ax.yaxis
 
     if isinstance(scale.breaks, str) and scale.breaks == "default":
-        target_axis.set_major_locator(mdates.AutoDateLocator())
+        locator = mdates.AutoDateLocator(minticks=4, maxticks=6)
     else:
         breaks = scale.breaks
         if callable(breaks):
             lim = view_limits or scale.limits or (None, None)
             breaks = breaks(lim)
-        target_axis.set_major_locator(
-            FixedLocator(mdates.date2num(_to_mpl_dates(breaks)))
-        )
+        locator = FixedLocator(mdates.date2num(_to_mpl_dates(breaks)))
+    target_axis.set_major_locator(locator)
 
-    target_axis.set_major_formatter(
-        mdates.DateFormatter(scale.date_format or default_format)
-    )
+    if scale.date_format is None:
+        formatter = mdates.ConciseDateFormatter(locator)
+        formatter.show_offset = False  # ggplot2's label_date_short doesn't add offset
+    else:
+        formatter = mdates.DateFormatter(scale.date_format)
+    target_axis.set_major_formatter(formatter)
 
     # Optional explicit ``labels=[...]`` overrides the formatter (used
     # when the user wants completely custom strings, not strftime).
@@ -96,26 +103,23 @@ def _apply_date_axis(scale, ax, axis: str, *, default_format: str,
 
 @dataclass
 class ScaleDate(ScaleContinuous):
-    """Date axis. Default formatter strips time."""
+    """Date axis. ``ConciseDateFormatter`` auto-strips time; year-aligned
+    ticks render as bare years (matches R's ``label_date_short``)."""
 
     date_format: str | None = None  # passed to mdates.DateFormatter
 
     def apply_to_axis(self, ax, axis: str, view_limits=None) -> None:
-        _apply_date_axis(self, ax, axis,
-                         default_format="%Y-%m-%d",
-                         view_limits=view_limits)
+        _apply_date_axis(self, ax, axis, view_limits=view_limits)
 
 
 @dataclass
 class ScaleDatetime(ScaleContinuous):
-    """Datetime axis. Default formatter shows year-month-day plus time."""
+    """Datetime axis."""
 
     date_format: str | None = None
 
     def apply_to_axis(self, ax, axis: str, view_limits=None) -> None:
-        _apply_date_axis(self, ax, axis,
-                         default_format="%Y-%m-%d %H:%M",
-                         view_limits=view_limits)
+        _apply_date_axis(self, ax, axis, view_limits=view_limits)
 
 
 @dataclass
@@ -125,9 +129,7 @@ class ScaleTime(ScaleContinuous):
     date_format: str | None = None
 
     def apply_to_axis(self, ax, axis: str, view_limits=None) -> None:
-        _apply_date_axis(self, ax, axis,
-                         default_format="%H:%M:%S",
-                         view_limits=view_limits)
+        _apply_date_axis(self, ax, axis, view_limits=view_limits)
 
 
 def _resolve_date_format(date_format, date_labels):

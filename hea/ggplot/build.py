@@ -269,6 +269,12 @@ def build(plot) -> BuildOutput:
         df = _attach_facet_columns(df, ld, facet_vars)
         df = _drop_na(df, layer)
         df = _add_group(df)
+        # Apply user-added positional scale transforms (scale_x_log10 etc.)
+        # to the data BEFORE the stat runs — matches ggplot2's pipeline so
+        # binning, smoothing, etc. operate on transformed values. Without
+        # this, ``geom_bin2d() + scale_x_log10()`` would bin in linear
+        # space then visually log-warp the bins (= wrong; chunky bins).
+        df = _apply_scale_transforms_pre_stat(df, plot.scales)
         df = _stat_per_panel(df, layer, facet_vars)
         df = _apply_deferred(df, after_stat_map, plot.plot_env)
         pre_position.append(df)
@@ -453,6 +459,37 @@ def _attach_facet_columns(df: pl.DataFrame, source: pl.DataFrame,
     cols = [source[v].alias(v) for v in facet_vars
             if v in source.columns and v not in df.columns]
     return df.with_columns(cols) if cols else df
+
+
+def _apply_scale_transforms_pre_stat(df: pl.DataFrame, scales) -> pl.DataFrame:
+    """Apply user-added positional scale transforms to the data BEFORE
+    ``stat.compute_layer`` runs. Mirrors ggplot2's pipeline.
+
+    Looks at the user-explicitly-added scales in ``plot.scales`` (NOT
+    auto-registered ones — those don't have a transform yet). For any
+    explicit scale with a non-identity ``transform``, every positional
+    sibling column of that aesthetic (``x`` plus ``xmin``/``xmax``/
+    ``xend``/etc.) is transformed in-place.
+    """
+    if df is None or len(df) == 0 or len(df.columns) == 0:
+        return df
+    for axis in ("x", "y"):
+        sc = scales.get(axis)
+        if sc is None:
+            continue
+        trans = getattr(sc, "transform", None)
+        if trans is None or trans.name == "identity":
+            continue
+        for sibling in _positional_aes_for(axis):
+            if sibling not in df.columns:
+                continue
+            arr = df[sibling].to_numpy()
+            try:
+                transformed = trans.transform(arr)
+            except Exception:
+                continue
+            df = df.with_columns(pl.Series(sibling, transformed))
+    return df
 
 
 def _stat_per_panel(df: pl.DataFrame, layer, facet_vars: list[str]) -> pl.DataFrame:
