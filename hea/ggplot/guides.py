@@ -223,9 +223,14 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
         levels = list(scale.levels)
         key = (source, tuple(levels))
 
-        # Title precedence: labs() override > scale.name > aes-source > aes name
+        # Title precedence: labs() override > scale.name > aes-source > aes name.
+        # ``scale.name`` may be the ``_NAME_MISSING`` sentinel (factory wasn't
+        # called with name=) — treat that as "no override". An explicit
+        # ``name=None`` (suppress) yields ``""`` here, which is falsy and
+        # falls through to the source name — for legend titles that's fine
+        # since no axis-style suppression UI exists yet.
         title = (plot_labels.get(aes_name)
-                 or scale.name
+                 or _scale_name_or_none(scale)
                  or aes_source.get(aes_name)
                  or aes_name)
 
@@ -268,6 +273,20 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
     return list(groups.values())
 
 
+def _scale_name_or_none(scale):
+    """Return ``scale.name`` if it was explicitly set, else ``None``.
+
+    Filters the ``_NAME_MISSING`` sentinel (factory wasn't called with
+    name=) so legend / colorbar title fallbacks treat it as "no override".
+    """
+    from .scales.scale import _NAME_MISSING
+
+    nm = getattr(scale, "name", None)
+    if nm is _NAME_MISSING:
+        return None
+    return nm
+
+
 def _resolve_discrete_labels(scale, levels):
     """Apply ``scale.labels`` to a discrete scale's levels for legend display.
 
@@ -283,7 +302,7 @@ def _resolve_discrete_labels(scale, levels):
       ``len(levels)``.
     """
     labels = getattr(scale, "labels", "default")
-    if labels == "default":
+    if isinstance(labels, str) and labels == "default":
         return [str(level) for level in levels]
     if labels is None:
         return ["" for _ in levels]
@@ -383,7 +402,7 @@ def build_colorbar_specs(plot, build_output) -> list[ColorbarSpec]:
             continue
         seen.add(id(scale))
         title = (plot_labels.get(aes_name)
-                 or scale.name
+                 or _scale_name_or_none(scale)
                  or aes_source.get(aes_name)
                  or aes_name)
         lo, hi = scale.range_

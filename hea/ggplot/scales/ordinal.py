@@ -124,7 +124,7 @@ class ScaleOrdinal(Scale):
         if self.breaks is None:
             ticks = []
             tick_labels = []
-        elif self.breaks == "default":
+        elif isinstance(self.breaks, str) and self.breaks == "default":
             ticks = list(range(n))
             tick_labels = list(levels)
         else:

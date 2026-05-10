@@ -130,7 +130,7 @@ def _render_single(plot, build_output, ax, subplotspec=None):
                 ax, axis, view_limits=_coord_view_limits(plot.coordinates, axis),
             )
 
-    xlabel, ylabel = _default_labels(plot)
+    xlabel, ylabel = _default_labels(plot, build_output)
     if is_flipped:
         xlabel, ylabel = ylabel, xlabel
     if xlabel is not None:
@@ -236,7 +236,7 @@ def _render_facets(plot, build_output, layout, subplotspec=None):
 
     # Common axis labels — set on the figure rather than per-panel so they
     # land in the canonical "outer edge only" position.
-    xlabel, ylabel = _default_labels(plot)
+    xlabel, ylabel = _default_labels(plot, build_output)
     if is_flipped:
         xlabel, ylabel = ylabel, xlabel
     if xlabel is not None:
@@ -605,19 +605,43 @@ def _apply_strip_background(theme, ax) -> None:
     title.set_va("center")
 
 
-def _default_labels(plot):
+def _default_labels(plot, build_output=None):
     """Resolve x/y labels with explicit ``labs()`` overrides taking priority.
 
     Precedence per axis: ``plot.labels[axis]`` (set by ``labs()``/``xlab()``/
-    ``ylab()``) → ``plot.mapping`` deparse → first layer mapping deparse →
-    stat default (y only).
+    ``ylab()``) → ``scale.name`` (when explicitly set on the axis scale,
+    e.g. ``scale_x_date(name=...)``) → ``plot.mapping`` deparse → first
+    layer mapping deparse → stat default (y only).
+
+    The scale.name fallback uses the ``_NAME_MISSING`` sentinel to tell
+    "user passed name=None to *suppress*" apart from "user didn't pass
+    name=" (which yields the auto label). With name=None, the resolved
+    label is ``""`` — matplotlib renders no axis title.
 
     The layer-mapping fallback matches the patchwork-doc idiom
     ``ggplot(df).geom_point(aes("mpg", "disp"))`` — aes on the layer, not
     the plot. ggplot2 picks up the labels from the first matching layer;
     we do the same.
     """
+    from .scales.scale import _NAME_MISSING
+
     explicit = plot.labels
+
+    def _scale_name_for(axis_key):
+        """Return ``""`` for explicit None (suppress), the string for an
+        explicit name, or ``None`` to defer to mapping fallback."""
+        if build_output is None:
+            return None
+        scales = getattr(build_output, "scales", None) or {}
+        sc = scales.get(axis_key)
+        if sc is None:
+            return None
+        nm = getattr(sc, "name", _NAME_MISSING)
+        if nm is _NAME_MISSING:
+            return None
+        if nm is None:
+            return ""
+        return str(nm)
 
     def _from_mapping(mapping, key):
         from .aes import AfterStat
@@ -664,12 +688,20 @@ def _default_labels(plot):
     if "x" in explicit:
         xlabel = str(explicit["x"])
     else:
-        xlabel = _from_mapping(plot.mapping, "x") or _from_layers("x")
+        scale_x = _scale_name_for("x")
+        if scale_x is not None:
+            xlabel = scale_x
+        else:
+            xlabel = _from_mapping(plot.mapping, "x") or _from_layers("x")
 
     if "y" in explicit:
         ylabel = str(explicit["y"])
     else:
-        ylabel = _from_mapping(plot.mapping, "y") or _from_layers("y")
+        scale_y = _scale_name_for("y")
+        if scale_y is not None:
+            ylabel = scale_y
+        else:
+            ylabel = _from_mapping(plot.mapping, "y") or _from_layers("y")
         if ylabel is None:
             # No user-mapped y → fall back to the first layer's stat default,
             # so histograms get "count" / density gets "density" without

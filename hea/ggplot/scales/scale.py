@@ -14,10 +14,19 @@ from dataclasses import dataclass
 from typing import Any
 
 
+# Sentinel for "user did not pass an explicit name=" to a scale factory.
+# Lets us distinguish that case from ``name=None`` (which mirrors R's
+# ``name = NULL`` and means *suppress the axis title*). Factories opt in
+# by defaulting their ``name`` kwarg to this sentinel; the consumer in
+# ``render._default_labels`` then knows whether to override the
+# auto-derived label.
+_NAME_MISSING: Any = object()
+
+
 @dataclass
 class Scale:
     aesthetics: tuple[str, ...] = ()
-    name: str | None = None
+    name: Any = _NAME_MISSING
     # ``breaks``: "default" | None (no ticks) | array-like | callable
     breaks: Any = "default"
     # ``labels``: "default" | array-like | callable(breaks) -> list[str]

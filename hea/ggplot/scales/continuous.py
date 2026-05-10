@@ -95,7 +95,7 @@ class ScaleContinuous(Scale):
         # explicit breaks, defer to matplotlib's native locator (LogLocator
         # for log; default for FuncScale). MaxNLocator-on-linear-coords would
         # produce e.g. evenly spaced linear ticks on a log axis — wrong.
-        if self.breaks == "default" and ms is not None:
+        if isinstance(self.breaks, str) and self.breaks == "default" and ms is not None:
             return
 
         # Compute breaks against the EXPANDED data range — matches
@@ -179,7 +179,7 @@ class ScaleContinuous(Scale):
         return (lo - m_lo * span - a_lo, hi + m_hi * span + a_hi)
 
     def _compute_breaks(self, lim):
-        if self.breaks == "default":
+        if isinstance(self.breaks, str) and self.breaks == "default":
             from ._breaks import extended_breaks
 
             return extended_breaks(lim[0], lim[1], m=5)
@@ -188,7 +188,7 @@ class ScaleContinuous(Scale):
         return np.asarray(self.breaks)
 
     def _compute_labels(self, breaks):
-        if self.labels == "default":
+        if isinstance(self.labels, str) and self.labels == "default":
             # Per-axis (vector) format choice: scientific only when its
             # max width strictly beats fixed, matching R's ``format()``.
             return format_breaks(breaks)

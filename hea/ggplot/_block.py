@@ -169,7 +169,7 @@ def measure_block(plot, build_output) -> PlotBlock:
     # --- LEFT margin: ylab (rotated 90) + ytick reserve.
     # ylab gap uses ``axes.labelpad`` (matplotlib's actual rendering)
     # — same rationale as the xlab side.
-    xlabel, ylabel = _default_labels(plot)
+    xlabel, ylabel = _default_labels(plot, build_output)
     ylab_w = M.text_size_in(
         ylabel,
         fontsize=M.AXIS_TITLE_SIZE_PT,
@@ -599,7 +599,7 @@ def _render_single_into(
                 view_limits=_coord_view_limits(plot.coordinates, axis),
             )
 
-    xlabel, ylabel = _default_labels(plot)
+    xlabel, ylabel = _default_labels(plot, build_output)
     if is_flipped:
         xlabel, ylabel = ylabel, xlabel
     if xlabel is not None:
@@ -715,7 +715,7 @@ def _render_facets_into(
     _hide_redundant_facet_ticks(axes_grid, sharex, sharey, n_panels)
 
     fig = flat_axes[0].figure
-    xlabel, ylabel = _default_labels(plot)
+    xlabel, ylabel = _default_labels(plot, build_output)
     if is_flipped:
         xlabel, ylabel = ylabel, xlabel
     # Always use the bbox-aware placement — even for standalone faceted

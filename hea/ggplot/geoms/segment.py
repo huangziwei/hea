@@ -58,6 +58,22 @@ def _per_row_widths(df, col, default):
     return arr.astype(float) * _PT_PER_MM
 
 
+def _to_numeric_axis(arr):
+    """Coerce datetime64 / timedelta64 arrays to matplotlib's float
+    representation so they can sit in the same numpy array as numeric
+    coordinates — needed by ``LineCollection`` / ``column_stack``, which
+    require a uniform dtype.
+
+    Numeric dtypes pass through unchanged."""
+    kind = getattr(arr.dtype, "kind", None)
+    if kind == "M":  # datetime64
+        from matplotlib.dates import date2num
+        return date2num(arr)
+    if kind == "m":  # timedelta64
+        return arr.astype("float64")
+    return arr
+
+
 def _update_lims(ax, xs, ys):
     ax.update_datalim(
         [(float(np.min(xs)), float(np.min(ys))),
@@ -147,10 +163,10 @@ class GeomSegment(Geom):
 
         if len(data) == 0:
             return
-        x = data["x"].to_numpy()
-        y = data["y"].to_numpy()
-        xend = data["xend"].to_numpy()
-        yend = data["yend"].to_numpy()
+        x = _to_numeric_axis(data["x"].to_numpy())
+        y = _to_numeric_axis(data["y"].to_numpy())
+        xend = _to_numeric_axis(data["xend"].to_numpy())
+        yend = _to_numeric_axis(data["yend"].to_numpy())
 
         if self.arrow is None:
             # Fast path: no arrowhead → one LineCollection for all rows.
@@ -221,10 +237,10 @@ class GeomCurve(Geom):
             return
 
         n = len(data)
-        x = data["x"].to_numpy()
-        y = data["y"].to_numpy()
-        xend = data["xend"].to_numpy()
-        yend = data["yend"].to_numpy()
+        x = _to_numeric_axis(data["x"].to_numpy())
+        y = _to_numeric_axis(data["y"].to_numpy())
+        xend = _to_numeric_axis(data["xend"].to_numpy())
+        yend = _to_numeric_axis(data["yend"].to_numpy())
         colours = (data["colour"].to_list()
                    if "colour" in data.columns else ["black"] * n)
         sizes = (data["size"].to_numpy()

@@ -279,6 +279,21 @@ def case_when(*pairs, default=None) -> pl.Expr:
     return expr.otherwise(_lit(default))
 
 
+def row_number() -> pl.Expr:
+    """dplyr's ``row_number()`` — 1-based row position.
+
+    Returns a polars expression suitable for use inside ``mutate()`` /
+    ``select()``. Mirrors dplyr's convention: positions start at 1, not 0.
+
+    Examples
+    --------
+    >>> import hea
+    >>> from hea import row_number
+    >>> hea.DataFrame({"x": [10, 20, 30]}).mutate(id=row_number())  # doctest: +SKIP
+    """
+    return pl.int_range(1, pl.len() + 1)
+
+
 def str_wrap(string, width=80, indent=0, exdent=0, whitespace_only=True):
     """stringr's ``str_wrap()`` — wrap text to a fixed line width.
 
@@ -364,10 +379,11 @@ __all__ = [
     "mean", "median", "var", "sd", "quantile", "cor", "cov",
     # coercion / predicates
     "as_numeric", "as_integer", "as_character", "as_logical",
+    "as_date", "as_Date",
     "is_na", "is_null", "is_finite", "is_numeric", "is_factor",
     "factor", "levels", "nlevels",
     # readr-style parsing + dplyr conditionals + stringr text helpers
-    "parse_number", "if_else", "case_when", "str_wrap",
+    "parse_number", "if_else", "case_when", "str_wrap", "row_number",
     # distributions: d/p/q/r families
     "dnorm", "pnorm", "qnorm", "rnorm",
     "dt", "pt", "qt", "rt",
@@ -891,6 +907,41 @@ def as_logical(x):
     if isinstance(x, pl.Series):
         return x.cast(pl.Boolean)
     return np.asarray(x, dtype=bool)
+
+
+def as_date(x, format=None):
+    """R/lubridate's ``as_date()`` — coerce strings to ``Date``.
+
+    Works on polars expressions (typical use inside ``mutate()``) and on
+    eager Series; both delegate to ``str.to_date``. Pass ``format=`` for
+    a strptime pattern; omit for ISO-8601 auto-detect (matches
+    lubridate's default).
+
+    Examples
+    --------
+    >>> import hea
+    >>> from hea import col
+    >>> from hea.R import as_date
+    >>> hea.DataFrame({"s": ["2024-01-15"]}).mutate(d=as_date(col("s")))  # doctest: +SKIP
+
+    Already-``Date`` inputs pass through (cast to ``pl.Date``).
+    Numeric / epoch-day input isn't supported here — use
+    ``pl.from_epoch(x, time_unit='d')`` for that.
+    """
+    if isinstance(x, pl.Expr):
+        return x.str.to_date(format=format)
+    if isinstance(x, pl.Series):
+        if x.dtype == pl.Date:
+            return x
+        if x.dtype == pl.Datetime:
+            return x.dt.date()
+        return x.str.to_date(format=format)
+    return pl.Series(x).str.to_date(format=format)
+
+
+# R's base spelling (``as.Date``) — Python can't have a dot, so the
+# convention here is the camel-cased underscore form. Same function.
+as_Date = as_date
 
 
 def is_na(x):

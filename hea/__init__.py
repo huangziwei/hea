@@ -42,6 +42,8 @@ from .lm import lm
 from .lme import lme
 from .R import (
     aov,
+    as_Date,
+    as_date,
     bartlett_test,
     binom_test,
     case_when,
@@ -56,6 +58,7 @@ from .R import (
     parse_number,
     prop_test,
     rank,
+    row_number,
     shapiro_test,
     signed_rank,
     str_wrap,
