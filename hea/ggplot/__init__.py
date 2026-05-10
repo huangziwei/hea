@@ -101,6 +101,11 @@ from .positions import (
     position_stack,
 )
 from .scales import (
+    label_comma,
+    label_currency,
+    label_dollar,
+    label_number,
+    label_percent,
     lims,
     scale_alpha,
     scale_alpha_continuous,
@@ -370,6 +375,11 @@ __all__ = [
     "xlim",
     "ylim",
     "lims",
+    "label_number",
+    "label_comma",
+    "label_dollar",
+    "label_currency",
+    "label_percent",
     "annotate",
     "annotation_custom",
     "arrow",

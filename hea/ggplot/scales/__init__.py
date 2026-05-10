@@ -54,6 +54,13 @@ from .discrete import (
     scale_fill_manual,
     scale_fill_viridis_d,
 )
+from .label_format import (
+    label_comma,
+    label_currency,
+    label_dollar,
+    label_number,
+    label_percent,
+)
 from .non_color import (
     scale_alpha,
     scale_alpha_continuous,
@@ -200,4 +207,10 @@ __all__ = [
     "ScaleTime",
     "ScalePercent",
     "ScaleOrdinal",
+    # scales::label_* formatters
+    "label_number",
+    "label_comma",
+    "label_dollar",
+    "label_currency",
+    "label_percent",
 ]
