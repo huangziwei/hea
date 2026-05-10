@@ -24,7 +24,7 @@ from .refline import geom_abline, geom_hline, geom_vline
 from .ribbon import geom_area, geom_ribbon
 from .segment import geom_curve, geom_segment
 from .smooth import geom_smooth
-from .text import geom_label, geom_label_repel, geom_text
+from .text import geom_label, geom_label_repel, geom_text, geom_text_repel
 from .violin import geom_violin
 
 __all__ = [
@@ -47,6 +47,7 @@ __all__ = [
     "geom_boxplot",
     "geom_violin",
     "geom_text",
+    "geom_text_repel",
     "geom_label",
     "geom_label_repel",
     "geom_hline",

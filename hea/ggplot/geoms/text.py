@@ -319,9 +319,28 @@ class GeomLabelRepel(GeomLabel):
     segment_alpha: float = 1.0
     direction: str = "both"           # "both" | "x" | "y"
 
-    def draw_panel(self, data, ax) -> None:
+    def _make_text_artist(self, ax, x, y, label, *,
+                          colour, fill, size, angle):
+        """Render this label as text inside a rounded box (geom_label style)."""
         from .._util import r_color
+        border_pt = float(self.label_size) * _PT_PER_MM
+        return ax.text(
+            x, y, str(label),
+            color=r_color(colour),
+            fontsize=float(size) * _PT_PER_MM,
+            rotation=float(angle),
+            ha="center", va="center",
+            bbox=dict(
+                boxstyle=f"round,pad={float(self.label_padding)},"
+                         f"rounding_size={float(self.label_r)}",
+                facecolor=r_color(fill),
+                edgecolor=r_color(colour),
+                linewidth=border_pt,
+            ),
+            zorder=10,
+        )
 
+    def draw_panel(self, data, ax) -> None:
         if len(data) == 0:
             return
         x = data["x"].to_numpy().astype(float)
@@ -330,7 +349,14 @@ class GeomLabelRepel(GeomLabel):
         n = len(labels)
 
         colour = data["colour"].to_list() if "colour" in data.columns else [self.default_aes["colour"]] * n
-        fill = data["fill"].to_list() if "fill" in data.columns else [self.default_aes["fill"]] * n
+        # ``fill`` only exists on GeomLabel subclasses; fall back to ``colour``
+        # so GeomTextRepel can share this code path.
+        if "fill" in data.columns:
+            fill = data["fill"].to_list()
+        elif "fill" in self.default_aes:
+            fill = [self.default_aes["fill"]] * n
+        else:
+            fill = list(colour)
         size = data["size"].to_numpy() if "size" in data.columns else np.full(n, self.default_aes["size"])
         angle = data["angle"].to_numpy() if "angle" in data.columns else np.full(n, self.default_aes["angle"])
 
@@ -341,27 +367,16 @@ class GeomLabelRepel(GeomLabel):
             return
 
         # Initial positions: anchor + nudge. ha/va fixed at center for
-        # repel — we move the *whole box*, not the text-within-box anchor.
+        # repel — we move the *whole label*, not the text-within-box anchor.
         x_init = x[keep] + float(self.nudge_x)
         y_init = y[keep] + float(self.nudge_y)
-        border_pt = float(self.label_size) * _PT_PER_MM
 
         text_artists = []
         for k, i in enumerate(keep):
-            ta = ax.text(
-                x_init[k], y_init[k], str(labels[i]),
-                color=r_color(colour[i]),
-                fontsize=float(size[i]) * _PT_PER_MM,
-                rotation=float(angle[i]),
-                ha="center", va="center",
-                bbox=dict(
-                    boxstyle=f"round,pad={float(self.label_padding)},"
-                             f"rounding_size={float(self.label_r)}",
-                    facecolor=r_color(fill[i]),
-                    edgecolor=r_color(colour[i]),
-                    linewidth=border_pt,
-                ),
-                zorder=10,
+            ta = self._make_text_artist(
+                ax, x_init[k], y_init[k], labels[i],
+                colour=colour[i], fill=fill[i],
+                size=size[i], angle=angle[i],
             )
             # Don't let tight_layout shrink the axes for moved labels.
             ta.set_in_layout(False)
@@ -409,6 +424,80 @@ def geom_label_repel(mapping=None, data=None, *, stat="identity",
         geom=GeomLabelRepel(
             label_padding=label_padding, label_r=label_r,
             label_size=label_size,
+            nudge_x=nudge_x, nudge_y=nudge_y,
+            force=force, force_pull=force_pull,
+            box_padding=box_padding, point_padding=point_padding,
+            min_segment_length=min_segment_length,
+            max_iter=max_iter, seed=seed,
+            segment_color=segment_color, segment_size=segment_size,
+            segment_alpha=segment_alpha, direction=direction,
+        ),
+        stat=resolve_stat(stat),
+        position=resolve_position(position),
+        mapping=mapping,
+        data=data,
+        aes_params=aes_params,
+        geom_params=geom_params,
+        na_rm=na_rm,
+    )
+
+
+@dataclass
+class GeomTextRepel(GeomText):
+    """ggrepel's ``geom_text_repel`` — same force-directed placement and
+    connector machinery as :class:`GeomLabelRepel`, but the labels render
+    as bare text (no rounded background box). Useful when you want repel
+    behaviour without the visual weight of a fill/border."""
+    nudge_x: float = 0.0
+    nudge_y: float = 0.0
+    force: float = 1.0
+    force_pull: float = 1.0
+    box_padding: float = 0.25
+    point_padding: float = 0.0
+    min_segment_length: float = 0.5
+    max_iter: int = 2000
+    seed: int | None = None
+    segment_color: str | None = None
+    segment_size: float = 0.5
+    segment_alpha: float = 1.0
+    direction: str = "both"
+
+    def _make_text_artist(self, ax, x, y, label, *,
+                          colour, fill, size, angle):
+        """Render this label as bare text — no bounding box."""
+        from .._util import r_color
+        return ax.text(
+            x, y, str(label),
+            color=r_color(colour),
+            fontsize=float(size) * _PT_PER_MM,
+            rotation=float(angle),
+            ha="center", va="center",
+            zorder=10,
+        )
+
+    # Reuse GeomLabelRepel's draw_panel — it already routes through
+    # self._make_text_artist for the per-row artist.
+    draw_panel = GeomLabelRepel.draw_panel
+
+
+def geom_text_repel(mapping=None, data=None, *, stat="identity",
+                    position="identity", na_rm=False,
+                    nudge_x=0.0, nudge_y=0.0,
+                    force=1.0, force_pull=1.0,
+                    box_padding=0.25, point_padding=0.0,
+                    min_segment_length=0.5,
+                    max_iter=2000, seed=None,
+                    segment_color=None, segment_size=0.5,
+                    segment_alpha=1.0, direction="both",
+                    **kwargs):
+    from ..layer import Layer
+    from ..positions import resolve_position
+    from ..stats import resolve_stat
+
+    aes_params, geom_params = split_layer_kwargs(kwargs)
+
+    return Layer(
+        geom=GeomTextRepel(
             nudge_x=nudge_x, nudge_y=nudge_y,
             force=force, force_pull=force_pull,
             box_padding=box_padding, point_padding=point_padding,
