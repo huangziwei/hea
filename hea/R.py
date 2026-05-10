@@ -222,6 +222,63 @@ def if_else(condition, true_value, false_value, missing=None) -> pl.Expr:
     return pl.when(condition).then(t).otherwise(f)
 
 
+def case_when(*pairs, default=None) -> pl.Expr:
+    """dplyr's ``case_when()`` — multi-branch vectorized conditional.
+
+    Each pair is ``(condition, value)``. The result for each row is the
+    ``value`` of the first pair whose ``condition`` is True; rows matching
+    no condition take ``default``. Mirrors dplyr's ``case_when()`` —
+    Python has no ``cond ~ value`` formula syntax, so pass tuples instead.
+
+    Bare-string ``value``s are lifted to ``pl.lit`` (matching dplyr's
+    "strings are values" convention). Polars' raw ``pl.when(...).then("x")``
+    would interpret ``"x"`` as a column reference.
+
+    Null conditions fall through to the next branch (and ultimately to
+    ``default``), matching dplyr 1.1+. Use :func:`if_else` if you want
+    null-in → null-out instead.
+
+    Parameters
+    ----------
+    *pairs : tuple[condition, value]
+        Each ``condition`` is a boolean ``pl.Expr`` / ``pl.Series``;
+        each ``value`` is a scalar / ``pl.Expr`` / ``pl.Series``.
+    default : scalar | pl.Expr, optional
+        Value for rows matching no condition. Defaults to ``None`` (null),
+        matching dplyr's ``.default = NA``.
+
+    Examples
+    --------
+    >>> import hea
+    >>> from hea import case_when, col
+    >>> df = hea.DataFrame({"drv": ["f", "r", "4", "f"]})
+    >>> df.mutate(label=case_when(
+    ...     (col("drv") == "f", "front-wheel drive"),
+    ...     (col("drv") == "r", "rear-wheel drive"),
+    ...     (col("drv") == "4", "4-wheel drive"),
+    ... ))  # doctest: +SKIP
+    """
+    if not pairs:
+        raise TypeError(
+            "case_when() requires at least one (condition, value) pair"
+        )
+
+    def _lit(v):
+        return v if isinstance(v, (pl.Expr, pl.Series)) else pl.lit(v)
+
+    expr = None
+    for i, pair in enumerate(pairs):
+        if not (isinstance(pair, tuple) and len(pair) == 2):
+            raise TypeError(
+                f"case_when() pair {i} must be a (condition, value) "
+                f"tuple, got {pair!r}"
+            )
+        cond, val = pair
+        val = _lit(val)
+        expr = pl.when(cond).then(val) if expr is None else expr.when(cond).then(val)
+    return expr.otherwise(_lit(default))
+
+
 def parse_number(x):
     """readr's ``parse_number()`` — pull the first number out of a string column.
 
@@ -265,8 +322,8 @@ __all__ = [
     "as_numeric", "as_integer", "as_character", "as_logical",
     "is_na", "is_null", "is_finite", "is_numeric", "is_factor",
     "factor", "levels", "nlevels",
-    # readr-style parsing + dplyr conditional
-    "parse_number", "if_else",
+    # readr-style parsing + dplyr conditionals
+    "parse_number", "if_else", "case_when",
     # distributions: d/p/q/r families
     "dnorm", "pnorm", "qnorm", "rnorm",
     "dt", "pt", "qt", "rt",

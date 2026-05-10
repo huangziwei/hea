@@ -530,6 +530,62 @@ def test_parse_number_and_if_else():
     assert out5["label"].to_list() == ["YES", "NO", "NO"]
 
 
+def test_case_when():
+    """``hea.case_when`` ports dplyr's ``case_when()`` — multi-branch
+    vectorized conditional. Pass ``(condition, value)`` tuples instead of
+    R's ``cond ~ value`` formulas (Python has no formula syntax)."""
+    import hea
+    from hea import case_when, col
+
+    # Canonical R from R for Data Science: drv → full drive-type label.
+    df = hea.DataFrame({"drv": ["f", "r", "4", "f", "r"]})
+    out = df.mutate(
+        drive_type=case_when(
+            (col("drv") == "f", "front-wheel drive"),
+            (col("drv") == "r", "rear-wheel drive"),
+            (col("drv") == "4", "4-wheel drive"),
+        )
+    )
+    assert out["drive_type"].to_list() == [
+        "front-wheel drive", "rear-wheel drive", "4-wheel drive",
+        "front-wheel drive", "rear-wheel drive",
+    ]
+
+    # No matching condition + no default → null (matches dplyr's ``.default = NA``).
+    df2 = hea.DataFrame({"x": [1, 2, 3, 4]})
+    out2 = df2.mutate(g=case_when((col("x") < 2, "low"), (col("x") > 3, "high")))
+    assert out2["g"].to_list() == ["low", None, None, "high"]
+
+    # default= fills the unmatched rows.
+    out3 = df2.mutate(g=case_when(
+        (col("x") < 2, "low"), (col("x") > 3, "high"), default="mid",
+    ))
+    assert out3["g"].to_list() == ["low", "mid", "mid", "high"]
+
+    # Null condition (NA == anything → NA) falls through to default —
+    # matches dplyr 1.1+ semantics. Use ``if_else`` for null-in → null-out.
+    df3 = hea.DataFrame({"x": [1, None, 4]})
+    out4 = df3.mutate(g=case_when(
+        (col("x") < 2, "low"), (col("x") > 3, "high"), default="mid",
+    ))
+    assert out4["g"].to_list() == ["low", "mid", "high"]
+
+    # Bare-string values are lifted to ``pl.lit`` (not interpreted as columns,
+    # which polars' raw ``then("x")`` would do).
+    df4 = hea.DataFrame({"label": ["x", "y", "z"]})
+    out5 = df4.mutate(g=case_when(
+        (col("label") == "x", "first"), default="other",
+    ))
+    assert out5["g"].to_list() == ["first", "other", "other"]
+
+    # Empty call is a usage error.
+    with pytest.raises(TypeError, match="at least one"):
+        case_when(default="x")
+    # Non-tuple pair is a usage error.
+    with pytest.raises(TypeError, match="must be a .* tuple"):
+        case_when(col("x") < 2)
+
+
 # ---------------------------------------------------------------------------
 # Cross-cutting: sp passthrough reproduces a fixed-sp fit
 # ---------------------------------------------------------------------------

@@ -44,6 +44,7 @@ from .R import (
     aov,
     bartlett_test,
     binom_test,
+    case_when,
     chisq_test,
     cor_test,
     fisher_test,
