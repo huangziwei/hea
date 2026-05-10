@@ -269,6 +269,11 @@ def build(plot) -> BuildOutput:
         df = _attach_facet_columns(df, ld, facet_vars)
         df = _drop_na(df, layer)
         df = _add_group(df)
+        # Drop rows outside ``scale_x/y_*(limits=...)`` BEFORE the stat
+        # so smooths / bins / counts only see the in-range subset.
+        # Distinct from ``coord_cartesian(xlim=...)`` which keeps data
+        # and only zooms at render time.
+        df = _drop_out_of_scale_limits(df, plot.scales)
         # Apply user-added positional scale transforms (scale_x_log10 etc.)
         # to the data BEFORE the stat runs — matches ggplot2's pipeline so
         # binning, smoothing, etc. operate on transformed values. Without
@@ -459,6 +464,58 @@ def _attach_facet_columns(df: pl.DataFrame, source: pl.DataFrame,
     cols = [source[v].alias(v) for v in facet_vars
             if v in source.columns and v not in df.columns]
     return df.with_columns(cols) if cols else df
+
+
+def _drop_out_of_scale_limits(df: pl.DataFrame, scales) -> pl.DataFrame:
+    """Drop rows whose positional value lies outside an explicit
+    ``scale_x/y_*(limits=...)`` range.
+
+    Mirrors ggplot2's pipeline: ``scale_*_continuous(limits=c(lo, hi))``
+    REMOVES out-of-range data before the stat (so e.g. ``geom_smooth``
+    fits only on the in-range subset). This is distinct from
+    ``coord_cartesian(xlim=...)``, which keeps the data and only zooms
+    the axis at render time.
+
+    Limits with ``None`` or ``NaN`` for one bound mean "no constraint
+    on that side" (matches R's ``c(NA, 6)``).
+    """
+    if df is None or len(df) == 0 or len(df.columns) == 0:
+        return df
+    import math as _math
+
+    for axis in ("x", "y"):
+        sc = scales.get(axis)
+        if sc is None or getattr(sc, "limits", None) is None:
+            continue
+        lim = sc.limits
+        if not isinstance(lim, (list, tuple)) or len(lim) != 2:
+            continue
+        # ScaleOrdinal's `limits=` is a list of CATEGORY NAMES, not a
+        # numeric range — drop-by-range doesn't apply there. The
+        # discrete-mapping pipeline filters by `resolved_limits()` later.
+        from .scales.ordinal import ScaleOrdinal
+
+        if isinstance(sc, ScaleOrdinal):
+            continue
+        lo, hi = lim
+        # Treat None/NaN as open bound on that side.
+        def _is_open(b):
+            return b is None or (isinstance(b, float) and _math.isnan(b))
+        if _is_open(lo) and _is_open(hi):
+            continue
+        for sibling in _positional_aes_for(axis):
+            if sibling not in df.columns:
+                continue
+            col = pl.col(sibling)
+            mask = pl.lit(True)
+            if not _is_open(lo):
+                mask = mask & (col >= lo)
+            if not _is_open(hi):
+                mask = mask & (col <= hi)
+            # Keep nulls (matches `_drop_na`'s contract — that step
+            # already removed any aesthetic-required nulls upstream).
+            df = df.filter(mask | col.is_null())
+    return df
 
 
 def _apply_scale_transforms_pre_stat(df: pl.DataFrame, scales) -> pl.DataFrame:
