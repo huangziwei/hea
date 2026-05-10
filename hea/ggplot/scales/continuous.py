@@ -192,8 +192,16 @@ class ScaleContinuous(Scale):
             # Per-axis (vector) format choice: scientific only when its
             # max width strictly beats fixed, matching R's ``format()``.
             return format_breaks(breaks)
+        if self.labels is None:
+            # ggplot2 / R: ``labels = NULL`` suppresses tick labels.
+            return ["" for _ in breaks]
         if callable(self.labels):
             return list(self.labels(breaks))
+        if isinstance(self.labels, dict):
+            # Dict lookup keyed by the break value — falls back to the
+            # break itself when missing (matches ggplot2's named-vector
+            # treatment in ``scale_*_continuous(labels = c(...))``).
+            return [str(self.labels.get(b, b)) for b in breaks]
         return [str(x) for x in self.labels]
 
 

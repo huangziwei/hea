@@ -255,7 +255,7 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
             groups[key] = LegendGroup(
                 title=title,
                 levels=levels,
-                labels=[str(level) for level in levels],
+                labels=_resolve_discrete_labels(scale, levels),
                 aes_values={},
                 key_glyph=getattr(geom, "key_glyph", "point") if geom else "point",
                 layer_aes_params=layer_params,
@@ -266,6 +266,35 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
         groups[key].aes_values[aes_name] = _scale_mapped_values(scale, levels)
 
     return list(groups.values())
+
+
+def _resolve_discrete_labels(scale, levels):
+    """Apply ``scale.labels`` to a discrete scale's levels for legend display.
+
+    Mirrors ggplot2's ``labels`` semantics on discrete scales:
+
+    * ``"default"`` (or attr missing) → ``str(level)`` for each level.
+    * ``None`` → blank labels (``labels = NULL`` in R hides the legend
+      entries' text but keeps the keys).
+    * dict → per-level lookup; missing keys fall back to ``str(level)``,
+      matching R's named-vector behaviour for partial overrides.
+    * callable → invoked once with the levels list, return the labels.
+    * list / tuple → used positionally; padded / truncated to match
+      ``len(levels)``.
+    """
+    labels = getattr(scale, "labels", "default")
+    if labels == "default":
+        return [str(level) for level in levels]
+    if labels is None:
+        return ["" for _ in levels]
+    if callable(labels):
+        return [str(x) for x in labels(levels)]
+    if isinstance(labels, dict):
+        return [str(labels.get(level, level)) for level in levels]
+    out = [str(x) for x in labels]
+    if len(out) < len(levels):
+        out += [str(levels[i]) for i in range(len(out), len(levels))]
+    return out[:len(levels)]
 
 
 def _find_layer_for_aes(plot, aes_name, *, layer_mappings=None,
