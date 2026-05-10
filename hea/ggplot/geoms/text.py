@@ -301,9 +301,12 @@ class GeomLabelRepel(GeomLabel):
     artists from each label-box edge back to its anchor. A second
     ``draw_idle`` paints the moved state.
 
-    Surface mirrors ggrepel's most-used args; not yet supported:
-    ``segment_curvature``, ``segment_ncp``, ``xlim``/``ylim``
-    (constraint boxes), ``hjust``/``vjust`` per label.
+    Full ggrepel parameter set is supported. Connectors render via
+    :class:`FancyArrowPatch` so curvature, arrows, and line types all
+    flow through one path. ``segment_ncp`` is accepted for API parity but
+    ignored: matplotlib's ``arc3`` connection style uses a fixed control
+    point — pure rad, no n-point control. ``parse`` (R plotmath) isn't
+    portable; matplotlib supports its own mathtext with ``$...$``.
     """
     nudge_x: float = 0.0
     nudge_y: float = 0.0
@@ -313,14 +316,23 @@ class GeomLabelRepel(GeomLabel):
     point_padding: float = 0.0        # in lines
     min_segment_length: float = 0.5   # in lines
     max_iter: int = 2000
+    max_time: float = 0.5             # seconds; 0 = no time cap
+    max_overlaps: int = 10
     seed: int | None = None
     segment_color: str | None = None  # default: same as label colour
     segment_size: float = 0.5         # mm
     segment_alpha: float = 1.0
+    segment_linetype: object = 1      # R lty (1=solid) or matplotlib string
+    segment_curvature: float = 0.0    # arc3 rad; positive curves one way
+    segment_ncp: int = 1              # accepted for parity; ignored
+    arrow: bool = False               # arrowhead at the anchor end
     direction: str = "both"           # "both" | "x" | "y"
+    xlim: tuple | None = None         # (min, max) in data coords; None = panel
+    ylim: tuple | None = None
+    verbose: bool = False
 
     def _make_text_artist(self, ax, x, y, label, *,
-                          colour, fill, size, angle):
+                          colour, fill, size, angle, ha, va):
         """Render this label as text inside a rounded box (geom_label style)."""
         from .._util import r_color
         border_pt = float(self.label_size) * _PT_PER_MM
@@ -329,7 +341,7 @@ class GeomLabelRepel(GeomLabel):
             color=r_color(colour),
             fontsize=float(size) * _PT_PER_MM,
             rotation=float(angle),
-            ha="center", va="center",
+            ha=ha, va=va,
             bbox=dict(
                 boxstyle=f"round,pad={float(self.label_padding)},"
                          f"rounding_size={float(self.label_r)}",
@@ -359,6 +371,8 @@ class GeomLabelRepel(GeomLabel):
             fill = list(colour)
         size = data["size"].to_numpy() if "size" in data.columns else np.full(n, self.default_aes["size"])
         angle = data["angle"].to_numpy() if "angle" in data.columns else np.full(n, self.default_aes["angle"])
+        hjust_arr = data["hjust"].to_numpy() if "hjust" in data.columns else None
+        vjust_arr = data["vjust"].to_numpy() if "vjust" in data.columns else None
 
         # Drop None / empty labels — ggrepel's na_rm equivalent.
         keep = [i for i, lbl in enumerate(labels)
@@ -366,10 +380,20 @@ class GeomLabelRepel(GeomLabel):
         if not keep:
             return
 
-        # Initial positions: anchor + nudge. ha/va fixed at center for
-        # repel — we move the *whole label*, not the text-within-box anchor.
+        # Initial positions: anchor + nudge.
         x_init = x[keep] + float(self.nudge_x)
         y_init = y[keep] + float(self.nudge_y)
+
+        # Resolve per-label ha/va (string aliases + inward/outward handled).
+        x_range, y_range = _axis_ranges_for_inward(
+            ax, x[keep], y[keep], hjust_arr, vjust_arr,
+        )
+        ha_list, va_list = [], []
+        for k, i in enumerate(keep):
+            h_raw = hjust_arr[i] if hjust_arr is not None else self.default_aes["hjust"]
+            v_raw = vjust_arr[i] if vjust_arr is not None else self.default_aes["vjust"]
+            ha_list.append(_hjust_to_ha(_resolve_just(h_raw, x[i], x_range, axis="h")))
+            va_list.append(_vjust_to_va(_resolve_just(v_raw, y[i], y_range, axis="v")))
 
         text_artists = []
         for k, i in enumerate(keep):
@@ -377,6 +401,7 @@ class GeomLabelRepel(GeomLabel):
                 ax, x_init[k], y_init[k], labels[i],
                 colour=colour[i], fill=fill[i],
                 size=size[i], angle=angle[i],
+                ha=ha_list[k], va=va_list[k],
             )
             # Don't let tight_layout shrink the axes for moved labels.
             ta.set_in_layout(False)
@@ -385,6 +410,7 @@ class GeomLabelRepel(GeomLabel):
         _schedule_repel(
             ax=ax,
             text_artists=text_artists,
+            ha_list=ha_list, va_list=va_list,
             x_anchor=x[keep], y_anchor=y[keep],
             x_init=x_init, y_init=y_init,
             colours=[colour[i] for i in keep],
@@ -392,6 +418,8 @@ class GeomLabelRepel(GeomLabel):
             force=float(self.force),
             force_pull=float(self.force_pull),
             max_iter=int(self.max_iter),
+            max_time=float(self.max_time),
+            max_overlaps=int(self.max_overlaps),
             box_padding_lines=float(self.box_padding),
             point_padding_lines=float(self.point_padding),
             min_segment_length_lines=float(self.min_segment_length),
@@ -399,7 +427,13 @@ class GeomLabelRepel(GeomLabel):
             segment_color=self.segment_color,
             segment_size_mm=float(self.segment_size),
             segment_alpha=float(self.segment_alpha),
+            segment_linetype=self.segment_linetype,
+            segment_curvature=float(self.segment_curvature),
+            arrow=bool(self.arrow),
             direction=str(self.direction),
+            xlim=self.xlim,
+            ylim=self.ylim,
+            verbose=bool(self.verbose),
         )
 
 
@@ -410,9 +444,14 @@ def geom_label_repel(mapping=None, data=None, *, stat="identity",
                      force=1.0, force_pull=1.0,
                      box_padding=0.25, point_padding=0.0,
                      min_segment_length=0.5,
-                     max_iter=2000, seed=None,
+                     max_iter=2000, max_time=0.5, max_overlaps=10,
+                     seed=None,
                      segment_color=None, segment_size=0.5,
-                     segment_alpha=1.0, direction="both",
+                     segment_alpha=1.0, segment_linetype=1,
+                     segment_curvature=0.0, segment_ncp=1,
+                     arrow=False,
+                     direction="both", xlim=None, ylim=None,
+                     verbose=False,
                      **kwargs):
     from ..layer import Layer
     from ..positions import resolve_position
@@ -428,9 +467,17 @@ def geom_label_repel(mapping=None, data=None, *, stat="identity",
             force=force, force_pull=force_pull,
             box_padding=box_padding, point_padding=point_padding,
             min_segment_length=min_segment_length,
-            max_iter=max_iter, seed=seed,
+            max_iter=max_iter, max_time=max_time,
+            max_overlaps=max_overlaps,
+            seed=seed,
             segment_color=segment_color, segment_size=segment_size,
-            segment_alpha=segment_alpha, direction=direction,
+            segment_alpha=segment_alpha,
+            segment_linetype=segment_linetype,
+            segment_curvature=segment_curvature,
+            segment_ncp=segment_ncp,
+            arrow=arrow,
+            direction=direction, xlim=xlim, ylim=ylim,
+            verbose=verbose,
         ),
         stat=resolve_stat(stat),
         position=resolve_position(position),
@@ -456,14 +503,23 @@ class GeomTextRepel(GeomText):
     point_padding: float = 0.0
     min_segment_length: float = 0.5
     max_iter: int = 2000
+    max_time: float = 0.5
+    max_overlaps: int = 10
     seed: int | None = None
     segment_color: str | None = None
     segment_size: float = 0.5
     segment_alpha: float = 1.0
+    segment_linetype: object = 1
+    segment_curvature: float = 0.0
+    segment_ncp: int = 1
+    arrow: bool = False
     direction: str = "both"
+    xlim: tuple | None = None
+    ylim: tuple | None = None
+    verbose: bool = False
 
     def _make_text_artist(self, ax, x, y, label, *,
-                          colour, fill, size, angle):
+                          colour, fill, size, angle, ha, va):
         """Render this label as bare text — no bounding box."""
         from .._util import r_color
         return ax.text(
@@ -471,7 +527,7 @@ class GeomTextRepel(GeomText):
             color=r_color(colour),
             fontsize=float(size) * _PT_PER_MM,
             rotation=float(angle),
-            ha="center", va="center",
+            ha=ha, va=va,
             zorder=10,
         )
 
@@ -486,9 +542,14 @@ def geom_text_repel(mapping=None, data=None, *, stat="identity",
                     force=1.0, force_pull=1.0,
                     box_padding=0.25, point_padding=0.0,
                     min_segment_length=0.5,
-                    max_iter=2000, seed=None,
+                    max_iter=2000, max_time=0.5, max_overlaps=10,
+                    seed=None,
                     segment_color=None, segment_size=0.5,
-                    segment_alpha=1.0, direction="both",
+                    segment_alpha=1.0, segment_linetype=1,
+                    segment_curvature=0.0, segment_ncp=1,
+                    arrow=False,
+                    direction="both", xlim=None, ylim=None,
+                    verbose=False,
                     **kwargs):
     from ..layer import Layer
     from ..positions import resolve_position
@@ -502,9 +563,17 @@ def geom_text_repel(mapping=None, data=None, *, stat="identity",
             force=force, force_pull=force_pull,
             box_padding=box_padding, point_padding=point_padding,
             min_segment_length=min_segment_length,
-            max_iter=max_iter, seed=seed,
+            max_iter=max_iter, max_time=max_time,
+            max_overlaps=max_overlaps,
+            seed=seed,
             segment_color=segment_color, segment_size=segment_size,
-            segment_alpha=segment_alpha, direction=direction,
+            segment_alpha=segment_alpha,
+            segment_linetype=segment_linetype,
+            segment_curvature=segment_curvature,
+            segment_ncp=segment_ncp,
+            arrow=arrow,
+            direction=direction, xlim=xlim, ylim=ylim,
+            verbose=verbose,
         ),
         stat=resolve_stat(stat),
         position=resolve_position(position),
@@ -516,14 +585,10 @@ def geom_text_repel(mapping=None, data=None, *, stat="identity",
     )
 
 
-def _schedule_repel(*, ax, text_artists, x_anchor, y_anchor, x_init, y_init,
-                    colours, sizes, force, force_pull, max_iter,
-                    box_padding_lines, point_padding_lines,
-                    min_segment_length_lines, seed,
-                    segment_color, segment_size_mm, segment_alpha,
-                    direction):
+def _schedule_repel(**params):
     """Defer the repel sim to the first draw (when bboxes are real).
     Disconnects after running so the second ``draw_idle`` doesn't loop."""
+    ax = params["ax"]
     fig = ax.figure
     state = {"cid": None}
 
@@ -531,33 +596,26 @@ def _schedule_repel(*, ax, text_artists, x_anchor, y_anchor, x_init, y_init,
         # Disconnect FIRST so the redraw we trigger doesn't re-enter us.
         fig.canvas.mpl_disconnect(state["cid"])
         try:
-            _do_repel(
-                renderer=event.renderer,
-                ax=ax, text_artists=text_artists,
-                x_anchor=x_anchor, y_anchor=y_anchor,
-                x_init=x_init, y_init=y_init,
-                colours=colours, sizes=sizes,
-                force=force, force_pull=force_pull, max_iter=max_iter,
-                box_padding_lines=box_padding_lines,
-                point_padding_lines=point_padding_lines,
-                min_segment_length_lines=min_segment_length_lines,
-                seed=seed,
-                segment_color=segment_color,
-                segment_size_mm=segment_size_mm,
-                segment_alpha=segment_alpha,
-                direction=direction,
-            )
+            _do_repel(renderer=event.renderer, **params)
         finally:
             fig.canvas.draw_idle()
 
     state["cid"] = fig.canvas.mpl_connect("draw_event", _on_draw)
 
 
-def _do_repel(*, renderer, ax, text_artists, x_anchor, y_anchor,
-              x_init, y_init, colours, sizes, force, force_pull, max_iter,
+def _do_repel(*, renderer, ax, text_artists, ha_list, va_list,
+              x_anchor, y_anchor, x_init, y_init, colours, sizes,
+              force, force_pull, max_iter, max_time, max_overlaps,
               box_padding_lines, point_padding_lines, min_segment_length_lines,
-              seed, segment_color, segment_size_mm, segment_alpha, direction):
+              seed, segment_color, segment_size_mm, segment_alpha,
+              segment_linetype, segment_curvature, arrow,
+              direction, xlim, ylim, verbose):
+    import time
+
+    from matplotlib.patches import FancyArrowPatch
+
     from .._util import r_color
+    from ...plot._util import r_lty
 
     n = len(text_artists)
     if n == 0:
@@ -566,7 +624,20 @@ def _do_repel(*, renderer, ax, text_artists, x_anchor, y_anchor,
     # Pixel-space conversions. ``transData`` is calibrated by this point
     # — first draw means scale.apply_to_axis has already run.
     anchors = ax.transData.transform(np.column_stack([x_anchor, y_anchor]))
-    pos = ax.transData.transform(np.column_stack([x_init, y_init]))
+
+    # Per-label offset between the user-visible text anchor (where ``set_position``
+    # plants the text) and the bbox CENTER (what the simulation tracks). Depends
+    # on the per-label ha/va. Without this, hjust/vjust != 0.5 would visibly
+    # drift after every position update.
+    bboxes0 = [ta.get_window_extent(renderer) for ta in text_artists]
+    anchor_to_center = np.zeros((n, 2))
+    for i, (bb, ha, va) in enumerate(zip(bboxes0, ha_list, va_list)):
+        anchor_px = ax.transData.transform([x_init[i], y_init[i]])
+        anchor_to_center[i, 0] = (bb.x0 + bb.width / 2) - anchor_px[0]
+        anchor_to_center[i, 1] = (bb.y0 + bb.height / 2) - anchor_px[1]
+
+    # ``pos`` tracks bbox CENTERS in display coords throughout the sim.
+    pos = ax.transData.transform(np.column_stack([x_init, y_init])) + anchor_to_center
     initial = pos.copy()
 
     px_per_pt = ax.figure.dpi / 72.0
@@ -577,9 +648,8 @@ def _do_repel(*, renderer, ax, text_artists, x_anchor, y_anchor,
     min_seg_px = min_segment_length_lines * line_px
 
     # Half-extents per label (from real renderer bboxes), inflated by box pad.
-    bboxes = [ta.get_window_extent(renderer) for ta in text_artists]
-    half_w = np.array([bb.width / 2 + box_pad_px for bb in bboxes])
-    half_h = np.array([bb.height / 2 + box_pad_px for bb in bboxes])
+    half_w = np.array([bb.width / 2 + box_pad_px for bb in bboxes0])
+    half_h = np.array([bb.height / 2 + box_pad_px for bb in bboxes0])
 
     dir_mask = np.array([
         1.0 if direction in ("both", "x") else 0.0,
@@ -588,14 +658,25 @@ def _do_repel(*, renderer, ax, text_artists, x_anchor, y_anchor,
 
     rng = np.random.default_rng(seed)
 
-    # Panel walls in display coords — keep labels inside the axes spines
-    # (ggrepel's default xlim/ylim = panel range). Without this, labels
-    # whose anchor sits near an edge can spill past it.
-    wall = ax.transAxes.transform([[0, 0], [1, 1]])
-    wall_xmin, wall_ymin = wall[0]
-    wall_xmax, wall_ymax = wall[1]
+    # Constraint walls: explicit xlim/ylim override the panel spines.
+    if xlim is not None:
+        wx = ax.transData.transform([[float(xlim[0]), 0], [float(xlim[1]), 0]])
+        wall_xmin, wall_xmax = float(wx[0, 0]), float(wx[1, 0])
+    else:
+        wxs = ax.transAxes.transform([[0, 0], [1, 0]])
+        wall_xmin, wall_xmax = float(wxs[0, 0]), float(wxs[1, 0])
+    if ylim is not None:
+        wy = ax.transData.transform([[0, float(ylim[0])], [0, float(ylim[1])]])
+        wall_ymin, wall_ymax = float(wy[0, 1]), float(wy[1, 1])
+    else:
+        wys = ax.transAxes.transform([[0, 0], [0, 1]])
+        wall_ymin, wall_ymax = float(wys[0, 1]), float(wys[1, 1])
 
-    for _ in range(max_iter):
+    t_start = time.perf_counter()
+    iters_run = 0
+
+    for it in range(max_iter):
+        iters_run = it + 1
         forces = np.zeros_like(pos)
         moved = False
 
@@ -637,7 +718,7 @@ def _do_repel(*, renderer, ax, text_artists, x_anchor, y_anchor,
             forces[:, 0] += np.where(use_x, ix * sx, 0.0).sum(axis=1) * force
             forces[:, 1] += np.where(use_y, iy * sy, 0.0).sum(axis=1) * force
 
-        # Wall forces: keep label boxes inside the panel.
+        # Wall forces: keep label boxes inside the constraint box.
         push_left = np.maximum(wall_xmin - (pos[:, 0] - half_w), 0.0)
         push_right = np.maximum((pos[:, 0] + half_w) - wall_xmax, 0.0)
         push_bottom = np.maximum(wall_ymin - (pos[:, 1] - half_h), 0.0)
@@ -659,13 +740,54 @@ def _do_repel(*, renderer, ax, text_artists, x_anchor, y_anchor,
         if not moved and np.max(np.abs(forces)) < 0.5:
             break
 
-    # Update text artist positions (data coords).
-    new_data = ax.transData.inverted().transform(pos)
+        if max_time > 0 and (time.perf_counter() - t_start) > max_time:
+            if verbose:
+                print(f"geom_*_repel: stopped at iter {iters_run} (max_time {max_time}s exceeded)")
+            break
+
+    # Final overlap count (for max_overlaps decision).
+    dx_f = pos[:, 0:1] - pos[:, 0:1].T
+    dy_f = pos[:, 1:2] - pos[:, 1:2].T
+    ox_f = (half_w[:, None] + half_w[None, :]) - np.abs(dx_f)
+    oy_f = (half_h[:, None] + half_h[None, :]) - np.abs(dy_f)
+    overlap_f = (ox_f > 0) & (oy_f > 0)
+    np.fill_diagonal(overlap_f, False)
+    n_overlapping = int((overlap_f.any(axis=1)).sum())
+
+    if verbose:
+        print(f"geom_*_repel: {iters_run} iters, {n_overlapping} labels still overlapping")
+
+    # If too many labels still overlap, hide the excess (matches ggrepel's
+    # max.overlaps behaviour: extra labels are silently dropped).
+    hide_mask = np.zeros(n, dtype=bool)
+    if n_overlapping > max_overlaps:
+        # Hide the most-overlapping labels first.
+        overlap_count = overlap_f.sum(axis=1)
+        n_to_hide = n_overlapping - max_overlaps
+        to_hide = np.argsort(-overlap_count)[:n_to_hide]
+        hide_mask[to_hide] = True
+        for i in np.where(hide_mask)[0]:
+            text_artists[i].set_visible(False)
+        if verbose:
+            print(f"geom_*_repel: hid {n_to_hide} labels (max_overlaps={max_overlaps})")
+
+    # Update text artist positions (data coords). ``set_position`` plants the
+    # *text anchor*, not the bbox center, so subtract back the per-label offset.
+    text_anchor_px = pos - anchor_to_center
+    new_data = ax.transData.inverted().transform(text_anchor_px)
     for i, ta in enumerate(text_artists):
+        if hide_mask[i]:
+            continue
         ta.set_position((float(new_data[i, 0]), float(new_data[i, 1])))
 
     # Connector segments: from box edge nearest the anchor to the anchor.
-    for i, ta in enumerate(text_artists):
+    linestyle = r_lty(segment_linetype)
+    arrowstyle = "-|>" if arrow else "-"
+    connstyle = f"arc3,rad={float(segment_curvature)}"
+    seg_lw = segment_size_mm * _PT_PER_MM
+    for i in range(n):
+        if hide_mask[i]:
+            continue
         seg_dx = pos[i, 0] - anchors[i, 0]
         seg_dy = pos[i, 1] - anchors[i, 1]
         if np.hypot(seg_dx, seg_dy) < min_seg_px:
@@ -676,15 +798,23 @@ def _do_repel(*, renderer, ax, text_artists, x_anchor, y_anchor,
                                  half_h[i] - box_pad_px)
         edge_data = ax.transData.inverted().transform(edge_px)
         seg_color = r_color(segment_color) if segment_color else r_color(colours[i])
-        ax.plot(
-            [edge_data[0], x_anchor[i]],
-            [edge_data[1], y_anchor[i]],
+        # FancyArrowPatch uniformly handles straight + curved + arrow + linestyle.
+        # posA = label-box edge, posB = anchor (so the arrow head, if any, lands
+        # on the data point — matches ggrepel's arrow=arrow() default).
+        patch = FancyArrowPatch(
+            posA=(float(edge_data[0]), float(edge_data[1])),
+            posB=(float(x_anchor[i]), float(y_anchor[i])),
+            connectionstyle=connstyle,
+            arrowstyle=arrowstyle,
             color=seg_color,
-            linewidth=segment_size_mm * _PT_PER_MM,
+            linewidth=seg_lw,
+            linestyle=linestyle,
             alpha=segment_alpha,
-            solid_capstyle="round",
+            mutation_scale=10,  # arrow head size in pt
+            shrinkA=0, shrinkB=0,
             zorder=9,
         )
+        ax.add_patch(patch)
 
 
 def _ray_rect_exit(center, direction, half_w, half_h):
