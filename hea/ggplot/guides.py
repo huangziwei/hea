@@ -168,6 +168,11 @@ class LegendGroup:
     # ``aes_values[aesthetic]`` is a list of mapped values, one per level
     # (e.g. ``{"colour": ["#FF0000", "#00FF00"], "shape": ["o", "^"]}``).
     aes_values: dict = field(default_factory=dict)
+    # Aesthetic names this group represents — multi-entry when multiple
+    # aes share the same source/levels and merge into one legend (e.g.
+    # ``aes(colour=g, shape=g)``). Used to look up ``guides(colour=...)``
+    # overrides; an override on any merged aes applies to the group.
+    aes_names: list[str] = field(default_factory=list)
     # Geom that contributed to this legend — drives the legend key glyph
     # (rectangle for bar, line for path, circle for point). ``"point"``
     # is the safe default when no contributor is found.
@@ -269,6 +274,8 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
             )
 
         groups[key].aes_values[aes_name] = _scale_mapped_values(scale, levels)
+        if aes_name not in groups[key].aes_names:
+            groups[key].aes_names.append(aes_name)
 
     return list(groups.values())
 
@@ -469,7 +476,31 @@ def apply_legends(fig, axes_list, plot, build_output, *,
     legends = []
     for i, group in enumerate(groups):
         handles = [_make_handle(group, j) for j in range(len(group.levels))]
-        ncols = len(handles) if direction == "horizontal" else 1
+        labels = list(group.labels)
+        title = group.title
+
+        # Apply ``guides(<aes>=guide_legend(...))`` overrides.
+        gl = _find_guide_legend(group, plot)
+        if gl is not None:
+            if gl.title is not None:
+                title = gl.title
+            if gl.reverse:
+                handles = list(reversed(handles))
+                labels = list(reversed(labels))
+            for h in handles:
+                for k, v in (gl.override_aes or {}).items():
+                    _apply_handle_override(h, k, v, group.key_glyph)
+
+        # Resolve column count: explicit ``ncol`` wins; ``nrow`` is
+        # converted to ``ceil(n/nrow)``; otherwise default by direction.
+        if gl is not None and gl.ncol is not None:
+            ncols = max(1, int(gl.ncol))
+        elif gl is not None and gl.nrow is not None:
+            from math import ceil
+            ncols = max(1, ceil(len(handles) / max(1, int(gl.nrow))))
+        else:
+            ncols = len(handles) if direction == "horizontal" else 1
+
         host = (legend_host_axes[i]
                 if legend_host_axes and i < len(legend_host_axes)
                 else None)
@@ -492,7 +523,7 @@ def apply_legends(fig, axes_list, plot, build_output, *,
         if host is not None:
             host.set_axis_off()
             leg = host.legend(
-                handles, group.labels, title=group.title, ncols=ncols,
+                handles, labels, title=title, ncols=ncols,
                 loc="center left", bbox_to_anchor=(0.0, 0.5),
                 frameon=False, alignment=alignment,
                 handler_map=handler_map, **sizing,
@@ -500,7 +531,7 @@ def apply_legends(fig, axes_list, plot, build_output, *,
         else:
             kw = _legend_position_kwargs(pos, i, len(groups))
             leg = target.legend(
-                handles, group.labels, title=group.title, ncols=ncols,
+                handles, labels, title=title, ncols=ncols,
                 frameon=False, alignment=alignment,
                 handler_map=handler_map, **sizing, **kw,
             )
@@ -546,6 +577,94 @@ def _render_colorbar(fig, axes_list, target, spec: ColorbarSpec,
     # R/ggplot2's layout. For horizontal colorbars matplotlib's default
     # is already on top, but ``set_title`` works there too.
     cb.ax.set_title(spec.title, fontsize=10, pad=4)
+
+
+def _find_guide_legend(group, plot):
+    """Return the :class:`GuideLegend` from ``guides(...)`` that targets
+    any aes in this group, or ``None``. Picks the *first* matching entry
+    in user order — same as ggplot2's behaviour when an aes appears in
+    multiple ``guides()`` calls."""
+    overrides = getattr(plot, "guide_overrides", {}) or {}
+    for aes_name in group.aes_names:
+        if aes_name in overrides:
+            spec = overrides[aes_name]
+            if isinstance(spec, GuideLegend):
+                return spec
+            if spec is None or spec is False:
+                # ``guides(colour = "none")`` / ``guides(colour = NULL)``
+                # suppress — we already handle suppression at draw time
+                # by returning a sentinel; treat None/False as "no extra
+                # override settings" here.
+                return None
+    return None
+
+
+def _apply_handle_override(handle, key, value, key_glyph):
+    """Apply one ``override.aes`` entry to a legend handle in-place.
+
+    Mirrors the per-glyph property mapping used by :func:`_make_point_handle`
+    et al. ``size`` is interpreted in ggplot2's mm units and converted to
+    matplotlib's pt; colour names go through :func:`r_color`."""
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    # Canonical names.
+    if key == "color":
+        key = "colour"
+    if key == "linetype":
+        key = "linestyle"
+
+    if key == "alpha" and value is not None:
+        try:
+            handle.set_alpha(float(value))
+        except (TypeError, ValueError):
+            pass
+        return
+    if key == "colour":
+        c = r_color(value) if value is not None else None
+        if isinstance(handle, Line2D):
+            if c is not None:
+                handle.set_color(c)
+                if key_glyph == "point":
+                    handle.set_markeredgecolor(c)
+                    handle.set_markerfacecolor(c)
+        elif isinstance(handle, Patch):
+            if c is not None:
+                handle.set_edgecolor(c)
+        return
+    if key == "fill":
+        c = "none" if value is None else r_color(value)
+        if isinstance(handle, Line2D):
+            handle.set_markerfacecolor(c)
+        elif isinstance(handle, Patch):
+            handle.set_facecolor(c)
+        return
+    if key == "size":
+        sz = float(value) * _PT_PER_MM  # ggplot mm → matplotlib pt
+        if isinstance(handle, Line2D):
+            if key_glyph == "point":
+                handle.set_markersize(sz)
+            else:  # path / line
+                handle.set_linewidth(sz)
+        elif isinstance(handle, Patch):
+            handle.set_linewidth(sz)
+        return
+    if key == "linewidth":
+        lw = float(value) * _PT_PER_MM
+        try:
+            handle.set_linewidth(lw)
+        except AttributeError:
+            pass
+        return
+    if key == "linestyle":
+        from ..plot._util import r_lty
+        if isinstance(handle, Line2D):
+            handle.set_linestyle(r_lty(value) or "-")
+        return
+    if key == "shape":
+        if isinstance(handle, Line2D):
+            handle.set_marker(value)
+        return
 
 
 def _make_handle(group: LegendGroup, idx: int):

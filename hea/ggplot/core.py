@@ -352,9 +352,14 @@ from .guides import Guides as _Guides  # noqa: E402
 
 @ggplot_add.register
 def _(thing: _Guides, plot):
+    from .aes import _canon
+
     out = _copy_plot(plot)
     existing = getattr(out, "guide_overrides", {}) or {}
-    out.guide_overrides = {**existing, **thing.overrides}
+    # Canonicalize aes spellings so ``guides(color=...)`` (American)
+    # matches groups built off canonical ``"colour"`` aes names.
+    new_overrides = {_canon(k): v for k, v in thing.overrides.items()}
+    out.guide_overrides = {**existing, **new_overrides}
     return out
 
 
