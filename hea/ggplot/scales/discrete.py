@@ -223,6 +223,18 @@ def scale_fill_hue(*, h=(15, 375), c=100, l=65, h_start=0, direction=1,
 scale_colour_hue = scale_color_hue
 
 
+# ggplot2's ``scale_colour_discrete`` is the default discrete colour scale —
+# ``scale_colour_hue`` with hue defaults. R 4.0+ exposes a global option
+# (``ggplot2.discrete.colour``) to swap the default; hea always uses hue,
+# so the alias is a straight passthrough. The auto-mode (``geom_point(
+# color="class")`` with no explicit scale) already uses the same hue
+# palette via ``ScaleDiscreteColor``'s default — these aliases just give
+# users the explicit form when they want to spell it out.
+scale_color_discrete = scale_color_hue
+scale_colour_discrete = scale_color_hue
+scale_fill_discrete = scale_fill_hue
+
+
 # ---------------------------------------------------------------------------
 # Colourblind-safe palette (ggthemes' Okabe-Ito).
 # ---------------------------------------------------------------------------
