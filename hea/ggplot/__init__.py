@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from .aes import aes, after_scale, after_stat
 from .annotate import annotate, annotation_custom
+from .geoms.segment import arrow
 from .coords import (
     coord_cartesian,
     coord_fixed,
@@ -365,6 +366,7 @@ __all__ = [
     "lims",
     "annotate",
     "annotation_custom",
+    "arrow",
     "expansion",
     "Expansion",
     "theme",

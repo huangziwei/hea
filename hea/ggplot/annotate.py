@@ -53,8 +53,14 @@ _NAME_TO_GEOM_CLS: dict[str, str] = {
 }
 
 
-def _resolve_geom(geom):
+def _resolve_geom(geom, **geom_kwargs):
+    """Return a Geom instance. ``geom_kwargs`` are passed to the
+    constructor (string form) or set as attributes (instance form) —
+    used for non-aesthetic params like ``arrow=`` on segment-style
+    geoms."""
     if hasattr(geom, "draw_panel"):
+        for k, v in geom_kwargs.items():
+            setattr(geom, k, v)
         return geom
     if not isinstance(geom, str):
         raise TypeError(
@@ -71,7 +77,7 @@ def _resolve_geom(geom):
     path = _NAME_TO_GEOM_CLS[geom]
     module_path, class_name = path.rsplit(".", 1)
     module = importlib.import_module(f"hea.ggplot.{module_path}")
-    return getattr(module, class_name)()
+    return getattr(module, class_name)(**geom_kwargs)
 
 
 def _value_length(v):
@@ -96,10 +102,29 @@ def _broadcast(v, n):
 
 def annotate(geom, *, x=None, y=None, xmin=None, xmax=None, ymin=None, ymax=None,
              xend=None, yend=None, **kwargs):
-    """One-row (or N-row) annotation layer with constant aesthetics."""
-    geom_obj = _resolve_geom(geom)
+    """One-row (or N-row) annotation layer with constant aesthetics.
 
-    aes_values: dict = {}
+    Positional aesthetics (``x``, ``y``, ``xmin``…) and ``label`` go into
+    the layer data and are mapped, so they reach the geom. Other
+    aesthetics (``color``, ``size``, ``hjust``…) are routed to
+    ``aes_params`` — i.e. SET, not MAPPED — so they bypass the scale
+    machinery and don't generate a legend, matching ggplot2's
+    ``annotate()`` (which uses ``show.legend = NA`` plus param-style
+    constants). Non-aesthetic kwargs (e.g. ``arrow=``) flow to the
+    geom constructor.
+    """
+    from .aes import _ALL_AES_NAMES
+
+    # ``label`` varies per row when the user supplies a list, so it has
+    # to live in the data alongside x/y. Everything else aesthetic-shaped
+    # is treated as SET.
+    POSITIONAL = {"x", "y", "xmin", "xmax", "ymin", "ymax", "xend", "yend",
+                  "label"}
+
+    mapped_values: dict = {}    # → data + Aes mapping
+    set_aes_params: dict = {}   # → layer.aes_params (no scale, no legend)
+    geom_kwargs: dict = {}      # → geom constructor (e.g. arrow=)
+
     for key, value in (
         ("x", x), ("y", y),
         ("xmin", xmin), ("xmax", xmax),
@@ -107,23 +132,31 @@ def annotate(geom, *, x=None, y=None, xmin=None, xmax=None, ymin=None, ymax=None
         ("xend", xend), ("yend", yend),
     ):
         if value is not None:
-            aes_values[key] = value
+            mapped_values[key] = value
     for key, value in kwargs.items():
         if value is None:
             continue
-        # Canonicalise British/American spelling for colour.
         canonical = "colour" if key == "color" else key
-        aes_values[canonical] = value
+        if canonical in POSITIONAL:
+            mapped_values[canonical] = value
+        elif canonical in _ALL_AES_NAMES:
+            set_aes_params[canonical] = value
+        else:
+            geom_kwargs[key] = value
 
-    if not aes_values:
+    geom_obj = _resolve_geom(geom, **geom_kwargs)
+
+    if not mapped_values and not set_aes_params:
         raise ValueError(
             "annotate: at least one aesthetic value (x, y, xmin, …) is required"
         )
 
-    n = max((_value_length(v) for v in aes_values.values()), default=1)
-    df = pl.DataFrame({k: _broadcast(v, n) for k, v in aes_values.items()})
-
-    mapping = Aes(**{k: k for k in aes_values})
+    if mapped_values:
+        n = max((_value_length(v) for v in mapped_values.values()), default=1)
+        df = pl.DataFrame({k: _broadcast(v, n) for k, v in mapped_values.items()})
+    else:
+        df = pl.DataFrame()
+    mapping = Aes(**{k: k for k in mapped_values})
 
     return Layer(
         geom=geom_obj,
@@ -131,9 +164,10 @@ def annotate(geom, *, x=None, y=None, xmin=None, xmax=None, ymin=None, ymax=None
         position=resolve_position("identity"),
         mapping=mapping,
         data=df,
-        aes_params={},
+        aes_params=set_aes_params,
         inherit_aes=False,
         broadcast_panels=True,
+        show_legend=False,
     )
 
 

@@ -279,6 +279,50 @@ def case_when(*pairs, default=None) -> pl.Expr:
     return expr.otherwise(_lit(default))
 
 
+def str_wrap(string, width=80, indent=0, exdent=0, whitespace_only=True):
+    """stringr's ``str_wrap()`` — wrap text to a fixed line width.
+
+    Wraps each input string to lines no longer than ``width`` characters,
+    breaking on whitespace by default. Mirrors stringr's defaults
+    (``width=80``, ``whitespace_only=TRUE``); ``indent`` / ``exdent`` add
+    spaces to the first / subsequent lines.
+
+    Accepts a single string or an iterable of strings; returns the same
+    shape. Built on Python's :mod:`textwrap` — no R-style pipe, but
+    ``hea.str_wrap("...", width=30)`` does what you want.
+
+    Parameters
+    ----------
+    string : str | Iterable[str]
+        Text to wrap. ``None`` entries pass through unchanged.
+    width : int, default 80
+        Maximum line length (characters).
+    indent : int, default 0
+        Spaces prepended to the first line of each string.
+    exdent : int, default 0
+        Spaces prepended to subsequent lines.
+    whitespace_only : bool, default True
+        Only break at whitespace; never split a word or hyphenated token.
+    """
+    import textwrap
+
+    def _wrap_one(s):
+        if s is None:
+            return None
+        return textwrap.fill(
+            str(s),
+            width=int(width),
+            initial_indent=" " * int(indent),
+            subsequent_indent=" " * int(exdent),
+            break_long_words=not whitespace_only,
+            break_on_hyphens=not whitespace_only,
+        )
+
+    if isinstance(string, str):
+        return _wrap_one(string)
+    return [_wrap_one(s) for s in string]
+
+
 def parse_number(x):
     """readr's ``parse_number()`` — pull the first number out of a string column.
 
@@ -322,8 +366,8 @@ __all__ = [
     "as_numeric", "as_integer", "as_character", "as_logical",
     "is_na", "is_null", "is_finite", "is_numeric", "is_factor",
     "factor", "levels", "nlevels",
-    # readr-style parsing + dplyr conditionals
-    "parse_number", "if_else", "case_when",
+    # readr-style parsing + dplyr conditionals + stringr text helpers
+    "parse_number", "if_else", "case_when", "str_wrap",
     # distributions: d/p/q/r families
     "dnorm", "pnorm", "qnorm", "rnorm",
     "dt", "pt", "qt", "rt",

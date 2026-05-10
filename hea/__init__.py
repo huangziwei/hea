@@ -58,6 +58,7 @@ from .R import (
     rank,
     shapiro_test,
     signed_rank,
+    str_wrap,
     t_test,
     var_test,
     wilcox_test,
