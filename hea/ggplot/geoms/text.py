@@ -780,7 +780,13 @@ def _do_repel(*, renderer, ax, text_artists, ha_list, va_list,
             continue
         ta.set_position((float(new_data[i, 0]), float(new_data[i, 1])))
 
-    # Connector segments: from box edge nearest the anchor to the anchor.
+    # Connector segments. Length is measured from the visible box edge to
+    # the anchor (NOT the bbox-center-to-anchor distance) — that's the
+    # actual visible line. With default ``min_segment_length=0.5`` lines
+    # and ``box_padding=0.25`` lines, an unobstructed repelled label sits
+    # with its anchor only ~0.25 lines outside the visible box edge, so
+    # no connector is drawn unless the simulation had to push the label
+    # further (overlap, wall, etc.). Matches ggrepel.
     linestyle = r_lty(segment_linetype)
     arrowstyle = "-|>" if arrow else "-"
     connstyle = f"arc3,rad={float(segment_curvature)}"
@@ -788,14 +794,24 @@ def _do_repel(*, renderer, ax, text_artists, ha_list, va_list,
     for i in range(n):
         if hide_mask[i]:
             continue
-        seg_dx = pos[i, 0] - anchors[i, 0]
-        seg_dy = pos[i, 1] - anchors[i, 1]
-        if np.hypot(seg_dx, seg_dy) < min_seg_px:
+        direction = anchors[i] - pos[i]
+        d_center = np.hypot(direction[0], direction[1])
+        if d_center < 1e-9:
+            continue  # anchor coincident with label center
+        visible_hw = half_w[i] - box_pad_px
+        visible_hh = half_h[i] - box_pad_px
+        # ``t`` = parameter along the center→anchor ray that lands on the
+        # visible box edge. ``t >= 1`` means the anchor is inside the box
+        # (no segment to draw).
+        t_x = visible_hw / abs(direction[0]) if direction[0] != 0 else np.inf
+        t_y = visible_hh / abs(direction[1]) if direction[1] != 0 else np.inf
+        t = min(t_x, t_y)
+        if t >= 1.0:
             continue
-        # Ray from label center toward anchor; exit the rectangle there.
-        edge_px = _ray_rect_exit(pos[i], anchors[i] - pos[i],
-                                 half_w[i] - box_pad_px,  # box edge, not pad
-                                 half_h[i] - box_pad_px)
+        seg_length_px = (1.0 - t) * d_center
+        if seg_length_px < min_seg_px:
+            continue
+        edge_px = (pos[i, 0] + t * direction[0], pos[i, 1] + t * direction[1])
         edge_data = ax.transData.inverted().transform(edge_px)
         seg_color = r_color(segment_color) if segment_color else r_color(colours[i])
         # FancyArrowPatch uniformly handles straight + curved + arrow + linestyle.
@@ -817,13 +833,3 @@ def _do_repel(*, renderer, ax, text_artists, ha_list, va_list,
         ax.add_patch(patch)
 
 
-def _ray_rect_exit(center, direction, half_w, half_h):
-    """Where does a ray from rectangle center exit through the side?
-    Used to land the connector on the box edge, not the text center."""
-    dx, dy = float(direction[0]), float(direction[1])
-    if dx == 0.0 and dy == 0.0:
-        return (center[0], center[1])
-    tx = half_w / abs(dx) if dx != 0 else np.inf
-    ty = half_h / abs(dy) if dy != 0 else np.inf
-    t = min(tx, ty)
-    return (center[0] + t * dx, center[1] + t * dy)
