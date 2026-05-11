@@ -2211,6 +2211,52 @@ def _install_df_series_overrides() -> None:
 _install_df_series_overrides()
 
 
+def _install_is_in_mixed_list_support() -> None:
+    """Teach ``pl.Expr.is_in`` to accept Python lists that mix literals
+    and ``Expr`` values.
+
+    Polars' built-in ``is_in`` tries to coerce the ``other`` list into a
+    homogeneous ``Series``; a list like ``[1, col("r").max()]`` errors
+    with ``failed to determine supertype of i64 and object``. The
+    dplyr-faithful translation of ``r %in% c(1, max(r))`` is
+    ``col("r").is_in([1, col("r").max()])``, so we patch ``is_in``:
+    when ``other`` contains any ``pl.Expr``, we expand into an OR-chain
+    (``(self == v0) | (self == v1) | …``), which polars evaluates row-
+    wise without dtype headaches. All-literal lists pass through to the
+    original ``is_in`` unchanged.
+
+    Series-side eager ``is_in`` is left alone — mixing an Expr into an
+    eager membership test has no column to bind against, so polars'
+    original error is the right answer there.
+    """
+    _orig_expr_is_in = pl.Expr.is_in
+
+    def wrapper(self, other, *args, **kwargs):
+        if isinstance(other, (list, tuple)) and any(
+            isinstance(v, pl.Expr) for v in other
+        ):
+            nulls_equal = kwargs.get("nulls_equal", False)
+            result = None
+            for v in other:
+                rhs = v if isinstance(v, pl.Expr) else pl.lit(v)
+                cmp = self.eq_missing(rhs) if nulls_equal else self == rhs
+                result = cmp if result is None else (result | cmp)
+            return result
+        return _orig_expr_is_in(self, other, *args, **kwargs)
+
+    wrapper.__name__ = "is_in"
+    wrapper.__qualname__ = "Expr.is_in (hea-patched)"
+    wrapper.__doc__ = (_orig_expr_is_in.__doc__ or "") + (
+        "\n\nhea extension: accepts a Python list mixing literals and "
+        "``pl.Expr`` values. Mixed lists are expanded to an OR-chain of "
+        "``self == v`` comparisons, matching R's ``x %in% c(1, max(x))``."
+    )
+    pl.Expr.is_in = wrapper
+
+
+_install_is_in_mixed_list_support()
+
+
 class LazyFrame(pl.LazyFrame):
     """``pl.LazyFrame`` that re-wraps materialized results as ``hea.DataFrame``.
 
@@ -2356,39 +2402,142 @@ class GroupBy:
             out = out.sort(name, descending=True)
         return self._df._wrap(out)
 
-    # ---- windowed mutate ---------------------------------------------
+    # ---- windowed verbs (preserve grouping like dplyr) ---------------
 
-    def mutate(self, *args: pl.Expr, **kwargs: pl.Expr) -> DataFrame:
+    def mutate(self, *args: pl.Expr, **kwargs: pl.Expr) -> "GroupBy":
         """Add columns whose values are computed within each group.
 
         Each expression is wrapped in ``.over(group_cols)`` — matches
         dplyr's ``group_by(g) |> mutate(x = mean(x))`` (windowed) and
         contrasts with ``summarize`` (collapsing). Result keeps the
-        original row count.
+        original row count AND the grouping, so chained
+        ``filter`` / ``arrange`` / ``select`` see the same groups.
+        Call ``.ungroup()`` to drop back to a plain DataFrame.
         """
         args, kwargs = _resolve_lazy_factors(self._df, args, kwargs)
         exprs = _kwargs_to_exprs(args, kwargs)
         windowed = [e.over(self._by) for e in exprs]
-        return self._df._wrap(
+        new_df = self._df._wrap(
             pl.DataFrame.with_columns(self._df, windowed)
         )
+        return GroupBy(new_df, self._by, self._kwargs)
 
-    # ---- slice family per group --------------------------------------
+    def filter(self, *predicates) -> "GroupBy":
+        """Per-group filter — reductions in the predicate become per-group.
 
-    def slice_head(self, n: int = 1) -> DataFrame:
+        dplyr's ``group_by(g) |> filter(r == max(r))`` keeps rows where
+        ``r`` equals the per-group max of ``r``. hea implements this by
+        evaluating the combined predicate inside ``.over(group_cols)``,
+        so any aggregate sub-expression (``.max()`` / ``.mean()`` /
+        ``.sum()`` …) is scoped to the group.
+
+        Don't pre-wrap your predicate with ``.over(...)`` — let GroupBy
+        do it. If you want explicit windowing, call ``.ungroup()`` first
+        and use the polars-style ``df.filter(expr.over(by))``.
+        """
+        if not predicates:
+            raise TypeError("filter() requires at least one predicate")
+        combined = predicates[0]
+        for p in predicates[1:]:
+            combined = combined & p
+        masked = combined.over(self._by)
+        new_df = self._df._wrap(pl.DataFrame.filter(self._df, masked))
+        return GroupBy(new_df, self._by, self._kwargs)
+
+    def arrange(self, *cols: Any) -> "GroupBy":
+        """Sort the underlying frame and preserve grouping.
+
+        Mirrors dplyr 1.0+'s default ``arrange()`` on grouped tibbles:
+        sorts globally (ignoring groups). Use this verb for the
+        downstream chain to remain grouped; call ``.ungroup().arrange()``
+        if you want a flat DataFrame back.
+        """
+        return GroupBy(self._df.arrange(*cols), self._by, self._kwargs)
+
+    sort = arrange  # polars name
+
+    def select(self, *cols: Any, **named: Any) -> "GroupBy":
+        """Select columns, always keeping the grouping vars (dplyr behavior).
+
+        If any group var isn't named in the selection, it's prepended
+        automatically — mirrors dplyr's "grouping variables are always
+        retained" rule.
+        """
+        new_df = self._df.select(*cols, **named)
+        missing = [g for g in self._by if g not in new_df.columns]
+        if missing:
+            new_df = self._df.select(*missing, *cols, **named)
+        return GroupBy(new_df, self._by, self._kwargs)
+
+    def transmute(self, *args: pl.Expr, **kwargs: pl.Expr) -> "GroupBy":
+        """``mutate`` that drops unmentioned columns. Group vars are kept."""
+        args, kwargs = _resolve_lazy_factors(self._df, args, kwargs)
+        exprs = _kwargs_to_exprs(args, kwargs)
+        windowed = [e.over(self._by) for e in exprs]
+        # Build the new frame: group cols + the new exprs.
+        new_df = self._df._wrap(
+            pl.DataFrame.select(
+                self._df, *[pl.col(g) for g in self._by], *windowed,
+            )
+        )
+        return GroupBy(new_df, self._by, self._kwargs)
+
+    def distinct(self, *cols: str, keep_all: bool = False) -> "GroupBy":
+        """Per-group distinct — the grouping vars are part of the key.
+
+        ``df.group_by(g).distinct(x)`` returns one row per ``(g, x)`` —
+        matching dplyr's behavior where grouping vars are always included
+        in the distinctness key.
+        """
+        key_cols = list(self._by) + list(cols)
+        new_df = self._df.distinct(*key_cols, keep_all=keep_all)
+        return GroupBy(new_df, self._by, self._kwargs)
+
+    def rename(self, mapping: dict | None = None, /, **kwargs: str) -> "GroupBy":
+        """Rename columns; group vars follow the rename automatically."""
+        new_df = self._df.rename(mapping, **kwargs)
+        # Build the old→new map to update self._by
+        if mapping is not None:
+            old_to_new = dict(mapping)
+        else:
+            old_to_new = {old: new for new, old in kwargs.items()}
+        new_by = [old_to_new.get(g, g) for g in self._by]
+        return GroupBy(new_df, new_by, self._kwargs)
+
+    def relocate(self, *args, **kwargs) -> "GroupBy":
+        """Reorder columns. Group vars unchanged."""
+        return GroupBy(self._df.relocate(*args, **kwargs), self._by, self._kwargs)
+
+    def drop(self, *cols: Any, strict: bool = True) -> "GroupBy":
+        """Drop columns. Refuses to drop a grouping variable — call
+        ``.ungroup().drop(...)`` if that's really what you want."""
+        # Resolve cols to names if possible
+        bad = [c for c in cols if isinstance(c, str) and c in self._by]
+        if bad:
+            raise ValueError(
+                f"drop(): cannot drop grouping variable(s) {bad}. "
+                "Call .ungroup() first."
+            )
+        return GroupBy(self._df.drop(*cols, strict=strict), self._by, self._kwargs)
+
+    # ---- slice family per group (preserve grouping) ------------------
+
+    def slice_head(self, n: int = 1) -> "GroupBy":
         gb = pl.DataFrame.group_by(self._df, self._by, **self._kwargs)
-        return self._df._wrap(gb.head(n))
+        new_df = self._df._wrap(gb.head(n))
+        return GroupBy(new_df, self._by, self._kwargs)
 
-    def slice_tail(self, n: int = 1) -> DataFrame:
+    def slice_tail(self, n: int = 1) -> "GroupBy":
         gb = pl.DataFrame.group_by(self._df, self._by, **self._kwargs)
-        return self._df._wrap(gb.tail(n))
+        new_df = self._df._wrap(gb.tail(n))
+        return GroupBy(new_df, self._by, self._kwargs)
 
     def slice_min(
         self,
         col: str,
         n: int = 1,
         with_ties: bool = True,
-    ) -> DataFrame:
+    ) -> "GroupBy":
         return self._slice_extreme(col, n, with_ties, descending=False)
 
     def slice_max(
@@ -2396,7 +2545,7 @@ class GroupBy:
         col: str,
         n: int = 1,
         with_ties: bool = True,
-    ) -> DataFrame:
+    ) -> "GroupBy":
         return self._slice_extreme(col, n, with_ties, descending=True)
 
     def _slice_extreme(
@@ -2406,7 +2555,7 @@ class GroupBy:
         with_ties: bool,
         *,
         descending: bool,
-    ) -> DataFrame:
+    ) -> "GroupBy":
         """Per-group slice_min / slice_max with dplyr-faithful null handling.
 
         Nulls sort to the end within each group; they're kept only when
@@ -2436,7 +2585,7 @@ class GroupBy:
         else:
             gb = pl.DataFrame.group_by(sorted_df, self._by, **self._kwargs)
             out = gb.head(n)
-        return self._df._wrap(out)
+        return GroupBy(self._df._wrap(out), self._by, self._kwargs)
 
     def slice_sample(
         self,
@@ -2444,7 +2593,7 @@ class GroupBy:
         prop: float | None = None,
         replace: bool = False,
         seed: int | None = None,
-    ) -> DataFrame:
+    ) -> "GroupBy":
         if (n is None) == (prop is None):
             raise ValueError("slice_sample(): pass exactly one of n= or prop=.")
         # No native per-group sample on polars GroupBy; approximate with
@@ -2467,13 +2616,80 @@ class GroupBy:
                 )
                 .explode(cols)
             )
-        return self._df._wrap(out)
+        return GroupBy(self._df._wrap(out), self._by, self._kwargs)
+
+    # ---- DataFrame-passthrough ---------------------------------------
+    #
+    # GroupBy is a grouped *view* of a DataFrame. Read-only frame access
+    # (column subscript, ``.columns``, ``.height``, ``.dtypes``, …) goes
+    # straight through to the underlying frame — there's no per-group
+    # semantics to apply. Verbs that DO have per-group semantics
+    # (filter / arrange / select / …) are overridden above.
+
+    def __getitem__(self, key):
+        """Subscript the underlying frame. Returns a ``Series`` for
+        column-name access, a ``DataFrame`` for row slicing. Grouping
+        information is dropped — wrap the result in ``.group_by(...)``
+        if you need it back."""
+        return self._df[key]
+
+    def __len__(self) -> int:
+        return len(self._df)
+
+    @property
+    def height(self) -> int:
+        return self._df.height
+
+    @property
+    def width(self) -> int:
+        return self._df.width
+
+    @property
+    def columns(self) -> list[str]:
+        return list(self._df.columns)
+
+    @property
+    def dtypes(self) -> list:
+        return list(self._df.dtypes)
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return self._df.shape
+
+    @property
+    def schema(self):
+        return self._df.schema
 
     # ---- representation ----------------------------------------------
+    #
+    # Match dplyr: a grouped tibble prints as a tibble plus a "Groups:"
+    # header. The data is the data — grouping is just metadata, not a
+    # different display.
+
+    def _n_groups(self) -> int:
+        return self._df.select(pl.struct(self._by).n_unique()).item()
 
     def __repr__(self) -> str:
-        n_groups = self._df.select(pl.struct(self._by).n_unique()).item()
-        return f"<GroupBy by={self._by!r} groups={n_groups} rows={self._df.height}>"
+        by_str = ", ".join(self._by)
+        return (
+            f"# Groups: {by_str} [{self._n_groups()}]\n"
+            f"{self._df!r}"
+        )
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    def _repr_html_(self) -> str:
+        """Notebook / Jupyter display — frame's HTML plus a Groups: banner."""
+        by_str = ", ".join(self._by)
+        banner = (
+            f'<small>Groups: {by_str} [{self._n_groups()}]</small>'
+        )
+        # polars DataFrame exposes _repr_html_; delegate.
+        inner = self._df._repr_html_() if hasattr(self._df, "_repr_html_") else (
+            f"<pre>{self._df!r}</pre>"
+        )
+        return banner + inner
 
 
 # ---------------------------------------------------------------------

@@ -1790,6 +1790,175 @@ def test_cumulative_series_in_series_out():
         assert out.to_list() == expected
 
 
+# ---- GroupBy preserves grouping (matches dplyr) --------------------------
+
+
+def test_groupby_mutate_returns_groupby():
+    """dplyr keeps grouping through mutate; hea now matches.
+    ``df.group_by(g).mutate(...)`` returns a GroupBy so downstream
+    ``filter`` / ``arrange`` / etc. operate per-group automatically."""
+    df = DataFrame({"g": ["a","a","b","b"], "x": [1,2,3,4]})
+    out = df.group_by("g").mutate(y=pl.col("x") * 2)
+    assert isinstance(out, GroupBy)
+    assert out.groups == ["g"]
+    # Subscript still works (passes through to the underlying frame)
+    assert out["y"].to_list() == [2, 4, 6, 8]
+
+
+def test_groupby_filter_reductions_are_per_group():
+    """The motivating user pattern, written exactly as in dplyr:
+
+        flights |> group_by(year, month, day) |>
+          mutate(r = min_rank(sched_dep_time)) |>
+          filter(r %in% c(1, max(r)))
+
+    Two things make this work:
+    - ``GroupBy.filter`` wraps the predicate in ``.over(by_cols)`` so
+      ``col("r").max()`` becomes per-group;
+    - hea's ``is_in`` patch (see ``test_is_in_accepts_mixed_literal_expr_list``)
+      lets a Python list mix literals and Exprs, so the dplyr-idiomatic
+      ``[1, col("r").max()]`` reads symbol-for-symbol the same as R's
+      ``c(1, max(r))``.
+    """
+    flights = DataFrame({
+        "year": [2013]*8,
+        "month": [1]*8,
+        "day":   [1, 1, 1, 1, 1, 2, 2, 2],
+        "sched_dep_time": [515, 540, 600, 700, 2359, 500, 800, 2300],
+    })
+    out = (
+        flights
+        .group_by("year", "month", "day")
+        .mutate(r=hea.min_rank(pl.col("sched_dep_time")))
+        .filter(pl.col("r").is_in([1, pl.col("r").max()]))
+    )
+    assert isinstance(out, GroupBy)
+    flat = out.ungroup().sort("year", "month", "day", "sched_dep_time")
+    # First and last sched_dep_time per day: day1 has 5 distinct ranks → r=1 and r=5;
+    # day2 has 3 distinct ranks → r=1 and r=3.
+    assert flat["sched_dep_time"].to_list() == [515, 2359, 500, 2300]
+
+
+def test_is_in_accepts_mixed_literal_expr_list():
+    """polars' built-in ``is_in`` rejects mixed lists with
+    ``failed to determine supertype of i64 and object``. hea patches it
+    so ``col("x").is_in([1, col("x").max()])`` expands to an OR-chain
+    of ``self == v`` comparisons — matches R's ``x %in% c(1, max(x))``.
+    """
+    df = DataFrame({"x": [1, 2, 3, 4, 5]})
+    out = df.with_columns(in_mixed=pl.col("x").is_in([1, pl.col("x").max()]))
+    # Keeps the literal 1 and the dynamic max (5).
+    assert out["in_mixed"].to_list() == [True, False, False, False, True]
+
+
+def test_is_in_all_literal_path_unchanged():
+    """Pure-literal lists must still go through polars' original path
+    (no OR expansion — single Series-based membership test)."""
+    df = DataFrame({"x": [1, 2, 3, 4, 5]})
+    out = df.filter(pl.col("x").is_in([1, 3, 5]))
+    assert out["x"].to_list() == [1, 3, 5]
+
+
+def test_is_in_mixed_list_with_nulls_equal_uses_eq_missing():
+    """``nulls_equal=True`` propagates into the OR-chain via ``eq_missing``."""
+    df = DataFrame({"x": [1, None, 3]})
+    out = df.with_columns(
+        m=pl.col("x").is_in([1, pl.col("x").max()], nulls_equal=True)
+    )
+    # 1 matches 1; null matches neither (the null in x doesn't equal max=3,
+    # and the literal 1 is not null); 3 matches max=3.
+    assert out["m"].to_list() == [True, False, True]
+
+
+def test_is_in_patch_only_affects_expr_not_series():
+    """The patch is Expr-only by design — eager ``Series.is_in`` doesn't
+    have a column to bind an Expr against, so the original error is the
+    right answer there. (Also avoids triggering the Series-coverage test.)
+    """
+    s = pl.Series([1, 2, 3, 4])
+    # Pure literals still work eagerly:
+    assert s.is_in([1, 3]).to_list() == [True, False, True, False]
+
+
+def test_groupby_repr_shows_data_and_groups_banner():
+    """dplyr's grouped tibble prints as the tibble with a ``# Groups:``
+    header. hea matches — the data is visible, grouping is just metadata."""
+    df = DataFrame({"g": ["a","a","b","b","c"], "x": [1, 2, 3, 4, 5]})
+    out = df.group_by("g").mutate(y=pl.col("x") * 2)
+    rendered = repr(out)
+    # The Groups: banner appears first
+    assert rendered.startswith("# Groups: g [3]\n")
+    # The underlying frame's repr follows (with the table)
+    assert "shape:" in rendered
+    assert "1" in rendered and "10" in rendered  # data values present
+
+
+def test_groupby_repr_html_includes_groups_banner():
+    df = DataFrame({"g": ["a","a","b"], "x": [1, 2, 3]})
+    out = df.group_by("g")
+    html = out._repr_html_()
+    assert "<small>Groups: g [2]</small>" in html
+    # Polars' frame HTML follows
+    assert "<table" in html
+
+
+def test_groupby_filter_with_multiple_predicates_anded():
+    """Multiple positional predicates are AND-ed (matches dplyr/polars)."""
+    df = DataFrame({"g": ["a","a","b","b","b"], "x": [1, 5, 2, 6, 3]})
+    out = df.group_by("g").filter(
+        pl.col("x") > pl.col("x").min(),  # not the per-group min
+        pl.col("x") < pl.col("x").max(),  # not the per-group max
+    )
+    # group a: min=1, max=5 → keep nothing strictly between (none)
+    # group b: min=2, max=6 → keep x=3
+    assert out.ungroup().sort("g", "x")["x"].to_list() == [3]
+
+
+def test_groupby_arrange_preserves_grouping():
+    df = DataFrame({"g": ["b","a","b","a"], "x": [10, 20, 30, 40]})
+    out = df.group_by("g").arrange("x")
+    assert isinstance(out, GroupBy)
+    assert out["x"].to_list() == [10, 20, 30, 40]
+    assert out.groups == ["g"]
+
+
+def test_groupby_select_auto_keeps_group_cols():
+    """dplyr: grouping variables are retained on select even if not listed."""
+    df = DataFrame({"g": ["a","b"], "x": [1,2], "y": [10,20]})
+    out = df.group_by("g").select("x")
+    assert set(out.columns) == {"g", "x"}
+    assert isinstance(out, GroupBy)
+
+
+def test_groupby_transmute_keeps_group_cols_drops_others():
+    df = DataFrame({"g": ["a","a","b"], "x": [1,2,3], "y": [10,20,30]})
+    out = df.group_by("g").transmute(z=pl.col("x") * 2)
+    assert set(out.columns) == {"g", "z"}
+    assert out["z"].to_list() == [2, 4, 6]
+
+
+def test_groupby_distinct_includes_group_cols_in_key():
+    """``df.group_by(g).distinct(x)`` is distinct on ``(g, x)``."""
+    df = DataFrame({"g": ["a","a","a","b"], "x": [1,1,2,1]})
+    out = df.group_by("g").distinct("x").ungroup().sort("g", "x")
+    # (a,1), (a,2), (b,1) — three rows
+    assert out.shape == (3, 2)
+
+
+def test_groupby_rename_remaps_group_vars():
+    """If a grouping column is renamed, ``GroupBy._by`` follows."""
+    df = DataFrame({"g": ["a","b"], "x": [1,2]})
+    out = df.group_by("g").rename(group="g")  # new=old
+    assert out.groups == ["group"]
+    assert "g" not in out.columns and "group" in out.columns
+
+
+def test_groupby_drop_refuses_group_cols():
+    df = DataFrame({"g": ["a","b"], "x": [1,2]})
+    with pytest.raises(ValueError, match="grouping variable"):
+        df.group_by("g").drop("g")
+
+
 def test_IQR_in_grouped_summarize():
     """IQR inside summarize, including the string-as-column shorthand
     that matches polars' ``pl.quantile("col", p)`` ergonomic."""
