@@ -367,40 +367,56 @@ from hea.R import (  # noqa: E402 — grouped with the rank-verb tests
 _X = [1, 5, 5, 17, 22, None]
 
 
-def _eager_to_list(arr):
-    """Float arrays from the eager path use NaN for nulls; convert to None
-    so the comparison against the R reference is clean."""
-    return [None if isinstance(v, float) and np.isnan(v) else v for v in arr.tolist()]
-
-
 def test_min_rank_eager_list():
-    assert _eager_to_list(min_rank(_X)) == [1.0, 2.0, 2.0, 4.0, 5.0, None]
+    """List input returns a polars Series with null preserved (not NaN), so
+    the result composes cleanly with ``mutate`` (no NaN→null mismatch)."""
+    out = min_rank(_X)
+    assert isinstance(out, pl.Series)
+    assert out.to_list() == [1.0, 2.0, 2.0, 4.0, 5.0, None]
 
 
 def test_dense_rank_eager_list():
-    assert _eager_to_list(dense_rank(_X)) == [1.0, 2.0, 2.0, 3.0, 4.0, None]
+    assert dense_rank(_X).to_list() == [1.0, 2.0, 2.0, 3.0, 4.0, None]
 
 
 def test_percent_rank_eager_list():
-    assert _eager_to_list(percent_rank(_X)) == [0.0, 0.25, 0.25, 0.75, 1.0, None]
+    assert percent_rank(_X).to_list() == [0.0, 0.25, 0.25, 0.75, 1.0, None]
 
 
 def test_cume_dist_eager_list():
-    assert _eager_to_list(cume_dist(_X)) == [0.2, 0.6, 0.6, 0.8, 1.0, None]
+    assert cume_dist(_X).to_list() == [0.2, 0.6, 0.6, 0.8, 1.0, None]
 
 
 def test_ntile_eager_list():
-    assert _eager_to_list(ntile(_X, 3)) == [1.0, 1.0, 2.0, 2.0, 3.0, None]
+    assert ntile(_X, 3).to_list() == [1.0, 1.0, 2.0, 2.0, 3.0, None]
 
 
 def test_ntile_eager_size_imbalance():
     """``ntile(1:10, 3)`` puts the extras in the earlier buckets."""
-    assert _eager_to_list(ntile(list(range(1, 11)), 3)) == [
+    assert ntile(list(range(1, 11)), 3).to_list() == [
         1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0
     ]
-    assert _eager_to_list(ntile(list(range(1, 11)), 4)) == [
+    assert ntile(list(range(1, 11)), 4).to_list() == [
         1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0
     ]
+
+
+def test_eager_rank_into_mutate_produces_null_not_nan():
+    """Regression: a list-input rank result must surface as polars null
+    (matching R's uniform NA), not as a literal NaN value in the column."""
+    df = pl.DataFrame({"x": _X})
+    out = df.with_columns(
+        rn=row_number_fn(_X),
+        mr=min_rank(_X),
+        dr=dense_rank(_X),
+        pr=percent_rank(_X),
+        cd=cume_dist(_X),
+        nt=ntile(_X, 3),
+    )
+    # Each computed column should have exactly one null at the last position
+    for col in ("rn", "mr", "dr", "pr", "cd", "nt"):
+        assert out[col].null_count() == 1, f"{col} should have null, not NaN"
+        assert out[col][-1] is None
 
 
 def test_rank_verbs_series_in_series_out():
@@ -473,9 +489,9 @@ def test_row_number_no_arg_is_position_expr():
 def test_row_number_eager_list_is_ordinal_rank():
     """``row_number(x)`` is ``rank(x, "ordinal")`` — ties by first appearance."""
     # R reference: row_number(c(3, 1, 1, 2)) -> c(4, 1, 2, 3)
-    assert row_number_fn([3, 1, 1, 2]).tolist() == [4.0, 1.0, 2.0, 3.0]
+    assert row_number_fn([3, 1, 1, 2]).to_list() == [4.0, 1.0, 2.0, 3.0]
     # NA propagates
-    assert _eager_to_list(row_number_fn(_X)) == [1.0, 2.0, 3.0, 4.0, 5.0, None]
+    assert row_number_fn(_X).to_list() == [1.0, 2.0, 3.0, 4.0, 5.0, None]
 
 
 def test_row_number_expr_form():

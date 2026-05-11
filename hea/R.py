@@ -303,7 +303,7 @@ def row_number(x=None):
         return x.rank("ordinal")
     if isinstance(x, pl.Series):
         return x.rank("ordinal")
-    return _rankdata_with_nan(_as_array(x), method="ordinal")
+    return _eager_rank_out(x, _rankdata_with_nan(_as_array(x), method="ordinal"))
 
 
 def str_wrap(string, width=80, indent=0, exdent=0, whitespace_only=True):
@@ -1578,6 +1578,20 @@ def _rankdata_with_nan(arr: np.ndarray, method: str) -> np.ndarray:
     return out
 
 
+def _eager_rank_out(x, arr: np.ndarray):
+    """Wrap an ndarray rank result based on the original input type.
+
+    For Python list / tuple input, return a :class:`pl.Series` with NaN
+    converted to null — so ``mutate(rn=min_rank(x))`` ends up with a
+    proper polars null column instead of a literal NaN value. For
+    ndarray input, return the ndarray unchanged (preserves the
+    lm/Wilcoxon contract used by :func:`rank` / :func:`signed_rank`).
+    """
+    if isinstance(x, (list, tuple)):
+        return pl.Series(arr, nan_to_null=True)
+    return arr
+
+
 def rank(x):
     """R's ``rank()`` with ``ties.method = "average"`` (R's default).
 
@@ -1609,26 +1623,26 @@ def signed_rank(x):
 def min_rank(x):
     """dplyr's ``min_rank()`` — ties get the smallest rank, next rank skipped.
 
-    ``min_rank([1, 5, 5, 17, 22, NA])`` → ``[1, 2, 2, 4, 5, NA]``.
+    ``min_rank([1, 5, 5, 17, 22, None])`` → ``Series[1, 2, 2, 4, 5, null]``.
     Dispatches on input like :func:`rank`; NA / null propagates.
     """
     if isinstance(x, pl.Expr):
         return x.rank("min")
     if isinstance(x, pl.Series):
         return x.rank("min")
-    return _rankdata_with_nan(_as_array(x), method="min")
+    return _eager_rank_out(x, _rankdata_with_nan(_as_array(x), method="min"))
 
 
 def dense_rank(x):
     """dplyr's ``dense_rank()`` — like :func:`min_rank` but no gaps after ties.
 
-    ``dense_rank([1, 5, 5, 17, 22, NA])`` → ``[1, 2, 2, 3, 4, NA]``.
+    ``dense_rank([1, 5, 5, 17, 22, None])`` → ``Series[1, 2, 2, 3, 4, null]``.
     """
     if isinstance(x, pl.Expr):
         return x.rank("dense")
     if isinstance(x, pl.Series):
         return x.rank("dense")
-    return _rankdata_with_nan(_as_array(x), method="dense")
+    return _eager_rank_out(x, _rankdata_with_nan(_as_array(x), method="dense"))
 
 
 def percent_rank(x):
@@ -1644,7 +1658,7 @@ def percent_rank(x):
         return (x.rank("min") - 1) / (x.count() - 1)
     arr = _as_array(x)
     n = int((~np.isnan(arr)).sum())
-    return (_rankdata_with_nan(arr, method="min") - 1) / (n - 1)
+    return _eager_rank_out(x, (_rankdata_with_nan(arr, method="min") - 1) / (n - 1))
 
 
 def cume_dist(x):
@@ -1659,7 +1673,7 @@ def cume_dist(x):
         return x.rank("max") / x.count()
     arr = _as_array(x)
     n = int((~np.isnan(arr)).sum())
-    return _rankdata_with_nan(arr, method="max") / n
+    return _eager_rank_out(x, _rankdata_with_nan(arr, method="max") / n)
 
 
 def ntile(x, n):
@@ -1710,7 +1724,7 @@ def ntile(x, n):
         upper = (ordinal + larger_size - 1) // larger_size
         lower = (ordinal - threshold + smaller_size - 1) // smaller_size + n_larger
         out[mask] = np.where(ordinal <= threshold, upper, lower)
-    return out
+    return _eager_rank_out(x, out)
 
 
 # ---- hypothesis tests -----------------------------------------------
