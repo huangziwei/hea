@@ -49,6 +49,8 @@ __all__ = [
     "Series",
     "Summary",
     "desc",
+    "n",
+    "n_distinct",
     "tbl",
 ]
 
@@ -118,6 +120,18 @@ def exclude(*columns: Any) -> pl.Expr:
         else:
             flat.append(c)
     return pl.exclude(flat)
+
+
+# dplyr's ``n()`` — row-count expression for ``mutate`` / ``summarize``.
+# Aliased to ``pl.len`` so ``from hea import n`` doesn't shadow the builtin
+# ``len`` (which ``from hea import len`` would, since ``hea.len`` is
+# ``polars.len`` via the star-import in __init__.py).
+n = pl.len
+
+# dplyr's ``n_distinct()`` — polars exposes the same operation as
+# ``n_unique``. Both names route to the same Expr; ``n_unique`` is also
+# reachable as ``hea.n_unique`` via the polars star-import.
+n_distinct = pl.n_unique
 
 
 _CLEAN_NAMES_REPLACE = (

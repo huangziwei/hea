@@ -349,16 +349,39 @@ def parse_number(x):
     ``"five"`` → null). Locale-specific thousand/decimal separators
     aren't supported — US-style only.
 
-    Accepts ``pl.Series`` (returns ``pl.Series``) or ``pl.Expr``
-    (returns ``pl.Expr``); both expose ``.cast`` and the ``.str``
-    namespace, so the same chain works for either.
+    Type-in / type-out: ``pl.Series`` → ``pl.Series``; ``pl.Expr`` →
+    ``pl.Expr``; list / tuple / ndarray → ``list`` (with ``None`` for
+    unparseable entries).
     """
-    return (
+    array_like = not isinstance(x, (pl.Series, pl.Expr))
+    if array_like:
+        x = pl.Series(x, dtype=pl.Utf8)
+    out = (
         x.cast(pl.Utf8)
         .str.replace_all(",", "")
         .str.extract(r"(-?\d+(?:\.\d+)?)")
         .cast(pl.Float64, strict=False)
     )
+    return out.to_list() if array_like else out
+
+
+def parse_double(x):
+    """readr's ``parse_double()`` — strict floating-point parser.
+
+    Unlike :func:`parse_number`, this does *not* strip currency symbols
+    or extract numbers from mixed text — the whole string must be a
+    valid double, otherwise the value becomes null. ``"1.234"`` →
+    ``1.234``; ``"$1.99"``, ``"1,234"``, ``"abc"`` → null.
+
+    Type-in / type-out: ``pl.Series`` → ``pl.Series``; ``pl.Expr`` →
+    ``pl.Expr``; list / tuple / ndarray → ``list`` (with ``None`` for
+    unparseable entries).
+    """
+    array_like = not isinstance(x, (pl.Series, pl.Expr))
+    if array_like:
+        x = pl.Series(x, dtype=pl.Utf8)
+    out = x.cast(pl.Utf8).cast(pl.Float64, strict=False)
+    return out.to_list() if array_like else out
 
 
 __all__ = [
@@ -383,7 +406,7 @@ __all__ = [
     "is_na", "is_null", "is_finite", "is_numeric", "is_factor",
     "factor", "levels", "nlevels",
     # readr-style parsing + dplyr conditionals + stringr text helpers
-    "parse_number", "if_else", "case_when", "str_wrap", "row_number",
+    "parse_number", "parse_double", "if_else", "case_when", "str_wrap", "row_number",
     # distributions: d/p/q/r families
     "dnorm", "pnorm", "qnorm", "rnorm",
     "dt", "pt", "qt", "rt",

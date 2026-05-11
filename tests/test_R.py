@@ -23,7 +23,8 @@ from hea.R import (
     is_factor, is_finite, is_na, is_null, is_numeric,
     length, levels, mean, median,
     na_omit, names, ncol, nlevels, nrow,
-    order, quantile, rev, sd, seq, seq_along, seq_len, sort, summary, tail,
+    order, parse_double, parse_number,
+    quantile, rev, sd, seq, seq_along, seq_len, sort, summary, tail,
     tabulate, unique, var, which, which_max, which_min,
     # distributions (a representative subset; full grid checked elsewhere)
     dnorm, pnorm, qnorm, rnorm,
@@ -302,6 +303,48 @@ def test_factor_levels_nlevels_is_factor():
     assert not is_factor(pl.Series([1, 2, 3]))
     assert levels(pl.Series([1, 2, 3])) is None
     assert nlevels(pl.Series([1, 2, 3])) == 0
+
+
+# ---------------------------------------------------------------------------
+# Readr-style parsing
+# ---------------------------------------------------------------------------
+
+
+def test_parse_double_strict_list():
+    """Whole string must be a valid double; otherwise null."""
+    assert parse_double(["1.2", "5.6", "1e3", "-0.5"]) == [1.2, 5.6, 1000.0, -0.5]
+    # currency / commas / words → null (strict, unlike parse_number)
+    assert parse_double(["$1.99", "1,234", "abc", ""]) == [None, None, None, None]
+
+
+def test_parse_double_tuple_returns_list():
+    assert parse_double(("1.2", "5.6")) == [1.2, 5.6]
+
+
+def test_parse_double_series_in_series_out():
+    out = parse_double(pl.Series(["1.2", "abc"]))
+    assert isinstance(out, pl.Series)
+    assert out.dtype == pl.Float64
+    assert out.to_list() == [1.2, None]
+
+
+def test_parse_double_expr_in_expr_out():
+    df = pl.DataFrame({"x": ["1.2", "5.6", "abc"]})
+    out = df.select(parse_double(pl.col("x")).alias("v"))["v"]
+    assert out.to_list() == [1.2, 5.6, None]
+
+
+def test_parse_number_list_returns_list():
+    """Regression: list input must not hit ``.cast`` AttributeError."""
+    assert parse_number(["$1,234.56", "30 yo", "five", "5"]) == [
+        1234.56, 30.0, None, 5.0
+    ]
+
+
+def test_parse_number_series_in_series_out():
+    out = parse_number(pl.Series(["$1.99", "abc"]))
+    assert isinstance(out, pl.Series)
+    assert out.to_list() == [1.99, None]
 
 
 # ---------------------------------------------------------------------------

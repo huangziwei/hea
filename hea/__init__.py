@@ -55,6 +55,7 @@ from .R import (
     kruskal_test,
     ks_test,
     mcnemar_test,
+    parse_double,
     parse_number,
     prop_test,
     rank,
@@ -70,15 +71,20 @@ from .data import data, map_data
 from .R import factor
 # These re-bindings shadow the star-imported pl.DataFrame / pl.LazyFrame
 # / pl.Series. Listed in _HEA_OVERRIDES below.
-from .dataframe import DataFrame, GroupBy, LazyFrame, Series, desc, exclude, tbl
+from .dataframe import (
+    DataFrame,
+    GroupBy,
+    LazyFrame,
+    Series,
+    desc,
+    exclude,
+    n,
+    n_distinct,
+    tbl,
+)
 from . import ggplot
 from . import plot
 from . import R
-
-# R-style alias for len() — ``from hea import n`` is the safe way to get
-# the row-count expression at module scope, since ``from hea import len``
-# would shadow the built-in ``len``.
-n = len
 
 
 # 4. Wrap polars factories (constructors + I/O) so they return hea

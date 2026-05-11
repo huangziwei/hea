@@ -152,6 +152,26 @@ def test_hea_exclude_extends_polars_exclude():
     assert df.select(hea.exclude(df["a":"b"])).columns == ["c"]
 
 
+def test_dplyr_named_aliases_route_to_polars():
+    """``hea.n`` / ``hea.n_distinct`` are dplyr-named aliases for the
+    polars row-count and unique-count expressions."""
+    assert hea.n is pl.len
+    assert hea.n_distinct is pl.n_unique
+    # End-to-end inside a summarize pipeline (the use case that motivates
+    # exposing these names at all).
+    df = hea.DataFrame({
+        "dest": ["A", "A", "B", "B", "B"],
+        "carrier": ["UA", "DL", "UA", "UA", "AA"],
+    })
+    out = (
+        df.group_by("dest")
+        .summarize(rows=hea.n(), carriers=hea.n_distinct("carrier"))
+        .arrange("dest")
+    )
+    assert out["rows"].to_list() == [2, 3]
+    assert out["carriers"].to_list() == [2, 2]
+
+
 @pytest.mark.parametrize("name", [
     "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64",
     "Float32", "Float64", "Boolean", "String", "Utf8", "Date", "Datetime",
