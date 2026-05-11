@@ -1683,3 +1683,70 @@ def test_first_last_nth_shadow_polars_top_level():
     assert hea.first is not pl.first
     assert hea.last is not pl.last
     assert hea.nth is not pl.nth
+
+
+# ---- cumsum / cumprod / cummax / cummin Expr dispatch --------------------
+#
+# These R-named cumulative functions live in hea.R (base R), but they're
+# routinely used inside ``mutate()`` (e.g. the dplyr `cumsum(has_gap)` group
+# trick). They dispatch on Expr/Series/ndarray like rank/signed_rank so the
+# same name works for both eager translation and pipeline construction.
+
+
+def test_cumsum_dispatches_on_expr_inside_mutate():
+    """Canonical use: ``mutate(group = cumsum(col(has_gap)))`` — Expr in,
+    Expr out, evaluated per-row by polars."""
+    df = DataFrame({"has_gap": [False, False, True, False, True, False]})
+    out = df.mutate(group=hea.cumsum(pl.col("has_gap")))
+    assert out["group"].to_list() == [0, 0, 1, 1, 2, 2]
+
+
+def test_cumsum_cumprod_cummax_cummin_eager_unchanged():
+    """Eager (list / ndarray) paths return ndarray, matching R's vector-out
+    contract. Existing call sites in the tests-as-lm notebook keep working."""
+    assert hea.cumsum([1, 2, 3, 4]).tolist() == [1, 3, 6, 10]
+    assert hea.cumprod([1, 2, 3, 4]).tolist() == [1, 2, 6, 24]
+    assert hea.cummax([3, 1, 4, 1, 5]).tolist() == [3, 3, 4, 4, 5]
+    assert hea.cummin([3, 1, 4, 1, 5]).tolist() == [3, 1, 1, 1, 1]
+
+
+def test_cumulative_series_in_series_out():
+    s = pl.Series([1, 2, 3, 4])
+    for fn, expected in [
+        (hea.cumsum, [1, 3, 6, 10]),
+        (hea.cumprod, [1, 2, 6, 24]),
+        (hea.cummax, [1, 2, 3, 4]),
+        (hea.cummin, [1, 1, 1, 1]),
+    ]:
+        out = fn(s)
+        assert isinstance(out, pl.Series), f"{fn.__name__} did not return Series"
+        assert out.to_list() == expected
+
+
+def test_lag_then_cumsum_group_pattern():
+    """End-to-end translation of dplyr's canonical event-grouping idiom:
+
+        events |> mutate(
+            diff    = time - lag(time, default = first(time)),
+            has_gap = diff >= 5,
+            group   = cumsum(has_gap),
+        )
+
+    Verified against the R output shown in the dplyr docs.
+    """
+    events = DataFrame({
+        "time": [0, 1, 2, 3, 5, 10, 11, 12, 14, 15, 20, 21, 24, 25],
+    })
+    out = events.mutate(
+        diff=pl.col("time") - hea.lag(
+            pl.col("time"), default=hea.first(pl.col("time"))
+        ),
+        has_gap=pl.col("diff") >= 5,
+        group=hea.cumsum(pl.col("has_gap")),
+    )
+    # has_gap True only at time=10 and time=20 → group jumps there
+    assert out["group"].to_list() == [
+        0, 0, 0, 0, 0,    # 0..5
+        1, 1, 1, 1, 1,    # 10..15
+        2, 2, 2, 2,       # 20..25
+    ]

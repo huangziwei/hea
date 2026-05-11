@@ -390,6 +390,8 @@ def seq_along(x):
 
 def rev(x):
     """R: reverse element order."""
+    if isinstance(x, pl.Expr):
+        return x.reverse()
     if isinstance(x, (pl.Series, pl.DataFrame)):
         return x.reverse()
     if isinstance(x, list):
@@ -399,6 +401,8 @@ def rev(x):
 
 def sort(x, decreasing=False):
     """R: sort. ``decreasing=True`` matches R's keyword."""
+    if isinstance(x, pl.Expr):
+        return x.sort(descending=decreasing)
     if isinstance(x, pl.Series):
         return x.sort(descending=decreasing)
     if isinstance(x, pl.DataFrame):
@@ -428,28 +432,67 @@ def which(cond):
 
 
 def which_max(x):
-    """R: ``which.max()`` — index of first max. 0-based."""
+    """R: ``which.max()`` — index of first max. 0-based.
+
+    Dispatches: ``pl.Expr`` → scalar ``pl.Expr`` (broadcasts inside
+    ``mutate``); ``pl.Series`` → Python int; list / ndarray → int.
+    """
+    if isinstance(x, pl.Expr):
+        return x.arg_max()
+    if isinstance(x, pl.Series):
+        return x.arg_max()
     return int(np.argmax(np.asarray(x)))
 
 
 def which_min(x):
-    """R: ``which.min()`` — index of first min. 0-based."""
+    """R: ``which.min()`` — index of first min. 0-based. Dispatches like
+    :func:`which_max`.
+    """
+    if isinstance(x, pl.Expr):
+        return x.arg_min()
+    if isinstance(x, pl.Series):
+        return x.arg_min()
     return int(np.argmin(np.asarray(x)))
 
 
 def cumsum(x):
+    """R: ``cumsum()`` — cumulative sum.
+
+    Dispatches like :func:`rank`: ``pl.Expr`` → ``pl.Expr`` (polars'
+    ``cum_sum`` method, so it composes inside ``mutate``); ``pl.Series``
+    → ``pl.Series``; list / tuple / ndarray → ``ndarray``.
+    """
+    if isinstance(x, pl.Expr):
+        return x.cum_sum()
+    if isinstance(x, pl.Series):
+        return x.cum_sum()
     return np.cumsum(np.asarray(x))
 
 
 def cumprod(x):
+    """R: ``cumprod()`` — cumulative product. Dispatches like :func:`cumsum`."""
+    if isinstance(x, pl.Expr):
+        return x.cum_prod()
+    if isinstance(x, pl.Series):
+        return x.cum_prod()
     return np.cumprod(np.asarray(x))
 
 
 def cummax(x):
+    """R: ``cummax()`` — cumulative max. Dispatches like :func:`cumsum`."""
+    if isinstance(x, pl.Expr):
+        return x.cum_max()
+    if isinstance(x, pl.Series):
+        return x.cum_max()
     return np.maximum.accumulate(np.asarray(x))
 
 
 def cummin(x):
+    """R: ``cummin()`` — cumulative min. Dispatches like :func:`cumsum`."""
+    if isinstance(x, pl.Expr):
+        return x.cum_min()
+    if isinstance(x, pl.Series):
+        return x.cum_min()
     return np.minimum.accumulate(np.asarray(x))
 
 
@@ -462,7 +505,14 @@ def diff(x, lag=1, differences=1):
 
 
 def unique(x):
-    """R: unique values, preserving order of first occurrence."""
+    """R: unique values, preserving order of first occurrence.
+
+    Note: in an Expr context, the result has *shorter* length than the
+    input — so it can't be used as a column inside ``mutate``. Use it
+    inside ``summarize`` or assign to a separate frame instead.
+    """
+    if isinstance(x, pl.Expr):
+        return x.unique(maintain_order=True)
     if isinstance(x, (pl.Series, pl.DataFrame)):
         return x.unique(maintain_order=True)
     arr = np.asarray(x)
@@ -472,6 +522,8 @@ def unique(x):
 
 def duplicated(x):
     """R: ``duplicated()`` — True for the 2nd+ occurrence of each value."""
+    if isinstance(x, pl.Expr):
+        return ~x.is_first_distinct()
     if isinstance(x, pl.Series):
         return ~x.is_first_distinct()
     arr = np.asarray(x)
@@ -623,6 +675,20 @@ def findInterval(
 # ---- reductions (R defaults) ----------------------------------------
 
 def mean(x, na_rm=False):
+    """R: ``mean()`` — arithmetic mean. ``na_rm=False`` (the R default)
+    propagates NA (NA in → NA out); ``na_rm=True`` skips nulls.
+
+    Dispatches: ``pl.Expr`` → ``pl.Expr`` (scalar that broadcasts inside
+    ``mutate``); ``pl.Series`` → Python scalar; list / ndarray → float.
+    """
+    if isinstance(x, pl.Expr):
+        if na_rm:
+            return x.mean()
+        return pl.when(x.is_null().any()).then(None).otherwise(x.mean())
+    if isinstance(x, pl.Series):
+        if not na_rm and x.null_count() > 0:
+            return None
+        return x.mean()
     arr = np.asarray(x, dtype=float)
     if na_rm:
         return float(np.nanmean(arr))
@@ -630,6 +696,15 @@ def mean(x, na_rm=False):
 
 
 def median(x, na_rm=False):
+    """R: ``median()`` — 50th percentile. Dispatches like :func:`mean`."""
+    if isinstance(x, pl.Expr):
+        if na_rm:
+            return x.median()
+        return pl.when(x.is_null().any()).then(None).otherwise(x.median())
+    if isinstance(x, pl.Series):
+        if not na_rm and x.null_count() > 0:
+            return None
+        return x.median()
     arr = np.asarray(x, dtype=float)
     if na_rm:
         return float(np.nanmedian(arr))
@@ -637,9 +712,22 @@ def median(x, na_rm=False):
 
 
 def var(x, y=None, na_rm=False):
-    """R: variance with N-1 denominator. ``var(x, y)`` returns covariance."""
+    """R: variance with N-1 denominator. ``var(x, y)`` returns covariance.
+
+    Dispatches like :func:`mean` for the unary form. The binary form
+    delegates to :func:`cov` (currently eager-only — no clean polars
+    top-level for a 2-vector covariance).
+    """
     if y is not None:
         return cov(x, y, na_rm=na_rm)
+    if isinstance(x, pl.Expr):
+        if na_rm:
+            return x.var(ddof=1)
+        return pl.when(x.is_null().any()).then(None).otherwise(x.var(ddof=1))
+    if isinstance(x, pl.Series):
+        if not na_rm and x.null_count() > 0:
+            return None
+        return x.var(ddof=1)
     arr = np.asarray(x, dtype=float)
     if na_rm:
         arr = arr[~np.isnan(arr)]
@@ -647,7 +735,15 @@ def var(x, y=None, na_rm=False):
 
 
 def sd(x, na_rm=False):
-    """R: standard deviation, N-1 denominator (matches R)."""
+    """R: standard deviation, N-1 denominator. Dispatches like :func:`mean`."""
+    if isinstance(x, pl.Expr):
+        if na_rm:
+            return x.std(ddof=1)
+        return pl.when(x.is_null().any()).then(None).otherwise(x.std(ddof=1))
+    if isinstance(x, pl.Series):
+        if not na_rm and x.null_count() > 0:
+            return None
+        return x.std(ddof=1)
     arr = np.asarray(x, dtype=float)
     if na_rm:
         arr = arr[~np.isnan(arr)]
@@ -655,7 +751,27 @@ def sd(x, na_rm=False):
 
 
 def quantile(x, probs=(0, 0.25, 0.5, 0.75, 1.0), na_rm=False):
-    """R: ``quantile()`` — numpy default is linear interpolation, ≈ R type 7."""
+    """R: ``quantile()`` — linear interpolation, R type 7.
+
+    For ``pl.Expr`` / ``pl.Series`` inputs, ``probs`` must be a scalar
+    (polars has no native batch-quantile expression). List-probs goes
+    through the eager numpy path.
+    """
+    is_scalar = np.isscalar(probs)
+    if isinstance(x, pl.Expr):
+        if not is_scalar:
+            raise TypeError(
+                "quantile(): list-of-probs only supported for eager inputs; "
+                "for Expr input, call quantile(col, p) with a scalar p"
+            )
+        q = x.quantile(probs, interpolation="linear")
+        if na_rm:
+            return q
+        return pl.when(x.is_null().any()).then(None).otherwise(q)
+    if isinstance(x, pl.Series) and is_scalar:
+        if not na_rm and x.null_count() > 0:
+            return None
+        return x.quantile(probs, interpolation="linear")
     arr = np.asarray(x, dtype=float)
     if na_rm:
         arr = arr[~np.isnan(arr)]
@@ -663,12 +779,30 @@ def quantile(x, probs=(0, 0.25, 0.5, 0.75, 1.0), na_rm=False):
 
 
 def cor(x, y=None, na_rm=False):
-    """R: Pearson correlation. ``cor(matrix)`` or ``cor(x, y)``."""
+    """R: Pearson correlation. ``cor(matrix)`` or ``cor(x, y)``.
+
+    For ``pl.Expr`` / ``pl.Series`` inputs in the binary form, dispatches
+    to ``pl.corr``. The matrix form (``y=None``) is eager-only — pass a
+    2D ndarray.
+    """
     if y is None:
         arr = np.asarray(x, dtype=float)
         if na_rm:
             arr = arr[~np.isnan(arr).any(axis=1)]
         return np.corrcoef(arr, rowvar=False)
+    # Binary form. Expr/Series dispatch routes to pl.corr.
+    if isinstance(x, (pl.Expr, pl.Series)) or isinstance(y, (pl.Expr, pl.Series)):
+        a = x if isinstance(x, pl.Expr) else (
+            x.to_frame().to_series() if isinstance(x, pl.Series) else pl.Series(x)
+        )
+        b = y if isinstance(y, pl.Expr) else (
+            y.to_frame().to_series() if isinstance(y, pl.Series) else pl.Series(y)
+        )
+        # na_rm: drop pairs where either is null
+        if na_rm and isinstance(a, pl.Expr) and isinstance(b, pl.Expr):
+            mask = ~(a.is_null() | b.is_null())
+            a, b = a.filter(mask), b.filter(mask)
+        return pl.corr(a, b, method="pearson")
     a = np.asarray(x, dtype=float).ravel()
     b = np.asarray(y, dtype=float).ravel()
     if na_rm:
@@ -678,7 +812,10 @@ def cor(x, y=None, na_rm=False):
 
 
 def cov(x, y=None, na_rm=False):
-    """R: sample covariance, N-1 denominator."""
+    """R: sample covariance, N-1 denominator. Currently eager-only —
+    polars has no top-level covariance expression. For an Expr-context
+    covariance use ``((x - x.mean()) * (y - y.mean())).sum() / (n - 1)``.
+    """
     if y is None:
         arr = np.asarray(x, dtype=float)
         if na_rm:
@@ -695,25 +832,25 @@ def cov(x, y=None, na_rm=False):
 # ---- coercion / predicates ------------------------------------------
 
 def as_numeric(x):
-    if isinstance(x, pl.Series):
+    if isinstance(x, (pl.Expr, pl.Series)):
         return x.cast(pl.Float64)
     return np.asarray(x, dtype=float)
 
 
 def as_integer(x):
-    if isinstance(x, pl.Series):
+    if isinstance(x, (pl.Expr, pl.Series)):
         return x.cast(pl.Int64)
     return np.asarray(x, dtype=np.int64)
 
 
 def as_character(x):
-    if isinstance(x, pl.Series):
+    if isinstance(x, (pl.Expr, pl.Series)):
         return x.cast(pl.Utf8)
     return np.asarray(x, dtype=str)
 
 
 def as_logical(x):
-    if isinstance(x, pl.Series):
+    if isinstance(x, (pl.Expr, pl.Series)):
         return x.cast(pl.Boolean)
     return np.asarray(x, dtype=bool)
 
@@ -755,7 +892,7 @@ as_Date = as_date
 
 def is_na(x):
     """R: ``is.na()`` — element-wise NaN / null."""
-    if isinstance(x, (pl.Series, pl.DataFrame)):
+    if isinstance(x, (pl.Expr, pl.Series, pl.DataFrame)):
         return x.is_null()
     arr = np.asarray(x)
     if arr.dtype.kind in "fc":
@@ -774,6 +911,8 @@ def is_null(x):
 
 def is_finite(x):
     """R: ``is.finite()`` — element-wise finiteness."""
+    if isinstance(x, (pl.Expr, pl.Series)):
+        return x.is_finite()
     return np.isfinite(np.asarray(x, dtype=float))
 
 

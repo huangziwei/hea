@@ -343,6 +343,118 @@ def test_rank_signed_rank_ndarray_backwards_compat():
 
 
 # ---------------------------------------------------------------------------
+# Expr-dispatch contract — enforcement test
+#
+# Vector-shape R.py functions (length-preserving transforms and scalar
+# reductions) must dispatch on pl.Expr: given a pl.Expr, return a pl.Expr.
+# This is what makes ``mutate(m = mean(col("x")))`` work for the R-shaped
+# API the same way it does for the polars-shaped one. Exemptions below
+# are categorical — anything not in a SKIP category must pass.
+# ---------------------------------------------------------------------------
+
+
+# Names that legitimately don't fit the "Expr in, Expr out" contract.
+# Grouped by reason so future additions to R.__all__ trip the test until
+# the author explicitly classifies them.
+_R_EXPR_SKIP = {
+    # Hypothesis tests — return HTest, not Expr.
+    "t_test", "wilcox_test", "cor_test", "kruskal_test", "chisq_test",
+    "fisher_test", "prop_test", "binom_test", "var_test", "bartlett_test",
+    "shapiro_test", "ks_test", "mcnemar_test", "friedman_test", "aov",
+    # Result classes — not callable in the vector-shape sense.
+    "HTest", "AnovaTable", "Terms",
+    # Model generics — operate on fitted models, not columns.
+    "coef", "coefficients", "fixef", "ranef",
+    "resid", "residuals", "fitted", "fitted_values",
+    "predict", "confint", "vcov", "logLik", "deviance",
+    "nobs", "df_residual", "formula", "model_matrix", "model_frame",
+    "terms", "update", "AIC", "BIC",
+    "hatvalues", "rstandard", "rstudent",
+    "cooks_distance", "dffits", "dfbetas", "influence",
+    # Distribution PDFs/CDFs/quantiles/random — scalar in, scalar out.
+    "dnorm", "pnorm", "qnorm", "rnorm",
+    "dt", "pt", "qt", "rt",
+    "dchisq", "pchisq", "qchisq", "rchisq",
+    "pf", "qf", "rf",
+    "dbinom", "pbinom", "qbinom", "rbinom",
+    "dpois", "ppois", "qpois", "rpois",
+    "dunif", "punif", "qunif", "runif",
+    "dexp", "pexp", "qexp", "rexp",
+    "dgamma", "pgamma", "qgamma", "rgamma",
+    "dbeta", "pbeta", "qbeta", "rbeta",
+    "set_seed",
+    # Frame-meta — operate on the DataFrame, not a column.
+    "nrow", "ncol", "dim", "length", "colnames", "names",
+    "head", "tail", "summary", "complete_cases", "na_omit",
+    # Length-changing transforms — would shorten/lengthen the column.
+    "diff", "which", "tabulate",
+    # Container / contingency tables — return tables, not Exprs.
+    "table", "xtabs", "prop_table", "addmargins",
+    # Sequence generators — take ints, not columns.
+    "seq", "seq_len", "seq_along",
+    # Variadic / index-based — multi-input shape.
+    "order",
+    # Bucketing — eager-only (custom labels machinery).
+    "cut", "findInterval",
+    # Categorical / dtype introspection — Expr has no eval-time dtype info.
+    "factor", "levels", "nlevels", "is_factor", "is_numeric", "is_null",
+    # cov: no clean polars top-level for 2-vector covariance (compute
+    # manually via (x - x.mean()) * (y - y.mean()) / (n - 1) if needed).
+    "cov",
+}
+
+
+# Functions that need an extra positional / keyword arg beyond ``x`` to
+# produce a meaningful Expr. Keyed by name; value is a callable that
+# returns the *additional* args + kwargs given the test's ``pl.col("x")``.
+_R_EXPR_EXTRA: dict[str, callable] = {
+    "cor":      lambda c: ((c,), {}),       # cor needs (x, y)
+    "quantile": lambda c: ((0.5,), {}),     # Expr needs scalar prob
+}
+
+
+def test_R_vector_functions_dispatch_on_expr():
+    """Every R.py function not in ``_R_EXPR_SKIP`` must dispatch on Expr.
+
+    This is the load-bearing rule for the R-shaped API: an R function
+    applied to ``pl.col("x")`` inside ``mutate`` must produce an Expr that
+    polars can evaluate, not a numpy array (which triggers the
+    ``pl.lit(ndarray-of-Expr)`` failure path).
+    """
+    import hea.R as R_mod
+    c = pl.col("x")
+    failures = []
+    for name in R_mod.__all__:
+        if name in _R_EXPR_SKIP:
+            continue
+        fn = getattr(R_mod, name)
+        if not callable(fn):
+            continue
+        extra_args, extra_kwargs = _R_EXPR_EXTRA.get(name, lambda _: ((), {}))(c)
+        try:
+            result = fn(c, *extra_args, **extra_kwargs)
+        except Exception as e:
+            failures.append(
+                f"  hea.R.{name}(pl.col('x'), *{extra_args}) raised "
+                f"{type(e).__name__}: {e}"
+            )
+            continue
+        if not isinstance(result, pl.Expr):
+            failures.append(
+                f"  hea.R.{name}: expected pl.Expr from pl.Expr input, "
+                f"got {type(result).__name__}"
+            )
+    if failures:
+        msg = "Expr dispatch missing or broken for:\n" + "\n".join(failures)
+        msg += (
+            "\n\nFix by adding ``isinstance(x, pl.Expr): return x.<method>()``"
+            " dispatch at the top of the function — or add the name to"
+            " _R_EXPR_SKIP with the category that applies."
+        )
+        raise AssertionError(msg)
+
+
+# ---------------------------------------------------------------------------
 # Distributions — agreement with known R values
 # ---------------------------------------------------------------------------
 
