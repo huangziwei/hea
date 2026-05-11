@@ -54,6 +54,8 @@ __all__ = [
     "row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist", "ntile",
     # dplyr window / numeric helpers
     "lag", "lead", "between", "na_if", "near",
+    # dplyr positional pickers (shadow polars pl.first / pl.last / pl.nth)
+    "first", "last", "nth",
     # dplyr cumulative + run-length
     "cummean", "cumall", "cumany", "consecutive_id",
     # readr / stringr / tibble
@@ -767,6 +769,115 @@ def _cumall_cumany_eager(x, all_):
     if is_ndarray:
         return np.asarray(out, dtype=object)
     return pl.Series(out, dtype=pl.Boolean)
+
+
+# ---- positional element pickers (dplyr) -----------------------------
+
+def first(x, default=None, order_by=None, na_rm=False):
+    """dplyr's ``first()`` — first element of ``x``.
+
+    Returns the first element, or ``default`` if ``x`` is empty (or, with
+    ``na_rm=True``, has no non-null entries). ``order_by`` reorders ``x``
+    before picking — useful when rows aren't already in the right order.
+
+    Shadows polars' top-level ``pl.first`` (which is a *column* selector,
+    not an *element* picker) — the dplyr shape is what you want inside
+    ``mutate``:
+
+    >>> df.mutate(diff=pl.col("time") - hea.lag(  # doctest: +SKIP
+    ...     pl.col("time"), default=hea.first(pl.col("time"))
+    ... ))
+
+    polars' first-column selector remains accessible as ``pl.first``;
+    inside a polars Expr, ``pl.col("x").first()`` is the equivalent
+    method shape.
+
+    Type-in / type-out: ``pl.Expr`` → scalar ``pl.Expr`` (broadcasts
+    inside ``mutate``); ``pl.Series`` / list / tuple / ndarray → Python
+    scalar (matching dplyr's length-1 result).
+    """
+    return _first_last_nth(x, 1, default, order_by, na_rm)
+
+
+def last(x, default=None, order_by=None, na_rm=False):
+    """dplyr's ``last()`` — last element of ``x``. Mirror of :func:`first`.
+
+    Shadows polars' top-level ``pl.last`` (a column selector); use
+    ``pl.col("x").last()`` for the polars method shape.
+    """
+    return _first_last_nth(x, -1, default, order_by, na_rm)
+
+
+def nth(x, n, order_by=None, default=None, na_rm=False):
+    """dplyr's ``nth(x, n)`` — n-th element (1-based).
+
+    Negative ``n`` counts from the end: ``nth(x, -1)`` is the last,
+    ``nth(x, -2)`` is the second-to-last. Out-of-bounds (including
+    ``n == 0``, which is degenerate in dplyr) returns ``default``.
+    A ``None`` / null *value* at index ``n`` is returned as-is —
+    ``default`` only fires on OOB.
+
+    Shadows polars' top-level ``pl.nth``. Mirror of :func:`first` for
+    the dispatch matrix.
+    """
+    return _first_last_nth(x, int(n), default, order_by, na_rm)
+
+
+def _first_last_nth(x, k, default, order_by, na_rm):
+    """Shared logic. ``k`` is 1-based: 1 = first, -1 = last, 2 = second…
+    ``k == 0`` is treated as OOB (returns ``default``), matching dplyr.
+    """
+    if isinstance(x, pl.Expr):
+        return _first_last_nth_expr(x, k, default, order_by, na_rm)
+    return _first_last_nth_eager(x, k, default, order_by, na_rm)
+
+
+def _first_last_nth_expr(x_expr, k, default, order_by, na_rm):
+    src = x_expr
+    if order_by is not None:
+        ob = order_by if isinstance(order_by, pl.Expr) else pl.col(order_by)
+        src = src.sort_by(ob)
+    if na_rm:
+        src = src.drop_nulls()
+    if k == 0:
+        # Degenerate: dplyr's nth(x, 0) returns default (or NA).
+        return pl.lit(default)
+    # polars' slice handles negative offsets (from end); slice(-1, 1) is
+    # the last element, slice(0, 1) the first. .first() on a 0-length
+    # slice (OOB) yields null — no ComputeError, unlike .gather().
+    offset = k - 1 if k > 0 else k
+    val = src.slice(offset, 1).first()
+    if default is None:
+        return val
+    in_bounds = src.len() >= abs(k)
+    return pl.when(in_bounds).then(val).otherwise(pl.lit(default))
+
+
+def _first_last_nth_eager(x, k, default, order_by, na_rm):
+    if isinstance(x, pl.Series):
+        arr = x.to_list()
+    elif isinstance(x, np.ndarray):
+        arr = x.tolist()
+    else:
+        arr = list(x)
+    if order_by is not None:
+        ob_list = (
+            order_by.to_list() if isinstance(order_by, pl.Series)
+            else list(order_by)
+        )
+        order = sorted(range(len(arr)), key=lambda i: ob_list[i])
+        arr = [arr[i] for i in order]
+    if na_rm:
+        arr = [
+            v for v in arr
+            if not (v is None or (isinstance(v, float) and np.isnan(v)))
+        ]
+    if k == 0:
+        return default
+    idx = k - 1 if k > 0 else len(arr) + k
+    if 0 <= idx < len(arr):
+        return arr[idx]
+    return default
 
 
 # ---- runs / consecutive identity (dplyr) ----------------------------

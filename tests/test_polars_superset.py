@@ -132,13 +132,14 @@ def test_merge_sorted_polymorphic():
 
 @pytest.mark.parametrize("name", [
     "col", "lit", "when", "sum", "mean", "count", "len", "min", "max",
-    "first", "last", "nth", "concat_str", "concat_list", "all", "any",
+    "concat_str", "concat_list", "all", "any",
     "fold", "format", "select", "struct", "duration",
     "date_range", "datetime_range",
 ])
 def test_expr_builder_is_polars_function(name):
-    # ``exclude`` is intentionally shadowed (see _HEA_OVERRIDES); covered
-    # separately below.
+    # ``exclude`` / ``first`` / ``last`` / ``nth`` are intentionally shadowed
+    # (see _HEA_OVERRIDES) — dplyr-shaped versions live in hea.dataframe.
+    # Covered separately below / in test_dataframe.py.
     assert getattr(hea, name) is getattr(pl, name)
 
 

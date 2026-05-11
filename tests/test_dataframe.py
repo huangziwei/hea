@@ -1552,3 +1552,134 @@ def test_consecutive_id_expr_inside_mutate():
 def test_consecutive_id_empty_args_raises():
     with pytest.raises(TypeError, match="at least one"):
         hea.consecutive_id()
+
+
+# ---- first / last / nth (dplyr) ------------------------------------------
+#
+# R reference (dplyr):
+#   x <- c(2, 5, NA, 11, 19, 35)
+#   first(x)                  -> 2
+#   first(integer(0), default=-1L) -> -1
+#   first(c(NA, 5), na_rm=TRUE)    -> 5
+#   last(x)                   -> 35
+#   nth(x, 2)                 -> 5
+#   nth(x, -1)                -> 35
+#   nth(x, -2)                -> 19
+#   nth(x, 100, default=-1)   -> -1   (OOB)
+#   nth(x, 3, na_rm=TRUE)     -> 11   (skip NA before counting)
+#   nth(x, 0, default=-1)     -> -1   (n=0 is OOB, default applies)
+#   nth(c(1,NA,3), 2)         -> NA   (null at index returned as-is)
+#   first(c("a","b","c"), order_by=c(3,1,2)) -> "b"
+
+_NTH_X = [2, 5, None, 11, 19, 35]
+
+
+def test_first_eager_returns_scalar():
+    """dplyr returns a length-1 vector; in Python we return a scalar."""
+    assert hea.first(_NTH_X) == 2
+    assert hea.first(pl.Series(_NTH_X)) == 2
+    assert hea.first([10, 20, 30]) == 10
+
+
+def test_first_default_fires_on_empty_input():
+    assert hea.first([], default=-1) == -1
+    assert hea.first([]) is None
+
+
+def test_first_na_rm_skips_leading_nulls():
+    assert hea.first([None, 5, 10], na_rm=True) == 5
+    # All-null + na_rm → empty arr → default
+    assert hea.first([None, None], na_rm=True, default=-1) == -1
+
+
+def test_last_eager():
+    assert hea.last(_NTH_X) == 35
+    assert hea.last([5, None], na_rm=True) == 5
+
+
+def test_nth_eager_positive_and_negative():
+    """Negative ``n`` counts from the end (-1 = last, -2 = second-to-last)."""
+    assert hea.nth(_NTH_X, 2) == 5
+    assert hea.nth(_NTH_X, -1) == 35
+    assert hea.nth(_NTH_X, -2) == 19
+
+
+def test_nth_default_fires_on_oob():
+    """``default`` returns when index is out of range."""
+    assert hea.nth(_NTH_X, 100, default=-1) == -1
+    assert hea.nth(_NTH_X, -100, default=-1) == -1
+
+
+def test_nth_n_zero_is_oob():
+    """``nth(x, 0)`` is degenerate in dplyr: returns ``default``."""
+    assert hea.nth(_NTH_X, 0) is None
+    assert hea.nth(_NTH_X, 0, default=-1) == -1
+
+
+def test_nth_null_at_index_returned_as_is():
+    """A ``None`` *value* at index ``n`` is returned, not replaced by default
+    (matches dplyr — default only fires on OOB)."""
+    assert hea.nth([1, None, 3], 2) is None
+    assert hea.nth([1, None, 3], 2, default=-1) is None
+
+
+def test_nth_na_rm_skips_nulls_before_counting():
+    """With ``na_rm=True``, null entries don't consume an index slot."""
+    assert hea.nth(_NTH_X, 3, na_rm=True) == 11  # x[1,2,4] = 2,5,11
+
+
+def test_first_order_by_reorders_then_picks():
+    """``first(x, order_by=t)`` returns the value of x when sorted by t."""
+    # R: first(c("a","b","c"), order_by=c(3,1,2)) -> "b"
+    assert hea.first(["a", "b", "c"], order_by=[3, 1, 2]) == "b"
+    assert hea.last(["a", "b", "c"], order_by=[3, 1, 2]) == "a"
+    assert hea.nth(["a", "b", "c"], 1, order_by=[3, 1, 2]) == "b"
+
+
+def test_first_expr_inside_mutate_broadcasts():
+    """In an Expr context, ``first(col)`` is a scalar that broadcasts."""
+    df = DataFrame({"x": [10, 20, 30, 40]})
+    out = df.mutate(
+        fst=hea.first(pl.col("x")),
+        lst=hea.last(pl.col("x")),
+        sec=hea.nth(pl.col("x"), 2),
+    )
+    assert out["fst"].to_list() == [10, 10, 10, 10]
+    assert out["lst"].to_list() == [40, 40, 40, 40]
+    assert out["sec"].to_list() == [20, 20, 20, 20]
+
+
+def test_nth_expr_oob_uses_default():
+    """The OOB-default path in Expr context (when/otherwise machinery)."""
+    df = DataFrame({"x": [10, 20, 30, 40]})
+    out = df.mutate(oob=hea.nth(pl.col("x"), 10, default=-1))
+    assert out["oob"].to_list() == [-1, -1, -1, -1]
+
+
+def test_lag_with_first_default_canonical_pattern():
+    """The motivating use case from R:
+
+        mutate(diff = time - lag(time, default = first(time)))
+
+    First row gets diff=0 (lag uses first(time)); subsequent rows are
+    real diffs. Verified against R's output.
+    """
+    events = DataFrame({"time": [1, 3, 8, 15, 20]})
+    out = events.mutate(
+        diff=pl.col("time") - hea.lag(
+            pl.col("time"), default=hea.first(pl.col("time"))
+        ),
+        has_gap=pl.col("diff") >= 5,
+    )
+    assert out["diff"].to_list() == [0, 2, 5, 7, 5]
+    assert out["has_gap"].to_list() == [False, False, True, True, True]
+
+
+def test_first_last_nth_shadow_polars_top_level():
+    """``hea.first`` / ``hea.last`` / ``hea.nth`` deliberately replace polars'
+    top-level versions (which are *column* selectors, not element pickers).
+    Polars' versions remain accessible as ``pl.first`` / ``pl.last`` / ``pl.nth``.
+    """
+    assert hea.first is not pl.first
+    assert hea.last is not pl.last
+    assert hea.nth is not pl.nth

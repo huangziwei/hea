@@ -80,15 +80,18 @@ from .dataframe import (
     dense_rank,
     desc,
     exclude,
+    first,
     glimpse,
     if_else,
     lag,
+    last,
     lead,
     min_rank,
     n,
     n_distinct,
     na_if,
     near,
+    nth,
     ntile,
     parse_double,
     parse_number,
@@ -202,6 +205,9 @@ _HEA_OVERRIDES = {
     "LazyFrame": "subclass that re-wraps on collect",
     "Series": "subclass with hea-aware overrides",
     "exclude": "wrapper that also accepts DataFrame/Series args",
+    "first": "dplyr's first(x) — element picker, not pl.first column selector",
+    "last": "dplyr's last(x) — element picker, not pl.last column selector",
+    "nth": "dplyr's nth(x, n) — element picker, not pl.nth column selector",
 }
 for _n in (*_DF_FACTORIES, *_LF_FACTORIES, *_POLY_FACTORIES):
     if hasattr(_pl, _n):
