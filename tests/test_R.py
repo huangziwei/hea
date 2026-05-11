@@ -247,6 +247,61 @@ def test_cor_scalar_and_matrix():
     assert cor(m).shape == (2, 2)
 
 
+# ---------------------------------------------------------------------------
+# IQR — agreement with R stats::IQR
+# ---------------------------------------------------------------------------
+#
+# R reference (computed via R --vanilla):
+#   IQR(c(2,5,11,11,19,35))            -> 10.5   (type 7 default, linear)
+#   IQR(c(2,5,11,11,19,35), type=1)    -> 14
+#   IQR(c(2,5,11,11,19,35), type=4)    -> 11.5
+#   IQR(c(1, NA, 3), na.rm=TRUE)       -> 1
+
+
+def test_IQR_eager_list_matches_R_default():
+    from hea.R import IQR
+    assert IQR([2, 5, 11, 11, 19, 35]) == 10.5
+
+
+def test_IQR_eager_quantile_types():
+    from hea.R import IQR
+    x = [2, 5, 11, 11, 19, 35]
+    assert IQR(x, type=1) == 14
+    assert IQR(x, type=4) == 11.5
+    assert IQR(x, type=7) == 10.5  # default
+
+
+def test_IQR_na_rm_drops_nulls():
+    from hea.R import IQR
+    assert IQR([1, None, 3], na_rm=True) == 1.0
+
+
+def test_IQR_invalid_type_raises():
+    from hea.R import IQR
+    with pytest.raises(ValueError, match="1..9"):
+        IQR([1, 2, 3], type=10)
+    with pytest.raises(ValueError, match="1..9"):
+        IQR([1, 2, 3], type=0)
+
+
+def test_IQR_series_returns_scalar():
+    from hea.R import IQR
+    s = pl.Series([2, 5, 11, 11, 19, 35])
+    assert IQR(s) == 10.5
+    # NA + na_rm=False → null (hea is graceful; R errors)
+    assert IQR(pl.Series([1.0, None, 3.0])) is None
+    assert IQR(pl.Series([1.0, None, 3.0]), na_rm=True) == 1.0
+
+
+def test_IQR_non_type_7_on_expr_raises():
+    """Polars only has linear interpolation; other R types only work eager."""
+    from hea.R import IQR
+    with pytest.raises(NotImplementedError, match="linear interpolation"):
+        IQR(pl.col("x"), type=4)
+    with pytest.raises(NotImplementedError, match="linear interpolation"):
+        IQR(pl.Series([1.0, 2.0]), type=4)
+
+
 def test_quantile_default_probs():
     # Linear interpolation matches R's type 7 (default).
     out = quantile([1, 2, 3, 4, 5])

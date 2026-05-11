@@ -1788,6 +1788,33 @@ def test_cumulative_series_in_series_out():
         assert out.to_list() == expected
 
 
+def test_IQR_in_grouped_summarize():
+    """IQR inside summarize, including the string-as-column shorthand
+    that matches polars' ``pl.quantile("col", p)`` ergonomic."""
+    flights = DataFrame({
+        "origin":   ["A", "A", "A", "B", "B", "B", "C", "C"],
+        "dest":     ["X", "X", "Y", "X", "X", "X", "Y", "Y"],
+        "distance": [100, 150, 100, 50, 50, 50, 200, 200],
+    })
+    out = (
+        flights
+        .group_by("origin", "dest")
+        .summarize(
+            distance_iqr=hea.IQR("distance"),   # string shorthand
+            iqr_expr=hea.IQR(pl.col("distance")),
+            n=hea.n(),
+            _groups="drop",
+        )
+        .filter(pl.col("distance_iqr") > 0)
+    )
+    # Only (A, X) has non-zero IQR — distances 100 and 150 → IQR 25
+    assert out["origin"].to_list() == ["A"]
+    assert out["dest"].to_list() == ["X"]
+    assert out["distance_iqr"].to_list() == [25.0]
+    assert out["iqr_expr"].to_list() == [25.0]
+    assert out["n"].to_list() == [2]
+
+
 def test_lag_then_cumsum_group_pattern():
     """End-to-end translation of dplyr's canonical event-grouping idiom:
 

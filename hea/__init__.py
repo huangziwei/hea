@@ -41,6 +41,7 @@ from .glm import glm
 from .lm import lm
 from .lme import lme
 from .R import (
+    IQR,
     aov,
     as_Date,
     as_date,

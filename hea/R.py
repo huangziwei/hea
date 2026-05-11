@@ -196,7 +196,7 @@ __all__ = [
     # contingency tables
     "table", "xtabs", "prop_table", "addmargins",
     # reductions (R defaults: sd/var use N-1)
-    "mean", "median", "var", "sd", "quantile", "cor", "cov",
+    "mean", "median", "var", "sd", "quantile", "IQR", "cor", "cov",
     # coercion / predicates
     "as_numeric", "as_integer", "as_character", "as_logical",
     "as_date", "as_Date",
@@ -748,6 +748,91 @@ def sd(x, na_rm=False):
     if na_rm:
         arr = arr[~np.isnan(arr)]
     return float(np.std(arr, ddof=1))
+
+
+# R's ``quantile(..., type=k)`` maps to numpy's ``method=`` argument.
+# Indexed 1-9 to match R; index 0 is unused.
+_R_QUANTILE_METHOD = (
+    None,                          # 0 — unused (R types are 1..9)
+    "inverted_cdf",                 # 1
+    "averaged_inverted_cdf",        # 2
+    "closest_observation",          # 3
+    "interpolated_inverted_cdf",    # 4
+    "hazen",                        # 5
+    "weibull",                      # 6
+    "linear",                       # 7 — R default
+    "median_unbiased",              # 8
+    "normal_unbiased",              # 9
+)
+
+
+def IQR(x, na_rm=False, type=7):
+    """R: ``IQR()`` — interquartile range, ``Q3 - Q1``.
+
+    Mirrors ``stats::IQR(x, na.rm = FALSE, type = 7)``. The eager path
+    supports all nine R quantile types (mapped to numpy's ``method=``
+    keyword). The polars (Expr / Series) path supports only ``type=7``
+    — polars' ``Expr.quantile`` exposes ``"linear"`` interpolation only.
+
+    Parameters
+    ----------
+    x : str | pl.Expr | pl.Series | list | tuple | ndarray
+        Column name (resolved to ``pl.col(name)``), or any vector-shape
+        input.
+    na_rm : bool, default False
+        Drop nulls / NaN before computing. With ``na_rm=False``, an NA in
+        ``x`` propagates to a null result (hea is more graceful than R,
+        which raises on NA + ``na.rm=FALSE``).
+    type : int in 1..9, default 7
+        R's quantile algorithm. ``type=7`` is the dplyr/R default.
+
+    Returns
+    -------
+    pl.Expr (for Expr/str input — broadcast inside ``mutate``),
+    Python float (for Series / list / ndarray; ``None`` if input has NA
+    and ``na_rm=False``).
+    """
+    if not (1 <= int(type) <= 9):
+        raise ValueError(f"IQR(type={type}): expected an integer in 1..9.")
+
+    # String column-name shorthand (polars convention; lets ``IQR("col")``
+    # work the same way ``pl.quantile("col", 0.5)`` does).
+    if isinstance(x, str):
+        x = pl.col(x)
+
+    if isinstance(x, pl.Expr):
+        if int(type) != 7:
+            raise NotImplementedError(
+                f"IQR(Expr, type={type}): polars only supports linear "
+                "interpolation (type=7) for Expr/Series. Materialize the "
+                "column (.to_list() or .to_numpy()) for other types."
+            )
+        diff = (
+            x.quantile(0.75, interpolation="linear")
+            - x.quantile(0.25, interpolation="linear")
+        )
+        if na_rm:
+            return diff
+        return pl.when(x.is_null().any()).then(None).otherwise(diff)
+
+    if isinstance(x, pl.Series):
+        if int(type) != 7:
+            raise NotImplementedError(
+                f"IQR(Series, type={type}): see IQR(Expr) docstring."
+            )
+        if not na_rm and x.null_count() > 0:
+            return None
+        return (
+            x.quantile(0.75, interpolation="linear")
+            - x.quantile(0.25, interpolation="linear")
+        )
+
+    arr = np.asarray(x, dtype=float)
+    if na_rm:
+        arr = arr[~np.isnan(arr)]
+    method = _R_QUANTILE_METHOD[int(type)]
+    q1, q3 = np.quantile(arr, [0.25, 0.75], method=method)
+    return float(q3 - q1)
 
 
 def quantile(x, probs=(0, 0.25, 0.5, 0.75, 1.0), na_rm=False):
