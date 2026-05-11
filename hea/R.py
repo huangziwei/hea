@@ -201,7 +201,7 @@ __all__ = [
     "as_numeric", "as_integer", "as_character", "as_logical",
     "as_date", "as_Date",
     "is_na", "is_null", "is_finite", "is_numeric", "is_factor",
-    "factor", "levels", "nlevels",
+    "factor", "interaction", "levels", "nlevels",
     # distributions: d/p/q/r families
     "dnorm", "pnorm", "qnorm", "rnorm",
     "dt", "pt", "qt", "rt",
@@ -1033,6 +1033,117 @@ def nlevels(x):
     """R: ``nlevels()`` — number of factor categories."""
     lv = levels(x)
     return len(lv) if lv is not None else 0
+
+
+def interaction(*args, drop=False, sep=".", lex_order=False):
+    """R: ``interaction()`` — combine vectors into a single factor.
+
+    Each argument is coerced to a string and joined with ``sep``; the
+    result is a categorical (R's "factor"). Strings are interpreted as
+    column names (polars convention), so the typical dplyr/ggplot use::
+
+        df.ggplot(group=interaction("day", "month"))
+
+    works identically to ``interaction(col("day"), col("month"))``.
+
+    Parameters
+    ----------
+    *args : str | pl.Expr | pl.Series | list-like
+        Vectors to interact. Same length required in eager mode.
+    drop : bool, default False
+        R default. The eager result's factor levels include the full
+        Cartesian product of input unique values, even unobserved
+        combinations. With ``drop=True``, only observed combinations.
+
+        In Expr context this argument is accepted but the result always
+        carries only observed levels — polars can't enumerate the
+        Cartesian product without materialization. The actual grouping
+        behavior (which is what matters inside ``group_by`` / ``ggplot
+        group=``) is identical either way; only the level metadata
+        differs.
+    sep : str, default ``"."``
+        Separator joining the component strings.
+    lex_order : bool, default False
+        If True, factor levels are sorted lexicographically by label.
+        With the default ``lex_order=False``, levels follow R's "first
+        factor varies fastest" Cartesian-product ordering (or
+        first-appearance order when ``drop=True``).
+
+        In Expr context, level ordering is always first-appearance —
+        ``lex_order=True`` only takes effect in eager mode.
+
+    Returns
+    -------
+    ``pl.Expr`` casting to ``pl.Categorical`` (Expr / string-name input);
+    ``pl.Series`` with ``pl.Enum`` dtype carrying the computed levels
+    (eager input).
+    """
+    if not args:
+        raise TypeError("interaction(): need at least one argument")
+
+    has_string_or_expr = any(isinstance(a, (str, pl.Expr)) for a in args)
+
+    if has_string_or_expr:
+        col_exprs = []
+        for a in args:
+            if isinstance(a, pl.Expr):
+                col_exprs.append(a.cast(pl.Utf8))
+            elif isinstance(a, str):
+                col_exprs.append(pl.col(a).cast(pl.Utf8))
+            elif isinstance(a, pl.Series):
+                col_exprs.append(pl.lit(a).cast(pl.Utf8))
+            else:
+                col_exprs.append(pl.lit(list(a)).cast(pl.Utf8))
+        combined = pl.concat_str(col_exprs, separator=sep)
+        return combined.cast(pl.Categorical)
+
+    # Eager path — compute Cartesian-product / observed levels explicitly.
+    from itertools import product as _product
+    str_cols: list[list] = []
+    n: int | None = None
+    levels_per_col: list[list[str]] = []
+    for a in args:
+        vals = a.to_list() if isinstance(a, pl.Series) else list(a)
+        if n is None:
+            n = len(vals)
+        elif len(vals) != n:
+            raise ValueError(
+                "interaction(): all inputs must have the same length"
+            )
+        str_vals = [str(v) if v is not None else None for v in vals]
+        str_cols.append(str_vals)
+        seen: dict[str, None] = {}
+        for v in str_vals:
+            if v is not None and v not in seen:
+                seen[v] = None
+        levels_per_col.append(list(seen.keys()))
+
+    combined: list[str | None] = [
+        sep.join(str_cols[c][i] for c in range(len(str_cols)))
+        if all(str_cols[c][i] is not None for c in range(len(str_cols)))
+        else None
+        for i in range(n or 0)
+    ]
+
+    if drop:
+        seen_lvl: dict[str, None] = {}
+        for v in combined:
+            if v is not None and v not in seen_lvl:
+                seen_lvl[v] = None
+        levels = list(seen_lvl.keys())
+    else:
+        # R's lex.order=FALSE has the FIRST factor varying fastest;
+        # itertools.product varies the LAST iterable fastest, so we
+        # reverse both the input list and each output tuple.
+        levels = [
+            sep.join(reversed(combo))
+            for combo in _product(*reversed(levels_per_col))
+        ]
+
+    if lex_order:
+        levels = sorted(levels)
+
+    return pl.Series(combined, dtype=pl.Enum(levels))
 
 
 # ---- distributions (scipy wrappers) ---------------------------------

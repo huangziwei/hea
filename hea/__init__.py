@@ -55,6 +55,7 @@ from .R import (
     cumsum,
     fisher_test,
     friedman_test,
+    interaction,
     kruskal_test,
     ks_test,
     mcnemar_test,

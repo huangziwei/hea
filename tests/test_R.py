@@ -293,12 +293,81 @@ def test_IQR_series_returns_scalar():
     assert IQR(pl.Series([1.0, None, 3.0]), na_rm=True) == 1.0
 
 
+# ---------------------------------------------------------------------------
+# interaction — R reference values
+# ---------------------------------------------------------------------------
+#
+#   interaction(c("a","b","a"), c(1,2,1))
+#     -> values: a.1 b.2 a.1
+#     -> Levels: a.1 b.1 a.2 b.2   (Cartesian product; first factor fastest)
+#   interaction(..., drop=TRUE)
+#     -> Levels: a.1 b.2           (observed only)
+#   interaction(..., lex.order=TRUE)
+#     -> Levels: a.1 a.2 b.1 b.2   (alphabetical)
+
+
+def test_interaction_default_matches_R_cartesian_levels():
+    from hea.R import interaction
+    out = interaction(["a", "b", "a"], [1, 2, 1])
+    assert isinstance(out, pl.Series)
+    assert out.to_list() == ["a.1", "b.2", "a.1"]
+    assert out.dtype.categories.to_list() == ["a.1", "b.1", "a.2", "b.2"]
+
+
+def test_interaction_drop_true_keeps_observed_only():
+    from hea.R import interaction
+    out = interaction(["a", "b", "a"], [1, 2, 1], drop=True)
+    assert out.dtype.categories.to_list() == ["a.1", "b.2"]
+
+
+def test_interaction_lex_order_sorts_levels():
+    from hea.R import interaction
+    out = interaction(["a", "b", "a"], [1, 2, 1], lex_order=True)
+    assert out.dtype.categories.to_list() == ["a.1", "a.2", "b.1", "b.2"]
+
+
+def test_interaction_custom_sep():
+    from hea.R import interaction
+    out = interaction(["a", "b"], [1, 2], sep="_")
+    assert out.to_list() == ["a_1", "b_2"]
+    assert out.dtype.categories.to_list() == ["a_1", "b_1", "a_2", "b_2"]
+
+
+def test_interaction_na_propagates():
+    """If any input is null at row i, the result at row i is null."""
+    from hea.R import interaction
+    out = interaction(["a", None, "b"], [1, 2, None])
+    assert out.to_list() == ["a.1", None, None]
+
+
+def test_interaction_no_args_raises():
+    from hea.R import interaction
+    with pytest.raises(TypeError, match="at least one"):
+        interaction()
+
+
+def test_interaction_unequal_lengths_raises():
+    from hea.R import interaction
+    with pytest.raises(ValueError, match="same length"):
+        interaction(["a", "b"], [1, 2, 3])
+
+
+def test_interaction_expr_returns_categorical_expr():
+    """In Expr context, returns a Categorical-typed Expr that composes
+    with mutate / group_by / ggplot's group= aesthetic."""
+    from hea.R import interaction
+    df = pl.DataFrame({"day": [1, 2, 1, 2], "month": [1, 1, 2, 2]})
+    out = df.with_columns(g=interaction("day", "month"))
+    assert out["g"].dtype == pl.Categorical
+    assert out["g"].to_list() == ["1.1", "2.1", "1.2", "2.2"]
+
+
 def test_IQR_non_type_7_on_expr_raises():
     """Polars only has linear interpolation; other R types only work eager."""
     from hea.R import IQR
-    with pytest.raises(NotImplementedError, match="linear interpolation"):
+    with pytest.raises(NotImplementedError, match="type=4"):
         IQR(pl.col("x"), type=4)
-    with pytest.raises(NotImplementedError, match="linear interpolation"):
+    with pytest.raises(NotImplementedError, match="type=4"):
         IQR(pl.Series([1.0, 2.0]), type=4)
 
 
