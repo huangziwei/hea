@@ -1681,16 +1681,18 @@ def test_nth_n_zero_is_oob():
     assert hea.nth(_NTH_X, 0, default=-1) == -1
 
 
-def test_nth_null_at_index_returned_as_is():
-    """A ``None`` *value* at index ``n`` is returned, not replaced by default
-    (matches dplyr — default only fires on OOB)."""
-    assert hea.nth([1, None, 3], 2) is None
-    assert hea.nth([1, None, 3], 2, default=-1) is None
+def test_nth_null_at_index_returned_as_is_with_na_rm_false():
+    """With ``na_rm=False``, a ``None`` *value* at index ``n`` is returned
+    as-is (not replaced by default — default only fires on OOB)."""
+    assert hea.nth([1, None, 3], 2, na_rm=False) is None
+    assert hea.nth([1, None, 3], 2, default=-1, na_rm=False) is None
 
 
-def test_nth_na_rm_skips_nulls_before_counting():
-    """With ``na_rm=True``, null entries don't consume an index slot."""
-    assert hea.nth(_NTH_X, 3, na_rm=True) == 11  # x[1,2,4] = 2,5,11
+def test_nth_default_na_rm_true_skips_nulls_before_counting():
+    """With hea's default ``na_rm=True``, null entries don't consume an
+    index slot — so the 3rd element of [2, 5, NaN, 11, 19, 35] is 11."""
+    assert hea.nth(_NTH_X, 3) == 11  # default na_rm=True
+    assert hea.nth(_NTH_X, 3, na_rm=True) == 11  # explicit, same result
 
 
 def test_first_order_by_reorders_then_picks():

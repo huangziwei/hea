@@ -773,12 +773,14 @@ def _cumall_cumany_eager(x, all_):
 
 # ---- positional element pickers (dplyr) -----------------------------
 
-def first(x, default=None, order_by=None, na_rm=False):
-    """dplyr's ``first()`` — first element of ``x``.
+def first(x, default=None, order_by=None, na_rm=True):
+    """dplyr's ``first()`` — first non-null element of ``x``.
 
-    Returns the first element, or ``default`` if ``x`` is empty (or, with
-    ``na_rm=True``, has no non-null entries). ``order_by`` reorders ``x``
-    before picking — useful when rows aren't already in the right order.
+    ``na_rm=True`` is hea's default (matches the rest of the R-shaped
+    API; diverges from dplyr's ``na_rm=FALSE``). Pass ``na_rm=False``
+    to get the literal first row, even if it's null. Returns ``default``
+    if ``x`` is empty (or, with the default ``na_rm=True``, has no
+    non-null entries). ``order_by`` reorders ``x`` before picking.
 
     Shadows polars' top-level ``pl.first`` (which is a *column* selector,
     not an *element* picker) — the dplyr shape is what you want inside
@@ -794,28 +796,35 @@ def first(x, default=None, order_by=None, na_rm=False):
 
     Type-in / type-out: ``pl.Expr`` → scalar ``pl.Expr`` (broadcasts
     inside ``mutate``); ``pl.Series`` / list / tuple / ndarray → Python
-    scalar (matching dplyr's length-1 result).
+    scalar.
     """
     return _first_last_nth(x, 1, default, order_by, na_rm)
 
 
-def last(x, default=None, order_by=None, na_rm=False):
-    """dplyr's ``last()`` — last element of ``x``. Mirror of :func:`first`.
+def last(x, default=None, order_by=None, na_rm=True):
+    """dplyr's ``last()`` — last non-null element of ``x``. Mirror of
+    :func:`first`.
 
-    Shadows polars' top-level ``pl.last`` (a column selector); use
-    ``pl.col("x").last()`` for the polars method shape.
+    ``na_rm=True`` is hea's default — see :func:`first` for the rationale.
+    Shadows polars' top-level ``pl.last``; use ``pl.col("x").last()`` for
+    the polars method shape (which returns the literal last row,
+    equivalent to ``hea.last(x, na_rm=False)``).
     """
     return _first_last_nth(x, -1, default, order_by, na_rm)
 
 
-def nth(x, n, order_by=None, default=None, na_rm=False):
+def nth(x, n, order_by=None, default=None, na_rm=True):
     """dplyr's ``nth(x, n)`` — n-th element (1-based).
+
+    ``na_rm=True`` is hea's default — null entries don't consume an index
+    slot (so ``nth([1, None, 3, 4], 2)`` returns ``3``). Pass
+    ``na_rm=False`` to count literal row positions.
 
     Negative ``n`` counts from the end: ``nth(x, -1)`` is the last,
     ``nth(x, -2)`` is the second-to-last. Out-of-bounds (including
     ``n == 0``, which is degenerate in dplyr) returns ``default``.
-    A ``None`` / null *value* at index ``n`` is returned as-is —
-    ``default`` only fires on OOB.
+    A ``None`` *value* at index ``n`` (when ``na_rm=False``) is returned
+    as-is — ``default`` only fires on OOB.
 
     Shadows polars' top-level ``pl.nth``. Mirror of :func:`first` for
     the dispatch matrix.

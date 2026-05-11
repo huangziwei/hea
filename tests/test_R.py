@@ -288,9 +288,11 @@ def test_IQR_series_returns_scalar():
     from hea.R import IQR
     s = pl.Series([2, 5, 11, 11, 19, 35])
     assert IQR(s) == 10.5
-    # NA + na_rm=False → null (hea is graceful; R errors)
-    assert IQR(pl.Series([1.0, None, 3.0])) is None
-    assert IQR(pl.Series([1.0, None, 3.0]), na_rm=True) == 1.0
+    # hea's default ``na_rm=True`` skips nulls — IQR over the non-null
+    # values [1.0, 3.0] gives 1.0.
+    assert IQR(pl.Series([1.0, None, 3.0])) == 1.0
+    # Opt-out: na_rm=False yields null (hea is graceful; R errors here).
+    assert IQR(pl.Series([1.0, None, 3.0]), na_rm=False) is None
 
 
 # ---------------------------------------------------------------------------

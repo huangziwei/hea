@@ -674,9 +674,13 @@ def findInterval(
 
 # ---- reductions (R defaults) ----------------------------------------
 
-def mean(x, na_rm=False):
-    """R: ``mean()`` — arithmetic mean. ``na_rm=False`` (the R default)
-    propagates NA (NA in → NA out); ``na_rm=True`` skips nulls.
+def mean(x, na_rm=True):
+    """R: ``mean()`` — arithmetic mean.
+
+    ``na_rm=True`` is hea's default — diverges from R's ``na.rm=FALSE``
+    to match polars' null-skip convention (and what users almost always
+    want). Pass ``na_rm=False`` to recover R's strict NA-in → NA-out
+    behavior.
 
     Dispatches: ``pl.Expr`` → ``pl.Expr`` (scalar that broadcasts inside
     ``mutate``); ``pl.Series`` → Python scalar; list / ndarray → float.
@@ -695,8 +699,11 @@ def mean(x, na_rm=False):
     return float(np.mean(arr))
 
 
-def median(x, na_rm=False):
-    """R: ``median()`` — 50th percentile. Dispatches like :func:`mean`."""
+def median(x, na_rm=True):
+    """R: ``median()`` — 50th percentile.
+
+    ``na_rm=True`` default — see :func:`mean` for the rationale.
+    """
     if isinstance(x, pl.Expr):
         if na_rm:
             return x.median()
@@ -711,9 +718,10 @@ def median(x, na_rm=False):
     return float(np.median(arr))
 
 
-def var(x, y=None, na_rm=False):
+def var(x, y=None, na_rm=True):
     """R: variance with N-1 denominator. ``var(x, y)`` returns covariance.
 
+    ``na_rm=True`` default — see :func:`mean` for the rationale.
     Dispatches like :func:`mean` for the unary form. The binary form
     delegates to :func:`cov` (currently eager-only — no clean polars
     top-level for a 2-vector covariance).
@@ -734,8 +742,11 @@ def var(x, y=None, na_rm=False):
     return float(np.var(arr, ddof=1))
 
 
-def sd(x, na_rm=False):
-    """R: standard deviation, N-1 denominator. Dispatches like :func:`mean`."""
+def sd(x, na_rm=True):
+    """R: standard deviation, N-1 denominator.
+
+    ``na_rm=True`` default — see :func:`mean` for the rationale.
+    """
     if isinstance(x, pl.Expr):
         if na_rm:
             return x.std(ddof=1)
@@ -766,23 +777,25 @@ _R_QUANTILE_METHOD = (
 )
 
 
-def IQR(x, na_rm=False, type=7):
+def IQR(x, na_rm=True, type=7):
     """R: ``IQR()`` — interquartile range, ``Q3 - Q1``.
 
-    Mirrors ``stats::IQR(x, na.rm = FALSE, type = 7)``. The eager path
-    supports all nine R quantile types (mapped to numpy's ``method=``
-    keyword). The polars (Expr / Series) path supports only ``type=7``
-    — polars' ``Expr.quantile`` exposes ``"linear"`` interpolation only.
+    Mirrors ``stats::IQR(x, na.rm, type = 7)`` — but ``na_rm`` defaults
+    to ``True`` (matches the rest of hea's R-shaped API; diverges from
+    R's ``na.rm=FALSE``). The eager path supports all nine R quantile
+    types (mapped to numpy's ``method=`` keyword). The polars (Expr /
+    Series) path supports only ``type=7`` — polars' ``Expr.quantile``
+    exposes ``"linear"`` interpolation only.
 
     Parameters
     ----------
     x : str | pl.Expr | pl.Series | list | tuple | ndarray
         Column name (resolved to ``pl.col(name)``), or any vector-shape
         input.
-    na_rm : bool, default False
-        Drop nulls / NaN before computing. With ``na_rm=False``, an NA in
-        ``x`` propagates to a null result (hea is more graceful than R,
-        which raises on NA + ``na.rm=FALSE``).
+    na_rm : bool, default True
+        Drop nulls / NaN before computing. Pass ``False`` for R's
+        strict NA-in → null-out behavior (hea is more graceful than R,
+        which raises in that case).
     type : int in 1..9, default 7
         R's quantile algorithm. ``type=7`` is the dplyr/R default.
 
@@ -835,9 +848,10 @@ def IQR(x, na_rm=False, type=7):
     return float(q3 - q1)
 
 
-def quantile(x, probs=(0, 0.25, 0.5, 0.75, 1.0), na_rm=False):
+def quantile(x, probs=(0, 0.25, 0.5, 0.75, 1.0), na_rm=True):
     """R: ``quantile()`` — linear interpolation, R type 7.
 
+    ``na_rm=True`` default — see :func:`mean` for the rationale.
     For ``pl.Expr`` / ``pl.Series`` inputs, ``probs`` must be a scalar
     (polars has no native batch-quantile expression). List-probs goes
     through the eager numpy path.
@@ -863,9 +877,10 @@ def quantile(x, probs=(0, 0.25, 0.5, 0.75, 1.0), na_rm=False):
     return np.quantile(arr, probs)
 
 
-def cor(x, y=None, na_rm=False):
+def cor(x, y=None, na_rm=True):
     """R: Pearson correlation. ``cor(matrix)`` or ``cor(x, y)``.
 
+    ``na_rm=True`` default — see :func:`mean` for the rationale.
     For ``pl.Expr`` / ``pl.Series`` inputs in the binary form, dispatches
     to ``pl.corr``. The matrix form (``y=None``) is eager-only — pass a
     2D ndarray.
@@ -896,10 +911,12 @@ def cor(x, y=None, na_rm=False):
     return float(np.corrcoef(a, b)[0, 1])
 
 
-def cov(x, y=None, na_rm=False):
+def cov(x, y=None, na_rm=True):
     """R: sample covariance, N-1 denominator. Currently eager-only —
     polars has no top-level covariance expression. For an Expr-context
     covariance use ``((x - x.mean()) * (y - y.mean())).sum() / (n - 1)``.
+
+    ``na_rm=True`` default — see :func:`mean` for the rationale.
     """
     if y is None:
         arr = np.asarray(x, dtype=float)
