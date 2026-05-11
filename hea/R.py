@@ -279,11 +279,17 @@ def case_when(*pairs, default=None) -> pl.Expr:
     return expr.otherwise(_lit(default))
 
 
-def row_number() -> pl.Expr:
-    """dplyr's ``row_number()`` — 1-based row position.
+def row_number(x=None):
+    """dplyr's ``row_number()`` — 1-based row position, or ordinal rank.
 
-    Returns a polars expression suitable for use inside ``mutate()`` /
-    ``select()``. Mirrors dplyr's convention: positions start at 1, not 0.
+    Two call shapes, both matching dplyr:
+
+    * ``row_number()`` (no args) returns the 1-based row position as a
+      polars expression, suitable for use inside ``mutate()`` /
+      ``select()``.
+    * ``row_number(x)`` returns the ordinal rank of ``x`` (ties broken
+      by first appearance) — equivalent to ``rank(x, "ordinal")``.
+      Dispatches on input like :func:`min_rank`.
 
     Examples
     --------
@@ -291,7 +297,13 @@ def row_number() -> pl.Expr:
     >>> from hea import row_number
     >>> hea.DataFrame({"x": [10, 20, 30]}).mutate(id=row_number())  # doctest: +SKIP
     """
-    return pl.int_range(1, pl.len() + 1)
+    if x is None:
+        return pl.int_range(1, pl.len() + 1)
+    if isinstance(x, pl.Expr):
+        return x.rank("ordinal")
+    if isinstance(x, pl.Series):
+        return x.rank("ordinal")
+    return _rankdata_with_nan(_as_array(x), method="ordinal")
 
 
 def str_wrap(string, width=80, indent=0, exdent=0, whitespace_only=True):
@@ -419,8 +431,9 @@ __all__ = [
     "dgamma", "pgamma", "qgamma", "rgamma",
     "dbeta", "pbeta", "qbeta", "rbeta",
     "set_seed",
-    # rank helpers (Lindeløv-style "tests as lm" notebook)
+    # rank helpers (Lindeløv-style "tests as lm" notebook + dplyr family)
     "rank", "signed_rank",
+    "min_rank", "dense_rank", "percent_rank", "cume_dist", "ntile",
     # hypothesis tests (return HTest, R's ``htest`` print-shape)
     "HTest", "AnovaTable",
     "t_test", "wilcox_test", "cor_test", "kruskal_test", "chisq_test",
@@ -1554,21 +1567,150 @@ def _as_array(x) -> np.ndarray:
 
 # ---- rank helpers (used by Wilcoxon/Spearman/Lindeløv constructions) -
 
-def rank(x) -> np.ndarray:
+
+def _rankdata_with_nan(arr: np.ndarray, method: str) -> np.ndarray:
+    """``scipy.stats.rankdata`` wrapped to preserve NaN (dplyr's NA → NA)."""
+    arr = np.asarray(arr, dtype=float)
+    mask = ~np.isnan(arr)
+    out = np.full(arr.shape, np.nan, dtype=float)
+    if mask.any():
+        out[mask] = _sps.rankdata(arr[mask], method=method)
+    return out
+
+
+def rank(x):
     """R's ``rank()`` with ``ties.method = "average"`` (R's default).
 
-    Returns a float array so downstream lm() formulas treat it as numeric.
+    Type-in / type-out: ``pl.Expr`` → ``pl.Expr``; ``pl.Series`` →
+    ``pl.Series``; list / tuple / ndarray → ``np.ndarray`` (float, so
+    downstream lm() formulas treat it as numeric).
     """
+    if isinstance(x, pl.Expr):
+        return x.rank("average")
+    if isinstance(x, pl.Series):
+        return x.rank("average")
     return _sps.rankdata(_as_array(x), method="average")
 
 
-def signed_rank(x) -> np.ndarray:
+def signed_rank(x):
     """Lindeløv's ``signed_rank = function(x) sign(x) * rank(abs(x))``.
 
     Used to turn Wilcoxon signed-rank into an intercept-only ``lm``.
+    Dispatches on input like :func:`rank`.
     """
+    if isinstance(x, pl.Expr):
+        return x.sign() * x.abs().rank("average")
+    if isinstance(x, pl.Series):
+        return x.sign() * x.abs().rank("average")
     arr = _as_array(x)
     return np.sign(arr) * _sps.rankdata(np.abs(arr), method="average")
+
+
+def min_rank(x):
+    """dplyr's ``min_rank()`` — ties get the smallest rank, next rank skipped.
+
+    ``min_rank([1, 5, 5, 17, 22, NA])`` → ``[1, 2, 2, 4, 5, NA]``.
+    Dispatches on input like :func:`rank`; NA / null propagates.
+    """
+    if isinstance(x, pl.Expr):
+        return x.rank("min")
+    if isinstance(x, pl.Series):
+        return x.rank("min")
+    return _rankdata_with_nan(_as_array(x), method="min")
+
+
+def dense_rank(x):
+    """dplyr's ``dense_rank()`` — like :func:`min_rank` but no gaps after ties.
+
+    ``dense_rank([1, 5, 5, 17, 22, NA])`` → ``[1, 2, 2, 3, 4, NA]``.
+    """
+    if isinstance(x, pl.Expr):
+        return x.rank("dense")
+    if isinstance(x, pl.Series):
+        return x.rank("dense")
+    return _rankdata_with_nan(_as_array(x), method="dense")
+
+
+def percent_rank(x):
+    """dplyr's ``percent_rank()`` — ``(min_rank(x) - 1) / (n - 1)``.
+
+    ``n`` is the non-null count. Returns 0 for the minimum and 1 for the
+    maximum; NA / null propagates. ``NaN`` if there's only one non-null value
+    (division by zero, matches R).
+    """
+    if isinstance(x, pl.Expr):
+        return (x.rank("min") - 1) / (x.count() - 1)
+    if isinstance(x, pl.Series):
+        return (x.rank("min") - 1) / (x.count() - 1)
+    arr = _as_array(x)
+    n = int((~np.isnan(arr)).sum())
+    return (_rankdata_with_nan(arr, method="min") - 1) / (n - 1)
+
+
+def cume_dist(x):
+    """dplyr's ``cume_dist()`` — cumulative distribution: ``rank("max") / n``.
+
+    ``n`` is the non-null count. Returns the proportion of values ≤ each
+    entry; NA / null propagates.
+    """
+    if isinstance(x, pl.Expr):
+        return x.rank("max") / x.count()
+    if isinstance(x, pl.Series):
+        return x.rank("max") / x.count()
+    arr = _as_array(x)
+    n = int((~np.isnan(arr)).sum())
+    return _rankdata_with_nan(arr, method="max") / n
+
+
+def ntile(x, n):
+    """dplyr's ``ntile(x, n)`` — bucket ``x`` into ``n`` roughly-equal groups.
+
+    Uses ordinal rank, so ties may end up in different buckets. Where ``n``
+    doesn't divide the non-null count evenly, the first ``count % n`` buckets
+    get one extra element (matches dplyr: ``ntile(1:10, 4)`` →
+    ``[1,1,1,2,2,2,3,3,4,4]`` — sizes 3, 3, 2, 2). NA / null propagates.
+    """
+    if isinstance(x, pl.Expr):
+        r = x.rank("ordinal")
+        count = x.count()
+        n_larger = count % n
+        larger_size = (count + n - 1) // n
+        smaller_size = count // n
+        threshold = larger_size * n_larger
+        return (
+            pl.when(r <= threshold)
+            .then((r + larger_size - 1) // larger_size)
+            .otherwise(
+                (r - threshold + smaller_size - 1) // smaller_size + n_larger
+            )
+        )
+    if isinstance(x, pl.Series):
+        r = x.rank("ordinal")
+        count = x.count()
+        if count == 0:
+            return pl.Series([None] * len(x), dtype=pl.UInt32)
+        n_larger = count % n
+        larger_size = -(-count // n)
+        smaller_size = count // n
+        threshold = larger_size * n_larger
+        upper = (r + larger_size - 1) // larger_size
+        lower = (r - threshold + smaller_size - 1) // smaller_size + n_larger
+        cond = (r <= threshold).to_numpy()
+        return pl.Series(np.where(cond, upper.to_numpy(), lower.to_numpy()))
+    arr = _as_array(x)
+    mask = ~np.isnan(arr)
+    out = np.full(arr.shape, np.nan, dtype=float)
+    if mask.any():
+        ordinal = _sps.rankdata(arr[mask], method="ordinal").astype(np.int64)
+        count = int(mask.sum())
+        n_larger = count % n
+        larger_size = -(-count // n)
+        smaller_size = count // n
+        threshold = larger_size * n_larger
+        upper = (ordinal + larger_size - 1) // larger_size
+        lower = (ordinal - threshold + smaller_size - 1) // smaller_size + n_larger
+        out[mask] = np.where(ordinal <= threshold, upper, lower)
+    return out
 
 
 # ---- hypothesis tests -----------------------------------------------

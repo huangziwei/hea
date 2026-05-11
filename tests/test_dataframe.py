@@ -110,6 +110,29 @@ def test_arrange_desc(df):
     assert out["x"].to_list() == [6, 5, 4, 3, 2, 1]
 
 
+def test_desc_negates_list():
+    """``desc()`` on values mirrors dplyr's ``-xtfrm(x)`` — used in
+    composable forms like ``min_rank(desc(x))``."""
+    import numpy as np
+    from hea import min_rank
+    out = desc([1, 5, 5, 17, 22, None])
+    assert isinstance(out, np.ndarray)
+    # NaN propagates through negation
+    assert np.array_equal(out[:5], np.array([-1.0, -5.0, -5.0, -17.0, -22.0]))
+    assert np.isnan(out[5])
+    # The motivating use case — descending min_rank matches R reference
+    ranks = min_rank(desc([1, 5, 5, 17, 22, None]))
+    assert ranks[:5].tolist() == [5.0, 3.0, 3.0, 2.0, 1.0]
+    assert np.isnan(ranks[5])
+
+
+def test_desc_negates_series_and_expr():
+    s = pl.Series([1, 5, 17, None])
+    assert desc(s).to_list() == [-1, -5, -17, None]
+    df = pl.DataFrame({"x": [1, 5, 17, None]})
+    assert df.select(desc(pl.col("x")))["x"].to_list() == [-1, -5, -17, None]
+
+
 def test_arrange_multi_with_desc(df):
     """Mix ascending and descending within one call."""
     out = df.arrange("g", desc("x"))

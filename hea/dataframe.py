@@ -86,7 +86,7 @@ def tbl(obj):
 
 
 class _Desc:
-    """Marker for descending sort, produced by ``desc()``."""
+    """Marker for descending sort, produced by ``desc("colname")``."""
 
     __slots__ = ("col",)
 
@@ -94,13 +94,30 @@ class _Desc:
         self.col = col
 
 
-def desc(col: str) -> _Desc:
-    """Mark a column for descending sort inside ``arrange()``.
+def desc(col: Any) -> Any:
+    """Reverse the sort order of a column or vector — mirrors dplyr's ``desc()``.
 
-    Mirrors dplyr's ``desc()``: ``df.arrange("a", desc("b"))`` sorts by
-    ``a`` ascending then ``b`` descending.
+    Two call shapes:
+
+    * ``desc("name")`` returns a ``_Desc`` marker that ``arrange()``
+      recognizes: ``df.arrange("a", desc("b"))`` sorts by ``a``
+      ascending then ``b`` descending.
+    * ``desc(values)`` negates the values, matching R's
+      ``-xtfrm(x)`` definition. Useful with verbs that take a vector
+      directly, e.g. ``min_rank(desc(x))`` gives the descending
+      min-rank.
+
+    Type-in / type-out for the value form:
+        * ``pl.Expr`` → negated ``pl.Expr``
+        * ``pl.Series`` → negated ``pl.Series``
+        * list / tuple / ndarray → negated ``np.ndarray`` (float)
     """
-    return _Desc(col)
+    if isinstance(col, str):
+        return _Desc(col)
+    if isinstance(col, (pl.Expr, pl.Series)):
+        return -col
+    import numpy as np
+    return -np.asarray(col, dtype=float)
 
 
 def exclude(*columns: Any) -> pl.Expr:

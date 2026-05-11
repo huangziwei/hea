@@ -348,6 +348,144 @@ def test_parse_number_series_in_series_out():
 
 
 # ---------------------------------------------------------------------------
+# Rank verbs — agreement with dplyr R reference
+# ---------------------------------------------------------------------------
+
+# Reference values from R 4.6 / dplyr 1.x:
+#   x <- c(1, 5, 5, 17, 22, NA)
+#   min_rank(x)     -> c(1, 2, 2, 4, 5, NA)
+#   dense_rank(x)   -> c(1, 2, 2, 3, 4, NA)
+#   percent_rank(x) -> c(0, 0.25, 0.25, 0.75, 1.0, NA)
+#   cume_dist(x)    -> c(0.2, 0.6, 0.6, 0.8, 1.0, NA)
+#   ntile(x, 3)     -> c(1, 1, 2, 2, 3, NA)
+
+from hea.R import (  # noqa: E402 — grouped with the rank-verb tests
+    cume_dist, dense_rank, min_rank, ntile, percent_rank,
+    rank as R_rank, row_number as row_number_fn, signed_rank,
+)
+
+_X = [1, 5, 5, 17, 22, None]
+
+
+def _eager_to_list(arr):
+    """Float arrays from the eager path use NaN for nulls; convert to None
+    so the comparison against the R reference is clean."""
+    return [None if isinstance(v, float) and np.isnan(v) else v for v in arr.tolist()]
+
+
+def test_min_rank_eager_list():
+    assert _eager_to_list(min_rank(_X)) == [1.0, 2.0, 2.0, 4.0, 5.0, None]
+
+
+def test_dense_rank_eager_list():
+    assert _eager_to_list(dense_rank(_X)) == [1.0, 2.0, 2.0, 3.0, 4.0, None]
+
+
+def test_percent_rank_eager_list():
+    assert _eager_to_list(percent_rank(_X)) == [0.0, 0.25, 0.25, 0.75, 1.0, None]
+
+
+def test_cume_dist_eager_list():
+    assert _eager_to_list(cume_dist(_X)) == [0.2, 0.6, 0.6, 0.8, 1.0, None]
+
+
+def test_ntile_eager_list():
+    assert _eager_to_list(ntile(_X, 3)) == [1.0, 1.0, 2.0, 2.0, 3.0, None]
+
+
+def test_ntile_eager_size_imbalance():
+    """``ntile(1:10, 3)`` puts the extras in the earlier buckets."""
+    assert _eager_to_list(ntile(list(range(1, 11)), 3)) == [
+        1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0
+    ]
+    assert _eager_to_list(ntile(list(range(1, 11)), 4)) == [
+        1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0
+    ]
+
+
+def test_rank_verbs_series_in_series_out():
+    s = pl.Series(_X)
+    for fn in (min_rank, dense_rank, percent_rank, cume_dist, R_rank, signed_rank):
+        out = fn(s)
+        assert isinstance(out, pl.Series), f"{fn.__name__} did not return Series"
+    out = ntile(s, 3)
+    assert isinstance(out, pl.Series)
+
+
+def test_rank_verbs_expr_in_mutate():
+    """Composes inside ``mutate()`` — the canonical dplyr use case."""
+    df = pl.DataFrame({"x": _X})
+    out = df.select(
+        mr=min_rank(pl.col("x")),
+        dr=dense_rank(pl.col("x")),
+        pr=percent_rank(pl.col("x")),
+        cd=cume_dist(pl.col("x")),
+        nt=ntile(pl.col("x"), 3),
+    )
+    assert out["mr"].to_list() == [1, 2, 2, 4, 5, None]
+    assert out["dr"].to_list() == [1, 2, 2, 3, 4, None]
+    # polars' Expr-context division drifts slightly from scipy; compare with approx
+    assert out["pr"].to_list() == pytest.approx(
+        [0.0, 0.25, 0.25, 0.75, 1.0, None], nan_ok=True
+    )
+    assert out["cd"].to_list() == pytest.approx(
+        [0.2, 0.6, 0.6, 0.8, 1.0, None], nan_ok=True
+    )
+    assert out["nt"].to_list() == [1, 1, 2, 2, 3, None]
+
+
+def test_rank_expr_in_expr_out_preserves_average_method():
+    """``rank()`` keeps ``ties.method = "average"`` — the lm/Wilcoxon contract."""
+    df = pl.DataFrame({"x": [1.0, 5.0, 5.0, 17.0]})
+    out = df.select(r=R_rank(pl.col("x")))["r"].to_list()
+    assert out == [1.0, 2.5, 2.5, 4.0]
+
+
+def test_signed_rank_expr_matches_eager_numpy():
+    """Expr path must produce the same values as the existing numpy path."""
+    arr = np.array([-2.0, -1.0, 0.0, 1.0, 2.0])
+    eager = signed_rank(arr)
+    df = pl.DataFrame({"x": arr})
+    expr_out = df.select(s=signed_rank(pl.col("x")))["s"].to_numpy()
+    np.testing.assert_array_equal(eager, expr_out)
+
+
+def test_rank_signed_rank_ndarray_backwards_compat():
+    """The existing numpy-out contract (used by the tests-as-lm notebook)
+    must keep working for ndarray input."""
+    arr = np.array([3.0, 1.0, 4.0, 1.0, 5.0])
+    out = R_rank(arr)
+    assert isinstance(out, np.ndarray)
+    assert out.tolist() == [3.0, 1.5, 4.0, 1.5, 5.0]
+    out2 = signed_rank(np.array([-2.0, -1.0, 0.0, 1.0, 2.0]))
+    assert isinstance(out2, np.ndarray)
+    assert out2.tolist() == [-4.5, -2.5, 0.0, 2.5, 4.5]
+
+
+def test_row_number_no_arg_is_position_expr():
+    """``row_number()`` (no args) returns the 1-based position expression."""
+    df = pl.DataFrame({"v": [10, 20, 30, None]})
+    out = df.select(rn=row_number_fn())["rn"].to_list()
+    # Null at position 4 still gets a row number — it's just position
+    assert out == [1, 2, 3, 4]
+
+
+def test_row_number_eager_list_is_ordinal_rank():
+    """``row_number(x)`` is ``rank(x, "ordinal")`` — ties by first appearance."""
+    # R reference: row_number(c(3, 1, 1, 2)) -> c(4, 1, 2, 3)
+    assert row_number_fn([3, 1, 1, 2]).tolist() == [4.0, 1.0, 2.0, 3.0]
+    # NA propagates
+    assert _eager_to_list(row_number_fn(_X)) == [1.0, 2.0, 3.0, 4.0, 5.0, None]
+
+
+def test_row_number_expr_form():
+    """Inside ``select``/``mutate`` with a column ref."""
+    df = pl.DataFrame({"x": _X})
+    out = df.select(rn=row_number_fn(pl.col("x")))["rn"].to_list()
+    assert out == [1, 2, 3, 4, 5, None]
+
+
+# ---------------------------------------------------------------------------
 # Distributions — agreement with known R values
 # ---------------------------------------------------------------------------
 
