@@ -181,225 +181,10 @@ def factor(
     return out
 
 
-def if_else(condition, true_value, false_value, missing=None) -> pl.Expr:
-    """dplyr's ``if_else()`` — vectorized conditional.
-
-    Wraps ``pl.when(condition).then(true_value).otherwise(false_value)``
-    with one dplyr-shaped twist: a null in ``condition`` produces
-    ``missing`` (default ``None`` → null), matching dplyr's ``NA in →
-    NA out``. Polars' raw ``when/then/otherwise`` instead routes nulls
-    through the otherwise branch — use ``pl.when(...)`` directly if
-    that's what you want.
-
-    Returns a ``pl.Expr``. Use inside ``mutate`` / ``select`` / any
-    polars verb. For Series-on-Series eager evaluation, materialize
-    via ``df.select(if_else(...))`` or use ``Series.zip_with``.
-
-    Parameters
-    ----------
-    condition : pl.Expr | pl.Series | bool
-        Boolean predicate.
-    true_value, false_value : pl.Expr | pl.Series | scalar
-        Values for True / False entries. Bare scalars are auto-lifted
-        via ``pl.lit`` by polars' ``when/then`` machinery.
-    missing : scalar, optional
-        Value emitted when ``condition`` is null. Defaults to ``None``
-        (null), matching dplyr's ``NA`` default.
-    """
-    # Polars' .then("x") interprets a bare string as a column name; dplyr's
-    # if_else treats strings as literals. Lift any non-Expr non-Series value
-    # to pl.lit so "5" stays "5".
-    def _lit(v):
-        return v if isinstance(v, (pl.Expr, pl.Series)) else pl.lit(v)
-
-    t, f = _lit(true_value), _lit(false_value)
-    if isinstance(condition, (pl.Expr, pl.Series)):
-        return (
-            pl.when(condition.is_null()).then(pl.lit(missing))
-            .when(condition).then(t)
-            .otherwise(f)
-        )
-    return pl.when(condition).then(t).otherwise(f)
-
-
-def case_when(*pairs, default=None) -> pl.Expr:
-    """dplyr's ``case_when()`` — multi-branch vectorized conditional.
-
-    Each pair is ``(condition, value)``. The result for each row is the
-    ``value`` of the first pair whose ``condition`` is True; rows matching
-    no condition take ``default``. Mirrors dplyr's ``case_when()`` —
-    Python has no ``cond ~ value`` formula syntax, so pass tuples instead.
-
-    Bare-string ``value``s are lifted to ``pl.lit`` (matching dplyr's
-    "strings are values" convention). Polars' raw ``pl.when(...).then("x")``
-    would interpret ``"x"`` as a column reference.
-
-    Null conditions fall through to the next branch (and ultimately to
-    ``default``), matching dplyr 1.1+. Use :func:`if_else` if you want
-    null-in → null-out instead.
-
-    Parameters
-    ----------
-    *pairs : tuple[condition, value]
-        Each ``condition`` is a boolean ``pl.Expr`` / ``pl.Series``;
-        each ``value`` is a scalar / ``pl.Expr`` / ``pl.Series``.
-    default : scalar | pl.Expr, optional
-        Value for rows matching no condition. Defaults to ``None`` (null),
-        matching dplyr's ``.default = NA``.
-
-    Examples
-    --------
-    >>> import hea
-    >>> from hea import case_when, col
-    >>> df = hea.DataFrame({"drv": ["f", "r", "4", "f"]})
-    >>> df.mutate(label=case_when(
-    ...     (col("drv") == "f", "front-wheel drive"),
-    ...     (col("drv") == "r", "rear-wheel drive"),
-    ...     (col("drv") == "4", "4-wheel drive"),
-    ... ))  # doctest: +SKIP
-    """
-    if not pairs:
-        raise TypeError(
-            "case_when() requires at least one (condition, value) pair"
-        )
-
-    def _lit(v):
-        return v if isinstance(v, (pl.Expr, pl.Series)) else pl.lit(v)
-
-    expr = None
-    for i, pair in enumerate(pairs):
-        if not (isinstance(pair, tuple) and len(pair) == 2):
-            raise TypeError(
-                f"case_when() pair {i} must be a (condition, value) "
-                f"tuple, got {pair!r}"
-            )
-        cond, val = pair
-        val = _lit(val)
-        expr = pl.when(cond).then(val) if expr is None else expr.when(cond).then(val)
-    return expr.otherwise(_lit(default))
-
-
-def row_number(x=None):
-    """dplyr's ``row_number()`` — 1-based row position, or ordinal rank.
-
-    Two call shapes, both matching dplyr:
-
-    * ``row_number()`` (no args) returns the 1-based row position as a
-      polars expression, suitable for use inside ``mutate()`` /
-      ``select()``.
-    * ``row_number(x)`` returns the ordinal rank of ``x`` (ties broken
-      by first appearance) — equivalent to ``rank(x, "ordinal")``.
-      Dispatches on input like :func:`min_rank`.
-
-    Examples
-    --------
-    >>> import hea
-    >>> from hea import row_number
-    >>> hea.DataFrame({"x": [10, 20, 30]}).mutate(id=row_number())  # doctest: +SKIP
-    """
-    if x is None:
-        return pl.int_range(1, pl.len() + 1)
-    if isinstance(x, pl.Expr):
-        return x.rank("ordinal")
-    if isinstance(x, pl.Series):
-        return x.rank("ordinal")
-    return _eager_rank_out(x, _rankdata_with_nan(_as_array(x), method="ordinal"))
-
-
-def str_wrap(string, width=80, indent=0, exdent=0, whitespace_only=True):
-    """stringr's ``str_wrap()`` — wrap text to a fixed line width.
-
-    Wraps each input string to lines no longer than ``width`` characters,
-    breaking on whitespace by default. Mirrors stringr's defaults
-    (``width=80``, ``whitespace_only=TRUE``); ``indent`` / ``exdent`` add
-    spaces to the first / subsequent lines.
-
-    Accepts a single string or an iterable of strings; returns the same
-    shape. Built on Python's :mod:`textwrap` — no R-style pipe, but
-    ``hea.str_wrap("...", width=30)`` does what you want.
-
-    Parameters
-    ----------
-    string : str | Iterable[str]
-        Text to wrap. ``None`` entries pass through unchanged.
-    width : int, default 80
-        Maximum line length (characters).
-    indent : int, default 0
-        Spaces prepended to the first line of each string.
-    exdent : int, default 0
-        Spaces prepended to subsequent lines.
-    whitespace_only : bool, default True
-        Only break at whitespace; never split a word or hyphenated token.
-    """
-    import textwrap
-
-    def _wrap_one(s):
-        if s is None:
-            return None
-        return textwrap.fill(
-            str(s),
-            width=int(width),
-            initial_indent=" " * int(indent),
-            subsequent_indent=" " * int(exdent),
-            break_long_words=not whitespace_only,
-            break_on_hyphens=not whitespace_only,
-        )
-
-    if isinstance(string, str):
-        return _wrap_one(string)
-    return [_wrap_one(s) for s in string]
-
-
-def parse_number(x):
-    """readr's ``parse_number()`` — pull the first number out of a string column.
-
-    Strips comma thousand-separators, then extracts the first signed
-    integer or decimal via ``(-?\\d+(?:\\.\\d+)?)`` and casts to
-    ``Float64`` with ``strict=False`` (unparseable → null). Handles
-    currency symbols, trailing units, and mixed text the same way
-    readr does (``"$1,234.56"`` → ``1234.56``, ``"30 yo"`` → ``30``,
-    ``"five"`` → null). Locale-specific thousand/decimal separators
-    aren't supported — US-style only.
-
-    Type-in / type-out: ``pl.Series`` → ``pl.Series``; ``pl.Expr`` →
-    ``pl.Expr``; list / tuple / ndarray → ``list`` (with ``None`` for
-    unparseable entries).
-    """
-    array_like = not isinstance(x, (pl.Series, pl.Expr))
-    if array_like:
-        x = pl.Series(x, dtype=pl.Utf8)
-    out = (
-        x.cast(pl.Utf8)
-        .str.replace_all(",", "")
-        .str.extract(r"(-?\d+(?:\.\d+)?)")
-        .cast(pl.Float64, strict=False)
-    )
-    return out.to_list() if array_like else out
-
-
-def parse_double(x):
-    """readr's ``parse_double()`` — strict floating-point parser.
-
-    Unlike :func:`parse_number`, this does *not* strip currency symbols
-    or extract numbers from mixed text — the whole string must be a
-    valid double, otherwise the value becomes null. ``"1.234"`` →
-    ``1.234``; ``"$1.99"``, ``"1,234"``, ``"abc"`` → null.
-
-    Type-in / type-out: ``pl.Series`` → ``pl.Series``; ``pl.Expr`` →
-    ``pl.Expr``; list / tuple / ndarray → ``list`` (with ``None`` for
-    unparseable entries).
-    """
-    array_like = not isinstance(x, (pl.Series, pl.Expr))
-    if array_like:
-        x = pl.Series(x, dtype=pl.Utf8)
-    out = x.cast(pl.Utf8).cast(pl.Float64, strict=False)
-    return out.to_list() if array_like else out
-
-
 __all__ = [
     # shape / preview
     "head", "tail", "nrow", "ncol", "dim", "length",
-    "names", "colnames", "summary", "glimpse",
+    "names", "colnames", "summary",
     "complete_cases", "na_omit",
     # vector helpers
     "seq", "seq_len", "seq_along",
@@ -417,8 +202,6 @@ __all__ = [
     "as_date", "as_Date",
     "is_na", "is_null", "is_finite", "is_numeric", "is_factor",
     "factor", "levels", "nlevels",
-    # readr-style parsing + dplyr conditionals + stringr text helpers
-    "parse_number", "parse_double", "if_else", "case_when", "str_wrap", "row_number",
     # distributions: d/p/q/r families
     "dnorm", "pnorm", "qnorm", "rnorm",
     "dt", "pt", "qt", "rt",
@@ -431,9 +214,8 @@ __all__ = [
     "dgamma", "pgamma", "qgamma", "rgamma",
     "dbeta", "pbeta", "qbeta", "rbeta",
     "set_seed",
-    # rank helpers (Lindeløv-style "tests as lm" notebook + dplyr family)
+    # rank helpers (Lindeløv-style "tests as lm" notebook)
     "rank", "signed_rank",
-    "min_rank", "dense_rank", "percent_rank", "cume_dist", "ntile",
     # hypothesis tests (return HTest, R's ``htest`` print-shape)
     "HTest", "AnovaTable",
     "t_test", "wilcox_test", "cor_test", "kruskal_test", "chisq_test",
@@ -528,15 +310,6 @@ def summary(x, **kwargs):
         return x.summary(**kwargs)
     raise TypeError(
         f"summary(): {type(x).__name__} has no .summary() method"
-    )
-
-
-def glimpse(df, **kwargs):
-    """dplyr: ``glimpse()`` — wide preview. Dispatches to ``.glimpse()``."""
-    if hasattr(df, "glimpse"):
-        return df.glimpse(**kwargs)
-    raise TypeError(
-        f"glimpse(): {type(df).__name__} has no .glimpse() method"
     )
 
 
@@ -1568,30 +1341,6 @@ def _as_array(x) -> np.ndarray:
 # ---- rank helpers (used by Wilcoxon/Spearman/Lindeløv constructions) -
 
 
-def _rankdata_with_nan(arr: np.ndarray, method: str) -> np.ndarray:
-    """``scipy.stats.rankdata`` wrapped to preserve NaN (dplyr's NA → NA)."""
-    arr = np.asarray(arr, dtype=float)
-    mask = ~np.isnan(arr)
-    out = np.full(arr.shape, np.nan, dtype=float)
-    if mask.any():
-        out[mask] = _sps.rankdata(arr[mask], method=method)
-    return out
-
-
-def _eager_rank_out(x, arr: np.ndarray):
-    """Wrap an ndarray rank result based on the original input type.
-
-    For Python list / tuple input, return a :class:`pl.Series` with NaN
-    converted to null — so ``mutate(rn=min_rank(x))`` ends up with a
-    proper polars null column instead of a literal NaN value. For
-    ndarray input, return the ndarray unchanged (preserves the
-    lm/Wilcoxon contract used by :func:`rank` / :func:`signed_rank`).
-    """
-    if isinstance(x, (list, tuple)):
-        return pl.Series(arr, nan_to_null=True)
-    return arr
-
-
 def rank(x):
     """R's ``rank()`` with ``ties.method = "average"`` (R's default).
 
@@ -1618,113 +1367,6 @@ def signed_rank(x):
         return x.sign() * x.abs().rank("average")
     arr = _as_array(x)
     return np.sign(arr) * _sps.rankdata(np.abs(arr), method="average")
-
-
-def min_rank(x):
-    """dplyr's ``min_rank()`` — ties get the smallest rank, next rank skipped.
-
-    ``min_rank([1, 5, 5, 17, 22, None])`` → ``Series[1, 2, 2, 4, 5, null]``.
-    Dispatches on input like :func:`rank`; NA / null propagates.
-    """
-    if isinstance(x, pl.Expr):
-        return x.rank("min")
-    if isinstance(x, pl.Series):
-        return x.rank("min")
-    return _eager_rank_out(x, _rankdata_with_nan(_as_array(x), method="min"))
-
-
-def dense_rank(x):
-    """dplyr's ``dense_rank()`` — like :func:`min_rank` but no gaps after ties.
-
-    ``dense_rank([1, 5, 5, 17, 22, None])`` → ``Series[1, 2, 2, 3, 4, null]``.
-    """
-    if isinstance(x, pl.Expr):
-        return x.rank("dense")
-    if isinstance(x, pl.Series):
-        return x.rank("dense")
-    return _eager_rank_out(x, _rankdata_with_nan(_as_array(x), method="dense"))
-
-
-def percent_rank(x):
-    """dplyr's ``percent_rank()`` — ``(min_rank(x) - 1) / (n - 1)``.
-
-    ``n`` is the non-null count. Returns 0 for the minimum and 1 for the
-    maximum; NA / null propagates. ``NaN`` if there's only one non-null value
-    (division by zero, matches R).
-    """
-    if isinstance(x, pl.Expr):
-        return (x.rank("min") - 1) / (x.count() - 1)
-    if isinstance(x, pl.Series):
-        return (x.rank("min") - 1) / (x.count() - 1)
-    arr = _as_array(x)
-    n = int((~np.isnan(arr)).sum())
-    return _eager_rank_out(x, (_rankdata_with_nan(arr, method="min") - 1) / (n - 1))
-
-
-def cume_dist(x):
-    """dplyr's ``cume_dist()`` — cumulative distribution: ``rank("max") / n``.
-
-    ``n`` is the non-null count. Returns the proportion of values ≤ each
-    entry; NA / null propagates.
-    """
-    if isinstance(x, pl.Expr):
-        return x.rank("max") / x.count()
-    if isinstance(x, pl.Series):
-        return x.rank("max") / x.count()
-    arr = _as_array(x)
-    n = int((~np.isnan(arr)).sum())
-    return _eager_rank_out(x, _rankdata_with_nan(arr, method="max") / n)
-
-
-def ntile(x, n):
-    """dplyr's ``ntile(x, n)`` — bucket ``x`` into ``n`` roughly-equal groups.
-
-    Uses ordinal rank, so ties may end up in different buckets. Where ``n``
-    doesn't divide the non-null count evenly, the first ``count % n`` buckets
-    get one extra element (matches dplyr: ``ntile(1:10, 4)`` →
-    ``[1,1,1,2,2,2,3,3,4,4]`` — sizes 3, 3, 2, 2). NA / null propagates.
-    """
-    if isinstance(x, pl.Expr):
-        r = x.rank("ordinal")
-        count = x.count()
-        n_larger = count % n
-        larger_size = (count + n - 1) // n
-        smaller_size = count // n
-        threshold = larger_size * n_larger
-        return (
-            pl.when(r <= threshold)
-            .then((r + larger_size - 1) // larger_size)
-            .otherwise(
-                (r - threshold + smaller_size - 1) // smaller_size + n_larger
-            )
-        )
-    if isinstance(x, pl.Series):
-        r = x.rank("ordinal")
-        count = x.count()
-        if count == 0:
-            return pl.Series([None] * len(x), dtype=pl.UInt32)
-        n_larger = count % n
-        larger_size = -(-count // n)
-        smaller_size = count // n
-        threshold = larger_size * n_larger
-        upper = (r + larger_size - 1) // larger_size
-        lower = (r - threshold + smaller_size - 1) // smaller_size + n_larger
-        cond = (r <= threshold).to_numpy()
-        return pl.Series(np.where(cond, upper.to_numpy(), lower.to_numpy()))
-    arr = _as_array(x)
-    mask = ~np.isnan(arr)
-    out = np.full(arr.shape, np.nan, dtype=float)
-    if mask.any():
-        ordinal = _sps.rankdata(arr[mask], method="ordinal").astype(np.int64)
-        count = int(mask.sum())
-        n_larger = count % n
-        larger_size = -(-count // n)
-        smaller_size = count // n
-        threshold = larger_size * n_larger
-        upper = (ordinal + larger_size - 1) // larger_size
-        lower = (ordinal - threshold + smaller_size - 1) // smaller_size + n_larger
-        out[mask] = np.where(ordinal <= threshold, upper, lower)
-    return _eager_rank_out(x, out)
 
 
 # ---- hypothesis tests -----------------------------------------------
