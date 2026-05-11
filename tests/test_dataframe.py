@@ -391,6 +391,64 @@ def test_group_by_maintain_order_default():
     assert out["g"].to_list() == ["b", "a"]
 
 
+def test_group_by_derived_kwarg_column():
+    """dplyr's ``group_by(name = expr)`` — kwarg defines a new column to group on."""
+    df = DataFrame({"sched_dep_time": [515, 540, 600, 700, 715, 800]})
+    out = (
+        df.group_by(hour=pl.col("sched_dep_time") // 100)
+        .summarize(n=pl.len())
+        .arrange("hour")
+    )
+    assert out["hour"].to_list() == [5, 6, 7, 8]
+    assert out["n"].to_list() == [2, 1, 2, 1]
+
+
+def test_group_by_mixed_positional_and_derived():
+    """Positional col plus kwarg-derived col are both grouping keys."""
+    df = DataFrame({
+        "g": ["a", "a", "a", "b"],
+        "x": [10, 12, 25, 11],
+    })
+    out = (
+        df.group_by("g", bucket=pl.col("x") // 10)
+        .summarize(n=pl.len())
+        .arrange("g", "bucket")
+    )
+    assert out["g"].to_list() == ["a", "a", "b"]
+    assert out["bucket"].to_list() == [1, 2, 1]
+    assert out["n"].to_list() == [2, 1, 1]
+
+
+def test_group_by_maintain_order_option_still_works():
+    """Backwards compat: bare ``maintain_order=`` is treated as a polars option,
+    not a derived column."""
+    df = DataFrame({"g": ["b", "a", "b", "a"], "x": [1, 2, 3, 4]})
+    # maintain_order=False relaxes the order guarantee — just check the
+    # grouping still works and "maintain_order" did not become a column.
+    out = df.group_by("g", maintain_order=False).summarize(n=pl.len())
+    assert set(out.columns) == {"g", "n"}
+    assert sorted(out["g"].to_list()) == ["a", "b"]
+
+
+def test_group_by_underscore_maintain_order_escape_hatch():
+    """``_maintain_order=`` frees the ``maintain_order`` name for a derived col."""
+    df = DataFrame({"x": [1, 2, 3, 4]})
+    out = (
+        df.group_by(maintain_order=pl.col("x") % 2, _maintain_order=True)
+        .summarize(n=pl.len())
+        .arrange("maintain_order")
+    )
+    assert out.columns == ["maintain_order", "n"]
+    assert out["maintain_order"].to_list() == [0, 1]
+    assert out["n"].to_list() == [2, 2]
+
+
+def test_group_by_no_args_raises():
+    df = DataFrame({"x": [1, 2]})
+    with pytest.raises(ValueError, match="at least one column"):
+        df.group_by()
+
+
 def test_summarize_no_group_collapses_to_one_row(df):
     out = df.summarize(total=pl.col("x").sum())
     assert out.height == 1

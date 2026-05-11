@@ -655,13 +655,46 @@ class DataFrame(pl.DataFrame):
     def group_by(self, *cols: Any, **kwargs: Any) -> "GroupBy":
         """Begin a grouped operation. Returns a :class:`GroupBy` wrapper.
 
+        Positional ``cols`` are existing column names (or polars Exprs)
+        to group on. Keyword arguments ``name=expr`` define **new**
+        columns to be materialized and grouped on, mirroring dplyr's
+        ``group_by(hour = sched_dep_time %/% 100)``.
+
         ``maintain_order=True`` is the default (R-tibble behavior); pass
-        ``maintain_order=False`` for polars' default.
+        ``maintain_order=False`` for polars' default. To define a
+        derived column literally named ``maintain_order``, pass the
+        polars option as ``_maintain_order=``.
         """
-        kwargs.setdefault("maintain_order", True)
+        pl_kwargs: dict[str, Any] = {}
+        derived: dict[str, Any] = {}
+        # _maintain_order is the explicit option (escape hatch); when
+        # passed, bare ``maintain_order`` is reclaimed as a derived
+        # column name.
+        if "_maintain_order" in kwargs:
+            pl_kwargs["maintain_order"] = kwargs["_maintain_order"]
+            derived = {k: v for k, v in kwargs.items() if k != "_maintain_order"}
+        else:
+            for k, v in kwargs.items():
+                if k == "maintain_order":
+                    pl_kwargs["maintain_order"] = v
+                else:
+                    derived[k] = v
+        pl_kwargs.setdefault("maintain_order", True)
+
+        df: DataFrame = self
+        if derived:
+            df = self.with_columns(*[
+                expr.alias(name) if isinstance(expr, pl.Expr)
+                else pl.lit(expr).alias(name)
+                for name, expr in derived.items()
+            ])
+            cols = (*cols, *derived.keys())
+
         if not cols:
-            raise ValueError("group_by(): pass at least one column.")
-        return GroupBy(self, list(cols), kwargs)
+            raise ValueError(
+                "group_by(): pass at least one column or derived column."
+            )
+        return GroupBy(df, list(cols), pl_kwargs)
 
     def summarize(
         self,
