@@ -490,6 +490,71 @@ def test_summarise_british_alias(df):
     assert out["s"].item() == 21
 
 
+def test_summarize_groups_drop_returns_dataframe(df):
+    """``_groups="drop"`` (the default) returns an ungrouped DataFrame.
+    Also guards the regression where _groups='drop' silently became a
+    literal column via the bare-scalar branch of _kwargs_to_exprs."""
+    out = df.group_by("g").summarize(m=pl.col("x").mean(), _groups="drop")
+    assert isinstance(out, DataFrame) and not isinstance(out, GroupBy)
+    assert "_groups" not in out.columns
+    assert set(out.columns) == {"g", "m"}
+
+
+def test_summarize_groups_keep_returns_grouped_for_chaining():
+    """``_groups="keep"`` returns a GroupBy on all original group vars so
+    downstream verbs see the same grouping. Verified by computing a
+    per-group derived column after summarize."""
+    d = DataFrame({"g": ["a","a","b","b","c"], "h": [1,2,1,2,1], "x": [1,2,3,4,5]})
+    out = d.group_by("g", "h").summarize(m=pl.col("x").mean(), _groups="keep")
+    assert isinstance(out, GroupBy)
+    assert out._by == ["g", "h"]
+
+
+def test_summarize_groups_drop_last_drops_one_level():
+    """``_groups="drop_last"`` keeps n-1 group vars. With a single group
+    var, collapses to ungrouped (matches dplyr)."""
+    d = DataFrame({"g": ["a","a","b","b","c"], "h": [1,2,1,2,1], "x": [1,2,3,4,5]})
+    out = d.group_by("g", "h").summarize(m=pl.col("x").mean(), _groups="drop_last")
+    assert isinstance(out, GroupBy)
+    assert out._by == ["g"]
+    # Downstream mutate is windowed over the remaining group var.
+    # R reference: groups left = g; g_sum = sum(m) within g.
+    follow = out.mutate(g_sum=pl.col("m").sum()).sort("g", "h")
+    assert follow["g_sum"].to_list() == [3.0, 3.0, 7.0, 7.0, 5.0]
+    # Single-group-var case collapses to DataFrame (matches dplyr).
+    out1 = d.group_by("g").summarize(m=pl.col("x").mean(), _groups="drop_last")
+    assert isinstance(out1, DataFrame) and not isinstance(out1, GroupBy)
+
+
+def test_summarize_groups_rowwise_groups_each_row():
+    """``_groups="rowwise"`` produces a GroupBy where each output row is
+    its own group (operationally equivalent to grouping by all original
+    by-cols after summarize, since each row is already unique in those)."""
+    d = DataFrame({"g": ["a","a","b","b","c"], "h": [1,2,1,2,1], "x": [1,2,3,4,5]})
+    out = d.group_by("g", "h").summarize(m=pl.col("x").mean(), _groups="rowwise")
+    assert isinstance(out, GroupBy)
+    assert out._by == ["g", "h"]
+
+
+def test_summarize_groups_invalid_raises(df):
+    """Typo or unknown value → ValueError listing the valid options."""
+    with pytest.raises(ValueError, match="expected one of"):
+        df.group_by("g").summarize(m=pl.col("x").mean(), _groups="nope")
+
+
+def test_summarize_groups_without_groups_only_drop_allowed(df):
+    """``DataFrame.summarize`` with no _by and no prior group_by has no
+    groups to preserve — only 'drop' (and 'drop_last' which collapses)
+    are sensible."""
+    with pytest.raises(ValueError, match="no groups to preserve"):
+        df.summarize(m=pl.col("x").mean(), _groups="keep")
+    with pytest.raises(ValueError, match="no groups to preserve"):
+        df.summarize(m=pl.col("x").mean(), _groups="rowwise")
+    # _by= form supports all four values like the group_by chain.
+    out = df.summarize(m=pl.col("x").mean(), _by="g", _groups="keep")
+    assert isinstance(out, GroupBy) and out._by == ["g"]
+
+
 def test_count_with_columns(df):
     out = df.count("g")
     assert out["g"].to_list() == ["a", "b"]

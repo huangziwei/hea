@@ -1030,6 +1030,46 @@ def _resolve_anchor(
     return idx
 
 
+_VALID_GROUPS = ("drop", "drop_last", "keep", "rowwise")
+
+
+def _check_groups(_groups: str) -> None:
+    """Validate dplyr-style ``_groups`` arg for ``summarize``."""
+    if _groups not in _VALID_GROUPS:
+        raise ValueError(
+            f"summarize(_groups={_groups!r}): expected one of "
+            f"{list(_VALID_GROUPS)!r} (matches dplyr's .groups argument)."
+        )
+
+
+def _apply_groups(out_df, by_cols: list, _groups: str):
+    """Resolve dplyr-style ``_groups`` on a summarize result.
+
+    Return type depends on ``_groups`` — analogous to dplyr where the
+    result is either an ungrouped tibble or a grouped one (tracked via
+    metadata; hea tracks it via the GroupBy wrapper type instead).
+
+    - ``"drop"`` → plain :class:`DataFrame` (polars' natural behavior).
+    - ``"drop_last"`` → :class:`GroupBy` on ``by_cols[:-1]``; if only one
+      group var existed, collapses to ungrouped (matches dplyr).
+    - ``"keep"`` → :class:`GroupBy` on all ``by_cols``.
+    - ``"rowwise"`` → :class:`GroupBy` on all ``by_cols``. After a
+      ``summarize``, each output row is unique by those columns, so
+      "each row is its own group" — operationally equivalent to dplyr's
+      rowwise. polars expressions are already row-vectorized, so there's
+      no further behavioral distinction inside ``mutate`` downstream.
+    """
+    if _groups == "drop":
+        return out_df
+    if _groups == "drop_last":
+        remaining = list(by_cols[:-1])
+        if not remaining:
+            return out_df
+        return GroupBy(out_df, remaining, {"maintain_order": True})
+    # "keep" or "rowwise" — group on all original by cols
+    return GroupBy(out_df, list(by_cols), {"maintain_order": True})
+
+
 def _kwargs_to_exprs(args: tuple, kwargs: dict) -> list[pl.Expr]:
     """Translate ``(*args, **kwargs)`` of a verb into a list of polars exprs.
 
@@ -1495,6 +1535,7 @@ class DataFrame(pl.DataFrame):
         self,
         *args: pl.Expr,
         _by: str | list[str] | None = None,
+        _groups: str = "drop",
         **kwargs: pl.Expr,
     ) -> "DataFrame":
         """Reduce the frame to one row per group (or one row total).
@@ -1503,15 +1544,31 @@ class DataFrame(pl.DataFrame):
         whole frame to a single row (matches dplyr).
         ``summarize(_by="g", x=pl.col("x").mean())`` is the per-call
         grouping form from dplyr 1.1.0.
+
+        ``_groups`` mirrors dplyr's ``.groups``:
+
+        - ``"drop"`` (default): ungrouped :class:`DataFrame`.
+        - ``"drop_last"``: :class:`GroupBy` on all but the last group var
+          (or DataFrame if only one group var existed).
+        - ``"keep"``: :class:`GroupBy` on all group vars.
+        - ``"rowwise"``: :class:`GroupBy` on all group vars (each row is
+          its own group after summarize).
         """
+        _check_groups(_groups)
         exprs = _kwargs_to_exprs(args, kwargs)
         if _by is None:
-            # Single row from the whole frame.
+            # Single row from the whole frame — no groups to operate on.
+            if _groups not in ("drop", "drop_last"):
+                raise ValueError(
+                    f"summarize(_groups={_groups!r}): no groups to "
+                    "preserve — call after group_by(...) or pass _by=."
+                )
             return super().select(exprs)
         by = [_by] if isinstance(_by, str) else list(_by)
-        return self._wrap(
+        result = self._wrap(
             super().group_by(by, maintain_order=True).agg(exprs)
         )
+        return _apply_groups(result, by, _groups)
 
     summarise = summarize  # British spelling, like dplyr.
 
@@ -2264,11 +2321,21 @@ class GroupBy:
 
     # ---- collapsing verbs --------------------------------------------
 
-    def summarize(self, *args: pl.Expr, **kwargs: pl.Expr) -> DataFrame:
-        """One row per group."""
+    def summarize(
+        self, *args: pl.Expr, _groups: str = "drop", **kwargs: pl.Expr,
+    ):
+        """One row per group.
+
+        ``_groups`` mirrors dplyr's ``.groups`` — see
+        :meth:`DataFrame.summarize` for the full table. Return type
+        depends on ``_groups``: :class:`DataFrame` for ``"drop"`` (and
+        ``"drop_last"`` with one group var); :class:`GroupBy` otherwise.
+        """
+        _check_groups(_groups)
         exprs = _kwargs_to_exprs(args, kwargs)
         gb = pl.DataFrame.group_by(self._df, self._by, **self._kwargs)
-        return self._df._wrap(gb.agg(exprs))
+        result = self._df._wrap(gb.agg(exprs))
+        return _apply_groups(result, self._by, _groups)
 
     summarise = summarize
 
