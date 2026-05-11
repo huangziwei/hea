@@ -52,6 +52,10 @@ __all__ = [
     "case_when", "desc", "if_else", "n", "n_distinct", "tbl",
     # dplyr rank family
     "row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist", "ntile",
+    # dplyr window / numeric helpers
+    "lag", "lead", "between", "na_if", "near",
+    # dplyr cumulative + run-length
+    "cummean", "cumall", "cumany", "consecutive_id",
     # readr / stringr / tibble
     "parse_double", "parse_number", "str_wrap", "glimpse",
 ]
@@ -520,6 +524,298 @@ def ntile(x, n):
         lower = (ordinal - threshold + smaller_size - 1) // smaller_size + n_larger
         out[mask] = np.where(ordinal <= threshold, upper, lower)
     return _eager_rank_out(x, out)
+
+
+# ---- window / mutate helpers (dplyr) --------------------------------
+
+def lag(x, n=1, default=None, order_by=None):
+    """dplyr's ``lag()`` — value ``n`` positions before each entry.
+
+    ``lag([2, 5, 11, 11, 19, 35])`` → ``[NA, 2, 5, 11, 11, 19]``. Entries
+    with no predecessor (the first ``n``) get ``default`` (``None`` →
+    null/NA, matching dplyr's default).
+
+    ``order_by`` reorders the input by another vector before computing
+    the lag, then restores the original positions. Use when rows aren't
+    already in chronological order:
+
+    >>> df.mutate(prev=hea.lag(pl.col("x"), order_by="t"))  # doctest: +SKIP
+
+    Inside ``group_by() %>% mutate()`` the lag is per-group automatically
+    (polars / dplyr's ``mutate`` handles the grouping).
+
+    Type-in / type-out: ``pl.Expr`` → ``pl.Expr``; ``pl.Series`` →
+    ``pl.Series``; list / tuple → ``pl.Series``; ndarray → ``ndarray``.
+    """
+    return _lag_lead(x, int(n), default, order_by)
+
+
+def lead(x, n=1, default=None, order_by=None):
+    """dplyr's ``lead()`` — value ``n`` positions after each entry.
+
+    ``lead([2, 5, 11, 11, 19, 35])`` → ``[5, 11, 11, 19, 35, NA]``. Mirror
+    of :func:`lag` — see that docstring for full arguments.
+    """
+    return _lag_lead(x, -int(n), default, order_by)
+
+
+def _lag_lead(x, k, default, order_by):
+    """Signed shift: ``k > 0`` lags, ``k < 0`` leads. Shared by lag/lead."""
+    if isinstance(x, pl.Expr):
+        if order_by is None:
+            return x.shift(k, fill_value=default)
+        ob = order_by if isinstance(order_by, pl.Expr) else pl.col(order_by)
+        inv = ob.arg_sort().arg_sort()
+        return x.sort_by(ob).shift(k, fill_value=default).gather(inv)
+
+    is_series = isinstance(x, pl.Series)
+    is_ndarray = isinstance(x, np.ndarray)
+
+    if order_by is not None:
+        ob_arr = (
+            order_by.to_numpy() if isinstance(order_by, pl.Series)
+            else np.asarray(order_by)
+        )
+        order = np.argsort(ob_arr, kind="stable")
+        inv = np.argsort(order, kind="stable")
+        x_arr = (x.to_numpy() if is_series else np.asarray(x))[order]
+        s = pl.Series(x_arr)
+    else:
+        s = x if is_series else pl.Series(x)
+
+    out = s.shift(k, fill_value=default)
+
+    if order_by is not None:
+        out = out.gather(pl.Series(inv))
+
+    if is_series:
+        return out
+    if is_ndarray:
+        return out.to_numpy()
+    return out  # list/tuple → pl.Series, matching min_rank/dense_rank pattern
+
+
+def between(x, left, right):
+    """dplyr's ``between(x, left, right)`` — ``left <= x <= right`` (both inclusive).
+
+    NA / null in ``x`` propagates. Wraps polars' ``Expr.between`` /
+    ``Series.is_between`` with the dplyr name and a top-level dispatch.
+
+    Type-in / type-out: ``pl.Expr`` → ``pl.Expr``; ``pl.Series`` →
+    ``pl.Series``; list / tuple → ``pl.Series``; ndarray → ``ndarray``.
+    """
+    if isinstance(x, pl.Expr):
+        return x.is_between(left, right, closed="both")
+    if isinstance(x, pl.Series):
+        return x.is_between(left, right, closed="both")
+    is_ndarray = isinstance(x, np.ndarray)
+    s = pl.Series(x)
+    out = s.is_between(left, right, closed="both")
+    return out.to_numpy() if is_ndarray else out
+
+
+def na_if(x, y):
+    """dplyr's ``na_if(x, y)`` — replace value ``y`` in ``x`` with NA / null.
+
+    ``na_if([1, 0, 3, 0], 0)`` → ``[1, NA, 3, NA]``. Useful for cleaning
+    sentinel codes (empty strings, ``-99``, …) into proper missing values.
+
+    Type-in / type-out: ``pl.Expr`` → ``pl.Expr``; ``pl.Series`` →
+    ``pl.Series``; list / tuple → ``pl.Series``; ndarray → ``ndarray``.
+    """
+    if isinstance(x, pl.Expr):
+        return pl.when(x == y).then(None).otherwise(x)
+    if isinstance(x, pl.Series):
+        return x.set(x == y, None)
+    is_ndarray = isinstance(x, np.ndarray)
+    s = pl.Series(x)
+    out = s.set(s == y, None)
+    return out.to_numpy() if is_ndarray else out
+
+
+def near(x, y, tol=1.5e-8):
+    """dplyr's ``near(x, y, tol)`` — approximate equality, ``|x - y| < tol``.
+
+    Default tolerance matches dplyr: ``sqrt(.Machine$double.eps)`` ≈ ``1.49e-8``.
+    Element-wise; ``y`` may be a scalar or same-length vector.
+
+    Type-in / type-out: ``pl.Expr`` → ``pl.Expr``; ``pl.Series`` →
+    ``pl.Series``; list / tuple → ``pl.Series``; ndarray → ``ndarray``.
+    """
+    if isinstance(x, pl.Expr):
+        return (x - y).abs() < tol
+    if isinstance(x, pl.Series):
+        return (x - y).abs() < tol
+    is_ndarray = isinstance(x, np.ndarray)
+    # Scalar shortcut — dplyr's near(1, 1+1e-10) returns a length-1 logical;
+    # in Python, returning a bool is the natural shape for scalar inputs.
+    if np.isscalar(x) and np.isscalar(y):
+        return bool(abs(float(x) - float(y)) < tol)
+    arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y, dtype=float) if not np.isscalar(y) else y
+    out = np.abs(arr - y_arr) < tol
+    return out if is_ndarray else pl.Series(out)
+
+
+# ---- cumulative helpers (dplyr) -------------------------------------
+
+def cummean(x):
+    """dplyr's ``cummean()`` — cumulative mean.
+
+    ``cummean([1, 2, 3, 4, 5])`` → ``[1, 1.5, 2, 2.5, 3]``. NA / null
+    propagates from the first missing value onward (matches dplyr's
+    ``cumsum(x) / seq_along(x)`` definition).
+
+    Type-in / type-out: ``pl.Expr`` → ``pl.Expr``; ``pl.Series`` →
+    ``pl.Series``; list / tuple → ``pl.Series``; ndarray → ``ndarray``.
+    """
+    if isinstance(x, pl.Expr):
+        csum = x.cum_sum()
+        denom = pl.int_range(1, pl.len() + 1)
+        has_na = x.is_null().cum_max()
+        return pl.when(has_na).then(None).otherwise(csum / denom)
+    is_series = isinstance(x, pl.Series)
+    is_ndarray = isinstance(x, np.ndarray)
+    arr = np.asarray(x.to_list() if is_series else x, dtype=float)
+    csum = np.cumsum(arr)
+    out = csum / np.arange(1, len(arr) + 1, dtype=float)
+    if is_ndarray:
+        return out
+    return pl.Series(out, nan_to_null=True)
+
+
+def cumall(x):
+    """dplyr's ``cumall()`` — cumulative all (logical AND).
+
+    TRUE while every value so far has been TRUE. ``FALSE`` absorbs
+    everything after it; ``NA`` propagates only until a ``FALSE`` is
+    seen (``FALSE`` takes precedence over ``NA``).
+
+    ``cumall([T, T, F, T])`` → ``[T, T, F, F]``;
+    ``cumall([T, NA, T])`` → ``[T, NA, NA]``;
+    ``cumall([F, NA])`` → ``[F, F]``.
+
+    Type-in / type-out: ``pl.Expr`` → ``pl.Expr``; ``pl.Series`` →
+    ``pl.Series``; list / tuple → ``pl.Series``; ndarray → ``ndarray``.
+    """
+    if isinstance(x, pl.Expr):
+        # has_false = any FALSE so far; has_na = any NA so far
+        has_false = (x == False).fill_null(False).cum_max()  # noqa: E712
+        has_na = x.is_null().cum_max()
+        return (
+            pl.when(has_false).then(False)
+            .when(has_na).then(None)
+            .otherwise(True)
+        )
+    return _cumall_cumany_eager(x, all_=True)
+
+
+def cumany(x):
+    """dplyr's ``cumany()`` — cumulative any (logical OR).
+
+    FALSE until the first TRUE, then TRUE forever (TRUE absorbs).
+    ``NA`` propagates only until a ``TRUE`` is seen.
+
+    ``cumany([F, F, T, F])`` → ``[F, F, T, T]``;
+    ``cumany([F, NA, F])`` → ``[F, NA, NA]``;
+    ``cumany([T, NA])`` → ``[T, T]``.
+
+    Type-in / type-out: ``pl.Expr`` → ``pl.Expr``; ``pl.Series`` →
+    ``pl.Series``; list / tuple → ``pl.Series``; ndarray → ``ndarray``.
+    """
+    if isinstance(x, pl.Expr):
+        has_true = x.fill_null(False).cum_max()
+        has_na = x.is_null().cum_max()
+        return (
+            pl.when(has_true).then(True)
+            .when(has_na).then(None)
+            .otherwise(False)
+        )
+    return _cumall_cumany_eager(x, all_=False)
+
+
+def _cumall_cumany_eager(x, all_):
+    """Shared eager loop for ``cumall`` (all_=True) and ``cumany`` (all_=False).
+
+    Returns a ``pl.Series`` of Boolean (with null) for Series / list /
+    tuple input, or an object ndarray for ndarray input.
+    """
+    is_series = isinstance(x, pl.Series)
+    is_ndarray = isinstance(x, np.ndarray)
+    src = x.to_list() if is_series else list(x)
+    if all_:
+        absorb, default_state = False, True   # FALSE absorbs; start TRUE
+    else:
+        absorb, default_state = True, False   # TRUE absorbs; start FALSE
+    state = default_state
+    out = []
+    for v in src:
+        if state is absorb:
+            out.append(absorb)
+            continue
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            state = None
+            out.append(None)
+            continue
+        v_bool = bool(v)
+        if v_bool is absorb:
+            state = absorb
+            out.append(absorb)
+        else:
+            # non-absorbing: state is True (cumall) or False (cumany), or None
+            out.append(state)
+    if is_ndarray:
+        return np.asarray(out, dtype=object)
+    return pl.Series(out, dtype=pl.Boolean)
+
+
+# ---- runs / consecutive identity (dplyr) ----------------------------
+
+def consecutive_id(*args):
+    """dplyr's ``consecutive_id()`` — id for each run of consecutive equal values.
+
+    Returns 1 for the first row, then increments each time *any* of the
+    inputs changes from the previous row. With multiple inputs, treats
+    them as a tuple — the id increments when the tuple changes.
+
+    ``consecutive_id([1, 1, 2, 2, 2, 1, 1])`` → ``[1, 1, 2, 2, 2, 3, 3]``.
+    ``consecutive_id(["a","a","b","a"], [1,1,1,1])`` → ``[1, 1, 2, 3]``.
+
+    Wraps polars' ``Expr.rle_id`` (which is 0-based) and adds 1 for
+    dplyr's 1-based convention.
+
+    Type-in / type-out: all-Expr / string → ``pl.Expr``; eager inputs
+    follow the first arg's type (Series / list → Series; ndarray →
+    ndarray).
+    """
+    if not args:
+        raise TypeError("consecutive_id() requires at least one argument")
+
+    # Pure-Expr / column-name path → return an Expr suitable for mutate().
+    if all(isinstance(a, (pl.Expr, str)) for a in args):
+        exprs = [a if isinstance(a, pl.Expr) else pl.col(a) for a in args]
+        if len(exprs) == 1:
+            return exprs[0].rle_id() + 1
+        return pl.struct(exprs).rle_id() + 1
+
+    # Eager path.
+    first = args[0]
+    if len(args) == 1:
+        if isinstance(first, pl.Series):
+            return first.rle_id() + 1
+        is_ndarray = isinstance(first, np.ndarray)
+        out = pl.Series(first).rle_id() + 1
+        return out.to_numpy() if is_ndarray else out
+
+    # Multiple eager args — combine into a tiny frame, struct-then-rle.
+    cols = {}
+    for i, a in enumerate(args):
+        name = f"__c{i}"
+        cols[name] = a.to_list() if isinstance(a, pl.Series) else list(a)
+    df = pl.DataFrame(cols)
+    out = df.select(pl.struct(pl.all()).rle_id() + 1).to_series().rename("")
+    is_ndarray = isinstance(first, np.ndarray)
+    return out.to_numpy() if is_ndarray else out
 
 
 _CLEAN_NAMES_REPLACE = (

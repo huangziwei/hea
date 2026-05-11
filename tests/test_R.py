@@ -19,12 +19,14 @@ from hea.R import (
     as_character, as_integer, as_logical, as_numeric,
     colnames, complete_cases, cor, cov, cumsum, cummax, cummin, cumprod,
     dim, diff, duplicated,
-    factor, glimpse, head,
+    factor, head,
     is_factor, is_finite, is_na, is_null, is_numeric,
     length, levels, mean, median,
     na_omit, names, ncol, nlevels, nrow,
-    order, parse_double, parse_number,
-    quantile, rev, sd, seq, seq_along, seq_len, sort, summary, tail,
+    order,
+    quantile,
+    rank as R_rank, rev, sd, seq, seq_along, seq_len, signed_rank,
+    sort, summary, tail,
     tabulate, unique, var, which, which_max, which_min,
     # distributions (a representative subset; full grid checked elsewhere)
     dnorm, pnorm, qnorm, rnorm,
@@ -104,11 +106,6 @@ def test_summary_dispatches_on_hea_dataframe():
 def test_summary_raises_on_unsupported():
     with pytest.raises(TypeError, match="no .summary"):
         summary(np.array([1, 2, 3]))
-
-
-def test_glimpse_dispatches(df):
-    # polars DataFrame has .glimpse() — just confirm we don't error
-    glimpse(df)
 
 
 def test_complete_cases_and_na_omit_on_dataframe():
@@ -310,144 +307,11 @@ def test_factor_levels_nlevels_is_factor():
 # ---------------------------------------------------------------------------
 
 
-def test_parse_double_strict_list():
-    """Whole string must be a valid double; otherwise null."""
-    assert parse_double(["1.2", "5.6", "1e3", "-0.5"]) == [1.2, 5.6, 1000.0, -0.5]
-    # currency / commas / words → null (strict, unlike parse_number)
-    assert parse_double(["$1.99", "1,234", "abc", ""]) == [None, None, None, None]
-
-
-def test_parse_double_tuple_returns_list():
-    assert parse_double(("1.2", "5.6")) == [1.2, 5.6]
-
-
-def test_parse_double_series_in_series_out():
-    out = parse_double(pl.Series(["1.2", "abc"]))
-    assert isinstance(out, pl.Series)
-    assert out.dtype == pl.Float64
-    assert out.to_list() == [1.2, None]
-
-
-def test_parse_double_expr_in_expr_out():
-    df = pl.DataFrame({"x": ["1.2", "5.6", "abc"]})
-    out = df.select(parse_double(pl.col("x")).alias("v"))["v"]
-    assert out.to_list() == [1.2, 5.6, None]
-
-
-def test_parse_number_list_returns_list():
-    """Regression: list input must not hit ``.cast`` AttributeError."""
-    assert parse_number(["$1,234.56", "30 yo", "five", "5"]) == [
-        1234.56, 30.0, None, 5.0
-    ]
-
-
-def test_parse_number_series_in_series_out():
-    out = parse_number(pl.Series(["$1.99", "abc"]))
-    assert isinstance(out, pl.Series)
-    assert out.to_list() == [1.99, None]
-
-
 # ---------------------------------------------------------------------------
-# Rank verbs — agreement with dplyr R reference
+# Rank — base R / Lindeløv constructions. The dplyr rank family (min_rank,
+# dense_rank, percent_rank, cume_dist, ntile, row_number) is tested in
+# test_dataframe.py — it lives in hea.dataframe with the tidyverse port.
 # ---------------------------------------------------------------------------
-
-# Reference values from R 4.6 / dplyr 1.x:
-#   x <- c(1, 5, 5, 17, 22, NA)
-#   min_rank(x)     -> c(1, 2, 2, 4, 5, NA)
-#   dense_rank(x)   -> c(1, 2, 2, 3, 4, NA)
-#   percent_rank(x) -> c(0, 0.25, 0.25, 0.75, 1.0, NA)
-#   cume_dist(x)    -> c(0.2, 0.6, 0.6, 0.8, 1.0, NA)
-#   ntile(x, 3)     -> c(1, 1, 2, 2, 3, NA)
-
-from hea.R import (  # noqa: E402 — grouped with the rank-verb tests
-    cume_dist, dense_rank, min_rank, ntile, percent_rank,
-    rank as R_rank, row_number as row_number_fn, signed_rank,
-)
-
-_X = [1, 5, 5, 17, 22, None]
-
-
-def test_min_rank_eager_list():
-    """List input returns a polars Series with null preserved (not NaN), so
-    the result composes cleanly with ``mutate`` (no NaN→null mismatch)."""
-    out = min_rank(_X)
-    assert isinstance(out, pl.Series)
-    assert out.to_list() == [1.0, 2.0, 2.0, 4.0, 5.0, None]
-
-
-def test_dense_rank_eager_list():
-    assert dense_rank(_X).to_list() == [1.0, 2.0, 2.0, 3.0, 4.0, None]
-
-
-def test_percent_rank_eager_list():
-    assert percent_rank(_X).to_list() == [0.0, 0.25, 0.25, 0.75, 1.0, None]
-
-
-def test_cume_dist_eager_list():
-    assert cume_dist(_X).to_list() == [0.2, 0.6, 0.6, 0.8, 1.0, None]
-
-
-def test_ntile_eager_list():
-    assert ntile(_X, 3).to_list() == [1.0, 1.0, 2.0, 2.0, 3.0, None]
-
-
-def test_ntile_eager_size_imbalance():
-    """``ntile(1:10, 3)`` puts the extras in the earlier buckets."""
-    assert ntile(list(range(1, 11)), 3).to_list() == [
-        1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0
-    ]
-    assert ntile(list(range(1, 11)), 4).to_list() == [
-        1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0
-    ]
-
-
-def test_eager_rank_into_mutate_produces_null_not_nan():
-    """Regression: a list-input rank result must surface as polars null
-    (matching R's uniform NA), not as a literal NaN value in the column."""
-    df = pl.DataFrame({"x": _X})
-    out = df.with_columns(
-        rn=row_number_fn(_X),
-        mr=min_rank(_X),
-        dr=dense_rank(_X),
-        pr=percent_rank(_X),
-        cd=cume_dist(_X),
-        nt=ntile(_X, 3),
-    )
-    # Each computed column should have exactly one null at the last position
-    for col in ("rn", "mr", "dr", "pr", "cd", "nt"):
-        assert out[col].null_count() == 1, f"{col} should have null, not NaN"
-        assert out[col][-1] is None
-
-
-def test_rank_verbs_series_in_series_out():
-    s = pl.Series(_X)
-    for fn in (min_rank, dense_rank, percent_rank, cume_dist, R_rank, signed_rank):
-        out = fn(s)
-        assert isinstance(out, pl.Series), f"{fn.__name__} did not return Series"
-    out = ntile(s, 3)
-    assert isinstance(out, pl.Series)
-
-
-def test_rank_verbs_expr_in_mutate():
-    """Composes inside ``mutate()`` — the canonical dplyr use case."""
-    df = pl.DataFrame({"x": _X})
-    out = df.select(
-        mr=min_rank(pl.col("x")),
-        dr=dense_rank(pl.col("x")),
-        pr=percent_rank(pl.col("x")),
-        cd=cume_dist(pl.col("x")),
-        nt=ntile(pl.col("x"), 3),
-    )
-    assert out["mr"].to_list() == [1, 2, 2, 4, 5, None]
-    assert out["dr"].to_list() == [1, 2, 2, 3, 4, None]
-    # polars' Expr-context division drifts slightly from scipy; compare with approx
-    assert out["pr"].to_list() == pytest.approx(
-        [0.0, 0.25, 0.25, 0.75, 1.0, None], nan_ok=True
-    )
-    assert out["cd"].to_list() == pytest.approx(
-        [0.2, 0.6, 0.6, 0.8, 1.0, None], nan_ok=True
-    )
-    assert out["nt"].to_list() == [1, 1, 2, 2, 3, None]
 
 
 def test_rank_expr_in_expr_out_preserves_average_method():
@@ -476,29 +340,6 @@ def test_rank_signed_rank_ndarray_backwards_compat():
     out2 = signed_rank(np.array([-2.0, -1.0, 0.0, 1.0, 2.0]))
     assert isinstance(out2, np.ndarray)
     assert out2.tolist() == [-4.5, -2.5, 0.0, 2.5, 4.5]
-
-
-def test_row_number_no_arg_is_position_expr():
-    """``row_number()`` (no args) returns the 1-based position expression."""
-    df = pl.DataFrame({"v": [10, 20, 30, None]})
-    out = df.select(rn=row_number_fn())["rn"].to_list()
-    # Null at position 4 still gets a row number — it's just position
-    assert out == [1, 2, 3, 4]
-
-
-def test_row_number_eager_list_is_ordinal_rank():
-    """``row_number(x)`` is ``rank(x, "ordinal")`` — ties by first appearance."""
-    # R reference: row_number(c(3, 1, 1, 2)) -> c(4, 1, 2, 3)
-    assert row_number_fn([3, 1, 1, 2]).to_list() == [4.0, 1.0, 2.0, 3.0]
-    # NA propagates
-    assert row_number_fn(_X).to_list() == [1.0, 2.0, 3.0, 4.0, 5.0, None]
-
-
-def test_row_number_expr_form():
-    """Inside ``select``/``mutate`` with a column ref."""
-    df = pl.DataFrame({"x": _X})
-    out = df.select(rn=row_number_fn(pl.col("x")))["rn"].to_list()
-    assert out == [1, 2, 3, 4, 5, None]
 
 
 # ---------------------------------------------------------------------------
