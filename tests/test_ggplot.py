@@ -24,7 +24,7 @@ from hea import (
 from hea.ggplot import (
     PlotGrid, aes, after_scale, after_stat, annotate, annotation_custom,
     coord_cartesian, coord_fixed,
-    coord_flip, coord_trans, expansion,
+    coord_flip, coord_polar, coord_trans, expansion,
     element_blank, element_line, element_rect,
     plot_annotation, plot_layout, wrap_plots,
     element_text, facet_grid, facet_wrap, geom_abline, geom_area, geom_bar, geom_blank,
@@ -3096,6 +3096,44 @@ def test_axis_rotation_via_theme_element_text_angle():
         rotations = {t.get_rotation()
                      for t in fig.axes[0].xaxis.get_majorticklabels()}
         assert rotations == {30.0}
+    finally:
+        plt.close(fig)
+
+
+def test_theme_panel_grid_blank_overrides_earlier_set_children():
+    """``theme_minimal()`` sets ``panel.grid.major`` (child) to an
+    ``element_line``. A later ``theme(panel_grid=element_blank())``
+    (parent) should clear the child via parent-cascade in
+    ``Theme.__add__``. Pre-fix, both lived in the merged theme dict
+    and ``_apply_grid`` reads the child first — gridlines kept drawing
+    despite the user's blank override."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + theme_minimal()
+         + theme(panel_grid=element_blank()))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        grid_visible = [l.get_visible() for l in ax.xaxis.get_gridlines()]
+        assert not any(grid_visible), f"gridlines still visible: {grid_visible}"
+    finally:
+        plt.close(fig)
+
+
+def test_theme_panel_border_blank_hides_polar_outer_ring():
+    """``panel.border=element_blank()`` should hide the polar outer
+    ring (``ax.spines["polar"]``). Pre-fix, ``_apply_spines`` early-
+    returned on polar without touching spines, so themes like
+    ``theme_minimal()`` (which sets ``panel.border=element_blank()``)
+    left the matplotlib default ring visible."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 1.0, 1.0]})
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + theme_minimal() + coord_polar())
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.name == "polar"
+        assert ax.spines["polar"].get_visible() is False
     finally:
         plt.close(fig)
 

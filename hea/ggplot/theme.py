@@ -84,6 +84,30 @@ def _merge_element(base, override):
     return type(base)(**merged_kwargs)
 
 
+# Parent-to-children relationships for element inheritance. Setting a
+# parent element in a later ``theme()`` call clears any previously-set
+# children so the parent's effect is fully realized. Mirrors ggplot2's
+# element inheritance hierarchy (R/theme-elements.R). Without cascade,
+# e.g. ``theme_minimal() + theme(panel_grid=element_blank())`` would
+# leave the panel.grid.major ``element_line`` from theme_minimal in
+# place — the user's panel.grid override never wins.
+_THEME_PARENT_TO_CHILDREN: dict = {
+    "panel.grid": ("panel.grid.major", "panel.grid.minor",
+                    "panel.grid.major.x", "panel.grid.major.y",
+                    "panel.grid.minor.x", "panel.grid.minor.y"),
+    "panel.grid.major": ("panel.grid.major.x", "panel.grid.major.y"),
+    "panel.grid.minor": ("panel.grid.minor.x", "panel.grid.minor.y"),
+    "axis.text": ("axis.text.x", "axis.text.y"),
+    "axis.title": ("axis.title.x", "axis.title.y"),
+    "axis.ticks": ("axis.ticks.x", "axis.ticks.y"),
+    "axis.line": ("axis.line.x", "axis.line.y"),
+    "strip.text": ("strip.text.x", "strip.text.y"),
+    "strip.background": ("strip.background.x", "strip.background.y"),
+    "legend.title": ("legend.title.x", "legend.title.y"),
+    "legend.text": ("legend.text.x", "legend.text.y"),
+}
+
+
 @dataclass
 class Theme:
     elements: dict = field(default_factory=dict)
@@ -99,6 +123,13 @@ class Theme:
         # Otherwise merge field-by-field.
         merged = dict(self.elements)
         for name, value in other.elements.items():
+            # Parent-child cascade: setting a parent later than its
+            # children overrides them. Without this,
+            # ``theme_minimal() + theme(panel_grid=element_blank())``
+            # would still draw gridlines because theme_minimal set the
+            # panel.grid.major child first.
+            for child in _THEME_PARENT_TO_CHILDREN.get(name, ()):
+                merged.pop(child, None)
             existing = merged.get(name)
             if existing is None or isinstance(value, element_blank) \
                     or isinstance(existing, element_blank):

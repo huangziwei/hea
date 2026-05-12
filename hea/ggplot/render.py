@@ -571,14 +571,23 @@ def _apply_spines(theme, ax) -> None:
     (ggplot2's ``theme_gray`` default — coloured panel background carries
     the visual weight).
 
-    Polar axes early-exit: their ``spines`` keys are
+    Polar axes branch: their ``spines`` keys are
     ``{"polar", "start", "end", "inner"}``, not the Cartesian quartet.
     Looking up ``"top"`` raises ``KeyError``, which would crash every
-    polar plot the first time a theme runs. Stage 5 maps
-    ``panel.border`` → ``ax.spines["polar"]`` properly; for now, defer
-    to matplotlib's default outer-ring rendering.
+    polar plot. We map ``panel.border`` → ``ax.spines["polar"]`` (the
+    outer ring) and otherwise leave matplotlib's polar defaults.
     """
     if getattr(ax, "name", None) == "polar":
+        panel_border = theme.get("panel.border")
+        polar_spine = ax.spines["polar"]
+        if isinstance(panel_border, element_blank):
+            polar_spine.set_visible(False)
+        elif isinstance(panel_border, element_rect):
+            polar_spine.set_visible(True)
+            if panel_border.colour:
+                polar_spine.set_color(r_color(panel_border.colour))
+            if panel_border.size:
+                polar_spine.set_linewidth(panel_border.size * _PT_PER_MM)
         return
 
     axis_line = theme.get("axis.line")
