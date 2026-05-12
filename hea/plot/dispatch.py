@@ -12,6 +12,7 @@ import polars as pl
 
 from ..formula import parse
 from .boxplot import boxplot_by
+from .density import _Density
 from .diagnostic import plot_lm
 from .formula_eval import eval_side
 from .helpers import pairs
@@ -61,6 +62,11 @@ def plot(*args, data: pl.DataFrame | None = None, env: dict | None = None,
     # Form: plot(lm_object) — 4-panel diagnostic
     if len(args) == 1 and _is_lm_like(a0):
         return plot_lm(a0, **kwargs)
+
+    # Form: plot(density_obj) — defers to the density's own .plot(),
+    # mirroring R's S3 ``plot.density`` dispatch.
+    if len(args) == 1 and isinstance(a0, _Density):
+        return a0.plot(ax=ax, **kwargs)
 
     # Form: plot(df) — DataFrame routes to scatterplot matrix (R's plot.data.frame)
     if len(args) == 1 and isinstance(a0, pl.DataFrame):

@@ -190,6 +190,19 @@ def test_density_rejects_tiny_input():
         density([1.0])
 
 
+def test_plot_dispatches_density_object(diastolic):
+    """``plot(density(x))`` should route through ``_Density.plot``, not
+    fall through to the single-vector scatter path that tries to take
+    ``len()`` of the density object."""
+    from hea.plot import plot
+
+    ax = plot(density(diastolic), main="")
+    assert isinstance(ax, matplotlib.axes.Axes)
+    assert ax.get_title() == ""
+    # The dispatch should have drawn a density curve, not scatter points.
+    assert len(ax.lines) == 1
+
+
 # ---------------------------------------------------------------------------
 # rug — overlay on existing axes.
 # ---------------------------------------------------------------------------
