@@ -867,9 +867,25 @@ def _default_labels(plot, build_output=None):
         return None
 
     def _from_layers(key):
-        for layer in plot.layers:
-            m = getattr(layer, "mapping", None)
-            if m is None:
+        # Prefer the build-time *effective* mapping per layer: kwarg-style
+        # aes (``geom_bar(x="clarity")``) lands in ``layer.aes_params`` and
+        # only gets promoted into a mapping during ``build`` (via
+        # ``_promote_string_aes_params``). The promoted view lives in
+        # ``build_output.layer_mappings[i]``; ``layer.mapping`` retains
+        # only what the user passed through ``aes(...)``. Reading
+        # ``layer.mapping`` alone would drop the kwarg-style label.
+        effective = (
+            getattr(build_output, "layer_mappings", None)
+            if build_output is not None
+            else None
+        )
+        for i, layer in enumerate(plot.layers):
+            m = None
+            if effective is not None and i < len(effective):
+                m = effective[i]
+            if not m:
+                m = getattr(layer, "mapping", None)
+            if not m:
                 continue
             label = _from_mapping(m, key)
             if label is not None:
