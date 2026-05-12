@@ -22,6 +22,7 @@ from . import r_ast as R
 from .nse import NSEContext, Slot
 from .r_parser import parse as parse_r
 from .registry.functions import FUNCTION_TABLE, Func, resolve_kwarg
+from .registry.ggplot import is_chain_extension
 from .registry.verbs import VERB_TABLE, Verb
 
 
@@ -190,6 +191,14 @@ class Translator:
 
     def _visit_BinOp(self, n: R.BinOp) -> P.AST:
         op = n.op
+
+        # ggplot chain extension: ``<plot expr> + geom_x(args)``. We
+        # detect by the RHS shape — it's a chain step iff it's a Call to
+        # a name like ``geom_*`` / ``scale_*`` / ``labs`` / etc. The LHS
+        # is recursively translated, so a long chain unfolds left-to-right.
+        if op == "+" and _is_ggplot_chain_call(n.right):
+            return self._emit_ggplot_chain_step(n.left, n.right)
+
         left = self._visit(n.left)
         right = self._visit(n.right)
 
@@ -203,12 +212,27 @@ class Translator:
         if cmp is not None:
             return P.Compare(left=left, ops=[cmp()], comparators=[right])
 
-        # Logical and/or — bitwise for polars Expr, boolean for scalars.
-        if op == "&" or op == "&&":
+        # Logical and/or.
+        #
+        # R distinguishes single (``&`` / ``|`` — elementwise) from double
+        # (``&&`` / ``||`` — short-circuit / scalar). We mirror:
+        # - ``&``/``|`` ALWAYS emit Python bitwise. That's correct for
+        #   polars Expr (elementwise) AND patchwork plot composition
+        #   (``p1 | p2``), and the scalar-bool case (``True | False``)
+        #   evaluates the same way. Short-circuit was never R's semantics
+        #   for these operators anyway.
+        # - ``&&``/``||`` are short-circuit in R; outside EXPR slot we
+        #   emit Python ``and``/``or``. Inside EXPR slot they still mean
+        #   elementwise (polars Expr), so we emit bitwise.
+        if op == "&":
+            return P.BinOp(left=left, op=P.BitAnd(), right=right)
+        if op == "|":
+            return P.BinOp(left=left, op=P.BitOr(), right=right)
+        if op == "&&":
             if self.nse.is_expr():
                 return P.BinOp(left=left, op=P.BitAnd(), right=right)
             return P.BoolOp(op=P.And(), values=[left, right])
-        if op == "|" or op == "||":
+        if op == "||":
             if self.nse.is_expr():
                 return P.BinOp(left=left, op=P.BitOr(), right=right)
             return P.BoolOp(op=P.Or(), values=[left, right])
@@ -301,6 +325,12 @@ class Translator:
         if isinstance(func, R.Identifier):
             name = func.name
 
+            # 0) ggplot(df, aes(...)) — the only ggplot entry point that
+            # takes a data frame. Rewritten to ``df.ggplot(...)`` so it
+            # composes with the chain rewriter via the ``+`` operator.
+            if name == "ggplot":
+                return self._emit_ggplot_root(n.args)
+
             # 1) Verb dispatch.
             verb = VERB_TABLE.get(name)
             if verb is not None and n.args:
@@ -344,6 +374,114 @@ class Translator:
                     continue
                 py_kwargs.append(P.keyword(arg=name, value=P.Constant(value=value)))
         return _call(_attr(receiver, verb.hea_method), py_args, py_kwargs)
+
+    # ----- ggplot ---------------------------------------------------------
+
+    def _emit_ggplot_root(self, args: tuple[R.Node, ...]) -> P.AST:
+        """``ggplot(df, aes(x = a, y = b))`` → ``df.ggplot(x="a", y="b")``.
+
+        The first positional arg is the data frame (receiver). Subsequent
+        args may be:
+        - ``aes(...)`` positional (or as ``mapping = aes(...)``) — unwrap
+          its kwargs into ``ggplot()``'s kwargs.
+        - Other named kwargs (``environment = ...``) — pass through.
+        """
+        if not args:
+            return _call(_attr(_name("hea"), "ggplot"))
+        receiver = self._visit(args[0])
+        kwargs = self._collect_ggplot_kwargs(args[1:])
+        return _call(_attr(receiver, "ggplot"), [], kwargs)
+
+    def _emit_ggplot_chain_step(self, left: R.Node, right: R.Call) -> P.AST:
+        """``<plot> + <ext>(args)`` → ``<plot translated>.<ext>(args)``."""
+        receiver = self._visit(left)
+        func_name = right.func.name  # type: ignore[attr-defined]
+        kwargs = self._collect_ggplot_kwargs(right.args)
+        # Positional args (besides aes) pass through under NSE.NONE so
+        # ``annotate("text", x=, y=, label=)`` keeps its string literal.
+        positional: list[P.AST] = []
+        with self.nse.enter(Slot.NONE):
+            for arg in right.args:
+                if isinstance(arg, R.NamedArg):
+                    continue  # collected by _collect_ggplot_kwargs
+                if _is_named_call(arg, "aes"):
+                    continue
+                if isinstance(arg, R.Tilde):
+                    # facet_wrap(~island) / facet_grid(rows ~ cols)
+                    positional.append(P.Constant(value=_format_formula(arg)))
+                    continue
+                positional.append(self._visit(arg))
+        return _call(_attr(receiver, func_name), positional, kwargs)
+
+    def _collect_ggplot_kwargs(self, args: tuple[R.Node, ...]) -> list[P.keyword]:
+        """Pull aes() unwrap + regular kwargs out of a ggplot-extension
+        call's argument list. Positional non-aes args are ignored here —
+        the caller handles them."""
+        kwargs: list[P.keyword] = []
+        for arg in args:
+            if _is_named_call(arg, "aes"):
+                kwargs.extend(self._translate_aes_args(arg.args))
+                continue
+            if isinstance(arg, R.NamedArg) and _is_named_call(arg.value, "aes"):
+                # ``mapping = aes(...)`` form.
+                kwargs.extend(self._translate_aes_args(arg.value.args))
+                continue
+            if isinstance(arg, R.NamedArg):
+                alias = resolve_kwarg(arg.name)
+                if alias.value_slot is not None:
+                    with self.nse.enter(alias.value_slot):
+                        value = self._visit(arg.value)
+                else:
+                    with self.nse.enter(Slot.NONE):
+                        value = self._visit(arg.value)
+                kwargs.append(P.keyword(arg=alias.py_name, value=value))
+        return kwargs
+
+    # ggplot's documented positional-aesthetic order for ``aes()``. R's
+    # convention (and ``?aes``): the first positional is ``x``, the
+    # second is ``y``. Everything else is named. We map by position so
+    # ``aes(x, y, color = z)`` translates as the user intends.
+    _AES_POS_AESTHETICS = ("x", "y")
+
+    def _translate_aes_args(self, args: tuple[R.Node, ...]) -> list[P.keyword]:
+        """Translate ``aes()`` args to ggplot kwargs.
+
+        Each arg becomes a kwarg by either its explicit name (NamedArg)
+        or its position (mapping to ``x``, then ``y`` — R's convention).
+        The value translation rules:
+
+        - Bare ``Identifier`` → string ``"name"`` (the column reference).
+        - ``StrLit`` → string (pass-through).
+        - Anything else → translate under EXPR slot for column-aware
+          expressions like ``log(weight)``.
+        """
+        kwargs: list[P.keyword] = []
+        pos_idx = 0
+        for arg in args:
+            if isinstance(arg, R.NamedArg):
+                name = arg.name
+                value = self._translate_aes_value(arg.value)
+                kwargs.append(P.keyword(arg=name, value=value))
+                continue
+            # Positional — map to x, y in order.
+            if pos_idx < len(self._AES_POS_AESTHETICS):
+                name = self._AES_POS_AESTHETICS[pos_idx]
+                value = self._translate_aes_value(arg)
+                kwargs.append(P.keyword(arg=name, value=value))
+                pos_idx += 1
+            # Extra positional args (3rd+) in aes are non-standard. Drop
+            # silently in v1 rather than guess at color/fill/etc.
+        return kwargs
+
+    def _translate_aes_value(self, node: R.Node) -> P.AST:
+        """Translate a single aes() value: identifier → string, otherwise
+        an EXPR-slot expression."""
+        if isinstance(node, R.Identifier):
+            return P.Constant(value=node.name)
+        if isinstance(node, R.StrLit):
+            return P.Constant(value=node.value)
+        with self.nse.enter(Slot.EXPR):
+            return self._visit(node)
 
     # ----- across() expansion ---------------------------------------------
 
@@ -629,17 +767,11 @@ class Translator:
 
     def _visit_Tilde(self, n: R.Tilde) -> P.AST:
         """Formula. Emit as a string literal so consumers like
-        ``hea.lm(formula="y ~ x")`` work. The fluent ``y ~ x`` syntax in
-        R has no Python operator equivalent without monkey-patching.
+        ``hea.lm(formula="y ~ x")`` and ``facet_wrap("~island")`` work.
+        The fluent ``y ~ x`` syntax in R has no Python operator
+        equivalent without monkey-patching.
         """
-        from .r_lexer import tokenize  # local import to avoid a cycle
-        # Build the original textual representation from the span.
-        # For a robust value we re-render from the AST; for now, conservative.
-        if n.lhs is None:
-            text = f"~ {_unparse_for_formula(n.rhs)}"
-        else:
-            text = f"{_unparse_for_formula(n.lhs)} ~ {_unparse_for_formula(n.rhs)}"
-        return P.Constant(value=text)
+        return P.Constant(value=_format_formula(n))
 
     def _visit_Block(self, n: R.Block) -> P.AST:
         """Brace block. As a statement, becomes the sequence of inner
@@ -743,6 +875,30 @@ def _is_named_call(node, name: str) -> bool:
         and isinstance(node.func, R.Identifier)
         and node.func.name == name
     )
+
+
+def _is_ggplot_chain_call(node) -> bool:
+    """``True`` iff ``node`` is a Call whose head identifier marks it as a
+    ggplot chain extension (geom_*, scale_*, labs, theme, …).
+
+    Plus ``theme(...)`` itself, which the prefix rule already catches
+    via ``theme_*``-startswith — but we also want bare ``theme``.
+    """
+    if not isinstance(node, R.Call) or not isinstance(node.func, R.Identifier):
+        return False
+    name = node.func.name
+    if name == "theme":
+        return True
+    return is_chain_extension(name)
+
+
+def _format_formula(t: R.Tilde) -> str:
+    """Render a Tilde back to R-style formula text. Matches hea's idiom
+    of compact ``"~island"`` / ``"rows ~ cols"`` style — no padding before
+    the ``~`` in the unary case."""
+    if t.lhs is None:
+        return f"~{_unparse_for_formula(t.rhs)}"
+    return f"{_unparse_for_formula(t.lhs)} ~ {_unparse_for_formula(t.rhs)}"
 
 
 def _extract_col_names(cols_arg) -> list[str]:

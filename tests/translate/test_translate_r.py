@@ -562,6 +562,158 @@ class TestAcross:
             _tr("mutate(df, across(c(a, b), list(mean = mean, sd = sd)))")
 
 
+class TestGgplot:
+    """Phase 5 — ``ggplot(df, aes(...)) + geom_*()`` chain detection,
+    aes() unwrapping, facet formulas, and patchwork operators."""
+
+    # ----- ggplot root + simplest chains -----
+
+    def test_ggplot_with_named_aes(self):
+        out = _tr(
+            "ggplot(penguins, aes(x = flipper_length_mm, y = body_mass_g)) "
+            "+ geom_point()"
+        )
+        assert out == (
+            "penguins.ggplot(x='flipper_length_mm', y='body_mass_g').geom_point()"
+        )
+
+    def test_positional_aes_maps_to_x_y(self):
+        # R convention: aes(x, y) — first positional is x, second is y.
+        out = _tr("ggplot(d, aes(x, y)) + geom_point()")
+        assert out == "d.ggplot(x='x', y='y').geom_point()"
+
+    def test_positional_and_named_mixed(self):
+        out = _tr("ggplot(d, aes(x, y, color = z)) + geom_point()")
+        assert out == "d.ggplot(x='x', y='y', color='z').geom_point()"
+
+    def test_no_aes(self):
+        # ``ggplot(df)`` with no aes — produces empty kwargs.
+        out = _tr("ggplot(d) + geom_blank()")
+        assert out == "d.ggplot().geom_blank()"
+
+    # ----- aes inside geoms -----
+
+    def test_aes_unwraps_inside_geom(self):
+        out = _tr(
+            "ggplot(d, aes(x = a)) + geom_point(aes(color = species, shape = species))"
+        )
+        assert out == (
+            "d.ggplot(x='a').geom_point(color='species', shape='species')"
+        )
+
+    def test_geom_with_mixed_aes_and_literal_kwarg(self):
+        # ``geom_point(aes(color = z), alpha = 0.5)`` — aesthetic kwargs
+        # from aes unwrap; literal ``alpha`` is a regular kwarg.
+        out = _tr(
+            "ggplot(d, aes(x, y)) + geom_point(aes(color = z), alpha = 0.5)"
+        )
+        assert out == "d.ggplot(x='x', y='y').geom_point(color='z', alpha=0.5)"
+
+    def test_aes_with_expression(self):
+        # ``aes(x = log(weight))`` — value is a polars Expr in hea.
+        out = _tr("ggplot(d, aes(x = log(weight), y = height)) + geom_point()")
+        assert out == "d.ggplot(x=col('weight').log(), y='height').geom_point()"
+
+    # ----- full chain -----
+
+    def test_full_chain(self):
+        out = _tr(
+            "ggplot(penguins, aes(x = flipper_length_mm, y = body_mass_g)) "
+            "+ geom_point(aes(color = species)) "
+            "+ labs(title = \"Body mass vs flipper\", x = \"Flipper length (mm)\") "
+            "+ theme_minimal()"
+        )
+        assert out == (
+            "penguins.ggplot(x='flipper_length_mm', y='body_mass_g')"
+            ".geom_point(color='species')"
+            ".labs(title='Body mass vs flipper', x='Flipper length (mm)')"
+            ".theme_minimal()"
+        )
+
+    def test_chain_with_scales(self):
+        out = _tr(
+            "ggplot(d, aes(x, y, color = z)) + geom_point() "
+            "+ scale_color_viridis_c() + scale_x_log10()"
+        )
+        assert out == (
+            "d.ggplot(x='x', y='y', color='z').geom_point()"
+            ".scale_color_viridis_c().scale_x_log10()"
+        )
+
+    def test_chain_with_coord_polar(self):
+        out = _tr("ggplot(d, aes(x = species)) + geom_bar() + coord_polar()")
+        assert out == "d.ggplot(x='species').geom_bar().coord_polar()"
+
+    # ----- facets -----
+
+    def test_facet_wrap_formula(self):
+        out = _tr(
+            "ggplot(d, aes(x, y)) + geom_point() + facet_wrap(~island)"
+        )
+        assert out == "d.ggplot(x='x', y='y').geom_point().facet_wrap('~island')"
+
+    def test_facet_grid_binary_formula(self):
+        out = _tr("ggplot(d, aes(x, y)) + geom_point() + facet_grid(year ~ month)")
+        assert out == (
+            "d.ggplot(x='x', y='y').geom_point().facet_grid('year ~ month')"
+        )
+
+    # ----- theme + element_* -----
+
+    def test_theme_with_element_text(self):
+        out = _tr(
+            "ggplot(d, aes(x, y)) + geom_point() "
+            "+ theme(axis.text = element_text(size = 10))"
+        )
+        # ``axis.text`` becomes ``axis_text`` via the dot→underscore rule;
+        # element_text is a regular function call (no special unwrap).
+        assert "axis_text=element_text(size=10)" in out
+        assert ".theme(" in out
+
+    def test_theme_bare_then_named_theme(self):
+        out = _tr("ggplot(d) + theme_bw() + theme(legend.position = \"none\")")
+        assert out == "d.ggplot().theme_bw().theme(legend_position='none')"
+
+    # ----- patchwork operators -----
+
+    def test_patchwork_pipe(self):
+        # ``p1 | p2`` — neither is a chain extension, so ``|`` stays as ``|``.
+        assert _tr("p1 | p2") == "p1 | p2"
+
+    def test_patchwork_stack(self):
+        assert _tr("p1 / p2") == "p1 / p2"
+
+    def test_patchwork_grouped(self):
+        assert _tr("(p1 | p2) / p3") == "(p1 | p2) / p3"
+
+    def test_patchwork_plus_with_bare_name(self):
+        # ``p1 + p2`` — RHS isn't a ggplot extension call, so stays as ``+``.
+        assert _tr("p1 + p2") == "p1 + p2"
+
+    def test_patchwork_with_plot_annotation(self):
+        # ``plot_annotation`` IS a chain extension — gets method-call form.
+        out = _tr('(p1 | p2) + plot_annotation(title = "title")')
+        assert out == "(p1 | p2).plot_annotation(title='title')"
+
+    # ----- aes with c(name = value) for renamed mappings -----
+
+    def test_aes_with_string_value(self):
+        # ``aes(x = "y_column")`` — string literal value.
+        out = _tr('ggplot(d, aes(x = "weight")) + geom_point()')
+        assert out == "d.ggplot(x='weight').geom_point()"
+
+    # ----- arithmetic on plot expressions remains arithmetic -----
+
+    def test_plus_with_geom_does_chain(self):
+        # Sanity: a ``+`` with a geom RHS is a chain — even when LHS is bare.
+        out = _tr("p + geom_point()")
+        assert out == "p.geom_point()"
+
+    def test_plus_with_non_chain_rhs_stays_arithmetic(self):
+        # ``p + 1`` — RHS is a number, not a chain extension.
+        assert _tr("p + 1") == "p + 1"
+
+
 class TestControlFlow:
     def test_if_else_ternary(self):
         out = _tr("if (x > 0) a else b")
