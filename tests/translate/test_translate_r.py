@@ -8,6 +8,7 @@ to catch any syntactic regressions.
 """
 
 import ast
+import re
 
 import pytest
 
@@ -15,14 +16,35 @@ from hea.translate.r_to_py import translate
 
 
 def _tr(src: str) -> str:
-    """Translate and strip trailing whitespace/newlines for stable compare."""
+    """Translate and strip the auto-emitted dataset-load preamble.
+
+    Most forward tests care about the body, not the preamble.
+    :class:`TestForwardAutoload` exercises preamble emission directly.
+    """
+    return _strip_autoload_preamble(translate(src)).strip()
+
+
+def _tr_full(src: str) -> str:
+    """Translate including the autoload preamble."""
     return translate(src).strip()
+
+
+_AUTOLOAD_LINE = re.compile(r"^\w+\s*=\s*hea\.data\(")
+
+
+def _strip_autoload_preamble(s: str) -> str:
+    """Drop leading ``<name> = hea.data(...)`` lines emitted by the
+    forward translator as autoload preamble."""
+    lines = s.split("\n")
+    while lines and _AUTOLOAD_LINE.match(lines[0]):
+        lines.pop(0)
+    return "\n".join(lines)
 
 
 def _compiles(src: str) -> bool:
     """Translated output must be valid Python source."""
     try:
-        compile(_tr(src), "<translated>", "exec")
+        compile(_tr_full(src), "<translated>", "exec")
     except SyntaxError:
         return False
     return True
@@ -244,6 +266,74 @@ class TestHelpers:
 # ---------------------------------------------------------------------------
 # End-to-end: canonical r4ds pipeline
 # ---------------------------------------------------------------------------
+
+
+class TestForwardAutoload:
+    """Forward direction infers ``hea.data()`` loads for bare-name dataset
+    references and standalone ``data(...)`` calls."""
+
+    def test_library_then_bare_ref(self):
+        # ``library(palmerpenguins)`` disambiguates a bare-name ref that
+        # would otherwise be skipped (penguins is in 2 packages).
+        out = _tr_full(
+            'library(palmerpenguins)\n'
+            'penguins |> ggplot(aes(x = flipper_length_mm)) + geom_point()'
+        )
+        assert "penguins = hea.data('penguins', package='palmerpenguins')" in out
+        # The library() call itself is dropped from the body.
+        assert "library(" not in out
+
+    def test_standalone_data_call_becomes_assignment(self):
+        # R's ``data("X", package="Y")`` is side-effectful — translate to
+        # ``X = hea.data(...)`` so the Python script can use ``X`` after.
+        out = _tr_full('data("flights", package = "nycflights13")\nflights |> filter(dest == "IAH")')
+        assert out.startswith("flights = hea.data('flights', package='nycflights13')")
+
+    def test_autoload_for_unique_dataset(self):
+        # No library() and no data() — bare ref to a uniquely-named
+        # rdatasets entry. Emit autoload load.
+        out = _tr_full('flights |> filter(dest == "IAH")')
+        assert "flights = hea.data('flights', package='nycflights13')" in out
+
+    def test_ambiguous_bare_ref_skipped(self):
+        # No library() to disambiguate ``penguins`` — skip the autoload.
+        # User will need to disambiguate themselves or it'll error at runtime.
+        out = _tr_full('penguins |> ggplot(aes(x = flipper_length_mm))')
+        assert "hea.data" not in out
+
+    def test_locally_defined_name_not_autoloaded(self):
+        # ``flights <- read_csv(...)`` defines the name; no autoload needed.
+        out = _tr_full(
+            'flights <- read_csv("my_file.csv")\nflights |> filter(dest == "IAH")'
+        )
+        # The forward translator currently doesn't strip the autoload from
+        # this case — but the local definition should win. Confirm there's
+        # NO ``flights = hea.data(...)`` line.
+        assert "hea.data" not in out
+
+    def test_r_default_package_skipped(self):
+        # ``mtcars`` lives in R's ``datasets`` package which is auto-loaded
+        # in R — no explicit hea.data() load needed.
+        out = _tr_full('mtcars |> filter(mpg > 20)')
+        assert "hea.data" not in out
+
+    def test_library_call_dropped_from_body(self):
+        # library() lines never make it into the Python body.
+        out = _tr_full(
+            'library(dplyr)\nlibrary(ggplot2)\nflights |> filter(dest == "IAH")'
+        )
+        assert "library(" not in out
+        assert "dplyr" not in out
+
+    def test_explicit_data_with_loaded_lib_disambiguates(self):
+        # User loaded modeldata but the dataset call says palmerpenguins —
+        # explicit form wins.
+        out = _tr_full(
+            'library(modeldata)\n'
+            'data("penguins", package = "palmerpenguins")\n'
+            'penguins |> ggplot()'
+        )
+        assert "penguins = hea.data('penguins', package='palmerpenguins')" in out
 
 
 def test_canonical_pipeline_full():

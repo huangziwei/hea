@@ -18,7 +18,7 @@ from __future__ import annotations
 import ast as P
 from typing import Optional
 
-from . import r_ast as R
+from . import _datasets, r_ast as R
 from .nse import NSEContext, Slot
 from .r_parser import parse as parse_r
 from .registry.functions import FUNCTION_TABLE, Func, resolve_kwarg
@@ -81,6 +81,11 @@ class Translator:
 
     def __init__(self):
         self.nse = NSEContext()
+        # Packages the source declared via ``library(pkg)`` /
+        # ``require(pkg)``. Used to disambiguate autoload candidates
+        # below — if ``penguins`` is in two packages and one of them
+        # was loaded, prefer that one.
+        self._loaded_packages: set[str] = set()
 
     # -- public ------------------------------------------------------------
 
@@ -94,13 +99,109 @@ class Translator:
     def _visit_program(self, prog: R.Program) -> P.Module:
         body: list[P.stmt] = []
         for stmt in prog.statements:
+            # ``library(pkg)`` / ``require(pkg)`` — drop, but record the
+            # package so autoload inference can prefer it for ambiguous
+            # dataset names below.
+            if _is_library_call(stmt):
+                _record_library_pkg(stmt, self._loaded_packages)
+                continue
             if _is_noop_call(stmt):
-                # library(...), require(...), suppressMessages(...) are
-                # R-environment setup that has no Python equivalent.
-                # Drop silently — the relevant hea names are already in scope.
+                continue
+            # Standalone ``data("X", package="Y")`` — rewrite as a
+            # Python assignment ``X = hea.data("X", package="Y")``. The
+            # R side is side-effectful (data() loads into the env); the
+            # Python equivalent needs an explicit binding.
+            smart = self._maybe_smart_data_call(stmt)
+            if smart is not None:
+                body.append(smart)
                 continue
             body.append(self._as_stmt(self._visit(stmt)))
-        return P.Module(body=body, type_ignores=[])
+
+        # Autoload preamble: bare names referenced but not defined that
+        # match a known rdatasets entry get a ``hea.data(...)`` load
+        # prepended to the module body.
+        preamble = self._build_autoload_preamble(body)
+        return P.Module(body=preamble + body, type_ignores=[])
+
+    def _maybe_smart_data_call(self, stmt: R.Node) -> Optional[P.AST]:
+        """If ``stmt`` is a standalone ``data("X", package="Y")`` call,
+        emit it as ``X = hea.data("X", package="Y")``.
+
+        R's ``data()`` loads the named dataset into the calling
+        environment as a side-effect; Python needs an explicit binding
+        for the script to work after translation.
+        """
+        if not (
+            isinstance(stmt, R.Call)
+            and isinstance(stmt.func, R.Identifier)
+            and stmt.func.name == "data"
+            and stmt.args
+        ):
+            return None
+        first = stmt.args[0]
+        if isinstance(first, R.StrLit):
+            name = first.value
+        elif isinstance(first, R.Identifier):
+            name = first.name
+        else:
+            return None
+        pkg: Optional[str] = None
+        for arg in stmt.args[1:]:
+            if isinstance(arg, R.NamedArg) and arg.name == "package":
+                if isinstance(arg.value, R.StrLit):
+                    pkg = arg.value.value
+                elif isinstance(arg.value, R.Identifier):
+                    pkg = arg.value.name
+        keywords = []
+        if pkg:
+            keywords.append(P.keyword(arg="package", value=P.Constant(value=pkg)))
+        return P.Assign(
+            targets=[P.Name(id=name, ctx=P.Store())],
+            value=P.Call(
+                func=P.Attribute(value=P.Name("hea"), attr="data", ctx=P.Load()),
+                args=[P.Constant(value=name)],
+                keywords=keywords,
+            ),
+        )
+
+    def _build_autoload_preamble(self, body: list[P.stmt]) -> list[P.stmt]:
+        """Scan ``body`` for bare ``Name`` references that aren't bound
+        anywhere and match a known dataset; emit a ``hea.data(...)``
+        assignment for each.
+
+        The user's ``library(...)`` declarations bias the resolution: an
+        ambiguous name like ``penguins`` (modeldata or palmerpenguins)
+        gets the loaded package if one was declared.
+        """
+        defined: set[str] = set()
+        referenced: set[str] = set()
+        for stmt in body:
+            for node in P.walk(stmt):
+                if isinstance(node, P.Assign):
+                    for tgt in node.targets:
+                        if isinstance(tgt, P.Name):
+                            defined.add(tgt.id)
+                elif isinstance(node, P.For) and isinstance(node.target, P.Name):
+                    defined.add(node.target.id)
+                elif isinstance(node, (P.FunctionDef, P.AsyncFunctionDef)):
+                    defined.add(node.name)
+                    for a in node.args.args:
+                        defined.add(a.arg)
+                elif isinstance(node, P.Lambda):
+                    for a in node.args.args:
+                        defined.add(a.arg)
+                elif isinstance(node, P.Name) and isinstance(node.ctx, P.Load):
+                    referenced.add(node.id)
+
+        loaded = frozenset(self._loaded_packages)
+        candidates = sorted(referenced - defined - _datasets.DATASET_REF_EXCLUSIONS)
+        out: list[P.stmt] = []
+        for name in candidates:
+            pkg = _datasets.resolve_dataset(name, loaded_packages=loaded)
+            if pkg is None:
+                continue
+            out.append(_make_data_load_stmt(name, pkg))
+        return out
 
     def _as_stmt(self, node) -> P.stmt:
         """Promote an expression node to a statement, wrapping in
@@ -916,21 +1017,59 @@ def _dotted_name(qualified: str) -> P.AST:
     return node
 
 
+_LIBRARY_CALL_NAMES: frozenset[str] = frozenset({"library", "require"})
+
 _NOOP_CALL_NAMES: frozenset[str] = frozenset({
-    "library", "require",
     "suppressMessages", "suppressWarnings", "suppressPackageStartupMessages",
 })
 
 
+def _is_library_call(node) -> bool:
+    """``True`` if ``node`` is ``library(pkg)`` / ``require(pkg)``.
+
+    These are tracked separately from other no-ops because the package
+    name they declare is used to disambiguate autoload candidates.
+    """
+    return (
+        isinstance(node, R.Call)
+        and isinstance(node.func, R.Identifier)
+        and node.func.name in _LIBRARY_CALL_NAMES
+    )
+
+
 def _is_noop_call(node) -> bool:
     """``True`` if ``node`` is an R top-level call whose Python equivalent
-    is empty (library setup, message suppression). These are skipped at
-    the statement level so they don't show up as dangling ``None`` exprs
-    or as bare ``library(dplyr)`` calls in the translated Python."""
+    is empty (message suppression, etc). Library calls are handled
+    separately by :func:`_is_library_call`."""
     return (
         isinstance(node, R.Call)
         and isinstance(node.func, R.Identifier)
         and node.func.name in _NOOP_CALL_NAMES
+    )
+
+
+def _record_library_pkg(node: R.Call, packages: set[str]) -> None:
+    """Extract the package name from a library()/require() call. Accepts
+    both ``library(dplyr)`` (bare name, R's NSE) and ``library("dplyr")``
+    (string form)."""
+    if not node.args:
+        return
+    arg = node.args[0]
+    if isinstance(arg, R.Identifier):
+        packages.add(arg.name)
+    elif isinstance(arg, R.StrLit):
+        packages.add(arg.value)
+
+
+def _make_data_load_stmt(name: str, pkg: str) -> P.stmt:
+    """Build a Python AST node for ``<name> = hea.data("<name>", package="<pkg>")``."""
+    return P.Assign(
+        targets=[P.Name(id=name, ctx=P.Store())],
+        value=P.Call(
+            func=P.Attribute(value=P.Name("hea"), attr="data", ctx=P.Load()),
+            args=[P.Constant(value=name)],
+            keywords=[P.keyword(arg="package", value=P.Constant(value=pkg))],
+        ),
     )
 
 

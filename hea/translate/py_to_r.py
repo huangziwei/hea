@@ -26,9 +26,10 @@ exactly. Notable losses:
 from __future__ import annotations
 
 import ast as P
-import functools
 import re
 from typing import Optional
+
+from . import _datasets
 
 from .nse import NSEContext, Slot
 from .registry.functions import FUNCTION_TABLE, KWARG_ALIASES, Func
@@ -1069,49 +1070,6 @@ _TIDYVERSE_PATTERN = _name_call_pattern(_TIDYVERSE_FN_NAMES)
 _PATCHWORK_PATTERN = _name_call_pattern(_PATCHWORK_FN_NAMES)
 
 
-@functools.lru_cache(maxsize=1)
-def _dataset_registry() -> dict[str, tuple[str, ...]]:
-    """Build a ``{dataset_name: (pkg1, pkg2, ...)}`` map from rdatasets.
-
-    Cached for the life of the process — the first call scans ~75
-    packages × ~30 items each (≈600ms once); subsequent calls are
-    instant. If rdatasets isn't installed, returns an empty map and
-    autoload detection becomes a no-op (translator still works).
-    """
-    try:
-        import rdatasets
-    except ImportError:
-        return {}
-    registry: dict[str, list[str]] = {}
-    for pkg in rdatasets.packages():
-        for item in rdatasets.items(pkg):
-            name = item.removesuffix(".pkl")
-            registry.setdefault(name, []).append(pkg)
-    # Freeze the lists into tuples so the cached dict is hashable-safe.
-    return {n: tuple(pkgs) for n, pkgs in registry.items()}
-
-
-# Names we should NEVER consider as dataset references even if they
-# happen to collide with one in rdatasets. ``c`` / ``data`` / etc.
-# These are functions, builtins, or other names with deterministic
-# Python meanings. Without this filter, autoload would over-trigger.
-_DATASET_REF_EXCLUSIONS: frozenset[str] = frozenset({
-    # Python builtins users commonly write
-    "True", "False", "None",
-    "print", "len", "range", "list", "dict", "set", "tuple", "int",
-    "float", "str", "bool", "type", "object",
-    # hea / polars surface that's a name, not a dataset
-    "hea", "pl", "col", "n", "desc", "selectors",
-    "DataFrame", "LazyFrame", "Series", "Expr",
-    # Common R-side names that map back via the FUNCTION_TABLE
-    "case_when", "if_else", "coalesce", "data", "first", "last",
-    # Single-letter / very-short names that would false-positive
-    "x", "y", "z", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k",
-    "p", "q", "p1", "p2", "p3", "p4",
-    "df", "dat", "obj", "out", "tmp", "res", "ans",
-})
-
-
 def _collect_dataset_refs(module: P.Module) -> list[tuple[str, str]]:
     """Walk ``module`` looking for bare names that look like autoload
     references to rdatasets-known datasets.
@@ -1123,7 +1081,7 @@ def _collect_dataset_refs(module: P.Module) -> list[tuple[str, str]]:
     by more than one package) are dropped — picking a package would be
     a guess.
     """
-    registry = _dataset_registry()
+    registry = _datasets.dataset_registry()
     if not registry:
         return []
 
@@ -1157,32 +1115,14 @@ def _collect_dataset_refs(module: P.Module) -> list[tuple[str, str]]:
         if isinstance(node, P.Name) and isinstance(node.ctx, P.Load):
             referenced.add(node.id)
 
-    candidates = referenced - defined - _DATASET_REF_EXCLUSIONS
+    candidates = referenced - defined - _datasets.DATASET_REF_EXCLUSIONS
     out: list[tuple[str, str]] = []
     for name in sorted(candidates):
-        pkgs = registry.get(name)
-        if pkgs is None:
+        pkg = _datasets.resolve_dataset(name)
+        if pkg is None:
             continue
-        if len(pkgs) == 1:
-            pkg = pkgs[0]
-            # Skip R's default-loaded packages — emitting ``library(datasets)``
-            # is redundant since base R always has them in scope.
-            if pkg in _R_DEFAULT_PACKAGES:
-                continue
-            out.append((name, pkg))
-        # Ambiguous (len > 1) — skip. The user can disambiguate by
-        # writing the explicit ``X = data("X", package="pkg")`` form,
-        # which the smart-data-assign rewrite still picks up.
+        out.append((name, pkg))
     return out
-
-
-# R's default-loaded packages (always in scope at the start of every R
-# session). Emitting ``library()`` for these is redundant — skip them
-# even when an autoload candidate resolves there.
-_R_DEFAULT_PACKAGES: frozenset[str] = frozenset({
-    "base", "datasets", "graphics", "grDevices",
-    "methods", "stats", "utils",
-})
 
 
 def _build_preamble(r_source: str, extra_libs: set[str]) -> list[str]:
