@@ -35,25 +35,35 @@ flights_fixture = hea.DataFrame({
 
 
 class TestResult:
-    def test_scalar_value(self):
+    def test_translate_only_by_default(self):
+        # Default is translation-only — no execution, .value stays None.
         r = from_R("1 + 2 * 3")
-        assert r.value == 7
+        assert r.value is None
         assert r.source.strip() == "1 + 2 * 3"
         assert r.gaps == []
 
-    def test_string_value(self):
-        r = from_R('"hello"')
+    def test_repr_shows_source_when_not_executed(self):
+        r = from_R("1 + 2 * 3")
+        assert repr(r) == "1 + 2 * 3"
+
+    def test_scalar_value_with_execute(self):
+        r = from_R("1 + 2 * 3", execute=True)
+        assert r.value == 7
+
+    def test_string_value_with_execute(self):
+        r = from_R('"hello"', execute=True)
         assert r.value == "hello"
 
     def test_no_trailing_expression(self):
-        # ``x <- 1`` is an assignment, not an expression. .value is None.
+        # ``x <- 1`` is an assignment, not an expression. .value is None
+        # under both execute modes; source still records the translation.
         r = from_R("x <- 1")
         assert r.value is None
         assert r.source.strip() == "x = 1"
 
-    def test_dataframe_value(self):
+    def test_dataframe_value_with_execute(self):
         # data.frame() literal stays self-contained.
-        r = from_R("data.frame(x = c(1, 2, 3))")
+        r = from_R("data.frame(x = c(1, 2, 3))", execute=True)
         assert isinstance(r.value, pl.DataFrame)
         assert r.value["x"].to_list() == [1, 2, 3]
 
@@ -72,7 +82,7 @@ class TestCallerFrame:
     """
 
     def test_resolves_module_global(self):
-        r = from_R('flights_fixture |> filter(dest == "IAH")')
+        r = from_R('flights_fixture |> filter(dest == "IAH")', execute=True)
         assert isinstance(r.value, pl.DataFrame)
         assert r.value.height == 3
 
@@ -81,18 +91,18 @@ class TestCallerFrame:
             flights_fixture |>
               filter(dest == "IAH") |>
               summarize(avg = mean(arr_delay))
-        """)
+        """, execute=True)
         assert isinstance(r.value, pl.DataFrame)
         assert r.value["avg"].to_list() == [pytest.approx(10.0)]
 
     def test_repr_passes_through_to_value(self):
         # The Result's ``__repr__`` delegates to the value's repr so
         # notebook cell output renders DataFrames as tables.
-        r = from_R("data.frame(x = c(1, 2, 3))")
+        r = from_R("data.frame(x = c(1, 2, 3))", execute=True)
         assert repr(r.value) in repr(r)
 
     def test_repr_html_passes_through_to_value(self):
-        r = from_R("data.frame(x = c(1, 2, 3))")
+        r = from_R("data.frame(x = c(1, 2, 3))", execute=True)
         # polars DataFrames implement _repr_html_; the Result must too.
         assert r._repr_html_() is not None
 
@@ -178,7 +188,7 @@ class TestPropagation:
         # ``from_R`` executes the rewritten Python in a namespace that
         # includes the caller's globals; assignments inside the snippet
         # write to that dict, and we copy back to caller.f_globals.
-        from_R("propagation_witness_var <- 42L")
+        from_R("propagation_witness_var <- 42L", execute=True)
         # The witness lands in this module's globals (caller frame).
         import sys
         mod = sys.modules[__name__]

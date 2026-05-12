@@ -26,6 +26,7 @@ exactly. Notable losses:
 from __future__ import annotations
 
 import ast as P
+import re
 from typing import Optional
 
 from .nse import NSEContext, Slot
@@ -224,16 +225,44 @@ class Translator:
 
     def __init__(self):
         self.nse = NSEContext()
+        # Packages discovered during translation that need a top-level
+        # ``library()`` call in the preamble. Populated by
+        # :meth:`_maybe_smart_data_assign`; merged with auto-detected
+        # tidyverse / patchwork usage in :meth:`translate`.
+        self._extra_libs: set[str] = set()
 
     # -- top-level --------------------------------------------------------
 
     def translate(self, module: P.Module) -> str:
-        return "\n".join(self._emit_stmt(s) for s in module.body)
+        out: list[str] = []
+        for s in module.body:
+            text = self._emit_stmt(s)
+            if text:  # imports / no-ops return ""
+                out.append(text)
+        body = "\n".join(out)
+
+        preamble = _build_preamble(body, self._extra_libs)
+        if preamble:
+            return "\n".join(preamble) + "\n" + body
+        return body
 
     # -- statements -------------------------------------------------------
 
     def _emit_stmt(self, stmt: P.stmt) -> str:
+        # Drop ``import`` / ``from X import Y`` — Python's import machinery
+        # has no clean R analog (R uses ``library()``, which is a runtime
+        # call). The hea side's translated output is run in a namespace
+        # that already has the relevant names available.
+        if isinstance(stmt, (P.Import, P.ImportFrom)):
+            return ""
         if isinstance(stmt, P.Assign):
+            # Smart rewrite: ``X = data("X", package="pkg")`` →
+            # ``library(pkg)``. The literal translation would assign the
+            # string ``"X"`` to the variable (R's data() returns a name
+            # string, not the dataset), breaking downstream uses.
+            smart = self._maybe_smart_data_assign(stmt)
+            if smart is not None:
+                return smart
             target = self._emit_expr(stmt.targets[0], prec=20)
             value = self._emit_expr(stmt.value, prec=20)
             return f"{target} <- {value}"
@@ -259,6 +288,62 @@ class Translator:
         if isinstance(stmt, P.FunctionDef):
             return self._emit_function_def(stmt)
         raise PyToRError(f"unsupported statement: {type(stmt).__name__}")
+
+    def _maybe_smart_data_assign(self, stmt: P.Assign) -> Optional[str]:
+        """Detect ``<X> = data("<X>", package="<pkg>")`` and reverse to
+        ``library(<pkg>)``.
+
+        R's ``data()`` is side-effectful — it loads a dataset by name
+        into the calling environment and returns the name string. Naive
+        translation of the Python assignment would bind the string to
+        the variable, breaking the rest of the script. ``library(pkg)``
+        loads the dataset package and makes the name available, which is
+        what the user actually wants.
+
+        Returns ``None`` if the pattern doesn't match (any deviation —
+        multi-target, non-Name target, mismatched names, missing
+        ``package`` kwarg — falls back to the generic Assign emitter).
+        """
+        if len(stmt.targets) != 1:
+            return None
+        target = stmt.targets[0]
+        if not isinstance(target, P.Name):
+            return None
+        value = stmt.value
+        if not isinstance(value, P.Call):
+            return None
+        # Accept both bare ``data(...)`` and ``hea.data(...)``.
+        func = value.func
+        if isinstance(func, P.Name) and func.id == "data":
+            pass
+        elif (
+            isinstance(func, P.Attribute)
+            and isinstance(func.value, P.Name)
+            and func.value.id == "hea"
+            and func.attr == "data"
+        ):
+            pass
+        else:
+            return None
+        # First positional arg must be a string matching the LHS name.
+        if not value.args or not isinstance(value.args[0], P.Constant):
+            return None
+        if value.args[0].value != target.id:
+            return None
+        # ``package`` kwarg — required for this rewrite. Without it, R
+        # would need to know where to find the dataset, and we'd be
+        # guessing.
+        pkg = None
+        for kw in value.keywords:
+            if kw.arg == "package" and isinstance(kw.value, P.Constant) and isinstance(kw.value.value, str):
+                pkg = kw.value.value
+        if pkg is None:
+            return None
+        # Stage in the preamble (along with any auto-detected libs)
+        # instead of emitting inline — keeps every ``library()`` call at
+        # the top of the script, matching the standard R idiom.
+        self._extra_libs.add(pkg)
+        return ""
 
     def _emit_if_stmt(self, stmt: P.If) -> str:
         cond = self._emit_expr(stmt.test, prec=20)
@@ -907,6 +992,98 @@ def _maybe_paren(text: str, my_prec: int, outer_prec: int) -> str:
     if my_prec > outer_prec:
         return f"({text})"
     return text
+
+
+# ---------------------------------------------------------------------------
+# Library preamble inference
+# ---------------------------------------------------------------------------
+
+
+# Function names that, if they appear in the emitted R source, signal the
+# script needs the tidyverse meta-package. Members are gathered from the
+# forward translator's surface: dplyr/tidyr verbs, tidy-select helpers,
+# expression helpers, lubridate/forcats/stringr fns. ``ggplot``/``aes``
+# and the open-set prefixes ``geom_*``/``scale_*``/``coord_*``/``facet_*``/
+# ``theme_*`` are handled by :data:`_GGPLOT_PATTERN` below.
+_TIDYVERSE_FN_NAMES: frozenset[str] = frozenset({
+    # dplyr verbs (mirror VERB_TABLE.keys minus joins which only need dplyr)
+    "filter", "mutate", "transmute", "summarize", "summarise",
+    "select", "group_by", "ungroup", "count", "add_count", "distinct",
+    "arrange", "rename", "relocate", "pull", "glimpse",
+    "inner_join", "left_join", "right_join", "full_join",
+    "semi_join", "anti_join", "cross_join", "nest_join",
+    # tidyr
+    "pivot_longer", "pivot_wider", "separate", "unite",
+    "drop_na", "replace_na", "fill", "complete", "expand",
+    "nest", "unnest",
+    # dplyr expression helpers
+    "case_when", "if_else", "coalesce", "na_if", "between", "near",
+    "desc", "n_distinct", "row_number", "lag", "lead",
+    "min_rank", "dense_rank", "percent_rank", "cume_dist", "ntile",
+    "cummean", "cumall", "cumany", "consecutive_id", "nth",
+    # tidy-select helpers
+    "starts_with", "ends_with", "contains", "matches", "everything",
+    "all_of", "any_of", "last_col", "num_range",
+    # forcats
+    "fct_infreq", "fct_relevel", "fct_recode", "fct_collapse",
+    "fct_lump_n", "fct_lump_lowfreq", "fct_reorder", "fct_reorder2", "fct_rev",
+    # stringr
+    "str_detect", "str_replace", "str_replace_all",
+    "str_to_lower", "str_to_upper", "str_to_title",
+    "str_length", "str_sub", "str_trim", "str_squish",
+    "str_pad", "str_wrap", "str_split", "str_extract", "str_extract_all",
+    "str_count", "str_starts", "str_ends",
+    # lubridate
+    "ymd", "mdy", "dmy", "ymd_hms", "as_date",
+    "wday", "yday",
+    # ggplot top-level entry points
+    "ggplot", "aes", "labs", "xlab", "ylab", "ggtitle",
+    "xlim", "ylim", "lims", "guides", "annotate",
+})
+
+_PATCHWORK_FN_NAMES: frozenset[str] = frozenset({
+    "plot_annotation", "plot_layout", "wrap_plots",
+})
+
+# Open-set ggplot prefixes — any ``geom_x(``, ``scale_y(``, etc.
+_GGPLOT_PATTERN = re.compile(
+    r"\b(?:geom_|scale_|coord_|facet_|theme_|stat_|position_|element_)\w+\s*\(|\btheme\s*\("
+)
+
+
+def _name_call_pattern(names: frozenset[str]) -> re.Pattern:
+    """Compile a regex matching any of ``names`` immediately followed by
+    ``(``. Word-boundary anchored so ``filter`` doesn't match ``filterX``."""
+    return re.compile(r"\b(?:" + "|".join(re.escape(n) for n in names) + r")\s*\(")
+
+
+_TIDYVERSE_PATTERN = _name_call_pattern(_TIDYVERSE_FN_NAMES)
+_PATCHWORK_PATTERN = _name_call_pattern(_PATCHWORK_FN_NAMES)
+
+
+def _build_preamble(r_source: str, extra_libs: set[str]) -> list[str]:
+    """Infer the ``library()`` calls the translated R script needs.
+
+    Detection is regex-based on the emitted source — simpler than
+    tracking flags through every emit path, and accepts the rare
+    false-positive (a function name appearing inside a string literal)
+    in exchange for not missing real usages. False positives just emit
+    a redundant ``library()`` call, which loads but does no harm.
+
+    Order: tidyverse first, then patchwork, then any data packages
+    (sorted) from :attr:`Translator._extra_libs` — that's the
+    convention r4ds-style scripts use.
+    """
+    libs: list[str] = []
+    if _TIDYVERSE_PATTERN.search(r_source) or _GGPLOT_PATTERN.search(r_source):
+        libs.append("library(tidyverse)")
+    if _PATCHWORK_PATTERN.search(r_source):
+        libs.append("library(patchwork)")
+    for pkg in sorted(extra_libs):
+        if pkg in ("tidyverse", "patchwork"):
+            continue
+        libs.append(f"library({pkg})")
+    return libs
 
 
 def _quote_string(s: str) -> str:

@@ -17,8 +17,27 @@ from hea.translate.r_to_py import translate as r_to_py
 
 
 def _tr(src: str) -> str:
-    """Reverse-translate and strip surrounding whitespace."""
+    """Reverse-translate and strip the auto-emitted ``library()`` preamble.
+
+    Most reverse tests care about the body, not the preamble — assertions
+    on the body would be a chore to maintain across many tests if every
+    expected value had to include the preamble. The dedicated
+    :class:`TestPreamble` block exercises preamble emission directly.
+    """
+    return _strip_preamble(py_to_r(src)).strip()
+
+
+def _tr_full(src: str) -> str:
+    """Reverse-translate including the preamble — used by preamble tests."""
     return py_to_r(src).strip()
+
+
+def _strip_preamble(s: str) -> str:
+    """Drop leading ``library(...)`` lines emitted by py_to_r as preamble."""
+    lines = s.split("\n")
+    while lines and lines[0].startswith("library("):
+        lines.pop(0)
+    return "\n".join(lines)
 
 
 def _normalize(s: str) -> str:
@@ -293,6 +312,100 @@ class TestPatchwork:
 # ---------------------------------------------------------------------------
 
 
+class TestImportsAndDataLoaders:
+    """Phase 9 follow-ups: handle Python idioms that don't appear in R."""
+
+    def test_imports_dropped(self):
+        # ``import hea`` and ``from hea import X`` have no R equivalent —
+        # silently drop them.
+        out = _tr("import hea\nfrom hea import data\nx <- 1")
+        # Note: the parser sees ``x <- 1`` as a single AnnAssign or Compare;
+        # Python doesn't support ``<-``. The valid Python here is ``x = 1``.
+        # Test with a real assignment.
+        out = _tr("import hea\nfrom hea import data\nx = 1")
+        assert out == "x <- 1"
+
+    def test_from_import_dropped(self):
+        out = _tr("from hea import data, col\nx = col('y')")
+        assert out == "x <- y"
+
+    def test_smart_data_loader_assign(self):
+        # ``penguins = data("penguins", package="palmerpenguins")`` is the
+        # hea idiom for loading a named dataset. Reverse-translates to
+        # ``library(palmerpenguins)`` (R loads the dataset by side effect).
+        out = _tr_full(
+            'penguins = data("penguins", package="palmerpenguins")\n'
+            'penguins.ggplot(x="flipper_length_mm", y="body_mass_g").geom_point()'
+        )
+        assert "library(palmerpenguins)" in out
+        assert "ggplot(penguins, aes(x = flipper_length_mm, y = body_mass_g))" in out
+
+    def test_hea_data_form_also_recognized(self):
+        # ``hea.data(...)`` reverses the same way as bare ``data(...)``.
+        out = _tr_full('penguins = hea.data("penguins", package="palmerpenguins")')
+        assert out == "library(palmerpenguins)"
+
+    def test_data_assign_with_mismatched_lhs_falls_through(self):
+        # If the var name doesn't match the dataset string, no smart rewrite.
+        # data() isn't in the tidyverse helper set, so no preamble emitted.
+        out = _tr_full('df = data("flights", package="nycflights13")')
+        assert out == 'df <- data("flights", package = "nycflights13")'
+
+
+class TestPreamble:
+    """py_to_r auto-emits ``library()`` calls inferred from the body."""
+
+    def test_tidyverse_for_dplyr_chain(self):
+        out = _tr_full('flights.filter(col("x") > 0)')
+        assert out.startswith("library(tidyverse)")
+
+    def test_tidyverse_for_ggplot(self):
+        out = _tr_full('d.ggplot(x="a").geom_point()')
+        assert out.startswith("library(tidyverse)")
+
+    def test_no_preamble_for_pure_arithmetic(self):
+        out = _tr_full("x = 1 + 2 * 3")
+        assert "library(" not in out
+
+    def test_patchwork_only(self):
+        # Patchwork detected via plot_annotation; no tidyverse fns used.
+        out = _tr_full('(p1 | p2) + plot_annotation(title="x")')
+        assert out.startswith("library(patchwork)")
+        assert "library(tidyverse)" not in out
+
+    def test_tidyverse_plus_patchwork(self):
+        # Both — tidyverse first, then patchwork.
+        out = _tr_full(
+            'd.ggplot(x="a").geom_point() + plot_annotation(title="x")'
+        )
+        lines = out.splitlines()
+        assert lines[0] == "library(tidyverse)"
+        assert lines[1] == "library(patchwork)"
+
+    def test_tidyverse_plus_data_package(self):
+        # ``library(tidyverse)`` first, then dataset packages (sorted).
+        out = _tr_full(
+            'penguins = data("penguins", package="palmerpenguins")\n'
+            'penguins.ggplot(x="flipper_length_mm").geom_point()'
+        )
+        lines = out.splitlines()
+        assert lines[0] == "library(tidyverse)"
+        assert lines[1] == "library(palmerpenguins)"
+
+    def test_pipe_alone_does_not_trigger(self):
+        # Bare ``|`` (patchwork operator) with no recognized chain
+        # extension or verb. No preamble — could be polars bitwise
+        # or anything else.
+        out = _tr_full("p1 | p2")
+        assert "library(" not in out
+
+    def test_case_when_alone(self):
+        # ``case_when`` is a tidyverse helper; trigger the preamble
+        # even outside a chain.
+        out = _tr_full('case_when((col("x") > 0, "pos"), default="neg")')
+        assert out.startswith("library(tidyverse)")
+
+
 class TestRoundTrip:
     """Translate R → hea, then hea → R, and assert structural equivalence.
 
@@ -307,7 +420,7 @@ class TestRoundTrip:
 
     def _round_trip(self, r_src: str) -> str:
         py = r_to_py(r_src)
-        return py_to_r(py)
+        return _strip_preamble(py_to_r(py))
 
     def test_simple_filter(self):
         r_src = 'filter(flights, dest == "IAH")'
