@@ -34,6 +34,15 @@ class GeomBar(Geom):
         "size": 0.5,
         "linetype": "solid",
         "alpha": 1.0,
+        # ggplot2's GeomBar/GeomCol default. Realized as a per-row
+        # column so polar's ``rescale_theta`` reaches it — without
+        # the column, ``draw_panel``'s scalar fallback (0.9) goes
+        # straight to ``ax.bar(width=0.9)`` and matplotlib polar
+        # interprets that as 0.9 RADIANS per bar (e.g. 60 bars × 0.9
+        # rad = ~8.6 full circles' worth of overlap). With the
+        # column, ``rescale_theta`` multiplies by ``2π / x_range``
+        # so 0.9 ends up as 0.9 × slot-width per bar.
+        "width": 0.9,
     })
     required_aes: tuple = ("x", "y")
     key_glyph: str = "polygon"
