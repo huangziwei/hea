@@ -28,6 +28,53 @@ from .scales.scale import Scale
 from .theme import Theme, theme_default
 
 
+class _PlotThemeHandle:
+    """Returned by ``ggplot.theme``. Bridges the noun/verb collision
+    between "the plot's current Theme" and the fluent ``theme(...)``
+    factory: the handle delegates attribute access to the underlying
+    :class:`Theme` (so ``plot.theme.get("legend.position")`` works) but
+    is also callable (so ``plot.theme(aspect_ratio=1)`` returns a new
+    plot with that theme merged in, mirroring ``plot + theme(...)``).
+
+    Why a handle and not a plain field? ``theme`` is the only fluent
+    install name (`_FLUENT_INSTALL_EXACT`) that also names a stored
+    field on ``ggplot``. The dataclass-set instance attribute shadows
+    the class-level fluent method — without this handle,
+    ``plot.theme(...)`` would try to call the Theme instance and raise
+    ``'Theme' object is not callable``. Other field names like
+    ``coordinates`` / ``facet`` don't collide (no ``coordinates`` /
+    ``facet`` factory in the install list).
+    """
+
+    __slots__ = ("_plot", "_theme")
+
+    def __init__(self, plot, theme_obj):
+        object.__setattr__(self, "_plot", plot)
+        object.__setattr__(self, "_theme", theme_obj)
+
+    def __call__(self, *args, **kwargs):
+        from .theme import theme as theme_factory
+        return self._plot + theme_factory(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._theme, name)
+
+    def __add__(self, other):
+        return self._theme + other
+
+    def __radd__(self, other):
+        return other + self._theme
+
+    def __eq__(self, other):
+        return self._theme == other
+
+    def __bool__(self):
+        return bool(self._theme)
+
+    def __repr__(self):
+        return repr(self._theme)
+
+
 @dataclass
 class ggplot:
     data: pl.DataFrame
@@ -36,9 +83,22 @@ class ggplot:
     scales: ScalesList = field(default_factory=ScalesList)
     coordinates: Coord = field(default_factory=CoordCartesian)
     facet: Facet = field(default_factory=FacetNull)
-    theme: Theme = field(default_factory=theme_default)
+    _theme: Theme = field(default_factory=theme_default)
     labels: dict = field(default_factory=dict)
     plot_env: dict = field(default_factory=dict, repr=False)
+
+    @property
+    def theme(self):
+        return _PlotThemeHandle(self, self._theme)
+
+    @theme.setter
+    def theme(self, value):
+        # Unwrap if someone hands us a handle back (e.g. ``out.theme =
+        # out.theme + thing`` — the RHS delegates to ``Theme.__add__``
+        # so it's already a plain Theme, but guard anyway).
+        if isinstance(value, _PlotThemeHandle):
+            value = value._theme
+        self._theme = value
 
     def __init__(
         self,
@@ -86,7 +146,7 @@ class ggplot:
         self.scales = ScalesList()
         self.coordinates = CoordCartesian()
         self.facet = FacetNull()
-        self.theme = theme_default()
+        self._theme = theme_default()
         self.labels = {}
         self.plot_env = env
 
@@ -381,9 +441,12 @@ def _(thing: list, plot):
 _FLUENT_INSTALL_PREFIXES = (
     "geom_", "stat_", "scale_", "facet_", "coord_", "theme_",
 )
-# Match by exact name (top-level callables that aren't prefix-matched):
+# Match by exact name (top-level callables that aren't prefix-matched).
+# Note: ``theme`` is intentionally excluded — it collides with the
+# stored ``_theme`` field on ``ggplot``; the ``theme`` property +
+# :class:`_PlotThemeHandle` covers the fluent ``.theme(...)`` form
+# without needing a class-level method that the dataclass would shadow.
 _FLUENT_INSTALL_EXACT = frozenset({
-    "theme",
     "labs", "ggtitle", "xlab", "ylab", "xlim", "ylim", "lims", "annotate",
 })
 

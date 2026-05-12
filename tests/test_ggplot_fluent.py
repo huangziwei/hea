@@ -126,6 +126,11 @@ def test_fluent_methods_installed_for_every_addable_name():
 def test_fluent_skip_list_not_installed():
     """Names matching the skip rules must NOT have methods on ``ggplot``."""
     skipped = _expected_skipped_names()
+    # ``theme`` is a special case: it's NOT installed via the loop
+    # (collides with the ``_theme`` field) but IS exposed via a property
+    # + :class:`_PlotThemeHandle` that supports both ``plot.theme.get(...)``
+    # and ``plot.theme(...)``. Exclude from the leak check.
+    skipped = skipped - {"theme"}
     leaked = {name for name in skipped if hasattr(ggplot_class, name)}
     # ``ggplot`` is in __all__ and would otherwise leak (the class itself
     # showing up as an attribute on instances). _FLUENT_SKIP_EXACT prevents it.
@@ -142,7 +147,6 @@ def test_should_install_fluent_predicate():
     assert _should_install_fluent("scale_x_log10")
     assert _should_install_fluent("facet_wrap")
     assert _should_install_fluent("theme_minimal")
-    assert _should_install_fluent("theme")  # exact
 
     # Skip
     assert not _should_install_fluent("position_dodge")
@@ -151,6 +155,42 @@ def test_should_install_fluent_predicate():
     assert not _should_install_fluent("after_scale")
     assert not _should_install_fluent("aes")
     assert not _should_install_fluent("ggplot")
+    # ``theme`` is intentionally NOT installed via the loop — see
+    # :class:`_PlotThemeHandle` in core.py. The fluent ``.theme(...)``
+    # form is delivered via a property/handle instead.
+    assert not _should_install_fluent("theme")
+
+
+def test_fluent_theme_method_works_via_property_handle():
+    """``plot.theme(aspect_ratio=1)`` must be equivalent to
+    ``plot + theme(aspect_ratio=1)``, even though ``theme`` is not in
+    the fluent install loop (the dataclass field shadows class-level
+    install)."""
+    import polars as pl
+    from hea.ggplot import aes, theme, geom_point
+
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    p_fluent = ggplot_class(df, aes("x", "y")) + geom_point()
+    p_fluent = p_fluent.theme(aspect_ratio=1)
+    p_plus = (ggplot_class(df, aes("x", "y")) + geom_point()
+              + theme(aspect_ratio=1))
+    assert p_fluent.theme.elements == p_plus.theme.elements
+
+
+def test_plot_theme_attribute_access_still_works():
+    """Read access (``plot.theme.get(...)``, ``plot.theme.elements``)
+    must keep working — many internal code paths and external tests
+    rely on it. The handle delegates these via ``__getattr__``."""
+    import polars as pl
+    from hea.ggplot import aes, theme, geom_point
+
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    p = ggplot_class(df, aes("x", "y")) + geom_point() + theme(aspect_ratio=2)
+    # .get() (delegated from Theme)
+    assert p.theme.get("aspect.ratio") == 2
+    # .elements (delegated from Theme)
+    assert isinstance(p.theme.elements, dict)
+    assert p.theme.elements["aspect.ratio"] == 2
 
 
 # ---------------------------------------------------------------------------
