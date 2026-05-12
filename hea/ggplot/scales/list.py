@@ -96,7 +96,24 @@ class ScalesList:
             if is_discrete:
                 from .discrete import ScaleDiscreteColor
 
-                sc = ScaleDiscreteColor(aesthetics=(aesthetic,))
+                # ggplot2 3.4+ dispatches ordered factors to
+                # ``scale_*_ordinal`` (viridis-backed) and unordered
+                # factors to ``scale_*_discrete`` (hue-backed). In
+                # polars, ``pl.Enum`` is the ordered case (carries a
+                # declared category order); ``Categorical``/``Utf8``
+                # are unordered. Mirror the dispatch here so e.g.
+                # ``diamonds.clarity`` (Enum) gets viridis by default
+                # while ``mtcars.cyl`` (numeric → unordered when cast)
+                # gets hue.
+                if isinstance(dtype, pl.Enum):
+                    from ._palettes import viridis_pal_discrete
+
+                    sc = ScaleDiscreteColor(
+                        aesthetics=(aesthetic,),
+                        palette=viridis_pal_discrete(),
+                    )
+                else:
+                    sc = ScaleDiscreteColor(aesthetics=(aesthetic,))
             elif is_numeric:
                 from ._palettes import gradient_pal
                 from .color_continuous import ScaleContinuousColor

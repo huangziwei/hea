@@ -3100,6 +3100,44 @@ def test_axis_rotation_via_theme_element_text_angle():
         plt.close(fig)
 
 
+def test_default_fill_palette_dispatches_on_dtype_ordered_vs_not():
+    """ggplot2 3.4+ dispatches ordered factors to ``scale_*_ordinal``
+    (viridis) and unordered factors to ``scale_*_discrete`` (hue). In
+    polars, ``pl.Enum`` carries declared category order so it maps to
+    viridis; ``Utf8`` / ``Categorical`` are unordered → hue. Pre-fix,
+    everything got hue regardless of dtype."""
+    # Enum (ordered) → viridis palette
+    df_ord = pl.DataFrame({"x": ["a", "b", "c", "a", "b"]}).with_columns(
+        pl.col("x").cast(pl.Enum(["a", "b", "c"]))
+    )
+    p_ord = ggplot(df_ord, aes(x="x", fill="x")) + geom_bar()
+    fig_ord = p_ord.draw()
+
+    # Utf8 (unordered) → hue palette
+    df_un = pl.DataFrame({"x": ["a", "b", "c", "a", "b"]})
+    p_un = ggplot(df_un, aes(x="x", fill="x")) + geom_bar()
+    fig_un = p_un.draw()
+
+    try:
+        # Extract fill colors per panel
+        def fills(fig):
+            return tuple(
+                p.get_facecolor()[:3] for p in fig.axes[0].patches[:3]
+            )
+        c_ord = fills(fig_ord)
+        c_un = fills(fig_un)
+        # Viridis "a" is dark purple ~ (0.27, 0.005, 0.33); hue "a" is
+        # red-pink ~ (0.97, 0.46, 0.43). They must differ markedly.
+        diff = sum(abs(c_ord[0][i] - c_un[0][i]) for i in range(3))
+        assert diff > 0.5, (
+            f"Expected ordered (Enum) → viridis vs unordered → hue. "
+            f"Got ordered first-color={c_ord[0]}, unordered first-color={c_un[0]}"
+        )
+    finally:
+        plt.close(fig_ord)
+        plt.close(fig_un)
+
+
 def test_theme_panel_grid_blank_overrides_earlier_set_children():
     """``theme_minimal()`` sets ``panel.grid.major`` (child) to an
     ``element_line``. A later ``theme(panel_grid=element_blank())``
