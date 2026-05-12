@@ -315,6 +315,30 @@ def test_coord_polar_labs_opts_axis_titles_back_in():
         plt.close(fig)
 
 
+def test_coord_polar_continuous_rose_pins_angular_range_to_two_pi():
+    """A rose-style chart: N wedges at theta = k·2π/N (k = 0..N-1).
+    Data trains the x-scale to ``[0, ~2π·(N-1)/N)``, not exactly 2π
+    because the last sample is excluded. matplotlib polar's
+    ``set_xticks`` auto-extends xlim past the trained max — without
+    re-pinning xlim, the polar projection collapses to a near-vertical
+    sliver. Verify the angular axis spans the full circle."""
+    n = 18
+    beta = np.linspace(0, 2 * math.pi, n, endpoint=False).tolist()
+    df = pl.DataFrame({"theta": beta, "h": [1.0] * n})
+    p = (ggplot(df, aes("theta", "h"))
+         + geom_col(width=2 * math.pi / n)
+         + coord_polar())
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        lo, hi = ax.get_xlim()
+        assert lo == pytest.approx(0.0)
+        assert hi == pytest.approx(2 * math.pi, abs=1e-6)
+        assert len(ax.patches) == n
+    finally:
+        plt.close(fig)
+
+
 def test_coord_polar_composes_with_coord_flip_via_patchwork():
     """``bar.coord_flip() | bar.coord_polar()`` — Cartesian and polar in
     the same figure. Each leaf needs its own projection."""

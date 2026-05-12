@@ -140,6 +140,8 @@ def _polar_apply_scales(ax, x_scale, y_scale, x_range):
             pass
 
     if x_scale is None or x_range is None:
+        # No x-scale info, but still pin the angular axis below.
+        ax.set_xlim(0.0, 2 * math.pi)
         return
     lo, hi = x_range
     span = hi - lo
@@ -175,6 +177,8 @@ def _polar_apply_scales(ax, x_scale, y_scale, x_range):
                 tick_labels = [str(s) for s in x_scale.labels]
         ax.set_xticks(tick_pos)
         ax.set_xticklabels(tick_labels)
+        # Pin angular range — see ScaleContinuous branch for rationale.
+        ax.set_xlim(0.0, 2 * math.pi)
         return
 
     if isinstance(x_scale, ScaleContinuous):
@@ -183,6 +187,7 @@ def _polar_apply_scales(ax, x_scale, y_scale, x_range):
         if x_scale.breaks is None:
             ax.set_xticks([])
             ax.set_xticklabels([])
+            ax.set_xlim(0.0, 2 * math.pi)
             return
         if x_scale.range_ is None:
             return
@@ -200,6 +205,13 @@ def _polar_apply_scales(ax, x_scale, y_scale, x_range):
         tick_pos = [_rescale(b) for b in breaks_arr]
         ax.set_xticks(tick_pos)
         ax.set_xticklabels(labels)
+        # Pin the angular axis to a full circle. ``set_xticks`` on a
+        # polar axes auto-expands xlim to enclose all tick positions —
+        # for continuous data trained on ``[0, ~2π)``, that pushes xlim
+        # past 2π and matplotlib then renders the polar projection as a
+        # near-full circle visually collapsed to a near-vertical sliver.
+        # Apply AFTER set_xticks so the auto-expand can't undo it.
+        ax.set_xlim(0.0, 2 * math.pi)
 
 
 def _coord_view_limits(coord, axis: str):
