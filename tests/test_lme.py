@@ -370,6 +370,73 @@ def test_plot_ranef_layout_rejects_bad_value():
         fm.plot_ranef(layout="diagonal")
 
 
+def test_plot_ranef_which_filters_to_one_term():
+    """``which="<term>"`` picks every panel whose grouping factor matches."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from hea import data, lme
+
+    pen = data("Penicillin", "lme4")
+    fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
+    fig = fm.plot_ranef(which="plate")
+    try:
+        titles = [a.get_title() for a in fig.axes if a.get_visible()]
+        assert titles == ["plate: (Intercept)"]
+    finally:
+        plt.close(fig)
+
+
+def test_plot_ranef_which_filters_to_one_panel_title():
+    """``which="<term>: <col>"`` picks a single column of a vector bar."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from hea import data, lme
+
+    sleep = data("sleepstudy", "lme4")
+    fm = lme("Reaction ~ 1 + Days + (1 + Days | Subject)", sleep)
+
+    # Term key pulls both columns of the vector bar.
+    fig_all = fm.plot_ranef(which="Subject")
+    # Full title pulls just one.
+    fig_one = fm.plot_ranef(which="Subject: Days")
+    try:
+        assert sorted(a.get_title() for a in fig_all.axes) == [
+            "Subject: (Intercept)", "Subject: Days",
+        ]
+        assert [a.get_title() for a in fig_one.axes] == ["Subject: Days"]
+    finally:
+        plt.close(fig_all)
+        plt.close(fig_one)
+
+
+def test_plot_ranef_which_accepts_list():
+    """A list of keys / titles works (mix-and-match allowed)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from hea import data, lme
+
+    sleep = data("sleepstudy", "lme4")
+    fm = lme("Reaction ~ 1 + Days + (1 + Days | Subject)", sleep)
+    fig = fm.plot_ranef(which=["Subject: (Intercept)"])
+    try:
+        titles = [a.get_title() for a in fig.axes]
+        assert titles == ["Subject: (Intercept)"]
+    finally:
+        plt.close(fig)
+
+
+def test_plot_ranef_which_unknown_raises():
+    from hea import data, lme
+
+    pen = data("Penicillin", "lme4")
+    fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
+    with pytest.raises(KeyError, match="no matching panel"):
+        fm.plot_ranef(which="nonexistent")
+
+
 def test_bates_2_plot_design_layout_matches_fig_2_3_2_4():
     """plot_design() — 4-panel mosaic A=Z' / B=Λ / C=Z'Z / D=L.
 

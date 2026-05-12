@@ -1268,6 +1268,7 @@ class lme:
         *, level: float = 0.95, strip: bool = True,
         layout: str | tuple[int, int] = "horizontal",
         aspect: float | None = None,
+        which: str | list[str] | None = None,
     ):
         """Caterpillar plot — BLUP ± Φ⁻¹((1+level)/2)·SE per level, sorted.
 
@@ -1287,6 +1288,17 @@ class lme:
             ``figsize`` is derived from it together with ``layout`` and
             the largest panel's level count. Ignored when ``figsize`` is
             passed explicitly.
+        which : str or list of str, optional
+            Restrict the figure to a subset of ranef panels. Accepts:
+
+            * A term key (e.g. ``"Subject"``) — pulls every panel for
+              that grouping factor (both the intercept and any slope
+              columns of a vector bar).
+            * A full panel title (e.g. ``"Subject: Days"``) — picks
+              exactly one panel.
+            * A list mixing the two forms.
+
+            ``None`` (default) plots every panel.
         """
         from scipy.stats import norm
         z = float(norm.ppf(0.5 + level / 2))
@@ -1294,8 +1306,22 @@ class lme:
         for key, levels, cnames, b_mat, se_mat in self._ranef():
             for j, cname in enumerate(cnames):
                 panels.append(
-                    (f"{key}: {cname}", b_mat[:, j], se_mat[:, j], levels)
+                    (f"{key}: {cname}", b_mat[:, j], se_mat[:, j], levels, key)
                 )
+
+        if which is not None:
+            wanted = {which} if isinstance(which, str) else set(which)
+            filtered = [p for p in panels if p[0] in wanted or p[4] in wanted]
+            if not filtered:
+                available = sorted({p[0] for p in panels}) + sorted(
+                    {p[4] for p in panels}
+                )
+                raise KeyError(
+                    f"plot_ranef(which={which!r}): no matching panel. "
+                    f"Available term keys / panel titles: {available!r}."
+                )
+            panels = filtered
+
         n_panels = len(panels)
 
         # Resolve layout to (nrow, ncol).
@@ -1331,7 +1357,7 @@ class lme:
 
         fig, axes = plt.subplots(nrow, ncol, figsize=figsize, squeeze=False)
         axes_flat = axes.ravel()
-        for ax, (title, b, se, levels) in zip(axes_flat, panels):
+        for ax, (title, b, se, levels, _key) in zip(axes_flat, panels):
             order = np.argsort(b)
             b_sorted = b[order]
             se_sorted = se[order]
