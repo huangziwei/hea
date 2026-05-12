@@ -8,6 +8,8 @@ modes mean each panel autoscales independently (matplotlib's
 
 from __future__ import annotations
 
+import math
+
 import matplotlib.pyplot as plt
 import polars as pl
 from matplotlib import rcParams
@@ -114,6 +116,84 @@ def _polar_prep_layer_data(df, x_scale):
     return df
 
 
+def _polar_apply_scales(ax, x_scale, y_scale, x_range):
+    """Apply scale ticks/limits on a polar axes.
+
+    Y (radial) is mostly Cartesian-like: ``set_ylim`` + ``set_yticks``
+    behave the same on polar, so we delegate to the scale's normal
+    ``apply_to_axis``. X (angular) needs rescaled tick positions —
+    the data was remapped from ``x_range`` to ``[0, 2π]``, so the
+    scale's breaks (which live in original-data space) must follow
+    the same affine transform before they hit ``set_xticks``.
+    """
+    import numpy as _np
+
+    from .scales.continuous import ScaleContinuous
+    from .scales.ordinal import ScaleOrdinal
+
+    if y_scale is not None:
+        try:
+            y_scale.apply_to_axis(ax, "y", view_limits=None)
+        except Exception:
+            # Radial-axis polishes (set_rgrids quirks etc.) shouldn't
+            # take down the plot; fall back to matplotlib auto-ticks.
+            pass
+
+    if x_scale is None or x_range is None:
+        return
+    lo, hi = x_range
+    span = hi - lo
+    if span <= 0:
+        return
+    factor = (2 * math.pi) / span
+
+    def _rescale(v):
+        return (v - lo) * factor
+
+    if isinstance(x_scale, ScaleOrdinal):
+        levels = x_scale.resolved_limits()
+        if not levels:
+            return
+        ticks = [_rescale(i) for i in range(len(levels))]
+        if x_scale.breaks is None:
+            tick_pos: list = []
+            tick_labels: list = []
+        elif isinstance(x_scale.breaks, str) and x_scale.breaks == "default":
+            tick_pos = ticks
+            tick_labels = list(levels)
+        else:
+            tick_pos = []
+            tick_labels = []
+            for i, lvl in enumerate(levels):
+                if lvl in x_scale.breaks:
+                    tick_pos.append(ticks[i])
+                    tick_labels.append(lvl)
+        if x_scale.labels != "default" and tick_pos:
+            if callable(x_scale.labels):
+                tick_labels = [str(s) for s in x_scale.labels(tick_labels)]
+            else:
+                tick_labels = [str(s) for s in x_scale.labels]
+        ax.set_xticks(tick_pos)
+        ax.set_xticklabels(tick_labels)
+        return
+
+    if isinstance(x_scale, ScaleContinuous):
+        if x_scale.range_ is None:
+            return
+        break_range = x_scale._expanded_break_range()
+        breaks = x_scale._compute_breaks(break_range)
+        if breaks is None or len(breaks) == 0:
+            return
+        labels = x_scale._compute_labels(breaks)
+        breaks_arr = _np.asarray(breaks, dtype=float)
+        mask = (breaks_arr >= break_range[0]) & (breaks_arr <= break_range[1])
+        breaks_arr = breaks_arr[mask]
+        labels = [labels[i] for i in range(len(labels)) if mask[i]]
+        tick_pos = [_rescale(b) for b in breaks_arr]
+        ax.set_xticks(tick_pos)
+        ax.set_xticklabels(labels)
+
+
 def _coord_view_limits(coord, axis: str):
     """Coord's ``xlim`` / ``ylim`` zoom for ``axis`` (visible axis name).
 
@@ -209,12 +289,15 @@ def _render_single(plot, build_output, ax, subplotspec=None):
                 df = plot.coordinates.rescale_theta(df, x_range)
         layer.geom.draw_panel(df, ax)
 
-    # Scale tick/limit application: skip on polar for stage 1. matplotlib
-    # polar's ``set_xlim`` semantics differ enough from Cartesian's that
-    # forcing the ordinal apply path through it produces oddities (ticks
-    # at positions matplotlib has already remapped, mostly). Stage 5
-    # polish revisits this with a coord-aware ``apply_to_axis`` branch.
-    if not is_polar:
+    if is_polar:
+        # On polar, x is angular (was rescaled to [0, 2π] above) and y
+        # is radial. The standard ``apply_to_axis`` would put ordinal
+        # ticks at the wrong (unrescaled) positions; ``_polar_apply_scales``
+        # adapts both axes.
+        _polar_apply_scales(
+            ax, x_scale, _panel_scale(build_output, 1, "y"), x_range,
+        )
+    else:
         for axis in ("x", "y"):
             # Under coord_flip, the scale registered for the x aesthetic
             # applies to the visible y axis (and vice versa) — scales bind
@@ -227,14 +310,13 @@ def _render_single(plot, build_output, ax, subplotspec=None):
                     view_limits=_coord_view_limits(plot.coordinates, axis),
                 )
 
-    if not is_polar:
-        xlabel, ylabel = _default_labels(plot, build_output)
-        if is_flipped:
-            xlabel, ylabel = ylabel, xlabel
-        if xlabel is not None:
-            ax.set_xlabel(xlabel)
-        if ylabel is not None:
-            ax.set_ylabel(ylabel)
+    xlabel, ylabel = _default_labels(plot, build_output)
+    if is_flipped:
+        xlabel, ylabel = ylabel, xlabel
+    if xlabel is not None:
+        ax.set_xlabel(xlabel)
+    if ylabel is not None:
+        ax.set_ylabel(ylabel)
 
     if owns_fig:
         _apply_plot_titles(plot, fig, ax_list=[ax])

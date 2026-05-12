@@ -657,6 +657,7 @@ def _render_single_into(
         _default_labels,
         _is_coord_flip,
         _is_coord_polar,
+        _polar_apply_scales,
         _polar_prep_layer_data,
         _polar_x_range,
     )
@@ -698,11 +699,11 @@ def _render_single_into(
                 df = plot.coordinates.rescale_theta(df, x_range)
         layer.geom.draw_panel(df, ax)
 
-    # Scale tick/limit application and x/y labels — skip on polar for
-    # stage 1. matplotlib's polar ``set_xlim`` / ``set_xlabel`` semantics
-    # diverge from Cartesian enough that the ordinal path produces
-    # oddities. Stage 5 polish wires a coord-aware ``apply_to_axis``.
-    if not is_polar:
+    if is_polar:
+        _polar_apply_scales(
+            ax, x_scale, _panel_scale(build_output, 1, "y"), x_range,
+        )
+    else:
         for axis in ("x", "y"):
             scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
             sc = _panel_scale(build_output, 1, scale_aes)
@@ -713,13 +714,13 @@ def _render_single_into(
                     view_limits=_coord_view_limits(plot.coordinates, axis),
                 )
 
-        xlabel, ylabel = _default_labels(plot, build_output)
-        if is_flipped:
-            xlabel, ylabel = ylabel, xlabel
-        if xlabel is not None:
-            ax.set_xlabel(xlabel)
-        if ylabel is not None:
-            ax.set_ylabel(ylabel)
+    xlabel, ylabel = _default_labels(plot, build_output)
+    if is_flipped:
+        xlabel, ylabel = ylabel, xlabel
+    if xlabel is not None:
+        ax.set_xlabel(xlabel)
+    if ylabel is not None:
+        ax.set_ylabel(ylabel)
 
     _apply_theme(plot.theme, ax.figure, [ax], owns_fig=False)
 
