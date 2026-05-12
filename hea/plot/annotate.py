@@ -218,6 +218,66 @@ def segments(x0, y0, x1, y1, *, ax=None, lty=None, col="black"):
     return ax
 
 
+def rug(
+    x,
+    *,
+    side: str | int = "bottom",
+    ticksize: float = 0.03,
+    col: str = "black",
+    lwd: float | None = None,
+    ax=None,
+):
+    """Add a rug — small ticks at each data point along one axis side.
+
+    Parameters
+    ----------
+    x
+        Data positions (polars Series, numpy array, or list). NaNs/nulls
+        dropped.
+    side : {"bottom", "left", "top", "right"} or {1, 2, 3, 4}
+        Which axis edge to draw on (R's numeric codes are accepted: 1
+        bottom, 2 left, 3 top, 4 right).
+    ticksize
+        Tick length as a fraction of the axis range (R default 0.03).
+    col, lwd
+        Tick color and line width.
+    """
+    _require_ax(ax, "rug")
+    _R_SIDE_NAMES = {1: "bottom", 2: "left", 3: "top", 4: "right"}
+    if isinstance(side, int):
+        side = _R_SIDE_NAMES.get(side, side)
+    if side not in ("bottom", "left", "top", "right"):
+        raise ValueError(
+            f"rug(): side= must be 'bottom'|'left'|'top'|'right' or 1..4, got {side!r}."
+        )
+    if isinstance(x, pl.Series):
+        vals = x.cast(pl.Float64).drop_nulls().to_numpy()
+    else:
+        vals = np.asarray(x, dtype=float)
+        vals = vals[~np.isnan(vals)]
+    line_kwargs: dict = {"color": col}
+    if lwd is not None:
+        line_kwargs["linewidth"] = float(lwd)
+
+    if side in ("bottom", "top"):
+        y0, y1 = ax.get_ylim()
+        length = (y1 - y0) * ticksize
+        base = y0 if side == "bottom" else y1
+        tip = base + length if side == "bottom" else base - length
+        for v in vals:
+            ax.plot([v, v], [base, tip], **line_kwargs)
+        ax.set_ylim(y0, y1)
+    else:
+        x0, x1 = ax.get_xlim()
+        length = (x1 - x0) * ticksize
+        base = x0 if side == "left" else x1
+        tip = base + length if side == "left" else base - length
+        for v in vals:
+            ax.plot([base, tip], [v, v], **line_kwargs)
+        ax.set_xlim(x0, x1)
+    return ax
+
+
 def qqline(x, *, ax=None, col="black", lty=None):
     """Add a quartile-anchored reference line to a Q-Q plot already drawn on ``ax``.
 

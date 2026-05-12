@@ -36,12 +36,18 @@ Phase 2+: annotations (``abline``/``points``/``lines``/``legend``/``segments``/
 long tail (``matplot``/``stripchart``/``interaction_plot``/``r_expr``).
 """
 
-from .annotate import abline, legend, lines, points, qqline, segments
+from .annotate import abline, legend, lines, points, qqline, rug, segments
+from .barplot import barplot
+from .boxplot import boxplot
+from .curve import curve
+from .density import density
 from .dispatch import plot
 from .helpers import halfnorm, interaction_plot, pairs, qqnorm, termplot
+from .hist import hist
 
 __all__ = [
     "plot",
-    "abline", "points", "lines", "legend", "segments", "qqline",
+    "abline", "points", "lines", "legend", "segments", "qqline", "rug",
     "qqnorm", "halfnorm", "termplot", "pairs", "interaction_plot",
+    "hist", "boxplot", "barplot", "density", "curve",
 ]
