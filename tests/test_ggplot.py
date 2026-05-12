@@ -3469,6 +3469,89 @@ def test_fct_infreq_preserves_unseen_enum_levels():
     assert set(out.dtype.categories.to_list()) == {"a", "b", "c", "d"}
 
 
+def test_fct_recode_renames_levels_preserving_order():
+    """``fct_recode(col, new=old)`` renames levels; unmentioned levels
+    keep their original name and position. ``**{}`` lets keys with
+    spaces / punctuation work (the r4ds partyid case)."""
+    import hea
+    df = hea.DataFrame({"g": ["a", "b", "c", "d"]})
+    out = df.mutate(g=hea.fct_recode("g", A="a", B="b"))
+    assert out["g"].cat.get_categories().to_list() == ["A", "B", "c", "d"]
+    assert out["g"].to_list() == ["A", "B", "c", "d"]
+
+    # Quoted-key form (matches r4ds' "Republican, strong" use case).
+    df2 = hea.DataFrame({"g": ["short", "long", "x"]})
+    out2 = df2.mutate(g=hea.fct_recode("g", **{"renamed long": "long"}))
+    assert "renamed long" in out2["g"].cat.get_categories().to_list()
+
+    # Non-string values rejected (point users to fct_collapse).
+    with pytest.raises(TypeError, match="fct_collapse"):
+        hea.fct_recode("g", X=["a", "b"])
+
+
+def test_fct_collapse_merges_levels_with_optional_other():
+    """``fct_collapse`` merges many old → one new. Without ``other_level``
+    unmentioned levels stay; with it they're swept into the bucket."""
+    import hea
+    df = hea.DataFrame({"g": ["a", "b", "c", "d"]})
+
+    # Partial: unmentioned c, d keep their names.
+    out = df.mutate(g=hea.fct_collapse("g", X=["a", "b"]))
+    assert out["g"].cat.get_categories().to_list() == ["X", "c", "d"]
+
+    # other_level sweeps the rest.
+    out2 = df.mutate(g=hea.fct_collapse("g", X=["a", "b"], other_level="Z"))
+    assert out2["g"].cat.get_categories().to_list() == ["X", "Z"]
+
+    # List/tuple required (not bare string).
+    with pytest.raises(TypeError, match="list/tuple"):
+        hea.fct_collapse("g", X="a")
+
+
+def test_fct_lump_n_keeps_top_n_by_count():
+    """Top-n by count; ties at the cutoff are all kept; lumped levels
+    merge into ``other_level`` (creating one if absent, or absorbing if
+    that level already exists in the data)."""
+    import hea
+    # 6 levels, n=2 keeps top 2 — bottom 4 lump into "Other".
+    df = hea.DataFrame({"g": ["a"]*10 + ["b"]*6 + ["c"]*4 + ["d"]*3 + ["e"]*2 + ["f"]*1})
+    out = df.mutate(g=hea.fct_lump_n("g", n=2))
+    cats = out["g"].cat.get_categories().to_list()
+    assert cats == ["a", "b", "Other"]
+    # Lumped: c+d+e+f = 4+3+2+1 = 10
+    other_n = (out["g"] == "Other").sum()
+    assert other_n == 10
+
+    # Existing "Other" level absorbs the lumped values. Use an Enum with
+    # explicit level order so the test isn't sensitive to Python's
+    # Unicode sort differing from R's locale-aware default.
+    s = pl.Series("g", ["a"]*10 + ["Other"]*5 + ["b"]*3 + ["c"]*1).cast(
+        pl.Enum(["a", "b", "c", "Other"])
+    )
+    df2 = hea.DataFrame({"g": s})
+    out2 = df2.mutate(g=hea.fct_lump_n("g", n=2))
+    # Top 2 by count: a(10), Other(5). Kept in original Enum order.
+    assert out2["g"].cat.get_categories().to_list() == ["a", "Other"]
+    # b(3) and c(1) lumped into existing Other(5): Other final = 9.
+    assert (out2["g"] == "Other").sum() == 9
+
+
+def test_fct_lump_lowfreq_matches_forcats_in_smallest_rule():
+    """forcats's rule: a level is kept while its count exceeds the sum
+    of all smaller-count levels. Worked example: a=10, b=6, c=4, d=3,
+    e=2, f=1 — only f gets lumped (when we reach e=2, left=1, 2>1)."""
+    import hea
+    df = hea.DataFrame({"g": ["a"]*10 + ["b"]*6 + ["c"]*4 + ["d"]*3 + ["e"]*2 + ["f"]*1})
+    out = df.mutate(g=hea.fct_lump_lowfreq("g"))
+    assert out["g"].cat.get_categories().to_list() == ["a", "b", "c", "d", "e", "Other"]
+    assert (out["g"] == "Other").sum() == 1
+
+    # Dominant level case: a=100, others tiny → only a kept.
+    df2 = hea.DataFrame({"g": ["a"]*100 + ["b"]*5 + ["c"]*3 + ["d"]*2})
+    out2 = df2.mutate(g=hea.fct_lump_lowfreq("g"))
+    assert out2["g"].cat.get_categories().to_list() == ["a", "Other"]
+
+
 def test_scale_radius_is_continuous_size_alias():
     """`scale_radius()` produces the same continuous size mapping as
     `scale_size_continuous()` (both use linear rescale_pal)."""

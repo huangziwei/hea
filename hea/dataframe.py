@@ -564,6 +564,200 @@ def fct_infreq(col: str) -> Callable:
     return _label_callable(infreq, col)
 
 
+def _input_levels(s: pl.Series) -> list[str]:
+    """Return the canonical level list for ``s`` — Enum categories if
+    available, otherwise sorted unique non-null string values. Shared by
+    the rename / collapse / lump family so they all use the same source.
+    """
+    if isinstance(s.dtype, pl.Enum):
+        return list(s.dtype.categories)
+    return sorted({str(v) for v in s.drop_nulls().to_list()})
+
+
+def fct_recode(col: str, **renames: str) -> Callable:
+    """Rename factor levels via ``new=old`` keyword args.
+
+    Mirrors R's ``forcats::fct_recode(col, new = old)`` — kwarg direction
+    is preserved. Unmentioned levels keep their original name and
+    position. For keys that aren't valid Python identifiers (spaces,
+    punctuation), use ``**{}`` to unpack a dict::
+
+        fct_recode("partyid", **{
+            "Republican, strong": "Strong republican",
+            "Republican, weak":   "Not str republican",
+        })
+
+    Values must be strings — for many-to-one merges use ``fct_collapse``.
+    """
+    if not renames:
+        raise ValueError("fct_recode(): pass at least one new=old rename.")
+    for new, old in renames.items():
+        if not isinstance(old, str):
+            raise TypeError(
+                f"fct_recode(): {new!r} maps to non-string {old!r}; "
+                "use fct_collapse for many-to-one merges."
+            )
+    # {old: new} for the polars replace step.
+    old_to_new = {old: new for new, old in renames.items()}
+
+    def recode(data: pl.DataFrame) -> pl.Series:
+        s = data[col]
+        old_levels = _input_levels(s)
+        # Preserve original order, replace renamed in place, dedupe
+        # so multi-old → one-new doesn't create duplicate level entries.
+        new_levels: list[str] = []
+        seen: set[str] = set()
+        for lvl in old_levels:
+            mapped = old_to_new.get(lvl, lvl)
+            if mapped not in seen:
+                new_levels.append(mapped)
+                seen.add(mapped)
+        return s.cast(pl.Utf8).replace(old_to_new).cast(pl.Enum(new_levels))
+
+    return _label_callable(recode, col)
+
+
+def fct_collapse(
+    col: str, *, other_level: str | None = None, **groups: list
+) -> Callable:
+    """Merge many old levels into one new level via ``new=[old, ...]`` kwargs.
+
+    Mirrors R's ``forcats::fct_collapse``. Each kwarg maps a new level
+    to a list/tuple of old levels that should map to it. Levels not in
+    any group keep their original name (with ``other_level=None``) or
+    are lumped into ``other_level`` if set. Result level order: declared
+    new levels in kwarg order, then either ``other_level`` (if set) or
+    any remaining original levels in their original order. Use ``**{}``
+    for keys that aren't valid Python identifiers.
+    """
+    if not groups:
+        raise ValueError("fct_collapse(): pass at least one new=[old,...] group.")
+    for new, olds in groups.items():
+        if not isinstance(olds, (list, tuple)):
+            raise TypeError(
+                f"fct_collapse(): {new!r} must map to a list/tuple of "
+                f"old level names; got {type(olds).__name__}. For 1:1 "
+                "rename use fct_recode."
+            )
+    # Flat {old: new} for the polars replace step.
+    old_to_new = {str(old): new for new, olds in groups.items() for old in olds}
+
+    def collapse(data: pl.DataFrame) -> pl.Series:
+        s = data[col]
+        old_levels = _input_levels(s)
+        # Sweep originals into other_level (if set).
+        if other_level is not None:
+            for lvl in old_levels:
+                if lvl not in old_to_new:
+                    old_to_new[lvl] = other_level
+        # Build the new level list.
+        new_levels: list[str] = list(groups.keys())
+        if other_level is not None:
+            if other_level not in new_levels:
+                new_levels.append(other_level)
+        else:
+            for lvl in old_levels:
+                mapped = old_to_new.get(lvl, lvl)
+                if mapped not in new_levels:
+                    new_levels.append(mapped)
+        return s.cast(pl.Utf8).replace(old_to_new).cast(pl.Enum(new_levels))
+
+    return _label_callable(collapse, col)
+
+
+def _lump_apply(
+    s: pl.Series, lumped: set, kept_in_order: list[str], other_level: str
+) -> pl.Series:
+    """Shared cast: remap ``lumped`` levels to ``other_level``, return Enum.
+
+    Level order = ``kept_in_order`` (original-factor-order of the kept set)
+    with ``other_level`` appended unless it's already a kept name (in
+    which case the lumped levels merge into the existing one and the
+    Enum doesn't grow).
+    """
+    if not lumped:
+        return s.cast(pl.Utf8).cast(pl.Enum(kept_in_order))
+    new_levels = list(kept_in_order)
+    if other_level not in new_levels:
+        new_levels.append(other_level)
+    old_to_new = {lvl: other_level for lvl in lumped}
+    return s.cast(pl.Utf8).replace(old_to_new).cast(pl.Enum(new_levels))
+
+
+def fct_lump_n(col: str, n: int, *, other_level: str = "Other") -> Callable:
+    """Keep the top ``n`` levels by count; lump the rest into ``other_level``.
+
+    Mirrors R's ``forcats::fct_lump_n``. When a tie spans the cutoff,
+    all tied levels are kept (matches R's default ``ties.method="min"``).
+    Kept levels are returned in their original factor-level order, then
+    ``other_level`` appended. If ``other_level`` is already a level in
+    the data, the lumped values merge into it.
+    """
+    if n < 0:
+        raise ValueError(f"fct_lump_n(): n must be >= 0, got {n}.")
+
+    def lump(data: pl.DataFrame) -> pl.Series:
+        s = data[col]
+        old_levels = _input_levels(s)
+        # Per-level counts. value_counts() honors null; we drop nulls so
+        # null doesn't compete for a top-n slot.
+        vc = (
+            s.cast(pl.Utf8)
+            .drop_nulls()
+            .value_counts()
+            .sort("count", descending=True)
+        )
+        present = vc.height
+        if present <= n:
+            return s.cast(pl.Utf8).cast(pl.Enum(old_levels))
+        cutoff = int(vc["count"][n - 1]) if n > 0 else (int(vc["count"].max()) + 1)
+        kept: set[str] = set()
+        for r in vc.iter_rows(named=True):
+            if r["count"] >= cutoff:
+                kept.add(str(r[s.name]))
+        kept_in_order = [lvl for lvl in old_levels if lvl in kept]
+        lumped = {lvl for lvl in old_levels if lvl not in kept}
+        return _lump_apply(s, lumped, kept_in_order, other_level)
+
+    return _label_callable(lump, col)
+
+
+def fct_lump_lowfreq(col: str, *, other_level: str = "Other") -> Callable:
+    """Lump levels into ``other_level`` so it stays the smallest level.
+
+    Mirrors R's ``forcats::fct_lump_lowfreq``. Walks the level counts in
+    descending order; a level is KEPT while its count exceeds the sum of
+    all smaller-count levels (the "in_smallest" rule from the forcats
+    source). Once that fails, every smaller level gets lumped. Kept
+    levels preserve their original factor-level order.
+    """
+    def lump(data: pl.DataFrame) -> pl.Series:
+        s = data[col]
+        old_levels = _input_levels(s)
+        vc = (
+            s.cast(pl.Utf8)
+            .drop_nulls()
+            .value_counts()
+            .sort("count", descending=True)
+        )
+        names = [str(v) for v in vc[s.name].to_list()]
+        counts = vc["count"].to_list()
+        # forcats::lump_cutoff — index where lumping starts (Python 0-based).
+        # Levels at indices >= cutoff_idx get lumped.
+        left = sum(counts)
+        cutoff_idx = len(counts)
+        for i, c in enumerate(counts):
+            left -= c
+            if c > left:
+                cutoff_idx = i + 1
+                break
+        lumped = set(names[cutoff_idx:])
+        kept_in_order = [lvl for lvl in old_levels if lvl not in lumped]
+        return _lump_apply(s, lumped, kept_in_order, other_level)
+
+    return _label_callable(lump, col)
+
+
 # ---- ggplot2 binning (cut_*) ----------------------------------------
 #
 # Bin a continuous variable into a factor for discrete
