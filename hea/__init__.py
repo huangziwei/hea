@@ -78,6 +78,7 @@ from .dataframe import (
     Series,
     between,
     case_when,
+    closest,
     consecutive_id,
     cumall,
     cumany,
@@ -101,6 +102,7 @@ from .dataframe import (
     first,
     glimpse,
     if_else,
+    join_by,
     lag,
     last,
     lead,
@@ -111,12 +113,14 @@ from .dataframe import (
     near,
     nth,
     ntile,
+    overlaps,
     parse_double,
     parse_number,
     percent_rank,
     row_number,
     str_wrap,
     tbl,
+    within,
 )
 from . import ggplot
 from . import plot

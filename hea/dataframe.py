@@ -60,6 +60,8 @@ __all__ = [
     "first", "last", "nth",
     # dplyr cumulative + run-length
     "cummean", "cumall", "cumany", "consecutive_id",
+    # dplyr two-table verb helpers (chapter 19)
+    "join_by", "closest", "overlaps", "within",
     # readr / stringr / tibble
     "parse_double", "parse_number", "str_wrap", "glimpse",
 ]
@@ -1518,6 +1520,267 @@ def consecutive_id(*args):
     return out.to_numpy() if is_ndarray else out
 
 
+# =============================================================================
+# join_by() and friends — dplyr-style two-table verb specifications.
+# =============================================================================
+
+# Map polars BinaryExpr ops (from Expr.meta.serialize) to a readable name.
+_BIN_OPS = {"Eq", "Lt", "LtEq", "Gt", "GtEq"}
+
+# Map a "left <op> right" inequality op to the polars join_asof strategy that
+# delivers dplyr's closest() semantics.
+_CLOSEST_STRATEGY = {
+    "GtEq": "backward",  # left >= right: pick largest right ≤ left
+    "Gt":   "backward",
+    "LtEq": "forward",   # left <= right: pick smallest right ≥ left
+    "Lt":   "forward",
+    "Eq":   "nearest",
+}
+
+
+def _extract_col_name(arg: Any) -> str:
+    """Pull a single column name from a string or ``col(name)`` expression."""
+    if isinstance(arg, str):
+        return arg
+    if isinstance(arg, pl.Expr):
+        names = arg.meta.root_names()
+        if len(names) != 1:
+            raise ValueError(
+                f"join_by helper: expected a single column reference, got {names!r}."
+            )
+        return names[0]
+    raise TypeError(
+        f"join_by helper: expected str or col(name), got {type(arg).__name__}."
+    )
+
+
+def _parse_join_binary(expr: pl.Expr) -> tuple[str, str, str] | None:
+    """Parse ``col(L) <op> col(R)`` → ``(op, L, R)``; return ``None`` otherwise.
+
+    Reads polars' JSON serialization so we can read off the operator (which
+    polars doesn't otherwise expose on the public Expr API).
+    """
+    import json
+    if not isinstance(expr, pl.Expr):
+        return None
+    try:
+        tree = json.loads(expr.meta.serialize(format="json"))
+    except Exception:
+        return None
+    if not isinstance(tree, dict) or "BinaryExpr" not in tree:
+        return None
+    bx = tree["BinaryExpr"]
+    left = bx.get("left"); right = bx.get("right"); op = bx.get("op")
+    if op not in _BIN_OPS:
+        return None
+    if not (isinstance(left, dict) and isinstance(right, dict)):
+        return None
+    if "Column" not in left or "Column" not in right:
+        return None
+    return op, left["Column"], right["Column"]
+
+
+@dataclass(frozen=True)
+class _Closest:
+    """Marker that asks ``join_by`` to route through ``join_asof``."""
+    op: str    # one of _CLOSEST_STRATEGY's keys
+    left: str
+    right: str
+
+
+def closest(expr: pl.Expr) -> _Closest:
+    """Inside :func:`join_by`: take only the closest matching right row.
+
+    Maps to polars' :meth:`pl.DataFrame.join_asof`:
+
+    - ``closest(col('x') >= col('y'))`` — backward asof (largest ``y`` ≤ ``x``).
+    - ``closest(col('x') <= col('y'))`` — forward asof (smallest ``y`` ≥ ``x``).
+    - ``closest(col('x') == col('y'))`` — nearest asof.
+
+    Mirrors dplyr's ``join_by(closest(...))`` rolling join.
+    """
+    parsed = _parse_join_binary(expr)
+    if parsed is None:
+        raise ValueError(
+            "closest(): expected a binary inequality between two column "
+            "references, e.g. closest(col('x') >= col('y'))."
+        )
+    return _Closest(*parsed)
+
+
+def overlaps(x_lower: Any, x_upper: Any, y_lower: Any, y_upper: Any) -> pl.Expr:
+    """Inside :func:`join_by`: rows where ``[x_lower, x_upper]`` overlaps ``[y_lower, y_upper]``.
+
+    Equivalent to ``(x_lower <= y_upper) & (y_lower <= x_upper)``. By
+    convention the first two arguments are left-side columns and the last
+    two are right-side. Accepts column-name strings or ``col(name)``
+    expressions.
+
+    Mirrors dplyr's ``join_by(overlaps(...))`` overlap join.
+    """
+    xl = pl.col(_extract_col_name(x_lower))
+    xu = pl.col(_extract_col_name(x_upper))
+    yl = pl.col(_extract_col_name(y_lower))
+    yu = pl.col(_extract_col_name(y_upper))
+    return (xl <= yu) & (yl <= xu)
+
+
+def within(x_lower: Any, x_upper: Any, y_lower: Any, y_upper: Any) -> pl.Expr:
+    """Inside :func:`join_by`: rows where ``[x_lower, x_upper]`` is contained in ``[y_lower, y_upper]``.
+
+    Equivalent to ``(x_lower >= y_lower) & (x_upper <= y_upper)``. By
+    convention the first two arguments are left-side columns and the last
+    two are right-side.
+
+    Mirrors dplyr's ``join_by(within(...))``.
+    """
+    xl = pl.col(_extract_col_name(x_lower))
+    xu = pl.col(_extract_col_name(x_upper))
+    yl = pl.col(_extract_col_name(y_lower))
+    yu = pl.col(_extract_col_name(y_upper))
+    return (xl >= yl) & (xu <= yu)
+
+
+@dataclass
+class _JoinBy:
+    """Normalized join specification produced by :func:`join_by`."""
+    # Parallel lists: equi-key columns on the left and right.
+    equi_left: list[str] = field(default_factory=list)
+    equi_right: list[str] = field(default_factory=list)
+    # Non-equi inequalities as ``(polars_op, left_col, right_col)``. Kept
+    # separately so we can rewrite right-side columns under suffix
+    # disambiguation when needed.
+    ineqs: list[tuple[str, str, str]] = field(default_factory=list)
+    # Free-form predicate exprs (e.g. from overlaps / within / between).
+    exprs: list[pl.Expr] = field(default_factory=list)
+    # Rolling spec — at most one closest() per call.
+    asof: _Closest | None = None
+
+
+def join_by(*args: Any) -> _JoinBy:
+    """Specify how two tables match for a join — dplyr's ``join_by()``.
+
+    Accepts any combination of:
+
+    - Strings — ``join_by("tailnum")``: same column on both sides.
+    - Polars equality — ``join_by(col("dest") == col("faa"))``: rename on
+      the right side.
+    - Polars inequality — ``join_by(col("id") < col("id"))``: non-equi
+      (routes through :meth:`pl.DataFrame.join_where`).
+    - :func:`closest` — ``join_by(closest(col("x") >= col("y")))``: rolling
+      join (routes through :meth:`pl.DataFrame.join_asof`).
+    - :func:`between` (already exported) — pass its return value directly
+      for ``y_lower <= x <= y_upper`` predicates inside a join.
+    - :func:`overlaps`, :func:`within` — interval-relationship predicates.
+
+    Multiple arguments are conjoined. ``closest()`` may appear at most
+    once and combines only with equi-key arguments.
+    """
+    spec = _JoinBy()
+    for a in args:
+        _consume_join_by_arg(spec, a)
+    return spec
+
+
+def _consume_join_by_arg(spec: _JoinBy, a: Any) -> None:
+    if isinstance(a, str):
+        spec.equi_left.append(a); spec.equi_right.append(a); return
+    if isinstance(a, _Closest):
+        if spec.asof is not None:
+            raise ValueError(
+                "join_by(): only one closest() condition is supported per call."
+            )
+        spec.asof = a; return
+    if isinstance(a, pl.Expr):
+        parsed = _parse_join_binary(a)
+        if parsed is not None:
+            op, L, R = parsed
+            if op == "Eq":
+                spec.equi_left.append(L); spec.equi_right.append(R); return
+            spec.ineqs.append((op, L, R)); return
+        spec.exprs.append(a); return
+    raise TypeError(
+        f"join_by(): unsupported arg type {type(a).__name__}. "
+        "Pass strings, col() comparisons, closest(), between(), "
+        "overlaps(), or within()."
+    )
+
+
+# Map "Lt"/"LtEq"/"Gt"/"GtEq" → corresponding Expr builder for non-equi
+# predicates (used to reconstitute inequalities with suffixed right refs).
+_INEQ_BUILDERS: dict[str, Callable[[pl.Expr, pl.Expr], pl.Expr]] = {
+    "Lt":   lambda l, r: l < r,
+    "LtEq": lambda l, r: l <= r,
+    "Gt":   lambda l, r: l > r,
+    "GtEq": lambda l, r: l >= r,
+}
+
+
+def _numeric_supertype(a: Any, b: Any) -> Any | None:
+    """Common numeric dtype that ``a`` and ``b`` both cast to, or ``None``.
+
+    Mirrors dplyr's implicit coercion of numeric join keys: integer +
+    float promotes to float; integer + integer promotes to the wider
+    signed integer. Non-numeric mismatches (string vs date, etc.)
+    return ``None`` and let polars raise its native ``SchemaError``.
+    """
+    if a == b:
+        return a
+    if not (a.is_numeric() and b.is_numeric()):
+        return None
+    if a.is_float() or b.is_float():
+        return pl.Float64
+    # Both integer kinds: promote to Int64 (widest signed). Hea doesn't
+    # try to preserve unsigned-ness — dplyr/R doesn't have it either.
+    return pl.Int64
+
+
+def _align_equi_key_types(
+    left: pl.DataFrame,
+    right: pl.DataFrame,
+    left_keys: list[str],
+    right_keys: list[str],
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Cast equi-join key columns to a common supertype where they mismatch.
+
+    Polars rejects equi joins on mismatched dtypes; dplyr/R coerces
+    numeric keys (e.g. ``flights.year: integer`` ↔ ``planes.year: integer``
+    with ``NA`` works in R because integer is nullable). We auto-cast
+    numeric pairs to a common supertype; non-numeric mismatches fall
+    through and surface polars' native error.
+    """
+    left_cast: list[pl.Expr] = []
+    right_cast: list[pl.Expr] = []
+    for lk, rk in zip(left_keys, right_keys):
+        lt = left.schema[lk]
+        rt = right.schema[rk]
+        if lt == rt:
+            continue
+        super_t = _numeric_supertype(lt, rt)
+        if super_t is None:
+            continue
+        if lt != super_t:
+            left_cast.append(pl.col(lk).cast(super_t))
+        if rt != super_t:
+            right_cast.append(pl.col(rk).cast(super_t))
+    if left_cast:
+        left = pl.DataFrame.with_columns(left, left_cast)
+    if right_cast:
+        right = pl.DataFrame.with_columns(right, right_cast)
+    return left, right
+
+
+def _emit_natural_join_message(shared: list[str]) -> None:
+    """Print dplyr's ``Joining with `by = join_by(...)``` info message.
+
+    Goes to stderr to match R's ``message()`` channel — visible in
+    Jupyter and REPL output but doesn't pollute stdout-piped scripts.
+    """
+    import sys
+    quoted = ", ".join(repr(c) for c in shared)
+    print(f"Joining with `by = join_by({quoted})`", file=sys.stderr)
+
+
 _CLEAN_NAMES_REPLACE = (
     ("'", ""),
     ('"', ""),
@@ -2274,6 +2537,382 @@ class DataFrame(pl.DataFrame):
         return self._wrap(
             super().sample(n=n, fraction=prop, with_replacement=replace, seed=seed)
         )
+
+    # ---- joins (chapter 19) ------------------------------------------
+
+    def inner_join(
+        self,
+        other: pl.DataFrame,
+        by: Any = None,
+        *,
+        suffix: tuple[str, str] = (".x", ".y"),
+        keep: bool = False,
+        na_matches: str = "na",
+    ) -> "DataFrame":
+        """Keep rows that have a match in both tables.
+
+        See :meth:`left_join` for shared parameter semantics.
+        """
+        return self._do_join(other, by, "inner", suffix, keep, na_matches)
+
+    def left_join(
+        self,
+        other: pl.DataFrame,
+        by: Any = None,
+        *,
+        suffix: tuple[str, str] = (".x", ".y"),
+        keep: bool = False,
+        na_matches: str = "na",
+    ) -> "DataFrame":
+        """Keep every row in ``self``; right-side columns come from matching rows.
+
+        Parameters
+        ----------
+        other
+            Right-hand table.
+        by
+            How to match. Default ``None`` does a natural join on shared
+            column names (dplyr behaviour). Pass a string / list of strings
+            for shared keys, a ``{left: right}`` dict to rename, or a
+            :func:`join_by` spec for non-equi / rolling / overlap joins.
+        suffix
+            Two-element tuple ``(left_suffix, right_suffix)`` applied to
+            non-key columns that collide on both sides. Defaults to dplyr's
+            ``(".x", ".y")``.
+        keep
+            ``False`` (default) drops the right-side key after the match,
+            mirroring dplyr's default. ``True`` keeps both key columns.
+        na_matches
+            ``"na"`` (default) treats nulls as equal during matching;
+            ``"never"`` treats every null as distinct.
+        """
+        return self._do_join(other, by, "left", suffix, keep, na_matches)
+
+    def right_join(
+        self,
+        other: pl.DataFrame,
+        by: Any = None,
+        *,
+        suffix: tuple[str, str] = (".x", ".y"),
+        keep: bool = False,
+        na_matches: str = "na",
+    ) -> "DataFrame":
+        """Keep every row in ``other``; left-side columns come from matching rows.
+
+        See :meth:`left_join` for parameter semantics.
+        """
+        return self._do_join(other, by, "right", suffix, keep, na_matches)
+
+    def full_join(
+        self,
+        other: pl.DataFrame,
+        by: Any = None,
+        *,
+        suffix: tuple[str, str] = (".x", ".y"),
+        keep: bool = False,
+        na_matches: str = "na",
+    ) -> "DataFrame":
+        """Keep every row from both tables; non-matching rows get nulls.
+
+        See :meth:`left_join` for parameter semantics.
+        """
+        return self._do_join(other, by, "full", suffix, keep, na_matches)
+
+    def semi_join(
+        self,
+        other: pl.DataFrame,
+        by: Any = None,
+        *,
+        na_matches: str = "na",
+    ) -> "DataFrame":
+        """Keep rows in ``self`` that have a match in ``other``; drop the rest.
+
+        Filtering join — no right-side columns are added. See
+        :meth:`left_join` for ``by`` and ``na_matches`` semantics.
+        """
+        return self._do_join(
+            other, by, "semi", suffix=(".x", ".y"), keep=False, na_matches=na_matches
+        )
+
+    def anti_join(
+        self,
+        other: pl.DataFrame,
+        by: Any = None,
+        *,
+        na_matches: str = "na",
+    ) -> "DataFrame":
+        """Keep rows in ``self`` that have *no* match in ``other``.
+
+        Filtering join — no right-side columns are added. See
+        :meth:`left_join` for ``by`` and ``na_matches`` semantics.
+        """
+        return self._do_join(
+            other, by, "anti", suffix=(".x", ".y"), keep=False, na_matches=na_matches
+        )
+
+    def cross_join(
+        self,
+        other: pl.DataFrame,
+        *,
+        suffix: tuple[str, str] = (".x", ".y"),
+    ) -> "DataFrame":
+        """Cartesian product — every row of ``self`` paired with every row of ``other``."""
+        return self._do_join(
+            other, by=None, how="cross", suffix=suffix, keep=False, na_matches="na",
+        )
+
+    # ---- join internals -----------------------------------------------
+
+    def _do_join(
+        self,
+        other: pl.DataFrame,
+        by: Any,
+        how: str,
+        suffix: tuple[str, str],
+        keep: bool,
+        na_matches: str,
+    ) -> "DataFrame":
+        if na_matches not in ("na", "never"):
+            raise ValueError(
+                f"na_matches: expected 'na' or 'never', got {na_matches!r}."
+            )
+        if not isinstance(suffix, tuple) or len(suffix) != 2:
+            raise TypeError(
+                "suffix=: expected a 2-tuple (left_suffix, right_suffix)."
+            )
+        spec = self._normalize_join_by(by, other, how=how)
+        if spec.asof is not None:
+            return self._do_asof(other, spec, how, suffix, keep, na_matches)
+        if spec.ineqs or spec.exprs:
+            return self._do_where(other, spec, how, suffix, keep)
+        return self._do_equi(other, spec, how, suffix, keep, na_matches)
+
+    def _normalize_join_by(
+        self, by: Any, other: pl.DataFrame, *, how: str
+    ) -> _JoinBy:
+        """Resolve ``by=`` into a :class:`_JoinBy`."""
+        if how == "cross":
+            return _JoinBy()  # no keys for cross
+        if by is None:
+            shared = [c for c in self.columns if c in other.columns]
+            if not shared:
+                raise ValueError(
+                    "No shared column names to join on. Pass by= or "
+                    "join_by(...) to specify keys."
+                )
+            # Mirror dplyr's natural-join info message so it's obvious
+            # when the chosen key set isn't the one the user wanted
+            # (e.g. accidentally joining flights to planes on year).
+            _emit_natural_join_message(shared)
+            return _JoinBy(equi_left=list(shared), equi_right=list(shared))
+        if isinstance(by, _JoinBy):
+            return by
+        if isinstance(by, str):
+            return _JoinBy(equi_left=[by], equi_right=[by])
+        if isinstance(by, (list, tuple)):
+            if not all(isinstance(x, str) for x in by):
+                raise TypeError(
+                    "by=: list/tuple must contain only column-name strings."
+                )
+            return _JoinBy(equi_left=list(by), equi_right=list(by))
+        if isinstance(by, dict):
+            return _JoinBy(equi_left=list(by.keys()), equi_right=list(by.values()))
+        raise TypeError(
+            f"by=: unsupported type {type(by).__name__}. Pass a string, "
+            "list of strings, dict, or join_by(...)."
+        )
+
+    def _do_equi(
+        self,
+        other: pl.DataFrame,
+        spec: _JoinBy,
+        how: str,
+        suffix: tuple[str, str],
+        keep: bool,
+        na_matches: str,
+    ) -> "DataFrame":
+        nulls_equal = na_matches == "na"
+        # Use a placeholder suffix polars won't collide with, then rename
+        # to dplyr's two-sided convention.
+        polars_suffix = "__hea_r__"
+        # ``coalesce`` mirrors dplyr's ``keep``: keep=False merges shared
+        # keys, keep=True leaves both. polars' default behaves differently
+        # across how= variants, so we pin it explicitly.
+        coalesce = not keep
+
+        if how == "cross":
+            out = pl.DataFrame.join(
+                self, other, how="cross", suffix=polars_suffix,
+            )
+            return self._apply_dplyr_suffix(out, suffix, polars_suffix)
+
+        # Coerce numeric type mismatches on key columns to a common
+        # supertype (matches dplyr's implicit coercion). Polars would
+        # otherwise raise SchemaError on i64-vs-f64 keys, etc.
+        left_aligned, right_aligned = _align_equi_key_types(
+            self, other, spec.equi_left, spec.equi_right
+        )
+
+        same_name = [
+            l for l, r in zip(spec.equi_left, spec.equi_right) if l == r
+        ]
+        diff_name = [
+            (l, r) for l, r in zip(spec.equi_left, spec.equi_right) if l != r
+        ]
+        if not diff_name:
+            out = pl.DataFrame.join(
+                left_aligned, right_aligned,
+                on=same_name, how=how,
+                suffix=polars_suffix,
+                nulls_equal=nulls_equal,
+                coalesce=coalesce,
+            )
+        else:
+            out = pl.DataFrame.join(
+                left_aligned, right_aligned,
+                left_on=spec.equi_left,
+                right_on=spec.equi_right,
+                how=how,
+                suffix=polars_suffix,
+                nulls_equal=nulls_equal,
+                coalesce=coalesce,
+            )
+        return self._apply_dplyr_suffix(out, suffix, polars_suffix)
+
+    def _do_where(
+        self,
+        other: pl.DataFrame,
+        spec: _JoinBy,
+        how: str,
+        suffix: tuple[str, str],
+        keep: bool,
+    ) -> "DataFrame":
+        if how != "inner":
+            raise NotImplementedError(
+                f"{how}_join with non-equi conditions is not supported yet — "
+                "polars' join_where backs only inner joins. Use inner_join "
+                "or open an issue for left/right/full non-equi support."
+            )
+        # Rename right-side columns that collide with the left so polars'
+        # name resolution inside the predicate is unambiguous. We rewrite
+        # inequalities to point at the renamed names; free-form exprs
+        # (overlaps / within / between) are passed through and rely on
+        # non-colliding names (true for every r4ds ch19 example).
+        polars_suffix = "__hea_r__"
+        rename_map = {
+            c: f"{c}{polars_suffix}"
+            for c in other.columns if c in self.columns
+        }
+        right = other.rename(rename_map) if rename_map else other
+        preds: list[pl.Expr] = []
+        for op, L, R in spec.ineqs:
+            R_renamed = rename_map.get(R, R)
+            preds.append(_INEQ_BUILDERS[op](pl.col(L), pl.col(R_renamed)))
+        # Equi conditions inside an otherwise non-equi join also go via
+        # join_where (it accepts equality predicates too).
+        for L, R in zip(spec.equi_left, spec.equi_right):
+            R_renamed = rename_map.get(R, R)
+            preds.append(pl.col(L) == pl.col(R_renamed))
+        preds.extend(spec.exprs)
+        if not preds:
+            raise ValueError("_do_where(): no predicates to apply.")
+        out = pl.DataFrame.join_where(self, right, *preds, suffix=polars_suffix)
+        return self._apply_dplyr_suffix(out, suffix, polars_suffix)
+
+    def _do_asof(
+        self,
+        other: pl.DataFrame,
+        spec: _JoinBy,
+        how: str,
+        suffix: tuple[str, str],
+        keep: bool,
+        na_matches: str,
+    ) -> "DataFrame":
+        if how not in ("left", "inner"):
+            raise NotImplementedError(
+                f"{how}_join with closest() is not supported — only "
+                "left_join and inner_join route to join_asof."
+            )
+        if spec.ineqs or spec.exprs:
+            raise NotImplementedError(
+                "join_by(closest(...)) does not yet combine with extra "
+                "non-equi predicates. Use equi keys only, or open an issue."
+            )
+        polars_suffix = "__hea_r__"
+        strategy = _CLOSEST_STRATEGY[spec.asof.op]
+        # Coerce numeric type mismatches on the asof key and any equi
+        # grouping keys (same rule as the equi-join path).
+        asof_keys_left = list(spec.equi_left) + [spec.asof.left]
+        asof_keys_right = list(spec.equi_right) + [spec.asof.right]
+        left_aligned, right_aligned = _align_equi_key_types(
+            self, other, asof_keys_left, asof_keys_right
+        )
+        # polars' join_asof requires both frames sorted on the asof key
+        # (and by the equi-grouping keys, if any). dplyr preserves left
+        # row order on the way out — we tag rows, sort, asof, then
+        # restore the original order. Equi keys map to by_left/by_right.
+        idx_col = "__hea_idx__"
+        left_sorted = pl.DataFrame.with_row_index(left_aligned, idx_col)
+        left_sorted = left_sorted.sort(asof_keys_left)
+        right_sorted = right_aligned.sort(asof_keys_right)
+        kwargs: dict[str, Any] = dict(
+            left_on=spec.asof.left,
+            right_on=spec.asof.right,
+            strategy=strategy,
+            suffix=polars_suffix,
+            coalesce=not keep,
+        )
+        if spec.equi_left:
+            kwargs["by_left"] = spec.equi_left
+            kwargs["by_right"] = spec.equi_right
+            # polars can't verify sortedness once `by` groups are
+            # involved; we already sorted, so skip the check.
+            kwargs["check_sortedness"] = False
+        out = pl.DataFrame.join_asof(left_sorted, right_sorted, **kwargs)
+        if how == "inner":
+            # asof always returns one row per left row (left-join shape);
+            # drop unmatched rows to get inner semantics.
+            out = out.filter(pl.col(spec.asof.right).is_not_null())
+        # Restore left's original row order and drop the index tag.
+        out = out.sort(idx_col).drop(idx_col)
+        return self._apply_dplyr_suffix(out, suffix, polars_suffix)
+
+    def _apply_dplyr_suffix(
+        self,
+        out: pl.DataFrame,
+        suffix: tuple[str, str],
+        polars_suffix: str,
+    ) -> "DataFrame":
+        """Rewrite polars' single-sided ``suffix`` into dplyr's two-sided form.
+
+        Polars adds ``polars_suffix`` only to right-side columns that
+        collide. dplyr renames both: the left column gets ``suffix[0]``
+        and the right column gets ``suffix[1]``. We translate one to the
+        other; if both suffix elements are empty no renaming happens.
+        """
+        ls, rs = suffix
+        rename: dict[str, str] = {}
+        for name in out.columns:
+            if name.endswith(polars_suffix):
+                base = name[: -len(polars_suffix)]
+                # The corresponding un-suffixed left column should exist;
+                # rename both sides.
+                if base in out.columns:
+                    if ls:
+                        rename[base] = f"{base}{ls}"
+                    if rs:
+                        rename[name] = f"{base}{rs}"
+                    elif ls:
+                        # No right suffix: strip the polars marker so the
+                        # right col becomes ``base`` — but ``base`` is the
+                        # left col, so we'd collide. Skip in this edge case.
+                        pass
+                else:
+                    # Right-only — just strip the polars marker.
+                    rename[name] = base
+        if rename:
+            out = out.rename(rename)
+        return self._wrap(out)
 
     # ---- pivots / pull (chapter 5) -----------------------------------
 
