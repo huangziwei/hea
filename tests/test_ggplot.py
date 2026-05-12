@@ -3053,6 +3053,40 @@ def test_axis_rotation_via_theme_element_text_angle():
         plt.close(fig)
 
 
+def test_axis_text_y_element_blank_hides_only_y_labels():
+    """`theme(axis_text_y=element_blank())` should suppress radial/y tick
+    labels without touching x. Pre-fix, `_apply_ticks_and_text` read
+    only `axis.text` (axis-agnostic) so the axis-specific theme element
+    was silently ignored."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + theme(axis_text_y=element_blank()))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        x_visible = [t.get_visible() for t in ax.get_xticklabels()]
+        y_visible = [t.get_visible() for t in ax.get_yticklabels()]
+        assert any(x_visible) or not x_visible  # x untouched
+        assert not any(y_visible) or not y_visible  # y suppressed
+    finally:
+        plt.close(fig)
+
+
+def test_axis_text_x_element_blank_hides_only_x_labels():
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
+    p = (ggplot(df, aes("x", "y")) + geom_point()
+         + theme(axis_text_x=element_blank()))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        x_visible = [t.get_visible() for t in ax.get_xticklabels()]
+        y_visible = [t.get_visible() for t in ax.get_yticklabels()]
+        assert not any(x_visible) or not x_visible  # x suppressed
+        assert any(y_visible) or not y_visible  # y untouched
+    finally:
+        plt.close(fig)
+
+
 def test_guide_axis_overrides_theme():
     """When both are set, ``guides(x=guide_axis(angle=...))`` wins."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})

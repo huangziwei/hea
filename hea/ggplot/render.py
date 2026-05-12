@@ -178,14 +178,22 @@ def _polar_apply_scales(ax, x_scale, y_scale, x_range):
         return
 
     if isinstance(x_scale, ScaleContinuous):
+        # Explicit ``breaks=None`` means "no ticks" — clear matplotlib's
+        # default degree-spoke ticks too.
+        if x_scale.breaks is None:
+            ax.set_xticks([])
+            ax.set_xticklabels([])
+            return
         if x_scale.range_ is None:
             return
         break_range = x_scale._expanded_break_range()
         breaks = x_scale._compute_breaks(break_range)
-        if breaks is None or len(breaks) == 0:
+        if breaks is None:
             return
-        labels = x_scale._compute_labels(breaks)
-        breaks_arr = _np.asarray(breaks, dtype=float)
+        breaks_arr = _np.atleast_1d(_np.asarray(breaks, dtype=float))
+        if breaks_arr.size == 0:
+            return
+        labels = x_scale._compute_labels(breaks_arr.tolist())
         mask = (breaks_arr >= break_range[0]) & (breaks_arr <= break_range[1])
         breaks_arr = breaks_arr[mask]
         labels = [labels[i] for i in range(len(labels)) if mask[i]]
@@ -586,11 +594,24 @@ def _apply_spines(theme, ax) -> None:
 
 
 def _apply_ticks_and_text(theme, ax) -> None:
+    """Apply ``axis.ticks`` (line styling) and ``axis.text`` (tick label
+    styling) to ``ax``.
+
+    Per-axis overrides: ``axis.text.x`` / ``axis.text.y`` merge over
+    ``axis.text`` for each axis independently, mirroring the resolution
+    pattern in :func:`_apply_axis_titles`. Without this, the only way
+    to suppress one axis's tick labels was via ``scale_*(breaks=None)``
+    — the discoverable theme form was silently ignored. Matters on
+    polar (suppress the radial spoke numbers, keep the rim labels)
+    and on Cartesian alike.
+    """
     ticks = theme.get("axis.ticks")
     text = theme.get("axis.text")
+    text_x = theme.get("axis.text.x")
+    text_y = theme.get("axis.text.y")
 
+    # Tick line styling stays global (no per-axis override yet).
     tick_kwargs = {"which": "both"}
-
     if isinstance(ticks, element_blank):
         tick_kwargs["length"] = 0
     elif isinstance(ticks, element_line):
@@ -602,20 +623,42 @@ def _apply_ticks_and_text(theme, ax) -> None:
         if ticks.size:
             tick_kwargs["width"] = ticks.size * _PT_PER_MM
             tick_kwargs["length"] = ticks.size * _PT_PER_MM * 8
-
-    if isinstance(text, element_blank):
-        tick_kwargs["labelleft"] = False
-        tick_kwargs["labelbottom"] = False
-        tick_kwargs["labeltop"] = False
-        tick_kwargs["labelright"] = False
-    elif isinstance(text, element_text):
-        if text.colour:
-            tick_kwargs["labelcolor"] = r_color(text.colour)
-        if text.size:
-            tick_kwargs["labelsize"] = text.size
-
-    if len(tick_kwargs) > 1:  # something beyond just "which"
+    if len(tick_kwargs) > 1:
         ax.tick_params(**tick_kwargs)
+
+    def _resolve_text(override):
+        if isinstance(override, element_blank):
+            return override
+        if override is None:
+            return text
+        if isinstance(text, element_text) and isinstance(override, element_text):
+            return _merge_text(text, override)
+        return override
+
+    x_text = _resolve_text(text_x)
+    y_text = _resolve_text(text_y)
+
+    def _apply(side: str, elem) -> None:
+        if not isinstance(elem, (element_blank, element_text)):
+            return
+        kw = {"axis": side, "which": "both"}
+        if isinstance(elem, element_blank):
+            if side == "x":
+                kw["labelbottom"] = False
+                kw["labeltop"] = False
+            else:
+                kw["labelleft"] = False
+                kw["labelright"] = False
+        else:  # element_text
+            if elem.colour:
+                kw["labelcolor"] = r_color(elem.colour)
+            if elem.size:
+                kw["labelsize"] = elem.size
+        if len(kw) > 2:  # something beyond "axis" and "which"
+            ax.tick_params(**kw)
+
+    _apply("x", x_text)
+    _apply("y", y_text)
 
 
 def _apply_axis_titles(theme, ax) -> None:
