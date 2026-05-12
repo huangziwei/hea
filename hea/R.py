@@ -2726,10 +2726,13 @@ def terms(model) -> Terms:
 _UPDATE_AUTO_FORWARD = ("family", "method", "weights", "REML")
 
 
-def update(model, formula, **kwargs):
-    """R: ``update()`` — refit on the same data with a new formula.
+def update(model, formula=None, **kwargs):
+    """R: ``update()`` — refit with a new formula and/or different args.
 
-    Two formula forms supported:
+    ``formula`` is optional, matching R's ``update(object, formula. = .)``
+    default: when omitted, the original ``model.formula`` is reused
+    verbatim, so ``update(fm, REML=False)`` just refits with one knob
+    changed. When supplied, two forms are recognised:
 
     * **Full formula** (e.g. ``"y ~ x1 + x2"``) — used verbatim.
     * **Delta formula** with R's ``.`` placeholder (e.g.
@@ -2747,21 +2750,25 @@ def update(model, formula, **kwargs):
     forwarding ``sp`` for example would tie the new fit's smoothing
     parameters to the old formula's smooth structure.
     """
-    f = formula.strip()
-    if "~" not in f:
-        raise ValueError(f"update(): formula must contain '~'; got {f!r}")
-    if "." in f:
-        old_lhs, old_rhs = (s.strip() for s in model.formula.split("~", 1))
-        new_lhs, new_rhs = (s.strip() for s in f.split("~", 1))
-        if new_lhs == ".":
-            new_lhs = old_lhs
-        elif "." in new_lhs:
-            new_lhs = new_lhs.replace(".", f"({old_lhs})")
-        if new_rhs == ".":
-            new_rhs = old_rhs
-        elif "." in new_rhs:
-            new_rhs = new_rhs.replace(".", f"({old_rhs})")
-        f = f"{new_lhs} ~ {new_rhs}"
+    if formula is None:
+        # R's default `formula. = .` — reuse the original verbatim.
+        f = model.formula
+    else:
+        f = formula.strip()
+        if "~" not in f:
+            raise ValueError(f"update(): formula must contain '~'; got {f!r}")
+        if "." in f:
+            old_lhs, old_rhs = (s.strip() for s in model.formula.split("~", 1))
+            new_lhs, new_rhs = (s.strip() for s in f.split("~", 1))
+            if new_lhs == ".":
+                new_lhs = old_lhs
+            elif "." in new_lhs:
+                new_lhs = new_lhs.replace(".", f"({old_lhs})")
+            if new_rhs == ".":
+                new_rhs = old_rhs
+            elif "." in new_rhs:
+                new_rhs = new_rhs.replace(".", f"({old_rhs})")
+            f = f"{new_lhs} ~ {new_rhs}"
     cls = type(model)
     import inspect
     try:

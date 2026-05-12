@@ -1866,6 +1866,17 @@ def test_update_full_formula_returns_new_fit(gala, m_lm):
     assert "Elevation" not in coef(new)
 
 
+def test_update_formula_optional_refits_same_model(gala, m_lm):
+    """R parity: ``update(fm)`` (no formula) refits with the original
+    formula — equivalent to R's default ``formula. = .``. Lets calls
+    like ``update(fm, REML=FALSE)`` work without retyping the formula.
+    """
+    new = update(m_lm)
+    assert new is not m_lm
+    assert new.formula == m_lm.formula
+    assert list(coef(new).keys()) == list(coef(m_lm).keys())
+
+
 def test_update_delta_add_term(gala, m_lm):
     """``. ~ . + x`` keeps existing RHS and appends a term."""
     new = update(m_lm, ". ~ . + Adjacent")
