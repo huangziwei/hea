@@ -2576,14 +2576,26 @@ def predict(model, *args, **kwargs):
 
 
 def confint(model, level=0.95):
-    """R: ``confint()`` — confidence intervals for the coefficients.
+    """R: ``confint()`` — confidence intervals.
 
-    Returns a polars DataFrame with one row per coefficient.
+    Returns a polars DataFrame with one row per parameter.
 
-    For ``lm``, ``level`` is honored exactly (refits CIs at
-    ``alpha = 1 - level``). For other models, only ``level=0.95``
-    is wired here — use the model's own method for other levels.
+    Dispatch:
+
+    * Profile-likelihood objects (``lme.profile()`` output) — defer to
+      :meth:`hea.lme.Profile.confint`, which inverts each ζ-curve at
+      ``±Φ⁻¹((1+level)/2)``. This is the lme4 ``confint(profile(fm))``
+      workflow.
+    * ``lm`` — exact CIs at ``alpha = 1 - level`` via
+      ``compute_ci_bhat``.
+    * Other model types — return ``model.ci_bhat`` when ``level=0.95``;
+      otherwise raise.
     """
+    # Profile objects expose their own ``confint`` — use it. Mirrors R's
+    # S3 ``confint.profile`` dispatch.
+    if hasattr(model, "confint") and not hasattr(model, "ci_bhat") \
+            and not hasattr(model, "compute_ci_bhat"):
+        return model.confint(level=level)
     if level == 0.95 and hasattr(model, "ci_bhat"):
         return model.ci_bhat
     if hasattr(model, "compute_ci_bhat"):

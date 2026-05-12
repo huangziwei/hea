@@ -906,6 +906,29 @@ def test_confint_custom_level_lm_recomputes(m_lm):
     assert np.all(hi99 > hi95)
 
 
+def test_confint_dispatches_to_profile_object():
+    """``confint(profile(fm))`` defers to the Profile's own ``.confint``,
+    mirroring R's S3 ``confint.profile`` dispatch — the
+    ``lme4::profile`` workflow Bates uses in the lme book.
+    """
+    from hea import data, lme
+
+    dye = data("Dyestuff")
+    fm = lme("Yield ~ 1 + (1 | Batch)", dye, REML=False)
+    pr = fm.profile()
+    out = confint(pr)
+    assert isinstance(out, pl.DataFrame)
+    # One row per profiled parameter — for the random-intercept Dyestuff
+    # fit that's ``.sig01``, ``.sigma``, ``(Intercept)``.
+    assert set(out["parameter"].to_list()) == {".sig01", ".sigma", "(Intercept)"}
+    # 99% CI strictly wider than 95% on the (Intercept) row.
+    ci99 = confint(pr, level=0.99)
+    icpt95 = out.filter(pl.col("parameter") == "(Intercept)")
+    icpt99 = ci99.filter(pl.col("parameter") == "(Intercept)")
+    assert icpt99[icpt99.columns[1]][0] < icpt95[icpt95.columns[1]][0]
+    assert icpt99[icpt99.columns[2]][0] > icpt95[icpt95.columns[2]][0]
+
+
 # ---- vcov -----------------------------------------------------------
 
 

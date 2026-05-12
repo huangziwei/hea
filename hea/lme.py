@@ -1410,12 +1410,21 @@ class Profile:
         if ax is not None:
             axes = [ax]
             fig = ax.figure
+        elif len(names) == 1:
+            # Single-parameter call: route through ``resolve_ax`` so an
+            # active :func:`hea.plot.par` context pulls a cell from the
+            # grid (R's ``par(mfrow=...)`` ergonomics). Outside ``par``,
+            # this still allocates a fresh figure.
+            from .plot._util import resolve_ax
+            ax_single = resolve_ax(None, figsize=figsize)
+            axes = [ax_single]
+            fig = ax_single.figure
         else:
             n = len(names)
             fig, axes_obj = plt.subplots(
                 1, n, figsize=figsize or (3.2 * n, 3.0), sharey=False,
             )
-            axes = [axes_obj] if n == 1 else list(axes_obj)
+            axes = list(axes_obj)
 
         for ax_i, name in zip(axes, names):
             df = self.data[name]

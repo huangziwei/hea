@@ -180,6 +180,25 @@ def test_curve_inside_par(diastolic):
     assert len([a for a in p.figure.axes if a.get_visible()]) == 2
 
 
+def test_profile_plot_single_param_inside_par():
+    """``Profile.plot(which="...", ...)`` is a single-panel call —
+    inside ``par(mfrow=...)`` it should pull a cell rather than open
+    its own figure (Bates Fig. 1.7-style ``par`` ergonomics)."""
+    from hea import data, lme
+
+    dye = data("Dyestuff")
+    fm = lme("Yield ~ 1 + (1 | Batch)", dye, REML=False)
+    pr = fm.profile()
+
+    with par(mfrow=(1, 3)) as p:
+        pr.plot(which=".sigma", transform="log")
+        pr.plot(which=".sigma")
+        pr.plot(which=".sigma", transform="square")
+
+    titles = [a.get_title() for a in p.figure.axes if a.get_visible()]
+    assert titles == ["log(.sigma)", ".sigma", ".sigma²"]
+
+
 # ---------------------------------------------------------------------------
 # Argument validation.
 # ---------------------------------------------------------------------------
