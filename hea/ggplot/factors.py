@@ -88,6 +88,32 @@ def fct_reorder(col: str, by: str, fn="median", *, desc: bool = False) -> Callab
     return _label_callable(reorder, col)
 
 
+def fct_reorder2(col: str, x: str, y: str, *, desc: bool = True) -> Callable:
+    """Reorder ``col``'s levels by ``y`` at each level's largest ``x``.
+
+    Mirrors R's ``forcats::fct_reorder2``. Designed for the line-plot
+    legend-ordering case: a level's rank is the ``y`` value at its
+    largest ``x``, so the legend order matches where lines end up at
+    the right of the plot. ``desc=True`` (default, like forcats) puts
+    the highest end-value first.
+    """
+    def reorder(data: pl.DataFrame) -> pl.Series:
+        ordered = (
+            data.lazy()
+            .filter(pl.col(x).is_not_null())
+            .sort(x)
+            .group_by(col, maintain_order=False)
+            .agg(pl.col(y).last().alias("_y_at_max_x"))
+            .sort("_y_at_max_x", descending=desc, nulls_last=True)
+            .collect()
+        )
+        levels = [str(v) for v in ordered[col].to_list() if v is not None]
+        levels = _append_unseen_enum_levels(data[col], levels)
+        return data[col].cast(pl.Utf8).cast(pl.Enum(levels))
+
+    return _label_callable(reorder, col)
+
+
 def fct_rev(col: str) -> Callable:
     """Reverse the level order of ``col``.
 

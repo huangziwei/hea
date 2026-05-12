@@ -2403,6 +2403,17 @@ class GroupBy:
         """Drop the grouping; return the underlying DataFrame."""
         return self._df
 
+    def ggplot(self, mapping=None, **aes_kwargs):
+        """Plot the underlying frame; grouping has no plot-side meaning.
+
+        dplyr's grouping is a per-row scope for verbs, not a plot
+        partition — ggplot2 handles its own faceting / aesthetics — so
+        ``df.group_by(...).mutate(...).ggplot(...)`` should work just
+        like ``df.group_by(...).mutate(...).ungroup().ggplot(...)``,
+        matching ``ggplot(grouped_tibble, aes(...))`` in R.
+        """
+        return self._df.ggplot(mapping, **aes_kwargs)
+
     # ---- collapsing verbs --------------------------------------------
 
     def summarize(

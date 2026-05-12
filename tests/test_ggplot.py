@@ -23,7 +23,7 @@ from hea.ggplot import (
     coord_cartesian, coord_fixed,
     coord_flip, coord_trans, expansion,
     element_blank, element_line, element_rect,
-    fct_infreq, fct_relevel, fct_rev, fct_reorder,
+    fct_infreq, fct_relevel, fct_rev, fct_reorder, fct_reorder2,
     plot_annotation, plot_layout, wrap_plots,
     element_text, facet_grid, facet_wrap, geom_abline, geom_area, geom_bar, geom_blank,
     geom_boxplot, geom_col, geom_contour, geom_contour_filled, geom_count,
@@ -3407,6 +3407,53 @@ def test_fct_reorder_preserves_unseen_enum_levels():
     out = callable_(df)
     # Data-driven order: b(1), c(2), a(3); unseen d, e tail in Enum order.
     assert out.dtype.categories.to_list() == ["b", "c", "a", "d", "e"]
+
+
+def test_fct_reorder2_orders_by_y_at_max_x():
+    """``fct_reorder2`` ranks levels by the y-value at each level's
+    largest x — the legend-ordering primitive for line plots.
+    ``desc=True`` is the forcats default. Worked example: at x=3,
+    a=30, c=28, b=25 → expected level order ``["a", "c", "b"]``.
+    """
+    df = pl.DataFrame({
+        "f": ["a", "a", "a", "b", "b", "b", "c", "c", "c"],
+        "x": [1, 2, 3, 1, 2, 3, 1, 2, 3],
+        "y": [10, 20, 30, 5, 15, 25, 8, 18, 28],
+    })
+    out = fct_reorder2("f", "x", "y")(df)
+    assert out.dtype.categories.to_list() == ["a", "c", "b"]
+
+    # desc=False reverses
+    out_asc = fct_reorder2("f", "x", "y", desc=False)(df)
+    assert out_asc.dtype.categories.to_list() == ["b", "c", "a"]
+
+
+def test_fct_reorder2_preserves_unseen_enum_levels():
+    """Unseen Enum levels go to the tail in original Enum order,
+    matching R's behavior (NA aggregates sort last)."""
+    s = pl.Series("f", ["a", "b", "c"]).cast(pl.Enum(["a", "b", "c", "d"]))
+    df = pl.DataFrame({"f": s, "x": [1, 2, 3], "y": [10, 20, 5]})
+    # At each level's max x: a→10, b→20, c→5. desc → b, a, c; then d.
+    out = fct_reorder2("f", "x", "y")(df)
+    assert out.dtype.categories.to_list() == ["b", "a", "c", "d"]
+
+
+def test_groupby_ggplot_passthrough():
+    """``GroupBy.ggplot()`` delegates to the underlying frame so r4ds-style
+    ``df.group_by(g).mutate(...).ggplot(...)`` works without a manual
+    ``.ungroup()`` — grouping has no plot-side meaning.
+    """
+    import hea
+    df = hea.DataFrame({"g": ["a", "a", "b", "b"], "x": [1, 2, 1, 2], "y": [1, 2, 3, 4]})
+    gb = df.group_by("g").mutate(yy=hea.col("y") * 2)
+    assert type(gb).__name__ == "GroupBy"
+    p = gb.ggplot(x="x", y="yy", color="g") + geom_line()
+    fig = p.draw()
+    try:
+        # 2 lines (one per group), as expected from the ungrouped frame
+        assert len(fig.axes[0].get_lines()) == 2
+    finally:
+        plt.close(fig)
 
 
 def test_fct_infreq_preserves_unseen_enum_levels():
