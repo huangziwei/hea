@@ -18,12 +18,14 @@ import pytest
 
 from conftest import load_dataset
 
+from hea import (
+    fct_infreq, fct_relevel, fct_rev, fct_reorder, fct_reorder2,
+)
 from hea.ggplot import (
     PlotGrid, aes, after_scale, after_stat, annotate, annotation_custom,
     coord_cartesian, coord_fixed,
     coord_flip, coord_trans, expansion,
     element_blank, element_line, element_rect,
-    fct_infreq, fct_relevel, fct_rev, fct_reorder, fct_reorder2,
     plot_annotation, plot_layout, wrap_plots,
     element_text, facet_grid, facet_wrap, geom_abline, geom_area, geom_bar, geom_blank,
     geom_boxplot, geom_col, geom_contour, geom_contour_filled, geom_count,

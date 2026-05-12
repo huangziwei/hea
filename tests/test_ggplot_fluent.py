@@ -303,7 +303,7 @@ def test_layer_level_callable_kwarg_promotes_to_mapping():
     """
     import numpy as np
     from hea import col
-    from hea.ggplot import cut_width
+    from hea import cut_width
     from hea.ggplot.build import build
     rng = np.random.default_rng(0)
     df = hea.DataFrame({
@@ -331,7 +331,7 @@ def test_cut_width_accepts_bare_column_name():
     documented as supported in :mod:`cuts`."""
     import numpy as np
     from hea import col
-    from hea.ggplot import cut_width
+    from hea import cut_width
     from hea.ggplot.build import build
     rng = np.random.default_rng(0)
     df = hea.DataFrame({

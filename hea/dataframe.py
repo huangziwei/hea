@@ -38,12 +38,14 @@ import shutil
 import textwrap
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, Union
 
 import numpy as np
 import polars as pl
 from polars.lazyframe.group_by import LazyGroupBy as _PlLazyGroupBy
 from scipy import stats as _sps
+
+from .R import cut as _R_cut
 
 __all__ = [
     # core classes
@@ -349,6 +351,376 @@ def str_wrap(string, width=80, indent=0, exdent=0, whitespace_only=True):
     if isinstance(string, str):
         return _wrap_one(string)
     return [_wrap_one(s) for s in string]
+
+
+# ---- forcats --------------------------------------------------------
+#
+# Reorder ``pl.Enum`` level sets — categorical aesthetics (x ticks,
+# legend keys, boxplot groups, …) display in level order, so reordering
+# levels reorders the display. Each ``fct_*`` returns a callable
+# ``data -> Series`` so the operation can fold into ``mutate`` /
+# ``select`` (resolved by ``_resolve_lazy_factors``) or be supplied
+# inline to ggplot ``aes(...)`` (resolved by the build pipeline). The
+# callable carries ``__hea_label__`` / ``__hea_aes_source__`` so axis
+# labels resolve to the source column name, not ``"<function>"``.
+#
+# Composability — ``fct_rev`` and ``fct_relevel`` accept either a
+# column name OR another ``fct_*`` callable, so
+# ``fct_rev(fct_infreq("g"))`` translates R's
+# ``g |> fct_infreq() |> fct_rev()``. Aggregators
+# (``fct_reorder`` / ``fct_reorder2`` / ``fct_infreq``) need the
+# original column for grouping and only accept a column name.
+
+# Type for fct_* args that accept either a column name or a chained
+# fct_* callable (so ``fct_rev(fct_infreq("g"))`` translates R's pipe).
+ColInput = Union[str, Callable[[pl.DataFrame], pl.Series]]
+
+
+def _label_callable(fn: Callable, label: str) -> Callable:
+    """Tag ``fn`` so the renderer / aes_source can pull a label from it."""
+    fn.__hea_label__ = label
+    fn.__hea_aes_source__ = label
+    return fn
+
+
+def _chain_label(col: ColInput) -> str:
+    """Resolve the source-column label for a string OR a chained fct_* callable.
+
+    Used so ``fct_rev(fct_infreq("marital"))`` still labels its axis
+    ``"marital"`` — the outer tag propagates from the inner.
+    """
+    if callable(col):
+        return getattr(col, "__hea_label__", "_chain")
+    return col
+
+
+def _resolve_col_input(col: ColInput, data: pl.DataFrame) -> pl.Series:
+    """Get the input Series for a string col-name OR a chained callable.
+
+    Lets ``fct_rev`` / ``fct_relevel`` accept either a column name
+    (the existing contract) or the output of another ``fct_*`` call
+    (so R's ``marital |> fct_infreq() |> fct_rev()`` translates to
+    ``fct_rev(fct_infreq("marital"))``).
+    """
+    if callable(col):
+        return col(data)
+    return data[col]
+
+
+def _append_unseen_enum_levels(s: pl.Series, levels: list[str]) -> list[str]:
+    """Append Enum categories absent from the data so reordering keeps R parity.
+
+    ``fct_reorder`` / ``fct_infreq`` derive their level order from a
+    group_by, which only iterates values actually present in ``s``. R's
+    ``fct_reorder`` keeps unobserved factor levels — their NA aggregate
+    sorts to the end — so we append them in original Enum order to match.
+    """
+    if not isinstance(s.dtype, pl.Enum):
+        return levels
+    seen = set(levels)
+    return levels + [lvl for lvl in s.dtype.categories.to_list() if lvl not in seen]
+
+
+def fct_reorder(col: str, by: str, fn="median", *, desc: bool = False) -> Callable:
+    """Reorder ``col``'s factor levels by aggregating ``by`` per level.
+
+    Mirrors R's ``forcats::fct_reorder``. ``fn`` is the name of any
+    :class:`polars.Series` aggregation method (``"median"``, ``"mean"``,
+    ``"sum"``, ``"min"``, ``"max"``, ``"std"``, ``"count"``, …) or a
+    callable ``Series -> scalar``. ``desc=True`` reverses the order so
+    the largest aggregate appears first.
+    """
+    def reorder(data: pl.DataFrame) -> pl.Series:
+        if isinstance(fn, str):
+            agg_expr = getattr(pl.col(by), fn)()
+            ordered = (
+                data.lazy()
+                .group_by(col, maintain_order=False)
+                .agg(agg_expr.alias("_agg"))
+                .sort("_agg", descending=desc)
+                .collect()
+            )
+            levels = [str(v) for v in ordered[col].to_list() if v is not None]
+        else:
+            # Python callable: aggregate per-group in Python so users can
+            # pass arbitrary scalar reducers (e.g. ``lambda s: s.quantile(0.9)``).
+            # ``.lazy()`` routes through polars' native group_by — hea's
+            # subclassed DataFrame exposes a different group_by API.
+            grouped = (
+                data.lazy()
+                .group_by(col, maintain_order=False)
+                .agg(pl.col(by).alias("_vals"))
+                .collect()
+            )
+            rows = []
+            for row in grouped.iter_rows(named=True):
+                level = row[col]
+                if level is None:
+                    continue
+                rows.append((str(level), fn(pl.Series(row["_vals"]))))
+            rows.sort(key=lambda r: r[1], reverse=desc)
+            levels = [r[0] for r in rows]
+        levels = _append_unseen_enum_levels(data[col], levels)
+        return data[col].cast(pl.Utf8).cast(pl.Enum(levels))
+
+    return _label_callable(reorder, col)
+
+
+def fct_reorder2(col: str, x: str, y: str, *, desc: bool = True) -> Callable:
+    """Reorder ``col``'s levels by ``y`` at each level's largest ``x``.
+
+    Mirrors R's ``forcats::fct_reorder2``. Designed for the line-plot
+    legend-ordering case: a level's rank is the ``y`` value at its
+    largest ``x``, so the legend order matches where lines end up at
+    the right of the plot. ``desc=True`` (default, like forcats) puts
+    the highest end-value first.
+    """
+    def reorder(data: pl.DataFrame) -> pl.Series:
+        ordered = (
+            data.lazy()
+            .filter(pl.col(x).is_not_null())
+            .sort(x)
+            .group_by(col, maintain_order=False)
+            .agg(pl.col(y).last().alias("_y_at_max_x"))
+            .sort("_y_at_max_x", descending=desc, nulls_last=True)
+            .collect()
+        )
+        levels = [str(v) for v in ordered[col].to_list() if v is not None]
+        levels = _append_unseen_enum_levels(data[col], levels)
+        return data[col].cast(pl.Utf8).cast(pl.Enum(levels))
+
+    return _label_callable(reorder, col)
+
+
+def fct_rev(col: ColInput) -> Callable:
+    """Reverse the level order of ``col``.
+
+    ``col`` is either a column name OR the output of another ``fct_*``
+    call — so ``fct_rev(fct_infreq("g"))`` translates R's
+    ``g |> fct_infreq() |> fct_rev()``. For Enum inputs, reverses the
+    existing level order; for plain string columns, sorts alphabetically
+    descending — symmetric with the ascending order ScaleOrdinal would
+    otherwise pick.
+    """
+    def rev(data: pl.DataFrame) -> pl.Series:
+        s = _resolve_col_input(col, data)
+        if isinstance(s.dtype, pl.Enum):
+            levels = list(s.dtype.categories)[::-1]
+        else:
+            levels = sorted(
+                {str(v) for v in s.drop_nulls().to_list()},
+                reverse=True,
+            )
+        return s.cast(pl.Utf8).cast(pl.Enum(levels))
+
+    return _label_callable(rev, _chain_label(col))
+
+
+def fct_relevel(col: ColInput, *levels: str) -> Callable:
+    """Move ``levels`` to the front of ``col``'s factor levels.
+
+    ``col`` is either a column name OR the output of another ``fct_*``
+    call (composable with ``fct_infreq`` / ``fct_reorder`` / ``fct_rev``).
+    Levels not listed keep their existing relative order behind the
+    promoted ones (Enum order if the input is an Enum, alphabetical
+    otherwise). Mirrors R's ``forcats::fct_relevel``.
+    """
+    promoted = [str(lvl) for lvl in levels]
+
+    def relevel(data: pl.DataFrame) -> pl.Series:
+        s = _resolve_col_input(col, data)
+        if isinstance(s.dtype, pl.Enum):
+            existing = list(s.dtype.categories)
+        else:
+            existing = sorted({str(v) for v in s.drop_nulls().to_list()})
+        promoted_set = set(promoted)
+        rest = [lvl for lvl in existing if lvl not in promoted_set]
+        ordered = promoted + rest
+        return s.cast(pl.Utf8).cast(pl.Enum(ordered))
+
+    return _label_callable(relevel, _chain_label(col))
+
+
+def fct_infreq(col: str) -> Callable:
+    """Order ``col``'s factor levels by frequency, descending.
+
+    Mirrors R's ``forcats::fct_infreq``. Most-common level first;
+    ties broken by first-encountered order in the data.
+    """
+    def infreq(data: pl.DataFrame) -> pl.Series:
+        # ``.lazy()`` routes through polars' native group_by API; hea's
+        # subclassed DataFrame has its own group_by signature.
+        counts = (
+            data.lazy()
+            .group_by(col, maintain_order=True)
+            .agg(pl.len().alias("_n"))
+            .sort("_n", descending=True)
+            .collect()
+        )
+        levels = [str(v) for v in counts[col].to_list() if v is not None]
+        levels = _append_unseen_enum_levels(data[col], levels)
+        return data[col].cast(pl.Utf8).cast(pl.Enum(levels))
+
+    return _label_callable(infreq, col)
+
+
+# ---- ggplot2 binning (cut_*) ----------------------------------------
+#
+# Bin a continuous variable into a factor for discrete
+# grouping/colouring. Algorithms mirror ``ggplot2::cut_width`` /
+# ``cut_interval`` / ``cut_number`` (file ``R/bin.R`` in ggplot2); the
+# actual binning delegates to :func:`hea.R.cut` so labels follow R's
+# ``"(a,b]"``-style formatting. Accept eager input (Series / ndarray)
+# or a column reference (string or ``pl.Expr``); the reference form
+# returns a callable that resolves against layer data.
+
+def _cut_resolve(x, data: pl.DataFrame | None = None) -> np.ndarray:
+    """Materialize ``x`` as a 1-d float numpy array.
+
+    String / ``pl.Expr`` need a DataFrame context (the lazy form used
+    inside ``aes()``); eager forms (Series / ndarray / list) resolve
+    immediately.
+    """
+    if isinstance(x, pl.Series):
+        return x.to_numpy().astype(float)
+    if isinstance(x, np.ndarray):
+        return x.astype(float)
+    if isinstance(x, str):
+        if data is None:
+            raise ValueError(
+                f"cut_*: column reference {x!r} needs a DataFrame "
+                f"context — use this form inside aes(), or pass a "
+                f"Series for eager use."
+            )
+        return data[x].to_numpy().astype(float)
+    if isinstance(x, pl.Expr):
+        if data is None:
+            raise ValueError(
+                "cut_*: polars expression needs a DataFrame context "
+                "— use this form inside aes(), or pass a Series for "
+                "eager use."
+            )
+        return data.select(x).to_series().to_numpy().astype(float)
+    return np.asarray(x, dtype=float)
+
+
+def _cut_maybe_lazy(x, eager_fn):
+    """Run ``eager_fn`` now if ``x`` is concrete; otherwise return a
+    closure for the build pipeline to invoke against the layer data."""
+    if isinstance(x, (str, pl.Expr)):
+        def _lazy(data):
+            return eager_fn(_cut_resolve(x, data))
+        return _lazy
+    return eager_fn(_cut_resolve(x))
+
+
+def cut_width(x, width, *, center=None, boundary=None, closed="right"):
+    """Bin numeric ``x`` into intervals of width ``width``.
+
+    Mirrors ``ggplot2::cut_width``. Default boundary = ``width / 2``,
+    so a call like ``cut_width(carat, 0.1)`` produces breaks at
+    ``..., 0.05, 0.15, 0.25, ...`` (each bin centered at a tenth).
+
+    Parameters
+    ----------
+    x : Series, ndarray, str, or pl.Expr
+        Numeric data to bin. A string column name or polars expression
+        defers binning until the build pipeline supplies a DataFrame.
+    width : float
+        Bin width.
+    center : float, optional
+        Center of one bin. Mutually exclusive with ``boundary``.
+    boundary : float, optional
+        Position of one breakpoint. Mutually exclusive with ``center``.
+    closed : {"right", "left"}, default ``"right"``
+        Side of each interval that is closed (the side that includes
+        its endpoint).
+
+    Returns
+    -------
+    pl.Series (Enum) | callable
+        Series of bin labels, or a callable awaiting a DataFrame when
+        ``x`` is a column reference.
+    """
+    if center is not None and boundary is not None:
+        raise ValueError(
+            "cut_width: only one of `center` and `boundary` may be specified"
+        )
+
+    def _eager(arr):
+        finite = arr[np.isfinite(arr)]
+        if len(finite) == 0:
+            return pl.Series([], dtype=pl.Utf8)
+        b = boundary
+        if b is None:
+            b = (center - width / 2) if center is not None else width / 2
+        x_min = float(finite.min())
+        x_max = float(finite.max())
+        # Shift origin so one breakpoint coincides with ``b`` modulo ``width``.
+        shift = float(np.floor((x_min - b) / width))
+        origin = b + shift * width
+        # Pad one extra slot on the right so x_max always falls inside a bin
+        # regardless of which side is closed (matches ggplot2's
+        # ``seq(min_x, max(range) + width, width)``).
+        n_bins = max(int(np.ceil((x_max - origin) / width)), 1)
+        breaks = origin + np.arange(n_bins + 2) * width
+        return _R_cut(arr, breaks, right=(closed == "right"), include_lowest=True)
+
+    return _cut_maybe_lazy(x, _eager)
+
+
+def cut_interval(x, n=None, length=None, *, closed="right"):
+    """Cut ``x`` into ``n`` intervals of equal length, or intervals of
+    given ``length``. Exactly one of ``n`` and ``length`` must be set.
+
+    Mirrors ``ggplot2::cut_interval``.
+    """
+    if (n is None) == (length is None):
+        raise ValueError(
+            "cut_interval: specify exactly one of `n` and `length`"
+        )
+
+    def _eager(arr):
+        finite = arr[np.isfinite(arr)]
+        if len(finite) == 0:
+            return pl.Series([], dtype=pl.Utf8)
+        x_min = float(finite.min())
+        x_max = float(finite.max())
+        if length is not None:
+            # ``fullseq``: round endpoints out to multiples of ``length``.
+            start = float(np.floor(x_min / length) * length)
+            end = float(np.ceil(x_max / length) * length)
+            n_bins = max(int(round((end - start) / length)), 1)
+            breaks = start + np.arange(n_bins + 1) * length
+            if breaks[-1] < x_max:
+                breaks = np.concatenate([breaks, [breaks[-1] + length]])
+        else:
+            breaks = np.linspace(x_min, x_max, n + 1)
+        return _R_cut(arr, breaks, right=(closed == "right"), include_lowest=True)
+
+    return _cut_maybe_lazy(x, _eager)
+
+
+def cut_number(x, n, *, closed="right"):
+    """Cut ``x`` into ``n`` intervals containing equal counts.
+
+    Quantile-based bin edges. Raises if there isn't enough variation
+    in the data to produce ``n`` distinct breaks (ggplot2 raises the
+    same way).
+    """
+    def _eager(arr):
+        finite = arr[np.isfinite(arr)]
+        if len(finite) == 0:
+            return pl.Series([], dtype=pl.Utf8)
+        probs = np.linspace(0.0, 1.0, n + 1)
+        breaks = np.quantile(finite, probs)
+        if np.any(np.diff(breaks) <= 0):
+            raise ValueError(
+                f"cut_number: insufficient data values to produce {n} bins"
+            )
+        return _R_cut(arr, breaks, right=(closed == "right"), include_lowest=True)
+
+    return _cut_maybe_lazy(x, _eager)
 
 
 # ---- tibble ---------------------------------------------------------
@@ -1106,9 +1478,9 @@ def _resolve_lazy_factors(
       for str/Expr inputs because the Enum's level set has to be detected
       from the actual data (polars expressions can't ``.to_list()``
       mid-pipeline). Resolved to a ``pl.Expr``.
-    * Tagged callables — ``fct_reorder("col", "by")`` and friends in
-      ``hea.ggplot.factors`` carry ``__hea_aes_source__`` so the ggplot
-      build pipeline can invoke them. The same shape works in
+    * Tagged callables — ``fct_reorder("col", "by")`` and friends (and
+      the ``cut_*`` binning helpers) carry ``__hea_aes_source__`` so the
+      ggplot build pipeline can invoke them. The same shape works in
       ``mutate`` / ``select``: call with the frame, get back a Series.
 
     Verbs that own a materialized frame (``mutate``, ``select``,

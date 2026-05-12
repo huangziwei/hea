@@ -24,8 +24,6 @@ from .coords import (
     coord_quickmap,
     coord_trans,
 )
-from .cuts import cut_interval, cut_number, cut_width
-from .factors import fct_infreq, fct_relevel, fct_rev, fct_reorder, fct_reorder2
 from .expansion import Expansion, expansion
 from .core import ggplot
 from .facets import facet_grid, facet_wrap
@@ -210,14 +208,6 @@ __all__ = [
     "aes",
     "after_stat",
     "after_scale",
-    "cut_interval",
-    "cut_number",
-    "cut_width",
-    "fct_infreq",
-    "fct_relevel",
-    "fct_rev",
-    "fct_reorder",
-    "fct_reorder2",
     "geom_blank",
     "geom_point",
     "geom_jitter",
