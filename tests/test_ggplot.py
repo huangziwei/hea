@@ -2282,6 +2282,7 @@ def test_stat_summary_default_is_mean_se_pointrange():
         # The point centres are the means: x=1 → 11, x=2 → 15, x=3 → 21.
         offsets = ax.collections[1].get_offsets()
         import numpy as np
+        import numpy as np
         np.testing.assert_array_almost_equal(
             sorted(offsets.tolist()), [[1.0, 11.0], [2.0, 15.0], [3.0, 21.0]]
         )
@@ -2316,6 +2317,7 @@ def test_stat_summary_componentwise_min_max_median():
         offsets = ax.collections[1].get_offsets()
         import numpy as np
         # x=1: median=11, min=10, max=12; same shape across x.
+        import numpy as np
         np.testing.assert_array_almost_equal(
             sorted(offsets.tolist()), [[1.0, 11.0], [2.0, 15.0], [3.0, 21.0]]
         )
@@ -2323,8 +2325,11 @@ def test_stat_summary_componentwise_min_max_median():
         segs = ax.collections[0].get_segments()
         # Sort by x for deterministic order.
         segs_sorted = sorted(segs, key=lambda s: s[0][0])
+        import numpy as np
         np.testing.assert_array_almost_equal(segs_sorted[0], [[1.0, 10.0], [1.0, 12.0]])
+        import numpy as np
         np.testing.assert_array_almost_equal(segs_sorted[1], [[2.0, 14.0], [2.0, 16.0]])
+        import numpy as np
         np.testing.assert_array_almost_equal(segs_sorted[2], [[3.0, 20.0], [3.0, 22.0]])
     finally:
         plt.close(fig)
@@ -2361,7 +2366,8 @@ def test_stat_summary_bootstrap_with_seed_is_deterministic():
         seg1 = fig1.axes[0].collections[0].get_segments()
         seg2 = fig2.axes[0].collections[0].get_segments()
         for s1, s2 in zip(seg1, seg2):
-            np.testing.assert_array_almost_equal(s1, s2)
+            import numpy as np
+        np.testing.assert_array_almost_equal(s1, s2)
     finally:
         plt.close(fig1)
         plt.close(fig2)
@@ -2377,6 +2383,112 @@ def test_stat_summary_unknown_fun_data_errors():
 def test_stat_summary_unknown_geom_errors():
     with pytest.raises(ValueError, match="unknown geom"):
         stat_summary(geom="weirdo")
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.7b — ggplot2 parity: geom registry + orientation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("geom_name", [
+    "line", "path", "step",            # path-family (need y only)
+    "area", "ribbon",                  # ribbon-family (need ymin/ymax)
+    "smooth",                          # ribbon + path combo
+])
+def test_stat_summary_geom_registry_covers_path_and_ribbon_family(geom_name):
+    """ggplot2 parity: stat_summary should accept the path-family and
+    ribbon-family geoms in addition to the interval geoms it shipped with.
+    """
+    df = _summary_test_df()
+    p = (ggplot(df, aes("x", "y"))
+         + stat_summary(geom=geom_name, fun="mean", group=1))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # Each of these draws at least one matplotlib artist.
+        assert len(ax.lines) + len(ax.collections) + len(ax.patches) > 0
+    finally:
+        plt.close(fig)
+
+
+def test_stat_summary_line_replaces_two_layer_means_recipe():
+    """``stat_summary(geom="line", fun="mean")`` — the one-call form
+    that matches dplyr/ggplot2 for an over-points-mean line."""
+    df = _summary_test_df()
+    p = (ggplot(df, aes("x", "y"))
+         + stat_summary(geom="line", fun="mean", group=1))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # Exactly one line through the three per-x means (11, 15, 21).
+        lines = ax.lines
+        assert len(lines) == 1
+        xs, ys = lines[0].get_data()
+        import numpy as np
+        np.testing.assert_array_almost_equal(xs, [1, 2, 3])
+        import numpy as np
+        np.testing.assert_array_almost_equal(ys, [11.0, 15.0, 21.0])
+    finally:
+        plt.close(fig)
+
+
+def test_stat_summary_auto_orientation_picks_y_for_discrete_y():
+    """When y is discrete (enum/categorical/utf8) and x isn't, the stat
+    transposes — groups by y, summarizes x, and emits ``(y, x, xmin,
+    xmax)``. Matches ggplot2's ``orientation="auto"``."""
+    df = pl.DataFrame({
+        "x": [10.0, 12.0, 11.0, 20.0, 22.0, 21.0],
+        "y": pl.Series(["a", "a", "a", "b", "b", "b"], dtype=pl.Enum(["a", "b"])),
+    })
+    p = (ggplot(df, aes("x", "y"))
+         + stat_summary(geom="line", fun="mean", group=1))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        xs, ys = ax.lines[0].get_data()
+        # Two means: x=mean of a-group, then x=mean of b-group. y stays
+        # categorical, rendered at categorical positions 0 and 1.
+        import numpy as np
+        np.testing.assert_array_almost_equal(xs, [11.0, 21.0])
+    finally:
+        plt.close(fig)
+
+
+def test_stat_summary_explicit_orientation_overrides_auto():
+    """``orientation="x"`` forces the historic behavior even when y is
+    discrete (caller knows best)."""
+    df = pl.DataFrame({
+        "x": [1, 1, 2, 2],
+        "y": pl.Series(["a", "b", "a", "b"], dtype=pl.Enum(["a", "b"])),
+    })
+    # With orientation="x" we'd be asked to take mean of an Enum series
+    # for each x group — that's nonsensical, so the stat should explode.
+    p = (ggplot(df, aes("x", "y"))
+         + stat_summary(geom="line", fun="mean", orientation="x", group=1))
+    with pytest.raises(Exception):  # numpy can't average enum codes
+        p.draw()
+
+
+def test_stat_summary_rejects_bad_orientation():
+    df = _summary_test_df()
+    p = ggplot(df, aes("x", "y")) + stat_summary(orientation="bogus")
+    with pytest.raises(ValueError, match="orientation="):
+        p.draw()
+
+
+def test_stat_summary_accepts_a_geom_instance_directly():
+    """ggplot2 also accepts a built Geom — ``geom=`` doesn't have to be
+    a string. Existing behavior, just protected by a parity test."""
+    from hea.ggplot.geoms.path import GeomPath
+
+    df = _summary_test_df()
+    p = (ggplot(df, aes("x", "y"))
+         + stat_summary(geom=GeomPath(sort_by_x=True),
+                        fun="mean", group=1))
+    fig = p.draw()
+    try:
+        assert len(fig.axes[0].lines) == 1
+    finally:
+        plt.close(fig)
 
 
 # ---------------------------------------------------------------------------

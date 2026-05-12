@@ -108,6 +108,9 @@ def _resolve_fun(f, *, default=None):
 # StatSummary
 # ---------------------------------------------------------------------------
 
+_DISCRETE_DTYPES = (pl.Enum, pl.Categorical, pl.Utf8)
+
+
 @dataclass
 class StatSummary(Stat):
     fun_data: Callable | str | None = None
@@ -115,6 +118,10 @@ class StatSummary(Stat):
     fun_min: Callable | str | None = None
     fun_max: Callable | str | None = None
     fun_args: dict = field(default_factory=dict)
+    # ``"x"`` (default ggplot2 behavior — group by x, summarize y),
+    # ``"y"`` (transposed: group by y, summarize x), or ``"auto"`` — pick
+    # ``"y"`` when y is discrete and x isn't, else ``"x"``.
+    orientation: str = "auto"
 
     def _summary_fn(self) -> Callable[[np.ndarray], dict]:
         if self.fun_data is not None:
@@ -146,60 +153,103 @@ class StatSummary(Stat):
         # ggplot2's default.
         return mean_se
 
+    def _resolve_orientation(self, data) -> str:
+        """Pick ``"x"`` or ``"y"`` for grouping. ``"auto"`` flips to ``"y"``
+        when y is discrete (enum / categorical / utf8) and x isn't —
+        matches ggplot2's auto-orientation."""
+        if self.orientation in ("x", "y"):
+            return self.orientation
+        if self.orientation != "auto":
+            raise ValueError(
+                f"orientation= must be 'x', 'y', or 'auto'; got {self.orientation!r}."
+            )
+        y_disc = data.schema["y"] in _DISCRETE_DTYPES
+        x_disc = data.schema["x"] in _DISCRETE_DTYPES
+        return "y" if (y_disc and not x_disc) else "x"
+
     def compute_group(self, data, params):
         if "x" not in data.columns or "y" not in data.columns or len(data) == 0:
             return data
 
+        orient = self._resolve_orientation(data)
+        # ``orient`` names the axis we summarize *along*: orient="x" means
+        # "x is the discrete axis; group by x and reduce y" (ggplot2's
+        # historic default). orient="y" transposes — reduce x within each
+        # y group and emit (y, x, xmin, xmax).
+        if orient == "y":
+            group_col, summary_col = "y", "x"
+            out_centre, out_min, out_max = "x", "xmin", "xmax"
+        else:
+            group_col, summary_col = "x", "y"
+            out_centre, out_min, out_max = "y", "ymin", "ymax"
+
         fn = self._summary_fn()
         rows: list[dict] = []
-        for keys, sub in data.group_by("x", maintain_order=True):
-            x_val = keys[0] if isinstance(keys, tuple) else keys
-            y_arr = sub["y"].drop_nulls().to_numpy()
+        for keys, sub in data.group_by(group_col, maintain_order=True):
+            grp_val = keys[0] if isinstance(keys, tuple) else keys
+            arr = sub[summary_col].drop_nulls().to_numpy()
             # Strip NaNs (drop_nulls only catches polars-null, not float-NaN).
-            if y_arr.dtype.kind == "f":
-                y_arr = y_arr[~np.isnan(y_arr)]
-            if len(y_arr) == 0:
+            if arr.dtype.kind == "f":
+                arr = arr[~np.isnan(arr)]
+            if len(arr) == 0:
                 continue
-            summary = fn(y_arr, **self.fun_args)
-            rows.append({"x": x_val, **summary})
+            summary = fn(arr, **self.fun_args)
+            rows.append({
+                group_col:  grp_val,
+                out_centre: summary["y"],
+                out_min:    summary["ymin"],
+                out_max:    summary["ymax"],
+            })
 
         if not rows:
             return pl.DataFrame()
-        return pl.DataFrame(rows).sort("x")
+        return pl.DataFrame(rows).sort(group_col)
 
 
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
-def stat_summary(mapping=None, data=None, *, geom="pointrange",
-                 fun_data=None, fun=None, fun_min=None, fun_max=None,
-                 fun_args=None, position="identity", **kwargs):
-    """Per-x summary of y. ``fun_data`` (preferred) returns ``{y, ymin, ymax}``;
-    name a built-in (``"mean_se"``, ``"mean_cl_normal"``, ``"mean_cl_boot"``,
-    ``"median_hilow"``) or pass a callable. Componentwise alternative:
-    ``fun=`` for y, ``fun_min``/``fun_max`` for the range — strings name a
-    numpy aggregation (``"mean"``, ``"median"``, ``"min"``, ``"max"``, ``"sum"``)
-    or callables work too.
+def _resolve_summary_geom(geom):
+    """Map a ggplot2-style geom name to an instantiated :class:`Geom`.
 
-    ``geom`` defaults to ``"pointrange"`` (ggplot2 convention); ``"errorbar"``,
-    ``"linerange"``, ``"crossbar"``, ``"bar"``, ``"point"`` also accepted.
+    ggplot2's :func:`stat_summary` resolves ``geom=`` through the global
+    geom registry, so any geom that consumes ``(x, y[, ymin, ymax])``
+    works. hea has no central registry, so we enumerate the geoms whose
+    required aesthetics are satisfied by ``StatSummary``'s output:
+
+    ``y``-only geoms — ``"point"``, ``"line"``, ``"path"``, ``"step"``;
+    range geoms (``ymin``/``ymax``) — ``"pointrange"``, ``"errorbar"``,
+    ``"linerange"``, ``"crossbar"``, ``"ribbon"``, ``"area"``, ``"smooth"``;
+    plus ``"bar"`` (uses ``y`` as the column height).
+
+    Pass an already-built ``Geom`` instance to bypass the lookup.
     """
     from ..geoms.bar import GeomBar
     from ..geoms.errorbar import (
         GeomCrossbar, GeomErrorbar, GeomLinerange, GeomPointrange,
     )
+    from ..geoms.path import GeomPath
     from ..geoms.point import GeomPoint
-    from ..layer import Layer
-    from ..positions import resolve_position
+    from ..geoms.ribbon import GeomArea, GeomRibbon
+    from ..geoms.smooth import GeomSmooth
 
+    # Factory dict — values are zero-arg callables so we can instantiate
+    # with constructor params where the geom needs them
+    # (``geom_line`` = ``GeomPath(sort_by_x=True)``, etc.).
     geom_map = {
         "pointrange": GeomPointrange,
-        "errorbar": GeomErrorbar,
-        "linerange": GeomLinerange,
-        "crossbar": GeomCrossbar,
-        "bar": GeomBar,
-        "point": GeomPoint,
+        "errorbar":   GeomErrorbar,
+        "linerange":  GeomLinerange,
+        "crossbar":   GeomCrossbar,
+        "bar":        GeomBar,
+        "point":      GeomPoint,
+        "path":       GeomPath,
+        "line":       lambda: GeomPath(sort_by_x=True),
+        "step":       lambda: GeomPath(sort_by_x=True, step_direction="hv"),
+        "ribbon":     GeomRibbon,
+        "area":       GeomArea,
+        "smooth":     GeomSmooth,
     }
     if isinstance(geom, str):
         if geom not in geom_map:
@@ -207,13 +257,41 @@ def stat_summary(mapping=None, data=None, *, geom="pointrange",
                 f"stat_summary: unknown geom {geom!r}; "
                 f"valid: {sorted(geom_map)}"
             )
-        geom_obj = geom_map[geom]()
-    elif hasattr(geom, "draw_panel"):
-        geom_obj = geom
-    else:
-        raise TypeError(
-            f"stat_summary: geom must be a Geom or string, got {type(geom).__name__}"
-        )
+        return geom_map[geom]()
+    if hasattr(geom, "draw_panel"):
+        return geom
+    raise TypeError(
+        f"stat_summary: geom must be a Geom or string, got {type(geom).__name__}"
+    )
+
+
+def stat_summary(mapping=None, data=None, *, geom="pointrange",
+                 fun_data=None, fun=None, fun_min=None, fun_max=None,
+                 fun_args=None, orientation="auto", position="identity",
+                 **kwargs):
+    """Per-x summary of y. ``fun_data`` (preferred) returns ``{y, ymin, ymax}``;
+    name a built-in (``"mean_se"``, ``"mean_cl_normal"``, ``"mean_cl_boot"``,
+    ``"median_hilow"``) or pass a callable. Componentwise alternative:
+    ``fun=`` for y, ``fun_min``/``fun_max`` for the range — strings name a
+    numpy aggregation (``"mean"``, ``"median"``, ``"min"``, ``"max"``, ``"sum"``)
+    or callables work too.
+
+    ``geom`` defaults to ``"pointrange"`` (ggplot2 convention). Any of the
+    following names resolve to the corresponding geom (matching the set
+    accepted by ggplot2's :func:`stat_summary`):
+
+    * ``y``-only consumers — ``"point"``, ``"line"``, ``"path"``, ``"step"``;
+    * range consumers (need ``ymin``/``ymax``) — ``"pointrange"``,
+      ``"errorbar"``, ``"linerange"``, ``"crossbar"``, ``"ribbon"``,
+      ``"area"``, ``"smooth"``;
+    * ``"bar"`` (uses ``y`` as the bar height).
+
+    A ``Geom`` instance is also accepted directly.
+    """
+    from ..layer import Layer
+    from ..positions import resolve_position
+
+    geom_obj = _resolve_summary_geom(geom)
 
     aes_params, geom_params = split_layer_kwargs(kwargs)
 
@@ -222,6 +300,7 @@ def stat_summary(mapping=None, data=None, *, geom="pointrange",
         stat=StatSummary(
             fun_data=fun_data, fun=fun, fun_min=fun_min, fun_max=fun_max,
             fun_args=fun_args or {},
+            orientation=orientation,
         ),
         position=resolve_position(position),
         mapping=mapping,
