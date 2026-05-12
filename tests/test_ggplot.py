@@ -3379,6 +3379,47 @@ def test_fct_infreq_orders_by_descending_count():
         plt.close(fig)
 
 
+def test_fct_reorder_works_inside_mutate():
+    """``fct_reorder`` returns a callable tagged for the ggplot aes
+    pipeline, but the same shape resolves inside ``mutate`` / ``select``
+    so r4ds-style ``df.mutate(g=fct_reorder("g", "v"))`` works without
+    forcing the user to call the inner reorder by hand. The mutate path
+    invokes the callable against the receiver and aliases the resulting
+    Series to the kwarg name.
+    """
+    import hea
+    df = hea.DataFrame({"g": ["a", "b", "c"], "v": [3.0, 1.0, 2.0]})
+    out = df.mutate(g=fct_reorder("g", "v"))
+    assert isinstance(out.schema["g"], pl.Enum)
+    # Sorted by v ascending: b(1), c(2), a(3).
+    assert out["g"].cat.get_categories().to_list() == ["b", "c", "a"]
+
+
+def test_fct_reorder_preserves_unseen_enum_levels():
+    """R's ``fct_reorder`` keeps factor levels with no data — empty
+    groups produce NA from the aggregator, which sorts to the end.
+    hea matches: unseen Enum levels are appended after the data-driven
+    ordering, preserving their original Enum order among themselves.
+    """
+    s = pl.Series("g", ["a", "b", "c"]).cast(pl.Enum(["a", "b", "c", "d", "e"]))
+    df = pl.DataFrame({"g": s, "v": [3.0, 1.0, 2.0]})
+    callable_ = fct_reorder("g", "v")
+    out = callable_(df)
+    # Data-driven order: b(1), c(2), a(3); unseen d, e tail in Enum order.
+    assert out.dtype.categories.to_list() == ["b", "c", "a", "d", "e"]
+
+
+def test_fct_infreq_preserves_unseen_enum_levels():
+    """Same level-completeness contract as fct_reorder."""
+    s = pl.Series("g", ["a", "b", "b", "c"]).cast(pl.Enum(["a", "b", "c", "d"]))
+    df = pl.DataFrame({"g": s})
+    out = fct_infreq("g")(df)
+    # b(2) leads; a and c (1 each) follow in encounter order; unseen d last.
+    assert out.dtype.categories.to_list()[0] == "b"
+    assert out.dtype.categories.to_list()[-1] == "d"
+    assert set(out.dtype.categories.to_list()) == {"a", "b", "c", "d"}
+
+
 def test_scale_radius_is_continuous_size_alias():
     """`scale_radius()` produces the same continuous size mapping as
     `scale_size_continuous()` (both use linear rescale_pal)."""

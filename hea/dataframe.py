@@ -1087,7 +1087,7 @@ def _kwargs_to_exprs(args: tuple, kwargs: dict) -> list[pl.Expr]:
     """
     exprs: list[Any] = list(args)
     for name, expr in kwargs.items():
-        if isinstance(expr, pl.Expr):
+        if isinstance(expr, (pl.Expr, pl.Series)):
             exprs.append(expr.alias(name))
         else:
             # bare scalar / list — broadcast as a literal column
@@ -1098,25 +1098,36 @@ def _kwargs_to_exprs(args: tuple, kwargs: dict) -> list[pl.Expr]:
 def _resolve_lazy_factors(
     df: pl.DataFrame, args: tuple, kwargs: dict
 ) -> tuple[tuple, dict]:
-    """Replace ``hea.factor("col")`` placeholders with concrete ``pl.Expr``.
+    """Replace deferred factor placeholders with concrete expressions / series.
 
-    ``factor()`` returns a ``_LazyFactor`` for str/Expr inputs because the
-    Enum's level set has to be detected from the actual data — polars
-    expressions can't ``.to_list()`` mid-pipeline. Verbs that own a
-    materialized frame (``mutate``, ``select``, ``GroupBy.mutate``) call
-    this pre-pass so downstream code only sees real expressions. For
-    kwargs the kwarg name is offered as a fallback column name when the
-    placeholder was built from a ``pl.Expr`` without an output_name.
+    Two placeholder shapes are resolved here:
+
+    * ``_LazyFactor`` — returned by ``factor("col")`` / ``factor(pl.col(...))``
+      for str/Expr inputs because the Enum's level set has to be detected
+      from the actual data (polars expressions can't ``.to_list()``
+      mid-pipeline). Resolved to a ``pl.Expr``.
+    * Tagged callables — ``fct_reorder("col", "by")`` and friends in
+      ``hea.ggplot.factors`` carry ``__hea_aes_source__`` so the ggplot
+      build pipeline can invoke them. The same shape works in
+      ``mutate`` / ``select``: call with the frame, get back a Series.
+
+    Verbs that own a materialized frame (``mutate``, ``select``,
+    ``GroupBy.mutate``) call this pre-pass so downstream code only
+    sees real expressions / series. For kwargs the kwarg name is
+    offered as a fallback column name when a ``_LazyFactor`` was
+    built from a ``pl.Expr`` without an output_name.
     """
     from .R import _LazyFactor
 
-    new_args = tuple(
-        a._resolve(df) if isinstance(a, _LazyFactor) else a for a in args
-    )
-    new_kwargs = {
-        k: (v._resolve(df, fallback_name=k) if isinstance(v, _LazyFactor) else v)
-        for k, v in kwargs.items()
-    }
+    def _resolve(v, fallback_name=None):
+        if isinstance(v, _LazyFactor):
+            return v._resolve(df, fallback_name=fallback_name)
+        if callable(v) and hasattr(v, "__hea_aes_source__"):
+            return v(df)
+        return v
+
+    new_args = tuple(_resolve(a) for a in args)
+    new_kwargs = {k: _resolve(v, fallback_name=k) for k, v in kwargs.items()}
     return new_args, new_kwargs
 
 

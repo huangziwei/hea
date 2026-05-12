@@ -29,6 +29,20 @@ def _label_callable(fn: Callable, label: str) -> Callable:
     return fn
 
 
+def _append_unseen_enum_levels(s: pl.Series, levels: list[str]) -> list[str]:
+    """Append Enum categories absent from the data so reordering keeps R parity.
+
+    ``fct_reorder`` / ``fct_infreq`` derive their level order from a
+    group_by, which only iterates values actually present in ``s``. R's
+    ``fct_reorder`` keeps unobserved factor levels — their NA aggregate
+    sorts to the end — so we append them in original Enum order to match.
+    """
+    if not isinstance(s.dtype, pl.Enum):
+        return levels
+    seen = set(levels)
+    return levels + [lvl for lvl in s.dtype.categories.to_list() if lvl not in seen]
+
+
 def fct_reorder(col: str, by: str, fn="median", *, desc: bool = False) -> Callable:
     """Reorder ``col``'s factor levels by aggregating ``by`` per level.
 
@@ -68,6 +82,7 @@ def fct_reorder(col: str, by: str, fn="median", *, desc: bool = False) -> Callab
                 rows.append((str(level), fn(pl.Series(row["_vals"]))))
             rows.sort(key=lambda r: r[1], reverse=desc)
             levels = [r[0] for r in rows]
+        levels = _append_unseen_enum_levels(data[col], levels)
         return data[col].cast(pl.Utf8).cast(pl.Enum(levels))
 
     return _label_callable(reorder, col)
@@ -134,6 +149,7 @@ def fct_infreq(col: str) -> Callable:
             .collect()
         )
         levels = [str(v) for v in counts[col].to_list() if v is not None]
+        levels = _append_unseen_enum_levels(data[col], levels)
         return data[col].cast(pl.Utf8).cast(pl.Enum(levels))
 
     return _label_callable(infreq, col)
