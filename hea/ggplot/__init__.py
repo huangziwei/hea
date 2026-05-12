@@ -21,6 +21,7 @@ from .coords import (
     coord_cartesian,
     coord_fixed,
     coord_flip,
+    coord_polar,
     coord_quickmap,
     coord_trans,
 )
@@ -357,6 +358,7 @@ __all__ = [
     "coord_cartesian",
     "coord_fixed",
     "coord_flip",
+    "coord_polar",
     "coord_quickmap",
     "coord_trans",
     "labs",

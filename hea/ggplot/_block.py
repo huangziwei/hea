@@ -564,8 +564,13 @@ def render_block(
     panel_cell = gs[1, 1]
     block.figure = fig
 
+    from .render import _is_coord_polar
+
+    is_polar = _is_coord_polar(plot.coordinates)
+    polar_kw = {"projection": "polar"} if is_polar else {}
+
     if block.n_panels == 1:
-        ax = fig.add_subplot(panel_cell)
+        ax = fig.add_subplot(panel_cell, **polar_kw)
         block.panel_axes = [ax]
         # Pre-allocate cax/legend host in the right-margin cell so
         # fig.colorbar doesn't shrink the panel and the legend stays
@@ -593,10 +598,17 @@ def render_block(
             for c in range(ncol):
                 share_x_with = _share_anchor(sharex, r, c, axes, row_axes, axis="x")
                 share_y_with = _share_anchor(sharey, r, c, axes, row_axes, axis="y")
+                # Polar projection forced shared-axes off (matplotlib
+                # ignores sharex/sharey for non-Cartesian projections
+                # anyway, and passing them produces warnings).
+                share_kw = (
+                    {} if is_polar
+                    else {"sharex": share_x_with, "sharey": share_y_with}
+                )
                 ax = fig.add_subplot(
                     sub_gs[r, c],
-                    sharex=share_x_with,
-                    sharey=share_y_with,
+                    **share_kw,
+                    **polar_kw,
                 )
                 row_axes.append(ax)
             axes.append(row_axes)
@@ -644,46 +656,70 @@ def _render_single_into(
         _coord_view_limits,
         _default_labels,
         _is_coord_flip,
+        _is_coord_polar,
+        _polar_prep_layer_data,
+        _polar_x_range,
     )
 
     is_flipped = _is_coord_flip(plot.coordinates)
+    is_polar = _is_coord_polar(plot.coordinates)
     ax._hea_coord_flipped = is_flipped
 
     from .render import _panel_scale
 
     # Pre-axis hook: discrete scales register their category order with
     # matplotlib's category unit BEFORE geoms draw, so the data lands at
-    # the levels' positions (not row-encounter positions).
-    for axis in ("x", "y"):
-        scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
-        sc = _panel_scale(build_output, 1, scale_aes)
-        if sc is not None:
-            sc.setup_axis(ax, axis)
+    # the levels' positions (not row-encounter positions). Skip on polar
+    # — the polar pre-pass below converts ordinal x to numeric positions
+    # before drawing, and matplotlib's category converter wouldn't
+    # interpret strings as theta anyway.
+    if not is_polar:
+        for axis in ("x", "y"):
+            scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
+            sc = _panel_scale(build_output, 1, scale_aes)
+            if sc is not None:
+                sc.setup_axis(ax, axis)
+
+    if is_polar:
+        x_scale = _panel_scale(build_output, 1, "x")
+        x_range = _polar_x_range(x_scale)
+    else:
+        x_scale = None
+        x_range = None
 
     for layer, df in zip(plot.layers, build_output.data):
         if is_flipped:
             from .coords.flip import flip_columns
 
             df = flip_columns(df)
+        if is_polar:
+            df = _polar_prep_layer_data(df, x_scale)
+            if x_range is not None:
+                df = plot.coordinates.rescale_theta(df, x_range)
         layer.geom.draw_panel(df, ax)
 
-    for axis in ("x", "y"):
-        scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
-        sc = _panel_scale(build_output, 1, scale_aes)
-        if sc is not None:
-            sc.apply_to_axis(
-                ax,
-                axis,
-                view_limits=_coord_view_limits(plot.coordinates, axis),
-            )
+    # Scale tick/limit application and x/y labels — skip on polar for
+    # stage 1. matplotlib's polar ``set_xlim`` / ``set_xlabel`` semantics
+    # diverge from Cartesian enough that the ordinal path produces
+    # oddities. Stage 5 polish wires a coord-aware ``apply_to_axis``.
+    if not is_polar:
+        for axis in ("x", "y"):
+            scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
+            sc = _panel_scale(build_output, 1, scale_aes)
+            if sc is not None:
+                sc.apply_to_axis(
+                    ax,
+                    axis,
+                    view_limits=_coord_view_limits(plot.coordinates, axis),
+                )
 
-    xlabel, ylabel = _default_labels(plot, build_output)
-    if is_flipped:
-        xlabel, ylabel = ylabel, xlabel
-    if xlabel is not None:
-        ax.set_xlabel(xlabel)
-    if ylabel is not None:
-        ax.set_ylabel(ylabel)
+        xlabel, ylabel = _default_labels(plot, build_output)
+        if is_flipped:
+            xlabel, ylabel = ylabel, xlabel
+        if xlabel is not None:
+            ax.set_xlabel(xlabel)
+        if ylabel is not None:
+            ax.set_ylabel(ylabel)
 
     _apply_theme(plot.theme, ax.figure, [ax], owns_fig=False)
 
@@ -2092,9 +2128,14 @@ def _render_leaf_cell(
 
     from .render import _apply_plot_titles
 
+    from .render import _is_coord_polar
+
     bo = blk.build_output
+    is_polar = _is_coord_polar(leaf.coordinates)
+    polar_kw = {"projection": "polar"} if is_polar else {}
+
     if blk.n_panels == 1:
-        ax = fig.add_subplot(panel_cell)
+        ax = fig.add_subplot(panel_cell, **polar_kw)
         blk.panel_axes = [ax]
         blk.figure = fig
         cb_caxes = _allocate_colorbar_caxes(
@@ -2134,10 +2175,14 @@ def _render_leaf_cell(
             for sc in range(sub_ncol):
                 share_x = _share_anchor(sharex, sr, sc, axes, row_axes, axis="x")
                 share_y = _share_anchor(sharey, sr, sc, axes, row_axes, axis="y")
+                share_kw = (
+                    {} if is_polar
+                    else {"sharex": share_x, "sharey": share_y}
+                )
                 ax = fig.add_subplot(
                     sub_gs[sr, sc],
-                    sharex=share_x,
-                    sharey=share_y,
+                    **share_kw,
+                    **polar_kw,
                 )
                 row_axes.append(ax)
             axes.append(row_axes)

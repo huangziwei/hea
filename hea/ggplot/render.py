@@ -52,6 +52,68 @@ def _is_coord_flip(coord) -> bool:
     return type(coord).__name__ == "CoordFlip"
 
 
+def _is_coord_polar(coord) -> bool:
+    """``coord_polar()`` switches to matplotlib's polar projection."""
+    return type(coord).__name__ == "CoordPolar"
+
+
+def _polar_x_range(x_scale):
+    """Return ``(lo, hi)`` for the trained x-scale so the polar rescale
+    can map it to ``[0, 2π]``. Mirrors ggplot2's coord_polar.
+
+    Discrete scales: levels live at integer positions ``0..n-1`` with
+    ggplot2-style ``add=0.6`` padding on each side, giving the seam a
+    small visual gap rather than two bars kissing at the 0/2π join.
+
+    Continuous scales: the trained data range ``(min, max)``; for data
+    already in ``[0, 2π]`` (pycircstat2's radians) this yields a
+    factor of 1.0 in :meth:`CoordPolar.rescale_theta` — no-op.
+    """
+    from .scales.continuous import ScaleContinuous
+    from .scales.ordinal import ScaleOrdinal
+
+    if isinstance(x_scale, ScaleOrdinal):
+        levels = x_scale.resolved_limits()
+        n = len(levels)
+        if n == 0:
+            return None
+        pad_lo, pad_hi = x_scale._padding()
+        return (-float(pad_lo), float(n - 1) + float(pad_hi))
+    if isinstance(x_scale, ScaleContinuous):
+        if x_scale.range_ is None:
+            return None
+        return (float(x_scale.range_[0]), float(x_scale.range_[1]))
+    return None
+
+
+def _polar_prep_layer_data(df, x_scale):
+    """Convert ordinal x to numeric positions and rescale theta to [0, 2π].
+
+    Cartesian rendering relies on matplotlib's ``StrCategoryConverter``
+    to place ordinal strings at integer positions. On polar that
+    converter doesn't run the same way, and we want the value
+    interpreted as an angle in radians anyway — so we replicate the
+    string→position step in polars-space, then let the coord's
+    ``rescale_theta`` spread positions evenly around ``[0, 2π]``.
+
+    No-op when x is already numeric in a continuous scale.
+    """
+    from .scales.ordinal import ScaleOrdinal
+
+    if isinstance(x_scale, ScaleOrdinal) and "x" in df.columns:
+        levels = x_scale.resolved_limits()
+        if levels:
+            level_to_pos = {str(lvl): float(i) for i, lvl in enumerate(levels)}
+            x_dtype = df["x"].dtype
+            if not x_dtype.is_numeric():
+                df = df.with_columns(
+                    pl.col("x").cast(pl.Utf8).replace_strict(
+                        level_to_pos, default=None,
+                    ).alias("x"),
+                )
+    return df
+
+
 def _coord_view_limits(coord, axis: str):
     """Coord's ``xlim`` / ``ylim`` zoom for ``axis`` (visible axis name).
 
@@ -88,14 +150,24 @@ def _panel_scale(build_output, panel_id, axis: str):
 
 
 def _render_single(plot, build_output, ax, subplotspec=None):
+    is_polar = _is_coord_polar(plot.coordinates)
+    subplot_kw = {"projection": "polar"} if is_polar else None
+
     if subplotspec is not None:
         fig = subplotspec.get_gridspec().figure
-        ax = fig.add_subplot(subplotspec)
+        ax = fig.add_subplot(
+            subplotspec, projection="polar" if is_polar else None,
+        )
         owns_fig = False
     elif ax is None:
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(subplot_kw=subplot_kw)
         owns_fig = True
     else:
+        if is_polar and getattr(ax, "name", None) != "polar":
+            raise ValueError(
+                "coord_polar() requires a polar axes; got a Cartesian ax. "
+                "Pass subplot_kw={'projection': 'polar'} when creating the axes.",
+            )
         fig = ax.figure
         owns_fig = False
 
@@ -107,36 +179,62 @@ def _render_single(plot, build_output, ax, subplotspec=None):
     # Pre-axis hook: discrete scales register their category order on
     # matplotlib's category unit BEFORE geoms draw, so the data lands at
     # the levels' positions (not row-encounter positions).
-    for axis in ("x", "y"):
-        scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
-        sc = _panel_scale(build_output, 1, scale_aes)
-        if sc is not None:
-            sc.setup_axis(ax, axis)
+    # Skip on polar: matplotlib's string-category converter wouldn't
+    # interpret strings as theta anyway; the polar pre-pass below
+    # converts ordinal x to numeric positions before drawing.
+    if not is_polar:
+        for axis in ("x", "y"):
+            scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
+            sc = _panel_scale(build_output, 1, scale_aes)
+            if sc is not None:
+                sc.setup_axis(ax, axis)
+
+    # Polar pre-pass: resolve ordinal strings to numeric positions and
+    # rescale the theta-axis data to [0, 2π] so ordinal x fans evenly
+    # around the circle (matches ggplot2). For continuous data already
+    # in [0, 2π] (pycircstat2's radians) this is a no-op.
+    if is_polar:
+        x_scale = _panel_scale(build_output, 1, "x")
+        x_range = _polar_x_range(x_scale)
+    else:
+        x_range = None
 
     for layer, df in zip(plot.layers, build_output.data):
         if is_flipped:
             from .coords.flip import flip_columns
             df = flip_columns(df)
+        if is_polar:
+            df = _polar_prep_layer_data(df, x_scale)
+            if x_range is not None:
+                df = plot.coordinates.rescale_theta(df, x_range)
         layer.geom.draw_panel(df, ax)
 
-    for axis in ("x", "y"):
-        # Under coord_flip, the scale registered for the x aesthetic
-        # applies to the visible y axis (and vice versa) — scales bind
-        # to aesthetics, not axes.
-        scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
-        sc = _panel_scale(build_output, 1, scale_aes)
-        if sc is not None:
-            sc.apply_to_axis(
-                ax, axis, view_limits=_coord_view_limits(plot.coordinates, axis),
-            )
+    # Scale tick/limit application: skip on polar for stage 1. matplotlib
+    # polar's ``set_xlim`` semantics differ enough from Cartesian's that
+    # forcing the ordinal apply path through it produces oddities (ticks
+    # at positions matplotlib has already remapped, mostly). Stage 5
+    # polish revisits this with a coord-aware ``apply_to_axis`` branch.
+    if not is_polar:
+        for axis in ("x", "y"):
+            # Under coord_flip, the scale registered for the x aesthetic
+            # applies to the visible y axis (and vice versa) — scales bind
+            # to aesthetics, not axes.
+            scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
+            sc = _panel_scale(build_output, 1, scale_aes)
+            if sc is not None:
+                sc.apply_to_axis(
+                    ax, axis,
+                    view_limits=_coord_view_limits(plot.coordinates, axis),
+                )
 
-    xlabel, ylabel = _default_labels(plot, build_output)
-    if is_flipped:
-        xlabel, ylabel = ylabel, xlabel
-    if xlabel is not None:
-        ax.set_xlabel(xlabel)
-    if ylabel is not None:
-        ax.set_ylabel(ylabel)
+    if not is_polar:
+        xlabel, ylabel = _default_labels(plot, build_output)
+        if is_flipped:
+            xlabel, ylabel = ylabel, xlabel
+        if xlabel is not None:
+            ax.set_xlabel(xlabel)
+        if ylabel is not None:
+            ax.set_ylabel(ylabel)
 
     if owns_fig:
         _apply_plot_titles(plot, fig, ax_list=[ax])
@@ -361,7 +459,18 @@ def _apply_spines(theme, ax) -> None:
     only) to matplotlib spines. ``panel.border`` wins when set — it's a
     superset of ``axis.line`` semantics. With both blank, all four hide
     (ggplot2's ``theme_gray`` default — coloured panel background carries
-    the visual weight)."""
+    the visual weight).
+
+    Polar axes early-exit: their ``spines`` keys are
+    ``{"polar", "start", "end", "inner"}``, not the Cartesian quartet.
+    Looking up ``"top"`` raises ``KeyError``, which would crash every
+    polar plot the first time a theme runs. Stage 5 maps
+    ``panel.border`` → ``ax.spines["polar"]`` properly; for now, defer
+    to matplotlib's default outer-ring rendering.
+    """
+    if getattr(ax, "name", None) == "polar":
+        return
+
     axis_line = theme.get("axis.line")
     panel_border = theme.get("panel.border")
 

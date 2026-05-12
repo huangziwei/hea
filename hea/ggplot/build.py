@@ -48,6 +48,10 @@ class BuildOutput:
     # same global scale instance (kept here for uniform render-time lookup).
     # Shape: ``{panel_id: {"x": Scale, "y": Scale}}``.
     panel_scales: dict = field(default_factory=dict)
+    # Coord instance for the plot. Populated from ``plot.coordinates``;
+    # render branches on its type (e.g. polar needs ``projection="polar"``
+    # at axes-creation time, before any geom draws).
+    coord: object = None
 
 
 _NON_POSITIONAL_AES = ("colour", "fill", "size", "alpha", "shape", "linetype")
@@ -417,7 +421,7 @@ def build(plot) -> BuildOutput:
     return BuildOutput(
         data=layers_data, scales=scales, layout=layout, aes_source=aes_source,
         layer_mappings=layer_mappings, layer_aes_params=layer_aes_params_out,
-        panel_scales=panel_scales,
+        panel_scales=panel_scales, coord=plot.coordinates,
     )
 
 
