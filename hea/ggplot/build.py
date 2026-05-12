@@ -806,7 +806,7 @@ def _promote_string_aes_params(mapping, aes_params, data):
     lower priority in the merge)."""
     if not aes_params:
         return mapping, aes_params
-    from .aes import Aes, _canon
+    from .aes import Aes, AfterScale, AfterStat, _canon
 
     promoted = Aes()
     keep = {}
@@ -815,6 +815,13 @@ def _promote_string_aes_params(mapping, aes_params, data):
         if isinstance(v, str) and v in data.columns:
             promoted[canon] = v
         elif isinstance(v, pl.Expr):
+            promoted[canon] = v
+        elif isinstance(v, (AfterStat, AfterScale)):
+            # ``geom_bar(y=after_stat("sqrt(count)"))`` — without this,
+            # the marker stays in aes_params and gets broadcast as a
+            # scalar object (=raw counts on the bar). Fluent / kwarg
+            # users shouldn't have to wrap in ``aes(...)`` to get the
+            # deferred-stat pipeline.
             promoted[canon] = v
         elif callable(v) and not isinstance(v, type):
             promoted[canon] = v

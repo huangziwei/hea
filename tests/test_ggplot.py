@@ -5172,6 +5172,29 @@ def test_xlab_ylab_shortcuts():
         plt.close(fig)
 
 
+def test_after_stat_kwarg_form_promotes_into_mapping():
+    """``geom_bar(y=after_stat("sqrt(count)"))`` (fluent kwarg form) must
+    be equivalent to ``geom_bar(aes(y=after_stat("sqrt(count)")))``.
+    Pre-fix, ``_promote_string_aes_params`` didn't recognize ``AfterStat``
+    markers as promotable, so the kwarg form silently fell through to
+    raw-count rendering. Fluent users shouldn't have to wrap in
+    ``aes(...)`` to get the deferred-stat pipeline."""
+    df = pl.DataFrame({"x": list("AAABBC")})
+    p_kwarg = ggplot(df) + geom_bar(x="x", y=after_stat("sqrt(count)"))
+    p_aes = ggplot(df) + geom_bar(aes(x="x", y=after_stat("sqrt(count)")))
+    fig_kwarg = p_kwarg.draw()
+    fig_aes = p_aes.draw()
+    try:
+        h_kwarg = sorted(round(p.get_height(), 4) for p in fig_kwarg.axes[0].patches)
+        h_aes = sorted(round(p.get_height(), 4) for p in fig_aes.axes[0].patches)
+        assert h_kwarg == h_aes
+        # Sanity: heights are sqrt of counts (1, 2, 3 → 1.0, 1.414, 1.732).
+        assert h_aes == [1.0, round(2 ** 0.5, 4), round(3 ** 0.5, 4)]
+    finally:
+        plt.close(fig_kwarg)
+        plt.close(fig_aes)
+
+
 def test_layer_kwarg_aes_contributes_to_default_axis_labels():
     """Kwarg-style aes on a geom (``geom_bar(x="clarity")``) gets promoted
     into the mapping during build. The label resolver must see that
