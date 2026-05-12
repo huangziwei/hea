@@ -62,6 +62,23 @@ VERB_TABLE: dict[str, Verb] = {
     # Stateless verbs — no NSE.
     "ungroup":    Verb("ungroup",   Slot.NONE),
     "glimpse":    Verb("glimpse",   Slot.NONE),
+
+    # Joins — first arg is the receiver, second arg is the right-hand
+    # table (a Python name, not a column ref) → slot=NONE. ``by`` kwarg
+    # is handled by c()'s named-args-emit-dict behavior.
+    "inner_join": Verb("inner_join", Slot.NONE),
+    "left_join":  Verb("left_join",  Slot.NONE),
+    "right_join": Verb("right_join", Slot.NONE),
+    "full_join":  Verb("full_join",  Slot.NONE),
+    "semi_join":  Verb("semi_join",  Slot.NONE),
+    "anti_join":  Verb("anti_join",  Slot.NONE),
+    "cross_join": Verb("cross_join", Slot.NONE),
+    "nest_join":  Verb("nest_join",  Slot.NONE),
+
+    # Pivot — first positional arg is ``cols`` (or ``names_from`` etc),
+    # all tidy-select. Verb-wide slot=COLUMN_NAME.
+    "pivot_longer": Verb("pivot_longer", Slot.COLUMN_NAME),
+    "pivot_wider":  Verb("pivot_wider",  Slot.COLUMN_NAME),
     # ``add_count`` / ``add_tally`` are NOT mapped here — they need a
     # mutate(n = n(), _by = cols) expansion, which isn't a 1:1 verb
     # rename. Tracked as a Phase 4+ item.

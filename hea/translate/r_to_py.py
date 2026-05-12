@@ -323,6 +323,10 @@ class Translator:
     def _emit_verb_call(self, verb: Verb, args: tuple[R.Node, ...]) -> P.AST:
         """First arg becomes the receiver; rest walked under ``verb.slot``.
 
+        Any ``across()`` call inside the verb's args is expanded BEFORE
+        translation — it's a translate-time macro that fans one entry
+        into N kwargs (one per matched column).
+
         After translating the user's kwargs, any :attr:`Verb.auto_kwargs`
         are appended — that's how ``transmute`` becomes ``mutate(..., _keep="none")``.
         Auto kwargs only land if the user didn't already pass that name,
@@ -330,8 +334,9 @@ class Translator:
         would emit ``.mutate(..., _keep="all")``, not both).
         """
         receiver = self._visit(args[0])
+        rest = self._expand_across_in_args(args[1:])
         with self.nse.enter(verb.slot):
-            py_args, py_kwargs = self._translate_args(args[1:])
+            py_args, py_kwargs = self._translate_args(rest)
         if verb.auto_kwargs:
             existing = {kw.arg for kw in py_kwargs}
             for name, value in verb.auto_kwargs:
@@ -339,6 +344,85 @@ class Translator:
                     continue
                 py_kwargs.append(P.keyword(arg=name, value=P.Constant(value=value)))
         return _call(_attr(receiver, verb.hea_method), py_args, py_kwargs)
+
+    # ----- across() expansion ---------------------------------------------
+
+    def _expand_across_in_args(self, args: tuple[R.Node, ...]) -> tuple[R.Node, ...]:
+        """Walk verb args; replace each ``across(...)`` call with the
+        list of synthetic ``NamedArg``\\s it expands to."""
+        out: list[R.Node] = []
+        for arg in args:
+            if isinstance(arg, R.Call) and _is_named_call(arg, "across"):
+                out.extend(self._expand_across(arg))
+            else:
+                out.append(arg)
+        return tuple(out)
+
+    def _expand_across(self, call: R.Call) -> list[R.Node]:
+        """Translate-time expansion of ``across(cols, fn[, .names = ...])``.
+
+        Supported in v1:
+        - ``across(col, fn)``               — single col, single fn
+        - ``across(c(a, b, ...), fn)``      — multiple cols, single fn
+        - ``fn`` may be an :class:`R.Identifier` (named function) or a
+          :class:`R.FunctionDef` (anonymous lambda) of one parameter.
+
+        Out of scope (raise :class:`RTranslateError` until Phase 5+):
+        - list-of-functions form ``list(mean = mean, sd = sd)``
+        - ``.names`` glue templates
+
+        Returns a list of synthetic :class:`R.NamedArg` nodes — one per
+        target column. Each NamedArg's value is the function applied to
+        an :class:`R.Identifier` for that column.
+        """
+        if len(call.args) < 2:
+            raise RTranslateError("across() requires (cols, fns) — got fewer", call)
+
+        cols_arg = call.args[0]
+        fn_arg = call.args[1]
+
+        # Reject the unsupported `.names` / list-of-fns forms cleanly so the
+        # user sees what's missing instead of a wrong-looking translation.
+        for extra in call.args[2:]:
+            if isinstance(extra, R.NamedArg) and extra.name == ".names":
+                raise RTranslateError(
+                    "across(.names = ...) not supported in v1 — defer to Phase 5+",
+                    extra,
+                )
+        if _is_named_call(fn_arg, "list"):
+            raise RTranslateError(
+                "across() with list(...) of functions not supported in v1",
+                fn_arg,
+            )
+
+        col_names = _extract_col_names(cols_arg)
+        results: list[R.Node] = []
+        for col_name in col_names:
+            synthetic_col = R.Identifier(col_name, call.span)
+            applied = self._apply_across_fn(fn_arg, synthetic_col, call.span)
+            results.append(R.NamedArg(col_name, applied, call.span))
+        return results
+
+    def _apply_across_fn(self, fn_arg: R.Node, col: R.Identifier, span) -> R.Node:
+        """Apply ``fn_arg`` to ``col``, returning an R AST node.
+
+        - ``fn_arg`` is an Identifier: emit ``fn_arg(col)``.
+        - ``fn_arg`` is a FunctionDef with one param ``p``: substitute
+          ``p`` with ``col`` in the body.
+        """
+        if isinstance(fn_arg, R.Identifier):
+            return R.Call(fn_arg, (col,), span)
+        if isinstance(fn_arg, R.FunctionDef):
+            if len(fn_arg.params) != 1:
+                raise RTranslateError(
+                    "across() lambda must take exactly one parameter",
+                    fn_arg,
+                )
+            return _substitute_identifier(fn_arg.body, fn_arg.params[0].name, col)
+        raise RTranslateError(
+            f"across() fn must be an identifier or lambda, got {type(fn_arg).__name__}",
+            fn_arg,
+        )
 
     def _emit_helper_call(self, helper: Func, r_name: str, args: tuple[R.Node, ...]) -> P.AST:
         """Translate one of the registered helpers (mean, desc, n, …).
@@ -350,9 +434,13 @@ class Translator:
         ``form="function"`` — emits ``hea.func(args)`` (with the registry's
         ``hea_name`` resolving qualified names like ``selectors.starts_with``).
         """
-        # Special-case: c(...) → Python list literal.
+        # Special-case: c(...) → Python list / dict literal.
         if helper.hea_name == "__list__":
             return self._emit_c_call(args)
+
+        # Special-case: case_when — Tilde args become (cond, value) tuples.
+        if helper.hea_name == "case_when":
+            return self._emit_case_when(args)
 
         # Override arg slot if registry specifies one.
         arg_slot_ctx = self.nse.enter(helper.arg_slot) if helper.arg_slot is not None else _null_ctx()
@@ -386,12 +474,61 @@ class Translator:
         py_name = name.replace(".", "_")
         return _call(_name(py_name), py_args, py_kwargs)
 
+    def _emit_case_when(self, args: tuple[R.Node, ...]) -> P.AST:
+        """``case_when(cond1 ~ val1, cond2 ~ val2, .default = d)`` →
+        ``case_when((c1, v1), (c2, v2), default=d)``.
+
+        Every Tilde-typed positional arg becomes a 2-tuple. The named
+        ``.default`` becomes the Python ``default=`` kwarg (handled by
+        the generic kwarg path).
+        """
+        tuples: list[P.AST] = []
+        kwargs: list[P.keyword] = []
+        # case_when's cond/value pairs are NSE expressions — push EXPR slot.
+        with self.nse.enter(Slot.EXPR):
+            for arg in args:
+                if isinstance(arg, R.Tilde):
+                    if arg.lhs is None:
+                        # ``~ value`` form — degenerate; treat as the default branch.
+                        kwargs.append(P.keyword(
+                            arg="default", value=self._visit(arg.rhs)
+                        ))
+                        continue
+                    cond = self._visit(arg.lhs)
+                    value = self._visit(arg.rhs)
+                    tuples.append(P.Tuple(elts=[cond, value], ctx=P.Load()))
+                elif isinstance(arg, R.NamedArg):
+                    alias = resolve_kwarg(arg.name)
+                    slot_ctx = self.nse.enter(alias.value_slot) if alias.value_slot is not None else _null_ctx()
+                    with slot_ctx:
+                        value = self._visit(arg.value)
+                    kwargs.append(P.keyword(arg=alias.py_name, value=value))
+                else:
+                    # Non-tilde positional — surprising. Keep as-is so the
+                    # user can see what happened.
+                    tuples.append(self._visit(arg))
+        return _call(_name("case_when"), tuples, kwargs)
+
     def _emit_c_call(self, args: tuple[R.Node, ...]) -> P.AST:
-        """``c(a, b, c)`` → Python list ``[a, b, c]``. Named ``c()`` args
-        (rare in idiomatic code) are not supported in v1 — they'd need a
-        dict, but downstream consumers expect lists. Falls back to a flat
-        list of values, dropping names. Gap-worthy if encountered."""
-        elems = [self._visit(a.value) if isinstance(a, R.NamedArg) else self._visit(a) for a in args]
+        """``c(a, b, c)`` → Python list. ``c("a" = "b", "x" = "y")`` →
+        Python dict (idiomatic for join ``by`` mappings). The split is
+        decided by whether any arg is named.
+        """
+        if any(isinstance(a, R.NamedArg) for a in args):
+            keys: list[P.AST] = []
+            values: list[P.AST] = []
+            for a in args:
+                if isinstance(a, R.NamedArg):
+                    keys.append(P.Constant(value=a.name))
+                    values.append(self._visit(a.value))
+                else:
+                    # An unnamed entry in an otherwise-named c() — R uses
+                    # an empty key. Emit a None-keyed entry so the user
+                    # sees the mismatch (and we don't silently drop it).
+                    keys.append(P.Constant(value=None))
+                    values.append(self._visit(a))
+            return P.Dict(keys=keys, values=values)
+        elems = [self._visit(a) for a in args]
         return P.List(elts=list(elems), ctx=P.Load())
 
     # -- args --------------------------------------------------------------
@@ -597,6 +734,73 @@ def _dotted_name(qualified: str) -> P.AST:
     for part in parts[1:]:
         node = _attr(node, part)
     return node
+
+
+def _is_named_call(node, name: str) -> bool:
+    """``True`` if ``node`` is ``Call(Identifier(name), ...)``."""
+    return (
+        isinstance(node, R.Call)
+        and isinstance(node.func, R.Identifier)
+        and node.func.name == name
+    )
+
+
+def _extract_col_names(cols_arg) -> list[str]:
+    """Best-effort extraction of column names from across()'s first arg.
+
+    Accepts: ``a`` (bare ident), ``"a"`` (string), or ``c(a, b, "c")``.
+    Rejects: tidy-select helpers (``starts_with("x")``), slices, etc. —
+    those need a runtime resolver (Phase 5+). Raise so the user sees the
+    gap instead of a silently-wrong expansion.
+    """
+    if isinstance(cols_arg, R.Identifier):
+        return [cols_arg.name]
+    if isinstance(cols_arg, R.StrLit):
+        return [cols_arg.value]
+    if _is_named_call(cols_arg, "c"):
+        names: list[str] = []
+        for a in cols_arg.args:
+            if isinstance(a, R.Identifier):
+                names.append(a.name)
+            elif isinstance(a, R.StrLit):
+                names.append(a.value)
+            else:
+                raise RTranslateError(
+                    f"across() column list contains {type(a).__name__} "
+                    "— only bare names and strings are supported in v1",
+                    a,
+                )
+        return names
+    raise RTranslateError(
+        f"across() col form not supported: {type(cols_arg).__name__} "
+        "— pass a bare name, a string, or c(a, b, ...).",
+        cols_arg,
+    )
+
+
+def _substitute_identifier(node: R.Node, param_name: str, replacement: R.Identifier) -> R.Node:
+    """Recursively replace ``Identifier(name=param_name)`` with ``replacement``.
+
+    Walks every field of every dataclass node, transforming tuples and
+    nested dataclasses. Non-dataclass values (strings, ints, tuples of
+    primitives like ``Span``) pass through untouched.
+    """
+    from dataclasses import fields, replace as _dc_replace, is_dataclass
+
+    if isinstance(node, R.Identifier) and node.name == param_name:
+        return replacement
+    if not is_dataclass(node):
+        return node
+    new_kwargs = {}
+    for f in fields(node):
+        v = getattr(node, f.name)
+        if isinstance(v, tuple) and v and is_dataclass(v[0]):
+            new_kwargs[f.name] = tuple(_substitute_identifier(x, param_name, replacement) for x in v)
+        elif is_dataclass(v):
+            new_kwargs[f.name] = _substitute_identifier(v, param_name, replacement)
+        else:
+            new_kwargs[f.name] = v
+    return _dc_replace(node, **new_kwargs)
 
 
 def _unparse_for_formula(node: R.Node) -> str:

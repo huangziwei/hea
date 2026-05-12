@@ -360,6 +360,208 @@ class TestMutateSummarize:
         assert out == "flights.mutate(rank=desc('arr_delay').min_rank())"
 
 
+class TestJoins:
+    """Phase 4 — every dplyr join, plus the `by = c("a" = "b")` named-vec."""
+
+    def test_string_by(self):
+        assert _tr('inner_join(x, y, by = "id")') == "x.inner_join(y, by='id')"
+
+    def test_natural_join_no_by(self):
+        # No ``by`` → polars' natural join.
+        assert _tr("left_join(flights, planes)") == "flights.left_join(planes)"
+
+    def test_unnamed_vec_by(self):
+        out = _tr('inner_join(x, y, by = c("a", "b"))')
+        assert out == "x.inner_join(y, by=['a', 'b'])"
+
+    def test_named_vec_by_to_dict(self):
+        out = _tr('inner_join(x, y, by = c("a" = "b"))')
+        assert out == "x.inner_join(y, by={'a': 'b'})"
+
+    def test_multi_named_vec_by(self):
+        out = _tr('inner_join(x, y, by = c("a" = "x", "b" = "y"))')
+        assert out == "x.inner_join(y, by={'a': 'x', 'b': 'y'})"
+
+    def test_all_join_kinds(self):
+        # Every join kind goes through the same machinery — smoke each.
+        for verb, method in [
+            ("inner_join", "inner_join"),
+            ("left_join", "left_join"),
+            ("right_join", "right_join"),
+            ("full_join", "full_join"),
+            ("semi_join", "semi_join"),
+            ("anti_join", "anti_join"),
+            ("cross_join", "cross_join"),
+        ]:
+            out = _tr(f'{verb}(x, y, by = "id")')
+            assert out == f"x.{method}(y, by='id')", f"failed for {verb}"
+
+    def test_join_in_pipe(self):
+        out = _tr('flights |> left_join(planes, by = "tailnum")')
+        assert out == "flights.left_join(planes, by='tailnum')"
+
+
+class TestCaseWhen:
+    """Phase 4 — case_when's tilde syntax → tuple-pair form."""
+
+    def test_basic(self):
+        out = _tr(
+            'case_when(x > 0 ~ "pos", x < 0 ~ "neg", .default = "zero")'
+        )
+        assert out == (
+            "case_when((col('x') > 0, 'pos'), (col('x') < 0, 'neg'), default='zero')"
+        )
+
+    def test_inside_mutate(self):
+        out = _tr(
+            'mutate(df, label = case_when('
+            '  arr_delay > 60 ~ "late",'
+            '  arr_delay < -10 ~ "early",'
+            '  .default = "ontime"))'
+        )
+        assert out == (
+            "df.mutate(label=case_when("
+            "(col('arr_delay') > 60, 'late'), "
+            "(col('arr_delay') < -10, 'early'), "
+            "default='ontime'))"
+        )
+
+    def test_no_default(self):
+        out = _tr('case_when(x > 0 ~ "pos")')
+        assert out == "case_when((col('x') > 0, 'pos'))"
+
+    def test_unary_tilde_as_default(self):
+        # The degenerate ``~ value`` form is treated as the default branch.
+        out = _tr('case_when(x > 0 ~ "pos", ~ "fallback")')
+        assert out == "case_when((col('x') > 0, 'pos'), default='fallback')"
+
+
+class TestExpressionHelpers:
+    """Phase 4 — if_else, coalesce, na_if, between, near."""
+
+    def test_if_else(self):
+        out = _tr('mutate(df, status = if_else(x > 0, "pos", "neg"))')
+        assert out == "df.mutate(status=if_else(col('x') > 0, 'pos', 'neg'))"
+
+    def test_ifelse_alias_to_if_else(self):
+        # R's base ``ifelse`` aliases to the same hea helper.
+        out = _tr('mutate(df, status = ifelse(x > 0, "pos", "neg"))')
+        assert out == "df.mutate(status=if_else(col('x') > 0, 'pos', 'neg'))"
+
+    def test_coalesce(self):
+        out = _tr("mutate(df, x = coalesce(a, b, c))")
+        assert out == "df.mutate(x=coalesce(col('a'), col('b'), col('c')))"
+
+    def test_na_if(self):
+        out = _tr("mutate(df, x = na_if(a, -1))")
+        assert out == "df.mutate(x=na_if(col('a'), -1))"
+
+    def test_between(self):
+        out = _tr("filter(df, between(x, 0, 100))")
+        assert out == "df.filter(between(col('x'), 0, 100))"
+
+    def test_near(self):
+        out = _tr("filter(df, near(x, 3.14))")
+        assert out == "df.filter(near(col('x'), 3.14))"
+
+
+class TestPivot:
+    """Phase 4 — pivot_longer / pivot_wider full kwarg coverage."""
+
+    def test_pivot_longer_simple(self):
+        out = _tr(
+            'pivot_longer(df, c(wk1, wk2, wk3), '
+            'names_to = "week", values_to = "rank")'
+        )
+        assert out == (
+            "df.pivot_longer(['wk1', 'wk2', 'wk3'], "
+            "names_to='week', values_to='rank')"
+        )
+
+    def test_pivot_longer_with_selector(self):
+        out = _tr(
+            'pivot_longer(billboard, starts_with("wk"), '
+            'names_to = "week", values_to = "rank", values_drop_na = TRUE)'
+        )
+        assert out == (
+            "billboard.pivot_longer(selectors.starts_with('wk'), "
+            "names_to='week', values_to='rank', values_drop_na=True)"
+        )
+
+    def test_pivot_longer_with_names_sep(self):
+        out = _tr(
+            'pivot_longer(df, c(x_a, x_b), '
+            'names_to = c("prefix", "key"), names_sep = "_")'
+        )
+        # ``names_to = c("prefix", "key")`` becomes a list.
+        assert "names_to=['prefix', 'key']" in out
+        assert "names_sep='_'" in out
+
+    def test_pivot_wider_simple(self):
+        out = _tr(
+            'pivot_wider(fish_encounters, '
+            'names_from = station, values_from = seen)'
+        )
+        assert out == (
+            "fish_encounters.pivot_wider("
+            "names_from='station', values_from='seen')"
+        )
+
+    def test_pivot_in_pipe(self):
+        out = _tr(
+            'billboard |> pivot_longer(starts_with("wk"), '
+            'names_to = "week", values_to = "rank")'
+        )
+        assert out == (
+            "billboard.pivot_longer(selectors.starts_with('wk'), "
+            "names_to='week', values_to='rank')"
+        )
+
+
+class TestAcross:
+    """Phase 4 — across() expansion at translate time."""
+
+    def test_single_col_single_fn(self):
+        out = _tr("mutate(df, across(x, mean))")
+        assert out == "df.mutate(x=col('x').mean())"
+
+    def test_multi_col_single_fn(self):
+        out = _tr("mutate(df, across(c(a, b), mean))")
+        assert out == "df.mutate(a=col('a').mean(), b=col('b').mean())"
+
+    def test_with_lambda(self):
+        out = _tr("mutate(df, across(c(a, b), \\(x) mean(x, na.rm = TRUE)))")
+        assert out == (
+            "df.mutate(a=col('a').mean(na_rm=True), b=col('b').mean(na_rm=True))"
+        )
+
+    def test_inside_summarize(self):
+        out = _tr("summarize(df, across(c(a, b, c), mean))")
+        assert out == (
+            "df.summarize(a=col('a').mean(), b=col('b').mean(), c=col('c').mean())"
+        )
+
+    def test_mixed_with_explicit_kwargs(self):
+        out = _tr(
+            "mutate(df, gain = x - y, across(c(a, b), mean), .by = origin)"
+        )
+        assert out == (
+            "df.mutate(gain=col('x') - col('y'), "
+            "a=col('a').mean(), b=col('b').mean(), _by='origin')"
+        )
+
+    def test_names_kwarg_raises(self):
+        # .names glue templating is deferred — translator should fail loudly.
+        from hea.translate.r_to_py import RTranslateError
+        with pytest.raises(RTranslateError):
+            _tr('mutate(df, across(c(a, b), mean, .names = "{col}_avg"))')
+
+    def test_list_fns_raises(self):
+        from hea.translate.r_to_py import RTranslateError
+        with pytest.raises(RTranslateError):
+            _tr("mutate(df, across(c(a, b), list(mean = mean, sd = sd)))")
+
+
 class TestControlFlow:
     def test_if_else_ternary(self):
         out = _tr("if (x > 0) a else b")
