@@ -272,6 +272,38 @@ def test_bates_1_4_dyestuff_fm01_ML_plot_ranef_qqranef(fm01ML):
     plt.close("all")
 
 
+def test_bates_2_plot_design_layout_matches_fig_2_3_2_4():
+    """plot_design() — 4-panel mosaic A=Z' / B=Λ / C=Z'Z / D=L.
+
+    Layout: AAA over BCD; top panel is the wide Z transpose, bottom row
+    is three q×q sparsity panels. Matches Bates lme4-book Figs 2.3+2.4
+    (the Penicillin crossed-RE example).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from hea import data, lme
+
+    penicillin = data("Penicillin", "lme4")
+    fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", penicillin)
+    fig = fm.plot_design()
+    try:
+        # Four labelled axes from subplot_mosaic: A, B, C, D.
+        axd = {ax.get_label(): ax for ax in fig.axes if ax.get_label() in "ABCD"}
+        assert set(axd) == {"A", "B", "C", "D"}
+        # Bottom-row labels match Bates' panel captions.
+        assert axd["B"].get_xlabel() == "Λ"
+        assert axd["C"].get_xlabel() == "Z'Z"
+        assert axd["D"].get_xlabel() == "L"
+        # Top panel renders the q × n shape; bottom panels render q × q.
+        assert axd["A"].images[0].get_array().shape == (fm.q, fm.n)
+        assert axd["B"].images[0].get_array().shape == (fm.q, fm.q)
+        assert axd["C"].images[0].get_array().shape == (fm.q, fm.q)
+        assert axd["D"].images[0].get_array().shape == (fm.q, fm.q)
+    finally:
+        plt.close(fig)
+
+
 def test_bates_1_4_dyestuff_fm01_ML_plot_density(fm01ML_profile):
     """plot_density() — profile-implied density peaks pinned to lme4:::dens."""
     import matplotlib

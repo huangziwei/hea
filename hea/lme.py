@@ -1150,6 +1150,62 @@ class lme:
         ax.set_title("Scale-Location")
         return ax
 
+    def plot_design(self, *, figsize=None, tol: float = 1e-10):
+        """4-panel design-matrix diagnostic (Bates lme4 book Figs 2.3 + 2.4).
+
+        Layout::
+
+            AAA      A = Z'   — transpose of the random-effects design
+            BCD      B = Λ    — relative covariance factor
+                     C = Z'Z  — cross-product matrix
+                     D = L    — sparse Cholesky factor of Λ′Z′ZΛ + I
+
+        Each panel renders the **sparsity pattern** (cells with
+        ``|value| > tol`` show as dark squares; zeros blank) — matches
+        ``Matrix::image()``'s default and the lme4-book figures. The top
+        panel uses ``aspect='auto'`` (Z is typically wide-and-short once
+        transposed); the three bottom panels are equal-aspect q×q.
+        """
+        import matplotlib.pyplot as plt
+
+        Z = self.Z if isinstance(self.Z, np.ndarray) else self.Z.toarray()
+        ZtZ = Z.T @ Z
+
+        def _pattern(M):
+            return (np.abs(M) > tol).astype(float)
+
+        if figsize is None:
+            # Bottom row is q×q each; top row spans three columns wide.
+            # 10×7 looks good for q in the 6..50 range Bates uses.
+            figsize = (10, 7)
+
+        fig = plt.figure(figsize=figsize)
+        axd = fig.subplot_mosaic(
+            """
+            AAA
+            BCD
+            """,
+            gridspec_kw={"height_ratios": [1, 2]},
+        )
+        kw = {"cmap": "gray_r", "interpolation": "nearest",
+              "vmin": 0.0, "vmax": 1.0}
+
+        axd["A"].imshow(_pattern(Z.T), aspect="auto", **kw)
+        axd["A"].set_ylabel("random-effect")
+        axd["A"].set_xlabel("Z'")
+
+        axd["B"].imshow(_pattern(self.Lambda), **kw)
+        axd["B"].set_xlabel("Λ")
+
+        axd["C"].imshow(_pattern(ZtZ), **kw)
+        axd["C"].set_xlabel("Z'Z")
+
+        axd["D"].imshow(_pattern(self.L), **kw)
+        axd["D"].set_xlabel("L")
+
+        fig.tight_layout()
+        return fig
+
     def plot_qq_ranef(
         self, figsize=None,
         *, level: float = 0.95, strip: bool = True,
