@@ -1266,12 +1266,27 @@ class lme:
     def plot_ranef(
         self, figsize=None,
         *, level: float = 0.95, strip: bool = True,
+        layout: str | tuple[int, int] = "horizontal",
+        aspect: float | None = None,
     ):
         """Caterpillar plot — BLUP ± Φ⁻¹((1+level)/2)·SE per level, sorted.
 
         Pythonic ``dotplot(ranef(., condVar=TRUE))``: defaults to 95%
         prediction intervals to match lme4. ``strip=False`` suppresses
         per-panel titles (Bates Fig. 1.5 convention).
+
+        Parameters
+        ----------
+        layout : {"horizontal", "vertical"} or ``(nrow, ncol)``
+            Panel arrangement. ``"horizontal"`` (default) lays panels in
+            a single row — lme4-book convention. ``"vertical"`` stacks
+            them in a single column. Pass an explicit ``(nrow, ncol)``
+            tuple for a grid; ``nrow * ncol`` must hold every panel.
+        aspect : float, optional
+            Width-to-height ratio of each subplot in inches. When set,
+            ``figsize`` is derived from it together with ``layout`` and
+            the largest panel's level count. Ignored when ``figsize`` is
+            passed explicitly.
         """
         from scipy.stats import norm
         z = float(norm.ppf(0.5 + level / 2))
@@ -1282,13 +1297,41 @@ class lme:
                     (f"{key}: {cname}", b_mat[:, j], se_mat[:, j], levels)
                 )
         n_panels = len(panels)
+
+        # Resolve layout to (nrow, ncol).
+        if isinstance(layout, tuple):
+            if len(layout) != 2 or not all(isinstance(x, int) and x > 0
+                                            for x in layout):
+                raise TypeError(
+                    f"layout: tuple must be (nrow, ncol) of positive ints; got {layout!r}."
+                )
+            nrow, ncol = layout
+            if nrow * ncol < n_panels:
+                raise ValueError(
+                    f"layout={layout!r}: holds {nrow * ncol} cells but the "
+                    f"model has {n_panels} ranef panels."
+                )
+        elif layout == "horizontal":
+            nrow, ncol = 1, n_panels
+        elif layout == "vertical":
+            nrow, ncol = n_panels, 1
+        else:
+            raise ValueError(
+                f"layout: expected 'horizontal', 'vertical', or (nrow, ncol); got {layout!r}."
+            )
+
+        # Pick a sensible figsize when not given. Subplot height tracks
+        # the largest panel's level count; width is derived from
+        # ``aspect`` when supplied, else a constant 3.2".
+        max_levels = max(len(p[3]) for p in panels)
         if figsize is None:
-            max_levels = max(len(p[3]) for p in panels)
-            height = max(3.0, min(0.18 * max_levels, 12.0))
-            figsize = (3.2 * n_panels, height)
-        fig, axes = plt.subplots(1, n_panels, figsize=figsize, squeeze=False)
-        axes = axes.ravel()
-        for ax, (title, b, se, levels) in zip(axes, panels):
+            subplot_h = max(2.5, min(0.18 * max_levels, 12.0))
+            subplot_w = aspect * subplot_h if aspect is not None else 3.2
+            figsize = (subplot_w * ncol, subplot_h * nrow)
+
+        fig, axes = plt.subplots(nrow, ncol, figsize=figsize, squeeze=False)
+        axes_flat = axes.ravel()
+        for ax, (title, b, se, levels) in zip(axes_flat, panels):
             order = np.argsort(b)
             b_sorted = b[order]
             se_sorted = se[order]
@@ -1310,6 +1353,10 @@ class lme:
                 ax.set_yticklabels([])
             ax.set_xlabel("Random Effect")
             ax.set_title(title if strip else "")
+        # Hide unused cells (only possible with an explicit (nrow, ncol)
+        # tuple that has more cells than panels).
+        for ax in axes_flat[n_panels:]:
+            ax.set_visible(False)
         fig.tight_layout()
         return fig
 

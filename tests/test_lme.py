@@ -272,6 +272,104 @@ def test_bates_1_4_dyestuff_fm01_ML_plot_ranef_qqranef(fm01ML):
     plt.close("all")
 
 
+def test_plot_ranef_layout_vertical_stacks_panels():
+    """``plot_ranef(layout="vertical")`` flips a 1×n panel row into n×1."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from hea import data, lme
+
+    pen = data("Penicillin", "lme4")
+    fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
+
+    fig_h = fm.plot_ranef()
+    fig_v = fm.plot_ranef(layout="vertical")
+    try:
+        # Horizontal: two panels in one row.
+        rows_h = {ax.get_subplotspec().rowspan.start for ax in fig_h.axes}
+        cols_h = {ax.get_subplotspec().colspan.start for ax in fig_h.axes}
+        assert rows_h == {0} and cols_h == {0, 1}
+
+        # Vertical: two panels in one column.
+        rows_v = {ax.get_subplotspec().rowspan.start for ax in fig_v.axes}
+        cols_v = {ax.get_subplotspec().colspan.start for ax in fig_v.axes}
+        assert rows_v == {0, 1} and cols_v == {0}
+
+        # And the vertical figure is taller than wide vs. the horizontal
+        # one (rough shape check; exact sizes depend on level counts).
+        w_h, h_h = fig_h.get_size_inches()
+        w_v, h_v = fig_v.get_size_inches()
+        assert h_v > h_h and w_v < w_h
+    finally:
+        plt.close(fig_h)
+        plt.close(fig_v)
+
+
+def test_plot_ranef_aspect_controls_subplot_width():
+    """``aspect=`` sets each subplot's width:height ratio in inches."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from hea import data, lme
+
+    pen = data("Penicillin", "lme4")
+    fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
+
+    fig_wide = fm.plot_ranef(layout="vertical", aspect=2.0)
+    fig_narrow = fm.plot_ranef(layout="vertical", aspect=0.5)
+    try:
+        w_wide, _ = fig_wide.get_size_inches()
+        w_narrow, _ = fig_narrow.get_size_inches()
+        # aspect=2.0 → 4× wider subplots than aspect=0.5
+        assert w_wide == pytest.approx(4.0 * w_narrow, rel=1e-9)
+    finally:
+        plt.close(fig_wide)
+        plt.close(fig_narrow)
+
+
+def test_plot_ranef_explicit_layout_tuple():
+    """An explicit ``(nrow, ncol)`` tuple is respected; over-allocating
+    leaves the trailing cells hidden."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from hea import data, lme
+
+    pen = data("Penicillin", "lme4")
+    fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
+
+    fig = fm.plot_ranef(layout=(2, 2))
+    try:
+        # Four cells allocated; two visible (one per ranef panel).
+        visibles = [ax for ax in fig.axes if ax.get_visible()]
+        hidden = [ax for ax in fig.axes if not ax.get_visible()]
+        assert len(visibles) == 2
+        assert len(hidden) == 2
+    finally:
+        plt.close(fig)
+
+
+def test_plot_ranef_layout_rejects_too_few_cells():
+    """A (nrow, ncol) tuple with fewer cells than panels raises."""
+    from hea import data, lme
+
+    pen = data("Penicillin", "lme4")
+    fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
+
+    with pytest.raises(ValueError, match="holds 1 cells"):
+        fm.plot_ranef(layout=(1, 1))
+
+
+def test_plot_ranef_layout_rejects_bad_value():
+    from hea import data, lme
+
+    pen = data("Penicillin", "lme4")
+    fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
+
+    with pytest.raises(ValueError, match="layout:"):
+        fm.plot_ranef(layout="diagonal")
+
+
 def test_bates_2_plot_design_layout_matches_fig_2_3_2_4():
     """plot_design() — 4-panel mosaic A=Z' / B=Λ / C=Z'Z / D=L.
 
