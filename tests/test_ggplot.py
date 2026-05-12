@@ -5138,6 +5138,22 @@ def test_xlab_ylab_shortcuts():
         plt.close(fig)
 
 
+def test_layer_kwarg_aes_contributes_to_default_axis_labels():
+    """Kwarg-style aes on a geom (``geom_bar(x="clarity")``) gets promoted
+    into the mapping during build. The label resolver must see that
+    promoted view, not the pre-build empty ``layer.mapping`` — otherwise
+    plots that route aes through kwargs lose their xlabel."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars) + geom_point(x="wt", y="mpg")
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xlabel() == "wt"
+        assert ax.get_ylabel() == "mpg"
+    finally:
+        plt.close(fig)
+
+
 def test_ggtitle_sets_axes_title_left_aligned():
     """``ggtitle("Cars")`` lands on the top-left axes via ``set_title(loc='left')``
     so it aligns with the panel's left edge (matches ggplot2 default
