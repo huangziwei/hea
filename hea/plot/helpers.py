@@ -14,7 +14,7 @@ import numpy as np
 import polars as pl
 from scipy.stats import norm
 
-from ._util import draw_points, r_lty
+from ._util import draw_points, r_lty, resolve_ax
 
 
 def qqnorm(
@@ -27,8 +27,7 @@ def qqnorm(
 ):
     """Standard-normal Q-Q scatter — pair with ``qqline(x, ax=ax)`` for the
     reference line. Mirrors R's ``stats::qqnorm``."""
-    if ax is None:
-        _, ax = plt.subplots()
+    ax = resolve_ax(ax)
     vals = np.asarray(x, dtype=float)
     vals = vals[~np.isnan(vals)]
     n = len(vals)
@@ -63,8 +62,7 @@ def halfnorm(
 
     The ``nlab`` parameter is positional (matches Faraway: ``halfnorm(cook, 3, labs=...)``).
     """
-    if ax is None:
-        _, ax = plt.subplots()
+    ax = resolve_ax(ax)
 
     abs_x = np.abs(np.asarray(x, dtype=float))
     n = len(abs_x)
@@ -387,8 +385,13 @@ def interaction_plot(
             if ys.size:
                 cells[ti, xi] = float(fun(ys))
 
-    if ax is None:
+    if ax is None and figsize is not None:
+        # Honor a caller-specified figsize, even if it means stepping
+        # outside an active par() context (figsize wouldn't apply to a
+        # pre-allocated par cell).
         _, ax = plt.subplots(figsize=figsize)
+    else:
+        ax = resolve_ax(ax)
 
     x_pos = np.arange(len(x_levels))
     show_line = type in ("l", "b", "o", "c")

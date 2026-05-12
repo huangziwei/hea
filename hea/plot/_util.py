@@ -8,6 +8,32 @@ import polars as pl
 _R_MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*", "+", "x"]
 
 
+def resolve_ax(ax):
+    """Return the target ``Axes`` for a single-panel base-graphics call.
+
+    Three cases, in order:
+
+    1. ``ax`` was passed explicitly — return it untouched.
+    2. A :func:`hea.plot.par` context is active on the stack — pull the
+       next cell from its grid.
+    3. Neither — create a fresh figure with ``plt.subplots()`` (R's
+       default "open a new device" behavior).
+    """
+    if ax is not None:
+        return ax
+    # Local import keeps _util.py free of plt at module load (R's plotters
+    # are sometimes used headless / with backend swaps in tests).
+    from .par import _current_par
+
+    p = _current_par()
+    if p is not None:
+        return p.next_cell()
+    import matplotlib.pyplot as plt
+
+    _, ax = plt.subplots()
+    return ax
+
+
 def to_codes(x):
     """Polars Enum/Categorical → integer codes; numpy/list → unchanged."""
     if isinstance(x, pl.Series) and x.dtype in (pl.Enum, pl.Categorical):

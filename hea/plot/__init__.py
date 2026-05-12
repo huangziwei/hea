@@ -7,8 +7,10 @@ Spec
   family. It returns a matplotlib ``Axes`` (or array of ``Axes`` for
   multi-panel diagnostic) so callers chain annotations explicitly via
   ``ax=``. Statefulness via ``plt.gca()`` is intentionally avoided.
-- Multi-panel layouts use ``fig, axes = plt.subplots(...)`` directly —
-  no ``par(mfrow)`` shim. Pass an ``axes[i, j]`` to each call.
+- Multi-panel layouts: either pre-allocate with
+  ``fig, axes = plt.subplots(...)`` and pass ``axes[i, j]`` to each
+  call, or use the scoped ``with par(mfrow=(r, c)):`` context manager
+  (R's ``par()`` idiom, but bounded by ``with`` so state can't leak).
 - Categorical kwargs (``pch=``, ``col=``) accept polars Series/Enum
   directly; integer codes are derived internally via ``to_physical()``.
 - Formula evaluation routes through ``hea.formula.parse``. Both LHS
@@ -44,10 +46,12 @@ from .density import density
 from .dispatch import plot
 from .helpers import halfnorm, interaction_plot, pairs, qqnorm, termplot
 from .hist import hist
+from .par import par
 
 __all__ = [
     "plot",
     "abline", "points", "lines", "legend", "segments", "qqline", "rug",
     "qqnorm", "halfnorm", "termplot", "pairs", "interaction_plot",
     "hist", "boxplot", "barplot", "density", "curve",
+    "par",
 ]

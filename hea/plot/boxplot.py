@@ -4,9 +4,10 @@
 
 from __future__ import annotations
 
-import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+
+from ._util import resolve_ax
 
 
 def boxplot(
@@ -62,8 +63,7 @@ def boxplot(
                 f"{len(arrays)} groups."
             )
 
-    if ax is None:
-        _, ax = plt.subplots()
+    ax = resolve_ax(ax)
 
     if horizontal:
         ax.boxplot(arrays, tick_labels=names, orientation="horizontal")
@@ -91,8 +91,7 @@ def boxplot_by(
     """Vertical boxplots of ``y`` grouped by ``group`` (a polars Enum/Categorical
     or any string-like Series). Level order is taken from ``group`` if it's an
     Enum (R-faithful), otherwise from sorted unique values."""
-    if ax is None:
-        _, ax = plt.subplots()
+    ax = resolve_ax(ax)
 
     if isinstance(group, pl.Series):
         if group.dtype == pl.Enum:

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+
+from ._util import resolve_ax
 
 
 def _resolve_breaks(vals: np.ndarray, breaks) -> np.ndarray:
@@ -70,8 +71,7 @@ def hist(
         Existing matplotlib ``Axes`` to draw into. A new figure is
         created when ``None``.
     """
-    if ax is None:
-        _, ax = plt.subplots()
+    ax = resolve_ax(ax)
 
     name = ""
     if isinstance(x, pl.Series):

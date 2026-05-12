@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import matplotlib.pyplot as plt
 import numpy as np
 
-from ._util import r_lty
+from ._util import r_lty, resolve_ax
 
 
 def curve(
@@ -51,8 +50,7 @@ def curve(
     ``from_`` (with a trailing underscore) is used because ``from`` is a
     Python keyword.
     """
-    if ax is None:
-        _, ax = plt.subplots()
+    ax = resolve_ax(ax)
 
     if from_ is None or to is None:
         x_lo, x_hi = ax.get_xlim()

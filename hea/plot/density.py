@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from scipy.stats import gaussian_kde
@@ -44,10 +43,9 @@ class _Density:
         lty=None,
     ):
         """Draw this density curve. Mirrors R's ``plot.density``."""
-        from ._util import r_lty
+        from ._util import r_lty, resolve_ax
 
-        if ax is None:
-            _, ax = plt.subplots()
+        ax = resolve_ax(ax)
         ax.plot(self.x, self.y, color=col, linestyle=r_lty(lty))
         if xlab is None:
             xlab = f"N = {self.n}   Bandwidth = {self.bw:.4g}"

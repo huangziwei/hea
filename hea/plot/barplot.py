@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+
+from ._util import resolve_ax
 
 
 def barplot(
@@ -49,8 +50,7 @@ def barplot(
         Existing matplotlib ``Axes`` to draw into. A new figure is
         created when ``None``.
     """
-    if ax is None:
-        _, ax = plt.subplots()
+    ax = resolve_ax(ax)
 
     # Accept the ``hea.R.table(x)`` layout: 2-col DataFrame (label, count).
     if isinstance(heights, pl.DataFrame) and heights.width == 2:

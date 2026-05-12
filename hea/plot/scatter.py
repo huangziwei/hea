@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import matplotlib.pyplot as plt
 import numpy as np
 
-from ._util import draw_points, r_lty, to_float
+from ._util import draw_points, r_lty, resolve_ax, to_float
 
 
 def scatter(
@@ -32,8 +31,7 @@ def scatter(
     ``pch``/``col`` accept a polars Series/Enum (factor coloring/marker by level)
     or a scalar/array.
     """
-    if ax is None:
-        _, ax = plt.subplots()
+    ax = resolve_ax(ax)
 
     xa = to_float(x)
     ya = to_float(y)
