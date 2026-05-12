@@ -5154,6 +5154,35 @@ def test_layer_kwarg_aes_contributes_to_default_axis_labels():
         plt.close(fig)
 
 
+def test_labs_none_suppresses_axis_label():
+    """``labs(x=None)`` is ggplot2's explicit-suppress form (mirrors
+    ``labs(x = NULL)``). Pre-fix, ``labs`` filtered None out as a missing
+    kwarg, so suppression was silently ignored — and the consumer would
+    have rendered the literal ``"None"`` string had the filter let it
+    through. Both ends need to handle None as "render empty"."""
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + labs(x=None, y=None)
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xlabel() == ""
+        assert ax.get_ylabel() == ""
+    finally:
+        plt.close(fig)
+
+
+def test_labs_none_suppress_one_axis_keeps_the_other():
+    mtcars = load_dataset("datasets", "mtcars")
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + labs(y=None)
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xlabel() == "wt"
+        assert ax.get_ylabel() == ""
+    finally:
+        plt.close(fig)
+
+
 def test_ggtitle_sets_axes_title_left_aligned():
     """``ggtitle("Cars")`` lands on the top-left axes via ``set_title(loc='left')``
     so it aligns with the panel's left edge (matches ggplot2 default

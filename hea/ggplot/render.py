@@ -892,8 +892,24 @@ def _default_labels(plot, build_output=None):
                 return label
         return None
 
+    # Polar coord suppresses auto-derived axis titles by default. Tick
+    # labels (categories around the rim, radial tick numbers) already
+    # carry the per-axis context, and matplotlib drops the ylabel at the
+    # 9 o'clock spoke where it collides with the 180° tick label. ggplot2
+    # and pycircstat2 both follow this convention. Users opt back in with
+    # ``labs(x="...", y="...")`` — that lands in ``explicit`` and bypasses
+    # this branch.
+    is_polar = (
+        type(getattr(plot, "coordinates", None)).__name__ == "CoordPolar"
+    )
+
+    # ``labs(x=None)`` is the explicit-suppress form (mirrors ggplot2's
+    # ``labs(x = NULL)``); resolve to ``""`` so matplotlib renders nothing.
+    # Pre-fix, ``str(None)`` returned the literal "None" — visible bug.
     if "x" in explicit:
-        xlabel = str(explicit["x"])
+        xlabel = "" if explicit["x"] is None else str(explicit["x"])
+    elif is_polar:
+        xlabel = None
     else:
         scale_x = _scale_name_for("x")
         if scale_x is not None:
@@ -902,7 +918,9 @@ def _default_labels(plot, build_output=None):
             xlabel = _from_mapping(plot.mapping, "x") or _from_layers("x")
 
     if "y" in explicit:
-        ylabel = str(explicit["y"])
+        ylabel = "" if explicit["y"] is None else str(explicit["y"])
+    elif is_polar:
+        ylabel = None
     else:
         scale_y = _scale_name_for("y")
         if scale_y is not None:

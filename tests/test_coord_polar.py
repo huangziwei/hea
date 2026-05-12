@@ -282,6 +282,39 @@ def test_coord_polar_continuous_x_keeps_radians_data():
 # ---------------------------------------------------------------------------
 
 
+def test_coord_polar_suppresses_axis_titles_by_default():
+    """Polar auto-suppresses the x/y axis titles. Tick labels around the
+    rim already carry the per-axis context, and matplotlib's default
+    ylabel placement at 9 o'clock collides with the 180° tick label.
+    Matches ggplot2's coord_polar and pycircstat2 conventions."""
+    df = pl.DataFrame({"clarity": list("ABCDEFGH") * 5})
+    p = (ggplot(df, aes(x="clarity")) + geom_bar() + coord_polar())
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xlabel() == ""
+        assert ax.get_ylabel() == ""
+    finally:
+        plt.close(fig)
+
+
+def test_coord_polar_labs_opts_axis_titles_back_in():
+    """``labs(x="...", y="...")`` overrides the polar auto-suppress."""
+    from hea.ggplot import labs
+
+    df = pl.DataFrame({"clarity": list("ABCDEFGH") * 5})
+    p = (ggplot(df, aes(x="clarity"))
+         + geom_bar() + coord_polar()
+         + labs(x="Clarity", y="Count"))
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xlabel() == "Clarity"
+        assert ax.get_ylabel() == "Count"
+    finally:
+        plt.close(fig)
+
+
 def test_coord_polar_composes_with_coord_flip_via_patchwork():
     """``bar.coord_flip() | bar.coord_polar()`` — Cartesian and polar in
     the same figure. Each leaf needs its own projection."""
