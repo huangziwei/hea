@@ -19,13 +19,8 @@ import polars as pl
 from scipy.stats import norm
 
 from ..formula import parse
-from ._util import draw_points, r_lty, to_float
+from ._util import draw_points, r_lty, resolve_overlay_ax, to_float
 from .formula_eval import eval_side
-
-
-def _require_ax(ax, fname: str):
-    if ax is None:
-        raise ValueError(f"{fname}(): `ax=` is required (hea.plot has no current-axes state)")
 
 
 def _is_lm_like(obj) -> bool:
@@ -54,7 +49,7 @@ def abline(*args, h=None, v=None, lty=None, col="black", ax=None):
     when ``h``/``v`` is a vector, ``lty`` may also be a same-length vector
     for per-line styling (R's ``lty=1:2`` idiom).
     """
-    _require_ax(ax, "abline")
+    ax = resolve_overlay_ax(ax, "abline")
     color = col
 
     if h is not None or v is not None:
@@ -110,7 +105,7 @@ def abline(*args, h=None, v=None, lty=None, col="black", ax=None):
 
 def points(x, y, *, ax=None, pch=None, cex=None, col=None):
     """Overlay scatter points on an existing axes."""
-    _require_ax(ax, "points")
+    ax = resolve_overlay_ax(ax, "points")
     draw_points(ax, x, y, pch=pch, cex=cex, col=col)
     return ax
 
@@ -123,7 +118,7 @@ def lines(*args, ax=None, data: pl.DataFrame | None = None, lty=None, col="black
         lines(x, y)
         lines("y ~ x", data=df)        — formula form, mirrors R
     """
-    _require_ax(ax, "lines")
+    ax = resolve_overlay_ax(ax, "lines")
     if not args:
         raise TypeError("lines(): need either (x, y) or (formula, data=)")
 
@@ -173,7 +168,7 @@ def legend(*args, ax=None, legend=None, pch=None, lty=None, col=None, **kwargs):
     location strings ("upper right" etc.) and R's compact form ("topright")
     both work.
     """
-    _require_ax(ax, "legend")
+    ax = resolve_overlay_ax(ax, "legend")
     if legend is None:
         raise TypeError("legend(): `legend=` (the labels list) is required")
     labels = list(legend)
@@ -205,7 +200,7 @@ def legend(*args, ax=None, legend=None, pch=None, lty=None, col=None, **kwargs):
 def segments(x0, y0, x1, y1, *, ax=None, lty=None, col="black"):
     """Draw line segments from (x0, y0) to (x1, y1). All four can be scalars
     or matching-length vectors."""
-    _require_ax(ax, "segments")
+    ax = resolve_overlay_ax(ax, "segments")
     x0a = np.atleast_1d(np.asarray(x0, dtype=float))
     y0a = np.atleast_1d(np.asarray(y0, dtype=float))
     x1a = np.atleast_1d(np.asarray(x1, dtype=float))
@@ -242,7 +237,7 @@ def rug(
     col, lwd
         Tick color and line width.
     """
-    _require_ax(ax, "rug")
+    ax = resolve_overlay_ax(ax, "rug")
     _R_SIDE_NAMES = {1: "bottom", 2: "left", 3: "top", 4: "right"}
     if isinstance(side, int):
         side = _R_SIDE_NAMES.get(side, side)
@@ -284,7 +279,7 @@ def qqline(x, *, ax=None, col="black", lty=None):
     R's ``qqline`` fits a line through the (.25, .75) quantile pair against
     the corresponding standard-normal quantiles, then extends it across the
     plotted range. Mirrors the helper in ``lm._qq_plot``."""
-    _require_ax(ax, "qqline")
+    ax = resolve_overlay_ax(ax, "qqline")
     vals = np.asarray(x, dtype=float)
     vals = vals[~np.isnan(vals)]
     if vals.size < 2:

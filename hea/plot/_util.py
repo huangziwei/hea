@@ -8,30 +8,71 @@ import polars as pl
 _R_MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*", "+", "x"]
 
 
-def resolve_ax(ax):
+# The most recently used ``Axes`` for any hea primary plotter (``hist``,
+# ``plot``, ``boxplot``, …). Used by overlay calls (``abline``, ``points``,
+# ``lines``, ``segments``, ``qqline``, ``rug``, ``legend``) when their
+# ``ax=`` is not given — R's ``abline(lmod)`` idiom without surfacing
+# matplotlib's ``plt.gca()``. ``None`` until the first hea primary draws.
+_LAST_AX = None
+
+
+def _remember_ax(ax):
+    """Record ``ax`` as the most recently used target. No-op on ``None``."""
+    global _LAST_AX
+    if ax is not None:
+        _LAST_AX = ax
+
+
+def resolve_ax(ax, *, figsize=None):
     """Return the target ``Axes`` for a single-panel base-graphics call.
 
-    Three cases, in order:
+    Cases, in order:
 
-    1. ``ax`` was passed explicitly — return it untouched.
-    2. A :func:`hea.plot.par` context is active on the stack — pull the
-       next cell from its grid.
-    3. Neither — create a fresh figure with ``plt.subplots()`` (R's
-       default "open a new device" behavior).
+    1. ``ax`` was passed explicitly — record + return.
+    2. A :func:`hea.plot.par` context is active and ``figsize`` is not
+       set — pull the next cell from its grid. (``figsize`` only makes
+       sense for a freshly-created figure, so it forces case 3 even
+       inside ``par``.)
+    3. Neither — create a fresh figure with ``plt.subplots(figsize=)``
+       (R's "open a new device" default).
+
+    In every case the returned ``Axes`` is stored as :data:`_LAST_AX` so
+    later overlay calls (``abline``, ``points``, …) without an explicit
+    ``ax=`` know where to draw.
     """
     if ax is not None:
+        _remember_ax(ax)
         return ax
     # Local import keeps _util.py free of plt at module load (R's plotters
     # are sometimes used headless / with backend swaps in tests).
     from .par import _current_par
 
     p = _current_par()
-    if p is not None:
-        return p.next_cell()
-    import matplotlib.pyplot as plt
+    if p is not None and figsize is None:
+        ax = p.next_cell()
+    else:
+        import matplotlib.pyplot as plt
 
-    _, ax = plt.subplots()
+        _, ax = plt.subplots(figsize=figsize)
+    _remember_ax(ax)
     return ax
+
+
+def resolve_overlay_ax(ax, fname: str):
+    """Target axes for an overlay (``abline``, ``points``, …).
+
+    Returns ``ax`` if given, otherwise the most recently drawn hea axes
+    (set by :func:`resolve_ax`). Raises a clear error if neither — that
+    case is "annotate without a plot" which has no sensible default.
+    """
+    if ax is not None:
+        return ax
+    if _LAST_AX is not None:
+        return _LAST_AX
+    raise ValueError(
+        f"{fname}(): no ax= and no previous hea plot to attach to. "
+        f"Call a primary plotter (plot, hist, …) first or pass ax=."
+    )
 
 
 def to_codes(x):

@@ -224,9 +224,24 @@ def test_rug_side_accepts_r_integer_codes(diastolic):
     assert len(ax.lines) == diastolic.len()
 
 
-def test_rug_requires_ax(diastolic):
-    with pytest.raises(ValueError, match="ax="):
-        rug(diastolic)
+def test_rug_falls_back_to_last_hea_axes(diastolic):
+    """Like other overlays, ``rug`` targets the most recent hea axes
+    when ``ax=`` is omitted (so ``hist(x); rug(x)`` works directly)."""
+    ax = hist(diastolic)
+    rug(diastolic)
+    assert len(ax.lines) == diastolic.len()
+
+
+def test_rug_with_no_prior_plot_errors():
+    """No prior hea plot → ``rug`` still raises (no sensible default)."""
+    from hea.plot import _util
+
+    saved, _util._LAST_AX = _util._LAST_AX, None
+    try:
+        with pytest.raises(ValueError, match="no previous hea plot"):
+            rug([1.0, 2.0])
+    finally:
+        _util._LAST_AX = saved
 
 
 def test_rug_rejects_bad_side(diastolic):

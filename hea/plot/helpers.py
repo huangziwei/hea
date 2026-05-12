@@ -385,13 +385,10 @@ def interaction_plot(
             if ys.size:
                 cells[ti, xi] = float(fun(ys))
 
-    if ax is None and figsize is not None:
-        # Honor a caller-specified figsize, even if it means stepping
-        # outside an active par() context (figsize wouldn't apply to a
-        # pre-allocated par cell).
-        _, ax = plt.subplots(figsize=figsize)
-    else:
-        ax = resolve_ax(ax)
+    # Honor a caller-specified figsize, even if it means stepping
+    # outside an active par() context (figsize wouldn't apply to a
+    # pre-allocated par cell — resolve_ax handles that switch).
+    ax = resolve_ax(ax, figsize=figsize)
 
     x_pos = np.arange(len(x_levels))
     show_line = type in ("l", "b", "o", "c")

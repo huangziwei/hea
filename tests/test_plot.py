@@ -208,9 +208,29 @@ def test_abline_h_vector_with_lty_vector(numeric_df):
     plt.close("all")
 
 
-def test_abline_requires_ax(numeric_df):
-    with pytest.raises(ValueError, match="`ax=` is required"):
-        lmplot.abline(0, 1)
+def test_abline_falls_back_to_last_hea_axes(numeric_df):
+    """When ``ax=`` is omitted, ``abline`` targets the most recently
+    drawn hea axes — the R idiom ``plot(...); abline(lmod)`` works
+    without the user threading ``ax=`` through every call.
+    """
+    ax = lmplot.plot("y ~ x", data=numeric_df)
+    out = lmplot.abline(0, 1)
+    assert out is ax
+    plt.close("all")
+
+
+def test_abline_with_no_prior_hea_plot_errors():
+    """If nothing has been drawn yet, ``abline()`` still raises — no
+    sensible default. (Resets module state by triggering the no-history
+    branch via a fresh module reimport in this test's scope.)"""
+    from hea.plot import _util
+
+    saved, _util._LAST_AX = _util._LAST_AX, None
+    try:
+        with pytest.raises(ValueError, match="no previous hea plot"):
+            lmplot.abline(0, 1)
+    finally:
+        _util._LAST_AX = saved
 
 
 def test_abline_lm_without_intercept_errors(numeric_df):
