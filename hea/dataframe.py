@@ -2702,17 +2702,38 @@ class Series(pl.Series):
         out = super().is_close(*args, **kwargs)
         return type(self)._from_pyseries(out._s)
 
+    def _is_ordered_factor(self) -> bool:
+        """True when this Series should print levels with ``<`` separators
+        (R's ordered-factor display). Two sources, in order:
+
+        1. Local marker set by ``factor(..., ordered=True)`` /
+           ``ordered()`` — covers unnamed Series (bare-list inputs).
+           Lost on derived ops; that's fine since this is a print-time
+           cosmetic.
+        2. The ``_ORDERED_COLS_CV`` contextvar — covers named columns
+           registered for poly contrasts in model fitting, so the same
+           ordered-ness flows to ``df["col"]`` views.
+        """
+        if getattr(self, "_hea_ordered", False):
+            return True
+        if self.name:
+            from .formula import _ORDERED_COLS_CV
+            return self.name in _ORDERED_COLS_CV.get()
+        return False
+
     def __str__(self) -> str:
         base = super().__str__()
         if isinstance(self.dtype, pl.Enum):
-            return base + "\nLevels: " + " ".join(self.dtype.categories.to_list())
+            sep = " < " if self._is_ordered_factor() else " "
+            return base + "\nLevels: " + sep.join(self.dtype.categories.to_list())
         return base
 
     def _repr_html_(self) -> str:
         base = super()._repr_html_()
         if isinstance(self.dtype, pl.Enum):
+            sep = " &lt; " if self._is_ordered_factor() else " "
             levels_html = (
-                f"<small>Levels: {' '.join(self.dtype.categories.to_list())}</small>"
+                f"<small>Levels: {sep.join(self.dtype.categories.to_list())}</small>"
             )
             stripped = base.rstrip()
             if stripped.endswith("</div>"):

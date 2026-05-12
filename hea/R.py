@@ -195,7 +195,28 @@ def factor(
         set_ordered_cols(_ORDERED_COLS_CV.get() | frozenset({series.name}))
 
     from .dataframe import Series as _HeaSeries
-    return _HeaSeries._from_pyseries(out._s)
+    result = _HeaSeries._from_pyseries(out._s)
+    if ordered:
+        # Local marker so unnamed Series (factor(bare_list, ordered=True)
+        # has empty name → can't go in _ORDERED_COLS_CV) still print with
+        # ``Levels: a < b < c``. Lost on derived ops, which is fine for
+        # the print-after-construction use case.
+        result._hea_ordered = True
+    return result
+
+
+def ordered(series, levels=None, labels: dict | None = None):
+    """R's ``ordered(x, ...)`` — shortcut for ``factor(x, ordered=True)``.
+
+    Returns an Enum series with the ordered-factor flag set: the
+    series's name (if any) is registered in hea's ordered-cols
+    contextvar so subsequent model fitting (``gam`` / ``lm`` / ``lme``)
+    applies polynomial contrasts, and ``print(s)`` shows
+    ``Levels: a < b < c`` (with ``<`` separators) to match R's display.
+    Polars ``Enum`` already provides ``<`` / ``>`` / sort semantics from
+    the declared level order, so comparison and ordering "just work".
+    """
+    return factor(series, levels=levels, labels=labels, ordered=True)
 
 
 __all__ = [
@@ -218,7 +239,7 @@ __all__ = [
     "as_numeric", "as_integer", "as_character", "as_logical",
     "as_date", "as_Date",
     "is_na", "is_null", "is_finite", "is_numeric", "is_factor",
-    "factor", "interaction", "levels", "nlevels",
+    "factor", "ordered", "interaction", "levels", "nlevels",
     # distributions: d/p/q/r families
     "dnorm", "pnorm", "qnorm", "rnorm",
     "dt", "pt", "qt", "rt",

@@ -482,6 +482,46 @@ def test_factor_repr_appends_levels_line():
     assert "Levels:" not in str(pl.Series([1, 2, 3]))
 
 
+def test_ordered_factor_renders_with_lt_separators():
+    """R's ``ordered()`` displays ``Levels: a < b < c`` to distinguish
+    ordered factors from regular ones. hea matches via two detection
+    paths: a local ``_hea_ordered`` marker on the Series (covers
+    unnamed inputs like ``ordered([a,b,c])``) and the global
+    ``_ORDERED_COLS_CV`` contextvar (covers named columns).
+    """
+    from hea.R import ordered
+    from hea.formula import _ORDERED_COLS_CV, set_ordered_cols
+
+    # 1. Bare-list input (unnamed): local marker path
+    y = ordered(["a", "b", "c"])
+    assert "Levels: a < b < c" in str(y)
+    assert "&lt;" in y._repr_html_()
+
+    # 2. factor(..., ordered=True) is the same alias underneath
+    from hea.R import factor
+    y2 = factor(["c", "a", "b"], levels=["a", "b", "c"], ordered=True)
+    assert "Levels: a < b < c" in str(y2)
+
+    # 3. Unordered factor still uses spaces (no <)
+    y3 = factor(["a", "b", "c"])
+    assert "Levels: a b c" in str(y3)
+    assert "<" not in str(y3).split("Levels:")[1].split("\n")[0]
+
+    # 4. Contextvar path: named column registered for poly contrasts
+    prev = _ORDERED_COLS_CV.get()
+    try:
+        s = pl.Series("g", ["a", "b", "c"]).cast(pl.Enum(["a", "b", "c"]))
+        hea_s = hea.Series._from_pyseries(s._s)
+        # No local marker → check before registration: should be space-separated
+        assert "Levels: a b c" in str(hea_s)
+        # Now register the name in the ordered-cols contextvar
+        set_ordered_cols(prev | frozenset({"g"}))
+        # Same Series — detection now flips to "<" via the contextvar
+        assert "Levels: a < b < c" in str(hea_s)
+    finally:
+        set_ordered_cols(prev)
+
+
 # ---------------------------------------------------------------------------
 # Readr-style parsing
 # ---------------------------------------------------------------------------
@@ -577,7 +617,7 @@ _R_EXPR_SKIP = {
     # Bucketing — eager-only (custom labels machinery).
     "cut", "findInterval",
     # Categorical / dtype introspection — Expr has no eval-time dtype info.
-    "factor", "levels", "nlevels", "is_factor", "is_numeric", "is_null",
+    "factor", "ordered", "levels", "nlevels", "is_factor", "is_numeric", "is_null",
     # cov: no clean polars top-level for 2-vector covariance (compute
     # manually via (x - x.mean()) * (y - y.mean()) / (n - 1) if needed).
     "cov",
