@@ -199,8 +199,12 @@ class TestVerbs:
         assert out == "flights.summarize(avg=col('dep_delay').mean())"
 
     def test_summarize_with_na_rm_kwarg(self):
+        # ``na.rm = TRUE`` is dropped — polars ``Expr.mean()`` always skips
+        # nulls (the equivalent of R's ``na.rm = TRUE``) and doesn't accept
+        # the kwarg. Without this filter the translated code would
+        # TypeError at runtime.
         out = _tr("summarize(flights, avg = mean(dep_delay, na.rm = TRUE))")
-        assert out == "flights.summarize(avg=col('dep_delay').mean(na_rm=True))"
+        assert out == "flights.summarize(avg=col('dep_delay').mean())"
 
     def test_count(self):
         out = _tr('count(flights, origin, dest, sort = TRUE)')
@@ -250,10 +254,13 @@ flights |>
   summarize(arr_delay = mean(arr_delay, na.rm = TRUE))
 """
     out = _tr(src)
+    # ``na.rm = TRUE`` is dropped — polars Expr method form has it as the
+    # implicit default. See test_summarize_with_na_rm_kwarg for the
+    # underlying rule.
     expected = (
         "flights.filter(col('dest') == 'IAH')"
         ".group_by('year', 'month', 'day')"
-        ".summarize(arr_delay=col('arr_delay').mean(na_rm=True))"
+        ".summarize(arr_delay=col('arr_delay').mean())"
     )
     assert out == expected
 
@@ -530,10 +537,10 @@ class TestAcross:
         assert out == "df.mutate(a=col('a').mean(), b=col('b').mean())"
 
     def test_with_lambda(self):
+        # ``na.rm = TRUE`` from the lambda body drops at the method-form
+        # site (same rule as test_summarize_with_na_rm_kwarg).
         out = _tr("mutate(df, across(c(a, b), \\(x) mean(x, na.rm = TRUE)))")
-        assert out == (
-            "df.mutate(a=col('a').mean(na_rm=True), b=col('b').mean(na_rm=True))"
-        )
+        assert out == "df.mutate(a=col('a').mean(), b=col('b').mean())"
 
     def test_inside_summarize(self):
         out = _tr("summarize(df, across(c(a, b, c), mean))")

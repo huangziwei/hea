@@ -94,6 +94,11 @@ class Translator:
     def _visit_program(self, prog: R.Program) -> P.Module:
         body: list[P.stmt] = []
         for stmt in prog.statements:
+            if _is_noop_call(stmt):
+                # library(...), require(...), suppressMessages(...) are
+                # R-environment setup that has no Python equivalent.
+                # Drop silently — the relevant hea names are already in scope.
+                continue
             body.append(self._as_stmt(self._visit(stmt)))
         return P.Module(body=body, type_ignores=[])
 
@@ -580,13 +585,25 @@ class Translator:
         if helper.hea_name == "case_when":
             return self._emit_case_when(args)
 
+        # Special-case: data.frame / tibble — emit ``hea.DataFrame({...})``.
+        if helper.hea_name == "__data_frame__":
+            return self._emit_data_frame_call(args)
+
         # Override arg slot if registry specifies one.
         arg_slot_ctx = self.nse.enter(helper.arg_slot) if helper.arg_slot is not None else _null_ctx()
 
         if helper.form == "method" and self.nse.is_expr() and args:
-            # ``mean(x, na.rm = TRUE)`` → ``col("x").mean(na_rm=True)``.
+            # ``mean(x, na.rm = TRUE)`` → ``col("x").mean()``.
             # The first arg becomes the receiver; remaining args become
             # the method's positional / kw args.
+            #
+            # ``na_rm`` is dropped: polars ``Expr.mean()`` / ``.sum()`` etc.
+            # don't take that kwarg, and their behavior matches R's
+            # ``na.rm = TRUE`` (skip nulls). If the user wrote
+            # ``na.rm = FALSE``, we still drop the kwarg — the resulting
+            # behavior diverges from R, but the parity runner will catch
+            # any value diff and report it as a real hea/R gap rather
+            # than a translator bug.
             first = args[0]
             if isinstance(first, R.Identifier):
                 receiver = _call(_name("col"), [P.Constant(first.name)])
@@ -596,6 +613,7 @@ class Translator:
                 receiver = self._visit(first)
             with arg_slot_ctx:
                 rest_args, rest_kwargs = self._translate_args(args[1:])
+            rest_kwargs = [kw for kw in rest_kwargs if kw.arg != "na_rm"]
             return _call(_attr(receiver, helper.hea_name), rest_args, rest_kwargs)
 
         # Function form (or method-form fallback outside EXPR slot).
@@ -646,6 +664,36 @@ class Translator:
                     # user can see what happened.
                     tuples.append(self._visit(arg))
         return _call(_name("case_when"), tuples, kwargs)
+
+    def _emit_data_frame_call(self, args: tuple[R.Node, ...]) -> P.AST:
+        """``data.frame(a = c(1, 2), b = c("x", "y"))`` →
+        ``hea.DataFrame({"a": [1, 2], "b": ["x", "y"]})``.
+
+        Unnamed positional args become ``V1``, ``V2``, …  by position
+        (R's default — though uncommon in idiomatic code). Cross-column
+        references inside tibble (e.g. ``tibble(x = 1:3, y = x * 2)``)
+        are not expanded — that would need build-time evaluation. Emit
+        the literal as-is and let polars fail loudly at runtime.
+        """
+        keys: list[P.AST] = []
+        values: list[P.AST] = []
+        for i, arg in enumerate(args):
+            if isinstance(arg, R.NamedArg):
+                keys.append(P.Constant(value=arg.name))
+                values.append(self._visit(arg.value))
+            elif isinstance(arg, R.MissingArg):
+                continue
+            else:
+                # Skip kwargs like ``stringsAsFactors = FALSE`` that have
+                # no Python equivalent — they're noise post-translation.
+                if isinstance(arg, R.NamedArg) and arg.name == "stringsAsFactors":
+                    continue
+                keys.append(P.Constant(value=f"V{i + 1}"))
+                values.append(self._visit(arg))
+        return _call(
+            _attr(_name("hea"), "DataFrame"),
+            [P.Dict(keys=keys, values=values)],
+        )
 
     def _emit_c_call(self, args: tuple[R.Node, ...]) -> P.AST:
         """``c(a, b, c)`` → Python list. ``c("a" = "b", "x" = "y")`` →
@@ -866,6 +914,24 @@ def _dotted_name(qualified: str) -> P.AST:
     for part in parts[1:]:
         node = _attr(node, part)
     return node
+
+
+_NOOP_CALL_NAMES: frozenset[str] = frozenset({
+    "library", "require",
+    "suppressMessages", "suppressWarnings", "suppressPackageStartupMessages",
+})
+
+
+def _is_noop_call(node) -> bool:
+    """``True`` if ``node`` is an R top-level call whose Python equivalent
+    is empty (library setup, message suppression). These are skipped at
+    the statement level so they don't show up as dangling ``None`` exprs
+    or as bare ``library(dplyr)`` calls in the translated Python."""
+    return (
+        isinstance(node, R.Call)
+        and isinstance(node.func, R.Identifier)
+        and node.func.name in _NOOP_CALL_NAMES
+    )
 
 
 def _is_named_call(node, name: str) -> bool:

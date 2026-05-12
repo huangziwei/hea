@@ -109,6 +109,16 @@ FUNCTION_TABLE: dict[str, Func] = {
     "is.null":  Func("is_null",    "method"),
     "is.finite": Func("is_finite", "method"),
 
+    # ---- tibble / data.frame literal — bespoke handler ----
+    # Translates to ``hea.DataFrame({"col": [values], ...})``. See
+    # ``r_to_py._emit_data_frame_call`` for the implementation. The
+    # ``__data_frame__`` marker steers the dispatch.
+    "data.frame":     Func("__data_frame__", "function"),
+    "tibble":         Func("__data_frame__", "function"),
+    "data_frame":     Func("__data_frame__", "function"),
+    "as_tibble":      Func("__data_frame__", "function"),
+    "as.data.frame":  Func("__data_frame__", "function"),
+
     # ---- forcats ----
     "fct_infreq":      Func("fct_infreq",      "function"),
     "fct_relevel":     Func("fct_relevel",     "function"),
