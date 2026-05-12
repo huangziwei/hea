@@ -1150,7 +1150,7 @@ class lme:
         ax.set_title("Scale-Location")
         return ax
 
-    def plot_design(self, *, figsize=None, tol: float = 1e-10):
+    def plot_design(self, *, figsize=None, cmap: str = "BuPu", gamma: float = 0.5):
         """4-panel design-matrix diagnostic (Bates lme4 book Figs 2.3 + 2.4).
 
         Layout::
@@ -1160,19 +1160,30 @@ class lme:
                      C = Z'Z  — cross-product matrix
                      D = L    — sparse Cholesky factor of Λ′Z′ZΛ + I
 
-        Each panel renders the **sparsity pattern** (cells with
-        ``|value| > tol`` show as dark squares; zeros blank) — matches
-        ``Matrix::image()``'s default and the lme4-book figures. The top
-        panel uses ``aspect='auto'`` (Z is typically wide-and-short once
-        transposed); the three bottom panels are equal-aspect q×q.
+        Renders each matrix's magnitudes (not just sparsity) with a
+        cyan-purple sequential palette and a γ < 1 power norm — matches
+        the lattice ``Matrix::image()`` look used in the lme4 book, where
+        off-diagonal small values (e.g. plate-sample crossings in Z'Z)
+        stay visible alongside the much larger diagonal counts.
+
+        Parameters
+        ----------
+        cmap
+            Sequential matplotlib colormap name. Default ``"BuPu"`` is
+            the Brewer Blue-Purple ramp; ``"PuBu"`` / ``"Blues"`` are
+            close alternatives.
+        gamma
+            Exponent for :class:`matplotlib.colors.PowerNorm` — values
+            below 1 compress the high end so low non-zeros remain
+            visible against a much larger diagonal. Set ``gamma=1`` for
+            a linear scale, or pass a larger ``cmap`` if you want a
+            stark binary look.
         """
         import matplotlib.pyplot as plt
+        from matplotlib.colors import PowerNorm
 
         Z = self.Z if isinstance(self.Z, np.ndarray) else self.Z.toarray()
         ZtZ = Z.T @ Z
-
-        def _pattern(M):
-            return (np.abs(M) > tol).astype(float)
 
         if figsize is None:
             # Bottom row is q×q each; top row spans three columns wide.
@@ -1187,20 +1198,26 @@ class lme:
             """,
             gridspec_kw={"height_ratios": [1, 2]},
         )
-        kw = {"cmap": "gray_r", "interpolation": "nearest",
-              "vmin": 0.0, "vmax": 1.0}
 
-        axd["A"].imshow(_pattern(Z.T), aspect="auto", **kw)
+        def _show(ax, M, *, aspect=None):
+            vmax = float(np.abs(M).max() or 1.0)
+            norm = PowerNorm(gamma=gamma, vmin=0.0, vmax=vmax)
+            kwargs = {"cmap": cmap, "interpolation": "nearest", "norm": norm}
+            if aspect is not None:
+                kwargs["aspect"] = aspect
+            ax.imshow(M, **kwargs)
+
+        _show(axd["A"], Z.T, aspect="auto")
         axd["A"].set_ylabel("random-effect")
         axd["A"].set_xlabel("Z'")
 
-        axd["B"].imshow(_pattern(self.Lambda), **kw)
+        _show(axd["B"], self.Lambda)
         axd["B"].set_xlabel("Λ")
 
-        axd["C"].imshow(_pattern(ZtZ), **kw)
+        _show(axd["C"], ZtZ)
         axd["C"].set_xlabel("Z'Z")
 
-        axd["D"].imshow(_pattern(self.L), **kw)
+        _show(axd["D"], self.L)
         axd["D"].set_xlabel("L")
 
         fig.tight_layout()
