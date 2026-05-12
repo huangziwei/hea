@@ -483,6 +483,17 @@ def test_factor_deferred_in_mutate_and_select():
     assert out5.columns == ["x", "grp"]
     assert isinstance(out5.schema["grp"], pl.Enum)
 
+    # strict= threads through deferred path
+    df_typo = pl.DataFrame({"g": ["a", "b", "x", "a"]})
+    out6 = hea.DataFrame._from_pydf(df_typo._df).mutate(
+        g=factor("g", levels=["a", "b"])
+    )
+    assert out6["g"].to_list() == ["a", "b", None, "a"]
+    with pytest.raises(pl.exceptions.InvalidOperationError):
+        hea.DataFrame._from_pydf(df_typo._df).mutate(
+            g=factor("g", levels=["a", "b"], strict=True)
+        )
+
     # Auto-detect raises a clear error if the column isn't in the frame
     with pytest.raises(ValueError, match="auto-detect levels"):
         hea.DataFrame._from_pydf(df._df).mutate(g=factor("missing"))

@@ -51,13 +51,14 @@ class _LazyFactor:
     frame calls ``_resolve(self)`` to materialize a real ``pl.Expr``.
     """
 
-    __slots__ = ("col_ref", "levels", "labels", "ordered")
+    __slots__ = ("col_ref", "levels", "labels", "ordered", "strict")
 
-    def __init__(self, col_ref, levels, labels, ordered):
+    def __init__(self, col_ref, levels, labels, ordered, strict):
         self.col_ref = col_ref  # str column name or pl.Expr
         self.levels = levels
         self.labels = labels
         self.ordered = ordered
+        self.strict = strict
 
     def _column_name(self) -> str | None:
         if isinstance(self.col_ref, str):
@@ -89,7 +90,7 @@ class _LazyFactor:
                 levels_list = series_utf8.drop_nulls().unique().sort().to_list()
             else:
                 levels_list = [str(v) for v in self.levels]
-            out_expr = s_utf8.cast(pl.Enum(levels_list))
+            out_expr = s_utf8.cast(pl.Enum(levels_list), strict=self.strict)
 
         if self.ordered and col_name:
             from .formula import _ORDERED_COLS_CV
@@ -98,10 +99,11 @@ class _LazyFactor:
 
 
 def factor(
-    series: pl.Series | str | pl.Expr,
+    series,
     levels=None,
     labels: dict | None = None,
     ordered: bool = False,
+    strict: bool = False,
 ):
     """Polars equivalent of R's ``factor()`` — cast a column to ``pl.Enum``.
 
@@ -120,11 +122,13 @@ def factor(
 
     Parameters
     ----------
-    series : pl.Series | str | pl.Expr
-        Column to convert. ``pl.Series`` triggers the eager path;
-        ``str`` (column name) or ``pl.Expr`` triggers the deferred
-        path. Int64 inputs route through Utf8 (``pl.Enum`` can't
-        accept integers directly).
+    series : pl.Series | list | np.ndarray | str | pl.Expr
+        Column to convert. ``pl.Series`` (and bare lists / numpy
+        arrays, which get wrapped) trigger the eager path; ``str``
+        (column name) or ``pl.Expr`` trigger the deferred path.
+        Int64 inputs route through Utf8 (``pl.Enum`` can't accept
+        integers directly). Values not in ``levels=`` become null,
+        matching R's ``factor()`` (which produces ``NA``).
     levels : list | None, optional
         Level order, no relabel. If None, auto-detected via
         ``unique().sort()`` on the string-cast values — that's Unicode
@@ -147,6 +151,12 @@ def factor(
         ``hea.formula.with_ordered_cols`` if you need scoped use.
         ``ordered=False`` does NOT remove an already-registered name —
         call ``set_ordered_cols(frozenset())`` to clear.
+    strict : bool, optional
+        If False (default), values not in ``levels=`` become null —
+        R's ``factor()`` semantics. If True, raise on unknown values
+        — forcats's ``fct()`` semantics, useful for catching typos in
+        coded data. Only affects the ``levels=`` / auto-detect path;
+        the ``labels=`` path always errors on unknown values.
     """
     if levels is not None and labels is not None:
         raise ValueError(
@@ -160,7 +170,12 @@ def factor(
         )
 
     if isinstance(series, (str, pl.Expr)):
-        return _LazyFactor(series, levels=levels, labels=labels, ordered=ordered)
+        return _LazyFactor(
+            series, levels=levels, labels=labels, ordered=ordered, strict=strict
+        )
+
+    if not isinstance(series, pl.Series):
+        series = pl.Series(series)
 
     s = series.cast(pl.Utf8)
 
@@ -173,12 +188,14 @@ def factor(
             levels_list = s.drop_nulls().unique().sort().to_list()
         else:
             levels_list = [str(v) for v in levels]
-        out = s.cast(pl.Enum(levels_list))
+        out = s.cast(pl.Enum(levels_list), strict=strict)
 
     if ordered and series.name:
         from .formula import _ORDERED_COLS_CV
         set_ordered_cols(_ORDERED_COLS_CV.get() | frozenset({series.name}))
-    return out
+
+    from .dataframe import Series as _HeaSeries
+    return _HeaSeries._from_pyseries(out._s)
 
 
 __all__ = [

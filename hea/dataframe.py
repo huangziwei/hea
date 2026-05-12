@@ -2111,6 +2111,24 @@ class Series(pl.Series):
         out = super().is_close(*args, **kwargs)
         return type(self)._from_pyseries(out._s)
 
+    def __str__(self) -> str:
+        base = super().__str__()
+        if isinstance(self.dtype, pl.Enum):
+            return base + "\nLevels: " + " ".join(self.dtype.categories.to_list())
+        return base
+
+    def _repr_html_(self) -> str:
+        base = super()._repr_html_()
+        if isinstance(self.dtype, pl.Enum):
+            levels_html = (
+                f"<small>Levels: {' '.join(self.dtype.categories.to_list())}</small>"
+            )
+            stripped = base.rstrip()
+            if stripped.endswith("</div>"):
+                return stripped[: -len("</div>")] + levels_html + "</div>"
+            return base + levels_html
+        return base
+
 
 def _install_series_subclass_overrides() -> None:
     """Install hea.Series-aware wrappers for every method on pl.Series that

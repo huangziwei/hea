@@ -428,6 +428,60 @@ def test_factor_levels_nlevels_is_factor():
     assert nlevels(pl.Series([1, 2, 3])) == 0
 
 
+def test_factor_accepts_list_and_unknown_value_handling():
+    """R's ``factor()`` accepts a character vector — bare Python lists
+    and numpy arrays should work the same. Unknown values default to
+    null (R parity); ``strict=True`` raises (forcats ``fct()`` parity).
+    """
+    month_levels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+    # list input, all values known
+    y1 = factor(["Dec", "Apr", "Jan", "Mar"], levels=month_levels)
+    assert y1.to_list() == ["Dec", "Apr", "Jan", "Mar"]
+    assert levels(y1) == month_levels
+
+    # numpy array input
+    y_np = factor(np.array(["Dec", "Apr"]), levels=month_levels)
+    assert y_np.to_list() == ["Dec", "Apr"]
+
+    # default strict=False — unknown "Jam" → null (R factor() semantics)
+    y2 = factor(["Dec", "Apr", "Jam", "Mar"], levels=month_levels)
+    assert y2.to_list() == ["Dec", "Apr", None, "Mar"]
+
+    # strict=True — unknown raises (forcats fct() semantics)
+    with pytest.raises(pl.exceptions.InvalidOperationError):
+        factor(["Dec", "Apr", "Jam", "Mar"], levels=month_levels, strict=True)
+
+    # strict=True with clean input still works
+    y3 = factor(["Dec", "Apr"], levels=month_levels, strict=True)
+    assert y3.to_list() == ["Dec", "Apr"]
+
+
+def test_factor_repr_appends_levels_line():
+    """R prints ``Levels: ...`` after the values — useful for inspecting
+    factor objects. The hea.Series repr override appends the line when
+    dtype is ``pl.Enum``. Non-enum series are unchanged.
+    """
+    y1 = factor(["Dec", "Apr", "Jan", "Mar"])  # auto: alphabetical
+    text = str(y1)
+    assert "Levels: Apr Dec Jan Mar" in text
+
+    # explicit levels keep the user-specified order in the Levels line
+    month_levels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    y2 = factor(["Dec", "Apr"], levels=month_levels)
+    assert "Levels: " + " ".join(month_levels) in str(y2)
+
+    # HTML repr (Jupyter) appends Levels inside the rendered div
+    html = y2._repr_html_()
+    assert "Levels: " + " ".join(month_levels) in html
+    assert html.rstrip().endswith("</div>")
+
+    # non-enum series: no Levels line
+    assert "Levels:" not in str(pl.Series([1, 2, 3]))
+
+
 # ---------------------------------------------------------------------------
 # Readr-style parsing
 # ---------------------------------------------------------------------------
