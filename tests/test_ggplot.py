@@ -50,7 +50,7 @@ from hea.ggplot import (
     scale_x_log10,
     scale_x_ordinal, scale_x_percent, scale_x_reverse, scale_x_sqrt,
     scale_x_time, scale_y_continuous, scale_y_date, scale_y_datetime,
-    scale_y_log10, scale_y_percent,
+    scale_y_log10, scale_y_percent, scale_y_sqrt,
     theme, theme_bw, theme_classic, theme_dark, theme_gray,
     theme_minimal, theme_void, xlab, xlim, ylab, ylim,
 )
@@ -338,6 +338,53 @@ def test_scale_x_sqrt():
         # disp range [71, 472] → sqrt range [~8.4, ~21.7].
         assert offsets[:, 0].max() < 25
         assert offsets[:, 0].min() > 8
+    finally:
+        plt.close(fig)
+
+
+def test_scale_y_sqrt_transforms_stat_generated_y():
+    """``scale_y_sqrt() + geom_bar()`` must transform the stat-generated
+    ``y = count`` so bars are drawn at sqrt-positions. Pre-fix, only the
+    pre-stat transform pass ran — y didn't exist then, so the transform
+    was skipped and the bars rendered at raw counts while ticks were
+    placed at sqrt-positions (visually misaligned)."""
+    df = pl.DataFrame({"x": list("AAABBBBCCCCCCCCCCCCCCCCDDDDDDDDDDDDDDDDD")})
+    p = (ggplot(df, aes("x")) + geom_bar() + scale_y_sqrt())
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # Bars should be at sqrt-heights, not raw counts.
+        heights = sorted(round(p.get_height(), 4) for p in ax.patches)
+        # counts: A=3, B=4, C=16, D=17 → sqrt: ~1.73, 2.00, 4.00, ~4.12
+        import math
+        assert heights[0] == pytest.approx(math.sqrt(3), abs=1e-4)
+        assert heights[-1] == pytest.approx(math.sqrt(17), abs=1e-4)
+        # Tick labels should read in raw count units.
+        labels = [t.get_text() for t in ax.get_yticklabels()]
+        assert any(lbl in ("0", "5", "10", "15", "20") for lbl in labels), labels
+    finally:
+        plt.close(fig)
+
+
+def test_scale_y_sqrt_tick_labels_in_raw_units_for_geom_col():
+    """Pre-fix bug: ``scale_y_sqrt()`` with ``geom_col`` placed labels
+    showing the *sqrt-space* values (``"10", "20", ...``) instead of the
+    *raw* values (``"100", "400", ...``). ``SqrtTrans.tick_positions_and_labels``
+    now inverse-maps to raw units before formatting."""
+    df = pl.DataFrame({"x": ["A", "B", "C", "D"],
+                       "y": [100.0, 400.0, 900.0, 1600.0]})
+    p = (ggplot(df, aes("x", "y")) + geom_col() + scale_y_sqrt())
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        labels = [t.get_text() for t in ax.get_yticklabels() if t.get_text()]
+        # The labels should be in raw units (hundreds), not sqrt-units
+        # (tens). Bar tops at sqrt(1600)=40; if labels were "10..40" we'd
+        # be back in the bug. Look for at least one >= 100.
+        large_labels = [lbl for lbl in labels
+                        if lbl.replace(".", "").replace("-", "").isdigit()
+                        and float(lbl) >= 100]
+        assert large_labels, f"Expected raw-unit labels (>=100), got {labels}"
     finally:
         plt.close(fig)
 

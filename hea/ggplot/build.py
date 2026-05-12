@@ -284,8 +284,15 @@ def build(plot) -> BuildOutput:
         # this, ``geom_bin2d() + scale_x_log10()`` would bin in linear
         # space then visually log-warp the bins (= wrong; chunky bins).
         df = _apply_scale_transforms_pre_stat(df, plot.scales)
+        pre_stat_cols = set(df.columns)
         df = _stat_per_panel(df, layer, facet_vars)
         df = _apply_deferred(df, after_stat_map, plot.plot_env)
+        # Apply positional scale transforms to columns the stat generated
+        # (e.g. ``geom_bar``'s ``y = count`` after ``stat_count``). Without
+        # this, ``scale_y_sqrt() + geom_bar()`` would leave y in raw counts
+        # while ``apply_to_axis`` places ticks at sqrt-positions — bars
+        # and ticks end up in different coordinate spaces.
+        df = _apply_scale_transforms_post_stat(df, plot.scales, pre_stat_cols)
         pre_position.append(df)
         deferred_after_stat.append(after_stat_map)
         deferred_after_scale.append(after_scale_map)
@@ -544,6 +551,42 @@ def _apply_scale_transforms_pre_stat(df: pl.DataFrame, scales) -> pl.DataFrame:
         for sibling in _positional_aes_for(axis):
             if sibling not in df.columns:
                 continue
+            arr = df[sibling].to_numpy()
+            try:
+                transformed = trans.transform(arr)
+            except Exception:
+                continue
+            df = df.with_columns(pl.Series(sibling, transformed))
+    return df
+
+
+def _apply_scale_transforms_post_stat(
+    df: pl.DataFrame, scales, pre_stat_cols: set[str],
+) -> pl.DataFrame:
+    """Apply positional scale transforms to columns the stat **generated**
+    (e.g. ``geom_bar``'s ``y = count`` from ``stat_count``).
+
+    Pre-stat columns were transformed by :func:`_apply_scale_transforms_pre_stat`;
+    we skip those here to avoid double-transforming. The set
+    ``pre_stat_cols`` is captured right before the stat runs.
+
+    Mirrors the pre-stat pass otherwise. Same skip rules: only honour
+    transforms that the user actually added (``trans.name != 'identity'``).
+    """
+    if df is None or len(df) == 0 or len(df.columns) == 0:
+        return df
+    for axis in ("x", "y"):
+        sc = scales.get(axis)
+        if sc is None:
+            continue
+        trans = getattr(sc, "transform", None)
+        if trans is None or trans.name == "identity":
+            continue
+        for sibling in _positional_aes_for(axis):
+            if sibling not in df.columns:
+                continue
+            if sibling in pre_stat_cols:
+                continue  # already transformed pre-stat
             arr = df[sibling].to_numpy()
             try:
                 transformed = trans.transform(arr)

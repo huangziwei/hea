@@ -131,6 +131,40 @@ class SqrtTrans(Trans):
         inverse = lambda x: x ** 2  # noqa: E731
         return ("function", {"functions": (forward, inverse)})
 
+    def tick_positions_and_labels(self, lo: float, hi: float):
+        """Nice raw-unit breaks at sqrt-spaced positions.
+
+        ``lo`` and ``hi`` arrive in **transformed (sqrt)** space (the
+        scale's trained range is in transformed space because data is
+        pre-transformed in build). We inverse-map to raw, ask
+        matplotlib's locator for nice breaks there, then forward-map
+        back to display positions and format the labels in raw units.
+
+        Without this, the fall-through path in
+        ``ScaleContinuous.apply_to_axis`` computes nice breaks across
+        the transformed range and labels them with their *transformed*
+        values — e.g. a count axis would show ``"30", "60", "90", "120"``
+        (sqrt-units) instead of ``"1000", "5000", "10000"``.
+        """
+        import matplotlib.ticker as _mt
+
+        from .scale import format_breaks
+
+        raw_lo = max(0.0, float(lo)) ** 2
+        raw_hi = max(0.0, float(hi)) ** 2
+        if raw_hi <= raw_lo:
+            return None
+        locator = _mt.MaxNLocator(nbins=6, steps=[1, 2, 2.5, 5, 10])
+        raw_breaks = [
+            float(b) for b in locator.tick_values(raw_lo, raw_hi)
+            if raw_lo <= b <= raw_hi and b >= 0
+        ]
+        if not raw_breaks:
+            return None
+        positions = [b ** 0.5 for b in raw_breaks]
+        labels = format_breaks(raw_breaks)
+        return positions, labels
+
 
 class ReverseTrans(Trans):
     """Visual reverse: data values aren't transformed (so stats run on

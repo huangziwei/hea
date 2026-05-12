@@ -79,8 +79,16 @@ def _polar_x_range(x_scale):
         n = len(levels)
         if n == 0:
             return None
-        pad_lo, pad_hi = x_scale._padding()
-        return (-float(pad_lo), float(n - 1) + float(pad_hi))
+        # NOTE: deliberately ignore the scale's discrete expansion padding
+        # (``pad_lo, pad_hi = x_scale._padding()``). On Cartesian, the
+        # +0.6/-0.6 pad keeps bars off the axis edges; on a closed circle
+        # it just leaves a wedge of empty space at the 0/2π seam and the
+        # bars no longer tile the full circle. Mapping the n positions
+        # ``[0..n-1]`` into ``[0, 2π·(n-1)/n]`` (via range ``(0, n)``)
+        # makes width=1 bars tile exactly and width<1 produce uniform
+        # gaps everywhere (including the seam) — the right behaviour for
+        # circular categorical data.
+        return (0.0, float(n))
     if isinstance(x_scale, ScaleContinuous):
         if x_scale.range_ is None:
             return None

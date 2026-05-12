@@ -315,6 +315,32 @@ def test_coord_polar_labs_opts_axis_titles_back_in():
         plt.close(fig)
 
 
+def test_coord_polar_ordinal_bars_tile_full_circle_without_seam_gap():
+    """N ordinal levels with ``width=1`` bars should tile the full
+    circle — bar 0 and bar N-1 must meet at the seam. ScaleOrdinal's
+    discrete expansion padding (which Cartesian needs to keep bars off
+    axis edges) leaves an empty wedge at the 0/2π join when used as a
+    polar rescale span; ``_polar_x_range`` drops the expansion for
+    ordinal-on-polar so positions [0..n-1] map cleanly into 2π."""
+    n = 8
+    df = pl.DataFrame({"cat": [chr(ord("A") + i) for i in range(n)] * 5})
+    p = (ggplot(df, aes(x="cat")) + geom_bar(width=1) + coord_polar())
+    fig = p.draw()
+    try:
+        ax = fig.axes[0]
+        # Sort bar centers; check spacing between adjacent bars equals
+        # the seam spacing (bar n-1 right edge ↔ bar 0 left edge, modulo
+        # 2π). If the seam has a unique gap, this fails.
+        centers = sorted(p.get_x() + p.get_width() / 2 for p in ax.patches)
+        spacings = [centers[i + 1] - centers[i] for i in range(n - 1)]
+        seam_spacing = (2 * math.pi - centers[-1]) + centers[0]
+        expected = 2 * math.pi / n
+        assert all(abs(s - expected) < 1e-9 for s in spacings)
+        assert abs(seam_spacing - expected) < 1e-9
+    finally:
+        plt.close(fig)
+
+
 def test_coord_polar_continuous_rose_pins_angular_range_to_two_pi():
     """A rose-style chart: N wedges at theta = k·2π/N (k = 0..N-1).
     Data trains the x-scale to ``[0, ~2π·(N-1)/N)``, not exactly 2π
