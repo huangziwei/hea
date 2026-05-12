@@ -574,31 +574,45 @@ def _input_levels(s: pl.Series) -> list[str]:
     return sorted({str(v) for v in s.drop_nulls().to_list()})
 
 
-def fct_recode(col: str, **renames: str) -> Callable:
-    """Rename factor levels via ``new=old`` keyword args.
+def fct_recode(col: str, **renames) -> Callable:
+    """Rename (and optionally merge) factor levels via ``new=old`` kwargs.
 
-    Mirrors R's ``forcats::fct_recode(col, new = old)`` — kwarg direction
-    is preserved. Unmentioned levels keep their original name and
-    position. For keys that aren't valid Python identifiers (spaces,
-    punctuation), use ``**{}`` to unpack a dict::
+    Mirrors R's ``forcats::fct_recode``. Kwarg direction matches R
+    (``new = old``). Values can be either a single string (1:1 rename)
+    or a list/tuple of strings (many:1 merge — Python's equivalent of
+    R's repeated-keyword trick, since dict keys can't repeat). Use
+    ``**{}`` for keys that aren't valid Python identifiers::
 
         fct_recode("partyid", **{
-            "Republican, strong": "Strong republican",
-            "Republican, weak":   "Not str republican",
+            "Republican, strong":    "Strong republican",   # 1:1
+            "Republican, weak":      "Not str republican",
+            "Other":                 ["No answer", "Don't know", "Other party"],  # many:1
         })
 
-    Values must be strings — for many-to-one merges use ``fct_collapse``.
+    Unmentioned levels keep their original name and position. For
+    sweeping all unmentioned levels into a single bucket, use
+    ``fct_collapse(..., other_level=)``.
     """
     if not renames:
         raise ValueError("fct_recode(): pass at least one new=old rename.")
+    # Build a flat {old: new} mapping; list/tuple values map every entry.
+    old_to_new: dict[str, str] = {}
     for new, old in renames.items():
-        if not isinstance(old, str):
+        if isinstance(old, str):
+            old_to_new[old] = new
+        elif isinstance(old, (list, tuple)):
+            for lvl in old:
+                if not isinstance(lvl, str):
+                    raise TypeError(
+                        f"fct_recode(): {new!r} list contains non-string "
+                        f"{lvl!r}."
+                    )
+                old_to_new[lvl] = new
+        else:
             raise TypeError(
-                f"fct_recode(): {new!r} maps to non-string {old!r}; "
-                "use fct_collapse for many-to-one merges."
+                f"fct_recode(): {new!r} maps to {type(old).__name__}; "
+                "expected str or list/tuple of str."
             )
-    # {old: new} for the polars replace step.
-    old_to_new = {old: new for new, old in renames.items()}
 
     def recode(data: pl.DataFrame) -> pl.Series:
         s = data[col]

@@ -3484,9 +3484,16 @@ def test_fct_recode_renames_levels_preserving_order():
     out2 = df2.mutate(g=hea.fct_recode("g", **{"renamed long": "long"}))
     assert "renamed long" in out2["g"].cat.get_categories().to_list()
 
-    # Non-string values rejected (point users to fct_collapse).
-    with pytest.raises(TypeError, match="fct_collapse"):
-        hea.fct_recode("g", X=["a", "b"])
+    # List values trigger many:1 merge (Python equivalent of R's repeated
+    # keyword names — can't be expressed as duplicate dict keys).
+    df3 = hea.DataFrame({"g": ["a", "b", "c", "d"]})
+    out3 = df3.mutate(g=hea.fct_recode("g", X=["a", "b"], Y="c"))
+    assert out3["g"].cat.get_categories().to_list() == ["X", "Y", "d"]
+    assert out3["g"].to_list() == ["X", "X", "Y", "d"]
+
+    # Non-str / non-list values still rejected.
+    with pytest.raises(TypeError, match="expected str or list/tuple"):
+        hea.fct_recode("g", X=42)
 
 
 def test_fct_collapse_merges_levels_with_optional_other():
