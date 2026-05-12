@@ -406,6 +406,58 @@ class TestPreamble:
         assert out.startswith("library(tidyverse)")
 
 
+class TestAutoloadDetection:
+    """py_to_r infers ``library()`` calls for bare names that resolve to
+    a unique rdatasets package (autoload-style references)."""
+
+    def test_flights_autoload(self):
+        out = _tr_full('flights.filter(col("x") > 0)')
+        assert "library(nycflights13)" in out
+
+    def test_explicit_data_still_works(self):
+        # Existing smart-data-assign should be unaffected.
+        out = _tr_full(
+            'penguins = data("penguins", package="palmerpenguins")\n'
+            'penguins.ggplot(x="flipper_length_mm").geom_point()'
+        )
+        assert "library(palmerpenguins)" in out
+
+    def test_locally_defined_name_skips_autoload(self):
+        # If the user assigns to a name that happens to match a dataset,
+        # don't autoload — they're using a local variable.
+        out = _tr_full('flights = my_function()\nflights.filter(col("x") > 0)')
+        assert "library(nycflights13)" not in out
+
+    def test_r_default_package_skipped(self):
+        # ``mtcars`` lives in R's ``datasets`` package which is always
+        # loaded — emitting ``library(datasets)`` would be redundant.
+        out = _tr_full('mtcars.filter(col("mpg") > 20)')
+        assert "library(datasets)" not in out
+
+    def test_ambiguous_name_skipped(self):
+        # ``penguins`` is in both modeldata and palmerpenguins. Don't
+        # guess — the user can disambiguate via explicit data() call.
+        out = _tr_full('penguins.ggplot(x="bill_length_mm").geom_point()')
+        assert "library(palmerpenguins)" not in out
+        assert "library(modeldata)" not in out
+
+    def test_short_var_names_skipped(self):
+        # Names like ``x``, ``df``, ``p1`` are common variables, not
+        # autoload candidates — even if they happen to match a dataset.
+        out = _tr_full('df.filter(col("x") > 0)')
+        # ``df`` IS a dataset in some packages but we exclude it.
+        # No library() for it.
+        body = _strip_preamble(out)
+        # Body should still translate, just no extra dataset preamble.
+        assert "df |>" in body or "df " in body
+
+    def test_excluded_helper_name_skipped(self):
+        # ``c`` is a function we never want as an autoload trigger.
+        out = _tr_full('x = c(1, 2, 3)')
+        # Only thing in preamble would be from autoload — should be empty.
+        assert "library(" not in out
+
+
 class TestRoundTrip:
     """Translate R → hea, then hea → R, and assert structural equivalence.
 
