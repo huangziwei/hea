@@ -26,8 +26,18 @@ from ..nse import Slot
 
 @dataclass(frozen=True, slots=True)
 class Verb:
-    hea_method: str  # method name on hea.DataFrame
-    slot: Slot       # NSE behavior for the verb's expression args
+    """How to translate a verb call.
+
+    - ``hea_method`` — method name on ``hea.DataFrame``.
+    - ``slot`` — NSE slot active while translating the verb's args.
+    - ``auto_kwargs`` — pairs of ``(py_name, value)`` always appended to
+      the emitted method call. Used for translating verbs that map to a
+      kwarg-configured version of another verb (``transmute`` → ``mutate(_keep="none")``).
+    """
+
+    hea_method: str
+    slot: Slot
+    auto_kwargs: tuple[tuple[str, object], ...] = ()
 
 
 # fmt: off
@@ -35,7 +45,7 @@ VERB_TABLE: dict[str, Verb] = {
     # EXPR-slot verbs — args are expressions over column refs.
     "filter":     Verb("filter",    Slot.EXPR),
     "mutate":     Verb("mutate",    Slot.EXPR),
-    "transmute":  Verb("mutate",    Slot.EXPR),   # transmute = mutate(_keep="none")
+    "transmute":  Verb("mutate",    Slot.EXPR, auto_kwargs=(("_keep", "none"),)),
     "summarize":  Verb("summarize", Slot.EXPR),
     "summarise":  Verb("summarize", Slot.EXPR),   # British spelling
 
@@ -43,7 +53,6 @@ VERB_TABLE: dict[str, Verb] = {
     "select":     Verb("select",    Slot.COLUMN_NAME),
     "group_by":   Verb("group_by",  Slot.COLUMN_NAME),
     "count":      Verb("count",     Slot.COLUMN_NAME),
-    "add_count":  Verb("count",     Slot.COLUMN_NAME),
     "distinct":   Verb("distinct",  Slot.COLUMN_NAME),
     "arrange":    Verb("arrange",   Slot.COLUMN_NAME),
     "rename":     Verb("rename",    Slot.COLUMN_NAME),
@@ -53,6 +62,9 @@ VERB_TABLE: dict[str, Verb] = {
     # Stateless verbs — no NSE.
     "ungroup":    Verb("ungroup",   Slot.NONE),
     "glimpse":    Verb("glimpse",   Slot.NONE),
+    # ``add_count`` / ``add_tally`` are NOT mapped here — they need a
+    # mutate(n = n(), _by = cols) expansion, which isn't a 1:1 verb
+    # rename. Tracked as a Phase 4+ item.
 }
 # fmt: on
 

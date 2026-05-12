@@ -21,7 +21,7 @@ from typing import Optional
 from . import r_ast as R
 from .nse import NSEContext, Slot
 from .r_parser import parse as parse_r
-from .registry.functions import FUNCTION_TABLE, KWARG_ALIASES, Func, normalize_kwarg_name
+from .registry.functions import FUNCTION_TABLE, Func, resolve_kwarg
 from .registry.verbs import VERB_TABLE, Verb
 
 
@@ -321,10 +321,23 @@ class Translator:
         return _call(callee, args, kwargs)
 
     def _emit_verb_call(self, verb: Verb, args: tuple[R.Node, ...]) -> P.AST:
-        """First arg becomes the receiver; rest walked under ``verb.slot``."""
+        """First arg becomes the receiver; rest walked under ``verb.slot``.
+
+        After translating the user's kwargs, any :attr:`Verb.auto_kwargs`
+        are appended — that's how ``transmute`` becomes ``mutate(..., _keep="none")``.
+        Auto kwargs only land if the user didn't already pass that name,
+        so the user can override the default (``transmute(..., .keep="all")``
+        would emit ``.mutate(..., _keep="all")``, not both).
+        """
         receiver = self._visit(args[0])
         with self.nse.enter(verb.slot):
             py_args, py_kwargs = self._translate_args(args[1:])
+        if verb.auto_kwargs:
+            existing = {kw.arg for kw in py_kwargs}
+            for name, value in verb.auto_kwargs:
+                if name in existing:
+                    continue
+                py_kwargs.append(P.keyword(arg=name, value=P.Constant(value=value)))
         return _call(_attr(receiver, verb.hea_method), py_args, py_kwargs)
 
     def _emit_helper_call(self, helper: Func, r_name: str, args: tuple[R.Node, ...]) -> P.AST:
@@ -386,15 +399,22 @@ class Translator:
     def _translate_args(self, args: tuple[R.Node, ...]) -> tuple[list[P.AST], list[P.keyword]]:
         """Walk an R argument list, splitting positional from named.
 
-        Named-arg name is normalized via :func:`normalize_kwarg_name`. The
-        value is walked under the current NSE slot.
+        Named-arg name is resolved via :func:`resolve_kwarg` — known
+        kwargs (``.by``, ``.keep``, ``.before`` etc.) may force a specific
+        NSE slot for their value, overriding the surrounding verb's slot.
+        Unknown kwargs inherit the current slot.
         """
         py_args: list[P.AST] = []
         py_kwargs: list[P.keyword] = []
         for arg in args:
             if isinstance(arg, R.NamedArg):
-                kw_name = normalize_kwarg_name(arg.name)
-                py_kwargs.append(P.keyword(arg=kw_name, value=self._visit(arg.value)))
+                alias = resolve_kwarg(arg.name)
+                if alias.value_slot is not None:
+                    with self.nse.enter(alias.value_slot):
+                        value = self._visit(arg.value)
+                else:
+                    value = self._visit(arg.value)
+                py_kwargs.append(P.keyword(arg=alias.py_name, value=value))
             elif isinstance(arg, R.MissingArg):
                 # Empty arg in subscript context — represent as None.
                 py_args.append(P.Constant(value=None))

@@ -123,30 +123,58 @@ FUNCTION_TABLE: dict[str, Func] = {
 # fmt: on
 
 
-# Kwarg name aliases — R-side dotted form → Python-side underscore form.
-# Looked up per call: any kwarg whose R name matches a key here gets its
-# Python name from the value. Unknown kwargs pass through with their dots
-# stripped (``na.rm`` → ``na_rm`` is the universal rule, but specific
-# overrides go here when the mapping isn't dot→underscore).
-KWARG_ALIASES: dict[str, str] = {
+@dataclass(frozen=True, slots=True)
+class KwargAlias:
+    """How to translate a known R kwarg.
+
+    - ``py_name`` is the Python kwarg name to emit (``.by`` → ``_by``).
+    - ``value_slot`` is the NSE slot to push when translating the kwarg's
+      VALUE. ``None`` means "inherit the surrounding context".
+
+    Why this matters: ``mutate(x = ..., .by = origin)`` puts ``.by`` inside
+    a verb whose default slot is EXPR — but ``.by`` semantically takes a
+    column NAME (string), not a column expression. The override forces
+    ``origin`` to render as ``"origin"`` rather than ``col("origin")``.
+    """
+
+    py_name: str
+    value_slot: "Slot | None" = None
+
+
+# Kwarg name aliases — R-side dotted form → (Python-side name, value slot).
+# Looked up per call: any kwarg whose R name matches a key here gets the
+# entry's settings. Unknown kwargs default to dot→underscore name with the
+# surrounding slot inherited.
+KWARG_ALIASES: dict[str, KwargAlias] = {
     # dplyr's dot-prefixed kwargs map to underscore-prefixed in hea, by
     # convention (so we don't collide with positional/expression args).
-    ".by":       "_by",
-    ".keep":     "_keep",
-    ".before":   "_before",
-    ".after":    "_after",
-    ".keep_all": "keep_all",
-    ".default":  "default",
+    ".by":       KwargAlias("_by",       Slot.COLUMN_NAME),
+    ".keep":     KwargAlias("_keep",     Slot.NONE),         # string literal: "all"|"used"|"unused"|"none"
+    ".before":   KwargAlias("_before",   Slot.COLUMN_NAME),  # col name or int position
+    ".after":    KwargAlias("_after",    Slot.COLUMN_NAME),
+    ".keep_all": KwargAlias("keep_all",  Slot.NONE),         # logical
+    ".default":  KwargAlias("default",   None),              # case_when default; inherits context
+    ".cols":     KwargAlias("cols",      Slot.COLUMN_NAME),  # across() / pivot_*
+    ".fns":      KwargAlias("fns",       None),              # across() function list
+    ".names":    KwargAlias("names",     Slot.NONE),         # across() name pattern
+    ".names_sep": KwargAlias("names_sep", Slot.NONE),
 }
 
 
-def normalize_kwarg_name(r_name: str) -> str:
-    """R kwarg name → Python kwarg name.
+def resolve_kwarg(r_name: str) -> KwargAlias:
+    """R kwarg name → :class:`KwargAlias`.
 
-    Rules, in order:
-    1. Explicit alias in :data:`KWARG_ALIASES` wins.
-    2. Otherwise, replace ``.`` with ``_`` (``na.rm`` → ``na_rm``).
+    Rules:
+    1. Explicit entry in :data:`KWARG_ALIASES` wins.
+    2. Otherwise, replace ``.`` with ``_`` in the name and inherit the
+       surrounding slot (``na.rm`` → ``KwargAlias("na_rm", None)``).
     """
-    if r_name in KWARG_ALIASES:
-        return KWARG_ALIASES[r_name]
-    return r_name.replace(".", "_")
+    hit = KWARG_ALIASES.get(r_name)
+    if hit is not None:
+        return hit
+    return KwargAlias(r_name.replace(".", "_"), None)
+
+
+# Backwards-compat shim for existing import sites — returns just the name.
+def normalize_kwarg_name(r_name: str) -> str:
+    return resolve_kwarg(r_name).py_name

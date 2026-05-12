@@ -289,6 +289,77 @@ def test_translate_output_is_valid_python():
 # ---------------------------------------------------------------------------
 
 
+class TestMutateSummarize:
+    """Phase 3 — mutate / summarize NSE and dplyr's dot-prefixed kwargs."""
+
+    def test_mutate_sequential_columns(self):
+        # Sequential evaluation is hea's runtime concern — the translator
+        # just emits both kwargs in order; hea.mutate evaluates them
+        # sequentially so the second can see the first.
+        out = _tr("mutate(flights, hours = air_time / 60, gain_per_hour = gain / hours)")
+        assert out == (
+            "flights.mutate(hours=col('air_time') / 60, "
+            "gain_per_hour=col('gain') / col('hours'))"
+        )
+
+    def test_mutate_dot_by_to_underscore_by_as_string(self):
+        # ``.by = origin`` — the column name slot, not the EXPR slot.
+        out = _tr("mutate(flights, gain = dep_delay - arr_delay, .by = origin)")
+        assert out == "flights.mutate(gain=col('dep_delay') - col('arr_delay'), _by='origin')"
+
+    def test_mutate_dot_by_with_c_list(self):
+        out = _tr("mutate(flights, gain = dep_delay - arr_delay, .by = c(origin, dest))")
+        assert out == (
+            "flights.mutate(gain=col('dep_delay') - col('arr_delay'), "
+            "_by=['origin', 'dest'])"
+        )
+
+    def test_mutate_dot_before_as_column_name(self):
+        out = _tr("mutate(flights, gain = dep_delay - arr_delay, .before = day)")
+        assert out == "flights.mutate(gain=col('dep_delay') - col('arr_delay'), _before='day')"
+
+    def test_mutate_dot_after_as_column_name(self):
+        out = _tr("mutate(flights, speed = distance / air_time, .after = day)")
+        assert out == "flights.mutate(speed=col('distance') / col('air_time'), _after='day')"
+
+    def test_mutate_dot_keep_string_literal(self):
+        # ``.keep`` takes a literal string — should NOT become col("used").
+        out = _tr('mutate(flights, x = a + b, .keep = "used")')
+        assert out == "flights.mutate(x=col('a') + col('b'), _keep='used')"
+
+    def test_transmute_auto_injects_keep_none(self):
+        out = _tr("transmute(flights, gain = dep_delay - arr_delay)")
+        assert out == "flights.mutate(gain=col('dep_delay') - col('arr_delay'), _keep='none')"
+
+    def test_transmute_user_keep_wins(self):
+        # Explicit ``.keep`` from the user overrides the auto-injected default.
+        out = _tr('transmute(flights, gain = dep_delay - arr_delay, .keep = "all")')
+        assert out == "flights.mutate(gain=col('dep_delay') - col('arr_delay'), _keep='all')"
+
+    def test_summarize_dot_by(self):
+        out = _tr("summarize(flights, avg = mean(dep_delay), .by = origin)")
+        assert out == "flights.summarize(avg=col('dep_delay').mean(), _by='origin')"
+
+    def test_summarise_british_spelling(self):
+        out = _tr("summarise(flights, avg = mean(dep_delay))")
+        assert out == "flights.summarize(avg=col('dep_delay').mean())"
+
+    def test_mutate_in_pipe(self):
+        out = _tr("flights |> mutate(gain = dep_delay - arr_delay, .before = day)")
+        assert out == (
+            "flights.mutate(gain=col('dep_delay') - col('arr_delay'), _before='day')"
+        )
+
+    def test_mutate_with_nested_aggregator(self):
+        # ``mutate(rank = min_rank(desc(arr_delay)))`` — desc() takes
+        # COLUMN_NAME slot, min_rank() is method-form on its arg.
+        out = _tr("mutate(flights, rank = min_rank(desc(arr_delay)))")
+        # desc("arr_delay") is a function call producing a polars Expr;
+        # min_rank is method form, so it becomes .min_rank() on whatever
+        # desc returns. Since desc returns an Expr, we get desc('...').min_rank().
+        assert out == "flights.mutate(rank=desc('arr_delay').min_rank())"
+
+
 class TestControlFlow:
     def test_if_else_ternary(self):
         out = _tr("if (x > 0) a else b")
