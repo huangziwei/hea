@@ -17,7 +17,7 @@ OUT_ROOT <- "datasets"
 # MASS, nlme, datasets, and most of lme4 are sourced from rdatasets at runtime
 # (see hea/data.py and the cleanup in /Users/ziweih/Works/hea/datasets/),
 # so re-exporting them here would just re-fill slots we just deleted.
-PKGS <- c("mgcv", "faraway", "gamair", "splines", "stats")
+PKGS <- c("mgcv", "faraway", "gamair", "splines", "stats", "forcats")
 # A few lme4 datasets aren't carried by rdatasets — keep these bundled.
 LME4_KEEP <- c("InstEval_sample", "cbpp2", "culcitalogreg", "culcitalvolume",
                "ergoStool", "gopherdat2", "salamander", "schizophrenia", "toenail")
