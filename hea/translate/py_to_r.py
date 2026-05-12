@@ -529,6 +529,17 @@ class Translator:
             if r is not None:
                 return r
 
+        # ``hea.DataFrame({...})`` → ``data.frame(...)`` — the only hea-
+        # qualified call that needs a name change (everything else just
+        # has the prefix stripped).
+        if (
+            isinstance(call.func, P.Attribute)
+            and isinstance(call.func.value, P.Name)
+            and call.func.value.id == "hea"
+            and call.func.attr in ("DataFrame", "from_dict")
+        ):
+            return self._emit_data_frame_reverse(call.args, call.keywords)
+
         # ``hea.X(...)`` / ``selectors.X(...)`` → ``X(...)``. Both
         # namespaces are stripped — R uses bare names for the same
         # functions (via the dplyr / tidyselect imports).
@@ -594,6 +605,33 @@ class Translator:
     def _emit_plain_call(self, name: str, args: list, kwargs: list) -> str:
         """Plain function call ``name(args)`` with no NSE rewriting."""
         return f"{name}({self._emit_args(args, kwargs)})"
+
+    def _emit_data_frame_reverse(self, args: list, kwargs: list) -> str:
+        """``hea.DataFrame({"a": [1, 2], "b": [3, 4]})`` → ``data.frame(a = c(1, 2), b = c(3, 4))``.
+
+        Also accepts ``hea.DataFrame(a=[1, 2], b=[3, 4])`` (Python kwarg form)
+        and ``hea.from_dict({...})``. Other shapes (e.g. list-of-dicts,
+        polars Series args) fall back to a bare ``data.frame(...)`` call
+        with the original args; the user gets readable but possibly-wrong R.
+        """
+        parts: list[str] = []
+        # Dict literal positional: unpack keys/values as R named args.
+        if len(args) == 1 and not kwargs and isinstance(args[0], P.Dict):
+            d = args[0]
+            for k, v in zip(d.keys, d.values):
+                if isinstance(k, P.Constant) and isinstance(k.value, str):
+                    key_text = k.value
+                else:
+                    key_text = self._emit_expr(k, prec=20) if k is not None else "NULL"
+                parts.append(f"{key_text} = {self._emit_expr(v, prec=20)}")
+            return f"data.frame({', '.join(parts)})"
+        # Python kwarg form.
+        if not args and kwargs:
+            for kw in kwargs:
+                parts.append(f"{kw.arg} = {self._emit_expr(kw.value, prec=20)}")
+            return f"data.frame({', '.join(parts)})"
+        # Fallback — let the user figure out the shape mismatch.
+        return self._emit_plain_call("data.frame", args, kwargs)
 
     def _emit_args(self, args: list, kwargs: list) -> str:
         parts: list[str] = []

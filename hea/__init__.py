@@ -125,6 +125,7 @@ from .dataframe import (
 from . import ggplot
 from . import plot
 from . import R
+from .translate.inline import from_R, to_R
 
 
 # 4. Wrap polars factories (constructors + I/O) so they return hea
