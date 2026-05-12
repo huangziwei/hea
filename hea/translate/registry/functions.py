@@ -158,6 +158,21 @@ KWARG_ALIASES: dict[str, KwargAlias] = {
     ".fns":      KwargAlias("fns",       None),              # across() function list
     ".names":    KwargAlias("names",     Slot.NONE),         # across() name pattern
     ".names_sep": KwargAlias("names_sep", Slot.NONE),
+
+    # pivot_* kwargs (no dot prefix in R). cols / id_cols / names_from /
+    # values_from are column lists → COLUMN_NAME. Everything else is a
+    # literal string / bool → Slot.NONE so we don't strip the quotes on
+    # reverse-direction emission.
+    "cols":          KwargAlias("cols",          Slot.COLUMN_NAME),
+    "id_cols":       KwargAlias("id_cols",       Slot.COLUMN_NAME),
+    "names_from":    KwargAlias("names_from",    Slot.COLUMN_NAME),
+    "values_from":   KwargAlias("values_from",   Slot.COLUMN_NAME),
+    "names_to":      KwargAlias("names_to",      Slot.NONE),
+    "values_to":     KwargAlias("values_to",     Slot.NONE),
+    "names_prefix":  KwargAlias("names_prefix",  Slot.NONE),
+    "names_pattern": KwargAlias("names_pattern", Slot.NONE),
+    "values_drop_na": KwargAlias("values_drop_na", Slot.NONE),
+    "values_fill":   KwargAlias("values_fill",   Slot.NONE),
 }
 
 
