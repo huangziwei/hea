@@ -364,6 +364,14 @@ class PlotGrid:
         self.draw(width=width, height=height, units=units, figsize=figsize)
         plt.show()
 
+    def plot_layout(self, **kwargs) -> "PlotGrid":
+        """Fluent equivalent of ``grid + plot_layout(...)``."""
+        return self + plot_layout(**kwargs)
+
+    def plot_annotation(self, **kwargs) -> "PlotGrid":
+        """Fluent equivalent of ``grid + plot_annotation(...)``."""
+        return self + plot_annotation(**kwargs)
+
     def save(
         self,
         filename: str,

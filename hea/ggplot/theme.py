@@ -38,6 +38,28 @@ class element_text:
     angle: float | None = None
     lineheight: float | None = None
 
+    def __init__(self, *, color=None, colour=None, **kwargs):
+        # Accept American ``color`` as a synonym for ``colour`` (ggplot2
+        # accepts both). Mutually exclusive; if both given, ``colour`` wins.
+        if color is not None and colour is None:
+            colour = color
+        elif color is not None and colour is not None and color != colour:
+            raise TypeError(
+                "element_text(): pass color= OR colour=, not both with different values."
+            )
+        self.family = kwargs.pop("family", None)
+        self.face = kwargs.pop("face", None)
+        self.colour = colour
+        self.size = kwargs.pop("size", None)
+        self.hjust = kwargs.pop("hjust", None)
+        self.vjust = kwargs.pop("vjust", None)
+        self.angle = kwargs.pop("angle", None)
+        self.lineheight = kwargs.pop("lineheight", None)
+        if kwargs:
+            raise TypeError(
+                f"element_text(): unexpected kwargs {sorted(kwargs)}"
+            )
+
 
 @dataclass
 class element_line:
@@ -46,6 +68,22 @@ class element_line:
     linetype: Any = None       # R lty int, name, or matplotlib dash tuple
     lineend: str | None = None
 
+    def __init__(self, *, color=None, colour=None, **kwargs):
+        if color is not None and colour is None:
+            colour = color
+        elif color is not None and colour is not None and color != colour:
+            raise TypeError(
+                "element_line(): pass color= OR colour=, not both with different values."
+            )
+        self.colour = colour
+        self.size = kwargs.pop("size", None)
+        self.linetype = kwargs.pop("linetype", None)
+        self.lineend = kwargs.pop("lineend", None)
+        if kwargs:
+            raise TypeError(
+                f"element_line(): unexpected kwargs {sorted(kwargs)}"
+            )
+
 
 @dataclass
 class element_rect:
@@ -53,6 +91,22 @@ class element_rect:
     colour: str | None = None
     size: float | None = None
     linetype: Any = None
+
+    def __init__(self, *, color=None, colour=None, **kwargs):
+        if color is not None and colour is None:
+            colour = color
+        elif color is not None and colour is not None and color != colour:
+            raise TypeError(
+                "element_rect(): pass color= OR colour=, not both with different values."
+            )
+        self.fill = kwargs.pop("fill", None)
+        self.colour = colour
+        self.size = kwargs.pop("size", None)
+        self.linetype = kwargs.pop("linetype", None)
+        if kwargs:
+            raise TypeError(
+                f"element_rect(): unexpected kwargs {sorted(kwargs)}"
+            )
 
 
 @dataclass
