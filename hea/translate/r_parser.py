@@ -345,6 +345,10 @@ class _Parser:
         When ``allow_missing`` is True (subscript context), empty positions
         become :class:`r_ast.MissingArg` rather than a syntax error — so
         ``df[, "a"]`` parses cleanly.
+
+        Trailing commas are accepted: ``f(a, b,)`` parses as ``f(a, b)``.
+        R itself is lenient here for ``tibble``/``data.frame``-shape calls
+        and the r4ds source uses the form throughout.
         """
         args: list[Node] = []
         self._skip_terms()
@@ -361,6 +365,10 @@ class _Parser:
             self._skip_terms()
             if self._peek().kind == ",":
                 self._advance()
+                self._skip_terms()
+                # Trailing comma — break out of the loop cleanly.
+                if self._peek().kind == closer:
+                    break
                 continue
             break
         return args

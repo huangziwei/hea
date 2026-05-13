@@ -122,6 +122,11 @@ FUNCTION_TABLE: dict[str, Func] = {
     "as_tibble":      Func("__data_frame__", "function"),
     "as.data.frame":  Func("__data_frame__", "function"),
 
+    # tribble — row-form literal. ``tribble(~col, ~col, val, val, val, val)``
+    # → reshape to column-major then dispatch to ``hea.DataFrame``. The
+    # ``__tribble__`` marker steers the dispatch in ``_emit_call``.
+    "tribble":        Func("__tribble__", "function"),
+
     # ---- forcats ----
     "fct_infreq":      Func("fct_infreq",      "function"),
     "fct_relevel":     Func("fct_relevel",     "function"),

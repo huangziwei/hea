@@ -1046,6 +1046,10 @@ class Translator:
         if helper.hea_name == "__data_frame__":
             return self._emit_data_frame_call(args)
 
+        # Special-case: tribble — row-form literal, reshape to column-major.
+        if helper.hea_name == "__tribble__":
+            return self._emit_tribble_call(args)
+
         # Override arg slot if registry specifies one.
         arg_slot_ctx = self.nse.enter(helper.arg_slot) if helper.arg_slot is not None else _null_ctx()
 
@@ -1234,6 +1238,48 @@ class Translator:
                     # user can see what happened.
                     tuples.append(self._visit(arg))
         return _call(_name("case_when"), tuples, kwargs)
+
+    def _emit_tribble_call(self, args: tuple[R.Node, ...]) -> P.AST:
+        """``tribble(~a, ~b, 1, "x", 2, "y")`` →
+        ``hea.DataFrame({"a": [1, 2], "b": ["x", "y"]})``.
+
+        Leading args of the form ``~name`` (unary tilde over a bare
+        identifier) are column headers; the remaining args fill those
+        columns in row-major order. A trailing partial row falls
+        through to ``hea.DataFrame`` which will raise (matches R's own
+        behavior — tribble requires complete rows).
+        """
+        col_names: list[str] = []
+        data_args: list[R.Node] = []
+        seen_data = False
+        for a in args:
+            if isinstance(a, R.MissingArg):
+                continue
+            if (
+                not seen_data
+                and isinstance(a, R.Tilde)
+                and a.lhs is None
+                and isinstance(a.rhs, R.Identifier)
+            ):
+                col_names.append(a.rhs.name)
+                continue
+            seen_data = True
+            data_args.append(a)
+        n = len(col_names)
+        if n == 0:
+            # No header rows — degenerate; fall back to data.frame
+            # emission so the user sees a useful error / shape.
+            return self._emit_data_frame_call(args)
+        keys: list[P.AST] = [P.Constant(value=name) for name in col_names]
+        # Reshape row-major data into n parallel column lists.
+        columns: list[list[P.AST]] = [[] for _ in range(n)]
+        for i, a in enumerate(data_args):
+            columns[i % n].append(self._visit(a))
+        values: list[P.AST] = [P.List(elts=col, ctx=P.Load()) for col in columns]
+        return _call(
+            _attr(_name("hea"), "DataFrame"),
+            [P.Dict(keys=keys, values=values)],
+        )
 
     def _emit_data_frame_call(self, args: tuple[R.Node, ...]) -> P.AST:
         """``data.frame(a = c(1, 2), b = c("x", "y"))`` →
