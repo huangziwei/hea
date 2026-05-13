@@ -61,13 +61,16 @@ def _is_coord_polar(coord) -> bool:
 
 def _polar_x_range(x_scale):
     """Return ``(lo, hi)`` for the trained x-scale so the polar rescale
-    can map it to ``[0, 2π]``. Mirrors ggplot2's coord_polar.
+    can map it to ``[0, 2π]``.
 
-    Discrete scales: levels live at integer positions ``0..n-1`` with
-    ggplot2-style ``add=0.6`` padding on each side, giving the seam a
-    small visual gap rather than two bars kissing at the 0/2π join.
+    Discrete scales: returns ``(0, n)``. Combined with categories
+    placed at half-integer positions ``[0.5, 1.5, …, n-0.5]`` (see
+    :func:`_polar_prep_layer_data`), the rescale puts bar centers at
+    ``(i+0.5)·2π/n`` — matching ggplot2's bar placement. Discrete
+    expansion padding (``add=0.6``) is deliberately ignored: on a
+    closed circle it would leave a gap at the 0/2π seam.
 
-    Continuous scales: the trained data range ``(min, max)``; for data
+    Continuous scales: the trained data range ``(min, max)``. For data
     already in ``[0, 2π]`` (pycircstat2's radians) this yields a
     factor of 1.0 in :meth:`CoordPolar.rescale_theta` — no-op.
     """

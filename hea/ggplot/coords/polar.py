@@ -1,18 +1,39 @@
 """``coord_polar()`` — polar coordinate system, matplotlib-native.
 
-Unlike ggplot2's `coord_polar` (which reprojects ``(x, y) → (cos(x)·y,
-sin(x)·y)`` and renders on a Cartesian device, producing bent bars and
-chord-gaps in paths), hea uses matplotlib's native ``projection="polar"``
-axes. ``ax.bar(theta, height, width)`` draws proper wedges;
-``ax.plot(theta, r)`` draws smooth radial paths; ``ax.fill_between(theta,
-r1, r2)`` arc-bounds the fill. **No 2D reprojection.**
+ggplot2 and hea diverge in *where* the polar transform happens:
 
-One 1D operation does happen: the x-aesthetic's trained range is
-linearly rescaled to ``[0, 2π]`` so ordinal x (clarity, gear, …) fans
-around the circle evenly the way ggplot2 does it. For data already in
-radians (pycircstat2's case) the rescale is a no-op (factor = 1).
+- **ggplot2** transforms the data. Each layer's ``(x, y)`` is mapped
+  to ``(cos(x)·y, sin(x)·y)`` and rendered on a Cartesian device.
+  Polygon-shaped geoms — ``geom_col`` rectangles routed through
+  ``GeomRect$draw_panel → GeomPolygon$draw_panel`` under any
+  non-linear coord — get their edges tessellated by ``coord_munch``
+  (default ``segment_length = 0.01``) into a polyline that
+  approximates the curved boundary *before* reprojection.
 
-See ``.claude/plans/coord_polar.md`` for the full rationale.
+- **hea** doesn't reproject the data. It opens a matplotlib axes
+  with ``projection="polar"`` and ships each layer's ``(θ, r)``
+  columns to ``ax.bar`` / ``ax.plot`` / ``ax.fill_between``
+  unchanged. The polar transform is applied at rasterization by
+  matplotlib's ``PolarTransform.transform_path_non_affine``, which
+  *only interpolates* paths whose ``_interpolation_steps`` is not 1.
+
+The practical consequence:
+
+- ``ax.bar`` Rectangles use ``_interpolation_steps = 100``, so the
+  constant-r ``LINETO`` edges are replaced with ``Path.arc()`` (CURVE4
+  cubic-Bezier) segments and the constant-θ edges stay radial. Polar
+  bars get true-arc wedges with ~15 path vertices.
+- ``ax.plot`` and ``ax.fill_between`` use ``_interpolation_steps = 1``,
+  so matplotlib does *not* interpolate. The path between consecutive
+  data points is a ``LINETO`` in ``(θ, r)`` space, which renders as a
+  chord in display. Sparse paths/ribbons look polygonal — *worse*
+  than ggplot2's ``coord_munch`` output. Dense sampling (e.g.
+  pycircstat2's CI arcs) hides this.
+
+One 1D operation does happen in hea: the x-aesthetic's trained range
+is linearly rescaled to ``[0, 2π]`` so ordinal x (clarity, gear, …)
+fans around the circle evenly. For data already in radians
+(pycircstat2's case) the rescale is a no-op (factor = 1).
 """
 
 from __future__ import annotations
