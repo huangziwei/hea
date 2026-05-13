@@ -154,15 +154,22 @@ FUNCTION_TABLE: dict[str, Func] = {
     "read_delim":   Func("read_csv", "function", drop_kwargs=frozenset({"col_types", "id", "locale", "trim_ws", "show_col_types"})),
 
     # ---- forcats ----
-    "fct_infreq":      Func("fct_infreq",      "function"),
-    "fct_relevel":     Func("fct_relevel",     "function"),
-    "fct_recode":      Func("fct_recode",      "function"),
-    "fct_collapse":    Func("fct_collapse",    "function"),
-    "fct_lump_n":      Func("fct_lump_n",      "function"),
-    "fct_lump_lowfreq": Func("fct_lump_lowfreq", "function"),
-    "fct_reorder":     Func("fct_reorder",     "function"),
-    "fct_reorder2":    Func("fct_reorder2",    "function"),
-    "fct_rev":         Func("fct_rev",         "function"),
+    # All hea ``fct_*`` helpers are lazy — they take the COLUMN NAME (a
+    # string) and return a callable that resolves against the receiving
+    # ``mutate()`` / ``select()`` at evaluation time. Put their first
+    # arg in COLUMN_NAME slot so bare ``marital`` becomes ``"marital"``,
+    # not ``col("marital")``. The downstream args (``by``/``x``/``y``
+    # in fct_reorder*; the rename dict in fct_recode/fct_collapse) are
+    # already string-shaped from R's NSE.
+    "fct_infreq":      Func("fct_infreq",      "function", Slot.COLUMN_NAME),
+    "fct_relevel":     Func("fct_relevel",     "function", Slot.COLUMN_NAME),
+    "fct_recode":      Func("fct_recode",      "function", Slot.COLUMN_NAME),
+    "fct_collapse":    Func("fct_collapse",    "function", Slot.COLUMN_NAME),
+    "fct_lump_n":      Func("fct_lump_n",      "function", Slot.COLUMN_NAME),
+    "fct_lump_lowfreq": Func("fct_lump_lowfreq", "function", Slot.COLUMN_NAME),
+    "fct_reorder":     Func("fct_reorder",     "function", Slot.COLUMN_NAME),
+    "fct_reorder2":    Func("fct_reorder2",    "function", Slot.COLUMN_NAME),
+    "fct_rev":         Func("fct_rev",         "function", Slot.COLUMN_NAME),
 }
 # fmt: on
 
