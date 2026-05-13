@@ -894,16 +894,17 @@ class Quasi(Family):
         return self._shadow.dev_resids(y, mu, wt)
 
     def initialize(self, y, wt):
-        # R's quasi(variance='mu(1-mu)') uses (y+0.5)/2 — different from
-        # Binomial's (wt·y+0.5)/(wt+1). Other variance choices match their
-        # parametric counterpart's start.
+        # R's quasi(variance='mu(1-mu)') initialize is
+        # ``pmax(0.001, pmin(0.999, y))`` — clip y into the open
+        # interval (0, 1). Different from binomial's
+        # ``(wt·y + 0.5) / (wt + 1)`` smoothing.
         if self.variance_name == "mu(1-mu)":
             y = np.asarray(y, dtype=float)
             if np.any(y < 0) or np.any(y > 1):
                 raise ValueError(
                     "y values must be 0 <= y <= 1 for quasi(variance='mu(1-mu)')"
                 )
-            return (y + 0.5) / 2.0
+            return np.clip(y, 0.001, 0.999)
         return self._shadow.initialize(y, wt)
 
     def validmu(self, mu):

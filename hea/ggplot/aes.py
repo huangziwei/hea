@@ -83,7 +83,9 @@ def split_layer_kwargs(kwargs: dict) -> tuple[dict, dict]:
 
 class Aes(dict):
     """Aesthetic mapping. ``dict`` subclass so ``aes(...) + aes(...)`` merges
-    by right-side override (matching ggplot2's ``%+%`` semantics)."""
+    by right-side override — a hea convenience. (ggplot2 does not merge
+    bare aes objects this way; you'd write ``ggplot(d, aes(x=a)) + aes(y=b)``,
+    which the plot's ``+`` dispatch then merges into the layer mapping.)"""
 
     def __add__(self, other: "Aes") -> "Aes":
         return Aes({**self, **other})

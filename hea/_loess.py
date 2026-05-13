@@ -11,8 +11,9 @@ now):
 * ``span``, ``degree`` (1 or 2), ``family`` ("gaussian" or "symmetric"),
   ``iterations`` for the robustness M-step;
 * direct neighbour lookup at each query point — no kd-tree interpolation
-  surface (R's ``loess(surface="interpolate")``). For n < ~1000 this is
-  fast; geom_smooth defaults to GAM above that anyway.
+  surface (R's ``loess.control(surface="interpolate")``, which is its
+  default). For n < ~1000 this is fast; geom_smooth defaults to GAM
+  above that anyway.
 * standard errors at any prediction grid via the WLS variance formula.
 
 Reference: Cleveland WS, Devlin SJ. *Locally Weighted Regression: An
@@ -143,8 +144,9 @@ def _local_fit(x_query: float, x: np.ndarray, y: np.ndarray, span: float,
 
     d = np.abs(x - x_query)
     if k >= n:
-        # Use everything; bandwidth is the max distance, possibly stretched
-        # past 1 in tricube — R does this in the "global" regime.
+        # Use everything; bandwidth is the max distance. When span > 1
+        # R loess (loessc.c) stretches the bandwidth proportionally; we
+        # use the simple max-distance bound here.
         h = d.max()
     else:
         # k-th smallest distance bounds the bandwidth.
