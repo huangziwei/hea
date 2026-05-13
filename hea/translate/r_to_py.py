@@ -1161,6 +1161,10 @@ class Translator:
         if helper.hea_name == "__where__":
             return self._emit_where_call(args)
 
+        # Special-case: join_by — bare ID → string; comparison → Expr.
+        if helper.hea_name == "__join_by__":
+            return self._emit_join_by_call(args)
+
         # Override arg slot if registry specifies one.
         arg_slot_ctx = self.nse.enter(helper.arg_slot) if helper.arg_slot is not None else _null_ctx()
 
@@ -1187,6 +1191,16 @@ class Translator:
                 rest_args, rest_kwargs = self._translate_args(args[1:])
             rest_kwargs = [kw for kw in rest_kwargs if kw.arg != "na_rm"]
             return _call(_attr(receiver, helper.hea_name), rest_args, rest_kwargs)
+
+        # Drop R-side kwargs that have no hea counterpart (e.g. readr's
+        # ``col_types=`` / ``id=``) so the emitted .py doesn't carry
+        # them. Done pre-translate so the dropped arg's value isn't
+        # walked at all (the value may itself reference R-only names).
+        if helper.drop_kwargs:
+            args = tuple(
+                a for a in args
+                if not (isinstance(a, R.NamedArg) and a.name in helper.drop_kwargs)
+            )
 
         # Function form (or method-form fallback outside EXPR slot).
         with arg_slot_ctx:
@@ -1366,6 +1380,34 @@ class Translator:
         "is.POSIXct":   "datetime",
         "is.POSIXlt":   "datetime",
     }
+
+    _JOIN_BY_BINOPS: frozenset[str] = frozenset({"==", "<", "<=", ">", ">=", "!="})
+
+    def _emit_join_by_call(self, args: tuple[R.Node, ...]) -> P.AST:
+        """``join_by(x, dest == faa, closest(t >= u))`` — dplyr's NSE
+        join spec. Each arg gets its own treatment:
+
+        - ``Identifier`` (bare name) → emit ``'name'`` (string; same key
+          on both sides; hea's ``join_by`` recognises this shape).
+        - ``BinOp`` with a comparison op → emit
+          ``col('lhs') op col('rhs')`` so polars' ``Expr.__eq__`` /
+          ``__lt__`` / etc. fires and produces a join-binary expression.
+        - ``Call`` to one of ``closest`` / ``between`` / ``overlaps`` /
+          ``within`` (or anything else) → translate normally with
+          ``Slot.EXPR`` active so its args (column names) become col()s.
+        """
+        py_args: list[P.AST] = []
+        for a in args:
+            if isinstance(a, R.Identifier):
+                py_args.append(P.Constant(value=a.name))
+                continue
+            if isinstance(a, R.BinOp) and a.op in self._JOIN_BY_BINOPS:
+                with self.nse.enter(Slot.EXPR):
+                    py_args.append(self._visit(a))
+                continue
+            with self.nse.enter(Slot.EXPR):
+                py_args.append(self._visit(a))
+        return _call(_name("join_by"), py_args)
 
     def _emit_where_call(self, args: tuple[R.Node, ...]) -> P.AST:
         """``where(is.character)`` → ``selectors.string()``. Known

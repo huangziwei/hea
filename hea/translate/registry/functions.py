@@ -33,6 +33,7 @@ class Func:
     hea_name: str
     form: str            # "method" | "function"
     arg_slot: Slot | None = None  # None = inherit parent slot
+    drop_kwargs: frozenset[str] = frozenset()  # R-only kwargs to skip at emit time
 
 
 # fmt: off
@@ -105,6 +106,9 @@ FUNCTION_TABLE: dict[str, Func] = {
     # (``_emit_where_call``) maps known R-predicate identifiers to the
     # equivalent ``polars.selectors`` constructor.
     "where":        Func("__where__",              "function"),
+    # ``join_by(col1, col2 == col3, ...)`` — bare name → string,
+    # comparison expr → ``col(lhs) op col(rhs)``. Bespoke handler.
+    "join_by":      Func("__join_by__",            "function"),
 
     # ---- base R that maps directly to hea ----
     "c":        Func("__list__",   "function"),  # bespoke — emit as a list/Series
@@ -130,6 +134,16 @@ FUNCTION_TABLE: dict[str, Func] = {
     # → reshape to column-major then dispatch to ``hea.DataFrame``. The
     # ``__tribble__`` marker steers the dispatch in ``_emit_call``.
     "tribble":        Func("__tribble__", "function"),
+
+    # ---- readr ----
+    # ``col_types = cols(month = col_factor(...))`` is meaningful in R but
+    # has no clean hea analog (polars infers; use ``schema_overrides=`` if
+    # a manual hint is needed). Drop the kwarg at translate time so the
+    # .py output stays meaningful. ``id=`` (multi-file id-column) and
+    # ``locale=`` (locale-aware parsing) are similarly out of scope.
+    "read_csv":     Func("read_csv", "function", drop_kwargs=frozenset({"col_types", "id", "locale", "trim_ws", "show_col_types"})),
+    "read_tsv":     Func("read_csv", "function", drop_kwargs=frozenset({"col_types", "id", "locale", "trim_ws", "show_col_types"})),
+    "read_delim":   Func("read_csv", "function", drop_kwargs=frozenset({"col_types", "id", "locale", "trim_ws", "show_col_types"})),
 
     # ---- forcats ----
     "fct_infreq":      Func("fct_infreq",      "function"),

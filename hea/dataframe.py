@@ -2504,21 +2504,50 @@ class DataFrame(pl.DataFrame):
     def count(
         self,
         *cols: str,
+        wt: str | None = None,
         sort: bool = False,
         name: str = "n",
+        **kwargs: Any,
     ) -> "DataFrame":
         """Count rows per combination of ``cols``.
 
         Equivalent to ``group_by(*cols).summarize(n=pl.len())``. Without
         ``cols``, returns a one-row frame with the total. ``sort=True``
         orders the result by count, descending — matches dplyr.
+
+        ``wt=<col>`` switches from row-counting to summing that column
+        per group (dplyr's weighted-count: ``count(x, wt = n)`` becomes
+        ``group_by(x).summarize(n = sum(n))``). Kwargs of the form
+        ``col_name=col_string`` get treated as additional grouping
+        columns — R's dplyr style ``count(length = str_length(name), wt = n)``
+        passes the kwargs through as the additional mutate-then-group.
         """
-        if not cols:
-            return self._wrap(pl.DataFrame({name: [self.height]}))
+        # ``count(name=value)`` in R/dplyr is a mutate-then-count: each kwarg
+        # adds a derived column to group by. We accept that shape but only
+        # for kwargs whose value is an Expr or a string column reference.
+        derived: dict[str, Any] = {}
+        for k, v in kwargs.items():
+            derived[k] = v
+        agg_expr = pl.col(wt).sum().alias(name) if wt is not None else pl.len().alias(name)
+        base: pl.DataFrame = self
+        if derived:
+            base = pl.DataFrame.with_columns(
+                base,
+                [(v if isinstance(v, pl.Expr) else pl.col(v)).alias(k) for k, v in derived.items()],
+            )
+            group_cols = [*cols, *derived.keys()]
+        else:
+            group_cols = list(cols)
+        if not group_cols:
+            scalar = (
+                base.select(pl.col(wt).sum().alias(name))
+                if wt is not None
+                else pl.DataFrame({name: [self.height]})
+            )
+            return self._wrap(scalar)
         out = (
-            super()
-            .group_by(list(cols), maintain_order=True)
-            .agg(pl.len().alias(name))
+            pl.DataFrame.group_by(base, group_cols, maintain_order=True)
+            .agg(agg_expr)
         )
         if sort:
             out = out.sort(name, descending=True)
