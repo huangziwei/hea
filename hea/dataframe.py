@@ -3697,6 +3697,29 @@ def _install_expr_is_na_alias() -> None:
 _install_expr_is_na_alias()
 
 
+def _install_expr_r_aliases() -> None:
+    """Alias R/dplyr spellings of cumulative ops on ``pl.Expr``.
+
+    Polars renamed ``cumsum`` → ``cum_sum``, ``cummax`` → ``cum_max``,
+    ``cummin`` → ``cum_min``, ``cumprod`` → ``cum_prod`` somewhere
+    around v1.0. R / dplyr keep the un-underscored spellings; the
+    R-to-Python translator emits R names. Without these aliases,
+    ``col('x').cumsum()`` raises AttributeError on current polars.
+    """
+    aliases = {
+        "cumsum":  "cum_sum",
+        "cummax":  "cum_max",
+        "cummin":  "cum_min",
+        "cumprod": "cum_prod",
+    }
+    for r_name, polars_name in aliases.items():
+        if not hasattr(pl.Expr, r_name) and hasattr(pl.Expr, polars_name):
+            setattr(pl.Expr, r_name, getattr(pl.Expr, polars_name))
+
+
+_install_expr_r_aliases()
+
+
 class LazyFrame(pl.LazyFrame):
     """``pl.LazyFrame`` that re-wraps materialized results as ``hea.DataFrame``.
 

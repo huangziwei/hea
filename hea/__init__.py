@@ -265,6 +265,13 @@ def read_csv(source, *args, **kwargs):
     if isinstance(source, str) and "\n" in source:
         import io
         source = io.StringIO(source)
+    # readr also accepts a list of paths and concatenates the results
+    # row-wise. Polars's reader takes a single path; emulate by reading
+    # each and concatenating.
+    if isinstance(source, (list, tuple)):
+        import polars as _pl_local
+        frames = [_polars_read_csv(p, *args, **kwargs) for p in source]
+        return _pl_local.concat(frames, how="vertical_relaxed")
     return _polars_read_csv(source, *args, **kwargs)
 
 

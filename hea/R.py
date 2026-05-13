@@ -2155,6 +2155,18 @@ def qnorm(p, mean=0, sd=1, lower_tail=True):
 
 
 def rnorm(n, mean=0, sd=1):
+    """R: ``rnorm(n, mean=0, sd=1)`` — n samples from Normal(mean, sd).
+
+    Eagerly returns a numpy array when ``n`` is an int. When ``n`` is a
+    polars ``Expr`` (e.g. ``rnorm(length(col("x")))`` inside a tibble
+    / with_columns), returns an Expr that produces N random normals
+    at evaluation time — N resolves against the receiver's row count.
+    """
+    if isinstance(n, pl.Expr):
+        return pl.int_range(0, n).map_elements(
+            lambda _: _sps.norm.rvs(loc=mean, scale=sd),
+            return_dtype=pl.Float64,
+        )
     return _sps.norm.rvs(loc=mean, scale=sd, size=int(n))
 
 

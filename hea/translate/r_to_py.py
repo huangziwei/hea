@@ -1469,31 +1469,58 @@ class Translator:
         """``data.frame(a = c(1, 2), b = c("x", "y"))`` →
         ``hea.DataFrame({"a": [1, 2], "b": ["x", "y"]})``.
 
+        Tibble cross-column references (``tibble(x = 1:10, y = x * 2 +
+        rnorm(length(x)))``) are detected: any named arg whose VALUE
+        translates to a polars-Expr-shaped expression (contains a
+        ``col(...)`` call after visiting in EXPR slot) lands in a
+        trailing ``.with_columns(expr.alias(name))`` chain rather than
+        in the constructor dict. That mirrors dplyr's left-to-right
+        NSE evaluation of tibble args.
+
         Unnamed positional args become ``V1``, ``V2``, …  by position
-        (R's default — though uncommon in idiomatic code). Cross-column
-        references inside tibble (e.g. ``tibble(x = 1:3, y = x * 2)``)
-        are not expanded — that would need build-time evaluation. Emit
-        the literal as-is and let polars fail loudly at runtime.
+        (R's default — though uncommon in idiomatic code).
         """
-        keys: list[P.AST] = []
-        values: list[P.AST] = []
+        literal_keys: list[P.AST] = []
+        literal_values: list[P.AST] = []
+        expr_columns: list[tuple[str, P.AST]] = []
         for i, arg in enumerate(args):
-            if isinstance(arg, R.NamedArg):
-                keys.append(P.Constant(value=arg.name))
-                values.append(self._visit(arg.value))
-            elif isinstance(arg, R.MissingArg):
+            if isinstance(arg, R.MissingArg):
                 continue
-            else:
-                # Skip kwargs like ``stringsAsFactors = FALSE`` that have
-                # no Python equivalent — they're noise post-translation.
-                if isinstance(arg, R.NamedArg) and arg.name == "stringsAsFactors":
+            if isinstance(arg, R.NamedArg):
+                if arg.name == "stringsAsFactors":
                     continue
-                keys.append(P.Constant(value=f"V{i + 1}"))
-                values.append(self._visit(arg))
-        return _call(
+                # Visit value in EXPR slot so backticked-numeric / cross
+                # column refs become ``col("name")`` and ``length`` etc.
+                # dispatch as Expr methods.
+                with self.nse.enter(Slot.EXPR):
+                    value = self._visit(arg.value)
+                if _contains_col_call(value):
+                    expr_columns.append((arg.name, value))
+                else:
+                    literal_keys.append(P.Constant(value=arg.name))
+                    literal_values.append(value)
+            else:
+                with self.nse.enter(Slot.EXPR):
+                    value = self._visit(arg)
+                key_name = f"V{i + 1}"
+                if _contains_col_call(value):
+                    expr_columns.append((key_name, value))
+                else:
+                    literal_keys.append(P.Constant(value=key_name))
+                    literal_values.append(value)
+        df_call: P.AST = _call(
             _attr(_name("hea"), "DataFrame"),
-            [P.Dict(keys=keys, values=values)],
+            [P.Dict(keys=literal_keys, values=literal_values)],
         )
+        # Append a single ``.with_columns(...)`` carrying every cross-ref
+        # column (polars resolves them left-to-right against the frame).
+        if expr_columns:
+            aliased = [
+                _call(_attr(expr, "alias"), [P.Constant(value=name)])
+                for name, expr in expr_columns
+            ]
+            df_call = _call(_attr(df_call, "with_columns"), aliased)
+        return df_call
 
     def _emit_c_call(self, args: tuple[R.Node, ...]) -> P.AST:
         """``c(a, b, c)`` → Python list. ``c("a" = "b", "x" = "y")`` →
@@ -1870,6 +1897,18 @@ class Translator:
 # ---------------------------------------------------------------------------
 # Small AST helpers
 # ---------------------------------------------------------------------------
+
+
+def _contains_col_call(node: P.AST) -> bool:
+    """``True`` if the AST contains a ``col(...)`` Call.
+
+    Used by ``_emit_data_frame_call`` to spot cross-column references
+    that need ``with_columns`` rather than a literal dict-value slot.
+    """
+    for sub in P.walk(node):
+        if isinstance(sub, P.Call) and isinstance(sub.func, P.Name) and sub.func.id == "col":
+            return True
+    return False
 
 
 def _is_numeric_literal(node: R.Node) -> bool:

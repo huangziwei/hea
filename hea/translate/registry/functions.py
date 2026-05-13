@@ -51,7 +51,9 @@ FUNCTION_TABLE: dict[str, Func] = {
     "quantile": Func("quantile", "method"),
     "n":        Func("n",        "function", Slot.NONE),
     "n_distinct": Func("n_distinct", "function"),
-    "length":   Func("len",      "function"),
+    # ``length`` on a column expr → ``.len()`` (polars Expr method); on a
+    # list/vector eagerly it's still Python ``len()`` via the fallback.
+    "length":   Func("len",      "method"),
 
     # ---- elementwise math (method form on the column) ----
     "log":      Func("log",      "method"),
