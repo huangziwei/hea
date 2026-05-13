@@ -146,6 +146,55 @@ scale_fill_continuous = scale_fill_gradient
 
 
 # ---------------------------------------------------------------------------
+# Binned continuous scale — bridges continuous and discrete
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ScaleBinnedColor(ScaleContinuousColor):
+    """Discretise a continuous range into ``n_breaks`` bins, then colour
+    each bin with the palette evaluated at the bin's normalised centre.
+
+    Matches ggplot2's ``scale_*_binned`` / ``_b`` family (viridis_b,
+    gradient_b, …). Same training as :class:`ScaleContinuousColor`;
+    the override is in ``map()``.
+    """
+
+    n_breaks: int = 10
+
+    def map(self, data):  # type: ignore[override]
+        if self.range_ is None or self.palette is None:
+            return data
+        lo, hi = self.range_
+
+        if isinstance(data, pl.Series):
+            arr = data.cast(pl.Float64).to_numpy()
+        else:
+            arr = np.asarray(data, dtype=float)
+
+        # Bin edges: ``n_breaks + 1`` evenly spaced from lo to hi.
+        edges = np.linspace(lo, hi, self.n_breaks + 1)
+        # Bin index per value (0 … n_breaks-1). ``np.digitize`` returns
+        # 1-based bin indices; clip + shift so values exactly at ``hi``
+        # land in the last bin.
+        idx = np.clip(np.digitize(arr, edges[1:-1], right=False),
+                      0, self.n_breaks - 1)
+        # Normalised position is each bin's centre.
+        bin_centres = (np.arange(self.n_breaks) + 0.5) / self.n_breaks
+        normalised = bin_centres[idx]
+        # NaN inputs propagate (digitize maps NaN to the last bin, but
+        # we'd rather leave them as null colours).
+        nan_mask = np.isnan(arr)
+        if nan_mask.any():
+            normalised = normalised.copy()
+            normalised[nan_mask] = np.nan
+        colours = self.palette(normalised)
+        if isinstance(data, pl.Series):
+            return pl.Series(name=data.name, values=colours)
+        return colours
+
+
+# ---------------------------------------------------------------------------
 # Factories — viridis family
 # ---------------------------------------------------------------------------
 
@@ -155,6 +204,31 @@ def scale_color_viridis_c(*, option="viridis", direction=1, name=_NAME_MISSING,
         aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
         limits=limits, palette=viridis_pal(option=option, direction=direction),
     )
+
+
+def scale_color_viridis_b(*, option="viridis", direction=1, n_breaks=10,
+                         name=_NAME_MISSING, breaks="default",
+                         labels="default", limits=None):
+    """Binned viridis colour scale — discretises into ``n_breaks`` bins."""
+    return ScaleBinnedColor(
+        aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
+        limits=limits, palette=viridis_pal(option=option, direction=direction),
+        n_breaks=n_breaks,
+    )
+
+
+def scale_fill_viridis_b(*, option="viridis", direction=1, n_breaks=10,
+                        name=_NAME_MISSING, breaks="default",
+                        labels="default", limits=None):
+    """Binned viridis fill scale — discretises into ``n_breaks`` bins."""
+    return ScaleBinnedColor(
+        aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
+        limits=limits, palette=viridis_pal(option=option, direction=direction),
+        n_breaks=n_breaks,
+    )
+
+
+scale_colour_viridis_b = scale_color_viridis_b
 
 
 def scale_fill_viridis_c(*, option="viridis", direction=1, name=_NAME_MISSING,
