@@ -3243,14 +3243,37 @@ class DataFrame(pl.DataFrame):
         else:
             id_list = self._resolve_cols(id_cols)
 
-        out = pl.DataFrame.pivot(
-            self,
-            on=names_from_list,
-            index=id_list,
-            values=values_from_list,
-            aggregate_function=None,
-            separator=names_sep,
-        )
+        try:
+            out = pl.DataFrame.pivot(
+                self,
+                on=names_from_list,
+                index=id_list,
+                values=values_from_list,
+                aggregate_function=None,
+                separator=names_sep,
+            )
+        except pl.exceptions.ComputeError as e:
+            # Duplicates in ``names_from`` × ``id_cols`` — tidyr defaults
+            # to producing list-columns + a warning in this case. Match
+            # that behavior instead of halting the script.
+            if "expected no or a single value" not in str(e):
+                raise
+            import warnings
+            warnings.warn(
+                "pivot_wider(): values are not uniquely identified; output "
+                "will contain list-columns. Run "
+                "`df.group_by(id_cols + names_from).summarize(n=n()).filter(col('n') > 1)` "
+                "to find the duplicates.",
+                stacklevel=2,
+            )
+            out = pl.DataFrame.pivot(
+                self,
+                on=names_from_list,
+                index=id_list,
+                values=values_from_list,
+                aggregate_function=pl.element().implode(),
+                separator=names_sep,
+            )
 
         new_cols = [c for c in out.columns if c not in id_list]
         if names_prefix:
