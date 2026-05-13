@@ -205,6 +205,19 @@ def factor(
     return result
 
 
+def fct(x, levels=None, na=None):
+    """forcats: ``fct(x, levels=NULL, na=NA)`` — thin alias around
+    :func:`factor`.
+
+    Differs from ``factor()`` only in spelling — forcats' ``fct``
+    documents itself as "factor with stricter handling" but the polars
+    Enum already errors on unknown levels (we cast through Utf8 and
+    nulls land where R's NA would). ``na=`` is accepted for R-side
+    surface compatibility but ignored.
+    """
+    return factor(x, levels=levels)
+
+
 def ordered(series, levels=None, labels: dict | None = None):
     """R's ``ordered(x, ...)`` — shortcut for ``factor(x, ordered=True)``.
 
@@ -220,6 +233,8 @@ def ordered(series, levels=None, labels: dict | None = None):
 
 
 __all__ = [
+    # base I/O
+    "cat",
     # shape / preview
     "head", "tail", "nrow", "ncol", "dim", "length",
     "names", "colnames", "summary",
@@ -256,8 +271,12 @@ __all__ = [
     # coercion / predicates
     "as_numeric", "as_integer", "as_character", "as_logical",
     "as_date", "as_Date",
+    # lubridate: clock primitives
+    "today", "now",
+    # stringr: regex-debug pretty-printers (no-op-like)
+    "str_view", "str_view_all",
     "is_na", "is_null", "is_finite", "is_numeric", "is_factor",
-    "factor", "ordered", "interaction", "levels", "nlevels",
+    "factor", "fct", "ordered", "interaction", "levels", "nlevels",
     # distributions: d/p/q/r families
     "dnorm", "pnorm", "qnorm", "rnorm",
     "dt", "pt", "qt", "rt",
@@ -293,6 +312,41 @@ __all__ = [
 
 
 # ---- shape / preview ------------------------------------------------
+
+def cat(*args, sep=" ", end="", file=None, fill=False, labels=None, append=False):
+    """R: ``cat(...)`` — flatten args into a single string, ``sep``-joined,
+    and write to stdout (or ``file=`` if given). No trailing newline by
+    default — matches R; pass ``sep="\\n"`` (idiomatic R) or ``end="\\n"``
+    if you want one.
+
+    Vector args are flattened (R's ``cat`` is recursive); polars Series
+    and numpy arrays are iterated. NA / None become an empty string.
+    """
+    def _flatten(xs):
+        for x in xs:
+            if x is None:
+                yield ""
+            elif isinstance(x, str):
+                yield x
+            elif isinstance(x, (pl.Series, np.ndarray, list, tuple)):
+                yield from _flatten(x)
+            else:
+                yield str(x)
+    text = sep.join(_flatten(args))
+    if end:
+        text = text + end
+    if file is None:
+        import sys
+        sys.stdout.write(text)
+    else:
+        # ``file=`` accepts a path (R semantics) or an open file-like object.
+        if isinstance(file, str):
+            mode = "a" if append else "w"
+            with open(file, mode, encoding="utf-8") as fh:
+                fh.write(text)
+        else:
+            file.write(text)
+
 
 def head(x, n=6):
     """R: first ``n`` rows / elements. Dispatches to ``x.head(n)`` if defined."""
@@ -408,7 +462,7 @@ def na_omit(df):
 
 # ---- vector helpers -------------------------------------------------
 
-def seq(*args, by=None, length_out=None, along_with=None):
+def seq(*args, from_=None, to=None, by=None, length_out=None, along_with=None):
     """R: ``seq()`` — flexible sequence constructor.
 
     The one-argument and ``along_with`` forms are 0-based to match Python
@@ -423,7 +477,20 @@ def seq(*args, by=None, length_out=None, along_with=None):
     * ``seq(from, to, by=step)`` → step-spaced, inclusive
     * ``seq(from, to, length_out=n)`` → ``n`` evenly spaced
     * ``seq(along_with=x)`` → ``0, 1, …, len(x)-1``
+
+    ``from_=`` / ``to=`` accept R's named forms after translation — R's
+    ``seq(from = 1, to = 10)`` becomes ``seq(from_=1, to=10)`` (Python
+    keyword conflict on ``from``).
     """
+    if from_ is not None or to is not None:
+        # R's named form: fold into positional slots.
+        if args:
+            raise TypeError(
+                "seq(): pass both endpoints positionally OR via from_= / to=, not both"
+            )
+        if from_ is None or to is None:
+            raise TypeError("seq(): from_= and to= must both be supplied together")
+        args = (from_, to)
     if along_with is not None:
         return np.arange(len(along_with))
     if length_out is not None:
@@ -1448,6 +1515,75 @@ def as_date(x, format=None):
 # R's base spelling (``as.Date``) — Python can't have a dot, so the
 # convention here is the camel-cased underscore form. Same function.
 as_Date = as_date
+
+
+def today(tzone: str = ""):
+    """lubridate: ``today(tzone="")`` — current date.
+
+    ``tzone=""`` (R default) uses the system local time; pass a tzdata
+    name (``"UTC"``, ``"Asia/Tokyo"``) for an explicit zone.
+    """
+    import datetime as _dt
+
+    if not tzone:
+        return _dt.date.today()
+    try:
+        from zoneinfo import ZoneInfo
+        return _dt.datetime.now(ZoneInfo(tzone)).date()
+    except Exception:
+        return _dt.date.today()
+
+
+def now(tzone: str = ""):
+    """lubridate: ``now(tzone="")`` — current datetime.
+
+    ``tzone=""`` (R default) returns a naive local-time ``datetime``;
+    pass a tzdata name for a tz-aware ``datetime``.
+    """
+    import datetime as _dt
+
+    if not tzone:
+        return _dt.datetime.now()
+    try:
+        from zoneinfo import ZoneInfo
+        return _dt.datetime.now(ZoneInfo(tzone))
+    except Exception:
+        return _dt.datetime.now()
+
+
+def str_view(string, pattern=None, *, match=None, html=False) -> None:
+    """stringr: ``str_view(string, pattern)`` — print each element with
+    matches of ``pattern`` highlighted (ANSI brackets in this port).
+
+    ``pattern=None`` just prints each value indexed (matches R's
+    "view-the-string" behavior with no pattern). Pure side-effect — no
+    return value.
+    """
+    import re as _re
+
+    def _iter(s):
+        if isinstance(s, (pl.Series, np.ndarray)):
+            return list(s)
+        if isinstance(s, (list, tuple)):
+            return list(s)
+        return [s]
+
+    values = _iter(string)
+    width = len(str(len(values)))
+    rx = _re.compile(pattern) if pattern else None
+    for i, v in enumerate(values, 1):
+        if v is None:
+            print(f"[{i:{width}d}] <NA>")
+            continue
+        text = str(v)
+        if rx is not None:
+            text = rx.sub(lambda m: "<" + m.group(0) + ">", text)
+        print(f"[{i:{width}d}] {text}")
+
+
+# stringr deprecated ``str_view_all`` in favor of ``str_view`` (which now
+# highlights all matches by default). Keep an alias for older scripts.
+str_view_all = str_view
 
 
 def is_na(x):

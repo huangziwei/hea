@@ -623,10 +623,14 @@ _R_EXPR_SKIP = {
     # Bucketing — eager-only (custom labels machinery).
     "cut", "findInterval",
     # Categorical / dtype introspection — Expr has no eval-time dtype info.
-    "factor", "ordered", "levels", "nlevels", "is_factor", "is_numeric", "is_null",
+    "factor", "fct", "ordered", "levels", "nlevels", "is_factor", "is_numeric", "is_null",
     # cov: no clean polars top-level for 2-vector covariance (compute
     # manually via (x - x.mean()) * (y - y.mean()) / (n - 1) if needed).
     "cov",
+    # I/O & clock — side-effect functions; not column ops.
+    "cat", "today", "now",
+    # stringr regex-debug pretty-printers — print to stdout, return None.
+    "str_view", "str_view_all",
 }
 
 

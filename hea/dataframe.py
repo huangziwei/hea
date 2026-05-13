@@ -2950,6 +2950,45 @@ class DataFrame(pl.DataFrame):
             return out
         return expand_one(cols)
 
+    def fill(
+        self,
+        *cols: Any,
+        direction: str = "down",
+    ) -> "DataFrame":
+        """tidyr: ``fill(.data, ..., .direction)`` — replace NA in each
+        column by carrying neighboring non-NA values forward / backward.
+
+        ``cols`` accepts the same tidy-select shapes :meth:`select` does
+        (bare names, ``selectors.starts_with(...)``, ``everything()``,
+        etc.). With no columns, all columns get filled.
+
+        ``direction`` matches R: ``"down"`` (forward-fill, the default),
+        ``"up"`` (backward), ``"downup"`` (forward then backward to
+        cover leading NAs), ``"updown"``.
+        """
+        # No cols → everything.
+        names = self._resolve_cols(list(cols)) if cols else list(self.columns)
+        if direction == "down":
+            strategies = ("forward",)
+        elif direction == "up":
+            strategies = ("backward",)
+        elif direction == "downup":
+            strategies = ("forward", "backward")
+        elif direction == "updown":
+            strategies = ("backward", "forward")
+        else:
+            raise ValueError(
+                f"fill(): direction must be 'down' / 'up' / 'downup' / "
+                f"'updown'; got {direction!r}"
+            )
+        exprs: list[pl.Expr] = []
+        for c in names:
+            e = pl.col(c)
+            for strat in strategies:
+                e = e.fill_null(strategy=strat)
+            exprs.append(e)
+        return self._wrap(pl.DataFrame.with_columns(self, exprs))
+
     def pivot_longer(
         self,
         cols: Any,
@@ -3524,6 +3563,22 @@ def _install_is_in_mixed_list_support() -> None:
 
 
 _install_is_in_mixed_list_support()
+
+
+def _install_expr_is_na_alias() -> None:
+    """Alias ``pl.Expr.is_na`` to ``is_null`` so R-translated code that
+    emits ``col("x").is_na()`` works.
+
+    Polars named its null-check ``is_null`` (``is_nan`` is the float-NaN
+    one); the R-to-Python translator emits the R spelling. Without this
+    alias, ``Expr`` raises ``AttributeError: 'Expr' object has no
+    attribute 'is_na'``.
+    """
+    if not hasattr(pl.Expr, "is_na"):
+        pl.Expr.is_na = pl.Expr.is_null
+
+
+_install_expr_is_na_alias()
 
 
 class LazyFrame(pl.LazyFrame):

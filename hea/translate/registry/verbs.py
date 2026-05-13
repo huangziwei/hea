@@ -79,6 +79,9 @@ VERB_TABLE: dict[str, Verb] = {
     # all tidy-select. Verb-wide slot=COLUMN_NAME.
     "pivot_longer": Verb("pivot_longer", Slot.COLUMN_NAME),
     "pivot_wider":  Verb("pivot_wider",  Slot.COLUMN_NAME),
+
+    # tidyr fill — fill NA values from neighbors. Tidy-select cols.
+    "fill":         Verb("fill",         Slot.COLUMN_NAME),
     # ``add_count`` / ``add_tally`` are NOT mapped here — they need a
     # mutate(n = n(), _by = cols) expansion, which isn't a 1:1 verb
     # rename. Tracked as a Phase 4+ item.
