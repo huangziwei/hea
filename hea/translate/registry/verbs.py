@@ -62,6 +62,7 @@ VERB_TABLE: dict[str, Verb] = {
     # Stateless verbs — no NSE.
     "ungroup":    Verb("ungroup",   Slot.NONE),
     "glimpse":    Verb("glimpse",   Slot.NONE),
+    "clean_names": Verb("clean_names", Slot.NONE),  # janitor::clean_names
 
     # Joins — first arg is the receiver, second arg is the right-hand
     # table (a Python name, not a column ref) → slot=NONE. ``by`` kwarg

@@ -631,6 +631,12 @@ _R_EXPR_SKIP = {
     "cat", "today", "now",
     # stringr regex-debug pretty-printers — print to stdout, return None.
     "str_view", "str_view_all",
+    # lubridate parsers — operate on strings / scalars, not column Exprs.
+    "ymd", "mdy", "dmy",
+    "ymd_hms", "ymd_hm", "mdy_hms", "mdy_hm", "dmy_hms", "dmy_hm",
+    # stringr helpers that don't take an Expr as the first arg or take
+    # multiple required args (covered separately by _R_EXPR_EXTRA below).
+    "str_glue", "str_sort", "str_equal",
 }
 
 
@@ -641,6 +647,9 @@ _R_EXPR_EXTRA: dict[str, callable] = {
     "cor":      lambda c: ((c,), {}),       # cor needs (x, y)
     "quantile": lambda c: ((0.5,), {}),     # Expr needs scalar prob
     "atan2":    lambda c: ((c,), {}),       # atan2 needs (y, x)
+    "str_detect": lambda c: (("[aeiou]",), {}),  # needs pattern
+    "str_count":  lambda c: (("[aeiou]",), {}),  # needs pattern
+    "str_sub":    lambda c: ((1, 3), {}),        # start, end
 }
 
 

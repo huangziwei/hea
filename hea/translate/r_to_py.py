@@ -16,6 +16,7 @@ glue that walks the R AST and asks those tables what to emit.
 from __future__ import annotations
 
 import ast as P
+import functools
 import importlib
 import re
 from typing import Optional
@@ -61,12 +62,29 @@ def _callable_exports(module_name: str) -> frozenset[str]:
     return frozenset(out)
 
 
-# Top-level ``hea`` callables. Strip the submodule names so ``plot``/``R``
-# resolve to the function-bearing surfaces below, not the submodule object.
-_HEA_EXPORTS = _callable_exports("hea") - {"R", "plot", "ggplot"}
-_HEA_R_EXPORTS = _callable_exports("hea.R")
-_HEA_PLOT_EXPORTS = _callable_exports("hea.plot")
-_HEA_GGPLOT_EXPORTS = _callable_exports("hea.ggplot")
+# Top-level ``hea`` callables. Computed lazily so additions to
+# ``hea.__init__`` that land AFTER ``translate.r_to_py`` is imported
+# (e.g. the ``read_csv`` shim and ``cols`` stub) still register. Strip
+# the submodule names so ``plot``/``R`` resolve to the function-bearing
+# surfaces below, not the submodule object.
+@functools.cache
+def _hea_exports() -> frozenset[str]:
+    return _callable_exports("hea") - {"R", "plot", "ggplot"}
+
+
+@functools.cache
+def _hea_r_exports() -> frozenset[str]:
+    return _callable_exports("hea.R")
+
+
+@functools.cache
+def _hea_plot_exports() -> frozenset[str]:
+    return _callable_exports("hea.plot")
+
+
+@functools.cache
+def _hea_ggplot_exports() -> frozenset[str]:
+    return _callable_exports("hea.ggplot")
 
 
 def _module_exports(module_name: str) -> frozenset[str]:
@@ -93,8 +111,11 @@ def _module_exports(module_name: str) -> frozenset[str]:
 # Submodules of ``hea`` we want to import on demand — e.g. ``selectors``
 # is ``polars.selectors`` re-exported via ``hea.__init__``. Translator
 # emits ``selectors.starts_with(...)`` so the preamble must contain
-# ``from hea import selectors``.
-_HEA_SUBMODULES = _module_exports("hea")
+# ``from hea import selectors``. Lazy to dodge import-order issues like
+# ``_hea_exports``.
+@functools.cache
+def _hea_submodules() -> frozenset[str]:
+    return _module_exports("hea")
 
 # Python builtins — names we never need to import.
 _PY_BUILTINS: frozenset[str] = frozenset(__builtins__.keys() if isinstance(__builtins__, dict) else dir(__builtins__)) | {  # type: ignore[union-attr]
@@ -397,17 +418,17 @@ class Translator:
         # helper). Fall back to ``hea`` for names hea.R doesn't carry.
         # hea.ggplot picks up geom_/scale_/coord_/facet_/theme_/position_*
         # helpers, which the translator emits as bare names.
-        r_names = sorted(n for n in candidates if n in _HEA_R_EXPORTS)
+        r_names = sorted(n for n in candidates if n in _hea_r_exports())
         used = set(r_names)
-        hea_names = sorted(n for n in (candidates - used) if n in _HEA_EXPORTS)
+        hea_names = sorted(n for n in (candidates - used) if n in _hea_exports())
         used |= set(hea_names)
-        plot_names = sorted(n for n in (candidates - used) if n in _HEA_PLOT_EXPORTS)
+        plot_names = sorted(n for n in (candidates - used) if n in _hea_plot_exports())
         used |= set(plot_names)
-        ggplot_names = sorted(n for n in (candidates - used) if n in _HEA_GGPLOT_EXPORTS)
+        ggplot_names = sorted(n for n in (candidates - used) if n in _hea_ggplot_exports())
         used |= set(ggplot_names)
         # Submodules used as Attribute roots: ``selectors.starts_with``,
         # ``pl.col``, etc. ``from hea import selectors`` resolves the root.
-        submod_names = sorted(n for n in (candidates - used) if n in _HEA_SUBMODULES)
+        submod_names = sorted(n for n in (candidates - used) if n in _hea_submodules())
 
         out: list[P.stmt] = []
         if "hea" in referenced:

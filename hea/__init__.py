@@ -223,6 +223,87 @@ for _name in (*_DF_FACTORIES, *_LF_FACTORIES, *_POLY_FACTORIES):
         globals()[_name] = _wrap_factory(_name)
 
 
+# Override ``read_csv`` with a thin readr-kwarg shim. R-translated scripts
+# use names like ``na=``, ``skip=``, ``comment=``, ``col_names=`` (readr);
+# polars uses ``null_values=``, ``skip_rows=``, ``comment_prefix=``,
+# ``has_header=`` / ``new_columns=``. The shim translates and dispatches.
+_polars_read_csv = globals()["read_csv"]
+
+
+def cols(**kwargs):
+    """readr's ``cols(...)`` — a column-types spec used in
+    ``read_csv(..., col_types = cols(...))``. hea's ``read_csv`` shim
+    drops ``col_types=`` (polars infers); we keep this stub callable so
+    the argument evaluates without raising. Returns ``None``.
+    """
+    return None
+
+
+def cols_only(**kwargs):
+    """readr's ``cols_only(...)``. Subset-of-columns variant; same stub
+    handling as :func:`cols`."""
+    return None
+
+
+def col_factor(levels=None, ordered=False, include_na=False):
+    """readr's ``col_factor(...)``. No-op stub; we drop col_types at
+    ``read_csv`` time."""
+    return None
+
+
+# Other ``col_*`` type specifiers from readr — same no-op shape so any
+# spec inside ``cols(...)`` evaluates cleanly.
+def col_double(): return None
+def col_integer(): return None
+def col_character(): return None
+def col_logical(): return None
+def col_number(): return None
+def col_date(format=None): return None
+def col_datetime(format=None): return None
+def col_time(format=None): return None
+def col_skip(): return None
+
+
+def read_csv(source, *args, **kwargs):
+    """readr-kwarg-friendly wrapper around polars ``read_csv``.
+
+    Accepted readr aliases (translated to the polars equivalent):
+
+    * ``na=`` → ``null_values=``
+    * ``skip=`` → ``skip_rows=``
+    * ``comment=`` → ``comment_prefix=``
+    * ``col_names=False`` → ``has_header=False``
+    * ``col_names=["a", "b", ...]`` → ``has_header=False`` + ``new_columns=...``
+    * ``col_types=`` → ignored (polars infers; R-style ``cols()`` shape isn't supported yet)
+    * ``id=`` → ignored (multi-file id-column not yet supported)
+    """
+    if "na" in kwargs:
+        kwargs["null_values"] = kwargs.pop("na")
+    if "skip" in kwargs:
+        kwargs["skip_rows"] = kwargs.pop("skip")
+    if "comment" in kwargs:
+        kwargs["comment_prefix"] = kwargs.pop("comment")
+    if "col_names" in kwargs:
+        col_names = kwargs.pop("col_names")
+        if col_names is False:
+            kwargs["has_header"] = False
+        elif isinstance(col_names, (list, tuple)):
+            kwargs["has_header"] = False
+            kwargs["new_columns"] = list(col_names)
+        # ``col_names=True`` is polars default — no-op.
+    # readr-only options without a clean polars equivalent — drop with no error.
+    kwargs.pop("col_types", None)
+    kwargs.pop("id", None)
+    # readr accepts inline CSV content as the first arg (R detects this
+    # heuristically — embedded newlines = literal). Polars's reader
+    # treats every string as a path; wrap inline-string content in
+    # StringIO so it gets parsed instead of being looked up on disk.
+    if isinstance(source, str) and "\n" in source:
+        import io
+        source = io.StringIO(source)
+    return _polars_read_csv(source, *args, **kwargs)
+
+
 # 5. _HEA_OVERRIDES — every name where hea shadows a name from
 #    ``polars.__all__`` must be listed here with a one-line reason. The
 #    invariant below fails if (a) hea shadows a polars name not listed,
