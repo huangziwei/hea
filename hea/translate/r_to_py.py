@@ -1165,6 +1165,12 @@ class Translator:
         if helper.hea_name == "__join_by__":
             return self._emit_join_by_call(args)
 
+        # Special-case: quote / expression / bquote — pass the inner R
+        # source text through as a string so ``hea.quote()`` can parse
+        # it as plotmath.
+        if helper.hea_name == "__quote__":
+            return self._emit_quote_call(args)
+
         # Override arg slot if registry specifies one.
         arg_slot_ctx = self.nse.enter(helper.arg_slot) if helper.arg_slot is not None else _null_ctx()
 
@@ -1380,6 +1386,19 @@ class Translator:
         "is.POSIXct":   "datetime",
         "is.POSIXlt":   "datetime",
     }
+
+    def _emit_quote_call(self, args: tuple[R.Node, ...]) -> P.AST:
+        """``quote(x[i]^2 == 0)`` → ``quote('x[i]^2 == 0')``.
+
+        Pass the inner expression through as R-source text (rebuilt from
+        the AST) so hea's runtime ``quote()`` can parse and render it as
+        matplotlib mathtext.
+        """
+        positional = [a for a in args if not isinstance(a, R.NamedArg)]
+        if not positional:
+            return _call(_name("quote"), [P.Constant(value="")])
+        src = _unparse_for_plotmath(positional[0])
+        return _call(_name("quote"), [P.Constant(value=src)])
 
     _JOIN_BY_BINOPS: frozenset[str] = frozenset({"==", "<", "<=", ">", ">=", "!="})
 
@@ -2166,6 +2185,41 @@ def _substitute_identifier(node: R.Node, param_name: str, replacement: R.Identif
         else:
             new_kwargs[f.name] = v
     return _dc_replace(node, **new_kwargs)
+
+
+def _unparse_for_plotmath(node: R.Node) -> str:
+    """Render an R AST node back to source text suitable for plotmath.
+
+    Differs from :func:`_unparse_for_formula` in handling subscript
+    (``x[i]``) and superscript (``x^2``) — both common in plotmath but
+    rare in regression formulas.
+    """
+    if isinstance(node, R.Identifier):
+        return node.name
+    if isinstance(node, R.NumLit):
+        if node.value.is_integer():
+            return str(int(node.value))
+        return str(node.value)
+    if isinstance(node, R.IntLit):
+        return str(node.value)
+    if isinstance(node, R.StrLit):
+        return repr(node.value)
+    if isinstance(node, R.UnaryOp):
+        return f"{node.op}{_unparse_for_plotmath(node.operand)}"
+    if isinstance(node, R.BinOp):
+        return f"{_unparse_for_plotmath(node.left)} {node.op} {_unparse_for_plotmath(node.right)}"
+    if isinstance(node, R.Subscript):
+        # ``x[i]`` → ``x[i]`` (R plotmath subscript syntax).
+        base = _unparse_for_plotmath(node.target)
+        idx = ", ".join(_unparse_for_plotmath(a) for a in node.args if not isinstance(a, R.MissingArg))
+        return f"{base}[{idx}]"
+    if isinstance(node, R.Call):
+        func_text = _unparse_for_plotmath(node.func)
+        args = ", ".join(_unparse_for_plotmath(a) for a in node.args)
+        return f"{func_text}({args})"
+    if isinstance(node, R.NamedArg):
+        return f"{node.name} = {_unparse_for_plotmath(node.value)}"
+    return f"<{type(node).__name__}>"
 
 
 def _unparse_for_formula(node: R.Node) -> str:

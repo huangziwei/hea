@@ -629,6 +629,8 @@ _R_EXPR_SKIP = {
     "cov",
     # I/O & clock — side-effect functions; not column ops.
     "cat", "today", "now",
+    # plotmath — takes R-source string, not a column.
+    "quote",
     # stringr regex-debug pretty-printers — print to stdout, return None.
     "str_view", "str_view_all",
     # lubridate parsers — operate on strings / scalars, not column Exprs.

@@ -448,6 +448,7 @@ _FLUENT_INSTALL_PREFIXES = (
 # without needing a class-level method that the dataclass would shadow.
 _FLUENT_INSTALL_EXACT = frozenset({
     "labs", "ggtitle", "xlab", "ylab", "xlim", "ylim", "lims", "annotate",
+    "guides",
 })
 
 # Names that prefix-match but should NOT be installed:

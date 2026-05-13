@@ -111,6 +111,12 @@ FUNCTION_TABLE: dict[str, Func] = {
     # ``join_by(col1, col2 == col3, ...)`` — bare name → string,
     # comparison expr → ``col(lhs) op col(rhs)``. Bespoke handler.
     "join_by":      Func("__join_by__",            "function"),
+    # ``quote(expr)`` — R's plotmath. Translator emits the inner expr
+    # as R source text (string); hea ``quote()`` parses and renders to
+    # matplotlib mathtext (``$...$``). Bespoke handler.
+    "quote":        Func("__quote__",              "function"),
+    "expression":   Func("__quote__",              "function"),
+    "bquote":       Func("__quote__",              "function"),
 
     # ---- base R that maps directly to hea ----
     "c":        Func("__list__",   "function"),  # bespoke — emit as a list/Series
