@@ -101,6 +101,10 @@ FUNCTION_TABLE: dict[str, Func] = {
     "everything":   Func("selectors.all",          "function"),
     "all_of":       Func("all_of",                 "function"),
     "any_of":       Func("any_of",                 "function"),
+    # ``where(is.X)`` — tidyselect predicate selector. Bespoke handler
+    # (``_emit_where_call``) maps known R-predicate identifiers to the
+    # equivalent ``polars.selectors`` constructor.
+    "where":        Func("__where__",              "function"),
 
     # ---- base R that maps directly to hea ----
     "c":        Func("__list__",   "function"),  # bespoke — emit as a list/Series

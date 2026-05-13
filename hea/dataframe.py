@@ -2211,6 +2211,11 @@ class DataFrame(pl.DataFrame):
                 flat.extend(c.columns)
             elif isinstance(c, pl.Series):
                 flat.append(c.name)
+            elif isinstance(c, slice):
+                # dplyr's ``select(year:day)`` column-range — translated as
+                # ``slice('year', 'day')``. Expand against this frame's
+                # column order.
+                flat.extend(self.cols_between(c.start, c.stop))
             else:
                 flat.append(c)
         exprs: list[Any] = []
@@ -2245,6 +2250,8 @@ class DataFrame(pl.DataFrame):
                 flat.extend(c.columns)
             elif isinstance(c, pl.Series):
                 flat.append(c.name)
+            elif isinstance(c, slice):
+                flat.extend(self.cols_between(c.start, c.stop))
             else:
                 flat.append(c)
         return self._wrap(super().drop(*flat, strict=strict))
@@ -2316,6 +2323,9 @@ class DataFrame(pl.DataFrame):
                 moving.extend(c.columns)
             elif isinstance(c, pl.Series):
                 moving.append(c.name)
+            elif isinstance(c, slice):
+                # dplyr's ``relocate(year:dep_time, ...)`` column-range.
+                moving.extend(self.cols_between(c.start, c.stop))
             elif cs.is_selector(c):
                 moving.extend(cs.expand_selector(self, c))
             else:

@@ -181,6 +181,11 @@ class Translator:
         # below — if ``penguins`` is in two packages and one of them
         # was loaded, prefer that one.
         self._loaded_packages: set[str] = set()
+        # Explicit ``pkg::name`` references — emit an autoload for
+        # ``name`` from ``pkg`` regardless of whether rdatasets carries
+        # it (the dataset may live in a bundled CSV or be downloaded).
+        # Keyed by the bare name so the autoload preamble dedupes.
+        self._namespaced_refs: dict[str, str] = {}
         # Loop variables whose iter we shifted from R's 1-based ``a:b``
         # to Python's 0-based ``range(a-1, b)``. While translating the
         # body of such a loop, ``(var - 1)`` collapses to ``var`` —
@@ -518,7 +523,18 @@ class Translator:
             referenced - defined - _datasets.DATASET_REF_EXCLUSIONS - emitted_helpers
         )
         out: list[P.stmt] = []
+        emitted: set[str] = set()
+        # First: explicit ``pkg::name`` references take precedence over
+        # registry-based resolution. ``hea.data`` will fall back to a
+        # bundled CSV or GitHub download if rdatasets doesn't carry it.
+        for name, pkg in sorted(self._namespaced_refs.items()):
+            if name in defined or name not in referenced:
+                continue
+            out.append(_make_data_load_stmt(name, pkg))
+            emitted.add(name)
         for name in candidates:
+            if name in emitted:
+                continue
             pkg = _datasets.resolve_dataset(name, loaded_packages=loaded)
             if pkg is None:
                 continue
@@ -702,6 +718,13 @@ class Translator:
         # those positions match hea's 0-based indexing without breaking
         # value uses elsewhere (e.g. ``plot(m, which=1:2)`` panel IDs).
         if op == ":":
+            # In COLUMN_NAME slot (``select(year:day)``, ``relocate(...)``)
+            # ``a:b`` is dplyr's column-range selector, not a numeric
+            # range. Emit a Python ``slice('a', 'b')`` so the receiving
+            # verb's tidy-select resolver can expand it via
+            # ``cols_between(start, stop)``.
+            if self.nse.current is Slot.COLUMN_NAME:
+                return _call(_name("slice"), [left, right])
             # Inside an index context (subscript arg, recursively into
             # function calls there), ``1:N`` shifts to ``range(N)`` so
             # downstream consumers like ``sample(1:N)`` produce 0-based
@@ -711,8 +734,19 @@ class Translator:
             return _call(_name("seq"), [left, right])
 
         # Namespace access ``pkg::name`` / ``pkg:::name``. Drop the package
-        # qualifier — the function registry handles renaming.
+        # qualifier — the function registry handles renaming — but
+        # record the LHS as a loaded package AND the (name, pkg) pair as
+        # an explicit autoload hint. ``Lahman::Batting`` is often the
+        # only hint we get that ``Batting`` is a dataset (the user
+        # didn't write ``library(Lahman)``); the rdatasets registry
+        # doesn't carry Lahman, so without this hint the autoload pass
+        # would silently skip it.
         if op == "::" or op == ":::":
+            if isinstance(n.left, R.Identifier):
+                pkg_name = n.left.name
+                self._loaded_packages.add(pkg_name)
+                if isinstance(n.right, R.Identifier):
+                    self._namespaced_refs.setdefault(n.right.name, pkg_name)
             return right
 
         # ``%in%`` → ``.is_in(...)``.
@@ -1085,6 +1119,10 @@ class Translator:
         if helper.hea_name == "__tribble__":
             return self._emit_tribble_call(args)
 
+        # Special-case: where(is.X) — tidyselect predicate.
+        if helper.hea_name == "__where__":
+            return self._emit_where_call(args)
+
         # Override arg slot if registry specifies one.
         arg_slot_ctx = self.nse.enter(helper.arg_slot) if helper.arg_slot is not None else _null_ctx()
 
@@ -1273,6 +1311,37 @@ class Translator:
                     # user can see what happened.
                     tuples.append(self._visit(arg))
         return _call(_name("case_when"), tuples, kwargs)
+
+    # R's tidyselect predicates → equivalent ``polars.selectors`` calls.
+    # All return a Selector (no extra args needed); the translator emits
+    # ``selectors.<name>()``.
+    _WHERE_PREDICATE_MAP: dict[str, str] = {
+        "is.character": "string",
+        "is.string":    "string",
+        "is.numeric":   "numeric",
+        "is.double":    "float",
+        "is.integer":   "integer",
+        "is.logical":   "boolean",
+        "is.boolean":   "boolean",
+        "is.factor":    "categorical",
+        "is.Date":      "date",
+        "is.POSIXct":   "datetime",
+        "is.POSIXlt":   "datetime",
+    }
+
+    def _emit_where_call(self, args: tuple[R.Node, ...]) -> P.AST:
+        """``where(is.character)`` → ``selectors.string()``. Known
+        R-predicate identifiers map to polars selector constructors;
+        unknown ones fall through to ``where(<id>)`` and will surface
+        as a runtime ``NameError`` so the gap is visible.
+        """
+        if len(args) == 1 and isinstance(args[0], R.Identifier):
+            sel = self._WHERE_PREDICATE_MAP.get(args[0].name)
+            if sel is not None:
+                return _call(_attr(_name("selectors"), sel), [])
+        # Fallback — let ``where`` resolve at runtime (will likely error).
+        py_args, py_kwargs = self._translate_args(args)
+        return _call(_name("where"), py_args, py_kwargs)
 
     def _emit_tribble_call(self, args: tuple[R.Node, ...]) -> P.AST:
         """``tribble(~a, ~b, 1, "x", 2, "y")`` →

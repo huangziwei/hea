@@ -82,6 +82,15 @@ VERB_TABLE: dict[str, Verb] = {
 
     # tidyr fill — fill NA values from neighbors. Tidy-select cols.
     "fill":         Verb("fill",         Slot.COLUMN_NAME),
+
+    # dplyr slice_* — first positional arg is a column name (for min/max)
+    # or an integer ``n`` (for head/tail). Method exists on both
+    # DataFrame and GroupBy, so pipe-rewriting works after group_by.
+    "slice_min":    Verb("slice_min",    Slot.COLUMN_NAME),
+    "slice_max":    Verb("slice_max",    Slot.COLUMN_NAME),
+    "slice_head":   Verb("slice_head",   Slot.NONE),
+    "slice_tail":   Verb("slice_tail",   Slot.NONE),
+    "slice_sample": Verb("slice_sample", Slot.NONE),
     # ``add_count`` / ``add_tally`` are NOT mapped here — they need a
     # mutate(n = n(), _by = cols) expansion, which isn't a 1:1 verb
     # rename. Tracked as a Phase 4+ item.
