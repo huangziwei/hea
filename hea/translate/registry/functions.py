@@ -191,13 +191,22 @@ def resolve_kwarg(r_name: str) -> KwargAlias:
 
     Rules:
     1. Explicit entry in :data:`KWARG_ALIASES` wins.
-    2. Otherwise, replace ``.`` with ``_`` in the name and inherit the
-       surrounding slot (``na.rm`` → ``KwargAlias("na_rm", None)``).
+    2. Otherwise, replace ``.`` with ``_`` in the name, append a trailing
+       ``_`` if the result is a hard Python keyword (``lambda`` →
+       ``lambda_``), and inherit the surrounding slot.
+
+    Soft keywords (``match``, ``case``, ``type``) are left alone — they
+    are valid kwarg names in any function.
     """
     hit = KWARG_ALIASES.get(r_name)
     if hit is not None:
         return hit
-    return KwargAlias(r_name.replace(".", "_"), None)
+    import keyword
+
+    py_name = r_name.replace(".", "_")
+    if keyword.iskeyword(py_name):
+        py_name = py_name + "_"
+    return KwargAlias(py_name, None)
 
 
 # Backwards-compat shim for existing import sites — returns just the name.

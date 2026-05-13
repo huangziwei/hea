@@ -16,14 +16,60 @@ glue that walks the R AST and asks those tables what to emit.
 from __future__ import annotations
 
 import ast as P
+import importlib
+import re
 from typing import Optional
 
-from . import _datasets, r_ast as R
+from . import _datasets, gaps as _gaps, r_ast as R
 from .nse import NSEContext, Slot
 from .r_parser import parse as parse_r
 from .registry.functions import FUNCTION_TABLE, Func, resolve_kwarg
 from .registry.ggplot import is_chain_extension
 from .registry.verbs import VERB_TABLE, Verb
+
+
+# ---------------------------------------------------------------------------
+# Standalone runnable preamble — discover what's importable from hea, hea.R,
+# and hea.plot once at import time. The translator uses these to emit a
+# needs-based import block at the top of every translated module so the
+# output can be ``python script.py``'d without a wrapper.
+# ---------------------------------------------------------------------------
+
+
+def _callable_exports(module_name: str) -> frozenset[str]:
+    try:
+        mod = importlib.import_module(module_name)
+    except Exception:
+        return frozenset()
+    return frozenset(
+        n for n in dir(mod)
+        if not n.startswith("_") and callable(getattr(mod, n, None))
+    )
+
+
+# Top-level ``hea`` callables. Strip the submodule names so ``plot``/``R``
+# resolve to the function-bearing surfaces below, not the submodule object.
+_HEA_EXPORTS = _callable_exports("hea") - {"R", "plot"}
+_HEA_R_EXPORTS = _callable_exports("hea.R")
+_HEA_PLOT_EXPORTS = _callable_exports("hea.plot")
+
+# Python builtins — names we never need to import.
+_PY_BUILTINS: frozenset[str] = frozenset(__builtins__.keys() if isinstance(__builtins__, dict) else dir(__builtins__)) | {  # type: ignore[union-attr]
+    "True", "False", "None",
+}
+
+
+# ---------------------------------------------------------------------------
+# Unported-construct sentinel. R idioms outside the v1 sublanguage
+# (replacement-function assigns, ``with(df, expr)``, ...) emit a uniquely
+# tagged statement that ``Translator.translate`` rewrites to a Python
+# comment block after ``ast.unparse``. The sentinel survives a regular
+# AST walk so downstream passes (autoload, import inference) don't see
+# the original R text as a phantom name reference.
+# ---------------------------------------------------------------------------
+
+_UNPORTED_TAG = "__HEA_UNPORTED__"
+_UNPORTED_LINE_RE = re.compile(rf"^\s*['\"]({_UNPORTED_TAG}):([0-9]+)['\"]\s*$")
 
 
 class RTranslateError(Exception):
@@ -39,14 +85,20 @@ class RTranslateError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def translate(src: str) -> str:
+def translate(src: str, *, log_gaps: bool = False, source_label: str = "<inline>") -> str:
     """Translate an R source string to a Python source string.
 
     Raises :class:`RTranslateError` on out-of-grammar inputs; the parser
     may raise :class:`hea.translate.r_parser.RParseError` first.
+
+    ``log_gaps`` controls whether unportable-construct gaps (replacement
+    functions, ``with(df, expr)``, Python-keyword kwargs, ...) are
+    appended to :mod:`hea.translate.gaps`'s persistent registry. The
+    inline UX (``hea.from_R``) usually leaves this off; the parity
+    runner sets it.
     """
     prog = parse_r(src)
-    return Translator().translate(prog)
+    return Translator(src=src, log_gaps=log_gaps, source_label=source_label).translate(prog)
 
 
 # ---------------------------------------------------------------------------
@@ -79,20 +131,89 @@ _CMP_PY = {
 class Translator:
     """Stateful walker. One instance per translation."""
 
-    def __init__(self):
+    def __init__(self, src: str = "", *, log_gaps: bool = False, source_label: str = "<inline>"):
         self.nse = NSEContext()
         # Packages the source declared via ``library(pkg)`` /
         # ``require(pkg)``. Used to disambiguate autoload candidates
         # below — if ``penguins`` is in two packages and one of them
         # was loaded, prefer that one.
         self._loaded_packages: set[str] = set()
+        # Original R source — used to slice back the text of an
+        # unportable statement when emitting its comment block.
+        self._src = src
+        # ``[(kind, subject, r_text, notes)]`` — one row per unported
+        # statement. Resolved post-unparse into Python comments.
+        self._unported: list[tuple[str, str, str, str]] = []
+        self._log_gaps = log_gaps
+        self._source_label = source_label
 
     # -- public ------------------------------------------------------------
 
     def translate(self, prog: R.Program) -> str:
         module = self._visit_program(prog)
         P.fix_missing_locations(module)
-        return P.unparse(module)
+        src = P.unparse(module)
+        src = self._rewrite_unported(src)
+        return src
+
+    # -- unported sentinel ------------------------------------------------
+
+    def _emit_unported(
+        self,
+        node: R.Node,
+        kind: str,
+        subject: str,
+        notes: str = "",
+    ) -> P.stmt:
+        """Record an unportable construct and return a sentinel statement
+        that :meth:`_rewrite_unported` will replace with a comment block."""
+        r_text = self._slice_source(node)
+        idx = len(self._unported)
+        self._unported.append((kind, subject, r_text, notes))
+        if self._log_gaps:
+            _gaps.log_gap(
+                kind=kind,
+                subject=subject,
+                source=self._source_label,
+                snippet=r_text[:200],
+                notes=notes,
+            )
+        return P.Expr(value=P.Constant(value=f"{_UNPORTED_TAG}:{idx}"))
+
+    def _slice_source(self, node: R.Node) -> str:
+        """Slice the R source for ``node``'s span. Returns ``"<unknown>"``
+        when the translator was constructed without source (older API)."""
+        if not self._src:
+            return "<unknown>"
+        span = getattr(node, "span", None)
+        if span is None:
+            return "<unknown>"
+        try:
+            start, end = span
+        except (TypeError, ValueError):
+            return "<unknown>"
+        return self._src[start:end]
+
+    def _rewrite_unported(self, py_source: str) -> str:
+        """Replace each ``"__HEA_UNPORTED__:N"`` line in the unparse output
+        with the recorded R source as a commented-out block. Indentation
+        is preserved so nested unported statements stay attached to their
+        enclosing scope."""
+        if not self._unported:
+            return py_source
+        out_lines: list[str] = []
+        for line in py_source.splitlines():
+            m = _UNPORTED_LINE_RE.match(line)
+            if not m:
+                out_lines.append(line)
+                continue
+            indent = line[: len(line) - len(line.lstrip())]
+            idx = int(m.group(2))
+            kind, subject, r_text, _notes = self._unported[idx]
+            out_lines.append(f"{indent}# UNPORTED [{kind}: {subject}] — translator declined; original R was:")
+            for r_line in r_text.splitlines() or [""]:
+                out_lines.append(f"{indent}#   {r_line}")
+        return "\n".join(out_lines)
 
     # -- top-level ---------------------------------------------------------
 
@@ -115,13 +236,134 @@ class Translator:
             if smart is not None:
                 body.append(smart)
                 continue
+            # Top-level checks for constructs we can't translate cleanly.
+            # Each emits a sentinel that ``_rewrite_unported`` later turns
+            # into a comment block — and logs a gap row.
+            unported = self._maybe_unported(stmt)
+            if unported is not None:
+                body.append(unported)
+                continue
             body.append(self._as_stmt(self._visit(stmt)))
 
         # Autoload preamble: bare names referenced but not defined that
         # match a known rdatasets entry get a ``hea.data(...)`` load
         # prepended to the module body.
-        preamble = self._build_autoload_preamble(body)
-        return P.Module(body=preamble + body, type_ignores=[])
+        autoload = self._build_autoload_preamble(body)
+        # Import preamble: scan body+autoload for bare Load Name refs and
+        # emit minimal ``from hea[.R|.plot] import ...`` so the translated
+        # source is runnable standalone (``python script.py``).
+        imports = self._build_import_preamble(autoload + body)
+        return P.Module(body=imports + autoload + body, type_ignores=[])
+
+    # -- unportable-construct detection ------------------------------------
+
+    def _maybe_unported(self, stmt: R.Node) -> Optional[P.stmt]:
+        """Return a sentinel statement for top-level constructs the
+        translator cannot emit as valid Python; otherwise ``None``."""
+        # ``f(x) <- v`` replacement-function assignment. R has dozens of
+        # these (``levels``, ``names``, ``colnames``, ``contrasts``,
+        # ``diag``, ``dim``, ``attr``, ...) — far cleaner to detect by
+        # structure (any Assign whose target is a Call) than to maintain
+        # a whitelist.
+        if (
+            isinstance(stmt, R.Assign)
+            and isinstance(stmt.target, R.Call)
+            and isinstance(stmt.target.func, R.Identifier)
+        ):
+            fn = stmt.target.func.name
+            return self._emit_unported(
+                stmt,
+                kind="replacement_function",
+                subject=f"{fn}<-",
+                notes=f"R's `{fn}(x) <- v` setter has no direct hea analog yet.",
+            )
+        # Any statement containing a ``with(df, expr)`` call — R's NSE
+        # rebind that the translator hasn't built out.
+        if _contains_call_to(stmt, "with"):
+            return self._emit_unported(
+                stmt,
+                kind="with_expression",
+                subject="with",
+                notes="R's `with(df, expr)` needs an NSE rewrite to bind df's columns; not yet implemented.",
+            )
+        # Any statement containing a call to a Python-keyword name
+        # (``class(x)``, ``try(expr)``, ``except(...)`` etc.). Emitting
+        # ``class(x)`` would be a Python syntax error.
+        kw = _first_python_keyword_call(stmt)
+        if kw is not None:
+            return self._emit_unported(
+                stmt,
+                kind="python_keyword_call",
+                subject=kw,
+                notes=f"`{kw}(...)` collides with Python's `{kw}` keyword; needs renamed-helper translation or different surface.",
+            )
+        return None
+
+    def _build_import_preamble(self, body: list[P.stmt]) -> list[P.stmt]:
+        """Scan ``body`` for Load Name + root-of-Attribute references that
+        aren't locally bound; emit minimal imports from ``hea``, ``hea.R``,
+        and ``hea.plot`` (in that priority).
+
+        Names not present in any of the three are left alone — they'll
+        surface as ``NameError`` at runtime, which is the right signal
+        that a gap remains rather than silently masking with a wildcard.
+        """
+        defined: set[str] = set()
+        referenced: set[str] = set()
+        for stmt in body:
+            for node in P.walk(stmt):
+                if isinstance(node, P.Assign):
+                    for tgt in node.targets:
+                        if isinstance(tgt, P.Name):
+                            defined.add(tgt.id)
+                elif isinstance(node, P.For) and isinstance(node.target, P.Name):
+                    defined.add(node.target.id)
+                elif isinstance(node, (P.FunctionDef, P.AsyncFunctionDef)):
+                    defined.add(node.name)
+                    for a in node.args.args:
+                        defined.add(a.arg)
+                elif isinstance(node, P.Lambda):
+                    for a in node.args.args:
+                        defined.add(a.arg)
+                elif isinstance(node, P.Name) and isinstance(node.ctx, P.Load):
+                    referenced.add(node.id)
+                elif isinstance(node, P.Attribute) and isinstance(node.value, P.Name):
+                    # ``hea.data(...)`` / ``selectors.starts_with(...)``
+                    # — the root name (``hea`` / ``selectors``) is what
+                    # must be importable.
+                    if isinstance(node.value.ctx, P.Load):
+                        referenced.add(node.value.id)
+
+        candidates = referenced - defined - _PY_BUILTINS
+
+        hea_names = sorted(n for n in candidates if n in _HEA_EXPORTS)
+        used = set(hea_names)
+        r_names = sorted(n for n in (candidates - used) if n in _HEA_R_EXPORTS)
+        used |= set(r_names)
+        plot_names = sorted(n for n in (candidates - used) if n in _HEA_PLOT_EXPORTS)
+
+        out: list[P.stmt] = []
+        if "hea" in referenced:
+            out.append(P.Import(names=[P.alias(name="hea", asname=None)]))
+        if hea_names:
+            out.append(P.ImportFrom(
+                module="hea",
+                names=[P.alias(name=n, asname=None) for n in hea_names],
+                level=0,
+            ))
+        if r_names:
+            out.append(P.ImportFrom(
+                module="hea.R",
+                names=[P.alias(name=n, asname=None) for n in r_names],
+                level=0,
+            ))
+        if plot_names:
+            out.append(P.ImportFrom(
+                module="hea.plot",
+                names=[P.alias(name=n, asname=None) for n in plot_names],
+                level=0,
+            ))
+        return out
 
     def _maybe_smart_data_call(self, stmt: R.Node) -> Optional[P.AST]:
         """If ``stmt`` is a standalone ``data("X", package="Y")`` call,
@@ -194,7 +436,16 @@ class Translator:
                     referenced.add(node.id)
 
         loaded = frozenset(self._loaded_packages)
-        candidates = sorted(referenced - defined - _datasets.DATASET_REF_EXCLUSIONS)
+        # Function-table emitted names (``sd → std``, ``cumsum``, ``ntile``,
+        # …) are translator output, not dataset references. Without this,
+        # ``sd(x)`` translating to ``std(x)`` would trigger a phantom
+        # ``std = hea.data("std", package="KMsurv")`` autoload.
+        emitted_helpers = frozenset(
+            f.hea_name.split(".", 1)[0] for f in FUNCTION_TABLE.values()
+        )
+        candidates = sorted(
+            referenced - defined - _datasets.DATASET_REF_EXCLUSIONS - emitted_helpers
+        )
         out: list[P.stmt] = []
         for name in candidates:
             pkg = _datasets.resolve_dataset(name, loaded_packages=loaded)
@@ -272,10 +523,10 @@ class Translator:
         if slot is Slot.COLUMN_NAME:
             return P.Constant(value=n.name)
         # NONE — emit as a Python name. Dot identifiers (``data.frame``,
-        # ``na.omit``) become underscores so the result is a valid Python
-        # identifier; this matches how the rest of hea names things.
-        py_name = n.name.replace(".", "_")
-        return _name(py_name)
+        # ``na.omit``) become underscores; identifiers that collide with
+        # Python keywords (``lambda``, ``class``, ``True``, ...) get a
+        # trailing ``_`` so the result is always a valid Python name.
+        return _name(_to_py_identifier(n.name))
 
     # -- operators ---------------------------------------------------------
 
@@ -356,11 +607,24 @@ class Translator:
         if op == "%in%":
             return _call(_attr(left, "is_in"), [right])
 
+        # ``%*%`` — R matrix multiplication. Python's ``@`` matmul
+        # operator is the right target (works on numpy arrays + hea
+        # DataFrames-as-matrices).
+        if op == "%*%":
+            return P.BinOp(left=left, op=P.MatMult(), right=right)
+
         # Other ``%infix%`` operators — emit as a function call so the user
         # sees something sensible. The registry can resolve specific names
-        # in a later phase.
+        # in a later phase. The function-name strips ``%`` and any other
+        # operator-only character so we never produce ``*(...)``-style
+        # invalid Python identifiers.
         if op.startswith("%") and op.endswith("%"):
-            fname = op.strip("%")
+            fname = "".join(c for c in op.strip("%") if c.isalnum() or c == "_")
+            if not fname:
+                # All-symbol infix (``%~%``, ``%^%``) with no usable
+                # Python identifier. Emit as ``_infix_<op>(left, right)``
+                # to surface the original operator in the gap log.
+                fname = "_infix_" + "".join(f"{ord(c):x}" for c in op.strip("%"))
             return _call(_name(fname), [left, right])
 
         raise RTranslateError(f"unknown binary operator {op!r}", n)
@@ -726,10 +990,10 @@ class Translator:
         return _call(callee, py_args, py_kwargs)
 
     def _emit_regular_call(self, name: str, args: tuple[R.Node, ...]) -> P.AST:
-        """Unknown function — emit as-is with dot→underscore name fix."""
+        """Unknown function — emit as-is, normalizing the name into a
+        valid Python identifier (dot→underscore, keyword→trailing-``_``)."""
         py_args, py_kwargs = self._translate_args(args)
-        py_name = name.replace(".", "_")
-        return _call(_name(py_name), py_args, py_kwargs)
+        return _call(_name(_to_py_identifier(name)), py_args, py_kwargs)
 
     def _emit_case_when(self, args: tuple[R.Node, ...]) -> P.AST:
         """``case_when(cond1 ~ val1, cond2 ~ val2, .default = d)`` →
@@ -996,6 +1260,25 @@ class Translator:
 # ---------------------------------------------------------------------------
 
 
+def _to_py_identifier(name: str) -> str:
+    """Normalize an R identifier into a valid Python identifier:
+
+    1. ``.`` → ``_`` (``data.frame`` → ``data_frame``).
+    2. Trailing ``_`` if the result is a hard Python keyword (``lambda``
+       → ``lambda_``, ``class`` → ``class_``).
+
+    Soft keywords (``match``, ``case``, ``type``, ``_``) are left alone
+    — they're valid identifiers outside their reserved-statement
+    contexts.
+    """
+    import keyword
+
+    py = name.replace(".", "_")
+    if keyword.iskeyword(py):
+        py = py + "_"
+    return py
+
+
 def _name(name: str, *, ctx: Optional[P.expr_context] = None) -> P.Name:
     return P.Name(id=name, ctx=ctx or P.Load())
 
@@ -1080,6 +1363,60 @@ def _is_named_call(node, name: str) -> bool:
         and isinstance(node.func, R.Identifier)
         and node.func.name == name
     )
+
+
+def _contains_call_to(node: R.Node, fn_name: str) -> bool:
+    """Recursively walk ``node``'s subtree looking for any
+    ``Call(Identifier(fn_name), ...)``. Used to detect ``with(...)`` /
+    ``class(...)`` etc. anywhere inside a top-level R statement."""
+    return _first_matching_call(node, lambda n: n == fn_name) == fn_name
+
+
+def _first_python_keyword_call(node: R.Node) -> Optional[str]:
+    """Return the first hard-Python-keyword function name called anywhere
+    inside ``node``'s subtree, or ``None`` if there is none.
+
+    R has plenty of functions whose names collide with Python keywords
+    — ``class``, ``try``, ``while``, ``return``, ``except``, ``finally``,
+    ``raise``, ``yield``, ``del``, ``assert``, ``global``, ``nonlocal``,
+    ``lambda``, ``pass``, ``elif``, ``async``, ``await``. Emitting them
+    as Python identifiers is a syntax error.
+
+    Soft keywords (``match``, ``case``, ``type``, ``_``) are valid as
+    identifiers outside their reserved-statement contexts, so we do
+    **not** unport them.
+    """
+    import keyword
+    return _first_matching_call(node, keyword.iskeyword)
+
+
+def _first_matching_call(node: R.Node, predicate) -> Optional[str]:
+    """Walk ``node``'s subtree; return the name of the first ``R.Call``
+    whose function-identifier name matches ``predicate``, else ``None``.
+    """
+    from dataclasses import fields, is_dataclass
+
+    if (
+        isinstance(node, R.Call)
+        and isinstance(node.func, R.Identifier)
+        and predicate(node.func.name)
+    ):
+        return node.func.name
+    if not is_dataclass(node):
+        return None
+    for f in fields(node):
+        v = getattr(node, f.name, None)
+        if isinstance(v, R.Node):
+            hit = _first_matching_call(v, predicate)
+            if hit is not None:
+                return hit
+        elif isinstance(v, (tuple, list)):
+            for item in v:
+                if isinstance(item, R.Node):
+                    hit = _first_matching_call(item, predicate)
+                    if hit is not None:
+                        return hit
+    return None
 
 
 def _is_ggplot_chain_call(node) -> bool:

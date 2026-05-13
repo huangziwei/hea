@@ -55,6 +55,10 @@ _KNOWN_KINDS: frozenset[str] = frozenset({
     "unknown_theme_element",
     "nse_ambiguous",
     "not_implemented",
+    "replacement_function",   # R `f(x) <- v` setter form
+    "with_expression",        # `with(df, expr)` — NSE rewrite not yet built
+    "python_keyword_call",    # bare `class(x)`/`lambda(x)` collides with a Python keyword
+    "lexer_ambiguity",        # parser/lexer can't disambiguate the input
     # Runtime-side
     "runtime_error_r",
     "runtime_error_py",

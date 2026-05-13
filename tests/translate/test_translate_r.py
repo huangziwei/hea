@@ -16,20 +16,34 @@ from hea.translate.r_to_py import translate
 
 
 def _tr(src: str) -> str:
-    """Translate and strip the auto-emitted dataset-load preamble.
+    """Translate and strip the auto-emitted import + dataset-load preamble.
 
     Most forward tests care about the body, not the preamble.
-    :class:`TestForwardAutoload` exercises preamble emission directly.
+    :class:`TestForwardAutoload` exercises preamble emission directly via
+    ``_tr_full``, which only strips imports.
     """
-    return _strip_autoload_preamble(translate(src)).strip()
+    return _strip_autoload_preamble(_strip_imports(translate(src))).strip()
 
 
 def _tr_full(src: str) -> str:
-    """Translate including the autoload preamble."""
-    return translate(src).strip()
+    """Translate including the autoload preamble. Strips just the import
+    preamble so existing autoload assertions keep working."""
+    return _strip_imports(translate(src)).strip()
 
 
 _AUTOLOAD_LINE = re.compile(r"^\w+\s*=\s*hea\.data\(")
+_IMPORT_LINE = re.compile(r"^(import\s+hea\b|from\s+hea(\.[\w.]+)?\s+import\b)")
+
+
+def _strip_imports(s: str) -> str:
+    """Drop the leading ``import hea`` / ``from hea[.<sub>] import ...``
+    block plus the blank line(s) that follow."""
+    lines = s.split("\n")
+    while lines and (_IMPORT_LINE.match(lines[0]) or lines[0] == ""):
+        if lines[0] == "" and not (len(lines) > 1 and _IMPORT_LINE.match(lines[1])):
+            break
+        lines.pop(0)
+    return "\n".join(lines)
 
 
 def _strip_autoload_preamble(s: str) -> str:
@@ -287,7 +301,12 @@ class TestForwardAutoload:
         # R's ``data("X", package="Y")`` is side-effectful — translate to
         # ``X = hea.data(...)`` so the Python script can use ``X`` after.
         out = _tr_full('data("flights", package = "nycflights13")\nflights |> filter(dest == "IAH")')
-        assert out.startswith("flights = hea.data('flights', package='nycflights13')")
+        assert "flights = hea.data('flights', package='nycflights13')" in out
+        # The data-assign must come before any use of ``flights`` below it.
+        lines = out.splitlines()
+        assign_at = next(i for i, ln in enumerate(lines) if ln.startswith("flights = hea.data("))
+        use_at = next(i for i, ln in enumerate(lines) if "flights." in ln or "flights[" in ln or "flights |" in ln)
+        assert assign_at < use_at
 
     def test_autoload_for_unique_dataset(self):
         # No library() and no data() — bare ref to a uniquely-named
