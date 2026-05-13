@@ -4,11 +4,8 @@ This is the *package*; the :func:`ggplot` factory function lives inside
 it. Use ``from hea.ggplot import ggplot, aes, geom_point`` rather than
 ``from hea import ggplot`` (the latter binds the package, not the function).
 
-Phase 0+ surface: ``ggplot``, ``aes``, ``geom_point``, ``geom_blank``,
-``geom_bar``/``geom_col``/``geom_histogram``, ``geom_density``, plus the
-underlying ``stat_*`` family. Subsequent phases land continuous scales,
-polar coords (the strategic piece — see
-``.claude/plans/ggplot2-port.md``), facets, themes, guides, and
+Surface today: ``ggplot``, ``aes``, the ``geom_*`` / ``stat_*`` /
+``scale_*`` / ``coord_*`` / ``facet_*`` / ``theme_*`` families, plus
 circular-statistics extensions in :mod:`hea.ggplot.circular`.
 """
 

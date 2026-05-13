@@ -39,7 +39,7 @@ class GeomRibbon(Geom):
             self._draw_one(data, ax)
 
     def _draw_one(self, sub, ax) -> None:
-        from .._util import r_color
+        from .._util import polar_arc_interp, r_color
 
         x = sub["x"].to_numpy()
         ymin = sub["ymin"].to_numpy()
@@ -52,8 +52,9 @@ class GeomRibbon(Geom):
         edge = r_color(edge_raw) if edge_raw is not None else "none"
         alpha = float(_first(sub, "alpha", 0.4))
 
-        ax.fill_between(x, ymin, ymax, facecolor=fill, edgecolor=edge,
-                        alpha=alpha, linewidth=0)
+        poly = ax.fill_between(x, ymin, ymax, facecolor=fill, edgecolor=edge,
+                               alpha=alpha, linewidth=0)
+        polar_arc_interp(ax, poly)
 
 
 def _first(df, col, default):

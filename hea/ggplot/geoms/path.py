@@ -47,6 +47,8 @@ class GeomPath(Geom):
             self._draw_one(data, ax, r_lty, r_color)
 
     def _draw_one(self, sub, ax, r_lty, r_color) -> None:
+        from .._util import polar_arc_interp
+
         x = sub["x"].to_numpy()
         y = sub["y"].to_numpy()
 
@@ -63,8 +65,9 @@ class GeomPath(Geom):
         alpha = float(_first(sub, "alpha", 1.0))
 
         # ggplot2 size in mm → matplotlib linewidth in pt (1pt ≈ 0.353mm).
-        ax.plot(x, y, color=colour, linewidth=size * 2.83,
-                linestyle=r_lty(linetype), alpha=alpha)
+        lines = ax.plot(x, y, color=colour, linewidth=size * 2.83,
+                        linestyle=r_lty(linetype), alpha=alpha)
+        polar_arc_interp(ax, *lines)
 
 
 def _first(df, col, default):

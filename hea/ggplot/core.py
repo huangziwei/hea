@@ -433,7 +433,7 @@ def _(thing: list, plot):
 
 
 # ---------------------------------------------------------------------------
-# Fluent API auto-install (Phase B of `.claude/plans/method-based-ggplot-api.md`)
+# Fluent API auto-install
 # ---------------------------------------------------------------------------
 
 # Names whose `name(...)` produces a value that's `+`-able into a ggplot.

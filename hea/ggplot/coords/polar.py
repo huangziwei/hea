@@ -19,16 +19,19 @@ ggplot2 and hea diverge in *where* the polar transform happens:
 
 The practical consequence:
 
-- ``ax.bar`` Rectangles use ``_interpolation_steps = 100``, so the
-  constant-r ``LINETO`` edges are replaced with ``Path.arc()`` (CURVE4
+- ``ax.bar`` Rectangles set ``_interpolation_steps = 100`` by default,
+  so the constant-r ``LINETO`` edges become ``Path.arc()`` (CURVE4
   cubic-Bezier) segments and the constant-θ edges stay radial. Polar
-  bars get true-arc wedges with ~15 path vertices.
-- ``ax.plot`` and ``ax.fill_between`` use ``_interpolation_steps = 1``,
-  so matplotlib does *not* interpolate. The path between consecutive
-  data points is a ``LINETO`` in ``(θ, r)`` space, which renders as a
-  chord in display. Sparse paths/ribbons look polygonal — *worse*
-  than ggplot2's ``coord_munch`` output. Dense sampling (e.g.
-  pycircstat2's CI arcs) hides this.
+  bars are true-arc wedges out of the box.
+- ``ax.plot`` Line2D and ``ax.fill_between`` PolyCollection default
+  to ``_interpolation_steps = 1``. hea's geom layer bumps this to
+  ``100`` via :func:`hea.ggplot._util.polar_arc_interp` so constant-r
+  segments in paths and ribbons get the same arc treatment.
+
+The radial axis is anchored at ``r = 0`` regardless of data minimum,
+matching ggplot2's coord_polar (a ribbon over ``r ∈ [0.4, 1.0]`` thus
+renders as an annulus with a hole, not as a filled disc that crops
+matplotlib's auto-zoomed radial range).
 
 One 1D operation does happen in hea: the x-aesthetic's trained range
 is linearly rescaled to ``[0, 2π]`` so ordinal x (clarity, gear, …)

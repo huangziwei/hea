@@ -1,9 +1,8 @@
 """hea.translate — R ↔ hea source-to-source translator.
 
-Pure-Python, no external R-parsing dependencies. See
-``.claude/plans/r-translator.md`` for the full design.
+Pure-Python, no external R-parsing dependencies.
 
-The public surface (some pieces still pending — see the plan):
+The public surface (some pieces still pending):
 
 - :func:`translate_r` — R source → Python source (str → str).
 - :func:`translate_py` — Python source → R source.

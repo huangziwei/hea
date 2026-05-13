@@ -155,6 +155,14 @@ def _polar_apply_scales(ax, x_scale, y_scale, x_range):
             # take down the plot; fall back to matplotlib auto-ticks.
             pass
 
+    # ggplot2's coord_polar anchors the radial axis at r=0 regardless of
+    # the data's minimum (so a ribbon over r ∈ [0.4, 1.0] renders as a
+    # proper annulus with a hole, not as a filled disc). matplotlib's
+    # polar default auto-scales rmin to the data — override.
+    rmin, rmax = ax.get_ylim()
+    if rmin > 0:
+        ax.set_ylim(0.0, rmax)
+
     if x_scale is None or x_range is None:
         # No x-scale info, but still pin the angular axis below.
         ax.set_xlim(0.0, 2 * math.pi)

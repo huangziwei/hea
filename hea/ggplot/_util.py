@@ -8,6 +8,35 @@ import numpy as np
 import polars as pl
 
 
+def polar_arc_interp(ax, *artists, steps: int = 100) -> None:
+    """Enable arc-edge tessellation on polar axes.
+
+    matplotlib's ``PolarTransform.transform_path_non_affine`` substitutes
+    ``Path.arc()`` (CURVE4) segments for constant-r ``LINETO`` edges and
+    radial lines for constant-θ ``LINETO`` edges — but **only** when the
+    path's ``_interpolation_steps`` is not 1. ``ax.bar`` Rectangle paths
+    set this to 100 by default; ``ax.plot`` Line2D and
+    ``ax.fill_between`` PolyCollection paths set it to 1, so paths and
+    ribbons render as chord polylines between consecutive data points.
+
+    Call this on the artists returned by ``ax.plot`` / ``ax.fill_between``
+    on a polar axes to lift them to the same arc-edged behaviour
+    matplotlib gives bars. No-op when ``ax`` is not polar.
+
+    Accepts ``Line2D`` instances (single path via ``.get_path()``) and
+    ``PolyCollection`` instances (multiple paths via ``.get_paths()``).
+    ``ax.plot`` returns a list of ``Line2D`` — unpack with ``*``.
+    """
+    if getattr(ax, "name", None) != "polar":
+        return
+    for a in artists:
+        if hasattr(a, "get_paths"):
+            for p in a.get_paths():
+                p._interpolation_steps = steps
+        else:
+            a.get_path()._interpolation_steps = steps
+
+
 def to_series(x, length: int, name: str = "value") -> pl.Series:
     """Coerce a scalar / array / Series into a polars Series of given length.
 

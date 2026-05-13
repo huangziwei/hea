@@ -126,6 +126,8 @@ class GeomDensityRidges(Geom):
             self._draw_one(sub, ax, r_color)
 
     def _draw_one(self, sub, ax, r_color):
+        from .._util import polar_arc_interp
+
         x = sub["x"].to_numpy().astype(float)
         ymin = sub["ymin"].to_numpy().astype(float)
         ymax = sub["ymax"].to_numpy().astype(float)
@@ -154,21 +156,24 @@ class GeomDensityRidges(Geom):
                 return
             poly_x = np.concatenate([x[valid], x[valid][::-1]])
             poly_y = np.concatenate([ymax[valid], ymin[valid][::-1]])
-            ax.fill(
+            polys = ax.fill(
                 poly_x, poly_y,
                 facecolor=fill, edgecolor=edge,
                 linewidth=lw * 2.83, alpha=alpha,
             )
+            polar_arc_interp(ax, *polys)
         else:
-            ax.fill_between(
+            poly = ax.fill_between(
                 x, ymin, ymax, where=~np.isnan(ymax),
                 facecolor=fill, edgecolor="none", alpha=alpha,
                 linewidth=0,
             )
+            polar_arc_interp(ax, poly)
             # Top line only — drop NaN segments so rel_min_height cuts
             # don't connect across the gap.
             line_y = np.where(np.isnan(ymax), np.nan, ymax)
-            ax.plot(x, line_y, color=edge, linewidth=lw * 2.83, alpha=alpha)
+            lines = ax.plot(x, line_y, color=edge, linewidth=lw * 2.83, alpha=alpha)
+            polar_arc_interp(ax, *lines)
 
 
 @dataclass

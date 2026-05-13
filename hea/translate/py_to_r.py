@@ -9,9 +9,8 @@ function-helper registry, joins, pivot, case_when (with tuple-pair
 inversion to ``~`` syntax), patchwork composition, and ggplot fluent
 chains.
 
-The forward direction is necessarily lossy in a few places — see
-``.claude/plans/r-translator.md`` §3.x for what's expected to round-trip
-exactly. Notable losses:
+The forward direction is necessarily lossy in a few places. Notable
+losses:
 
 - ``mutate(across(c(a, b), mean))`` expands forward to two NamedArgs and
   cannot reliably re-collapse into ``across()``. Reverse emits the

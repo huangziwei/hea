@@ -1,8 +1,8 @@
 """R lexer — character stream → token stream.
 
-Pure-Python, hand-written. Covers the documented sublanguage described in
-``.claude/plans/r-translator.md`` §4. Out-of-grammar character sequences
-raise :class:`RLexError` with a precise span.
+Pure-Python, hand-written. Covers the tidyverse-shaped R sublanguage
+the translator supports. Out-of-grammar character sequences raise
+:class:`RLexError` with a precise span.
 
 Token kinds are short uppercase strings (``"NUM"``, ``"IDENT"``, ``"<-"`` …)
 rather than an enum, so error messages and tests can print them naturally
