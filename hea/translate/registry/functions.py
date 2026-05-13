@@ -105,8 +105,8 @@ FUNCTION_TABLE: dict[str, Func] = {
     # ---- base R that maps directly to hea ----
     "c":        Func("__list__",   "function"),  # bespoke — emit as a list/Series
     "list":     Func("__list__",   "function"),
-    "is.na":    Func("is_null",    "method"),    # R's is.na ~= polars .is_null()
-    "is.null":  Func("is_null",    "method"),
+    "is.na":    Func("is_na",      "method"),    # R's is.na — element-wise NA
+    "is.null":  Func("is_null",    "method"),    # R's is.null — scalar None check
     "is.finite": Func("is_finite", "method"),
 
     # ---- tibble / data.frame literal — bespoke handler ----

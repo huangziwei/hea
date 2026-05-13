@@ -235,6 +235,18 @@ __all__ = [
     "table", "xtabs", "prop_table", "addmargins",
     # reductions (R defaults: sd/var use N-1)
     "mean", "median", "var", "sd", "quantile", "IQR", "cor", "cov",
+    # elementwise math (R: vectorized scalar functions)
+    # Note: ``abs`` and ``round`` exist as module attributes but are NOT
+    # exported — they collide with Python builtins and the translator
+    # treats the R names as builtins (the builtin handles scalars / Series
+    # / ndarrays via __abs__ / __round__).
+    "pi",
+    "sqrt", "exp", "log", "log2", "log10", "log1p", "expm1", "sign",
+    "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+    "floor", "ceiling", "trunc",
+    # matrix / frame utilities (R: base matrix ops)
+    "rowSums", "colSums", "rowMeans", "colMeans",
+    "apply", "rbind", "cbind", "sweep", "expand_grid", "matrix",
     # coercion / predicates
     "as_numeric", "as_integer", "as_character", "as_logical",
     "as_date", "as_Date",
@@ -969,6 +981,283 @@ def cov(x, y=None, na_rm=True):
     return float(np.cov(a, b, ddof=1)[0, 1])
 
 
+# ---- elementwise math (R: vectorized scalar functions) --------------
+
+pi = float(np.pi)
+
+
+def _elementwise(x, fn_expr, fn_np):
+    """Dispatch math by input type.
+
+    polars Expr/Series → call its method; scalars/lists/arrays → numpy.
+    Keeps R's "math functions vectorize over containers" semantics.
+    """
+    if isinstance(x, (pl.Expr, pl.Series)):
+        return fn_expr(x)
+    return fn_np(x)
+
+
+def sqrt(x):
+    """R: elementwise square root."""
+    return _elementwise(x, lambda v: v.sqrt(), np.sqrt)
+
+
+def exp(x):
+    """R: elementwise e^x."""
+    return _elementwise(x, lambda v: v.exp(), np.exp)
+
+
+def log(x, base=None):
+    """R: elementwise log. Default is natural log; ``base`` for arbitrary base."""
+    if base is None:
+        return _elementwise(x, lambda v: v.log(), np.log)
+    if isinstance(x, (pl.Expr, pl.Series)):
+        return x.log(base)
+    return np.log(x) / np.log(base)
+
+
+def log2(x):
+    """R: elementwise base-2 log."""
+    if isinstance(x, (pl.Expr, pl.Series)):
+        return x.log(2.0)
+    return np.log2(x)
+
+
+def log10(x):
+    """R: elementwise base-10 log."""
+    return _elementwise(x, lambda v: v.log10(), np.log10)
+
+
+def log1p(x):
+    """R: ``log(1 + x)``, accurate for small ``x``."""
+    return _elementwise(x, lambda v: (v + 1).log(), np.log1p)
+
+
+def expm1(x):
+    """R: ``exp(x) - 1``, accurate for small ``x``."""
+    return _elementwise(x, lambda v: v.exp() - 1, np.expm1)
+
+
+def abs(x):
+    """R: elementwise absolute value. Shadows the builtin; intentional."""
+    return _elementwise(x, lambda v: v.abs(), np.abs)
+
+
+def sign(x):
+    """R: elementwise sign (-1, 0, 1)."""
+    return _elementwise(x, lambda v: v.sign(), np.sign)
+
+
+def sin(x):
+    return _elementwise(x, lambda v: v.sin(), np.sin)
+
+
+def cos(x):
+    return _elementwise(x, lambda v: v.cos(), np.cos)
+
+
+def tan(x):
+    return _elementwise(x, lambda v: v.tan(), np.tan)
+
+
+def asin(x):
+    return _elementwise(x, lambda v: v.arcsin(), np.arcsin)
+
+
+def acos(x):
+    return _elementwise(x, lambda v: v.arccos(), np.arccos)
+
+
+def atan(x):
+    return _elementwise(x, lambda v: v.arctan(), np.arctan)
+
+
+def atan2(y, x):
+    """R: two-argument arctangent."""
+    if isinstance(y, (pl.Expr, pl.Series)) or isinstance(x, (pl.Expr, pl.Series)):
+        return pl.arctan2(y, x)
+    return np.arctan2(y, x)
+
+
+def floor(x):
+    return _elementwise(x, lambda v: v.floor(), np.floor)
+
+
+def ceiling(x):
+    """R: ``ceiling`` (note: R uses ``ceiling`` not ``ceil``)."""
+    return _elementwise(x, lambda v: v.ceil(), np.ceil)
+
+
+def round(x, digits=0):
+    """R: round half-to-even, ``digits`` decimal places. Shadows builtin."""
+    if isinstance(x, (pl.Expr, pl.Series)):
+        return x.round(int(digits))
+    return np.round(x, int(digits))
+
+
+def trunc(x):
+    """R: truncate toward zero."""
+    if isinstance(x, pl.Expr):
+        return pl.when(x >= 0).then(x.floor()).otherwise(x.ceil())
+    return np.trunc(x)
+
+
+# ---- matrix / frame utilities (R: base matrix ops) ------------------
+
+
+def _to_2d(x) -> np.ndarray:
+    """Promote DataFrame/list/array to a 2-D numpy array."""
+    if isinstance(x, pl.DataFrame):
+        return x.to_numpy()
+    arr = np.asarray(x)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    return arr
+
+
+def rowSums(x, na_rm=False):
+    """R: per-row sum. Returns a 1-D numpy array."""
+    arr = _to_2d(x)
+    if na_rm:
+        return np.nansum(arr, axis=1)
+    return arr.sum(axis=1)
+
+
+def colSums(x, na_rm=False):
+    """R: per-column sum. Returns a 1-D numpy array."""
+    arr = _to_2d(x)
+    if na_rm:
+        return np.nansum(arr, axis=0)
+    return arr.sum(axis=0)
+
+
+def rowMeans(x, na_rm=False):
+    """R: per-row mean. Returns a 1-D numpy array."""
+    arr = _to_2d(x)
+    if na_rm:
+        return np.nanmean(arr, axis=1)
+    return arr.mean(axis=1)
+
+
+def colMeans(x, na_rm=False):
+    """R: per-column mean. Returns a 1-D numpy array."""
+    arr = _to_2d(x)
+    if na_rm:
+        return np.nanmean(arr, axis=0)
+    return arr.mean(axis=0)
+
+
+def apply(X, MARGIN, FUN, *args, **kwargs):
+    """R: ``apply(X, MARGIN, FUN, ...)``.
+
+    MARGIN=1 → over rows, MARGIN=2 → over columns. Returns numpy array
+    of FUN-results stacked; loses R's name attribute (Python has no
+    named-vector primitive).
+    """
+    arr = _to_2d(X)
+    axis = 1 if MARGIN == 1 else 0  # iterate along the *other* axis
+    results = []
+    if MARGIN == 2:
+        for j in range(arr.shape[1]):
+            results.append(FUN(arr[:, j], *args, **kwargs))
+    else:
+        for i in range(arr.shape[0]):
+            results.append(FUN(arr[i, :], *args, **kwargs))
+    return np.asarray(results)
+
+
+def rbind(*args):
+    """R: row-bind. Concatenates 1-D vectors or 2-D arrays vertically."""
+    if all(isinstance(a, pl.DataFrame) for a in args):
+        return pl.concat(args, how="vertical")
+    arrs = [np.atleast_2d(np.asarray(a)) for a in args]
+    return np.vstack(arrs)
+
+
+def cbind(*args):
+    """R: column-bind. Concatenates vectors as columns of a matrix."""
+    if all(isinstance(a, pl.DataFrame) for a in args):
+        return pl.concat(args, how="horizontal")
+    arrs = []
+    for a in args:
+        arr = np.asarray(a)
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        arrs.append(arr)
+    # Broadcast scalars to longest column
+    max_rows = max(a.shape[0] for a in arrs)
+    arrs = [np.broadcast_to(a, (max_rows, a.shape[1])) if a.shape[0] == 1 else a for a in arrs]
+    return np.hstack(arrs)
+
+
+def sweep(x, MARGIN, STATS, FUN="-"):
+    """R: sweep out a summary statistic along a margin.
+
+    ``MARGIN=1`` sweeps along rows, ``MARGIN=2`` along columns. ``FUN``
+    is the operator name (``"-"``, ``"+"``, ``"*"``, ``"/"``).
+    """
+    arr = _to_2d(x).astype(float)
+    stats = np.asarray(STATS, dtype=float).ravel()
+    if MARGIN == 2:
+        # broadcast along axis 0 (rows broadcast, columns aligned)
+        op_arr = stats[np.newaxis, :]
+    else:
+        op_arr = stats[:, np.newaxis]
+    ops = {"-": np.subtract, "+": np.add, "*": np.multiply, "/": np.divide}
+    op = ops.get(FUN, FUN if callable(FUN) else ops["-"])
+    return op(arr, op_arr)
+
+
+def expand_grid(**kwargs):
+    """R: ``expand.grid(...)``. Cartesian product of named inputs.
+
+    Returns a polars DataFrame whose columns are the named args. R's
+    column ordering: first arg varies fastest; we match that.
+    """
+    import itertools
+
+    if not kwargs:
+        return pl.DataFrame()
+    keys = list(kwargs.keys())
+    values = []
+    for v in kwargs.values():
+        if isinstance(v, (str, bytes)) or not hasattr(v, "__iter__"):
+            values.append([v])
+        else:
+            values.append(list(v))
+    # R's expand.grid: first variable varies fastest. itertools.product
+    # varies the *last* fastest, so reverse, product, reverse again.
+    rev_values = list(reversed(values))
+    rows = list(itertools.product(*rev_values))
+    rows = [tuple(reversed(r)) for r in rows]
+    cols = {k: [r[i] for r in rows] for i, k in enumerate(keys)}
+    return pl.DataFrame(cols)
+
+
+def matrix(data, nrow=None, ncol=None, byrow=False):
+    """R: ``matrix(data, nrow, ncol, byrow=FALSE)``.
+
+    Reshapes ``data`` to (nrow × ncol). Either ``nrow`` or ``ncol`` may
+    be inferred from the other. R fills column-major (``byrow=FALSE``);
+    we match that default.
+    """
+    arr = np.asarray(data).ravel()
+    if nrow is None and ncol is None:
+        return arr.reshape(-1, 1)
+    if nrow is None:
+        nrow = -(-arr.size // ncol)
+    if ncol is None:
+        ncol = -(-arr.size // nrow)
+    if arr.size < nrow * ncol:
+        # R recycles values; numpy reshape doesn't — tile to fill.
+        reps = -(-(nrow * ncol) // arr.size)
+        arr = np.tile(arr, reps)[: nrow * ncol]
+    elif arr.size > nrow * ncol:
+        arr = arr[: nrow * ncol]
+    order = "C" if byrow else "F"
+    return arr.reshape(nrow, ncol, order=order)
+
+
 # ---- coercion / predicates ------------------------------------------
 
 def as_numeric(x):
@@ -1032,8 +1321,12 @@ as_Date = as_date
 
 def is_na(x):
     """R: ``is.na()`` — element-wise NaN / null."""
-    if isinstance(x, (pl.Expr, pl.Series, pl.DataFrame)):
+    if isinstance(x, (pl.Expr, pl.Series)):
         return x.is_null()
+    if isinstance(x, pl.DataFrame):
+        # polars DataFrame has no top-level .is_null(); per-column is the
+        # idiom. Result is a same-shape DataFrame of booleans.
+        return x.select(pl.all().is_null())
     arr = np.asarray(x)
     if arr.dtype.kind in "fc":
         return np.isnan(arr)

@@ -336,10 +336,13 @@ class Translator:
 
         candidates = referenced - defined - _PY_BUILTINS
 
-        hea_names = sorted(n for n in candidates if n in _HEA_EXPORTS)
-        used = set(hea_names)
-        r_names = sorted(n for n in (candidates - used) if n in _HEA_R_EXPORTS)
-        used |= set(r_names)
+        # hea.R first: R-script translations want R semantics (e.g. ``mean``
+        # is a scalar reducer with na_rm=True, not the polars expression
+        # helper). Fall back to ``hea`` for names hea.R doesn't carry.
+        r_names = sorted(n for n in candidates if n in _HEA_R_EXPORTS)
+        used = set(r_names)
+        hea_names = sorted(n for n in (candidates - used) if n in _HEA_EXPORTS)
+        used |= set(hea_names)
         plot_names = sorted(n for n in (candidates - used) if n in _HEA_PLOT_EXPORTS)
 
         out: list[P.stmt] = []
@@ -1145,22 +1148,37 @@ class Translator:
     # -- subscript / dollar / at ------------------------------------------
 
     def _visit_Subscript(self, n: R.Subscript) -> P.AST:
-        """``df[i]`` / ``df[i, j]`` — Python ``df[i]`` / ``df[i, j]``."""
+        """``df[i]`` / ``df[i, j]`` — Python ``df[i]`` / ``df[i, j]``.
+
+        R's blank-axis form ``df[, j]`` / ``df[i, ]`` maps to a Python
+        slice (``df[:, j]`` / ``df[i, :]``) — polars and numpy both accept
+        that, whereas ``None`` is rejected.
+        """
+        def _arg(a):
+            if isinstance(a, R.MissingArg):
+                return P.Slice(lower=None, upper=None, step=None)
+            return self._visit(a)
+
         with self.nse.enter(Slot.NONE):
             target = self._visit(n.target)
             if len(n.args) == 1:
-                slice_ = self._visit(n.args[0])
+                slice_ = _arg(n.args[0])
             else:
-                slice_ = P.Tuple(elts=[self._visit(a) for a in n.args], ctx=P.Load())
+                slice_ = P.Tuple(elts=[_arg(a) for a in n.args], ctx=P.Load())
         return P.Subscript(value=target, slice=slice_, ctx=P.Load())
 
     def _visit_DoubleSubscript(self, n: R.DoubleSubscript) -> P.AST:
         """``x[[i]]`` — translate to ``x[i]`` (polars has no double-bracket
         distinction; both flatten to single-element selection)."""
+        def _arg(a):
+            if isinstance(a, R.MissingArg):
+                return P.Slice(lower=None, upper=None, step=None)
+            return self._visit(a)
+
         with self.nse.enter(Slot.NONE):
             target = self._visit(n.target)
-            slice_ = self._visit(n.args[0]) if len(n.args) == 1 else \
-                P.Tuple(elts=[self._visit(a) for a in n.args], ctx=P.Load())
+            slice_ = _arg(n.args[0]) if len(n.args) == 1 else \
+                P.Tuple(elts=[_arg(a) for a in n.args], ctx=P.Load())
         return P.Subscript(value=target, slice=slice_, ctx=P.Load())
 
     def _visit_Dollar(self, n: R.Dollar) -> P.AST:

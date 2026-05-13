@@ -606,6 +606,9 @@ _R_EXPR_SKIP = {
     # Frame-meta — operate on the DataFrame, not a column.
     "nrow", "ncol", "dim", "length", "colnames", "names",
     "head", "tail", "summary", "complete_cases", "na_omit",
+    # Matrix / frame utilities — operate on 2D shapes, not single columns.
+    "rowSums", "colSums", "rowMeans", "colMeans",
+    "apply", "rbind", "cbind", "sweep", "expand_grid", "matrix",
     # Length-changing transforms — would shorten/lengthen the column.
     "diff", "which", "tabulate",
     # Container / contingency tables — return tables, not Exprs.
@@ -630,6 +633,7 @@ _R_EXPR_SKIP = {
 _R_EXPR_EXTRA: dict[str, callable] = {
     "cor":      lambda c: ((c,), {}),       # cor needs (x, y)
     "quantile": lambda c: ((0.5,), {}),     # Expr needs scalar prob
+    "atan2":    lambda c: ((c,), {}),       # atan2 needs (y, x)
 }
 
 
