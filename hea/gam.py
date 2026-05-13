@@ -575,9 +575,10 @@ class gam:
             Ve = G_P @ Ve @ G_P.T
 
         # ------------- attribute assembly ----------------------------------
+        from .named_vector import NamedVector
         self.bhat = _row_frame(beta, column_names)
-        self.coef = self.bhat                           # R-canonical alias
-        self.coefficients = self.bhat                   # R-canonical alias
+        self.coef = NamedVector(list(column_names), np.asarray(beta).reshape(-1))
+        self.coefficients = self.coef
         self._beta = beta
         se = np.sqrt(np.diag(Vp))
         self.se_bhat = _row_frame(se, column_names)

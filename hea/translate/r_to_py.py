@@ -37,21 +37,36 @@ from .registry.verbs import VERB_TABLE, Verb
 
 
 def _callable_exports(module_name: str) -> frozenset[str]:
+    """Public names a module exports — callables and module-level
+    constants (e.g. ``hea.R.pi``, ``hea.R.LETTERS``).
+
+    Submodule attributes and dunders are excluded; everything else with
+    a public name is importable as a bare identifier in translated R
+    scripts.
+    """
+    import types
+
     try:
         mod = importlib.import_module(module_name)
     except Exception:
         return frozenset()
-    return frozenset(
-        n for n in dir(mod)
-        if not n.startswith("_") and callable(getattr(mod, n, None))
-    )
+    out: set[str] = set()
+    for n in dir(mod):
+        if n.startswith("_"):
+            continue
+        v = getattr(mod, n, None)
+        if isinstance(v, types.ModuleType):
+            continue
+        out.add(n)
+    return frozenset(out)
 
 
 # Top-level ``hea`` callables. Strip the submodule names so ``plot``/``R``
 # resolve to the function-bearing surfaces below, not the submodule object.
-_HEA_EXPORTS = _callable_exports("hea") - {"R", "plot"}
+_HEA_EXPORTS = _callable_exports("hea") - {"R", "plot", "ggplot"}
 _HEA_R_EXPORTS = _callable_exports("hea.R")
 _HEA_PLOT_EXPORTS = _callable_exports("hea.plot")
+_HEA_GGPLOT_EXPORTS = _callable_exports("hea.ggplot")
 
 # Python builtins — names we never need to import.
 _PY_BUILTINS: frozenset[str] = frozenset(__builtins__.keys() if isinstance(__builtins__, dict) else dir(__builtins__)) | {  # type: ignore[union-attr]
@@ -138,6 +153,17 @@ class Translator:
         # below — if ``penguins`` is in two packages and one of them
         # was loaded, prefer that one.
         self._loaded_packages: set[str] = set()
+        # Loop variables whose iter we shifted from R's 1-based ``a:b``
+        # to Python's 0-based ``range(a-1, b)``. While translating the
+        # body of such a loop, ``(var - 1)`` collapses to ``var`` —
+        # R-source ``(i - 1)`` is the manual "shift to 0-based for
+        # arithmetic" pattern; after we've already shifted the loop
+        # counter the subtraction is redundant.
+        self._shifted_loop_vars: set[str] = set()
+        # Depth of "index context" — inside a subscript's arg list,
+        # ``1:N`` shifts to ``range(N)`` (positions are 0-based in hea).
+        # Tracked as a counter so nested subscripts compose.
+        self._index_context: int = 0
         # Original R source — used to slice back the text of an
         # unportable statement when emitting its comment block.
         self._src = src
@@ -339,11 +365,15 @@ class Translator:
         # hea.R first: R-script translations want R semantics (e.g. ``mean``
         # is a scalar reducer with na_rm=True, not the polars expression
         # helper). Fall back to ``hea`` for names hea.R doesn't carry.
+        # hea.ggplot picks up geom_/scale_/coord_/facet_/theme_/position_*
+        # helpers, which the translator emits as bare names.
         r_names = sorted(n for n in candidates if n in _HEA_R_EXPORTS)
         used = set(r_names)
         hea_names = sorted(n for n in (candidates - used) if n in _HEA_EXPORTS)
         used |= set(hea_names)
         plot_names = sorted(n for n in (candidates - used) if n in _HEA_PLOT_EXPORTS)
+        used |= set(plot_names)
+        ggplot_names = sorted(n for n in (candidates - used) if n in _HEA_GGPLOT_EXPORTS)
 
         out: list[P.stmt] = []
         if "hea" in referenced:
@@ -364,6 +394,12 @@ class Translator:
             out.append(P.ImportFrom(
                 module="hea.plot",
                 names=[P.alias(name=n, asname=None) for n in plot_names],
+                level=0,
+            ))
+        if ggplot_names:
+            out.append(P.ImportFrom(
+                module="hea.ggplot",
+                names=[P.alias(name=n, asname=None) for n in ggplot_names],
                 level=0,
             ))
         return out
@@ -559,6 +595,20 @@ class Translator:
         if op == "+" and _is_ggplot_chain_call(n.right):
             return self._emit_ggplot_chain_step(n.left, n.right)
 
+        # ``(var - 1)`` where ``var`` is a 0-based-shifted loop counter
+        # → just ``var``. R's ``for(i in 1:N) ... i - 1 ...`` is the
+        # manual "convert 1-based loop counter to 0-based for math"
+        # pattern; after the translator has already shifted the loop,
+        # the subtraction is redundant and (worse) makes i=0 become -1.
+        if (
+            op == "-"
+            and isinstance(n.left, R.Identifier)
+            and n.left.name in self._shifted_loop_vars
+            and isinstance(n.right, (R.IntLit, R.NumLit))
+            and n.right.value == 1
+        ):
+            return self._visit(n.left)
+
         left = self._visit(n.left)
         right = self._visit(n.right)
 
@@ -597,9 +647,17 @@ class Translator:
                 return P.BinOp(left=left, op=P.BitOr(), right=right)
             return P.BoolOp(op=P.Or(), values=[left, right])
 
-        # Sequence ``a:b`` → ``seq(a, b)``. The autoimport preamble
-        # resolves ``seq`` to ``hea.R.seq``.
+        # Sequence ``a:b`` → ``seq(a, b)`` by default; the for-loop iter
+        # and subscript visitors special-case to ``range(...)`` shifts so
+        # those positions match hea's 0-based indexing without breaking
+        # value uses elsewhere (e.g. ``plot(m, which=1:2)`` panel IDs).
         if op == ":":
+            # Inside an index context (subscript arg, recursively into
+            # function calls there), ``1:N`` shifts to ``range(N)`` so
+            # downstream consumers like ``sample(1:N)`` produce 0-based
+            # values that match hea's container indexing.
+            if self._index_context and isinstance(left, P.Constant) and left.value == 1:
+                return _call(_name("range"), [right])
             return _call(_name("seq"), [left, right])
 
         # Namespace access ``pkg::name`` / ``pkg:::name``. Drop the package
@@ -1179,9 +1237,6 @@ class Translator:
                     keys.append(P.Constant(value=a.name))
                     values.append(self._visit(a.value))
                 else:
-                    # An unnamed entry in an otherwise-named c() — R uses
-                    # an empty key. Emit a None-keyed entry so the user
-                    # sees the mismatch (and we don't silently drop it).
                     keys.append(P.Constant(value=None))
                     values.append(self._visit(a))
             return P.Dict(keys=keys, values=values)
@@ -1256,11 +1311,61 @@ class Translator:
         R's blank-axis form ``df[, j]`` / ``df[i, ]`` maps to a Python
         slice (``df[:, j]`` / ``df[i, :]``) — polars and numpy both accept
         that, whereas ``None`` is rejected.
+
+        R-range subscripts ``vec[a:b]`` translate to Python slices
+        ``vec[a-1:b]`` so 0-based positional indexing on the hea side
+        selects the same elements R's 1-based ``a:b`` would.
         """
         def _arg(a):
             if isinstance(a, R.MissingArg):
                 return P.Slice(lower=None, upper=None, step=None)
-            return self._visit(a)
+            if isinstance(a, R.BinOp) and a.op == ":":
+                return self._range_subscript(a)
+            # R 1-based literal index → Python 0-based.
+            if isinstance(a, R.IntLit):
+                return P.Constant(value=a.value - 1)
+            if isinstance(a, R.NumLit) and a.value == int(a.value) and a.value > 0:
+                return P.Constant(value=int(a.value) - 1)
+            # ``c(1, 3, 5)`` of positive int literals → shifted Python list.
+            if (
+                isinstance(a, R.Call)
+                and isinstance(a.func, R.Identifier)
+                and a.func.name == "c"
+                and a.args
+                and all(
+                    (isinstance(x, R.IntLit) and x.value > 0)
+                    or (isinstance(x, R.NumLit) and x.value == int(x.value) and x.value > 0)
+                    for x in a.args
+                )
+            ):
+                elts = [
+                    P.Constant(value=int(x.value) - 1)
+                    for x in a.args
+                ]
+                return P.List(elts=elts, ctx=P.Load())
+            # ``vec[expr + 1]`` — R's idiom for "shift 0-based-arithmetic
+            # result to 1-based index" (e.g. ``letters[dm + 1]`` where
+            # ``dm`` was built from ``%% s``). hea is 0-based, so the
+            # ``+ 1`` is redundant; drop it.
+            if (
+                isinstance(a, R.BinOp)
+                and a.op == "+"
+                and isinstance(a.right, (R.IntLit, R.NumLit))
+                and a.right.value == 1
+            ):
+                self._index_context += 1
+                try:
+                    return self._visit(a.left)
+                finally:
+                    self._index_context -= 1
+            # Recurse with index context active: ``sample(1:N)`` and any
+            # other nested ``1:N`` literal inside the subscript arg should
+            # shift to ``range(N)`` so the produced indices are 0-based.
+            self._index_context += 1
+            try:
+                return self._visit(a)
+            finally:
+                self._index_context -= 1
 
         with self.nse.enter(Slot.NONE):
             target = self._visit(n.target)
@@ -1269,6 +1374,23 @@ class Translator:
             else:
                 slice_ = P.Tuple(elts=[_arg(a) for a in n.args], ctx=P.Load())
         return P.Subscript(value=target, slice=slice_, ctx=P.Load())
+
+    def _range_subscript(self, bin_op: R.BinOp) -> P.AST:
+        """Emit a Python slice for an R ``a:b`` index expression.
+
+        R ``vec[1:5]`` selects 1-based positions 1..5 = first 5 elements;
+        Python ``vec[:5]`` does the same. R ``vec[a:b]`` (positions a..b
+        1-based, length b-a+1) becomes Python ``vec[a-1:b]`` (positions
+        a-1..b-1 0-based, same length).
+        """
+        with self.nse.enter(Slot.NONE):
+            left = self._visit(bin_op.left)
+            right = self._visit(bin_op.right)
+        # ``1:N`` → ``:N``
+        if isinstance(left, P.Constant) and left.value == 1:
+            return P.Slice(lower=None, upper=right, step=None)
+        shifted = P.BinOp(left=left, op=P.Sub(), right=P.Constant(value=1))
+        return P.Slice(lower=shifted, upper=right, step=None)
 
     def _visit_DoubleSubscript(self, n: R.DoubleSubscript) -> P.AST:
         """``x[[i]]`` — translate to ``x[i]`` (polars has no double-bracket
@@ -1331,15 +1453,50 @@ class Translator:
         return P.IfExp(test=cond, body=then, orelse=otherwise)
 
     def _visit_For(self, n: R.For) -> P.stmt:
-        with self.nse.enter(Slot.NONE):
-            iterable = self._visit(n.iterable)
-            body = self._as_stmt(self._visit(n.body))
+        iterable, shifted = self._visit_for_iter(n.iterable)
+        # When the R loop ``for(i in a:b)`` is shifted to a 0-based
+        # ``range(a-1, b)``, body references to ``(i - 1)`` (R's manual
+        # "shift to 0-based for arithmetic") are no longer needed — the
+        # loop counter is already 0-based. Rewrite them so the math
+        # matches the original R script.
+        if shifted:
+            self._shifted_loop_vars.add(n.var)
+        try:
+            with self.nse.enter(Slot.NONE):
+                body = self._as_stmt(self._visit(n.body))
+        finally:
+            if shifted:
+                self._shifted_loop_vars.discard(n.var)
         return P.For(
             target=_name(n.var, ctx=P.Store()),
             iter=iterable,
             body=[body],
             orelse=[],
         )
+
+    def _visit_for_iter(self, iter_node: R.Node) -> tuple[P.AST, bool]:
+        """Translate the iter of an R ``for(i in <iter>)``.
+
+        R is 1-based; hea is 0-based throughout. Emitting ``range(a-1, b)``
+        for R's ``a:b`` makes the loop counter a 0-based index, which is
+        how the body normally uses it. ``range`` matches Python idiom
+        and is what numpy / polars indexing expects.
+
+        Returns the iter AST plus a flag indicating whether the loop's
+        counter was shifted (caller propagates this into the body so
+        ``(i - 1)`` references collapse to ``i``).
+        """
+        if isinstance(iter_node, R.BinOp) and iter_node.op == ":":
+            with self.nse.enter(Slot.NONE):
+                left = self._visit(iter_node.left)
+                right = self._visit(iter_node.right)
+            # ``1:N`` → ``range(N)``; ``a:b`` → ``range(a-1, b)``.
+            if isinstance(left, P.Constant) and left.value == 1:
+                return _call(_name("range"), [right]), True
+            shifted = P.BinOp(left=left, op=P.Sub(), right=P.Constant(value=1))
+            return _call(_name("range"), [shifted, right]), True
+        with self.nse.enter(Slot.NONE):
+            return self._visit(iter_node), False
 
     def _visit_While(self, n: R.While) -> P.stmt:
         with self.nse.enter(Slot.NONE):

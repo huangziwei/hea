@@ -27,6 +27,38 @@ def _row_frame(values: np.ndarray, columns: list[str]) -> pl.DataFrame:
     return pl.DataFrame({c: [float(flat[i])] for i, c in enumerate(columns)})
 
 
+def _apply_subset(data: pl.DataFrame, subset) -> pl.DataFrame:
+    """R: ``subset=`` filter for ``lm()`` / ``glm()`` / etc.
+
+    Supports R's three forms: boolean mask (length == nrow), positive
+    1-based indices (keep), negative 1-based indices (drop). Mixing
+    positive and negative isn't valid R and we don't accept it either.
+    """
+    if isinstance(subset, (pl.Series, np.ndarray, list, tuple)):
+        arr = np.asarray(subset)
+        if arr.dtype == bool:
+            return data.filter(pl.Series(arr))
+        ints = arr.astype(int)
+    else:
+        # scalar
+        ints = np.asarray([int(subset)])
+    n = data.height
+    has_pos = bool((ints > 0).any())
+    has_neg = bool((ints < 0).any())
+    if has_pos and has_neg:
+        raise ValueError(
+            "subset=: cannot mix positive and negative indices (R-incompatible)"
+        )
+    if has_neg:
+        # Negative R indices: drop those 1-based positions.
+        drop_set = {(-int(idx)) - 1 for idx in ints.tolist()}
+        keep = [i for i in range(n) if i not in drop_set]
+        return data[keep]
+    # Positive indices: keep those 1-based positions.
+    keep = [int(i) - 1 for i in ints.tolist()]
+    return data[keep]
+
+
 def _drop_aliased_cols(X_df: pl.DataFrame) -> list[str]:
     """Identify linearly-dependent columns in a design matrix.
 
@@ -162,6 +194,159 @@ def _qq_plot(
     ax.set_title(title)
 
 
+class SummaryLm:
+    """R: ``summary.lm()`` return value.
+
+    Mirrors the components R exposes via ``$``:
+
+    - ``.sigma`` (Residual SE), partial-matched as ``["sig"]``
+    - ``.r_squared`` / ``.adj_r_squared``
+    - ``.fstatistic`` — numpy array ``[F, df1, df2]`` (R's vector shape)
+    - ``.coefficients`` — DataFrame with Estimate / Std. Error / t / p
+      (R's coefficient matrix)
+    - ``.df`` — degrees-of-freedom triple
+    - ``.cov_unscaled`` — ``(X'X)^-1`` matrix
+    - ``.residuals`` — raw residual Series
+
+    ``__repr__`` prints the R-style summary block. ``__getitem__``
+    supports R's ``$`` access including partial-name matching: ``["sig"]``
+    resolves to ``sigma`` if it's the unique prefix match.
+    """
+
+    def __init__(self, model, *, digits: int = 4, cor: bool = False):
+        self._model = model
+        self._digits = digits
+        self._cor = cor
+        # Components in R's summary.lm order — names use ``.`` like R
+        # so ``["cov.unscaled"]`` etc. round-trip in translated code.
+        self.sigma = float(np.sqrt(model.sigma_squared))
+        self.r_squared = float(model.r_squared)
+        self.adj_r_squared = float(model.r_squared_adjusted)
+        self.fstatistic = (
+            np.array([model.fstats, model.df_model, model.df_residuals])
+            if model.fstats is not None else None
+        )
+        self.df = (model.df_model, model.df_residuals, model.p)
+        self.cov_unscaled = np.asarray(model.XtXinv)
+        self.residuals = model.residuals
+        # Coefficients matrix — R's ``summary(lm)$coef`` is a numeric
+        # matrix; we expose it as a NumPy 2D array with row/col labels
+        # held alongside.
+        bhat = np.asarray(model._bhat_arr, dtype=float)
+        se = np.asarray(model._se_bhat_arr, dtype=float)
+        t = np.divide(bhat, se, out=np.full_like(bhat, np.nan), where=se > 0)
+        from scipy.stats import t as _t
+        p = 2.0 * _t.sf(np.abs(t), model.df_residuals)
+        self.coefficients = np.column_stack([bhat, se, t, p])
+        self._coef_rownames = list(model.column_names)
+        self._coef_colnames = ("Estimate", "Std. Error", "t value", "Pr(>|t|)")
+
+    # ---- R-style ``$`` access (partial name matching) ---------------
+
+    _ALIASES = {
+        "sig": "sigma",
+        "sigma": "sigma",
+        "r.squared": "r_squared",
+        "adj.r.squared": "adj_r_squared",
+        "fstatistic": "fstatistic",
+        "df": "df",
+        "cov.unscaled": "cov_unscaled",
+        "coefficients": "coefficients",
+        "coef": "coefficients",
+        "residuals": "residuals",
+    }
+
+    def __getitem__(self, key):
+        # R's partial-name matching: ``$sig`` resolves to ``$sigma`` if
+        # exactly one alias has it as a prefix.
+        key = str(key)
+        if key in self._ALIASES:
+            return getattr(self, self._ALIASES[key])
+        matches = [a for a in self._ALIASES if a.startswith(key)]
+        if len(matches) == 1:
+            return getattr(self, self._ALIASES[matches[0]])
+        if len(matches) > 1:
+            raise KeyError(
+                f"summary(lm)[{key!r}] ambiguous; matches: {matches}"
+            )
+        raise KeyError(f"summary(lm) has no component {key!r}")
+
+    def __getattr__(self, name):
+        # ``.sig`` partial-match via attribute access too.
+        try:
+            return self.__getitem__(name)
+        except KeyError as e:
+            raise AttributeError(str(e))
+
+    def __repr__(self) -> str:
+        return _format_summary_lm(self._model, self._digits, self._cor)
+
+
+def _format_summary_lm(model, digits: int, cor: bool) -> str:
+    """Build the R-style ``summary.lm`` print block.
+
+    Pulled out of :meth:`lm.summary` so :class:`SummaryLm` can call it
+    from ``__repr__`` without rebuilding the dependency on ``model``.
+    """
+    docstring = f"Formula: {model.formula}\n\n"
+    docstring += "\n".join(model._residuals_lines(digits=digits))
+    docstring += "\n\n" + model._coef_header() + "\n"
+
+    t_arr = model._bhat_arr / model._se_bhat_arr
+    p_arr = np.asarray(model.p_values.row(0), dtype=float)
+    sig = significance_code(p_arr)
+    ci_low_col, ci_hi_col = model.ci_bhat.columns[1], model.ci_bhat.columns[2]
+    ci_low_arr = model.ci_bhat[ci_low_col].to_numpy()
+    ci_hi_arr = model.ci_bhat[ci_hi_col].to_numpy()
+    est_s, se_s = format_signif_jointly(
+        [model._bhat_arr, model._se_bhat_arr], digits=digits,
+    )
+    cilo_s, cihi_s = format_signif_jointly(
+        [ci_low_arr, ci_hi_arr], digits=digits,
+    )
+    res = pl.DataFrame({
+        "": model.column_names,
+        "Estimate": est_s,
+        "Std. Error": se_s,
+        ci_low_col: cilo_s,
+        ci_hi_col: cihi_s,
+        "t value": format_signif(t_arr, digits=digits),
+        "Pr(>|t|)": format_pval(p_arr, digits=_dig_tst(digits)),
+        " ": sig,
+    })
+    num_align = {c: "right" for c in
+                 ("Estimate", "Std. Error", ci_low_col, ci_hi_col,
+                  "t value", "Pr(>|t|)")}
+    docstring += format_df(res, align=num_align)
+    docstring += "\n---"
+    docstring += "\nSignif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
+
+    docstring += (
+        f"\n\nn = {model.n}, p = {model.p}, "
+        f"Residual SE = {np.sqrt(model.sigma_squared):.3f} "
+        f"on {model.df_residuals} DF\n"
+    )
+    docstring += (
+        f"R-Squared = {model.r_squared:.4f}, "
+        f"adjusted R-Squared = {model.r_squared_adjusted:.4f}\n"
+    )
+    if model.fstats is not None:
+        fmt = ".2f" if model.f_p_value > 1e-5 else "e"
+        docstring += (
+            f"F-statistics = {model.fstats:.4f} on "
+            f"{model.df_model} and {model.df_residuals} DF, "
+            f"p-value: {model.f_p_value:{fmt}}\n\n"
+        )
+    docstring += (
+        f"Log Likelihood = {model.loglike:.4f}, "
+        f"AIC = {model.AIC:.4f}, BIC = {model.BIC:.4f}"
+    )
+    if cor and model.V_bhat.shape[0] >= 2:
+        docstring += "\n\nCorrelation of Coefficients:\n"
+        docstring += model._correlation_block()
+    return docstring
+
+
 class lm:
     def __init__(
         self,
@@ -169,7 +354,14 @@ class lm:
         data: pl.DataFrame,
         weights: Union[None, np.array] = None,
         method: str = "qr",
+        subset=None,
     ):
+
+        # R's ``subset=`` filters rows before fitting. Mirror its semantics:
+        # bool vector → mask; positive ints → 1-based positions to keep;
+        # negative ints → 1-based positions to drop.
+        if subset is not None:
+            data = _apply_subset(data, subset)
 
         # meta
         self.formula = formula
@@ -255,9 +447,14 @@ class lm:
             bhat, self.XtX, self.Xty = self.compute_bhat(X, y_solve, W, method)
 
         self._bhat_arr = np.asarray(bhat).reshape(-1)
+        from .named_vector import NamedVector
+
         self.bhat = _row_frame(self._bhat_arr, self.column_names)
-        self.coef = self.bhat                           # R-canonical alias
-        self.coefficients = self.bhat                   # R-canonical alias
+        # R-canonical alias: ``m$coef`` is a named numeric vector, so we
+        # expose the same on the Python side. ``.bhat`` keeps its 1-row
+        # DataFrame shape for internal callers that want a frame.
+        self.coef = NamedVector(self.column_names, self._bhat_arr)
+        self.coefficients = self.coef
 
         # compute predicted (fitted values ŷ = Xβ̂)
         self.yhat = self.compute_yhat()
@@ -630,61 +827,12 @@ class lm:
         return "\n".join(lines)
 
     def summary(self, digits=4, cor=False):
-
-        docstring = f"""Formula: {self.formula}\n\n"""
-        docstring += "\n".join(self._residuals_lines(digits=digits))
-        docstring += "\n\n" + self._coef_header() + "\n"
-
-        t_arr = self._bhat_arr / self._se_bhat_arr
-        p_arr = np.asarray(self.p_values.row(0), dtype=float)
-        sig = significance_code(p_arr)
-        ci_low_col, ci_hi_col = self.ci_bhat.columns[1], self.ci_bhat.columns[2]
-        ci_low_arr = self.ci_bhat[ci_low_col].to_numpy()
-        ci_hi_arr = self.ci_bhat[ci_hi_col].to_numpy()
-        # Joint format Estimate+SE so the smaller-magnitude column drives
-        # decimals (mirrors R's `printCoefmat` cs.ind block). CI columns
-        # join their own group — they often have smaller magnitudes than
-        # Estimate/SE and would otherwise force extra decimals on those.
-        est_s, se_s = format_signif_jointly(
-            [self._bhat_arr, self._se_bhat_arr], digits=digits,
-        )
-        cilo_s, cihi_s = format_signif_jointly(
-            [ci_low_arr, ci_hi_arr], digits=digits,
-        )
-        res = pl.DataFrame(
-            {
-                "": self.column_names,
-                "Estimate": est_s,
-                "Std. Error": se_s,
-                ci_low_col: cilo_s,
-                ci_hi_col: cihi_s,
-                "t value": format_signif(t_arr, digits=digits),
-                "Pr(>|t|)": format_pval(p_arr, digits=_dig_tst(digits)),
-                " ": sig,
-            }
-        )
-        self.results = res
-
-        num_align = {c: "right" for c in
-                     ("Estimate", "Std. Error", ci_low_col, ci_hi_col,
-                      "t value", "Pr(>|t|)")}
-        docstring += format_df(res, align=num_align)
-        docstring += "\n---"
-        docstring += "\nSignif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
-
-        docstring += f"\n\nn = {self.n}, p = {self.p}, Residual SE = {np.sqrt(self.sigma_squared):.3f} on {self.df_residuals} DF\n"
-        docstring += f"R-Squared = {self.r_squared:.4f}, adjusted R-Squared = {self.r_squared_adjusted:.4f}\n"
-
-        if self.fstats is not None:
-            docstring += f'F-statistics = {self.fstats:.4f} on {self.df_model} and {self.df_residuals} DF, p-value: {self.f_p_value:{".2f" if self.f_p_value > 1e-5 else "e"}}\n\n'
-
-        docstring += f"Log Likelihood = {self.loglike:.4f}, AIC = {self.AIC:.4f}, BIC = {self.BIC:.4f}"
-
-        if cor is True and self.V_bhat.shape[0] >= 2:
-            docstring += "\n\nCorrelation of Coefficients:\n"
-            docstring += self._correlation_block()
-
-        print(docstring)
+        """R: ``summary.lm()`` — returns a :class:`SummaryLm` whose
+        ``__repr__`` is the R-style print block and whose attributes
+        (``.sigma``, ``.r_squared``, ``.fstatistic``, …) mirror the
+        components of R's ``summary.lm`` return value.
+        """
+        return SummaryLm(self, digits=digits, cor=cor)
 
     def plot_observed_fitted(
         self,

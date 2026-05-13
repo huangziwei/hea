@@ -5,7 +5,15 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 
 
-def plot_lm(lmod, *, which=None, figsize=None, smooth: bool = True, label_n: int = 3):
+def plot_lm(
+    lmod,
+    *,
+    which=None,
+    figsize=None,
+    smooth: bool = True,
+    label_n: int = 3,
+    caption=None,
+):
     """4-panel (or subset) diagnostic for an ``lm``/``glm`` result.
 
     R parity: ``which=1:6`` selects from {1: resid-fitted, 2: QQ, 3:
@@ -13,7 +21,15 @@ def plot_lm(lmod, *, which=None, figsize=None, smooth: bool = True, label_n: int
     leverage}. We currently support 1, 2, 3, 5 (the four panels that
     ``lm.plot()`` builds). Pass an int for a single panel, an iterable
     for a subset, or omit for the default 4-panel layout.
+
+    ``caption=`` matches R's ``plot.lm`` parameter: pass a list of panel
+    titles or ``None`` to suppress them. Currently accepted but not
+    rendered — the panels carry their own internal titles already.
     """
+    # Caption hook is accepted for R parity. ``None`` suppresses, a list
+    # would override per-panel; we honor neither yet — panels carry their
+    # own titles. Quiet pass-through avoids tripping translated scripts.
+    del caption
     panels = (1, 2, 3, 5) if which is None else (
         (which,) if isinstance(which, int) else tuple(which)
     )

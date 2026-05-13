@@ -125,6 +125,9 @@ from .dataframe import (
 from . import ggplot
 from . import plot
 from . import R
+from . import emmeans as _emmeans_pkg
+from .emmeans import emmeans
+from .named_vector import NamedVector
 from .session_info import SessionInfo, session_info
 from .translate.inline import from_R, to_R
 

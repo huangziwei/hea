@@ -19,6 +19,27 @@ from .helpers import pairs
 from .scatter import scatter
 
 
+def _plot_emmeans_table(df: pl.DataFrame, *, comparisons=False, adjust=None, **_):
+    """Forest plot of an emmeans means table.
+
+    R's ``plot.emmGrid(rem$emmeans, …)`` returns a ggplot, so callers can
+    chain ``+ coord_flip()`` etc. We mirror that by returning a hea
+    ggplot of points + CI segments. ``comparisons``/``adjust`` are
+    accepted for R parity; the comparison-arrows overlay is v1-deferred.
+    """
+    import hea  # local to avoid import-time cycles
+    factor_col = next(
+        c for c in df.columns
+        if c not in {"emmean", "SE", "df", "lower.CL", "upper.CL"}
+    )
+    # Rename CL columns for the hea aes mapping (dot-in-name kwargs are
+    # awkward; the ymin/ymax aesthetics just need numeric columns).
+    plot_df = hea.DataFrame(df).rename({"lower.CL": "lower_CL", "upper.CL": "upper_CL"})
+    return plot_df.ggplot(
+        x=factor_col, y="emmean", ymin="lower_CL", ymax="upper_CL"
+    ).geom_pointrange()
+
+
 def _is_lm_like(obj) -> bool:
     """True for an object that exposes the lm/glm diagnostic panel API."""
     return all(
@@ -68,8 +89,11 @@ def plot(*args, data: pl.DataFrame | None = None, env: dict | None = None,
     if len(args) == 1 and isinstance(a0, _Density):
         return a0.plot(ax=ax, **kwargs)
 
-    # Form: plot(df) — DataFrame routes to scatterplot matrix (R's plot.data.frame)
+    # Form: plot(df) — DataFrame routes by shape.
     if len(args) == 1 and isinstance(a0, pl.DataFrame):
+        # emmeans .emmeans table → forest plot (R's plot.emmGrid).
+        if {"emmean", "SE", "lower.CL", "upper.CL"} <= set(a0.columns):
+            return _plot_emmeans_table(a0, ax=ax, **kwargs)
         return pairs(a0, **kwargs)
 
     # Form: plot("formula", data=df)

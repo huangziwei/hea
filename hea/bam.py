@@ -2537,9 +2537,10 @@ class bam(gam):
             Ve = G_P @ Ve @ G_P.T
 
         # ---- β / SE / t / p (parametric Wald) ------------------------------
+        from .named_vector import NamedVector
         self.bhat = _row_frame(beta, self.column_names)
-        self.coef = self.bhat                           # R-canonical alias
-        self.coefficients = self.bhat                   # R-canonical alias
+        self.coef = NamedVector(list(self.column_names), np.asarray(beta).reshape(-1))
+        self.coefficients = self.coef
         self._beta = beta
         se = np.sqrt(np.diag(Vp))
         self.se_bhat = _row_frame(se, self.column_names)
@@ -3278,9 +3279,10 @@ class bam(gam):
             Ve = G_P @ Ve @ G_P.T
 
         # ---- β / SE / t / p (parametric Wald) ------------------------------
+        from .named_vector import NamedVector
         self.bhat = _row_frame(beta, self.column_names)
-        self.coef = self.bhat                           # R-canonical alias
-        self.coefficients = self.bhat                   # R-canonical alias
+        self.coef = NamedVector(list(self.column_names), np.asarray(beta).reshape(-1))
+        self.coefficients = self.coef
         self._beta = beta
         se = np.sqrt(np.diag(Vp))
         self.se_bhat = _row_frame(se, self.column_names)

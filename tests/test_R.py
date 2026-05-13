@@ -610,6 +610,8 @@ _R_EXPR_SKIP = {
     "rowSums", "colSums", "rowMeans", "colMeans",
     "apply", "rbind", "cbind", "sweep", "expand_grid", "matrix",
     "R_range", "R_round",
+    # Vector primitives — variadic / multi-arg; not column ops.
+    "rep", "sample", "sapply",
     # Length-changing transforms — would shorten/lengthen the column.
     "diff", "which", "tabulate",
     # Container / contingency tables — return tables, not Exprs.
@@ -806,15 +808,19 @@ def m_lme():
 # ---- coef / coefficients / fixef ------------------------------------
 
 
-def test_coef_returns_named_dict(m_lm):
+def test_coef_returns_named_vector(m_lm):
     c = coef(m_lm)
-    assert isinstance(c, dict)
-    assert set(c.keys()) == {"(Intercept)", "Area", "Elevation"}
-    assert all(isinstance(v, float) for v in c.values())
+    assert isinstance(c, hea.NamedVector)
+    assert set(c.names) == {"(Intercept)", "Area", "Elevation"}
+    # Name and 0-based positional indexing both work.
+    assert c["Area"] == c[1]["Area"]
+    assert all(isinstance(v, float) for v in c.values.tolist())
 
 
 def test_coefficients_alias(m_lm):
-    assert coefficients(m_lm) == coef(m_lm)
+    a, b = coefficients(m_lm), coef(m_lm)
+    assert a.names == b.names
+    assert (a.values == b.values).all()
 
 
 def test_coef_works_on_glm_gam_lme(m_glm, m_gam, m_lme):
@@ -823,12 +829,14 @@ def test_coef_works_on_glm_gam_lme(m_glm, m_gam, m_lme):
     assert "(Intercept)" in coef(m_gam)
     # lme: fixed effects only (= fixef)
     c = coef(m_lme)
-    assert set(c.keys()) == {"(Intercept)", "Days"}
+    assert set(c.names) == {"(Intercept)", "Days"}
 
 
 def test_fixef_equals_coef(m_lm, m_lme):
-    assert fixef(m_lm) == coef(m_lm)
-    assert fixef(m_lme) == coef(m_lme)
+    for fn_model in [(m_lm,), (m_lme,)]:
+        a, b = fixef(*fn_model), coef(*fn_model)
+        assert a.names == b.names
+        assert (a.values == b.values).all()
 
 
 def test_ranef_returns_random_effects(m_lme):
@@ -1178,8 +1186,8 @@ def test_dfbetas_matches_loo_refit_first_obs(m_lm, gala):
 
     gala_drop0 = gala.slice(1)
     m_drop0 = hea.lm("Species ~ Area + Elevation", gala_drop0)
-    bhat_full = np.array(list(coef(m_lm).values()))
-    bhat_drop = np.array(list(coef(m_drop0).values()))
+    bhat_full = coef(m_lm).values
+    bhat_drop = coef(m_drop0).values
     delta = bhat_full - bhat_drop
     sigma_loo = m_drop0.sigma
     sd_j = np.sqrt(np.diag(m_lm.XtXinv))
@@ -1231,8 +1239,8 @@ def test_weighted_lm_diagnostics_match_loo_refit(gala):
     m_drop0 = hea.lm(
         "Species ~ Area + Elevation", gala.slice(1), weights=w[1:]
     )
-    b_full = np.array(list(coef(m_w).values()))
-    b_drop = np.array(list(coef(m_drop0).values()))
+    b_full = coef(m_w).values
+    b_drop = coef(m_drop0).values
     delta = b_full - b_drop
 
     # σ_(-0) from the refit's own weighted RSS
@@ -1713,10 +1721,25 @@ def test_xtabs_two_way_uses_dnn():
     assert sorted(out.columns[1:]) == ["x", "y"]
 
 
-def test_xtabs_lhs_form_not_supported():
-    df = pl.DataFrame({"w": [1.0, 2.0], "g": ["a", "b"]})
-    with pytest.raises(NotImplementedError, match="weighted form"):
-        xtabs("w ~ g", df)
+def test_xtabs_lhs_weighted_one_way():
+    """R: ``xtabs(w ~ g, df)`` sums ``w`` per level of ``g``."""
+    df = pl.DataFrame({"w": [1.0, 2.0, 3.0], "g": ["a", "b", "a"]})
+    out = xtabs("w ~ g", df)
+    assert out.columns == ["g", "n"]
+    rows = {r["g"]: r["n"] for r in out.iter_rows(named=True)}
+    assert rows == {"a": 4.0, "b": 2.0}
+
+
+def test_xtabs_lhs_weighted_two_way():
+    """R: ``xtabs(w ~ a + b, df)`` sums ``w`` per (a, b) cell, wide."""
+    df = pl.DataFrame({
+        "w": [10, 20, 30, 40],
+        "a": ["x", "x", "y", "y"],
+        "b": ["p", "q", "p", "q"],
+    })
+    out = xtabs("w ~ a + b", df)
+    rows = {r["a"]: (r["p"], r["q"]) for r in out.iter_rows(named=True)}
+    assert rows == {"x": (10, 20), "y": (30, 40)}
 
 
 # ---- prop_table -----------------------------------------------------
@@ -1838,8 +1861,8 @@ def test_glm_dfbetas_closed_form_vs_loo_refit(gala, m_glm):
         gala.slice(1),
         family=hea.poisson(),
     )
-    bhat_full = np.array(list(coef(m_glm).values()))
-    bhat_drop = np.array(list(coef(m_drop0).values()))
+    bhat_full = coef(m_glm).values
+    bhat_drop = coef(m_drop0).values
     delta = bhat_full - bhat_drop
     # Poisson is scale-known, so sigma_(-i) = 1; closed form scales delta
     # by sqrt(diag(XtWXinv)).
@@ -1902,7 +1925,7 @@ def test_update_formula_optional_refits_same_model(gala, m_lm):
     new = update(m_lm)
     assert new is not m_lm
     assert new.formula == m_lm.formula
-    assert list(coef(new).keys()) == list(coef(m_lm).keys())
+    assert coef(new).names == coef(m_lm).names
 
 
 def test_update_delta_add_term(gala, m_lm):

@@ -235,6 +235,8 @@ __all__ = [
     "table", "xtabs", "prop_table", "addmargins",
     # reductions (R defaults: sd/var use N-1)
     "mean", "median", "var", "sd", "quantile", "IQR", "cor", "cov",
+    # base-R constants
+    "LETTERS", "letters",
     # elementwise math (R: vectorized scalar functions)
     # Note: ``abs`` and ``round`` exist as module attributes but are NOT
     # exported — they collide with Python builtins and the translator
@@ -244,6 +246,9 @@ __all__ = [
     "sqrt", "exp", "log", "log2", "log10", "log1p", "expm1", "sign",
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
     "floor", "ceiling", "trunc",
+    # vector primitives — R's rep() flattens nested list-of-vector inputs
+    # (the translator emits ``c(scalar, vec)`` as a Python list literal).
+    "rep",
     # matrix / frame utilities (R: base matrix ops)
     "rowSums", "colSums", "rowMeans", "colMeans",
     "apply", "rbind", "cbind", "sweep", "expand_grid", "matrix",
@@ -264,7 +269,7 @@ __all__ = [
     "dexp", "pexp", "qexp", "rexp",
     "dgamma", "pgamma", "qgamma", "rgamma",
     "dbeta", "pbeta", "qbeta", "rbeta",
-    "set_seed",
+    "set_seed", "sample", "sapply",
     # rank helpers (Lindeløv-style "tests as lm" notebook)
     "rank", "signed_rank",
     # hypothesis tests (return HTest, R's ``htest`` print-shape)
@@ -356,7 +361,15 @@ def summary(x, **kwargs):
     Works on hea models (``lm``/``glm``/``gam``/``lme``/``bam``) and on
     ``hea.DataFrame``. For raw arrays / Series, wrap first:
     ``hea.tbl(pl.DataFrame({"x": arr})).summary()``.
+
+    Special case: emmeans contrasts DataFrames (``rem.contrasts``) route
+    to ``hea.emmeans.summary_emmgrid_contrasts`` so R's
+    ``summary(rem$contrasts, infer=TRUE, adjust="bonferroni")`` works
+    without the caller knowing which package the table came from.
     """
+    if isinstance(x, pl.DataFrame) and {"contrast", "estimate", "t.ratio"} <= set(x.columns):
+        from .emmeans import summary_emmgrid_contrasts
+        return summary_emmgrid_contrasts(x, **kwargs)
     if hasattr(x, "summary"):
         return x.summary(**kwargs)
     raise TypeError(
@@ -986,6 +999,11 @@ def cov(x, y=None, na_rm=True):
 
 pi = float(np.pi)
 
+# R's character-vector constants of the Latin alphabet, always
+# in scope in base R (``LETTERS`` uppercase, ``letters`` lowercase).
+LETTERS: list[str] = [chr(ord("A") + i) for i in range(26)]
+letters: list[str] = [chr(ord("a") + i) for i in range(26)]
+
 
 def _elementwise(x, fn_expr, fn_np):
     """Dispatch math by input type.
@@ -1248,6 +1266,68 @@ def R_range(x, na_rm=False):
     return [float(arr.min()), float(arr.max())]
 
 
+def _flatten_to_values(x) -> np.ndarray:
+    """Flatten an R-shaped argument to a 1-D numpy array.
+
+    Accepts a scalar, list/tuple (possibly with nested vectors), numpy
+    array, ``pl.Series``, or :class:`hea.NamedVector`. The list case is
+    what the translator emits for R's ``c(scalar, vec, vec2)`` — a
+    Python list with mixed scalar + vector entries that R would have
+    flattened via ``c()``.
+    """
+    from .named_vector import NamedVector
+
+    if isinstance(x, NamedVector):
+        return x.values
+    if isinstance(x, pl.Series):
+        return x.to_numpy().ravel()
+    if isinstance(x, np.ndarray):
+        return x.ravel()
+    if isinstance(x, (list, tuple)):
+        parts: list[np.ndarray] = []
+        for item in x:
+            if isinstance(item, NamedVector):
+                parts.append(item.values)
+            elif isinstance(item, pl.Series):
+                parts.append(item.to_numpy().ravel())
+            elif isinstance(item, np.ndarray):
+                parts.append(item.ravel())
+            elif isinstance(item, (list, tuple)):
+                parts.append(_flatten_to_values(item))
+            else:
+                parts.append(np.asarray([item]))
+        return np.concatenate(parts) if parts else np.asarray([])
+    return np.asarray([x])
+
+
+def rep(x, times=1, each=1, length_out=None):
+    """R: ``rep(x, times, each, length.out)`` — repeat values.
+
+    Semantics:
+
+    - ``each=N`` repeats each element ``N`` times in place
+      (``rep(c(1,2), each=3) → c(1,1,1,2,2,2)``).
+    - ``times=N`` repeats the (already-each-expanded) vector ``N`` times
+      (``rep(c(1,2), 3) → c(1,2,1,2,1,2)``).
+    - ``length.out`` truncates / cycles to that length, overriding
+      ``times`` when set.
+
+    Flattens any list-with-vector input (the translator emits R's
+    ``c(scalar, vec)`` as a Python list, so ``rep([0, named_vec], …)``
+    needs to be equivalent to R's ``rep(c(0, named_vec), …)``).
+    """
+    arr = _flatten_to_values(x)
+    arr = np.repeat(arr, int(each))
+    out = np.tile(arr, int(times))
+    if length_out is not None:
+        n = int(length_out)
+        if n <= len(out):
+            return out[:n]
+        reps = -(-n // max(len(out), 1))
+        return np.tile(out, reps)[:n]
+    return out
+
+
 def R_round(x, digits=0):
     """R: ``round(x, digits)`` — vectorized over containers.
 
@@ -1274,8 +1354,25 @@ def matrix(data, nrow=None, ncol=None, byrow=False):
     Reshapes ``data`` to (nrow × ncol). Either ``nrow`` or ``ncol`` may
     be inferred from the other. R fills column-major (``byrow=FALSE``);
     we match that default.
+
+    ``None`` / ``NA`` data fills with ``float64`` NaN — R's ``matrix(NA,
+    r, c)`` creates a numeric matrix that downstream assignments mutate
+    in-place. Object dtype (what ``np.asarray(None)`` gives) would
+    break later integer indexing.
     """
-    arr = np.asarray(data).ravel()
+    if data is None:
+        arr = np.array([np.nan], dtype=float)
+    else:
+        arr = np.asarray(data).ravel()
+        if arr.dtype == object:
+            # Mixed / None entries — coerce to float with NaN for None.
+            try:
+                arr = np.asarray(
+                    [np.nan if v is None else v for v in arr.tolist()],
+                    dtype=float,
+                )
+            except (TypeError, ValueError):
+                pass  # leave as object; downstream may want strings/factors
     if nrow is None and ncol is None:
         return arr.reshape(-1, 1)
     if nrow is None:
@@ -1772,6 +1869,85 @@ def set_seed(seed):
     np.random.seed(int(seed))
 
 
+def sample(x, size=None, replace=False, prob=None):
+    """R: ``sample()`` — random permutation or draw.
+
+    Forms:
+
+    - ``sample(x)`` where ``x`` is a vector → permute ``x``.
+    - ``sample(n)`` where ``n`` is a scalar int → permute ``1:n``
+      (R's "convenience" form).
+    - ``sample(x, size)`` → draw ``size`` without replacement.
+    - ``sample(x, size, replace=True)`` → with replacement.
+    - ``sample(x, size, prob=p)`` → weighted draw.
+
+    Names from a :class:`hea.NamedVector` are preserved through
+    permutation / draw.
+    """
+    from .named_vector import NamedVector
+
+    if isinstance(x, NamedVector):
+        names = x.names
+        values = x.values
+    elif isinstance(x, (int, np.integer)) and not isinstance(x, bool):
+        names = None
+        values = np.arange(1, int(x) + 1)
+    else:
+        names = None
+        values = np.asarray(x).ravel()
+
+    n = len(values)
+    if size is None:
+        size = n
+    idx = np.random.choice(n, size=int(size), replace=replace,
+                           p=(np.asarray(prob, dtype=float) if prob is not None else None))
+    if names is not None:
+        return NamedVector([names[i] for i in idx], values[idx])
+    return values[idx]
+
+
+def sapply(X, FUN, *args, **kwargs):
+    """R: ``sapply()`` — apply ``FUN`` to each element of ``X`` and
+    simplify the result.
+
+    - Scalar results → 1-D numpy array.
+    - Same-shape vector results → 2-D matrix (columns = X positions,
+      matching R's ``sapply`` convention).
+    - Mixed → list (R's ``lapply`` fallback).
+    """
+    # Iterate respecting R's "elements of X." For a vector/list, it's
+    # the elements. For a polars Series, the values. For a NamedVector,
+    # the values too (names are dropped on the FUN inputs but propagated
+    # to the column labels of the result matrix).
+    from .named_vector import NamedVector
+
+    if isinstance(X, NamedVector):
+        names = X.names
+        items = list(X.values)
+    elif isinstance(X, pl.Series):
+        names = X.to_list()
+        items = list(X.to_list())
+    elif isinstance(X, dict):
+        names = list(X.keys())
+        items = list(X.values())
+    else:
+        items = list(X)
+        names = [str(x) for x in items]
+
+    results = [FUN(it, *args, **kwargs) for it in items]
+    if not results:
+        return np.asarray([])
+
+    if all(np.isscalar(r) or (isinstance(r, np.ndarray) and r.ndim == 0) for r in results):
+        return np.asarray(results)
+    arrs = [np.asarray(r).ravel() for r in results]
+    sizes = {len(a) for a in arrs}
+    if len(sizes) == 1:
+        # Matrix: columns are X positions (R's convention).
+        return np.stack(arrs, axis=1)
+    return results  # fall back to a Python list (R's ``lapply`` shape)
+
+
 # ---- contingency tables ---------------------------------------------
 #
 # ``table`` / ``xtabs`` build frequency tables; ``prop_table`` and
@@ -1822,24 +1998,45 @@ def table(x, y=None, *, dnn=None):
 def xtabs(formula: str, data: pl.DataFrame):
     """R: ``xtabs()`` — formula-based contingency table.
 
-    Currently supports the count form ``~ a`` or ``~ a + b`` (no LHS).
-    The weighted form ``w ~ a + b`` (sum of ``w`` per cell) is not yet
-    wired.
+    Count form (``~ a`` / ``~ a + b``) returns level counts. Weighted
+    form (``w ~ a`` / ``w ~ a + b``) sums ``w`` per cell — the same
+    layout, just aggregating a numeric column instead of counting rows.
     """
     if "~" not in formula:
         raise ValueError("xtabs(): formula must contain '~'")
     lhs, rhs = formula.split("~", 1)
-    if lhs.strip():
-        raise NotImplementedError(
-            "xtabs(): weighted form (with LHS) not yet supported"
-        )
+    lhs = lhs.strip()
     cols = [p.strip() for p in rhs.split("+")]
+    if lhs == "":
+        # Count form.
+        if len(cols) == 1:
+            return table(data[cols[0]])
+        if len(cols) == 2:
+            return table(data[cols[0]], data[cols[1]], dnn=(cols[0], cols[1]))
+        raise NotImplementedError(
+            "xtabs(): 3+ way tables not supported in v1"
+        )
+    # Weighted form: ``w ~ a (+ b)`` — sum ``w`` per group.
+    # Use polars directly (hea's GroupBy is dplyr-shaped).
+    base = pl.DataFrame._from_pydf(data._df) if hasattr(data, "_df") else data
     if len(cols) == 1:
-        return table(data[cols[0]])
+        return (
+            base.group_by(cols[0]).agg(pl.col(lhs).sum())
+            .sort(cols[0])
+            .rename({lhs: "n"})
+        )
     if len(cols) == 2:
-        return table(data[cols[0]], data[cols[1]], dnn=(cols[0], cols[1]))
+        wide = (
+            base.group_by(cols).agg(pl.col(lhs).sum().alias("__w__"))
+            .pivot(values="__w__", index=cols[0], on=cols[1])
+            .fill_null(0)
+            .sort(cols[0])
+        )
+        label_col = cols[0]
+        other_cols = sorted(c for c in wide.columns if c != label_col)
+        return wide.select([label_col, *other_cols])
     raise NotImplementedError(
-        "xtabs(): 3+ way tables not supported in v1"
+        "xtabs(): 3+ way weighted tables not supported in v1"
     )
 
 
@@ -2787,23 +2984,30 @@ def aov(formula: str, data: pl.DataFrame, *, type: str = "II") -> AnovaTable:
 # needed. Where R has multiple aliases (``coef``/``coefficients``,
 # ``resid``/``residuals``, ``fitted``/``fitted.values``), we expose both.
 
-def _bhat_to_dict(model) -> dict:
+def _bhat_to_named_vector(model):
+    """Build a ``NamedVector`` from a fitted model's ``.bhat`` row."""
+    from .named_vector import NamedVector
+
     if not hasattr(model, "bhat") or not isinstance(model.bhat, pl.DataFrame):
         raise TypeError(
             f"{model.__class__.__name__} has no .bhat DataFrame"
         )
-    return dict(zip(model.bhat.columns, model.bhat.row(0)))
+    return NamedVector(model.bhat.columns, model.bhat.row(0))
 
 
 def coef(model):
-    """R: ``coef()`` — coefficients as ``{name: estimate}``.
+    """R: ``coef()`` — coefficients as a named numeric vector.
 
     Works for ``lm`` / ``glm`` / ``gam`` / ``bam`` / ``lme``. For ``lme``
     this returns FIXED effects only (= R's ``fixef(m)``); R's
     ``coef.lmerMod`` returns per-group BLUPs which hea doesn't compute
     in the same shape — use ``fixef()`` + ``ranef()`` to assemble.
+
+    Returns :class:`hea.NamedVector` — supports R-style positional
+    indexing (1-based: ``coef(m)[1]``), name lookup (``coef(m)["x"]``),
+    and elementwise arithmetic.
     """
-    return _bhat_to_dict(model)
+    return _bhat_to_named_vector(model)
 
 
 def coefficients(model):
@@ -3135,7 +3339,43 @@ def update(model, formula=None, **kwargs):
         if v is None or callable(v):
             continue
         kwargs[name] = v
-    return cls(f, model.data, **kwargs)
+    # If the new formula references names that aren't in ``model.data``,
+    # look them up in the caller's frame (R's ``update()`` evaluates the
+    # formula in the parent environment, so locally-computed vectors
+    # like ``ab`` in ``update(m, .~. + ab)`` are picked up automatically).
+    data = _merge_formula_vars_from_caller(f, model.data, inspect.currentframe().f_back)
+    return cls(f, data, **kwargs)
+
+
+def _merge_formula_vars_from_caller(formula: str, data: pl.DataFrame, frame) -> pl.DataFrame:
+    """Find identifier-shaped names in ``formula`` that aren't columns of
+    ``data``; pull each from ``frame``'s locals/globals if a length-match
+    vector is bound there; return ``data`` augmented with those columns.
+    """
+    import re
+
+    if frame is None:
+        return data
+    names = set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_.]*\b", formula))
+    missing = [n for n in names if n not in data.columns and "." not in n]
+    if not missing:
+        return data
+    ns = {**frame.f_globals, **frame.f_locals}
+    add: dict[str, list] = {}
+    n_rows = data.height
+    for name in missing:
+        if name not in ns:
+            continue
+        val = ns[name]
+        try:
+            arr = np.asarray(val).ravel()
+        except Exception:
+            continue
+        if arr.size == n_rows:
+            add[name] = arr.tolist()
+    if not add:
+        return data
+    return data.with_columns([pl.Series(k, v) for k, v in add.items()])
 
 
 def AIC(*models):

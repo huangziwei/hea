@@ -426,8 +426,9 @@ class glm:
 
         self._bhat_arr = fit.beta.copy()
         self.bhat = _row_frame(self._bhat_arr, self.column_names)
-        self.coef = self.bhat                           # R-canonical alias
-        self.coefficients = self.bhat                   # R-canonical alias
+        from .named_vector import NamedVector
+        self.coef = NamedVector(self.column_names, self._bhat_arr)
+        self.coefficients = self.coef
 
         # μ̂, η̂ (η̂ includes offset).
         self.fitted_values = fit.mu

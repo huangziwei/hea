@@ -133,10 +133,14 @@ class TestOperators:
         # ``!x`` outside slot is logical ``not``.
         assert _tr("!x") == "not x"
 
-    def test_sequence_to_seq(self):
-        # ``1:5`` → ``seq(1, 5)``; the autoimport preamble resolves ``seq``
-        # to ``hea.R.seq`` (R-style semantics: integer-valued sequence).
+    def test_sequence_default_to_seq(self):
+        # Standalone ``a:b`` → ``seq(a, b)`` keeps R's integer-sequence
+        # values. Special contexts (for-iter, subscript) shift to 0-based
+        # via dedicated handlers — see test_for_loop /
+        # test_subscript_one_based_range.
         assert _tr("1:5") == "seq(1, 5)"
+        assert _tr("0:5") == "seq(0, 5)"
+        assert _tr("2:7") == "seq(2, 7)"
 
 
 # ---------------------------------------------------------------------------
@@ -837,8 +841,10 @@ class TestControlFlow:
         assert out == "a if x > 0 else b"
 
     def test_for_loop(self):
+        # R ``1:5`` as a for-loop iterator translates to ``range(5)``
+        # so the loop counter is 0-based (matches hea's 0-based indexing).
         out = _tr("for (i in 1:5) print(i)")
-        assert "for i in seq(1, 5)" in out
+        assert "for i in range(5)" in out
 
     def test_lambda_shorthand(self):
         out = _tr("f <- \\(x) x + 1")
