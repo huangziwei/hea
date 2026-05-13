@@ -1712,7 +1712,15 @@ def _parse_lubridate(value, order: str, with_time: bool, tz: str = ""):
         return pl.Series(value.name, out)
     if isinstance(value, (list, tuple, np.ndarray)):
         return [_parse_one(v) for v in value]
-    return _parse_one(value)
+    # Scalar return: numpy datetime64 so ``+`` with int/ndarray works the
+    # R way (``ymd('2022-01-01') + 5`` → ``2022-01-06``;
+    # ``ymd('2022-01-01') + np.array([1, 2])`` → array of two dates).
+    # Python's bare ``datetime.date`` rejects ``+ int``.
+    scalar = _parse_one(value)
+    if scalar is None:
+        return None
+    unit = "us" if with_time else "D"
+    return np.datetime64(scalar, unit)
 
 
 def ymd(value, *, tz: str = "", quiet: bool = False, truncated: int = 0):

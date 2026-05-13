@@ -2639,12 +2639,24 @@ class DataFrame(pl.DataFrame):
         suffix: tuple[str, str] = (".x", ".y"),
         keep: bool = False,
         na_matches: str = "na",
+        unmatched: str = "drop",
+        relationship: Any = None,
+        multiple: str | None = None,
     ) -> "DataFrame":
         """Keep rows that have a match in both tables.
 
-        See :meth:`left_join` for shared parameter semantics.
+        See :meth:`left_join` for shared parameter semantics. ``unmatched``
+        ("drop" default / "error") + ``relationship`` / ``multiple`` are
+        dplyr-1.1 hooks for asserting cardinality / forbidding unmatched
+        rows; ``"error"`` raises if either side has unmatched rows.
         """
-        return self._do_join(other, by, "inner", suffix, keep, na_matches)
+        out = self._do_join(other, by, "inner", suffix, keep, na_matches)
+        if unmatched == "error" and out.height < self.height:
+            raise ValueError(
+                f"inner_join(unmatched='error'): {self.height - out.height} "
+                f"of {self.height} left rows had no match."
+            )
+        return out
 
     def left_join(
         self,
@@ -2919,10 +2931,10 @@ class DataFrame(pl.DataFrame):
         keep: bool,
         na_matches: str,
     ) -> "DataFrame":
-        if how not in ("left", "inner"):
+        if how not in ("left", "inner", "anti", "semi"):
             raise NotImplementedError(
                 f"{how}_join with closest() is not supported — only "
-                "left_join and inner_join route to join_asof."
+                "left/inner/anti/semi route through join_asof."
             )
         if spec.ineqs or spec.exprs:
             raise NotImplementedError(
@@ -2960,10 +2972,27 @@ class DataFrame(pl.DataFrame):
             # involved; we already sorted, so skip the check.
             kwargs["check_sortedness"] = False
         out = pl.DataFrame.join_asof(left_sorted, right_sorted, **kwargs)
+        # asof always returns one row per left row (left-join shape);
+        # the asof key column on the right tells us whether each row
+        # matched (null = no match found).
+        right_key_col = spec.asof.right
+        # ``coalesce`` collapsed the right key into the left when ``not keep``.
+        match_marker = (
+            spec.asof.right
+            if right_key_col in out.columns
+            else (right_key_col + polars_suffix
+                  if (right_key_col + polars_suffix) in out.columns
+                  else spec.asof.left)
+        )
         if how == "inner":
-            # asof always returns one row per left row (left-join shape);
-            # drop unmatched rows to get inner semantics.
-            out = out.filter(pl.col(spec.asof.right).is_not_null())
+            out = out.filter(pl.col(match_marker).is_not_null())
+        elif how == "anti":
+            # Keep only unmatched left rows; project back to left's columns.
+            out = out.filter(pl.col(match_marker).is_null())
+            out = out.select([c for c in out.columns if c in self.columns or c == idx_col])
+        elif how == "semi":
+            out = out.filter(pl.col(match_marker).is_not_null())
+            out = out.select([c for c in out.columns if c in self.columns or c == idx_col])
         # Restore left's original row order and drop the index tag.
         out = out.sort(idx_col).drop(idx_col)
         return self._apply_dplyr_suffix(out, suffix, polars_suffix)
