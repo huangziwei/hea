@@ -1504,16 +1504,30 @@ class Translator:
             self._shifted_loop_vars.add(n.var)
         try:
             with self.nse.enter(Slot.NONE):
-                body = self._as_stmt(self._visit(n.body))
+                body = self._visit_block_as_stmts(n.body)
         finally:
             if shifted:
                 self._shifted_loop_vars.discard(n.var)
         return P.For(
             target=_name(n.var, ctx=P.Store()),
             iter=iterable,
-            body=[body],
+            body=body,
             orelse=[],
         )
+
+    def _visit_block_as_stmts(self, body: R.Node) -> list[P.stmt]:
+        """Translate a control-flow body to a list of Python statements.
+
+        R's ``{stmt1; stmt2; ...}`` blocks contain multiple statements —
+        the visitor that's emitting an `if` / `for` / `while` / function
+        body needs every one, not just the last. Single-statement bodies
+        (no braces) collapse to a 1-element list.
+        """
+        if isinstance(body, R.Block):
+            if not body.statements:
+                return [P.Pass()]
+            return [self._as_stmt(self._visit(s)) for s in body.statements]
+        return [self._as_stmt(self._visit(body))]
 
     def _visit_for_iter(self, iter_node: R.Node) -> tuple[P.AST, bool]:
         """Translate the iter of an R ``for(i in <iter>)``.
@@ -1542,13 +1556,13 @@ class Translator:
     def _visit_While(self, n: R.While) -> P.stmt:
         with self.nse.enter(Slot.NONE):
             cond = self._visit(n.cond)
-            body = self._as_stmt(self._visit(n.body))
-        return P.While(test=cond, body=[body], orelse=[])
+            body = self._visit_block_as_stmts(n.body)
+        return P.While(test=cond, body=body, orelse=[])
 
     def _visit_Repeat(self, n: R.Repeat) -> P.stmt:
         with self.nse.enter(Slot.NONE):
-            body = self._as_stmt(self._visit(n.body))
-        return P.While(test=P.Constant(True), body=[body], orelse=[])
+            body = self._visit_block_as_stmts(n.body)
+        return P.While(test=P.Constant(True), body=body, orelse=[])
 
     def _visit_Break(self, n: R.Break) -> P.stmt:
         return P.Break()

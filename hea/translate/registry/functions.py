@@ -45,7 +45,7 @@ FUNCTION_TABLE: dict[str, Func] = {
     "min":      Func("min",      "method"),
     "max":      Func("max",      "method"),
     "var":      Func("var",      "method"),
-    "sd":       Func("std",      "method"),   # polars exposes .std(), not .sd()
+    "sd":       Func("sd",       "method"),   # hea.R.sd uses R's N-1 SD; polars .std() also has ddof=1 default — both fine
     "IQR":      Func("IQR",      "function"), # IQR is a hea function, not a method
     "quantile": Func("quantile", "method"),
     "n":        Func("n",        "function", Slot.NONE),
