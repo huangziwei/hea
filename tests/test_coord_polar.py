@@ -82,12 +82,30 @@ def test_coord_polar_creates_polar_axes_standalone():
         plt.close(fig)
 
 
-def test_coord_polar_start_sets_theta_offset():
+def test_coord_polar_default_puts_zero_at_top():
+    """``coord_polar()`` with defaults — theta=0 sits at 12 o'clock,
+    matching ggplot2. matplotlib's polar default is east, so the
+    internal offset is π/2.
+    """
+    df = pl.DataFrame({"x": [0.0, 1.0], "y": [1.0, 1.0]})
+    p = ggplot(df, aes("x", "y")) + geom_point() + coord_polar()
+    fig = p.draw()
+    try:
+        assert fig.axes[0].get_theta_offset() == pytest.approx(math.pi / 2)
+    finally:
+        plt.close(fig)
+
+
+def test_coord_polar_start_rotates_in_direction():
+    """``start`` rotates the zero point in the user-chosen direction.
+    With ``direction=1`` (CW), ``start=π/2`` sweeps zero from top to
+    3 o'clock; matplotlib's internal offset drops to 0 (east).
+    """
     df = pl.DataFrame({"x": [0.0, 1.0], "y": [1.0, 1.0]})
     p = ggplot(df, aes("x", "y")) + geom_point() + coord_polar(start=math.pi / 2)
     fig = p.draw()
     try:
-        assert fig.axes[0].get_theta_offset() == pytest.approx(math.pi / 2)
+        assert fig.axes[0].get_theta_offset() == pytest.approx(0.0)
     finally:
         plt.close(fig)
 

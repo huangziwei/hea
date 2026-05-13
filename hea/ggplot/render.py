@@ -83,11 +83,11 @@ def _polar_x_range(x_scale):
         # (``pad_lo, pad_hi = x_scale._padding()``). On Cartesian, the
         # +0.6/-0.6 pad keeps bars off the axis edges; on a closed circle
         # it just leaves a wedge of empty space at the 0/2π seam and the
-        # bars no longer tile the full circle. Mapping the n positions
-        # ``[0..n-1]`` into ``[0, 2π·(n-1)/n]`` (via range ``(0, n)``)
-        # makes width=1 bars tile exactly and width<1 produce uniform
-        # gaps everywhere (including the seam) — the right behaviour for
-        # circular categorical data.
+        # bars no longer tile the full circle. Categories live at
+        # half-integer positions ``[0.5, 1.5, … n-0.5]`` (see
+        # :func:`_polar_prep_layer_data`); mapping range ``(0, n)`` into
+        # ``[0, 2π]`` then puts bar centers at ``(i+0.5)·2π/n`` and the
+        # first bar's left edge at the top — matching ggplot2.
         return (0.0, float(n))
     if isinstance(x_scale, ScaleContinuous):
         if x_scale.range_ is None:
@@ -113,7 +113,12 @@ def _polar_prep_layer_data(df, x_scale):
     if isinstance(x_scale, ScaleOrdinal) and "x" in df.columns:
         levels = x_scale.resolved_limits()
         if levels:
-            level_to_pos = {str(lvl): float(i) for i, lvl in enumerate(levels)}
+            # +0.5 puts each category at the *center* of its 1-wide slot.
+            # Combined with the [0, n] training range and the [0, 2π]
+            # rescale, this places bar centers at (i+0.5)·2π/n — matching
+            # ggplot2, so the first bar's left edge sits at theta=0 (the
+            # top) rather than its center sitting at the top.
+            level_to_pos = {str(lvl): float(i) + 0.5 for i, lvl in enumerate(levels)}
             x_dtype = df["x"].dtype
             if not x_dtype.is_numeric():
                 df = df.with_columns(
@@ -164,7 +169,7 @@ def _polar_apply_scales(ax, x_scale, y_scale, x_range):
         levels = x_scale.resolved_limits()
         if not levels:
             return
-        ticks = [_rescale(i) for i in range(len(levels))]
+        ticks = [_rescale(i + 0.5) for i in range(len(levels))]
         if x_scale.breaks is None:
             tick_pos: list = []
             tick_labels: list = []

@@ -36,9 +36,11 @@ class CoordPolar(Coord):
         matches ggplot2 and pycircstat2. ``"y"`` is ggplot2's
         stacked-bar→pie idiom.
     start : float
-        Offset of ``theta=0`` from matplotlib's default east-pointing
-        zero, in **radians**. ``π/2`` puts zero at the top (north),
-        ``π`` at the left (west), etc.
+        Offset of the data's starting theta from 12 o'clock (top), in
+        **radians**, applied in the same rotation sense as ``direction``.
+        Matches ggplot2's convention: ``start=0`` (default) puts the
+        starting point at the top; ``start=π/2`` rotates it 90° in the
+        chosen direction (clockwise to 3 o'clock when ``direction=1``).
     direction : int
         ``1`` = clockwise (ggplot2 convention; compass-style).
         ``-1`` = counterclockwise (mathematical). The translation
@@ -94,10 +96,15 @@ class CoordPolar(Coord):
 
     def apply_to_axes(self, ax) -> None:
         """Configure the polar axes orientation. Called by render after
-        the axes are created. matplotlib's ``set_theta_direction`` is
-        inverted relative to ggplot2 (its ``1`` = CCW), so we negate.
+        the axes are created.
+
+        ggplot2 puts theta=0 at 12 o'clock (top) and sweeps clockwise
+        for ``direction=1``. matplotlib's polar default is theta=0 at
+        3 o'clock (east) with CCW positive. To match ggplot2 we rotate
+        the origin by π/2 and negate the direction; ``start`` adds an
+        extra rotation in the user-chosen direction.
         """
-        ax.set_theta_offset(float(self.start))
+        ax.set_theta_offset(math.pi / 2 - float(self.start) * int(self.direction))
         ax.set_theta_direction(-int(self.direction))
 
 

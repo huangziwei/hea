@@ -174,7 +174,7 @@ def geom_bar(mapping=None, data=None, *, stat="count", position="stack", **kwarg
     )
 
 
-def geom_col(mapping=None, data=None, *, position="identity", **kwargs):
+def geom_col(mapping=None, data=None, *, position="stack", **kwargs):
     from ..layer import Layer
     from ..positions import resolve_position
     from ..stats.identity import StatIdentity
