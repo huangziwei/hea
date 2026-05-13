@@ -158,7 +158,7 @@ class Translator:
         return P.Assign(
             targets=[P.Name(id=name, ctx=P.Store())],
             value=P.Call(
-                func=P.Attribute(value=P.Name("hea"), attr="data", ctx=P.Load()),
+                func=P.Attribute(value=P.Name("hea", ctx=P.Load()), attr="data", ctx=P.Load()),
                 args=[P.Constant(value=name)],
                 keywords=keywords,
             ),
@@ -1066,7 +1066,7 @@ def _make_data_load_stmt(name: str, pkg: str) -> P.stmt:
     return P.Assign(
         targets=[P.Name(id=name, ctx=P.Store())],
         value=P.Call(
-            func=P.Attribute(value=P.Name("hea"), attr="data", ctx=P.Load()),
+            func=P.Attribute(value=P.Name("hea", ctx=P.Load()), attr="data", ctx=P.Load()),
             args=[P.Constant(value=name)],
             keywords=[P.keyword(arg="package", value=P.Constant(value=pkg))],
         ),
