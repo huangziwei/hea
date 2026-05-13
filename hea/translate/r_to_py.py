@@ -645,6 +645,24 @@ class Translator:
             # In EXPR slot, polars Expr negation uses ``~``; elsewhere ``not``.
             if self.nse.is_expr():
                 return P.UnaryOp(P.Invert(), operand)
+            # In COLUMN_NAME (tidy-select) slot, ``!cols`` means "exclude
+            # these cols". Strategy depends on operand shape:
+            # - ``!(a:b)`` — operand is ``cols_between(...)`` which
+            #   supports ``__invert__`` natively → emit ``~operand``.
+            # - ``!single_col`` / ``!c(...)`` — wrap in
+            #   ``~selectors.by_name(operand)`` so polars' selector tree
+            #   handles the inversion at expansion time.
+            if self.nse.current is Slot.COLUMN_NAME:
+                if (
+                    isinstance(operand, P.Call)
+                    and isinstance(operand.func, P.Name)
+                    and operand.func.id == "cols_between"
+                ):
+                    return P.UnaryOp(P.Invert(), operand)
+                return P.UnaryOp(P.Invert(), _call(
+                    _attr(_name("selectors"), "by_name"),
+                    [operand],
+                ))
             return P.UnaryOp(P.Not(), operand)
         if n.op == "?":
             # Help operator — rare. Translate to a comment placeholder.
@@ -720,11 +738,10 @@ class Translator:
         if op == ":":
             # In COLUMN_NAME slot (``select(year:day)``, ``relocate(...)``)
             # ``a:b`` is dplyr's column-range selector, not a numeric
-            # range. Emit a Python ``slice('a', 'b')`` so the receiving
-            # verb's tidy-select resolver can expand it via
-            # ``cols_between(start, stop)``.
+            # range. Emit ``cols_between('a', 'b')`` — hea's tidy-select
+            # placeholder that supports ``~`` for ``select(!(a:b))``.
             if self.nse.current is Slot.COLUMN_NAME:
-                return _call(_name("slice"), [left, right])
+                return _call(_name("cols_between"), [left, right])
             # Inside an index context (subscript arg, recursively into
             # function calls there), ``1:N`` shifts to ``range(N)`` so
             # downstream consumers like ``sample(1:N)`` produce 0-based

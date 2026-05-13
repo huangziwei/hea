@@ -79,6 +79,7 @@ from .dataframe import (
     between,
     case_when,
     closest,
+    cols_between,
     consecutive_id,
     cumall,
     cumany,

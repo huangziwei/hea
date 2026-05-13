@@ -1974,6 +1974,58 @@ def _resolve_lazy_factors(
     return new_args, new_kwargs
 
 
+class _TidyRange:
+    """Frame-less placeholder for dplyr's ``a:b`` column range.
+
+    The translator emits ``cols_between('a', 'b')`` for R's ``select(a:b)``
+    style ranges. ``~`` flips the placeholder to its complement so
+    ``select(!(a:b))`` → ``~cols_between('a', 'b')``. The receiver verb's
+    tidy-select resolver expands against the frame at call time.
+
+    The polars-native form ``~df["a":"b"]`` continues to work via
+    :meth:`DataFrame.__invert__` — this class only covers the path where
+    the receiver isn't available syntactically (i.e., inside arg lists
+    of a method call, which is exactly where the translator emits).
+    """
+
+    __slots__ = ("start", "stop", "exclude")
+
+    def __init__(self, start: str, stop: str, *, exclude: bool = False):
+        self.start = start
+        self.stop = stop
+        self.exclude = exclude
+
+    def __invert__(self) -> "_TidyRange":
+        return _TidyRange(self.start, self.stop, exclude=not self.exclude)
+
+    def __repr__(self) -> str:
+        prefix = "!" if self.exclude else ""
+        return f"{prefix}cols_between({self.start!r}, {self.stop!r})"
+
+    def resolve(self, frame: "DataFrame") -> list[str]:
+        """Expand against ``frame``: list of column names (or their
+        complement when ``exclude=True``)."""
+        cols = frame.cols_between(self.start, self.stop)
+        if not self.exclude:
+            return cols
+        skip = set(cols)
+        return [c for c in frame.columns if c not in skip]
+
+
+def cols_between(start: str, stop: str) -> _TidyRange:
+    """tidy-select column range for use without a frame in hand.
+
+    Pass to ``select`` / ``relocate`` / ``pivot_longer`` / ``fill`` /
+    anywhere that accepts tidy-select cols. ``~cols_between('a', 'b')``
+    is the negated form.
+
+    The :class:`DataFrame` method of the same name (``df.cols_between(
+    'a', 'b')``) is the eager equivalent — both routes expand to the
+    same list of column names.
+    """
+    return _TidyRange(start, stop)
+
+
 class DataFrame(pl.DataFrame):
     """``pl.DataFrame`` with tidyverse-named methods.
 
@@ -2211,11 +2263,11 @@ class DataFrame(pl.DataFrame):
                 flat.extend(c.columns)
             elif isinstance(c, pl.Series):
                 flat.append(c.name)
-            elif isinstance(c, slice):
-                # dplyr's ``select(year:day)`` column-range — translated as
-                # ``slice('year', 'day')``. Expand against this frame's
-                # column order.
-                flat.extend(self.cols_between(c.start, c.stop))
+            elif isinstance(c, _TidyRange):
+                # dplyr's ``select(year:day)`` column range — translator
+                # emits ``cols_between('year', 'day')``. ``~cols_between``
+                # gives the complement (``select(!(a:b))``).
+                flat.extend(c.resolve(self))
             else:
                 flat.append(c)
         exprs: list[Any] = []
@@ -2250,8 +2302,8 @@ class DataFrame(pl.DataFrame):
                 flat.extend(c.columns)
             elif isinstance(c, pl.Series):
                 flat.append(c.name)
-            elif isinstance(c, slice):
-                flat.extend(self.cols_between(c.start, c.stop))
+            elif isinstance(c, _TidyRange):
+                flat.extend(c.resolve(self))
             else:
                 flat.append(c)
         return self._wrap(super().drop(*flat, strict=strict))
@@ -2323,9 +2375,9 @@ class DataFrame(pl.DataFrame):
                 moving.extend(c.columns)
             elif isinstance(c, pl.Series):
                 moving.append(c.name)
-            elif isinstance(c, slice):
+            elif isinstance(c, _TidyRange):
                 # dplyr's ``relocate(year:dep_time, ...)`` column-range.
-                moving.extend(self.cols_between(c.start, c.stop))
+                moving.extend(c.resolve(self))
             elif cs.is_selector(c):
                 moving.extend(cs.expand_selector(self, c))
             else:
@@ -2945,6 +2997,8 @@ class DataFrame(pl.DataFrame):
                 return [c.name]
             if isinstance(c, pl.DataFrame):
                 return list(c.columns)
+            if isinstance(c, _TidyRange):
+                return c.resolve(self)
             if isinstance(c, pl.Expr):
                 # ``pl.exclude(...)`` and similar non-selector exprs:
                 # resolve by asking polars which columns they cover.
