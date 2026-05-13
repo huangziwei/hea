@@ -166,11 +166,21 @@ class TestAssignment:
 
 
 class TestC:
-    def test_c_to_list(self):
-        assert _tr('c(1, 2, 3)') == "[1, 2, 3]"
+    def test_c_numeric_to_np_array(self):
+        # All-numeric c(...) becomes np.array so R's elementwise
+        # arithmetic (``primes * 2``, ``primes - 1``) carries over.
+        assert _tr('c(1, 2, 3)') == "import numpy as np\nnp.array([1, 2, 3])"
 
     def test_c_of_strings(self):
         assert _tr('c("a", "b")') == "['a', 'b']"
+
+    def test_c_mixed_falls_back_to_list(self):
+        # Anything non-numeric in the vector → Python list, no np.array.
+        assert _tr('c(1, "a")') == "[1, 'a']"
+
+    def test_c_with_unary_minus_still_numeric(self):
+        # Unary minus is part of the numeric literal — still np.array.
+        assert _tr('c(-1, 2, -3)') == "import numpy as np\nnp.array([-1, 2, -3])"
 
 
 # ---------------------------------------------------------------------------

@@ -68,6 +68,34 @@ _HEA_R_EXPORTS = _callable_exports("hea.R")
 _HEA_PLOT_EXPORTS = _callable_exports("hea.plot")
 _HEA_GGPLOT_EXPORTS = _callable_exports("hea.ggplot")
 
+
+def _module_exports(module_name: str) -> frozenset[str]:
+    """Public submodule attributes of ``module_name``. Counterpart to
+    :func:`_callable_exports` for names like ``hea.selectors`` that
+    the translator emits as Attribute roots (``selectors.starts_with``).
+    """
+    import types
+
+    try:
+        mod = importlib.import_module(module_name)
+    except Exception:
+        return frozenset()
+    out: set[str] = set()
+    for n in dir(mod):
+        if n.startswith("_"):
+            continue
+        v = getattr(mod, n, None)
+        if isinstance(v, types.ModuleType):
+            out.add(n)
+    return frozenset(out)
+
+
+# Submodules of ``hea`` we want to import on demand — e.g. ``selectors``
+# is ``polars.selectors`` re-exported via ``hea.__init__``. Translator
+# emits ``selectors.starts_with(...)`` so the preamble must contain
+# ``from hea import selectors``.
+_HEA_SUBMODULES = _module_exports("hea")
+
 # Python builtins — names we never need to import.
 _PY_BUILTINS: frozenset[str] = frozenset(__builtins__.keys() if isinstance(__builtins__, dict) else dir(__builtins__)) | {  # type: ignore[union-attr]
     "True", "False", "None",
@@ -371,14 +399,21 @@ class Translator:
         plot_names = sorted(n for n in (candidates - used) if n in _HEA_PLOT_EXPORTS)
         used |= set(plot_names)
         ggplot_names = sorted(n for n in (candidates - used) if n in _HEA_GGPLOT_EXPORTS)
+        used |= set(ggplot_names)
+        # Submodules used as Attribute roots: ``selectors.starts_with``,
+        # ``pl.col``, etc. ``from hea import selectors`` resolves the root.
+        submod_names = sorted(n for n in (candidates - used) if n in _HEA_SUBMODULES)
 
         out: list[P.stmt] = []
         if "hea" in referenced:
             out.append(P.Import(names=[P.alias(name="hea", asname=None)]))
-        if hea_names:
+        if "np" in referenced:
+            # Translator emits ``np.array([...])`` for all-numeric ``c(...)``.
+            out.append(P.Import(names=[P.alias(name="numpy", asname="np")]))
+        if hea_names or submod_names:
             out.append(P.ImportFrom(
                 module="hea",
-                names=[P.alias(name=n, asname=None) for n in hea_names],
+                names=[P.alias(name=n, asname=None) for n in (hea_names + submod_names)],
                 level=0,
             ))
         if r_names:
@@ -1315,6 +1350,11 @@ class Translator:
         """``c(a, b, c)`` → Python list. ``c("a" = "b", "x" = "y")`` →
         Python dict (idiomatic for join ``by`` mappings). The split is
         decided by whether any arg is named.
+
+        All-numeric-literal vectors (``c(2, 3, 5)`` / ``c(-1.5, 0, 1.5)``)
+        emit as ``np.array([...])`` so R's elementwise arithmetic
+        (``primes * 2``, ``primes - 1``) carries over — Python's bare
+        ``list`` rejects ``-``  and repeats on ``*``.
         """
         if any(isinstance(a, R.NamedArg) for a in args):
             keys: list[P.AST] = []
@@ -1328,6 +1368,11 @@ class Translator:
                     values.append(self._visit(a))
             return P.Dict(keys=keys, values=values)
         elems = [self._visit(a) for a in args]
+        if args and all(_is_numeric_literal(a) for a in args):
+            return _call(
+                _attr(_name("np"), "array"),
+                [P.List(elts=list(elems), ctx=P.Load())],
+            )
         return P.List(elts=list(elems), ctx=P.Load())
 
     # -- args --------------------------------------------------------------
@@ -1342,6 +1387,20 @@ class Translator:
         """
         py_args: list[P.AST] = []
         py_kwargs: list[P.keyword] = []
+        # R lets named args use any string literal name (``fct_recode(
+        # "Republican, strong" = ...)``) and even repeat the same name
+        # (``fct_recode("Other" = "x", "Other" = "y")`` — many-to-one
+        # merge). Python accepts neither shape as plain ``name=v`` kwargs,
+        # so anything non-identifier OR repeated lands in a trailing
+        # ``**{...}`` dict; repeats become value lists.
+        name_counts: dict[str, int] = {}
+        for arg in args:
+            if isinstance(arg, R.NamedArg):
+                py_name = resolve_kwarg(arg.name).py_name
+                name_counts[py_name] = name_counts.get(py_name, 0) + 1
+        # Dict of merged kwargs we'll emit as a single ``**{}`` at the end.
+        merged_keys: list[str] = []      # insertion order
+        merged_values: dict[str, list[P.AST]] = {}
         for arg in args:
             if isinstance(arg, R.NamedArg):
                 alias = resolve_kwarg(arg.name)
@@ -1350,12 +1409,37 @@ class Translator:
                         value = self._visit(arg.value)
                 else:
                     value = self._visit(arg.value)
-                py_kwargs.append(P.keyword(arg=alias.py_name, value=value))
+                is_id = alias.py_name.isidentifier()
+                is_dup = name_counts[alias.py_name] > 1
+                if is_id and not is_dup:
+                    py_kwargs.append(P.keyword(arg=alias.py_name, value=value))
+                else:
+                    if alias.py_name not in merged_values:
+                        merged_keys.append(alias.py_name)
+                        merged_values[alias.py_name] = []
+                    merged_values[alias.py_name].append(value)
             elif isinstance(arg, R.MissingArg):
                 # Empty arg in subscript context — represent as None.
                 py_args.append(P.Constant(value=None))
             else:
                 py_args.append(self._visit(arg))
+        if merged_keys:
+            dict_keys: list[P.AST] = []
+            dict_values: list[P.AST] = []
+            for name in merged_keys:
+                vals = merged_values[name]
+                dict_keys.append(P.Constant(value=name))
+                if len(vals) == 1:
+                    dict_values.append(vals[0])
+                else:
+                    # Many → list. Matches fct_recode's many-to-one merge
+                    # shape (and is generally less lossy than picking the
+                    # last value as Python would do for plain dup kwargs).
+                    dict_values.append(P.List(elts=vals, ctx=P.Load()))
+            py_kwargs.append(P.keyword(
+                arg=None,
+                value=P.Dict(keys=dict_keys, values=dict_values),
+            ))
         return py_args, py_kwargs
 
     # -- assignment & top-level control flow -------------------------------
@@ -1637,6 +1721,17 @@ class Translator:
 # ---------------------------------------------------------------------------
 # Small AST helpers
 # ---------------------------------------------------------------------------
+
+
+def _is_numeric_literal(node: R.Node) -> bool:
+    """Numeric literal — int/float, plain or with leading unary sign.
+    Used by ``c(...)`` to decide list vs ``np.array`` emission.
+    """
+    if isinstance(node, (R.NumLit, R.IntLit)):
+        return True
+    if isinstance(node, R.UnaryOp) and node.op in ("-", "+"):
+        return _is_numeric_literal(node.operand)
+    return False
 
 
 def _to_py_identifier(name: str) -> str:
