@@ -609,6 +609,7 @@ _R_EXPR_SKIP = {
     # Matrix / frame utilities — operate on 2D shapes, not single columns.
     "rowSums", "colSums", "rowMeans", "colMeans",
     "apply", "rbind", "cbind", "sweep", "expand_grid", "matrix",
+    "R_range", "R_round",
     # Length-changing transforms — would shorten/lengthen the column.
     "diff", "which", "tabulate",
     # Container / contingency tables — return tables, not Exprs.

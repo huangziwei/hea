@@ -107,6 +107,8 @@ FUNCTION_TABLE: dict[str, Func] = {
     "list":     Func("__list__",   "function"),
     "is.na":    Func("is_na",      "method"),    # R's is.na — element-wise NA
     "is.null":  Func("is_null",    "method"),    # R's is.null — scalar None check
+    "range":    Func("R_range",    "function"),  # R range() collides with builtin; uses hea.R.R_range
+    "round":    Func("R_round",    "function"),  # R round() needs to vectorize over dict/array; builtin only handles scalars
     "is.finite": Func("is_finite", "method"),
 
     # ---- tibble / data.frame literal — bespoke handler ----

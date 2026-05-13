@@ -133,9 +133,10 @@ class TestOperators:
         # ``!x`` outside slot is logical ``not``.
         assert _tr("!x") == "not x"
 
-    def test_sequence_to_hea_seq(self):
-        # ``1:5`` → ``hea.seq(1, 5)``.
-        assert _tr("1:5") == "hea.seq(1, 5)"
+    def test_sequence_to_seq(self):
+        # ``1:5`` → ``seq(1, 5)``; the autoimport preamble resolves ``seq``
+        # to ``hea.R.seq`` (R-style semantics: integer-valued sequence).
+        assert _tr("1:5") == "seq(1, 5)"
 
 
 # ---------------------------------------------------------------------------
@@ -837,7 +838,7 @@ class TestControlFlow:
 
     def test_for_loop(self):
         out = _tr("for (i in 1:5) print(i)")
-        assert "for i in hea.seq(1, 5)" in out
+        assert "for i in seq(1, 5)" in out
 
     def test_lambda_shorthand(self):
         out = _tr("f <- \\(x) x + 1")

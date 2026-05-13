@@ -47,6 +47,7 @@ from .dispatch import plot
 from .helpers import halfnorm, interaction_plot, pairs, qqnorm, termplot
 from .hist import hist
 from .par import par
+from .stubs import dev_off, gray, image, pdf, stripchart
 
 __all__ = [
     "plot",
@@ -54,4 +55,8 @@ __all__ = [
     "qqnorm", "halfnorm", "termplot", "pairs", "interaction_plot",
     "hist", "boxplot", "barplot", "density", "curve",
     "par",
+    # No-op stubs for R base-graphics calls hea doesn't render yet.
+    # Surfaced so translated scripts don't crash on the side-effect lines;
+    # plotting calls between pdf()/dev.off() pairs still run.
+    "pdf", "dev_off", "image", "stripchart", "gray",
 ]

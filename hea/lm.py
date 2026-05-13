@@ -584,8 +584,8 @@ class lm:
     def compute_BIC(self):
         return -2 * self.loglike + np.log(self.n) * self.npar
 
-    def predict(self, new=None, interval=None, alpha=0.05):
-        return self.compute_yhat(Xnew=new, interval=interval, alpha=alpha)
+    def predict(self, newdata=None, interval=None, alpha=0.05):
+        return self.compute_yhat(Xnew=newdata, interval=interval, alpha=alpha)
 
     def _residuals_lines(self, digits: int = 4) -> list[str]:
         qs = np.quantile(self._residuals_arr, [0.0, 0.25, 0.5, 0.75, 1.0])

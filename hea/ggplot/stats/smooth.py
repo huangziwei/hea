@@ -82,7 +82,7 @@ def _fit_predict(method: str, formula: str | None,
         # `predict(interval="confidence")` returns Fitted plus CI columns named
         # `CI[2.5%]` / `CI[97.5]%` (the closing-bracket asymmetry is hea.lm
         # internal). We back out se from the CI half-width.
-        pred = fit.predict(new=new, interval="confidence", alpha=0.05)
+        pred = fit.predict(newdata=new, interval="confidence", alpha=0.05)
         yhat = pred["Fitted"].to_numpy()
         ci_lo = pred[pred.columns[1]].to_numpy()
         # 95% CI half-width / t_crit * sqrt(...) — we re-derive se from

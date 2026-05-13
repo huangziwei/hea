@@ -50,6 +50,10 @@ class _ParContext:
         if mfrow is None and mfcol is None:
             raise ValueError("par(): pass mfrow=(nrow,ncol) or mfcol=(nrow,ncol).")
         shape = mfrow if mfrow is not None else mfcol
+        # Accept list too — R's ``par(mfrow=c(3,3))`` translates to a Python
+        # list, and forcing the user to wrap in a tuple is needless friction.
+        if isinstance(shape, list):
+            shape = tuple(shape)
         if not (isinstance(shape, tuple) and len(shape) == 2
                 and all(isinstance(x, int) and x > 0 for x in shape)):
             raise TypeError(

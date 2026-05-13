@@ -597,9 +597,10 @@ class Translator:
                 return P.BinOp(left=left, op=P.BitOr(), right=right)
             return P.BoolOp(op=P.Or(), values=[left, right])
 
-        # Sequence ``a:b`` → ``hea.seq(a, b)``.
+        # Sequence ``a:b`` → ``seq(a, b)``. The autoimport preamble
+        # resolves ``seq`` to ``hea.R.seq``.
         if op == ":":
-            return _call(_attr(_name("hea"), "seq"), [left, right])
+            return _call(_name("seq"), [left, right])
 
         # Namespace access ``pkg::name`` / ``pkg:::name``. Drop the package
         # qualifier — the function registry handles renaming.
@@ -713,6 +714,14 @@ class Translator:
             helper = FUNCTION_TABLE.get(name)
             if helper is not None:
                 return self._emit_helper_call(helper, name, n.args)
+
+            # 2.5) Model fits with no ``data`` argument — R resolves
+            # ``lm(y ~ x)``'s ``y``/``x`` from the caller's environment.
+            # Translate-time we can do the same by building a frame from
+            # the formula's terms.
+            synthesized = self._maybe_lm_no_data(name, n.args)
+            if synthesized is not None:
+                return synthesized
 
             # 3) Default: regular call. Args walked under current slot,
             # which is what's wanted for nested user calls.
@@ -997,6 +1006,100 @@ class Translator:
         valid Python identifier (dot→underscore, keyword→trailing-``_``)."""
         py_args, py_kwargs = self._translate_args(args)
         return _call(_name(_to_py_identifier(name)), py_args, py_kwargs)
+
+    _LM_LIKE: frozenset[str] = frozenset({"lm", "glm", "gam", "bam", "lme", "lmer", "glmer"})
+    _FORMULA_OPS: frozenset[str] = frozenset({"+", "-", "*", "/", ":", "^", "|"})
+
+    def _maybe_lm_no_data(self, name: str, args: tuple[R.Node, ...]) -> Optional[P.AST]:
+        """Catch ``lm(y ~ x)`` / ``glm(...)`` / etc. with no ``data`` arg.
+
+        R resolves the formula's variables in the caller's environment;
+        hea requires an explicit ``data=`` frame. We build that frame
+        at translate time from the formula's *additive terms*: bare
+        identifiers become eponymous columns, compound expressions get
+        synthesized names (``term_0``…) with the expression itself as
+        the column value. The formula text is rewritten to match.
+        """
+        if name not in self._LM_LIKE:
+            return None
+        if not args or not isinstance(args[0], R.Tilde):
+            return None
+
+        positional = [a for a in args if not isinstance(a, R.NamedArg)]
+        has_data_kwarg = any(
+            isinstance(a, R.NamedArg) and a.name in ("data", ".data")
+            for a in args
+        )
+        # Second positional arg fills the ``data`` slot in R.
+        if has_data_kwarg or len(positional) >= 2:
+            return None
+
+        formula = args[0]
+        pairs: list[tuple[str, R.Node]] = []
+        seen: set[str] = set()
+        counter = [0]
+
+        def take(node: R.Node) -> R.Node:
+            if isinstance(node, R.Identifier):
+                if node.name not in seen:
+                    pairs.append((node.name, node))
+                    seen.add(node.name)
+                return node
+            # Compound term — synthesize a fresh name.
+            new_name = f"term_{counter[0]}"
+            counter[0] += 1
+            pairs.append((new_name, node))
+            seen.add(new_name)
+            return R.Identifier(name=new_name, span=node.span)
+
+        def walk(side: R.Node) -> R.Node:
+            # Recurse through top-level formula operators; everything
+            # else is a terminal "term."
+            if isinstance(side, R.BinOp) and side.op in self._FORMULA_OPS:
+                return R.BinOp(
+                    op=side.op,
+                    left=walk(side.left),
+                    right=walk(side.right),
+                    span=side.span,
+                )
+            if isinstance(side, R.UnaryOp) and side.op in ("-", "+"):
+                return R.UnaryOp(op=side.op, operand=walk(side.operand), span=side.span)
+            # Literals (``y ~ 1`` intercept, ``y ~ 0`` no-intercept) pass through.
+            if isinstance(side, (R.NumLit, R.IntLit, R.BoolLit)):
+                return side
+            return take(side)
+
+        new_lhs = walk(formula.lhs) if formula.lhs is not None else None
+        new_rhs = walk(formula.rhs)
+        new_tilde = R.Tilde(lhs=new_lhs, rhs=new_rhs, span=formula.span)
+        formula_str = _format_formula(new_tilde)
+
+        # hea.DataFrame({col: <visited value>, ...}).
+        keys: list[P.AST] = []
+        values: list[P.AST] = []
+        for col_name, ast_node in pairs:
+            keys.append(P.Constant(value=col_name))
+            values.append(self._visit(ast_node))
+        df_arg = _call(
+            _attr(_name("hea"), "DataFrame"),
+            [P.Dict(keys=keys, values=values)],
+            [],
+        )
+
+        # Propagate any non-formula kwargs (weights=, method=, …).
+        py_kwargs: list[P.keyword] = []
+        for a in args[1:]:
+            if isinstance(a, R.NamedArg):
+                alias = resolve_kwarg(a.name)
+                value = self._visit(a.value)
+                py_kwargs.append(P.keyword(arg=alias.py_name, value=value))
+        py_kwargs.append(P.keyword(arg="data", value=df_arg))
+
+        return _call(
+            _name(_to_py_identifier(name)),
+            [P.Constant(value=formula_str)],
+            py_kwargs,
+        )
 
     def _emit_case_when(self, args: tuple[R.Node, ...]) -> P.AST:
         """``case_when(cond1 ~ val1, cond2 ~ val2, .default = d)`` →

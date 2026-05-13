@@ -247,6 +247,7 @@ __all__ = [
     # matrix / frame utilities (R: base matrix ops)
     "rowSums", "colSums", "rowMeans", "colMeans",
     "apply", "rbind", "cbind", "sweep", "expand_grid", "matrix",
+    "R_range", "R_round",
     # coercion / predicates
     "as_numeric", "as_integer", "as_character", "as_logical",
     "as_date", "as_Date",
@@ -1232,6 +1233,39 @@ def expand_grid(**kwargs):
     rows = [tuple(reversed(r)) for r in rows]
     cols = {k: [r[i] for r in rows] for i, k in enumerate(keys)}
     return pl.DataFrame(cols)
+
+
+def R_range(x, na_rm=False):
+    """R: ``range(x)`` — ``[min(x), max(x)]``. Named ``R_range`` to avoid
+    colliding with Python's builtin ``range``; the translator routes R's
+    ``range()`` here via the FUNCTION_TABLE registry.
+    """
+    if isinstance(x, (pl.Expr, pl.Series)):
+        return [x.min(), x.max()]
+    arr = np.asarray(x, dtype=float)
+    if na_rm:
+        arr = arr[~np.isnan(arr)]
+    return [float(arr.min()), float(arr.max())]
+
+
+def R_round(x, digits=0):
+    """R: ``round(x, digits)`` — vectorized over containers.
+
+    Named ``R_round`` to avoid colliding with Python's builtin ``round``;
+    the translator routes R's ``round()`` here via FUNCTION_TABLE.
+    Handles dict (named-vector), ndarray, Series/Expr, scalar.
+    """
+    d = int(digits)
+    if isinstance(x, dict):
+        return {k: round(v, d) for k, v in x.items()}
+    if isinstance(x, (pl.Expr, pl.Series)):
+        return x.round(d)
+    if isinstance(x, pl.DataFrame):
+        return x.with_columns(pl.col(pl.Float64, pl.Float32).round(d))
+    arr = np.asarray(x)
+    if arr.shape == ():
+        return round(float(arr), d)
+    return np.round(arr, d)
 
 
 def matrix(data, nrow=None, ncol=None, byrow=False):
@@ -2968,8 +3002,15 @@ def formula(model):
     return model.formula
 
 
-def model_matrix(model):
-    """R: ``model.matrix()`` — design matrix used at fit time.
+def model_matrix(model, data=None):
+    """R: ``model.matrix(model_or_formula, data=df)`` — design matrix.
+
+    Two forms:
+
+    - ``model_matrix(fitted_model)`` — return the design matrix already
+      stored on the fitted model.
+    - ``model_matrix(formula_str, data=df)`` — build a design matrix
+      from the formula against ``df``. Mirrors R's bare-formula form.
 
     Returns a polars DataFrame; columns are the named design columns
     (intercept, dummy-coded factor levels, spline bases, …). R returns
@@ -2977,8 +3018,15 @@ def model_matrix(model):
     """
     if hasattr(model, "X"):
         return model.X
+    if isinstance(model, str) and data is not None:
+        # Formula form: import locally to avoid circular import at module load.
+        from .design import prepare_design
+
+        design = prepare_design(model, data)
+        return design.X
     raise TypeError(
-        f"model_matrix(): {model.__class__.__name__} has no design matrix"
+        f"model_matrix(): {model.__class__.__name__} has no design matrix; "
+        f"for the formula form pass data= explicitly."
     )
 
 
