@@ -269,7 +269,7 @@ __all__ = [
     "dexp", "pexp", "qexp", "rexp",
     "dgamma", "pgamma", "qgamma", "rgamma",
     "dbeta", "pbeta", "qbeta", "rbeta",
-    "set_seed", "sample", "sapply",
+    "set_seed", "sample", "sapply", "tapply",
     # rank helpers (Lindeløv-style "tests as lm" notebook)
     "rank", "signed_rank",
     # hypothesis tests (return HTest, R's ``htest`` print-shape)
@@ -1904,6 +1904,23 @@ def sample(x, size=None, replace=False, prob=None):
     if names is not None:
         return NamedVector([names[i] for i in idx], values[idx])
     return values[idx]
+
+
+def tapply(X, INDEX, FUN, *args, **kwargs):
+    """R: ``tapply(X, INDEX, FUN, ...)`` — apply ``FUN`` to subsets of
+    ``X`` grouped by the levels of ``INDEX``.
+
+    Returns a :class:`hea.NamedVector` keyed by the unique levels of
+    ``INDEX``, matching R's "named numeric vector" return shape.
+    """
+    from .named_vector import NamedVector
+
+    x = X.to_numpy() if hasattr(X, "to_numpy") else np.asarray(X)
+    idx = INDEX.to_numpy() if hasattr(INDEX, "to_numpy") else np.asarray(INDEX)
+    levels = sorted(set(idx.tolist()), key=str)
+    names = [str(lvl) for lvl in levels]
+    values = [FUN(x[idx == lvl], *args, **kwargs) for lvl in levels]
+    return NamedVector(names, values)
 
 
 def sapply(X, FUN, *args, **kwargs):

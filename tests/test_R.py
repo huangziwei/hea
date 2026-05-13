@@ -611,7 +611,7 @@ _R_EXPR_SKIP = {
     "apply", "rbind", "cbind", "sweep", "expand_grid", "matrix",
     "R_range", "R_round",
     # Vector primitives — variadic / multi-arg; not column ops.
-    "rep", "sample", "sapply",
+    "rep", "sample", "sapply", "tapply",
     # Length-changing transforms — would shorten/lengthen the column.
     "diff", "which", "tabulate",
     # Container / contingency tables — return tables, not Exprs.

@@ -164,6 +164,12 @@ class Translator:
         # ``1:N`` shifts to ``range(N)`` (positions are 0-based in hea).
         # Tracked as a counter so nested subscripts compose.
         self._index_context: int = 0
+        # Stack of data-frame names introduced by ``with(df, expr)``. R's
+        # ``with()`` evaluates ``expr`` in an env where ``df``'s columns
+        # are bound locally; while a frame is active, bare identifiers
+        # in value position rewrite to ``df["name"]`` so the same
+        # resolution happens at runtime.
+        self._with_stack: list[str] = []
         # Original R source — used to slice back the text of an
         # unportable statement when emitting its comment block.
         self._src = src
@@ -302,15 +308,6 @@ class Translator:
                 kind="replacement_function",
                 subject=f"{fn}<-",
                 notes=f"R's `{fn}(x) <- v` setter has no direct hea analog yet.",
-            )
-        # Any statement containing a ``with(df, expr)`` call — R's NSE
-        # rebind that the translator hasn't built out.
-        if _contains_call_to(stmt, "with"):
-            return self._emit_unported(
-                stmt,
-                kind="with_expression",
-                subject="with",
-                notes="R's `with(df, expr)` needs an NSE rewrite to bind df's columns; not yet implemented.",
             )
         # Any statement containing a call to a Python-keyword name
         # (``class(x)``, ``try(expr)``, ``except(...)`` etc.). Emitting
@@ -561,6 +558,24 @@ class Translator:
             return _call(_name("col"), [P.Constant(n.name)])
         if slot is Slot.COLUMN_NAME:
             return P.Constant(value=n.name)
+        # Inside ``with(df, expr)``: bare identifier resolves to a
+        # column lookup on ``df``. Matches R's NSE binding — ``with()``
+        # checks the data frame's columns before falling back to the
+        # parent environment. Known R functions (``mean``, ``sum``,
+        # tidyverse verbs, …) bypass the rewrite so e.g.
+        # ``with(df, tapply(x, g, mean))`` keeps ``mean`` as a function
+        # rather than mis-resolving to ``df["mean"]``.
+        if (
+            self._with_stack
+            and n.name not in FUNCTION_TABLE
+            and n.name not in VERB_TABLE
+        ):
+            df_name = self._with_stack[-1]
+            return P.Subscript(
+                value=_name(df_name),
+                slice=P.Constant(value=n.name),
+                ctx=P.Load(),
+            )
         # NONE — emit as a Python name. Dot identifiers (``data.frame``,
         # ``na.omit``) become underscores; identifiers that collide with
         # Python keywords (``lambda``, ``class``, ``True``, ...) get a
@@ -762,6 +777,13 @@ class Translator:
             # composes with the chain rewriter via the ``+`` operator.
             if name == "ggplot":
                 return self._emit_ggplot_root(n.args)
+
+            # ``with(df, expr)`` — push the df name onto the stack so
+            # bare identifiers in ``expr``'s subtree rewrite to
+            # ``df["name"]``; the call itself "returns" the translated
+            # expression value (R's ``with()`` is value-producing).
+            if name == "with":
+                return self._emit_with_call(n.args)
 
             # 1) Verb dispatch.
             verb = VERB_TABLE.get(name)
@@ -1064,6 +1086,25 @@ class Translator:
         valid Python identifier (dot→underscore, keyword→trailing-``_``)."""
         py_args, py_kwargs = self._translate_args(args)
         return _call(_name(_to_py_identifier(name)), py_args, py_kwargs)
+
+    def _emit_with_call(self, args: tuple[R.Node, ...]) -> P.AST:
+        """``with(df, expr)`` — R's NSE binding.
+
+        ``expr`` is translated with bare identifiers rewritten to
+        ``df["name"]`` lookups. Currently requires the ``df`` argument
+        to be a bare :class:`R.Identifier` (the common case across
+        idiomatic R scripts); anything more elaborate falls through to
+        the regular-call emission so the user can see the gap.
+        """
+        if len(args) < 2 or not isinstance(args[0], R.Identifier):
+            return self._emit_regular_call("with", args)
+        df_name = _to_py_identifier(args[0].name)
+        body = args[1]
+        self._with_stack.append(df_name)
+        try:
+            return self._visit(body)
+        finally:
+            self._with_stack.pop()
 
     _LM_LIKE: frozenset[str] = frozenset({"lm", "glm", "gam", "bam", "lme", "lmer", "glmer"})
     _FORMULA_OPS: frozenset[str] = frozenset({"+", "-", "*", "/", ":", "^", "|"})
@@ -1662,10 +1703,15 @@ def _first_python_keyword_call(node: R.Node) -> Optional[str]:
 
     Soft keywords (``match``, ``case``, ``type``, ``_``) are valid as
     identifiers outside their reserved-statement contexts, so we do
-    **not** unport them.
+    **not** unport them. ``with`` is also a Python keyword but the
+    translator handles ``with(df, expr)`` natively via NSE rebinding —
+    excluded here so it isn't flagged as a gap.
     """
     import keyword
-    return _first_matching_call(node, keyword.iskeyword)
+    return _first_matching_call(
+        node,
+        lambda name: keyword.iskeyword(name) and name != "with",
+    )
 
 
 def _first_matching_call(node: R.Node, predicate) -> Optional[str]:
