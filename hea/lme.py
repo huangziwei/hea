@@ -817,6 +817,16 @@ class lme:
 
         return Profile(data, estimate)
 
+    def confint(self, level: float = 0.95) -> pl.DataFrame:
+        """R: ``confint.merMod`` — profile-likelihood CIs at ``level``.
+
+        Mirrors lme4's default ``method="profile"``: runs :meth:`profile`
+        and inverts each ζ-curve at ``±Φ⁻¹((1+level)/2)``. Returns one row
+        per variance-component SD (``.sig01``, …, ``.sigma``) and one row
+        per fixed effect.
+        """
+        return self.profile().confint(level=level)
+
     # ---- lmer-style printing --------------------------------------------
 
     def _header(self) -> str:
