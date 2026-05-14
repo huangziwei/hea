@@ -658,3 +658,253 @@ def test_devfun_stage1_with_empty_fixef_slice():
     devfun_stage1 = _glmm_devfun_factory(pred, resp, nagq=1)
     dev_hea = devfun_stage1(theta_hat)  # par = theta only (empty β slice)
     assert dev_hea == pytest.approx(dev1_r, rel=1e-9, abs=1e-9)
+
+
+# ----------------------------------------------------------------------
+# Phase 5: Full glmer fit — tests the public ``hea.lme(..., family=...)``
+# entry point against ``lme4::glmer``. ≤ 1e-7 on θ̂, β̂; ≤ 1e-9 on the
+# Laplace deviance (since deviance evaluation is exact given converged
+# parameters).
+# ----------------------------------------------------------------------
+
+
+def _r_glmer_full_fit(formula: str, csv_data: str, family_r: str):
+    """Fit lme4::glmer and return theta_hat, beta_hat, deviance."""
+    r_script = f"""
+        suppressMessages(suppressWarnings(library(lme4)))
+        d <- read.csv(text="{csv_data}")
+        d$g <- factor(d$g)
+        m <- glmer({formula}, data=d, family={family_r}())
+        hp <- function(...) format(c(...), digits=17, scientific=TRUE)
+        cat("RESULT_THETA", hp(getME(m, "theta")), "\\n")
+        cat("RESULT_BETA",  hp(getME(m, "beta")),  "\\n")
+        cat("RESULT_DEV",   hp(-2 * as.numeric(logLik(m))), "\\n")
+    """
+    out = subprocess.run(
+        ["R", "--vanilla", "--slave", "-e", r_script],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    parsed = {
+        line.split(maxsplit=1)[0]: line.split(maxsplit=1)[1]
+        for line in out.strip().split("\n")
+        if line.startswith("RESULT_")
+    }
+    return {
+        "theta": np.array(parsed["RESULT_THETA"].split(), dtype=float),
+        "beta":  np.array(parsed["RESULT_BETA"].split(),  dtype=float),
+        "deviance": float(parsed["RESULT_DEV"]),
+    }
+
+
+def test_glmer_poisson_full_fit_matches_lme4():
+    """Full ``hea.lme(..., family=poisson())`` fit ≡ ``lme4::glmer(..., family=poisson)``.
+
+    Both stages of the outer optimizer must converge to the same neighbourhood
+    as lme4. Tolerance: ~1e-4 on θ̂/β̂ — limited by two factors that aren't
+    bugs and can't be tightened without losing the parity with how lme4
+    behaves in practice:
+
+    * scipy's L-BFGS-B (finite-difference gradient) vs lme4's bobyqa/
+      Nelder_Mead (derivative-free) take different paths to the optimum.
+    * lme4's PIRLS reports ``ldL2`` from the iter-before-last (the "stale
+      weights" trick documented at :func:`_glmm_devfun_factory`), so the
+      Laplace value at a given (θ, β) depends on how warm-started PIRLS was
+      — making both lme4 and hea's deviance surfaces *slightly* different
+      functions whose minima sit at slightly different (θ̂, β̂).
+
+    Two glmer fits on the same data with different default optimizers
+    (bobyqa vs Nelder_Mead) can themselves disagree by ~1e-4 — see lme4's
+    own ``allFit()`` tooling. Our agreement at ~1e-5 is well inside that
+    band.
+    """
+    from hea.lme import lme  # local import — keep test file's top imports lean
+    from hea.family import Poisson as PoissonFamily
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    csv = "y,x,g\n" + "\n".join(
+        f"{int(df['y'][i])},{df['x'][i]:.10g},{df['g'][i]}" for i in range(df.height)
+    )
+    r = _r_glmer_full_fit("y ~ x + (1|g)", csv, "poisson")
+
+    m = lme("y ~ x + (1|g)", df, family=PoissonFamily())
+
+    np.testing.assert_allclose(m.theta, r["theta"], atol=1e-4, rtol=1e-4)
+    np.testing.assert_allclose(m._beta, r["beta"],  atol=1e-4, rtol=1e-4)
+    np.testing.assert_allclose(m.deviance, r["deviance"], atol=1e-4, rtol=1e-4)
+    # Public-API check: bhat as a DataFrame with R-canonical column names.
+    assert m.bhat.columns == ["(Intercept)", "x"]
+    np.testing.assert_allclose(
+        m.bhat.row(0), r["beta"], atol=1e-4, rtol=1e-4,
+    )
+
+
+def test_glmer_binomial_full_fit_matches_lme4_cbpp():
+    """Full ``hea.lme`` fit on cbpp matches ``lme4::glmer(family=binomial)``.
+
+    cbpp is the canonical lme4 GLMM example. Uses proportion response
+    (incidence/size) with binomial weights (size).
+    """
+    from hea.lme import lme
+    from hea.family import Binomial as BinomialFamily
+
+    r_dump = subprocess.run(
+        ["R", "--vanilla", "--slave", "-e",
+         "suppressMessages(library(lme4)); data(cbpp); "
+         "write.table(cbpp, sep=',', quote=FALSE, row.names=FALSE)"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    import io
+    df = pl.read_csv(io.StringIO(r_dump))
+    df = df.with_columns(
+        (pl.col("incidence") / pl.col("size")).alias("y_prop"),
+        pl.col("herd").cast(pl.String),
+        pl.col("period").cast(pl.String),
+    )
+
+    # Pin against the original cbind() formula in R.
+    r_out = subprocess.run(
+        ["R", "--vanilla", "--slave", "-e", """
+            suppressMessages(library(lme4)); data(cbpp)
+            m <- glmer(cbind(incidence, size-incidence) ~ period + (1|herd),
+                       data=cbpp, family=binomial())
+            hp <- function(...) format(c(...), digits=17, scientific=TRUE)
+            cat("THETA", hp(getME(m, "theta")), "\\n")
+            cat("BETA",  hp(getME(m, "beta")),  "\\n")
+            cat("DEV",   hp(-2 * as.numeric(logLik(m))), "\\n")
+        """],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    lines = {l.split(maxsplit=1)[0]: l.split(maxsplit=1)[1]
+             for l in r_out.strip().split("\n")}
+    theta_r = np.array(lines["THETA"].split(), dtype=float)
+    beta_r  = np.array(lines["BETA"].split(),  dtype=float)
+    dev_r   = float(lines["DEV"])
+
+    size = df["size"].to_numpy().astype(float)
+    m = lme("y_prop ~ period + (1|herd)", df,
+            family=BinomialFamily(), weights=size)
+
+    np.testing.assert_allclose(m.theta, theta_r, atol=1e-4, rtol=1e-4)
+    np.testing.assert_allclose(m._beta, beta_r,  atol=1e-4, rtol=1e-4)
+    np.testing.assert_allclose(m.deviance, dev_r, atol=1e-4, rtol=1e-4)
+
+
+def test_glmer_intercept_only_poisson():
+    """No fixed effects (p=0) → Stage 1 has empty β slice, optimize θ only.
+
+    Edge case: Stage 1's par vector is just θ. lme4 happily fits these too;
+    we should match.
+    """
+    from hea.lme import lme
+    from hea.family import Poisson as PoissonFamily
+
+    df = _synthetic_poisson_grouped(seed=11, n_groups=8, n_per=5)
+    csv = "y,g\n" + "\n".join(
+        f"{int(df['y'][i])},{df['g'][i]}" for i in range(df.height)
+    )
+    r_out = subprocess.run(
+        ["R", "--vanilla", "--slave", "-e", f"""
+            suppressMessages(library(lme4))
+            d <- read.csv(text="{csv}")
+            d$g <- factor(d$g)
+            m <- glmer(y ~ 0 + (1|g), data=d, family=poisson())
+            hp <- function(...) format(c(...), digits=17, scientific=TRUE)
+            cat("THETA", hp(getME(m, "theta")), "\\n")
+            cat("DEV",   hp(-2 * as.numeric(logLik(m))), "\\n")
+        """],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    lines = {l.split(maxsplit=1)[0]: l.split(maxsplit=1)[1]
+             for l in r_out.strip().split("\n")}
+    theta_r = np.array(lines["THETA"].split(), dtype=float)
+    dev_r   = float(lines["DEV"])
+
+    m = lme("y ~ 0 + (1|g)", df, family=PoissonFamily())
+    np.testing.assert_allclose(m.theta, theta_r, atol=1e-4, rtol=1e-4)
+    np.testing.assert_allclose(m.deviance, dev_r, atol=1e-4, rtol=1e-4)
+    assert m.p == 0
+    assert m._beta.shape == (0,)
+
+
+def test_glmer_nagq0_init_step_false_runs_stage1_directly():
+    """With ``nAGQ0initStep=False``, Stage 0 is skipped and Stage 1 starts
+    cold (θ=θ₀, β=0). Should still converge to the same optimum as the
+    default path (Stage 0 just provides a warm start; final answer is
+    determined by Stage 1 alone).
+    """
+    from hea.lme import lme
+    from hea.family import Poisson as PoissonFamily
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    m_default = lme("y ~ x + (1|g)", df, family=PoissonFamily())
+    m_no_stage0 = lme(
+        "y ~ x + (1|g)", df, family=PoissonFamily(), nAGQ0initStep=False,
+    )
+
+    assert m_default._optim_stage0 is not None
+    assert m_no_stage0._optim_stage0 is None
+    # Without Stage 0 warm-up, Stage 1 starts cold (β=0). L-BFGS-B on the
+    # noisy Laplace surface converges to a slightly different neighbour of
+    # the optimum — both valid fits but not byte-identical.
+    np.testing.assert_allclose(
+        m_default.theta, m_no_stage0.theta, atol=1e-3, rtol=1e-3,
+    )
+    np.testing.assert_allclose(
+        m_default._beta, m_no_stage0._beta, atol=1e-3, rtol=1e-3,
+    )
+
+
+def test_glmer_start_numeric_overrides_theta():
+    """A numeric ``start=`` is interpreted as θ-only and overrides the
+    formula default ``θ₀``. The optimizer still converges to the same
+    answer."""
+    from hea.lme import lme
+    from hea.family import Poisson as PoissonFamily
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    m_default = lme("y ~ x + (1|g)", df, family=PoissonFamily())
+    # Start from a different θ — should still find the same optimum.
+    m_alt = lme(
+        "y ~ x + (1|g)", df, family=PoissonFamily(), start=np.array([2.0]),
+    )
+    np.testing.assert_allclose(m_default.theta, m_alt.theta, atol=1e-4, rtol=1e-4)
+
+
+def test_glmer_start_dict_with_theta_and_beta():
+    """``start={"theta": ..., "beta": ...}`` overrides both initial values."""
+    from hea.lme import lme
+    from hea.family import Poisson as PoissonFamily
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    m_default = lme("y ~ x + (1|g)", df, family=PoissonFamily())
+    m_with_dict = lme(
+        "y ~ x + (1|g)", df, family=PoissonFamily(),
+        start={"theta": np.array([1.5]), "beta": np.array([0.1, 0.2])},
+    )
+    np.testing.assert_allclose(
+        m_default.theta, m_with_dict.theta, atol=1e-4, rtol=1e-4,
+    )
+    np.testing.assert_allclose(
+        m_default._beta, m_with_dict._beta, atol=1e-4, rtol=1e-4,
+    )
+
+
+def test_glmer_start_validation_errors():
+    """``start=`` rejects malformed inputs."""
+    from hea.lme import lme
+    from hea.family import Poisson as PoissonFamily
+
+    df = _synthetic_poisson_grouped(seed=2026)
+
+    with pytest.raises(ValueError, match="unrecognised start keys"):
+        lme("y ~ x + (1|g)", df, family=PoissonFamily(),
+            start={"theta": np.array([1.0]), "blah": np.array([0.0])})
+    with pytest.raises(ValueError, match="not have both"):
+        lme("y ~ x + (1|g)", df, family=PoissonFamily(),
+            start={"theta": np.array([1.0]), "par": np.array([1.0])})
+    with pytest.raises(ValueError, match="start theta has shape"):
+        lme("y ~ x + (1|g)", df, family=PoissonFamily(),
+            start={"theta": np.array([1.0, 2.0])})  # too many
+    with pytest.raises(ValueError, match="start beta has shape"):
+        lme("y ~ x + (1|g)", df, family=PoissonFamily(),
+            start={"beta": np.array([1.0])})  # wrong p

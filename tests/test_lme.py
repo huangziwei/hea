@@ -167,14 +167,20 @@ def test_family_default_equals_explicit_gaussian():
     assert m_default.REML_criterion == m_explicit.REML_criterion
 
 
-def test_family_non_gaussian_raises_until_phase_2():
-    """Poisson/Binomial/etc. raise a clear NotImplementedError until the
-    non-Gaussian Laplace path lands."""
+def test_family_non_gaussian_runs_glmm_path():
+    """Poisson family dispatches to the GLMM Laplace path (Phase 5).
+
+    Just smoke-checks that ``hea.lme(..., family=poisson())`` fits without
+    raising. Numerical parity with ``lme4::glmer`` is pinned in
+    ``test_lme_glmm.py``'s Phase 5 acceptance tests.
+    """
     data = load_dataset("lme4", "Dyestuff")
-    with pytest.raises(NotImplementedError, match="lme-family-port"):
-        lme("Yield ~ 1 + (1|Batch)", data, family=Poisson())
-    with pytest.raises(NotImplementedError, match="not yet implemented"):
-        lme("Yield ~ 1 + (1|Batch)", data, family=Binomial())
+    # Dyestuff's Yield is continuous, but for a smoke test we can fit a
+    # Poisson model — the optimizer should still converge.
+    m = lme("Yield ~ 1 + (1|Batch)", data, family=Poisson())
+    assert m.theta.shape == (1,)
+    assert m._beta.shape == (1,)
+    assert np.isfinite(m.deviance)
 
 
 def test_bates_1_4_dyestuff_fm01_REML():

@@ -100,6 +100,19 @@ class _FitInputs:
     etastart: Optional[np.ndarray] = None
     """Starting η for GLMM PIRLS (Phase 2)."""
 
+    start: Optional[dict] = None
+    """User-supplied starting values for the GLMM outer optimizer. Accepts
+    ``None`` (use defaults: θ from ``re_terms.theta``, β from Stage 0's
+    converged ``pp.delb``), a numpy array (interpreted as ``θ`` only), or a
+    dict with keys ``"theta"``/``"par"`` and ``"beta"``/``"fixef"``. Mirrors
+    lme4's ``getStart`` (modular.R:472-533)."""
+
+    nagq0_init_step: bool = True
+    """When True (default), run a Stage 0 (θ-only) optimization before the
+    full Stage 1 (θ+β) one to warm-start the latter. When False, skip
+    Stage 0 and run Stage 1 directly from ``θ₀`` and ``β=0``. Mirrors
+    ``glmerControl(nAGQ0initStep=...)``."""
+
     # Diagnostic carries ------------------------------------------------
     # These follow the data through the fit so the resulting ``lme`` instance
     # can produce diagnostics, predict on new data, and round-trip formulas.
@@ -1010,6 +1023,8 @@ class lme:
         family: Optional[Family] = None,
         REML: bool = True,
         weights: Optional[np.ndarray] = None,
+        start=None,
+        nAGQ0initStep: bool = True,
     ):
         self.formula = formula
         self.REML = REML
@@ -1046,6 +1061,8 @@ class lme:
             family=family,
             reml=REML,
             weights=weights,
+            start=start,
+            nagq0_init_step=nAGQ0initStep,
             expanded=d.expanded,
             data=d.data,
         ))
@@ -1068,12 +1085,8 @@ class lme:
             and inputs.family.link.name == "identity"
         )
         if not is_gaussian_identity:
-            raise NotImplementedError(
-                f"lme(family={inputs.family.name}, link={inputs.family.link.name}) "
-                "is not yet implemented; the non-Gaussian Laplace path lands "
-                "in Phase 2-5 of .claude/plans/lme-family-port.md. For now, "
-                "only family=gaussian(link='identity') is supported."
-            )
+            self._fit_glmm_from_components(inputs)
+            return
         if inputs.weights is not None:
             raise NotImplementedError(
                 "weights= is plumbed through _FitInputs but the Gaussian fit "
@@ -1266,6 +1279,195 @@ class lme:
         # for REML fits, matching lme4's ``AIC.merMod`` / ``BIC.merMod``.
         self.AIC = opt + 2.0 * self.npar
         self.BIC = opt + np.log(n) * self.npar
+
+    # ---- GLMM fit -------------------------------------------------------
+
+    def _fit_glmm_from_components(self, inputs: _FitInputs) -> None:
+        """Fit a GLMM by Laplace approximation. Mirrors ``glmer`` (lmer.R:148-198).
+
+        Two-stage outer optimization:
+
+        1. **Stage 0** (``nAGQ0initStep=True`` default): optimize the Laplace
+           deviance over θ only, with PIRLS doing a joint (β, u) solve each
+           call. Provides a warm start for Stage 1.
+        2. **Stage 1**: optimize over (θ, β) jointly. β is folded into the
+           offset and PIRLS does a u-only solve. Returns the final estimates.
+
+        Both stages use scipy's L-BFGS-B with finite-difference gradients —
+        derivative-free in spirit, matching lme4's bobyqa/Nelder_Mead choices.
+
+        The instance gets just the bare minimum after this method: ``theta``,
+        ``_beta``, ``bhat``/``fixef``, ``deviance``, plus the live
+        ``_pred``/``_resp`` for downstream phases. Full post-fit attributes
+        (``fitted``, ``residuals``, ``AIC``, ``logLik``, ``sigma`` for
+        unknown-scale families, σ-component summary tables, plotting hooks)
+        land in Phase 6 of ``.claude/plans/lme-family-port.md``.
+        """
+        re = inputs.re_terms
+        X_df = inputs.X_df
+        y = inputs.y
+        family = inputs.family
+        X = X_df.to_numpy().astype(float)
+        # polars to_numpy on a 0-column DataFrame returns shape (0, 0); fix
+        # to (n, 0) so _PredState's row-count check passes.
+        if X.shape == (0, 0):
+            X = np.zeros((len(y), 0), dtype=float)
+        Z = re.Z
+        Z_sp = csc_array(Z)
+        n, p = X.shape
+        q = Z.shape[1]
+        off = inputs.offset
+
+        self.family = family
+        self._offset = off
+        self.data = inputs.data
+        self._expanded = inputs.expanded
+        self.X = X_df
+        self.y = y
+        self.Z = Z
+        self.column_names = list(X_df.columns)
+        self.n = n
+        self.p = p
+        self.q = q
+        self._re = re
+
+        bar_sizes = _bar_sizes(re.cnms)
+        self._bar_sizes = bar_sizes
+        self.n_groups = {g: len(levs) for g, levs in re.flist_levels.items()}
+
+        diag_set = set(_theta_diag_idx(bar_sizes))
+        self._diag_set = diag_set
+        bounds_theta = [
+            (0.0, None) if i in diag_set else (None, None)
+            for i in range(len(re.theta))
+        ]
+        self._theta_bounds = bounds_theta
+        bounds_beta = [(None, None)] * p
+        n_theta = len(re.theta)
+
+        # Build the live PIRLS state. _PredState holds X, Z, Λᵀ(θ);
+        # _GlmResponse holds y, weights, offset, μ, and the working-weight
+        # state PIRLS mutates each iteration.
+        pred = _PredState(X, Z_sp, re)
+        resp = _GlmResponse(
+            family, y,
+            weights=inputs.weights, offset=off,
+            mustart=inputs.mustart, etastart=inputs.etastart,
+        )
+
+        theta0 = re.theta.astype(float).copy()
+        # User-supplied starting values override the defaults. Mirror lme4's
+        # ``getStart`` (modular.R:472-533): None → no override; ndarray →
+        # θ-only; dict → keys ``theta``/``par`` and ``beta``/``fixef``.
+        beta_user_start: Optional[np.ndarray] = None
+        if inputs.start is not None:
+            if isinstance(inputs.start, dict):
+                if "theta" in inputs.start and "par" in inputs.start:
+                    raise ValueError(
+                        "start= must not have both 'theta' and 'par' keys"
+                    )
+                if "beta" in inputs.start and "fixef" in inputs.start:
+                    raise ValueError(
+                        "start= must not have both 'beta' and 'fixef' keys"
+                    )
+                if "theta" in inputs.start or "par" in inputs.start:
+                    theta0 = np.asarray(
+                        inputs.start.get("theta", inputs.start.get("par")),
+                        dtype=float,
+                    ).copy()
+                    if theta0.shape != re.theta.shape:
+                        raise ValueError(
+                            f"start theta has shape {theta0.shape}; expected "
+                            f"{re.theta.shape}"
+                        )
+                if "beta" in inputs.start or "fixef" in inputs.start:
+                    beta_user_start = np.asarray(
+                        inputs.start.get("beta", inputs.start.get("fixef")),
+                        dtype=float,
+                    ).copy()
+                    if beta_user_start.shape != (p,):
+                        raise ValueError(
+                            f"start beta has shape {beta_user_start.shape}; "
+                            f"expected ({p},)"
+                        )
+                bad = set(inputs.start) - {"theta", "par", "beta", "fixef"}
+                if bad:
+                    raise ValueError(f"unrecognised start keys: {sorted(bad)}")
+            else:
+                theta0 = np.asarray(inputs.start, dtype=float).copy()
+                if theta0.shape != re.theta.shape:
+                    raise ValueError(
+                        f"start has shape {theta0.shape}; expected "
+                        f"{re.theta.shape}"
+                    )
+
+        nagq0_init_step = inputs.nagq0_init_step
+        # PIRLS inner-loop control. Match lme4's glmerControl defaults
+        # (tolPwrss=1e-7, maxit=100). Phase 8 will plumb user overrides.
+        tol_pwrss = 1e-7
+        maxit_pwrss = 100
+
+        if nagq0_init_step:
+            # Stage 0 — joint PIRLS at θ₀, then optimize devfun over θ only.
+            _pwrss_update(pred, resp, u_only=False, tol=tol_pwrss, maxit=maxit_pwrss)
+            devfun_stage0 = _glmm_devfun_factory(
+                pred, resp, nagq=0, tol_pwrss=tol_pwrss, maxit_pwrss=maxit_pwrss,
+            )
+            res0 = minimize(
+                devfun_stage0, theta0,
+                method="L-BFGS-B", bounds=bounds_theta,
+                options={"ftol": 1e-12, "gtol": 1e-8, "maxiter": 1000},
+            )
+            theta_stage0 = res0.x
+            # Re-anchor pred/resp at the Stage 0 optimum. scipy's last
+            # devfun call may have been a probe rather than the optimum.
+            devfun_stage0(theta_stage0)
+            # lme4 uses pp.beta(1) (= the converged β from Stage 0 joint
+            # PIRLS) as the Stage 1 starting β. modular.R:475 (`fixef0 <-
+            # rho$pp$delb`). A user-supplied ``start["beta"]`` overrides.
+            beta_start = beta_user_start if beta_user_start is not None else pred.beta(1.0).copy()
+            self._optim_stage0 = res0
+        else:
+            # No Stage 0 — go straight to Stage 1 with θ₀ and β=0 (or
+            # user-supplied β).
+            _pwrss_update(pred, resp, u_only=True, tol=tol_pwrss, maxit=maxit_pwrss)
+            theta_stage0 = theta0
+            beta_start = beta_user_start if beta_user_start is not None else np.zeros(p)
+            self._optim_stage0 = None
+
+        # Stage 1 — optimize over (θ, β) jointly. β is folded into the
+        # offset; PIRLS uses u_only=True. The factory snapshots lp0 at the
+        # current (post-Stage-0) state and base_offset = resp.offset.
+        devfun_stage1 = _glmm_devfun_factory(
+            pred, resp, nagq=1, tol_pwrss=tol_pwrss, maxit_pwrss=maxit_pwrss,
+        )
+        start_par = np.concatenate([theta_stage0, beta_start])
+        bounds_par = bounds_theta + bounds_beta
+        res1 = minimize(
+            devfun_stage1, start_par,
+            method="L-BFGS-B", bounds=bounds_par,
+            options={"ftol": 1e-12, "gtol": 1e-8, "maxiter": 1000},
+        )
+        theta_hat = res1.x[:n_theta]
+        beta_hat = res1.x[n_theta:]
+        # Re-anchor at the Stage 1 optimum.
+        devfun_stage1(res1.x)
+        self._optim = res1
+
+        self.theta = theta_hat
+        self._beta = beta_hat
+        self._pred = pred
+        self._resp = resp
+
+        # Minimal Phase 5 attributes — Phase 6 adds the rest of the
+        # merMod-equivalent surface.
+        self.bhat = pl.DataFrame(
+            {c: [float(beta_hat[i])] for i, c in enumerate(self.column_names)}
+        )
+        self.fixef = self.bhat                            # R-canonical alias
+        self.deviance = float(res1.fun)
+        # ML log-likelihood from the Laplace deviance.
+        self.loglike = -0.5 * self.deviance
 
     # ---- deviance building blocks --------------------------------------
     #
