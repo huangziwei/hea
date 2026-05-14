@@ -14,12 +14,15 @@ import numpy as np
 import polars as pl
 import pytest
 
-from hea._cholmod import csc_array
+from hea.lme import csc_array
 from hea.family import Binomial, Gamma, Gaussian, Poisson
 from hea.formula import materialize_bars, parse, expand
 from hea.lme import (
+    NelderMead,
+    NMStatus,
     _GlmResponse,
     _PredState,
+    _deriv12,
     _glmm_devfun_factory,
     _internal_glmer_wrk_iter,
     _pwrss_update,
@@ -1193,3 +1196,327 @@ def test_glmer_phase6_sigma_for_scale_unknown_family():
     np.testing.assert_allclose(m.sigma, sigma_r, atol=1e-3, rtol=1e-3)
     # npar formula: p + n_theta + useSc (=1 for unknown-scale).
     assert m.npar == m.p + len(m.theta) + 1
+
+
+# ----------------------------------------------------------------------
+# Phase 7: GLMM predict — type, re.form, random.only, allow.new.levels,
+# se.fit. Pinned against ``lme4::predict.merMod``.
+# ----------------------------------------------------------------------
+
+
+def _r_glmer_predict(formula: str, csv_data: str, family_r: str,
+                     newdata_csv: str | None = None, **predict_args):
+    """Fit lme4::glmer and run ``predict(m, newdata=..., ...)`` returning fit + se.fit."""
+    nd_block = ""
+    nd_arg = ""
+    if newdata_csv is not None:
+        nd_block = f'nd <- read.csv(text="{newdata_csv}"); nd$g <- factor(nd$g, levels=levels(d$g))\n'
+        nd_arg = ", newdata=nd"
+    pred_kwargs = []
+    for k, v in predict_args.items():
+        if isinstance(v, bool):
+            pred_kwargs.append(f"{k}={'TRUE' if v else 'FALSE'}")
+        elif v is None:
+            pred_kwargs.append(f"{k}=NULL")
+        elif v == "no_re":
+            pred_kwargs.append(f"{k}=~0")
+        else:
+            pred_kwargs.append(f"{k}={v!r}")
+    pred_kwargs_str = (", " + ", ".join(pred_kwargs)) if pred_kwargs else ""
+    r_script = f"""
+        suppressMessages(suppressWarnings(library(lme4)))
+        d <- read.csv(text="{csv_data}"); d$g <- factor(d$g)
+        {nd_block}
+        m <- glmer({formula}, data=d, family={family_r}(),
+                   control=glmerControl(optimizer=c("Nelder_Mead", "Nelder_Mead")))
+        out <- suppressWarnings(predict(m{nd_arg}{pred_kwargs_str}))
+        hp <- function(...) format(c(...), digits=17, scientific=TRUE)
+        if (is.list(out)) {{
+            cat("FIT", hp(out$fit), "\\n")
+            cat("SE",  hp(out$se.fit), "\\n")
+        }} else {{
+            cat("FIT", hp(as.numeric(out)), "\\n")
+        }}
+    """
+    out = subprocess.run(
+        ["R", "--vanilla", "--slave", "-e", r_script],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    lines = {l.split(maxsplit=1)[0]: l.split(maxsplit=1)[1]
+             for l in out.strip().split("\n") if l.startswith(("FIT", "SE"))}
+    r = {"fit": np.array(lines["FIT"].split(), dtype=float)}
+    if "SE" in lines:
+        r["se.fit"] = np.array(lines["SE"].split(), dtype=float)
+    return r
+
+
+def test_glmer_predict_link_and_response_match_lme4_poisson():
+    """``predict(m, type="link")`` returns η; ``type="response"`` returns μ.
+
+    For Poisson(log): ``μ = exp(η)``. Pin both against ``lme4::predict``.
+    """
+    from hea.lme import lme
+    from hea.family import Poisson as PoissonFamily
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    csv = "y,x,g\n" + "\n".join(
+        f"{int(df['y'][i])},{df['x'][i]:.10g},{df['g'][i]}" for i in range(df.height)
+    )
+    m = lme("y ~ x + (1|g)", df, family=PoissonFamily())
+
+    r_link = _r_glmer_predict("y ~ x + (1|g)", csv, "poisson", type="link")
+    r_resp = _r_glmer_predict("y ~ x + (1|g)", csv, "poisson", type="response")
+
+    p_link = m.predict(type="link")
+    p_resp = m.predict(type="response")
+    np.testing.assert_allclose(p_link["fit"].to_numpy(), r_link["fit"], atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(p_resp["fit"].to_numpy(), r_resp["fit"], atol=1e-9, rtol=1e-9)
+    # Consistency: μ = linkinv(η) = exp(η) for Poisson(log).
+    np.testing.assert_allclose(p_resp["fit"].to_numpy(),
+                               np.exp(p_link["fit"].to_numpy()),
+                               atol=1e-12, rtol=1e-12)
+
+
+def test_glmer_predict_newdata_matches_lme4_poisson():
+    """``predict(m, newdata=...)`` matches lme4 with the same newdata."""
+    from hea.lme import lme
+    from hea.family import Poisson as PoissonFamily
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    csv = "y,x,g\n" + "\n".join(
+        f"{int(df['y'][i])},{df['x'][i]:.10g},{df['g'][i]}" for i in range(df.height)
+    )
+    m = lme("y ~ x + (1|g)", df, family=PoissonFamily())
+
+    # Build a small newdata frame: 6 rows, 3 groups present in fit.
+    nd_x = np.array([-1.0, 0.0, 1.0, -0.5, 0.5, 0.0])
+    nd_g = ["G00", "G05", "G11", "G00", "G05", "G11"]
+    nd_csv = "y,x,g\n" + "\n".join(
+        f"0,{nd_x[i]:.10g},{nd_g[i]}" for i in range(len(nd_x))
+    )
+    nd_df = pl.DataFrame({"y": np.zeros(len(nd_x)), "x": nd_x, "g": nd_g})
+
+    r = _r_glmer_predict("y ~ x + (1|g)", csv, "poisson",
+                         newdata_csv=nd_csv, type="response")
+    p = m.predict(nd_df, type="response")
+    np.testing.assert_allclose(p["fit"].to_numpy(), r["fit"], atol=1e-9, rtol=1e-9)
+
+
+def test_glmer_predict_re_form_false_matches_lme4_poisson():
+    """``re_form=False`` returns population-level prediction (X·β only)."""
+    from hea.lme import lme
+    from hea.family import Poisson as PoissonFamily
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    csv = "y,x,g\n" + "\n".join(
+        f"{int(df['y'][i])},{df['x'][i]:.10g},{df['g'][i]}" for i in range(df.height)
+    )
+    m = lme("y ~ x + (1|g)", df, family=PoissonFamily())
+
+    r = _r_glmer_predict("y ~ x + (1|g)", csv, "poisson",
+                         **{"re.form": "no_re", "type": "response"})
+    p = m.predict(re_form=False, type="response")
+    np.testing.assert_allclose(p["fit"].to_numpy(), r["fit"], atol=1e-9, rtol=1e-9)
+
+
+def test_glmer_predict_allow_new_levels_matches_lme4():
+    """New levels in newdata get population-level prediction with ``allow_new_levels=True``."""
+    from hea.lme import lme
+    from hea.family import Poisson as PoissonFamily
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    csv = "y,x,g\n" + "\n".join(
+        f"{int(df['y'][i])},{df['x'][i]:.10g},{df['g'][i]}" for i in range(df.height)
+    )
+    m = lme("y ~ x + (1|g)", df, family=PoissonFamily())
+
+    # Mix existing + brand-new levels.
+    nd_x = np.array([0.5, 0.0, -0.5, 0.5])
+    nd_g = ["G00", "NEWGROUP1", "NEWGROUP2", "G05"]
+    nd_df = pl.DataFrame({"y": np.zeros(len(nd_x)), "x": nd_x, "g": nd_g})
+
+    # Default ``allow_new_levels=False`` should raise.
+    with pytest.raises(ValueError, match="new level"):
+        m.predict(nd_df)
+
+    # With ``allow_new_levels=True``: new levels → b=0 → population mean.
+    p = m.predict(nd_df, allow_new_levels=True, type="response")
+    # For the new levels, expectation equals exp(X·β + 0).
+    eta_pop = nd_df.select(pl.col("x")).to_numpy().ravel() * m._beta[1] + m._beta[0]
+    new_rows = [1, 2]
+    np.testing.assert_allclose(
+        p["fit"].to_numpy()[new_rows], np.exp(eta_pop[new_rows]),
+        atol=1e-12, rtol=1e-12,
+    )
+
+
+def test_glmer_predict_se_fit_link_matches_lme4_poisson():
+    """``se.fit`` on link scale matches lme4 at ≤ 1e-7.
+
+    lme4's ``vcov_full`` builds (b, β) covariance via the L / RX / RZX
+    factors. We build the same M densely and solve — equivalent algebra,
+    same machinery as the LMM se.fit path with working weights added.
+    """
+    from hea.lme import lme
+    from hea.family import Poisson as PoissonFamily
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    csv = "y,x,g\n" + "\n".join(
+        f"{int(df['y'][i])},{df['x'][i]:.10g},{df['g'][i]}" for i in range(df.height)
+    )
+    m = lme("y ~ x + (1|g)", df, family=PoissonFamily())
+
+    r = _r_glmer_predict("y ~ x + (1|g)", csv, "poisson",
+                         type="link", **{"se.fit": True})
+    p = m.predict(type="link", se_fit=True)
+    np.testing.assert_allclose(p["fit"].to_numpy(),    r["fit"],    atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(p["se.fit"].to_numpy(), r["se.fit"], atol=1e-7, rtol=1e-6)
+
+
+def test_glmer_predict_se_fit_response_matches_lme4_poisson():
+    """``se.fit`` on response scale uses the delta method ``SE_link · |dμ/dη|``."""
+    from hea.lme import lme
+    from hea.family import Poisson as PoissonFamily
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    csv = "y,x,g\n" + "\n".join(
+        f"{int(df['y'][i])},{df['x'][i]:.10g},{df['g'][i]}" for i in range(df.height)
+    )
+    m = lme("y ~ x + (1|g)", df, family=PoissonFamily())
+
+    r = _r_glmer_predict("y ~ x + (1|g)", csv, "poisson",
+                         type="response", **{"se.fit": True})
+    p = m.predict(type="response", se_fit=True)
+    np.testing.assert_allclose(p["fit"].to_numpy(),    r["fit"],    atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(p["se.fit"].to_numpy(), r["se.fit"], atol=1e-7, rtol=1e-6)
+
+
+def test_glmer_predict_random_only_matches_lme4_poisson():
+    """``random.only=True`` returns Z·b on the link scale (no X·β, no offset)."""
+    from hea.lme import lme
+    from hea.family import Poisson as PoissonFamily
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    csv = "y,x,g\n" + "\n".join(
+        f"{int(df['y'][i])},{df['x'][i]:.10g},{df['g'][i]}" for i in range(df.height)
+    )
+    m = lme("y ~ x + (1|g)", df, family=PoissonFamily())
+
+    r = _r_glmer_predict("y ~ x + (1|g)", csv, "poisson",
+                         type="link", **{"random.only": True})
+    p = m.predict(type="link", random_only=True)
+    np.testing.assert_allclose(p["fit"].to_numpy(), r["fit"], atol=1e-9, rtol=1e-9)
+
+
+# ======================================================================
+# Phase 8 — Argument plumbing & validation
+# ======================================================================
+
+
+def _r_deriv12(fn_body_r: str, x, delta=1e-4, lower=None, upper=None):
+    """Call ``lme4:::deriv12`` on the given R-side scalar objective.
+
+    The objective body must be R code that uses ``x`` and returns a scalar.
+    Returns ``{"gradient": ndarray, "Hessian": ndarray}``.
+    """
+    x = np.asarray(x, dtype=float)
+    n = x.size
+    x_str = ",".join(f"{v:.17g}" for v in x)
+    if lower is None:
+        lower_arg = f"rep(NA_real_, {n})"
+    else:
+        lower = np.asarray(lower, dtype=float)
+        lower_arg = "c(" + ",".join(
+            ("NA_real_" if np.isnan(v) else f"{v:.17g}") for v in lower
+        ) + ")"
+    if upper is None:
+        upper_arg = f"rep(NA_real_, {n})"
+    else:
+        upper = np.asarray(upper, dtype=float)
+        upper_arg = "c(" + ",".join(
+            ("NA_real_" if np.isnan(v) else f"{v:.17g}") for v in upper
+        ) + ")"
+    r_script = f"""
+        suppressMessages(suppressWarnings(library(lme4)))
+        fn <- function(x) {{ {fn_body_r} }}
+        d <- lme4:::deriv12(fn, x=c({x_str}), delta={delta:.17g},
+                            lower={lower_arg}, upper={upper_arg})
+        hp <- function(...) format(c(...), digits=17, scientific=TRUE)
+        cat("GRAD", hp(d$gradient), "\\n")
+        cat("HESS", hp(as.vector(d$Hessian)), "\\n")
+    """
+    out = subprocess.run(
+        ["R", "--vanilla", "--slave", "-e", r_script],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    lines = {l.split(maxsplit=1)[0]: l.split(maxsplit=1)[1]
+             for l in out.strip().split("\n")}
+    g = np.array(lines["GRAD"].split(), dtype=float)
+    H_flat = np.array(lines["HESS"].split(), dtype=float)
+    return {"gradient": g, "Hessian": H_flat.reshape(n, n, order="F")}
+
+
+def test_deriv12_quadratic_matches_lme4():
+    """Smooth quadratic — gradient and Hessian are exact at any step."""
+    def py_fn(x):
+        return float((x[0] - 2.0) ** 2 + 3.0 * (x[1] + 1.0) ** 2 + x[0] * x[1])
+
+    x0 = np.array([0.5, -0.3])
+    g_py, H_py = _deriv12(py_fn, x0)
+    r = _r_deriv12("(x[1]-2)^2 + 3*(x[2]+1)^2 + x[1]*x[2]", x0)
+    np.testing.assert_allclose(g_py, r["gradient"], atol=1e-10, rtol=1e-10)
+    np.testing.assert_allclose(H_py, r["Hessian"], atol=1e-10, rtol=1e-10)
+
+
+def test_deriv12_rosenbrock_matches_lme4():
+    """Non-quadratic — central differences should still byte-match."""
+    def py_fn(x):
+        return float(100.0 * (x[1] - x[0] ** 2) ** 2 + (1.0 - x[0]) ** 2)
+
+    x0 = np.array([0.7, 0.4])
+    g_py, H_py = _deriv12(py_fn, x0)
+    r = _r_deriv12("100 * (x[2] - x[1]^2)^2 + (1 - x[1])^2", x0)
+    np.testing.assert_allclose(g_py, r["gradient"], atol=1e-10, rtol=1e-10)
+    np.testing.assert_allclose(H_py, r["Hessian"], atol=1e-10, rtol=1e-10)
+
+
+def test_deriv12_bound_shrinks_step_matches_lme4():
+    """Optimum near upper bound — udelta shrinks; asymmetric central diff."""
+    def py_fn(x):
+        return float((x[0] - 0.99995) ** 2 + (x[1] + 0.5) ** 2)
+
+    x0 = np.array([0.99995, 0.0])
+    upper = np.array([1.0, np.nan])
+    lower = np.array([0.0, np.nan])
+    g_py, H_py = _deriv12(py_fn, x0, lower=lower, upper=upper)
+    r = _r_deriv12(
+        "(x[1] - 0.99995)^2 + (x[2] + 0.5)^2",
+        x0, lower=lower, upper=upper,
+    )
+    np.testing.assert_allclose(g_py, r["gradient"], atol=1e-10, rtol=1e-10)
+    np.testing.assert_allclose(H_py, r["Hessian"], atol=1e-10, rtol=1e-10)
+
+
+def test_deriv12_1d_matches_lme4():
+    """1D objective — Hessian is a 1×1 matrix, no off-diagonal loop."""
+    def py_fn(x):
+        return float(np.exp(0.3 * x[0]) - 2.0 * x[0])
+
+    x0 = np.array([1.5])
+    g_py, H_py = _deriv12(py_fn, x0)
+    r = _r_deriv12("exp(0.3 * x[1]) - 2 * x[1]", x0)
+    np.testing.assert_allclose(g_py, r["gradient"], atol=1e-10, rtol=1e-10)
+    np.testing.assert_allclose(H_py, r["Hessian"], atol=1e-10, rtol=1e-10)
+
+
+def test_deriv12_uses_supplied_fx_to_save_one_eval():
+    """``fx`` argument skips the redundant ``fn(x)`` call. Pin: same answer."""
+    def py_fn(x):
+        return float(x[0] ** 3 + x[1] ** 2)
+
+    x0 = np.array([0.2, 0.4])
+    g_a, H_a = _deriv12(py_fn, x0)
+    g_b, H_b = _deriv12(py_fn, x0, fx=py_fn(x0))
+    np.testing.assert_array_equal(g_a, g_b)
+    np.testing.assert_array_equal(H_a, H_b)
+

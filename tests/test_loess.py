@@ -1,4 +1,4 @@
-"""Tests for ``hea._loess`` — local polynomial regression port.
+"""Tests for ``hea.ggplot.stats.smooth.loess`` — local polynomial regression.
 
 R-oracle parity tests against ``stats::loess`` come later (X.1). These are
 hand-checked sanity tests covering the algorithmic core: fit recovery on
@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from hea._loess import loess
+from hea.ggplot.stats.smooth import loess
 
 
 def test_loess_recovers_linear_data():

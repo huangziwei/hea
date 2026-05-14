@@ -1,4 +1,4 @@
-"""Pin :class:`hea._nelder_mead.NelderMead` against lme4's ``Nelder_Mead()``.
+"""Pin :class:`hea.lme.NelderMead` against lme4's ``Nelder_Mead()``.
 
 Both run the same algorithm (NLopt-derived bounded simplex). With identical
 ``x0``, ``xstep``, ``xtol``, and the same objective, every reflection /
@@ -12,7 +12,7 @@ import subprocess
 import numpy as np
 import pytest
 
-from hea._nelder_mead import NelderMead, NMStatus
+from hea.lme import NelderMead, NMStatus
 
 
 def _r_nelder_mead(fn_body_r: str, x0, lower, upper, xst, xt, maxfun=10000):

@@ -2515,7 +2515,8 @@ def set_seed(seed):
     """R: ``set.seed()`` — seeds numpy's global RNG (used by ``r*`` here).
 
     For bit-exact reproduction of R's RNG (mgcv parity), see
-    ``hea._r_random``. This wrapper is for ordinary reproducibility.
+    :class:`hea.discrete.RMersenneTwister`. This wrapper is for ordinary
+    reproducibility.
     """
     np.random.seed(int(seed))
 

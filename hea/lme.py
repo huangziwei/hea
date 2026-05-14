@@ -19,6 +19,8 @@ Models Using lme4", J. Stat. Software 67(1), §5 ("Profiled Deviance").
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import IntEnum
+import warnings
 from typing import Callable, Optional
 
 import matplotlib.pyplot as plt
@@ -26,13 +28,7 @@ import numpy as np
 import polars as pl
 from scipy.linalg import solve_triangular
 from scipy.optimize import minimize
-from ._cholmod import (
-    CholmodError,
-    cho_factor,
-    csc_array,
-    eye_array,
-)
-from ._nelder_mead import NelderMead, NMStatus
+from scipy.sparse import csc_array, eye_array
 
 from .family import Family, Gaussian
 from .formula import (
@@ -52,6 +48,143 @@ from .lm import _label_top_n, _lowess, _qq_plot
 from .utils import format_df, format_signif, format_signif_jointly
 
 __all__ = ["lme", "Profile"]
+
+
+# ---------------------------------------------------------------------------
+# CHOLMOD compatibility shim.
+#
+# Routes through ``sksparse.cholmod`` when scikit-sparse is installed (the
+# fast path used here for the inner Cholesky of ``M = Λ Zᵀ Z Λᵀ + I``).
+# Falls back to ``scipy.sparse.linalg.splu`` otherwise — slower than
+# CHOLMOD because SuperLU re-runs symbolic analysis on every refactor and
+# doesn't exploit symmetry, but it preserves sparsity. A one-time
+# ``UserWarning`` points users at ``hea[fast]``.
+#
+# Both backends expose the slice of the API the rest of this module uses:
+#   * ``factorize(M)`` — refactor with new numeric values
+#   * ``solve(b)`` — solve ``M⁻¹ b``
+#   * ``half_log_det()`` — ``½·log|det M|``
+#   * ``L`` — sparse Cholesky factor. sksparse returns it directly; the
+#     splu fallback computes via dense Cholesky on first access.
+# ---------------------------------------------------------------------------
+
+try:
+    from sksparse.cholmod import (
+        CholmodError as _SksparseCholmodError,
+        cho_factor as _sks_cho_factor,
+    )
+
+    _HAS_SKSPARSE = True
+except ImportError:
+    _HAS_SKSPARSE = False
+
+
+class CholmodError(Exception):
+    """Raised when the Cholesky factor cannot be built (e.g. non-SPD matrix).
+
+    Unifies ``sksparse.cholmod.CholmodError`` (fast path) and the SuperLU
+    ``RuntimeError`` / non-positive-diagonal check (fallback).
+    """
+
+
+class _SksparseFactor:
+    """Wraps an ``sksparse.cholmod`` factor with our unified API."""
+
+    __slots__ = ("_F",)
+
+    def __init__(self, M):
+        try:
+            self._F = _sks_cho_factor(M)
+        except _SksparseCholmodError as e:
+            raise CholmodError(str(e)) from e
+
+    def factorize(self, M) -> None:
+        try:
+            self._F.factorize(M)
+        except _SksparseCholmodError as e:
+            raise CholmodError(str(e)) from e
+
+    def solve(self, b):
+        return self._F.solve(b)
+
+    def half_log_det(self) -> float:
+        return float(np.log(self._F.L.diagonal()).sum())
+
+    @property
+    def L(self):
+        return self._F.L
+
+
+class _SpluFactor:
+    """``scipy.sparse.linalg.splu`` fallback — sparse LU on SPD matrices."""
+
+    __slots__ = ("_M", "_lu", "_L_cache")
+
+    def __init__(self, M):
+        self._M = None
+        self._lu = None
+        self._L_cache = None
+        self.factorize(M)
+
+    def factorize(self, M) -> None:
+        from scipy.sparse.linalg import splu
+
+        M = M.tocsc() if hasattr(M, "tocsc") else M
+        self._M = M
+        try:
+            self._lu = splu(M)
+        except RuntimeError as e:
+            raise CholmodError(str(e)) from e
+        self._L_cache = None
+
+    def solve(self, b):
+        return self._lu.solve(b)
+
+    def half_log_det(self) -> float:
+        # |det M| = |det U| since L is unit-diagonal and the permutation
+        # signs cancel for SPD M (det M > 0).
+        return 0.5 * float(np.log(np.abs(self._lu.U.diagonal())).sum())
+
+    @property
+    def L(self):
+        # Cholesky's L isn't directly available from SuperLU. Compute via
+        # dense Cholesky on first access — only touched once per fit
+        # (snapshot stored on the result), so this is cold-path.
+        if self._L_cache is None:
+            from scipy.linalg import cholesky as _scipy_cholesky
+
+            M_dense = self._M.toarray()
+            L_dense = _scipy_cholesky(M_dense, lower=True)
+            self._L_cache = csc_array(L_dense)
+        return self._L_cache
+
+
+_SKSPARSE_WARNED = False
+
+
+def _warn_no_sksparse_once() -> None:
+    global _SKSPARSE_WARNED
+    if _SKSPARSE_WARNED:
+        return
+    warnings.warn(
+        "scikit-sparse is not installed; hea.lme is using a "
+        "scipy.sparse.linalg.splu fallback. This is functional but slower "
+        "than CHOLMOD for large mixed-effect models (no symbolic-analysis "
+        "reuse across deviance evaluations). Install SuiteSparse "
+        "(e.g. `apt install libsuitesparse-dev` or `brew install suite-sparse`) "
+        "and `pip install scikit-sparse` (or `pip install hea[fast]`) for "
+        "the fast path.",
+        UserWarning,
+        stacklevel=3,
+    )
+    _SKSPARSE_WARNED = True
+
+
+def cho_factor(M):
+    if _HAS_SKSPARSE:
+        return _SksparseFactor(M)
+    _warn_no_sksparse_once()
+    return _SpluFactor(M)
 
 
 @dataclass(slots=True)
@@ -113,6 +246,38 @@ class _FitInputs:
     full Stage 1 (θ+β) one to warm-start the latter. When False, skip
     Stage 0 and run Stage 1 directly from ``θ₀`` and ``β=0``. Mirrors
     ``glmerControl(nAGQ0initStep=...)``."""
+
+    # Phase 8 plumbing --------------------------------------------------
+    nAGQ: int = 1
+    """Number of adaptive Gauss-Hermite quadrature points per group. Default
+    1 ≡ Laplace approximation. ``0`` skips Stage 1 (LMM-style θ-only fit);
+    ``>1`` is reserved for Phase 9 (AGQ) and currently raises."""
+
+    tol_pwrss: float = 1e-7
+    """PIRLS convergence tolerance — ``glmerControl(tolPwrss=)``."""
+
+    maxit_pwrss: int = 100
+    """PIRLS iteration cap — ``glmerControl(maxit=)`` (n.b. lme4 hard-codes
+    this at 30 in pp_internal but exposes ``maxit`` via control)."""
+
+    calc_derivs: bool = True
+    """When True (default), compute the numerical gradient + Hessian of the
+    Stage 1 deviance at the optimum and store on ``m.optinfo$derivs``.
+    Mirrors ``glmerControl(calc.derivs=)``."""
+
+    use_last_params: bool = False
+    """When True, do NOT restore (β, u) to ``opt$par`` after the Hessian
+    pass — leaves the model at whatever state ``deriv12`` happened to
+    finish at. Mirrors ``glmerControl(use.last.params=)``."""
+
+    verbose: int = 0
+    """Integer verbosity level. ``>0`` enables Nelder-Mead progress prints;
+    ``>2`` enables PIRLS iteration prints."""
+
+    opt_ctrl: Optional[dict] = None
+    """Optimizer-specific control options. Currently only Nelder_Mead keys
+    are recognised (``maxfun``, ``xtol_rel``, ``ftol_abs``, ``ftol_rel``).
+    Mirrors ``glmerControl(optCtrl=)``."""
 
     # Diagnostic carries ------------------------------------------------
     # These follow the data through the fit so the resulting ``lme`` instance
@@ -197,6 +362,83 @@ def _beta_sd_from_RX(RX: np.ndarray) -> np.ndarray:
     p = RX.shape[0]
     A = solve_triangular(RX, np.eye(p), lower=True)
     return np.sqrt(np.sum(A * A, axis=0))
+
+
+def _deriv12(
+    fn: Callable[[np.ndarray], float],
+    x: np.ndarray,
+    delta: float = 1e-4,
+    fx: Optional[float] = None,
+    lower: Optional[np.ndarray] = None,
+    upper: Optional[np.ndarray] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Central-difference gradient + Hessian — port of lme4's ``deriv12``.
+
+    lme4 ships its own central-difference scheme in ``R/deriv.R`` instead
+    of using ``numDeriv::hessian`` (Richardson extrapolation); the comment
+    at modular.R:664 explicitly notes the choice: "don't use numDeriv —
+    cruder but fewer dependencies, no worries". The post-fit
+    ``m@optinfo$derivs`` and the Hessian-based ``vcov()`` rely on this
+    specific scheme, so for byte-match we port it directly rather than
+    swapping in a more sophisticated estimator.
+
+    Bound handling (lower/upper, ``NaN`` ≡ R's ``NA``): when
+    ``x[j] + delta`` exceeds ``upper[j]``, the right step shrinks to
+    ``upper[j] - x[j]`` and the central-difference formula uses the
+    asymmetric step. Symmetric on the lower side. This is the same
+    "udelta / ldelta" trick R/deriv.R:38-53 uses for optima at the bound.
+    """
+    x = np.asarray(x, dtype=float)
+    n = x.size
+    if n < 1:
+        raise ValueError("x must be nonempty")
+    if fx is None:
+        fx = float(fn(x))
+    fx = float(fx)
+
+    xadd = x + delta
+    udelta = np.full(n, delta)
+    if upper is not None:
+        upper = np.asarray(upper, dtype=float)
+        active = ~np.isnan(upper) & (xadd > upper)
+        if active.any():
+            udelta = np.where(active, upper - x, delta)
+            xadd = np.where(active, upper, xadd)
+
+    xsub = x - delta
+    ldelta = np.full(n, delta)
+    if lower is not None:
+        lower = np.asarray(lower, dtype=float)
+        active = ~np.isnan(lower) & (xsub < lower)
+        if active.any():
+            ldelta = np.where(active, x - lower, delta)
+            xsub = np.where(active, lower, xsub)
+
+    f_add = np.empty(n)
+    f_sub = np.empty(n)
+    for j in range(n):
+        xj = x.copy(); xj[j] = xadd[j]; f_add[j] = float(fn(xj))
+        xj = x.copy(); xj[j] = xsub[j]; f_sub[j] = float(fn(xj))
+
+    g = (f_add - f_sub) / (udelta + ldelta)
+    H = np.empty((n, n))
+    for j in range(n):
+        udj, ldj = udelta[j], ldelta[j]
+        H[j, j] = f_add[j] / udj**2 - 2.0 * fx / (udj * ldj) + f_sub[j] / ldj**2
+        for i in range(j):
+            udi, ldi = udelta[i], ldelta[i]
+            x_aa = x.copy(); x_aa[i] = xadd[i]; x_aa[j] = xadd[j]
+            x_as = x.copy(); x_as[i] = xadd[i]; x_as[j] = xsub[j]
+            x_sa = x.copy(); x_sa[i] = xsub[i]; x_sa[j] = xadd[j]
+            x_ss = x.copy(); x_ss[i] = xsub[i]; x_ss[j] = xsub[j]
+            val = (
+                float(fn(x_aa)) / (udi + udj) ** 2
+                - float(fn(x_as)) / (udi + ldj) ** 2
+                - float(fn(x_sa)) / (ldi + udj) ** 2
+                + float(fn(x_ss)) / (ldi + ldj) ** 2
+            )
+            H[i, j] = H[j, i] = val
+    return g, H
 
 
 def _per_bar_relative_cov(theta: np.ndarray, bar_sizes: list[int]) -> list[np.ndarray]:
@@ -970,6 +1212,359 @@ def _glmm_devfun_factory(
             pred.log_det_l_sq, pred.log_det_rx_sq, pred.sqr_l_u(1.0),
         )
     return devfun_theta_beta
+
+
+# ----------------------------------------------------------------------
+# Bounded-simplex Nelder-Mead — port of lme4's ``src/optimizer.cpp``.
+#
+# lme4 ships its own Nelder-Mead implementation (derived from NLopt 2.2.4's
+# ``nldrmd``) for the GLMM outer optimizer. Porting it directly — rather
+# than wrapping ``scipy.optimize.minimize(method="Nelder-Mead")`` — lets
+# this module match lme4's iteration trajectory byte-for-byte when both
+# are run with ``optimizer="Nelder_Mead"``. scipy's Nelder-Mead uses a
+# different bounds-handling scheme and different default tolerances; at
+# matched ``xtol`` settings the trajectories diverge after a few iterations.
+#
+# The port preserves lme4's state-machine layout (stages
+# ``restart → postreflect → {postexpand | postcontract}``), reflection
+# heuristic (``alpha=1, beta=0.5, gamm=2, delta=0.5``), and convergence
+# defaults from the R wrapper (``optimizer.R:27-33``: ``maxfun=10000``,
+# ``FtolAbs=1e-5``, ``XtolRel=1e-7``, etc.). ``ftol``-style convergence is
+# defined in C++ but never invoked by the loop; we keep the parameter for
+# parity but it's effectively unused — only ``xtol``, ``maxeval``, and
+# ``minf_max`` trigger termination.
+#
+# References:
+# - ``/tmp/lme4/src/optimizer.cpp`` — C++ implementation.
+# - ``/tmp/lme4/src/optimizer.h`` — header with ``nm_status``/``nm_stage``
+#   enums and the heuristic constants.
+# - ``/tmp/lme4/R/optimizer.R`` — R wrapper exposing ``Nelder_Mead()``.
+# - NLopt's ``nldrmd.c`` — original algorithm by S. G. Johnson.
+
+_NM_ALPHA = 1.0    # reflection      — optimizer.h:95
+_NM_BETA  = 0.5    # contraction
+_NM_GAMM  = 2.0    # expansion
+_NM_DELTA = 0.5    # shrink
+
+
+class NMStatus(IntEnum):
+    """Return code from :meth:`NelderMead.newf`.
+
+    Mirrors lme4's ``nm_status`` enum (optimizer.h:89). ``active`` means
+    "continue iterating"; any other value means the optimizer has stopped.
+    """
+    active = 0
+    x0_not_feasible = 1   # nm_x0notfeasible — raised by ctor, never returned.
+    no_feasible = 2       # nm_nofeasible    — raised by ctor, never returned.
+    forced = 3            # nm_forced (set_force_stop=True)
+    minf_max = 4          # objective dipped below ``minf_max``
+    evals = 5             # hit ``maxeval``
+    fcvg = 6              # ftol convergence (unused; preserved for parity)
+    xcvg = 7              # xtol convergence
+
+
+class _NMStage(IntEnum):
+    """Internal stage of the state machine — optimizer.h:92."""
+    restart = 0
+    postreflect = 1
+    postexpand = 2
+    postcontract = 3
+
+
+def _nm_close(a: float, b: float) -> bool:
+    """Two values are within floating-point tolerance — optimizer.cpp:30."""
+    return abs(a - b) <= 1e-13 * (abs(a) + abs(b))
+
+
+def _nm_relstop(vold: float, vnew: float, reltol: float, abstol: float) -> bool:
+    """nl_stop's relative-stop predicate — optimizer.h:64-87."""
+    if np.isinf(abs(vold)):
+        return False
+    return (
+        abs(vnew - vold) < abstol
+        or abs(vnew - vold) < reltol * (abs(vnew) + abs(vold)) * 0.5
+        or (reltol > 0 and vnew == vold)
+    )
+
+
+class NelderMead:
+    """Bounded-simplex Nelder-Mead — port of ``Nelder_Mead`` in optimizer.cpp.
+
+    The caller drives the iteration via :meth:`xeval` (where to evaluate
+    next) and :meth:`newf` (feed the function value back). After
+    :meth:`newf` returns a status other than :attr:`NMStatus.active`, the
+    best point is at :meth:`xpos` with value :meth:`value`. Or use the
+    convenience :meth:`minimize` for the common pattern.
+
+    Parameters
+    ----------
+    lb, ub
+        Element-wise lower/upper bounds; ``-np.inf``/``np.inf`` for
+        unbounded coordinates. ``x0`` must be feasible.
+    xstep
+        Initial step sizes along each coordinate. The R wrapper at
+        optimizer.R:5 defaults to ``rep(0.02, n)``; lme4's Stage 1 setup
+        at lmer.R:2534-2540 uses ``0.2 * [0.1; min(βSD, 10)]``.
+    x0
+        Initial point; must lie in ``[lb, ub]``.
+    xtol_abs
+        Per-coordinate absolute xtol. Defaults to ``|xstep| * 5e-4``
+        matching the R wrapper at optimizer.R:6.
+    xtol_rel, ftol_abs, ftol_rel
+        Relative/absolute tolerances. ``ftol_*`` are stored but never
+        consulted by the C++ implementation — included for API parity.
+    maxeval
+        Maximum function evaluations. Default 10000 (R wrapper default).
+    minf_max
+        Optimizer terminates when the function dips below this.
+    """
+
+    def __init__(
+        self,
+        lb: np.ndarray,
+        ub: np.ndarray,
+        xstep: np.ndarray,
+        x0: np.ndarray,
+        *,
+        xtol_abs: Optional[np.ndarray] = None,
+        ftol_abs: float = 1e-5,
+        ftol_rel: float = 1e-15,
+        xtol_rel: float = 1e-7,
+        maxeval: int = 10000,
+        minf_max: float = -np.finfo(float).max,
+    ):
+        lb = np.asarray(lb, dtype=float)
+        ub = np.asarray(ub, dtype=float)
+        xstep = np.asarray(xstep, dtype=float)
+        x0 = np.asarray(x0, dtype=float)
+        n = x0.size
+        if lb.size != n or ub.size != n or xstep.size != n:
+            raise ValueError(
+                f"lb/ub/xstep/x0 size mismatch: {lb.size}/{ub.size}/"
+                f"{xstep.size}/{n}"
+            )
+        if np.any(x0 - lb < 0) or np.any(ub - x0 < 0):
+            raise ValueError("initial x0 is not a feasible point")
+        if np.any(xstep == 0):
+            raise ValueError("xstep must be nonzero for every coordinate")
+        if xtol_abs is None:
+            xtol_abs = np.abs(xstep) * 5e-4
+        xtol_abs = np.asarray(xtol_abs, dtype=float)
+        if xtol_abs.size != n:
+            raise ValueError(f"xtol_abs size {xtol_abs.size} != n={n}")
+
+        # Build the initial simplex. Vertex 0 = x0; vertex j+1 = x0 + xstep[j]·e_j,
+        # pinned into [lb, ub] via the constructor heuristics
+        # (optimizer.cpp:71-91): if outside ub, clip to ub when there's
+        # room, else flip direction; symmetric for lb. Degenerate ⇒ raise.
+        pts = np.tile(x0[:, None], (1, n + 1))
+        for i in range(n):
+            j = i + 1
+            pts[i, j] += xstep[i]
+            if pts[i, j] > ub[i]:
+                if ub[i] - x0[i] > abs(xstep[i]) * 0.1:
+                    pts[i, j] = ub[i]
+                else:
+                    pts[i, j] = x0[i] - abs(xstep[i])
+            if pts[i, j] < lb[i]:
+                if x0[i] - lb[i] > abs(xstep[i]) * 0.1:
+                    pts[i, j] = lb[i]
+                else:
+                    pts[i, j] = x0[i] + abs(xstep[i])
+                    if pts[i, j] > ub[i]:
+                        target = ub[i] if (ub[i] - x0[i] > x0[i] - lb[i]) else lb[i]
+                        pts[i, j] = 0.5 * (target + x0[i])
+            if _nm_close(pts[i, j], x0[i]):
+                raise ValueError("cannot generate feasible simplex")
+
+        self.lb = lb
+        self.ub = ub
+        self.xstep = xstep
+        self.n = n
+        self.pts = pts
+        self.vals = np.full(n + 1, np.finfo(float).min, dtype=float)
+        self.c = np.zeros(n)
+        self.xcur = np.zeros(n)
+        self.xeval_ = x0.copy()
+        self.x = x0.copy()
+        self.minf = np.inf
+        self.stage = _NMStage.restart
+        self.init_pos = 0
+        self.xtol_abs = xtol_abs
+        self.ftol_abs = ftol_abs
+        self.ftol_rel = ftol_rel
+        self.xtol_rel = xtol_rel
+        self.maxeval = maxeval
+        self.minf_max = minf_max
+        self.nevals = 0
+        self.force_stop = False
+        self._f_old = 0.0
+        self._fh = 0.0
+        self._fl = 0.0
+        self._ih = 0
+        self._il = 0
+
+    # ---- public interface -----------------------------------------------
+
+    def xeval(self) -> np.ndarray:
+        """Where to evaluate the objective next."""
+        return self.xeval_
+
+    def xpos(self) -> np.ndarray:
+        """Best parameter vector found so far."""
+        return self.x
+
+    def value(self) -> float:
+        """Best function value found so far."""
+        return self.minf
+
+    def set_force_stop(self, stop: bool) -> None:
+        """Request early termination on next :meth:`newf`."""
+        self.force_stop = stop
+
+    def newf(self, f: float) -> NMStatus:
+        """Install ``f = objective(xeval())`` and step the state machine.
+
+        Port of ``Nelder_Mead::newf`` (optimizer.cpp:101-141).
+        """
+        self.nevals += 1
+        if self.force_stop:
+            return NMStatus.forced
+        if f < self.minf:
+            self.minf = f
+            self.x = self.xeval_.copy()
+            if self.minf < self.minf_max:
+                return NMStatus.minf_max
+        if self.maxeval > 0 and self.nevals > self.maxeval:
+            return NMStatus.evals
+        if self.init_pos <= self.n:
+            return self._init(f)
+        if self.stage == _NMStage.restart:
+            return self._restart(f)
+        elif self.stage == _NMStage.postreflect:
+            return self._postreflect(f)
+        elif self.stage == _NMStage.postexpand:
+            return self._postexpand(f)
+        elif self.stage == _NMStage.postcontract:
+            return self._postcontract(f)
+        return NMStatus.active
+
+    def minimize(self, fn: Callable[[np.ndarray], float]) -> NMStatus:
+        """Run the optimizer to a stopping condition, calling ``fn`` each step."""
+        while True:
+            f = fn(self.xeval_)
+            status = self.newf(f)
+            if status != NMStatus.active:
+                return status
+
+    # ---- state-machine stages -------------------------------------------
+
+    def _init(self, f: float) -> NMStatus:
+        """Fill ``vals[init_pos]`` and queue the next simplex vertex
+        (optimizer.cpp:150-156)."""
+        if self.init_pos > self.n:
+            raise RuntimeError("init called after n+1 evaluations")
+        self.vals[self.init_pos] = f
+        self.init_pos += 1
+        if self.init_pos > self.n:
+            return self._restart(f)
+        self.xeval_ = self.pts[:, self.init_pos].copy()
+        return NMStatus.active
+
+    def _restart(self, f: float) -> NMStatus:
+        """Recompute high/low/centroid, check x-convergence, reflect
+        (optimizer.cpp:167-192)."""
+        self._il = int(np.argmin(self.vals))
+        self._fl = float(self.vals[self._il])
+        self._ih = int(np.argmax(self.vals))
+        self._fh = float(self.vals[self._ih])
+        self.c = (self.pts.sum(axis=1) - self.pts[:, self._ih]) / self.n
+        deviations = np.abs(self.pts - self.c[:, None]).max(axis=1)
+        if self._x_conv(np.zeros(self.n), deviations):
+            return NMStatus.xcvg
+        if not self._reflectpt(self.xcur, self.c, _NM_ALPHA, self.pts[:, self._ih]):
+            return NMStatus.xcvg
+        self.xeval_ = self.xcur.copy()
+        self.stage = _NMStage.postreflect
+        return NMStatus.active
+
+    def _postreflect(self, f: float) -> NMStatus:
+        """Decide what to do with the reflected point — port of
+        ``Nelder_Mead::postreflect`` (optimizer.cpp:194-219)."""
+        if f < self._fl:
+            if not self._reflectpt(self.xeval_, self.c, _NM_GAMM, self.pts[:, self._ih]):
+                return NMStatus.xcvg
+            self.stage = _NMStage.postexpand
+            self._f_old = f
+            return NMStatus.active
+        if f < self._fh:
+            self.vals[self._ih] = f
+            self.pts[:, self._ih] = self.xeval_
+            return self._restart(f)
+        scale = -_NM_BETA if self._fh <= f else _NM_BETA
+        if not self._reflectpt(self.xcur, self.c, scale, self.pts[:, self._ih]):
+            return NMStatus.xcvg
+        self._f_old = f
+        self.xeval_ = self.xcur.copy()
+        self.stage = _NMStage.postcontract
+        return NMStatus.active
+
+    def _postexpand(self, f: float) -> NMStatus:
+        """Did expansion improve? Port of ``postexpand`` (optimizer.cpp:221-235)."""
+        if f < self.vals[self._ih]:
+            self.pts[:, self._ih] = self.xeval_
+            self.vals[self._ih] = f
+        else:
+            self.pts[:, self._ih] = self.xcur
+            self.vals[self._ih] = self._f_old
+        return self._restart(f)
+
+    def _postcontract(self, f: float) -> NMStatus:
+        """Did contraction improve? Port of ``postcontract`` (optimizer.cpp:237-256).
+
+        If yes, accept and restart. Otherwise SHRINK the entire simplex
+        toward the best vertex (``il``) and re-evaluate every shrunk vertex.
+        """
+        if f < self._f_old and f < self._fh:
+            self.pts[:, self._ih] = self.xeval_
+            self.vals[self._ih] = f
+            return self._restart(f)
+        best = self.pts[:, self._il].copy()
+        for i in range(self.n + 1):
+            if i != self._il:
+                target = np.empty(self.n)
+                if not self._reflectpt(target, best, -_NM_DELTA, self.pts[:, i]):
+                    return NMStatus.xcvg
+                self.pts[:, i] = target
+        self.init_pos = 0
+        self.xeval_ = self.pts[:, 0].copy()
+        return NMStatus.active
+
+    # ---- helpers --------------------------------------------------------
+
+    def _reflectpt(self, xnew: np.ndarray, c: np.ndarray, scale: float,
+                   xold: np.ndarray) -> bool:
+        """``xnew = clip(c + scale·(c − xold), lb, ub)`` (optimizer.cpp:269-289).
+
+        Returns ``False`` if ``xnew`` coincides with ``c`` *or* ``xold``
+        in every coordinate — signal of a collapsed simplex.
+        """
+        np.copyto(xnew, c + scale * (c - xold))
+        equalc = True
+        equalold = True
+        for i in range(self.n):
+            newx = min(max(xnew[i], self.lb[i]), self.ub[i])
+            equalc = equalc and _nm_close(newx, c[i])
+            equalold = equalold and _nm_close(newx, xold[i])
+            xnew[i] = newx
+        return not (equalc or equalold)
+
+    def _x_conv(self, x: np.ndarray, oldx: np.ndarray) -> bool:
+        """All coordinates pass relstop — port of ``nl_stop::x`` (optimizer.cpp:299)."""
+        for i in range(x.size):
+            if not _nm_relstop(oldx[i], x[i], self.xtol_rel, self.xtol_abs[i]):
+                return False
+        return True
 
 
 class lme:
@@ -2369,51 +2964,96 @@ class lme:
                 "False (population-level / no RE) in this port"
             )
 
+        is_glmm = self.family.name != "gaussian" or self.family.link.name != "identity"
+
         # No-arg fast path — matches R's ``na.omit(fitted(object))``.
+        # For GLMM, ``self.fitted`` is on the response scale (= μ̂); for LMM
+        # μ ≡ η so both ``type`` values are the same value.
         if newdata is None and include_re and not random_only and not se_fit:
+            if is_glmm and type == "link":
+                return pl.DataFrame({"fit": self.eta.copy()})
             return pl.DataFrame({"fit": self.fitted.copy()})
 
         # Build X, Z, offset on the appropriate frame.
         if newdata is None:
             X_pred = self.X.to_numpy().astype(float)
+            # Same workaround as _fit_glmm_from_components — polars-empty
+            # design materialises as (0, 0) instead of (n, 0).
+            if X_pred.shape == (0, 0):
+                X_pred = np.zeros((self.n, 0), dtype=float)
             offset_pred = self._offset
             n_pred = self.n
         else:
             n_pred = newdata.height
             offset_pred = self._build_offset_for_newdata(newdata)
             X_pred = self._build_X_for_newdata(newdata)
+            if X_pred.shape == (0, 0):
+                X_pred = np.zeros((n_pred, 0), dtype=float)
 
-        pred = np.zeros(n_pred)
+        # Linear-predictor on the link scale: η = X·β + Z·b + offset.
+        # ``random_only`` drops X·β AND offset (lme4 does the same — see
+        # predict.R:464 ``pred <- rep(0, nobs)`` then conditional adds).
+        eta_pred = np.zeros(n_pred)
         if not random_only:
-            pred = X_pred @ self._beta + offset_pred
+            eta_pred = X_pred @ self._beta + offset_pred
 
         if include_re:
             if newdata is None:
-                # ZL · u at the original data — same expression that built
-                # self.fitted, but offset-free here.
                 Z_pred = self.Z
             else:
                 Z_pred = self._build_Z_for_newdata(
                     newdata, allow_new_levels=allow_new_levels,
                 )
             ZL_pred = Z_pred @ self.Lambda
-            pred = pred + ZL_pred @ self._u
+            eta_pred = eta_pred + ZL_pred @ self._u
         else:
             Z_pred = np.zeros((n_pred, self.q))
             ZL_pred = Z_pred
 
+        # Response-scale conversion. For Gaussian-identity ``link(eta)=eta``
+        # so this is a no-op and ``pred == eta_pred``.
+        if type == "response" and is_glmm:
+            pred = self.family.link.linkinv(eta_pred)
+        else:
+            pred = eta_pred
+
         if not se_fit:
             return pl.DataFrame({"fit": pred})
 
-        # se.fit — joint (û, β̂) posterior covariance is σ̂² · M⁻¹ with
-        # M = [Λᵀ Z'Z Λ + I,  Λᵀ Z'X; X'Z Λ,  X'X]. Build M densely and
-        # solve. For p+q in the hundreds this is trivial; large-q models
-        # can be revisited with a block-Cholesky path if needed.
-        X_fit = self.X.to_numpy().astype(float)
-        ZL_fit = self.Z @ self.Lambda
-        M_top = ZL_fit.T @ ZL_fit + np.eye(self.q)
-        M_brc = ZL_fit.T @ X_fit
-        M_bot = X_fit.T @ X_fit
+        # se.fit — joint (û, β̂) posterior covariance is ``σ² · M⁻¹``
+        # where M is the Henderson MME in spherical (u, β) coordinates:
+        #
+        #   M = [Λᵀ Z'WZ Λ + I,  Λᵀ Z'WX]
+        #       [    X'WZ Λ,        X'WX ]
+        #
+        # For GLMM, ``W`` is the working-weight diagonal lme4's
+        # ``vcov_full`` (lmer.R:2281) reads off the **cached** ``pp$L`` /
+        # ``pp$RZX`` factors — i.e. from the *last PIRLS iteration's
+        # start*, one ``updateXwts`` behind the converged μ. Building M
+        # from ``self.working_weights`` (fresh) instead would be slightly
+        # more accurate but differs from lme4 at ~1e-5. We match lme4 by
+        # reading the cached weighted matrices off ``self._pred`` so SEs
+        # agree byte-for-byte.
+        #
+        # For Gaussian-identity, working weights ≡ 1, so the stale-vs-fresh
+        # distinction collapses; we just rebuild M densely with W=I, which
+        # is also what the cached ``_pred`` would give since for LMMs we
+        # only need the unweighted version.
+        if is_glmm:
+            # Use cached weighted blocks from the last PIRLS iter.
+            pp = self._pred
+            lamt_ut_dense = np.asarray(pp.lamt_ut.todense())
+            M_top = lamt_ut_dense @ lamt_ut_dense.T + np.eye(self.q)
+            M_brc = pp.RZX_unfactored  # = lamt_ut · V = Λᵀ Z' W X
+            M_bot = pp.VtV             # = V' V = X' W X
+        else:
+            X_fit = self.X.to_numpy().astype(float)
+            if X_fit.shape == (0, 0):
+                X_fit = np.zeros((self.n, 0), dtype=float)
+            ZL_fit = self.Z @ self.Lambda
+            M_top = ZL_fit.T @ ZL_fit + np.eye(self.q)
+            M_brc = ZL_fit.T @ X_fit
+            M_bot = X_fit.T @ X_fit
         M_full = np.block([[M_top, M_brc], [M_brc.T, M_bot]])
 
         if random_only:
@@ -2425,11 +3065,15 @@ class lme:
         else:
             ZL_for_se = np.zeros((n_pred, self.q))
         ZLX_new = np.hstack([ZL_for_se, X_for_se])
-        W = np.linalg.solve(M_full, ZLX_new.T)
-        var_pred = self.sigma_squared * np.einsum("ij,ji->i", ZLX_new, W)
-        # Numerical floor: tiny negative values from cancellation.
+        Minv_ZLX = np.linalg.solve(M_full, ZLX_new.T)
+        var_pred = self.sigma_squared * np.einsum("ij,ji->i", ZLX_new, Minv_ZLX)
+        # Floor tiny negatives from numerical cancellation.
         var_pred = np.maximum(var_pred, 0.0)
         se = np.sqrt(var_pred)
+        # Delta method: SE on response scale = SE on link scale · |dμ/dη|.
+        # lme4 does this at predict.R:654 for isGLMM + type=="response".
+        if type == "response" and is_glmm:
+            se = se * np.abs(self.family.link.mu_eta(eta_pred))
         return pl.DataFrame({"fit": pred, "se.fit": se})
 
     # ---- lmer-style printing --------------------------------------------
