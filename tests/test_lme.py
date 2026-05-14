@@ -181,14 +181,17 @@ def test_bates_1_4_dyestuff_fm01_ML_profile_confint(fm01ML_profile):
     """
     pr = fm01ML_profile
 
+    # Tolerance reflects the spline-inversion residual (R uses
+    # interpSpline+backSpline, hea uses CubicSpline+brentq); the
+    # profile grid itself now matches R to ~1e-9.
     ci99 = pr.confint(level=0.99).to_dict(as_series=False)
     assert ci99["parameter"] == [".sig01", ".sigma", "(Intercept)"]
-    np.testing.assert_allclose(ci99["0.5%"], [0.0, 35.5632, 1465.874], atol=0.1)
-    np.testing.assert_allclose(ci99["99.5%"], [113.6877, 75.6680, 1589.126], atol=0.1)
+    np.testing.assert_allclose(ci99["0.5%"], [0.0, 35.5632, 1465.874], atol=2e-3)
+    np.testing.assert_allclose(ci99["99.5%"], [113.6877, 75.6680, 1589.126], atol=2e-3)
 
     ci95 = pr.confint(level=0.95).to_dict(as_series=False)
-    np.testing.assert_allclose(ci95["2.5%"], [12.1985, 38.2300, 1486.452], atol=0.1)
-    np.testing.assert_allclose(ci95["97.5%"], [84.0631, 67.6577, 1568.548], atol=0.1)
+    np.testing.assert_allclose(ci95["2.5%"], [12.1985, 38.2300, 1486.452], atol=2e-3)
+    np.testing.assert_allclose(ci95["97.5%"], [84.0631, 67.6577, 1568.548], atol=2e-3)
 
 
 def test_bates_1_4_dyestuff_fm01_ML_plot_fig17(fm01ML_profile):

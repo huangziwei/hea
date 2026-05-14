@@ -637,105 +637,175 @@ class lme:
         _, beta_opt = self._post_refit_state(theta_opt, sigma_fix=sigma_opt)
         return float(res.fun), theta_opt, sigma_opt, beta_opt
 
-    def _step_adaptive(
-        self, *, direction: int, v_start: float, initial_step: float,
+    def _fillmat_walk(
+        self, *, direction: int,
+        prev_v: float, prev_zeta: float,
+        curr_v: float, curr_zeta: float,
         fit_at_v, theta_warm: np.ndarray, sigma_warm: float,
-        d_hat: float, v_min: float = -np.inf, v_max: float = np.inf,
-        zeta_cutoff: float = 4.0, target_dzeta: float = 0.5,
-        max_steps: int = 25,
+        d_hat: float, delta: float, cutoff: float,
+        v_min: float = -np.inf, v_max: float = np.inf,
+        max_steps: int = 100, maxmult: float = 10.0, minstep: float = 1e-6,
     ) -> list[tuple]:
-        """One-direction adaptive ζ-stepper — matches R's profile.merMod.
+        """One-direction profile walk — port of lme4's ``fillmat`` inner
+        loop in ``profile.merMod``.
 
-        Steps from ``v_start`` along ``direction`` (±1), refits the
-        constrained deviance at each step, and adapts the v-step size so
-        |Δζ| ≈ ``target_dzeta`` per step. Stops when |ζ| ≥ ``zeta_cutoff``,
-        v hits a bound, or ``max_steps`` is exhausted. Critically, this
-        avoids the σ → 5·σ̂ extreme-grid points where ``M = ΛᵀZᵀZΛ + I``
-        becomes Cholmod-near-singular (rcond ≈ 1e-15), which is what made
-        the old fixed-grid profile diverge between Intel Macs and ARM.
-        Returns ``(v, ζ, θ, σ, β)`` tuples in stepping order.
+        Extrapolates the next v from the local slope ``Δv/Δζ`` between
+        (prev_v, prev_zeta) and (curr_v, curr_zeta) to target |Δζ| ≈
+        ``delta`` per step; caps the step at ``maxmult × |Δv|`` to bound
+        runaway when ζ flattens. ``direction`` only sets ζ's sign (matching
+        R's ``sign(xx - pw)``). Stops when |ζ| ≥ ``cutoff``, v hits a
+        bound, or ``max_steps`` is exhausted. Does NOT include
+        (curr_v, curr_zeta) in the returned list.
         """
         out: list[tuple] = []
-        v_curr, zeta_curr, step = v_start, 0.0, float(initial_step)
         for _ in range(max_steps):
-            v_try = v_curr + direction * step
-            boundary_hit = False
-            if v_try <= v_min:
-                v_try = v_min + 1e-6 * abs(initial_step)
-                boundary_hit = True
-            elif v_try >= v_max:
-                v_try = v_max - 1e-6 * abs(initial_step)
-                boundary_hit = True
-            d, theta_opt, sigma_opt, beta_opt = fit_at_v(v_try, theta_warm, sigma_warm)
-            if not np.isfinite(d):
-                step *= 0.5
-                if step < 1e-6 * initial_step:
-                    break
-                continue
-            zeta_try = direction * np.sqrt(max(0.0, d - d_hat))
-            out.append((float(v_try), float(zeta_try), theta_opt, sigma_opt, beta_opt))
-            theta_warm, sigma_warm = theta_opt, sigma_opt
-            if abs(zeta_try) >= zeta_cutoff or boundary_hit:
+            if abs(curr_zeta) >= cutoff:
                 break
-            dzeta = abs(zeta_try - zeta_curr)
-            if dzeta > 1e-6:
-                step = float(np.clip(step * (target_dzeta / dzeta), step / 4, step * 4))
-            v_curr, zeta_curr = v_try, zeta_try
+            if curr_v <= v_min or curr_v >= v_max:
+                break
+
+            num = curr_v - prev_v
+            denom = curr_zeta - prev_zeta
+            if denom == 0.0 or not np.isfinite(denom):
+                step = minstep
+            else:
+                step = delta * num / denom
+                if step < 0:
+                    # Non-monotonic profile — fall back to a tiny step
+                    # rather than walking backwards (matches R's
+                    # ``warning("unexpected decrease in profile")`` path).
+                    step = minstep
+                else:
+                    maxstep = maxmult * abs(num)
+                    if abs(step) > maxstep:
+                        step = float(np.sign(step) * maxstep)
+
+            v_new = curr_v + float(np.sign(num)) * step
+            boundary_hit = False
+            if v_new <= v_min:
+                v_new = v_min + 1e-6 * max(abs(step), 1e-12)
+                boundary_hit = True
+            elif v_new >= v_max:
+                v_new = v_max - 1e-6 * max(abs(step), 1e-12)
+                boundary_hit = True
+
+            d_new, theta_new, sigma_new, beta_new = fit_at_v(
+                v_new, theta_warm, sigma_warm,
+            )
+            if not np.isfinite(d_new):
+                break
+            zeta_new = direction * float(np.sqrt(max(0.0, d_new - d_hat)))
+            out.append(
+                (float(v_new), float(zeta_new), theta_new, sigma_new, beta_new)
+            )
+
+            if boundary_hit:
+                break
+
+            prev_v, prev_zeta = curr_v, curr_zeta
+            curr_v, curr_zeta = v_new, zeta_new
+            theta_warm, sigma_warm = theta_new, sigma_new
         return out
 
     def _profile_param_adaptive(
         self, *, fit_at_v, v_start: float,
         theta_start: np.ndarray, sigma_start: float, beta_start: np.ndarray,
-        d_hat: float, initial_step: float,
+        d_hat: float, is_var_component: bool,
+        cutoff: float, delta: float,
+        se_for_init: float = 0.0,
         v_min: float = -np.inf, v_max: float = np.inf,
-        zeta_cutoff: float = 4.0, max_steps_per_dir: int = 25,
+        max_steps_per_dir: int = 100,
     ) -> list[tuple]:
-        """Profile one parameter in both ζ-directions + insert the MLE
-        row. See :meth:`_step_adaptive`. Output order: most-negative ζ
-        first → MLE → most-positive ζ last.
-        """
-        common = dict(
-            initial_step=initial_step, fit_at_v=fit_at_v, d_hat=d_hat,
-            v_min=v_min, v_max=v_max, zeta_cutoff=zeta_cutoff,
-            max_steps=max_steps_per_dir,
-        )
-        pos = self._step_adaptive(
-            direction=+1, v_start=v_start,
-            theta_warm=theta_start.copy(), sigma_warm=sigma_start, **common,
-        )
-        neg = self._step_adaptive(
-            direction=-1, v_start=v_start,
-            theta_warm=theta_start.copy(), sigma_warm=sigma_start, **common,
-        )
-        mle = (float(v_start), 0.0, theta_start.copy(), float(sigma_start),
-               beta_start.copy())
-        return list(reversed(neg)) + [mle] + pos
+        """Profile one parameter — port of lme4's per-parameter loop in
+        ``profile.merMod``.
 
-    def profile(self, n_grid: int = 41) -> "Profile":
+        Computes one initial "shift" sample (``MLE × 1.01`` for variance
+        components, ``MLE + delta·SE`` for fixed effects — matching R's
+        ``shiftpar = pw * 1.01`` and ``fe.zeta(est + delta * std)``), then
+        walks adaptively in both ζ-directions using :meth:`_fillmat_walk`.
+        Output: deepest-negative-ζ first → MLE → shift → deepest-positive-ζ.
+        """
+        if is_var_component:
+            shift_v = 0.001 if v_start == 0.0 else v_start * 1.01
+        else:
+            shift_v = v_start + delta * se_for_init
+
+        d_shift, theta_shift, sigma_shift, beta_shift = fit_at_v(
+            shift_v, theta_start.copy(), sigma_start,
+        )
+        # shift_v > v_start by construction (multiplicative bump for
+        # variance components, additive positive bump for fixed effects),
+        # so the shift point lives in the +ζ half — matching R's
+        # ``sign(xx - pw)``.
+        zeta_shift = float(np.sqrt(max(0.0, d_shift - d_hat)))
+
+        mle_tup = (
+            float(v_start), 0.0, theta_start.copy(),
+            float(sigma_start), beta_start.copy(),
+        )
+        shift_tup = (
+            float(shift_v), zeta_shift, theta_shift, sigma_shift, beta_shift,
+        )
+
+        pos = self._fillmat_walk(
+            direction=+1,
+            prev_v=float(v_start), prev_zeta=0.0,
+            curr_v=float(shift_v), curr_zeta=zeta_shift,
+            fit_at_v=fit_at_v,
+            theta_warm=theta_shift, sigma_warm=sigma_shift,
+            d_hat=d_hat, delta=delta, cutoff=cutoff,
+            v_min=v_min, v_max=v_max, max_steps=max_steps_per_dir,
+        )
+        neg = self._fillmat_walk(
+            direction=-1,
+            prev_v=float(shift_v), prev_zeta=zeta_shift,
+            curr_v=float(v_start), curr_zeta=0.0,
+            fit_at_v=fit_at_v,
+            theta_warm=theta_start.copy(), sigma_warm=sigma_start,
+            d_hat=d_hat, delta=delta, cutoff=cutoff,
+            v_min=v_min, v_max=v_max, max_steps=max_steps_per_dir,
+        )
+        return list(reversed(neg)) + [mle_tup, shift_tup] + pos
+
+    def profile(self, n_grid: int = 100, alphamax: float = 0.01) -> "Profile":
         """Compute profile-likelihood curves for σ_i, σ, and each β_j.
 
-        Uses R's adaptive ζ-stepping (``profile.merMod``): from the MLE
-        we step in v with step size adapted so |Δζ| ≈ 0.5 per step,
-        stopping each direction when |ζ| ≥ 4 or v hits a bound. ``n_grid``
-        is reinterpreted as the max-steps-per-direction cap; in practice
-        most parameters terminate after 10–15 steps. The Profile rows
-        thus have variable length, sorted by ζ.
+        Port of lme4's ``profile.merMod``: walks ζ adaptively from the
+        MLE using a linear ``Δv/Δζ`` slope estimate from the last two
+        points, targeting |Δζ| ≈ ``cutoff/8`` per step. The cutoff is
+        ``sqrt(qchisq(1 - alphamax, nptot))`` where ``nptot`` is the
+        total number of profiled parameters (variance components + σ +
+        fixed effects). Walking stops when |ζ| ≥ cutoff or v hits a
+        bound. ``n_grid`` is the maximum steps per direction (R's
+        ``maxpts``); in practice most parameters terminate after 8–16
+        steps.
 
         For REML fits we first re-fit by ML, per lme4's convention (the LRT
         statistic requires ML). Only scalar bars ``(1|g)`` are supported in
         this first port.
         """
+        from scipy.stats import chi2
+
         if any(c > 1 for c in self._bar_sizes):
             raise NotImplementedError(
                 "profile() currently requires scalar bars (1|g); "
                 "vector bars like (1+x|g) need a different parameterization."
             )
         if self.REML:
-            return lme(self.formula, self.data, REML=False).profile(n_grid=n_grid)
+            return lme(self.formula, self.data, REML=False).profile(
+                n_grid=n_grid, alphamax=alphamax,
+            )
 
         d_hat = self.deviance
         theta_hat = self.theta.copy()
         sigma_hat = self.sigma
+
+        # R's lme4: ``cutoff = sqrt(qchisq(1 - alphamax, nptot))`` and
+        # ``delta = cutoff * delta.cutoff`` (default ``delta.cutoff = 1/8``).
+        # ``nptot`` = #θ + 1 (residual σ, since useSc=True for LMM) + p betas.
+        nptot = len(theta_hat) + 1 + self.p
+        cutoff = float(np.sqrt(chi2.ppf(1.0 - alphamax, nptot)))
+        delta = cutoff / 8.0
 
         bar_keys = list(self.sd_re.keys())
         bar_labels = [f".sig{i + 1:02d}" for i in range(len(bar_keys))]
@@ -779,7 +849,8 @@ class lme:
                     self._dev_with_sd_fixed(_slot, v, sg_w, th_w),
                 v_start=sd_i, theta_start=theta_hat,
                 sigma_start=sigma_hat, beta_start=self._beta,
-                d_hat=d_hat, initial_step=0.1 * max(sd_i, 1.0),
+                d_hat=d_hat, is_var_component=True,
+                cutoff=cutoff, delta=delta,
                 v_min=0.0, max_steps_per_dir=n_grid,
             )
             _samples_to_storage(samples, lbl)
@@ -790,7 +861,8 @@ class lme:
                 self._dev_with_sigma_fixed(v, th_w),
             v_start=sigma_hat, theta_start=theta_hat,
             sigma_start=sigma_hat, beta_start=self._beta,
-            d_hat=d_hat, initial_step=0.1 * sigma_hat,
+            d_hat=d_hat, is_var_component=True,
+            cutoff=cutoff, delta=delta,
             v_min=0.0, max_steps_per_dir=n_grid,
         )
         _samples_to_storage(samples, ".sigma")
@@ -804,7 +876,9 @@ class lme:
                     self._dev_with_beta_fixed(_j, v, th_w),
                 v_start=beta_j, theta_start=theta_hat,
                 sigma_start=sigma_hat, beta_start=self._beta,
-                d_hat=d_hat, initial_step=max(se_j, 1e-3),
+                d_hat=d_hat, is_var_component=False,
+                se_for_init=max(se_j, 1e-3),
+                cutoff=cutoff, delta=delta,
                 max_steps_per_dir=n_grid,
             )
             _samples_to_storage(samples, name)
