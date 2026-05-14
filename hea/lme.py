@@ -32,7 +32,17 @@ from ._cholmod import (
     eye_array,
 )
 
-from .formula import _eval_atom, materialize_bars
+from .formula import (
+    BinOp,
+    ExpandedFormula,
+    _bar_lhs_to_ef,
+    _eval_atom,
+    _eval_group,
+    _flatten_nested_group,
+    _materialize_re_lhs,
+    materialize,
+    materialize_bars,
+)
 from .design import prepare_design
 from .lm import _label_top_n, _lowess, _qq_plot
 from .utils import format_df, format_signif, format_signif_jointly
@@ -208,6 +218,7 @@ class lme:
         y_solve = y - off
 
         self.data = d.data
+        self._expanded = d.expanded
         self.X = X_df
         self.y = y
         self._y_solve = y_solve
@@ -900,6 +911,243 @@ class lme:
         per fixed effect.
         """
         return self.profile().confint(level=level)
+
+    # ---- predict --------------------------------------------------------
+
+    def _build_X_for_newdata(self, newdata: pl.DataFrame) -> np.ndarray:
+        """Materialize the fixed-effect design matrix on ``newdata`` using
+        the cached expanded formula. Errors if the resulting column names
+        don't match the fit's — that catches the common pitfall of a
+        factor column with new or missing levels in ``newdata``."""
+        X_new_df = materialize(self._expanded, newdata)
+        if list(X_new_df.columns) != self.column_names:
+            raise ValueError(
+                f"predict: newdata's design matrix columns "
+                f"{list(X_new_df.columns)!r} don't match the fit's "
+                f"{self.column_names!r}. This usually means a factor column "
+                f"in newdata has different levels than the fit's data."
+            )
+        return X_new_df.to_numpy().astype(float)
+
+    def _build_offset_for_newdata(self, newdata: pl.DataFrame) -> np.ndarray:
+        """Evaluate any ``offset(...)`` terms on newdata."""
+        off = np.zeros(newdata.height)
+        for off_node in self._expanded.offsets:
+            off = off + _eval_atom(off_node, newdata).values.flatten().astype(float)
+        return off
+
+    def _build_Z_for_newdata(
+        self, newdata: pl.DataFrame, *, allow_new_levels: bool = False,
+    ) -> np.ndarray:
+        """Build a dense Z matrix on ``newdata`` aligned to the fit's RE
+        column layout. Group values in newdata are mapped to the fit's
+        level indices; unseen levels either zero that row's Z entries
+        (``allow_new_levels=True``) or raise (``False``, default — matches
+        ``lme4::predict.merMod``).
+        """
+        n = newdata.height
+        q = self.q
+        Z_new = np.zeros((n, q))
+        fit_levels_by_label: dict = self._re.flist_levels
+
+        # Walk fit's bars on newdata using the same simple-bar generation
+        # as materialize_bars, but mapping group codes through fit's
+        # level lists so Z_new's columns line up with the fit's Z. Sort
+        # by fit-#levels descending (stable) to match materialize_bars.
+        simple: list[tuple] = []
+        for bar in self._expanded.bars:
+            if not (isinstance(bar, BinOp) and bar.op in ("|", "||")):
+                continue
+            lhs_node = bar.left
+            group_nodes = _flatten_nested_group(bar.right)
+            is_double = bar.op == "||"
+            lhs_ef = _bar_lhs_to_ef(lhs_node)
+            if is_double:
+                lhs_parts: list[ExpandedFormula] = []
+                if lhs_ef.intercept:
+                    lhs_parts.append(ExpandedFormula(
+                        intercept=True, terms=[], bars=[], offsets=[],
+                    ))
+                for t in lhs_ef.terms:
+                    lhs_parts.append(ExpandedFormula(
+                        intercept=False, terms=[t], bars=[], offsets=[],
+                    ))
+            else:
+                lhs_parts = [lhs_ef]
+            for g_node in group_nodes:
+                new_codes, new_levels, g_label = _eval_group(g_node, newdata)
+                fit_levels = fit_levels_by_label.get(g_label)
+                if fit_levels is None:
+                    raise ValueError(
+                        f"predict: grouping factor {g_label!r} from newdata "
+                        f"is not in the fit (fit groups: "
+                        f"{list(fit_levels_by_label)!r})"
+                    )
+                lvl_to_fit_idx = {lvl: i for i, lvl in enumerate(fit_levels)}
+                mapped = np.full(len(new_codes), -1, dtype=int)
+                for i, c in enumerate(new_codes):
+                    if c < 0:
+                        continue
+                    fit_idx = lvl_to_fit_idx.get(new_levels[c], -1)
+                    if fit_idx < 0 and not allow_new_levels:
+                        raise ValueError(
+                            f"predict: new level {new_levels[c]!r} in "
+                            f"grouping factor {g_label!r}; pass "
+                            f"allow_new_levels=True to treat as population mean."
+                        )
+                    mapped[i] = fit_idx
+                for lef in lhs_parts:
+                    Z_lhs, cnames = _materialize_re_lhs(lef, newdata)
+                    if Z_lhs.shape[1] == 0:
+                        continue
+                    simple.append((g_label, fit_levels, mapped, Z_lhs, cnames))
+
+        # Stable sort by fit-#levels descending (matches materialize_bars).
+        simple.sort(key=lambda b: -len(b[1]))
+
+        col_offset = 0
+        for g_label, fit_levels, mapped, Z_lhs, cnames in simple:
+            k = len(fit_levels)
+            c = Z_lhs.shape[1]
+            valid = mapped >= 0
+            lvl = mapped[valid]
+            rows = np.where(valid)[0]
+            for comp in range(c):
+                Z_new[rows, col_offset + lvl * c + comp] = Z_lhs[rows, comp]
+            col_offset += k * c
+
+        if col_offset != q:
+            raise ValueError(
+                f"predict: rebuilt Z has {col_offset} columns, expected "
+                f"{q}. Bar structure on newdata doesn't match the fit."
+            )
+        return Z_new
+
+    def predict(
+        self,
+        newdata: pl.DataFrame | None = None,
+        *,
+        re_form=None,
+        random_only: bool = False,
+        type: str = "response",
+        allow_new_levels: bool = False,
+        na_action: str = "na.pass",
+        se_fit: bool = False,
+        terms=None,
+    ):
+        """R: ``predict.merMod`` — predict at the original or new data.
+
+        Parameters
+        ----------
+        newdata
+            New data frame to predict at. If ``None``, returns predictions
+            at the original fit data (i.e. fitted values).
+        re_form
+            ``None`` (default) — include all random effects (``Xβ + Zb``).
+            ``False`` — population-level only (``Xβ``). A formula restricting
+            to a subset of bars is not yet implemented.
+        random_only
+            If ``True``, return only the random-effect contribution (``Zb``).
+        type
+            ``"response"`` or ``"link"``. Identical for LMMs (identity link);
+            kept for R-API compatibility.
+        allow_new_levels
+            If ``True``, group levels in ``newdata`` that weren't in the
+            fit contribute 0 to ``Zb`` (population mean). If ``False``
+            (R's default), unseen levels raise.
+        na_action
+            Only ``"na.pass"`` is supported in this port.
+        se_fit
+            If ``True``, return ``{"fit": pred, "se.fit": se}``. The SE uses
+            the joint posterior covariance of ``(û, β̂)``, which for LMMs is
+            ``σ̂² · M⁻¹`` where ``M`` is the Henderson MME in spherical
+            coordinates.
+        terms
+            Not implemented (R also marks this as unimplemented).
+        """
+        if terms is not None:
+            raise NotImplementedError("predict: terms= is not implemented")
+        if type not in ("response", "link"):
+            raise ValueError(f"predict: type must be 'response' or 'link', got {type!r}")
+        if na_action != "na.pass":
+            raise NotImplementedError(
+                f"predict: only na.action='na.pass' is supported, got {na_action!r}"
+            )
+        # R's ``isRE``: re.form=None (include all) and re.form=NA (exclude
+        # all) are the two we support; a partial-bars formula needs a
+        # separate code path that we haven't ported yet.
+        if re_form is None:
+            include_re = True
+        elif re_form is False:
+            include_re = False
+        else:
+            raise NotImplementedError(
+                "predict: re_form= only accepts None (include all RE) or "
+                "False (population-level / no RE) in this port"
+            )
+
+        # No-arg fast path — matches R's ``na.omit(fitted(object))``.
+        if newdata is None and include_re and not random_only and not se_fit:
+            return self.fitted.copy()
+
+        # Build X, Z, offset on the appropriate frame.
+        if newdata is None:
+            X_pred = self.X.to_numpy().astype(float)
+            offset_pred = self._offset
+            n_pred = self.n
+        else:
+            n_pred = newdata.height
+            offset_pred = self._build_offset_for_newdata(newdata)
+            X_pred = self._build_X_for_newdata(newdata)
+
+        pred = np.zeros(n_pred)
+        if not random_only:
+            pred = X_pred @ self._beta + offset_pred
+
+        if include_re:
+            if newdata is None:
+                # ZL · u at the original data — same expression that built
+                # self.fitted, but offset-free here.
+                Z_pred = self.Z
+            else:
+                Z_pred = self._build_Z_for_newdata(
+                    newdata, allow_new_levels=allow_new_levels,
+                )
+            ZL_pred = Z_pred @ self.Lambda
+            pred = pred + ZL_pred @ self._u
+        else:
+            Z_pred = np.zeros((n_pred, self.q))
+            ZL_pred = Z_pred
+
+        if not se_fit:
+            return pred
+
+        # se.fit — joint (û, β̂) posterior covariance is σ̂² · M⁻¹ with
+        # M = [Λᵀ Z'Z Λ + I,  Λᵀ Z'X; X'Z Λ,  X'X]. Build M densely and
+        # solve. For p+q in the hundreds this is trivial; large-q models
+        # can be revisited with a block-Cholesky path if needed.
+        X_fit = self.X.to_numpy().astype(float)
+        ZL_fit = self.Z @ self.Lambda
+        M_top = ZL_fit.T @ ZL_fit + np.eye(self.q)
+        M_brc = ZL_fit.T @ X_fit
+        M_bot = X_fit.T @ X_fit
+        M_full = np.block([[M_top, M_brc], [M_brc.T, M_bot]])
+
+        if random_only:
+            X_for_se = np.zeros((n_pred, self.p))
+        else:
+            X_for_se = X_pred
+        if include_re:
+            ZL_for_se = ZL_pred
+        else:
+            ZL_for_se = np.zeros((n_pred, self.q))
+        ZLX_new = np.hstack([ZL_for_se, X_for_se])
+        W = np.linalg.solve(M_full, ZLX_new.T)
+        var_pred = self.sigma_squared * np.einsum("ij,ji->i", ZLX_new, W)
+        # Numerical floor: tiny negative values from cancellation.
+        var_pred = np.maximum(var_pred, 0.0)
+        se = np.sqrt(var_pred)
+        return {"fit": pred, "se.fit": se}
 
     # ---- lmer-style printing --------------------------------------------
 
