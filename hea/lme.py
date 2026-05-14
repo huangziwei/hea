@@ -186,6 +186,637 @@ def _per_bar_relative_cov(theta: np.ndarray, bar_sizes: list[int]) -> list[np.nd
     return blocks
 
 
+class _GlmResponse:
+    """GLMM response state — port of lme4's ``glmResp`` / ``lmerResp``.
+
+    Mirrors the C++ class hierarchy in ``lme4/src/respModule.cpp`` and
+    ``respModule.h``: holds the response ``y``, prior weights, offset, and
+    the current ``(η, μ)`` plus the working weights / residuals that PIRLS
+    reads each iteration.
+
+    The Gaussian-identity case (``lmerResp``) is a degenerate path through
+    the same state — no link inverse, no working weights — handled by
+    skipping :meth:`update_weights` and reading ``μ`` directly as ``η``
+    minus offset. For now the class is used only by the non-Gaussian
+    Laplace path (Phase 4); Phase 1's profiled-deviance code does not go
+    through it.
+
+    State (``snake_case`` mirrors of lme4's ``d_*`` members):
+
+    * ``family``: a :class:`hea.family.Family` instance.
+    * ``y``, ``weights``, ``offset``: arrays of length ``n``.
+    * ``eta``, ``mu``: current linear predictor and response-scale mean.
+    * ``sqrt_x_wt``: ``μ_η · sqrt_r_wt`` — X-side √working weights
+      (= lme4's ``d_sqrtXwt``).
+    * ``sqrt_r_wt``: ``sqrt(weights / V(μ))`` — residual-side √weights
+      (= lme4's ``d_sqrtrwt``).
+    * ``wt_res``: ``sqrt_r_wt · (y - μ)`` — current weighted residuals.
+    * ``wrss``: ``||wt_res||²``.
+    * ``log_det_weights``: ``Σ log w[w>0]`` — used by lmer Laplace
+      criterion to absorb the prior-weight Jacobian.
+
+    Method shapes follow lme4 but with Pythonic names:
+
+    Mutators (refresh dependent fields in lock-step):
+
+    * :meth:`update_mu`: set ``η = offset + γ``, refresh ``μ`` and ``wrss``.
+    * :meth:`update_weights`: refresh ``sqrt_r_wt``, ``sqrt_x_wt``, ``wrss``.
+    * :meth:`update_wrss`: refresh ``wt_res`` and ``wrss``.
+
+    Pure-compute (read state, no mutation):
+
+    * :meth:`working_residuals`, :meth:`working_response`,
+      :meth:`weighted_working_response` — PIRLS RHS pieces.
+    * :meth:`deviance_residuals`, :meth:`deviance`, :meth:`aic` — family-
+      driven evaluators.
+    * :meth:`laplace` — the Laplace approximation
+      ``ldL2 + ||u||² + aic`` (port of ``respModule.cpp:161``).
+    """
+
+    __slots__ = (
+        "family", "y", "weights", "offset",
+        "eta", "mu", "sqrt_x_wt", "sqrt_r_wt", "wt_res", "wrss",
+        "log_det_weights",
+    )
+
+    def __init__(
+        self,
+        family: Family,
+        y: np.ndarray,
+        *,
+        weights: Optional[np.ndarray] = None,
+        offset: Optional[np.ndarray] = None,
+        mustart: Optional[np.ndarray] = None,
+        etastart: Optional[np.ndarray] = None,
+    ):
+        y = np.asarray(y, dtype=float)
+        n = len(y)
+
+        if weights is None:
+            weights = np.ones(n)
+        else:
+            weights = np.asarray(weights, dtype=float)
+            if weights.shape != (n,):
+                raise ValueError(
+                    f"weights shape {weights.shape} doesn't match y shape ({n},)"
+                )
+
+        if offset is None:
+            offset = np.zeros(n)
+        else:
+            offset = np.asarray(offset, dtype=float)
+            if offset.shape != (n,):
+                raise ValueError(
+                    f"offset shape {offset.shape} doesn't match y shape ({n},)"
+                )
+
+        # Initial μ from mustart (user-provided) or family.initialize.
+        # Mirror utilities.R:236-258: family$initialize fills mustart, and a
+        # user mustart_update overrides afterwards.
+        if mustart is None:
+            mustart = family.initialize(y, weights)
+        else:
+            mustart = np.asarray(mustart, dtype=float).copy()
+
+        # Gamma stability fix (utilities.R:250-252): when no etastart is
+        # supplied, replace mustart with its mean. Reason: PIRLS on
+        # log-link Gamma diverges from a saturated mustart because
+        # E[log(y)] ≤ log(E[y]) (Jensen's inequality on the link), so
+        # initialising η = log(y) gives an over-shoot on the first step.
+        if family.name == "Gamma" and etastart is None:
+            mustart = np.full_like(mustart, float(np.mean(mustart)))
+
+        # Initial η. If etastart provided, use it; else linkfun(mustart).
+        # NB: lme4 passes this directly to updateMu (utilities.R:257),
+        # which adds the offset — so the *initial* η ends up offset-shifted
+        # relative to a clean linkfun(mustart). This is the documented lme4
+        # behaviour; PIRLS converges from any reasonable starting state, so
+        # it doesn't affect the final fit. We replicate it for parity.
+        if etastart is not None:
+            initial_gamma = np.asarray(etastart, dtype=float).copy()
+        else:
+            initial_gamma = family.link.link(mustart)
+
+        # log Σ w[w>0] — Jacobian term for the lmer REML/ML criterion.
+        good = weights > 0
+        log_det_weights = (
+            float(np.sum(np.log(weights[good]))) if np.any(good) else 0.0
+        )
+
+        # Seed mutable state — start at all-zeros, then call update_mu /
+        # update_weights to populate consistently.
+        self.family = family
+        self.y = y
+        self.weights = weights
+        self.offset = offset
+        self.eta = np.zeros(n)
+        self.mu = np.zeros(n)
+        self.sqrt_x_wt = np.zeros(n)
+        self.sqrt_r_wt = np.zeros(n)
+        self.wt_res = np.zeros(n)
+        self.wrss = 0.0
+        self.log_det_weights = log_det_weights
+
+        # Now drive state to the initial (η, μ, weights, wrss) consistently.
+        # Order matters: update_mu sets μ from η, then update_weights uses μ.
+        self.update_mu(initial_gamma)
+        self.update_weights()
+
+    # ------- mutators -----------------------------------------------------
+
+    def update_mu(self, gamma: np.ndarray) -> float:
+        """Set ``η = offset + γ`` and refresh ``μ`` and ``wrss``.
+
+        Port of ``glmResp::updateMu`` (respModule.cpp:169-177). ``γ`` is the
+        offset-free linear predictor (typically ``X·β + Z·b`` from
+        ``merPredD::linPred``); the offset is added here.
+        """
+        eta = self.offset + np.asarray(gamma, dtype=float)
+        self.eta = eta
+        self.mu = self.family.link.linkinv(eta)
+        return self.update_wrss()
+
+    def update_wrss(self) -> float:
+        """Refresh ``wt_res = sqrt_r_wt · (y - μ)`` and ``wrss``.
+
+        Port of ``lmResp::updateWrss`` (respModule.cpp:56-60). Called by
+        both :meth:`update_mu` and :meth:`update_weights`; can also be
+        called standalone when only the residual term needs refreshing
+        (rare — kept for parity).
+        """
+        self.wt_res = self.sqrt_r_wt * (self.y - self.mu)
+        self.wrss = float(np.dot(self.wt_res, self.wt_res))
+        return self.wrss
+
+    def update_weights(self) -> float:
+        """Refresh working weights from the current μ and η.
+
+        ``sqrt_r_wt = sqrt(weights / V(μ))``
+        ``sqrt_x_wt = μ_η · sqrt_r_wt``
+
+        Port of ``glmResp::updateWts`` (respModule.cpp:179-183). PIRLS
+        calls this once per iteration after :meth:`update_mu`. Returns the
+        new ``wrss`` (since ``sqrt_r_wt`` changed, the weighted residuals
+        change too).
+        """
+        variance = self.family.variance(self.mu)
+        self.sqrt_r_wt = np.sqrt(self.weights / variance)
+        self.sqrt_x_wt = self.family.link.mu_eta(self.eta) * self.sqrt_r_wt
+        return self.update_wrss()
+
+    # ------- pure-compute (no mutation) -----------------------------------
+
+    def working_residuals(self) -> np.ndarray:
+        """``(y - μ) / μ_η`` — port of ``glmResp::wrkResids`` (respModule.cpp:140)."""
+        return (self.y - self.mu) / self.family.link.mu_eta(self.eta)
+
+    def working_response(self) -> np.ndarray:
+        """``(η - offset) + working_residuals`` — port of ``wrkResp`` (respModule.cpp:144).
+
+        The PIRLS working response ``z`` is what gets regressed against the
+        weighted ``X`` in the inner loop.
+        """
+        return (self.eta - self.offset) + self.working_residuals()
+
+    def weighted_working_response(self) -> np.ndarray:
+        """``working_response · sqrt_x_wt`` — port of ``wtWrkResp`` (respModule.cpp:148).
+
+        The right-hand side ``√W · z`` for the PIRLS weighted-LS step.
+        """
+        return self.working_response() * self.sqrt_x_wt
+
+    def deviance_residuals(self) -> np.ndarray:
+        """Family deviance contributions per observation.
+
+        Port of ``glmResp::devResid`` (respModule.cpp:128). Delegates to
+        :meth:`hea.family.Family.dev_resids`.
+        """
+        return self.family.dev_resids(self.y, self.mu, self.weights)
+
+    def deviance(self) -> float:
+        """Total deviance ``Σ devResid``.
+
+        Port of ``glmResp::resDev`` (respModule.cpp:165). Matches what
+        :func:`stats::deviance.merMod` returns for GLMM.
+        """
+        return float(np.sum(self.deviance_residuals()))
+
+    def aic(self) -> float:
+        """Family AIC contribution ``family.aic(y, μ, dev, w, n)``.
+
+        Port of ``glmResp::aic`` (respModule.cpp:124). ``n`` (the binomial
+        denominator on R's side) is folded into ``weights`` in hea's
+        :class:`Binomial` and ignored by other families, so we pass an
+        all-ones array for compatibility with the family signature.
+        """
+        return float(self.family.aic(
+            self.y, self.mu, self.deviance(),
+            self.weights, np.ones(len(self.y)),
+        ))
+
+    def laplace(self, log_det_l_sq: float, log_det_rx_sq: float,
+                sqr_len_u: float) -> float:
+        """GLMM Laplace approximation to ``-2 log L_marginal``.
+
+        Port of ``glmResp::Laplace`` (respModule.cpp:161-163):
+
+            laplace = log_det_l_sq + sqr_len_u + aic
+
+        where ``log_det_l_sq = 2 log|L|`` from CHOLMOD's factor of
+        ``Λ Z'WZ Λ' + I``, ``sqr_len_u = ||u||²`` is the random-effect
+        penalty (from ``merPredD::sqrL(1)``), and ``aic`` carries the
+        conditional log-likelihood contribution.
+
+        ``log_det_rx_sq`` (the fixed-effect Cholesky log-det) is accepted
+        for signature symmetry with the lmer path; lme4's glmResp Laplace
+        does not use it.
+        """
+        del log_det_rx_sq  # unused in GLMM Laplace; here for signature parity
+        return log_det_l_sq + sqr_len_u + self.aic()
+
+
+class _PredState:
+    """PIRLS predictor-side state — port of lme4's ``merPredD``.
+
+    Carries the design pieces (``X``, ``Z``), the parameterised
+    Cholesky factor ``Λᵀ(θ)``, the current "base" point ``(β0, u0)``, the
+    step ``(δβ, δu)`` away from that base, and the CHOLMOD factor of
+    ``M = Λ Z' W Z Λᵀ + I`` for the current working weights ``W``.
+
+    The state is mutable: ``set_theta`` refreshes ``Λᵀ``,
+    ``update_xwts_and_decomp`` refreshes the weighted decomposition, and
+    ``solve`` writes new ``(δβ, δu)``. This mirrors lme4's C++ class
+    (Eigen Maps over R-side memory) — PIRLS reads and rewrites the same
+    state object across iterations, with the CHOLMOD symbolic factor
+    cached for cheap numeric refactors when only weights change.
+
+    PLS math is done via the Schur complement (single full-system CHOLMOD
+    ``M⁻¹b`` solves), matching how the Gaussian path in
+    :meth:`lme._fit_from_components` already operates. Mathematically
+    equivalent to lme4's staged ``P/L/Lt/Pt`` solveInPlace sequence in
+    ``predModule.cpp:189-214``.
+    """
+
+    __slots__ = (
+        # Read-only design pieces ----------------------------------------
+        "X",                 # (n, p) fixed-effect design
+        "Z_sp",              # (n, q) sparse Z (CSC)
+        "n", "p", "q",
+        # Λᵀ template (built once from ReTerms, structure is fixed) ------
+        "_lt_theta_pos", "_lt_indices", "_lt_indptr", "_lt_shape",
+        # Persistent state ----------------------------------------------
+        "theta", "beta0", "u0", "delb", "delu",
+        # Current weighted state (set by update_xwts_and_decomp) --------
+        "sqrt_x_wt",
+        "lambdat_sp",        # current Λᵀ as CSC (built by set_theta)
+        "V",                 # (n, p) = diag(sqrt_x_wt) · X
+        "VtV",               # (p, p) = V'·V
+        "lamt_ut",           # (q, n) sparse = Λᵀ · √W · Z' (i.e. LamtUt)
+        "RZX_unfactored",    # (q, p) = lamt_ut · V
+        "M_inv_RZX",         # (q, p) = M⁻¹ · RZX_unfactored
+        "RX",                # (p, p) lower Cholesky of (V'V − RZX'·M⁻¹·RZX)
+        "log_det_l_sq",      # 2 log|L| from CHOLMOD
+        "log_det_rx_sq",     # 2 log|RX|
+        "chol_factor",       # CHOLMOD factor of M = LamtUt · LamtUt' + I
+        # Cached identity for M assembly (built once) -------------------
+        "_eye_q_sp",
+    )
+
+    def __init__(self, X: np.ndarray, Z_sp: csc_array, re_terms: ReTerms):
+        n, p = X.shape
+        q = Z_sp.shape[1]
+        if Z_sp.shape[0] != n:
+            raise ValueError(
+                f"Z rows ({Z_sp.shape[0]}) don't match X rows ({n})"
+            )
+
+        self.X = X
+        self.Z_sp = Z_sp
+        self.n, self.p, self.q = n, p, q
+
+        # Precompute the CSC structure of Λᵀ from the integer template.
+        lt_theta_pos, lt_indices, lt_indptr = _sparse_Lt_spec(re_terms.Lambdat)
+        self._lt_theta_pos = lt_theta_pos
+        self._lt_indices = lt_indices
+        self._lt_indptr = lt_indptr
+        self._lt_shape = re_terms.Lambdat.shape
+
+        # Initial state: base point at origin, no step.
+        self.theta = re_terms.theta.astype(float).copy()
+        self.beta0 = np.zeros(p)
+        self.u0 = np.zeros(q)
+        self.delb = np.zeros(p)
+        self.delu = np.zeros(q)
+
+        # Weighted state — populated by update_xwts_and_decomp.
+        self.sqrt_x_wt = np.zeros(n)
+        self.V = np.zeros((n, p))
+        self.VtV = np.zeros((p, p))
+        self.lamt_ut = None       # filled by set_theta + xwts
+        self.RZX_unfactored = np.zeros((q, p))
+        self.M_inv_RZX = np.zeros((q, p))
+        self.RX = np.zeros((p, p))
+        self.log_det_l_sq = 0.0
+        self.log_det_rx_sq = 0.0
+        self.chol_factor = None
+
+        # Cache the q×q identity for M = LamtUt · LamtUt' + I.
+        self._eye_q_sp = eye_array(q, format="csc")
+
+        # Build initial Λᵀ from θ₀ so callers can call update_xwts_and_decomp
+        # immediately.
+        self.lambdat_sp = self._build_lambdat(self.theta)
+
+    # ------- internal --------------------------------------------------
+
+    def _build_lambdat(self, theta: np.ndarray) -> csc_array:
+        """Rebuild Λᵀ from a new θ vector. Sparse structure stays fixed —
+        only the nonzero values change, which lets CHOLMOD reuse its
+        symbolic factor across calls.
+        """
+        data = np.asarray(theta, dtype=float)[self._lt_theta_pos]
+        return csc_array(
+            (data, self._lt_indices, self._lt_indptr),
+            shape=self._lt_shape, copy=False,
+        )
+
+    # ------- mutators --------------------------------------------------
+
+    def set_theta(self, theta: np.ndarray) -> None:
+        """Set new ``θ`` and refresh ``Λᵀ``. Doesn't touch the weighted
+        decomposition — caller must call :meth:`update_xwts_and_decomp`
+        next.
+        """
+        self.theta = np.asarray(theta, dtype=float).copy()
+        self.lambdat_sp = self._build_lambdat(self.theta)
+
+    def update_xwts_and_decomp(self, sqrt_x_wt: np.ndarray) -> None:
+        """Apply new X-side √working weights and refresh the decomposition.
+
+        Mirrors lme4's ``merPredD::updateXwts`` + ``updateDecomp``
+        (predModule.cpp:216-301). Specifically:
+
+        1. ``V = diag(sqrt_x_wt) · X``,
+           ``Ut = diag(sqrt_x_wt) · Z'`` (sparse, in-place on Z's pattern),
+           ``VtV = V'·V``.
+        2. ``lamt_ut = Λᵀ · Ut``.
+        3. ``M = lamt_ut · lamt_ut' + I``, factorize via CHOLMOD
+           (re-uses symbolic factor when available).
+        4. ``ldL2 = 2 log|L|``.
+        5. ``RZX_unfactored = lamt_ut · V``;
+           ``M_inv_RZX = M⁻¹ · RZX_unfactored``.
+        6. ``VtV_schur = VtV − RZX_unfactored' · M_inv_RZX``;
+           ``RX = chol(VtV_schur)``; ``ldRX2 = 2 log|RX|``.
+        """
+        sqrt_x_wt = np.asarray(sqrt_x_wt, dtype=float)
+        if sqrt_x_wt.shape != (self.n,):
+            raise ValueError(
+                f"sqrt_x_wt shape {sqrt_x_wt.shape} doesn't match n={self.n}"
+            )
+        self.sqrt_x_wt = sqrt_x_wt
+
+        # V = diag(sqrt_x_wt) · X — dense
+        self.V = sqrt_x_wt[:, None] * self.X
+        self.VtV = self.V.T @ self.V
+
+        # Ut = diag(sqrt_x_wt) · Z' — sparse. Scale each column of Z by
+        # sqrt_x_wt[j], then transpose.
+        Z_scaled = self.Z_sp.multiply(sqrt_x_wt[:, None]).tocsc()
+        Ut = csc_array(Z_scaled.T)
+
+        # lamt_ut = Λᵀ · Ut — sparse @ sparse
+        self.lamt_ut = (self.lambdat_sp @ Ut).tocsc()
+
+        # M = lamt_ut · lamt_ut' + I_q. Factorize (re-using symbolic).
+        M = (self.lamt_ut @ self.lamt_ut.T + self._eye_q_sp).tocsc()
+        if self.chol_factor is None:
+            self.chol_factor = cho_factor(M)
+        else:
+            self.chol_factor.factorize(M)
+        self.log_det_l_sq = 2.0 * self.chol_factor.half_log_det()
+
+        # RZX_unfactored = lamt_ut · V (dense, q×p).
+        self.RZX_unfactored = np.asarray(self.lamt_ut @ self.V)
+
+        # M⁻¹ · RZX_unfactored (dense, q×p). The Gaussian path uses
+        # einsum for this; here we just use the factor's solve.
+        if self.p > 0:
+            self.M_inv_RZX = self.chol_factor.solve(self.RZX_unfactored)
+            VtV_schur = self.VtV - np.einsum(
+                "ij,ik->jk", self.RZX_unfactored, self.M_inv_RZX,
+            )
+            # chol returns lower-triangular L with VtV_schur = L · L'
+            try:
+                self.RX = np.linalg.cholesky(VtV_schur)
+            except np.linalg.LinAlgError as exc:
+                raise CholmodError(
+                    "Fixed-effect Cholesky failed — Schur complement not "
+                    "positive definite. Likely an ill-conditioned design "
+                    "matrix or a θ that drove M close to singular."
+                ) from exc
+            self.log_det_rx_sq = 2.0 * float(np.log(np.diag(self.RX)).sum())
+        else:
+            self.M_inv_RZX = np.zeros((self.q, 0))
+            self.RX = np.zeros((0, 0))
+            self.log_det_rx_sq = 0.0
+
+    def solve(self, weighted_response: np.ndarray, *, u_only: bool = False) -> float:
+        """Solve the PLS step for ``(δβ, δu)``.
+
+        Given the weighted working response ``z_w`` (length n), compute
+        the right-hand side ``Vtr = V'·z_w``, ``Utr = Λᵀ·U·z_w``, then
+        solve the block system via the Schur complement:
+
+            δβ = (V'V − RZX'·M⁻¹·RZX)⁻¹ · (Vtr − RZX'·M⁻¹·(Utr − u0))
+            δu = M⁻¹ · ((Utr − u0) − RZX·δβ)
+
+        For ``u_only=True`` (used by nAGQ=0 GLMM where β is held fixed),
+        skip the δβ step:
+
+            δβ = 0
+            δu = M⁻¹ · (Utr − u0)
+
+        Returns ``CcNumer = ||L⁻¹·P·(Utr − u0)||² + ||δβ||²`` —
+        lme4's convergence-criterion numerator (predModule.cpp:193, 196).
+        We compute its value as ``(Utr − u0)'·M⁻¹·(Utr − u0) + ||δβ||²``
+        (same quantity, equivalent under the Cholesky identity).
+        """
+        z = np.asarray(weighted_response, dtype=float)
+        if z.shape != (self.n,):
+            raise ValueError(
+                f"weighted_response shape {z.shape} doesn't match n={self.n}"
+            )
+        Vtr = self.V.T @ z
+        Utr = np.asarray(self.lamt_ut @ z).ravel()
+        offset = Utr - self.u0
+
+        if u_only or self.p == 0:
+            # Pure-u path: δβ = 0, δu = M⁻¹ · offset.
+            self.delb = np.zeros(self.p)
+            self.delu = self.chol_factor.solve(offset)
+            cc_numer = float(np.einsum("i,i->", offset, self.delu))
+            return cc_numer
+
+        # Joint (δβ, δu) path via Schur complement.
+        # cu = M⁻¹ · offset (in factored form: P' L⁻ᵀ L⁻¹ P · offset)
+        cu = self.chol_factor.solve(offset)
+        # rhs = Vtr − RZX'·cu (where RZX = M⁻¹/²·LamtUt·V ≡ "factored" form;
+        # what we have is RZX_unfactored = LamtUt·V, and cu = M⁻¹·offset.
+        # The product RZX_unfactored.T @ cu is exactly the rotated quantity.)
+        rhs = Vtr - np.einsum("ij,i->j", self.RZX_unfactored, cu)
+        # δβ = (VtV_schur)⁻¹ · rhs via two triangular solves on RX.
+        cb = solve_triangular(self.RX, rhs, lower=True)
+        self.delb = solve_triangular(self.RX.T, cb, lower=False)
+        # δu = M⁻¹ · (offset − LamtUt·V · δβ)
+        #    = cu − M_inv_RZX · δβ
+        self.delu = cu - self.M_inv_RZX @ self.delb
+        # CcNumer = (Utr − u0)·M⁻¹·(Utr − u0) + ||δβ||²
+        cu_sq = float(np.einsum("i,i->", offset, cu))
+        cc_numer = cu_sq + float(np.einsum("i,i->", self.delb, self.delb))
+        return cc_numer
+
+    def install_pars(self, f: float = 1.0) -> None:
+        """Snapshot the current step: ``u0 ← u0 + f·δu``, ``β0 ← β0 +
+        f·δβ``, ``δu = δβ = 0``. Port of ``merPredD::installPars``
+        (predModule.cpp:310-315).
+
+        Called by the outer optimizer after PIRLS converges, to lock in
+        the new "base" point for downstream solves.
+        """
+        self.u0 = self.u0 + f * self.delu
+        self.beta0 = self.beta0 + f * self.delb
+        self.delu = np.zeros(self.q)
+        self.delb = np.zeros(self.p)
+
+    # ------- pure-compute (no mutation) --------------------------------
+
+    def beta(self, f: float = 1.0) -> np.ndarray:
+        """Fixed-effect coefficients at step factor ``f``: ``β0 + f·δβ``.
+
+        Port of ``merPredD::beta(f)`` (predModule.cpp:92).
+        """
+        return self.beta0 + f * self.delb
+
+    def u(self, f: float = 1.0) -> np.ndarray:
+        """Spherical random effects at step factor ``f``: ``u0 + f·δu``.
+
+        Port of ``merPredD::u(f)`` (predModule.cpp:138).
+        """
+        return self.u0 + f * self.delu
+
+    def b(self, f: float = 1.0) -> np.ndarray:
+        """Non-spherical random effects ``b = Λᵀ · u(f)`` — port of
+        ``merPredD::b(f)`` (predModule.cpp:90).
+        """
+        return np.asarray(self.lambdat_sp.T @ self.u(f)).ravel()
+
+    def lin_pred(self, f: float = 1.0) -> np.ndarray:
+        """Offset-free linear predictor ``γ = X·β(f) + Z'·b(f)``.
+
+        Port of ``merPredD::linPred(f)`` (predModule.cpp:94-96). The
+        caller (``_GlmResponse.update_mu``) adds the offset to get ``η``.
+        """
+        return self.X @ self.beta(f) + np.asarray(self.Z_sp @ self.b(f)).ravel()
+
+    def sqr_l_u(self, f: float = 1.0) -> float:
+        """``||u(f)||²`` — RE penalty in the Laplace approximation.
+
+        Port of ``merPredD::sqrL(f)`` (predModule.cpp:140).
+        """
+        u_f = self.u(f)
+        return float(np.einsum("i,i->", u_f, u_f))
+
+
+def _internal_glmer_wrk_iter(
+    pred: _PredState, resp: _GlmResponse, *, u_only: bool,
+) -> float:
+    """One PIRLS iteration — port of ``internal_glmerWrkIter`` (external.cpp:268-295).
+
+    Refreshes the working weights from current ``μ``, runs the predictor's
+    weighted decomposition, solves the PLS step, then updates the response
+    to the new linear predictor. Returns the penalised deviance
+    ``Σ deviance_residuals + ||u(1)||²``.
+
+    The leading :meth:`_GlmResponse.update_weights` call matches lme4's
+    ``rp->sqrtWrkWt()`` method (respModule.cpp:152-159), which computes
+    fresh from current ``μ`` rather than reading a stale stored field.
+    Without it, PIRLS would use weights from the previous iteration's
+    ``μ`` and could oscillate without converging.
+
+    Caller (``_pwrss_update``) loops this until ``pdev`` converges.
+    """
+    resp.update_weights()
+    pred.update_xwts_and_decomp(resp.sqrt_x_wt)
+    pred.solve(resp.weighted_working_response(), u_only=u_only)
+    resp.update_mu(pred.lin_pred(1.0))
+    return resp.deviance() + pred.sqr_l_u(1.0)
+
+
+def _pwrss_update(
+    pred: _PredState,
+    resp: _GlmResponse,
+    *,
+    u_only: bool,
+    tol: float = 1e-7,
+    maxit: int = 100,
+    verbose: int = 0,
+) -> float:
+    """Outer PIRLS loop — port of ``pwrssUpdate`` (external.cpp:308-376).
+
+    Iterates :func:`_internal_glmer_wrk_iter` until ``|Δpdev|/|pdev| <
+    tol``. On a pdev increase or NaN, step-halves ``(δu, δβ)`` toward the
+    previous iteration's values for up to 20 substeps (matching lme4's
+    ``maxstephalfit``). Caller (the devfun closure) discards any state
+    that should reset between optimizer calls — this function freely
+    mutates ``pred`` and ``resp``.
+
+    Returns the converged ``pdev``. Raises ``RuntimeError`` if PIRLS
+    fails to converge or step-halving cannot recover from a divergence.
+    """
+    max_stephalfit = 20
+    old_pdev = np.finfo(float).max
+    pdev = old_pdev
+    converged = False
+
+    for i in range(maxit):
+        old_delu = pred.delu.copy()
+        old_delb = pred.delb.copy()
+        pdev = _internal_glmer_wrk_iter(pred, resp, u_only=u_only)
+        if verbose > 2:
+            print(f"pwrss iter {i}: pdev={pdev:.10g}")
+        if np.abs((old_pdev - pdev) / pdev) < tol:
+            converged = True
+            break
+
+        # Step-halving on increase or NaN. Mirrors external.cpp:341-369.
+        if np.isnan(pdev) or pdev > old_pdev:
+            if verbose > 2:
+                print("  entering step-halving loop")
+            for k in range(max_stephalfit):
+                if not (np.isnan(pdev) or pdev > old_pdev):
+                    break
+                pred.delu = (old_delu + pred.delu) / 2.0
+                if not u_only:
+                    pred.delb = (old_delb + pred.delb) / 2.0
+                resp.update_mu(pred.lin_pred(1.0))
+                pdev = resp.deviance() + pred.sqr_l_u(1.0)
+            if np.isnan(pdev):
+                raise RuntimeError("PIRLS loop produced NaN pdev")
+            if (pdev - old_pdev) > tol:
+                raise RuntimeError(
+                    f"PIRLS step-halving failed to reduce pdev after "
+                    f"{max_stephalfit} halvings (pdev={pdev}, "
+                    f"old_pdev={old_pdev})"
+                )
+        old_pdev = pdev
+
+    if not converged:
+        raise RuntimeError(
+            f"PIRLS did not converge in {maxit} iterations (last pdev={pdev})"
+        )
+    return pdev
+
+
 class lme:
     """Linear mixed-effects model, fit by ML or REML profiled deviance.
 
