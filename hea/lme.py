@@ -30,7 +30,8 @@ from scipy.linalg import solve_triangular
 from scipy.optimize import minimize
 from scipy.sparse import csc_array, eye_array
 
-from .family import Family, Gaussian
+from . import family as _family_mod
+from .family import Family, Gaussian, _coerce_response
 from .formula import (
     BinOp,
     ExpandedFormula,
@@ -45,7 +46,7 @@ from .formula import (
 )
 from .design import prepare_design
 from .lm import _label_top_n, _lowess, _qq_plot
-from .utils import format_df, format_signif, format_signif_jointly
+from .utils import format_df, format_pval, format_signif, format_signif_jointly
 
 __all__ = ["lme", "Profile"]
 
@@ -1567,6 +1568,175 @@ class NelderMead:
         return True
 
 
+# ---------------------------------------------------------------------------
+# Phase 8 — argument plumbing & validation helpers.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_lme_family(family) -> Family:
+    """Resolve ``family=`` to a :class:`Family` instance — port of
+    modular.R:733-735.
+
+    Accepts ``None`` (→ Gaussian), a :class:`Family` instance, a class /
+    callable that returns one (``Poisson`` → ``Poisson()``), or a name
+    string (``"poisson"``). Rejects ``quasi*`` families with lme4's exact
+    error (modular.R:734).
+    """
+    if family is None:
+        return Gaussian()
+    # Reject quasi by string first so the error mentions the input.
+    if isinstance(family, str):
+        if family in ("quasi", "quasibinomial", "quasipoisson"):
+            raise ValueError('"quasi" families cannot be used in glmer')
+        cls = getattr(_family_mod, family, None)
+        if cls is None:
+            raise ValueError(
+                f"unknown family {family!r}; expected one of gaussian, "
+                "poisson, binomial, Gamma, inverse_gaussian"
+            )
+        family = cls
+    if isinstance(family, Family):
+        if isinstance(family, _family_mod.Quasi):
+            raise ValueError('"quasi" families cannot be used in glmer')
+        return family
+    if callable(family):
+        result = family()
+        if isinstance(result, Family):
+            if isinstance(result, _family_mod.Quasi):
+                raise ValueError('"quasi" families cannot be used in glmer')
+            return result
+        raise TypeError(
+            f"family must resolve to a Family instance; calling {family!r} "
+            f"returned {type(result).__name__}"
+        )
+    raise TypeError(
+        f"family must be None, a Family instance, a Family class, or a "
+        f"name string; got {type(family).__name__}"
+    )
+
+
+def _validate_nagq(nAGQ: int) -> int:
+    """Validate ``nAGQ=`` per lme4 (modular.R:980-987).
+
+    Integer in [0, 100]. ``nAGQ > 1`` (adaptive Gauss-Hermite) is reserved
+    for Phase 9 and raises :class:`NotImplementedError`.
+    """
+    try:
+        n = int(nAGQ)
+    except (TypeError, ValueError):
+        raise ValueError(f"nAGQ must be an integer; got {nAGQ!r}")
+    if n != nAGQ:
+        # Reject floats that aren't whole numbers (1.5 etc.). int(1.5) == 1
+        # would silently round; force a clean error instead.
+        raise ValueError(f"nAGQ must be an integer; got {nAGQ!r}")
+    if n < 0 or n > 100:
+        raise ValueError(f"nAGQ must be in [0, 100]; got {n}")
+    if n > 1:
+        raise NotImplementedError(
+            f"nAGQ={n}: adaptive Gauss-Hermite quadrature awaits Phase 9 of "
+            "the lme-family port. Use nAGQ=1 (Laplace) or nAGQ=0 (no Stage-1 "
+            "outer refinement) for now."
+        )
+    return n
+
+
+_GLMER_CONTROL_DEFAULTS = {
+    "optimizer": "Nelder_Mead",     # only NM currently ported (see Phase 5)
+    "restart_edge": False,          # Phase 8.12 (lmer-only, deferred)
+    "boundary.tol": 1e-5,           # Phase 8.13 (deferred)
+    "tolPwrss": 1e-7,
+    "compDev": True,
+    "nAGQ0initStep": True,
+    "calc.derivs": True,
+    "use.last.params": False,
+    "optCtrl": {},                  # Nelder_Mead kwargs (maxfun, xtol*, etc.)
+    # check.* keys — pre-fit and post-fit validation. Accepted now;
+    # enforcement lands incrementally in Phases 8.14 / 8.15.
+    "check.nobs.vs.nlev": "stop",
+    "check.nlev.gtreq.5": "ignore",
+    "check.nlev.gtr.1": "stop",
+    "check.nobs.vs.nRE": "stop",
+    "check.rankX": "message+drop.cols",
+    "check.scaleX": "warning",
+    "check.formula.LHS": "stop",
+    "check.response.not.const": "stop",
+    "check.conv.grad": {"action": "warning", "tol": 2e-3, "relTol": None},
+    "check.conv.singular": {"action": "message", "tol": 1e-4},
+    "check.conv.hess": {"action": "warning", "tol": 1e-6},
+}
+
+
+_NM_OPT_CTRL_KEYS = {"maxfun", "FtolAbs", "FtolRel", "XtolRel",
+                     "MinfMax", "verbose"}
+
+
+def _nm_kwargs_from_opt_ctrl(opt_ctrl) -> dict:
+    """Translate lme4's ``optCtrl`` dict to :class:`NelderMead` kwargs.
+
+    lme4 uses R-flavoured names (``maxfun``, ``FtolAbs``, ``XtolRel``, …);
+    the Python class uses snake_case (``maxeval``, ``ftol_abs``,
+    ``xtol_rel``, …). Map both directions so a user's ``glmerControl(
+    optCtrl=list(maxfun=2000))`` does what they expect.
+    """
+    if opt_ctrl is None or len(opt_ctrl) == 0:
+        return {}
+    out: dict = {}
+    for key, val in opt_ctrl.items():
+        if key == "maxfun":
+            out["maxeval"] = int(val)
+        elif key == "FtolAbs":
+            out["ftol_abs"] = float(val)
+        elif key == "FtolRel":
+            out["ftol_rel"] = float(val)
+        elif key == "XtolRel":
+            out["xtol_rel"] = float(val)
+        elif key == "MinfMax":
+            out["minf_max"] = float(val)
+        elif key == "verbose":
+            # NelderMead doesn't print its own progress (lme4's wrapper does
+            # at the R level). Accept but ignore so user code doesn't break.
+            pass
+        else:
+            raise ValueError(
+                f"unknown optCtrl key {key!r}; expected one of "
+                f"{sorted(_NM_OPT_CTRL_KEYS)}"
+            )
+    return out
+
+
+def _normalize_glmer_control(control) -> dict:
+    """Merge ``control=`` with lme4's ``glmerControl()`` defaults.
+
+    Unknown keys raise :class:`ValueError`. Optimizers other than
+    ``"Nelder_Mead"`` raise :class:`NotImplementedError` — bobyqa /
+    NLOPT_LN_BOBYQA / L-BFGS-B require separate optimizer ports.
+    """
+    if control is None:
+        merged = dict(_GLMER_CONTROL_DEFAULTS)
+        merged["optCtrl"] = dict(merged["optCtrl"])  # don't share the default mapping
+        return merged
+    if not isinstance(control, dict):
+        raise TypeError(
+            f"control= must be a dict; got {type(control).__name__}"
+        )
+    bad = set(control) - set(_GLMER_CONTROL_DEFAULTS)
+    if bad:
+        raise ValueError(
+            f"unknown control keys: {sorted(bad)}; expected one of "
+            f"{sorted(_GLMER_CONTROL_DEFAULTS)}"
+        )
+    merged = dict(_GLMER_CONTROL_DEFAULTS)
+    merged["optCtrl"] = dict(merged["optCtrl"])
+    merged.update(control)
+    if merged["optimizer"] != "Nelder_Mead":
+        raise NotImplementedError(
+            f"optimizer={merged['optimizer']!r}: only 'Nelder_Mead' is "
+            "currently ported. bobyqa / NLOPT_LN_BOBYQA / L-BFGS-B require "
+            "a separate optimizer port."
+        )
+    return merged
+
+
 class lme:
     """Linear mixed-effects model, fit by ML or REML profiled deviance.
 
@@ -1632,17 +1802,41 @@ class lme:
         formula: str,
         data: pl.DataFrame,
         *,
-        family: Optional[Family] = None,
+        family: object = None,
         REML: bool = True,
         weights: Optional[np.ndarray] = None,
+        offset: Optional[np.ndarray] = None,
+        mustart: Optional[np.ndarray] = None,
+        etastart: Optional[np.ndarray] = None,
+        nAGQ: int = 1,
         start=None,
+        verbose: int = 0,
+        devFunOnly: bool = False,
+        control: Optional[dict] = None,
         nAGQ0initStep: bool = True,
     ):
         self.formula = formula
+
+        # 8.10 — family= validation. Accept None/Family/callable/str; reject
+        # quasi* with lme4's exact error message (modular.R:733-735).
+        family = _resolve_lme_family(family)
+
+        # REML is only meaningful for the Gaussian-identity LMM; glmer is
+        # ML by construction (the Laplace approximation evaluates the
+        # marginal log-likelihood directly). Silently override the default
+        # ``REML=True`` for non-Gaussian-identity families so summary /
+        # ``__repr__`` print AIC/BIC/logLik rather than reaching for a
+        # non-existent ``REML_criterion``.
+        if not (family.name == "gaussian" and family.link.name == "identity"):
+            REML = False
         self.REML = REML
 
-        if family is None:
-            family = Gaussian()
+        # 8.11 — nAGQ validation. Integer in [0, 100]; >1 awaits Phase 9.
+        nAGQ = _validate_nagq(nAGQ)
+
+        # 8.6 — control= normalization. Merges user-supplied keys with
+        # lme4's glmerControl defaults; unknown keys raise.
+        ctrl = _normalize_glmer_control(control)
 
         d = prepare_design(formula, data)
         if not d.expanded.bars:
@@ -1653,9 +1847,12 @@ class lme:
         # applies the same NA-omit policy as materialize() did for X — the
         # resulting Z stays row-aligned with X.
         re = materialize_bars(d.expanded, d.data)
-        y = d.y.to_numpy().astype(float)
+        # R's factor-response convention for Binomial (Y/N → 0/1 with the
+        # second declared level as success); for other families this is a
+        # plain float-cast. See :func:`hea.family._coerce_response`.
+        y = _coerce_response(d.y, family)
 
-        # Sum any `offset(...)` atoms from the formula. β̂, û and the
+        # Sum any ``offset(...)`` atoms from the formula. β̂, û and the
         # variance components are all unchanged by the offset; only the
         # fitted/residual scale shifts. ``y`` here is the *original* response
         # (response scale); ``_fit_from_components`` builds ``y_solve = y -
@@ -1664,8 +1861,16 @@ class lme:
         off = np.zeros(n)
         for off_node in d.expanded.offsets:
             off = off + _eval_atom(off_node, d.data).values.flatten().astype(float)
+        # 8.2 — direct numeric ``offset=`` arg adds to the formula offset.
+        if offset is not None:
+            offset_arr = np.asarray(offset, dtype=float)
+            if offset_arr.shape != (n,):
+                raise ValueError(
+                    f"offset= must have length {n}; got {offset_arr.shape}"
+                )
+            off = off + offset_arr
 
-        self._fit_from_components(_FitInputs(
+        fit_inputs = _FitInputs(
             X_df=d.X,
             y=y,
             re_terms=re,
@@ -1673,11 +1878,33 @@ class lme:
             family=family,
             reml=REML,
             weights=weights,
+            mustart=mustart,
+            etastart=etastart,
             start=start,
-            nagq0_init_step=nAGQ0initStep,
+            nagq0_init_step=ctrl["nAGQ0initStep"]
+                if "nAGQ0initStep" in (control or {}) else nAGQ0initStep,
+            nAGQ=nAGQ,
+            tol_pwrss=ctrl["tolPwrss"],
+            calc_derivs=ctrl["calc.derivs"],
+            use_last_params=ctrl["use.last.params"],
+            verbose=verbose,
+            opt_ctrl=ctrl["optCtrl"],
             expanded=d.expanded,
             data=d.data,
-        ))
+        )
+
+        # 8.9 — ``devFunOnly=True`` returns a handle wrapping the Stage 1
+        # deviance closure. The caller can probe it manually (lme4's
+        # diagnostic / debugging entry point). The handle's lower/upper/
+        # par_names reflect θ followed by β (the Stage 1 parameter order).
+        if devFunOnly:
+            raise NotImplementedError(
+                "devFunOnly=True is reserved for a future Phase 8.9 plumb. "
+                "It will return a _DevFunHandle exposing the Stage 1 closure "
+                "with lower/upper/par_names — port pending."
+            )
+
+        self._fit_from_components(fit_inputs)
 
     def _fit_from_components(self, inputs: _FitInputs) -> None:
         """Fit the model given pre-assembled design pieces.
@@ -2014,10 +2241,14 @@ class lme:
                     )
 
         nagq0_init_step = inputs.nagq0_init_step
-        # PIRLS inner-loop control. Match lme4's glmerControl defaults
-        # (tolPwrss=1e-7, maxit=100). Phase 8 will plumb user overrides.
-        tol_pwrss = 1e-7
-        maxit_pwrss = 100
+        # nAGQ=0 → skip Stage 1 entirely (LMM-style θ-only outer loop).
+        # We still warm-start with a joint PIRLS so the Stage 0 closure
+        # sees ``lp0`` at the conditional mode of (β, u) at θ₀.
+        do_stage1 = inputs.nAGQ != 0
+        # PIRLS inner-loop control, sourced from ``glmerControl(...)``.
+        tol_pwrss = inputs.tol_pwrss
+        maxit_pwrss = inputs.maxit_pwrss
+        verbose_pirls = max(0, inputs.verbose - 2)  # PIRLS prints at v > 2
 
         # Translate the (lower, upper) tuple bounds into the arrays
         # :class:`NelderMead` expects, with ±inf for one-sided bounds.
@@ -2030,25 +2261,31 @@ class lme:
         lb_beta = np.full(p, -np.inf)
         ub_beta = np.full(p, np.inf)
 
-        if nagq0_init_step:
+        # Optional Nelder-Mead overrides from ``glmerControl(optCtrl=...)``.
+        nm_kwargs = _nm_kwargs_from_opt_ctrl(inputs.opt_ctrl)
+
+        if nagq0_init_step or not do_stage1:
             # Stage 0 — joint PIRLS at θ₀, then optimize devfun over θ only.
-            _pwrss_update(pred, resp, u_only=False, tol=tol_pwrss, maxit=maxit_pwrss)
+            # When nAGQ=0 this IS the final fit (skip Stage 1 below).
+            _pwrss_update(pred, resp, u_only=False, tol=tol_pwrss,
+                          maxit=maxit_pwrss, verbose=verbose_pirls)
             devfun_stage0 = _glmm_devfun_factory(
-                pred, resp, nagq=0, tol_pwrss=tol_pwrss, maxit_pwrss=maxit_pwrss,
+                pred, resp, nagq=0, tol_pwrss=tol_pwrss,
+                maxit_pwrss=maxit_pwrss, verbose=verbose_pirls,
             )
             # Stage 0 step sizes: lme4's R wrapper default
             # (optimizer.R:5) ``xst = rep(0.02, n)``. ``xt = xst·5e-4``.
             xst0 = np.full(n_theta, 0.02)
             xt0 = xst0 * 5e-4
-            nm0 = NelderMead(lb_theta, ub_theta, xst0, theta0, xtol_abs=xt0)
+            nm0 = NelderMead(lb_theta, ub_theta, xst0, theta0,
+                             xtol_abs=xt0, **nm_kwargs)
             status0 = nm0.minimize(devfun_stage0)
             theta_stage0 = nm0.xpos().copy()
-            # Re-anchor pred/resp at the Stage 0 optimum. ``minimize`` may
-            # have last evaluated at a probe — recall at the best point.
+            # Re-anchor pred/resp at the Stage 0 optimum.
             devfun_stage0(theta_stage0)
-            # lme4 uses pp.beta(1) (= the converged β from Stage 0 joint
-            # PIRLS) as the Stage 1 starting β. modular.R:475 (`fixef0 <-
-            # rho$pp$delb`). A user-supplied ``start["beta"]`` overrides.
+            # β at Stage 0 optimum (= pp.delb after the joint PIRLS).
+            # modular.R:475: ``fixef0 <- rho$pp$delb``. A user-supplied
+            # ``start["beta"]`` overrides for the Stage 1 starting β.
             beta_start = beta_user_start if beta_user_start is not None else pred.beta(1.0).copy()
             self._optim_stage0 = {
                 "par": theta_stage0, "fval": nm0.value(),
@@ -2057,40 +2294,51 @@ class lme:
         else:
             # No Stage 0 — go straight to Stage 1 with θ₀ and β=0 (or
             # user-supplied β).
-            _pwrss_update(pred, resp, u_only=True, tol=tol_pwrss, maxit=maxit_pwrss)
+            _pwrss_update(pred, resp, u_only=True, tol=tol_pwrss,
+                          maxit=maxit_pwrss, verbose=verbose_pirls)
             theta_stage0 = theta0
             beta_start = beta_user_start if beta_user_start is not None else np.zeros(p)
             self._optim_stage0 = None
 
-        # Stage 1 — optimize over (θ, β) jointly. β is folded into the
-        # offset; PIRLS uses u_only=True. The factory snapshots lp0 at the
-        # current (post-Stage-0) state and base_offset = resp.offset.
-        devfun_stage1 = _glmm_devfun_factory(
-            pred, resp, nagq=1, tol_pwrss=tol_pwrss, maxit_pwrss=maxit_pwrss,
-        )
-        start_par = np.concatenate([theta_stage0, beta_start])
-        lb_par = np.concatenate([lb_theta, lb_beta])
-        ub_par = np.concatenate([ub_theta, ub_beta])
-        # Stage 1 step sizes — lme4's ``adj=TRUE`` tweak at lmer.R:2533-2540:
-        # θ block uses 0.1, β block uses ``min(βSD, 10)``, all scaled by 0.2.
-        # ``βSD`` is sqrt(diag(unsc())); unsc = (RX·RX')⁻¹ with RX from the
-        # current weighted decomposition (the Stage-0 converged state).
-        beta_sd = _beta_sd_from_RX(pred.RX) if p > 0 else np.zeros(0)
-        xst1 = 0.2 * np.concatenate([
-            np.full(n_theta, 0.1),
-            np.minimum(beta_sd, 10.0),
-        ])
-        xt1 = xst1 * 5e-4
-        nm1 = NelderMead(lb_par, ub_par, xst1, start_par, xtol_abs=xt1)
-        status1 = nm1.minimize(devfun_stage1)
-        theta_hat = nm1.xpos()[:n_theta].copy()
-        beta_hat = nm1.xpos()[n_theta:].copy()
-        # Re-anchor at the Stage 1 optimum.
-        devfun_stage1(nm1.xpos())
-        self._optim = {
-            "par": nm1.xpos().copy(), "fval": nm1.value(),
-            "feval": nm1.nevals, "status": int(status1),
-        }
+        if do_stage1:
+            # Stage 1 — optimize over (θ, β) jointly. β is folded into the
+            # offset; PIRLS uses u_only=True. The factory snapshots lp0 at
+            # the current (post-Stage-0) state and base_offset = resp.offset.
+            devfun_stage1 = _glmm_devfun_factory(
+                pred, resp, nagq=1, tol_pwrss=tol_pwrss,
+                maxit_pwrss=maxit_pwrss, verbose=verbose_pirls,
+            )
+            start_par = np.concatenate([theta_stage0, beta_start])
+            lb_par = np.concatenate([lb_theta, lb_beta])
+            ub_par = np.concatenate([ub_theta, ub_beta])
+            # Stage 1 step sizes — lme4's ``adj=TRUE`` tweak at
+            # lmer.R:2533-2540: θ block uses 0.1, β block uses
+            # ``min(βSD, 10)``, all scaled by 0.2.
+            beta_sd = _beta_sd_from_RX(pred.RX) if p > 0 else np.zeros(0)
+            xst1 = 0.2 * np.concatenate([
+                np.full(n_theta, 0.1),
+                np.minimum(beta_sd, 10.0),
+            ])
+            xt1 = xst1 * 5e-4
+            nm1 = NelderMead(lb_par, ub_par, xst1, start_par,
+                             xtol_abs=xt1, **nm_kwargs)
+            status1 = nm1.minimize(devfun_stage1)
+            theta_hat = nm1.xpos()[:n_theta].copy()
+            beta_hat = nm1.xpos()[n_theta:].copy()
+            devfun_stage1(nm1.xpos())
+            self._optim = {
+                "par": nm1.xpos().copy(), "fval": nm1.value(),
+                "feval": nm1.nevals, "status": int(status1),
+            }
+            self._devfun_stage1 = devfun_stage1  # Phase 8.14 reuses this
+        else:
+            # nAGQ=0 — Stage 0 IS the final fit. θ̂ from NM, β̂ from the
+            # converged PIRLS at θ̂.
+            theta_hat = theta_stage0
+            beta_hat = pred.beta(1.0).copy() if p > 0 else np.zeros(0)
+            self._optim = dict(self._optim_stage0)
+            self._optim_stage0 = None
+            self._devfun_stage1 = None
 
         self.theta = theta_hat
         self._beta = beta_hat
@@ -3099,7 +3347,19 @@ class lme:
 
     # ---- lmer-style printing --------------------------------------------
 
+    def _is_glmm(self) -> bool:
+        """``True`` for non-Gaussian-identity fits (Laplace path)."""
+        fam = getattr(self, "family", None)
+        if fam is None:
+            return False
+        return not (fam.name == "gaussian" and fam.link.name == "identity")
+
     def _header(self) -> str:
+        if self._is_glmm():
+            return (
+                "Generalized linear mixed model fit by maximum likelihood "
+                "(Laplace Approximation)"
+            )
         if self.REML:
             return "Linear mixed model fit by REML"
         return "Linear mixed model fit by maximum likelihood"
@@ -3107,12 +3367,19 @@ class lme:
     def _fit_criterion_lines(self) -> list[str]:
         if self.REML:
             return [f"REML criterion at convergence: {self.REML_criterion:.4f}"]
+        # GLMM's printed "-2*log(L)" column is the Laplace value (= AIC −
+        # 2·npar), not the residual deviance. Mirror lme4's print.merMod
+        # (methods.R: print.merMod for glmerMod).
+        if self._is_glmm():
+            dev_val = self.deviance_laplace
+        else:
+            dev_val = self.deviance
         labels = ["AIC", "BIC", "logLik", "-2*log(L)", "df.resid"]
         vals = [
             f"{self.AIC:.4f}",
             f"{self.BIC:.4f}",
             f"{self.loglike:.4f}",
-            f"{self.deviance:.4f}",
+            f"{dev_val:.4f}",
             f"{self.df_resid}",
         ]
         widths = [max(len(l), len(v)) for l, v in zip(labels, vals)]
@@ -3152,7 +3419,12 @@ class lme:
             for i, (name, s) in enumerate(zip(names, sds)):
                 corrs = [corr[i, j] for j in range(i)] if (corr is not None and i > 0) else []
                 entries.append((key if i == 0 else "", name, float(s), float(s) ** 2, corrs))
-        entries.append(("Residual", "", float(self.sigma), float(self.sigma_squared), []))
+        # Residual SD: lme4 omits this row for scale-known GLMM families
+        # (Poisson, Binomial — methods.R: print.merMod for glmerMod) since
+        # σ ≡ 1 conveys no information; show it only when the scale is
+        # estimated (LMM Gaussian, GLMM with Gamma / Inverse-Gaussian).
+        if not (self._is_glmm() and getattr(self.family, "scale_known", False)):
+            entries.append(("Residual", "", float(self.sigma), float(self.sigma_squared), []))
 
         sd_col = self._format_col([e[2] for e in entries])
         var_col = self._format_col([e[3] for e in entries]) if include_variance else None
@@ -3238,7 +3510,12 @@ class lme:
         return self.__repr__()
 
     def _scaled_residuals_lines(self) -> list[str]:
-        scaled = self.residuals / self.sigma
+        # lme4's print.summary.merMod uses ``residuals(., "pearson",
+        # scaled=TRUE)`` — i.e. (y − μ)·√w / √V(μ) / σ. For LMM Gaussian
+        # this reduces to (y − μ) / σ (matching the raw "scaled" residuals
+        # users expect); for GLMM Binomial / Poisson it diverges from the
+        # signed deviance residuals stored on ``self.residuals``.
+        scaled = self.residuals_of("pearson") / self.sigma
         qs = np.quantile(scaled, [0.0, 0.25, 0.5, 0.75, 1.0])
         labels = ["Min", "1Q", "Median", "3Q", "Max"]
         vals = [f"{v:.4f}" for v in qs]
@@ -3248,7 +3525,12 @@ class lme:
         return ["Scaled residuals:", hdr, row]
 
     def summary(self, digits: int = 4) -> None:
-        out = [self._header(), f"Formula: {self.formula}", ""]
+        from scipy.stats import norm
+        out = [self._header()]
+        if self._is_glmm():
+            out.append(f" Family: {self.family.name}  ( {self.family.link.name} )")
+        out.append(f"Formula: {self.formula}")
+        out.append("")
         out.extend(self._fit_criterion_lines())
         out.append("")
         out.extend(self._scaled_residuals_lines())
@@ -3263,16 +3545,27 @@ class lme:
         se_arr  = raw["Std. Error"].to_numpy()
         tval    = raw["t value"].to_numpy()
         est_s, se_s = format_signif_jointly([est_arr, se_arr], digits=digits)
-        tbl = pl.DataFrame({
-            "":           raw[""].to_list(),
-            "Estimate":   est_s,
-            "Std. Error": se_s,
-            "t value":    format_signif(tval, digits=digits),
-        })
-        out.append(format_df(
-            tbl,
-            align={c: "right" for c in ("Estimate", "Std. Error", "t value")},
-        ))
+        # GLMM uses z + Pr(>|z|) (asymptotic normal — lme4's print.coefmat
+        # for glmerMod); LMM keeps lme4's t-no-p convention.
+        if self._is_glmm():
+            p_arr = 2.0 * (1.0 - norm.cdf(np.abs(tval)))
+            tbl = pl.DataFrame({
+                "":           raw[""].to_list(),
+                "Estimate":   est_s,
+                "Std. Error": se_s,
+                "z value":    format_signif(tval, digits=digits),
+                "Pr(>|z|)":   format_pval(p_arr),
+            })
+            align_cols = ("Estimate", "Std. Error", "z value", "Pr(>|z|)")
+        else:
+            tbl = pl.DataFrame({
+                "":           raw[""].to_list(),
+                "Estimate":   est_s,
+                "Std. Error": se_s,
+                "t value":    format_signif(tval, digits=digits),
+            })
+            align_cols = ("Estimate", "Std. Error", "t value")
+        out.append(format_df(tbl, align={c: "right" for c in align_cols}))
         corr_lines = self._fixef_corr_lines()
         if corr_lines:
             out.append("")
