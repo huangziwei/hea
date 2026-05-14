@@ -31,6 +31,7 @@ import pytest
 from scipy.stats import chi2
 
 from conftest import load_dataset
+from hea.family import Binomial, Gaussian, Poisson
 from hea.lme import lme
 
 
@@ -144,6 +145,36 @@ def _lrt(m_reduced, m_full):
 # ---------------------------------------------------------------------------
 # Ch 1: A Simple, Linear, Mixed-effects Model
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 of lme-family-port.md: the public ``family=`` argument was added.
+# Default (``None``) and explicit ``Gaussian()`` must produce bit-identical
+# fits; non-Gaussian families must raise ``NotImplementedError`` with a
+# message pointing at the port plan until Phase 2-5 land the Laplace path.
+# ---------------------------------------------------------------------------
+
+
+def test_family_default_equals_explicit_gaussian():
+    """``family=None`` (default) and ``family=Gaussian()`` produce identical fits."""
+    data = load_dataset("lme4", "Dyestuff")
+    m_default = lme("Yield ~ 1 + (1|Batch)", data, REML=True)
+    m_explicit = lme("Yield ~ 1 + (1|Batch)", data, family=Gaussian(), REML=True)
+
+    np.testing.assert_array_equal(m_default.theta, m_explicit.theta)
+    np.testing.assert_array_equal(m_default._beta, m_explicit._beta)
+    assert m_default.sigma == m_explicit.sigma
+    assert m_default.REML_criterion == m_explicit.REML_criterion
+
+
+def test_family_non_gaussian_raises_until_phase_2():
+    """Poisson/Binomial/etc. raise a clear NotImplementedError until the
+    non-Gaussian Laplace path lands."""
+    data = load_dataset("lme4", "Dyestuff")
+    with pytest.raises(NotImplementedError, match="lme-family-port"):
+        lme("Yield ~ 1 + (1|Batch)", data, family=Poisson())
+    with pytest.raises(NotImplementedError, match="not yet implemented"):
+        lme("Yield ~ 1 + (1|Batch)", data, family=Binomial())
 
 
 def test_bates_1_4_dyestuff_fm01_REML():

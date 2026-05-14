@@ -18,7 +18,8 @@ Models Using lme4", J. Stat. Software 67(1), §5 ("Profiled Deviance").
 
 from __future__ import annotations
 
-from typing import Callable
+from dataclasses import dataclass, field
+from typing import Callable, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -32,9 +33,11 @@ from ._cholmod import (
     eye_array,
 )
 
+from .family import Family, Gaussian
 from .formula import (
     BinOp,
     ExpandedFormula,
+    ReTerms,
     _bar_lhs_to_ef,
     _eval_atom,
     _eval_group,
@@ -48,6 +51,63 @@ from .lm import _label_top_n, _lowess, _qq_plot
 from .utils import format_df, format_signif, format_signif_jointly
 
 __all__ = ["lme", "Profile"]
+
+
+@dataclass(slots=True)
+class _FitInputs:
+    """Pre-assembled inputs for :meth:`lme._fit_from_components`.
+
+    Built by the public formula-based ``lme()`` constructor, or assembled
+    directly by callers that bypass formula parsing (e.g. ``hea.gamm``,
+    which composes ``smooth2random`` outputs into a unified design).
+
+    Field naming follows hea conventions: matrix/vector symbols (``X``,
+    ``y``, ``Z``, ``theta``) stay as their math names; longer-lived state
+    uses snake_case. ``re_terms`` holds the full :class:`ReTerms` from
+    :func:`materialize_bars` (carries ``Z``, ``Lambdat`` template, initial
+    ``theta``, ``cnms``, ``flist_levels``, ``Gp``).
+    """
+
+    # Design pieces -----------------------------------------------------
+    X_df: pl.DataFrame
+    """Fixed-effects design matrix, columns named by formula expansion."""
+
+    y: np.ndarray
+    """Response on the response scale (i.e. before offset subtraction)."""
+
+    re_terms: ReTerms
+    """Random-effects structure from :func:`materialize_bars`."""
+
+    offset: np.ndarray
+    """Per-row offset; zeros if none specified."""
+
+    # Inference mode ----------------------------------------------------
+    family: Family
+    """GLM family. Gaussian-identity is the current implemented path;
+    other families raise :class:`NotImplementedError` until Phase 2-5 of
+    ``lme-family-port.md`` land."""
+
+    reml: bool
+    """``True`` for REML, ``False`` for ML."""
+
+    # Optional inputs ---------------------------------------------------
+    weights: Optional[np.ndarray] = None
+    """Prior weights (``None`` ≡ unit weights)."""
+
+    mustart: Optional[np.ndarray] = None
+    """Starting μ for GLMM PIRLS (Phase 2)."""
+
+    etastart: Optional[np.ndarray] = None
+    """Starting η for GLMM PIRLS (Phase 2)."""
+
+    # Diagnostic carries ------------------------------------------------
+    # These follow the data through the fit so the resulting ``lme`` instance
+    # can produce diagnostics, predict on new data, and round-trip formulas.
+    expanded: Optional[ExpandedFormula] = None
+    """The parsed/expanded formula, used by ``predict`` and ``profile``."""
+
+    data: Optional[pl.DataFrame] = None
+    """Post-NA-omit row set, in row-aligned order with X/Z/y/offset."""
 
 
 def _sparse_Lt_spec(
@@ -186,9 +246,20 @@ class lme:
         with the same fixed-effects structure.
     """
 
-    def __init__(self, formula: str, data: pl.DataFrame, REML: bool = True):
+    def __init__(
+        self,
+        formula: str,
+        data: pl.DataFrame,
+        *,
+        family: Optional[Family] = None,
+        REML: bool = True,
+        weights: Optional[np.ndarray] = None,
+    ):
         self.formula = formula
         self.REML = REML
+
+        if family is None:
+            family = Gaussian()
 
         d = prepare_design(formula, data)
         if not d.expanded.bars:
@@ -199,26 +270,76 @@ class lme:
         # applies the same NA-omit policy as materialize() did for X — the
         # resulting Z stays row-aligned with X.
         re = materialize_bars(d.expanded, d.data)
-        X_df = d.X
         y = d.y.to_numpy().astype(float)
+
+        # Sum any `offset(...)` atoms from the formula. β̂, û and the
+        # variance components are all unchanged by the offset; only the
+        # fitted/residual scale shifts. ``y`` here is the *original* response
+        # (response scale); ``_fit_from_components`` builds ``y_solve = y -
+        # offset`` internally for the Gaussian fit.
+        n = len(y)
+        off = np.zeros(n)
+        for off_node in d.expanded.offsets:
+            off = off + _eval_atom(off_node, d.data).values.flatten().astype(float)
+
+        self._fit_from_components(_FitInputs(
+            X_df=d.X,
+            y=y,
+            re_terms=re,
+            offset=off,
+            family=family,
+            reml=REML,
+            weights=weights,
+            expanded=d.expanded,
+            data=d.data,
+        ))
+
+    def _fit_from_components(self, inputs: _FitInputs) -> None:
+        """Fit the model given pre-assembled design pieces.
+
+        Public ``lme()`` calls this after running ``prepare_design`` and
+        ``materialize_bars``. External callers (``hea.gamm``) call it
+        directly after composing smooth random-effect blocks via
+        ``smooth2random`` — bypassing the formula parser entirely.
+
+        Dispatches on ``inputs.family``: Gaussian-identity uses the
+        profiled-deviance + CHOLMOD path implemented here. Other families
+        raise :class:`NotImplementedError` until Phase 2-5 of
+        ``lme-family-port.md`` add the Laplace approximation.
+        """
+        is_gaussian_identity = (
+            inputs.family.name == "gaussian"
+            and inputs.family.link.name == "identity"
+        )
+        if not is_gaussian_identity:
+            raise NotImplementedError(
+                f"lme(family={inputs.family.name}, link={inputs.family.link.name}) "
+                "is not yet implemented; the non-Gaussian Laplace path lands "
+                "in Phase 2-5 of .claude/plans/lme-family-port.md. For now, "
+                "only family=gaussian(link='identity') is supported."
+            )
+        if inputs.weights is not None:
+            raise NotImplementedError(
+                "weights= is plumbed through _FitInputs but the Gaussian fit "
+                "path does not yet honour non-unit weights; Phase 8 adds this."
+            )
+
+        # Unpack inputs onto self — same attributes the original __init__ set.
+        re = inputs.re_terms
+        X_df = inputs.X_df
+        y = inputs.y
         X = X_df.to_numpy().astype(float)
         Z = re.Z
         n, p = X.shape
         q = Z.shape[1]
-
-        # Sum any `offset(...)` atoms from the formula, then fit on
-        # ``y_solve = y - offset`` (R's lme/lmer convention). β̂, û and the
-        # variance components are all unchanged by the offset; only the
-        # fitted/residual scale shifts. ``self.y`` keeps the original
-        # response so plots and diagnostics show the user's data.
-        off = np.zeros(n)
-        for off_node in d.expanded.offsets:
-            off = off + _eval_atom(off_node, d.data).values.flatten().astype(float)
-        self._offset = off
+        off = inputs.offset
         y_solve = y - off
+        REML = inputs.reml
 
-        self.data = d.data
-        self._expanded = d.expanded
+        self.family = inputs.family
+        self._offset = off
+        self.data = inputs.data
+        self._expanded = inputs.expanded
         self.X = X_df
         self.y = y
         self._y_solve = y_solve
@@ -392,8 +513,8 @@ class lme:
 
     # ---- deviance building blocks --------------------------------------
     #
-    # These are used both by __init__ (for the initial ML/REML fit) and by
-    # profile() (for the per-grid-point re-optimization).
+    # These are used both by _fit_from_components (for the initial ML/REML
+    # fit) and by profile() (for the per-grid-point re-optimization).
 
     def _build_Lt_sparse(self, theta: np.ndarray) -> csc_array:
         """Build Λᵀ as a CSC sparse matrix from the precomputed structure.
