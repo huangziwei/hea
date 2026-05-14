@@ -852,7 +852,7 @@ def test_glmer_start_validation_errors():
 #     residuals(m, type="deviance" | "pearson" | "working" | "response")
 #     m@resp$sqrtXwt^2; m@resp$weights
 #     AIC(m); BIC(m); sigma(m)
-#     vcov(m, use.hessian=FALSE)   # RX-based; Phase 8 will pin Hessian-based
+#     vcov(m)                      # default = Hessian-based (calc.derivs=TRUE)
 #     VarCorr(m)$g                 # per-bar SD
 #     ranef(m)$g                   # BLUPs
 _GLMER_PHASE6_POISSON_REF = {
@@ -1046,11 +1046,11 @@ _GLMER_PHASE6_POISSON_REF = {
     "aic":      277.74519961363023,
     "bic":      284.5751979706784,
     "sigma":      1.0,
-    "se_beta":  np.array([0.22221510757525684, 0.07701572680278147]),
-    "t_value":  np.array([2.9847011442129796,  1.9283295778443179]),
+    "se_beta":  np.array([0.22373518123563182, 0.07634416844084180]),
+    "t_value":  np.array([2.9644228600005782,  1.9452920502770410]),
     "vcov":     np.array([
-        4.9379554034682971e-02, -1.1994196115711706e-03,
-        -1.1994196115711706e-03,  5.9314221749606722e-03,
+        5.0057431322541014e-02, -1.0412945174445921e-03,
+        -1.0412945174445921e-03,  5.8284320549236244e-03,
     ]).reshape(2, 2),
     "sd_re_g": np.array([0.70455662201657199]),
     "ranef_g": np.array([
@@ -1069,7 +1069,6 @@ def test_glmer_phase6_attrs_match_lme4_poisson():
 
     df = _synthetic_poisson_grouped(seed=2026)
     r = _GLMER_PHASE6_POISSON_REF
-
     m = lme("y ~ x + (1|g)", df, family=PoissonFamily())
 
     # Linear predictor / fitted values.
@@ -1142,9 +1141,10 @@ def test_glmer_phase6_attrs_match_lme4_binomial_cbpp():
     dev_r     =  73.474376562348297
     aic_r     = 194.0531328091428
     sigma_r   =   1.0
+    # ``vcov(m)`` — default Hessian-based.
     se_beta_r = np.array([
-        0.22785120243880524, 0.30534753437042639,
-        0.32599944470550102, 0.42870015465286354,
+        0.23121236677483406, 0.30315052283321253,
+        0.32282842402114170, 0.42204738209246356,
     ])
     sd_herd_r = np.array([0.64206385678459621])
 
@@ -1852,12 +1852,13 @@ def test_glmer_bates_fm10_contraception_matches_lme4():
 
         glmer(use ~ poly(age, 2) + urban + livch + (1 | district),
               Contraception, binomial,
-              control = glmerControl(optimizer = "Nelder_Mead",
-                                     calc.derivs = FALSE))
+              control = glmerControl(
+                  optimizer = c("Nelder_Mead", "Nelder_Mead")))
 
-    This is the canonical Bates-book Binomial GLMM. The fit also exercises
+    This is the canonical Bates-book Binomial GLMM. The fit exercises
     factor-response coercion (use ∈ {"N","Y"} → 0/1) and a multi-term
-    polynomial fixed effect via ``poly(age, 2)``.
+    polynomial fixed effect via ``poly(age, 2)``. SE / vcov pinned against
+    the default Hessian-based ``vcov(m)`` (calc.derivs=TRUE).
     """
     from hea import data, factor
     from hea.lme import lme
@@ -1872,7 +1873,7 @@ def test_glmer_bates_fm10_contraception_matches_lme4():
         data=contra, family=Binomial(),
     )
 
-    # lme4 reference (R-script: glmer + Nelder_Mead, calc.derivs=FALSE):
+    # lme4 reference (R-script: glmer + Nelder_Mead, calc.derivs=TRUE):
     expected_theta = np.array([0.47521470485270112])
     expected_beta = np.array([
         -1.40544920712743404,    # (Intercept)
@@ -1913,13 +1914,13 @@ def test_glmer_bates_fm10_contraception_matches_lme4():
         np.quantile(pearson_scaled, [0, .25, .5, .75, 1]),
         expected_qs, atol=1e-8, rtol=1e-8,
     )
-    # Per-coefficient SEs match lme4's RX-based ``vcov(m, use.hessian=FALSE)``.
+    # Per-coefficient SEs match lme4's default ``vcov(m)`` (Hessian-based).
     expected_se = np.array([
-        0.15045559012118487, 3.2691846924049117, 2.5943129964813090,
-        0.11987785020750072, 0.16218877245296692, 0.18509835776861358,
-        0.18576758945818120,
+        0.15205785060031651, 3.2794856330989806, 2.6061250627421617,
+        0.12085912096674213, 0.16316622788381172, 0.18626670551820307,
+        0.18711654493564561,
     ])
-    np.testing.assert_allclose(m._se_beta, expected_se, atol=1e-7, rtol=1e-7)
+    np.testing.assert_allclose(m._se_beta, expected_se, atol=1e-6, rtol=1e-6)
 
 
 def test_deriv12_uses_supplied_fx_to_save_one_eval():

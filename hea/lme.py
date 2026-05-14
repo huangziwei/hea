@@ -26,7 +26,7 @@ from typing import Callable, Optional
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-from scipy.linalg import solve_triangular
+from scipy.linalg import qr as _scipy_qr, solve_triangular
 from scipy.optimize import minimize
 from scipy.sparse import csc_array, eye_array
 
@@ -1704,6 +1704,79 @@ def _nm_kwargs_from_opt_ctrl(opt_ctrl) -> dict:
     return out
 
 
+def _check_rank_drop_cols(
+    X: np.ndarray, col_names: list[str], *,
+    tol: float = 1e-7, action: str = "message+drop.cols",
+) -> tuple[np.ndarray, list[str], list[str]]:
+    """Detect rank-deficient design matrix and drop redundant columns.
+
+    Port of lme4's ``chkRank.drop.cols`` (modular.R:235-293). Uses a
+    pivoted QR to find a column subset of full rank, then drops the
+    remaining columns. Mirrors the action levels of
+    ``glmerControl(check.rankX=)``:
+
+    * ``"ignore"`` → never drop, return as-is.
+    * ``"silent.drop.cols"`` → drop, no message.
+    * ``"message+drop.cols"`` (default) → drop and print a message.
+    * ``"warn+drop.cols"`` → drop and emit ``UserWarning``.
+    * ``"stop.deficient"`` → raise on rank deficiency.
+
+    R's ``chkRank.drop.cols`` uses LINPACK QR pivoting (the same as
+    ``lm()``); we use SciPy's LAPACK pivoted QR. For "obvious"
+    deficiencies (one column is a linear combination of others) both
+    methods identify the same dropped column, but pathological cases may
+    differ; that's a known follow-up.
+
+    Returns ``(X_kept, kept_names, dropped_names)``.
+    """
+    if action == "ignore":
+        return X, list(col_names), []
+    n, p = X.shape
+    if p == 0:
+        return X, list(col_names), []
+    # Order-preserving Householder QR (no pivoting) — keep R[j,j] in the
+    # original column ordering. A column is rank-deficient iff its
+    # orthogonal component (R diagonal at that row) is small relative to
+    # ``|R[0,0]|``. This matches R's ``lm()``/``glmer`` behaviour of
+    # dropping the *later* of any pair of collinear columns — and matches
+    # LINPACK QR's pivoting heuristic for typical designs (main effects
+    # first, interactions later) while avoiding LAPACK-vs-LINPACK pivot
+    # divergences. Mirrors R's modular.R:259 (``qr(X, LAPACK=FALSE)``)
+    # via the simpler "first p_rank columns that add rank" semantics.
+    _, R = _scipy_qr(X, mode="economic")
+    diag = np.abs(np.diag(R))
+    thresh = tol * (diag[0] if diag.size else 1.0)
+    keep_mask = diag > thresh
+    rank = int(keep_mask.sum())
+    if rank == p:
+        return X, list(col_names), []
+    if action == "stop.deficient":
+        raise ValueError(
+            f"the fixed-effects model matrix is column rank deficient "
+            f"(rank(X) = {rank} < {p} = p); the fixed effects will be "
+            "jointly unidentifiable"
+        )
+    keep = np.flatnonzero(keep_mask).tolist()
+    dropped = [col_names[j] for j in range(p) if not keep_mask[j]]
+    msg = (
+        f"fixed-effect model matrix is rank deficient so dropping "
+        f"{p - rank} column / coefficient"
+        if p - rank == 1
+        else f"fixed-effect model matrix is rank deficient so dropping "
+             f"{p - rank} columns / coefficients"
+    )
+    if action == "warn+drop.cols":
+        warnings.warn(msg, UserWarning, stacklevel=3)
+    elif action == "message+drop.cols":
+        # lme4's ``message()`` writes to stderr; mirror.
+        import sys
+        print(msg, file=sys.stderr)
+    # ``silent.drop.cols`` falls through without printing.
+    X_kept = X[:, keep]
+    kept_names = [col_names[j] for j in keep]
+    return X_kept, kept_names, dropped
+
+
 def _normalize_glmer_control(control) -> dict:
     """Merge ``control=`` with lme4's ``glmerControl()`` defaults.
 
@@ -1870,8 +1943,27 @@ class lme:
                 )
             off = off + offset_arr
 
+        # 8.15 — rank-deficient column drop (lme4's ``chkRank.drop.cols``).
+        # Detect and drop columns at __init__ time so the fit only sees a
+        # full-rank X. Without this, the inner-Cholesky in PIRLS dies on
+        # rank-deficient designs (e.g. ``poly(age,2) + age:ch`` where
+        # ``age:ch`` rebuilds a column that ``poly(age,2)`` already spans).
+        X_arr = d.X.to_numpy().astype(float)
+        if X_arr.shape == (0, 0):
+            X_arr = np.zeros((n, 0))
+        X_arr_kept, kept_names, dropped_names = _check_rank_drop_cols(
+            X_arr, list(d.X.columns),
+            tol=1e-7, action=ctrl["check.rankX"],
+        )
+        if dropped_names:
+            X_for_fit = pl.DataFrame({c: X_arr_kept[:, i]
+                                       for i, c in enumerate(kept_names)})
+        else:
+            X_for_fit = d.X
+        self._dropped_cols = dropped_names
+
         fit_inputs = _FitInputs(
-            X_df=d.X,
+            X_df=X_for_fit,
             y=y,
             re_terms=re,
             offset=off,
@@ -2407,17 +2499,49 @@ class lme:
             self.sigma_squared = phi
             use_sc = 1
 
-        # ----- SE(β̂) / vcov_beta via the Schur-complement RX --------------
-        # ``pred.RX`` is the lower-Cholesky factor of the Schur-complement
-        # Hessian of the conditional log-likelihood w.r.t. β at the
-        # converged state. So Var(β̂) = σ² · (RX·RX')⁻¹ = σ² · RX⁻ᵀ·RX⁻¹.
-        if p > 0:
+        # ----- SE(β̂) / vcov_beta ------------------------------------------
+        # ``calc_derivs=True`` (lme4 default): use the numerical Hessian of
+        # the Stage 1 deviance at the optimum. lme4's vcov.merMod
+        # (lmer.R:2211-2219): ``V = solve(H)[β,β] + t(solve(H)[β,β])``
+        # which is ``2·solve(H)[β,β]`` when symmetric — the H is over
+        # (θ, β) and H is the Hessian of the deviance ``-2·logL`` so
+        # ``Var(β) = inv(H/2) = 2·inv(H)``.
+        # ``calc_derivs=False`` (or Stage 1 unavailable, e.g. nAGQ=0):
+        # fall back to the Schur-complement RX, ``Var(β̂) = σ²·RX⁻ᵀ·RX⁻¹``.
+        vcov_beta_hess = None
+        if (inputs.calc_derivs and p > 0 and do_stage1
+                and self._devfun_stage1 is not None):
+            try:
+                opt_par = np.concatenate([theta_hat, beta_hat])
+                _, H = _deriv12(self._devfun_stage1, opt_par,
+                                fx=self._optim["fval"])
+                H_inv = np.linalg.solve(H, np.eye(H.shape[0]))
+                # β-block of inv(H); lme4 then adds its transpose for
+                # symmetry (= 2·H_inv[β,β] when H_inv is symmetric).
+                bb = H_inv[n_theta:, n_theta:]
+                V = bb + bb.T
+                # Sanity check: positive definite.
+                eig = np.linalg.eigvalsh(0.5 * (V + V.T))
+                if eig.min() > 0:
+                    vcov_beta_hess = V
+                # After the deriv12 sweep, re-anchor pred/resp at the
+                # optimum so downstream code (predict, ranef, …) sees the
+                # converged state. Mirrors lme4 lmer.R:2614-2617.
+                if not inputs.use_last_params:
+                    self._devfun_stage1(opt_par)
+            except (np.linalg.LinAlgError, RuntimeError):
+                vcov_beta_hess = None
+        if p == 0:
+            vcov_beta = np.zeros((0, 0))
+            se_beta = np.zeros(0)
+        elif vcov_beta_hess is not None:
+            vcov_beta = vcov_beta_hess
+            se_beta = np.sqrt(np.diag(vcov_beta))
+        else:
+            # RX-based fallback.
             Rx_inv = solve_triangular(pred.RX, np.eye(p), lower=True)
             vcov_beta = self.sigma_squared * np.einsum("ij,ik->jk", Rx_inv, Rx_inv)
             se_beta = np.sqrt(np.diag(vcov_beta))
-        else:
-            vcov_beta = np.zeros((0, 0))
-            se_beta = np.zeros(0)
         self._vcov_beta_arr = vcov_beta
         self.vcov_beta = pl.DataFrame(
             {c: vcov_beta[:, i] for i, c in enumerate(self.column_names)}
