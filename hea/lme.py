@@ -817,6 +817,131 @@ def _pwrss_update(
     return pdev
 
 
+def _glmm_devfun_factory(
+    pred: _PredState,
+    resp: _GlmResponse,
+    *,
+    nagq: int,
+    tol_pwrss: float = 1e-7,
+    maxit_pwrss: int = 100,
+    verbose: int = 0,
+) -> Callable[[np.ndarray], float]:
+    """Build the Laplace deviance evaluator for a given optimization stage.
+
+    Port of ``mkdevfun`` (lmer.R:308-384) — the GLMM branch. Returns a closure
+    that takes a parameter vector and returns the Laplace approximation to
+    ``-2 log L_marginal``. The closure resets PIRLS state to the snapshotted
+    ``lp0`` (offset-free linear predictor) before each evaluation, so the
+    optimizer sees ``devfun`` as a pure function of its argument.
+
+    Parameters
+    ----------
+    pred, resp
+        Live :class:`_PredState` / :class:`_GlmResponse` objects. The factory
+        snapshots their state — ``lp0`` from ``pred.lin_pred(1)`` and (for
+        ``nagq>0``) the base offset from ``resp.offset`` — at call time, so
+        the caller must arrange these to the desired Stage-{0,1} starting
+        point before calling the factory. For lme4-matching numerics, the
+        caller should warm-start ``(β, u)`` to the conditional mode at
+        ``θ₀`` via a one-off :func:`_pwrss_update` first — mirroring
+        ``mkGlmerDevfun``'s ``.Call(glmerLaplace, ...)`` at modular.R:888.
+        Without this warm-up, ``lp0`` snapshots the constructor's zero state
+        and PIRLS inside each devfun call takes more iterations; the final
+        Laplace converges to the same value but at a different "staleness
+        offset" in ``ldL2``, producing ~1e-4 mismatches against lme4.
+    nagq : int
+        ``0`` for the Stage 0 (θ-only) closure, ``1`` for the Stage 1
+        (θ, β) closure. ``nagq > 1`` (adaptive Gauss-Hermite) is implemented
+        in Phase 9 — pass through this factory unchanged once the
+        ``_pwrss_update`` AGQ path is added.
+    tol_pwrss, maxit_pwrss, verbose
+        Passed to :func:`_pwrss_update`. Match lme4's
+        ``glmerControl(tolPwrss=1e-7, ...)`` defaults.
+
+    Returns
+    -------
+    callable
+        For ``nagq=0``: ``devfun(theta)``. For ``nagq>0``: ``devfun(par)``
+        where ``par = concatenate([theta, beta])``.
+
+    Notes
+    -----
+    The ``u_only`` direction is inverted relative to ``nagq``:
+
+    - ``nagq=0`` → ``u_only=False``. Stage 0 outer optimizer searches over θ,
+      so PIRLS must produce a joint (β, u) solve for each candidate θ.
+    - ``nagq>0`` → ``u_only=True``. Stage 1 outer optimizer searches over
+      (θ, β); β is folded into the offset (lmer.R:347 trick), so PIRLS only
+      needs to update u.
+
+    This mirrors lme4's C++ ``pwrssUpdate(rp, pp, ::Rf_asInteger(nAGQ_), ...)``
+    (external.cpp:386) which casts the integer ``nAGQ`` to the bool ``uOnly``.
+    The R fallback ``glmerPwrssUpdate`` has the opposite convention
+    (``uOnly <- nAGQ == 0L``, lmer.R:447) — that's a latent bug in the
+    seldom-exercised ``compDev=FALSE`` branch; the C++ behaviour is canonical.
+    """
+    if nagq < 0:
+        raise ValueError(f"nagq must be >= 0, got {nagq}")
+
+    # lp0 — the offset-free linear predictor at the current pred state.
+    # Each devfun call resets resp.update_mu(lp0) so PIRLS sees a fixed
+    # starting η across optimizer calls (lmer.R:333, 344). Snapshot via
+    # .copy() since lin_pred returns a fresh array, but be explicit.
+    lp0 = pred.lin_pred(1.0).copy()
+    u_only = nagq > 0
+
+    if nagq == 0:
+        def devfun_theta(theta: np.ndarray) -> float:
+            resp.update_mu(lp0)
+            pred.set_theta(np.asarray(theta, dtype=float))
+            _pwrss_update(
+                pred, resp,
+                u_only=u_only, tol=tol_pwrss,
+                maxit=maxit_pwrss, verbose=verbose,
+            )
+            # Refresh weights once more so post-fit reads see a state
+            # consistent with the final μ (mkdevfun lmer.R:337).
+            resp.update_weights()
+            return resp.laplace(
+                pred.log_det_l_sq, pred.log_det_rx_sq, pred.sqr_l_u(1.0),
+            )
+        return devfun_theta
+
+    # nagq > 0 — Stage 1 closure. Take the current resp.offset as
+    # base_offset; the outer optimizer's β slice is added to it via X·β
+    # before each PIRLS run (lmer.R:347-348, modular.R:996).
+    base_offset = resp.offset.copy()
+    n_theta = len(pred.theta)
+
+    def devfun_theta_beta(par: np.ndarray) -> float:
+        par = np.asarray(par, dtype=float)
+        theta = par[:n_theta]
+        spars = par[n_theta:]
+        # Order matters: reset offset → reset μ → THEN install the new
+        # X·β offset. lme4 (lmer.R:343-348) leaves μ at
+        # ``linkinv(baseOffset + lp0)`` deliberately, even though the new
+        # offset is ``baseOffset + X·β`` — so the first PIRLS iteration's
+        # working weights come from a μ that excludes ``X·β``, while the
+        # in-loop ``update_mu`` then computes the next μ from
+        # ``linkinv(new_offset + linPred)``. Swapping the order changes the
+        # iteration trajectory and produces a ~1e-4 mismatch in ``ldL2``.
+        resp.offset = base_offset.copy()
+        resp.update_mu(lp0)
+        if len(spars) > 0:
+            resp.offset = base_offset + pred.X @ spars
+        pred.set_theta(theta)
+        _pwrss_update(
+            pred, resp,
+            u_only=u_only, tol=tol_pwrss,
+            maxit=maxit_pwrss, verbose=verbose,
+        )
+        resp.update_weights()
+        return resp.laplace(
+            pred.log_det_l_sq, pred.log_det_rx_sq, pred.sqr_l_u(1.0),
+        )
+    return devfun_theta_beta
+
+
 class lme:
     """Linear mixed-effects model, fit by ML or REML profiled deviance.
 

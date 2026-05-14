@@ -20,6 +20,7 @@ from hea.formula import materialize_bars, parse, expand
 from hea.lme import (
     _GlmResponse,
     _PredState,
+    _glmm_devfun_factory,
     _internal_glmer_wrk_iter,
     _pwrss_update,
 )
@@ -448,3 +449,212 @@ def test_pwrss_update_step_halving_recovers_from_overstep():
     pdev = _pwrss_update(state, resp, u_only=False, tol=1e-8, maxit=200)
     assert np.isfinite(pdev)
     assert pdev > 0
+
+
+# ----------------------------------------------------------------------
+# Phase 4: Laplace deviance evaluator. Tests _glmm_devfun_factory's two
+# closures against `lme4::mkGlmerDevfun(nAGQ=0)` and `updateGlmerDevfun(
+# nAGQ=1)` at the converged (θ̂, β̂) of a real glmer fit.
+# ----------------------------------------------------------------------
+
+
+def _synthetic_poisson_grouped(seed: int, n_groups: int = 12, n_per: int = 6):
+    """Generate a synthetic Poisson GLMM with one scalar random intercept."""
+    rng = np.random.default_rng(seed)
+    n = n_groups * n_per
+    g = np.repeat(np.arange(n_groups), n_per)
+    x = rng.standard_normal(n)
+    b = rng.standard_normal(n_groups) * 0.6
+    eta = 0.4 + 0.25 * x + b[g]
+    y = rng.poisson(np.exp(eta)).astype(float)
+    df = pl.DataFrame({
+        "y": y, "x": x, "g": [f"G{gi:02d}" for gi in g],
+    })
+    return df
+
+
+def _r_glmer_devfun_pin(formula: str, csv_data: str, family_r: str):
+    """Fit lme4::glmer, then evaluate Stage-0 and Stage-1 devfun at (θ̂, β̂).
+
+    Returns a dict with keys ``theta``, ``beta``, ``dev_stage0``,
+    ``dev_stage1`` — all high-precision strings parsed from R's
+    ``format(..., digits=17, scientific=TRUE)``.
+    """
+    r_script = f"""
+        suppressMessages(suppressWarnings(library(lme4)))
+        d <- read.csv(text="{csv_data}")
+        d$g <- factor(d$g)
+        m <- glmer({formula}, data=d, family={family_r}())
+        theta_hat <- getME(m, "theta")
+        beta_hat  <- getME(m, "beta")
+        # Build the Stage 0 closure (devfun_nAGQ0) and evaluate at θ̂.
+        glmod <- glFormula({formula}, data=d, family={family_r}())
+        dev0  <- mkGlmerDevfun(glmod$fr, glmod$X, glmod$reTrms,
+                               family={family_r}(), nAGQ=0)
+        dev_stage0 <- dev0(theta_hat)
+        # Transition to Stage 1 (nAGQ=1) and evaluate at (θ̂, β̂).
+        dev1  <- updateGlmerDevfun(dev0, glmod$reTrms, nAGQ=1L)
+        dev_stage1 <- dev1(c(theta_hat, beta_hat))
+        hp <- function(...) format(c(...), digits=17, scientific=TRUE)
+        cat("RESULT_THETA", hp(theta_hat), "\\n")
+        cat("RESULT_BETA",  hp(beta_hat),  "\\n")
+        cat("RESULT_DEV0",  hp(dev_stage0), "\\n")
+        cat("RESULT_DEV1",  hp(dev_stage1), "\\n")
+    """
+    out = subprocess.run(
+        ["R", "--vanilla", "--slave", "-e", r_script],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    parsed = {
+        line.split(maxsplit=1)[0]: line.split(maxsplit=1)[1]
+        for line in out.strip().split("\n")
+        if line.startswith("RESULT_")
+    }
+    return {
+        "theta": np.array(parsed["RESULT_THETA"].split(), dtype=float),
+        "beta":  np.array(parsed["RESULT_BETA"].split(),  dtype=float),
+        "dev_stage0": float(parsed["RESULT_DEV0"]),
+        "dev_stage1": float(parsed["RESULT_DEV1"]),
+    }
+
+
+def test_devfun_stage0_matches_lme4_poisson():
+    """``devfun_stage0(θ̂)`` ≡ lme4's ``mkGlmerDevfun(nAGQ=0)(θ̂)`` at ≤ 1e-9.
+
+    Stage 0 PIRLS does a joint (β, u) solve, so the deviance at θ̂ here is
+    NOT the same as ``-2 logLik(m)`` — it's the joint-conditional deviance
+    that lme4 reports as ``dev0(θ̂)``. Phase 4 verifies the closure
+    machinery; Phase 5 will tie this into the full optimizer.
+
+    The initial :func:`_pwrss_update` before the factory mirrors
+    ``mkGlmerDevfun``'s ``.Call(glmerLaplace, ...)`` warm-up at
+    modular.R:888 — without it, the cold-start lp0 would change the PIRLS
+    iteration count and the stale ``ldL2`` lme4 reports drifts by ~1e-4.
+    """
+    df = _synthetic_poisson_grouped(seed=2026)
+    csv = "y,x,g\n" + "\n".join(
+        f"{int(df['y'][i])},{df['x'][i]:.10g},{df['g'][i]}" for i in range(df.height)
+    )
+    r = _r_glmer_devfun_pin("y ~ x + (1|g)", csv, "poisson")
+    theta_hat = r["theta"]
+
+    X, y_arr, Z_sp, re_terms, _ = _build_design_pieces("y ~ x + (1|g)", df)
+    pred = _PredState(X, Z_sp, re_terms)
+    resp = _GlmResponse(Poisson(), y_arr)
+    _pwrss_update(pred, resp, u_only=False, tol=1e-7, maxit=100)
+
+    devfun_stage0 = _glmm_devfun_factory(pred, resp, nagq=0)
+    dev_hea = devfun_stage0(theta_hat)
+    assert dev_hea == pytest.approx(r["dev_stage0"], rel=1e-9, abs=1e-9)
+
+
+def test_devfun_stage1_matches_lme4_poisson():
+    """``devfun_stage1([θ̂, β̂])`` ≡ lme4's ``nAGQ=1`` devfun at ≤ 1e-9.
+
+    Stage 1 folds β̂ into the offset and runs PIRLS with ``u_only=True``.
+    The returned deviance equals ``-2 logLik(m)`` at the converged
+    parameters — the value lme4's outer optimizer minimises.
+    """
+    df = _synthetic_poisson_grouped(seed=2026)
+    csv = "y,x,g\n" + "\n".join(
+        f"{int(df['y'][i])},{df['x'][i]:.10g},{df['g'][i]}" for i in range(df.height)
+    )
+    r = _r_glmer_devfun_pin("y ~ x + (1|g)", csv, "poisson")
+    theta_hat, beta_hat = r["theta"], r["beta"]
+
+    X, y_arr, Z_sp, re_terms, _ = _build_design_pieces("y ~ x + (1|g)", df)
+    pred = _PredState(X, Z_sp, re_terms)
+    resp = _GlmResponse(Poisson(), y_arr)
+
+    # Mirror the R script's full lme4 sequence: (a) init PIRLS via
+    # mkGlmerDevfun(nAGQ=0) with joint solve, (b) one call to the Stage 0
+    # closure at θ̂, (c) updateGlmerDevfun(nAGQ=1) re-snapshots lp0 from
+    # post-step-(b) state, then dev_stage1 uses that lp0. Without step (b)
+    # the Stage 1 lp0 captures state at θ₀ instead of θ̂, and PIRLS in the
+    # Stage 1 closure follows a different iteration trajectory.
+    _pwrss_update(pred, resp, u_only=False, tol=1e-7, maxit=100)
+    devfun_stage0 = _glmm_devfun_factory(pred, resp, nagq=0)
+    devfun_stage0(theta_hat)
+
+    devfun_stage1 = _glmm_devfun_factory(pred, resp, nagq=1)
+    dev_hea = devfun_stage1(np.concatenate([theta_hat, beta_hat]))
+    assert dev_hea == pytest.approx(r["dev_stage1"], rel=1e-9, abs=1e-9)
+
+
+def test_devfun_factory_pure_function_property():
+    """Calling devfun(θ) twice with the same arg must give the same value.
+
+    Each call resets PIRLS to the snapshotted ``lp0``, so the optimizer
+    can rely on devfun being a pure function of its argument regardless
+    of how many times it was called or with what intermediate values.
+    """
+    df = _synthetic_poisson_grouped(seed=42)
+    X, y_arr, Z_sp, re_terms, _ = _build_design_pieces("y ~ x + (1|g)", df)
+    pred = _PredState(X, Z_sp, re_terms)
+    resp = _GlmResponse(Poisson(), y_arr)
+    _pwrss_update(pred, resp, u_only=False, tol=1e-7, maxit=100)
+
+    devfun_stage0 = _glmm_devfun_factory(pred, resp, nagq=0)
+    theta_a = np.array([0.5])
+    theta_b = np.array([1.3])
+    # Probe values in a noisy interleaved order so any state-carryover bug
+    # would show up as a mismatch on the repeat.
+    d_a_1 = devfun_stage0(theta_a)
+    d_b   = devfun_stage0(theta_b)
+    d_a_2 = devfun_stage0(theta_a)
+    assert d_a_1 == pytest.approx(d_a_2, rel=1e-12, abs=1e-12)
+    assert d_a_1 != pytest.approx(d_b, rel=1e-3)
+
+
+def test_devfun_stage1_with_empty_fixef_slice():
+    """When the model has no fixed effects (p=0), the Stage-1 closure must
+    handle the empty β slice without trying to do ``X @ empty``.
+    """
+    df = _synthetic_poisson_grouped(seed=7, n_groups=8, n_per=5)
+    # Intercept-only formula → empty X. lme4 still supports this.
+    csv = "y,g\n" + "\n".join(
+        f"{int(df['y'][i])},{df['g'][i]}" for i in range(df.height)
+    )
+    r_script = f"""
+        suppressMessages(suppressWarnings(library(lme4)))
+        d <- read.csv(text="{csv}")
+        d$g <- factor(d$g)
+        m <- glmer(y ~ 0 + (1|g), data=d, family=poisson())
+        theta_hat <- getME(m, "theta")
+        beta_hat  <- getME(m, "beta")
+        glmod <- glFormula(y ~ 0 + (1|g), data=d, family=poisson())
+        dev0  <- mkGlmerDevfun(glmod$fr, glmod$X, glmod$reTrms,
+                               family=poisson(), nAGQ=0)
+        dev1  <- updateGlmerDevfun(dev0, glmod$reTrms, nAGQ=1L)
+        hp <- function(...) format(c(...), digits=17, scientific=TRUE)
+        cat("RESULT_THETA", hp(theta_hat), "\\n")
+        cat("RESULT_DEV1",  hp(dev1(c(theta_hat, beta_hat))), "\\n")
+    """
+    out = subprocess.run(
+        ["R", "--vanilla", "--slave", "-e", r_script],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    parsed = {
+        line.split(maxsplit=1)[0]: line.split(maxsplit=1)[1]
+        for line in out.strip().split("\n")
+        if line.startswith("RESULT_")
+    }
+    theta_hat = np.array(parsed["RESULT_THETA"].split(), dtype=float)
+    dev1_r = float(parsed["RESULT_DEV1"])
+
+    # polars to_numpy on a 0-column DataFrame returns shape (0, 0) — work
+    # around by building X explicitly. The rest of _build_design_pieces is
+    # still usable for y/Z.
+    _, y_arr, Z_sp, re_terms, _ = _build_design_pieces("y ~ 0 + (1|g)", df)
+    X = np.zeros((df.height, 0), dtype=float)
+    pred = _PredState(X, Z_sp, re_terms)
+    resp = _GlmResponse(Poisson(), y_arr)
+    # The R script for this test does NOT call dev0(theta_hat) between
+    # mkGlmerDevfun and updateGlmerDevfun, so Stage 1's lp0 is captured
+    # right after the init PIRLS at θ₀. Match that here — single init pass,
+    # then straight to the Stage 1 factory.
+    _pwrss_update(pred, resp, u_only=False, tol=1e-7, maxit=100)
+
+    devfun_stage1 = _glmm_devfun_factory(pred, resp, nagq=1)
+    dev_hea = devfun_stage1(theta_hat)  # par = theta only (empty β slice)
+    assert dev_hea == pytest.approx(dev1_r, rel=1e-9, abs=1e-9)
