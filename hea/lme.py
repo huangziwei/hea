@@ -2231,13 +2231,17 @@ class lme:
         ``family$dev.resids(y, μ, w)``, which for most families is the
         per-observation **squared** deviance contribution. R's
         ``residuals.merMod(type="deviance")`` then takes the signed
-        square-root — that's what we report by default.
+        square-root — that's what we report by default. For Gaussian
+        LMM (no ``_resp``), the deviance residual collapses to ``y − μ``.
         """
-        rp = self._resp
+        rp = getattr(self, "_resp", None)
+        if rp is None:
+            # Gaussian-identity LMM path — devresids are just raw residuals.
+            return np.asarray(self.y, dtype=float) - np.asarray(self.fitted, dtype=float)
         return np.sign(rp.y - rp.mu) * np.sqrt(rp.deviance_residuals())
 
     def residuals_of(self, type: str = "deviance") -> np.ndarray:
-        """GLMM residuals on the chosen scale — mirrors ``residuals.merMod``.
+        """Residuals on the chosen scale — mirrors ``residuals.merMod``.
 
         Types:
 
@@ -2247,9 +2251,26 @@ class lme:
         - ``"response"``: ``y − μ`` on the response scale.
 
         Port of ``residuals.glmResp`` (respModule.cpp / methods.R:1310-1349).
-        For Gaussian-identity, all four collapse to ``y − μ``.
+        For Gaussian-identity (LMM, or GLMM with the trivial family), all
+        four collapse to ``y − μ``.
         """
-        rp = self._resp
+        rp = getattr(self, "_resp", None)
+        if rp is None:
+            # Gaussian-identity LMM path: every type collapses to y − μ,
+            # except "pearson" which scales by √w when prior weights ≠ 1.
+            y = np.asarray(self.y, dtype=float)
+            mu = np.asarray(self.fitted, dtype=float)
+            if type == "response" or type == "deviance" or type == "working":
+                return y - mu
+            if type == "pearson":
+                w = getattr(self, "prior_weights", None)
+                if w is None:
+                    return y - mu
+                return (y - mu) * np.sqrt(np.asarray(w, dtype=float))
+            raise ValueError(
+                f"unknown residual type {type!r}; expected one of "
+                "'deviance', 'pearson', 'working', 'response'"
+            )
         if type == "deviance":
             return self._deviance_residuals_signed()
         if type == "pearson":
