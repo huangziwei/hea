@@ -41,6 +41,14 @@ from scipy import stats as _sps
 from .formula import set_ordered_cols
 
 
+def _label_key_to_str(k):
+    # polars casts bool to lowercase "true"/"false", but str(True) is "True".
+    # Match polars so factor(col != x, labels={False: ..., True: ...}) works.
+    if isinstance(k, bool):
+        return "true" if k else "false"
+    return str(k)
+
+
 class _LazyFactor:
     """Deferred ``factor()`` placeholder, resolved by ``mutate``/``select``.
 
@@ -74,7 +82,7 @@ class _LazyFactor:
         s_utf8 = base.cast(pl.Utf8)
 
         if self.labels is not None:
-            old = [str(k) for k in self.labels.keys()]
+            old = [_label_key_to_str(k) for k in self.labels.keys()]
             new = [str(v) for v in self.labels.values()]
             out_expr = s_utf8.replace_strict(old, new, return_dtype=pl.Enum(new))
         else:
@@ -180,7 +188,7 @@ def factor(
     s = series.cast(pl.Utf8)
 
     if labels is not None:
-        old = [str(k) for k in labels.keys()]
+        old = [_label_key_to_str(k) for k in labels.keys()]
         new = [str(v) for v in labels.values()]
         out = s.replace_strict(old, new, return_dtype=pl.Enum(new))
     else:
