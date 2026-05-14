@@ -669,12 +669,20 @@ def test_devfun_stage1_with_empty_fixef_slice():
 
 
 def _r_glmer_full_fit(formula: str, csv_data: str, family_r: str):
-    """Fit lme4::glmer and return theta_hat, beta_hat, deviance."""
+    """Fit lme4::glmer with ``optimizer="Nelder_Mead"`` for both stages.
+
+    The default lme4 setup uses ``bobyqa`` for Stage 0 and ``Nelder_Mead``
+    for Stage 1; hea uses the ported ``Nelder_Mead`` for both. Configuring
+    lme4 to also use Nelder_Mead for both stages removes the optimizer-choice
+    confound — the remaining differences come only from initial-step
+    heuristics and tolerance settings, both of which we mirror.
+    """
     r_script = f"""
         suppressMessages(suppressWarnings(library(lme4)))
         d <- read.csv(text="{csv_data}")
         d$g <- factor(d$g)
-        m <- glmer({formula}, data=d, family={family_r}())
+        m <- glmer({formula}, data=d, family={family_r}(),
+                   control=glmerControl(optimizer=c("Nelder_Mead", "Nelder_Mead")))
         hp <- function(...) format(c(...), digits=17, scientific=TRUE)
         cat("RESULT_THETA", hp(getME(m, "theta")), "\\n")
         cat("RESULT_BETA",  hp(getME(m, "beta")),  "\\n")
@@ -699,23 +707,10 @@ def _r_glmer_full_fit(formula: str, csv_data: str, family_r: str):
 def test_glmer_poisson_full_fit_matches_lme4():
     """Full ``hea.lme(..., family=poisson())`` fit ≡ ``lme4::glmer(..., family=poisson)``.
 
-    Both stages of the outer optimizer must converge to the same neighbourhood
-    as lme4. Tolerance: ~1e-4 on θ̂/β̂ — limited by two factors that aren't
-    bugs and can't be tightened without losing the parity with how lme4
-    behaves in practice:
-
-    * scipy's L-BFGS-B (finite-difference gradient) vs lme4's bobyqa/
-      Nelder_Mead (derivative-free) take different paths to the optimum.
-    * lme4's PIRLS reports ``ldL2`` from the iter-before-last (the "stale
-      weights" trick documented at :func:`_glmm_devfun_factory`), so the
-      Laplace value at a given (θ, β) depends on how warm-started PIRLS was
-      — making both lme4 and hea's deviance surfaces *slightly* different
-      functions whose minima sit at slightly different (θ̂, β̂).
-
-    Two glmer fits on the same data with different default optimizers
-    (bobyqa vs Nelder_Mead) can themselves disagree by ~1e-4 — see lme4's
-    own ``allFit()`` tooling. Our agreement at ~1e-5 is well inside that
-    band.
+    Compared to ``lme4::glmer`` configured with
+    ``optimizer=c("Nelder_Mead", "Nelder_Mead")`` so both stages use the
+    same algorithm hea has ported from lme4 (see ``hea._nelder_mead``).
+    Tolerance ≤ 1e-7 on θ̂/β̂ — anything looser would mask actual bugs.
     """
     from hea.lme import lme  # local import — keep test file's top imports lean
     from hea.family import Poisson as PoissonFamily
@@ -728,13 +723,13 @@ def test_glmer_poisson_full_fit_matches_lme4():
 
     m = lme("y ~ x + (1|g)", df, family=PoissonFamily())
 
-    np.testing.assert_allclose(m.theta, r["theta"], atol=1e-4, rtol=1e-4)
-    np.testing.assert_allclose(m._beta, r["beta"],  atol=1e-4, rtol=1e-4)
-    np.testing.assert_allclose(m.deviance, r["deviance"], atol=1e-4, rtol=1e-4)
+    np.testing.assert_allclose(m.theta, r["theta"], atol=1e-7, rtol=1e-7)
+    np.testing.assert_allclose(m._beta, r["beta"],  atol=1e-7, rtol=1e-7)
+    np.testing.assert_allclose(m.deviance, r["deviance"], atol=1e-9, rtol=1e-9)
     # Public-API check: bhat as a DataFrame with R-canonical column names.
     assert m.bhat.columns == ["(Intercept)", "x"]
     np.testing.assert_allclose(
-        m.bhat.row(0), r["beta"], atol=1e-4, rtol=1e-4,
+        m.bhat.row(0), r["beta"], atol=1e-7, rtol=1e-7,
     )
 
 
@@ -766,7 +761,8 @@ def test_glmer_binomial_full_fit_matches_lme4_cbpp():
         ["R", "--vanilla", "--slave", "-e", """
             suppressMessages(library(lme4)); data(cbpp)
             m <- glmer(cbind(incidence, size-incidence) ~ period + (1|herd),
-                       data=cbpp, family=binomial())
+                       data=cbpp, family=binomial(),
+                       control=glmerControl(optimizer=c("Nelder_Mead","Nelder_Mead")))
             hp <- function(...) format(c(...), digits=17, scientific=TRUE)
             cat("THETA", hp(getME(m, "theta")), "\\n")
             cat("BETA",  hp(getME(m, "beta")),  "\\n")
@@ -784,9 +780,9 @@ def test_glmer_binomial_full_fit_matches_lme4_cbpp():
     m = lme("y_prop ~ period + (1|herd)", df,
             family=BinomialFamily(), weights=size)
 
-    np.testing.assert_allclose(m.theta, theta_r, atol=1e-4, rtol=1e-4)
-    np.testing.assert_allclose(m._beta, beta_r,  atol=1e-4, rtol=1e-4)
-    np.testing.assert_allclose(m.deviance, dev_r, atol=1e-4, rtol=1e-4)
+    np.testing.assert_allclose(m.theta, theta_r, atol=1e-7, rtol=1e-7)
+    np.testing.assert_allclose(m._beta, beta_r,  atol=1e-7, rtol=1e-7)
+    np.testing.assert_allclose(m.deviance, dev_r, atol=1e-9, rtol=1e-9)
 
 
 def test_glmer_intercept_only_poisson():
@@ -807,7 +803,8 @@ def test_glmer_intercept_only_poisson():
             suppressMessages(library(lme4))
             d <- read.csv(text="{csv}")
             d$g <- factor(d$g)
-            m <- glmer(y ~ 0 + (1|g), data=d, family=poisson())
+            m <- glmer(y ~ 0 + (1|g), data=d, family=poisson(),
+                       control=glmerControl(optimizer=c("Nelder_Mead","Nelder_Mead")))
             hp <- function(...) format(c(...), digits=17, scientific=TRUE)
             cat("THETA", hp(getME(m, "theta")), "\\n")
             cat("DEV",   hp(-2 * as.numeric(logLik(m))), "\\n")
@@ -820,8 +817,8 @@ def test_glmer_intercept_only_poisson():
     dev_r   = float(lines["DEV"])
 
     m = lme("y ~ 0 + (1|g)", df, family=PoissonFamily())
-    np.testing.assert_allclose(m.theta, theta_r, atol=1e-4, rtol=1e-4)
-    np.testing.assert_allclose(m.deviance, dev_r, atol=1e-4, rtol=1e-4)
+    np.testing.assert_allclose(m.theta, theta_r, atol=1e-7, rtol=1e-7)
+    np.testing.assert_allclose(m.deviance, dev_r, atol=1e-9, rtol=1e-9)
     assert m.p == 0
     assert m._beta.shape == (0,)
 
@@ -843,9 +840,11 @@ def test_glmer_nagq0_init_step_false_runs_stage1_directly():
 
     assert m_default._optim_stage0 is not None
     assert m_no_stage0._optim_stage0 is None
-    # Without Stage 0 warm-up, Stage 1 starts cold (β=0). L-BFGS-B on the
-    # noisy Laplace surface converges to a slightly different neighbour of
-    # the optimum — both valid fits but not byte-identical.
+    # Without Stage 0 warm-up, Stage 1 starts cold (β=0); Nelder-Mead is
+    # derivative-free and gets stuck at slightly different simplex
+    # configurations within its xtol band when starting cold vs warm.
+    # That's expected — the warm-started path (default) is more numerically
+    # accurate. ~1e-3 is the realistic agreement.
     np.testing.assert_allclose(
         m_default.theta, m_no_stage0.theta, atol=1e-3, rtol=1e-3,
     )

@@ -32,6 +32,7 @@ from ._cholmod import (
     csc_array,
     eye_array,
 )
+from ._nelder_mead import NelderMead, NMStatus
 
 from .family import Family, Gaussian
 from .formula import (
@@ -180,6 +181,22 @@ def _theta_diag_idx(bar_sizes: list[int]) -> list[int]:
             cum += c - i
         off += c * (c + 1) // 2
     return diag
+
+
+def _beta_sd_from_RX(RX: np.ndarray) -> np.ndarray:
+    """Per-coefficient SD ``√diag((RX·RX')⁻¹)`` — port of lme4's ``pp$unsc()``.
+
+    lme4's ``merPredD::unsc()`` (predModule.cpp:371) returns ``RXi·RXi'``
+    where ``RXi = RX⁻¹`` from the upper-triangular factor of the
+    Schur-complement Hessian. We store ``RX`` as the lower-triangular
+    factor (``RX·RX' = VtV_schur``), so ``unsc = RX⁻ᵀ·RX⁻¹`` and
+    ``diag(unsc)[j] = Σᵢ (RX⁻¹)[i,j]²`` — i.e. the column-norms² of
+    ``A = RX⁻¹``. Used by Stage 1 Nelder-Mead step-size scaling
+    (lmer.R:2535).
+    """
+    p = RX.shape[0]
+    A = solve_triangular(RX, np.eye(p), lower=True)
+    return np.sqrt(np.sum(A * A, axis=0))
 
 
 def _per_bar_relative_cov(theta: np.ndarray, bar_sizes: list[int]) -> list[np.ndarray]:
@@ -1407,26 +1424,41 @@ class lme:
         tol_pwrss = 1e-7
         maxit_pwrss = 100
 
+        # Translate the (lower, upper) tuple bounds into the arrays
+        # :class:`NelderMead` expects, with ±inf for one-sided bounds.
+        lb_theta = np.array(
+            [-np.inf if lo is None else float(lo) for (lo, _) in bounds_theta]
+        )
+        ub_theta = np.array(
+            [np.inf if hi is None else float(hi) for (_, hi) in bounds_theta]
+        )
+        lb_beta = np.full(p, -np.inf)
+        ub_beta = np.full(p, np.inf)
+
         if nagq0_init_step:
             # Stage 0 — joint PIRLS at θ₀, then optimize devfun over θ only.
             _pwrss_update(pred, resp, u_only=False, tol=tol_pwrss, maxit=maxit_pwrss)
             devfun_stage0 = _glmm_devfun_factory(
                 pred, resp, nagq=0, tol_pwrss=tol_pwrss, maxit_pwrss=maxit_pwrss,
             )
-            res0 = minimize(
-                devfun_stage0, theta0,
-                method="L-BFGS-B", bounds=bounds_theta,
-                options={"ftol": 1e-12, "gtol": 1e-8, "maxiter": 1000},
-            )
-            theta_stage0 = res0.x
-            # Re-anchor pred/resp at the Stage 0 optimum. scipy's last
-            # devfun call may have been a probe rather than the optimum.
+            # Stage 0 step sizes: lme4's R wrapper default
+            # (optimizer.R:5) ``xst = rep(0.02, n)``. ``xt = xst·5e-4``.
+            xst0 = np.full(n_theta, 0.02)
+            xt0 = xst0 * 5e-4
+            nm0 = NelderMead(lb_theta, ub_theta, xst0, theta0, xtol_abs=xt0)
+            status0 = nm0.minimize(devfun_stage0)
+            theta_stage0 = nm0.xpos().copy()
+            # Re-anchor pred/resp at the Stage 0 optimum. ``minimize`` may
+            # have last evaluated at a probe — recall at the best point.
             devfun_stage0(theta_stage0)
             # lme4 uses pp.beta(1) (= the converged β from Stage 0 joint
             # PIRLS) as the Stage 1 starting β. modular.R:475 (`fixef0 <-
             # rho$pp$delb`). A user-supplied ``start["beta"]`` overrides.
             beta_start = beta_user_start if beta_user_start is not None else pred.beta(1.0).copy()
-            self._optim_stage0 = res0
+            self._optim_stage0 = {
+                "par": theta_stage0, "fval": nm0.value(),
+                "feval": nm0.nevals, "status": int(status0),
+            }
         else:
             # No Stage 0 — go straight to Stage 1 with θ₀ and β=0 (or
             # user-supplied β).
@@ -1442,17 +1474,28 @@ class lme:
             pred, resp, nagq=1, tol_pwrss=tol_pwrss, maxit_pwrss=maxit_pwrss,
         )
         start_par = np.concatenate([theta_stage0, beta_start])
-        bounds_par = bounds_theta + bounds_beta
-        res1 = minimize(
-            devfun_stage1, start_par,
-            method="L-BFGS-B", bounds=bounds_par,
-            options={"ftol": 1e-12, "gtol": 1e-8, "maxiter": 1000},
-        )
-        theta_hat = res1.x[:n_theta]
-        beta_hat = res1.x[n_theta:]
+        lb_par = np.concatenate([lb_theta, lb_beta])
+        ub_par = np.concatenate([ub_theta, ub_beta])
+        # Stage 1 step sizes — lme4's ``adj=TRUE`` tweak at lmer.R:2533-2540:
+        # θ block uses 0.1, β block uses ``min(βSD, 10)``, all scaled by 0.2.
+        # ``βSD`` is sqrt(diag(unsc())); unsc = (RX·RX')⁻¹ with RX from the
+        # current weighted decomposition (the Stage-0 converged state).
+        beta_sd = _beta_sd_from_RX(pred.RX) if p > 0 else np.zeros(0)
+        xst1 = 0.2 * np.concatenate([
+            np.full(n_theta, 0.1),
+            np.minimum(beta_sd, 10.0),
+        ])
+        xt1 = xst1 * 5e-4
+        nm1 = NelderMead(lb_par, ub_par, xst1, start_par, xtol_abs=xt1)
+        status1 = nm1.minimize(devfun_stage1)
+        theta_hat = nm1.xpos()[:n_theta].copy()
+        beta_hat = nm1.xpos()[n_theta:].copy()
         # Re-anchor at the Stage 1 optimum.
-        devfun_stage1(res1.x)
-        self._optim = res1
+        devfun_stage1(nm1.xpos())
+        self._optim = {
+            "par": nm1.xpos().copy(), "fval": nm1.value(),
+            "feval": nm1.nevals, "status": int(status1),
+        }
 
         self.theta = theta_hat
         self._beta = beta_hat
@@ -1465,7 +1508,7 @@ class lme:
             {c: [float(beta_hat[i])] for i, c in enumerate(self.column_names)}
         )
         self.fixef = self.bhat                            # R-canonical alias
-        self.deviance = float(res1.fun)
+        self.deviance = float(self._optim["fval"])
         # ML log-likelihood from the Laplace deviance.
         self.loglike = -0.5 * self.deviance
 
