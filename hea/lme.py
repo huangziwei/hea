@@ -1501,16 +1501,172 @@ class lme:
         self._beta = beta_hat
         self._pred = pred
         self._resp = resp
+        self.method = "glmer.ML"   # lme4's @resp$family != gaussian path
 
-        # Minimal Phase 5 attributes — Phase 6 adds the rest of the
-        # merMod-equivalent surface.
+        # ----- post-fit attributes (Phase 6) ------------------------------
+
+        # Caches that ``_ranef`` / ``predict`` need. Mirror what the
+        # Gaussian path stashes in ``_fit_from_components``.
+        template = re.Lambdat
+        lt_theta_pos, lt_indices, lt_indptr = _sparse_Lt_spec(template)
+        self._template = template
+        self._lt_theta_pos = lt_theta_pos
+        self._lt_indices = lt_indices
+        self._lt_indptr = lt_indptr
+        self._lt_shape = template.shape
+        self._Z_sp = Z_sp
+        self._eye_q_sp = eye_array(q, format="csc")
+        self._chol_factor = pred.chol_factor
+
+        # Snapshot Λ and L at θ̂ — same shapes as the Gaussian path so
+        # downstream code (profile/ranef/plot_design) works unchanged.
+        # ``Lambda`` is dense q×q; ``L`` is the lower CHOLMOD factor.
+        self.Lambda = pred.lambdat_sp.T.toarray()
+        self.L = pred.chol_factor.L.toarray()
+        # ``_u`` = spherical RE at the converged state. ``pred.beta0`` and
+        # ``pred.u0`` are still zero (lme4 never installPars during the
+        # outer loop), so u(1) = delu.
+        self._u = pred.u(1.0).copy()
+
+        # Linear predictor / fitted values. ``eta`` includes the offset
+        # (resp.eta is computed from offset + γ in update_mu). ``mu``
+        # is on the response scale. lme4 names ``fitted_values`` for the
+        # response-scale fit; ``linear_predictors`` for ``eta``.
+        self.mu = resp.mu.copy()
+        self.eta = resp.eta.copy()
+        self.linear_predictors = self.eta
+        self.fitted = self.mu
+        self.fitted_values = self.mu
+        # Raw response-scale residuals = y − μ̂. (Type-specific residuals
+        # live on ``residuals_of``; ``residuals`` itself follows lme4's
+        # default of *deviance* residuals — that's what ``deviance(m)``
+        # decomposes.)
+        self.residuals = self._deviance_residuals_signed()
+        # ``working_weights`` = lme4's ``glmResp$weights`` = (μ_η²·w)/V(μ)
+        # = sqrt_x_wt² (respModule.cpp:179-183).
+        self.working_weights = resp.sqrt_x_wt ** 2
+        self.prior_weights = resp.weights.copy()
+
+        # ----- scale (σ) / dispersion -------------------------------------
+        # For canonical-link scale-known families (Poisson, Binomial),
+        # lme4 reports σ = 1 (methods.R:236, sigma.merMod). For
+        # scale-unknown (Gamma, Inverse-Gaussian, Gaussian-noncanon),
+        # σ is the Pearson estimate: √[Σ w·(y−μ)²/V(μ) / df_resid].
+        if getattr(family, "scale_known", False):
+            self.sigma = 1.0
+            self.sigma_squared = 1.0
+            use_sc = 0
+        else:
+            df_resid = max(n - p, 1)
+            pearson = resp.weights * (y - resp.mu) ** 2 / family.variance(resp.mu)
+            phi = float(np.sum(pearson) / df_resid)
+            self.sigma = float(np.sqrt(phi))
+            self.sigma_squared = phi
+            use_sc = 1
+
+        # ----- SE(β̂) / vcov_beta via the Schur-complement RX --------------
+        # ``pred.RX`` is the lower-Cholesky factor of the Schur-complement
+        # Hessian of the conditional log-likelihood w.r.t. β at the
+        # converged state. So Var(β̂) = σ² · (RX·RX')⁻¹ = σ² · RX⁻ᵀ·RX⁻¹.
+        if p > 0:
+            Rx_inv = solve_triangular(pred.RX, np.eye(p), lower=True)
+            vcov_beta = self.sigma_squared * np.einsum("ij,ik->jk", Rx_inv, Rx_inv)
+            se_beta = np.sqrt(np.diag(vcov_beta))
+        else:
+            vcov_beta = np.zeros((0, 0))
+            se_beta = np.zeros(0)
+        self._vcov_beta_arr = vcov_beta
+        self.vcov_beta = pl.DataFrame(
+            {c: vcov_beta[:, i] for i, c in enumerate(self.column_names)}
+        )
+        self._se_beta = se_beta
         self.bhat = pl.DataFrame(
             {c: [float(beta_hat[i])] for i, c in enumerate(self.column_names)}
         )
-        self.fixef = self.bhat                            # R-canonical alias
-        self.deviance = float(self._optim["fval"])
-        # ML log-likelihood from the Laplace deviance.
-        self.loglike = -0.5 * self.deviance
+        self.fixef = self.bhat
+        self.se_bhat = pl.DataFrame(
+            {c: [float(se_beta[i])] for i, c in enumerate(self.column_names)}
+        )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t_vals = np.where(se_beta > 0, beta_hat / np.where(se_beta > 0, se_beta, 1.0), 0.0)
+        self.t_values = pl.DataFrame(
+            {c: [float(t_vals[i])] for i, c in enumerate(self.column_names)}
+        )
+
+        # ----- per-bar variance components --------------------------------
+        # Same shape as the Gaussian path; the σ factor here is 1 for
+        # scale-known families (so Σ_block ≡ relative covariance), else
+        # multiplied by σ for unknown-scale parity with lme4's VarCorr.
+        Sigma_blocks = _per_bar_relative_cov(theta_hat, bar_sizes)
+        self.sd_re: dict[str, np.ndarray] = {}
+        self.corr_re: dict[str, np.ndarray | None] = {}
+        for key, Sigma in zip(re.cnms.keys(), Sigma_blocks):
+            d = np.sqrt(np.diag(Sigma))
+            self.sd_re[key] = self.sigma * d
+            if Sigma.shape[0] > 1:
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    corr = Sigma / np.outer(d, d)
+                corr = np.where(np.isfinite(corr), corr, 0.0)
+                np.fill_diagonal(corr, 1.0)
+                self.corr_re[key] = corr
+            else:
+                self.corr_re[key] = None
+
+        # ----- summary statistics -----------------------------------------
+        # npar follows ``npar.merMod`` (lmer.R:1049): length(beta) +
+        # length(theta) + useSc. useSc = 0 for scale-known.
+        self.npar = p + len(theta_hat) + use_sc
+        laplace = float(self._optim["fval"])
+        # ``m.deviance`` for GLMM == residual deviance (sum of dev_resids),
+        # NOT the Laplace value. lme4's ``deviance(m)`` returns the same
+        # for glmer fits (methods.R's deviance.merMod). The Laplace
+        # criterion is on ``m.deviance_laplace`` for downstream callers.
+        self.deviance_laplace = laplace
+        self.deviance = float(resp.deviance())   # = Σ dev_resids
+        self.loglike = -0.5 * laplace
+        self.df_resid = n - self.npar
+        # AIC/BIC use the Laplace deviance (lme4's logLik-based formula).
+        self.AIC = laplace + 2.0 * self.npar
+        self.BIC = laplace + np.log(n) * self.npar
+
+    def _deviance_residuals_signed(self) -> np.ndarray:
+        """Signed √dev_resid_i — what ``residuals(m, type="deviance")`` returns.
+
+        ``glmResp::devResid`` (respModule.cpp:128) returns
+        ``family$dev.resids(y, μ, w)``, which for most families is the
+        per-observation **squared** deviance contribution. R's
+        ``residuals.merMod(type="deviance")`` then takes the signed
+        square-root — that's what we report by default.
+        """
+        rp = self._resp
+        return np.sign(rp.y - rp.mu) * np.sqrt(rp.deviance_residuals())
+
+    def residuals_of(self, type: str = "deviance") -> np.ndarray:
+        """GLMM residuals on the chosen scale — mirrors ``residuals.merMod``.
+
+        Types:
+
+        - ``"deviance"`` (default): signed √dev_resid_i.
+        - ``"pearson"``: ``(y − μ) · √w / √V(μ)``.
+        - ``"working"``: ``(y − μ) / μ_η`` (PIRLS working residual).
+        - ``"response"``: ``y − μ`` on the response scale.
+
+        Port of ``residuals.glmResp`` (respModule.cpp / methods.R:1310-1349).
+        For Gaussian-identity, all four collapse to ``y − μ``.
+        """
+        rp = self._resp
+        if type == "deviance":
+            return self._deviance_residuals_signed()
+        if type == "pearson":
+            return (rp.y - rp.mu) * np.sqrt(rp.weights / self.family.variance(rp.mu))
+        if type == "working":
+            return rp.working_residuals()
+        if type == "response":
+            return rp.y - rp.mu
+        raise ValueError(
+            f"unknown residual type {type!r}; expected one of "
+            "'deviance', 'pearson', 'working', 'response'"
+        )
 
     # ---- deviance building blocks --------------------------------------
     #

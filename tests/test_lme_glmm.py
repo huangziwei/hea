@@ -676,6 +676,11 @@ def _r_glmer_full_fit(formula: str, csv_data: str, family_r: str):
     lme4 to also use Nelder_Mead for both stages removes the optimizer-choice
     confound — the remaining differences come only from initial-step
     heuristics and tolerance settings, both of which we mirror.
+
+    ``laplace`` = ``-2·logLik(m)`` = the Laplace deviance (lme4's
+    optimization criterion). ``deviance`` = ``deviance(m)`` = sum of
+    deviance residuals (the GLMM residual deviance; what
+    ``stats::deviance.merMod`` returns for glmer fits).
     """
     r_script = f"""
         suppressMessages(suppressWarnings(library(lme4)))
@@ -686,7 +691,11 @@ def _r_glmer_full_fit(formula: str, csv_data: str, family_r: str):
         hp <- function(...) format(c(...), digits=17, scientific=TRUE)
         cat("RESULT_THETA", hp(getME(m, "theta")), "\\n")
         cat("RESULT_BETA",  hp(getME(m, "beta")),  "\\n")
-        cat("RESULT_DEV",   hp(-2 * as.numeric(logLik(m))), "\\n")
+        cat("RESULT_LAPLACE", hp(-2 * as.numeric(logLik(m))), "\\n")
+        cat("RESULT_DEV",     hp(deviance(m)), "\\n")
+        cat("RESULT_AIC",     hp(AIC(m)), "\\n")
+        cat("RESULT_BIC",     hp(BIC(m)), "\\n")
+        cat("RESULT_SIGMA",   hp(sigma(m)), "\\n")
     """
     out = subprocess.run(
         ["R", "--vanilla", "--slave", "-e", r_script],
@@ -698,9 +707,13 @@ def _r_glmer_full_fit(formula: str, csv_data: str, family_r: str):
         if line.startswith("RESULT_")
     }
     return {
-        "theta": np.array(parsed["RESULT_THETA"].split(), dtype=float),
-        "beta":  np.array(parsed["RESULT_BETA"].split(),  dtype=float),
+        "theta":   np.array(parsed["RESULT_THETA"].split(), dtype=float),
+        "beta":    np.array(parsed["RESULT_BETA"].split(),  dtype=float),
+        "laplace": float(parsed["RESULT_LAPLACE"]),
         "deviance": float(parsed["RESULT_DEV"]),
+        "aic":     float(parsed["RESULT_AIC"]),
+        "bic":     float(parsed["RESULT_BIC"]),
+        "sigma":   float(parsed["RESULT_SIGMA"]),
     }
 
 
@@ -725,7 +738,13 @@ def test_glmer_poisson_full_fit_matches_lme4():
 
     np.testing.assert_allclose(m.theta, r["theta"], atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m._beta, r["beta"],  atol=1e-7, rtol=1e-7)
+    # ``deviance(m)`` for glmer fits = residual deviance (= Σ dev_resids),
+    # NOT the Laplace value. The Laplace value is on ``deviance_laplace``.
     np.testing.assert_allclose(m.deviance, r["deviance"], atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(m.deviance_laplace, r["laplace"], atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(m.AIC, r["aic"], atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(m.BIC, r["bic"], atol=1e-9, rtol=1e-9)
+    assert m.sigma == pytest.approx(r["sigma"])  # = 1 for Poisson
     # Public-API check: bhat as a DataFrame with R-canonical column names.
     assert m.bhat.columns == ["(Intercept)", "x"]
     np.testing.assert_allclose(
@@ -766,7 +785,8 @@ def test_glmer_binomial_full_fit_matches_lme4_cbpp():
             hp <- function(...) format(c(...), digits=17, scientific=TRUE)
             cat("THETA", hp(getME(m, "theta")), "\\n")
             cat("BETA",  hp(getME(m, "beta")),  "\\n")
-            cat("DEV",   hp(-2 * as.numeric(logLik(m))), "\\n")
+            cat("LAPLACE", hp(-2 * as.numeric(logLik(m))), "\\n")
+            cat("DEV",   hp(deviance(m)), "\\n")
         """],
         capture_output=True, text=True, check=True,
     ).stdout
@@ -774,6 +794,7 @@ def test_glmer_binomial_full_fit_matches_lme4_cbpp():
              for l in r_out.strip().split("\n")}
     theta_r = np.array(lines["THETA"].split(), dtype=float)
     beta_r  = np.array(lines["BETA"].split(),  dtype=float)
+    laplace_r = float(lines["LAPLACE"])
     dev_r   = float(lines["DEV"])
 
     size = df["size"].to_numpy().astype(float)
@@ -783,6 +804,7 @@ def test_glmer_binomial_full_fit_matches_lme4_cbpp():
     np.testing.assert_allclose(m.theta, theta_r, atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m._beta, beta_r,  atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m.deviance, dev_r, atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(m.deviance_laplace, laplace_r, atol=1e-9, rtol=1e-9)
 
 
 def test_glmer_intercept_only_poisson():
@@ -807,18 +829,18 @@ def test_glmer_intercept_only_poisson():
                        control=glmerControl(optimizer=c("Nelder_Mead","Nelder_Mead")))
             hp <- function(...) format(c(...), digits=17, scientific=TRUE)
             cat("THETA", hp(getME(m, "theta")), "\\n")
-            cat("DEV",   hp(-2 * as.numeric(logLik(m))), "\\n")
+            cat("LAPLACE", hp(-2 * as.numeric(logLik(m))), "\\n")
         """],
         capture_output=True, text=True, check=True,
     ).stdout
     lines = {l.split(maxsplit=1)[0]: l.split(maxsplit=1)[1]
              for l in r_out.strip().split("\n")}
     theta_r = np.array(lines["THETA"].split(), dtype=float)
-    dev_r   = float(lines["DEV"])
+    laplace_r = float(lines["LAPLACE"])
 
     m = lme("y ~ 0 + (1|g)", df, family=PoissonFamily())
     np.testing.assert_allclose(m.theta, theta_r, atol=1e-7, rtol=1e-7)
-    np.testing.assert_allclose(m.deviance, dev_r, atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(m.deviance_laplace, laplace_r, atol=1e-9, rtol=1e-9)
     assert m.p == 0
     assert m._beta.shape == (0,)
 
@@ -907,3 +929,267 @@ def test_glmer_start_validation_errors():
     with pytest.raises(ValueError, match="start beta has shape"):
         lme("y ~ x + (1|g)", df, family=PoissonFamily(),
             start={"beta": np.array([1.0])})  # wrong p
+
+
+# ----------------------------------------------------------------------
+# Phase 6: Post-fit attributes (fitted, residuals, ranef, vcov_beta, ...)
+# Each attribute pinned against the corresponding ``lme4::glmer`` getter.
+# ----------------------------------------------------------------------
+
+
+def _fit_with_full_glmer_attrs(formula: str, csv_data: str, family_r: str):
+    """Fit lme4::glmer and dump every Phase 6 attribute.
+
+    Returns a dict carrying R's values for fitted, eta, residuals (all
+    types), AIC, BIC, sigma, vcov(β̂), ranef BLUPs, etc. Both sides set
+    ``optimizer="Nelder_Mead"`` so trajectories match.
+    """
+    r_script = f"""
+        suppressMessages(suppressWarnings(library(lme4)))
+        d <- read.csv(text="{csv_data}")
+        d$g <- factor(d$g)
+        m <- glmer({formula}, data=d, family={family_r}(),
+                   control=glmerControl(optimizer=c("Nelder_Mead", "Nelder_Mead")))
+        hp <- function(...) format(c(...), digits=17, scientific=TRUE)
+        cat("THETA", hp(getME(m, "theta")), "\\n")
+        cat("BETA",  hp(getME(m, "beta")),  "\\n")
+        cat("ETA",   hp(predict(m, type="link")),    "\\n")
+        cat("MU",    hp(fitted(m)),                  "\\n")
+        cat("RES_DEV",      hp(residuals(m, type="deviance")), "\\n")
+        cat("RES_PEARSON",  hp(residuals(m, type="pearson")),  "\\n")
+        cat("RES_WORKING",  hp(residuals(m, type="working")),  "\\n")
+        cat("RES_RESPONSE", hp(residuals(m, type="response")), "\\n")
+        cat("WORKING_WTS", hp(m@resp$sqrtXwt^2), "\\n")
+        cat("PRIOR_WTS",   hp(m@resp$weights), "\\n")
+        cat("LAPLACE", hp(-2*as.numeric(logLik(m))), "\\n")
+        cat("DEV",     hp(deviance(m)), "\\n")
+        cat("AIC",     hp(AIC(m)), "\\n")
+        cat("BIC",     hp(BIC(m)), "\\n")
+        cat("SIGMA",   hp(sigma(m)), "\\n")
+        # SE(β̂) from RX-based vcov (use.hessian=FALSE). lme4's default
+        # uses the numerical Hessian when calc.derivs=TRUE for small models
+        # — hea computes Hessian-based SE in Phase 8, here we pin the
+        # RX-based SE (analytical from the Schur-complement factor).
+        vc_rx <- as.matrix(suppressWarnings(vcov(m, use.hessian=FALSE)))
+        cat("SE_BETA", hp(sqrt(diag(vc_rx))), "\\n")
+        cat("T_VALUE", hp(getME(m, "beta") / sqrt(diag(vc_rx))), "\\n")
+        # Full Var-Cov matrix of β̂ (RX-based).
+        vc <- vc_rx
+        cat("VCOV_NROW", nrow(vc), "\\n")
+        cat("VCOV", hp(as.vector(vc)), "\\n")
+        # Random-effect SDs (per bar) — VarCorr(m) returns named list.
+        vcr <- VarCorr(m)
+        for (nm in names(vcr)) {{
+            cat("SD_RE_", nm, " ", paste(hp(attr(vcr[[nm]], "stddev")), collapse=" "), "\\n", sep="")
+        }}
+        # BLUPs.
+        rf <- ranef(m, condVar=FALSE)
+        for (nm in names(rf)) {{
+            blups <- as.matrix(rf[[nm]])
+            cat("RANEF_", nm, " ", paste(hp(as.vector(blups)), collapse=" "), "\\n", sep="")
+        }}
+    """
+    out = subprocess.run(
+        ["R", "--vanilla", "--slave", "-e", r_script],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    lines = {}
+    for line in out.strip().split("\n"):
+        if " " in line:
+            k, _, rest = line.partition(" ")
+            lines[k] = rest
+    arr = lambda k: np.array(lines[k].split(), dtype=float)
+    flt = lambda k: float(lines[k])
+    return {
+        "theta": arr("THETA"), "beta": arr("BETA"),
+        "eta": arr("ETA"), "mu": arr("MU"),
+        "res_dev": arr("RES_DEV"), "res_pearson": arr("RES_PEARSON"),
+        "res_working": arr("RES_WORKING"), "res_response": arr("RES_RESPONSE"),
+        "working_wts": arr("WORKING_WTS"),
+        "prior_wts":   arr("PRIOR_WTS"),
+        "laplace": flt("LAPLACE"), "deviance": flt("DEV"),
+        "aic": flt("AIC"), "bic": flt("BIC"), "sigma": flt("SIGMA"),
+        "se_beta": arr("SE_BETA"), "t_value": arr("T_VALUE"),
+        "vcov_nrow": int(lines["VCOV_NROW"]),
+        "vcov": arr("VCOV"),
+        "sd_re": {k.removeprefix("SD_RE_"): np.array(v.split(), dtype=float)
+                  for k, v in lines.items() if k.startswith("SD_RE_")},
+        "ranef": {k.removeprefix("RANEF_"): np.array(v.split(), dtype=float)
+                  for k, v in lines.items() if k.startswith("RANEF_")},
+    }
+
+
+def test_glmer_phase6_attrs_match_lme4_poisson():
+    """Every Phase 6 attribute on a Poisson fit matches lme4 at ≤ 1e-9."""
+    from hea.lme import lme
+    from hea.family import Poisson as PoissonFamily
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    csv = "y,x,g\n" + "\n".join(
+        f"{int(df['y'][i])},{df['x'][i]:.10g},{df['g'][i]}" for i in range(df.height)
+    )
+    r = _fit_with_full_glmer_attrs("y ~ x + (1|g)", csv, "poisson")
+
+    m = lme("y ~ x + (1|g)", df, family=PoissonFamily())
+
+    # Linear predictor / fitted values.
+    np.testing.assert_allclose(m.eta, r["eta"], atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(m.mu,  r["mu"],  atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(m.fitted_values, r["mu"], atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(m.linear_predictors, r["eta"], atol=1e-9, rtol=1e-9)
+    # Residuals — all four types.
+    np.testing.assert_allclose(m.residuals,                 r["res_dev"],     atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(m.residuals_of("deviance"),  r["res_dev"],     atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(m.residuals_of("pearson"),   r["res_pearson"], atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(m.residuals_of("working"),   r["res_working"], atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(m.residuals_of("response"),  r["res_response"], atol=1e-9, rtol=1e-9)
+    # Working weights = sqrt_x_wt² — matches lme4's m@resp$sqrtXwt^2.
+    np.testing.assert_allclose(m.working_weights, r["working_wts"], atol=1e-9, rtol=1e-9)
+    # Prior weights = the user-supplied ``weights=`` (1s when not given).
+    np.testing.assert_allclose(m.prior_weights, r["prior_wts"], atol=1e-12, rtol=1e-12)
+    # Summary statistics.
+    np.testing.assert_allclose(m.AIC, r["aic"], atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(m.BIC, r["bic"], atol=1e-9, rtol=1e-9)
+    assert m.sigma == pytest.approx(r["sigma"])
+    # SE(β̂) and t-values.
+    np.testing.assert_allclose(m._se_beta, r["se_beta"], atol=1e-9, rtol=1e-7)
+    np.testing.assert_allclose(m.t_values.row(0), r["t_value"], atol=1e-7, rtol=1e-7)
+    # vcov_beta — full p×p matrix.
+    assert r["vcov_nrow"] == m.p
+    np.testing.assert_allclose(
+        m._vcov_beta_arr.flatten(), r["vcov"], atol=1e-9, rtol=1e-7,
+    )
+    # Variance components: SD per bar.
+    for bar in m.sd_re:
+        np.testing.assert_allclose(m.sd_re[bar], r["sd_re"][bar], atol=1e-9, rtol=1e-7)
+    # method string.
+    assert m.method == "glmer.ML"
+
+
+def test_glmer_phase6_ranef_match_lme4_poisson():
+    """BLUPs match ``ranef(m)`` — covers ``_ranef``/``ranef`` for GLMM."""
+    from hea.lme import lme
+    from hea.family import Poisson as PoissonFamily
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    csv = "y,x,g\n" + "\n".join(
+        f"{int(df['y'][i])},{df['x'][i]:.10g},{df['g'][i]}" for i in range(df.height)
+    )
+    r = _fit_with_full_glmer_attrs("y ~ x + (1|g)", csv, "poisson")
+
+    m = lme("y ~ x + (1|g)", df, family=PoissonFamily())
+    rf = m.ranef
+    # Single bar named ``g`` — match the BLUPs column-by-column.
+    assert "g" in rf
+    blups_py = rf["g"]["(Intercept)"].to_numpy()
+    np.testing.assert_allclose(blups_py, r["ranef"]["g"], atol=1e-9, rtol=1e-7)
+
+
+def test_glmer_phase6_attrs_match_lme4_binomial_cbpp():
+    """cbpp binomial — verify per-period β̂ SE/t, sd_re, deviance breakdown."""
+    from hea.lme import lme
+    from hea.family import Binomial as BinomialFamily
+
+    r_dump = subprocess.run(
+        ["R", "--vanilla", "--slave", "-e",
+         "suppressMessages(library(lme4)); data(cbpp); "
+         "write.table(cbpp, sep=',', quote=FALSE, row.names=FALSE)"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    import io
+    df = pl.read_csv(io.StringIO(r_dump))
+    df = df.with_columns(
+        (pl.col("incidence") / pl.col("size")).alias("y_prop"),
+        pl.col("herd").cast(pl.String),
+        pl.col("period").cast(pl.String),
+    )
+    size = df["size"].to_numpy().astype(float)
+
+    r_out = subprocess.run(
+        ["R", "--vanilla", "--slave", "-e", """
+            suppressMessages(library(lme4)); data(cbpp)
+            m <- glmer(cbind(incidence, size-incidence) ~ period + (1|herd),
+                       data=cbpp, family=binomial(),
+                       control=glmerControl(optimizer=c("Nelder_Mead","Nelder_Mead")))
+            hp <- function(...) format(c(...), digits=17, scientific=TRUE)
+            cat("LAPLACE", hp(-2*as.numeric(logLik(m))), "\\n")
+            cat("DEV",     hp(deviance(m)), "\\n")
+            cat("AIC",     hp(AIC(m)), "\\n")
+            cat("SIGMA",   hp(sigma(m)), "\\n")
+            vc_rx <- as.matrix(suppressWarnings(vcov(m, use.hessian=FALSE)))
+            cat("SE_BETA", hp(sqrt(diag(vc_rx))), "\\n")
+            vcr <- VarCorr(m)
+            cat("SD_HERD", hp(attr(vcr$herd, "stddev")), "\\n")
+        """],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    lines = {l.split(maxsplit=1)[0]: l.split(maxsplit=1)[1]
+             for l in r_out.strip().split("\n")}
+
+    m = lme("y_prop ~ period + (1|herd)", df,
+            family=BinomialFamily(), weights=size)
+    assert m.deviance_laplace == pytest.approx(float(lines["LAPLACE"]), rel=1e-9, abs=1e-9)
+    assert m.deviance         == pytest.approx(float(lines["DEV"]),     rel=1e-9, abs=1e-9)
+    assert m.AIC              == pytest.approx(float(lines["AIC"]),     rel=1e-9, abs=1e-9)
+    assert m.sigma            == pytest.approx(float(lines["SIGMA"]))  # = 1
+    np.testing.assert_allclose(
+        m._se_beta, np.array(lines["SE_BETA"].split(), dtype=float),
+        atol=1e-9, rtol=1e-7,
+    )
+    np.testing.assert_allclose(
+        m.sd_re["herd"], np.array(lines["SD_HERD"].split(), dtype=float),
+        atol=1e-9, rtol=1e-7,
+    )
+
+
+def test_glmer_phase6_sigma_for_scale_unknown_family():
+    """Scale-unknown families (Gamma) report a Pearson dispersion estimate.
+
+    For canonical-link scale-known (Poisson, Binomial), ``m.sigma == 1``.
+    For scale-unknown (Gamma, Inverse-Gaussian, etc.), ``m.sigma`` =
+    ``sqrt(sum(w·(y−μ)²/V(μ)) / df_resid)`` — Pearson estimate.
+    """
+    from hea.lme import lme
+    from hea.family import Gamma as GammaFamily
+
+    rng = np.random.default_rng(11)
+    n_groups, n_per = 10, 6
+    n = n_groups * n_per
+    g = np.repeat(np.arange(n_groups), n_per)
+    x = rng.standard_normal(n)
+    b = rng.standard_normal(n_groups) * 0.3
+    # Generate positive responses with mean linked to log(eta).
+    eta = 1.0 + 0.2 * x + b[g]
+    mu = np.exp(eta)
+    y = rng.gamma(shape=4.0, scale=mu / 4.0)
+    df = pl.DataFrame({"y": y, "x": x, "g": [f"G{gi:02d}" for gi in g]})
+    csv = "y,x,g\n" + "\n".join(
+        f"{df['y'][i]:.10g},{df['x'][i]:.10g},{df['g'][i]}" for i in range(df.height)
+    )
+    # Pin against lme4 with the same Gamma(log) family.
+    r_out = subprocess.run(
+        ["R", "--vanilla", "--slave", "-e", f"""
+            suppressMessages(library(lme4))
+            d <- read.csv(text="{csv}")
+            d$g <- factor(d$g)
+            m <- glmer(y ~ x + (1|g), data=d, family=Gamma(link="log"),
+                       control=glmerControl(optimizer=c("Nelder_Mead","Nelder_Mead")))
+            hp <- function(...) format(c(...), digits=17, scientific=TRUE)
+            cat("THETA", hp(getME(m, "theta")), "\\n")
+            cat("BETA",  hp(getME(m, "beta")),  "\\n")
+            cat("SIGMA", hp(sigma(m)),          "\\n")
+        """],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    lines = {l.split(maxsplit=1)[0]: l.split(maxsplit=1)[1]
+             for l in r_out.strip().split("\n")}
+    sigma_r = float(lines["SIGMA"])
+
+    from hea.family import LogLink
+    m = lme("y ~ x + (1|g)", df, family=GammaFamily(link=LogLink()))
+    # σ should be the Pearson estimate, not 1. Tolerance loose since
+    # Nelder-Mead doesn't drive Gamma fits to byte-equal endpoints.
+    assert m.sigma > 0.0 and m.sigma != 1.0
+    np.testing.assert_allclose(m.sigma, sigma_r, atol=1e-3, rtol=1e-3)
+    # npar formula: p + n_theta + useSc (=1 for unknown-scale).
+    assert m.npar == m.p + len(m.theta) + 1
