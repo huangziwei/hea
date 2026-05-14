@@ -2114,10 +2114,11 @@ class bam(gam):
         # Fast path: cached arrays cover the most common ask.
         if type in ("link", "response") and not se_fit and extra is None:
             if type == "link":
-                return self.linear_predictors.copy()
-            return self.fitted_values.copy()
+                return pl.DataFrame({"fit": self.linear_predictors.copy()})
+            return pl.DataFrame({"fit": self.fitted_values.copy()})
 
         if type == "lpmatrix":
+            # lpmatrix returns a raw ndarray (design matrix, not prediction).
             return super().predict(
                 newdata=self.data, type="lpmatrix", se_fit=False, offset=None,
             )
@@ -2129,17 +2130,17 @@ class bam(gam):
 
         if not se_fit:
             if type == "link":
-                return eta
-            return self.family.link.linkinv(eta)
+                return pl.DataFrame({"fit": eta})
+            return pl.DataFrame({"fit": self.family.link.linkinv(eta)})
 
         # se_fit=True
         var_eta = self._chunked_var_eta_diag(self.Vp)
         se_link = np.sqrt(np.maximum(var_eta, 0.0))
         if type == "link":
-            return eta, se_link
+            return pl.DataFrame({"fit": eta, "se.fit": se_link})
         mu = self.family.link.linkinv(eta)
         mu_eta = self.family.link.mu_eta(eta)
-        return mu, se_link * np.abs(mu_eta)
+        return pl.DataFrame({"fit": mu, "se.fit": se_link * np.abs(mu_eta)})
 
     # -----------------------------------------------------------------------
     # _fit_given_rho override — uses (R, f, y_norm2, rss_extra)

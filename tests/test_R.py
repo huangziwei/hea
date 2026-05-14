@@ -903,10 +903,10 @@ def test_fitted_values_alias(m_glm):
 
 def test_predict_dispatches_to_method(m_lm):
     out = R_predict(m_lm)
-    # lm.predict() returns a polars DataFrame with "Fitted" column
+    # lm.predict() returns a polars DataFrame with "fit" column
     assert isinstance(out, pl.DataFrame)
     np.testing.assert_array_almost_equal(
-        out["Fitted"].to_numpy(), fitted(m_lm)
+        out["fit"].to_numpy(), fitted(m_lm)
     )
 
 

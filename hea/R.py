@@ -3746,7 +3746,7 @@ def fitted(model):
         return np.asarray(f)
     yh = getattr(model, "yhat", None)
     if isinstance(yh, pl.DataFrame):
-        col = "Fitted" if "Fitted" in yh.columns else yh.columns[0]
+        col = "fit" if "fit" in yh.columns else yh.columns[0]
         return yh[col].to_numpy()
     if isinstance(yh, np.ndarray):
         return yh

@@ -3538,15 +3538,18 @@ class gam:
         """Predict from the fitted GAM — :func:`predict.gam` parity.
 
         ``type='response'`` returns ``μ̂ = g⁻¹(X_new β̂ + offset)``;
-        ``type='link'`` returns ``η̂ = X_new β̂ + offset``;
+        ``type='link'`` returns ``η̂ = X_new β̂ + offset``.
+
+        Both return a ``pl.DataFrame`` with a ``fit`` column; with
+        ``se_fit=True`` a second ``se.fit`` column is added. Link-scale SE
+        is ``√diag(X · Vp · Xᵀ)`` (offset is constant so it doesn't affect
+        SE); response-scale SE multiplies by ``|dμ/dη|`` (delta method,
+        same as mgcv).
+
         ``type='lpmatrix'`` returns the linear-predictor design matrix
-        ``X_new`` itself (no β multiplication, no offset addition — offset
-        is added at the η level, not in X). With ``se_fit=True``, also
-        returns the standard error: link-scale SE is ``√diag(X · Vp · Xᵀ)``
-        (offset is constant so it doesn't affect SE); response-scale SE
-        multiplies by ``|dμ/dη|`` (delta method, same as mgcv).
-        ``se_fit=True`` is not allowed with ``type='lpmatrix'`` — the
-        matrix is the SE building block, not an estimate.
+        ``X_new`` as a raw ``np.ndarray`` — it's the SE building block, not
+        a prediction, so the DataFrame wrapper would be misleading.
+        ``se_fit=True`` is not allowed with ``type='lpmatrix'``.
 
         ``Vp`` is the Bayesian posterior covariance (``self.Vp``) — mgcv's
         default for ``se.fit`` since smoothing-parameter shrinkage makes the
@@ -3640,16 +3643,16 @@ class gam:
         fit = eta if type == "link" else self.family.link.linkinv(eta)
 
         if not se_fit:
-            return fit
+            return pl.DataFrame({"fit": fit})
 
         # Var(η̂_i) = X_i · Vp · X_iᵀ; rowwise via einsum.
         var_eta = np.einsum("ij,jk,ik->i", X_new, self.Vp, X_new)
         se_link = np.sqrt(np.maximum(var_eta, 0.0))
         if type == "link":
-            return fit, se_link
+            return pl.DataFrame({"fit": fit, "se.fit": se_link})
         # Delta method: Var(μ̂) ≈ (dμ/dη)² · Var(η̂).
         mu_eta_v = self.family.link.mu_eta(eta)
-        return fit, np.abs(mu_eta_v) * se_link
+        return pl.DataFrame({"fit": fit, "se.fit": np.abs(mu_eta_v) * se_link})
 
     def vis(
         self,
@@ -3764,9 +3767,11 @@ class gam:
                 new_df = new_df.with_columns(new_df[name].cast(src.dtype))
 
         if se:
-            fit, se_arr = self.predict(new_df, type=type, se_fit=True)
+            pred_df = self.predict(new_df, type=type, se_fit=True)
+            fit = pred_df["fit"].to_numpy()
+            se_arr = pred_df["se.fit"].to_numpy()
         else:
-            fit = self.predict(new_df, type=type, se_fit=False)
+            fit = self.predict(new_df, type=type, se_fit=False)["fit"].to_numpy()
             se_arr = None
 
         if too_far > 0.0:

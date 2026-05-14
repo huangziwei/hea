@@ -801,13 +801,15 @@ def test_bates_4_2_ergostool_fm17_ML():
 
 
 def test_predict_no_args_equals_fitted():
-    """predict() with no args returns self.fitted, matching R's
-    ``predict(fm)`` → ``na.omit(fitted(fm))`` short-circuit."""
+    """predict() with no args returns a 1-col DataFrame matching self.fitted —
+    R's ``predict(fm)`` → ``na.omit(fitted(fm))`` short-circuit."""
     import polars as pl
-    from hea import data
     gpa = pl.read_csv("datasets/m-clark/gpa.csv")
     fm = lme("gpa ~ occasion + (1 | student)", data=gpa)
-    np.testing.assert_array_equal(fm.predict(), fm.fitted)
+    out = fm.predict()
+    assert isinstance(out, pl.DataFrame)
+    assert out.columns == ["fit"]
+    np.testing.assert_array_equal(out["fit"].to_numpy(), fm.fitted)
 
 
 def test_predict_newdata_eq_orig_matches_fitted():
@@ -815,18 +817,12 @@ def test_predict_newdata_eq_orig_matches_fitted():
     import polars as pl
     gpa = pl.read_csv("datasets/m-clark/gpa.csv")
     fm = lme("gpa ~ occasion + (1 | student)", data=gpa)
-    p = fm.predict(newdata=gpa)
+    p = fm.predict(newdata=gpa)["fit"].to_numpy()
     np.testing.assert_allclose(p, fm.fitted, atol=1e-10)
 
 
 def test_predict_pinned_to_R_lmer():
-    """predict.merMod cross-check: head values pinned to R 4.5 / lme4 4.5.
-
-    The 1e-6 tolerance reflects optimizer-level disagreement between hea
-    and R's BLUPs (theta converges to ~4 dp); the predict() port itself
-    is just ``Xβ + ZΛu``, so any larger drift would indicate a regression
-    in the dispatch logic.
-    """
+    """predict.merMod cross-check: head values pinned to R 4.5 / lme4 4.5."""
     import polars as pl
     gpa = pl.read_csv("datasets/m-clark/gpa.csv")
     fm = lme("gpa ~ occasion + (1 | student)", data=gpa)
@@ -835,13 +831,15 @@ def test_predict_pinned_to_R_lmer():
     r_conditional = [2.528319363, 2.634633649, 2.740947934, 2.847262220,
                      2.953576506]
     np.testing.assert_allclose(
-        fm.predict(newdata=gpa.head(5)), r_conditional, atol=1e-6,
+        fm.predict(newdata=gpa.head(5))["fit"].to_numpy(),
+        r_conditional, atol=1e-6,
     )
     # Population (re.form=NA) — Xβ only.
     r_population = [2.599214286, 2.705528571, 2.811842857, 2.918157143,
                     3.024471429]
     np.testing.assert_allclose(
-        fm.predict(newdata=gpa.head(5), re_form=False), r_population, atol=1e-9,
+        fm.predict(newdata=gpa.head(5), re_form=False)["fit"].to_numpy(),
+        r_population, atol=1e-9,
     )
 
 
@@ -855,7 +853,7 @@ def test_predict_allow_new_levels():
     with pytest.raises(ValueError, match="new level"):
         fm.predict(newdata=nd)
 
-    p = fm.predict(newdata=nd, allow_new_levels=True)
+    p = fm.predict(newdata=nd, allow_new_levels=True)["fit"].to_numpy()
     r_population = [2.599214286, 2.705528571, 2.811842857]
     np.testing.assert_allclose(p, r_population, atol=1e-9)
 
@@ -865,7 +863,7 @@ def test_predict_random_only():
     import polars as pl
     gpa = pl.read_csv("datasets/m-clark/gpa.csv")
     fm = lme("gpa ~ occasion + (1 | student)", data=gpa)
-    pred_re = fm.predict(newdata=gpa.head(20), random_only=True)
+    pred_re = fm.predict(newdata=gpa.head(20), random_only=True)["fit"].to_numpy()
     X_head = fm._build_X_for_newdata(gpa.head(20))
     expected = fm.fitted[:20] - X_head @ fm._beta - fm._offset[:20]
     np.testing.assert_allclose(pred_re, expected, atol=1e-10)
@@ -877,9 +875,11 @@ def test_predict_se_fit_matches_R():
     gpa = pl.read_csv("datasets/m-clark/gpa.csv")
     fm = lme("gpa ~ occasion + (1 | student)", data=gpa)
     ans = fm.predict(newdata=gpa.head(5), se_fit=True)
+    assert isinstance(ans, pl.DataFrame)
+    assert ans.columns == ["fit", "se.fit"]
     r_se = [0.09227442221, 0.09191399288, 0.09173324716, 0.09173324716,
             0.09191399288]
-    np.testing.assert_allclose(ans["se.fit"], r_se, atol=1e-6)
+    np.testing.assert_allclose(ans["se.fit"].to_numpy(), r_se, atol=1e-6)
 
 
 def test_predict_via_R_dispatcher():
@@ -889,7 +889,8 @@ def test_predict_via_R_dispatcher():
     from hea.R import predict
     gpa = pl.read_csv("datasets/m-clark/gpa.csv")
     fm = lme("gpa ~ occasion + (1 | student)", data=gpa)
-    np.testing.assert_array_equal(predict(fm), fm.fitted)
+    out = predict(fm)
+    np.testing.assert_array_equal(out["fit"].to_numpy(), fm.fitted)
 
 
 def test_lme_offset_matches_y_minus_offset():

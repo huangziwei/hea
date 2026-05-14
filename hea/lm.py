@@ -458,7 +458,7 @@ class lm:
 
         # compute predicted (fitted values ŷ = Xβ̂)
         self.yhat = self.compute_yhat()
-        yhat = self.yhat["Fitted"].to_numpy().astype(float)
+        yhat = self.yhat["fit"].to_numpy().astype(float)
 
         # compute residuals ϵ̂
         residuals = y - yhat
@@ -655,14 +655,20 @@ class lm:
         # compute predicted or fitted values ŷ = Xβ̂ + offset
         bhat = self._bhat_arr[:, None]
         yhat_vals = (X @ bhat).flatten() + off
-        yhat = pl.DataFrame({"Fitted": yhat_vals})
+        yhat = pl.DataFrame({"fit": yhat_vals})
 
         match interval:
             case None:
                 return yhat
             case True:
-                ci_yhat = self.compute_ci_yhat(yhat, Xnew, alpha)
-                pi_yhat = self.compute_pi_yhat(yhat, Xnew, alpha)
+                # Both CI and PI in one frame — column names are prefixed
+                # so the two interval kinds don't collide.
+                ci_yhat = self.compute_ci_yhat(yhat, Xnew, alpha).rename(
+                    {"lwr": "ci_lwr", "upr": "ci_upr"}
+                )
+                pi_yhat = self.compute_pi_yhat(yhat, Xnew, alpha).rename(
+                    {"lwr": "pi_lwr", "upr": "pi_upr"}
+                )
                 return pl.concat([yhat, ci_yhat, pi_yhat], how="horizontal")
             case "prediction":
                 pi_yhat = self.compute_pi_yhat(yhat, Xnew, alpha)
@@ -685,7 +691,7 @@ class lm:
         # Var(ŷ) = σ² · x'(X'X)⁻¹x  ⇒  se = √diag(σ² · X(X'X)⁻¹Xᵀ).
         var_mean = np.einsum("ij,jk,ik->i", X, self.XtXinv, X) * self.sigma_squared
         se_yhat_mean = np.sqrt(np.maximum(var_mean, 0.0))
-        yhat_vals = yhat["Fitted"].to_numpy().astype(float)[:, None]
+        yhat_vals = yhat["fit"].to_numpy().astype(float)[:, None]
         ci = (
             t.ppf(1 - alpha / 2, self.df_residuals)
             * se_yhat_mean[:, None]
@@ -694,8 +700,8 @@ class lm:
         )
         return pl.DataFrame(
             {
-                f"CI[{alpha/2*100}%]": ci[:, 0],
-                f"CI[{100-alpha/2*100}]%": ci[:, 1],
+                "lwr": ci[:, 0],
+                "upr": ci[:, 1],
             }
         )
 
@@ -709,7 +715,7 @@ class lm:
         # Var(y_new − ŷ) = σ²·(1 + x'(X'X)⁻¹x).
         var_mean = np.einsum("ij,jk,ik->i", X, self.XtXinv, X) * self.sigma_squared
         se_yhat = np.sqrt(self.sigma_squared + np.maximum(var_mean, 0.0))
-        yhat_vals = yhat["Fitted"].to_numpy().astype(float)[:, None]
+        yhat_vals = yhat["fit"].to_numpy().astype(float)[:, None]
         pi = (
             t.ppf(1 - alpha / 2, self.df_residuals)
             * se_yhat[:, None]
@@ -718,8 +724,8 @@ class lm:
         )
         return pl.DataFrame(
             {
-                f"PI[{alpha/2*100}%]": pi[:, 0],
-                f"PI[{100-alpha/2*100}]%": pi[:, 1],
+                "lwr": pi[:, 0],
+                "upr": pi[:, 1],
             }
         )
 
@@ -846,7 +852,7 @@ class lm:
         if ax is None:
             fig, ax = plt.subplots(figsize=figsize)
         y = self.y.to_numpy().astype(float)
-        yhat = self.yhat["Fitted"].to_numpy().astype(float)
+        yhat = self.yhat["fit"].to_numpy().astype(float)
         ax.scatter(yhat, y, facecolor=facecolor, edgecolor=edgecolor)
         lo = float(min(y.min(), yhat.min()))
         hi = float(max(y.max(), yhat.max()))
@@ -869,7 +875,7 @@ class lm:
 
         if ax is None:
             fig, ax = plt.subplots(figsize=figsize)
-        yhat = self.yhat["Fitted"].to_numpy().astype(float)
+        yhat = self.yhat["fit"].to_numpy().astype(float)
         r = self._residuals_arr
         ax.scatter(yhat, r, facecolor=facecolor, edgecolor=edgecolor)
         ax.axhline(0, color="black", linestyle="--")
@@ -908,7 +914,7 @@ class lm:
 
         if ax is None:
             fig, ax = plt.subplots(figsize=figsize)
-        yhat = self.yhat["Fitted"].to_numpy().astype(float)
+        yhat = self.yhat["fit"].to_numpy().astype(float)
         s = np.sqrt(np.abs(self.std_residuals))
         ax.scatter(yhat, s, facecolor=facecolor, edgecolor=edgecolor)
         if smooth:

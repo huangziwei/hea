@@ -522,7 +522,7 @@ def test_sp_passthrough_matches_optimized():
 def test_predict_inSample_matches_fitted():
     d = load_dataset("MASS", "mcycle")
     m = gam("accel ~ s(times)", d, method="REML")
-    np.testing.assert_array_equal(m.predict(), m.fitted)
+    np.testing.assert_array_equal(m.predict()["fit"].to_numpy(), m.fitted)
 
 
 # ---------------------------------------------------------------------------
@@ -1150,8 +1150,8 @@ def test_gam_predict_reevaluates_offset_on_newdata():
     m = gam("y ~ offset(off_col) + x", family=Poisson(), data=d, method="REML")
     # Same X but a different offset column → η̂ should shift by exactly Δoffset.
     new = d.with_columns((pl.col("off_col") + 2.0).alias("off_col"))
-    eta_orig = m.predict(type="link")
-    eta_new = m.predict(new, type="link")
+    eta_orig = m.predict(type="link")["fit"].to_numpy()
+    eta_new = m.predict(new, type="link")["fit"].to_numpy()
     np.testing.assert_allclose(eta_new - eta_orig, 2.0, atol=1e-10)
 
 
@@ -1580,7 +1580,7 @@ def test_vis_matches_predict_on_same_grid(trees_te):
         pl.col("g").cast(data["g"].dtype),
         pl.col("h").cast(data["h"].dtype),
     )
-    fit_pred = m.predict(new, type="link").reshape(20, 20)
+    fit_pred = m.predict(new, type="link")["fit"].to_numpy().reshape(20, 20)
     assert np.allclose(v.fit, fit_pred, atol=1e-12, rtol=0)
 
 
@@ -1594,7 +1594,9 @@ def test_vis_se_matches_predict_se(trees_te):
         pl.col("g").cast(data["g"].dtype),
         pl.col("h").cast(data["h"].dtype),
     )
-    fit_pred, se_pred = m.predict(new, type="link", se_fit=True)
+    pred = m.predict(new, type="link", se_fit=True)
+    fit_pred = pred["fit"].to_numpy()
+    se_pred = pred["se.fit"].to_numpy()
     assert np.allclose(v.fit, fit_pred.reshape(15, 15), atol=1e-12)
     assert np.allclose(v.se, se_pred.reshape(15, 15), atol=1e-12)
 

@@ -40,7 +40,7 @@ def _residuals(model):
 
 def _fitted(model):
     if hasattr(model, "yhat"):
-        return model.yhat["Fitted"].to_numpy()
+        return model.yhat["fit"].to_numpy()
     if hasattr(model, "fitted_values"):
         return np.asarray(model.fitted_values)
     raise TypeError(f"fitted(): can't extract from {type(model).__name__}")

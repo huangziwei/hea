@@ -79,12 +79,11 @@ def _fit_predict(method: str, formula: str | None,
         fml = formula or "y ~ x"
         fit = lm(fml, pl.DataFrame({"x": x, "y": y}))
         new = pl.DataFrame({"x": grid})
-        # `predict(interval="confidence")` returns Fitted plus CI columns named
-        # `CI[2.5%]` / `CI[97.5]%` (the closing-bracket asymmetry is hea.lm
-        # internal). We back out se from the CI half-width.
+        # `predict(interval="confidence")` returns columns ("fit", "lwr",
+        # "upr"). Back out the standard error from the CI half-width.
         pred = fit.predict(newdata=new, interval="confidence", alpha=0.05)
-        yhat = pred["Fitted"].to_numpy()
-        ci_lo = pred[pred.columns[1]].to_numpy()
+        yhat = pred["fit"].to_numpy()
+        ci_lo = pred["lwr"].to_numpy()
         # 95% CI half-width / t_crit * sqrt(...) — we re-derive se from
         # (CI - fit) / 1.96. The smoother's `level` then re-inflates to
         # the user's chosen level.

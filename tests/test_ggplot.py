@@ -814,7 +814,7 @@ def test_geom_smooth_lm_fit_matches_hea_lm():
 
         m = lm("mpg ~ wt", mtcars)
         new = pl.DataFrame({"wt": line_x})
-        expected = m.predict(newdata=new)["Fitted"].to_numpy()
+        expected = m.predict(newdata=new)["fit"].to_numpy()
         import numpy as np
         np.testing.assert_allclose(line_y, expected, atol=1e-9)
     finally:

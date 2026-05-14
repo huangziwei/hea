@@ -433,7 +433,7 @@ class glm:
         # μ̂, η̂ (η̂ includes offset).
         self.fitted_values = fit.mu
         self.linear_predictors = fit.eta
-        self.yhat = pl.DataFrame({"Fitted": fit.mu})    # lm-style
+        self.yhat = pl.DataFrame({"fit": fit.mu})       # lm-style
         self.fitted = self.fitted_values
 
         # Deviance.
@@ -652,9 +652,9 @@ class glm:
         """Generate predictions on new data — :func:`predict.glm` parity.
 
         ``type='response'`` returns μ̂ = linkinv(η̂); ``type='link'`` returns
-        η̂. If ``se_fit=True``, also returns the standard error: on the link
-        scale ``√diag(X·vcov·Xᵀ)``; on the response scale this is multiplied
-        by ``|dμ/dη|`` (delta method, matches R).
+        η̂. Returns a ``pl.DataFrame`` with column ``fit``; if ``se_fit=True``
+        also a column ``se.fit``. Link-scale SE is ``√diag(X·vcov·Xᵀ)``;
+        response-scale SE multiplies by ``|dμ/dη|`` (delta method, matches R).
         """
         if new is None:
             X_new = self.X.to_numpy().astype(float)
@@ -692,7 +692,7 @@ class glm:
             raise ValueError(f"unknown predict type {type!r}; expected 'response' or 'link'")
 
         if not se_fit:
-            return fit
+            return pl.DataFrame({"fit": fit})
 
         # SE on the link scale: √diag(X · vcov · Xᵀ); use the kept-column
         # subspace so NaN-vcov entries don't propagate.
@@ -702,10 +702,10 @@ class glm:
         var_link = np.einsum("ij,jk,ik->i", Xk, Vk, Xk)
         se_link = np.sqrt(np.maximum(var_link, 0.0))
         if type == "link":
-            return fit, se_link
+            return pl.DataFrame({"fit": fit, "se.fit": se_link})
         # response-scale SE = |dμ/dη(η̂)| · se_link  (delta method).
         mu_eta_v = self.family.link.mu_eta(eta)
-        return fit, np.abs(mu_eta_v) * se_link
+        return pl.DataFrame({"fit": fit, "se.fit": np.abs(mu_eta_v) * se_link})
 
     # ----- printing -------------------------------------------------------
 

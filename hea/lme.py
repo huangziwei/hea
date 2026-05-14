@@ -1058,12 +1058,17 @@ class lme:
         na_action
             Only ``"na.pass"`` is supported in this port.
         se_fit
-            If ``True``, return ``{"fit": pred, "se.fit": se}``. The SE uses
-            the joint posterior covariance of ``(û, β̂)``, which for LMMs is
-            ``σ̂² · M⁻¹`` where ``M`` is the Henderson MME in spherical
-            coordinates.
+            If ``True``, the returned frame gains an ``se.fit`` column.
+            SE uses the joint posterior covariance of ``(û, β̂)``, which
+            for LMMs is ``σ̂² · M⁻¹`` where ``M`` is the Henderson MME in
+            spherical coordinates.
         terms
             Not implemented (R also marks this as unimplemented).
+
+        Returns
+        -------
+        pl.DataFrame
+            ``{fit}``, plus ``se.fit`` when ``se_fit=True``.
         """
         if terms is not None:
             raise NotImplementedError("predict: terms= is not implemented")
@@ -1088,7 +1093,7 @@ class lme:
 
         # No-arg fast path — matches R's ``na.omit(fitted(object))``.
         if newdata is None and include_re and not random_only and not se_fit:
-            return self.fitted.copy()
+            return pl.DataFrame({"fit": self.fitted.copy()})
 
         # Build X, Z, offset on the appropriate frame.
         if newdata is None:
@@ -1120,7 +1125,7 @@ class lme:
             ZL_pred = Z_pred
 
         if not se_fit:
-            return pred
+            return pl.DataFrame({"fit": pred})
 
         # se.fit — joint (û, β̂) posterior covariance is σ̂² · M⁻¹ with
         # M = [Λᵀ Z'Z Λ + I,  Λᵀ Z'X; X'Z Λ,  X'X]. Build M densely and
@@ -1147,7 +1152,7 @@ class lme:
         # Numerical floor: tiny negative values from cancellation.
         var_pred = np.maximum(var_pred, 0.0)
         se = np.sqrt(var_pred)
-        return {"fit": pred, "se.fit": se}
+        return pl.DataFrame({"fit": pred, "se.fit": se})
 
     # ---- lmer-style printing --------------------------------------------
 

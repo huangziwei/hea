@@ -65,28 +65,35 @@ def _check_predict_no_newdata(m):
     fitted = m.fitted_values
     eta_full = m.linear_predictors
 
-    # response / link / lpmatrix without se_fit
-    assert np.allclose(m.predict(), fitted, rtol=0, atol=0)
-    assert np.allclose(m.predict(type="link"), eta_full, rtol=0, atol=0)
+    # response / link return a DataFrame with column "fit".
+    assert np.allclose(m.predict()["fit"].to_numpy(), fitted, rtol=0, atol=0)
+    assert np.allclose(
+        m.predict(type="link")["fit"].to_numpy(), eta_full, rtol=0, atol=0,
+    )
+    # lpmatrix is the raw design matrix (ndarray), not a prediction.
     X = m.predict(type="lpmatrix")
     assert X.shape == (n, p)
 
-    # se_fit on response and link returns 2-tuples of length-n
-    fit, se = m.predict(se_fit=True)
+    # se_fit adds a second column "se.fit".
+    pred = m.predict(se_fit=True)
+    fit = pred["fit"].to_numpy()
+    se = pred["se.fit"].to_numpy()
     assert fit.shape == (n,)
     assert se.shape == (n,)
     assert np.all(np.isfinite(se))
     assert np.all(se >= 0.0)
     assert np.allclose(fit, fitted, rtol=0, atol=0)
 
-    fit_l, se_l = m.predict(type="link", se_fit=True)
+    pred_l = m.predict(type="link", se_fit=True)
+    fit_l = pred_l["fit"].to_numpy()
+    se_l = pred_l["se.fit"].to_numpy()
     assert np.allclose(fit_l, eta_full, rtol=0, atol=0)
     assert se_l.shape == (n,)
     assert np.all(np.isfinite(se_l))
 
     # extra offset shifts link by exactly that amount
     extra = np.full(n, 0.123)
-    eta_extra = m.predict(type="link", offset=extra)
+    eta_extra = m.predict(type="link", offset=extra)["fit"].to_numpy()
     assert np.allclose(eta_extra - eta_full, extra)
 
 
@@ -111,7 +118,7 @@ def test_predict_newdata_matches_in_sample():
     is the training frame — sanity-check the super().predict delegation."""
     df = _poisson_data()
     m = hea.bam("y ~ s(x, k=5)", df, family=Poisson(), discrete=True)
-    yhat = m.predict(newdata=df)
+    yhat = m.predict(newdata=df)["fit"].to_numpy()
     assert np.allclose(yhat, m.fitted_values, rtol=1e-12, atol=1e-12)
 
 
