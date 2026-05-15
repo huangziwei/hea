@@ -1213,6 +1213,1867 @@ def _glmm_devfun_factory(
 
 
 # ----------------------------------------------------------------------
+# Bound-constrained BOBYQA — port of ``minqa``'s Fortran (M. J. D. Powell).
+#
+# lme4's default GLMM optimizer chain is ``c("bobyqa", "Nelder_Mead")``
+# (glmerControl). Stage 0 (θ-only) runs BOBYQA; Stage 1 (θ+β) runs
+# Nelder-Mead. To match R's converged ``(θ̂, β̂)`` byte-for-byte, hea Stage 0
+# must therefore run the same BOBYQA — not a different derivative-free
+# method (e.g. Py-BOBYQA, which is a fresh Cartis/Roberts implementation,
+# not a Fortran port).
+#
+# The port is line-by-line from ``/tmp/minqa_src/minqa/src/*.f``:
+#
+#   bobyqa.f        →  _bobyqa_driver           (workspace + initial X clamp)
+#   bobyqb.f        →  _bobyqa_bobyqb           (main iteration loop)
+#   prelim.f        →  _bobyqa_prelim           (initial interpolation set)
+#   trsbox.f        →  _bobyqa_trsbox           (trust-region step in box)
+#   altmov.f        →  _bobyqa_altmov           (alternative geometry step)
+#   rescue.f        →  _bobyqa_rescue           (interpolation-set rescue)
+#   updatebobyqa.f  →  _bobyqa_update           (BMAT/ZMAT update)
+#
+# Fortran conventions kept verbatim for fidelity:
+#
+# - **1-indexed arrays**. All internal arrays are allocated with shape
+#   ``(n+1,)`` or ``(npt+1, n+1)`` etc. Element ``[0]`` is unused. Loops
+#   use ``range(1, n+1)``. This lets every Python statement mirror its
+#   Fortran origin literally (``XPT(K,J)`` ⇔ ``xpt[K, J]``).
+# - **Operation order is preserved**. The Fortran source ordering of
+#   additions/subtractions is the only meaningful "implementation"
+#   (BOBYQA is sensitive to rounding-error accumulation around small
+#   denominators in the Lagrange-function denominator updates), so each
+#   reduction, dot product, and sum is unrolled rather than vectorized.
+# - **GOTOs become a state-string dispatch**. ``bobyqb.f`` has a tangled
+#   GOTO graph (labels 20/60/90/190/210/230/350/360/650/680/720); the
+#   port uses ``state = "L60"`` etc. in a ``while True`` loop. This is
+#   uglier than structured control flow but maps directly to the
+#   Fortran labels — diffing this code against the .f source is the
+#   verification strategy.
+# - **Known minqa quirks reproduced verbatim**: ``altmov.f`` resets
+#   ``IBDSAV=0`` between the K-loop and the XNEW construction
+#   (line 178), making the subsequent ``IBDSAV<0`` / ``>0`` boundary
+#   handling unreachable. ``rescue.f`` calls ``CALFUN(N,X,IPRINT)``
+#   inside its second loop (line 372) although ``X`` is not in the
+#   RESCUE argument list — in F77 this picks up whatever the caller's
+#   ``X`` slot happens to hold; the apparent intent is the freshly
+#   populated ``W(1..N)``, which is what we pass. Both quirks affect
+#   only seldom-triggered branches, but for bit-by-bit match against
+#   minqa we follow the Fortran exactly.
+#
+# References:
+# - ``/tmp/minqa_src/minqa/src/*.f`` — F77 source (minqa 1.2.8).
+# - Powell, M. J. D. (2009), "The BOBYQA algorithm for bound constrained
+#   optimization without derivatives", DAMTP technical report 2009/NA06.
+
+def _bobyqa_update(n, npt, bmat, zmat, ndim, vlag, beta, denom, knew, w):
+    """Update BMAT and ZMAT for the new KNEW-th interpolation point.
+
+    In-place port of ``updatebobyqa.f``. The vector ``vlag`` has length
+    ``n + npt``, BETA is the parameter from the Powell 2006 NEWUOA paper
+    eq. (4.11), DENOM is the denominator of the updating formula, and
+    ``w`` is working space (first NDIM elements used).
+    """
+    ONE = 1.0
+    ZERO = 0.0
+    nptm = npt - n - 1
+    # ZTEST = 1e-20 * max(|ZMAT|) — threshold for treating ZMAT entries as 0.
+    ztest = ZERO
+    for k in range(1, npt + 1):
+        for j in range(1, nptm + 1):
+            ztest = max(ztest, abs(zmat[k, j]))
+    ztest = 1.0e-20 * ztest
+    #
+    # Apply the rotations that put zeros in the KNEW-th row of ZMAT.
+    #
+    jl = 1  # noqa: F841 — kept for fidelity with the F77 source
+    for j in range(2, nptm + 1):
+        if abs(zmat[knew, j]) > ztest:
+            temp = np.sqrt(zmat[knew, 1] ** 2 + zmat[knew, j] ** 2)
+            tempa = zmat[knew, 1] / temp
+            tempb = zmat[knew, j] / temp
+            for i in range(1, npt + 1):
+                temp = tempa * zmat[i, 1] + tempb * zmat[i, j]
+                zmat[i, j] = tempa * zmat[i, j] - tempb * zmat[i, 1]
+                zmat[i, 1] = temp
+        zmat[knew, j] = ZERO
+    #
+    # Put the first NPT components of the KNEW-th column of HLAG into W,
+    # and calculate the parameters of the updating formula.
+    #
+    for i in range(1, npt + 1):
+        w[i] = zmat[knew, 1] * zmat[i, 1]
+    alpha = w[knew]
+    tau = vlag[knew]
+    vlag[knew] = vlag[knew] - ONE
+    #
+    # Complete the updating of ZMAT.
+    #
+    temp = np.sqrt(denom)
+    tempb = zmat[knew, 1] / temp
+    tempa = tau / temp
+    for i in range(1, npt + 1):
+        zmat[i, 1] = tempa * zmat[i, 1] - tempb * vlag[i]
+    #
+    # Finally, update the matrix BMAT.
+    #
+    for j in range(1, n + 1):
+        jp = npt + j
+        w[jp] = bmat[knew, j]
+        tempa = (alpha * vlag[jp] - tau * w[jp]) / denom
+        tempb = (-beta * w[jp] - tau * vlag[jp]) / denom
+        for i in range(1, jp + 1):
+            bmat[i, j] = bmat[i, j] + tempa * vlag[i] + tempb * w[i]
+            if i > npt:
+                bmat[jp, i - npt] = bmat[i, j]
+
+
+def _bobyqa_prelim(calfun, n, npt, x, xl, xu, rhobeg, maxfun,
+                   xbase, xpt, fval, gopt, hq, pq, bmat, zmat, ndim, sl, su):
+    """Initialize XBASE, XPT, FVAL, GOPT, HQ, PQ, BMAT, ZMAT.
+
+    Line-by-line port of ``prelim.f``. Maintains NF (number of CALFUN
+    evaluations) and KOPT (index of best-so-far interpolation point).
+    Returns ``(nf, kopt)``.
+    """
+    HALF = 0.5
+    ONE = 1.0
+    TWO = 2.0
+    ZERO = 0.0
+    rhosq = rhobeg * rhobeg
+    recip = ONE / rhosq
+    np_ = n + 1
+    #
+    # Set XBASE = X, zero XPT, BMAT, HQ, PQ, ZMAT.
+    #
+    for j in range(1, n + 1):
+        xbase[j] = x[j]
+        for k in range(1, npt + 1):
+            xpt[k, j] = ZERO
+        for i in range(1, ndim + 1):
+            bmat[i, j] = ZERO
+    for ih in range(1, (n * np_) // 2 + 1):
+        hq[ih] = ZERO
+    for k in range(1, npt + 1):
+        pq[k] = ZERO
+        for j in range(1, npt - np_ + 1):
+            zmat[k, j] = ZERO
+    #
+    # Build initial interpolation set point by point.
+    #
+    nf = 0
+    fbeg = 0.0
+    stepa = 0.0
+    stepb = 0.0
+    ipt = 0
+    jpt = 0
+    kopt = 1
+    while True:  # outer loop: GOTO 50
+        nfm = nf
+        nfx = nf - n
+        nf = nf + 1
+        if nfm <= 2 * n:
+            if 1 <= nfm <= n:
+                stepa = rhobeg
+                if su[nfm] == ZERO:
+                    stepa = -stepa
+                xpt[nf, nfm] = stepa
+            elif nfm > n:
+                stepa = xpt[nf - n, nfx]
+                stepb = -rhobeg
+                if sl[nfx] == ZERO:
+                    stepb = min(TWO * rhobeg, su[nfx])
+                if su[nfx] == ZERO:
+                    stepb = max(-TWO * rhobeg, sl[nfx])
+                xpt[nf, nfx] = stepb
+        else:
+            itemp = (nfm - np_) // n
+            jpt = nfm - itemp * n - n
+            ipt = jpt + itemp
+            if ipt > n:
+                itemp = jpt
+                jpt = ipt - n
+                ipt = itemp
+            xpt[nf, ipt] = xpt[ipt + 1, ipt]
+            xpt[nf, jpt] = xpt[jpt + 1, jpt]
+        #
+        # Calculate the next value of F.
+        #
+        for j in range(1, n + 1):
+            x[j] = min(max(xl[j], xbase[j] + xpt[nf, j]), xu[j])
+            if xpt[nf, j] == sl[j]:
+                x[j] = xl[j]
+            if xpt[nf, j] == su[j]:
+                x[j] = xu[j]
+        f = calfun(x[1:n + 1])
+        fval[nf] = f
+        if nf == 1:
+            fbeg = f
+            kopt = 1
+        elif f < fval[kopt]:
+            kopt = nf
+        #
+        # Set the nonzero initial elements of BMAT and the quadratic model.
+        #
+        if nf <= 2 * n + 1:
+            if 2 <= nf <= n + 1:
+                gopt[nfm] = (f - fbeg) / stepa
+                if npt < nf + n:
+                    bmat[1, nfm] = -ONE / stepa
+                    bmat[nf, nfm] = ONE / stepa
+                    bmat[npt + nfm, nfm] = -HALF * rhosq
+            elif nf >= n + 2:
+                ih = (nfx * (nfx + 1)) // 2
+                temp = (f - fbeg) / stepb
+                diff = stepb - stepa
+                hq[ih] = TWO * (temp - gopt[nfx]) / diff
+                gopt[nfx] = (gopt[nfx] * stepb - temp * stepa) / diff
+                if stepa * stepb < ZERO:
+                    if f < fval[nf - n]:
+                        fval[nf] = fval[nf - n]
+                        fval[nf - n] = f
+                        if kopt == nf:
+                            kopt = nf - n
+                        xpt[nf - n, nfx] = stepb
+                        xpt[nf, nfx] = stepa
+                bmat[1, nfx] = -(stepa + stepb) / (stepa * stepb)
+                bmat[nf, nfx] = -HALF / xpt[nf - n, nfx]
+                bmat[nf - n, nfx] = -bmat[1, nfx] - bmat[nf, nfx]
+                zmat[1, nfx] = np.sqrt(TWO) / (stepa * stepb)
+                zmat[nf, nfx] = np.sqrt(HALF) / rhosq
+                zmat[nf - n, nfx] = -zmat[1, nfx] - zmat[nf, nfx]
+        #
+        # Set the off-diagonal second derivatives.
+        #
+        else:
+            ih = (ipt * (ipt - 1)) // 2 + jpt
+            zmat[1, nfx] = recip
+            zmat[nf, nfx] = recip
+            zmat[ipt + 1, nfx] = -recip
+            zmat[jpt + 1, nfx] = -recip
+            temp = xpt[nf, ipt] * xpt[nf, jpt]
+            hq[ih] = (fbeg - fval[ipt + 1] - fval[jpt + 1] + f) / temp
+        if not (nf < npt and nf < maxfun):
+            break
+    return nf, kopt
+
+
+def _bobyqa_altmov(n, npt, xpt, xopt, bmat, zmat, ndim, sl, su, kopt,
+                   knew, adelt, xnew, xalt, glag, hcol, w):
+    """Compute alternative geometry step. Port of ``altmov.f``.
+
+    Returns ``(alpha, cauchy)``. Mutates ``xnew``, ``xalt``, ``glag``,
+    ``hcol``, ``w``.
+    """
+    HALF = 0.5
+    ONE = 1.0
+    ZERO = 0.0
+    CONST = ONE + np.sqrt(2.0)
+    #
+    # Set HCOL to the leading elements of the KNEW-th column of H.
+    #
+    for k in range(1, npt + 1):
+        hcol[k] = ZERO
+    for j in range(1, npt - n - 1 + 1):
+        temp = zmat[knew, j]
+        for k in range(1, npt + 1):
+            hcol[k] = hcol[k] + temp * zmat[k, j]
+    alpha = hcol[knew]
+    ha = HALF * alpha
+    #
+    # Calculate the gradient of the KNEW-th Lagrange function at XOPT.
+    #
+    for i in range(1, n + 1):
+        glag[i] = bmat[knew, i]
+    for k in range(1, npt + 1):
+        temp = ZERO
+        for j in range(1, n + 1):
+            temp = temp + xpt[k, j] * xopt[j]
+        temp = hcol[k] * temp
+        for i in range(1, n + 1):
+            glag[i] = glag[i] + temp * xpt[k, i]
+    #
+    # Search for a large denominator along lines through XOPT.
+    #
+    presav = ZERO
+    ksav = kopt  # init for safety; overwritten on first PREDSQ > PRESAV
+    stpsav = ZERO
+    ibdsav = 0
+    for k in range(1, npt + 1):
+        if k == kopt:
+            continue  # GOTO 80 — skip body
+        dderiv = ZERO
+        distsq = ZERO
+        for i in range(1, n + 1):
+            temp = xpt[k, i] - xopt[i]
+            dderiv = dderiv + glag[i] * temp
+            distsq = distsq + temp * temp
+        subd = adelt / np.sqrt(distsq)
+        slbd = -subd
+        ilbd = 0
+        iubd = 0
+        sumin = min(ONE, subd)
+        #
+        # Revise SLBD and SUBD because of SL/SU.
+        #
+        for i in range(1, n + 1):
+            temp = xpt[k, i] - xopt[i]
+            if temp > ZERO:
+                if slbd * temp < sl[i] - xopt[i]:
+                    slbd = (sl[i] - xopt[i]) / temp
+                    ilbd = -i
+                if subd * temp > su[i] - xopt[i]:
+                    subd = max(sumin, (su[i] - xopt[i]) / temp)
+                    iubd = i
+            elif temp < ZERO:
+                if slbd * temp > su[i] - xopt[i]:
+                    slbd = (su[i] - xopt[i]) / temp
+                    ilbd = i
+                if subd * temp < sl[i] - xopt[i]:
+                    subd = max(sumin, (sl[i] - xopt[i]) / temp)
+                    iubd = -i
+        #
+        # K == KNEW path.
+        #
+        if k == knew:
+            diff = dderiv - ONE
+            step = slbd
+            vlag_local = slbd * (dderiv - slbd * diff)
+            isbd = ilbd
+            temp = subd * (dderiv - subd * diff)
+            if abs(temp) > abs(vlag_local):
+                step = subd
+                vlag_local = temp
+                isbd = iubd
+            tempd = HALF * dderiv
+            tempa = tempd - diff * slbd
+            tempb = tempd - diff * subd
+            if tempa * tempb < ZERO:
+                temp = tempd * tempd / diff
+                if abs(temp) > abs(vlag_local):
+                    step = tempd / diff
+                    vlag_local = temp
+                    isbd = 0
+        else:
+            #
+            # Other lines through XOPT.
+            #
+            step = slbd
+            vlag_local = slbd * (ONE - slbd)
+            isbd = ilbd
+            temp = subd * (ONE - subd)
+            if abs(temp) > abs(vlag_local):
+                step = subd
+                vlag_local = temp
+                isbd = iubd
+            if subd > HALF:
+                if abs(vlag_local) < 0.25:
+                    step = HALF
+                    vlag_local = 0.25
+                    isbd = 0
+            vlag_local = vlag_local * dderiv
+        #
+        # PREDSQ for this line, maintain PRESAV.
+        #
+        temp = step * (ONE - step) * distsq
+        predsq = vlag_local * vlag_local * (vlag_local * vlag_local + ha * temp * temp)
+        if predsq > presav:
+            presav = predsq
+            ksav = k
+            stpsav = step
+            ibdsav = isbd
+    #
+    # Construct XNEW. The IBDSAV=0 here is verbatim from altmov.f:178 — a
+    # known quirk that makes the next two bound-snapping branches dead code.
+    # Preserved for bit-by-bit match with minqa.
+    #
+    ibdsav = 0
+    for i in range(1, n + 1):
+        temp = xopt[i] + stpsav * (xpt[ksav, i] - xopt[i])
+        xnew[i] = max(sl[i], min(su[i], temp))
+    if ibdsav < 0:
+        xnew[-ibdsav] = sl[-ibdsav]
+    if ibdsav > 0:
+        xnew[ibdsav] = su[ibdsav]
+    #
+    # Constrained Cauchy step iteration (labels 100 / 120). IFLAG=0 runs
+    # with +GLAG, IFLAG=1 with -GLAG; XALT is the better of the two.
+    #
+    bigstp = adelt + adelt
+    iflag = 0
+    csave = 0.0
+    while True:  # label 100
+        wfixsq = ZERO
+        ggfree = ZERO
+        for i in range(1, n + 1):
+            w[i] = ZERO
+            tempa = min(xopt[i] - sl[i], glag[i])
+            tempb = max(xopt[i] - su[i], glag[i])
+            if tempa > ZERO or tempb < ZERO:
+                w[i] = bigstp
+                ggfree = ggfree + glag[i] ** 2
+        cauchy = 0.0
+        step = ZERO
+        if ggfree == ZERO:
+            cauchy = ZERO
+            return alpha, cauchy
+        #
+        # Try to fix more components of W (label 120 loop).
+        #
+        while True:  # label 120
+            temp = adelt * adelt - wfixsq
+            if temp > ZERO:
+                wsqsav = wfixsq
+                step = np.sqrt(temp / ggfree)
+                ggfree = ZERO
+                for i in range(1, n + 1):
+                    if w[i] == bigstp:
+                        temp = xopt[i] - step * glag[i]
+                        if temp <= sl[i]:
+                            w[i] = sl[i] - xopt[i]
+                            wfixsq = wfixsq + w[i] ** 2
+                        elif temp >= su[i]:
+                            w[i] = su[i] - xopt[i]
+                            wfixsq = wfixsq + w[i] ** 2
+                        else:
+                            ggfree = ggfree + glag[i] ** 2
+                if wfixsq > wsqsav and ggfree > ZERO:
+                    continue
+            break
+        #
+        # Set remaining components of W and XALT.
+        #
+        gw = ZERO
+        for i in range(1, n + 1):
+            if w[i] == bigstp:
+                w[i] = -step * glag[i]
+                xalt[i] = max(sl[i], min(su[i], xopt[i] + w[i]))
+            elif w[i] == ZERO:
+                xalt[i] = xopt[i]
+            elif glag[i] > ZERO:
+                xalt[i] = sl[i]
+            else:
+                xalt[i] = su[i]
+            gw = gw + glag[i] * w[i]
+        #
+        # Curvature of KNEW-th Lagrange function along W.
+        #
+        curv = ZERO
+        for k in range(1, npt + 1):
+            temp = ZERO
+            for j in range(1, n + 1):
+                temp = temp + xpt[k, j] * w[j]
+            curv = curv + hcol[k] * temp * temp
+        if iflag == 1:
+            curv = -curv
+        if curv > -gw and curv < -CONST * gw:
+            scale = -gw / curv
+            for i in range(1, n + 1):
+                temp = xopt[i] + scale * w[i]
+                xalt[i] = max(sl[i], min(su[i], temp))
+            cauchy = (HALF * gw * scale) ** 2
+        else:
+            cauchy = (gw + HALF * curv) ** 2
+        #
+        # IFLAG=0 → flip GLAG and repeat with -GLAG; pick the larger CAUCHY.
+        #
+        if iflag == 0:
+            for i in range(1, n + 1):
+                glag[i] = -glag[i]
+                w[n + i] = xalt[i]
+            csave = cauchy
+            iflag = 1
+            continue
+        if csave > cauchy:
+            for i in range(1, n + 1):
+                xalt[i] = w[n + i]
+            cauchy = csave
+        return alpha, cauchy
+
+
+def _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta,
+                   xnew, d, gnew, xbdi, s, hs, hred):
+    """Trust-region step within bounds. Port of ``trsbox.f``.
+
+    Returns ``(dsq, crvmin)``. Mutates ``xnew, d, gnew, xbdi, s, hs, hred``.
+    """
+    HALF = 0.5
+    ONE = 1.0
+    ONEMIN = -1.0
+    ZERO = 0.0
+    #
+    # Initial: set XBDI from active bounds and GOPT signs; D=0, GNEW=GOPT.
+    #
+    iterc = 0
+    nact = 0
+    sqstp = ZERO  # noqa: F841
+    for i in range(1, n + 1):
+        xbdi[i] = ZERO
+        if xopt[i] <= sl[i]:
+            if gopt[i] >= ZERO:
+                xbdi[i] = ONEMIN
+        elif xopt[i] >= su[i]:
+            if gopt[i] <= ZERO:
+                xbdi[i] = ONE
+        if xbdi[i] != ZERO:
+            nact = nact + 1
+        d[i] = ZERO
+        gnew[i] = gopt[i]
+    delsq = delta * delta
+    qred = ZERO
+    crvmin = ONEMIN
+    #
+    # State-machine dispatch for the GOTO graph (labels 20/30/50/90/100/120/150/190/210).
+    # 210 is the "multiply S by HQ, store in HS" routine that's reached from
+    # 50/120/150; it dispatches back depending on CRVMIN / ITERC.
+    #
+    iact = 0
+    itcsav = -1
+    stepsq = 0.0
+    gredsq = 0.0
+    ggsav = 0.0
+    blen = 0.0
+    stplen = 0.0
+    sredg = 0.0
+    dredg = 0.0
+    dredsq = 0.0
+    angbd = 0.0
+    sdec = 0.0
+    angt = 0.0
+    cth = 0.0
+    sth = 0.0
+    xsav = 0.0
+    itermax = 0
+    return_from = ''  # which label called L210; resume target after L210 runs
+
+    state = 'L20'
+    while True:
+        if state == 'L20':
+            beta = ZERO
+            state = 'L30'
+        elif state == 'L30':
+            stepsq = ZERO
+            for i in range(1, n + 1):
+                if xbdi[i] != ZERO:
+                    s[i] = ZERO
+                elif beta == ZERO:
+                    s[i] = -gnew[i]
+                else:
+                    s[i] = beta * s[i] - gnew[i]
+                stepsq = stepsq + s[i] ** 2
+            if stepsq == ZERO:
+                state = 'L190'
+                continue
+            if beta == ZERO:
+                gredsq = stepsq
+                itermax = iterc + n - nact
+            if gredsq * delsq <= 1.0e-4 * qred * qred:
+                state = 'L190'
+                continue
+            return_from = 'L50'
+            state = 'L210'
+        elif state == 'L50':
+            resid = delsq
+            ds = ZERO
+            shs = ZERO
+            for i in range(1, n + 1):
+                if xbdi[i] == ZERO:
+                    resid = resid - d[i] ** 2
+                    ds = ds + s[i] * d[i]
+                    shs = shs + s[i] * hs[i]
+            if resid <= ZERO:
+                state = 'L90'
+                continue
+            temp = np.sqrt(stepsq * resid + ds * ds)
+            if ds < ZERO:
+                blen = (temp - ds) / stepsq
+            else:
+                blen = resid / (temp + ds)
+            stplen = blen
+            if shs > ZERO:
+                stplen = min(blen, gredsq / shs)
+            #
+            # Reduce STPLEN to preserve simple bounds; IACT is the new fixed var.
+            #
+            iact = 0
+            for i in range(1, n + 1):
+                if s[i] != ZERO:
+                    xsum = xopt[i] + d[i]
+                    if s[i] > ZERO:
+                        temp = (su[i] - xsum) / s[i]
+                    else:
+                        temp = (sl[i] - xsum) / s[i]
+                    if temp < stplen:
+                        stplen = temp
+                        iact = i
+            #
+            # Update CRVMIN, GNEW, D. SDEC is the decrease in Q.
+            #
+            sdec = ZERO
+            if stplen > ZERO:
+                iterc = iterc + 1
+                temp = shs / stepsq
+                if iact == 0 and temp > ZERO:
+                    crvmin = min(crvmin, temp)
+                    if crvmin == ONEMIN:
+                        crvmin = temp
+                ggsav = gredsq
+                gredsq = ZERO
+                for i in range(1, n + 1):
+                    gnew[i] = gnew[i] + stplen * hs[i]
+                    if xbdi[i] == ZERO:
+                        gredsq = gredsq + gnew[i] ** 2
+                    d[i] = d[i] + stplen * s[i]
+                sdec = max(stplen * (ggsav - HALF * stplen * shs), ZERO)
+                qred = qred + sdec
+            #
+            # Restart CG if hit a new bound.
+            #
+            if iact > 0:
+                nact = nact + 1
+                xbdi[iact] = ONE
+                if s[iact] < ZERO:
+                    xbdi[iact] = ONEMIN
+                delsq = delsq - d[iact] ** 2
+                if delsq <= ZERO:
+                    state = 'L90'
+                    continue
+                state = 'L20'
+                continue
+            #
+            # STPLEN < BLEN: more CG steps or return.
+            #
+            if stplen < blen:
+                if iterc == itermax:
+                    state = 'L190'
+                    continue
+                if sdec <= 0.01 * qred:
+                    state = 'L190'
+                    continue
+                beta = gredsq / ggsav
+                state = 'L30'
+                continue
+            state = 'L90'
+        elif state == 'L90':
+            crvmin = ZERO
+            state = 'L100'
+        elif state == 'L100':
+            if nact >= n - 1:
+                state = 'L190'
+                continue
+            dredsq = ZERO
+            dredg = ZERO
+            gredsq = ZERO
+            for i in range(1, n + 1):
+                if xbdi[i] == ZERO:
+                    dredsq = dredsq + d[i] ** 2
+                    dredg = dredg + d[i] * gnew[i]
+                    gredsq = gredsq + gnew[i] ** 2
+                    s[i] = d[i]
+                else:
+                    s[i] = ZERO
+            itcsav = iterc
+            return_from = 'L150'
+            state = 'L210'
+        elif state == 'L120':
+            iterc = iterc + 1
+            temp = gredsq * dredsq - dredg * dredg
+            if temp <= 1.0e-4 * qred * qred:
+                state = 'L190'
+                continue
+            temp = np.sqrt(temp)
+            for i in range(1, n + 1):
+                if xbdi[i] == ZERO:
+                    s[i] = (dredg * d[i] - dredsq * gnew[i]) / temp
+                else:
+                    s[i] = ZERO
+            sredg = -temp
+            #
+            # ANGBD from bounds.
+            #
+            angbd = ONE
+            iact = 0
+            jumped_to_100 = False
+            for i in range(1, n + 1):
+                if xbdi[i] == ZERO:
+                    tempa = xopt[i] + d[i] - sl[i]
+                    tempb = su[i] - xopt[i] - d[i]
+                    if tempa <= ZERO:
+                        nact = nact + 1
+                        xbdi[i] = ONEMIN
+                        jumped_to_100 = True
+                        break
+                    elif tempb <= ZERO:
+                        nact = nact + 1
+                        xbdi[i] = ONE
+                        jumped_to_100 = True
+                        break
+                    ratio = ONE  # noqa: F841
+                    ssq = d[i] ** 2 + s[i] ** 2
+                    temp = ssq - (xopt[i] - sl[i]) ** 2
+                    if temp > ZERO:
+                        temp = np.sqrt(temp) - s[i]
+                        if angbd * temp > tempa:
+                            angbd = tempa / temp
+                            iact = i
+                            xsav = ONEMIN
+                    temp = ssq - (su[i] - xopt[i]) ** 2
+                    if temp > ZERO:
+                        temp = np.sqrt(temp) + s[i]
+                        if angbd * temp > tempb:
+                            angbd = tempb / temp
+                            iact = i
+                            xsav = ONE
+            if jumped_to_100:
+                state = 'L100'
+                continue
+            return_from = 'L150'
+            state = 'L210'
+        elif state == 'L150':
+            shs = ZERO
+            dhs = ZERO
+            dhd = ZERO
+            for i in range(1, n + 1):
+                if xbdi[i] == ZERO:
+                    shs = shs + s[i] * hs[i]
+                    dhs = dhs + d[i] * hs[i]
+                    dhd = dhd + d[i] * hred[i]
+            #
+            # Search for greatest reduction over equally-spaced ANGT.
+            #
+            redmax = ZERO
+            isav = 0
+            redsav = ZERO
+            rdprev = 0.0
+            rdnext = 0.0
+            iu = int(17.0 * angbd + 3.1)
+            for i in range(1, iu + 1):
+                angt = angbd * float(i) / float(iu)
+                sth = (angt + angt) / (ONE + angt * angt)
+                temp = shs + angt * (angt * dhd - dhs - dhs)
+                rednew = sth * (angt * dredg - sredg - HALF * sth * temp)
+                if rednew > redmax:
+                    redmax = rednew
+                    isav = i
+                    rdprev = redsav
+                elif i == isav + 1:
+                    rdnext = rednew
+                redsav = rednew
+            if isav == 0:
+                state = 'L190'
+                continue
+            if isav < iu:
+                temp = (rdnext - rdprev) / (redmax + redmax - rdprev - rdnext)
+                angt = angbd * (float(isav) + HALF * temp) / float(iu)
+            cth = (ONE - angt * angt) / (ONE + angt * angt)
+            sth = (angt + angt) / (ONE + angt * angt)
+            temp = shs + angt * (angt * dhd - dhs - dhs)
+            sdec = sth * (angt * dredg - sredg - HALF * sth * temp)
+            if sdec <= ZERO:
+                state = 'L190'
+                continue
+            #
+            # Update GNEW, D, HRED. Fix variable if angle was bound-restricted.
+            #
+            dredg = ZERO
+            gredsq = ZERO
+            for i in range(1, n + 1):
+                gnew[i] = gnew[i] + (cth - ONE) * hred[i] + sth * hs[i]
+                if xbdi[i] == ZERO:
+                    d[i] = cth * d[i] + sth * s[i]
+                    dredg = dredg + d[i] * gnew[i]
+                    gredsq = gredsq + gnew[i] ** 2
+                hred[i] = cth * hred[i] + sth * hs[i]
+            qred = qred + sdec
+            if iact > 0 and isav == iu:
+                nact = nact + 1
+                xbdi[iact] = xsav
+                state = 'L100'
+                continue
+            if sdec > 0.01 * qred:
+                state = 'L120'
+                continue
+            state = 'L190'
+        elif state == 'L190':
+            dsq = ZERO
+            for i in range(1, n + 1):
+                xnew[i] = max(min(xopt[i] + d[i], su[i]), sl[i])
+                if xbdi[i] == ONEMIN:
+                    xnew[i] = sl[i]
+                if xbdi[i] == ONE:
+                    xnew[i] = su[i]
+                d[i] = xnew[i] - xopt[i]
+                dsq = dsq + d[i] ** 2
+            return dsq, crvmin
+        elif state == 'L210':
+            # Multiply S by HQ, store in HS.
+            ih = 0
+            for j in range(1, n + 1):
+                hs[j] = ZERO
+                for i in range(1, j + 1):
+                    ih = ih + 1
+                    if i < j:
+                        hs[j] = hs[j] + hq[ih] * s[i]
+                    hs[i] = hs[i] + hq[ih] * s[j]
+            for k in range(1, npt + 1):
+                if pq[k] != ZERO:
+                    temp = ZERO
+                    for j in range(1, n + 1):
+                        temp = temp + xpt[k, j] * s[j]
+                    temp = temp * pq[k]
+                    for i in range(1, n + 1):
+                        hs[i] = hs[i] + temp * xpt[k, i]
+            if crvmin != ZERO:
+                state = 'L50'
+                continue
+            if iterc > itcsav:
+                state = 'L150'
+                continue
+            for i in range(1, n + 1):
+                hred[i] = hs[i]
+            state = 'L120'
+        else:
+            raise RuntimeError(f"trsbox: unknown state {state!r}")
+
+
+def _bobyqa_rescue(calfun, n, npt, xl, xu, maxfun, xbase, xpt, fval,
+                   xopt, gopt, hq, pq, bmat, zmat, ndim, sl, su, nf, delta,
+                   kopt, vlag, ptsaux, ptsid, w):
+    """Rescue ill-conditioned interpolation set. Port of ``rescue.f``.
+
+    Returns ``(nf, kopt)`` (nf set to -1 if MAXFUN exhausted).
+    """
+    HALF = 0.5
+    ONE = 1.0
+    ZERO = 0.0
+    np_ = n + 1
+    sfrac = HALF / float(np_)
+    nptm = npt - np_
+    #
+    # Shift XPT so XOPT becomes origin; clear ZMAT; compute W(NDIM+K) distances.
+    #
+    sumpq = ZERO
+    winc = ZERO
+    for k in range(1, npt + 1):
+        distsq = ZERO
+        for j in range(1, n + 1):
+            xpt[k, j] = xpt[k, j] - xopt[j]
+            distsq = distsq + xpt[k, j] ** 2
+        sumpq = sumpq + pq[k]
+        w[ndim + k] = distsq
+        winc = max(winc, distsq)
+        for j in range(1, nptm + 1):
+            zmat[k, j] = ZERO
+    #
+    # Update HQ for XBASE shift.
+    #
+    ih = 0
+    for j in range(1, n + 1):
+        w[j] = HALF * sumpq * xopt[j]
+        for k in range(1, npt + 1):
+            w[j] = w[j] + pq[k] * xpt[k, j]
+        for i in range(1, j + 1):
+            ih = ih + 1
+            hq[ih] = hq[ih] + w[i] * xopt[j] + w[j] * xopt[i]
+    #
+    # Shift XBASE, SL, SU, XOPT; clear BMAT; set PTSAUX.
+    #
+    for j in range(1, n + 1):
+        xbase[j] = xbase[j] + xopt[j]
+        sl[j] = sl[j] - xopt[j]
+        su[j] = su[j] - xopt[j]
+        xopt[j] = ZERO
+        ptsaux[1, j] = min(delta, su[j])
+        ptsaux[2, j] = max(-delta, sl[j])
+        if ptsaux[1, j] + ptsaux[2, j] < ZERO:
+            temp = ptsaux[1, j]
+            ptsaux[1, j] = ptsaux[2, j]
+            ptsaux[2, j] = temp
+        if abs(ptsaux[2, j]) < HALF * abs(ptsaux[1, j]):
+            ptsaux[2, j] = HALF * ptsaux[1, j]
+        for i in range(1, ndim + 1):
+            bmat[i, j] = ZERO
+    fbase = fval[kopt]
+    #
+    # Set provisional interpolation point identifiers PTSID, and nonzero
+    # elements of BMAT and ZMAT.
+    #
+    ptsid[1] = sfrac
+    for j in range(1, n + 1):
+        jp = j + 1
+        jpn = jp + n
+        ptsid[jp] = float(j) + sfrac
+        if jpn <= npt:
+            ptsid[jpn] = float(j) / float(np_) + sfrac
+            temp = ONE / (ptsaux[1, j] - ptsaux[2, j])
+            bmat[jp, j] = -temp + ONE / ptsaux[1, j]
+            bmat[jpn, j] = temp + ONE / ptsaux[2, j]
+            bmat[1, j] = -bmat[jp, j] - bmat[jpn, j]
+            zmat[1, j] = np.sqrt(2.0) / abs(ptsaux[1, j] * ptsaux[2, j])
+            zmat[jp, j] = zmat[1, j] * ptsaux[2, j] * temp
+            zmat[jpn, j] = -zmat[1, j] * ptsaux[1, j] * temp
+        else:
+            bmat[1, j] = -ONE / ptsaux[1, j]
+            bmat[jp, j] = ONE / ptsaux[1, j]
+            bmat[j + npt, j] = -HALF * ptsaux[1, j] ** 2
+    #
+    # Remaining identifiers — off-diagonal ZMAT.
+    #
+    if npt >= n + np_:
+        for k in range(2 * np_, npt + 1):
+            iw = int((float(k - np_) - HALF) / float(n))
+            ip = k - np_ - iw * n
+            iq = ip + iw
+            if iq > n:
+                iq = iq - n
+            ptsid[k] = float(ip) + float(iq) / float(np_) + sfrac
+            temp = ONE / (ptsaux[1, ip] * ptsaux[1, iq])
+            zmat[1, k - np_] = temp
+            zmat[ip + 1, k - np_] = -temp
+            zmat[iq + 1, k - np_] = -temp
+            zmat[k, k - np_] = temp
+    nrem = npt
+    kold = 1
+    knew = kopt
+    beta = 0.0
+    denom = 0.0
+    #
+    # Reorder provisional points. Labels 80 / 120 / 260 / 350.
+    #
+    while True:  # label 80 — outer loop
+        for j in range(1, n + 1):
+            temp = bmat[kold, j]
+            bmat[kold, j] = bmat[knew, j]
+            bmat[knew, j] = temp
+        for j in range(1, nptm + 1):
+            temp = zmat[kold, j]
+            zmat[kold, j] = zmat[knew, j]
+            zmat[knew, j] = temp
+        ptsid[kold] = ptsid[knew]
+        ptsid[knew] = ZERO
+        w[ndim + knew] = ZERO
+        nrem = nrem - 1
+        if knew != kopt:
+            temp = vlag[kold]
+            vlag[kold] = vlag[knew]
+            vlag[knew] = temp
+            _bobyqa_update(n, npt, bmat, zmat, ndim, vlag, beta, denom, knew, w)
+            if nrem == 0:
+                return nf, kopt  # GOTO 350
+            for k in range(1, npt + 1):
+                w[ndim + k] = abs(w[ndim + k])
+        #
+        # Pick next KNEW (label 120).
+        #
+        retry_120 = True
+        while retry_120:
+            dsqmin = ZERO
+            for k in range(1, npt + 1):
+                if w[ndim + k] > ZERO:
+                    if dsqmin == ZERO or w[ndim + k] < dsqmin:
+                        knew = k
+                        dsqmin = w[ndim + k]
+            if dsqmin == ZERO:
+                # GOTO 260: finalize new interpolation points.
+                return _bobyqa_rescue_finalize(
+                    calfun, n, npt, xl, xu, maxfun, xbase, xpt, fval,
+                    gopt, hq, pq, bmat, zmat, ndim, sl, su, nf, kopt,
+                    ptsaux, ptsid, w,
+                )
+            #
+            # Form W-vector of the chosen original point.
+            #
+            for j in range(1, n + 1):
+                w[npt + j] = xpt[knew, j]
+            for k in range(1, npt + 1):
+                sum_ = ZERO
+                if k == kopt:
+                    pass  # F77 CONTINUE
+                elif ptsid[k] == ZERO:
+                    for j in range(1, n + 1):
+                        sum_ = sum_ + w[npt + j] * xpt[k, j]
+                else:
+                    ip = int(ptsid[k])
+                    if ip > 0:
+                        sum_ = w[npt + ip] * ptsaux[1, ip]
+                    iq = int(float(np_) * ptsid[k] - float(ip * np_))
+                    if iq > 0:
+                        iw = 1
+                        if ip == 0:
+                            iw = 2
+                        sum_ = sum_ + w[npt + iq] * ptsaux[iw, iq]
+                w[k] = HALF * sum_ * sum_
+            #
+            # VLAG and BETA for the proposed reinstatement.
+            #
+            for k in range(1, npt + 1):
+                sum_ = ZERO
+                for j in range(1, n + 1):
+                    sum_ = sum_ + bmat[k, j] * w[npt + j]
+                vlag[k] = sum_
+            beta = ZERO
+            for j in range(1, nptm + 1):
+                sum_ = ZERO
+                for k in range(1, npt + 1):
+                    sum_ = sum_ + zmat[k, j] * w[k]
+                beta = beta - sum_ * sum_
+                for k in range(1, npt + 1):
+                    vlag[k] = vlag[k] + sum_ * zmat[k, j]
+            bsum = ZERO
+            distsq = ZERO
+            for j in range(1, n + 1):
+                sum_ = ZERO
+                for k in range(1, npt + 1):
+                    sum_ = sum_ + bmat[k, j] * w[k]
+                jp = j + npt
+                bsum = bsum + sum_ * w[jp]
+                for ip in range(npt + 1, ndim + 1):
+                    sum_ = sum_ + bmat[ip, j] * w[ip]
+                bsum = bsum + sum_ * w[jp]
+                vlag[jp] = sum_
+                distsq = distsq + xpt[knew, j] ** 2
+            beta = HALF * distsq * distsq + beta - bsum
+            vlag[kopt] = vlag[kopt] + ONE
+            #
+            # KOLD by max DEN with rejection of small denominators.
+            #
+            denom = ZERO
+            vlmxsq = ZERO
+            for k in range(1, npt + 1):
+                if ptsid[k] != ZERO:
+                    hdiag = ZERO
+                    for j in range(1, nptm + 1):
+                        hdiag = hdiag + zmat[k, j] ** 2
+                    den = beta * hdiag + vlag[k] ** 2
+                    if den > denom:
+                        kold = k
+                        denom = den
+                vlmxsq = max(vlmxsq, vlag[k] ** 2)
+            if denom <= 1.0e-2 * vlmxsq:
+                w[ndim + knew] = -w[ndim + knew] - winc
+                continue  # GOTO 120
+            retry_120 = False
+        # falls back to GOTO 80
+
+
+def _bobyqa_rescue_finalize(calfun, n, npt, xl, xu, maxfun, xbase, xpt, fval,
+                            gopt, hq, pq, bmat, zmat, ndim, sl, su, nf, kopt,
+                            ptsaux, ptsid, w):
+    """Label-260 block of ``rescue.f``: evaluate F at remaining provisional
+    points and absorb them into the quadratic model. Returns ``(nf, kopt)``.
+    """
+    HALF = 0.5
+    ZERO = 0.0
+    np_ = n + 1
+    nptm = npt - np_
+    fbase = fval[kopt]
+    for kpt in range(1, npt + 1):
+        if ptsid[kpt] == ZERO:
+            continue
+        if nf >= maxfun:
+            nf = -1
+            return nf, kopt
+        ih = 0
+        for j in range(1, n + 1):
+            w[j] = xpt[kpt, j]
+            xpt[kpt, j] = ZERO
+            temp = pq[kpt] * w[j]
+            for i in range(1, j + 1):
+                ih = ih + 1
+                hq[ih] = hq[ih] + temp * w[i]
+        pq[kpt] = ZERO
+        ip = int(ptsid[kpt])
+        iq = int(float(np_) * ptsid[kpt] - float(ip * np_))
+        xp = 0.0
+        xq = 0.0
+        if ip > 0:
+            xp = ptsaux[1, ip]
+            xpt[kpt, ip] = xp
+        if iq > 0:
+            xq = ptsaux[1, iq]
+            if ip == 0:
+                xq = ptsaux[2, iq]
+            xpt[kpt, iq] = xq
+        #
+        # VQUAD = current model at the new point.
+        #
+        vquad = fbase
+        ihp = 0
+        ihq = 0
+        if ip > 0:
+            ihp = (ip + ip * ip) // 2
+            vquad = vquad + xp * (gopt[ip] + HALF * xp * hq[ihp])
+        if iq > 0:
+            ihq = (iq + iq * iq) // 2
+            vquad = vquad + xq * (gopt[iq] + HALF * xq * hq[ihq])
+            if ip > 0:
+                iw = max(ihp, ihq) - abs(ip - iq)
+                vquad = vquad + xp * xq * hq[iw]
+        for k in range(1, npt + 1):
+            temp = ZERO
+            if ip > 0:
+                temp = temp + xp * xpt[k, ip]
+            if iq > 0:
+                temp = temp + xq * xpt[k, iq]
+            vquad = vquad + HALF * pq[k] * temp * temp
+        #
+        # Evaluate F at the new interpolation point. The Fortran call is
+        # ``F = CALFUN(N, X, IPRINT)`` but X is not in RESCUE's arg list —
+        # we use W (which contains the clipped new point) as that's the
+        # apparent intent.
+        #
+        for i in range(1, n + 1):
+            w[i] = min(max(xl[i], xbase[i] + xpt[kpt, i]), xu[i])
+            if xpt[kpt, i] == sl[i]:
+                w[i] = xl[i]
+            if xpt[kpt, i] == su[i]:
+                w[i] = xu[i]
+        nf = nf + 1
+        f = calfun(w[1:n + 1])
+        fval[kpt] = f
+        if f < fval[kopt]:
+            kopt = kpt
+        diff = f - vquad
+        #
+        # Update quadratic model.
+        #
+        for i in range(1, n + 1):
+            gopt[i] = gopt[i] + diff * bmat[kpt, i]
+        for k in range(1, npt + 1):
+            sum_ = ZERO
+            for j in range(1, nptm + 1):
+                sum_ = sum_ + zmat[k, j] * zmat[kpt, j]
+            temp = diff * sum_
+            if ptsid[k] == ZERO:
+                pq[k] = pq[k] + temp
+            else:
+                ip_k = int(ptsid[k])
+                iq_k = int(float(np_) * ptsid[k] - float(ip_k * np_))
+                ihq_k = (iq_k * iq_k + iq_k) // 2
+                if ip_k == 0:
+                    hq[ihq_k] = hq[ihq_k] + temp * ptsaux[2, iq_k] ** 2
+                else:
+                    ihp_k = (ip_k * ip_k + ip_k) // 2
+                    hq[ihp_k] = hq[ihp_k] + temp * ptsaux[1, ip_k] ** 2
+                    if iq_k > 0:
+                        hq[ihq_k] = hq[ihq_k] + temp * ptsaux[1, iq_k] ** 2
+                        iw = max(ihp_k, ihq_k) - abs(iq_k - ip_k)
+                        hq[iw] = hq[iw] + temp * ptsaux[1, ip_k] * ptsaux[1, iq_k]
+        ptsid[kpt] = ZERO
+    return nf, kopt
+
+
+def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su):
+    """Main BOBYQA iteration loop. Port of ``bobyqb.f``.
+
+    Returns ``(x, f, nf, ierr)`` where IERR is 0 on normal exit,
+    20/320/390/430 for the various Powell error codes.
+    """
+    HALF = 0.5
+    ONE = 1.0
+    TEN = 10.0
+    TENTH = 0.1
+    TWO = 2.0
+    ZERO = 0.0
+    np_ = n + 1
+    nptm = npt - np_
+    nh = (n * np_) // 2
+    ndim = npt + n
+    #
+    # Allocate work arrays (1-indexed; element [0] unused).
+    #
+    xbase = np.zeros(n + 1)
+    xpt = np.zeros((npt + 1, n + 1))
+    fval = np.zeros(npt + 1)
+    xopt = np.zeros(n + 1)
+    gopt = np.zeros(n + 1)
+    hq = np.zeros(nh + 1)
+    pq = np.zeros(npt + 1)
+    bmat = np.zeros((ndim + 1, n + 1))
+    zmat = np.zeros((npt + 1, nptm + 1))
+    xnew = np.zeros(n + 1)
+    xalt = np.zeros(n + 1)
+    d = np.zeros(n + 1)
+    vlag = np.zeros(ndim + 1)
+    w = np.zeros(3 * ndim + np_ + n + 1)  # generous; F77 W() length ≥ 3·NDIM
+    ierr = 0
+    #
+    # PRELIM: initial XBASE, XPT, FVAL, GOPT, HQ, PQ, BMAT, ZMAT.
+    #
+    nf, kopt = _bobyqa_prelim(calfun, n, npt, x, xl, xu, rhobeg, maxfun,
+                              xbase, xpt, fval, gopt, hq, pq,
+                              bmat, zmat, ndim, sl, su)
+    xoptsq = ZERO
+    for i in range(1, n + 1):
+        xopt[i] = xpt[kopt, i]
+        xoptsq = xoptsq + xopt[i] ** 2
+    fsave = fval[1]
+    if nf < npt:
+        ierr = 390
+        # GOTO 720
+        return _bobyqa_finalize(x, xl, xu, sl, su, xbase, xopt, fval, kopt,
+                                fsave, n, nf, ierr)
+    kbase = 1
+    #
+    # Settings for the iterative procedure.
+    #
+    rho = rhobeg
+    delta = rho
+    nresc = nf
+    ntrits = 0
+    diffa = ZERO
+    diffb = ZERO
+    diffc = 0.0
+    itest = 0
+    nfsav = nf
+    knew = 0
+    dnorm = 0.0
+    dsq = 0.0
+    crvmin = 0.0
+    adelt = 0.0
+    alpha = 0.0
+    cauchy = 0.0
+    beta = 0.0
+    vquad = 0.0
+    ratio = 0.0
+    denom = 0.0
+    f = fval[kopt]
+
+    state = 'L20'
+    while True:
+        if state == 'L20':
+            # Update GOPT if KOPT changed.
+            if kopt != kbase:
+                ih = 0
+                for j in range(1, n + 1):
+                    for i in range(1, j + 1):
+                        ih = ih + 1
+                        if i < j:
+                            gopt[j] = gopt[j] + hq[ih] * xopt[i]
+                        gopt[i] = gopt[i] + hq[ih] * xopt[j]
+                if nf > npt:
+                    for k in range(1, npt + 1):
+                        temp = ZERO
+                        for j in range(1, n + 1):
+                            temp = temp + xpt[k, j] * xopt[j]
+                        temp = pq[k] * temp
+                        for i in range(1, n + 1):
+                            gopt[i] = gopt[i] + temp * xpt[k, i]
+            state = 'L60'
+        elif state == 'L60':
+            # Trust-region step.
+            #
+            # F77: TRSBOX(N,NPT,XPT,XOPT,GOPT,HQ,PQ,SL,SU,DELTA,XNEW,D,
+            #             W,W(NP),W(NP+N),W(NP+2*N),W(NP+3*N),DSQ,CRVMIN)
+            # The W partition gives GNEW, XBDI, S, HS, HRED.
+            gnew_w = w[1:np_]  # placeholder; trsbox uses dedicated arrays below
+            # Use private scratch arrays — F77 reuse of W() is just buffer
+            # economy; results don't depend on overlap.
+            gnew = np.zeros(n + 1)
+            xbdi = np.zeros(n + 1)
+            s_arr = np.zeros(n + 1)
+            hs_arr = np.zeros(n + 1)
+            hred = np.zeros(n + 1)
+            # Cache W(1..N) for use in BDTEST below (XNEW snapshot vs SL/SU).
+            for jj in range(1, n + 1):
+                w[jj] = gnew[jj]
+            dsq, crvmin = _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su,
+                                         delta, xnew, d, gnew, xbdi,
+                                         s_arr, hs_arr, hred)
+            # Snapshot GNEW into W(1..N) for the BDTEST branch below.
+            for jj in range(1, n + 1):
+                w[jj] = gnew[jj]
+            dnorm = min(delta, np.sqrt(dsq))
+            if dnorm < HALF * rho:
+                ntrits = -1
+                distsq = (TEN * rho) ** 2
+                if nf <= nfsav + 2:
+                    state = 'L650'
+                    continue
+                errbig = max(diffa, diffb, diffc)
+                frhosq = 0.125 * rho * rho
+                if crvmin > ZERO and errbig > frhosq * crvmin:
+                    state = 'L650'
+                    continue
+                bdtol = errbig / rho
+                hit_650 = False
+                for j in range(1, n + 1):
+                    bdtest = bdtol
+                    if xnew[j] == sl[j]:
+                        bdtest = w[j]
+                    if xnew[j] == su[j]:
+                        bdtest = -w[j]
+                    if bdtest < bdtol:
+                        curv = hq[(j + j * j) // 2]
+                        for k in range(1, npt + 1):
+                            curv = curv + pq[k] * xpt[k, j] ** 2
+                        bdtest = bdtest + HALF * curv * rho
+                        if bdtest < bdtol:
+                            hit_650 = True
+                            break
+                if hit_650:
+                    state = 'L650'
+                    continue
+                state = 'L680'
+                continue
+            ntrits = ntrits + 1
+            state = 'L90'
+        elif state == 'L90':
+            # Severe cancellation guard: shift XBASE if XOPT far from XBASE.
+            if dsq <= 1.0e-3 * xoptsq:
+                fracsq = 0.25 * xoptsq
+                sumpq = ZERO
+                for k in range(1, npt + 1):
+                    sumpq = sumpq + pq[k]
+                    sum_ = -HALF * xoptsq
+                    for i in range(1, n + 1):
+                        sum_ = sum_ + xpt[k, i] * xopt[i]
+                    w[npt + k] = sum_
+                    temp = fracsq - HALF * sum_
+                    for i in range(1, n + 1):
+                        w[i] = bmat[k, i]
+                        vlag[i] = sum_ * xpt[k, i] + temp * xopt[i]
+                        ip = npt + i
+                        for j in range(1, i + 1):
+                            bmat[ip, j] = bmat[ip, j] + w[i] * vlag[j] + vlag[i] * w[j]
+                # BMAT depending on ZMAT.
+                for jj in range(1, nptm + 1):
+                    sumz = ZERO
+                    sumw = ZERO
+                    for k in range(1, npt + 1):
+                        sumz = sumz + zmat[k, jj]
+                        vlag[k] = w[npt + k] * zmat[k, jj]
+                        sumw = sumw + vlag[k]
+                    for j in range(1, n + 1):
+                        sum_ = (fracsq * sumz - HALF * sumw) * xopt[j]
+                        for k in range(1, npt + 1):
+                            sum_ = sum_ + vlag[k] * xpt[k, j]
+                        w[j] = sum_
+                        for k in range(1, npt + 1):
+                            bmat[k, j] = bmat[k, j] + sum_ * zmat[k, jj]
+                    for i in range(1, n + 1):
+                        ip = i + npt
+                        temp = w[i]
+                        for j in range(1, i + 1):
+                            bmat[ip, j] = bmat[ip, j] + temp * w[j]
+                # Finalize shift; update HQ, XPT, XBASE, XNEW, SL, SU, XOPT.
+                ih = 0
+                for j in range(1, n + 1):
+                    w[j] = -HALF * sumpq * xopt[j]
+                    for k in range(1, npt + 1):
+                        w[j] = w[j] + pq[k] * xpt[k, j]
+                        xpt[k, j] = xpt[k, j] - xopt[j]
+                    for i in range(1, j + 1):
+                        ih = ih + 1
+                        hq[ih] = hq[ih] + w[i] * xopt[j] + xopt[i] * w[j]
+                        bmat[npt + i, j] = bmat[npt + j, i]
+                for i in range(1, n + 1):
+                    xbase[i] = xbase[i] + xopt[i]
+                    xnew[i] = xnew[i] - xopt[i]
+                    sl[i] = sl[i] - xopt[i]
+                    su[i] = su[i] - xopt[i]
+                    xopt[i] = ZERO
+                xoptsq = ZERO
+            if ntrits == 0:
+                state = 'L210'
+                continue
+            state = 'L230'
+        elif state == 'L190':
+            # RESCUE.
+            nfsav = nf
+            kbase = kopt
+            ptsaux = np.zeros((3, n + 1))  # 1..2, 1..n
+            ptsid = np.zeros(npt + 1)
+            nf, kopt = _bobyqa_rescue(
+                calfun, n, npt, xl, xu, maxfun, xbase, xpt, fval,
+                xopt, gopt, hq, pq, bmat, zmat, ndim, sl, su, nf, delta,
+                kopt, vlag, ptsaux, ptsid, w,
+            )
+            xoptsq = ZERO
+            if kopt != kbase:
+                for i in range(1, n + 1):
+                    xopt[i] = xpt[kopt, i]
+                    xoptsq = xoptsq + xopt[i] ** 2
+            if nf < 0:
+                nf = maxfun
+                ierr = 390
+                state = 'L720'
+                continue
+            nresc = nf
+            if nfsav < nf:
+                nfsav = nf
+                state = 'L20'
+                continue
+            if ntrits > 0:
+                state = 'L60'
+                continue
+            state = 'L210'
+        elif state == 'L210':
+            # ALTMOV.
+            glag = np.zeros(n + 1)
+            hcol = np.zeros(npt + 1)
+            # W(1..2*N) is the altmov workspace.
+            adelt_local = adelt
+            alpha, cauchy = _bobyqa_altmov(
+                n, npt, xpt, xopt, bmat, zmat, ndim, sl, su, kopt,
+                knew, adelt_local, xnew, xalt, glag, hcol, w,
+            )
+            for i in range(1, n + 1):
+                d[i] = xnew[i] - xopt[i]
+            state = 'L230'
+        elif state == 'L230':
+            # Compute VLAG and BETA for current D.
+            for k in range(1, npt + 1):
+                suma = ZERO
+                sumb = ZERO
+                sum_ = ZERO
+                for j in range(1, n + 1):
+                    suma = suma + xpt[k, j] * d[j]
+                    sumb = sumb + xpt[k, j] * xopt[j]
+                    sum_ = sum_ + bmat[k, j] * d[j]
+                w[k] = suma * (HALF * suma + sumb)
+                vlag[k] = sum_
+                w[npt + k] = suma
+            beta = ZERO
+            for jj in range(1, nptm + 1):
+                sum_ = ZERO
+                for k in range(1, npt + 1):
+                    sum_ = sum_ + zmat[k, jj] * w[k]
+                beta = beta - sum_ * sum_
+                for k in range(1, npt + 1):
+                    vlag[k] = vlag[k] + sum_ * zmat[k, jj]
+            dsq = ZERO
+            bsum = ZERO
+            dx = ZERO
+            for j in range(1, n + 1):
+                dsq = dsq + d[j] ** 2
+                sum_ = ZERO
+                for k in range(1, npt + 1):
+                    sum_ = sum_ + w[k] * bmat[k, j]
+                bsum = bsum + sum_ * d[j]
+                jp = npt + j
+                for i in range(1, n + 1):
+                    sum_ = sum_ + bmat[jp, i] * d[i]
+                vlag[jp] = sum_
+                bsum = bsum + sum_ * d[j]
+                dx = dx + d[j] * xopt[j]
+            beta = dx * dx + dsq * (xoptsq + dx + dx + HALF * dsq) + beta - bsum
+            vlag[kopt] = vlag[kopt] + ONE
+            #
+            # NTRITS=0: Cauchy-step alternative; possibly RESCUE.
+            #
+            if ntrits == 0:
+                denom = vlag[knew] ** 2 + alpha * beta
+                if denom < cauchy and cauchy > ZERO:
+                    for i in range(1, n + 1):
+                        xnew[i] = xalt[i]
+                        d[i] = xnew[i] - xopt[i]
+                    cauchy = ZERO
+                    state = 'L230'
+                    continue
+                if denom <= HALF * vlag[knew] ** 2:
+                    if nf > nresc:
+                        state = 'L190'
+                        continue
+                    ierr = 320
+                    state = 'L720'
+                    continue
+            else:
+                # Pick KNEW for trust-region replacement.
+                delsq = delta * delta
+                scaden = ZERO
+                biglsq = ZERO
+                knew = 0
+                for k in range(1, npt + 1):
+                    if k == kopt:
+                        continue
+                    hdiag = ZERO
+                    for jj in range(1, nptm + 1):
+                        hdiag = hdiag + zmat[k, jj] ** 2
+                    den = beta * hdiag + vlag[k] ** 2
+                    distsq = ZERO
+                    for j in range(1, n + 1):
+                        distsq = distsq + (xpt[k, j] - xopt[j]) ** 2
+                    temp = max(ONE, (distsq / delsq) ** 2)
+                    if temp * den > scaden:
+                        scaden = temp * den
+                        knew = k
+                        denom = den
+                    biglsq = max(biglsq, temp * vlag[k] ** 2)
+                if scaden <= HALF * biglsq:
+                    if nf > nresc:
+                        state = 'L190'
+                        continue
+                    ierr = 320
+                    state = 'L720'
+                    continue
+            state = 'L360'
+        elif state == 'L360':
+            # Evaluate CALFUN at XBASE+XNEW.
+            for i in range(1, n + 1):
+                x[i] = min(max(xl[i], xbase[i] + xnew[i]), xu[i])
+                if xnew[i] == sl[i]:
+                    x[i] = xl[i]
+                if xnew[i] == su[i]:
+                    x[i] = xu[i]
+            if nf >= maxfun:
+                ierr = 390
+                state = 'L720'
+                continue
+            nf = nf + 1
+            f = calfun(x[1:n + 1])
+            if ntrits == -1:
+                fsave = f
+                state = 'L720'
+                continue
+            #
+            # VQUAD = quadratic-model prediction of F at XOPT+D.
+            #
+            fopt = fval[kopt]
+            vquad = ZERO
+            ih = 0
+            for j in range(1, n + 1):
+                vquad = vquad + d[j] * gopt[j]
+                for i in range(1, j + 1):
+                    ih = ih + 1
+                    temp = d[i] * d[j]
+                    if i == j:
+                        temp = HALF * temp
+                    vquad = vquad + hq[ih] * temp
+            for k in range(1, npt + 1):
+                vquad = vquad + HALF * pq[k] * w[npt + k] ** 2
+            diff = f - fopt - vquad
+            diffc = diffb
+            diffb = diffa
+            diffa = abs(diff)
+            if dnorm > rho:
+                nfsav = nf
+            #
+            # Adjust DELTA after a trust-region step.
+            #
+            if ntrits > 0:
+                if vquad >= ZERO:
+                    ierr = 430
+                    state = 'L720'
+                    continue
+                ratio = (f - fopt) / vquad
+                if ratio <= TENTH:
+                    delta = min(HALF * delta, dnorm)
+                elif ratio <= 0.7:
+                    delta = max(HALF * delta, dnorm)
+                else:
+                    delta = max(HALF * delta, dnorm + dnorm)
+                if delta <= 1.5 * rho:
+                    delta = rho
+                #
+                # Recompute KNEW, DENOM if new F < FOPT.
+                #
+                if f < fopt:
+                    ksav = knew
+                    densav = denom
+                    delsq = delta * delta
+                    scaden = ZERO
+                    biglsq = ZERO
+                    knew = 0
+                    for k in range(1, npt + 1):
+                        hdiag = ZERO
+                        for jj in range(1, nptm + 1):
+                            hdiag = hdiag + zmat[k, jj] ** 2
+                        den = beta * hdiag + vlag[k] ** 2
+                        distsq = ZERO
+                        for j in range(1, n + 1):
+                            distsq = distsq + (xpt[k, j] - xnew[j]) ** 2
+                        temp = max(ONE, (distsq / delsq) ** 2)
+                        if temp * den > scaden:
+                            scaden = temp * den
+                            knew = k
+                            denom = den
+                        biglsq = max(biglsq, temp * vlag[k] ** 2)
+                    if scaden <= HALF * biglsq:
+                        knew = ksav
+                        denom = densav
+            #
+            # Update BMAT, ZMAT, HQ, PQ for the new KNEW.
+            #
+            _bobyqa_update(n, npt, bmat, zmat, ndim, vlag, beta, denom, knew, w)
+            ih = 0
+            pqold = pq[knew]
+            pq[knew] = ZERO
+            for i in range(1, n + 1):
+                temp = pqold * xpt[knew, i]
+                for j in range(1, i + 1):
+                    ih = ih + 1
+                    hq[ih] = hq[ih] + temp * xpt[knew, j]
+            for jj in range(1, nptm + 1):
+                temp = diff * zmat[knew, jj]
+                for k in range(1, npt + 1):
+                    pq[k] = pq[k] + temp * zmat[k, jj]
+            #
+            # Absorb the new interpolation point; update GOPT.
+            #
+            fval[knew] = f
+            for i in range(1, n + 1):
+                xpt[knew, i] = xnew[i]
+                w[i] = bmat[knew, i]
+            for k in range(1, npt + 1):
+                suma = ZERO
+                for jj in range(1, nptm + 1):
+                    suma = suma + zmat[knew, jj] * zmat[k, jj]
+                sumb = ZERO
+                for j in range(1, n + 1):
+                    sumb = sumb + xpt[k, j] * xopt[j]
+                temp = suma * sumb
+                for i in range(1, n + 1):
+                    w[i] = w[i] + temp * xpt[k, i]
+            for i in range(1, n + 1):
+                gopt[i] = gopt[i] + diff * w[i]
+            #
+            # Update XOPT, GOPT, KOPT if new F < FOPT.
+            #
+            if f < fopt:
+                kopt = knew
+                xoptsq = ZERO
+                ih = 0
+                for j in range(1, n + 1):
+                    xopt[j] = xnew[j]
+                    xoptsq = xoptsq + xopt[j] ** 2
+                    for i in range(1, j + 1):
+                        ih = ih + 1
+                        if i < j:
+                            gopt[j] = gopt[j] + hq[ih] * d[i]
+                        gopt[i] = gopt[i] + hq[ih] * d[j]
+                for k in range(1, npt + 1):
+                    temp = ZERO
+                    for j in range(1, n + 1):
+                        temp = temp + xpt[k, j] * d[j]
+                    temp = pq[k] * temp
+                    for i in range(1, n + 1):
+                        gopt[i] = gopt[i] + temp * xpt[k, i]
+            #
+            # Frobenius-norm interpolant gradient check (NTRITS>0 only).
+            #
+            if ntrits > 0:
+                for k in range(1, npt + 1):
+                    vlag[k] = fval[k] - fval[kopt]
+                    w[k] = ZERO
+                for j in range(1, nptm + 1):
+                    sum_ = ZERO
+                    for k in range(1, npt + 1):
+                        sum_ = sum_ + zmat[k, j] * vlag[k]
+                    for k in range(1, npt + 1):
+                        w[k] = w[k] + sum_ * zmat[k, j]
+                for k in range(1, npt + 1):
+                    sum_ = ZERO
+                    for j in range(1, n + 1):
+                        sum_ = sum_ + xpt[k, j] * xopt[j]
+                    w[k + npt] = w[k]
+                    w[k] = sum_ * w[k]
+                gqsq = ZERO
+                gisq = ZERO
+                for i in range(1, n + 1):
+                    sum_ = ZERO
+                    for k in range(1, npt + 1):
+                        sum_ = sum_ + bmat[k, i] * vlag[k] + xpt[k, i] * w[k]
+                    if xopt[i] == sl[i]:
+                        gqsq = gqsq + min(ZERO, gopt[i]) ** 2
+                        gisq = gisq + min(ZERO, sum_) ** 2
+                    elif xopt[i] == su[i]:
+                        gqsq = gqsq + max(ZERO, gopt[i]) ** 2
+                        gisq = gisq + max(ZERO, sum_) ** 2
+                    else:
+                        gqsq = gqsq + gopt[i] ** 2
+                        gisq = gisq + sum_ * sum_
+                    vlag[npt + i] = sum_
+                itest = itest + 1
+                if gqsq < TEN * gisq:
+                    itest = 0
+                if itest >= 3:
+                    for i in range(1, max(npt, nh) + 1):
+                        if i <= n:
+                            gopt[i] = vlag[npt + i]
+                        if i <= npt:
+                            pq[i] = w[npt + i]
+                        if i <= nh:
+                            hq[i] = ZERO
+                        itest = 0
+            if ntrits == 0:
+                state = 'L60'
+                continue
+            if f <= fopt + TENTH * vquad:
+                state = 'L60'
+                continue
+            distsq = max((TWO * delta) ** 2, (TEN * rho) ** 2)
+            state = 'L650'
+        elif state == 'L650':
+            knew = 0
+            # distsq comes from L60 (NTRITS=-1 branch) or L360.
+            if 'distsq' not in dir() or state == 'L650':  # ensure defined
+                pass
+            for k in range(1, npt + 1):
+                sum_ = ZERO
+                for j in range(1, n + 1):
+                    sum_ = sum_ + (xpt[k, j] - xopt[j]) ** 2
+                if sum_ > distsq:
+                    knew = k
+                    distsq = sum_
+            if knew > 0:
+                dist = np.sqrt(distsq)
+                if ntrits == -1:
+                    delta = min(TENTH * delta, HALF * dist)
+                    if delta <= 1.5 * rho:
+                        delta = rho
+                ntrits = 0
+                adelt = max(min(TENTH * dist, delta), rho)
+                dsq = adelt * adelt
+                state = 'L90'
+                continue
+            if ntrits == -1:
+                state = 'L680'
+                continue
+            if ratio > ZERO:
+                state = 'L60'
+                continue
+            if max(delta, dnorm) > rho:
+                state = 'L60'
+                continue
+            state = 'L680'
+        elif state == 'L680':
+            # Pick the next RHO.
+            if rho > rhoend:
+                delta = HALF * rho
+                ratio = rho / rhoend
+                if ratio <= 16.0:
+                    rho = rhoend
+                elif ratio <= 250.0:
+                    rho = np.sqrt(ratio) * rhoend
+                else:
+                    rho = TENTH * rho
+                delta = max(delta, rho)
+                ntrits = 0
+                nfsav = nf
+                state = 'L60'
+                continue
+            if ntrits == -1:
+                state = 'L360'
+                continue
+            state = 'L720'
+        elif state == 'L720':
+            return _bobyqa_finalize(x, xl, xu, sl, su, xbase, xopt, fval, kopt,
+                                    fsave, n, nf, ierr, f)
+        else:
+            raise RuntimeError(f"bobyqb: unknown state {state!r}")
+
+
+def _bobyqa_finalize(x, xl, xu, sl, su, xbase, xopt, fval, kopt, fsave, n, nf, ierr, f=None):
+    """Label 720 of ``bobyqb.f``: write final X and return ``(x, f, nf, ierr)``."""
+    if fval[kopt] <= fsave:
+        for i in range(1, n + 1):
+            x[i] = min(max(xl[i], xbase[i] + xopt[i]), xu[i])
+            if xopt[i] == sl[i]:
+                x[i] = xl[i]
+            if xopt[i] == su[i]:
+                x[i] = xu[i]
+        f_out = fval[kopt]
+    else:
+        f_out = f if f is not None else fval[kopt]
+    return x, f_out, nf, ierr
+
+
+def _bobyqa_driver(calfun, x0, lower, upper, *,
+                   npt=None, rhobeg=None, rhoend=None, maxfun=10000):
+    """Public BOBYQA entry. Port of ``bobyqa.f`` (workspace partition,
+    bound-aware initial X) plus the ``minqa`` R-wrapper defaults
+    (``rhobeg``, ``rhoend``, ``npt`` when ``None``).
+
+    Parameters mirror ``minqa::bobyqa``:
+        npt    : interpolation points (default ``min(n+2, 2n)``, floored to ``n+2``)
+        rhobeg : initial trust-radius (default ``min(0.95, 0.2*max|par|)``)
+        rhoend : final trust-radius   (default ``1e-6 * rhobeg``)
+        maxfun : max function evals   (default 10000)
+
+    Returns ``(par, fval, nf, ierr, msg)``.
+    """
+    x0 = np.asarray(x0, dtype=float).copy()
+    n = x0.size
+    lower = np.asarray(lower, dtype=float).copy()
+    upper = np.asarray(upper, dtype=float).copy()
+    # Apply minqa defaults.
+    if rhobeg is None:
+        rhobeg = min(0.95, 0.2 * max(np.max(np.abs(x0)), 1e-300))
+    if rhoend is None:
+        rhoend = 1.0e-6 * rhobeg
+    if npt is None:
+        npt = max(n + 2, min(n + 2, 2 * n))
+    npt = int(max(n + 2, min(int(npt), ((n + 1) * (n + 2)) // 2)))
+    #
+    # Range-shrink rhobeg if any bound interval is < 2*rhobeg (matches minqa.R).
+    #
+    rng = upper - lower
+    if np.any(rng < 2 * rhobeg):
+        rhobeg = 0.2 * np.min(rng)
+        rhoend = min(rhoend, rhobeg)
+    #
+    # NPT validity (matches bobyqa.f IERR=10).
+    #
+    if not (n + 2 <= npt <= ((n + 2) * (n + 1)) // 2):
+        return (x0, float('inf'), 0, 10,
+                "bobyqa -- NPT is not in the required interval")
+    #
+    # 1-indexed work arrays.
+    #
+    x = np.zeros(n + 1)
+    x[1:n + 1] = x0
+    xl = np.zeros(n + 1)
+    xl[1:n + 1] = lower
+    xu = np.zeros(n + 1)
+    xu[1:n + 1] = upper
+    sl = np.zeros(n + 1)
+    su = np.zeros(n + 1)
+    #
+    # Bound check + initial X clamp (bobyqa.f:99-136).
+    #
+    for j in range(1, n + 1):
+        temp = xu[j] - xl[j]
+        if temp < rhobeg + rhobeg:
+            return (x[1:n + 1], float('inf'), 0, 20,
+                    "bobyqa -- one of the box constraint ranges is too small (< 2*RHOBEG)")
+        sl[j] = xl[j] - x[j]
+        su[j] = xu[j] - x[j]
+        if sl[j] >= -rhobeg:
+            if sl[j] >= 0.0:
+                x[j] = xl[j]
+                sl[j] = 0.0
+                su[j] = temp
+            else:
+                x[j] = xl[j] + rhobeg
+                sl[j] = -rhobeg
+                su[j] = max(xu[j] - x[j], rhobeg)
+        elif su[j] <= rhobeg:
+            if su[j] <= 0.0:
+                x[j] = xu[j]
+                sl[j] = -temp
+                su[j] = 0.0
+            else:
+                x[j] = xu[j] - rhobeg
+                sl[j] = min(xl[j] - x[j], -rhobeg)
+                su[j] = rhobeg
+    #
+    # Run the main loop.
+    #
+    x_out, f_out, nf, ierr = _bobyqa_bobyqb(
+        calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
+    )
+    msgmap = {
+        0:   "Normal exit from bobyqa",
+        10:  "bobyqa -- NPT is not in the required interval",
+        20:  "bobyqa -- one of the box constraint ranges is too small (< 2*RHOBEG)",
+        320: "bobyqa detected too much cancellation in denominator",
+        390: "bobyqa -- maximum number of function evaluations exceeded",
+        430: "bobyqa -- a trust region step failed to reduce q",
+    }
+    return x_out[1:n + 1].copy(), f_out, nf, ierr, msgmap.get(ierr, "")
+
+
+# ----------------------------------------------------------------------
 # Bounded-simplex Nelder-Mead — port of lme4's ``src/optimizer.cpp``.
 #
 # lme4 ships its own Nelder-Mead implementation (derived from NLopt 2.2.4's
@@ -2356,20 +4217,28 @@ class lme:
         if nagq0_init_step or not do_stage1:
             # Stage 0 — joint PIRLS at θ₀, then optimize devfun over θ only.
             # When nAGQ=0 this IS the final fit (skip Stage 1 below).
+            #
+            # lme4 default optimizer chain is ``c("bobyqa", "Nelder_Mead")``
+            # (glmerControl): BOBYQA for Stage 0, Nelder-Mead for Stage 1.
+            # We use our ported BOBYQA so the converged (θ̂, β̂) matches R's
+            # default fit byte-by-byte.
             _pwrss_update(pred, resp, u_only=False, tol=tol_pwrss,
                           maxit=maxit_pwrss, verbose=verbose_pirls)
             devfun_stage0 = _glmm_devfun_factory(
                 pred, resp, nagq=0, tol_pwrss=tol_pwrss,
                 maxit_pwrss=maxit_pwrss, verbose=verbose_pirls,
             )
-            # Stage 0 step sizes: lme4's R wrapper default
-            # (optimizer.R:5) ``xst = rep(0.02, n)``. ``xt = xst·5e-4``.
-            xst0 = np.full(n_theta, 0.02)
-            xt0 = xst0 * 5e-4
-            nm0 = NelderMead(lb_theta, ub_theta, xst0, theta0,
-                             xtol_abs=xt0, **nm_kwargs)
-            status0 = nm0.minimize(devfun_stage0)
-            theta_stage0 = nm0.xpos().copy()
+            # minqa's defaults (commonArgs in /tmp/minqa_src/minqa/R/minqa.R):
+            #   npt    = min(n+2, 2n)  (floored to n+2 by _bobyqa_driver)
+            #   rhobeg = min(0.95, 0.2*max|par|)
+            #   rhoend = 1e-6 * rhobeg
+            #   maxfun = 10000
+            lb_stage0 = np.where(np.isfinite(lb_theta), lb_theta, -1.0e20)
+            ub_stage0 = np.where(np.isfinite(ub_theta), ub_theta, 1.0e20)
+            theta_stage0_x, fval0, feval0, ierr0, _msg0 = _bobyqa_driver(
+                devfun_stage0, theta0, lb_stage0, ub_stage0,
+            )
+            theta_stage0 = np.asarray(theta_stage0_x, dtype=float)
             # Re-anchor pred/resp at the Stage 0 optimum.
             devfun_stage0(theta_stage0)
             # β at Stage 0 optimum (= pp.delb after the joint PIRLS).
@@ -2377,8 +4246,8 @@ class lme:
             # ``start["beta"]`` overrides for the Stage 1 starting β.
             beta_start = beta_user_start if beta_user_start is not None else pred.beta(1.0).copy()
             self._optim_stage0 = {
-                "par": theta_stage0, "fval": nm0.value(),
-                "feval": nm0.nevals, "status": int(status0),
+                "par": theta_stage0, "fval": float(fval0),
+                "feval": int(feval0), "status": int(ierr0),
             }
         else:
             # No Stage 0 — go straight to Stage 1 with θ₀ and β=0 (or
