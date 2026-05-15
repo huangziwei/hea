@@ -1074,10 +1074,13 @@ def test_glmer_phase6_attrs_match_lme4_poisson():
     r = _GLMER_PHASE6_POISSON_REF
     m = lme("y ~ x + (1|g)", df, family=PoissonFamily())
 
-    # Linear predictor / fitted values. PIRLS+Accelerate(arm64) vs
-    # PIRLS+OpenBLAS(x86_64) reduction order disagree by ~1 ULP per inner
-    # product; over many iterations this propagates to ~few-ULP / ~1e-9 abs
-    # on η and ~1e-7 rel on residuals/AIC. Pin at 1e-7 for portability.
+    # Linear predictor / fitted values. The reference is R-on-Intel and we
+    # run on arbitrary platforms; even though the algorithm is identical
+    # (PIRLS through CHOLMOD), unavoidable FP-reduction-order differences
+    # between Python/NumPy/sksparse-CHOLMOD and R/Matrix/CHOLMOD-C compound
+    # through PIRLS into ~1e-9 abs on η and ~1e-7 rel on residuals/AIC.
+    # R itself has the same cross-arch drift on this fit (verified
+    # arm64↔x86_64). Pin at 1e-7 — well above the floor.
     np.testing.assert_allclose(m.eta, r["eta"], atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m.mu,  r["mu"],  atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m.fitted_values, r["mu"], atol=1e-7, rtol=1e-7)
@@ -1096,11 +1099,12 @@ def test_glmer_phase6_attrs_match_lme4_poisson():
     np.testing.assert_allclose(m.AIC, r["aic"], atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m.BIC, r["bic"], atol=1e-7, rtol=1e-7)
     assert m.sigma == pytest.approx(r["sigma"])
-    # SE(β̂) and t-values. Hessian-based vcov is computed via deriv12
-    # (central differences) on the Stage 1 closure; each finite-difference
-    # probe accumulates ~1 ULP of BLAS-DGEMV-vs-Eigen3-SIMD rounding noise
-    # in PIRLS internals. With delta²=1e-8 that floor is ~1e-7 rel for
-    # n≈70, which is what we pin here.
+    # SE(β̂) and t-values. Hessian-based vcov is computed by deriv12
+    # (central differences, δ=1e-4) on the Stage-1 closure, so the FD
+    # formula ``(f+ − 2f₀ + f−)/δ²`` divides a ~3e-9-scale second difference
+    # by 1e-8 — about 11 digits of catastrophic cancellation. For
+    # well-conditioned columns the noise is far below H_jj and the SE
+    # carries it cleanly. For this n≈70 fit the floor lands at ~1e-7 rel.
     np.testing.assert_allclose(m._se_beta, r["se_beta"], atol=1e-9, rtol=1e-6)
     np.testing.assert_allclose(m.t_values.row(0), r["t_value"], atol=1e-7, rtol=1e-6)
     # vcov_beta — full p×p matrix. Same FP-arithmetic floor as SE.
@@ -1164,7 +1168,8 @@ def test_glmer_phase6_attrs_match_lme4_binomial_cbpp():
     assert m.deviance         == pytest.approx(dev_r,     rel=1e-9, abs=1e-9)
     assert m.AIC              == pytest.approx(aic_r,     rel=1e-9, abs=1e-9)
     assert m.sigma            == pytest.approx(sigma_r)  # = 1
-    # See _GLMER_PHASE6_POISSON_REF for the deriv12 / BLAS-vs-Eigen3 floor.
+    # See test_glmer_phase6_attrs_match_lme4_poisson for the deriv12
+    # cancellation floor that drives the SE tolerance here.
     np.testing.assert_allclose(m._se_beta,       se_beta_r, atol=1e-9, rtol=2e-6)
     np.testing.assert_allclose(m.sd_re["herd"],  sd_herd_r, atol=1e-9, rtol=1e-7)
 
@@ -1898,14 +1903,16 @@ def test_glmer_bates_fm10_contraception_matches_lme4():
     expected_dev_laplace = 2372.728706535781839193
     expected_dev_resid   = 2289.732405042512255022
 
-    # BOBYQA halts on a locally-flat objective, so platform-dependent
-    # rounding (Accelerate/arm64 vs OpenBLAS/x86_64 vs Eigen3) shifts the
-    # argmin by √(Δdev/curvature). For this fit the curvature at θ̂ is
-    # small → θ̂ drifts ~3e-6 rel and the badly-identified poly(age, 2)2
-    # column of β̂ drifts ~1e-5 rel. Verified: hea-arm64 matches lme4-arm64
-    # at ~5e-9 (R run on the same machine), so this is BLAS/optimizer noise
-    # in the *reference*, not a hea bug. Pin θ̂ at the 1e-5 portability
-    # floor and β̂ in SE-relative units so the test is platform-agnostic.
+    # BOBYQA halts on a locally-flat objective: any sub-ULP shift in the
+    # deviance function (which differs between hea and R by ~1e-10 abs on
+    # this fit due to NumPy/sksparse vs Matrix/CHOLMOD-C reduction order)
+    # moves the argmin by √(Δdev/curvature). Curvature at θ̂ is small here
+    # → θ̂ drifts ~3e-6 rel and the badly-identified poly(age, 2)2 column
+    # of β̂ drifts ~1e-5 rel. Verified: hea-arm64 matches lme4-arm64 at
+    # ~5e-9 on (θ̂, β̂) when R is run on the same machine, so this is
+    # cross-platform-reference drift, not a hea bug — R-on-Intel and
+    # R-on-arm64 disagree by similar amounts. Pin θ̂ at 1e-5 and β̂ in
+    # SE-relative units so the test is platform-agnostic.
     expected_se_for_beta = np.array([
         0.1522134608573170178047, 3.2936286686357942876668, 2.6142087304558478955130,
         0.1208624239243845793768, 0.1632291674042204154826, 0.1864493856133159488397,
@@ -1942,14 +1949,17 @@ def test_glmer_bates_fm10_contraception_matches_lme4():
         expected_qs, atol=1e-5, rtol=1e-5,
     )
     # Per-coefficient SEs match lme4's default ``vcov(m)`` (Hessian-based).
-    # vcov is built from a central-difference deriv12 on the Stage-1 closure,
-    # so each probe accumulates 1-ULP BLAS-reduction noise. The
-    # small-Hessian-diagonal columns (``poly(age, 2)``, H_jj≈0.36) amplify
-    # this: on OpenBLAS/x86_64 the rel error floor is ~3e-4, on
-    # Accelerate/arm64 it climbs to ~2e-3 (verified: hea-arm64 vs R-lme4-arm64
-    # also disagree at this level on the same machine — finite-difference
-    # Hessian is intrinsically platform-noisy). Well-identified columns
-    # (Intercept, urban, livch) stay below 1e-3 rel on both.
+    # vcov is built from a central-difference deriv12 (δ=1e-4) on the
+    # Stage-1 closure: the formula ``(f+ − 2f₀ + f−)/δ²`` divides a
+    # ~3e-9 second difference by 1e-8, losing ~11 digits to cancellation.
+    # The small-H_jj columns (``poly(age, 2)``, H_jj≈0.36) sit right at
+    # that cancellation floor, so any sub-ULP perturbation of the deviance
+    # (which differs between hea and R by ~1e-10 abs on this fit, and
+    # between R-Intel and R-arm64 by similar amounts) maps to ~1e-3 rel
+    # in their SEs. Well-identified columns (Intercept, urban, livch)
+    # have H_jj of 100-300 and stay below 1e-3 rel comfortably. This is
+    # the intrinsic floor of FD-Hessian SE for badly-identified columns
+    # — R itself disagrees with its own arm64 build at this scale.
     expected_se = np.array([
         0.1522134608573170178047, 3.2936286686357942876668, 2.6142087304558478955130,
         0.1208624239243845793768, 0.1632291674042204154826, 0.1864493856133159488397,
