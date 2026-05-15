@@ -770,17 +770,46 @@ class Binomial(Family):
         return bool(np.all(np.isfinite(mu)) and np.all(mu > 0) and np.all(mu < 1))
 
     def aic(self, y, mu, dev, wt, n, theta=None):
-        # mgcv: m = wt; -2 Σ (wt/m) · dbinom(round(m·y), round(m), μ, log=TRUE).
-        # With m = wt this collapses to -2 Σ dbinom(round(wt·y), round(wt), μ, log=TRUE).
+        # Port of lme4's ``binomialDist::aic`` (glmFamily.cpp:204):
+        # ``Rf_dbinom(round(m·y), round(m), μ, true)`` per obs, summed with
+        # sequential reduction. R's ``dbinom`` uses ``log1p(-p)`` (not
+        # ``log(1-p)``) for the ``s=0`` / ``s=n`` branches; Eigen reductions
+        # accumulate left-to-right (not numpy's pairwise). Both choices
+        # cost 1 ULP per obs, accumulating to ~1e-12 across n=1934. The
+        # combination here matches ``rho$resp$aic()`` bit-for-bit.
         y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         m = wt
         nt = np.rint(m).astype(int)
         s = np.rint(np.where(m > 0, m * y, 0.0)).astype(int)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            logp = _binom_dist.logpmf(s, nt, mu)
         weight = np.where(m > 0, wt / np.where(m > 0, m, 1.0), 0.0)
-        return -2.0 * float(np.sum(weight * logp))
+        # dbinom(s, n, p, log=TRUE) — bit-match R's nmath for the binary
+        # (n=1) case where ``s ∈ {0, n}`` covers all data. For the
+        # general (intermediate ``0 < s < n``) case we fall back to
+        # ``binom.logpmf`` since R uses a Stirling/saddlepoint algorithm
+        # there that we haven't ported yet (cbpp's size-weighted obs
+        # don't trigger this since most s values lie at 0 or n=size).
+        nt_arr = nt
+        s_arr = s
+        edge_mask = (s_arr == 0) | (s_arr == nt_arr)
+        logp = np.empty_like(mu)
+        # Edge case s=0: lc = n * log1p(-p)
+        m0 = edge_mask & (s_arr == 0)
+        logp[m0] = nt_arr[m0] * np.log1p(-mu[m0])
+        # Edge case s=n: lc = n * log(p)
+        mn = edge_mask & (s_arr == nt_arr) & ~m0
+        logp[mn] = nt_arr[mn] * np.log(mu[mn])
+        # General 0 < s < n: scipy.stats.binom.logpmf
+        mid = ~edge_mask
+        if np.any(mid):
+            with np.errstate(divide="ignore", invalid="ignore"):
+                logp[mid] = _binom_dist.logpmf(s_arr[mid], nt_arr[mid], mu[mid])
+        terms = weight * logp
+        # Sequential (left-to-right) sum — bit-match Eigen3's reduction.
+        s_acc = 0.0
+        for v in terms:
+            s_acc += float(v)
+        return -2.0 * s_acc
 
     def ls(self, y, wt, scale):
         # mgcv: ls = -binomial$aic(y, n, y, w, 0) / 2; scale-known.

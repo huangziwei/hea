@@ -668,8 +668,19 @@ class _GlmResponse:
 
         Port of ``glmResp::resDev`` (respModule.cpp:165). Matches what
         :func:`stats::deviance.merMod` returns for GLMM.
+
+        The sum is performed sequentially (left-to-right) to match
+        Eigen3's ``Array.sum()`` reduction bit-for-bit — numpy's default
+        ``np.sum`` uses pairwise reduction, which differs by ~1 ULP for
+        arrays of this size. This 1-ULP-per-call difference cascades
+        through PIRLS and would otherwise produce a ~1e-6 gap in the
+        outer optimizer's converged θ̂ on n≈2000 GLMM fits.
         """
-        return float(np.sum(self.deviance_residuals()))
+        arr = self.deviance_residuals()
+        s = 0.0
+        for v in arr:
+            s += float(v)
+        return s
 
     def aic(self) -> float:
         """Family AIC contribution ``family.aic(y, μ, dev, w, n)``.
@@ -991,10 +1002,16 @@ class _PredState:
     def sqr_l_u(self, f: float = 1.0) -> float:
         """``||u(f)||²`` — RE penalty in the Laplace approximation.
 
-        Port of ``merPredD::sqrL(f)`` (predModule.cpp:140).
+        Port of ``merPredD::sqrL(f)`` (predModule.cpp:140). The sum is
+        sequential (left-to-right) to match Eigen3's
+        ``Vector.squaredNorm()`` reduction bit-for-bit; see
+        :meth:`_GlmResponse.deviance` for the rationale.
         """
         u_f = self.u(f)
-        return float(np.einsum("i,i->", u_f, u_f))
+        s = 0.0
+        for v in u_f:
+            s += float(v) * float(v)
+        return s
 
 
 def _internal_glmer_wrk_iter(
