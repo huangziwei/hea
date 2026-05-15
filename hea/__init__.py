@@ -63,8 +63,11 @@ from . import (  # noqa: F401
     translate,
 )
 
-# ``data`` is exposed at the top level — used in nearly every example
-# (``data('iris')``, ``data('penguins', package='palmerpenguins')``).
-# This shadows the ``hea.data`` submodule attribute; the submodule is
-# still importable via ``import hea.data`` / ``from hea.data import …``.
-from .data import data  # noqa: F401
+# ``data``, ``map_data``, and ``session_info`` are exposed at the top
+# level — they're hit in nearly every notebook (``data('iris')``,
+# ``map_data('world')``, ``session_info()`` as the trailing reproducibility
+# watermark). These shadow the ``hea.data`` / ``hea.session_info``
+# submodule *attributes*; the submodules themselves are still importable
+# via ``import hea.data`` / ``from hea.session_info import SessionInfo``.
+from .data import data, map_data  # noqa: F401
+from .session_info import session_info  # noqa: F401

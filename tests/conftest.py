@@ -74,7 +74,7 @@ def load_dataset(pkg: str, name: str) -> pl.DataFrame:
     column — that's the whole point of preserving meaningful row names
     like the Galápagos island IDs in ``faraway::gala``.
     """
-    from hea.data import data as _data
+    from hea import data as _data
     key = (pkg, name)
     if key not in _data_cache:
         df = _data(name, _pkg_subdir(pkg))

@@ -377,7 +377,7 @@ def test_data_helper_applies_schema_sidecar():
     / by=factor / fs / sz smooths silently take the non-factor fallthrough
     path — which is the Machines b1/b2 footgun (AIC ~337 instead of ~165).
     """
-    from hea.data import data
+    from hea import data
     d = data("Machines", "nlme")
     assert isinstance(d.schema["Worker"], pl.Enum), \
         f"Worker should be pl.Enum, got {d.schema['Worker']}"

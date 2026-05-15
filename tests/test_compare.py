@@ -763,7 +763,7 @@ def test_drop1_respects_marginality_on_gavote():
     ``equip``, and ``cpergore:usage`` — never ``cpergore`` or ``usage``
     alone, because they're "marginal to" the interaction.
     """
-    from hea.data import data
+    from hea import data
     g = data("gavote", package="faraway")
     g = g.mutate(usage=pl.col("rural")).select(pl.exclude("rural"))
     g = g.mutate(
@@ -949,7 +949,7 @@ def test_step_backward_on_gavote_matches_R():
     text has a typo describing the chosen interactions; R's real
     output has ``equip:perAA`` not ``econ:perAA``).
     """
-    from hea.data import data
+    from hea import data
     g = data("gavote", package="faraway")
     g = g.mutate(usage=pl.col("rural")).select(pl.exclude("rural"))
     g = g.mutate(

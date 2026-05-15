@@ -700,7 +700,7 @@ def test_glmer_binomial_full_fit_matches_lme4_cbpp():
         # captured getME(m, "theta"), getME(m, "beta"),
         # -2*as.numeric(logLik(m)), deviance(m)
     """
-    from hea.data import data as hea_data
+    from hea import data as hea_data
     from hea.models.lme import lme
     from hea.family import Binomial as BinomialFamily
 
@@ -1147,7 +1147,7 @@ def test_glmer_phase6_attrs_match_lme4_binomial_cbpp():
         # captured AIC, deviance, -2*logLik, sigma, sqrt(diag(vc_rx)),
         # attr(VarCorr(m)$herd, "stddev")
     """
-    from hea.data import data as hea_data
+    from hea import data as hea_data
     from hea.models.lme import lme
     from hea.family import Binomial as BinomialFamily
 
@@ -2224,7 +2224,7 @@ def test_glmer_bates_fm10_contraception_matches_lme4():
 
     """
     from hea.R import factor
-    from hea.data import data
+    from hea import data
     from hea.models.lme import lme
     from hea.family import Binomial
 

@@ -318,7 +318,7 @@ def test_plot_ranef_layout_vertical_stacks_panels():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from hea.models import lme
-    from hea.data import data
+    from hea import data
     pen = data("Penicillin", "lme4")
     fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
 
@@ -351,7 +351,7 @@ def test_plot_ranef_aspect_controls_subplot_width():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from hea.models import lme
-    from hea.data import data
+    from hea import data
     pen = data("Penicillin", "lme4")
     fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
 
@@ -374,7 +374,7 @@ def test_plot_ranef_explicit_layout_tuple():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from hea.models import lme
-    from hea.data import data
+    from hea import data
     pen = data("Penicillin", "lme4")
     fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
 
@@ -392,7 +392,7 @@ def test_plot_ranef_explicit_layout_tuple():
 def test_plot_ranef_layout_rejects_too_few_cells():
     """A (nrow, ncol) tuple with fewer cells than panels raises."""
     from hea.models import lme
-    from hea.data import data
+    from hea import data
     pen = data("Penicillin", "lme4")
     fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
 
@@ -402,7 +402,7 @@ def test_plot_ranef_layout_rejects_too_few_cells():
 
 def test_plot_ranef_layout_rejects_bad_value():
     from hea.models import lme
-    from hea.data import data
+    from hea import data
     pen = data("Penicillin", "lme4")
     fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
 
@@ -416,7 +416,7 @@ def test_plot_ranef_which_filters_to_one_term():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from hea.models import lme
-    from hea.data import data
+    from hea import data
     pen = data("Penicillin", "lme4")
     fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
     fig = fm.plot_ranef(which="plate")
@@ -433,7 +433,7 @@ def test_plot_ranef_which_filters_to_one_panel_title():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from hea.models import lme
-    from hea.data import data
+    from hea import data
     sleep = data("sleepstudy", "lme4")
     fm = lme("Reaction ~ 1 + Days + (1 + Days | Subject)", sleep)
 
@@ -457,7 +457,7 @@ def test_plot_ranef_which_accepts_list():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from hea.models import lme
-    from hea.data import data
+    from hea import data
     sleep = data("sleepstudy", "lme4")
     fm = lme("Reaction ~ 1 + Days + (1 + Days | Subject)", sleep)
     fig = fm.plot_ranef(which=["Subject: (Intercept)"])
@@ -470,7 +470,7 @@ def test_plot_ranef_which_accepts_list():
 
 def test_plot_ranef_which_unknown_raises():
     from hea.models import lme
-    from hea.data import data
+    from hea import data
     pen = data("Penicillin", "lme4")
     fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
     with pytest.raises(KeyError, match="no matching panel"):
@@ -488,7 +488,7 @@ def test_bates_2_plot_design_layout_matches_fig_2_3_2_4():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from hea.models import lme
-    from hea.data import data
+    from hea import data
     penicillin = data("Penicillin", "lme4")
     fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", penicillin)
     fig = fm.plot_design()

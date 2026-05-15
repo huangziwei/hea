@@ -1100,7 +1100,7 @@ def test_discrete_color_levels_sorted_alphabetically():
     mapping, so the level → colour assignment is alphabetical regardless
     of CSV row order. The penguins dataset lists Adelie/Gentoo/Chinstrap
     in that order; ggplot2 still gives Chinstrap green and Gentoo blue."""
-    from hea.data import data as _hea_data
+    from hea import data as _hea_data
     from matplotlib.colors import to_rgb
 
     penguins = _hea_data("penguins", package="palmerpenguins")
@@ -1133,8 +1133,7 @@ def test_discrete_color_levels_sorted_alphabetically():
 def test_user_penguins_string_color_works_end_to_end():
     """The bug report: ``aes(color="species")`` on string column → 3 colours,
     no matplotlib RGBA error. Penguins has 2 NA rows so a warning is expected."""
-    from hea.data import data as _hea_data
-
+    from hea import data as _hea_data
     penguins = _hea_data("penguins", package="palmerpenguins")
     p = (ggplot(penguins, aes(x="flipper_length_mm", y="body_mass_g",
                               color="species"))
@@ -1620,8 +1619,7 @@ def test_facet_wrap_with_geom_smooth_per_panel_fits():
 
 def test_facet_wrap_preserves_colour_mapping_per_panel():
     """Per-panel discrete colour mapping survives the facet split."""
-    from hea.data import data as _hea_data
-
+    from hea import data as _hea_data
     penguins = _hea_data("penguins", package="palmerpenguins")
     p = (ggplot(penguins, aes("flipper_length_mm", "body_mass_g",
                               colour="species"))
@@ -4509,7 +4507,7 @@ def test_patchwork_faceted_child_axis_label_scoped_to_panel_column():
 
 def _patchwork_doc_plots():
     """The four ggplots set up at the top of the patchwork tutorial."""
-    from hea.data import data
+    from hea import data
     mtcars = data("mtcars")
     p1 = (mtcars.ggplot().geom_point(aes("mpg", "disp"))
           .ggtitle("Plot 1"))
@@ -5031,8 +5029,7 @@ def test_geom_smooth_fits_per_group_when_colour_mapped():
     """`aes(colour=species)` + `geom_smooth(method="lm")` → one fitted line
     per species, each in its own colour. Bug repro: previously a single fit
     was drawn in the default smooth colour."""
-    from hea.data import data as _hea_data
-
+    from hea import data as _hea_data
     penguins = _hea_data("penguins", package="palmerpenguins")
     p = (ggplot(penguins, aes(x="flipper_length_mm", y="body_mass_g",
                               colour="species"))
@@ -5147,8 +5144,7 @@ def test_gg_c9_boxplot_with_jitter():
 
 def test_gg_c8_histogram_pima_diastolic():
     """`ggplot(pima, aes(x=diastolic)) + geom_histogram()` (Faraway p.5)."""
-    from hea.data import data as _hea_data
-
+    from hea import data as _hea_data
     pima = _hea_data("pima", package="faraway")
     p = ggplot(pima, aes(x="diastolic")) + geom_histogram()
     fig = p.draw()
@@ -5202,8 +5198,7 @@ def test_stat_density_trim_false_uses_panel_x_range():
 
 def test_gg_c10_density_pima_diastolic():
     """`ggplot(pima, aes(x=diastolic)) + geom_density()` (Faraway p.5)."""
-    from hea.data import data as _hea_data
-
+    from hea import data as _hea_data
     pima = _hea_data("pima", package="faraway")
     p = ggplot(pima, aes(x="diastolic")) + geom_density()
     fig = p.draw()
@@ -5227,8 +5222,7 @@ def test_gg_c10_density_pima_diastolic():
 
 def test_draw_into_existing_axes_via_subplot_mosaic():
     """`draw(ax=ax)` paints into a caller-supplied axes (e.g. ``plt.subplot_mosaic``)."""
-    from hea.data import data as _hea_data
-
+    from hea import data as _hea_data
     pima = _hea_data("pima", package="faraway")
     fig, axes = plt.subplot_mosaic([["hist", "scatter"]], figsize=(8, 3))
     try:
@@ -5250,8 +5244,7 @@ def test_draw_into_existing_axes_via_subplot_mosaic():
 
 def test_faraway_p5_scatter_pima_diastolic_diabetes():
     """`ggplot(pima, aes(x=diastolic, y=diabetes)) + geom_point()` (Faraway p.5)."""
-    from hea.data import data as _hea_data
-
+    from hea import data as _hea_data
     pima = _hea_data("pima", package="faraway")
     p = ggplot(pima, aes(x="diastolic", y="diabetes")) + geom_point()
     fig = p.draw()

@@ -942,7 +942,7 @@ def test_confint_dispatches_to_profile_object():
     ``lme4::profile`` workflow Bates uses in the lme book.
     """
     from hea.models import lme
-    from hea.data import data
+    from hea import data
     dye = data("Dyestuff")
     fm = lme("Yield ~ 1 + (1 | Batch)", dye, REML=False)
     pr = fm.profile()
