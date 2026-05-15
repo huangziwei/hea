@@ -669,18 +669,14 @@ class _GlmResponse:
         Port of ``glmResp::resDev`` (respModule.cpp:165). Matches what
         :func:`stats::deviance.merMod` returns for GLMM.
 
-        The sum is performed sequentially (left-to-right) to match
-        Eigen3's ``Array.sum()`` reduction bit-for-bit — numpy's default
-        ``np.sum`` uses pairwise reduction, which differs by ~1 ULP for
-        arrays of this size. This 1-ULP-per-call difference cascades
+        Uses ``np.cumsum(...)[-1]`` (== ``np.add.accumulate``) for the
+        sum: that performs sequential left-to-right reduction (one ULP
+        of bit-match to Eigen3's ``Array.sum()``), unlike ``np.sum``
+        which is pairwise. This 1-ULP-per-call difference cascades
         through PIRLS and would otherwise produce a ~1e-6 gap in the
         outer optimizer's converged θ̂ on n≈2000 GLMM fits.
         """
-        arr = self.deviance_residuals()
-        s = 0.0
-        for v in arr:
-            s += float(v)
-        return s
+        return float(np.cumsum(self.deviance_residuals())[-1])
 
     def aic(self) -> float:
         """Family AIC contribution ``family.aic(y, μ, dev, w, n)``.
@@ -1008,10 +1004,7 @@ class _PredState:
         :meth:`_GlmResponse.deviance` for the rationale.
         """
         u_f = self.u(f)
-        s = 0.0
-        for v in u_f:
-            s += float(v) * float(v)
-        return s
+        return float(np.cumsum(u_f * u_f)[-1])
 
 
 def _internal_glmer_wrk_iter(

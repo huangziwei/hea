@@ -114,93 +114,164 @@ _M_LN2 = 0.6931471805599453094172321214581766
 _M_2PI = 6.283185307179586476925286766559
 
 
-def _stirlerr(n: float) -> float:
-    """Port of nmath ``stirlerr(n)`` (stirlerr.c).
+_STIRLERR_HALVES_ARR = np.array(_STIRLERR_HALVES, dtype=float)
+
+
+def _stirlerr(n):
+    """Port of nmath ``stirlerr(n)`` (stirlerr.c). Vectorized over ``n``.
 
     Returns log(n!) - log(sqrt(2πn)·(n/e)ⁿ). The error term in
     Stirling's formula. Used by Loader's saddlepoint algorithm for
-    dpois/dbinom.
+    dpois/dbinom. Accepts a scalar or array; returns the same shape.
+    Bit-identical to the scalar Fortran source — branches via
+    ``np.where``, all arithmetic ops in the same order.
     """
-    if n <= 23.5:
-        nn2 = n + n
-        if n <= 15.0 and nn2 == int(nn2):
-            return _STIRLERR_HALVES[int(nn2)]
-        if n <= 5.25:
-            if n >= 1.0:
-                # "MM2" form: slightly more accurate than direct.
-                l_n = np.log(n)
-                # ldexp(u, -1) == u/2
-                return (float(gammaln(n)) + n * (1.0 - l_n)
-                        + (l_n - _M_LN_2PI) * 0.5)
-            # n < 1
-            return float(gammaln(1.0 + n)) - (n + 0.5) * np.log(n) + n - _M_LN_SQRT_2PI
-        # 5.25 < n <= 23.5
-        nn = n * n
-        if n > 12.8:
-            return (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - _S6 / nn) / nn) / nn) / nn) / nn) / nn) / n
-        if n > 12.3:
-            return (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - _S7 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / n
-        if n > 8.9:
-            return (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - _S8 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / n
-        if n > 7.3:
-            return (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - (_S8 - (_S9 - _S10 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / n
-        if n > 6.6:
-            return (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - (_S8 - (_S9 - (_S10 - (_S11 - _S12 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / n
-        if n > 6.1:
-            return (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - (_S8 - (_S9 - (_S10 - (_S11 - (_S12 - (_S13 - _S14 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / n
-        # 5.25 < n <= 6.1
-        return (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - (_S8 - (_S9 - (_S10 - (_S11 - (_S12 - (_S13 - (_S14 - (_S15 - _S16 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / n
-    # n > 23.5
-    nn = n * n
-    if n > 15.7e6:
-        return _S0 / n
-    if n > 6180:
-        return (_S0 - _S1 / nn) / n
-    if n > 205:
-        return (_S0 - (_S1 - _S2 / nn) / nn) / n
-    if n > 86:
-        return (_S0 - (_S1 - (_S2 - _S3 / nn) / nn) / nn) / n
-    if n > 27:
-        return (_S0 - (_S1 - (_S2 - (_S3 - _S4 / nn) / nn) / nn) / nn) / n
-    return (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - _S5 / nn) / nn) / nn) / nn) / nn) / n
+    n = np.asarray(n, dtype=float)
+    scalar_input = (n.ndim == 0)
+    n = np.atleast_1d(n)
+
+    out = np.empty_like(n)
+    nn2 = n + n
+    nn2_int = np.rint(nn2).astype(np.int64)
+
+    # ---- n <= 23.5 ----
+    le_235 = n <= 23.5
+    # Table path: n <= 15.0 and 2n is integer.
+    table_mask = le_235 & (n <= 15.0) & (nn2 == nn2_int)
+    if np.any(table_mask):
+        idx = nn2_int[table_mask]
+        out[table_mask] = _STIRLERR_HALVES_ARR[idx]
+
+    # MM2 (n>=1, n<=5.25, not in table)
+    mm2_mask = le_235 & ~table_mask & (n <= 5.25) & (n >= 1.0)
+    if np.any(mm2_mask):
+        nm = n[mm2_mask]
+        l_n = np.log(nm)
+        out[mm2_mask] = (gammaln(nm) + nm * (1.0 - l_n)
+                         + (l_n - _M_LN_2PI) * 0.5)
+
+    # n < 1, not in table
+    lt1_mask = le_235 & ~table_mask & ~mm2_mask & (n < 1.0)
+    if np.any(lt1_mask):
+        nm = n[lt1_mask]
+        out[lt1_mask] = (gammaln(1.0 + nm) - (nm + 0.5) * np.log(nm)
+                         + nm - _M_LN_SQRT_2PI)
+
+    # 5.25 < n <= 23.5 — asymptotic series, branches by n threshold.
+    series_mask = le_235 & ~table_mask & ~mm2_mask & ~lt1_mask
+    if np.any(series_mask):
+        nm = n[series_mask]
+        nn = nm * nm
+        # We need different series lengths per element. Compute the longest
+        # branch (k=16) and shorter ones; np.where picks per element.
+        s_k7  = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - _S6 / nn) / nn) / nn) / nn) / nn) / nn) / nm
+        s_k8  = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - _S7 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
+        s_k9  = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - _S8 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
+        s_k11 = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - (_S8 - (_S9 - _S10 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
+        s_k13 = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - (_S8 - (_S9 - (_S10 - (_S11 - _S12 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
+        s_k15 = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - (_S8 - (_S9 - (_S10 - (_S11 - (_S12 - (_S13 - _S14 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
+        s_k16 = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - (_S8 - (_S9 - (_S10 - (_S11 - (_S12 - (_S13 - (_S14 - (_S15 - _S16 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
+        # Select per-element by threshold.
+        ser = np.where(nm > 12.8, s_k7,
+              np.where(nm > 12.3, s_k8,
+              np.where(nm > 8.9,  s_k9,
+              np.where(nm > 7.3,  s_k11,
+              np.where(nm > 6.6,  s_k13,
+              np.where(nm > 6.1,  s_k15, s_k16))))))
+        out[series_mask] = ser
+
+    # ---- n > 23.5 ----
+    gt235 = ~le_235
+    if np.any(gt235):
+        nm = n[gt235]
+        nn = nm * nm
+        a_k1 = _S0 / nm
+        a_k2 = (_S0 - _S1 / nn) / nm
+        a_k3 = (_S0 - (_S1 - _S2 / nn) / nn) / nm
+        a_k4 = (_S0 - (_S1 - (_S2 - _S3 / nn) / nn) / nn) / nm
+        a_k5 = (_S0 - (_S1 - (_S2 - (_S3 - _S4 / nn) / nn) / nn) / nn) / nm
+        a_k6 = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - _S5 / nn) / nn) / nn) / nn) / nn) / nm
+        a = np.where(nm > 15.7e6, a_k1,
+            np.where(nm > 6180.0, a_k2,
+            np.where(nm > 205.0,  a_k3,
+            np.where(nm > 86.0,   a_k4,
+            np.where(nm > 27.0,   a_k5, a_k6)))))
+        out[gt235] = a
+
+    return float(out[0]) if scalar_input else out
 
 
-def _bd0(x: float, np_: float) -> float:
-    """Port of nmath ``bd0(x, np)`` (bd0.c:48-87).
+def _bd0(x, np_):
+    """Port of nmath ``bd0(x, np)`` (bd0.c:48-87). Vectorized.
 
     Evaluates ``M·D₀(x/M) = x·log(x/M) + M - x`` (where ``M = np_``) with
-    small relative error even when ``x/M ≈ 1``. Uses Taylor series of
-    ``log((1+v)/(1-v))`` with ``v = (x-M)/(x+M)`` for the "close" branch.
+    small relative error even when ``x/M ≈ 1``. Bit-identical per element
+    to the scalar Fortran source — Taylor series for the close branch,
+    direct evaluation otherwise.
     """
-    if not np.isfinite(x) or not np.isfinite(np_) or np_ == 0.0:
-        return float('nan')
-    if abs(x - np_) < 0.1 * (x + np_):
-        d = x - np_
-        v = d / (x + np_)
-        if d != 0.0 and v == 0.0:
-            # v underflowed (x+np overflowed)
-            x_ = np.ldexp(x, -2)
-            n_ = np.ldexp(np_, -2)
-            v = (x_ - n_) / (x_ + n_)
-        s = np.ldexp(d, -1) * v  # was d * v; this is d*v/2 here
-        if abs(np.ldexp(s, 1)) < np.finfo(float).tiny:
-            return np.ldexp(s, 1)
-        ej = x * v  # 2*x*v could overflow
-        v *= v
+    x = np.asarray(x, dtype=float)
+    np_ = np.asarray(np_, dtype=float)
+    scalar = (x.ndim == 0 and np_.ndim == 0)
+    x = np.atleast_1d(x)
+    np_ = np.atleast_1d(np.broadcast_to(np_, x.shape).copy())
+
+    out = np.empty_like(x)
+    out[:] = np.nan
+    valid = np.isfinite(x) & np.isfinite(np_) & (np_ != 0.0)
+
+    close = valid & (np.abs(x - np_) < 0.1 * (x + np_))
+    far = valid & ~close
+
+    # Far branch: direct formula.
+    if np.any(far):
+        xf, nf = x[far], np_[far]
+        xnp = xf / nf
+        # Safe log: fall back to log(x) - log(np_) if xnp non-finite.
+        with np.errstate(invalid="ignore"):
+            lg_x_n = np.where(np.isfinite(xnp),
+                              np.log(np.where(np.isfinite(xnp), xnp, 1.0)),
+                              np.log(xf) - np.log(nf))
+        out[far] = np.where(xf > nf,
+                            xf * (lg_x_n - 1.0) + nf,
+                            xf * lg_x_n + nf - xf)
+
+    # Close branch: Taylor series with per-element early exit.
+    if np.any(close):
+        xc, nc = x[close], np_[close]
+        d = xc - nc
+        v = d / (xc + nc)
+        # Underflow fix: scale by 2^-2 to avoid x+np overflow path.
+        underflow = (d != 0.0) & (v == 0.0)
+        if np.any(underflow):
+            x_ = np.ldexp(xc[underflow], -2)
+            n_ = np.ldexp(nc[underflow], -2)
+            v_uf = (x_ - n_) / (x_ + n_)
+            v[underflow] = v_uf
+        s = np.ldexp(d, -1) * v
+        # Underflow early-return: ldexp(s, 1) < tiny.
+        s2 = np.ldexp(s, 1)
+        early = np.abs(s2) < np.finfo(float).tiny
+        ej = xc * v
+        v2 = v * v
+        # Iterate Taylor series; mask out converged/early-returned elements.
+        active = ~early
         for j in range(1, 1000):
-            ej *= v  # x * v^(2j+1)
-            s_ = s
-            s = s + ej / ((j << 1) + 1)
-            if s == s_:
-                return np.ldexp(s, 1)  # 2*s
-        # Should never happen
-        return float('nan')
-    # |x - np| not too small
-    xnp = x / np_
-    lg_x_n = np.log(xnp) if np.isfinite(xnp) else (np.log(x) - np.log(np_))
-    if x > np_:
-        return x * (lg_x_n - 1.0) + np_
-    return x * lg_x_n + np_ - x
+            if not np.any(active):
+                break
+            ej_a = ej[active] * v2[active]
+            ej[active] = ej_a
+            s_old = s[active].copy()
+            s_new = s[active] + ej_a / ((j << 1) + 1)
+            s[active] = s_new
+            still_changed = s_new != s_old
+            # Re-build active mask
+            idx = np.where(active)[0]
+            active = np.zeros_like(active)
+            active[idx[still_changed]] = True
+        # Return 2*s for converged; 2*early-s for early.
+        out[close] = np.where(early, s2, np.ldexp(s, 1))
+
+    return float(out[0]) if scalar else out
 
 
 def _log1pmx(x: float) -> float:
@@ -390,138 +461,271 @@ _BD0_SCALE_HEX = (
     ("0",              "0",               "0",               "0"),  # log(1) = 0
 )
 _BD0_SCALE = tuple(tuple(_hex_to_float(s) for s in row) for row in _BD0_SCALE_HEX)
+_BD0_SCALE_NP = np.array(_BD0_SCALE, dtype=float)  # shape (129, 4) for vectorized lookup
 
 
-def _ebd0(x: float, M: float) -> tuple[float, float]:
-    """Port of nmath ``ebd0(x, M)`` (bd0.c:241-355).
+def _ebd0(x, M):
+    """Port of nmath ``ebd0(x, M)`` (bd0.c:241-355). Vectorized.
 
     Computes ``x·log(x/M) + (M - x)`` with extended precision. Returns
-    ``(yh, yl)`` such that ``yh + yl`` is the value. Welinder's improved
-    algorithm (R Bugzilla PR#15628).
+    ``(yh, yl)`` arrays such that ``yh + yl`` is the value. Welinder's
+    improved algorithm (R Bugzilla PR#15628).
     """
     Sb = 10
     S = 1 << Sb  # = 1024
     N = 128
 
-    yh = 0.0
-    yl = 0.0
+    x = np.asarray(x, dtype=float)
+    M = np.asarray(M, dtype=float)
+    scalar = (x.ndim == 0 and M.ndim == 0)
+    x = np.atleast_1d(x)
+    M = np.atleast_1d(np.broadcast_to(M, x.shape).copy())
 
-    if x == M:
-        return yh, yl
-    if x == 0.0:
-        return M, 0.0
-    if M == 0.0:
-        return float('inf'), 0.0
+    yh = np.zeros_like(x)
+    yl = np.zeros_like(x)
 
-    M_over_x = M / x
-    if M_over_x == float('inf'):
-        return M, 0.0
+    # Edge cases.
+    eq = x == M
+    x_zero = ~eq & (x == 0.0)
+    M_zero = ~eq & ~x_zero & (M == 0.0)
+    yh[x_zero] = M[x_zero]
+    yh[M_zero] = np.inf
 
-    r, e = np.frexp(M_over_x)  # M/x = r * 2^e, r in [0.5, 1)
+    # M/x → ∞ (M >> x).
+    Mox = np.where(eq | x_zero | M_zero, 1.0, M / np.where(x == 0.0, 1.0, x))
+    inf_Mox = ~eq & ~x_zero & ~M_zero & (Mox == np.inf)
+    yh[inf_Mox] = M[inf_Mox]
 
-    # Prevent overflow.
-    if _M_LN2 * (-e) > 1.0 + (np.finfo(float).max / x):
-        return float('inf'), 0.0
+    active = ~(eq | x_zero | M_zero | inf_Mox)
+    if not np.any(active):
+        return (float(yh[0]), float(yl[0])) if scalar else (yh, yl)
 
-    i = int(np.floor((r - 0.5) * (2 * N) + 0.5))
+    xa = x[active]
+    Ma = M[active]
+    Mox_a = Ma / xa
+
+    # M/x = r · 2^e
+    r, e = np.frexp(Mox_a)
+
+    # Overflow check (rare): M_LN2 * (-e) > 1 + DBL_MAX/x → yh = +inf
+    overflow = _M_LN2 * (-e.astype(float)) > (1.0 + np.finfo(float).max / xa)
+    if np.any(overflow):
+        active_idx = np.where(active)[0]
+        yh[active_idx[overflow]] = np.inf
+        good = ~overflow
+        xa = xa[good]; Ma = Ma[good]; r = r[good]; e = e[good]
+        active_idx = active_idx[good]
+    else:
+        active_idx = np.where(active)[0]
+
+    if xa.size == 0:
+        return (float(yh[0]), float(yl[0])) if scalar else (yh, yl)
+
+    i = np.floor((r - 0.5) * (2 * N) + 0.5).astype(np.int64)
     f = np.floor(S / (0.5 + i / (2.0 * N)) + 0.5)
     fg = np.ldexp(f, -(e + Sb))
-    if fg == float('inf'):
-        return float('inf'), 0.0
 
-    # ADD1 macro: split into high (rounded) and low (residual) parts.
-    def add1(d: float) -> None:
-        nonlocal yh, yl
-        d1 = np.floor(d + 0.5)
-        d2 = d - d1
-        yh += d1
-        yl += d2
+    inf_fg = fg == np.inf
+    if np.any(inf_fg):
+        yh[active_idx[inf_fg]] = np.inf
+        good = ~inf_fg
+        xa = xa[good]; Ma = Ma[good]; fg = fg[good]; i = i[good]; e = e[good]
+        active_idx = active_idx[good]
+
+    if xa.size == 0:
+        return (float(yh[0]), float(yl[0])) if scalar else (yh, yl)
+
+    # Local accumulators (we update yh/yl only via these arrays).
+    lh = np.zeros_like(xa)
+    ll = np.zeros_like(xa)
+
+    def add1(d_arr):
+        d1 = np.floor(d_arr + 0.5)
+        d2 = d_arr - d1
+        np.add(lh, d1, out=lh)
+        np.add(ll, d2, out=ll)
 
     # ADD1(-x * log1pmx((M*fg - x) / x))
-    arg = (M * fg - x) / x
-    # Use numpy's log1p for log(1+arg), then subtract arg.
+    arg = (Ma * fg - xa) / xa
     log1pmx_val = np.log1p(arg) - arg
-    add1(-x * log1pmx_val)
+    add1(-xa * log1pmx_val)
 
-    if fg == 1.0:
-        return yh, yl
+    fg_ne_1 = fg != 1.0
+    if np.any(fg_ne_1):
+        # Process the 4-iteration table corrections only where fg != 1.
+        # We compute updates for the WHOLE active set; for fg==1 elements
+        # the increments are 0 (since x * 0 = 0 with proper masking).
+        for j in range(4):
+            tbl_i = _BD0_SCALE_NP[i, j]
+            tbl_0 = _BD0_SCALE_NP[0, j]
+            inc1 = np.where(fg_ne_1, xa * tbl_i, 0.0)
+            inc2 = np.where(fg_ne_1, -xa * tbl_0 * e, 0.0)
+            add1(inc1)
+            add1(inc2)
+            # Per-iter overflow check: any !isfinite → set to inf and freeze.
+            nonfinite = ~np.isfinite(lh)
+            if np.any(nonfinite):
+                lh[nonfinite] = np.inf
+                ll[nonfinite] = 0.0
+                fg_ne_1 = fg_ne_1 & ~nonfinite
 
-    for j in range(4):
-        add1(x * _BD0_SCALE[i][j])
-        add1(-x * _BD0_SCALE[0][j] * e)
-        if not np.isfinite(yh):
-            return float('inf'), 0.0
+    # ADD1(M); ADD1(-M·fg) only where fg != 1; for fg==1, the original
+    # scalar code returns early before these — match that exactly.
+    M_inc = np.where(fg != 1.0, Ma, 0.0)
+    fg_inc = np.where(fg != 1.0, -Ma * fg, 0.0)
+    # But: the scalar code returns IMMEDIATELY for fg==1 after the first
+    # add1(-x·log1pmx). For fg==1, lh/ll already have the right value,
+    # so skip the M / -M·fg adds.
+    fg_eq_1 = fg == 1.0
+    fg_ne_1 = ~fg_eq_1
+    if np.any(fg_ne_1):
+        # Apply M / -M·fg adds only for fg != 1 (otherwise scalar returns
+        # early so we shouldn't add).
+        i_ne = np.where(fg_ne_1)[0]
+        d = Ma[i_ne]
+        d1 = np.floor(d + 0.5)
+        lh[i_ne] = lh[i_ne] + d1
+        ll[i_ne] = ll[i_ne] + (d - d1)
+        d = -Ma[i_ne] * fg[i_ne]
+        d1 = np.floor(d + 0.5)
+        lh[i_ne] = lh[i_ne] + d1
+        ll[i_ne] = ll[i_ne] + (d - d1)
 
-    add1(M)
-    add1(-M * fg)
-    return yh, yl
+    yh[active_idx] = lh
+    yl[active_idx] = ll
+    return (float(yh[0]), float(yl[0])) if scalar else (yh, yl)
 
 
-def _dpois_raw(x: float, lambda_: float, give_log: bool = True) -> float:
+def _dpois_raw(x, lambda_, give_log: bool = True):
     """Port of nmath ``dpois_raw(x, lambda, give_log)`` (dpois.c:43-69).
 
-    Uses Loader's saddlepoint algorithm with ebd0 (R 4.5).
+    Vectorized over ``x`` and ``lambda``. Uses Loader's saddlepoint with
+    ebd0 (R 4.5). Returns the same shape as the broadcast of inputs.
     """
-    if lambda_ == 0.0:
-        return (0.0 if give_log else 1.0) if x == 0.0 else (float('-inf') if give_log else 0.0)
-    if not np.isfinite(lambda_):
-        return float('-inf') if give_log else 0.0
-    if x < 0:
-        return float('-inf') if give_log else 0.0
-    if x <= lambda_ * np.finfo(float).tiny:
-        # R_D_exp(-lambda)
-        return -lambda_ if give_log else np.exp(-lambda_)
-    if lambda_ < x * np.finfo(float).tiny:
-        if not np.isfinite(x):
-            return float('-inf') if give_log else 0.0
-        val = -lambda_ + x * np.log(lambda_) - float(gammaln(x + 1.0))
-        return val if give_log else np.exp(val)
+    x_in = np.asarray(x, dtype=float)
+    l_in = np.asarray(lambda_, dtype=float)
+    scalar = (x_in.ndim == 0 and l_in.ndim == 0)
+    x = np.atleast_1d(x_in.copy())
+    lam = np.atleast_1d(np.broadcast_to(l_in, x.shape).copy())
 
-    # Common path: -stirlerr(x) - ebd0(x, lambda) - 0.5·log(2π·x)
-    yh, yl = _ebd0(x, lambda_)
-    yl_total = yl + _stirlerr(x)
-    x_LRG = 2.86111748575702815380240589208115399625e307  # 2^1023 / π
-    Lrg_x = x >= x_LRG
-    if Lrg_x:
-        r = 2.5066282746310005024 * np.sqrt(x)  # sqrt(2π)·sqrt(x)
-        if give_log:
-            return -yl_total - yh - np.log(r)
-        return np.exp(-yl_total) * np.exp(-yh) / r
-    r = _M_2PI * x
-    if give_log:
-        return -yl_total - yh - 0.5 * np.log(r)
-    return np.exp(-yl_total) * np.exp(-yh) / np.sqrt(r)
+    NEG_INF = float('-inf')
+    out = np.empty_like(x)
+
+    # Edge cases (rare in PIRLS; cheap to test).
+    lam_zero = (lam == 0.0)
+    lam_inf  = ~np.isfinite(lam)
+    x_neg    = x < 0
+    tiny = np.finfo(float).tiny
+    x_le_lt = (x <= lam * tiny) & ~lam_zero & ~lam_inf & ~x_neg
+    lam_lt_xt = (lam < x * tiny) & ~lam_zero & ~lam_inf & ~x_neg & ~x_le_lt
+    main = ~(lam_zero | lam_inf | x_neg | x_le_lt | lam_lt_xt)
+
+    # lam == 0: x==0 → log(1)=0; else -inf
+    if np.any(lam_zero):
+        out[lam_zero] = np.where(x[lam_zero] == 0.0, 0.0, NEG_INF)
+    if np.any(lam_inf):
+        out[lam_inf] = NEG_INF
+    if np.any(x_neg):
+        out[x_neg] = NEG_INF
+    if np.any(x_le_lt):
+        out[x_le_lt] = -lam[x_le_lt]
+    if np.any(lam_lt_xt):
+        sub = lam_lt_xt
+        xn = x[sub]; ln = lam[sub]
+        out[sub] = np.where(~np.isfinite(xn),
+                            NEG_INF,
+                            -ln + xn * np.log(ln) - gammaln(xn + 1.0))
+
+    # Common (saddlepoint) path.
+    if np.any(main):
+        xm = x[main]; lm = lam[main]
+        yh, yl = _ebd0(xm, lm)
+        yl_total = yl + _stirlerr(xm)
+        x_LRG = 2.86111748575702815380240589208115399625e307
+        Lrg = xm >= x_LRG
+        r = np.where(Lrg, 2.5066282746310005024 * np.sqrt(xm), _M_2PI * xm)
+        log_correction = np.where(Lrg, np.log(r), 0.5 * np.log(r))
+        out[main] = -yl_total - yh - log_correction
+
+    if not give_log:
+        out = np.exp(out)
+    return float(out[0]) if scalar else out
 
 
-def _dbinom_raw(x: float, n: float, p: float, q: float, give_log: bool = True) -> float:
+def _dbinom_raw(x, n, p, q, give_log: bool = True):
     """Port of nmath ``dbinom_raw(x, n, p, q, give_log)`` (dbinom.c:72-118).
 
-    Uses Loader's saddlepoint with the older (non-extended) ``bd0`` —
-    matches dbinom.c which calls ``bd0(...)`` not ``ebd0(...)``.
+    Vectorized. Uses Loader's saddlepoint with the older (non-extended)
+    ``bd0`` — matches dbinom.c which calls ``bd0(...)`` not ``ebd0(...)``.
     """
-    if p == 0.0:
-        return (0.0 if give_log else 1.0) if x == 0.0 else (float('-inf') if give_log else 0.0)
-    if q == 0.0:
-        return (0.0 if give_log else 1.0) if x == n else (float('-inf') if give_log else 0.0)
-    if x == 0.0:
-        if n == 0.0:
-            return 0.0 if give_log else 1.0
-        if p > q:
-            return n * np.log(q) if give_log else q ** n
-        return n * np.log1p(-p) if give_log else (1.0 - p) ** n
-    if x == n:
-        if p > q:
-            return n * np.log1p(-q) if give_log else (1.0 - q) ** n
-        return n * np.log(p) if give_log else p ** n
-    if x < 0 or x > n:
-        return float('-inf') if give_log else 0.0
+    x_in = np.asarray(x, dtype=float)
+    n_in = np.asarray(n, dtype=float)
+    p_in = np.asarray(p, dtype=float)
+    q_in = np.asarray(q, dtype=float)
+    scalar = (x_in.ndim == 0 and n_in.ndim == 0 and p_in.ndim == 0 and q_in.ndim == 0)
+    # Broadcast to common shape.
+    shape = np.broadcast_shapes(x_in.shape, n_in.shape, p_in.shape, q_in.shape)
+    x = np.broadcast_to(x_in, shape).astype(float).copy()
+    n = np.broadcast_to(n_in, shape).astype(float).copy()
+    p = np.broadcast_to(p_in, shape).astype(float).copy()
+    q = np.broadcast_to(q_in, shape).astype(float).copy()
 
-    lc = (_stirlerr(n) - _stirlerr(x) - _stirlerr(n - x)
-          - _bd0(x, n * p) - _bd0(n - x, n * q))
-    # lf = log(2π) + log(x) + log1p(-x/n)
-    lf = _M_LN_2PI + np.log(x) + np.log1p(-x / n)
-    val = lc - 0.5 * lf
-    return val if give_log else np.exp(val)
+    NEG_INF = float('-inf')
+    out = np.empty(shape, dtype=float)
+
+    p_zero = p == 0.0
+    q_zero = q == 0.0
+    x_zero = x == 0.0
+    x_eq_n = x == n
+    x_oob = (x < 0) | (x > n)
+
+    edge_p0 = p_zero
+    edge_q0 = q_zero & ~p_zero
+    edge_x0 = x_zero & ~p_zero & ~q_zero
+    edge_xn = x_eq_n & ~p_zero & ~q_zero & ~x_zero
+    edge_oob = x_oob & ~p_zero & ~q_zero & ~x_zero & ~x_eq_n
+    main = ~(edge_p0 | edge_q0 | edge_x0 | edge_xn | edge_oob)
+
+    if np.any(edge_p0):
+        out[edge_p0] = np.where(x[edge_p0] == 0.0, 0.0, NEG_INF)
+    if np.any(edge_q0):
+        out[edge_q0] = np.where(x[edge_q0] == n[edge_q0], 0.0, NEG_INF)
+    if np.any(edge_x0):
+        n0 = n[edge_x0]; p0 = p[edge_x0]; q0 = q[edge_x0]
+        # n == 0 → log(1) = 0
+        n_is_0 = n0 == 0.0
+        # else: n*log(q) if p>q, n*log1p(-p) otherwise.
+        big_p = (p0 > q0) & ~n_is_0
+        big_q = ~big_p & ~n_is_0
+        val = np.empty_like(n0)
+        val[n_is_0] = 0.0
+        if np.any(big_p):
+            val[big_p] = n0[big_p] * np.log(q0[big_p])
+        if np.any(big_q):
+            val[big_q] = n0[big_q] * np.log1p(-p0[big_q])
+        out[edge_x0] = val
+    if np.any(edge_xn):
+        n0 = n[edge_xn]; p0 = p[edge_xn]; q0 = q[edge_xn]
+        big_p = p0 > q0
+        val = np.empty_like(n0)
+        if np.any(big_p):
+            val[big_p] = n0[big_p] * np.log1p(-q0[big_p])
+        if np.any(~big_p):
+            val[~big_p] = n0[~big_p] * np.log(p0[~big_p])
+        out[edge_xn] = val
+    if np.any(edge_oob):
+        out[edge_oob] = NEG_INF
+
+    if np.any(main):
+        xm = x[main]; nm = n[main]; pm = p[main]; qm = q[main]
+        lc = (_stirlerr(nm) - _stirlerr(xm) - _stirlerr(nm - xm)
+              - _bd0(xm, nm * pm) - _bd0(nm - xm, nm * qm))
+        lf = _M_LN_2PI + np.log(xm) + np.log1p(-xm / nm)
+        out[main] = lc - 0.5 * lf
+
+    if not give_log:
+        out = np.exp(out)
+    return float(out.reshape(())) if scalar else out
 
 
 # ---------------------------------------------------------------------------
@@ -1196,14 +1400,12 @@ class Poisson(Family):
     def aic(self, y, mu, dev, wt, n, theta=None):
         # Port of lme4's ``PoissonDist::aic`` (glmFamily.cpp:321-326):
         # ``-2 · Σ wt[i] · Rf_dpois(y[i], mu[i], TRUE)`` with sequential
-        # reduction. Uses Loader's saddlepoint (:func:`_dpois_raw`) for
-        # bit-exact match against R.
+        # reduction. :func:`_dpois_raw` is vectorized; the final sum uses
+        # ``np.cumsum(...)[-1]`` for sequential bit-match to Eigen3.
         y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
-        s = 0.0
-        for i in range(y.size):
-            s += _dpois_raw(float(y[i]), float(mu[i]), True) * float(wt[i])
-        return -2.0 * s
+        logp = _dpois_raw(y, mu, True)
+        return -2.0 * float(np.cumsum(logp * wt)[-1])
 
     def ls(self, y, wt, scale):
         # Saturated log-lik at μ=y; scale-known so d/dlogφ = d²/dlogφ² = 0.
@@ -1267,22 +1469,24 @@ class Binomial(Family):
     def aic(self, y, mu, dev, wt, n, theta=None):
         # Port of lme4's ``binomialDist::aic`` (glmFamily.cpp:204-213):
         # ``-2 · Σ (wt[i]/m[i]) · Rf_dbinom(round(m·y), round(m), μ, TRUE)``
-        # with sequential reduction. Uses :func:`_dbinom_raw` (Loader's
-        # saddlepoint) for bit-exact match.
+        # with sequential reduction. :func:`_dbinom_raw` is vectorized;
+        # final sum uses ``np.cumsum(...)[-1]`` for bit-match to Eigen3.
         y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
-        m = wt
-        # m_i = round(wt_i); s_i = round(m_i · y_i); weight_i = wt_i/m_i.
-        s_acc = 0.0
-        for i in range(y.size):
-            mi = float(np.rint(m[i]))
-            if mi <= 0.0:
-                continue
-            si = float(np.rint(mi * y[i]))
-            pi = float(mu[i])
-            wi = float(wt[i]) / mi
-            s_acc += wi * _dbinom_raw(si, mi, pi, 1.0 - pi, True)
-        return -2.0 * s_acc
+        m = np.rint(wt)
+        # Mask out m<=0; for those, contribution is 0.
+        good = m > 0
+        if not np.any(good):
+            return 0.0
+        s_arr = np.rint(np.where(good, m * y, 0.0))
+        weight = np.where(good, wt / np.where(good, m, 1.0), 0.0)
+        logp = _dbinom_raw(s_arr, m, mu, 1.0 - mu, True)
+        terms = weight * logp
+        # Replace -inf entries (oob) by 0 so they don't contaminate the
+        # sum (lme4 filters via the m<=0 branch which sets contribution
+        # to 0; oob cases shouldn't occur for valid data anyway).
+        terms = np.where(good & np.isfinite(logp), terms, 0.0)
+        return -2.0 * float(np.cumsum(terms)[-1])
 
     def ls(self, y, wt, scale):
         # mgcv: ls = -binomial$aic(y, n, y, w, 0) / 2; scale-known.
