@@ -210,10 +210,12 @@ def test_duplicated():
     assert duplicated(s).to_list() == [False, False, True, False, True]
 
 
-def test_tabulate_one_based():
-    """R's ``tabulate(c(1,2,2,3,3,3))`` is c(1, 2, 3) — 1-based bins."""
-    assert tabulate([1, 2, 2, 3, 3, 3]).tolist() == [1, 2, 3]
-    assert tabulate([2, 2, 4], nbins=5).tolist() == [0, 2, 0, 1, 0]
+def test_tabulate_zero_based():
+    """hea's ``tabulate`` uses 0-based bins (Python convention).
+    R / dplyr's ``tabulate(c(1,2,2,3,3,3))`` -> c(1, 2, 3); hea's
+    equivalent is ``tabulate([0,1,1,2,2,2])`` -> [1, 2, 3]."""
+    assert tabulate([0, 1, 1, 2, 2, 2]).tolist() == [1, 2, 3]
+    assert tabulate([1, 1, 3], nbins=5).tolist() == [0, 2, 0, 1, 0]
 
 
 # ---------------------------------------------------------------------------
@@ -1621,11 +1623,12 @@ def test_cut_returns_pl_enum_factor():
 
 def test_cut_labels_false_returns_codes():
     out = cut([1, 3, 7, 100], breaks=[0, 2, 5, 10], labels=False)
-    # 1-based codes (R-faithful): 1, 2, 3; out-of-range → NaN
+    # 0-based codes (hea convention; R / dplyr emits 1-based);
+    # out-of-range → NaN.
     assert isinstance(out, np.ndarray)
-    assert out[0] == 1
-    assert out[1] == 2
-    assert out[2] == 3
+    assert out[0] == 0
+    assert out[1] == 1
+    assert out[2] == 2
     assert np.isnan(out[3])
 
 

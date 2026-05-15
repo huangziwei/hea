@@ -16,11 +16,11 @@ def plot_lm(
 ):
     """4-panel (or subset) diagnostic for an ``lm``/``glm`` result.
 
-    R parity: ``which=1:6`` selects from {1: resid-fitted, 2: QQ, 3:
-    scale-location, 4: Cook's distance, 5: resid-leverage, 6: Cook vs
-    leverage}. We currently support 1, 2, 3, 5 (the four panels that
-    ``lm.plot()`` builds). Pass an int for a single panel, an iterable
-    for a subset, or omit for the default 4-panel layout.
+    Panel index (0-based; R's ``plot.lm`` is 1-based): ``0`` resid-fitted,
+    ``1`` QQ, ``2`` scale-location, ``3`` Cook's distance, ``4`` resid-
+    leverage, ``5`` Cook vs leverage. hea currently supports 0, 1, 2, 4.
+    Pass an int for a single panel, an iterable for a subset, or omit
+    for the default 4-panel layout.
 
     ``caption=`` matches R's ``plot.lm`` parameter: pass a list of panel
     titles or ``None`` to suppress them. Currently accepted but not
@@ -30,7 +30,7 @@ def plot_lm(
     # would override per-panel; we honor neither yet — panels carry their
     # own titles. Quiet pass-through avoids tripping translated scripts.
     del caption
-    panels = (1, 2, 3, 5) if which is None else (
+    panels = (0, 1, 2, 4) if which is None else (
         (which,) if isinstance(which, int) else tuple(which)
     )
 
@@ -51,17 +51,17 @@ def plot_lm(
 
     for i, p in enumerate(panels):
         ax = axes[i]
-        if p == 1:
+        if p == 0:
             lmod.plot_residuals(ax=ax, smooth=smooth, label_n=label_n)
-        elif p == 2:
+        elif p == 1:
             lmod.plot_qq(ax=ax, label_n=label_n)
-        elif p == 3:
+        elif p == 2:
             lmod.plot_scale_location(ax=ax, smooth=smooth, label_n=label_n)
-        elif p == 5:
+        elif p == 4:
             lmod.plot_leverage(ax=ax, smooth=smooth, label_n=label_n)
         else:
             raise ValueError(
-                f"plot(lmod, which={p}): only panels 1, 2, 3, 5 are supported "
+                f"plot(lmod, which={p}): only panels 0, 1, 2, 4 are supported "
                 f"in Phase 1 (Cook's distance and Cook-vs-leverage are deferred)"
             )
     fig.tight_layout()

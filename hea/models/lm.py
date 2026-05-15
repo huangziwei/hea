@@ -30,9 +30,13 @@ def _row_frame(values: np.ndarray, columns: list[str]) -> pl.DataFrame:
 def _apply_subset(data: pl.DataFrame, subset) -> pl.DataFrame:
     """R: ``subset=`` filter for ``lm()`` / ``glm()`` / etc.
 
-    Supports R's three forms: boolean mask (length == nrow), positive
-    1-based indices (keep), negative 1-based indices (drop). Mixing
-    positive and negative isn't valid R and we don't accept it either.
+    Three forms: boolean mask (length == nrow), non-negative 0-based
+    indices (keep), or negative indices (drop). Negative indices use
+    Python's ``range(n) − k`` semantics: ``-1`` is the last row, ``-2``
+    the second-to-last, etc. Mixing non-negative and negative isn't
+    valid and is rejected.
+
+    R / dplyr ``subset=`` is 1-based; hea follows Python indexing.
     """
     if isinstance(subset, (pl.Series, np.ndarray, list, tuple)):
         arr = np.asarray(subset)
@@ -43,19 +47,20 @@ def _apply_subset(data: pl.DataFrame, subset) -> pl.DataFrame:
         # scalar
         ints = np.asarray([int(subset)])
     n = data.height
-    has_pos = bool((ints > 0).any())
+    has_nonneg = bool((ints >= 0).any())
     has_neg = bool((ints < 0).any())
-    if has_pos and has_neg:
+    if has_nonneg and has_neg:
         raise ValueError(
-            "subset=: cannot mix positive and negative indices (R-incompatible)"
+            "subset=: cannot mix non-negative and negative indices"
         )
     if has_neg:
-        # Negative R indices: drop those 1-based positions.
-        drop_set = {(-int(idx)) - 1 for idx in ints.tolist()}
+        # Negative indices drop the corresponding rows (Python convention:
+        # -1 is the last row).
+        drop_set = {n + int(idx) for idx in ints.tolist()}
         keep = [i for i in range(n) if i not in drop_set]
         return data[keep]
-    # Positive indices: keep those 1-based positions.
-    keep = [int(i) - 1 for i in ints.tolist()]
+    # Non-negative indices: keep those rows.
+    keep = [int(i) for i in ints.tolist()]
     return data[keep]
 
 

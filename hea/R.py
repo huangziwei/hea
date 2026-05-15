@@ -832,16 +832,17 @@ def duplicated(x):
 
 
 def tabulate(x, nbins=None):
-    """R: ``tabulate()`` — counts of integer values in ``1..nbins``.
+    """R: ``tabulate()`` — counts of integer values in ``0..nbins-1``.
 
-    1-based to match R: ``tabulate([1, 2, 2, 3])`` → ``[1, 2, 1]``.
+    0-based (Python convention; R / dplyr's ``tabulate()`` is 1-based):
+    ``tabulate([0, 1, 1, 2])`` → ``[1, 2, 1]``.
     """
     arr = np.asarray(x, dtype=int)
     if nbins is None:
-        nbins = int(arr.max()) if arr.size else 0
+        nbins = int(arr.max()) + 1 if arr.size else 0
     if nbins == 0:
         return np.zeros(0, dtype=int)
-    return np.bincount(arr - 1, minlength=int(nbins))[:int(nbins)]
+    return np.bincount(arr, minlength=int(nbins))[:int(nbins)]
 
 
 def cut(x, breaks, *, labels=None, right=True, include_lowest=False):
@@ -857,8 +858,9 @@ def cut(x, breaks, *, labels=None, right=True, include_lowest=False):
     labels : list, False, or None
         ``None`` (default): auto-generate ``"(a,b]"`` / ``"[a,b)"``-style
         labels. A list: custom labels (length must equal ``len(breaks)-1``).
-        ``False``: return integer codes instead of a factor (1-based to
-        match R; ``NaN`` for out-of-range).
+        ``False``: return integer codes instead of a factor (0-based,
+        Python convention; ``NaN`` for out-of-range. R / dplyr's ``cut()``
+        emits 1-based codes).
     right : bool, default True
         If True, bins are right-closed ``(a, b]`` (R's default). If False,
         left-closed ``[a, b)``.
@@ -870,7 +872,7 @@ def cut(x, breaks, *, labels=None, right=True, include_lowest=False):
     -------
     pl.Series
         ``pl.Enum`` factor with the bin labels, or a numpy ``float64`` array
-        of 1-based integer codes when ``labels=False``.
+        of 0-based integer codes when ``labels=False``.
     """
     arr = np.asarray(x, dtype=float)
     if isinstance(breaks, (int, np.integer)) and not isinstance(breaks, bool):
@@ -898,7 +900,7 @@ def cut(x, breaks, *, labels=None, right=True, include_lowest=False):
     out_of_range = (idx < 0) | (idx >= n_bins)
 
     if labels is False:
-        codes = (idx + 1).astype(float)
+        codes = idx.astype(float)
         codes[out_of_range] = np.nan
         return codes
 
@@ -1949,36 +1951,42 @@ def str_length(x):
     return len(x)
 
 
-def str_sub(x, start=1, end=-1):
-    """stringr: ``str_sub(x, start, end)`` — 1-based inclusive substring.
+def str_sub(x, start=0, end=None):
+    """stringr: ``str_sub(x, start, end)`` — 0-based half-open substring.
 
-    Negative positions count from the end (R semantics). Polars uses
-    0-based half-open slicing, so we shift on the way in.
+    Matches Python slicing: ``str_sub(s, 0, 5)`` is ``s[0:5]``. Negative
+    positions count from the end (Python convention; ``end=None`` reads
+    to the end of the string). R / stringr's ``str_sub()`` is 1-based
+    inclusive; hea follows Python.
     """
-    # Convert R 1-based inclusive [start, end] to polars 0-based
-    # half-open [start_p, length).
+    # Inputs already use Python's 0-based half-open convention — pass
+    # straight through to polars / native slicing.
     def _norm(s, e, length):
-        # Negative R positions count from end.
+        if e is None:
+            e = length
         if s < 0:
-            s = max(0, length + s + 1)
-        else:
-            s = max(0, s - 1)
+            s = max(0, length + s)
         if e < 0:
-            e = length + e + 1
-        if e < s:
-            return s, 0
+            e = max(0, length + e)
+        s = max(0, min(s, length))
+        e = max(s, min(e, length))
         return s, e - s
 
     if isinstance(x, pl.Expr):
-        # We can't know length per row at expression construction; use
-        # ``.str.slice`` and let polars handle each row. Negative ``end``
-        # falls back to ``.str.tail`` semantics via a length-aware expr.
-        offset = start - 1 if start > 0 else start  # polars accepts negative offset
-        if end > 0:
-            length = end - start + 1
-            return x.str.slice(offset, max(0, length))
-        # end is negative: length = len + end - start + 2
-        return x.str.slice(offset, x.str.len_chars() + end - start + 2)
+        # polars ``.str.slice(offset, length)`` accepts negative offsets.
+        if end is None:
+            return x.str.slice(start)
+        if end >= 0 and start >= 0:
+            return x.str.slice(start, max(0, end - start))
+        # Mixed signs: defer to a length-aware expression.
+        len_expr = x.str.len_chars()
+        norm_start = pl.when(pl.lit(start) < 0).then(
+            (len_expr + pl.lit(start)).clip(lower_bound=0)
+        ).otherwise(pl.lit(start))
+        norm_end = pl.when(pl.lit(end) < 0).then(
+            (len_expr + pl.lit(end)).clip(lower_bound=0)
+        ).otherwise(pl.lit(end))
+        return x.str.slice(norm_start, (norm_end - norm_start).clip(lower_bound=0))
     if isinstance(x, (pl.Series, list, tuple, np.ndarray)):
         out = []
         for v in x:
@@ -3698,9 +3706,9 @@ def coef(model):
     ``coef.lmerMod`` returns per-group BLUPs which hea doesn't compute
     in the same shape — use ``fixef()`` + ``ranef()`` to assemble.
 
-    Returns :class:`hea.NamedVector` — supports R-style positional
-    indexing (1-based: ``coef(m)[1]``), name lookup (``coef(m)["x"]``),
-    and elementwise arithmetic.
+    Returns :class:`hea.R.NamedVector` — supports 0-based positional
+    indexing (``coef(m)[0]`` is the first coefficient), name lookup
+    (``coef(m)["x"]``), and elementwise arithmetic.
     """
     return _bhat_to_named_vector(model)
 
@@ -6037,8 +6045,8 @@ def _anova_lme(*models, labels: list[str]):
 # =============================================================================
 
 class NamedVector:
-    """R-style named numeric vector. Indexing is 1-based on integers,
-    name-based on strings."""
+    """R-style named numeric vector. Indexing is 0-based on integers
+    (Python convention; R / dplyr use 1-based), name-based on strings."""
 
     __slots__ = ("names", "values")
 

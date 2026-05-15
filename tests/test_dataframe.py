@@ -120,9 +120,10 @@ def test_desc_negates_list():
     # NaN propagates through negation
     assert np.array_equal(out[:5], np.array([-1.0, -5.0, -5.0, -17.0, -22.0]))
     assert np.isnan(out[5])
-    # The motivating use case — descending min_rank matches R reference
+    # The motivating use case — descending min_rank. hea is 0-based,
+    # so R's [5, 3, 3, 2, 1] becomes [4, 2, 2, 1, 0].
     ranks = min_rank(desc([1, 5, 5, 17, 22, None]))
-    assert ranks[:5].tolist() == [5.0, 3.0, 3.0, 2.0, 1.0]
+    assert ranks[:5].tolist() == [4.0, 2.0, 2.0, 1.0, 0.0]
     assert np.isnan(ranks[5])
 
 
@@ -1326,14 +1327,15 @@ _RANK_X = [1, 5, 5, 17, 22, None]
 
 def test_min_rank_eager_list():
     """List input returns a polars Series with null preserved (not NaN), so
-    the result composes cleanly with ``mutate`` (no NaN→null mismatch)."""
+    the result composes cleanly with ``mutate`` (no NaN→null mismatch).
+    Ranks are 0-based (hea convention)."""
     out = hea.tidy.min_rank(_RANK_X)
     assert isinstance(out, pl.Series)
-    assert out.to_list() == [1.0, 2.0, 2.0, 4.0, 5.0, None]
+    assert out.to_list() == [0.0, 1.0, 1.0, 3.0, 4.0, None]
 
 
 def test_dense_rank_eager_list():
-    assert hea.tidy.dense_rank(_RANK_X).to_list() == [1.0, 2.0, 2.0, 3.0, 4.0, None]
+    assert hea.tidy.dense_rank(_RANK_X).to_list() == [0.0, 1.0, 1.0, 2.0, 3.0, None]
 
 
 def test_percent_rank_eager_list():
@@ -1347,16 +1349,17 @@ def test_cume_dist_eager_list():
 
 
 def test_ntile_eager_list():
-    assert hea.tidy.ntile(_RANK_X, 3).to_list() == [1.0, 1.0, 2.0, 2.0, 3.0, None]
+    assert hea.tidy.ntile(_RANK_X, 3).to_list() == [0.0, 0.0, 1.0, 1.0, 2.0, None]
 
 
 def test_ntile_eager_size_imbalance():
-    """``ntile(1:10, 3)`` puts the extras in the earlier buckets."""
+    """``ntile(0..10, 3)`` puts the extras in the earlier buckets.
+    Bucket labels are 0-based."""
     assert hea.tidy.ntile(list(range(1, 11)), 3).to_list() == [
-        1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0
+        0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0
     ]
     assert hea.tidy.ntile(list(range(1, 11)), 4).to_list() == [
-        1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0
+        0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0
     ]
 
 
@@ -1396,36 +1399,38 @@ def test_rank_verbs_expr_in_mutate():
         cd=hea.tidy.cume_dist(pl.col("x")),
         nt=hea.tidy.ntile(pl.col("x"), 3),
     )
-    assert out["mr"].to_list() == [1, 2, 2, 4, 5, None]
-    assert out["dr"].to_list() == [1, 2, 2, 3, 4, None]
+    assert out["mr"].to_list() == [0, 1, 1, 3, 4, None]
+    assert out["dr"].to_list() == [0, 1, 1, 2, 3, None]
     assert out["pr"].to_list() == pytest.approx(
         [0.0, 0.25, 0.25, 0.75, 1.0, None], nan_ok=True
     )
     assert out["cd"].to_list() == pytest.approx(
         [0.2, 0.6, 0.6, 0.8, 1.0, None], nan_ok=True
     )
-    assert out["nt"].to_list() == [1, 1, 2, 2, 3, None]
+    assert out["nt"].to_list() == [0, 0, 1, 1, 2, None]
 
 
 def test_row_number_no_arg_is_position_expr():
-    """``row_number()`` (no args) returns the 1-based position expression."""
+    """``row_number()`` (no args) returns the 0-based position expression."""
     df = pl.DataFrame({"v": [10, 20, 30, None]})
     out = df.select(rn=hea.tidy.row_number())["rn"].to_list()
-    assert out == [1, 2, 3, 4]
+    assert out == [0, 1, 2, 3]
 
 
 def test_row_number_eager_list_is_ordinal_rank():
-    """``row_number(x)`` is ``rank(x, "ordinal")`` — ties by first appearance."""
-    # R reference: row_number(c(3, 1, 1, 2)) -> c(4, 1, 2, 3)
-    assert hea.tidy.row_number([3, 1, 1, 2]).to_list() == [4.0, 1.0, 2.0, 3.0]
-    assert hea.tidy.row_number(_RANK_X).to_list() == [1.0, 2.0, 3.0, 4.0, 5.0, None]
+    """``row_number(x)`` is ``rank(x, "ordinal") - 1`` — 0-based ranks,
+    ties broken by first appearance."""
+    # R reference is 1-based: row_number(c(3, 1, 1, 2)) -> c(4, 1, 2, 3);
+    # hea subtracts 1 to match Python indexing.
+    assert hea.tidy.row_number([3, 1, 1, 2]).to_list() == [3.0, 0.0, 1.0, 2.0]
+    assert hea.tidy.row_number(_RANK_X).to_list() == [0.0, 1.0, 2.0, 3.0, 4.0, None]
 
 
 def test_row_number_expr_form():
     """Inside ``select`` / ``mutate`` with a column ref."""
     df = pl.DataFrame({"x": _RANK_X})
     out = df.select(rn=hea.tidy.row_number(pl.col("x")))["rn"].to_list()
-    assert out == [1, 2, 3, 4, 5, None]
+    assert out == [0, 1, 2, 3, 4, None]
 
 
 # ---- lag / lead (dplyr) --------------------------------------------------
@@ -1596,22 +1601,23 @@ def test_cumany_expr_inside_mutate():
 
 
 def test_consecutive_id_single_input():
-    """``consecutive_id([1,1,2,2,2,1,1])`` -> [1,1,2,2,2,3,3] (R)."""
+    """``consecutive_id([1,1,2,2,2,1,1])`` -> [0,0,1,1,1,2,2] (0-based;
+    R / dplyr produces [1,1,2,2,2,3,3])."""
     out = hea.tidy.consecutive_id([1, 1, 2, 2, 2, 1, 1])
-    assert out.to_list() == [1, 1, 2, 2, 2, 3, 3]
+    assert out.to_list() == [0, 0, 1, 1, 1, 2, 2]
 
 
 def test_consecutive_id_multi_input():
     """Increments when *any* input changes."""
     df = DataFrame({"a": ["a", "a", "b", "a"], "b": [1, 1, 1, 1]})
     out = df.mutate(g=hea.tidy.consecutive_id("a", "b"))
-    assert out["g"].to_list() == [1, 1, 2, 3]
+    assert out["g"].to_list() == [0, 0, 1, 2]
 
 
 def test_consecutive_id_expr_inside_mutate():
     df = DataFrame({"x": [1, 1, 2, 2, 2, 1, 1]})
     out = df.mutate(g=hea.tidy.consecutive_id(pl.col("x")))
-    assert out["g"].to_list() == [1, 1, 2, 2, 2, 3, 3]
+    assert out["g"].to_list() == [0, 0, 1, 1, 1, 2, 2]
 
 
 def test_consecutive_id_empty_args_raises():
@@ -1621,20 +1627,14 @@ def test_consecutive_id_empty_args_raises():
 
 # ---- first / last / nth (dplyr) ------------------------------------------
 #
-# R reference (dplyr):
-#   x <- c(2, 5, NA, 11, 19, 35)
-#   first(x)                  -> 2
-#   first(integer(0), default=-1L) -> -1
-#   first(c(NA, 5), na_rm=TRUE)    -> 5
-#   last(x)                   -> 35
-#   nth(x, 2)                 -> 5
-#   nth(x, -1)                -> 35
-#   nth(x, -2)                -> 19
-#   nth(x, 100, default=-1)   -> -1   (OOB)
-#   nth(x, 3, na_rm=TRUE)     -> 11   (skip NA before counting)
-#   nth(x, 0, default=-1)     -> -1   (n=0 is OOB, default applies)
-#   nth(c(1,NA,3), 2)         -> NA   (null at index returned as-is)
-#   first(c("a","b","c"), order_by=c(3,1,2)) -> "b"
+# R / dplyr reference is 1-based; hea uses 0-based Python indexing.
+# Equivalences below:
+#   R: nth(x, 2)   <=>  hea: nth(x, 1)
+#   R: nth(x, -1)  <=>  hea: nth(x, -1)  (negative offsets unchanged)
+#   R: nth(x, -2)  <=>  hea: nth(x, -2)
+#   R: nth(x, 3, na_rm=TRUE)  <=>  hea: nth(x, 2, na_rm=True)
+#
+# Sample data: x <- c(2, 5, NA, 11, 19, 35)
 
 _NTH_X = [2, 5, None, 11, 19, 35]
 
@@ -1664,7 +1664,7 @@ def test_last_eager():
 
 def test_nth_eager_positive_and_negative():
     """Negative ``n`` counts from the end (-1 = last, -2 = second-to-last)."""
-    assert hea.tidy.nth(_NTH_X, 2) == 5
+    assert hea.tidy.nth(_NTH_X, 1) == 5
     assert hea.tidy.nth(_NTH_X, -1) == 35
     assert hea.tidy.nth(_NTH_X, -2) == 19
 
@@ -1675,32 +1675,35 @@ def test_nth_default_fires_on_oob():
     assert hea.tidy.nth(_NTH_X, -100, default=-1) == -1
 
 
-def test_nth_n_zero_is_oob():
-    """``nth(x, 0)`` is degenerate in dplyr: returns ``default``."""
-    assert hea.tidy.nth(_NTH_X, 0) is None
-    assert hea.tidy.nth(_NTH_X, 0, default=-1) == -1
+def test_nth_n_zero_is_first():
+    """``nth(x, 0)`` returns the first element under 0-based indexing
+    (R / dplyr's ``nth(x, 0)`` is OOB — different convention)."""
+    assert hea.tidy.nth(_NTH_X, 0) == 2
+    assert hea.tidy.nth(_NTH_X, 0, default=-1) == 2
 
 
 def test_nth_null_at_index_returned_as_is_with_na_rm_false():
     """With ``na_rm=False``, a ``None`` *value* at index ``n`` is returned
     as-is (not replaced by default — default only fires on OOB)."""
-    assert hea.tidy.nth([1, None, 3], 2, na_rm=False) is None
-    assert hea.tidy.nth([1, None, 3], 2, default=-1, na_rm=False) is None
+    assert hea.tidy.nth([1, None, 3], 1, na_rm=False) is None
+    assert hea.tidy.nth([1, None, 3], 1, default=-1, na_rm=False) is None
 
 
 def test_nth_default_na_rm_true_skips_nulls_before_counting():
     """With hea's default ``na_rm=True``, null entries don't consume an
-    index slot — so the 3rd element of [2, 5, NaN, 11, 19, 35] is 11."""
-    assert hea.tidy.nth(_NTH_X, 3) == 11  # default na_rm=True
-    assert hea.tidy.nth(_NTH_X, 3, na_rm=True) == 11  # explicit, same result
+    index slot — so the 3rd non-null element (0-based ``n=2``) of
+    [2, 5, NaN, 11, 19, 35] is 11."""
+    assert hea.tidy.nth(_NTH_X, 2) == 11  # default na_rm=True
+    assert hea.tidy.nth(_NTH_X, 2, na_rm=True) == 11  # explicit, same result
 
 
 def test_first_order_by_reorders_then_picks():
     """``first(x, order_by=t)`` returns the value of x when sorted by t."""
-    # R: first(c("a","b","c"), order_by=c(3,1,2)) -> "b"
+    # R 1-based: first(c("a","b","c"), order_by=c(3,1,2)) -> "b"
+    # hea 0-based: nth(..., 1) picks the second of the reordered values.
     assert hea.tidy.first(["a", "b", "c"], order_by=[3, 1, 2]) == "b"
     assert hea.tidy.last(["a", "b", "c"], order_by=[3, 1, 2]) == "a"
-    assert hea.tidy.nth(["a", "b", "c"], 1, order_by=[3, 1, 2]) == "b"
+    assert hea.tidy.nth(["a", "b", "c"], 0, order_by=[3, 1, 2]) == "b"
 
 
 def test_first_expr_inside_mutate_broadcasts():
@@ -1709,7 +1712,7 @@ def test_first_expr_inside_mutate_broadcasts():
     out = df.mutate(
         fst=hea.tidy.first(pl.col("x")),
         lst=hea.tidy.last(pl.col("x")),
-        sec=hea.tidy.nth(pl.col("x"), 2),
+        sec=hea.tidy.nth(pl.col("x"), 1),
     )
     assert out["fst"].to_list() == [10, 10, 10, 10]
     assert out["lst"].to_list() == [40, 40, 40, 40]
@@ -1830,12 +1833,13 @@ def test_groupby_filter_reductions_are_per_group():
         flights
         .group_by("year", "month", "day")
         .mutate(r=hea.tidy.min_rank(pl.col("sched_dep_time")))
-        .filter(pl.col("r").is_in([1, pl.col("r").max()]))
+        .filter(pl.col("r").is_in([0, pl.col("r").max()]))
     )
     assert isinstance(out, GroupBy)
     flat = out.ungroup().sort("year", "month", "day", "sched_dep_time")
-    # First and last sched_dep_time per day: day1 has 5 distinct ranks → r=1 and r=5;
-    # day2 has 3 distinct ranks → r=1 and r=3.
+    # First and last sched_dep_time per day. With 0-based ranks: day1 has
+    # 5 distinct ranks → r=0 and r=4; day2 has 3 distinct ranks → r=0 and
+    # r=2.
     assert flat["sched_dep_time"].to_list() == [515, 2359, 500, 2300]
 
 

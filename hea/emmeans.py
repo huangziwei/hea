@@ -12,7 +12,8 @@ Initial scope, driven by the Faraway lmwr scripts that use it:
   differences between factor levels, Tukey-adjusted by default.
 - ``emmeans(model, trt.vs.ctrlk ~ factor, ref=N, side="<")`` — each
   non-reference level vs. the reference level (``ref=N`` selects the
-  1-based reference, ``side="<"`` runs a one-sided lower test).
+  0-based reference level; R's emmeans uses 1-based, hea follows
+  Python indexing. ``side="<"`` runs a one-sided lower test).
 - ``.emmeans`` / ``.contrasts`` accessors on the return object.
 - ``summary(emmGrid.contrasts, infer=True, adjust="bonferroni"/"tukey")``
   re-formats the contrasts with CIs and an alternative adjustment.
@@ -84,7 +85,8 @@ def emmeans(
     adjust
         ``"tukey"`` (default for pairwise), ``"bonferroni"``, ``"none"``.
     ref
-        1-based reference level for ``trt.vs.ctrlk`` contrasts.
+        0-based reference level for ``trt.vs.ctrlk`` contrasts (R /
+        emmeans is 1-based; hea follows Python indexing).
     side
         ``"<"`` → one-sided lower-tail test (alternative ``μ_i < μ_ref``).
         ``">"`` → one-sided upper. ``None`` (default) → two-sided.
@@ -112,7 +114,7 @@ def emmeans(
             target, levels, L, beta, V, df_resid, adjust=adjust
         )
     elif spec_lhs in ("trt.vs.ctrlk", "trt.vs.ctrl"):
-        ref_pos = (ref - 1) if ref is not None else 0
+        ref_pos = ref if ref is not None else 0
         if not (0 <= ref_pos < len(levels)):
             raise ValueError(
                 f"emmeans: ref={ref} out of range for {len(levels)} levels"

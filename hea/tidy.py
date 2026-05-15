@@ -977,55 +977,60 @@ def _eager_rank_out(x, arr: np.ndarray):
 
 
 def row_number(x=None):
-    """dplyr's ``row_number()`` — 1-based row position, or ordinal rank.
+    """dplyr's ``row_number()`` — 0-based row position, or ordinal rank.
 
-    Two call shapes, both matching dplyr:
+    Two call shapes:
 
-    * ``row_number()`` (no args) returns the 1-based row position as a
+    * ``row_number()`` (no args) returns the 0-based row position as a
       polars expression, suitable for use inside ``mutate()`` /
-      ``select()``.
-    * ``row_number(x)`` returns the ordinal rank of ``x`` (ties broken
-      by first appearance) — equivalent to ``rank(x, "ordinal")``.
-      Dispatches on input like :func:`min_rank`.
+      ``select()``. (R / dplyr's ``row_number()`` is 1-based; hea
+      follows Python indexing.)
+    * ``row_number(x)`` returns the 0-based ordinal rank of ``x`` (ties
+      broken by first appearance). Dispatches on input like
+      :func:`min_rank`.
 
     Examples
     --------
     >>> import hea
-    >>> from hea import row_number
+    >>> from hea.tidy import row_number
     >>> hea.DataFrame({"x": [10, 20, 30]}).mutate(id=row_number())  # doctest: +SKIP
     """
     if x is None:
-        return pl.int_range(1, pl.len() + 1)
+        return pl.int_range(0, pl.len())
     if isinstance(x, pl.Expr):
-        return x.rank("ordinal")
+        return x.rank("ordinal") - 1
     if isinstance(x, pl.Series):
-        return x.rank("ordinal")
-    return _eager_rank_out(x, _rankdata_with_nan(_as_array(x), method="ordinal"))
+        return x.rank("ordinal") - 1
+    return _eager_rank_out(x, _rankdata_with_nan(_as_array(x), method="ordinal") - 1)
 
 
 def min_rank(x):
-    """dplyr's ``min_rank()`` — ties get the smallest rank, next rank skipped.
+    """dplyr's ``min_rank()`` — 0-based ranks; ties get the smallest rank,
+    next rank skipped.
 
-    ``min_rank([1, 5, 5, 17, 22, None])`` → ``Series[1, 2, 2, 4, 5, null]``.
+    ``min_rank([1, 5, 5, 17, 22, None])`` → ``Series[0, 1, 1, 3, 4, null]``.
     Dispatches on input like :func:`row_number`; NA / null propagates.
+    R / dplyr's ``min_rank()`` starts at 1; hea follows Python indexing.
     """
     if isinstance(x, pl.Expr):
-        return x.rank("min")
+        return x.rank("min") - 1
     if isinstance(x, pl.Series):
-        return x.rank("min")
-    return _eager_rank_out(x, _rankdata_with_nan(_as_array(x), method="min"))
+        return x.rank("min") - 1
+    return _eager_rank_out(x, _rankdata_with_nan(_as_array(x), method="min") - 1)
 
 
 def dense_rank(x):
-    """dplyr's ``dense_rank()`` — like :func:`min_rank` but no gaps after ties.
+    """dplyr's ``dense_rank()`` — 0-based; like :func:`min_rank` but no gaps
+    after ties.
 
-    ``dense_rank([1, 5, 5, 17, 22, None])`` → ``Series[1, 2, 2, 3, 4, null]``.
+    ``dense_rank([1, 5, 5, 17, 22, None])`` → ``Series[0, 1, 1, 2, 3, null]``.
+    R / dplyr's ``dense_rank()`` starts at 1; hea follows Python indexing.
     """
     if isinstance(x, pl.Expr):
-        return x.rank("dense")
+        return x.rank("dense") - 1
     if isinstance(x, pl.Series):
-        return x.rank("dense")
-    return _eager_rank_out(x, _rankdata_with_nan(_as_array(x), method="dense"))
+        return x.rank("dense") - 1
+    return _eager_rank_out(x, _rankdata_with_nan(_as_array(x), method="dense") - 1)
 
 
 def percent_rank(x):
@@ -1064,8 +1069,9 @@ def ntile(x, n):
 
     Uses ordinal rank, so ties may end up in different buckets. Where ``n``
     doesn't divide the non-null count evenly, the first ``count % n`` buckets
-    get one extra element (matches dplyr: ``ntile(1:10, 4)`` →
-    ``[1,1,1,2,2,2,3,3,4,4]`` — sizes 3, 3, 2, 2). NA / null propagates.
+    get one extra element. Bucket labels are 0-based: ``ntile(range(10), 4)``
+    → ``[0,0,0,1,1,1,2,2,3,3]`` (sizes 3, 3, 2, 2). NA / null propagates.
+    R / dplyr's ``ntile()`` is 1-based; hea follows Python indexing.
     """
     if isinstance(x, pl.Expr):
         r = x.rank("ordinal")
@@ -1080,7 +1086,7 @@ def ntile(x, n):
             .otherwise(
                 (r - threshold + smaller_size - 1) // smaller_size + n_larger
             )
-        )
+        ) - 1
     if isinstance(x, pl.Series):
         r = x.rank("ordinal")
         count = x.count()
@@ -1093,7 +1099,7 @@ def ntile(x, n):
         upper = (r + larger_size - 1) // larger_size
         lower = (r - threshold + smaller_size - 1) // smaller_size + n_larger
         cond = (r <= threshold).to_numpy()
-        return pl.Series(np.where(cond, upper.to_numpy(), lower.to_numpy()))
+        return pl.Series(np.where(cond, upper.to_numpy(), lower.to_numpy()) - 1)
     arr = _as_array(x)
     mask = ~np.isnan(arr)
     out = np.full(arr.shape, np.nan, dtype=float)
@@ -1106,7 +1112,7 @@ def ntile(x, n):
         threshold = larger_size * n_larger
         upper = (ordinal + larger_size - 1) // larger_size
         lower = (ordinal - threshold + smaller_size - 1) // smaller_size + n_larger
-        out[mask] = np.where(ordinal <= threshold, upper, lower)
+        out[mask] = np.where(ordinal <= threshold, upper, lower) - 1
     return _eager_rank_out(x, out)
 
 
@@ -1380,7 +1386,7 @@ def first(x, default=None, order_by=None, na_rm=True):
     inside ``mutate``); ``pl.Series`` / list / tuple / ndarray → Python
     scalar.
     """
-    return _first_last_nth(x, 1, default, order_by, na_rm)
+    return _first_last_nth(x, 0, default, order_by, na_rm)
 
 
 def last(x, default=None, order_by=None, na_rm=True):
@@ -1396,17 +1402,18 @@ def last(x, default=None, order_by=None, na_rm=True):
 
 
 def nth(x, n, order_by=None, default=None, na_rm=True):
-    """dplyr's ``nth(x, n)`` — n-th element (1-based).
+    """dplyr's ``nth(x, n)`` — n-th element, 0-based.
 
-    ``na_rm=True`` is hea's default — null entries don't consume an index
-    slot (so ``nth([1, None, 3, 4], 2)`` returns ``3``). Pass
-    ``na_rm=False`` to count literal row positions.
+    ``nth(x, 0)`` is the first, ``nth(x, 1)`` the second. Negative ``n``
+    counts from the end: ``nth(x, -1)`` is the last, ``nth(x, -2)`` the
+    second-to-last. Out-of-bounds returns ``default``. R / dplyr's
+    ``nth()`` is 1-based; hea follows Python indexing.
 
-    Negative ``n`` counts from the end: ``nth(x, -1)`` is the last,
-    ``nth(x, -2)`` is the second-to-last. Out-of-bounds (including
-    ``n == 0``, which is degenerate in dplyr) returns ``default``.
-    A ``None`` *value* at index ``n`` (when ``na_rm=False``) is returned
-    as-is — ``default`` only fires on OOB.
+    ``na_rm=True`` is hea's default — null entries don't consume an
+    index slot (so ``nth([1, None, 3, 4], 1)`` returns ``3``). Pass
+    ``na_rm=False`` to count literal row positions. A ``None`` *value*
+    at index ``n`` (when ``na_rm=False``) is returned as-is — ``default``
+    only fires on OOB.
 
     Shadows polars' top-level ``pl.nth``. Mirror of :func:`first` for
     the dispatch matrix.
@@ -1415,8 +1422,7 @@ def nth(x, n, order_by=None, default=None, na_rm=True):
 
 
 def _first_last_nth(x, k, default, order_by, na_rm):
-    """Shared logic. ``k`` is 1-based: 1 = first, -1 = last, 2 = second…
-    ``k == 0`` is treated as OOB (returns ``default``), matching dplyr.
+    """Shared logic. ``k`` is 0-based: 0 = first, -1 = last, 1 = second…
     """
     if isinstance(x, pl.Expr):
         return _first_last_nth_expr(x, k, default, order_by, na_rm)
@@ -1430,17 +1436,16 @@ def _first_last_nth_expr(x_expr, k, default, order_by, na_rm):
         src = src.sort_by(ob)
     if na_rm:
         src = src.drop_nulls()
-    if k == 0:
-        # Degenerate: dplyr's nth(x, 0) returns default (or NA).
-        return pl.lit(default)
-    # polars' slice handles negative offsets (from end); slice(-1, 1) is
-    # the last element, slice(0, 1) the first. .first() on a 0-length
-    # slice (OOB) yields null — no ComputeError, unlike .gather().
-    offset = k - 1 if k > 0 else k
-    val = src.slice(offset, 1).first()
+    # polars' ``slice`` handles negative offsets (from end); slice(-1, 1)
+    # is the last element, slice(0, 1) the first. ``.first()`` on a
+    # 0-length slice (OOB) yields null — no ComputeError, unlike
+    # ``.gather()``.
+    val = src.slice(k, 1).first()
     if default is None:
         return val
-    in_bounds = src.len() >= abs(k)
+    # OOB if ``|k| > len`` for negative k, or ``k >= len`` for non-negative.
+    need_len = -k if k < 0 else k + 1
+    in_bounds = src.len() >= need_len
     return pl.when(in_bounds).then(val).otherwise(pl.lit(default))
 
 
@@ -1463,9 +1468,7 @@ def _first_last_nth_eager(x, k, default, order_by, na_rm):
             v for v in arr
             if not (v is None or (isinstance(v, float) and np.isnan(v)))
         ]
-    if k == 0:
-        return default
-    idx = k - 1 if k > 0 else len(arr) + k
+    idx = k if k >= 0 else len(arr) + k
     if 0 <= idx < len(arr):
         return arr[idx]
     return default
@@ -1474,17 +1477,18 @@ def _first_last_nth_eager(x, k, default, order_by, na_rm):
 # ---- runs / consecutive identity (dplyr) ----------------------------
 
 def consecutive_id(*args):
-    """dplyr's ``consecutive_id()`` — id for each run of consecutive equal values.
+    """dplyr's ``consecutive_id()`` — 0-based id for each run of consecutive
+    equal values.
 
-    Returns 1 for the first row, then increments each time *any* of the
+    Returns 0 for the first row, then increments each time *any* of the
     inputs changes from the previous row. With multiple inputs, treats
     them as a tuple — the id increments when the tuple changes.
 
-    ``consecutive_id([1, 1, 2, 2, 2, 1, 1])`` → ``[1, 1, 2, 2, 2, 3, 3]``.
-    ``consecutive_id(["a","a","b","a"], [1,1,1,1])`` → ``[1, 1, 2, 3]``.
+    ``consecutive_id([1, 1, 2, 2, 2, 1, 1])`` → ``[0, 0, 1, 1, 1, 2, 2]``.
+    ``consecutive_id(["a","a","b","a"], [1,1,1,1])`` → ``[0, 0, 1, 2]``.
 
-    Wraps polars' ``Expr.rle_id`` (which is 0-based) and adds 1 for
-    dplyr's 1-based convention.
+    Thin wrapper around polars' ``Expr.rle_id`` (also 0-based). R /
+    dplyr's ``consecutive_id()`` is 1-based; hea follows Python indexing.
 
     Type-in / type-out: all-Expr / string → ``pl.Expr``; eager inputs
     follow the first arg's type (Series / list → Series; ndarray →
@@ -1497,16 +1501,16 @@ def consecutive_id(*args):
     if all(isinstance(a, (pl.Expr, str)) for a in args):
         exprs = [a if isinstance(a, pl.Expr) else pl.col(a) for a in args]
         if len(exprs) == 1:
-            return exprs[0].rle_id() + 1
-        return pl.struct(exprs).rle_id() + 1
+            return exprs[0].rle_id()
+        return pl.struct(exprs).rle_id()
 
     # Eager path.
     first = args[0]
     if len(args) == 1:
         if isinstance(first, pl.Series):
-            return first.rle_id() + 1
+            return first.rle_id()
         is_ndarray = isinstance(first, np.ndarray)
-        out = pl.Series(first).rle_id() + 1
+        out = pl.Series(first).rle_id()
         return out.to_numpy() if is_ndarray else out
 
     # Multiple eager args — combine into a tiny frame, struct-then-rle.
@@ -1515,7 +1519,7 @@ def consecutive_id(*args):
         name = f"__c{i}"
         cols[name] = a.to_list() if isinstance(a, pl.Series) else list(a)
     df = pl.DataFrame(cols)
-    out = df.select(pl.struct(pl.all()).rle_id() + 1).to_series().rename("")
+    out = df.select(pl.struct(pl.all()).rle_id()).to_series().rename("")
     is_ndarray = isinstance(first, np.ndarray)
     return out.to_numpy() if is_ndarray else out
 

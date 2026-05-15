@@ -1896,26 +1896,32 @@ def test_lme_subset_bool_mask_matches_pre_filter():
 
 
 def test_lme_subset_positive_int_indices_keep():
-    """Positive R-style 1-based indices keep the specified rows."""
+    """Non-negative 0-based indices keep the specified rows.
+    R's ``subset = 1:50`` (1-based) becomes ``range(50)`` here."""
     from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
-    # Keep first 50 rows: R 1-based 1..50
-    idx_keep = np.arange(1, 51)
+    idx_keep = np.arange(50)
     m_arg = lme("y ~ x + (1|g)", df, family=Poisson(), subset=idx_keep)
     m_pre = lme("y ~ x + (1|g)", df.head(50), family=Poisson())
     np.testing.assert_allclose(m_arg.theta, m_pre.theta, atol=1e-12, rtol=1e-12)
 
 
 def test_lme_subset_negative_int_indices_drop():
-    """Negative R-style 1-based indices drop the specified rows."""
+    """Negative indices drop the rows they reference (Python convention:
+    -1 is the last row). R's ``subset = -(1:5)`` (drop rows 1..5 1-based)
+    is expressed here as ``np.arange(5)`` of POSITIVE values then negated
+    via the rule ``-(n - k)``; simplest is to enumerate the rows to drop
+    in Python 0-based form."""
     from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
-    # Drop first 5 rows: R -1..-5
-    idx_drop = -np.arange(1, 6)
+    # Drop first 5 rows: 0-based positions [0..4] → reference as -n, -(n-1),
+    # ..., -(n-4) under Python's slice convention.
+    n = df.height
+    idx_drop = -np.arange(n, n - 5, -1)
     m_arg = lme("y ~ x + (1|g)", df, family=Poisson(), subset=idx_drop)
     m_pre = lme("y ~ x + (1|g)", df.tail(df.height - 5),
                 family=Poisson())

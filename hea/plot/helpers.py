@@ -56,9 +56,10 @@ def halfnorm(
 
     Plots ``sort(|x|)`` against the half-normal theoretical quantiles
     ``qnorm((n + 1:n) / (2n + 1))``. The ``nlab`` largest values are
-    labeled with strings from ``labs`` (defaults to 1-based integer index).
-    Used in the book to flag high-leverage points, large Cook's distances,
-    or top absolute coefficients.
+    labeled with strings from ``labs`` (defaults to 0-based integer index,
+    Python convention; R's ``halfnorm`` is 1-based). Used in the book to
+    flag high-leverage points, large Cook's distances, or top absolute
+    coefficients.
 
     The ``nlab`` parameter is positional (matches Faraway: ``halfnorm(cook, 3, labs=...)``).
     """
@@ -67,7 +68,7 @@ def halfnorm(
     abs_x = np.abs(np.asarray(x, dtype=float))
     n = len(abs_x)
     if labs is None:
-        labels = [str(i + 1) for i in range(n)]
+        labels = [str(i) for i in range(n)]
     else:
         labels = [str(s) for s in labs]
     if len(labels) != n:
@@ -107,8 +108,9 @@ def termplot(lmod, *, partial_resid: bool = False, terms=None, ax=None):
     With ``partial_resid=True``, scatter overlays partial residuals
     ``e + b_j * (x_j - mean(x_j))``.
 
-    ``terms`` selects a single term by 1-based int (R style) or by name,
-    or a list of either. ``None`` plots every numeric main-effect term.
+    ``terms`` selects a single term by 0-based int (Python convention;
+    R's ``termplot`` is 1-based) or by name, or a list of either.
+    ``None`` plots every numeric main-effect term.
 
     v1: numeric main-effect terms only — factor dummies (0/1 columns)
     error out, since they collapse a categorical to a single level
@@ -125,7 +127,7 @@ def termplot(lmod, *, partial_resid: bool = False, terms=None, ax=None):
         idx_list = []
         for t in as_list:
             if isinstance(t, (int, np.integer)):
-                idx_list.append(int(t) - 1)
+                idx_list.append(int(t))
             elif isinstance(t, str):
                 if t not in feats:
                     raise ValueError(f"termplot(): term {t!r} not in {feats}")

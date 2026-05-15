@@ -88,12 +88,13 @@ def test_plot_lm_diagnostic(numeric_df):
 
 
 def test_plot_lm_which_subset(numeric_df):
-    """`plot(lmod, which=...)` honors the panel selection."""
+    """``plot(lmod, which=...)`` honors the panel selection. Panel index
+    is 0-based (Python convention; R's ``plot.lm`` is 1-based)."""
     m = lm("y ~ x", numeric_df)
-    axes = lmplot.plot(m, which=(1, 2))
+    axes = lmplot.plot(m, which=(0, 1))  # resid-fitted + QQ
     assert len(axes) == 2
     # single panel returns a bare Axes
-    ax = lmplot.plot(m, which=2)
+    ax = lmplot.plot(m, which=1)  # QQ
     assert isinstance(ax, matplotlib.axes.Axes)
     plt.close("all")
 
@@ -354,8 +355,9 @@ def test_halfnorm_labels_top_nlab():
     # 3 annotations placed
     texts = [t.get_text() for t in ax.texts]
     assert len(texts) == 3
-    # default labels are 1-based indices of the input order; biggest |x| at indices 4, 5, 6
-    assert set(texts) == {"4", "5", "6"}
+    # default labels are 0-based indices of the input order; biggest |x|
+    # is at indices 3, 4, 5 (the last three values of ``vals``).
+    assert set(texts) == {"3", "4", "5"}
     # remaining 3 points scattered
     assert ax.collections[0].get_offsets().shape[0] == 3
     plt.close("all")
@@ -407,9 +409,10 @@ def test_termplot_terms_selection_by_name(numeric_df):
 
 
 def test_termplot_terms_selection_by_index(numeric_df):
-    """1-based int (R style) picks term by position."""
+    """0-based int (Python convention; R's ``termplot`` is 1-based)
+    picks term by position."""
     m = lm("y ~ x + z", numeric_df)
-    ax = lmplot.termplot(m, terms=2)
+    ax = lmplot.termplot(m, terms=1)
     assert ax.get_xlabel() == "z"
     plt.close("all")
 
