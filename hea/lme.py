@@ -666,12 +666,12 @@ class _GlmResponse:
         Port of ``glmResp::resDev`` (respModule.cpp:165). Matches what
         :func:`stats::deviance.merMod` returns for GLMM.
 
-        Uses ``np.cumsum(...)[-1]`` (== ``np.add.accumulate``) for the
-        sum: that performs sequential left-to-right reduction (one ULP
-        of bit-match to Eigen3's ``Array.sum()``), unlike ``np.sum``
-        which is pairwise. This 1-ULP-per-call difference cascades
-        through PIRLS and would otherwise produce a ~1e-6 gap in the
-        outer optimizer's converged θ̂ on n≈2000 GLMM fits.
+        Uses ``np.cumsum(...)[-1]`` (sequential left-to-right reduction),
+        which empirically lands ~1 ULP from R's ``deviance(m)`` on
+        n=1934 binomial GLMM (Contraception), while ``np.sum`` (pairwise)
+        lands 3 ULP off in the opposite direction. The 1-ULP cumsum
+        agreement is the closest reduction order to R; switching costs
+        ~2 ULP per call and propagates to ~1e-6 in converged θ̂.
         """
         return float(np.cumsum(self.deviance_residuals())[-1])
 
@@ -995,9 +995,9 @@ class _PredState:
     def sqr_l_u(self, f: float = 1.0) -> float:
         """``||u(f)||²`` — RE penalty in the Laplace approximation.
 
-        Port of ``merPredD::sqrL(f)`` (predModule.cpp:140). The sum is
-        sequential (left-to-right) to match Eigen3's
-        ``Vector.squaredNorm()`` reduction bit-for-bit; see
+        Port of ``merPredD::sqrL(f)`` (predModule.cpp:140). Uses
+        sequential cumsum to keep within ~1 ULP of R for small u arrays
+        (typical glmer has q = n_groups, often 60-1000); see
         :meth:`_GlmResponse.deviance` for the rationale.
         """
         u_f = self.u(f)
@@ -4227,8 +4227,9 @@ class lme:
             #
             # lme4 default optimizer chain is ``c("bobyqa", "Nelder_Mead")``
             # (glmerControl): BOBYQA for Stage 0, Nelder-Mead for Stage 1.
-            # We use our ported BOBYQA so the converged (θ̂, β̂) matches R's
-            # default fit byte-by-byte.
+            # Our ported BOBYQA matches R's at the algorithm level; converged
+            # θ̂ lands within rhoend (~2e-7) of R's, with β̂ following at the
+            # FD-Hessian-amplified scale (1e-7 to 1e-3 depending on contrast).
             _pwrss_update(pred, resp, u_only=False, tol=tol_pwrss,
                           maxit=maxit_pwrss, verbose=verbose_pirls)
             devfun_stage0 = _glmm_devfun_factory(

@@ -1075,12 +1075,14 @@ def test_glmer_phase6_attrs_match_lme4_poisson():
     m = lme("y ~ x + (1|g)", df, family=PoissonFamily())
 
     # Linear predictor / fitted values. The reference is R-on-Intel and we
-    # run on arbitrary platforms; even though the algorithm is identical
-    # (PIRLS through CHOLMOD), unavoidable FP-reduction-order differences
-    # between Python/NumPy/sksparse-CHOLMOD and R/Matrix/CHOLMOD-C compound
-    # through PIRLS into ~1e-9 abs on η and ~1e-7 rel on residuals/AIC.
-    # R itself has the same cross-arch drift on this fit (verified
-    # arm64↔x86_64). Pin at 1e-7 — well above the floor.
+    # run on arbitrary platforms. Audit (2026-05) verified that scipy.sparse
+    # `@` matches Eigen3's Gustavson at 0 ULP, sqrt_x_wt's 4-op chain matches
+    # R at 0 ULP, and np.cumsum tracks R's deviance() within ~1 ULP on
+    # n=1934. The remaining floor is CHOLMOD-internal accumulator noise
+    # (~2 ULP per factorization) plus bobyqa's rhoend-tolerance walk
+    # (~5e-8 in θ̂), which compounds through PIRLS into ~1e-9 abs on η and
+    # ~1e-7 rel on residuals/AIC. R itself has the same cross-arch drift
+    # on this fit (verified arm64↔x86_64). Pin at 1e-7.
     np.testing.assert_allclose(m.eta, r["eta"], atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m.mu,  r["mu"],  atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m.fitted_values, r["mu"], atol=1e-7, rtol=1e-7)
@@ -1903,10 +1905,11 @@ def test_glmer_bates_fm10_contraception_matches_lme4():
     expected_dev_laplace = 2372.728706535781839193
     expected_dev_resid   = 2289.732405042512255022
 
-    # BOBYQA halts on a locally-flat objective: any sub-ULP shift in the
-    # deviance function (which differs between hea and R by ~1e-10 abs on
-    # this fit due to NumPy/sksparse vs Matrix/CHOLMOD-C reduction order)
-    # moves the argmin by √(Δdev/curvature). Curvature at θ̂ is small here
+    # BOBYQA halts on a locally-flat objective: at the FP precision floor
+    # (~4 ULP on devfun, from CHOLMOD-internal Cholesky accumulator noise
+    # plus accumulated PIRLS rounding — verified 2026-05 that scipy.sparse
+    # `@` and the 4-op weight chain match R at 0 ULP, so it's not those),
+    # the argmin shifts by √(Δdev/curvature). Curvature at θ̂ is small here
     # → θ̂ drifts ~3e-6 rel and the badly-identified poly(age, 2)2 column
     # of β̂ drifts ~1e-5 rel. Verified: hea-arm64 matches lme4-arm64 at
     # ~5e-9 on (θ̂, β̂) when R is run on the same machine, so this is
