@@ -24,10 +24,17 @@ jobs:
       uses: actions/setup-python@v3
       with:
         python-version: ${{ matrix.python-version }}
+    - name: Install SuiteSparse (CHOLMOD backend)
+      # scikit-sparse builds against libsuitesparse-dev. Without it, hea
+      # falls back to scipy.sparse.linalg.splu, whose different sparse
+      # reduction order opens a wider FP floor on glmer fits — enough
+      # to fail the FD-Hessian SE pin on poly() contrasts (~2e-2 abs)
+      # and the predict tolerance (~3e-9 abs).
+      run: sudo apt-get update && sudo apt-get install -y libsuitesparse-dev
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        python -m pip install . --group dev
+        python -m pip install '.[fast]' --group dev
     - name: Test with pytest
       run: |
         pytest
