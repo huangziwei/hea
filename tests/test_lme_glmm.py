@@ -1953,6 +1953,47 @@ def test_lme_na_action_pass_raises_not_implemented():
         lme("y ~ x + (1|g)", df, family=Poisson(), na_action="na.exclude")
 
 
+def test_glmer_summary_prints_signif_codes_legend(capsys):
+    """GLMM ``summary()`` appends R's ``Signif. codes:`` legend with the
+    five-band thresholds. Match lme4's ``printCoefmat`` output."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    m = lme("y ~ x + (1|g)", df, family=Poisson())
+    m.summary()
+    out = capsys.readouterr().out
+    assert "---" in out
+    assert (
+        "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
+        in out
+    ), out
+    # The trailing legend implies a ``Pr(>|z|)`` column was printed; verify.
+    assert "Pr(>|z|)" in out
+
+
+def test_lmer_summary_omits_signif_codes_legend(capsys):
+    """LMM ``summary()`` skips both the p-value column AND the legend —
+    lme4's deliberate choice (see ``?lme4::pvalues``)."""
+    from hea.lme import lme
+
+    rng = np.random.default_rng(2026)
+    n = 60
+    g = np.repeat(np.arange(10), 6)
+    x = rng.normal(size=n)
+    u = rng.normal(scale=0.5, size=10)[g]
+    y = 1.0 + 2.0 * x + u + rng.normal(scale=0.3, size=n)
+    df = pl.DataFrame({"y": y, "x": x, "g": g})
+    m = lme("y ~ x + (1|g)", df)
+    m.summary()
+    out = capsys.readouterr().out
+    assert "Signif. codes" not in out
+    assert "Pr(>|t|)" not in out
+    assert "Pr(>|z|)" not in out
+    # t value column IS present though.
+    assert "t value" in out
+
+
 def test_lme_subset_and_na_action_compose():
     """subset= filters first, then na_action policy applies to the result.
     Verifies the order of operations matches R's model.frame semantics."""

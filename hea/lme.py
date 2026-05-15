@@ -46,7 +46,10 @@ from .formula import (
 )
 from .design import prepare_design
 from .lm import _apply_subset, _label_top_n, _lowess, _qq_plot
-from .utils import format_df, format_pval, format_signif, format_signif_jointly
+from .utils import (
+    format_df, format_pval, format_signif, format_signif_jointly,
+    significance_code,
+)
 
 __all__ = ["lme", "Profile"]
 
@@ -5579,6 +5582,7 @@ class lme:
                 "Std. Error": se_s,
                 "z value":    format_signif(tval, digits=digits),
                 "Pr(>|z|)":   format_pval(p_arr),
+                " ":          significance_code(p_arr),
             })
             align_cols = ("Estimate", "Std. Error", "z value", "Pr(>|z|)")
         else:
@@ -5590,6 +5594,15 @@ class lme:
             })
             align_cols = ("Estimate", "Std. Error", "t value")
         out.append(format_df(tbl, align={c: "right" for c in align_cols}))
+        # lme4 prints the signif-code legend only when at least one row has
+        # a Pr-column (i.e. GLMM). LMM summary intentionally omits both
+        # p-values and the legend (the df-controversy footnote in lme4's
+        # docs: "Why are p-values not displayed").
+        if self._is_glmm():
+            out.append("---")
+            out.append(
+                "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
+            )
         corr_lines = self._fixef_corr_lines()
         if corr_lines:
             out.append("")
