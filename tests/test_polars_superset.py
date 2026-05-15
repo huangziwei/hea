@@ -147,12 +147,12 @@ def test_dtype_is_polars_dtype(name):
 
 def test_constructors_return_hea_dataframe():
     cases = [
-        ("from_dict",    lambda: hea.io.from_dict({"x": [1, 2, 3]})),
-        ("from_dicts",   lambda: hea.io.from_dicts([{"x": 1}, {"x": 2}])),
-        ("from_records", lambda: hea.io.from_records([(1, 2), (3, 4)], schema=["a", "b"])),
-        ("concat",       lambda: hea.io.concat([
-                             hea.io.from_dict({"x": [1]}),
-                             hea.io.from_dict({"x": [2]}),
+        ("from_dict",    lambda: hea.tidy.from_dict({"x": [1, 2, 3]})),
+        ("from_dicts",   lambda: hea.tidy.from_dicts([{"x": 1}, {"x": 2}])),
+        ("from_records", lambda: hea.tidy.from_records([(1, 2), (3, 4)], schema=["a", "b"])),
+        ("concat",       lambda: hea.tidy.concat([
+                             hea.tidy.from_dict({"x": [1]}),
+                             hea.tidy.from_dict({"x": [2]}),
                          ])),
     ]
     for name, fn in cases:
@@ -163,8 +163,8 @@ def test_constructors_return_hea_dataframe():
 
 
 def test_concat_polymorphic_lazyframe():
-    lf = hea.io.from_dict({"x": [1, 2]}).lazy()
-    out = hea.io.concat([lf, lf])
+    lf = hea.tidy.from_dict({"x": [1, 2]}).lazy()
+    out = hea.tidy.concat([lf, lf])
     assert isinstance(out, hea.tidy.LazyFrame)
 
 
@@ -185,27 +185,27 @@ def test_scan_csv_returns_hea_lazyframe(tmp_path):
 
 def test_read_parquet_returns_hea_dataframe(tmp_path):
     p = str(tmp_path / "x.parquet")
-    hea.io.from_dict({"x": [1, 2, 3]}).write_parquet(p)
+    hea.tidy.from_dict({"x": [1, 2, 3]}).write_parquet(p)
     df = hea.io.read_parquet(p)
     assert isinstance(df, hea.tidy.DataFrame)
 
 
 def test_scan_parquet_returns_hea_lazyframe(tmp_path):
     p = str(tmp_path / "x.parquet")
-    hea.io.from_dict({"x": [1, 2, 3]}).write_parquet(p)
+    hea.tidy.from_dict({"x": [1, 2, 3]}).write_parquet(p)
     lf = hea.io.scan_parquet(p)
     assert isinstance(lf, hea.tidy.LazyFrame)
 
 
 def test_merge_sorted_polymorphic():
-    df = hea.io.from_dict({"x": [1, 3]}).sort("x")
-    out = hea.io.merge_sorted([df, df], key="x")
+    df = hea.tidy.from_dict({"x": [1, 3]}).sort("x")
+    out = hea.tidy.merge_sorted([df, df], key="x")
     assert isinstance(out, hea.tidy.DataFrame)
 
 
 def test_end_to_end_chain_stays_in_hea():
     """Realistic chain: read → filter → groupby → collect — must stay hea."""
-    df = hea.io.from_dict({"g": ["a", "b", "a", "b"], "x": [1, 2, 3, 4]})
+    df = hea.tidy.from_dict({"g": ["a", "b", "a", "b"], "x": [1, 2, 3, 4]})
     out = (
         df.lazy()
         .filter(hea.tidy.col("x") > 1)

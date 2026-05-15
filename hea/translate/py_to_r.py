@@ -624,13 +624,13 @@ class Translator:
             if r is not None:
                 return r
 
-        # ``hea.tidy.DataFrame({...})`` / ``hea.io.from_dict({...})`` /
+        # ``hea.tidy.DataFrame({...})`` / ``hea.tidy.from_dict({...})`` /
         # ``hea.DataFrame({...})`` / ``hea.from_dict({...})`` → ``data.frame(...)``.
         # The bare-prefix forms are kept so already-translated scripts (and
         # ``hea.from_dict`` from older snapshots) still round-trip.
         if isinstance(call.func, P.Attribute):
             f = call.func
-            # hea.tidy.DataFrame(...) or hea.io.from_dict(...)
+            # hea.tidy.DataFrame(...) or hea.tidy.from_dict(...)
             if (
                 isinstance(f.value, P.Attribute)
                 and isinstance(f.value.value, P.Name)

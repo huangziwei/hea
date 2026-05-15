@@ -38,7 +38,7 @@ def _apply_schema(df: pl.DataFrame, pkg: str, name: str) -> pl.DataFrame:
     re-attach factor types to ``predict_data.csv`` fixtures, which lose them
     on CSV round-trip just like the source datasets do.
     """
-    from hea.data import _apply_dataset_schema
+    from hea.io import _apply_dataset_schema
     schema_path = DATA_ROOT / _pkg_subdir(pkg) / f"{name}.schema.json"
     return _apply_dataset_schema(df, schema_path)
 

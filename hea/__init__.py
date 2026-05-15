@@ -66,8 +66,8 @@ from . import (  # noqa: F401
 # ``data``, ``map_data``, and ``session_info`` are exposed at the top
 # level — they're hit in nearly every notebook (``data('iris')``,
 # ``map_data('world')``, ``session_info()`` as the trailing reproducibility
-# watermark). These shadow the ``hea.data`` / ``hea.session_info``
-# submodule *attributes*; the submodules themselves are still importable
-# via ``import hea.data`` / ``from hea.session_info import SessionInfo``.
-from .data import data, map_data  # noqa: F401
+# watermark). ``data`` / ``map_data`` live in :mod:`hea.io` (they're
+# dataset loaders — disk + rdatasets I/O); ``session_info`` has its own
+# module for the watermark logic.
+from .io import data, map_data  # noqa: F401
 from .session_info import session_info  # noqa: F401

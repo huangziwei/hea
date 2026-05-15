@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 
 from hea import data
-from hea.data import _dataset_index
+from hea.io import _dataset_index
 
 
 def test_data_unique_name_resolves_without_package():

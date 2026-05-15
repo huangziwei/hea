@@ -4505,3 +4505,68 @@ from polars import (  # noqa: F401, E402
     sum_horizontal,
     when,
 )
+
+
+# ---------------------------------------------------------------------------
+# Polars DataFrame constructors + multi-frame combinators.
+#
+# ``hea.tidy`` is the frame namespace, period — so ``concat``,
+# ``from_dict``, ``from_pandas``, etc. live here, not in ``hea.io``.
+# Each is wrapped so the result is the hea subclass (``hea.tidy.DataFrame``
+# / ``LazyFrame`` / ``Series``) instead of bare polars.
+# ---------------------------------------------------------------------------
+import functools as _functools  # noqa: E402
+import polars as _pl_tidy  # noqa: E402
+
+
+def _rewrap(obj):
+    if isinstance(obj, _pl_tidy.DataFrame) and not isinstance(obj, DataFrame):
+        return DataFrame._from_pydf(obj._df)
+    if isinstance(obj, _pl_tidy.LazyFrame) and not isinstance(obj, LazyFrame):
+        return LazyFrame._from_pyldf(obj._ldf)
+    if isinstance(obj, _pl_tidy.Series) and not isinstance(obj, Series):
+        return Series._from_pyseries(obj._s)
+    if isinstance(obj, list):
+        return [_rewrap(x) for x in obj]
+    if isinstance(obj, tuple):
+        return tuple(_rewrap(x) for x in obj)
+    return obj
+
+
+def _wrap_factory(name: str):
+    pl_func = getattr(_pl_tidy, name)
+
+    @_functools.wraps(pl_func)
+    def wrapper(*args, **kwargs):
+        return _rewrap(pl_func(*args, **kwargs))
+
+    return wrapper
+
+
+# DataFrame-returning constructors (`from_*`, `json_normalize`) plus
+# multi-frame combinators (`concat`, `align_frames`, `merge_sorted`,
+# `union`, `collect_all`, `from_epoch`). All wrap-then-return.
+_TIDY_FACTORIES = (
+    "align_frames",
+    "collect_all",
+    "concat",
+    "from_arrow",
+    "from_dataframe",
+    "from_dict",
+    "from_dicts",
+    "from_epoch",
+    "from_numpy",
+    "from_pandas",
+    "from_records",
+    "from_repr",
+    "from_torch",
+    "json_normalize",
+    "merge_sorted",
+    "union",
+)
+
+for _name in _TIDY_FACTORIES:
+    if hasattr(_pl_tidy, _name):
+        globals()[_name] = _wrap_factory(_name)
+
+del _name
