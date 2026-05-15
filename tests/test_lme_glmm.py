@@ -1859,6 +1859,123 @@ def test_lme_offset_arg_length_mismatch_errors():
 
 
 # ----------------------------------------------------------------------
+# 8.3 — subset= / na_action= argument plumbing.
+# Mirrors R's ``glmer(subset=, na.action=)`` (modular.R passes to the
+# model.frame builder; we apply before prepare_design's NA-omit pass).
+# ----------------------------------------------------------------------
+
+
+def test_lme_subset_bool_mask_matches_pre_filter():
+    """``subset=mask`` ≡ caller pre-filtering. Bit-identical fit."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    mask = np.arange(df.height) >= 10  # drop the first 10 rows
+    m_arg = lme("y ~ x + (1|g)", df, family=Poisson(), subset=mask)
+    m_pre = lme("y ~ x + (1|g)", df.filter(pl.Series(mask)), family=Poisson())
+    np.testing.assert_allclose(m_arg.theta, m_pre.theta, atol=1e-12, rtol=1e-12)
+    np.testing.assert_allclose(
+        m_arg.bhat.to_numpy().ravel(),
+        m_pre.bhat.to_numpy().ravel(),
+        atol=1e-12, rtol=1e-12,
+    )
+
+
+def test_lme_subset_positive_int_indices_keep():
+    """Positive R-style 1-based indices keep the specified rows."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    # Keep first 50 rows: R 1-based 1..50
+    idx_keep = np.arange(1, 51)
+    m_arg = lme("y ~ x + (1|g)", df, family=Poisson(), subset=idx_keep)
+    m_pre = lme("y ~ x + (1|g)", df.head(50), family=Poisson())
+    np.testing.assert_allclose(m_arg.theta, m_pre.theta, atol=1e-12, rtol=1e-12)
+
+
+def test_lme_subset_negative_int_indices_drop():
+    """Negative R-style 1-based indices drop the specified rows."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    # Drop first 5 rows: R -1..-5
+    idx_drop = -np.arange(1, 6)
+    m_arg = lme("y ~ x + (1|g)", df, family=Poisson(), subset=idx_drop)
+    m_pre = lme("y ~ x + (1|g)", df.tail(df.height - 5),
+                family=Poisson())
+    np.testing.assert_allclose(m_arg.theta, m_pre.theta, atol=1e-12, rtol=1e-12)
+
+
+def test_lme_na_action_omit_default_drops_silently():
+    """Default ``na_action='na.omit'`` drops rows with any NA in referenced
+    columns and proceeds (mirrors R's ``na.omit`` model-frame default)."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    # Inject NAs in `x` for the first 3 rows
+    x_arr = df["x"].to_numpy().astype(float)
+    x_arr[:3] = np.nan
+    df_na = df.with_columns(pl.Series("x", x_arr))
+
+    m_na  = lme("y ~ x + (1|g)", df_na, family=Poisson())
+    m_ref = lme("y ~ x + (1|g)", df.tail(df.height - 3), family=Poisson())
+    np.testing.assert_allclose(m_na.theta, m_ref.theta, atol=1e-12, rtol=1e-12)
+
+
+def test_lme_na_action_fail_raises_on_na():
+    """``na_action='na.fail'`` errors if any referenced-column row has NA."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    x_arr = df["x"].to_numpy().astype(float)
+    x_arr[0] = np.nan
+    df_na = df.with_columns(pl.Series("x", x_arr))
+
+    with pytest.raises(ValueError, match=r"missing values in object"):
+        lme("y ~ x + (1|g)", df_na, family=Poisson(), na_action="na.fail")
+
+
+def test_lme_na_action_pass_raises_not_implemented():
+    """``na_action='na.pass'`` and 'na.exclude' are not implemented yet —
+    they require carrying NA rows through PIRLS."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    with pytest.raises(NotImplementedError, match=r"na.pass"):
+        lme("y ~ x + (1|g)", df, family=Poisson(), na_action="na.pass")
+    with pytest.raises(NotImplementedError, match=r"na.exclude"):
+        lme("y ~ x + (1|g)", df, family=Poisson(), na_action="na.exclude")
+
+
+def test_lme_subset_and_na_action_compose():
+    """subset= filters first, then na_action policy applies to the result.
+    Verifies the order of operations matches R's model.frame semantics."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    # Inject NAs in the FIRST row only.
+    x_arr = df["x"].to_numpy().astype(float)
+    x_arr[0] = np.nan
+    df_na = df.with_columns(pl.Series("x", x_arr))
+
+    # subset=  drops the first 5 rows → no NA remains → na.fail must NOT raise
+    mask = np.arange(df_na.height) >= 5
+    m = lme("y ~ x + (1|g)", df_na, family=Poisson(),
+            subset=mask, na_action="na.fail")
+    # Sanity: produces same fit as pre-filtering then dropping the NA-row.
+    m_ref = lme("y ~ x + (1|g)", df_na.filter(pl.Series(mask)),
+                family=Poisson())
+    np.testing.assert_allclose(m.theta, m_ref.theta, atol=1e-12, rtol=1e-12)
+
+
+# ----------------------------------------------------------------------
 # Canonical Bates lme4 example — fm10: Contraception / Binomial GLMM.
 # Reference: Bates (2010), Doug, *lme4: Mixed-effects modeling with R*,
 # §6.1 "Contraception data" and Bates et al. (2015), §7.2.

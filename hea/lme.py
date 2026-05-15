@@ -45,7 +45,7 @@ from .formula import (
     materialize_bars,
 )
 from .design import prepare_design
-from .lm import _label_top_n, _lowess, _qq_plot
+from .lm import _apply_subset, _label_top_n, _lowess, _qq_plot
 from .utils import format_df, format_pval, format_signif, format_signif_jointly
 
 __all__ = ["lme", "Profile"]
@@ -3748,6 +3748,8 @@ class lme:
         etastart: Optional[np.ndarray] = None,
         nAGQ: int = 1,
         start=None,
+        subset=None,
+        na_action: str = "na.omit",
         verbose: int = 0,
         devFunOnly: bool = False,
         control: Optional[dict] = None,
@@ -3776,7 +3778,31 @@ class lme:
         # lme4's glmerControl defaults; unknown keys raise.
         ctrl = _normalize_glmer_control(control)
 
+        # 8.3 — subset= (R's row-filter) and na_action= (R's na.action).
+        # subset accepts: bool mask, positive 1-based ints (keep), negative
+        # 1-based ints (drop). Filtered before prepare_design so the NA-omit
+        # policy that runs inside prepare_design sees the same row set R does.
+        if subset is not None:
+            data = _apply_subset(data, subset)
+        # na_action: prepare_design always uses na.omit (R's default); explicit
+        # "na.fail" mode checks for NAs in referenced columns and raises before
+        # they're dropped. "na.pass" / "na.exclude" would require carrying NA
+        # rows through PIRLS — defer.
+        if na_action not in ("na.omit", "na.fail"):
+            raise NotImplementedError(
+                f"na_action={na_action!r}: only 'na.omit' (default) and "
+                f"'na.fail' are supported. R's 'na.pass' / 'na.exclude' "
+                f"require carrying NA rows through PIRLS and are deferred."
+            )
+
+        _n_rows_before_na = data.height
         d = prepare_design(formula, data)
+        if na_action == "na.fail" and d.data.height < _n_rows_before_na:
+            raise ValueError(
+                f"missing values in object ({_n_rows_before_na - d.data.height} "
+                f"row(s) dropped due to NA); pass na_action='na.omit' to drop "
+                f"them silently."
+            )
         if not d.expanded.bars:
             raise ValueError(
                 f"lme requires at least one random-effect bar; got formula={formula!r}"
