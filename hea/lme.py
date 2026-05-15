@@ -415,17 +415,14 @@ def _deriv12(
             ldelta = np.where(active, x - lower, delta)
             xsub = np.where(active, lower, xsub)
 
-    f_add = np.empty(n)
-    f_sub = np.empty(n)
-    for j in range(n):
-        xj = x.copy(); xj[j] = xadd[j]; f_add[j] = float(fn(xj))
-        xj = x.copy(); xj[j] = xsub[j]; f_sub[j] = float(fn(xj))
-
-    g = (f_add - f_sub) / (udelta + ldelta)
+    g = np.empty(n)
     H = np.empty((n, n))
     for j in range(n):
+        xj = x.copy(); xj[j] = xadd[j]; fadd = float(fn(xj))
+        xj = x.copy(); xj[j] = xsub[j]; fsub = float(fn(xj))
         udj, ldj = udelta[j], ldelta[j]
-        H[j, j] = f_add[j] / udj**2 - 2.0 * fx / (udj * ldj) + f_sub[j] / ldj**2
+        H[j, j] = fadd / udj**2 - 2.0 * fx / (udj * ldj) + fsub / ldj**2
+        g[j] = (fadd - fsub) / (udj + ldj)
         for i in range(j):
             udi, ldi = udelta[i], ldelta[i]
             x_aa = x.copy(); x_aa[i] = xadd[i]; x_aa[j] = xadd[j]
