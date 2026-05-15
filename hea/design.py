@@ -20,7 +20,7 @@ User-facing data prep — ``data()`` and ``factor()`` — lives in
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Mapping, Optional
 
 import numpy as np
 import polars as pl
@@ -38,6 +38,7 @@ from .formula import (
     materialize,
     parse,
     referenced_columns,
+    with_contrasts,
 )
 
 __all__ = [
@@ -371,6 +372,8 @@ def _na_mask_with_matrix_cols(
 def prepare_design(
     formula: str,
     data: pl.DataFrame | Mapping[str, np.ndarray | list | pl.Series],
+    *,
+    contrasts: Optional[Mapping[str, str]] = None,
 ) -> Design:
     """Parse a formula, expand, and materialize the fixed-effect design.
 
@@ -390,6 +393,11 @@ def prepare_design(
     ndarray; 2-D entries become matrix columns (``Array(Float64, m)``),
     enabling mgcv's matrix-argument summation convention for ``s()`` and
     ``te()`` smooths (Wood §7.4.1's distributed-lag models).
+
+    ``contrasts`` mirrors R's ``model.matrix(contrasts.arg=)`` — a name →
+    contrast-name mapping overriding the default treatment/poly coding
+    for matching bare-name factor references. In-formula ``C(...)``
+    wraps still win (R semantics).
     """
     data = normalize_data(data)
     f_parsed = parse(formula)
@@ -428,5 +436,6 @@ def prepare_design(
             _eval_lhs_expr(f_parsed.lhs, columns).alias(response_label)
         )[response_label]
 
-    X = materialize(expanded, data_clean)
+    with with_contrasts(contrasts):
+        X = materialize(expanded, data_clean)
     return Design(expanded=expanded, data=data_clean, X=X, y=y, response=response_label)

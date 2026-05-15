@@ -969,6 +969,29 @@ def set_ordered_cols(cols):
     _ORDERED_COLS_CV.set(frozenset(cols))
 
 
+# R's ``contrasts.arg`` (model.matrix): a named-list mapping factor-column
+# name → contrast name (one of ``contr.treatment``, ``contr.sum``,
+# ``contr.helmert``, ``contr.poly``, ``contr.SAS``). When a factor block is
+# built from a bare-name reference whose label is in this mapping AND no
+# ``C(...)`` wrapping has already set ``forced_contrast``, the mapped contrast
+# is applied. R semantics: in-formula ``C(...)`` wins over the argument.
+_CONTRASTS_CV: contextvars.ContextVar[dict] = contextvars.ContextVar(
+    "_hea_contrasts", default={},
+)
+
+
+@contextlib.contextmanager
+def with_contrasts(mapping):
+    """Context manager: inside the `with` block, the given mapping is consulted
+    by ``_factor_from_series`` to override the default treatment/poly contrast
+    on bare factor references. Empty mapping is a no-op."""
+    token = _CONTRASTS_CV.set(dict(mapping) if mapping else {})
+    try:
+        yield
+    finally:
+        _CONTRASTS_CV.reset(token)
+
+
 # R's factor() sorts levels via locale-aware `sort(unique(x))`. On macOS the
 # default is en_US.UTF-8, under which e.g. "<1l" sorts before "1-1.5l" and
 # "-" sorts before "+". Pure ASCII sort diverges on punctuation. We try to
@@ -1083,7 +1106,9 @@ def _factor_from_series(series: pl.Series, label: str, ordered_hint: bool = Fals
         # via `with_ordered_cols(...)`; the explicit `ordered_hint` wins when
         # the call site already knows (e.g. `ordered(x)` in a formula).
         ordered = ordered_hint or (label in _ORDERED_COLS_CV.get())
-        return _FactorBlock(codes=codes, levels=levels, ordered=ordered, label=label)
+        forced = _CONTRASTS_CV.get().get(label)
+        return _FactorBlock(codes=codes, levels=levels, ordered=ordered,
+                            label=label, forced_contrast=forced)
     # R's factor() uses locale-aware sort(unique(x)) on strings, but numeric
     # columns sort numerically (factor() first coerces to character and R's
     # sort on numerics is numeric when the input was numeric).
@@ -1106,7 +1131,9 @@ def _factor_from_series(series: pl.Series, label: str, ordered_hint: bool = Fals
     else:
         codes = np.array([code_map.get(v, -1) for v in values], dtype=int)
     ordered = ordered_hint or (label in _ORDERED_COLS_CV.get())
-    return _FactorBlock(codes=codes, levels=levels, ordered=ordered, label=label)
+    forced = _CONTRASTS_CV.get().get(label)
+    return _FactorBlock(codes=codes, levels=levels, ordered=ordered,
+                        label=label, forced_contrast=forced)
 
 
 def _eval_maybe_string(node, data: pl.DataFrame) -> np.ndarray:
@@ -1696,6 +1723,15 @@ def _contrast_poly(k: int) -> np.ndarray:
     """Orthogonal polynomial contrasts on equally-spaced levels 1..k."""
     x = np.arange(1, k + 1, dtype=float)
     return _poly_orthogonal(x, k - 1)
+
+
+CONTRAST_FN_NAMES = (
+    "contr.treatment",
+    "contr.SAS",
+    "contr.sum",
+    "contr.helmert",
+    "contr.poly",
+)
 
 
 _CONTRAST_FNS = {

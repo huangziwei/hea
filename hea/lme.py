@@ -34,6 +34,7 @@ from . import family as _family_mod
 from .family import Family, Gaussian, _coerce_response
 from .formula import (
     BinOp,
+    CONTRAST_FN_NAMES,
     ExpandedFormula,
     ReTerms,
     _bar_lhs_to_ef,
@@ -3538,6 +3539,55 @@ _NM_OPT_CTRL_KEYS = {"maxfun", "FtolAbs", "FtolRel", "XtolRel",
                      "MinfMax", "verbose"}
 
 
+def _build_optinfo(
+    *,
+    theta: np.ndarray,
+    theta_bounds: list,
+    optim: dict,
+    optim_stage0: Optional[dict],
+    ctrl: Optional[dict],
+) -> dict:
+    """Port of lme4's ``m@optinfo`` (utilities.R:448) + ``checkConv`` runs.
+
+    Currently fires only the singular-fit check (``check.conv.singular``,
+    checkConv.R:32-48). Gradient and Hessian checks need numerical
+    derivatives of the deviance function and are deferred to 8.14b/c.
+
+    The singular check is unconditional in lme4 (ignored ``action`` is
+    treated as ``message``): when any θ entry sits within ``tol`` of a
+    finite bound, the fit is flagged as boundary/singular. Messages
+    surface in :meth:`lme.summary`'s convergence block.
+    """
+    SINGULAR_TOL = 1e-4
+    messages: list[str] = []
+
+    theta_arr = np.asarray(theta, dtype=float).ravel()
+    is_singular = False
+    for th, (lo, hi) in zip(theta_arr, theta_bounds):
+        lo_gap = th - lo if lo is not None else np.inf
+        hi_gap = hi - th if hi is not None else np.inf
+        if min(lo_gap, hi_gap) < SINGULAR_TOL:
+            is_singular = True
+            break
+    if is_singular:
+        messages.append("boundary (singular) fit: see help('isSingular')")
+
+    return {
+        "optimizer": "bobyqa+Nelder_Mead",
+        "control": dict(ctrl) if ctrl else {},
+        "val": theta_arr.copy(),
+        "feval": int(optim.get("feval", 0))
+                 + (int(optim_stage0.get("feval", 0)) if optim_stage0 else 0),
+        "is_singular": is_singular,
+        "conv": {
+            "opt": int(optim.get("status", 0)),
+            "lme4": {"code": 0, "messages": messages},
+        },
+        "derivs": None,
+        "warnings": list(messages),
+    }
+
+
 def _nm_kwargs_from_opt_ctrl(opt_ctrl) -> dict:
     """Translate lme4's ``optCtrl`` dict to :class:`NelderMead` kwargs.
 
@@ -3753,6 +3803,7 @@ class lme:
         start=None,
         subset=None,
         na_action: str = "na.omit",
+        contrasts: Optional[dict] = None,
         verbose: int = 0,
         devFunOnly: bool = False,
         control: Optional[dict] = None,
@@ -3798,8 +3849,20 @@ class lme:
                 f"require carrying NA rows through PIRLS and are deferred."
             )
 
+        # 8.4 — contrasts= dict mapping factor-column name → R contrast name.
+        # In-formula ``C(...)`` wraps win over this argument (R semantics).
+        if contrasts is not None:
+            valid_names = set(CONTRAST_FN_NAMES)
+            for col, ctr in contrasts.items():
+                if not isinstance(ctr, str) or ctr not in valid_names:
+                    raise ValueError(
+                        f"contrasts[{col!r}]={ctr!r}: only string names of "
+                        f"R contrast functions are supported "
+                        f"({sorted(valid_names)}). Numeric matrices and "
+                        f"function references are deferred."
+                    )
         _n_rows_before_na = data.height
-        d = prepare_design(formula, data)
+        d = prepare_design(formula, data, contrasts=contrasts)
         if na_action == "na.fail" and d.data.height < _n_rows_before_na:
             raise ValueError(
                 f"missing values in object ({_n_rows_before_na - d.data.height} "
@@ -4498,6 +4561,19 @@ class lme:
         # AIC/BIC use the Laplace deviance (lme4's logLik-based formula).
         self.AIC = laplace + 2.0 * self.npar
         self.BIC = laplace + np.log(n) * self.npar
+
+        # 8.14 — convergence diagnostics. Port of ``checkConv`` (checkConv.R)
+        # plus ``m@optinfo`` (utilities.R:448). Currently only the singular
+        # check (``check.conv.singular``) fires — gradient/Hessian checks
+        # (``check.conv.grad`` / ``check.conv.hess``) require numerical
+        # derivatives of the deviance function and are deferred.
+        self.optinfo = _build_optinfo(
+            theta=self.theta,
+            theta_bounds=self._theta_bounds,
+            optim=self._optim,
+            optim_stage0=self._optim_stage0,
+            ctrl=inputs.opt_ctrl,
+        )
 
     def _deviance_residuals_signed(self) -> np.ndarray:
         """Signed √dev_resid_i — what ``residuals(m, type="deviance")`` returns.
@@ -5607,6 +5683,17 @@ class lme:
         if corr_lines:
             out.append("")
             out.extend(corr_lines)
+        # 8.14 — convergence diagnostics block, appended verbatim after the
+        # correlation matrix when there's anything to report. Mirrors lme4's
+        # ``print.summary.merMod`` (methods.R:158-176) which prints the
+        # collected ``optinfo$conv$lme4$messages`` at the tail.
+        opt_messages = getattr(self, "optinfo", {}).get(
+            "conv", {}).get("lme4", {}).get("messages", [])
+        if opt_messages:
+            out.append("")
+            out.append("optimizer (bobyqa+Nelder_Mead) convergence code: 0 (OK)")
+            for msg in opt_messages:
+                out.append(msg)
         print("\n".join(out))
 
     # ---- diagnostic plots ----------------------------------------------

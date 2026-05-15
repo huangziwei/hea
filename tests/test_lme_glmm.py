@@ -1972,6 +1972,180 @@ def test_glmer_summary_prints_signif_codes_legend(capsys):
     assert "Pr(>|z|)" in out
 
 
+# ----------------------------------------------------------------------
+# 8.4 — contrasts= dict mapping factor-column name → R contrast name.
+# Mirrors ``model.matrix(contrasts.arg=)``: overrides the default
+# treatment/poly coding on bare-name factor references. In-formula
+# ``C(...)`` still wins (R semantics).
+# ----------------------------------------------------------------------
+
+
+def _three_level_glmm_df(seed: int = 2026):
+    rng = np.random.default_rng(seed)
+    n_groups, n_per = 8, 10
+    g = np.repeat(np.arange(n_groups), n_per)
+    x = np.tile(np.array(["a", "b", "c"]), n_groups * n_per // 3 + 1)[: n_groups * n_per]
+    u = rng.normal(0, 0.3, n_groups)[g]
+    beta = {"a": 1.0, "b": 1.5, "c": 2.0}
+    eta = np.array([beta[xi] for xi in x]) + u
+    y = rng.poisson(np.exp(eta))
+    return pl.DataFrame({"y": y, "x": x, "g": g})
+
+
+def test_lme_contrasts_arg_switches_to_contr_sum():
+    """contrasts={'x': 'contr.sum'} replaces the default contr.treatment
+    coding on factor x. Column names switch from ``xb, xc`` (treatment,
+    drop first level) to ``x1, x2`` (sum-to-zero, drop last level)."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    df = _three_level_glmm_df()
+    m_def = lme("y ~ x + (1|g)", df, family=Poisson())
+    m_sum = lme("y ~ x + (1|g)", df, family=Poisson(),
+                contrasts={"x": "contr.sum"})
+    assert m_def.column_names == ["(Intercept)", "xb", "xc"]
+    assert m_sum.column_names == ["(Intercept)", "x1", "x2"]
+
+
+def test_lme_contrasts_arg_helmert():
+    """contrasts={'x': 'contr.helmert'} → contrast columns x1, x2."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    df = _three_level_glmm_df()
+    m = lme("y ~ x + (1|g)", df, family=Poisson(),
+            contrasts={"x": "contr.helmert"})
+    assert m.column_names == ["(Intercept)", "x1", "x2"]
+
+
+def test_lme_contrasts_arg_rejects_unknown_name():
+    """Unknown contrast names raise with a clear message listing the
+    supported set (mirrors R's ``no contrasts function 'contr.foo'``)."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    df = _three_level_glmm_df()
+    with pytest.raises(ValueError, match=r"contrasts\['x'\]"):
+        lme("y ~ x + (1|g)", df, family=Poisson(),
+            contrasts={"x": "contr.bogus"})
+
+
+def test_lme_contrasts_arg_rejects_non_string_value():
+    """Numeric matrices and function references aren't yet supported."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    df = _three_level_glmm_df()
+    with pytest.raises(ValueError, match=r"only string names"):
+        lme("y ~ x + (1|g)", df, family=Poisson(),
+            contrasts={"x": np.eye(3)})
+
+
+def test_lme_contrasts_arg_loses_to_inline_C():
+    """In-formula ``C(x, contr.sum)`` overrides ``contrasts={x: contr.treatment}``
+    (matches R: per-term ``C(...)`` always wins). Column names reflect C()."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    df = _three_level_glmm_df()
+    m = lme("y ~ C(x, contr.sum) + (1|g)", df, family=Poisson(),
+            contrasts={"x": "contr.treatment"})
+    # The C(x, contr.sum) atom produces sum-coded columns regardless of the
+    # contrasts= argument.
+    assert any(c.endswith("1") for c in m.column_names), m.column_names
+    assert any(c.endswith("2") for c in m.column_names), m.column_names
+
+
+def test_lme_contrasts_arg_unrelated_column_unaffected():
+    """A contrasts entry for a non-existent column is silently ignored,
+    matching R's behavior. The fit proceeds as if no override was given."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    df = _three_level_glmm_df()
+    m_def = lme("y ~ x + (1|g)", df, family=Poisson())
+    m_nop = lme("y ~ x + (1|g)", df, family=Poisson(),
+                contrasts={"not_a_column": "contr.sum"})
+    # Bit-identical fits
+    np.testing.assert_allclose(m_def.theta, m_nop.theta, atol=1e-12, rtol=1e-12)
+    np.testing.assert_allclose(
+        m_def.bhat.to_numpy().ravel(),
+        m_nop.bhat.to_numpy().ravel(),
+        atol=1e-12, rtol=1e-12,
+    )
+
+
+# ----------------------------------------------------------------------
+# 8.14 — convergence diagnostics. Currently only the singular-fit check
+# (``check.conv.singular``, lme4 checkConv.R:32-48) fires; gradient and
+# Hessian checks are deferred to 8.14b/c.
+# ----------------------------------------------------------------------
+
+
+def test_lme_optinfo_singular_check_fires_at_boundary():
+    """When a variance component shrinks to its lower bound (θ ≈ 0), the
+    optinfo singular flag turns on and the standard lme4 message lands in
+    ``optinfo$conv$lme4$messages``."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    # No within-group signal → θ̂ pinned at 0
+    rng = np.random.default_rng(1)
+    n_groups, n_per = 3, 100
+    g = np.repeat(np.arange(n_groups), n_per)
+    y = rng.poisson(2.0, size=n_groups * n_per)
+    df = pl.DataFrame({"y": y, "g": g})
+
+    m = lme("y ~ 1 + (1|g)", df, family=Poisson())
+    assert m.optinfo["is_singular"] is True
+    assert m.theta[0] < 1e-4
+    msgs = m.optinfo["conv"]["lme4"]["messages"]
+    assert any("singular" in s for s in msgs), msgs
+
+
+def test_lme_optinfo_singular_check_silent_for_normal_fit():
+    """A well-identified RE → ``is_singular=False``, empty messages."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    m = lme("y ~ x + (1|g)", df, family=Poisson())
+    assert m.optinfo["is_singular"] is False
+    assert m.optinfo["conv"]["lme4"]["messages"] == []
+
+
+def test_lme_summary_prints_singular_warning(capsys):
+    """The singular message is appended to summary() output (mirrors R's
+    ``print.summary.merMod`` convergence block)."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    rng = np.random.default_rng(1)
+    n_groups, n_per = 3, 100
+    g = np.repeat(np.arange(n_groups), n_per)
+    y = rng.poisson(2.0, size=n_groups * n_per)
+    df = pl.DataFrame({"y": y, "g": g})
+
+    m = lme("y ~ 1 + (1|g)", df, family=Poisson())
+    m.summary()
+    out = capsys.readouterr().out
+    assert "boundary (singular) fit" in out
+    assert "see help('isSingular')" in out
+
+
+def test_lme_summary_omits_convergence_block_when_clean(capsys):
+    """A clean fit has no convergence block in summary()."""
+    from hea.lme import lme
+    from hea.family import Poisson
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    m = lme("y ~ x + (1|g)", df, family=Poisson())
+    m.summary()
+    out = capsys.readouterr().out
+    assert "boundary" not in out
+    assert "isSingular" not in out
+
+
 def test_lmer_summary_omits_signif_codes_legend(capsys):
     """LMM ``summary()`` skips both the p-value column AND the legend —
     lme4's deliberate choice (see ``?lme4::pvalues``)."""
