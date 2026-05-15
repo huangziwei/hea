@@ -445,11 +445,8 @@ def _per_bar_relative_cov(theta: np.ndarray, bar_sizes: list[int]) -> list[np.nd
     off = 0
     for c in bar_sizes:
         Lt = np.zeros((c, c))
-        idx = 0
-        for i in range(c):
-            for j in range(i, c):
-                Lt[i, j] = theta[off + idx]
-                idx += 1
+        iu, ju = np.triu_indices(c)
+        Lt[iu, ju] = theta[off:off + iu.size]
         L = Lt.T
         blocks.append(L @ L.T)
         off += c * (c + 1) // 2
@@ -4754,8 +4751,8 @@ class lme:
         = sd_tgt`` is a single nonlinear constraint. We re-parameterize as
         ``(σ, θ_rest)`` with ``θ[slot_i] = sd_tgt / σ`` and minimize jointly.
         Returns ``(dev, θ̂, σ̂, β̂)``."""
-        other = [k for k in range(len(self._theta_bounds)) if k != slot_i]
-        theta_rest0 = np.array([theta_start[k] for k in other])
+        other = np.delete(np.arange(len(self._theta_bounds)), slot_i)
+        theta_rest0 = np.asarray(theta_start, dtype=float)[other]
 
         # Guard θ[slot_i] = sd_tgt/σ from blowing up when L-BFGS-B probes
         # very small σ — without this the implied θ becomes O(1e7) and

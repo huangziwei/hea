@@ -467,11 +467,9 @@ def _estimate_theta(
             Dth2_packed = np.atleast_2d(Dd["Dth2"])
             xs = Dth2_packed.sum(axis=0) / (2.0 * scale_eval)
             Dth2 = np.zeros((nth, nth), dtype=float)
-            k = 0
-            for ii in range(nth):
-                for jj in range(ii, nth):
-                    Dth2[ii, jj] = Dth2[jj, ii] = xs[k]
-                    k += 1
+            iu, ju = np.triu_indices(nth)
+            Dth2[iu, ju] = xs[:iu.size]
+            Dth2[ju, iu] = xs[:iu.size]
             if get_scale:
                 # mgcv R/efam.r:41: rbind(cbind(Dth2,-g1), c(-g1,dev/2))
                 top = np.column_stack([Dth2, -g1.reshape(-1, 1)])

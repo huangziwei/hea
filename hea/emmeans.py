@@ -269,22 +269,16 @@ def _pairwise_table(
 ) -> pl.DataFrame:
     """All C(k, 2) pairwise differences with adjusted p-values."""
     k = len(levels)
-    labels: list[str] = []
-    ests: list[float] = []
-    ses: list[float] = []
-    ts: list[float] = []
-    for i in range(k):
-        for j in range(i + 1, k):
-            c = L[i] - L[j]
-            est = float(c @ beta)
-            se = float(np.sqrt(c @ V @ c))
-            labels.append(f"{levels[i]} - {levels[j]}")
-            ests.append(est)
-            ses.append(se)
-            ts.append(est / se if se > 0 else np.nan)
-    ests_a = np.asarray(ests)
-    ses_a = np.asarray(ses)
-    ts_a = np.asarray(ts)
+    L_arr = np.asarray(L, dtype=float)
+    iu, ju = np.triu_indices(k, k=1)
+    C = L_arr[iu] - L_arr[ju]                    # (n_pairs, p)
+    ests_a = C @ np.asarray(beta, dtype=float)   # (n_pairs,)
+    CV = C @ np.asarray(V, dtype=float)
+    quad = np.einsum("ip,ip->i", CV, C)
+    ses_a = np.sqrt(np.maximum(quad, 0.0))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ts_a = np.where(ses_a > 0, ests_a / ses_a, np.nan)
+    labels = [f"{levels[int(i)]} - {levels[int(j)]}" for i, j in zip(iu, ju)]
     p_raw = 2.0 * _sps.t.sf(np.abs(ts_a), df_resid)
     p_adj = _p_adjust(p_raw, ts_a, np.full_like(ts_a, df_resid), adjust, k)
     return pl.DataFrame({
@@ -303,21 +297,16 @@ def _vs_control_table(
 ) -> pl.DataFrame:
     """Each non-reference level minus the reference (R's ``trt.vs.ctrlk``)."""
     k = len(levels)
-    labels: list[str] = []
-    ests: list[float] = []
-    ses: list[float] = []
-    ts: list[float] = []
-    for i in range(k):
-        if i == ref_pos:
-            continue
-        c = L[i] - L[ref_pos]
-        est = float(c @ beta)
-        se = float(np.sqrt(c @ V @ c))
-        labels.append(f"{levels[i]} - {levels[ref_pos]}")
-        ests.append(est)
-        ses.append(se)
-        ts.append(est / se if se > 0 else np.nan)
-    ts_a = np.asarray(ts)
+    L_arr = np.asarray(L, dtype=float)
+    nonref = np.array([i for i in range(k) if i != ref_pos], dtype=int)
+    C = L_arr[nonref] - L_arr[ref_pos]            # (k-1, p)
+    ests_a = C @ np.asarray(beta, dtype=float)
+    CV = C @ np.asarray(V, dtype=float)
+    quad = np.einsum("ip,ip->i", CV, C)
+    ses_a = np.sqrt(np.maximum(quad, 0.0))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ts_a = np.where(ses_a > 0, ests_a / ses_a, np.nan)
+    labels = [f"{levels[int(i)]} - {levels[ref_pos]}" for i in nonref]
     if side == "<":
         p_raw = _sps.t.cdf(ts_a, df_resid)
     elif side == ">":
@@ -327,8 +316,8 @@ def _vs_control_table(
     p_adj = _p_adjust(p_raw, ts_a, np.full_like(ts_a, df_resid), adjust, k - 1)
     return pl.DataFrame({
         "contrast": labels,
-        "estimate": np.asarray(ests),
-        "SE": np.asarray(ses),
+        "estimate": ests_a,
+        "SE": ses_a,
         "df": np.full(len(labels), df_resid),
         "t.ratio": ts_a,
         "p.value": np.asarray(p_adj),

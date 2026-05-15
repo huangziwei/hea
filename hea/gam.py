@@ -3833,7 +3833,7 @@ class gam:
 
         names = [slot.block.label for slot in self._slots] + ["scale"]
         sd2 = np.concatenate([
-            np.array([self.sigma_squared / max(s, 1e-300) for s in self.sp]),
+            self.sigma_squared / np.maximum(np.asarray(self.sp, dtype=float), 1e-300),
             [self.sigma_squared],
         ])
         log_sd = 0.5 * np.log(np.clip(sd2, 1e-300, None))
@@ -5305,14 +5305,21 @@ class gam:
                 rows.append((b.label, kc, edf_b, float("nan"), float("nan")))
                 continue
 
+            # Generate all n_rep permutations via per-iter ``rng.permutation``
+            # to preserve the seeded RNG sequence — then vectorize the
+            # diff/square/mean over the (n_rep, nr) stack. This keeps
+            # p-values bit-identical to the unrolled loop while skipping
+            # the Python overhead of n_rep separate numpy invocations.
+            shufs = np.empty((n_rep, nr))
+            for i in range(n_rep):
+                shufs[i] = rng.permutation(rsd)
+
             if len(cols) == 1:
                 order = np.argsort(cols[0], kind="stable")
                 rsd_o = rsd[order]
                 v_obs = float(np.mean(np.diff(rsd_o) ** 2) / 2)
-                ve = np.empty(n_rep)
-                for i in range(n_rep):
-                    shuf = rng.permutation(rsd)
-                    ve[i] = np.mean(np.diff(shuf) ** 2) / 2
+                diffs = np.diff(shufs, axis=1)
+                ve = np.mean(diffs * diffs, axis=1) / 2
             else:
                 from scipy.spatial import cKDTree
                 Xnn = np.column_stack(cols)
@@ -5323,11 +5330,13 @@ class gam:
                 ni = ni[:, 1:]
                 e_parts = [rsd - rsd[ni[:, j]] for j in range(nn)]
                 v_obs = float(np.mean(np.concatenate(e_parts) ** 2) / 2)
-                ve = np.empty(n_rep)
-                for i in range(n_rep):
-                    shuf = rng.permutation(rsd)
-                    parts = [shuf - shuf[ni[:, j]] for j in range(nn)]
-                    ve[i] = np.mean(np.concatenate(parts) ** 2) / 2
+                # parts_3d[i, r, j] = shufs[i, r] - shufs[i, ni[r, j]].
+                # Transpose to (n_rep, nn, nr) before flattening so the
+                # row-major order matches ``np.concatenate(parts)`` (which
+                # lays out all j=0 rows first, then j=1, then j=2).
+                parts_3d = shufs[:, :, None] - shufs[:, ni]
+                parts_flat = parts_3d.transpose(0, 2, 1).reshape(n_rep, -1)
+                ve = np.mean(parts_flat * parts_flat, axis=1) / 2
 
             p_val = float(np.mean(ve < v_obs))
             k_index = v_obs / rsd_sq_mean

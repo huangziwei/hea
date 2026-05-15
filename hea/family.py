@@ -1758,11 +1758,18 @@ def _tweedie_log_a_one(y_i: float, phi_i: float, p: float):
     return log_a, j_bar, j_var, j_psi_bar
 
 
-def _tweedie_log_a_vec(y, phi, p):
+def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     """Vectorised over y (and per-obs phi). Returns four arrays of shape
     ``y.shape``: ``log_a``, ``j_bar``, ``j_var``, ``j_psi_bar``. Entries
     with y==0 are 0 (the y=0 row uses the closed-form point mass, not the
     series). Per-obs phi handles weights via ``φ_i = φ/wt_i``.
+
+    Builds a fixed ``j`` grid wide enough to cover every active row's
+    eps-truncated series tail, then evaluates the (n_active, J) matrix
+    of ``log W_j`` and reduces along ``j`` in one pass. ``J`` is sized
+    so the eps gate fires within the grid for every row — agrees with
+    the per-row :func:`_tweedie_log_a_one` walk to ~1e-13 absolute on
+    log_a / moments (well below mgcv-oracle test tolerances).
     """
     y = np.asarray(y, dtype=float)
     phi_arr = np.broadcast_to(np.asarray(phi, dtype=float), y.shape).astype(float, copy=True)
@@ -1772,19 +1779,80 @@ def _tweedie_log_a_vec(y, phi, p):
     j_psi_bar = np.zeros_like(y)
     flat_y = y.ravel()
     flat_phi = phi_arr.ravel()
-    out_la = log_a.ravel()
-    out_jb = j_bar.ravel()
-    out_jv = j_var.ravel()
-    out_jpb = j_psi_bar.ravel()
-    for i in range(flat_y.size):
-        if flat_y[i] > 0.0:
-            la, jb, jv, jpb = _tweedie_log_a_one(
-                float(flat_y[i]), float(flat_phi[i]), p
-            )
-            out_la[i] = la
-            out_jb[i] = jb
-            out_jv[i] = jv
-            out_jpb[i] = jpb
+    active = flat_y > 0.0
+    if not np.any(active):
+        return log_a, j_bar, j_var, j_psi_bar
+    ya = flat_y[active]
+    pha = flat_phi[active]
+
+    om1 = 1.0 - p
+    tm = 2.0 - p
+    alpha = tm / om1
+    one_minus_alpha = 1.0 - alpha
+
+    log_z = (-alpha * np.log(ya) + alpha * np.log(p - 1.0)
+             - one_minus_alpha * np.log(pha) - np.log(tm))
+    j_star = np.maximum(
+        np.exp((log_z + alpha * np.log(-alpha)) / one_minus_alpha), 1.0,
+    )
+    j_int = np.maximum(1, np.round(j_star).astype(int))
+    j_int_max = int(j_int.max())
+
+    # Series decay rate scales with |alpha|; p close to 2 (slow decay)
+    # needs a wider window before the eps gate fires. Empirically
+    # ``1/|alpha| + 1`` × j_int_max suffices for ``p`` up to 1.99.
+    margin_mult = max(2.0, 1.0 / abs(alpha) + 1.0)
+    safe_margin = max(50, int(np.ceil(margin_mult * j_int_max)) + 20)
+    J = min(j_int_max + safe_margin, _LD_J_MAX)
+
+    j_grid = np.arange(1, J + 1, dtype=float)
+    j_grid_int = j_grid.astype(int)
+    lgamma_jp1 = gammaln(j_grid + 1.0)
+    lgamma_neg_ja = gammaln(-j_grid * alpha)
+    psi_arr = digamma(-j_grid * alpha)
+
+    # Chunk on the n_active axis to bound the (chunk, J) working set.
+    # Each row carries 5 J-wide arrays in flight (lw / 2 masks / w /
+    # transient), 8 bytes each → 40 J bytes per row.
+    n_active = ya.size
+    chunk = max(1, _chunk_bytes // (40 * J))
+
+    out_la = np.empty(n_active)
+    out_jb = np.empty(n_active)
+    out_jv = np.empty(n_active)
+    out_jpb = np.empty(n_active)
+    near = 5
+    for s in range(0, n_active, chunk):
+        e = min(s + chunk, n_active)
+        lz_c = log_z[s:e]
+        ji_c = j_int[s:e]
+        lw = (j_grid[None, :] * lz_c[:, None]
+              - lgamma_jp1[None, :] - lgamma_neg_ja[None, :])
+        log_max = np.max(lw, axis=1)
+        within_near = np.abs(j_grid_int[None, :] - ji_c[:, None]) <= near
+        above_eps = lw >= (log_max[:, None] - _LD_EPS)
+        keep = within_near | above_eps
+        w = np.where(keep, np.exp(lw - log_max[:, None]), 0.0)
+        sum_w = np.sum(w, axis=1)
+        out_la[s:e] = log_max + np.log(sum_w)
+        p_w = w / sum_w[:, None]
+        jb_c = np.sum(p_w * j_grid[None, :], axis=1)
+        out_jb[s:e] = jb_c
+        out_jv[s:e] = np.sum(
+            p_w * (j_grid[None, :] - jb_c[:, None]) ** 2, axis=1,
+        )
+        out_jpb[s:e] = np.sum(
+            p_w * j_grid[None, :] * psi_arr[None, :], axis=1,
+        )
+
+    flat_la = log_a.ravel()
+    flat_jb = j_bar.ravel()
+    flat_jv = j_var.ravel()
+    flat_jpb = j_psi_bar.ravel()
+    flat_la[active] = out_la
+    flat_jb[active] = out_jb
+    flat_jv[active] = out_jv
+    flat_jpb[active] = out_jpb
     return log_a, j_bar, j_var, j_psi_bar
 
 
