@@ -111,26 +111,39 @@ def _rw_matrix(stop: np.ndarray, row: np.ndarray, weight: np.ndarray,
     if not is_matrix:
         X = X.reshape(-1, 1)
     n, p = X.shape
-    out = np.zeros((n, p), dtype=float)
     if trans:
         # Transposed form — applied to lpmatrix on the right; not exercised
         # by bam.fit's single-thread path. Kept for completeness.
+        out = np.zeros((n, p), dtype=float)
         prev = -1
         for i in range(n):
             for k in range(prev + 1, stop[i] + 1):
                 out[row[k], :] += weight[k] * X[i, :]
             prev = stop[i]
-    else:
-        prev = -1
-        for i in range(n):
-            acc = np.zeros(p, dtype=float)
-            for k in range(prev + 1, stop[i] + 1):
-                acc += weight[k] * X[row[k], :]
-            out[i, :] = acc
-            prev = stop[i]
-    if not is_matrix:
-        return out.ravel()
-    return out
+        return out.ravel() if not is_matrix else out
+    if n == 0:
+        out = np.zeros((0, p), dtype=float)
+        return out.ravel() if not is_matrix else out
+    # Vectorized segmented reduction: output row i sums
+    # ``weight[k] · X[row[k], :]`` over k in ``(stop[i-1]+1):stop[i]``
+    # (with ``stop[-1] := -1`` for the first row). ``np.add.reduceat``
+    # sums each segment left-to-right, matching the scalar-loop
+    # arithmetic bit-exactly.
+    K = int(stop[-1]) + 1
+    weighted = weight[:K, None] * X[row[:K], :]
+    starts = np.empty(n, dtype=np.intp)
+    starts[0] = 0
+    starts[1:] = stop[:-1] + 1
+    out = np.add.reduceat(weighted, starts, axis=0)
+    # ``reduceat`` returns ``weighted[starts[i]]`` (not zero) for any
+    # empty segment ``starts[i] == starts[i+1]``. The scalar loop leaves
+    # that output row at zero, so re-zero those positions when present.
+    nonempty = np.empty(n, dtype=bool)
+    nonempty[0] = stop[0] >= 0
+    nonempty[1:] = stop[1:] >= starts[1:]
+    if not nonempty.all():
+        out[~nonempty] = 0.0
+    return out.ravel() if not is_matrix else out
 
 
 @dataclass
@@ -1075,14 +1088,14 @@ def _ar_resid(rsd: np.ndarray, rho: float = 0.0,
         return rsd
     rsd = np.asarray(rsd, dtype=float).ravel()
     n = rsd.shape[0]
+    if n == 0:
+        return np.empty(0, dtype=float)
     ld = 1.0 / np.sqrt(1.0 - rho ** 2)
-    out = np.empty_like(rsd)
+    out = ld * rsd
+    out[1:] -= rho * ld * rsd[:-1]
     out[0] = rsd[0]
-    for i in range(1, n):
-        if ar_start is not None and bool(ar_start[i]):
-            out[i] = rsd[i]
-        else:
-            out[i] = ld * rsd[i] - rho * ld * rsd[i - 1]
+    if ar_start is not None:
+        np.copyto(out, rsd, where=np.asarray(ar_start, dtype=bool))
     return out
 
 

@@ -615,14 +615,32 @@ class lm:
         W = self.W
         bhat = self._bhat_arr[:, None]
         residuals = self._residuals_arr
+        n = len(residuals)
+
+        # X and W are constant across draws, so the QR-WLS factorisation
+        # (cholesky(W), L.T @ X, qr) is constant too — the per-iter
+        # ``compute_bhat`` call would otherwise redo all three on every
+        # draw. Hoist them and keep the per-iter ``L.T @ y_star``,
+        # ``Q.T @ ·``, ``solve_triangular`` exactly as ``_qr`` does, so
+        # each bhat_star matches the loop's arithmetic bit-for-bit.
+        L = cholesky(W, lower=True)
+        Xhat = L.T @ X
+        Q, R = qr(Xhat, mode="economic")
+        X_bhat_flat = (X @ bhat).flatten()
+
+        # ``np.random.choice(..., size=(B, n))`` produces the same draws
+        # and advances ``np.random`` by the same amount as B sequential
+        # ``size=n`` calls (verified on the legacy MT19937), so this
+        # batched sample is RNG-byte-equivalent to the unrolled loop.
+        residuals_star = np.random.choice(
+            residuals, size=(num_bootstrap, n), replace=True
+        )
+
         bhat_stars = np.zeros([num_bootstrap, self.p])
         for i in range(num_bootstrap):
-            residuals_star = np.random.choice(
-                residuals, size=len(residuals), replace=True
-            )
-            y_star = X @ bhat + residuals_star[:, None]
-            bhat_star = self.compute_bhat(X, y_star.flatten(), W, return_ss=False)
-            bhat_stars[i] = bhat_star
+            y_flat = X_bhat_flat + residuals_star[i]
+            f = Q.T @ (L.T @ y_flat)
+            bhat_stars[i] = solve_triangular(R, f)
 
         quantiles = np.quantile(
             bhat_stars, q=[alpha / 2, 1 - alpha / 2], axis=0
