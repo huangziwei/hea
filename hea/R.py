@@ -94,8 +94,13 @@ class _LazyFactor:
                         "explicitly, or use the eager Series form "
                         "factor(df['col'])."
                     )
-                series_utf8 = df[col_name].cast(pl.Utf8)
-                levels_list = series_utf8.drop_nulls().unique().sort().to_list()
+                src = df[col_name]
+                # R's factor() sorts numerically when the input is numeric
+                # (then string-casts); only character/factor inputs sort lex.
+                if src.dtype.is_numeric():
+                    levels_list = [str(v) for v in src.drop_nulls().unique().sort().to_list()]
+                else:
+                    levels_list = src.cast(pl.Utf8).drop_nulls().unique().sort().to_list()
             else:
                 levels_list = [str(v) for v in self.levels]
             out_expr = s_utf8.cast(pl.Enum(levels_list), strict=self.strict)
@@ -193,7 +198,12 @@ def factor(
         out = s.replace_strict(old, new, return_dtype=pl.Enum(new))
     else:
         if levels is None:
-            levels_list = s.drop_nulls().unique().sort().to_list()
+            # R's factor() sorts numerically when input is numeric
+            # (then string-casts); only character/factor inputs sort lex.
+            if series.dtype.is_numeric():
+                levels_list = [str(v) for v in series.drop_nulls().unique().sort().to_list()]
+            else:
+                levels_list = s.drop_nulls().unique().sort().to_list()
         else:
             levels_list = [str(v) for v in levels]
         out = s.cast(pl.Enum(levels_list), strict=strict)
