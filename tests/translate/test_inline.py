@@ -23,7 +23,7 @@ from hea.translate.inline import Result, from_R, to_R
 # These are used by the caller-frame tests below. They live at module scope
 # so the exec'd translated Python can resolve them by name — same as how
 # a notebook cell sees other variables in the kernel namespace.
-flights_fixture = hea.DataFrame({
+flights_fixture = hea.tidy.DataFrame({
     "dest":      ["IAH", "JFK", "IAH", "LAX", "IAH"],
     "arr_delay": [10.0, 20.0, 15.0, 30.0, 5.0],
 })
@@ -166,7 +166,7 @@ class TestToR:
         # Only translator-recognized constructs in the source — no
         # ``import hea`` (out of scope; py_to_r doesn't translate imports).
         py_source = (
-            "df = hea.DataFrame({'x': [1, 2, 3, 4, 5]})\n"
+            "df = hea.tidy.DataFrame({'x': [1, 2, 3, 4, 5]})\n"
             "df.filter(col('x') > 2)\n"
         )
         r = to_R(py_source, execute=True)

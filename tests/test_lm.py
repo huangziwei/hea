@@ -17,7 +17,7 @@ import numpy as np
 from scipy.stats import f as f_dist
 
 from conftest import load_dataset
-from hea import lm
+from hea.models import lm
 
 
 def _assert_coef(m, col, est, se=None, tval=None, pval=None):
@@ -340,7 +340,7 @@ def test_wood_2_1_1_stomata_rank_deficient_anova():
     one aliased tree dummy via dqrdc2 pivoting. Verify the F-test in
     anova(m0, m1) matches the book: Df=4 (not 5), F=6.665 (not 5.025),
     Res.Df_full=18 (not 17)."""
-    from hea import anova  # noqa: F401 — keeps import close to use
+    from hea.R import anova  # noqa: F401 — keeps import close to use
     df = load_dataset("gamair", "stomata")
     m1 = lm("area ~ CO2 + tree", data=df)
     m0 = lm("area ~ CO2", data=df)
@@ -360,7 +360,7 @@ def test_wood_2_1_1_stomata_anova_single_model_sequential(capsys):
     """anova(lm) for a single fit — sequential (Type I) SS, R parity.
     Wood §2.1.1: anova(lm(area ~ CO2 + tree)) decomposes into CO2 + tree
     incremental F-tests; pinned to R's anova.lm output."""
-    from hea import anova
+    from hea.R import anova
     df = load_dataset("gamair", "stomata")
     m = lm("area ~ CO2 + tree", data=df)
     anova(m)

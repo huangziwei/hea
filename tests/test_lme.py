@@ -32,7 +32,7 @@ from scipy.stats import chi2
 
 from conftest import load_dataset
 from hea.family import Binomial, Gaussian, Poisson
-from hea.lme import lme
+from hea.models.lme import lme
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +170,7 @@ def test_family_default_equals_explicit_gaussian():
 def test_family_non_gaussian_runs_glmm_path():
     """Poisson family dispatches to the GLMM Laplace path (Phase 5).
 
-    Just smoke-checks that ``hea.lme(..., family=poisson())`` fits without
+    Just smoke-checks that ``hea.models.lme(..., family=poisson())`` fits without
     raising. Numerical parity with ``lme4::glmer`` is pinned in
     ``test_lme_glmm.py``'s Phase 5 acceptance tests.
     """
@@ -317,8 +317,8 @@ def test_plot_ranef_layout_vertical_stacks_panels():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea import data, lme
-
+    from hea.models import lme
+    from hea.data import data
     pen = data("Penicillin", "lme4")
     fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
 
@@ -350,8 +350,8 @@ def test_plot_ranef_aspect_controls_subplot_width():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea import data, lme
-
+    from hea.models import lme
+    from hea.data import data
     pen = data("Penicillin", "lme4")
     fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
 
@@ -373,8 +373,8 @@ def test_plot_ranef_explicit_layout_tuple():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea import data, lme
-
+    from hea.models import lme
+    from hea.data import data
     pen = data("Penicillin", "lme4")
     fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
 
@@ -391,8 +391,8 @@ def test_plot_ranef_explicit_layout_tuple():
 
 def test_plot_ranef_layout_rejects_too_few_cells():
     """A (nrow, ncol) tuple with fewer cells than panels raises."""
-    from hea import data, lme
-
+    from hea.models import lme
+    from hea.data import data
     pen = data("Penicillin", "lme4")
     fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
 
@@ -401,8 +401,8 @@ def test_plot_ranef_layout_rejects_too_few_cells():
 
 
 def test_plot_ranef_layout_rejects_bad_value():
-    from hea import data, lme
-
+    from hea.models import lme
+    from hea.data import data
     pen = data("Penicillin", "lme4")
     fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
 
@@ -415,8 +415,8 @@ def test_plot_ranef_which_filters_to_one_term():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea import data, lme
-
+    from hea.models import lme
+    from hea.data import data
     pen = data("Penicillin", "lme4")
     fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
     fig = fm.plot_ranef(which="plate")
@@ -432,8 +432,8 @@ def test_plot_ranef_which_filters_to_one_panel_title():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea import data, lme
-
+    from hea.models import lme
+    from hea.data import data
     sleep = data("sleepstudy", "lme4")
     fm = lme("Reaction ~ 1 + Days + (1 + Days | Subject)", sleep)
 
@@ -456,8 +456,8 @@ def test_plot_ranef_which_accepts_list():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea import data, lme
-
+    from hea.models import lme
+    from hea.data import data
     sleep = data("sleepstudy", "lme4")
     fm = lme("Reaction ~ 1 + Days + (1 + Days | Subject)", sleep)
     fig = fm.plot_ranef(which=["Subject: (Intercept)"])
@@ -469,8 +469,8 @@ def test_plot_ranef_which_accepts_list():
 
 
 def test_plot_ranef_which_unknown_raises():
-    from hea import data, lme
-
+    from hea.models import lme
+    from hea.data import data
     pen = data("Penicillin", "lme4")
     fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
     with pytest.raises(KeyError, match="no matching panel"):
@@ -487,8 +487,8 @@ def test_bates_2_plot_design_layout_matches_fig_2_3_2_4():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea import data, lme
-
+    from hea.models import lme
+    from hea.data import data
     penicillin = data("Penicillin", "lme4")
     fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", penicillin)
     fig = fm.plot_design()

@@ -18,7 +18,7 @@ import pytest
 
 from conftest import load_dataset
 
-from hea import (
+from hea.tidy import (
     fct_infreq, fct_relevel, fct_rev, fct_reorder, fct_reorder2,
 )
 from hea.ggplot import (
@@ -803,8 +803,7 @@ def test_geom_smooth_lm_fit_matches_hea_lm():
     """The fit line from geom_smooth(method="lm") must match a hea.lm fit
     on the same data — no surprise drift."""
     import polars as pl
-    from hea import lm
-
+    from hea.models import lm
     mtcars = load_dataset("datasets", "mtcars")
     p = ggplot(mtcars, aes("wt", "mpg")) + geom_smooth(method="lm")
     fig = p.draw()
@@ -3659,7 +3658,7 @@ def test_fct_reorder_works_inside_mutate():
     Series to the kwarg name.
     """
     import hea
-    df = hea.DataFrame({"g": ["a", "b", "c"], "v": [3.0, 1.0, 2.0]})
+    df = hea.tidy.DataFrame({"g": ["a", "b", "c"], "v": [3.0, 1.0, 2.0]})
     out = df.mutate(g=fct_reorder("g", "v"))
     assert isinstance(out.schema["g"], pl.Enum)
     # Sorted by v ascending: b(1), c(2), a(3).
@@ -3715,8 +3714,8 @@ def test_groupby_ggplot_passthrough():
     ``.ungroup()`` — grouping has no plot-side meaning.
     """
     import hea
-    df = hea.DataFrame({"g": ["a", "a", "b", "b"], "x": [1, 2, 1, 2], "y": [1, 2, 3, 4]})
-    gb = df.group_by("g").mutate(yy=hea.col("y") * 2)
+    df = hea.tidy.DataFrame({"g": ["a", "a", "b", "b"], "x": [1, 2, 1, 2], "y": [1, 2, 3, 4]})
+    gb = df.group_by("g").mutate(yy=hea.tidy.col("y") * 2)
     assert type(gb).__name__ == "GroupBy"
     p = gb.ggplot(x="x", y="yy", color="g") + geom_line()
     fig = p.draw()
@@ -3743,45 +3742,45 @@ def test_fct_recode_renames_levels_preserving_order():
     keep their original name and position. ``**{}`` lets keys with
     spaces / punctuation work (the r4ds partyid case)."""
     import hea
-    df = hea.DataFrame({"g": ["a", "b", "c", "d"]})
-    out = df.mutate(g=hea.fct_recode("g", A="a", B="b"))
+    df = hea.tidy.DataFrame({"g": ["a", "b", "c", "d"]})
+    out = df.mutate(g=hea.tidy.fct_recode("g", A="a", B="b"))
     assert out["g"].cat.get_categories().to_list() == ["A", "B", "c", "d"]
     assert out["g"].to_list() == ["A", "B", "c", "d"]
 
     # Quoted-key form (matches r4ds' "Republican, strong" use case).
-    df2 = hea.DataFrame({"g": ["short", "long", "x"]})
-    out2 = df2.mutate(g=hea.fct_recode("g", **{"renamed long": "long"}))
+    df2 = hea.tidy.DataFrame({"g": ["short", "long", "x"]})
+    out2 = df2.mutate(g=hea.tidy.fct_recode("g", **{"renamed long": "long"}))
     assert "renamed long" in out2["g"].cat.get_categories().to_list()
 
     # List values trigger many:1 merge (Python equivalent of R's repeated
     # keyword names — can't be expressed as duplicate dict keys).
-    df3 = hea.DataFrame({"g": ["a", "b", "c", "d"]})
-    out3 = df3.mutate(g=hea.fct_recode("g", X=["a", "b"], Y="c"))
+    df3 = hea.tidy.DataFrame({"g": ["a", "b", "c", "d"]})
+    out3 = df3.mutate(g=hea.tidy.fct_recode("g", X=["a", "b"], Y="c"))
     assert out3["g"].cat.get_categories().to_list() == ["X", "Y", "d"]
     assert out3["g"].to_list() == ["X", "X", "Y", "d"]
 
     # Non-str / non-list values still rejected.
     with pytest.raises(TypeError, match="expected str or list/tuple"):
-        hea.fct_recode("g", X=42)
+        hea.tidy.fct_recode("g", X=42)
 
 
 def test_fct_collapse_merges_levels_with_optional_other():
     """``fct_collapse`` merges many old → one new. Without ``other_level``
     unmentioned levels stay; with it they're swept into the bucket."""
     import hea
-    df = hea.DataFrame({"g": ["a", "b", "c", "d"]})
+    df = hea.tidy.DataFrame({"g": ["a", "b", "c", "d"]})
 
     # Partial: unmentioned c, d keep their names.
-    out = df.mutate(g=hea.fct_collapse("g", X=["a", "b"]))
+    out = df.mutate(g=hea.tidy.fct_collapse("g", X=["a", "b"]))
     assert out["g"].cat.get_categories().to_list() == ["X", "c", "d"]
 
     # other_level sweeps the rest.
-    out2 = df.mutate(g=hea.fct_collapse("g", X=["a", "b"], other_level="Z"))
+    out2 = df.mutate(g=hea.tidy.fct_collapse("g", X=["a", "b"], other_level="Z"))
     assert out2["g"].cat.get_categories().to_list() == ["X", "Z"]
 
     # List/tuple required (not bare string).
     with pytest.raises(TypeError, match="list/tuple"):
-        hea.fct_collapse("g", X="a")
+        hea.tidy.fct_collapse("g", X="a")
 
 
 def test_fct_lump_n_keeps_top_n_by_count():
@@ -3790,8 +3789,8 @@ def test_fct_lump_n_keeps_top_n_by_count():
     that level already exists in the data)."""
     import hea
     # 6 levels, n=2 keeps top 2 — bottom 4 lump into "Other".
-    df = hea.DataFrame({"g": ["a"]*10 + ["b"]*6 + ["c"]*4 + ["d"]*3 + ["e"]*2 + ["f"]*1})
-    out = df.mutate(g=hea.fct_lump_n("g", n=2))
+    df = hea.tidy.DataFrame({"g": ["a"]*10 + ["b"]*6 + ["c"]*4 + ["d"]*3 + ["e"]*2 + ["f"]*1})
+    out = df.mutate(g=hea.tidy.fct_lump_n("g", n=2))
     cats = out["g"].cat.get_categories().to_list()
     assert cats == ["a", "b", "Other"]
     # Lumped: c+d+e+f = 4+3+2+1 = 10
@@ -3804,8 +3803,8 @@ def test_fct_lump_n_keeps_top_n_by_count():
     s = pl.Series("g", ["a"]*10 + ["Other"]*5 + ["b"]*3 + ["c"]*1).cast(
         pl.Enum(["a", "b", "c", "Other"])
     )
-    df2 = hea.DataFrame({"g": s})
-    out2 = df2.mutate(g=hea.fct_lump_n("g", n=2))
+    df2 = hea.tidy.DataFrame({"g": s})
+    out2 = df2.mutate(g=hea.tidy.fct_lump_n("g", n=2))
     # Top 2 by count: a(10), Other(5). Kept in original Enum order.
     assert out2["g"].cat.get_categories().to_list() == ["a", "Other"]
     # b(3) and c(1) lumped into existing Other(5): Other final = 9.
@@ -3817,14 +3816,14 @@ def test_fct_lump_lowfreq_matches_forcats_in_smallest_rule():
     of all smaller-count levels. Worked example: a=10, b=6, c=4, d=3,
     e=2, f=1 — only f gets lumped (when we reach e=2, left=1, 2>1)."""
     import hea
-    df = hea.DataFrame({"g": ["a"]*10 + ["b"]*6 + ["c"]*4 + ["d"]*3 + ["e"]*2 + ["f"]*1})
-    out = df.mutate(g=hea.fct_lump_lowfreq("g"))
+    df = hea.tidy.DataFrame({"g": ["a"]*10 + ["b"]*6 + ["c"]*4 + ["d"]*3 + ["e"]*2 + ["f"]*1})
+    out = df.mutate(g=hea.tidy.fct_lump_lowfreq("g"))
     assert out["g"].cat.get_categories().to_list() == ["a", "b", "c", "d", "e", "Other"]
     assert (out["g"] == "Other").sum() == 1
 
     # Dominant level case: a=100, others tiny → only a kept.
-    df2 = hea.DataFrame({"g": ["a"]*100 + ["b"]*5 + ["c"]*3 + ["d"]*2})
-    out2 = df2.mutate(g=hea.fct_lump_lowfreq("g"))
+    df2 = hea.tidy.DataFrame({"g": ["a"]*100 + ["b"]*5 + ["c"]*3 + ["d"]*2})
+    out2 = df2.mutate(g=hea.tidy.fct_lump_lowfreq("g"))
     assert out2["g"].cat.get_categories().to_list() == ["a", "Other"]
 
 
@@ -4510,8 +4509,7 @@ def test_patchwork_faceted_child_axis_label_scoped_to_panel_column():
 
 def _patchwork_doc_plots():
     """The four ggplots set up at the top of the patchwork tutorial."""
-    from hea import data
-
+    from hea.data import data
     mtcars = data("mtcars")
     p1 = (mtcars.ggplot().geom_point(aes("mpg", "disp"))
           .ggtitle("Plot 1"))

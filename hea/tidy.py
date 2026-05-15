@@ -4469,3 +4469,35 @@ def _temporal_entries(s: pl.Series) -> list[tuple[str, str]]:
         ]
     formatted = ["NA" if v is None else str(v) for v in stats]
     return list(zip(_NUMERIC_LABELS, formatted))
+
+
+# ---------------------------------------------------------------------------
+# Polars passthrough — only the names a tidy pipeline reaches for.
+#
+# Expression builders (``col``, ``lit``, ``when``), basic combinators
+# (``coalesce``, ``concat_str``, ``concat_list``), the row-wise reducers
+# (``min_horizontal`` family), plus a couple of typing/schema classes
+# (``Expr``, ``Schema``).
+#
+# Anything more esoteric — Polars' SQL bridge, GPU engine, range/repeat
+# constructors, system config — stays in ``polars`` and is not re-exported.
+# Add a name here only when a tidy-flavored example actually needs it.
+#
+# Dtypes live in :mod:`hea.dtypes`; I/O factories in :mod:`hea.io`.
+# ---------------------------------------------------------------------------
+from polars import (  # noqa: F401, E402
+    Expr,
+    Schema,
+    all_horizontal,
+    any_horizontal,
+    coalesce,
+    col,
+    concat_list,
+    concat_str,
+    lit,
+    max_horizontal,
+    mean_horizontal,
+    min_horizontal,
+    sum_horizontal,
+    when,
+)

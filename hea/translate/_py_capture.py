@@ -53,15 +53,23 @@ def _rewrite_last_expr(tree: ast.Module) -> None:
 
 
 def _build_namespace() -> dict:
-    """Caller's globals — every public ``hea`` name pre-bound so the
-    user script can write ``col("x")`` / ``case_when(...)`` etc. with no
-    imports."""
+    """Caller's globals — every public ``hea`` name (top-level + every
+    user-facing sub-namespace) pre-bound so the user script can write
+    ``col("x")`` / ``case_when(...)`` / ``lm(...)`` etc. with no imports."""
     import hea  # local import — keeps cli startup fast
 
     ns: dict[str, Any] = {"__name__": "__capture__", "hea": hea}
     for name in dir(hea):
         if not name.startswith("_"):
             ns[name] = getattr(hea, name)
+    # The top-level only exposes polars + the three subclasses; everything
+    # else (verbs, models, families, R functions, …) lives under a
+    # sub-namespace. Pre-bind those too.
+    for sub in (hea.tidy, hea.models, hea.family, hea.R,
+                hea.data, hea.emmeans, hea.session_info):
+        for name in dir(sub):
+            if not name.startswith("_") and name not in ns:
+                ns[name] = getattr(sub, name)
     return ns
 
 

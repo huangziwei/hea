@@ -12,7 +12,7 @@ File sections:
 2. ``Scat`` family unit tests — ``Dd`` levels 0/1/2, ``ls_extended``,
    ``dev_resids``, ``aic``, ``preinitialize``, link validation,
    ``_estimate_theta`` vs mgcv ``estimate.theta``.
-3. ``Scat`` end-to-end ``hea.bam(family=Scat(...), discrete=True)``
+3. ``Scat`` end-to-end ``hea.models.bam(family=Scat(...), discrete=True)``
    parity (simple and ``by=factor`` oracles). These exercise bam's
    PIRLS-with-θ-Newton cadence; they live here because Scat is the
    exotic-family vehicle, and the value the assertions guard is θ/sp
@@ -869,7 +869,7 @@ def test_scat_estimate_theta(init_name: str):
     """mgcv ``estimate.theta`` parity for ``_estimate_theta`` on a
     Scat family with heavy-tailed residuals (so ν stays finite and
     both impls converge to a well-defined optimum)."""
-    from hea.bam import _estimate_theta
+    from hea.models.bam import _estimate_theta
     df = pl.read_csv(str(_SCAT_ESTTH / "inputs.csv"))
     y = df["y"].to_numpy().astype(float)
     mu = df["mu"].to_numpy().astype(float)
@@ -934,7 +934,7 @@ def test_scat_bam_simple_force_theta_sp():
            "x": df["x"].to_numpy().astype(float)}
     fam = Scat(theta=tuple(theta_mgcv), min_df=5)
     assert fam.n_theta == 0   # both θ supplied positive ⇒ locked
-    m = hea.bam("y ~ s(x, k=10)", dat, family=fam, discrete=True,
+    m = hea.models.bam("y ~ s(x, k=10)", dat, family=fam, discrete=True,
                 sp=sp_mgcv)
     fit_h = np.asarray(m.fitted_values)
     rel = float(np.linalg.norm(fit_h - fit_mgcv) / np.linalg.norm(fit_mgcv))
@@ -952,7 +952,7 @@ def test_scat_bam_simple_auto_fit():
     df, sp_mgcv, theta_mgcv, fit_mgcv = _scat_bam_load("simple")
     dat = {"y": df["y"].to_numpy().astype(float),
            "x": df["x"].to_numpy().astype(float)}
-    m = hea.bam("y ~ s(x, k=10)", dat, family=Scat(min_df=5),
+    m = hea.models.bam("y ~ s(x, k=10)", dat, family=Scat(min_df=5),
                 discrete=True)
     fit_h = np.asarray(m.fitted_values)
     rel = float(np.linalg.norm(fit_h - fit_mgcv) / np.linalg.norm(fit_mgcv))
@@ -981,7 +981,7 @@ def test_scat_bam_factor_force_theta_sp():
            "g": df["g"].to_numpy()}
     fam = Scat(theta=tuple(theta_mgcv), min_df=5)
     assert fam.n_theta == 0
-    m = hea.bam("y ~ g + s(x, by=g, k=10)", dat, family=fam,
+    m = hea.models.bam("y ~ g + s(x, by=g, k=10)", dat, family=fam,
                 discrete=True, sp=sp_mgcv)
     fit_h = np.asarray(m.fitted_values)
     rel = float(np.linalg.norm(fit_h - fit_mgcv) / np.linalg.norm(fit_mgcv))
@@ -1001,7 +1001,7 @@ def test_scat_bam_factor_auto_fit():
     dat = {"y": df["y"].to_numpy().astype(float),
            "x": df["x"].to_numpy().astype(float),
            "g": df["g"].to_numpy()}
-    m = hea.bam("y ~ g + s(x, by=g, k=10)", dat, family=Scat(min_df=5),
+    m = hea.models.bam("y ~ g + s(x, by=g, k=10)", dat, family=Scat(min_df=5),
                 discrete=True)
     fit_h = np.asarray(m.fitted_values)
     rel = float(np.linalg.norm(fit_h - fit_mgcv) / np.linalg.norm(fit_mgcv))

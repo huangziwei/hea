@@ -247,7 +247,7 @@ class TestParityE2E:
         py_script = tmp_path / "script.py"
         py_script.write_text(
             "import hea\n"
-            "hea.DataFrame({'x': [1, 2, 3]})\n",
+            "hea.tidy.DataFrame({'x': [1, 2, 3]})\n",
             encoding="utf-8",
         )
         result = run_py(py_script, tmp_path)

@@ -1,4 +1,4 @@
-"""GLMM-specific tests for ``hea.lme(family=...)``.
+"""GLMM-specific tests for ``hea.models.lme(family=...)``.
 
 This file accumulates Phase 2-13 tests of ``lme-family-port.md``. Phase 2
 focuses on the ``_GlmResponse`` private class — verifying its mutators
@@ -12,10 +12,10 @@ import numpy as np
 import polars as pl
 import pytest
 
-from hea.lme import csc_array
+from hea.models.lme import csc_array
 from hea.family import Binomial, Gamma, Gaussian, Poisson
 from hea.formula import materialize_bars, parse, expand
-from hea.lme import (
+from hea.models.lme import (
     NelderMead,
     NMStatus,
     _GlmResponse,
@@ -627,7 +627,7 @@ def test_devfun_stage1_with_empty_fixef_slice():
 
 
 # ----------------------------------------------------------------------
-# Phase 5: Full glmer fit — tests the public ``hea.lme(..., family=...)``
+# Phase 5: Full glmer fit — tests the public ``hea.models.lme(..., family=...)``
 # entry point against ``lme4::glmer``. ≤ 1e-7 on θ̂, β̂; ≤ 1e-9 on the
 # Laplace deviance (since deviance evaluation is exact given converged
 # parameters).
@@ -656,14 +656,14 @@ _GLMER_POISSON_FULLFIT_REF = {
 
 
 def test_glmer_poisson_full_fit_matches_lme4():
-    """Full ``hea.lme(..., family=poisson())`` fit ≡ ``lme4::glmer(..., family=poisson)``.
+    """Full ``hea.models.lme(..., family=poisson())`` fit ≡ ``lme4::glmer(..., family=poisson)``.
 
     Compared to ``lme4::glmer`` with its default optimizer chain
     ``optimizer=c("bobyqa", "Nelder_Mead")`` — both stages of hea use the
     ported BOBYQA + Nelder-Mead implementations. Tolerance ≤ 1e-7 on
     θ̂/β̂ — anything looser would mask actual bugs.
     """
-    from hea.lme import lme  # local import — keep test file's top imports lean
+    from hea.models.lme import lme  # local import — keep test file's top imports lean
     from hea.family import Poisson as PoissonFamily
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -700,8 +700,8 @@ def test_glmer_binomial_full_fit_matches_lme4_cbpp():
         # captured getME(m, "theta"), getME(m, "beta"),
         # -2*as.numeric(logLik(m)), deviance(m)
     """
-    from hea import data as hea_data
-    from hea.lme import lme
+    from hea.data import data as hea_data
+    from hea.models.lme import lme
     from hea.family import Binomial as BinomialFamily
 
     df = hea_data("cbpp").with_columns(
@@ -744,7 +744,7 @@ def test_glmer_intercept_only_poisson():
                    control=glmerControl(
                        optimizer=c("Nelder_Mead","Nelder_Mead")))
     """
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson as PoissonFamily
 
     df = _synthetic_poisson_grouped(seed=11, n_groups=8, n_per=5)
@@ -765,7 +765,7 @@ def test_glmer_nagq0_init_step_false_runs_stage1_directly():
     default path (Stage 0 just provides a warm start; final answer is
     determined by Stage 1 alone).
     """
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson as PoissonFamily
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -793,7 +793,7 @@ def test_glmer_start_numeric_overrides_theta():
     """A numeric ``start=`` is interpreted as θ-only and overrides the
     formula default ``θ₀``. The optimizer still converges to the same
     answer."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson as PoissonFamily
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -807,7 +807,7 @@ def test_glmer_start_numeric_overrides_theta():
 
 def test_glmer_start_dict_with_theta_and_beta():
     """``start={"theta": ..., "beta": ...}`` overrides both initial values."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson as PoissonFamily
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -826,7 +826,7 @@ def test_glmer_start_dict_with_theta_and_beta():
 
 def test_glmer_start_validation_errors():
     """``start=`` rejects malformed inputs."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson as PoissonFamily
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1072,7 +1072,7 @@ _GLMER_PHASE6_POISSON_REF = {
 
 def test_glmer_phase6_attrs_match_lme4_poisson():
     """Every Phase 6 attribute on a Poisson fit matches lme4 at ≤ 1e-9."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson as PoissonFamily
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1124,7 +1124,7 @@ def test_glmer_phase6_attrs_match_lme4_poisson():
 
 def test_glmer_phase6_ranef_match_lme4_poisson():
     """BLUPs match ``ranef(m)`` — covers ``_ranef``/``ranef`` for GLMM."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson as PoissonFamily
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1147,8 +1147,8 @@ def test_glmer_phase6_attrs_match_lme4_binomial_cbpp():
         # captured AIC, deviance, -2*logLik, sigma, sqrt(diag(vc_rx)),
         # attr(VarCorr(m)$herd, "stddev")
     """
-    from hea import data as hea_data
-    from hea.lme import lme
+    from hea.data import data as hea_data
+    from hea.models.lme import lme
     from hea.family import Binomial as BinomialFamily
 
     df = hea_data("cbpp").with_columns(
@@ -1197,7 +1197,7 @@ def test_glmer_phase6_sigma_for_scale_unknown_family():
                        optimizer=c("Nelder_Mead","Nelder_Mead")))
         sigma(m)   # → 0.4682088613...
     """
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Gamma as GammaFamily
 
     rng = np.random.default_rng(11)
@@ -1400,7 +1400,7 @@ def test_glmer_predict_link_and_response_match_lme4_poisson():
 
     For Poisson(log): ``μ = exp(η)``. Pin both against ``lme4::predict``.
     """
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson as PoissonFamily
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1424,7 +1424,7 @@ def test_glmer_predict_link_and_response_match_lme4_poisson():
 
 def test_glmer_predict_newdata_matches_lme4_poisson():
     """``predict(m, newdata=...)`` matches lme4 with the same newdata."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson as PoissonFamily
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1444,7 +1444,7 @@ def test_glmer_predict_newdata_matches_lme4_poisson():
 
 def test_glmer_predict_re_form_false_matches_lme4_poisson():
     """``re_form=False`` returns population-level prediction (X·β only)."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson as PoissonFamily
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1459,7 +1459,7 @@ def test_glmer_predict_re_form_false_matches_lme4_poisson():
 
 def test_glmer_predict_allow_new_levels_matches_lme4():
     """New levels in newdata get population-level prediction with ``allow_new_levels=True``."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson as PoissonFamily
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1492,7 +1492,7 @@ def test_glmer_predict_se_fit_link_matches_lme4_poisson():
     factors. We build the same M densely and solve — equivalent algebra,
     same machinery as the LMM se.fit path with working weights added.
     """
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson as PoissonFamily
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1511,7 +1511,7 @@ def test_glmer_predict_se_fit_link_matches_lme4_poisson():
 
 def test_glmer_predict_se_fit_response_matches_lme4_poisson():
     """``se.fit`` on response scale uses the delta method ``SE_link · |dμ/dη|``."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson as PoissonFamily
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1535,7 +1535,7 @@ def test_glmer_predict_random_only_matches_lme4_poisson():
     (~3e-9 abs Linux-OpenBLAS vs reference); see top of test_lme_glmm.py
     "FP precision floor" note in the plan.
     """
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson as PoissonFamily
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1645,7 +1645,7 @@ def test_deriv12_1d_matches_lme4():
 
 def test_family_validation_accepts_instance():
     """Family instance is passed through unchanged."""
-    from hea.lme import lme, _resolve_lme_family
+    from hea.models.lme import lme, _resolve_lme_family
     from hea.family import Poisson, LogLink
 
     fam = Poisson(link=LogLink())
@@ -1656,7 +1656,7 @@ def test_family_validation_accepts_instance():
 def test_family_validation_accepts_class():
     """Family class (callable returning a Family instance) is instantiated."""
     from hea.family import Poisson
-    from hea.lme import _resolve_lme_family
+    from hea.models.lme import _resolve_lme_family
 
     out = _resolve_lme_family(Poisson)
     assert isinstance(out, Poisson)
@@ -1665,7 +1665,7 @@ def test_family_validation_accepts_class():
 def test_family_validation_accepts_lowercase_string():
     """String dispatches to the matching ``hea.family`` attribute."""
     from hea.family import Binomial
-    from hea.lme import _resolve_lme_family
+    from hea.models.lme import _resolve_lme_family
 
     out = _resolve_lme_family("binomial")
     assert isinstance(out, Binomial)
@@ -1674,7 +1674,7 @@ def test_family_validation_accepts_lowercase_string():
 def test_family_validation_none_defaults_gaussian():
     """``family=None`` reproduces lme4's lmer-style Gaussian default."""
     from hea.family import Gaussian
-    from hea.lme import _resolve_lme_family
+    from hea.models.lme import _resolve_lme_family
 
     out = _resolve_lme_family(None)
     assert isinstance(out, Gaussian)
@@ -1682,7 +1682,7 @@ def test_family_validation_none_defaults_gaussian():
 
 def test_family_validation_rejects_quasi_string_with_lme4_message():
     """``family="quasi"`` raises lme4's exact error from modular.R:734."""
-    from hea.lme import _resolve_lme_family
+    from hea.models.lme import _resolve_lme_family
 
     for name in ("quasi", "quasibinomial", "quasipoisson"):
         with pytest.raises(ValueError, match='"quasi" families cannot be used in glmer'):
@@ -1692,7 +1692,7 @@ def test_family_validation_rejects_quasi_string_with_lme4_message():
 def test_family_validation_rejects_quasi_instance():
     """``family=Quasi(...)`` also errors — by class, not just string."""
     from hea.family import Quasi
-    from hea.lme import _resolve_lme_family
+    from hea.models.lme import _resolve_lme_family
 
     with pytest.raises(ValueError, match='"quasi" families cannot be used in glmer'):
         _resolve_lme_family(Quasi(variance="constant"))
@@ -1700,7 +1700,7 @@ def test_family_validation_rejects_quasi_instance():
 
 def test_family_validation_rejects_unknown_string():
     """Unrecognised family names error with the list of accepted names."""
-    from hea.lme import _resolve_lme_family
+    from hea.models.lme import _resolve_lme_family
 
     with pytest.raises(ValueError, match="unknown family"):
         _resolve_lme_family("ziggurat")
@@ -1708,7 +1708,7 @@ def test_family_validation_rejects_unknown_string():
 
 def test_family_validation_rejects_garbage_input():
     """Non-Family, non-callable, non-string input is a TypeError."""
-    from hea.lme import _resolve_lme_family
+    from hea.models.lme import _resolve_lme_family
 
     with pytest.raises(TypeError, match="family must be"):
         _resolve_lme_family(42)
@@ -1721,7 +1721,7 @@ def test_family_validation_rejects_garbage_input():
 
 def test_nAGQ_validation_accepts_0_and_1():
     """Both Laplace (1) and θ-only (0) are supported now."""
-    from hea.lme import _validate_nagq
+    from hea.models.lme import _validate_nagq
 
     assert _validate_nagq(0) == 0
     assert _validate_nagq(1) == 1
@@ -1729,7 +1729,7 @@ def test_nAGQ_validation_accepts_0_and_1():
 
 def test_nAGQ_validation_rejects_above_1_with_phase9_message():
     """``nAGQ > 1`` defers to Phase 9 with a clear message."""
-    from hea.lme import _validate_nagq
+    from hea.models.lme import _validate_nagq
 
     with pytest.raises(NotImplementedError, match="Phase 9"):
         _validate_nagq(7)
@@ -1737,7 +1737,7 @@ def test_nAGQ_validation_rejects_above_1_with_phase9_message():
 
 def test_nAGQ_validation_rejects_negative_or_too_large():
     """nAGQ must be in [0, 100] (modular.R:980-987)."""
-    from hea.lme import _validate_nagq
+    from hea.models.lme import _validate_nagq
 
     with pytest.raises(ValueError, match=r"nAGQ must be in \[0, 100\]"):
         _validate_nagq(-1)
@@ -1747,7 +1747,7 @@ def test_nAGQ_validation_rejects_negative_or_too_large():
 
 def test_nAGQ_validation_rejects_non_integer():
     """Non-integer nAGQ (1.5 etc.) is rejected — int(1.5) would silently round."""
-    from hea.lme import _validate_nagq
+    from hea.models.lme import _validate_nagq
 
     with pytest.raises(ValueError, match="nAGQ must be an integer"):
         _validate_nagq(1.5)
@@ -1762,7 +1762,7 @@ def test_nAGQ_validation_rejects_non_integer():
 
 def test_glmer_control_defaults_match_lme4():
     """No user override → defaults exactly match ``glmerControl()``."""
-    from hea.lme import _normalize_glmer_control
+    from hea.models.lme import _normalize_glmer_control
 
     out = _normalize_glmer_control(None)
     assert out["optimizer"] == "Nelder_Mead"
@@ -1775,7 +1775,7 @@ def test_glmer_control_defaults_match_lme4():
 
 def test_glmer_control_merges_user_overrides():
     """User-supplied keys overlay the defaults; unspecified keys keep theirs."""
-    from hea.lme import _normalize_glmer_control
+    from hea.models.lme import _normalize_glmer_control
 
     out = _normalize_glmer_control({"tolPwrss": 1e-9, "calc.derivs": False})
     assert out["tolPwrss"] == 1e-9
@@ -1786,7 +1786,7 @@ def test_glmer_control_merges_user_overrides():
 
 def test_glmer_control_rejects_unknown_keys():
     """Typos / R-only keys raise with the list of accepted keys."""
-    from hea.lme import _normalize_glmer_control
+    from hea.models.lme import _normalize_glmer_control
 
     with pytest.raises(ValueError, match="unknown control keys"):
         _normalize_glmer_control({"speed": 9000})
@@ -1794,7 +1794,7 @@ def test_glmer_control_rejects_unknown_keys():
 
 def test_glmer_control_rejects_unsupported_optimizer():
     """bobyqa / nloptwrap etc. await separate ports — clear NotImplementedError."""
-    from hea.lme import _normalize_glmer_control
+    from hea.models.lme import _normalize_glmer_control
 
     with pytest.raises(NotImplementedError, match="bobyqa"):
         _normalize_glmer_control({"optimizer": "bobyqa"})
@@ -1802,7 +1802,7 @@ def test_glmer_control_rejects_unsupported_optimizer():
 
 def test_glmer_control_optCtrl_translates_to_nelder_mead_kwargs():
     """``optCtrl=list(maxfun=...)`` → ``NelderMead(maxeval=...)`` mapping."""
-    from hea.lme import _nm_kwargs_from_opt_ctrl
+    from hea.models.lme import _nm_kwargs_from_opt_ctrl
 
     out = _nm_kwargs_from_opt_ctrl({
         "maxfun": 5000, "FtolAbs": 1e-9, "XtolRel": 1e-10,
@@ -1811,7 +1811,7 @@ def test_glmer_control_optCtrl_translates_to_nelder_mead_kwargs():
 
 
 def test_glmer_control_optCtrl_rejects_unknown_keys():
-    from hea.lme import _nm_kwargs_from_opt_ctrl
+    from hea.models.lme import _nm_kwargs_from_opt_ctrl
 
     with pytest.raises(ValueError, match="unknown optCtrl key"):
         _nm_kwargs_from_opt_ctrl({"PRNGseed": 42})
@@ -1824,7 +1824,7 @@ def test_glmer_control_optCtrl_rejects_unknown_keys():
 
 def test_lme_devFunOnly_raises_until_handle_lands():
     """``devFunOnly=True`` errors with a clear message until handle ports."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1841,7 +1841,7 @@ def test_lme_offset_arg_adds_to_formula_offset():
     """``offset=`` is summed with any ``offset(...)`` in the formula. We
     check the Poisson identity: ``glmer(y ~ x + (1|g), offset=v)`` matches
     ``glmer(y ~ x + offset(v) + (1|g))`` to converged-fit precision."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1862,7 +1862,7 @@ def test_lme_offset_arg_adds_to_formula_offset():
 
 def test_lme_offset_arg_length_mismatch_errors():
     """Wrong-length offset= raises before fitting."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1880,7 +1880,7 @@ def test_lme_offset_arg_length_mismatch_errors():
 
 def test_lme_subset_bool_mask_matches_pre_filter():
     """``subset=mask`` ≡ caller pre-filtering. Bit-identical fit."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1897,7 +1897,7 @@ def test_lme_subset_bool_mask_matches_pre_filter():
 
 def test_lme_subset_positive_int_indices_keep():
     """Positive R-style 1-based indices keep the specified rows."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1910,7 +1910,7 @@ def test_lme_subset_positive_int_indices_keep():
 
 def test_lme_subset_negative_int_indices_drop():
     """Negative R-style 1-based indices drop the specified rows."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1925,7 +1925,7 @@ def test_lme_subset_negative_int_indices_drop():
 def test_lme_na_action_omit_default_drops_silently():
     """Default ``na_action='na.omit'`` drops rows with any NA in referenced
     columns and proceeds (mirrors R's ``na.omit`` model-frame default)."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1941,7 +1941,7 @@ def test_lme_na_action_omit_default_drops_silently():
 
 def test_lme_na_action_fail_raises_on_na():
     """``na_action='na.fail'`` errors if any referenced-column row has NA."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1956,7 +1956,7 @@ def test_lme_na_action_fail_raises_on_na():
 def test_lme_na_action_pass_raises_not_implemented():
     """``na_action='na.pass'`` and 'na.exclude' are not implemented yet —
     they require carrying NA rows through PIRLS."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -1969,7 +1969,7 @@ def test_lme_na_action_pass_raises_not_implemented():
 def test_glmer_summary_prints_signif_codes_legend(capsys):
     """GLMM ``summary()`` appends R's ``Signif. codes:`` legend with the
     five-band thresholds. Match lme4's ``printCoefmat`` output."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -2009,7 +2009,7 @@ def test_lme_contrasts_arg_switches_to_contr_sum():
     """contrasts={'x': 'contr.sum'} replaces the default contr.treatment
     coding on factor x. Column names switch from ``xb, xc`` (treatment,
     drop first level) to ``x1, x2`` (sum-to-zero, drop last level)."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _three_level_glmm_df()
@@ -2022,7 +2022,7 @@ def test_lme_contrasts_arg_switches_to_contr_sum():
 
 def test_lme_contrasts_arg_helmert():
     """contrasts={'x': 'contr.helmert'} → contrast columns x1, x2."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _three_level_glmm_df()
@@ -2034,7 +2034,7 @@ def test_lme_contrasts_arg_helmert():
 def test_lme_contrasts_arg_rejects_unknown_name():
     """Unknown contrast names raise with a clear message listing the
     supported set (mirrors R's ``no contrasts function 'contr.foo'``)."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _three_level_glmm_df()
@@ -2045,7 +2045,7 @@ def test_lme_contrasts_arg_rejects_unknown_name():
 
 def test_lme_contrasts_arg_rejects_non_string_value():
     """Numeric matrices and function references aren't yet supported."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _three_level_glmm_df()
@@ -2057,7 +2057,7 @@ def test_lme_contrasts_arg_rejects_non_string_value():
 def test_lme_contrasts_arg_loses_to_inline_C():
     """In-formula ``C(x, contr.sum)`` overrides ``contrasts={x: contr.treatment}``
     (matches R: per-term ``C(...)`` always wins). Column names reflect C()."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _three_level_glmm_df()
@@ -2072,7 +2072,7 @@ def test_lme_contrasts_arg_loses_to_inline_C():
 def test_lme_contrasts_arg_unrelated_column_unaffected():
     """A contrasts entry for a non-existent column is silently ignored,
     matching R's behavior. The fit proceeds as if no override was given."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _three_level_glmm_df()
@@ -2099,7 +2099,7 @@ def test_lme_optinfo_singular_check_fires_at_boundary():
     """When a variance component shrinks to its lower bound (θ ≈ 0), the
     optinfo singular flag turns on and the standard lme4 message lands in
     ``optinfo$conv$lme4$messages``."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     # No within-group signal → θ̂ pinned at 0
@@ -2118,7 +2118,7 @@ def test_lme_optinfo_singular_check_fires_at_boundary():
 
 def test_lme_optinfo_singular_check_silent_for_normal_fit():
     """A well-identified RE → ``is_singular=False``, empty messages."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -2130,7 +2130,7 @@ def test_lme_optinfo_singular_check_silent_for_normal_fit():
 def test_lme_summary_prints_singular_warning(capsys):
     """The singular message is appended to summary() output (mirrors R's
     ``print.summary.merMod`` convergence block)."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     rng = np.random.default_rng(1)
@@ -2148,7 +2148,7 @@ def test_lme_summary_prints_singular_warning(capsys):
 
 def test_lme_summary_omits_convergence_block_when_clean(capsys):
     """A clean fit has no convergence block in summary()."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -2162,7 +2162,7 @@ def test_lme_summary_omits_convergence_block_when_clean(capsys):
 def test_lmer_summary_omits_signif_codes_legend(capsys):
     """LMM ``summary()`` skips both the p-value column AND the legend —
     lme4's deliberate choice (see ``?lme4::pvalues``)."""
-    from hea.lme import lme
+    from hea.models.lme import lme
 
     rng = np.random.default_rng(2026)
     n = 60
@@ -2184,7 +2184,7 @@ def test_lmer_summary_omits_signif_codes_legend(capsys):
 def test_lme_subset_and_na_action_compose():
     """subset= filters first, then na_action policy applies to the result.
     Verifies the order of operations matches R's model.frame semantics."""
-    from hea.lme import lme
+    from hea.models.lme import lme
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
@@ -2223,8 +2223,9 @@ def test_glmer_bates_fm10_contraception_matches_lme4():
     the default Hessian-based ``vcov(m)`` (calc.derivs=TRUE).
 
     """
-    from hea import data, factor
-    from hea.lme import lme
+    from hea.R import factor
+    from hea.data import data
+    from hea.models.lme import lme
     from hea.family import Binomial
 
     contra = data("Contraception").mutate(

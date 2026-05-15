@@ -1,11 +1,11 @@
-"""Regression test: hea.DataFrame / hea.LazyFrame subclass coverage.
+"""Regression test: hea.tidy.DataFrame / hea.tidy.LazyFrame subclass coverage.
 
 Polars operations should preserve the hea subclass identity so users don't
 need ``tbl(...)`` to re-wrap. Two layers:
 
 1. **Curated map** (``DF_METHODS`` / ``LF_METHODS``) — methods we know return
    a DataFrame/LazyFrame, paired with a callable that exercises them. We
-   assert ``isinstance(result, hea.DataFrame)`` (or ``hea.LazyFrame``).
+   assert ``isinstance(result, hea.tidy.DataFrame)`` (or ``hea.tidy.LazyFrame``).
 2. **Coverage check** — every public method on ``pl.DataFrame`` / ``pl.LazyFrame``
    must be in exactly one of: the curated map, ``DF_NON_DF`` (returns
    something else), or ``DF_ALLOWLIST`` (known leak; Phase 3 will fix). When
@@ -20,7 +20,7 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from hea.dataframe import DataFrame, LazyFrame, Series, tbl
+from hea.tidy import DataFrame, LazyFrame, Series, tbl
 
 # A few exercised methods are deprecated upstream (e.g. ``approx_n_unique``,
 # ``with_context``). They still return DataFrame/LazyFrame correctly today, so
@@ -123,7 +123,7 @@ LF_NON_DF: set[str] = {
 
 
 # ---------------------------------------------------------------------------
-# Curated method map — every entry must produce a hea.DataFrame.
+# Curated method map — every entry must produce a hea.tidy.DataFrame.
 # ---------------------------------------------------------------------------
 
 DF_METHODS = {
@@ -352,7 +352,7 @@ def test_curated_lf_methods_preserve_subclass(lf: LazyFrame):
 
 
 def test_lf_materializing_methods_return_hea_dataframe(lf: LazyFrame):
-    """LazyFrame methods that materialize must return ``hea.DataFrame``.
+    """LazyFrame methods that materialize must return ``hea.tidy.DataFrame``.
 
     ``collect`` is the structural fix for the lazy round-trip
     (`polars/lazyframe/frame.py:2510`). ``describe`` materializes too —
@@ -367,7 +367,7 @@ def test_lf_materializing_methods_return_hea_dataframe(lf: LazyFrame):
     out2 = lf.filter(pl.col("x") > 0).with_columns(z=pl.col("x") + pl.col("y")).collect()
     assert isinstance(out2, DataFrame)
 
-    # describe() is on LazyFrame but materializes — must return hea.DataFrame.
+    # describe() is on LazyFrame but materializes — must return hea.tidy.DataFrame.
     out3 = lf.describe()
     assert isinstance(out3, DataFrame)
 
@@ -495,7 +495,7 @@ SERIES_METHODS = {
 }
 
 # Series methods that return ``pl.DataFrame``. Tested separately to assert
-# they return ``hea.DataFrame``.
+# they return ``hea.tidy.DataFrame``.
 SERIES_DF_METHODS = {
     "to_frame":      lambda s: s.to_frame(),
     "to_dummies":    lambda s: s.to_dummies(),
@@ -521,7 +521,7 @@ SERIES_NON_S: set[str] = {
     "alias", "rename",
     # take user fns and return Series shaped by the fn — preserves through __getitem__
     "map_elements",
-    # complicated by-arg signatures / sql; hea.Series subclass still preserves
+    # complicated by-arg signatures / sql; hea.tidy.Series subclass still preserves
     # since they go through self._from_pyseries internally.
     "scatter",
     # not_ etc. variants
@@ -541,9 +541,9 @@ SERIES_NON_S: set[str] = {
 def _series_auto_wrapped_methods() -> set[str]:
     """Names of pl.Series methods that are auto-wrapped at hea import time.
 
-    Mirrors the discovery in ``hea.dataframe._install_series_subclass_overrides``
+    Mirrors the discovery in ``hea.tidy._install_series_subclass_overrides``
     so the coverage test stays in sync. Every name returned here is a method
-    that returns ``hea.Series`` after install.
+    that returns ``hea.tidy.Series`` after install.
     """
     from polars.series.utils import _is_empty_method, _undecorated
     out: set[str] = set()
@@ -574,7 +574,7 @@ def test_curated_series_methods_preserve_subclass(s: Series):
 
 def test_series_methods_returning_dataframe(s: Series):
     """Series methods like ``to_frame`` / ``to_dummies`` / ``value_counts`` /
-    ``hist`` / ``describe`` materialize to DataFrame — must return ``hea.DataFrame``."""
+    ``hist`` / ``describe`` materialize to DataFrame — must return ``hea.tidy.DataFrame``."""
     failures: list[str] = []
     for name, fn in sorted(SERIES_DF_METHODS.items()):
         try:
@@ -592,7 +592,7 @@ def test_series_methods_returning_dataframe(s: Series):
 def test_df_series_returning_methods_return_hea_series(df: DataFrame):
     """``df.get_column(...)``, ``df["x"]``, ``df.to_series(...)``, the
     ``*_horizontal`` family, ``fold``, ``hash_rows``, ``is_duplicated``,
-    ``is_unique``, ``drop_in_place``, ``to_struct`` must return ``hea.Series``."""
+    ``is_unique``, ``drop_in_place``, ``to_struct`` must return ``hea.tidy.Series``."""
     df_num = df.select("x", "y").cast({pl.Int64: pl.Float64})
     cases = [
         ("get_column",     lambda: df.get_column("x")),
@@ -624,7 +624,7 @@ def test_df_series_returning_methods_return_hea_series(df: DataFrame):
 
 
 def test_series_chain_round_trip(s: Series):
-    """End-to-end: hea.Series → hea.Series → hea.DataFrame stays in hea-land."""
+    """End-to-end: hea.tidy.Series → hea.tidy.Series → hea.tidy.DataFrame stays in hea-land."""
     out = s.filter(s > 1).unique().to_frame()
     assert isinstance(out, DataFrame)
 

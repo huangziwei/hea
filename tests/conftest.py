@@ -63,14 +63,14 @@ _current_ordered_cols: "set[str]" = set()
 
 
 def load_dataset(pkg: str, name: str) -> pl.DataFrame:
-    """Test-side dataset loader. Delegates to ``hea.data.data`` (which
+    """Test-side dataset loader. Delegates to ``hea.data`` (which
     routes to ``rdatasets`` when covered, bundled CSV otherwise) and caches
     the result so repeated fixture loads are cheap.
 
     Drops the ``rowname`` column (R's row.names preserved on the bundled-CSV
     side, ``rownames`` injected on the rdatasets side). All R-side fixtures
     were generated without it, so ``y ~ .`` expansions and column lists
-    would mismatch otherwise. User-facing ``hea.data.data`` keeps the
+    would mismatch otherwise. User-facing ``hea.data`` keeps the
     column — that's the whole point of preserving meaningful row names
     like the Galápagos island IDs in ``faraway::gala``.
     """

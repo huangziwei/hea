@@ -252,7 +252,7 @@ def _fit_predict(method: str, formula: str | None,
         return yhat, se
 
     if method == "lm":
-        from ...lm import lm
+        from ...models.lm import lm
 
         fml = formula or "y ~ x"
         fit = lm(fml, pl.DataFrame({"x": x, "y": y}))
@@ -269,7 +269,7 @@ def _fit_predict(method: str, formula: str | None,
         return yhat, se
 
     if method == "gam":
-        from ...gam import gam
+        from ...models.gam import gam
 
         fml = formula or "y ~ s(x)"
         fit = gam(fml, pl.DataFrame({"x": x, "y": y}))
@@ -281,7 +281,7 @@ def _fit_predict(method: str, formula: str | None,
         return np.asarray(yhat), np.asarray(se)
 
     if method == "glm":
-        from ...glm import glm
+        from ...models.glm import glm
 
         fml = formula or "y ~ x"
         fam = _resolve_family(family)

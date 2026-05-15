@@ -98,17 +98,17 @@ def _check_predict_no_newdata(m):
 
 
 def test_predict_gaussian_identity():
-    m = hea.bam("y ~ s(x, k=5)", _gauss_data())
+    m = hea.models.bam("y ~ s(x, k=5)", _gauss_data())
     _check_predict_no_newdata(m)
 
 
 def test_predict_poisson_pirls():
-    m = hea.bam("y ~ s(x, k=5)", _poisson_data(), family=Poisson())
+    m = hea.models.bam("y ~ s(x, k=5)", _poisson_data(), family=Poisson())
     _check_predict_no_newdata(m)
 
 
 def test_predict_poisson_discrete():
-    m = hea.bam("y ~ s(x, k=5)", _poisson_data(),
+    m = hea.models.bam("y ~ s(x, k=5)", _poisson_data(),
                 family=Poisson(), discrete=True)
     _check_predict_no_newdata(m)
 
@@ -117,19 +117,19 @@ def test_predict_newdata_matches_in_sample():
     """``predict(newdata=df)`` agrees with cached fitted_values when df
     is the training frame — sanity-check the super().predict delegation."""
     df = _poisson_data()
-    m = hea.bam("y ~ s(x, k=5)", df, family=Poisson(), discrete=True)
+    m = hea.models.bam("y ~ s(x, k=5)", df, family=Poisson(), discrete=True)
     yhat = m.predict(newdata=df)["fit"].to_numpy()
     assert np.allclose(yhat, m.fitted_values, rtol=1e-12, atol=1e-12)
 
 
 def test_predict_lpmatrix_invalid_with_se():
-    m = hea.bam("y ~ s(x, k=5)", _gauss_data())
+    m = hea.models.bam("y ~ s(x, k=5)", _gauss_data())
     with pytest.raises(ValueError, match="se_fit=True is not allowed"):
         m.predict(type="lpmatrix", se_fit=True)
 
 
 def test_predict_unknown_type():
-    m = hea.bam("y ~ s(x, k=5)", _gauss_data())
+    m = hea.models.bam("y ~ s(x, k=5)", _gauss_data())
     with pytest.raises(ValueError, match="type must be"):
         m.predict(type="bogus")
 
@@ -156,7 +156,7 @@ def _to_dat(df: pl.DataFrame) -> dict:
 def test_chicago_simple():
     """5-smooth Poisson on chicago, no matrix args."""
     dat = _to_dat(_load_chicago())
-    m = hea.bam(
+    m = hea.models.bam(
         "death ~ s(time, k=200) + s(pm10median) + s(o3median) + "
         "s(so2median) + s(tmpd)",
         dat, family=Poisson(), discrete=True,
@@ -205,7 +205,7 @@ def test_chicago_lag():
     dat2["pm10_lag"] = pm10_lag[good]
     dat2["lag_idx"] = lag_idx[good]
 
-    m = hea.bam(
+    m = hea.models.bam(
         "death ~ s(time, k=200) + te(pm10_lag, lag_idx, k=c(10, 5)) "
         "+ s(tmpd)",
         dat2, family=Poisson(), discrete=True,
@@ -255,7 +255,7 @@ def test_small_data_force_sp():
     to ≤ 1e-9 (gauge-invariant predictive equivalence)."""
     dat = _load_small_dat()
     sp_mgcv = np.atleast_1d(np.loadtxt(_SMALL / "sp.csv"))
-    m = hea.bam("y ~ te(pm10, lag, k=c(5, 3))", dat,
+    m = hea.models.bam("y ~ te(pm10, lag, k=c(5, 3))", dat,
                 family=Poisson(), discrete=True, sp=sp_mgcv)
 
     fit_mgcv = np.loadtxt(_SMALL / "fitted.csv")
@@ -278,7 +278,7 @@ def test_small_data_auto_sp():
     be within 1e-5 because the basin is flat and both impls minimise
     REML to machine precision."""
     dat = _load_small_dat()
-    m = hea.bam("y ~ te(pm10, lag, k=c(5, 3))", dat,
+    m = hea.models.bam("y ~ te(pm10, lag, k=c(5, 3))", dat,
                 family=Poisson(), discrete=True)
 
     fit_mgcv = np.loadtxt(_SMALL / "fitted.csv")

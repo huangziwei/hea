@@ -215,15 +215,29 @@ def _build_exec_namespace(caller) -> dict:
     Order matters — caller globals first (broadest), then locals (most
     specific), then hea names if not already shadowed. This lets the user
     override a hea name in their own scope without surprise.
+
+    Translated Python uses bare names (``col``, ``lit``, ``lm``, ``data``,
+    ``case_when``, …) because that's how the source R script writes them.
+    The top-level ``hea.*`` only exposes sub-modules now, so we pull names
+    out of every user-facing sub-namespace and seed them into the exec
+    namespace.
     """
     import hea  # local to avoid import-time cycles
 
     ns: dict = dict(caller.f_globals)
     ns.update(caller.f_locals)
+    # Top-level hea attrs (the sub-modules themselves: hea.tidy, hea.models, …).
     for name in dir(hea):
         if name.startswith("_"):
             continue
         ns.setdefault(name, getattr(hea, name))
+    # Names from every user-facing sub-namespace — col / lit / DataFrame /
+    # lm / Binomial / anova / t_test / data / etc.
+    for sub in (hea.tidy, hea.dtypes, hea.io, hea.models, hea.family,
+                hea.R, hea.data, hea.emmeans, hea.session_info):
+        for name in dir(sub):
+            if not name.startswith("_"):
+                ns.setdefault(name, getattr(sub, name))
     return ns
 
 

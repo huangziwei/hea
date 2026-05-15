@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from hea import data
+from hea.data import data
 from hea.data import _dataset_index
 
 

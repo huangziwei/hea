@@ -46,9 +46,9 @@ import polars as pl
 import pytest
 
 from conftest import load_dataset
-from hea import gam, glm
+from hea.models import gam, glm
 from hea.family import Gamma, Tweedie, tw
-from hea.gam import VisResult
+from hea.models.gam import VisResult
 
 matplotlib.use("Agg")  # headless — must be set before pyplot import below.
 import matplotlib.pyplot as plt   # noqa: E402
@@ -377,7 +377,7 @@ def test_data_helper_applies_schema_sidecar():
     / by=factor / fs / sz smooths silently take the non-factor fallthrough
     path — which is the Machines b1/b2 footgun (AIC ~337 instead of ~165).
     """
-    from hea import data
+    from hea.data import data
     d = data("Machines", "nlme")
     assert isinstance(d.schema["Worker"], pl.Enum), \
         f"Worker should be pl.Enum, got {d.schema['Worker']}"
@@ -386,10 +386,10 @@ def test_data_helper_applies_schema_sidecar():
 
 
 def test_factor_helper():
-    """`hea.factor()` is the polars equivalent of R's factor() — the
+    """`hea.R.factor()` is the polars equivalent of R's factor() — the
     user-side fix for wild-data Int64-stored factor columns.
     """
-    from hea import factor
+    from hea.R import factor
     from hea.formula import _ORDERED_COLS_CV, set_ordered_cols
 
     # Bypass `hea.data` (which applies our schema sidecar) to simulate the
@@ -448,55 +448,54 @@ def test_factor_helper():
 
 
 def test_factor_deferred_in_mutate_and_select():
-    """`hea.factor("col")` returns a placeholder so the tidyverse-style
-    ``df.mutate(species=hea.factor("species"))`` works — the eager Series
-    form would force ``df.with_columns(hea.factor(df["species"]))``,
+    """`hea.R.factor("col")` returns a placeholder so the tidyverse-style
+    ``df.mutate(species=hea.R.factor("species"))`` works — the eager Series
+    form would force ``df.with_columns(hea.R.factor(df["species"]))``,
     repeating the frame name. ``mutate`` / ``select`` peek at the frame
     to auto-detect Enum levels at call time.
     """
     import hea
-    from hea import factor
-
+    from hea.R import factor
     df = pl.DataFrame({"g": ["b", "a", "b", "a"], "x": [1.0, 2.0, 3.0, 4.0]})
 
     # Auto-detect levels via mutate(str)
-    out = hea.DataFrame._from_pydf(df._df).mutate(g=factor("g"))
+    out = hea.tidy.DataFrame._from_pydf(df._df).mutate(g=factor("g"))
     assert isinstance(out.schema["g"], pl.Enum)
     assert out.schema["g"].categories.to_list() == ["a", "b"]
 
     # Explicit levels via mutate(str, levels=)
-    out2 = hea.DataFrame._from_pydf(df._df).mutate(g=factor("g", levels=["b", "a"]))
+    out2 = hea.tidy.DataFrame._from_pydf(df._df).mutate(g=factor("g", levels=["b", "a"]))
     assert out2.schema["g"].categories.to_list() == ["b", "a"]
 
     # labels= rename in one pass
-    out3 = hea.DataFrame._from_pydf(df._df).mutate(
+    out3 = hea.tidy.DataFrame._from_pydf(df._df).mutate(
         g=factor("g", labels={"a": "Alpha", "b": "Bravo"})
     )
     assert out3["g"].to_list() == ["Bravo", "Alpha", "Bravo", "Alpha"]
 
     # pl.Expr form also resolves
-    out4 = hea.DataFrame._from_pydf(df._df).mutate(g=factor(pl.col("g")))
+    out4 = hea.tidy.DataFrame._from_pydf(df._df).mutate(g=factor(pl.col("g")))
     assert isinstance(out4.schema["g"], pl.Enum)
 
     # select() integration: rename + factor in one verb
-    out5 = hea.DataFrame._from_pydf(df._df).select("x", grp=factor("g"))
+    out5 = hea.tidy.DataFrame._from_pydf(df._df).select("x", grp=factor("g"))
     assert out5.columns == ["x", "grp"]
     assert isinstance(out5.schema["grp"], pl.Enum)
 
     # strict= threads through deferred path
     df_typo = pl.DataFrame({"g": ["a", "b", "x", "a"]})
-    out6 = hea.DataFrame._from_pydf(df_typo._df).mutate(
+    out6 = hea.tidy.DataFrame._from_pydf(df_typo._df).mutate(
         g=factor("g", levels=["a", "b"])
     )
     assert out6["g"].to_list() == ["a", "b", None, "a"]
     with pytest.raises(pl.exceptions.InvalidOperationError):
-        hea.DataFrame._from_pydf(df_typo._df).mutate(
+        hea.tidy.DataFrame._from_pydf(df_typo._df).mutate(
             g=factor("g", levels=["a", "b"], strict=True)
         )
 
     # Auto-detect raises a clear error if the column isn't in the frame
     with pytest.raises(ValueError, match="auto-detect levels"):
-        hea.DataFrame._from_pydf(df._df).mutate(g=factor("missing"))
+        hea.tidy.DataFrame._from_pydf(df._df).mutate(g=factor("missing"))
 
 
 # Tests for parse_number / if_else / case_when moved to test_dataframe.py
@@ -537,7 +536,7 @@ def test_predict_inSample_matches_fitted():
 
 def test_pirls_init_canonical_inverse_gaussian():
     """IG canonical fit on Wald-distributed data must converge."""
-    from hea import inverse_gaussian
+    from hea.family import inverse_gaussian
     rng = np.random.default_rng(0)
     n = 200
     x = rng.uniform(0.0, 1.0, n)
@@ -585,7 +584,7 @@ def test_trees_gamma_log_smoke():
     """trees + Gamma(log), method='REML': pin family-agnostic post-fit values
     against mgcv (those that don't depend on sp), and hea's current
     sp-dependent values as a regression guard until Phase 2 lands."""
-    from hea import Gamma
+    from hea.family import Gamma
     d = load_dataset("R", "trees")
     m = gam("Volume ~ s(Height) + s(Girth)", d, family=Gamma(link="log"),
             method="REML")
@@ -700,7 +699,8 @@ def test_reml_finite_for_trees_gamma_log():
     """Sanity: for the converged Gamma(log) fit, `_reml` returns a
     finite value at the hea-current sp. (Phase 2.2 makes φ̂ a joint outer
     variable; this just ensures the formula is wired up correctly.)"""
-    from hea import Gamma, gam
+    from hea.models import gam
+    from hea.family import Gamma
     d = load_dataset("R", "trees")
     m = gam("Volume ~ s(Height) + s(Girth)", d,
             family=Gamma(link="log"), method="REML")
@@ -899,7 +899,8 @@ def test_check_outer_info_is_populated_after_fit():
 def test_gam_offset_in_formula_matches_glm():
     """No smooths → gam == glm. Offset(...) inside the formula must
     propagate identically through both."""
-    from hea import glm, Quasi
+    from hea.models import glm
+    from hea.family import Quasi
     d = load_dataset("MASS", "quine")  # count data
     # Synthetic offset column to exercise the path.
     d = d.with_columns(off=pl.lit(0.3) * pl.col("Days").cast(pl.Float64).clip(lower_bound=1).log())
@@ -925,7 +926,7 @@ def test_gam_offset_kwarg_equivalent_to_formula_offset():
         "x": rng.standard_normal(n),
         "off_col": rng.uniform(0.0, 1.0, n),
     })
-    from hea import Poisson
+    from hea.family import Poisson
     a = gam("y ~ offset(off_col) + x", family=Poisson(), data=d, method="REML")
     b = gam("y ~ x", family=Poisson(), data=d, method="REML",
             offset=d["off_col"].to_numpy())
@@ -940,7 +941,7 @@ def test_gam_gamma_kwarg_matches_mgcv_on_trees():
     Pinned: trees + Gamma(log), GCV.Cp and REML, both γ=1 and γ=1.4.
     Criterion values come from mgcv 1.9.4 directly.
     """
-    from hea import Gamma
+    from hea.family import Gamma
     trees = load_dataset("mgcv", "trees")
 
     # GCV.Cp path
@@ -975,7 +976,7 @@ def test_plot_smooth_dispatches_2d_to_contour():
     (Wood 2017 Fig. 4.14 — bold/dashed/dotted contours + data scatter)."""
     import matplotlib
     matplotlib.use("Agg")
-    from hea import Gamma
+    from hea.family import Gamma
     trees = load_dataset("mgcv", "trees")
     ct5 = gam("Volume ~ s(Height, Girth, k=25)",
               family=Gamma(link="log"), data=trees)
@@ -1003,7 +1004,7 @@ def test_plot_smooth_all_terms_factor_termplot():
     the factor — Wood 2017 Fig. 4.15."""
     import matplotlib
     matplotlib.use("Agg")
-    from hea import Gamma
+    from hea.family import Gamma
     trees = load_dataset("mgcv", "trees").with_columns(
         Hclass=((pl.col("Height") / 10).floor() - 5)
             .cast(pl.Int64)
@@ -1070,7 +1071,7 @@ def test_plot_smooth_scheme_persp_for_2d():
     import matplotlib
     matplotlib.use("Agg")
     from mpl_toolkits.mplot3d import Axes3D
-    from hea import Gamma
+    from hea.family import Gamma
     trees = load_dataset("mgcv", "trees")
     m = gam("Volume ~ s(Height, Girth, k=20)",
             family=Gamma(link="log"), data=trees)
@@ -1093,7 +1094,7 @@ def test_plot_smooth_scheme_per_panel_list():
     import matplotlib
     matplotlib.use("Agg")
     from mpl_toolkits.mplot3d import Axes3D
-    from hea import Gamma
+    from hea.family import Gamma
     trees = load_dataset("mgcv", "trees")
     m = gam("Volume ~ s(Height) + s(Height, Girth, k=20)",
             family=Gamma(link="log"), data=trees)
@@ -1114,7 +1115,7 @@ def test_plot_smooth_ax_3d_required_for_persp():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea import Gamma
+    from hea.family import Gamma
     trees = load_dataset("mgcv", "trees")
     m = gam("Volume ~ s(Height, Girth, k=20)",
             family=Gamma(link="log"), data=trees)
@@ -1146,7 +1147,7 @@ def test_gam_predict_reevaluates_offset_on_newdata():
         "x": rng.standard_normal(n),
         "off_col": rng.uniform(0.5, 1.5, n),
     })
-    from hea import Poisson
+    from hea.family import Poisson
     m = gam("y ~ offset(off_col) + x", family=Poisson(), data=d, method="REML")
     # Same X but a different offset column → η̂ should shift by exactly Δoffset.
     new = d.with_columns((pl.col("off_col") + 2.0).alias("off_col"))
@@ -1255,8 +1256,7 @@ def test_select_true_binomial_summary_matches_mgcv():
     not t/F. Pinned to mgcv on wesdr at mgcv's converged sp.
     """
     from scipy.stats import norm
-    from hea import Binomial
-
+    from hea.family import Binomial
     d = load_dataset("gamair", "wesdr")
     sp_mgcv = np.array([
         0.0164113465035,  4.59199813892,  # s(dur): wig, null
@@ -1362,7 +1362,7 @@ def test_wesdr_binomial_ML():
         REML sp ≈ (0.0565, 4205, 0.1277), edf 9.117, score 386.350
         ML   sp ≈ (0.0787, 34055, 0.2153), edf 8.417, score 384.004
     """
-    from hea import Binomial
+    from hea.family import Binomial
     d = load_dataset("gamair", "wesdr")
     m_ml = gam("ret ~ s(dur) + s(gly) + s(bmi)",
                d, family=Binomial(), method="ML")

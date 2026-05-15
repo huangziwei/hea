@@ -7,9 +7,9 @@ from scipy.linalg import cholesky, lu, qr, solve_triangular
 from scipy.optimize import minimize
 from scipy.stats import f, norm, t
 
-from .formula import _eval_atom, materialize
-from .design import prepare_design
-from .utils import (
+from ..formula import _eval_atom, materialize
+from ..design import prepare_design
+from ..utils import (
     _dig_tst,
     format_df,
     format_pval,
@@ -447,7 +447,7 @@ class lm:
             bhat, self.XtX, self.Xty = self.compute_bhat(X, y_solve, W, method)
 
         self._bhat_arr = np.asarray(bhat).reshape(-1)
-        from .named_vector import NamedVector
+        from ..R import NamedVector
 
         self.bhat = _row_frame(self._bhat_arr, self.column_names)
         # R-canonical alias: ``m$coef`` is a named numeric vector, so we
@@ -1002,7 +1002,7 @@ class lm:
         Levels of every categorical RHS predictor are concatenated with
         ``:`` (matching R's ``apply(..., paste, collapse=":")``); models
         with no categorical predictor fall back to observation index."""
-        from .formula import referenced_columns
+        from ..formula import referenced_columns
 
         referenced = referenced_columns(self._expanded)
         factor_cols = [

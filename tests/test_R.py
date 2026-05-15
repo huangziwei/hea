@@ -96,8 +96,8 @@ def test_colnames_and_names(df):
 
 
 def test_summary_dispatches_on_hea_dataframe():
-    """``summary(hea.DataFrame)`` must reach the existing ``.summary()``."""
-    d = hea.tbl(pl.DataFrame({"x": [1.0, 2.0, 3.0]}))
+    """``summary(hea.tidy.DataFrame)`` must reach the existing ``.summary()``."""
+    d = hea.tidy.tbl(pl.DataFrame({"x": [1.0, 2.0, 3.0]}))
     out = summary(d)
     # Existing .summary() returns a Summary object with __repr__
     assert "Min" in repr(out)
@@ -460,7 +460,7 @@ def test_factor_accepts_list_and_unknown_value_handling():
 
 def test_factor_repr_appends_levels_line():
     """R prints ``Levels: ...`` after the values — useful for inspecting
-    factor objects. The hea.Series repr override appends the line when
+    factor objects. The hea.tidy.Series repr override appends the line when
     dtype is ``pl.Enum``. Non-enum series are unchanged.
     """
     y1 = factor(["Dec", "Apr", "Jan", "Mar"])  # auto: alphabetical
@@ -511,7 +511,7 @@ def test_ordered_factor_renders_with_lt_separators():
     prev = _ORDERED_COLS_CV.get()
     try:
         s = pl.Series("g", ["a", "b", "c"]).cast(pl.Enum(["a", "b", "c"]))
-        hea_s = hea.Series._from_pyseries(s._s)
+        hea_s = hea.tidy.Series._from_pyseries(s._s)
         # No local marker → check before registration: should be space-separated
         assert "Levels: a b c" in str(hea_s)
         # Now register the name in the ordered-cols contextvar
@@ -589,6 +589,7 @@ _R_EXPR_SKIP = {
     "predict", "confint", "vcov", "logLik", "deviance",
     "nobs", "df_residual", "formula", "model_matrix", "model_frame",
     "terms", "update", "AIC", "BIC",
+    "anova", "add1", "drop1", "step",
     "hatvalues", "rstandard", "rstudent",
     "cooks_distance", "dffits", "dfbetas", "influence",
     # Distribution PDFs/CDFs/quantiles/random — scalar in, scalar out.
@@ -800,24 +801,24 @@ def gala():
 
 @pytest.fixture(scope="module")
 def m_lm(gala):
-    return hea.lm("Species ~ Area + Elevation", gala)
+    return hea.models.lm("Species ~ Area + Elevation", gala)
 
 
 @pytest.fixture(scope="module")
 def m_glm(gala):
-    return hea.glm("Species ~ Area + Elevation", gala, family=hea.poisson())
+    return hea.models.glm("Species ~ Area + Elevation", gala, family=hea.family.poisson())
 
 
 @pytest.fixture(scope="module")
 def m_gam():
     mt = hea.data("mtcars", package="R")
-    return hea.gam("mpg ~ s(wt) + s(hp)", mt)
+    return hea.models.gam("mpg ~ s(wt) + s(hp)", mt)
 
 
 @pytest.fixture(scope="module")
 def m_lme():
     sleep = hea.data("sleepstudy", package="lme4")
-    return hea.lme("Reaction ~ Days + (Days|Subject)", sleep)
+    return hea.models.lme("Reaction ~ Days + (Days|Subject)", sleep)
 
 
 # ---- coef / coefficients / fixef ------------------------------------
@@ -825,7 +826,8 @@ def m_lme():
 
 def test_coef_returns_named_vector(m_lm):
     c = coef(m_lm)
-    assert isinstance(c, hea.NamedVector)
+    from hea.R import NamedVector
+    assert isinstance(c, NamedVector)
     assert set(c.names) == {"(Intercept)", "Area", "Elevation"}
     # Name and 0-based positional indexing both work.
     assert c["Area"] == c[1]["Area"]
@@ -939,8 +941,8 @@ def test_confint_dispatches_to_profile_object():
     mirroring R's S3 ``confint.profile`` dispatch — the
     ``lme4::profile`` workflow Bates uses in the lme book.
     """
-    from hea import data, lme
-
+    from hea.models import lme
+    from hea.data import data
     dye = data("Dyestuff")
     fm = lme("Yield ~ 1 + (1 | Batch)", dye, REML=False)
     pr = fm.profile()
@@ -1057,8 +1059,8 @@ def test_BIC_single_model_returns_scalar(m_lm):
 
 
 def test_AIC_multiple_models_returns_table(gala):
-    m1 = hea.lm("Species ~ Area", gala)
-    m2 = hea.lm("Species ~ Area + Elevation", gala)
+    m1 = hea.models.lm("Species ~ Area", gala)
+    m2 = hea.models.lm("Species ~ Area + Elevation", gala)
     out = R_AIC(m1, m2)
     assert isinstance(out, pl.DataFrame)
     assert out.height == 2
@@ -1147,7 +1149,7 @@ def test_rstudent_closed_form_matches_loo_refit(m_lm, gala):
 
     # Refit without row 0
     gala_drop0 = gala.slice(1)  # drop first row
-    m_drop0 = hea.lm("Species ~ Area + Elevation", gala_drop0)
+    m_drop0 = hea.models.lm("Species ~ Area + Elevation", gala_drop0)
     sigma_loo_0 = m_drop0.sigma  # σ from the leave-one-out fit
 
     expected_rs0 = e0 / (sigma_loo_0 * np.sqrt(1 - h0))
@@ -1200,7 +1202,7 @@ def test_dfbetas_matches_loo_refit_first_obs(m_lm, gala):
     out = dfbetas(m_lm).row(0)  # dfbetas for observation 0 across all coefs
 
     gala_drop0 = gala.slice(1)
-    m_drop0 = hea.lm("Species ~ Area + Elevation", gala_drop0)
+    m_drop0 = hea.models.lm("Species ~ Area + Elevation", gala_drop0)
     bhat_full = coef(m_lm).values
     bhat_drop = coef(m_drop0).values
     delta = bhat_full - bhat_drop
@@ -1228,7 +1230,7 @@ def test_influence_hat_matches_hatvalues(m_lm):
 def test_influence_sigma_at_obs0_matches_loo_refit(m_lm, gala):
     """``influence(m)['sigma'][0]`` should equal ``σ`` from the row-0-dropped fit."""
     sigma_full = influence(m_lm)["sigma"]
-    m_drop0 = hea.lm("Species ~ Area + Elevation", gala.slice(1))
+    m_drop0 = hea.models.lm("Species ~ Area + Elevation", gala.slice(1))
     assert sigma_full[0] == pytest.approx(m_drop0.sigma, rel=1e-8)
 
 
@@ -1248,10 +1250,10 @@ def test_weighted_lm_diagnostics_match_loo_refit(gala):
     leave-one-out refit to numerical precision."""
     rng = np.random.default_rng(0)
     w = rng.uniform(0.5, 2.0, gala.height)
-    m_w = hea.lm("Species ~ Area + Elevation", gala, weights=w)
+    m_w = hea.models.lm("Species ~ Area + Elevation", gala, weights=w)
 
     # Refit dropping observation 0
-    m_drop0 = hea.lm(
+    m_drop0 = hea.models.lm(
         "Species ~ Area + Elevation", gala.slice(1), weights=w[1:]
     )
     b_full = coef(m_w).values
@@ -1278,7 +1280,7 @@ def test_weighted_lm_rstudent_dffits_consistent(gala):
     """``DFFITS_i = rstudent_i · √(h_i / (1 - h_i))`` must hold for weighted lm."""
     rng = np.random.default_rng(1)
     w = rng.uniform(0.5, 2.0, gala.height)
-    m_w = hea.lm("Species ~ Area + Elevation", gala, weights=w)
+    m_w = hea.models.lm("Species ~ Area + Elevation", gala, weights=w)
     h = hatvalues(m_w)
     expected = rstudent(m_w) * np.sqrt(h / (1 - h))
     np.testing.assert_allclose(dffits(m_w), expected, rtol=1e-12)
@@ -1844,7 +1846,7 @@ from hea.R import (  # noqa: E402  — grouped with the deferred-fn tests
 @pytest.fixture(scope="module")
 def m_glm_gauss(gala):
     """Gaussian glm — used to verify jackknife formulas reduce to lm's."""
-    return hea.glm("Species ~ Area + Elevation", gala, family=hea.gaussian())
+    return hea.models.glm("Species ~ Area + Elevation", gala, family=hea.family.gaussian())
 
 
 def test_glm_rstudent_returns_array(m_glm):
@@ -1871,10 +1873,10 @@ def test_glm_dfbetas_closed_form_vs_loo_refit(gala, m_glm):
     coefficients when we drop observation 0 and refit.
     """
     predicted = np.array(dfbetas(m_glm).row(0))
-    m_drop0 = hea.glm(
+    m_drop0 = hea.models.glm(
         "Species ~ Area + Elevation",
         gala.slice(1),
-        family=hea.poisson(),
+        family=hea.family.poisson(),
     )
     bhat_full = coef(m_glm).values
     bhat_drop = coef(m_drop0).values
@@ -1911,7 +1913,7 @@ def test_glm_unknown_scale_uses_loo_deviance(m_glm_gauss):
 def test_gam_diagnostics_run_end_to_end():
     """gam uses the penalized full design ``_X_full``; check shapes only."""
     mt = hea.data("mtcars", package="R")
-    g = hea.gam("mpg ~ s(wt) + s(hp)", mt)
+    g = hea.models.gam("mpg ~ s(wt) + s(hp)", mt)
     assert rstudent(g).shape == (32,)
     assert dffits(g).shape == (32,)
     db = dfbetas(g)
@@ -1967,7 +1969,7 @@ def test_update_glm_carries_family(gala, m_glm):
 
 def test_update_glm_can_override_family(gala, m_glm):
     """Explicit ``family=`` in kwargs wins over the auto-forward."""
-    new = update(m_glm, "Species ~ Area + Elevation", family=hea.gaussian())
+    new = update(m_glm, "Species ~ Area + Elevation", family=hea.family.gaussian())
     assert type(new.family).__name__ == "Gaussian"
 
 
@@ -1988,7 +1990,7 @@ def test_update_carries_weights_for_lm(gala):
     """``weights`` is auto-forwarded when the model was fit with weights."""
     rng = np.random.default_rng(0)
     w = rng.uniform(0.5, 2.0, gala.height)
-    m_w = hea.lm("Species ~ Area", gala, weights=w)
+    m_w = hea.models.lm("Species ~ Area", gala, weights=w)
     new = update(m_w, ". ~ . + Elevation")
     assert new.weights is not None
     np.testing.assert_array_equal(new.weights, w)
@@ -1997,7 +1999,7 @@ def test_update_carries_weights_for_lm(gala):
 def test_update_carries_method_for_gam():
     """``method`` (REML/ML) is auto-forwarded for gam."""
     mt = hea.data("mtcars", package="R")
-    m_gam_reml = hea.gam("mpg ~ s(wt)", mt, method="REML")
+    m_gam_reml = hea.models.gam("mpg ~ s(wt)", mt, method="REML")
     new = update(m_gam_reml, ". ~ . + s(hp)")
     assert new.method == "REML"
 
@@ -2006,7 +2008,7 @@ def test_update_kwargs_override_auto_forward(gala):
     """Explicit kwargs win over the auto-forward."""
     rng = np.random.default_rng(0)
     w = rng.uniform(0.5, 2.0, gala.height)
-    m_w = hea.lm("Species ~ Area", gala, weights=w)
+    m_w = hea.models.lm("Species ~ Area", gala, weights=w)
     # Override: refit unweighted
     new = update(m_w, ". ~ . + Elevation", weights=None)
     assert new.weights is None

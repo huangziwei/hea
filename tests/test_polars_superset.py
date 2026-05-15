@@ -1,21 +1,22 @@
-"""Phase 5 regression test: hea is a strict superset of polars.
+"""Namespace contract: polars passthrough lives in sub-modules.
 
-Two layers:
+The top-level ``hea`` namespace is intentionally empty of polars names
+— no ``hea.col``, ``hea.Int64``, ``hea.read_csv``. The polars passthrough
+splits across three hea sub-modules:
 
-1. **Coverage check** — every name in ``polars.__all__`` is reachable via
-   ``hea.*``. New polars releases that add a public name will fail this
-   test until categorized (either re-exported as-is or wrapped).
-2. **Targeted tests** — wrapped factories (constructors / I/O readers /
-   scanners) return ``hea.DataFrame`` / ``hea.LazyFrame``; expression
-   builders pass through unchanged.
+* ``hea.tidy``   — expression builders (``col``, ``lit``, ``when``,
+                   ``coalesce``, the horizontal reducers) plus the
+                   ``DataFrame`` / ``LazyFrame`` / ``Series`` subclasses
+* ``hea.dtypes`` — every polars datatype (``Int64``, ``String``, …)
+* ``hea.io``     — readers / scanners / DataFrame factories
+                   (``read_csv``, ``concat``, ``from_dict``, …) — wrapped
+                   so the result is the hea subclass
 
-Pinned polars version (``pyproject.toml``); bump cadence runs this test.
+Polars's own sub-namespaces (``api``, ``exceptions``, ``plugins``,
+``selectors``) ARE re-exported at the top level as a stable convention.
 """
 
 from __future__ import annotations
-
-import os
-import tempfile
 
 import polars as pl
 import pytest
@@ -24,153 +25,109 @@ import hea
 
 
 # ---------------------------------------------------------------------------
-# 1. Coverage — strict superset
+# 1. Top-level shape — sub-modules only, no polars name leaks
 # ---------------------------------------------------------------------------
 
 
-def test_hea_dir_is_superset_of_polars_all():
-    """``dir(hea) ⊇ pl.__all__`` — the foundation of the 100%-superset goal."""
-    hea_public = {n for n in dir(hea) if not n.startswith("_")}
-    pl_all = set(pl.__all__)
-    missing = pl_all - hea_public
-    assert not missing, (
-        f"polars added public names that hea doesn't re-export: {sorted(missing)}. "
-        "Star import in hea/__init__.py should cover them automatically — "
-        "check whether polars's __all__ has changed or whether the import order "
-        "is dropping these names."
-    )
-
-
-def test_hea_overrides_match_actual_shadows():
-    """``_HEA_OVERRIDES`` must equal the set of polars names hea re-binds.
-
-    Already enforced at import time (raises in ``hea/__init__.py``); this
-    test gives a clear failure message if a developer changes the override
-    list and forgets to update _HEA_OVERRIDES.
-    """
-    pl_all = set(pl.__all__)
-    actual_shadows = {
-        n for n in pl_all
-        if hasattr(hea, n) and getattr(hea, n) is not getattr(pl, n)
-    }
-    assert actual_shadows == set(hea._HEA_OVERRIDES), (
-        f"hea shadows {sorted(actual_shadows)} but _HEA_OVERRIDES "
-        f"declares {sorted(hea._HEA_OVERRIDES)}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# 2. Wrapped factories return hea subclasses
-# ---------------------------------------------------------------------------
-
-
-def test_constructors_return_hea_dataframe():
-    cases = [
-        ("from_dict",     lambda: hea.from_dict({"x": [1, 2, 3]})),
-        ("from_dicts",    lambda: hea.from_dicts([{"x": 1}, {"x": 2}])),
-        ("from_records",  lambda: hea.from_records([(1, 2), (3, 4)], schema=["a", "b"])),
-        ("concat",        lambda: hea.concat([
-                              hea.from_dict({"x": [1]}),
-                              hea.from_dict({"x": [2]}),
-                          ])),
-    ]
-    for name, fn in cases:
-        result = fn()
-        assert isinstance(result, hea.DataFrame), (
-            f"hea.{name}(...) returned {type(result).__module__}.{type(result).__name__}"
+def test_top_level_carries_no_polars_names():
+    """``hea.col``, ``hea.Int64``, ``hea.read_csv`` must all fail.
+    Anything in ``pl.__all__`` is inaccessible at the top-level — except
+    the three data type classes (which appear at top-level *as hea
+    subclasses*, never the raw polars versions) and the four polars
+    sub-namespaces."""
+    type_allowlist = {"DataFrame", "LazyFrame", "Series"}
+    sub_namespace_allowlist = {"api", "exceptions", "plugins", "selectors"}
+    for name in pl.__all__:
+        if name in sub_namespace_allowlist | type_allowlist:
+            continue
+        assert not hasattr(hea, name), (
+            f"hea.{name} leaked at top level — polars names should live "
+            "in hea.tidy / hea.dtypes / hea.io instead"
         )
 
 
-def test_concat_polymorphic_lazyframe():
-    """``concat`` of LazyFrames should return ``hea.LazyFrame``."""
-    lf = hea.from_dict({"x": [1, 2]}).lazy()
-    out = hea.concat([lf, lf])
-    assert isinstance(out, hea.LazyFrame)
+def test_top_level_data_classes_are_hea_subclasses():
+    """``hea.DataFrame`` / ``hea.LazyFrame`` / ``hea.Series`` are the hea
+    subclasses, not raw polars. Users get the tidyverse verbs for free."""
+    assert hea.DataFrame is hea.tidy.DataFrame
+    assert hea.LazyFrame is hea.tidy.LazyFrame
+    assert hea.Series is hea.tidy.Series
+    assert hea.DataFrame is not pl.DataFrame
+    assert hea.LazyFrame is not pl.LazyFrame
+    assert hea.Series is not pl.Series
+    assert issubclass(hea.DataFrame, pl.DataFrame)
+    assert issubclass(hea.LazyFrame, pl.LazyFrame)
+    assert issubclass(hea.Series, pl.Series)
 
 
-def test_read_csv_returns_hea_dataframe(tmp_path):
-    p = tmp_path / "x.csv"
-    p.write_text("a,b\n1,2\n3,4\n")
-    df = hea.read_csv(str(p))
-    assert isinstance(df, hea.DataFrame)
-
-
-def test_scan_csv_returns_hea_lazyframe(tmp_path):
-    p = tmp_path / "x.csv"
-    p.write_text("a,b\n1,2\n3,4\n")
-    lf = hea.scan_csv(str(p))
-    assert isinstance(lf, hea.LazyFrame)
-    df = lf.collect()
-    assert isinstance(df, hea.DataFrame)
-
-
-def test_read_parquet_returns_hea_dataframe(tmp_path):
-    p = str(tmp_path / "x.parquet")
-    hea.from_dict({"x": [1, 2, 3]}).write_parquet(p)
-    df = hea.read_parquet(p)
-    assert isinstance(df, hea.DataFrame)
-
-
-def test_scan_parquet_returns_hea_lazyframe(tmp_path):
-    p = str(tmp_path / "x.parquet")
-    hea.from_dict({"x": [1, 2, 3]}).write_parquet(p)
-    lf = hea.scan_parquet(p)
-    assert isinstance(lf, hea.LazyFrame)
-
-
-def test_merge_sorted_polymorphic():
-    """``merge_sorted`` is polymorphic — DataFrames in, DataFrame out."""
-    df = hea.from_dict({"x": [1, 3]}).sort("x")
-    out = hea.merge_sorted([df, df], key="x")
-    assert isinstance(out, hea.DataFrame)
+def test_polars_sub_namespaces_are_re_exported():
+    assert hea.selectors is pl.selectors
+    assert hea.api is pl.api
+    assert hea.exceptions is pl.exceptions
+    assert hea.plugins is pl.plugins
 
 
 # ---------------------------------------------------------------------------
-# 3. Expression builders, dtypes, sub-namespaces pass through unchanged
+# 2. hea.tidy — expression builders + DataFrame subclasses
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("name", [
-    "col", "lit", "when", "sum", "mean", "count", "len", "min", "max",
-    "concat_str", "concat_list", "all", "any",
-    "fold", "format", "select", "struct", "duration",
-    "date_range", "datetime_range",
+    "col", "lit", "when", "coalesce",
+    "concat_str", "concat_list",
+    "all_horizontal", "any_horizontal",
+    "min_horizontal", "max_horizontal", "mean_horizontal", "sum_horizontal",
+    "Expr", "Schema",
 ])
-def test_expr_builder_is_polars_function(name):
-    # ``exclude`` / ``first`` / ``last`` / ``nth`` are intentionally shadowed
-    # (see _HEA_OVERRIDES) — dplyr-shaped versions live in hea.dataframe.
-    # Covered separately below / in test_dataframe.py.
-    assert getattr(hea, name) is getattr(pl, name)
+def test_tidy_re_exports_polars_expr(name):
+    """``hea.tidy.col`` etc. are the polars originals — no wrapping."""
+    assert getattr(hea.tidy, name) is getattr(pl, name)
 
 
-def test_hea_exclude_extends_polars_exclude():
-    """``hea.exclude`` accepts everything ``pl.exclude`` does plus
-    DataFrame/Series/list. Names-and-strings path must produce the same
-    Expr as ``pl.exclude`` for a representative input."""
-    df = hea.DataFrame({"a": [1], "b": [2], "c": [3]})
-    assert df.select(hea.exclude("a")).columns == df.select(pl.exclude("a")).columns
+def test_tidy_dataframe_is_hea_subclass():
+    assert hea.tidy.DataFrame is not pl.DataFrame
+    assert issubclass(hea.tidy.DataFrame, pl.DataFrame)
+
+
+def test_tidy_lazyframe_is_hea_subclass():
+    assert hea.tidy.LazyFrame is not pl.LazyFrame
+    assert issubclass(hea.tidy.LazyFrame, pl.LazyFrame)
+
+
+def test_tidy_series_is_hea_subclass():
+    assert hea.tidy.Series is not pl.Series
+    assert issubclass(hea.tidy.Series, pl.Series)
+
+
+def test_tidy_exclude_extends_polars_exclude():
+    """``hea.tidy.exclude`` accepts everything ``pl.exclude`` does plus
+    DataFrame/Series/list."""
+    df = hea.tidy.DataFrame({"a": [1], "b": [2], "c": [3]})
+    assert df.select(hea.tidy.exclude("a")).columns == df.select(pl.exclude("a")).columns
     # Slice-of-DataFrame form (the new affordance).
-    assert df.select(hea.exclude(df["a":"b"])).columns == ["c"]
+    assert df.select(hea.tidy.exclude(df["a":"b"])).columns == ["c"]
 
 
-def test_dplyr_named_aliases_route_to_polars():
-    """``hea.n`` / ``hea.n_distinct`` are dplyr-named aliases for the
-    polars row-count and unique-count expressions."""
-    assert hea.n is pl.len
-    assert hea.n_distinct is pl.n_unique
-    # End-to-end inside a summarize pipeline (the use case that motivates
-    # exposing these names at all).
-    df = hea.DataFrame({
+def test_tidy_n_and_n_distinct_alias_polars():
+    """``hea.tidy.n`` / ``hea.tidy.n_distinct`` are dplyr-named aliases."""
+    assert hea.tidy.n is pl.len
+    assert hea.tidy.n_distinct is pl.n_unique
+    df = hea.tidy.DataFrame({
         "dest": ["A", "A", "B", "B", "B"],
         "carrier": ["UA", "DL", "UA", "UA", "AA"],
     })
     out = (
         df.group_by("dest")
-        .summarize(rows=hea.n(), carriers=hea.n_distinct("carrier"))
+        .summarize(rows=hea.tidy.n(), carriers=hea.tidy.n_distinct("carrier"))
         .arrange("dest")
     )
     assert out["rows"].to_list() == [2, 3]
     assert out["carriers"].to_list() == [2, 2]
+
+
+# ---------------------------------------------------------------------------
+# 3. hea.dtypes — every polars dtype is reachable
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("name", [
@@ -180,49 +137,81 @@ def test_dplyr_named_aliases_route_to_polars():
     "Object", "Null", "Decimal", "DataType",
 ])
 def test_dtype_is_polars_dtype(name):
-    assert getattr(hea, name) is getattr(pl, name)
-
-
-def test_sub_namespaces_re_exported():
-    assert hea.selectors is pl.selectors
-    assert hea.api is pl.api
-    assert hea.exceptions is pl.exceptions
-    assert hea.plugins is pl.plugins
+    assert getattr(hea.dtypes, name) is getattr(pl, name)
 
 
 # ---------------------------------------------------------------------------
-# 4. Class overrides — hea.DataFrame / hea.LazyFrame / hea.Series are subclasses
+# 4. hea.io — wrapped factories return hea subclasses
 # ---------------------------------------------------------------------------
 
 
-def test_dataframe_is_hea_subclass():
-    assert hea.DataFrame is hea.dataframe.DataFrame
-    assert hea.DataFrame is not pl.DataFrame
-    assert issubclass(hea.DataFrame, pl.DataFrame)
+def test_constructors_return_hea_dataframe():
+    cases = [
+        ("from_dict",    lambda: hea.io.from_dict({"x": [1, 2, 3]})),
+        ("from_dicts",   lambda: hea.io.from_dicts([{"x": 1}, {"x": 2}])),
+        ("from_records", lambda: hea.io.from_records([(1, 2), (3, 4)], schema=["a", "b"])),
+        ("concat",       lambda: hea.io.concat([
+                             hea.io.from_dict({"x": [1]}),
+                             hea.io.from_dict({"x": [2]}),
+                         ])),
+    ]
+    for name, fn in cases:
+        result = fn()
+        assert isinstance(result, hea.tidy.DataFrame), (
+            f"hea.io.{name}(...) returned {type(result).__module__}.{type(result).__name__}"
+        )
 
 
-def test_lazyframe_is_hea_subclass():
-    assert hea.LazyFrame is hea.dataframe.LazyFrame
-    assert hea.LazyFrame is not pl.LazyFrame
-    assert issubclass(hea.LazyFrame, pl.LazyFrame)
+def test_concat_polymorphic_lazyframe():
+    lf = hea.io.from_dict({"x": [1, 2]}).lazy()
+    out = hea.io.concat([lf, lf])
+    assert isinstance(out, hea.tidy.LazyFrame)
 
 
-def test_series_is_hea_subclass():
-    assert hea.Series is hea.dataframe.Series
-    assert hea.Series is not pl.Series
-    assert issubclass(hea.Series, pl.Series)
+def test_read_csv_returns_hea_dataframe(tmp_path):
+    p = tmp_path / "x.csv"
+    p.write_text("a,b\n1,2\n3,4\n")
+    df = hea.io.read_csv(str(p))
+    assert isinstance(df, hea.tidy.DataFrame)
+
+
+def test_scan_csv_returns_hea_lazyframe(tmp_path):
+    p = tmp_path / "x.csv"
+    p.write_text("a,b\n1,2\n3,4\n")
+    lf = hea.io.scan_csv(str(p))
+    assert isinstance(lf, hea.tidy.LazyFrame)
+    assert isinstance(lf.collect(), hea.tidy.DataFrame)
+
+
+def test_read_parquet_returns_hea_dataframe(tmp_path):
+    p = str(tmp_path / "x.parquet")
+    hea.io.from_dict({"x": [1, 2, 3]}).write_parquet(p)
+    df = hea.io.read_parquet(p)
+    assert isinstance(df, hea.tidy.DataFrame)
+
+
+def test_scan_parquet_returns_hea_lazyframe(tmp_path):
+    p = str(tmp_path / "x.parquet")
+    hea.io.from_dict({"x": [1, 2, 3]}).write_parquet(p)
+    lf = hea.io.scan_parquet(p)
+    assert isinstance(lf, hea.tidy.LazyFrame)
+
+
+def test_merge_sorted_polymorphic():
+    df = hea.io.from_dict({"x": [1, 3]}).sort("x")
+    out = hea.io.merge_sorted([df, df], key="x")
+    assert isinstance(out, hea.tidy.DataFrame)
 
 
 def test_end_to_end_chain_stays_in_hea():
     """Realistic chain: read → filter → groupby → collect — must stay hea."""
-    df = hea.from_dict({"g": ["a", "b", "a", "b"], "x": [1, 2, 3, 4]})
+    df = hea.io.from_dict({"g": ["a", "b", "a", "b"], "x": [1, 2, 3, 4]})
     out = (
-        df
-        .lazy()
-        .filter(hea.col("x") > 1)
-        .with_columns(z=hea.col("x") * 2)
+        df.lazy()
+        .filter(hea.tidy.col("x") > 1)
+        .with_columns(z=hea.tidy.col("x") * 2)
         .group_by("g")
-        .agg(hea.col("z").sum())
+        .agg(hea.tidy.col("z").sum())
         .collect()
     )
-    assert isinstance(out, hea.DataFrame)
+    assert isinstance(out, hea.tidy.DataFrame)

@@ -23,7 +23,7 @@ from hea.ggplot import (
 
 @pytest.fixture
 def mpg():
-    return hea.DataFrame({
+    return hea.tidy.DataFrame({
         "drv": ["f"]*5 + ["r"]*5 + ["4"]*5,
         "cty": [20.0, 22, 19, 21, 23, 14, 13, 15, 12, 16, 17, 18, 16, 19, 18],
         "hwy": [28.0, 30, 27, 29, 31, 22, 21, 23, 20, 24, 25, 26, 24, 27, 26],

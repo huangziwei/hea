@@ -30,9 +30,9 @@ from scipy.linalg import qr as _scipy_qr, solve_triangular
 from scipy.optimize import minimize
 from scipy.sparse import csc_array, eye_array
 
-from . import family as _family_mod
-from .family import Family, Gaussian, _coerce_response
-from .formula import (
+from .. import family as _family_mod
+from ..family import Family, Gaussian, _coerce_response
+from ..formula import (
     BinOp,
     CONTRAST_FN_NAMES,
     ExpandedFormula,
@@ -45,9 +45,9 @@ from .formula import (
     materialize,
     materialize_bars,
 )
-from .design import prepare_design
+from ..design import prepare_design
 from .lm import _apply_subset, _label_top_n, _lowess, _qq_plot
-from .utils import (
+from ..utils import (
     format_df, format_pval, format_signif, format_signif_jointly,
     significance_code,
 )
@@ -6258,7 +6258,7 @@ class Profile:
             # active :func:`hea.plot.par` context pulls a cell from the
             # grid (R's ``par(mfrow=...)`` ergonomics). Outside ``par``,
             # this still allocates a fresh figure.
-            from .plot._util import resolve_ax
+            from ..plot._util import resolve_ax
             ax_single = resolve_ax(None, figsize=figsize)
             axes = [ax_single]
             fig = ax_single.figure

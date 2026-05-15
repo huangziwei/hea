@@ -613,7 +613,10 @@ class Translator:
         if self.nse.is_expr():
             # ``pl.lit(None)`` — but we want everything to flow through hea,
             # so emit ``hea.lit(None)``.
-            return _call(_attr(_name("hea"), "lit"), [P.Constant(None)])
+            return _call(
+                _attr(_attr(_name("hea"), "tidy"), "lit"),
+                [P.Constant(None)],
+            )
         return P.Constant(value=None)
 
     def _visit_InfLit(self, n: R.InfLit) -> P.AST:
@@ -956,7 +959,7 @@ class Translator:
         - Other named kwargs (``environment = ...``) — pass through.
         """
         if not args:
-            return _call(_attr(_name("hea"), "ggplot"))
+            return _call(_attr(_attr(_name("hea"), "ggplot"), "ggplot"))
         receiver = self._visit(args[0])
         kwargs = self._collect_ggplot_kwargs(args[1:])
         return _call(_attr(receiver, "ggplot"), [], kwargs)
@@ -1315,7 +1318,7 @@ class Translator:
             keys.append(P.Constant(value=col_name))
             values.append(self._visit(ast_node))
         df_arg = _call(
-            _attr(_name("hea"), "DataFrame"),
+            _attr(_attr(_name("hea"), "tidy"), "DataFrame"),
             [P.Dict(keys=keys, values=values)],
             [],
         )
@@ -1480,7 +1483,7 @@ class Translator:
             columns[i % n].append(self._visit(a))
         values: list[P.AST] = [P.List(elts=col, ctx=P.Load()) for col in columns]
         return _call(
-            _attr(_name("hea"), "DataFrame"),
+            _attr(_attr(_name("hea"), "tidy"), "DataFrame"),
             [P.Dict(keys=keys, values=values)],
         )
 
@@ -1528,7 +1531,7 @@ class Translator:
                     literal_keys.append(P.Constant(value=key_name))
                     literal_values.append(value)
         df_call: P.AST = _call(
-            _attr(_name("hea"), "DataFrame"),
+            _attr(_attr(_name("hea"), "tidy"), "DataFrame"),
             [P.Dict(keys=literal_keys, values=literal_values)],
         )
         # Append a single ``.with_columns(...)`` carrying every cross-ref

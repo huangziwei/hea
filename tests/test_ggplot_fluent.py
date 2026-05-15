@@ -27,7 +27,7 @@ from hea.ggplot.core import (
 
 @pytest.fixture
 def df():
-    return hea.DataFrame({"x": [1, 2, 3, 4], "y": [4.0, 5.0, 6.0, 7.0]})
+    return hea.tidy.DataFrame({"x": [1, 2, 3, 4], "y": [4.0, 5.0, 6.0, 7.0]})
 
 
 def test_df_ggplot_returns_ggplot(df):
@@ -56,7 +56,7 @@ def test_df_ggplot_equivalent_to_function_form(df):
 
 def test_df_ggplot_chains_through_verbs(df):
     """``df.filter(...).ggplot(aes())`` — the natural tidyverse chain."""
-    p = df.filter(hea.col("x") > 1).ggplot(aes("x", "y")) + geom_point()
+    p = df.filter(hea.tidy.col("x") > 1).ggplot(aes("x", "y")) + geom_point()
     assert isinstance(p, ggplot_class)
     # filter cut to 3 rows; ggplot snapshots the filtered frame.
     assert p.data.height == 3
@@ -208,7 +208,7 @@ def test_plot_theme_attribute_access_still_works():
 def test_fluent_method_matches_plus_form(df, name, call_args, call_kwargs):
     """For each representative name, the fluent and ``+`` forms produce
     structurally equivalent plots."""
-    df_with_g = df.with_columns(g=hea.lit("a"))
+    df_with_g = df.with_columns(g=hea.tidy.lit("a"))
     base_args = ("g",) if name == "facet_wrap" else ()
     fn = getattr(hg, name)
 
@@ -226,7 +226,7 @@ def test_fluent_method_matches_plus_form(df, name, call_args, call_kwargs):
 def test_fluent_chain_full(df):
     """A realistic chain: tidyverse → ggplot → fluent layers + theme."""
     p = (
-        df.filter(hea.col("x") > 1)
+        df.filter(hea.tidy.col("x") > 1)
         .ggplot(aes("x", "y"))
         .geom_point()
         .geom_smooth(method="lm")
@@ -325,7 +325,7 @@ def test_layer_level_color_constant_still_means_set(df):
 def test_layer_level_color_column_means_map(df):
     """``geom_point(color="g")`` where "g" is a column → MAP via promotion."""
     from hea.ggplot import geom_point
-    df_g = df.with_columns(g=hea.lit("a"))
+    df_g = df.with_columns(g=hea.tidy.lit("a"))
     p = df_g.ggplot(x="x", y="y").geom_point(color="g")
     # The promoted mapping should now contain colour: "g".
     # Inspect via build (no need to draw).
@@ -342,11 +342,11 @@ def test_layer_level_callable_kwarg_promotes_to_mapping():
     and ``pl.Expr`` do — so the bare-kwarg form matches ``aes(group=...)``.
     """
     import numpy as np
-    from hea import col
-    from hea import cut_width
+    from hea.tidy import col
+    from hea.tidy import cut_width
     from hea.ggplot.build import build
     rng = np.random.default_rng(0)
-    df = hea.DataFrame({
+    df = hea.tidy.DataFrame({
         "carat": rng.uniform(0.2, 2.5, 200),
         "price": rng.uniform(200, 2000, 200),
     })
@@ -370,11 +370,11 @@ def test_cut_width_accepts_bare_column_name():
     ``cut_width(col("carat"), 0.1)`` — symmetric with ``fct_*`` and
     documented as supported in :mod:`cuts`."""
     import numpy as np
-    from hea import col
-    from hea import cut_width
+    from hea.tidy import col
+    from hea.tidy import cut_width
     from hea.ggplot.build import build
     rng = np.random.default_rng(0)
-    df = hea.DataFrame({
+    df = hea.tidy.DataFrame({
         "carat": rng.uniform(0.2, 2.5, 200),
         "price": rng.uniform(200, 2000, 200),
     })

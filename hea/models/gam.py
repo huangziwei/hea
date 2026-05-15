@@ -44,11 +44,11 @@ from matplotlib.transforms import blended_transform_factory
 from scipy.linalg import cho_factor, cho_solve, solve_triangular
 from scipy.stats import chi2 as _chi2, f as f_dist, norm, t as t_dist
 
-from .family import Family, Gaussian, tw as _tw_family
-from .formula import BasisSpec, SmoothBlock, _eval_atom, materialize_smooths
-from .design import prepare_design
+from ..family import Family, Gaussian, tw as _tw_family
+from ..formula import BasisSpec, SmoothBlock, _eval_atom, materialize_smooths
+from ..design import prepare_design
 from .lm import _label_top_n, _lowess, _qq_plot
-from .utils import (
+from ..utils import (
     _dig_tst,
     format_df,
     format_pval,
@@ -602,7 +602,7 @@ class gam:
         # residuals, summary, residuals_of, etc. — without each having to
         # re-evaluate the expression. ``materialize_smooths`` will idempotently
         # see the columns already present and skip the work.
-        from .formula import _apply_smooth_arg_exprs, _smooth_arg_expr_map
+        from ..formula import _apply_smooth_arg_exprs, _smooth_arg_expr_map
         _expr_map = _smooth_arg_expr_map(self._expanded)
         self.data = _apply_smooth_arg_exprs(d.data, _expr_map) if _expr_map else d.data
         X_param_df = d.X
@@ -967,7 +967,7 @@ class gam:
             Ve = G_P @ Ve @ G_P.T
 
         # ------------- attribute assembly ----------------------------------
-        from .named_vector import NamedVector
+        from ..R import NamedVector
         self.bhat = _row_frame(beta, column_names)
         self.coef = NamedVector(list(column_names), np.asarray(beta).reshape(-1))
         self.coefficients = self.coef
@@ -3963,12 +3963,12 @@ class gam:
             X_new = self._X_full
             off_new = self._offset
         else:
-            from .formula import (        # local to avoid cycle
+            from ..formula import (        # local to avoid cycle
                 _apply_smooth_arg_exprs,
                 _smooth_arg_expr_map,
                 materialize,
             )
-            from .design import normalize_data
+            from ..design import normalize_data
 
             # Accept the same dict / DataFrame input as the constructor
             # so matrix-arg smooths can replay on a {name: 2-D ndarray}.
@@ -5000,7 +5000,7 @@ class gam:
         response or stray data columns). Numeric → median; factor/string →
         modal level.
         """
-        from .formula import referenced_columns  # local to avoid cycle
+        from ..formula import referenced_columns  # local to avoid cycle
 
         rhs_vars = referenced_columns(self._expanded)
         out: dict = {}
@@ -6511,7 +6511,7 @@ def _grid_axis(col: pl.Series, n_grid: int) -> np.ndarray:
     to ``n_grid`` if there are more, or each level repeated to fill the
     grid otherwise — same shape as mgcv's ``fac.seq``)."""
     if _is_factor_like_col(col):
-        from .formula import _factor_levels  # local import to avoid cycle
+        from ..formula import _factor_levels  # local import to avoid cycle
 
         levels = list(_factor_levels(col))
         fn = len(levels)
@@ -6793,7 +6793,7 @@ def _add_factor_stub_rows(grid: pl.DataFrame, src: pl.DataFrame):
         src_col = src[name]
         if not _is_factor_like_col(src_col):
             continue
-        from .formula import _factor_levels  # local to avoid cycle
+        from ..formula import _factor_levels  # local to avoid cycle
         src_levels = list(_factor_levels(src_col))
         if len(src_levels) <= 1:
             continue

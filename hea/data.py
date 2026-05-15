@@ -25,7 +25,7 @@ from pathlib import Path
 
 import polars as pl
 
-from .dataframe import DataFrame
+from .tidy import DataFrame
 from .formula import set_ordered_cols
 
 __all__ = ["data", "map_data"]

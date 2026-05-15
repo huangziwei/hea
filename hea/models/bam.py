@@ -52,8 +52,8 @@ from scipy.linalg import cho_factor, cho_solve, qr as scipy_qr, solve_triangular
 from scipy.linalg.lapack import dpstrf
 from scipy.stats import t as t_dist
 
-from .family import Family, Gaussian
-from .formula import (
+from ..family import Family, Gaussian
+from ..formula import (
     BasisSpec,
     SmoothBlock,
     _apply_smooth_arg_exprs,
@@ -62,8 +62,8 @@ from .formula import (
     materialize,
     materialize_smooths,
 )
-from .design import prepare_design
-from .discrete import (
+from ..design import prepare_design
+from ..discrete import (
     DiscreteDesign,
     DiscretizedFrame,
     Xbd,
@@ -1043,7 +1043,7 @@ def _smooth_specs_from_expanded(expanded, data: pl.DataFrame) -> list[dict]:
     smooth basis construction runs on the padded scalar mf0, not on the
     matrix-arg long form.
     """
-    from .formula import (
+    from ..formula import (
         _smooth_term_vars, _smooth_by_expr, _te_parse_margins, _apply_tero,
     )
     out: list[dict] = []
@@ -2455,7 +2455,7 @@ class bam(gam):
             # discretization didn't round (the common case for small or
             # already-unique covariates). Phase 5.2 will replace this
             # with a true Xbd-gather.
-            from .formula import materialize
+            from ..formula import materialize
             X_param_full = self._X_param_full
             for start, end in _chunk_indices(n, self._chunk_size):
                 cols = [X_param_full[start:end]]
@@ -2549,7 +2549,7 @@ class bam(gam):
             Ve = G_P @ Ve @ G_P.T
 
         # ---- β / SE / t / p (parametric Wald) ------------------------------
-        from .named_vector import NamedVector
+        from ..R import NamedVector
         self.bhat = _row_frame(beta, self.column_names)
         self.coef = NamedVector(list(self.column_names), np.asarray(beta).reshape(-1))
         self.coefficients = self.coef
@@ -3291,7 +3291,7 @@ class bam(gam):
             Ve = G_P @ Ve @ G_P.T
 
         # ---- β / SE / t / p (parametric Wald) ------------------------------
-        from .named_vector import NamedVector
+        from ..R import NamedVector
         self.bhat = _row_frame(beta, self.column_names)
         self.coef = NamedVector(list(self.column_names), np.asarray(beta).reshape(-1))
         self.coefficients = self.coef

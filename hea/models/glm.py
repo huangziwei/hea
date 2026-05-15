@@ -21,11 +21,11 @@ import polars as pl
 from scipy.linalg import qr, solve_triangular
 from scipy.stats import norm, t as student_t
 
-from .family import Binomial, Family, Gaussian, Link, _coerce_response
-from .formula import _eval_atom, deparse, materialize, parse, Call, Name
-from .design import prepare_design
+from ..family import Binomial, Family, Gaussian, Link, _coerce_response
+from ..formula import _eval_atom, deparse, materialize, parse, Call, Name
+from ..design import prepare_design
 from .lm import _label_top_n, _lowess, _qq_plot
-from .utils import (
+from ..utils import (
     _dig_tst,
     format_df,
     format_pval,
@@ -388,7 +388,7 @@ class glm:
 
         self._bhat_arr = fit.beta.copy()
         self.bhat = _row_frame(self._bhat_arr, self.column_names)
-        from .named_vector import NamedVector
+        from ..R import NamedVector
         self.coef = NamedVector(self.column_names, self._bhat_arr)
         self.coefficients = self.coef
 

@@ -24,22 +24,10 @@ import polars as pl
 import pytest
 
 from conftest import load_dataset, load_glm_oracle
-from hea import (
-    AIC,
-    BIC,
-    Binomial,
-    Gamma,
-    Gaussian,
-    Poisson,
-    add1,
-    anova,
-    drop1,
-    gam,
-    glm,
-    lm,
-    step,
-)
-from hea.compare import (
+from hea.R import AIC, BIC, add1, anova, drop1, step
+from hea.family import Binomial, Gamma, Gaussian, Poisson
+from hea.models import gam, glm, lm
+from hea.R import (
     _anova_gam_rdf,
     _anova_gam_table,
     _anova_glm_table,
@@ -511,22 +499,24 @@ def test_anova_gam_test_argument_validation():
 
 
 # =============================================================================
-# AIC() / BIC() printed comparison tables
+# AIC() / BIC() comparison tables
 # =============================================================================
 #
-# The helpers print and return None; we just confirm they don't raise on
-# fitted models and that the per-model values shown agree with the
-# per-model oracles already pinned in the glm parity tests.
+# Multi-model calls return a polars DataFrame with one row per model;
+# pin that the values agree with the per-model oracles already covered
+# in the glm parity tests.
 
 
 def test_aic_bic_dispatch_on_glm():
     fits = _fits_anova_gaussian_iris()
-    out = _capture(lambda: (AIC(*fits), BIC(*fits)))
-    # Each model's AIC and BIC should appear in the printed table to 2dp,
-    # which is the rounding the helpers apply.
-    for m in fits:
-        assert f"{m.AIC:.2f}" in out, f"AIC table missing {m.AIC:.2f}"
-        assert f"{m.BIC:.2f}" in out, f"BIC table missing {m.BIC:.2f}"
+    aic_table = AIC(*fits)
+    bic_table = BIC(*fits)
+    assert aic_table["AIC"].to_list() == pytest.approx(
+        [m.AIC for m in fits]
+    )
+    assert bic_table["BIC"].to_list() == pytest.approx(
+        [m.BIC for m in fits]
+    )
 
 
 # =============================================================================
@@ -556,7 +546,7 @@ def test_drop1_lm_F_test_pins_to_R_on_iris():
     """`drop1(lm, test="F")` against R's drop1.lm on iris.
     Pins the Mallows-style AIC column (extractAIC) and the F + p values.
     """
-    from hea.compare import _drop1_lm
+    from hea.R import _drop1_lm
     iris = load_dataset("R", "iris")
     m = lm("Sepal.Length ~ Petal.Length + Species", iris)
     out = _capture(_drop1_lm, m, test="F", k=2.0)

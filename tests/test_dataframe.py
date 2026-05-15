@@ -11,7 +11,9 @@ import polars as pl
 import pytest
 
 import hea
-from hea import DataFrame, GroupBy, desc, factor, tbl
+from hea.tidy import DataFrame
+from hea.R import factor
+from hea.tidy import GroupBy, desc, tbl
 
 
 # ---------------------------------------------------------------------------
@@ -49,17 +51,14 @@ def test_is_pl_dataframe_subclass(df):
     assert isinstance(df, DataFrame)
 
 
-def test_hea_is_polars_superset():
-    """``hea.*`` is a strict superset of ``polars.__all__`` so users can
-    drop ``import polars as pl`` entirely. Regression-tested in detail in
-    ``tests/test_polars_superset.py``; this is just the smoke check.
-    """
-    hea_public = {n for n in dir(hea) if not n.startswith("_")}
-    assert hea_public >= set(pl.__all__)
-    # And the hea-specific helpers desc / tbl / factor live under hea.*.
-    assert hea.desc is desc
-    assert hea.tbl is tbl
-    assert hea.factor is factor
+def test_helpers_live_under_sub_namespaces():
+    """hea has no polars/tidyverse names at top level — everything lives in
+    a sub-module. Detailed namespace contract is in test_polars_superset.py;
+    this is the smoke check that the imports we already made above resolve
+    to the same objects."""
+    assert hea.tidy.desc is desc
+    assert hea.tidy.tbl is tbl
+    assert hea.R.factor is factor
 
 
 def test_data_returns_subclass():
@@ -115,7 +114,7 @@ def test_desc_negates_list():
     """``desc()`` on values mirrors dplyr's ``-xtfrm(x)`` — used in
     composable forms like ``min_rank(desc(x))``."""
     import numpy as np
-    from hea import min_rank
+    from hea.tidy import min_rank
     out = desc([1, 5, 5, 17, 22, None])
     assert isinstance(out, np.ndarray)
     # NaN propagates through negation
@@ -939,7 +938,7 @@ def test_chain_then_lm():
         .mutate(log_area=pl.col("Area").log())
         .select("Species", "log_area", "Elevation")
     )
-    m = hea.lm("Species ~ log_area + Elevation", sub)
+    m = hea.models.lm("Species ~ log_area + Elevation", sub)
     assert m is not None
 
 
@@ -1150,8 +1149,8 @@ def test_if_else_chains_with_parse_number():
     tidyverse one-liner, end-to-end."""
     df = DataFrame({"age": ["25", "five", "30 yo", "$1,234.56", "12.5", None]})
     out = df.mutate(
-        age_num=hea.parse_number(
-            hea.if_else(pl.col("age") == "five", "5", pl.col("age"))
+        age_num=hea.tidy.parse_number(
+            hea.tidy.if_else(pl.col("age") == "five", "5", pl.col("age"))
         )
     )
     assert out["age_num"].to_list() == [25.0, 5.0, 30.0, 1234.56, 12.5, None]
@@ -1161,7 +1160,7 @@ def test_if_else_null_cond_yields_null_by_default():
     """dplyr semantics: ``NA in condition → NA out`` (polars' raw when/then
     instead routes null through ``otherwise``)."""
     df = DataFrame({"cond": [True, None, False], "x": [1, 2, 3], "y": [10, 20, 30]})
-    out = df.mutate(z=hea.if_else(pl.col("cond"), pl.col("x"), pl.col("y")))
+    out = df.mutate(z=hea.tidy.if_else(pl.col("cond"), pl.col("x"), pl.col("y")))
     assert out["z"].to_list() == [1, None, 30]
 
 
@@ -1169,7 +1168,7 @@ def test_if_else_missing_override():
     """``missing=`` overrides the null-out value."""
     df = DataFrame({"cond": [True, None, False], "x": [1, 2, 3], "y": [10, 20, 30]})
     out = df.mutate(
-        z=hea.if_else(pl.col("cond"), pl.col("x"), pl.col("y"), missing=-1)
+        z=hea.tidy.if_else(pl.col("cond"), pl.col("x"), pl.col("y"), missing=-1)
     )
     assert out["z"].to_list() == [1, -1, 30]
 
@@ -1178,7 +1177,7 @@ def test_if_else_bare_strings_are_lifted_to_lit():
     """``then("YES")`` must produce the literal "YES", not a column ref —
     polars' raw ``when/then("x")`` would try to resolve "x" as a column."""
     df = DataFrame({"g": ["a", "b", "c"]})
-    out = df.mutate(label=hea.if_else(pl.col("g") == "a", "YES", "NO"))
+    out = df.mutate(label=hea.tidy.if_else(pl.col("g") == "a", "YES", "NO"))
     assert out["label"].to_list() == ["YES", "NO", "NO"]
 
 
@@ -1186,7 +1185,7 @@ def test_case_when_drive_type():
     """Canonical R-for-Data-Science example: drv code → full label."""
     df = DataFrame({"drv": ["f", "r", "4", "f", "r"]})
     out = df.mutate(
-        drive_type=hea.case_when(
+        drive_type=hea.tidy.case_when(
             (pl.col("drv") == "f", "front-wheel drive"),
             (pl.col("drv") == "r", "rear-wheel drive"),
             (pl.col("drv") == "4", "4-wheel drive"),
@@ -1201,7 +1200,7 @@ def test_case_when_drive_type():
 def test_case_when_unmatched_default_null():
     """No matching branch + no ``default`` → null (dplyr's ``.default = NA``)."""
     df = DataFrame({"x": [1, 2, 3, 4]})
-    out = df.mutate(g=hea.case_when(
+    out = df.mutate(g=hea.tidy.case_when(
         (pl.col("x") < 2, "low"), (pl.col("x") > 3, "high"),
     ))
     assert out["g"].to_list() == ["low", None, None, "high"]
@@ -1209,7 +1208,7 @@ def test_case_when_unmatched_default_null():
 
 def test_case_when_default_fills_unmatched():
     df = DataFrame({"x": [1, 2, 3, 4]})
-    out = df.mutate(g=hea.case_when(
+    out = df.mutate(g=hea.tidy.case_when(
         (pl.col("x") < 2, "low"), (pl.col("x") > 3, "high"), default="mid",
     ))
     assert out["g"].to_list() == ["low", "mid", "mid", "high"]
@@ -1219,7 +1218,7 @@ def test_case_when_null_condition_falls_through_to_default():
     """Null condition (NA == anything → NA) falls through to ``default`` —
     matches dplyr 1.1+ semantics. Use ``if_else`` for null-in → null-out."""
     df = DataFrame({"x": [1, None, 4]})
-    out = df.mutate(g=hea.case_when(
+    out = df.mutate(g=hea.tidy.case_when(
         (pl.col("x") < 2, "low"), (pl.col("x") > 3, "high"), default="mid",
     ))
     assert out["g"].to_list() == ["low", "mid", "high"]
@@ -1227,7 +1226,7 @@ def test_case_when_null_condition_falls_through_to_default():
 
 def test_case_when_bare_strings_lifted():
     df = DataFrame({"label": ["x", "y", "z"]})
-    out = df.mutate(g=hea.case_when(
+    out = df.mutate(g=hea.tidy.case_when(
         (pl.col("label") == "x", "first"), default="other",
     ))
     assert out["g"].to_list() == ["first", "other", "other"]
@@ -1235,9 +1234,9 @@ def test_case_when_bare_strings_lifted():
 
 def test_case_when_usage_errors():
     with pytest.raises(TypeError, match="at least one"):
-        hea.case_when(default="x")
+        hea.tidy.case_when(default="x")
     with pytest.raises(TypeError, match="must be a .* tuple"):
-        hea.case_when(pl.col("x") < 2)
+        hea.tidy.case_when(pl.col("x") < 2)
 
 
 # ---- parse_number / parse_double (readr) ---------------------------------
@@ -1245,20 +1244,20 @@ def test_case_when_usage_errors():
 
 def test_parse_double_strict_list():
     """Whole string must be a valid double; otherwise null."""
-    assert hea.parse_double(["1.2", "5.6", "1e3", "-0.5"]) == [
+    assert hea.tidy.parse_double(["1.2", "5.6", "1e3", "-0.5"]) == [
         1.2, 5.6, 1000.0, -0.5
     ]
-    assert hea.parse_double(["$1.99", "1,234", "abc", ""]) == [
+    assert hea.tidy.parse_double(["$1.99", "1,234", "abc", ""]) == [
         None, None, None, None
     ]
 
 
 def test_parse_double_tuple_returns_list():
-    assert hea.parse_double(("1.2", "5.6")) == [1.2, 5.6]
+    assert hea.tidy.parse_double(("1.2", "5.6")) == [1.2, 5.6]
 
 
 def test_parse_double_series_in_series_out():
-    out = hea.parse_double(pl.Series(["1.2", "abc"]))
+    out = hea.tidy.parse_double(pl.Series(["1.2", "abc"]))
     assert isinstance(out, pl.Series)
     assert out.dtype == pl.Float64
     assert out.to_list() == [1.2, None]
@@ -1266,19 +1265,19 @@ def test_parse_double_series_in_series_out():
 
 def test_parse_double_expr_in_expr_out():
     df = pl.DataFrame({"x": ["1.2", "5.6", "abc"]})
-    out = df.select(hea.parse_double(pl.col("x")).alias("v"))["v"]
+    out = df.select(hea.tidy.parse_double(pl.col("x")).alias("v"))["v"]
     assert out.to_list() == [1.2, 5.6, None]
 
 
 def test_parse_number_list_returns_list():
     """Regression: list input must not hit ``.cast`` AttributeError."""
-    assert hea.parse_number(["$1,234.56", "30 yo", "five", "5"]) == [
+    assert hea.tidy.parse_number(["$1,234.56", "30 yo", "five", "5"]) == [
         1234.56, 30.0, None, 5.0
     ]
 
 
 def test_parse_number_series_in_series_out():
-    out = hea.parse_number(pl.Series(["$1.99", "abc"]))
+    out = hea.tidy.parse_number(pl.Series(["$1.99", "abc"]))
     assert isinstance(out, pl.Series)
     assert out.to_list() == [1.99, None]
 
@@ -1286,7 +1285,7 @@ def test_parse_number_series_in_series_out():
 def test_parse_number_inside_mutate():
     """parse_number alone: handles currency, units, unparseable → null."""
     df = DataFrame({"age": ["25", "five", "30 yo", "$1,234.56", "12.5", None]})
-    out = df.mutate(age_num=hea.parse_number(pl.col("age")))
+    out = df.mutate(age_num=hea.tidy.parse_number(pl.col("age")))
     assert out["age_num"].to_list() == [25.0, None, 30.0, 1234.56, 12.5, None]
 
 
@@ -1294,12 +1293,12 @@ def test_parse_number_inside_mutate():
 
 
 def test_str_wrap_single_string():
-    out = hea.str_wrap("hello world this is a long string", width=15)
+    out = hea.tidy.str_wrap("hello world this is a long string", width=15)
     assert out == "hello world\nthis is a long\nstring"
 
 
 def test_str_wrap_list_passthrough():
-    out = hea.str_wrap(["short", "much longer line here"], width=10)
+    out = hea.tidy.str_wrap(["short", "much longer line here"], width=10)
     assert out == ["short", "much\nlonger\nline here"]
 
 
@@ -1309,7 +1308,7 @@ def test_str_wrap_list_passthrough():
 def test_glimpse_dispatches_on_dataframe():
     """polars / hea DataFrame has .glimpse() — just confirm we don't error."""
     df = DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
-    hea.glimpse(df)
+    hea.tidy.glimpse(df)
 
 
 # ---- rank family (dplyr) -------------------------------------------------
@@ -1328,35 +1327,35 @@ _RANK_X = [1, 5, 5, 17, 22, None]
 def test_min_rank_eager_list():
     """List input returns a polars Series with null preserved (not NaN), so
     the result composes cleanly with ``mutate`` (no NaN→null mismatch)."""
-    out = hea.min_rank(_RANK_X)
+    out = hea.tidy.min_rank(_RANK_X)
     assert isinstance(out, pl.Series)
     assert out.to_list() == [1.0, 2.0, 2.0, 4.0, 5.0, None]
 
 
 def test_dense_rank_eager_list():
-    assert hea.dense_rank(_RANK_X).to_list() == [1.0, 2.0, 2.0, 3.0, 4.0, None]
+    assert hea.tidy.dense_rank(_RANK_X).to_list() == [1.0, 2.0, 2.0, 3.0, 4.0, None]
 
 
 def test_percent_rank_eager_list():
-    assert hea.percent_rank(_RANK_X).to_list() == [
+    assert hea.tidy.percent_rank(_RANK_X).to_list() == [
         0.0, 0.25, 0.25, 0.75, 1.0, None
     ]
 
 
 def test_cume_dist_eager_list():
-    assert hea.cume_dist(_RANK_X).to_list() == [0.2, 0.6, 0.6, 0.8, 1.0, None]
+    assert hea.tidy.cume_dist(_RANK_X).to_list() == [0.2, 0.6, 0.6, 0.8, 1.0, None]
 
 
 def test_ntile_eager_list():
-    assert hea.ntile(_RANK_X, 3).to_list() == [1.0, 1.0, 2.0, 2.0, 3.0, None]
+    assert hea.tidy.ntile(_RANK_X, 3).to_list() == [1.0, 1.0, 2.0, 2.0, 3.0, None]
 
 
 def test_ntile_eager_size_imbalance():
     """``ntile(1:10, 3)`` puts the extras in the earlier buckets."""
-    assert hea.ntile(list(range(1, 11)), 3).to_list() == [
+    assert hea.tidy.ntile(list(range(1, 11)), 3).to_list() == [
         1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0
     ]
-    assert hea.ntile(list(range(1, 11)), 4).to_list() == [
+    assert hea.tidy.ntile(list(range(1, 11)), 4).to_list() == [
         1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0
     ]
 
@@ -1366,12 +1365,12 @@ def test_eager_rank_into_mutate_produces_null_not_nan():
     (matching R's uniform NA), not as a literal NaN value in the column."""
     df = pl.DataFrame({"x": _RANK_X})
     out = df.with_columns(
-        rn=hea.row_number(_RANK_X),
-        mr=hea.min_rank(_RANK_X),
-        dr=hea.dense_rank(_RANK_X),
-        pr=hea.percent_rank(_RANK_X),
-        cd=hea.cume_dist(_RANK_X),
-        nt=hea.ntile(_RANK_X, 3),
+        rn=hea.tidy.row_number(_RANK_X),
+        mr=hea.tidy.min_rank(_RANK_X),
+        dr=hea.tidy.dense_rank(_RANK_X),
+        pr=hea.tidy.percent_rank(_RANK_X),
+        cd=hea.tidy.cume_dist(_RANK_X),
+        nt=hea.tidy.ntile(_RANK_X, 3),
     )
     for col in ("rn", "mr", "dr", "pr", "cd", "nt"):
         assert out[col].null_count() == 1, f"{col} should have null, not NaN"
@@ -1380,21 +1379,22 @@ def test_eager_rank_into_mutate_produces_null_not_nan():
 
 def test_rank_verbs_series_in_series_out():
     s = pl.Series(_RANK_X)
-    for fn in (hea.min_rank, hea.dense_rank, hea.percent_rank, hea.cume_dist):
+    for fn in (hea.tidy.min_rank, hea.tidy.dense_rank,
+               hea.tidy.percent_rank, hea.tidy.cume_dist):
         out = fn(s)
         assert isinstance(out, pl.Series), f"{fn.__name__} did not return Series"
-    assert isinstance(hea.ntile(s, 3), pl.Series)
+    assert isinstance(hea.tidy.ntile(s, 3), pl.Series)
 
 
 def test_rank_verbs_expr_in_mutate():
     """Composes inside ``mutate()`` — the canonical dplyr use case."""
     df = pl.DataFrame({"x": _RANK_X})
     out = df.select(
-        mr=hea.min_rank(pl.col("x")),
-        dr=hea.dense_rank(pl.col("x")),
-        pr=hea.percent_rank(pl.col("x")),
-        cd=hea.cume_dist(pl.col("x")),
-        nt=hea.ntile(pl.col("x"), 3),
+        mr=hea.tidy.min_rank(pl.col("x")),
+        dr=hea.tidy.dense_rank(pl.col("x")),
+        pr=hea.tidy.percent_rank(pl.col("x")),
+        cd=hea.tidy.cume_dist(pl.col("x")),
+        nt=hea.tidy.ntile(pl.col("x"), 3),
     )
     assert out["mr"].to_list() == [1, 2, 2, 4, 5, None]
     assert out["dr"].to_list() == [1, 2, 2, 3, 4, None]
@@ -1410,21 +1410,21 @@ def test_rank_verbs_expr_in_mutate():
 def test_row_number_no_arg_is_position_expr():
     """``row_number()`` (no args) returns the 1-based position expression."""
     df = pl.DataFrame({"v": [10, 20, 30, None]})
-    out = df.select(rn=hea.row_number())["rn"].to_list()
+    out = df.select(rn=hea.tidy.row_number())["rn"].to_list()
     assert out == [1, 2, 3, 4]
 
 
 def test_row_number_eager_list_is_ordinal_rank():
     """``row_number(x)`` is ``rank(x, "ordinal")`` — ties by first appearance."""
     # R reference: row_number(c(3, 1, 1, 2)) -> c(4, 1, 2, 3)
-    assert hea.row_number([3, 1, 1, 2]).to_list() == [4.0, 1.0, 2.0, 3.0]
-    assert hea.row_number(_RANK_X).to_list() == [1.0, 2.0, 3.0, 4.0, 5.0, None]
+    assert hea.tidy.row_number([3, 1, 1, 2]).to_list() == [4.0, 1.0, 2.0, 3.0]
+    assert hea.tidy.row_number(_RANK_X).to_list() == [1.0, 2.0, 3.0, 4.0, 5.0, None]
 
 
 def test_row_number_expr_form():
     """Inside ``select`` / ``mutate`` with a column ref."""
     df = pl.DataFrame({"x": _RANK_X})
-    out = df.select(rn=hea.row_number(pl.col("x")))["rn"].to_list()
+    out = df.select(rn=hea.tidy.row_number(pl.col("x")))["rn"].to_list()
     assert out == [1, 2, 3, 4, 5, None]
 
 
@@ -1442,19 +1442,19 @@ _LAG_X = [2, 5, 11, 11, 19, 35]
 
 
 def test_lag_default_n1_fills_null():
-    assert hea.lag(_LAG_X).to_list() == [None, 2, 5, 11, 11, 19]
+    assert hea.tidy.lag(_LAG_X).to_list() == [None, 2, 5, 11, 11, 19]
 
 
 def test_lag_with_n_and_default():
-    assert hea.lag(_LAG_X, n=2, default=0).to_list() == [0, 0, 2, 5, 11, 11]
+    assert hea.tidy.lag(_LAG_X, n=2, default=0).to_list() == [0, 0, 2, 5, 11, 11]
 
 
 def test_lead_default_n1_fills_null():
-    assert hea.lead(_LAG_X).to_list() == [5, 11, 11, 19, 35, None]
+    assert hea.tidy.lead(_LAG_X).to_list() == [5, 11, 11, 19, 35, None]
 
 
 def test_lead_with_n_and_default():
-    assert hea.lead(_LAG_X, n=2, default=-1).to_list() == [
+    assert hea.tidy.lead(_LAG_X, n=2, default=-1).to_list() == [
         11, 11, 19, 35, -1, -1
     ]
 
@@ -1462,7 +1462,7 @@ def test_lead_with_n_and_default():
 def test_lag_inside_mutate_per_group():
     """``mutate`` handles the grouping; lag operates per-group automatically."""
     df = DataFrame({"g": ["a", "a", "b", "b", "b"], "x": [1, 2, 3, 4, 5]})
-    out = df.group_by("g").mutate(lx=hea.lag(pl.col("x"))).sort("g", "x")
+    out = df.group_by("g").mutate(lx=hea.tidy.lag(pl.col("x"))).sort("g", "x")
     # R: group_by(g) %>% mutate(lx = lag(x)) yields [NA, 1, NA, 3, 4]
     assert out["lx"].to_list() == [None, 1, None, 3, 4]
 
@@ -1473,14 +1473,14 @@ def test_lag_with_order_by_string_column():
         -> c("b", NA, "a")  # row at t=3 gets the row at t=2; t=1 has no predecessor
     """
     df = DataFrame({"t": [3, 1, 2], "x": ["c", "a", "b"]})
-    out = df.mutate(prev=hea.lag(pl.col("x"), order_by="t"))
+    out = df.mutate(prev=hea.tidy.lag(pl.col("x"), order_by="t"))
     assert out["prev"].to_list() == ["b", None, "a"]
 
 
 def test_lag_lead_dispatch_ndarray():
     """ndarray input returns ndarray (matches min_rank etc.)."""
     arr = np.array([1.0, 2.0, 3.0, 4.0])
-    out = hea.lag(arr)
+    out = hea.tidy.lag(arr)
     assert isinstance(out, np.ndarray)
     # n=1 default=None → leading NaN
     assert np.isnan(out[0]) and out[1:].tolist() == [1.0, 2.0, 3.0]
@@ -1491,47 +1491,47 @@ def test_lag_lead_dispatch_ndarray():
 
 def test_between_eager_list():
     """``between([1,5,10,15,20], 5, 15)`` -> [F, T, T, T, F] (R dplyr)."""
-    out = hea.between([1, 5, 10, 15, 20], 5, 15)
+    out = hea.tidy.between([1, 5, 10, 15, 20], 5, 15)
     assert out.to_list() == [False, True, True, True, False]
 
 
 def test_between_propagates_null():
     """NA in input propagates (matches R)."""
-    out = hea.between([None, 5, 10], 5, 10)
+    out = hea.tidy.between([None, 5, 10], 5, 10)
     assert out.to_list() == [None, True, True]
 
 
 def test_between_expr_inside_mutate():
     df = DataFrame({"x": [1, 5, 10, 15, 20]})
-    out = df.mutate(in_range=hea.between(pl.col("x"), 5, 15))
+    out = df.mutate(in_range=hea.tidy.between(pl.col("x"), 5, 15))
     assert out["in_range"].to_list() == [False, True, True, True, False]
 
 
 def test_na_if_replaces_value_with_null():
-    assert hea.na_if([1, 0, 3, 0], 0).to_list() == [1, None, 3, None]
-    assert hea.na_if(["a", "", "b"], "").to_list() == ["a", None, "b"]
+    assert hea.tidy.na_if([1, 0, 3, 0], 0).to_list() == [1, None, 3, None]
+    assert hea.tidy.na_if(["a", "", "b"], "").to_list() == ["a", None, "b"]
 
 
 def test_na_if_expr_inside_mutate():
     df = DataFrame({"y": [1, 0, 3, 0]})
-    out = df.mutate(y2=hea.na_if(pl.col("y"), 0))
+    out = df.mutate(y2=hea.tidy.na_if(pl.col("y"), 0))
     assert out["y2"].to_list() == [1, None, 3, None]
 
 
 def test_near_scalar_within_default_tol():
     """Default ``tol`` ≈ 1.49e-8 (sqrt(.Machine$double.eps))."""
-    assert hea.near(1.0, 1 + 1e-10) is True
-    assert hea.near(1.0, 1 + 1e-6) is False
+    assert hea.tidy.near(1.0, 1 + 1e-10) is True
+    assert hea.tidy.near(1.0, 1 + 1e-6) is False
 
 
 def test_near_vector_with_custom_tol():
-    out = hea.near([1, 2, 3], [1, 2.001, 3], tol=0.01)
+    out = hea.tidy.near([1, 2, 3], [1, 2.001, 3], tol=0.01)
     assert out.to_list() == [True, True, True]
 
 
 def test_near_expr_inside_mutate():
     df = DataFrame({"a": [1.0, 1.00000001, 2.0], "b": [1.0, 1.0, 2.0]})
-    out = df.mutate(close=hea.near(pl.col("a"), pl.col("b")))
+    out = df.mutate(close=hea.tidy.near(pl.col("a"), pl.col("b")))
     assert out["close"].to_list() == [True, True, True]
 
 
@@ -1540,55 +1540,55 @@ def test_near_expr_inside_mutate():
 
 def test_cummean_eager():
     """``cummean([1..5])`` -> [1, 1.5, 2, 2.5, 3] (R)."""
-    out = hea.cummean([1, 2, 3, 4, 5])
+    out = hea.tidy.cummean([1, 2, 3, 4, 5])
     assert out.to_list() == [1.0, 1.5, 2.0, 2.5, 3.0]
 
 
 def test_cummean_propagates_null():
     """NA propagates from the first missing value (matches cumsum/seq_along)."""
-    out = hea.cummean([1, None, 3])
+    out = hea.tidy.cummean([1, None, 3])
     assert out.to_list() == [1.0, None, None]
 
 
 def test_cummean_expr_inside_mutate():
     df = DataFrame({"x": [1, 2, 3, 4, 5]})
-    out = df.mutate(cm=hea.cummean(pl.col("x")))
+    out = df.mutate(cm=hea.tidy.cummean(pl.col("x")))
     assert out["cm"].to_list() == [1.0, 1.5, 2.0, 2.5, 3.0]
 
 
 def test_cumall_absorbs_false_after_seen():
     """``cumall([T,T,F,T])`` -> [T,T,F,F] (R)."""
-    out = hea.cumall([True, True, False, True])
+    out = hea.tidy.cumall([True, True, False, True])
     assert out.to_list() == [True, True, False, False]
 
 
 def test_cumall_na_propagates_until_false_seen():
     """``cumall([T,NA,T])`` -> [T,NA,NA]; ``cumall([F,NA])`` -> [F,F]."""
-    assert hea.cumall([True, None, True]).to_list() == [True, None, None]
-    assert hea.cumall([False, None]).to_list() == [False, False]
+    assert hea.tidy.cumall([True, None, True]).to_list() == [True, None, None]
+    assert hea.tidy.cumall([False, None]).to_list() == [False, False]
 
 
 def test_cumall_expr_inside_mutate():
     df = DataFrame({"b": [True, True, False, None, True]})
-    out = df.mutate(c=hea.cumall(pl.col("b")))
+    out = df.mutate(c=hea.tidy.cumall(pl.col("b")))
     assert out["c"].to_list() == [True, True, False, False, False]
 
 
 def test_cumany_absorbs_true_after_seen():
     """``cumany([F,F,T,F])`` -> [F,F,T,T] (R)."""
-    out = hea.cumany([False, False, True, False])
+    out = hea.tidy.cumany([False, False, True, False])
     assert out.to_list() == [False, False, True, True]
 
 
 def test_cumany_na_propagates_until_true_seen():
     """``cumany([F,NA,F])`` -> [F,NA,NA]; ``cumany([T,NA])`` -> [T,T]."""
-    assert hea.cumany([False, None, False]).to_list() == [False, None, None]
-    assert hea.cumany([True, None]).to_list() == [True, True]
+    assert hea.tidy.cumany([False, None, False]).to_list() == [False, None, None]
+    assert hea.tidy.cumany([True, None]).to_list() == [True, True]
 
 
 def test_cumany_expr_inside_mutate():
     df = DataFrame({"b": [False, False, True, None, False]})
-    out = df.mutate(c=hea.cumany(pl.col("b")))
+    out = df.mutate(c=hea.tidy.cumany(pl.col("b")))
     assert out["c"].to_list() == [False, False, True, True, True]
 
 
@@ -1597,26 +1597,26 @@ def test_cumany_expr_inside_mutate():
 
 def test_consecutive_id_single_input():
     """``consecutive_id([1,1,2,2,2,1,1])`` -> [1,1,2,2,2,3,3] (R)."""
-    out = hea.consecutive_id([1, 1, 2, 2, 2, 1, 1])
+    out = hea.tidy.consecutive_id([1, 1, 2, 2, 2, 1, 1])
     assert out.to_list() == [1, 1, 2, 2, 2, 3, 3]
 
 
 def test_consecutive_id_multi_input():
     """Increments when *any* input changes."""
     df = DataFrame({"a": ["a", "a", "b", "a"], "b": [1, 1, 1, 1]})
-    out = df.mutate(g=hea.consecutive_id("a", "b"))
+    out = df.mutate(g=hea.tidy.consecutive_id("a", "b"))
     assert out["g"].to_list() == [1, 1, 2, 3]
 
 
 def test_consecutive_id_expr_inside_mutate():
     df = DataFrame({"x": [1, 1, 2, 2, 2, 1, 1]})
-    out = df.mutate(g=hea.consecutive_id(pl.col("x")))
+    out = df.mutate(g=hea.tidy.consecutive_id(pl.col("x")))
     assert out["g"].to_list() == [1, 1, 2, 2, 2, 3, 3]
 
 
 def test_consecutive_id_empty_args_raises():
     with pytest.raises(TypeError, match="at least one"):
-        hea.consecutive_id()
+        hea.tidy.consecutive_id()
 
 
 # ---- first / last / nth (dplyr) ------------------------------------------
@@ -1641,75 +1641,75 @@ _NTH_X = [2, 5, None, 11, 19, 35]
 
 def test_first_eager_returns_scalar():
     """dplyr returns a length-1 vector; in Python we return a scalar."""
-    assert hea.first(_NTH_X) == 2
-    assert hea.first(pl.Series(_NTH_X)) == 2
-    assert hea.first([10, 20, 30]) == 10
+    assert hea.tidy.first(_NTH_X) == 2
+    assert hea.tidy.first(pl.Series(_NTH_X)) == 2
+    assert hea.tidy.first([10, 20, 30]) == 10
 
 
 def test_first_default_fires_on_empty_input():
-    assert hea.first([], default=-1) == -1
-    assert hea.first([]) is None
+    assert hea.tidy.first([], default=-1) == -1
+    assert hea.tidy.first([]) is None
 
 
 def test_first_na_rm_skips_leading_nulls():
-    assert hea.first([None, 5, 10], na_rm=True) == 5
+    assert hea.tidy.first([None, 5, 10], na_rm=True) == 5
     # All-null + na_rm → empty arr → default
-    assert hea.first([None, None], na_rm=True, default=-1) == -1
+    assert hea.tidy.first([None, None], na_rm=True, default=-1) == -1
 
 
 def test_last_eager():
-    assert hea.last(_NTH_X) == 35
-    assert hea.last([5, None], na_rm=True) == 5
+    assert hea.tidy.last(_NTH_X) == 35
+    assert hea.tidy.last([5, None], na_rm=True) == 5
 
 
 def test_nth_eager_positive_and_negative():
     """Negative ``n`` counts from the end (-1 = last, -2 = second-to-last)."""
-    assert hea.nth(_NTH_X, 2) == 5
-    assert hea.nth(_NTH_X, -1) == 35
-    assert hea.nth(_NTH_X, -2) == 19
+    assert hea.tidy.nth(_NTH_X, 2) == 5
+    assert hea.tidy.nth(_NTH_X, -1) == 35
+    assert hea.tidy.nth(_NTH_X, -2) == 19
 
 
 def test_nth_default_fires_on_oob():
     """``default`` returns when index is out of range."""
-    assert hea.nth(_NTH_X, 100, default=-1) == -1
-    assert hea.nth(_NTH_X, -100, default=-1) == -1
+    assert hea.tidy.nth(_NTH_X, 100, default=-1) == -1
+    assert hea.tidy.nth(_NTH_X, -100, default=-1) == -1
 
 
 def test_nth_n_zero_is_oob():
     """``nth(x, 0)`` is degenerate in dplyr: returns ``default``."""
-    assert hea.nth(_NTH_X, 0) is None
-    assert hea.nth(_NTH_X, 0, default=-1) == -1
+    assert hea.tidy.nth(_NTH_X, 0) is None
+    assert hea.tidy.nth(_NTH_X, 0, default=-1) == -1
 
 
 def test_nth_null_at_index_returned_as_is_with_na_rm_false():
     """With ``na_rm=False``, a ``None`` *value* at index ``n`` is returned
     as-is (not replaced by default — default only fires on OOB)."""
-    assert hea.nth([1, None, 3], 2, na_rm=False) is None
-    assert hea.nth([1, None, 3], 2, default=-1, na_rm=False) is None
+    assert hea.tidy.nth([1, None, 3], 2, na_rm=False) is None
+    assert hea.tidy.nth([1, None, 3], 2, default=-1, na_rm=False) is None
 
 
 def test_nth_default_na_rm_true_skips_nulls_before_counting():
     """With hea's default ``na_rm=True``, null entries don't consume an
     index slot — so the 3rd element of [2, 5, NaN, 11, 19, 35] is 11."""
-    assert hea.nth(_NTH_X, 3) == 11  # default na_rm=True
-    assert hea.nth(_NTH_X, 3, na_rm=True) == 11  # explicit, same result
+    assert hea.tidy.nth(_NTH_X, 3) == 11  # default na_rm=True
+    assert hea.tidy.nth(_NTH_X, 3, na_rm=True) == 11  # explicit, same result
 
 
 def test_first_order_by_reorders_then_picks():
     """``first(x, order_by=t)`` returns the value of x when sorted by t."""
     # R: first(c("a","b","c"), order_by=c(3,1,2)) -> "b"
-    assert hea.first(["a", "b", "c"], order_by=[3, 1, 2]) == "b"
-    assert hea.last(["a", "b", "c"], order_by=[3, 1, 2]) == "a"
-    assert hea.nth(["a", "b", "c"], 1, order_by=[3, 1, 2]) == "b"
+    assert hea.tidy.first(["a", "b", "c"], order_by=[3, 1, 2]) == "b"
+    assert hea.tidy.last(["a", "b", "c"], order_by=[3, 1, 2]) == "a"
+    assert hea.tidy.nth(["a", "b", "c"], 1, order_by=[3, 1, 2]) == "b"
 
 
 def test_first_expr_inside_mutate_broadcasts():
     """In an Expr context, ``first(col)`` is a scalar that broadcasts."""
     df = DataFrame({"x": [10, 20, 30, 40]})
     out = df.mutate(
-        fst=hea.first(pl.col("x")),
-        lst=hea.last(pl.col("x")),
-        sec=hea.nth(pl.col("x"), 2),
+        fst=hea.tidy.first(pl.col("x")),
+        lst=hea.tidy.last(pl.col("x")),
+        sec=hea.tidy.nth(pl.col("x"), 2),
     )
     assert out["fst"].to_list() == [10, 10, 10, 10]
     assert out["lst"].to_list() == [40, 40, 40, 40]
@@ -1719,7 +1719,7 @@ def test_first_expr_inside_mutate_broadcasts():
 def test_nth_expr_oob_uses_default():
     """The OOB-default path in Expr context (when/otherwise machinery)."""
     df = DataFrame({"x": [10, 20, 30, 40]})
-    out = df.mutate(oob=hea.nth(pl.col("x"), 10, default=-1))
+    out = df.mutate(oob=hea.tidy.nth(pl.col("x"), 10, default=-1))
     assert out["oob"].to_list() == [-1, -1, -1, -1]
 
 
@@ -1733,8 +1733,8 @@ def test_lag_with_first_default_canonical_pattern():
     """
     events = DataFrame({"time": [1, 3, 8, 15, 20]})
     out = events.mutate(
-        diff=pl.col("time") - hea.lag(
-            pl.col("time"), default=hea.first(pl.col("time"))
+        diff=pl.col("time") - hea.tidy.lag(
+            pl.col("time"), default=hea.tidy.first(pl.col("time"))
         ),
         has_gap=pl.col("diff") >= 5,
     )
@@ -1742,14 +1742,14 @@ def test_lag_with_first_default_canonical_pattern():
     assert out["has_gap"].to_list() == [False, False, True, True, True]
 
 
-def test_first_last_nth_shadow_polars_top_level():
-    """``hea.first`` / ``hea.last`` / ``hea.nth`` deliberately replace polars'
-    top-level versions (which are *column* selectors, not element pickers).
-    Polars' versions remain accessible as ``pl.first`` / ``pl.last`` / ``pl.nth``.
-    """
-    assert hea.first is not pl.first
-    assert hea.last is not pl.last
-    assert hea.nth is not pl.nth
+def test_first_last_nth_live_under_tidy():
+    """``hea.tidy.first`` / ``last`` / ``nth`` are dplyr's element pickers,
+    distinct from polars' top-level column selectors (``pl.first`` etc.).
+    Polars' versions are NOT re-exported under hea.tidy — users who want
+    the column selector go through ``polars`` directly."""
+    assert hea.tidy.first is not pl.first
+    assert hea.tidy.last is not pl.last
+    assert hea.tidy.nth is not pl.nth
 
 
 # ---- cumsum / cumprod / cummax / cummin Expr dispatch --------------------
@@ -1764,26 +1764,26 @@ def test_cumsum_dispatches_on_expr_inside_mutate():
     """Canonical use: ``mutate(group = cumsum(col(has_gap)))`` — Expr in,
     Expr out, evaluated per-row by polars."""
     df = DataFrame({"has_gap": [False, False, True, False, True, False]})
-    out = df.mutate(group=hea.cumsum(pl.col("has_gap")))
+    out = df.mutate(group=hea.R.cumsum(pl.col("has_gap")))
     assert out["group"].to_list() == [0, 0, 1, 1, 2, 2]
 
 
 def test_cumsum_cumprod_cummax_cummin_eager_unchanged():
     """Eager (list / ndarray) paths return ndarray, matching R's vector-out
     contract. Existing call sites in the tests-as-lm notebook keep working."""
-    assert hea.cumsum([1, 2, 3, 4]).tolist() == [1, 3, 6, 10]
-    assert hea.cumprod([1, 2, 3, 4]).tolist() == [1, 2, 6, 24]
-    assert hea.cummax([3, 1, 4, 1, 5]).tolist() == [3, 3, 4, 4, 5]
-    assert hea.cummin([3, 1, 4, 1, 5]).tolist() == [3, 1, 1, 1, 1]
+    assert hea.R.cumsum([1, 2, 3, 4]).tolist() == [1, 3, 6, 10]
+    assert hea.R.cumprod([1, 2, 3, 4]).tolist() == [1, 2, 6, 24]
+    assert hea.R.cummax([3, 1, 4, 1, 5]).tolist() == [3, 3, 4, 4, 5]
+    assert hea.R.cummin([3, 1, 4, 1, 5]).tolist() == [3, 1, 1, 1, 1]
 
 
 def test_cumulative_series_in_series_out():
     s = pl.Series([1, 2, 3, 4])
     for fn, expected in [
-        (hea.cumsum, [1, 3, 6, 10]),
-        (hea.cumprod, [1, 2, 6, 24]),
-        (hea.cummax, [1, 2, 3, 4]),
-        (hea.cummin, [1, 1, 1, 1]),
+        (hea.R.cumsum, [1, 3, 6, 10]),
+        (hea.R.cumprod, [1, 2, 6, 24]),
+        (hea.R.cummax, [1, 2, 3, 4]),
+        (hea.R.cummin, [1, 1, 1, 1]),
     ]:
         out = fn(s)
         assert isinstance(out, pl.Series), f"{fn.__name__} did not return Series"
@@ -1829,7 +1829,7 @@ def test_groupby_filter_reductions_are_per_group():
     out = (
         flights
         .group_by("year", "month", "day")
-        .mutate(r=hea.min_rank(pl.col("sched_dep_time")))
+        .mutate(r=hea.tidy.min_rank(pl.col("sched_dep_time")))
         .filter(pl.col("r").is_in([1, pl.col("r").max()]))
     )
     assert isinstance(out, GroupBy)
@@ -1971,9 +1971,9 @@ def test_IQR_in_grouped_summarize():
         flights
         .group_by("origin", "dest")
         .summarize(
-            distance_iqr=hea.IQR("distance"),   # string shorthand
-            iqr_expr=hea.IQR(pl.col("distance")),
-            n=hea.n(),
+            distance_iqr=hea.R.IQR("distance"),   # string shorthand
+            iqr_expr=hea.R.IQR(pl.col("distance")),
+            n=hea.tidy.n(),
             _groups="drop",
         )
         .filter(pl.col("distance_iqr") > 0)
@@ -2001,11 +2001,11 @@ def test_lag_then_cumsum_group_pattern():
         "time": [0, 1, 2, 3, 5, 10, 11, 12, 14, 15, 20, 21, 24, 25],
     })
     out = events.mutate(
-        diff=pl.col("time") - hea.lag(
-            pl.col("time"), default=hea.first(pl.col("time"))
+        diff=pl.col("time") - hea.tidy.lag(
+            pl.col("time"), default=hea.tidy.first(pl.col("time"))
         ),
         has_gap=pl.col("diff") >= 5,
-        group=hea.cumsum(pl.col("has_gap")),
+        group=hea.R.cumsum(pl.col("has_gap")),
     )
     # has_gap True only at time=10 and time=20 → group jumps there
     assert out["group"].to_list() == [

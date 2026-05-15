@@ -23,13 +23,13 @@ from hea.ggplot import (
 
 
 def _mtcars() -> pl.DataFrame:
-    from hea import data
+    from hea.data import data
     return data("mtcars").to_polars() if hasattr(data("mtcars"), "to_polars") else data("mtcars")
 
 
 def _patchwork_doc_plots():
     """Same four plots as the patchwork tutorial doc."""
-    from hea import data
+    from hea.data import data
     mtcars = data("mtcars")
     p1 = (mtcars.ggplot().geom_point(aes("mpg", "disp"))
           .ggtitle("Plot 1"))

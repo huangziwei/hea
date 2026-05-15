@@ -321,7 +321,8 @@ class Translator:
         value = stmt.value
         if not isinstance(value, P.Call):
             return None
-        # Accept both bare ``data(...)`` and ``hea.data(...)``.
+        # Accept bare ``data(...)`` and ``hea.data(...)`` — both reverse
+        # to the same R ``library()`` declaration.
         func = value.func
         if isinstance(func, P.Name) and func.id == "data":
             pass
@@ -623,16 +624,30 @@ class Translator:
             if r is not None:
                 return r
 
-        # ``hea.DataFrame({...})`` → ``data.frame(...)`` — the only hea-
-        # qualified call that needs a name change (everything else just
-        # has the prefix stripped).
-        if (
-            isinstance(call.func, P.Attribute)
-            and isinstance(call.func.value, P.Name)
-            and call.func.value.id == "hea"
-            and call.func.attr in ("DataFrame", "from_dict")
-        ):
-            return self._emit_data_frame_reverse(call.args, call.keywords)
+        # ``hea.tidy.DataFrame({...})`` / ``hea.io.from_dict({...})`` /
+        # ``hea.DataFrame({...})`` / ``hea.from_dict({...})`` → ``data.frame(...)``.
+        # The bare-prefix forms are kept so already-translated scripts (and
+        # ``hea.from_dict`` from older snapshots) still round-trip.
+        if isinstance(call.func, P.Attribute):
+            f = call.func
+            # hea.tidy.DataFrame(...) or hea.io.from_dict(...)
+            if (
+                isinstance(f.value, P.Attribute)
+                and isinstance(f.value.value, P.Name)
+                and f.value.value.id == "hea"
+                and (
+                    (f.value.attr == "tidy" and f.attr == "DataFrame")
+                    or (f.value.attr == "io" and f.attr == "from_dict")
+                )
+            ):
+                return self._emit_data_frame_reverse(call.args, call.keywords)
+            # hea.DataFrame(...) or hea.from_dict(...) — legacy form
+            if (
+                isinstance(f.value, P.Name)
+                and f.value.id == "hea"
+                and f.attr in ("DataFrame", "from_dict")
+            ):
+                return self._emit_data_frame_reverse(call.args, call.keywords)
 
         # ``hea.X(...)`` / ``selectors.X(...)`` → ``X(...)``. Both
         # namespaces are stripped — R uses bare names for the same

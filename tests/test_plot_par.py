@@ -184,8 +184,8 @@ def test_profile_plot_single_param_inside_par():
     """``Profile.plot(which="...", ...)`` is a single-panel call —
     inside ``par(mfrow=...)`` it should pull a cell rather than open
     its own figure (Bates Fig. 1.7-style ``par`` ergonomics)."""
-    from hea import data, lme
-
+    from hea.models import lme
+    from hea.data import data
     dye = data("Dyestuff")
     fm = lme("Yield ~ 1 + (1 | Batch)", dye, REML=False)
     pr = fm.profile()

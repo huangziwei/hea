@@ -7,7 +7,8 @@
 
 Dataset loading and ``factor()`` live in ``hea.data``; the formula →
 fitting-ready design pipeline lives in ``hea.design``; model-comparison
-helpers (``anova``, ``AIC``, ``BIC``) in ``hea.compare``.
+helpers (``anova``, ``AIC``, ``BIC``) and R's ``NamedVector`` return
+type live in ``hea.R``.
 """
 
 from __future__ import annotations

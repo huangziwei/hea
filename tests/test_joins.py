@@ -11,15 +11,8 @@ import datetime as _dt
 import polars as pl
 import pytest
 
-from hea import (
-    DataFrame,
-    between,
-    closest,
-    col,
-    join_by,
-    overlaps,
-    within,
-)
+from hea.tidy import DataFrame, col
+from hea.tidy import between, closest, join_by, overlaps, within
 
 
 # ---------------------------------------------------------------------------

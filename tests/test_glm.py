@@ -9,7 +9,7 @@ Sections (top → bottom):
    estimated-scale families). Catches a missing fixture before parity
    tests fail with a confusing FileNotFoundError.
 
-2. **Per-oracle parity** — ``hea.glm(...)`` outputs pinned against the
+2. **Per-oracle parity** — ``hea.models.glm(...)`` outputs pinned against the
    corresponding ``stats::glm(...)`` oracle. Phase 1 (engine + core
    fit), Phase 2 (Wald inference), Phase 3 (null deviance / AIC / BIC
    / logLik), Phase 4 (predict link/response, se.fit). Tolerances
@@ -33,15 +33,8 @@ import polars as pl
 import pytest
 
 from conftest import load_dataset, load_glm_oracle
-from hea import (
-    Binomial,
-    Gamma,
-    Gaussian,
-    InverseGaussian,
-    Poisson,
-    Quasi,
-    glm,
-)
+from hea.family import Binomial, Gamma, Gaussian, InverseGaussian, Poisson, Quasi
+from hea.models import glm
 
 
 # =============================================================================

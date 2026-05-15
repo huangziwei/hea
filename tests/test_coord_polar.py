@@ -61,7 +61,7 @@ def test_coord_polar_plus_dispatch_sets_coordinates():
 
 def test_coord_polar_fluent_form_works():
     """The fluent install loop matches ``coord_*`` prefix — verify it's wired."""
-    df = hea.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    df = hea.tidy.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     p = df.ggplot(aes("x", "y")).geom_point().coord_polar(start=math.pi / 2)
     assert isinstance(p.coordinates, CoordPolar)
     assert p.coordinates.start == math.pi / 2
@@ -386,7 +386,7 @@ def test_coord_polar_continuous_rose_pins_angular_range_to_two_pi():
 def test_coord_polar_composes_with_coord_flip_via_patchwork():
     """``bar.coord_flip() | bar.coord_polar()`` — Cartesian and polar in
     the same figure. Each leaf needs its own projection."""
-    df = hea.DataFrame({"clarity": list("ABCDEFGH") * 10})
+    df = hea.tidy.DataFrame({"clarity": list("ABCDEFGH") * 10})
     bar = df.ggplot().geom_bar(x="clarity", width=1)
     composite = bar.coord_flip() | bar.coord_polar()
     fig = composite.draw()
