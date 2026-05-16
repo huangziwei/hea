@@ -85,6 +85,29 @@ class DataFrame(pl.DataFrame):
         """
         return pl.exclude(self.columns)
 
+    # ---- repr ---------------------------------------------------------
+
+    def __repr__(self) -> str:
+        base = super().__repr__()
+        m = getattr(self, "_ts_meta", None)
+        if m is None:
+            return base
+        return _format_ts_header(m) + "\n" + base
+
+    def __str__(self) -> str:
+        base = super().__str__()
+        m = getattr(self, "_ts_meta", None)
+        if m is None:
+            return base
+        return _format_ts_header(m) + "\n" + base
+
+    def _repr_html_(self, **kwargs) -> str | None:
+        base = super()._repr_html_(**kwargs)
+        m = getattr(self, "_ts_meta", None)
+        if m is None or base is None:
+            return base
+        return _format_ts_header_html(m) + base
+
     # ---- row verbs ----------------------------------------------------
 
     def filter(self, *predicates: Any, **constraints: Any) -> "DataFrame":
@@ -1543,6 +1566,43 @@ class DataFrame(pl.DataFrame):
         out = self._wrap(self)
         out._ts_meta = TsMeta(start=start, end=end, frequency=float(frequency))
         return out
+
+    def drop_ts(self) -> "DataFrame":
+        """Strip the ts marker — inverse of :meth:`as_ts`. Mirrors R's
+        ``unclass(Nile)`` / ``as.data.frame(Nile)``.
+
+        Returns a new DataFrame with the same columns but ``_ts_meta``
+        absent, so subsequent ``hist`` / ``plot`` / ``summary`` calls
+        treat it as a plain 2-column frame. No-op if the frame isn't
+        ts-marked.
+        """
+        return self._wrap(self)
+
+
+def _fmt_ts_num(v: float) -> str:
+    """Format a ts metadata value like R: integers without decimal,
+    floats with their natural decimal repr."""
+    iv = int(v)
+    return str(iv) if float(iv) == v else repr(v)
+
+
+def _format_ts_header(m: "TsMeta") -> str:
+    """R-style ``print.ts`` header — three lines above the data block."""
+    return (
+        "Time Series:\n"
+        f"Start = {_fmt_ts_num(m.start)}\n"
+        f"End = {_fmt_ts_num(m.end)}\n"
+        f"Frequency = {_fmt_ts_num(m.frequency)}"
+    )
+
+
+def _format_ts_header_html(m: "TsMeta") -> str:
+    return (
+        "<p><b>Time Series</b><br/>"
+        f"Start = {_fmt_ts_num(m.start)}<br/>"
+        f"End = {_fmt_ts_num(m.end)}<br/>"
+        f"Frequency = {_fmt_ts_num(m.frequency)}</p>"
+    )
 
 
 @dataclass(frozen=True, slots=True)
