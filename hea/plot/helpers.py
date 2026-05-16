@@ -14,7 +14,7 @@ import numpy as np
 import polars as pl
 from scipy.stats import norm
 
-from ._util import draw_points, r_lty, resolve_ax
+from ._util import draw_points, r_lty, resolve_ax, to_value_series
 
 
 def qqnorm(
@@ -28,7 +28,8 @@ def qqnorm(
     """Standard-normal Q-Q scatter — pair with ``qqline(x, ax=ax)`` for the
     reference line. Mirrors R's ``stats::qqnorm``."""
     ax = resolve_ax(ax)
-    vals = np.asarray(x, dtype=float)
+    s = to_value_series(x, "qqnorm")
+    vals = s.cast(pl.Float64).drop_nulls().to_numpy()
     vals = vals[~np.isnan(vals)]
     n = len(vals)
     if n < 2:
@@ -65,7 +66,8 @@ def halfnorm(
     """
     ax = resolve_ax(ax)
 
-    abs_x = np.abs(np.asarray(x, dtype=float))
+    s = to_value_series(x, "halfnorm")
+    abs_x = np.abs(s.cast(pl.Float64).to_numpy())
     n = len(abs_x)
     if labs is None:
         labels = [str(i) for i in range(n)]

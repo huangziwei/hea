@@ -19,7 +19,7 @@ import polars as pl
 from scipy.stats import norm
 
 from ..formula import parse
-from ._util import draw_points, r_lty, resolve_overlay_ax, to_float
+from ._util import draw_points, r_lty, resolve_overlay_ax, to_float, to_value_series
 from .formula_eval import eval_side
 
 
@@ -245,11 +245,9 @@ def rug(
         raise ValueError(
             f"rug(): side= must be 'bottom'|'left'|'top'|'right' or 1..4, got {side!r}."
         )
-    if isinstance(x, pl.Series):
-        vals = x.cast(pl.Float64).drop_nulls().to_numpy()
-    else:
-        vals = np.asarray(x, dtype=float)
-        vals = vals[~np.isnan(vals)]
+    s = to_value_series(x, "rug")
+    vals = s.cast(pl.Float64).drop_nulls().to_numpy()
+    vals = vals[~np.isnan(vals)]
     line_kwargs: dict = {"color": col}
     if lwd is not None:
         line_kwargs["linewidth"] = float(lwd)

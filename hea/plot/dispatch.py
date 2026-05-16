@@ -91,6 +91,16 @@ def plot(*args, data: pl.DataFrame | None = None, env: dict | None = None,
 
     # Form: plot(df) — DataFrame routes by shape.
     if len(args) == 1 and isinstance(a0, pl.DataFrame):
+        # ts-from-data() shape → line plot of value vs time. Mirrors R's
+        # ``plot.ts`` dispatch, which is what ``plot(Nile)`` etc. hit.
+        # hea.data() loads R ``ts`` objects as a 2-col tidy frame because
+        # polars has no ts type; this branch is the equivalent of S3's
+        # method dispatch on the ``ts`` class.
+        if list(a0.columns) == ["time", "value"]:
+            kwargs.setdefault("type", "l")
+            kwargs.setdefault("xlab", "Time")
+            kwargs.setdefault("ylab", "value")
+            return scatter(a0["time"], a0["value"], ax=ax, **kwargs)
         # emmeans .emmeans table → forest plot (R's plot.emmGrid).
         if {"emmean", "SE", "lower.CL", "upper.CL"} <= set(a0.columns):
             return _plot_emmeans_table(a0, ax=ax, **kwargs)

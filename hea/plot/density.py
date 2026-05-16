@@ -14,6 +14,8 @@ import numpy as np
 import polars as pl
 from scipy.stats import gaussian_kde
 
+from ._util import to_value_series
+
 
 @dataclass
 class _Density:
@@ -94,13 +96,10 @@ def density(
         With fields ``.x`` (grid), ``.y`` (density), ``.bw``, ``.n``,
         and ``.data_name``. Call ``.plot(ax=)`` to draw.
     """
-    name = ""
-    if isinstance(x, pl.Series):
-        name = x.name or ""
-        vals = x.cast(pl.Float64).drop_nulls().to_numpy()
-    else:
-        vals = np.asarray(x, dtype=float)
-        vals = vals[~np.isnan(vals)]
+    s = to_value_series(x, "density")
+    name = s.name or ""
+    vals = s.cast(pl.Float64).drop_nulls().to_numpy()
+    vals = vals[~np.isnan(vals)]
     if vals.size < 2:
         raise ValueError("density(): need at least 2 finite values.")
 

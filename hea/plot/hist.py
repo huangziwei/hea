@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
-from ._util import resolve_ax
+from ._util import resolve_ax, to_value_series
 
 
 def _resolve_breaks(vals: np.ndarray, breaks) -> np.ndarray:
@@ -73,13 +73,10 @@ def hist(
     """
     ax = resolve_ax(ax)
 
-    name = ""
-    if isinstance(x, pl.Series):
-        name = x.name or ""
-        vals = x.cast(pl.Float64).drop_nulls().to_numpy()
-    else:
-        vals = np.asarray(x, dtype=float)
-        vals = vals[~np.isnan(vals)]
+    s = to_value_series(x, "hist")
+    name = s.name or ""
+    vals = s.cast(pl.Float64).drop_nulls().to_numpy()
+    vals = vals[~np.isnan(vals)]
 
     if freq is not None and probability is not None:
         raise ValueError("hist(): pass freq= or probability=, not both.")

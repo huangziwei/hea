@@ -90,6 +90,47 @@ def to_float(x):
     return np.asarray(x, dtype=float)
 
 
+def to_value_series(x, fname: str) -> pl.Series:
+    """Coerce a 1-D-ish argument into a ``pl.Series`` for base-graphics
+    plotters that expect a single numeric vector.
+
+    Polars has no R ``ts`` type, so :func:`hea.data` loads R time-series
+    objects (``Nile``, ``AirPassengers``, …) as a 2-column tidy frame
+    with columns ``("time", "value")``. R's ``hist(Nile)`` / ``plot(Nile)``
+    / etc. should still work — we recognize that shape and pull the
+    value column.
+
+    Shapes accepted:
+
+    * ``pl.Series`` (incl. ``hea.Series``) — returned as-is.
+    * ``pl.DataFrame`` with columns ``["time", "value"]`` — the
+      ts-from-``data()`` shape → return the ``value`` column.
+    * ``pl.DataFrame`` with exactly one column — return that column.
+    * 1-D ``ndarray`` / ``list`` / etc. — wrapped in an unnamed
+      ``pl.Series``.
+
+    Anything else raises ``TypeError``. ``fname`` is the caller's name
+    so the error message points at the right entry point.
+    """
+    if isinstance(x, pl.Series):
+        return x
+    if isinstance(x, pl.DataFrame):
+        if list(x.columns) == ["time", "value"]:
+            return x["value"]
+        if x.width == 1:
+            return x[x.columns[0]]
+        raise TypeError(
+            f"{fname}(): cannot histogram a DataFrame with columns "
+            f"{x.columns}; pass a Series (e.g. df['x'])."
+        )
+    arr = np.asarray(x)
+    if arr.ndim != 1:
+        raise TypeError(
+            f"{fname}(): expected a 1-D vector, got ndim={arr.ndim}."
+        )
+    return pl.Series(arr)
+
+
 def r_lty(lty):
     """R lty (1 solid, 2 dashed, 3 dotted, 4 dotdash, 5 longdash, 6 twodash)
     or matplotlib string → matplotlib linestyle."""

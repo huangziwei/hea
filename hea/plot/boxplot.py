@@ -7,7 +7,7 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
-from ._util import resolve_ax
+from ._util import resolve_ax, to_value_series
 
 
 def boxplot(
@@ -44,13 +44,10 @@ def boxplot(
     arrays: list[np.ndarray] = []
     inferred_names: list[str] = []
     for i, g in enumerate(groups):
-        if isinstance(g, pl.Series):
-            arr = g.cast(pl.Float64).drop_nulls().to_numpy()
-            inferred_names.append(g.name or str(i + 1))
-        else:
-            arr = np.asarray(g, dtype=float)
-            arr = arr[~np.isnan(arr)]
-            inferred_names.append(str(i + 1))
+        s = to_value_series(g, "boxplot")
+        arr = s.cast(pl.Float64).drop_nulls().to_numpy()
+        arr = arr[~np.isnan(arr)]
+        inferred_names.append(s.name or str(i + 1))
         arrays.append(arr)
 
     if names is None:
