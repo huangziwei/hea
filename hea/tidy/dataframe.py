@@ -1498,10 +1498,113 @@ class DataFrame(pl.DataFrame):
             ``(label, value)`` entries programmatically.
         """
         from .summary import Summary, _summary_block, _SummaryBlock
+        # ts-marked frame: hea.data() and hea.R.ts() set ``_ts_meta`` on
+        # frames that R would classify as ``ts``. R's ``summary(Nile)``
+        # (via the ts class) summarizes only the values; we mirror that
+        # by summarizing just the ``value`` column and skipping the
+        # year-index ``time``. Never inferred from column names — a
+        # user-built ``DataFrame({"time": …, "value": …})`` falls through
+        # to the normal per-column path.
+        if getattr(self, "_ts_meta", None) is not None:
+            cols_to_summarize = ["value"]
+        else:
+            cols_to_summarize = list(self.columns)
         blocks: list[_SummaryBlock] = []
-        for col in self.columns:
+        for col in cols_to_summarize:
             blocks.append(
                 _summary_block(col, self.get_column(col), maxsum=maxsum, digits=digits)
             )
         return Summary(blocks, width=width)
+
+    # ---- time series --------------------------------------------------
+
+    def as_ts(self, *, start: float | None = None,
+              frequency: float = 1.0) -> "DataFrame":
+        """Mark this frame as a time series (R's ``as.ts()``).
+
+        The frame must already be a 2-column ``(time, value)`` shape —
+        :func:`hea.R.ts` is the constructor for the from-scratch case.
+        ``start`` defaults to the first row's ``time`` value; ``end`` is
+        derived from the last row; ``frequency`` defaults to 1 (annual).
+
+        Returns a new DataFrame (same data, ``_ts_meta`` set). The flag
+        is not propagated by ``filter`` / ``select`` / etc. — mirrors R,
+        where ``Nile[1:10]`` drops the ``ts`` class.
+        """
+        if list(self.columns) != ["time", "value"]:
+            raise ValueError(
+                f"as_ts(): frame must have columns ['time', 'value'], "
+                f"got {self.columns}. Use hea.R.ts(values, start=, "
+                f"frequency=) for the from-scratch case."
+            )
+        if start is None:
+            start = float(self["time"][0])
+        end = float(self["time"][-1])
+        out = self._wrap(self)
+        out._ts_meta = TsMeta(start=start, end=end, frequency=float(frequency))
+        return out
+
+
+@dataclass(frozen=True, slots=True)
+class TsMeta:
+    """R-style ``tsp`` triple — (start, end, frequency) — carried as the
+    ``_ts_meta`` attribute on hea DataFrames marked as a time series.
+
+    Set by :func:`hea.R.ts` (from-scratch construction), :meth:`DataFrame.as_ts`
+    (post-hoc marking), and :func:`hea.data` for the known R ``ts``
+    datasets. Consulted by base-graphics plotters and
+    :meth:`DataFrame.summary` to dispatch as R does for the ``ts`` class.
+    Not propagated through ``_wrap``: subset / filter / select / join
+    drop it, mirroring R's "indexing a ts returns a vector".
+    """
+    start: float
+    end: float
+    frequency: float
+
+
+def ts(data, start: float = 1.0, frequency: float = 1.0) -> "DataFrame":
+    """R: ``ts(data, start, frequency)`` — construct a time series.
+
+    Returns a hea ``DataFrame`` with columns ``("time", "value")``,
+    synthesized as ``time = start + i / frequency`` for ``i in 0..n-1``,
+    and ``_ts_meta`` set so base-graphics plotters and ``summary`` route
+    via R's ``ts`` dispatch.
+
+    Parameters
+    ----------
+    data
+        Numeric vector (1-D ndarray, list, hea/polars Series, or a
+        1-column DataFrame). NA / null values are preserved (R doesn't
+        drop them at ``ts`` construction either).
+    start
+        Time of the first observation. Defaults to 1 like R.
+    frequency
+        Observations per unit of time. R defaults: 1 (annual),
+        12 (monthly), 4 (quarterly), 52 (weekly).
+
+    Examples
+    --------
+    >>> Nile = hea.R.ts(values, start=1871, frequency=1)
+    >>> hist(Nile)   # dispatches as a numeric vector via the flag
+    """
+    if isinstance(data, pl.DataFrame):
+        if data.width != 1:
+            raise ValueError(
+                f"ts(): DataFrame input must have exactly one column, "
+                f"got {data.columns}. Drop the time column or call "
+                f"as_ts() on an existing (time, value) frame."
+            )
+        values_series = data[data.columns[0]]
+    elif isinstance(data, pl.Series):
+        values_series = data
+    else:
+        values_series = pl.Series("value", np.asarray(data))
+
+    n = values_series.len()
+    step = 1.0 / float(frequency)
+    time_arr = np.asarray([start + i * step for i in range(n)], dtype=float)
+    end = float(time_arr[-1]) if n else float(start)
+    out = DataFrame({"time": time_arr, "value": values_series.rename("value")})
+    out._ts_meta = TsMeta(start=float(start), end=end, frequency=float(frequency))
+    return out
 

@@ -623,6 +623,8 @@ _R_EXPR_SKIP = {
     "table", "xtabs", "prop_table", "addmargins",
     # Sequence generators — take ints, not columns.
     "seq", "seq_len", "seq_along",
+    # Time series construction — returns a DataFrame (R's ``ts``), not an Expr.
+    "ts",
     # Variadic / index-based — multi-input shape.
     "order",
     # Bucketing — eager-only (custom labels machinery).

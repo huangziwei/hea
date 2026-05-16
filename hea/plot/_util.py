@@ -94,28 +94,24 @@ def to_value_series(x, fname: str) -> pl.Series:
     """Coerce a 1-D-ish argument into a ``pl.Series`` for base-graphics
     plotters that expect a single numeric vector.
 
-    Polars has no R ``ts`` type, so :func:`hea.data` loads R time-series
-    objects (``Nile``, ``AirPassengers``, …) as a 2-column tidy frame
-    with columns ``("time", "value")``. R's ``hist(Nile)`` / ``plot(Nile)``
-    / etc. should still work — we recognize that shape and pull the
-    value column.
-
     Shapes accepted:
 
     * ``pl.Series`` (incl. ``hea.Series``) — returned as-is.
-    * ``pl.DataFrame`` with columns ``["time", "value"]`` — the
-      ts-from-``data()`` shape → return the ``value`` column.
+    * ``pl.DataFrame`` carrying the hea ``_ts_meta`` marker (set by
+      :func:`hea.R.ts` or :func:`hea.data` for R-side ``ts`` datasets) —
+      return the ``value`` column. Mirrors R's S3 dispatch on the ``ts``
+      class.
     * ``pl.DataFrame`` with exactly one column — return that column.
     * 1-D ``ndarray`` / ``list`` / etc. — wrapped in an unnamed
       ``pl.Series``.
 
-    Anything else raises ``TypeError``. ``fname`` is the caller's name
-    so the error message points at the right entry point.
+    Anything else raises ``TypeError`` — same strictness as R, which
+    rejects ``hist(read.csv(...))`` with ``'x' must be numeric``.
     """
     if isinstance(x, pl.Series):
         return x
     if isinstance(x, pl.DataFrame):
-        if list(x.columns) == ["time", "value"]:
+        if getattr(x, "_ts_meta", None) is not None:
             return x["value"]
         if x.width == 1:
             return x[x.columns[0]]

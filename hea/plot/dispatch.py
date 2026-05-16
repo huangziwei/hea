@@ -91,12 +91,12 @@ def plot(*args, data: pl.DataFrame | None = None, env: dict | None = None,
 
     # Form: plot(df) — DataFrame routes by shape.
     if len(args) == 1 and isinstance(a0, pl.DataFrame):
-        # ts-from-data() shape → line plot of value vs time. Mirrors R's
-        # ``plot.ts`` dispatch, which is what ``plot(Nile)`` etc. hit.
-        # hea.data() loads R ``ts`` objects as a 2-col tidy frame because
-        # polars has no ts type; this branch is the equivalent of S3's
-        # method dispatch on the ``ts`` class.
-        if list(a0.columns) == ["time", "value"]:
+        # ts-marked frame → line plot of value vs time. Mirrors R's S3
+        # ``plot.ts`` dispatch. The ``_ts_meta`` flag is set by
+        # :func:`hea.R.ts` and by :func:`hea.data` for known R ts
+        # datasets — never inferred from column names, so a user-built
+        # ``DataFrame({"time": …, "value": …})`` won't accidentally fire.
+        if getattr(a0, "_ts_meta", None) is not None:
             kwargs.setdefault("type", "l")
             kwargs.setdefault("xlab", "Time")
             kwargs.setdefault("ylab", "value")

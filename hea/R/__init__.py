@@ -330,6 +330,21 @@ from .model_selection import (
     _extract_aic_lm,
 )
 
+# Time series construction — mirrors R's ``ts()``. The constructor
+# lives in ``hea.tidy.dataframe`` (next to ``DataFrame``, whose
+# ``_ts_meta`` attribute it stamps); a lazy wrapper here makes
+# ``hea.R.ts`` reachable without the circular import that a top-level
+# ``from ..tidy.dataframe import ts`` would trigger (``hea.tidy.dataframe``
+# is mid-load when ``hea.R.__init__`` is imported).
+def ts(data, start: float = 1.0, frequency: float = 1.0):
+    """R: ``ts(data, start, frequency)`` — construct a time series.
+
+    Thin wrapper around :func:`hea.tidy.dataframe.ts` (lazy import to
+    avoid the load-order cycle). See that docstring for details.
+    """
+    from ..tidy.dataframe import ts as _ts
+    return _ts(data, start=start, frequency=frequency)
+
 
 __all__ = [
     # base I/O
@@ -405,6 +420,8 @@ __all__ = [
     # regression diagnostics
     "hatvalues", "rstandard", "rstudent",
     "cooks_distance", "dffits", "dfbetas", "influence",
+    # time series construction (R's ts())
+    "ts",
     # emmeans (CRAN port, parked here until the surface grows)
     "EmmGrid", "emmeans", "summary_emmgrid_contrasts",
 ]

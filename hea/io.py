@@ -170,6 +170,62 @@ del _name
 _RDATASETS_PKG_ALIAS = {"R": "datasets"}
 
 
+# (canonical_package, name) → frequency for datasets R classifies as ``ts``.
+# rdatasets ships them as 2-col ``(time, value)`` frames because CSV can't
+# carry an R class attribute — but on load we want them marked so the
+# base-graphics plotters and ``summary()`` dispatch like R's ``ts`` would.
+# The flag is set explicitly here (never inferred from column names), so
+# a user-built ``DataFrame({"time": …, "value": …})`` won't accidentally
+# fire the ts dispatch.
+_KNOWN_TS_DATASETS: dict[tuple[str, str], float] = {
+    ("datasets", "AirPassengers"):  12.0,   # monthly
+    ("datasets", "BJsales"):         1.0,
+    ("datasets", "BJsales.lead"):    1.0,
+    ("datasets", "JohnsonJohnson"):  4.0,   # quarterly
+    ("datasets", "LakeHuron"):       1.0,
+    ("datasets", "Nile"):            1.0,
+    ("datasets", "UKDriverDeaths"): 12.0,
+    ("datasets", "UKgas"):           4.0,
+    ("datasets", "USAccDeaths"):    12.0,
+    ("datasets", "WWWusage"):        1.0,
+    ("datasets", "airmiles"):        1.0,
+    ("datasets", "austres"):         4.0,
+    ("datasets", "co2"):            12.0,
+    ("datasets", "discoveries"):     1.0,
+    ("datasets", "fdeaths"):        12.0,
+    ("datasets", "freeny.y"):        4.0,
+    ("datasets", "ldeaths"):        12.0,
+    ("datasets", "lh"):              1.0,
+    ("datasets", "lynx"):            1.0,
+    ("datasets", "mdeaths"):        12.0,
+    ("datasets", "nhtemp"):          1.0,
+    ("datasets", "nottem"):         12.0,
+    ("datasets", "presidents"):      4.0,
+    ("datasets", "sunspot.month"): 12.0,
+    ("datasets", "sunspot.year"):   1.0,
+    ("datasets", "sunspots"):       12.0,
+    ("datasets", "treering"):        1.0,
+    ("datasets", "uspop"):           0.1,
+}
+
+
+def _apply_ts_metadata(df: "DataFrame", package: str, name: str) -> "DataFrame":
+    """Stamp ``_ts_meta`` on ``df`` if ``(package, name)`` is in the known
+    R ts table. Otherwise return the frame unchanged.
+    """
+    canon_pkg = _RDATASETS_PKG_ALIAS.get(package, package)
+    freq = _KNOWN_TS_DATASETS.get((canon_pkg, name))
+    if freq is None:
+        return df
+    if list(df.columns) != ["time", "value"]:
+        return df  # CSV shape unexpectedly diverged; skip silently.
+    from .tidy.dataframe import TsMeta
+    start = float(df["time"][0])
+    end = float(df["time"][-1])
+    df._ts_meta = TsMeta(start=start, end=end, frequency=freq)
+    return df
+
+
 def _find_bundled_dataset(package: str, name: str) -> Path | None:
     """Walk up from CWD looking for a bundled ``datasets/{package}/{name}.csv``.
 
@@ -489,7 +545,8 @@ def data(name: str, package: str | None = None, save_to: str = "./data",
         df = pl.read_csv(csv_path, null_values="NA")
 
     df = _apply_dataset_schema(df, _find_schema(package, name))
-    return DataFrame._from_pydf(df._df)
+    out = DataFrame._from_pydf(df._df)
+    return _apply_ts_metadata(out, package, name)
 
 
 # ---------------------------------------------------------------------------
