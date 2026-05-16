@@ -1438,6 +1438,19 @@ class DataFrame(pl.DataFrame):
         from hea.ggplot.core import ggplot as _ggplot
         from hea.plot.dispatch import _frame_env
 
+        # ts-marked frame: default x=value (single-vector default,
+        # matching ``hist(Nile)``). Users targeting the time-axis line
+        # plot pass aes explicitly: ``Nile.ggplot(x="time", y="value")``
+        # — same explicitness ggplot2 in R requires for any chart.
+        # Driven by the explicit ``_ts_meta`` flag, never by column-name
+        # inference, so user-built ``DataFrame({"time": …, "value": …})``
+        # is not affected.
+        if getattr(self, "_ts_meta", None) is not None:
+            mapped_x = ("x" in aes_kwargs) or (
+                mapping is not None and "x" in mapping)
+            if not mapped_x:
+                aes_kwargs["x"] = "value"
+
         env = _frame_env(inspect.currentframe().f_back)
         return _ggplot(self, mapping, _env=env, **aes_kwargs)
 

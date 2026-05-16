@@ -113,6 +113,46 @@ class Series(pl.Series):
             return base + levels_html
         return base
 
+    # ---- ggplot entry point -------------------------------------------
+
+    def ggplot(self, mapping=None, **aes_kwargs):
+        """Start a ggplot from this Series.
+
+        Builds a one-column DataFrame ``{self.name: self}`` and chains
+        through :meth:`DataFrame.ggplot`. ``x`` defaults to the Series
+        name so single-vector geoms (``geom_histogram``, ``geom_density``,
+        ``geom_qq``, ``geom_boxplot``, ``geom_rug``) chain without an
+        explicit aesthetic:
+
+        ::
+
+            s.ggplot().geom_histogram()
+            s.ggplot().geom_density()
+            s.ggplot(color="red").geom_rug()
+
+        Unnamed Series get the column name ``"value"`` (same convention
+        as :func:`hea.R.ts`). User-passed ``x=`` / ``y=`` override the
+        default.
+
+        ggplot2 in R strictly requires a data.frame — hea adds this
+        entry point because a Series is unambiguously one numeric vector,
+        with zero false-positive risk.
+        """
+        import inspect
+
+        from hea.ggplot.core import ggplot as _ggplot
+        from hea.plot.dispatch import _frame_env
+
+        name = self.name or "value"
+        df = DataFrame({name: self.rename(name)})
+        mapped_x = ("x" in aes_kwargs) or (
+            mapping is not None and "x" in mapping)
+        if not mapped_x:
+            aes_kwargs["x"] = name
+
+        env = _frame_env(inspect.currentframe().f_back)
+        return _ggplot(df, mapping, _env=env, **aes_kwargs)
+
 
 def _install_series_subclass_overrides() -> None:
     """Install hea.Series-aware wrappers for every method on pl.Series that
