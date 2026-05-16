@@ -65,10 +65,12 @@ from ..formula import (
     _T2PredictRawBasis,
     _T2RawBasis,
     _TensorRawBasis,
+    is_matrix_col,
     materialize,
     materialize_smooths,
+    matrix_to_2d,
+    prepare_design,
 )
-from ..design import is_matrix_col, matrix_to_2d, prepare_design
 from .gam import (
     _FitState,
     _PenaltySlot,

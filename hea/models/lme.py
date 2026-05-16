@@ -44,8 +44,8 @@ from ..formula import (
     _materialize_re_lhs,
     materialize,
     materialize_bars,
+    prepare_design,
 )
-from ..design import prepare_design
 from .lm import _apply_subset, _label_top_n, _lowess, _qq_plot
 from ..utils import (
     format_df, format_pval, format_signif, format_signif_jointly,

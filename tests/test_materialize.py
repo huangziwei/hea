@@ -13,8 +13,7 @@ import polars as pl
 import pytest
 
 from conftest import FIXTURE_ROOT, fixture_meta, fixtures_by_kind, load_dataset
-from hea.formula import expand, materialize, parse, referenced_columns
-from hea.design import prepare_design
+from hea.formula import expand, materialize, parse, prepare_design, referenced_columns
 
 WR_FIXTURES = fixtures_by_kind("wr")
 WR_IDS = [e["id"] for e in WR_FIXTURES]

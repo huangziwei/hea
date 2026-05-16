@@ -277,7 +277,7 @@ def test_poisson_glm_state_matches_R():
 def _build_design_pieces(formula: str, data: pl.DataFrame):
     """Helper: parse formula, build X and ReTerms manually (bypassing the
     full prepare_design pipeline so the test focuses on _PredState math)."""
-    from hea.design import prepare_design
+    from hea.formula import prepare_design
 
     design = prepare_design(formula, data)
     re_terms = materialize_bars(design.expanded, design.data)

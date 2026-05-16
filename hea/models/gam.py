@@ -45,8 +45,7 @@ from scipy.linalg import cho_factor, cho_solve, solve_triangular
 from scipy.stats import chi2 as _chi2, f as f_dist, norm, t as t_dist
 
 from ..family import Family, Gaussian, tw as _tw_family
-from ..formula import BasisSpec, SmoothBlock, _eval_atom, materialize_smooths
-from ..design import prepare_design
+from ..formula import BasisSpec, SmoothBlock, _eval_atom, materialize_smooths, prepare_design
 from .lm import _label_top_n, _lowess, _qq_plot
 from ..utils import (
     _dig_tst,
@@ -3967,8 +3966,8 @@ class gam:
                 _apply_smooth_arg_exprs,
                 _smooth_arg_expr_map,
                 materialize,
+                normalize_data,
             )
-            from ..design import normalize_data
 
             # Accept the same dict / DataFrame input as the constructor
             # so matrix-arg smooths can replay on a {name: 2-D ndarray}.

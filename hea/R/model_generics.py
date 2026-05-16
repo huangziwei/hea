@@ -259,7 +259,7 @@ def model_matrix(model, data=None):
         return model.X
     if isinstance(model, str) and data is not None:
         # Formula form: import locally to avoid circular import at module load.
-        from ..design import prepare_design
+        from ..formula import prepare_design
 
         design = prepare_design(model, data)
         return design.X

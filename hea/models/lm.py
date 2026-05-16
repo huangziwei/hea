@@ -7,8 +7,7 @@ from scipy.linalg import cholesky, lu, qr, solve_triangular
 from scipy.optimize import minimize
 from scipy.stats import f, norm, t
 
-from ..formula import _eval_atom, materialize
-from ..design import prepare_design
+from ..formula import _eval_atom, materialize, prepare_design
 from ..utils import (
     _dig_tst,
     format_df,
