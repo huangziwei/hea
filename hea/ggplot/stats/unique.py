@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import polars as pl
-
 from ..aes import split_layer_kwargs
 from .stat import Stat
 

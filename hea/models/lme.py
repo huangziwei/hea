@@ -18,7 +18,7 @@ Models Using lme4", J. Stat. Software 67(1), §5 ("Profiled Deviance").
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
 import warnings
 from typing import Callable, Optional

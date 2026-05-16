@@ -16,7 +16,6 @@ from ._shared import (
     _check_groups,
     _kwargs_to_exprs,
     _resolve_lazy_factors,
-    _split_arrange,
 )
 from .dataframe import DataFrame
 

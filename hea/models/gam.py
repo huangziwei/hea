@@ -4957,7 +4957,6 @@ class gam:
         # (Zp + CI < 0); plotted via ``contourf`` on a binary 0/1 field
         # with a single-color cmap, alpha-blended over the heatmap.
         if show_diff and CI_mat is not None:
-            from matplotlib.colors import ListedColormap as _LCM
             sig = ((Zp - CI_mat.T > 0) | (Zp + CI_mat.T < 0)).astype(float)
             # Mask non-significant (0) cells so contourf paints only the
             # 1-valued cells; one-color cmap so ``col_diff`` does the work.

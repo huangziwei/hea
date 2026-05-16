@@ -33,8 +33,6 @@ class GeomPolygon(Geom):
     key_glyph: str = "polygon"
 
     def draw_panel(self, data, ax) -> None:
-        from .._util import r_color
-
         if len(data) == 0:
             return
 

@@ -29,7 +29,6 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 from scipy.special import digamma, expit, gammaln, ndtr, ndtri, polygamma
-from scipy.stats import binom as _binom_dist
 from scipy.stats import gamma as _gamma_dist
 from scipy.stats import poisson as _poisson_dist
 

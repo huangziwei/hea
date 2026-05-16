@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .scale import Scale, _NAME_MISSING, fmt_number, format_breaks
+from .scale import Scale, _NAME_MISSING, format_breaks
 from .transformed import IdentityTrans, Trans
 
 

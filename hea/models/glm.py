@@ -22,7 +22,7 @@ from scipy.linalg import qr, solve_triangular
 from scipy.stats import norm, t as student_t
 
 from ..family import Binomial, Family, Gaussian, Link, _coerce_response
-from ..formula import _eval_atom, deparse, materialize, parse, prepare_design, Call, Name
+from ..formula import _eval_atom, deparse, materialize, parse, prepare_design, Call
 from .lm import _label_top_n, _lowess, _qq_plot
 from ..utils import (
     _dig_tst,

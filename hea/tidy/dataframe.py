@@ -15,13 +15,8 @@ wrapped via the install hooks in :mod:`hea.tidy.series`.
 """
 from __future__ import annotations
 
-import datetime as _dt
-import math
-import re
-import shutil
-import textwrap
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Union
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .groupby import GroupBy
@@ -30,9 +25,7 @@ if TYPE_CHECKING:
 
 import numpy as np
 import polars as pl
-from scipy import stats as _sps
 
-from ..R import cut as _R_cut
 from ._shared import (
     _apply_groups,
     _check_groups,
@@ -44,9 +37,7 @@ from ._shared import (
     _split_arrange,
     _TidyRange,
 )
-from .basics import _Desc
 from .joins import (
-    _BIN_OPS,
     _CLOSEST_STRATEGY,
     _INEQ_BUILDERS,
     _JoinBy,

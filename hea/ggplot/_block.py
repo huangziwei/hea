@@ -1521,7 +1521,7 @@ def _prepare_collect(grid):
     legend's orientation.
     """
     from .core import ggplot
-    from .patchwork import GuideArea, PlotGrid, guide_area
+    from .patchwork import GuideArea, PlotGrid
     from .theme import theme as theme_fn
 
     leaves = grid.leaves()
@@ -1577,7 +1577,7 @@ def _wrap_with_guide_area(grid, pos: str):
     on the side indicated by ``pos``. Annotation and ``guides`` flag stay
     on the new outer grid so :func:`_render_guide_area_cell` still has
     access to the merged legend payload."""
-    from .patchwork import _DIRECTION_H, _DIRECTION_V, GuideArea, PlotGrid, guide_area
+    from .patchwork import _DIRECTION_H, _DIRECTION_V, PlotGrid, guide_area
 
     ga = guide_area()
     # Promote the inner grid's annotation onto the outer wrapper so the
@@ -2126,8 +2126,6 @@ def _render_leaf_cell(
     instead of overlapping it.
     """
     from matplotlib.gridspec import GridSpecFromSubplotSpec
-
-    from .render import _apply_plot_titles
 
     from .render import _is_coord_polar
 

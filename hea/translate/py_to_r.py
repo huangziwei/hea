@@ -31,9 +31,9 @@ from typing import Optional
 from . import _datasets
 
 from .nse import NSEContext, Slot
-from .registry.functions import FUNCTION_TABLE, KWARG_ALIASES, Func
+from .registry.functions import FUNCTION_TABLE, KWARG_ALIASES
 from .registry.ggplot import is_chain_extension
-from .registry.verbs import VERB_TABLE, Verb
+from .registry.verbs import VERB_TABLE
 
 
 class PyToRError(Exception):

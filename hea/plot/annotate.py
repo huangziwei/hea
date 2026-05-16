@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import inspect
 
-import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from scipy.stats import norm

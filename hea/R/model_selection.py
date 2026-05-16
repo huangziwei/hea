@@ -23,7 +23,6 @@ import polars as pl
 from scipy.stats import chi2, f
 
 from ._shared import _caller_names
-from ..models.bam import bam
 from ..models.gam import gam
 from ..models.glm import glm
 from ..models.lm import lm

@@ -27,7 +27,7 @@ individual plots before composition, not to a composition wrapper.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import ceil, sqrt
+from math import ceil
 from typing import Any
 
 _DIRECTION_H = "h"

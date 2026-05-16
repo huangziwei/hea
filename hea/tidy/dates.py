@@ -44,7 +44,6 @@ def _parse_lubridate(value, order: str, with_time: bool, tz: str = ""):
     the input shape: a ``date`` (or ``datetime`` when ``with_time``) for
     scalars; a Python list for list/Series/ndarray inputs.
     """
-    import datetime as _dt
     import re as _re
     from dateutil import parser as _du
 

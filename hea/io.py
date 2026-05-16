@@ -40,7 +40,7 @@ import polars as _pl
 import polars as pl  # alias used by the dataset loaders below
 
 from .formula import set_ordered_cols
-from .tidy import DataFrame, LazyFrame, Series, _rewrap
+from .tidy import DataFrame, _rewrap
 
 # These polars I/O helpers return plain dict[str, DataType] (schema
 # introspection only) — no wrapping needed.

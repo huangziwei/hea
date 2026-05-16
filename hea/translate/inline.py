@@ -29,12 +29,10 @@ from __future__ import annotations
 import ast
 import inspect
 import uuid
-import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from . import gaps as _gaps
 from .gaps import Gap
 from .py_to_r import translate as _py_to_r
 from .r_to_py import translate as _r_to_py

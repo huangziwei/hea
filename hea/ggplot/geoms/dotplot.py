@@ -14,7 +14,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
-import polars as pl
 
 from ..aes import split_layer_kwargs
 from .geom import Geom

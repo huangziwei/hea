@@ -43,7 +43,7 @@ mgcv source: ``/tmp/mgcv/R/bam.r`` (1.9-1).
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Sequence
 
 import numpy as np
@@ -66,7 +66,6 @@ from ..formula import (
     _T2RawBasis,
     _TensorRawBasis,
     is_matrix_col,
-    materialize,
     materialize_smooths,
     matrix_to_2d,
     prepare_design,
@@ -2453,7 +2452,6 @@ class bam(gam):
             # discretization didn't round (the common case for small or
             # already-unique covariates). Phase 5.2 will replace this
             # with a true Xbd-gather.
-            from ..formula import materialize
             X_param_full = self._X_param_full
             for start, end in _chunk_indices(n, self._chunk_size):
                 cols = [X_param_full[start:end]]

@@ -8,7 +8,6 @@ form is resolved by ``hea.DataFrame.mutate`` / ``select`` via the private
 """
 from __future__ import annotations
 
-import numpy as np
 import polars as pl
 
 from ..formula import set_ordered_cols
