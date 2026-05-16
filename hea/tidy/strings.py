@@ -1,19 +1,110 @@
-"""tidyverse's ``stringr`` string operations.
+"""String operations: stringr's ``str_*`` family plus readr's
+``parse_number`` / ``parse_double`` (string → numeric).
 
-``str_c`` / ``str_glue`` / ``str_flatten`` — paste & interpolate.
-``str_length`` / ``str_sub`` — measure & slice.
-``str_to_upper`` / ``str_to_lower`` / ``str_to_title`` — case folding.
-``str_sort`` / ``str_equal`` — order & compare.
-``str_detect`` / ``str_count`` — regex membership & match-count.
-``str_view`` (+ ``str_view_all`` alias) — pretty-print with highlights.
-
-All dispatch on input type — polars Expr/Series stay lazy, lists / numpy
-arrays go through Python regex; scalars return scalars.
+Every function dispatches on input type — polars ``Expr`` / ``Series``
+stay lazy and return the same shape; lists / numpy arrays go through
+Python regex; scalars return scalars. ``str_wrap`` is the wrap-to-width
+helper from stringr (textwrap-based); the rest mirror stringr's regex
+and case-folding surface.
 """
 from __future__ import annotations
 
+import textwrap
+
 import numpy as np
 import polars as pl
+
+
+# ---- readr parsers --------------------------------------------------
+
+def parse_number(x):
+    """readr's ``parse_number()`` — pull the first number out of a string column.
+
+    Strips comma thousand-separators, then extracts the first signed
+    integer or decimal via ``(-?\\d+(?:\\.\\d+)?)`` and casts to
+    ``Float64`` with ``strict=False`` (unparseable → null). Handles
+    currency symbols, trailing units, and mixed text the same way
+    readr does (``"$1,234.56"`` → ``1234.56``, ``"30 yo"`` → ``30``,
+    ``"five"`` → null). Locale-specific thousand/decimal separators
+    aren't supported — US-style only.
+
+    Type-in / type-out: ``pl.Series`` → ``pl.Series``; ``pl.Expr`` →
+    ``pl.Expr``; list / tuple / ndarray → ``list`` (with ``None`` for
+    unparseable entries).
+    """
+    array_like = not isinstance(x, (pl.Series, pl.Expr))
+    if array_like:
+        x = pl.Series(x, dtype=pl.Utf8)
+    out = (
+        x.cast(pl.Utf8)
+        .str.replace_all(",", "")
+        .str.extract(r"(-?\d+(?:\.\d+)?)")
+        .cast(pl.Float64, strict=False)
+    )
+    return out.to_list() if array_like else out
+
+
+def parse_double(x):
+    """readr's ``parse_double()`` — strict floating-point parser.
+
+    Unlike :func:`parse_number`, this does *not* strip currency symbols
+    or extract numbers from mixed text — the whole string must be a
+    valid double, otherwise the value becomes null. ``"1.234"`` →
+    ``1.234``; ``"$1.99"``, ``"1,234"``, ``"abc"`` → null.
+
+    Type-in / type-out: ``pl.Series`` → ``pl.Series``; ``pl.Expr`` →
+    ``pl.Expr``; list / tuple / ndarray → ``list`` (with ``None`` for
+    unparseable entries).
+    """
+    array_like = not isinstance(x, (pl.Series, pl.Expr))
+    if array_like:
+        x = pl.Series(x, dtype=pl.Utf8)
+    out = x.cast(pl.Utf8).cast(pl.Float64, strict=False)
+    return out.to_list() if array_like else out
+
+
+# ---- stringr --------------------------------------------------------
+
+def str_wrap(string, width=80, indent=0, exdent=0, whitespace_only=True):
+    """stringr's ``str_wrap()`` — wrap text to a fixed line width.
+
+    Wraps each input string to lines no longer than ``width`` characters,
+    breaking on whitespace by default. Mirrors stringr's defaults
+    (``width=80``, ``whitespace_only=TRUE``); ``indent`` / ``exdent`` add
+    spaces to the first / subsequent lines.
+
+    Accepts a single string or an iterable of strings; returns the same
+    shape. Built on Python's :mod:`textwrap` — no R-style pipe, but
+    ``hea.str_wrap("...", width=30)`` does what you want.
+
+    Parameters
+    ----------
+    string : str | Iterable[str]
+        Text to wrap. ``None`` entries pass through unchanged.
+    width : int, default 80
+        Maximum line length (characters).
+    indent : int, default 0
+        Spaces prepended to the first line of each string.
+    exdent : int, default 0
+        Spaces prepended to subsequent lines.
+    whitespace_only : bool, default True
+        Only break at whitespace; never split a word or hyphenated token.
+    """
+    def _wrap_one(s):
+        if s is None:
+            return None
+        return textwrap.fill(
+            str(s),
+            width=int(width),
+            initial_indent=" " * int(indent),
+            subsequent_indent=" " * int(exdent),
+            break_long_words=not whitespace_only,
+            break_on_hyphens=not whitespace_only,
+        )
+
+    if isinstance(string, str):
+        return _wrap_one(string)
+    return [_wrap_one(s) for s in string]
 
 
 def str_c(*args, sep="", collapse=None):

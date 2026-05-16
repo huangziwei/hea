@@ -78,6 +78,11 @@ def _hea_r_exports() -> frozenset[str]:
 
 
 @functools.cache
+def _hea_tidy_exports() -> frozenset[str]:
+    return _callable_exports("hea.tidy")
+
+
+@functools.cache
 def _hea_plot_exports() -> frozenset[str]:
     return _callable_exports("hea.plot")
 
@@ -415,11 +420,14 @@ class Translator:
 
         # hea.R first: R-script translations want R semantics (e.g. ``mean``
         # is a scalar reducer with na_rm=True, not the polars expression
-        # helper). Fall back to ``hea`` for names hea.R doesn't carry.
-        # hea.ggplot picks up geom_/scale_/coord_/facet_/theme_/position_*
-        # helpers, which the translator emits as bare names.
+        # helper). Then hea.tidy for tidyverse-only ports (stringr / lubridate /
+        # forcats / dplyr-window-helpers / readr / tibble). Fall back to ``hea``
+        # for names neither sub-namespace carries, then hea.plot / hea.ggplot
+        # for the plot-shaped helpers the translator emits as bare names.
         r_names = sorted(n for n in candidates if n in _hea_r_exports())
         used = set(r_names)
+        tidy_names = sorted(n for n in (candidates - used) if n in _hea_tidy_exports())
+        used |= set(tidy_names)
         hea_names = sorted(n for n in (candidates - used) if n in _hea_exports())
         used |= set(hea_names)
         plot_names = sorted(n for n in (candidates - used) if n in _hea_plot_exports())
@@ -446,6 +454,12 @@ class Translator:
             out.append(P.ImportFrom(
                 module="hea.R",
                 names=[P.alias(name=n, asname=None) for n in r_names],
+                level=0,
+            ))
+        if tidy_names:
+            out.append(P.ImportFrom(
+                module="hea.tidy",
+                names=[P.alias(name=n, asname=None) for n in tidy_names],
                 level=0,
             ))
         if plot_names:

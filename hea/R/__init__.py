@@ -53,9 +53,6 @@ This package is the result of splitting the legacy ``hea/R.py`` (one
   ``as_character`` / ``as_logical`` / ``as_date``.
 * :mod:`hea.R.predicates` — ``is_na`` / ``is_null`` / ``is_finite`` /
   ``is_numeric``.
-* :mod:`hea.R.lubridate` — ``today`` / ``now``, ``ymd`` / ``mdy`` /
-  ``dmy`` + their ``_hms`` / ``_hm`` variants.
-* :mod:`hea.R.stringr` — ``str_*`` family.
 * :mod:`hea.R.distributions` — ``dnorm`` / ``pnorm`` / ``qnorm`` /
   ``rnorm`` and the other d/p/q/r families, ``set_seed`` / ``sample``.
 * :mod:`hea.R.functional` — ``tapply`` / ``sapply``.
@@ -203,39 +200,6 @@ from .predicates import (
     is_na,
     is_null,
     is_numeric,
-)
-
-# lubridate
-from .lubridate import (
-    dmy,
-    dmy_hm,
-    dmy_hms,
-    mdy,
-    mdy_hm,
-    mdy_hms,
-    now,
-    today,
-    ymd,
-    ymd_hm,
-    ymd_hms,
-)
-
-# stringr
-from .stringr import (
-    str_c,
-    str_count,
-    str_detect,
-    str_equal,
-    str_flatten,
-    str_glue,
-    str_length,
-    str_sort,
-    str_sub,
-    str_to_lower,
-    str_to_title,
-    str_to_upper,
-    str_view,
-    str_view_all,
 )
 
 # Distributions
@@ -405,16 +369,6 @@ __all__ = [
     # coercion / predicates
     "as_numeric", "as_integer", "as_character", "as_logical",
     "as_date", "as_Date",
-    # lubridate: clock primitives + parsers
-    "today", "now",
-    "ymd", "mdy", "dmy",
-    "ymd_hms", "ymd_hm", "mdy_hms", "mdy_hm", "dmy_hms", "dmy_hm",
-    # stringr: regex-debug pretty-printers (no-op-like)
-    "str_view", "str_view_all",
-    # stringr: core string ops
-    "str_c", "str_glue", "str_flatten", "str_length", "str_sub",
-    "str_to_upper", "str_to_lower", "str_to_title",
-    "str_sort", "str_equal", "str_detect", "str_count",
     "is_na", "is_null", "is_finite", "is_numeric", "is_factor",
     "factor", "fct", "ordered", "interaction", "levels", "nlevels",
     # distributions: d/p/q/r families
