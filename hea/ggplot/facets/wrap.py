@@ -23,6 +23,7 @@ class FacetWrap(Facet):
     facets: list = field(default_factory=list)
     ncol: int | None = None
     nrow: int | None = None
+    as_table: bool = True
 
     def facet_vars(self) -> list[str]:
         return list(self.facets)
@@ -62,12 +63,27 @@ class FacetWrap(Facet):
         n = len(unique)
         nrow, ncol = self.grid_dims(n)
 
-        rows = (i // ncol + 1 for i in range(n))
-        cols = (i % ncol + 1 for i in range(n))
+        # ``as_table=True`` (ggplot2 default): smallest factor level at
+        # top-left, panels flow top-to-bottom (the "table" reading order).
+        # ``as_table=False`` flips rows so the smallest level lands at
+        # bottom-left and panels flow bottom-to-top — lattice's default
+        # for ``xyplot(... | f)``, matching the "graphics" convention
+        # Bates uses in lmmwr Fig. 3.1.
+        if self.as_table:
+            row_list = [i // ncol + 1 for i in range(n)]
+        else:
+            row_list = [nrow - i // ncol for i in range(n)]
+        col_list = [i % ncol + 1 for i in range(n)]
+        # ``PANEL`` is the flat-axes index the renderer uses to drop each
+        # panel into its grid cell (``flat_axes[PANEL - 1]``). Derive it
+        # from (ROW, COL) so ``as_table=False`` actually relocates panels
+        # — without this, the sequential 1..n numbering would silently
+        # cancel the row flip and the plot would look unchanged.
+        panel_list = [(r - 1) * ncol + c for r, c in zip(row_list, col_list)]
         return unique.with_columns(
-            PANEL=pl.Series(values=list(range(1, n + 1)), dtype=pl.Int64),
-            ROW=pl.Series(values=list(rows), dtype=pl.Int64),
-            COL=pl.Series(values=list(cols), dtype=pl.Int64),
+            PANEL=pl.Series(values=panel_list, dtype=pl.Int64),
+            ROW=pl.Series(values=row_list, dtype=pl.Int64),
+            COL=pl.Series(values=col_list, dtype=pl.Int64),
         )
 
     def map_data(self, data: pl.DataFrame, layout: pl.DataFrame) -> pl.DataFrame:
@@ -84,11 +100,16 @@ class FacetWrap(Facet):
         return data.join(lookup, on=keys, how="left")
 
 
-def facet_wrap(facets, *, ncol=None, nrow=None, scales="fixed"):
+def facet_wrap(facets, *, ncol=None, nrow=None, scales="fixed", as_table=True):
     """Split into panels by ``facets``.
 
     Accepts ``"cyl"``, ``"~ cyl"``, ``"~ cyl + vs"``, or ``["cyl", "vs"]``.
     The R-style tilde is stripped if present.
+
+    ``as_table`` (default ``True``, ggplot2 convention): when ``False``,
+    fills panels bottom-to-top instead of top-to-bottom — matches
+    lattice's ``xyplot(... | f)`` default, useful for Bates-style
+    "panels increase upward" displays.
     """
     if isinstance(facets, str):
         s = facets.strip()
@@ -103,4 +124,5 @@ def facet_wrap(facets, *, ncol=None, nrow=None, scales="fixed"):
         raise ValueError(
             f"scales must be one of 'fixed'/'free'/'free_x'/'free_y'; got {scales!r}"
         )
-    return FacetWrap(facets=facet_list, ncol=ncol, nrow=nrow, scales=scales)
+    return FacetWrap(facets=facet_list, ncol=ncol, nrow=nrow,
+                     scales=scales, as_table=as_table)
