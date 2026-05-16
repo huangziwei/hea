@@ -18,6 +18,7 @@ import numpy as np
 import polars as pl
 from scipy.stats import norm
 
+from .._util import to_numeric_aes
 from .stat import Stat
 
 
@@ -211,8 +212,11 @@ class StatSmooth(Stat):
     family: object = None  # for glm — Family instance or name; default Gaussian
 
     def compute_group(self, data, params):
-        x = data["x"].to_numpy().astype(float)
-        y = data["y"].to_numpy().astype(float)
+        # Factor / string columns flow through as integer codes (1..N),
+        # matching ggplot2's ``mapped_discrete`` so binary-factor responses
+        # like ``y="use"`` work with no upstream coercion.
+        x = to_numeric_aes(data["x"])
+        y = to_numeric_aes(data["y"])
 
         mask = ~(np.isnan(x) | np.isnan(y))
         x, y = x[mask], y[mask]

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 import polars as pl
 
 from .aes import Aes
-from ._util import to_series
+from ._util import to_numeric_aes, to_series
 from .scales.list import ScalesList
 
 
@@ -516,6 +516,18 @@ def _drop_out_of_scale_limits(df: pl.DataFrame, scales) -> pl.DataFrame:
         for sibling in _positional_aes_for(axis):
             if sibling not in df.columns:
                 continue
+            # Continuous-scale limits filter assumes numeric data; coerce
+            # factor / string columns via ggplot2's ``mapped_discrete``
+            # convention (1..N codes) first so the user's
+            # ``df.ggplot(y="some_factor").ylim(0, 1)`` doesn't crash with
+            # "cannot compare categorical with i32". The coerced column
+            # replaces the original so downstream stats / scales see
+            # numeric values throughout.
+            s = df[sibling]
+            if not s.dtype.is_numeric() and s.dtype != pl.Boolean:
+                df = df.with_columns(
+                    pl.Series(sibling, to_numeric_aes(s))
+                )
             col = pl.col(sibling)
             mask = pl.lit(True)
             if not _is_open(lo):

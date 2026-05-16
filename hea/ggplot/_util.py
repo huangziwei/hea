@@ -37,6 +37,45 @@ def polar_arc_interp(ax, *artists, steps: int = 100) -> None:
             a.get_path()._interpolation_steps = steps
 
 
+def to_numeric_aes(s: pl.Series) -> np.ndarray:
+    """Coerce a Series mapped to a numeric aesthetic (x / y / size / …)
+    into a 1-D float ndarray, mirroring ggplot2's ``mapped_discrete`` but
+    in Python's 0-based convention.
+
+    ggplot2 silently lets a factor or string column flow into a continuous
+    aesthetic by mapping it to its integer level codes; in R that's
+    1-based (N→1, Y→2). hea uses 0-based codes (N→0, Y→1) — consistent
+    with polars ``to_physical()``, numpy indexing, and the rest of hea —
+    so a binary response lands on the natural ``[0, 1]`` axis without
+    extra subtraction.
+
+    Rules, by dtype:
+
+    * Numeric (Int / Float) — cast to float, NaN preserved.
+    * Boolean               — cast to float (False→0.0, True→1.0).
+    * Enum / Categorical    — polars ``to_physical()`` codes (0-based).
+    * String / Utf8         — alphabetical sort of unique values as the
+                              implicit factor order, then physical codes
+                              (0-based).
+
+    Other dtypes raise ``TypeError``.
+    """
+    dt = s.dtype
+    if dt.is_numeric():
+        return s.cast(pl.Float64).to_numpy()
+    if dt == pl.Boolean:
+        return s.cast(pl.Float64).to_numpy()
+    if isinstance(dt, (pl.Enum, pl.Categorical)):
+        return s.to_physical().to_numpy().astype(float)
+    if dt == pl.String or dt == pl.Utf8:
+        levels = sorted(s.drop_nulls().unique().to_list())
+        coded = s.cast(pl.Enum(levels))
+        return coded.to_physical().to_numpy().astype(float)
+    raise TypeError(
+        f"cannot coerce {dt} to a numeric aesthetic; cast first."
+    )
+
+
 def to_series(x, length: int, name: str = "value") -> pl.Series:
     """Coerce a scalar / array / Series into a polars Series of given length.
 
