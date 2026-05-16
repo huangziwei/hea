@@ -66,7 +66,7 @@ def _build_namespace() -> dict:
     # else (verbs, models, families, R functions, …) lives under a
     # sub-namespace. Pre-bind those too.
     for sub in (hea.tidy, hea.models, hea.family, hea.R,
-                hea.data, hea.emmeans, hea.session_info):
+                hea.data, hea.session_info):
         for name in dir(sub):
             if not name.startswith("_") and name not in ns:
                 ns[name] = getattr(sub, name)

@@ -1,7 +1,9 @@
 """Port of R's emmeans package (subset).
 
-emmeans is a standalone CRAN package, not base R, so it lives in its
-own ``hea.emmeans`` module — separate from ``hea.R``.
+emmeans is a standalone CRAN package, not base R; lives inside
+:mod:`hea.R` for now because the port is small and shares its real peers
+(:mod:`hea.R.htest`, :mod:`hea.R.model_generics`) — promote to a sibling
+package when the surface grows beyond the Faraway lmwr coverage.
 
 Initial scope, driven by the Faraway lmwr scripts that use it:
 

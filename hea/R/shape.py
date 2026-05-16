@@ -82,7 +82,7 @@ def summary(x, **kwargs):
     without the caller knowing which package the table came from.
     """
     if isinstance(x, pl.DataFrame) and {"contrast", "estimate", "t.ratio"} <= set(x.columns):
-        from ..emmeans import summary_emmgrid_contrasts
+        from .emmeans import summary_emmgrid_contrasts
         return summary_emmgrid_contrasts(x, **kwargs)
     if hasattr(x, "summary"):
         return x.summary(**kwargs)

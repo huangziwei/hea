@@ -234,7 +234,7 @@ def _build_exec_namespace(caller) -> dict:
     # Names from every user-facing sub-namespace — col / lit / DataFrame /
     # lm / Binomial / anova / t_test / data / etc.
     for sub in (hea.tidy, hea.dtypes, hea.io, hea.models, hea.family,
-                hea.R, hea.data, hea.emmeans, hea.session_info):
+                hea.R, hea.data, hea.session_info):
         for name in dir(sub):
             if not name.startswith("_"):
                 ns.setdefault(name, getattr(sub, name))

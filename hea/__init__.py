@@ -24,9 +24,9 @@ construct a frame or run an ``isinstance`` check.
 * ``hea.family``        — GLM/GAM/LME exponential-family + link primitives
 * ``hea.R``             — base-R muscle memory: hypothesis tests
                           (``t_test``, ``chisq_test``, …), model-comparison
-                          generics (``anova``, ``AIC``, ``step``, …), and
-                          R utility functions (``factor``, ``cumsum``, …)
-* ``hea.emmeans``       — port of CRAN ``emmeans``
+                          generics (``anova``, ``AIC``, ``step``, …),
+                          R utility functions (``factor``, ``cumsum``, …),
+                          plus the small CRAN ``emmeans`` port
 * ``hea.translate``     — R ↔ Python source-to-source translator
 * ``hea.ggplot``        — port of ``ggplot2``
 * ``hea.plot``          — port of base-R ``plot``/``boxplot``/``hist``/…
@@ -52,7 +52,6 @@ from .tidy import DataFrame, LazyFrame, Series
 from . import (  # noqa: F401
     R,
     dtypes,
-    emmeans,
     family,
     ggplot,
     io,

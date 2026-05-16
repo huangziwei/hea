@@ -250,6 +250,9 @@ from .distributions import (
 # Functional iteration
 from .functional import sapply, tapply
 
+# emmeans — small CRAN port; promoted out of R/ once the surface grows.
+from .emmeans import EmmGrid, emmeans, summary_emmgrid_contrasts
+
 # Contingency tables
 from .tables import addmargins, prop_table, table, xtabs
 
@@ -402,4 +405,6 @@ __all__ = [
     # regression diagnostics
     "hatvalues", "rstandard", "rstudent",
     "cooks_distance", "dffits", "dfbetas", "influence",
+    # emmeans (CRAN port, parked here until the surface grows)
+    "EmmGrid", "emmeans", "summary_emmgrid_contrasts",
 ]

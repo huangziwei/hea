@@ -594,6 +594,8 @@ _R_EXPR_SKIP = {
     "anova", "add1", "drop1", "step",
     "hatvalues", "rstandard", "rstudent",
     "cooks_distance", "dffits", "dfbetas", "influence",
+    # emmeans — model-shaped (operate on fitted models / EmmGrid tables).
+    "emmeans", "EmmGrid", "summary_emmgrid_contrasts",
     # Distribution PDFs/CDFs/quantiles/random — scalar in, scalar out.
     "dnorm", "pnorm", "qnorm", "rnorm",
     "dt", "pt", "qt", "rt",
