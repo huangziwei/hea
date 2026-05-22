@@ -83,6 +83,21 @@ def _hea_tidy_exports() -> frozenset[str]:
 
 
 @functools.cache
+def _hea_models_exports() -> frozenset[str]:
+    return _callable_exports("hea.models")
+
+
+@functools.cache
+def _hea_family_exports() -> frozenset[str]:
+    return _callable_exports("hea.family")
+
+
+@functools.cache
+def _hea_io_exports() -> frozenset[str]:
+    return _callable_exports("hea.io")
+
+
+@functools.cache
 def _hea_plot_exports() -> frozenset[str]:
     return _callable_exports("hea.plot")
 
@@ -421,13 +436,22 @@ class Translator:
         # hea.R first: R-script translations want R semantics (e.g. ``mean``
         # is a scalar reducer with na_rm=True, not the polars expression
         # helper). Then hea.tidy for tidyverse-only ports (stringr / lubridate /
-        # forcats / dplyr-window-helpers / readr / tibble). Fall back to ``hea``
-        # for names neither sub-namespace carries, then hea.plot / hea.ggplot
-        # for the plot-shaped helpers the translator emits as bare names.
+        # forcats / dplyr-window-helpers / readr / tibble). Then the
+        # restructure-split sub-namespaces — hea.models (lm/glm/lme/…),
+        # hea.family (binomial/gaussian/…), hea.io (read_csv/…) — none of
+        # which live at hea's top level. Fall back to ``hea`` for the
+        # truly top-level names, then hea.plot / hea.ggplot for the
+        # plot-shaped helpers.
         r_names = sorted(n for n in candidates if n in _hea_r_exports())
         used = set(r_names)
         tidy_names = sorted(n for n in (candidates - used) if n in _hea_tidy_exports())
         used |= set(tidy_names)
+        models_names = sorted(n for n in (candidates - used) if n in _hea_models_exports())
+        used |= set(models_names)
+        family_names = sorted(n for n in (candidates - used) if n in _hea_family_exports())
+        used |= set(family_names)
+        io_names = sorted(n for n in (candidates - used) if n in _hea_io_exports())
+        used |= set(io_names)
         hea_names = sorted(n for n in (candidates - used) if n in _hea_exports())
         used |= set(hea_names)
         plot_names = sorted(n for n in (candidates - used) if n in _hea_plot_exports())
@@ -460,6 +484,24 @@ class Translator:
             out.append(P.ImportFrom(
                 module="hea.tidy",
                 names=[P.alias(name=n, asname=None) for n in tidy_names],
+                level=0,
+            ))
+        if models_names:
+            out.append(P.ImportFrom(
+                module="hea.models",
+                names=[P.alias(name=n, asname=None) for n in models_names],
+                level=0,
+            ))
+        if family_names:
+            out.append(P.ImportFrom(
+                module="hea.family",
+                names=[P.alias(name=n, asname=None) for n in family_names],
+                level=0,
+            ))
+        if io_names:
+            out.append(P.ImportFrom(
+                module="hea.io",
+                names=[P.alias(name=n, asname=None) for n in io_names],
                 level=0,
             ))
         if plot_names:

@@ -624,40 +624,20 @@ class Translator:
             if r is not None:
                 return r
 
-        # ``hea.tidy.DataFrame({...})`` / ``hea.tidy.from_dict({...})`` /
-        # ``hea.DataFrame({...})`` / ``hea.from_dict({...})`` → ``data.frame(...)``.
-        # The bare-prefix forms are kept so already-translated scripts (and
-        # ``hea.from_dict`` from older snapshots) still round-trip.
-        if isinstance(call.func, P.Attribute):
-            f = call.func
-            # hea.tidy.DataFrame(...) or hea.tidy.from_dict(...)
-            if (
-                isinstance(f.value, P.Attribute)
-                and isinstance(f.value.value, P.Name)
-                and f.value.value.id == "hea"
-                and (
-                    (f.value.attr == "tidy" and f.attr == "DataFrame")
-                    or (f.value.attr == "io" and f.attr == "from_dict")
-                )
-            ):
+        # ``hea.<subns>.X(...)`` / ``hea.X(...)`` / ``selectors.X(...)`` →
+        # ``X(...)``. The namespace prefix is stripped — R uses bare names
+        # for the same functions (via the dplyr / tidyselect imports).
+        # Two prefix shapes:
+        # - depth-2: ``hea.tidy.DataFrame``, ``hea.models.lm``, ``hea.io.read_csv``
+        # - depth-1: ``hea.data``, ``selectors.starts_with``, plus legacy
+        #   ``hea.DataFrame`` / ``hea.from_dict`` shims at the top level.
+        # ``DataFrame`` / ``from_dict`` route to the data.frame reverse
+        # emitter regardless of which sub-namespace they came from.
+        stripped = _strip_hea_prefix(call.func)
+        if stripped is not None:
+            if stripped in ("DataFrame", "from_dict"):
                 return self._emit_data_frame_reverse(call.args, call.keywords)
-            # hea.DataFrame(...) or hea.from_dict(...) — legacy form
-            if (
-                isinstance(f.value, P.Name)
-                and f.value.id == "hea"
-                and f.attr in ("DataFrame", "from_dict")
-            ):
-                return self._emit_data_frame_reverse(call.args, call.keywords)
-
-        # ``hea.X(...)`` / ``selectors.X(...)`` → ``X(...)``. Both
-        # namespaces are stripped — R uses bare names for the same
-        # functions (via the dplyr / tidyselect imports).
-        if (
-            isinstance(call.func, P.Attribute)
-            and isinstance(call.func.value, P.Name)
-            and call.func.value.id in ("hea", "selectors")
-        ):
-            return self._emit_plain_call(call.func.attr, call.args, call.keywords)
+            return self._emit_plain_call(stripped, call.args, call.keywords)
 
         # 4) Fallback: plain call.
         if isinstance(call.func, P.Name):
@@ -680,9 +660,11 @@ class Translator:
         attr = call.func
         if not isinstance(attr, P.Attribute):
             return None
-        # Skip namespace-qualified calls — ``hea.X`` / ``selectors.X``
-        # are NOT method-form helpers on a column expression.
-        if isinstance(attr.value, P.Name) and attr.value.id in ("hea", "selectors"):
+        # Skip namespace-qualified calls — ``hea.X``, ``hea.<sub>.X``, and
+        # ``selectors.X`` are namespaced module references, not method-form
+        # helpers on a column expression. ``_strip_hea_prefix`` handles
+        # the actual reversal of these later in :meth:`_emit_call`.
+        if _strip_hea_prefix(attr) is not None:
             return None
         method_name = attr.attr
 
@@ -977,6 +959,30 @@ class Translator:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _strip_hea_prefix(func: P.expr) -> Optional[str]:
+    """If ``func`` is ``hea.X``, ``hea.<sub>.X``, or ``selectors.X``,
+    return the bare ``X`` name. Otherwise return ``None``.
+
+    Used by the reverse direction to drop hea's namespace qualifier — R
+    has no equivalent (the loader is ``library()``, which makes names
+    bare). ``hea.<sub>.<sub2>.X`` (depth > 2) isn't emitted by the
+    forward translator, so we don't try to strip it.
+    """
+    if not isinstance(func, P.Attribute):
+        return None
+    # depth-1: ``hea.X`` / ``selectors.X``.
+    if isinstance(func.value, P.Name) and func.value.id in ("hea", "selectors"):
+        return func.attr
+    # depth-2: ``hea.<sub>.X``.
+    if (
+        isinstance(func.value, P.Attribute)
+        and isinstance(func.value.value, P.Name)
+        and func.value.value.id == "hea"
+    ):
+        return func.attr
+    return None
 
 
 def _flatten_method_chain(call: P.Call) -> tuple[P.expr, list]:
