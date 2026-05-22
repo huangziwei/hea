@@ -33,9 +33,19 @@ def _tr_full(src: str) -> str:
 
 
 def _strip_preamble(s: str) -> str:
-    """Drop leading ``library(...)`` lines emitted by py_to_r as preamble."""
+    """Drop leading ``library(...)`` and explicit ``data(...)`` lines
+    emitted by py_to_r as preamble.
+
+    The ``data("X", package = "Y")`` shape is emitted by the
+    smart-data-assign rewrite — it's the R-side counterpart to the
+    Python ``X = data("X", package="Y")`` and lives in the body, but
+    for round-trip body comparisons it's noise to strip.
+    """
     lines = s.split("\n")
-    while lines and lines[0].startswith("library("):
+    while lines and (
+        lines[0].startswith("library(")
+        or lines[0].startswith("data(")
+    ):
         lines.pop(0)
     return "\n".join(lines)
 
@@ -331,19 +341,23 @@ class TestImportsAndDataLoaders:
 
     def test_smart_data_loader_assign(self):
         # ``penguins = data("penguins", package="palmerpenguins")`` is the
-        # hea idiom for loading a named dataset. Reverse-translates to
-        # ``library(palmerpenguins)`` (R loads the dataset by side effect).
+        # hea idiom for loading a named dataset. Reverse-translates to an
+        # explicit ``data("penguins", package = "palmerpenguins")`` R call
+        # — the R-side counterpart that loads the dataset and exposes the
+        # ``penguins`` binding (side effect). The explicit form (rather
+        # than ``library(palmerpenguins)``) preserves the dataset name so
+        # the Py→R→Py round-trip rebinds it.
         out = _tr_full(
             'penguins = data("penguins", package="palmerpenguins")\n'
             'penguins.ggplot(x="flipper_length_mm", y="body_mass_g").geom_point()'
         )
-        assert "library(palmerpenguins)" in out
+        assert 'data("penguins", package = "palmerpenguins")' in out
         assert "ggplot(penguins, aes(x = flipper_length_mm, y = body_mass_g))" in out
 
     def test_hea_data_form_also_recognized(self):
         # ``hea.data(...)`` reverses the same way as bare ``data(...)``.
         out = _tr_full('penguins = hea.data("penguins", package="palmerpenguins")')
-        assert out == "library(palmerpenguins)"
+        assert out == 'data("penguins", package = "palmerpenguins")'
 
     def test_data_assign_with_mismatched_lhs_falls_through(self):
         # If the var name doesn't match the dataset string, no smart rewrite.
@@ -383,14 +397,18 @@ class TestPreamble:
         assert lines[1] == "library(patchwork)"
 
     def test_tidyverse_plus_data_package(self):
-        # ``library(tidyverse)`` first, then dataset packages (sorted).
+        # ``library(tidyverse)`` for the geom_point + the explicit
+        # ``data("penguins", package = "palmerpenguins")`` load. The
+        # dataset is loaded inline in the body (not as a preamble
+        # ``library(palmerpenguins)``) because that's what preserves
+        # the binding name on the way back to Python.
         out = _tr_full(
             'penguins = data("penguins", package="palmerpenguins")\n'
             'penguins.ggplot(x="flipper_length_mm").geom_point()'
         )
         lines = out.splitlines()
         assert lines[0] == "library(tidyverse)"
-        assert lines[1] == "library(palmerpenguins)"
+        assert lines[1] == 'data("penguins", package = "palmerpenguins")'
 
     def test_pipe_alone_does_not_trigger(self):
         # Bare ``|`` (patchwork operator) with no recognized chain
@@ -415,12 +433,14 @@ class TestAutoloadDetection:
         assert "library(nycflights13)" in out
 
     def test_explicit_data_still_works(self):
-        # Existing smart-data-assign should be unaffected.
+        # Smart-data-assign still fires; reverses to an explicit
+        # ``data("X", package = "Y")`` call (not a ``library()``) so
+        # the dataset binding survives the round-trip.
         out = _tr_full(
             'penguins = data("penguins", package="palmerpenguins")\n'
             'penguins.ggplot(x="flipper_length_mm").geom_point()'
         )
-        assert "library(palmerpenguins)" in out
+        assert 'data("penguins", package = "palmerpenguins")' in out
 
     def test_locally_defined_name_skips_autoload(self):
         # If the user assigns to a name that happens to match a dataset,

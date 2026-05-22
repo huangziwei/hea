@@ -15,13 +15,12 @@ import functools
 
 
 @functools.lru_cache(maxsize=1)
-def dataset_registry() -> dict[str, tuple[str, ...]]:
-    """``{dataset_name: (pkg1, pkg2, ...)}`` from rdatasets.
+def _rdatasets_registry() -> dict[str, tuple[str, ...]]:
+    """``{dataset_name: (pkg, ...)}`` from rdatasets.
 
-    Cached for the life of the process. First call scans ~75 packages ×
-    ~30 items each (≈600ms); subsequent calls are instant. Returns an
-    empty dict if rdatasets isn't installed — translator still works,
-    just without autoload inference.
+    Cached: rdatasets's contents don't change at runtime. First call
+    scans ~75 packages × ~30 items each (≈600ms); subsequent are
+    instant. Empty dict if rdatasets isn't installed.
     """
     try:
         import rdatasets
@@ -33,6 +32,39 @@ def dataset_registry() -> dict[str, tuple[str, ...]]:
             name = item.removesuffix(".pkl")
             registry.setdefault(name, []).append(pkg)
     return {n: tuple(pkgs) for n, pkgs in registry.items()}
+
+
+def _bundled_registry() -> dict[str, tuple[str, ...]]:
+    """``{dataset_name: (pkg, ...)}`` from the local ``datasets/`` tree
+    (CWD-walk via :func:`hea.io._bundled_index`).
+
+    NOT cached — the index is CWD-dependent. ``_bundled_index`` says
+    re-scanning is sub-millisecond, so this stays cheap. Empty dict if
+    no ``datasets/`` directory is reachable from CWD.
+    """
+    # Local import: ``hea.translate`` is loaded after ``hea.io``, but
+    # ``_datasets`` itself may be imported at any time, so we defer.
+    from hea.io import _bundled_index
+    return {n: tuple(sorted(pkgs)) for n, pkgs in _bundled_index().items()}
+
+
+def dataset_registry() -> dict[str, tuple[str, ...]]:
+    """Merged ``{dataset_name: (pkg, ...)}`` index — rdatasets +
+    locally-bundled CSVs.
+
+    Mirrors :func:`hea.io._dataset_index` so the translator's autoload
+    sees every package ``hea.data(...)`` can actually load (faraway /
+    gamair / lme4-extras / etc. live in the bundled tree, not in
+    rdatasets).
+    """
+    rd = _rdatasets_registry()
+    bundled = _bundled_registry()
+    if not bundled:
+        return rd
+    merged: dict[str, set[str]] = {n: set(pkgs) for n, pkgs in rd.items()}
+    for n, pkgs in bundled.items():
+        merged.setdefault(n, set()).update(pkgs)
+    return {n: tuple(sorted(pkgs)) for n, pkgs in merged.items()}
 
 
 # Names that should never trigger an autoload lookup even if they match

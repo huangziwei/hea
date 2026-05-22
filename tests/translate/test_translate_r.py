@@ -31,7 +31,7 @@ def _tr_full(src: str) -> str:
     return _strip_imports(translate(src)).strip()
 
 
-_AUTOLOAD_LINE = re.compile(r"^\w+\s*=\s*hea\.data\(")
+_AUTOLOAD_LINE = re.compile(r"^\w+\s*=\s*(hea\.)?data\(")
 _IMPORT_LINE = re.compile(r"^(import\s+hea\b|from\s+hea(\.[\w.]+)?\s+import\b)")
 
 
@@ -298,8 +298,11 @@ class TestHelpers:
 
 
 class TestForwardAutoload:
-    """Forward direction infers ``hea.data()`` loads for bare-name dataset
-    references and standalone ``data(...)`` calls."""
+    """Forward direction infers ``data()`` loads for bare-name dataset
+    references and standalone ``data(...)`` calls. Emits bare ``data``
+    + ``from hea import data`` so the autoload reads as the
+    user-preferred ``data('X', ...)`` rather than the qualified
+    ``hea.data('X', ...)``."""
 
     def test_library_then_bare_ref(self):
         # ``library(palmerpenguins)`` disambiguates a bare-name ref that
@@ -308,18 +311,18 @@ class TestForwardAutoload:
             'library(palmerpenguins)\n'
             'penguins |> ggplot(aes(x = flipper_length_mm)) + geom_point()'
         )
-        assert "penguins = hea.data('penguins', package='palmerpenguins')" in out
+        assert "penguins = data('penguins', package='palmerpenguins')" in out
         # The library() call itself is dropped from the body.
         assert "library(" not in out
 
     def test_standalone_data_call_becomes_assignment(self):
         # R's ``data("X", package="Y")`` is side-effectful — translate to
-        # ``X = hea.data(...)`` so the Python script can use ``X`` after.
+        # ``X = data(...)`` so the Python script can use ``X`` after.
         out = _tr_full('data("flights", package = "nycflights13")\nflights |> filter(dest == "IAH")')
-        assert "flights = hea.data('flights', package='nycflights13')" in out
+        assert "flights = data('flights', package='nycflights13')" in out
         # The data-assign must come before any use of ``flights`` below it.
         lines = out.splitlines()
-        assign_at = next(i for i, ln in enumerate(lines) if ln.startswith("flights = hea.data("))
+        assign_at = next(i for i, ln in enumerate(lines) if ln.startswith("flights = data("))
         use_at = next(i for i, ln in enumerate(lines) if "flights." in ln or "flights[" in ln or "flights |" in ln)
         assert assign_at < use_at
 
@@ -327,13 +330,13 @@ class TestForwardAutoload:
         # No library() and no data() — bare ref to a uniquely-named
         # rdatasets entry. Emit autoload load.
         out = _tr_full('flights |> filter(dest == "IAH")')
-        assert "flights = hea.data('flights', package='nycflights13')" in out
+        assert "flights = data('flights', package='nycflights13')" in out
 
     def test_ambiguous_bare_ref_skipped(self):
         # No library() to disambiguate ``penguins`` — skip the autoload.
         # User will need to disambiguate themselves or it'll error at runtime.
         out = _tr_full('penguins |> ggplot(aes(x = flipper_length_mm))')
-        assert "hea.data" not in out
+        assert "data('penguins'" not in out
 
     def test_locally_defined_name_not_autoloaded(self):
         # ``flights <- read_csv(...)`` defines the name; no autoload needed.
@@ -342,14 +345,14 @@ class TestForwardAutoload:
         )
         # The forward translator currently doesn't strip the autoload from
         # this case — but the local definition should win. Confirm there's
-        # NO ``flights = hea.data(...)`` line.
-        assert "hea.data" not in out
+        # NO ``flights = data(...)`` line.
+        assert "flights = data('flights'" not in out
 
     def test_r_default_package_skipped(self):
         # ``mtcars`` lives in R's ``datasets`` package which is auto-loaded
-        # in R — no explicit hea.data() load needed.
+        # in R — no explicit data() load needed.
         out = _tr_full('mtcars |> filter(mpg > 20)')
-        assert "hea.data" not in out
+        assert "mtcars = data(" not in out
 
     def test_library_call_dropped_from_body(self):
         # library() lines never make it into the Python body.
@@ -367,7 +370,7 @@ class TestForwardAutoload:
             'data("penguins", package = "palmerpenguins")\n'
             'penguins |> ggplot()'
         )
-        assert "penguins = hea.data('penguins', package='palmerpenguins')" in out
+        assert "penguins = data('penguins', package='palmerpenguins')" in out
 
 
 def test_canonical_pipeline_full():

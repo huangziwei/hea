@@ -300,14 +300,20 @@ class Translator:
 
     def _maybe_smart_data_assign(self, stmt: P.Assign) -> Optional[str]:
         """Detect ``<X> = data("<X>", package="<pkg>")`` and reverse to
-        ``library(<pkg>)``.
+        ``data("<X>", package = "<pkg>")``.
 
-        R's ``data()`` is side-effectful — it loads a dataset by name
-        into the calling environment and returns the name string. Naive
-        translation of the Python assignment would bind the string to
-        the variable, breaking the rest of the script. ``library(pkg)``
-        loads the dataset package and makes the name available, which is
-        what the user actually wants.
+        R's ``data()`` is side-effectful: it loads a dataset by name into
+        the calling environment and returns the name string. Emitting
+        the standalone call mirrors the Python binding — after R runs
+        the line, ``X`` is available in the env, the same way the
+        Python assignment makes ``X`` available in the module
+        namespace. Round-trip: from_R's :meth:`_maybe_smart_data_call`
+        rebuilds the assignment.
+
+        (Older revisions of this method emitted ``library(<pkg>)``
+        instead. That lost the dataset name and broke Py→R→Py
+        round-trip for the binding — there was no R-side ``X`` to
+        restore on the way back.)
 
         Returns ``None`` if the pattern doesn't match (any deviation —
         multi-target, non-Name target, mismatched names, missing
@@ -322,7 +328,7 @@ class Translator:
         if not isinstance(value, P.Call):
             return None
         # Accept bare ``data(...)`` and ``hea.data(...)`` — both reverse
-        # to the same R ``library()`` declaration.
+        # to the same R ``data()`` declaration.
         func = value.func
         if isinstance(func, P.Name) and func.id == "data":
             pass
@@ -349,11 +355,7 @@ class Translator:
                 pkg = kw.value.value
         if pkg is None:
             return None
-        # Stage in the preamble (along with any auto-detected libs)
-        # instead of emitting inline — keeps every ``library()`` call at
-        # the top of the script, matching the standard R idiom.
-        self._extra_libs.add(pkg)
-        return ""
+        return f'data({_quote_string(target.id)}, package = {_quote_string(pkg)})'
 
     def _emit_if_stmt(self, stmt: P.If) -> str:
         cond = self._emit_expr(stmt.test, prec=20)
@@ -642,7 +644,20 @@ class Translator:
         # 4) Fallback: plain call.
         if isinstance(call.func, P.Name):
             return self._emit_plain_call(call.func.id, call.args, call.keywords)
-        # Callee is some expression — emit as ``(expr)(args)``.
+        # Attribute callee not matched by any helper / chain / namespace
+        # rule above — assume R-generic style: ``obj.method(args)``
+        # reverses to ``method(obj, args)``. Mirrors R's S3 / S4 dispatch
+        # convention where the generic is called as ``generic(obj, ...)``,
+        # NOT ``(obj$generic)(...)`` (which would be a function-valued
+        # slot — rare and almost never the user's intent).
+        if isinstance(call.func, P.Attribute):
+            receiver = self._emit_expr(call.func.value, prec=20)
+            method = call.func.attr
+            rest = self._emit_args(call.args, call.keywords)
+            if rest:
+                return f"{method}({receiver}, {rest})"
+            return f"{method}({receiver})"
+        # Callee is some other expression — emit as ``(expr)(args)``.
         callee = self._emit_expr(call.func, prec=2)
         args_text = self._emit_args(call.args, call.keywords)
         return f"({callee})({args_text})"

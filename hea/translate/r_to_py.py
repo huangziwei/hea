@@ -212,6 +212,26 @@ _CMP_PY = {
 }
 
 
+# R S3 / S4 generics that, when called with a single positional
+# identifier (typically a fitted model name), reverse to Python
+# method form: ``summary(m)`` → ``m.summary()``. Mirrors hea's
+# convention of exposing per-object inspectors as methods rather
+# than free functions. Multi-arg calls (``anova(m1, m2)``) stay as
+# function calls so they round-trip cleanly with hea's Python API.
+_R_GENERIC_METHOD_FORM: frozenset[str] = frozenset({
+    "summary", "anova",
+    "coef", "coefficients",
+    "residuals", "resid",
+    "fitted", "fitted_values",
+    "predict",
+    "confint", "vcov",
+    "logLik", "deviance",
+    "formula", "nobs",
+    "AIC", "BIC",
+    "update", "print", "plot",
+})
+
+
 class Translator:
     """Stateful walker. One instance per translation."""
 
@@ -438,10 +458,11 @@ class Translator:
         # helper). Then hea.tidy for tidyverse-only ports (stringr / lubridate /
         # forcats / dplyr-window-helpers / readr / tibble). Then the
         # restructure-split sub-namespaces — hea.models (lm/glm/lme/…),
-        # hea.family (binomial/gaussian/…), hea.io (read_csv/…) — none of
-        # which live at hea's top level. Fall back to ``hea`` for the
-        # truly top-level names, then hea.plot / hea.ggplot for the
-        # plot-shaped helpers.
+        # hea.family (binomial/gaussian/…). Then ``hea`` top-level so
+        # the user-facing surface (``data``, ``map_data``) imports via
+        # ``from hea import data`` rather than the deeper
+        # ``from hea.io import data``. After that hea.io (read_csv /
+        # scan_*) for the io-only helpers, then hea.plot / hea.ggplot.
         r_names = sorted(n for n in candidates if n in _hea_r_exports())
         used = set(r_names)
         tidy_names = sorted(n for n in (candidates - used) if n in _hea_tidy_exports())
@@ -450,10 +471,10 @@ class Translator:
         used |= set(models_names)
         family_names = sorted(n for n in (candidates - used) if n in _hea_family_exports())
         used |= set(family_names)
-        io_names = sorted(n for n in (candidates - used) if n in _hea_io_exports())
-        used |= set(io_names)
         hea_names = sorted(n for n in (candidates - used) if n in _hea_exports())
         used |= set(hea_names)
+        io_names = sorted(n for n in (candidates - used) if n in _hea_io_exports())
+        used |= set(io_names)
         plot_names = sorted(n for n in (candidates - used) if n in _hea_plot_exports())
         used |= set(plot_names)
         ggplot_names = sorted(n for n in (candidates - used) if n in _hea_ggplot_exports())
@@ -520,7 +541,8 @@ class Translator:
 
     def _maybe_smart_data_call(self, stmt: R.Node) -> Optional[P.AST]:
         """If ``stmt`` is a standalone ``data("X", package="Y")`` call,
-        emit it as ``X = hea.data("X", package="Y")``.
+        emit it as ``X = data("X", package="Y")`` (bare call — import
+        preamble will pull in ``from hea import data``).
 
         R's ``data()`` loads the named dataset into the calling
         environment as a side-effect; Python needs an explicit binding
@@ -553,7 +575,7 @@ class Translator:
         return P.Assign(
             targets=[P.Name(id=name, ctx=P.Store())],
             value=P.Call(
-                func=P.Attribute(value=P.Name("hea", ctx=P.Load()), attr="data", ctx=P.Load()),
+                func=P.Name(id="data", ctx=P.Load()),
                 args=[P.Constant(value=name)],
                 keywords=keywords,
             ),
@@ -969,9 +991,33 @@ class Translator:
             if synthesized is not None:
                 return synthesized
 
-            # 3) Default: regular call. Args walked under current slot,
+            # 3) R-generic method-form: ``summary(m)`` → ``m.summary()``
+            # when ``m`` is a bare identifier. Round-trips with hea
+            # Python's idiomatic ``m.summary()`` method form. Multi-arg
+            # generics (``anova(m1, m2)``) and non-identifier first args
+            # (``summary(fit(...))``) fall through to regular call.
+            if name in _R_GENERIC_METHOD_FORM:
+                positional = [a for a in n.args if not isinstance(a, R.NamedArg)]
+                if len(positional) == 1 and isinstance(positional[0], R.Identifier):
+                    receiver = _name(_to_py_identifier(positional[0].name))
+                    rest = tuple(a for a in n.args if isinstance(a, R.NamedArg))
+                    py_args, py_kwargs = self._translate_args(rest)
+                    return _call(_attr(receiver, name), py_args, py_kwargs)
+
+            # 4) Default: regular call. Args walked under current slot,
             # which is what's wanted for nested user calls.
             return self._emit_regular_call(name, n.args)
+
+        # ``obj$method(...)`` / ``(obj$method)(...)`` — R's call of a
+        # function-valued list slot on an S3 / S4 object. Reverse to
+        # Python attribute access ``obj.method(args)``. Bare ``obj$col``
+        # without a trailing call still goes through ``_visit_Dollar``
+        # which emits ``obj["col"]`` (the data-frame column-access shape).
+        if isinstance(func, R.Dollar):
+            target = self._visit(func.target)
+            args, kwargs = self._translate_args(n.args)
+            callee = P.Attribute(value=target, attr=func.name, ctx=P.Load())
+            return _call(callee, args, kwargs)
 
         # Non-identifier callable (e.g. ``f()(g)`` — Call of Call).
         callee = self._visit(func)
@@ -2085,11 +2131,17 @@ def _record_library_pkg(node: R.Call, packages: set[str]) -> None:
 
 
 def _make_data_load_stmt(name: str, pkg: str) -> P.stmt:
-    """Build a Python AST node for ``<name> = hea.data("<name>", package="<pkg>")``."""
+    """Build a Python AST node for ``<name> = data("<name>", package="<pkg>")``.
+
+    Emitted as a bare ``data(...)`` call (not ``hea.data(...)``) so the
+    import-preamble inference pulls in ``from hea import data`` —
+    matching the user's preferred ``from hea import data`` idiom over
+    the qualified ``import hea; hea.data(...)`` form.
+    """
     return P.Assign(
         targets=[P.Name(id=name, ctx=P.Store())],
         value=P.Call(
-            func=P.Attribute(value=P.Name("hea", ctx=P.Load()), attr="data", ctx=P.Load()),
+            func=P.Name(id="data", ctx=P.Load()),
             args=[P.Constant(value=name)],
             keywords=[P.keyword(arg="package", value=P.Constant(value=pkg))],
         ),
