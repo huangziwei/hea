@@ -226,6 +226,16 @@ class TestToRExecuteNonFrameResult:
         # HTML form wraps in <pre>
         assert s._repr_html_() == "<pre>hello\nworld</pre>"
 
+    def test_missing_R_raises_clear_error(self, monkeypatch):
+        # Simulate R not installed by hiding it from PATH.
+        from hea.translate.runner import RNotFoundError
+        monkeypatch.setenv("PATH", "/nonexistent")
+        with pytest.raises(RNotFoundError) as excinfo:
+            to_R("x = 1\n", execute=True)
+        msg = str(excinfo.value)
+        assert "R" in msg and "PATH" in msg
+        assert "cran.r-project.org" in msg or "package manager" in msg
+
 
 class TestResultWrapping:
     """``from_R``/``to_R`` accept either a string OR a :class:`Result`
