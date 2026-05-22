@@ -60,13 +60,14 @@ def _strip_r(src: str) -> str:
 
 
 def _py_r_py(py_src: str) -> str:
-    """Python → R → Python; returns the stripped Python body."""
-    return _strip_py(from_R(to_R(py_src).source).source)
+    """Python → R → Python; returns the stripped Python body. Uses the
+    nested-wrap shape — ``from_R`` unwraps a ``Result`` automatically."""
+    return _strip_py(from_R(to_R(py_src)).source)
 
 
 def _r_py_r(r_src: str) -> str:
     """R → Python → R; returns the stripped R body."""
-    return _strip_r(to_R(from_R(r_src).source).source)
+    return _strip_r(to_R(from_R(r_src)).source)
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +183,45 @@ class TestDataLoadRoundtrip:
 # ---------------------------------------------------------------------------
 # User's reported case — the integrated scenario from the bug report.
 # ---------------------------------------------------------------------------
+
+
+class TestResultWrapping:
+    """``from_R``/``to_R`` accept either a string OR a :class:`Result`
+    from a prior call. Lets users (and tests) write the round-trip
+    pattern as nested calls — ``to_R(from_R(r_src))`` — instead of
+    ``to_R(from_R(r_src).source)``.
+    """
+
+    def test_to_R_accepts_from_R_result(self):
+        r_src = (
+            'data("gala", package = "faraway")\n'
+            'm0 <- lm("Species ~ Area", gala)\n'
+            'summary(m0)\n'
+        )
+        # Nested wrap — fixed point: r_src → py → r_src.
+        out = to_R(from_R(r_src))
+        assert out.source.strip() == r_src.strip()
+
+    def test_from_R_accepts_to_R_result(self):
+        py_src = (
+            "from hea import data\n"
+            "from hea.models import lm\n"
+            "gala = data('gala', package='faraway')\n"
+            "m0 = lm('Species ~ Area', gala)\n"
+            "m0.summary()\n"
+        )
+        out = from_R(to_R(py_src))
+        assert out.source.strip() == py_src.strip()
+
+    def test_result_unwrap_preserves_source_only(self):
+        # Wrapping unwraps ``.source`` only; ``.value`` (if any) is
+        # ignored. Sanity check: a Result with a manually-stashed
+        # value still translates the source.
+        from hea.translate.inline import Result
+        r_src = "x <- 1"
+        synthetic = Result(value="ignored", source=r_src, gaps=[])
+        out = from_R(synthetic)
+        assert out.source.strip() == "x = 1"
 
 
 class TestBundledDatasetAutoload:
