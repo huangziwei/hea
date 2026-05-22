@@ -48,6 +48,30 @@ class HeaTranslationGap(UserWarning):
     """
 
 
+class RConsoleOutput(str):
+    """A ``str`` carrying R's REPL-formatted stdout (used by
+    ``to_R(execute=True)`` when the R script's final value isn't a
+    frame — model fits, ``summary.lm``, ``aov``, lists, etc.).
+
+    The override is purely about display: ``repr(...)`` returns the
+    text unquoted so a notebook / IPython cell shows the same multi-
+    line output an R REPL would print, instead of a single quoted
+    Python string with ``\\n`` / ``\\t`` escapes. ``_repr_html_``
+    wraps the text in a ``<pre>`` block for nicer Jupyter rendering.
+    Everything else (``str.__str__``, slicing, ``len``, …) is the
+    plain ``str`` behavior.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return str.__str__(self)
+
+    def _repr_html_(self) -> str:
+        import html
+        return f"<pre>{html.escape(str.__str__(self))}</pre>"
+
+
 @dataclass(slots=True)
 class Result:
     """Outcome of a translate-and-execute call.
@@ -290,9 +314,18 @@ def _save_translated(
 
 
 def _execute_r_and_load(r_source: str):
-    """Run translated R via the parity runner's :func:`run_r`, then read
-    the captured CSV back into a hea DataFrame. Used only when the user
-    asks ``to_R(..., execute=True)``."""
+    """Run translated R via the parity runner's :func:`run_r`, then
+    return:
+
+    - a polars DataFrame when the final expression is frame-shaped
+      (``data.frame`` / atomic / ``ggplot$data``),
+    - the R subprocess's captured stdout (as a string) for any other
+      result class — model fits, ``summary.lm``, ``aov``, lists, etc.
+      The R driver auto-prints these so the caller sees the same output
+      an R REPL would show.
+
+    Used only when the user asks ``to_R(..., execute=True)``.
+    """
     import tempfile
 
     import polars as pl
@@ -304,9 +337,14 @@ def _execute_r_and_load(r_source: str):
         script_path = tmp / "translated.R"
         script_path.write_text(r_source, encoding="utf-8")
         result = run_r(script_path, tmp)
-        if not result.ok:
+        if result.returncode != 0:
             raise RuntimeError(
                 f"to_R(execute=True): R subprocess failed.\n"
                 f"stderr:\n{result.stderr}"
             )
-        return pl.read_csv(result.out_csv)
+        if result.captured:
+            return pl.read_csv(result.out_csv)
+        # No frame captured — driver printed the result to stdout. Wrap
+        # in RConsoleOutput so Jupyter / IPython renders the multi-line
+        # R-console text unquoted instead of as a Python ``'...'`` repr.
+        return RConsoleOutput(result.stdout.rstrip("\n"))

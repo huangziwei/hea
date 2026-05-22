@@ -185,6 +185,48 @@ class TestDataLoadRoundtrip:
 # ---------------------------------------------------------------------------
 
 
+class TestToRExecuteNonFrameResult:
+    """``to_R(..., execute=True)`` on a script whose final value is NOT
+    a data.frame (model fit, ``summary.lm``, list, …) used to throw
+    ``RuntimeError: R: cannot serialize result``. Now the R driver
+    auto-prints the value and the captured stdout is returned as
+    :class:`RConsoleOutput` — a ``str`` subclass that renders raw in
+    Jupyter / IPython (``repr`` returns the text unquoted, with a
+    ``<pre>``-wrapped ``_repr_html_``).
+    """
+
+    def test_summary_returns_console_output(self):
+        # Need R available; skip if not installed.
+        pytest.importorskip("polars")
+        import shutil
+        if shutil.which("R") is None:
+            pytest.skip("R binary not available")
+        from hea.translate.inline import RConsoleOutput
+        result = to_R(
+            "from hea.models import lm\n"
+            "gala = data('gala', package='faraway')\n"
+            "m0 = lm('Species ~ Area', gala)\n"
+            "m0.summary()\n",
+            execute=True,
+        )
+        assert isinstance(result.value, RConsoleOutput)
+        # repr is the raw multi-line text, no Python ``'...'`` escapes.
+        assert "\\n" not in repr(result.value)
+        # The R-printed lm summary mentions ``Coefficients:`` somewhere.
+        assert "Coefficients:" in result.value
+
+    def test_console_output_str_behavior(self):
+        from hea.translate.inline import RConsoleOutput
+        s = RConsoleOutput("hello\nworld")
+        # Acts like str
+        assert len(s) == 11
+        assert s.split() == ["hello", "world"]
+        # repr is the raw text (no quotes / escapes)
+        assert repr(s) == "hello\nworld"
+        # HTML form wraps in <pre>
+        assert s._repr_html_() == "<pre>hello\nworld</pre>"
+
+
 class TestResultWrapping:
     """``from_R``/``to_R`` accept either a string OR a :class:`Result`
     from a prior call. Lets users (and tests) write the round-trip

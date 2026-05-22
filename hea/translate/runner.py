@@ -150,11 +150,12 @@ if (inherits(.result, "data.frame")) {
     .out_schema, auto_unbox = TRUE, null = "null"
   )
 } else {
-  cat(
-    "R: cannot serialize result of class ", paste(class(.result), collapse = "/"), "\n",
-    sep = "", file = stderr()
-  )
-  quit(status = 3)
+  # Non-frame result (summary.lm / aov / lm / list / environment / …):
+  # print to stdout so callers see R's REPL-style formatted output. Don't
+  # write CSV/schema — that's the signal to the parity runner that there
+  # is no comparable frame for diffing; the inline to_R(execute=True)
+  # path surfaces the captured stdout as ``.value`` instead.
+  print(.result)
 }
 """
 
@@ -184,24 +185,48 @@ def _build_r_driver(user_script: Path, out_csv: Path, out_schema: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
+class RNotFoundError(RuntimeError):
+    """Raised when the ``R`` executable isn't on ``PATH``.
+
+    The translator's ``execute=True`` path and the parity runner both
+    spawn an R subprocess. Without R, neither can do its job — but the
+    underlying ``FileNotFoundError`` from ``subprocess`` is opaque, so
+    we re-raise with an install hint.
+    """
+
+
 def run_r(script_path: Path, out_dir: Path, *, timeout: float = 60.0) -> RunResult:
     """Run ``script_path`` under R. Writes CSV + schema to ``out_dir``.
 
-    Returns a :class:`RunResult` regardless of success — callers inspect
-    ``ok``. R is invoked with ``--vanilla`` to skip user-side ``.Rprofile``
-    and site-init, keeping the runner reproducible.
+    Returns a :class:`RunResult` regardless of script-level success —
+    callers inspect ``ok``. R is invoked with ``--vanilla`` to skip
+    user-side ``.Rprofile`` and site-init, keeping the runner
+    reproducible.
+
+    Raises :class:`RNotFoundError` if the ``R`` binary isn't on
+    ``PATH`` (distinct from a script that ran and failed).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     out_csv = out_dir / "out_r.csv"
     out_schema = out_dir / "out_r.schema.json"
 
     driver = _build_r_driver(script_path, out_csv, out_schema)
-    proc = subprocess.run(
-        ["R", "--vanilla", "--slave", "-e", driver],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        proc = subprocess.run(
+            ["R", "--vanilla", "--slave", "-e", driver],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError as e:
+        raise RNotFoundError(
+            "Could not find the `R` executable on PATH. "
+            "hea.to_R(execute=True) and the parity runner spawn an R "
+            "subprocess to run the translated script. Install R from "
+            "https://cran.r-project.org (or via your package manager — "
+            "`brew install r` on macOS, `apt install r-base` on Debian / "
+            "Ubuntu) and make sure `R` is on PATH."
+        ) from e
     captured = out_csv.exists() and out_schema.exists()
     return RunResult(
         returncode=proc.returncode,
