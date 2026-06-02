@@ -192,6 +192,30 @@ class TestVerbChain:
         out = _tr('flights.select(tail_num="tailnum")')
         assert out == "flights |>\n  select(tail_num = tailnum)"
 
+    def test_slice_positional_keep(self):
+        # hea's 0-based positions shift back to R's 1-based.
+        assert _tr("flights.slice([0, 2, 4])") == "flights |>\n  slice(c(1, 3, 5))"
+
+    def test_slice_range(self):
+        assert _tr("flights.slice(range(3))") == "flights |>\n  slice(1:3)"
+        assert _tr("flights.slice(range(1, 4))") == "flights |>\n  slice(2:4)"
+
+    def test_slice_single_and_last(self):
+        assert _tr("flights.slice([4])") == "flights |>\n  slice(5)"
+        assert _tr("flights.slice([-1])") == "flights |>\n  slice(n())"
+
+    def test_slice_drop_marker_to_negative(self):
+        assert _tr("flights.slice(drop([0, 1]))") == "flights |>\n  slice(-c(1, 2))"
+        assert _tr("flights.slice(drop(range(2)))") == "flights |>\n  slice(-(1:2))"
+
+    def test_slice_polars_contiguous(self):
+        # Two-arg polars form (offset, length) → a 1-based R range.
+        assert _tr("flights.slice(0, 2)") == "flights |>\n  slice(1:2)"
+
+    def test_slice_in_chain(self):
+        out = _tr('flights.filter(col("x") > 1).slice([0, 2])')
+        assert out == "flights |>\n  filter(x > 1) |>\n  slice(c(1, 3))"
+
 
 # ---------------------------------------------------------------------------
 # kwarg-name reverse

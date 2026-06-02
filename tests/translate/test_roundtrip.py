@@ -109,6 +109,36 @@ class TestModelGenericRoundtrip:
 
 
 # ---------------------------------------------------------------------------
+# dplyr slice() ↔ hea positional slice / drop() marker.
+# ---------------------------------------------------------------------------
+
+
+class TestSliceRoundtrip:
+    """Forward maps R's 1-based slice positions to hea's 0-based and routes
+    the negative (drop) form through the ``drop(...)`` marker; the reverse
+    undoes both, so a slice survives a full round-trip."""
+
+    def test_keep_r_py_r(self):
+        assert _r_py_r("df |> slice(c(1, 3, 5))") == "df |>\n  slice(c(1, 3, 5))"
+
+    def test_range_r_py_r(self):
+        assert _r_py_r("df |> slice(1:3)") == "df |>\n  slice(1:3)"
+
+    def test_last_row_r_py_r(self):
+        assert _r_py_r("df |> slice(n())") == "df |>\n  slice(n())"
+
+    def test_drop_negative_r_py_r(self):
+        assert _r_py_r("df |> slice(-c(1, 2))") == "df |>\n  slice(-c(1, 2))"
+        assert _r_py_r("df |> slice(-(1:2))") == "df |>\n  slice(-(1:2))"
+
+    def test_keep_py_r_py(self):
+        assert _py_r_py("df.slice([0, 2, 4])") == "df.slice([0, 2, 4])"
+
+    def test_drop_py_r_py(self):
+        assert _py_r_py("df.slice(drop([0, 1]))") == "df.slice(drop([0, 1]))"
+
+
+# ---------------------------------------------------------------------------
 # R's ``obj$method()`` — function-valued slot call.
 # ---------------------------------------------------------------------------
 

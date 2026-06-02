@@ -860,12 +860,117 @@ class Translator:
                 current = f"{current} + {ext}"
                 continue
 
+            # ``slice`` — dedicated reverse emitter: shift hea's 0-based
+            # positions back to R's 1-based and invert the ``drop(...)``
+            # marker to a negative. Falls through to the opaque pipe when
+            # the positions aren't statically invertible.
+            if method_name == "slice":
+                emitted = self._emit_slice_reverse(current, args, kwargs)
+                if emitted is not None:
+                    current = emitted
+                    continue
+
             # Default: dplyr pipe.
             r_method, slot, auto = self._lookup_verb_method(method_name)
             verb_args = self._emit_verb_args(args, kwargs, slot)
             current = f"{current} |>\n  {r_method}({verb_args})"
 
         return current
+
+    def _emit_slice_reverse(self, current: str, args: list, kwargs: list) -> Optional[str]:
+        """``df.slice(...)`` → R ``df |> slice(...)``, undoing the forward map.
+
+        Keep positions shift 0→1-based (``[0, 2, 4]`` → ``c(1, 3, 5)``,
+        ``range(3)`` → ``1:3``, ``[-1]`` → ``n()``); a ``drop(...)`` marker
+        becomes a negative (``drop([0, 1])`` → ``-c(1, 2)``); the two-arg
+        polars form ``slice(off, length)`` becomes ``(off+1):(off+length)``.
+        Returns ``None`` when the positions can't be statically inverted
+        (e.g. a runtime variable), so the caller falls back to the opaque pipe.
+        """
+        if kwargs:
+            return None
+        if len(args) == 1:
+            arg = args[0]
+            if (
+                isinstance(arg, P.Call)
+                and isinstance(arg.func, P.Name)
+                and arg.func.id == "drop"
+                and len(arg.args) == 1
+                and not arg.keywords
+            ):
+                inner = self._shift_up_positions(arg.args[0])
+                if inner is None:
+                    return None
+                # Parenthesize before negating when ``inner`` isn't an atom
+                # (``1:2`` → ``-(1:2)``, ``n() - 1`` → ``-(n() - 1)``).
+                needs_paren = any(t in inner for t in (":", " - ", " + "))
+                neg = f"-({inner})" if needs_paren else f"-{inner}"
+                return f"{current} |>\n  slice({neg})"
+            pos = self._shift_up_positions(arg)
+            if pos is None:
+                return None
+            return f"{current} |>\n  slice({pos})"
+        if len(args) == 2 and all(
+            isinstance(a, P.Constant) and isinstance(a.value, int)
+            and not isinstance(a.value, bool)
+            for a in args
+        ):
+            off, length = args[0].value, args[1].value
+            return f"{current} |>\n  slice({off + 1}:{off + length})"
+        return None
+
+    @staticmethod
+    def _shift_up_positions(node: P.expr) -> Optional[str]:
+        """0-based Python positions → R 1-based source, or ``None`` if not a
+        statically shiftable literal."""
+        def _int_val(e):
+            # Python parses a negative literal as ``UnaryOp(USub, Constant)``,
+            # not ``Constant(-n)`` — handle both.
+            if isinstance(e, P.Constant) and isinstance(e.value, int) and not isinstance(e.value, bool):
+                return e.value
+            if (isinstance(e, P.UnaryOp) and isinstance(e.op, P.USub)
+                    and isinstance(e.operand, P.Constant)
+                    and isinstance(e.operand.value, int)
+                    and not isinstance(e.operand.value, bool)):
+                return -e.operand.value
+            return None
+
+        def _ints(elts):
+            out = []
+            for e in elts:
+                v = _int_val(e)
+                if v is None:
+                    return None
+                out.append(v)
+            return out
+
+        if isinstance(node, P.List):
+            vals = _ints(node.elts)
+            if vals is None:
+                return None
+            # A single from-end negative → ``n()`` arithmetic (``-1`` is the
+            # last row, ``-2`` the second-to-last, …).
+            if len(vals) == 1 and vals[0] < 0:
+                k = -vals[0]
+                return "n()" if k == 1 else f"n() - {k - 1}"
+            if any(v < 0 for v in vals):
+                return None  # mixed / multi from-end negatives don't invert
+            if len(vals) == 1:
+                return str(vals[0] + 1)
+            return "c(" + ", ".join(str(v + 1) for v in vals) + ")"
+        if (
+            isinstance(node, P.Call)
+            and isinstance(node.func, P.Name)
+            and node.func.id == "range"
+        ):
+            rargs = _ints(node.args)
+            if rargs is None:
+                return None
+            if len(rargs) == 1:
+                return f"1:{rargs[0]}"
+            if len(rargs) == 2:
+                return f"{rargs[0] + 1}:{rargs[1]}"
+        return None
 
     def _lookup_verb_method(self, py_method: str) -> tuple[str, Slot, tuple]:
         """Resolve a Python method name to (R verb name, slot, auto_kwargs).
@@ -1027,6 +1132,10 @@ def _is_translation_chain(chain: list) -> bool:
         if method_name == "ggplot":
             return True
         if is_chain_extension(method_name) or method_name == "theme":
+            return True
+        # ``slice`` is handled by a dedicated reverse emitter (it isn't in
+        # the verb registry because the index base differs 0- vs 1-based).
+        if method_name == "slice":
             return True
     return False
 
