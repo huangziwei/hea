@@ -973,6 +973,17 @@ class Translator:
             if name == "with":
                 return self._emit_with_call(n.args)
 
+            # ``slice(df, <positions>)`` — dplyr's positional slice. Maps to
+            # ``df.slice([...])`` (keep) or ``df.slice(drop([...]))``
+            # (negative = drop), shifting R's 1-based positions to hea's
+            # 0-based. Returns ``None`` (→ falls through to the default call)
+            # when the positions can't be statically shifted, e.g. a bare
+            # runtime variable whose sign is unknown.
+            if name == "slice" and n.args:
+                emitted = self._maybe_emit_slice(n.args)
+                if emitted is not None:
+                    return emitted
+
             # 1) Verb dispatch.
             verb = VERB_TABLE.get(name)
             if verb is not None and n.args:
@@ -1048,6 +1059,69 @@ class Translator:
                     continue
                 py_kwargs.append(P.keyword(arg=name, value=P.Constant(value=value)))
         return _call(_attr(receiver, verb.hea_method), py_args, py_kwargs)
+
+    def _maybe_emit_slice(self, args: tuple[R.Node, ...]) -> Optional[P.AST]:
+        """dplyr ``slice(df, <positions>)`` → ``df.slice([...])`` / ``df.slice(drop([...]))``.
+
+        Positive positions keep, a leading ``-`` drops (R's
+        ``slice(df, -c(1, 2))``). R's 1-based positions are shifted to hea's
+        0-based. Returns ``None`` — so the caller falls back to the default
+        call emission — unless the call is ``slice(df, <one index>)`` with
+        no named args and the index is a *statically shiftable* literal
+        (``c(...)`` of positive ints, ``a:b``, ``n()``, or a single positive
+        int); a bare runtime variable can't be shifted at translate time.
+        """
+        if len(args) != 2 or any(isinstance(a, R.NamedArg) for a in args):
+            return None
+        idx = args[1]
+        negated = isinstance(idx, R.UnaryOp) and idx.op == "-"
+        inner = idx.operand if negated else idx
+        positions = self._shift_slice_positions(inner)
+        if positions is None:
+            return None
+        receiver = self._visit(args[0])
+        arg = _call(_name("drop"), [positions]) if negated else positions
+        return _call(_attr(receiver, "slice"), [arg])
+
+    def _shift_slice_positions(self, node: R.Node) -> Optional[P.AST]:
+        """Shift an R 1-based ``slice`` index to a 0-based Python positions
+        expression, or ``None`` if it isn't a statically shiftable literal."""
+        # ``c(1, 3, 5)`` of positive int literals → ``[0, 2, 4]``.
+        if (
+            isinstance(node, R.Call)
+            and isinstance(node.func, R.Identifier)
+            and node.func.name == "c"
+            and node.args
+            and all(_is_pos_int_lit(x) for x in node.args)
+        ):
+            return P.List(
+                elts=[P.Constant(value=int(x.value) - 1) for x in node.args],
+                ctx=P.Load(),
+            )
+        # ``a:b`` of positive int literals → ``range(a-1, b)`` (1-based
+        # inclusive → 0-based half-open); ``1:b`` collapses to ``range(b)``.
+        if (
+            isinstance(node, R.BinOp)
+            and node.op == ":"
+            and _is_pos_int_lit(node.left)
+            and _is_pos_int_lit(node.right)
+        ):
+            a, b = int(node.left.value), int(node.right.value)
+            if a == 1:
+                return _call(_name("range"), [P.Constant(value=b)])
+            return _call(_name("range"), [P.Constant(value=a - 1), P.Constant(value=b)])
+        # ``n()`` → the last row (0-based ``[-1]``).
+        if (
+            isinstance(node, R.Call)
+            and isinstance(node.func, R.Identifier)
+            and node.func.name == "n"
+            and not node.args
+        ):
+            return P.List(elts=[P.Constant(value=-1)], ctx=P.Load())
+        # A single positive int literal → ``[n - 1]``.
+        if _is_pos_int_lit(node):
+            return P.List(elts=[P.Constant(value=int(node.value) - 1)], ctx=P.Load())
+        return None
 
     # ----- ggplot ---------------------------------------------------------
 
@@ -2063,6 +2137,15 @@ def _to_py_identifier(name: str) -> str:
     if keyword.iskeyword(py):
         py = py + "_"
     return py
+
+
+def _is_pos_int_lit(x: R.Node) -> bool:
+    """True for an R positive integer literal — ``3L`` (IntLit) or a whole
+    double ``3`` (NumLit). Used to statically shift ``slice`` positions."""
+    return (
+        (isinstance(x, R.IntLit) and x.value > 0)
+        or (isinstance(x, R.NumLit) and x.value == int(x.value) and x.value > 0)
+    )
 
 
 def _name(name: str, *, ctx: Optional[P.expr_context] = None) -> P.Name:

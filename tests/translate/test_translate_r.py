@@ -270,6 +270,35 @@ class TestVerbs:
         out = _tr("summarize(flights, total = n())")
         assert out == "flights.summarize(total=n())"
 
+    def test_slice_positional_keep(self):
+        # dplyr positional slice: R 1-based c(1,3,5) → hea 0-based [0,2,4].
+        assert _tr("slice(flights, c(1, 3, 5))") == "flights.slice([0, 2, 4])"
+        assert _tr("flights |> slice(c(1, 3, 5))") == "flights.slice([0, 2, 4])"
+
+    def test_slice_range(self):
+        # R a:b (1-based, inclusive) → 0-based range; 1:b collapses to range(b).
+        assert _tr("slice(flights, 1:3)") == "flights.slice(range(3))"
+        assert _tr("slice(flights, 2:4)") == "flights.slice(range(1, 4))"
+
+    def test_slice_single_and_n(self):
+        assert _tr("slice(flights, 5)") == "flights.slice([4])"
+        # ``n()`` inside slice = the last row.
+        assert _tr("slice(flights, n())") == "flights.slice([-1])"
+
+    def test_slice_negative_is_drop(self):
+        # R's negative slice (drop) → hea's drop(...) marker.
+        assert _tr("slice(flights, -c(1, 2))") == "flights.slice(drop([0, 1]))"
+        assert _tr("slice(flights, -(1:2))") == "flights.slice(drop(range(2)))"
+
+    def test_slice_negative_emits_drop_import(self):
+        full = translate("flights |> slice(-c(1, 2))")
+        assert "from hea.tidy import drop" in full
+
+    def test_slice_bare_variable_falls_through(self):
+        # Unknown-sign runtime index can't be statically shifted — left as a
+        # plain call (the runtime gap signal), not silently mis-shifted.
+        assert _tr("slice(flights, idx)") == "slice(flights, idx)"
+
 
 # ---------------------------------------------------------------------------
 # Helpers — function-form translation
