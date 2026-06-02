@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 import numpy as np
 import polars as pl
 
+from .basics import _Drop
 from ._shared import (
     _apply_groups,
     _check_groups,
@@ -598,6 +599,61 @@ class DataFrame(pl.DataFrame):
         return self._wrap(out)
 
     # ---- slice family (ungrouped; grouped versions live on GroupBy) ---
+
+    def slice(self, offset, length=None):
+        """Positional row selection — dplyr's ``slice()`` *and* polars' ``slice``.
+
+        Two call forms, disambiguated by the first argument:
+
+        * **Scalar offset** — ``df.slice(2)`` / ``df.slice(1, 3)`` /
+          ``df.slice(-2)`` — polars' contiguous slice: ``length`` rows
+          (or to the end) starting at ``offset`` (a negative offset
+          counts from the end). Unchanged from polars, so the superset
+          holds.
+        * **A list / tuple / range / Series of positions** —
+          ``df.slice([0, 2, 4])`` — dplyr's positional ``slice()``: keep
+          exactly those rows. **0-based**, with Python from-end negatives
+          (``-1`` is the last row), matching :func:`nth` /
+          :func:`row_number` / ``gather``. Out-of-range positions are
+          dropped (dplyr-faithful), while duplicates and reordering are
+          kept — ``df.slice([2, 2, 0])`` → rows 2, 2, 0.
+        * **A** :func:`drop` **marker** — ``df.slice(drop([0, 1]))`` —
+          the complement: keep everything *except* those positions. hea's
+          spelling of R's ``slice(df, -c(1, 2))``.
+
+        R's 1-based ``slice(df, c(1, 3))`` / ``slice(df, -c(1, 3))`` are
+        rewritten to the 0-based ``df.slice([0, 2])`` /
+        ``df.slice(drop([0, 2]))`` by the translator; the fluent API is
+        0-based throughout (see :func:`nth`).
+        """
+        if isinstance(offset, _Drop):
+            if length is not None:
+                raise TypeError("slice(): a drop(...) marker takes no length argument.")
+            return self._slice_positions(offset.positions, drop=True)
+        if isinstance(offset, (list, tuple, range, pl.Series, np.ndarray)):
+            if length is not None:
+                raise TypeError(
+                    "slice(): positional form takes a single list of row "
+                    "positions — df.slice([0, 2]), not df.slice([...], length)."
+                )
+            return self._slice_positions(offset)
+        return self._wrap(super().slice(offset, length))
+
+    def _slice_positions(self, positions, *, drop: bool = False) -> "DataFrame":
+        """dplyr positional ``slice`` — keep the given 0-based positions
+        (via ``gather``) or, with ``drop=True``, remove them (via
+        ``remove``). Out-of-range positions are skipped either way."""
+        n = self.height
+        keep = [p for p in (int(i) for i in positions) if -n <= p < n]
+        if drop:
+            # Map any from-end negatives to absolute indices, then remove.
+            targets = [p % n for p in keep]
+            return self._wrap(
+                pl.DataFrame.remove(self, pl.int_range(pl.len()).is_in(targets))
+            )
+        # Keep: ``gather`` is 0-based, handles from-end negatives, and
+        # preserves duplicates / reordering — exactly dplyr's slice().
+        return self._wrap(pl.DataFrame.gather(self, keep))
 
     def slice_head(self, n: int = 1) -> "DataFrame":
         return super().head(n)

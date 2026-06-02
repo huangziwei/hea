@@ -88,6 +88,37 @@ def desc(col: Any) -> Any:
     return -np.asarray(col, dtype=float)
 
 
+class _Drop:
+    """Marker for positional row *removal*, produced by ``drop([0, 1])``.
+
+    Passed to :meth:`hea.tidy.DataFrame.slice` to flip it from
+    keep-these-rows to drop-these-rows — hea's spelling of R's
+    ``slice(df, -c(...))``.
+    """
+
+    __slots__ = ("positions",)
+
+    def __init__(self, positions: Any):
+        self.positions = positions
+
+
+def drop(positions: Any) -> _Drop:
+    """Mark row positions for removal inside :meth:`DataFrame.slice`.
+
+    ``df.slice(drop([0, 1]))`` *drops* rows 0 and 1 — the complement of
+    the positive form ``df.slice([0, 1])`` (which *keeps* them). This is
+    hea's spelling of dplyr's ``slice(df, -c(1, 2))``: positions are
+    0-based, Python from-end negatives are allowed (``drop([-1])`` drops
+    the last row), and out-of-range positions are ignored.
+
+    Accepts a single position or a list / tuple / range / Series of them.
+    Distinct from the ``df.drop(...)`` *method*, which drops columns.
+    """
+    if isinstance(positions, (list, tuple, range, pl.Series, np.ndarray)):
+        return _Drop(list(positions))
+    return _Drop([positions])
+
+
 def exclude(*columns: Any) -> pl.Expr:
     """Like :func:`polars.exclude`, but also accepts a :class:`DataFrame`
     (uses ``.columns``), :class:`Series` (uses ``.name``), or list/tuple

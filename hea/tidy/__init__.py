@@ -68,8 +68,10 @@ from __future__ import annotations
 # the class hierarchy so they slot in anywhere.
 from .basics import (
     _Desc,
+    _Drop,
     case_when,
     desc,
+    drop,
     exclude,
     glimpse,
     if_else,
@@ -268,7 +270,7 @@ __all__ = [
     # core classes
     "DataFrame", "GroupBy", "LazyFrame", "Series", "Summary",
     # dplyr verbs / mutate helpers
-    "case_when", "desc", "if_else", "n", "n_distinct", "tbl",
+    "case_when", "desc", "drop", "if_else", "n", "n_distinct", "tbl",
     # dplyr rank family
     "row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist", "ntile",
     # dplyr window / numeric helpers

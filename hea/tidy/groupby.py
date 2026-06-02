@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 import polars as pl
 
 from ._shared import (
@@ -17,6 +18,7 @@ from ._shared import (
     _kwargs_to_exprs,
     _resolve_lazy_factors,
 )
+from .basics import _Drop
 from .dataframe import DataFrame
 
 
@@ -304,6 +306,35 @@ class GroupBy:
                 )
                 .explode(cols)
             )
+        return GroupBy(self._df._wrap(out), self._by, self._kwargs)
+
+    def slice(self, positions) -> "GroupBy":
+        """dplyr's positional ``slice()`` within each group.
+
+        ``g.slice([0, 2])`` keeps the 1st and 3rd row of every group;
+        ``g.slice(0)`` keeps each group's first row; ``g.slice(drop([0]))``
+        drops each group's first row. **0-based**, with Python from-end
+        negatives (``-1`` is each group's last row), to match the ungrouped
+        :meth:`DataFrame.slice`. Out-of-range positions are skipped. Unlike
+        the ungrouped form, rows keep their original within-group order and
+        are not duplicated — the grouped slice family is filter-based (cf.
+        :meth:`slice_min`).
+        """
+        drop_mode = isinstance(positions, _Drop)
+        if drop_mode:
+            positions = positions.positions
+        if isinstance(positions, (list, tuple, range, pl.Series, np.ndarray)):
+            pos = [int(p) for p in positions]
+        else:
+            pos = [int(positions)]
+        wpos = pl.int_range(0, pl.len()).over(self._by)   # 0-based pos in group
+        glen = pl.len().over(self._by)                    # rows per group
+        # A non-negative request ``p`` matches wpos == p; a from-end
+        # request ``-k`` matches wpos == glen - k, i.e. wpos - glen == -k.
+        # ``is_in`` over the raw request set captures both directions;
+        # out-of-range requests match no row. ``drop`` keeps the complement.
+        sel = wpos.is_in(pos) | (wpos - glen).is_in(pos)
+        out = pl.DataFrame.filter(self._df, ~sel if drop_mode else sel)
         return GroupBy(self._df._wrap(out), self._by, self._kwargs)
 
     # ---- DataFrame-passthrough ---------------------------------------

@@ -13,7 +13,7 @@ import pytest
 import hea
 from hea.tidy import DataFrame
 from hea.R import factor
-from hea.tidy import GroupBy, desc, tbl
+from hea.tidy import GroupBy, desc, drop, tbl
 
 
 # ---------------------------------------------------------------------------
@@ -670,6 +670,110 @@ def test_slice_max_keeps_all_null_when_only_rows():
 def test_groupby_slice_max_n_gt_1(df):
     out = df.group_by("g").slice_max("y", n=2)
     assert out.height == 4
+
+
+# ---------------------------------------------------------------------------
+# Positional slice — dplyr's slice() overloaded onto polars' slice()
+# ---------------------------------------------------------------------------
+
+
+def test_slice_polars_contiguous_preserved(df):
+    """Scalar args keep polars' ``slice(offset, length)`` — superset holds."""
+    assert df.slice(0, 2)["x"].to_list() == [1, 2]
+    assert df.slice(2)["x"].to_list() == [3, 4, 5, 6]   # offset → end
+    assert df.slice(-2)["x"].to_list() == [5, 6]        # negative offset = last 2
+    assert isinstance(df.slice(0, 2), DataFrame)
+
+
+def test_slice_positional_select(df):
+    """List arg = dplyr positional slice, 0-based. ``[0, 2, 4]`` picks the
+    rows R's 1-based ``slice(c(1, 3, 5))`` would (x = 1, 3, 5)."""
+    assert df.slice([0, 2, 4])["x"].to_list() == [1, 3, 5]
+    assert isinstance(df.slice([0, 2, 4]), DataFrame)
+
+
+def test_slice_positional_from_end(df):
+    assert df.slice([-1])["x"].to_list() == [6]
+    assert df.slice([-1, -2])["x"].to_list() == [6, 5]
+
+
+def test_slice_positional_oob_dropped(df):
+    """Out-of-range positions are silently skipped (dplyr-faithful)."""
+    assert df.slice([100, 0])["x"].to_list() == [1]
+    assert df.slice([100, -100]).height == 0   # all OOB → empty
+    assert df.slice([]).height == 0
+
+
+def test_slice_positional_keeps_dups_and_order(df):
+    assert df.slice([2, 2, 0])["x"].to_list() == [3, 3, 1]
+
+
+def test_slice_positional_accepts_range_and_series(df):
+    assert df.slice(range(2))["x"].to_list() == [1, 2]
+    assert df.slice(pl.Series([1, 3]))["x"].to_list() == [2, 4]
+    assert df.slice(np.array([0, 4]))["x"].to_list() == [1, 5]
+
+
+def test_slice_positional_rejects_length(df):
+    with pytest.raises(TypeError):
+        df.slice([1, 3], 2)
+
+
+def test_groupby_slice_positional(df):
+    """Per-group positional slice. Group a = x[1,2,3], group b = x[4,5,6]."""
+    # First row of each group (list and scalar forms agree).
+    assert sorted(df.group_by("g").slice([0]).ungroup()["x"].to_list()) == [1, 4]
+    assert sorted(df.group_by("g").slice(0).ungroup()["x"].to_list()) == [1, 4]
+    # 2nd row of each group.
+    assert sorted(df.group_by("g").slice([1]).ungroup()["x"].to_list()) == [2, 5]
+    # First + last of each group (from-end negative is per-group).
+    assert sorted(df.group_by("g").slice([0, -1]).ungroup()["x"].to_list()) == [1, 3, 4, 6]
+    # Out-of-range per-group position → empty (groups have 3 rows each).
+    assert df.group_by("g").slice([5]).ungroup().height == 0
+
+
+def test_groupby_slice_preserves_grouping(df):
+    """Grouped slice returns a GroupBy that still carries its keys."""
+    g = df.group_by("g").slice([0, 1])
+    assert isinstance(g, GroupBy)
+    assert g._by == ["g"]
+    # A following grouped verb windows per group.
+    assert g.slice([0]).ungroup().sort("g")["x"].to_list() == [1, 4]
+
+
+def test_slice_drop_marker(df):
+    """drop([...]) keeps the complement — hea's spelling of slice(df, -c(1,2))."""
+    assert df.slice(drop([0, 1]))["x"].to_list() == [3, 4, 5, 6]
+    assert df.slice(drop(0))["x"].to_list() == [2, 3, 4, 5, 6]   # scalar position
+    assert isinstance(df.slice(drop([0, 1])), DataFrame)
+
+
+def test_slice_drop_from_end_and_oob(df):
+    assert df.slice(drop([-1]))["x"].to_list() == [1, 2, 3, 4, 5]  # drop last row
+    assert df.slice(drop([100])).height == 6                       # OOB → no-op
+    assert df.slice(drop([])).height == 6
+
+
+def test_slice_drop_rejects_length(df):
+    with pytest.raises(TypeError):
+        df.slice(drop([0]), 2)
+
+
+def test_slice_keep_drop_are_complementary(df):
+    """slice([P]) keeps and slice(drop([P])) drops the same positions."""
+    kept = df.slice([0, 2, 4])["x"].to_list()
+    dropped = df.slice(drop([0, 2, 4]))["x"].to_list()
+    assert kept == [1, 3, 5]
+    assert dropped == [2, 4, 6]
+    assert sorted(kept + dropped) == df["x"].to_list()
+
+
+def test_groupby_slice_drop(df):
+    """Per-group drop. Group a = x[1,2,3], group b = x[4,5,6]."""
+    # Drop each group's first row.
+    assert sorted(df.group_by("g").slice(drop([0])).ungroup()["x"].to_list()) == [2, 3, 5, 6]
+    # Drop each group's last row (from-end, per group).
+    assert sorted(df.group_by("g").slice(drop([-1])).ungroup()["x"].to_list()) == [1, 2, 4, 5]
 
 
 def test_groupby_slice_head_per_group(df):
