@@ -109,7 +109,7 @@ LF_NON_DF: set[str] = {
     # ``test_lf_materializing_methods_return_hea_dataframe``).
     "collect", "describe",
     # Materializing ops that return non-DataFrame containers.
-    "collect_async", "collect_batches", "fetch",
+    "collect_async", "collect_batches", "execute", "fetch",
     # Sinks — write to disk, return None or async result.
     "sink_batches", "sink_csv", "sink_delta", "sink_iceberg", "sink_ipc",
     "sink_ndjson", "sink_parquet",
@@ -136,6 +136,7 @@ DF_METHODS = {
     "limit":             lambda d: d.limit(2),
     "slice":             lambda d: d.slice(0, 2),
     "sample":            lambda d: d.sample(n=2, seed=0),
+    "gather":            lambda d: d.gather([0, 2]),
     "gather_every":      lambda d: d.gather_every(2),
     "reverse":           lambda d: d.reverse(),
     "unique":            lambda d: d.unique(),
@@ -227,6 +228,7 @@ LF_METHODS = {
     "last":              lambda lf: lf.last(),
     "limit":             lambda lf: lf.limit(2),
     "slice":             lambda lf: lf.slice(0, 2),
+    "gather":            lambda lf: lf.gather([0, 2]),
     "gather_every":      lambda lf: lf.gather_every(2),
     "reverse":           lambda lf: lf.reverse(),
     "unique":            lambda lf: lf.unique(),
