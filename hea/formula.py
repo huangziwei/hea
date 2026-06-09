@@ -1470,6 +1470,35 @@ def _eval_call(call: Call, data: pl.DataFrame):
         suffixes = [str(i + 1) for i in range(cols.shape[1])]
         return _NumBlock(values=cols, suffixes=suffixes, label=label)
 
+    if fn == "harmonic":
+        # hea-native periodic basis: K cos/sin harmonic pairs at an explicit
+        # period (the trig sibling of poly/bs/ns; see _harmonic_basis). K and
+        # period take positional — harmonic(x, K, period) — or keyword forms.
+        # period must be a positive scalar (e.g. 12 or 2*pi); hea has no ts
+        # frequency to infer it from, so it has no default.
+        v = _eval_numeric(call.args[0], data)
+        k_node = call.args[1] if len(call.args) >= 2 else call.kwargs.get("K")
+        if not (isinstance(k_node, Literal) and k_node.kind == "num") \
+                or float(k_node.value) != int(k_node.value) \
+                or int(k_node.value) < 1:
+            got = None if k_node is None else getattr(k_node, "value", k_node)
+            raise ValueError(
+                f"harmonic(): K must be a positive integer, got {got!r}")
+        K = int(k_node.value)
+        p_node = call.args[2] if len(call.args) >= 3 else call.kwargs.get("period")
+        if p_node is None:
+            raise ValueError(
+                "harmonic(): a positive `period=` is required "
+                "(hea has no ts frequency to infer it from)")
+        period = (float(p_node.value)
+                  if isinstance(p_node, Literal) and p_node.kind == "num"
+                  else float(_eval_numeric(p_node, data)[0]))
+        if period <= 0:
+            raise ValueError(
+                f"harmonic(): `period=` must be positive, got {period}")
+        cols, suffixes = _harmonic_basis(v, K, period)
+        return _NumBlock(values=cols, suffixes=suffixes, label=label)
+
     # Fallback: try to treat as numeric single-argument elementwise function.
     raise NotImplementedError(f"unsupported call: {fn}(…)")
 
@@ -1604,6 +1633,28 @@ def _ns_basis(x, boundary, interior_knots, df, intercept):
     Q, _ = np.linalg.qr(const.T, mode="complete")
     H = Q[:, 2:]
     return B @ H
+
+
+def _harmonic_basis(x, K: int, period: float):
+    """Raw Fourier/harmonic basis: ``K`` cos/sin pairs at ``period``.
+
+    Columns are cos-first interleaved — ``[cos1, sin1, cos2, sin2, …]`` with
+    matching suffixes — i.e. ``cos(2π j x / period)``, ``sin(2π j x / period)``
+    for ``j = 1..K``. A pure function of ``(x, K, period)`` with no
+    data-derived state, so it reproduces exactly on fresh data at predict time
+    (unlike ``bs``/``ns``, which capture knots).
+
+    hea-native term, name aligned with ``TSA::harmonic`` — NOT a port of
+    ``forecast::fourier`` / ``TSA::harmonic``: always emits ``2K`` columns (no
+    integer-``ts`` Nyquist drop) and takes an explicit ``period``.
+    """
+    x = np.asarray(x, dtype=float)
+    cols, suffixes = [], []
+    for j in range(1, K + 1):
+        w = (2.0 * np.pi * j / period) * x
+        cols.append(np.cos(w)); suffixes.append(f"cos{j}")
+        cols.append(np.sin(w)); suffixes.append(f"sin{j}")
+    return np.stack(cols, axis=1), suffixes
 
 
 def _eval_level_list(node) -> list:
