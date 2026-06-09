@@ -51,7 +51,6 @@ from ..formula import (
     _eval_atom,
     materialize_smooths,
     prepare_design,
-    reject_unsupported_smooth_id,
 )
 from .lm import _label_top_n, _lowess, _qq_plot
 from ..utils import (
@@ -566,6 +565,15 @@ class gam:
     # subclasses that build their own state without running gam's
     # constructor (bam) — readers treat ``None`` as "assume full rank".
     rank: int | None = None
+    # Working→per-penalty log-sp map (mgcv's ``L``; see ``_rho_full``).
+    # ``None`` ⇔ identity (no id linkage) — also the bam fallback.
+    _L: np.ndarray | None = None
+
+    @property
+    def _work_dim(self) -> int:
+        """Number of *working* (estimated) smoothing parameters —
+        ``ncol(L)``; equals ``len(self._slots)`` when no id linkage."""
+        return len(self._slots) if self._L is None else self._L.shape[1]
 
     def __init__(
         self,
@@ -617,7 +625,6 @@ class gam:
         # UBRE `D/n + 2·τ/n − 1`. mgcv's `gam.outer` does the same dispatch
         # under method="GCV.Cp".
         d = prepare_design(formula, data)
-        reject_unsupported_smooth_id(d.expanded)
         self._expanded = d.expanded
         # Materialise smooth-arg expressions once into ``self.data`` so the
         # synth columns (``s(I(b.depth^.5))`` ⇒ ``"I(b.depth^0.5)"``) are
@@ -650,6 +657,16 @@ class gam:
             if d.expanded.smooths else []
         )
         blocks: list[SmoothBlock] = [b for group in sb_lists for b in group]
+        # Per-block ``id`` (mgcv's sp-linkage key), parallel to ``blocks``.
+        # Every block born from the same smooth call inherits that call's
+        # id (a by=factor smooth's level blocks all share it — that's the
+        # ``s(x, by=fac, id=1)`` single-λ idiom). Both block-list
+        # transforms below are length/order-preserving, so this stays
+        # aligned.
+        from ..formula import _smooth_id_value
+        block_ids: list[str | None] = []
+        for call_node, group_blocks in zip(d.expanded.smooths, sb_lists):
+            block_ids.extend([_smooth_id_value(call_node)] * len(group_blocks))
         # mgcv: select=TRUE adds a null-space penalty per smooth inside
         # smoothCon — i.e., before gam.side. Mirror that order so the
         # subsequent column drops (gam.side) restrict Sf to the kept-cols
@@ -688,6 +705,47 @@ class gam:
             col_cursor = bcol
         X = np.concatenate(Xs, axis=1) if len(Xs) > 1 else X_param
         p = X.shape[1]
+
+        # ------------- L matrix: working → per-penalty log-sp ---------------
+        # mgcv's gam.setup (mgcv.r:1280-1320): ``ρ_full = L·θ`` maps the
+        # *working* (estimated) log smoothing parameters θ to the log-sp
+        # multiplying each S_k. A block whose ``id`` was seen before reuses
+        # the first such block's working columns (its j-th penalty shares
+        # the j-th column); everything else extends L block-diagonally
+        # with an identity. ``self._L is None`` ⇔ no linkage — the mapping
+        # is the identity and every code path below stays byte-identical
+        # to the pre-L behavior. (mgcv's lsp0 offset is identically zero
+        # until fixed-sp support lands, so it is not carried.)
+        slot_work_col: list[int] = []
+        n_work = 0
+        id_first_cols: dict[str, tuple[int, int]] = {}
+        slot_cursor = 0
+        for b, bid in zip(blocks, block_ids):
+            nS = len(b.S)
+            if nS == 0:
+                continue
+            if bid is None or bid not in id_first_cols:
+                start = n_work
+                n_work += nS
+                if bid is not None:
+                    id_first_cols[bid] = (start, nS)
+            else:
+                start, nc = id_first_cols[bid]
+                if nS > nc:
+                    # mgcv's exact refusal (mgcv.r:1312-1314).
+                    raise ValueError(
+                        "Later terms sharing an `id' can not have more "
+                        "smoothing parameters than the first such term"
+                    )
+            slot_work_col.extend(range(start, start + nS))
+            slot_cursor += nS
+        if n_work == len(slots):
+            self._L = None                       # identity — no id linkage
+        else:
+            L = np.zeros((len(slots), n_work))
+            L[np.arange(len(slots)), slot_work_col] = 1.0
+            self._L = L
+        self._n_work = n_work
 
         # Column names: parametric (R-canonical) + "s(x).1", "s(x).2", … per
         # block. Matches mgcv's `coef(gam_fit)` labels. For multi-block
@@ -780,15 +838,20 @@ class gam:
             fit = self._fit_given_rho(rho_hat)
         elif sp is not None:
             sp_arr = np.asarray(sp, dtype=float)
-            if sp_arr.shape != (n_sp,):
+            # mgcv semantics: ``sp`` supplies the *working* smoothing
+            # parameters — one per column of L (= one per penalty when
+            # there is no id linkage; fewer when smooths share an id).
+            if sp_arr.shape != (n_work,):
                 raise ValueError(
-                    f"sp must have length {n_sp} (one per penalty slot), got {sp_arr.shape}"
+                    f"sp must have length {n_work} (one per estimated "
+                    f"smoothing parameter; id-linked penalties share one), "
+                    f"got {sp_arr.shape}"
                 )
             if np.any(sp_arr < 0):
                 raise ValueError("sp entries must be non-negative")
             # guard log(0) — a hard zero sp means "no penalty," which we
             # represent as exp(-large) instead, matching mgcv's handling.
-            rho_hat = np.log(np.maximum(sp_arr, 1e-10))
+            rho_hat = self._rho_full(np.log(np.maximum(sp_arr, 1e-10)))
             self.sp = sp_arr
             fit = self._fit_given_rho(rho_hat)
             # For unknown-scale families fit by (RE)ML, set log φ̂ to the
@@ -834,20 +897,19 @@ class gam:
                     "method='REML' or 'ML'; got method='GCV.Cp'"
                 )
 
-            # Initial seed for the smoothing parameters and log φ.
+            # Initial seed for the (working) smoothing parameters and log φ.
             #
             # REML and GCV both run analytical Newton on the criterion's
-            # exact Hessian (mgcv's gam.outer). REML starts at ρ=0 (Newton's
+            # exact Hessian (mgcv's gam.outer). REML starts at θ=0 (Newton's
             # eigen-clamped quadratic model handles the global descent).
-            # GCV uses a coordinate grid-scan first, then Newton: the
-            # criterion has flat saturation tails on some smooths (e.g.
-            # mcycle's tp) where Newton from ρ=0 can drift toward the
-            # boundary; the grid scan finds the right basin.
+            # GCV seeds at mgcv's ``initial.sp`` balance; with id linkage
+            # the full-space seed maps to working space by least squares —
+            # mgcv's ``coef(lm(log(def.sp) ~ L - 1))`` (mgcv.r:4618-4622).
             if method in ("REML", "ML"):
-                cur_rho = np.zeros(n_sp)
+                cur_rho = np.zeros(n_work)
                 if include_log_phi:
                     try:
-                        fit_seed = self._fit_given_rho(cur_rho)
+                        fit_seed = self._fit_given_rho(self._rho_full(cur_rho))
                         df_resid_seed = max(self.n - self._Mp, 1.0)
                         V_seed = family.variance(fit_seed.mu)
                         pearson = float(np.sum(
@@ -862,7 +924,12 @@ class gam:
                 else:
                     cur_logphi = 0.0
             else:
-                cur_rho = self._initial_sp_rho()
+                rho0_full = self._initial_sp_rho()
+                if self._L is None:
+                    cur_rho = rho0_full
+                else:
+                    cur_rho, *_ = np.linalg.lstsq(self._L, rho0_full,
+                                                  rcond=None)
                 cur_logphi = 0.0  # GCV does not put log φ in θ
 
             theta0_parts = [cur_rho]
@@ -882,20 +949,24 @@ class gam:
             )
 
             if include_log_phi:
-                rho_hat = theta_hat[:n_sp]
-                log_phi_hat = float(theta_hat[n_sp])
+                theta_sp = theta_hat[:n_work]
+                log_phi_hat = float(theta_hat[n_work])
                 if include_family_theta:
-                    family.set_theta(theta_hat[n_sp + 1:])
+                    family.set_theta(theta_hat[n_work + 1:])
                     self._tw_info = {
-                        "theta_hat": float(theta_hat[n_sp + 1]),
+                        "theta_hat": float(theta_hat[n_work + 1]),
                         "p_hat": float(family.p),
                         "log_phi_hat": log_phi_hat,
                     }
             else:
-                rho_hat = theta_hat
+                theta_sp = theta_hat
                 log_phi_hat = None
             self._log_phi_hat = log_phi_hat
-            self.sp = np.exp(rho_hat)
+            # mgcv exposure: ``m$sp`` is the *working* sp vector; the
+            # per-penalty expansion (mgcv's ``m$full.sp``) is derived
+            # below for every path via ``_rho_full``.
+            self.sp = np.exp(theta_sp)
+            rho_hat = self._rho_full(theta_sp)
             fit = self._fit_given_rho(rho_hat)
 
         # Unpack fit results. ``fit.A_chol`` is the Newton-W factorization
@@ -1147,6 +1218,12 @@ class gam:
             H_aug = 0.5 * self._reml_hessian(
                 rho_hat, log_phi_hat_for_aug, fit=fit, include_log_phi=True,
             )
+            # Working-space view: the criterion is optimized over θ
+            # (ρ = L·θ), so Vr — and every CI built on H_aug — lives in
+            # working coordinates: H_θ = T'·H_ρ·T, T = blockdiag(L, [1]).
+            T_aug = self._T_working(1)
+            if T_aug is not None:
+                H_aug = T_aug.T @ H_aug @ T_aug
             H_aug = 0.5 * (H_aug + H_aug.T)
         else:
             H_aug = None
@@ -1264,6 +1341,29 @@ class gam:
             a, b = slot.col_start, slot.col_end
             Sλ[a:b, a:b] += lam * slot.S
         return Sλ
+
+    def _rho_full(self, theta_sp: np.ndarray) -> np.ndarray:
+        """Working log-sp θ → per-penalty log-sp ρ = L·θ (mgcv's
+        ``lsp = L %*% lsp_working + lsp0`` with lsp0 ≡ 0). Identity when
+        no smooths share an ``id``."""
+        if self._L is None:
+            return theta_sp
+        return self._L @ theta_sp
+
+    def _T_working(self, n_extra: int) -> np.ndarray | None:
+        """``T = blockdiag(L, I_extra)`` — the Jacobian ∂(ρ, extras)/∂(θ,
+        extras) used to chain criterion derivatives to working space:
+        ``g_θ = T'·g_ρ``, ``H_θ = T'·H_ρ·T`` (mgcv's newton applies the
+        same ``L`` contraction, gam.fit3.r:1335-1340). ``None`` ⇔ identity.
+        """
+        if self._L is None:
+            return None
+        n_slots, n_work = self._L.shape
+        T = np.zeros((n_slots + n_extra, n_work + n_extra))
+        T[:n_slots, :n_work] = self._L
+        if n_extra > 0:
+            T[n_slots:, n_work:] = np.eye(n_extra)
+        return T
 
     def _initial_sp_rho(self) -> np.ndarray:
         """mgcv's ``initial.sp`` seed for log-smoothing-params (gam.fit3.r).
@@ -2239,17 +2339,30 @@ class gam:
             )
 
         n_sp = len(self._slots)
+        n_work = self._work_dim
         n_theta_fam = self.family.n_theta if include_family_theta else 0
         theta = np.asarray(theta0, dtype=float).copy()
+        # θ's sp-part is the *working* log-sp; criterion derivatives come
+        # back per-penalty (FULL space) and chain to working space through
+        # T = blockdiag(L, I_extra): g_θ = T'g, H_θ = T'HT. T is None ⇔
+        # identity (no id linkage) — zero-cost on the common path.
+        T_work = self._T_working((1 if include_log_phi else 0) + n_theta_fam)
+
+        def _to_working(g):
+            return g if T_work is None else T_work.T @ g
+
+        def _to_working_hess(H):
+            return H if T_work is None else T_work.T @ H @ T_work
 
         def _split(t):
+            # → (FULL per-penalty ρ, log φ) from a working-layout θ.
             if include_log_phi:
-                return t[:n_sp], float(t[n_sp])
-            return t, 0.0
+                return self._rho_full(t[:n_work]), float(t[n_work])
+            return self._rho_full(t), 0.0
 
         def _apply_family_theta(t):
             if n_theta_fam > 0:
-                base = n_sp + (1 if include_log_phi else 0)
+                base = n_work + (1 if include_log_phi else 0)
                 self.family.set_theta(t[base:base + n_theta_fam])
 
         if criterion == "REML":
@@ -2263,17 +2376,17 @@ class gam:
                 val_2VR = float(self._reml(rho_t, lp_t, fit=fit_t))
                 return val_2VR / 2.0, fit_t
             def _grad(rho, log_phi, fit):
-                return 0.5 * self._reml_grad(
+                return _to_working(0.5 * self._reml_grad(
                     rho, log_phi, fit=fit,
                     include_log_phi=include_log_phi,
                     include_family_theta=include_family_theta,
-                )
+                ))
             def _hess(rho, log_phi, fit):
-                return 0.5 * self._reml_hessian(
+                return _to_working_hess(0.5 * self._reml_hessian(
                     rho, log_phi, fit=fit,
                     include_log_phi=include_log_phi,
                     include_family_theta=include_family_theta,
-                )
+                ))
         else:  # GCV
             def _eval(t):
                 rho_t, _ = _split(t)
@@ -2284,9 +2397,9 @@ class gam:
                 val = float(self._gcv(rho_t, fit=fit_t))
                 return val, fit_t
             def _grad(rho, log_phi, fit):
-                return self._gcv_grad(rho, fit=fit)
+                return _to_working(self._gcv_grad(rho, fit=fit))
             def _hess(rho, log_phi, fit):
-                return self._gcv_hessian(rho, fit=fit)
+                return _to_working_hess(self._gcv_hessian(rho, fit=fit))
 
         is_reml = (criterion == "REML")
 
@@ -3701,7 +3814,9 @@ class gam:
             and self.sigma_squared > 0 else 1.0
         a_m, b_m = self._block_col_ranges[m_idx]
         k_m = b_m - a_m
-        sp = np.asarray(self.sp, dtype=float)
+        # Per-penalty sp — mgcv reads ``b$full.sp`` when id linkage made
+        # the working ``b$sp`` shorter (mgcv.r:3612); exp(ρ̂_full) is that.
+        sp = np.exp(np.asarray(self._rho_hat, dtype=float))
 
         # R factor: R'R = X'WX from stored Fisher working weights. Use
         # eigendecomp when XtWX is borderline-PSD (gam.side rank-trim,
@@ -3956,6 +4071,11 @@ class gam:
             return edf.copy(), edf1, np.zeros((p, p))
 
         db = self._db_drho(rho, fit.beta, fit.A_chol, fit.A_chol_lower)
+        # Working-space chain: ∂β/∂θ = (∂β/∂ρ)·L — mgcv's post-proc does
+        # exactly ``db.drho %*% L`` (gam.fit3.r:996-999). Vr is the working
+        # θ covariance (H_aug is stored in working space).
+        if self._L is not None:
+            db = db @ self._L
         Vr = self._compute_Vr(rho, H_aug)
         # mgcv splits Vr by component: Vc1 uses pinv(H_aug) on positive
         # eigenspace; Vc2 uses (H_aug + 0.1·I)^{-1} — a weak prior on log
@@ -4017,27 +4137,31 @@ class gam:
         approx multiplicative range"). Without this, edf2 on bs='re' /
         nested-RE models drifts ~1e-3 above mgcv.
         """
-        n_sp = len(self._slots)
+        n_w = self._work_dim
         if H_aug is not None:
+            # H_aug is stored in working space — (n_work + 1)².
             w, V = np.linalg.eigh(H_aug)
             if prior_var is not None:
                 d_reg = np.where(w > 0, w, 0.0) + float(prior_var)
                 H_inv = (V / d_reg) @ V.T
-                return H_inv[:n_sp, :n_sp]
+                return H_inv[:n_w, :n_w]
             w_max = float(w.max()) if w.size > 0 else 0.0
             keep = (w > w_max * 1e-7) if w_max > 0 else np.zeros_like(w, dtype=bool)
             if not keep.any():
-                return np.zeros((n_sp, n_sp))
+                return np.zeros((n_w, n_w))
             Vk = V[:, keep]
             H_inv = (Vk / w[keep]) @ Vk.T
-            return H_inv[:n_sp, :n_sp]
+            return H_inv[:n_w, :n_w]
         # GCV / no-H_aug fallback: ρρ block of the (ρ, log φ) joint Hessian
-        # at log φ = 0. For Gaussian-identity REML this used to call the
-        # Gaussian-profiled `_reml_hessian`; the joint Hessian's ρρ block
-        # equals 2× that profiled Hessian up to the rank-1 Schur term, which
-        # is fine for the GCV path (mgcv defines edf2 differently for GCV
-        # anyway — this is a best-effort sp-uncertainty correction).
+        # at log φ = 0, chained to working space (T'HT). For
+        # Gaussian-identity REML this used to call the Gaussian-profiled
+        # `_reml_hessian`; the joint Hessian's ρρ block equals 2× that
+        # profiled Hessian up to the rank-1 Schur term, which is fine for
+        # the GCV path (mgcv defines edf2 differently for GCV anyway —
+        # this is a best-effort sp-uncertainty correction).
         H_full = 0.5 * self._reml_hessian(rho, 0.0, include_log_phi=False)
+        if self._L is not None:
+            H_full = self._L.T @ H_full @ self._L
         H = 0.5 * (H_full + H_full.T)
         w, V = np.linalg.eigh(H)
         if prior_var is not None:
@@ -4046,7 +4170,7 @@ class gam:
         w_max = float(w.max()) if w.size > 0 else 0.0
         keep = (w > w_max * 1e-7) if w_max > 0 else np.zeros_like(w, dtype=bool)
         if not keep.any():
-            return np.zeros((n_sp, n_sp))
+            return np.zeros((n_w, n_w))
         Vk = V[:, keep]
         return (Vk / w[keep]) @ Vk.T
 
@@ -4104,6 +4228,13 @@ class gam:
             # L^T M_k = -G.
             G = solve_triangular(L, dL, lower=True).T
             M[k] = solve_triangular(L.T, -G, lower=False)
+
+        # Working-space contraction: M_k is linear in dA_k, and the dA per
+        # working θ_j is the L-weighted sum of per-penalty dA's — mgcv
+        # Vb.corr's ``dH[[j]] <- Σ_i L[i,j]·dH1[[i]]`` reweighting
+        # (gam.fit3.r:915-925). Vr is the working-space covariance.
+        if self._L is not None:
+            M = np.einsum("kj,kab->jab", self._L, M)
 
         # Vc2[a,b] = Σ_{i,j} Vr[i,j] M_i[a,c] M_j[b,c] — contract over
         # the trailing axis of both M operands.
@@ -4177,8 +4308,11 @@ class gam:
             })
 
         names = [slot.block.label for slot in self._slots] + ["scale"]
+        # Per-penalty sp (mgcv ``full.sp``); id-linked slots show the
+        # shared value on each of their rows, like mgcv's vcomp output.
+        sp_full = np.exp(np.asarray(self._rho_hat, dtype=float))
         sd2 = np.concatenate([
-            self.sigma_squared / np.maximum(np.asarray(self.sp, dtype=float), 1e-300),
+            self.sigma_squared / np.maximum(sp_full, 1e-300),
             [self.sigma_squared],
         ])
         log_sd = 0.5 * np.log(np.clip(sd2, 1e-300, None))
@@ -4194,6 +4328,7 @@ class gam:
             })
 
         # Pseudo-invert on the positive eigenspace, same threshold as edf2.
+        # ``_H_aug`` lives in working (θ, log σ²) space — (n_work+1)².
         w, V = np.linalg.eigh(H)
         w_max = float(w.max()) if w.size > 0 else 0.0
         keep = (w > w_max * 1e-7) if w_max > 0 else np.zeros_like(w, dtype=bool)
@@ -4202,11 +4337,15 @@ class gam:
             Vk = V[:, keep]
             Hinv = (Vk / w[keep]) @ Vk.T
 
-        # J: log(σ_k) = -0.5·ρ_k + 0.5·log σ² for k < last; log(σ_scale) =
-        # 0.5·log σ². Last column is the log σ² coefficient throughout.
-        m = n_sp + 1
-        J = np.zeros((m, m))
-        J[np.arange(n_sp), np.arange(n_sp)] = -0.5
+        # J: log(σ_k) = -0.5·ρ_k + 0.5·log σ² per slot k, with
+        # ρ = L·θ — so the θ-block of row k is -0.5·L[k, :]; the scale row
+        # is 0.5·log σ² only. Columns are (θ_working…, log σ²).
+        n_work = self._work_dim
+        J = np.zeros((n_sp + 1, n_work + 1))
+        if self._L is None:
+            J[np.arange(n_sp), np.arange(n_sp)] = -0.5
+        else:
+            J[:n_sp, :n_work] = -0.5 * self._L
         J[:, -1] = 0.5
 
         Vc = J @ Hinv @ J.T

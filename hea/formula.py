@@ -958,6 +958,18 @@ _TERO_CV: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
+# Capture channel for id-linked basis construction (mgcv's smoothCon
+# ``n=``/``dataX=`` path, smooth.r:3888-3894). When set to a dict,
+# ``_apply_by_and_absorb`` records the constructor output (raw X on the
+# pooled basis-setup data, un-rescaled S list, raw basis, class) and
+# returns no blocks; ``materialize_smooths``'s id machinery then rescales
+# S against the pooled X once and re-enters per linked smooth with
+# ``pre_scaled=True``.
+_ID_RAW_CAPTURE: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "_hea_id_raw_capture", default=None
+)
+
+
 @contextlib.contextmanager
 def with_ordered_cols(cols):
     """Context manager: inside the `with` block, the given column names are
@@ -2401,6 +2413,23 @@ class _RawBasis:
 
 
 @dataclass(slots=True)
+class _RenamedRawBasis(_RawBasis):
+    """View of a base raw basis under a repeat-``id`` smooth's covariate
+    names — the evaluation half of mgcv's ``clone.smooth.spec``: the
+    cloned smooth keeps the base smooth's basis state (knots, anchors)
+    but reads its *own* columns. ``rename`` maps member name → base name.
+    """
+    raw: _RawBasis
+    rename: dict[str, str]
+
+    def eval(self, data: pl.DataFrame) -> np.ndarray:
+        cols = {}
+        for member, base in self.rename.items():
+            cols[base] = data[member].rename(base)
+        return self.raw.eval(pl.DataFrame(cols))
+
+
+@dataclass(slots=True)
 class _AbsorbTransform:
     """Replay ``_absorb_sumzero`` on new-data rows.
 
@@ -3004,6 +3033,78 @@ def _collect_name_idents(node, out: set[str]) -> None:
     # Subscript, Dot, Empty: no Name references we care about for this path.
 
 
+def _smooth_id_value(call: Call) -> str | None:
+    """The smooth's ``id=`` linkage key as a canonical string, or None.
+
+    mgcv keys its id machinery by ``as.character(id)`` (mgcv.r:1202), so
+    ``id=1`` and ``id="1"`` link with each other. Mirror R's coercions:
+    whole-number doubles print without a decimal part, logicals print
+    TRUE/FALSE.
+    """
+    node = call.kwargs.get("id")
+    if node is None:
+        return None
+    if isinstance(node, Literal):
+        v = node.value
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            return "TRUE" if v else "FALSE"
+        if isinstance(v, (int, float)):
+            f = float(v)
+            if f.is_integer():
+                return str(int(f))
+            return repr(f)
+        return str(v)
+    if isinstance(node, Name):
+        if node.ident == "NULL":
+            return None
+        return node.ident
+    return _deparse(node)
+
+
+def _clone_smooth_spec(base: Call, member: Call) -> Call:
+    """mgcv ``clone.smooth.spec`` (mgcv.r:730-765): a repeat-``id`` smooth
+    is rebuilt from the *first* smooth with that id — same bs class, k, m,
+    xt, fx, … — keeping only its own covariates and ``by``. Cloning
+    ``base.fn`` too covers mgcv's "sloppy user" branch, where an ``s()``
+    member linked to a ``te()`` base is reconstructed as a ``te`` over the
+    member's terms (margin specs come along inside the cloned kwargs,
+    since hea's tensor builders read margin bs/k/m from kwargs).
+    """
+    if len(member.args) != len(base.args):
+        # mgcv's exact message (mgcv.r:735).
+        raise ValueError(
+            "`id' linked smooths must have same number of arguments"
+        )
+    kwargs = dict(base.kwargs)
+    kwargs.pop("by", None)
+    if "by" in member.kwargs:
+        kwargs["by"] = member.kwargs["by"]
+    return Call(fn=base.fn, args=list(member.args), kwargs=kwargs)
+
+
+def _id_basis_frame(group_calls: list[Call], data: pl.DataFrame) -> pl.DataFrame:
+    """Pooled basis-setup data for an ``id`` group — mgcv's
+    ``id.list[[id]]$data`` (mgcv.r:1217-1227): the j-th covariate of every
+    linked smooth, stacked under the *base* smooth's term names, so knot
+    placement / tp anchors / eigen ranges see the union of covariate
+    values (smoothCon's ``n=``/``dataX=`` path then evaluates the model
+    matrix at each smooth's own values).
+    """
+    base_vars = _smooth_term_vars(group_calls[0])
+    cols: dict[str, pl.Series] = {}
+    for j, bname in enumerate(base_vars):
+        pieces: list[pl.Series] = []
+        for c in group_calls:
+            s = data[_smooth_term_vars(c)[j]]
+            if s.dtype.is_numeric() and s.dtype != pl.Float64:
+                s = s.cast(pl.Float64)
+            pieces.append(s.rename(bname))
+        cols[bname] = pl.concat(pieces) if len(pieces) > 1 else pieces[0]
+    return pl.DataFrame(cols)
+
+
 def _smooth_arg_expr_map(expanded: "ExpandedFormula") -> dict[str, "Node"]:
     """Walk every smooth Call (``s``/``te``/``ti``/``t2``) in ``expanded``
     and collect a ``{deparsed_text: ast_node}`` map for every non-``Name``
@@ -3170,6 +3271,8 @@ def _apply_by_and_absorb(
     cls: str,
     term: list[str],
     raw_basis: _RawBasis | None = None,
+    pre_scaled: bool = False,
+    C_source: np.ndarray | None = None,
 ) -> list[SmoothBlock]:
     """Apply mgcv's smoothCon post-processing:
     scale.penalty → by-handling → absorb.cons → SmoothBlock(s).
@@ -3184,9 +3287,30 @@ def _apply_by_and_absorb(
     `_RawBasis` subclass here so `block.spec.predict_mat(new_data)` reproduces
     the same scale.penalty-free design rows the fit used (the by-mask and
     absorb-rotation steps are layered on automatically).
+
+    ``pre_scaled=True`` skips ``_scale_penalty`` — used by the id-linkage
+    path, where mgcv rescales S against the POOLED basis-setup X *before*
+    replacing X with the own-data evaluation (smooth.r:3870-3877: doing it
+    per-smooth would give linked terms "the same basis, but different
+    penalties").
+
+    ``C_source`` overrides the matrix whose column sums define the
+    sum-to-zero constraint. mgcv computes ``sm$C`` from the constructor's
+    X (smooth.r:3848-3851) *before* the dataX replacement, so id-linked
+    smooths are all constrained against the pooled-construction X — the
+    id path passes that pooled X here. Default: the (per-level pre-by) X
+    itself, the non-id behavior.
     """
     S_list = [(S + S.T) / 2.0 for S in S_list]
-    S_list = _scale_penalty(X, S_list)
+    _id_cap = _ID_RAW_CAPTURE.get()
+    if _id_cap is not None:
+        # id-linked construction pass (mgcv smoothCon's n=/dataX= path):
+        # hand the constructor output back just before scale.penalty/by/
+        # absorb — the caller re-enters per linked smooth.
+        _id_cap.update(X=X, S=S_list, raw=raw_basis, cls=cls)
+        return []
+    if not pre_scaled:
+        S_list = _scale_penalty(X, S_list)
 
     sparse_cons = _SPARSE_CONS_CV.get()
     by_expr = _smooth_by_expr(call)
@@ -3195,7 +3319,7 @@ def _apply_by_and_absorb(
         if sparse_cons == -1:
             X2, S2, T = _absorb_sweep_drop(X, S_list)
         else:
-            X2, S2, T = _absorb_sumzero(X, S_list)
+            X2, S2, T = _absorb_sumzero(X, S_list, C_source=C_source)
         spec = (
             BasisSpec(raw=raw_basis, by=None, absorb=T)
             if raw_basis is not None else None
@@ -3227,7 +3351,10 @@ def _apply_by_and_absorb(
                 # what current bam-F use cases need.)
                 X2, S2, T = _absorb_sweep_drop(X_lev, S_list)
             else:
-                X2, S2, T = _absorb_sumzero(X_lev, S_list, C_source=X)
+                X2, S2, T = _absorb_sumzero(
+                    X_lev, S_list,
+                    C_source=C_source if C_source is not None else X,
+                )
             label = f"{base_label}:{by_expr}{lev}"
             spec = (
                 BasisSpec(
@@ -7136,13 +7263,124 @@ def materialize_smooths(
             "not yet implemented"
         )
 
+    # ---- id pre-pass (mgcv gam.setup, mgcv.r:1199-1229) -------------------
+    # Repeat-id smooths are cloned from the first smooth with that id
+    # (same bs/k/m/xt; own term/by), and every smooth in a ≥2-member group
+    # builds its basis from the POOLED covariate values (idLinksBases=TRUE
+    # — smoothCon's n=/dataX= path), so linked terms share knots AND
+    # penalty scaling. The sp linkage itself (one λ per group, mgcv's L
+    # matrix) lives in the fitters.
+    calls = list(expanded.smooths)
+    id_groups: dict[str, list[int]] = {}
+    for i, c in enumerate(calls):
+        idv = _smooth_id_value(c)
+        if idv is not None:
+            id_groups.setdefault(idv, []).append(i)
+    id_groups = {k: v for k, v in id_groups.items() if len(v) >= 2}
+    call_group: dict[int, str] = {}
+    for idv, members in id_groups.items():
+        base_call = calls[members[0]]
+        for i in members:
+            call_group[i] = idv
+        for i in members[1:]:
+            calls[i] = _clone_smooth_spec(base_call, calls[i])
+    id_shared: dict[str, dict] = {}
+
+    def _dispatch_id_linked(idv: str, i: int) -> list[SmoothBlock]:
+        group = id_groups[idv]
+        base_call = calls[group[0]]
+        call_i = calls[i]
+        bs = (
+            None if base_call.fn in ("te", "ti", "t2")
+            else _smooth_bs(base_call)
+        )
+        if base_call.fn == "t2" or bs in ("fs", "sz"):
+            # t2's fit/predict-basis remap and fs/sz's factor-product
+            # bases don't fit the shared-raw-basis replay below; refuse
+            # rather than link with unshared bases (a different model).
+            what = "t2" if base_call.fn == "t2" else f"bs={bs!r}"
+            raise NotImplementedError(
+                f"{_smooth_label(call_i)}: id= linkage across {what} "
+                "smooths is not implemented (basis sharing for this "
+                "class is not ported)."
+            )
+        if bs == "re":
+            # Indicator basis — no knots to share. Identical level sets
+            # give identical bases, so construct each member normally and
+            # let the fitters link the sp's; differing level sets would
+            # need mgcv's pooled (union-level) basis.
+            base_levels = [
+                _factor_levels(data[v]) for v in _smooth_term_vars(base_call)
+            ]
+            my_levels = [
+                _factor_levels(data[v]) for v in _smooth_term_vars(call_i)
+            ]
+            if my_levels != base_levels:
+                raise NotImplementedError(
+                    f"{_smooth_label(call_i)}: id-linked bs='re' smooths "
+                    "must have identical factor levels (pooled-level "
+                    "bases are not ported)."
+                )
+            return _dispatch(call_i, data)
+        rec = id_shared.get(idv)
+        if rec is None:
+            basis_frame = _id_basis_frame([calls[j] for j in group], data)
+            cap: dict = {}
+            cap_token = _ID_RAW_CAPTURE.set(cap)
+            try:
+                _dispatch(base_call, basis_frame)
+            finally:
+                _ID_RAW_CAPTURE.reset(cap_token)
+            if "X" not in cap or cap.get("raw") is None:
+                raise NotImplementedError(
+                    f"{_smooth_label(base_call)}: id= linkage is not "
+                    "implemented for this smooth class (constructor does "
+                    "not expose a shareable raw basis)."
+                )
+            # mgcv rescales S against the pooled-construction X *before*
+            # the dataX replacement (smooth.r:3870-3877) so all linked
+            # smooths carry identical penalties.
+            cap["S_scaled"] = _scale_penalty(cap["X"], cap["S"])
+            rec = id_shared[idv] = cap
+        base_vars = _smooth_term_vars(base_call)
+        my_vars = _smooth_term_vars(call_i)
+        eval_frame = pl.DataFrame(
+            [data[mv].rename(bv) for mv, bv in zip(my_vars, base_vars)]
+        )
+        X_i = np.asarray(rec["raw"].eval(eval_frame), dtype=float)
+        raw_i = (
+            rec["raw"] if my_vars == base_vars
+            else _RenamedRawBasis(
+                raw=rec["raw"], rename=dict(zip(my_vars, base_vars)),
+            )
+        )
+        S_i = [np.array(S, dtype=float, copy=True) for S in rec["S_scaled"]]
+        # ``C_source=rec["X"]``: mgcv fixes the sum-to-zero constraint from
+        # the pooled-construction X (smooth.r:3848) before the dataX
+        # replacement, so every linked smooth absorbs against the SAME
+        # constraint vector — without this the absorbed bases differ
+        # non-orthogonally and log|H+S|/log|S|+ (hence the REML score)
+        # shift by a constant even though the fit is identical.
+        return _apply_by_and_absorb(
+            call_i, data, X_i, S_i, rec["cls"], my_vars,
+            raw_basis=raw_i, pre_scaled=True, C_source=rec["X"],
+        )
+
     token = _SPARSE_CONS_CV.set(int(sparse_cons))
     tero_token = _TERO_CV.set(bool(tero))
     try:
         out: list[list[SmoothBlock]] = []
-        for call in expanded.smooths:
+        for i, call in enumerate(calls):
             mvars = _smooth_matrix_vars(call, data)
-            if mvars:
+            if i in call_group:
+                if mvars:
+                    raise NotImplementedError(
+                        f"{_smooth_label(call)}: id= linkage with "
+                        "matrix-argument (summation convention) smooths "
+                        "is not implemented."
+                    )
+                blocks = _dispatch_id_linked(call_group[i], i)
+            elif mvars:
                 long_data, n_orig, m = long_form_view(data, mvars)
                 blocks = _dispatch(call, long_data, matrix_arg=True)
                 blocks = _summation_apply_blocks(blocks, n_orig, m, mvars)

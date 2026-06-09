@@ -2020,17 +2020,142 @@ def test_full_rank_fit_reports_p_and_does_not_warn():
     assert not any("rank deficient" in str(w.message) for w in wlist)
 
 
-def test_smooth_id_kwarg_raises():
-    """mgcv's id= shares one λ across smooths; hea has no L-matrix layer,
-    so silently fitting independent λ's would be a different model."""
-    rng = np.random.default_rng(0)
-    n = 80
-    x1 = rng.uniform(0, 1, n)
-    z = rng.uniform(0, 1, n)
-    y = np.sin(2 * np.pi * z) + rng.normal(0, 0.3, n)
-    df = pl.DataFrame({"x1": x1, "z": z, "y": y})
+def _id_linked_data() -> pl.DataFrame:
+    """Two covariates on *different ranges* — the acid test for id basis
+    sharing (pooled knots over [0, 3] differ from each smooth's own)."""
+    rng = np.random.default_rng(13)
+    n = 250
+    x0 = rng.uniform(0, 1, n)
+    x1 = rng.uniform(0, 3, n)
+    y = np.sin(2 * np.pi * x0) + np.sin(2 * np.pi * x1 / 3) \
+        + rng.normal(0, 0.35, n)
+    return pl.DataFrame({"x0": x0, "x1": x1, "y": y})
+
+
+@pytest.mark.parametrize(
+    "formula, exp_sp, exp_edf, exp_reml",
+    [
+        # mgcv references on the exact _id_linked_data() CSV:
+        #   gam(y ~ s(x0, bs=..., id=1) + s(x1, bs=..., id=1), method="REML")
+        ("y ~ s(x0, bs='cr', id=1) + s(x1, bs='cr', id=1)",
+         2.73138803, (5.388691, 7.840385), 111.9803343),
+        ("y ~ s(x0, id=1) + s(x1, id=1)",          # tp (default basis)
+         0.000950795685, (4.156817, 8.746249), 116.2335752),
+    ],
+)
+def test_id_links_smoothing_parameters_matches_mgcv(
+    formula, exp_sp, exp_edf, exp_reml,
+):
+    """mgcv id= semantics: ONE working λ shared across the linked smooths
+    (L-matrix), bases built from POOLED covariate values (idLinksBases),
+    penalties rescaled and constrained against the pooled construction —
+    sp, per-smooth edf, and the REML score all pin to mgcv."""
+    m = gam(formula, _id_linked_data(), method="REML")
+    assert len(m.sp) == 1                 # working sp (mgcv's m$sp)
+    assert len(m._slots) == 2             # two penalties share it
+    np.testing.assert_allclose(np.exp(m._rho_hat), [m.sp[0]] * 2, rtol=1e-12)
+    np.testing.assert_allclose(m.sp[0], exp_sp, rtol=1e-4)
+    np.testing.assert_allclose(
+        list(m.edf_by_smooth.values()), exp_edf, rtol=1e-4,
+    )
+    np.testing.assert_allclose(m.REML_criterion / 2, exp_reml, rtol=1e-6)
+    # The shared raw basis must replay at predict time (renamed view for
+    # the second smooth).
+    pred = m.predict(_id_linked_data().head(40))["fit"].to_numpy()
+    np.testing.assert_allclose(pred, m.fitted[:40], rtol=1e-10)
+
+
+def test_id_by_factor_single_lambda_matches_mgcv():
+    """``s(x2, by=fac, id=1)``: all by-level blocks share one λ — the
+    canonical id idiom (mgcv gam.models docs; fixture mgcv_0080's formula).
+    mgcv reference: sp=(0.0133409281, 0.0206449404), full.sp repeats the
+    first across the three level blocks; -REML=189.4203017,
+    scale=0.15601042."""
+    rng = np.random.default_rng(5)
+    n = 300
+    x2 = rng.uniform(0, 1, n)
+    x0 = rng.uniform(0, 1, n)
+    fac = rng.integers(1, 4, n)
+    fl = np.array([0.0, 1.0, 2.0])[fac - 1]
+    amp = np.where(fac == 1, 1.0, np.where(fac == 2, 1.5, 0.5))
+    y = fl + amp * np.sin(2 * np.pi * x2) + np.cos(2 * np.pi * x0) \
+        + rng.normal(0, 0.4, n)
+    df = pl.DataFrame({
+        "x2": x2, "x0": x0, "fac": [f"f{i}" for i in fac], "y": y,
+    }).with_columns(pl.col("fac").cast(pl.Enum(["f1", "f2", "f3"])))
+    m = gam("y ~ fac + s(x2, by=fac, id=1) + s(x0)", df, method="REML")
+    assert len(m.sp) == 2 and len(m._slots) == 4
+    np.testing.assert_allclose(
+        m.sp, [0.0133409281, 0.0206449404], rtol=1e-4,
+    )
+    np.testing.assert_allclose(            # full.sp expansion
+        np.exp(m._rho_hat),
+        [m.sp[0], m.sp[0], m.sp[0], m.sp[1]], rtol=1e-12,
+    )
+    np.testing.assert_allclose(
+        list(m.edf_by_smooth.values()),
+        [5.9821444, 5.9008228, 5.7796811, 6.4424672], rtol=1e-4,
+    )
+    np.testing.assert_allclose(m.REML_criterion / 2, 189.4203017, rtol=1e-6)
+    np.testing.assert_allclose(m.sigma_squared, 0.15601042, rtol=1e-5)
+
+
+def test_id_tensor_smooths_match_mgcv():
+    """id across te() smooths links pairwise (1st penalty ↔ 1st, 2nd ↔
+    2nd) with pooled marginal bases. mgcv reference: sp[0]=0.1522418706,
+    sp[1] on the flat λ→∞ tail (mgcv 3.58e6 — only its order of magnitude
+    is determined); -REML=77.67269936; per-smooth edf 8.760963/8.7305329;
+    scale 0.090709176."""
+    rng = np.random.default_rng(21)
+    n = 220
+    x0, x1 = rng.uniform(0, 1, n), rng.uniform(0, 1, n)
+    z, u = rng.uniform(0, 1, n), rng.uniform(0, 1, n)
+    y = (np.sin(2 * np.pi * x0) * np.cos(np.pi * z)
+         + 0.8 * np.sin(2 * np.pi * x1) * np.cos(np.pi * u)
+         + rng.normal(0, 0.3, n))
+    df = pl.DataFrame({"x0": x0, "x1": x1, "z": z, "u": u, "y": y})
+    m = gam("y ~ te(x0, z, id=1) + te(x1, u, id=1)", df, method="REML")
+    assert len(m.sp) == 2 and len(m._slots) == 4
+    np.testing.assert_allclose(m.sp[0], 0.1522418706, rtol=1e-4)
+    assert m.sp[1] > 1e5                  # flat saturation tail
+    np.testing.assert_allclose(
+        list(m.edf_by_smooth.values()), [8.760963, 8.7305329], rtol=1e-4,
+    )
+    np.testing.assert_allclose(m.REML_criterion / 2, 77.67269936, rtol=1e-6)
+    np.testing.assert_allclose(m.sigma_squared, 0.090709176, rtol=1e-5)
+
+
+def test_id_fixed_sp_takes_working_length():
+    """``sp=`` supplies the *working* parameters (mgcv semantics): one
+    value drives both linked penalties. mgcv reference at sp=2.0:
+    sum(edf)=14.594997."""
+    d = _id_linked_data()
+    m = gam("y ~ s(x0, bs='cr', id=1) + s(x1, bs='cr', id=1)", d, sp=[2.0])
+    np.testing.assert_allclose(m.edf_total, 14.594997, rtol=1e-5)
+    with pytest.raises(ValueError, match="length 1"):
+        gam("y ~ s(x0, bs='cr', id=1) + s(x1, bs='cr', id=1)", d,
+            sp=[2.0, 3.0])
+
+
+def test_id_singleton_is_noop():
+    """An id used by a single smooth links nothing — same model as no id."""
+    d = _id_linked_data()
+    m1 = gam("y ~ s(x0, id=9) + s(x1)", d, method="REML")
+    m0 = gam("y ~ s(x0) + s(x1)", d, method="REML")
+    assert len(m1.sp) == 2
+    np.testing.assert_allclose(m1.sp, m0.sp, rtol=1e-10)
+    np.testing.assert_allclose(
+        m1.REML_criterion, m0.REML_criterion, rtol=1e-12,
+    )
+
+
+def test_bam_still_rejects_id():
+    """bam has no L-matrix layer yet — must refuse rather than silently
+    fit independent λ's."""
+    from hea.models.bam import bam
+    d = _id_linked_data()
     with pytest.raises(NotImplementedError, match="id="):
-        gam("y ~ s(x1, id=1) + s(z, id=1)", df, method="REML")
+        bam("y ~ s(x0, id=1) + s(x1, id=1)", d)
 
 
 def test_sz_id_kwarg_still_allowed():
