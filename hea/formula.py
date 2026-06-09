@@ -5312,6 +5312,190 @@ def _build_ds_smooth(
     )
 
 
+# ---- sos: spline on the sphere ----------------------------------------------
+#
+# Port of mgcv's smooth.construct.sos.smooth.spec — an isotropic spline of a
+# scalar response over positions on S² (lat, long in degrees), based on
+# Wendelberger (1981) / Wahba (1981). Shares ds's low-rank reduction
+# (_lowrank_kernel_reduce); the kernel is the geodesic reproducing kernel
+# (makeR), order m ∈ {−2,−1,0,1,2,3,4} (default 0). The m=0 kernel (mgcv's
+# C rksos series) is the closed form via the dilogarithm derived below.
+
+
+def _rksos(z: np.ndarray) -> np.ndarray:
+    """mgcv's `rksos` (m=0 sphere kernel), as a dilogarithm closed form.
+    z = cos(geodesic angle). Verified to ≤3e-10 vs mgcv's C series. With
+    ``W = (1−z)/2`` and ``Li2(x) = scipy.special.spence(1−x)``:
+      z>0 : 1 − log(1−W)·log(W) − Li2(W);  z≤0 : 1 − π²/6 + Li2(1−W);  z≥1 : 1.
+    """
+    from scipy.special import spence
+    z = np.clip(np.asarray(z, dtype=float), -1.0, 1.0)
+    W = (1.0 - z) / 2.0
+    rk = np.empty(z.shape, dtype=float)
+    m_lo = z <= 0.0
+    rk[m_lo] = 1.0 - np.pi ** 2 / 6.0 + spence(W[m_lo])        # Li2(1−W)
+    m_mid = (z > 0.0) & (z < 1.0)
+    Wm = W[m_mid]
+    rk[m_mid] = 1.0 - np.log(1.0 - Wm) * np.log(Wm) - spence(1.0 - Wm)  # Li2(W)
+    rk[z >= 1.0] = 1.0
+    return rk
+
+
+def _makeR(
+    la: np.ndarray, lo: np.ndarray, lak: np.ndarray, lok: np.ndarray, m: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """mgcv's `makeR`: geodesic reproducing-kernel matrix between points
+    (la, lo) and knots (lak, lok) (degrees), plus the null-space bases at each
+    (``attr T``/``Tc``). Returns ``(R (n,nk), T_la (n,p), T_lak (nk,p))`` with
+    p = 4 for m=−1 (sphere linears) else 1."""
+    p180 = np.pi / 180.0
+    la_r = np.asarray(la, dtype=float) * p180
+    lo_r = np.asarray(lo, dtype=float) * p180
+    lak_r = np.asarray(lak, dtype=float) * p180
+    lok_r = np.asarray(lok, dtype=float) * p180
+    v = (np.sin(la_r)[:, None] * np.sin(lak_r)[None, :]
+         + np.cos(la_r)[:, None] * np.cos(lak_r)[None, :]
+         * np.cos(lo_r[:, None] - lok_r[None, :]))
+    v = np.clip(v, -1.0, 1.0)
+    gamma = np.arccos(v)
+
+    def _tcols(lar, lor):
+        if m == -1:
+            zc = np.sin(lar)
+            xc = np.cos(lar) * np.sin(lor)
+            yc = np.cos(lar) * np.cos(lor)
+            return np.column_stack([np.ones_like(zc), xc, yc, zc])
+        return np.ones((len(lar), 1))
+
+    t_la = _tcols(la_r, lo_r)
+    t_lak = _tcols(lak_r, lok_r)
+    if m == -2:
+        zz = 2.0 * np.sin(gamma / 2.0)
+        zz = np.maximum(zz, np.finfo(float).tiny * 10)
+        return -zz, t_la, t_lak
+    if m == -1:
+        zz = 2.0 * np.sin(gamma / 2.0)
+        zz = np.maximum(zz, np.finfo(float).tiny * 10)
+        return zz * zz * np.log(zz) / (8.0 * np.pi), t_la, t_lak
+    if m == 0:
+        return _rksos(v) / (4.0 * np.pi), t_la, t_lak
+    # m >= 1: closed-form q_m in W = (1−cosγ)/2
+    zz = np.maximum(1.0 - v, np.finfo(float).eps * 1e-4)
+    W = zz / 2.0
+    C = np.sqrt(W)
+    A = np.log(1.0 + 1.0 / C)
+    C = C * 2.0
+    if m == 1:
+        q = 2.0 * A * W - C + 1.0
+        R = (q - 0.5) / (2.0 * np.pi)
+    elif m == 2:
+        W2 = W * W
+        q = A * (6.0 * W2 - 2.0 * W) - 3.0 * C * W + 3.0 * W + 0.5
+        R = (q / 2.0 - 1.0 / 6.0) / (2.0 * np.pi)
+    elif m == 3:
+        W2 = W * W
+        W3 = W2 * W
+        q = (A * (60.0 * W3 - 36.0 * W2) + 30.0 * W2
+             + C * (8.0 * W - 30.0 * W2) - 3.0 * W + 1.0) / 3.0
+        R = (q / 6.0 - 1.0 / 24.0) / (2.0 * np.pi)
+    else:  # m == 4
+        W2 = W * W
+        W3 = W2 * W
+        W4 = W3 * W
+        q = (A * (70.0 * W4 - 60.0 * W3 + 6.0 * W2) + 35.0 * W3 * (1.0 - C)
+             + C * 55.0 * W2 / 3.0 - 12.5 * W2 - W / 3.0 + 0.25)
+        R = (q / 24.0 - 1.0 / 120.0) / (2.0 * np.pi)
+    return R, t_la, t_lak
+
+
+def _sos_order_m(call: Call) -> int:
+    """sos penalty order m (single int): default 0; <−2 → −1; >4 → 4."""
+    m_src = call.kwargs.get("m")
+    if isinstance(m_src, Literal) and m_src.kind == "num":
+        m = int(round(m_src.value))
+    else:
+        m = 0
+    if m < -2:
+        m = -1
+    if m > 4:
+        m = 4
+    return m
+
+
+def _sos_default_k(call: Call) -> int:
+    k_src = call.kwargs.get("k")
+    if isinstance(k_src, Literal) and k_src.kind == "num":
+        return int(k_src.value)
+    return 50
+
+
+@dataclass(slots=True)
+class _SOSRawBasis(_RawBasis):
+    """`smooth.construct.sos.smooth.spec` — spline on the sphere (predict)."""
+    term: list[str]
+    la_k: np.ndarray
+    lo_k: np.ndarray
+    UZ: np.ndarray
+    m: int
+    xc_scale: np.ndarray
+
+    def eval(self, data: pl.DataFrame) -> np.ndarray:
+        la = data[self.term[0]].to_numpy().astype(float)
+        lo = data[self.term[1]].to_numpy().astype(float)
+        R, t_la, _ = _makeR(la, lo, self.la_k, self.lo_k, self.m)
+        X = np.hstack([R @ self.UZ, t_la])
+        return X * self.xc_scale
+
+
+def _sos_raw(
+    call: Call, data: pl.DataFrame, term: list[str],
+    knots: dict | None = None, max_knots: int = 2000,
+) -> tuple[np.ndarray, list[np.ndarray], _SOSRawBasis]:
+    if len(term) != 2:
+        raise ValueError('bs="sos" needs exactly 2 covariates (lat, long)')
+    la = data[term[0]].to_numpy().astype(float)
+    lo = data[term[1]].to_numpy().astype(float)
+    m = _sos_order_m(call)
+    kdict = knots or {}
+    kla, klo = kdict.get(term[0]), kdict.get(term[1])
+    if kla is not None and klo is not None:
+        la_k = np.asarray(kla, dtype=float).ravel()
+        lo_k = np.asarray(klo, dtype=float).ravel()
+        if la_k.size != lo_k.size:
+            raise ValueError("sos knots: components must have the same length")
+    else:
+        pts = np.unique(np.column_stack([la, lo]), axis=0)
+        if pts.shape[0] > max_knots:
+            pts = pts[:max_knots]
+        la_k, lo_k = pts[:, 0], pts[:, 1]
+    k = _sos_default_k(call)
+    R_kk, _t, T_kk = _makeR(la_k, lo_k, la_k, lo_k, m)
+    S, UZ, _nd, _rank = _lowrank_kernel_reduce(R_kk, T_kk, k)
+    R_xk, T_x, _ = _makeR(la, lo, la_k, lo_k, m)
+    X = np.hstack([R_xk @ UZ, T_x])
+    # mgcv column scaling: divide each col by its sd, with the smallest-sd
+    # column(s) (incl. the constant null-space col, sd=0) left at scale 1.
+    xs = X.std(axis=0, ddof=1)
+    xs[xs == xs.min()] = 1.0
+    xs = 1.0 / xs
+    X = X * xs
+    S = S * xs[:, None] * xs[None, :]
+    raw = _SOSRawBasis(
+        term=list(term), la_k=la_k, lo_k=lo_k, UZ=UZ, m=m, xc_scale=xs)
+    return X, [S], raw
+
+
+def _build_sos_smooth(
+    call: Call, data: pl.DataFrame, knots: dict | None = None,
+) -> list[SmoothBlock]:
+    """Build a spline on the sphere (`bs="sos"`) — mgcv smooth.construct.sos."""
+    term = _smooth_term_vars(call)
+    X, S_list, raw = _sos_raw(call, data, term, knots=knots)
+    return _apply_by_and_absorb(
+        call, data, X, S_list, "sos.smooth", term, raw_basis=raw,
+    )
+
+
 # ---- fs: factor-smooth interaction ------------------------------------------
 #
 # mgcv's `smooth.construct.fs.smooth.spec` builds one base smooth on the
@@ -6859,6 +7043,7 @@ def materialize_smooths(
         if bs == "tp":   return _build_tp_smooth(call, d)
         if bs == "ts":   return _build_ts_smooth(call, d)
         if bs == "ds":   return _build_ds_smooth(call, d, knots=knots)
+        if bs == "sos":  return _build_sos_smooth(call, d, knots=knots)
         if bs == "ps":   return _build_ps_smooth(call, d, knots=knots)
         if bs == "cp":   return _build_cp_smooth(call, d, knots=knots)
         if bs == "bs":   return _build_bs_smooth(call, d, knots=knots)

@@ -390,6 +390,39 @@ def test_duchon_spline_matches_mgcv(formula):
     assert fit.sum() == pytest.approx(refsum, abs=1e-4)
 
 
+# --- sos (spline on the sphere, Phase 2 Tier 2) ------------------------------
+# The intrinsic sphere smoother. Default m=0 uses the dilogarithm kernel (mgcv's
+# C rksos, ported as a closed form via scipy.special.spence); m=1..4 are
+# closed-form. Non-grid lat/long points (deg).
+_SI = np.arange(100)
+_SLA = -90 + 180 * (((_SI + 1) * np.sqrt(2)) % 1)
+_SLO = -180 + 360 * (((_SI + 1) * np.sqrt(3)) % 1)
+_SOSRESP = (np.sin(_SLA * np.pi / 180) + np.cos(_SLO * np.pi / 180)
+            + 0.3 * np.sin(2 * _SLA * np.pi / 180))
+_DSOS = pl.DataFrame({"la": _SLA, "lo": _SLO, "resp": _SOSRESP})
+
+# mgcv gam(resp~s(la,lo,bs="sos",m=<m>,k=30), method="REML"): (first 6, sum).
+_SOS_REF = {
+    0: ([-0.305692179, 2.180044305, -1.419174683, -0.1965701097, -0.5825114232,
+         0.7050912758], 0.1032882204),
+    1: ([-0.2999685876, 2.200354645, -1.419732277, -0.1657718073, -0.5563202624,
+         0.6917979824], 0.1032882204),
+    2: ([-0.3071683682, 2.206072393, -1.426163737, -0.1890717838, -0.5646068575,
+         0.7029232916], 0.1032882204),
+}
+
+
+@pytest.mark.parametrize("m", [0, 1, 2])
+def test_sos_matches_mgcv(m):
+    """sos incl. the DEFAULT order m=0 (dilogarithm kernel) and closed forms."""
+    ref6, refsum = _SOS_REF[m]
+    fit = np.asarray(
+        gam(f'resp~s(la,lo,bs="sos",m={m},k=30)', _DSOS, method="REML")
+        .fitted_values, dtype=float).ravel()
+    assert np.allclose(fit[:6], np.array(ref6), atol=1e-5, rtol=0)
+    assert fit.sum() == pytest.approx(refsum, abs=1e-4)
+
+
 @pytest.mark.parametrize("discrete", [False, True])
 def test_bam_knots_passthrough_both_paths(discrete):
     """knots= must reach the builder on BOTH bam materialize_smooths sites."""
