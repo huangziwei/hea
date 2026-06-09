@@ -1471,19 +1471,22 @@ def _eval_call(call: Call, data: pl.DataFrame):
         return _NumBlock(values=cols, suffixes=suffixes, label=label)
 
     if fn == "harmonic":
-        # hea-native periodic basis: K cos/sin harmonic pairs at an explicit
-        # period (the trig sibling of poly/bs/ns; see _harmonic_basis). K and
-        # period take positional — harmonic(x, K, period) — or keyword forms.
+        # hea-native periodic basis: k cos/sin harmonic pairs at an explicit
+        # period (the trig sibling of poly/bs/ns; see _harmonic_basis). The
+        # count and period take positional — harmonic(x, k, period) — or
+        # keyword forms. The count keyword is `k` (canonical, matches
+        # pycircstat2) or `K` (forecast spelling); `k` wins if both are given.
         # period must be a positive scalar (e.g. 12 or 2*pi); hea has no ts
         # frequency to infer it from, so it has no default.
         v = _eval_numeric(call.args[0], data)
-        k_node = call.args[1] if len(call.args) >= 2 else call.kwargs.get("K")
+        k_node = (call.args[1] if len(call.args) >= 2
+                  else call.kwargs.get("k", call.kwargs.get("K")))
         if not (isinstance(k_node, Literal) and k_node.kind == "num") \
                 or float(k_node.value) != int(k_node.value) \
                 or int(k_node.value) < 1:
             got = None if k_node is None else getattr(k_node, "value", k_node)
             raise ValueError(
-                f"harmonic(): K must be a positive integer, got {got!r}")
+                f"harmonic(): k must be a positive integer, got {got!r}")
         K = int(k_node.value)
         p_node = call.args[2] if len(call.args) >= 3 else call.kwargs.get("period")
         if p_node is None:

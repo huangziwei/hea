@@ -93,11 +93,16 @@ def test_harmonic_equals_explicit_cos_sin_terms():
 
 
 def test_harmonic_positional_and_keyword_forms_agree():
-    a = lm("y ~ harmonic(x, 2, 12)", _DF)           # all positional
-    b = lm("y ~ harmonic(x, 2, period=12)", _DF)    # period keyword
-    c = lm("y ~ harmonic(x, K=2, period=12)", _DF)  # all keyword
-    np.testing.assert_allclose(np.asarray(a.coef), np.asarray(b.coef))
-    np.testing.assert_allclose(np.asarray(a.coef), np.asarray(c.coef))
+    # the count keyword accepts both `k` (canonical, pycircstat2) and `K`
+    # (forecast spelling); all forms give the same fit.
+    a = lm("y ~ harmonic(x, 2, 12)", _DF)               # all positional
+    for f in (
+        "y ~ harmonic(x, 2, period=12)",                # period keyword
+        "y ~ harmonic(x, k=2, period=12)",              # lowercase k
+        "y ~ harmonic(x, K=2, period=12)",              # capital K
+    ):
+        np.testing.assert_allclose(
+            np.asarray(lm(f, _DF).coef), np.asarray(a.coef))
 
 
 def test_harmonic_period_2pi_angular():
