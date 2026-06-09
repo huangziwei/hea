@@ -3569,6 +3569,45 @@ def _build_cr_smooth(
     )
 
 
+def _shrink_null_penalty(
+    S: np.ndarray, null_dim: int, cascade: bool, shrink: float = 0.1,
+) -> np.ndarray:
+    """mgcv shrinkage (``attr(object,'shrink')=0.1``): lift S's null-space
+    eigenvalues so the whole smooth is penalised/shrinkable — the cs/ts bases.
+
+    R's ``eigen`` is descending, numpy's ``eigh`` ascending, so the null space
+    is the ``null_dim`` SMALLEST eigenvalues (``w[:null_dim]``) and the smallest
+    positive is ``w[null_dim]``. ``cascade`` (cr/cs rule, null_dim=2) sets the
+    two null eigenvalues to λ·shrink and λ·shrink²; otherwise (tp/ts rule) all
+    ``null_dim`` null eigenvalues are set to λ·shrink.
+    """
+    w, V = np.linalg.eigh(0.5 * (S + S.T))     # ascending
+    lam = float(w[null_dim])                    # smallest positive eigenvalue
+    if cascade:
+        # mgcv cr: es$values[nk-1]<-es$values[nk-2]*s; es$values[nk]<-es$values[nk-1]*s
+        w[1] = lam * shrink
+        w[0] = w[1] * shrink
+    else:
+        w[:null_dim] = lam * shrink
+    return V @ (w[:, None] * V.T)
+
+
+def _build_cs_smooth(
+    call: Call, data: pl.DataFrame, knots: dict | None = None,
+) -> list[SmoothBlock]:
+    """`bs="cs"` — cubic regression spline with shrinkage (mgcv
+    smooth.construct.cs: cr + ``shrink=0.1`` on the 2-dim null space)."""
+    term = _smooth_term_vars(call)
+    kv = None if knots is None else knots.get(term[0])
+    X, S_list, knots_vec = _cr_raw(call, data, term, knots_vec=kv)
+    if S_list:  # un-fixed: cr null.space.dim = 2, cascade rule
+        S_list = [_shrink_null_penalty(S_list[0], null_dim=2, cascade=True)]
+    raw = _CRRawBasis(term=term[0], knots=knots_vec)
+    return _apply_by_and_absorb(
+        call, data, X, S_list, "cs.smooth", term, raw_basis=raw,
+    )
+
+
 # ---- cc (cyclic cubic regression spline) -----------------------------------
 #
 # Periodic variant of `cr`: knot 1 and knot nk are identified, so at the seam
@@ -3702,25 +3741,29 @@ def _cc_is_fixed(call: Call) -> bool:
     return False
 
 
-def _build_cc_smooth(
-    call: Call, data: pl.DataFrame, knots: dict | None = None,
-) -> list[SmoothBlock]:
-    term = _smooth_term_vars(call)
+def _cc_raw(
+    call: Call, data: pl.DataFrame, term: list[str] | None = None,
+    knots_vec: np.ndarray | None = None,
+) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, np.ndarray]:
+    """Bare cc basis — returns ``(X, S_list, knots, BD)``, pre-absorb/by.
+    Shared by ``_build_cc_smooth`` and the te/ti/t2 cc-margin path.
+
+    ``knots_vec`` (mgcv ``knots=list(term=...)``): length-2 pins the endpoints
+    and places the interior ADAPTIVELY via place.knots(c(lo,hi,x), nk) — NOT
+    evenly (that is the cp rule); a length-nk entry is verbatim (not sorted).
+    """
+    if term is None:
+        term = _smooth_term_vars(call)
     if len(term) != 1:
         raise ValueError("cc smooth must be 1D")
     x = data[term[0]].to_numpy().astype(float)
     nk = _cc_default_k(call)
     if nk < 4:
         nk = 4
-    # mgcv smooth.construct.cc.smooth.spec consumes knots=list(term=...): a
-    # length-2 entry pins the endpoints and places the interior ADAPTIVELY via
-    # place.knots(c(lo,hi,x), nk) — NOT evenly (that is the cp rule); a
-    # length-nk entry is used verbatim. mgcv does not sort the verbatim form.
-    kv = None if knots is None else knots.get(term[0])
-    if kv is None:
+    if knots_vec is None:
         kn = _cc_place_knots(x, nk)
     else:
-        kv = np.asarray(kv, dtype=float).ravel()
+        kv = np.asarray(knots_vec, dtype=float).ravel()
         if kv.size == 2:
             kn = _cc_place_knots(np.concatenate([kv, x]), nk)
         elif kv.size == nk:
@@ -3733,11 +3776,16 @@ def _build_cc_smooth(
     B, D = _cc_getBD(kn)
     BD = np.linalg.solve(B, D)
     X = _cc_basis(x, kn, BD)
-    if _cc_is_fixed(call):
-        S_list: list[np.ndarray] = []
-    else:
-        S = D.T @ BD
-        S_list = [S]
+    S_list: list[np.ndarray] = [] if _cc_is_fixed(call) else [D.T @ BD]
+    return X, S_list, kn, BD
+
+
+def _build_cc_smooth(
+    call: Call, data: pl.DataFrame, knots: dict | None = None,
+) -> list[SmoothBlock]:
+    term = _smooth_term_vars(call)
+    kv = None if knots is None else knots.get(term[0])
+    X, S_list, kn, BD = _cc_raw(call, data, term, knots_vec=kv)
     raw = _CCRawBasis(term=term[0], knots=kn, BD=BD)
     return _apply_by_and_absorb(
         call, data, X, S_list, "cc.smooth.spec", term, raw_basis=raw,
@@ -3851,24 +3899,27 @@ def _ps_penalty(k: int, m1: int) -> np.ndarray:
     return D.T @ D
 
 
-def _build_ps_smooth(
-    call: Call, data: pl.DataFrame, knots: dict | None = None,
-) -> list[SmoothBlock]:
-    term = _smooth_term_vars(call)
+def _ps_raw(
+    call: Call, data: pl.DataFrame, term: list[str] | None = None,
+    knots_vec: np.ndarray | None = None,
+) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, int]:
+    """Bare ps basis — returns ``(X, S_list, knots, m0)``, pre-absorb/by.
+    Shared by ``_build_ps_smooth`` and the te/ti/t2 ps-margin path.
+
+    ``knots_vec``: length-2 sets the [lo,hi] range (must cover data) fed into
+    the padded even-knot build; the full extended vector (k + m0 + 2) verbatim.
+    """
+    if term is None:
+        term = _smooth_term_vars(call)
     if len(term) != 1:
         raise ValueError('bs="ps" only handles 1D smooths')
     x = data[term[0]].to_numpy().astype(float)
     m = _ps_order_m(call)
     k = _ps_default_k(call, m[0])
-    # mgcv smooth.construct.ps.smooth.spec consumes knots=list(term=...): a
-    # length-2 entry sets the [lo,hi] range (must cover the data) fed into the
-    # padded even-knot construction; the full extended vector (length
-    # k + m0 + 2) is used verbatim.
-    kv = None if knots is None else knots.get(term[0])
-    if kv is None:
+    if knots_vec is None:
         kn = _ps_knots(x, m[0], k)
     else:
-        kv = np.asarray(kv, dtype=float).ravel()
+        kv = np.asarray(knots_vec, dtype=float).ravel()
         n_full = (k - m[0]) + 2 * m[0] + 2
         if kv.size == 2:
             lo, hi = float(np.min(kv)), float(np.max(kv))
@@ -3886,9 +3937,18 @@ def _build_ps_smooth(
             )
     X = _ps_basis(x, kn, m[0])
     S = _ps_penalty(k, m[1])
-    raw = _PSRawBasis(term=term[0], knots=kn, m0=m[0])
+    return X, [S], kn, m[0]
+
+
+def _build_ps_smooth(
+    call: Call, data: pl.DataFrame, knots: dict | None = None,
+) -> list[SmoothBlock]:
+    term = _smooth_term_vars(call)
+    kv = None if knots is None else knots.get(term[0])
+    X, S_list, kn, m0 = _ps_raw(call, data, term, knots_vec=kv)
+    raw = _PSRawBasis(term=term[0], knots=kn, m0=m0)
     return _apply_by_and_absorb(
-        call, data, X, [S], "pspline.smooth", term, raw_basis=raw,
+        call, data, X, S_list, "pspline.smooth", term, raw_basis=raw,
     )
 
 
@@ -4099,10 +4159,19 @@ def _bs_penalty(knots: np.ndarray, m0: int, m2: int) -> np.ndarray:
     return D.T @ W @ D
 
 
-def _build_bs_smooth(
-    call: Call, data: pl.DataFrame, knots: dict | None = None,
-) -> list[SmoothBlock]:
-    term = _smooth_term_vars(call)
+def _bs_raw(
+    call: Call, data: pl.DataFrame, term: list[str] | None = None,
+    knots_vec: np.ndarray | None = None,
+) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, int]:
+    """Bare bs basis — returns ``(X, S_list, knots, m0)``, pre-absorb/by.
+    Shared by ``_build_bs_smooth`` and the te/ti/t2 bs-margin path.
+
+    ``knots_vec``: length-2 → [lo,hi] range (must cover data), padded even-knot
+    build; length-4 → sorted boundary+interior span, NO pad; full vector
+    (nk + 2*m0) verbatim.
+    """
+    if term is None:
+        term = _smooth_term_vars(call)
     if len(term) != 1:
         raise ValueError('bs="bs" only handles 1D smooths')
     x = data[term[0]].to_numpy().astype(float)
@@ -4111,16 +4180,10 @@ def _build_bs_smooth(
     bs_dim = _bs_default_k(call, m0)
     nk = bs_dim - m0 + 1
     n_full = nk + 2 * m0
-    # mgcv smooth.construct.bs.smooth.spec consumes knots=list(term=...):
-    #   length 2  -> [lo,hi] range (must cover data), padded even-knot build;
-    #   length 4  -> sort; outer pair = boundary, inner pair span the interior;
-    #                build [boundary | interior | boundary] with NO pad;
-    #   full vec  -> verbatim (length nk + 2*m0).
-    kv = None if knots is None else knots.get(term[0])
-    if kv is None:
+    if knots_vec is None:
         kn = _bs_knots_eval(x, m0, bs_dim)
     else:
-        kv = np.asarray(kv, dtype=float).ravel()
+        kv = np.asarray(knots_vec, dtype=float).ravel()
         if kv.size == 2:
             lo, hi = float(np.min(kv)), float(np.max(kv))
             if lo > float(np.min(x)) or hi < float(np.max(x)):
@@ -4146,16 +4209,33 @@ def _build_bs_smooth(
             )
     X = _bs_design(x, kn, m0, deriv=0)
     S_list = [_bs_penalty(kn, m0, m2) for m2 in m[1:]]
+    return X, S_list, kn, m0
+
+
+def _build_bs_smooth(
+    call: Call, data: pl.DataFrame, knots: dict | None = None,
+) -> list[SmoothBlock]:
+    term = _smooth_term_vars(call)
+    kv = None if knots is None else knots.get(term[0])
+    X, S_list, kn, m0 = _bs_raw(call, data, term, knots_vec=kv)
     raw = _BSRawBasis(term=term[0], knots=kn, m0=m0)
     return _apply_by_and_absorb(
         call, data, X, S_list, "Bspline.smooth", term, raw_basis=raw,
     )
 
 
-def _build_cp_smooth(
-    call: Call, data: pl.DataFrame, knots: dict | None = None,
-) -> list[SmoothBlock]:
-    term = _smooth_term_vars(call)
+def _cp_raw(
+    call: Call, data: pl.DataFrame, term: list[str] | None = None,
+    knots_vec: np.ndarray | None = None,
+) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, int]:
+    """Bare cp basis — returns ``(X, S_list, knots, ord_)``, pre-absorb/by.
+    Shared by ``_build_cp_smooth`` and the te/ti/t2 cp-margin path.
+
+    ``knots_vec``: length-2 gives the period endpoints [lo,hi] over which the
+    nk knots are placed EVENLY (seq, range must cover data); length-nk verbatim.
+    """
+    if term is None:
+        term = _smooth_term_vars(call)
     if len(term) != 1:
         raise ValueError('bs="cp" only handles 1D smooths')
     x = data[term[0]].to_numpy().astype(float)
@@ -4165,15 +4245,10 @@ def _build_cp_smooth(
     if nk <= m[0]:
         raise ValueError(f"basis dim {bs_dim} too small for b-spline order {m[0]}")
     ord_ = m[0] + 2
-    # mgcv smooth.construct.cp.smooth.spec consumes knots=list(term=...): a
-    # length-2 entry gives the period endpoints [lo,hi] over which the nk knots
-    # are placed EVENLY (seq, not place.knots — the cc rule), and the range
-    # must cover the data; a length-nk entry is used verbatim.
-    kv = None if knots is None else knots.get(term[0])
-    if kv is None:
+    if knots_vec is None:
         kn = np.linspace(float(np.min(x)), float(np.max(x)), nk)
     else:
-        kv = np.asarray(kv, dtype=float).ravel()
+        kv = np.asarray(knots_vec, dtype=float).ravel()
         if kv.size == 2:
             lo, hi = float(np.min(kv)), float(np.max(kv))
             if lo > float(np.min(x)) or hi < float(np.max(x)):
@@ -4192,9 +4267,18 @@ def _build_cp_smooth(
     if m[1] > X.shape[1] - 1:
         raise ValueError("penalty order too high for basis dimension")
     S = _cp_penalty(X.shape[1], m[1])
+    return X, [S], kn, ord_
+
+
+def _build_cp_smooth(
+    call: Call, data: pl.DataFrame, knots: dict | None = None,
+) -> list[SmoothBlock]:
+    term = _smooth_term_vars(call)
+    kv = None if knots is None else knots.get(term[0])
+    X, S_list, kn, ord_ = _cp_raw(call, data, term, knots_vec=kv)
     raw = _CPRawBasis(term=term[0], knots=kn, ord_=ord_)
     return _apply_by_and_absorb(
-        call, data, X, [S], "cpspline.smooth", term, raw_basis=raw,
+        call, data, X, S_list, "cpspline.smooth", term, raw_basis=raw,
     )
 
 
@@ -5033,6 +5117,24 @@ def _build_tp_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     )
 
 
+def _build_ts_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
+    """`bs="ts"` — thin-plate spline with shrinkage (mgcv smooth.construct.ts:
+    tp + ``shrink=0.1`` on the M-dim polynomial null space). tp ignores knots,
+    so ts does too."""
+    term = _smooth_term_vars(call)
+    X_raw, S_list, M, k, _rank, state = _tp_raw(call, data, term)
+    # mgcv: es$values[(k-M+1):k] <- es$values[k-M]*0.1 — all M null directions
+    # set to 0.1 * smallest positive eigenvalue.
+    S_list = [_shrink_null_penalty(S_list[0], null_dim=M, cascade=False)]
+    raw = _TPRawBasis(
+        term=list(term), shift=state["shift"], Xu=state["Xu"],
+        m=state["m"], d=state["d"], M=M, k=k, UZ=state["UZ"], w=state["w"],
+    )
+    return _apply_by_and_absorb(
+        call, data, X_raw, S_list, "ts.smooth", term, raw_basis=raw,
+    )
+
+
 # ---- fs: factor-smooth interaction ------------------------------------------
 #
 # mgcv's `smooth.construct.fs.smooth.spec` builds one base smooth on the
@@ -5865,6 +5967,32 @@ def _te_build_margin_raw(
         def _predict(x_new: np.ndarray) -> np.ndarray:
             return _cr_basis(np.asarray(x_new, dtype=float), kn)
         return X, S_list, _predict, True, raw
+    if bs == "cc":
+        # cyclic cubic margin (noterp=True like cr — already nicely parameterised).
+        X, S_list, kn, BD = _cc_raw(mcall, data, term, knots_vec=knots_vec)
+        raw = _CCRawBasis(term=term[0], knots=kn, BD=BD)
+        def _predict(x_new: np.ndarray) -> np.ndarray:
+            return _cc_basis(np.asarray(x_new, dtype=float), kn, BD)
+        return X, S_list, _predict, True, raw
+    if bs == "cp":
+        # cyclic P-spline margin (noterp=False → np=TRUE SVD reparam applies).
+        X, S_list, kn, ord_ = _cp_raw(mcall, data, term, knots_vec=knots_vec)
+        raw = _CPRawBasis(term=term[0], knots=kn, ord_=ord_)
+        def _predict(x_new: np.ndarray) -> np.ndarray:
+            return _cp_basis(np.asarray(x_new, dtype=float), kn, ord_)
+        return X, S_list, _predict, False, raw
+    if bs == "ps":
+        X, S_list, kn, m0 = _ps_raw(mcall, data, term, knots_vec=knots_vec)
+        raw = _PSRawBasis(term=term[0], knots=kn, m0=m0)
+        def _predict(x_new: np.ndarray) -> np.ndarray:
+            return _ps_basis(np.asarray(x_new, dtype=float), kn, m0)
+        return X, S_list, _predict, False, raw
+    if bs == "bs":
+        X, S_list, kn, m0 = _bs_raw(mcall, data, term, knots_vec=knots_vec)
+        raw = _BSRawBasis(term=term[0], knots=kn, m0=m0)
+        def _predict(x_new: np.ndarray) -> np.ndarray:
+            return _bs_design(np.asarray(x_new, dtype=float), kn, m0, deriv=0)
+        return X, S_list, _predict, False, raw
     if bs == "tp":
         X, S_list, M, k, _rank, state = _tp_raw(mcall, data, term)
         raw = _TPRawBasis(
@@ -5883,53 +6011,27 @@ def _te_build_margin_raw(
 def _te_build_margin_centered(
     spec: dict, data: pl.DataFrame, knots_vec: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], object, bool, _RawBasis]:
-    """Build a centered margin (absorb.cons applied), returning
-    `(X, S_list, predict, noterp, raw)`. Equivalent to
+    """Centered margin = bare margin (:func:`_te_build_margin_raw`) + sum-to-zero
+    absorb, returning `(X, S_list, predict, noterp, raw)`. Equivalent to
     `smoothCon(..., absorb.cons=TRUE)[[1]]` but keeps the Z matrix so
-    `predict(x_new)` evaluates the raw basis at new points and applies
-    the same sum-to-zero rotation. ``raw`` chains the bare basis with
-    the post-multiplication ``Z`` for predict-time replay.
+    `predict(x_new)` evaluates the raw basis and applies the same rotation.
 
-    ``knots_vec`` overrides the cr margin's default knots (see
-    :func:`_te_build_margin_raw`); the centering/Z step is unaffected by it.
+    The centering (scale.penalty + mean-constraint Z) is basis-agnostic, so this
+    supports every basis the bare builder does; ``knots_vec`` is forwarded.
     """
-    mcall = _te_make_margin_call(spec)
-    bs = spec["bs"]
-    term = spec["term"]
-    if bs == "cr":
-        X_raw, S_raw, kn = _cr_raw(mcall, data, term, knots_vec=knots_vec)
-        S_sym = [(S + S.T) / 2.0 for S in S_raw]
-        S_scaled = _scale_penalty(X_raw, S_sym)
-        C = X_raw.mean(axis=0)
-        Q, _ = np.linalg.qr(C.reshape(-1, 1), mode="complete")
-        Z = Q[:, 1:]
-        X = X_raw @ Z
-        S_list = [Z.T @ S @ Z for S in S_scaled]
-        bare = _CRRawBasis(term=term[0], knots=kn)
-        raw = _LinearTransformRawBasis(inner=bare, M=Z)
-        def _predict(x_new: np.ndarray) -> np.ndarray:
-            return _cr_basis(np.asarray(x_new, dtype=float), kn) @ Z
-        return X, S_list, _predict, True, raw
-    if bs == "tp":
-        X_raw, S_raw, M, k, _rank, state = _tp_raw(mcall, data, term)
-        S_sym = [(S + S.T) / 2.0 for S in S_raw]
-        S_scaled = _scale_penalty(X_raw, S_sym)
-        C = X_raw.mean(axis=0)
-        Q, _ = np.linalg.qr(C.reshape(-1, 1), mode="complete")
-        Z = Q[:, 1:]
-        X = X_raw @ Z
-        S_list = [Z.T @ S @ Z for S in S_scaled]
-        bare = _TPRawBasis(
-            term=list(term), shift=state["shift"], Xu=state["Xu"],
-            m=state["m"], d=state["d"], M=M, k=k,
-            UZ=state["UZ"], w=state["w"],
-        )
-        raw = _LinearTransformRawBasis(inner=bare, M=Z)
-        def _predict(x_new: np.ndarray) -> np.ndarray:
-            df = pl.DataFrame({term[0]: np.asarray(x_new, dtype=float)})
-            return bare.eval(df) @ Z
-        return X, S_list, _predict, False, raw
-    raise NotImplementedError(f"ti/t2 centered margin with bs={bs!r} not yet supported")
+    X_raw, S_raw, predict_bare, noterp, bare = _te_build_margin_raw(
+        spec, data, knots_vec=knots_vec)
+    S_sym = [(S + S.T) / 2.0 for S in S_raw]
+    S_scaled = _scale_penalty(X_raw, S_sym)
+    C = X_raw.mean(axis=0)
+    Q, _ = np.linalg.qr(C.reshape(-1, 1), mode="complete")
+    Z = Q[:, 1:]
+    X = X_raw @ Z
+    S_list = [Z.T @ S @ Z for S in S_scaled]
+    raw = _LinearTransformRawBasis(inner=bare, M=Z)
+    def _predict(x_new: np.ndarray) -> np.ndarray:
+        return np.asarray(predict_bare(x_new)) @ Z
+    return X, S_list, _predict, noterp, raw
 
 
 def _te_reparam_margin(X: np.ndarray, S_list: list[np.ndarray], x_vals: np.ndarray,
@@ -6142,6 +6244,30 @@ def _t2_margin_raw_and_rank(
         # cr null.space.dim = 2 for un-shrunk cr.
         rank = X.shape[1] - 2
         raw = _CRRawBasis(term=term[0], knots=kn)
+        return X, S, rank, raw
+    if bs == "cc":
+        X, S_list, kn, BD = _cc_raw(mcall, data, term, knots_vec=knots_vec)
+        S = 0.5 * (S_list[0] + S_list[0].T)
+        rank = X.shape[1] - 1            # cc null.space.dim = 1
+        raw = _CCRawBasis(term=term[0], knots=kn, BD=BD)
+        return X, S, rank, raw
+    if bs == "cp":
+        X, S_list, kn, ord_ = _cp_raw(mcall, data, term, knots_vec=knots_vec)
+        S = 0.5 * (S_list[0] + S_list[0].T)
+        rank = X.shape[1] - 1            # cp null.space.dim = 1
+        raw = _CPRawBasis(term=term[0], knots=kn, ord_=ord_)
+        return X, S, rank, raw
+    if bs == "ps":
+        X, S_list, kn, m0 = _ps_raw(mcall, data, term, knots_vec=knots_vec)
+        S = 0.5 * (S_list[0] + S_list[0].T)
+        rank = X.shape[1] - _ps_order_m(mcall)[1]   # null.space.dim = penalty order
+        raw = _PSRawBasis(term=term[0], knots=kn, m0=m0)
+        return X, S, rank, raw
+    if bs == "bs":
+        X, S_list, kn, m0 = _bs_raw(mcall, data, term, knots_vec=knots_vec)
+        S = 0.5 * (S_list[0] + S_list[0].T)
+        rank = X.shape[1] - _bs_order_m(mcall)[1]   # null.space.dim = penalty order
+        raw = _BSRawBasis(term=term[0], knots=kn, m0=m0)
         return X, S, rank, raw
     if bs == "tp":
         X, S_list, M, k, rank, state = _tp_raw(mcall, data, term)
@@ -6551,8 +6677,10 @@ def materialize_smooths(
         bs = _smooth_bs(call)
         if bs == "re":   return _build_re_smooth(call, d)
         if bs == "cr":   return _build_cr_smooth(call, d, knots=knots)
+        if bs == "cs":   return _build_cs_smooth(call, d, knots=knots)
         if bs == "cc":   return _build_cc_smooth(call, d, knots=knots)
         if bs == "tp":   return _build_tp_smooth(call, d)
+        if bs == "ts":   return _build_ts_smooth(call, d)
         if bs == "ps":   return _build_ps_smooth(call, d, knots=knots)
         if bs == "cp":   return _build_cp_smooth(call, d, knots=knots)
         if bs == "bs":   return _build_bs_smooth(call, d, knots=knots)

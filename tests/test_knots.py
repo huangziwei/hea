@@ -62,6 +62,8 @@ MGCV_KNOTS = {
                 3.5903916041, 4.48798950513, 5.38558740615, 6.28318530718],
     # cr: verbatim (no length-2 form), length must equal k.
     "cr_verb": [1.0, 4.0, 6.5, 9.0, 11.0],
+    # cs (cr + shrinkage) reuses cr's verbatim knot rule.
+    "cs_verb": [1.0, 4.0, 6.5, 9.0, 11.0],
     # ps length-2: [lo,hi] range fed into the PADDED even-knot build (note the
     # -0.012 / 12.012 from the 0.1% pad mgcv applies to the supplied range too).
     "ps_len2": [-5.16514285714, -3.44742857143, -1.72971428571, -0.012,
@@ -86,6 +88,7 @@ KNOT_CASES = [
     ("cp_len2", 'y ~ s(xa, bs="cp", k=7)', DA, {"xa": [0.0, TWO_PI]}),
     ("cp_verb", 'y ~ s(xa, bs="cp", k=7)', DA, {"xa": list(np.linspace(0, TWO_PI, 8))}),
     ("cr_verb", 'y ~ s(xb, bs="cr", k=5)', DB, {"xb": [1.0, 4.0, 6.5, 9.0, 11.0]}),
+    ("cs_verb", 'y ~ s(xb, bs="cs", k=5)', DB, {"xb": [1.0, 4.0, 6.5, 9.0, 11.0]}),
     ("ps_len2", 'y ~ s(xb, bs="ps", k=10)', DB, {"xb": [0.0, 12.0]}),
     ("bs_len2", 'y ~ s(xb, bs="bs", k=10)', DB, {"xb": [0.0, 12.0]}),
     ("bs_len4", 'y ~ s(xb, bs="bs", k=10)', DB, {"xb": [0.0, 2.0, 10.0, 12.0]}),
@@ -272,16 +275,82 @@ def test_tensor_tp_margin_ignores_knots():
 
 
 def test_tensor_unsupported_margin_raises_not_silent():
-    # cc margins are unsupported in hea's te -> raise (loud), regardless of knots.
+    # a margin basis hea's te does not implement (gp) raises loudly, not silent.
     with pytest.raises(NotImplementedError):
-        materialize_smooths(
-            expand(parse('y ~ te(x, z, bs="cc")')), _DGRID, knots={"x": [0.0, 12.0]})
+        materialize_smooths(expand(parse('y ~ te(x, z, bs="gp")')), _DGRID)
 
 
 def test_tensor_unrelated_knots_ignored():
     blocks = materialize_smooths(
         expand(parse('y ~ te(x, z)')), _DGRID, knots={"zzz": [0.0, 1.0]})
     assert blocks
+
+
+# --- new tensor margin bases cc/cp/ps/bs (Phase 2, Tier 1) -------------------
+# Headline: a cyclic `cc` tensor margin reproduces mgcv with the supplied period.
+# Grid with x in (0, 2pi) so the cc/cp margins are meaningful.
+_J = np.arange(64)
+_TGX = 0.15 + (2 * np.pi - 0.3) * (_J % 8) / 7.0   # x in (0, 2pi)
+_TGZ = (_J // 8) / 7.0 * 10.0                       # z in [0, 10]
+_TGY = np.sin(_TGX) + np.cos(_TGZ / 3) + 0.4 * np.sin(_TGX) * _TGZ / 10
+_DTENS = pl.DataFrame({"x": _TGX, "z": _TGZ, "y": _TGY})
+
+# mgcv gam(y ~ te(x, z, bs=c(<m>,"tp")), knots=list(x=...), method="REML"):
+# margin -> (knots for x, first-6 fitted values, sum of fitted values)
+_TE_MARGIN_REF = {
+    "cc": ([0.0, 2 * np.pi], [1.170485472, 1.897275812, 1.946279596,
+            1.390922313, 0.6339380525, 0.07987115742], -3.067510149),
+    "cp": ([0.0, 2 * np.pi], [1.158396002, 1.857008723, 1.965038429,
+            1.428696211, 0.5922861809, 0.05574713466], -3.067510149),
+    "ps": ([0.0, 7.0], [1.15036304, 1.963036709, 1.920773823, 1.371115039,
+            0.6615983155, 0.133281978], -3.067510149),
+    "bs": ([0.0, 7.0], [1.150526902, 1.963300792, 1.921058023, 1.371374024,
+            0.6618215159, 0.1334866525], -3.067510149),
+}
+
+
+@pytest.mark.parametrize("margin", ["cc", "cp", "ps", "bs"])
+def test_te_new_margin_knots_match_mgcv(margin):
+    kn, ref6, refsum = _TE_MARGIN_REF[margin]
+    f = f'y ~ te(x, z, bs=c("{margin}","tp"))'
+    g = gam(f, _DTENS, knots={"x": kn}, method="REML")
+    g0 = gam(f, _DTENS, method="REML")
+    fit = np.asarray(g.fitted_values, dtype=float).ravel()
+    fit0 = np.asarray(g0.fitted_values, dtype=float).ravel()
+    assert np.sum(np.abs(fit - fit0)) > 1e-3       # margin knots took effect
+    assert np.allclose(fit[:6], np.array(ref6), atol=FIT_ATOL, rtol=0)
+    assert fit.sum() == pytest.approx(refsum, abs=1e-3)
+
+
+# --- standalone shrinkage bases ts / cs (Phase 2, Tier 1) --------------------
+# ts = tp + 0.1 null-space shrinkage; cs = cr + 0.1 shrinkage. Verify the fit
+# reproduces mgcv AND differs from the un-shrunk tp/cr base, so a missing- or
+# wrong-shrinkage regression is caught (the shrink effect ~7e-5 > the 1e-5 tol).
+_SX = np.linspace(0.0, 1.0, 40)
+_SY = np.sin(4 * _SX) + 0.5 * _SX + 0.2 * np.cos(8 * _SX)
+_DSHRINK = pl.DataFrame({"x": _SX, "y": _SY})
+
+# mgcv gam(y ~ s(x, bs=<b>, k=10), method="REML"): (first-6 fitted, sum, base bs)
+_SHRINK_REF = {
+    "cs": ([0.2050605341, 0.3080972801, 0.4081741552, 0.5023312884,
+            0.5876088086, 0.6612796069], 26.77717736, "cr"),
+    "ts": ([0.2046326916, 0.308104904, 0.408655978, 0.5028161393,
+            0.587536063, 0.66108276], 26.77717736, "tp"),
+}
+
+
+@pytest.mark.parametrize("bs", ["cs", "ts"])
+def test_shrinkage_basis_matches_mgcv(bs):
+    ref6, refsum, base = _SHRINK_REF[bs]
+    g = gam(f'y ~ s(x, bs="{bs}", k=10)', _DSHRINK, method="REML")
+    gbase = gam(f'y ~ s(x, bs="{base}", k=10)', _DSHRINK, method="REML")
+    fit = np.asarray(g.fitted_values, dtype=float).ravel()
+    fitb = np.asarray(gbase.fitted_values, dtype=float).ravel()
+    # shrinkage measurably changes the fit vs the un-shrunk base
+    assert np.sum(np.abs(fit - fitb)) > 1e-5
+    # and reproduces mgcv's shrinkage fit
+    assert np.allclose(fit[:6], np.array(ref6), atol=1e-5, rtol=0)
+    assert fit.sum() == pytest.approx(refsum, abs=1e-4)
 
 
 @pytest.mark.parametrize("discrete", [False, True])
