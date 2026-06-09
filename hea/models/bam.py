@@ -1671,6 +1671,7 @@ class bam(gam):
         ar_start: np.ndarray | list | None = None,
         discrete: bool = False,
         discrete_m: int | None = None,
+        knots: dict | None = None,
     ):
         # ``data`` may be a polars DataFrame OR a mapping of name → 1-D /
         # 2-D ndarray. 2-D entries become matrix columns for mgcv's
@@ -1691,6 +1692,14 @@ class bam(gam):
             )
         if not (np.isfinite(gamma) and gamma > 0):
             raise ValueError(f"gamma must be a positive finite number, got {gamma!r}")
+        if knots is not None and not isinstance(knots, dict):
+            raise TypeError(
+                "knots must be a dict mapping covariate name -> knot sequence "
+                "(mgcv's knots=list(...)), or None"
+            )
+        # mgcv's per-covariate knot override; threaded into both
+        # materialize_smooths call sites (discrete and non-discrete) below.
+        self.knots = knots
 
         family = Gaussian() if family is None else family
 
@@ -1820,7 +1829,7 @@ class bam(gam):
                 }
                 mf0 = pl.DataFrame(mf_dict) if mf_dict else pl.DataFrame()
                 sb_lists = materialize_smooths(
-                    d.expanded, mf0, sparse_cons=0, tero=True,
+                    d.expanded, mf0, sparse_cons=0, tero=True, knots=self.knots,
                 )
             else:
                 # discrete=FALSE: basis setup on a representative subsample
@@ -1828,7 +1837,7 @@ class bam(gam):
                 # (sweep-drop absorb on row-summed colMeans).
                 mf0 = _mini_mf(self.data, chunk_size)
                 sb_lists = materialize_smooths(
-                    d.expanded, mf0, sparse_cons=-1,
+                    d.expanded, mf0, sparse_cons=-1, knots=self.knots,
                 )
             blocks: list[SmoothBlock] = [b for group in sb_lists for b in group]
         else:
