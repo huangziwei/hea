@@ -565,6 +565,7 @@ class gam:
         offset: np.ndarray | list | None = None,
         gamma: float = 1.0,
         select: bool = False,
+        knots: dict | None = None,
     ):
         # ``data`` may be a polars DataFrame OR a mapping of name → 1-D /
         # 2-D ndarray. 2-D entries become matrix columns
@@ -577,9 +578,18 @@ class gam:
             )
         if not (np.isfinite(gamma) and gamma > 0):
             raise ValueError(f"gamma must be a positive finite number, got {gamma!r}")
+        if knots is not None and not isinstance(knots, dict):
+            raise TypeError(
+                "knots must be a dict mapping covariate name -> knot sequence "
+                "(mgcv's knots=list(...)), or None"
+            )
 
         self.formula = formula
         self.method = method
+        # mgcv's per-covariate knot override; threaded into materialize_smooths
+        # and consumed by the cr/cc/ps/cp/bs builders. None ⇒ data-adaptive
+        # defaults (byte-identical to pre-knots behavior).
+        self.knots = knots
         self._select = bool(select)
         # mgcv's smoothing-strength multiplier. ``gamma > 1`` produces
         # smoother fits by inflating the apparent edf cost in the GCV/UBRE
@@ -621,7 +631,10 @@ class gam:
             off = off + blk.values.flatten().astype(float)
         self._offset = off
 
-        sb_lists = materialize_smooths(d.expanded, d.data) if d.expanded.smooths else []
+        sb_lists = (
+            materialize_smooths(d.expanded, d.data, knots=knots)
+            if d.expanded.smooths else []
+        )
         blocks: list[SmoothBlock] = [b for group in sb_lists for b in group]
         # mgcv: select=TRUE adds a null-space penalty per smooth inside
         # smoothCon — i.e., before gam.side. Mirror that order so the
