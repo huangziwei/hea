@@ -5135,6 +5135,183 @@ def _build_ts_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     )
 
 
+# ---- ds: Duchon spline (generalised thin-plate) -----------------------------
+#
+# Port of mgcv's smooth.construct.ds.smooth.spec. Isotropic R^d spline whose
+# penalty has fractional Sobolev order m+s (``m = c(m, s)``; s=0 ⇒ thin-plate).
+# Reuses tp's null-space polynomials (``_tp_gen_poly_powers``) — but NOT tp's
+# m-bump, since Duchon's whole point is allowing m+s > d/2 with small m. The
+# low-rank reduction (``_lowrank_kernel_reduce``) is shared with sos (§9).
+
+
+def _lowrank_kernel_reduce(
+    K: np.ndarray, T: np.ndarray, k: int,
+) -> tuple[np.ndarray, np.ndarray, int, int]:
+    """mgcv's ds/sos low-rank reduction. ``K`` (nk,nk) kernel, ``T`` (nk,M)
+    null space, ``k`` target basis dim → ``(S (k,k), UZ (nk,k-M), null_dim,
+    rank)``. Mirrors ``er<-slanczos(K,k,-1); qru<-qr(t(t(T)%*%er$vec)); ...``;
+    slanczos(K,k,-1) = the k eigenpairs of largest magnitude (K is only
+    conditionally definite), here a dense ``eigh`` + magnitude sort (nk≤2000).
+    """
+    nk = K.shape[0]
+    M = T.shape[1]
+    if k < nk:
+        vals_all, vecs_all = np.linalg.eigh(K)
+        order = np.argsort(np.abs(vals_all))[::-1][:k]   # top-k by |λ|
+        vecs = vecs_all[:, order]                        # (nk, k)
+        D = np.diag(vals_all[order])                     # (k, k)
+    else:
+        k = nk
+        vecs = np.eye(nk)
+        D = K
+    U1 = vecs.T @ T                                      # (k, M)
+    Q, _ = np.linalg.qr(U1, mode="complete")             # (k, k)
+    QtD = Q.T @ D                                        # (k, k)
+    S_core = (Q.T @ QtD[M:, :].T)[M:, :]                 # (k-M, k-M)
+    S = np.zeros((k, k))
+    S[:k - M, :k - M] = 0.5 * (S_core + S_core.T)
+    UZ = (Q.T @ vecs.T)[M:, :].T                         # (nk, k-M)
+    return S, UZ, M, k - M
+
+
+def _duchon_E(
+    x: np.ndarray, xk: np.ndarray, m: int, s: float, n: int,
+) -> np.ndarray:
+    """`DuchonE` — generalised polyharmonic kernel between rows of x and xk.
+    ``ke = 2m + 2s − n`` (> 0 under the validity constraint m+s>n/2); E = dᵏ·log d
+    when ke even, dᵏ otherwise, times the mgcv sign."""
+    diff = x[:, None, :] - xk[None, :, :]
+    dist = np.sqrt((diff * diff).sum(axis=-1))
+    ke = int(round(2 * m + 2 * s - n))
+    if ke % 2 == 0:
+        logd = np.log(np.where(dist > 0, dist, 1.0))
+        E = np.where(dist > 0, (dist ** ke) * logd, 0.0)
+    else:
+        E = dist ** ke
+    sign_e = 1 - 2 * (((ke // 2) + 1) % 2)
+    return E * sign_e
+
+
+def _duchon_T(X: np.ndarray, m: int, n: int) -> np.ndarray:
+    """`DuchonT` — null-space polynomials (total degree < m) in n covariates,
+    M = C(m+n−1, n) columns. Same monomials as tp's null space but WITHOUT
+    tp's m-bump."""
+    from math import comb
+    M = comb(m + n - 1, n)
+    pi_pow = _tp_gen_poly_powers(M, m, n)
+    T = np.ones((X.shape[0], M), dtype=float)
+    for j in range(M):
+        for kk in range(n):
+            p = int(pi_pow[j, kk])
+            if p > 0:
+                T[:, j] *= X[:, kk] ** p
+    return T
+
+
+def _ds_order_ms(call: Call, d: int) -> tuple[int, float]:
+    """Resolve ``m = c(m, s)`` for ds (mgcv corrections): m default 2 (≥1); s
+    default 0, rounded to ½-integer, clamped to (−d/2, d/2); if m+s ≤ d/2 bump
+    s = ½ + d/2 − m for a continuous function."""
+    m_src = call.kwargs.get("m")
+    vals = _eval_c_vec_floats(m_src) if m_src is not None else None
+    m = vals[0] if vals else 2.0
+    s = vals[1] if (vals and len(vals) > 1) else 0.0
+    m = int(round(m))
+    s = round(s * 2) / 2
+    if m < 1:
+        m = 1
+    if s >= d / 2:
+        s = (d - 1) / 2
+    if s <= -d / 2:
+        s = -(d - 1) / 2
+    if m + s <= d / 2:
+        s = 0.5 + d / 2 - m
+        if s >= d / 2:
+            raise ValueError(
+                "ds smooth: no suitable s (m[2]); try increasing m[1]")
+    return m, float(s)
+
+
+def _ds_default_k(call: Call, M: int, d: int) -> int:
+    k_src = call.kwargs.get("k")
+    if isinstance(k_src, Literal) and k_src.kind == "num":
+        k = int(k_src.value)
+    else:
+        defk = (10, 30, 100)
+        k = M + defk[min(d, 3) - 1]
+    return max(k, M + 1)
+
+
+@dataclass(slots=True)
+class _DSRawBasis(_RawBasis):
+    """`smooth.construct.ds.smooth.spec` — Duchon spline (predict replay)."""
+    term: list[str]
+    shift: np.ndarray
+    knt: np.ndarray        # (nk, d) centered knots
+    UZ: np.ndarray         # (nk, k-M)
+    m: int
+    s: float
+    d: int
+
+    def eval(self, data: pl.DataFrame) -> np.ndarray:
+        x = np.column_stack(
+            [data[v].to_numpy().astype(float) for v in self.term])
+        x_c = x - self.shift
+        E = _duchon_E(x_c, self.knt, self.m, self.s, self.d)
+        T = _duchon_T(x_c, self.m, self.d)
+        return np.hstack([E @ self.UZ, T])
+
+
+def _ds_raw(
+    call: Call, data: pl.DataFrame, term: list[str],
+    knots: dict | None = None, max_knots: int = 2000,
+) -> tuple[np.ndarray, list[np.ndarray], _DSRawBasis]:
+    from math import comb
+    d = len(term)
+    x = np.column_stack([data[t].to_numpy().astype(float) for t in term])
+    m, s = _ds_order_ms(call, d)
+    # knots: explicit locations only if every covariate is keyed (mgcv form);
+    # otherwise the unique data (subsample > max_knots — rare, won't match
+    # mgcv's RNG, same caveat as tp).
+    kdict = knots or {}
+    kcols = [kdict.get(t) for t in term]
+    if all(kc is not None for kc in kcols):
+        arrs = [np.asarray(kc, dtype=float).ravel() for kc in kcols]
+        if len({a.size for a in arrs}) != 1:
+            raise ValueError("ds knots: components must have the same length")
+        knt = np.column_stack(arrs)
+    else:
+        knt = np.unique(x, axis=0)
+        if knt.shape[0] > max_knots:
+            knt = knt[:max_knots]
+    nk = knt.shape[0]
+    M = comb(m + d - 1, d)
+    if nk < M + 1:
+        raise ValueError("ds smooth: too few unique covariate combinations")
+    k = _ds_default_k(call, M, d)
+    shift = x.mean(axis=0)
+    x_c = x - shift
+    knt_c = knt - shift
+    E_kk = _duchon_E(knt_c, knt_c, m, s, d)
+    T_kk = _duchon_T(knt_c, m, d)
+    S, UZ, _null, _rank = _lowrank_kernel_reduce(E_kk, T_kk, k)
+    X = np.hstack([_duchon_E(x_c, knt_c, m, s, d) @ UZ, _duchon_T(x_c, m, d)])
+    raw = _DSRawBasis(
+        term=list(term), shift=shift, knt=knt_c, UZ=UZ, m=m, s=s, d=d)
+    return X, [S], raw
+
+
+def _build_ds_smooth(
+    call: Call, data: pl.DataFrame, knots: dict | None = None,
+) -> list[SmoothBlock]:
+    """Build a Duchon spline (`bs="ds"`) — mgcv smooth.construct.ds."""
+    term = _smooth_term_vars(call)
+    X, S_list, raw = _ds_raw(call, data, term, knots=knots)
+    return _apply_by_and_absorb(
+        call, data, X, S_list, "duchon.spline", term, raw_basis=raw,
+    )
+
+
 # ---- fs: factor-smooth interaction ------------------------------------------
 #
 # mgcv's `smooth.construct.fs.smooth.spec` builds one base smooth on the
@@ -6681,6 +6858,7 @@ def materialize_smooths(
         if bs == "cc":   return _build_cc_smooth(call, d, knots=knots)
         if bs == "tp":   return _build_tp_smooth(call, d)
         if bs == "ts":   return _build_ts_smooth(call, d)
+        if bs == "ds":   return _build_ds_smooth(call, d, knots=knots)
         if bs == "ps":   return _build_ps_smooth(call, d, knots=knots)
         if bs == "cp":   return _build_cp_smooth(call, d, knots=knots)
         if bs == "bs":   return _build_bs_smooth(call, d, knots=knots)

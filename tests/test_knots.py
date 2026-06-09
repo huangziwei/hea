@@ -353,6 +353,43 @@ def test_shrinkage_basis_matches_mgcv(bs):
     assert fit.sum() == pytest.approx(refsum, abs=1e-4)
 
 
+# --- ds (Duchon spline, Phase 2 Tier 2) --------------------------------------
+# Reproducible NON-GRID points (√2,√3,√5 mod 1). A regular grid's symmetry makes
+# the kernel eigenvalues degenerate at the rank-k truncation boundary, where
+# eigh and mgcv's slanczos pick different (equally valid) bases of the degenerate
+# eigenspace — an arbitrary truncation, not a bug; generic data has no such
+# degeneracy and matches mgcv to ~1e-9. Covers odd kernel exponents (1-D default
+# ke=3, 2-D s=0.5 ke=3, 3-D ke=1 — the spherical R³-embedding case).
+_DI = np.arange(120)
+_DDX = ((_DI + 1) * np.sqrt(2)) % 1
+_DDY = ((_DI + 1) * np.sqrt(3)) % 1
+_DDZ = ((_DI + 1) * np.sqrt(5)) % 1
+_DDRESP = np.sin(3 * _DDX) + np.cos(3 * _DDY) + 0.5 * _DDX * _DDY
+_DDUCHON = pl.DataFrame({"x": _DDX, "y": _DDY, "z": _DDZ, "resp": _DDRESP})
+
+# mgcv gam(..., method="REML") fitted-value refs: (first 6, sum).
+_DS_REF = {
+    'resp~s(x,bs="ds")': (
+        [1.018977856, 0.8944856975, 0.7266364385, 1.082800301, 0.2868604633,
+         1.085883881], 99.1190289),
+    'resp~s(x,y,bs="ds",m=c(2,0.5),k=15)': (
+        [0.513294058, 0.9854715318, 1.519510961, 0.2893410526, -0.1647833207,
+         1.481446076], 99.1190289),
+    'resp~s(x,y,z,bs="ds",m=c(2,0),k=15)': (
+        [0.5989270326, 0.8611405181, 1.459403579, 0.1248205412, -0.08803478233,
+         1.53621942], 99.1190289),
+}
+
+
+@pytest.mark.parametrize("formula", list(_DS_REF))
+def test_duchon_spline_matches_mgcv(formula):
+    ref6, refsum = _DS_REF[formula]
+    fit = np.asarray(
+        gam(formula, _DDUCHON, method="REML").fitted_values, dtype=float).ravel()
+    assert np.allclose(fit[:6], np.array(ref6), atol=1e-5, rtol=0)
+    assert fit.sum() == pytest.approx(refsum, abs=1e-4)
+
+
 @pytest.mark.parametrize("discrete", [False, True])
 def test_bam_knots_passthrough_both_paths(discrete):
     """knots= must reach the builder on BOTH bam materialize_smooths sites."""
