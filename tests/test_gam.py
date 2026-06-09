@@ -553,16 +553,23 @@ def test_pirls_init_canonical_inverse_gaussian():
     assert np.all(m.linear_predictors > 0)
     # Phase 2.2 wiring: unknown-scale family ⇒ log φ enters the outer
     # vector and `m._log_phi_hat` is finite. ``m.scale = m.sigma_squared``
-    # is the post-fit Pearson estimate (mgcv's ``m$sig2 = scale.est``,
-    # gam.fit3.r:606), reported regardless of method. The optimizer's
-    # converged scale ``exp(log φ̂)`` (mgcv's ``reml.scale``) lives on
-    # ``m._log_phi_hat`` — for REML the two coincide at the optimum
-    # (FOC); for ML they don't.
+    # is the post-fit scale estimate (mgcv's ``m$sig2 = scale.est``) —
+    # Pearson with the Fletcher (2012) correction, mgcv's default
+    # estimator (gam.fit3.r:596-603). For canonical IG the correction is
+    # non-trivial: s̄ = 3·mean((y−μ̂)/μ̂) ≠ 0, so Fletcher ≠ Pearson here.
+    # The optimizer's converged scale ``exp(log φ̂)`` (mgcv's
+    # ``reml.scale``) lives on ``m._log_phi_hat`` — for REML the two
+    # coincide at the optimum (FOC); for ML they don't.
     assert m._log_phi_hat is not None
     assert np.isfinite(m._log_phi_hat)
-    np.testing.assert_allclose(m.scale, m._pearson_scale, atol=0.0)
+    np.testing.assert_allclose(m.scale, m._fletcher_scale, atol=0.0)
     assert np.isfinite(m._pearson_scale)
     assert m.sigma_squared > 0
+    # mgcv reference on this exact dataset (R, mgcv 1.9-4):
+    #   gam(y ~ s(x), family=inverse.gaussian(), method="REML")
+    #   m$sig2 = 0.969595916461   (plain Pearson: 0.939454279371)
+    np.testing.assert_allclose(m.sigma_squared, 0.969595916461, rtol=1e-6)
+    np.testing.assert_allclose(m._pearson_scale, 0.939454279371, rtol=1e-6)
     # Intercept ≈ link(mean(y)) = 1/mean(y)² for an intercept-only fit;
     # with a smooth that captures most of the signal it lands near
     # link(mean(mu_true)) = 1/1.5² ≈ 0.444.
@@ -1924,3 +1931,153 @@ def test_cohort_y_matches_basic(itsadug_fitted_model):
                                 rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(res_y.ci, res_b.ci,
                                 rtol=1e-12, atol=1e-12)
+
+
+# =============================================================================
+# Tier-1 mgcv-parity fixes (testStat mixture p-values + √W design, Fletcher
+# scale, rank detection, id= guard, reTest with sibling random effects).
+#
+# Reference values: R mgcv 1.9-4 run locally on the exact CSV each numpy
+# generator below reproduces (tests never call R). The testStat pins
+# discriminate against the old single-statistic F-only path, which is ~15%
+# off on the low-p Gaussian case below.
+# =============================================================================
+
+
+def _borderline_gaussian(seed: int, amp: float, n: int = 130) -> pl.DataFrame:
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0, 1, n)
+    y = amp * np.sin(4 * np.pi * x) + rng.normal(0, 1, n)
+    return pl.DataFrame({"x": x, "y": y})
+
+
+@pytest.mark.parametrize(
+    "seed, amp, expected",
+    [
+        # (edf, Ref.df, F, p) from mgcv summary(gam(y ~ s(x), method="REML"))
+        (23, 0.45, (2.920565601204, 3.635185663159,
+                    0.707551676855, 0.489004131254)),
+        (31, 0.50, (5.62568065646878, 6.76317580531274,
+                    4.83126594787145, 0.00011153338537)),
+    ],
+)
+def test_teststat_mixture_pvalue_gaussian_matches_mgcv(seed, amp, expected):
+    """Wood (2013) testStat: fractional-rank mixture reference distribution
+    (psum.chisq) + d/d1 averaging — not the pf(F, rank, res.df) fallback."""
+    m = gam("y ~ s(x)", _borderline_gaussian(seed, amp), method="REML")
+    label, edf, ref_df, stat_col, p_val = m._smooth_significance_rows()[0]
+    assert label == "s(x)"
+    np.testing.assert_allclose(
+        [edf, ref_df, stat_col, p_val], expected, rtol=5e-4,
+        err_msg="s(x) row vs mgcv s.table",
+    )
+
+
+def test_teststat_mixture_pvalue_poisson_matches_mgcv():
+    """Known-scale branch: chi-squared mixture via psum.chisq, and the
+    statistic built on the √W-weighted design (mgcv tests against object$R,
+    the QR factor of √W·X — unweighted X is only its legacy fallback)."""
+    from hea.family import Poisson
+    rng = np.random.default_rng(4)
+    n = 160
+    x = rng.uniform(0, 1, n)
+    y = rng.poisson(np.exp(0.30 * np.sin(4 * np.pi * x)))
+    d = pl.DataFrame({"x": x, "y": y})
+    m = gam("y ~ s(x)", d, family=Poisson(), method="REML")
+    label, edf, ref_df, stat_col, p_val = m._smooth_significance_rows()[0]
+    # mgcv: edf, Ref.df, Chi.sq, p-value
+    np.testing.assert_allclose(
+        [edf, ref_df, stat_col, p_val],
+        (3.155091929152, 3.902446682533, 6.195704535045, 0.222514468845),
+        rtol=5e-4, err_msg="s(x) row vs mgcv s.table (poisson)",
+    )
+
+
+def test_rank_deficient_design_detected_and_warned():
+    """Exactly collinear parametric columns: mgcv estimates rank 11/12 on
+    this dataset (and drops a coefficient; hea warns instead — the ridge
+    fallback smears the estimate, so silence would be wrong)."""
+    rng = np.random.default_rng(0)
+    n = 100
+    x1 = rng.uniform(0, 1, n)
+    x2 = x1.copy()
+    z = rng.uniform(0, 1, n)
+    y = 1 + 2 * x1 + np.sin(2 * np.pi * z) + rng.normal(0, 0.3, n)
+    df = pl.DataFrame({"x1": x1, "x2": x2, "z": z, "y": y})
+    with pytest.warns(UserWarning, match="rank deficient"):
+        m = gam("y ~ x1 + x2 + s(z)", df, method="REML")
+    assert m.rank == 11
+    assert m.p == 12
+
+
+def test_full_rank_fit_reports_p_and_does_not_warn():
+    import warnings
+    d = load_dataset("MASS", "mcycle")
+    with warnings.catch_warnings(record=True) as wlist:
+        warnings.simplefilter("always")
+        m = gam("accel ~ s(times)", d, method="REML")
+    assert m.rank == m.p
+    assert not any("rank deficient" in str(w.message) for w in wlist)
+
+
+def test_smooth_id_kwarg_raises():
+    """mgcv's id= shares one λ across smooths; hea has no L-matrix layer,
+    so silently fitting independent λ's would be a different model."""
+    rng = np.random.default_rng(0)
+    n = 80
+    x1 = rng.uniform(0, 1, n)
+    z = rng.uniform(0, 1, n)
+    y = np.sin(2 * np.pi * z) + rng.normal(0, 0.3, n)
+    df = pl.DataFrame({"x1": x1, "z": z, "y": y})
+    with pytest.raises(NotImplementedError, match="id="):
+        gam("y ~ s(x1, id=1) + s(z, id=1)", df, method="REML")
+
+
+def test_sz_id_kwarg_still_allowed():
+    """bs='sz' legitimately consumes id= (within-term penalty merging) —
+    the guard must not catch it."""
+    rng = np.random.default_rng(2)
+    n = 150
+    x = rng.uniform(0, 1, n)
+    g = rng.choice(["a", "b", "c"], n)
+    y = np.sin(2 * np.pi * x) + (g == "b") * 0.5 + rng.normal(0, 0.3, n)
+    df = pl.DataFrame({"x": x, "g": g, "y": y}).with_columns(
+        pl.col("g").cast(pl.Enum(["a", "b", "c"]))
+    )
+    m = gam("y ~ s(x) + s(g, x, bs='sz', id=1)", df, method="REML")
+    assert len(m.sp) == 2  # one for s(x), one merged sz penalty
+
+
+def test_retest_with_sibling_random_effects_matches_mgcv():
+    """reTest for one bs='re' term treats the *other* re terms as fully
+    random (recov's re-branch, mgcv.r:3640-3713) — not as fixed."""
+    rng = np.random.default_rng(7)
+    n = 250
+    x = rng.uniform(0, 1, n)
+    g1 = rng.integers(0, 8, n)
+    g2 = rng.integers(0, 6, n)
+    b1 = rng.normal(0, 0.5, 8)
+    b2 = rng.normal(0, 0.09, 6)
+    y = np.sin(2 * np.pi * x) + b1[g1] + b2[g2] + rng.normal(0, 0.5, n)
+    df = pl.DataFrame({
+        "x": x,
+        "g1": [f"a{i}" for i in g1],
+        "g2": [f"b{i}" for i in g2],
+        "y": y,
+    }).with_columns(
+        pl.col("g1").cast(pl.Enum([f"a{i}" for i in range(8)])),
+        pl.col("g2").cast(pl.Enum([f"b{i}" for i in range(6)])),
+    )
+    m = gam("y ~ s(x) + s(g1, bs='re') + s(g2, bs='re')", df, method="REML")
+    rows = {r[0]: r[1:] for r in m._smooth_significance_rows()}
+    # mgcv s.table (edf, Ref.df, F, p) on this exact dataset:
+    np.testing.assert_allclose(
+        rows["s(g1)"],
+        (6.90386745017, 7.0, 88.75859491707, 0.0),
+        rtol=5e-4, atol=1e-12, err_msg="s(g1) vs mgcv",
+    )
+    np.testing.assert_allclose(
+        rows["s(g2)"],
+        (3.5166733495327, 5.0, 3.5106246383545, 0.0198880041678),
+        rtol=5e-4, err_msg="s(g2) vs mgcv",
+    )

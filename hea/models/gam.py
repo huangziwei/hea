@@ -45,7 +45,14 @@ from scipy.linalg import cho_factor, cho_solve, solve_triangular
 from scipy.stats import chi2 as _chi2, f as f_dist, norm, t as t_dist
 
 from ..family import Family, Gaussian, tw as _tw_family
-from ..formula import BasisSpec, SmoothBlock, _eval_atom, materialize_smooths, prepare_design
+from ..formula import (
+    BasisSpec,
+    SmoothBlock,
+    _eval_atom,
+    materialize_smooths,
+    prepare_design,
+    reject_unsupported_smooth_id,
+)
 from .lm import _label_top_n, _lowess, _qq_plot
 from ..utils import (
     _dig_tst,
@@ -554,6 +561,12 @@ class gam:
         Optimized GCV score, ``n · rss / (n − edf_total)²``.
     """
 
+    # Estimated model rank (mgcv's ``oo$rank.est``), set by ``__init__``
+    # via ``_estimate_rank``. Class-level ``None`` is the fallback for
+    # subclasses that build their own state without running gam's
+    # constructor (bam) — readers treat ``None`` as "assume full rank".
+    rank: int | None = None
+
     def __init__(
         self,
         formula: str,
@@ -604,6 +617,7 @@ class gam:
         # UBRE `D/n + 2·τ/n − 1`. mgcv's `gam.outer` does the same dispatch
         # under method="GCV.Cp".
         d = prepare_design(formula, data)
+        reject_unsupported_smooth_id(d.expanded)
         self._expanded = d.expanded
         # Materialise smooth-arg expressions once into ``self.data`` so the
         # synth columns (``s(I(b.depth^.5))`` ⇒ ``"I(b.depth^0.5)"``) are
@@ -928,8 +942,18 @@ class gam:
         self._wt = np.ones(n)
         wt = self._wt
         # df.residual used in mgcv = n - edf_total. For unknown-scale
-        # families, mgcv reports `m$sig2 = m$scale = scale.est` (the
-        # Pearson/deviance estimator, gam.fit3.r:606), regardless of method.
+        # families, mgcv reports `m$sig2 = m$scale = scale.est`, regardless
+        # of method — and its default estimator is **Fletcher (2012)**
+        # (`gam.control(scale.est="fletcher")`, mgcv.r:2476): the Pearson
+        # estimate divided by (1 + s̄) with
+        #
+        #     s̄ = max(-0.9, mean(V'(μ̂)·(y − μ̂)/V(μ̂)))      (gam.fit3.r:596-603)
+        #
+        # (unweighted mean; the -0.9 floor caps the correction at 10×
+        # Pearson). s̄ = 0 — Fletcher ≡ Pearson — whenever V'·(y−μ)/V is a
+        # score component of the fit (Gaussian: V'≡0; Gamma+log with
+        # intercept: Σ(y−μ)/μ = 0 at convergence), so the correction only
+        # moves Tweedie / IG / quasi-style fits.
         # This differs from `m$reml.scale = exp(log φ̂)` — the optimizer's
         # converged scale that enters the score formula. For REML on
         # Gaussian-identity the two coincide at the optimum (FOC enforces
@@ -939,10 +963,19 @@ class gam:
         if df_resid > 0 and not self.family.scale_known:
             V = self.family.variance(fit.mu)
             pearson_scale = float(np.sum(wt * (y - fit.mu) ** 2 / V)) / df_resid
+            s_bar = max(-0.9, float(np.mean(
+                self.family.dvar(fit.mu) * (y - fit.mu) / V
+            )))
+            fletcher_scale = (
+                pearson_scale / (1.0 + s_bar) if np.isfinite(s_bar)
+                else pearson_scale
+            )
         else:
             pearson_scale = 1.0 if self.family.scale_known else float("nan")
+            fletcher_scale = pearson_scale
         self._pearson_scale = pearson_scale
-        scale = 1.0 if self.family.scale_known else pearson_scale
+        self._fletcher_scale = fletcher_scale
+        scale = 1.0 if self.family.scale_known else fletcher_scale
         sigma_squared = scale                 # alias kept for back-compat
         sigma = float(np.sqrt(sigma_squared)) if np.isfinite(sigma_squared) and sigma_squared >= 0 else float("nan")
 
@@ -1194,6 +1227,24 @@ class gam:
         # gam.vcomp(rescale=FALSE). Cheap to compute eagerly for typical
         # n_sp; users can ignore the attribute if they don't need it.
         self.vcomp = self._compute_vcomp()
+
+        # mgcv's estimated model rank (``oo$rank.est``) — identifiability
+        # of the penalized problem at the converged fit. hea does not yet
+        # *drop* unidentifiable columns the way mgcv's C core does (the
+        # Cholesky ridge fallback smears the estimate across them
+        # instead), so unlike mgcv a deficient rank warrants a loud
+        # warning: fitted values are fine, but coefficients/SEs in the
+        # deficient directions are not individually interpretable.
+        self.rank = self._estimate_rank()
+        if self.rank < p:
+            import warnings as _w
+            _w.warn(
+                f"model is rank deficient: estimated rank {self.rank} < "
+                f"{p} coefficients. hea does not drop unidentifiable "
+                "coefficients (mgcv does) — estimates and SEs in the "
+                "deficient directions are not individually meaningful.",
+                stacklevel=2,
+            )
 
     # -----------------------------------------------------------------------
     # Internals
@@ -2241,8 +2292,10 @@ class gam:
 
         def _score_scale(fit_, val):
             # mgcv's score.scale: |scale.est| + |score| (GCV/UBRE) or
-            # |log(scale.est)| + |score| (REML). scale.est is mgcv's
-            # Pearson estimator; for known-scale families it is 1.
+            # |log(scale.est)| + |score| (REML). scale.est is gam.fit3's
+            # estimator — Pearson with the Fletcher (2012) correction
+            # (gam.fit3.r:596-603, mgcv's default scale.est); for
+            # known-scale families it is 1.
             if self.family.scale_known:
                 scale_est = 1.0
             else:
@@ -2263,6 +2316,11 @@ class gam:
                 tau_ = float(np.trace(A_inv_ @ XtWX_))
                 df_resid_ = max(self.n - tau_, 1.0)
                 scale_est = pearson / df_resid_
+                s_bar_ = max(-0.9, float(np.mean(
+                    self.family.dvar(mu_arr) * (y_arr - mu_arr) / V_arr
+                )))
+                if np.isfinite(s_bar_):
+                    scale_est = scale_est / (1.0 + s_bar_)
             if is_reml:
                 # log(scale.est); guard against scale_est ≤ 0
                 scale_est_safe = max(scale_est, 1e-300)
@@ -3466,24 +3524,45 @@ class gam:
             db[:, k] = cho_solve((A_chol, A_chol_lower), v)
         return db
 
-    def _test_stat_type0(
+    def _test_stat(
         self,
         X_b: np.ndarray,
         V_b: np.ndarray,
         beta_b: np.ndarray,
         rank: float,
-    ) -> tuple[float, float]:
-        """mgcv ``testStat`` with ``type = 0`` (summary.r default).
+        res_df: float = -1.0,
+    ) -> tuple[float, float, float]:
+        """mgcv ``testStat`` with ``type = 0`` (summary.r default) —
+        Wood (2013) Biometrika 100(1), 221-228. Direct port of
+        mgcv.r:3759-3855 including the p-value computation.
 
-        Returns ``(stat, rank_out)`` where ``stat`` is the d-statistic and
-        ``rank_out`` is the (possibly truncated) rank used as the F numerator
-        d.f. The "fractional rank" correction blends the k-th and (k+1)-th
+        Returns ``(stat, pval, rank_out)``. ``stat`` is the d-statistic,
+        ``rank_out`` the (possibly truncated) rank reported as Ref.df.
+        ``res_df`` mirrors mgcv's ``res.df``: ``<= 0`` means the scale is
+        fixed/known (chi-squared reference); ``> 0`` is the residual d.f.
+        used to estimate the scale (F-type reference).
+
+        The "fractional rank" correction blends the k-th and (k+1)-th
         whitened eigenvectors via a 2×2 symmetric square root so the test
-        respects a non-integer reference d.f. Equivalent type=1 (rounded
-        rank) gives a discontinuous F as edf1 crosses an integer; type=0
-        is what mgcv summary actually calls.
+        respects a non-integer reference d.f. The statistic is ambiguous
+        up to the sign of the first blended column, so mgcv computes both
+        variants (``d`` from ``vec``, ``d1`` from ``vec1``) and averages
+        the two p-values (the statistics can't be averaged — the mixture
+        distribution of the average is unknown). The primary p-value is
+        the weighted-chi-squared survival via ``psum_chisq`` (Davies):
+
+            val = [1, …, 1, (rp+√(rp(2−rp)))/2, rp − val[k]],  rp = ν+1
+            scale known:     Pr(Σ val_j·χ²_1 > d)
+            scale estimated: Pr(Σ val_j·χ²_1 − (d/k0)·χ²_k0 > 0),
+                             k0 = max(1, round(res_df))
+
+        The plain ``pchisq(d, rank)`` / ``pf(d/rank, rank, res_df)`` form
+        is only the fallback when the mixture p-value is unavailable
+        (integer rank sets pval=2 to force it; Davies failure gives NaN).
         """
         # QR on the smooth's design block, then rotate Vp into that basis.
+        # (mgcv uses qr(X, tol=0): with tol=0 LINPACK never pivots, so the
+        # unpivoted numpy QR is the same operation.)
         _, R = np.linalg.qr(X_b, mode="reduced")
         V_rot = R @ V_b @ R.T
         V_rot = 0.5 * (V_rot + V_rot.T)
@@ -3511,7 +3590,7 @@ class gam:
             rank = float(r_est)
 
         if k1 == 0 or U.shape[1] == 0:
-            return 0.0, float(rank)
+            return 0.0, 1.0, float(rank)
 
         vec = U[:, :k1].copy()
 
@@ -3545,61 +3624,201 @@ class gam:
             vec1 = vec
 
         Rp = R @ beta_b
-        proj = vec.T @ Rp
-        stat = float(np.sum(proj ** 2))
-        return stat, float(rank)
+        d = float(np.sum((vec.T @ Rp) ** 2))
+        d1 = float(np.sum((vec1.T @ Rp) ** 2))
 
-    def _recov_no_re(self, m_idx: int) -> np.ndarray:
-        """Port of ``mgcv:::recov`` for the no-RE case (re=∅, m>0).
+        rank1 = float(rank)            # rank for the fallback below
 
-        Returns ``Rm`` such that ``Rm' Rm`` is the m-th block's Schur
-        complement of A = X'WX + Sλ — i.e. the inverse of ``A⁻¹[m,m]``,
-        the precision of β̂_m after profiling out the rest. Built by stacking
-        the model-matrix R factor (chol(X'WX)) on top of the penalty
-        square-root, reordering target cols last, then taking the bottom-right
-        block of the QR's R.
+        if nu > 0:
+            # Mixture-of-chi² reference distribution (primary path).
+            if k1 == 1:
+                rank1 = 1.0
+                val = np.ones(1)
+            else:
+                val = np.ones(k1)
+                rp = nu + 1.0
+                val[k - 1] = (rp + math.sqrt(rp * (2.0 - rp))) / 2.0
+                val[k1 - 1] = rp - val[k - 1]
+            if res_df <= 0:
+                pval = 0.5 * (psum_chisq(d, val) + psum_chisq(d1, val))
+            else:
+                k0 = max(1, int(round(res_df)))
+                df = np.concatenate(
+                    [np.ones(val.size, dtype=int), np.array([k0], dtype=int)]
+                )
+                pval = 0.5 * (
+                    psum_chisq(0.0, np.concatenate([val, [-d / k0]]), df)
+                    + psum_chisq(0.0, np.concatenate([val, [-d1 / k0]]), df)
+                )
+        else:
+            pval = 2.0                 # force the fallback (mgcv convention)
+
+        # mgcv's ``pval > 1`` fallback. ``not (pval <= 1)`` also catches a
+        # NaN from a Davies/Liu failure. (hea's psum_chisq clips into
+        # [0, 1], so unlike mgcv a degraded-but-finite Davies result stays
+        # at 1.0 rather than re-routing here — conservative, far lower tail
+        # only.)
+        if not (pval <= 1.0):
+            if res_df <= 0:
+                pval = 0.5 * (
+                    float(_chi2.sf(d, rank1)) + float(_chi2.sf(d1, rank1))
+                )
+            else:
+                pval = 0.5 * (
+                    float(f_dist.sf(d / rank1, rank1, res_df))
+                    + float(f_dist.sf(d1 / rank1, rank1, res_df))
+                )
+
+        return d, float(min(1.0, pval)), float(rank)
+
+    def _recov(
+        self, m_idx: int, re_idx: list[int] | tuple[int, ...] = (),
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Port of ``mgcv:::recov`` (mgcv.r:3599-3713). Returns ``(Ve, Rm)``.
+
+        ``Ve`` is the frequentist covariance of β̂ under a data
+        distribution in which the smooths indexed by ``re_idx`` are
+        treated as *fully random* (β_re ~ N(0, σ²·S2⁻)):
+
+            Ve = Vp·R'·L'L·R·Vp / σ²,   L'L = I + R2·S2⁻·R2'
+
+        with R the model R factor (R'R = X'WX), R2 its random columns and
+        S2 the random blocks' penalty. With ``re_idx`` empty this reduces
+        to the usual model ``Ve`` (returned symmetrized, as mgcv does).
+
+        ``Rm`` is an upper-triangular factor whose ``Rm'Rm`` is block
+        ``m_idx``'s precision after profiling out everything else —
+        stack ``L·R1`` (data factor, random-inflated) on the non-random
+        penalty square root, rotate block-m's columns last, unpivoted QR,
+        bottom-right block. (Only ``Rm'Rm`` and sign-invariant quadratic
+        forms in ``Rm`` are consumed, so a Cholesky stand-in for mgcv's
+        fitting-QR ``b$R`` is exact here.)
         """
         p = self.p
-        a, bcol = self._block_col_ranges[m_idx]
-        k = bcol - a
-        # X'WX from stored Fisher working weights.
+        if m_idx in re_idx:
+            raise ValueError("m_idx can't be in re_idx")
+        sig2 = float(self.sigma_squared) if np.isfinite(self.sigma_squared) \
+            and self.sigma_squared > 0 else 1.0
+        a_m, b_m = self._block_col_ranges[m_idx]
+        k_m = b_m - a_m
+        sp = np.asarray(self.sp, dtype=float)
+
+        # R factor: R'R = X'WX from stored Fisher working weights. Use
+        # eigendecomp when XtWX is borderline-PSD (gam.side rank-trim,
+        # near-singular weights, etc.).
         if self._fisher_w is None:
-            XtWX = self._X_full.T @ self._X_full
+            XtWX = self._XtX
         else:
             Xw = self._X_full * np.sqrt(self._fisher_w)[:, None]
             XtWX = Xw.T @ Xw
-        # Cholesky of X'WX: R_factor' R_factor = X'WX (upper-triangular).
-        # Use eigendecomp+jitter when XtWX is borderline-PSD (gam.side
-        # rank-trim, near-singular weights, etc.).
         try:
             R_factor = np.linalg.cholesky(XtWX).T
         except np.linalg.LinAlgError:
             ev, U = np.linalg.eigh(0.5 * (XtWX + XtWX.T))
             ev = np.clip(ev, 0.0, None)
             R_factor = (U * np.sqrt(ev)).T
-        # Penalty square-root sqrtS such that sqrtS' sqrtS = Sλ.
-        S_lam = self._build_S_lambda(self._rho_hat)
-        ev, U = np.linalg.eigh(0.5 * (S_lam + S_lam.T))
-        max_ev = ev.max() if ev.size else 0.0
-        keep = ev > max(max_ev, 0.0) * 1e-12
-        if keep.any():
-            sqrtS = (U[:, keep] * np.sqrt(ev[keep])).T
+
+        def _mroot_rows(S: np.ndarray) -> np.ndarray:
+            """Rows B' of an eigen square root B·B' = S (rank rows)."""
+            if S.size == 0:
+                return np.zeros((0, S.shape[1] if S.ndim == 2 else 0))
+            ev, U = np.linalg.eigh(0.5 * (S + S.T))
+            max_ev = ev.max() if ev.size else 0.0
+            keep = ev > max(max_ev, 0.0) * 1e-12
+            if not keep.any():
+                return np.zeros((0, S.shape[0]), dtype=float)
+            return (U[:, keep] * np.sqrt(ev[keep])).T
+
+        def _rm_from(data_rows: np.ndarray, pen_rows: np.ndarray,
+                     a: int, b: int) -> np.ndarray:
+            """Bottom-right block of the unpivoted QR after rotating cols
+            ``a:b`` to the end — mgcv's ``qr.R(qr(LRB, tol=0))[ii, ii]``."""
+            LRB = np.vstack([data_rows, pen_rows])
+            n_cols = LRB.shape[1]
+            target = list(range(a, b))
+            other = [j for j in range(n_cols) if j < a or j >= b]
+            LRB_perm = LRB[:, other + target]
+            _, R_qr = np.linalg.qr(LRB_perm, mode="reduced")
+            k = b - a
+            return R_qr[-k:, -k:]
+
+        if len(re_idx) == 0:
+            # mgcv's re-empty branch: total penalty at λ̂, model Ve.
+            S_lam = self._build_S_lambda(self._rho_hat)
+            Rm = _rm_from(R_factor, _mroot_rows(S_lam), a_m, b_m)
+            return 0.5 * (self.Ve + self.Ve.T), Rm
+
+        # ---- split coefficients into fixed (1) / random (2) -------------
+        rind = np.zeros(p, dtype=bool)
+        for i in re_idx:
+            a, b = self._block_col_ranges[i]
+            rind[a:b] = True
+        p2 = int(rind.sum())
+        p1 = p - p2
+        # map[j] = position of coefficient j within its (fixed|random)
+        # subset. Blocks are wholly fixed or wholly random, so each
+        # block's mapped indices stay contiguous.
+        map_idx = np.zeros(p, dtype=int)
+        map_idx[rind] = np.arange(p2)
+        map_idx[~rind] = np.arange(p1)
+
+        R1 = R_factor[:, ~rind]
+        R2 = R_factor[:, rind]
+
+        # Assemble S1 (fixed-part penalty, λ̂-weighted) and S2 (random).
+        block_pos = {id(blk): i for i, blk in enumerate(self._blocks)}
+        S1 = np.zeros((p1, p1))
+        S2 = np.zeros((p2, p2))
+        for k, slot in enumerate(self._slots):
+            a, b = slot.col_start, slot.col_end
+            s0 = int(map_idx[a])
+            s1 = s0 + (b - a)
+            if block_pos[id(slot.block)] in re_idx:
+                S2[s0:s1, s0:s1] += sp[k] * slot.S
+            else:
+                S1[s0:s1, s0:s1] += sp[k] * slot.S
+
+        # ---- B2 with B2'B2 = S2⁻ (mgcv's three pseudoinvert-root cases) --
+        if p2 == 1:
+            B2 = np.array([[1.0 / np.sqrt(S2[0, 0])]])
+        elif float(np.max(np.abs(np.diag(np.diag(S2)) - S2))) == 0.0:
+            # Exactly diagonal S2 (mgcv tests literal equality).
+            ds2 = np.diag(S2).copy()
+            ind = ds2 > ds2.max() * np.finfo(float).eps ** 0.8
+            inv_d = np.zeros_like(ds2)
+            inv_d[ind] = 1.0 / ds2[ind]
+            B2 = np.diag(np.sqrt(inv_d))
         else:
-            sqrtS = np.zeros((0, p), dtype=float)
-        LRB = np.vstack([R_factor, sqrtS])
-        # Reorder columns: target block last.
-        target = list(range(a, bcol))
-        other = [j for j in range(p) if j < a or j >= bcol]
-        perm = other + target
-        LRB_perm = LRB[:, perm]
-        _, R_qr = np.linalg.qr(LRB_perm, mode="reduced")
-        return R_qr[-k:, -k:]
+            ev2, V2 = np.linalg.eigh(0.5 * (S2 + S2.T))
+            ind = ev2 > ev2.max() * np.finfo(float).eps ** 0.8
+            inv_v = np.zeros_like(ev2)
+            inv_v[ind] = 1.0 / ev2[ind]
+            B2 = np.sqrt(inv_v)[:, None] * V2.T
+
+        # L'L = I + R2·S2⁻·R2' (R returns the upper factor from chol;
+        # numpy's lower Cholesky transposed is the same matrix).
+        M2 = B2 @ R2.T                              # (p2, p)
+        A_L = np.eye(p) + M2.T @ M2
+        L = np.linalg.cholesky(0.5 * (A_L + A_L.T)).T
+
+        Rm = _rm_from(
+            L @ R1, _mroot_rows(S1), int(map_idx[a_m]), int(map_idx[a_m]) + k_m,
+        )
+
+        G = L @ R_factor @ self.Vp                  # (p, p)
+        Ve = (G.T @ G) / sig2
+        return Ve, Rm
 
     def _re_test(
         self, m_idx: int, beta_b: np.ndarray, Vp_b: np.ndarray
     ) -> tuple[float, float, float]:
-        """Port of ``mgcv:::reTest`` (no-RE branch). Returns ``(stat, pval,
-        rank)``. Uses ``psum_chisq`` (Davies 1980) for the p-value.
+        """Port of ``mgcv:::reTest`` (mgcv.r:3716-3755). Returns ``(stat,
+        pval, rank)``. Uses ``psum_chisq`` (Davies 1980) for the p-value.
+
+        Every *other* random-effect smooth in the model (mgcv's
+        ``smooth$random == TRUE`` — set only by ``smooth.construct.re``)
+        is treated as fully random via ``_recov``'s re-branch, so the test
+        for one ``bs="re"`` term conditions correctly on its siblings.
 
         - Wood (2013) "On p-values for smooth components of an extended GAM",
           Biometrika 100(1), 221–228.
@@ -3607,12 +3826,14 @@ class gam:
         """
         sig2 = float(self.sigma_squared) if np.isfinite(self.sigma_squared) \
             and self.sigma_squared > 0 else 1.0
-        Rm = self._recov_no_re(m_idx)
-        # Ve[ind, ind] half-square-root via eigendecomp.
-        Ve_b = self.Ve[
-            self._block_col_ranges[m_idx][0]:self._block_col_ranges[m_idx][1],
-            self._block_col_ranges[m_idx][0]:self._block_col_ranges[m_idx][1],
+        re_idx = [
+            i for i, blk in enumerate(self._blocks)
+            if i != m_idx and blk.cls == "re.smooth.spec"
         ]
+        Ve_full, Rm = self._recov(m_idx, re_idx)
+        # Ve[ind, ind] half-square-root via eigendecomp.
+        a_m, b_m = self._block_col_ranges[m_idx]
+        Ve_b = Ve_full[a_m:b_m, a_m:b_m]
         ev_b, U_b = np.linalg.eigh(0.5 * (Ve_b + Ve_b.T))
         ev_b = np.clip(ev_b, 0.0, None)
         B = U_b * np.sqrt(ev_b)
@@ -3633,6 +3854,74 @@ class gam:
             )
             pval = psum_chisq(0.0, lb, df) if ev.size else float("nan")
         return stat, float(pval), float(rank)
+
+    def _smooth_significance_rows(
+        self,
+    ) -> list[tuple[str, float, float, float, float]]:
+        """Per-smooth test rows ``(label, edf, Ref.df, stat_col, p-value)``
+        — the smooth half of mgcv's ``summary.gam`` (mgcv.r:4008-4040),
+        shared by :meth:`summary` and ``anova(m)`` (mgcv's single-model
+        ``anova.gam`` *is* ``summary.gam`` reclassed, so the tables must
+        come from one place).
+
+        Dispatch per smooth: ``reTest`` (Wood 2013) whenever the combined
+        penalty is full-rank on the block (``null.space.dim == 0`` — re/fs/
+        sz, cyclic bases, and every smooth under ``select=TRUE``);
+        ``testStat`` (inverted-Nychka, fractional rank, ``_test_stat``)
+        otherwise. ``stat_col`` is the printed statistic: ``Chi.sq`` (the
+        raw stat) for known-scale families, ``F = stat / Ref.df`` when the
+        scale is estimated — same for both branches (mgcv prints
+        ``chi.sq/df`` under ``est.disp``).
+        """
+        scale_known = bool(self.family.scale_known)
+        # mgcv tests against ``object$R`` — the R factor of the QR of
+        # √W·X (Fisher working weights), so the statistic's inner product
+        # is X'WX, not X'X. hea keeps n-row √W·X blocks instead of the
+        # global R factor; ``qr`` inside ``_test_stat`` reduces either to
+        # the same R'R = (X'WX)[block]. ``_fisher_w`` is None ↔ W = I
+        # (Gaussian-identity), where weighting is a no-op.
+        if self._fisher_w is not None:
+            sqw = np.sqrt(self._fisher_w)
+            X_w = self._X_full * sqw[:, None]
+        else:
+            X_w = self._X_full
+        rows: list[tuple[str, float, float, float, float]] = []
+        for m_idx, (b, (a, bcol)) in enumerate(
+            zip(self._blocks, self._block_col_ranges)
+        ):
+            beta_b = self._beta[a:bcol]
+            Vp_b = self.Vp[a:bcol, a:bcol]
+            X_b = X_w[:, a:bcol]
+            edf_b = float(self.edf[a:bcol].sum())
+            edf1_b = (
+                float(self.edf1[a:bcol].sum())
+                if hasattr(self, "edf1") else edf_b
+            )
+            p_b = bcol - a
+            if b.S:
+                S_sum = b.S[0].copy()
+                for S_i in b.S[1:]:
+                    S_sum = S_sum + S_i
+                rank_S = int(np.linalg.matrix_rank(S_sum))
+                null_dim = p_b - rank_S
+            else:
+                null_dim = p_b
+            if null_dim == 0:
+                # reTest path — penalty is full-rank on the smooth's block.
+                stat, p_val, ref_df = self._re_test(m_idx, beta_b, Vp_b)
+            else:
+                rank_in = float(min(p_b, edf1_b))
+                # mgcv summary.gam: rdf <- residual.df if est.disp else -1.
+                # res_df <= 0 in testStat means "scale fixed" (chi² ref).
+                res_df = -1.0 if scale_known else float(self.df_residuals)
+                stat, p_val, ref_df = self._test_stat(
+                    X_b, Vp_b, beta_b, rank_in, res_df=res_df,
+                )
+            col_stat = stat if scale_known else stat / max(ref_df, 1e-8)
+            rows.append(
+                (b.label, edf_b, float(ref_df), float(col_stat), float(p_val))
+            )
+        return rows
 
     def _compute_edf12(self, rho: np.ndarray, fit: "_FitState",
                        sigma_squared: float, A_inv: np.ndarray,
@@ -3820,6 +4109,50 @@ class gam:
         # the trailing axis of both M operands.
         Vc2 = np.einsum("ij,iac,jbc->ab", Vr, M, M)
         return sigma_squared * Vc2
+
+    def _estimate_rank(self) -> int:
+        """mgcv's fitting-rank estimate ``oo$rank.est`` — the
+        identifiability check from ``gdiPK`` (gdi.c:1740-1758) on the
+        augmented penalized problem.
+
+        Stack the R factor of QR(√W·X) on the *balanced* penalty square
+        root Eb (``totalPenaltySpace``, gam.fit3.r:2661:
+        ``St = Σ_k S_k/‖S_k‖_F`` — smoothing-parameter independent, so
+        identifiability doesn't drift with λ̂), each part divided by its
+        own Frobenius norm so neither dominates; pivoted QR of the stack;
+        then Cline-condition rank reduction at mgcv's
+        ``rank.tol = √eps`` (gam.control default) via :func:`_R_rank`.
+        """
+        X = self._X_full
+        p = self.p
+        if self._fisher_w is not None:
+            Xw = X * np.sqrt(self._fisher_w)[:, None]
+        else:
+            Xw = X
+        R1 = np.linalg.qr(Xw, mode="r")
+        # Balanced total penalty St = Σ_k S_k/‖S_k‖_F (embedded per slot).
+        St = np.zeros((p, p))
+        for slot in self._slots:
+            a, b = slot.col_start, slot.col_end
+            nrm = float(np.sqrt(np.sum(slot.S * slot.S)))
+            if nrm > 0:
+                St[a:b, a:b] += slot.S / nrm
+        if np.any(St):
+            ev, Y = np.linalg.eigh(0.5 * (St + St.T))
+            keep = ev > ev.max() * np.finfo(float).eps ** 0.66
+            E = (Y[:, keep] * np.sqrt(ev[keep])).T        # E'E = St
+        else:
+            E = np.zeros((0, p))
+        R1_norm = float(np.sqrt(np.sum(R1 * R1)))
+        parts = [R1 / R1_norm if R1_norm > 0 else R1]
+        if E.shape[0] > 0:
+            E_norm = float(np.sqrt(np.sum(E * E)))
+            if E_norm > 0:
+                parts.append(E / E_norm)
+        aug = np.vstack(parts)
+        from scipy.linalg import qr as _scipy_qr
+        R_piv, _ = _scipy_qr(aug, mode="r", pivoting=True)
+        return _R_rank(R_piv)
 
     def _compute_vcomp(self) -> pl.DataFrame:
         """Build the variance-component table mgcv calls ``gam.vcomp``.
@@ -5078,6 +5411,10 @@ class gam:
             f"Formula: {self.formula}",
             "",
         ]
+        # mgcv print.summary.gam (mgcv.r:4089): show the rank line only
+        # when the model is rank deficient.
+        if self.rank is not None and self.rank < self.p:
+            out.insert(-1, f"Rank: {self.rank}/{self.p}")
 
         # -- parametric table (lm-style) -----------------------------------
         # mgcv (summary.gam): when scale.estimated, t/Pr(>|t|) on residual.df;
@@ -5123,75 +5460,17 @@ class gam:
             out.append("")
 
         # -- smooth-edf table ----------------------------------------------
-        # mgcv summary.gam dispatches per-smooth on null.space.dim and on
-        # scale.estimated. Under select=TRUE the null-space penalty makes
-        # null.space.dim == 0 for every smooth ⇒ reTest path (Wood 2013).
-        # Without select=TRUE we fall back to testStat (the type=0 fractional
-        # rank routine, _test_stat_type0). Output column header switches
-        # F↔Chi.sq, and Ref.df reports the rank actually used in the test.
+        # Rows from ``_smooth_significance_rows`` — reTest / testStat
+        # dispatch on null.space.dim, mixture p-values, Chi.sq↔F column by
+        # ``family.scale_known``. Ref.df reports the rank used in the test.
         if self._blocks:
             out.append("Approximate significance of smooth terms:")
-            rows_label: list[str] = []
-            rows_edf:   list[float] = []
-            rows_refdf: list[float] = []
-            rows_stat:  list[float] = []
-            rows_p:     list[float] = []
-            for m_idx, (b, (a, bcol)) in enumerate(
-                zip(self._blocks, self._block_col_ranges)
-            ):
-                beta_b = self._beta[a:bcol]
-                Vp_b   = self.Vp[a:bcol, a:bcol]
-                X_b    = self._X_full[:, a:bcol]
-                edf_b  = float(self.edf[a:bcol].sum())
-                edf1_b = float(self.edf1[a:bcol].sum()) if hasattr(self, "edf1") else edf_b
-                p_b = bcol - a
-                # Per-smooth dispatch: mgcv summary.gam line 4023-4024 uses
-                # ``reTest`` whenever ``smooth$null.space.dim==0`` (random-
-                # effect-style test, Wood 2013 Biometrika). That covers any
-                # smooth whose combined penalty has full rank — re/fs/sz, the
-                # cyclic bases (cc/cp), and (under select=TRUE) every smooth
-                # after null-space penalty augmentation. testStat is for
-                # smooths with a non-trivial unpenalized null space.
-                if b.S:
-                    S_sum = b.S[0].copy()
-                    for S_i in b.S[1:]:
-                        S_sum = S_sum + S_i
-                    rank_S = int(np.linalg.matrix_rank(S_sum))
-                    null_dim = p_b - rank_S
-                else:
-                    null_dim = p_b
-                if null_dim == 0:
-                    # reTest path — penalty is full-rank on the smooth's block.
-                    stat, p_val, ref_df = self._re_test(m_idx, beta_b, Vp_b)
-                    if scale_known:
-                        # Chi.sq column = stat. F column = stat / rank.
-                        col_stat = stat
-                    else:
-                        col_stat = stat / max(ref_df, 1e-8)
-                else:
-                    rank_in = float(min(p_b, edf1_b))
-                    Tr, ref_df = self._test_stat_type0(X_b, Vp_b, beta_b, rank_in)
-                    if scale_known:
-                        # mgcv testStat with res.df=-1 uses chi^2 with df=rank
-                        # for integer rank (the fractional path averages two
-                        # psum_chisq calls; we approximate with rounded rank
-                        # for known-scale select=False — rare in practice).
-                        col_stat = Tr
-                        df_int = max(1, int(round(ref_df)))
-                        from scipy.stats import chi2 as _chi2_dist
-                        p_val = float(_chi2_dist.sf(Tr, df_int))
-                    else:
-                        F = Tr / max(ref_df, 1e-8)
-                        col_stat = F
-                        p_val = (
-                            float(f_dist.sf(F, ref_df, self.df_residuals))
-                            if self.df_residuals > 0 else float("nan")
-                        )
-                rows_label.append(b.label)
-                rows_edf.append(edf_b)
-                rows_refdf.append(float(ref_df))
-                rows_stat.append(col_stat)
-                rows_p.append(p_val)
+            sm_rows = self._smooth_significance_rows()
+            rows_label = [r[0] for r in sm_rows]
+            rows_edf   = [r[1] for r in sm_rows]
+            rows_refdf = [r[2] for r in sm_rows]
+            rows_stat  = [r[3] for r in sm_rows]
+            rows_p     = [r[4] for r in sm_rows]
             sig = significance_code(rows_p)
             stat_col = "Chi.sq" if scale_known else "F"
             sm_tbl = pl.DataFrame({
@@ -5432,7 +5711,8 @@ class gam:
                 out.append(
                     f"{pd_text}eigenvalue range [{ev_min:.7g},{ev_max:.7g}]."
                 )
-        out.append(f"Model rank = {self.p} / {self.p}")
+        rank_disp = self.rank if self.rank is not None else self.p
+        out.append(f"Model rank = {rank_disp} / {self.p}")
         out.append("")
 
         # --- basis dimension check ---
@@ -6447,6 +6727,58 @@ def _sym_rank(S: np.ndarray) -> int:
         return 0
     tol = max(1e-12, w.max() * 1e-10) if w.max() > 0 else 1e-12
     return int(np.sum(w > tol))
+
+
+def _r_cond(R: np.ndarray) -> float:
+    """mgcv ``R_cond`` (gdi.c:2851) — ∞-norm condition estimate of an
+    upper-triangular ``R``, by the Cline-Moler-Stewart-Wilkinson (1979)
+    growth recursion (Golub & Van Loan 1996): solve ``R'y = ±e`` choosing
+    each sign to maximize growth, then ``κ ≈ ‖R‖_∞ · ‖y‖_∞``.
+    """
+    c = R.shape[1]
+    if c == 0:
+        return 0.0
+    y = np.zeros(c)
+    p_acc = np.zeros(c)
+    y_inf = 0.0
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        for k in range(c - 1, -1, -1):
+            yp = (1.0 - p_acc[k]) / R[k, k]
+            ym = (-1.0 - p_acc[k]) / R[k, k]
+            pp = p_acc[:k] + R[:k, k] * yp
+            pm = p_acc[:k] + R[:k, k] * ym
+            if abs(yp) + float(np.abs(pp).sum()) >= \
+                    abs(ym) + float(np.abs(pm).sum()):
+                y[k] = yp
+                p_acc[:k] = pp
+            else:
+                y[k] = ym
+                p_acc[:k] = pm
+            kappa = abs(y[k])
+            if kappa > y_inf:
+                y_inf = kappa
+        R_inf = float(np.abs(np.triu(R[:c, :c])).sum(axis=1).max())
+    return R_inf * y_inf
+
+
+def _R_rank(R: np.ndarray,
+            tol: float = float(np.finfo(float).eps) ** 0.5) -> int:
+    """mgcv ``Rrank`` (mgcv.r:4-17): rank of a *pivoted* upper-triangular
+    ``R`` by reducing rank until the Cline condition estimate of the
+    leading block satisfies ``κ · tol < 1``.
+
+    ``tol`` defaults to mgcv's fitting-rank tolerance
+    (``gam.control(rank.tol = .Machine$double.eps^0.5)``, the value the C
+    rank-determination loop in ``gdiPK`` uses); ``Rrank`` the R function
+    defaults to ``eps^0.9`` for its own callers.
+    """
+    rank = min(R.shape[0], R.shape[1])
+    while rank > 0:
+        rcond = _r_cond(R[:rank, :rank])
+        if rcond * tol < 1.0:
+            break
+        rank -= 1
+    return rank
 
 
 class _PenaltySlot:

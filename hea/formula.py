@@ -7004,6 +7004,33 @@ def _summation_apply_blocks(
     return out
 
 
+def reject_unsupported_smooth_id(expanded: ExpandedFormula) -> None:
+    """Fit-time guard for mgcv's ``id=`` smoothing-parameter sharing.
+
+    mgcv links the smooths carrying the same ``id`` to ONE smoothing
+    parameter (a single λ multiplies several S_k, via the ``L`` matrix
+    mapping log sp); hea's penalty slots have no L-matrix layer, so a fit
+    would silently estimate independent λ's — a different model than the
+    formula asks for. Basis construction (X, S) is id-agnostic, so this
+    is enforced by the *fitters* (``gam``, ``bam``) right after formula
+    expansion, not by :func:`materialize_smooths` — mgcv-fixture parity
+    tests legitimately build bases for id-carrying smooths.
+
+    ``bs="sz"`` is exempt: its builder consumes ``id=`` for within-term
+    penalty merging (a documented sz-local meaning).
+    """
+    for call in expanded.smooths:
+        if call.kwargs.get("id") is None:
+            continue
+        if call.fn not in ("te", "ti", "t2") and _smooth_bs(call) == "sz":
+            continue
+        raise NotImplementedError(
+            f"{_smooth_label(call)}: id= (sharing one smoothing "
+            "parameter across smooths) is not implemented; each penalty "
+            "would silently get its own λ. Remove id=."
+        )
+
+
 def materialize_smooths(
     expanded: ExpandedFormula, data: pl.DataFrame,
     *, sparse_cons: int = 0, tero: bool = False, knots: dict | None = None,
@@ -7081,9 +7108,8 @@ def materialize_smooths(
     ) -> list[SmoothBlock]:
         if call.fn in ("te", "ti", "t2"):
             # mgcv threads the same knots= list to every marginal
-            # smooth.construct. hea consumes it for 1-D cr margins; tp margins
-            # ignore it (matches mgcv); cc/cp/ps/bs margins are unsupported in
-            # te and raise in the margin builder regardless of knots.
+            # smooth.construct. hea consumes it for 1-D cr margins; tp
+            # margins ignore it (matches mgcv).
             if call.fn == "te":
                 return _build_te_smooth(call, d, matrix_arg=matrix_arg, knots=knots)
             if call.fn == "ti":

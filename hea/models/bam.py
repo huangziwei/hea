@@ -69,6 +69,7 @@ from ..formula import (
     materialize_smooths,
     matrix_to_2d,
     prepare_design,
+    reject_unsupported_smooth_id,
 )
 from .gam import (
     _FitState,
@@ -1748,6 +1749,7 @@ class bam(gam):
 
         # ---- setup phase (mirror gam.__init__ lines 198-321) ---------------
         d = prepare_design(formula, data)
+        reject_unsupported_smooth_id(d.expanded)
         self._expanded = d.expanded
         _expr_map = _smooth_arg_expr_map(self._expanded)
         self.data = (

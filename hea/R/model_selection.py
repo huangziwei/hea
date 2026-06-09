@@ -1171,49 +1171,28 @@ def _anova_gam_single(m: gam):
         )
         out.append("")
 
-    # ---- Smooth significance table (same logic as gam.summary) ----------
+    # ---- Smooth significance table ---------------------------------------
+    # mgcv's single-model ``anova.gam`` returns ``summary.gam(object)``
+    # reclassed, so these rows must be identical to summary()'s — shared
+    # via ``gam._smooth_significance_rows`` (reTest/testStat dispatch,
+    # mixture p-values, Chi.sq↔F by ``family.scale_known``).
     if m._blocks:
-        from scipy.stats import f as _f_dist
-        rows_label: list[str] = []
-        rows_edf: list[float] = []
-        rows_refdf: list[float] = []
-        rows_F: list[float] = []
-        rows_p: list[float] = []
-        for b, (a, bcol) in zip(m._blocks, m._block_col_ranges):
-            beta_b = m._beta[a:bcol]
-            Vp_b = m.Vp[a:bcol, a:bcol]
-            X_b = m._X_full[:, a:bcol]
-            edf_b = float(m.edf[a:bcol].sum())
-            edf1_b = (
-                float(m.edf1[a:bcol].sum())
-                if hasattr(m, "edf1") else edf_b
-            )
-            p_b = bcol - a
-            rank = float(min(p_b, edf1_b))
-            Tr, ref_df = m._test_stat_type0(X_b, Vp_b, beta_b, rank)
-            F_smooth = Tr / max(ref_df, 1e-8)
-            p_smooth = (
-                float(_f_dist.sf(F_smooth, ref_df, m.df_residuals))
-                if m.df_residuals > 0 else float("nan")
-            )
-            rows_label.append(b.label)
-            rows_edf.append(edf_b)
-            rows_refdf.append(edf1_b)
-            rows_F.append(F_smooth)
-            rows_p.append(p_smooth)
-        sig_smooth = significance_code(rows_p)
+        sm_rows = m._smooth_significance_rows()
+        sig_smooth = significance_code([r[4] for r in sm_rows])
+        stat_col = "Chi.sq" if m.family.scale_known else "F"
         sm_tbl = pl.DataFrame({
-            "":        rows_label,
-            "edf":     format_signif(rows_edf, digits=digits),
-            "Ref.df":  format_signif(rows_refdf, digits=digits),
-            "F":       format_signif(rows_F, digits=digits),
-            "p-value": format_pval(rows_p, digits=_dig_tst(digits)),
+            "":        [r[0] for r in sm_rows],
+            "edf":     format_signif([r[1] for r in sm_rows], digits=digits),
+            "Ref.df":  format_signif([r[2] for r in sm_rows], digits=digits),
+            stat_col:  format_signif([r[3] for r in sm_rows], digits=digits),
+            "p-value": format_pval([r[4] for r in sm_rows],
+                                   digits=_dig_tst(digits)),
             " ":       sig_smooth,
         })
         out.append("Approximate significance of smooth terms:")
         out.append(format_df(
             sm_tbl,
-            align={c: "right" for c in ("edf", "Ref.df", "F", "p-value")},
+            align={c: "right" for c in ("edf", "Ref.df", stat_col, "p-value")},
         ))
         out.append("---")
         out.append(
