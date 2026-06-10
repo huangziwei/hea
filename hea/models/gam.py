@@ -8352,6 +8352,506 @@ def _gam_reparam(rS_list: list[np.ndarray], lsp: np.ndarray, deriv: int,
             "det": det, "det1": det1, "det2": det2}
 
 
+# ---------------------------------------------------------------------------
+# Sl penalty machinery — mgcv fast-REML.r (Sl.setup / ldetS / appliers).
+#
+# The block-diagonal penalty representation gam.fit5 (general families) and
+# bam's discrete fitter are built on. Port of the DEFAULT path only:
+# dense, cholesky=FALSE, no.repara=FALSE — exactly what estimate.gam uses
+# for general families (mgcv.r:1899 `Sl.setup(G)`). Out of scope (raise or
+# absent, never silent): sparse=TRUE, cholesky=TRUE (ldetSt/iniStrans/
+# singleStrans), paraPen blocks, non-linear (`updateS`) blocks, `nl.reg`.
+# hea-side simplifications that are exact for hea's smooth zoo: every block
+# is linear with repara=TRUE (mgcv sets repara=FALSE only for g.index
+# smooths, smooth.r:3819 — none exist here).
+#
+# Index convention: `start`/`stop` are 0-based half-open (Python slices);
+# mgcv's are 1-based inclusive. All other arithmetic is line-by-line.
+# ---------------------------------------------------------------------------
+
+
+class _SlBlock:
+    """One block of the block-diagonal total penalty (mgcv Sl[[b]])."""
+    __slots__ = ("start", "stop", "S", "rank", "repara", "lam", "D", "Di",
+                 "ind", "ldet", "rS", "Srp", "St")
+
+    def __init__(self, *, start: int, stop: int, S: list[np.ndarray],
+                 rank: int, repara: bool, lam: np.ndarray,
+                 D: np.ndarray | None, Di: np.ndarray | None,
+                 ind: np.ndarray, ldet: float = 0.0,
+                 rS: list[np.ndarray] | None = None):
+        self.start = start          # 0-based first coef of the block
+        self.stop = stop            # past-end (Python half-open)
+        self.S = S                  # penalties (projected if multi-S)
+        self.rank = rank
+        self.repara = repara
+        self.lam = lam              # per-S λ (setup scaling; ldetS updates)
+        self.D = D                  # diag vector or matrix transform
+        self.Di = Di
+        self.ind = ind              # boolean penalized mask within block
+        self.ldet = ldet            # initial-repara log-det correction
+        self.rS = rS                # multi-S roots (projected)
+        self.Srp = None             # per-term λᵢSᵢ in ldetS repara coords
+        self.St = None              # block total penalty at current λ
+
+    @property
+    def n_sp(self) -> int:
+        return len(self.S)
+
+    def pen_cols(self) -> np.ndarray:
+        """Absolute column indices of the penalized coefs of this block —
+        mgcv's ``(start:stop)[ind]``."""
+        return np.arange(self.start, self.stop)[self.ind]
+
+
+class _Sl:
+    """Container for the Sl block list + Sl.setup attributes."""
+    __slots__ = ("blocks", "E", "S", "lam0", "p")
+
+    def __init__(self, blocks: list[_SlBlock], E: np.ndarray,
+                 S: np.ndarray, lam0: np.ndarray, p: int):
+        self.blocks = blocks
+        self.E = E                  # attr(Sl,"E"): E'E = balanced penalty
+        self.S = S                  # attr(Sl,"S"): balanced total penalty
+        self.lam0 = lam0            # attr(Sl,"lambda")
+        self.p = p
+
+    def __len__(self) -> int:
+        return len(self.blocks)
+
+
+def _sl_setup(slots: list["_PenaltySlot"], p: int) -> _Sl:
+    """mgcv ``Sl.setup`` (fast-REML.r:68-429), default dense
+    non-Cholesky path.
+
+    ``slots`` are hea's per-penalty records; slots sharing one parent
+    SmoothBlock and column range form an mgcv "additive block" (tensor
+    smooths), everything else is a singleton. Multi-S blocks are split
+    into singletons when their penalty footprints don't overlap
+    (fast-REML.r:175-225), then each block is reparameterized: singletons
+    to partial identity (diagonal shortcut or eigen), multi-S projected
+    onto the range space of the unscaled total penalty (eigenvectors U,
+    rank-r leading block).
+    """
+    eps = float(np.finfo(float).eps)
+    # ---- group slots into blocks (per-smooth S lists) -------------------
+    groups: list[tuple[int, int, list[np.ndarray]]] = []
+    for slot in slots:
+        if (groups and groups[-1][0] == slot.col_start
+                and groups[-1][1] == slot.col_end):
+            groups[-1][2].append(np.asarray(slot.S, dtype=float))
+        else:
+            groups.append((slot.col_start, slot.col_end,
+                           [np.asarray(slot.S, dtype=float)]))
+
+    raw_blocks: list[tuple[int, int, list[np.ndarray]]] = []
+    for (a, b, S_list) in groups:
+        m = len(S_list)
+        if m == 1:
+            raw_blocks.append((a, b, S_list))
+            continue
+        # Split test (fast-REML.r:179-204): no overlap in penalty
+        # footprints; all-diagonal penalties may interleave.
+        nb = S_list[0].shape[0]
+        sbdiag = np.zeros(m, dtype=bool)
+        sb_start = np.zeros(m, dtype=int)
+        sb_stop = np.zeros(m, dtype=int)
+        for j, Sj in enumerate(S_list):
+            off_diag = Sj - np.diag(np.diag(Sj))
+            sbdiag[j] = float(np.sum(np.abs(off_diag))) == 0.0
+            nz = np.where(np.sum(np.abs(Sj), axis=1) > 0)[0]
+            sb_start[j], sb_stop[j] = int(nz[0]), int(nz[-1])
+        split_ok = True
+        for j in range(m):
+            itot = np.zeros(nb, dtype=bool)
+            if np.all(sbdiag):
+                for k in range(m):
+                    if k != j:
+                        itot[np.diag(S_list[k]) != 0] = True
+                if np.any(itot[np.diag(S_list[j]) != 0]):
+                    split_ok = False
+                    break
+            else:
+                for k in range(m):
+                    if k != j:
+                        itot[sb_start[k]:sb_stop[k] + 1] = True
+                if np.any(itot[sb_start[j]:sb_stop[j] + 1]):
+                    split_ok = False
+                    break
+        if split_ok:
+            for j in range(m):
+                ind = slice(sb_start[j], sb_stop[j] + 1)
+                raw_blocks.append((a + sb_start[j], a + sb_stop[j] + 1,
+                                   [S_list[j][ind, ind]]))
+        else:
+            raw_blocks.append((a, b, S_list))
+
+    # ---- per-block reparameterization + balanced E/S ---------------------
+    blocks: list[_SlBlock] = []
+    E = np.zeros((p, p))
+    S_bal = np.zeros((p, p))
+    lam0_parts: list[float] = []
+    for (a, b, S_list) in raw_blocks:
+        if len(S_list) == 1:
+            S1 = S_list[0]
+            k = S1.shape[0]
+            off_diag = S1 - np.diag(np.diag(S1))
+            if float(np.sum(np.abs(off_diag))) == 0.0:
+                # Diagonal S: D a vector (fast-REML.r:268-278).
+                Dv = np.diag(S1).copy()
+                ind = Dv > 0
+                rank = int(np.sum(ind))
+                Dv[ind] = 1.0 / np.sqrt(Dv[ind])
+                Dv[~ind] = 1.0
+                blk = _SlBlock(start=a, stop=b, S=[S1], rank=rank,
+                               repara=True, lam=np.ones(1), D=Dv, Di=None,
+                               ind=ind)
+            else:
+                # Eigen reparameterization (fast-REML.r:288-302).
+                w, U = np.linalg.eigh(0.5 * (S1 + S1.T))
+                w = w[::-1].copy()
+                U = U[:, ::-1].copy()
+                rank = int(np.sum(w > eps ** 0.8 * float(w.max())))
+                Dv = w.copy()
+                ind = np.zeros(k, dtype=bool)
+                ind[:rank] = True
+                Dv[ind] = 1.0 / np.sqrt(Dv[ind])
+                Dv[~ind] = 1.0
+                D = U * Dv[None, :]            # U %*% diag(D)
+                Di = U.T / Dv[:, None]         # diag(1/D) %*% t(U)
+                blk = _SlBlock(start=a, stop=b, S=[S1], rank=rank,
+                               repara=True, lam=np.ones(1), D=D, Di=Di,
+                               ind=ind)
+            # repara=TRUE contribution: identity at penalized positions
+            # (fast-REML.r:317-325).
+            pcols = blk.pen_cols()
+            E[pcols, pcols] = 1.0
+            S_bal[pcols, pcols] = 1.0
+            lam0_parts.append(1.0)
+            blocks.append(blk)
+        else:
+            # Multi-S block, non-Cholesky (fast-REML.r:371-404):
+            # eigen of the UNSCALED total, project into its range space.
+            m = len(S_list)
+            St = S_list[0].copy()
+            for Sj in S_list[1:]:
+                St = St + Sj
+            w, U = np.linalg.eigh(0.5 * (St + St.T))
+            w = w[::-1].copy()
+            U = U[:, ::-1].copy()
+            rank = int(np.sum(w > eps ** 0.8 * float(w.max())))
+            Ur = U[:, :rank]
+            S_proj = []
+            rS = []
+            for Sj in S_list:
+                bob = Ur.T @ Sj @ Ur
+                bob = 0.5 * (bob + bob.T)
+                S_proj.append(bob)
+                rS.append(_mroot(bob, rank))
+            ind = np.zeros(S_list[0].shape[0], dtype=bool)
+            ind[:rank] = True
+            blk = _SlBlock(start=a, stop=b, S=S_proj, rank=rank,
+                           repara=True, lam=np.ones(m), D=U, Di=None,
+                           ind=ind, rS=rS)
+            # Balanced E/S in the NEW (projected) coordinates
+            # (fast-REML.r:394-417): Σ S_j/‖S_j‖ over the projected S.
+            St2 = np.zeros((rank, rank))
+            for Sj in S_proj:
+                nrm = float(np.abs(Sj).sum(axis=0).max())  # R one-norm
+                St2 = St2 + Sj / nrm
+                lam0_parts.append(1.0 / nrm)
+            St2 = 0.5 * (St2 + St2.T)
+            Sr = _mroot(St2, rank).T
+            E[a:a + Sr.shape[0], a:a + Sr.shape[1]] = Sr
+            S_bal[a:a + rank, a:a + rank] = St2
+            blocks.append(blk)
+    return _Sl(blocks, E, S_bal, np.asarray(lam0_parts, dtype=float), p)
+
+
+def _sl_initial_repara(sl: _Sl, X: np.ndarray, inverse: bool = False,
+                       both_sides: bool = True, cov: bool = True):
+    """mgcv ``Sl.initial.repara`` (fast-REML.r:517-588): apply (or undo)
+    the Sl.setup block transforms. Forward: model matrix → repara'd
+    coordinates (X·D per block; both_sides also hits rows — for X'X-like
+    inputs). Inverse: coefficient vector / covariance matrix back to the
+    original coordinates (``cov=False`` uses Di — the proper inverse —
+    for plain matrices). Vector + ``both_sides=False`` + forward means
+    "X is a coefficient vector" (transform by Di)."""
+    X = np.array(X, dtype=float, copy=True)
+    if len(sl) == 0:
+        return X
+    for blk in sl.blocks:
+        if not blk.repara:
+            continue
+        ind = slice(blk.start, blk.stop)
+        D = blk.D
+        if inverse:
+            if X.ndim == 2:
+                if cov:
+                    if D.ndim == 2:
+                        if both_sides:
+                            X[ind, :] = D @ X[ind, :]
+                        X[:, ind] = X[:, ind] @ D.T
+                    else:
+                        X[:, ind] = X[:, ind] * D[None, :]
+                        if both_sides:
+                            X[ind, :] = D[:, None] * X[ind, :]
+                else:
+                    if D.ndim == 2:
+                        Di = D.T if blk.Di is None else blk.Di
+                        if both_sides:
+                            X[ind, :] = Di.T @ X[ind, :]
+                        X[:, ind] = X[:, ind] @ Di
+                    else:
+                        Di = 1.0 / D
+                        X[:, ind] = X[:, ind] * Di[None, :]
+                        if both_sides:
+                            X[ind, :] = Di[:, None] * X[ind, :]
+            else:
+                if D.ndim == 2:
+                    X[ind] = D @ X[ind]
+                else:
+                    X[ind] = D * X[ind]
+        else:
+            if X.ndim == 2:
+                if D.ndim == 2:
+                    if both_sides:
+                        X[ind, :] = D.T @ X[ind, :]
+                    X[:, ind] = X[:, ind] @ D
+                else:
+                    if both_sides:
+                        X[ind, :] = D[:, None] * X[ind, :]
+                    X[:, ind] = X[:, ind] * D[None, :]
+            else:
+                if both_sides:
+                    if D.ndim == 2:
+                        X[ind] = D.T @ X[ind]
+                    else:
+                        X[ind] = D * X[ind]
+                else:
+                    if D.ndim == 2:
+                        Di = D.T if blk.Di is None else blk.Di
+                        X[ind] = Di @ X[ind]
+                    else:
+                        X[ind] = X[ind] / D
+    return X
+
+
+def _ldet_s(sl: _Sl, rho: np.ndarray, fixed: np.ndarray | None = None,
+            root: bool = False, stot: bool = False,
+            deriv: int = 2) -> dict:
+    """mgcv ``ldetS`` (fast-REML.r:762-1013), default path
+    (cholesky=FALSE, repara=TRUE, dense): log|Sλ|₊ with first/second
+    ρ-derivatives, the per-block multi-S reparameterization list ``rp``,
+    the total-penalty root ``E`` (zero rows dropped) and total ``S``.
+
+    Singleton blocks contribute ``rank·ρ_k`` analytically (their penalty
+    is a partial identity after Sl.setup); multi-S blocks go through
+    ``_gam_reparam`` — the gam.fit3 ``gam.reparam`` similarity transform
+    already pinned against mgcv (§2.2). Updates each block's ``lam``,
+    ``St`` and ``Srp`` in place, mirroring the returned ``Sl``.
+    """
+    rho = np.asarray(rho, dtype=float)
+    n_sp_total = sum(blk.n_sp for blk in sl.blocks)
+    if fixed is None:
+        fixed = np.zeros(n_sp_total, dtype=bool)
+    n_deriv = int(np.sum(~fixed))
+    ldS = 0.0
+    d1 = np.zeros(n_deriv)
+    d2 = np.zeros((n_deriv, n_deriv))
+    rp: list[dict] = []
+    E = np.zeros((sl.p, sl.p)) if root else None
+    S = np.zeros((sl.p, sl.p)) if stot else None
+    k_sp = 0
+    k_deriv = 0
+    for blk in sl.blocks:
+        if blk.n_sp == 1:
+            # Linear singleton (fast-REML.r:832-898).
+            ldS += blk.ldet + rho[k_sp] * blk.rank
+            if not fixed[k_sp]:
+                d1[k_deriv] = float(blk.rank)
+                k_deriv += 1
+            pcols = blk.pen_cols()
+            if root:
+                E[pcols, pcols] = np.exp(rho[k_sp] * 0.5)
+            if stot:
+                S[pcols, pcols] = np.exp(rho[k_sp])
+            blk.lam = np.array([np.exp(rho[k_sp])])
+            k_sp += 1
+        else:
+            # Linear multi-S block (fast-REML.r:899-1007): gam.reparam.
+            m = blk.n_sp
+            ind_sp = slice(k_sp, k_sp + m)
+            ldS += blk.ldet
+            grp = _gam_reparam(blk.rS, rho[ind_sp], deriv)
+            blk.lam = np.exp(rho[ind_sp])
+            ldS += grp["det"]
+            free = ~fixed[ind_sp]
+            if deriv > 0:
+                det1 = np.asarray(grp["det1"], dtype=float).reshape(-1)[free]
+                nd = det1.size
+                if nd > 0:
+                    sl_d = slice(k_deriv, k_deriv + nd)
+                    d1[sl_d] = det1
+                    if deriv > 1:
+                        det2 = np.asarray(grp["det2"], dtype=float)
+                        d2[sl_d, sl_d] = det2[np.ix_(free, free)]
+                    k_deriv += nd
+            else:
+                k_deriv += int(np.sum(free))
+            rp.append({
+                "ind": blk.pen_cols(),
+                "Qs": grp["Qs"],
+                "repara": blk.repara,
+            })
+            blk.Srp = [
+                blk.lam[i] * (grp["rS"][i] @ grp["rS"][i].T)
+                for i in range(m)
+            ]
+            blk.St = grp["S"]
+            k_sp += m
+            if root:
+                Eb = grp["E"]
+                E[blk.start:blk.start + Eb.shape[0],
+                  blk.start:blk.start + Eb.shape[1]] = Eb
+            if stot:
+                Stb = grp["S"]
+                S[blk.start:blk.start + Stb.shape[0],
+                  blk.start:blk.start + Stb.shape[1]] = Stb
+    if root:
+        keep = np.sum(np.abs(E), axis=1) != 0
+        E = E[keep, :]
+    return {"ldetS": ldS, "ldet1": d1, "ldet2": d2, "rp": rp,
+            "E": E, "S": S}
+
+
+def _sl_repara(rp: list[dict], X: np.ndarray, inverse: bool = False,
+               both_sides: bool = True):
+    """mgcv ``Sl.repara`` (fast-REML.r:1087-1117): apply the ldetS
+    multi-S reparameterization. Forward: model matrix columns
+    ``X[:, ind] @ Qs`` (or β-vector ``Qs' β``); inverse: coef vector /
+    covariance back via ``Qs``."""
+    X = np.array(X, dtype=float, copy=True)
+    for r in rp:
+        if not r["repara"]:
+            continue
+        ind = r["ind"]
+        Qs = r["Qs"]
+        if inverse:
+            if X.ndim == 2:
+                if both_sides:
+                    X[ind, :] = Qs @ X[ind, :]
+                X[:, ind] = X[:, ind] @ Qs.T
+            else:
+                X[ind] = Qs @ X[ind]
+        else:
+            if X.ndim == 2:
+                X[:, ind] = X[:, ind] @ Qs
+            else:
+                X[ind] = Qs.T @ X[ind]
+    return X
+
+
+def _sl_repa(rp: list[dict], X: np.ndarray, l: int = 0, r: int = 0):
+    """mgcv ``Sl.repa`` (fast-REML.r:1062-1085): generalized applier.
+    ``l``/``r`` ∈ {−2,−1,0,1,2}: 0 = skip, 1 = D, 2 = D', −1 = Di,
+    −2 = Di', applied to rows (l) / columns (r). With Qs-only blocks
+    (the non-Cholesky path) D = Qs' and Di = Qs."""
+    X = np.array(X, dtype=float, copy=True)
+    for rec in rp:
+        if not rec["repara"]:
+            continue
+        ind = rec["ind"]
+        Qs = rec["Qs"]
+        def _T(code):
+            # D = t(Qs), Di = Qs (fast-REML.r:1067).
+            if code == 1:
+                return Qs.T
+            if code == 2:
+                return Qs
+            if code == -1:
+                return Qs
+            return Qs.T          # code == -2
+        if l:
+            T = _T(l)
+            if X.ndim == 2:
+                X[ind, :] = T @ X[ind, :]
+            else:
+                X[ind] = T @ X[ind]
+        if r:
+            T = _T(r)
+            if X.ndim == 2:
+                X[:, ind] = X[:, ind] @ T
+            else:
+                X[ind] = X[ind] @ T
+    return X
+
+
+def _sl_mult(sl: _Sl, A: np.ndarray, k: int | None = None,
+             full: bool = True):
+    """mgcv ``Sl.mult`` (fast-REML.r:1119-1225): ``Sλ @ A`` (``k=None``)
+    or ``λ_k S_k @ A`` for the k-th penalty (0-based here; mgcv's k is
+    1-based). ``full=False`` strips the zero rows. Assumes ``_ldet_s``
+    has run (block ``lam``/``St``/``Srp`` current)."""
+    A = np.asarray(A, dtype=float)
+    if len(sl) == 0:
+        return np.zeros_like(A)
+    if k is None:
+        B = np.zeros_like(A)
+        for blk in sl.blocks:
+            if blk.n_sp == 1:
+                pcols = blk.pen_cols()
+                B[pcols] = blk.lam[0] * A[pcols]
+            else:
+                pcols = blk.pen_cols()
+                B[pcols] = blk.St @ A[pcols]
+        return B
+    j = 0
+    for blk in sl.blocks:
+        for i in range(blk.n_sp):
+            if j == k:
+                pcols = blk.pen_cols()
+                if blk.n_sp == 1:
+                    part = blk.lam[0] * A[pcols]
+                else:
+                    part = (blk.Srp[i] @ A[pcols] if blk.Srp is not None
+                            else blk.lam[i] * (blk.S[i] @ A[pcols]))
+                if full:
+                    B = np.zeros_like(A)
+                    B[pcols] = part
+                    return B
+                return part
+            j += 1
+    raise IndexError(f"penalty index {k} out of range")
+
+
+def _sl_term_mult(sl: _Sl, A: np.ndarray, full: bool = False):
+    """mgcv ``Sl.termMult`` (fast-REML.r:1227-1327): the list
+    ``[λ_i S_i @ A]`` over every penalty. Returns ``(SA, inds)`` —
+    mgcv attaches ``ind`` as an attribute; here it's the parallel list
+    (None entries when ``full=True``)."""
+    A = np.asarray(A, dtype=float)
+    SA: list[np.ndarray] = []
+    inds: list[np.ndarray | None] = []
+    for blk in sl.blocks:
+        pcols = blk.pen_cols()
+        for i in range(blk.n_sp):
+            if blk.n_sp == 1:
+                part = blk.lam[0] * A[pcols]
+            else:
+                part = (blk.Srp[i] @ A[pcols] if blk.Srp is not None
+                        else blk.lam[i] * (blk.S[i] @ A[pcols]))
+            if full:
+                B = np.zeros_like(A)
+                B[pcols] = part
+                SA.append(B)
+                inds.append(None)
+            else:
+                SA.append(part)
+                inds.append(pcols)
+    return SA, inds
+
+
 class _PenaltySlot:
     """One smoothing-param slot: the k×k S matrix and its col range in the
     full design. Each SmoothBlock contributes len(S_list) slots."""

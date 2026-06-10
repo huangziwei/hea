@@ -3106,3 +3106,139 @@ def test_nb_fixed_theta_matches_mgcv():
     np.testing.assert_allclose(m.sp[0], 0.07201056219, rtol=1e-4)
     np.testing.assert_allclose(float(np.sum(m.edf)), 5.7755018202,
                                rtol=0, atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Sl penalty machinery (mgcv fast-REML.r) — §5.3 prerequisite 3.
+# mgcv 1.9-4 references via gam(fit=FALSE) + mgcv:::Sl.setup / mgcv:::ldetS
+# on identical data (full-precision CSV).
+# ---------------------------------------------------------------------------
+
+def _sl_fixture():
+    rng = np.random.default_rng(5)
+    n = 120
+    x = rng.uniform(0, 1, n)
+    z = rng.uniform(0, 1, n)
+    g = rng.integers(0, 6, n)
+    y = np.sin(2 * np.pi * x) + 0.3 * z + rng.normal(0, 0.3, n)
+    return pl.DataFrame({
+        "x": x, "z": z,
+        "g": pl.Series(g.astype(str)).cast(pl.Categorical),
+        "y": y,
+    })
+
+
+def test_sl_setup_ldet_s_match_mgcv():
+    # te-only (no gam.side, so the penalty basis is representation-
+    # identical to mgcv's): every quantity pins exactly. Plus the t2
+    # split-into-singletons path (disjoint penalty footprints).
+    from hea.models.gam import _sl_setup, _ldet_s
+    df = _sl_fixture()
+    m = gam("y ~ te(x, z, k=5)", df, method="REML")
+    sl = _sl_setup(m._slots, m.p)
+    ld = _ldet_s(sl, np.array([-1.0, 1.5]), root=True, stot=True, deriv=2)
+    np.testing.assert_allclose(ld["ldetS"], 12.3869335721, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(ld["ldet1"], [7.8268755622, 13.1731244378],
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(sl.lam0, [0.1843318201, 0.1952835412],
+                               rtol=1e-9)
+    np.testing.assert_allclose(float(np.linalg.norm(m._slots[0].S)),
+                               9.0350713860, rtol=1e-9)
+
+    m2 = gam("y ~ t2(x, z, k=4)", df, method="REML")
+    sl2 = _sl_setup(m2._slots, m2.p)
+    # mgcv splits t2's three disjoint-footprint penalties into three
+    # singleton blocks (1-based inclusive (2,5),(6,9),(10,13), rank 4).
+    assert [(b.start, b.stop, b.n_sp, b.rank) for b in sl2.blocks] == [
+        (1, 5, 1, 4), (5, 9, 1, 4), (9, 13, 1, 4)]
+    ld2 = _ldet_s(sl2, np.array([0.2, -0.7, 1.1]), deriv=1)
+    np.testing.assert_allclose(ld2["ldetS"], 2.4, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(ld2["ldet1"], [4.0, 4.0, 4.0],
+                               rtol=0, atol=1e-12)
+
+
+def test_sl_mixed_model_matches_mgcv_geometry():
+    # s(x) + te(x,z) + s(g, bs="re"): gam.side rotates the te penalties
+    # into a different (equally valid) basis than mgcv's, so raw block
+    # log-dets shift by a transform constant that cancels in the REML
+    # criterion (fast-REML.r:294-296's own design). Pin the basis-
+    # invariant quantities: block geometry/ranks, ldet1, ldet2, E rows.
+    from hea.models.gam import _sl_setup, _ldet_s
+    df = _sl_fixture()
+    m = gam('y ~ s(x) + te(x, z, k=5) + s(g, bs="re")', df, method="REML")
+    sl = _sl_setup(m._slots, m.p)
+    assert [(b.start, b.stop, b.n_sp, b.rank) for b in sl.blocks] == [
+        (1, 10, 1, 8), (10, 33, 2, 21), (33, 39, 1, 6)]
+    ld = _ldet_s(sl, np.array([0.5, -1.0, 1.5, 0.3]),
+                 root=True, stot=True, deriv=2)
+    np.testing.assert_allclose(
+        ld["ldet1"], [8.0, 7.8268755622, 13.1731244378, 6.0],
+        rtol=0, atol=1e-8)
+    np.testing.assert_allclose(
+        np.diag(ld["ldet2"]), [0.0, 0.9176631008, 0.9176631008, 0.0],
+        rtol=0, atol=1e-8)
+    np.testing.assert_allclose(ld["ldet2"][1, 2], -0.9176631008,
+                               rtol=0, atol=1e-8)
+    assert ld["E"].shape[0] == 35
+
+
+def test_sl_machinery_invariants():
+    # Coordinate-free self-consistency: E'E = S_total; ldetS equals the
+    # dense log pseudo-determinant of S_total; ldet1/ldet2 match central
+    # differences; Sl.mult == Σ Sl.termMult == S_total @ A; Xβ is
+    # invariant under both reparameterizations; β round-trips.
+    from hea.models.gam import (_sl_setup, _ldet_s, _sl_initial_repara,
+                                _sl_repara, _sl_mult, _sl_term_mult)
+    df = _sl_fixture()
+    m = gam('y ~ s(x) + te(x, z, k=5) + s(g, bs="re")', df, method="REML")
+    sl = _sl_setup(m._slots, m.p)
+    rho = np.array([0.5, -1.0, 1.5, 0.3])
+    ld = _ldet_s(sl, rho, root=True, stot=True, deriv=2)
+
+    np.testing.assert_allclose(ld["E"].T @ ld["E"], ld["S"], atol=1e-10)
+    w = np.linalg.eigvalsh(0.5 * (ld["S"] + ld["S"].T))
+    r_tot = sum(b.rank for b in sl.blocks)
+    ld_dense = float(np.sum(np.log(np.sort(w)[::-1][:r_tot])))
+    np.testing.assert_allclose(ld["ldetS"], ld_dense, rtol=0, atol=1e-8)
+
+    h = 1e-6
+    n_sp = rho.size
+    fd1 = np.zeros(n_sp)
+    fdH = np.zeros((n_sp, n_sp))
+    for k in range(n_sp):
+        rp_ = rho.copy(); rp_[k] += h
+        rm_ = rho.copy(); rm_[k] -= h
+        fd1[k] = (_ldet_s(_sl_setup(m._slots, m.p), rp_, deriv=0)["ldetS"]
+                  - _ldet_s(_sl_setup(m._slots, m.p), rm_, deriv=0)["ldetS"]
+                  ) / (2 * h)
+        gp = _ldet_s(_sl_setup(m._slots, m.p), rp_, deriv=1)["ldet1"]
+        gm = _ldet_s(_sl_setup(m._slots, m.p), rm_, deriv=1)["ldet1"]
+        fdH[:, k] = (gp - gm) / (2 * h)
+    np.testing.assert_allclose(ld["ldet1"], fd1, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(ld["ldet2"], fdH, rtol=0, atol=1e-6)
+
+    rng = np.random.default_rng(11)
+    A = rng.normal(size=(m.p, 3))
+    SA, inds = _sl_term_mult(sl, A, full=True)
+    np.testing.assert_allclose(_sl_mult(sl, A), sum(SA), atol=1e-12)
+    np.testing.assert_allclose(_sl_mult(sl, A), ld["S"] @ A, atol=1e-10)
+    for k in range(n_sp):
+        np.testing.assert_allclose(_sl_mult(sl, A, k=k), SA[k], atol=1e-12)
+    SA_s, inds_s = _sl_term_mult(sl, A, full=False)
+    for k in range(n_sp):
+        np.testing.assert_allclose(SA_s[k], SA[k][inds_s[k]], atol=1e-12)
+
+    beta = rng.normal(size=m.p)
+    X = m._X_full
+    Xr = _sl_initial_repara(sl, X, both_sides=False)
+    br = _sl_initial_repara(sl, beta, both_sides=False)
+    np.testing.assert_allclose(X @ beta, Xr @ br, atol=1e-8)
+    Xrr = _sl_repara(ld["rp"], Xr)
+    brr = _sl_repara(ld["rp"], br)
+    np.testing.assert_allclose(Xr @ br, Xrr @ brr, atol=1e-8)
+    np.testing.assert_allclose(_sl_repara(ld["rp"], brr, inverse=True), br,
+                               atol=1e-10)
+    # initial-repara inverse on a coefficient vector recovers the
+    # original-coordinate β: b_orig = D·b_repara.
+    b_back = _sl_initial_repara(sl, br, inverse=True)
+    np.testing.assert_allclose(b_back, beta, atol=1e-8)
