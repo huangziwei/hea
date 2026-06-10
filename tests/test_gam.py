@@ -2831,6 +2831,11 @@ def test_weights_gaussian_reml_matches_mgcv():
                                [1.721944024841, 0.350544878214], rtol=1e-6)
     np.testing.assert_allclose(vc0["upper"].to_numpy(),
                                [5.33449504015, 0.44214358259], rtol=1e-6)
+    # sp.vcov (single-formula path: the (ρ, log φ) outer Hessian) —
+    # solve(hess + reg) with mgcv's elementwise reg (mgcv.r:4221-4234).
+    np.testing.assert_allclose(
+        m.sp_vcov(),
+        [[0.34536789, 0.01333525], [0.01333525, 0.01402823]], rtol=1e-5)
 
 
 def test_weights_unit_weights_are_bit_identical():
@@ -3676,6 +3681,59 @@ def test_gaulss_free_fit_through_gam_matches_mgcv():
     assert m3.method == "REML"
     np.testing.assert_allclose(m3.REML_criterion / 2, 200.60535650,
                                rtol=0, atol=1e-5)
+
+
+def test_gaulss_post_proc_surface_matches_mgcv():
+    # gam.fit5.post.proc (gam.fit4.r:1571-1719): Vp/Vc/Ve/edf/edf1/edf2
+    # with both reparameterizations undone; AIC/logLik (m$aic = −2l +
+    # 2Σedf, df = Σedf2 capped at #coef — logLik.gam); gam.vcomp (the
+    # slice-(i) S.scale rescale rides through the multi-formula slots;
+    # hea appends its conventional scale≡1 row, mgcv's gaulss table has
+    # no scale row); sp.vcov = solve(hess + reg) with mgcv's literal
+    # elementwise regularizer.
+    from hea.family import gaulss
+    df = _fit5_fixture()
+    m = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+            method="REML")
+    np.testing.assert_allclose(m.edf_total, 14.34142983, rtol=0,
+                               atol=1e-5)
+    np.testing.assert_allclose(
+        m.edf[:4], [1.0, 1.0, 0.98952005, 1.05990647], rtol=0,
+        atol=1e-6)
+    np.testing.assert_allclose(
+        np.diag(m.Vp)[:4],
+        [0.0024479142, 0.0079576104, 0.0608089139, 0.3963172515],
+        rtol=1e-5)
+    np.testing.assert_allclose(
+        np.diag(m.Vc)[:4],
+        [0.0024540885, 0.0079894831, 0.0620244290, 0.4101259669],
+        rtol=1e-5)
+    np.testing.assert_allclose(np.diag(m.Ve)[:2],
+                               [0.0024137837, 0.0078776141], rtol=1e-6)
+    np.testing.assert_allclose(m.edf1_total, 16.58127221, rtol=0,
+                               atol=1e-5)
+    np.testing.assert_allclose(m.edf2_total, 14.99414695, rtol=0,
+                               atol=1e-5)
+    np.testing.assert_allclose(m.AIC, 373.12406808, rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.loglike, -171.56788708, rtol=0,
+                               atol=1e-5)
+    np.testing.assert_allclose(m.npar, 14.994147, rtol=0, atol=1e-4)
+    vc = m.vcomp
+    assert vc["name"].to_list() == ["s(x)", "s.1(z)", "scale"]
+    np.testing.assert_allclose(vc["std_dev"].to_numpy()[:2],
+                               [10.4411751946, 11.9261212019], rtol=1e-5)
+    np.testing.assert_allclose(vc["lower"].to_numpy()[:2],
+                               [5.78885425909, 5.29522532599], rtol=1e-5)
+    np.testing.assert_allclose(vc["upper"].to_numpy()[:2],
+                               [18.8324208151, 26.8604937783], rtol=1e-5)
+    np.testing.assert_allclose(
+        m.sp_vcov(),
+        [[0.36210767, 0.01324865], [0.01324865, 0.68594051]], rtol=1e-4)
+    # fixed-sp fits carry no sp-uncertainty: Vc ≡ Vp, no sp covariance
+    m2 = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+             method="REML", sp=np.array([2.0, 0.5]))
+    assert m2.sp_vcov() is None
+    np.testing.assert_allclose(m2.Vc, m2.Vp, rtol=0, atol=0)
 
 
 def test_gaulss_fixed_sp_through_gam_matches_mgcv():

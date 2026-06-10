@@ -3545,6 +3545,201 @@ class gam:
                               if pp.get("null_deviance") is not None
                               else float("nan"))
 
+        # ---- gam.fit5.post.proc + the estimate.gam tail ----------------
+        mv = self._fit5_post_proc(fit)
+        self.Vp = mv["Vp"]
+        self.Ve = mv["Ve"]
+        self.Vc = mv["Vc"]
+        self._V_sp = mv["V_sp"]
+        self._R_fit5 = mv["R"]
+        self.edf = mv["edf"]
+        self.edf1 = mv["edf1"]
+        self.edf2 = mv["edf2"]
+        self.edf_total = float(np.sum(self.edf))
+        self.edf1_total = float(np.sum(self.edf1))
+        self.edf2_total = float(np.sum(self.edf2))
+        se = np.sqrt(np.maximum(np.diag(self.Vp), 0.0))
+        self._se = se
+        self._beta_report = coefs
+        self._se_report = se
+        self.se_bhat = _row_frame(se, names)
+        self.df_residuals = float(n) - self.edf_total
+        # per-coef Wald (z — the scale is known ≡ 1 for general
+        # families, so summary's p.table uses N(0,1) like mgcv).
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t_stats = np.divide(coefs, se,
+                                out=np.full_like(coefs, np.nan),
+                                where=se > 0)
+        self.t_values = _row_frame(t_stats, names)
+        self.p_values = _row_frame(2 * norm.sf(np.abs(t_stats)), names)
+        # mgcv's m$aic = fit5's −2l + 2Σedf (mgcv.r:1843); AIC()'s df is
+        # Σedf2 capped at #coef (logLik.gam; sc.p = 0 — scale fixed).
+        mgcv_aic = fit["aic"] + 2.0 * self.edf_total
+        log_lik = self.edf_total - 0.5 * mgcv_aic        # = fit l
+        df_for_aic = min(self.edf2_total, float(self.p))
+        self.loglike = float(log_lik)
+        self.logLik = self.loglike
+        self.npar = float(df_for_aic)
+        self.AIC = -2.0 * log_lik + 2.0 * df_for_aic
+        self.BIC = -2.0 * log_lik + float(np.log(n)) * df_for_aic
+        self._mgcv_aic = float(mgcv_aic)
+        # vcomp machinery: the outer REML2 Hessian doubles as mgcv's
+        # outer.info$hess (working ρ-only space — the layout
+        # _compute_vcomp expects for scale-known fits); σ ≡ 1.
+        self.sigma = 1.0
+        self._H_aug = (np.asarray(self._outer_info["hess"], dtype=float)
+                       if self._outer_info.get("hess") is not None
+                       and np.size(self._outer_info.get("hess")) > 0
+                       else None)
+        self.vcomp = self._compute_vcomp()
+
+    def _fit5_post_proc(self, fit: dict) -> dict:
+        """mgcv ``gam.fit5.post.proc`` (gam.fit4.r:1571-1719, the
+        edge.correct=FALSE path).
+
+        From the converged gam.fit5 state (fit parameterization,
+        possibly with dropped parameters): the unpivoted root R of
+        −lbb (nearest-PSD eigen retry when the likelihood Hessian
+        isn't +ve definite — which also rebuilds the penalized factor
+        and REPLACES fit's L for Vb), Vb = Hp⁻¹ through that factor,
+        zero-row reinsertion for dropped coefficients, the
+        sp-uncertainty corrections (Vc = Vb + db·hess⁺·db′ + the
+        Vb.corr factor-derivative term — "NOTE: unscaled", σ²≡1) with
+        V.sp at the 1/50-regularized prior, both reparameterizations
+        undone, then F = Vb·R′R, Ve = F·Vb, edf/edf1/edf2 with the
+        Σedf2 ≤ Σedf1 cap.
+        """
+        sl = self._sl
+        lbb = -np.asarray(fit["lbb"], dtype=float)
+        p = lbb.shape[0]
+        D = np.asarray(fit["D"], dtype=float)
+        L_fac = fit["L"]
+        piv = fit["piv"]
+        ipiv = fit["ipiv"]
+
+        # pre-condition lbb before testing rank (gam.fit4.r:1597)
+        lbb_pre = D * (D * lbb).T
+        R_f, piv_R, rank_R = _pivoted_chol(lbb_pre)
+        if rank_R < p:
+            # not +ve definite: nearest +ve semi-definite retry,
+            # rebuilding the penalized factor as well (1601-1626)
+            tol, dtol = 0.0, 1e-7
+            ev, V = np.linalg.eigh(lbb_pre)
+            mev = float(ev.max())
+            while True:
+                ev[ev < tol * mev] = tol * mev
+                R_f = np.sqrt(ev)[:, None] * V.T
+                lbb_pre = R_f.T @ R_f
+                Hp = lbb_pre + D * (D * np.asarray(fit["St"],
+                                                   dtype=float)).T
+                L_new, piv_n, rank_n = _pivoted_chol(Hp)
+                if rank_n == p:
+                    R_f = R_f / D[None, :]      # R'R = lbb (original)
+                    L_fac, piv = L_new, piv_n
+                    ipiv = np.empty_like(piv)
+                    ipiv[piv] = np.arange(p)
+                    break
+                tol += dtol
+                dtol *= 10.0
+        else:
+            ipiv_R = np.empty_like(piv_R)
+            ipiv_R[piv_R] = np.arange(p)
+            R_f = R_f[:, ipiv_R] / D[None, :]   # R'R = lbb (original)
+
+        # Vb = D·Hp_pre⁻¹·D through the (possibly rebuilt) factor
+        Dm = np.diag(D)[piv, :]
+        sol = solve_triangular(L_fac, Dm, lower=False, trans="T")[ipiv, :]
+        Vb = sol.T @ sol
+
+        bdrop = np.asarray(fit["bdrop"], dtype=bool)
+        if bdrop.any():                          # reinsert zero rows
+            q = bdrop.size
+            ibd = ~bdrop
+            Vt, Vb = Vb, np.zeros((q, q))
+            Vb[np.ix_(ibd, ibd)] = Vt
+            Rt, R_f = R_f, np.zeros((q, q))
+            R_f[np.ix_(ibd, ibd)] = Rt
+
+        hess = self._outer_info.get("hess")
+        have_corr = (hess is not None and np.size(hess) > 0
+                     and fit.get("db_drho") is not None)
+        V_sp = None
+        Vr = None
+        Vc_corr = 0.0
+        if have_corr:
+            hess = np.asarray(hess, dtype=float)
+            db = np.asarray(fit["db_drho"], dtype=float)
+            if self._L is not None:              # derivs w.r.t. working
+                db = db @ self._L
+            ev_h, V_h = np.linalg.eigh(hess)
+            nonpos = ev_h <= 0
+            d = ev_h.copy()
+            d[nonpos] = 0.0
+            d[~nonpos] = 1.0 / np.sqrt(d[~nonpos])
+            db = _sl_inirep(sl, db, l=1, r=0)    # undo initial repara
+            tmp = (d[:, None] * V_h.T) @ db.T
+            Vc_corr = tmp.T @ tmp                # first correction
+            d2 = ev_h.copy()
+            d2[nonpos] = 0.0
+            d2 = 1.0 / np.sqrt(d2 + 1.0 / 50.0)  # k=1 prior (1671)
+            Vr = (V_h * (d2 * d2)) @ V_h.T
+            V_sp = Vr
+
+        Vb = _sl_repara(fit["rp"], Vb, inverse=True)
+        Vb = _sl_initial_repara(sl, Vb, inverse=True)
+        Vc = Vb + Vc_corr
+        R_f = _sl_repa(fit["rp"], R_f, r=1)
+        R_f = _sl_initial_repara(sl, R_f, inverse=True,
+                                 both_sides=False, cov=False)
+        RtR = R_f.T @ R_f
+        F = Vb @ RtR
+        Ve = F @ Vb
+        edf = np.diag(F).copy()
+        if have_corr:
+            # second correction in the original parameterization —
+            # Vb.corr(R, L, lsp0, S, off, w=NULL, lsp, Vr) ≡ the
+            # _compute_Vc2 chain at σ² = 1 (1709).
+            Vc = Vc + self._vb_corr_fit5(RtR, Vr)
+        edf1 = 2.0 * edf - np.einsum("ij,ji->i", F, F)
+        edf2 = np.sum(Vc * RtR, axis=1)
+        if float(np.sum(edf2)) > float(np.sum(edf1)):
+            edf2 = edf1.copy()
+        return {"Vc": Vc, "Vp": Vb, "Ve": Ve, "V_sp": V_sp, "edf": edf,
+                "edf1": edf1, "edf2": edf2, "R": R_f}
+
+    def _vb_corr_fit5(self, RtR: np.ndarray, Vr: np.ndarray) -> np.ndarray:
+        """gam.fit5.post.proc's ``Vb.corr`` call (gam.fit3.r:869-952
+        with w=NULL): rebuild H = R'R + Σλ_k S_k in MODEL coordinates,
+        Cholesky it (bail to 0 like mgcv when that fails), and reuse
+        the `_compute_Vc2` factor-derivative chain (≡ vcorr) — with
+        penalty-only dH and NO σ² scaling ("NOTE: unscaled!!")."""
+        p = self.p
+        A = RtR.copy()
+        lam = np.exp(np.asarray(self._rho_hat, dtype=float))
+        for k, slot in enumerate(self._slots):
+            a, b = slot.col_start, slot.col_end
+            A[a:b, a:b] += lam[k] * slot.S
+        try:
+            C = np.linalg.cholesky(0.5 * (A + A.T))
+        except np.linalg.LinAlgError:
+            return np.zeros((p, p))
+        import types
+        duck = types.SimpleNamespace(A_chol=C, A_chol_lower=True)
+        return self._compute_Vc2(self._rho_hat, duck, Vr, 1.0)
+
+    def sp_vcov(self, reg: float = 1e-3):
+        """mgcv ``sp.vcov`` (mgcv.r:4221-4234): covariance of the
+        (working) log smoothing parameters from the outer optimizer's
+        Hessian — ``solve(hess + reg)``, mgcv's literal elementwise
+        regularizer. ``None`` when no Hessian is available (GCV fits,
+        fixed sp). The edge-corrected branch lands with edge_correct
+        support for general families."""
+        H = getattr(self, "_H_aug", None)
+        if H is None or self.method not in ("REML", "ML"):
+            return None
+        return np.linalg.solve(np.asarray(H, dtype=float) + reg,
+                               np.eye(H.shape[0]))
+
     def _outer_newton(
         self, theta0: np.ndarray, *, include_log_phi: bool,
         criterion: str = "REML",
@@ -9134,6 +9329,56 @@ def _sl_repa(rp: list[dict], X: np.ndarray, l: int = 0, r: int = 0):
                 X[ind] = T @ X[ind]
         if r:
             T = _T(r)
+            if X.ndim == 2:
+                X[:, ind] = X[:, ind] @ T
+            else:
+                X[ind] = X[ind] @ T
+    return X
+
+
+def _sl_inirep(sl: _Sl, X: np.ndarray, l: int = 0, r: int = 0):
+    """mgcv ``Sl.inirep`` (fast-REML.r:485-520): code-based applier of
+    the Sl.setup INITIAL block transforms (the ``Sl.repa`` analog of
+    ``Sl.initial.repara``). ``l``/``r`` ∈ {−2,−1,0,1,2}: 0 = skip,
+    1 = D, 2 = D', −1 = Di (D' when Di is None — orthogonal D),
+    −2 = Di'. Vector D blocks get the diagonal row/col scaling
+    (Sl.initial.repara's vector semantics; mgcv's matrix-only ``%*%``
+    would mangle them — no such block reaches this in practice). Note
+    mgcv's r-branch tests ``l`` for the transform choice (a quirk);
+    hea keys it on ``r`` — gam.fit5.post.proc only ever calls (1, 0).
+    """
+    X = np.array(X, dtype=float, copy=True)
+    if len(sl) == 0 or (not l and not r):
+        return X
+    for blk in sl.blocks:
+        if not blk.repara:
+            continue
+        ind = slice(blk.start, blk.stop)
+        D = blk.D
+
+        def _mat(code):
+            if D.ndim == 1:
+                Dm = np.diag(D)
+                Dim = np.diag(1.0 / D)
+            else:
+                Dm = D
+                Dim = (D.T if blk.Di is None else blk.Di)
+            if code == 1:
+                return Dm
+            if code == 2:
+                return Dm.T
+            if code == -1:
+                return Dim
+            return Dim.T            # code == -2
+
+        if l:
+            T = _mat(l)
+            if X.ndim == 2:
+                X[ind, :] = T @ X[ind, :]
+            else:
+                X[ind] = T @ X[ind]
+        if r:
+            T = _mat(r)
             if X.ndim == 2:
                 X[:, ind] = X[:, ind] @ T
             else:
