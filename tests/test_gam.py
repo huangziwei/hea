@@ -3516,6 +3516,127 @@ def test_pterms_dropped_term_is_nan_like_mgcv():
     assert np.isnan(rows[2][2]) and np.isnan(rows[2][3])
 
 
+# ---------------------------------------------------------------------------
+# §5.3 gam.fit5 — general-family inner Newton + implicit-differentiation
+# derivative system. Pinned against mgcv:::gam.fit5 called directly at
+# fixed lsp (deriv=2) after Sl.setup + Sl.initial.repara, exactly as
+# estimate.gam stages it; Mp = ncol(totalPenaltySpace(...)$Z), which
+# equals hea's structural Σnsdf + Σ(k − rank ΣS_block). References from
+# mgcv 1.9-4 on the CSV-identical fixture. Coefficients are pinned via
+# fitted values (per-column basis signs are convention).
+# ---------------------------------------------------------------------------
+
+def _fit5_fixture():
+    rng = np.random.default_rng(3)
+    n = 220
+    x = rng.uniform(0, 1, n)
+    z = rng.uniform(0, 1, n)
+    w = rng.uniform(0, 1, n)
+    mu = 0.4 + np.sin(2 * np.pi * x) + 0.5 * w
+    sd = np.exp(-0.6 + 0.8 * np.cos(2 * np.pi * z))
+    y = mu + rng.normal(0, 1, n) * sd
+    return pl.DataFrame(dict(x=x, z=z, w=w, y=y))
+
+
+def _fit5_run(formulas, lsp, deriv=2):
+    from hea.models.gam import (_prepare_multi_design, _sl_setup,
+                                _sl_initial_repara, _gam_fit5, _sym_rank)
+    from hea.family import gaulss
+    md = _prepare_multi_design(formulas, _fit5_fixture())
+    sl = _sl_setup(md.slots, md.p)
+    X = _sl_initial_repara(sl, md.X, both_sides=False)
+    Mp = sum(md.nsdf)
+    for b, (a, bc) in zip(md.blocks, md.block_col_ranges):
+        k = bc - a
+        if not b.S:
+            Mp += k
+            continue
+        Mp += k - _sym_rank(np.sum(
+            [np.asarray(s, dtype=float) for s in b.S], axis=0))
+    fit = _gam_fit5(X, md.y, np.asarray(lsp, dtype=float), sl,
+                    family=gaulss(), lpi=md.lpi, offsets=md.offsets,
+                    Mp=Mp, deriv=deriv)
+    return fit, Mp
+
+
+def test_gam_fit5_two_sp_matches_mgcv():
+    fit, Mp = _fit5_run(["y ~ s(x) + w", "~ s(z)"], [0.5, -0.3])
+    assert Mp == 5 and fit["rank"] == 21 and fit["converged"]
+    np.testing.assert_allclose(fit["REML"], 213.9917788856, rtol=0,
+                               atol=1e-8)
+    np.testing.assert_allclose(fit["REML1"],
+                               [11.4473159053, 2.6308284759],
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(
+        fit["REML2"],
+        [[5.82968067, -0.76767514], [-0.76767514, 2.30025692]],
+        rtol=0, atol=1e-6)
+    np.testing.assert_allclose(fit["l"], -180.5215777022, rtol=0,
+                               atol=1e-8)
+    np.testing.assert_allclose(
+        fit["fitted_values"][:2],
+        [[1.33200703, 2.84108181], [1.42661609, 1.10335269]],
+        rtol=0, atol=1e-7)
+    np.testing.assert_allclose(
+        fit["dVkk"], [[7.39655483, 0.84697345], [0.84697345, 2.27045307]],
+        rtol=0, atol=1e-6)
+    np.testing.assert_allclose(np.abs(fit["db_drho"]).sum(), 6.90388373,
+                               rtol=0, atol=1e-6)
+
+
+def test_gam_fit5_three_sp_matches_mgcv():
+    # Two smooths in LP1 + one in LP2 — stresses the packed (i ≤ j)
+    # indexing of d2b / trHid2H / d2ldetH.
+    fit, Mp = _fit5_run(["y ~ s(x) + s(w)", "~ s(z)"], [0.5, -0.3, 1.2])
+    assert Mp == 5 and fit["rank"] == 29
+    np.testing.assert_allclose(fit["REML"], 225.0875339834, rtol=0,
+                               atol=1e-8)
+    np.testing.assert_allclose(
+        fit["REML1"], [9.5256091001, -1.0576466390, 7.2162252667],
+        rtol=0, atol=1e-8)
+    np.testing.assert_allclose(
+        np.asarray(fit["REML2"]).ravel(),
+        [3.95730494, 0.07470845, -1.16378995,
+         0.07470845, 0.18385047, 0.03085272,
+         -1.16378995, 0.03085272, 3.88631638],
+        rtol=0, atol=1e-6)
+    np.testing.assert_allclose(fit["l"], -185.7786982068, rtol=0,
+                               atol=1e-8)
+    np.testing.assert_allclose(
+        fit["fitted_values"][:2],
+        [[1.34246951, 2.62498051], [1.34337421, 1.18549499]],
+        rtol=0, atol=1e-7)
+    np.testing.assert_allclose(
+        np.diag(fit["dVkk"]), [7.27825685, 0.84085216, 4.77164776],
+        rtol=0, atol=1e-6)
+
+
+def test_gam_fit5_deriv1_trace_path_matches_deriv2():
+    # deriv=1 assembles d1ldetH from the gamlss_gH TRACE-vector form
+    # (fh = Hp⁻¹); deriv=2 from the full ∂H/∂ρ list. Same REML1 either
+    # way (gam.fit4.r:1347-1365).
+    f2, _ = _fit5_run(["y ~ s(x) + w", "~ s(z)"], [0.5, -0.3], deriv=2)
+    f1, _ = _fit5_run(["y ~ s(x) + w", "~ s(z)"], [0.5, -0.3], deriv=1)
+    np.testing.assert_allclose(f1["REML1"], f2["REML1"], rtol=0,
+                               atol=1e-9)
+    assert f1["REML2"] is None
+
+
+def test_gam_fit5_reml1_matches_finite_differences():
+    base = np.array([0.5, -0.3])
+    fit, _ = _fit5_run(["y ~ s(x) + w", "~ s(z)"], base)
+    eps = 1e-5
+    g_fd = np.zeros(2)
+    for k in range(2):
+        lp, lm = base.copy(), base.copy()
+        lp[k] += eps
+        lm[k] -= eps
+        fp, _ = _fit5_run(["y ~ s(x) + w", "~ s(z)"], lp, deriv=0)
+        fm, _ = _fit5_run(["y ~ s(x) + w", "~ s(z)"], lm, deriv=0)
+        g_fd[k] = (fp["REML"] - fm["REML"]) / (2 * eps)
+    np.testing.assert_allclose(fit["REML1"], g_fd, rtol=0, atol=1e-6)
+
+
 def test_predict_unconditional_se_matches_mgcv():
     # unconditional=TRUE swaps Vp → Vc (sp-uncertainty corrected) for the
     # SE band — predict.gam parity on the first three rows.

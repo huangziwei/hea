@@ -9263,6 +9263,473 @@ def _multi_lpmatrix(md: _MultiDesign, newdata) -> tuple[np.ndarray,
     return np.concatenate(cols, axis=1), md.lpi
 
 
+# ---------------------------------------------------------------------------
+# §5.3 gam.fit5 — general-family fitting (gam.fit4.r:941-1477)
+#
+# Inner Newton on β of the penalized log-likelihood l(β) − β'Sλβ/2 for
+# "general families" (several linear predictors, likelihood supplied
+# directly via family.ll). mgcv's stabilization protocol, line by line:
+#   1. the ldetS (rp) reparameterization is applied to X up front;
+#   2. the penalized Hessian is diagonally preconditioned when its
+#      diagonal is positive (otherwise it's indefinite anyway and gets
+#      the |min D| + √eps·|max D| ridge instead);
+#   3. Newton steps through a pivoted Cholesky with an escalating ×100
+#      ridge on rank failure; 0.1·‖β‖ step cap; step-halving then
+#      steepest-ascent fallback;
+#   4. an indefinite Hessian at apparent convergence triggers the
+#      saddle-perturbation protocol (≤5 deterministic coef shakes), and
+#      from iteration 4 the fundamental-rank check on the BALANCED
+#      penalized Hessian — unidentifiable parameters are dropped (lpi
+#      reindexed, X/St reduced) and iteration continues;
+#   5. all remaining computations run in the reduced space.
+# Then implicit differentiation through the preconditioned factor gives
+# d1b/d2b, d1ldetH/d2ldetH, d1bSb/d2bSb and the dVkk curvature-check
+# matrix, assembled into
+#   REML  = −[(l − β'Sβ/2)/γ + log|S|₊/2 − log|H+S|/2 + Mp·log(2π)/2
+#             − log(γ)/2]
+# with exact first/second log-sp derivatives (gam.fit4.r:1409-1414).
+# scale.est ≡ 1: the scale never enters the outer problem. The NCV
+# branches are out of scope (plan §5.3).
+# ---------------------------------------------------------------------------
+
+
+def _pivoted_chol(A: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
+    """R ``chol(A, pivot=TRUE)`` via LAPACK dpstrf: upper ``U``, 0-based
+    pivot vector and detected rank, with ``A[piv][:, piv] = U'U`` (rows
+    past the rank zeroed)."""
+    from scipy.linalg.lapack import dpstrf
+    c, piv, r_eff, _info = dpstrf(A, lower=0)
+    U = np.triu(c)
+    if int(r_eff) < A.shape[0]:
+        U[int(r_eff):, :] = 0.0
+    return U, piv.astype(int) - 1, int(r_eff)
+
+
+def _fit5_solve(L: np.ndarray, piv: np.ndarray, ipiv: np.ndarray,
+                D: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """gam.fit5's preconditioned penalized-Hessian solve:
+    ``D·(U⁻¹ U'⁻¹ (D·v)[piv])[ipiv]`` — i.e. Hp⁻¹ v through the pivoted
+    upper factor of the preconditioned Hp (gam.fit4.r:1082)."""
+    u = D[:, None] * v if v.ndim == 2 else D * v
+    u = u[piv]
+    t1 = solve_triangular(L, u, lower=False, trans="T")
+    t2 = solve_triangular(L, t1, lower=False)
+    out = t2[ipiv]
+    return D[:, None] * out if v.ndim == 2 else D * out
+
+
+def _gam_fit5(X, y, lsp, sl: _Sl, *, family, lpi, weights=None,
+              offsets=None, Mp: int = -1, deriv: int = 2, start=None,
+              gamma: float = 1.0, epsilon: float = 1e-7,
+              maxit: int = 200) -> dict:
+    """mgcv ``gam.fit5`` (gam.fit4.r:941-1477) — see the section comment.
+
+    ``X`` must already carry the Sl *initial* reparameterization
+    (estimate.gam applies ``Sl.initial.repara`` before fitting,
+    mgcv.r:1899-1903); the ldetS (``rp``) reparameterization is applied
+    and undone internally, exactly like mgcv. ``lpi``: per-LP 0-based
+    column index arrays. ``offsets``: per-LP offset arrays (entries may
+    be ``None``). ``Mp``: the criterion's prior null-space dimension (a
+    setup-time quantity). Returned dict mirrors mgcv's ret list —
+    ``coefficients``/``db_drho`` have the rp-reparameterization undone
+    (``Sl.repara(inverse)`` / ``Sl.repa(l=-1)``) but NOT the initial
+    one; the caller undoes that, like estimate.gam.
+    """
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=float)
+    lsp = np.asarray(lsp, dtype=float).reshape(-1)
+    q = X.shape[1]
+    nobs = y.shape[0]
+    n_sp = int(lsp.size)
+    penalized = len(sl) > 0
+    warn: list[str] = []
+    eps_mach = float(np.finfo(float).eps)
+
+    lpi = [np.asarray(ix, dtype=int) for ix in lpi]
+    if weights is None:
+        weights = np.ones(nobs)
+    if offsets is None:
+        offsets = [None] * len(lpi)
+
+    if penalized:
+        rp = _ldet_s(sl, lsp, root=True, stot=True, deriv=deriv)
+        X = _sl_repara(rp["rp"], X)
+        Sb = _sl_repa(rp["rp"], sl.S, l=-2, r=-1)   # balanced penalty
+        St = np.asarray(rp["S"], dtype=float)
+        E = rp["E"]
+        if start is not None:
+            start = _sl_repara(rp["rp"], np.asarray(start, dtype=float))
+    else:                       # unpenalized: no derivatives required
+        deriv = 0
+        rp = {"ldetS": 0.0, "ldet1": np.zeros(0),
+              "ldet2": np.zeros((0, 0)), "rp": []}
+        St = np.zeros((q, q))
+        E = np.zeros((0, q))
+        Sb = np.zeros((q, q))
+
+    if start is None:
+        start = family.initialize_coef(y, X, lpi, E=E, offset=offsets)
+    coef = np.asarray(start, dtype=float).reshape(-1).copy()
+    start = coef.copy()         # kept for the iconv first-step-fail path
+
+    def llf(b, d, **kw):
+        return family.ll(y, X, b, weights, lpi=lpi, offset=offsets,
+                         deriv=d, **kw)
+
+    ll = llf(coef, 1)
+    ll0 = ll["l"] - float(coef @ St @ coef) / 2.0
+    grad = ll["lb"] - St @ coef
+    iconv = bool(np.max(np.abs(grad)) < epsilon * abs(ll0))
+    Hp = -ll["lbb"] + St
+    rank_checked = False
+    rank = q
+    converged = False
+    drop = None
+    bdrop = np.zeros(q, dtype=bool)
+    perturbed = 0
+    L = piv = ipiv = D = None
+    iter_ = 0
+
+    for iter_ in range(1, 2 * maxit + 1):    # main iteration
+        kappaH = float(np.linalg.cond(Hp, 1))
+        D = np.diag(Hp).copy()
+        if np.sum(~np.isfinite(D)) > 0:
+            raise FloatingPointError("non finite values in Hessian")
+
+        if np.min(D) <= 0:      # could be indefinite or +ve semi def
+            Dthresh = np.max(D) * np.sqrt(eps_mach)
+            if -np.min(D) < Dthresh:
+                indefinite = False
+                D[D < Dthresh] = Dthresh
+            else:
+                indefinite = True
+        else:
+            indefinite = False
+
+        if indefinite:          # Hessian indefinite, for sure
+            Ib = np.eye(rank) * abs(np.min(D))
+            Ip = np.eye(rank) * abs(np.max(D) * eps_mach ** 0.5)
+            Hp = Hp + Ip + Ib
+            D = np.ones(Hp.shape[0])
+        else:                   # +ve def: cheap pivoted Cholesky
+            D = D ** -0.5       # diagonal pre-conditioner
+            Hp = D * (D * Hp).T
+            Ip = np.eye(rank) * eps_mach ** 0.5
+        L, piv, L_rank = _pivoted_chol(Hp)
+        while L_rank < rank:    # rank deficient: escalate ridge ×100
+            L, piv, L_rank = _pivoted_chol(Hp + Ip)
+            Ip = Ip * 100.0
+            indefinite = True
+        ipiv = np.empty_like(piv)
+        ipiv[piv] = np.arange(L.shape[0])
+
+        if converged:
+            break               # L and D now match the final Hp
+
+        step = _fit5_solve(L, piv, ipiv, D, grad)
+        c_norm = float(np.sum(coef ** 2))
+        if c_norm > 0:          # limit step length to .1 of coef length
+            s_norm = float(np.sqrt(np.sum(step ** 2)))
+            c_norm = float(np.sqrt(c_norm))
+            if s_norm > 0.1 * c_norm:
+                step = step * (0.1 * c_norm / s_norm)
+        s_norm = float(np.sqrt(np.sum(step ** 2)))
+
+        coef1 = coef + step     # try the Newton step
+        ll = llf(coef1, 1)
+        ll1 = ll["l"] - float(coef1 @ St @ coef1) / 2.0
+        khalf = 0
+        fac = 2.0
+        llold = ll              # keep an lbb slot through step failure
+        no_change = 0
+        while ((not np.isfinite(ll1)) or ll1 <= ll0) and khalf < 25:
+            step = step / fac
+            coef1 = coef + step
+            ll = llf(coef1, 0)
+            ll1 = ll["l"] - float(coef1 @ St @ coef1) / 2.0
+            if np.isfinite(ll1) and ll1 >= ll0:   # no worse: get derivs
+                ll = llf(coef1, 1)
+            if np.isfinite(ll1) and ll1 == ll0:
+                no_change += 1
+            if (np.max(np.abs(coef - coef1))
+                    < np.max(np.abs(coef)) * eps_mach or no_change > 1):
+                khalf = 100     # step has gone nowhere — abort halving
+            khalf += 1
+            if khalf > 5:
+                fac = 5.0
+
+        if (not np.isfinite(ll1)) or (ll1 <= ll0 and not iconv):
+            # switch to steepest ascent, scaled to Newton step length
+            step = grad * (s_norm / float(np.sqrt(np.sum(grad ** 2))))
+            khalf = 0
+
+        no_change = 0
+        while (((not np.isfinite(ll1)) or (ll1 <= ll0 and not iconv))
+               and khalf < 25):
+            step = step / 10.0
+            coef1 = coef + step
+            ll = llf(coef1, 0)
+            ll1 = ll["l"] - float(coef1 @ St @ coef1) / 2.0
+            if np.isfinite(ll1) and ll1 >= ll0:
+                ll = llf(coef1, 1)
+            if np.isfinite(ll1) and ll1 == ll0:
+                no_change += 1
+            if (np.max(np.abs(coef - coef1))
+                    < np.max(np.abs(coef)) * eps_mach or no_change > 1):
+                khalf = 100
+            khalf += 1
+
+        if ((np.isfinite(ll1) and ll1 >= ll0
+             and (khalf < 25 or indefinite)) or iter_ == maxit):
+            # step ok: accept and test
+            coef = coef + step
+            grad = ll["lb"] - St @ coef
+            Hp = -ll["lbb"] + St
+            ok = (iter_ == maxit
+                  or np.max(np.abs(grad)) < epsilon * abs(ll0))
+            if ok:
+                if indefinite:  # not a well defined maximum
+                    if perturbed == 5:
+                        raise FloatingPointError(
+                            "indefinite penalized likelihood in gam.fit5")
+                    if iter_ < 4 or rank_checked:
+                        perturbed += 1
+                        alt = np.resize([0.0, 1.0], coef.size)
+                        coef = (coef * (1.0 + (alt * 0.02 - 0.01)
+                                        * perturbed)
+                                + (alt - 0.5) * np.mean(np.abs(coef))
+                                * 1e-5 * perturbed)
+                        ll = llf(coef, 1)
+                        ll0 = ll["l"] - float(coef @ St @ coef) / 2.0
+                        grad = ll["lb"] - St @ coef
+                        Hp = -ll["lbb"] + St
+                    else:
+                        rank_checked = True
+                        # fundamental rank check on the balanced
+                        # penalized Hessian (gam.fit4.r:1162-1199)
+                        lbb = ll["lbb"]
+                        if penalized:
+                            Hb = (-lbb / np.linalg.norm(lbb)
+                                  + Sb / np.linalg.norm(Sb))
+                        else:
+                            Hb = -lbb / np.linalg.norm(lbb)
+                        Db = np.abs(np.diag(Hb)).copy()
+                        Db[Db < 1e-50] = 1.0
+                        Db = Db ** -0.5
+                        Hb = (Db * Hb).T * Db
+                        from scipy.linalg import qr as _scipy_qr
+                        Rq, piv_q = _scipy_qr(Hb, mode="r",
+                                              pivoting=True)
+                        rank = _R_rank(Rq, tol=eps_mach ** 0.9)
+                        if rank < q:
+                            # drop unidentifiable params and continue
+                            drop = np.sort(piv_q[rank:q])
+                            bdrop = np.isin(np.arange(q), drop)
+                            keep = ~bdrop
+                            coef = coef[keep]
+                            St = St[np.ix_(keep, keep)]
+                            X = X[:, keep]
+                            ij = np.full(q, -1, dtype=int)
+                            ij[keep] = np.arange(int(keep.sum()))
+                            lpi = [ij[ix[~np.isin(ix, drop)]]
+                                   for ix in lpi]
+                            ll = llf(coef, 1)
+                            ll0 = (ll["l"]
+                                   - float(coef @ St @ coef) / 2.0)
+                            grad = ll["lb"] - St @ coef
+                            Hp = -ll["lbb"] + St
+                else:           # not indefinite: really converged
+                    converged = True
+                    # don't break: loop top refreshes L and D first
+            else:
+                ll0 = ll1       # step ok but not converged yet
+        else:                   # step failed
+            ll = llold          # restore the ll with an lbb slot
+            if drop is None:
+                bdrop = np.zeros(q, dtype=bool)
+            if iconv and iter_ == 1:
+                # OK to fail on the first step if apparently converged
+                # to start with — but check improvement was impossible,
+                # otherwise sp changes can produce no objective change
+                converged = True
+                coef = start
+            else:
+                converged = False
+                coefp = coef * (1.0 + np.resize([-1.0, 1.0], coef.size)
+                                * eps_mach ** 0.9)
+                llp = llf(coef, 1)
+                gradp = llp["lb"] - St @ coefp
+                err = min(1e-3, kappaH * max(
+                    1.0, float(np.mean(np.abs(gradp - grad)))
+                    / float(np.mean(np.abs(coefp - coef)))) * eps_mach)
+                if np.max(np.abs(grad / ll0)) > max(err, epsilon * 2):
+                    warn.append(
+                        "gam.fit5 step failed: max magnitude relative "
+                        f"grad = {np.max(np.abs(grad / ll0))}")
+            break               # no need to recompute L and D
+
+    if iter_ == 2 * maxit and not converged:
+        warn.append("gam.fit5 iteration limit reached: max abs grad = "
+                    f"{np.max(np.abs(grad))}")
+
+    ldetHp = (2.0 * float(np.sum(np.log(np.diag(L))))
+              - 2.0 * float(np.sum(np.log(D))))
+
+    if drop is not None:        # full coef with zeros for unidentifiable
+        fcoef = np.zeros(q)
+        fcoef[~bdrop] = coef
+    else:
+        fcoef = coef
+
+    dVkk = d2l = d1bSb = d2bSb = d1b = d2b = None
+    d1ldetH = d2ldetH = None
+    llr = None
+    keep = ~bdrop
+    m = n_sp
+    if deriv > 0:               # implicit differentiation for derivs
+        d1b = np.zeros((rank, m))
+        Sib, _ = _sl_term_mult(sl, fcoef, full=True)
+        for i in range(m):
+            d1b[:, i] = -_fit5_solve(L, piv, ipiv, D, Sib[i][keep])
+
+        # curvature check matrix (gam.fit4.r:1253)
+        dVkk = (L[:, ipiv] @ (d1b / D[:, None])).T @ \
+               (L[:, ipiv] @ (d1b / D[:, None]))
+
+        if drop is not None:
+            fd1b = np.zeros((q, m))
+            fd1b[keep, :] = d1b
+        else:
+            fd1b = d1b
+
+        # family call for ∂H/∂ρ: trace vector at deriv 1, list above
+        invU = solve_triangular(L, np.eye(L.shape[0]), lower=False)
+        Hp_inv_perm = invU @ invU.T
+        Hp_inv = (D[:, None] * Hp_inv_perm[np.ix_(ipiv, ipiv)]
+                  * D[None, :])
+        ll = llf(coef, 2 + (1 if deriv > 1 else 0), d1b=d1b, fh=Hp_inv)
+
+        if deriv > 1:           # second derivatives of β̂
+            d2b = np.zeros((rank, m * (m + 1) // 2))
+            k = 0
+            for i in range(m):
+                for j in range(i, m):
+                    v = (-ll["d1H"][i] @ d1b[:, j]
+                         + _sl_mult(sl, fd1b[:, j], k=i)[keep]
+                         + _sl_mult(sl, fd1b[:, i], k=j)[keep])
+                    d2b[:, k] = -_fit5_solve(L, piv, ipiv, D, v)
+                    if i == j:
+                        d2b[:, k] = d2b[:, k] + d1b[:, i]
+                    k += 1
+
+            # last family call: tr(Hp⁻¹ ∂²H/∂ρᵢ∂ρⱼ)
+            llr = llf(coef, 4, d1b=d1b, d2b=d2b, fh=(L, piv), D=D)
+
+            d2l = np.zeros((m, m))
+            for i in range(m):
+                for j in range(i, m):
+                    d2l[j, i] = d2l[i, j] = float(
+                        d1b[:, i] @ ll["lbb"] @ d1b[:, j])
+
+    # ----- REML score and its derivatives (gam.fit4.r:1343-1414) -----
+    if deriv > 0:
+        if deriv == 1 and not isinstance(ll["d1H"], list):
+            d1ldetH = -np.asarray(ll["d1H"], dtype=float)
+            for i in range(m):
+                A = _sl_mult(sl, np.eye(q), k=i, full=True)[
+                    np.ix_(keep, keep)]
+                bind = np.sum(np.abs(A), axis=1) != 0
+                A = A[:, bind]
+                A = _fit5_solve(L, piv, ipiv, D, A)
+                d1ldetH[i] += float(np.trace(A[bind, :]))
+        else:
+            d1ldetH = np.zeros(m)
+            d1Hp = []
+            for i in range(m):
+                A = (-ll["d1H"][i]
+                     + _sl_mult(sl, np.eye(q), k=i)[np.ix_(keep, keep)])
+                d1Hp.append(_fit5_solve(L, piv, ipiv, D, A))
+                d1ldetH[i] = float(np.trace(d1Hp[i]))
+
+    if deriv > 1:
+        d2ldetH = np.zeros((m, m))
+        k = 0
+        for i in range(m):
+            for j in range(i, m):
+                d2ldetH[i, j] = (-float(np.sum(d1Hp[i] * d1Hp[j].T))
+                                 - float(llr["trHid2H"][k]))
+                if i == j:      # add the smoothing-penalty term
+                    A = _sl_mult(sl, np.eye(q), k=i, full=True)[
+                        np.ix_(keep, keep)]
+                    bind = np.sum(np.abs(A), axis=1) != 0
+                    A = A[:, bind]
+                    A = _fit5_solve(L, piv, ipiv, D, A)
+                    d2ldetH[i, j] += float(np.trace(A[bind, :]))
+                else:
+                    d2ldetH[j, i] = d2ldetH[i, j]
+                k += 1
+
+    if deriv > 0:               # derivatives of β'Sβ
+        Skb, _ = _sl_term_mult(sl, fcoef, full=True)
+        Skb = [s[keep] for s in Skb]
+        d1bSb = np.array([float(np.sum(coef * Skb[i]))
+                          for i in range(m)])
+
+    if deriv > 1:
+        d2bSb = np.zeros((m, m))
+        for i in range(m):
+            Sd1b = St @ d1b[:, i]
+            for j in range(i, m):
+                d2bSb[j, i] = d2bSb[i, j] = 2.0 * float(np.sum(
+                    d1b[:, i] * Skb[j] + d1b[:, j] * Skb[i]
+                    + d1b[:, j] * Sd1b))
+            d2bSb[i, i] += float(np.sum(coef * Skb[i]))
+
+    bSb = float(coef @ St @ coef)
+    REML = -float((ll["l"] - bSb / 2.0) / gamma + rp["ldetS"] / 2.0
+                  - ldetHp / 2.0 + Mp * (np.log(2.0 * np.pi) / 2.0)
+                  - np.log(gamma) / 2.0)
+    REML1 = (None if deriv < 1 else
+             -(-d1bSb / (2.0 * gamma) + rp["ldet1"] / 2.0
+               - d1ldetH / 2.0))
+    REML2 = (None if deriv < 2 else
+             -((d2l - d2bSb / 2.0) / gamma + rp["ldet2"] / 2.0
+               - d2ldetH / 2.0))
+
+    # multiple linear predictors: η and fitted per LP
+    K = len(lpi)
+    linear_predictors = np.zeros((nobs, K))
+    fitted_values = np.zeros((nobs, K))
+    for j in range(K):
+        eta_j = X[:, lpi[j]] @ coef[lpi[j]]
+        if offsets[j] is not None:
+            eta_j = eta_j + offsets[j]
+        linear_predictors[:, j] = eta_j
+        fitted_values[:, j] = family.links[j].linkinv(eta_j)
+
+    coef_out = _sl_repara(rp["rp"], fcoef, inverse=True)
+    if drop is not None and d1b is not None:
+        db_drho = np.zeros((q, d1b.shape[1]))
+        db_drho[keep, :] = d1b
+    else:
+        db_drho = d1b
+    if d1b is not None:
+        db_drho = _sl_repa(rp["rp"], db_drho, l=-1)
+
+    return {
+        "coefficients": coef_out, "fitted_values": fitted_values,
+        "linear_predictors": linear_predictors, "scale_est": 1.0,
+        "REML": REML, "REML1": REML1, "REML2": REML2,
+        "rank": rank, "aic": -2.0 * ll["l"], "l": ll["l"],
+        "lbb": ll["lbb"], "L": L, "piv": piv, "ipiv": ipiv,
+        "bdrop": bdrop, "D": D, "St": St, "rp": rp["rp"],
+        "db_drho": db_drho, "S1": rp["ldet1"], "iter": iter_,
+        "dH": ll.get("d1H"), "dVkk": dVkk, "warn": warn,
+        "lpi": lpi, "ldetHp": ldetHp, "ldetS": rp["ldetS"],
+        "converged": converged,
+    }
+
+
 class _PenaltySlot:
     """One smoothing-param slot: the k×k S matrix and its col range in the
     full design. Each SmoothBlock contributes len(S_list) slots.
