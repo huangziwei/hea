@@ -4503,3 +4503,42 @@ def test_concurvity_multi_lp_gaulss_matches_mgcv():
     m0 = gam("ygau ~ f4 + z", _pterms_fixture(), method="REML")
     with pytest.raises(ValueError, match="nothing to do"):
         m0.concurvity()
+
+
+# ---------------------------------------------------------------------------
+# influence / cooks_distance accessors (roadmap B5) — mgcv.r:4415/4212.
+# influence.gam returns model$hat (the penalized hat diagonal, Σ = edf);
+# cooks.distance.gam = (pearson/(1−hat))²·hat/(φ̂·Σedf). General-family
+# fits have NULL hat in mgcv (influence empty, cooks all-NA) — hea raises.
+# ---------------------------------------------------------------------------
+
+def test_influence_cooks_distance_match_mgcv():
+    df = _pterms_fixture()
+    m = gam("ygau ~ f4 + z + s(x)", df, method="REML")
+    h = m.influence()
+    np.testing.assert_allclose(
+        h[:5],
+        [0.0496655158, 0.0613157442, 0.0581243627, 0.0778861408,
+         0.0454793333], rtol=1e-6)
+    np.testing.assert_allclose(h.sum(), m.edf_total, rtol=1e-10)
+    cd = m.cooks_distance()
+    np.testing.assert_allclose(
+        cd[:5],
+        [0.006996147178, 0.002232521831, 0.002563066262,
+         0.000839914661, 0.001177848450], rtol=1e-6)
+    np.testing.assert_allclose(cd.max(), 0.0449985889, rtol=1e-6)
+    assert int(np.argmax(cd)) == 105  # R's which.max = 106, 1-based
+    mp = gam("ypois ~ z + s(x)", df, family=Poisson(), method="REML")
+    np.testing.assert_allclose(
+        mp.influence()[:3],
+        [0.0272322184, 0.0346970056, 0.0251673931], rtol=1e-6)
+    np.testing.assert_allclose(
+        mp.cooks_distance()[:3],
+        [0.000387437873, 0.001321828307, 0.000851105538], rtol=1e-6)
+    from hea.family import gaulss
+    mg = gam(["y ~ s(x) + w", "~ s(z)"], _fit5_fixture(), family=gaulss(),
+             method="REML")
+    with pytest.raises(NotImplementedError, match="general-family"):
+        mg.influence()
+    with pytest.raises(NotImplementedError, match="general-family"):
+        mg.cooks_distance()

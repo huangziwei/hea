@@ -8229,6 +8229,38 @@ class gam:
             for k, nm in enumerate(names)
         }
 
+    def influence(self) -> np.ndarray:
+        """mgcv's ``influence.gam`` (mgcv.r:4415): the penalized
+        hat-matrix diagonal ``model$hat`` (sums to the total edf).
+
+        General-family (multi-LP) fits carry no hat values in mgcv
+        either (``model$hat`` is NULL there, making influence empty and
+        cooks.distance all-NA) — hea raises instead of mirroring the
+        silent NULL."""
+        lev = getattr(self, "leverage", None)
+        if lev is None:
+            raise NotImplementedError(
+                "mgcv stores no hat values for general-family fits "
+                "(model$hat is NULL); influence()/cooks_distance() are "
+                "undefined here."
+            )
+        return np.asarray(lev, dtype=float)
+
+    def cooks_distance(self) -> np.ndarray:
+        """mgcv's ``cooks.distance.gam`` (mgcv.r:4212-4218):
+
+            (pearson / (1 − hat))² · hat / (φ̂ · Σedf)
+
+        with the Pearson residuals, the fitted dispersion ``sig2`` and
+        the penalized hat diagonal. The same quantity drives
+        ``plot_leverage``'s contour labels; this is the per-observation
+        accessor."""
+        hat = self.influence()
+        res = np.asarray(self.residuals_of("pearson"), dtype=float)
+        p_edf = float(self.edf_total)
+        return ((res / (1.0 - hat)) ** 2 * hat
+                / (float(self.sigma_squared) * p_edf))
+
     # ----- diagnostic plots -----------------------------------------------
     #
     # Match the graphical half of mgcv's gam.check + R's plot.glm:
