@@ -6153,6 +6153,9 @@ class gam:
         se_fit: bool = False,
         offset: np.ndarray | list | None = None,
         unconditional: bool = False,
+        terms: str | list[str] | None = None,
+        exclude: str | list[str] | None = None,
+        iterms_type: int | None = None,
     ):
         """Predict from the fitted GAM — :func:`predict.gam` parity.
 
@@ -6164,6 +6167,29 @@ class gam:
         is ``√diag(X · Vp · Xᵀ)`` (offset is constant so it doesn't affect
         SE); response-scale SE multiplies by ``|dμ/dη|`` (delta method,
         same as mgcv).
+
+        ``type='terms'`` returns one column per model term (parametric
+        terms by label, then smooths by label), each ``X_term · β̂_term``
+        on the link scale; the intercept is never a column (mgcv attaches
+        it as the ``"constant"`` attribute — here it's just ``coef[0]``)
+        and the model offset is not included. ``se_fit=True`` appends
+        ``se.{label}`` columns. ``type='iterms'`` is identical except
+        constrained smooths' SEs include the uncertainty about the
+        overall mean (mgcv's ``cmX`` construction); ``iterms_type=2``
+        restricts that to the fixed-effects mean. ``iterms`` is not
+        available for multi-formula fits (warns and falls back to
+        ``terms``, like mgcv).
+
+        ``terms=`` / ``exclude=`` (a label or list of labels) select model
+        terms for ANY type, exactly like predict.gam: the columns of the
+        prediction design belonging to de-selected terms are zeroed (for
+        ``terms=`` the intercept is kept only if ``"(Intercept)"`` is
+        listed), so link/response predictions become partial linear
+        predictors; for ``type='terms'/'iterms'`` the output is
+        additionally restricted to the requested columns — with mgcv's
+        warn-and-ignore semantics when a requested label doesn't exist
+        (the zeroing still applies; only the column selection is
+        ignored).
 
         ``type='lpmatrix'`` returns the linear-predictor design matrix
         ``X_new`` as a raw ``np.ndarray`` — it's the SE building block, not
@@ -6182,17 +6208,22 @@ class gam:
         against ``newdata`` (mirrors ``predict.gam``). Pass ``offset=`` to
         override or to add an offset on top of the formula offset.
         """
-        if type not in ("link", "response", "lpmatrix"):
+        if type not in ("link", "response", "lpmatrix", "terms", "iterms"):
             raise ValueError(
-                f"type must be 'link', 'response', or 'lpmatrix'; got {type!r}"
+                "type must be 'link', 'response', 'lpmatrix', 'terms', or "
+                f"'iterms'; got {type!r}"
             )
         if type == "lpmatrix" and se_fit:
             raise ValueError(
                 "se_fit=True is not allowed with type='lpmatrix'"
             )
+        if isinstance(terms, str):
+            terms = [terms]
+        if isinstance(exclude, str):
+            exclude = [exclude]
         if getattr(self, "_md", None) is not None:
             return self._predict_general(newdata, type, se_fit, offset,
-                                         unconditional)
+                                         unconditional, terms, exclude)
 
         if newdata is None:
             X_new = self._X_full
@@ -6266,6 +6297,18 @@ class gam:
                     f"offset must have length {off_new.shape[0]}, got {extra.shape}"
                 )
             off_new = off_new + extra
+        if terms is not None or exclude is not None or type in ("terms",
+                                                                "iterms"):
+            groups = self._term_column_groups()
+        if terms is not None or exclude is not None:
+            # predict.gam zeroes the de-selected terms' design columns for
+            # every type (mgcv.r:2993-3026) — partial linear predictors.
+            X_new = _zero_terms_exclude(X_new, terms, exclude, *groups)
+        if type in ("terms", "iterms"):
+            return self._terms_frame(
+                X_new, self._beta, se_fit,
+                self._predict_V(unconditional) if se_fit else None,
+                type, iterms_type, terms, exclude, *groups)
         if type == "lpmatrix":
             return X_new
         eta = X_new @ self._beta + off_new
@@ -6276,18 +6319,7 @@ class gam:
             return pl.DataFrame({"fit": fit})
 
         # Var(η̂_i) = X_i · V · X_iᵀ; rowwise via einsum.
-        V = self.Vp
-        if unconditional:
-            if self.method in ("REML", "ML"):
-                V = self.Vc
-            else:
-                import warnings as _w
-                _w.warn(
-                    "smoothness-uncertainty corrected covariance not "
-                    "available for GCV fits; using Vp (mgcv predict.gam "
-                    "does the same)",
-                    stacklevel=2,
-                )
+        V = self._predict_V(unconditional)
         var_eta = np.einsum("ij,jk,ik->i", X_new, V, X_new)
         se_link = np.sqrt(np.maximum(var_eta, 0.0))
         if type == "link":
@@ -6296,8 +6328,132 @@ class gam:
         mu_eta_v = self.family.link.mu_eta(eta)
         return pl.DataFrame({"fit": fit, "se.fit": np.abs(mu_eta_v) * se_link})
 
+    def _predict_V(self, unconditional: bool) -> np.ndarray:
+        """Covariance for prediction SEs: Vp, or Vc when unconditional
+        (predict.gam's top-of-function swap; GCV fits warn and keep Vp)."""
+        if not unconditional:
+            return self.Vp
+        if self.method in ("REML", "ML") or getattr(self, "_md", None) \
+                is not None:
+            return self.Vc
+        import warnings as _w
+        _w.warn(
+            "smoothness-uncertainty corrected covariance not "
+            "available for GCV fits; using Vp (mgcv predict.gam "
+            "does the same)",
+            stacklevel=2,
+        )
+        return self.Vp
+
+    def _term_column_groups(self):
+        """Term → fit-space design-column map for predict's terms machinery.
+
+        Returns ``(plabels, pidx, icols, slabels, sranges)``: parametric
+        term labels with their column index arrays (R ``assign`` grouping,
+        the same map _pterms_rows tests by), the intercept's columns
+        (``assign == 0``), and the smooth labels with their (start, end)
+        column ranges. Multi-LP fits suffix LP j ≥ 1 labels with ``.{j}``
+        (parametric, matching _pterms_rows; smooth labels already carry
+        mgcv's ``s.1(…)`` form from construction).
+        """
+        md = getattr(self, "_md", None)
+        plabels: list[str] = []
+        pidx: list[np.ndarray] = []
+        icols: list[int] = []
+        if md is not None:
+            for j, lp in enumerate(md.lps):
+                asgn = np.asarray(lp.param_assign or [], dtype=int)
+                pstart = int(md.pstart[j])
+                icols.extend((pstart + np.flatnonzero(asgn == 0)).tolist())
+                for i, t in enumerate(lp.expanded.terms, start=1):
+                    plabels.append(t.label if j == 0 else f"{t.label}.{j}")
+                    pidx.append(pstart + np.flatnonzero(asgn == i))
+            slabels = [b.label for b in md.blocks]
+            sranges = list(md.block_col_ranges)
+        else:
+            asgn = np.asarray(getattr(self, "_param_assign", []) or [],
+                              dtype=int)
+            if self._keep_cols is not None and asgn.size:
+                asgn = asgn[self._keep_cols[:asgn.size]]
+            icols.extend(np.flatnonzero(asgn == 0).tolist())
+            for i, t in enumerate(self._expanded.terms, start=1):
+                plabels.append(t.label)
+                pidx.append(np.flatnonzero(asgn == i))
+            slabels = [b.label for b in self._blocks]
+            sranges = list(self._block_col_ranges)
+        return (plabels, pidx, np.asarray(icols, dtype=int), slabels,
+                sranges)
+
+    def _terms_frame(self, X, beta, se_fit, V, type_, iterms_type,
+                     terms, exclude, plabels, pidx, icols, slabels,
+                     sranges):
+        """type="terms"/"iterms" assembly (predict.gam mgcv.r:3041-3103 +
+        the trailing terms=/exclude= column selection at 3257-3284).
+
+        One link-scale column per term: ``X_term · β_term``; SEs from the
+        term's Vp block. iterms widens constrained smooths' SEs by mgcv's
+        cmX construction ("carry the intercept"): X1 = rowwise-repeated
+        colMeans of the fit design with the smooth's own block patched in,
+        se = √rowSums((X1·Vp)∘X1) over the FULL covariance.
+        (mgcv's meanL1 rescaling for matrix-argument smooths with constant
+        summation weights is not carried — that combination isn't pinned.)
+        """
+        beta = np.asarray(beta, dtype=float)
+        fit_cols: dict[str, np.ndarray] = {}
+        se_cols: dict[str, np.ndarray] = {}
+        for lab, idx in zip(plabels, pidx):
+            if idx.size == 0:
+                continue
+            Xi = X[:, idx]
+            fit_cols[lab] = Xi @ beta[idx]
+            if se_fit:
+                v = np.einsum("ij,jk,ik->i", Xi, V[np.ix_(idx, idx)], Xi)
+                se_cols[lab] = np.sqrt(np.maximum(v, 0.0))
+        blocks = (self._md.blocks if getattr(self, "_md", None) is not None
+                  else self._blocks)
+        for (lab, (a, b)), blk in zip(zip(slabels, sranges), blocks):
+            Xs = X[:, a:b]
+            fit_cols[lab] = Xs @ beta[a:b]
+            if not se_fit:
+                continue
+            constrained = (blk.spec is not None
+                           and blk.spec.absorb is not None)
+            if type_ == "iterms" and constrained:
+                cmX = getattr(self, "_cmX", None)
+                if cmX is None:
+                    cmX = np.asarray(self._X_full, dtype=float).mean(axis=0)
+                    self._cmX = cmX
+                X1 = np.tile(cmX, (X.shape[0], 1))
+                if iterms_type == 2:
+                    X1[:, self.p_param:] = 0.0
+                X1[:, a:b] = Xs
+                v = np.einsum("ij,jk,ik->i", X1, V, X1)
+            else:
+                v = np.einsum("ij,jk,ik->i", Xs, V[a:b, a:b], Xs)
+            se_cols[lab] = np.sqrt(np.maximum(v, 0.0))
+        # Trailing column selection — mgcv's warn-and-ignore semantics.
+        names = list(fit_cols.keys())
+        import warnings as _w
+        if terms is not None:
+            if any(t not in names for t in terms):
+                _w.warn("non-existent terms requested - ignoring",
+                        stacklevel=3)
+            else:
+                names = list(terms)
+        if exclude is not None:
+            if any(e not in fit_cols for e in exclude):
+                _w.warn("non-existent exclude terms requested - ignoring",
+                        stacklevel=3)
+            else:
+                names = [n for n in names if n not in exclude]
+        out = {n: fit_cols[n] for n in names}
+        if se_fit:
+            for n in names:
+                out[f"se.{n}"] = se_cols[n]
+        return pl.DataFrame(out)
+
     def _predict_general(self, newdata, type, se_fit, offset,
-                         unconditional):
+                         unconditional, terms=None, exclude=None):
         """Multi-LP predict (general families): mgcv's predict.gam
         returns an (n, n_lp) matrix per type — hea returns a DataFrame
         with one column per linear predictor, named ``fit``,
@@ -6332,6 +6488,20 @@ class gam:
                     offs.append(off_j)
                 else:
                     offs.append(None)
+        if type == "iterms":
+            import warnings as _w
+            _w.warn("type iterms not available for multiple predictor "
+                    "cases", stacklevel=3)
+            type = "terms"
+        if terms is not None or exclude is not None or type == "terms":
+            groups = self._term_column_groups()
+        if terms is not None or exclude is not None:
+            X_new = _zero_terms_exclude(X_new, terms, exclude, *groups)
+        if type == "terms":
+            return self._terms_frame(
+                X_new, self._beta, se_fit,
+                self._predict_V(unconditional) if se_fit else None,
+                "terms", None, terms, exclude, *groups)
         if type == "lpmatrix":
             return X_new
 
@@ -9961,6 +10131,33 @@ def _multi_lpmatrix(md: _MultiDesign, newdata) -> tuple[np.ndarray,
             X_lp = X_lp[:n_user]
         cols.append(X_lp)
     return np.concatenate(cols, axis=1), md.lpi
+
+
+def _zero_terms_exclude(X, terms, exclude, plabels, pidx, icols, slabels,
+                        sranges):
+    """predict.gam's terms=/exclude= design zeroing (mgcv.r:2993-3026).
+
+    Returns a copy of ``X`` with the de-selected terms' columns zeroed:
+    a term is kept iff (``terms`` is None or its label is listed) and its
+    label is not in ``exclude``. The intercept columns (R assign == 0)
+    are zeroed when ``"(Intercept)"`` is excluded, or when ``terms`` is
+    given without listing it. Smooth blocks zero whole column ranges
+    (mgcv skips their PredictMat — value-identical).
+    """
+    X = np.array(X, dtype=float, copy=True)
+    tset = set(terms) if terms is not None else None
+    eset = set(exclude) if exclude is not None else set()
+    if icols.size and ("(Intercept)" in eset
+                       or (tset is not None and "(Intercept)" not in tset)):
+        X[:, icols] = 0.0
+    for lab, idx in zip(plabels, pidx):
+        if idx.size and (lab in eset
+                         or (tset is not None and lab not in tset)):
+            X[:, idx] = 0.0
+    for lab, (a, b) in zip(slabels, sranges):
+        if lab in eset or (tset is not None and lab not in tset):
+            X[:, a:b] = 0.0
+    return X
 
 
 # ---------------------------------------------------------------------------

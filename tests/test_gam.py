@@ -3519,6 +3519,8 @@ def test_fs_smooth_fit_matches_mgcv():
 # ---------------------------------------------------------------------------
 
 def _pterms_fixture():
+    # g5/lo are drawn AFTER the original columns so their values are
+    # unchanged — the B1 predict-terms tests share this fixture.
     rng = np.random.default_rng(11)
     n = 200
     x = rng.uniform(0, 1, n)
@@ -3528,7 +3530,9 @@ def _pterms_fixture():
     eta = 0.4 + np.vectorize(feff.get)(f4) + 0.6 * z + np.sin(2 * np.pi * x)
     ygau = eta + rng.normal(0, 0.35, n)
     ypois = rng.poisson(np.exp(eta)).astype(float)
-    return pl.DataFrame({"x": x, "z": z, "f4": f4,
+    g5 = np.array([f"g{i}" for i in range(5)])[rng.integers(0, 5, n)]
+    lo = rng.uniform(0.5, 1.5, n)
+    return pl.DataFrame({"x": x, "z": z, "f4": f4, "g5": g5, "lo": lo,
                          "ygau": ygau, "ypois": ypois})
 
 
@@ -3933,3 +3937,196 @@ def test_predict_unconditional_se_matches_mgcv():
     np.testing.assert_array_equal(
         pg["se.fit"].to_numpy(),
         mg.predict(df[:3], se_fit=True)["se.fit"].to_numpy())
+
+
+# ---------------------------------------------------------------------------
+# predict type="terms"/"iterms" + terms=/exclude= (roadmap B1) — mgcv 1.9-4
+# pins from predict.gam on the CSV-identical fixture, newdata = rows 1:6.
+# terms=/exclude= zero the de-selected terms' design columns for EVERY type
+# (mgcv.r:2993-3026); for type="terms"/"iterms" a trailing column selection
+# applies with warn-and-ignore semantics (mgcv.r:3257-3284). iterms differs
+# from terms only in constrained smooths' SEs (cmX "carry the intercept",
+# mgcv.r:3072-3081).
+# ---------------------------------------------------------------------------
+
+def test_predict_terms_and_iterms_match_mgcv():
+    df = _pterms_fixture()
+    m = gam("ygau ~ f4 + z + s(x)", df, method="REML")
+    nd = df.head(6)
+    pt = m.predict(nd, type="terms")
+    assert pt.columns == ["f4", "z", "s(x)"]
+    np.testing.assert_allclose(pt.to_numpy(), [
+        [-0.3408192205, 0.2194469430, 0.7287209118],
+        [-0.3408192205, 0.0537651013, 0.1140422594],
+        [0.0000000000, 0.3660683342, -0.5756077002],
+        [-0.3408192205, 0.2688727602, 0.1536795821],
+        [0.0000000000, 0.2531976180, 0.8146643719],
+        [0.5385307295, 0.5036076593, -0.4525337537]], atol=1e-7)
+    pts = m.predict(nd, type="terms", se_fit=True)
+    assert pts.columns == ["f4", "z", "s(x)", "se.f4", "se.z", "se.s(x)"]
+    np.testing.assert_allclose(pts.to_numpy()[:, 3:], [
+        [0.0765794425, 0.0341440710, 0.0587519425],
+        [0.0765794425, 0.0083653908, 0.0662769170],
+        [0.0000000000, 0.0569571078, 0.0628542979],
+        [0.0765794425, 0.0418343062, 0.0890198521],
+        [0.0000000000, 0.0393953879, 0.0579948072],
+        [0.0761244507, 0.0783570527, 0.0736727905]], atol=1e-7)
+    # iterms: same fit, s(x)'s SE widened by the cmX construction; the
+    # strictly parametric columns are untouched.
+    pti = m.predict(nd, type="iterms", se_fit=True)
+    np.testing.assert_allclose(pti.to_numpy()[:, :3], pt.to_numpy(),
+                               rtol=1e-12)
+    np.testing.assert_allclose(pti.to_numpy()[:, 3:], [
+        [0.0765794425, 0.0341440710, 0.0641493154],
+        [0.0765794425, 0.0083653908, 0.0711053700],
+        [0.0000000000, 0.0569571078, 0.0679264799],
+        [0.0765794425, 0.0418343062, 0.0926708044],
+        [0.0000000000, 0.0393953879, 0.0634566117],
+        [0.0761244507, 0.0783570527, 0.0780450124]], atol=1e-7)
+    # iterms.type=2 (fixed-effects mean only) coincides here: the tp
+    # basis is sum-to-zero so cmX's smooth block is already ~0.
+    pti2 = m.predict(nd, type="iterms", se_fit=True, iterms_type=2)
+    np.testing.assert_allclose(pti2.to_numpy(), pti.to_numpy(), atol=1e-10)
+
+
+def test_predict_terms_select_exclude_matches_mgcv():
+    df = _pterms_fixture()
+    m = gam("ygau ~ f4 + z + s(x)", df, method="REML")
+    nd = df.head(6)
+    sx = [0.7287209118, 0.1140422594, -0.5756077002,
+          0.1536795821, 0.8146643719, -0.4525337537]
+    zc = [0.2194469430, 0.0537651013, 0.3660683342,
+          0.2688727602, 0.2531976180, 0.5036076593]
+    sel = m.predict(nd, type="terms", terms="s(x)")
+    assert sel.columns == ["s(x)"]
+    np.testing.assert_allclose(sel["s(x)"].to_numpy(), sx, atol=1e-7)
+    selp = m.predict(nd, type="terms", terms=["z", "s(x)"])
+    assert selp.columns == ["z", "s(x)"]
+    np.testing.assert_allclose(selp.to_numpy(),
+                               np.column_stack([zc, sx]), atol=1e-7)
+    exc = m.predict(nd, type="terms", exclude="f4")
+    assert exc.columns == ["z", "s(x)"]
+    np.testing.assert_allclose(exc.to_numpy(),
+                               np.column_stack([zc, sx]), atol=1e-7)
+    # Non-existent labels: the design zeroing still applies, only the
+    # column selection warns and is ignored — terms="nope" therefore
+    # returns the full layout with ALL-ZERO values (verified vs mgcv).
+    with pytest.warns(UserWarning, match="non-existent terms"):
+        wt = m.predict(nd, type="terms", terms="nope")
+    assert wt.columns == ["f4", "z", "s(x)"]
+    assert float(np.abs(wt.to_numpy()).max()) == 0.0
+    with pytest.warns(UserWarning, match="non-existent exclude"):
+        we = m.predict(nd, type="terms", exclude="nope")
+    np.testing.assert_allclose(
+        we.to_numpy(), m.predict(nd, type="terms").to_numpy(), rtol=1e-12)
+
+
+def test_predict_link_response_terms_exclude_matches_mgcv():
+    df = _pterms_fixture()
+    m = gam("ygau ~ f4 + z + s(x)", df, method="REML")
+    nd = df.head(6)
+    le = m.predict(nd, type="link", exclude="s(x)", se_fit=True)
+    np.testing.assert_allclose(le["fit"].to_numpy(), [
+        0.2537803410, 0.0880984993, 0.7412209527,
+        0.3032061582, 0.6283502365, 1.4172910074], atol=1e-7)
+    np.testing.assert_allclose(le["se.fit"].to_numpy(), [
+        0.0522992110, 0.0636480299, 0.0586730126,
+        0.0509906440, 0.0567566929, 0.0613090528], atol=1e-7)
+    # Gaussian identity: response == link for the partial predictor.
+    re_ = m.predict(nd, type="response", exclude="s(x)")
+    np.testing.assert_allclose(re_["fit"].to_numpy(),
+                               le["fit"].to_numpy(), rtol=1e-12)
+    ni = m.predict(nd, type="link", exclude="(Intercept)")
+    np.testing.assert_allclose(ni["fit"].to_numpy(), [
+        0.6073486343, -0.1730118599, -0.2095393660,
+        0.0817331218, 1.0678619899, 0.5896046352], atol=1e-7)
+    # terms= on the link scale: everything not listed is zeroed,
+    # including the intercept — link terms="s(x)" IS the s(x) column.
+    lt = m.predict(nd, type="link", terms="s(x)")
+    np.testing.assert_allclose(lt["fit"].to_numpy(), [
+        0.7287209118, 0.1140422594, -0.5756077002,
+        0.1536795821, 0.8146643719, -0.4525337537], atol=1e-7)
+    lz = m.predict(nd, type="link", terms="z")
+    np.testing.assert_allclose(lz["fit"].to_numpy(), [
+        0.2194469430, 0.0537651013, 0.3660683342,
+        0.2688727602, 0.2531976180, 0.5036076593], atol=1e-7)
+
+
+def test_predict_iterms_unconstrained_smooth_fallback():
+    # s(g5, bs="re") has no absorbed constraint (nCons == 0): its iterms
+    # SE must equal its terms SE (mgcv.r:3072 gate), while s(x)'s widens.
+    # The re component fits to σ ≈ 0 here — its λ stops on a flat REML
+    # boundary (hea 763382 vs R 375898 with REML values 2.5e-6 apart), so
+    # the s(g5) columns themselves are boundary noise and only their
+    # structure is asserted; everything else pins tight.
+    df = _pterms_fixture()
+    m = gam("ygau ~ f4 + z + s(x) + s(g5, bs='re')", df, method="REML")
+    nd = df.head(6)
+    pt = m.predict(nd, type="terms", se_fit=True)
+    pi_ = m.predict(nd, type="iterms", se_fit=True)
+    assert pt.columns[:4] == ["f4", "z", "s(x)", "s(g5)"]
+    np.testing.assert_array_equal(pi_["se.s(g5)"].to_numpy(),
+                                  pt["se.s(g5)"].to_numpy())
+    assert float(np.abs(pt["s(g5)"].to_numpy()).max()) < 1e-4
+    np.testing.assert_allclose(pt["se.s(x)"].to_numpy(), [
+        0.0587519240, 0.0662769260, 0.0628542888,
+        0.0890198483, 0.0579947801, 0.0736728295], rtol=1e-4)
+    np.testing.assert_allclose(pi_["se.s(x)"].to_numpy(), [
+        0.0641492930, 0.0711053735, 0.0679264664,
+        0.0926707969, 0.0634565815, 0.0780450448], rtol=1e-4)
+
+
+def test_predict_terms_offset_poisson_matches_mgcv():
+    # The model offset is kept in link/response predictions under
+    # exclude= (it is not a term), and never appears as a terms column.
+    df = _pterms_fixture()
+    m = gam("ypois ~ z + s(x) + offset(log(lo))", df,
+            family=Poisson(), method="REML")
+    nd = df.head(6)
+    o3 = m.predict(nd, type="link", exclude="s(x)")
+    np.testing.assert_allclose(o3["fit"].to_numpy(), [
+        0.8190497817, 1.0124859323, 0.5762626765,
+        0.6325591405, 1.1485999909, 0.4688441416], atol=1e-7)
+    t3 = m.predict(nd, type="terms")
+    assert t3.columns == ["z", "s(x)"]
+    np.testing.assert_allclose(t3.to_numpy()[0],
+                               [0.0342212456, 0.5892883747], atol=1e-7)
+
+
+def test_predict_terms_multi_lp_gaulss_matches_mgcv():
+    from hea.family import gaulss
+    df = _fit5_fixture()
+    m = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+            method="REML")
+    nd = df.head(6)
+    t4 = m.predict(nd, type="terms")
+    assert t4.columns == ["w", "s(x)", "s.1(z)"]
+    np.testing.assert_allclose(t4.to_numpy(), [
+        [0.1771665841, 0.6438415670, -0.4543401972],
+        [0.1384814493, 0.9652822284, 0.6238127054],
+        [0.2005871866, -0.8572871736, -0.8965449100],
+        [0.2076771970, -0.4848969373, -0.4513446128],
+        [0.2020295798, 0.6688384899, -0.1132332303],
+        [0.3154323869, 0.4317872708, 1.0395618292]], atol=1e-6)
+    # iterms unavailable multi-LP: warn + fall back to terms (mgcv).
+    with pytest.warns(UserWarning, match="iterms not available"):
+        i4 = m.predict(nd, type="iterms")
+    np.testing.assert_array_equal(i4.to_numpy(), t4.to_numpy())
+    e4 = m.predict(nd, type="link", exclude="s.1(z)", se_fit=True)
+    np.testing.assert_allclose(e4["fit"].to_numpy()[:2],
+                               [1.2178920370, 1.5006475636], atol=1e-6)
+    np.testing.assert_allclose(e4["fit.1"].to_numpy()[:2],
+                               [-0.6615446695, -0.6615446695], atol=1e-6)
+    np.testing.assert_allclose(e4["se.fit"].to_numpy()[:2],
+                               [0.0830967718, 0.0619028312], atol=1e-6)
+    np.testing.assert_allclose(e4["se.fit.1"].to_numpy()[:2],
+                               [0.0492193899, 0.0492193899], atol=1e-6)
+    r4 = m.predict(nd, type="response", exclude="s(x)", se_fit=True)
+    np.testing.assert_allclose(r4["fit"].to_numpy()[:2],
+                               [0.5740504700, 0.5353653352], atol=1e-6)
+    np.testing.assert_allclose(r4["fit.1"].to_numpy()[:2],
+                               [2.9618638183, 1.0277798438], atol=1e-6)
+    np.testing.assert_allclose(r4["se.fit"].to_numpy()[:2],
+                               [0.0276854117, 0.0280243013], atol=1e-6)
+    np.testing.assert_allclose(r4["se.fit.1"].to_numpy()[:2],
+                               [0.3332974257, 0.1072502305], atol=1e-6)
