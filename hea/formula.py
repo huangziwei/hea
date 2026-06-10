@@ -5145,115 +5145,23 @@ def _tp_rlanczos(
     return D_out, U_out
 
 
-# ---- R RNG port (knot subsampling parity) -----------------------------------
+# ---- R RNG (knot subsampling parity) ----------------------------------------
 #
 # mgcv's tp/ds/sos constructors take a *seeded random* subsample of
 # max.knots=2000 knots whenever a smooth has more than 2000 unique
 # covariate locations (smooth.r:1286/3031/3239, via temp.seed(seed=1),
 # misc.r:840 — i.e. RNGkind("Mersenne-Twister", sample.kind="Rejection")
 # + set.seed(1) + sample(1:nu, 2000)). Matching mgcv's bases at large n
-# therefore requires R's RNG bit-for-bit: R's set.seed scrambling and
-# MT19937 stream (RNG.c), R_unif_index's rejection sampler, and
-# do_sample's without-replacement pool walk (R >= 3.6 default).
+# therefore requires R's RNG bit-for-bit — the port lives in
+# ``hea.R.rng.RMersenneTwister``. The shim below keeps this module's
+# historical ``_RUnif`` entry point; it imports lazily because
+# ``hea.R``'s __init__ pulls in modules that import this one.
 
 
-class _RUnif:
-    """R's ``unif_rand`` stream after ``set.seed(seed)`` under the default
-    Mersenne-Twister kind — a bit-exact port of R's RNG.c, plus
-    ``R_unif_index`` and the without-replacement ``sample()`` walk."""
-
-    _MATRIX_A = np.uint32(0x9908B0DF)
-    _UPPER = np.uint32(0x80000000)
-    _LOWER = np.uint32(0x7FFFFFFF)
-    _I2_32M1 = 2.3283064365386963e-10   # 2^-32
-
-    def __init__(self, seed: int):
-        # RNG_Init: 50 initial LCG scrambles of the user seed, then 625
-        # further draws fill i_seed[0..624]; MT_FixupSeeds(initial=TRUE)
-        # overwrites i_seed[0] (the mti slot) with 624, so the first draw
-        # regenerates from the LCG-filled state.
-        s = int(seed) & 0xFFFFFFFF
-        for _ in range(50):
-            s = (69069 * s + 1) & 0xFFFFFFFF
-        fills = np.empty(625, dtype=np.uint32)
-        for j in range(625):
-            s = (69069 * s + 1) & 0xFFFFFFFF
-            fills[j] = s
-        self._mt = fills[1:].copy()
-        self._buf = np.empty(0)
-        self._pos = 0
-
-    def _refill(self) -> None:
-        # One MT19937 "twist" of the whole 624-word state, vectorized in
-        # dependency-free slices, then the standard tempering. Tempering
-        # is a pure function of the stored word, so tempering the block
-        # up front equals R's per-draw tempering. Note the wrap-around:
-        # the last word's y pairs old mt[623] with the *freshly updated*
-        # mt[0] (the C loop has already overwritten it).
-        mt = self._mt
-        N, M = 624, 397
-        y = (mt[:N - 1] & self._UPPER) | (mt[1:] & self._LOWER)
-        mag = np.where((y & np.uint32(1)) != 0, self._MATRIX_A, np.uint32(0))
-        yshift = (y >> np.uint32(1)) ^ mag
-        new = np.empty(N, dtype=np.uint32)
-        new[:N - M] = mt[M:] ^ yshift[:N - M]
-        new[N - M:2 * (N - M)] = new[:N - M] ^ yshift[N - M:2 * (N - M)]
-        new[2 * (N - M):N - 1] = new[N - M:M - 1] ^ yshift[2 * (N - M):]
-        y_last = (mt[N - 1] & self._UPPER) | (new[0] & self._LOWER)
-        mag_last = self._MATRIX_A if (int(y_last) & 1) else np.uint32(0)
-        new[N - 1] = new[M - 1] ^ (y_last >> np.uint32(1)) ^ mag_last
-        self._mt = new
-        t = new.copy()
-        t ^= t >> np.uint32(11)
-        t ^= (t << np.uint32(7)) & np.uint32(0x9D2C5680)
-        t ^= (t << np.uint32(15)) & np.uint32(0xEFC60000)
-        t ^= t >> np.uint32(18)
-        u = t.astype(np.float64) * self._I2_32M1
-        # R's fixup keeps draws strictly inside (0,1).
-        u = np.where(u <= 0.0, 0.5 * self._I2_32M1, u)
-        u = np.where(1.0 - u <= 0.0, 1.0 - 0.5 * self._I2_32M1, u)
-        self._buf = u
-        self._pos = 0
-
-    def unif_rand(self) -> float:
-        if self._pos >= self._buf.size:
-            self._refill()
-        v = float(self._buf[self._pos])
-        self._pos += 1
-        return v
-
-    def _rbits(self, bits: int) -> int:
-        # RNG.c rbits: 16 bits per unif_rand draw, mask to `bits`.
-        v = 0
-        nb = 0
-        while nb <= bits:
-            v1 = int(np.floor(self.unif_rand() * 65536.0))
-            v = 65536 * v + v1
-            nb += 16
-        return v & ((1 << bits) - 1)
-
-    def unif_index(self, dn: int) -> int:
-        # R_unif_index, sample.kind="Rejection" (R >= 3.6 default).
-        if dn <= 0:
-            return 0
-        bits = int(np.ceil(np.log2(dn)))
-        while True:
-            dv = self._rbits(bits)
-            if dv < dn:
-                return dv
-
-    def sample_int(self, n: int, k: int) -> np.ndarray:
-        """``sample(1:n, k, replace=FALSE)`` as 0-based indices —
-        do_sample's shrinking-pool walk (src/main/random.c)."""
-        pool = np.arange(n, dtype=np.int64)
-        out = np.empty(k, dtype=np.int64)
-        m = n
-        for i in range(k):
-            j = self.unif_index(m)
-            out[i] = pool[j]
-            m -= 1
-            pool[j] = pool[m]
-        return out
+def _RUnif(seed: int):
+    """R's RNG after ``set.seed(seed)`` — see :class:`hea.R.rng.RMersenneTwister`."""
+    from .R.rng import RMersenneTwister
+    return RMersenneTwister(seed)
 
 
 def _mgcv_ordered_unique(xm: np.ndarray) -> np.ndarray:

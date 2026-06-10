@@ -736,12 +736,9 @@ def test_reml_finite_for_trees_gamma_log():
 def test_kcheck_mcycle_matches_mgcv():
     """k.check on `accel ~ s(times)` (1D smooth, REML).
 
-    mgcv pin (n.rep=10000, see development log):
-        s(times)  k'=9   edf=8.62469100  k-index=1.14736165
-    edf and k-index are deterministic in the residuals + covariate; we
-    pin them tightly. The p-value is a permutation tail and depends on
-    the RNG draw — pin it to a wide-enough band that the test stays
-    robust across RNG seeds.
+    mgcv pins: edf/k-index are RNG-free; the permutation p-value runs
+    through the bit-exact _RUnif port, so seed=0 with n_rep=2000
+    reproduces R's set.seed(0); k.check(b, n.rep=2000) exactly (0.951).
     """
     d = load_dataset("MASS", "mcycle")
     m = gam("accel ~ s(times)", d, method="REML")
@@ -750,8 +747,8 @@ def test_kcheck_mcycle_matches_mgcv():
     np.testing.assert_allclose(ktab["k'"].to_list(),     [9.0],          atol=0)
     np.testing.assert_allclose(ktab["edf"].to_list(),    [8.62469100],   atol=5e-5)
     np.testing.assert_allclose(ktab["k-index"].to_list(),[1.14736165],   atol=5e-5)
-    # mgcv reports ~0.95 with 10k reps; permutation noise widens the band.
-    assert 0.85 < ktab["p-value"][0] <= 1.0
+    np.testing.assert_allclose(ktab["p-value"].to_list(), [0.951],
+                               atol=1e-12)
 
 
 def test_kcheck_handles_no_smooths_returns_none():
@@ -2398,6 +2395,26 @@ def test_r_rng_port_is_bit_exact():
     assert s.sum() == 2979991
     assert s[:5].tolist() == [1017, 679, 2177, 930, 1533]
     assert s[-3:].tolist() == [2694, 2568, 1897]
+    # The port's home is hea.R.rng (formula's _RUnif and
+    # hea.models.bam's name are shims/re-exports of the same class).
+    from hea.R import RMersenneTwister
+    from hea.models.bam import RMersenneTwister as _bam_alias
+    assert type(_RUnif(1)) is RMersenneTwister is _bam_alias
+    # Vector unif_rand consumes the identical stream as scalar draws.
+    r_scalar = _RUnif(1)
+    np.testing.assert_array_equal(
+        RMersenneTwister(1).unif_rand(5),
+        [r_scalar.unif_rand() for _ in range(5)])
+    # R: set.seed(1); sample(5, 4, replace=TRUE)
+    np.testing.assert_array_equal(
+        RMersenneTwister(1).sample_int(5, 4, replace=True) + 1,
+        [1, 4, 1, 2])
+    # R: set.seed(3); sample(c("a","b","c")) → identity permutation
+    assert RMersenneTwister(3).permute(["a", "b", "c"]).tolist() == \
+        ["a", "b", "c"]
+    # R: set.seed(4); sample(c("a","b","c"))
+    assert RMersenneTwister(4).permute(["a", "b", "c"]).tolist() == \
+        list("cab")
 
 
 def test_tp_max_knots_subsample_matches_mgcv():
@@ -4159,15 +4176,21 @@ def test_qq_gam_gaussian_direct_matches_mgcv():
         [-0.9233625883, -0.8576700043, -0.7414020728], rtol=1e-6)
 
 
-def test_qq_gam_poisson_direct_close_to_mgcv():
+def test_qq_gam_poisson_direct_matches_mgcv_exactly():
+    # The direct path's only randomness is R's sample(U), run through
+    # the bit-exact _RUnif port: seed=1 reproduces R's
+    # set.seed(1); qq.gam(m) stream, so Dq pins at 1e-8.
     m = gam("ypois ~ z + s(x)", _pterms_fixture(), family=Poisson(),
             method="REML")
-    q = m._qq_gam_quantiles(seed=0)
-    # R set.seed(1) values at positions 1,50,100,150,200; R's own
-    # seed-to-seed band is max|ΔDq| = 0.069 — pin at ~3×.
+    q = m._qq_gam_quantiles(seed=1)
     np.testing.assert_allclose(
-        np.asarray(q["Dq"])[[0, 49, 99, 149, 199]],
-        [-2.710847, -0.952699, -0.086297, 0.580930, 2.737697], atol=0.2)
+        q["Dq"][:5],
+        [-2.7108467289, -2.3812140479, -2.2226129085, -2.0718779230,
+         -1.9901408878], atol=2e-9)
+    np.testing.assert_allclose(
+        np.asarray(q["Dq"])[[49, 99, 149, 199]],
+        [-0.9526989431, -0.0862973192, 0.5809299111, 2.7376968741],
+        atol=2e-9)
     assert np.all(np.diff(q["Dq"]) >= 0)
 
 
@@ -4230,14 +4253,14 @@ def test_gaulss_check_and_k_check_match_mgcv(capsys):
     kt = m._k_check(seed=0)
     assert kt[""].to_list() == ["s(x)", "s.1(z)"]
     np.testing.assert_allclose(kt["k'"].to_numpy(), [9.0, 9.0])
-    # edf and k-index are RNG-free: R k.check pins (only the permutation
-    # p-value depends on the RNG stream).
     np.testing.assert_allclose(kt["edf"].to_numpy(),
                                [6.1567457, 5.1846841], rtol=1e-6)
     np.testing.assert_allclose(kt["k-index"].to_numpy(),
                                [0.98686224, 0.97445599], rtol=1e-6)
-    np.testing.assert_allclose(kt["p-value"].to_numpy(), [0.3825, 0.3050],
-                               atol=0.1)
+    # The permutation p-values run through the _RUnif port: seed=0 with
+    # n_rep=200 reproduces R's set.seed(0); k.check(b, n.rep=200) exactly.
+    np.testing.assert_allclose(kt["p-value"].to_numpy(), [0.365, 0.330],
+                               atol=1e-12)
     m.check(seed=0, plots=False)
     out = capsys.readouterr().out
     assert "Method: REML   Optimizer: outer newton" in out

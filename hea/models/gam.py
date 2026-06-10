@@ -7821,6 +7821,12 @@ class gam:
         ``t2``) k-indexes are not on mgcv's rescaled axes — the
         qualitative "k-index < 1" warning still applies.
 
+        All randomness (the optional subsample and the permutation
+        null) goes through R's ``sample()`` via the bit-exact
+        ``hea.R.rng`` port, consuming the stream in mgcv's order — so
+        ``seed=k`` reproduces ``set.seed(k); k.check(b, ...)``'s
+        p-values exactly (k'/edf/k-index are RNG-free).
+
         Returns a polars DataFrame with columns ``""``, ``"k'"``,
         ``"edf"``, ``"k-index"``, ``"p-value"`` (one row per smooth
         block), or ``None`` if there are no smooths.
@@ -7830,13 +7836,16 @@ class gam:
 
         rsd = self.residuals_of(type=type)
         n_full = len(rsd)
-        rng = np.random.default_rng(seed)
+        if seed is None:
+            seed = int(np.random.default_rng().integers(2**31 - 1))
+        from ..R.rng import RMersenneTwister
+        r_rng = RMersenneTwister(seed)
 
         # Optional subsample (mgcv's `k.sample`). The same row indices
         # subset both residuals and the per-smooth covariate columns so
         # the neighbour graph stays consistent.
         if n_full > subsample:
-            idx = rng.choice(n_full, size=subsample, replace=False)
+            idx = r_rng.sample_int(n_full, subsample)
             rsd = rsd[idx]
         else:
             idx = np.arange(n_full)
@@ -7866,14 +7875,14 @@ class gam:
                 rows.append((b.label, kc, edf_b, float("nan"), float("nan")))
                 continue
 
-            # Generate all n_rep permutations via per-iter ``rng.permutation``
-            # to preserve the seeded RNG sequence — then vectorize the
-            # diff/square/mean over the (n_rep, nr) stack. This keeps
-            # p-values bit-identical to the unrolled loop while skipping
-            # the Python overhead of n_rep separate numpy invocations.
+            # Generate all n_rep permutations via per-iter R ``sample()``
+            # draws to consume the stream in mgcv's order — then vectorize
+            # the diff/square/mean over the (n_rep, nr) stack. This keeps
+            # p-values bit-identical to R's unrolled loop while skipping
+            # the Python overhead of n_rep separate invocations.
             shufs = np.empty((n_rep, nr))
             for i in range(n_rep):
-                shufs[i] = rng.permutation(rsd)
+                shufs[i] = rsd[r_rng.sample_int(nr, nr)]
 
             if len(cols) == 1:
                 order = np.argsort(cols[0], kind="stable")
@@ -8120,12 +8129,20 @@ class gam:
         QQ plot, like mgcv when the family has neither qf nor rd), the
         (2, n) simulation band (``0 < level < 1``), and the sorted
         simulated-residual matrix (returned when ``level >= 1`` so the
-        caller can draw per-replicate lines). mgcv draws from R's global
-        RNG; hea uses a numpy Generator seeded by ``seed``.
+        caller can draw per-replicate lines).
+
+        RNG: the direct (default) path randomizes only through R's
+        ``sample(U)`` — run through the bit-exact ``hea.R.rng`` port, so
+        ``seed=k`` reproduces R's ``set.seed(k); qq.gam(...)`` exactly.
+        The ``rep>0`` simulation path draws response deviates: R's
+        rpois/rgamma/rbinom rejection samplers are not ported, so it
+        uses a numpy Generator (same seed) and matches R only to
+        Monte-Carlo accuracy.
         """
         D = np.asarray(self.residuals_of(type), dtype=float)
         n = D.size
-        rng = np.random.default_rng(seed)
+        if seed is None:
+            seed = int(np.random.default_rng().integers(2**31 - 1))
         fam = self.family
         lim = Dq = dm_out = None
         if rep == 0:
@@ -8138,6 +8155,7 @@ class gam:
         if rep > 0:  # simulate quantiles via the family's rd
             if getattr(fam, "rd", None) is None:
                 return {"D": D, "Dq": None, "lim": None, "dm": None}
+            rng = np.random.default_rng(seed)
             dm = np.empty((n, rep))
             for i in range(rep):
                 yr = fam.rd(rng, mu, wt, scale)
@@ -8151,10 +8169,12 @@ class gam:
             elif level >= 1:
                 dm_out = dm
         else:  # direct: randomized uniform quantiles through qf
+            from ..R.rng import RMersenneTwister
+            r_rng = RMersenneTwister(seed)
             U = (np.arange(1, n + 1) - 0.5) / n
             dm = np.empty((n, s_rep))
             for i in range(s_rep):
-                U = rng.permutation(U)
+                U = U[r_rng.sample_int(n, n)]   # R: U <- sample(U, n)
                 q0 = fam.qf(U, mu, wt, scale)
                 dm[:, i] = np.sort(self._residuals_for_y(q0, type))
             Dq = np.sort(dm.mean(axis=1))
@@ -8173,10 +8193,13 @@ class gam:
         hook instead, and with ``rep>0`` simulation is forced with a
         ``level`` reference band (``level>=1`` draws each replicate as a
         line). Families with neither hook (e.g. gaulss — exactly as in
-        mgcv) fall back to a normal QQ plot of the residuals. mgcv's
-        randomness comes from R's RNG, hea's from numpy — seed with
-        ``seed=`` for reproducibility; the theoretical-quantile values
-        agree with R up to that Monte-Carlo noise.
+        mgcv) fall back to a normal QQ plot of the residuals.
+
+        ``seed=k`` on the default direct path reproduces R's
+        ``set.seed(k); qq.gam(...)`` bit-exactly (the only randomness is
+        R's ``sample()``, run through the ``hea.R.rng`` port). The
+        simulation path draws deviates from numpy (R's rejection
+        samplers aren't ported) and matches R to Monte-Carlo accuracy.
         """
         if ax is None:
             _fig, ax = plt.subplots(figsize=figsize)
