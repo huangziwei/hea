@@ -4231,12 +4231,15 @@ def test_gaulss_residuals_match_mgcv():
             method="REML")
     rd = m.residuals_of("deviance")
     rr = m.residuals_of("response")
+    # rtol: the gaulss optimizer's stop point differs across BLAS builds
+    # by ~2e-7 in (y−μ̂)·τ̂ (CI/OpenBLAS vs Mac/Accelerate measured
+    # 2.3e-7); same-machine agreement with R is ~1e-8.
     np.testing.assert_allclose(
         rd[:5], [0.9169736592, -0.3322325602, 0.4953299910,
-                 -1.0565800490, -0.8892863726], rtol=1e-7)
+                 -1.0565800490, -0.8892863726], rtol=1e-6)
     np.testing.assert_allclose(
         rr[:5], [0.3095934572, -0.3232526520, 0.1092390376,
-                 -0.3577666120, -0.4186814620], rtol=1e-7)
+                 -0.3577666120, -0.4186814620], rtol=1e-6)
     # gaulss's hook defines pearson == deviance ((y−μ̂)·τ̂).
     np.testing.assert_array_equal(m.residuals_of("pearson"), rd)
     with pytest.raises(ValueError, match="gaulss residuals"):
@@ -4490,12 +4493,20 @@ def test_concurvity_multi_lp_gaulss_matches_mgcv():
     # complement's span — all three measures are 1 (mgcv prints 1 1 1).
     np.testing.assert_allclose(cf["para"].to_numpy(), np.ones(3),
                                atol=1e-10)
+    # The duplicated intercept makes the stacked X EXACTLY rank-deficient
+    # (σ_min ≈ 3e-15), and the FULL measures run an unpivoted QR over it
+    # (mgcv.r:3376 "No pivoting!!") — a 1e-14 perturbation of X moves
+    # these values by ~5e-3, so they are platform noise at that scale in
+    # mgcv too (CI/OpenBLAS measured 3.9e-4 from the Mac pins). Pin the
+    # noise band, not the digits.
     np.testing.assert_allclose(
         cf["s(x)"].to_numpy(),
-        [0.1375448729, 0.0799442378, 0.0742819992], rtol=1e-5)
+        [0.1375448729, 0.0799442378, 0.0742819992], atol=0.02)
     np.testing.assert_allclose(
         cf["s.1(z)"].to_numpy(),
-        [0.1451342576, 0.0844232962, 0.0446797955], rtol=1e-5)
+        [0.1451342576, 0.0844232962, 0.0446797955], atol=0.02)
+    # Pairwise blocks exclude the stray intercept columns — well
+    # conditioned, so the cross-platform-stable pin stays tight.
     cp = m.concurvity(full=False)
     np.testing.assert_allclose(float(cp["estimate"]["s.1(z)"][1]),
                                0.0423461441, rtol=1e-5)
