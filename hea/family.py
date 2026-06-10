@@ -1206,6 +1206,23 @@ class Family:
         """
         return {}
 
+    # ----- qq.gam hooks (mgcv fix.family.qf / fix.family.rd,
+    # plots.r:31-91). ``None`` means unavailable: the qq machinery then
+    # tries simulation (rd) and finally falls back to a normal QQ plot.
+    # Subclasses override with methods qf(p, mu, wt, scale) — the
+    # response quantile function — and rd(rng, mu, wt, scale) — random
+    # deviates (rng is a numpy Generator; mgcv uses R's global RNG).
+    qf = None
+    rd = None
+
+    # mgcv residuals.gam dispatches to ``family$residuals(object, type)``
+    # when the family supplies one (mgcv.r:3429) — general families
+    # (gaulss & co) define their own residuals this way. hea's signature
+    # is ``residuals(y, fitted, type)`` (the only pieces mgcv's hooks
+    # read off the object). ``None`` means use the standard
+    # deviance/pearson/working/response computations.
+    residuals = None
+
     def initialize(self, y, wt) -> np.ndarray:
         """Starting μ̂ for PIRLS. Return a length-n positive (or family-valid)
         vector. Default: y; subclasses override when y can be at the boundary.
@@ -1282,6 +1299,14 @@ class Gaussian(Family):
         if self.link.name == "log":
             return np.maximum(y, 0.01 * np.std(y, ddof=1))
         return y.copy()
+
+    def qf(self, p, mu, wt, scale):
+        from scipy.stats import norm
+        return norm.ppf(p, loc=mu, scale=np.sqrt(
+            scale / np.asarray(wt, dtype=float)))
+
+    def rd(self, rng, mu, wt, scale):
+        return rng.normal(mu, np.sqrt(scale / np.asarray(wt, dtype=float)))
 
     def dev_resids(self, y, mu, wt, theta=None):
         y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
@@ -1388,6 +1413,17 @@ class Gamma(Family):
         d2 = scale * d1_phi + scale * scale * d2_phi
         return np.array([ls0, d1, d2], dtype=float)
 
+    def qf(self, p, mu, wt, scale):
+        # mgcv fix.family.qf: qgamma(p, shape=1/scale, scale=mu*scale) —
+        # prior weights are ignored (as in mgcv).
+        from scipy.stats import gamma as _gamma_dist
+        return _gamma_dist.ppf(p, a=1.0 / scale,
+                               scale=np.asarray(mu, dtype=float) * scale)
+
+    def rd(self, rng, mu, wt, scale):
+        mu = np.asarray(mu, dtype=float)
+        return rng.gamma(shape=1.0 / scale, scale=mu * scale)
+
 
 class Poisson(Family):
     """``y ~ Poisson(μ)``; mean = variance = μ; scale fixed at 1."""
@@ -1443,6 +1479,12 @@ class Poisson(Family):
             logp = _poisson_dist.logpmf(y, y)
         ls0 = float(np.sum(logp * wt))
         return np.array([ls0, 0.0, 0.0], dtype=float)
+
+    def qf(self, p, mu, wt, scale):
+        return _poisson_dist.ppf(p, np.asarray(mu, dtype=float))
+
+    def rd(self, rng, mu, wt, scale):
+        return rng.poisson(np.asarray(mu, dtype=float)).astype(float)
 
 
 class Binomial(Family):
@@ -1521,6 +1563,25 @@ class Binomial(Family):
         ls0 = -0.5 * self.aic(y, y, 0.0, wt, None)
         return np.array([ls0, 0.0, 0.0], dtype=float)
 
+    def qf(self, p, mu, wt, scale):
+        # mgcv fix.family.qf: ceiling non-integer denominators with a
+        # warning; qbinom(p, wt, mu)/(wt + (wt==0)).
+        from scipy.stats import binom as _binom_dist
+        wt = np.asarray(wt, dtype=float)
+        if not np.allclose(wt, np.ceil(wt)):
+            wt = np.ceil(wt)
+            import warnings as _w
+            _w.warn("non-integer binomial denominator: quantiles "
+                    "incorrect", stacklevel=2)
+        q = _binom_dist.ppf(p, wt, np.asarray(mu, dtype=float))
+        return q / (wt + (wt == 0))
+
+    def rd(self, rng, mu, wt, scale):
+        wt = np.asarray(wt, dtype=float)
+        d = rng.binomial(np.rint(wt).astype(np.int64),
+                         np.asarray(mu, dtype=float))
+        return d / (wt + (wt == 0))
+
 
 class InverseGaussian(Family):
     """``y ~ IG(μ, φ)``; mean μ, variance φ·μ³; scale φ unknown."""
@@ -1574,6 +1635,12 @@ class InverseGaussian(Family):
         ls0 = (-0.5 * float(np.sum(np.log(2.0 * np.pi * scale * y[good] ** 3)))
                + 0.5 * float(np.sum(np.log(wt[good]))))
         return np.array([ls0, -0.5 * nobs, 0.0], dtype=float)
+
+    def rd(self, rng, mu, wt, scale):
+        # mgcv fix.family.rd: rig(n, mu, scale) — inverse Gaussian with
+        # variance scale·μ³, i.e. numpy's wald(mean=μ, scale=1/φ). No qf
+        # in mgcv, so qq machinery simulates for this family.
+        return rng.wald(np.asarray(mu, dtype=float), 1.0 / scale)
 
 
 # ---------------------------------------------------------------------------
@@ -3629,6 +3696,10 @@ class gaulss(GeneralFamily):
         """gaulss residuals (gamlss.r:903-908): response = y − μ̂;
         deviance/pearson = (y − μ̂)·τ̂ = (y − μ̂)/σ̂. ``fitted`` is the
         (n, 2) matrix of (μ̂, τ̂)."""
+        if type not in ("deviance", "pearson", "response"):
+            raise ValueError(
+                "type must be one of 'deviance', 'pearson', 'response' "
+                f"for gaulss residuals; got {type!r}")
         fitted = np.asarray(fitted, dtype=float)
         rsd = np.asarray(y, dtype=float) - fitted[:, 0]
         if type == "response":

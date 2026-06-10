@@ -6122,13 +6122,25 @@ class gam:
             - ``"working"``: ``(y-μ) · g'(μ)`` (η-scale residual).
             - ``"response"``: ``y - μ``.
         """
+        # Family-supplied residuals take precedence (mgcv.r:3429) — the
+        # general families (gaulss & co) define deviance/pearson/response
+        # from their (n, n_lp) fitted matrix.
+        fam_res = getattr(self.family, "residuals", None)
+        if fam_res is not None:
+            return np.asarray(
+                fam_res(self._y_arr, self.fitted_values, type), dtype=float)
         if type not in ("deviance", "pearson", "scaled.pearson",
                         "working", "response"):
             raise ValueError(
                 f"type must be one of 'deviance', 'pearson', "
                 f"'scaled.pearson', 'working', 'response'; got {type!r}"
             )
-        y = self._y_arr
+        return self._residuals_for_y(self._y_arr, type)
+
+    def _residuals_for_y(self, y, type: str) -> np.ndarray:
+        """Standard-family residuals for an arbitrary response vector at
+        the FITTED μ̂/weights — qq.gam's ``object$y <- yr`` substitution
+        (plots.r:134/158) recomputes residuals exactly this way."""
         mu = self.fitted_values
         wt = self._wt
         if type == "response":
@@ -7905,10 +7917,18 @@ class gam:
         k_sample: int = 5000,
         k_rep: int = 200,
         seed: int | None = None,
+        plots: bool = True,
+        rep: int = 0,
+        level: float = 0.9,
+        s_rep: int = 10,
     ) -> None:
-        """mgcv-style ``gam.check``: convergence diagnostics + ``k.check`` table.
+        """mgcv-style ``gam.check``: diagnostic plots + convergence text +
+        ``k.check`` table.
 
-        Prints (no plotting — this is a non-graphical port):
+        With ``plots=True`` (default — gam.check always plots) draws
+        mgcv's 2×2 panel first (``plot_check``: qq.gam, residuals vs
+        linear predictor, residual histogram, response vs fitted), then
+        prints:
 
         - Method / optimizer line.
         - Convergence status, iterations, gradient range.
@@ -7919,7 +7939,8 @@ class gam:
         Parameters
         ----------
         type : {"deviance", "pearson", "response"}
-            Residual type passed to ``_k_check``. Default matches mgcv.
+            Residual type for the plots and ``_k_check``. Default
+            matches mgcv.
         k_sample : int
             Maximum residuals to use for the basis check
             (mgcv's ``k.sample``).
@@ -7927,14 +7948,26 @@ class gam:
             Permutation reps for the k-check p-value
             (mgcv's ``k.rep``).
         seed : int | None
-            Seeds the permutations and subsample for reproducibility.
+            Seeds the permutations/subsample and the qq randomization.
             ``None`` uses fresh randomness each call.
+        plots : bool
+            Draw the 2×2 diagnostic panel (``plot_check``).
+        rep, level, s_rep
+            Passed to ``qq_gam`` (see there).
         """
+        if plots:
+            self.plot_check(type=type, rep=rep, level=level, s_rep=s_rep,
+                            seed=seed)
         out: list[str] = []
 
         # --- method / optimizer header ---
         method_label = self.method
-        out.append(f"Method: {method_label}   Optimizer: outer newton")
+        optimizer_label = ("outer efs"
+                           if (self._outer_info or {}).get("conv") in
+                           ("full convergence", "iteration limit reached")
+                           and getattr(self.family, "available_derivs", 2)
+                           == 0 else "outer newton")
+        out.append(f"Method: {method_label}   Optimizer: {optimizer_label}")
 
         # --- convergence info from _outer_newton ---
         info = self._outer_info
@@ -7949,16 +7982,20 @@ class gam:
             iters = info["iter"]
             plural = "" if iters == 1 else "s"
             out.append(f"{info['conv']} after {iters} iteration{plural}.")
-            grad = np.asarray(info["grad"])
+            # General-fit efs / fixed-sp infos carry conv+iter only —
+            # print whatever diagnostics the optimizer recorded.
+            grad = np.asarray(info.get("grad", np.zeros(0)))
             if grad.size > 0:
                 out.append(
                     f"Gradient range [{float(grad.min()):.7g},"
                     f"{float(grad.max()):.7g}]"
                 )
-            score = info["score"]
-            scale = self.sigma_squared
-            out.append(f"(score {score:.7g} & scale {scale:.7g}).")
-            H = np.asarray(info["hess"])
+            score = info.get("score")
+            if score is not None:
+                scale = self.sigma_squared
+                out.append(f"(score {score:.7g} & scale {scale:.7g}).")
+            H = np.asarray(info.get("hess")) \
+                if info.get("hess") is not None else np.zeros(0)
             if H.size > 0:
                 ev = np.linalg.eigvalsh(0.5 * (H + H.T))
                 ev_min, ev_max = float(ev.min()), float(ev.max())
@@ -8072,6 +8109,140 @@ class gam:
             ylabel="Std. deviance resid.",
         )
         return ax
+
+    def _qq_gam_quantiles(self, type: str = "deviance", rep: int = 0,
+                          level: float = 0.9, s_rep: int = 10,
+                          seed: int | None = None) -> dict:
+        """qq.gam's quantile computation (plots.r:116-163).
+
+        Returns ``{"D", "Dq", "lim", "dm"}``: the residuals, the
+        theoretical quantiles (``None`` → caller falls back to a normal
+        QQ plot, like mgcv when the family has neither qf nor rd), the
+        (2, n) simulation band (``0 < level < 1``), and the sorted
+        simulated-residual matrix (returned when ``level >= 1`` so the
+        caller can draw per-replicate lines). mgcv draws from R's global
+        RNG; hea uses a numpy Generator seeded by ``seed``.
+        """
+        D = np.asarray(self.residuals_of(type), dtype=float)
+        n = D.size
+        rng = np.random.default_rng(seed)
+        fam = self.family
+        lim = Dq = dm_out = None
+        if rep == 0:
+            if getattr(fam, "qf", None) is None:
+                rep = 50  # try simulation if no quantile function
+            level = 0
+        mu = self.fitted_values
+        wt = self._wt
+        scale = self.sigma_squared
+        if rep > 0:  # simulate quantiles via the family's rd
+            if getattr(fam, "rd", None) is None:
+                return {"D": D, "Dq": None, "lim": None, "dm": None}
+            dm = np.empty((n, rep))
+            for i in range(rep):
+                yr = fam.rd(rng, mu, wt, scale)
+                dm[:, i] = np.sort(self._residuals_for_y(yr, type))
+            Dq = np.quantile(dm.ravel(), (np.arange(1, n + 1) - 0.5) / n)
+            alpha = (1.0 - level) / 2.0
+            if alpha > 0.5 or alpha < 0:
+                alpha = 0.05
+            if 0 < level < 1:
+                lim = np.quantile(dm, [alpha, 1.0 - alpha], axis=1)
+            elif level >= 1:
+                dm_out = dm
+        else:  # direct: randomized uniform quantiles through qf
+            U = (np.arange(1, n + 1) - 0.5) / n
+            dm = np.empty((n, s_rep))
+            for i in range(s_rep):
+                U = rng.permutation(U)
+                q0 = fam.qf(U, mu, wt, scale)
+                dm[:, i] = np.sort(self._residuals_for_y(q0, type))
+            Dq = np.sort(dm.mean(axis=1))
+        return {"D": D, "Dq": Dq, "lim": lim, "dm": dm_out}
+
+    def qq_gam(self, type: str = "deviance", rep: int = 0,
+               level: float = 0.9, s_rep: int = 10,
+               seed: int | None = None, ax=None, figsize=None,
+               rl_col: str = "red", rep_col: str = "0.8"):
+        """mgcv's ``qq.gam`` (plots.r:94): QQ plot of residuals against
+        family-correct theoretical quantiles.
+
+        ``rep=0`` uses the family's quantile function directly (averaged
+        over ``s_rep`` randomizations of the uniform grid); families
+        without one simulate ``rep=50`` datasets via their random-deviate
+        hook instead, and with ``rep>0`` simulation is forced with a
+        ``level`` reference band (``level>=1`` draws each replicate as a
+        line). Families with neither hook (e.g. gaulss — exactly as in
+        mgcv) fall back to a normal QQ plot of the residuals. mgcv's
+        randomness comes from R's RNG, hea's from numpy — seed with
+        ``seed=`` for reproducibility; the theoretical-quantile values
+        agree with R up to that Monte-Carlo noise.
+        """
+        if ax is None:
+            _fig, ax = plt.subplots(figsize=figsize)
+        qq = self._qq_gam_quantiles(type=type, rep=rep, level=level,
+                                    s_rep=s_rep, seed=seed)
+        D, Dq, lim, dm = qq["D"], qq["Dq"], qq["lim"], qq["dm"]
+        ylab = f"{type} residuals"
+        if Dq is None:
+            # qqnorm fallback: residuals vs N(0,1) quantiles (ppoints).
+            n = D.size
+            a = 3.0 / 8.0 if n <= 10 else 0.5
+            pp = (np.arange(1, n + 1) - a) / (n + 1.0 - 2.0 * a)
+            from scipy.stats import norm as _norm
+            ax.scatter(_norm.ppf(pp), np.sort(D), s=8,
+                       facecolor="none", edgecolor="black")
+            ax.set_xlabel("Theoretical Quantiles")
+            ax.set_ylabel(ylab)
+            ax.set_title("Normal Q-Q Plot")
+            return ax
+        Ds = np.sort(D)
+        if lim is not None:
+            ax.fill_between(Dq, lim[0], lim[1], color=rep_col, lw=0)
+        elif dm is not None:
+            for i in range(dm.shape[1]):
+                ax.plot(Dq, dm[:, i], color=rep_col, lw=0.5)
+        ax.axline((0.0, 0.0), slope=1.0, color=rl_col, lw=1.0)
+        ax.scatter(Dq, Ds, s=8, facecolor="none", edgecolor="black")
+        ax.set_xlabel("theoretical quantiles")
+        ax.set_ylabel(ylab)
+        ax.set_title("QQ plot of residuals")
+        return ax
+
+    def plot_check(self, type: str = "deviance", rep: int = 0,
+                   level: float = 0.9, s_rep: int = 10,
+                   seed: int | None = None, figsize=None):
+        """The graphical half of mgcv's ``gam.check`` (plots.r:277-288):
+        qq.gam | residuals vs linear predictor | residual histogram |
+        response vs fitted values. Multi-LP fits use the first linear
+        predictor / first fitted column on the scatter panels, exactly
+        like mgcv when the residual vector is 1-D."""
+        fig, axes = plt.subplots(2, 2, figsize=figsize or (10, 8))
+        self.qq_gam(type=type, rep=rep, level=level, s_rep=s_rep,
+                    seed=seed, ax=axes[0, 0])
+        resid = np.asarray(self.residuals_of(type), dtype=float)
+        eta = np.asarray(self.linear_predictors, dtype=float)
+        if eta.ndim == 2 and resid.ndim == 1:
+            eta = eta[:, 0]
+        axes[0, 1].scatter(eta, resid, s=8, facecolor="none",
+                           edgecolor="black")
+        axes[0, 1].set_xlabel("linear predictor")
+        axes[0, 1].set_ylabel("residuals")
+        axes[0, 1].set_title("Resids vs. linear pred.")
+        axes[1, 0].hist(resid, color="0.85", edgecolor="black")
+        axes[1, 0].set_xlabel("Residuals")
+        axes[1, 0].set_title("Histogram of residuals")
+        fv = np.asarray(self.fitted_values, dtype=float)
+        y = np.asarray(self._y_arr, dtype=float)
+        if fv.ndim == 2 and y.ndim == 1:
+            fv = fv[:, 0]
+        axes[1, 1].scatter(fv, y, s=8, facecolor="none",
+                           edgecolor="black")
+        axes[1, 1].set_xlabel("Fitted Values")
+        axes[1, 1].set_ylabel("Response")
+        axes[1, 1].set_title("Response vs. Fitted Values")
+        fig.tight_layout()
+        return axes
 
     def plot_scale_location(
         self, ax=None, figsize=None,
@@ -8781,12 +8952,20 @@ class gam:
         ax.set_ylabel(f"Partial for {label}")
 
     def plot(self, figsize=None, smooth=True, label_n=3):
-        """4-panel diagnostic, matching the graphical part of gam.check.
-
-        Per-smooth effect curves (mgcv's plot.gam) and the 2D fitted-surface
-        viewer (vis.gam) live in separate methods and are not part of this
-        diagnostic panel.
+        """4-panel ``plot.lm``-style diagnostic (residuals vs fitted,
+        normal QQ, scale-location, leverage) — hea's lm/glm panel applied
+        to the GAM. mgcv's gam.check panel is ``plot_check`` (drawn by
+        ``check()``); per-smooth effect curves (mgcv's plot.gam) are
+        ``plot_smooth``; the 2D fitted-surface viewer (vis.gam) is
+        ``vis``.
         """
+        if getattr(self, "_md", None) is not None:
+            raise NotImplementedError(
+                "the lm-style diagnostic panel needs scalar-response GLM "
+                "quantities (hat values, standardized residuals) that "
+                "multi-LP general-family fits don't define; use check() "
+                "/ plot_check() and plot_smooth() instead."
+            )
         if figsize is None:
             figsize = (10, 8)
         fig, axes = plt.subplots(2, 2, figsize=figsize)

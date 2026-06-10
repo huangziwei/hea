@@ -771,7 +771,7 @@ def test_check_prints_convergence_block(capsys):
     """
     d = load_dataset("MASS", "mcycle")
     m = gam("accel ~ s(times)", d, method="REML")
-    m.check(seed=0, k_rep=200)
+    m.check(seed=0, k_rep=200, plots=False)
     out = capsys.readouterr().out
     assert "Method: REML" in out
     assert "Optimizer: outer newton" in out
@@ -790,7 +790,7 @@ def test_check_no_smooth_path(capsys):
     the k-check table is omitted."""
     d = load_dataset("R", "trees")
     m = gam("Volume ~ Height + Girth", d, method="REML")
-    m.check()
+    m.check(plots=False)
     out = capsys.readouterr().out
     assert "Model required no smoothing parameter selection" in out
     assert "Basis dimension" not in out
@@ -4130,3 +4130,150 @@ def test_predict_terms_multi_lp_gaulss_matches_mgcv():
                                [0.0276854117, 0.0280243013], atol=1e-6)
     np.testing.assert_allclose(r4["se.fit.1"].to_numpy()[:2],
                                [0.3332974257, 0.1072502305], atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# qq.gam + gam.check plots + multi-LP check (roadmap B2) — mgcv 1.9-4.
+# qq.gam (plots.r:94): family-correct theoretical residual quantiles — the
+# qf direct path (averaged over s_rep randomized uniform grids), the rd
+# simulation path (rep>0, level band), and the qqnorm fallback when the
+# family has neither hook (gaulss — same in mgcv). mgcv randomizes via R's
+# RNG and hea via numpy, so shuffle-dependent quantiles are pinned within
+# R's own seed-to-seed band (measured 0.07 for the poisson fit below);
+# the unweighted-gaussian direct path is shuffle-INVARIANT and pins exactly.
+# ---------------------------------------------------------------------------
+
+def test_qq_gam_gaussian_direct_matches_mgcv():
+    m = gam("ygau ~ f4 + z + s(x)", _pterms_fixture(), method="REML")
+    q = m._qq_gam_quantiles(seed=0)
+    # Dq == sort(qnorm(U))·√sig2 exactly, for any shuffle: R values.
+    np.testing.assert_allclose(
+        q["Dq"][:5],
+        [-1.0224262903, -0.8859630851, -0.8164023895, -0.7679426877,
+         -0.7301698497], atol=1e-9)
+    np.testing.assert_allclose(q["Dq"][99], -0.0022825335, atol=1e-9)
+    np.testing.assert_allclose(q["Dq"][199], 1.0224262903, atol=1e-9)
+    assert q["lim"] is None
+    np.testing.assert_allclose(
+        np.sort(q["D"])[:3],
+        [-0.9233625883, -0.8576700043, -0.7414020728], rtol=1e-6)
+
+
+def test_qq_gam_poisson_direct_close_to_mgcv():
+    m = gam("ypois ~ z + s(x)", _pterms_fixture(), family=Poisson(),
+            method="REML")
+    q = m._qq_gam_quantiles(seed=0)
+    # R set.seed(1) values at positions 1,50,100,150,200; R's own
+    # seed-to-seed band is max|ΔDq| = 0.069 — pin at ~3×.
+    np.testing.assert_allclose(
+        np.asarray(q["Dq"])[[0, 49, 99, 149, 199]],
+        [-2.710847, -0.952699, -0.086297, 0.580930, 2.737697], atol=0.2)
+    assert np.all(np.diff(q["Dq"]) >= 0)
+
+
+def test_qq_gam_simulation_branch_matches_mgcv():
+    m = gam("ygau ~ f4 + z + s(x)", _pterms_fixture(), method="REML")
+    q = m._qq_gam_quantiles(rep=20, level=0.9, seed=1)
+    # R set.seed(1), rep=20: [-1.085751, -0.007870, 0.977612] — MC band.
+    np.testing.assert_allclose(np.asarray(q["Dq"])[[0, 99, 199]],
+                               [-1.085751, -0.007870, 0.977612], atol=0.25)
+    assert q["lim"].shape == (2, 200)
+    assert np.all(q["lim"][0] <= q["lim"][1])
+    # level >= 1: per-replicate line matrix instead of a band.
+    q2 = m._qq_gam_quantiles(rep=5, level=1, seed=1)
+    assert q2["dm"].shape == (200, 5) and q2["lim"] is None
+
+
+def test_qq_gam_plot_and_gaulss_fallback():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    m = gam("ygau ~ f4 + z + s(x)", _pterms_fixture(), method="REML")
+    ax = m.qq_gam(seed=0)
+    assert ax.get_xlabel() == "theoretical quantiles"
+    plt.close("all")
+    from hea.family import gaulss
+    mg = gam(["y ~ s(x) + w", "~ s(z)"], _fit5_fixture(), family=gaulss(),
+             method="REML")
+    # gaulss has neither qf nor rd in mgcv 1.9-4 → normal QQ fallback.
+    assert mg._qq_gam_quantiles(seed=0)["Dq"] is None
+    ax = mg.qq_gam(seed=0)
+    assert ax.get_title() == "Normal Q-Q Plot"
+    plt.close("all")
+
+
+def test_gaulss_residuals_match_mgcv():
+    from hea.family import gaulss
+    m = gam(["y ~ s(x) + w", "~ s(z)"], _fit5_fixture(), family=gaulss(),
+            method="REML")
+    rd = m.residuals_of("deviance")
+    rr = m.residuals_of("response")
+    np.testing.assert_allclose(
+        rd[:5], [0.9169736592, -0.3322325602, 0.4953299910,
+                 -1.0565800490, -0.8892863726], rtol=1e-7)
+    np.testing.assert_allclose(
+        rr[:5], [0.3095934572, -0.3232526520, 0.1092390376,
+                 -0.3577666120, -0.4186814620], rtol=1e-7)
+    # gaulss's hook defines pearson == deviance ((y−μ̂)·τ̂).
+    np.testing.assert_array_equal(m.residuals_of("pearson"), rd)
+    with pytest.raises(ValueError, match="gaulss residuals"):
+        m.residuals_of("working")
+
+
+def test_gaulss_check_and_k_check_match_mgcv(capsys):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from hea.family import gaulss
+    m = gam(["y ~ s(x) + w", "~ s(z)"], _fit5_fixture(), family=gaulss(),
+            method="REML")
+    kt = m._k_check(seed=0)
+    assert kt[""].to_list() == ["s(x)", "s.1(z)"]
+    np.testing.assert_allclose(kt["k'"].to_numpy(), [9.0, 9.0])
+    # edf and k-index are RNG-free: R k.check pins (only the permutation
+    # p-value depends on the RNG stream).
+    np.testing.assert_allclose(kt["edf"].to_numpy(),
+                               [6.1567457, 5.1846841], rtol=1e-6)
+    np.testing.assert_allclose(kt["k-index"].to_numpy(),
+                               [0.98686224, 0.97445599], rtol=1e-6)
+    np.testing.assert_allclose(kt["p-value"].to_numpy(), [0.3825, 0.3050],
+                               atol=0.1)
+    m.check(seed=0, plots=False)
+    out = capsys.readouterr().out
+    assert "Method: REML   Optimizer: outer newton" in out
+    assert "full convergence after" in out
+    assert "Basis dimension (k) checking" in out
+    assert "s.1(z)" in out
+    axes = m.plot_check(seed=0)
+    assert axes.shape == (2, 2)
+    assert axes[0, 0].get_title() == "Normal Q-Q Plot"  # gaulss fallback
+    plt.close("all")
+    # The lm-style panel is undefined for multi-LP fits — clear guard.
+    with pytest.raises(NotImplementedError, match="plot_smooth"):
+        m.plot()
+
+
+def test_family_qf_rd_unit_values_match_R():
+    from hea.family import Binomial, Gaussian
+    g = Gamma()
+    np.testing.assert_allclose(
+        g.qf(np.array([.1, .5, .9]), np.array([2.0, 2.0, 2.0]), 1.0, 0.3),
+        [0.7860239435, 1.8039491853, 3.4688989388], rtol=1e-9)
+    b = Binomial()
+    np.testing.assert_allclose(
+        b.qf(np.array([.1, .5, .9]), np.array([0.4, 0.4, 0.4]),
+             np.array([7.0, 7.0, 7.0]), 1.0),
+        [0.1428571429, 0.4285714286, 0.5714285714], rtol=1e-9)
+    p = Poisson()
+    np.testing.assert_allclose(
+        p.qf(np.array([.1, .5, .9]), np.array([3.5, 3.5, 3.5]), 1.0, 1.0),
+        [1.0, 3.0, 6.0])
+    gau = Gaussian()
+    np.testing.assert_allclose(
+        gau.qf(0.75, 1.2, 2.0, 0.5), 1.5372448751, rtol=1e-9)
+    # rd hooks: reproducible given the same Generator seed.
+    rng1 = np.random.default_rng(5)
+    rng2 = np.random.default_rng(5)
+    mu = np.array([1.0, 2.0, 3.0])
+    np.testing.assert_array_equal(g.rd(rng1, mu, 1.0, 0.3),
+                                  g.rd(rng2, mu, 1.0, 0.3))
