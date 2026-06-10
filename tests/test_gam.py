@@ -3330,9 +3330,16 @@ def test_multi_formula_validation_and_gam_guard():
     # mgcv's numeric-label shared-term syntax: explicit refusal.
     with pytest.raises(NotImplementedError, match="shared-term"):
         _prepare_multi_design(["y ~ s(x)", "1 + 2 ~ s(z)"], df)
-    # gam() on a formula list: clear pointer to §5.3 until gam.fit5 lands.
-    with pytest.raises(NotImplementedError, match="general-family"):
+    # gam() on a formula list requires a general family (gam.fit5);
+    # a general family conversely requires the formula list.
+    with pytest.raises(NotImplementedError, match="general family"):
         gam(["y ~ s(x)", "~ s(z)"], df, method="REML")
+    from hea.family import gaulss
+    with pytest.raises(ValueError, match="list of formulas"):
+        gam("y ~ s(x)", df, family=gaulss(), method="REML")
+    with pytest.raises(ValueError, match="linear predictors"):
+        gam(["y ~ s(x)", "~ s(z)", "~ x"], df, family=gaulss(),
+            method="REML")
 
 
 # ---------------------------------------------------------------------------
@@ -3635,6 +3642,54 @@ def test_gam_fit5_reml1_matches_finite_differences():
         fm, _ = _fit5_run(["y ~ s(x) + w", "~ s(z)"], lm, deriv=0)
         g_fd[k] = (fp["REML"] - fm["REML"]) / (2 * eps)
     np.testing.assert_allclose(fit["REML1"], g_fd, rtol=0, atol=1e-6)
+
+
+def test_gaulss_free_fit_through_gam_matches_mgcv():
+    # End-to-end: gam(formula list, family=gaulss()) — initial.spg
+    # general seed (pen.reg initializer) → outer Newton over the
+    # gam.fit5 REML closure (newton's coefficient carry-forward,
+    # ε=1e-8) → final deriv-2 fit. R: gam(list(y ~ s(x) + w, ~ s(z)),
+    # family=gaulss(), method="REML"), mgcv 1.9-4 — both stop within
+    # the same band (sp agrees to ~7e-7 here; tolerances leave
+    # cross-architecture headroom).
+    from hea.family import gaulss
+    df = _fit5_fixture()
+    m = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+            method="REML")
+    assert m.converged and m.method == "REML"
+    np.testing.assert_allclose(m.sp, [0.17652378, 0.13552758], rtol=1e-4)
+    np.testing.assert_allclose(m.REML_criterion / 2, 200.6053564981,
+                               rtol=0, atol=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(m.fitted_values)[:2],
+        [[1.21789203, 2.96186385], [1.50064757, 1.02777984]],
+        rtol=0, atol=1e-5)
+    # deviance = Σ deviance-residuals² (mgcv.r:2429); null deviance
+    # from gaulss's postproc (gamlss.r:910-918).
+    np.testing.assert_allclose(m.deviance, 219.87251230, rtol=1e-5)
+    np.testing.assert_allclose(m.null_deviance, 999.78800005, rtol=1e-5)
+    assert m.rank == 21
+    # GCV.Cp silently coerces to REML for general families
+    # (mgcv.r:1894-1898).
+    m3 = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+             method="GCV.Cp")
+    assert m3.method == "REML"
+    np.testing.assert_allclose(m3.REML_criterion / 2, 200.60535650,
+                               rtol=0, atol=1e-5)
+
+
+def test_gaulss_fixed_sp_through_gam_matches_mgcv():
+    from hea.family import gaulss
+    df = _fit5_fixture()
+    m = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+            method="REML", sp=np.array([2.0, 0.5]))
+    np.testing.assert_allclose(m.REML_criterion / 2, 215.4989395241,
+                               rtol=0, atol=1e-7)
+    np.testing.assert_allclose(
+        np.asarray(m.fitted_values)[:2],
+        [[1.34747742, 2.84715778], [1.41893577, 1.08064959]],
+        rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.sp, [2.0, 0.5])
 
 
 def test_predict_unconditional_se_matches_mgcv():

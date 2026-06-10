@@ -3330,6 +3330,56 @@ def gamlss_gH(X, jj, l1, l2, i2, l3=None, i3=None, l4=None, i4=None,
     return {"lb": lb, "lbb": lbb, "d1H": d1H, "trHid2H": trHid2H}
 
 
+def _pen_reg(x: np.ndarray, e: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """mgcv ``pen.reg`` (gamlss.r:1415-1453): penalized regression of y
+    on x with square-root penalty e used as a *regularizer* — the
+    penalty weight k is grown/shrunk (×10 / ÷5) until the edf lands in
+    (0.85·rank(x), rank(x) − 0.1·re]. Used by general-family
+    ``initialize`` when E arrives without mgcv's ``use.unscaled``
+    attribute (the initial.spg path)."""
+    # local import: hea.models.gam imports this module at load time,
+    # so the reverse import must be deferred to call time.
+    from .models.gam import _R_rank
+    x = np.asarray(x, dtype=float)
+    e = np.asarray(e, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if float(np.sum(np.abs(e))) == 0.0:
+        b, *_ = np.linalg.lstsq(x, y, rcond=None)
+        b[~np.isfinite(b)] = 0.0
+        return b
+    from scipy.linalg import qr as _scipy_qr
+    Q_x, R, piv = _scipy_qr(x, mode="economic", pivoting=True)
+    r = R.shape[1]
+    rr = _R_rank(R, tol=float(np.finfo(float).eps) ** 0.9)
+    R_unpiv = np.empty_like(R)
+    R_unpiv[:, piv] = R                      # R[, pivot] <- R
+    R = R_unpiv
+    Qy = Q_x.T @ y                           # qr.qty(...)[1:ncol(R)]
+
+    def _edf_and_R(k):
+        aug = np.vstack([R, e * k])
+        Q_a, R_a = np.linalg.qr(aug, mode="reduced")
+        return float(np.sum(Q_a[:r] ** 2)), R_a
+
+    norm_R = float(np.abs(R).sum(axis=0).max())      # R norm(): "O"
+    norm_e = float(np.abs(e).sum(axis=0).max())
+    k = 0.01 * norm_R / norm_e
+    edf, R_a = _edf_and_R(k)
+    re = (min(int(np.sum(np.abs(e).sum(axis=0) != 0)), e.shape[0])
+          - _R_rank(R_a, tol=float(np.finfo(float).eps) ** 0.9) + rr)
+    while edf > rr - 0.1 * re:               # increase penalization
+        k = k * 10.0
+        edf, _ = _edf_and_R(k)
+    while edf < 0.85 * rr:                   # reduce penalization
+        k = k / 5.0
+        edf, _ = _edf_and_R(k)
+    aug = np.vstack([R, e * k])
+    rhs = np.concatenate([Qy, np.zeros(e.shape[0])])
+    b, *_ = np.linalg.lstsq(aug, rhs, rcond=None)
+    b[~np.isfinite(b)] = 0.0
+    return b
+
+
 class LogbLink(Link):
     """mgcv's ``logb`` link for gaulss's precision LP (gamlss.r:887-900):
     η = log(1/μ − b) so μ = 1/(exp(η) + b) stays below 1/b (τ = 1/σ
@@ -3407,9 +3457,24 @@ class GeneralFamily(Family):
         """
         raise NotImplementedError
 
-    def initialize_coef(self, y, X, lpi, E=None, offset=None) -> np.ndarray:
-        """Starting coefficients (mgcv ``family$initialize``)."""
+    def initialize_coef(self, y, X, lpi, E=None, offset=None,
+                        use_unscaled: bool = False) -> np.ndarray:
+        """Starting coefficients (mgcv ``family$initialize``).
+
+        ``use_unscaled`` mirrors mgcv's ``attr(E, "use.unscaled")``:
+        gam.fit5 passes its ldetS penalty root with the attribute set
+        (E used as-is in a stacked least squares); initial.spg passes
+        the balanced root WITHOUT it, and the initializer then adjusts
+        the penalty weight itself (``pen.reg``)."""
         raise NotImplementedError
+
+    def postproc(self, y, fitted) -> dict:
+        """mgcv ``family$postproc`` analog: family-specific deviance /
+        null-deviance overrides, evaluated on the converged fit.
+        Returns a dict with optional ``deviance`` / ``null_deviance``
+        keys; absent keys fall back to estimate.gam's generics
+        (deviance = Σ deviance-residuals², mgcv.r:2429)."""
+        return {}
 
 
 class gaulss(GeneralFamily):
@@ -3508,12 +3573,15 @@ class gaulss(GeneralFamily):
         ret.update(gh)
         return ret
 
-    def initialize_coef(self, y, X, lpi, E=None,
-                        offset=None) -> np.ndarray:
+    def initialize_coef(self, y, X, lpi, E=None, offset=None,
+                        use_unscaled: bool = False) -> np.ndarray:
         """gaulss ``initialize`` (gamlss.r:1016-1086, dense branch):
-        ridge-regress g(y) on LP1's columns, then the log absolute
-        residuals on LP2's. ``E`` is the total penalty root used purely
-        as a regularizer (gam.fit5 passes it with use.unscaled set)."""
+        regress g(y) on LP1's columns, then the log absolute residuals
+        on LP2's, with the penalty root ``E`` as a regularizer.
+        ``use_unscaled`` (mgcv's ``attr(E,"use.unscaled")``, set by
+        gam.fit5 on its ldetS root): stacked least squares with E
+        as-is; otherwise (initial.spg's balanced root) ``pen.reg``
+        adjusts the penalty weight to an edf target."""
         y = np.asarray(y, dtype=float)
         X = np.asarray(X, dtype=float)
         jj = [np.asarray(ix, dtype=int) for ix in lpi]
@@ -3527,21 +3595,35 @@ class gaulss(GeneralFamily):
             yt1 = self.links[0].link(np.abs(y) + float(np.max(y)) * 1e-7)
         if offset is not None and offset[0] is not None:
             yt1 = yt1 - offset[0]
-        x1 = np.vstack([X[:, jj[0]], E[:, jj[0]]])
-        b1, *_ = np.linalg.lstsq(
-            x1, np.concatenate([yt1, np.zeros(E.shape[0])]), rcond=None)
-        b1[~np.isfinite(b1)] = 0.0
+
+        def _reg(cols, target):
+            if use_unscaled:
+                xa = np.vstack([X[:, cols], E[:, cols]])
+                b, *_ = np.linalg.lstsq(
+                    xa, np.concatenate([target, np.zeros(E.shape[0])]),
+                    rcond=None)
+                b[~np.isfinite(b)] = 0.0
+                return b
+            return _pen_reg(X[:, cols], E[:, cols], target)
+
+        b1 = _reg(jj[0], yt1)
         start[jj[0]] = b1
         lres1 = np.log(np.abs(y - self.links[0].linkinv(
             X[:, jj[0]] @ b1)))
         if offset is not None and len(offset) > 1 and offset[1] is not None:
             lres1 = lres1 - offset[1]
-        x2 = np.vstack([X[:, jj[1]], E[:, jj[1]]])
-        b2, *_ = np.linalg.lstsq(
-            x2, np.concatenate([lres1, np.zeros(E.shape[0])]), rcond=None)
-        b2[~np.isfinite(b2)] = 0.0
-        start[jj[1]] = b2
+        start[jj[1]] = _reg(jj[1], lres1)
         return start
+
+    def postproc(self, y, fitted) -> dict:
+        """gaulss postproc (gamlss.r:910-918): null deviance only —
+        ``Σ((y − ȳ)·τ̂)²`` (the fitted-precision-weighted null SS);
+        the deviance itself falls back to estimate.gam's generic
+        Σ deviance-residuals² (mgcv.r:2429)."""
+        y = np.asarray(y, dtype=float)
+        fitted = np.asarray(fitted, dtype=float)
+        return {"null_deviance": float(np.sum(
+            ((y - float(np.mean(y))) * fitted[:, 1]) ** 2))}
 
     def residuals(self, y, fitted, type: str = "deviance") -> np.ndarray:
         """gaulss residuals (gamlss.r:903-908): response = y − μ̂;
