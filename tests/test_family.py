@@ -1020,3 +1020,140 @@ def test_scat_bam_factor_auto_fit():
     assert np.allclose(sp_h, sp_mgcv, rtol=1e-5, atol=0), (
         f"factor auto-fit sp mismatch: hea={sp_h} mgcv={sp_mgcv}"
     )
+
+
+# ---------------------------------------------------------------------------
+# General-family seam (mgcv gamlss.r authoring kit) + gaulss — §5.3
+# prerequisite 5. mgcv 1.9-4 oracle references: gaulss()$ll evaluated in R
+# at identical (y, X, lpi, coef, d1b, d2b, fh, D) for every deriv level.
+# ---------------------------------------------------------------------------
+
+def test_trind_generator_matches_mgcv():
+    from hea.family import trind_generator
+    tri = trind_generator(3)
+    # R's 1-based packed indices, flattened column-major (mgcv K=3).
+    np.testing.assert_array_equal(
+        (tri["i2"] + 1).flatten(order="F"), [1, 2, 3, 2, 4, 5, 3, 5, 6])
+    assert tri["i3"][0, 1, 2] + 1 == 5
+    assert tri["i3"][2, 2, 2] + 1 == 10
+    assert tri["i3"][1, 0, 1] + 1 == 4
+    assert tri["i4"][0, 1, 2, 2] + 1 == 9
+    assert tri["i4"][2, 2, 2, 2] + 1 == 15
+    assert tri["i4"][1, 0, 2, 0] + 1 == 5
+    # symmetry: any permutation hits the same packed column
+    assert tri["i4"][0, 2, 1, 2] == tri["i4"][2, 2, 1, 0]
+
+
+def _gaulss_oracle_inputs():
+    rng = np.random.default_rng(17)
+    n = 40
+    X = np.hstack([np.ones((n, 1)), rng.normal(size=(n, 2)),
+                   np.ones((n, 1)), rng.normal(size=(n, 1))])
+    y = 1.0 + X[:, 1] * 0.5 + rng.normal(0, 0.7, n)
+    coef = np.array([0.8, 0.4, -0.2, 0.3, 0.1])
+    d1b = rng.normal(size=(5, 2)) * 0.3
+    d2b = rng.normal(size=(5, 3)) * 0.2
+    lpi = [np.arange(0, 3), np.arange(3, 5)]
+    return X, y, coef, d1b, d2b, lpi
+
+
+def test_gaulss_ll_matches_mgcv_oracle():
+    # Every output of gaulss()$ll at deriv 1/2/3/4, pinned to all printed
+    # digits: l, lb, lbb, the tr(Hp⁻¹∂H/∂ρ) vector (fh = Hp⁻¹), the full
+    # ∂H/∂ρ list, and trHid2H through the preconditioned-Cholesky fh/D
+    # convention gam.fit5 uses.
+    from scipy.linalg import cholesky
+    from hea.family import gaulss
+    X, y, coef, d1b, d2b, lpi = _gaulss_oracle_inputs()
+    fam = gaulss()
+
+    r1 = fam.ll(y, X, coef, lpi=lpi, deriv=1)
+    np.testing.assert_allclose(r1["l"], -54.793169613785, rtol=0,
+                               atol=1e-10)
+    np.testing.assert_allclose(
+        r1["lb"],
+        [4.7999681426, 1.3391588398, -1.6129245631, -29.6772211001,
+         -5.2891939141], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(r1["lbb"][0, 0], -21.2901328670,
+                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(float(np.sum(np.abs(r1["lbb"]))),
+                               255.3526070152, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(r1["lbb"][0, 4], -7.5504145515,
+                               rtol=0, atol=1e-9)
+
+    Hp = -r1["lbb"] + np.eye(5) * 0.5
+    r2 = fam.ll(y, X, coef, lpi=lpi, deriv=2, d1b=d1b,
+                fh=np.linalg.inv(Hp))
+    np.testing.assert_allclose(r2["d1H"], [2.4746058080, -0.7768359917],
+                               rtol=0, atol=1e-9)
+
+    r3 = fam.ll(y, X, coef, lpi=lpi, deriv=3, d1b=d1b)
+    np.testing.assert_allclose(float(np.sum(np.abs(r3["d1H"][0]))),
+                               345.3335722086, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(float(np.sum(np.abs(r3["d1H"][1]))),
+                               246.6055510218, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(r3["d1H"][0][0, 0], 10.8408987310,
+                               rtol=0, atol=1e-9)
+
+    D = 1.0 / np.sqrt(np.diag(Hp))
+    R = cholesky(D[:, None] * Hp * D[None, :], lower=False)
+    r4 = fam.ll(y, X, coef, lpi=lpi, deriv=4, d1b=d1b, d2b=d2b,
+                fh=(R, np.arange(5)), D=D)
+    np.testing.assert_allclose(
+        r4["trHid2H"], [-6.7777512659, 2.3794298623, -3.2244531536],
+        rtol=0, atol=1e-9)
+    # The eigendecomposition fh variant must agree with the Cholesky one.
+    w, V = np.linalg.eigh(D[:, None] * Hp * D[None, :])
+    r4e = fam.ll(y, X, coef, lpi=lpi, deriv=4, d1b=d1b, d2b=d2b,
+                 fh={"values": w, "vectors": V}, D=D)
+    np.testing.assert_allclose(r4e["trHid2H"], r4["trHid2H"], atol=1e-9)
+
+
+def test_gaulss_ll_derivatives_match_fd():
+    from hea.family import gaulss
+    X, y, coef, d1b, _, lpi = _gaulss_oracle_inputs()
+    fam = gaulss()
+    r1 = fam.ll(y, X, coef, lpi=lpi, deriv=1)
+    h = 1e-6
+    p = coef.size
+    fd_lb = np.zeros(p)
+    fd_lbb = np.zeros((p, p))
+    for k in range(p):
+        cp = coef.copy(); cp[k] += h
+        cm = coef.copy(); cm[k] -= h
+        fd_lb[k] = (fam.ll(y, X, cp, lpi=lpi)["l"]
+                    - fam.ll(y, X, cm, lpi=lpi)["l"]) / (2 * h)
+        fd_lbb[:, k] = (fam.ll(y, X, cp, lpi=lpi, deriv=1)["lb"]
+                        - fam.ll(y, X, cm, lpi=lpi, deriv=1)["lb"]) / (2 * h)
+    np.testing.assert_allclose(r1["lb"], fd_lb, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(r1["lbb"], fd_lbb, rtol=0, atol=1e-6)
+    # d1H along the d1b directions: H(β + h·d1b_l) FD.
+    r3 = fam.ll(y, X, coef, lpi=lpi, deriv=3, d1b=d1b)
+    for l in range(d1b.shape[1]):
+        fdH = (fam.ll(y, X, coef + h * d1b[:, l], lpi=lpi, deriv=1)["lbb"]
+               - fam.ll(y, X, coef - h * d1b[:, l], lpi=lpi,
+                        deriv=1)["lbb"]) / (2 * h)
+        np.testing.assert_allclose(r3["d1H"][l], fdH, rtol=0, atol=1e-5)
+
+
+def test_gaulss_initialize_and_residuals():
+    from hea.family import gaulss
+    X, y, coef, _, _, lpi = _gaulss_oracle_inputs()
+    fam = gaulss()
+    start = fam.initialize_coef(y, X, lpi)
+    assert start.shape == (5,) and np.all(np.isfinite(start))
+    # identity μ-link: LP1 start is the plain LS fit of y on X₁.
+    b1, *_ = np.linalg.lstsq(X[:, :3], y, rcond=None)
+    np.testing.assert_allclose(start[:3], b1, atol=1e-10)
+    mu = X[:, :3] @ coef[:3]
+    tau = fam.links[1].linkinv(X[:, 3:] @ coef[3:])
+    fitted = np.column_stack([mu, tau])
+    np.testing.assert_allclose(fam.residuals(y, fitted, type="response"),
+                               y - mu, atol=0)
+    np.testing.assert_allclose(fam.residuals(y, fitted),
+                               (y - mu) * tau, atol=0)
+    # logb link: μ = 1/(e^η + b) round-trips and stays below 1/b.
+    lk = fam.links[1]
+    eta = np.linspace(-3, 3, 9)
+    np.testing.assert_allclose(lk.link(lk.linkinv(eta)), eta, atol=1e-10)
+    assert np.all(lk.linkinv(eta) < 1.0 / fam.b)

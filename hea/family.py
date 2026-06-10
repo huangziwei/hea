@@ -26,8 +26,11 @@ Gaussian REML derivatives in :mod:`hea.gam`.
 
 from __future__ import annotations
 
+import itertools
+
 import numpy as np
 import polars as pl
+from scipy.linalg import solve_triangular
 from scipy.special import digamma, expit, gammaln, ndtr, ndtri, polygamma
 from scipy.stats import gamma as _gamma_dist
 from scipy.stats import poisson as _poisson_dist
@@ -2986,6 +2989,575 @@ class nb(Family):
         return f"nb(theta={Th:.4g}, link={self.link.name})"
 
 
+# ---------------------------------------------------------------------------
+# General-family seam — mgcv gamlss.r authoring kit (§5.3 prerequisite 5).
+#
+# General families (gam.fit5: multiple linear predictors, likelihood
+# supplied as ``ll`` instead of a deviance) are authored from per-datum
+# derivative arrays of the log-likelihood w.r.t. the distribution
+# parameters (μ₁..μ_K), packed in upper-triangular order. The kit:
+#   * trind_generator — symmetric index lookups into the packed arrays
+#   * gamlss_etamu    — chain rule μ-derivatives → η-derivatives through
+#                        the per-LP link derivatives
+#   * gamlss_gH       — assemble the coefficient-space gradient/Hessian/
+#                        ∂H/∂ρ/tr(H⁻¹∂²H) that gam.fit5 consumes
+# A custom family (pycircstat2's von Mises, …) supplies l1..l4 + links;
+# everything downstream is generic. Ported complete-array/dense paths
+# only — out of scope (absent, never silent): the "remap" dropped-zero-
+# column optimization (multinom-scale K), discrete (bam) X lists,
+# sandwich, bootstrap deriv<0, the non-linear g.index corrections.
+# Index convention: everything 0-based (R's 1-based m and dims shifted).
+# ---------------------------------------------------------------------------
+
+
+def trind_generator(K: int = 2) -> dict:
+    """mgcv ``trind.generator`` (gamlss.r:20-112): index arrays for
+    upper-triangular packed storage of symmetric derivative arrays up to
+    order 4. ``i4[i,j,k,l]`` (0-based everywhere) gives the packed column
+    holding the derivative w.r.t. parameters i,j,k,l in any order;
+    ``i3``/``i2`` likewise."""
+    i4 = np.zeros((K, K, K, K), dtype=int)
+    m = 0
+    for i in range(K):
+        for j in range(i, K):
+            for k in range(j, K):
+                for ll_ in range(k, K):
+                    for perm in itertools.permutations((i, j, k, ll_)):
+                        i4[perm] = m
+                    m += 1
+    i3 = np.zeros((K, K, K), dtype=int)
+    m = 0
+    for j in range(K):
+        for k in range(j, K):
+            for ll_ in range(k, K):
+                for perm in itertools.permutations((j, k, ll_)):
+                    i3[perm] = m
+                m += 1
+    i2 = np.zeros((K, K), dtype=int)
+    m = 0
+    for k in range(K):
+        for ll_ in range(k, K):
+            i2[k, ll_] = i2[ll_, k] = m
+            m += 1
+    return {"i2": i2, "i3": i3, "i4": i4}
+
+
+def _deriv_orders(idx: tuple[int, ...]) -> np.ndarray:
+    """mgcv's ``ordf`` (gamlss.r:254-278): differentiation order carried
+    by each slot of a 2-4 index tuple (repeats accumulate on the first
+    occurrence, later slots zero out)."""
+    idx = tuple(idx)
+    d = len(idx)
+    ord_ = np.ones(d, dtype=int)
+    if d >= 2 and idx[0] == idx[1]:
+        ord_[0] += 1
+        ord_[1] = 0
+    if d >= 3:
+        if idx[0] == idx[2]:
+            ord_[0] += 1
+            ord_[2] = 0
+        if ord_[1] and idx[1] == idx[2]:
+            ord_[1] += 1
+            ord_[2] = 0
+    if d == 4:
+        if idx[0] == idx[3]:
+            ord_[0] += 1
+            ord_[3] = 0
+        if ord_[1]:
+            if idx[1] == idx[3]:
+                ord_[1] += 1
+                ord_[3] = 0
+        if ord_[2] and idx[2] == idx[3]:
+            ord_[2] += 1
+            ord_[3] = 0
+    return ord_
+
+
+def gamlss_etamu(l1, l2, l3=None, l4=None, ig1=None, g2=None, g3=None,
+                 g4=None, i2=None, i3=None, i4=None, deriv: int = 0) -> dict:
+    """mgcv ``gamlss.etamu`` (gamlss.r:231-584), complete-array paths:
+    transform packed log-likelihood derivatives w.r.t. the distribution
+    parameters (μ₁..μ_K) into derivatives w.r.t. the linear predictors
+    (η₁..η_K). ``ig1[:,k]`` = 1/g'(μ_k) (= dμ_k/dη_k), ``g2``-``g4`` the
+    per-LP link derivatives d²g/dμ²… evaluated at μ_k. ``deriv``: 0 →
+    l1,l2 only; >0 adds l3; >2 adds l4 (mgcv's convention — it is the
+    ll-level deriv minus one)."""
+    l1 = np.asarray(l1, dtype=float)
+    l2 = np.asarray(l2, dtype=float)
+    K = l1.shape[1]
+    d1 = l1 * ig1
+
+    d2 = np.array(l2, dtype=float, copy=True)
+    k = 0
+    for i in range(K):
+        for j in range(i, K):
+            ord_ = _deriv_orders((i, j))
+            if ord_.max() == 2:
+                d2[:, k] = ((l2[:, k] - l1[:, i] * g2[:, i] * ig1[:, i])
+                            * ig1[:, i] ** 2)
+            else:
+                d2[:, k] = l2[:, k] * ig1[:, i] * ig1[:, j]
+            k += 1
+
+    d3 = l3
+    if deriv > 0:
+        l3 = np.asarray(l3, dtype=float)
+        d3 = np.array(l3, dtype=float, copy=True)
+        k = 0
+        for i in range(K):
+            for j in range(i, K):
+                for ll_ in range(j, K):
+                    ord_ = _deriv_orders((i, j, ll_))
+                    ii = np.array((i, j, ll_))
+                    mo = int(ord_.max())
+                    if mo == 3:
+                        mind = i2[i, i]
+                        d3[:, k] = ((l3[:, k]
+                                     - 3.0 * l2[:, mind] * g2[:, i]
+                                     * ig1[:, i]
+                                     + l1[:, i] * (3.0 * g2[:, i] ** 2
+                                                   * ig1[:, i] ** 2
+                                                   - g3[:, i] * ig1[:, i]))
+                                    * ig1[:, i] ** 3)
+                    elif mo == 1:
+                        d3[:, k] = (l3[:, k] * ig1[:, i] * ig1[:, j]
+                                    * ig1[:, ll_])
+                    else:
+                        k1 = int(ii[ord_ == 1][0])
+                        k2 = int(ii[ord_ == 2][0])
+                        mind = i2[k2, k1]
+                        d3[:, k] = ((l3[:, k] - l2[:, mind] * g2[:, k2]
+                                     * ig1[:, k2])
+                                    * ig1[:, k1] * ig1[:, k2] ** 2)
+                    k += 1
+
+    d4 = l4
+    if deriv > 2:
+        l4 = np.asarray(l4, dtype=float)
+        d4 = np.array(l4, dtype=float, copy=True)
+        k = 0
+        for i in range(K):
+            for j in range(i, K):
+                for ll_ in range(j, K):
+                    for m_ in range(ll_, K):
+                        ord_ = _deriv_orders((i, j, ll_, m_))
+                        ii = np.array((i, j, ll_, m_))
+                        mo = int(ord_.max())
+                        if mo == 4:
+                            mi2 = i2[i, i]
+                            mi3 = i3[i, i, i]
+                            d4[:, k] = ((
+                                l4[:, k]
+                                - 6.0 * l3[:, mi3] * g2[:, i] * ig1[:, i]
+                                + l2[:, mi2] * (15.0 * g2[:, i] ** 2
+                                                * ig1[:, i] ** 2
+                                                - 4.0 * g3[:, i]
+                                                * ig1[:, i])
+                                - l1[:, i] * (15.0 * g2[:, i] ** 3
+                                              * ig1[:, i] ** 3
+                                              - 10.0 * g2[:, i] * g3[:, i]
+                                              * ig1[:, i] ** 2
+                                              + g4[:, i] * ig1[:, i])
+                            ) * ig1[:, i] ** 4)
+                        elif mo == 1:
+                            d4[:, k] = (l4[:, k] * ig1[:, i] * ig1[:, j]
+                                        * ig1[:, ll_] * ig1[:, m_])
+                        elif mo == 3:
+                            k1 = int(ii[ord_ == 1][0])
+                            k3 = int(ii[ord_ == 3][0])
+                            mi2 = i2[k3, k1]
+                            mi3 = i3[k3, k3, k1]
+                            d4[:, k] = ((
+                                l4[:, k]
+                                - 3.0 * l3[:, mi3] * g2[:, k3] * ig1[:, k3]
+                                + l2[:, mi2] * (3.0 * g2[:, k3] ** 2
+                                                * ig1[:, k3] ** 2
+                                                - g3[:, k3] * ig1[:, k3])
+                            ) * ig1[:, k1] * ig1[:, k3] ** 3)
+                        elif int(np.sum(ord_ == 2)) == 2:
+                            two = ii[ord_ == 2]
+                            k2a, k2b = int(two[0]), int(two[1])
+                            mi2 = i2[k2a, k2b]
+                            mi3 = i3[k2a, k2b, k2b]
+                            mi3a = i3[k2a, k2a, k2b]
+                            d4[:, k] = ((
+                                l4[:, k]
+                                - l3[:, mi3] * g2[:, k2a] * ig1[:, k2a]
+                                - l3[:, mi3a] * g2[:, k2b] * ig1[:, k2b]
+                                + l2[:, mi2] * g2[:, k2a] * g2[:, k2b]
+                                * ig1[:, k2a] * ig1[:, k2b]
+                            ) * ig1[:, k2a] ** 2 * ig1[:, k2b] ** 2)
+                        else:
+                            k2 = int(ii[ord_ == 2][0])
+                            ones = ii[ord_ == 1]
+                            k1a, k1b = int(ones[0]), int(ones[1])
+                            mi3 = i3[k2, k1a, k1b]
+                            d4[:, k] = ((l4[:, k] - l3[:, mi3] * g2[:, k2]
+                                         * ig1[:, k2])
+                                        * ig1[:, k1a] * ig1[:, k1b]
+                                        * ig1[:, k2] ** 2)
+                        k += 1
+
+    return {"l1": d1, "l2": d2, "l3": d3, "l4": d4}
+
+
+def gamlss_gH(X, jj, l1, l2, i2, l3=None, i3=None, l4=None, i4=None,
+              d1b=None, d2b=None, deriv: int = 0, fh=None,
+              D=None) -> dict:
+    """mgcv ``gamlss.gH`` (gamlss.r:587-857), dense complete-array paths:
+    coefficient-space quantities from η-space derivative arrays.
+
+    ``jj[i]`` = LP i's column indices into X (0-based). ``deriv``:
+      0 — ``lb`` (gradient) and ``lbb`` (Hessian) only;
+      1 — + ``d1H`` as the vector tr(Hp⁻¹·∂H/∂ρ_l) (``fh`` must be the
+          INVERSE penalized Hessian);
+      2 — + ``d1H`` as the list of full ∂H/∂ρ_l matrices;
+      3 — + ``trHid2H`` (``fh`` the pivoted Cholesky of the diagonally
+          preconditioned Hp, ``D`` the preconditioner — gam.fit5's
+          convention; or an eigendecomposition dict {values, vectors}).
+    """
+    X = np.asarray(X, dtype=float)
+    n, p = X.shape
+    K = len(jj)
+    l1 = np.asarray(l1, dtype=float)
+    l2 = np.asarray(l2, dtype=float)
+    lb = np.zeros(p)
+    for i in range(K):
+        lb[jj[i]] += X[:, jj[i]].T @ l1[:, i]
+
+    lbb = np.zeros((p, p))
+    for i in range(K):
+        for j in range(i, K):
+            A = X[:, jj[i]].T @ (l2[:, i2[i, j]][:, None] * X[:, jj[j]])
+            lbb[np.ix_(jj[i], jj[j])] += A
+            if j > i:
+                lbb[np.ix_(jj[j], jj[i])] += A.T
+
+    d1H = None
+    trHid2H = None
+    if deriv > 0:
+        l3 = np.asarray(l3, dtype=float)
+        d1b = np.asarray(d1b, dtype=float)
+        m = d1b.shape[1]
+        # Stacked per-LP derivative of η w.r.t. each ρ (gamlss.r:680-686).
+        d1eta = np.zeros((n * K, m))
+        for i in range(K):
+            d1eta[i * n:(i + 1) * n, :] = X[:, jj[i]] @ d1b[jj[i], :]
+
+    if deriv == 1:
+        # tr(Hp⁻¹ ∂H/∂ρ_l) accumulation (gamlss.r:735-773, dense branch);
+        # fh is the inverse penalized Hessian.
+        fh = np.asarray(fh, dtype=float)
+        d1H = np.zeros(m)
+        for i in range(K):
+            for j in range(i, K):
+                Hpi = fh[np.ix_(jj[i], jj[j])]
+                a = np.einsum("ij,ij->i", X[:, jj[i]] @ Hpi, X[:, jj[j]])
+                mult = 1.0 if i == j else 2.0
+                for ll_ in range(m):
+                    v = np.zeros(n)
+                    for q in range(K):
+                        v += l3[:, i3[i, j, q]] * d1eta[q * n:(q + 1) * n,
+                                                        ll_]
+                    d1H[ll_] += mult * float(np.sum(a * v))
+
+    if deriv > 1:
+        # Full ∂H/∂ρ_l matrices (gamlss.r:776-796).
+        d1H = []
+        for ll_ in range(m):
+            Hl = np.zeros((p, p))
+            for i in range(K):
+                for j in range(i, K):
+                    v = np.zeros(n)
+                    for q in range(K):
+                        v += l3[:, i3[i, j, q]] * d1eta[q * n:(q + 1) * n,
+                                                        ll_]
+                    A = X[:, jj[i]].T @ (v[:, None] * X[:, jj[j]])
+                    Hl[np.ix_(jj[i], jj[j])] += A
+                    if j > i:
+                        Hl[np.ix_(jj[j], jj[i])] += A.T
+            d1H.append(Hl)
+
+    if deriv > 2:
+        # tr(Hp⁻¹ ∂²H/∂ρ_k∂ρ_l) (gamlss.r:798-855).
+        l4 = np.asarray(l4, dtype=float)
+        d2b = np.asarray(d2b, dtype=float)
+        Xe = np.zeros((K * n, p))
+        for i in range(K):
+            Xe[i * n:(i + 1) * n, jj[i]] = X[:, jj[i]]
+        if isinstance(fh, dict):
+            dvals = np.asarray(fh["values"], dtype=float).copy()
+            dvals[dvals > 0] = 1.0 / dvals[dvals > 0]
+            dvals[dvals <= 0] = 0.0
+            V = np.asarray(fh["vectors"], dtype=float)
+            Hinv = V @ (dvals[:, None] * V.T)
+            Xe_solved = (D[:, None] * (Hinv @ (D[:, None] * Xe.T))).T
+        else:
+            # fh: pivoted upper-Cholesky (R chol(...,pivot=TRUE) analog)
+            # with pivot vector in fh[1]; D the diagonal preconditioner.
+            R_f, piv = fh
+            DXt = (D[:, None] * Xe.T)[piv, :]
+            tmp = solve_triangular(R_f, DXt, lower=False, trans="T")
+            sol = solve_triangular(R_f, tmp, lower=False)
+            ipiv = np.empty_like(piv)
+            ipiv[piv] = np.arange(p)
+            Xe_solved = (D[:, None] * sol[ipiv, :]).T
+        d2eta = np.zeros((n * K, d2b.shape[1]))
+        for i in range(K):
+            d2eta[i * n:(i + 1) * n, :] = X[:, jj[i]] @ d2b[jj[i], :]
+        n2 = d2b.shape[1]
+        trHid2H = np.zeros(n2)
+        VX = np.zeros((K * n, p))
+        kk = 0
+        for k_ in range(m):
+            for ll_ in range(k_, m):
+                VX[:] = 0.0
+                for i in range(K):
+                    for j in range(K):
+                        v = np.zeros(n)
+                        for q in range(K):
+                            v += (d2eta[q * n:(q + 1) * n, kk]
+                                  * l3[:, i3[i, j, q]])
+                            for s in range(K):
+                                v += (d1eta[q * n:(q + 1) * n, k_]
+                                      * d1eta[s * n:(s + 1) * n, ll_]
+                                      * l4[:, i4[i, j, q, s]])
+                        VX[j * n:(j + 1) * n, jj[i]] = (v[:, None]
+                                                        * X[:, jj[i]])
+                trHid2H[kk] = float(np.sum(Xe_solved * VX))
+                kk += 1
+
+    return {"lb": lb, "lbb": lbb, "d1H": d1H, "trHid2H": trHid2H}
+
+
+class LogbLink(Link):
+    """mgcv's ``logb`` link for gaulss's precision LP (gamlss.r:887-900):
+    η = log(1/μ − b) so μ = 1/(exp(η) + b) stays below 1/b (τ = 1/σ
+    bounded away from ∞ ⇒ σ > b)."""
+    name = "logb"
+
+    def __init__(self, b: float = 0.01):
+        self.b = float(b)
+
+    def link(self, mu):
+        return np.log(1.0 / np.asarray(mu, dtype=float) - self.b)
+
+    def linkinv(self, eta):
+        return 1.0 / (np.exp(np.asarray(eta, dtype=float)) + self.b)
+
+    def mu_eta(self, eta):
+        ee = np.exp(np.asarray(eta, dtype=float))
+        return -ee / (ee + self.b) ** 2
+
+    def _mub(self, mu):
+        return np.maximum(1.0 - np.asarray(mu, dtype=float) * self.b,
+                          np.finfo(float).eps)
+
+    def d2link(self, mu):
+        mu = np.asarray(mu, dtype=float)
+        mub = self._mub(mu)
+        return (2.0 * mub - 1.0) / (mub * mu) ** 2
+
+    def d3link(self, mu):
+        mu = np.asarray(mu, dtype=float)
+        mub = self._mub(mu)
+        return ((1.0 - mub) * mub * 6.0 - 2.0) / (mub * mu) ** 3
+
+    def d4link(self, mu):
+        mu = np.asarray(mu, dtype=float)
+        mub = self._mub(mu)
+        return ((((24.0 * mub - 36.0) * mub + 24.0) * mub - 6.0)
+                / (mub * mu) ** 4)
+
+
+class GeneralFamily(Family):
+    """Base for mgcv "general families" (gam.fit5): several linear
+    predictors, the likelihood supplied directly via :meth:`ll` instead
+    of a deviance/PIRLS interface.
+
+    Authoring contract (the pycircstat2 seam): subclasses set ``n_lp``
+    and ``links`` (one :class:`Link` per LP, custom subclasses welcome —
+    ``mu_eta``/``d2link``-``d4link`` must be implemented up to the order
+    implied by ``available_derivs``), and implement :meth:`ll` — almost
+    always by filling the packed per-datum arrays l1..l4 of log-density
+    derivatives w.r.t. the distribution parameters and delegating to
+    :func:`gamlss_etamu` + :func:`gamlss_gH` exactly like
+    :class:`gaulss` does. ``available_derivs``: 2 → full outer Newton
+    (l4 required), 1 → gradient-only outer (l3), 0 → EFS (l2 only).
+    """
+    is_general = True
+    n_lp: int = 2
+    available_derivs: int = 2
+    canonical_link_name = "none"
+
+    def __init__(self, links: list[Link]):
+        self.links = links
+        # Family base wires a single .link; point it at LP1's for the
+        # odd shared code path that asks (residual helpers etc.).
+        self.link = links[0]
+
+    def ll(self, y, X, coef, wt, *, lpi, offset=None, deriv: int = 0,
+           d1b=None, d2b=None, fh=None, D=None) -> dict:
+        """Log-likelihood + coefficient-space derivatives at ``coef``.
+
+        ``deriv``: 0 value only; 1 + lb/lbb; 2 + d1H trace vector (fh =
+        Hp⁻¹); 3 + d1H matrix list; 4 + trHid2H (fh/D = gam.fit5's
+        preconditioned Cholesky pieces). Returns a dict with keys
+        ``l`` (+ ``lb``, ``lbb``, ``d1H``, ``trHid2H`` as available).
+        """
+        raise NotImplementedError
+
+    def initialize_coef(self, y, X, lpi, E=None, offset=None) -> np.ndarray:
+        """Starting coefficients (mgcv ``family$initialize``)."""
+        raise NotImplementedError
+
+
+class gaulss(GeneralFamily):
+    """Gaussian location-scale general family — mgcv ``gaulss()``
+    (gamlss.r:862-1106). LP1 models μ (links: identity/log/inverse/sqrt);
+    LP2 models τ = 1/σ through the ``logb`` link (σ > b > 0).
+
+        log f = −½(y−μ)²τ² − ½log(2π) + log τ
+    """
+    name = "gaulss"
+    scale_known = True
+    n_theta = 0
+    n_lp = 2
+    available_derivs = 2
+
+    _OK_MU_LINKS = ("identity", "log", "inverse", "sqrt")
+
+    def __init__(self, link: tuple[str, str] = ("identity", "logb"),
+                 b: float = 0.01):
+        mu_link, tau_link = link
+        if mu_link not in self._OK_MU_LINKS:
+            raise ValueError(
+                f'link "{mu_link}" not available for the mu parameter of '
+                f"gaulss; available links are {self._OK_MU_LINKS}"
+            )
+        if tau_link != "logb":
+            raise ValueError(
+                'only the "logb" link is available for the precision '
+                "parameter of gaulss"
+            )
+        links = [
+            {"identity": IdentityLink, "log": LogLink,
+             "inverse": InverseLink, "sqrt": SqrtLink}[mu_link](),
+            LogbLink(b=b),
+        ]
+        self.b = float(b)
+        self.tri = trind_generator(2)
+        super().__init__(links)
+
+    def ll(self, y, X, coef, wt=None, *, lpi, offset=None, deriv: int = 0,
+           d1b=None, d2b=None, fh=None, D=None) -> dict:
+        y = np.asarray(y, dtype=float)
+        X = np.asarray(X, dtype=float)
+        coef = np.asarray(coef, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        eta = X[:, jj[0]] @ coef[jj[0]]
+        eta1 = X[:, jj[1]] @ coef[jj[1]]
+        if offset is not None:
+            if offset[0] is not None:
+                eta = eta + offset[0]
+            if len(offset) > 1 and offset[1] is not None:
+                eta1 = eta1 + offset[1]
+        mu = self.links[0].linkinv(eta)
+        tau = self.links[1].linkinv(eta1)
+
+        n = y.shape[0]
+        ymu = y - mu
+        ymu2 = ymu * ymu
+        tau2 = tau * tau
+        l0 = -0.5 * ymu2 * tau2 - 0.5 * np.log(2.0 * np.pi) + np.log(tau)
+        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        if deriv == 0:
+            return ret
+
+        l1 = np.column_stack([tau2 * ymu, 1.0 / tau - tau * ymu2])
+        # second derivatives, packed (mm, ms, ss)
+        l2 = np.column_stack([-tau2, 2.0 * l1[:, 0] / tau,
+                              -ymu2 - 1.0 / tau2])
+        ig1 = np.column_stack([self.links[0].mu_eta(eta),
+                               self.links[1].mu_eta(eta1)])
+        g2 = np.column_stack([self.links[0].d2link(mu),
+                              self.links[1].d2link(tau)])
+        l3 = l4 = g3 = g4 = None
+        if deriv > 1:
+            # third derivatives, packed (mmm, mms, mss, sss)
+            zeros = np.zeros(n)
+            l3 = np.column_stack([zeros, -2.0 * tau, 2.0 * ymu,
+                                  2.0 / tau ** 3])
+            g3 = np.column_stack([self.links[0].d3link(mu),
+                                  self.links[1].d3link(tau)])
+        if deriv > 3:
+            # fourth derivatives, packed (mmmm, mmms, mmss, msss, ssss)
+            zeros = np.zeros(n)
+            l4 = np.column_stack([zeros, zeros, np.full(n, -2.0), zeros,
+                                  -6.0 / (tau2 * tau2)])
+            g4 = np.column_stack([self.links[0].d4link(mu),
+                                  self.links[1].d4link(tau)])
+
+        tri = self.tri
+        de = gamlss_etamu(l1, l2, l3, l4, ig1, g2, g3, g4,
+                          tri["i2"], tri["i3"], tri["i4"], deriv - 1)
+        gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
+                       l3=de["l3"], i3=tri["i3"], l4=de["l4"],
+                       i4=tri["i4"], d1b=d1b, d2b=d2b, deriv=deriv - 1,
+                       fh=fh, D=D)
+        ret.update(gh)
+        return ret
+
+    def initialize_coef(self, y, X, lpi, E=None,
+                        offset=None) -> np.ndarray:
+        """gaulss ``initialize`` (gamlss.r:1016-1086, dense branch):
+        ridge-regress g(y) on LP1's columns, then the log absolute
+        residuals on LP2's. ``E`` is the total penalty root used purely
+        as a regularizer (gam.fit5 passes it with use.unscaled set)."""
+        y = np.asarray(y, dtype=float)
+        X = np.asarray(X, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        p = X.shape[1]
+        if E is None:
+            E = np.zeros((0, p))
+        start = np.zeros(p)
+        if self.links[0].name == "identity":
+            yt1 = y.copy()
+        else:
+            yt1 = self.links[0].link(np.abs(y) + float(np.max(y)) * 1e-7)
+        if offset is not None and offset[0] is not None:
+            yt1 = yt1 - offset[0]
+        x1 = np.vstack([X[:, jj[0]], E[:, jj[0]]])
+        b1, *_ = np.linalg.lstsq(
+            x1, np.concatenate([yt1, np.zeros(E.shape[0])]), rcond=None)
+        b1[~np.isfinite(b1)] = 0.0
+        start[jj[0]] = b1
+        lres1 = np.log(np.abs(y - self.links[0].linkinv(
+            X[:, jj[0]] @ b1)))
+        if offset is not None and len(offset) > 1 and offset[1] is not None:
+            lres1 = lres1 - offset[1]
+        x2 = np.vstack([X[:, jj[1]], E[:, jj[1]]])
+        b2, *_ = np.linalg.lstsq(
+            x2, np.concatenate([lres1, np.zeros(E.shape[0])]), rcond=None)
+        b2[~np.isfinite(b2)] = 0.0
+        start[jj[1]] = b2
+        return start
+
+    def residuals(self, y, fitted, type: str = "deviance") -> np.ndarray:
+        """gaulss residuals (gamlss.r:903-908): response = y − μ̂;
+        deviance/pearson = (y − μ̂)·τ̂ = (y − μ̂)/σ̂. ``fitted`` is the
+        (n, 2) matrix of (μ̂, τ̂)."""
+        fitted = np.asarray(fitted, dtype=float)
+        rsd = np.asarray(y, dtype=float) - fitted[:, 0]
+        if type == "response":
+            return rsd
+        return rsd * fitted[:, 1]
+
+    def __repr__(self):
+        return (f"gaulss(link=({self.links[0].name!r}, 'logb'), "
+                f"b={self.b:g})")
+
+
 def _coerce_response(y_series: pl.Series, family: "Family") -> np.ndarray:
     """Cast the response column to a numeric float array, with R's
     factor-response convention for :class:`Binomial`.
@@ -3043,6 +3615,8 @@ __all__ = [
     "Tweedie", "tw",
     "Scat", "scat",
     "nb",
+    "GeneralFamily", "gaulss",
+    "trind_generator", "gamlss_etamu", "gamlss_gH",
     "IdentityLink", "LogLink", "InverseLink",
     "SqrtLink", "LogitLink", "ProbitLink", "CauchitLink", "CloglogLink",
     "InverseSquareLink",
