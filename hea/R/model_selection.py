@@ -36,7 +36,8 @@ from ..utils import (
 )
 
 
-def anova(*models, test: str | None = None):
+def anova(*models, test: str | None = None, freq: bool = False,
+          dispersion: float | None = None):
     """Compare nested fits, or decompose a single fit by Type-I SS.
 
     - One ``lm`` → sequential (Type I) ANOVA table, splitting the model's
@@ -58,6 +59,11 @@ def anova(*models, test: str | None = None):
         ``"Rao"`` (score test) is not implemented yet. For ``lm`` and ``lme``
         the test is fixed (always F / Chisq LRT respectively); passing
         ``test=`` for those raises.
+    freq, dispersion : single-``gam`` form only
+        mgcv's ``anova.gam(object, dispersion=, freq=)`` passthrough to
+        the summary tables: ``freq=True`` uses the frequentist ``Ve``
+        for the parametric Terms table; ``dispersion=`` overrides the
+        scale (known-scale Chi.sq forms throughout).
 
     For multi-model calls rows are sorted by parameter count (smaller
     model first), matching R's ``anova``. Row labels are recovered from
@@ -66,12 +72,16 @@ def anova(*models, test: str | None = None):
     """
     if len(models) == 0:
         raise TypeError("anova(): need at least one model")
+    if (freq or dispersion is not None) and not (
+            len(models) == 1 and isinstance(models[0], gam)):
+        raise TypeError(
+            "anova(): freq=/dispersion= apply to the single-gam form only")
     if len(models) == 1:
         m = models[0]
         if isinstance(m, gam):
             if test is not None:
                 raise TypeError("anova(gam): test= is not accepted")
-            return _anova_gam_single(m)
+            return _anova_gam_single(m, freq=freq, dispersion=dispersion)
         if isinstance(m, lm) and not isinstance(m, glm):
             if test is not None:
                 raise TypeError("anova(lm): test= is not accepted (always F)")
@@ -1089,7 +1099,8 @@ def _anova_lm_single(m: lm):
     print("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1")
 
 
-def _anova_gam_single(m: gam):
+def _anova_gam_single(m: gam, freq: bool = False,
+                      dispersion: float | None = None):
     """``anova.gam``-style single-model output: parametric Terms table
     plus the smooth significance table. Mirrors mgcv's ``anova.gam`` for
     a single fit (which omits the lm-coefficient details that
@@ -1099,9 +1110,12 @@ def _anova_gam_single(m: gam):
     ``anova.gam(single)`` returns the summary object reclassed and
     ``print.anova.gam`` shows its pTerms.table — so they're shared via
     ``gam._pterms_rows`` (assign-exact term→column mapping, pinv-rank
-    df, Chi.sq↔F by ``family.scale_known``).
+    df, Chi.sq↔F by est.disp). ``freq``/``dispersion`` are anova.gam's
+    passthrough to ``summary.gam(object, dispersion=, freq=)``
+    (mgcv.r:4153).
     """
     digits = 4
+    est_disp = (not m.family.scale_known) and dispersion is None
 
     out = []
     out.append("")
@@ -1112,9 +1126,9 @@ def _anova_gam_single(m: gam):
     out.append("")
 
     # ---- Parametric Terms (summary.gam's pTerms.table) -------------------
-    rows = m._pterms_rows()
+    rows = m._pterms_rows(freq=freq, dispersion=dispersion)
     if rows:
-        stat_col = "Chi.sq" if m.family.scale_known else "F"
+        stat_col = "F" if est_disp else "Chi.sq"
         sig = significance_code([r[3] for r in rows])
         tbl = pl.DataFrame({
             "":        [r[0] for r in rows],
@@ -1141,9 +1155,9 @@ def _anova_gam_single(m: gam):
     # via ``gam._smooth_significance_rows`` (reTest/testStat dispatch,
     # mixture p-values, Chi.sq↔F by ``family.scale_known``).
     if m._blocks:
-        sm_rows = m._smooth_significance_rows()
+        sm_rows = m._smooth_significance_rows(dispersion=dispersion)
         sig_smooth = significance_code([r[4] for r in sm_rows])
-        stat_col = "Chi.sq" if m.family.scale_known else "F"
+        stat_col = "F" if est_disp else "Chi.sq"
         sm_tbl = pl.DataFrame({
             "":        [r[0] for r in sm_rows],
             "edf":     format_signif([r[1] for r in sm_rows], digits=digits),

@@ -5473,6 +5473,7 @@ class gam:
 
     def _recov(
         self, m_idx: int, re_idx: list[int] | tuple[int, ...] = (),
+        v_scale: float = 1.0,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Port of ``mgcv:::recov`` (mgcv.r:3599-3713). Returns ``(Ve, Rm)``.
 
@@ -5485,6 +5486,13 @@ class gam:
         with R the model R factor (R'R = X'WX), R2 its random columns and
         S2 the random blocks' penalty. With ``re_idx`` empty this reduces
         to the usual model ``Ve`` (returned symmetrized, as mgcv does).
+
+        ``v_scale`` is summary.gam's ``dispersion=`` rescale of the
+        object covariances (mgcv.r:3897-3898 replaces ``object$Vp``/
+        ``$Ve`` by ``·dispersion/sig2`` before reTest runs; ``sig2``
+        itself stays put, so the factor enters exactly where mgcv's
+        modified matrices do — quadratically through Vp here, linearly
+        in the empty-``re_idx`` model-Ve branch).
 
         ``Rm`` is an upper-triangular factor whose ``Rm'Rm`` is block
         ``m_idx``'s precision after profiling out everything else —
@@ -5548,7 +5556,7 @@ class gam:
             # mgcv's re-empty branch: total penalty at λ̂, model Ve.
             S_lam = self._build_S_lambda(self._rho_hat)
             Rm = _rm_from(R_factor, _mroot_rows(S_lam), a_m, b_m)
-            return 0.5 * (self.Ve + self.Ve.T), Rm
+            return 0.5 * (self.Ve + self.Ve.T) * v_scale, Rm
 
         # ---- split coefficients into fixed (1) / random (2) -------------
         rind = np.zeros(p, dtype=bool)
@@ -5607,12 +5615,13 @@ class gam:
             L @ R1, _mroot_rows(S1), int(map_idx[a_m]), int(map_idx[a_m]) + k_m,
         )
 
-        G = L @ R_factor @ self.Vp                  # (p, p)
+        G = L @ R_factor @ (self.Vp * v_scale)      # (p, p)
         Ve = (G.T @ G) / sig2
         return Ve, Rm
 
     def _re_test(
-        self, m_idx: int, beta_b: np.ndarray, Vp_b: np.ndarray
+        self, m_idx: int, beta_b: np.ndarray, Vp_b: np.ndarray,
+        v_scale: float = 1.0,
     ) -> tuple[float, float, float]:
         """Port of ``mgcv:::reTest`` (mgcv.r:3716-3755). Returns ``(stat,
         pval, rank)``. Uses ``psum_chisq`` (Davies 1980) for the p-value.
@@ -5621,6 +5630,11 @@ class gam:
         ``smooth$random == TRUE`` — set only by ``smooth.construct.re``)
         is treated as fully random via ``_recov``'s re-branch, so the test
         for one ``bs="re"`` term conditions correctly on its siblings.
+        ``v_scale`` carries summary.gam's ``dispersion=`` covariance
+        rescale into ``_recov`` (sig2 and the scale-estimated p-value
+        branch stay on the OBJECT's values, exactly like mgcv's reTest,
+        which reads ``b$sig2``/``b$scale.estimated`` untouched by the
+        dispersion override).
 
         - Wood (2013) "On p-values for smooth components of an extended GAM",
           Biometrika 100(1), 221–228.
@@ -5632,7 +5646,7 @@ class gam:
             i for i, blk in enumerate(self._blocks)
             if i != m_idx and blk.cls == "re.smooth.spec"
         ]
-        Ve_full, Rm = self._recov(m_idx, re_idx)
+        Ve_full, Rm = self._recov(m_idx, re_idx, v_scale=v_scale)
         # Ve[ind, ind] half-square-root via eigendecomp.
         a_m, b_m = self._block_col_ranges[m_idx]
         Ve_b = Ve_full[a_m:b_m, a_m:b_m]
@@ -5658,7 +5672,7 @@ class gam:
         return stat, float(pval), float(rank)
 
     def _smooth_significance_rows(
-        self,
+        self, dispersion: float | None = None,
     ) -> list[tuple[str, float, float, float, float]]:
         """Per-smooth test rows ``(label, edf, Ref.df, stat_col, p-value)``
         — the smooth half of mgcv's ``summary.gam`` (mgcv.r:4008-4040),
@@ -5671,11 +5685,20 @@ class gam:
         sz, cyclic bases, and every smooth under ``select=TRUE``);
         ``testStat`` (inverted-Nychka, fractional rank, ``_test_stat``)
         otherwise. ``stat_col`` is the printed statistic: ``Chi.sq`` (the
-        raw stat) for known-scale families, ``F = stat / Ref.df`` when the
-        scale is estimated — same for both branches (mgcv prints
+        raw stat) when ``est.disp`` is FALSE (known-scale family, or any
+        family under a ``dispersion=`` override), ``F = stat / Ref.df``
+        when the scale is estimated — same for both branches (mgcv prints
         ``chi.sq/df`` under ``est.disp``).
+
+        ``dispersion`` is summary.gam's override (mgcv.r:3895-3899): the
+        smooth tests always use ``Vp`` (freq= never reaches them), but a
+        supplied dispersion rescales it by ``dispersion/sig2`` and forces
+        ``est.disp = FALSE`` (χ² references; testStat ``res.df = -1``).
         """
         scale_known = bool(self.family.scale_known)
+        est_disp = (not scale_known) and dispersion is None
+        v_scale = (1.0 if dispersion is None
+                   else float(dispersion) / float(self.sigma_squared))
         # mgcv tests against ``object$R`` — the R factor of the QR of
         # √W·X (Fisher working weights), so the statistic's inner product
         # is X'WX, not X'X. hea keeps n-row √W·X blocks instead of the
@@ -5696,7 +5719,7 @@ class gam:
             zip(self._blocks, self._block_col_ranges)
         ):
             beta_b = self._beta[a:bcol]
-            Vp_b = self.Vp[a:bcol, a:bcol]
+            Vp_b = self.Vp[a:bcol, a:bcol] * v_scale
             X_b = X_w[:, a:bcol]
             edf_b = float(self.edf[a:bcol].sum())
             edf1_b = (
@@ -5714,16 +5737,17 @@ class gam:
                 null_dim = p_b
             if null_dim == 0:
                 # reTest path — penalty is full-rank on the smooth's block.
-                stat, p_val, ref_df = self._re_test(m_idx, beta_b, Vp_b)
+                stat, p_val, ref_df = self._re_test(m_idx, beta_b, Vp_b,
+                                                    v_scale=v_scale)
             else:
                 rank_in = float(min(p_b, edf1_b))
                 # mgcv summary.gam: rdf <- residual.df if est.disp else -1.
                 # res_df <= 0 in testStat means "scale fixed" (chi² ref).
-                res_df = -1.0 if scale_known else float(self.df_residuals)
+                res_df = float(self.df_residuals) if est_disp else -1.0
                 stat, p_val, ref_df = self._test_stat(
                     X_b, Vp_b, beta_b, rank_in, res_df=res_df,
                 )
-            col_stat = stat if scale_known else stat / max(ref_df, 1e-8)
+            col_stat = stat / max(ref_df, 1e-8) if est_disp else stat
             rows.append(
                 (b.label, edf_b, float(ref_df), float(col_stat), float(p_val))
             )
@@ -7563,16 +7587,21 @@ class gam:
     def __str__(self) -> str:
         return self.__repr__()
 
-    def _pterms_rows(self) -> list[tuple[str, int, float, float]]:
+    def _pterms_rows(self, freq: bool = False,
+                     dispersion: float | None = None,
+                     ) -> list[tuple[str, int, float, float]]:
         """mgcv summary.gam's pTerms block (mgcv.r:3928-3977): one joint
         Wald test per whole parametric term — a factor's columns are
         tested together, which the per-coefficient p.table can't do.
 
         Returns ``(label, df, stat, p)`` rows. ``stat`` is Chi.sq with a
-        pchisq p-value when the scale is known, else F = Chi.sq/df with
+        pchisq p-value when ``est.disp`` is FALSE (known scale, or any
+        ``dispersion=`` override), else F = Chi.sq/df with
         pf(·, df, residual.df) (mgcv's est.disp dispatch; residual.df =
         n − Σedf). The covariance is ``Vp`` (summary.gam's default
-        ``freq=FALSE``); each term block is pseudo-inverted at
+        ``freq=FALSE``) or ``Ve`` under ``freq=True`` (mgcv.r:3890),
+        rescaled by ``dispersion/sig2`` when a dispersion is supplied
+        (mgcv.r:3895-3899); each term block is pseudo-inverted at
         rank.tol = √eps with the resulting rank as the df
         (:func:`_wald_pinv`), so dropped (rank-deficient) coefficients —
         zero rows in report space — reduce the df exactly like mgcv.
@@ -7603,17 +7632,23 @@ class gam:
             pterms_list = [([t.label for t in self._expanded.terms],
                             list(getattr(self, "_param_assign", []) or []),
                             0)]
-        est_disp = not bool(self.family.scale_known)
+        est_disp = (not bool(self.family.scale_known)) and dispersion is None
         residual_df = float(self.n) - float(self.edf_total)
 
-        # Vp in report (original-p) space: zero rows/cols at dropped
-        # columns (mgcv reinserts zeros for dropped coefficients).
+        # summary.gam's covmat: Ve when freq else Vp (mgcv.r:3890),
+        # times dispersion/sig2 under an override — in report
+        # (original-p) space: zero rows/cols at dropped columns (mgcv
+        # reinserts zeros for dropped coefficients).
+        covmat = self.Ve if freq else self.Vp
+        if dispersion is not None:
+            covmat = covmat * (float(dispersion)
+                               / float(self.sigma_squared))
         if self._keep_cols is not None:
             keep = self._keep_cols
             Vp_rep = np.zeros((keep.size, keep.size))
-            Vp_rep[np.ix_(keep, keep)] = self.Vp
+            Vp_rep[np.ix_(keep, keep)] = covmat
         else:
-            Vp_rep = self.Vp
+            Vp_rep = covmat
         beta = self._beta_report
 
         rank_tol = float(np.finfo(float).eps) ** 0.5
@@ -7644,8 +7679,37 @@ class gam:
                     rows.append((lab, nb, stat, pv))
         return rows
 
-    def summary(self, digits: int = 4) -> None:
-        """mgcv-style summary: parametric table + smooth-edf table + fit stats."""
+    def _se_report_for(self, freq: bool, dispersion: float | None
+                       ) -> np.ndarray:
+        """Report-space coefficient SEs from summary.gam's covmat choice:
+        ``Ve`` when ``freq`` else ``Vp`` (mgcv.r:3890), rescaled by
+        ``dispersion/sig2`` under an override (mgcv.r:3895-3899).
+        Defaults return the precomputed ``_se_report`` unchanged."""
+        if not freq and dispersion is None:
+            return self._se_report
+        V = self.Ve if freq else self.Vp
+        se = np.sqrt(np.clip(np.diag(V), 0.0, None))
+        if dispersion is not None:
+            se = se * np.sqrt(float(dispersion)
+                              / float(self.sigma_squared))
+        if self._keep_cols is not None:
+            se_rep = np.zeros(self._keep_cols.size)
+            se_rep[self._keep_cols] = se
+            return se_rep
+        return se
+
+    def summary(self, digits: int = 4, freq: bool = False,
+                dispersion: float | None = None) -> None:
+        """mgcv-style summary: parametric table + smooth-edf table + fit stats.
+
+        ``freq=True`` uses the frequentist ``Ve`` instead of the Bayesian
+        ``Vp`` for the parametric tables (summary.gam's ``freq``;
+        smooth tests always use ``Vp``). ``dispersion=`` overrides the
+        scale: every covariance is rescaled by ``dispersion/sig2``, the
+        tests switch to their known-scale forms (z / Chi.sq), and the
+        printed ``Scale est.`` shows the supplied value — exactly
+        ``summary.gam(..., dispersion=)``.
+        """
         # multi-LP (general-family) fits: all link names, one formula
         # per line — mgcv's print.summary.gam layout.
         if getattr(self.family, "is_general", False):
@@ -7672,9 +7736,12 @@ class gam:
 
         # -- parametric table (lm-style) -----------------------------------
         # mgcv (summary.gam): when scale.estimated, t/Pr(>|t|) on residual.df;
-        # otherwise (binomial/poisson with φ ≡ 1) Wald z/Pr(>|z|). Dropped
-        # (rank-deficiency) coefficients show 0 / 0 / NaN like mgcv.
+        # otherwise (binomial/poisson with φ ≡ 1, or any family under a
+        # dispersion= override) Wald z/Pr(>|z|). Dropped (rank-deficiency)
+        # coefficients show 0 / 0 / NaN like mgcv.
         scale_known = bool(self.family.scale_known)
+        est_disp = (not scale_known) and dispersion is None
+        se_report = self._se_report_for(freq, dispersion)
         n_par = len(self.parametric_columns)
         if n_par > 0:
             out.append("Parametric coefficients:")
@@ -7684,13 +7751,13 @@ class gam:
             par_idx = getattr(self, "_param_idx", None)
             if par_idx is not None:
                 est = self._beta_report[par_idx]
-                se = self._se_report[par_idx]
+                se = se_report[par_idx]
             else:
                 est = self._beta_report[:n_par]
-                se = self._se_report[:n_par]
+                se = se_report[:n_par]
             with np.errstate(divide="ignore", invalid="ignore"):
                 t_stats = est / se
-            if scale_known:
+            if not est_disp:
                 pv = 2 * norm.sf(np.abs(t_stats))
                 stat_col = "z value"
                 pcol = "Pr(>|z|)"
@@ -7729,14 +7796,14 @@ class gam:
         # ``family.scale_known``. Ref.df reports the rank used in the test.
         if self._blocks:
             out.append("Approximate significance of smooth terms:")
-            sm_rows = self._smooth_significance_rows()
+            sm_rows = self._smooth_significance_rows(dispersion=dispersion)
             rows_label = [r[0] for r in sm_rows]
             rows_edf   = [r[1] for r in sm_rows]
             rows_refdf = [r[2] for r in sm_rows]
             rows_stat  = [r[3] for r in sm_rows]
             rows_p     = [r[4] for r in sm_rows]
             sig = significance_code(rows_p)
-            stat_col = "Chi.sq" if scale_known else "F"
+            stat_col = "F" if est_disp else "Chi.sq"
             sm_tbl = pl.DataFrame({
                 "":        rows_label,
                 "edf":     format_signif(rows_edf, digits=digits),
@@ -7776,16 +7843,20 @@ class gam:
         # preserves the user's choice across bam's internal fREML→REML
         # rename so the footer label tracks the original.
         method_label = getattr(self, "_method_in", self.method)
+        # print.summary.gam shows x$scale — the dispersion override when
+        # one was supplied (mgcv.r:3900/4097).
+        disp_print = (float(dispersion) if dispersion is not None
+                      else self.sigma_squared)
         if self.method == "REML":
             tag = "fREML" if method_label == "fREML" else "-REML"
             out.append(
                 f"{tag} = {self.REML_criterion / 2:.5g}  "
-                f"Scale est. = {self.sigma_squared:.5g}  n = {self.n}"
+                f"Scale est. = {disp_print:.5g}  n = {self.n}"
             )
         elif self.method == "ML":
             out.append(
                 f"-ML = {self.ML_criterion / 2:.5g}  "
-                f"Scale est. = {self.sigma_squared:.5g}  n = {self.n}"
+                f"Scale est. = {disp_print:.5g}  n = {self.n}"
             )
         else:
             # method="GCV.Cp" dispatches by family.scale_known: scale-known
@@ -7795,7 +7866,7 @@ class gam:
             label = "UBRE" if self.family.scale_known else "GCV"
             out.append(
                 f"{label} = {self.GCV_score:.5g}  "
-                f"Scale est. = {self.sigma_squared:.5g}  n = {self.n}"
+                f"Scale est. = {disp_print:.5g}  n = {self.n}"
             )
         print("\n".join(out))
 

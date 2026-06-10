@@ -4300,3 +4300,121 @@ def test_family_qf_rd_unit_values_match_R():
     mu = np.array([1.0, 2.0, 3.0])
     np.testing.assert_array_equal(g.rd(rng1, mu, 1.0, 0.3),
                                   g.rd(rng2, mu, 1.0, 0.3))
+
+
+# ---------------------------------------------------------------------------
+# summary(freq=, dispersion=) + anova passthrough (roadmap B3) — mgcv 1.9-4.
+# freq=TRUE swaps Ve for Vp in the PARAMETRIC tables only (mgcv.r:3890;
+# the smooth tests always use Vp). dispersion= rescales every covariance
+# by dispersion/sig2 and forces est.disp=FALSE — z/Chi.sq forms, testStat
+# res.df=-1, reTest fed the rescaled covariances with sig2 untouched
+# (mgcv.r:3895-3899) — and prints as the Scale est. Pins from
+# summary(m, freq=, dispersion=)$p.table/pTerms.table/s.table on the
+# CSV-identical fixtures.
+# ---------------------------------------------------------------------------
+
+def test_summary_freq_dispersion_parametric_matches_mgcv():
+    m = gam("ygau ~ f4 + z + s(x)", _pterms_fixture(), method="REML")
+    np.testing.assert_allclose(
+        m._se_report_for(True, None)[:5],
+        [0.0703526223, 0.0757599880, 0.0762499680, 0.0773978969,
+         0.0919057192], rtol=1e-7)
+    np.testing.assert_allclose(
+        m._se_report_for(False, 2.0)[:5],
+        [0.2736928420, 0.2955662208, 0.2973328043, 0.3020047615,
+         0.3570707871], rtol=1e-7)
+    np.testing.assert_allclose(
+        m._se_report_for(True, 0.5)[:5],
+        [0.1365780541, 0.1470755659, 0.1480267816, 0.1502552969,
+         0.1784198496], rtol=1e-7)
+    # defaults: byte-identical to the precomputed report SEs.
+    np.testing.assert_array_equal(m._se_report_for(False, None),
+                                  m._se_report)
+    # pTerms under freq stays est.disp (F = chi/df on residual df).
+    rows_f = m._pterms_rows(freq=True)
+    assert [(r[0], r[1]) for r in rows_f] == [("f4", 3), ("z", 1)]
+    np.testing.assert_allclose([r[2] for r in rows_f],
+                               [52.9350579883, 41.3609763621], rtol=1e-6)
+    # dispersion= forces the known-scale Chi.sq/pchisq forms.
+    rows_d = m._pterms_rows(dispersion=2.0)
+    np.testing.assert_allclose([r[2] for r in rows_d],
+                               [10.5016944951, 2.7401050675], rtol=1e-6)
+    np.testing.assert_allclose([r[3] for r in rows_d],
+                               [0.0147494068, 0.0978583325], rtol=1e-5)
+
+
+def test_summary_dispersion_smooth_tables_match_mgcv():
+    df = _pterms_fixture()
+    m = gam("ygau ~ f4 + z + s(x)", df, method="REML")
+    sm = m._smooth_significance_rows(dispersion=2.0)
+    # est.disp FALSE: the stat column is the RAW Chi.sq, χ² reference.
+    np.testing.assert_allclose(
+        [sm[0][1], sm[0][2], sm[0][3]],
+        [6.8488014298, 7.9483724163, 50.1390255611], rtol=1e-5)
+    assert sm[0][4] < 1e-12
+    # freq= never reaches the smooth table (mgcv.r:4014 hard-codes Vp).
+    sm0 = m._smooth_significance_rows()
+    sm0b = m._smooth_significance_rows(dispersion=None)
+    assert sm0 == sm0b
+    # poisson (scale known): dispersion=1.5 rescales Vp; Chi.sq stays raw.
+    mp = gam("ypois ~ z + s(x)", df, family=Poisson(), method="REML")
+    np.testing.assert_allclose(
+        mp._se_report_for(False, 1.5)[:2],
+        [0.1080887998, 0.1837822424], rtol=1e-7)
+    smp = mp._smooth_significance_rows(dispersion=1.5)
+    np.testing.assert_allclose(smp[0][3], 118.0001184587, rtol=1e-6)
+
+
+def test_summary_dispersion_re_test_matches_mgcv():
+    # reTest under dispersion=: the rescaled Vp/Ve flow through recov
+    # (quadratically), sig2 and the scale-estimated p-value branch stay
+    # on the object's values (mgcv reads b$sig2/b$scale.estimated
+    # untouched). The s(g5) component sits on the flat-REML λ boundary
+    # (hea/R stop at different λ — the recorded band), so its raw stat
+    # is boundary noise: pin the p-value (which matches R to 7 digits)
+    # plus the hea-internal invariance stat(disp) == stat(default), and
+    # pin s(x) tight.
+    m = gam("ygau ~ f4 + z + s(x) + s(g5, bs='re')", _pterms_fixture(),
+            method="REML")
+    sm_d = m._smooth_significance_rows(dispersion=2.0)
+    sm_0 = m._smooth_significance_rows()
+    np.testing.assert_allclose(sm_d[0][3], 50.1390197746, rtol=1e-5)
+    np.testing.assert_allclose(sm_d[1][4], 0.9950204093, rtol=1e-6)
+    # raw reTest stat is dispersion-invariant: default's printed F-col is
+    # stat/Ref.df, the dispersion column is the raw stat.
+    np.testing.assert_allclose(sm_d[1][3], sm_0[1][3] * sm_0[1][2],
+                               rtol=1e-10)
+
+
+def test_summary_freq_dispersion_gaulss_and_print(capsys):
+    from hea.family import gaulss
+    mg = gam(["y ~ s(x) + w", "~ s(z)"], _fit5_fixture(), family=gaulss(),
+             method="REML")
+    idx = mg._param_idx
+    np.testing.assert_allclose(
+        mg._se_report_for(True, None)[idx],
+        [0.0491302732, 0.0887559258, 0.0489703286], rtol=1e-6)
+    # printed surface: dispersion shows as Scale est., Chi.sq column for
+    # a gaussian fit under the override, t→z switch implicit in pins.
+    m1 = gam("ygau ~ f4 + z + s(x)", _pterms_fixture(), method="REML")
+    m1.summary(dispersion=2.0)
+    out = capsys.readouterr().out
+    assert "Scale est. = 2  " in out
+    assert "Chi.sq" in out and "z value" in out
+    m1.summary(freq=True)
+    out_f = capsys.readouterr().out
+    assert "t value" in out_f and "F" in out_f
+
+
+def test_anova_gam_freq_dispersion_passthrough(capsys):
+    from hea.R import anova
+    m = gam("ygau ~ f4 + z + s(x)", _pterms_fixture(), method="REML")
+    anova(m, dispersion=2.0)
+    out = capsys.readouterr().out
+    assert "Chi.sq" in out and "10.5" in out
+    anova(m, freq=True)
+    out_f = capsys.readouterr().out
+    assert "52.94" in out_f or "52.93" in out_f
+    m2 = gam("ygau ~ z + s(x)", _pterms_fixture(), method="REML")
+    with pytest.raises(TypeError, match="single-gam"):
+        anova(m, m2, dispersion=2.0)
