@@ -47,7 +47,7 @@ import pytest
 
 from conftest import load_dataset
 from hea.models import gam, glm
-from hea.family import Gamma, Tweedie, tw
+from hea.family import Gamma, Poisson, Tweedie, tw
 from hea.models.gam import VisResult
 
 matplotlib.use("Agg")  # headless — must be set before pyplot import below.
@@ -2814,17 +2814,23 @@ def test_weights_gaussian_reml_matches_mgcv():
     np.testing.assert_allclose(p["se.fit"].to_numpy(),
                                [0.06401862872, 0.05586021636],
                                rtol=0, atol=1e-8)
-    # hea's vcomp is mgcv's gam.vcomp(rescale=FALSE) flavor — σ_k at the
-    # fitted S scaling. mgcv's default rescale=TRUE divides each sp by the
-    # smooth's S.scale (smoothCon's maS) first; hea doesn't track S.scale
-    # yet (recorded in plan Tier 4 — vcomp rescale).
+    # vcomp defaults to mgcv's gam.vcomp(rescale=TRUE): each sp divided by
+    # the penalty's S.scale (smoothCon's maS) so σ_k refers to the original
+    # penalty scale. rescale=False is the fitted-scaling flavor.
     vc = m.vcomp
     np.testing.assert_allclose(vc["std_dev"].to_numpy(),
-                               [3.03079228, 0.39368918], rtol=1e-4)
+                               [11.559097937201, 0.393689177286], rtol=1e-6)
     np.testing.assert_allclose(vc["lower"].to_numpy(),
-                               [1.72194402, 0.35054488], rtol=1e-3)
+                               [6.567299164698, 0.350544878214], rtol=1e-6)
     np.testing.assert_allclose(vc["upper"].to_numpy(),
-                               [5.33449504, 0.44214358], rtol=1e-3)
+                               [20.34515891099, 0.44214358259], rtol=1e-6)
+    vc0 = m._compute_vcomp(rescale=False)
+    np.testing.assert_allclose(vc0["std_dev"].to_numpy(),
+                               [3.030792282543, 0.393689177286], rtol=1e-6)
+    np.testing.assert_allclose(vc0["lower"].to_numpy(),
+                               [1.721944024841, 0.350544878214], rtol=1e-6)
+    np.testing.assert_allclose(vc0["upper"].to_numpy(),
+                               [5.33449504015, 0.44214358259], rtol=1e-6)
 
 
 def test_weights_unit_weights_are_bit_identical():
@@ -3327,3 +3333,207 @@ def test_multi_formula_validation_and_gam_guard():
     # gam() on a formula list: clear pointer to §5.3 until gam.fit5 lands.
     with pytest.raises(NotImplementedError, match="general-family"):
         gam(["y ~ s(x)", "~ s(z)"], df, method="REML")
+
+
+# ---------------------------------------------------------------------------
+# gam.vcomp rescale=TRUE default (pre-§5.3 slice i) — mgcv 1.9-4 references.
+# R fits read the identical data via full-precision CSV; pins are printed
+# gam.vcomp() values. S.scale is recorded per penalty by _scale_penalty
+# (mgcv smooth.r:3877-3884) and vcomp's default divides each sp by it
+# (mgcv.r:4242-4290); rescale=False is the fitted-scaling flavor.
+# (The weighted-tp case is pinned in test_weights_gaussian_reml_matches_mgcv;
+# factor-only bs="re" has S.scale=1 — the Machines pins cover invariance.)
+# ---------------------------------------------------------------------------
+
+def _vcomp_fixture():
+    rng = np.random.default_rng(7)
+    n = 240
+    x0 = rng.uniform(0, 1, n)
+    x1 = rng.uniform(0, 1, n)
+    x2 = rng.uniform(0, 1, n)
+    fac = rng.integers(0, 3, n)
+    g = rng.integers(0, 6, n)
+    fg = np.array(["a", "b", "c"])[fac]
+    gg = np.array([f"g{i}" for i in range(6)])[g]
+    fb = np.where(fg == "a", np.sin(2 * np.pi * x0),
+                  np.where(fg == "b", np.cos(2 * np.pi * x0), x0 ** 2 * 2.0))
+    y = (0.3 + np.sin(2 * np.pi * x0) + (x1 * x2) ** 2 * 2.0 + fb
+         + 0.3 * g * x0 + rng.normal(0, 0.4, n))
+    return pl.DataFrame({"x0": x0, "x1": x1, "x2": x2, "fac": fg, "g": gg,
+                         "y": y})
+
+
+def test_vcomp_rescale_te_matches_mgcv():
+    # s + te: S.scale recorded on the ASSEMBLED tensor penalties (the
+    # smoothCon-level rescale; margin-level scaling is interior machinery).
+    m = gam("y ~ s(x0) + te(x1, x2)", _vcomp_fixture(), method="REML")
+    vc = m.vcomp
+    np.testing.assert_allclose(
+        vc["std_dev"].to_numpy(),
+        [18.6152252011860, 0.0395304271658, 0.1370510770924, 0.8447589088108],
+        rtol=1e-5)
+    np.testing.assert_allclose(
+        vc["lower"].to_numpy(),
+        [10.20136909028973, 0.00231551372448, 0.04788841250276,
+         0.77002639213213],
+        rtol=1e-5)
+    np.testing.assert_allclose(
+        vc["upper"].to_numpy(),
+        [33.968637564610, 0.674863057554, 0.392224272022, 0.926744357475],
+        rtol=1e-5)
+    vc0 = m._compute_vcomp(rescale=False)
+    np.testing.assert_allclose(
+        vc0["std_dev"].to_numpy(),
+        [4.2566793836967, 0.0702588383706, 0.2425382528529, 0.8447589088108],
+        rtol=1e-5)
+
+
+def test_vcomp_rescale_id_linked_full_sp_matches_mgcv():
+    # s(x0, by=fac, id=1): one working λ, three penalty slots. mgcv's
+    # $all divides every full.sp entry by the PROTOTYPE's S.scale
+    # (clone.smooth.spec copies S.scale with the smooth); hea's per-slot
+    # rows reproduce $all, with $vc's CI bounds shared across the rows.
+    m = gam("y ~ s(x0, by=fac, id=1)", _vcomp_fixture(), method="REML")
+    vc = m.vcomp
+    np.testing.assert_allclose(
+        vc["std_dev"].to_numpy(),
+        [21.7159885155] * 3 + [0.636337493588], rtol=1e-6)
+    np.testing.assert_allclose(
+        vc["lower"].to_numpy(),
+        [15.001294442183] * 3 + [0.579801697418], rtol=1e-6)
+    np.testing.assert_allclose(
+        vc["upper"].to_numpy(),
+        [31.436230988263] * 3 + [0.698386030171], rtol=1e-6)
+
+
+def test_vcomp_rescale_select_null_penalty_scale_one():
+    # select=TRUE appends the null-space penalty Sf with mgcv S.scale=1
+    # (smooth.r:4241/4259), so its row is rescale-invariant; the main
+    # penalty's row rescales as usual. Wider tolerances: the select fit
+    # stops on a flatter surface (same band as the §2.3 record).
+    m = gam("y ~ s(x0)", _vcomp_fixture(), method="REML", select=True)
+    vc = m.vcomp
+    np.testing.assert_allclose(
+        vc["std_dev"].to_numpy(),
+        [19.75192502647, 1.90564140001, 0.928244589653], rtol=2e-4)
+    np.testing.assert_allclose(
+        vc["lower"].to_numpy(),
+        [10.631661749382, 0.380252650694, 0.847733685602], rtol=2e-3)
+    np.testing.assert_allclose(
+        vc["upper"].to_numpy(),
+        [36.69591371961, 9.55014814180, 1.01640176963], rtol=2e-3)
+    vc0 = m._compute_vcomp(rescale=False)
+    # The appended Sf row is bit-identical across flavors (scale == 1).
+    assert vc0["std_dev"][1] == vc["std_dev"][1]
+    assert vc0["lower"][1] == vc["lower"][1]
+
+
+def test_vcomp_rescale_fs_consistency_and_loose_mgcv():
+    # fs: multi-S block through the dedicated builder. hea's fs
+    # null-space parameterization has a small recorded construction
+    # divergence from mgcv (nat.param basis — plan §5.4 note: X
+    # fingerprint ~2e-4 rel, S.scale 22.47 vs 22.43, null-dim meaning
+    # rotated so the two null sp's land crossed), so mgcv values are
+    # order-insensitive and loose; the rescale mechanism itself is
+    # pinned exactly via σ_k(default) = σ_k(rescale=False)·√S.scale.
+    m = gam("y ~ s(x0, g, bs='fs')", _vcomp_fixture(), method="REML")
+    vc = m.vcomp
+    vc0 = m._compute_vcomp(rescale=False)
+    ss = np.array([s.S_scale for s in m._slots])
+    np.testing.assert_allclose(
+        vc["std_dev"].to_numpy()[:3],
+        vc0["std_dev"].to_numpy()[:3] * np.sqrt(ss), rtol=1e-12)
+    np.testing.assert_allclose(
+        vc["lower"].to_numpy()[:3],
+        vc0["lower"].to_numpy()[:3] * np.sqrt(ss), rtol=1e-12)
+    # mgcv 1.9-4: [23.705650223879, 0.351338675157, 0.255257857391],
+    # scale 0.870402969596 — range penalty + sorted null rows, loose.
+    np.testing.assert_allclose(vc["std_dev"][0], 23.705650223879, rtol=2e-3)
+    np.testing.assert_allclose(
+        np.sort(vc["std_dev"].to_numpy()[1:3]),
+        np.sort([0.351338675157, 0.255257857391]), rtol=2e-2)
+    np.testing.assert_allclose(vc["std_dev"][3], 0.870402969596, rtol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# summary pTerms + predict(unconditional=) (pre-§5.3 slice ii) — mgcv 1.9-4.
+# pTerms (mgcv.r:3928-3977): one joint Wald test per whole parametric term,
+# assign-exact column grouping, pinv-rank df, Chi.sq (known scale, pchisq)
+# vs F (estimated scale, pf on n−Σedf). Printed via anova() exactly like
+# mgcv (print.anova.gam shows pTerms.table; print.summary.gam does not).
+# References from gam()+summary()$pTerms.table / predict.gam on the
+# CSV-identical fixture.
+# ---------------------------------------------------------------------------
+
+def _pterms_fixture():
+    rng = np.random.default_rng(11)
+    n = 200
+    x = rng.uniform(0, 1, n)
+    z = rng.uniform(0, 1, n)
+    f4 = np.array(["a", "b", "c", "d"])[rng.integers(0, 4, n)]
+    feff = {"a": 0.0, "b": 0.5, "c": -0.4, "d": 0.15}
+    eta = 0.4 + np.vectorize(feff.get)(f4) + 0.6 * z + np.sin(2 * np.pi * x)
+    ygau = eta + rng.normal(0, 0.35, n)
+    ypois = rng.poisson(np.exp(eta)).astype(float)
+    return pl.DataFrame({"x": x, "z": z, "f4": f4,
+                         "ygau": ygau, "ypois": ypois})
+
+
+def test_pterms_gaussian_F_matches_mgcv():
+    m = gam("ygau ~ f4 + z + s(x)", _pterms_fixture(), method="REML")
+    rows = m._pterms_rows()
+    assert [(r[0], r[1]) for r in rows] == [("f4", 3), ("z", 1)]
+    np.testing.assert_allclose([r[2] for r in rows],
+                               [52.7714927056, 41.3074579481], rtol=1e-6)
+    np.testing.assert_allclose([r[3] for r in rows],
+                               [8.49355655343e-25, 1.04116815355e-09],
+                               rtol=1e-5)
+
+
+def test_pterms_poisson_chisq_matches_mgcv():
+    # Known scale → Chi.sq statistic with a pchisq p-value (est.disp=FALSE).
+    m = gam("ypois ~ f4 + z + s(x)", _pterms_fixture(),
+            family=Poisson(), method="REML")
+    rows = m._pterms_rows()
+    assert [(r[0], r[1]) for r in rows] == [("f4", 3), ("z", 1)]
+    np.testing.assert_allclose([r[2] for r in rows],
+                               [50.15614538086, 2.41654374211], rtol=1e-6)
+    np.testing.assert_allclose([r[3] for r in rows],
+                               [7.40026299488e-11, 0.120059562637], rtol=1e-5)
+
+
+def test_pterms_dropped_term_is_nan_like_mgcv():
+    # z2 == z: the duplicate column is dropped (coef 0, zero Vp row), so
+    # its pTerms row is df 1 with NaN stat/p — exactly mgcv's output.
+    df = _pterms_fixture().with_columns(pl.col("z").alias("z2"))
+    with pytest.warns(UserWarning, match="rank deficient"):
+        m = gam("ygau ~ f4 + z + z2 + s(x)", df, method="REML")
+    rows = m._pterms_rows()
+    assert [r[0] for r in rows] == ["f4", "z", "z2"]
+    np.testing.assert_allclose([rows[0][2], rows[1][2]],
+                               [52.7722538822, 41.3067103254], rtol=1e-6)
+    assert rows[2][1] == 1
+    assert np.isnan(rows[2][2]) and np.isnan(rows[2][3])
+
+
+def test_predict_unconditional_se_matches_mgcv():
+    # unconditional=TRUE swaps Vp → Vc (sp-uncertainty corrected) for the
+    # SE band — predict.gam parity on the first three rows.
+    df = _pterms_fixture()
+    m = gam("ygau ~ f4 + z + s(x)", df, method="REML")
+    p = m.predict(df[:3], se_fit=True)
+    pu = m.predict(df[:3], se_fit=True, unconditional=True)
+    np.testing.assert_allclose(
+        p["se.fit"].to_numpy(),
+        [0.081173046562, 0.090192489149, 0.087813942008], rtol=1e-6)
+    np.testing.assert_allclose(
+        pu["se.fit"].to_numpy(),
+        [0.081596256494, 0.091300879297, 0.088508175365], rtol=1e-6)
+    # GCV fits carry no sp-uncertainty correction: mgcv warns and falls
+    # back to Vp; so do we.
+    mg = gam("ygau ~ f4 + z + s(x)", df, method="GCV.Cp")
+    with pytest.warns(UserWarning, match="not available"):
+        pg = mg.predict(df[:3], se_fit=True, unconditional=True)
+    np.testing.assert_array_equal(
+        pg["se.fit"].to_numpy(),
+        mg.predict(df[:3], se_fit=True)["se.fit"].to_numpy())

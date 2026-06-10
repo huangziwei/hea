@@ -2041,7 +2041,8 @@ def referenced_columns(expanded: ExpandedFormula) -> set[str]:
     return referenced
 
 
-def materialize(expanded: ExpandedFormula, data: pl.DataFrame) -> pl.DataFrame:
+def materialize(expanded: ExpandedFormula, data: pl.DataFrame,
+                return_assign: bool = False):
     """Turn an expanded formula + data frame into a design matrix X.
 
     NA-omit: rows with missing values in any referenced column are dropped
@@ -2050,6 +2051,11 @@ def materialize(expanded: ExpandedFormula, data: pl.DataFrame) -> pl.DataFrame:
     order matching R's interaction convention (first atom's levels vary
     fastest). Column names follow R: `(Intercept)`, `x`, `fb`, `x:fb`,
     `I(x^2)`, etc.
+
+    ``return_assign=True`` additionally returns R's ``model.matrix``
+    ``assign`` attribute: one int per column — 0 for the intercept,
+    ``i`` (1-based) for columns of ``expanded.terms[i-1]``. Exact by
+    construction (columns are emitted term block by term block).
     """
     referenced = referenced_columns(expanded) & set(data.columns)
     ref_list = list(referenced)
@@ -2057,26 +2063,32 @@ def materialize(expanded: ExpandedFormula, data: pl.DataFrame) -> pl.DataFrame:
         data = data.drop_nulls(subset=ref_list)
 
     blocks: list[_NumBlock] = []
+    block_term_idx: list[int] = []          # R assign value per block
     running_terms: list[Term] = []
     atom_cache: dict = {}
 
     if expanded.intercept:
         blocks.append(_encode_term(_EMPTY_TERM, data, running_terms, expanded.intercept, atom_cache))
+        block_term_idx.append(0)
         running_terms.append(_EMPTY_TERM)
 
-    for t in expanded.terms:
+    for i, t in enumerate(expanded.terms):
         blocks.append(_encode_term(t, data, running_terms, expanded.intercept, atom_cache))
+        block_term_idx.append(i + 1)
         running_terms.append(t)
 
     all_names: list[str] = []
-    for b in blocks:
+    assign: list[int] = []
+    for b, ti in zip(blocks, block_term_idx):
         all_names.extend(b.suffixes)
+        assign.extend([ti] * b.values.shape[1])
     if not blocks or sum(b.values.shape[1] for b in blocks) == 0:
         # Polars can't represent (n, 0); return an empty frame and let
         # callers use ``len(input_data)`` if they need the row count.
-        return pl.DataFrame()
+        return (pl.DataFrame(), []) if return_assign else pl.DataFrame()
     all_values = np.hstack([b.values for b in blocks])
-    return pl.from_numpy(all_values, schema=all_names)
+    X = pl.from_numpy(all_values, schema=all_names)
+    return (X, assign) if return_assign else X
 
 
 # ---------------------------------------------------------------------------
@@ -2381,6 +2393,10 @@ class SmoothBlock:
     X: np.ndarray                   # basis matrix, (n, k)
     S: list[np.ndarray]             # penalty matrices, each (k, k)
     spec: Optional["BasisSpec"] = None   # predict-time replay state
+    # mgcv ``sm$S.scale``, parallel to ``S``: the ``maS`` factor
+    # ``_scale_penalty`` divided each penalty by (1.0 where the rescale
+    # didn't apply). ``gam.vcomp(rescale=TRUE)`` divides sp by it.
+    S_scale: Optional[list[float]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -3273,6 +3289,7 @@ def _apply_by_and_absorb(
     raw_basis: _RawBasis | None = None,
     pre_scaled: bool = False,
     C_source: np.ndarray | None = None,
+    S_scale: list[float] | None = None,
 ) -> list[SmoothBlock]:
     """Apply mgcv's smoothCon post-processing:
     scale.penalty → by-handling → absorb.cons → SmoothBlock(s).
@@ -3292,7 +3309,9 @@ def _apply_by_and_absorb(
     path, where mgcv rescales S against the POOLED basis-setup X *before*
     replacing X with the own-data evaluation (smooth.r:3870-3877: doing it
     per-smooth would give linked terms "the same basis, but different
-    penalties").
+    penalties"). ``S_scale`` then carries the pooled-rescale ``maS``
+    factors (mgcv clones ``S.scale`` with the smooth); ignored unless
+    ``pre_scaled``.
 
     ``C_source`` overrides the matrix whose column sums define the
     sum-to-zero constraint. mgcv computes ``sm$C`` from the constructor's
@@ -3310,7 +3329,9 @@ def _apply_by_and_absorb(
         _id_cap.update(X=X, S=S_list, raw=raw_basis, cls=cls)
         return []
     if not pre_scaled:
-        S_list = _scale_penalty(X, S_list)
+        S_list, S_scale = _scale_penalty(X, S_list)
+    elif S_scale is None:
+        S_scale = [1.0] * len(S_list)
 
     sparse_cons = _SPARSE_CONS_CV.get()
     by_expr = _smooth_by_expr(call)
@@ -3325,7 +3346,7 @@ def _apply_by_and_absorb(
             if raw_basis is not None else None
         )
         return [SmoothBlock(label=base_label, term=term, cls=cls,
-                            X=X2, S=S2, spec=spec)]
+                            X=X2, S=S2, spec=spec, S_scale=S_scale)]
 
     by_col = _eval_by_col(by_expr, data)
     if _is_factor_like(by_col):
@@ -3365,7 +3386,8 @@ def _apply_by_and_absorb(
                 if raw_basis is not None else None
             )
             blocks.append(SmoothBlock(label=label, term=term, cls=cls,
-                                      X=X2, S=S2, spec=spec))
+                                      X=X2, S=S2, spec=spec,
+                                      S_scale=S_scale))
         return blocks
 
     # Numeric by: multiply X by by-column, skip absorb.cons.
@@ -3384,33 +3406,45 @@ def _apply_by_and_absorb(
     )
     return [SmoothBlock(
         label=f"{base_label}:{by_expr}",
-        term=term, cls=cls, X=X2, S=S_list, spec=spec,
+        term=term, cls=cls, X=X2, S=S_list, spec=spec, S_scale=S_scale,
     )]
 
 
-def _scale_penalty(X: np.ndarray, S_list: list[np.ndarray]) -> list[np.ndarray]:
+def _scale_penalty(
+    X: np.ndarray, S_list: list[np.ndarray],
+) -> tuple[list[np.ndarray], list[float]]:
     """Match mgcv's `scale.penalty=TRUE` rescaling.
 
     mgcv applies this on the raw (pre-absorb.cons) X and S:
         maXX = norm(X, "I")^2      # max abs row sum, squared
         maS  = norm(S, "O") / maXX # default R norm() = one-norm
         S   := S / maS = S * maXX / norm(S, "O")
+
+    Also returns the per-S ``maS`` factors — mgcv's ``sm$S.scale``
+    ("multiply S[[i]] by this to get original S[[i]]", smooth.r:3884),
+    initialised to 1 wherever the rescale doesn't apply (smooth.r:3877).
+    ``gam.vcomp``'s default ``rescale=TRUE`` divides each sp by it.
     """
     if X.size == 0 or not S_list:
-        return [np.asarray(s, dtype=float) for s in S_list]
+        return ([np.asarray(s, dtype=float) for s in S_list],
+                [1.0] * len(S_list))
     maXX = float(np.abs(X).sum(axis=1).max()) ** 2
     out = []
+    scales: list[float] = []
     for S in S_list:
         S = np.asarray(S, dtype=float)
         if S.size == 0:
             out.append(S)
+            scales.append(1.0)
             continue
         normS = float(np.abs(S).sum(axis=0).max())
         if normS == 0 or maXX == 0:
             out.append(S)
+            scales.append(1.0)
         else:
             out.append(S * (maXX / normS))
-    return out
+            scales.append(normS / maXX)
+    return out, scales
 
 
 def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
@@ -3434,7 +3468,7 @@ def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     X_df = materialize(ef, data)
     X = X_df.to_numpy().astype(float)
     S_list = [np.eye(X.shape[1])]
-    S_list = _scale_penalty(X, S_list)
+    S_list, S_scale = _scale_penalty(X, S_list)
     # re.smooth.spec sets C = empty (no absorb.cons). `by` is still honored:
     # factor by → one block per level; numeric by → multiply X by by.
     base_label = _smooth_label(call)
@@ -3457,7 +3491,8 @@ def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     if by_expr is None:
         return [SmoothBlock(label=base_label, term=term_vars,
                             cls="re.smooth.spec", X=X, S=S_list,
-                            spec=BasisSpec(raw=raw, by=None, absorb=None))]
+                            spec=BasisSpec(raw=raw, by=None, absorb=None),
+                            S_scale=S_scale)]
     by_col = _eval_by_col(by_expr, data)
     if _is_factor_like(by_col):
         levels = _factor_levels(by_col)
@@ -3475,6 +3510,7 @@ def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
                     by=_ByMask(expr=by_expr, kind="factor", level=lev),
                     absorb=None,
                 ),
+                S_scale=S_scale,
             )
             for lev in levels
         ]
@@ -3489,6 +3525,7 @@ def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         spec=BasisSpec(
             raw=raw, by=_ByMask(expr=by_expr, kind="numeric"), absorb=None,
         ),
+        S_scale=S_scale,
     )]
 
 
@@ -5445,12 +5482,13 @@ def _build_tp_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         X_raw = X_raw - col_means[None, :]
         S_list = [S[:keep, :keep] for S in S_list]
         S_list = [(S + S.T) / 2.0 for S in S_list]
-        S_list = _scale_penalty(X_raw, S_list)
+        S_list, S_scale = _scale_penalty(X_raw, S_list)
         raw = _TPDropNullRawBasis(inner=full_raw, keep=keep, col_means=col_means)
         return [SmoothBlock(
             label=_smooth_label(call), term=term,
             cls="tprs.smooth", X=X_raw, S=S_list,
             spec=BasisSpec(raw=raw, by=None, absorb=None),
+            S_scale=S_scale,
         )]
 
     raw = _TPRawBasis(
@@ -6077,7 +6115,7 @@ def _build_fs_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         S_list.append(np.diag(np.tile(um, nf)))
 
     # scale.penalty runs on the final (duplicated) X and each S.
-    S_list = _scale_penalty(X, S_list)
+    S_list, S_scale = _scale_penalty(X, S_list)
 
     base_raw = _TPRawBasis(
         term=list(others), shift=state["shift"], Xu=state["Xu"],
@@ -6091,6 +6129,7 @@ def _build_fs_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         label=_smooth_label(call), term=term,
         cls="fs.interaction", X=X, S=S_list,
         spec=BasisSpec(raw=raw, by=None, absorb=None),
+        S_scale=S_scale,
     )]
 
 
@@ -6230,7 +6269,7 @@ def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     # before the Kronecker constraint — XZKr rescales column norms but
     # `scale.penalty=TRUE` matches on the pre-contrast `sm$X`).
     S_list = [(S + S.T) / 2.0 for S in S_list]
-    S_list = _scale_penalty(X, S_list)
+    S_list, S_scale = _scale_penalty(X, S_list)
 
     # Kronecker sum-to-zero: absorb.cons with C = c(0, nf). XZKr drops the
     # last-level block per factor and subtracts it from each non-last block.
@@ -6253,6 +6292,7 @@ def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     return [SmoothBlock(
         label=label, term=term, cls="sz.interaction", X=X_out, S=S_out,
         spec=BasisSpec(raw=raw, by=None, absorb=None),
+        S_scale=S_scale,
     )]
 
 
@@ -6738,7 +6778,9 @@ def _te_build_margin_centered(
     X_raw, S_raw, predict_bare, noterp, bare = _te_build_margin_raw(
         spec, data, knots_vec=knots_vec)
     S_sym = [(S + S.T) / 2.0 for S in S_raw]
-    S_scaled = _scale_penalty(X_raw, S_sym)
+    # Margin-level rescale: interior te machinery, not mgcv's per-smooth
+    # S.scale (that's recorded on the assembled tensor penalties).
+    S_scaled, _ = _scale_penalty(X_raw, S_sym)
     C = X_raw.mean(axis=0)
     Q, _ = np.linalg.qr(C.reshape(-1, 1), mode="complete")
     Z = Q[:, 1:]
@@ -6896,10 +6938,11 @@ def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
 
     if inter:
         # Skip outer absorb.cons (C = matrix(0,0,0)).
-        S_list = _scale_penalty(X, S_list)
+        S_list, S_scale = _scale_penalty(X, S_list)
         return [SmoothBlock(
             label=label, term=term_all, cls=cls, X=X, S=S_list,
             spec=BasisSpec(raw=tensor_raw, by=None, absorb=None),
+            S_scale=S_scale,
         )]
 
     if matrix_arg:
@@ -7106,7 +7149,7 @@ def _build_t2_smooth(
     if null_dim == 0:
         # No null space, no identifiability constraint needed; sm$Cp is NULL,
         # so fit basis == predict basis.
-        S_list = _scale_penalty(X_raw_full, S_list)
+        S_list, S_scale = _scale_penalty(X_raw_full, S_list)
         t2_raw = _T2RawBasis(
             margins=margin_raws, P_per_margin=P_per_margin,
             ranks=ranks, null_dim=0, Zn=None,
@@ -7114,6 +7157,7 @@ def _build_t2_smooth(
         return [SmoothBlock(
             label=label, term=term_all, cls=cls, X=X_raw_full, S=S_list,
             spec=BasisSpec(raw=t2_raw, by=None, absorb=None),
+            S_scale=S_scale,
         )]
 
     # Predict-time basis (mgcv's full absorb.cons via sm$Cp = colSums(X_raw_full)):
@@ -7135,7 +7179,7 @@ def _build_t2_smooth(
         keep[-1] = False
         X = X_raw_full[:, keep]
         S_list = [S[np.ix_(keep, keep)] for S in S_list]
-        S_list = _scale_penalty(X, S_list)
+        S_list, S_scale = _scale_penalty(X, S_list)
         t2_raw = _T2RawBasis(
             margins=margin_raws, P_per_margin=P_per_margin,
             ranks=ranks, null_dim=1, Zn=None,
@@ -7147,13 +7191,14 @@ def _build_t2_smooth(
             label=label, term=term_all, cls=cls, X=X, S=S_list,
             spec=BasisSpec(raw=t2_raw, by=None, absorb=None,
                            predict_raw=t2_predict, coef_remap=(M, X_bar)),
+            S_scale=S_scale,
         )]
 
     # Partial absorb.cons (smooth.r:4076-4100): C has zero cols on the range
     # space, so only the null-space cols of X / S get rotated. QR is on the
     # nx×1 slice cN = colSums(X_N); Z' = Q[:, 1:] spans the null of cN within
     # the null-space coordinates. Range-space cols pass through unchanged.
-    S_list = _scale_penalty(X_raw_full, S_list)
+    S_list, S_scale = _scale_penalty(X_raw_full, S_list)
     X_R = X_raw_full[:, :nup]
     X_N = X_raw_full[:, nup:]
     cN = X_N.sum(axis=0).reshape(-1, 1)
@@ -7180,6 +7225,7 @@ def _build_t2_smooth(
         label=label, term=term_all, cls=cls, X=X, S=S_list_new,
         spec=BasisSpec(raw=t2_raw, by=None, absorb=None,
                        predict_raw=t2_predict, coef_remap=(M, X_bar)),
+        S_scale=S_scale,
     )]
 
 
@@ -7280,7 +7326,7 @@ def _summation_apply_blocks(
         X_summed = X.reshape(n, m, X.shape[1]).sum(axis=1)
         S_list = list(b.S)
         # mgcv smoothCon pipeline on the row-summed design.
-        S_list = _scale_penalty(X_summed, S_list)
+        S_list, S_scale = _scale_penalty(X_summed, S_list)
         if sparse_cons == -1:
             X_summed, S_list, abs_T = _absorb_sweep_drop(X_summed, S_list)
         else:
@@ -7300,7 +7346,7 @@ def _summation_apply_blocks(
                     b.spec.keep_cols = keep_mask
         out.append(SmoothBlock(
             label=b.label, term=b.term, cls=b.cls,
-            X=X_summed, S=S_list, spec=b.spec,
+            X=X_summed, S=S_list, spec=b.spec, S_scale=S_scale,
         ))
     return out
 
@@ -7513,8 +7559,10 @@ def materialize_smooths(
                 )
             # mgcv rescales S against the pooled-construction X *before*
             # the dataX replacement (smooth.r:3870-3877) so all linked
-            # smooths carry identical penalties.
-            cap["S_scaled"] = _scale_penalty(cap["X"], cap["S"])
+            # smooths carry identical penalties (and the same S.scale —
+            # clone.smooth.spec copies the whole smooth object).
+            cap["S_scaled"], cap["S_scale"] = _scale_penalty(
+                cap["X"], cap["S"])
             rec = id_shared[idv] = cap
         base_vars = _smooth_term_vars(base_call)
         my_vars = _smooth_term_vars(call_i)
@@ -7538,6 +7586,7 @@ def materialize_smooths(
         return _apply_by_and_absorb(
             call_i, data, X_i, S_i, rec["cls"], my_vars,
             raw_basis=raw_i, pre_scaled=True, C_source=rec["X"],
+            S_scale=list(rec["S_scale"]),
         )
 
     token = _SPARSE_CONS_CV.set(int(sparse_cons))
@@ -7758,6 +7807,10 @@ class Design:
     X: pl.DataFrame
     y: pl.Series
     response: str
+    # R model.matrix's ``assign``: per X column, 0 = intercept, i = the
+    # 1-based index into ``expanded.terms``. Exact term→column mapping
+    # (factors contribute several columns) — summary/anova pTerms use it.
+    param_assign: list[int] = None
 
 
 # LHS function table — maps R-side function names to a polars-expr builder.
@@ -7975,5 +8028,6 @@ def prepare_design(
         )[response_label]
 
     with with_contrasts(contrasts):
-        X = materialize(expanded, data_clean)
-    return Design(expanded=expanded, data=data_clean, X=X, y=y, response=response_label)
+        X, param_assign = materialize(expanded, data_clean, return_assign=True)
+    return Design(expanded=expanded, data=data_clean, X=X, y=y,
+                  response=response_label, param_assign=param_assign)

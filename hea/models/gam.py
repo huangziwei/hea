@@ -820,9 +820,10 @@ class gam:
             k = Xb.shape[1]
             a, bcol = col_cursor, col_cursor + k
             block_col_ranges.append((a, bcol))
-            for S_j in b.S:
+            for j, S_j in enumerate(b.S):
                 slots.append(_PenaltySlot(block=b, col_start=a, col_end=bcol,
-                                          S=np.asarray(S_j, dtype=float)))
+                                          S=np.asarray(S_j, dtype=float),
+                                          S_scale=_block_s_scale(b, j)))
             col_cursor = bcol
         X = np.concatenate(Xs, axis=1) if len(Xs) > 1 else X_param
         p = X.shape[1]
@@ -937,10 +938,11 @@ class gam:
             block_col_ranges = new_ranges
             slots = []
             for b, (a, bcol) in zip(blocks, block_col_ranges):
-                for S_j in b.S:
+                for j, S_j in enumerate(b.S):
                     slots.append(_PenaltySlot(
                         block=b, col_start=a, col_end=bcol,
                         S=np.asarray(S_j, dtype=float),
+                        S_scale=_block_s_scale(b, j),
                     ))
             p_param = int(np.sum(keep_mask[:p_param]))
             column_names = [nm for nm, k in zip(column_names, keep_mask) if k]
@@ -971,6 +973,10 @@ class gam:
         self._has_intercept = has_intercept
         self._tss = tss
         self.parametric_columns = list(X_param_df.columns)
+        # R model.matrix's ``assign`` for the parametric block (0 =
+        # intercept, i = expanded.terms[i-1]): the exact term→column map
+        # the pTerms joint Wald tests group by.
+        self._param_assign = list(d.param_assign or [])
 
         # Mp / _penalty_rank were computed before the identifiability drop
         # (mgcv's G$Mp is a setup-time quantity — see the drop block).
@@ -1614,8 +1620,10 @@ class gam:
                 self.GCV_score = float("nan")
 
         # Variance components: σ² and the implied per-slot std.dev's
-        # σ_k = σ/√sp_k, with delta-method CIs (REML only). Mirrors mgcv's
-        # gam.vcomp(rescale=FALSE). Cheap to compute eagerly for typical
+        # σ_k = σ/√(sp_k/S.scale_k), with delta-method CIs (REML only).
+        # Mirrors mgcv's gam.vcomp at its defaults (rescale=TRUE,
+        # conf.lev=0.95); `_compute_vcomp(rescale=False)` gives the
+        # fitted-scaling flavor. Cheap to compute eagerly for typical
         # n_sp; users can ignore the attribute if they don't need it.
         self.vcomp = self._compute_vcomp()
 
@@ -5493,7 +5501,8 @@ class gam:
         rank, _drop = _pls_rank_drop(Xw, self._slots, self.p)
         return rank
 
-    def _compute_vcomp(self) -> pl.DataFrame:
+    def _compute_vcomp(self, rescale: bool = True,
+                       conf_lev: float = 0.95) -> pl.DataFrame:
         """Build the variance-component table mgcv calls ``gam.vcomp``.
 
         For each smoothing-param slot k, σ_k = σ/√sp_k is the implied
@@ -5503,7 +5512,16 @@ class gam:
         (ρ, log σ²) — only meaningful under REML, so for GCV we return
         point estimates with NaN bounds. Reuses the augmented Hessian
         cached on ``self._H_aug`` (set in ``__init__``).
+
+        ``rescale=True`` (mgcv's default) first divides each sp by its
+        penalty's ``S.scale`` — undoing smoothCon's ``scale.penalty``
+        rescale so the std.dev's refer to the ORIGINAL penalty scale
+        (mgcv.r:4242-4290). Rescaling multiplies σ_k by a constant, so
+        the delta-method SEs of log σ_k (hence the CI ratios) are
+        unchanged. ``rescale=False`` reports σ_k at the fitted scaling.
         """
+        if conf_lev <= 0.0 or conf_lev >= 1.0:   # mgcv's guard
+            conf_lev = 0.95
         n_sp = len(self._slots)
         scale_sd = float(self.sigma) if np.isfinite(self.sigma) else float("nan")
 
@@ -5519,6 +5537,9 @@ class gam:
         # Per-penalty sp (mgcv ``full.sp``); id-linked slots show the
         # shared value on each of their rows, like mgcv's vcomp output.
         sp_full = np.exp(np.asarray(self._rho_hat, dtype=float))
+        if rescale:
+            sp_full = sp_full / np.array(
+                [slot.S_scale for slot in self._slots], dtype=float)
         sd2 = np.concatenate([
             self.sigma_squared / np.maximum(sp_full, 1e-300),
             [self.sigma_squared],
@@ -5566,7 +5587,7 @@ class gam:
 
         Vc = J @ Hinv @ J.T
         se = np.sqrt(np.maximum(np.diag(Vc), 0.0))
-        z = float(norm.ppf(0.975))
+        z = float(norm.ppf(1.0 - (1.0 - conf_lev) / 2.0))
         lower = np.exp(log_sd - z * se)
         upper = np.exp(log_sd + z * se)
         return pl.DataFrame({
@@ -5631,6 +5652,7 @@ class gam:
         type: str = "response",
         se_fit: bool = False,
         offset: np.ndarray | list | None = None,
+        unconditional: bool = False,
     ):
         """Predict from the fitted GAM — :func:`predict.gam` parity.
 
@@ -5651,6 +5673,10 @@ class gam:
         ``Vp`` is the Bayesian posterior covariance (``self.Vp``) — mgcv's
         default for ``se.fit`` since smoothing-parameter shrinkage makes the
         frequentist ``Ve`` over-confident at the posterior mode.
+        ``unconditional=True`` uses the smoothing-parameter-uncertainty
+        corrected ``self.Vc`` instead (predict.gam's ``unconditional``);
+        for GCV fits the correction isn't available — mgcv warns and
+        falls back to ``Vp``, and so does this.
 
         With ``newdata`` and a formula offset, the offset is re-evaluated
         against ``newdata`` (mirrors ``predict.gam``). Pass ``offset=`` to
@@ -5746,8 +5772,20 @@ class gam:
         if not se_fit:
             return pl.DataFrame({"fit": fit})
 
-        # Var(η̂_i) = X_i · Vp · X_iᵀ; rowwise via einsum.
-        var_eta = np.einsum("ij,jk,ik->i", X_new, self.Vp, X_new)
+        # Var(η̂_i) = X_i · V · X_iᵀ; rowwise via einsum.
+        V = self.Vp
+        if unconditional:
+            if self.method in ("REML", "ML"):
+                V = self.Vc
+            else:
+                import warnings as _w
+                _w.warn(
+                    "smoothness-uncertainty corrected covariance not "
+                    "available for GCV fits; using Vp (mgcv predict.gam "
+                    "does the same)",
+                    stacklevel=2,
+                )
+        var_eta = np.einsum("ij,jk,ik->i", X_new, V, X_new)
         se_link = np.sqrt(np.maximum(var_eta, 0.0))
         if type == "link":
             return pl.DataFrame({"fit": fit, "se.fit": se_link})
@@ -6765,6 +6803,75 @@ class gam:
 
     def __str__(self) -> str:
         return self.__repr__()
+
+    def _pterms_rows(self) -> list[tuple[str, int, float, float]]:
+        """mgcv summary.gam's pTerms block (mgcv.r:3928-3977): one joint
+        Wald test per whole parametric term — a factor's columns are
+        tested together, which the per-coefficient p.table can't do.
+
+        Returns ``(label, df, stat, p)`` rows. ``stat`` is Chi.sq with a
+        pchisq p-value when the scale is known, else F = Chi.sq/df with
+        pf(·, df, residual.df) (mgcv's est.disp dispatch; residual.df =
+        n − Σedf). The covariance is ``Vp`` (summary.gam's default
+        ``freq=FALSE``); each term block is pseudo-inverted at
+        rank.tol = √eps with the resulting rank as the df
+        (:func:`_wald_pinv`), so dropped (rank-deficient) coefficients —
+        zero rows in report space — reduce the df exactly like mgcv.
+
+        Written list-generic over linear predictors like mgcv
+        (``pterms <- if (is.list(object$pterms)) ... else list(...)``,
+        mgcv.r:3930): one entry until §5.3 multi-LP fits land, when
+        formula j ≥ 2 terms get mgcv's ``.{j-1}`` label suffix
+        (mgcv.r:3939) and per-LP (assign, pstart) blocks feed the same
+        loop. The intercept (assign 0) is never a term — mgcv's
+        convention. mgcv's printed surface for this table is
+        ``anova.gam``, not ``print.summary.gam`` — hea's ``anova()``
+        consumes these rows; ``summary()``'s print output is unchanged.
+        """
+        # Per-LP (term labels, assign vector, pstart) — 1-list for now.
+        pterms_list = [([t.label for t in self._expanded.terms],
+                        list(getattr(self, "_param_assign", []) or []),
+                        0)]
+        est_disp = not bool(self.family.scale_known)
+        residual_df = float(self.n) - float(self.edf_total)
+
+        # Vp in report (original-p) space: zero rows/cols at dropped
+        # columns (mgcv reinserts zeros for dropped coefficients).
+        if self._keep_cols is not None:
+            keep = self._keep_cols
+            Vp_rep = np.zeros((keep.size, keep.size))
+            Vp_rep[np.ix_(keep, keep)] = self.Vp
+        else:
+            Vp_rep = self.Vp
+        beta = self._beta_report
+
+        rank_tol = float(np.finfo(float).eps) ** 0.5
+        rows: list[tuple[str, int, float, float]] = []
+        for j, (labels, asgn, pstart) in enumerate(pterms_list):
+            asgn = np.asarray(asgn, dtype=int)
+            for i, label in enumerate(labels, start=1):
+                idx = pstart + np.flatnonzero(asgn == i)
+                if idx.size == 0:
+                    continue
+                b = beta[idx]
+                V = Vp_rep[np.ix_(idx, idx)]
+                if idx.size == 1:
+                    nb = 1
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        chi = float(b[0] * b[0] / V[0, 0])
+                else:
+                    Vi, nb = _wald_pinv(V, idx.size, rank_tol)
+                    chi = float(b @ Vi @ b)
+                lab = label if j == 0 else f"{label}.{j}"
+                if not est_disp:
+                    pv = float(_chi2.sf(chi, nb))
+                    rows.append((lab, nb, chi, pv))
+                else:
+                    stat = chi / nb
+                    pv = (float(f_dist.sf(stat, nb, residual_df))
+                          if residual_df > 0 else float("nan"))
+                    rows.append((lab, nb, stat, pv))
+        return rows
 
     def summary(self, digits: int = 4) -> None:
         """mgcv-style summary: parametric table + smooth-edf table + fit stats."""
@@ -7967,6 +8074,8 @@ def _add_null_space_penalties(blocks: list[SmoothBlock]) -> list[SmoothBlock]:
         out.append(SmoothBlock(
             label=b.label, term=b.term, cls=b.cls,
             X=b.X, S=S_list + [Sf], spec=b.spec,
+            S_scale=(None if b.S_scale is None
+                     else list(b.S_scale) + [1.0]),
         ))
     return out
 
@@ -8890,7 +8999,7 @@ class _LpDesign:
     """One linear predictor's design bundle (one formula's gam.setup)."""
     __slots__ = ("formula", "expanded", "data", "X", "blocks",
                  "block_col_ranges", "slots", "column_names", "offset",
-                 "nsdf", "L", "n_work")
+                 "nsdf", "L", "n_work", "param_assign")
 
     def __init__(self, **kw):
         for k, v in kw.items():
@@ -8965,9 +9074,10 @@ def _build_lp_design(formula: str, data, knots: dict | None,
         Xs.append(Xb)
         a, bcol = cursor, cursor + Xb.shape[1]
         ranges.append((a, bcol))
-        for S_j in b.S:
+        for j, S_j in enumerate(b.S):
             slots.append(_PenaltySlot(block=b, col_start=a, col_end=bcol,
-                                      S=np.asarray(S_j, dtype=float)))
+                                      S=np.asarray(S_j, dtype=float),
+                                      S_scale=_block_s_scale(b, j)))
         cursor = bcol
     X = np.concatenate(Xs, axis=1) if len(Xs) > 1 else X_param
 
@@ -9086,7 +9196,7 @@ def _prepare_multi_design(formulas: list[str], data,
         for s in lp.slots:
             slots.append(_PenaltySlot(
                 block=s.block, col_start=s.col_start + pof,
-                col_end=s.col_end + pof, S=s.S,
+                col_end=s.col_end + pof, S=s.S, S_scale=s.S_scale,
             ))
         L_parts.append(lp.L if lp.L is not None
                        else (np.eye(len(lp.slots)) if lp.slots else None))
@@ -9155,15 +9265,50 @@ def _multi_lpmatrix(md: _MultiDesign, newdata) -> tuple[np.ndarray,
 
 class _PenaltySlot:
     """One smoothing-param slot: the k×k S matrix and its col range in the
-    full design. Each SmoothBlock contributes len(S_list) slots."""
-    __slots__ = ("block", "col_start", "col_end", "S")
+    full design. Each SmoothBlock contributes len(S_list) slots.
+
+    ``S_scale`` is mgcv's ``sm$S.scale`` entry for this penalty — the
+    ``maS`` factor ``_scale_penalty`` divided it by (1 where no rescale
+    applied, incl. select's appended null-space penalty, smooth.r:4241).
+    ``vcomp``'s default ``rescale=True`` divides the slot's sp by it."""
+    __slots__ = ("block", "col_start", "col_end", "S", "S_scale")
 
     def __init__(self, *, block: SmoothBlock, col_start: int, col_end: int,
-                 S: np.ndarray):
+                 S: np.ndarray, S_scale: float = 1.0):
         self.block = block
         self.col_start = col_start
         self.col_end = col_end
         self.S = S
+        self.S_scale = S_scale
+
+
+def _block_s_scale(b: SmoothBlock, j: int) -> float:
+    """``sm$S.scale[j]`` for a block's j-th penalty. Penalties appended
+    after construction (select's null-space Sf) sit past the recorded
+    list and get mgcv's 1.0 (smooth.r:4241/4259)."""
+    if b.S_scale is not None and j < len(b.S_scale):
+        return float(b.S_scale[j])
+    return 1.0
+
+
+def _wald_pinv(V: np.ndarray, M: int,
+               rank_tol: float) -> tuple[np.ndarray, int]:
+    """summary.gam's local ``pinv`` (mgcv.r:3869-3881): eigen
+    pseudo-inverse of a Wald-test covariance block, truncated at
+    ``rank.tol·λ_max`` and capped at ``M``; returns ``(V⁻, rank)`` —
+    the rank is the test's df, so rank-deficient blocks (zero rows from
+    dropped coefficients, truncated parametric space) test on reduced
+    df exactly like mgcv."""
+    vals, vecs = np.linalg.eigh(V)
+    vals = vals[::-1]                  # R eigen: descending
+    vecs = vecs[:, ::-1]
+    M1 = int(np.sum(vals > rank_tol * vals[0])) if vals.size else 0
+    if M > M1:
+        M = M1
+    ivals = np.zeros_like(vals)
+    if M > 0:
+        ivals[:M] = 1.0 / vals[:M]
+    return (vecs * ivals) @ vecs.T, M
 
 
 class _FitState:

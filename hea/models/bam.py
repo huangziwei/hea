@@ -76,6 +76,7 @@ from .gam import (
     _PenaltySlot,
     _add_null_space_penalties,
     _apply_gam_side,
+    _block_s_scale,
     _row_frame,
     _sym_rank,
     gam,
@@ -1856,9 +1857,10 @@ class bam(gam):
             k = int(np.asarray(b.X).shape[1])
             a, bcol = col_cursor, col_cursor + k
             block_col_ranges.append((a, bcol))
-            for S_j in b.S:
+            for j, S_j in enumerate(b.S):
                 slots.append(_PenaltySlot(block=b, col_start=a, col_end=bcol,
-                                          S=np.asarray(S_j, dtype=float)))
+                                          S=np.asarray(S_j, dtype=float),
+                                          S_scale=_block_s_scale(b, j)))
             col_cursor = bcol
         p = col_cursor
 
