@@ -690,6 +690,11 @@ class gam:
         # functions (_reml, _gcv, ...) and their gradients/hessians.
         self._gamma = float(gamma)
         self.family = Gaussian() if family is None else family
+        # mgcv coerces extended families onto (RE)ML — gam.fit4 has no
+        # GCV/UBRE path (mgcv.r:1892; silent there, so silent here).
+        if self._family_mgcv_extended and method == "GCV.Cp":
+            method = "REML"
+            self.method = method
         # GCV.Cp dispatches by family.scale_known: scale-unknown (Gaussian,
         # Gamma, IG) → GCV `n·D/(n−τ)²`; scale-known (Poisson, Binomial) →
         # UBRE `D/n + 2·τ/n − 1`. mgcv's `gam.outer` does the same dispatch
@@ -747,6 +752,16 @@ class gam:
                 raise ValueError("negative weights not allowed")
             self._wt = wt_prior
         self.prior_weights = self._wt
+
+        # mgcv's extended-family preinitialize hook (mgcv.r:1983-1995):
+        # one-shot data-dependent θ start (scat: ν, σ from sd(y)) and/or
+        # a response transform, run once before any fitting machinery.
+        pre = self.family.preinitialize(y)
+        if pre:
+            if pre.get("Theta") is not None:
+                self.family.set_theta(np.asarray(pre["Theta"], dtype=float))
+            if pre.get("y") is not None:
+                y = np.asarray(pre["y"], dtype=float).reshape(-1)
 
         sb_lists = (
             materialize_smooths(d.expanded, d.data, knots=knots)
@@ -971,17 +986,18 @@ class gam:
         # Set by the joint outer Newton in the tw() path (estimated-p
         # Tweedie); None otherwise. Holds θ̂, p̂, log φ̂.
         self._tw_info: dict | None = None
-        # tw() exists specifically to estimate p; pairing it with a fixed
-        # ``sp`` would silently freeze p at the init value (1.5 by default).
-        # Refuse early so the user picks ``Tweedie(p)`` instead — there is
-        # no useful interpretation of "fixed sp + estimated p" without
-        # widening the outer Newton to include θ_tw, which is the Phase 2
-        # design we deliberately deferred (see family.py:tw docstring).
-        if isinstance(self.family, _tw_family) and sp is not None:
+        # Free-θ extended families (tw, scat, nb) estimate θ jointly with
+        # the smoothing parameters; pairing them with a fixed ``sp`` would
+        # silently freeze θ at the init value. Refuse early so the user
+        # picks the fixed-θ constructor form instead (Tweedie(p=...),
+        # scat(theta=(ν,σ)), ...).
+        if self.family.n_theta > 0 and sp is not None:
             raise ValueError(
-                "tw() estimates p jointly with the smoothing parameters; "
-                "passing a fixed `sp` is incompatible. Use Tweedie(p=...) "
-                "with fixed `sp` instead."
+                f"{type(self.family).__name__} estimates its family "
+                "parameters jointly with the smoothing parameters; passing "
+                "a fixed `sp` is incompatible. Fix the family parameters "
+                "in the constructor instead (e.g. Tweedie(p=...), "
+                "scat(theta=(nu, sigma)))."
             )
         if n_sp == 0:
             # No smooths — degenerate to unpenalized least squares. This is
@@ -1096,19 +1112,21 @@ class gam:
                 include_family_theta=include_family_theta,
             )
 
+            theta_sp = theta_hat[:n_work]
+            base = n_work
             if include_log_phi:
-                theta_sp = theta_hat[:n_work]
-                log_phi_hat = float(theta_hat[n_work])
-                if include_family_theta:
-                    family.set_theta(theta_hat[n_work + 1:])
+                log_phi_hat = float(theta_hat[base])
+                base += 1
+            else:
+                log_phi_hat = None
+            if include_family_theta:
+                family.set_theta(theta_hat[base:base + family.n_theta])
+                if isinstance(family, _tw_family):
                     self._tw_info = {
-                        "theta_hat": float(theta_hat[n_work + 1]),
+                        "theta_hat": float(theta_hat[base]),
                         "p_hat": float(family.p),
                         "log_phi_hat": log_phi_hat,
                     }
-            else:
-                theta_sp = theta_hat
-                log_phi_hat = None
             self._log_phi_hat = log_phi_hat
             # mgcv exposure: ``m$sp`` is the *working* sp vector; the
             # per-penalty expansion (mgcv's ``m$full.sp``) is derived
@@ -1487,13 +1505,16 @@ class gam:
             n_work = self._work_dim
             th1 = self._edge_theta1
             rho1 = self._rho_full(th1[:n_work])
-            log_phi1 = (float(th1[n_work]) if th1.size > n_work
+            has_phi1 = not self.family.scale_known
+            log_phi1 = (float(th1[n_work])
+                        if (has_phi1 and th1.size > n_work)
                         else (self._log_phi_hat or 0.0))
+            th_base1 = n_work + (1 if has_phi1 else 0)
             n_th_aug = self._n_theta_aug
             theta_fam_saved = self.family.get_theta().copy() if n_th_aug else None
             try:
                 if n_th_aug:
-                    self.family.set_theta(th1[n_work + 1:n_work + 1 + n_th_aug])
+                    self.family.set_theta(th1[th_base1:th_base1 + n_th_aug])
                 fit1 = self._fit_given_rho(rho1)
                 include_phi_aug1 = not self.family.scale_known
                 H_aug1 = 0.5 * self._reml_hessian(
@@ -1789,6 +1810,14 @@ class gam:
         # fixed across PIRLS iterations at this ρ.
         E_aug = self._penalty_root(rho)
         wt = self._wt                   # prior weights (gam(weights=) or ones)
+
+        # Extended families (tw, scat, nb — anything mgcv routes through
+        # gam.fit4) use deviance-curvature weights w = ½·∂²D/∂η² from the
+        # family's Dd tables instead of the α·μ'²/V form. The two coincide
+        # for exponential-family deviances (tw) but NOT for general
+        # likelihood-based deviances (scat's t).
+        if self._family_mgcv_extended:
+            return self._fit_extended(rho, Sλ, E_aug, wt)
 
         # ``eta`` here is the *offset-stripped* β-only predictor X·β; the
         # full linear predictor is ``eta + off``. Mirrors glm._irls. We
@@ -2108,6 +2137,274 @@ class gam:
             E_aug=E_aug,
         )
 
+    def _fit_extended(self, rho: np.ndarray, Sλ: np.ndarray,
+                      E_aug: np.ndarray, wt: np.ndarray) -> "_FitState":
+        """Penalized IRLS for mgcv-extended families — gam.fit4's inner
+        loop (gam.fit4.r:340-548), line-by-line.
+
+        Weights and pseudodata come from the family's deviance-derivative
+        tables (``dDeta``):
+
+            w  = ½·Deta2                    (signed Newton weights)
+            z  = η_β − Deta/Deta2           (ratio form, can blow up at w≈0)
+            wz = w·η_β − ½·Deta             (finite even at w = 0)
+
+        Rows with non-finite z switch the solve to pls_fit1's ``use.wy``
+        mode (rhs from X'wz). An indefinite penalized Hessian (the
+        ``oo$n<0`` signal) retries the step with the negative-Deta2 rows
+        zeroed — gam.fit4.r:392-416's "positive weights" retry, NOT
+        gam.fit3's Fisher retry. Convergence is
+        ``|Δpdev|/(0.1+|pdev|) < ε`` confirmed by the penalized-deviance
+        gradient ``X'Deta + 2Sλβ`` (gam.fit4.r:523-537).
+        """
+        family = self.family
+        link = family.link
+        X = self._X_full
+        y = self._y_arr
+        off = self._offset
+        n, p = self.n, self.p
+        theta = family.get_theta()
+
+        mu = family.gam_initialize(y, wt)
+        eta = link.link(mu) - off       # β-only η
+
+        # Null baseline — same construction as the standard branch
+        # (mgcv's get.null.coef projection of a constant valid η).
+        mu_null_const = float(np.average(mu, weights=wt))
+        eta_null_full = link.link(np.full(n, mu_null_const))
+        null_coef, *_ = np.linalg.lstsq(X, eta_null_full - off, rcond=None)
+        eta_null = X @ null_coef
+        mu_null = link.linkinv(eta_null + off)
+        if not (link.valideta(eta_null + off) and family.validmu(mu_null)):
+            null_coef = np.zeros(p)
+            eta_null = np.zeros(n)
+            mu_null = link.linkinv(off)
+        beta = null_coef.copy()
+        beta_old = null_coef.copy()
+        eta_old = eta_null.copy()
+        old_pdev = (float(np.sum(family.dev_resids(y, mu_null, wt)))
+                    + float(null_coef @ Sλ @ null_coef))
+
+        eps = 1e-8    # newton() caps control$epsilon at conv.tol/100
+        max_it = 200
+        scale_abs = 1.0
+
+        def _work(mu_c, eta_c):
+            # weights/pseudodata at the current iterate (gam.fit4.r:367-371).
+            dd_c = family.dDeta(y, mu_c, wt, theta, level=0)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                w_c = 0.5 * np.asarray(dd_c["Deta2"], dtype=float)
+                wz_c = w_c * eta_c - 0.5 * np.asarray(dd_c["Deta"],
+                                                      dtype=float)
+                z_c = eta_c - np.asarray(dd_c["Deta.Deta2"], dtype=float)
+            good_c = np.isfinite(z_c) & np.isfinite(w_c)
+            return dd_c, w_c, wz_c, z_c, good_c
+
+        dd, w, wz, z, good = _work(mu, eta)
+        conv = False
+        boundary = False
+        posdef = True
+        warn_msgs: list[str] = []
+        dev = float(np.sum(family.dev_resids(y, mu, wt)))
+
+        def _solve(w_c, wz_c, z_c, good_c):
+            # Masked pls_fit1 call: zero-weight rows drop out of X'WX and
+            # X'Wz identically to mgcv's x[good,] subsetting. use.wy
+            # whenever any z is non-finite (gam.fit4.r:377-381).
+            w_m = np.where(good_c, w_c, 0.0)
+            if np.all(good_c):
+                return self._pls_qr(w_m, z_c, E_aug)
+            good_w = np.isfinite(w_c) & np.isfinite(wz_c)
+            w_m = np.where(good_w, w_c, 0.0)
+            wz_m = np.where(good_w, wz_c, 0.0)
+            return self._pls_qr(w_m, np.zeros(n), E_aug, Xtwz=X.T @ wz_m)
+
+        for it in range(1, max_it + 1):
+            if not np.any(good):
+                warn_msgs.append(
+                    f"PIRLS(extended): no good data at iteration {it}"
+                )
+                break
+            start, _R_it, _ld_it, ok = _solve(w, wz, z, good)
+            posdef = ok
+            if not ok:
+                # Indefinite penalized Hessian → positive-weights retry
+                # (gam.fit4.r:392-416).
+                pos = np.isfinite(np.asarray(dd["Deta2"], dtype=float))
+                pos &= np.where(pos, np.asarray(dd["Deta2"]) > 0.0, False)
+                w = np.where(pos, w, 0.0)
+                wz = w * eta - 0.5 * np.asarray(dd["Deta"], dtype=float)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    z = eta - np.asarray(dd["Deta.Deta2"], dtype=float)
+                good = np.isfinite(z) & np.isfinite(w)
+                start, _R_it, _ld_it, ok = _solve(w, wz, z, good)
+            if not ok:
+                # Last resort: legacy ridge on the normal equations.
+                w_m = np.where(good & (w > 0), w, 0.0)
+                A = (X.T * w_m) @ X + Sλ
+                A = 0.5 * (A + A.T)
+                ridge = 1e-8 * np.trace(A) / p
+                A_chol_r, lower_r = cho_factor(
+                    A + ridge * np.eye(p), lower=True, overwrite_a=False,
+                )
+                wz_m = np.where(good, wz, 0.0)
+                start = cho_solve((A_chol_r, lower_r), X.T @ wz_m)
+            if np.any(~np.isfinite(start)):
+                warn_msgs.append(
+                    f"PIRLS(extended): non-finite coefficients at "
+                    f"iteration {it}"
+                )
+                break
+            eta_new = X @ start
+            mu_new = link.linkinv(eta_new + off)
+            dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
+            pen_new = float(start @ Sλ @ start)
+
+            # inner loop 1 (gam.fit4.r:433-458): non-finite deviance.
+            if not np.isfinite(dev_new):
+                boundary = True
+                ii = 0
+                while not np.isfinite(dev_new):
+                    ii += 1
+                    if ii > max_it:
+                        raise FloatingPointError(
+                            "inner loop 1; can't correct step size"
+                        )
+                    start = 0.5 * (start + beta_old)
+                    eta_new = 0.5 * (eta_new + eta_old)
+                    mu_new = link.linkinv(eta_new + off)
+                    dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
+                pen_new = float(start @ Sλ @ start)
+
+            # inner loop 2 (gam.fit4.r:461-477): invalid η/μ.
+            if not (link.valideta(eta_new + off) and family.validmu(mu_new)):
+                boundary = True
+                ii = 0
+                while not (link.valideta(eta_new + off)
+                           and family.validmu(mu_new)):
+                    ii += 1
+                    if ii > max_it:
+                        raise FloatingPointError(
+                            "inner loop 2; can't correct step size"
+                        )
+                    start = 0.5 * (start + beta_old)
+                    eta_new = 0.5 * (eta_new + eta_old)
+                    mu_new = link.linkinv(eta_new + off)
+                dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
+                pen_new = float(start @ Sλ @ start)
+
+            pdev_new = dev_new + pen_new
+
+            # inner loop 3 (gam.fit4.r:486-505): pdev divergence.
+            div_thresh = (10.0 * (0.1 + abs(old_pdev))
+                          * (np.finfo(float).eps ** 0.5))
+            if pdev_new - old_pdev > div_thresh:
+                if it == 1:
+                    beta_old = null_coef.copy()
+                    eta_old = eta_null.copy()
+                ii = 0
+                while pdev_new - old_pdev > div_thresh:
+                    ii += 1
+                    if ii > 100:
+                        raise FloatingPointError(
+                            "inner loop 3; can't correct step size"
+                        )
+                    start = 0.5 * (start + beta_old)
+                    eta_new = 0.5 * (eta_new + eta_old)
+                    mu_new = link.linkinv(eta_new + off)
+                    if not (link.valideta(eta_new + off)
+                            and family.validmu(mu_new)):
+                        continue
+                    dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
+                    pen_new = float(start @ Sλ @ start)
+                    pdev_cand = dev_new + pen_new
+                    pdev_new = pdev_cand if np.isfinite(pdev_cand) else np.inf
+
+            beta = start
+            eta = eta_new
+            mu = mu_new
+            dev = dev_new
+
+            # Fresh weights/pseudodata at the accepted iterate — needed
+            # both for the gradient confirmation and the next step
+            # (gam.fit4.r:517-521).
+            dd, w, wz, z, good = _work(mu, eta)
+
+            # Convergence (gam.fit4.r:523-537): pdev change relative to
+            # (0.1 + |pdev|), then gradient confirmation. Note w·η − wz
+            # = ½·Deta on good rows, so the grad is X'Deta + 2Sλβ.
+            if posdef and (abs(pdev_new - old_pdev) / (0.1 + abs(pdev_new))
+                           < eps):
+                w_m = np.where(good, w, 0.0)
+                wz_m = np.where(good, wz, 0.0)
+                grad = (2.0 * (X.T @ (w_m * eta - wz_m))
+                        + 2.0 * (Sλ @ beta))
+                if float(np.max(np.abs(grad))) > eps * (abs(pdev_new)
+                                                        + scale_abs):
+                    old_pdev = pdev_new
+                    beta_old = beta.copy()
+                    eta_old = eta.copy()
+                else:
+                    conv = True
+                    break
+            else:
+                old_pdev = pdev_new
+                beta_old = beta.copy()
+                eta_old = eta.copy()
+
+        if not conv:
+            warn_msgs.append("PIRLS algorithm did not converge")
+        if boundary:
+            warn_msgs.append("PIRLS algorithm stopped at boundary value")
+
+        # Final consistent state at converged β̂ (gam.fit4.r:561-572):
+        # signed w = ½Deta2, z with non-finite→0, wz finite everywhere.
+        is_fisher_fallback = False
+        good_f = np.isfinite(wz) & np.isfinite(w)
+        w_f = np.where(good_f, w, 0.0)
+        wz_f = np.where(good_f, wz, 0.0)
+        z_f = np.where(np.isfinite(z), z, 0.0)
+        use_wy = not np.all(np.isfinite(z) | ~good_f)
+        if use_wy:
+            _b_fin, R_fin, log_det_A, ok = self._pls_qr(
+                w_f, np.zeros(n), E_aug, Xtwz=X.T @ wz_f,
+            )
+        else:
+            _b_fin, R_fin, log_det_A, ok = self._pls_qr(
+                w_f, np.where(good_f, z_f, 0.0), E_aug,
+            )
+        if not ok:
+            # Indefinite at convergence — keep only the positive-weight
+            # rows for the stored factor (same deliberate residual as the
+            # standard path's Fisher fallback, plan §2.1).
+            pos = w_f > 0.0
+            w_f = np.where(pos, w_f, 0.0)
+            wz_f = np.where(pos, wz_f, 0.0)
+            is_fisher_fallback = True
+            _b_fin, R_fin, log_det_A, ok = self._pls_qr(
+                w_f, np.zeros(n), E_aug, Xtwz=X.T @ wz_f,
+            )
+        if ok:
+            A_chol, lower = R_fin, False
+        else:
+            A = (X.T * w_f) @ X + Sλ
+            A = 0.5 * (A + A.T)
+            ridge = 1e-8 * np.trace(A) / p
+            A_chol, lower = cho_factor(
+                A + ridge * np.eye(p), lower=True, overwrite_a=False,
+            )
+            log_det_A = 2.0 * float(np.log(np.abs(np.diag(A_chol))).sum())
+
+        return _FitState(
+            beta=beta, dev=dev, pen=float(beta @ Sλ @ beta),
+            A_chol=A_chol, A_chol_lower=lower,
+            S_full=Sλ, log_det_A=log_det_A,
+            eta=eta + off, mu=mu, w=w_f, z=z_f, alpha=None,
+            is_fisher_fallback=is_fisher_fallback,
+            converged=conv, boundary=boundary, warn=warn_msgs,
+            E_aug=E_aug,
+        )
+
     def _init_fisher_w(self, y: np.ndarray) -> np.ndarray:
         """Working weights at the family's starting μ̂ — initial.spg's
         ``w = wt·μ'(η₀)²/V(μ₀)`` (mgcv.r:4595-4602), with the
@@ -2231,7 +2528,8 @@ class gam:
         keep = wv > w_max * float(np.finfo(float).eps)
         return (V[:, keep] * np.sqrt(wv[keep])).T
 
-    def _pls_qr(self, w: np.ndarray, z: np.ndarray, E_aug: np.ndarray):
+    def _pls_qr(self, w: np.ndarray, z: np.ndarray, E_aug: np.ndarray,
+                Xtwz: np.ndarray | None = None):
         """Penalized least-squares solve via QR of the augmented matrix —
         mgcv's ``pls_fit1`` (gdi.c): never forms X'WX, so the working
         condition number is κ([√W·X; E]) rather than its square.
@@ -2243,6 +2541,14 @@ class gam:
         Cholesky-factor replacement, ``lower=False``) and
         ``log_det = log|X'WX + Sλ|``.
 
+        ``Xtwz``: pls_fit1's ``use.wy`` mode (gam.fit4.r:378-390) — the
+        rhs formed directly from the finite vector ``wz = W·z`` as
+        ``X'wz``, for extended-family rows where ``w ≈ 0`` makes ``z``
+        itself non-finite. Algebraically ``Q₁'(√w·z) = R⁻ᵀ·X'Wz``, so it
+        substitutes one triangular solve for the orthogonal projection;
+        everything downstream (factor, determinant, SVD correction) is
+        unchanged.
+
         Negative Newton weights are handled by gdiPK's SVD correction
         (gdi.c:1816-1901): with ``Q₁`` the data-rows orthogonal factor of
         ``[√|W|·X; E]`` and ``Ĩ Q₁ = U D V'`` its negative-w rows,
@@ -2253,7 +2559,7 @@ class gam:
         small QR of ``(I − 2D²)^{1/2}V'R``. Any ``1 − 2d² ≤ 0`` means the
         penalized Hessian is indefinite — return ``ok=False``, mirroring
         pls_fit1's ``n<0`` signal (gam.fit3.r:341 retries the step with
-        Fisher weights).
+        Fisher weights; gam.fit4.r:392 retries with positive weights).
         """
         X = self._X_full
         n = X.shape[0]
@@ -2266,7 +2572,10 @@ class gam:
             return None, None, float("nan"), False
         Q1 = Q[:n]
         if not np.any(neg):
-            c = Q1.T @ (sqw * z)
+            if Xtwz is not None:
+                c = solve_triangular(R, Xtwz, lower=False, trans="T")
+            else:
+                c = Q1.T @ (sqw * z)
             beta = solve_triangular(R, c, lower=False)
             log_det = 2.0 * float(np.sum(np.log(np.abs(diag_R))))
             if not np.all(np.isfinite(beta)):
@@ -2285,9 +2594,13 @@ class gam:
         d2[:d.size] = 1.0 - 2.0 * d * d         # eigenvalues of I − 2D²
         if np.any(d2 <= 0.0):
             return None, None, float("nan"), False
-        zt = sqw * z
-        zt[neg] = -zt[neg]                      # signed √|W|z
-        c = Vt @ (Q1.T @ zt)
+        if Xtwz is not None:
+            # X'Wz = (√|W|X)'·(signed √|W|z) ⇒ Q₁'·zt = R⁻ᵀ·X'Wz.
+            c = Vt @ solve_triangular(R, Xtwz, lower=False, trans="T")
+        else:
+            zt = sqw * z
+            zt[neg] = -zt[neg]                  # signed √|W|z
+            c = Vt @ (Q1.T @ zt)
         beta = solve_triangular(
             R, Vt.T @ (c / d2), lower=False,
         )
@@ -2422,9 +2735,16 @@ class gam:
             return 1e15
         # ``family.ls`` returns (ls0, d_ls/d_log_φ, d²_ls/d_log_φ²) at the
         # prior weights — only ls0 enters the criterion; the derivatives
-        # feed the (ρ, log φ) gradient/Hessian rows.
+        # feed the (ρ, log φ) gradient/Hessian rows. Extended families
+        # carry θ in their saturated log-lik (gam.fit4.r:730 calls the
+        # 4-arg ls(y, w, θ, scale)) — dispatch through ls_extended.
         wt = self._wt
-        ls0 = float(self.family.ls(self._y_arr, wt, phi)[0])
+        if self._family_mgcv_extended:
+            ls0 = float(self.family.ls_extended(
+                self._y_arr, wt, theta=self.family.get_theta(), scale=phi,
+            )["ls"])
+        else:
+            ls0 = float(self.family.ls(self._y_arr, wt, phi)[0])
         rp = self._reparam_at(rho)
         log_det_S = (rp["det"] if rp is not None
                      else self._log_det_S_pos(rho))
@@ -2535,56 +2855,97 @@ class gam:
         if not include_log_phi and not include_family_theta:
             return grad_rho
 
-        Mp = float(self._Mp)
+        out = grad_rho
         wt = self._wt
         Dp = fit.dev + fit.pen
-        ls = np.asarray(self.family.ls(self._y_arr, wt, phi), dtype=float)
-        ls1 = float(ls[1])    # d ls / d(log φ), already chain-ruled
-        # Data-fit pieces (-Dp/φ - 2·ls1) divide by γ; the -Mp piece comes
-        # from -Mp·log(2πφ) (γ-independent) and is REML-only — under
-        # method="ML" remlInd=0 drops it (gam.fit3.r:628).
         reml_ind = 1.0 if self.method == "REML" else 0.0
-        d_logphi = (-Dp / phi - 2.0 * ls1) / gamma - reml_ind * Mp
-
-        out = np.concatenate([grad_rho, [d_logphi]])
+        if include_log_phi:
+            Mp = float(self._Mp)
+            ls = np.asarray(self.family.ls(self._y_arr, wt, phi),
+                            dtype=float)
+            ls1 = float(ls[1])    # d ls / d(log φ), already chain-ruled
+            # Data-fit pieces (-Dp/φ - 2·ls1) divide by γ; the -Mp piece
+            # comes from -Mp·log(2πφ) (γ-independent) and is REML-only —
+            # under method="ML" remlInd=0 drops it (gam.fit3.r:628).
+            d_logphi = (-Dp / phi - 2.0 * ls1) / gamma - reml_ind * Mp
+            out = np.concatenate([out, [d_logphi]])
 
         if include_family_theta and self.family.n_theta > 0:
-            # Tweedie / tw: chain rule p → θ_tw via family.dp_dtheta().
-            # Other extended families would dispatch here; for now we only
-            # handle the tw case and assert as much.
+            # Family-generic θ block (gam.fit4.r:744 in 2·V_R units):
+            #   ∂(2V_R)/∂θ_j = (Σᵢ Dthᵢⱼ)/(φγ) − 2·lsth1_j/γ
+            #                  + ∂log|H+S|/∂θ_j
+            # The Dp piece is the envelope theorem at PIRLS-converged β̂
+            # (∂(D+β'Sβ)/∂β = 0 kills the β-coupled chain); lsth1 comes
+            # from the family's extended ls; the log|H+S| piece is the
+            # Dd-based dW/dθ trace (direct ½·Deta2th + indirect via
+            # ∂β̂/∂θ). For tw this equals the old dD_dp/dls_dp/dp_dtheta
+            # chain exactly (tw.Dd's D*th already carry dp/dθ).
             family = self.family
-            if not isinstance(family, _tw_family):
-                raise NotImplementedError(
-                    f"Joint outer-Newton extra-θ derivatives are only wired "
-                    f"for tw(); got family={family!r}."
-                )
-            dp_dth = family.dp_dtheta()
-            # ∂Dp/∂p at PIRLS-converged β̂ = ∂D/∂p|_β̂ (envelope; β̂'S_λβ̂ has
-            # no explicit p). Use Tweedie.dD_dp.
-            dD_dp = float(family.dD_dp(self._y_arr, fit.mu, wt))
-            # ∂(2·ls0)/∂p via the Dunn-Smyth p-derivative.
-            dls_dp = float(family.dls_dp(self._y_arr, wt, phi))
-            # ∂log|H+S|/∂p — fully analytical, direct + β-coupled.
-            dlogH_dp = float(self._dlog_det_H_dp_tw(fit))
+            nt = family.n_theta
+            theta = family.get_theta()
+            dd1 = family.dDeta(self._y_arr, fit.mu, wt, theta, level=1)
+            Dth = np.asarray(dd1["Dth"], dtype=float)
+            if Dth.ndim == 1:
+                Dth = Dth[:, None]
+            dDp_dth = Dth.sum(axis=0)                       # (nt,)
+            ls_ext = family.ls_extended(self._y_arr, wt, theta=theta,
+                                        scale=phi)
+            lsth1 = np.asarray(ls_ext["lsth1"], dtype=float).reshape(-1)[:nt]
+            dlogH_dth = self._dlog_det_H_dtheta(fit, dd1=dd1)
             if self.method == "ML":
-                # Projected-Hessian correction ∂log|M|/∂p (M = U_n'A⁻¹U_n)
-                # — the family-θ analogue of the ρ-branch MLpenalty1 term
-                # above. The penalty carries no θ, so only the ∂W/∂p piece
-                # contributes:
-                #   ∂log|M|/∂p = −tr(M⁻¹ B'(∂A/∂p)B)
-                #              = −Σ_i (∂W/∂p)_i·q_i,  q_i = (XB)_i'M⁻¹(XB)_i.
+                # Projected-Hessian correction ∂log|M|/∂θ_j
+                # (M = U_n'A⁻¹U_n) — the penalty carries no θ, so only
+                # the ∂W/∂θ piece contributes:
+                #   ∂log|M|/∂θ_j = −Σ_i (∂W/∂θ_j)_i·q_i,
+                #   q_i = (XB)_i'M⁻¹(XB)_i.
                 _, M_inv, B = self._ml_logdet_adj(fit)
                 if M_inv is not None:
                     Y = self._X_full @ B
                     q = np.einsum("ij,ij->i", Y, Y @ M_inv)
-                    dlogH_dp += -float(np.sum(
-                        self._dW_dp_tw_total(fit) * q
-                    ))
-            d_p = dD_dp / (phi * gamma) - 2.0 * dls_dp / gamma + dlogH_dp
-            d_theta = d_p * dp_dth
-            out = np.concatenate([out, [d_theta]])
+                    dW_dth = self._dW_dtheta_total(fit, dd1=dd1)  # (n, nt)
+                    dlogH_dth = dlogH_dth - dW_dth.T @ q
+            d_theta = (dDp_dth / (phi * gamma)
+                       - 2.0 * lsth1 / gamma
+                       + dlogH_dth)
+            out = np.concatenate([out, d_theta])
 
         return out
+
+    def _dW_dtheta_total(self, fit: "_FitState",
+                         dd1: dict | None = None) -> np.ndarray:
+        """Total ∂W/∂θ for an extended family at the converged fit,
+        shape (n, n_theta): the direct fixed-β̂ piece ½·Deta2th plus the
+        β̂(θ)-coupled piece (∂w/∂η)·(X·∂β̂/∂θ). The Dd-table version of
+        the old tw-only ``_dW_dp_tw_total`` (identical values for tw by
+        the exponential-family identity)."""
+        family = self.family
+        wt = self._wt
+        if dd1 is None:
+            dd1 = family.dDeta(self._y_arr, fit.mu, wt,
+                               family.get_theta(), level=1)
+        Deta2th = np.asarray(dd1["Deta2th"], dtype=float)
+        if Deta2th.ndim == 1:
+            Deta2th = Deta2th[:, None]
+        dW_direct = 0.5 * Deta2th                           # (n, nt)
+        db_dth = self._db_dtheta_fam(fit)                   # (p, nt)
+        deta_dth = self._X_full @ db_dth                    # (n, nt)
+        dw_deta = self._dw_deta(fit)                        # (n,)
+        total = dW_direct + dw_deta[:, None] * deta_dth
+        # Rows dropped from the working model contribute nothing.
+        keep = (fit.w != 0.0)[:, None] & np.isfinite(total)
+        return np.where(keep, total, 0.0)
+
+    def _dlog_det_H_dtheta(self, fit: "_FitState",
+                           dd1: dict | None = None) -> np.ndarray:
+        """∂log|H+S|/∂θ for an extended family, shape (n_theta,):
+        tr(A⁻¹·X'·diag(∂W/∂θ_j)·X) = Σᵢ dᵢ·(∂W/∂θ_j)ᵢ with
+        dᵢ = (X·A⁻¹·X')ᵢᵢ — the family-generic version of the old
+        ``_dlog_det_H_dp_tw``."""
+        X = self._X_full
+        dW_dth = self._dW_dtheta_total(fit, dd1=dd1)        # (n, nt)
+        Hinv_Xt = cho_solve((fit.A_chol, fit.A_chol_lower), X.T)
+        d = np.einsum("ij,ji->i", X, Hinv_Xt)
+        return dW_dth.T @ d
 
     def _reml_hessian(self, rho: np.ndarray, log_phi: float = 0.0,
                               fit: "_FitState | None" = None,
@@ -2902,30 +3263,37 @@ class gam:
                     else:
                         H2[i, j] = H2[j, i] = cross_2VR
 
-        if not include_log_phi:
+        if not include_log_phi and not include_family_theta:
             return H2
 
-        # Augment with log φ row/col. Cross / log φ² come from the data-fit
-        # term (Dp/φ − 2·ls0), so they scale by 1/γ.
-        H_aug = np.zeros((n_sp + 1, n_sp + 1))
-        H_aug[:n_sp, :n_sp] = H2
-        for k in range(n_sp):
-            cross = -g[k] / (phi * gamma)
-            H_aug[k, n_sp] = cross
-            H_aug[n_sp, k] = cross
-        Dp = fit.dev + fit.pen
-        ls = np.asarray(self.family.ls(self._y_arr, self._wt, phi))
-        H_aug[n_sp, n_sp] = (Dp / phi - 2.0 * float(ls[2])) / gamma
+        if include_log_phi:
+            # Augment with log φ row/col. Cross / log φ² come from the
+            # data-fit term (Dp/φ − 2·ls0), so they scale by 1/γ.
+            H_aug = np.zeros((n_sp + 1, n_sp + 1))
+            H_aug[:n_sp, :n_sp] = H2
+            for k in range(n_sp):
+                cross = -g[k] / (phi * gamma)
+                H_aug[k, n_sp] = cross
+                H_aug[n_sp, k] = cross
+            Dp = fit.dev + fit.pen
+            ls = np.asarray(self.family.ls(self._y_arr, self._wt, phi))
+            H_aug[n_sp, n_sp] = (Dp / phi - 2.0 * float(ls[2])) / gamma
+        else:
+            # Scale-known extended family (scat): θ-vector is (ρ, θ_fam)
+            # with no log φ slot — matches mgcv's gam.fit4 layout where
+            # the scale row only exists when scale < 0.
+            H_aug = H2
 
         if not include_family_theta or self.family.n_theta == 0:
             return H_aug
 
-        # Family-θ rows/cols. The base θ-vector layout is (ρ, log φ, θ_fam).
-        # We FD the analytical gradient `_reml_grad(..., include_family_theta=True)`
-        # along each θ_fam slot, refitting β̂ at the perturbed θ each time.
+        # Family-θ rows/cols. The base θ-vector layout is
+        # (ρ[, log φ], θ_fam). We FD the analytical gradient
+        # `_reml_grad(..., include_family_theta=True)` along each θ_fam
+        # slot, refitting β̂ at the perturbed θ each time.
         family = self.family
         n_extra = family.n_theta
-        base_size = n_sp + 1
+        base_size = n_sp + (1 if include_log_phi else 0)
         new_size = base_size + n_extra
         H_full = np.zeros((new_size, new_size))
         H_full[:base_size, :base_size] = H_aug
@@ -2943,7 +3311,7 @@ class gam:
                 fit_p = self._fit_given_rho(rho)
                 grad_p = self._reml_grad(
                     rho, log_phi, fit=fit_p,
-                    include_log_phi=True,
+                    include_log_phi=include_log_phi,
                     include_family_theta=True,
                 )
             except Exception:
@@ -2955,7 +3323,7 @@ class gam:
                 fit_m = self._fit_given_rho(rho)
                 grad_m = self._reml_grad(
                     rho, log_phi, fit=fit_m,
-                    include_log_phi=True,
+                    include_log_phi=include_log_phi,
                     include_family_theta=True,
                 )
             except Exception:
@@ -3040,11 +3408,6 @@ class gam:
             raise ValueError("GCV path does not include log φ in outer θ.")
         if criterion == "GCV" and include_family_theta:
             raise ValueError("GCV path does not include family θ in outer θ.")
-        if include_family_theta and not include_log_phi:
-            raise ValueError(
-                "include_family_theta=True requires include_log_phi=True "
-                "(no scale-known extended families are wired)."
-            )
 
         n_sp = len(self._slots)
         n_work = self._work_dim
@@ -3064,9 +3427,13 @@ class gam:
 
         def _split(t):
             # → (FULL per-penalty ρ, log φ) from a working-layout θ.
-            if include_log_phi:
-                return self._rho_full(t[:n_work]), float(t[n_work])
-            return self._rho_full(t), 0.0
+            # ρ always occupies the first n_work slots; log φ (when
+            # present) sits right after; family θ trails — so plain
+            # ``t[:n_work]`` is correct for every layout, including the
+            # scale-known (ρ, θ_fam) one.
+            rho_t = self._rho_full(t[:n_work])
+            lp_t = float(t[n_work]) if include_log_phi else 0.0
+            return rho_t, lp_t
 
         def _apply_family_theta(t):
             if n_theta_fam > 0:
@@ -3123,7 +3490,9 @@ class gam:
                 y_arr = self._y_arr
                 mu_arr = fit_.mu
                 V_arr = self.family.variance(mu_arr)
-                pearson = float(np.sum((y_arr - mu_arr) ** 2 / V_arr))
+                # Weighted Pearson — gam.fit3.r:597 sum(weights*(y-mu)^2/V).
+                pearson = float(np.sum(self._wt * (y_arr - mu_arr) ** 2
+                                       / V_arr))
                 fit_F_ = self._fisher_view(fit_)
                 w_F = fit_F_.w
                 if w_F is None or np.allclose(w_F, 1.0):
@@ -3344,6 +3713,11 @@ class gam:
             # Recompute grad/hess at the new θ (gam.fit3.r:1505-1508).
             # The convergence test and active-set update use these
             # post-step values, mirroring mgcv's gam.fit3 deriv=2 refit.
+            # The family θ state must be re-pinned to the ACCEPTED point:
+            # _eval mutates it at every trial candidate, and the accepted
+            # candidate is not necessarily the last one evaluated
+            # (step-halving / SD line searches probe past it).
+            _apply_family_theta(theta)
             rho_n, log_phi_n = _split(theta)
             grad = _grad(rho_n, log_phi_n, fit)
             H = _hess(rho_n, log_phi_n, fit)
@@ -3493,11 +3867,22 @@ class gam:
         # Canonical-link short circuit: α≡1 by canonical identity ⇒ W_F = W_N.
         if fit.is_fisher_fallback:
             return fit
-        mu_eta = family.link.mu_eta(eta)
-        V = family.variance(mu)
-        # wf = wt·μ'²/V (gam.fit3.r:512/644) — prior weights included;
-        # zero-weight rows stay excluded (μ'=0 rows zero out by algebra).
-        W_F = np.where(self._wt > 0.0, self._wt * mu_eta ** 2 / V, 0.0)
+        if self._family_mgcv_extended:
+            # gam.fit4.r:564: wf = pmax(0, ½·EDeta2) — the expected
+            # deviance curvature. For exponential-family deviances this
+            # equals wt·μ'²/V; for scat it does not.
+            dd = family.dDeta(self._y_arr, mu, self._wt,
+                              family.get_theta(), level=0)
+            W_F = np.maximum(0.0, 0.5 * np.asarray(dd["EDeta2"],
+                                                   dtype=float))
+            W_F = np.where(np.isfinite(W_F) & (self._wt > 0.0), W_F, 0.0)
+        else:
+            mu_eta = family.link.mu_eta(eta)
+            V = family.variance(mu)
+            # wf = wt·μ'²/V (gam.fit3.r:512/644) — prior weights included;
+            # zero-weight rows stay excluded (μ'=0 rows zero out by
+            # algebra).
+            W_F = np.where(self._wt > 0.0, self._wt * mu_eta ** 2 / V, 0.0)
         if np.allclose(W_F, fit.w):
             return fit
         if fit.E_aug is not None:
@@ -3579,6 +3964,14 @@ class gam:
         eta = fit.eta
         w = fit.w
         alpha = fit.alpha
+
+        # Extended families: w = ½·∂²D/∂η² so ∂w/∂η = ½·Deta3 directly
+        # from the family's Dd tables (gam.fit4/gdi2 convention). Rows
+        # dropped from the working model (stored w == 0) contribute 0.
+        if self._family_mgcv_extended:
+            dd = family.dDeta(y, mu, self._wt, family.get_theta(), level=1)
+            d3 = 0.5 * np.asarray(dd["Deta3"], dtype=float)
+            return np.where((w != 0.0) & np.isfinite(d3), d3, 0.0)
 
         mu_eta = link.mu_eta(eta)
         V = family.variance(mu)
@@ -3693,6 +4086,12 @@ class gam:
         eta = fit.eta
         w = fit.w
         alpha = fit.alpha
+
+        # Extended families: ∂²w/∂η² = ½·Deta4 from the Dd tables.
+        if self._family_mgcv_extended:
+            dd = family.dDeta(y, mu, self._wt, family.get_theta(), level=2)
+            d4 = 0.5 * np.asarray(dd["Deta4"], dtype=float)
+            return np.where((w != 0.0) & np.isfinite(d4), d4, 0.0)
 
         mu_eta = link.mu_eta(eta)
         V = family.variance(mu)
@@ -4915,9 +5314,11 @@ class gam:
         dd = family.Dd(self._y_arr, fit.mu, family.get_theta(),
                        self._wt, level=1)
         mu_eta = family.link.mu_eta(fit.eta)
-        dmuth = np.atleast_2d(np.asarray(dd["Dmuth"], dtype=float))
-        if dmuth.shape[0] != family.n_theta:
-            dmuth = dmuth.reshape(family.n_theta, -1)
+        dmuth = np.asarray(dd["Dmuth"], dtype=float)
+        if dmuth.ndim == 1:
+            dmuth = dmuth[None, :]                 # (1, n) for n_theta=1
+        elif dmuth.shape[0] != family.n_theta:
+            dmuth = dmuth.T                        # (n, nt) → (nt, n)
         rhs = self._X_full.T @ (dmuth * mu_eta).T / 2.0    # (p, n_theta)
         return -cho_solve((fit.A_chol, fit.A_chol_lower), rhs)
 
@@ -4948,10 +5349,14 @@ class gam:
             # returns the (ρ, θ) marginal (mgcv's rV[, 1:M] — everything
             # but the scale slot); default is the ρ block only.
             sel = np.arange(n_w)
-            if with_theta and H_aug.shape[0] > n_w + 1:
-                sel = np.concatenate([
-                    sel, np.arange(n_w + 1, H_aug.shape[0]),
-                ])
+            if with_theta:
+                # θ_fam columns start after ρ and after the log φ slot —
+                # which only exists when the scale is estimated.
+                th_start = n_w + (0 if self.family.scale_known else 1)
+                if H_aug.shape[0] > th_start:
+                    sel = np.concatenate([
+                        sel, np.arange(th_start, H_aug.shape[0]),
+                    ])
             w, V = np.linalg.eigh(H_aug)
             if prior_var is not None:
                 d_reg = np.where(w > 0, w, 0.0) + float(prior_var)
@@ -5143,9 +5548,10 @@ class gam:
         else:
             J[:n_sp, :n_work] = -0.5 * self._L
         # log σ² column exists only when the scale is estimated (H_aug is
-        # ρ-only for scale-known families, matching mgcv's hess). Fixed
-        # scale ⇒ the +½·log σ² term carries no uncertainty.
-        if H.shape[0] > n_work:
+        # ρ-only — or (ρ, θ_fam) for scat — when the scale is known,
+        # matching mgcv's hess). Fixed scale ⇒ the +½·log σ² term carries
+        # no uncertainty.
+        if (not self.family.scale_known) and H.shape[0] > n_work:
             J[:, n_work] = 0.5
 
         Vc = J @ Hinv @ J.T

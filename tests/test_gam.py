@@ -1544,12 +1544,15 @@ def test_gam_fit_tw_score_no_worse_than_fixed_p():
     assert m_tw.REML_criterion <= m_fixed.REML_criterion + 1e-6
 
 
-def test_tw_rejects_gcv_method():
+def test_tw_gcv_method_coerced_to_reml():
+    # mgcv silently coerces extended families onto (RE)ML — gam.fit4 has
+    # no GCV/UBRE path (mgcv.r:1892). hea mirrors the coercion.
     rng = np.random.default_rng(0)
     x, y, _ = _simulate_compound_poisson_gamma(rng, n=100)
     df = pl.DataFrame({"y": y, "x": x})
-    with pytest.raises(ValueError, match="REML"):
-        gam("y ~ s(x, k=6)", df, family=tw(), method="GCV.Cp")
+    m = gam("y ~ s(x, k=6)", df, family=tw(), method="GCV.Cp")
+    assert m.method == "REML"
+    assert np.isfinite(m.REML_criterion)
 
 
 def test_tw_rejects_fixed_sp():
@@ -2970,3 +2973,136 @@ def test_weights_validation():
     nan[3] = np.nan
     with pytest.raises(ValueError, match="non-finite"):
         gam("y ~ s(x)", df, weights=nan, method="REML")
+
+
+# ---------------------------------------------------------------------------
+# 5.2: scale-known extended families through gam() — scat. mgcv 1.9-4
+# references (identical data via full-precision CSV).
+# ---------------------------------------------------------------------------
+
+def _scat_fixture():
+    rng = np.random.default_rng(99)
+    n = 200
+    x = rng.uniform(0, 1, n)
+    f = np.sin(2 * np.pi * x) + 0.5 * x
+    y = f + 0.3 * rng.standard_t(df=4, size=n)
+    return pl.DataFrame({"x": x, "y": y})
+
+
+def test_scat_through_gam_matches_mgcv():
+    # gam(y ~ s(x), family=scat(), REML): gam.fit4 PIRLS (Dd-table
+    # weights w = ½Deta2, use.wy fallback), the (ρ, θ_fam) outer layout
+    # with NO log φ slot, the family-generic Dd θ-gradient, preinitialize
+    # θ seeding, and the scale-known H_aug/Vc chain.
+    from hea.family import Scat
+    df = _scat_fixture()
+    m = gam("y ~ s(x)", df, family=Scat(), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 98.8661481421,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.2252719608, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 7.5698625762,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(m.coef)[0], 0.2152614293,
+                               rtol=0, atol=1e-7)
+    nu, sig = m.family.get_theta(trans=True)
+    np.testing.assert_allclose(nu, 10.79624285, rtol=1e-6)
+    np.testing.assert_allclose(sig, 0.33845196, rtol=1e-6)
+    np.testing.assert_allclose(m.deviance, 221.0135453303, rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m.fitted_values[0], 0.1972092616,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(m.Vp[0, 0], 0.0006698555932, rtol=1e-6)
+    # edf2/AIC carry the FD-Hessian-θ-rows divergence (hea FDs the
+    # analytical gradient for the outer Hessian's θ rows; mgcv's REML2 is
+    # analytic) — small and documented.
+    np.testing.assert_allclose(m.edf2_total, 7.70731486, rtol=0, atol=2e-3)
+    np.testing.assert_allclose(m.AIC, 183.9037075959, rtol=0, atol=5e-3)
+
+
+def test_scat_ml_through_gam_matches_mgcv():
+    from hea.family import Scat
+    df = _scat_fixture()
+    m = gam("y ~ s(x)", df, family=Scat(), method="ML")
+    np.testing.assert_allclose(m.ML_criterion / 2, 96.0090311236,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.2400137927, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 7.5083624461,
+                               rtol=0, atol=1e-4)
+    nu, sig = m.family.get_theta(trans=True)
+    np.testing.assert_allclose(nu, 10.51763340, rtol=1e-6)
+    np.testing.assert_allclose(sig, 0.33616103, rtol=1e-6)
+
+
+def test_scat_fixed_theta_fixed_sp_matches_mgcv():
+    # Fixed (ν, σ) ⇒ n_theta=0 extended family: the inner gam.fit4 PIRLS
+    # + extended criterion in isolation (no outer θ). At mgcv's converged
+    # (sp, θ) the criterion must reproduce mgcv's REML to all digits.
+    from hea.family import Scat
+    df = _scat_fixture()
+    fam = Scat(theta=(10.79624285, 0.33845196))
+    assert fam.n_theta == 0
+    m = gam("y ~ s(x)", df, family=fam, method="REML",
+            sp=np.array([0.2252719608]))
+    np.testing.assert_allclose(m.REML_criterion / 2, 98.8661481421,
+                               rtol=0, atol=1e-7)
+    np.testing.assert_allclose(np.asarray(m.coef)[0], 0.2152614293,
+                               rtol=0, atol=1e-8)
+
+
+def test_extended_family_rejects_free_theta_with_fixed_sp():
+    from hea.family import Scat
+    df = _scat_fixture()
+    with pytest.raises(ValueError, match="incompatible"):
+        gam("y ~ s(x)", df, family=Scat(), method="REML",
+            sp=np.array([0.1]))
+
+
+def _nb_fixture():
+    rng = np.random.default_rng(7)
+    n = 200
+    x = rng.uniform(0, 1, n)
+    mu = np.exp(0.3 + np.sin(2 * np.pi * x))
+    Th = 3.0
+    lam = rng.gamma(shape=Th, scale=mu / Th)
+    y = rng.poisson(lam).astype(float)
+    return pl.DataFrame({"x": x, "y": y})
+
+
+def test_nb_through_gam_matches_mgcv():
+    # gam(y ~ s(x), family=nb(), REML) — the negative binomial extended
+    # family with Θ estimated jointly (θ = log Θ in the outer vector,
+    # scale fixed at 1). mgcv 1.9-4 pins.
+    from hea.family import nb
+    df = _nb_fixture()
+    m = gam("y ~ s(x)", df, family=nb(), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 294.7952161834,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.07132960482, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 5.8580493405,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(m.coef)[0], 0.08970849052,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(float(m.family.get_theta(trans=True)[0]),
+                               3.88313559, rtol=1e-6)
+    np.testing.assert_allclose(m.deviance, 209.2357768385, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.null_deviance, 303.73000425,
+                               rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m.fitted_values[0], 0.6182401827,
+                               rtol=0, atol=1e-8)
+    # AIC/edf2 carry the FD-Hessian-θ-rows divergence (documented).
+    np.testing.assert_allclose(m.edf2_total, 6.19148710, rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.AIC, 583.8235859018, rtol=0, atol=2e-3)
+
+
+def test_nb_fixed_theta_matches_mgcv():
+    # nb(theta=3): Θ fixed (n_theta=0) — extended PIRLS + criterion with
+    # no outer θ slot.
+    from hea.family import nb
+    df = _nb_fixture()
+    fam = nb(theta=3.0)
+    assert fam.n_theta == 0
+    m = gam("y ~ s(x)", df, family=fam, method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 295.0158222631,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.07201056219, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 5.7755018202,
+                               rtol=0, atol=1e-4)

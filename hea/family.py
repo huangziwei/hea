@@ -2191,12 +2191,11 @@ class tw(Tweedie):
     with default ``a = 1.01``, ``b = 1.99``. Initial p defaults to 1.5
     (mgcv's start) unless ``theta`` is passed (sets p = p(theta)).
 
-    Joint estimation in ``hea.gam`` is via Brent's method on θ over the
-    interior of ``(a, b)``: each Brent iterate fits the full GAM at a fixed
-    candidate ``p``; the score returned is the converged REML/ML criterion
-    at that ``p``. Cheaper than analytical joint outer-Newton but typically
-    converges in 10-20 inner fits. The fitted ``p̂`` is stored on
-    ``family.p``; the converged θ̂ on ``family.theta``.
+    ``hea.gam`` estimates θ jointly with (ρ, log φ) in the analytical
+    outer Newton (the family-generic Dd chain supplies the θ gradient;
+    the Hessian θ rows are central differences of that gradient). The
+    fitted ``p̂`` is stored on ``family.p``; the converged θ̂ on
+    ``family.theta``.
     """
     name = "Tweedie"
     n_theta = 1
@@ -2253,6 +2252,41 @@ class tw(Tweedie):
 
     def get_theta(self) -> np.ndarray:
         return np.array([self.theta], dtype=float)
+
+    def ls_extended(self, y, wt, theta=None, scale: float = 1.0) -> dict:
+        """mgcv ``tw()$ls`` in dict form (efam.r:3221-3230): saturated
+        log-likelihood and its derivatives wrt the working parameters
+        (θ, log φ).
+
+        ``lsth1 = (∂ls/∂θ, ∂ls/∂log φ)`` is exact — the θ component is
+        the Dunn-Smyth p-derivative chained through dp/dθ. ``lsth2``'s
+        θθ and θ×logφ entries are NaN-poisoned: gam's outer-Newton θ
+        rows are central differences of the analytical gradient and
+        never read them, so anything that does fails loudly instead of
+        silently using a wrong second derivative. Only the (logφ, logφ)
+        entry is filled (= ``ls(y, wt, φ)[2]``).
+        """
+        saved = None
+        if theta is not None:
+            th = np.asarray(theta, dtype=float).reshape(-1)
+            if not np.allclose(th, self.get_theta()):
+                saved = self.get_theta().copy()
+                self.set_theta(th)
+        try:
+            ls3 = np.asarray(self.ls(y, wt, scale), dtype=float)
+            dls_dth = (float(self.dls_dp(y, wt, scale))
+                       * float(self.dp_dtheta()))
+            lsth2 = np.full((2, 2), np.nan)
+            lsth2[1, 1] = float(ls3[2])
+            return {
+                "ls": float(ls3[0]),
+                "lsth1": np.array([dls_dth, float(ls3[1])]),
+                "lsth2": lsth2,
+                "LSTH1": None,
+            }
+        finally:
+            if saved is not None:
+                self.set_theta(saved)
 
     def Dd(self, y, mu, theta, wt, level: int = 0) -> dict:
         """Tweedie deviance derivatives wrt μ and θ — full port of mgcv
@@ -2747,6 +2781,211 @@ class Scat(Family):
                 f"link={self.link.name}, min_df={self._min_df:g})")
 
 
+class nb(Family):
+    """Negative binomial extended family — direct port of mgcv ``nb()``
+    (efam.r:161-306).
+
+    ``Var(y) = μ + μ²/Θ`` with the size parameter Θ estimated jointly
+    with the smoothing parameters (θ = log Θ internally; scale fixed
+    at 1 like Poisson).
+
+    Constructor ``theta`` follows mgcv's sign convention:
+    ``None``/``0`` → free θ starting at Θ=1; ``theta > 0`` → Θ fixed
+    (``n_theta = 0``); ``theta < 0`` → free θ starting at ``|theta|``.
+    Links: log (default), identity, sqrt.
+    """
+    name = "negative binomial"
+    canonical_link_name = "log"
+    scale_known = True
+    is_extended = True
+    n_theta = 1
+
+    _OK_LINKS = ("log", "identity", "sqrt")
+
+    def __init__(self, theta: float | None = None, link: str = "log"):
+        if link not in self._OK_LINKS:
+            raise ValueError(
+                f'link "{link}" not available for nb family; available '
+                f'links are {self._OK_LINKS}'
+            )
+        n_theta = 1
+        if theta is not None and theta != 0.0:
+            if theta > 0:
+                ini = float(np.log(theta))
+                n_theta = 0
+            else:
+                ini = float(np.log(-theta))
+        else:
+            ini = 0.0
+        self.n_theta = int(n_theta)
+        self._theta = np.array([ini], dtype=float)
+        super().__init__(link=link)
+
+    # ----- θ accessors ---------------------------------------------------
+
+    def set_theta(self, values) -> None:
+        v = np.asarray(values, dtype=float).reshape(-1)
+        if v.shape != (1,):
+            raise ValueError(
+                f"nb.set_theta expects a single log Θ; got shape {v.shape}"
+            )
+        self._theta = v.copy()
+
+    def get_theta(self, trans: bool = False) -> np.ndarray:
+        if trans:
+            return np.exp(self._theta).copy()
+        return self._theta.copy()
+
+    # ----- variance ------------------------------------------------------
+
+    def variance(self, mu):
+        Th = float(np.exp(self._theta[0]))
+        mu = np.asarray(mu, dtype=float)
+        return mu + mu * mu / Th
+
+    def dvar(self, mu):
+        Th = float(np.exp(self._theta[0]))
+        return 1.0 + 2.0 * np.asarray(mu, dtype=float) / Th
+
+    def d2var(self, mu):
+        Th = float(np.exp(self._theta[0]))
+        return np.full_like(np.asarray(mu, dtype=float), 2.0 / Th)
+
+    def d3var(self, mu):
+        return np.zeros_like(np.asarray(mu, dtype=float))
+
+    # ----- deviance / likelihood ----------------------------------------
+
+    def dev_resids(self, y, mu, wt, theta=None):
+        # mgcv (efam.r:199-205): 2·wt·[y·log(max(1,y)/μ)
+        #                              − (y+Θ)·log((y+Θ)/(μ+Θ))]
+        th = self._theta if theta is None else np.asarray(theta,
+                                                          dtype=float)
+        Th = float(np.exp(np.asarray(th).reshape(-1)[0]))
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        return 2.0 * wt * (
+            y * np.log(np.maximum(1.0, y) / mu)
+            - (y + Th) * np.log((y + Th) / (mu + Th))
+        )
+
+    def Dd(self, y, mu, theta, wt, level: int = 0) -> dict:
+        # mgcv nb()$Dd verbatim (efam.r:207-237); θ = log Θ supplied.
+        Th = float(np.exp(np.asarray(theta, dtype=float).reshape(-1)[0]))
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        yth = y + Th
+        muth = mu + Th
+        r = {}
+        r["Dmu"] = 2.0 * wt * (yth / muth - y / mu)
+        r["Dmu2"] = -2.0 * wt * (yth / muth ** 2 - y / mu ** 2)
+        r["EDmu2"] = 2.0 * wt * (1.0 / mu - 1.0 / muth)
+        if level > 0:
+            r["Dth"] = -2.0 * wt * Th * (np.log(yth / muth)
+                                         + (1.0 - yth / muth))
+            r["Dmuth"] = 2.0 * wt * Th * (1.0 - yth / muth) / muth
+            r["Dmu3"] = 4.0 * wt * (yth / muth ** 3 - y / mu ** 3)
+            r["Dmu2th"] = 2.0 * wt * Th * (2.0 * yth / muth - 1.0) / muth ** 2
+            r["EDmu2th"] = 2.0 * wt / muth ** 2
+        if level > 1:
+            r["Dmu4"] = 2.0 * wt * (6.0 * y / mu ** 4
+                                    - 6.0 * yth / muth ** 4)
+            r["Dth2"] = -2.0 * wt * Th * (
+                np.log(yth / muth) + Th * yth / muth ** 2 - yth / muth
+                - 2.0 * Th / muth + 1.0 + Th / yth
+            )
+            r["Dmuth2"] = 2.0 * wt * Th * (
+                2.0 * Th * yth / muth ** 2 - yth / muth
+                - 2.0 * Th / muth + 1.0
+            ) / muth
+            r["Dmu2th2"] = 2.0 * wt * Th * (
+                -6.0 * yth * Th / muth ** 2 + 2.0 * yth / muth
+                + 4.0 * Th / muth - 1.0
+            ) / muth ** 2
+            r["Dmu3th"] = 4.0 * wt * Th * (1.0 - 3.0 * yth / muth) / muth ** 3
+        return r
+
+    def aic(self, y, mu, dev, wt, n, theta=None):
+        # mgcv nb()$aic (efam.r:239-246); `dev` is unused (Θ-form direct).
+        th = self._theta if theta is None else np.asarray(theta,
+                                                          dtype=float)
+        Th = float(np.exp(np.asarray(th).reshape(-1)[0]))
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        term = ((y + Th) * np.log(mu + Th) - y * np.log(mu)
+                + gammaln(y + 1.0) - Th * np.log(Th) + gammaln(Th)
+                - gammaln(Th + y))
+        return 2.0 * float(np.sum(term * wt))
+
+    def ls_extended(self, y, wt, theta=None, scale: float = 1.0) -> dict:
+        # mgcv nb()$ls (efam.r:248-275). scale is fixed at 1, so lsth1 is
+        # the single θ derivative (no scale slot).
+        th = self._theta if theta is None else np.asarray(theta,
+                                                          dtype=float)
+        th0 = float(np.asarray(th).reshape(-1)[0])
+        Th = float(np.exp(th0))
+        y = np.asarray(y, dtype=float)
+        w = np.asarray(wt, dtype=float)
+        ylogy = np.where(y > 0, y * np.log(np.maximum(y, 1e-300)), 0.0)
+        term = ((y + Th) * np.log(y + Th) - ylogy
+                + gammaln(y + 1.0) - Th * np.log(Th) + gammaln(Th)
+                - gammaln(Th + y))
+        ls0 = -float(np.sum(term * w))
+        yth = y + Th
+        lyth = np.log(yth)
+        psi0_yth = digamma(yth)
+        psi0_th = digamma(Th)
+        term1 = Th * (lyth - psi0_yth + psi0_th - th0)
+        LSTH = (-term1 * w)[:, None]
+        lsth = float(np.sum(LSTH))
+        psi1_yth = polygamma(1, yth)
+        psi1_th = polygamma(1, Th)
+        term2 = Th * (lyth - Th * psi1_yth - psi0_yth + Th / yth
+                      + Th * psi1_th + psi0_th - th0 - 1.0)
+        lsth2 = -float(np.sum(term2 * w))
+        return {
+            "ls": ls0,
+            "lsth1": np.array([lsth]),
+            "lsth2": np.array([[lsth2]]),
+            "LSTH1": LSTH,
+        }
+
+    # ----- initialization / validity -------------------------------------
+
+    def initialize(self, y, wt):
+        y = np.asarray(y, dtype=float)
+        if np.any(y < 0):
+            raise ValueError(
+                "negative values not allowed for the negative binomial "
+                "family"
+            )
+        # mgcv: mustart <- y + (y == 0)/6
+        return y + (y == 0.0) / 6.0
+
+    def validmu(self, mu) -> bool:
+        mu = np.asarray(mu)
+        return bool(np.all(np.isfinite(mu)) and np.all(mu > 0))
+
+    def postproc(self, y, mu, wt) -> dict:
+        Th = float(self.get_theta(trans=True)[0])
+        return {"family_name": f"Negative Binomial({np.round(Th, 3):g})"}
+
+    def rd(self, mu, wt, scale, rng: np.random.Generator | None = None):
+        Th = float(self.get_theta(trans=True)[0])
+        mu = np.asarray(mu, dtype=float)
+        gen = rng if rng is not None else np.random.default_rng()
+        # NB as Gamma-Poisson mixture: rate ~ Gamma(Θ, μ/Θ).
+        lam = gen.gamma(shape=Th, scale=mu / Th)
+        return gen.poisson(lam).astype(float)
+
+    def __repr__(self):
+        Th = float(self.get_theta(trans=True)[0])
+        return f"nb(theta={Th:.4g}, link={self.link.name})"
+
+
 def _coerce_response(y_series: pl.Series, family: "Family") -> np.ndarray:
     """Cast the response column to a numeric float array, with R's
     factor-response convention for :class:`Binomial`.
@@ -2803,6 +3042,7 @@ __all__ = [
     "Quasi", "quasi",
     "Tweedie", "tw",
     "Scat", "scat",
+    "nb",
     "IdentityLink", "LogLink", "InverseLink",
     "SqrtLink", "LogitLink", "ProbitLink", "CauchitLink", "CloglogLink",
     "InverseSquareLink",
