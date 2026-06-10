@@ -363,11 +363,23 @@ def test_machines_re_smooths_REML():
         row = vc2.filter(pl.col("name") == nm).row(0, named=True)
         _allclose(row["std_dev"], sd, atol=5e-4, name=f"b2 vcomp {nm}.std")
         _allclose(row["lower"],   lo, atol=5e-4, name=f"b2 vcomp {nm}.lo")
-        # MachineA has the smallest std (1.94) but largest upper (~14.87),
-        # making the upper highly sensitive to small sp shifts inside
-        # mgcv's stopping band — see the docstring above.
-        upper_atol = 3e-3 if nm == "s(Worker):MachineA" else 5e-4
-        _allclose(row["upper"],   hi, atol=upper_atol, name=f"b2 vcomp {nm}.hi")
+        # The per-level upper CI bounds sit on flat REML directions and
+        # are exp-amplified, so they're the band-noise-limited quantities
+        # here. Measured: seeding at initial.spg (identical to mgcv's
+        # seed to 1e-9), hea and mgcv stop with REML values 2.6e-8 apart
+        # — both far inside the |Δscore| ≤ score.scale·conv.tol ≈ 1e-4
+        # band — yet the by-level sp's differ up to 4.7e-4 relative along
+        # the flat directions, moving MachineA's bound by ~7e-4 relative
+        # and MachineC's by ~1e-4. Irreducible without bit-identical
+        # arithmetic; the by-level bounds get a band-derived rtol.
+        if nm.startswith("s(Worker):Machine"):
+            np.testing.assert_allclose(
+                row["upper"], hi, rtol=2e-3,
+                err_msg=f"b2 vcomp {nm}.hi: {row['upper']} vs {hi}",
+            )
+        else:
+            _allclose(row["upper"], hi, atol=5e-4,
+                      name=f"b2 vcomp {nm}.hi")
 
 
 def test_data_helper_applies_schema_sidecar():
@@ -1994,9 +2006,10 @@ def test_teststat_mixture_pvalue_poisson_matches_mgcv():
 
 
 def test_rank_deficient_design_detected_and_warned():
-    """Exactly collinear parametric columns: mgcv estimates rank 11/12 on
-    this dataset (and drops a coefficient; hea warns instead — the ridge
-    fallback smears the estimate, so silence would be wrong)."""
+    """Exactly collinear parametric columns: mgcv detects rank 11/12 and
+    *drops* a coefficient (pls_fit1, gdi.c:1740-1775) — zero-filled coef,
+    SE 0, t NaN — and hea now does the same (the internal fit runs on the
+    reduced design; reporting re-inflates)."""
     rng = np.random.default_rng(0)
     n = 100
     x1 = rng.uniform(0, 1, n)
@@ -2007,7 +2020,45 @@ def test_rank_deficient_design_detected_and_warned():
     with pytest.warns(UserWarning, match="rank deficient"):
         m = gam("y ~ x1 + x2 + s(z)", df, method="REML")
     assert m.rank == 11
-    assert m.p == 12
+    assert m.p == 11          # internal (reduced) parameter count
+    assert m._p_orig == 12    # original — what check()/summary report
+    # one of the twins is zero-filled, the other carries the effect
+    b1 = float(np.asarray(m.bhat["x1"])[0])
+    b2 = float(np.asarray(m.bhat["x2"])[0])
+    assert (b1 == 0.0) != (b2 == 0.0)
+    assert abs(b1 + b2 - 2.0) < 0.25
+
+
+def test_rank_deficient_drop_matches_mgcv_exactly():
+    # Same construction at rng(3): mgcv (1.9-4) keeps one twin with
+    # coefficient 1.98453773, rank 11, REML 22.46719612, sig2 0.07442324,
+    # first prediction 0.84075695. The criterion keeps the *pre-drop*
+    # Mp and log|S| basis (G$Mp and UrS are setup-time quantities) —
+    # using post-drop Mp shifts REML by exactly ΔMp/2·log(2πφ̂) ≈ 0.38.
+    rng = np.random.default_rng(3)
+    n = 80
+    x1 = rng.uniform(0, 1, n)
+    z = rng.uniform(0, 1, n)
+    y = 1.96 * x1 + np.sin(2 * np.pi * z) + rng.normal(0, 0.3, n)
+    df = pl.DataFrame({"x1": x1, "x2": x1.copy(), "z": z, "y": y})
+    with pytest.warns(UserWarning, match="rank deficient"):
+        m = gam("y ~ x1 + x2 + s(z)", df, method="REML")
+    kept = (float(np.asarray(m.bhat["x2"])[0])
+            or float(np.asarray(m.bhat["x1"])[0]))
+    np.testing.assert_allclose(kept, 1.98453773, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.REML_criterion / 2, 22.46719612,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sigma_squared, 0.07442324,
+                               rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.sp[0], 0.0085086098, rtol=1e-5)
+    np.testing.assert_allclose(
+        m.predict(df.head(1))["fit"][0], 0.84075695, rtol=0, atol=1e-6,
+    )
+    # t value of the dropped twin is NaN, like mgcv's p.table
+    tvals = m.t_values
+    t1 = float(np.asarray(tvals["x1"])[0])
+    t2 = float(np.asarray(tvals["x2"])[0])
+    assert np.isnan(t1) != np.isnan(t2)
 
 
 def test_full_rank_fit_reports_p_and_does_not_warn():
@@ -2206,3 +2257,425 @@ def test_retest_with_sibling_random_effects_matches_mgcv():
         (3.5166733495327, 5.0, 3.5106246383545, 0.0198880041678),
         rtol=5e-4, err_msg="s(g2) vs mgcv",
     )
+
+
+# ---------------------------------------------------------------------------
+# 1.6 PIRLS control parity (gam.fit3 inner loop): full-Newton steps for
+# non-canonical links, signed Newton weights in the score (no wholesale
+# Fisher fallback), fix.family starting values, maxit/gradient-check.
+# ---------------------------------------------------------------------------
+
+def _noncanonical_pirls_data():
+    rng = np.random.default_rng(101)
+    n = 400
+    x = rng.uniform(0, 1, n)
+    f = np.sin(2 * np.pi * x) + 0.5 * x ** 2
+    mu = np.exp(0.3 + f)
+    y_gamma = rng.gamma(shape=3.0, scale=mu / 3.0)
+    y_glog = mu + rng.normal(0, 1.0, n)
+    return pl.DataFrame({"x": x, "yg": y_gamma, "yn": y_glog})
+
+
+def test_pirls_noncanonical_gamma_log_matches_mgcv():
+    # gam(yg ~ s(x), Gamma(log), REML) — non-canonical link, so the inner
+    # loop takes full-Newton steps (gam.fit3.r:118). mgcv 1.9-4 reference.
+    df = _noncanonical_pirls_data()
+    m = gam("yg ~ s(x)", df, family=Gamma(link="log"), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 516.0426205989,
+                               rtol=0, atol=1e-6, err_msg="REML")
+    np.testing.assert_allclose(float(np.sum(m.edf)), 7.9636897232,
+                               rtol=0, atol=5e-4, err_msg="edf")
+    np.testing.assert_allclose(m.sigma_squared, 0.357718681258,
+                               rtol=0, atol=5e-6, err_msg="sig2")
+
+
+def test_pirls_gaussian_log_negative_newton_weights_match_mgcv():
+    # gaussian(link="log") with y ≤ 0 in 29 rows: needs mgcv's fix.family
+    # starting values (mustart = pmax(y, .01·sd(y)), gam.fit3.r:2550), and
+    # at convergence 26 rows carry *negative* Newton weights — mgcv keeps
+    # the signed weights in the REML score (gam.fit3.r:505-515). A
+    # Fisher-fallback score is off by ~0.06 on this criterion.
+    df = _noncanonical_pirls_data()
+    from hea.family import Gaussian
+    m = gam("yn ~ s(x)", df, family=Gaussian(link="log"), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 593.6963879213,
+                               rtol=0, atol=1e-6, err_msg="REML")
+    np.testing.assert_allclose(m.sp[0], 0.09667572681,
+                               rtol=1e-3, err_msg="sp")
+    np.testing.assert_allclose(float(np.sum(m.edf)), 7.6908929715,
+                               rtol=0, atol=1e-3, err_msg="edf")
+    np.testing.assert_allclose(m.sigma_squared, 1.064863735326,
+                               rtol=0, atol=5e-6, err_msg="sig2")
+    b0 = float(np.asarray(m.coef)[0])
+    np.testing.assert_allclose(b0, 0.5736692935, rtol=0, atol=1e-5,
+                               err_msg="intercept")
+
+
+def test_pirls_clean_fits_emit_no_warnings():
+    # converged/boundary/warn plumbing: a healthy fit must surface nothing.
+    import warnings as w
+    df = _noncanonical_pirls_data()
+    with w.catch_warnings():
+        w.simplefilter("error")
+        m = gam("yg ~ s(x)", df, family=Gamma(link="log"), method="REML")
+    assert float(np.sum(m.edf)) > 1.0
+
+
+# ---------------------------------------------------------------------------
+# 1.7 micro-divergences: null deviance semantics (offset / no-intercept),
+# scaled.pearson residuals.
+# ---------------------------------------------------------------------------
+
+def test_null_deviance_offset_and_no_intercept_match_mgcv():
+    # mgcv: gam.fit3 always runs with intercept=TRUE (mgcv.r:1667) so the
+    # base null deviance is dev(weighted-mean) for every formula; for
+    # intercept+offset models estimate.gam refits glm(y ~ offset(off))
+    # (mgcv.r:2072-2075). df.null = n-1 always. mgcv 1.9-4 references.
+    rng = np.random.default_rng(33)
+    n = 200
+    x = rng.uniform(0, 1, n)
+    expo = rng.uniform(0.5, 2.0, n)
+    mu = expo * np.exp(0.4 + np.sin(2 * np.pi * x))
+    y = rng.poisson(mu).astype(float)
+    df = pl.DataFrame({"x": x, "expo": expo, "y": y})
+    from hea.family import Poisson
+
+    m = gam("y ~ s(x) - 1 + offset(log(expo))", df, family=Poisson(),
+            method="REML")
+    np.testing.assert_allclose(m.null_deviance, 418.3499279531,
+                               rtol=0, atol=1e-7)
+    assert m.df_null == n - 1
+
+    m2 = gam("y ~ s(x) + offset(log(expo))", df, family=Poisson(),
+             method="REML")
+    np.testing.assert_allclose(m2.null_deviance, 410.0056332077,
+                               rtol=0, atol=1e-7)
+
+    # scaled.pearson = pearson/√φ̂ (mgcv.r:3457); φ=1 for Poisson so the
+    # no-intercept fit pins R's residuals(m, "scaled.pearson") directly.
+    r = m.residuals_of("scaled.pearson")
+    np.testing.assert_allclose(
+        r[:3], [0.2833041422, 1.0547593514, 0.9580616495],
+        rtol=0, atol=1e-5,
+    )
+    with pytest.raises(ValueError, match="scaled.pearson"):
+        m.residuals_of("nonsense")
+
+
+# ---------------------------------------------------------------------------
+# 1.8 tp/ds/sos max.knots seeded subsampling + R RNG port. mgcv takes a
+# seeded random subsample of 2000 knots when a smooth has > 2000 unique
+# covariate locations (smooth.r:1286/3031/3239, temp.seed(1)); matching it
+# requires R's RNG bit-for-bit (set.seed scrambling, MT19937, R_unif_index
+# rejection sampling, do_sample pool walk).
+# ---------------------------------------------------------------------------
+
+def test_r_rng_port_is_bit_exact():
+    from hea.formula import _RUnif
+    # R: set.seed(1); runif(5)
+    r = _RUnif(1)
+    np.testing.assert_array_equal(
+        [r.unif_rand() for _ in range(5)],
+        [0.26550866314209998, 0.37212389963679016, 0.57285336335189641,
+         0.90820778999477625, 0.2016819310374558],
+    )
+    # R: set.seed(1); sample(4000, 8)
+    np.testing.assert_array_equal(
+        _RUnif(1).sample_int(4000, 8) + 1,
+        [1017, 3908, 679, 2177, 930, 1533, 471, 2347],
+    )
+    # R: set.seed(42); sample(10, 10)  (full permutation)
+    np.testing.assert_array_equal(
+        _RUnif(42).sample_int(10, 10) + 1,
+        [1, 5, 10, 8, 2, 4, 6, 9, 7, 3],
+    )
+    # R: set.seed(1); sum(sample(3000, 2000)) — crosses an MT refill and
+    # several pool-size power-of-two boundaries.
+    s = _RUnif(1).sample_int(3000, 2000) + 1
+    assert s.sum() == 2979991
+    assert s[:5].tolist() == [1017, 679, 2177, 930, 1533]
+    assert s[-3:].tolist() == [2694, 2568, 1897]
+
+
+def test_tp_max_knots_subsample_matches_mgcv():
+    # n=4000 > max.knots=2000: before the subsample port hea used all
+    # unique rows and sp was 5-12% off mgcv; now the knot sets are
+    # identical. mgcv 1.9-4: gam(y ~ s(x, k=20), REML).
+    rng = np.random.default_rng(2024)
+    n = 4000
+    x = rng.uniform(0, 1, n)
+    y = (np.sin(2 * np.pi * x) + 0.3 * np.cos(6 * np.pi * x)
+         + rng.normal(0, 0.4, n))
+    df = pl.DataFrame({"x": x, "y": y})
+    m = gam("y ~ s(x, k=20)", df, method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 2046.4493253413,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.009114465577, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 16.9714122248,
+                               rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.sigma_squared, 0.159927692016,
+                               rtol=0, atol=1e-8)
+
+
+def _tp_ds_2d_data():
+    rng = np.random.default_rng(77)
+    n = 3000
+    x1 = rng.uniform(0, 1, n)
+    x2 = rng.uniform(0, 1, n)
+    y = (np.sin(2 * np.pi * x1) * np.cos(np.pi * x2) + (x1 - 0.5) ** 2
+         + rng.normal(0, 0.3, n))
+    return pl.DataFrame({"x1": x1, "x2": x2, "y": y})
+
+
+def test_tp_2d_subsample_matches_mgcv():
+    # 2-D exercises uniquecombs(·,TRUE)'s C-locale string-sort row order
+    # (the sample indexes into those rows). mgcv 1.9-4 references.
+    df = _tp_ds_2d_data()
+    m = gam("y ~ s(x1, x2, k=40)", df, method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 699.2650646040,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.1574089045, rtol=1e-6)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 38.2145858974,
+                               rtol=0, atol=1e-4)
+
+
+def test_ds_subsample_and_reported_sp_match_mgcv():
+    # Two fixes pinned here: the seeded ds knot subsample at n=3000, and
+    # the Rlanczos basis in _lowrank_kernel_reduce — with a dense eigh
+    # basis the *reported* sp was off mgcv by a model-invariant 7-18%
+    # factor (identical REML/edf/fits) because clustered eigenvalues give
+    # eigh a different orthonormal basis than mgcv's Lanczos, shifting
+    # ‖S‖ and the sp that compensates for it.
+    df = _tp_ds_2d_data()
+    m3 = gam("y ~ s(x1, x2, bs='ds', k=40)", df, method="REML")
+    np.testing.assert_allclose(m3.REML_criterion / 2, 696.2092773464,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m3.sp[0], 0.03414280754, rtol=1e-5)
+
+    m15 = gam("y ~ s(x1, x2, bs='ds', k=40)", df.head(1500), method="REML")
+    np.testing.assert_allclose(m15.REML_criterion / 2, 351.9531642893,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m15.sp[0], 0.02727861846, rtol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# 2.3 outer-optimization seeding: initial.spg (√w-weighted initial.sp +
+# global 0.4-rebalance) for every outer method, log(null.scale/10) for the
+# φ slot. Seeds pinned directly against mgcv:::initial.spg / get.null.coef.
+# ---------------------------------------------------------------------------
+
+def test_initial_spg_seed_matches_mgcv():
+    df = _noncanonical_pirls_data()
+    m = gam("yg ~ s(x)", df, family=Gamma(link="log"), method="REML")
+    # R: log(mgcv:::initial.spg(G$X, G$y, G$w, G$family, G$S, G$rank,
+    #        G$off, E=G$Eb)) on the same fixture (non-canonical weights).
+    np.testing.assert_allclose(m._initial_sp_rho(), [0.7588679789],
+                               rtol=0, atol=1e-8)
+    # log(null.scale/10), null.scale = Σ dev_resids(y, ȳ)/n
+    y = df["yg"].to_numpy()
+    mu0 = np.full(len(y), y.mean())
+    ns = float(np.sum(m.family.dev_resids(y, mu0, np.ones(len(y))))) / len(y)
+    np.testing.assert_allclose(np.log(ns / 10.0), -2.5423759619,
+                               rtol=0, atol=1e-8)
+
+    # Two smooths — exercises the shared ×10 rebalance loop.
+    df2 = _tp_ds_2d_data()
+    m2 = gam("y ~ s(x1, x2, k=40) + s(x1, k=10)", df2, method="REML")
+    np.testing.assert_allclose(
+        m2._initial_sp_rho(), [1.4926773694, 2.5814449388],
+        rtol=0, atol=1e-8,
+    )
+
+    # The seed moves the optimizer onto mgcv's stopping point: mcycle edf
+    # was 8.624673 (hea's old path) and is mgcv's 8.624691 now.
+    d = load_dataset("MASS", "mcycle")
+    m3 = gam("accel ~ s(times)", d, method="REML")
+    np.testing.assert_allclose(m3._initial_sp_rho(), [-1.0127433870],
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(float(np.sum(m3.edf)) - 1.0, 8.624691,
+                               rtol=0, atol=2e-5)
+
+
+# ---------------------------------------------------------------------------
+# 2.4 tw() sp-uncertainty pieces: extended-family sig2 = exp(φ̂) reporting,
+# family-θ column of db.drho in Vc/edf2, ML projected-Hessian θ term.
+# ---------------------------------------------------------------------------
+
+def _tw_24_data():
+    rng = np.random.default_rng(55)
+    n = 500
+    x = rng.uniform(0, 1, n)
+    mu = np.exp(0.5 + np.sin(2 * np.pi * x))
+    y = rng.gamma(shape=2.0, scale=mu / 2.0)
+    y[rng.uniform(size=n) < 0.08] = 0.0
+    return pl.DataFrame({"x": x, "y": y})
+
+
+def test_tw_reml_scale_and_vc_match_mgcv():
+    # mgcv-extended families report sig2 = exp(φ̂_REML) (gam.outer's
+    # scale.est), NOT the Fletcher estimator — Fletcher applied to tw was
+    # 0.56% off, dragging Vp/Vc with it. mgcv 1.9-4 references.
+    df = _tw_24_data()
+    m = gam("y ~ s(x)", df, family=tw(), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 826.7923690210,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sigma_squared, 0.87769401,
+                               rtol=0, atol=1e-6)
+    assert m.sigma_squared == np.exp(m._log_phi_hat)
+    np.testing.assert_allclose(m.sp[0], 0.11942987, rtol=1e-4)
+    # Vc/edf2 with the family-θ column of db.drho; residual vs mgcv is
+    # p̂-ridge noise (criteria agree to 6e-8, p̂ differs 1.5e-3).
+    np.testing.assert_allclose(np.diag(m.Vc)[0], 0.0014742061, rtol=1e-3)
+    np.testing.assert_allclose(m.edf2_total, 7.05826502, rtol=0, atol=2e-3)
+
+
+def test_tw_db_dtheta_column_matches_finite_differences():
+    # ∂β̂/∂θ_tw (the family-θ column of mgcv's db.drho): analytic
+    # −A⁻¹X'(Dmuth·μ')/2 vs central differences of the PIRLS fixed point
+    # over θ at fixed ρ. FD noise floor ≈ PIRLS tol/δ ≈ 1e-3 relative.
+    df = _tw_24_data()
+    m = gam("y ~ s(x)", df, family=tw(), method="REML")
+    fit = m._fit_given_rho(m._rho_hat)
+    analytic = m._db_dtheta_fam(fit)[:, 0]
+    th0 = float(m.family.get_theta()[0])
+    delta = 1e-5
+    m.family.set_theta(np.array([th0 + delta]))
+    b_plus = m._fit_given_rho(m._rho_hat).beta
+    m.family.set_theta(np.array([th0 - delta]))
+    b_minus = m._fit_given_rho(m._rho_hat).beta
+    m.family.set_theta(np.array([th0]))
+    fd = (b_plus - b_minus) / (2 * delta)
+    np.testing.assert_allclose(analytic, fd, rtol=5e-3, atol=1e-6)
+
+
+def test_tw_ml_projected_gradient_matches_mgcv():
+    # method="ML" + tw: the ∂log|M_proj|/∂p projected-Hessian term was
+    # skipped, biasing the gradient — hea stopped with the ML criterion
+    # 3e-5 off mgcv and φ̂ 0.8% off. With the term: criterion to 2.4e-8,
+    # φ̂ to 8 digits. mgcv 1.9-4 references.
+    df = _tw_24_data()
+    m = gam("y ~ s(x)", df, family=tw(), method="ML")
+    np.testing.assert_allclose(m.ML_criterion / 2, 824.6125277246,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sigma_squared, 0.87574253,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.13126347, rtol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# 2.5 gam.control(edge.correct=): post-convergence walk of Hessian-flat
+# smoothing parameters + the k=2 Vc recomputation with the weaker 1e-7 Vr
+# prior (gam.fit3.r:1670-1716, post.proc K loop).
+# ---------------------------------------------------------------------------
+
+def test_edge_correct_vc_matches_mgcv():
+    # On both fixtures mgcv's flat set is empty (lsp1 == lsp) and the
+    # corrected Vc differs from the plain one purely through the k=2
+    # 1e-7 prior — a 2.5x change on the flat smooth's null-space-adjacent
+    # entries in the second fixture. mgcv 1.9-4 references.
+    rng = np.random.default_rng(99)
+    n = 300
+    x1 = rng.uniform(0, 1, n)
+    x2 = rng.uniform(0, 1, n)
+    y = np.sin(2 * np.pi * x1) + 0.5 * x2 + rng.normal(0, 0.3, n)
+    df = pl.DataFrame({"x1": x1, "x2": x2, "y": y})
+    m1 = gam("y ~ s(x1) + s(x2)", df, method="REML", edge_correct=True)
+    np.testing.assert_allclose(
+        np.diag(m1.Vc)[[1, 9, 10]],
+        [0.022485405, 0.084568825, 0.0027264787], rtol=5e-4,
+    )
+    # edf2 keeps the fitted-model (k=1) value.
+    np.testing.assert_allclose(m1.edf2_total, 11.06057347, rtol=2e-5)
+
+    rng = np.random.default_rng(7)
+    n = 200
+    x1 = rng.uniform(0, 1, n)
+    x2 = rng.uniform(0, 1, n)
+    y = np.sin(2 * np.pi * x1) + rng.normal(0, 0.25, n)
+    df2 = pl.DataFrame({"x1": x1, "x2": x2, "y": y})
+    m2 = gam("y ~ s(x1) + s(x2)", df2, method="REML", edge_correct=True)
+    np.testing.assert_allclose(
+        np.diag(m2.Vc)[[1, 10, 11]],
+        [0.025712048, 0.0069904269, 0.013000829], rtol=5e-4,
+    )
+    m0 = gam("y ~ s(x1) + s(x2)", df2, method="REML")
+    np.testing.assert_allclose(
+        np.diag(m0.Vc)[[1, 10, 11]],
+        [0.025189013, 0.0027884243, 0.0046002536], rtol=5e-4,
+    )
+
+    with pytest.raises(ValueError, match="edge_correct"):
+        gam("y ~ s(x1)", df2, method="REML", edge_correct=-1.0)
+
+
+# ---------------------------------------------------------------------------
+# 2.2 gam.reparam / get_stableS: log|Sλ|+ and its ρ-derivatives via mgcv's
+# similarity-transform reparameterization (gdi.c:550-792) — immune to
+# λ-ratio "machine zero leakage" between penalty components.
+# ---------------------------------------------------------------------------
+
+def test_get_stable_s_matches_mgcv_oracle():
+    # Synthetic penalty roots; oracle values from mgcv:::gam.reparam on
+    # the same matrices (R 4.x / mgcv 1.9-4). The disjoint case (3+3 in
+    # 6-dim) shows the leakage: at lsp=(0,40) the assembled-eigen
+    # determinant is off by 11.2; get_stableS is exact.
+    from hea.models.gam import _gam_reparam
+    rng = np.random.default_rng(404)
+    R1 = rng.normal(size=(3, 6)).round(6)
+    rng.normal(size=(3, 6))  # R2 drawn but unused here (keeps stream)
+    rng2 = np.random.default_rng(405)
+    R3 = rng2.normal(size=(4, 6)).round(6)
+
+    rp = _gam_reparam([R1.T, R3.T], np.array([0.0, 0.0]), deriv=2)
+    np.testing.assert_allclose(rp["det"], 5.6213367839, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(rp["det1"], [2.5973053960, 3.4026946040],
+                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        rp["det2"], [[0.2405316599, -0.2405316599],
+                     [-0.2405316599, 0.2405316599]], rtol=0, atol=1e-9,
+    )
+    rp = _gam_reparam([R1.T, R3.T], np.array([0.0, 20.0]), deriv=2)
+    np.testing.assert_allclose(rp["det"], 84.7117599761, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(rp["det1"], [2.0000000031, 3.9999999969],
+                               rtol=0, atol=1e-8)
+    rp = _gam_reparam([R1.T, R3.T], np.array([0.0, 40.0]), deriv=2)
+    np.testing.assert_allclose(rp["det"], 164.7117599730, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(rp["det1"], [2.0, 4.0], rtol=0, atol=1e-8)
+    # E is a stable square root: E'E = S.
+    np.testing.assert_allclose(rp["E"].T @ rp["E"], rp["S"],
+                               rtol=0, atol=1e-12 * np.abs(rp["S"]).max())
+    # The assembled-eigen determinant fails here (the stress this guards)
+    # — same top-r + clip recipe as the legacy _log_det_S_pos.
+    S1, S3 = R1.T @ R1, R3.T @ R3
+    lam = np.exp(np.array([0.0, 40.0]))
+    w = np.linalg.eigvalsh(lam[0] * S1 + lam[1] * S3)
+    top = np.clip(np.sort(w)[::-1][:6], 1e-300, None)
+    det_naive = float(np.sum(np.log(top)))
+    assert abs(det_naive - 164.7117599730) > 1.0
+
+
+def test_extreme_fixed_sp_tensor_criterion_matches_mgcv():
+    # Fit-level leakage stress: te() with fixed sp=(1e-8, 1e8) — λ ratio
+    # 1e16 *within one block*. The legacy assembled-eigen log|S|+ path
+    # returns a criterion off by ~334 here; gam.reparam lands on mgcv to
+    # 4e-8. Free-fit pins confirm the optimizer surface is unchanged on
+    # the healthy regime. mgcv 1.9-4 references.
+    rng = np.random.default_rng(77)
+    n = 3000
+    x1 = rng.uniform(0, 1, n)
+    x2 = rng.uniform(0, 1, n)
+    y = (np.sin(2 * np.pi * x1) * np.cos(np.pi * x2) + (x1 - 0.5) ** 2
+         + rng.normal(0, 0.3, n))
+    df = pl.DataFrame({"x1": x1[:400], "x2": x2[:400], "y": y[:400]})
+
+    m = gam("y ~ te(x1, x2, k=5)", df, method="REML",
+            sp=np.array([1e-8, 1e8]))
+    np.testing.assert_allclose(m.REML_criterion / 2, 151.4513862986,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sigma_squared, 0.0905718512,
+                               rtol=0, atol=1e-9)
+
+    m2 = gam("y ~ te(x1, x2, k=5)", df, method="REML")
+    np.testing.assert_allclose(m2.REML_criterion / 2, 107.5309262948,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m2.sp, [0.061977, 162.243], rtol=1e-4)

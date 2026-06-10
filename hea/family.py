@@ -1209,6 +1209,14 @@ class Family:
         """
         return np.asarray(y, dtype=float).copy()
 
+    def gam_initialize(self, y, wt) -> np.ndarray:
+        """Starting μ̂ for gam/bam PIRLS — mgcv patches some families'
+        ``initialize`` before fitting (``fix.family``, gam.fit3.r:2550),
+        making starts valid where glm's would refuse (e.g. gaussian-log
+        with y ≤ 0). Default: same as ``initialize``; Gaussian overrides.
+        """
+        return self.initialize(y, wt)
+
     def validmu(self, mu) -> bool:
         return bool(np.all(np.isfinite(mu)))
 
@@ -1260,6 +1268,17 @@ class Gaussian(Family):
     def dvar(self, mu): return np.zeros_like(np.asarray(mu, dtype=float))
     def d2var(self, mu): return np.zeros_like(np.asarray(mu, dtype=float))
     def d3var(self, mu): return np.zeros_like(np.asarray(mu, dtype=float))
+
+    def gam_initialize(self, y, wt):
+        # mgcv fix.family (gam.fit3.r:2550-2561): link-aware starting μ̂ so
+        # gaussian fits with log/inverse links start inside the valid
+        # region (glm's initialize refuses y ≤ 0 under a log link).
+        y = np.asarray(y, dtype=float)
+        if self.link.name == "inverse":
+            return y + (y == 0.0) * np.std(y, ddof=1) * 0.01
+        if self.link.name == "log":
+            return np.maximum(y, 0.01 * np.std(y, ddof=1))
+        return y.copy()
 
     def dev_resids(self, y, mu, wt, theta=None):
         y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
@@ -2224,6 +2243,77 @@ class tw(Tweedie):
 
     def get_theta(self) -> np.ndarray:
         return np.array([self.theta], dtype=float)
+
+    def Dd(self, y, mu, theta, wt, level: int = 0) -> dict:
+        """Tweedie deviance derivatives wrt μ and θ — full port of mgcv
+        tw()$Dd (efam.r:3155-3210). Level 0 feeds ``initial.spg``; level
+        1's ``Dmuth`` feeds the family-θ column of ``db.drho``
+        (∂β̂/∂θ for the Vc/edf2 sp-uncertainty correction)."""
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        th = float(np.asarray(theta, dtype=float).ravel()[0])
+        a, b = self.a, self.b
+        if th > 0:
+            p = (b + a * np.exp(-th)) / (1 + np.exp(-th))
+            dpth1 = np.exp(-th) * (b - a) / (1 + np.exp(-th)) ** 2
+            dpth2 = (((a - b) * np.exp(-th) + (b - a) * np.exp(-2 * th))
+                     / (np.exp(-th) + 1) ** 3)
+        else:
+            p = (b * np.exp(th) + a) / (np.exp(th) + 1)
+            dpth1 = np.exp(th) * (b - a) / (np.exp(th) + 1) ** 2
+            dpth2 = (((a - b) * np.exp(2 * th) + (b - a) * np.exp(th))
+                     / (np.exp(th) + 1) ** 3)
+        mu1p = mu ** (1 - p)
+        mup = mu ** p
+        r = {}
+        ymupi = y / mup
+        r["Dmu"] = 2 * wt * (mu1p - ymupi)
+        r["Dmu2"] = 2 * wt * (mu ** (-1 - p) * p * y + (1 - p) / mup)
+        r["EDmu2"] = (2 * wt) / mup
+        if level > 0:
+            i1p = 1 / (1 - p)
+            y1 = y + (y == 0)
+            logmu = np.log(mu)
+            mu2p = mu * mu1p
+            r["Dth"] = 2 * wt * (
+                (y ** (2 - p) * np.log(y1) - mu2p * logmu) / (2 - p)
+                + (y * mu1p * logmu - y ** (2 - p) * np.log(y1)) / (1 - p)
+                - (y ** (2 - p) - mu2p) / (2 - p) ** 2
+                + (y ** (2 - p) - y * mu1p) * i1p ** 2
+            ) * dpth1
+            r["Dmuth"] = 2 * wt * logmu * (ymupi - mu1p) * dpth1
+            mup1 = mu ** (-p - 1)
+            r["Dmu3"] = -2 * wt * mup1 * p * (y / mu * (p + 1) + 1 - p)
+            r["Dmu2th"] = 2 * wt * (
+                mup1 * y * (1 - p * logmu) - (logmu * (1 - p) + 1) / mup
+            ) * dpth1
+            r["EDmu3"] = -2 * wt * p * mup1
+            r["EDmu2th"] = -2 * wt * logmu / mup * dpth1
+        if level > 1:
+            mup2 = mup1 / mu
+            r["Dmu4"] = 2 * wt * mup2 * p * (p + 1) * (y * (p + 2) / mu + 1 - p)
+            y2plogy = y ** (2 - p) * np.log(y1)
+            y2plog2y = y2plogy * np.log(y1)
+            r["Dth2"] = 2 * wt * (
+                (mu2p * logmu ** 2 - y2plog2y) / (2 - p)
+                + (y2plog2y - y * mu1p * logmu ** 2) / (1 - p)
+                + 2 * (y2plogy - mu2p * logmu) / (2 - p) ** 2
+                + 2 * (y * mu1p * logmu - y2plogy) / (1 - p) ** 2
+                + 2 * (mu2p - y ** (2 - p)) / (2 - p) ** 3
+                + 2 * (y ** (2 - p) - y * mu ** (1 - p)) / (1 - p) ** 3
+            ) * dpth1 ** 2 + r["Dth"] * dpth2 / dpth1
+            r["Dmuth2"] = (2 * wt * ((mu1p * logmu ** 2
+                                      - logmu ** 2 * ymupi) * dpth1 ** 2)
+                           + r["Dmuth"] * dpth2 / dpth1)
+            r["Dmu2th2"] = (2 * wt * ((mup1 * logmu * y * (logmu * p - 2)
+                            + logmu / mup * (logmu * (1 - p) + 2)) * dpth1 ** 2)
+                            + r["Dmu2th"] * dpth2 / dpth1)
+            r["Dmu3th"] = 2 * wt * mup1 * (
+                y / mu * (logmu * (1 + p) * p - p - p - 1)
+                + logmu * (1 - p) * p + p - 1 + p
+            ) * dpth1
+        return r
 
     def __repr__(self):
         return (f"tw(p={self.p:.4g}, link={self.link.name}, "

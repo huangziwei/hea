@@ -2849,7 +2849,7 @@ class bam(gam):
                 family.set_theta(pini["Theta"])
 
         # ---- Initialize μ̂, η̂, dev for iter 0 (mgcv bam.r:950-969) -----
-        mu = family.initialize(y, prior_w)
+        mu = family.gam_initialize(y, prior_w)
         eta = link.link(mu)
         if not (link.valideta(eta) and family.validmu(mu)):
             raise FloatingPointError(

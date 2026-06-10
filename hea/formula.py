@@ -5119,6 +5119,151 @@ def _tp_rlanczos(
     return D_out, U_out
 
 
+# ---- R RNG port (knot subsampling parity) -----------------------------------
+#
+# mgcv's tp/ds/sos constructors take a *seeded random* subsample of
+# max.knots=2000 knots whenever a smooth has more than 2000 unique
+# covariate locations (smooth.r:1286/3031/3239, via temp.seed(seed=1),
+# misc.r:840 — i.e. RNGkind("Mersenne-Twister", sample.kind="Rejection")
+# + set.seed(1) + sample(1:nu, 2000)). Matching mgcv's bases at large n
+# therefore requires R's RNG bit-for-bit: R's set.seed scrambling and
+# MT19937 stream (RNG.c), R_unif_index's rejection sampler, and
+# do_sample's without-replacement pool walk (R >= 3.6 default).
+
+
+class _RUnif:
+    """R's ``unif_rand`` stream after ``set.seed(seed)`` under the default
+    Mersenne-Twister kind — a bit-exact port of R's RNG.c, plus
+    ``R_unif_index`` and the without-replacement ``sample()`` walk."""
+
+    _MATRIX_A = np.uint32(0x9908B0DF)
+    _UPPER = np.uint32(0x80000000)
+    _LOWER = np.uint32(0x7FFFFFFF)
+    _I2_32M1 = 2.3283064365386963e-10   # 2^-32
+
+    def __init__(self, seed: int):
+        # RNG_Init: 50 initial LCG scrambles of the user seed, then 625
+        # further draws fill i_seed[0..624]; MT_FixupSeeds(initial=TRUE)
+        # overwrites i_seed[0] (the mti slot) with 624, so the first draw
+        # regenerates from the LCG-filled state.
+        s = int(seed) & 0xFFFFFFFF
+        for _ in range(50):
+            s = (69069 * s + 1) & 0xFFFFFFFF
+        fills = np.empty(625, dtype=np.uint32)
+        for j in range(625):
+            s = (69069 * s + 1) & 0xFFFFFFFF
+            fills[j] = s
+        self._mt = fills[1:].copy()
+        self._buf = np.empty(0)
+        self._pos = 0
+
+    def _refill(self) -> None:
+        # One MT19937 "twist" of the whole 624-word state, vectorized in
+        # dependency-free slices, then the standard tempering. Tempering
+        # is a pure function of the stored word, so tempering the block
+        # up front equals R's per-draw tempering. Note the wrap-around:
+        # the last word's y pairs old mt[623] with the *freshly updated*
+        # mt[0] (the C loop has already overwritten it).
+        mt = self._mt
+        N, M = 624, 397
+        y = (mt[:N - 1] & self._UPPER) | (mt[1:] & self._LOWER)
+        mag = np.where((y & np.uint32(1)) != 0, self._MATRIX_A, np.uint32(0))
+        yshift = (y >> np.uint32(1)) ^ mag
+        new = np.empty(N, dtype=np.uint32)
+        new[:N - M] = mt[M:] ^ yshift[:N - M]
+        new[N - M:2 * (N - M)] = new[:N - M] ^ yshift[N - M:2 * (N - M)]
+        new[2 * (N - M):N - 1] = new[N - M:M - 1] ^ yshift[2 * (N - M):]
+        y_last = (mt[N - 1] & self._UPPER) | (new[0] & self._LOWER)
+        mag_last = self._MATRIX_A if (int(y_last) & 1) else np.uint32(0)
+        new[N - 1] = new[M - 1] ^ (y_last >> np.uint32(1)) ^ mag_last
+        self._mt = new
+        t = new.copy()
+        t ^= t >> np.uint32(11)
+        t ^= (t << np.uint32(7)) & np.uint32(0x9D2C5680)
+        t ^= (t << np.uint32(15)) & np.uint32(0xEFC60000)
+        t ^= t >> np.uint32(18)
+        u = t.astype(np.float64) * self._I2_32M1
+        # R's fixup keeps draws strictly inside (0,1).
+        u = np.where(u <= 0.0, 0.5 * self._I2_32M1, u)
+        u = np.where(1.0 - u <= 0.0, 1.0 - 0.5 * self._I2_32M1, u)
+        self._buf = u
+        self._pos = 0
+
+    def unif_rand(self) -> float:
+        if self._pos >= self._buf.size:
+            self._refill()
+        v = float(self._buf[self._pos])
+        self._pos += 1
+        return v
+
+    def _rbits(self, bits: int) -> int:
+        # RNG.c rbits: 16 bits per unif_rand draw, mask to `bits`.
+        v = 0
+        nb = 0
+        while nb <= bits:
+            v1 = int(np.floor(self.unif_rand() * 65536.0))
+            v = 65536 * v + v1
+            nb += 16
+        return v & ((1 << bits) - 1)
+
+    def unif_index(self, dn: int) -> int:
+        # R_unif_index, sample.kind="Rejection" (R >= 3.6 default).
+        if dn <= 0:
+            return 0
+        bits = int(np.ceil(np.log2(dn)))
+        while True:
+            dv = self._rbits(bits)
+            if dv < dn:
+                return dv
+
+    def sample_int(self, n: int, k: int) -> np.ndarray:
+        """``sample(1:n, k, replace=FALSE)`` as 0-based indices —
+        do_sample's shrinking-pool walk (src/main/random.c)."""
+        pool = np.arange(n, dtype=np.int64)
+        out = np.empty(k, dtype=np.int64)
+        m = n
+        for i in range(k):
+            j = self.unif_index(m)
+            out[i] = pool[j]
+            m -= 1
+            pool[j] = pool[m]
+        return out
+
+
+def _mgcv_ordered_unique(xm: np.ndarray) -> np.ndarray:
+    """mgcv ``uniquecombs(x, ordered=TRUE)`` (smooth.r:156-236): unique
+    rows of an (n × d) matrix. d=1: numerically sorted unique. d>1: rows
+    de-duplicated *by text label* ``paste0(col1,"*",col2,...)`` (R's
+    as.character ≈ ``%.15g``) keeping first occurrence, then ordered by
+    the C-locale (byte) sort of those labels. The order matters because
+    mgcv's seeded knot subsample indexes into these rows."""
+    if xm.shape[1] == 1:
+        return np.unique(xm[:, 0])[:, None]
+    labels = np.array(
+        ["*".join(f"{v:.15g}" for v in row) for row in xm]
+    )
+    _, idx = np.unique(labels, return_index=True)
+    return xm[idx]
+
+
+def _mgcv_knot_subsample(xm: np.ndarray, max_knots: int,
+                         seed: int = 1) -> np.ndarray | None:
+    """The shared large-n knot rule of mgcv's tp/ds/sos constructors:
+    when n > max.knots *and* the unique locations nu > max.knots, return
+    the seeded 2000-row subsample of the ordered unique locations (in
+    sampled order, like ``xu[ind,]``); otherwise None (caller keeps its
+    existing knot choice)."""
+    n = xm.shape[0]
+    if n <= max_knots:
+        return None
+    xu = _mgcv_ordered_unique(xm)
+    nu = xu.shape[0]
+    if nu <= max_knots:
+        return None
+    ind = _RUnif(seed).sample_int(nu, max_knots)
+    return xu[ind]
+
+
 def _tp_raw(
     call: Call, data: pl.DataFrame, term: list[str],
 ) -> tuple[np.ndarray, list[np.ndarray], int, int, int, dict]:
@@ -5144,9 +5289,18 @@ def _tp_raw(
     if k < M + 1:
         k = M + 1
 
-    # Collapse to unique rows (Xu). Preserve an index mapping from data rows
-    # to their position in Xu.
-    Xu, yxindex = np.unique(x_c, axis=0, return_inverse=True)
+    # Collapse to unique rows (Xu). mgcv large-n rule (smooth.r:1286-1302):
+    # with no user knots, more than max.knots=2000 unique locations means
+    # the knots become a seeded random subsample of the ordered unique
+    # rows — in which case data rows no longer index into Xu and the model
+    # matrix is built by kernel evaluation instead (yxindex=None).
+    # Otherwise preserve the index mapping from data rows to Xu.
+    Xu_sub = _mgcv_knot_subsample(x_c, 2000, seed=1)
+    if Xu_sub is not None:
+        Xu = Xu_sub
+        yxindex = None
+    else:
+        Xu, yxindex = np.unique(x_c, axis=0, return_inverse=True)
     nu = Xu.shape[0]
     if nu < k:
         raise ValueError(f"tp smooth: fewer unique covariate rows than k ({nu} < {k})")
@@ -5215,14 +5369,6 @@ def _tp_raw(
         TU = T_mat.T @ U
         Z_hh = _tp_qt_factor(TU)
 
-        # X1 on unique rows: first (k-M) cols = U diag(v) applied with Q,
-        # last M cols = polynomial T.
-        X1 = U * v_k  # col-wise scaling
-        X1 = _tp_hqmult_right(X1, Z_hh, transposed=False)
-        X1[:, k - M:] = 0.0
-        X1[:, k - M:k - M + M] = T_mat
-        X_raw = X1[yxindex, :]  # map unique → full data rows
-
         # UZ: (nu + M) × k. Radial block = U @ Q on rows 0..nu-1. Poly block
         # on last M rows is the identity (diagonal on the last M cols).
         UZ = np.zeros((nu + M, k))
@@ -5231,6 +5377,24 @@ def _tp_raw(
         UZ[:nu, k - M:] = 0.0
         for i in range(M):
             UZ[(nu + M) - i - 1, k - i - 1] = 1.0
+
+        if yxindex is not None:
+            # X1 on unique rows: first (k-M) cols = U diag(v) applied with
+            # Q, last M cols = polynomial T; map unique → full data rows.
+            X1 = U * v_k  # col-wise scaling
+            X1 = _tp_hqmult_right(X1, Z_hh, transposed=False)
+            X1[:, k - M:] = 0.0
+            X1[:, k - M:k - M + M] = T_mat
+            X_raw = X1[yxindex, :]
+        else:
+            # Knots are a subsample — evaluate the kernel basis at the
+            # data rows (mgcv builds X through the same map as
+            # Predict.matrix.tp when knots ≠ data; cf. _TPRawBasis.eval).
+            eta0 = _tp_eta_const(m, d)
+            diff = x_c[:, None, :] - Xu[None, :, :]
+            rsq = (diff * diff).sum(axis=-1)
+            E_xk = _tp_fast_eta_vec(m, d, rsq.ravel(), eta0).reshape(n, nu)
+            X_raw = np.hstack([E_xk, _tp_T(x_c, m, d)]) @ UZ
 
         # Penalty S: Q' diag(v) Q, zero-pad last M rows/cols (polynomial
         # part is unpenalized).
@@ -5332,15 +5496,16 @@ def _lowrank_kernel_reduce(
     null space, ``k`` target basis dim → ``(S (k,k), UZ (nk,k-M), null_dim,
     rank)``. Mirrors ``er<-slanczos(K,k,-1); qru<-qr(t(t(T)%*%er$vec)); ...``;
     slanczos(K,k,-1) = the k eigenpairs of largest magnitude (K is only
-    conditionally definite), here a dense ``eigh`` + magnitude sort (nk≤2000).
+    conditionally definite), via the Rlanczos port (``_tp_rlanczos``) — a
+    dense ``eigh`` + magnitude sort spans the same space but picks a
+    different orthonormal basis whenever eigenvalues cluster, which shifts
+    ‖S‖ and hence the *reported* sp by a model-invariant factor vs mgcv.
     """
     nk = K.shape[0]
     M = T.shape[1]
     if k < nk:
-        vals_all, vecs_all = np.linalg.eigh(K)
-        order = np.argsort(np.abs(vals_all))[::-1][:k]   # top-k by |λ|
-        vecs = vecs_all[:, order]                        # (nk, k)
-        D = np.diag(vals_all[order])                     # (k, k)
+        vals, vecs = _tp_rlanczos(K, k, -1)              # (k,), (nk, k)
+        D = np.diag(vals)                                # (k, k)
     else:
         k = nk
         vecs = np.eye(nk)
@@ -5452,8 +5617,8 @@ def _ds_raw(
     x = np.column_stack([data[t].to_numpy().astype(float) for t in term])
     m, s = _ds_order_ms(call, d)
     # knots: explicit locations only if every covariate is keyed (mgcv form);
-    # otherwise the unique data (subsample > max_knots — rare, won't match
-    # mgcv's RNG, same caveat as tp).
+    # otherwise the unique data, with mgcv's seeded max.knots subsample
+    # above 2000 unique locations (smooth.r:3239-3266, bit-exact R RNG).
     kdict = knots or {}
     kcols = [kdict.get(t) for t in term]
     if all(kc is not None for kc in kcols):
@@ -5462,9 +5627,15 @@ def _ds_raw(
             raise ValueError("ds knots: components must have the same length")
         knt = np.column_stack(arrs)
     else:
-        knt = np.unique(x, axis=0)
-        if knt.shape[0] > max_knots:
-            knt = knt[:max_knots]
+        # mgcv ds always takes knt <- xu in uniquecombs(·,TRUE) order
+        # (smooth.r:3239/3263) — order is *not* cosmetic: the Lanczos
+        # reduction's basis (hence the S normalization that the reported
+        # sp compensates for) depends on knot order. np.unique's lexsort
+        # ordering left 2-D ds sp off mgcv by a data-dependent factor
+        # while leaving the fitted model identical.
+        knt = _mgcv_knot_subsample(x, max_knots, seed=1)
+        if knt is None:
+            knt = _mgcv_ordered_unique(x)
     nk = knt.shape[0]
     M = comb(m + d - 1, d)
     if nk < M + 1:
@@ -5645,9 +5816,12 @@ def _sos_raw(
         if la_k.size != lo_k.size:
             raise ValueError("sos knots: components must have the same length")
     else:
-        pts = np.unique(np.column_stack([la, lo]), axis=0)
-        if pts.shape[0] > max_knots:
-            pts = pts[:max_knots]
+        # mgcv's seeded max.knots subsample above 2000 unique (lat,long)
+        # locations (smooth.r:3031-3050, bit-exact R RNG).
+        pts = _mgcv_knot_subsample(np.column_stack([la, lo]), max_knots,
+                                   seed=1)
+        if pts is None:
+            pts = np.unique(np.column_stack([la, lo]), axis=0)
         la_k, lo_k = pts[:, 0], pts[:, 1]
     k = _sos_default_k(call)
     R_kk, _t, T_kk = _makeR(la_k, lo_k, la_k, lo_k, m)
