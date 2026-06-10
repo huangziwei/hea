@@ -3736,6 +3736,107 @@ def test_gaulss_post_proc_surface_matches_mgcv():
     np.testing.assert_allclose(m2.Vc, m2.Vp, rtol=0, atol=0)
 
 
+def test_gaulss_predict_and_summary_surface_matches_mgcv():
+    # Multi-LP user surface: predict (link/response/lpmatrix, se,
+    # unconditional — per-LP columns fit/fit.1, se.fit/se.fit.1),
+    # summary machinery (smooth rows against post.proc's R — mgcv's
+    # object$R; pTerms over the real per-LP list; per-LP parametric
+    # p.table indices). R references: predict(m, d[1:3,], ...) and
+    # summary(m) on the same fixture.
+    from hea.family import gaulss
+    df = _fit5_fixture()
+    m = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+            method="REML")
+    p = m.predict(df[:3], type="link", se_fit=True)
+    np.testing.assert_allclose(
+        np.c_[p["fit"], p["fit.1"]],
+        [[1.21789203, -1.11588488], [1.50064757, -0.03773196],
+         [-0.25981610, -1.55808960]], rtol=0, atol=1e-5)
+    np.testing.assert_allclose(
+        np.c_[p["se.fit"], p["se.fit.1"]],
+        [[0.08309677, 0.11596433], [0.06190283, 0.10543501],
+         [0.06965504, 0.12055511]], rtol=0, atol=1e-6)
+    pr = m.predict(df[:3], type="response")
+    np.testing.assert_allclose(
+        np.c_[pr["fit"], pr["fit.1"]],
+        [[1.21789203, 2.96186385], [1.50064757, 1.02777984],
+         [-0.25981610, 4.53436803]], rtol=0, atol=1e-5)
+    pu = m.predict(df[:3], type="link", se_fit=True, unconditional=True)
+    np.testing.assert_allclose(
+        np.c_[pu["se.fit"], pu["se.fit.1"]],
+        [[0.08479987, 0.11850585], [0.06321051, 0.10986651],
+         [0.07014460, 0.12802161]], rtol=0, atol=1e-6)
+    Xl = m.predict(df[:3], type="lpmatrix")
+    assert Xl.shape == (3, 21)
+    np.testing.assert_allclose(np.abs(Xl).sum(), 39.06214701, rtol=1e-7)
+    # smooth table: edf / Ref.df / Chi.sq vs printed summary(m)
+    rows = m._smooth_significance_rows()
+    assert [r[0] for r in rows] == ["s(x)", "s.1(z)"]
+    np.testing.assert_allclose(
+        [(r[1], r[2], r[3]) for r in rows],
+        [(6.156746, 7.311943, 746.4329), (5.184684, 6.269329, 142.6575)],
+        rtol=1e-4)
+    # pTerms: only LP1's `w` is a parametric term; Chi.sq = z²
+    pt = m._pterms_rows()
+    assert [(r[0], r[1]) for r in pt] == [("w", 1)]
+    np.testing.assert_allclose(pt[0][2], 3.92203 ** 2, rtol=1e-4)
+    # per-LP p.table indices pick up the `.1`-suffixed LP2 intercept
+    par = dict(zip(m.parametric_columns,
+                   np.asarray(m._beta_report)[m._param_idx]))
+    np.testing.assert_allclose(par["(Intercept).1"], -0.66154468,
+                               rtol=0, atol=1e-6)
+    m.summary()      # prints the mgcv-layout summary without error
+
+
+def test_gaulss_efs_optimizer_matches_mgcv():
+    # available_derivs == 0 → the automatic extended-Fellner-Schall
+    # outer loop (efsud, gam.fit4.r:1479-1569; mgcv.r:1907-1908's
+    # optimizer switch): every fit at deriv=0, the family's ll needed
+    # only to deriv 1 — the derivative-light custom-family on-ramp.
+    # R: gam(list(...), family=gaulss(), optimizer="efs"). EFS's own
+    # stop rules are loose by design (efs.tol = 0.1 on the REML band),
+    # so tolerances here are wider than the newton pins.
+    from hea.family import gaulss
+
+    class _gaulss_efs(gaulss):
+        available_derivs = 0
+
+    df = _fit5_fixture()
+    m = gam(["y ~ s(x) + w", "~ s(z)"], df, family=_gaulss_efs(),
+            method="REML")
+    assert 3 <= m.outer_info["iter"] <= 8        # R: 5
+    np.testing.assert_allclose(m.sp, [0.17215468, 0.11762001],
+                               rtol=1e-3)
+    np.testing.assert_allclose(m.REML_criterion / 2, 200.6203917799,
+                               rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.edf_total, 14.53471886, rtol=0,
+                               atol=1e-3)
+    np.testing.assert_allclose(
+        np.asarray(m.fitted_values)[:2],
+        [[1.21650454, 2.96612954], [1.50175511, 1.02319039]],
+        rtol=0, atol=1e-4)
+    # deriv-0 fits carry no outer Hessian: no sp-uncertainty surface
+    assert m.sp_vcov() is None
+    np.testing.assert_array_equal(m.Vc, m.Vp)
+
+
+def test_gaulss_start_warm_restart():
+    # start= (mgcv.r:1903): model-space coefficients enter the fitting
+    # basis via the forward initial repara; a warm restart lands on
+    # the same optimum. The single-formula path rejects start=.
+    from hea.family import gaulss
+    df = _fit5_fixture()
+    m0 = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+             method="REML")
+    m1 = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+             method="REML", start=np.asarray(m0._beta))
+    np.testing.assert_allclose(m1.REML_criterion, m0.REML_criterion,
+                               rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m1.sp, m0.sp, rtol=1e-5)
+    with pytest.raises(NotImplementedError, match="start="):
+        gam("y ~ s(x)", df, method="REML", start=np.zeros(11))
+
+
 def test_gaulss_fixed_sp_through_gam_matches_mgcv():
     from hea.family import gaulss
     df = _fit5_fixture()

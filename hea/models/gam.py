@@ -646,6 +646,7 @@ class gam:
         select: bool = False,
         knots: dict | None = None,
         edge_correct: bool | float = False,
+        start: np.ndarray | list | None = None,
     ):
         # ``data`` may be a polars DataFrame OR a mapping of name → 1-D /
         # 2-D ndarray. 2-D entries become matrix columns
@@ -665,13 +666,19 @@ class gam:
                 [str(f) for f in formula], data, method=method, sp=sp,
                 family=family, offset=offset, weights=weights,
                 gamma=gamma, select=select, knots=knots,
-                edge_correct=edge_correct,
+                edge_correct=edge_correct, start=start,
             )
             return
         if getattr(family, "is_general", False):
             raise ValueError(
                 f"family {family!r} has {family.n_lp} linear predictors"
                 " — pass a list of formulas, one per linear predictor."
+            )
+        if start is not None:
+            raise NotImplementedError(
+                "start= is currently supported only for general-family "
+                "(formula list) fits; the single-formula PIRLS path "
+                "doesn't take start/etastart/mustart yet (plan Tier 3)."
             )
         if method not in ("REML", "ML", "GCV.Cp"):
             raise ValueError(
@@ -3373,7 +3380,7 @@ class gam:
 
     def _init_general(self, formulas, data, *, method, sp, family,
                       offset, weights, gamma, select, knots,
-                      edge_correct):
+                      edge_correct, start=None):
         """estimate.gam's general-family glue (mgcv.r:1893-1924,
         1984-2005, 2060-2092): multi-formula design → Sl.setup +
         initial repara → initial.spg seed → outer Newton over the
@@ -3458,13 +3465,27 @@ class gam:
         self._Mp = Mp
         self._penalty_rank = md.p - Mp
 
+        # user start= (mgcv.r:1903): the coefficient vector enters the
+        # fitting basis through the forward initial repara
+        # (both.sides=FALSE — the vector/coefficient transform).
+        start_irp = None
+        if start is not None:
+            start_arr = np.asarray(start, dtype=float).reshape(-1)
+            if start_arr.shape != (md.p,):
+                raise ValueError(
+                    f"start must have length {md.p} (the stacked "
+                    f"coefficient vector), got {start_arr.shape}")
+            start_irp = _sl_initial_repara(sl, start_arr,
+                                           both_sides=False)
+
         self._g5 = {
             "X": X_irp, "y": y, "sl": sl, "lpi": md.lpi,
             "offsets": md.offsets, "Mp": Mp, "weights": self._wt,
-            "start": None, "gamma": self._gamma,
+            "start": start_irp, "gamma": self._gamma,
         }
 
         n_work = self._work_dim
+        use_efs = int(getattr(family, "available_derivs", 2) or 0) == 0
         if sp is not None:
             sp_arr = np.asarray(sp, dtype=float).flatten()
             if sp_arr.shape != (n_work,):
@@ -3479,6 +3500,30 @@ class gam:
             theta_hat = np.zeros(0)
             self._outer_info = {"conv": "no smoothing parameters",
                                 "iter": 0}
+        elif use_efs:
+            # available_derivs == 0 → extended Fellner-Schall (mgcv's
+            # automatic optimizer switch, mgcv.r:1907-1908): the family
+            # only ever supplies ll at deriv ≤ 1. Inner ε stays at
+            # gam.control's 1e-7 (no newton cap on this path).
+            if md.L is not None:
+                raise NotImplementedError(
+                    "efs (available_derivs=0) with id-linked smoothing "
+                    "parameters is not supported.")
+            sl_setup = _sl_setup(md.slots, md.p)
+            theta0 = _initial_sp_general(
+                X_irp, y, family, md.slots, md.lpi, weights=self._wt,
+                offsets=md.offsets, L=None)
+            fit_efs, theta_hat, it_efs = _efsud(
+                X_irp, y, theta0, sl, sl_setup, family=family,
+                lpi=md.lpi, weights=self._wt, offsets=md.offsets,
+                Mp=Mp, start=self._g5["start"])
+            self._g5["fit"] = fit_efs
+            self._g5["start"] = fit_efs["coefficients"]
+            self._outer_info = {
+                "conv": ("iteration limit reached" if it_efs == 200
+                         else "full convergence"),
+                "iter": it_efs,
+            }
         else:
             theta0 = _initial_sp_general(
                 X_irp, y, family, md.slots, md.lpi, weights=self._wt,
@@ -3544,6 +3589,27 @@ class gam:
         self.null_deviance = (float(pp["null_deviance"])
                               if pp.get("null_deviance") is not None
                               else float("nan"))
+        # general families carry no r² (mgcv's no.r.sq); deviance
+        # explained still prints when the family's postproc gave a null
+        # deviance (mgcv print.summary.gam shows exactly that line).
+        self.r_squared = float("nan")
+        self.r_squared_adjusted = float("nan")
+        self.deviance_explained = (
+            (self.null_deviance - self.deviance) / self.null_deviance
+            if np.isfinite(self.null_deviance) and self.null_deviance != 0
+            else float("nan"))
+        # summary/anova plumbing: blocks + ranges for the smooth table,
+        # per-LP parametric indices for the p.table (mgcv.r:3907-3912).
+        self._blocks = md.blocks
+        self._block_col_ranges = md.block_col_ranges
+        if sum(md.nsdf) > 0:
+            self._param_idx = np.concatenate(
+                [np.arange(ps, ps + nd)
+                 for ps, nd in zip(md.pstart, md.nsdf) if nd > 0]
+            ).astype(int)
+        else:
+            self._param_idx = np.zeros(0, dtype=int)
+        self.parametric_columns = [names[i] for i in self._param_idx]
 
         # ---- gam.fit5.post.proc + the estimate.gam tail ----------------
         mv = self._fit5_post_proc(fit)
@@ -5615,8 +5681,12 @@ class gam:
         # is X'WX, not X'X. hea keeps n-row √W·X blocks instead of the
         # global R factor; ``qr`` inside ``_test_stat`` reduces either to
         # the same R'R = (X'WX)[block]. ``_fisher_w`` is None ↔ W = I
-        # (Gaussian-identity), where weighting is a no-op.
-        if self._fisher_w is not None:
+        # (Gaussian-identity), where weighting is a no-op. General-family
+        # fits use gam.fit5.post.proc's R directly (R'R = −lbb), exactly
+        # mgcv's object$R there.
+        if getattr(self, "_md", None) is not None:
+            X_w = self._R_fit5
+        elif self._fisher_w is not None:
             sqw = np.sqrt(self._fisher_w)
             X_w = self._X_full * sqw[:, None]
         else:
@@ -6120,6 +6190,9 @@ class gam:
             raise ValueError(
                 "se_fit=True is not allowed with type='lpmatrix'"
             )
+        if getattr(self, "_md", None) is not None:
+            return self._predict_general(newdata, type, se_fit, offset,
+                                         unconditional)
 
         if newdata is None:
             X_new = self._X_full
@@ -6222,6 +6295,80 @@ class gam:
         # Delta method: Var(μ̂) ≈ (dμ/dη)² · Var(η̂).
         mu_eta_v = self.family.link.mu_eta(eta)
         return pl.DataFrame({"fit": fit, "se.fit": np.abs(mu_eta_v) * se_link})
+
+    def _predict_general(self, newdata, type, se_fit, offset,
+                         unconditional):
+        """Multi-LP predict (general families): mgcv's predict.gam
+        returns an (n, n_lp) matrix per type — hea returns a DataFrame
+        with one column per linear predictor, named ``fit``,
+        ``fit.{j}`` (and ``se.fit``/``se.fit.{j}``), matching the
+        ``.{j}`` coefficient-name suffix convention.
+
+        ``type='lpmatrix'`` returns the stacked design (lpi available
+        as ``m.lpi``). Per-LP formula ``offset(...)`` atoms are
+        re-evaluated against newdata; the constructor-style ``offset=``
+        override is not supported on this path.
+        """
+        if offset is not None:
+            raise NotImplementedError(
+                "offset= is not supported for multi-formula gam predict; "
+                "put offset(...) atoms in the per-LP formulas."
+            )
+        md = self._md
+        if newdata is None:
+            X_new = np.asarray(md.X, dtype=float)
+            offs = list(md.offsets)
+        else:
+            from ..formula import _eval_atom, normalize_data
+            newdata_n = normalize_data(newdata)
+            X_new, _ = _multi_lpmatrix(md, newdata_n)
+            offs = []
+            for lp in md.lps:
+                if lp.expanded.offsets:
+                    off_j = np.zeros(newdata_n.height)
+                    for off_node in lp.expanded.offsets:
+                        blk = _eval_atom(off_node, newdata_n)
+                        off_j = off_j + blk.values.flatten().astype(float)
+                    offs.append(off_j)
+                else:
+                    offs.append(None)
+        if type == "lpmatrix":
+            return X_new
+
+        K = len(md.lpi)
+        beta = np.asarray(self._beta, dtype=float)
+        fits = []
+        ses = []
+        V = self.Vp
+        if unconditional:
+            V = self.Vc        # general fits are always REML
+        for j in range(K):
+            cols = np.asarray(md.lpi[j], dtype=int)
+            eta_j = X_new[:, cols] @ beta[cols]
+            if offs[j] is not None:
+                eta_j = eta_j + offs[j]
+            if se_fit:
+                Xj = X_new[:, cols]
+                Vjj = V[np.ix_(cols, cols)]
+                var_j = np.einsum("ij,jk,ik->i", Xj, Vjj, Xj)
+                se_j = np.sqrt(np.maximum(var_j, 0.0))
+            if type == "response":
+                mu_j = self.family.links[j].linkinv(eta_j)
+                fits.append(mu_j)
+                if se_fit:
+                    ses.append(np.abs(self.family.links[j].mu_eta(eta_j))
+                               * se_j)
+            else:
+                fits.append(eta_j)
+                if se_fit:
+                    ses.append(se_j)
+        cols_out: dict = {}
+        for j in range(K):
+            cols_out["fit" if j == 0 else f"fit.{j}"] = fits[j]
+        if se_fit:
+            for j in range(K):
+                cols_out["se.fit" if j == 0 else f"se.fit.{j}"] = ses[j]
+        return pl.DataFrame(cols_out)
 
     def vis(
         self,
@@ -7258,10 +7405,22 @@ class gam:
         ``anova.gam``, not ``print.summary.gam`` — hea's ``anova()``
         consumes these rows; ``summary()``'s print output is unchanged.
         """
-        # Per-LP (term labels, assign vector, pstart) — 1-list for now.
-        pterms_list = [([t.label for t in self._expanded.terms],
-                        list(getattr(self, "_param_assign", []) or []),
-                        0)]
+        # Per-LP (term labels, assign vector, pstart): the real list for
+        # multi-LP (general-family) fits, a 1-list otherwise — exactly
+        # mgcv's `pterms <- if (is.list(object$pterms)) ... else
+        # list(...)` dispatch.
+        md = getattr(self, "_md", None)
+        if md is not None:
+            pterms_list = [
+                ([t.label for t in lp.expanded.terms],
+                 list(lp.param_assign or []),
+                 int(md.pstart[j]))
+                for j, lp in enumerate(md.lps)
+            ]
+        else:
+            pterms_list = [([t.label for t in self._expanded.terms],
+                            list(getattr(self, "_param_assign", []) or []),
+                            0)]
         est_disp = not bool(self.family.scale_known)
         residual_df = float(self.n) - float(self.edf_total)
 
@@ -7305,12 +7464,22 @@ class gam:
 
     def summary(self, digits: int = 4) -> None:
         """mgcv-style summary: parametric table + smooth-edf table + fit stats."""
+        # multi-LP (general-family) fits: all link names, one formula
+        # per line — mgcv's print.summary.gam layout.
+        if getattr(self.family, "is_general", False):
+            link_disp = " ".join(l.name for l in self.family.links)
+        else:
+            link_disp = self.family.link.name
+        if isinstance(self.formula, (list, tuple)):
+            formula_disp = "\n".join(str(f) for f in self.formula)
+        else:
+            formula_disp = str(self.formula)
         out = [
             "",
             f"Family: {self._family_display_name()}",
-            f"Link function: {self.family.link.name}",
+            f"Link function: {link_disp}",
             "",
-            f"Formula: {self.formula}",
+            f"Formula: {formula_disp}",
             "",
         ]
         # mgcv print.summary.gam (mgcv.r:4089): show the rank line only
@@ -7327,8 +7496,16 @@ class gam:
         n_par = len(self.parametric_columns)
         if n_par > 0:
             out.append("Parametric coefficients:")
-            est = self._beta_report[:n_par]
-            se  = self._se_report[:n_par]
+            # multi-LP fits: the parametric columns sit at each LP's
+            # pstart, not a single prefix (mgcv.r:3907-3912's
+            # length(nsdf)>1 branch); ``_param_idx`` carries them.
+            par_idx = getattr(self, "_param_idx", None)
+            if par_idx is not None:
+                est = self._beta_report[par_idx]
+                se = self._se_report[par_idx]
+            else:
+                est = self._beta_report[:n_par]
+                se = self._se_report[:n_par]
             with np.errstate(divide="ignore", invalid="ignore"):
                 t_stats = est / se
             if scale_known:
@@ -7400,10 +7577,17 @@ class gam:
         # -- fit stats ------------------------------------------------------
         # mgcv: `formatC(r.sq, digits=3, width=5)`, `formatC(dev.expl*100,
         # digits=3)`, `formatC(REML/GCV/scale, digits=5)`. Match that.
-        out.append(
-            f"R-sq.(adj) = {self.r_squared_adjusted:.3g}  "
-            f"Deviance explained = {self.deviance_explained * 100:.3g}%"
-        )
+        # General families have no r² (mgcv's no.r.sq — summary.gam sets
+        # r.sq NULL and the print skips it, mgcv.r:4055).
+        if np.isfinite(getattr(self, "r_squared_adjusted", float("nan"))):
+            out.append(
+                f"R-sq.(adj) = {self.r_squared_adjusted:.3g}  "
+                f"Deviance explained = {self.deviance_explained * 100:.3g}%"
+            )
+        else:
+            out.append(
+                f"Deviance explained = {self.deviance_explained * 100:.3g}%"
+            )
         # mgcv summary.gam line 4058: prepend "-" only for "REML"/"ML"
         # (and "P-REML"/"P-ML" which we don't expose); leave "fREML"
         # alone — mgcv prints it as ``fREML = X``. ``_method_in``
@@ -9600,7 +9784,8 @@ def _build_lp_design(formula: str, data, knots: dict | None,
                      X=X, blocks=blocks, block_col_ranges=ranges,
                      slots=slots, column_names=names,
                      offset=(off if has_off else None),
-                     nsdf=X_param.shape[1], L=L, n_work=n_work)
+                     nsdf=X_param.shape[1], L=L, n_work=n_work,
+                     param_assign=list(d.param_assign or []))
 
 
 def _prepare_multi_design(formulas: list[str], data,
@@ -9832,7 +10017,10 @@ def _gam_fit5(X, y, lsp, sl: _Sl, *, family, lpi, weights=None,
         offsets = [None] * len(lpi)
 
     if penalized:
-        rp = _ldet_s(sl, lsp, root=True, stot=True, deriv=deriv)
+        # mgcv calls ldetS WITHOUT deriv → its default 2 (gam.fit4.r:969)
+        # even for deriv=0 fits: S1 (= ldet1) must exist on every return
+        # — efsud's update reads it from deriv-0 fits.
+        rp = _ldet_s(sl, lsp, root=True, stot=True, deriv=2)
         X = _sl_repara(rp["rp"], X)
         Sb = _sl_repa(rp["rp"], sl.S, l=-2, r=-1)   # balanced penalty
         St = np.asarray(rp["S"], dtype=float)
@@ -10219,6 +10407,108 @@ def _gam_fit5(X, y, lsp, sl: _Sl, *, family, lpi, weights=None,
         "lpi": lpi, "ldetHp": ldetHp, "ldetS": rp["ldetS"],
         "converged": converged,
     }
+
+
+def _efsud(X, y, lsp, sl: _Sl, sl_setup: _Sl, *, family, lpi,
+           weights=None, offsets=None, Mp: int = -1, start=None,
+           epsilon: float = 1e-7, efs_lspmax: float = 15.0,
+           efs_tol: float = 0.1) -> tuple[dict, np.ndarray, int]:
+    """mgcv ``efsud`` (gam.fit4.r:1479-1569): the extended
+    Fellner-Schall outer loop for general families. Every gam.fit5
+    call runs at deriv=0, so the family only ever needs ``ll`` with
+    deriv ≤ 1 — the on-ramp for ``available_derivs == 0`` custom
+    families. Update per penalty: λ ← λ·[tr(Sλ⁻Sⱼ) − tr(Vb Sⱼ)]/β'Sⱼβ
+    (a = S1·e^{−ρ} − trVS, floored at √eps), with the ×2 extension /
+    ÷2 contraction step control and the two stop rules (EFS step small
+    + REML flat over 3 steps; or log-lik change < 100·ε·|l| — mgcv's
+    ``control$eps`` PARTIAL-MATCHES gam.control's ``epsilon`` in R, no
+    eps field exists).
+
+    ``sl`` is the fitting penalty object (each fit's ldetS updates its
+    λ state in place); ``sl_setup`` must be a pristine Sl.setup copy
+    for the termMult traces — mgcv's G$Sl stays at setup state by R
+    copy semantics, and Vb here is only rp-undone (still in the
+    initial-repara basis sl_setup's penalties live in).
+    """
+    lsp = np.asarray(lsp, dtype=float) + 2.5
+    mult = 1.0
+    tiny = float(np.finfo(float).eps) ** 0.5
+
+    def fit_at(l, st):
+        return _gam_fit5(X, y, l, sl, family=family, lpi=lpi,
+                         weights=weights, offsets=offsets, Mp=Mp,
+                         deriv=0, start=st, gamma=1.0, epsilon=epsilon)
+
+    fit = fit_at(lsp, start)
+    score_hist = np.zeros(200)
+    old_ll = None
+    it = 0
+    for it in range(1, 201):
+        start = fit["coefficients"]
+        L_f, piv, ipiv = fit["L"], fit["piv"], fit["ipiv"]
+        D = np.asarray(fit["D"], dtype=float)
+        Dm = np.diag(D)[piv, :]
+        sol = solve_triangular(L_f, Dm, lower=False, trans="T")[ipiv, :]
+        Vb = sol.T @ sol
+        bdrop = np.asarray(fit["bdrop"], dtype=bool)
+        if bdrop.any():
+            q = bdrop.size
+            ibd = ~bdrop
+            Vt, Vb = Vb, np.zeros((q, q))
+            Vb[np.ix_(ibd, ibd)] = Vt
+        Vb = _sl_repara(fit["rp"], Vb, inverse=True)
+        SVb, inds = _sl_term_mult(sl_setup, Vb, full=False)
+        trVS = np.array([float(np.trace(SVb[i][:, inds[i]]))
+                         for i in range(len(SVb))])
+        st_arr = np.asarray(start, dtype=float)
+        Sb, _ = _sl_term_mult(sl_setup, st_arr, full=True)
+        bSb = np.array([float(np.sum(st_arr * Sb[i]))
+                        for i in range(len(Sb))])
+
+        a = np.maximum(tiny, np.asarray(fit["S1"], dtype=float)
+                       * np.exp(-lsp) - trVS)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            r = a / np.maximum(tiny, bSb)
+        r[(a == 0) & (bSb == 0)] = 1.0
+        r[~np.isfinite(r)] = 1e6
+        lsp1 = np.minimum(lsp + np.log(r) * mult, efs_lspmax)
+        max_step = float(np.max(np.abs(lsp1 - lsp)))
+        old_reml = fit["REML"]
+        fit = fit_at(lsp1, start)
+
+        if fit["REML"] <= old_reml:     # improvement
+            if max_step < 0.05:         # consider step extension
+                lsp2 = np.minimum(lsp + np.log(r) * mult * 2.0, 12.0)
+                fit2 = fit_at(lsp2, start)
+                if fit2["REML"] < fit["REML"]:
+                    fit, lsp = fit2, lsp2
+                    mult = mult * 2.0
+                else:
+                    lsp = lsp1
+            else:
+                lsp = lsp1
+        else:                           # no improvement: contract
+            while fit["REML"] > old_reml and mult > 1.0:
+                mult = mult / 2.0
+                lsp1 = np.minimum(lsp + np.log(r) * mult, efs_lspmax)
+                fit = fit_at(lsp1, start)
+            lsp = lsp1
+            if mult < 1.0:
+                mult = 1.0
+        score_hist[it - 1] = fit["REML"]
+        # break if EFS step small and REML flat over the last 3 steps
+        if (it > 3 and max_step < 0.05
+                and float(np.max(np.abs(np.diff(
+                    score_hist[it - 4:it])))) < efs_tol):
+            break
+        # or break if the log likelihood has stopped changing
+        if it == 1:
+            old_ll = fit["l"]
+        else:
+            if abs(old_ll - fit["l"]) < 100.0 * epsilon * abs(fit["l"]):
+                break
+            old_ll = fit["l"]
+    return fit, lsp, it
 
 
 def _initial_sp_general(X, y, family, slots: list["_PenaltySlot"], lpi,
