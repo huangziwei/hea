@@ -8885,6 +8885,8 @@ def _pls_rank_drop(Xw: np.ndarray, slots: list["_PenaltySlot"],
     Frobenius norm; pivoted QR of the stack; reduce rank by the Cline
     condition estimate at ``rank.tol = √eps``; the dropped columns are
     the trailing pivots (sorted ascending, like gdi.c's qsort).
+    Exact-alias columns (bit-identical up to sign) are canonicalized so
+    the earliest twin is kept on every BLAS build — see below.
     Returns ``(rank, drop)``."""
     R1 = np.linalg.qr(Xw, mode="r")
     St = np.zeros((p, p))
@@ -8906,6 +8908,39 @@ def _pls_rank_drop(Xw: np.ndarray, slots: list["_PenaltySlot"],
         if E_norm > 0:
             parts.append(E / E_norm)
     aug = np.vstack(parts)
+    # dgeqp3's pivot choice between columns with *tied* partial norms is
+    # decided by blocked-kernel rounding noise, so which twin of an
+    # exact-alias pair (bit-identical, possibly negated, design columns)
+    # lands in the trailing pivots varies by BLAS build — Accelerate and
+    # OpenBLAS disagree, and mgcv inherits the very same tie from R's
+    # LAPACK. Reference LAPACK (R's default — where the pins were
+    # generated) keeps the earliest twin: tied maxima go to the first
+    # index, and bit-identical columns stay bit-identical through its
+    # unblocked downdates. Canonicalize to that convention: zero the
+    # later twins' aug columns — a zero column can never be pivoted
+    # ahead of an independent one, so it drops on every platform.
+    # Detection runs on (Xw, E), before any factorization has a chance
+    # to ULP-split the twins; the exact-norm prefilter means only tied
+    # columns are ever byte-compared. Scaled aliases (≠ ±1) tie nothing
+    # — dgeqp3 keeps the larger-norm copy deterministically everywhere.
+    if p > 1:
+        cn = np.einsum("ij,ij->j", Xw, Xw)
+        if E.shape[0]:
+            cn = cn + np.einsum("ij,ij->j", E, E)
+        norm_groups: dict[float, list[int]] = {}
+        for j in range(p):
+            norm_groups.setdefault(float(cn[j]), []).append(j)
+        for group in norm_groups.values():
+            if len(group) < 2:
+                continue
+            seen: dict[tuple[bytes, bytes], int] = {}
+            for j in group:
+                key = (Xw[:, j].tobytes(), E[:, j].tobytes())
+                neg = ((-Xw[:, j]).tobytes(), (-E[:, j]).tobytes())
+                if key in seen or neg in seen:
+                    aug[:, j] = 0.0
+                else:
+                    seen[key] = j
     from scipy.linalg import qr as _scipy_qr
     R_piv, piv = _scipy_qr(aug, mode="r", pivoting=True)
     # gam.fit3 overrides the fitting-path rank tolerance to eps*100

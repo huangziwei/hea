@@ -2793,11 +2793,9 @@ class _RERawBasis(_RawBasis):
 class _FSRawBasis(_RawBasis):
     """`smooth.construct.fs.smooth.spec` — factor-smooth interaction.
 
-    Predict replays:
+    Predict replays mgcv's `Predict.matrix.fs.interaction`:
       1. base tp (or other) basis evaluated at new x via stored ``base_raw``
-      2. nat.param(type=1) reparameterization via ``P`` (so X_r = Xb @ P);
-         we store ``Xr_T = P`` directly — the post-canonicalization rotation
-         is captured by ``null_rot`` (eigenvectors of Xn'Xn) and ``null_signs``
+      2. nat.param(type=1) reparameterization via ``P`` (X_r = Xb @ P)
       3. block-wise duplicate across factor levels, masking by `data[fterm]`
     The full result has shape ``(n, p * nf)`` matching the fit-time block.
     """
@@ -2808,19 +2806,10 @@ class _FSRawBasis(_RawBasis):
     null_d: int
     base_raw: _RawBasis  # the inner tp/etc. raw basis
     P: np.ndarray   # nat.param transform: Xr = Xb @ P
-    null_rot: Optional[np.ndarray]  # (null_d, null_d) — None if null_d == 0
-    null_signs: Optional[np.ndarray]  # length null_d
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         Xb = self.base_raw.eval(data)
         Xr = Xb @ self.P
-        if self.null_d > 0:
-            # Re-rotate the null block: same as _canonicalize_fs_null_basis
-            # but using the *fixed* rotation from training (not recomputed
-            # from new data).
-            Xn = Xr[:, self.rank:] @ self.null_rot
-            Xn *= self.null_signs[None, :]
-            Xr = np.concatenate([Xr[:, :self.rank], Xn], axis=1)
         n = Xr.shape[0]
         nf = len(self.flev)
         p = self.p
@@ -5905,7 +5894,9 @@ def _nat_param(
     """Port of mgcv's `nat.param(X, S, rank, type, unit.fnorm)`.
 
     type=1: QR on X, then eigendecompose R^-T S R^-1; rescale so the
-    penalty is identity on its range.
+    penalty is identity on its range. The chain is fp-faithful to mgcv
+    (triangular solves, unsymmetrized evr eigen) so the degenerate
+    null-space basis reproduces R's to ~1e-14 — see the inline note.
     type=3: eigendecompose S directly; rescale columns by sqrt(eigenvalue)
     (range) or by a col-norm match (null). Null-space eigenvectors are
     post-rotated so the final column is closest to a constant vector.
@@ -5967,23 +5958,30 @@ def _nat_param(
         return X_new, D, P
 
     Q, R = np.linalg.qr(X, mode="reduced")
-    # RSR = R^-T @ S @ R^-1.
-    Y = np.linalg.solve(R.T, S)
-    RSR = np.linalg.solve(R.T, Y.T).T
-    RSR = 0.5 * (RSR + RSR.T)
-    # Match R's eigen() eigenvector basis inside degenerate eigenspaces by
-    # calling the same LAPACK driver (MRRR, via evr). numpy's eigh uses evd
-    # (D&C), which rotates the null-space differently and leaks into the
-    # final X/P columns for fs-style smooths that don't re-rotate the null.
-    from scipy.linalg import eigh as _sla_eigh
-    w, V = _sla_eigh(RSR, driver="evr")
+    # RSR = R^-T @ S @ R^-1, via the same two triangular solves as mgcv's
+    # forwardsolve(t(R), t(forwardsolve(t(R), t(S)))) — and, like mgcv, NO
+    # symmetrization before eigen. The exact-arithmetic null space of RSR is
+    # degenerate, and dsyevr (R's eigen(symmetric=TRUE) and scipy's evr
+    # driver) resolves the within-cluster basis deterministically from the
+    # well-determined part of the matrix: given this solve chain, scipy
+    # reproduces R's null VECTORS to ~1e-14. Only their column ORDER (the
+    # sort of the two noise-level eigenvalues) is build-dependent — a model-
+    # invariant permutation that even two R installs with different BLAS
+    # would not agree on. An LU solve (np.linalg.solve) or a pre-eigen
+    # 0.5*(A+A') symmetrization perturbs the cluster enough to ROTATE the
+    # basis instead, which does change the model (each null dimension gets
+    # its own λ).
+    from scipy.linalg import eigh as _sla_eigh, solve_triangular as _sla_tri
+    Y = _sla_tri(R.T, S.T, lower=True)        # R^-T S'
+    RSR = _sla_tri(R.T, Y.T, lower=True)      # R^-T (S R^-1)
+    w, V = _sla_eigh(RSR, lower=True, driver="evr")
     order = np.argsort(-w)  # descending
     w = w[order]
     V = V[:, order]
 
     D = np.clip(w[:rank].copy(), 0.0, None)
     X_new = Q @ V
-    P = np.linalg.solve(R, V)
+    P = _sla_tri(R, V, lower=False)
 
     if type_ == 1:
         E = np.concatenate([np.sqrt(D), np.ones(p - rank)])
@@ -6024,42 +6022,6 @@ def _fs_find_factor(term: list[str], data: pl.DataFrame) -> tuple[str | None, li
     return fterm, others
 
 
-def _canonicalize_fs_null_basis(
-    Xr: np.ndarray, rank: int,
-) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
-    """Rotate the null-space columns of Xr to a LAPACK-independent basis.
-
-    mgcv's `nat.param(type=1)` leaves the null eigenspace of RSR spanned by
-    whatever orthonormal basis its LAPACK returns. For degenerate eigenspaces
-    that choice varies between LAPACK builds (R's netlib vs scipy's
-    Accelerate), so Xr's last `null_d` columns are implementation-dependent.
-    Rotate them by the principal components of the centered null columns —
-    a deterministic, data-driven basis computable from any LAPACK's nat.param
-    output (the 2×2 / small eigendecomp of `Xn^T Xn` is stable across libs).
-    Sign convention: largest-magnitude entry of each column is positive.
-
-    Returns ``(out, V_n, signs)`` where ``V_n`` is the (null_d, null_d)
-    rotation and ``signs`` are the per-column ±1 flips. Both are ``None``
-    when ``null_d == 0``.
-    """
-    p = Xr.shape[1]
-    null_d = p - rank
-    if null_d == 0:
-        return Xr, None, None
-    Xn = Xr[:, rank:] - Xr[:, rank:].mean(axis=0, keepdims=True)
-    _w, V_n = np.linalg.eigh(Xn.T @ Xn)  # ascending; largest eig last
-    Xn_rot = Xr[:, rank:] @ V_n
-    signs = np.ones(null_d)
-    for c in range(null_d):
-        m = int(np.argmax(np.abs(Xn_rot[:, c])))
-        if Xn_rot[m, c] < 0:
-            Xn_rot[:, c] = -Xn_rot[:, c]
-            signs[c] = -1.0
-    out = Xr.copy()
-    out[:, rank:] = Xn_rot
-    return out, V_n, signs
-
-
 def _build_fs_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     """`bs="fs"` — factor-smooth interaction.
 
@@ -6083,10 +6045,10 @@ def _build_fs_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     Sb = Sb_list[0]
 
     # nat.param(type=1) — make the base penalty an identity on its range.
+    # The null-space basis matches mgcv's eigen choice (see _nat_param);
+    # only the order of the null columns is LAPACK-build noise, in hea
+    # exactly as in R itself.
     Xr, D, P = _nat_param(Xb, Sb, rank=rank, type_=1, unit_fnorm=True)
-    # mgcv inherits its LAPACK's rotation of the degenerate null eigenspace;
-    # re-rotate to a canonical basis so hea's output is deterministic.
-    Xr, null_rot, null_signs = _canonicalize_fs_null_basis(Xr, rank)
     p = Xr.shape[1]
 
     # Factor levels in alphabetic order (R's factor() default).
@@ -6123,7 +6085,7 @@ def _build_fs_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     )
     raw = _FSRawBasis(
         fterm=fterm, flev=list(flev), p=p, rank=rank, null_d=null_d,
-        base_raw=base_raw, P=P, null_rot=null_rot, null_signs=null_signs,
+        base_raw=base_raw, P=P,
     )
     return [SmoothBlock(
         label=_smooth_label(call), term=term,

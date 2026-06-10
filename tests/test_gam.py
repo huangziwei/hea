@@ -3440,14 +3440,16 @@ def test_vcomp_rescale_select_null_penalty_scale_one():
     assert vc0["lower"][1] == vc["lower"][1]
 
 
-def test_vcomp_rescale_fs_consistency_and_loose_mgcv():
-    # fs: multi-S block through the dedicated builder. hea's fs
-    # null-space parameterization has a small recorded construction
-    # divergence from mgcv (nat.param basis — plan §5.4 note: X
-    # fingerprint ~2e-4 rel, S.scale 22.47 vs 22.43, null-dim meaning
-    # rotated so the two null sp's land crossed), so mgcv values are
-    # order-insensitive and loose; the rescale mechanism itself is
-    # pinned exactly via σ_k(default) = σ_k(rescale=False)·√S.scale.
+def test_vcomp_rescale_fs_consistency_and_mgcv():
+    # fs: multi-S block through the dedicated builder. _nat_param's type=1
+    # chain is fp-faithful to mgcv's nat.param (triangular solves,
+    # unsymmetrized evr eigen), and on this fixture scipy's dsyevr resolves
+    # the degenerate null eigenspace to the SAME basis as R's — vcomp rows
+    # match in value and order. The within-null basis is LAPACK-build noise
+    # (R itself rotates it O(1) across machines), so if a future
+    # BLAS/LAPACK change breaks the null rows here, re-pin from R on the
+    # same machine. The rescale mechanism is pinned exactly via
+    # σ_k(default) = σ_k(rescale=False)·√S.scale.
     m = gam("y ~ s(x0, g, bs='fs')", _vcomp_fixture(), method="REML")
     vc = m.vcomp
     vc0 = m._compute_vcomp(rescale=False)
@@ -3458,13 +3460,42 @@ def test_vcomp_rescale_fs_consistency_and_loose_mgcv():
     np.testing.assert_allclose(
         vc["lower"].to_numpy()[:3],
         vc0["lower"].to_numpy()[:3] * np.sqrt(ss), rtol=1e-12)
-    # mgcv 1.9-4: [23.705650223879, 0.351338675157, 0.255257857391],
-    # scale 0.870402969596 — range penalty + sorted null rows, loose.
-    np.testing.assert_allclose(vc["std_dev"][0], 23.705650223879, rtol=2e-3)
+    # mgcv 1.9-4 gam.vcomp: range row, null rows in mgcv's order, scale.
     np.testing.assert_allclose(
-        np.sort(vc["std_dev"].to_numpy()[1:3]),
-        np.sort([0.351338675157, 0.255257857391]), rtol=2e-2)
-    np.testing.assert_allclose(vc["std_dev"][3], 0.870402969596, rtol=1e-3)
+        vc["std_dev"].to_numpy(),
+        [23.705650223879, 0.255257857391, 0.351338675157, 0.870402969596],
+        rtol=1e-5)
+    np.testing.assert_allclose(
+        vc["lower"].to_numpy(),
+        [16.827537361971, 0.114220884469, 0.180002939012, 0.790025586953],
+        rtol=1e-5)
+
+
+def test_fs_smooth_fit_matches_mgcv():
+    # The fs construction is mgcv-exact on this machine (every X column to
+    # 2e-12, S.scale to 12 digits — the nat.param re-derivation, plan A1),
+    # so the whole REML fit pins tightly: sp (all three, mgcv's order),
+    # REML, scale, edf, fitted. The fixed-sp REML is THE basis-sensitive
+    # quantity (each null dimension carries its own λ): it diverged O(0.01)
+    # under the old rotated basis and now matches to 1e-12. Same noise
+    # caveat as the vcomp test above: the null-dim ORDER inside sp/vcomp is
+    # LAPACK-build noise — swap those pins if a future LAPACK flips it.
+    df = _vcomp_fixture()
+    m = gam("y ~ s(x0, g, bs='fs')", df, method="REML")
+    np.testing.assert_allclose(
+        m.sp, [0.0302404084243, 0.0793274311249, 0.0418725790411], rtol=1e-6)
+    np.testing.assert_allclose(m.REML_criterion / 2, 342.959898695382,
+                               rtol=1e-10)
+    np.testing.assert_allclose(m.scale, 0.757601417077, rtol=1e-9)
+    np.testing.assert_allclose(np.sum(m.edf), 29.983026500786, rtol=1e-9)
+    np.testing.assert_allclose(
+        np.asarray(m.fitted_values)[:5],
+        [0.059141969561, 0.267571299093, 0.572985963884,
+         2.288189939067, 2.361954603671], atol=1e-8)
+    m2 = gam("y ~ s(x0, g, bs='fs')", df, method="REML", sp=[1.0, 2.0, 0.5])
+    np.testing.assert_allclose(m2.REML_criterion / 2, 375.551476460602,
+                               rtol=1e-10)
+    np.testing.assert_allclose(np.sum(m2.edf), 9.102090869012, rtol=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -3526,6 +3557,26 @@ def test_pterms_dropped_term_is_nan_like_mgcv():
                                [52.7722538822, 41.3067103254], rtol=1e-6)
     assert rows[2][1] == 1
     assert np.isnan(rows[2][2]) and np.isnan(rows[2][3])
+
+
+def test_pls_rank_drop_alias_twin_canonical_on_any_blas():
+    # Bit-identical (or negated) columns tie dgeqp3's pivot norms, and
+    # the BLAS then drops whichever twin its kernel noise disfavors —
+    # Accelerate kept z, OpenBLAS kept z2, splitting CI from local runs.
+    # _pls_rank_drop canonicalizes to reference LAPACK's choice: the
+    # earliest twin is kept, every later twin is dropped, on any build.
+    from hea.models.gam import _pls_rank_drop
+    rng = np.random.default_rng(0)
+    X = rng.standard_normal((40, 6))
+    X[:, 3] = X[:, 1]                       # exact duplicate
+    rank, drop = _pls_rank_drop(X, [], 6)
+    assert rank == 5 and list(drop) == [3]
+    X[:, 3] = -X[:, 1]                      # exact negated alias
+    rank, drop = _pls_rank_drop(X, [], 6)
+    assert rank == 5 and list(drop) == [3]
+    X[:, 5] = X[:, 1]                       # three-way: keep first only
+    rank, drop = _pls_rank_drop(X, [], 6)
+    assert rank == 4 and list(drop) == [3, 5]
 
 
 # ---------------------------------------------------------------------------

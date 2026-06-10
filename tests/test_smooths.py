@@ -34,44 +34,35 @@ from conftest import (
     load_dataset,
 )
 from hea.formula import (
-    _canonicalize_fs_null_basis,
-    _factor_levels,
-    _fs_find_factor,
     expand,
     materialize_smooths,
     parse,
 )
 
 
-def _canonicalize_fs_reference(X_ref, r_meta, data):
-    """Apply hea's canonical null-basis rotation to mgcv's fs X output.
+def _fs_null_layout(r_meta, ncol):
+    """Column layout of an fs.interaction block.
 
-    mgcv's raw fs X uses whatever null-basis its LAPACK chose (R's netlib
-    dsyevr). Extract the per-level template Xr from X_ref's block structure,
-    rotate Xr's null cols by the canonical W (same rule used in hea), then
-    rebuild the block-duplicated X. See `_canonicalize_fs_null_basis`.
+    mgcv's fs null-space basis is resolved from an exactly-degenerate
+    eigenspace, so the basis WITHIN the null span is LAPACK-build noise:
+    R itself produces an O(1)-rotated null pair when re-run on a different
+    machine (these fixtures carry the generating machine's draw). hea's
+    nat.param is fp-faithful to mgcv's, making its draw equally legitimate
+    — so tests compare the null SPAN per level tightly instead of raw null
+    columns. Returns ``(p, rank, null_d, nf, null_cols)`` where ``p`` is
+    the per-level block width and ``null_cols`` the global indices of all
+    null columns.
     """
-    term = r_meta["term"] if isinstance(r_meta["term"], list) else [r_meta["term"]]
-    fterm, _others = _fs_find_factor(term, data)
-    assert fterm is not None, f"fs.interaction needs a factor term; got {term}"
-    flev = _factor_levels(data[fterm])
     p = r_meta["bs_dim"]
     null_d = r_meta["n_penalties"] - 1
     rank = p - null_d
+    nf = ncol // p
+    null_cols = np.array(
+        [j * p + rank + i for j in range(nf) for i in range(null_d)],
+        dtype=int,
+    )
+    return p, rank, null_d, nf, null_cols
 
-    fac_arr = data[fterm].to_numpy()
-    Xr = np.zeros((X_ref.shape[0], p))
-    for j, lev in enumerate(flev):
-        mask = fac_arr == lev
-        Xr[mask, :] = X_ref[mask, j * p : (j + 1) * p]
-
-    Xr_canonical, _rot, _signs = _canonicalize_fs_null_basis(Xr, rank)
-
-    X_new = np.zeros_like(X_ref)
-    for j, lev in enumerate(flev):
-        mask = (fac_arr == lev).astype(float)
-        X_new[:, j * p : (j + 1) * p] = Xr_canonical * mask[:, None]
-    return X_new
 
 MGCV_FIXTURES = fixtures_by_kind("mgcv")
 
@@ -121,20 +112,21 @@ def test_mgcv_smooths_match_R(fx_id: str):
                 f"smooth #{i} block {k}: X shape got {blk.X.shape} want {X_ref.shape}"
             )
 
-            # fs.interaction: null eigenspace rotation is LAPACK-dependent
-            # (R's netlib vs scipy's Accelerate). hea canonicalizes its own
-            # output inside `_build_fs_smooth`; apply the same rotation to
-            # R's reference per-level block so the comparison is basis-agnostic.
-            # The row-sums of X (and thus scale.penalty's maXX = max|row-sum|^2)
-            # change with the null rotation, so rescale each S_ref by the ratio
-            # maXX(canonical)/maXX(R) — hea's penalty values end up consistent
-            # with the canonical basis.
-            S_scale = 1.0
+            # fs.interaction: the null columns carry a machine-noise rotation
+            # (see _fs_null_layout) — compare their span per level instead of
+            # raw values, and compare S up to the common maXX = ||X||_inf^2
+            # factor that scale.penalty derives from rotation-sensitive row
+            # sums. Everything else (and every other class) compares raw.
+            is_null = np.zeros(blk.X.shape[1], dtype=bool)
+            s_scale_ratio = 1.0
             if r_meta["class"] == "fs.smooth.spec":
-                maXX_R = float(np.abs(X_ref).sum(axis=1).max()) ** 2
-                X_ref = _canonicalize_fs_reference(X_ref, r_meta, data)
-                maXX_canon = float(np.abs(X_ref).sum(axis=1).max()) ** 2
-                S_scale = maXX_canon / maXX_R if maXX_R > 0 else 1.0
+                p_lev, fs_rank, null_d, nf, null_cols = _fs_null_layout(
+                    r_meta, blk.X.shape[1]
+                )
+                is_null[null_cols] = True
+                maXX_ours = float(np.abs(blk.X).sum(axis=1).max()) ** 2
+                maXX_ref = float(np.abs(X_ref).sum(axis=1).max()) ** 2
+                s_scale_ratio = maXX_ours / maXX_ref
 
             # mgcv's Lanczos uses an arbitrary per-eigenvector sign convention;
             # hea's np.linalg.eigh uses its own. Match each column up to sign,
@@ -149,9 +141,25 @@ def test_mgcv_smooths_match_R(fx_id: str):
                     X_got[:, c] = -blk.X[:, c]
 
             tol_X = max(1e-6, 1e-5 * float(np.max(np.abs(X_ref))))
-            assert np.allclose(X_got, X_ref, atol=tol_X, rtol=0), (
+            assert np.allclose(
+                X_got[:, ~is_null], X_ref[:, ~is_null], atol=tol_X, rtol=0
+            ), (
                 f"smooth #{i} block {k} ({r_meta['class']}): X values diverge"
             )
+            if is_null.any():
+                # Null block: same span, orthogonal relative rotation.
+                for j in range(nf):
+                    cols = np.arange(j * p_lev + fs_rank, (j + 1) * p_lev)
+                    A, B = X_got[:, cols], X_ref[:, cols]
+                    G, *_ = np.linalg.lstsq(A, B, rcond=None)
+                    assert float(np.max(np.abs(A @ G - B))) < tol_X, (
+                        f"smooth #{i} block {k}: fs null span diverges "
+                        f"(level {j})"
+                    )
+                    assert np.allclose(G.T @ G, np.eye(null_d), atol=1e-6), (
+                        f"smooth #{i} block {k}: fs null relative rotation "
+                        f"not orthogonal (level {j})"
+                    )
 
             assert len(blk.S) == r_meta["n_penalties"], (
                 f"smooth #{i} block {k}: got {len(blk.S)} penalties want {r_meta['n_penalties']}"
@@ -159,7 +167,7 @@ def test_mgcv_smooths_match_R(fx_id: str):
             for j, S_got in enumerate(blk.S, start=1):
                 S_ref = np.asarray(
                     mmread(fx / f"smooth_{i}_{k}_S_{j}.mtx").todense(), dtype=float
-                ) * S_scale
+                ) * s_scale_ratio
                 assert S_got.shape == S_ref.shape, (
                     f"smooth #{i} block {k} S_{j}: got {S_got.shape} want {S_ref.shape}"
                 )
@@ -244,12 +252,6 @@ def test_mgcv_predict_mat_matches_R(fx_id: str):
                 f"got {X_pred_ours.shape} want {X_pred_ref.shape}"
             )
 
-            # fs.interaction: same null-eigenvector rotation we apply at fit;
-            # apply the canonical rotation to mgcv's predict reference using
-            # the predict_data factor column.
-            if r_meta["class"] == "fs.smooth.spec":
-                X_pred_ref = _canonicalize_fs_reference(X_pred_ref, r_meta, new)
-
             # Match column signs against an in-sample anchor that lives in the
             # same column space as the predict basis. For most bases this is
             # `sm$X` (smooth_*_X.mtx) — fit and predict bases coincide. For
@@ -276,8 +278,6 @@ def test_mgcv_predict_mat_matches_R(fx_id: str):
                 anchor_ref = np.asarray(
                     mmread(fx / f"smooth_{i}_{k}_X.mtx").todense(), dtype=float
                 )
-                if r_meta["class"] == "fs.smooth.spec":
-                    anchor_ref = _canonicalize_fs_reference(anchor_ref, r_meta, data)
                 anchor_ours = blk.X
 
             signs = np.ones(blk.X.shape[1])
@@ -287,6 +287,22 @@ def test_mgcv_predict_mat_matches_R(fx_id: str):
                 if minus < plus:
                     signs[c] = -1.0
             X_pred_aligned = X_pred_ours * signs[None, :]
+
+            # fs.interaction: align the machine-noise null rotation (see
+            # _fs_null_layout) by the per-level 2x2 map estimated from the
+            # FIT anchors; predict columns are the same fixed P applied to
+            # new data, so the fit-time relative rotation carries over
+            # exactly.
+            if r_meta["class"] == "fs.smooth.spec":
+                p_lev, fs_rank, null_d, nf, _ = _fs_null_layout(
+                    r_meta, blk.X.shape[1]
+                )
+                for j in range(nf):
+                    cols = np.arange(j * p_lev + fs_rank, (j + 1) * p_lev)
+                    G, *_ = np.linalg.lstsq(
+                        anchor_ours[:, cols], anchor_ref[:, cols], rcond=None
+                    )
+                    X_pred_aligned[:, cols] = X_pred_ours[:, cols] @ G
 
             tol = max(1e-6, 1e-5 * float(np.max(np.abs(X_pred_ref))))
             assert np.allclose(X_pred_aligned, X_pred_ref, atol=tol, rtol=0), (
