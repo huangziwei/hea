@@ -3242,3 +3242,88 @@ def test_sl_machinery_invariants():
     # original-coordinate β: b_orig = D·b_repara.
     b_back = _sl_initial_repara(sl, br, inverse=True)
     np.testing.assert_allclose(b_back, beta, atol=1e-8)
+
+
+# ---------------------------------------------------------------------------
+# Multi-formula front end (mgcv gam.setup.list) — §5.3 prerequisite 4.
+# mgcv 1.9-4 references via gam(list(...), family=gaulss(), fit=FALSE).
+# ---------------------------------------------------------------------------
+
+def _mf_fixture():
+    rng = np.random.default_rng(31)
+    n = 150
+    x = rng.uniform(0, 1, n)
+    z = rng.uniform(0, 1, n)
+    w = rng.normal(0, 1, n)
+    y = (np.sin(2 * np.pi * x) + 0.4 * w
+         + rng.normal(0, np.exp(0.3 * np.cos(2 * np.pi * z)), n))
+    return pl.DataFrame({"x": x, "z": z, "w": w, "y": y})
+
+
+def test_multi_formula_design_matches_mgcv():
+    # gam(list(y ~ s(x) + w, ~ s(z)), family=gaulss(), fit=FALSE) pins:
+    # column counts/order, lpi, nsdf/pstart, penalty offsets, mgcv's
+    # term-name conventions ("(Intercept).1", smooth label "s.1(z)"),
+    # and the aggregate design fingerprint — the stacked X matches
+    # mgcv's to 8 decimals in total abs sum.
+    from hea.models.gam import _prepare_multi_design
+    df = _mf_fixture()
+    md = _prepare_multi_design(["y ~ s(x) + w", "~ s(z)"], df)
+    assert md.p == 21 and md.n_lp == 2
+    assert md.nsdf == [2, 1]
+    assert md.pstart == [0, 11]                      # mgcv 1-based (1, 12)
+    np.testing.assert_array_equal(md.lpi[0], np.arange(0, 11))
+    np.testing.assert_array_equal(md.lpi[1], np.arange(11, 21))
+    # G$off (1-based): 3, 13 → 0-based slot col_starts 2, 12; both S 9×9.
+    assert [(s.col_start, s.col_end) for s in md.slots] == [(2, 11),
+                                                            (12, 21)]
+    assert all(s.S.shape == (9, 9) for s in md.slots)
+    assert md.column_names[:3] == ["(Intercept)", "w", "s(x).1"]
+    assert md.column_names[11:14] == ["(Intercept).1", "s.1(z).1",
+                                      "s.1(z).2"]
+    assert md.blocks[0].label == "s(x)"
+    assert md.blocks[1].label == "s.1(z)"
+    np.testing.assert_allclose(float(np.abs(md.X).sum()), 2023.30210226,
+                               rtol=0, atol=1e-6)
+    assert md.offsets == [None, None]
+    assert md.L is None and md.n_work == 2
+
+
+def test_multi_formula_lpmatrix_and_offsets():
+    from hea.models.gam import _prepare_multi_design, _multi_lpmatrix
+    df = _mf_fixture()
+    md = _prepare_multi_design(["y ~ s(x) + w", "~ s(z)"], df)
+    # lpmatrix on the training rows reproduces the stacked X; on a
+    # permuted subset it evaluates per-LP bases consistently.
+    Xn, lpi = _multi_lpmatrix(md, df[:7])
+    np.testing.assert_allclose(Xn, md.X[:7], atol=1e-12)
+    assert [len(i) for i in lpi] == [11, 10]
+    perm = df[::-1][:10]
+    Xp, _ = _multi_lpmatrix(md, perm)
+    np.testing.assert_allclose(Xp, md.X[::-1][:10], atol=1e-12)
+
+    # Per-formula offset() atoms land in the per-LP offset list.
+    md2 = _prepare_multi_design(["y ~ s(x) + offset(w)", "~ s(z)"], df)
+    np.testing.assert_allclose(md2.offsets[0], df["w"].to_numpy(),
+                               atol=0)
+    assert md2.offsets[1] is None
+
+    # Three formulas stack fine (assembler is family-agnostic).
+    md3 = _prepare_multi_design(["y ~ s(x)", "~ s(z)", "~ w"], df)
+    assert md3.n_lp == 3 and md3.p == md3.lpi[2][-1] + 1
+    assert md3.nsdf == [1, 1, 2]
+
+
+def test_multi_formula_validation_and_gam_guard():
+    from hea.models.gam import _prepare_multi_design
+    df = _mf_fixture()
+    with pytest.raises(ValueError, match="at least 2"):
+        _prepare_multi_design(["y ~ s(x)"], df)
+    with pytest.raises(ValueError, match="response"):
+        _prepare_multi_design(["~ s(x)", "~ s(z)"], df)
+    # mgcv's numeric-label shared-term syntax: explicit refusal.
+    with pytest.raises(NotImplementedError, match="shared-term"):
+        _prepare_multi_design(["y ~ s(x)", "1 + 2 ~ s(z)"], df)
+    # gam() on a formula list: clear pointer to §5.3 until gam.fit5 lands.
+    with pytest.raises(NotImplementedError, match="general-family"):
+        gam(["y ~ s(x)", "~ s(z)"], df, method="REML")

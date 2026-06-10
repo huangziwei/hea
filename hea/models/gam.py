@@ -652,6 +652,16 @@ class gam:
         # (``Array(Float64, m)``) for mgcv's summation-convention smooths
         # (Wood §7.4.1). ``prepare_design`` calls ``normalize_data``
         # internally; we keep the parameter untyped for flexibility.
+        if isinstance(formula, (list, tuple)):
+            # Multiple linear predictors: the design assembler
+            # (`_prepare_multi_design` — mgcv's gam.setup.list) is in
+            # place and verified, but fitting needs a general family
+            # through gam.fit5 (plan §5.3).
+            raise NotImplementedError(
+                "gam with a formula list (multiple linear predictors) "
+                "requires general-family fitting (gam.fit5), which is "
+                "not yet implemented — plan §5.3."
+            )
         if method not in ("REML", "ML", "GCV.Cp"):
             raise ValueError(
                 f"method must be 'REML', 'ML', or 'GCV.Cp', got {method!r}"
@@ -8850,6 +8860,297 @@ def _sl_term_mult(sl: _Sl, A: np.ndarray, full: bool = False):
                 SA.append(part)
                 inds.append(pcols)
     return SA, inds
+
+
+# ---------------------------------------------------------------------------
+# Multi-formula front end — mgcv interpret.gam list branch (mgcv.r:431-498)
+# + gam.setup.list (mgcv.r:922-1092). §5.3 prerequisite 4.
+#
+# A list of formulas — the first with a response, the rest response-less
+# (`"~ s(z)"`) — becomes ONE stacked design matrix with `lpi`: per-linear-
+# predictor column index lists. Each formula runs the same per-formula
+# design pipeline gam.__init__ uses (constraint absorption, select
+# penalties, gam.side, id linkage — all WITHIN its own formula, exactly
+# like mgcv's per-formula gam.setup calls), then columns are appended in
+# formula order. Smooth labels in formula j ≥ 1 get mgcv's textra suffix
+# inserted before the first "(" (`s(z)` → `s.1(z)`, interpret.gam0
+# mgcv.r:370-374); parametric names get a trailing `.{j}`
+# (gam.setup.list mgcv.r:1042).
+#
+# Out of scope first pass (explicit raise, never silent): mgcv's
+# numeric-label shared-term syntax (`1 + 2 ~ s(x)`) and the `olid`
+# unidentifiability dropping it requires; multivariate responses (mvn);
+# `drop.intercept`. Consumed by gam.fit5 (general families) when §5.3
+# proper lands — until then `gam()` raises NotImplementedError on list
+# formulas after this assembler is importable for tests.
+# ---------------------------------------------------------------------------
+
+
+class _LpDesign:
+    """One linear predictor's design bundle (one formula's gam.setup)."""
+    __slots__ = ("formula", "expanded", "data", "X", "blocks",
+                 "block_col_ranges", "slots", "column_names", "offset",
+                 "nsdf", "L", "n_work")
+
+    def __init__(self, **kw):
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+class _MultiDesign:
+    """gam.setup.list analog: the stacked multi-LP design."""
+    __slots__ = ("lps", "X", "lpi", "y", "blocks", "block_col_ranges",
+                 "slots", "column_names", "nsdf", "pstart", "offsets",
+                 "n_lp", "L", "n_work", "p", "n")
+
+    def __init__(self, **kw):
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def _suffix_smooth_label(label: str, suffix: str) -> str:
+    """mgcv's textra insertion (interpret.gam0, mgcv.r:370-374):
+    ``s(z)`` + ``.1`` → ``s.1(z)`` — before the FIRST ``(``."""
+    pos = label.find("(")
+    if pos < 0:
+        return label + suffix
+    return label[:pos] + suffix + label[pos:]
+
+
+def _build_lp_design(formula: str, data, knots: dict | None,
+                     select: bool, label_suffix: str | None) -> _LpDesign:
+    """One formula through the same design pipeline as gam.__init__
+    (prepare_design → smooth-arg materialization → formula offsets →
+    materialize_smooths → select penalties → gam.side → column stacking
+    → per-formula id L-matrix). Kept in lockstep with the constructor's
+    design block — the single-formula path is untouched until §5.3
+    unifies them."""
+    from ..formula import (_apply_smooth_arg_exprs, _smooth_arg_expr_map,
+                           _smooth_id_value)
+    d = prepare_design(formula, data)
+    expr_map = _smooth_arg_expr_map(d.expanded)
+    data_m = _apply_smooth_arg_exprs(d.data, expr_map) if expr_map else d.data
+    X_param_df = d.X
+    X_param = X_param_df.to_numpy().astype(float)
+    n = data_m.height
+    if X_param.shape[1] == 0:
+        X_param = np.zeros((n, 0))
+    off = np.zeros(n)
+    has_off = False
+    for off_node in d.expanded.offsets:
+        blk = _eval_atom(off_node, d.data)
+        off = off + blk.values.flatten().astype(float)
+        has_off = True
+
+    sb_lists = (materialize_smooths(d.expanded, data_m, knots=knots)
+                if d.expanded.smooths else [])
+    blocks = [b for group in sb_lists for b in group]
+    block_ids: list[str | None] = []
+    for call_node, group_blocks in zip(d.expanded.smooths, sb_lists):
+        block_ids.extend([_smooth_id_value(call_node)] * len(group_blocks))
+    if select:
+        blocks = _add_null_space_penalties(blocks)
+    blocks = _apply_gam_side(blocks)
+
+    if label_suffix:
+        for b in blocks:
+            b.label = _suffix_smooth_label(b.label, label_suffix)
+
+    Xs = [X_param]
+    slots: list[_PenaltySlot] = []
+    ranges: list[tuple[int, int]] = []
+    cursor = X_param.shape[1]
+    for b in blocks:
+        Xb = np.asarray(b.X, dtype=float)
+        Xs.append(Xb)
+        a, bcol = cursor, cursor + Xb.shape[1]
+        ranges.append((a, bcol))
+        for S_j in b.S:
+            slots.append(_PenaltySlot(block=b, col_start=a, col_end=bcol,
+                                      S=np.asarray(S_j, dtype=float)))
+        cursor = bcol
+    X = np.concatenate(Xs, axis=1) if len(Xs) > 1 else X_param
+
+    names = list(X_param_df.columns)
+    if label_suffix:
+        names = [f"{nm}{label_suffix}" for nm in names]
+    for b, (a, bcol) in zip(blocks, ranges):
+        for i in range(1, bcol - a + 1):
+            names.append(f"{b.label}.{i}")
+
+    # Per-formula id L-matrix (same logic as gam.__init__; linkage never
+    # crosses formulas — mgcv's gam.setup calls are independent too).
+    slot_work_col: list[int] = []
+    n_work = 0
+    id_first: dict[str, tuple[int, int]] = {}
+    for b, bid in zip(blocks, block_ids):
+        nS = len(b.S)
+        if nS == 0:
+            continue
+        if bid is None or bid not in id_first:
+            start = n_work
+            n_work += nS
+            if bid is not None:
+                id_first[bid] = (start, nS)
+        else:
+            start, nc = id_first[bid]
+            if nS > nc:
+                raise ValueError(
+                    "Later terms sharing an `id' can not have more "
+                    "smoothing parameters than the first such term"
+                )
+        slot_work_col.extend(range(start, start + nS))
+    if n_work == len(slots):
+        L = None
+    else:
+        L = np.zeros((len(slots), n_work))
+        L[np.arange(len(slots)), slot_work_col] = 1.0
+
+    return _LpDesign(formula=formula, expanded=d.expanded, data=data_m,
+                     X=X, blocks=blocks, block_col_ranges=ranges,
+                     slots=slots, column_names=names,
+                     offset=(off if has_off else None),
+                     nsdf=X_param.shape[1], L=L, n_work=n_work)
+
+
+def _prepare_multi_design(formulas: list[str], data,
+                          knots: dict | None = None,
+                          select: bool = False) -> _MultiDesign:
+    """mgcv ``gam.setup.list`` (mgcv.r:922-1092) for hea: a list of
+    formula strings → one stacked design with ``lpi``.
+
+    The first formula carries the response; every later one must be
+    response-less (``"~ s(z)"`` — mgcv injects the first response to
+    keep gam.setup happy, mgcv.r:962-963, and so does this). Columns
+    append in formula order; ``lpi[j]`` holds LP j's 0-based column
+    indices; offsets are per-LP (``None`` when a formula has no
+    ``offset()`` atom); penalties carry global column offsets; the id
+    L-matrix is block-diagonal across formulas.
+    """
+    if len(formulas) < 2:
+        raise ValueError(
+            "multi-formula gam needs at least 2 formulas; pass a plain "
+            "string for single-predictor models"
+        )
+    first = formulas[0]
+    if "~" not in first:
+        raise ValueError(f"first formula must contain '~': {first!r}")
+    resp = first.split("~", 1)[0].strip()
+    if not resp:
+        raise ValueError("first formula must have a response on the lhs")
+    full_formulas = [first]
+    for j, f in enumerate(formulas[1:], start=1):
+        if "~" not in f:
+            raise ValueError(f"formula {j} must contain '~': {f!r}")
+        lhs = f.split("~", 1)[0].strip()
+        if lhs:
+            raise NotImplementedError(
+                "formulas after the first must be response-less "
+                f"('~ ...'); got lhs {lhs!r}. mgcv's numeric-label "
+                "shared-term syntax ('1 + 2 ~ s(x)') is not supported "
+                "yet (plan §5.3 — multi-formula front end, out-of-scope "
+                "list)."
+            )
+        full_formulas.append(f"{resp} {f.strip()}")
+
+    lps: list[_LpDesign] = []
+    for j, f in enumerate(full_formulas):
+        lps.append(_build_lp_design(
+            f, data, knots, select,
+            label_suffix=(f".{j}" if j > 0 else None),
+        ))
+
+    n = lps[0].X.shape[0]
+    y = prepare_design(full_formulas[0], data).y.to_numpy().astype(float)
+    X = np.concatenate([lp.X for lp in lps], axis=1)
+    lpi: list[np.ndarray] = []
+    blocks: list[SmoothBlock] = []
+    ranges: list[tuple[int, int]] = []
+    slots: list[_PenaltySlot] = []
+    names: list[str] = []
+    nsdf: list[int] = []
+    pstart: list[int] = []
+    offsets: list[np.ndarray | None] = []
+    L_parts: list[np.ndarray | None] = []
+    pof = 0
+    for lp in lps:
+        p_lp = lp.X.shape[1]
+        lpi.append(np.arange(pof, pof + p_lp))
+        pstart.append(pof)
+        nsdf.append(lp.nsdf)
+        offsets.append(lp.offset)
+        names.extend(lp.column_names)
+        blocks.extend(lp.blocks)
+        for (a, b) in lp.block_col_ranges:
+            ranges.append((a + pof, b + pof))
+        for s in lp.slots:
+            slots.append(_PenaltySlot(
+                block=s.block, col_start=s.col_start + pof,
+                col_end=s.col_end + pof, S=s.S,
+            ))
+        L_parts.append(lp.L if lp.L is not None
+                       else (np.eye(len(lp.slots)) if lp.slots else None))
+        pof += p_lp
+
+    # Block-diagonal L across formulas; None ⇔ identity everywhere.
+    if all(lp.L is None for lp in lps):
+        L = None
+        n_work = len(slots)
+    else:
+        sizes = [(len(lp.slots),
+                  lp.n_work if lp.L is not None else len(lp.slots))
+                 for lp in lps]
+        n_work = sum(w for _, w in sizes)
+        L = np.zeros((len(slots), n_work))
+        r0 = c0 = 0
+        for lp, (nr, nc) in zip(lps, sizes):
+            if nr:
+                Lj = lp.L if lp.L is not None else np.eye(nr)
+                L[r0:r0 + nr, c0:c0 + nc] = Lj
+            r0 += nr
+            c0 += nc
+
+    return _MultiDesign(lps=lps, X=X, lpi=lpi, y=y, blocks=blocks,
+                        block_col_ranges=ranges, slots=slots,
+                        column_names=names, nsdf=nsdf, pstart=pstart,
+                        offsets=offsets, n_lp=len(lps), L=L,
+                        n_work=n_work, p=X.shape[1], n=n)
+
+
+def _multi_lpmatrix(md: _MultiDesign, newdata) -> tuple[np.ndarray,
+                                                        list[np.ndarray]]:
+    """Linear-predictor matrix for new data — predict.gam's
+    ``type="lpmatrix"`` with the ``lpi`` attribute (mgcv.r:2704, 3173).
+    Returns ``(X_new, lpi)``; each LP's columns are rebuilt with the
+    same per-formula recipe as gam.predict's newdata branch."""
+    from ..formula import (_apply_smooth_arg_exprs, _smooth_arg_expr_map,
+                           materialize, normalize_data)
+    newdata = normalize_data(newdata)
+    cols: list[np.ndarray] = []
+    for lp in md.lps:
+        nd = newdata
+        expr_map = _smooth_arg_expr_map(lp.expanded)
+        if expr_map:
+            nd = _apply_smooth_arg_exprs(nd, expr_map)
+        n_user = nd.height
+        nd, n_stubs = _add_factor_stub_rows(nd, lp.data)
+        X_param = materialize(lp.expanded, nd).to_numpy().astype(float)
+        if X_param.shape[1] == 0:
+            X_param = np.zeros((nd.height, 0))
+        parts = [X_param]
+        for b in lp.blocks:
+            if b.spec is None:
+                raise RuntimeError(
+                    f"smooth block {b.label!r} has no BasisSpec; "
+                    "lpmatrix on newdata requires one."
+                )
+            parts.append(np.asarray(b.spec.predict_mat(nd), dtype=float))
+        X_lp = (np.concatenate(parts, axis=1) if len(parts) > 1
+                else X_param)
+        if n_stubs > 0:
+            X_lp = X_lp[:n_user]
+        cols.append(X_lp)
+    return np.concatenate(cols, axis=1), md.lpi
 
 
 class _PenaltySlot:
