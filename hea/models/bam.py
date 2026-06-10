@@ -1878,6 +1878,11 @@ class bam(gam):
         self.y = d.y
         self._y_arr = y_full
         self.n = n
+        # Prior weights: bam's user-facing ``weights=`` is not plumbed yet
+        # (bam plan), but inherited gam methods (_reml/_reml_grad/ls calls)
+        # read ``self._wt`` — keep it ones until then.
+        self._wt = np.ones(n)
+        self.prior_weights = self._wt
         self.p = p
         self.p_param = p_param
         self._blocks = blocks

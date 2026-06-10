@@ -1286,11 +1286,18 @@ class Gaussian(Family):
         return wt * (y - mu) ** 2
 
     def aic(self, y, mu, dev, wt, n, theta=None):
-        n_eff = float(np.sum(wt))
-        sigma2 = dev / n_eff
-        # mgcv's gaussian()$aic: n·(log(2πσ²)+1) + 2 — note the +2 is the
-        # "+1 family df" placeholder; downstream adds 2·edf for the model.
-        return n_eff * (np.log(2.0 * np.pi * sigma2) + 1.0) + 2.0
+        # R's gaussian()$aic verbatim: nobs·(log(2π·dev/nobs)+1) + 2
+        # − Σ log(wt), with nobs = length(y) (NOT Σwt — prior weights are
+        # precision multipliers on σ², not extra observations; they enter
+        # through the −Σlog(wt) Jacobian term instead). A zero weight makes
+        # this Inf, exactly as in R. The +2 is the "+1 family df"
+        # placeholder; downstream adds 2·edf for the model.
+        wt = np.asarray(wt, dtype=float)
+        nobs = float(np.asarray(y).shape[0])
+        sigma2 = dev / nobs
+        with np.errstate(divide="ignore"):
+            log_wt_sum = float(np.sum(np.log(wt)))
+        return nobs * (np.log(2.0 * np.pi * sigma2) + 1.0) + 2.0 - log_wt_sum
 
     def _aic_dev1(self, dev, scale, wt):
         # Gaussian MLE σ² = dev/n is closed-form, so mgcv passes dev directly
@@ -1942,14 +1949,14 @@ class Tweedie(Family):
         mu = np.asarray(mu)
         return bool(np.all(np.isfinite(mu)) and np.all(mu > 0))
 
-    def _log_density(self, y, mu, phi, wt):
-        """Per-obs log f(y_i; μ_i, φ/wt_i, p), shape (n,). Weight-aware via
-        the per-obs scale convention φ_i = φ/w_i (matches mgcv)."""
+    def _log_density(self, y, mu, phi):
+        """Per-obs log f(y_i; μ_i, φ, p), shape (n,) — one unmodified φ for
+        every row (mgcv's ``ldTweedie(y, mu, p, phi=scale)``; prior weights
+        multiply the summed log-density at the call site, they never divide
+        the dispersion — same convention as ``ls``)."""
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
-        wt = np.asarray(wt, dtype=float)
-        good = wt > 0
-        phi_i = np.where(good, float(phi) / np.where(good, wt, 1.0), 1.0)
+        phi_i = np.full_like(y, float(phi))
         p = self.p
         om1 = 1.0 - p
         tm = 2.0 - p
@@ -1965,29 +1972,31 @@ class Tweedie(Family):
         return out
 
     def aic(self, y, mu, dev, wt, n, theta=None):
-        # mgcv's ``Tweedie()$aic``: -2·Σ wt·log f at the fitted (μ, φ̂) plus
-        # +2 for the φ "extra df". φ̂ is the Pearson moment scale (matches
-        # mgcv:::fix.family.aic which expects the post-fit scale).
+        # mgcv's ``Tweedie()$aic`` (gam.fit3.r:3086) and ``tw()$aic``
+        # (efam.r:3212), identical math: scale = dev/Σwt — the caller's
+        # dev1 is scale·Σwt (gam.fit3.r:848 / gam.fit4.r:794), so this
+        # recovers the REML/Pearson scale — then
+        # -2·Σ wt·ldTweedie(y, μ, p, φ=scale) + 2.
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         n_eff = float(wt.sum())
-        V = mu ** self.p
-        phi = float(np.sum(wt * (y - mu) ** 2 / np.maximum(V, 1e-300))
-                    / max(n_eff, 1.0))
-        if not (np.isfinite(phi) and phi > 0):
-            phi = max(float(dev) / max(n_eff, 1.0), 1e-12)
-        log_f = self._log_density(y, mu, phi, wt)
+        phi = max(float(dev) / max(n_eff, 1e-300), 1e-12)
+        log_f = self._log_density(y, mu, phi)
         return -2.0 * float(np.sum(log_f * wt)) + 2.0
 
     def ls(self, y, wt, scale):
-        """Saturated log-lik Σ w_i·log f(y_i; y_i, φ/w_i, p) and its 1st/2nd
+        """Saturated log-lik Σ w_i·log f(y_i; y_i, φ, p) and its 1st/2nd
         derivatives wrt log φ (hea log-scale convention).
 
-        Per-obs scale ``φ_i = φ/w_i`` ⇒ d log φ_i / d log φ = 1, so the chain
-        rule is trivial. For y_i = 0 with μ_i = y_i = 0 the cumulant is 0 and
-        log f = 0; the entry contributes nothing to ls or its derivatives.
-        For y_i > 0:
+        mgcv's Tweedie convention (BOTH variants): the prior weight
+        multiplies the per-obs log-density at *unmodified* φ —
+        ``colSums(w·ldTweedie(y, y, phi=scale))`` (fix.family.ls,
+        gam.fit3.r:3083) and ``w·ldTweedie(y, y, rho=log(scale))``
+        (tw()$ls, efam.r:3224). This deliberately differs from the
+        Gamma/exponential-family ``φ_i = φ/w_i`` convention. For y_i = 0
+        with μ_i = y_i = 0 the cumulant is 0 and log f = 0; the entry
+        contributes nothing to ls or its derivatives. For y_i > 0:
 
             log f_sat = -log y + log a(y, φ_i, p) + y^(2-p)/((1-p)(2-p)·φ_i)
 
@@ -2007,7 +2016,7 @@ class Tweedie(Family):
             return np.array([0.0, 0.0, 0.0], dtype=float)
         y_g = y[good]
         w_g = wt[good]
-        phi_i = float(scale) / w_g
+        phi_i = np.full_like(w_g, float(scale))
         p = self.p
         om1 = 1.0 - p
         tm = 2.0 - p
@@ -2129,7 +2138,8 @@ class Tweedie(Family):
             return 0.0
         y_g = y[good]
         w_g = wt[good]
-        phi_i = float(scale) / w_g
+        # Same mgcv convention as ``ls``: weight outside, φ unmodified.
+        phi_i = np.full_like(w_g, float(scale))
         p = self.p
         om1 = 1.0 - p
         tm = 2.0 - p

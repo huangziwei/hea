@@ -2750,3 +2750,223 @@ def test_ill_conditioned_design_matches_mgcv():
     )
     np.testing.assert_allclose(m.predict(df.head(1))["fit"][0], 0.74940624,
                                rtol=0, atol=1e-7)
+
+
+# ---------------------------------------------------------------------------
+# weights= (gam prior weights) — mgcv 1.9-4 references.
+#
+# One shared fixture; the R reference fits read the identical data via CSV
+# (full-precision export) and every pin below is a printed mgcv value.
+# Draw order from the single rng stream matters: x, normal, w, trials,
+# binomial, gamma, poisson, per-row gamma sums.
+# ---------------------------------------------------------------------------
+
+def _weights_fixture():
+    rng = np.random.default_rng(42)
+    n = 150
+    x = rng.uniform(0, 1, n)
+    f = np.sin(2 * np.pi * x) + 0.5 * x
+    y = f + rng.normal(0, 0.3, n)
+    w = np.round(rng.uniform(0.5, 3.0, n), 6)
+    w0 = w.copy()
+    w0[5] = 0.0
+    w0[77] = 0.0
+    trials = rng.integers(1, 21, n).astype(float)
+    pr = 1.0 / (1.0 + np.exp(-(1.5 * np.sin(2 * np.pi * x))))
+    ybin = rng.binomial(trials.astype(int), pr) / trials
+    yg = rng.gamma(shape=4.0, scale=np.exp(0.3 + np.sin(2 * np.pi * x)) / 4.0,
+                   size=n)
+    lam = np.exp(0.2 + np.sin(2 * np.pi * x))
+    N = rng.poisson(lam)
+    ytw = np.array([rng.gamma(3.0, 0.25, size=k).sum() if k > 0 else 0.0
+                    for k in N])
+    df = pl.DataFrame({"x": x, "y": y, "ybin": ybin, "yg": yg, "ytw": ytw})
+    return df, w, w0, trials
+
+
+def test_weights_gaussian_reml_matches_mgcv():
+    # gam(y ~ s(x), weights=w, method="REML") — continuous prior weights
+    # through PIRLS, the (ρ, log φ) criterion (family.ls), Fletcher scale,
+    # null deviance (weighted mean), AIC (gaussian: −Σlog w term), predict
+    # SE, and gam.vcomp.
+    df, w, _, _ = _weights_fixture()
+    m = gam("y ~ s(x)", df, weights=w, method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 50.1095803830,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.01687308936, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 7.7166114092,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.sigma_squared, 0.1549911683,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(np.asarray(m.coef)[0], 0.2301681628,
+                               rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.null_deviance, 110.2038284565,
+                               rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.deviance, 22.0526686291, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.AIC, 82.9992153234, rtol=0, atol=1e-5)
+    p = m.predict(newdata=df[:2], se_fit=True)
+    np.testing.assert_allclose(p["fit"].to_numpy(),
+                               [-0.5141652368, 0.5948125387],
+                               rtol=0, atol=1e-7)
+    np.testing.assert_allclose(p["se.fit"].to_numpy(),
+                               [0.06401862872, 0.05586021636],
+                               rtol=0, atol=1e-8)
+    # hea's vcomp is mgcv's gam.vcomp(rescale=FALSE) flavor — σ_k at the
+    # fitted S scaling. mgcv's default rescale=TRUE divides each sp by the
+    # smooth's S.scale (smoothCon's maS) first; hea doesn't track S.scale
+    # yet (recorded in plan Tier 4 — vcomp rescale).
+    vc = m.vcomp
+    np.testing.assert_allclose(vc["std_dev"].to_numpy(),
+                               [3.03079228, 0.39368918], rtol=1e-4)
+    np.testing.assert_allclose(vc["lower"].to_numpy(),
+                               [1.72194402, 0.35054488], rtol=1e-3)
+    np.testing.assert_allclose(vc["upper"].to_numpy(),
+                               [5.33449504, 0.44214358], rtol=1e-3)
+
+
+def test_weights_unit_weights_are_bit_identical():
+    # weights=ones must reproduce the unweighted fit exactly — every site
+    # reads the same self._wt array, so this guards the plumbing.
+    df, _, _, _ = _weights_fixture()
+    m0 = gam("y ~ s(x)", df, method="REML")
+    m1 = gam("y ~ s(x)", df, weights=np.ones(df.height), method="REML")
+    assert m0.REML_criterion == m1.REML_criterion
+    assert np.array_equal(np.asarray(m0.coef), np.asarray(m1.coef))
+    assert m0.AIC == m1.AIC
+
+
+def test_weights_zero_weight_rows_match_mgcv():
+    # Two rows with w=0: excluded from the working model (mgcv's `good`
+    # mask) but still predicted; n.true stays nobs in the scale estimator
+    # (gam.fit3.r:197); gaussian AIC = Inf via the −Σlog(w) term, exactly
+    # as in R.
+    df, _, w0, _ = _weights_fixture()
+    m = gam("y ~ s(x)", df, weights=w0, method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 50.5134527011,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.01654847277, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 7.7161062133,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.sigma_squared, 0.1543587507,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(m.null_deviance, 108.8015552005,
+                               rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.deviance, 21.9627640897, rtol=0, atol=1e-7)
+    assert np.isinf(m.AIC)
+    assert np.all(np.isfinite(m.fitted_values))
+
+
+def test_weights_gaussian_ml_and_gcv_match_mgcv():
+    df, w, _, _ = _weights_fixture()
+    m = gam("y ~ s(x)", df, weights=w, method="ML")
+    np.testing.assert_allclose(m.ML_criterion / 2, 47.1516979169,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sigma_squared, 0.1549729083,
+                               rtol=0, atol=5e-8)
+    np.testing.assert_allclose(m.AIC, 82.9193007916, rtol=0, atol=1e-4)
+
+    g = gam("y ~ s(x)", df, weights=w)          # GCV.Cp
+    np.testing.assert_allclose(g.GCV_score, 0.1621153374, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(g.sp[0], 0.0546737154, rtol=1e-3)
+    np.testing.assert_allclose(float(np.sum(g.edf)), 6.3807110238,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(g.sigma_squared, 0.1552192632,
+                               rtol=0, atol=1e-7)
+    # mgcv leaves edf2 NULL on the GCV path, so logLik df falls back to
+    # edf and AIC(m) = m$aic exactly.
+    np.testing.assert_allclose(g.AIC, 81.6920422117, rtol=0, atol=1e-5)
+
+
+def test_weights_binomial_trials_match_mgcv():
+    # The R proportion + trials idiom: y = successes/trials, weights=trials.
+    # Covers scale-known REML (no log φ in the outer Hessian — the Vr/Vc/
+    # edf2 chain), the UBRE path, and weighted deviance residuals.
+    from hea.family import Binomial
+    df, _, _, trials = _weights_fixture()
+    m = gam("ybin ~ s(x)", df, weights=trials, family=Binomial(),
+            method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 263.6119585501,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.04331411223, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 6.8131092110,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(m.coef)[0], 0.07339991329,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(m.null_deviance, 507.9908739694,
+                               rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.deviance, 174.2643442814, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.fitted_values[0], 0.2149225469,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(m.residuals[0], -1.155459905,
+                               rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.edf2_total, 7.0460305153, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(float(np.sum(np.abs(m.Vc))), 27.9042827995,
+                               rtol=1e-6)
+    np.testing.assert_allclose(m.AIC, 515.1797403312, rtol=0, atol=1e-5)
+
+    u = gam("ybin ~ s(x)", df, weights=trials, family=Binomial())  # UBRE
+    np.testing.assert_allclose(u.GCV_score, 0.2499339831, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(u.sp[0], 0.08471804949, rtol=1e-3)
+    np.testing.assert_allclose(float(np.sum(u.edf)), 6.0726440999,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(u.AIC, 514.3134324773, rtol=0, atol=1e-4)
+
+
+def test_weights_gamma_log_reml_matches_mgcv():
+    # Non-canonical link: Newton weights w = wt·α·μ'²/V with prior weights,
+    # plus mgcv's dev1 = reml.scale·Σw convention in the AIC.
+    df, w, _, _ = _weights_fixture()
+    m = gam("yg ~ s(x)", df, weights=w, family=Gamma(link="log"),
+            method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 163.5973125233,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.04506318324, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 6.5991224158,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.sigma_squared, 0.5729548494,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(np.asarray(m.coef)[0], 0.298512261,
+                               rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.null_deviance, 204.3523621522,
+                               rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.deviance, 74.7456421308, rtol=0, atol=1e-7)
+    # storedaic (family aic + 2·edf) pins exactly; AIC adds 2·(edf2−edf)
+    # whose edf2 wobbles in the optimizer stopping band.
+    np.testing.assert_allclose(m._mgcv_aic, 585.6353269046, rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m.AIC, 585.9668528256, rtol=0, atol=2e-3)
+
+
+def test_weights_tw_matches_mgcv():
+    # Extended family: weighted tw deviance/Dd chain, the Tweedie ls
+    # convention (weight OUTSIDE the density at unmodified φ — mgcv
+    # efam.r:3224), sig2 = exp(φ̂), the θ-gradient with weights, and
+    # logLik df += n_theta.
+    from hea.family import tw
+    df, w, _, _ = _weights_fixture()
+    m = gam("ytw ~ s(x)", df, weights=w, family=tw(), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 373.8945274863,
+                               rtol=0, atol=5e-5)
+    np.testing.assert_allclose(m.sp[0], 0.03566560669, rtol=1e-3)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 6.7139156777,
+                               rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.sigma_squared, 0.9654156127, rtol=1e-5)
+    np.testing.assert_allclose(np.asarray(m.coef)[0], -0.144101299,
+                               rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m.deviance, 275.6496327145, rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m._tw_info["p_hat"], 1.15848981,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.AIC, 740.5840845316, rtol=0, atol=1e-2)
+
+
+def test_weights_validation():
+    df, w, _, _ = _weights_fixture()
+    with pytest.raises(ValueError, match="length"):
+        gam("y ~ s(x)", df, weights=w[:-1], method="REML")
+    bad = w.copy()
+    bad[3] = -1.0
+    with pytest.raises(ValueError, match="negative"):
+        gam("y ~ s(x)", df, weights=bad, method="REML")
+    nan = w.copy()
+    nan[3] = np.nan
+    with pytest.raises(ValueError, match="non-finite"):
+        gam("y ~ s(x)", df, weights=nan, method="REML")

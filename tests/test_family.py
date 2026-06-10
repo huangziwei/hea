@@ -579,7 +579,7 @@ def test_tweedie_dev_limit_to_gamma():
 def test_tweedie_log_density_oracle_p15():
     """ldTweedie(y, mu, rho=0, theta=0, a=1.01, b=1.99)[, 1] at p=1.5, phi=1."""
     f = Tweedie(p=1.5)
-    log_f = f._log_density(_TW_DEV_Y, _TW_DEV_MU, phi=1.0, wt=np.ones(5))
+    log_f = f._log_density(_TW_DEV_Y, _TW_DEV_MU, phi=1.0)
     oracle = [-1.549193338482966809, -0.608940759999017533,
               -1.045247308713201040, -1.710387087424116714,
               -2.026689918613598707]
@@ -589,7 +589,7 @@ def test_tweedie_log_density_oracle_p15():
 def test_tweedie_log_density_oracle_p17():
     """Same at p=1.7, phi=2.0 — exercises the Dunn-Smyth series at off-default p."""
     f = Tweedie(p=1.7)
-    log_f = f._log_density(_TW_DEV_Y, _TW_DEV_MU, phi=2.0, wt=np.ones(5))
+    log_f = f._log_density(_TW_DEV_Y, _TW_DEV_MU, phi=2.0)
     oracle = [-1.429862000740157901, -0.970520782376560809,
               -1.491788879150033331, -2.222992852580873091,
               -2.589272021845887117]
@@ -618,12 +618,16 @@ def test_tweedie_ls_saturated_oracle_p17():
 
 
 def test_tweedie_ls_weighted_oracle():
-    """Weighted saturated ls; per-obs scale phi_i = phi/wt_i (mgcv tw()$ls)."""
+    """Weighted saturated ls — mgcv's convention is the weight OUTSIDE the
+    density at unmodified φ: colSums(wt·ldTweedie(y, y, rho=log(φ)))
+    (tw()$ls efam.r:3224, fix.family.ls gam.fit3.r:3083). Oracle from
+    mgcv 1.9-4 ldTweedie at p=1.5, φ=1.5."""
     f = Tweedie(p=1.5)
     wt = np.array([0.5, 1.0, 2.0, 1.0, 0.5])
     ls = f.ls(_TW_DEV_Y, wt, scale=1.5)
-    np.testing.assert_allclose(ls[0], -5.85919331444838587, rtol=1e-12)
-    np.testing.assert_allclose(ls[1], -3.06707140557613522, rtol=1e-12)
+    np.testing.assert_allclose(ls[0], -6.5366223458531341, rtol=1e-12)
+    np.testing.assert_allclose(ls[1], -3.2991695964476975, rtol=1e-12)
+    np.testing.assert_allclose(ls[2], -1.4641591053552576, rtol=1e-9)
 
 
 def test_tweedie_ls_zero_weights_dropped():

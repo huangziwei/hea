@@ -487,6 +487,14 @@ class gam:
     offset : array-like, optional
         Added to the linear predictor (combined with any formula
         ``offset(...)`` terms).
+    weights : array-like, optional
+        mgcv's prior weights ``w_i``: per-observation multipliers on the
+        log-likelihood contribution (frequency/precision weights). For
+        ``Binomial()`` this is the trials vector ``m_i`` with ``y`` the
+        success *proportion* (R's proportion + ``weights=`` idiom; the
+        ``cbind(succ, fail)`` response form is not parsed — pre-convert).
+        Zero-weight rows are excluded from fitting (mgcv's ``good`` mask)
+        but still get fitted values. Default: ones.
     gamma : float, default 1.0
         mgcv's smoothing-strength multiplier (Wood §4.6 suggests 1.4 for
         extra over-fitting protection).
@@ -633,6 +641,7 @@ class gam:
         sp: np.ndarray | None = None,
         family: Family | None = None,
         offset: np.ndarray | list | None = None,
+        weights: np.ndarray | list | None = None,
         gamma: float = 1.0,
         select: bool = False,
         knots: dict | None = None,
@@ -716,6 +725,28 @@ class gam:
             blk = _eval_atom(off_node, d.data)
             off = off + blk.values.flatten().astype(float)
         self._offset = off
+
+        # mgcv's prior weights (gam(weights=)). One canonical array,
+        # ``self._wt``, set before any fitting so the PIRLS loop, the
+        # REML/ML criterion (family.ls), initial.spg, and every post-fit
+        # consumer (Pearson scale, residuals, AIC, null deviance) read the
+        # same values. glm semantics: zero allowed (row excluded from the
+        # working model via the `good` mask, still predicted), negative
+        # rejected.
+        if weights is None:
+            self._wt = np.ones(n)
+        else:
+            wt_prior = np.asarray(weights, dtype=float).flatten()
+            if wt_prior.shape != (n,):
+                raise ValueError(
+                    f"weights must have length {n}, got {wt_prior.shape}"
+                )
+            if not np.all(np.isfinite(wt_prior)):
+                raise ValueError("missing or non-finite values in weights")
+            if np.any(wt_prior < 0):
+                raise ValueError("negative weights not allowed")
+            self._wt = wt_prior
+        self.prior_weights = self._wt
 
         sb_lists = (
             materialize_smooths(d.expanded, d.data, knots=knots)
@@ -1039,9 +1070,11 @@ class gam:
                 # (mgcv.r:1854-1870, 2027-2029) — the deviance of the
                 # constant-mean fit, not a Pearson estimate (and no extra
                 # PIRLS fit).
+                # mum = mean(y) is *unweighted* (mgcv.r:1863) but the
+                # dev.resids carry the prior weights (mgcv.r:1868).
                 mu_null0 = np.full(n, float(np.mean(self._y_arr)))
                 null_scale = float(np.sum(family.dev_resids(
-                    self._y_arr, mu_null0, np.ones(n)
+                    self._y_arr, mu_null0, self._wt
                 ))) / n
                 cur_logphi = float(np.log(max(null_scale / 10.0, 1e-12)))
             else:
@@ -1144,10 +1177,9 @@ class gam:
         # remains non-negative and interpretable.
         edf = np.diag(A_inv_XtWX).copy()
         edf_total = float(edf.sum())
-        # Prior weights (PIRLS uses ones today; binomial size / offset / prior-w
-        # land later). Stored so residuals_of and Pearson-scale share the same
-        # weights PIRLS fit with.
-        self._wt = np.ones(n)
+        # Prior weights (set at __init__ intake — gam(weights=) or ones).
+        # residuals_of and the Pearson scale below share the exact array
+        # PIRLS fit with.
         wt = self._wt
         # df.residual used in mgcv = n - edf_total. For unknown-scale
         # families, mgcv reports `m$sig2 = m$scale = scale.est`, regardless
@@ -1393,14 +1425,22 @@ class gam:
                 else 0
             )
             self._n_theta_aug = n_th_aug
+            # mgcv's outer.info$hess spans exactly the optimizer's θ: ρ,
+            # plus log φ only when the scale is estimated, plus family θ
+            # for tw. Scale-known families (binomial, Poisson) have NO
+            # log φ row — appending one shifts every Schur-complement ρρ
+            # block (Vr → Vc1/Vc2 → edf2/Vc) off mgcv's, because the
+            # (ρ, log φ) cross term −(∂Dp/∂ρ)/φ is nonzero at convergence.
+            include_phi_aug = not self.family.scale_known
             H_aug = 0.5 * self._reml_hessian(
-                rho_hat, log_phi_hat_for_aug, fit=fit, include_log_phi=True,
+                rho_hat, log_phi_hat_for_aug, fit=fit,
+                include_log_phi=include_phi_aug,
                 include_family_theta=n_th_aug > 0,
             )
             # Working-space view: the criterion is optimized over θ
             # (ρ = L·θ), so Vr — and every CI built on H_aug — lives in
             # working coordinates: H_θ = T'·H_ρ·T, T = blockdiag(L, I).
-            T_aug = self._T_working(1 + n_th_aug)
+            T_aug = self._T_working((1 if include_phi_aug else 0) + n_th_aug)
             if T_aug is not None:
                 H_aug = T_aug.T @ H_aug @ T_aug
             H_aug = 0.5 * (H_aug + H_aug.T)
@@ -1455,11 +1495,15 @@ class gam:
                 if n_th_aug:
                     self.family.set_theta(th1[n_work + 1:n_work + 1 + n_th_aug])
                 fit1 = self._fit_given_rho(rho1)
+                include_phi_aug1 = not self.family.scale_known
                 H_aug1 = 0.5 * self._reml_hessian(
-                    rho1, log_phi1, fit=fit1, include_log_phi=True,
+                    rho1, log_phi1, fit=fit1,
+                    include_log_phi=include_phi_aug1,
                     include_family_theta=n_th_aug > 0,
                 )
-                T_aug1 = self._T_working(1 + n_th_aug)
+                T_aug1 = self._T_working(
+                    (1 if include_phi_aug1 else 0) + n_th_aug
+                )
                 if T_aug1 is not None:
                     H_aug1 = T_aug1.T @ H_aug1 @ T_aug1
                 H_aug1 = 0.5 * (H_aug1 + H_aug1.T)
@@ -1488,11 +1532,26 @@ class gam:
         # `dev1` is family-specific (Gaussian uses dev directly, the Pearson
         # σ̂² is moment-based for the rest); see Family._aic_dev1.
         sc_p = 0.0 if self.family.scale_known else 1.0
-        dev1 = self.family._aic_dev1(self.deviance, scale, wt)
+        # mgcv's dev1 scale (gam.fit3.r:848): REML/ML fits use reml.scale
+        # = exp(φ̂) — the optimizer's converged scale — NOT the Fletcher
+        # scale.est, which only feeds dev1 when reml.scale is NA (GCV.Cp).
+        # Gaussian overrides _aic_dev1 to use dev directly either way.
+        aic_scale = (float(np.exp(self._log_phi_hat))
+                     if self._log_phi_hat is not None else scale)
+        dev1 = self.family._aic_dev1(self.deviance, aic_scale, wt)
         family_aic = float(self.family.aic(y, fit.mu, dev1, wt, n))
         mgcv_aic = family_aic + 2.0 * edf_total                    # mgcv's m$aic
         logLik = sc_p + edf_total - 0.5 * mgcv_aic                 # mgcv's logLik value
-        df_for_aic = min(self.edf2_total + sc_p, float(p) + sc_p)  # capped at np
+        # mgcv leaves edf2 NULL on the GCV/UBRE path (gam.fit3.post.proc
+        # gates on reml.scale), so logLik.gam's df falls back to edf there;
+        # hea's GCV edf2 attribute stays as a best-effort extra but must
+        # not leak into AIC/BIC.
+        df_base = self.edf2_total if method in ("REML", "ML") else edf_total
+        df_for_aic = min(df_base + sc_p, float(p) + sc_p)          # capped at np
+        # logLik.gam (mgcv.r): extended families add n.theta to the df
+        # *after* the np cap (tw: +1 for the free p).
+        if self._family_mgcv_extended:
+            df_for_aic += float(getattr(self.family, "n_theta", 0) or 0)
         self.loglike = float(logLik)
         self.logLik = self.loglike                                 # alias (mgcv-style name)
         self.npar = float(df_for_aic)
@@ -1729,7 +1788,7 @@ class gam:
         # Penalty square root for the augmented QR solves (mgcv's Sr);
         # fixed across PIRLS iterations at this ρ.
         E_aug = self._penalty_root(rho)
-        wt = np.ones(n)                 # prior weights = 1 (offset is plumbed; prior-w lands later)
+        wt = self._wt                   # prior weights (gam(weights=) or ones)
 
         # ``eta`` here is the *offset-stripped* β-only predictor X·β; the
         # full linear predictor is ``eta + off``. Mirrors glm._irls. We
@@ -1817,10 +1876,11 @@ class gam:
                 raise FloatingPointError("0s in V(mu) in PIRLS")
             if np.any(np.isnan(mu_eta_v)):
                 raise FloatingPointError("NAs in d(mu)/d(eta) in PIRLS")
-            # gam.fit3.r:308 drops rows with μ'(η)=0 from the working model
-            # (the `good` mask). Vectorized equivalent: w = 0 *and* z = 0
-            # (so w·z is 0, not 0·inf) — identical X'WX and X'Wz.
-            good = mu_eta_v != 0.0
+            # gam.fit3.r:308 drops zero-weight rows and rows with μ'(η)=0
+            # from the working model (`good <- (weights > 0) & (mu.eta.val
+            # != 0)`). Vectorized equivalent: w = 0 *and* z = 0 (so w·z is
+            # 0, not 0·inf) — identical X'WX and X'Wz.
+            good = (wt > 0.0) & (mu_eta_v != 0.0)
             if not np.any(good):
                 warn_msgs.append(
                     f"PIRLS: no informative observations at iteration {it}"
@@ -1996,14 +2056,16 @@ class gam:
         V = family.variance(mu)
         d2g = link.d2link(mu)
         # Same `good` masking as the loop (gam.fit3 recomputes the mask for
-        # the derivative call): rows with μ'(η)=0 get w=0, z=0.
-        good = mu_eta_v != 0.0
+        # the derivative call): zero-weight rows and rows with μ'(η)=0 get
+        # w=0, z=0.
+        good = (wt > 0.0) & (mu_eta_v != 0.0)
         safe_mu_eta = np.where(good, mu_eta_v, 1.0)
         alpha = 1.0 + (y - mu) * (family.dvar(mu) / V + d2g * mu_eta_v)
         alpha = np.where(alpha == 0.0, np.finfo(float).eps, alpha)
-        # offset-stripped working response
+        # offset-stripped working response; w = wf·α with the Fisher part
+        # wf = wt·μ'²/V carrying the prior weights (gam.fit3.r:512-515).
         z = np.where(good, eta + (y - mu) / (safe_mu_eta * alpha), 0.0)
-        w = np.where(good, alpha * mu_eta_v ** 2 / V, 0.0)
+        w = np.where(good, wt * alpha * mu_eta_v ** 2 / V, 0.0)
         # mgcv keeps the *signed* Newton weights in the score machinery —
         # gam.fit3.r:505-515 passes w = wf·α (negatives included) to gdi1,
         # which handles them via gdiPK's SVD determinant correction
@@ -2019,7 +2081,7 @@ class gam:
         if (not ok) and np.any(w < 0):
             alpha = np.ones(n)
             z = np.where(good, eta + (y - mu) / safe_mu_eta, 0.0)
-            w = np.where(good, mu_eta_v ** 2 / V, 0.0)
+            w = np.where(good, wt * mu_eta_v ** 2 / V, 0.0)
             is_fisher_fallback = True
             _b_fin, R_fin, log_det_A, ok = self._pls_qr(w, z, E_aug)
         if ok:
@@ -2054,8 +2116,7 @@ class gam:
         and the pls_fit1-style identifiability check."""
         family = self.family
         link = family.link
-        n = y.shape[0]
-        wt = np.ones(n)
+        wt = self._wt
         mustart = family.gam_initialize(y, wt)
         eta0 = link.link(mustart)
         if self._family_mgcv_extended:
@@ -2359,12 +2420,10 @@ class gam:
         phi = float(np.exp(log_phi))
         if not (np.isfinite(phi) and phi > 0):
             return 1e15
-        # Prior weights placeholder. PIRLS uses the same `np.ones(n)` today;
-        # when the user-facing ``weights=`` arg lands, both paths read from
-        # ``self._wt_prior``. ``family.ls`` returns (ls0, d_ls/d_log_φ,
-        # d²_ls/d_log_φ²) — Phase 2.1 only needs ls0; the derivatives feed
-        # the (rho, log φ) Hessian in Phase 3.
-        wt = np.ones(self.n)
+        # ``family.ls`` returns (ls0, d_ls/d_log_φ, d²_ls/d_log_φ²) at the
+        # prior weights — only ls0 enters the criterion; the derivatives
+        # feed the (ρ, log φ) gradient/Hessian rows.
+        wt = self._wt
         ls0 = float(self.family.ls(self._y_arr, wt, phi)[0])
         rp = self._reparam_at(rho)
         log_det_S = (rp["det"] if rp is not None
@@ -2477,7 +2536,7 @@ class gam:
             return grad_rho
 
         Mp = float(self._Mp)
-        wt = np.ones(self.n)
+        wt = self._wt
         Dp = fit.dev + fit.pen
         ls = np.asarray(self.family.ls(self._y_arr, wt, phi), dtype=float)
         ls1 = float(ls[1])    # d ls / d(log φ), already chain-ruled
@@ -2596,7 +2655,7 @@ class gam:
             if include_log_phi:
                 Dp0 = fit.dev + fit.pen
                 ls = np.asarray(self.family.ls(self._y_arr,
-                                               np.ones(self.n), phi))
+                                               self._wt, phi))
                 H[0, 0] = (Dp0 / phi - 2.0 * float(ls[2])) / gamma
             return H
 
@@ -2855,7 +2914,7 @@ class gam:
             H_aug[k, n_sp] = cross
             H_aug[n_sp, k] = cross
         Dp = fit.dev + fit.pen
-        ls = np.asarray(self.family.ls(self._y_arr, np.ones(self.n), phi))
+        ls = np.asarray(self.family.ls(self._y_arr, self._wt, phi))
         H_aug[n_sp, n_sp] = (Dp / phi - 2.0 * float(ls[2])) / gamma
 
         if not include_family_theta or self.family.n_theta == 0:
@@ -3436,7 +3495,9 @@ class gam:
             return fit
         mu_eta = family.link.mu_eta(eta)
         V = family.variance(mu)
-        W_F = mu_eta ** 2 / V
+        # wf = wt·μ'²/V (gam.fit3.r:512/644) — prior weights included;
+        # zero-weight rows stay excluded (μ'=0 rows zero out by algebra).
+        W_F = np.where(self._wt > 0.0, self._wt * mu_eta ** 2 / V, 0.0)
         if np.allclose(W_F, fit.w):
             return fit
         if fit.E_aug is not None:
@@ -3868,7 +3929,9 @@ class gam:
         mu_eta = family.link.mu_eta(eta)
         V = family.variance(mu)
         log_mu = np.log(mu)
-        duf_dp = -mu_eta * (y - mu) * log_mu / V
+        # Weighted Fisher score u_F = wt·μ_η·(y−μ)/V — the prior weights
+        # ride along in ∂u_F/∂p.
+        duf_dp = -self._wt * mu_eta * (y - mu) * log_mu / V
         rhs = self._X_full.T @ duf_dp
         return cho_solve((fit.A_chol, fit.A_chol_lower), rhs)
 
@@ -3910,7 +3973,8 @@ class gam:
         mu_eta = family.link.mu_eta(eta)
         V = family.variance(mu)
         log_mu = np.log(mu)
-        muV = mu_eta ** 2 / V
+        # W = wt·α·μ_η²/V — prior weights scale every ∂W/∂p piece.
+        muV = self._wt * mu_eta ** 2 / V
 
         # Direct ∂W/∂p|_{β̂}.
         if fit.is_fisher_fallback:
@@ -5078,7 +5142,11 @@ class gam:
             J[np.arange(n_sp), np.arange(n_sp)] = -0.5
         else:
             J[:n_sp, :n_work] = -0.5 * self._L
-        J[:, n_work] = 0.5
+        # log σ² column exists only when the scale is estimated (H_aug is
+        # ρ-only for scale-known families, matching mgcv's hess). Fixed
+        # scale ⇒ the +½·log σ² term carries no uncertainty.
+        if H.shape[0] > n_work:
+            J[:, n_work] = 0.5
 
         Vc = J @ Hinv @ J.T
         se = np.sqrt(np.maximum(np.diag(Vc), 0.0))
