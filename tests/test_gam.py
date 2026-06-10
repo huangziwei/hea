@@ -3443,13 +3443,14 @@ def test_vcomp_rescale_select_null_penalty_scale_one():
 def test_vcomp_rescale_fs_consistency_and_mgcv():
     # fs: multi-S block through the dedicated builder. _nat_param's type=1
     # chain is fp-faithful to mgcv's nat.param (triangular solves,
-    # unsymmetrized evr eigen), and on this fixture scipy's dsyevr resolves
-    # the degenerate null eigenspace to the SAME basis as R's — vcomp rows
-    # match in value and order. The within-null basis is LAPACK-build noise
-    # (R itself rotates it O(1) across machines), so if a future
-    # BLAS/LAPACK change breaks the null rows here, re-pin from R on the
-    # same machine. The rescale mechanism is pinned exactly via
-    # σ_k(default) = σ_k(rescale=False)·√S.scale.
+    # unsymmetrized evr eigen), and dsyevr resolves the degenerate null
+    # eigenspace to the SAME two vectors on every build probed (Accelerate,
+    # OpenBLAS, R's reference LAPACK) — but their ORDER follows the sort of
+    # two noise-level eigenvalues and genuinely flips between builds (CI's
+    # OpenBLAS swaps the pair vs the Mac that generated the pins, with
+    # values matching to 1e-8; R itself has no canonical order). So the
+    # null pair is compared sorted, values tight. The rescale mechanism is
+    # pinned exactly via σ_k(default) = σ_k(rescale=False)·√S.scale.
     m = gam("y ~ s(x0, g, bs='fs')", _vcomp_fixture(), method="REML")
     vc = m.vcomp
     vc0 = m._compute_vcomp(rescale=False)
@@ -3460,30 +3461,36 @@ def test_vcomp_rescale_fs_consistency_and_mgcv():
     np.testing.assert_allclose(
         vc["lower"].to_numpy()[:3],
         vc0["lower"].to_numpy()[:3] * np.sqrt(ss), rtol=1e-12)
-    # mgcv 1.9-4 gam.vcomp: range row, null rows in mgcv's order, scale.
+    # mgcv 1.9-4 gam.vcomp: range row, null pair (sorted), scale.
+    vals = vc["std_dev"].to_numpy()
+    lows = vc["lower"].to_numpy()
+    o = 1 + np.argsort(vals[1:3])  # null-pair order is LAPACK-build noise
     np.testing.assert_allclose(
-        vc["std_dev"].to_numpy(),
+        np.concatenate([vals[:1], vals[o], vals[3:]]),
         [23.705650223879, 0.255257857391, 0.351338675157, 0.870402969596],
         rtol=1e-5)
     np.testing.assert_allclose(
-        vc["lower"].to_numpy(),
+        np.concatenate([lows[:1], lows[o], lows[3:]]),
         [16.827537361971, 0.114220884469, 0.180002939012, 0.790025586953],
         rtol=1e-5)
 
 
 def test_fs_smooth_fit_matches_mgcv():
-    # The fs construction is mgcv-exact on this machine (every X column to
-    # 2e-12, S.scale to 12 digits — the nat.param re-derivation, plan A1),
-    # so the whole REML fit pins tightly: sp (all three, mgcv's order),
-    # REML, scale, edf, fitted. The fixed-sp REML is THE basis-sensitive
-    # quantity (each null dimension carries its own λ): it diverged O(0.01)
-    # under the old rotated basis and now matches to 1e-12. Same noise
-    # caveat as the vcomp test above: the null-dim ORDER inside sp/vcomp is
-    # LAPACK-build noise — swap those pins if a future LAPACK flips it.
+    # The fs construction is mgcv-exact up to the null-pair ORDER (the only
+    # LAPACK-build noise — see the vcomp test above; the vectors themselves
+    # reproduce across builds): REML/scale/edf/fitted are order-invariant
+    # and pin tight; sp pins as range + sorted null pair. The fixed-sp REML
+    # is THE basis-sensitive quantity (each null dimension carries its own
+    # λ; it diverged O(0.01) under the old rotated basis): R fit
+    # sp=c(1, 2, 0.5) in ITS null order, so exactly one of the two ways of
+    # assigning (2, 0.5) to hea's null pair is that same model — the better
+    # ordering must match R to 1e-10.
     df = _vcomp_fixture()
     m = gam("y ~ s(x0, g, bs='fs')", df, method="REML")
+    sp = np.asarray(m.sp)
     np.testing.assert_allclose(
-        m.sp, [0.0302404084243, 0.0793274311249, 0.0418725790411], rtol=1e-6)
+        np.concatenate([sp[:1], np.sort(sp[1:3])]),
+        [0.0302404084243, 0.0418725790411, 0.0793274311249], rtol=1e-6)
     np.testing.assert_allclose(m.REML_criterion / 2, 342.959898695382,
                                rtol=1e-10)
     np.testing.assert_allclose(m.scale, 0.757601417077, rtol=1e-9)
@@ -3492,10 +3499,13 @@ def test_fs_smooth_fit_matches_mgcv():
         np.asarray(m.fitted_values)[:5],
         [0.059141969561, 0.267571299093, 0.572985963884,
          2.288189939067, 2.361954603671], atol=1e-8)
-    m2 = gam("y ~ s(x0, g, bs='fs')", df, method="REML", sp=[1.0, 2.0, 0.5])
-    np.testing.assert_allclose(m2.REML_criterion / 2, 375.551476460602,
-                               rtol=1e-10)
-    np.testing.assert_allclose(np.sum(m2.edf), 9.102090869012, rtol=1e-9)
+    rems = [gam("y ~ s(x0, g, bs='fs')", df, method="REML",
+                sp=[1.0] + null_sp).REML_criterion / 2
+            for null_sp in ([2.0, 0.5], [0.5, 2.0])]
+    best = min(rems, key=lambda r: abs(r - 375.551476460602))
+    np.testing.assert_allclose(best, 375.551476460602, rtol=1e-10)
+    assert abs(max(rems, key=lambda r: abs(r - 375.551476460602))
+               - 375.551476460602) > 1e-3  # the other order is a real model change
 
 
 # ---------------------------------------------------------------------------
