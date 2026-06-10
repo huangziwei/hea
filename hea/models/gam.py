@@ -1,35 +1,36 @@
-"""Generalized additive model — mgcv-style penalized regression with
-REML/GCV smoothing-parameter selection.
+"""Generalized additive model — a port of mgcv's ``gam()``.
 
 Built on hea.formula's ``parse → expand → materialize / materialize_smooths``
 pipeline: the parametric side comes from ``materialize`` (R-canonical
 column names); each smooth call (``s``/``te``/``ti``/``t2``) is passed to
 ``materialize_smooths`` which mirrors mgcv's ``smoothCon(..., absorb.cons=
-TRUE, scale.penalty=TRUE)``.
+TRUE, scale.penalty=TRUE)``. Identifiability across nested smooths
+(``s(x1) + te(x1, x2)``) is handled by a port of mgcv's ``gam.side`` /
+``fixDependence``; rank-deficient designs are dropped to identifiability
+like mgcv's ``pls_fit1`` (coef 0 / SE 0 reporting).
 
-The penalized design is assembled once as
-``X = [X_param | X_block_1 | X_block_2 | …]`` with a parallel list of
-penalty matrices ``S_k`` (one per (block, penalty) slot) embedded in
-``p × p`` templates. Smoothing parameters ``λ = exp(ρ)`` are selected by
-minimizing REML (default) or GCV over ``ρ`` with L-BFGS-B; at each
-evaluation ``β̂(λ) = (XᵀX + Sλ)⁻¹ Xᵀy`` is solved by Cholesky.
+Fitting follows gam.fit3/gdi: an inner PIRLS loop (Fisher for canonical
+links, full Newton otherwise) whose every solve is the QR of the
+augmented matrix ``[√|W|·X; E]`` — ``E`` being ``gam.reparam``'s stable
+penalty square root — with gdiPK's SVD correction for negative Newton
+weights; an outer analytical-Newton optimization of REML/ML (default)
+or GCV/UBRE over ``ρ = log λ`` (plus log φ and family θ for tw()),
+seeded at ``initial.spg`` and using ``get_stableS`` for log|Sλ|₊ and
+its derivatives. Smooths sharing ``id=`` are linked through mgcv's
+L-matrix working parameterization.
 
-Identifiability across nested smooths (``s(x1) + te(x1, x2)``) is
-handled by an in-Python port of mgcv's ``gam.side`` / ``fixDependence``:
-te columns that are linearly dependent on the marginal smooths are
-deleted before fitting, dropping te from 24 → 22 cols (matching
-``ncol(model.matrix(m))``).
-
-Gaussian identity link only in this first port. Non-Gaussian families,
-penalized null-space shrinkage, prediction intervals, and out-of-sample
-prediction for smooth terms (needs a mgcv-style ``PredictMat`` shim)
-are out of scope here.
+Post-fit mirrors mgcv's reporting: Vp/Ve/Vc (sp-uncertainty corrected,
+optionally ``edge_correct``-ed), edf/edf1/edf2, the testStat/reTest
+smooth p-values (Wood 2013), Fletcher or exp(φ̂) scale by family class,
+``predict``/``summary``/``check``/``vcomp``/plotting.
 
 References
 ----------
 Wood (2011), "Fast stable REML and ML estimation of semiparametric GLMs",
 JRSS B 73(1), §3-4.
-Wood (2017), *Generalized Additive Models* (2nd ed.), §6.2, §6.6.
+Wood (2013), "On p-values for smooth components of an extended
+generalized additive model", Biometrika 100(1).
+Wood (2017), *Generalized Additive Models* (2nd ed.), ch. 6.
 """
 
 from __future__ import annotations
@@ -457,32 +458,51 @@ def psum_chisq(q: float, lb: np.ndarray, df: np.ndarray | None = None,
 
 
 class gam:
-    """Generalized additive model (Gaussian identity), fit by REML or GCV.
+    """Generalized additive model — mgcv's ``gam()``.
 
     Parameters
     ----------
     formula : str
         mgcv-style formula, e.g. ``"y ~ x1 + s(x2) + s(x3, bs='cr') +
-        te(u, v)"``.
+        te(u, v) + offset(log(e))"``.
     data : polars.DataFrame
         Data table; rows with NA in any referenced column are dropped
         before fitting.
-    method : {"REML", "ML", "GCV.Cp"}, default "REML"
-        Smoothing-parameter selection criterion. ``"ML"`` is Laplace
-        marginal likelihood — like REML but does not profile out the
-        unpenalized fixed effects. Useful for ``anova(m1, m2)``-style
-        likelihood-ratio comparisons across different fixed-effect
-        structures, where REML scores aren't comparable.
+    method : {"REML", "ML", "GCV.Cp"}, default "GCV.Cp"
+        Smoothing-parameter selection criterion (mgcv's default too;
+        prefer ``"REML"`` for most work). ``"ML"`` is Laplace marginal
+        likelihood — like REML but does not profile out the unpenalized
+        fixed effects. Useful for ``anova(m1, m2)``-style likelihood-
+        ratio comparisons across different fixed-effect structures,
+        where REML scores aren't comparable.
     sp : None or array-like, optional
         If given, fix smoothing parameters at these (non-negative)
-        values and skip optimization. Length must match the total number
-        of penalty slots across all smooth blocks.
+        values and skip optimization. Length is the number of *working*
+        smoothing parameters — one per penalty slot, except that smooths
+        sharing an ``id=`` contribute a single shared parameter (mgcv's
+        ``m$sp``).
+    family : hea.family.Family, optional
+        Response family (Gaussian, Gamma, Poisson, Binomial,
+        InverseGaussian, Tweedie, tw, …). Default Gaussian-identity.
+    offset : array-like, optional
+        Added to the linear predictor (combined with any formula
+        ``offset(...)`` terms).
+    gamma : float, default 1.0
+        mgcv's smoothing-strength multiplier (Wood §4.6 suggests 1.4 for
+        extra over-fitting protection).
     select : bool, default False
         Mirror of mgcv's ``select=TRUE``. When ``True``, an extra penalty
         is added to each smooth term over its null-space directions, so
         the smoothing-parameter selection can shrink any term entirely
         to zero — i.e., perform model selection alongside smoothness
         estimation. Each smooth gains one additional smoothing parameter.
+    knots : dict, optional
+        Per-covariate knot overrides (mgcv's ``knots=list(...)``).
+    edge_correct : bool or float, default False
+        mgcv's ``gam.control(edge.correct=)``: improve ``Vc`` near
+        smoothing parameters at "working infinity" (REML/ML only; a
+        number sets the target criterion increase per flat parameter,
+        ``True`` means 0.02).
 
     Attributes (always set)
     -----------------------
@@ -583,6 +603,10 @@ class gam:
     # the *full* columns).
     _keep_cols: np.ndarray | None = None
     _block_keep: list[np.ndarray] | None = None
+    # Range basis Y of the balanced total penalty (totalPenaltySpace) —
+    # maps gam.reparam's range-space quantities back to the full
+    # coefficient space (penalty root E_full = rp$E·Qs'·Y').
+    _reparam_Y: np.ndarray | None = None
 
     @property
     def _work_dim(self) -> int:
@@ -1094,12 +1118,26 @@ class gam:
         # cho_solve(I) rather than via diag-tricks, since we need the full
         # matrix for Ve, per-coef SEs, and predict().
         A_inv = cho_solve((A_chol, A_chol_lower), np.eye(p))
+        # F = A⁻¹X'WX (mgcv's edf matrix) and X'WX itself, computed
+        # through the triangular factor instead of the explicit product:
+        # with A = C'C and K_w = √W·X·C⁻¹ (= the data-rows orthogonal
+        # factor when C came from the augmented QR),
+        #     X'WX = C'(K_w'K_w)C,   F = C⁻¹(K_w'K_w)C.
+        # The explicit √W·X' @ √W·X squares the condition number and made
+        # edf garbage (negative totals) on κ(X) ≈ 1e10 designs that the
+        # QR fit path handles exactly.
         if fit_F.w is None or np.allclose(fit_F.w, 1.0):
-            XtWX = XtX
+            Xw_F = X
         else:
-            Xw = X * np.sqrt(fit_F.w)[:, None]
-            XtWX = Xw.T @ Xw
-        A_inv_XtWX = A_inv @ XtWX
+            Xw_F = X * np.sqrt(np.maximum(fit_F.w, 0.0))[:, None]
+        # (cho_factor leaves junk in the unused triangle; the explicit
+        # matmuls below need it masked.)
+        C_F = np.triu(A_chol) if not A_chol_lower else np.triu(A_chol.T)
+        # K_w = Xw·C⁻¹  ⇔  C' K_w' = Xw'
+        Kw_F = solve_triangular(C_F, Xw_F.T, lower=False, trans="T").T
+        KtK_F = Kw_F.T @ Kw_F
+        XtWX = C_F.T @ KtK_F @ C_F
+        A_inv_XtWX = solve_triangular(C_F, KtK_F @ C_F, lower=False)
         # Per-coefficient edf = diag(F) where F = A⁻¹ X'WX. F is not
         # symmetric, so individual diag entries can be negative — mgcv
         # reports them verbatim (matches m$edf), and the per-smooth sum
@@ -1688,6 +1726,9 @@ class gam:
         n, p = self.n, self.p
         Sλ = self._build_S_lambda(rho)
         Sλ = 0.5 * (Sλ + Sλ.T)
+        # Penalty square root for the augmented QR solves (mgcv's Sr);
+        # fixed across PIRLS iterations at this ρ.
+        E_aug = self._penalty_root(rho)
         wt = np.ones(n)                 # prior weights = 1 (offset is plumbed; prior-w lands later)
 
         # ``eta`` here is the *offset-stripped* β-only predictor X·β; the
@@ -1804,34 +1845,24 @@ class gam:
                 )
                 w = np.where(good, wt * alpha_it * mu_eta_v ** 2 / V, 0.0)
 
-            A = (X.T * w) @ X + Sλ
-            A = 0.5 * (A + A.T)
-            try:
-                A_chol, lower = cho_factor(A, lower=True, overwrite_a=False)
-            except np.linalg.LinAlgError:
-                A_chol = None
-            if A_chol is None and not fisher:
-                # Newton weights made X'WX+Sλ indefinite — redo this step
-                # with Fisher weights (gam.fit3.r:341-352, oo$n<0 branch).
+            start, _R_it, _ld_it, ok = self._pls_qr(w, z, E_aug)
+            if (not ok) and not fisher:
+                # Newton weights made X'WX+Sλ indefinite — pls_fit1
+                # signals this (oo$n<0) and gam.fit3 redoes the step with
+                # Fisher weights (gam.fit3.r:341-352).
                 z = np.where(good, eta + (y - mu) / safe_mu_eta, 0.0)
                 w = np.where(good, wt * mu_eta_v ** 2 / V, 0.0)
+                start, _R_it, _ld_it, ok = self._pls_qr(w, z, E_aug)
+            if not ok:
+                # Singularity beyond what the augmented QR survives —
+                # legacy normal-equations ridge as the last resort.
                 A = (X.T * w) @ X + Sλ
                 A = 0.5 * (A + A.T)
-                try:
-                    A_chol, lower = cho_factor(
-                        A, lower=True, overwrite_a=False
-                    )
-                except np.linalg.LinAlgError:
-                    A_chol = None
-            if A_chol is None:
-                # Fisher A is PSD by construction; a Cholesky failure here
-                # is numerical singularity. Ridge until the pivoted-QR fit
-                # space (plan §2.1) replaces this solve.
                 ridge = 1e-8 * np.trace(A) / p
-                A_chol, lower = cho_factor(
+                A_chol_r, lower_r = cho_factor(
                     A + ridge * np.eye(p), lower=True, overwrite_a=False,
                 )
-            start = cho_solve((A_chol, lower), X.T @ (w * z))
+                start = cho_solve((A_chol_r, lower_r), X.T @ (w * z))
             if np.any(~np.isfinite(start)):
                 # mgcv warns and bails out of the main loop with conv=FALSE
                 # (gam.fit3.r:358-363). Keep the last consistent iterate so
@@ -1975,35 +2006,32 @@ class gam:
         w = np.where(good, alpha * mu_eta_v ** 2 / V, 0.0)
         # mgcv keeps the *signed* Newton weights in the score machinery —
         # gam.fit3.r:505-515 passes w = wf·α (negatives included) to gdi1,
-        # which handles them via an SVD determinant correction
-        # (gdi.c:1816-1901). While X'WX+Sλ stays PD — the usual case, since
-        # E[α]=1 — Cholesky of the signed matrix gives exactly mgcv's
-        # log|X'WX+S| = 2Σlog|R_ii| + log|I−2D²|. The indefinite corner
-        # needs gdiPK's clamped pseudo-determinant basis (plan §2.1);
-        # until then that (rare) corner falls back to Fisher weights.
+        # which handles them via gdiPK's SVD determinant correction
+        # (gdi.c:1816-1901). ``_pls_qr`` is that machinery: the factor is
+        # built from the augmented QR of [√|W|·X; E] (κ, not κ²) with the
+        # (I−2D²) correction for negative rows, and
+        # log|X'WX+S| = 2Σlog|R_ii| + log|I−2D²| exactly. The *indefinite*
+        # corner (some 1−2d² ≤ 0, where gdi clamps to a pseudo-determinant
+        # basis) is still not carried through the derivative chain — that
+        # rare corner falls back to Fisher weights (plan §2.1 residual).
         is_fisher_fallback = False
-        XtWX = (X.T * w) @ X
-        A = XtWX + Sλ
-        A = 0.5 * (A + A.T)
-        try:
-            A_chol, lower = cho_factor(A, lower=True, overwrite_a=False)
-        except np.linalg.LinAlgError:
-            if np.any(w < 0):
-                alpha = np.ones(n)
-                z = np.where(good, eta + (y - mu) / safe_mu_eta, 0.0)
-                w = np.where(good, mu_eta_v ** 2 / V, 0.0)
-                is_fisher_fallback = True
-                XtWX = (X.T * w) @ X
-                A = XtWX + Sλ
-                A = 0.5 * (A + A.T)
-            try:
-                A_chol, lower = cho_factor(A, lower=True, overwrite_a=False)
-            except np.linalg.LinAlgError:
-                ridge = 1e-8 * np.trace(A) / p
-                A_chol, lower = cho_factor(
-                    A + ridge * np.eye(p), lower=True, overwrite_a=False,
-                )
-        log_det_A = 2.0 * float(np.log(np.abs(np.diag(A_chol))).sum())
+        _b_fin, R_fin, log_det_A, ok = self._pls_qr(w, z, E_aug)
+        if (not ok) and np.any(w < 0):
+            alpha = np.ones(n)
+            z = np.where(good, eta + (y - mu) / safe_mu_eta, 0.0)
+            w = np.where(good, mu_eta_v ** 2 / V, 0.0)
+            is_fisher_fallback = True
+            _b_fin, R_fin, log_det_A, ok = self._pls_qr(w, z, E_aug)
+        if ok:
+            A_chol, lower = R_fin, False
+        else:
+            A = (X.T * w) @ X + Sλ
+            A = 0.5 * (A + A.T)
+            ridge = 1e-8 * np.trace(A) / p
+            A_chol, lower = cho_factor(
+                A + ridge * np.eye(p), lower=True, overwrite_a=False,
+            )
+            log_det_A = 2.0 * float(np.log(np.abs(np.diag(A_chol))).sum())
 
         # ``eta`` here is offset-stripped; downstream consumers
         # (linear_predictors, predict, residuals_of) expect the full
@@ -2015,6 +2043,7 @@ class gam:
             eta=eta + off, mu=mu, w=w, z=z, alpha=alpha,
             is_fisher_fallback=is_fisher_fallback,
             converged=conv, boundary=boundary, warn=warn_msgs,
+            E_aug=E_aug,
         )
 
     def _init_fisher_w(self, y: np.ndarray) -> np.ndarray:
@@ -2090,6 +2119,7 @@ class gam:
             full[a:b, :] = b_root
             UrS.append(Y.T @ full)
         self._UrS = UrS
+        self._reparam_Y = Y
 
     def _reparam_at(self, rho: np.ndarray) -> dict | None:
         """gam.reparam at ρ (det/det1/det2 of log|Sλ|+ on the fixed total-
@@ -2106,6 +2136,114 @@ class gam:
         out = _gam_reparam(self._UrS, rho, deriv=2)
         self._reparam_cache = (key, out)
         return out
+
+    def _penalty_root(self, rho: np.ndarray) -> np.ndarray:
+        """Square root E (e × p) of the assembled penalty, ``E'E = Sλ``,
+        for the augmented least-squares fit (mgcv's ``Sr``).
+
+        Primary source is gam.reparam's leakage-free root mapped back to
+        the original basis: mgcv fits in the transformed basis ``x·T``
+        with ``Sr = [rp$E | 0]`` (gam.fit3.r:162-181); since
+        ``T = U1·blockdiag(Qs, I)`` is orthogonal, the augmented matrix
+        has identical singular values in either basis and hea stays in
+        the original one with ``E = rp$E·Qs'·Y'``. With the
+        identifiability drop active, the kept-column slice of E is an
+        exact root of the reduced Sλ. Falls back to an eigen root of the
+        assembled Sλ when no reparam basis exists."""
+        if not self._slots:
+            return np.zeros((0, self.p))
+        rp = self._reparam_at(rho)
+        if rp is not None and self._reparam_Y is not None:
+            E_full = rp.get("E_orig")
+            if E_full is None:
+                E_full = rp["E"] @ rp["Qs"].T @ self._reparam_Y.T
+                if self._keep_cols is not None:
+                    E_full = E_full[:, self._keep_cols]
+                rp["E_orig"] = E_full
+            return E_full
+        Sλ = self._build_S_lambda(rho)
+        Sλ = 0.5 * (Sλ + Sλ.T)
+        wv, V = np.linalg.eigh(Sλ)
+        w_max = float(wv.max()) if wv.size else 0.0
+        if w_max <= 0:
+            return np.zeros((0, self.p))
+        keep = wv > w_max * float(np.finfo(float).eps)
+        return (V[:, keep] * np.sqrt(wv[keep])).T
+
+    def _pls_qr(self, w: np.ndarray, z: np.ndarray, E_aug: np.ndarray):
+        """Penalized least-squares solve via QR of the augmented matrix —
+        mgcv's ``pls_fit1`` (gdi.c): never forms X'WX, so the working
+        condition number is κ([√W·X; E]) rather than its square.
+
+            min ‖√W(z − Xβ)‖² + β'Sλβ,   E'E = Sλ
+
+        Returns ``(beta, R_upper, log_det, ok)`` with ``R_upper`` a p×p
+        triangular factor satisfying ``R'R = X'WX + Sλ`` (a drop-in
+        Cholesky-factor replacement, ``lower=False``) and
+        ``log_det = log|X'WX + Sλ|``.
+
+        Negative Newton weights are handled by gdiPK's SVD correction
+        (gdi.c:1816-1901): with ``Q₁`` the data-rows orthogonal factor of
+        ``[√|W|·X; E]`` and ``Ĩ Q₁ = U D V'`` its negative-w rows,
+
+            X'WX + Sλ = R'V(I − 2D²)V'R,
+
+        solved through ``(I − 2D²)⁻¹`` and refactored triangular via a
+        small QR of ``(I − 2D²)^{1/2}V'R``. Any ``1 − 2d² ≤ 0`` means the
+        penalized Hessian is indefinite — return ``ok=False``, mirroring
+        pls_fit1's ``n<0`` signal (gam.fit3.r:341 retries the step with
+        Fisher weights).
+        """
+        X = self._X_full
+        n = X.shape[0]
+        neg = w < 0.0
+        sqw = np.sqrt(np.abs(w))
+        aug = np.vstack([X * sqw[:, None], E_aug])
+        Q, R = np.linalg.qr(aug)            # economic: (n+e)×p, p×p
+        diag_R = np.diag(R)
+        if (not np.all(np.isfinite(R))) or np.any(diag_R == 0.0):
+            return None, None, float("nan"), False
+        Q1 = Q[:n]
+        if not np.any(neg):
+            c = Q1.T @ (sqw * z)
+            beta = solve_triangular(R, c, lower=False)
+            log_det = 2.0 * float(np.sum(np.log(np.abs(diag_R))))
+            if not np.all(np.isfinite(beta)):
+                return None, None, float("nan"), False
+            # Normalize to a positive diagonal — downstream consumers
+            # (the Cholesky-derivative chain in _compute_Vc2) assume the
+            # factor *is* the unique Cholesky factor of R'R, not just
+            # any triangular root.
+            sgn = np.where(diag_R < 0, -1.0, 1.0)
+            return beta, R * sgn[:, None], log_det, True
+        # --- negative Newton weights: SVD determinant correction --------
+        # X'WX + Sλ = R'(I − 2·IQ'IQ)R = R'V(I − 2D²)V'R, IQ = Q₁[neg].
+        IQ = Q1[neg]                            # (n_neg, p)
+        _U, d, Vt = np.linalg.svd(IQ, full_matrices=True)   # Vt: (p, p)
+        d2 = np.ones(R.shape[0])
+        d2[:d.size] = 1.0 - 2.0 * d * d         # eigenvalues of I − 2D²
+        if np.any(d2 <= 0.0):
+            return None, None, float("nan"), False
+        zt = sqw * z
+        zt[neg] = -zt[neg]                      # signed √|W|z
+        c = Vt @ (Q1.T @ zt)
+        beta = solve_triangular(
+            R, Vt.T @ (c / d2), lower=False,
+        )
+        if not np.all(np.isfinite(beta)):
+            return None, None, float("nan"), False
+        # Triangular refactor: A = M'M, M = (I−2D²)^{1/2} V' R → QR(M),
+        # normalized to the unique (positive-diagonal) Cholesky factor.
+        M = np.sqrt(d2)[:, None] * (Vt @ R)
+        R_corr = np.linalg.qr(M, mode="r")
+        dR = np.diag(R_corr)
+        if (not np.all(np.isfinite(R_corr))) or np.any(dR == 0.0):
+            return None, None, float("nan"), False
+        sgn = np.where(dR < 0, -1.0, 1.0)
+        R_corr = R_corr * sgn[:, None]
+        log_det = (2.0 * float(np.sum(np.log(np.abs(diag_R))))
+                   + float(np.sum(np.log(d2))))
+        return beta, R_corr, log_det, True
 
     def _log_det_S_pos(self, rho: np.ndarray) -> float:
         """log|Sλ|_+ — log-determinant of Sλ on its fixed range space.
@@ -2928,16 +3066,19 @@ class gam:
                 V_arr = self.family.variance(mu_arr)
                 pearson = float(np.sum((y_arr - mu_arr) ** 2 / V_arr))
                 fit_F_ = self._fisher_view(fit_)
-                A_inv_ = cho_solve(
-                    (fit_F_.A_chol, fit_F_.A_chol_lower), np.eye(self.p)
-                )
                 w_F = fit_F_.w
                 if w_F is None or np.allclose(w_F, 1.0):
-                    XtWX_ = self._XtX
+                    Xw_ = self._X_full
                 else:
-                    Xw_ = self._X_full * np.sqrt(w_F)[:, None]
-                    XtWX_ = Xw_.T @ Xw_
-                tau_ = float(np.trace(A_inv_ @ XtWX_))
+                    Xw_ = self._X_full * np.sqrt(np.maximum(w_F, 0.0))[:, None]
+                # τ = tr(A⁻¹X'WX) = ‖√W·X·C⁻¹‖_F² with A = C'C — the
+                # factor route, not the κ²-squaring explicit product.
+                if fit_F_.A_chol_lower:
+                    Kw_ = solve_triangular(fit_F_.A_chol, Xw_.T, lower=True)
+                else:
+                    Kw_ = solve_triangular(fit_F_.A_chol, Xw_.T,
+                                           lower=False, trans="T")
+                tau_ = float(np.sum(Kw_ * Kw_))
                 df_resid_ = max(self.n - tau_, 1.0)
                 scale_est = pearson / df_resid_
                 s_bar_ = max(-0.9, float(np.mean(
@@ -3298,13 +3439,22 @@ class gam:
         W_F = mu_eta ** 2 / V
         if np.allclose(W_F, fit.w):
             return fit
-        sqW_F = np.sqrt(W_F)
-        Xw = self._X_full * sqW_F[:, None]
-        XtWX_F = Xw.T @ Xw
-        A_F = XtWX_F + fit.S_full
-        A_F = 0.5 * (A_F + A_F.T)
-        A_F_chol, lower = cho_factor(A_F, lower=False)
-        log_det_A_F = 2.0 * float(np.sum(np.log(np.abs(np.diag(A_F_chol)))))
+        if fit.E_aug is not None:
+            _b, A_F_chol, log_det_A_F, ok = self._pls_qr(
+                W_F, fit.z, fit.E_aug,
+            )
+            lower = False
+        else:
+            ok = False
+        if not ok:
+            sqW_F = np.sqrt(W_F)
+            Xw = self._X_full * sqW_F[:, None]
+            A_F = Xw.T @ Xw + fit.S_full
+            A_F = 0.5 * (A_F + A_F.T)
+            A_F_chol, lower = cho_factor(A_F, lower=False)
+            log_det_A_F = 2.0 * float(
+                np.sum(np.log(np.abs(np.diag(A_F_chol))))
+            )
         return _FitState(
             beta=fit.beta, dev=fit.dev, pen=fit.pen,
             A_chol=A_F_chol, A_chol_lower=lower,
@@ -3312,6 +3462,7 @@ class gam:
             eta=eta, mu=mu, w=W_F, z=fit.z, alpha=np.ones(self.n),
             is_fisher_fallback=True,
             converged=fit.converged, boundary=fit.boundary, warn=fit.warn,
+            E_aug=fit.E_aug,
         )
 
     def _dbeta_drho(self, fit: "_FitState",
@@ -4657,18 +4808,18 @@ class gam:
         # X'W_F X)/σ². Fisher W_F to stay consistent with the edf metric
         # used at gam.fit3.r:644 (and with the Fisher A_inv_XtWX our caller
         # passes in). For Gaussian-identity W_F ≡ I and X'W_F X = X'X.
-        if fit.is_fisher_fallback:
-            W_F_view = fit.w
-        else:
-            family = self.family
-            mu_eta = family.link.mu_eta(fit.eta)
-            V = family.variance(fit.mu)
-            W_F_view = mu_eta ** 2 / V
+        # X'W_F X through the Fisher factor (X'WX = C'(K'K)C, K = √W·X·C⁻¹)
+        # — the explicit product squares the condition number.
+        fit_F_v = self._fisher_view(fit)
+        W_F_view = fit_F_v.w
         if W_F_view is None or np.allclose(W_F_view, 1.0):
-            XtWX = self._XtX
+            Xw = self._X_full
         else:
-            Xw = self._X_full * np.sqrt(W_F_view)[:, None]
-            XtWX = Xw.T @ Xw
+            Xw = self._X_full * np.sqrt(np.maximum(W_F_view, 0.0))[:, None]
+        C_v = (np.triu(fit_F_v.A_chol) if not fit_F_v.A_chol_lower
+               else np.triu(fit_F_v.A_chol.T))
+        Kw_v = solve_triangular(C_v, Xw.T, lower=False, trans="T").T
+        XtWX = C_v.T @ (Kw_v.T @ Kw_v) @ C_v
         if sigma_squared > 0 and np.isfinite(sigma_squared):
             Vc_corr = Vc1 + Vc2
             edf2 = edf + np.einsum("ij,ij->i", Vc_corr, XtWX) / sigma_squared
@@ -4798,11 +4949,15 @@ class gam:
         n_sp = len(self._slots)
         if n_sp == 0 or sigma_squared <= 0 or not np.isfinite(sigma_squared):
             return np.zeros((p, p))
-        # scipy's cho_factor leaves the unused upper triangle untouched
-        # (random memory), so explicitly mask before using as a triangular
-        # operand — solve_triangular respects `lower=True` but np.tril for
-        # the explicit L matmul below would otherwise pull garbage in.
-        L = np.tril(fit.A_chol)
+        # scipy's cho_factor leaves the unused triangle untouched (random
+        # memory), so explicitly mask before using as a triangular
+        # operand. The factor convention varies by producer (PIRLS'
+        # augmented QR stores upper, legacy cho_factor lower) — normalize
+        # to the lower form L with A = L L'.
+        if fit.A_chol_lower:
+            L = np.tril(fit.A_chol)
+        else:
+            L = np.triu(fit.A_chol).T
 
         M = np.empty((n_sp, p, p))
         for k, slot in enumerate(self._slots):
@@ -7499,10 +7654,11 @@ def _R_rank(R: np.ndarray,
     ``R`` by reducing rank until the Cline condition estimate of the
     leading block satisfies ``κ · tol < 1``.
 
-    ``tol`` defaults to mgcv's fitting-rank tolerance
-    (``gam.control(rank.tol = .Machine$double.eps^0.5)``, the value the C
-    rank-determination loop in ``gdiPK`` uses); ``Rrank`` the R function
-    defaults to ``eps^0.9`` for its own callers.
+    ``tol`` defaults to ``gam.control(rank.tol = eps^0.5)`` — magic's
+    value. The gam.fit3 fitting path overrides to ``eps*100``
+    (gam.fit3.r:133) before calling pls_fit1/gdi1 — callers on that path
+    pass it explicitly. ``Rrank`` the R function defaults to ``eps^0.9``
+    for its own callers.
     """
     rank = min(R.shape[0], R.shape[1])
     while rank > 0:
@@ -7545,7 +7701,10 @@ def _pls_rank_drop(Xw: np.ndarray, slots: list["_PenaltySlot"],
     aug = np.vstack(parts)
     from scipy.linalg import qr as _scipy_qr
     R_piv, piv = _scipy_qr(aug, mode="r", pivoting=True)
-    rank = _R_rank(R_piv)
+    # gam.fit3 overrides the fitting-path rank tolerance to eps*100
+    # (gam.fit3.r:133) — both pls_fit1 and gdi1 receive that value, not
+    # gam.control's √eps (which magic's GCV path uses).
+    rank = _R_rank(R_piv, tol=float(np.finfo(float).eps) * 100.0)
     drop = np.sort(piv[rank:]) if rank < p else np.zeros(0, dtype=int)
     return rank, drop
 
@@ -7741,7 +7900,7 @@ class _FitState:
         "beta", "eta", "mu", "w", "z", "alpha",
         "dev", "pen", "rss",
         "A_chol", "A_chol_lower",
-        "S_full", "log_det_A",
+        "S_full", "log_det_A", "E_aug",
         "is_fisher_fallback",
         "converged", "boundary", "warn",
     )
@@ -7750,7 +7909,8 @@ class _FitState:
                  S_full, log_det_A,
                  eta=None, mu=None, w=None, z=None, alpha=None,
                  is_fisher_fallback=False,
-                 converged=True, boundary=False, warn=None):
+                 converged=True, boundary=False, warn=None,
+                 E_aug=None):
         self.beta = beta
         self.dev = dev
         self.rss = dev               # back-compat alias for Gaussian path
@@ -7770,6 +7930,10 @@ class _FitState:
         self.converged = converged
         self.boundary = boundary
         self.warn = [] if warn is None else warn
+        # Penalty square root used by the augmented-QR solves at this ρ
+        # (consumers that refactor with other weights — _fisher_view —
+        # reuse it).
+        self.E_aug = E_aug
         # True iff PIRLS forced α=1 at convergence because Newton's
         # α formula produced a w<0. In that case dα/dμ is taken as 0
         # for derivative purposes (the analytical α'(μ) is not

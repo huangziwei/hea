@@ -2679,3 +2679,74 @@ def test_extreme_fixed_sp_tensor_criterion_matches_mgcv():
     np.testing.assert_allclose(m2.REML_criterion / 2, 107.5309262948,
                                rtol=0, atol=1e-6)
     np.testing.assert_allclose(m2.sp, [0.061977, 162.243], rtol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# 2.1 conditioning half: augmented-QR PIRLS solve (pls_fit1) + gdiPK's
+# negative-weight SVD correction. κ([√W·X; E]) instead of κ² everywhere a
+# factor or X'WX-derived quantity is consumed.
+# ---------------------------------------------------------------------------
+
+def test_pls_qr_negative_weight_correction_is_exact():
+    # Property check of the gdiPK (I−2D²) machinery on a synthetic
+    # problem with mixed-sign Newton weights: the returned triangular
+    # factor and log-determinant must reproduce the *signed* X'WX + S,
+    # and beta must solve the signed normal equations.
+    rng = np.random.default_rng(8)
+    n, p = 60, 5
+    X = rng.normal(size=(n, p))
+    z = rng.normal(size=n)
+    w = rng.uniform(0.2, 2.0, n)
+    w[:6] = -rng.uniform(0.01, 0.05, 6)     # mildly negative rows: A stays PD
+    E = np.diag(rng.uniform(0.5, 2.0, p))   # S = E'E
+
+    df = pl.DataFrame({"x": rng.uniform(0, 1, 30),
+                       "y": rng.normal(size=30)})
+    m = gam("y ~ s(x, k=5)", df, method="REML")   # host for the method
+    m._X_full = X
+    beta, R, log_det, ok = m._pls_qr(w, z, E)
+    assert ok
+    A = X.T @ (w[:, None] * X) + E.T @ E
+    np.testing.assert_allclose(R.T @ R, A, rtol=0, atol=1e-10)
+    np.testing.assert_allclose(A @ beta, X.T @ (w * z), rtol=0, atol=1e-10)
+    np.testing.assert_allclose(log_det, np.linalg.slogdet(A)[1],
+                               rtol=0, atol=1e-10)
+    assert np.all(np.diag(R) > 0)           # unique Cholesky normalization
+
+    # Indefinite case (strongly negative weights) signals ok=False —
+    # pls_fit1's oo$n<0, which gam.fit3 answers with a Fisher retry.
+    w_bad = w.copy()
+    w_bad[:20] = -5.0
+    A_bad = X.T @ (w_bad[:, None] * X) + E.T @ E
+    assert np.linalg.eigvalsh(A_bad).min() < 0
+    *_, ok_bad = m._pls_qr(w_bad, z, E)
+    assert not ok_bad
+
+
+def test_ill_conditioned_design_matches_mgcv():
+    # κ(X) ≈ 6e10 polynomial block (κ(X'X) ≈ 3e21 — beyond double
+    # precision for the normal-equations route, which previously produced
+    # *negative* total edf here). The augmented-QR path matches mgcv
+    # (1.9-4) on every reported quantity.
+    rng = np.random.default_rng(11)
+    n = 150
+    x = rng.uniform(10.0, 10.1, n)
+    z = rng.uniform(0, 1, n)
+    y = (0.5 * (x - 10.0) + 0.05 * (x - 10.0) ** 2 + np.sin(2 * np.pi * z)
+         + rng.normal(0, 0.2, n))
+    df = pl.DataFrame({"x": x, "z": z, "y": y})
+    m = gam("y ~ x + I(x^2) + I(x^3) + s(z)", df, method="REML")
+    assert m.rank == 13 and m.p == 13       # no drop: below eps*100 tol
+    np.testing.assert_allclose(m.REML_criterion / 2, -19.28509474,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sigma_squared, 0.0440145971,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 11.304399,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(
+        np.asarray(m.coef)[:4],
+        [-258681.26995556, 77010.92217727, -7642.12350559, 252.78437541],
+        rtol=1e-6,
+    )
+    np.testing.assert_allclose(m.predict(df.head(1))["fit"][0], 0.74940624,
+                               rtol=0, atol=1e-7)
