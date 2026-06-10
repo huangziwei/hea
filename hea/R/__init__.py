@@ -317,6 +317,10 @@ from .diagnostics import (
     rstudent,
 )
 
+# R's RNG (Mersenne-Twister / Inversion / Rejection), bit-exact —
+# set.seed/runif/sample parity for pinning RNG-dependent R results.
+from .rng import RMersenneTwister
+
 # Model comparison / selection
 from .model_selection import add1, anova, drop1, step
 

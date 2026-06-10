@@ -59,6 +59,7 @@ from ..formula import (
     _apply_smooth_arg_exprs,
     _eval_atom,
     _eval_by_col,
+    _factor_levels,
     _LinearTransformRawBasis,
     _RawBasis,
     _smooth_arg_expr_map,
@@ -69,16 +70,21 @@ from ..formula import (
     materialize_smooths,
     matrix_to_2d,
     prepare_design,
+    reject_unsupported_smooth_id,
 )
 from .gam import (
     _FitState,
     _PenaltySlot,
     _add_null_space_penalties,
     _apply_gam_side,
+    _block_s_scale,
     _row_frame,
     _sym_rank,
     gam,
 )
+# Safe at module level: nothing on the hea.R.__init__ chain
+# (model_selection → models.gam → formula) imports this module.
+from ..R.rng import RMersenneTwister
 
 __all__ = ["bam"]
 
@@ -983,22 +989,28 @@ def _mini_mf(data: pl.DataFrame, chunk_size: int,
         chunk_size = mn
     if n <= chunk_size:
         return data
-    rng = np.random.default_rng(seed)
-    # Random sample
-    ind = rng.choice(n, size=chunk_size, replace=False)
+    # mgcv: rngs <- temp.seed(66), then sample(1:n, chunk.size) and
+    # sample(1:n, n) from the continuing stream — bit-exact via the
+    # hea.R.rng port so the representative frame (hence knot/eigen
+    # setup at n > chunk_size) matches mgcv's.
+    rng = RMersenneTwister(seed)
+    ind = rng.sample_int(n, chunk_size)
     mf0 = data[ind.tolist()]
     # Stratified sampling for representativeness: place min/max rows for
-    # numerics and one row per factor level into the head of mf0.
-    ind_full = rng.permutation(n)
+    # numerics and one row per factor level into the head of mf0. The
+    # factor pick is mgcv's ind[fac[ind]==X][1] — the first match in the
+    # RANDOMIZED row order, one random row per level, levels in R's
+    # order.
+    ind_full = rng.sample_int(n, n)
     rows: list[int] = []
     for c in cols:
         s = data[c]
         if _is_factor_col(s):
-            arr = s.to_numpy()
-            for lvl in s.unique().to_list():
-                where = np.flatnonzero(arr == lvl)
+            arr_perm = s.to_numpy()[ind_full]
+            for lvl in _factor_levels(s):
+                where = np.flatnonzero(arr_perm == lvl)
                 if where.size:
-                    rows.append(int(where[0]))
+                    rows.append(int(ind_full[where[0]]))
         elif s.dtype.is_numeric():
             arr = s.to_numpy()
             j_min = int(np.argmin(arr))
@@ -1748,6 +1760,7 @@ class bam(gam):
 
         # ---- setup phase (mirror gam.__init__ lines 198-321) ---------------
         d = prepare_design(formula, data)
+        reject_unsupported_smooth_id(d.expanded)
         self._expanded = d.expanded
         _expr_map = _smooth_arg_expr_map(self._expanded)
         self.data = (
@@ -1854,9 +1867,10 @@ class bam(gam):
             k = int(np.asarray(b.X).shape[1])
             a, bcol = col_cursor, col_cursor + k
             block_col_ranges.append((a, bcol))
-            for S_j in b.S:
+            for j, S_j in enumerate(b.S):
                 slots.append(_PenaltySlot(block=b, col_start=a, col_end=bcol,
-                                          S=np.asarray(S_j, dtype=float)))
+                                          S=np.asarray(S_j, dtype=float),
+                                          S_scale=_block_s_scale(b, j)))
             col_cursor = bcol
         p = col_cursor
 
@@ -1876,6 +1890,11 @@ class bam(gam):
         self.y = d.y
         self._y_arr = y_full
         self.n = n
+        # Prior weights: bam's user-facing ``weights=`` is not plumbed yet
+        # (bam plan), but inherited gam methods (_reml/_reml_grad/ls calls)
+        # read ``self._wt`` — keep it ones until then.
+        self._wt = np.ones(n)
+        self.prior_weights = self._wt
         self.p = p
         self.p_param = p_param
         self._blocks = blocks
@@ -2847,7 +2866,7 @@ class bam(gam):
                 family.set_theta(pini["Theta"])
 
         # ---- Initialize μ̂, η̂, dev for iter 0 (mgcv bam.r:950-969) -----
-        mu = family.initialize(y, prior_w)
+        mu = family.gam_initialize(y, prior_w)
         eta = link.link(mu)
         if not (link.valideta(eta) and family.validmu(mu)):
             raise FloatingPointError(
@@ -3480,154 +3499,12 @@ class bam(gam):
 
 
 # ---------------------------------------------------------------------------
-# R's Mersenne-Twister RNG and ``sample()`` — bit-exact port.
-#
-# Reproduces R 3.6+ default ``RNGkind("Mersenne-Twister", "Inversion",
-# "Rejection")`` so mgcv's ``temp.seed(8547)`` + ``sample()`` calls inside
-# ``compress.df`` / ``discrete.mf`` are matched bit-exactly from Python.
-#
-# Direct port of R's ``src/main/RNG.c`` and ``src/main/random.c``:
-#   * ``RNG_Init`` — 50× LCG warm-up then 625 LCG iterations to fill
-#     ``i_seed[0..624]``. ``FixupSeeds(initial=1)`` overwrites
-#     ``i_seed[0]`` (= mti) with N=624 so the first ``MT_genrand``
-#     regenerates the state.
-#   * ``MT_genrand`` — standard MT19937 step + R's tempering masks,
-#     scaled via ``y * 2.3283064365386963e-10``.
-#   * ``unif_rand`` — wraps MT output through R's ``fixup`` (avoid 0.0 / 1.0).
-#   * ``R_unif_index`` (Sample_kind = REJECTION) — bits = ceil(log2(dn));
-#     draw ``rbits(bits)`` until < dn.
-#   * ``rbits`` — pack low ``bits`` bits from successive
-#     ``floor(unif_rand() * 65536)`` chunks.
-#   * ``sample(n, k, replace=TRUE)`` — independent ``R_unif_index(n)`` per draw.
-#   * ``sample(n, k, replace=FALSE)`` — partial Fisher-Yates with swap-and-pop.
-#
-# All return 0-based indices (R returns 1-based; caller adjusts).
+# R's Mersenne-Twister RNG and ``sample()`` — bit-exact port; lives in
+# ``hea.R.rng`` (imported at the top of this module), re-exported here so
+# ``from hea.models.bam import RMersenneTwister`` keeps working. mgcv's
+# ``temp.seed(8547)`` + ``sample()`` calls inside ``compress.df`` /
+# ``discrete.mf`` are matched bit-exactly through it.
 # ---------------------------------------------------------------------------
-
-# Period parameters (RNG.c:646-650).
-_MT_N = 624
-_MT_M = 397
-_MT_MATRIX_A = 0x9908B0DF
-_MT_UPPER_MASK = 0x80000000
-_MT_LOWER_MASK = 0x7FFFFFFF
-
-# MT_genrand scale factor (RNG.c:722) — IEEE-754 nearest-double to 2^-32.
-_INV_2P32 = 2.3283064365386963e-10
-# fixup() boundary epsilon (RNG.c:86, step away from 0/1).
-_I2_32M1 = 2.328306437080797e-10
-
-
-class RMersenneTwister:
-    """R's default RNG, reproducible bit-exactly across platforms."""
-
-    __slots__ = ("_mt", "_mti")
-
-    def __init__(self, seed: int):
-        self.set_seed(seed)
-
-    def set_seed(self, seed: int) -> None:
-        # ``RNG_Init``: warm 50 LCG steps, then 625 more to fill
-        # ``i_seed[0..624]``. ``FixupSeeds(initial=1)`` overwrites
-        # ``i_seed[0]`` with ``N=624`` so the first ``MT_genrand`` call
-        # regenerates the state.
-        s = int(seed) & 0xFFFFFFFF
-        for _ in range(50):
-            s = (69069 * s + 1) & 0xFFFFFFFF
-        state = [0] * _MT_N
-        # ``state[0]`` is i_seed[0] which gets thrown away; we still need
-        # to advance the LCG so the 624 state words match R.
-        s = (69069 * s + 1) & 0xFFFFFFFF
-        for j in range(_MT_N):
-            s = (69069 * s + 1) & 0xFFFFFFFF
-            state[j] = s
-        self._mt = state
-        self._mti = _MT_N  # force regen on first genrand
-
-    def _genrand_int32(self) -> int:
-        if self._mti >= _MT_N:
-            mt = self._mt
-            for kk in range(_MT_N - _MT_M):
-                y = (mt[kk] & _MT_UPPER_MASK) | (mt[kk + 1] & _MT_LOWER_MASK)
-                mt[kk] = mt[kk + _MT_M] ^ (y >> 1) ^ ((y & 1) * _MT_MATRIX_A)
-            for kk in range(_MT_N - _MT_M, _MT_N - 1):
-                y = (mt[kk] & _MT_UPPER_MASK) | (mt[kk + 1] & _MT_LOWER_MASK)
-                mt[kk] = mt[kk + (_MT_M - _MT_N)] ^ (y >> 1) ^ ((y & 1) * _MT_MATRIX_A)
-            y = (mt[_MT_N - 1] & _MT_UPPER_MASK) | (mt[0] & _MT_LOWER_MASK)
-            mt[_MT_N - 1] = mt[_MT_M - 1] ^ (y >> 1) ^ ((y & 1) * _MT_MATRIX_A)
-            self._mti = 0
-        y = self._mt[self._mti]
-        self._mti += 1
-        # Tempering (RNG.c:716-719).
-        y ^= y >> 11
-        y ^= (y << 7) & 0x9D2C5680
-        y ^= (y << 15) & 0xEFC60000
-        y ^= y >> 18
-        return y & 0xFFFFFFFF
-
-    def unif_rand(self) -> float:
-        u = self._genrand_int32() * _INV_2P32
-        # ``fixup`` (RNG.c:100-105). MT output is in (0, 1) for non-zero
-        # state; these branches almost never fire, but kept for parity.
-        if u <= 0.0:
-            return 0.5 * _I2_32M1
-        if (1.0 - u) <= 0.0:
-            return 1.0 - 0.5 * _I2_32M1
-        return u
-
-    def _rbits(self, bits: int) -> int:
-        """``rbits(bits)`` — RNG.c:875-885. Returns int in [0, 2^bits)."""
-        v = 0
-        n = 0
-        while n <= bits:
-            v1 = int(self.unif_rand() * 65536)
-            v = 65536 * v + v1
-            n += 16
-        return v & ((1 << bits) - 1)
-
-    def unif_index(self, dn: int) -> int:
-        """``R_unif_index(dn)`` for ``Sample_kind=REJECTION`` (R 3.6+
-        default). Returns int in [0, dn)."""
-        if dn <= 0:
-            return 0
-        # ``ceil(log2(dn))``: for dn=1 use 0; otherwise ``(dn-1).bit_length()``.
-        bits = (dn - 1).bit_length() if dn > 1 else 0
-        while True:
-            dv = self._rbits(bits)
-            if dv < dn:
-                return dv
-
-    def sample_replace(self, n: int, k: int) -> np.ndarray:
-        """``sample(n, k, replace=TRUE)`` — 0-based indices in [0, n)."""
-        out = np.empty(k, dtype=np.int64)
-        for i in range(k):
-            out[i] = self.unif_index(n)
-        return out
-
-    def sample_no_replace(self, n: int, k: int) -> np.ndarray:
-        """``sample(n, k, replace=FALSE)`` — 0-based indices in [0, n).
-
-        R uses the ``replace`` branch for ``k < 2`` (no allocation), but
-        the resulting draw is identical to a single ``unif_index(n)`` so
-        we route k=1 through the FY path uniformly. For k >= 2 this is
-        partial Fisher-Yates with swap-and-pop:
-
-            x[0..n-1] = 0..n-1
-            for i in 0..k-1:
-                j = unif_index(n_remaining)
-                out[i] = x[j]
-                x[j] = x[--n_remaining]
-        """
-        if k < 0 or k > n:
-            raise ValueError(f"k={k} not in [0, n={n}]")
-        x = list(range(n))
-        m = n
-        out = np.empty(k, dtype=np.int64)
-        for i in range(k):
-            j = self.unif_index(m)
-            out[i] = x[j]
-            m -= 1
-            x[j] = x[m]
-        return out
 
 
 # ---------------------------------------------------------------------------

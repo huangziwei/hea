@@ -958,6 +958,18 @@ _TERO_CV: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
+# Capture channel for id-linked basis construction (mgcv's smoothCon
+# ``n=``/``dataX=`` path, smooth.r:3888-3894). When set to a dict,
+# ``_apply_by_and_absorb`` records the constructor output (raw X on the
+# pooled basis-setup data, un-rescaled S list, raw basis, class) and
+# returns no blocks; ``materialize_smooths``'s id machinery then rescales
+# S against the pooled X once and re-enters per linked smooth with
+# ``pre_scaled=True``.
+_ID_RAW_CAPTURE: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "_hea_id_raw_capture", default=None
+)
+
+
 @contextlib.contextmanager
 def with_ordered_cols(cols):
     """Context manager: inside the `with` block, the given column names are
@@ -2029,7 +2041,8 @@ def referenced_columns(expanded: ExpandedFormula) -> set[str]:
     return referenced
 
 
-def materialize(expanded: ExpandedFormula, data: pl.DataFrame) -> pl.DataFrame:
+def materialize(expanded: ExpandedFormula, data: pl.DataFrame,
+                return_assign: bool = False):
     """Turn an expanded formula + data frame into a design matrix X.
 
     NA-omit: rows with missing values in any referenced column are dropped
@@ -2038,6 +2051,11 @@ def materialize(expanded: ExpandedFormula, data: pl.DataFrame) -> pl.DataFrame:
     order matching R's interaction convention (first atom's levels vary
     fastest). Column names follow R: `(Intercept)`, `x`, `fb`, `x:fb`,
     `I(x^2)`, etc.
+
+    ``return_assign=True`` additionally returns R's ``model.matrix``
+    ``assign`` attribute: one int per column — 0 for the intercept,
+    ``i`` (1-based) for columns of ``expanded.terms[i-1]``. Exact by
+    construction (columns are emitted term block by term block).
     """
     referenced = referenced_columns(expanded) & set(data.columns)
     ref_list = list(referenced)
@@ -2045,26 +2063,32 @@ def materialize(expanded: ExpandedFormula, data: pl.DataFrame) -> pl.DataFrame:
         data = data.drop_nulls(subset=ref_list)
 
     blocks: list[_NumBlock] = []
+    block_term_idx: list[int] = []          # R assign value per block
     running_terms: list[Term] = []
     atom_cache: dict = {}
 
     if expanded.intercept:
         blocks.append(_encode_term(_EMPTY_TERM, data, running_terms, expanded.intercept, atom_cache))
+        block_term_idx.append(0)
         running_terms.append(_EMPTY_TERM)
 
-    for t in expanded.terms:
+    for i, t in enumerate(expanded.terms):
         blocks.append(_encode_term(t, data, running_terms, expanded.intercept, atom_cache))
+        block_term_idx.append(i + 1)
         running_terms.append(t)
 
     all_names: list[str] = []
-    for b in blocks:
+    assign: list[int] = []
+    for b, ti in zip(blocks, block_term_idx):
         all_names.extend(b.suffixes)
+        assign.extend([ti] * b.values.shape[1])
     if not blocks or sum(b.values.shape[1] for b in blocks) == 0:
         # Polars can't represent (n, 0); return an empty frame and let
         # callers use ``len(input_data)`` if they need the row count.
-        return pl.DataFrame()
+        return (pl.DataFrame(), []) if return_assign else pl.DataFrame()
     all_values = np.hstack([b.values for b in blocks])
-    return pl.from_numpy(all_values, schema=all_names)
+    X = pl.from_numpy(all_values, schema=all_names)
+    return (X, assign) if return_assign else X
 
 
 # ---------------------------------------------------------------------------
@@ -2369,6 +2393,10 @@ class SmoothBlock:
     X: np.ndarray                   # basis matrix, (n, k)
     S: list[np.ndarray]             # penalty matrices, each (k, k)
     spec: Optional["BasisSpec"] = None   # predict-time replay state
+    # mgcv ``sm$S.scale``, parallel to ``S``: the ``maS`` factor
+    # ``_scale_penalty`` divided each penalty by (1.0 where the rescale
+    # didn't apply). ``gam.vcomp(rescale=TRUE)`` divides sp by it.
+    S_scale: Optional[list[float]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -2398,6 +2426,23 @@ class _RawBasis:
     """
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         raise NotImplementedError
+
+
+@dataclass(slots=True)
+class _RenamedRawBasis(_RawBasis):
+    """View of a base raw basis under a repeat-``id`` smooth's covariate
+    names — the evaluation half of mgcv's ``clone.smooth.spec``: the
+    cloned smooth keeps the base smooth's basis state (knots, anchors)
+    but reads its *own* columns. ``rename`` maps member name → base name.
+    """
+    raw: _RawBasis
+    rename: dict[str, str]
+
+    def eval(self, data: pl.DataFrame) -> np.ndarray:
+        cols = {}
+        for member, base in self.rename.items():
+            cols[base] = data[member].rename(base)
+        return self.raw.eval(pl.DataFrame(cols))
 
 
 @dataclass(slots=True)
@@ -2748,11 +2793,9 @@ class _RERawBasis(_RawBasis):
 class _FSRawBasis(_RawBasis):
     """`smooth.construct.fs.smooth.spec` — factor-smooth interaction.
 
-    Predict replays:
+    Predict replays mgcv's `Predict.matrix.fs.interaction`:
       1. base tp (or other) basis evaluated at new x via stored ``base_raw``
-      2. nat.param(type=1) reparameterization via ``P`` (so X_r = Xb @ P);
-         we store ``Xr_T = P`` directly — the post-canonicalization rotation
-         is captured by ``null_rot`` (eigenvectors of Xn'Xn) and ``null_signs``
+      2. nat.param(type=1) reparameterization via ``P`` (X_r = Xb @ P)
       3. block-wise duplicate across factor levels, masking by `data[fterm]`
     The full result has shape ``(n, p * nf)`` matching the fit-time block.
     """
@@ -2763,19 +2806,10 @@ class _FSRawBasis(_RawBasis):
     null_d: int
     base_raw: _RawBasis  # the inner tp/etc. raw basis
     P: np.ndarray   # nat.param transform: Xr = Xb @ P
-    null_rot: Optional[np.ndarray]  # (null_d, null_d) — None if null_d == 0
-    null_signs: Optional[np.ndarray]  # length null_d
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         Xb = self.base_raw.eval(data)
         Xr = Xb @ self.P
-        if self.null_d > 0:
-            # Re-rotate the null block: same as _canonicalize_fs_null_basis
-            # but using the *fixed* rotation from training (not recomputed
-            # from new data).
-            Xn = Xr[:, self.rank:] @ self.null_rot
-            Xn *= self.null_signs[None, :]
-            Xr = np.concatenate([Xr[:, :self.rank], Xn], axis=1)
         n = Xr.shape[0]
         nf = len(self.flev)
         p = self.p
@@ -3004,6 +3038,78 @@ def _collect_name_idents(node, out: set[str]) -> None:
     # Subscript, Dot, Empty: no Name references we care about for this path.
 
 
+def _smooth_id_value(call: Call) -> str | None:
+    """The smooth's ``id=`` linkage key as a canonical string, or None.
+
+    mgcv keys its id machinery by ``as.character(id)`` (mgcv.r:1202), so
+    ``id=1`` and ``id="1"`` link with each other. Mirror R's coercions:
+    whole-number doubles print without a decimal part, logicals print
+    TRUE/FALSE.
+    """
+    node = call.kwargs.get("id")
+    if node is None:
+        return None
+    if isinstance(node, Literal):
+        v = node.value
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            return "TRUE" if v else "FALSE"
+        if isinstance(v, (int, float)):
+            f = float(v)
+            if f.is_integer():
+                return str(int(f))
+            return repr(f)
+        return str(v)
+    if isinstance(node, Name):
+        if node.ident == "NULL":
+            return None
+        return node.ident
+    return _deparse(node)
+
+
+def _clone_smooth_spec(base: Call, member: Call) -> Call:
+    """mgcv ``clone.smooth.spec`` (mgcv.r:730-765): a repeat-``id`` smooth
+    is rebuilt from the *first* smooth with that id — same bs class, k, m,
+    xt, fx, … — keeping only its own covariates and ``by``. Cloning
+    ``base.fn`` too covers mgcv's "sloppy user" branch, where an ``s()``
+    member linked to a ``te()`` base is reconstructed as a ``te`` over the
+    member's terms (margin specs come along inside the cloned kwargs,
+    since hea's tensor builders read margin bs/k/m from kwargs).
+    """
+    if len(member.args) != len(base.args):
+        # mgcv's exact message (mgcv.r:735).
+        raise ValueError(
+            "`id' linked smooths must have same number of arguments"
+        )
+    kwargs = dict(base.kwargs)
+    kwargs.pop("by", None)
+    if "by" in member.kwargs:
+        kwargs["by"] = member.kwargs["by"]
+    return Call(fn=base.fn, args=list(member.args), kwargs=kwargs)
+
+
+def _id_basis_frame(group_calls: list[Call], data: pl.DataFrame) -> pl.DataFrame:
+    """Pooled basis-setup data for an ``id`` group — mgcv's
+    ``id.list[[id]]$data`` (mgcv.r:1217-1227): the j-th covariate of every
+    linked smooth, stacked under the *base* smooth's term names, so knot
+    placement / tp anchors / eigen ranges see the union of covariate
+    values (smoothCon's ``n=``/``dataX=`` path then evaluates the model
+    matrix at each smooth's own values).
+    """
+    base_vars = _smooth_term_vars(group_calls[0])
+    cols: dict[str, pl.Series] = {}
+    for j, bname in enumerate(base_vars):
+        pieces: list[pl.Series] = []
+        for c in group_calls:
+            s = data[_smooth_term_vars(c)[j]]
+            if s.dtype.is_numeric() and s.dtype != pl.Float64:
+                s = s.cast(pl.Float64)
+            pieces.append(s.rename(bname))
+        cols[bname] = pl.concat(pieces) if len(pieces) > 1 else pieces[0]
+    return pl.DataFrame(cols)
+
+
 def _smooth_arg_expr_map(expanded: "ExpandedFormula") -> dict[str, "Node"]:
     """Walk every smooth Call (``s``/``te``/``ti``/``t2``) in ``expanded``
     and collect a ``{deparsed_text: ast_node}`` map for every non-``Name``
@@ -3170,6 +3276,9 @@ def _apply_by_and_absorb(
     cls: str,
     term: list[str],
     raw_basis: _RawBasis | None = None,
+    pre_scaled: bool = False,
+    C_source: np.ndarray | None = None,
+    S_scale: list[float] | None = None,
 ) -> list[SmoothBlock]:
     """Apply mgcv's smoothCon post-processing:
     scale.penalty → by-handling → absorb.cons → SmoothBlock(s).
@@ -3184,9 +3293,34 @@ def _apply_by_and_absorb(
     `_RawBasis` subclass here so `block.spec.predict_mat(new_data)` reproduces
     the same scale.penalty-free design rows the fit used (the by-mask and
     absorb-rotation steps are layered on automatically).
+
+    ``pre_scaled=True`` skips ``_scale_penalty`` — used by the id-linkage
+    path, where mgcv rescales S against the POOLED basis-setup X *before*
+    replacing X with the own-data evaluation (smooth.r:3870-3877: doing it
+    per-smooth would give linked terms "the same basis, but different
+    penalties"). ``S_scale`` then carries the pooled-rescale ``maS``
+    factors (mgcv clones ``S.scale`` with the smooth); ignored unless
+    ``pre_scaled``.
+
+    ``C_source`` overrides the matrix whose column sums define the
+    sum-to-zero constraint. mgcv computes ``sm$C`` from the constructor's
+    X (smooth.r:3848-3851) *before* the dataX replacement, so id-linked
+    smooths are all constrained against the pooled-construction X — the
+    id path passes that pooled X here. Default: the (per-level pre-by) X
+    itself, the non-id behavior.
     """
     S_list = [(S + S.T) / 2.0 for S in S_list]
-    S_list = _scale_penalty(X, S_list)
+    _id_cap = _ID_RAW_CAPTURE.get()
+    if _id_cap is not None:
+        # id-linked construction pass (mgcv smoothCon's n=/dataX= path):
+        # hand the constructor output back just before scale.penalty/by/
+        # absorb — the caller re-enters per linked smooth.
+        _id_cap.update(X=X, S=S_list, raw=raw_basis, cls=cls)
+        return []
+    if not pre_scaled:
+        S_list, S_scale = _scale_penalty(X, S_list)
+    elif S_scale is None:
+        S_scale = [1.0] * len(S_list)
 
     sparse_cons = _SPARSE_CONS_CV.get()
     by_expr = _smooth_by_expr(call)
@@ -3195,13 +3329,13 @@ def _apply_by_and_absorb(
         if sparse_cons == -1:
             X2, S2, T = _absorb_sweep_drop(X, S_list)
         else:
-            X2, S2, T = _absorb_sumzero(X, S_list)
+            X2, S2, T = _absorb_sumzero(X, S_list, C_source=C_source)
         spec = (
             BasisSpec(raw=raw_basis, by=None, absorb=T)
             if raw_basis is not None else None
         )
         return [SmoothBlock(label=base_label, term=term, cls=cls,
-                            X=X2, S=S2, spec=spec)]
+                            X=X2, S=S2, spec=spec, S_scale=S_scale)]
 
     by_col = _eval_by_col(by_expr, data)
     if _is_factor_like(by_col):
@@ -3227,7 +3361,10 @@ def _apply_by_and_absorb(
                 # what current bam-F use cases need.)
                 X2, S2, T = _absorb_sweep_drop(X_lev, S_list)
             else:
-                X2, S2, T = _absorb_sumzero(X_lev, S_list, C_source=X)
+                X2, S2, T = _absorb_sumzero(
+                    X_lev, S_list,
+                    C_source=C_source if C_source is not None else X,
+                )
             label = f"{base_label}:{by_expr}{lev}"
             spec = (
                 BasisSpec(
@@ -3238,7 +3375,8 @@ def _apply_by_and_absorb(
                 if raw_basis is not None else None
             )
             blocks.append(SmoothBlock(label=label, term=term, cls=cls,
-                                      X=X2, S=S2, spec=spec))
+                                      X=X2, S=S2, spec=spec,
+                                      S_scale=S_scale))
         return blocks
 
     # Numeric by: multiply X by by-column, skip absorb.cons.
@@ -3257,33 +3395,45 @@ def _apply_by_and_absorb(
     )
     return [SmoothBlock(
         label=f"{base_label}:{by_expr}",
-        term=term, cls=cls, X=X2, S=S_list, spec=spec,
+        term=term, cls=cls, X=X2, S=S_list, spec=spec, S_scale=S_scale,
     )]
 
 
-def _scale_penalty(X: np.ndarray, S_list: list[np.ndarray]) -> list[np.ndarray]:
+def _scale_penalty(
+    X: np.ndarray, S_list: list[np.ndarray],
+) -> tuple[list[np.ndarray], list[float]]:
     """Match mgcv's `scale.penalty=TRUE` rescaling.
 
     mgcv applies this on the raw (pre-absorb.cons) X and S:
         maXX = norm(X, "I")^2      # max abs row sum, squared
         maS  = norm(S, "O") / maXX # default R norm() = one-norm
         S   := S / maS = S * maXX / norm(S, "O")
+
+    Also returns the per-S ``maS`` factors — mgcv's ``sm$S.scale``
+    ("multiply S[[i]] by this to get original S[[i]]", smooth.r:3884),
+    initialised to 1 wherever the rescale doesn't apply (smooth.r:3877).
+    ``gam.vcomp``'s default ``rescale=TRUE`` divides each sp by it.
     """
     if X.size == 0 or not S_list:
-        return [np.asarray(s, dtype=float) for s in S_list]
+        return ([np.asarray(s, dtype=float) for s in S_list],
+                [1.0] * len(S_list))
     maXX = float(np.abs(X).sum(axis=1).max()) ** 2
     out = []
+    scales: list[float] = []
     for S in S_list:
         S = np.asarray(S, dtype=float)
         if S.size == 0:
             out.append(S)
+            scales.append(1.0)
             continue
         normS = float(np.abs(S).sum(axis=0).max())
         if normS == 0 or maXX == 0:
             out.append(S)
+            scales.append(1.0)
         else:
             out.append(S * (maXX / normS))
-    return out
+            scales.append(normS / maXX)
+    return out, scales
 
 
 def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
@@ -3307,7 +3457,7 @@ def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     X_df = materialize(ef, data)
     X = X_df.to_numpy().astype(float)
     S_list = [np.eye(X.shape[1])]
-    S_list = _scale_penalty(X, S_list)
+    S_list, S_scale = _scale_penalty(X, S_list)
     # re.smooth.spec sets C = empty (no absorb.cons). `by` is still honored:
     # factor by → one block per level; numeric by → multiply X by by.
     base_label = _smooth_label(call)
@@ -3330,7 +3480,8 @@ def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     if by_expr is None:
         return [SmoothBlock(label=base_label, term=term_vars,
                             cls="re.smooth.spec", X=X, S=S_list,
-                            spec=BasisSpec(raw=raw, by=None, absorb=None))]
+                            spec=BasisSpec(raw=raw, by=None, absorb=None),
+                            S_scale=S_scale)]
     by_col = _eval_by_col(by_expr, data)
     if _is_factor_like(by_col):
         levels = _factor_levels(by_col)
@@ -3348,6 +3499,7 @@ def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
                     by=_ByMask(expr=by_expr, kind="factor", level=lev),
                     absorb=None,
                 ),
+                S_scale=S_scale,
             )
             for lev in levels
         ]
@@ -3362,6 +3514,7 @@ def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         spec=BasisSpec(
             raw=raw, by=_ByMask(expr=by_expr, kind="numeric"), absorb=None,
         ),
+        S_scale=S_scale,
     )]
 
 
@@ -4992,6 +5145,59 @@ def _tp_rlanczos(
     return D_out, U_out
 
 
+# ---- R RNG (knot subsampling parity) ----------------------------------------
+#
+# mgcv's tp/ds/sos constructors take a *seeded random* subsample of
+# max.knots=2000 knots whenever a smooth has more than 2000 unique
+# covariate locations (smooth.r:1286/3031/3239, via temp.seed(seed=1),
+# misc.r:840 — i.e. RNGkind("Mersenne-Twister", sample.kind="Rejection")
+# + set.seed(1) + sample(1:nu, 2000)). Matching mgcv's bases at large n
+# therefore requires R's RNG bit-for-bit — the port lives in
+# ``hea.R.rng.RMersenneTwister``. The shim below keeps this module's
+# historical ``_RUnif`` entry point; it imports lazily because
+# ``hea.R``'s __init__ pulls in modules that import this one.
+
+
+def _RUnif(seed: int):
+    """R's RNG after ``set.seed(seed)`` — see :class:`hea.R.rng.RMersenneTwister`."""
+    from .R.rng import RMersenneTwister
+    return RMersenneTwister(seed)
+
+
+def _mgcv_ordered_unique(xm: np.ndarray) -> np.ndarray:
+    """mgcv ``uniquecombs(x, ordered=TRUE)`` (smooth.r:156-236): unique
+    rows of an (n × d) matrix. d=1: numerically sorted unique. d>1: rows
+    de-duplicated *by text label* ``paste0(col1,"*",col2,...)`` (R's
+    as.character ≈ ``%.15g``) keeping first occurrence, then ordered by
+    the C-locale (byte) sort of those labels. The order matters because
+    mgcv's seeded knot subsample indexes into these rows."""
+    if xm.shape[1] == 1:
+        return np.unique(xm[:, 0])[:, None]
+    labels = np.array(
+        ["*".join(f"{v:.15g}" for v in row) for row in xm]
+    )
+    _, idx = np.unique(labels, return_index=True)
+    return xm[idx]
+
+
+def _mgcv_knot_subsample(xm: np.ndarray, max_knots: int,
+                         seed: int = 1) -> np.ndarray | None:
+    """The shared large-n knot rule of mgcv's tp/ds/sos constructors:
+    when n > max.knots *and* the unique locations nu > max.knots, return
+    the seeded 2000-row subsample of the ordered unique locations (in
+    sampled order, like ``xu[ind,]``); otherwise None (caller keeps its
+    existing knot choice)."""
+    n = xm.shape[0]
+    if n <= max_knots:
+        return None
+    xu = _mgcv_ordered_unique(xm)
+    nu = xu.shape[0]
+    if nu <= max_knots:
+        return None
+    ind = _RUnif(seed).sample_int(nu, max_knots)
+    return xu[ind]
+
+
 def _tp_raw(
     call: Call, data: pl.DataFrame, term: list[str],
 ) -> tuple[np.ndarray, list[np.ndarray], int, int, int, dict]:
@@ -5017,9 +5223,18 @@ def _tp_raw(
     if k < M + 1:
         k = M + 1
 
-    # Collapse to unique rows (Xu). Preserve an index mapping from data rows
-    # to their position in Xu.
-    Xu, yxindex = np.unique(x_c, axis=0, return_inverse=True)
+    # Collapse to unique rows (Xu). mgcv large-n rule (smooth.r:1286-1302):
+    # with no user knots, more than max.knots=2000 unique locations means
+    # the knots become a seeded random subsample of the ordered unique
+    # rows — in which case data rows no longer index into Xu and the model
+    # matrix is built by kernel evaluation instead (yxindex=None).
+    # Otherwise preserve the index mapping from data rows to Xu.
+    Xu_sub = _mgcv_knot_subsample(x_c, 2000, seed=1)
+    if Xu_sub is not None:
+        Xu = Xu_sub
+        yxindex = None
+    else:
+        Xu, yxindex = np.unique(x_c, axis=0, return_inverse=True)
     nu = Xu.shape[0]
     if nu < k:
         raise ValueError(f"tp smooth: fewer unique covariate rows than k ({nu} < {k})")
@@ -5088,14 +5303,6 @@ def _tp_raw(
         TU = T_mat.T @ U
         Z_hh = _tp_qt_factor(TU)
 
-        # X1 on unique rows: first (k-M) cols = U diag(v) applied with Q,
-        # last M cols = polynomial T.
-        X1 = U * v_k  # col-wise scaling
-        X1 = _tp_hqmult_right(X1, Z_hh, transposed=False)
-        X1[:, k - M:] = 0.0
-        X1[:, k - M:k - M + M] = T_mat
-        X_raw = X1[yxindex, :]  # map unique → full data rows
-
         # UZ: (nu + M) × k. Radial block = U @ Q on rows 0..nu-1. Poly block
         # on last M rows is the identity (diagonal on the last M cols).
         UZ = np.zeros((nu + M, k))
@@ -5104,6 +5311,24 @@ def _tp_raw(
         UZ[:nu, k - M:] = 0.0
         for i in range(M):
             UZ[(nu + M) - i - 1, k - i - 1] = 1.0
+
+        if yxindex is not None:
+            # X1 on unique rows: first (k-M) cols = U diag(v) applied with
+            # Q, last M cols = polynomial T; map unique → full data rows.
+            X1 = U * v_k  # col-wise scaling
+            X1 = _tp_hqmult_right(X1, Z_hh, transposed=False)
+            X1[:, k - M:] = 0.0
+            X1[:, k - M:k - M + M] = T_mat
+            X_raw = X1[yxindex, :]
+        else:
+            # Knots are a subsample — evaluate the kernel basis at the
+            # data rows (mgcv builds X through the same map as
+            # Predict.matrix.tp when knots ≠ data; cf. _TPRawBasis.eval).
+            eta0 = _tp_eta_const(m, d)
+            diff = x_c[:, None, :] - Xu[None, :, :]
+            rsq = (diff * diff).sum(axis=-1)
+            E_xk = _tp_fast_eta_vec(m, d, rsq.ravel(), eta0).reshape(n, nu)
+            X_raw = np.hstack([E_xk, _tp_T(x_c, m, d)]) @ UZ
 
         # Penalty S: Q' diag(v) Q, zero-pad last M rows/cols (polynomial
         # part is unpenalized).
@@ -5154,12 +5379,13 @@ def _build_tp_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         X_raw = X_raw - col_means[None, :]
         S_list = [S[:keep, :keep] for S in S_list]
         S_list = [(S + S.T) / 2.0 for S in S_list]
-        S_list = _scale_penalty(X_raw, S_list)
+        S_list, S_scale = _scale_penalty(X_raw, S_list)
         raw = _TPDropNullRawBasis(inner=full_raw, keep=keep, col_means=col_means)
         return [SmoothBlock(
             label=_smooth_label(call), term=term,
             cls="tprs.smooth", X=X_raw, S=S_list,
             spec=BasisSpec(raw=raw, by=None, absorb=None),
+            S_scale=S_scale,
         )]
 
     raw = _TPRawBasis(
@@ -5205,15 +5431,16 @@ def _lowrank_kernel_reduce(
     null space, ``k`` target basis dim → ``(S (k,k), UZ (nk,k-M), null_dim,
     rank)``. Mirrors ``er<-slanczos(K,k,-1); qru<-qr(t(t(T)%*%er$vec)); ...``;
     slanczos(K,k,-1) = the k eigenpairs of largest magnitude (K is only
-    conditionally definite), here a dense ``eigh`` + magnitude sort (nk≤2000).
+    conditionally definite), via the Rlanczos port (``_tp_rlanczos``) — a
+    dense ``eigh`` + magnitude sort spans the same space but picks a
+    different orthonormal basis whenever eigenvalues cluster, which shifts
+    ‖S‖ and hence the *reported* sp by a model-invariant factor vs mgcv.
     """
     nk = K.shape[0]
     M = T.shape[1]
     if k < nk:
-        vals_all, vecs_all = np.linalg.eigh(K)
-        order = np.argsort(np.abs(vals_all))[::-1][:k]   # top-k by |λ|
-        vecs = vecs_all[:, order]                        # (nk, k)
-        D = np.diag(vals_all[order])                     # (k, k)
+        vals, vecs = _tp_rlanczos(K, k, -1)              # (k,), (nk, k)
+        D = np.diag(vals)                                # (k, k)
     else:
         k = nk
         vecs = np.eye(nk)
@@ -5325,8 +5552,8 @@ def _ds_raw(
     x = np.column_stack([data[t].to_numpy().astype(float) for t in term])
     m, s = _ds_order_ms(call, d)
     # knots: explicit locations only if every covariate is keyed (mgcv form);
-    # otherwise the unique data (subsample > max_knots — rare, won't match
-    # mgcv's RNG, same caveat as tp).
+    # otherwise the unique data, with mgcv's seeded max.knots subsample
+    # above 2000 unique locations (smooth.r:3239-3266, bit-exact R RNG).
     kdict = knots or {}
     kcols = [kdict.get(t) for t in term]
     if all(kc is not None for kc in kcols):
@@ -5335,9 +5562,15 @@ def _ds_raw(
             raise ValueError("ds knots: components must have the same length")
         knt = np.column_stack(arrs)
     else:
-        knt = np.unique(x, axis=0)
-        if knt.shape[0] > max_knots:
-            knt = knt[:max_knots]
+        # mgcv ds always takes knt <- xu in uniquecombs(·,TRUE) order
+        # (smooth.r:3239/3263) — order is *not* cosmetic: the Lanczos
+        # reduction's basis (hence the S normalization that the reported
+        # sp compensates for) depends on knot order. np.unique's lexsort
+        # ordering left 2-D ds sp off mgcv by a data-dependent factor
+        # while leaving the fitted model identical.
+        knt = _mgcv_knot_subsample(x, max_knots, seed=1)
+        if knt is None:
+            knt = _mgcv_ordered_unique(x)
     nk = knt.shape[0]
     M = comb(m + d - 1, d)
     if nk < M + 1:
@@ -5518,9 +5751,12 @@ def _sos_raw(
         if la_k.size != lo_k.size:
             raise ValueError("sos knots: components must have the same length")
     else:
-        pts = np.unique(np.column_stack([la, lo]), axis=0)
-        if pts.shape[0] > max_knots:
-            pts = pts[:max_knots]
+        # mgcv's seeded max.knots subsample above 2000 unique (lat,long)
+        # locations (smooth.r:3031-3050, bit-exact R RNG).
+        pts = _mgcv_knot_subsample(np.column_stack([la, lo]), max_knots,
+                                   seed=1)
+        if pts is None:
+            pts = np.unique(np.column_stack([la, lo]), axis=0)
         la_k, lo_k = pts[:, 0], pts[:, 1]
     k = _sos_default_k(call)
     R_kk, _t, T_kk = _makeR(la_k, lo_k, la_k, lo_k, m)
@@ -5566,7 +5802,9 @@ def _nat_param(
     """Port of mgcv's `nat.param(X, S, rank, type, unit.fnorm)`.
 
     type=1: QR on X, then eigendecompose R^-T S R^-1; rescale so the
-    penalty is identity on its range.
+    penalty is identity on its range. The chain is fp-faithful to mgcv
+    (triangular solves, unsymmetrized evr eigen) so the degenerate
+    null-space basis reproduces R's to ~1e-14 — see the inline note.
     type=3: eigendecompose S directly; rescale columns by sqrt(eigenvalue)
     (range) or by a col-norm match (null). Null-space eigenvectors are
     post-rotated so the final column is closest to a constant vector.
@@ -5628,23 +5866,30 @@ def _nat_param(
         return X_new, D, P
 
     Q, R = np.linalg.qr(X, mode="reduced")
-    # RSR = R^-T @ S @ R^-1.
-    Y = np.linalg.solve(R.T, S)
-    RSR = np.linalg.solve(R.T, Y.T).T
-    RSR = 0.5 * (RSR + RSR.T)
-    # Match R's eigen() eigenvector basis inside degenerate eigenspaces by
-    # calling the same LAPACK driver (MRRR, via evr). numpy's eigh uses evd
-    # (D&C), which rotates the null-space differently and leaks into the
-    # final X/P columns for fs-style smooths that don't re-rotate the null.
-    from scipy.linalg import eigh as _sla_eigh
-    w, V = _sla_eigh(RSR, driver="evr")
+    # RSR = R^-T @ S @ R^-1, via the same two triangular solves as mgcv's
+    # forwardsolve(t(R), t(forwardsolve(t(R), t(S)))) — and, like mgcv, NO
+    # symmetrization before eigen. The exact-arithmetic null space of RSR is
+    # degenerate, and dsyevr (R's eigen(symmetric=TRUE) and scipy's evr
+    # driver) resolves the within-cluster basis deterministically from the
+    # well-determined part of the matrix: given this solve chain, scipy
+    # reproduces R's null VECTORS to ~1e-14. Only their column ORDER (the
+    # sort of the two noise-level eigenvalues) is build-dependent — a model-
+    # invariant permutation that even two R installs with different BLAS
+    # would not agree on. An LU solve (np.linalg.solve) or a pre-eigen
+    # 0.5*(A+A') symmetrization perturbs the cluster enough to ROTATE the
+    # basis instead, which does change the model (each null dimension gets
+    # its own λ).
+    from scipy.linalg import eigh as _sla_eigh, solve_triangular as _sla_tri
+    Y = _sla_tri(R.T, S.T, lower=True)        # R^-T S'
+    RSR = _sla_tri(R.T, Y.T, lower=True)      # R^-T (S R^-1)
+    w, V = _sla_eigh(RSR, lower=True, driver="evr")
     order = np.argsort(-w)  # descending
     w = w[order]
     V = V[:, order]
 
     D = np.clip(w[:rank].copy(), 0.0, None)
     X_new = Q @ V
-    P = np.linalg.solve(R, V)
+    P = _sla_tri(R, V, lower=False)
 
     if type_ == 1:
         E = np.concatenate([np.sqrt(D), np.ones(p - rank)])
@@ -5685,42 +5930,6 @@ def _fs_find_factor(term: list[str], data: pl.DataFrame) -> tuple[str | None, li
     return fterm, others
 
 
-def _canonicalize_fs_null_basis(
-    Xr: np.ndarray, rank: int,
-) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
-    """Rotate the null-space columns of Xr to a LAPACK-independent basis.
-
-    mgcv's `nat.param(type=1)` leaves the null eigenspace of RSR spanned by
-    whatever orthonormal basis its LAPACK returns. For degenerate eigenspaces
-    that choice varies between LAPACK builds (R's netlib vs scipy's
-    Accelerate), so Xr's last `null_d` columns are implementation-dependent.
-    Rotate them by the principal components of the centered null columns —
-    a deterministic, data-driven basis computable from any LAPACK's nat.param
-    output (the 2×2 / small eigendecomp of `Xn^T Xn` is stable across libs).
-    Sign convention: largest-magnitude entry of each column is positive.
-
-    Returns ``(out, V_n, signs)`` where ``V_n`` is the (null_d, null_d)
-    rotation and ``signs`` are the per-column ±1 flips. Both are ``None``
-    when ``null_d == 0``.
-    """
-    p = Xr.shape[1]
-    null_d = p - rank
-    if null_d == 0:
-        return Xr, None, None
-    Xn = Xr[:, rank:] - Xr[:, rank:].mean(axis=0, keepdims=True)
-    _w, V_n = np.linalg.eigh(Xn.T @ Xn)  # ascending; largest eig last
-    Xn_rot = Xr[:, rank:] @ V_n
-    signs = np.ones(null_d)
-    for c in range(null_d):
-        m = int(np.argmax(np.abs(Xn_rot[:, c])))
-        if Xn_rot[m, c] < 0:
-            Xn_rot[:, c] = -Xn_rot[:, c]
-            signs[c] = -1.0
-    out = Xr.copy()
-    out[:, rank:] = Xn_rot
-    return out, V_n, signs
-
-
 def _build_fs_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     """`bs="fs"` — factor-smooth interaction.
 
@@ -5744,10 +5953,10 @@ def _build_fs_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     Sb = Sb_list[0]
 
     # nat.param(type=1) — make the base penalty an identity on its range.
+    # The null-space basis matches mgcv's eigen choice (see _nat_param);
+    # only the order of the null columns is LAPACK-build noise, in hea
+    # exactly as in R itself.
     Xr, D, P = _nat_param(Xb, Sb, rank=rank, type_=1, unit_fnorm=True)
-    # mgcv inherits its LAPACK's rotation of the degenerate null eigenspace;
-    # re-rotate to a canonical basis so hea's output is deterministic.
-    Xr, null_rot, null_signs = _canonicalize_fs_null_basis(Xr, rank)
     p = Xr.shape[1]
 
     # Factor levels in alphabetic order (R's factor() default).
@@ -5776,7 +5985,7 @@ def _build_fs_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         S_list.append(np.diag(np.tile(um, nf)))
 
     # scale.penalty runs on the final (duplicated) X and each S.
-    S_list = _scale_penalty(X, S_list)
+    S_list, S_scale = _scale_penalty(X, S_list)
 
     base_raw = _TPRawBasis(
         term=list(others), shift=state["shift"], Xu=state["Xu"],
@@ -5784,12 +5993,13 @@ def _build_fs_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     )
     raw = _FSRawBasis(
         fterm=fterm, flev=list(flev), p=p, rank=rank, null_d=null_d,
-        base_raw=base_raw, P=P, null_rot=null_rot, null_signs=null_signs,
+        base_raw=base_raw, P=P,
     )
     return [SmoothBlock(
         label=_smooth_label(call), term=term,
         cls="fs.interaction", X=X, S=S_list,
         spec=BasisSpec(raw=raw, by=None, absorb=None),
+        S_scale=S_scale,
     )]
 
 
@@ -5929,7 +6139,7 @@ def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     # before the Kronecker constraint — XZKr rescales column norms but
     # `scale.penalty=TRUE` matches on the pre-contrast `sm$X`).
     S_list = [(S + S.T) / 2.0 for S in S_list]
-    S_list = _scale_penalty(X, S_list)
+    S_list, S_scale = _scale_penalty(X, S_list)
 
     # Kronecker sum-to-zero: absorb.cons with C = c(0, nf). XZKr drops the
     # last-level block per factor and subtracts it from each non-last block.
@@ -5952,6 +6162,7 @@ def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     return [SmoothBlock(
         label=label, term=term, cls="sz.interaction", X=X_out, S=S_out,
         spec=BasisSpec(raw=raw, by=None, absorb=None),
+        S_scale=S_scale,
     )]
 
 
@@ -6437,7 +6648,9 @@ def _te_build_margin_centered(
     X_raw, S_raw, predict_bare, noterp, bare = _te_build_margin_raw(
         spec, data, knots_vec=knots_vec)
     S_sym = [(S + S.T) / 2.0 for S in S_raw]
-    S_scaled = _scale_penalty(X_raw, S_sym)
+    # Margin-level rescale: interior te machinery, not mgcv's per-smooth
+    # S.scale (that's recorded on the assembled tensor penalties).
+    S_scaled, _ = _scale_penalty(X_raw, S_sym)
     C = X_raw.mean(axis=0)
     Q, _ = np.linalg.qr(C.reshape(-1, 1), mode="complete")
     Z = Q[:, 1:]
@@ -6595,10 +6808,11 @@ def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
 
     if inter:
         # Skip outer absorb.cons (C = matrix(0,0,0)).
-        S_list = _scale_penalty(X, S_list)
+        S_list, S_scale = _scale_penalty(X, S_list)
         return [SmoothBlock(
             label=label, term=term_all, cls=cls, X=X, S=S_list,
             spec=BasisSpec(raw=tensor_raw, by=None, absorb=None),
+            S_scale=S_scale,
         )]
 
     if matrix_arg:
@@ -6805,7 +7019,7 @@ def _build_t2_smooth(
     if null_dim == 0:
         # No null space, no identifiability constraint needed; sm$Cp is NULL,
         # so fit basis == predict basis.
-        S_list = _scale_penalty(X_raw_full, S_list)
+        S_list, S_scale = _scale_penalty(X_raw_full, S_list)
         t2_raw = _T2RawBasis(
             margins=margin_raws, P_per_margin=P_per_margin,
             ranks=ranks, null_dim=0, Zn=None,
@@ -6813,6 +7027,7 @@ def _build_t2_smooth(
         return [SmoothBlock(
             label=label, term=term_all, cls=cls, X=X_raw_full, S=S_list,
             spec=BasisSpec(raw=t2_raw, by=None, absorb=None),
+            S_scale=S_scale,
         )]
 
     # Predict-time basis (mgcv's full absorb.cons via sm$Cp = colSums(X_raw_full)):
@@ -6834,7 +7049,7 @@ def _build_t2_smooth(
         keep[-1] = False
         X = X_raw_full[:, keep]
         S_list = [S[np.ix_(keep, keep)] for S in S_list]
-        S_list = _scale_penalty(X, S_list)
+        S_list, S_scale = _scale_penalty(X, S_list)
         t2_raw = _T2RawBasis(
             margins=margin_raws, P_per_margin=P_per_margin,
             ranks=ranks, null_dim=1, Zn=None,
@@ -6846,13 +7061,14 @@ def _build_t2_smooth(
             label=label, term=term_all, cls=cls, X=X, S=S_list,
             spec=BasisSpec(raw=t2_raw, by=None, absorb=None,
                            predict_raw=t2_predict, coef_remap=(M, X_bar)),
+            S_scale=S_scale,
         )]
 
     # Partial absorb.cons (smooth.r:4076-4100): C has zero cols on the range
     # space, so only the null-space cols of X / S get rotated. QR is on the
     # nx×1 slice cN = colSums(X_N); Z' = Q[:, 1:] spans the null of cN within
     # the null-space coordinates. Range-space cols pass through unchanged.
-    S_list = _scale_penalty(X_raw_full, S_list)
+    S_list, S_scale = _scale_penalty(X_raw_full, S_list)
     X_R = X_raw_full[:, :nup]
     X_N = X_raw_full[:, nup:]
     cN = X_N.sum(axis=0).reshape(-1, 1)
@@ -6879,6 +7095,7 @@ def _build_t2_smooth(
         label=label, term=term_all, cls=cls, X=X, S=S_list_new,
         spec=BasisSpec(raw=t2_raw, by=None, absorb=None,
                        predict_raw=t2_predict, coef_remap=(M, X_bar)),
+        S_scale=S_scale,
     )]
 
 
@@ -6979,7 +7196,7 @@ def _summation_apply_blocks(
         X_summed = X.reshape(n, m, X.shape[1]).sum(axis=1)
         S_list = list(b.S)
         # mgcv smoothCon pipeline on the row-summed design.
-        S_list = _scale_penalty(X_summed, S_list)
+        S_list, S_scale = _scale_penalty(X_summed, S_list)
         if sparse_cons == -1:
             X_summed, S_list, abs_T = _absorb_sweep_drop(X_summed, S_list)
         else:
@@ -6999,9 +7216,36 @@ def _summation_apply_blocks(
                     b.spec.keep_cols = keep_mask
         out.append(SmoothBlock(
             label=b.label, term=b.term, cls=b.cls,
-            X=X_summed, S=S_list, spec=b.spec,
+            X=X_summed, S=S_list, spec=b.spec, S_scale=S_scale,
         ))
     return out
+
+
+def reject_unsupported_smooth_id(expanded: ExpandedFormula) -> None:
+    """Fit-time guard for mgcv's ``id=`` smoothing-parameter sharing.
+
+    mgcv links the smooths carrying the same ``id`` to ONE smoothing
+    parameter (a single λ multiplies several S_k, via the ``L`` matrix
+    mapping log sp); hea's penalty slots have no L-matrix layer, so a fit
+    would silently estimate independent λ's — a different model than the
+    formula asks for. Basis construction (X, S) is id-agnostic, so this
+    is enforced by the *fitters* (``gam``, ``bam``) right after formula
+    expansion, not by :func:`materialize_smooths` — mgcv-fixture parity
+    tests legitimately build bases for id-carrying smooths.
+
+    ``bs="sz"`` is exempt: its builder consumes ``id=`` for within-term
+    penalty merging (a documented sz-local meaning).
+    """
+    for call in expanded.smooths:
+        if call.kwargs.get("id") is None:
+            continue
+        if call.fn not in ("te", "ti", "t2") and _smooth_bs(call) == "sz":
+            continue
+        raise NotImplementedError(
+            f"{_smooth_label(call)}: id= (sharing one smoothing "
+            "parameter across smooths) is not implemented; each penalty "
+            "would silently get its own λ. Remove id=."
+        )
 
 
 def materialize_smooths(
@@ -7081,9 +7325,8 @@ def materialize_smooths(
     ) -> list[SmoothBlock]:
         if call.fn in ("te", "ti", "t2"):
             # mgcv threads the same knots= list to every marginal
-            # smooth.construct. hea consumes it for 1-D cr margins; tp margins
-            # ignore it (matches mgcv); cc/cp/ps/bs margins are unsupported in
-            # te and raise in the margin builder regardless of knots.
+            # smooth.construct. hea consumes it for 1-D cr margins; tp
+            # margins ignore it (matches mgcv).
             if call.fn == "te":
                 return _build_te_smooth(call, d, matrix_arg=matrix_arg, knots=knots)
             if call.fn == "ti":
@@ -7110,13 +7353,127 @@ def materialize_smooths(
             "not yet implemented"
         )
 
+    # ---- id pre-pass (mgcv gam.setup, mgcv.r:1199-1229) -------------------
+    # Repeat-id smooths are cloned from the first smooth with that id
+    # (same bs/k/m/xt; own term/by), and every smooth in a ≥2-member group
+    # builds its basis from the POOLED covariate values (idLinksBases=TRUE
+    # — smoothCon's n=/dataX= path), so linked terms share knots AND
+    # penalty scaling. The sp linkage itself (one λ per group, mgcv's L
+    # matrix) lives in the fitters.
+    calls = list(expanded.smooths)
+    id_groups: dict[str, list[int]] = {}
+    for i, c in enumerate(calls):
+        idv = _smooth_id_value(c)
+        if idv is not None:
+            id_groups.setdefault(idv, []).append(i)
+    id_groups = {k: v for k, v in id_groups.items() if len(v) >= 2}
+    call_group: dict[int, str] = {}
+    for idv, members in id_groups.items():
+        base_call = calls[members[0]]
+        for i in members:
+            call_group[i] = idv
+        for i in members[1:]:
+            calls[i] = _clone_smooth_spec(base_call, calls[i])
+    id_shared: dict[str, dict] = {}
+
+    def _dispatch_id_linked(idv: str, i: int) -> list[SmoothBlock]:
+        group = id_groups[idv]
+        base_call = calls[group[0]]
+        call_i = calls[i]
+        bs = (
+            None if base_call.fn in ("te", "ti", "t2")
+            else _smooth_bs(base_call)
+        )
+        if base_call.fn == "t2" or bs in ("fs", "sz"):
+            # t2's fit/predict-basis remap and fs/sz's factor-product
+            # bases don't fit the shared-raw-basis replay below; refuse
+            # rather than link with unshared bases (a different model).
+            what = "t2" if base_call.fn == "t2" else f"bs={bs!r}"
+            raise NotImplementedError(
+                f"{_smooth_label(call_i)}: id= linkage across {what} "
+                "smooths is not implemented (basis sharing for this "
+                "class is not ported)."
+            )
+        if bs == "re":
+            # Indicator basis — no knots to share. Identical level sets
+            # give identical bases, so construct each member normally and
+            # let the fitters link the sp's; differing level sets would
+            # need mgcv's pooled (union-level) basis.
+            base_levels = [
+                _factor_levels(data[v]) for v in _smooth_term_vars(base_call)
+            ]
+            my_levels = [
+                _factor_levels(data[v]) for v in _smooth_term_vars(call_i)
+            ]
+            if my_levels != base_levels:
+                raise NotImplementedError(
+                    f"{_smooth_label(call_i)}: id-linked bs='re' smooths "
+                    "must have identical factor levels (pooled-level "
+                    "bases are not ported)."
+                )
+            return _dispatch(call_i, data)
+        rec = id_shared.get(idv)
+        if rec is None:
+            basis_frame = _id_basis_frame([calls[j] for j in group], data)
+            cap: dict = {}
+            cap_token = _ID_RAW_CAPTURE.set(cap)
+            try:
+                _dispatch(base_call, basis_frame)
+            finally:
+                _ID_RAW_CAPTURE.reset(cap_token)
+            if "X" not in cap or cap.get("raw") is None:
+                raise NotImplementedError(
+                    f"{_smooth_label(base_call)}: id= linkage is not "
+                    "implemented for this smooth class (constructor does "
+                    "not expose a shareable raw basis)."
+                )
+            # mgcv rescales S against the pooled-construction X *before*
+            # the dataX replacement (smooth.r:3870-3877) so all linked
+            # smooths carry identical penalties (and the same S.scale —
+            # clone.smooth.spec copies the whole smooth object).
+            cap["S_scaled"], cap["S_scale"] = _scale_penalty(
+                cap["X"], cap["S"])
+            rec = id_shared[idv] = cap
+        base_vars = _smooth_term_vars(base_call)
+        my_vars = _smooth_term_vars(call_i)
+        eval_frame = pl.DataFrame(
+            [data[mv].rename(bv) for mv, bv in zip(my_vars, base_vars)]
+        )
+        X_i = np.asarray(rec["raw"].eval(eval_frame), dtype=float)
+        raw_i = (
+            rec["raw"] if my_vars == base_vars
+            else _RenamedRawBasis(
+                raw=rec["raw"], rename=dict(zip(my_vars, base_vars)),
+            )
+        )
+        S_i = [np.array(S, dtype=float, copy=True) for S in rec["S_scaled"]]
+        # ``C_source=rec["X"]``: mgcv fixes the sum-to-zero constraint from
+        # the pooled-construction X (smooth.r:3848) before the dataX
+        # replacement, so every linked smooth absorbs against the SAME
+        # constraint vector — without this the absorbed bases differ
+        # non-orthogonally and log|H+S|/log|S|+ (hence the REML score)
+        # shift by a constant even though the fit is identical.
+        return _apply_by_and_absorb(
+            call_i, data, X_i, S_i, rec["cls"], my_vars,
+            raw_basis=raw_i, pre_scaled=True, C_source=rec["X"],
+            S_scale=list(rec["S_scale"]),
+        )
+
     token = _SPARSE_CONS_CV.set(int(sparse_cons))
     tero_token = _TERO_CV.set(bool(tero))
     try:
         out: list[list[SmoothBlock]] = []
-        for call in expanded.smooths:
+        for i, call in enumerate(calls):
             mvars = _smooth_matrix_vars(call, data)
-            if mvars:
+            if i in call_group:
+                if mvars:
+                    raise NotImplementedError(
+                        f"{_smooth_label(call)}: id= linkage with "
+                        "matrix-argument (summation convention) smooths "
+                        "is not implemented."
+                    )
+                blocks = _dispatch_id_linked(call_group[i], i)
+            elif mvars:
                 long_data, n_orig, m = long_form_view(data, mvars)
                 blocks = _dispatch(call, long_data, matrix_arg=True)
                 blocks = _summation_apply_blocks(blocks, n_orig, m, mvars)
@@ -7320,6 +7677,10 @@ class Design:
     X: pl.DataFrame
     y: pl.Series
     response: str
+    # R model.matrix's ``assign``: per X column, 0 = intercept, i = the
+    # 1-based index into ``expanded.terms``. Exact term→column mapping
+    # (factors contribute several columns) — summary/anova pTerms use it.
+    param_assign: list[int] = None
 
 
 # LHS function table — maps R-side function names to a polars-expr builder.
@@ -7537,5 +7898,6 @@ def prepare_design(
         )[response_label]
 
     with with_contrasts(contrasts):
-        X = materialize(expanded, data_clean)
-    return Design(expanded=expanded, data=data_clean, X=X, y=y, response=response_label)
+        X, param_assign = materialize(expanded, data_clean, return_assign=True)
+    return Design(expanded=expanded, data=data_clean, X=X, y=y,
+                  response=response_label, param_assign=param_assign)
