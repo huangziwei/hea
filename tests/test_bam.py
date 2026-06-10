@@ -291,3 +291,32 @@ def test_small_data_auto_sp():
     )
 
 
+
+
+def test_mini_mf_matches_mgcv():
+    """mini.mf (bam.r:384-427) row selection is bit-exact: temp.seed(66)
+    + sample(1:n, chunk.size) + sample(1:n, n) through the hea.R.rng
+    port, factor levels picked as the first match in the RANDOMIZED row
+    order, levels in R's order, numeric min/max rows overwriting the
+    head. Reference: mgcv:::mini.mf on a 500-row frame (x = runif
+    rounded to 6dp, fac = 4 letters), chunk_size=100."""
+    from hea.models.bam import _mini_mf
+    # Regenerate the R probe frame exactly (R: set.seed(99); x =
+    # round(runif(n), 6); fac = sample(letters[1:4], n, TRUE)) via the
+    # R RNG port — runif stream then R sample() with replacement.
+    from hea.R import RMersenneTwister
+    r = RMersenneTwister(99)
+    n = 500
+    x = np.round(r.unif_rand(n), 6)
+    lv = np.array(["a", "b", "c", "d"])
+    fac = lv[r.sample_int(4, n, replace=True)]
+    df = pl.DataFrame({"x": x, "fac": fac})
+    mf0 = _mini_mf(df, 100)
+    assert mf0.height == 100
+    np.testing.assert_allclose(
+        mf0["x"].to_numpy()[:8],
+        [0.001179, 0.996862, 0.552895, 0.040490, 0.090266, 0.396683,
+         0.097112, 0.193021], atol=1e-9)
+    assert mf0["fac"].to_list()[:8] == list("ccabcdaa")
+    np.testing.assert_allclose(float(mf0["x"].sum()), 45.676350,
+                               atol=1e-6)

@@ -2839,11 +2839,10 @@ class Scat(Family):
             nu_disp_str = f"{nu_disp:g}"
         return {"family_name": f"Scaled t({nu_disp_str},{sig_disp:g})"}
 
-    def rd(self, mu, wt, scale, rng: np.random.Generator | None = None):
+    def rd(self, rng, mu, wt, scale):
         nu, sig = self.get_theta(trans=True)
         n = np.asarray(mu, dtype=float).shape[0]
-        gen = rng if rng is not None else np.random.default_rng()
-        return gen.standard_t(nu, size=n) * sig + np.asarray(mu, dtype=float)
+        return rng.standard_t(nu, size=n) * sig + np.asarray(mu, dtype=float)
 
     def __repr__(self):
         nu, sig = self.get_theta(trans=True)
@@ -3043,13 +3042,12 @@ class nb(Family):
         Th = float(self.get_theta(trans=True)[0])
         return {"family_name": f"Negative Binomial({np.round(Th, 3):g})"}
 
-    def rd(self, mu, wt, scale, rng: np.random.Generator | None = None):
+    def rd(self, rng, mu, wt, scale):
         Th = float(self.get_theta(trans=True)[0])
         mu = np.asarray(mu, dtype=float)
-        gen = rng if rng is not None else np.random.default_rng()
         # NB as Gamma-Poisson mixture: rate ~ Gamma(Θ, μ/Θ).
-        lam = gen.gamma(shape=Th, scale=mu / Th)
-        return gen.poisson(lam).astype(float)
+        lam = rng.gamma(shape=Th, scale=mu / Th)
+        return rng.poisson(lam).astype(float)
 
     def __repr__(self):
         Th = float(self.get_theta(trans=True)[0])

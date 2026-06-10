@@ -59,6 +59,7 @@ from ..formula import (
     _apply_smooth_arg_exprs,
     _eval_atom,
     _eval_by_col,
+    _factor_levels,
     _LinearTransformRawBasis,
     _RawBasis,
     _smooth_arg_expr_map,
@@ -988,22 +989,28 @@ def _mini_mf(data: pl.DataFrame, chunk_size: int,
         chunk_size = mn
     if n <= chunk_size:
         return data
-    rng = np.random.default_rng(seed)
-    # Random sample
-    ind = rng.choice(n, size=chunk_size, replace=False)
+    # mgcv: rngs <- temp.seed(66), then sample(1:n, chunk.size) and
+    # sample(1:n, n) from the continuing stream — bit-exact via the
+    # hea.R.rng port so the representative frame (hence knot/eigen
+    # setup at n > chunk_size) matches mgcv's.
+    rng = RMersenneTwister(seed)
+    ind = rng.sample_int(n, chunk_size)
     mf0 = data[ind.tolist()]
     # Stratified sampling for representativeness: place min/max rows for
-    # numerics and one row per factor level into the head of mf0.
-    ind_full = rng.permutation(n)
+    # numerics and one row per factor level into the head of mf0. The
+    # factor pick is mgcv's ind[fac[ind]==X][1] — the first match in the
+    # RANDOMIZED row order, one random row per level, levels in R's
+    # order.
+    ind_full = rng.sample_int(n, n)
     rows: list[int] = []
     for c in cols:
         s = data[c]
         if _is_factor_col(s):
-            arr = s.to_numpy()
-            for lvl in s.unique().to_list():
-                where = np.flatnonzero(arr == lvl)
+            arr_perm = s.to_numpy()[ind_full]
+            for lvl in _factor_levels(s):
+                where = np.flatnonzero(arr_perm == lvl)
                 if where.size:
-                    rows.append(int(where[0]))
+                    rows.append(int(ind_full[where[0]]))
         elif s.dtype.is_numeric():
             arr = s.to_numpy()
             j_min = int(np.argmin(arr))
