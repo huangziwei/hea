@@ -4418,3 +4418,88 @@ def test_anova_gam_freq_dispersion_passthrough(capsys):
     m2 = gam("ygau ~ z + s(x)", _pterms_fixture(), method="REML")
     with pytest.raises(TypeError, match="single-gam"):
         anova(m, m2, dispersion=2.0)
+
+
+# ---------------------------------------------------------------------------
+# concurvity (roadmap B4) — mgcv.r:3340-3423, R pins on the CSV fixtures.
+# Blocks = each smooth + mgcv's "para" block, which (evaluation-order
+# quirk: stop <- c(min(start)-1, stop) AFTER start was prepended) is just
+# the FIRST design column — ported bug-for-bug; single column ⇒ the three
+# para measures coincide, pairwise para rows are exact zeros vs centered
+# smooths, and a multi-LP fit's duplicated LP2 intercept drives para to 1.
+# ---------------------------------------------------------------------------
+
+def test_concurvity_full_and_pairwise_match_mgcv():
+    df = _pterms_fixture()
+    m = gam("ygau ~ f4 + s(x) + s(z)", df, method="REML")
+    cf = m.concurvity()
+    assert cf.columns == ["", "para", "s(x)", "s(z)"]
+    assert cf[""].to_list() == ["worst", "observed", "estimate"]
+    np.testing.assert_allclose(cf["para"].to_numpy(),
+                               [0.8022011785] * 3, rtol=1e-7)
+    np.testing.assert_allclose(
+        cf["s(x)"].to_numpy(),
+        [0.1759440882, 0.0924324433, 0.0723339238], rtol=1e-5)
+    np.testing.assert_allclose(
+        cf["s(z)"].to_numpy(),
+        [0.1457622978, 0.0599003383, 0.0582782038], rtol=1e-5)
+    cp = m.concurvity(full=False)
+    assert set(cp) == {"worst", "observed", "estimate"}
+    W = cp["worst"]
+    assert W[""].to_list() == ["para", "s(x)", "s(z)"]
+    np.testing.assert_allclose(np.diag(W.to_numpy()[:, 1:].astype(float)),
+                               np.ones(3))
+    # para row/col vs centered smooths: exact zeros in R's print.
+    assert float(W["s(x)"][0]) < 1e-12 and float(W["para"][1]) < 1e-12
+    np.testing.assert_allclose(float(W["s(z)"][1]), 0.1321030420,
+                               rtol=1e-6)
+    np.testing.assert_allclose(float(cp["observed"]["s(z)"][1]),
+                               0.0531429112, rtol=1e-5)
+    np.testing.assert_allclose(float(cp["observed"]["s(x)"][2]),
+                               0.0647038705, rtol=1e-5)
+    np.testing.assert_allclose(float(cp["estimate"]["s(z)"][1]),
+                               0.0520460923, rtol=1e-5)
+
+
+def test_concurvity_correlated_and_intercept_only_para():
+    # xc = (x+z)/2 makes s(x)/s(xc) genuinely concurve; the para block is
+    # the intercept alone — exactly orthogonal to the centered smooths.
+    df = _pterms_fixture().with_columns(
+        ((pl.col("x") + pl.col("z")) / 2).alias("xc"))
+    m = gam("ygau ~ s(x) + s(xc)", df, method="REML")
+    cf = m.concurvity()
+    assert float(np.abs(cf["para"].to_numpy()).max()) < 1e-12
+    np.testing.assert_allclose(
+        cf["s(x)"].to_numpy(),
+        [0.6311074296, 0.5273551001, 0.5656684323], rtol=1e-5)
+    np.testing.assert_allclose(
+        cf["s(xc)"].to_numpy(),
+        [0.6311074296, 0.6083575856, 0.5202350675], rtol=1e-5)
+    cp = m.concurvity(full=False)
+    np.testing.assert_allclose(float(cp["worst"]["s(xc)"][1]),
+                               0.6311074296, rtol=1e-6)
+
+
+def test_concurvity_multi_lp_gaulss_matches_mgcv():
+    from hea.family import gaulss
+    m = gam(["y ~ s(x) + w", "~ s(z)"], _fit5_fixture(), family=gaulss(),
+            method="REML")
+    cf = m.concurvity()
+    assert cf.columns == ["", "para", "s(x)", "s.1(z)"]
+    # LP2's intercept column duplicates LP1's: para lies entirely in the
+    # complement's span — all three measures are 1 (mgcv prints 1 1 1).
+    np.testing.assert_allclose(cf["para"].to_numpy(), np.ones(3),
+                               atol=1e-10)
+    np.testing.assert_allclose(
+        cf["s(x)"].to_numpy(),
+        [0.1375448729, 0.0799442378, 0.0742819992], rtol=1e-5)
+    np.testing.assert_allclose(
+        cf["s.1(z)"].to_numpy(),
+        [0.1451342576, 0.0844232962, 0.0446797955], rtol=1e-5)
+    cp = m.concurvity(full=False)
+    np.testing.assert_allclose(float(cp["estimate"]["s.1(z)"][1]),
+                               0.0423461441, rtol=1e-5)
+    # No smooths → mgcv's "nothing to do" error.
+    m0 = gam("ygau ~ f4 + z", _pterms_fixture(), method="REML")
+    with pytest.raises(ValueError, match="nothing to do"):
+        m0.concurvity()

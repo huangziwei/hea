@@ -8131,6 +8131,104 @@ class gam:
 
         print("\n".join(out))
 
+    def concurvity(self, full: bool = True):
+        """Port of mgcv's ``concurvity`` (mgcv.r:3340-3423).
+
+        Concurvity measures how well each model term could be
+        approximated by the others — a generalization of collinearity.
+        Three measures in [0, 1] (0 = no problem, 1 = the term lies
+        entirely in the span of the rest): ``worst`` (largest singular
+        value² of the projected-vs-total ratio — the worst case over
+        coefficient directions), ``observed`` (at the fitted
+        coefficients), ``estimate`` (the Frobenius/"less pessimistic"
+        measure).
+
+        ``full=True`` (default): each term against ALL the rest —
+        returns a DataFrame with one row per measure and one column per
+        term. ``full=False``: pairwise — a dict of three DataFrames
+        (``worst``/``observed``/``estimate``), entry [i, j] measuring
+        how much of term j lies in the span of term i alone (diagonal
+        1).
+
+        Blocks follow mgcv exactly: each smooth's coefficient range,
+        plus a leading ``"para"`` block when parametric columns exist —
+        which in mgcv is just the FIRST column (the intercept):
+        ``stop <- c(min(start)-1, stop)`` runs after ``start`` was
+        prepended with 1, so the para range is ``1:0`` and R's indexing
+        quirks collapse it to column 1. Ported bug-for-bug (it's why
+        para's three measures coincide — single column ⇒ β cancels).
+        Columns in no block (the other parametric columns; LP ≥ 2's
+        parametric columns on multi-formula fits) participate in the
+        ``full`` complement but not in the pairwise comparison — also
+        mgcv's behavior. The design is the unweighted model matrix; on
+        rank-dropped fits it is the reduced (identifiable) design.
+        """
+        from scipy.linalg import solve_triangular as _sla_tri
+        if not self._blocks:
+            raise ValueError("nothing to do for this model")
+        md = getattr(self, "_md", None)
+        X = np.asarray(md.X if md is not None else self._X_full,
+                       dtype=float)
+        # Speed step (mgcv.r:3351): reduce to the p×p R factor — every
+        # measure below is quadratic in columns, so spans are preserved.
+        Rf = np.linalg.qr(X, mode="r")
+        p = Rf.shape[1]
+        blocks = [(a, b) for a, b in self._block_col_ranges]
+        labels = [b.label for b in self._blocks]
+        min_start = min(a for a, _ in blocks)
+        if min_start > 0:
+            # mgcv.r:3359-3364's "append parametric terms": the 1:0
+            # range collapses to column 1 only — see the docstring.
+            blocks = [(0, 1)] + blocks
+            labels = ["para"] + labels
+        m = len(blocks)
+        beta = np.asarray(self._beta, dtype=float)
+
+        def _measures(Xi, Xj, bj):
+            """The three concurvity measures of Xj's span explained by
+            Xi (mgcv.r:3376-3387): unpivoted QR of [Xi Xj], the Xj
+            columns' R block split into the projection rows (1:r) and
+            the orthogonal remainder."""
+            r = Xi.shape[1]
+            Rq = np.linalg.qr(np.concatenate([Xi, Xj], axis=1),
+                              mode="r")[:, r:]
+            Rt = np.linalg.qr(Rq, mode="r")
+            M = _sla_tri(Rt.T, Rq[:r].T, lower=True)
+            worst = float(np.linalg.svd(M, compute_uv=False)[0] ** 2)
+            observed = (float(np.sum((Rq[:r] @ bj) ** 2))
+                        / float(np.sum((Rt @ bj) ** 2)))
+            estimate = (float(np.sum(Rq[:r] ** 2))
+                        / float(np.sum(Rq ** 2)))
+            return worst, observed, estimate
+
+        names = ["worst", "observed", "estimate"]
+        if full:
+            conc = np.zeros((3, m))
+            for i, (a, b) in enumerate(blocks):
+                others = np.r_[0:a, b:p]
+                conc[:, i] = _measures(Rf[:, others], Rf[:, a:b],
+                                       beta[a:b])
+            return pl.DataFrame(
+                {"": names,
+                 **{lab: conc[:, i] for i, lab in enumerate(labels)}})
+        mats = [np.eye(m), np.eye(m), np.eye(m)]
+        for i, (ai, bi) in enumerate(blocks):
+            for j, (aj, bj_) in enumerate(blocks):
+                if i == j:
+                    continue
+                w, o, e = _measures(Rf[:, ai:bi], Rf[:, aj:bj_],
+                                    beta[aj:bj_])
+                mats[0][i, j] = w
+                mats[1][i, j] = o
+                mats[2][i, j] = e
+        return {
+            nm: pl.DataFrame(
+                {"": labels,
+                 **{lab: mats[k][:, jj]
+                    for jj, lab in enumerate(labels)}})
+            for k, nm in enumerate(names)
+        }
+
     # ----- diagnostic plots -----------------------------------------------
     #
     # Match the graphical half of mgcv's gam.check + R's plot.glm:
