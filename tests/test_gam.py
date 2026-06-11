@@ -2544,10 +2544,13 @@ def test_tw_reml_scale_and_vc_match_mgcv():
                                rtol=0, atol=1e-6)
     assert m.sigma_squared == np.exp(m._log_phi_hat)
     np.testing.assert_allclose(m.sp[0], 0.11942987, rtol=1e-4)
-    # Vc/edf2 with the family-θ column of db.drho; residual vs mgcv is
-    # p̂-ridge noise (criteria agree to 6e-8, p̂ differs 1.5e-3).
-    np.testing.assert_allclose(np.diag(m.Vc)[0], 0.0014742061, rtol=1e-3)
-    np.testing.assert_allclose(m.edf2_total, 7.05826502, rtol=0, atol=2e-3)
+    # Vc/edf2 with the family-θ column of db.drho. Tightened from
+    # 2e-3-era tolerances after family-review B9: Vc2's Cholesky seed
+    # now uses the Fisher penalized Hessian like gam.fit3.post.proc's R
+    # (gam.fit4.r:798 Fisher-type weights), which closed the whole
+    # extended-family edf2/AIC band (measured Δ 2.6e-9 here).
+    np.testing.assert_allclose(np.diag(m.Vc)[0], 0.0014742061, rtol=1e-6)
+    np.testing.assert_allclose(m.edf2_total, 7.05826502, rtol=0, atol=1e-6)
 
 
 def test_tw_db_dtheta_column_matches_finite_differences():
@@ -2965,10 +2968,11 @@ def test_weights_gamma_log_reml_matches_mgcv():
     np.testing.assert_allclose(m.null_deviance, 204.3523621522,
                                rtol=0, atol=1e-7)
     np.testing.assert_allclose(m.deviance, 74.7456421308, rtol=0, atol=1e-7)
-    # storedaic (family aic + 2·edf) pins exactly; AIC adds 2·(edf2−edf)
-    # whose edf2 wobbles in the optimizer stopping band.
+    # storedaic (family aic + 2·edf) pins exactly; AIC adds 2·(edf2−edf).
+    # edf2 tightened post-B9 (Fisher-seed Vc2; Gamma-log is non-canonical
+    # so the old Newton-seed Vc2 was off here too — measured Δ 5.7e-12).
     np.testing.assert_allclose(m._mgcv_aic, 585.6353269046, rtol=0, atol=1e-5)
-    np.testing.assert_allclose(m.AIC, 585.9668528256, rtol=0, atol=2e-3)
+    np.testing.assert_allclose(m.AIC, 585.9668528256, rtol=0, atol=1e-6)
 
 
 def test_weights_tw_matches_mgcv():
@@ -2990,7 +2994,8 @@ def test_weights_tw_matches_mgcv():
     np.testing.assert_allclose(m.deviance, 275.6496327145, rtol=0, atol=1e-3)
     np.testing.assert_allclose(m._tw_info["p_hat"], 1.15848981,
                                rtol=0, atol=1e-6)
-    np.testing.assert_allclose(m.AIC, 740.5840845316, rtol=0, atol=1e-2)
+    # tightened from 1e-2 post-B9 (Fisher-seed Vc2): measured Δ 8.7e-11.
+    np.testing.assert_allclose(m.AIC, 740.5840845316, rtol=0, atol=1e-6)
 
 
 def test_weights_validation():
@@ -3557,6 +3562,38 @@ def test_binomial_factor_response_matches_mgcv():
         gam("ystr ~ s(x)", df, method="REML")
 
 
+def test_outer_hessian_matches_mgcv_reml2():
+    """The outer Newton Hessian vs mgcv's analytic REML2 (family-review
+    B9 scoping measurement, promoted to a pin): hea's analytic
+    (ρ, log φ) block agrees to ~1e-10 and the FD θ-rows (central
+    differences of the analytic gradient, h=1e-4) to ~1e-7 — the FD
+    truncation band. Layouts: hea (ρ, logφ, θ) ≡ mgcv (θ, ρ, logφ),
+    both V_R units.
+
+    R 4.6.0 / mgcv 1.9-4: gam(ytw2~s(x), tw(), REML) on the
+    _mixed_sp_fixture data; m$outer.info$hess =
+        [θ ]  23.473527142053  -0.028094324393  -28.072963159805
+        [ρ ]  -0.028094324393   1.807824671490   -1.976317124260
+        [φ ] -28.072963159805  -1.976317124260  149.584955862748
+    """
+    from hea.family import tw
+    df = _mixed_sp_fixture()
+    m = gam("ytw2 ~ s(x)", df, family=tw(), method="REML")
+    H = np.asarray(m._outer_info["hess"])
+    perm = [2, 0, 1]                      # hea (ρ,logφ,θ) → mgcv (θ,ρ,logφ)
+    Hm = H[np.ix_(perm, perm)]
+    R_hess = np.array([
+        [23.473527142053, -0.028094324393, -28.072963159805],
+        [-0.028094324393, 1.807824671490, -1.976317124260],
+        [-28.072963159805, -1.976317124260, 149.584955862748],
+    ])
+    # θ row/col: FD truncation band; analytic block much tighter.
+    np.testing.assert_allclose(Hm[0, :], R_hess[0, :], rtol=0, atol=5e-6)
+    np.testing.assert_allclose(Hm[:, 0], R_hess[:, 0], rtol=0, atol=5e-6)
+    np.testing.assert_allclose(Hm[1:, 1:], R_hess[1:, 1:],
+                               rtol=0, atol=1e-7)
+
+
 def test_quasi_power_link_matches_r():
     """R's ``power(λ)`` link (family-review B5): ``g(μ) = μ^λ`` with
     R's exact factory semantics — λ ≤ 0 → log, λ = 1 → identity, link
@@ -3891,11 +3928,11 @@ def test_scat_through_gam_matches_mgcv():
     np.testing.assert_allclose(m.fitted_values[0], 0.1972092616,
                                rtol=0, atol=1e-8)
     np.testing.assert_allclose(m.Vp[0, 0], 0.0006698555932, rtol=1e-6)
-    # edf2/AIC carry the FD-Hessian-θ-rows divergence (hea FDs the
-    # analytical gradient for the outer Hessian's θ rows; mgcv's REML2 is
-    # analytic) — small and documented.
-    np.testing.assert_allclose(m.edf2_total, 7.70731486, rtol=0, atol=2e-3)
-    np.testing.assert_allclose(m.AIC, 183.9037075959, rtol=0, atol=5e-3)
+    # edf2/AIC tightened post-B9: the old ~1e-3 band was Vc2's Newton-
+    # seed Cholesky, NOT the FD θ-rows (those match mgcv's analytic
+    # REML2 to 1e-7); Fisher-seed Vc2 lands Δ ≈ 2e-9 here.
+    np.testing.assert_allclose(m.edf2_total, 7.70731486, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.AIC, 183.9037075959, rtol=0, atol=1e-6)
 
 
 def test_scat_ml_through_gam_matches_mgcv():
@@ -3968,9 +4005,9 @@ def test_nb_through_gam_matches_mgcv():
                                rtol=0, atol=1e-5)
     np.testing.assert_allclose(m.fitted_values[0], 0.6182401827,
                                rtol=0, atol=1e-8)
-    # AIC/edf2 carry the FD-Hessian-θ-rows divergence (documented).
-    np.testing.assert_allclose(m.edf2_total, 6.19148710, rtol=0, atol=1e-3)
-    np.testing.assert_allclose(m.AIC, 583.8235859018, rtol=0, atol=2e-3)
+    # AIC/edf2 tightened post-B9 (Fisher-seed Vc2): Δ ≈ 3e-9 / 2e-11.
+    np.testing.assert_allclose(m.edf2_total, 6.19148710, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.AIC, 583.8235859018, rtol=0, atol=1e-6)
 
 
 def test_nb_fixed_theta_matches_mgcv():

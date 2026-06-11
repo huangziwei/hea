@@ -2041,7 +2041,8 @@ class gam:
                     Vr1 = self._compute_Vr(rho1, H_aug1)
                 Vc1_1 = db1 @ Vr1 @ db1.T
                 Vr_reg1 = self._compute_Vr(rho1, H_aug1, prior_var=1e-7)
-                Vc2_1 = self._compute_Vc2(rho1, fit1, Vr_reg1, sigma_squared)
+                Vc2_1 = self._compute_Vc2(rho1, self._fisher_view(fit1),
+                                          Vr_reg1, sigma_squared)
                 self.Vc = Vp + Vc1_1 + Vc2_1
             finally:
                 if theta_fam_saved is not None:
@@ -6494,8 +6495,14 @@ class gam:
         # this prior on Vc2, edf2 drifts ~1e-3 above mgcv.
         Vr_reg = self._compute_Vr(rho, H_aug, prior_var=0.1)
 
+        # Fisher view once: Vc2's Cholesky seed AND the edf2 metric both
+        # live in post.proc's √(object$weights)·X geometry — Fisher-type
+        # weights for gam.fit3 and gam.fit4 alike (gam.fit4.r:798); see
+        # _compute_Vc2's docstring for the B9 story.
+        fit_F_v = self._fisher_view(fit)
+
         Vc1 = db @ Vr @ db.T
-        Vc2 = self._compute_Vc2(rho, fit, Vr_reg, sigma_squared)
+        Vc2 = self._compute_Vc2(rho, fit_F_v, Vr_reg, sigma_squared)
 
         # diag((σ²A_F⁻¹ + Vc1 + Vc2)·X'W_F X)/σ² = edf + diag((Vc1 + Vc2)·
         # X'W_F X)/σ². Fisher W_F to stay consistent with the edf metric
@@ -6503,7 +6510,6 @@ class gam:
         # passes in). For Gaussian-identity W_F ≡ I and X'W_F X = X'X.
         # X'W_F X through the Fisher factor (X'WX = C'(K'K)C, K = √W·X·C⁻¹)
         # — the explicit product squares the condition number.
-        fit_F_v = self._fisher_view(fit)
         W_F_view = fit_F_v.w
         if W_F_view is None or np.allclose(W_F_view, 1.0):
             Xw = self._X_full
@@ -6643,6 +6649,17 @@ class gam:
 
         Mirrors mgcv's gam.fit3.post.proc — closes the residual ~0.1 AIC
         gap on bs='re' models that's left after Vc1 alone.
+
+        The Cholesky seed must be the FISHER penalized Hessian on the
+        single-formula path: post.proc's ``R`` comes from
+        ``qr(sqrt(object$weights)*X)`` and gam.fit3/4 both return
+        Fisher-type working weights there (gam.fit4.r:798 "note that
+        these are Fisher type weights"; wf = pmax(0, ½·EDeta2) for
+        extended families). Callers pass the ``_fisher_view`` fit (or
+        fit5's own lbb-root duck) — using the PIRLS Newton factor here
+        was the B9 root cause: the entire extended-family Σedf2 ~1e-3
+        band (tw measured Vc2 trace 0.24536 vs mgcv 0.23983) traced to
+        this one factor choice.
         """
         p = self.p
         n_sp = len(self._slots)
