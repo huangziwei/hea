@@ -45,12 +45,22 @@ from matplotlib.transforms import blended_transform_factory
 from scipy.linalg import cho_factor, cho_solve, solve_triangular
 from scipy.stats import chi2 as _chi2, f as f_dist, norm, t as t_dist
 
-from ..family import Family, Gaussian, tw as _tw_family
+from ..family import (
+    Binomial,
+    Family,
+    Gaussian,
+    QuasiBinomial,
+    tw as _tw_family,
+)
 from ..formula import (
     BasisSpec,
+    Call,
     SmoothBlock,
     _eval_atom,
+    _eval_lhs_expr,
     materialize_smooths,
+    normalize_data,
+    parse,
     prepare_design,
 )
 from .lm import _label_top_n, _lowess, _qq_plot
@@ -63,7 +73,126 @@ from ..utils import (
     significance_code,
 )
 
-__all__ = ["gam"]
+__all__ = ["gam", "gam_control"]
+
+
+def gam_control(
+    *,
+    epsilon: float = 1e-7,
+    maxit: int = 200,
+    irls_reg: float = 0.0,
+    rank_tol: float | None = None,
+    newton: dict | None = None,
+    scale_est: str = "fletcher",
+    edge_correct: bool | float = False,
+    efs_lspmax: float = 15.0,
+    efs_tol: float = 0.1,
+    idLinksBases: bool = True,
+    scalePenalty: bool = True,
+    nthreads: int = 1,
+    keepData: bool = False,
+    trace: bool = False,
+) -> dict:
+    """mgcv's ``gam.control`` (mgcv.r:2476-2533) for ``gam(control=)``.
+
+    Names follow the dots→underscores convention (``scale.est`` →
+    ``scale_est``; the ``newton`` sublist keys are ``conv_tol``,
+    ``maxNstep``, ``maxSstep``, ``maxHalf``, ``use_svd``). A plain dict
+    with these keys works too — ``gam()`` revalidates through here.
+
+    Wired knobs: ``epsilon``/``maxit`` (inner PIRLS — newton caps the
+    effective ε at conv_tol/100, gam.fit3.r:1308), the ``newton`` step
+    controls, ``scale_est`` ("fletcher"/"pearson"/"deviance",
+    gam.fit3.r:596-606), ``edge_correct`` (was a gam() argument;
+    mgcv keeps it in control), ``efs_lspmax``/``efs_tol`` (general-
+    family EFS). ``rank_tol`` is accepted but the fit path overrides it
+    to eps·100 exactly like mgcv (gam.fit3.r:133 — the knob only feeds
+    the unported magic path); ``nthreads``/``keepData``/``trace`` are
+    accepted no-ops. Unported knobs raise (never silent): non-zero
+    ``irls_reg`` (performance-iteration only), ``idLinksBases=False``,
+    ``scalePenalty=False``, ``use_svd=True``; mgcv's ``nlm``/``optim``/
+    ``mgcv.tol``/``mgcv.half``/``ncv.threads`` optimizer knobs are not
+    accepted at all (those optimizers aren't ported).
+    """
+    if scale_est not in ("fletcher", "pearson", "deviance"):
+        raise ValueError(
+            "scale_est must be one of 'fletcher', 'pearson', 'deviance'; "
+            f"got {scale_est!r}"
+        )
+    if not isinstance(edge_correct, bool) and (
+        not isinstance(edge_correct, (int, float)) or edge_correct < 0
+    ):
+        raise ValueError("edge_correct must be logical or a positive number")
+    if not (np.isscalar(epsilon) and epsilon > 0):
+        raise ValueError("value of epsilon must be > 0")
+    if not (np.isscalar(maxit) and maxit > 0):
+        raise ValueError("maximum number of iterations must be > 0")
+    if not (np.isscalar(irls_reg) and irls_reg >= 0):
+        raise ValueError(
+            "IRLS regularizing parameter must be a non-negative number."
+        )
+    if irls_reg != 0.0:
+        raise NotImplementedError(
+            "irls_reg is consumed only by mgcv's performance-iteration/"
+            "magic path (mgcv.r:2622), which is not ported; the outer-"
+            "Newton path ignores it in mgcv too."
+        )
+    if rank_tol is None:
+        rank_tol = float(np.finfo(float).eps ** 0.5)
+    elif rank_tol < 0 or rank_tol > 1:
+        import warnings
+        warnings.warn("silly value supplied for rank_tol: reset to "
+                      "square root of machine precision.", stacklevel=2)
+        rank_tol = float(np.finfo(float).eps ** 0.5)
+    if idLinksBases is not True:
+        raise NotImplementedError(
+            "idLinksBases=False (id-linked smooths with own-data bases) "
+            "is not ported; hea always uses mgcv's default pooled bases."
+        )
+    if scalePenalty is not True:
+        raise NotImplementedError(
+            "scalePenalty=FALSE is not ported; penalties are always "
+            "rescaled like mgcv's default."
+        )
+    if efs_tol <= 0:
+        efs_tol = 0.1                       # mgcv's silent reset
+    nt = dict(newton or {})
+    newton_full = {
+        "conv_tol": float(nt.pop("conv_tol", 1e-6)),
+        "maxNstep": float(nt.pop("maxNstep", 5.0)),
+        "maxSstep": float(nt.pop("maxSstep", 2.0)),
+        "maxHalf": int(nt.pop("maxHalf", 30)),
+        "use_svd": bool(nt.pop("use_svd", False)),
+    }
+    if nt:
+        raise ValueError(
+            f"unknown newton control entries: {sorted(nt)} (accepted: "
+            "conv_tol, maxNstep, maxSstep, maxHalf, use_svd)"
+        )
+    if newton_full["use_svd"]:
+        raise NotImplementedError("newton use_svd=True is not ported "
+                                  "(unused by mgcv's newton too)")
+    return {
+        "epsilon": float(epsilon),
+        "maxit": int(maxit),
+        "irls_reg": float(irls_reg),
+        "rank_tol": float(rank_tol),
+        "newton": newton_full,
+        "scale_est": scale_est,
+        "edge_correct": edge_correct,
+        "efs_lspmax": float(efs_lspmax),
+        "efs_tol": float(efs_tol),
+        "idLinksBases": True,
+        "scalePenalty": True,
+        "nthreads": int(nthreads),
+        "keepData": bool(keepData),
+        "trace": bool(trace),
+    }
+
+
+# Defaults for readers that may run without an instance control dict
+# (bam inherits several gam methods without running gam.__init__).
+_GAM_CONTROL_DEFAULTS = gam_control()
 
 
 # ---------------------------------------------------------------------------
@@ -476,11 +605,15 @@ class gam:
         ratio comparisons across different fixed-effect structures,
         where REML scores aren't comparable.
     sp : None or array-like, optional
-        If given, fix smoothing parameters at these (non-negative)
-        values and skip optimization. Length is the number of *working*
-        smoothing parameters — one per penalty slot, except that smooths
-        sharing an ``id=`` contribute a single shared parameter (mgcv's
-        ``m$sp``).
+        Supplied smoothing parameters. Non-negative entries are fixed
+        at that value; **negative entries are estimated** (mgcv's
+        convention), so ``sp=[2, -1]`` fixes the first and optimizes
+        the second. Length is the number of *working* smoothing
+        parameters — one per penalty slot, except that smooths sharing
+        an ``id=`` contribute a single shared parameter (mgcv's
+        ``m$sp``). Per-smooth values can be given in the formula
+        instead — ``s(x, sp=2)``, ``te(x, z, sp=c(1, -1))`` — and
+        override the gam-level vector for that term (mgcv.r:1417-1440).
     family : hea.family.Family, optional
         Response family (Gaussian, Gamma, Poisson, Binomial,
         InverseGaussian, Tweedie, tw, …). Default Gaussian-identity.
@@ -491,8 +624,9 @@ class gam:
         mgcv's prior weights ``w_i``: per-observation multipliers on the
         log-likelihood contribution (frequency/precision weights). For
         ``Binomial()`` this is the trials vector ``m_i`` with ``y`` the
-        success *proportion* (R's proportion + ``weights=`` idiom; the
-        ``cbind(succ, fail)`` response form is not parsed — pre-convert).
+        success *proportion* (R's proportion + ``weights=`` idiom), or
+        use the ``cbind(succ, fail) ~ ...`` response form directly —
+        like R, it multiplies any ``weights=`` by the per-row trials.
         Zero-weight rows are excluded from fitting (mgcv's ``good`` mask)
         but still get fitted values. Default: ones.
     gamma : float, default 1.0
@@ -506,11 +640,15 @@ class gam:
         estimation. Each smooth gains one additional smoothing parameter.
     knots : dict, optional
         Per-covariate knot overrides (mgcv's ``knots=list(...)``).
-    edge_correct : bool or float, default False
-        mgcv's ``gam.control(edge.correct=)``: improve ``Vc`` near
-        smoothing parameters at "working infinity" (REML/ML only; a
-        number sets the target criterion increase per flat parameter,
-        ``True`` means 0.02).
+    control : dict, optional
+        mgcv's ``gam.control()`` — build with :func:`gam_control` or
+        pass a plain dict with the same keys (``epsilon``, ``maxit``,
+        ``newton={'conv_tol': ..., 'maxNstep': ..., 'maxSstep': ...,
+        'maxHalf': ...}``, ``scale_est`` ("fletcher"/"pearson"/
+        "deviance"), ``edge_correct``, ``efs_lspmax``, ``efs_tol``, …).
+        ``edge_correct`` improves ``Vc`` near smoothing parameters at
+        "working infinity" (REML/ML only; a number sets the target
+        criterion increase per flat parameter, ``True`` means 0.02).
 
     Attributes (always set)
     -----------------------
@@ -538,8 +676,12 @@ class gam:
     sigma, sigma_squared : float
         Residual SD and variance (``scale`` in mgcv).
     sp : np.ndarray
-        Optimized (or fixed) smoothing parameters, length
-        ``n_sp = Σ_blocks |S_block|``.
+        Optimized (or fixed) *working* smoothing parameters (mgcv's
+        ``m$sp``): one per estimated parameter — fixed entries are
+        folded out, id-linked penalties share one.
+    full_sp : np.ndarray
+        Per-penalty expansion ``exp(L·log(sp) + lsp0)`` (mgcv's
+        ``m$full.sp``); equals ``sp`` when nothing is linked or fixed.
     edf : np.ndarray
         Per-coefficient effective degrees of freedom, diagonal of the
         influence matrix in coefficient space
@@ -596,6 +738,13 @@ class gam:
     # Working→per-penalty log-sp map (mgcv's ``L``; see ``_rho_full``).
     # ``None`` ⇔ identity (no id linkage) — also the bam fallback.
     _L: np.ndarray | None = None
+    # Fixed-sp offset (mgcv's ``lsp0``): ρ_full = L·θ + lsp0. ``None`` ⇔
+    # zeros — set only when sp= / s(..., sp=) fixes a strict subset of
+    # the smoothing parameters (mgcv.r:1513-1538's fold).
+    _lsp0: np.ndarray | None = None
+    # gam.control dict — class default covers bam and any pre-__init__
+    # reader; instances overwrite with the validated user control.
+    _control: dict | None = None
     # Class-level fallbacks so inherited methods stay usable from ``bam``
     # (same pattern as ``_L``): edge.correct off, no edge-corrected θ, no
     # family-θ slots in the augmented Hessian, no reparam basis (bam's
@@ -622,6 +771,11 @@ class gam:
         ``ncol(L)``; equals ``len(self._slots)`` when no id linkage."""
         return len(self._slots) if self._L is None else self._L.shape[1]
 
+    # Binomial trials vector from a cbind(succ, fail) response — class
+    # default so bam (which shares the criterion/aic machinery but not
+    # this __init__) reads None until it grows its own cbind intake.
+    _binom_n: np.ndarray | None = None
+
     @property
     def _family_mgcv_extended(self) -> bool:
         """mgcv's ``extended.family`` set — families whose θ enters the
@@ -645,7 +799,7 @@ class gam:
         gamma: float = 1.0,
         select: bool = False,
         knots: dict | None = None,
-        edge_correct: bool | float = False,
+        control: dict | None = None,
         start: np.ndarray | list | None = None,
     ):
         # ``data`` may be a polars DataFrame OR a mapping of name → 1-D /
@@ -653,6 +807,11 @@ class gam:
         # (``Array(Float64, m)``) for mgcv's summation-convention smooths
         # (Wood §7.4.1). ``prepare_design`` calls ``normalize_data``
         # internally; we keep the parameter untyped for flexibility.
+        if isinstance(family, type) and issubclass(family, Family):
+            # R: gam(family=quasipoisson) passes the constructor itself;
+            # mgcv calls it (`if (is.function(family)) family <- family()`,
+            # mgcv.r:2324).
+            family = family()
         if isinstance(formula, (list, tuple)):
             # Multiple linear predictors → general-family fitting via
             # gam.fit5 (estimate.gam's general branch, plan §5.3).
@@ -666,7 +825,7 @@ class gam:
                 [str(f) for f in formula], data, method=method, sp=sp,
                 family=family, offset=offset, weights=weights,
                 gamma=gamma, select=select, knots=knots,
-                edge_correct=edge_correct, start=start,
+                control=control, start=start,
             )
             return
         if getattr(family, "is_general", False):
@@ -691,16 +850,12 @@ class gam:
                 "knots must be a dict mapping covariate name -> knot sequence "
                 "(mgcv's knots=list(...)), or None"
             )
-        # mgcv gam.control(edge.correct=): logical, or a positive number
-        # giving the target RE/ML increase per flat smoothing parameter
-        # (gam.fit3.r:1670-1716). Only meaningful for REML/ML.
-        if not isinstance(edge_correct, bool) and (
-            not isinstance(edge_correct, (int, float)) or edge_correct < 0
-        ):
-            raise ValueError(
-                "edge_correct must be logical or a positive number"
-            )
-        self._edge_correct = edge_correct
+        # mgcv's gam.control umbrella — validated/defaulted through
+        # ``gam_control`` whether the caller passed its output or a raw
+        # dict. ``edge_correct`` lives here like mgcv's edge.correct
+        # (gam.fit3.r:1670-1716; REML/ML only).
+        self._control = gam_control(**(control or {}))
+        self._edge_correct = self._control["edge_correct"]
         self._edge_theta1: np.ndarray | None = None
 
         self.formula = formula
@@ -727,6 +882,61 @@ class gam:
         # Gamma, IG) → GCV `n·D/(n−τ)²`; scale-known (Poisson, Binomial) →
         # UBRE `D/n + 2·τ/n − 1`. mgcv's `gam.outer` does the same dispatch
         # under method="GCV.Cp".
+
+        # cbind(succ, fail) ~ ... — R's two-column binomial response.
+        # R's binomial initialize (run inside gam.fit3, gam.fit3.r:219)
+        # rewrites y ← succ/n with weights ← weights·n (n = succ + fail)
+        # and keeps the trials vector n aside for family$aic / $ls /
+        # mustart (gam.fit3.r:614,850). hea rewrites up front: the
+        # proportion and trials become frame columns (so prepare_design's
+        # NA-omit keeps them row-aligned) and the rest of the pipeline
+        # runs on the proportion form; ``self._binom_n`` carries the
+        # trials to the aic/ls/mustart consumers. ``self.formula`` keeps
+        # the original text.
+        _cbind = isinstance(formula, str) and "cbind" in formula
+        if _cbind:
+            lhs = parse(formula).lhs
+            _cbind = isinstance(lhs, Call) and lhs.fn == "cbind"
+        if _cbind:
+            if len(lhs.args) != 2 or lhs.kwargs:
+                raise ValueError(
+                    "cbind() response must have exactly two columns: "
+                    "cbind(successes, failures)"
+                )
+            if not isinstance(self.family, (Binomial, QuasiBinomial)):
+                # mgcv dies obscurely here ("logical subscript too
+                # long") — only (quasi)binomial's initialize understands
+                # a two-column y.
+                raise ValueError(
+                    "cbind(successes, failures) ~ ... requires "
+                    "family=Binomial() or QuasiBinomial(); got "
+                    f"{self.family.name!r}"
+                )
+            data = normalize_data(data)
+            cols = set(data.columns)
+            succ, fail = (
+                data.select(_eval_lhs_expr(a, cols).alias("_v"))["_v"]
+                .to_numpy().astype(float)
+                for a in lhs.args
+            )
+            if np.any(succ < 0) or np.any(fail < 0):
+                raise ValueError("negative counts in cbind() response")
+            if (np.any(np.abs(succ - np.rint(succ)) > 0.001)
+                    or np.any(np.abs(fail - np.rint(fail)) > 0.001)):
+                import warnings
+                warnings.warn("non-integer counts in a binomial glm!",
+                              stacklevel=2)
+            tot = succ + fail
+            pos = tot > 0
+            prop = np.where(pos, succ / np.where(pos, tot, 1.0), 0.0)
+            # NaN counts → NaN proportion so the standard NA-omit drops
+            # the row (R's model.frame does the same before initialize).
+            prop = np.where(np.isnan(tot), np.nan, prop)
+            data = data.with_columns(
+                pl.Series("_hea_cbind_p", prop),
+                pl.Series("_hea_cbind_n", tot),
+            )
+            formula = "_hea_cbind_p ~" + formula.split("~", 1)[1]
         d = prepare_design(formula, data)
         self._expanded = d.expanded
         # Materialise smooth-arg expressions once into ``self.data`` so the
@@ -779,6 +989,14 @@ class gam:
             if np.any(wt_prior < 0):
                 raise ValueError("negative weights not allowed")
             self._wt = wt_prior
+        if _cbind:
+            # weights ← weights·n (R binomial initialize). Trials re-read
+            # from the design frame, which prepare_design may have
+            # NA-filtered — keeps rows aligned. A zero-trials row gets
+            # weight 0: excluded from the fit via the `good` mask but
+            # still predicted, like R.
+            self._binom_n = d.data["_hea_cbind_n"].to_numpy().astype(float)
+            self._wt = self._wt * self._binom_n
         self.prior_weights = self._wt
 
         # mgcv's extended-family preinitialize hook (mgcv.r:1983-1995):
@@ -802,10 +1020,15 @@ class gam:
         # ``s(x, by=fac, id=1)`` single-λ idiom). Both block-list
         # transforms below are length/order-preserving, so this stays
         # aligned.
-        from ..formula import _smooth_id_value
+        from ..formula import _smooth_id_value, _smooth_sp_value
         block_ids: list[str | None] = []
+        # Per-block ``sp=`` from the smooth spec (mgcv: each by=factor
+        # level block inherits the spec's sp), parallel to ``blocks``
+        # under the same length/order-preserving guarantee.
+        block_sps: list[tuple[float, ...] | None] = []
         for call_node, group_blocks in zip(d.expanded.smooths, sb_lists):
             block_ids.extend([_smooth_id_value(call_node)] * len(group_blocks))
+            block_sps.extend([_smooth_sp_value(call_node)] * len(group_blocks))
         # mgcv: select=TRUE adds a null-space penalty per smooth inside
         # smoothCon — i.e., before gam.side. Mirror that order so the
         # subsequent column drops (gam.side) restrict Sf to the kept-cols
@@ -854,22 +1077,29 @@ class gam:
         # the j-th column); everything else extends L block-diagonally
         # with an identity. ``self._L is None`` ⇔ no linkage — the mapping
         # is the identity and every code path below stays byte-identical
-        # to the pre-L behavior. (mgcv's lsp0 offset is identically zero
-        # until fixed-sp support lands, so it is not carried.)
+        # to the pre-L behavior. (mgcv's lsp0 offset enters just below,
+        # when sp= / s(..., sp=) fixes a subset of the parameters.)
         slot_work_col: list[int] = []
         n_work = 0
         id_first_cols: dict[str, tuple[int, int]] = {}
         slot_cursor = 0
+        # Per-block working-column range + whether this block *defines*
+        # its id group (mgcv's idx[[id]]$sp.done: only the defining
+        # term's sp= is consumed, mgcv.r:1430-1438).
+        block_work_info: list[tuple[int, int, bool]] = []
         for b, bid in zip(blocks, block_ids):
             nS = len(b.S)
             if nS == 0:
+                block_work_info.append((0, 0, False))
                 continue
             if bid is None or bid not in id_first_cols:
+                defining = True
                 start = n_work
                 n_work += nS
                 if bid is not None:
                     id_first_cols[bid] = (start, nS)
             else:
+                defining = False
                 start, nc = id_first_cols[bid]
                 if nS > nc:
                     # mgcv's exact refusal (mgcv.r:1312-1314).
@@ -877,6 +1107,7 @@ class gam:
                         "Later terms sharing an `id' can not have more "
                         "smoothing parameters than the first such term"
                     )
+            block_work_info.append((start, nS, defining))
             slot_work_col.extend(range(start, start + nS))
             slot_cursor += nS
         if n_work == len(slots):
@@ -886,6 +1117,70 @@ class gam:
             L[np.arange(len(slots)), slot_work_col] = 1.0
             self._L = L
         self._n_work = n_work
+
+        # ------------- sp=: gam-level + per-smooth merge, fixed fold -------
+        # mgcv gam.setup (mgcv.r:1400-1459): the working sp vector starts
+        # from gam(sp=) — or all -1 ("estimate") — then any s(..., sp=) /
+        # te(..., sp=) values overwrite their term's working entries
+        # (id groups: defining term only). Entries >= 0 are then folded
+        # out of the optimization (mgcv.r:1513-1538):
+        #   lsp0 = L[, fixed] @ log(sp_fixed);  L <- L[, free]
+        # and the remaining negative entries stay estimated. All-fixed
+        # input keeps the historical fixed-sp path; all-negative input is
+        # mgcv's "estimate everything" (≡ sp=None).
+        if n_work > 0:
+            sp_work = np.full(n_work, -1.0)
+            if sp is not None:
+                sp_arr = np.asarray(sp, dtype=float).flatten()
+                if sp_arr.shape != (n_work,):
+                    raise ValueError(
+                        f"sp must have length {n_work} (one per estimated "
+                        f"smoothing parameter; id-linked penalties share "
+                        f"one), got {sp_arr.shape}"
+                    )
+                sp_work = sp_arr.copy()
+            for (start, nS, defining), bsp in zip(block_work_info,
+                                                  block_sps):
+                if bsp is None or not defining or nS == 0:
+                    continue
+                if len(bsp) != nS:
+                    # mgcv's exact message (mgcv.r:1426).
+                    raise ValueError(
+                        "incorrect number of smoothing parameters "
+                        "supplied for a smooth term"
+                    )
+                sp_work[start:start + nS] = bsp
+            fixed_mask = sp_work >= 0.0
+            if np.any(fixed_mask) and not np.all(fixed_mask):
+                # Mixed: fold the fixed working columns into (L, lsp0).
+                L_cur = (self._L if self._L is not None
+                         else np.eye(len(slots)))
+                fixed_vals = sp_work[fixed_mask]
+                log_fixed = np.empty(fixed_vals.shape[0])
+                zero = fixed_vals == 0.0
+                log_fixed[~zero] = np.log(fixed_vals[~zero])
+                if np.any(zero):
+                    # mgcv's "effective zero" for a fixed sp of 0
+                    # (mgcv.r:1519-1527), ported bug-for-bug: the i-th
+                    # zero reads the i-th *penalty's* X-block and S
+                    # (G$off[i]/G$S[[i]] with i the literal loop
+                    # counter), not the zero entry's own penalty.
+                    eps = np.finfo(float).eps
+                    for i, dst in enumerate(np.flatnonzero(zero)):
+                        sl = slots[i]
+                        Xblk = X[:, sl.col_start:sl.col_end]
+                        ef0 = (np.linalg.norm(Xblk) ** 2
+                               / np.linalg.norm(sl.S) * eps * 0.1)
+                        log_fixed[dst] = np.log(ef0)
+                self._lsp0 = L_cur[:, fixed_mask] @ log_fixed
+                self._L = L_cur[:, ~fixed_mask]
+                n_work = int(np.count_nonzero(~fixed_mask))
+                self._n_work = n_work
+                sp = None       # the outer machinery estimates the rest
+            elif np.all(fixed_mask):
+                sp = sp_work    # all fixed (possibly via s(..., sp=))
+            else:
+                sp = None       # nothing fixed — free optimization
 
         # Column names: parametric (R-canonical) + "s(x).1", "s(x).2", … per
         # block. Matches mgcv's `coef(gam_fit)` labels. For multi-block
@@ -1021,10 +1316,13 @@ class gam:
         # Tweedie); None otherwise. Holds θ̂, p̂, log φ̂.
         self._tw_info: dict | None = None
         # Free-θ extended families (tw, scat, nb) estimate θ jointly with
-        # the smoothing parameters; pairing them with a fixed ``sp`` would
-        # silently freeze θ at the init value. Refuse early so the user
-        # picks the fixed-θ constructor form instead (Tweedie(p=...),
-        # scat(theta=(ν,σ)), ...).
+        # the smoothing parameters; an ALL-fixed ``sp`` skips the outer
+        # optimizer and would silently freeze θ at the init value. Refuse
+        # early so the user picks the fixed-θ constructor form instead
+        # (Tweedie(p=...), scat(theta=(ν,σ)), ...). Mixed sp is fine —
+        # by this point ``sp is not None`` ⇔ every entry fixed (the
+        # merge/fold above rebound partially-fixed input to sp=None with
+        # the fixed part in lsp0), and the outer Newton still runs θ.
         if self.family.n_theta > 0 and sp is not None:
             raise ValueError(
                 f"{type(self.family).__name__} estimates its family "
@@ -1105,10 +1403,12 @@ class gam:
             #
             # Every outer method seeds at mgcv's ``initial.spg`` balance
             # (estimate.gam mgcv.r:1998: ``lsp <- lsp2`` — REML, ML and
-            # GCV alike); with id linkage the full-space seed maps to
-            # working space by least squares — mgcv's
-            # ``coef(lm(log(def.sp) ~ L - 1))`` (mgcv.r:4618-4622).
+            # GCV alike); with id linkage or fixed entries the full-space
+            # seed maps to working space by least squares — mgcv's
+            # ``coef(lm(lsp ~ L - 1 + offset(lsp0)))`` (mgcv.r:4617-4618).
             rho0_full = self._initial_sp_rho()
+            if self._lsp0 is not None:
+                rho0_full = rho0_full - self._lsp0
             if self._L is None:
                 cur_rho = rho0_full
             else:
@@ -1139,11 +1439,14 @@ class gam:
                 theta0_parts.append(np.asarray(family.get_theta(), dtype=float))
             theta0 = np.concatenate(theta0_parts)
 
+            _nt = self._control["newton"]
             theta_hat = self._outer_newton(
                 theta0,
                 criterion="REML" if method in ("REML", "ML") else "GCV",
                 include_log_phi=include_log_phi,
                 include_family_theta=include_family_theta,
+                conv_tol=_nt["conv_tol"], max_step=_nt["maxNstep"],
+                max_sd_step=_nt["maxSstep"], max_half=_nt["maxHalf"],
             )
 
             theta_sp = theta_hat[:n_work]
@@ -1189,6 +1492,10 @@ class gam:
         Sλ = fit.S_full
 
         self._rho_hat = rho_hat
+        # mgcv's ``m$full.sp`` (mgcv.r:2399-2401): the per-penalty sp
+        # expansion exp(L·log(sp) + lsp0). Equals ``sp`` itself when no
+        # id linkage and nothing fixed.
+        self.full_sp = np.exp(np.asarray(rho_hat, dtype=float))
 
         fit_F = self._fisher_view(fit)
         A_chol = fit_F.A_chol
@@ -1252,6 +1559,7 @@ class gam:
         # Dp/(n−Mp) = dev/(n−edf)); for ML they differ since φ̂_ML = Dp/n.
         # ``_log_phi_hat`` is preserved separately for score evaluation.
         df_resid = float(n - edf_total)
+        scale_est_kind = (self._control or _GAM_CONTROL_DEFAULTS)["scale_est"]
         if df_resid > 0 and not self.family.scale_known:
             V = self.family.variance(fit.mu)
             pearson_scale = float(np.sum(wt * (y - fit.mu) ** 2 / V)) / df_resid
@@ -1262,9 +1570,11 @@ class gam:
                 pearson_scale / (1.0 + s_bar) if np.isfinite(s_bar)
                 else pearson_scale
             )
+            deviance_scale = float(fit.dev) / df_resid
         else:
             pearson_scale = 1.0 if self.family.scale_known else float("nan")
             fletcher_scale = pearson_scale
+            deviance_scale = pearson_scale
         self._pearson_scale = pearson_scale
         self._fletcher_scale = fletcher_scale
         if self.family.scale_known:
@@ -1276,6 +1586,13 @@ class gam:
             # tw sig2 ≡ exp(φ̂_REML) to 8 digits). Fletcher applies only
             # to *standard* unknown-scale families.
             scale = float(np.exp(self._log_phi_hat))
+        elif scale_est_kind == "pearson":
+            # gam.control(scale.est="pearson"): no Fletcher correction
+            # (gam.fit3.r:596-598).
+            scale = pearson_scale
+        elif scale_est_kind == "deviance":
+            # gam.fit3.r:606: (dev + dev.extra)/(n.true − trA).
+            scale = deviance_scale
         else:
             scale = fletcher_scale
         sigma_squared = scale                 # alias kept for back-compat
@@ -1390,7 +1707,9 @@ class gam:
         # branch in gam.fit3.r:841 is unreachable via gam). estimate.gam
         # then replaces it with the deviance of glm(y ~ offset(off)) when
         # the model has an intercept and a nonzero offset, for non-extended
-        # families (mgcv.r:2072-2075). df.null = n − 1 always.
+        # families (mgcv.r:2072-2075). df.null = n.ok − 1 with
+        # n.ok = n − #zero-weight rows (gam.fit3.r:843-844; the
+        # as.integer(intercept) term is always 1 via gam).
         # For Gaussian (V=1, wt=1, offset=0) this reduces to
         # Σ(y - mean(y))² = tss.
         mu_null_const = float(np.sum(wt * y) / np.sum(wt))
@@ -1399,7 +1718,7 @@ class gam:
         if (has_intercept and np.any(self._offset != 0.0)
                 and not self._family_mgcv_extended):
             self.null_deviance = self._offset_only_null_deviance(y, wt)
-        self.df_null = float(n - 1)
+        self.df_null = float(n - int(np.sum(wt == 0.0)) - 1)
 
         self.Vp = Vp
         self.Ve = Ve
@@ -1594,7 +1913,11 @@ class gam:
         aic_scale = (float(np.exp(self._log_phi_hat))
                      if self._log_phi_hat is not None else scale)
         dev1 = self.family._aic_dev1(self.deviance, aic_scale, wt)
-        family_aic = float(self.family.aic(y, fit.mu, dev1, wt, n))
+        # cbind responses: family$aic gets the trials vector as ``n``
+        # (gam.fit3.r:850) — distinct from wt = pw·n when extra prior
+        # weights are present.
+        n_aic = self._binom_n if self._binom_n is not None else n
+        family_aic = float(self.family.aic(y, fit.mu, dev1, wt, n_aic))
         mgcv_aic = family_aic + 2.0 * edf_total                    # mgcv's m$aic
         logLik = sc_p + edf_total - 0.5 * mgcv_aic                 # mgcv's logLik value
         # mgcv leaves edf2 NULL on the GCV/UBRE path (gam.fit3.post.proc
@@ -1693,12 +2016,17 @@ class gam:
         return Sλ
 
     def _rho_full(self, theta_sp: np.ndarray) -> np.ndarray:
-        """Working log-sp θ → per-penalty log-sp ρ = L·θ (mgcv's
-        ``lsp = L %*% lsp_working + lsp0`` with lsp0 ≡ 0). Identity when
-        no smooths share an ``id``."""
+        """Working log-sp θ → per-penalty log-sp ρ = L·θ + lsp0 (mgcv's
+        ``lsp = L %*% lsp_working + lsp0``). Identity when no smooths
+        share an ``id`` and no sp entry is fixed; lsp0 carries the
+        folded-out fixed log-sp's (mgcv.r:1513-1538)."""
         if self._L is None:
-            return theta_sp
-        return self._L @ theta_sp
+            rho = theta_sp
+        else:
+            rho = self._L @ theta_sp
+        if self._lsp0 is not None:
+            rho = rho + self._lsp0
+        return rho
 
     def _T_working(self, n_extra: int) -> np.ndarray | None:
         """``T = blockdiag(L, I_extra)`` — the Jacobian ∂(ρ, extras)/∂(θ,
@@ -1868,7 +2196,9 @@ class gam:
         # invalid η_new toward η_old=0 never escapes — and using the
         # saturated η as baseline gives old_pdev=0, so any positive iter-1
         # pdev would look like divergence.
-        mu = family.gam_initialize(y, wt)
+        mu = (family.gam_initialize(y, wt, n=self._binom_n)
+              if self._binom_n is not None
+              else family.gam_initialize(y, wt))
         eta = link.link(mu) - off       # β-only η
         beta = np.zeros(p)
 
@@ -1915,8 +2245,11 @@ class gam:
         # invariant — but the iteration path (and step-halving behaviour)
         # follows mgcv's.
         fisher = family.is_canonical
-        eps = 1e-8    # newton() caps control$epsilon at conv.tol/100 (gam.fit3.r:1308)
-        max_it = 200  # gam.control(maxit = 200)
+        # control$epsilon with newton()'s conv.tol/100 cap
+        # (gam.fit3.r:1308); defaults: min(1e-7, 1e-8) = 1e-8.
+        ctrl = self._control or _GAM_CONTROL_DEFAULTS
+        eps = min(ctrl["epsilon"], ctrl["newton"]["conv_tol"] / 100.0)
+        max_it = ctrl["maxit"]            # gam.control(maxit = 200)
         # mgcv's pdev test scales by |scale|+|pdev|, where gam.fit3's
         # `scale` argument is -1 (unknown φ) or +1 (Poisson/binomial) at
         # gam() defaults — |scale| = 1 on every path reachable here. A
@@ -2221,8 +2554,10 @@ class gam:
         old_pdev = (float(np.sum(family.dev_resids(y, mu_null, wt)))
                     + float(null_coef @ Sλ @ null_coef))
 
-        eps = 1e-8    # newton() caps control$epsilon at conv.tol/100
-        max_it = 200
+        ctrl = self._control or _GAM_CONTROL_DEFAULTS
+        # control$epsilon under newton()'s conv.tol/100 cap (gam.fit3.r:1308)
+        eps = min(ctrl["epsilon"], ctrl["newton"]["conv_tol"] / 100.0)
+        max_it = ctrl["maxit"]
         scale_abs = 1.0
 
         def _work(mu_c, eta_c):
@@ -2450,7 +2785,9 @@ class gam:
         family = self.family
         link = family.link
         wt = self._wt
-        mustart = family.gam_initialize(y, wt)
+        mustart = (family.gam_initialize(y, wt, n=self._binom_n)
+                   if self._binom_n is not None
+                   else family.gam_initialize(y, wt))
         eta0 = link.link(mustart)
         if self._family_mgcv_extended:
             dd = family.Dd(y, mustart, family.get_theta(), wt, level=0)
@@ -2779,6 +3116,12 @@ class gam:
             ls0 = float(self.family.ls_extended(
                 self._y_arr, wt, theta=self.family.get_theta(), scale=phi,
             )["ls"])
+        elif self._binom_n is not None:
+            # cbind responses: fix.family.ls's binomial ls is
+            # -aic(y, n, y, w, 0)/2 with n = trials (gam.fit3.r:614 passes
+            # n separately from the prior weights).
+            ls0 = float(self.family.ls(self._y_arr, wt, phi,
+                                       n=self._binom_n)[0])
         else:
             ls0 = float(self.family.ls(self._y_arr, wt, phi)[0])
         rp = self._reparam_at(rho)
@@ -3380,7 +3723,7 @@ class gam:
 
     def _init_general(self, formulas, data, *, method, sp, family,
                       offset, weights, gamma, select, knots,
-                      edge_correct, start=None):
+                      control=None, start=None):
         """estimate.gam's general-family glue (mgcv.r:1893-1924,
         1984-2005, 2060-2092): multi-formula design → Sl.setup +
         initial repara → initial.spg seed → outer Newton over the
@@ -3390,10 +3733,12 @@ class gam:
 
         ``method`` is coerced to REML like mgcv (mgcv.r:1894-1898,
         silently); ``sp=`` takes the working-length vector and fixes
-        every sp (all-or-nothing, matching the single-formula path);
-        ``start=`` and the efs dispatch land with the remaining glue.
+        every sp (all-or-nothing — the single-formula mixed-sp fold
+        hasn't been extended here); ``control=`` supplies the efs and
+        newton knobs (edge_correct still raises).
         """
-        if edge_correct:
+        self._control = gam_control(**(control or {}))
+        if self._control["edge_correct"]:
             raise NotImplementedError(
                 "edge_correct for general families lands with "
                 "gam.fit5.post.proc (plan §5.3)."
@@ -3516,7 +3861,10 @@ class gam:
             fit_efs, theta_hat, it_efs = _efsud(
                 X_irp, y, theta0, sl, sl_setup, family=family,
                 lpi=md.lpi, weights=self._wt, offsets=md.offsets,
-                Mp=Mp, start=self._g5["start"])
+                Mp=Mp, start=self._g5["start"],
+                epsilon=self._control["epsilon"],
+                efs_lspmax=self._control["efs_lspmax"],
+                efs_tol=self._control["efs_tol"])
             self._g5["fit"] = fit_efs
             self._g5["start"] = fit_efs["coefficients"]
             self._outer_info = {
@@ -3528,12 +3876,18 @@ class gam:
             theta0 = _initial_sp_general(
                 X_irp, y, family, md.slots, md.lpi, weights=self._wt,
                 offsets=md.offsets, L=md.L)
+            _nt = self._control["newton"]
             theta_hat = self._outer_newton(
-                theta0, include_log_phi=False, criterion="REML5")
+                theta0, include_log_phi=False, criterion="REML5",
+                conv_tol=_nt["conv_tol"], max_step=_nt["maxNstep"],
+                max_sd_step=_nt["maxSstep"], max_half=_nt["maxHalf"])
 
         rho_full = self._rho_full(theta_hat)
         self._rho_hat = rho_full
         self.sp = np.exp(theta_hat)
+        # mgcv's ``m$full.sp`` — per-penalty expansion (≡ sp when L is
+        # the identity; the general path has no fixed-sp fold yet).
+        self.full_sp = np.exp(np.asarray(rho_full, dtype=float))
 
         # The converged deriv-2 fit: newton's last accepted iterate
         # (cached by the REML5 closure — mgcv's b; estimate.gam never
@@ -4023,11 +4377,20 @@ class gam:
                 tau_ = float(np.sum(Kw_ * Kw_))
                 df_resid_ = max(self.n - tau_, 1.0)
                 scale_est = pearson / df_resid_
-                s_bar_ = max(-0.9, float(np.mean(
-                    self.family.dvar(mu_arr) * (y_arr - mu_arr) / V_arr
-                )))
-                if np.isfinite(s_bar_):
-                    scale_est = scale_est / (1.0 + s_bar_)
+                se_kind = (self._control
+                           or _GAM_CONTROL_DEFAULTS)["scale_est"]
+                if se_kind == "deviance":
+                    # gam.fit3.r:606 — deviance estimator replaces the
+                    # Pearson one entirely.
+                    scale_est = float(fit_.dev) / df_resid_
+                elif se_kind == "fletcher":
+                    s_bar_ = max(-0.9, float(np.mean(
+                        self.family.dvar(mu_arr) * (y_arr - mu_arr)
+                        / V_arr
+                    )))
+                    if np.isfinite(s_bar_):
+                        scale_est = scale_est / (1.0 + s_bar_)
+                # "pearson": keep the uncorrected estimate.
             if is_reml:
                 # log(scale.est); guard against scale_est ≤ 0
                 scale_est_safe = max(scale_est, 1e-300)

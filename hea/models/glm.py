@@ -21,7 +21,14 @@ import polars as pl
 from scipy.linalg import qr, solve_triangular
 from scipy.stats import norm, t as student_t
 
-from ..family import Binomial, Family, Gaussian, Link, _coerce_response
+from ..family import (
+    Binomial,
+    Family,
+    Gaussian,
+    Link,
+    QuasiBinomial,
+    _coerce_response,
+)
 from ..formula import _eval_atom, deparse, materialize, parse, prepare_design, Call
 from .lm import _label_top_n, _lowess, _qq_plot
 from ..utils import (
@@ -234,9 +241,11 @@ class glm:
     Parameters
     ----------
     formula : str
-        R-style formula, e.g. ``"y ~ x1 + x2"``. Single-name LHS only;
-        the ``cbind(success, failure) ~ ...`` binomial form is not yet
-        supported (use ``weights=`` to pass the binomial size ``m``).
+        R-style formula, e.g. ``"y ~ x1 + x2"``. The binomial
+        ``cbind(success, failure) ~ ...`` form is rewritten to
+        (proportion, ``weights=`` · trials) exactly like R's binomial
+        ``initialize``; small LHS expressions (``log(y)``, ``y/100``)
+        are also accepted.
     data : polars.DataFrame
         Input data; rows with NA in any referenced column are dropped
         (R's ``na.action = na.omit``).
@@ -287,6 +296,10 @@ class glm:
     ):
         self.formula = formula
         self.data = data
+        if isinstance(family, type) and issubclass(family, Family):
+            # R: glm(family=quasipoisson) passes the constructor itself;
+            # R calls it (`if (is.function(family)) family <- family()`).
+            family = family()
         self.family = Gaussian() if family is None else family
         ctl = {"epsilon": 1e-8, "maxit": 25}
         if control:
@@ -300,10 +313,10 @@ class glm:
         if (isinstance(f_parsed.lhs, Call)
                 and f_parsed.lhs.fn == "cbind"
                 and len(f_parsed.lhs.args) == 2):
-            if not isinstance(self.family, Binomial):
+            if not isinstance(self.family, (Binomial, QuasiBinomial)):
                 raise ValueError(
                     "cbind(success, failure) ~ ... LHS only makes sense "
-                    "for Binomial; got family="
+                    "for Binomial/QuasiBinomial; got family="
                     f"{self.family.name!r}"
                 )
             s_blk = _eval_atom(f_parsed.lhs.args[0], data)

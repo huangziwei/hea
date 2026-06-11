@@ -849,9 +849,10 @@ def test_lhs_unsupported_function_raises():
 
 
 def test_lhs_cbind_raises():
-    """cbind() multi-column response is not implemented yet — error clearly."""
+    """cbind() responses are binomial-only (C10) — non-binomial families
+    error clearly (mgcv dies with an obscure subscript error there)."""
     d = load_dataset("R", "trees")
-    with pytest.raises(NotImplementedError, match="cbind"):
+    with pytest.raises(ValueError, match="family=Binomial"):
         gam("cbind(Volume, Height) ~ s(Girth)", d, method="REML")
 
 
@@ -2599,7 +2600,8 @@ def test_edge_correct_vc_matches_mgcv():
     x2 = rng.uniform(0, 1, n)
     y = np.sin(2 * np.pi * x1) + 0.5 * x2 + rng.normal(0, 0.3, n)
     df = pl.DataFrame({"x1": x1, "x2": x2, "y": y})
-    m1 = gam("y ~ s(x1) + s(x2)", df, method="REML", edge_correct=True)
+    m1 = gam("y ~ s(x1) + s(x2)", df, method="REML",
+             control={"edge_correct": True})
     np.testing.assert_allclose(
         np.diag(m1.Vc)[[1, 9, 10]],
         [0.022485405, 0.084568825, 0.0027264787], rtol=5e-4,
@@ -2613,7 +2615,8 @@ def test_edge_correct_vc_matches_mgcv():
     x2 = rng.uniform(0, 1, n)
     y = np.sin(2 * np.pi * x1) + rng.normal(0, 0.25, n)
     df2 = pl.DataFrame({"x1": x1, "x2": x2, "y": y})
-    m2 = gam("y ~ s(x1) + s(x2)", df2, method="REML", edge_correct=True)
+    m2 = gam("y ~ s(x1) + s(x2)", df2, method="REML",
+             control={"edge_correct": True})
     np.testing.assert_allclose(
         np.diag(m2.Vc)[[1, 10, 11]],
         [0.025712048, 0.0069904269, 0.013000829], rtol=5e-4,
@@ -2625,7 +2628,8 @@ def test_edge_correct_vc_matches_mgcv():
     )
 
     with pytest.raises(ValueError, match="edge_correct"):
-        gam("y ~ s(x1)", df2, method="REML", edge_correct=-1.0)
+        gam("y ~ s(x1)", df2, method="REML",
+            control={"edge_correct": -1.0})
 
 
 # ---------------------------------------------------------------------------
@@ -3001,6 +3005,497 @@ def test_weights_validation():
     nan[3] = np.nan
     with pytest.raises(ValueError, match="non-finite"):
         gam("y ~ s(x)", df, weights=nan, method="REML")
+
+
+# ---------------------------------------------------------------------------
+# C10: cbind(succ, fail) binomial responses (R's two-column form).
+# mgcv 1.9-4 references (identical data via full-precision CSV;
+# succ = ybin·trials from _weights_fixture, fail = trials − succ).
+# ---------------------------------------------------------------------------
+
+def _cbind_fixture():
+    df, w, _, trials = _weights_fixture()
+    ybin = df["ybin"].to_numpy()
+    succ = np.rint(ybin * trials)
+    fail = trials - succ
+    d = df.with_columns(pl.Series("succ", succ), pl.Series("fail", fail))
+    return d, w, trials
+
+
+def test_cbind_response_equals_proportion_idiom_and_mgcv():
+    # Unit prior weights: R's binomial initialize rewrite makes
+    # cbind(s, f) ≡ (y = s/n, weights = n) exactly (verified diff 0 in R),
+    # so the proportion-idiom pins hold; b$y is the proportion VECTOR and
+    # prior.weights the trials.
+    from hea.family import Binomial
+    d, _, trials = _cbind_fixture()
+    m = gam("cbind(succ, fail) ~ s(x)", d, family=Binomial(),
+            method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 263.6119585501,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.04331411223, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 6.8131092110,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.AIC, 515.1797403312, rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m._y_arr[:3],
+                               [0.1111111111, 0.6666666667, 0.1111111111],
+                               rtol=0, atol=1e-10)
+    np.testing.assert_allclose(m.prior_weights, trials, rtol=0, atol=0)
+    assert m.formula == "cbind(succ, fail) ~ s(x)"
+    # Bit-identical to the proportion + trials idiom (same code path
+    # after the intake rewrite).
+    p = gam("ybin ~ s(x)", d, weights=trials, family=Binomial(),
+            method="REML")
+    np.testing.assert_array_equal(np.asarray(m.coef), np.asarray(p.coef))
+    np.testing.assert_array_equal(m.sp, p.sp)
+    assert m.REML_criterion == p.REML_criterion and m.AIC == p.AIC
+
+
+def test_cbind_with_prior_weights_matches_mgcv():
+    # weights= on top of a cbind response: wt = pw·n while family$aic and
+    # fix.family.ls's binomial ls keep the TRIALS vector n distinct
+    # (binomial()$aic's `m <- if (any(n > 1)) n` branch). The proportion
+    # idiom with weights = pw·n gives the same fit but R reports REML
+    # 367.368 / AIC 714.719 there vs the pins below — the split is real.
+    from hea.family import Binomial
+    d, w, trials = _cbind_fixture()
+    m = gam("cbind(succ, fail) ~ s(x)", d, family=Binomial(),
+            method="REML", weights=w)
+    np.testing.assert_allclose(m.REML_criterion / 2, 466.1483027311,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.03410176348, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 7.7229271723,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(m.coef)[0], 0.0681441619,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(m.deviance, 311.3979099864, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.null_deviance, 944.7137003064,
+                               rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.fitted_values[:3],
+                               [0.1979216377, 0.5944660706, 0.2351697378],
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(m._mgcv_aic, 915.2305383298, rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m.AIC, 915.7745310954, rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m.loglike, -449.8923419926, rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m.prior_weights, w * trials, rtol=0, atol=0)
+    np.testing.assert_allclose(m.Vp[0, 0], 0.001874768817, rtol=1e-6)
+    label, edf, ref_df, stat, p_val = m._smooth_significance_rows()[0]
+    assert label == "s(x)"
+    np.testing.assert_allclose([edf, ref_df, stat],
+                               [6.7229271723, 7.8240928476, 521.6259569195],
+                               rtol=1e-6)
+    assert p_val < 1e-10
+    # UBRE (GCV.Cp, scale known) with the same weights.
+    u = gam("cbind(succ, fail) ~ s(x)", d, family=Binomial(), weights=w)
+    np.testing.assert_allclose(u.GCV_score, 1.1784593386, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(u.sp[0], 0.04663454651, rtol=1e-3)
+    np.testing.assert_allclose(float(np.sum(u.edf)), 7.3750121982,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(u.AIC, 915.1556747877, rtol=0, atol=1e-4)
+
+
+def test_cbind_zero_trials_row_matches_mgcv():
+    # A zero-trials row: y ← 0, weight ← 0 (R initialize), excluded from
+    # the fit via the `good` mask but still predicted; df.null counts it
+    # out (n.ok − 1, gam.fit3.r:843-844).
+    from hea.family import Binomial
+    d, _, trials = _cbind_fixture()
+    trials0 = trials.copy()
+    trials0[10] = 0.0
+    succ0 = d["succ"].to_numpy().copy()
+    succ0[10] = 0.0
+    d0 = d.with_columns(pl.Series("succ0", succ0),
+                        pl.Series("fail0", trials0 - succ0))
+    m = gam("cbind(succ0, fail0) ~ s(x)", d0, family=Binomial(),
+            method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 262.1505266576,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.04381145591, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 6.7925691271,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.deviance, 173.8658914415, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.fitted_values[10], 0.7278699070,
+                               rtol=0, atol=1e-8)
+    assert m._y_arr[10] == 0.0 and m.prior_weights[10] == 0.0
+    assert m.df_null == 148.0
+    np.testing.assert_allclose(m.AIC, 512.3235955314, rtol=0, atol=1e-5)
+
+
+def test_cbind_intake_validation():
+    from hea.family import Binomial, Poisson
+    d, _, _ = _cbind_fixture()
+    # mgcv dies obscurely on non-binomial cbind ("logical subscript too
+    # long"); hea raises a clear error instead.
+    with pytest.raises(ValueError, match="family=Binomial"):
+        gam("cbind(succ, fail) ~ s(x)", d, family=Poisson(), method="REML")
+    with pytest.raises(ValueError, match="exactly two"):
+        gam("cbind(succ, fail, x) ~ s(x)", d, family=Binomial(),
+            method="REML")
+    neg = d.with_columns((pl.col("succ") - 100.0).alias("succ_n"))
+    with pytest.raises(ValueError, match="negative counts"):
+        gam("cbind(succ_n, fail) ~ s(x)", neg, family=Binomial(),
+            method="REML")
+    # R: "non-integer counts in a binomial glm!" (initialize's 2-col
+    # branch); fitting proceeds.
+    frac = d.with_columns((pl.col("succ") + 0.4).alias("succ_f"))
+    with pytest.warns(UserWarning, match="non-integer counts"):
+        gam("cbind(succ_f, fail) ~ s(x)", frac, family=Binomial(),
+            method="REML")
+    # Expression arguments evaluate like R (cbind(tot - fail, fail)).
+    tot = d.with_columns((pl.col("succ") + pl.col("fail")).alias("tot"))
+    m = gam("cbind(tot - fail, fail) ~ s(x)", tot, family=Binomial(),
+            method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 263.6119585501,
+                               rtol=0, atol=1e-6)
+    # bam has no cbind support yet (bam-mgcv-parity plan) — still raises.
+    from hea.models.bam import bam
+    with pytest.raises(NotImplementedError, match="cbind"):
+        bam("cbind(succ, fail) ~ s(x)", d, family=Binomial())
+
+
+# ---------------------------------------------------------------------------
+# D1a: quasipoisson / quasibinomial constructors, plain quasi's "none"
+# canonical (full Newton at every link), and the R bare-constructor
+# family idiom. mgcv 1.9-4 references on the _cbind_fixture data.
+# ---------------------------------------------------------------------------
+
+def test_quasipoisson_through_gam_matches_mgcv():
+    # EQL ls (fix.family.ls quasi branch), Fletcher scale with poisson
+    # dvar, F-flavor s.table (scale estimated), AIC/logLik NA in R →
+    # NaN here. family=quasipoisson (bare class) mirrors R's
+    # function-valued family= (mgcv.r:2324).
+    from hea.family import quasipoisson
+    d, _, _ = _cbind_fixture()
+    m = gam("succ ~ s(x)", d, family=quasipoisson, method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 144.4439228069,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.3008360239, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 5.6297896526,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.sigma_squared, 2.0762775960,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(np.asarray(m.coef)[0], 1.5788384003,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(m.deviance, 329.9450530812, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.null_deviance, 485.7909046963,
+                               rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.fitted_values[:3],
+                               [2.4218737006, 6.4842910810, 2.8097708860],
+                               rtol=0, atol=1e-8)
+    assert np.isnan(m.AIC) and np.isnan(m.loglike)
+    label, edf, ref_df, stat, p_val = m._smooth_significance_rows()[0]
+    np.testing.assert_allclose([edf, ref_df, stat],
+                               [4.6297896526, 5.6558435620, 11.2994195441],
+                               rtol=1e-6)
+    assert p_val < 1e-8
+    # GCV flavor (scale unknown → GCV, not UBRE).
+    g = gam("succ ~ s(x)", d, family=quasipoisson)
+    np.testing.assert_allclose(g.GCV_score, 2.3738165056, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(g.sp[0], 0.3798156913, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(g.edf)), 5.3959126173,
+                               rtol=0, atol=1e-4)
+    # Non-canonical link → full-Newton inner loop (canonical is log,
+    # gam.fit3.r:2318).
+    s = gam("succ ~ s(x)", d, family=quasipoisson(link="sqrt"),
+            method="REML")
+    np.testing.assert_allclose(s.REML_criterion / 2, 144.0428184132,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(s.sp[0], 0.269688419, rtol=1e-4)
+    np.testing.assert_allclose(s.sigma_squared, 2.0713282096,
+                               rtol=0, atol=1e-8)
+
+
+def test_quasibinomial_cbind_through_gam_matches_mgcv():
+    # quasibinomial shares binomial's initialize (cbind rewrite + n-form
+    # mustart) but quasi's EQL ls / NA aic; scale estimated (F tests).
+    from hea.family import quasibinomial
+    d, _, trials = _cbind_fixture()
+    m = gam("cbind(succ, fail) ~ s(x)", d, family=quasibinomial,
+            method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, -62.3730489654,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.05279199299, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 6.5911948602,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.sigma_squared, 1.0867019662,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(np.asarray(m.coef)[0], 0.0734848336,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(m.deviance, 174.5209038941, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.fitted_values[:3],
+                               [0.2159421273, 0.6067860102, 0.2618003404],
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(m.prior_weights, trials, rtol=0, atol=0)
+    assert np.isnan(m.AIC)
+    label, edf, ref_df, stat, p_val = m._smooth_significance_rows()[0]
+    np.testing.assert_allclose([edf, ref_df, stat],
+                               [5.5911948602, 6.7168840816, 38.0380208401],
+                               rtol=1e-6)
+    assert p_val < 1e-10
+    # Bit-identical to the proportion + trials idiom (R: equiv diff 0).
+    p = gam("ybin ~ s(x)", d, weights=trials, family=quasibinomial,
+            method="REML")
+    assert m.REML_criterion == p.REML_criterion
+    np.testing.assert_array_equal(np.asarray(m.coef), np.asarray(p.coef))
+
+
+# ---------------------------------------------------------------------------
+# C1: mixed sp= (negative entries = estimate) + per-smooth s(..., sp=).
+# mgcv 1.9-4 references (identical data via full-precision CSV).
+# ---------------------------------------------------------------------------
+
+def _mixed_sp_fixture():
+    rng = np.random.default_rng(7)
+    n = 160
+    x = rng.uniform(0, 1, n)
+    z = rng.uniform(0, 1, n)
+    w2 = rng.uniform(0, 1, n)
+    f = np.sin(2 * np.pi * x) + 0.5 * (z - 0.5) ** 2 * 8 \
+        + 0.3 * np.cos(3 * np.pi * w2)
+    y = f + rng.normal(0, 0.4, n)
+    ycnt = rng.poisson(np.exp(0.3 + np.sin(2 * np.pi * x) + 0.5 * z))
+    lam = np.exp(0.2 + np.sin(2 * np.pi * x))
+    N = rng.poisson(lam)
+    ytw = np.array([rng.gamma(3.0, 0.25, size=k).sum() if k > 0 else 0.0
+                    for k in N])
+    lam2 = np.exp(0.2 + np.sin(2 * np.pi * x) + 1.2 * (z - 0.5) ** 2 * 3)
+    N2 = rng.poisson(lam2)
+    ytw2 = np.array([rng.gamma(3.0, 0.25, size=k).sum() if k > 0 else 0.0
+                     for k in N2])
+    return pl.DataFrame({"x": x, "z": z, "w2": w2, "y": y,
+                         "ycnt": ycnt.astype(float), "ytw": ytw,
+                         "ytw2": ytw2})
+
+
+def test_mixed_sp_gaussian_matches_mgcv():
+    # gam(sp=c(2, -1)): first sp fixed, second estimated — folded into
+    # (L, lsp0) exactly like mgcv.r:1513-1538. m.sp is the FREE working
+    # vector (mgcv m$sp); full_sp the per-penalty expansion (m$full.sp).
+    df = _mixed_sp_fixture()
+    m = gam("y ~ s(x) + s(z)", df, sp=np.array([2.0, -1.0]),
+            method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 142.5837690211,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp, [0.4074918641], rtol=1e-4)
+    np.testing.assert_allclose(m.full_sp, [2.0, 0.4074918641], rtol=1e-4)
+    assert m.full_sp[0] == 2.0
+    np.testing.assert_allclose(float(np.sum(m.edf)), 6.5232779772,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.sigma_squared, 0.2856327288,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(np.asarray(m.coef)[0], 0.2877072697,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(m.fitted_values[:2],
+                               [-0.1224328811, 0.0088623259],
+                               rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.Vp[0, 0], 0.001785204555, rtol=1e-6)
+    # s(x, sp=2) is the same model (R: diff exactly 0), and a gam-level
+    # vector is overridden by the per-smooth value (mgcv.r:1426).
+    m2 = gam("y ~ s(x, sp=2) + s(z)", df, method="REML")
+    assert m2.REML_criterion == m.REML_criterion
+    np.testing.assert_array_equal(np.asarray(m2.coef), np.asarray(m.coef))
+    m3 = gam("y ~ s(x, sp=2) + s(z)", df, sp=np.array([5.0, -1.0]),
+             method="REML")
+    assert m3.REML_criterion == m.REML_criterion
+    # All-negative == estimate everything (mgcv's rep(-1) default).
+    m4 = gam("y ~ s(x) + s(z)", df, sp=np.array([-1.0, -1.0]),
+             method="REML")
+    m5 = gam("y ~ s(x) + s(z)", df, method="REML")
+    assert m4.REML_criterion == m5.REML_criterion
+
+
+def test_mixed_sp_zero_gcv_te_and_id_match_mgcv():
+    df = _mixed_sp_fixture()
+    # Fixed sp=0 → mgcv's "effective zero" replacement
+    # (‖X_1‖_F²/‖S_1‖_F·eps·0.1, mgcv.r:1519-1527 — incl. the literal
+    # loop-counter quirk); full.sp[0] pinned to R's exact fudge value.
+    m = gam("y ~ s(x, sp=0) + s(z)", df, method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 248.6019479119,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp, [0.2752522316], rtol=1e-4)
+    np.testing.assert_allclose(m.full_sp[0], 4.208851163e-17, rtol=1e-6)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 13.6151131908,
+                               rtol=0, atol=1e-4)
+    # GCV path with a fixed entry (criterion exact; the free sp wobbles
+    # in the optimizer stop band like every GCV pin).
+    g = gam("y ~ s(x, sp=2) + s(z)", df)
+    np.testing.assert_allclose(g.GCV_score, 0.2969723877, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(g.sp, [0.9390895884], rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(g.edf)), 5.9084181815,
+                               rtol=0, atol=1e-4)
+    # te() with mixed per-margin sp.
+    t = gam("y ~ te(x, z, sp=c(1, -1))", df, method="REML")
+    np.testing.assert_allclose(t.REML_criterion / 2, 121.3723761980,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(t.sp, [2.043859291], rtol=1e-4)
+    np.testing.assert_allclose(t.full_sp, [1.0, 2.043859291], rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(t.edf)), 15.2677698428,
+                               rtol=0, atol=1e-4)
+    # id-linked pair fixed via its shared working slot + free third.
+    i = gam("y ~ s(x, id=1) + s(z, id=1) + s(w2)", df,
+            sp=np.array([3.0, -1.0]), method="REML")
+    np.testing.assert_allclose(i.REML_criterion / 2, 140.1580927327,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(i.sp, [0.07509267192], rtol=1e-4)
+    np.testing.assert_allclose(i.full_sp, [3.0, 3.0, 0.07509267192],
+                               rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(i.edf)), 9.5110080234,
+                               rtol=0, atol=1e-4)
+
+
+def test_mixed_sp_tw_and_poisson_match_mgcv():
+    # tw: the fixed-sp fold coexists with the family-θ outer slot (the
+    # all-fixed guard no longer fires for mixed input); poisson: scale-
+    # known REML layout.
+    from hea.family import Poisson, tw
+    df = _mixed_sp_fixture()
+    m = gam("ytw2 ~ s(x, sp=1) + s(z)", df, family=tw(), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 273.7799107088,
+                               rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m.sp, [1.126567419], rtol=1e-4)
+    np.testing.assert_allclose(m.full_sp, [1.0, 1.126567419], rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 6.7232489145,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m._tw_info["p_hat"], 1.2152532008,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sigma_squared, 1.0239855520,
+                               rtol=0, atol=1e-6)
+    p = gam("ycnt ~ s(x, sp=0.5) + s(z)", df, family=Poisson(),
+            method="REML")
+    np.testing.assert_allclose(p.REML_criterion / 2, 254.9820343675,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(p.sp, [30843.93019], rtol=1e-3)
+    np.testing.assert_allclose(p.full_sp[0], 0.5, rtol=0, atol=0)
+    np.testing.assert_allclose(float(np.sum(p.edf)), 5.5251888072,
+                               rtol=0, atol=1e-4)
+
+
+def test_mixed_sp_validation():
+    df = _mixed_sp_fixture()
+    # mgcv's exact error for a wrong-length per-smooth sp (mgcv.r:1426).
+    with pytest.raises(ValueError, match="incorrect number of smoothing"):
+        gam("y ~ s(x, sp=c(1, 2)) + s(z)", df, method="REML")
+    with pytest.raises(ValueError, match="sp must have length"):
+        gam("y ~ s(x) + s(z)", df, sp=np.array([1.0]), method="REML")
+    with pytest.raises(ValueError, match="must be numeric"):
+        gam("y ~ s(x, sp='a') + s(z)", df, method="REML")
+    # All-fixed via per-smooth values lands on the historical fixed path.
+    m = gam("y ~ s(x, sp=2) + s(z, sp=0.5)", df, method="REML")
+    f = gam("y ~ s(x) + s(z)", df, sp=np.array([2.0, 0.5]), method="REML")
+    assert m.REML_criterion == f.REML_criterion
+    np.testing.assert_array_equal(m.sp, f.sp)
+
+
+# ---------------------------------------------------------------------------
+# C2: gam(control=) umbrella + xt=list(max.knots=, seed=). mgcv 1.9-4
+# references.
+# ---------------------------------------------------------------------------
+
+def test_control_scale_est_matches_mgcv():
+    # gam.control(scale.est=): "pearson" drops the Fletcher correction,
+    # "deviance" uses dev/(n−trA) (gam.fit3.r:596-606). The fit itself
+    # is untouched on this fixture (score.scale enters thresholds only)
+    # — sig2 is the value-level difference.
+    from hea.family import quasipoisson
+    d, _, _ = _cbind_fixture()
+    base = gam("succ ~ s(x)", d, family=quasipoisson, method="REML")
+    p = gam("succ ~ s(x)", d, family=quasipoisson, method="REML",
+            control={"scale_est": "pearson"})
+    np.testing.assert_allclose(p.sigma_squared, 2.0480829053,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(p.REML_criterion / 2, 144.4439228069,
+                               rtol=0, atol=1e-6)
+    dv = gam("succ ~ s(x)", d, family=quasipoisson, method="REML",
+             control={"scale_est": "deviance"})
+    np.testing.assert_allclose(dv.sigma_squared, 2.2854095196,
+                               rtol=0, atol=1e-8)
+    # fletcher is the default (already pinned 2.0762775960 in the
+    # quasipoisson test) and differs from both.
+    assert base.sigma_squared not in (p.sigma_squared, dv.sigma_squared)
+
+
+def test_control_newton_and_maxit_match_mgcv():
+    # newton=list(conv.tol=1e-3): looser outer stop — R-pinned sp/REML.
+    # maxit=2: tiny PIRLS budget changes the fit; mgcv neither warns nor
+    # flags it at the gam level (verified live) — same here.
+    df = _mixed_sp_fixture()
+    m = gam("y ~ s(x) + s(z)", df, method="REML",
+            control={"newton": {"conv_tol": 1e-3}})
+    np.testing.assert_allclose(m.REML_criterion / 2, 117.7658503583,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp, [0.03091877386, 0.2917482089],
+                               rtol=1e-6)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 10.3718899880,
+                               rtol=0, atol=1e-4)
+    m2 = gam("y ~ s(x) + s(z)", df, method="REML", control={"maxit": 2})
+    assert m2.REML_criterion != m.REML_criterion
+
+
+def test_xt_max_knots_seed_matches_mgcv():
+    # s(x, xt=list(max.knots=1500, seed=2)) — the 1.8 subsample
+    # machinery under non-default controls, bit-exact via the R-RNG
+    # port. Same data as test_tp_max_knots_subsample_matches_mgcv.
+    rng = np.random.default_rng(2024)
+    n = 4000
+    x = rng.uniform(0, 1, n)
+    y = (np.sin(2 * np.pi * x) + 0.3 * np.cos(6 * np.pi * x)
+         + rng.normal(0, 0.4, n))
+    df = pl.DataFrame({"x": x, "y": y})
+    m = gam("y ~ s(x, k=20, xt=list(max.knots=1500, seed=2))", df,
+            method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 2046.4335963521,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.008229625024, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 16.9716843685,
+                               rtol=0, atol=1e-4)
+
+
+def test_gam_control_validation():
+    from hea.models.gam import gam_control
+    df = _mixed_sp_fixture()
+    with pytest.raises(ValueError, match="scale_est"):
+        gam_control(scale_est="bogus")
+    with pytest.raises(NotImplementedError, match="irls_reg"):
+        gam_control(irls_reg=0.5)
+    with pytest.raises(NotImplementedError, match="idLinksBases"):
+        gam_control(idLinksBases=False)
+    with pytest.raises(ValueError, match="newton control"):
+        gam_control(newton={"bogus": 1})
+    with pytest.raises(TypeError):
+        gam_control(nlm={})            # unported optimizer knob
+    with pytest.raises(ValueError, match="epsilon"):
+        gam_control(epsilon=0.0)
+    # raw dicts revalidate through gam_control inside gam()
+    with pytest.raises(ValueError, match="scale_est"):
+        gam("y ~ s(x)", df, method="REML",
+            control={"scale_est": "nope"})
+    with pytest.raises(ValueError, match="unsupported xt entry"):
+        gam("y ~ s(x, xt=list(shrink=0.5))", df, method="REML")
+    # defaults are byte-identical to no control at all
+    m0 = gam("y ~ s(x) + s(z)", df, method="REML")
+    m1 = gam("y ~ s(x) + s(z)", df, method="REML", control={})
+    assert m0.REML_criterion == m1.REML_criterion
+    np.testing.assert_array_equal(np.asarray(m0.coef), np.asarray(m1.coef))
+
+
+def test_plain_quasi_identity_link_full_newton_matches_mgcv():
+    # mgcv's canonical for plain quasi is "none" (fix.family.link,
+    # gam.fit3.r:2322): the inner loop runs full Newton even at the
+    # identity link. quasi(identity, V=mu) would take Fisher steps under
+    # a link==default test — the pins differ visibly in the sp. Same-
+    # optimum stopping noise leaves sp ~1.5e-6 relative off R here
+    # (criterion agrees to 7e-9; cf. the §2.3/§2.4 band records).
+    from hea.family import Quasi
+    d, _, _ = _cbind_fixture()
+    m = gam("succ ~ s(x)", d,
+            family=Quasi(link="identity", variance="mu"), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 141.2023803253,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], 0.01510015552, rtol=1e-3)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 5.4712772398,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.sigma_squared, 2.0726103917,
+                               rtol=0, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------

@@ -1229,12 +1229,19 @@ class Family:
         """
         return np.asarray(y, dtype=float).copy()
 
-    def gam_initialize(self, y, wt) -> np.ndarray:
+    def gam_initialize(self, y, wt, n=None) -> np.ndarray:
         """Starting μ̂ for gam/bam PIRLS — mgcv patches some families'
         ``initialize`` before fitting (``fix.family``, gam.fit3.r:2550),
         making starts valid where glm's would refuse (e.g. gaussian-log
         with y ≤ 0). Default: same as ``initialize``; Gaussian overrides.
+
+        ``n`` is the binomial trials vector from a ``cbind(succ, fail)``
+        response (R's initialize keeps it distinct from the prior
+        weights); only forwarded when given so ``initialize`` overrides
+        without an ``n`` parameter stay valid.
         """
+        if n is not None:
+            return self.initialize(y, wt, n=n)
         return self.initialize(y, wt)
 
     def validmu(self, mu) -> bool:
@@ -1491,9 +1498,13 @@ class Binomial(Family):
     """``y·m ~ Binomial(m, μ)``; ``y`` is the success proportion in [0,1],
     ``wt`` is the binomial size ``m`` (= 1 for Bernoulli).
 
-    The cbind(success, failure) input form that R supports is *not* handled
-    here — the caller must pre-convert it to (proportion, size) before
-    constructing the family.
+    The cbind(success, failure) response form is handled by the *model*
+    front ends (``gam``, ``glm``), which convert it to (proportion,
+    weights·trials) before fitting — R's binomial ``initialize`` does the
+    same. The trials vector ``n`` stays distinct from the prior weights
+    in ``aic``/``ls``/``initialize`` (R keeps them separate whenever the
+    caller also supplies its own ``weights=``); when ``n`` is omitted,
+    the prior weights play both roles exactly as before.
     """
     name = "binomial"
     canonical_link_name = "logit"
@@ -1524,10 +1535,17 @@ class Binomial(Family):
 
         return 2.0 * wt * (yly(y, mu) + yly(1.0 - y, 1.0 - mu))
 
-    def initialize(self, y, wt):
+    def initialize(self, y, wt, n=None):
         y = np.asarray(y, dtype=float); wt = np.asarray(wt, dtype=float)
         if np.any(y < 0) or np.any(y > 1):
             raise ValueError("y values must be 0 <= y <= 1 for the 'binomial' family")
+        if n is not None:
+            # R binomial initialize, NCOL(y)==2 branch: mustart =
+            # (n·y + 0.5)/(n + 1) — the trials vector, NOT the (possibly
+            # prior-weight-scaled) wt. Only the starting point differs;
+            # the converged fit is identical either way.
+            n = np.asarray(n, dtype=float)
+            return (n * y + 0.5) / (n + 1.0)
         # mgcv/R: mustart = (wt·y + 0.5) / (wt + 1) keeps μ in (0,1) so the
         # logit link starts finite even when y is exactly 0 or 1.
         return (wt * y + 0.5) / (wt + 1.0)
@@ -1543,6 +1561,22 @@ class Binomial(Family):
         # final sum uses ``np.cumsum(...)[-1]`` for bit-match to Eigen3.
         y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
+        # R binomial()$aic: ``m <- if (any(n > 1)) n else wt`` — with a
+        # cbind(succ, fail) response, ``n`` is the trials vector kept by
+        # initialize and ``wt`` carries any extra prior weights on top
+        # (wt = pw·n), so the density is evaluated at the true counts
+        # with coefficient wt/m = pw. Callers passing a scalar n (nobs)
+        # or ones keep the historical wt-only path bit-for-bit.
+        n_arr = None if n is None else np.asarray(n, dtype=float)
+        if (n_arr is not None and n_arr.ndim == 1
+                and n_arr.shape == y.shape and np.any(n_arr > 1.0)):
+            good = n_arr > 0
+            weight = np.where(good, wt / np.where(good, n_arr, 1.0), 0.0)
+            s_arr = np.rint(np.where(good, n_arr * y, 0.0))
+            size = np.rint(n_arr)
+            logp = _dbinom_raw(s_arr, size, mu, 1.0 - mu, True)
+            terms = np.where(good & np.isfinite(logp), weight * logp, 0.0)
+            return -2.0 * float(np.cumsum(terms)[-1])
         m = np.rint(wt)
         # Mask out m<=0; for those, contribution is 0.
         good = m > 0
@@ -1558,9 +1592,11 @@ class Binomial(Family):
         terms = np.where(good & np.isfinite(logp), terms, 0.0)
         return -2.0 * float(np.cumsum(terms)[-1])
 
-    def ls(self, y, wt, scale):
+    def ls(self, y, wt, scale, n=None):
         # mgcv: ls = -binomial$aic(y, n, y, w, 0) / 2; scale-known.
-        ls0 = -0.5 * self.aic(y, y, 0.0, wt, None)
+        # ``n`` (trials, cbind responses) flows into the aic exactly as in
+        # fix.family.ls (gam.fit3.r:2516) — None keeps the wt-only path.
+        ls0 = -0.5 * self.aic(y, y, 0.0, wt, n)
         return np.array([ls0, 0.0, 0.0], dtype=float)
 
     def qf(self, p, mu, wt, scale):
@@ -1676,6 +1712,16 @@ class Quasi(Family):
     name = "quasi"
     canonical_link_name = "identity"  # R's quasi() default, regardless of variance
     scale_known = False
+    # mgcv's canonical link for the full-Newton/Fisher switch
+    # (fix.family.link, gam.fit3.r:2316-2323): plain quasi → "none", so
+    # the inner loop never takes the Fisher shortcut whatever the link;
+    # quasipoisson/quasibinomial override with log/logit. Distinct from
+    # ``canonical_link_name``, which only resolves the *default* link.
+    _newton_canonical = "none"
+
+    @property
+    def is_canonical(self) -> bool:
+        return self.link.name == self._newton_canonical
 
     def __init__(self, link=None, variance: str = "constant"):
         if variance not in _QUASI_VARIANCE_FAMILIES:
@@ -1715,7 +1761,9 @@ class Quasi(Family):
     def aic(self, y, mu, dev, wt, n, theta=None):
         return float("nan")
 
-    def ls(self, y, wt, scale):
+    def ls(self, y, wt, scale, n=None):
+        # ``n`` (trials, quasibinomial cbind responses) accepted and
+        # ignored — mgcv's quasi ls(y,w,n,scale) never reads it.
         # Extended quasi-likelihood saturated piece (Nelder & Pregibon 1987;
         # McCullagh & Nelder 1989, §9.6). mgcv's ``quasi$ls`` drops both the
         # log(2π) and log V(y) constants — neither depends on φ or ρ, so they
@@ -1738,6 +1786,53 @@ class Quasi(Family):
 
     def __repr__(self) -> str:
         return f"quasi(link={self.link.name}, variance={self.variance_name!r})"
+
+
+class QuasiPoisson(Quasi):
+    """R's ``quasipoisson(link="log")``: Poisson variance/deviance with
+    estimated dispersion (no likelihood — AIC/logLik are NaN, EQL ls).
+
+    Differs from ``Quasi(variance="mu")`` exactly where R differs:
+    default link log, poisson's ``initialize`` (μ₀ = y + 0.1 with the
+    negative-y check), canonical log for the Newton/Fisher switch
+    (gam.fit3.r:2318), and the family name printers show.
+    """
+    name = "quasipoisson"
+    canonical_link_name = "log"
+    _newton_canonical = "log"
+
+    def __init__(self, link=None):
+        super().__init__(link=link, variance="mu")
+
+    def initialize(self, y, wt):
+        # R quasipoisson shares poisson's initialize verbatim.
+        return self._shadow.initialize(y, wt)
+
+    __repr__ = Family.__repr__
+
+
+class QuasiBinomial(Quasi):
+    """R's ``quasibinomial(link="logit")``: binomial variance/deviance
+    with estimated dispersion (no likelihood — AIC/logLik are NaN).
+
+    Shares binomial's ``initialize`` verbatim — the proportion-smoothing
+    mustart and the ``cbind(succ, fail)`` trials form (which warns on
+    non-integer counts, like R) — unlike ``Quasi(variance="mu(1-mu)")``'s
+    clip-style start. Canonical logit (gam.fit3.r:2319).
+    """
+    name = "quasibinomial"
+    canonical_link_name = "logit"
+    _newton_canonical = "logit"
+
+    def __init__(self, link=None):
+        super().__init__(link=link, variance="mu(1-mu)")
+
+    def initialize(self, y, wt, n=None):
+        # R quasibinomial shares binomial's initialize verbatim (incl.
+        # the n-form mustart for cbind responses).
+        return self._shadow.initialize(y, wt, n=n)
+
+    __repr__ = Family.__repr__
 
 
 # ---------------------------------------------------------------------------
@@ -3726,7 +3821,7 @@ def _coerce_response(y_series: pl.Series, family: "Family") -> np.ndarray:
     matches what R would pick after ``droplevels()``.
     """
     dt = y_series.dtype
-    if isinstance(family, Binomial):
+    if isinstance(family, (Binomial, QuasiBinomial)):
         if dt == pl.Boolean:
             return y_series.to_numpy().astype(float)
         if dt == pl.String or isinstance(dt, (pl.Categorical, pl.Enum)):
@@ -3754,6 +3849,8 @@ poisson = Poisson
 binomial = Binomial
 inverse_gaussian = InverseGaussian
 quasi = Quasi
+quasipoisson = QuasiPoisson
+quasibinomial = QuasiBinomial
 scat = Scat   # mgcv-style lowercase alias
 __all__ = [
     "Family", "Link",
@@ -3763,6 +3860,8 @@ __all__ = [
     "Binomial", "binomial",
     "InverseGaussian", "inverse_gaussian",
     "Quasi", "quasi",
+    "QuasiPoisson", "quasipoisson",
+    "QuasiBinomial", "quasibinomial",
     "Tweedie", "tw",
     "Scat", "scat",
     "nb",

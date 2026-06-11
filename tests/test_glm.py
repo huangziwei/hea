@@ -603,3 +603,29 @@ def test_quasi_rejects_unknown_variance():
     with pytest.raises(ValueError, match="variance must be"):
         Quasi(variance="bogus")
 
+
+def test_quasibinomial_quasipoisson_constructors_through_glm():
+    # R's convenience constructors: quasipoisson == Quasi(log, "mu") at
+    # the point-estimate level (initialize differs only in mustart);
+    # quasibinomial additionally accepts the cbind response form, which
+    # plain Quasi("mu(1-mu)") does not. Bare-class family= mirrors R's
+    # function-valued family argument.
+    from hea.family import quasibinomial, quasipoisson
+    d = load_dataset("MASS", "quine")
+    m_q = glm("Days ~ Sex + Age", d, family=Quasi(link="log", variance="mu"))
+    m_qp = glm("Days ~ Sex + Age", d, family=quasipoisson)
+    np.testing.assert_allclose(m_qp._bhat_arr, m_q._bhat_arr, atol=1e-10)
+    np.testing.assert_allclose(m_qp.dispersion, m_q.dispersion, atol=1e-12)
+    assert m_qp.family.name == "quasipoisson"
+    assert np.isnan(m_qp.aic)
+
+    men = load_dataset("MASS", "menarche")
+    m_qb = glm("cbind(Menarche, Total - Menarche) ~ Age", men,
+               family=quasibinomial)
+    m_b = glm("cbind(Menarche, Total - Menarche) ~ Age", men,
+              family=Binomial())
+    # Same IRLS fixed point as binomial; dispersion estimated, t tests.
+    np.testing.assert_allclose(m_qb._bhat_arr, m_b._bhat_arr, atol=1e-8)
+    assert m_qb.dispersion != 1.0 and m_qb._test_kind == "t"
+    assert np.isnan(m_qb.aic)
+

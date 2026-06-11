@@ -3068,6 +3068,39 @@ def _smooth_id_value(call: Call) -> str | None:
     return _deparse(node)
 
 
+def _smooth_sp_value(call: Call) -> tuple[float, ...] | None:
+    """The smooth's ``sp=`` argument (s/te/ti/t2): per-penalty supplied
+    smoothing parameters, **negative = "estimate this one"** (mgcv
+    gam.setup, mgcv.r:1417-1440). Returns a tuple of floats, or None
+    when absent/NULL. Scalar ``sp=2`` and vector ``sp=c(2, -1)`` forms
+    both parse; anything non-numeric is an error (mgcv would fail in
+    its own way downstream)."""
+    node = call.kwargs.get("sp")
+    if node is None:
+        return None
+    if isinstance(node, Name) and node.ident == "NULL":
+        return None
+
+    def scalar(nd) -> float:
+        if isinstance(nd, Paren):
+            return scalar(nd.expr)
+        if isinstance(nd, UnaryOp) and nd.op in ("-", "+"):
+            v = scalar(nd.operand)
+            return -v if nd.op == "-" else v
+        if isinstance(nd, Literal) and nd.kind == "num":
+            return float(nd.value)
+        raise ValueError(
+            f"sp= in {call.fn}() must be numeric (a scalar or c(...)); "
+            f"got {_deparse(nd)!r}"
+        )
+
+    if isinstance(node, Call) and node.fn == "c":
+        if node.kwargs:
+            raise ValueError("sp=c(...) takes no named arguments")
+        return tuple(scalar(a) for a in node.args)
+    return (scalar(node),)
+
+
 def _clone_smooth_spec(base: Call, member: Call) -> Call:
     """mgcv ``clone.smooth.spec`` (mgcv.r:730-765): a repeat-``id`` smooth
     is rebuilt from the *first* smooth with that id — same bs class, k, m,
@@ -5180,6 +5213,43 @@ def _mgcv_ordered_unique(xm: np.ndarray) -> np.ndarray:
     return xm[idx]
 
 
+def _xt_max_knots_seed(call: Call) -> tuple[int, int]:
+    """tp/ds/sos ``xt=list(max.knots=, seed=)`` — the large-n knot-
+    subsample controls (smooth.r:1286-1302 tp, :3239-3266 ds,
+    :3031-3050 sos). Defaults (2000, 1), mgcv's. Other ``xt`` entries
+    are an error here — no other xt semantics are ported for these
+    bases (never silent)."""
+    node = call.kwargs.get("xt")
+    mk, seed = 2000, 1
+    if node is None or (isinstance(node, Name) and node.ident == "NULL"):
+        return mk, seed
+    if not (isinstance(node, Call) and node.fn == "list"):
+        raise ValueError(
+            f"xt= for {call.fn}() must be list(max.knots=, seed=); "
+            f"got {_deparse(node)!r}"
+        )
+
+    def _int(nd, what):
+        if isinstance(nd, Literal) and nd.kind == "num":
+            return int(nd.value)
+        raise ValueError(f"xt ${what} must be a number; got {_deparse(nd)!r}")
+
+    for key, v in node.kwargs.items():
+        if key == "max.knots":
+            mk = _int(v, "max.knots")
+        elif key == "seed":
+            seed = _int(v, "seed")
+        else:
+            raise ValueError(
+                f"unsupported xt entry {key!r} for {call.fn}() "
+                "(ported: max.knots, seed)"
+            )
+    if node.args:
+        raise ValueError("xt=list(...) entries must be named "
+                         "(max.knots=, seed=)")
+    return mk, seed
+
+
 def _mgcv_knot_subsample(xm: np.ndarray, max_knots: int,
                          seed: int = 1) -> np.ndarray | None:
     """The shared large-n knot rule of mgcv's tp/ds/sos constructors:
@@ -5229,7 +5299,8 @@ def _tp_raw(
     # rows — in which case data rows no longer index into Xu and the model
     # matrix is built by kernel evaluation instead (yxindex=None).
     # Otherwise preserve the index mapping from data rows to Xu.
-    Xu_sub = _mgcv_knot_subsample(x_c, 2000, seed=1)
+    mk_tp, seed_tp = _xt_max_knots_seed(call)
+    Xu_sub = _mgcv_knot_subsample(x_c, mk_tp, seed=seed_tp)
     if Xu_sub is not None:
         Xu = Xu_sub
         yxindex = None
@@ -5545,7 +5616,7 @@ class _DSRawBasis(_RawBasis):
 
 def _ds_raw(
     call: Call, data: pl.DataFrame, term: list[str],
-    knots: dict | None = None, max_knots: int = 2000,
+    knots: dict | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], _DSRawBasis]:
     from math import comb
     d = len(term)
@@ -5568,7 +5639,8 @@ def _ds_raw(
         # sp compensates for) depends on knot order. np.unique's lexsort
         # ordering left 2-D ds sp off mgcv by a data-dependent factor
         # while leaving the fitted model identical.
-        knt = _mgcv_knot_subsample(x, max_knots, seed=1)
+        mk_ds, seed_ds = _xt_max_knots_seed(call)
+        knt = _mgcv_knot_subsample(x, mk_ds, seed=seed_ds)
         if knt is None:
             knt = _mgcv_ordered_unique(x)
     nk = knt.shape[0]
@@ -5736,7 +5808,7 @@ class _SOSRawBasis(_RawBasis):
 
 def _sos_raw(
     call: Call, data: pl.DataFrame, term: list[str],
-    knots: dict | None = None, max_knots: int = 2000,
+    knots: dict | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], _SOSRawBasis]:
     if len(term) != 2:
         raise ValueError('bs="sos" needs exactly 2 covariates (lat, long)')
@@ -5753,8 +5825,9 @@ def _sos_raw(
     else:
         # mgcv's seeded max.knots subsample above 2000 unique (lat,long)
         # locations (smooth.r:3031-3050, bit-exact R RNG).
-        pts = _mgcv_knot_subsample(np.column_stack([la, lo]), max_knots,
-                                   seed=1)
+        mk_sos, seed_sos = _xt_max_knots_seed(call)
+        pts = _mgcv_knot_subsample(np.column_stack([la, lo]), mk_sos,
+                                   seed=seed_sos)
         if pts is None:
             pts = np.unique(np.column_stack([la, lo]), axis=0)
         la_k, lo_k = pts[:, 0], pts[:, 1]
