@@ -1018,6 +1018,118 @@ def _resolve_link(link, default: str) -> Link:
     raise ValueError(f"unknown link {link!r}")
 
 
+def _brent_fmin(f, ax: float, bx: float, tol: float) -> tuple[float, float]:
+    """R's ``Brent_fmin`` (src/library/stats/src/optimize.c) — the exact
+    golden-section + successive-parabolic-interpolation loop behind
+    ``stats::optimize``, ported operation-for-operation so mgcv code
+    built on ``optimize`` (``find.null.dev``) reproduces R's stop points.
+    Returns ``(x_min, f(x_min))``.
+    """
+    c = (3.0 - np.sqrt(5.0)) * 0.5
+    eps = np.sqrt(np.finfo(float).eps)
+    a, b = ax, bx
+    v = a + c * (b - a)
+    w = x = v
+    d = e = 0.0
+    fx = f(x)
+    fv = fw = fx
+    tol3 = tol / 3.0
+    while True:
+        xm = (a + b) * 0.5
+        tol1 = eps * abs(x) + tol3
+        t2 = tol1 * 2.0
+        if abs(x - xm) <= t2 - (b - a) * 0.5:
+            break
+        p = q = r = 0.0
+        if abs(e) > tol1:                       # fit parabola
+            r = (x - w) * (fx - fv)
+            q = (x - v) * (fx - fw)
+            p = (x - v) * q - (x - w) * r
+            q = (q - r) * 2.0
+            if q > 0.0:
+                p = -p
+            else:
+                q = -q
+            r = e
+            e = d
+        if (abs(p) >= abs(q * 0.5 * r)
+                or p <= q * (a - x) or p >= q * (b - x)):
+            # golden-section step
+            e = (b - x) if x < xm else (a - x)
+            d = c * e
+        else:
+            # parabolic-interpolation step
+            d = p / q
+            u = x + d
+            if u - a < t2 or b - u < t2:
+                d = tol1 if x < xm else -tol1
+        if abs(d) >= tol1:
+            u = x + d
+        else:
+            u = x + (tol1 if d > 0.0 else -tol1)
+        fu = f(u)
+        if fu <= fx:
+            if u < x:
+                b = x
+            else:
+                a = x
+            v, fv = w, fw
+            w, fw = x, fx
+            x, fx = u, fu
+        else:
+            if u < x:
+                a = u
+            else:
+                b = u
+            if fu <= fw or w == x:
+                v, fv = w, fw
+                w, fw = u, fu
+            elif fu <= fv or v == x or v == w:
+                v, fv = u, fu
+    return x, fx
+
+
+def find_null_dev(family: "Family", y, eta, offset, weights) -> float:
+    """mgcv ``find.null.dev`` (efam.r:98-117): the null deviance of an
+    extended family — deviance of the best single-constant model on the
+    link scale, found by 1-D ``optimize`` over the constant with mgcv's
+    interval-doubling protocol (double the half-width until the minimum
+    is interior). Replaces the standard weighted-mean null deviance in
+    the extended postprocs (nb efam.r:283, tw efam.r:3239,
+    scat efam.r:3742) — for non-canonical-ish links the optimal constant
+    is NOT the weighted mean, so the two differ at 1e-3 level.
+
+    ``eta`` is the converged linear predictor INCLUDING the offset
+    (mgcv's ``linear.predictors``); the initial constant comes from the
+    weighted mean of ``linkinv(eta − offset)``, while the candidate
+    models are ``μ = linkinv(γ + offset)``.
+    """
+    y = np.asarray(y, dtype=float)
+    eta = np.asarray(eta, dtype=float)
+    offset = np.zeros_like(eta) if offset is None else np.asarray(
+        offset, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    link = family.link
+
+    def fnull(gamma: float) -> float:
+        # 3-arg dev.resids like mgcv's fnull — extended families read
+        # their current θ when ``theta=None``.
+        mu = link.linkinv(gamma + offset)
+        return float(np.sum(family.dev_resids(y, mu, weights)))
+
+    mu0 = link.linkinv(eta - offset)
+    mum = float(np.mean(mu0 * weights) / np.mean(weights))
+    eta0 = float(link.link(mum))
+    deta = abs(eta0) * 0.1 + 1.0       # search interval half width
+    tol = float(np.finfo(float).eps) ** 0.25   # optimize's default tol
+    while True:
+        lo, hi = eta0 - deta, eta0 + deta
+        x_min, f_min = _brent_fmin(fnull, lo, hi, tol)
+        if lo < x_min < hi:
+            return f_min
+        deta *= 2.0
+
+
 # ---------------------------------------------------------------------------
 # Families
 # ---------------------------------------------------------------------------
@@ -1212,10 +1324,16 @@ class Family:
         """
         return None
 
-    def postproc(self, y, mu, wt) -> dict:
-        """One-shot post-fit hook for display strings. mgcv
-        ``family$postproc`` rewrites ``family$family`` to e.g.
-        ``"Scaled t(5,0.3)"`` reflecting fitted θ. Default: empty dict.
+    def postproc(self, y, prior_weights, fitted, linear_predictors,
+                 offset, intercept) -> dict:
+        """One-shot post-fit hook — mgcv ``family$postproc(family, y,
+        prior.weights, fitted, linear.predictors, offset, intercept)``.
+        Extended families return ``{"null_deviance": ...}`` (via
+        :func:`find_null_dev`, replacing the standard weighted-mean null
+        deviance) and ``{"family_name": ...}`` (the θ-embedding relabel
+        mgcv writes into ``family$family`` — "Scaled t(ν,σ)",
+        "Negative Binomial(Θ)", "Tweedie(p=…)"). Default: empty dict
+        (standard families keep estimate.gam's generics).
         """
         return {}
 
@@ -2427,6 +2545,18 @@ class tw(Tweedie):
     def get_theta(self) -> np.ndarray:
         return np.array([self.theta], dtype=float)
 
+    def postproc(self, y, prior_weights, fitted, linear_predictors,
+                 offset, intercept) -> dict:
+        # tw postproc (efam.r:3237-3243): find.null.dev + "Tweedie(p=…)"
+        # relabel with the fitted power rounded to 3 decimals.
+        return {
+            "null_deviance": find_null_dev(
+                self, y, eta=linear_predictors, offset=offset,
+                weights=prior_weights,
+            ),
+            "family_name": f"Tweedie(p={np.round(self.p, 3):g})",
+        }
+
     def ls_extended(self, y, wt, theta=None, scale: float = 1.0) -> dict:
         """mgcv ``tw()$ls`` in dict form (efam.r:3221-3230): saturated
         log-likelihood and its derivatives wrt the working parameters
@@ -2933,9 +3063,11 @@ class Scat(Family):
                                       dtype=float)}
         return None
 
-    def postproc(self, y, mu, wt) -> dict:
-        # mgcv builds "Scaled t(ν, σ)" with values rounded to 3 decimals;
-        # if ν > 999 it's reported as Inf.  (efam.r:3742-3749)
+    def postproc(self, y, prior_weights, fitted, linear_predictors,
+                 offset, intercept) -> dict:
+        # scat postproc (efam.r:3742-3749): find.null.dev null deviance
+        # + "Scaled t(ν,σ)" relabel, θ rounded to 3 decimals, ν > 999
+        # reported as Inf.
         nu, sig = self.get_theta(trans=True)
         nu_disp = float(np.round(nu, 3))
         sig_disp = float(np.round(sig, 3))
@@ -2943,7 +3075,13 @@ class Scat(Family):
             nu_disp_str = "Inf"
         else:
             nu_disp_str = f"{nu_disp:g}"
-        return {"family_name": f"Scaled t({nu_disp_str},{sig_disp:g})"}
+        return {
+            "null_deviance": find_null_dev(
+                self, y, eta=linear_predictors, offset=offset,
+                weights=prior_weights,
+            ),
+            "family_name": f"Scaled t({nu_disp_str},{sig_disp:g})",
+        }
 
     def rd(self, rng, mu, wt, scale):
         nu, sig = self.get_theta(trans=True)
@@ -3145,9 +3283,18 @@ class nb(Family):
         mu = np.asarray(mu)
         return bool(np.all(np.isfinite(mu)) and np.all(mu > 0))
 
-    def postproc(self, y, mu, wt) -> dict:
+    def postproc(self, y, prior_weights, fitted, linear_predictors,
+                 offset, intercept) -> dict:
+        # nb postproc (efam.r:283-289): find.null.dev + "Negative
+        # Binomial(Θ)" relabel, Θ rounded to 3 decimals.
         Th = float(self.get_theta(trans=True)[0])
-        return {"family_name": f"Negative Binomial({np.round(Th, 3):g})"}
+        return {
+            "null_deviance": find_null_dev(
+                self, y, eta=linear_predictors, offset=offset,
+                weights=prior_weights,
+            ),
+            "family_name": f"Negative Binomial({np.round(Th, 3):g})",
+        }
 
     def rd(self, rng, mu, wt, scale):
         Th = float(self.get_theta(trans=True)[0])
@@ -3640,12 +3787,14 @@ class GeneralFamily(Family):
         the penalty weight itself (``pen.reg``)."""
         raise NotImplementedError
 
-    def postproc(self, y, fitted) -> dict:
+    def postproc(self, y, prior_weights, fitted, linear_predictors,
+                 offset, intercept) -> dict:
         """mgcv ``family$postproc`` analog: family-specific deviance /
         null-deviance overrides, evaluated on the converged fit.
         Returns a dict with optional ``deviance`` / ``null_deviance``
         keys; absent keys fall back to estimate.gam's generics
-        (deviance = Σ deviance-residuals², mgcv.r:2429)."""
+        (deviance = Σ deviance-residuals², mgcv.r:2429). ``fitted`` is
+        the (n, n_lp) fitted matrix for general families."""
         return {}
 
 
@@ -3787,7 +3936,8 @@ class gaulss(GeneralFamily):
         start[jj[1]] = _reg(jj[1], lres1)
         return start
 
-    def postproc(self, y, fitted) -> dict:
+    def postproc(self, y, prior_weights, fitted, linear_predictors,
+                 offset, intercept) -> dict:
         """gaulss postproc (gamlss.r:910-918): null deviance only —
         ``Σ((y − ȳ)·τ̂)²`` (the fitted-precision-weighted null SS);
         the deviance itself falls back to estimate.gam's generic

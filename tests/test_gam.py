@@ -3428,6 +3428,67 @@ def test_fixed_sp_unknown_scale_matches_mgcv():
                                rtol=0, atol=1e-9)
 
 
+def test_extended_null_deviance_find_null_dev_matches_mgcv():
+    """Extended families replace null.deviance with mgcv's
+    ``find.null.dev`` (efam.r:98-117: 1-D optimize over the constant ON
+    THE LINK SCALE, offset in the candidate model) via the family
+    postproc (nb efam.r:283, tw efam.r:3239, scat efam.r:3742) — NOT the
+    standard weighted-mean value (family-review A2; pre-fix scat read
+    385.4317521873, Δ2.4e-3). postproc also relabels summary's Family
+    line with the fitted θ.
+
+    R 4.6.0 / mgcv 1.9-4 on the _mixed_sp_fixture data, off1 = 0.3·z:
+        gam(y~s(x), scat(), REML)        null.dev 385.4293532499
+                                         family  'Scaled t(96.587,0.508)'
+        gam(y~s(x)+offset(off1), scat()) null.dev 373.7023599855
+        gam(ytw2~s(x), tw(), REML)       null.dev 271.3076551716
+                                         family  'Tweedie(p=1.213)'
+        gam(ytw2~s(x)+offset(off1), tw())null.dev 276.0773265493
+        gam(ycnt~s(x), nb(theta=5))      null.dev 242.2451295239
+                                         family  'Negative Binomial(5)'
+        gam(ycnt~s(x)+offset(off1), nb(theta=5))
+                                         null.dev 233.2162754509
+                                         REML 259.6043091509
+    Free-θ nb is left unpinned here: ycnt is near-Poisson, so Θ̂ sits on
+    a flat ridge (R 47546.9 vs hea 54437.4 at <1e-8 criterion flatness)
+    and null.dev inherits the Θ̂ band at ~1e-3. The offset variants are
+    the discriminating cases — no weighted-mean formula produces them.
+    """
+    from hea.family import nb, scat, tw
+    df = _mixed_sp_fixture().with_columns(off1=0.3 * pl.col("z"))
+    ms = gam("y ~ s(x)", df, family=scat(), method="REML")
+    np.testing.assert_allclose(ms.null_deviance, 385.4293532499,
+                               rtol=0, atol=1e-6)
+    assert ms._family_display_name() == "Scaled t(96.587,0.508)"
+    mso = gam("y ~ s(x) + offset(off1)", df, family=scat(), method="REML")
+    np.testing.assert_allclose(mso.null_deviance, 373.7023599855,
+                               rtol=0, atol=1e-6)
+    mt = gam("ytw2 ~ s(x)", df, family=tw(), method="REML")
+    np.testing.assert_allclose(mt.null_deviance, 271.3076551716,
+                               rtol=0, atol=1e-6)
+    assert mt._family_display_name() == "Tweedie(p=1.213)"
+    mto = gam("ytw2 ~ s(x) + offset(off1)", df, family=tw(),
+              method="REML")
+    np.testing.assert_allclose(mto.null_deviance, 276.0773265493,
+                               rtol=0, atol=1e-6)
+    m5 = gam("ycnt ~ s(x)", df, family=nb(theta=5), method="REML")
+    np.testing.assert_allclose(m5.null_deviance, 242.2451295239,
+                               rtol=0, atol=1e-8)
+    assert m5._family_display_name() == "Negative Binomial(5)"
+    m5o = gam("ycnt ~ s(x) + offset(off1)", df, family=nb(theta=5),
+              method="REML")
+    np.testing.assert_allclose(m5o.null_deviance, 233.2162754509,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(m5o.REML_criterion / 2, 259.6043091509,
+                               rtol=0, atol=1e-6)
+    # deviance_explained rides on the corrected null deviance.
+    np.testing.assert_allclose(
+        m5o.deviance_explained,
+        (m5o.null_deviance - m5o.deviance) / m5o.null_deviance,
+        rtol=0, atol=1e-12,
+    )
+
+
 def test_mixed_sp_validation():
     df = _mixed_sp_fixture()
     # mgcv's exact error for a wrong-length per-smooth sp (mgcv.r:1426).

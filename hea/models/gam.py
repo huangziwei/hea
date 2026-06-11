@@ -1849,6 +1849,22 @@ class gam:
                 and not self._family_mgcv_extended):
             self.null_deviance = self._offset_only_null_deviance(y, wt)
         self.df_null = float(n - int(np.sum(wt == 0.0)) - 1)
+        # Extended-family postproc (estimate.gam, mgcv.r:2092-2098):
+        # replaces null.deviance with find.null.dev's optimized constant
+        # — NOT the weighted-mean value above (≠ at 1e-3 level even at
+        # the log link once an offset is present) — and relabels the
+        # family display name with the fitted θ ("Tweedie(p=…)",
+        # "Negative Binomial(Θ)", "Scaled t(ν,σ)").
+        self._postproc: dict = {}
+        if self._family_mgcv_extended:
+            pp = self.family.postproc(
+                y, prior_weights=self._wt, fitted=mu,
+                linear_predictors=fit.eta, offset=self._offset,
+                intercept=has_intercept,
+            )
+            self._postproc = pp
+            if pp.get("null_deviance") is not None:
+                self.null_deviance = float(pp["null_deviance"])
 
         self.Vp = Vp
         self.Ve = Ve
@@ -4226,7 +4242,12 @@ class gam:
         # via the postproc hook at mgcv.r:2092-2098). r² machinery is
         # skipped for general families (no.r.sq) — null_deviance only
         # exists when the family's postproc supplies one (gaulss does).
-        pp = family.postproc(y, fit["fitted_values"])
+        pp = family.postproc(
+            y, prior_weights=self._wt, fitted=fit["fitted_values"],
+            linear_predictors=fit["linear_predictors"],
+            offset=md.offsets, intercept=True,
+        )
+        self._postproc = pp
         self.deviance = (float(pp["deviance"])
                          if pp.get("deviance") is not None
                          else float(np.sum(np.asarray(self.residuals,
@@ -8219,20 +8240,14 @@ class gam:
     # ------------- printing ------------------------------------------------
 
     def _family_display_name(self) -> str:
-        """Family display string. Extended families with a ``postproc``
-        hook can override this to embed fitted θ — e.g. mgcv reports
-        ``Scaled t(5,0.3)`` rather than ``scat`` once a ``scat()`` fit
-        has converged. ``postproc`` is allowed to return ``None`` (or
-        no ``family_name`` key) for the default ``family.name`` path.
+        """Family display string. Extended families' ``postproc`` (run
+        once at fit time, stashed on ``self._postproc``) relabels with
+        the fitted θ — e.g. mgcv reports ``Scaled t(5,0.3)`` rather
+        than ``scat`` once a ``scat()`` fit has converged. Families
+        without a ``family_name`` key keep the default ``family.name``.
         """
-        try:
-            pp = self.family.postproc(
-                self._y_arr, self.fitted_values,
-                np.ones(self.n, dtype=float),
-            )
-        except Exception:
-            return self.family.name
-        if pp and "family_name" in pp:
+        pp = getattr(self, "_postproc", None)
+        if pp and pp.get("family_name") is not None:
             return str(pp["family_name"])
         return self.family.name
 

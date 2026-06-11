@@ -3368,6 +3368,18 @@ class bam(gam):
             np.sum(family.dev_resids(y, mu_null, wt))
         )
         self.df_null = float(n - 1) if self._has_intercept else float(n)
+        # Extended-family postproc (bam.r:1322-1331): find.null.dev
+        # null deviance + θ-embedding family relabel.
+        self._postproc = {}
+        if family.is_extended:
+            pp = family.postproc(
+                y, prior_weights=wt, fitted=mu,
+                linear_predictors=eta, offset=self._offset,
+                intercept=self._has_intercept,
+            )
+            self._postproc = pp
+            if pp.get("null_deviance") is not None:
+                self.null_deviance = float(pp["null_deviance"])
 
         self.Vp = Vp
         self.Ve = Ve
