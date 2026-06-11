@@ -463,7 +463,10 @@ def test_tweedie_validmu_and_initialize():
     assert not f.validmu(np.array([0.0, 1.0]))
     assert not f.validmu(np.array([-0.1, 1.0]))
     y = np.array([0.0, 1.0, 2.5])
-    np.testing.assert_allclose(f.initialize(y, np.ones(3)), y + 0.1)
+    # mgcv bumps only the zeros: mustart = y + 0.1·(y==0)
+    # (Tweedie gam.fit3.r:3078, tw efam.r:3234).
+    np.testing.assert_allclose(f.initialize(y, np.ones(3)),
+                               np.array([0.1, 1.0, 2.5]))
     with pytest.raises(ValueError, match="negative values"):
         f.initialize(np.array([-1.0, 1.0]), np.ones(2))
 

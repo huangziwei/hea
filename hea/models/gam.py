@@ -49,6 +49,7 @@ from ..family import (
     Binomial,
     Family,
     Gaussian,
+    Quasi,
     QuasiBinomial,
     tw as _tw_family,
 )
@@ -1470,20 +1471,30 @@ class gam:
             self.sp = sp_arr
             fit = self._fit_given_rho(rho_hat)
             # For unknown-scale families fit by (RE)ML, set log φ̂ to the
-            # profile-out value — the same value the (ρ, log φ) outer
-            # optimizer would converge to at this sp. Keeps `sigma_squared`
-            # and the score consistent with the free-optimization path
-            # bit-for-bit when sp= is fed back in.
+            # criterion minimizer over log φ at this fixed ρ — the value
+            # mgcv's outer newton() converges to when the free lsp vector
+            # is just [log φ] (gam.fit3.r:121-123 appends log scale; the
+            # φ-row gradient/Hessian are gam.fit3.r:629-631). β̂/PIRLS
+            # don't depend on φ, so this is a 1-D problem in the score.
+            #
+            # Closed form when ∂ls/∂log φ = −n_obs/2 exactly (Gaussian's
+            # −n/(2φ) and the quasi trio's EQL ls):
             #   REML: φ̂ = Dp/(n−Mp)  (Mp·log φ in score; profiles out fixed effects)
             #   ML:   φ̂ = Dp/n      (no Mp·log φ; treats β as deterministic)
+            # For Gamma/IG/Tweedie ls the closed form is NOT the
+            # minimizer (it seeds the Newton below instead) — using it
+            # was a value-level REML bug at fixed sp (family-review A1).
             # A gam(scale=)-fixed φ skips the profile-out (φ is not
             # estimated; the criterion runs at log(scale) via _split).
             if (not self._scale_known_fit) and method in ("REML", "ML"):
                 Dp = float(fit.dev + fit.pen)
                 denom = max(float(n - self._Mp), 1.0) if method == "REML" else max(float(n), 1.0)
-                self._log_phi_hat = float(
-                    np.log(max(Dp / denom, 1e-300))
-                )
+                log_phi = float(np.log(max(Dp / denom, 1e-300)))
+                if not isinstance(self.family, (Gaussian, Quasi)):
+                    log_phi = self._profile_log_phi_fixed_sp(
+                        fit, log_phi,
+                    )
+                self._log_phi_hat = log_phi
         else:
             # Unified outer optimization. PIRLS inner solve + general
             # `_reml(ρ, log φ[, θ_fam])` + analytical Newton, family-agnostic.
@@ -3362,6 +3373,70 @@ class gam:
             - reml_ind * (Mp * float(np.log(2.0 * np.pi * phi))
                           - Mp * float(np.log(gamma)))
         )
+
+    def _profile_log_phi_fixed_sp(self, fit: "_FitState",
+                                  log_phi0: float) -> float:
+        """Minimize the (RE)ML criterion over log φ at fixed ρ — the 1-D
+        analogue of mgcv's newton() run when every sp is user-fixed and
+        the scale is free (the lsp vector is then just [log φ],
+        gam.fit3.r:121-123).
+
+        β̂ is φ-independent, so only the φ-terms of ``_reml`` move:
+
+            2V(φ)        = (Dp/φ − 2·ls0(φ))/γ + const(ρ)
+                           − remlInd·Mp·log(2πφ)
+            d2V/dlogφ    = (−Dp/φ − 2·ls1)/γ − remlInd·Mp
+            d²2V/dlogφ²  = (Dp/φ − 2·ls2)/γ
+
+        with (ls0, ls1, ls2) = family.ls in hea's log-φ convention —
+        ≡ gam.fit3.r:629-631's dlr.dlphi/d2lr.d2lphi rows after the
+        φ ↔ log φ chain rule. Guarded Newton: steps clamped to mgcv's
+        maxNstep=5, halved while the criterion rises, gradient-step
+        fallback if the φ-curvature goes non-convex (Tweedie series
+        tails). Gaussian/quasi never get here — their gradient zero is
+        the closed-form profile φ̂ = Dp/denom (the seed).
+        """
+        family = self.family
+        y = self._y_arr
+        wt = self._wt
+        Dp = float(fit.dev + fit.pen)
+        gamma = self._gamma
+        Mp = float(self._Mp)
+        reml_ind = 1.0 if self.method == "REML" else 0.0
+
+        def score_g_h(lp: float):
+            phi = float(np.exp(lp))
+            ls0, ls1, ls2 = (float(v) for v in family.ls(y, wt, phi)[:3])
+            v2 = ((Dp / phi - 2.0 * ls0) / gamma
+                  - reml_ind * Mp * float(np.log(2.0 * np.pi * phi)))
+            g = (-Dp / phi - 2.0 * ls1) / gamma - reml_ind * Mp
+            h = (Dp / phi - 2.0 * ls2) / gamma
+            return v2, g, h
+
+        lp = float(log_phi0)
+        v2, g, h = score_g_h(lp)
+        for _ in range(100):
+            if abs(g) <= 1e-9 * (1.0 + abs(v2)):
+                break
+            step = (-g / h) if h > 0.0 else (-np.sign(g))
+            step = float(np.clip(step, -5.0, 5.0))   # newton maxNstep
+            lp_new = lp + step
+            v2_new, g_new, h_new = score_g_h(lp_new)
+            ii = 0
+            while (not np.isfinite(v2_new)) or v2_new > v2:
+                ii += 1
+                if ii > 30:
+                    break
+                step *= 0.5
+                lp_new = lp + step
+                v2_new, g_new, h_new = score_g_h(lp_new)
+            if (not np.isfinite(v2_new)) or v2_new > v2:
+                break                                # no improving step
+            if abs(v2 - v2_new) <= 1e-12 * (1.0 + abs(v2)):
+                lp, v2, g, h = lp_new, v2_new, g_new, h_new
+                break
+            lp, v2, g, h = lp_new, v2_new, g_new, h_new
+        return lp
 
     def _reml_grad(self, rho: np.ndarray, log_phi: float = 0.0,
                            fit: "_FitState | None" = None,

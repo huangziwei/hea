@@ -3370,6 +3370,64 @@ def test_mixed_sp_tw_and_poisson_match_mgcv():
                                rtol=0, atol=1e-4)
 
 
+def test_fixed_sp_unknown_scale_matches_mgcv():
+    """All-fixed sp + unknown scale: the criterion must be minimized over
+    log φ (mgcv's 1-D newton when lsp = [log scale], gam.fit3.r:121-123),
+    NOT evaluated at the Gaussian profile φ̂ = Dp/(n−Mp) — those coincide
+    only for Gaussian/EQL-shaped ls (family-review A1). β̂/edf/Fletcher
+    sig2 are φ-independent and were always right; only the reported
+    criterion moved. Pre-fix Tweedie sp=2 read 293.3175256791 (Δ0.40).
+
+    R 4.6.0 / mgcv 1.9-4 on the _mixed_sp_fixture data:
+        d$yg <- exp(d$y/3)
+        gam(ytw2~s(x), Tweedie(1.5, log), sp=2, method="REML")
+            REML 292.9163166026  sig2 1.0332071139  reml.scale 1.3805120081
+        gam(ytw2~s(x), Tweedie(1.5, log), sp=0.5, method="REML")
+            REML 288.7970577529
+        gam(ytw2~s(x), Tweedie(1.5, log), sp=2, method="ML")
+            ML 291.0689523486
+        gam(yg~s(x)+s(z), Gamma(log), sp=c(1,4), method="REML")
+            REML -16.6042899389  sig2 0.0286716621  edf 5.4913651732
+        gam(yg~s(x), inverse.gaussian(log), sp=3, method="REML")
+            REML -2.3126333735  sig2 0.0351132451  edf 2.9434646141
+    """
+    from hea.family import Gamma, InverseGaussian, Tweedie
+    df = _mixed_sp_fixture()
+    m = gam("ytw2 ~ s(x)", df, family=Tweedie(p=1.5), sp=np.array([2.0]),
+            method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 292.9163166026,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sigma_squared, 1.0332071139,
+                               rtol=0, atol=1e-8)
+    # the criterion's internal φ̂ is the newton stop, not the Fletcher
+    # scale — mgcv's reml.scale (1.3805120081; stop-point band).
+    np.testing.assert_allclose(float(np.exp(m._log_phi_hat)),
+                               1.3805120081, rtol=1e-6)
+    m05 = gam("ytw2 ~ s(x)", df, family=Tweedie(p=1.5),
+              sp=np.array([0.5]), method="REML")
+    np.testing.assert_allclose(m05.REML_criterion / 2, 288.7970577529,
+                               rtol=0, atol=1e-6)
+    ml = gam("ytw2 ~ s(x)", df, family=Tweedie(p=1.5), sp=np.array([2.0]),
+             method="ML")
+    np.testing.assert_allclose(ml.ML_criterion / 2, 291.0689523486,
+                               rtol=0, atol=1e-6)
+    dfg = df.with_columns(yg=(pl.col("y") / 3).exp())
+    g = gam("yg ~ s(x) + s(z)", dfg, family=Gamma(link="log"),
+            sp=np.array([1.0, 4.0]), method="REML")
+    np.testing.assert_allclose(g.REML_criterion / 2, -16.6042899389,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(g.sigma_squared, 0.0286716621,
+                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(float(np.sum(g.edf)), 5.4913651732,
+                               rtol=0, atol=1e-4)
+    i = gam("yg ~ s(x)", dfg, family=InverseGaussian(link="log"),
+            sp=np.array([3.0]), method="REML")
+    np.testing.assert_allclose(i.REML_criterion / 2, -2.3126333735,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(i.sigma_squared, 0.0351132451,
+                               rtol=0, atol=1e-9)
+
+
 def test_mixed_sp_validation():
     df = _mixed_sp_fixture()
     # mgcv's exact error for a wrong-length per-smooth sp (mgcv.r:1426).

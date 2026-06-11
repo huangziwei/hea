@@ -1049,12 +1049,25 @@ class Family:
     # extended families with all θ user-locked leave it ``False``.
     estimate_theta_callback: bool = False
 
+    # mgcv's canonical link for PIRLS's full-Newton/Fisher switch
+    # (fix.family.link's table, gam.fit3.r:2316-2323). ``None`` means
+    # "same as canonical_link_name" (the table's gaussian/poisson/
+    # binomial/Gamma/IG rows). Families outside that table set "none"
+    # explicitly — quasi (table fallback :2322), Tweedie
+    # (gam.fit3.r:3105), tw (efam.r:3262), scat/nb — so the inner loop
+    # never takes the Fisher shortcut whatever the link. Distinct from
+    # ``canonical_link_name``, which also resolves the *default* link.
+    _newton_canonical: str | None = None
+
     def __init__(self, link=None):
         self.link = _resolve_link(link, self.canonical_link_name)
 
     @property
     def is_canonical(self) -> bool:
-        return self.link.name == self.canonical_link_name
+        canon = self._newton_canonical
+        if canon is None:
+            canon = self.canonical_link_name
+        return self.link.name == canon
 
     def set_theta(self, values) -> None:
         """Mutate the family's extra parameters from a length-``n_theta``
@@ -1712,16 +1725,9 @@ class Quasi(Family):
     name = "quasi"
     canonical_link_name = "identity"  # R's quasi() default, regardless of variance
     scale_known = False
-    # mgcv's canonical link for the full-Newton/Fisher switch
-    # (fix.family.link, gam.fit3.r:2316-2323): plain quasi → "none", so
-    # the inner loop never takes the Fisher shortcut whatever the link;
-    # quasipoisson/quasibinomial override with log/logit. Distinct from
-    # ``canonical_link_name``, which only resolves the *default* link.
+    # fix.family.link's table fallback (gam.fit3.r:2322): plain quasi →
+    # "none"; quasipoisson/quasibinomial override with log/logit.
     _newton_canonical = "none"
-
-    @property
-    def is_canonical(self) -> bool:
-        return self.link.name == self._newton_canonical
 
     def __init__(self, link=None, variance: str = "constant"):
         if variance not in _QUASI_VARIANCE_FAMILIES:
@@ -2059,6 +2065,9 @@ class Tweedie(Family):
     name = "Tweedie"
     canonical_link_name = "log"  # mgcv's default; no canonical link in the strict
                                   # EDF sense for non-integer p.
+    # mgcv sets canonical="none" explicitly (gam.fit3.r:3105; tw
+    # efam.r:3262): PIRLS runs full Newton even at the default log link.
+    _newton_canonical = "none"
     scale_known = False
 
     def __init__(self, p: float, link=None):
@@ -2106,9 +2115,9 @@ class Tweedie(Family):
             raise ValueError(
                 "negative values not allowed for the 'Tweedie' family"
             )
-        # mgcv's Tweedie(): mustart = y + 0.1 — keeps log(μ) finite for y=0
-        # rows under the canonical log link. Same shape as Poisson.
-        return y + 0.1
+        # mgcv: mustart = y + 0.1·(y==0) — bump only the zeros so log(μ)
+        # stays finite (Tweedie gam.fit3.r:3078, tw efam.r:3234).
+        return y + 0.1 * (y == 0.0)
 
     def validmu(self, mu):
         mu = np.asarray(mu)
@@ -2557,6 +2566,8 @@ class Scat(Family):
     """
     name = "scat"
     canonical_link_name = "identity"
+    _newton_canonical = "none"  # efam.r:2641 (canonical=""); extended
+                                # path is always full Newton anyway.
     # mgcv treats scat as a fixed-scale family (``family$scale = 1``):
     # σ is in θ, not in φ. The bam/gam outer Newton therefore has no
     # log-φ slot for scat.
@@ -2960,6 +2971,7 @@ class nb(Family):
     """
     name = "negative binomial"
     canonical_link_name = "log"
+    _newton_canonical = "none"  # extended family: no Fisher shortcut.
     scale_known = True
     is_extended = True
     n_theta = 1
