@@ -3489,6 +3489,118 @@ def test_extended_null_deviance_find_null_dev_matches_mgcv():
     )
 
 
+def test_nb_tw_sqrt_link_matches_mgcv():
+    """sqrt is in nb/tw's okLinks but SqrtLink had no g2g/g3g/g4g — the
+    extended dDeta chain raised NotImplementedError mid-fit
+    (family-review B3). Forms from fix.family.link's extended block
+    (gam.fit3.r:2243-2247).
+
+    R 4.6.0 / mgcv 1.9-4 on the _mixed_sp_fixture data:
+        gam(ycnt~s(x), nb(theta=5, link="sqrt"), REML)
+            REML 263.9396600372  dev 131.4077576788
+            edf 6.2210917609    null.dev 242.2451296337
+        gam(ytw2~s(x), tw(link="sqrt"), REML)
+            REML 272.0055292137  p 1.21389782
+    """
+    from hea.family import nb, tw
+    df = _mixed_sp_fixture()
+    m = gam("ycnt ~ s(x)", df, family=nb(theta=5, link="sqrt"),
+            method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 263.9396600372,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.deviance, 131.4077576788,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 6.2210917609,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.null_deviance, 242.2451296337,
+                               rtol=0, atol=1e-8)
+    mt = gam("ytw2 ~ s(x)", df, family=tw(link="sqrt"), method="REML")
+    np.testing.assert_allclose(mt.REML_criterion / 2, 272.0055292137,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(mt._tw_info["p_hat"], 1.21389782,
+                               rtol=0, atol=1e-5)
+
+
+def test_binomial_factor_response_matches_mgcv():
+    """R's gam accepts a 2-level factor (or logical) binomial response
+    via binomial initialize's is.factor branch (level 1 = failure);
+    hea routes gam/bam response intake through the same
+    ``_coerce_response`` glm uses (family-review B8 — previously
+    crashed on the float cast).
+
+    R 4.6.0 / mgcv 1.9-4, _mixed_sp_fixture + seed-11 bernoulli draws
+    on p = expit(1.5·sin(2πx)), ystr = yes/no (alphabetical levels →
+    "no" is failure):
+        gam(ystr~s(x), binomial, REML)  REML 85.7026799598
+            dev 162.4369430818  edf 4.0610721597
+        (logical response: identical fit)
+    """
+    df = _mixed_sp_fixture()
+    rng = np.random.default_rng(11)
+    p = 1.0 / (1.0 + np.exp(-(np.sin(2 * np.pi * df["x"].to_numpy()) * 1.5)))
+    yb = rng.uniform(0, 1, len(p)) < p
+    df = df.with_columns(ystr=pl.Series(np.where(yb, "yes", "no")),
+                         ybool=pl.Series(yb))
+    from hea.family import Binomial
+    m = gam("ystr ~ s(x)", df, family=Binomial(), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 85.7026799598,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.deviance, 162.4369430818,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 4.0610721597,
+                               rtol=0, atol=1e-4)
+    mb = gam("ybool ~ s(x)", df, family=Binomial(), method="REML")
+    assert mb.REML_criterion == m.REML_criterion
+    np.testing.assert_array_equal(np.asarray(mb.coef), np.asarray(m.coef))
+    # non-binomial families keep the strict float cast.
+    with pytest.raises(Exception, match="convert|cast|float"):
+        gam("ystr ~ s(x)", df, method="REML")
+
+
+def test_quasi_power_link_matches_r():
+    """R's ``power(λ)`` link (family-review B5): ``g(μ) = μ^λ`` with
+    R's exact factory semantics — λ ≤ 0 → log, λ = 1 → identity, link
+    name "mu^round(λ,3)" — and fix.family.link's power d2link..d4link
+    branch (gam.fit3.r:2329-2335). Object form only, like R (make.link
+    accepts no "power(...)" string).
+
+    R 4.6.0 / mgcv 1.9-4, yg = exp(y/3) on the _mixed_sp_fixture data:
+        glm(yg ~ x + z, quasi(link=power(1/3), variance="mu"))
+            coef 1.1302498604 -0.1885787676 0.0146480400
+            dev 7.9842609074  dispersion 0.0507340387
+        gam(yg ~ s(x) + z, quasi(power(1/3), "mu"), REML)
+            REML -177.0653787699  dev 4.9606669257
+            edf 7.5915073119     sig2 0.0325949810
+    """
+    from hea.family import PowerLink, Quasi, power
+    from hea.models import glm
+    assert power(0).name == "log" and power(-1).name == "log"
+    assert power(1).name == "identity"
+    assert power(1 / 3).name == "mu^0.333"
+    assert isinstance(power(0.5), PowerLink)
+    df = _mixed_sp_fixture().with_columns(yg=(pl.col("y") / 3).exp())
+    mq = glm("yg ~ x + z", df,
+             family=Quasi(link=power(1 / 3), variance="mu"))
+    np.testing.assert_allclose(
+        mq._bhat_arr, [1.1302498604, -0.1885787676, 0.0146480400],
+        rtol=0, atol=1e-6)
+    np.testing.assert_allclose(mq.deviance, 7.9842609074,
+                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(mq.dispersion, 0.0507340387,
+                               rtol=0, atol=1e-8)
+    mg = gam("yg ~ s(x) + z", df,
+             family=Quasi(link=power(1 / 3), variance="mu"),
+             method="REML")
+    np.testing.assert_allclose(mg.REML_criterion / 2, -177.0653787699,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(mg.deviance, 4.9606669257,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(float(np.sum(mg.edf)), 7.5915073119,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(mg.sigma_squared, 0.0325949810,
+                               rtol=0, atol=1e-9)
+
+
 def test_mixed_sp_validation():
     df = _mixed_sp_fixture()
     # mgcv's exact error for a wrong-length per-smooth sp (mgcv.r:1426).
@@ -4952,7 +5064,7 @@ def test_qq_gam_simulation_branch_matches_mgcv():
     assert q2["dm"].shape == (200, 5) and q2["lim"] is None
 
 
-def test_qq_gam_plot_and_gaulss_fallback():
+def test_qq_gam_plot_and_gaulss_simulation():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -4963,10 +5075,24 @@ def test_qq_gam_plot_and_gaulss_fallback():
     from hea.family import gaulss
     mg = gam(["y ~ s(x) + w", "~ s(z)"], _fit5_fixture(), family=gaulss(),
              method="REML")
-    # gaulss has neither qf nor rd in mgcv 1.9-4 → normal QQ fallback.
-    assert mg._qq_gam_quantiles(seed=0)["Dq"] is None
+    # gaulss HAS rd in mgcv (gamlss.r:1089) — qq.gam takes the
+    # simulation path (no qf → rep=50 via rd), NOT a qqnorm fallback
+    # (family-review A3; the old B2 record claimed otherwise).
+    qq = mg._qq_gam_quantiles(seed=0)
+    assert qq["Dq"] is not None
+    # Monte-Carlo-level: deviance residuals are (y−μ̂)·τ̂ ≈ N(0,1) at the
+    # converged fit, so the simulated theoretical quantiles must track
+    # the standard-normal quantiles closely (and exactly in law as
+    # rep → ∞). mgcv qq.gam on this fit shows the same band.
+    n = qq["Dq"].size
+    a = 0.5
+    pp = (np.arange(1, n + 1) - a) / n
+    from scipy.stats import norm as _norm
+    ref = _norm.ppf(np.clip(pp, 1e-12, 1 - 1e-12))
+    inner = slice(n // 10, -n // 10)        # compare away from the tails
+    np.testing.assert_allclose(qq["Dq"][inner], ref[inner], atol=0.25)
     ax = mg.qq_gam(seed=0)
-    assert ax.get_title() == "Normal Q-Q Plot"
+    assert ax.get_title() == "QQ plot of residuals"
     plt.close("all")
 
 
@@ -5017,7 +5143,8 @@ def test_gaulss_check_and_k_check_match_mgcv(capsys):
     assert "s.1(z)" in out
     axes = m.plot_check(seed=0)
     assert axes.shape == (2, 2)
-    assert axes[0, 0].get_title() == "Normal Q-Q Plot"  # gaulss fallback
+    # gaulss has rd (gamlss.r:1089) → simulation-path QQ, like mgcv.
+    assert axes[0, 0].get_title() == "QQ plot of residuals"
     plt.close("all")
     # The lm-style panel is undefined for multi-LP fits — clear guard.
     with pytest.raises(NotImplementedError, match="plot_smooth"):

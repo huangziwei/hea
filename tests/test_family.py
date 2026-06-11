@@ -21,6 +21,7 @@ File sections:
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -268,7 +269,21 @@ def test_binomial_initialize_and_validmu():
     y = np.array([0.0, 0.5, 1.0])
     wt = np.array([1.0, 3.0, 1.0])
     expected = (wt * y + 0.5) / (wt + 1.0)
-    np.testing.assert_allclose(f.initialize(y, wt), expected, rtol=1e-12)
+    # m = wt·y = [0, 1.5, 1] isn't integral → R's NCOL=1 branch warns
+    # "non-integer #successes in a binomial glm!" (family-review B6).
+    with pytest.warns(UserWarning, match="non-integer #successes"):
+        out = f.initialize(y, wt)
+    np.testing.assert_allclose(out, expected, rtol=1e-12)
+    # integral counts (0/1 at unit weights) stay silent...
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        f.initialize(np.array([0.0, 1.0]), np.ones(2))
+    # ...and quasibinomial never warns (R's template guard
+    # "quasibinomial" == "binomial" is false).
+    from hea.family import QuasiBinomial
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        QuasiBinomial().initialize(y, wt)
     with pytest.raises(ValueError, match="0 <= y <= 1"):
         f.initialize(np.array([-0.1, 0.5]), np.ones(2))
     assert f.validmu(np.array([0.01, 0.5, 0.99]))
@@ -861,6 +876,107 @@ def test_scat_link_validation():
     Scat(link="inverse")
     with pytest.raises(ValueError, match="not available for scat"):
         Scat(link="probit")
+
+
+def test_tw_ls_extended_lsth2_matches_mgcv():
+    """tw's analytic ``lsth2`` (family-review B4 — previously
+    NaN-poisoned): the (θ,θ)/(θ,logφ) saturated-likelihood second
+    derivatives via ldTweedie's column-5/6 forms (density closed forms
+    gam.fit3.r:2802-2806 + Dunn-Smyth series moments) chained through
+    p(θ).
+
+    Oracle: R 4.6.0 / mgcv 1.9-4, y = the _mixed_sp_fixture ytw2
+    column, w = 1, theta = log(0.49/0.49) for p = 1.5 (a=1.01, b=1.99):
+        fam <- tw(); fam$ls(y, w, theta, scale)
+        scale=0.8: ls -159.1465003977
+                   lsth1 (-7.3948798555, -74.8238393909)
+                   lsth2 [0.1209236332, 1.4618616825;
+                          1.4618616825, -14.3754131012]
+        scale=1.3: ls -197.6649193951
+                   lsth1 (-5.6102775745, -85.0364843846)
+                   lsth2 [-1.7094624821, 6.9296834083;
+                          6.9296834083, -29.0369350068]
+    hea matches all printed digits; pinned at 1e-8.
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_gam import _mixed_sp_fixture
+    from hea.family import tw
+    y = _mixed_sp_fixture()["ytw2"].to_numpy()
+    w = np.ones_like(y)
+    f = tw()
+    expected = {
+        0.8: (-159.1465003977, [-7.3948798555, -74.8238393909],
+              [[0.1209236332, 1.4618616825],
+               [1.4618616825, -14.3754131012]]),
+        1.3: (-197.6649193951, [-5.6102775745, -85.0364843846],
+              [[-1.7094624821, 6.9296834083],
+               [6.9296834083, -29.0369350068]]),
+    }
+    for sc, (ls_r, lsth1_r, lsth2_r) in expected.items():
+        out = f.ls_extended(y, w, scale=sc)
+        np.testing.assert_allclose(out["ls"], ls_r, rtol=0, atol=1e-8)
+        np.testing.assert_allclose(out["lsth1"], lsth1_r,
+                                   rtol=0, atol=1e-8)
+        np.testing.assert_allclose(out["lsth2"], lsth2_r,
+                                   rtol=0, atol=1e-8)
+        assert np.all(np.isfinite(out["lsth2"]))
+
+
+def test_rtweedie_moments_and_rd_hook():
+    """mgcv ``rTweedie`` construction (gam.fit3.r:3112-3146) at
+    Monte-Carlo level: compound Poisson-Gamma with E[Y] = μ,
+    Var[Y] = φ·μ^p, P(Y=0) = exp(−μ^(2−p)/((2−p)φ)). The family rd
+    hooks (Tweedie gam.fit3.r:3097, tw efam.r:3245 — tw inherits)
+    drive qq.gam's simulation path; mgcv's rd ignores wt, bug-for-bug.
+    """
+    from hea.family import Tweedie, _r_tweedie, tw
+    rng = np.random.default_rng(0)
+    n = 200_000
+    mu = np.full(n, 2.0)
+    p, phi = 1.5, 1.3
+    y = _r_tweedie(rng, mu, p, phi)
+    lam = mu[0] ** (2 - p) / ((2 - p) * phi)
+    assert abs(y.mean() - mu[0]) < 0.02
+    assert abs(y.var() - phi * mu[0] ** p) < 0.06
+    assert abs(np.mean(y == 0) - np.exp(-lam)) < 0.005
+    # hooks present and shape-correct; wt unread (mgcv signature quirk).
+    f = Tweedie(p=1.5)
+    d = f.rd(np.random.default_rng(1), mu[:100], None, 1.0)
+    assert d.shape == (100,) and np.all(d >= 0)
+    d2 = tw().rd(np.random.default_rng(1), mu[:100], None, 1.0)
+    np.testing.assert_array_equal(d, d2)   # same seed, same p=1.5 start
+    with pytest.raises(ValueError, match="must be positive"):
+        _r_tweedie(rng, mu[:5], 1.5, 0.0)
+
+
+def test_link_validation_matches_r_acceptance():
+    """Construction-time link validation ≡ R (probed live, R 4.6.0 /
+    mgcv 1.9-4, 2026-06-11). The extended families (tw here; scat/nb
+    above) enforce okLinks strictly: ``tw(link="logit")`` errs in R
+    with 'link "logit" not available for tw family; available links
+    are log, identity, sqrt, inverse' (efam.r:3098-3101). The standard
+    constructors do NOT: their is.character fallback routes any
+    make.link-known name through — ``poisson(link="logit")``,
+    ``binomial(link="inverse")``, ``gaussian(link="logit")`` and
+    ``Tweedie(1.5, link="logit")`` (gam.fit3.r:3042-3045) all
+    construct fine in R (the okLinks message there fires only for
+    non-character link objects), and misfits surface downstream as
+    link-domain errors, not at construction. hea mirrors both
+    behaviors; unknown names error in ``_resolve_link`` like R's
+    make.link ('bogus' link not recognised)."""
+    from hea.family import (Binomial, Gaussian, Poisson, Tweedie, tw)
+    tw(link="log"), tw(link="identity"), tw(link="sqrt"), tw(link="inverse")
+    with pytest.raises(ValueError,
+                       match='link "logit" not available for tw family'):
+        tw(link="logit")
+    # R-permissive standard constructors — construction must succeed.
+    Poisson(link="logit")
+    Binomial(link="inverse")
+    Gaussian(link="logit")
+    Tweedie(p=1.5, link="logit")
+    with pytest.raises(ValueError, match="unknown link"):
+        Poisson(link="bogus")
 
 
 _SCAT_ESTTH = Path(__file__).parent / "fixtures" / "scat_estth"

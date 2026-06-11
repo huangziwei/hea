@@ -838,9 +838,76 @@ class SqrtLink(Link):
     def d2link(self, mu): return -0.25 * np.asarray(mu, dtype=float) ** -1.5
     def d3link(self, mu): return 0.375 * np.asarray(mu, dtype=float) ** -2.5
     def d4link(self, mu): return -0.9375 * np.asarray(mu, dtype=float) ** -3.5
+    # fix.family.link's extended-family ratios (gam.fit3.r:2243-2247):
+    # g' = ½μ^-½ ⇒ g2g = g″/g′² = -μ^-½, g3g = g‴/g′³ = 3/μ,
+    # g4g = g⁗/g′⁴ = -15·μ^-1.5.
+    def g2g(self, mu): return -np.asarray(mu, dtype=float) ** -0.5
+    def g3g(self, mu): return 3.0 / np.asarray(mu, dtype=float)
+    def g4g(self, mu): return -15.0 * np.asarray(mu, dtype=float) ** -1.5
     def valideta(self, eta):
         eta = np.asarray(eta)
         return bool(np.all(np.isfinite(eta)) and np.all(eta > 0))
+
+
+class PowerLink(Link):
+    """R's ``power(λ)`` link for 0 < λ ≠ 1: ``g(μ) = μ^λ``.
+
+    Use the :func:`power` factory, which mirrors R exactly — ``λ ≤ 0``
+    returns the log link and ``λ = 1`` the identity, so only genuine
+    powers reach this class. ``linkinv``/``mu_eta`` carry R's
+    ``.Machine$double.eps`` floor; the d2link..d4link table is
+    fix.family.link's power branch (gam.fit3.r:2329-2335 quasi
+    vector-link form ≡ the "mu^" name branch :2415-2421).
+    """
+    def __init__(self, lam: float):
+        self.lam = float(lam)
+        # R: link name is paste0("mu^", round(lambda, 3)).
+        self.name = f"mu^{round(self.lam, 3):g}"
+    def link(self, mu):
+        return np.asarray(mu, dtype=float) ** self.lam
+    def linkinv(self, eta):
+        eps = np.finfo(float).eps
+        return np.maximum(
+            np.asarray(eta, dtype=float) ** (1.0 / self.lam), eps,
+        )
+    def mu_eta(self, eta):
+        eps = np.finfo(float).eps
+        return np.maximum(
+            np.asarray(eta, dtype=float) ** (1.0 / self.lam - 1.0)
+            / self.lam, eps,
+        )
+    def d2link(self, mu):
+        lam = self.lam
+        return lam * (lam - 1.0) * np.asarray(mu, dtype=float) ** (lam - 2.0)
+    def d3link(self, mu):
+        lam = self.lam
+        return (lam * (lam - 1.0) * (lam - 2.0)
+                * np.asarray(mu, dtype=float) ** (lam - 3.0))
+    def d4link(self, mu):
+        lam = self.lam
+        return (lam * (lam - 1.0) * (lam - 2.0) * (lam - 3.0)
+                * np.asarray(mu, dtype=float) ** (lam - 4.0))
+    def valideta(self, eta):
+        eta = np.asarray(eta)
+        return bool(np.all(np.isfinite(eta)) and np.all(eta > 0))
+
+
+def power(lam: float = 1.0) -> Link:
+    """R ``stats::power(lambda)``: the ``μ^λ`` link-glm object.
+
+    Exact R semantics: ``λ ≤ 0`` → the log link, ``λ = 1`` → identity,
+    otherwise :class:`PowerLink`. Pass the OBJECT to a family —
+    ``quasi(link=power(1/3))`` — exactly as in R (R's ``make.link``
+    does not accept a "power(...)" string and neither does hea).
+    """
+    lam = float(lam)
+    if not np.isfinite(lam):
+        raise ValueError("invalid argument 'lambda'")
+    if lam <= 0.0:
+        return LogLink()
+    if lam == 1.0:
+        return IdentityLink()
+    return PowerLink(lam)
 
 
 class LogitLink(Link):
@@ -1666,7 +1733,7 @@ class Binomial(Family):
 
         return 2.0 * wt * (yly(y, mu) + yly(1.0 - y, 1.0 - mu))
 
-    def initialize(self, y, wt, n=None):
+    def initialize(self, y, wt, n=None, warn_non_integer=True):
         y = np.asarray(y, dtype=float); wt = np.asarray(wt, dtype=float)
         if np.any(y < 0) or np.any(y > 1):
             raise ValueError("y values must be 0 <= y <= 1 for the 'binomial' family")
@@ -1674,9 +1741,21 @@ class Binomial(Family):
             # R binomial initialize, NCOL(y)==2 branch: mustart =
             # (n·y + 0.5)/(n + 1) — the trials vector, NOT the (possibly
             # prior-weight-scaled) wt. Only the starting point differs;
-            # the converged fit is identical either way.
+            # the converged fit is identical either way. (That branch's
+            # non-integer-counts warning fired at the cbind intake.)
             n = np.asarray(n, dtype=float)
             return (n * y + 0.5) / (n + 1.0)
+        # R's NCOL(y)==1 branch: m = weights·y must be integral counts.
+        # The warning is gated on the family template being literally
+        # "binomial" (quasibinomial's initialize is the same expression
+        # with %s = "quasibinomial", so its guard is false → silent;
+        # QuasiBinomial delegates here with warn_non_integer=False).
+        if warn_non_integer:
+            m = wt * y
+            if np.any(np.abs(m - np.rint(m)) > 0.001):
+                import warnings as _w
+                _w.warn("non-integer #successes in a binomial glm!",
+                        stacklevel=2)
         # mgcv/R: mustart = (wt·y + 0.5) / (wt + 1) keeps μ in (0,1) so the
         # logit link starts finite even when y is exactly 0 or 1.
         return (wt * y + 0.5) / (wt + 1.0)
@@ -1953,8 +2032,10 @@ class QuasiBinomial(Quasi):
 
     def initialize(self, y, wt, n=None):
         # R quasibinomial shares binomial's initialize verbatim (incl.
-        # the n-form mustart for cbind responses).
-        return self._shadow.initialize(y, wt, n=n)
+        # the n-form mustart for cbind responses) — minus the
+        # non-integer-#successes warning, whose template guard
+        # ("quasibinomial" == "binomial") is false in R.
+        return self._shadow.initialize(y, wt, n=n, warn_non_integer=False)
 
     __repr__ = Family.__repr__
 
@@ -1997,11 +2078,13 @@ _LD_J_MAX = 100000
 def _tweedie_log_a_one(y_i: float, phi_i: float, p: float):
     """Series approximation log a(y, φ, p) = log Σ_{j≥1} W_j for one y > 0.
 
-    Returns ``(log_a, j_bar, j_var, j_psi_bar)`` — the log of the series sum
-    plus three moments of ``j`` under ``p_j = W_j/Σ W_k``: E[j], Var[j],
-    and E[j·ψ(-j·α)]. The first two feed the φ-derivatives of log a; the
-    third (with the digamma weight) is needed for the p-derivative — see
-    Tweedie.dls_dp.
+    Returns ``(log_a, j_bar, j_var, j_psi_bar, j2_psi_bar, j2_psi2_bar,
+    j2_trig_bar)`` — the log of the series sum plus six moments of ``j``
+    under ``p_j = W_j/Σ W_k``: E[j], Var[j], E[j·ψ(-j·α)], E[j²·ψ(-j·α)],
+    E[(j·ψ(-j·α))²], and E[j²·ψ′(-j·α)]. The first two feed the
+    φ-derivatives of log a; E[j·ψ] the p-derivative (Tweedie.dls_dp);
+    the last three the p-second-derivatives (Tweedie._d2ls_dp — tw's
+    analytic ``lsth2``, family-review B4).
     """
     om1 = 1.0 - p                  # negative
     tm = 2.0 - p                   # positive
@@ -2069,14 +2152,22 @@ def _tweedie_log_a_one(y_i: float, phi_i: float, p: float):
     # the same j-grid so that the moment matches the series we just summed.
     psi_arr = digamma(-j_arr * alpha)
     j_psi_bar = float(np.sum(p_w * j_arr * psi_arr))
-    return log_a, j_bar, j_var, j_psi_bar
+    j2_psi_bar = float(np.sum(p_w * j_arr * j_arr * psi_arr))
+    j2_psi2_bar = float(np.sum(p_w * (j_arr * psi_arr) ** 2))
+    j2_trig_bar = float(np.sum(
+        p_w * j_arr * j_arr * polygamma(1, -j_arr * alpha)
+    ))
+    return (log_a, j_bar, j_var, j_psi_bar,
+            j2_psi_bar, j2_psi2_bar, j2_trig_bar)
 
 
 def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
-    """Vectorised over y (and per-obs phi). Returns four arrays of shape
-    ``y.shape``: ``log_a``, ``j_bar``, ``j_var``, ``j_psi_bar``. Entries
-    with y==0 are 0 (the y=0 row uses the closed-form point mass, not the
-    series). Per-obs phi handles weights via ``φ_i = φ/wt_i``.
+    """Vectorised over y (and per-obs phi). Returns seven arrays of shape
+    ``y.shape``: ``log_a``, ``j_bar``, ``j_var``, ``j_psi_bar``,
+    ``j2_psi_bar``, ``j2_psi2_bar``, ``j2_trig_bar`` (the same moment
+    set as :func:`_tweedie_log_a_one`). Entries with y==0 are 0 (the
+    y=0 row uses the closed-form point mass, not the series). Per-obs
+    phi handles weights via ``φ_i = φ/wt_i``.
 
     Builds a fixed ``j`` grid wide enough to cover every active row's
     eps-truncated series tail, then evaluates the (n_active, J) matrix
@@ -2091,11 +2182,15 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     j_bar = np.zeros_like(y)
     j_var = np.zeros_like(y)
     j_psi_bar = np.zeros_like(y)
+    j2_psi_bar = np.zeros_like(y)
+    j2_psi2_bar = np.zeros_like(y)
+    j2_trig_bar = np.zeros_like(y)
     flat_y = y.ravel()
     flat_phi = phi_arr.ravel()
     active = flat_y > 0.0
     if not np.any(active):
-        return log_a, j_bar, j_var, j_psi_bar
+        return (log_a, j_bar, j_var, j_psi_bar,
+                j2_psi_bar, j2_psi2_bar, j2_trig_bar)
     ya = flat_y[active]
     pha = flat_phi[active]
 
@@ -2124,6 +2219,7 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     lgamma_jp1 = gammaln(j_grid + 1.0)
     lgamma_neg_ja = gammaln(-j_grid * alpha)
     psi_arr = digamma(-j_grid * alpha)
+    trig_arr = polygamma(1, -j_grid * alpha)
 
     # Chunk on the n_active axis to bound the (chunk, J) working set.
     # Each row carries 5 J-wide arrays in flight (lw / 2 masks / w /
@@ -2135,6 +2231,9 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     out_jb = np.empty(n_active)
     out_jv = np.empty(n_active)
     out_jpb = np.empty(n_active)
+    out_j2pb = np.empty(n_active)
+    out_j2p2b = np.empty(n_active)
+    out_j2tb = np.empty(n_active)
     near = 5
     for s in range(0, n_active, chunk):
         e = min(s + chunk, n_active)
@@ -2158,6 +2257,12 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
         out_jpb[s:e] = np.sum(
             p_w * j_grid[None, :] * psi_arr[None, :], axis=1,
         )
+        jpsi = j_grid[None, :] * psi_arr[None, :]
+        out_j2pb[s:e] = np.sum(p_w * j_grid[None, :] * jpsi, axis=1)
+        out_j2p2b[s:e] = np.sum(p_w * jpsi * jpsi, axis=1)
+        out_j2tb[s:e] = np.sum(
+            p_w * j_grid[None, :] ** 2 * trig_arr[None, :], axis=1,
+        )
 
     flat_la = log_a.ravel()
     flat_jb = j_bar.ravel()
@@ -2167,7 +2272,37 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     flat_jb[active] = out_jb
     flat_jv[active] = out_jv
     flat_jpb[active] = out_jpb
-    return log_a, j_bar, j_var, j_psi_bar
+    j2_psi_bar.ravel()[active] = out_j2pb
+    j2_psi2_bar.ravel()[active] = out_j2p2b
+    j2_trig_bar.ravel()[active] = out_j2tb
+    return (log_a, j_bar, j_var, j_psi_bar,
+            j2_psi_bar, j2_psi2_bar, j2_trig_bar)
+
+
+def _r_tweedie(rng, mu, p: float, phi: float) -> np.ndarray:
+    """mgcv ``rTweedie`` (gam.fit3.r:3112-3146): compound Poisson-Gamma
+    deviates for 1 < p < 2. mgcv draws N_i ~ Poisson(λ_i) individual
+    Gamma(shape, scale_i) jumps and C_psum's them; equal in law to one
+    Gamma(N_i·shape, scale_i) draw per row (gamma additivity at shared
+    scale), which is what we sample. numpy RNG — Monte-Carlo-level
+    parity (R's rejection samplers aren't ported).
+    """
+    mu = np.asarray(mu, dtype=float)
+    if not (1.0 < p < 2.0):
+        raise ValueError("p must be in (1,2)")
+    if np.any(mu < 0):
+        raise ValueError("mean, mu, must be non negative")
+    if phi <= 0:
+        raise ValueError("scale parameter must be positive")
+    lam = mu ** (2.0 - p) / ((2.0 - p) * phi)
+    shape = (2.0 - p) / (p - 1.0)
+    scale = phi * (p - 1.0) * mu ** (p - 1.0)
+    N = rng.poisson(lam)
+    pos = N > 0
+    y = np.zeros(mu.shape[0], dtype=float)
+    if np.any(pos):
+        y[pos] = rng.gamma(N[pos] * shape, scale[pos])
+    return y
 
 
 class Tweedie(Family):
@@ -2241,6 +2376,14 @@ class Tweedie(Family):
         mu = np.asarray(mu)
         return bool(np.all(np.isfinite(mu)) and np.all(mu > 0))
 
+    def rd(self, rng, mu, wt, scale):
+        # Tweedie rd (gam.fit3.r:3097-3099) / tw rd (efam.r:3245-3254,
+        # inherited): rTweedie(mu, p, phi=scale). ``wt`` is in mgcv's
+        # signature but unread — prior weights don't enter, bug-for-bug.
+        # (mgcv's p==2 rgamma branch is unreachable here: hea requires
+        # 1 < p < 2.)
+        return _r_tweedie(rng, mu, self.p, float(scale))
+
     def _log_density(self, y, mu, phi):
         """Per-obs log f(y_i; μ_i, φ, p), shape (n,) — one unmodified φ for
         every row (mgcv's ``ldTweedie(y, mu, p, phi=scale)``; prior weights
@@ -2259,7 +2402,7 @@ class Tweedie(Family):
         out = np.empty_like(y)
         out[zero] = cumulant[zero] / phi_i[zero]
         if np.any(~zero):
-            la, _, _, _ = _tweedie_log_a_vec(y[~zero], phi_i[~zero], p)
+            la = _tweedie_log_a_vec(y[~zero], phi_i[~zero], p)[0]
             out[~zero] = -np.log(y[~zero]) + la + cumulant[~zero] / phi_i[~zero]
         return out
 
@@ -2327,7 +2470,7 @@ class Tweedie(Family):
         j_bar = np.zeros_like(y_g)
         j_var = np.zeros_like(y_g)
         if np.any(~zero):
-            la_, jb_, jv_, _ = _tweedie_log_a_vec(y_g[~zero], phi_i[~zero], p)
+            la_, jb_, jv_ = _tweedie_log_a_vec(y_g[~zero], phi_i[~zero], p)[:3]
             log_a[~zero] = la_
             j_bar[~zero] = jb_
             j_var[~zero] = jv_
@@ -2453,7 +2596,7 @@ class Tweedie(Family):
         j_bar = np.zeros_like(y_g)
         j_psi_bar = np.zeros_like(y_g)
         if np.any(~zero):
-            _, jb_, _, jpb_ = _tweedie_log_a_vec(
+            _, jb_, _, jpb_, *_rest2 = _tweedie_log_a_vec(
                 y_g[~zero], phi_i[~zero], p
             )
             j_bar[~zero] = jb_
@@ -2466,6 +2609,95 @@ class Tweedie(Family):
 
         dlog_f_dp = np.where(zero, 0.0, dlog_a_dp + dcum_dp / phi_i)
         return float(np.sum(w_g * dlog_f_dp))
+
+    def _d2ls_dp(self, y, wt, scale):
+        """``(∂²ls/∂p², ∂²ls/∂p∂log φ)`` at the saturated point — the
+        p-space second derivatives behind tw's analytic ``lsth2``
+        (ldTweedie's columns 5/6 in the (θ,ρ) form before the p(θ)
+        chain: gam.fit3.r:2802-2806 density part + the C_tweedious
+        series part; family-review B4).
+
+        Density part at μ = y (mgcv's ld[,5]/ld[,6] closed forms with
+        θ_y·y = y^(2−p)/(1−p), k_y = y^(2−p)/(2−p), L = log y):
+
+            d²/dp²   = [θ_y·y(L² − 2L/(1−p) + 2/(1−p)²)
+                        − k_y(L² − 2L/(2−p) + 2/(2−p)²)]/φ
+            d²/dp∂φ  = −x/φ  ⇒  d²/dp∂logφ = −x   (x = density ∂/∂p)
+
+        Series part via Dunn-Smyth moments of log a = log Σ_j W_j with
+        log W_j = j·log z − lgamma(j+1) − lgamma(−jα), α = (2−p)/(1−p),
+        α′ = 1/(1−p)², α″ = 2/(1−p)³, K_j = C + ψ(−jα),
+        C = log φ + log(p−1) − log y − (2−p):
+
+            ∂logW_j/∂p       = j·α′·K_j + j/(2−p)              (=: G_j)
+            ∂²logW_j/∂p²     = j[α″K_j + α′(1/(p−1) + 1
+                                − jα′ψ′(−jα)) + 1/(2−p)²]
+            ∂²logW_j/∂p∂logφ = j·α′
+
+            ∂²log a/∂p²      = E[∂²logW/∂p²] + Var[G]
+            ∂²log a/∂p∂logφ  = α′E[j] − (1/(p−1))·[(α′C + 1/(2−p))Var[j]
+                                + α′(E[j²ψ] − E[jψ]E[j])]
+
+        y = 0 rows contribute nothing (log f_sat ≡ 0 there, matching
+        ldTweedie(y, y)'s all-zero rows at y = 0).
+        """
+        y = np.asarray(y, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        good = wt > 0
+        if not np.any(good):
+            return 0.0, 0.0
+        y_g = y[good]
+        w_g = wt[good]
+        phi_i = np.full_like(w_g, float(scale))
+        p = self.p
+        om1 = 1.0 - p
+        tm = 2.0 - p
+
+        zero = (y_g == 0.0)
+        y_safe = np.where(zero, 1.0, y_g)
+        L = np.where(zero, 0.0, np.log(y_safe))
+        log_phi = np.log(phi_i)
+
+        # --- density part (μ = y) ---------------------------------------
+        y_tm = y_safe ** tm
+        th_y = y_tm / om1                  # θ_y·y = y^(2-p)/(1-p)
+        k_y = y_tm / tm
+        x_dens = (th_y * (1.0 / om1 - L) + k_y * (L - 1.0 / tm)) / phi_i
+        d2p_dens = (th_y * (L * L - 2.0 * L / om1 + 2.0 / (om1 * om1))
+                    - k_y * (L * L - 2.0 * L / tm + 2.0 / (tm * tm))) / phi_i
+        cross_dens = -x_dens               # already in log φ form
+
+        # --- series part -------------------------------------------------
+        ap = 1.0 / (om1 * om1)             # α′
+        app = 2.0 / (om1 * om1 * om1)      # α″
+        inv_pm1 = 1.0 / (p - 1.0)          # 1 − α
+        d2p_ser = np.zeros_like(y_g)
+        cross_ser = np.zeros_like(y_g)
+        if np.any(~zero):
+            (_, jb, jv, jpb, j2pb, j2p2b, j2tb) = _tweedie_log_a_vec(
+                y_g[~zero], phi_i[~zero], p
+            )
+            C = log_phi[~zero] + np.log(p - 1.0) - L[~zero] - tm
+            E_jK = jb * C + jpb
+            G_mean = ap * E_jK + jb / tm
+            E_j2 = jv + jb * jb
+            coef = ap * C + 1.0 / tm
+            E_G2 = (coef * coef * E_j2 + 2.0 * coef * ap * j2pb
+                    + ap * ap * j2p2b)
+            var_G = E_G2 - G_mean * G_mean
+            d2p_ser[~zero] = (app * E_jK
+                              + ap * (inv_pm1 + 1.0) * jb
+                              - ap * ap * j2tb
+                              + jb / (tm * tm)
+                              + var_G)
+            cross_ser[~zero] = (ap * jb
+                                - inv_pm1 * (coef * jv
+                                             + ap * (j2pb - jpb * jb)))
+
+        d2p = np.where(zero, 0.0, d2p_ser + d2p_dens)
+        cross = np.where(zero, 0.0, cross_ser + cross_dens)
+        return (float(np.sum(w_g * d2p)),
+                float(np.sum(w_g * cross)))
 
     def __repr__(self):
         return f"Tweedie(p={self.p:.4g}, link={self.link.name})"
@@ -2492,6 +2724,12 @@ class tw(Tweedie):
     name = "Tweedie"
     n_theta = 1
 
+    # mgcv tw() okLinks (efam.r:3098-3101) — tw validates strictly,
+    # UNLIKE fixed-p Tweedie() whose is.character fallback
+    # (gam.fit3.r:3042-3045) accepts any make.link name (R-verified:
+    # Tweedie(1.5, link="logit") constructs, tw(link="logit") errors).
+    _OK_LINKS = ("log", "identity", "sqrt", "inverse")
+
     def __init__(self, theta: float | None = None, link=None,
                  a: float = 1.01, b: float = 1.99):
         if not (1.0 <= a < b <= 2.0):
@@ -2511,6 +2749,11 @@ class tw(Tweedie):
         self.theta = theta_init
         # Tweedie.__init__ validates 1 < p < 2 and sets p, link.
         super().__init__(p=p_init, link=link)
+        if self.link.name not in self._OK_LINKS:
+            raise ValueError(
+                f'link "{self.link.name}" not available for tw family; '
+                f'available links are {self._OK_LINKS}'
+            )
 
     def _p_of_theta(self, theta: float) -> float:
         # p(θ) = (a + b·e^θ)/(1 + e^θ); use sigmoid form for stability.
@@ -2559,16 +2802,24 @@ class tw(Tweedie):
 
     def ls_extended(self, y, wt, theta=None, scale: float = 1.0) -> dict:
         """mgcv ``tw()$ls`` in dict form (efam.r:3221-3230): saturated
-        log-likelihood and its derivatives wrt the working parameters
-        (θ, log φ).
+        log-likelihood and its full first/second derivatives wrt the
+        working parameters (θ, log φ) — ldTweedie's columns
+        (1,4,2,5,6,3) summed with weight w:
 
-        ``lsth1 = (∂ls/∂θ, ∂ls/∂log φ)`` is exact — the θ component is
-        the Dunn-Smyth p-derivative chained through dp/dθ. ``lsth2``'s
-        θθ and θ×logφ entries are NaN-poisoned: gam's outer-Newton θ
-        rows are central differences of the analytical gradient and
-        never read them, so anything that does fails loudly instead of
-        silently using a wrong second derivative. Only the (logφ, logφ)
-        entry is filled (= ``ls(y, wt, φ)[2]``).
+            lsth1 = (LS₄, LS₂)
+            lsth2 = [[LS₅, LS₆], [LS₆, LS₃]]
+
+        The θ entries chain the p-space derivatives through p(θ):
+        ∂/∂θ = (∂/∂p)·p′, ∂²/∂θ² = (∂²/∂p²)·p′² + (∂/∂p)·p″,
+        ∂²/∂θ∂logφ = (∂²/∂p∂logφ)·p′ — exactly ldTweedie's work.param
+        transform (gam.fit3.r:2808-2814). The p-space second
+        derivatives come from :meth:`Tweedie._d2ls_dp` (family-review
+        B4; previously NaN-poisoned).
+
+        Note: hea's outer-Newton θ rows are still central differences
+        of the analytical gradient (gam.py `_reml_hessian`) — they
+        don't read lsth2 yet; mgcv's `estimate.theta` Newton and any
+        future analytic θ-row port do.
         """
         saved = None
         if theta is not None:
@@ -2578,9 +2829,14 @@ class tw(Tweedie):
                 self.set_theta(th)
         try:
             ls3 = np.asarray(self.ls(y, wt, scale), dtype=float)
-            dls_dth = (float(self.dls_dp(y, wt, scale))
-                       * float(self.dp_dtheta()))
-            lsth2 = np.full((2, 2), np.nan)
+            dp1 = float(self.dp_dtheta())
+            dp2 = float(self.d2p_dtheta2())
+            dls_dp = float(self.dls_dp(y, wt, scale))
+            dls_dth = dls_dp * dp1
+            d2ls_dp2, d2ls_dpdlphi = self._d2ls_dp(y, wt, scale)
+            lsth2 = np.empty((2, 2))
+            lsth2[0, 0] = d2ls_dp2 * dp1 * dp1 + dls_dp * dp2
+            lsth2[0, 1] = lsth2[1, 0] = d2ls_dpdlphi * dp1
             lsth2[1, 1] = float(ls3[2])
             return {
                 "ls": float(ls3[0]),
@@ -3947,6 +4203,16 @@ class gaulss(GeneralFamily):
         return {"null_deviance": float(np.sum(
             ((y - float(np.mean(y))) * fitted[:, 1]) ** 2))}
 
+    def rd(self, rng, mu, wt, scale):
+        """gaulss rd (gamlss.r:1089): ``rnorm(n, mu[,1],
+        sqrt(scale/wt)/mu[,2])`` — μ is the (n, 2) fitted matrix
+        (mean, τ = 1/σ); scale ≡ 1 for gaulss fits. Drives qq.gam's
+        simulation path (mgcv does NOT qqnorm-fallback for gaulss)."""
+        mu = np.asarray(mu, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        sd = np.sqrt(float(scale) / wt) / mu[:, 1]
+        return rng.normal(mu[:, 0], sd)
+
     def residuals(self, y, fitted, type: str = "deviance") -> np.ndarray:
         """gaulss residuals (gamlss.r:903-908): response = y − μ̂;
         deviance/pearson = (y − μ̂)·τ̂ = (y − μ̂)/σ̂. ``fitted`` is the
@@ -4031,5 +4297,5 @@ __all__ = [
     "trind_generator", "gamlss_etamu", "gamlss_gH",
     "IdentityLink", "LogLink", "InverseLink",
     "SqrtLink", "LogitLink", "ProbitLink", "CauchitLink", "CloglogLink",
-    "InverseSquareLink",
+    "InverseSquareLink", "PowerLink", "power",
 ]

@@ -359,6 +359,56 @@ def test_cbind_lhs_rejects_non_binomial():
         glm("cbind(s, f) ~ x", d, family=Gaussian())
 
 
+def test_cbind_prior_weights_and_na_drop_match_r():
+    """The two C10 corners on glm's cbind path (family-review B7):
+    (1) prior weights pw≠1 — R's binomial aic evaluates dbinom at the
+    true counts with coefficient wt/n = pw, needing the trials vector
+    kept distinct from the merged weights (pre-fix hea folded trials
+    into wt and rounded pw·n as the size); (2) counts evaluated
+    pre-NA-drop — both cbind columns now ride the design frame so
+    prepare_design's NA-omit keeps trials/proportions row-aligned.
+
+    R 4.6.0 reference (set.seed(4): x~runif(40), ntr~rpois(8)+1,
+    s~rbinom(ntr, plogis(-0.5+2.1x)), pw alternating 1.0/2.5):
+        glm(cbind(s,f) ~ x, binomial, weights=pw)
+            coef -0.3590009136 1.8278292807  dev 77.4834446946
+            AIC 246.1291034502  null.dev 116.3366152535
+        with x[7] <- NA (1-indexed):
+            coef -0.3540628519 1.7828651293  dev 74.1404894214
+            AIC 240.8651231928  nobs 39
+    (hea's weights= contract is post-drop length — R subsets length-n
+    weights in model.frame; that intake difference is glm-wide and
+    out of scope here.)
+    """
+    # R's set.seed(4) fixture captured as literals (no R dependency).
+    import json
+    from pathlib import Path
+    fx = Path(__file__).parent / "fixtures" / "glm_cbind_pw.json"
+    data = json.loads(fx.read_text())
+    d = pl.DataFrame({k: np.asarray(v, dtype=float)
+                      for k, v in data.items()})
+    pw = d["pw"].to_numpy()
+    m = glm("cbind(s, f) ~ x", d, family=Binomial(), weights=pw)
+    np.testing.assert_allclose(m._bhat_arr, [-0.3590009136, 1.8278292807],
+                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(m.deviance, 77.4834446946, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(m.AIC, 246.1291034502, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(m.null_deviance, 116.3366152535,
+                               rtol=0, atol=1e-9)
+    # NA in a covariate: row dropped, trials/weights stay aligned.
+    d2 = d.with_columns(
+        pl.when(pl.arange(0, d.height) == 6).then(None)
+        .otherwise(pl.col("x")).alias("x")
+    )
+    m2 = glm("cbind(s, f) ~ x", d2, family=Binomial(),
+             weights=pw[np.arange(d.height) != 6])
+    assert m2.n == 39
+    np.testing.assert_allclose(m2._bhat_arr, [-0.3540628519, 1.7828651293],
+                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(m2.deviance, 74.1404894214, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(m2.AIC, 240.8651231928, rtol=0, atol=1e-8)
+
+
 # 6.2 — offset(...) inside the formula.
 
 def test_formula_offset_matches_kwarg_offset():

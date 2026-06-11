@@ -51,6 +51,7 @@ from ..family import (
     Gaussian,
     Quasi,
     QuasiBinomial,
+    _coerce_response,
     tw as _tw_family,
 )
 from ..formula import (
@@ -1032,7 +1033,9 @@ class gam:
         _expr_map = _smooth_arg_expr_map(self._expanded)
         self.data = _apply_smooth_arg_exprs(d.data, _expr_map) if _expr_map else d.data
         X_param_df = d.X
-        y = d.y.to_numpy().astype(float)
+        # R's binomial initialize accepts a 2-level factor / boolean
+        # response (level 1 = failure); same coercion as glm's intake.
+        y = _coerce_response(d.y, self.family)
         X_param = X_param_df.to_numpy().astype(float)
         if X_param.shape[1] == 0:
             # 0-column polars frame → to_numpy() collapses to (0, 0); keep
@@ -6847,9 +6850,17 @@ class gam:
         return self._residuals_for_y(self._y_arr, type)
 
     def _residuals_for_y(self, y, type: str) -> np.ndarray:
-        """Standard-family residuals for an arbitrary response vector at
-        the FITTED μ̂/weights — qq.gam's ``object$y <- yr`` substitution
-        (plots.r:134/158) recomputes residuals exactly this way."""
+        """Residuals for an arbitrary response vector at the FITTED
+        μ̂/weights — qq.gam's ``object$y <- yr`` substitution
+        (plots.r:134/158) recomputes residuals exactly this way.
+        Family-supplied residuals hooks (general families: gaulss & co,
+        with their (n, n_lp) fitted matrix) take precedence exactly as
+        in ``residuals_of`` — qq.gam's simulation path needs this for
+        multi-LP rd hooks (gaulss rd, gamlss.r:1089)."""
+        fam_res = getattr(self.family, "residuals", None)
+        if fam_res is not None:
+            return np.asarray(
+                fam_res(y, self.fitted_values, type), dtype=float)
         mu = self.fitted_values
         wt = self._wt
         if type == "response":
@@ -9070,10 +9081,12 @@ class gam:
         ``rep=0`` uses the family's quantile function directly (averaged
         over ``s_rep`` randomizations of the uniform grid); families
         without one simulate ``rep=50`` datasets via their random-deviate
-        hook instead, and with ``rep>0`` simulation is forced with a
+        hook instead (gaulss takes this path — its rd draws
+        ``N(μ̂, (√scale/w)/τ̂)`` from the (n,2) fitted matrix,
+        gamlss.r:1089), and with ``rep>0`` simulation is forced with a
         ``level`` reference band (``level>=1`` draws each replicate as a
-        line). Families with neither hook (e.g. gaulss — exactly as in
-        mgcv) fall back to a normal QQ plot of the residuals.
+        line). Families with neither hook fall back to a normal QQ plot
+        of the residuals, like mgcv.
 
         ``seed=k`` on the default direct path reproduces R's
         ``set.seed(k); qq.gam(...)`` bit-exactly (the only randomness is

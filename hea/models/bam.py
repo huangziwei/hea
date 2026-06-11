@@ -52,7 +52,7 @@ from scipy.linalg import cho_factor, cho_solve, qr as scipy_qr, solve_triangular
 from scipy.linalg.lapack import dpstrf
 from scipy.stats import t as t_dist
 
-from ..family import Family, Gaussian
+from ..family import Family, Gaussian, _coerce_response
 from ..formula import (
     BasisSpec,
     SmoothBlock,
@@ -1767,7 +1767,8 @@ class bam(gam):
             _apply_smooth_arg_exprs(d.data, _expr_map) if _expr_map else d.data
         )
         X_param_df = d.X
-        y_full = d.y.to_numpy().astype(float)
+        # Same factor/boolean binomial-response coercion as glm/gam.
+        y_full = _coerce_response(d.y, self.family)
         X_param_full = X_param_df.to_numpy().astype(float)
         n, p_param = X_param_full.shape
 
