@@ -3478,6 +3478,132 @@ def test_gam_control_validation():
     np.testing.assert_array_equal(np.asarray(m0.coef), np.asarray(m1.coef))
 
 
+# ---------------------------------------------------------------------------
+# C3: gam(scale=) — fixed scale (REML without the φ slot; UBRE at φ),
+# forced estimation (GCV for poisson). mgcv 1.9-4 references on the
+# _mixed_sp_fixture data.
+# ---------------------------------------------------------------------------
+
+def test_scale_fixed_gaussian_matches_mgcv():
+    # scale=0.3 + REML: φ KNOWN — no log φ slot in the outer vector,
+    # criterion at log(0.3), sig2 reported as 0.3, Vp = 0.3·A⁻¹,
+    # z/Chi-sq summary flavor (scale.estimated FALSE), AIC's dev1 =
+    # scale·Σwt (gam.fit3.r:848 first branch — NOT the gaussian dev
+    # override).
+    df = _mixed_sp_fixture()
+    m = gam("y ~ s(x) + s(z)", df, method="REML", scale=0.3)
+    np.testing.assert_allclose(m.REML_criterion / 2, 121.8990407302,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp, [0.04413550556, 0.4293697861],
+                               rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 9.6524402954,
+                               rtol=0, atol=1e-4)
+    assert m.sigma_squared == 0.3 and m.scale_estimated is False
+    np.testing.assert_allclose(np.asarray(m.coef)[0], 0.2877072697,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(m.Vp[0, 0], 0.001875, rtol=1e-6)
+    np.testing.assert_allclose(m.AIC, 283.8525054335, rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m.loglike, -131.7123409667, rtol=0, atol=1e-5)
+    label, edf, ref_df, stat, p_val = m._smooth_significance_rows()[0]
+    np.testing.assert_allclose([edf, ref_df, stat],
+                               [5.3910687949, 6.5025104713, 208.8957788350],
+                               rtol=1e-6)
+    # GCV.Cp at fixed scale → UBRE at φ=0.3 (any family, mgcv.r:1956).
+    u = gam("y ~ s(x) + s(z)", df, scale=0.3)
+    np.testing.assert_allclose(u.GCV_score, -0.0666545554, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(u.sp, [0.09190364853, 0.9311373154],
+                               rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(u.edf)), 8.3020750673,
+                               rtol=0, atol=1e-4)
+    assert u.sigma_squared == 0.3
+    np.testing.assert_allclose(u.AIC, 280.0288320679, rtol=0, atol=1e-5)
+
+
+def test_scale_negative_forces_estimation_matches_mgcv():
+    # poisson + GCV.Cp + scale=-1: GCV (not UBRE), dispersion estimated
+    # (Fletcher), t/F summary flavor — mgcv's quasi-style overdispersion
+    # route without changing the family.
+    from hea.family import Poisson
+    df = _mixed_sp_fixture()
+    m = gam("ycnt ~ s(x) + s(z)", df, family=Poisson(), scale=-1)
+    np.testing.assert_allclose(m.GCV_score, 1.0659512878, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(m.sp[0], 0.1301443057, rtol=1e-4)
+    np.testing.assert_allclose(m.sp[1], 209670.6702, rtol=1e-2)  # boundary
+    np.testing.assert_allclose(float(np.sum(m.edf)), 6.7763956261,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.sigma_squared, 0.8517618990,
+                               rtol=0, atol=1e-8)
+    assert m.scale_estimated is True
+    label, edf, ref_df, stat, p_val = m._smooth_significance_rows()[0]
+    np.testing.assert_allclose([edf, ref_df, stat],
+                               [4.7763283214, 5.8175838773, 23.7987376897],
+                               rtol=1e-6)
+    # Under (RE)ML, poisson/binomial scale= is silently 1 (mgcv.r:1947).
+    p2 = gam("ycnt ~ s(x) + s(z)", df, family=Poisson(), method="REML",
+             scale=2)
+    p0 = gam("ycnt ~ s(x) + s(z)", df, family=Poisson(), method="REML")
+    assert p2.REML_criterion == p0.REML_criterion
+    assert p2.sigma_squared == 1.0 and p2.scale_estimated is False
+    # Extended families: scale handling is family-driven — honest raise.
+    from hea.family import tw
+    with pytest.raises(NotImplementedError, match="scale="):
+        gam("ytw2 ~ s(x)", df, family=tw(), method="REML", scale=2.0)
+
+
+# ---------------------------------------------------------------------------
+# C7: single-formula start= / etastart= / mustart= (gam.fit3.r:259-292).
+# Start values steer the PIRLS path, not the optimum — R-verified: mgcv
+# warm/perturbed starts land on the same fit to 1e-14.
+# ---------------------------------------------------------------------------
+
+def test_pirls_start_values_warm_and_invariant():
+    from hea.family import Poisson
+    df = _mixed_sp_fixture()
+    m0 = gam("y ~ s(x) + s(z)", df, method="REML")
+    m1 = gam("y ~ s(x) + s(z)", df, method="REML",
+             start=np.asarray(m0.coef))
+    m2 = gam("y ~ s(x) + s(z)", df, method="REML",
+             mustart=m0.fitted_values)
+    m3 = gam("y ~ s(x) + s(z)", df, method="REML",
+             etastart=m0.linear_predictors)
+    m4 = gam("y ~ s(x) + s(z)", df, method="REML",
+             start=np.asarray(m0.coef) + 5.0)   # perturbed, still valid
+    for m in (m1, m2, m3, m4):
+        np.testing.assert_allclose(m.REML_criterion, m0.REML_criterion,
+                                   rtol=0, atol=1e-7)
+        np.testing.assert_allclose(np.asarray(m.coef),
+                                   np.asarray(m0.coef), atol=1e-8)
+    # Non-gaussian + GCV path too (poisson, etastart route). The
+    # initial.spg seed sees the user start (mgcv.r:4591-4595), so the
+    # optimizer path shifts within the stop band (~5e-9 here).
+    p0 = gam("ycnt ~ s(x) + s(z)", df, family=Poisson())
+    p1 = gam("ycnt ~ s(x) + s(z)", df, family=Poisson(),
+             etastart=p0.linear_predictors)
+    np.testing.assert_allclose(p1.GCV_score, p0.GCV_score,
+                               rtol=0, atol=1e-7)
+
+
+def test_pirls_start_values_validation():
+    from hea.family import Gamma
+    df = _mixed_sp_fixture()
+    with pytest.raises(ValueError, match="Length of start"):
+        gam("y ~ s(x) + s(z)", df, method="REML", start=np.zeros(3))
+    with pytest.raises(ValueError, match="etastart must have length"):
+        gam("y ~ s(x)", df, method="REML", etastart=np.zeros(3))
+    with pytest.raises(ValueError, match="mustart must have length"):
+        gam("y ~ s(x)", df, method="REML", mustart=np.zeros(3))
+    # Unrecoverable starting values: R's intended refusal
+    # (gam.fit3.r:292) — mgcv itself dies with an obscure "missing
+    # value where TRUE/FALSE needed" there (verified live).
+    d2 = df.with_columns((pl.col("ycnt") + 0.5).alias("ygam"))
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError, match="valid starting values"):
+            gam("ygam ~ s(x)", d2, family=Gamma(link="log"),
+                method="REML", mustart=np.full(len(df), -5.0))
+
+
 def test_plain_quasi_identity_link_full_newton_matches_mgcv():
     # mgcv's canonical for plain quasi is "none" (fix.family.link,
     # gam.fit3.r:2322): the inner loop runs full Newton even at the
@@ -4400,7 +4526,9 @@ def test_gaulss_efs_optimizer_matches_mgcv():
 def test_gaulss_start_warm_restart():
     # start= (mgcv.r:1903): model-space coefficients enter the fitting
     # basis via the forward initial repara; a warm restart lands on
-    # the same optimum. The single-formula path rejects start=.
+    # the same optimum. (The single-formula path takes start= too since
+    # C7 — its wrong-length error is mgcv's gam.fit3 message; see
+    # test_pirls_start_values_*.)
     from hea.family import gaulss
     df = _fit5_fixture()
     m0 = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
@@ -4410,8 +4538,11 @@ def test_gaulss_start_warm_restart():
     np.testing.assert_allclose(m1.REML_criterion, m0.REML_criterion,
                                rtol=0, atol=1e-5)
     np.testing.assert_allclose(m1.sp, m0.sp, rtol=1e-5)
-    with pytest.raises(NotImplementedError, match="start="):
+    with pytest.raises(ValueError, match="Length of start"):
         gam("y ~ s(x)", df, method="REML", start=np.zeros(11))
+    with pytest.raises(NotImplementedError, match="etastart"):
+        gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+            method="REML", etastart=np.zeros(len(df)))
 
 
 def test_gaulss_fixed_sp_through_gam_matches_mgcv():

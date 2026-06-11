@@ -649,6 +649,25 @@ class gam:
         ``edge_correct`` improves ``Vc`` near smoothing parameters at
         "working infinity" (REML/ML only; a number sets the target
         criterion increase per flat parameter, ``True`` means 0.02).
+    scale : float, default 0.0
+        mgcv's ``gam(scale=)``: 0 resolves by family (binomial/poisson
+        known at 1, everything else estimated); ``> 0`` treats φ as
+        KNOWN at that value (REML/ML drop the log φ slot, GCV.Cp
+        switches to UBRE at that φ, summary uses z/Chi-sq statistics);
+        ``< 0`` forces φ estimation (GCV even for poisson/binomial
+        under GCV.Cp, with t/F statistics). Under (RE)ML, binomial/
+        poisson are always scale=1 — a user value is silently
+        overridden, as in mgcv (mgcv.r:1947).
+    start, etastart, mustart : array-like, optional
+        glm-style starting values for the inner PIRLS (length-p
+        coefficients / length-n linear predictor / length-n means),
+        precedence etastart > start > mustart (gam.fit3.r:259-272).
+        Invalid values shrink toward the null model (20 tries, then
+        R's "Can't find valid starting values" error). hea seeds every
+        inner PIRLS restart with them; mgcv seeds the first inner fit
+        and then carries coefficients forward between criterion
+        evaluations — the converged fit is identical. For formula-list
+        (general-family) fits only ``start`` applies.
 
     Attributes (always set)
     -----------------------
@@ -745,6 +764,33 @@ class gam:
     # gam.control dict — class default covers bam and any pre-__init__
     # reader; instances overwrite with the validated user control.
     _control: dict | None = None
+    # Resolved gam(scale=) state (mgcv estimate.gam, mgcv.r:1936-1971):
+    # > 0 ⇒ the scale is KNOWN/fixed at that value, < 0 ⇒ estimated.
+    # ``None`` (class default, bam fallback) ⇒ resolve from the family
+    # (binomial/poisson known at 1, everything else estimated) — the
+    # pre-scale= behavior, byte-identical.
+    _scale_resolved: float | None = None
+    # glm-style PIRLS starting values (gam(start=/etastart=/mustart=));
+    # class defaults cover bam and pre-__init__ readers.
+    _pirls_start: np.ndarray | None = None
+    _pirls_etastart: np.ndarray | None = None
+    _pirls_mustart: np.ndarray | None = None
+
+    @property
+    def _scale_known_fit(self) -> bool:
+        """Fit-level "is φ known?" — replaces ``family.scale_known`` in
+        every dispatch ``gam(scale=)`` can override."""
+        if self._scale_resolved is None:
+            return bool(self.family.scale_known)
+        return self._scale_resolved > 0
+
+    @property
+    def _scale_fixed_value(self) -> float:
+        """The known φ (only meaningful when ``_scale_known_fit``);
+        1.0 on the family-default paths."""
+        if self._scale_resolved is None or self._scale_resolved <= 0:
+            return 1.0
+        return float(self._scale_resolved)
     # Class-level fallbacks so inherited methods stay usable from ``bam``
     # (same pattern as ``_L``): edge.correct off, no edge-corrected θ, no
     # family-θ slots in the augmented Hessian, no reparam basis (bam's
@@ -800,7 +846,10 @@ class gam:
         select: bool = False,
         knots: dict | None = None,
         control: dict | None = None,
+        scale: float = 0.0,
         start: np.ndarray | list | None = None,
+        etastart: np.ndarray | list | None = None,
+        mustart: np.ndarray | list | None = None,
     ):
         # ``data`` may be a polars DataFrame OR a mapping of name → 1-D /
         # 2-D ndarray. 2-D entries become matrix columns
@@ -821,6 +870,11 @@ class gam:
                     "predictors) requires a general family — e.g. "
                     "family=gaulss()."
                 )
+            if etastart is not None or mustart is not None:
+                raise NotImplementedError(
+                    "etastart/mustart apply to the PIRLS fitters only; "
+                    "general-family (formula list) fits take start=."
+                )
             self._init_general(
                 [str(f) for f in formula], data, method=method, sp=sp,
                 family=family, offset=offset, weights=weights,
@@ -832,12 +886,6 @@ class gam:
             raise ValueError(
                 f"family {family!r} has {family.n_lp} linear predictors"
                 " — pass a list of formulas, one per linear predictor."
-            )
-        if start is not None:
-            raise NotImplementedError(
-                "start= is currently supported only for general-family "
-                "(formula list) fits; the single-formula PIRLS path "
-                "doesn't take start/etastart/mustart yet (plan Tier 3)."
             )
         if method not in ("REML", "ML", "GCV.Cp"):
             raise ValueError(
@@ -878,6 +926,40 @@ class gam:
         if self._family_mgcv_extended and method == "GCV.Cp":
             method = "REML"
             self.method = method
+
+        # gam(scale=) resolution (estimate.gam, mgcv.r:1936-1971):
+        #   scale = 0  → family default (binomial/poisson known at 1,
+        #                everything else estimated) — the historical path;
+        #   scale > 0  → φ KNOWN at that value: REML/ML drop the log φ
+        #                slot, GCV.Cp switches to UBRE at φ=scale;
+        #   scale < 0  → force φ estimation (GCV even for poisson/
+        #                binomial under GCV.Cp).
+        # Under (RE)ML, binomial/poisson are ALWAYS scale=1 — a user
+        # scale= is silently overridden (mgcv.r:1947, same silence).
+        if not (np.isscalar(scale) and np.isfinite(scale)):
+            raise ValueError(f"scale must be a finite number, got {scale!r}")
+        scale = float(scale)
+        if self._family_mgcv_extended:
+            if scale != 0.0:
+                raise NotImplementedError(
+                    "scale= for mgcv-extended families (tw, scat, nb) is "
+                    "not ported — their scale handling is family-driven "
+                    "(mgcv.r:1948-1949)."
+                )
+            self._scale_resolved = 1.0 if self.family.scale_known else -1.0
+        elif method in ("REML", "ML"):
+            if self.family.scale_known:
+                self._scale_resolved = 1.0          # mgcv.r:1947
+            else:
+                self._scale_resolved = scale if scale > 0 else -1.0
+        else:  # GCV.Cp
+            if scale == 0.0:
+                self._scale_resolved = (1.0 if self.family.scale_known
+                                        else -1.0)
+            else:
+                self._scale_resolved = scale  # >0 → UBRE at φ; <0 → GCV
+        # mgcv's object$scale.estimated.
+        self.scale_estimated = not self._scale_known_fit
         # GCV.Cp dispatches by family.scale_known: scale-unknown (Gaussian,
         # Gamma, IG) → GCV `n·D/(n−τ)²`; scale-known (Poisson, Binomial) →
         # UBRE `D/n + 2·τ/n − 1`. mgcv's `gam.outer` does the same dispatch
@@ -1094,21 +1176,21 @@ class gam:
                 continue
             if bid is None or bid not in id_first_cols:
                 defining = True
-                start = n_work
+                wstart = n_work
                 n_work += nS
                 if bid is not None:
-                    id_first_cols[bid] = (start, nS)
+                    id_first_cols[bid] = (wstart, nS)
             else:
                 defining = False
-                start, nc = id_first_cols[bid]
+                wstart, nc = id_first_cols[bid]
                 if nS > nc:
                     # mgcv's exact refusal (mgcv.r:1312-1314).
                     raise ValueError(
                         "Later terms sharing an `id' can not have more "
                         "smoothing parameters than the first such term"
                     )
-            block_work_info.append((start, nS, defining))
-            slot_work_col.extend(range(start, start + nS))
+            block_work_info.append((wstart, nS, defining))
+            slot_work_col.extend(range(wstart, wstart + nS))
             slot_cursor += nS
         if n_work == len(slots):
             self._L = None                       # identity — no id linkage
@@ -1139,8 +1221,8 @@ class gam:
                         f"one), got {sp_arr.shape}"
                     )
                 sp_work = sp_arr.copy()
-            for (start, nS, defining), bsp in zip(block_work_info,
-                                                  block_sps):
+            for (wstart, nS, defining), bsp in zip(block_work_info,
+                                                   block_sps):
                 if bsp is None or not defining or nS == 0:
                     continue
                 if len(bsp) != nS:
@@ -1149,7 +1231,7 @@ class gam:
                         "incorrect number of smoothing parameters "
                         "supplied for a smooth term"
                     )
-                sp_work[start:start + nS] = bsp
+                sp_work[wstart:wstart + nS] = bsp
             fixed_mask = sp_work >= 0.0
             if np.any(fixed_mask) and not np.all(fixed_mask):
                 # Mixed: fold the fixed working columns into (L, lsp0).
@@ -1221,7 +1303,34 @@ class gam:
         self._Mp = Mp
         self._penalty_rank = p - Mp
         slots_full = list(slots)
-        w0 = self._init_fisher_w(y)
+        # gam(start=/etastart=/mustart=) — glm-style PIRLS starting
+        # values (gam.fit3.r:259-292). hea seeds every inner PIRLS with
+        # them (mgcv seeds the first inner fit, then carries previous
+        # coefficients forward between criterion evaluations,
+        # gam.fit3.r:1366-1368 — hea restarts each evaluation instead;
+        # the converged fit is identical, each inner problem is convex).
+        # Stored before the rank-drop so the initial.spg weights see
+        # them; ``start`` is masked to the kept columns just after.
+        if start is not None:
+            st = np.asarray(start, dtype=float).flatten()
+            if st.shape != (p,):
+                # mgcv's message shape (gam.fit3.r:264).
+                raise ValueError(
+                    f"Length of start should equal {p} and correspond "
+                    "to initial coefs."
+                )
+            self._pirls_start = st
+        if etastart is not None:
+            es = np.asarray(etastart, dtype=float).flatten()
+            if es.shape != (n,):
+                raise ValueError(f"etastart must have length {n}")
+            self._pirls_etastart = es
+        if mustart is not None:
+            ms = np.asarray(mustart, dtype=float).flatten()
+            if ms.shape != (n,):
+                raise ValueError(f"mustart must have length {n}")
+            self._pirls_mustart = ms
+        w0 = self._init_fisher_w(y, X=X)
         Xw0 = X * np.sqrt(np.maximum(w0, 0.0))[:, None]
         rank0, drop0 = _pls_rank_drop(Xw0, slots, p)
         if drop0.size:
@@ -1260,6 +1369,10 @@ class gam:
             p_param = int(np.sum(keep_mask[:p_param]))
             column_names = [nm for nm, k in zip(column_names, keep_mask) if k]
             p = X.shape[1]
+            if self._pirls_start is not None:
+                # User start corresponds to the original columns; the
+                # fit runs reduced (mgcv drops inside pls_fit1 instead).
+                self._pirls_start = self._pirls_start[keep_mask]
 
         # ------------- sufficient statistics -------------------------------
         XtX = X.T @ X
@@ -1363,7 +1476,9 @@ class gam:
             # bit-for-bit when sp= is fed back in.
             #   REML: φ̂ = Dp/(n−Mp)  (Mp·log φ in score; profiles out fixed effects)
             #   ML:   φ̂ = Dp/n      (no Mp·log φ; treats β as deterministic)
-            if (not self.family.scale_known) and method in ("REML", "ML"):
+            # A gam(scale=)-fixed φ skips the profile-out (φ is not
+            # estimated; the criterion runs at log(scale) via _split).
+            if (not self._scale_known_fit) and method in ("REML", "ML"):
                 Dp = float(fit.dev + fit.pen)
                 denom = max(float(n - self._Mp), 1.0) if method == "REML" else max(float(n), 1.0)
                 self._log_phi_hat = float(
@@ -1386,7 +1501,8 @@ class gam:
             # with FD on the analytical gradient for the new rows/cols
             # (truncation ~ 1e-8, well below the optimiser's tol).
             family = self.family
-            include_log_phi = (not family.scale_known) and method in ("REML", "ML")
+            include_log_phi = ((not self._scale_known_fit)
+                               and method in ("REML", "ML"))
             include_family_theta = (
                 family.n_theta > 0 and method in ("REML", "ML")
             )
@@ -1560,7 +1676,7 @@ class gam:
         # ``_log_phi_hat`` is preserved separately for score evaluation.
         df_resid = float(n - edf_total)
         scale_est_kind = (self._control or _GAM_CONTROL_DEFAULTS)["scale_est"]
-        if df_resid > 0 and not self.family.scale_known:
+        if df_resid > 0 and not self._scale_known_fit:
             V = self.family.variance(fit.mu)
             pearson_scale = float(np.sum(wt * (y - fit.mu) ** 2 / V)) / df_resid
             s_bar = max(-0.9, float(np.mean(
@@ -1572,13 +1688,16 @@ class gam:
             )
             deviance_scale = float(fit.dev) / df_resid
         else:
-            pearson_scale = 1.0 if self.family.scale_known else float("nan")
+            pearson_scale = (self._scale_fixed_value
+                             if self._scale_known_fit else float("nan"))
             fletcher_scale = pearson_scale
             deviance_scale = pearson_scale
         self._pearson_scale = pearson_scale
         self._fletcher_scale = fletcher_scale
-        if self.family.scale_known:
-            scale = 1.0
+        if self._scale_known_fit:
+            # mgcv: G$sig2 <- scale (mgcv.r:1942) — the known value is
+            # reported, 1.0 on the family-default paths.
+            scale = self._scale_fixed_value
         elif (self._family_mgcv_extended and self._log_phi_hat is not None):
             # mgcv-extended families (tw): mgcv reports the optimizer's
             # converged φ̂ — gam.fit3's efam scale.est is the scale passed
@@ -1802,7 +1921,7 @@ class gam:
             # log φ row — appending one shifts every Schur-complement ρρ
             # block (Vr → Vc1/Vc2 → edf2/Vc) off mgcv's, because the
             # (ρ, log φ) cross term −(∂Dp/∂ρ)/φ is nonzero at convergence.
-            include_phi_aug = not self.family.scale_known
+            include_phi_aug = not self._scale_known_fit
             H_aug = 0.5 * self._reml_hessian(
                 rho_hat, log_phi_hat_for_aug, fit=fit,
                 include_log_phi=include_phi_aug,
@@ -1858,7 +1977,7 @@ class gam:
             n_work = self._work_dim
             th1 = self._edge_theta1
             rho1 = self._rho_full(th1[:n_work])
-            has_phi1 = not self.family.scale_known
+            has_phi1 = not self._scale_known_fit
             log_phi1 = (float(th1[n_work])
                         if (has_phi1 and th1.size > n_work)
                         else (self._log_phi_hat or 0.0))
@@ -1869,7 +1988,7 @@ class gam:
                 if n_th_aug:
                     self.family.set_theta(th1[th_base1:th_base1 + n_th_aug])
                 fit1 = self._fit_given_rho(rho1)
-                include_phi_aug1 = not self.family.scale_known
+                include_phi_aug1 = not self._scale_known_fit
                 H_aug1 = 0.5 * self._reml_hessian(
                     rho1, log_phi1, fit=fit1,
                     include_log_phi=include_phi_aug1,
@@ -1905,14 +2024,22 @@ class gam:
         #   AIC(m) = -2·logLik(m) + 2·df_for_AIC                        (R's AIC.default)
         # `dev1` is family-specific (Gaussian uses dev directly, the Pearson
         # σ̂² is moment-based for the rest); see Family._aic_dev1.
-        sc_p = 0.0 if self.family.scale_known else 1.0
+        sc_p = 0.0 if self._scale_known_fit else 1.0
         # mgcv's dev1 scale (gam.fit3.r:848): REML/ML fits use reml.scale
         # = exp(φ̂) — the optimizer's converged scale — NOT the Fletcher
         # scale.est, which only feeds dev1 when reml.scale is NA (GCV.Cp).
         # Gaussian overrides _aic_dev1 to use dev directly either way.
         aic_scale = (float(np.exp(self._log_phi_hat))
                      if self._log_phi_hat is not None else scale)
-        dev1 = self.family._aic_dev1(self.deviance, aic_scale, wt)
+        if self._scale_known_fit:
+            # gam.fit3.r:848's FIRST branch: dev1 = scale·Σwt whenever
+            # the scale is known — including a gam(scale=)-fixed
+            # gaussian (its dev-based MLE override applies only to the
+            # estimated case). Poisson/binomial defaults are the same
+            # product as before (scale 1).
+            dev1 = float(aic_scale) * float(np.sum(wt))
+        else:
+            dev1 = self.family._aic_dev1(self.deviance, aic_scale, wt)
         # cbind responses: family$aic gets the trials vector as ``n``
         # (gam.fit3.r:850) — distinct from wt = pw·n when extra prior
         # weights are present.
@@ -1940,12 +2067,14 @@ class gam:
         if method in ("REML", "ML"):
             if n_sp > 0:
                 # `_reml` returns -2·V_R (REML) or -2·V_ML (ML); `summary()`'s
-                # `/2` recovers mgcv's `-REML`/`-ML` display value. Scale-known
-                # families (Poisson, Binomial) substitute log φ = 0; scale-
-                # unknown read the outer-optimizer's (or sp= path's profile-out)
-                # log φ̂.
+                # `/2` recovers mgcv's `-REML`/`-ML` display value. Known-
+                # scale fits substitute log φ = log(scale) — 0 on the
+                # poisson/binomial defaults, log(gam(scale=)) when fixed;
+                # estimated-scale fits read the outer-optimizer's (or sp=
+                # path's profile-out) log φ̂.
                 log_phi_hat = (
-                    self._log_phi_hat if self._log_phi_hat is not None else 0.0
+                    self._log_phi_hat if self._log_phi_hat is not None
+                    else float(np.log(self._scale_fixed_value))
                 )
                 score = float(self._reml(rho_hat, log_phi_hat, fit=fit))
             else:
@@ -2062,7 +2191,7 @@ class gam:
         log(def.sp) — the full-space ρ seed (the caller maps to working
         space through L when smooths share an id).
         """
-        w = self._init_fisher_w(self._y_arr)
+        w = self._init_fisher_w(self._y_arr, X=self._X_full)
         Xw = self._X_full * np.sqrt(np.maximum(w, 0.0))[:, None]
 
         ldxx = np.einsum("ij,ij->j", Xw, Xw)  # diag(X'WX)
@@ -2199,10 +2328,25 @@ class gam:
         mu = (family.gam_initialize(y, wt, n=self._binom_n)
               if self._binom_n is not None
               else family.gam_initialize(y, wt))
-        eta = link.link(mu) - off       # β-only η
+        # User starting values (gam(start=/etastart=/mustart=)) —
+        # gam.fit3.r:259-272 precedence: etastart > start > (user
+        # mustart, kept past initialize). The null baseline below stays
+        # user-independent like get.null.coef's mean(y) (mgcv.r:1863).
+        mu_default = mu
+        if self._pirls_mustart is not None:
+            mu = np.asarray(self._pirls_mustart, dtype=float)
+        if self._pirls_etastart is not None:
+            eta_user = np.asarray(self._pirls_etastart, dtype=float)
+            eta = eta_user - off            # R's η includes the offset
+            mu = link.linkinv(eta_user)
+        elif self._pirls_start is not None:
+            eta = X @ self._pirls_start     # β-only η
+            mu = link.linkinv(eta + off)
+        else:
+            eta = link.link(mu) - off       # β-only η
         beta = np.zeros(p)
 
-        mu_null_const = float(np.average(mu, weights=wt))
+        mu_null_const = float(np.average(mu_default, weights=wt))
         eta_null_full = link.link(np.full(n, mu_null_const))
         # Solve null_coef from X·null_coef = (full η at null) − offset.
         null_coef, *_ = np.linalg.lstsq(X, eta_null_full - off, rcond=None)
@@ -2217,6 +2361,22 @@ class gam:
             null_coef = np.zeros(p)
             eta_null = np.zeros(n)
             mu_null = link.linkinv(off)
+        # gam.fit3.r:286-292: shrink invalid starting values toward the
+        # null η (20 tries, then R's exact refusal). Only reachable with
+        # user-supplied values — family mustarts are valid by design.
+        if (self._pirls_mustart is not None
+                or self._pirls_etastart is not None
+                or self._pirls_start is not None):
+            ii = 0
+            while not (family.validmu(mu)
+                       and link.valideta(eta + off)
+                       and bool(np.all(np.isfinite(eta)))):
+                ii += 1
+                if ii > 20:
+                    raise ValueError("Can't find valid starting values: "
+                                     "please specify some")
+                eta = 0.9 * eta + 0.1 * eta_null
+                mu = link.linkinv(eta + off)
         beta_old = null_coef.copy()
         eta_old = eta_null.copy()
         dev = float(np.sum(family.dev_resids(y, mu, wt)))
@@ -2250,11 +2410,12 @@ class gam:
         ctrl = self._control or _GAM_CONTROL_DEFAULTS
         eps = min(ctrl["epsilon"], ctrl["newton"]["conv_tol"] / 100.0)
         max_it = ctrl["maxit"]            # gam.control(maxit = 200)
-        # mgcv's pdev test scales by |scale|+|pdev|, where gam.fit3's
-        # `scale` argument is -1 (unknown φ) or +1 (Poisson/binomial) at
-        # gam() defaults — |scale| = 1 on every path reachable here. A
-        # user-fixed scale= argument (Tier 3) would change this constant.
-        scale_abs = 1.0
+        # mgcv's pdev test scales by |scale|+|pdev|: gam.fit3's `scale`
+        # argument is -1 (unknown φ), +1 (poisson/binomial), or the
+        # gam(scale=)-fixed value — |scale| = 1 except under a user-
+        # fixed scale.
+        scale_abs = (self._scale_fixed_value
+                     if self._scale_known_fit else 1.0)
         # gam.fit3.r:227: Gaussian-identity needs exactly one penalized LS
         # solve; mgcv breaks before the pdev bookkeeping ("strictly.additive").
         strictly_additive = (
@@ -2535,11 +2696,25 @@ class gam:
         theta = family.get_theta()
 
         mu = family.gam_initialize(y, wt)
-        eta = link.link(mu) - off       # β-only η
+        # User starting values — same glm precedence as the standard
+        # branch (gam.fit4 mirrors gam.fit3's block); the null baseline
+        # below stays user-independent.
+        mu_default = mu
+        if self._pirls_mustart is not None:
+            mu = np.asarray(self._pirls_mustart, dtype=float)
+        if self._pirls_etastart is not None:
+            eta_user = np.asarray(self._pirls_etastart, dtype=float)
+            eta = eta_user - off
+            mu = link.linkinv(eta_user)
+        elif self._pirls_start is not None:
+            eta = X @ self._pirls_start
+            mu = link.linkinv(eta + off)
+        else:
+            eta = link.link(mu) - off       # β-only η
 
         # Null baseline — same construction as the standard branch
         # (mgcv's get.null.coef projection of a constant valid η).
-        mu_null_const = float(np.average(mu, weights=wt))
+        mu_null_const = float(np.average(mu_default, weights=wt))
         eta_null_full = link.link(np.full(n, mu_null_const))
         null_coef, *_ = np.linalg.lstsq(X, eta_null_full - off, rcond=None)
         eta_null = X @ null_coef
@@ -2548,6 +2723,19 @@ class gam:
             null_coef = np.zeros(p)
             eta_null = np.zeros(n)
             mu_null = link.linkinv(off)
+        if (self._pirls_mustart is not None
+                or self._pirls_etastart is not None
+                or self._pirls_start is not None):
+            ii = 0
+            while not (family.validmu(mu)
+                       and link.valideta(eta + off)
+                       and bool(np.all(np.isfinite(eta)))):
+                ii += 1
+                if ii > 20:
+                    raise ValueError("Can't find valid starting values: "
+                                     "please specify some")
+                eta = 0.9 * eta + 0.1 * eta_null
+                mu = link.linkinv(eta + off)
         beta = null_coef.copy()
         beta_old = null_coef.copy()
         eta_old = eta_null.copy()
@@ -2776,27 +2964,55 @@ class gam:
             E_aug=E_aug,
         )
 
-    def _init_fisher_w(self, y: np.ndarray) -> np.ndarray:
+    def _init_fisher_w(self, y: np.ndarray,
+                       X: np.ndarray | None = None) -> np.ndarray:
         """Working weights at the family's starting μ̂ — initial.spg's
         ``w = wt·μ'(η₀)²/V(μ₀)`` (mgcv.r:4595-4602), with the
         extended-family deviance-curvature branch ``w = ½·Dmu2·μ'²``
         (``EDmu2`` if any are negative). Shared by the initial.spg seed
-        and the pls_fit1-style identifiability check."""
+        and the pls_fit1-style identifiability check.
+
+        User starting values follow initial.spg's own precedence
+        (mgcv.r:4591-4595): mustart wins outright; else start → η =
+        X·start with NO offset (quirk), outranking etastart; else
+        etastart → linkinv."""
         family = self.family
         link = family.link
         wt = self._wt
         mustart = (family.gam_initialize(y, wt, n=self._binom_n)
                    if self._binom_n is not None
                    else family.gam_initialize(y, wt))
-        eta0 = link.link(mustart)
-        if self._family_mgcv_extended:
-            dd = family.Dd(y, mustart, family.get_theta(), wt, level=0)
-            mu_eta2 = link.mu_eta(eta0) ** 2
-            w = 0.5 * np.asarray(dd["Dmu2"], dtype=float) * mu_eta2
-            if np.any(w < 0):
-                w = 0.5 * np.asarray(dd["EDmu2"], dtype=float) * mu_eta2
-        else:
-            w = wt * link.mu_eta(eta0) ** 2 / family.variance(mustart)
+        mustart_default = mustart
+        if self._pirls_mustart is not None:
+            mustart = np.asarray(self._pirls_mustart, dtype=float)
+        elif self._pirls_start is not None and X is not None:
+            mustart = link.linkinv(X @ self._pirls_start)
+        elif self._pirls_etastart is not None:
+            mustart = link.linkinv(
+                np.asarray(self._pirls_etastart, dtype=float))
+
+        def _w_at(mu0):
+            eta0 = link.link(mu0)
+            if self._family_mgcv_extended:
+                dd = family.Dd(y, mu0, family.get_theta(), wt, level=0)
+                mu_eta2 = link.mu_eta(eta0) ** 2
+                w_ = 0.5 * np.asarray(dd["Dmu2"], dtype=float) * mu_eta2
+                if np.any(w_ < 0):
+                    w_ = 0.5 * np.asarray(dd["EDmu2"],
+                                          dtype=float) * mu_eta2
+            else:
+                w_ = wt * link.mu_eta(eta0) ** 2 / family.variance(mu0)
+            return w_
+
+        with np.errstate(all="ignore"):
+            w = _w_at(mustart)
+        if mustart is not mustart_default and not np.all(np.isfinite(w)):
+            # Invalid USER starting values: the PIRLS shrink loop
+            # (gam.fit3.r:286-292) handles recovery for the fit itself;
+            # the heuristic initial.spg weights just fall back to the
+            # family default instead of NaN-poisoning the seed and the
+            # rank check.
+            w = _w_at(mustart_default)
         return w
 
     def _setup_reparam(self, slots: list["_PenaltySlot"] | None = None,
@@ -4255,7 +4471,10 @@ class gam:
             # ``t[:n_work]`` is correct for every layout, including the
             # scale-known (ρ, θ_fam) one.
             rho_t = self._rho_full(t[:n_work])
-            lp_t = float(t[n_work]) if include_log_phi else 0.0
+            # Known-scale layouts: log φ is the FIXED log(scale) — 0 on
+            # the poisson/binomial defaults, log(gam(scale=)) otherwise.
+            lp_t = (float(t[n_work]) if include_log_phi
+                    else float(np.log(self._scale_fixed_value)))
             return rho_t, lp_t
 
         def _apply_family_theta(t):
@@ -5296,8 +5515,13 @@ class gam:
         # mgcv (gam.fit3.r): ``gamma`` inflates the apparent edf cost in
         # the criterion: V_g = n·D / (n − γ·τ)²; V_u = D/n + 2·γ·τ/n − 1.
         gamma = self._gamma
-        if self.family.scale_known:
-            return fit.dev / n + 2.0 * gamma * edf_total / n - 1.0
+        if self._scale_known_fit:
+            # mgcv (gam.fit3.r:753): UBRE = dev/n − s + 2γ·τ·s/n at the
+            # known scale s (1 on the poisson/binomial defaults — the
+            # ``·s`` keeps those bit-identical; gam(scale=) sets s).
+            s_phi = self._scale_fixed_value
+            return (fit.dev / n + 2.0 * gamma * edf_total * s_phi / n
+                    - s_phi)
         denom = n - gamma * edf_total
         if denom <= 0:
             return 1e15
@@ -5393,8 +5617,9 @@ class gam:
         # ``gamma`` inflates τ in the criterion: V_g = n·D/(n−γ·τ)²,
         # V_u = D/n + 2γτ/n − 1. Chain-rule the τ-derivative pieces by γ.
         gamma = self._gamma
-        if family.scale_known:
-            return dD_drho / n + 2.0 * gamma * dtau_drho / n
+        if self._scale_known_fit:
+            s_phi = self._scale_fixed_value
+            return dD_drho / n + 2.0 * gamma * dtau_drho * s_phi / n
         denom = n - gamma * edf_total
         if denom <= 0:
             return np.zeros(n_sp)
@@ -5650,8 +5875,9 @@ class gam:
         # ``gamma`` inflates the τ-coefficient in V_u and V_g; chain-rule
         # picks up γ at every τ-derivative encounter.
         gamma = self._gamma
-        if family.scale_known:
-            return d2D / n + 2.0 * gamma * d2tau / n
+        if self._scale_known_fit:
+            s_phi = self._scale_fixed_value
+            return d2D / n + 2.0 * gamma * d2tau * s_phi / n
 
         denom = n - gamma * edf_total
         if denom <= 0:
@@ -6023,7 +6249,7 @@ class gam:
         ev = np.clip(ev, 0.0, None)
         max_ev = ev.max() if ev.size else 0.0
         rank = int(np.sum(ev > max(max_ev, 0.0) * np.finfo(float).eps ** 0.8))
-        if self.family.scale_known:
+        if self._scale_known_fit:
             pval = psum_chisq(stat, ev) if ev.size else float("nan")
         else:
             k_df = max(1, int(round(self.df_residuals)))
@@ -6058,7 +6284,7 @@ class gam:
         supplied dispersion rescales it by ``dispersion/sig2`` and forces
         ``est.disp = FALSE`` (χ² references; testStat ``res.df = -1``).
         """
-        scale_known = bool(self.family.scale_known)
+        scale_known = bool(self._scale_known_fit)
         est_disp = (not scale_known) and dispersion is None
         v_scale = (1.0 if dispersion is None
                    else float(dispersion) / float(self.sigma_squared))
@@ -6257,7 +6483,7 @@ class gam:
             if with_theta:
                 # θ_fam columns start after ρ and after the log φ slot —
                 # which only exists when the scale is estimated.
-                th_start = n_w + (0 if self.family.scale_known else 1)
+                th_start = n_w + (0 if self._scale_known_fit else 1)
                 if H_aug.shape[0] > th_start:
                     sel = np.concatenate([
                         sel, np.arange(th_start, H_aug.shape[0]),
@@ -6469,7 +6695,7 @@ class gam:
         # ρ-only — or (ρ, θ_fam) for scat — when the scale is known,
         # matching mgcv's hess). Fixed scale ⇒ the +½·log σ² term carries
         # no uncertainty.
-        if (not self.family.scale_known) and H.shape[0] > n_work:
+        if (not self._scale_known_fit) and H.shape[0] > n_work:
             J[:, n_work] = 0.5
 
         Vc = J @ Hinv @ J.T
@@ -7995,7 +8221,7 @@ class gam:
             pterms_list = [([t.label for t in self._expanded.terms],
                             list(getattr(self, "_param_assign", []) or []),
                             0)]
-        est_disp = (not bool(self.family.scale_known)) and dispersion is None
+        est_disp = (not bool(self._scale_known_fit)) and dispersion is None
         residual_df = float(self.n) - float(self.edf_total)
 
         # summary.gam's covmat: Ve when freq else Vp (mgcv.r:3890),
@@ -8102,7 +8328,7 @@ class gam:
         # otherwise (binomial/poisson with φ ≡ 1, or any family under a
         # dispersion= override) Wald z/Pr(>|z|). Dropped (rank-deficiency)
         # coefficients show 0 / 0 / NaN like mgcv.
-        scale_known = bool(self.family.scale_known)
+        scale_known = bool(self._scale_known_fit)
         est_disp = (not scale_known) and dispersion is None
         se_report = self._se_report_for(freq, dispersion)
         n_par = len(self.parametric_columns)
@@ -8226,7 +8452,7 @@ class gam:
             # (Poisson, Binomial) optimizes UBRE, scale-unknown optimizes
             # GCV. mgcv's summary.gam labels the printed score with the
             # criterion that was actually optimized.
-            label = "UBRE" if self.family.scale_known else "GCV"
+            label = "UBRE" if self._scale_known_fit else "GCV"
             out.append(
                 f"{label} = {self.GCV_score:.5g}  "
                 f"Scale est. = {disp_print:.5g}  n = {self.n}"
