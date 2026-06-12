@@ -1486,8 +1486,8 @@ def _eval_call(call: Call, data: pl.DataFrame):
         # hea-native periodic basis: k cos/sin harmonic pairs at an explicit
         # period (the trig sibling of poly/bs/ns; see _harmonic_basis). The
         # count and period take positional — harmonic(x, k, period) — or
-        # keyword forms. The count keyword is `k` (canonical, matches
-        # pycircstat2) or `K` (forecast spelling); `k` wins if both are given.
+        # keyword forms. The count keyword is `k` (canonical) or `K`
+        # (forecast spelling); `k` wins if both are given.
         # period must be a positive scalar (e.g. 12 or 2*pi); hea has no ts
         # frequency to infer it from, so it has no default.
         v = _eval_numeric(call.args[0], data)

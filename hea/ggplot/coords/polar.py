@@ -35,8 +35,8 @@ matplotlib's auto-zoomed radial range).
 
 One 1D operation does happen in hea: the x-aesthetic's trained range
 is linearly rescaled to ``[0, 2π]`` so ordinal x (clarity, gear, …)
-fans around the circle evenly. For data already in radians
-(pycircstat2's case) the rescale is a no-op (factor = 1).
+fans around the circle evenly. For data already in radians the
+rescale is a no-op (factor = 1).
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ class CoordPolar(Coord):
     ----------
     theta : {"x", "y"}
         Which aesthetic carries the angular variable. Default ``"x"``
-        matches ggplot2 and pycircstat2. ``"y"`` is ggplot2's
+        matches ggplot2. ``"y"`` is ggplot2's
         stacked-bar→pie idiom.
     start : float
         Offset of the data's starting theta from 12 o'clock (top), in
@@ -97,8 +97,8 @@ class CoordPolar(Coord):
         domain spreads evenly around the circle, so 8 ordinal levels
         produce 8 wedges that span the full 2π.
 
-        For data already in ``[0, 2π]`` (pycircstat2's case) the factor
-        is 1.0 — no-op.
+        For data already in ``[0, 2π]`` (radians) the factor is
+        1.0 — no-op.
 
         ``x``/``xmin``/``xmax``/``xend`` get the full affine transform
         (``(v - lo) * factor``). ``width`` is a delta — multiplicative
@@ -147,7 +147,7 @@ def coord_polar(
     --------
     >>> # ggplot2's classic windrose / polar bar chart:
     >>> diamonds.ggplot().geom_bar(x="clarity", fill="clarity") + coord_polar()
-    >>> # Compass-oriented, zero-at-top, clockwise (pycircstat2's default):
+    >>> # Compass-oriented, zero-at-top, clockwise:
     >>> df.ggplot(aes(x="alpha", y="r")).geom_point() + coord_polar(start=π/2, direction=1)
     """
     return CoordPolar(theta=theta, start=start, direction=direction, clip=clip)

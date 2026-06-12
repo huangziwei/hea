@@ -62,7 +62,7 @@ def test_harmonic_lm_coef_parity_R():
 
 
 def test_harmonic_coef_labels_carry_suffixes():
-    # downstream (pycircstat2) reads (harmonic index, cos|sin) from the suffix,
+    # downstream consumers read (harmonic index, cos|sin) from the suffix,
     # so no coefficient-name regex is needed.
     m = lm("y ~ harmonic(x, 2, period=12)", _DF)
     names = list(m.bhat.columns)
@@ -81,7 +81,7 @@ def test_harmonic_predict_is_stateless_R():
 
 def test_harmonic_equals_explicit_cos_sin_terms():
     # spans the same column space as the hand-written cos/sin formula ->
-    # identical fitted values (the baseline pycircstat2 uses today).
+    # identical fitted values (the classic cos+sin regression baseline).
     m_h = lm("y ~ harmonic(x, 2, period=12)", _DF)
     m_e = lm(
         "y ~ cos(2*pi*x/12) + sin(2*pi*x/12)"
@@ -93,7 +93,7 @@ def test_harmonic_equals_explicit_cos_sin_terms():
 
 
 def test_harmonic_positional_and_keyword_forms_agree():
-    # the count keyword accepts both `k` (canonical, pycircstat2) and `K`
+    # the count keyword accepts both `k` (canonical) and `K`
     # (forecast spelling); all forms give the same fit.
     a = lm("y ~ harmonic(x, 2, 12)", _DF)               # all positional
     for f in (
@@ -106,7 +106,7 @@ def test_harmonic_positional_and_keyword_forms_agree():
 
 
 def test_harmonic_period_2pi_angular():
-    # the pycircstat2 path: angular predictor with period=2*pi (parses `pi`),
+    # angular predictor with period=2*pi (parses `pi`),
     # no `ts` involved. Exact 2-harmonic signal -> recovered coefficients.
     th = np.linspace(0.0, 2 * np.pi, 40, endpoint=False)
     yy = 1.0 + 0.8 * np.cos(th) - 0.5 * np.sin(th) + 0.3 * np.cos(2 * th)

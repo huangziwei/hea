@@ -3,7 +3,7 @@
 Covers construction, dispatch, fluent form, the three axes-creation
 paths in ``_render_single`` and the block engine's ``_render_leaf_cell``,
 the ``_apply_spines`` polar guard (theme regression), the ordinal-x →
-[0, 2π] rescale, and the continuous-x no-op case (pycircstat2's path).
+[0, 2π] rescale, and the continuous-x no-op case (radian data).
 """
 
 from __future__ import annotations
@@ -200,7 +200,7 @@ def test_coord_polar_does_not_crash_under_themes(theme_factory):
 
 
 def test_rescale_theta_continuous_two_pi_is_noop():
-    """pycircstat2's case: data already in [0, 2π] — factor should be 1.0."""
+    """Data already in [0, 2π] (radians) — factor should be 1.0."""
     c = coord_polar()
     df = pl.DataFrame({"x": [0.0, math.pi, 2 * math.pi], "y": [1.0, 1.0, 1.0]})
     out = c.rescale_theta(df, (0.0, 2 * math.pi))
@@ -277,7 +277,7 @@ def test_coord_polar_bar_chart_renders_wedges_for_each_ordinal_level():
 
 
 def test_coord_polar_continuous_x_keeps_radians_data():
-    """Continuous x in [0, 2π] feeds polar directly — pycircstat2's
+    """Continuous x in [0, 2π] feeds polar directly — the radian-data
     canonical recipe. Each point's data stays at its angular position."""
     angles = np.linspace(0, 2 * math.pi, 8, endpoint=False)
     df = pl.DataFrame({"theta": angles.tolist(), "r": [1.0] * 8})
@@ -304,7 +304,7 @@ def test_coord_polar_suppresses_axis_titles_by_default():
     """Polar auto-suppresses the x/y axis titles. Tick labels around the
     rim already carry the per-axis context, and matplotlib's default
     ylabel placement at 9 o'clock collides with the 180° tick label.
-    Matches ggplot2's coord_polar and pycircstat2 conventions."""
+    Matches ggplot2's coord_polar conventions."""
     df = pl.DataFrame({"clarity": list("ABCDEFGH") * 5})
     p = (ggplot(df, aes(x="clarity")) + geom_bar() + coord_polar())
     fig = p.draw()

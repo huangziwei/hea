@@ -3576,8 +3576,8 @@ class nb(Family):
 #                        the per-LP link derivatives
 #   * gamlss_gH       — assemble the coefficient-space gradient/Hessian/
 #                        ∂H/∂ρ/tr(H⁻¹∂²H) that gam.fit5 consumes
-# A custom family (pycircstat2's von Mises, …) supplies l1..l4 + links;
-# everything downstream is generic. Ported complete-array/dense paths
+# A custom family supplies l1..l4 + links; everything downstream is
+# generic. Ported complete-array/dense paths
 # only — out of scope (absent, never silent): the "remap" dropped-zero-
 # column optimization (multinom-scale K), discrete (bam) X lists,
 # sandwich, bootstrap deriv<0, the non-linear g.index corrections.
@@ -4000,10 +4000,9 @@ class GeneralFamily(Family):
     predictors, the likelihood supplied directly via :meth:`ll` instead
     of a deviance/PIRLS interface.
 
-    **Authoring contract.** This seam is public and consumed outside
-    hea (pycircstat2's ``CircularLL``); it is frozen by
-    ``test_general_family_seam_contract_guard`` (tests/test_gam.py),
-    and changes to it must record consumer impact in the family plan.
+    **Authoring contract.** This is hea's public extension API for
+    new general families (mgcv's ``general.family`` analog), frozen by
+    ``test_general_family_authoring_contract`` (tests/test_gam.py).
 
     Attributes a subclass declares:
 

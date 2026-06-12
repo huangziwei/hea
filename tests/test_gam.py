@@ -4982,18 +4982,19 @@ def test_optimizer_knob_efs_and_validation():
     assert m_def.optimizer == ("outer", "newton")
 
 
-def test_general_family_seam_contract_guard():
-    # The GeneralFamily authoring contract, frozen as a test (W3): a
-    # consumer-shaped family — 3 LPs, derivs=0, custom clamped links,
-    # ll filling the packed l1/l2 arrays and delegating to
-    # gamlss_etamu/gamlss_gH, CircularLL-style initialize_coef/
-    # postproc/residuals overrides — fits end-to-end through the
-    # formula-list gam. Any hea-side drift in the call protocol
+def test_general_family_authoring_contract():
+    # The GeneralFamily authoring contract (the documented public
+    # extension API, mgcv general.family analog), frozen as a test: a
+    # from-scratch family written purely against the class docstring —
+    # 3 LPs, derivs=0, custom clamped links, ll filling the packed
+    # l1/l2 arrays and delegating to gamlss_etamu/gamlss_gH, with
+    # initialize_coef/postproc/residuals overrides — fits end-to-end
+    # through the formula-list gam. Any drift in the call protocol
     # (kwarg names, deriv ceiling, per-LP offset lists, lpi layout,
-    # the 6-arg keyword-called postproc) breaks THIS suite rather
-    # than the external consumer's. The FD block is also the first
-    # end-to-end validation of the K=3 etamu/gH l1/l2 branches
-    # (oracle pins exist only at K=2, via gaulss).
+    # the 6-arg keyword-called postproc) fails here instead of
+    # surfacing in external family authors' code. The FD block is
+    # also the first end-to-end validation of the K=3 etamu/gH l1/l2
+    # branches (oracle pins exist only at K=2, via gaulss).
     from itertools import combinations_with_replacement
     from scipy.special import digamma, gammaln, polygamma
     from hea.family import (GeneralFamily, IdentityLink, Link,
@@ -5061,8 +5062,8 @@ def test_general_family_seam_contract_guard():
     class _TLSS(GeneralFamily):
         # Student-t location/scale/shape: parameters (μ, σ, λ) with
         # ν = 6 + 4λ ∈ (2, 10) — a real 3-parameter density with
-        # closed-form l1/l2, authored exactly like the consumer's
-        # bridge (CircularLL)
+        # closed-form l1/l2, authored exactly as the contract
+        # docstring prescribes
         name = "tlss-dummy"
         n_lp = 3
         available_derivs = 0
