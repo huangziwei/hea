@@ -2589,6 +2589,886 @@ def _tw_null_fit(y, a: float = 1.001, b: float = 1.999):
     return float(np.exp(th[0])), float(p), float(np.exp(th[2]))
 
 
+def _shash_log1pexp(x):
+    """shash's ``.log1pexp`` (gamlss.r:3431-3441): log(1 + e^x) with
+    R's binned stabilization. The x = −Inf corner (z = 0 exactly)
+    falls in the first bin here and returns 0 — R's ``.bincode``
+    NA-drops that boundary and would propagate the −Inf."""
+    x = np.asarray(x, dtype=float)
+    out = x.copy()
+    m1 = x <= -37.0
+    m2 = (x > -37.0) & (x <= 18.0)
+    m3 = (x > 18.0) & (x <= 33.3)
+    out[m1] = np.exp(x[m1])
+    out[m2] = np.log1p(np.exp(x[m2]))
+    out[m3] = x[m3] + np.exp(-x[m3])
+    return out
+
+
+def _sqrt_x2pm(x, m):
+    """shash's ``.sqrtX2pm`` (gamlss.r:3444-3451): sqrt(x² + m),
+    passing |x| through unchanged once |x| ≥ 1e8."""
+    x = np.abs(np.asarray(x, dtype=float))
+    out = x.copy()
+    kk = x < 1e8
+    out[kk] = np.sqrt(x[kk] ** 2 + m)
+    return out
+
+
+def _ax2m1_div_x2m2_sq(x, m1, m2, a=1.0):
+    """shash's ``.ax2m1DivX2m2SQ`` (gamlss.r:3454-3466):
+    (a·x² + m1)/(x² + m2)² computed stably for large |x|."""
+    if a < 0:
+        raise ValueError("'a' has to be positive")
+    x = np.abs(np.asarray(x, dtype=float))
+    kk = (a * x ** 2 + m1) < 0.0
+    out = np.zeros_like(x)
+    if np.any(kk):
+        out[kk] = (a * x[kk] ** 2 + m1) / (x[kk] ** 2 + m2) ** 2
+    nk = ~kk
+    if np.any(nk):
+        out[nk] = ((_sqrt_x2pm(np.sqrt(a) * x[nk], m1)
+                    / _sqrt_x2pm(x[nk], m2)) / _sqrt_x2pm(x[nk], m2)) ** 2
+    return out
+
+
+def _sech(x):
+    return 1.0 / np.cosh(x)
+
+
+def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
+    """shash log-density and packed parameter-space derivatives —
+    mgcv's shash ``ll`` body (gamlss.r:3487-3950) up to the etamu
+    hand-off. Returns ``(l0, L1, L2, L3, L4)`` with the (μ, τ, ε, φ)
+    packing; L3/L4 are None below the requesting deriv level. The
+    third/fourth-derivative blocks are mechanical transcriptions of
+    mgcv's auto-generated maxima code (sequencing and groupings kept
+    line-for-line; only `del`→`delta` renamed).
+    """
+    y = np.asarray(y, dtype=float)
+    sig = np.exp(tau)
+    delta = np.exp(phi)
+    z = (y - mu) / (sig * delta)
+    dTasMe = delta * np.arcsinh(z) - eps
+    g = -dTasMe
+    CC = np.cosh(dTasMe)
+    SS = np.sinh(dTasMe)
+    with np.errstate(divide="ignore"):
+        log_abs_z2 = 2.0 * np.log(np.abs(z))
+    l0 = (-tau - 0.5 * np.log(2.0 * np.pi) + np.log(CC)
+          - 0.5 * _shash_log1pexp(log_abs_z2) - 0.5 * SS ** 2
+          - phi_pen * phi ** 2)
+    L1 = L2 = L3 = L4 = None
+    if deriv >= 1:
+        zsd = z * sig * delta
+        sSp1 = _sqrt_x2pm(z, 1.0)               # sqrt(z² + 1)
+        asinhZ = np.arcsinh(z)
+
+        # first derivatives (gamlss.r:3513-3519)
+        De = np.tanh(g) - 0.5 * np.sinh(2.0 * g)
+        Dm = 1.0 / (delta * sig * sSp1) * (delta * De + z / sSp1)
+        Dt = zsd * Dm - 1.0
+        Dp = Dt + 1.0 - delta * asinhZ * De - 2.0 * phi_pen * phi
+        L1 = np.column_stack([Dm, Dt, De, Dp])
+
+        # second derivatives, packed mm,mt,me,mp,tt,te,tp,ee,ep,pp
+        # (gamlss.r:3522-3535)
+        Dme = (_sech(g) ** 2 - np.cosh(2.0 * g)) / (sig * sSp1)
+        Dte = zsd * Dme
+        Dmm = (Dme / (sig * sSp1) + z * De / (sig ** 2 * delta * sSp1 ** 3)
+               + _ax2m1_div_x2m2_sq(z, -1.0, 1.0) / (delta * sig * delta
+                                                     * sig))
+        Dmt = zsd * Dmm - Dm
+        Dee = -2.0 * np.cosh(g) ** 2 + _sech(g) ** 2 + 1.0
+        Dtt = zsd * Dmt
+        Dep = Dte - delta * asinhZ * Dee
+        Dmp = Dmt + De / (sig * sSp1) - delta * asinhZ * Dme
+        Dtp = zsd * Dmp
+        Dpp = (Dtp - delta * asinhZ * Dep
+               + delta * (z / sSp1 - asinhZ) * De - 2.0 * phi_pen)
+        L2 = np.column_stack([Dmm, Dmt, Dme, Dmp, Dtt, Dte, Dtp, Dee,
+                              Dep, Dpp])
+    if deriv > 1:
+        # third derivatives (gamlss.r:3545-3567)
+        Deee = -2 * (np.sinh(2 * g) + _sech(g) ** 2 * np.tanh(g))
+        Dmee = Deee / (sig * sSp1)
+        Dmme = Dmee / (sig * sSp1) + z * Dee / (sig * sig * delta * sSp1 ** 3)
+        Dmmm = (
+            2 * z * Dme / (sig * sig * delta * sSp1 ** 3) + Dmme /
+            (sig * sSp1) + _ax2m1_div_x2m2_sq(z, -1, 1, 2) * De /
+            (sig ** 3 * delta ** 2 * sSp1) + 2 * (z / sSp1) *
+            _ax2m1_div_x2m2_sq(z, -3, 1) / ((sig * delta) ** 3 * sSp1)
+        )
+        Dmmt = zsd * Dmmm - 2 * Dmm
+        Dtee = zsd * Dmee
+        Dmte = zsd * Dmme - Dme
+        Dtte = zsd * Dmte
+        Dmtt = zsd * Dmmt - Dmt
+        Dttt = zsd * Dmtt
+        Dmep = Dmte + Dee / (sig * sSp1) - delta * asinhZ * Dmee
+        Dtep = zsd * Dmep
+        Deep = Dtee - delta * asinhZ * Deee
+        Depp = Dtep - delta * asinhZ * Deep + delta * (z / sSp1 - asinhZ) * Dee
+        Dmmp = (
+            Dmmt + 2 * Dme / (sig * sSp1) + z * De /
+            (delta * sig * sig * sSp1 ** 3) - delta * asinhZ * Dmme
+        )
+        Dmtp = zsd * Dmmp - Dmp
+        Dttp = zsd * Dmtp
+        Dmpp = (
+            Dmtp + Dep / (sig * sSp1) + z ** 2 * De / (sig * sSp1 ** 3) -
+            delta * asinhZ * Dmep + delta * Dme * (z / sSp1 - asinhZ)
+        )
+        Dtpp = zsd * Dmpp
+        Dppp = (
+            Dtpp - delta * asinhZ * Depp + delta * (z / sSp1 - asinhZ) *
+            (2 * Dep + De) + delta * (z / sSp1) ** 3 * De
+        )
+
+        L3 = np.column_stack([Dmmm, Dmmt, Dmme, Dmmp, Dmtt, Dmte, Dmtp,
+                              Dmee, Dmep, Dmpp, Dttt, Dtte, Dttp, Dtee,
+                              Dtep, Dtpp, Deee, Deep, Depp, Dppp])
+    if deriv > 3:
+        # fourth derivatives — mgcv's auto-generated block
+        # (gamlss.r:3586-3941); 35 columns in the packed order
+        # mmmm..pppp listed at gamlss.r:3579-3582
+        m = mu
+        t = tau
+        p = phi
+        e = eps
+        exp1 = np.e
+        aaa1 = -t
+        aaa2 = y - m
+        aaa3 = exp1 ** p * np.asinh(exp1 ** (aaa1 - p) * aaa2) - e
+        abb8 = np.cosh(aaa3)
+        abb9 = np.sinh(aaa3)
+        abb1 = exp1 ** ((-2 * t) - 2 * p)
+        abb3 = aaa2 ** 2
+        abb4 = 1 / exp1 ** t
+        abb5 = -t - p
+        abb7 = exp1 ** (2 * abb5) * abb3 + 1
+        abb6 = 1 / np.sqrt(abb7)
+        aee5 = aaa3 + e
+        aff04 = abb1 * abb3 + 1
+        aff05 = abb4 ** 2
+        aff08 = 2 * abb5
+        aff10 = 1 / abb7
+        aff13 = abb8 ** 2
+        aff14 = exp1 ** (aaa1 + aff08)
+        aff15 = abb6 ** 3
+        aff17 = abb9 ** 2
+        agg15 = 1 / abb6
+        agg17 = 1 / abb8
+        aii11 = aaa3 + e
+        aii12 = aii11 - abb4 * aaa2 * abb6
+        aii17 = abb6 ** 3
+        ajj15 = aaa2 ** 3
+        ann05 = exp1 ** p
+        ann06 = np.asinh(exp1 ** abb5 * aaa2)
+        aoo09 = -aaa2 / (exp1 ** t * agg15)
+        app02 = -2 * t
+        app04 = exp1 ** (app02 - 2 * p) * abb3 + 1
+        app08 = exp1 ** (app02 + aff08)
+        app10 = 1 / abb7 ** 2
+        app14 = exp1 ** (aaa1 + 4 * abb5)
+        app16 = 1 / agg15 ** 5
+        app21 = 1 / exp1 ** (3 * t)
+        aqq03 = exp1 ** (app02 - 2 * p)
+        aqq05 = aqq03 * abb3 + 1
+        aqq27 = 1 / aff13
+        arr06 = exp1 ** aff08 * aaa2 ** 2 + 1
+        arr07 = 1 / np.sqrt(arr06) ** 3
+        arr12 = 1 / arr06
+        ass16 = aii11 - aaa2 / (exp1 ** t * agg15)
+        ass23 = 1 / abb8
+        ass28 = 1 / aff13
+        att19 = aaa2 ** 4
+        avv19 = aii11 - abb4 * aaa2 * abb6
+        ayy14 = -abb4 * aaa2 * abb6
+        ayy16 = aii11 + ayy14
+        ayy17 = aii11 + ayy14 - aff14 * ajj15 * aii17
+        ayy24 = ayy16 ** 2
+        azz19 = aaa2 ** 5
+        bdd07 = np.sqrt(exp1 ** aff08 * aaa2 ** 2 + 1)
+        bdd08 = 1 / bdd07 ** 3
+        bdd14 = 1 / bdd07
+        bdd15 = aii11 - abb4 * aaa2 * bdd14
+        bgg4 = (
+            aee5 - aaa2 /
+            (exp1 ** t * np.sqrt(exp1 ** (2 * abb5) * aaa2 ** 2 + 1))
+        )
+        bhh13 = -abb4 * aaa2 * bdd14
+        bhh14 = ann05 * ann06
+        bii11 = aii11 + aoo09
+        bii15 = aii11 + aoo09 - aff14 * ajj15 * aii17
+        bjj07 = 4 * abb5
+        bjj08 = exp1 ** (app02 + bjj07)
+        bjj11 = 1 / abb7 ** 3
+        bjj14 = 1 / exp1 ** (4 * t)
+        bjj18 = exp1 ** (aaa1 + 6 * abb5)
+        bjj21 = 1 / agg15 ** 7
+        bjj24 = exp1 ** (aff08 - 3 * t)
+        bjj26 = exp1 ** (aaa1 + bjj07)
+        j2 = (
+            (-(6 * bjj14 * app10 * abb9 ** 4) / abb8 ** 4) -
+            (12 * bjj24 * aaa2 * app16 * abb9 ** 3) / abb8 ** 3 + 8 * bjj14 *
+            app10 * aqq27 * aff17 + 4 * app08 * app10 * aqq27 * aff17 - 15 *
+            bjj08 * abb3 * bjj11 * aqq27 * aff17 - 4 * bjj14 * app10 * aff17 +
+            4 * app08 * app10 * aff17 - 15 * bjj08 * abb3 * bjj11 * aff17 - 9
+            * bjj26 * aaa2 * app16 * abb8 * abb9 + 24 * bjj24 * aaa2 * app16 *
+            abb8 * abb9 + 15 * bjj18 * ajj15 * bjj21 * abb8 * abb9 + 9 * bjj26
+            * aaa2 * app16 * agg17 * abb9 + 12 * bjj24 * aaa2 * app16 * agg17
+            * abb9 - 15 * bjj18 * ajj15 * bjj21 * agg17 * abb9 - 4 * bjj14 *
+            app10 * aff13 + 4 * app08 * app10 * aff13 - 15 * bjj08 * abb3 *
+            bjj11 * aff13 - 2 * bjj14 * app10 - 4 * app08 * app10 + 15 * bjj08
+            * abb3 * bjj11 + (6 * exp1 ** ((-4 * t) - 4 * p)) / app04 ** 2 -
+            (48 * exp1 ** ((-6 * t) - 6 * p) * abb3) / app04 ** 3 +
+            (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2 ** 4) / app04 ** 4
+        )
+        bkk33 = 1 / abb8 ** 3
+        bkk34 = abb9 ** 3
+        k2 = (
+            (-(6 * bjj14 * aaa2 * app10 * abb9 ** 4) / abb8 ** 4) + 6 * app21
+            * aff15 * bkk33 * bkk34 - 12 * bjj24 * abb3 * app16 * bkk33 *
+            bkk34 + 8 * bjj14 * aaa2 * app10 * aqq27 * aff17 + 13 * app08 *
+            aaa2 * app10 * aqq27 * aff17 - 15 * bjj08 * ajj15 * bjj11 * aqq27
+            * aff17 - 4 * bjj14 * aaa2 * app10 * aff17 + 13 * app08 * aaa2 *
+            app10 * aff17 - 15 * bjj08 * ajj15 * bjj11 * aff17 - 12 * app21 *
+            aff15 * abb8 * abb9 + 3 * aff14 * aff15 * abb8 * abb9 - 18 * bjj26
+            * abb3 * app16 * abb8 * abb9 + 24 * bjj24 * abb3 * app16 * abb8 *
+            abb9 + 15 * bjj18 * att19 * bjj21 * abb8 * abb9 - 6 * app21 *
+            aff15 * agg17 * abb9 - 3 * aff14 * aff15 * agg17 * abb9 + 18 *
+            bjj26 * abb3 * app16 * agg17 * abb9 + 12 * bjj24 * abb3 * app16 *
+            agg17 * abb9 - 15 * bjj18 * att19 * bjj21 * agg17 * abb9 - 4 *
+            bjj14 * aaa2 * app10 * aff13 + 13 * app08 * aaa2 * app10 * aff13 -
+            15 * bjj08 * ajj15 * bjj11 * aff13 - 2 * bjj14 * aaa2 * app10 - 13
+            * app08 * aaa2 * app10 + 15 * bjj08 * ajj15 * bjj11 +
+            (24 * exp1 ** ((-4 * t) - 4 * p) * aaa2) / app04 ** 2 -
+            (72 * exp1 ** ((-6 * t) - 6 * p) * ajj15) / app04 ** 3 +
+            (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2 ** 5) / app04 ** 4
+        )
+        bll16 = exp1 ** (aff08 - 2 * t)
+        l2 = (
+            (-(6 * app21 * aff15 * abb9 ** 4) / abb8 ** 4) -
+            (6 * bll16 * aaa2 * app10 * abb9 ** 3) / abb8 ** 3 + 8 * app21 *
+            aff15 * aqq27 * aff17 + aff14 * aff15 * aqq27 * aff17 - 3 * app14
+            * abb3 * app16 * aqq27 * aff17 - 4 * app21 * aff15 * aff17 + aff14
+            * aff15 * aff17 - 3 * app14 * abb3 * app16 * aff17 + 12 * bll16 *
+            aaa2 * app10 * abb8 * abb9 + (6 * bll16 * aaa2 * app10 * abb9) /
+            abb8 - 4 * app21 * aff15 * aff13 + aff14 * aff15 * aff13 - 3 *
+            app14 * abb3 * app16 * aff13 - 2 * app21 * aff15 - aff14 * aff15 +
+            3 * app14 * abb3 * app16
+        )
+        bmm34 = 1 / abb8 ** 3
+        bmm35 = abb9 ** 3
+        m2 = (
+            (6 * app21 * aff15 * ass16 * abb9 ** 4) / abb8 ** 4 + 6 * app08 *
+            aaa2 * app10 * ass16 * bmm34 * bmm35 - 6 * bjj24 * abb3 * app16 *
+            bmm34 * bmm35 - 8 * app21 * aff15 * ass16 * ass28 * aff17 - aff14
+            * aff15 * ass16 * ass28 * aff17 + 3 * bjj26 * abb3 * app16 * ass16
+            * ass28 * aff17 + 6 * app08 * aaa2 * app10 * ass28 * aff17 - 12 *
+            bjj08 * ajj15 * bjj11 * ass28 * aff17 + 4 * app21 * aff15 * ass16
+            * aff17 - aff14 * aff15 * ass16 * aff17 + 3 * bjj26 * abb3 * app16
+            * ass16 * aff17 + 6 * app08 * aaa2 * app10 * aff17 - 12 * bjj08 *
+            ajj15 * bjj11 * aff17 - 12 * app08 * aaa2 * app10 * ass16 * abb8 *
+            abb9 + 2 * aff14 * aff15 * abb8 * abb9 - 15 * bjj26 * abb3 * app16
+            * abb8 * abb9 + 12 * bjj24 * abb3 * app16 * abb8 * abb9 + 15 *
+            bjj18 * att19 * bjj21 * abb8 * abb9 - 6 * app08 * aaa2 * app10 *
+            ass16 * ass23 * abb9 - 2 * aff14 * aff15 * ass23 * abb9 + 15 *
+            bjj26 * abb3 * app16 * ass23 * abb9 + 6 * bjj24 * abb3 * app16 *
+            ass23 * abb9 - 15 * bjj18 * att19 * bjj21 * ass23 * abb9 + 4 *
+            app21 * aff15 * ass16 * aff13 - aff14 * aff15 * ass16 * aff13 + 3
+            * bjj26 * abb3 * app16 * ass16 * aff13 + 6 * app08 * aaa2 * app10
+            * aff13 - 12 * bjj08 * ajj15 * bjj11 * aff13 + 2 * app21 * aff15 *
+            ass16 + aff14 * aff15 * ass16 - 3 * bjj26 * abb3 * app16 * ass16 -
+            6 * app08 * aaa2 * app10 + 12 * bjj08 * ajj15 * bjj11 +
+            (24 * exp1 ** ((-4 * t) - 4 * p) * aaa2) / app04 ** 2 -
+            (72 * exp1 ** ((-6 * t) - 6 * p) * ajj15) / app04 ** 3 +
+            (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2 ** 5) / app04 ** 4
+        )
+        n2 = (
+            (-(6 * bjj14 * abb3 * app10 * abb9 ** 4) / abb8 ** 4) + 10 * app21
+            * aaa2 * aff15 * bkk33 * bkk34 - 12 * bjj24 * ajj15 * app16 *
+            bkk33 * bkk34 - 4 * aff05 * aff10 * aqq27 * aff17 + 8 * bjj14 *
+            abb3 * app10 * aqq27 * aff17 + 19 * app08 * abb3 * app10 * aqq27 *
+            aff17 - 15 * bjj08 * att19 * bjj11 * aqq27 * aff17 - 4 * aff05 *
+            aff10 * aff17 - 4 * bjj14 * abb3 * app10 * aff17 + 19 * app08 *
+            abb3 * app10 * aff17 - 15 * bjj08 * att19 * bjj11 * aff17 - 20 *
+            app21 * aaa2 * aff15 * abb8 * abb9 + 9 * aff14 * aaa2 * aff15 *
+            abb8 * abb9 - 24 * bjj26 * ajj15 * app16 * abb8 * abb9 + 24 *
+            bjj24 * ajj15 * app16 * abb8 * abb9 + 15 * bjj18 * azz19 * bjj21 *
+            abb8 * abb9 - 10 * app21 * aaa2 * aff15 * agg17 * abb9 - 9 * aff14
+            * aaa2 * aff15 * agg17 * abb9 + 24 * bjj26 * ajj15 * app16 * agg17
+            * abb9 + 12 * bjj24 * ajj15 * app16 * agg17 * abb9 - 15 * bjj18 *
+            azz19 * bjj21 * agg17 * abb9 - 4 * aff05 * aff10 * aff13 - 4 *
+            bjj14 * abb3 * app10 * aff13 + 19 * app08 * abb3 * app10 * aff13 -
+            15 * bjj08 * att19 * bjj11 * aff13 + 4 * aff05 * aff10 - 2 * bjj14
+            * abb3 * app10 - 19 * app08 * abb3 * app10 + 15 * bjj08 * att19 *
+            bjj11 - (4 * aqq03) / aqq05 +
+            (44 * exp1 ** ((-4 * t) - 4 * p) * abb3) / aqq05 ** 2 -
+            (88 * exp1 ** ((-6 * t) - 6 * p) * att19) / aqq05 ** 3 +
+            (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2 ** 6) / aqq05 ** 4
+        )
+        o2 = (
+            (-(6 * app21 * aaa2 * aff15 * abb9 ** 4) / abb8 ** 4) + 4 * aff05
+            * aff10 * bkk33 * bkk34 - 6 * bll16 * abb3 * app10 * bkk33 * bkk34
+            + 8 * app21 * aaa2 * aff15 * aqq27 * aff17 + 3 * aff14 * aaa2 *
+            aff15 * aqq27 * aff17 - 3 * app14 * ajj15 * app16 * aqq27 * aff17
+            - 4 * app21 * aaa2 * aff15 * aff17 + 3 * aff14 * aaa2 * aff15 *
+            aff17 - 3 * app14 * ajj15 * app16 * aff17 - 8 * aff05 * aff10 *
+            abb8 * abb9 + 12 * bll16 * abb3 * app10 * abb8 * abb9 - 4 * aff05
+            * aff10 * agg17 * abb9 + 6 * bll16 * abb3 * app10 * agg17 * abb9 -
+            4 * app21 * aaa2 * aff15 * aff13 + 3 * aff14 * aaa2 * aff15 *
+            aff13 - 3 * app14 * ajj15 * app16 * aff13 - 2 * app21 * aaa2 *
+            aff15 - 3 * aff14 * aaa2 * aff15 + 3 * app14 * ajj15 * app16
+        )
+        p2 = (
+            (6 * app21 * aaa2 * aff15 * ass16 * abb9 ** 4) / abb8 ** 4 - 4 *
+            aff05 * aff10 * ass16 * bmm34 * bmm35 + 6 * app08 * abb3 * app10 *
+            ass16 * bmm34 * bmm35 - 6 * bjj24 * ajj15 * app16 * bmm34 * bmm35
+            - 8 * app21 * aaa2 * aff15 * ass16 * ass28 * aff17 - 3 * aff14 *
+            aaa2 * aff15 * ass16 * ass28 * aff17 + 3 * bjj26 * ajj15 * app16 *
+            ass16 * ass28 * aff17 + 10 * app08 * abb3 * app10 * ass28 * aff17
+            - 12 * bjj08 * att19 * bjj11 * ass28 * aff17 + 4 * app21 * aaa2 *
+            aff15 * ass16 * aff17 - 3 * aff14 * aaa2 * aff15 * ass16 * aff17 +
+            3 * bjj26 * ajj15 * app16 * ass16 * aff17 + 10 * app08 * abb3 *
+            app10 * aff17 - 12 * bjj08 * att19 * bjj11 * aff17 + 8 * aff05 *
+            aff10 * ass16 * abb8 * abb9 - 12 * app08 * abb3 * app10 * ass16 *
+            abb8 * abb9 + 6 * aff14 * aaa2 * aff15 * abb8 * abb9 - 21 * bjj26
+            * ajj15 * app16 * abb8 * abb9 + 12 * bjj24 * ajj15 * app16 * abb8
+            * abb9 + 15 * bjj18 * azz19 * bjj21 * abb8 * abb9 + 4 * aff05 *
+            aff10 * ass16 * ass23 * abb9 - 6 * app08 * abb3 * app10 * ass16 *
+            ass23 * abb9 - 6 * aff14 * aaa2 * aff15 * ass23 * abb9 + 21 *
+            bjj26 * ajj15 * app16 * ass23 * abb9 + 6 * bjj24 * ajj15 * app16 *
+            ass23 * abb9 - 15 * bjj18 * azz19 * bjj21 * ass23 * abb9 + 4 *
+            app21 * aaa2 * aff15 * ass16 * aff13 - 3 * aff14 * aaa2 * aff15 *
+            ass16 * aff13 + 3 * bjj26 * ajj15 * app16 * ass16 * aff13 + 10 *
+            app08 * abb3 * app10 * aff13 - 12 * bjj08 * att19 * bjj11 * aff13
+            + 2 * app21 * aaa2 * aff15 * ass16 + 3 * aff14 * aaa2 * aff15 *
+            ass16 - 3 * bjj26 * ajj15 * app16 * ass16 - 10 * app08 * abb3 *
+            app10 + 12 * bjj08 * att19 * bjj11 - (4 * aqq03) / aqq05 +
+            (44 * exp1 ** ((-4 * t) - 4 * p) * abb3) / aqq05 ** 2 -
+            (88 * exp1 ** ((-6 * t) - 6 * p) * att19) / aqq05 ** 3 +
+            (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2 ** 6) / aqq05 ** 4
+        )
+        q2 = (
+            (-(6 * aff05 * arr12 * abb9 ** 4) / abb8 ** 4) -
+            (2 * aff14 * aaa2 * arr07 * abb9 ** 3) / abb8 ** 3 +
+            (8 * aff05 * arr12 * aff17) / aff13 - 4 * aff05 * arr12 * aff17 +
+            4 * aff14 * aaa2 * arr07 * abb8 * abb9 +
+            (2 * aff14 * aaa2 * arr07 * abb9) / abb8 - 4 * aff05 * arr12 *
+            aff13 - 2 * aff05 * arr12
+        )
+        r2 = (
+            (6 * aff05 * aff10 * ass16 * abb9 ** 4) / abb8 ** 4 + 2 * aff14 *
+            aaa2 * aff15 * ass16 * bmm34 * bmm35 - 4 * bll16 * abb3 * app10 *
+            bmm34 * bmm35 - 8 * aff05 * aff10 * ass16 * ass28 * aff17 + 2 *
+            aff14 * aaa2 * aff15 * ass28 * aff17 - 3 * app14 * ajj15 * app16 *
+            ass28 * aff17 + 4 * aff05 * aff10 * ass16 * aff17 + 2 * aff14 *
+            aaa2 * aff15 * aff17 - 3 * app14 * ajj15 * app16 * aff17 - 4 *
+            aff14 * aaa2 * aff15 * ass16 * abb8 * abb9 + 8 * bll16 * abb3 *
+            app10 * abb8 * abb9 - 2 * aff14 * aaa2 * aff15 * ass16 * ass23 *
+            abb9 + 4 * bll16 * abb3 * app10 * ass23 * abb9 + 4 * aff05 * aff10
+            * ass16 * aff13 + 2 * aff14 * aaa2 * aff15 * aff13 - 3 * app14 *
+            ajj15 * app16 * aff13 + 2 * aff05 * aff10 * ass16 - 2 * aff14 *
+            aaa2 * aff15 + 3 * app14 * ajj15 * app16
+        )
+        bss21 = 2 * aff14 * abb3 * aff15 - 3 * bjj26 * att19 * app16
+        bss23 = -abb4 * aaa2 * abb6
+        bss25 = aii11 + bss23
+        bss26 = aii11 + bss23 - aff14 * ajj15 * aff15
+        bss29 = bss25 ** 2
+        bss33 = (
+            (-4 * aff14 * aaa2 * aff15) + 18 * bjj26 * ajj15 * app16 -
+            (15 * exp1 ** (aaa1 + 6 * abb5) * aaa2 ** 5) / agg15 ** 7
+        )
+        s2 = (
+            (-(6 * aff05 * aff10 * bss29 * abb9 ** 4) / abb8 ** 4) - 2 * aff14
+            * aaa2 * aff15 * bss29 * bmm34 * bmm35 + 2 * aff05 * aff10 * bss26
+            * bmm34 * bmm35 + 8 * app08 * abb3 * app10 * bss25 * bmm34 * bmm35
+            + 8 * aff05 * aff10 * bss29 * ass28 * aff17 + aff14 * aaa2 * aff15
+            * bss26 * ass28 * aff17 - 4 * aff14 * aaa2 * aff15 * bss25 * ass28
+            * aff17 + 6 * bjj26 * ajj15 * app16 * bss25 * ass28 * aff17 + 2 *
+            abb4 * abb6 * bss21 * ass28 * aff17 - 2 * bjj08 * att19 * bjj11 *
+            ass28 * aff17 - 4 * aff05 * aff10 * bss29 * aff17 + aff14 * aaa2 *
+            aff15 * bss26 * aff17 - 4 * aff14 * aaa2 * aff15 * bss25 * aff17 +
+            6 * bjj26 * ajj15 * app16 * bss25 * aff17 + 2 * abb4 * abb6 *
+            bss21 * aff17 - 2 * bjj08 * att19 * bjj11 * aff17 + 4 * aff14 *
+            aaa2 * aff15 * bss29 * abb8 * abb9 - 4 * aff05 * aff10 * bss26 *
+            abb8 * abb9 - 16 * app08 * abb3 * app10 * bss25 * abb8 * abb9 -
+            bss33 * abb8 * abb9 + 2 * aff14 * aaa2 * aff15 * bss29 * ass23 *
+            abb9 - 2 * aff05 * aff10 * bss26 * ass23 * abb9 - 8 * app08 * abb3
+            * app10 * bss25 * ass23 * abb9 + bss33 * ass23 * abb9 - 4 * aff05
+            * aff10 * bss29 * aff13 + aff14 * aaa2 * aff15 * bss26 * aff13 - 4
+            * aff14 * aaa2 * aff15 * bss25 * aff13 + 6 * bjj26 * ajj15 * app16
+            * bss25 * aff13 + 2 * abb4 * abb6 * bss21 * aff13 - 2 * bjj08 *
+            att19 * bjj11 * aff13 - 2 * aff05 * aff10 * bss29 - aff14 * aaa2 *
+            aff15 * bss26 + 4 * aff14 * aaa2 * aff15 * bss25 - 6 * bjj26 *
+            ajj15 * app16 * bss25 - 2 * abb4 * abb6 * bss21 + 2 * bjj08 *
+            att19 * bjj11 - (4 * aqq03) / aqq05 +
+            (44 * exp1 ** ((-4 * t) - 4 * p) * abb3) / aqq05 ** 2 -
+            (88 * exp1 ** ((-6 * t) - 6 * p) * att19) / aqq05 ** 3 +
+            (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2 ** 6) / aqq05 ** 4
+        )
+        btt24 = aaa2 ** 6
+        t2 = (
+            (-(6 * bjj14 * ajj15 * app10 * abb9 ** 4) / abb8 ** 4) + 12 *
+            app21 * abb3 * aff15 * bkk33 * bkk34 - 12 * bjj24 * att19 * app16
+            * bkk33 * bkk34 - 7 * aff05 * aaa2 * aff10 * aqq27 * aff17 + 8 *
+            bjj14 * ajj15 * app10 * aqq27 * aff17 + 22 * app08 * ajj15 * app10
+            * aqq27 * aff17 - 15 * bjj08 * azz19 * bjj11 * aqq27 * aff17 - 7 *
+            aff05 * aaa2 * aff10 * aff17 - 4 * bjj14 * ajj15 * app10 * aff17 +
+            22 * app08 * ajj15 * app10 * aff17 - 15 * bjj08 * azz19 * bjj11 *
+            aff17 - abb4 * abb6 * abb8 * abb9 - 24 * app21 * abb3 * aff15 *
+            abb8 * abb9 + 13 * aff14 * abb3 * aff15 * abb8 * abb9 - 27 * bjj26
+            * att19 * app16 * abb8 * abb9 + 24 * bjj24 * att19 * app16 * abb8
+            * abb9 + 15 * bjj18 * btt24 * bjj21 * abb8 * abb9 + abb4 * abb6 *
+            agg17 * abb9 - 12 * app21 * abb3 * aff15 * agg17 * abb9 - 13 *
+            aff14 * abb3 * aff15 * agg17 * abb9 + 27 * bjj26 * att19 * app16 *
+            agg17 * abb9 + 12 * bjj24 * att19 * app16 * agg17 * abb9 - 15 *
+            bjj18 * btt24 * bjj21 * agg17 * abb9 - 7 * aff05 * aaa2 * aff10 *
+            aff13 - 4 * bjj14 * ajj15 * app10 * aff13 + 22 * app08 * ajj15 *
+            app10 * aff13 - 15 * bjj08 * azz19 * bjj11 * aff13 + 7 * aff05 *
+            aaa2 * aff10 - 2 * bjj14 * ajj15 * app10 - 22 * app08 * ajj15 *
+            app10 + 15 * bjj08 * azz19 * bjj11 - (8 * aqq03 * aaa2) / aqq05 +
+            (56 * exp1 ** ((-4 * t) - 4 * p) * ajj15) / aqq05 ** 2 -
+            (96 * exp1 ** ((-6 * t) - 6 * p) * azz19) / aqq05 ** 3 +
+            (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2 ** 7) / aqq05 ** 4
+        )
+        u2 = (
+            (-(6 * app21 * abb3 * aff15 * abb9 ** 4) / abb8 ** 4) + 6 * aff05
+            * aaa2 * aff10 * bkk33 * bkk34 - 6 * bll16 * ajj15 * app10 * bkk33
+            * bkk34 - abb4 * abb6 * aqq27 * aff17 + 8 * app21 * abb3 * aff15 *
+            aqq27 * aff17 + 4 * aff14 * abb3 * aff15 * aqq27 * aff17 - 3 *
+            app14 * att19 * app16 * aqq27 * aff17 - abb4 * abb6 * aff17 - 4 *
+            app21 * abb3 * aff15 * aff17 + 4 * aff14 * abb3 * aff15 * aff17 -
+            3 * app14 * att19 * app16 * aff17 - 12 * aff05 * aaa2 * aff10 *
+            abb8 * abb9 + 12 * bll16 * ajj15 * app10 * abb8 * abb9 - 6 * aff05
+            * aaa2 * aff10 * agg17 * abb9 + 6 * bll16 * ajj15 * app10 * agg17
+            * abb9 - abb4 * abb6 * aff13 - 4 * app21 * abb3 * aff15 * aff13 +
+            4 * aff14 * abb3 * aff15 * aff13 - 3 * app14 * att19 * app16 *
+            aff13 + abb4 * abb6 - 2 * app21 * abb3 * aff15 - 4 * aff14 * abb3
+            * aff15 + 3 * app14 * att19 * app16
+        )
+        v2 = (
+            (6 * app21 * abb3 * aff15 * avv19 * abb9 ** 4) / abb8 ** 4 - 6 *
+            aff05 * aaa2 * aff10 * avv19 * bmm34 * bmm35 + 6 * app08 * ajj15 *
+            app10 * avv19 * bmm34 * bmm35 - 6 * bjj24 * att19 * app16 * bmm34
+            * bmm35 + abb4 * abb6 * avv19 * ass28 * aff17 - 8 * app21 * abb3 *
+            aff15 * avv19 * ass28 * aff17 - 4 * aff14 * abb3 * aff15 * avv19 *
+            ass28 * aff17 + 3 * bjj26 * att19 * app16 * avv19 * ass28 * aff17
+            + 12 * app08 * ajj15 * app10 * ass28 * aff17 - 12 * bjj08 * azz19
+            * bjj11 * ass28 * aff17 + abb4 * abb6 * avv19 * aff17 + 4 * app21
+            * abb3 * aff15 * avv19 * aff17 - 4 * aff14 * abb3 * aff15 * avv19
+            * aff17 + 3 * bjj26 * att19 * app16 * avv19 * aff17 + 12 * app08 *
+            ajj15 * app10 * aff17 - 12 * bjj08 * azz19 * bjj11 * aff17 + 12 *
+            aff05 * aaa2 * aff10 * avv19 * abb8 * abb9 - 12 * app08 * ajj15 *
+            app10 * avv19 * abb8 * abb9 + 9 * aff14 * abb3 * aff15 * abb8 *
+            abb9 - 24 * bjj26 * att19 * app16 * abb8 * abb9 + 12 * bjj24 *
+            att19 * app16 * abb8 * abb9 + 15 * bjj18 * btt24 * bjj21 * abb8 *
+            abb9 + 6 * aff05 * aaa2 * aff10 * avv19 * ass23 * abb9 - 6 * app08
+            * ajj15 * app10 * avv19 * ass23 * abb9 - 9 * aff14 * abb3 * aff15
+            * ass23 * abb9 + 24 * bjj26 * att19 * app16 * ass23 * abb9 + 6 *
+            bjj24 * att19 * app16 * ass23 * abb9 - 15 * bjj18 * btt24 * bjj21
+            * ass23 * abb9 + abb4 * abb6 * avv19 * aff13 + 4 * app21 * abb3 *
+            aff15 * avv19 * aff13 - 4 * aff14 * abb3 * aff15 * avv19 * aff13 +
+            3 * bjj26 * att19 * app16 * avv19 * aff13 + 12 * app08 * ajj15 *
+            app10 * aff13 - 12 * bjj08 * azz19 * bjj11 * aff13 - abb4 * abb6 *
+            avv19 + 2 * app21 * abb3 * aff15 * avv19 + 4 * aff14 * abb3 *
+            aff15 * avv19 - 3 * bjj26 * att19 * app16 * avv19 - 12 * app08 *
+            ajj15 * app10 + 12 * bjj08 * azz19 * bjj11 - (8 * aqq03 * aaa2) /
+            aqq05 + (56 * exp1 ** ((-4 * t) - 4 * p) * ajj15) / aqq05 ** 2 -
+            (96 * exp1 ** ((-6 * t) - 6 * p) * azz19) / aqq05 ** 3 +
+            (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2 ** 7) / aqq05 ** 4
+        )
+        w2 = (
+            (-(6 * aff05 * aaa2 * aff10 * abb9 ** 4) / abb8 ** 4) + 2 * abb4 *
+            abb6 * bkk33 * bkk34 - 2 * aff14 * abb3 * aff15 * bkk33 * bkk34 +
+            (8 * aff05 * aaa2 * aff10 * aff17) / aff13 - 4 * aff05 * aaa2 *
+            aff10 * aff17 - 4 * abb4 * abb6 * abb8 * abb9 + 4 * aff14 * abb3 *
+            aff15 * abb8 * abb9 - 2 * abb4 * abb6 * agg17 * abb9 + 2 * aff14 *
+            abb3 * aff15 * agg17 * abb9 - 4 * aff05 * aaa2 * aff10 * aff13 - 2
+            * aff05 * aaa2 * aff10
+        )
+        x2 = (
+            (6 * aff05 * aaa2 * aff10 * avv19 * abb9 ** 4) / abb8 ** 4 - 2 *
+            abb4 * abb6 * avv19 * bmm34 * bmm35 + 2 * aff14 * abb3 * aff15 *
+            avv19 * bmm34 * bmm35 - 4 * bll16 * ajj15 * app10 * bmm34 * bmm35
+            - 8 * aff05 * aaa2 * aff10 * avv19 * ass28 * aff17 + 3 * aff14 *
+            abb3 * aff15 * ass28 * aff17 - 3 * app14 * att19 * app16 * ass28 *
+            aff17 + 4 * aff05 * aaa2 * aff10 * avv19 * aff17 + 3 * aff14 *
+            abb3 * aff15 * aff17 - 3 * app14 * att19 * app16 * aff17 + 4 *
+            abb4 * abb6 * avv19 * abb8 * abb9 - 4 * aff14 * abb3 * aff15 *
+            avv19 * abb8 * abb9 + 8 * bll16 * ajj15 * app10 * abb8 * abb9 + 2
+            * abb4 * abb6 * avv19 * ass23 * abb9 - 2 * aff14 * abb3 * aff15 *
+            avv19 * ass23 * abb9 + 4 * bll16 * ajj15 * app10 * ass23 * abb9 +
+            4 * aff05 * aaa2 * aff10 * avv19 * aff13 + 3 * aff14 * abb3 *
+            aff15 * aff13 - 3 * app14 * att19 * app16 * aff13 + 2 * aff05 *
+            aaa2 * aff10 * avv19 - 3 * aff14 * abb3 * aff15 + 3 * app14 *
+            att19 * app16
+        )
+        byy24 = 2 * aff14 * ajj15 * aff15 - 3 * bjj26 * azz19 * app16
+        byy35 = (
+            (-6 * aff14 * abb3 * aff15) + 21 * bjj26 * att19 * app16 -
+            (15 * exp1 ** (aaa1 + 6 * abb5) * aaa2 ** 6) / agg15 ** 7
+        )
+        y2 = (
+            (-(6 * aff05 * aaa2 * aff10 * bss29 * abb9 ** 4) / abb8 ** 4) + 2
+            * abb4 * abb6 * bss29 * bmm34 * bmm35 - 2 * aff14 * abb3 * aff15 *
+            bss29 * bmm34 * bmm35 + 2 * aff05 * aaa2 * aff10 * bss26 * bmm34 *
+            bmm35 + 8 * app08 * ajj15 * app10 * bss25 * bmm34 * bmm35 + 8 *
+            aff05 * aaa2 * aff10 * bss29 * ass28 * aff17 - abb4 * abb6 * bss26
+            * ass28 * aff17 + aff14 * abb3 * aff15 * bss26 * ass28 * aff17 - 6
+            * aff14 * abb3 * aff15 * bss25 * ass28 * aff17 + 6 * bjj26 * att19
+            * app16 * bss25 * ass28 * aff17 + abb4 * abb6 * byy24 * ass28 *
+            aff17 + abb4 * aaa2 * abb6 * bss21 * ass28 * aff17 - 2 * bjj08 *
+            azz19 * bjj11 * ass28 * aff17 - 4 * aff05 * aaa2 * aff10 * bss29 *
+            aff17 - abb4 * abb6 * bss26 * aff17 + aff14 * abb3 * aff15 * bss26
+            * aff17 - 6 * aff14 * abb3 * aff15 * bss25 * aff17 + 6 * bjj26 *
+            att19 * app16 * bss25 * aff17 + abb4 * abb6 * byy24 * aff17 + abb4
+            * aaa2 * abb6 * bss21 * aff17 - 2 * bjj08 * azz19 * bjj11 * aff17
+            - 4 * abb4 * abb6 * bss29 * abb8 * abb9 + 4 * aff14 * abb3 * aff15
+            * bss29 * abb8 * abb9 - 4 * aff05 * aaa2 * aff10 * bss26 * abb8 *
+            abb9 - 16 * app08 * ajj15 * app10 * bss25 * abb8 * abb9 - byy35 *
+            abb8 * abb9 - 2 * abb4 * abb6 * bss29 * ass23 * abb9 + 2 * aff14 *
+            abb3 * aff15 * bss29 * ass23 * abb9 - 2 * aff05 * aaa2 * aff10 *
+            bss26 * ass23 * abb9 - 8 * app08 * ajj15 * app10 * bss25 * ass23 *
+            abb9 + byy35 * ass23 * abb9 - 4 * aff05 * aaa2 * aff10 * bss29 *
+            aff13 - abb4 * abb6 * bss26 * aff13 + aff14 * abb3 * aff15 * bss26
+            * aff13 - 6 * aff14 * abb3 * aff15 * bss25 * aff13 + 6 * bjj26 *
+            att19 * app16 * bss25 * aff13 + abb4 * abb6 * byy24 * aff13 + abb4
+            * aaa2 * abb6 * bss21 * aff13 - 2 * bjj08 * azz19 * bjj11 * aff13
+            - 2 * aff05 * aaa2 * aff10 * bss29 + abb4 * abb6 * bss26 - aff14 *
+            abb3 * aff15 * bss26 + 6 * aff14 * abb3 * aff15 * bss25 - 6 *
+            bjj26 * att19 * app16 * bss25 - abb4 * abb6 * byy24 - abb4 * aaa2
+            * abb6 * bss21 + 2 * bjj08 * azz19 * bjj11 - (8 * aqq03 * aaa2) /
+            aqq05 + (56 * exp1 ** ((-4 * t) - 4 * p) * ajj15) / aqq05 ** 2 -
+            (96 * exp1 ** ((-6 * t) - 6 * p) * azz19) / aqq05 ** 3 +
+            (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2 ** 7) / aqq05 ** 4
+        )
+        bzz7 = abb8 ** 2
+        bzz9 = abb9 ** 2
+        z2 = (
+            (-(6 * abb4 * abb6 * abb9 ** 4) / abb8 ** 4) +
+            (8 * abb4 * abb6 * bzz9) / bzz7 - 4 * abb4 * abb6 * bzz9 - 4 *
+            abb4 * abb6 * bzz7 - 2 * abb4 * abb6
+        )
+        a3 = (
+            (6 * abb4 * abb6 * aii12 * abb9 ** 4) / abb8 ** 4 -
+            (2 * aff14 * abb3 * aii17 * abb9 ** 3) / abb8 ** 3 -
+            (8 * abb4 * abb6 * aii12 * aff17) / aff13 + 4 * abb4 * abb6 *
+            aii12 * aff17 + 4 * aff14 * abb3 * aii17 * abb8 * abb9 +
+            (2 * aff14 * abb3 * aii17 * abb9) / abb8 + 4 * abb4 * abb6 * aii12
+            * aff13 + 2 * abb4 * abb6 * aii12
+        )
+        cbb09 = 1 / agg15 ** 5
+        cbb18 = 2 * aff14 * abb3 * aii17 - 3 * app14 * att19 * cbb09
+        cbb24 = aii11 + ayy14 - aff14 * aaa2 ** 3 * aii17
+        b3 = (
+            (-(6 * abb4 * abb6 * ayy24 * abb9 ** 4) / abb8 ** 4) + 2 * abb4 *
+            abb6 * cbb24 * bmm34 * bmm35 + 4 * aff14 * abb3 * aii17 * ayy16 *
+            bmm34 * bmm35 + 8 * abb4 * abb6 * ayy24 * ass28 * aff17 + cbb18 *
+            ass28 * aff17 - 4 * abb4 * abb6 * ayy24 * aff17 + cbb18 * aff17 -
+            4 * abb4 * abb6 * cbb24 * abb8 * abb9 - 8 * aff14 * abb3 * aii17 *
+            ayy16 * abb8 * abb9 - 2 * abb4 * abb6 * cbb24 * ass23 * abb9 - 4 *
+            aff14 * abb3 * aii17 * ayy16 * ass23 * abb9 - 4 * abb4 * abb6 *
+            ayy24 * aff13 + cbb18 * aff13 - 2 * abb4 * abb6 * ayy24 - 2 *
+            aff14 * abb3 * aii17 + 3 * app14 * att19 * cbb09
+        )
+        ccc23 = (
+            aii11 + ayy14 + aff14 * ajj15 * aii17 - 3 * app14 * azz19 * cbb09
+        )
+        ccc24 = ayy16 ** 3
+        ccc28 = (
+            (-4 * aff14 * abb3 * aii17) + 18 * app14 * att19 * cbb09 -
+            (15 * exp1 ** (aaa1 + 6 * abb5) * aaa2 ** 6) / agg15 ** 7
+        )
+        c3 = (
+            (6 * abb4 * abb6 * ccc24 * abb9 ** 4) / abb8 ** 4 - 6 * aff14 *
+            abb3 * aii17 * ayy24 * bmm34 * bmm35 - 6 * abb4 * abb6 * ayy16 *
+            ayy17 * bmm34 * bmm35 - 8 * abb4 * abb6 * ccc24 * ass28 * aff17 +
+            abb4 * abb6 * ccc23 * ass28 * aff17 + 3 * aff14 * abb3 * aii17 *
+            ayy17 * ass28 * aff17 - 3 * cbb18 * ayy16 * ass28 * aff17 + 4 *
+            abb4 * abb6 * ccc24 * aff17 + abb4 * abb6 * ccc23 * aff17 + 3 *
+            aff14 * abb3 * aii17 * ayy17 * aff17 - 3 * cbb18 * ayy16 * aff17 +
+            12 * aff14 * abb3 * aii17 * ayy24 * abb8 * abb9 + 12 * abb4 * abb6
+            * ayy16 * ayy17 * abb8 * abb9 - ccc28 * abb8 * abb9 + 6 * aff14 *
+            abb3 * aii17 * ayy24 * ass23 * abb9 + 6 * abb4 * abb6 * ayy16 *
+            ayy17 * ass23 * abb9 + ccc28 * ass23 * abb9 + 4 * abb4 * abb6 *
+            ccc24 * aff13 + abb4 * abb6 * ccc23 * aff13 + 3 * aff14 * abb3 *
+            aii17 * ayy17 * aff13 - 3 * cbb18 * ayy16 * aff13 + 2 * abb4 *
+            abb6 * ccc24 - abb4 * abb6 * ccc23 - 3 * aff14 * abb3 * aii17 *
+            ayy17 + 3 * cbb18 * ayy16 - (8 * abb1 * aaa2) / aff04 +
+            (56 * exp1 ** ((-4 * t) - 4 * p) * ajj15) / aff04 ** 2 -
+            (96 * exp1 ** ((-6 * t) - 6 * p) * azz19) / aff04 ** 3 +
+            (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2 ** 7) / aff04 ** 4
+        )
+        cdd24 = aaa2 ** 7
+        d3 = (
+            (-(6 * bjj14 * att19 * app10 * abb9 ** 4) / abb8 ** 4) + 12 *
+            app21 * ajj15 * aff15 * bkk33 * bkk34 - 12 * bjj24 * azz19 * app16
+            * bkk33 * bkk34 - 7 * aff05 * abb3 * aff10 * aqq27 * aff17 + 8 *
+            bjj14 * att19 * app10 * aqq27 * aff17 + 22 * app08 * att19 * app10
+            * aqq27 * aff17 - 15 * bjj08 * btt24 * bjj11 * aqq27 * aff17 - 7 *
+            aff05 * abb3 * aff10 * aff17 - 4 * bjj14 * att19 * app10 * aff17 +
+            22 * app08 * att19 * app10 * aff17 - 15 * bjj08 * btt24 * bjj11 *
+            aff17 - abb4 * aaa2 * abb6 * abb8 * abb9 - 24 * app21 * ajj15 *
+            aff15 * abb8 * abb9 + 13 * aff14 * ajj15 * aff15 * abb8 * abb9 -
+            27 * bjj26 * azz19 * app16 * abb8 * abb9 + 24 * bjj24 * azz19 *
+            app16 * abb8 * abb9 + 15 * bjj18 * cdd24 * bjj21 * abb8 * abb9 +
+            abb4 * aaa2 * abb6 * agg17 * abb9 - 12 * app21 * ajj15 * aff15 *
+            agg17 * abb9 - 13 * aff14 * ajj15 * aff15 * agg17 * abb9 + 27 *
+            bjj26 * azz19 * app16 * agg17 * abb9 + 12 * bjj24 * azz19 * app16
+            * agg17 * abb9 - 15 * bjj18 * cdd24 * bjj21 * agg17 * abb9 - 7 *
+            aff05 * abb3 * aff10 * aff13 - 4 * bjj14 * att19 * app10 * aff13 +
+            22 * app08 * att19 * app10 * aff13 - 15 * bjj08 * btt24 * bjj11 *
+            aff13 + 7 * aff05 * abb3 * aff10 - 2 * bjj14 * att19 * app10 - 22
+            * app08 * att19 * app10 + 15 * bjj08 * btt24 * bjj11 -
+            (8 * aqq03 * abb3) / aqq05 +
+            (56 * exp1 ** ((-4 * t) - 4 * p) * att19) / aqq05 ** 2 -
+            (96 * exp1 ** ((-6 * t) - 6 * p) * btt24) / aqq05 ** 3 +
+            (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2 ** 8) / aqq05 ** 4
+        )
+        e3 = (
+            (-(6 * app21 * ajj15 * aff15 * abb9 ** 4) / abb8 ** 4) + 6 * aff05
+            * abb3 * aff10 * bkk33 * bkk34 - 6 * bll16 * att19 * app10 * bkk33
+            * bkk34 - abb4 * aaa2 * abb6 * aqq27 * aff17 + 8 * app21 * ajj15 *
+            aff15 * aqq27 * aff17 + 4 * aff14 * ajj15 * aff15 * aqq27 * aff17
+            - 3 * app14 * azz19 * app16 * aqq27 * aff17 - abb4 * aaa2 * abb6 *
+            aff17 - 4 * app21 * ajj15 * aff15 * aff17 + 4 * aff14 * ajj15 *
+            aff15 * aff17 - 3 * app14 * azz19 * app16 * aff17 - 12 * aff05 *
+            abb3 * aff10 * abb8 * abb9 + 12 * bll16 * att19 * app10 * abb8 *
+            abb9 - 6 * aff05 * abb3 * aff10 * agg17 * abb9 + 6 * bll16 * att19
+            * app10 * agg17 * abb9 - abb4 * aaa2 * abb6 * aff13 - 4 * app21 *
+            ajj15 * aff15 * aff13 + 4 * aff14 * ajj15 * aff15 * aff13 - 3 *
+            app14 * azz19 * app16 * aff13 + abb4 * aaa2 * abb6 - 2 * app21 *
+            ajj15 * aff15 - 4 * aff14 * ajj15 * aff15 + 3 * app14 * azz19 *
+            app16
+        )
+        f3 = (
+            (6 * app21 * ajj15 * aff15 * avv19 * abb9 ** 4) / abb8 ** 4 - 6 *
+            aff05 * abb3 * aff10 * avv19 * bmm34 * bmm35 + 6 * app08 * att19 *
+            app10 * avv19 * bmm34 * bmm35 - 6 * bjj24 * azz19 * app16 * bmm34
+            * bmm35 + abb4 * aaa2 * abb6 * avv19 * ass28 * aff17 - 8 * app21 *
+            ajj15 * aff15 * avv19 * ass28 * aff17 - 4 * aff14 * ajj15 * aff15
+            * avv19 * ass28 * aff17 + 3 * bjj26 * azz19 * app16 * avv19 *
+            ass28 * aff17 + 12 * app08 * att19 * app10 * ass28 * aff17 - 12 *
+            bjj08 * btt24 * bjj11 * ass28 * aff17 + abb4 * aaa2 * abb6 * avv19
+            * aff17 + 4 * app21 * ajj15 * aff15 * avv19 * aff17 - 4 * aff14 *
+            ajj15 * aff15 * avv19 * aff17 + 3 * bjj26 * azz19 * app16 * avv19
+            * aff17 + 12 * app08 * att19 * app10 * aff17 - 12 * bjj08 * btt24
+            * bjj11 * aff17 + 12 * aff05 * abb3 * aff10 * avv19 * abb8 * abb9
+            - 12 * app08 * att19 * app10 * avv19 * abb8 * abb9 + 9 * aff14 *
+            ajj15 * aff15 * abb8 * abb9 - 24 * bjj26 * azz19 * app16 * abb8 *
+            abb9 + 12 * bjj24 * azz19 * app16 * abb8 * abb9 + 15 * bjj18 *
+            cdd24 * bjj21 * abb8 * abb9 + 6 * aff05 * abb3 * aff10 * avv19 *
+            ass23 * abb9 - 6 * app08 * att19 * app10 * avv19 * ass23 * abb9 -
+            9 * aff14 * ajj15 * aff15 * ass23 * abb9 + 24 * bjj26 * azz19 *
+            app16 * ass23 * abb9 + 6 * bjj24 * azz19 * app16 * ass23 * abb9 -
+            15 * bjj18 * cdd24 * bjj21 * ass23 * abb9 + abb4 * aaa2 * abb6 *
+            avv19 * aff13 + 4 * app21 * ajj15 * aff15 * avv19 * aff13 - 4 *
+            aff14 * ajj15 * aff15 * avv19 * aff13 + 3 * bjj26 * azz19 * app16
+            * avv19 * aff13 + 12 * app08 * att19 * app10 * aff13 - 12 * bjj08
+            * btt24 * bjj11 * aff13 - abb4 * aaa2 * abb6 * avv19 + 2 * app21 *
+            ajj15 * aff15 * avv19 + 4 * aff14 * ajj15 * aff15 * avv19 - 3 *
+            bjj26 * azz19 * app16 * avv19 - 12 * app08 * att19 * app10 + 12 *
+            bjj08 * btt24 * bjj11 - (8 * aqq03 * abb3) / aqq05 +
+            (56 * exp1 ** ((-4 * t) - 4 * p) * att19) / aqq05 ** 2 -
+            (96 * exp1 ** ((-6 * t) - 6 * p) * btt24) / aqq05 ** 3 +
+            (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2 ** 8) / aqq05 ** 4
+        )
+        g3 = (
+            (-(6 * aff05 * abb3 * aff10 * abb9 ** 4) / abb8 ** 4) + 2 * abb4 *
+            aaa2 * abb6 * bkk33 * bkk34 - 2 * aff14 * ajj15 * aff15 * bkk33 *
+            bkk34 + (8 * aff05 * abb3 * aff10 * aff17) / aff13 - 4 * aff05 *
+            abb3 * aff10 * aff17 - 4 * abb4 * aaa2 * abb6 * abb8 * abb9 + 4 *
+            aff14 * ajj15 * aff15 * abb8 * abb9 - 2 * abb4 * aaa2 * abb6 *
+            agg17 * abb9 + 2 * aff14 * ajj15 * aff15 * agg17 * abb9 - 4 *
+            aff05 * abb3 * aff10 * aff13 - 2 * aff05 * abb3 * aff10
+        )
+        h3 = (
+            (6 * aff05 * abb3 * aff10 * avv19 * abb9 ** 4) / abb8 ** 4 - 2 *
+            abb4 * aaa2 * abb6 * avv19 * bmm34 * bmm35 + 2 * aff14 * ajj15 *
+            aff15 * avv19 * bmm34 * bmm35 - 4 * bll16 * att19 * app10 * bmm34
+            * bmm35 - 8 * aff05 * abb3 * aff10 * avv19 * ass28 * aff17 + 3 *
+            aff14 * ajj15 * aff15 * ass28 * aff17 - 3 * app14 * azz19 * app16
+            * ass28 * aff17 + 4 * aff05 * abb3 * aff10 * avv19 * aff17 + 3 *
+            aff14 * ajj15 * aff15 * aff17 - 3 * app14 * azz19 * app16 * aff17
+            + 4 * abb4 * aaa2 * abb6 * avv19 * abb8 * abb9 - 4 * aff14 * ajj15
+            * aff15 * avv19 * abb8 * abb9 + 8 * bll16 * att19 * app10 * abb8 *
+            abb9 + 2 * abb4 * aaa2 * abb6 * avv19 * ass23 * abb9 - 2 * aff14 *
+            ajj15 * aff15 * avv19 * ass23 * abb9 + 4 * bll16 * att19 * app10 *
+            ass23 * abb9 + 4 * aff05 * abb3 * aff10 * avv19 * aff13 + 3 *
+            aff14 * ajj15 * aff15 * aff13 - 3 * app14 * azz19 * app16 * aff13
+            + 2 * aff05 * abb3 * aff10 * avv19 - 3 * aff14 * ajj15 * aff15 + 3
+            * app14 * azz19 * app16
+        )
+        i3 = (
+            (-(6 * aff05 * abb3 * aff10 * bss29 * abb9 ** 4) / abb8 ** 4) + 2
+            * abb4 * aaa2 * abb6 * bss29 * bmm34 * bmm35 - 2 * aff14 * ajj15 *
+            aff15 * bss29 * bmm34 * bmm35 + 2 * aff05 * abb3 * aff10 * bss26 *
+            bmm34 * bmm35 + 8 * app08 * att19 * app10 * bss25 * bmm34 * bmm35
+            + 8 * aff05 * abb3 * aff10 * bss29 * ass28 * aff17 - abb4 * aaa2 *
+            abb6 * bss26 * ass28 * aff17 + aff14 * ajj15 * aff15 * bss26 *
+            ass28 * aff17 - 6 * aff14 * ajj15 * aff15 * bss25 * ass28 * aff17
+            + 6 * bjj26 * azz19 * app16 * bss25 * ass28 * aff17 + 4 * app08 *
+            att19 * app10 * ass28 * aff17 - 8 * bjj08 * btt24 * bjj11 * ass28
+            * aff17 - 4 * aff05 * abb3 * aff10 * bss29 * aff17 - abb4 * aaa2 *
+            abb6 * bss26 * aff17 + aff14 * ajj15 * aff15 * bss26 * aff17 - 6 *
+            aff14 * ajj15 * aff15 * bss25 * aff17 + 6 * bjj26 * azz19 * app16
+            * bss25 * aff17 + 4 * app08 * att19 * app10 * aff17 - 8 * bjj08 *
+            btt24 * bjj11 * aff17 - 4 * abb4 * aaa2 * abb6 * bss29 * abb8 *
+            abb9 + 4 * aff14 * ajj15 * aff15 * bss29 * abb8 * abb9 - 4 * aff05
+            * abb3 * aff10 * bss26 * abb8 * abb9 - 16 * app08 * att19 * app10
+            * bss25 * abb8 * abb9 + 6 * aff14 * ajj15 * aff15 * abb8 * abb9 -
+            21 * bjj26 * azz19 * app16 * abb8 * abb9 + 15 * bjj18 * cdd24 *
+            bjj21 * abb8 * abb9 - 2 * abb4 * aaa2 * abb6 * bss29 * ass23 *
+            abb9 + 2 * aff14 * ajj15 * aff15 * bss29 * ass23 * abb9 - 2 *
+            aff05 * abb3 * aff10 * bss26 * ass23 * abb9 - 8 * app08 * att19 *
+            app10 * bss25 * ass23 * abb9 - 6 * aff14 * ajj15 * aff15 * ass23 *
+            abb9 + 21 * bjj26 * azz19 * app16 * ass23 * abb9 - 15 * bjj18 *
+            cdd24 * bjj21 * ass23 * abb9 - 4 * aff05 * abb3 * aff10 * bss29 *
+            aff13 - abb4 * aaa2 * abb6 * bss26 * aff13 + aff14 * ajj15 * aff15
+            * bss26 * aff13 - 6 * aff14 * ajj15 * aff15 * bss25 * aff13 + 6 *
+            bjj26 * azz19 * app16 * bss25 * aff13 + 4 * app08 * att19 * app10
+            * aff13 - 8 * bjj08 * btt24 * bjj11 * aff13 - 2 * aff05 * abb3 *
+            aff10 * bss29 + abb4 * aaa2 * abb6 * bss26 - aff14 * ajj15 * aff15
+            * bss26 + 6 * aff14 * ajj15 * aff15 * bss25 - 6 * bjj26 * azz19 *
+            app16 * bss25 - 4 * app08 * att19 * app10 + 8 * bjj08 * btt24 *
+            bjj11 - (8 * aqq03 * abb3) / aqq05 +
+            (56 * exp1 ** ((-4 * t) - 4 * p) * att19) / aqq05 ** 2 -
+            (96 * exp1 ** ((-6 * t) - 6 * p) * btt24) / aqq05 ** 3 +
+            (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2 ** 8) / aqq05 ** 4
+        )
+        j3 = (
+            (-(6 * abb4 * aaa2 * abb6 * abb9 ** 4) / abb8 ** 4) +
+            (8 * abb4 * aaa2 * abb6 * bzz9) / bzz7 - 4 * abb4 * aaa2 * abb6 *
+            bzz9 - 4 * abb4 * aaa2 * abb6 * bzz7 - 2 * abb4 * aaa2 * abb6
+        )
+        k3 = (
+            (6 * abb4 * aaa2 * bdd14 * bdd15 * abb9 ** 4) / abb8 ** 4 -
+            (2 * aff14 * ajj15 * bdd08 * abb9 ** 3) / abb8 ** 3 -
+            (8 * abb4 * aaa2 * bdd14 * bdd15 * aff17) / aff13 + 4 * abb4 *
+            aaa2 * bdd14 * bdd15 * aff17 + 4 * aff14 * ajj15 * bdd08 * abb8 *
+            abb9 + (2 * aff14 * ajj15 * bdd08 * abb9) / abb8 + 4 * abb4 * aaa2
+            * bdd14 * bdd15 * aff13 + 2 * abb4 * aaa2 * bdd14 * bdd15
+        )
+        cll08 = 1 / bdd07 ** 5
+        cll16 = aii11 + bhh13
+        cll17 = cll16 ** 2
+        cll18 = 2 * aff14 * ajj15 * bdd08 - 3 * app14 * azz19 * cll08
+        cll24 = aii11 + bhh13 - aff14 * ajj15 * bdd08
+        l3 = (
+            (-(6 * abb4 * aaa2 * bdd14 * cll17 * abb9 ** 4) / abb8 ** 4) + 2 *
+            abb4 * aaa2 * bdd14 * cll24 * bmm34 * bmm35 + 4 * aff14 * ajj15 *
+            bdd08 * cll16 * bmm34 * bmm35 + 8 * abb4 * aaa2 * bdd14 * cll17 *
+            ass28 * aff17 + cll18 * ass28 * aff17 - 4 * abb4 * aaa2 * bdd14 *
+            cll17 * aff17 + cll18 * aff17 - 4 * abb4 * aaa2 * bdd14 * cll24 *
+            abb8 * abb9 - 8 * aff14 * ajj15 * bdd08 * cll16 * abb8 * abb9 - 2
+            * abb4 * aaa2 * bdd14 * cll24 * ass23 * abb9 - 4 * aff14 * ajj15 *
+            bdd08 * cll16 * ass23 * abb9 - 4 * abb4 * aaa2 * bdd14 * cll17 *
+            aff13 + cll18 * aff13 - 2 * abb4 * aaa2 * bdd14 * cll17 - 2 *
+            aff14 * ajj15 * bdd08 + 3 * app14 * azz19 * cll08
+        )
+        cmm12 = -3 * app14 * azz19 * cbb09
+        cmm16 = 2 * aff14 * ajj15 * aii17 + cmm12
+        cmm23 = aii11 + ayy14 + aff14 * ajj15 * aii17 + cmm12
+        cmm28 = (
+            (-4 * aff14 * ajj15 * aii17) + 18 * app14 * azz19 * cbb09 -
+            (15 * exp1 ** (aaa1 + 6 * abb5) * aaa2 ** 7) / agg15 ** 7
+        )
+        m3 = (
+            (6 * abb4 * aaa2 * abb6 * ccc24 * abb9 ** 4) / abb8 ** 4 - 6 *
+            aff14 * ajj15 * aii17 * ayy24 * bmm34 * bmm35 - 6 * abb4 * aaa2 *
+            abb6 * ayy16 * ayy17 * bmm34 * bmm35 - 8 * abb4 * aaa2 * abb6 *
+            ccc24 * ass28 * aff17 + abb4 * aaa2 * abb6 * cmm23 * ass28 * aff17
+            + 3 * aff14 * ajj15 * aii17 * ayy17 * ass28 * aff17 - 3 * cmm16 *
+            ayy16 * ass28 * aff17 + 4 * abb4 * aaa2 * abb6 * ccc24 * aff17 +
+            abb4 * aaa2 * abb6 * cmm23 * aff17 + 3 * aff14 * ajj15 * aii17 *
+            ayy17 * aff17 - 3 * cmm16 * ayy16 * aff17 + 12 * aff14 * ajj15 *
+            aii17 * ayy24 * abb8 * abb9 + 12 * abb4 * aaa2 * abb6 * ayy16 *
+            ayy17 * abb8 * abb9 - cmm28 * abb8 * abb9 + 6 * aff14 * ajj15 *
+            aii17 * ayy24 * ass23 * abb9 + 6 * abb4 * aaa2 * abb6 * ayy16 *
+            ayy17 * ass23 * abb9 + cmm28 * ass23 * abb9 + 4 * abb4 * aaa2 *
+            abb6 * ccc24 * aff13 + abb4 * aaa2 * abb6 * cmm23 * aff13 + 3 *
+            aff14 * ajj15 * aii17 * ayy17 * aff13 - 3 * cmm16 * ayy16 * aff13
+            + 2 * abb4 * aaa2 * abb6 * ccc24 - abb4 * aaa2 * abb6 * cmm23 - 3
+            * aff14 * ajj15 * aii17 * ayy17 + 3 * cmm16 * ayy16 -
+            (8 * abb1 * abb3) / aff04 +
+            (56 * exp1 ** ((-4 * t) - 4 * p) * aaa2 ** 4) / aff04 ** 2 -
+            (96 * exp1 ** ((-6 * t) - 6 * p) * aaa2 ** 6) / aff04 ** 3 +
+            (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2 ** 8) / aff04 ** 4
+        )
+        cnn3 = abb8 ** 2
+        cnn5 = abb9 ** 2
+        n3 = (
+            (-(6 * abb9 ** 4) / abb8 ** 4) + (8 * cnn5) / cnn3 - 4 * cnn5 - 4
+            * cnn3 - 2
+        )
+        coo7 = abb8 ** 2
+        coo9 = abb9 ** 2
+        o3 = (
+            (6 * bgg4 * abb9 ** 4) / abb8 ** 4 - (8 * bgg4 * coo9) / coo7 + 4
+            * bgg4 * coo9 + 4 * bgg4 * coo7 + 2 * bgg4
+        )
+        cpp06 = -aaa2 / (exp1 ** t * bdd07)
+        cpp08 = (cpp06 + aii11) ** 2
+        cpp12 = (
+            aii11 + cpp06 - (exp1 ** (aaa1 + aff08) * aaa2 ** 3) / bdd07 ** 3
+        )
+        p3 = (
+            (-(6 * cpp08 * abb9 ** 4) / abb8 ** 4) + (2 * cpp12 * abb9 ** 3) /
+            abb8 ** 3 + (8 * cpp08 * aff17) / aff13 - 4 * cpp08 * aff17 - 4 *
+            cpp12 * abb8 * abb9 - (2 * cpp12 * abb9) / abb8 - 4 * cpp08 *
+            aff13 - 2 * cpp08
+        )
+        cqq12 = -aff14 * ajj15 * bdd08
+        cqq19 = bhh14 + bhh13
+        cqq20 = cqq19 ** 3
+        cqq21 = (
+            bhh14 + bhh13 + aff14 * ajj15 * bdd08 - 3 * app14 * azz19 * cll08
+        )
+        cqq25 = bhh14 + bhh13 + cqq12
+        cqq28 = 1 / aff13
+        q3 = (
+            (6 * cqq20 * abb9 ** 4) / abb8 ** 4 -
+            (6 * cqq19 * cqq25 * abb9 ** 3) / abb8 ** 3 - 8 * cqq20 * cqq28 *
+            aff17 + cqq21 * cqq28 * aff17 + 4 * cqq20 * aff17 + cqq21 * aff17
+            + 12 * cqq19 * cqq25 * abb8 * abb9 + (6 * cqq19 * cqq25 * abb9) /
+            abb8 + 4 * cqq20 * aff13 + cqq21 * aff13 + 2 * cqq20 - ann05 *
+            ann06 + abb4 * aaa2 * bdd14 + cqq12 + 3 * app14 * azz19 * cll08
+        )
+        crr18 = (
+            aii11 + aoo09 + aff14 * ajj15 * aii17 - 3 * app14 * azz19 * cbb09
+        )
+        crr19 = bii11 ** 4
+        crr21 = bii15 ** 2
+        crr25 = (
+            aii11 + aoo09 - 3 * aff14 * ajj15 * aii17 + 15 * app14 * azz19 *
+            cbb09 - (15 * exp1 ** (aaa1 + 6 * abb5) * aaa2 ** 7) / agg15 ** 7
+        )
+        crr28 = bii11 ** 2
+        r3 = (
+            (-(6 * crr19 * abb9 ** 4) / abb8 ** 4) +
+            (12 * crr28 * bii15 * abb9 ** 3) / abb8 ** 3 - 3 * crr21 * ass28 *
+            aff17 + 8 * crr19 * ass28 * aff17 - 4 * bii11 * crr18 * ass28 *
+            aff17 - 3 * crr21 * aff17 - 4 * crr19 * aff17 - 4 * bii11 * crr18
+            * aff17 - 24 * crr28 * bii15 * abb8 * abb9 - crr25 * abb8 * abb9 -
+            12 * crr28 * bii15 * ass23 * abb9 + crr25 * ass23 * abb9 - 3 *
+            crr21 * aff13 - 4 * crr19 * aff13 - 4 * bii11 * crr18 * aff13 + 3
+            * crr21 - 2 * crr19 + 4 * bii11 * crr18 - (8 * abb1 * abb3) /
+            aff04 + (56 * exp1 ** ((-4 * t) - 4 * p) * aaa2 ** 4) / aff04 ** 2
+            - (96 * exp1 ** ((-6 * t) - 6 * p) * aaa2 ** 6) / aff04 ** 3 +
+            (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2 ** 8) / aff04 ** 4
+        )
+
+        L4 = np.column_stack([j2, k2, l2, m2, n2, o2, p2, q2, r2, s2,
+                              t2, u2, v2, w2, x2, y2, z2, a3, b3, c3,
+                              d3, e3, f3, g3, h3, i3, j3, k3, l3, m3,
+                              n3, o3, p3, q3, r3])
+    return l0, L1, L2, L3, L4
+
+
 def _r_tweedie(rng, mu, p: float, phi: float) -> np.ndarray:
     """mgcv ``rTweedie`` (gam.fit3.r:3112-3146): compound Poisson-Gamma
     deviates for 1 < p < 2. mgcv draws N_i ~ Poisson(λ_i) individual
@@ -4780,6 +5660,247 @@ class twlss(GeneralFamily):
                 f"'identity'), a={self.a:g}, b={self.b:g})")
 
 
+class LogebLink(Link):
+    """shash's ``logeb`` link for τ = log σ (gamlss.r:3356-3371):
+    η = log(e^τ − b), τ = log(e^η + b) — keeps σ = e^τ > b > 0."""
+
+    name = "logeb"
+
+    def __init__(self, b: float = 1e-2):
+        self.b = float(b)
+
+    def link(self, mu):
+        return np.log(np.exp(np.asarray(mu, dtype=float)) - self.b)
+
+    def linkinv(self, eta):
+        return np.log(np.exp(np.asarray(eta, dtype=float)) + self.b)
+
+    def mu_eta(self, eta):
+        ee = np.exp(np.asarray(eta, dtype=float))
+        return ee / (ee + self.b)
+
+    def d2link(self, mu):
+        em = np.exp(np.asarray(mu, dtype=float))
+        fr = em / (em - self.b)
+        return fr * (1.0 - fr)
+
+    def d3link(self, mu):
+        em = np.exp(np.asarray(mu, dtype=float))
+        fr = em / (em - self.b)
+        oo = fr * (1.0 - fr)
+        return oo - 2.0 * oo * fr
+
+    def d4link(self, mu):
+        em = np.exp(np.asarray(mu, dtype=float))
+        b = self.b
+        return (-b * em * (b ** 2 + 4.0 * b * em + em ** 2)
+                / (em - b) ** 4)
+
+
+class shash(GeneralFamily):
+    """Sinh-arcsinh location-scale-shape general family — mgcv
+    ``shash()`` (gamlss.r:3334-4080). Four linear predictors: LP1 the
+    location μ (identity), LP2 τ = log σ through the ``logeb`` link
+    (σ > b > 0), LP3 the skewness ε (identity), LP4 the log-kurtosis
+    φ (identity; δ = e^φ).
+
+        z = (y − μ)/(σδ),  l = −τ − ½log 2π + log cosh(δ·asinh z − ε)
+            − ½log(1 + z²) − ½sinh²(δ·asinh z − ε) − phiPen·φ²
+
+    The phiPen·φ² ridge is part of the LIKELIHOOD itself (mgcv's
+    light regularization of the kurtosis direction). Full analytic
+    derivatives to order 4 (``available_derivs = 2`` — outer Newton);
+    no postproc (mgcv's is commented out, so null deviance is NaN
+    like mgcv's NULL); formula offsets are rejected exactly like
+    mgcv's ll (gamlss.r:3470). The ``cdf`` hook is ported for surface
+    parity (mgcv consumes it only in unported NCV machinery).
+    """
+    name = "shash"
+    scale_known = True
+    n_theta = 0
+    n_lp = 4
+    available_derivs = 2
+
+    def __init__(self, link: tuple = ("identity", "logeb", "identity",
+                                      "identity"),
+                 b: float = 1e-2, phiPen: float = 1e-3):
+        mu_link, tau_link, eps_link, phi_link = link
+        if mu_link != "identity" or eps_link != "identity" \
+                or phi_link != "identity":
+            raise ValueError(
+                'only the "identity" link is available for the mu, eps '
+                "and phi parameters of shash"
+            )
+        if tau_link != "logeb":
+            raise ValueError(
+                'only the "logeb" link is available for the scale '
+                "parameter of shash"
+            )
+        self.b = float(b)
+        self.phiPen = float(phiPen)
+        super().__init__([IdentityLink(), LogebLink(b), IdentityLink(),
+                          IdentityLink()])
+        self.tri = trind_generator(4)
+
+    def ll(self, y, X, coef, wt=None, *, lpi, offset=None,
+           deriv: int = 0, d1b=None, d2b=None, fh=None, D=None) -> dict:
+        # mgcv's shash ll rejects offsets outright (gamlss.r:3470)
+        if offset is not None and any(
+                o is not None and np.any(np.asarray(o) != 0.0)
+                for o in offset):
+            raise NotImplementedError(
+                "offset not still available for this family (mgcv "
+                "shash, gamlss.r:3470)")
+        y = np.asarray(y, dtype=float)
+        X = np.asarray(X, dtype=float)
+        coef = np.asarray(coef, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        etas = [X[:, jj[k]] @ coef[jj[k]] for k in range(4)]
+        mu = self.links[0].linkinv(etas[0])
+        tau = self.links[1].linkinv(etas[1])
+        eps = self.links[2].linkinv(etas[2])
+        phi = self.links[3].linkinv(etas[3])
+
+        l0, L1, L2, L3, L4 = _shash_derivs(y, mu, tau, eps, phi,
+                                           self.phiPen, deriv)
+        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        if deriv == 0:
+            return ret
+        params = (mu, tau, eps, phi)
+        ig1 = np.column_stack([lnk.mu_eta(eta)
+                               for lnk, eta in zip(self.links, etas)])
+        g2 = np.column_stack([lnk.d2link(par)
+                              for lnk, par in zip(self.links, params)])
+        g3 = g4 = None
+        if deriv > 1:
+            g3 = np.column_stack([lnk.d3link(par)
+                                  for lnk, par in zip(self.links,
+                                                      params)])
+        if deriv > 3:
+            g4 = np.column_stack([lnk.d4link(par)
+                                  for lnk, par in zip(self.links,
+                                                      params)])
+        tri = self.tri
+        de = gamlss_etamu(L1, L2, L3, L4, ig1, g2, g3, g4,
+                          tri["i2"], tri["i3"], tri["i4"], deriv - 1)
+        gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
+                       l3=de["l3"], i3=tri["i3"], l4=de["l4"],
+                       i4=tri["i4"], d1b=d1b, d2b=d2b, deriv=deriv - 1,
+                       fh=fh, D=D)
+        ret.update(gh)
+        return ret
+
+    def initialize_coef(self, y, X, lpi, E=None, offset=None,
+                        use_unscaled: bool = False) -> np.ndarray:
+        """shash ``initialize`` (gamlss.r:3973-4024): regress y on
+        LP1's columns and the log absolute residuals on LP2's (the
+        log-scale predictor), both E-regularized; the skewness and
+        log-kurtosis predictors target the constant linkfun(0) = 0
+        through plain least squares (Gaussian start)."""
+        y = np.asarray(y, dtype=float)
+        X = np.asarray(X, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        p = X.shape[1]
+        if E is None:
+            E = np.zeros((0, p))
+        start = np.zeros(p)
+
+        def _reg(cols, target):
+            if use_unscaled:
+                xa = np.vstack([X[:, cols], E[:, cols]])
+                bvec, *_ = np.linalg.lstsq(
+                    xa, np.concatenate([target, np.zeros(E.shape[0])]),
+                    rcond=None)
+                bvec[~np.isfinite(bvec)] = 0.0
+                return bvec
+            return _pen_reg(X[:, cols], E[:, cols], target)
+
+        b1 = _reg(jj[0], y)
+        start[jj[0]] = b1
+        lres1 = np.log(np.abs(y - self.links[0].linkinv(
+            X[:, jj[0]] @ b1)))
+        start[jj[1]] = _reg(jj[1], lres1)
+        for k in (2, 3):
+            target = np.zeros(X.shape[0])
+            bvec, *_ = np.linalg.lstsq(X[:, jj[k]], target, rcond=None)
+            bvec[~np.isfinite(bvec)] = 0.0
+            start[jj[k]] = bvec
+        return start
+
+    def residuals(self, y, fitted, type: str = "deviance") -> np.ndarray:
+        """shash residuals (gamlss.r:3377-3411): ``fitted`` is the
+        (n, 4) matrix (μ, τ, ε, φ). The raw residual subtracts the
+        sinh-arcsinh mean (Bessel-K form); deviance residuals use the
+        plain log-likelihood against a zero saturated reference
+        (mgcv sets ls = 0 — no phiPen term here)."""
+        if type not in ("deviance", "response"):
+            raise ValueError(
+                "type must be one of 'deviance', 'response' for shash "
+                f"residuals; got {type!r}")
+        from scipy.special import kv
+        y = np.asarray(y, dtype=float)
+        fitted = np.asarray(fitted, dtype=float)
+        mu, tau, eps, phi = (fitted[:, 0], fitted[:, 1], fitted[:, 2],
+                             fitted[:, 3])
+        sig = np.exp(tau)
+        delta = np.exp(phi)
+        rsd = y - mu - sig * delta * np.exp(0.25) * (
+            kv((1.0 / delta + 1.0) / 2.0, 0.25)
+            + kv((1.0 / delta - 1.0) / 2.0, 0.25)) / np.sqrt(8.0 * np.pi)
+        if type == "response":
+            return rsd
+        sgn = np.sign(rsd)
+        z = (y - mu) / (sig * delta)
+        dTasMe = delta * np.arcsinh(z) - eps
+        ll = (-tau - 0.5 * np.log(2.0 * np.pi) + np.log(np.cosh(dTasMe))
+              - 0.5 * np.log1p(z ** 2) - 0.5 * np.sinh(dTasMe) ** 2)
+        return np.sqrt(np.maximum(0.0, 2.0 * (0.0 - ll))) * sgn
+
+    def rd(self, rng, mu, wt, scale):
+        """shash ``rd`` (gamlss.r:4026-4039): deviates via the
+        quantile transform of uniforms (R's qnorm(runif(n)))."""
+        from scipy.special import ndtri
+        mu = np.asarray(mu, dtype=float)
+        mu_e = mu[:, 0]
+        sig_e = np.exp(mu[:, 1])
+        eps_e = mu[:, 2]
+        del_e = np.exp(mu[:, 3])
+        n = mu_e.shape[0]
+        u = ndtri(rng.uniform(size=n))
+        return mu_e + (del_e * sig_e) * np.sinh(
+            (1.0 / del_e) * np.arcsinh(u) + eps_e / del_e)
+
+    def qf(self, p, mu, wt, scale):
+        """shash quantile function (gamlss.r:4041-4053)."""
+        from scipy.special import ndtri
+        mu = np.asarray(mu, dtype=float)
+        p = np.asarray(p, dtype=float)
+        mu_e = mu[:, 0]
+        sig_e = np.exp(mu[:, 1])
+        eps_e = mu[:, 2]
+        del_e = np.exp(mu[:, 3])
+        return mu_e + (del_e * sig_e) * np.sinh(
+            (1.0 / del_e) * np.arcsinh(ndtri(p)) + eps_e / del_e)
+
+    def cdf(self, q, mu, wt, scale, logp: bool = False):
+        """shash cdf (gamlss.r:4055-4067). Ported for surface parity —
+        mgcv consumes family$cdf only in (unported) NCV machinery."""
+        from scipy.special import log_ndtr, ndtr
+        mu = np.asarray(mu, dtype=float)
+        q = np.asarray(q, dtype=float)
+        mu_e = mu[:, 0]
+        sig_e = np.exp(mu[:, 1])
+        eps_e = mu[:, 2]
+        del_e = np.exp(mu[:, 3])
+        s = np.sinh((np.arcsinh((q - mu_e) / (del_e * sig_e))
+                     - eps_e / del_e) * del_e)
+        return log_ndtr(s) if logp else ndtr(s)
+
+    def __repr__(self):
+        return (f"shash(link=('identity', 'logeb', 'identity', "
+                f"'identity'), b={self.b:g}, phiPen={self.phiPen:g})")
+
+
 def _coerce_response(y_series: pl.Series, family: "Family") -> np.ndarray:
     """Cast the response column to a numeric float array, with R's
     factor-response convention for :class:`Binomial`.
@@ -4841,7 +5962,7 @@ __all__ = [
     "Tweedie", "tw",
     "Scat", "scat",
     "nb",
-    "GeneralFamily", "gaulss", "twlss",
+    "GeneralFamily", "gaulss", "twlss", "shash", "LogebLink",
     "trind_generator", "gamlss_etamu", "gamlss_gH",
     "IdentityLink", "LogLink", "InverseLink",
     "SqrtLink", "LogitLink", "ProbitLink", "CauchitLink", "CloglogLink",

@@ -5461,6 +5461,93 @@ def test_twlss_weighted_residuals_match_mgcv():
                                   np.asarray(mu.residuals)[::2])
 
 
+def test_shash_through_gam_matches_mgcv():
+    # R: gam(list(y ~ s(x), ~ s(z), ~ 1, ~ 1), family=shash(),
+    # method="REML") — available.derivs=2, the FULL outer-Newton
+    # path on a 4-LP family (the K=4 etamu/gH branches end-to-end),
+    # plus the optimizer="efs" cross-pin at K=4 (W2's purpose: hea
+    # reproduces BOTH of R's distinct newton and efs stop points).
+    # The s(z)-on-τ smoothing parameter is a flattish ridge direction
+    # (R 43.87 vs hea 44.02 with the criterion agreeing to 5e-7) —
+    # pinned at band width; everything else is tight.
+    from hea.family import shash, _r_tweedie  # noqa: F401
+
+    rng = np.random.default_rng(21)
+    n = 400
+    x = rng.uniform(0, 1, n)
+    z = rng.uniform(0, 1, n)
+    mu_t = 1.0 + np.sin(2 * np.pi * x)
+    sig_t = np.exp(-0.4 + 0.5 * z)
+    u = rng.standard_normal(n)
+    y = mu_t + sig_t * np.sinh(np.arcsinh(u) + 0.4)
+    df = pl.DataFrame({"y": y, "x": x, "z": z})
+
+    m1 = gam(["y ~ s(x)", "~ s(z)", "~ 1", "~ 1"], df, family=shash(),
+             method="REML")
+    np.testing.assert_allclose(m1.REML_criterion / 2, 527.4723214243,
+                               rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m1.sp[0], 0.1378796293, rtol=1e-4)
+    np.testing.assert_allclose(m1.sp[1], 43.8682001068, rtol=2e-2)
+    # edf tracks the sp[1] band (Δ ~1.2e-3 measured on this machine)
+    np.testing.assert_allclose(m1.edf_total, 11.2879213915, rtol=0,
+                               atol=5e-3)
+    b = np.asarray(m1._beta)
+    np.testing.assert_allclose(b[0], 0.9027420479, rtol=0, atol=1e-4)
+    # tp-basis eigenvector signs are build noise — pin magnitudes
+    np.testing.assert_allclose(
+        np.abs(b[1:3]), np.abs([1.9927754156, -0.1926500839]),
+        rtol=0, atol=1e-3)
+    # the ε and log-kurtosis intercepts (sign-stable)
+    np.testing.assert_allclose(
+        [b[20], b[21]], [0.5055590765, 0.1364202137], rtol=0,
+        atol=1e-4)
+    np.testing.assert_allclose(
+        np.asarray(m1.fitted_values)[0],
+        [-0.0241720681, -0.1043888138, 0.5055590765, 0.1364202137],
+        rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m1.deviance, 1010.7511986050,
+                               rtol=1e-4)
+    assert np.isnan(m1.null_deviance)      # mgcv: NULL (no postproc)
+    np.testing.assert_allclose(
+        np.asarray(m1.residuals)[:3],
+        [-1.5442233471, -1.9523394265, 1.8450093410], rtol=0,
+        atol=1e-4)
+    np.testing.assert_allclose(np.asarray(m1.Vp)[0, 0],
+                               0.012801605357, rtol=0, atol=1e-5)
+    assert 2 <= m1.outer_info["iter"] <= 8           # R: 3
+    # the qf hook lights qq.gam's DIRECT path (first general family
+    # with one); rd lights the simulation path
+    qq = m1._qq_gam_quantiles(type="deviance", rep=0, s_rep=2, seed=1)
+    assert qq["Dq"] is not None and np.all(np.isfinite(qq["Dq"]))
+    qq2 = m1._qq_gam_quantiles(type="deviance", rep=3, level=0, seed=1)
+    assert qq2["Dq"] is not None and np.all(np.isfinite(qq2["Dq"]))
+    m1.summary()
+    pred = m1.predict(df[:3])
+    np.testing.assert_allclose(
+        pred["fit"].to_numpy(),
+        np.asarray(m1.fitted_values)[:3, 0], rtol=0, atol=1e-10)
+
+    # mgcv's shash ll rejects offsets outright (gamlss.r:3470)
+    with pytest.raises(NotImplementedError, match="offset not still"):
+        gam(["y ~ s(x) + offset(z)", "~ s(z)", "~ 1", "~ 1"], df,
+            family=shash(), method="REML")
+
+    # efs cross-pin at K=4: R optimizer="efs" stops at its OWN point
+    # (REML 527.47953 vs newton's 527.47232) and hea lands on it
+    m2 = gam(["y ~ s(x)", "~ s(z)", "~ 1", "~ 1"], df, family=shash(),
+             method="REML", optimizer="efs")
+    np.testing.assert_allclose(m2.REML_criterion / 2, 527.4795328446,
+                               rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m2.sp, [0.1384827473, 30.4835529665],
+                               rtol=5e-3)
+    np.testing.assert_allclose(m2.edf_total, 11.4197222586, rtol=0,
+                               atol=1e-2)
+    np.testing.assert_allclose(
+        np.asarray(m2.fitted_values)[0],
+        [-0.0233997983, -0.0997865568, 0.5050729242, 0.1365292222],
+        rtol=0, atol=1e-3)
+
+
 def test_predict_unconditional_se_matches_mgcv():
     # unconditional=TRUE swaps Vp → Vc (sp-uncertainty corrected) for the
     # SE band — predict.gam parity on the first three rows.

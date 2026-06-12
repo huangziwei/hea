@@ -1525,3 +1525,157 @@ def test_twlss_ll_oracle_matches_mgcv():
         twlss(a=1.5, b=1.2)
     assert repr(twlss()) == \
         "twlss(link=('log', 'identity', 'identity'), a=1.01, b=1.99)"
+
+
+# ---------------------------------------------------------------------------
+# shash (sinh-arcsinh location-scale-shape, gamlss.r:3334-4080) — mgcv
+# 1.9-4 oracle references generated live (R --vanilla): shash()$ll at
+# every deriv level (the K=4 etamu/gH branches through all orders), the
+# logeb link, and the residuals/rd/qf/cdf hooks.
+# ---------------------------------------------------------------------------
+
+def _shash_oracle_inputs():
+    n = 40
+    i = np.arange(1, n + 1, dtype=float)
+    y = 0.7 + np.sin(i / 4) + 0.4 * np.cos(i * 1.7)
+    X = np.column_stack([np.ones(n), np.sin(i / 7), np.cos(i / 5),
+                         np.ones(n), i / n, np.ones(n), (i % 5) / 10,
+                         np.ones(n), np.cos(i / 9)])
+    lpi = [np.arange(0, 3), np.arange(3, 5), np.arange(5, 7),
+           np.arange(7, 9)]
+    coef = np.array([0.5, 0.4, -0.3, -0.8, 0.2, 0.15, -0.25, 0.1, 0.05])
+    # R: matrix(sin(1:18)/5, 9, 2) / matrix(cos(1:27)/5, 9, 3) —
+    # column-major fill
+    d1b = (np.sin(np.arange(1, 19)) / 5).reshape(2, 9).T
+    d2b = (np.cos(np.arange(1, 28)) / 5).reshape(3, 9).T
+    return y, X, lpi, coef, d1b, d2b
+
+
+def test_shash_ll_matches_mgcv_oracle():
+    # Every output of shash()$ll at deriv 1/2/3/4 — l, lb, lbb, the
+    # tr(Hp⁻¹∂H/∂ρ) vector, the full ∂H/∂ρ list, trHid2H — pinned to
+    # all printed digits. This is the K=4 stress pin: the packed L1
+    # (4), L2 (10), L3 (20) and L4 (35 auto-generated columns) all
+    # flow through gamlss_etamu/gamlss_gH's highest-order branches.
+    from hea.family import shash
+
+    y, X, lpi, coef, d1b, d2b = _shash_oracle_inputs()
+    fam = shash()
+    r1 = fam.ll(y, X, coef, None, lpi=lpi, deriv=1)
+    np.testing.assert_allclose(r1["l"], -100.9497210553, rtol=0,
+                               atol=1e-8)
+    np.testing.assert_allclose(
+        r1["lb"],
+        [37.6260962202, -62.0123901747, 113.0759290090, 154.0254235235,
+         85.7420345932, 54.8783816066, 17.2037035469, -112.6281058568,
+         60.2205948365], rtol=0, atol=1e-8)
+    np.testing.assert_allclose(float(np.abs(r1["lbb"]).sum()),
+                               10088.3601306536, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(
+        [r1["lbb"][0, 0], r1["lbb"][0, 8], r1["lbb"][3, 8]],
+        [-193.4295889712, -40.3834376029, -202.9264742803],
+        rtol=0, atol=1e-8)
+
+    Hp = -r1["lbb"] + np.eye(9) * 0.5
+    r2 = fam.ll(y, X, coef, None, lpi=lpi, deriv=2, d1b=d1b,
+                fh=np.linalg.inv(Hp))
+    np.testing.assert_allclose(r2["d1H"],
+                               [-6.7252978570, 7.5418328552],
+                               rtol=0, atol=1e-8)
+
+    r3 = fam.ll(y, X, coef, None, lpi=lpi, deriv=3, d1b=d1b)
+    np.testing.assert_allclose(
+        [float(np.abs(r3["d1H"][0]).sum()), r3["d1H"][0][0, 0]],
+        [11283.4240316976, -202.6392545658], rtol=0, atol=1e-7)
+    np.testing.assert_allclose(
+        [float(np.abs(r3["d1H"][1]).sum()), r3["d1H"][1][0, 0]],
+        [9755.5096903696, 167.1180992130], rtol=0, atol=1e-7)
+
+    D = 1.0 / np.sqrt(np.diag(Hp))
+    w, V = np.linalg.eigh(D[:, None] * Hp * D[None, :])
+    r4 = fam.ll(y, X, coef, None, lpi=lpi, deriv=4, d1b=d1b, d2b=d2b,
+                fh={"values": w, "vectors": V}, D=D)
+    np.testing.assert_allclose(
+        r4["trHid2H"], [-4.8268188590, 5.1230900806, -5.4504659452],
+        rtol=0, atol=1e-8)
+
+    # FD self-checks: lb against FD of l, lbb against FD of lb
+    h = 1e-6
+    fd_lb = np.empty(9)
+    fd_lbb = np.empty((9, 9))
+    for k in range(9):
+        cp = coef.copy()
+        cm = coef.copy()
+        cp[k] += h
+        cm[k] -= h
+        fd_lb[k] = (fam.ll(y, X, cp, None, lpi=lpi, deriv=0)["l"]
+                    - fam.ll(y, X, cm, None, lpi=lpi,
+                             deriv=0)["l"]) / (2 * h)
+        fd_lbb[:, k] = (fam.ll(y, X, cp, None, lpi=lpi, deriv=1)["lb"]
+                        - fam.ll(y, X, cm, None, lpi=lpi,
+                                 deriv=1)["lb"]) / (2 * h)
+    np.testing.assert_allclose(r1["lb"], fd_lb, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(r1["lbb"], 0.5 * (fd_lbb + fd_lbb.T),
+                               rtol=1e-4, atol=1e-3)
+
+    # constructor surface
+    with pytest.raises(ValueError, match='only the "identity"'):
+        shash(link=("log", "logeb", "identity", "identity"))
+    with pytest.raises(ValueError, match='only the "logeb"'):
+        shash(link=("identity", "log", "identity", "identity"))
+    assert repr(shash()) == ("shash(link=('identity', 'logeb', "
+                             "'identity', 'identity'), b=0.01, "
+                             "phiPen=0.001)")
+    # logeb link round-trip: τ = log(e^η + b) keeps σ = e^τ > b
+    lk = shash().links[1]
+    eta = np.linspace(-3.0, 3.0, 9)
+    np.testing.assert_allclose(lk.link(lk.linkinv(eta)), eta,
+                               rtol=0, atol=1e-12)
+    assert np.all(np.exp(lk.linkinv(eta)) > shash().b)
+
+
+def test_shash_hooks_match_mgcv():
+    # residuals (deviance vs the ls=0 reference; raw mean via Bessel
+    # K), rd-shape, qf and cdf (incl. log.p) — R values at the fitted
+    # parameter matrix implied by the oracle coefficients.
+    from hea.family import shash
+
+    y, X, lpi, coef, _, _ = _shash_oracle_inputs()
+    fam = shash()
+    F = np.column_stack([
+        X[:, 0:3] @ coef[0:3],
+        np.log(np.exp(X[:, 3:5] @ coef[3:5]) + 0.01),
+        X[:, 5:7] @ coef[5:7],
+        X[:, 7:9] @ coef[7:9]])
+    np.testing.assert_allclose(
+        fam.residuals(y, F, "deviance")[:3],
+        [-1.3300547156, -1.0212378918, 2.4582366281], rtol=0,
+        atol=1e-8)
+    np.testing.assert_allclose(
+        fam.residuals(y, F, "response")[:3],
+        [-0.0399933645, -0.2195953901, 0.4355807611], rtol=0,
+        atol=1e-8)
+    with pytest.raises(ValueError, match="deviance"):
+        fam.residuals(y, F, "pearson")
+    n = y.shape[0]
+    p = (np.arange(1, n + 1) - 0.5) / n
+    np.testing.assert_allclose(
+        fam.qf(p, F, None, None)[[0, 19, 39]],
+        [-0.5698615266, 0.8685826873, 1.7077315470], rtol=0,
+        atol=1e-8)
+    np.testing.assert_allclose(
+        fam.cdf(y, F, None, None, False)[[0, 19, 39]],
+        [0.8922773135, 0.0002822583, 0.4429213918], rtol=0, atol=1e-8)
+    np.testing.assert_allclose(
+        fam.cdf(y, F, None, None, True)[[0, 19, 39]],
+        [-0.1139783051, -8.1726878430, -0.8143629698], rtol=0,
+        atol=1e-8)
+    # rd: the quantile transform of uniforms — cdf(draws) must be
+    # uniform at Monte-Carlo level
+    rng = np.random.default_rng(4)
+    Fc = np.broadcast_to([0.5, np.log(np.exp(0.2) + 0.01), 0.3, 0.0],
+                         (200000, 4))
+    draws = fam.rd(rng, Fc, None, None)
+    u = fam.cdf(draws, Fc, None, None, False)
+    np.testing.assert_allclose(u.mean(), 0.5, rtol=0, atol=5e-3)
+    np.testing.assert_allclose(u.var(), 1.0 / 12.0, rtol=0, atol=5e-3)
