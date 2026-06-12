@@ -606,6 +606,15 @@ class gam:
         fixed effects. Useful for ``anova(m1, m2)``-style likelihood-
         ratio comparisons across different fixed-effect structures,
         where REML scores aren't comparable.
+    optimizer : str or (str, str), default ("outer", "newton")
+        mgcv's ``gam(optimizer=)``. ``"efs"`` forces the extended
+        Fellner-Schall loop for general (formula-list) families —
+        ``method`` is then coerced to REML like mgcv (mgcv.r:1914) —
+        and is the automatic choice when ``family.available_derivs ==
+        0``. The second element picks the outer method; only
+        ``"newton"`` is ported (``"bfgs"``/``"nlm"``/``"optim"`` raise,
+        roadmap C9), and single-formula ``"efs"`` awaits the efsudr
+        port (gam.fit4.r:822).
     sp : None or array-like, optional
         Supplied smoothing parameters. Non-negative entries are fixed
         at that value; **negative entries are estimated** (mgcv's
@@ -840,6 +849,7 @@ class gam:
         data,
         *,
         method: str = "GCV.Cp",
+        optimizer: str | tuple | list = ("outer", "newton"),
         sp: np.ndarray | None = None,
         family: Family | None = None,
         offset: np.ndarray | list | None = None,
@@ -863,6 +873,28 @@ class gam:
             # mgcv calls it (`if (is.function(family)) family <- family()`,
             # mgcv.r:2324).
             family = family()
+        # mgcv gam(optimizer=) intake: a 1- or 2-vector; first element
+        # "outer"|"efs" (estimate.gam, mgcv.r:1913), second the outer
+        # method defaulting to "newton" (gam.outer, mgcv.r:1643-1644).
+        # hea validates both elements up front — mgcv's second-element
+        # check sits in gam.outer and is skipped only by paths hea does
+        # not have (the magic additive-GCV route). Only newton and efs
+        # are ported; bfgs/nlm/optim raise honestly (roadmap C9).
+        opt = ((optimizer,) if isinstance(optimizer, str)
+               else tuple(str(o) for o in optimizer))
+        if not 1 <= len(opt) <= 2:
+            raise ValueError("optimizer must have one or two elements")
+        if opt[0] not in ("outer", "efs"):
+            raise ValueError("unknown optimizer")
+        opt = (opt[0], opt[1] if len(opt) == 2 else "newton")
+        if opt[1] not in ("newton", "bfgs", "nlm", "optim"):
+            raise ValueError("unknown outer optimization method.")
+        if opt[0] == "outer" and opt[1] != "newton":
+            raise NotImplementedError(
+                f"optimizer=('outer', '{opt[1]}') is not ported — only "
+                "'newton' (and the 'efs' first element) are available "
+                "(bfgs/nlm/optim: roadmap C9).")
+        self.optimizer = opt
         if isinstance(formula, (list, tuple)):
             # Multiple linear predictors → general-family fitting via
             # gam.fit5 (estimate.gam's general branch, plan §5.3).
@@ -881,7 +913,7 @@ class gam:
                 [str(f) for f in formula], data, method=method, sp=sp,
                 family=family, offset=offset, weights=weights,
                 gamma=gamma, select=select, knots=knots,
-                control=control, start=start,
+                control=control, start=start, optimizer=opt,
             )
             return
         if getattr(family, "is_general", False):
@@ -889,6 +921,11 @@ class gam:
                 f"family {family!r} has {family.n_lp} linear predictors"
                 " — pass a list of formulas, one per linear predictor."
             )
+        if opt[0] == "efs":
+            raise NotImplementedError(
+                "optimizer='efs' on the single-formula path needs the "
+                "efsudr port (gam.fit4.r:822) — efs is available for "
+                "general families (formula lists) only.")
         if method not in ("REML", "ML", "GCV.Cp"):
             raise ValueError(
                 f"method must be 'REML', 'ML', or 'GCV.Cp', got {method!r}"
@@ -4040,7 +4077,8 @@ class gam:
 
     def _init_general(self, formulas, data, *, method, sp, family,
                       offset, weights, gamma, select, knots,
-                      control=None, start=None):
+                      control=None, start=None,
+                      optimizer=("outer", "newton")):
         """estimate.gam's general-family glue (mgcv.r:1893-1924,
         1984-2005, 2060-2092): multi-formula design → Sl.setup +
         initial repara → initial.spg seed → outer Newton over the
@@ -4148,17 +4186,19 @@ class gam:
 
         n_work = self._work_dim
         avail_derivs = int(getattr(family, "available_derivs", 2) or 0)
-        if avail_derivs == 1:
+        efs_forced = optimizer[0] == "efs"
+        if avail_derivs == 1 and not efs_forced:
             # mgcv coerces available.derivs==1 families to the bfgs
-            # outer optimizer (mgcv.r:1907) — unported. Refuse here
-            # rather than crash at ll(deriv=3) inside gam.fit5.
+            # outer optimizer unless efs was requested (mgcv.r:1907) —
+            # bfgs is unported. Refuse here rather than crash at
+            # ll(deriv=3) inside gam.fit5.
             raise NotImplementedError(
                 "general family with available_derivs=1 needs the "
                 "'bfgs' outer optimizer (mgcv.r:1907), which is not "
                 "ported; supply ll derivatives to order 4 "
-                "(available_derivs=2, full Newton) or only to order 2 "
-                "(available_derivs=0, EFS).")
-        use_efs = avail_derivs == 0
+                "(available_derivs=2, full Newton), only to order 2 "
+                "(available_derivs=0, EFS), or pass optimizer='efs'.")
+        use_efs = avail_derivs == 0 or efs_forced
         if sp is not None:
             sp_arr = np.asarray(sp, dtype=float).flatten()
             if sp_arr.shape != (n_work,):
@@ -8774,8 +8814,11 @@ class gam:
         optimizer_label = ("outer efs"
                            if (self._outer_info or {}).get("conv") in
                            ("full convergence", "iteration limit reached")
-                           and getattr(self.family, "available_derivs", 2)
-                           == 0 else "outer newton")
+                           and (getattr(self.family, "available_derivs",
+                                        2) == 0
+                                or getattr(self, "optimizer",
+                                           ("outer",))[0] == "efs")
+                           else "outer newton")
         out.append(f"Method: {method_label}   Optimizer: {optimizer_label}")
 
         # --- convergence info from _outer_newton ---

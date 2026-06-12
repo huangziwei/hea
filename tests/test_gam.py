@@ -4902,6 +4902,86 @@ def test_general_family_derivs_dispatch_guards():
                                atol=1e-10)
 
 
+def test_optimizer_knob_efs_and_validation():
+    # gam(optimizer=) — mgcv's intake and dispatch: first element
+    # "outer"|"efs" with estimate.gam's "unknown optimizer" error
+    # (mgcv.r:1913), second element defaulting to "newton" with
+    # gam.outer's "unknown outer optimization method." (mgcv.r:
+    # 1643-1644), efs forcing method="REML" (mgcv.r:1914), and the
+    # available.derivs==1 coercion skipped when efs is requested
+    # (mgcv.r:1907). Only newton + efs are ported (C9: bfgs/nlm/optim;
+    # single-formula efs = the efsudr port, gam.fit4.r:822).
+    from hea.family import gaulss
+
+    df = _fit5_fixture()
+
+    class _gaulss_d0(gaulss):
+        available_derivs = 0
+
+    # forcing efs on a derivs-2 family ≡ the automatic derivs-0
+    # dispatch byte-for-byte; the R reference for this exact call is
+    # gam(list(...), gaulss(), optimizer="efs") — the pins of
+    # test_gaulss_efs_optimizer_matches_mgcv.
+    m_auto = gam(["y ~ s(x) + w", "~ s(z)"], df, family=_gaulss_d0(),
+                 method="REML")
+    m_knob = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+                 method="REML", optimizer="efs")
+    np.testing.assert_array_equal(np.asarray(m_knob._beta),
+                                  np.asarray(m_auto._beta))
+    np.testing.assert_array_equal(m_knob.sp, m_auto.sp)
+    assert m_knob.optimizer == ("efs", "newton")
+    np.testing.assert_allclose(m_knob.REML_criterion / 2,
+                               200.6203917799, rtol=0, atol=1e-3)
+    assert m_knob.sp_vcov() is None       # deriv-0 fit: no outer hess
+
+    # efs coerces the method like mgcv.r:1914 (the general path is
+    # REML-coerced anyway, mgcv.r:1894 — the fit must be identical)
+    m_gcv = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+                method="GCV.Cp", optimizer="efs")
+    assert m_gcv.method == "REML"
+    np.testing.assert_array_equal(np.asarray(m_gcv._beta),
+                                  np.asarray(m_knob._beta))
+
+    # derivs==1 + optimizer="efs" is legal (mgcv.r:1907 only coerces
+    # to bfgs when efs was NOT requested); ll never asked past deriv 1
+    class _gaulss_d1(gaulss):
+        available_derivs = 1
+
+        def ll(self, y, X, coef, wt, *, lpi, offset=None, deriv=0,
+               d1b=None, d2b=None, fh=None, D=None):
+            assert deriv <= 1, \
+                f"efs asked a derivs-1 family for ll(deriv={deriv})"
+            return super().ll(y, X, coef, wt, lpi=lpi, offset=offset,
+                              deriv=deriv, d1b=d1b, d2b=d2b, fh=fh,
+                              D=D)
+
+    m_d1 = gam(["y ~ s(x) + w", "~ s(z)"], df, family=_gaulss_d1(),
+               method="REML", optimizer="efs")
+    np.testing.assert_array_equal(np.asarray(m_d1._beta),
+                                  np.asarray(m_auto._beta))
+
+    # intake validation — mgcv's exact messages
+    with pytest.raises(ValueError, match="unknown optimizer"):
+        gam("y ~ s(x)", df, method="REML", optimizer="perf")
+    with pytest.raises(ValueError,
+                       match="unknown outer optimization method"):
+        gam("y ~ s(x)", df, method="REML",
+            optimizer=("outer", "magic"))
+    with pytest.raises(NotImplementedError, match="C9"):
+        gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+            method="REML", optimizer=("outer", "bfgs"))
+    with pytest.raises(NotImplementedError, match="efsudr"):
+        gam("y ~ s(x)", df, method="REML", optimizer="efs")
+
+    # the default knob is inert on the single-formula path
+    m_def = gam("y ~ s(x)", df, method="REML")
+    m_opt = gam("y ~ s(x)", df, method="REML",
+                optimizer=("outer", "newton"))
+    np.testing.assert_array_equal(np.asarray(m_opt._beta),
+                                  np.asarray(m_def._beta))
+    assert m_def.optimizer == ("outer", "newton")
+
+
 def test_predict_unconditional_se_matches_mgcv():
     # unconditional=TRUE swaps Vp → Vc (sp-uncertainty corrected) for the
     # SE band — predict.gam parity on the first three rows.
