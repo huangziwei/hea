@@ -4775,6 +4775,78 @@ def test_gaulss_predict_and_summary_surface_matches_mgcv():
     m.summary()      # prints the mgcv-layout summary without error
 
 
+def test_fit5_fully_penalized_summary_matches_mgcv():
+    # Fully-penalized smooths (zero penalty null space after the
+    # centering constraint: cc here, re below) route summary through
+    # reTest → recov (mgcv.r:3599), which consumes the model R factor
+    # ``b$R`` verbatim — for general families that is
+    # gam.fit5.post.proc's root with R'R = −lbb, not the PIRLS
+    # √W·X factor (which fit5 never stores; ``_recov`` used to read it
+    # unguarded and summary() crashed on any general fit with a cc/cp/re
+    # smooth). One fixture drives all three recov consumptions:
+    #   m1 s(x,cc)        — reTest, no random siblings (LRB branch);
+    #   m2 s(x,cc)        — reTest conditioning on s(g,re) as random
+    #                       (the R1/R2 split + L-inflation branch);
+    #   m2 s(g,re)        — reTest on the re term itself;
+    #   m2 s(v) (tp)      — testStat through the same _R_fit5 (p-value
+    #                       pin; edf/Chi.sq of that branch are already
+    #                       pinned by the predict-and-summary test).
+    # R: gam(list(y ~ ..., ~ 1), family=gaulss(), method="REML",
+    # knots=list(x=c(0, 2*pi))) on the same %.17g CSV; pins from
+    # summary(b)$s.table at digits=12.
+    from hea.family import gaulss
+    rng = np.random.default_rng(31)
+    n = 200
+    x = rng.uniform(0, 2 * np.pi, n)
+    v = rng.uniform(0, 1, n)
+    g = rng.integers(0, 8, n)
+    b_g = rng.normal(0, 0.15, 8)
+    y = (0.2 * np.sin(x) + 0.15 * np.cos(np.pi * v) + b_g[g]
+         + rng.normal(0, 0.4, n))
+    df = pl.DataFrame({
+        "x": x, "v": v,
+        "g": pl.Series(g.astype(str)).cast(pl.Categorical),
+        "y": y,
+    })
+    kn = {"x": [0.0, 2 * np.pi]}
+
+    m1 = gam(['y ~ s(x, bs="cc")', "~ 1"], df, family=gaulss(),
+             method="REML", knots=kn)
+    assert m1.converged
+    np.testing.assert_allclose(m1.REML_criterion / 2, 131.3358739041,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m1.sp, [1492.8399280971], rtol=5e-4)
+    (label, edf, ref_df, stat, p_val), = m1._smooth_significance_rows()
+    assert label == "s(x)"
+    np.testing.assert_allclose(
+        [edf, ref_df, stat], [2.43306194495, 8.0, 11.0964040579],
+        rtol=1e-4, err_msg="m1 s(x,cc) row vs mgcv s.table")
+    np.testing.assert_allclose(p_val, 0.00258664960873, rtol=1e-3)
+    m1.summary()                     # the original crash site
+
+    m2 = gam(['y ~ s(x, bs="cc") + s(v) + s(g, bs="re")', "~ 1"], df,
+             family=gaulss(), method="REML", knots=kn)
+    assert m2.converged
+    np.testing.assert_allclose(m2.REML_criterion / 2, 125.1716615835,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(
+        m2.sp, [1725.9594822063, 114.6488554795, 47.6852166323],
+        rtol=5e-4)
+    rows = m2._smooth_significance_rows()
+    assert [r[0] for r in rows] == ["s(x)", "s(v)", "s(g)"]
+    np.testing.assert_allclose(
+        [r[1:4] for r in rows],
+        [(2.42503642108, 8.0, 16.2994154159),
+         (1.33989507049, 1.60107141573, 11.2055844863),
+         (5.19515886770, 7.0, 22.2893078692)],
+        rtol=1e-4, err_msg="m2 rows vs mgcv s.table")
+    np.testing.assert_allclose(
+        [r[4] for r in rows],
+        [3.43105084761e-04, 6.05372847462e-03, 8.71978864927e-05],
+        rtol=1e-3, err_msg="m2 p-values vs mgcv s.table")
+    m2.summary()
+
+
 def test_gaulss_efs_optimizer_matches_mgcv():
     # available_derivs == 0 → the automatic extended-Fellner-Schall
     # outer loop (efsud, gam.fit4.r:1479-1569; mgcv.r:1907-1908's
@@ -5321,6 +5393,17 @@ def test_general_family_authoring_contract():
     pred = m.predict(df[:5])
     assert pred.shape[0] == 5
     m.summary()
+
+    # fully-penalized smooth under the from-scratch family: summary's
+    # reTest path needs gam.fit5.post.proc's R (R'R = −lbb) in _recov —
+    # the fit5 path no gaulss-only test reaches with a cc/cp/re smooth
+    fam3 = _TLSS()
+    m_cc = gam(['y ~ s(x, bs="cc")', "~ 1", "~ 1"], df, family=fam3,
+               method="REML", knots={"x": [0.0, 1.0]})
+    (label, edf, ref_df, stat, p_cc), = m_cc._smooth_significance_rows()
+    assert label == "s(x)" and ref_df > 0
+    assert np.isfinite(stat) and 0.0 <= p_cc <= 1.0
+    m_cc.summary()
 
 
 def _twlss_fixture():

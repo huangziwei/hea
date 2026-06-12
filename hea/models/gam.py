@@ -6235,9 +6235,11 @@ class gam:
 
             Ve = Vp·R'·L'L·R·Vp / σ²,   L'L = I + R2·S2⁻·R2'
 
-        with R the model R factor (R'R = X'WX), R2 its random columns and
-        S2 the random blocks' penalty. With ``re_idx`` empty this reduces
-        to the usual model ``Ve`` (returned symmetrized, as mgcv does).
+        with R the model R factor (R'R = X'WX; for general families
+        gam.fit5.post.proc's root with R'R = −lbb), R2 its random columns
+        and S2 the random blocks' penalty. With ``re_idx`` empty this
+        reduces to the usual model ``Ve`` (returned symmetrized, as mgcv
+        does).
 
         ``v_scale`` is summary.gam's ``dispersion=`` rescale of the
         object covariances (mgcv.r:3897-3898 replaces ``object$Vp``/
@@ -6265,20 +6267,27 @@ class gam:
         # the working ``b$sp`` shorter (mgcv.r:3612); exp(ρ̂_full) is that.
         sp = np.exp(np.asarray(self._rho_hat, dtype=float))
 
-        # R factor: R'R = X'WX from stored Fisher working weights. Use
-        # eigendecomp when XtWX is borderline-PSD (gam.side rank-trim,
-        # near-singular weights, etc.).
-        if self._fisher_w is None:
-            XtWX = self._XtX
+        # R factor — mgcv's ``b$R``, consumed verbatim by recov
+        # (mgcv.r:3624 ``rbind(b$R, …)``, :3656 ``b$R[, !rind]``). General
+        # families: gam.fit5.post.proc's root, R'R = −lbb — exactly mgcv's
+        # ``object$R`` on this path (cf. the testStat branch at
+        # ``_smooth_significance_rows``). PIRLS: R'R = X'WX from stored
+        # Fisher working weights; eigendecomp when XtWX is borderline-PSD
+        # (gam.side rank-trim, near-singular weights, etc.).
+        if getattr(self, "_md", None) is not None:
+            R_factor = self._R_fit5
         else:
-            Xw = self._X_full * np.sqrt(self._fisher_w)[:, None]
-            XtWX = Xw.T @ Xw
-        try:
-            R_factor = np.linalg.cholesky(XtWX).T
-        except np.linalg.LinAlgError:
-            ev, U = np.linalg.eigh(0.5 * (XtWX + XtWX.T))
-            ev = np.clip(ev, 0.0, None)
-            R_factor = (U * np.sqrt(ev)).T
+            if self._fisher_w is None:
+                XtWX = self._XtX
+            else:
+                Xw = self._X_full * np.sqrt(self._fisher_w)[:, None]
+                XtWX = Xw.T @ Xw
+            try:
+                R_factor = np.linalg.cholesky(XtWX).T
+            except np.linalg.LinAlgError:
+                ev, U = np.linalg.eigh(0.5 * (XtWX + XtWX.T))
+                ev = np.clip(ev, 0.0, None)
+                R_factor = (U * np.sqrt(ev)).T
 
         def _mroot_rows(S: np.ndarray) -> np.ndarray:
             """Rows B' of an eigen square root B·B' = S (rank rows)."""
