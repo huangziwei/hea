@@ -4982,6 +4982,346 @@ def test_optimizer_knob_efs_and_validation():
     assert m_def.optimizer == ("outer", "newton")
 
 
+def test_general_family_seam_contract_guard():
+    # The GeneralFamily authoring contract, frozen as a test (W3): a
+    # consumer-shaped family — 3 LPs, derivs=0, custom clamped links,
+    # ll filling the packed l1/l2 arrays and delegating to
+    # gamlss_etamu/gamlss_gH, CircularLL-style initialize_coef/
+    # postproc/residuals overrides — fits end-to-end through the
+    # formula-list gam. Any hea-side drift in the call protocol
+    # (kwarg names, deriv ceiling, per-LP offset lists, lpi layout,
+    # the 6-arg keyword-called postproc) breaks THIS suite rather
+    # than the external consumer's. The FD block is also the first
+    # end-to-end validation of the K=3 etamu/gH l1/l2 branches
+    # (oracle pins exist only at K=2, via gaulss).
+    from itertools import combinations_with_replacement
+    from scipy.special import digamma, gammaln, polygamma
+    from hea.family import (GeneralFamily, IdentityLink, Link,
+                            gamlss_etamu, gamlss_gH, trind_generator)
+
+    class _ShiftedLogLink(Link):
+        # σ = b + exp(η) — a clamped scale link in the mgcv custom-
+        # link shape (cf. gaulss's logb)
+        name = "slog"
+        b = 0.01
+
+        def link(self, mu):
+            return np.log(np.asarray(mu, dtype=float) - self.b)
+
+        def linkinv(self, eta):
+            return self.b + np.exp(np.clip(
+                np.asarray(eta, dtype=float), -700.0, 700.0))
+
+        def mu_eta(self, eta):
+            return np.maximum(
+                np.exp(np.clip(np.asarray(eta, dtype=float),
+                               -700.0, 700.0)),
+                np.finfo(float).eps)
+
+        def d2link(self, mu):
+            return -1.0 / (np.asarray(mu, dtype=float) - self.b) ** 2
+
+        def d3link(self, mu):
+            return 2.0 / (np.asarray(mu, dtype=float) - self.b) ** 3
+
+        def d4link(self, mu):
+            return -6.0 / (np.asarray(mu, dtype=float) - self.b) ** 4
+
+    class _TanhLink(Link):
+        # λ = tanh(η) ∈ (−1, 1), linkinv clamped inside the open
+        # interval, mu_eta eps-floored (the consumer's bounded-shape
+        # link pattern)
+        name = "tanh"
+
+        def link(self, mu):
+            return np.arctanh(np.asarray(mu, dtype=float))
+
+        def linkinv(self, eta):
+            eps = np.finfo(float).eps
+            return np.clip(np.tanh(np.asarray(eta, dtype=float)),
+                           -1.0 + eps, 1.0 - eps)
+
+        def mu_eta(self, eta):
+            a = np.exp(-2.0 * np.abs(np.asarray(eta, dtype=float)))
+            return np.maximum(4.0 * a / (1.0 + a) ** 2,
+                              np.finfo(float).eps)
+
+        def d2link(self, mu):
+            mu = np.asarray(mu, dtype=float)
+            return 2.0 * mu / (1.0 - mu * mu) ** 2
+
+        def d3link(self, mu):
+            mu = np.asarray(mu, dtype=float)
+            return (2.0 + 6.0 * mu * mu) / (1.0 - mu * mu) ** 3
+
+        def d4link(self, mu):
+            mu = np.asarray(mu, dtype=float)
+            return 24.0 * mu * (1.0 + mu * mu) / (1.0 - mu * mu) ** 4
+
+    class _TLSS(GeneralFamily):
+        # Student-t location/scale/shape: parameters (μ, σ, λ) with
+        # ν = 6 + 4λ ∈ (2, 10) — a real 3-parameter density with
+        # closed-form l1/l2, authored exactly like the consumer's
+        # bridge (CircularLL)
+        name = "tlss-dummy"
+        n_lp = 3
+        available_derivs = 0
+        scale_known = True
+        n_theta = 0
+
+        def __init__(self):
+            super().__init__([IdentityLink(), _ShiftedLogLink(),
+                              _TanhLink()])
+            self.tri = trind_generator(3)
+            self.seen = {"deriv": [], "use_unscaled": [],
+                         "postproc_kwargs": None, "offsets": None,
+                         "lpi_cols": None, "wt_len": None}
+
+        @staticmethod
+        def _l0(y, mu, sigma, lam):
+            nu = 6.0 + 4.0 * lam
+            z = (y - mu) / sigma
+            return (gammaln((nu + 1.0) / 2.0) - gammaln(nu / 2.0)
+                    - 0.5 * np.log(nu * np.pi) - np.log(sigma)
+                    - (nu + 1.0) / 2.0 * np.log1p(z * z / nu))
+
+        @staticmethod
+        def _lp_derivs(y, mu, sigma, lam):
+            # first/second log-density derivatives w.r.t. (μ, σ, λ);
+            # λ enters through ν = 6 + 4λ (chain factor 4)
+            nu = 6.0 + 4.0 * lam
+            z = (y - mu) / sigma
+            q = nu + z * z
+            g = (nu + 1.0) * z / q
+            dg_dz = (nu + 1.0) * (nu - z * z) / q ** 2
+            dg_dnu = z * (z * z - 1.0) / q ** 2
+            dC = (0.5 * digamma((nu + 1.0) / 2.0)
+                  - 0.5 * digamma(nu / 2.0) - 0.5 / nu)
+            d2C = (0.25 * polygamma(1, (nu + 1.0) / 2.0)
+                   - 0.25 * polygamma(1, nu / 2.0) + 0.5 / nu ** 2)
+            l_nu = (dC - 0.5 * np.log1p(z * z / nu)
+                    + (nu + 1.0) * z * z / (2.0 * nu * q))
+            l_nunu = (d2C + z * z / (2.0 * nu * q)
+                      - z * z * (nu * nu + 2.0 * nu + z * z)
+                      / (2.0 * nu * nu * q * q))
+            d1 = {"mu": g / sigma,
+                  "sigma": (g * z - 1.0) / sigma,
+                  "lam": 4.0 * l_nu}
+            d2 = {("mu", "mu"): -dg_dz / sigma ** 2,
+                  ("mu", "sigma"): -(g + z * dg_dz) / sigma ** 2,
+                  ("mu", "lam"): 4.0 * dg_dnu / sigma,
+                  ("sigma", "sigma"):
+                      (1.0 - 2.0 * g * z - z * z * dg_dz) / sigma ** 2,
+                  ("sigma", "lam"): 4.0 * z * dg_dnu / sigma,
+                  ("lam", "lam"): 16.0 * l_nunu}
+            return d1, d2
+
+        def ll(self, y, X, coef, wt, *, lpi, offset=None, deriv=0,
+               d1b=None, d2b=None, fh=None, D=None):
+            self.seen["deriv"].append(deriv)
+            self.seen["wt_len"] = None if wt is None else len(wt)
+            self.seen["offsets"] = offset
+            self.seen["lpi_cols"] = sorted(
+                int(c) for ix in lpi for c in np.asarray(ix))
+            assert deriv <= 1, \
+                f"derivs-0 family asked for ll(deriv={deriv})"
+            y = np.asarray(y, dtype=float)
+            X = np.asarray(X, dtype=float)
+            coef = np.asarray(coef, dtype=float)
+            jj = [np.asarray(ix, dtype=int) for ix in lpi]
+            etas = []
+            for j in range(3):
+                eta = X[:, jj[j]] @ coef[jj[j]]
+                if offset is not None and offset[j] is not None:
+                    eta = eta + offset[j]
+                etas.append(eta)
+            mu = self.links[0].linkinv(etas[0])
+            sigma = self.links[1].linkinv(etas[1])
+            lam = self.links[2].linkinv(etas[2])
+            w = (np.ones_like(y) if wt is None
+                 else np.asarray(wt, dtype=float))
+            l0 = self._l0(y, mu, sigma, lam)
+            ret = {"l": float(np.sum(w * l0))}
+            if deriv == 0:
+                return ret
+            names = ("mu", "sigma", "lam")
+            params = {"mu": mu, "sigma": sigma, "lam": lam}
+            d1, d2 = self._lp_derivs(y, mu, sigma, lam)
+            shape = y.shape
+            l1 = np.column_stack(
+                [np.broadcast_to(d1[p], shape) for p in names])
+            l2 = np.column_stack(
+                [np.broadcast_to(d2[k], shape)
+                 for k in combinations_with_replacement(names, 2)])
+            l1 = l1 * w[:, None]
+            l2 = l2 * w[:, None]
+            ig1 = np.column_stack(
+                [lnk.mu_eta(eta)
+                 for lnk, eta in zip(self.links, etas)])
+            g2 = np.column_stack(
+                [lnk.d2link(params[name])
+                 for lnk, name in zip(self.links, names)])
+            tri = self.tri
+            de = gamlss_etamu(l1, l2, None, None, ig1, g2, None, None,
+                              tri["i2"], tri["i3"], tri["i4"],
+                              deriv - 1)
+            gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
+                           l3=de["l3"], i3=tri["i3"], l4=de["l4"],
+                           i4=tri["i4"], d1b=d1b, d2b=d2b,
+                           deriv=deriv - 1, fh=fh, D=D)
+            ret.update(gh)
+            return ret
+
+        def _null_params(self, y):
+            y = np.asarray(y, dtype=float)
+            return (float(np.median(y)),
+                    max(float(np.std(y)) * 0.8, 0.05), 0.0)
+
+        def initialize_coef(self, y, X, lpi, E=None, offset=None,
+                            use_unscaled=False):
+            self.seen["use_unscaled"].append(bool(use_unscaled))
+            y = np.asarray(y, dtype=float)
+            X = np.asarray(X, dtype=float)
+            jj = [np.asarray(ix, dtype=int) for ix in lpi]
+            n, p = X.shape
+            if E is None:
+                E = np.zeros((0, p))
+            start = np.zeros(p)
+            for j, (lnk, p0) in enumerate(
+                    zip(self.links, self._null_params(y))):
+                target = np.full(n, float(lnk.link(p0)))
+                if offset is not None and offset[j] is not None:
+                    target = target - offset[j]
+                cols = jj[j]
+                xa = np.vstack([X[:, cols], E[:, cols]])
+                ta = np.concatenate([target, np.zeros(E.shape[0])])
+                b, *_ = np.linalg.lstsq(xa, ta, rcond=None)
+                start[cols] = np.where(np.isfinite(b), b, 0.0)
+            return start
+
+        def postproc(self, y, prior_weights, fitted,
+                     linear_predictors, offset, intercept):
+            self.seen["postproc_kwargs"] = {
+                "prior_weights": np.shape(prior_weights),
+                "fitted": np.shape(fitted),
+                "linear_predictors": np.shape(linear_predictors),
+                "intercept": intercept}
+            y = np.asarray(y, dtype=float)
+            f0 = np.broadcast_to(np.asarray(self._null_params(y)),
+                                 (y.shape[0], 3))
+            r0 = self.residuals(y, f0)
+            return {"null_deviance": float(np.sum(r0 * r0))}
+
+        def residuals(self, y, fitted, type: str = "deviance"):
+            y = np.asarray(y, dtype=float)
+            fitted = np.asarray(fitted, dtype=float)
+            mu, sigma, lam = (fitted[:, 0], fitted[:, 1],
+                              fitted[:, 2])
+            rsd = y - mu
+            if type == "response":
+                return rsd
+            if type == "pearson":
+                nu = 6.0 + 4.0 * lam
+                return rsd / (sigma * np.sqrt(nu / (nu - 2.0)))
+            l_sat = self._l0(y, y, sigma, lam)
+            l_obs = self._l0(y, mu, sigma, lam)
+            return np.sign(rsd) * np.sqrt(
+                2.0 * np.clip(l_sat - l_obs, 0.0, None))
+
+    # --- FD validation of the dummy's ll: lb against FD of l, lbb
+    # against FD of lb, at a hand-built 3-LP design — also the first
+    # FD pin of the K=3 gamlss_etamu/gamlss_gH l1/l2 branches
+    fam = _TLSS()
+    rng = np.random.default_rng(11)
+    n = 40
+    Xs = np.hstack([np.ones((n, 1)), rng.normal(size=(n, 2)),
+                    np.ones((n, 1)), rng.normal(size=(n, 1)),
+                    np.ones((n, 1))])
+    lpi = [np.arange(0, 3), np.arange(3, 5), np.arange(5, 6)]
+    yv = 0.5 + Xs[:, 1] * 0.4 + rng.standard_t(df=6, size=n) * 0.7
+    coef = np.array([0.3, 0.2, -0.1, np.log(0.8 - 0.01), 0.05, 0.1])
+    wt = np.ones(n)
+    base = fam.ll(yv, Xs, coef, wt, lpi=lpi, deriv=1)
+    h = 1e-6
+    fd_lb = np.empty(6)
+    fd_lbb = np.empty((6, 6))
+    for k in range(6):
+        cp = coef.copy()
+        cm = coef.copy()
+        cp[k] += h
+        cm[k] -= h
+        fd_lb[k] = (fam.ll(yv, Xs, cp, wt, lpi=lpi, deriv=0)["l"]
+                    - fam.ll(yv, Xs, cm, wt, lpi=lpi,
+                             deriv=0)["l"]) / (2 * h)
+        fd_lbb[:, k] = (
+            fam.ll(yv, Xs, cp, wt, lpi=lpi, deriv=1)["lb"]
+            - fam.ll(yv, Xs, cm, wt, lpi=lpi, deriv=1)["lb"]
+        ) / (2 * h)
+    np.testing.assert_allclose(base["lb"], fd_lb, rtol=2e-5,
+                               atol=1e-7)
+    np.testing.assert_allclose(base["lbb"],
+                               0.5 * (fd_lbb + fd_lbb.T),
+                               rtol=5e-5, atol=5e-6)
+
+    # --- end-to-end: 3 formulas, a per-LP offset atom, auto-efs
+    n = 320
+    x = rng.uniform(size=n)
+    off1 = 0.3 * rng.normal(size=n)
+    y = (1.0 + np.sin(2 * np.pi * x) + off1
+         + rng.standard_t(df=7.0, size=n) * 0.7)
+    df = pl.DataFrame({"y": y, "x": x, "off1": off1})
+    fam2 = _TLSS()
+    m = gam(["y ~ s(x) + offset(off1)", "~ 1", "~ 1"], df,
+            family=fam2, method="REML")
+
+    # derivs-0 protocol: ll never asked past deriv 1 on any path
+    assert max(fam2.seen["deriv"]) <= 1
+    # both initialize_coef flavors ran: the initial.spg seed (False)
+    # and gam.fit5's ldetS-root start (True)
+    assert set(fam2.seen["use_unscaled"]) == {False, True}
+    # per-LP offsets arrive as a length-n_lp list, the formula-offset
+    # LP carrying its vector and offset-free LPs None
+    off_seen = fam2.seen["offsets"]
+    assert isinstance(off_seen, (list, tuple)) and len(off_seen) == 3
+    np.testing.assert_allclose(np.asarray(off_seen[0]), off1,
+                               rtol=0, atol=1e-12)
+    assert off_seen[1] is None and off_seen[2] is None
+    # lpi covers the stacked design exactly, 0-based
+    assert fam2.seen["lpi_cols"] == list(
+        range(len(np.asarray(m._beta))))
+    assert fam2.seen["wt_len"] == n
+    # efs auto-dispatch ran
+    assert m.outer_info["conv"] in ("full convergence",
+                                    "iteration limit reached")
+    # the 6-arg postproc was keyword-called on the converged fit;
+    # null_deviance landed, deviance fell back to Σ residuals²
+    pk = fam2.seen["postproc_kwargs"]
+    assert pk == {"prior_weights": (n,), "fitted": (n, 3),
+                  "linear_predictors": (n, 3), "intercept": True}
+    assert np.isfinite(m.null_deviance) and m.null_deviance > 0
+    np.testing.assert_allclose(
+        m.deviance, float(np.sum(np.asarray(m.residuals) ** 2)),
+        rtol=1e-12)
+    # residuals_of dispatches through the family hook with type=
+    np.testing.assert_array_equal(
+        np.asarray(m.residuals_of("deviance")),
+        np.asarray(m.residuals))
+    fitted = np.asarray(m.fitted_values)
+    np.testing.assert_allclose(
+        np.asarray(m.residuals_of("response")), y - fitted[:, 0],
+        rtol=0, atol=1e-12)
+    # fit sanity (Monte-Carlo level): smooth μ(x) + offset recovered,
+    # σ̂ near 0.7, λ̂ strictly inside (−1, 1)
+    truth = 1.0 + np.sin(2 * np.pi * x) + off1
+    assert np.corrcoef(fitted[:, 0], truth)[0, 1] > 0.95
+    assert 0.3 < float(np.median(fitted[:, 1])) < 1.5
+    assert float(np.max(np.abs(fitted[:, 2]))) < 0.999
+    # consumer-used surfaces run on the K=3 fit
+    pred = m.predict(df[:5])
+    assert pred.shape[0] == 5
+    m.summary()
+
+
 def test_predict_unconditional_se_matches_mgcv():
     # unconditional=TRUE swaps Vp → Vc (sp-uncertainty corrected) for the
     # SE band — predict.gam parity on the first three rows.

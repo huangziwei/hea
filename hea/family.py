@@ -4000,15 +4000,59 @@ class GeneralFamily(Family):
     predictors, the likelihood supplied directly via :meth:`ll` instead
     of a deviance/PIRLS interface.
 
-    Authoring contract (the pycircstat2 seam): subclasses set ``n_lp``
-    and ``links`` (one :class:`Link` per LP, custom subclasses welcome —
-    ``mu_eta``/``d2link``-``d4link`` must be implemented up to the order
-    implied by ``available_derivs``), and implement :meth:`ll` — almost
-    always by filling the packed per-datum arrays l1..l4 of log-density
-    derivatives w.r.t. the distribution parameters and delegating to
-    :func:`gamlss_etamu` + :func:`gamlss_gH` exactly like
-    :class:`gaulss` does. ``available_derivs``: 2 → full outer Newton
-    (l4 required), 1 → gradient-only outer (l3), 0 → EFS (l2 only).
+    **Authoring contract.** This seam is public and consumed outside
+    hea (pycircstat2's ``CircularLL``); it is frozen by
+    ``test_general_family_seam_contract_guard`` (tests/test_gam.py),
+    and changes to it must record consumer impact in the family plan.
+
+    Attributes a subclass declares:
+
+    - ``n_lp`` — number of linear predictors; ``gam`` takes a list of
+      exactly ``n_lp`` formulas, one per LP.
+    - ``links`` — list of ``n_lp`` :class:`Link` objects (set via
+      ``__init__``); custom subclasses welcome. Each implements
+      ``link``/``linkinv``/``mu_eta`` plus ``d2link``..``d4link`` up
+      to the order ``available_derivs`` implies (the chain rule runs
+      through :func:`gamlss_etamu`); clamp ``linkinv`` inside open
+      supports and floor ``mu_eta`` like mgcv's links do.
+    - ``available_derivs`` — 2: full outer Newton, :meth:`ll` must
+      answer every ``deriv`` ≤ 4. 0: extended Fellner-Schall;
+      :meth:`ll` is only ever called with ``deriv`` ≤ 1, on every
+      path (free, fixed and absent sp). 1: reserved for the unported
+      bfgs route — fitting refuses unless ``optimizer="efs"`` is
+      passed (mgcv.r:1907).
+    - conventional flags, as on :class:`gaulss`: ``scale_known =
+      True``, ``n_theta = 0``; ``name`` is what summaries print.
+
+    Engine call protocol (signatures are the contract):
+
+    - ``ll(y, X, coef, wt, *, lpi, offset=None, deriv=0, d1b=None,
+      d2b=None, fh=None, D=None)`` — ``lpi`` is a list of ``n_lp``
+      0-based integer column-index arrays into the stacked ``X``;
+      ``offset`` a per-LP list (entries ``None`` for offset-free
+      formulas) or ``None``; ``wt`` the (n,) prior weights — honor
+      them in every returned quantity. Deriv levels: :meth:`ll`.
+    - ``initialize_coef(y, X, lpi, E=None, offset=None,
+      use_unscaled=False)`` — called with ``use_unscaled=True`` from
+      gam.fit5 (E = the ldetS root, gam.fit4.r:974) and with the
+      default ``False`` from the initial.spg seed (E = the balanced
+      root, pen.reg semantics).
+    - ``postproc(y, prior_weights, fitted, linear_predictors, offset,
+      intercept)`` — mgcv's 6-argument form (unified 2026-06-11),
+      keyword-called once on the converged fit; see :meth:`postproc`.
+    - ``residuals(y, fitted, type="deviance")`` — REQUIRED for
+      general families: the fit stores ``residuals(y, fitted)`` and
+      ``residuals_of(type=)``/qq dispatch through it (mgcv.r:3429);
+      ``fitted`` is the (n, n_lp) inverse-linked matrix.
+    - ``rd(rng, mu, wt, scale)`` — optional; enables qq.gam's
+      simulation path (``mu`` = the fitted matrix, like
+      :class:`gaulss`).
+
+    Almost always :meth:`ll` is implemented by filling the packed
+    per-datum arrays l1..l4 of log-density derivatives w.r.t. the
+    distribution parameters and delegating to :func:`gamlss_etamu` +
+    :func:`gamlss_gH` exactly like :class:`gaulss` does
+    (:func:`trind_generator` supplies the packed index tables).
     """
     is_general = True
     n_lp: int = 2
