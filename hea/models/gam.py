@@ -4147,7 +4147,18 @@ class gam:
         }
 
         n_work = self._work_dim
-        use_efs = int(getattr(family, "available_derivs", 2) or 0) == 0
+        avail_derivs = int(getattr(family, "available_derivs", 2) or 0)
+        if avail_derivs == 1:
+            # mgcv coerces available.derivs==1 families to the bfgs
+            # outer optimizer (mgcv.r:1907) — unported. Refuse here
+            # rather than crash at ll(deriv=3) inside gam.fit5.
+            raise NotImplementedError(
+                "general family with available_derivs=1 needs the "
+                "'bfgs' outer optimizer (mgcv.r:1907), which is not "
+                "ported; supply ll derivatives to order 4 "
+                "(available_derivs=2, full Newton) or only to order 2 "
+                "(available_derivs=0, EFS).")
+        use_efs = avail_derivs == 0
         if sp is not None:
             sp_arr = np.asarray(sp, dtype=float).flatten()
             if sp_arr.shape != (n_work,):
@@ -4209,12 +4220,17 @@ class gam:
         # The converged deriv-2 fit: newton's last accepted iterate
         # (cached by the REML5 closure — mgcv's b; estimate.gam never
         # refits). Fixed-sp / no-sp paths fit directly here, with the
-        # newton-capped inner epsilon (1e-8, gam.fit3.r:1308).
+        # newton-capped inner epsilon (1e-8, gam.fit3.r:1308) — at
+        # deriv 0 for derivs-0 families, whose ll has nothing above
+        # order 2: mgcv only ever fits those through efsudr's deriv=0
+        # calls (gam.fit4.r:1479+), and post-proc then takes the same
+        # Vc ≡ Vp path as efs fits (no db_drho on the fit).
         fit = self._g5.get("fit")
         if fit is None:
             fit = _gam_fit5(
                 X_irp, y, rho_full, sl, family=family, lpi=md.lpi,
-                weights=self._wt, offsets=md.offsets, Mp=Mp, deriv=2,
+                weights=self._wt, offsets=md.offsets, Mp=Mp,
+                deriv=2 if avail_derivs >= 2 else 0,
                 start=self._g5["start"], gamma=self._gamma,
                 epsilon=1e-8)
         self._fit5 = fit

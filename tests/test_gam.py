@@ -4843,6 +4843,65 @@ def test_gaulss_fixed_sp_through_gam_matches_mgcv():
     np.testing.assert_allclose(m.sp, [2.0, 0.5])
 
 
+def test_general_family_derivs_dispatch_guards():
+    # mgcv's optimizer dispatch on available.derivs (mgcv.r:1906-1908):
+    # ==1 → c("outer","bfgs") — unported, so hea refuses with a clear
+    # message instead of crashing at ll(deriv=3) inside gam.fit5;
+    # ==0 → every fit5 call stays at deriv 0 (ll deriv ≤ 1), including
+    # the fixed-sp and no-smooth paths that previously hard-coded a
+    # deriv-2 final fit (mgcv fits derivs-0 families only through
+    # efsudr's deriv=0 calls, gam.fit4.r:1479+).
+    from hea.family import gaulss
+
+    class _gaulss_d1(gaulss):
+        available_derivs = 1
+
+    df = _fit5_fixture()
+    with pytest.raises(NotImplementedError, match="bfgs"):
+        gam(["y ~ s(x) + w", "~ s(z)"], df, family=_gaulss_d1(),
+            method="REML")
+
+    class _gaulss_d0(gaulss):
+        # faithful derivs-0 family: anything above ll deriv 1 is an
+        # error — the shape of every d2logpdf-only custom family
+        available_derivs = 0
+
+        def ll(self, y, X, coef, wt, *, lpi, offset=None, deriv=0,
+               d1b=None, d2b=None, fh=None, D=None):
+            assert deriv <= 1, \
+                f"derivs-0 family asked for ll(deriv={deriv})"
+            return super().ll(y, X, coef, wt, lpi=lpi, offset=offset,
+                              deriv=deriv, d1b=d1b, d2b=d2b, fh=fh,
+                              D=D)
+
+    # fixed sp: the inner Newton is deriv-independent, so the deriv-0
+    # final fit must reproduce the deriv-2 gaulss fit at the same sp;
+    # the post-fit surface is efs-grade (Vc ≡ Vp; sp_vcov None is the
+    # fixed-sp rule either way).
+    m2 = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+             method="REML", sp=np.array([2.0, 0.5]))
+    m0 = gam(["y ~ s(x) + w", "~ s(z)"], df, family=_gaulss_d0(),
+             method="REML", sp=np.array([2.0, 0.5]))
+    np.testing.assert_allclose(m0.REML_criterion, m2.REML_criterion,
+                               rtol=0, atol=1e-10)
+    np.testing.assert_allclose(np.asarray(m0._beta),
+                               np.asarray(m2._beta), rtol=0, atol=1e-10)
+    np.testing.assert_allclose(np.asarray(m0.Vp), np.asarray(m2.Vp),
+                               rtol=0, atol=1e-10)
+    np.testing.assert_array_equal(m0.Vc, m0.Vp)
+    assert m0.sp_vcov() is None
+
+    # no-smooth formula list (n_work == 0 — the intercept-only shape
+    # every derivs-0 consumer family hits): same deriv-0 protocol.
+    m0p = gam(["y ~ w", "~ 1"], df, family=_gaulss_d0(), method="REML")
+    m2p = gam(["y ~ w", "~ 1"], df, family=gaulss(), method="REML")
+    np.testing.assert_allclose(m0p.REML_criterion, m2p.REML_criterion,
+                               rtol=0, atol=1e-10)
+    np.testing.assert_allclose(np.asarray(m0p._beta),
+                               np.asarray(m2p._beta), rtol=0,
+                               atol=1e-10)
+
+
 def test_predict_unconditional_se_matches_mgcv():
     # unconditional=TRUE swaps Vp → Vc (sp-uncertainty corrected) for the
     # SE band — predict.gam parity on the first three rows.
