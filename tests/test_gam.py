@@ -4788,11 +4788,17 @@ def test_fit5_fully_penalized_summary_matches_mgcv():
     #   m2 s(x,cc)        — reTest conditioning on s(g,re) as random
     #                       (the R1/R2 split + L-inflation branch);
     #   m2 s(g,re)        — reTest on the re term itself;
-    #   m2 s(v) (tp)      — testStat through the same _R_fit5 (p-value
-    #                       pin; edf/Chi.sq of that branch are already
-    #                       pinned by the predict-and-summary test).
+    #   m2 s(v) (tp)      — testStat through the same _R_fit5.
+    # Both engines run at tightened convergence (conv_tol=1e-11,
+    # epsilon=1e-10) so early stops don't masquerade as disagreement:
+    # s(v)'s λ sits in a REML basin of curvature ~0.03, where the shared
+    # default conv_tol=1e-6 halts wherever the BLAS-rounded gradient
+    # lands (±~1e-3 in λ — not portable; it broke CI on OpenBLAS). Fully
+    # converged, hea and mgcv agree to a ~6e-8 floor, so one 2e-6 class
+    # covers every quantity (the circlss test-pnlss-parity.R convention).
     # R: gam(list(y ~ ..., ~ 1), family=gaulss(), method="REML",
-    # knots=list(x=c(0, 2*pi))) on the same %.17g CSV; pins from
+    # knots=list(x=c(0, 2*pi)), control=gam.control(epsilon=1e-10,
+    # newton=list(conv.tol=1e-11))) on the same %.17g CSV; pins from
     # summary(b)$s.table at digits=12.
     from hea.family import gaulss
     rng = np.random.default_rng(31)
@@ -4809,50 +4815,42 @@ def test_fit5_fully_penalized_summary_matches_mgcv():
         "y": y,
     })
     kn = {"x": [0.0, 2 * np.pi]}
+    ctl = {"epsilon": 1e-10, "newton": {"conv_tol": 1e-11}}
+    TOL = 2e-6                  # one class, ~30x the cross-engine floor
 
     m1 = gam(['y ~ s(x, bs="cc")', "~ 1"], df, family=gaulss(),
-             method="REML", knots=kn)
+             method="REML", knots=kn, control=ctl)
     assert m1.converged
-    np.testing.assert_allclose(m1.REML_criterion / 2, 131.3358739041,
-                               rtol=0, atol=1e-6)
-    np.testing.assert_allclose(m1.sp, [1492.8399280971], rtol=5e-4)
+    np.testing.assert_allclose(m1.REML_criterion / 2, 131.335873904053,
+                               rtol=0, atol=TOL)
+    np.testing.assert_allclose(m1.sp, [1492.82206023], rtol=TOL)
     (label, edf, ref_df, stat, p_val), = m1._smooth_significance_rows()
     assert label == "s(x)"
     np.testing.assert_allclose(
-        [edf, ref_df, stat], [2.43306194495, 8.0, 11.0964040579],
-        rtol=1e-4, err_msg="m1 s(x,cc) row vs mgcv s.table")
-    np.testing.assert_allclose(p_val, 0.00258664960873, rtol=1e-3)
+        [edf, ref_df, stat], [2.4330715129, 8.0, 11.0964355952],
+        rtol=TOL, err_msg="m1 s(x,cc) row vs mgcv s.table")
+    np.testing.assert_allclose(p_val, 0.00258664125969, rtol=TOL)
     m1.summary()                     # the original crash site
 
     m2 = gam(['y ~ s(x, bs="cc") + s(v) + s(g, bs="re")', "~ 1"], df,
-             family=gaulss(), method="REML", knots=kn)
+             family=gaulss(), method="REML", knots=kn, control=ctl)
     assert m2.converged
-    np.testing.assert_allclose(m2.REML_criterion / 2, 125.1716615835,
-                               rtol=0, atol=1e-6)
-    # sp[0]/sp[2] are tightly determined (match mgcv to <2e-7). sp[1]
-    # (s(v)) is flat-determined: the REML criterion agrees to ~3e-9
-    # across backends while sp[1] itself spreads ~7e-4 — Accelerate
-    # lands 114.6566, Linux-OpenBLAS (CI) 114.5707, mgcv 114.6489. The
-    # REML surface is essentially flat along it, so its argmin isn't
-    # BLAS-portable; everything the fit *reports* is (edf/Ref.df/Chi.sq/
-    # p pinned below at 1e-4 / 1e-3). Pin it at the band the flat
-    # direction determines, not the 5e-4 the others hold to.
-    np.testing.assert_allclose([m2.sp[0], m2.sp[2]],
-                               [1725.9594822063, 47.6852166323],
-                               rtol=5e-4)
-    np.testing.assert_allclose(m2.sp[1], 114.6488554795, rtol=2e-3)
+    np.testing.assert_allclose(m2.REML_criterion / 2, 125.171661556162,
+                               rtol=0, atol=TOL)
+    np.testing.assert_allclose(
+        m2.sp, [1725.95722471, 114.7928675, 47.6850401296], rtol=TOL)
     rows = m2._smooth_significance_rows()
     assert [r[0] for r in rows] == ["s(x)", "s(v)", "s(g)"]
     np.testing.assert_allclose(
         [r[1:4] for r in rows],
-        [(2.42503642108, 8.0, 16.2994154159),
-         (1.33989507049, 1.60107141573, 11.2055844863),
-         (5.19515886770, 7.0, 22.2893078692)],
-        rtol=1e-4, err_msg="m2 rows vs mgcv s.table")
+        [(2.42503549993, 8.0, 16.2993298921),
+         (1.3395620337, 1.60054881484, 11.204826581),
+         (5.19516161642, 7.0, 22.2892975839)],
+        rtol=TOL, err_msg="m2 rows vs mgcv s.table")
     np.testing.assert_allclose(
         [r[4] for r in rows],
-        [3.43105084761e-04, 6.05372847462e-03, 8.71978864927e-05],
-        rtol=1e-3, err_msg="m2 p-values vs mgcv s.table")
+        [0.000343120469493, 0.00605114772768, 8.72003361002e-05],
+        rtol=TOL, err_msg="m2 p-values vs mgcv s.table")
     m2.summary()
 
 
