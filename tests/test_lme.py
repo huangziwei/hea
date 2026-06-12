@@ -30,7 +30,7 @@ import numpy as np
 import pytest
 from scipy.stats import chi2
 
-from conftest import load_dataset
+from conftest import assert_fp_equiv, load_dataset
 from hea.family import Binomial, Gaussian, Poisson
 from hea.models.lme import lme
 
@@ -149,22 +149,23 @@ def _lrt(m_reduced, m_full):
 
 # ---------------------------------------------------------------------------
 # Phase 1 of lme-family-port.md: the public ``family=`` argument was added.
-# Default (``None``) and explicit ``Gaussian()`` must produce bit-identical
-# fits; non-Gaussian families must raise ``NotImplementedError`` with a
-# message pointing at the port plan until Phase 2-5 land the Laplace path.
+# Default (``None``) and explicit ``Gaussian()`` must produce the same fit
+# (FP-equal — see conftest.assert_fp_equiv); non-Gaussian families must raise
+# ``NotImplementedError`` with a message pointing at the port plan until
+# Phase 2-5 land the Laplace path.
 # ---------------------------------------------------------------------------
 
 
 def test_family_default_equals_explicit_gaussian():
-    """``family=None`` (default) and ``family=Gaussian()`` produce identical fits."""
+    """``family=None`` (default) and ``family=Gaussian()`` produce the same fit."""
     data = load_dataset("lme4", "Dyestuff")
     m_default = lme("Yield ~ 1 + (1|Batch)", data, REML=True)
     m_explicit = lme("Yield ~ 1 + (1|Batch)", data, family=Gaussian(), REML=True)
 
-    np.testing.assert_array_equal(m_default.theta, m_explicit.theta)
-    np.testing.assert_array_equal(m_default._beta, m_explicit._beta)
-    assert m_default.sigma == m_explicit.sigma
-    assert m_default.REML_criterion == m_explicit.REML_criterion
+    assert_fp_equiv(m_default.theta, m_explicit.theta)
+    assert_fp_equiv(m_default._beta, m_explicit._beta)
+    assert_fp_equiv(m_default.sigma, m_explicit.sigma)
+    assert_fp_equiv(m_default.REML_criterion, m_explicit.REML_criterion)
 
 
 def test_family_non_gaussian_runs_glmm_path():

@@ -45,7 +45,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from conftest import load_dataset
+from conftest import assert_fp_equiv as _assert_fp_equiv, load_dataset
 from hea.models import gam, glm
 from hea.family import Gamma, Poisson, Tweedie, tw
 from hea.models.gam import VisResult
@@ -2862,15 +2862,16 @@ def test_weights_gaussian_reml_matches_mgcv():
         [[0.34536789, 0.01333525], [0.01333525, 0.01402823]], rtol=1e-5)
 
 
-def test_weights_unit_weights_are_bit_identical():
-    # weights=ones must reproduce the unweighted fit exactly — every site
-    # reads the same self._wt array, so this guards the plumbing.
+def test_weights_unit_weights_equal_unweighted():
+    # weights=ones must reproduce the unweighted fit — every site reads the
+    # same self._wt array, so this guards the plumbing (FP-equal, see
+    # conftest.assert_fp_equiv).
     df, _, _, _ = _weights_fixture()
     m0 = gam("y ~ s(x)", df, method="REML")
     m1 = gam("y ~ s(x)", df, weights=np.ones(df.height), method="REML")
-    assert m0.REML_criterion == m1.REML_criterion
-    assert np.array_equal(np.asarray(m0.coef), np.asarray(m1.coef))
-    assert m0.AIC == m1.AIC
+    _assert_fp_equiv(m0.REML_criterion, m1.REML_criterion)
+    _assert_fp_equiv(m0.coef, m1.coef)
+    _assert_fp_equiv(m0.AIC, m1.AIC)
 
 
 def test_weights_zero_weight_rows_match_mgcv():
@@ -3047,13 +3048,14 @@ def test_cbind_response_equals_proportion_idiom_and_mgcv():
                                rtol=0, atol=1e-10)
     np.testing.assert_allclose(m.prior_weights, trials, rtol=0, atol=0)
     assert m.formula == "cbind(succ, fail) ~ s(x)"
-    # Bit-identical to the proportion + trials idiom (same code path
-    # after the intake rewrite).
+    # Same model as the proportion + trials idiom (same code path after
+    # the intake rewrite; R: equiv diff 0) — FP-equal, see _assert_fp_equiv.
     p = gam("ybin ~ s(x)", d, weights=trials, family=Binomial(),
             method="REML")
-    np.testing.assert_array_equal(np.asarray(m.coef), np.asarray(p.coef))
-    np.testing.assert_array_equal(m.sp, p.sp)
-    assert m.REML_criterion == p.REML_criterion and m.AIC == p.AIC
+    _assert_fp_equiv(m.coef, p.coef)
+    _assert_fp_equiv(m.sp, p.sp)
+    _assert_fp_equiv(m.REML_criterion, p.REML_criterion)
+    _assert_fp_equiv(m.AIC, p.AIC)
 
 
 def test_cbind_with_prior_weights_matches_mgcv():
@@ -3237,11 +3239,11 @@ def test_quasibinomial_cbind_through_gam_matches_mgcv():
                                [5.5911948602, 6.7168840816, 38.0380208401],
                                rtol=1e-6)
     assert p_val < 1e-10
-    # Bit-identical to the proportion + trials idiom (R: equiv diff 0).
+    # Same model as the proportion + trials idiom (R: equiv diff 0).
     p = gam("ybin ~ s(x)", d, weights=trials, family=quasibinomial,
             method="REML")
-    assert m.REML_criterion == p.REML_criterion
-    np.testing.assert_array_equal(np.asarray(m.coef), np.asarray(p.coef))
+    _assert_fp_equiv(m.REML_criterion, p.REML_criterion)
+    _assert_fp_equiv(m.coef, p.coef)
 
 
 # ---------------------------------------------------------------------------
@@ -3297,16 +3299,16 @@ def test_mixed_sp_gaussian_matches_mgcv():
     # s(x, sp=2) is the same model (R: diff exactly 0), and a gam-level
     # vector is overridden by the per-smooth value (mgcv.r:1426).
     m2 = gam("y ~ s(x, sp=2) + s(z)", df, method="REML")
-    assert m2.REML_criterion == m.REML_criterion
-    np.testing.assert_array_equal(np.asarray(m2.coef), np.asarray(m.coef))
+    _assert_fp_equiv(m2.REML_criterion, m.REML_criterion)
+    _assert_fp_equiv(m2.coef, m.coef)
     m3 = gam("y ~ s(x, sp=2) + s(z)", df, sp=np.array([5.0, -1.0]),
              method="REML")
-    assert m3.REML_criterion == m.REML_criterion
+    _assert_fp_equiv(m3.REML_criterion, m.REML_criterion)
     # All-negative == estimate everything (mgcv's rep(-1) default).
     m4 = gam("y ~ s(x) + s(z)", df, sp=np.array([-1.0, -1.0]),
              method="REML")
     m5 = gam("y ~ s(x) + s(z)", df, method="REML")
-    assert m4.REML_criterion == m5.REML_criterion
+    _assert_fp_equiv(m4.REML_criterion, m5.REML_criterion)
 
 
 def test_mixed_sp_zero_gcv_te_and_id_match_mgcv():
@@ -3555,8 +3557,8 @@ def test_binomial_factor_response_matches_mgcv():
     np.testing.assert_allclose(float(np.sum(m.edf)), 4.0610721597,
                                rtol=0, atol=1e-4)
     mb = gam("ybool ~ s(x)", df, family=Binomial(), method="REML")
-    assert mb.REML_criterion == m.REML_criterion
-    np.testing.assert_array_equal(np.asarray(mb.coef), np.asarray(m.coef))
+    _assert_fp_equiv(mb.REML_criterion, m.REML_criterion)
+    _assert_fp_equiv(mb.coef, m.coef)
     # non-binomial families keep the strict float cast.
     with pytest.raises(Exception, match="convert|cast|float"):
         gam("ystr ~ s(x)", df, method="REML")
@@ -3650,7 +3652,7 @@ def test_mixed_sp_validation():
     # All-fixed via per-smooth values lands on the historical fixed path.
     m = gam("y ~ s(x, sp=2) + s(z, sp=0.5)", df, method="REML")
     f = gam("y ~ s(x) + s(z)", df, sp=np.array([2.0, 0.5]), method="REML")
-    assert m.REML_criterion == f.REML_criterion
+    _assert_fp_equiv(m.REML_criterion, f.REML_criterion)
     np.testing.assert_array_equal(m.sp, f.sp)
 
 
@@ -3739,11 +3741,11 @@ def test_gam_control_validation():
             control={"scale_est": "nope"})
     with pytest.raises(ValueError, match="unsupported xt entry"):
         gam("y ~ s(x, xt=list(shrink=0.5))", df, method="REML")
-    # defaults are byte-identical to no control at all
+    # defaults are the same fit as no control at all (FP-equal)
     m0 = gam("y ~ s(x) + s(z)", df, method="REML")
     m1 = gam("y ~ s(x) + s(z)", df, method="REML", control={})
-    assert m0.REML_criterion == m1.REML_criterion
-    np.testing.assert_array_equal(np.asarray(m0.coef), np.asarray(m1.coef))
+    _assert_fp_equiv(m0.REML_criterion, m1.REML_criterion)
+    _assert_fp_equiv(m0.coef, m1.coef)
 
 
 # ---------------------------------------------------------------------------
@@ -3810,7 +3812,7 @@ def test_scale_negative_forces_estimation_matches_mgcv():
     p2 = gam("ycnt ~ s(x) + s(z)", df, family=Poisson(), method="REML",
              scale=2)
     p0 = gam("ycnt ~ s(x) + s(z)", df, family=Poisson(), method="REML")
-    assert p2.REML_criterion == p0.REML_criterion
+    _assert_fp_equiv(p2.REML_criterion, p0.REML_criterion)
     assert p2.sigma_squared == 1.0 and p2.scale_estimated is False
     # Extended families: scale handling is family-driven — honest raise.
     from hea.family import tw
@@ -4253,6 +4255,19 @@ def test_multi_formula_validation_and_gam_guard():
             method="REML")
 
 
+def test_gam_family_constructor_autocall():
+    # mgcv accepts the family constructor — gam(family=gaulss) ≡
+    # gam(family=gaulss()) via ``if (is.function(family)) family <-
+    # family()`` (mgcv.r:2324). Instances pass through un-called.
+    from hea.family import Gaussian, gaulss
+    df = _mf_fixture()
+    m = gam("y ~ s(x)", df, family=Gaussian, method="REML")
+    assert isinstance(m.family, Gaussian)
+    m2 = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss,
+             method="REML")
+    assert isinstance(m2.family, gaulss)
+
+
 # ---------------------------------------------------------------------------
 # gam.vcomp rescale=TRUE default (pre-§5.3 slice i) — mgcv 1.9-4 references.
 # R fits read the identical data via full-precision CSV; pins are printed
@@ -4347,16 +4362,14 @@ def test_vcomp_rescale_select_null_penalty_scale_one():
 
 
 def test_vcomp_rescale_fs_consistency_and_mgcv():
-    # fs: multi-S block through the dedicated builder. _nat_param's type=1
-    # chain is fp-faithful to mgcv's nat.param (triangular solves,
-    # unsymmetrized evr eigen), and dsyevr resolves the degenerate null
-    # eigenspace to the SAME two vectors on every build probed (Accelerate,
-    # OpenBLAS, R's reference LAPACK) — but their ORDER follows the sort of
-    # two noise-level eigenvalues and genuinely flips between builds (CI's
-    # OpenBLAS swaps the pair vs the Mac that generated the pins, with
-    # values matching to 1e-8; R itself has no canonical order). So the
-    # null pair is compared sorted, values tight. The rescale mechanism is
-    # pinned exactly via σ_k(default) = σ_k(rescale=False)·√S.scale.
+    # fs: multi-S block through the dedicated builder, null pair in hea's
+    # canonical centered-Gram order (see test_fs_smooth_fit_matches_mgcv —
+    # mgcv leaves it to LAPACK noise, which macOS x86 Accelerate doesn't
+    # even keep stable per call). gam.vcomp pins are R 4.6.0 / mgcv 1.9-4
+    # on the paraPen export of hea's exact X/S; paraPen records no S.scale,
+    # so R's output IS the rescale=False flavor, positional. The default
+    # flavor is pinned through the exact relation
+    # σ_k(default) = σ_k(rescale=False)·√S.scale.
     m = gam("y ~ s(x0, g, bs='fs')", _vcomp_fixture(), method="REML")
     vc = m.vcomp
     vc0 = m._compute_vcomp(rescale=False)
@@ -4367,51 +4380,54 @@ def test_vcomp_rescale_fs_consistency_and_mgcv():
     np.testing.assert_allclose(
         vc["lower"].to_numpy()[:3],
         vc0["lower"].to_numpy()[:3] * np.sqrt(ss), rtol=1e-12)
-    # mgcv 1.9-4 gam.vcomp: range row, null pair (sorted), scale.
-    vals = vc["std_dev"].to_numpy()
-    lows = vc["lower"].to_numpy()
-    o = 1 + np.argsort(vals[1:3])  # null-pair order is LAPACK-build noise
     np.testing.assert_allclose(
-        np.concatenate([vals[:1], vals[o], vals[3:]]),
-        [23.705650223879, 0.255257857391, 0.351338675157, 0.870402969596],
-        rtol=1e-5)
+        vc0["std_dev"].to_numpy(),
+        [5.00111440593679, 3.04761717384477, 4.27610779129663,
+         0.87038118562712], rtol=1e-5)
     np.testing.assert_allclose(
-        np.concatenate([lows[:1], lows[o], lows[3:]]),
-        [16.827537361971, 0.114220884469, 0.180002939012, 0.790025586953],
-        rtol=1e-5)
+        vc0["lower"].to_numpy(),
+        [3.550066350466488, 1.357457340608016, 2.193906159307820,
+         0.790008559835151], rtol=1e-5)
+    np.testing.assert_allclose(
+        vc0["upper"].to_numpy(),
+        [7.045261364757873, 6.842182189057526, 8.334494055368658,
+         0.958930632918394], rtol=1e-5)
 
 
 def test_fs_smooth_fit_matches_mgcv():
-    # The fs construction is mgcv-exact up to the null-pair ORDER (the only
-    # LAPACK-build noise — see the vcomp test above; the vectors themselves
-    # reproduce across builds): REML/scale/edf/fitted are order-invariant
-    # and pin tight; sp pins as range + sorted null pair. The fixed-sp REML
-    # is THE basis-sensitive quantity (each null dimension carries its own
-    # λ; it diverged O(0.01) under the old rotated basis): R fit
-    # sp=c(1, 2, 0.5) in ITS null order, so exactly one of the two ways of
-    # assigning (2, 0.5) to hea's null pair is that same model — the better
-    # ordering must match R to 1e-10.
+    # hea canonicalizes the fs null pair (centered-Gram rotation in
+    # _nat_param: constant-like column first, most-variable last) where
+    # mgcv leaves the degenerate pair to LAPACK noise — macOS x86_64
+    # Accelerate resolved it differently CALL-TO-CALL (rotations up to 44°,
+    # free REML/2 flapping 342.96↔340.90 within one process), so mgcv's
+    # realized basis isn't a reproducible target even per-machine. Pins are
+    # R 4.6.0 / mgcv 1.9-4 fits of the IDENTICAL parametrization: hea's
+    # X/S blocks exported at %.17g and fitted via gam(y ~ X, paraPen=...)
+    # — R reproduced hea's free fit to all 15 printed digits. Everything is
+    # positional; no sorted-pair hedging.
     df = _vcomp_fixture()
     m = gam("y ~ s(x0, g, bs='fs')", df, method="REML")
-    sp = np.asarray(m.sp)
     np.testing.assert_allclose(
-        np.concatenate([sp[:1], np.sort(sp[1:3])]),
-        [0.0302404084243, 0.0418725790411, 0.0793274311249], rtol=1e-6)
-    np.testing.assert_allclose(m.REML_criterion / 2, 342.959898695382,
+        np.asarray(m.sp),
+        [0.0302890331157785, 0.0815639340505075, 0.0414306455894891],
+        rtol=1e-6)
+    np.testing.assert_allclose(m.REML_criterion / 2, 342.93930638789,
                                rtol=1e-10)
-    np.testing.assert_allclose(m.scale, 0.757601417077, rtol=1e-9)
-    np.testing.assert_allclose(np.sum(m.edf), 29.983026500786, rtol=1e-9)
+    np.testing.assert_allclose(m.scale, 0.757563495912191, rtol=1e-9)
+    np.testing.assert_allclose(np.sum(m.edf), 29.9696708392256, rtol=1e-9)
     np.testing.assert_allclose(
         np.asarray(m.fitted_values)[:5],
-        [0.059141969561, 0.267571299093, 0.572985963884,
-         2.288189939067, 2.361954603671], atol=1e-8)
-    rems = [gam("y ~ s(x0, g, bs='fs')", df, method="REML",
-                sp=[1.0] + null_sp).REML_criterion / 2
-            for null_sp in ([2.0, 0.5], [0.5, 2.0])]
-    best = min(rems, key=lambda r: abs(r - 375.551476460602))
-    np.testing.assert_allclose(best, 375.551476460602, rtol=1e-10)
-    assert abs(max(rems, key=lambda r: abs(r - 375.551476460602))
-               - 375.551476460602) > 1e-3  # the other order is a real model change
+        [0.058794148779781, 0.266676076523886, 0.572487120306762,
+         2.28963252364345, 2.36042460871368], atol=1e-8)
+    # Each null dimension carries its own λ, so the two assignments of
+    # (2, 0.5) to (constant-like, most-variable) are two DIFFERENT models,
+    # each pinned to its own R paraPen value at fixed sp.
+    f1 = gam("y ~ s(x0, g, bs='fs')", df, method="REML", sp=[1.0, 2.0, 0.5])
+    np.testing.assert_allclose(f1.REML_criterion / 2, 375.499244455334,
+                               rtol=1e-10)
+    f2 = gam("y ~ s(x0, g, bs='fs')", df, method="REML", sp=[1.0, 0.5, 2.0])
+    np.testing.assert_allclose(f2.REML_criterion / 2, 376.246589879461,
+                               rtol=1e-10)
 
 
 # ---------------------------------------------------------------------------

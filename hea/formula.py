@@ -5875,12 +5875,12 @@ def _nat_param(
     """Port of mgcv's `nat.param(X, S, rank, type, unit.fnorm)`.
 
     type=1: QR on X, then eigendecompose R^-T S R^-1; rescale so the
-    penalty is identity on its range. The chain is fp-faithful to mgcv
-    (triangular solves, unsymmetrized evr eigen) so the degenerate
-    null-space basis reproduces R's to ~1e-14 — see the inline note.
+    penalty is identity on its range. mgcv stops there, leaving the
+    degenerate null-space basis to LAPACK noise; hea additionally applies
+    the type=3 centered-Gram null rotation — see the inline note.
     type=3: eigendecompose S directly; rescale columns by sqrt(eigenvalue)
     (range) or by a col-norm match (null). Null-space eigenvectors are
-    post-rotated so the final column is closest to a constant vector.
+    post-rotated via the eigen of the centered null-block Gram.
 
     Returns `(X_new, D, P)`: X_new = X @ P; D is the range diagonal of the
     transformed penalty (length `rank`); P is the parameter-transform."""
@@ -5941,17 +5941,8 @@ def _nat_param(
     Q, R = np.linalg.qr(X, mode="reduced")
     # RSR = R^-T @ S @ R^-1, via the same two triangular solves as mgcv's
     # forwardsolve(t(R), t(forwardsolve(t(R), t(S)))) — and, like mgcv, NO
-    # symmetrization before eigen. The exact-arithmetic null space of RSR is
-    # degenerate, and dsyevr (R's eigen(symmetric=TRUE) and scipy's evr
-    # driver) resolves the within-cluster basis deterministically from the
-    # well-determined part of the matrix: given this solve chain, scipy
-    # reproduces R's null VECTORS to ~1e-14. Only their column ORDER (the
-    # sort of the two noise-level eigenvalues) is build-dependent — a model-
-    # invariant permutation that even two R installs with different BLAS
-    # would not agree on. An LU solve (np.linalg.solve) or a pre-eigen
-    # 0.5*(A+A') symmetrization perturbs the cluster enough to ROTATE the
-    # basis instead, which does change the model (each null dimension gets
-    # its own λ).
+    # symmetrization before eigen (an LU solve or a 0.5*(A+A') perturbs the
+    # null cluster enough to land on a different resolution).
     from scipy.linalg import eigh as _sla_eigh, solve_triangular as _sla_tri
     Y = _sla_tri(R.T, S.T, lower=True)        # R^-T S'
     RSR = _sla_tri(R.T, Y.T, lower=True)      # R^-T (S R^-1)
@@ -5970,6 +5961,30 @@ def _nat_param(
         X_new = X_new / E_safe
         P = P / E_safe
         D = np.ones(rank)
+
+    # mgcv stops here for type=1: the null block keeps eigen()'s arbitrary
+    # resolution of the zero-eigenvalue cluster — pure LAPACK noise, decided
+    # by the last bits of RSR. macOS x86 Accelerate doesn't even keep those
+    # bits stable per call (heap-phase-sensitive kernels): the cluster came
+    # out rotated 44° between two fits in ONE process, which is a different
+    # model whenever each null dimension carries its own λ (fs) — measured
+    # 2.1 on a free-sp fs REML and 0.7 at fixed sp. So hea pins the
+    # resolution down with the SAME centered-Gram rotation mgcv applies in
+    # the type=3 branch: orientation and order become data-determined
+    # (eigengap O(1) vs O(1e-20)) and reproduce across BLAS builds to
+    # ~1e-14. This is a deliberate deviation from nat.param; the fs
+    # reference pins are R-validated against this exact parametrization via
+    # paraPen (see the fs tests in tests/test_gam.py).
+    if type_ == 1 and rank < p - 1:
+        ind = np.arange(rank, p)
+        rind = np.arange(p - 1, rank - 1, -1)  # reversed
+        Xn = X_new[:, ind]
+        Xn_c = Xn - Xn.mean(axis=0, keepdims=True)
+        w_n, V_n = np.linalg.eigh(Xn_c.T @ Xn_c)
+        o = np.argsort(-w_n)
+        V_n = V_n[:, o]
+        X_new[:, rind] = X_new[:, ind] @ V_n
+        P[:, rind] = P[:, ind] @ V_n
 
     if unit_fnorm:
         if rank > 0:
@@ -6026,9 +6041,10 @@ def _build_fs_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     Sb = Sb_list[0]
 
     # nat.param(type=1) — make the base penalty an identity on its range.
-    # The null-space basis matches mgcv's eigen choice (see _nat_param);
-    # only the order of the null columns is LAPACK-build noise, in hea
-    # exactly as in R itself.
+    # The null-space basis is canonicalized by the centered-Gram rotation
+    # (see _nat_param): column rank+0 is the constant-like direction, the
+    # final column the most-variable one, deterministically on every BLAS
+    # build (mgcv leaves this order/orientation to LAPACK noise).
     Xr, D, P = _nat_param(Xb, Sb, rank=rank, type_=1, unit_fnorm=True)
     p = Xr.shape[1]
 

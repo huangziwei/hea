@@ -1,10 +1,27 @@
 import json
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import pytest
 
 from hea.formula import set_ordered_cols
+
+
+def assert_fp_equiv(a, b):
+    """Same-model assertion for two fits that share one code path.
+
+    These equivalences are verified as diff-exactly-0 in R, and the fits
+    are bit-identical on run-to-run-stable BLAS builds (Linux OpenBLAS,
+    arm64 Accelerate). On macOS x86_64, Accelerate's ddot/dgemv kernels
+    pick their reduction order from the 32-byte phase of heap addresses,
+    so ANY two fits — even the same call repeated — drift at the last ulp
+    (measured ≤3e-14 relative). rtol=1e-11 still pins code-path
+    equivalence: a genuine intake/model split sits orders of magnitude
+    above it."""
+    np.testing.assert_allclose(np.asarray(a, dtype=float),
+                               np.asarray(b, dtype=float), rtol=1e-11)
+
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 DATA_ROOT = Path(__file__).parent.parent / "datasets"

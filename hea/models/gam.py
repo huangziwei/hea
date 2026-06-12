@@ -922,6 +922,12 @@ class gam:
         # protection. Stored on self and threaded into the criterion
         # functions (_reml, _gcv, ...) and their gradients/hessians.
         self._gamma = float(gamma)
+        # mgcv accepts the family constructor as well as the constructed
+        # object — ``if (is.function(family)) family <- family()``
+        # (mgcv.r:2324) — so ``family=gaulss`` works like
+        # ``family=gaulss()``. Family *instances* are never re-called.
+        if not isinstance(family, Family) and callable(family):
+            family = family()
         self.family = Gaussian() if family is None else family
         # mgcv coerces extended families onto (RE)ML — gam.fit4 has no
         # GCV/UBRE path (mgcv.r:1892; silent there, so silent here).
