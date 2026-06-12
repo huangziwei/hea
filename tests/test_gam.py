@@ -4793,9 +4793,14 @@ def test_fit5_fully_penalized_summary_matches_mgcv():
     # epsilon=1e-10) so early stops don't masquerade as disagreement:
     # s(v)'s λ sits in a REML basin of curvature ~0.03, where the shared
     # default conv_tol=1e-6 halts wherever the BLAS-rounded gradient
-    # lands (±~1e-3 in λ — not portable; it broke CI on OpenBLAS). Fully
-    # converged, hea and mgcv agree to a ~6e-8 floor, so one 2e-6 class
-    # covers every quantity (the circlss test-pnlss-parity.R convention).
+    # lands (±~1e-3 in λ — it broke CI on OpenBLAS). Tightening removes
+    # that early-stop slop, but the basin is flat enough (~29x gradient
+    # amplification) that λ keeps a ~3.5e-6 *cross-BLAS* floor even fully
+    # converged (Accelerate/mgcv 114.7929 vs Linux-OpenBLAS 114.7925);
+    # the REML score and the whole s.table stay portable to ~1e-6. One
+    # uniform 5e-5 class (~14x the λ floor) covers all — the circlss
+    # test-pnlss-parity.R convention, widened from its 2e-6 because this
+    # basin is far flatter than any there.
     # R: gam(list(y ~ ..., ~ 1), family=gaulss(), method="REML",
     # knots=list(x=c(0, 2*pi)), control=gam.control(epsilon=1e-10,
     # newton=list(conv.tol=1e-11))) on the same %.17g CSV; pins from
@@ -4816,7 +4821,7 @@ def test_fit5_fully_penalized_summary_matches_mgcv():
     })
     kn = {"x": [0.0, 2 * np.pi]}
     ctl = {"epsilon": 1e-10, "newton": {"conv_tol": 1e-11}}
-    TOL = 2e-6                  # one class, ~30x the cross-engine floor
+    TOL = 5e-5                  # one class, ~14x the worst cross-BLAS floor (s(v) λ)
 
     m1 = gam(['y ~ s(x, bs="cc")', "~ 1"], df, family=gaulss(),
              method="REML", knots=kn, control=ctl)
