@@ -4302,7 +4302,8 @@ class gam:
         # problem for general families.
         self.scale = 1.0
         self.sigma_squared = 1.0
-        self.residuals = family.residuals(y, fit["fitted_values"])
+        self.residuals = family.residuals(
+            y, fit["fitted_values"], **self._family_residuals_kw())
         # deviance: family postproc override when provided, else
         # estimate.gam's generic Σ deviance-residuals² (mgcv.r:2429,
         # via the postproc hook at mgcv.r:2092-2098). r² machinery is
@@ -6898,6 +6899,20 @@ class gam:
         d_i = np.maximum(d_i, 0.0)            # FP cleanup near zero
         return np.sign(y - mu) * np.sqrt(d_i)
 
+    def _family_residuals_kw(self) -> dict:
+        """Extra keyword(s) for a family residuals hook: hooks may
+        declare an optional ``prior_weights`` parameter (twlss's
+        deviance residuals carry mgcv's ``object$prior.weights``,
+        gamlss.r:2541); the engine passes the fit's prior weights when
+        the parameter is declared."""
+        import inspect
+        try:
+            params = inspect.signature(self.family.residuals).parameters
+        except (TypeError, ValueError):
+            return {}
+        return ({"prior_weights": self._wt}
+                if "prior_weights" in params else {})
+
     def residuals_of(self, type: str = "deviance") -> np.ndarray:
         """GLM residuals of the requested ``type``.
 
@@ -6919,7 +6934,8 @@ class gam:
         fam_res = getattr(self.family, "residuals", None)
         if fam_res is not None:
             return np.asarray(
-                fam_res(self._y_arr, self.fitted_values, type), dtype=float)
+                fam_res(self._y_arr, self.fitted_values, type,
+                        **self._family_residuals_kw()), dtype=float)
         if type not in ("deviance", "pearson", "scaled.pearson",
                         "working", "response"):
             raise ValueError(
@@ -6939,7 +6955,8 @@ class gam:
         fam_res = getattr(self.family, "residuals", None)
         if fam_res is not None:
             return np.asarray(
-                fam_res(y, self.fitted_values, type), dtype=float)
+                fam_res(y, self.fitted_values, type,
+                        **self._family_residuals_kw()), dtype=float)
         mu = self.fitted_values
         wt = self._wt
         if type == "response":

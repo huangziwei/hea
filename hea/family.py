@@ -2279,6 +2279,316 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
             j2_psi_bar, j2_psi2_bar, j2_trig_bar)
 
 
+def _tweedie_log_a_vec_pv(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
+    """Per-observation-``p`` variant of :func:`_tweedie_log_a_vec`
+    (mgcv's ``C_tweedious2`` case — ldTweedie called with vector
+    ``theta``/``rho``, gam.fit3.r:2952-2956). Same seven return arrays;
+    the special-function tables become (rows, J) matrices because α
+    varies by row. Kept separate from the scalar-``p`` function so its
+    existing consumers stay byte-identical."""
+    y = np.asarray(y, dtype=float)
+    phi_arr = np.broadcast_to(
+        np.asarray(phi, dtype=float), y.shape).astype(float, copy=True)
+    p_arr = np.broadcast_to(
+        np.asarray(p, dtype=float), y.shape).astype(float, copy=True)
+    log_a = np.zeros_like(y)
+    j_bar = np.zeros_like(y)
+    j_var = np.zeros_like(y)
+    j_psi_bar = np.zeros_like(y)
+    j2_psi_bar = np.zeros_like(y)
+    j2_psi2_bar = np.zeros_like(y)
+    j2_trig_bar = np.zeros_like(y)
+    flat_y = y.ravel()
+    active = flat_y > 0.0
+    if not np.any(active):
+        return (log_a, j_bar, j_var, j_psi_bar,
+                j2_psi_bar, j2_psi2_bar, j2_trig_bar)
+    ya = flat_y[active]
+    pha = phi_arr.ravel()[active]
+    pa = p_arr.ravel()[active]
+
+    om1 = 1.0 - pa
+    tm = 2.0 - pa
+    alpha = tm / om1
+    one_minus_alpha = 1.0 - alpha
+
+    log_z = (-alpha * np.log(ya) + alpha * np.log(pa - 1.0)
+             - one_minus_alpha * np.log(pha) - np.log(tm))
+    j_star = np.maximum(
+        np.exp((log_z + alpha * np.log(-alpha)) / one_minus_alpha), 1.0,
+    )
+    j_int = np.maximum(1, np.round(j_star).astype(int))
+    j_int_max = int(j_int.max())
+
+    # widest window needed across rows: decay slows as |alpha| shrinks
+    # (p → 2), so size the shared grid from the slowest-decaying row.
+    margin_mult = max(2.0, 1.0 / float(np.min(np.abs(alpha))) + 1.0)
+    safe_margin = max(50, int(np.ceil(margin_mult * j_int_max)) + 20)
+    J = min(j_int_max + safe_margin, _LD_J_MAX)
+
+    j_grid = np.arange(1, J + 1, dtype=float)
+    j_grid_int = j_grid.astype(int)
+    lgamma_jp1 = gammaln(j_grid + 1.0)
+
+    # per-row α ⇒ the -jα tables are (chunk, J); budget ~9 J-wide
+    # doubles per row in flight → 72 J bytes per row.
+    n_active = ya.size
+    chunk = max(1, _chunk_bytes // (72 * J))
+
+    out_la = np.empty(n_active)
+    out_jb = np.empty(n_active)
+    out_jv = np.empty(n_active)
+    out_jpb = np.empty(n_active)
+    out_j2pb = np.empty(n_active)
+    out_j2p2b = np.empty(n_active)
+    out_j2tb = np.empty(n_active)
+    near = 5
+    for s in range(0, n_active, chunk):
+        e = min(s + chunk, n_active)
+        lz_c = log_z[s:e]
+        ji_c = j_int[s:e]
+        nja = -j_grid[None, :] * alpha[s:e, None]      # (c, J), > 0
+        lw = (j_grid[None, :] * lz_c[:, None]
+              - lgamma_jp1[None, :] - gammaln(nja))
+        log_max = np.max(lw, axis=1)
+        within_near = np.abs(j_grid_int[None, :] - ji_c[:, None]) <= near
+        above_eps = lw >= (log_max[:, None] - _LD_EPS)
+        keep = within_near | above_eps
+        w = np.where(keep, np.exp(lw - log_max[:, None]), 0.0)
+        sum_w = np.sum(w, axis=1)
+        out_la[s:e] = log_max + np.log(sum_w)
+        p_w = w / sum_w[:, None]
+        jb_c = np.sum(p_w * j_grid[None, :], axis=1)
+        out_jb[s:e] = jb_c
+        out_jv[s:e] = np.sum(
+            p_w * (j_grid[None, :] - jb_c[:, None]) ** 2, axis=1,
+        )
+        psi_c = digamma(nja)
+        out_jpb[s:e] = np.sum(p_w * j_grid[None, :] * psi_c, axis=1)
+        jpsi = j_grid[None, :] * psi_c
+        out_j2pb[s:e] = np.sum(p_w * j_grid[None, :] * jpsi, axis=1)
+        out_j2p2b[s:e] = np.sum(p_w * jpsi * jpsi, axis=1)
+        out_j2tb[s:e] = np.sum(
+            p_w * j_grid[None, :] ** 2 * polygamma(1, nja), axis=1,
+        )
+
+    log_a.ravel()[active] = out_la
+    j_bar.ravel()[active] = out_jb
+    j_var.ravel()[active] = out_jv
+    j_psi_bar.ravel()[active] = out_jpb
+    j2_psi_bar.ravel()[active] = out_j2pb
+    j2_psi2_bar.ravel()[active] = out_j2p2b
+    j2_trig_bar.ravel()[active] = out_j2tb
+    return (log_a, j_bar, j_var, j_psi_bar,
+            j2_psi_bar, j2_psi2_bar, j2_trig_bar)
+
+
+def _ld_tweedie_work(y, mu, theta, rho, a: float = 1.001,
+                     b: float = 1.999) -> np.ndarray:
+    """mgcv ``ldTweedie`` in the working (ρ, θ) parameterization with
+    ``all.derivs=TRUE`` (gam.fit3.r:2838-3035): log Tweedie density and
+    derivatives for vector ``mu``/``theta``/``rho``, with
+    p = (a + b·e^θ)/(1 + e^θ) ∈ (a, b) and φ = e^ρ.
+
+    Returns the (n, 10) array in mgcv's column order
+    ``[l, ρ, ρρ, θ, θθ, θρ, μ, μμ, μθ, μρ]`` — exactly what twlss's ll
+    consumes (gamlss.r:2575-2580). The closed-form saddle/zero parts
+    and the (p, φ) → (θ, ρ) chain are line-by-line ports; the series
+    part (the C ``tweedious2`` call) runs the Dunn-Smyth moment
+    machinery (:func:`_tweedie_log_a_vec_pv`) with the same eps gate,
+    converted to working-parameter derivatives via
+
+        ∂log W_j/∂ρ = −(1−α)·j,   ∂log W_j/∂p = j·L′ + α′·j·ψ(−jα),
+
+    L = log z, α = (2−p)/(1−p), and the chain p(θ).
+    """
+    y = np.asarray(y, dtype=float)
+    n = y.shape[0]
+    mu = np.ascontiguousarray(
+        np.broadcast_to(np.asarray(mu, dtype=float), y.shape))
+    theta = np.ascontiguousarray(
+        np.broadcast_to(np.asarray(theta, dtype=float), y.shape))
+    rho = np.ascontiguousarray(
+        np.broadcast_to(np.asarray(rho, dtype=float), y.shape))
+    if not (1.0 < a < b < 2.0):
+        raise ValueError("1<a<b<2 (strict) required")
+
+    # p(θ) and its θ-derivatives, the ±θ-stable branches
+    # (gam.fit3.r:2849-2858)
+    pos = theta > 0
+    eth = np.exp(-np.abs(theta))
+    p = np.where(pos, (b + a * eth) / (1.0 + eth),
+                 (b * eth + a) / (eth + 1.0))
+    dpth1 = eth * (b - a) / (1.0 + eth) ** 2
+    dpth2 = np.where(
+        pos,
+        ((a - b) * eth + (b - a) * eth * eth) / (eth + 1.0) ** 3,
+        ((a - b) * eth * eth + (b - a) * eth) / (eth + 1.0) ** 3,
+    )
+    phi = np.exp(rho)
+
+    ld = np.zeros((n, 10))
+
+    # y == 0 rows: closed forms (gam.fit3.r:2920-2937), mu > 0 gate
+    zm = (y == 0.0) & (mu > 0.0)
+    if np.any(zm):
+        mu_z = mu[zm]
+        p_z = p[zm]
+        phi_z = phi[zm]
+        lmu_z = np.log(mu_z)
+        ld[zm, 0] = -mu_z ** (2.0 - p_z) / (phi_z * (2.0 - p_z))
+        ld[zm, 1] = -ld[zm, 0] / phi_z
+        ld[zm, 2] = -2.0 * ld[zm, 1] / phi_z
+        ld[zm, 3] = -ld[zm, 0] * (lmu_z - 1.0 / (2.0 - p_z))
+        ld[zm, 4] = (2.0 * ld[zm, 3] / (2.0 - p_z)
+                     + ld[zm, 0] * lmu_z ** 2)
+        ld[zm, 5] = -ld[zm, 3] / phi_z
+        mup = mu_z ** p_z
+        ld[zm, 6] = -mu_z / (mup * phi_z)
+        ld[zm, 7] = -(1.0 - p_z) / (mup * phi_z)
+        ld[zm, 8] = lmu_z * mu_z / (mup * phi_z)
+        ld[zm, 9] = -ld[zm, 6] / phi_z
+
+    # y > 0 rows: saddle part in (p, φ) (gam.fit3.r:2974-2989)
+    ind = y > 0.0
+    any_pos = bool(np.any(ind))
+    if any_pos:
+        y_i = y[ind]
+        mu_i = mu[ind]
+        p_i = p[ind]
+        phii = phi[ind]
+        log_mu = np.log(mu_i)
+        onep = 1.0 - p_i
+        twop = 2.0 - p_i
+        mu1p = mu_i ** onep
+        k_theta = mu_i * mu1p / twop          # mu^(2-p)/(2-p)
+        theta_s = mu1p / onep                 # mu^(1-p)/(1-p)
+        a1 = y_i / onep - mu_i / twop
+        l_base = mu1p * a1 / phii
+        ld[ind, 0] = l_base - np.log(y_i)
+        ld[ind, 1] = -l_base / phii
+        ld[ind, 2] = 2.0 * l_base / phii ** 2
+        x_ = (theta_s * y_i * (1.0 / onep - log_mu) / phii
+              + k_theta * (log_mu - 1.0 / twop) / phii)
+        ld[ind, 3] = x_
+        ld[ind, 4] = (theta_s * y_i
+                      * (log_mu ** 2 - 2.0 * log_mu / onep
+                         + 2.0 / onep ** 2) / phii
+                      - k_theta * (log_mu ** 2 - 2.0 * log_mu / twop
+                                   + 2.0 / twop ** 2) / phii)
+        ld[ind, 5] = -x_ / phii
+
+    # transform (p, φ) derivatives to working (θ, ρ)
+    # (gam.fit3.r:2990-2997) — all rows, zeros included
+    ld[:, 2] = ld[:, 2] * phi ** 2 + ld[:, 1] * phi
+    ld[:, 1] = ld[:, 1] * phi
+    ld[:, 4] = ld[:, 4] * dpth1 ** 2 + ld[:, 3] * dpth2
+    ld[:, 3] = ld[:, 3] * dpth1
+    ld[:, 5] = ld[:, 5] * dpth1 * phi
+
+    # all.derivs μ-columns for y > 0 (gam.fit3.r:2999-3009)
+    if any_pos:
+        a2 = mu1p / (mu_i * phii)             # 1/(mu^p · φ)
+        ld[ind, 6] = a2 * (onep * a1 - mu_i / twop)
+        ld[ind, 7] = -a2 * (onep * p_i * a1 / mu_i
+                            + 2.0 * onep / twop)
+        ld[ind, 8] = a2 * (-log_mu * onep * a1 - a1
+                           + onep * (y_i / onep ** 2 - mu_i / twop ** 2)
+                           + mu_i * log_mu / twop - mu_i / twop ** 2)
+        ld[ind, 9] = a2 * (mu_i / (phii * twop) - onep * a1 / phii)
+    ld[:, 9] = ld[:, 9] * phi
+    ld[:, 8] = ld[:, 8] * dpth1
+
+    # series part — added AFTER the transform: like the C code, it is
+    # computed natively in (θ, ρ) (gam.fit3.r:3013-3020)
+    if any_pos:
+        la, jb, jv, jpb, j2pb, j2p2b, j2tb = _tweedie_log_a_vec_pv(
+            y_i, phii, p_i)
+        al = twop / onep                      # α < 0
+        alp = 1.0 / onep ** 2                 # dα/dp
+        alpp = 2.0 / onep ** 3                # d²α/dp²
+        lphi = np.log(phii)
+        ly = np.log(y_i)
+        lp1 = np.log(p_i - 1.0)
+        Lp = (-alp * ly + alp * lp1 + al / (p_i - 1.0) + alp * lphi
+              + 1.0 / twop)
+        Lpp = (-alpp * ly + alpp * lp1 + 2.0 * alp / (p_i - 1.0)
+               - al / (p_i - 1.0) ** 2 + alpp * lphi + 1.0 / twop ** 2)
+        one_m_al = 1.0 - al
+        cov_j_jpsi = j2pb - jb * jpb
+        dla_dp = jb * Lp + alp * jpb
+        d2la_dp2 = (Lp ** 2 * jv + 2.0 * Lp * alp * cov_j_jpsi
+                    + alp ** 2 * (j2p2b - jpb ** 2)
+                    + jb * Lpp + alpp * jpb - alp ** 2 * j2tb)
+        d2la_dpdrho = (-one_m_al * (Lp * jv + alp * cov_j_jpsi)
+                       + alp * jb)
+        d1 = dpth1[ind]
+        d2_ = dpth2[ind]
+        ld[ind, 0] += la
+        ld[ind, 1] += -one_m_al * jb
+        ld[ind, 2] += one_m_al ** 2 * jv
+        ld[ind, 3] += d1 * dla_dp
+        ld[ind, 4] += d1 ** 2 * d2la_dp2 + d2_ * dla_dp
+        ld[ind, 5] += d1 * d2la_dpdrho
+    return ld
+
+
+def _tw_null_fit(y, a: float = 1.001, b: float = 1.999):
+    """mgcv ``tw.null.fit`` (gamlss.r:2454-2490): stabilized,
+    step-controlled Newton MLE of (μ, p, φ) for a plain Tweedie sample,
+    iterating on the working scale (log μ, θ, ρ). Returns
+    ``(mu, p, phi)`` — R's ``c(mu, p, sigma)``. The Hessian's log-μ
+    chain and the negative-definite eigenvalue clamp are ported
+    literally (the gradient stop test is exact, so the approximate
+    chain only shapes the path)."""
+    y = np.asarray(y, dtype=float)
+    th = np.zeros(3)                     # log mu, theta, rho
+    ones = np.ones_like(y)
+
+    def _ld_sums(t):
+        ld = _ld_tweedie_work(y, np.exp(t[0]) * ones, t[1] * ones,
+                              t[2] * ones, a=a, b=b)
+        return ld.sum(axis=0)
+
+    lds = _ld_sums(th)
+    for _ in range(50):
+        g = lds[[6, 3, 1]].copy()
+        if np.sum(np.abs(g) > 1e-9 * abs(lds[0])) == 0:
+            break
+        g[0] = g[0] * np.exp(th[0])      # work on log scale for mu
+        H = np.zeros((3, 3))             # mu, th, rh
+        H[0, 0] = lds[7]
+        H[1, 1] = lds[4]
+        H[2, 2] = lds[2]
+        H[0, 1] = H[1, 0] = lds[8]
+        H[0, 2] = H[2, 0] = lds[9]
+        H[1, 2] = H[2, 1] = lds[5]
+        H[:, 0] = H[:, 0] * np.exp(th[0])
+        H[0, 1:] = H[0, 1:] * np.exp(th[0])
+        ev, V = np.linalg.eigh(0.5 * (H + H.T))
+        tol = float(np.max(np.abs(ev))) * 1e-7
+        ev[ev > -tol] = -tol
+        step = V @ ((V.T @ g) / ev)
+        ms = float(np.max(np.abs(step)))
+        if ms > 3.0:
+            step = step * 3.0 / ms
+        while True:
+            th1 = th - step
+            lds1 = _ld_sums(th1)
+            if lds1[0] < lds[0]:
+                step = step / 2.0
+            else:
+                th = th1
+                lds = lds1
+                break
+    t2 = th[1]
+    if t2 > 0:
+        p = (b + a * np.exp(-t2)) / (1.0 + np.exp(-t2))
+    else:
+        p = (b * np.exp(t2) + a) / (np.exp(t2) + 1.0)
+    return float(np.exp(th[0])), float(p), float(np.exp(th[2]))
+
+
 def _r_tweedie(rng, mu, p: float, phi: float) -> np.ndarray:
     """mgcv ``rTweedie`` (gam.fit3.r:3112-3146): compound Poisson-Gamma
     deviates for 1 < p < 2. mgcv draws N_i ~ Poisson(λ_i) individual
@@ -4029,8 +4339,11 @@ class GeneralFamily(Family):
       d2b=None, fh=None, D=None)`` — ``lpi`` is a list of ``n_lp``
       0-based integer column-index arrays into the stacked ``X``;
       ``offset`` a per-LP list (entries ``None`` for offset-free
-      formulas) or ``None``; ``wt`` the (n,) prior weights — honor
-      them in every returned quantity. Deriv levels: :meth:`ll`.
+      formulas) or ``None``; ``wt`` the (n,) prior weights, forwarded
+      by the engine — note mgcv's own general families (gaulss,
+      twlss) leave the likelihood unweighted and consume prior
+      weights only in residuals/postproc; follow your reference.
+      Deriv levels: :meth:`ll`.
     - ``initialize_coef(y, X, lpi, E=None, offset=None,
       use_unscaled=False)`` — called with ``use_unscaled=True`` from
       gam.fit5 (E = the ldetS root, gam.fit4.r:974) and with the
@@ -4042,7 +4355,11 @@ class GeneralFamily(Family):
     - ``residuals(y, fitted, type="deviance")`` — REQUIRED for
       general families: the fit stores ``residuals(y, fitted)`` and
       ``residuals_of(type=)``/qq dispatch through it (mgcv.r:3429);
-      ``fitted`` is the (n, n_lp) inverse-linked matrix.
+      ``fitted`` is the (n, n_lp) inverse-linked matrix. A hook MAY
+      additionally declare an optional ``prior_weights`` keyword —
+      the engine passes the fit's prior weights when it is declared
+      (twlss's deviance residuals carry mgcv's
+      ``object$prior.weights``).
     - ``rd(rng, mu, wt, scale)`` — optional; enables qq.gam's
       simulation path (``mu`` = the fitted matrix, like
       :class:`gaulss`).
@@ -4275,6 +4592,194 @@ class gaulss(GeneralFamily):
                 f"b={self.b:g})")
 
 
+class twlss(GeneralFamily):
+    """Tweedie location-scale-shape general family — mgcv ``twlss()``
+    (gamlss.r:2493-2662). Three linear predictors: LP1 the mean μ
+    (links: log/identity/sqrt), LP2 the transformed index θ with
+    p = (a + b·e^θ)/(1 + e^θ) ∈ (a, b) (identity link), LP3
+    ρ = log scale (identity link).
+
+    ``available_derivs = 0``: mgcv supplies no third/fourth
+    log-likelihood derivatives, so fitting always runs the extended
+    Fellner-Schall loop (mgcv.r:1907-1908's automatic optimizer
+    switch). Like mgcv, the likelihood itself ignores prior weights
+    (gamlss.r:2556 — ``wt`` unread, same as gaulss); they enter the
+    deviance residuals and null deviance only.
+    """
+    name = "twlss"
+    scale_known = True
+    n_theta = 0
+    n_lp = 3
+    available_derivs = 0
+
+    _OK_MU_LINKS = ("log", "identity", "sqrt")
+
+    def __init__(self, link: tuple[str, str, str] = ("log", "identity",
+                                                     "identity"),
+                 a: float = 1.01, b: float = 1.99):
+        mu_link, th_link, rho_link = link
+        if mu_link not in self._OK_MU_LINKS:
+            raise ValueError(
+                f'link "{mu_link}" not available for the mu parameter '
+                f"of twlss; available links are {self._OK_MU_LINKS}"
+            )
+        if th_link != "identity" or rho_link != "identity":
+            raise ValueError(
+                'only the "identity" link is available for the theta '
+                "and rho parameters of twlss"
+            )
+        if not (1.0 < a < b < 2.0):
+            raise ValueError("1<a<b<2 (strict) required")
+        self.a = float(a)
+        self.b = float(b)
+        links = [
+            {"log": LogLink, "identity": IdentityLink,
+             "sqrt": SqrtLink}[mu_link](),
+            IdentityLink(), IdentityLink(),
+        ]
+        super().__init__(links)
+        self.tri = trind_generator(3)
+
+    def _p_of_theta(self, theta):
+        """p(θ) with the ±θ-stable branches (gamlss.r:2528-2532)."""
+        theta = np.asarray(theta, dtype=float)
+        eth = np.exp(-np.abs(theta))
+        return np.where(theta > 0,
+                        (self.b + self.a * eth) / (1.0 + eth),
+                        (self.b * eth + self.a) / (eth + 1.0))
+
+    def ll(self, y, X, coef, wt=None, *, lpi, offset=None,
+           deriv: int = 0, d1b=None, d2b=None, fh=None, D=None) -> dict:
+        y = np.asarray(y, dtype=float)
+        X = np.asarray(X, dtype=float)
+        coef = np.asarray(coef, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        eta = X[:, jj[0]] @ coef[jj[0]]
+        theta = X[:, jj[1]] @ coef[jj[1]]
+        rho = X[:, jj[2]] @ coef[jj[2]]
+        if offset is not None:
+            if offset[0] is not None:
+                eta = eta + offset[0]
+            if len(offset) > 1 and offset[1] is not None:
+                theta = theta + offset[1]
+            if len(offset) > 2 and offset[2] is not None:
+                rho = rho + offset[2]
+        mu = self.links[0].linkinv(eta)
+
+        # ldTweedie columns: l; ρ, ρρ; θ, θθ, θρ; μ, μμ, μθ, μρ —
+        # reordered into the packed (μ, θ, ρ) layout (gamlss.r:2575-2580)
+        ld = _ld_tweedie_work(y, mu, theta, rho, a=self.a, b=self.b)
+        l0 = ld[:, 0]
+        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        if deriv == 0:
+            return ret
+        l1 = ld[:, [6, 3, 1]]
+        l2 = ld[:, [7, 8, 9, 4, 5, 2]]
+        ig1 = np.column_stack([self.links[0].mu_eta(eta),
+                               self.links[1].mu_eta(theta),
+                               self.links[2].mu_eta(rho)])
+        g2 = np.column_stack([self.links[0].d2link(mu),
+                              self.links[1].d2link(theta),
+                              self.links[2].d2link(rho)])
+        # no l3/l4 for this family: etamu/gH run at deriv 0 whenever
+        # any derivative is requested (gamlss.r:2592-2599)
+        tri = self.tri
+        de = gamlss_etamu(l1, l2, None, None, ig1, g2, None, None,
+                          tri["i2"], tri["i3"], tri["i4"], 0)
+        gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
+                       l3=de["l3"], i3=tri["i3"], l4=de["l4"],
+                       i4=tri["i4"], d1b=d1b, d2b=d2b, deriv=0,
+                       fh=fh, D=D)
+        ret.update(gh)
+        return ret
+
+    def initialize_coef(self, y, X, lpi, E=None, offset=None,
+                        use_unscaled: bool = False) -> np.ndarray:
+        """twlss ``initialize`` (gamlss.r:2609-2649): regress g(y) on
+        LP1's columns, the log absolute scaled residuals
+        ``log|((y−μ₁)/μ₁^1.5)|`` on LP3's (the log-scale predictor),
+        and start the θ predictor at zero (p = (a+b)/2). E is a
+        regularizer; mgcv's expression never references offsets here —
+        ported as-is."""
+        y = np.asarray(y, dtype=float)
+        X = np.asarray(X, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        p = X.shape[1]
+        if E is None:
+            E = np.zeros((0, p))
+        start = np.zeros(p)
+        if self.links[0].name == "identity":
+            yt1 = y.copy()
+        else:
+            yt1 = self.links[0].link(np.abs(y) + float(np.max(y)) * 1e-7)
+
+        def _reg(cols, target):
+            if use_unscaled:
+                xa = np.vstack([X[:, cols], E[:, cols]])
+                bvec, *_ = np.linalg.lstsq(
+                    xa, np.concatenate([target, np.zeros(E.shape[0])]),
+                    rcond=None)
+                bvec[~np.isfinite(bvec)] = 0.0
+                return bvec
+            return _pen_reg(X[:, cols], E[:, cols], target)
+
+        b1 = _reg(jj[0], yt1)
+        start[jj[0]] = b1
+        mu1 = self.links[0].linkinv(X[:, jj[0]] @ b1)
+        lres1 = np.log(np.abs((y - mu1) / mu1 ** 1.5))
+        start[jj[2]] = _reg(jj[2], lres1)
+        return start
+
+    def postproc(self, y, prior_weights, fitted, linear_predictors,
+                 offset, intercept) -> dict:
+        """twlss ``postproc`` (gamlss.r:2545-2554): null deviance from
+        the intercept-only Tweedie MLE — mgcv calls ``tw.null.fit(y)``
+        with ITS defaults a=1.001/b=1.999 even when the family was
+        built with other (a, b); ported bug-for-bug — scaled by the
+        FITTED per-observation e^ρ."""
+        y = np.asarray(y, dtype=float)
+        pw = np.asarray(prior_weights, dtype=float)
+        fitted = np.asarray(fitted, dtype=float)
+        mu0, p0, _phi0 = _tw_null_fit(y)
+        y1 = y + (y == 0.0)
+        th0 = (y1 ** (1.0 - p0) - mu0 ** (1.0 - p0)) / (1.0 - p0)
+        ka0 = (y ** (2.0 - p0) - mu0 ** (2.0 - p0)) / (2.0 - p0)
+        nd = np.sum(np.maximum(
+            2.0 * (y * th0 - ka0) * pw / np.exp(fitted[:, 2]), 0.0))
+        return {"null_deviance": float(nd)}
+
+    def residuals(self, y, fitted, type: str = "deviance",
+                  prior_weights=None) -> np.ndarray:
+        """twlss residuals (gamlss.r:2522-2543): ``fitted`` is the
+        (n, 3) matrix (μ, θ, ρ). Deviance residuals carry mgcv's
+        ``object$prior.weights`` — the engine passes them through the
+        optional ``prior_weights`` keyword."""
+        if type not in ("deviance", "pearson", "response"):
+            raise ValueError(
+                "type must be one of 'deviance', 'pearson', 'response' "
+                f"for twlss residuals; got {type!r}")
+        y = np.asarray(y, dtype=float)
+        fitted = np.asarray(fitted, dtype=float)
+        mu = fitted[:, 0]
+        p = self._p_of_theta(fitted[:, 1])
+        phi = np.exp(fitted[:, 2])
+        if type == "pearson":
+            return (y - mu) / np.sqrt(phi * mu ** p)
+        if type == "response":
+            return y - mu
+        pw = (np.ones_like(y) if prior_weights is None
+              else np.asarray(prior_weights, dtype=float))
+        y1 = y + (y == 0.0)
+        th = (y1 ** (1.0 - p) - mu ** (1.0 - p)) / (1.0 - p)
+        ka = (y ** (2.0 - p) - mu ** (2.0 - p)) / (2.0 - p)
+        return np.sign(y - mu) * np.sqrt(
+            np.maximum(2.0 * (y * th - ka) * pw / phi, 0.0))
+
+    def __repr__(self):
+        return (f"twlss(link=({self.links[0].name!r}, 'identity', "
+                f"'identity'), a={self.a:g}, b={self.b:g})")
+
+
 def _coerce_response(y_series: pl.Series, family: "Family") -> np.ndarray:
     """Cast the response column to a numeric float array, with R's
     factor-response convention for :class:`Binomial`.
@@ -4336,7 +4841,7 @@ __all__ = [
     "Tweedie", "tw",
     "Scat", "scat",
     "nb",
-    "GeneralFamily", "gaulss",
+    "GeneralFamily", "gaulss", "twlss",
     "trind_generator", "gamlss_etamu", "gamlss_gH",
     "IdentityLink", "LogLink", "InverseLink",
     "SqrtLink", "LogitLink", "ProbitLink", "CauchitLink", "CloglogLink",

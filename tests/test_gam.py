@@ -5317,10 +5317,148 @@ def test_general_family_authoring_contract():
     assert np.corrcoef(fitted[:, 0], truth)[0, 1] > 0.95
     assert 0.3 < float(np.median(fitted[:, 1])) < 1.5
     assert float(np.max(np.abs(fitted[:, 2]))) < 0.999
-    # consumer-used surfaces run on the K=3 fit
+    # predict/summary run on the K=3 fit
     pred = m.predict(df[:5])
     assert pred.shape[0] == 5
     m.summary()
+
+
+def _twlss_fixture():
+    # Tweedie response over smooth μ(x) + linear w — the SAME doubles
+    # were exported at %.17g and fit live in R (mgcv 1.9-4) for the
+    # pins below.
+    from hea.family import _r_tweedie
+    rng = np.random.default_rng(9)
+    n = 300
+    x = rng.uniform(0, 1, n)
+    z = rng.uniform(0, 1, n)
+    w = rng.uniform(0, 1, n)
+    mu = np.exp(0.3 + np.sin(2 * np.pi * x) + 0.3 * w)
+    y = _r_tweedie(rng, mu, p=1.55, phi=0.9)
+    return pl.DataFrame({"y": y, "x": x, "z": z, "w": w})
+
+
+def test_twlss_through_gam_matches_mgcv():
+    # R: gam(list(y ~ s(x) + w, ~ 1, ~ s(z)), family=twlss(),
+    # method="REML") — available.derivs=0, so mgcv coerces the
+    # optimizer to efs (mgcv.r:1908) and hea auto-dispatches the same
+    # way; tolerances sit inside EFS's own stop band (efs.tol = 0.1),
+    # like the gaulss efs pins. m2 puts a covariate on the θ (index)
+    # predictor — per-row p through the vectorized ldTweedie series
+    # (the C_tweedious2 case) end-to-end.
+    from hea.family import twlss
+
+    df = _twlss_fixture()
+    m1 = gam(["y ~ s(x) + w", "~ 1", "~ s(z)"], df, family=twlss(),
+             method="REML")
+    np.testing.assert_allclose(m1.REML_criterion / 2, 495.3552356778,
+                               rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m1.sp[0], 0.1235779327, rtol=1e-4)
+    # second sp is a flat λ→∞ direction (s(z) on ρ shrunk to linear,
+    # edf 1.0014): R stops at 8836, hea at ~7915 — same working-
+    # infinity band; pin the direction + its edf instead of the value.
+    assert m1.sp[1] > 500.0
+    np.testing.assert_allclose(m1.edf_total, 10.3995210288, rtol=0,
+                               atol=2e-3)
+    rows = m1._smooth_significance_rows()
+    np.testing.assert_allclose(rows[1][1], 1.0013803186, rtol=0,
+                               atol=5e-3)
+    # tp-basis eigenvector signs are build noise (cf. the fs record):
+    # pin |coef|, plus fitted values which are sign-invariant.
+    np.testing.assert_allclose(
+        np.abs(np.asarray(m1._beta)[:4]),
+        np.abs([0.4243552129, 0.0458891478, -2.1074745630,
+                0.7379786690]), rtol=0, atol=1e-4)
+    np.testing.assert_allclose(
+        np.asarray(m1.fitted_values)[:2],
+        [[0.6581888497, 0.3261817526, -0.2348092602],
+         [4.7811905814, 0.3261817526, -0.1599234639]],
+        rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m1.deviance, 358.2875399725, rtol=0,
+                               atol=1e-3)
+    np.testing.assert_allclose(m1.null_deviance, 632.1121270051,
+                               rtol=0, atol=1e-3)
+    np.testing.assert_allclose(
+        np.asarray(m1.residuals)[:3],
+        [1.2877909886, -1.2883620195, -2.1466111271], rtol=0,
+        atol=1e-4)
+    assert 3 <= m1.outer_info["iter"] <= 8          # R: 5
+    np.testing.assert_allclose(np.asarray(m1.Vp)[0, 0], 0.009975857963,
+                               rtol=0, atol=1e-6)
+    assert m1.sp_vcov() is None                     # deriv-0 fit
+    pred = m1.predict(df[:3])
+    np.testing.assert_allclose(
+        pred["fit"].to_numpy(),
+        np.asarray(m1.fitted_values)[:3, 0], rtol=0, atol=1e-10)
+    m1.summary()
+
+    m2 = gam(["y ~ s(x)", "~ z", "~ 1"], df, family=twlss(),
+             method="REML")
+    np.testing.assert_allclose(m2.REML_criterion / 2, 493.2079998178,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m2.sp, [0.1283965998], rtol=1e-4)
+    np.testing.assert_allclose(m2.edf_total, 9.3607166433, rtol=0,
+                               atol=1e-4)
+    # LP2 (θ) + LP3 (ρ) parametric coefficients — exact stop point
+    np.testing.assert_allclose(
+        np.asarray(m2._beta)[10:13],
+        [0.4148269229, -0.1577905892, -0.1466709101], rtol=0,
+        atol=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(m2.fitted_values)[0],
+        [0.6569874072, 0.2885374839, -0.1466709101], rtol=0,
+        atol=1e-5)
+    np.testing.assert_allclose(m2.deviance, 358.2223478383, rtol=0,
+                               atol=1e-4)
+    np.testing.assert_allclose(m2.null_deviance, 626.0739164460,
+                               rtol=0, atol=1e-3)
+
+
+def test_twlss_weighted_residuals_match_mgcv():
+    # mgcv's twlss ll IGNORES prior weights (gamlss.r:2556 — wt
+    # unread), so a weighted fit is IDENTICAL to the unweighted one;
+    # weights enter only the deviance residuals (object$prior.weights,
+    # gamlss.r:2541 — hea's optional prior_weights residuals keyword)
+    # and the postproc null deviance. R-verified both ways.
+    from hea.family import twlss
+
+    df = _twlss_fixture()
+    pw = np.tile([1.0, 2.0], 150)
+    mw = gam(["y ~ s(x)", "~ 1", "~ 1"], df, family=twlss(),
+             method="REML", weights=pw)
+    mu = gam(["y ~ s(x)", "~ 1", "~ 1"], df, family=twlss(),
+             method="REML")
+    # fit invariance (R: REML/sp/coef all.equal TRUE)
+    np.testing.assert_allclose(mw.REML_criterion, mu.REML_criterion,
+                               rtol=0, atol=1e-9)
+    np.testing.assert_array_equal(np.asarray(mw._beta),
+                                  np.asarray(mu._beta))
+    np.testing.assert_allclose(mw.REML_criterion / 2, 493.3949778807,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(mw.sp, [0.1283235976], rtol=1e-4)
+    # weighted deviance surface (R refs)
+    np.testing.assert_allclose(mw.deviance, 539.2703507203, rtol=0,
+                               atol=1e-3)
+    np.testing.assert_allclose(mu.deviance, 358.2394763188, rtol=0,
+                               atol=1e-3)
+    np.testing.assert_allclose(mw.null_deviance, 972.3090046659,
+                               rtol=0, atol=1e-3)
+    np.testing.assert_allclose(mu.null_deviance, 625.4888863739,
+                               rtol=0, atol=1e-3)
+    np.testing.assert_allclose(
+        np.asarray(mw.residuals)[:3],
+        [1.2353023924, -1.8067797691, -2.0311914008], rtol=0,
+        atol=1e-4)
+    np.testing.assert_allclose(
+        np.asarray(mu.residuals)[:3],
+        [1.2353023924, -1.2775862268, -2.0311914008], rtol=0,
+        atol=1e-4)
+    # the pw=2 rows scale by √2 exactly; pw=1 rows are untouched
+    np.testing.assert_allclose(
+        np.asarray(mw.residuals)[1::2],
+        np.asarray(mu.residuals)[1::2] * np.sqrt(2.0), rtol=1e-12)
+    np.testing.assert_array_equal(np.asarray(mw.residuals)[::2],
+                                  np.asarray(mu.residuals)[::2])
 
 
 def test_predict_unconditional_se_matches_mgcv():
