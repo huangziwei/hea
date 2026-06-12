@@ -4829,9 +4829,18 @@ def test_fit5_fully_penalized_summary_matches_mgcv():
     assert m2.converged
     np.testing.assert_allclose(m2.REML_criterion / 2, 125.1716615835,
                                rtol=0, atol=1e-6)
-    np.testing.assert_allclose(
-        m2.sp, [1725.9594822063, 114.6488554795, 47.6852166323],
-        rtol=5e-4)
+    # sp[0]/sp[2] are tightly determined (match mgcv to <2e-7). sp[1]
+    # (s(v)) is flat-determined: the REML criterion agrees to ~3e-9
+    # across backends while sp[1] itself spreads ~7e-4 — Accelerate
+    # lands 114.6566, Linux-OpenBLAS (CI) 114.5707, mgcv 114.6489. The
+    # REML surface is essentially flat along it, so its argmin isn't
+    # BLAS-portable; everything the fit *reports* is (edf/Ref.df/Chi.sq/
+    # p pinned below at 1e-4 / 1e-3). Pin it at the band the flat
+    # direction determines, not the 5e-4 the others hold to.
+    np.testing.assert_allclose([m2.sp[0], m2.sp[2]],
+                               [1725.9594822063, 47.6852166323],
+                               rtol=5e-4)
+    np.testing.assert_allclose(m2.sp[1], 114.6488554795, rtol=2e-3)
     rows = m2._smooth_significance_rows()
     assert [r[0] for r in rows] == ["s(x)", "s(v)", "s(g)"]
     np.testing.assert_allclose(
@@ -4998,9 +5007,8 @@ def test_optimizer_knob_efs_and_validation():
                  method="REML")
     m_knob = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
                  method="REML", optimizer="efs")
-    np.testing.assert_array_equal(np.asarray(m_knob._beta),
-                                  np.asarray(m_auto._beta))
-    np.testing.assert_array_equal(m_knob.sp, m_auto.sp)
+    _assert_fp_equiv(m_knob._beta, m_auto._beta)
+    _assert_fp_equiv(m_knob.sp, m_auto.sp)
     assert m_knob.optimizer == ("efs", "newton")
     np.testing.assert_allclose(m_knob.REML_criterion / 2,
                                200.6203917799, rtol=0, atol=1e-3)
@@ -5011,8 +5019,7 @@ def test_optimizer_knob_efs_and_validation():
     m_gcv = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
                 method="GCV.Cp", optimizer="efs")
     assert m_gcv.method == "REML"
-    np.testing.assert_array_equal(np.asarray(m_gcv._beta),
-                                  np.asarray(m_knob._beta))
+    _assert_fp_equiv(m_gcv._beta, m_knob._beta)
 
     # derivs==1 + optimizer="efs" is legal (mgcv.r:1907 only coerces
     # to bfgs when efs was NOT requested); ll never asked past deriv 1
@@ -5029,8 +5036,7 @@ def test_optimizer_knob_efs_and_validation():
 
     m_d1 = gam(["y ~ s(x) + w", "~ s(z)"], df, family=_gaulss_d1(),
                method="REML", optimizer="efs")
-    np.testing.assert_array_equal(np.asarray(m_d1._beta),
-                                  np.asarray(m_auto._beta))
+    _assert_fp_equiv(m_d1._beta, m_auto._beta)
 
     # intake validation — mgcv's exact messages
     with pytest.raises(ValueError, match="unknown optimizer"):
@@ -5049,8 +5055,7 @@ def test_optimizer_knob_efs_and_validation():
     m_def = gam("y ~ s(x)", df, method="REML")
     m_opt = gam("y ~ s(x)", df, method="REML",
                 optimizer=("outer", "newton"))
-    np.testing.assert_array_equal(np.asarray(m_opt._beta),
-                                  np.asarray(m_def._beta))
+    _assert_fp_equiv(m_opt._beta, m_def._beta)
     assert m_def.optimizer == ("outer", "newton")
 
 
@@ -5514,8 +5519,7 @@ def test_twlss_weighted_residuals_match_mgcv():
     # fit invariance (R: REML/sp/coef all.equal TRUE)
     np.testing.assert_allclose(mw.REML_criterion, mu.REML_criterion,
                                rtol=0, atol=1e-9)
-    np.testing.assert_array_equal(np.asarray(mw._beta),
-                                  np.asarray(mu._beta))
+    _assert_fp_equiv(mw._beta, mu._beta)
     np.testing.assert_allclose(mw.REML_criterion / 2, 493.3949778807,
                                rtol=0, atol=1e-4)
     np.testing.assert_allclose(mw.sp, [0.1283235976], rtol=1e-4)
@@ -5540,8 +5544,8 @@ def test_twlss_weighted_residuals_match_mgcv():
     np.testing.assert_allclose(
         np.asarray(mw.residuals)[1::2],
         np.asarray(mu.residuals)[1::2] * np.sqrt(2.0), rtol=1e-12)
-    np.testing.assert_array_equal(np.asarray(mw.residuals)[::2],
-                                  np.asarray(mu.residuals)[::2])
+    _assert_fp_equiv(np.asarray(mw.residuals)[::2],
+                     np.asarray(mu.residuals)[::2])
 
 
 def test_shash_through_gam_matches_mgcv():
