@@ -23,6 +23,7 @@ import polars as pl
 from scipy.stats import chi2, f
 
 from ._shared import _caller_names
+from ..formula import deparse
 from ..models.gam import gam
 from ..models.glm import glm
 from ..models.lm import lm
@@ -114,7 +115,7 @@ def anova(*models, test: str | None = None, freq: bool = False,
 
 
 def drop1(model, *, test: str | None = None, k: float = 2.0):
-    """Single-term deletions, R's ``drop1.lm`` / ``drop1.glm``.
+    """Single-term deletions, R's ``drop1.lm`` / ``drop1.glm`` / ``drop1.merMod``.
 
     For each non-intercept term in ``model``, refits with that term
     removed and prints a one-row-per-term table comparing each reduced
@@ -134,6 +135,11 @@ def drop1(model, *, test: str | None = None, k: float = 2.0):
       Δdev — appropriate when ``dispersion=1``) and ``"scaled dev."``
       (Δdev/dispersion_full — what mgcv/R uses for unknown-scale),
       matching ``drop1.glm`` exactly.
+    * ``gmm``: refits without each droppable fixed-effect term (random-effect
+      bars / offsets preserved), comparing by the Laplace-deviance LRT.
+      Columns ``npar`` (Δnpar) / ``AIC`` (``-2logL + k·npar``) and, with a
+      test, ``LRT`` / ``Pr(Chi)`` — matching ``drop1.merMod``. ``test`` accepts
+      only ``"Chisq"``/``"LRT"`` or ``None`` (no F test for GLMMs).
 
     Parameters
     ----------
@@ -151,7 +157,7 @@ def drop1(model, *, test: str | None = None, k: float = 2.0):
             "smoothing-parameter caveats we haven't ported."
         )
     if isinstance(model, gmm):
-        raise NotImplementedError("drop1(gmm): not implemented yet.")
+        return _drop1_gmm(model, test=test, k=k)
     # glm before lm: glm is not an lm subclass, but order matters if
     # that ever changes (mirrors anova()'s dispatch order).
     if isinstance(model, glm):
@@ -958,6 +964,93 @@ def _drop1_glm(m: glm, *, test: str | None, k: float):
     print(f"Single term deletions\n\nModel:\n{m.formula}\n")
     print(format_df(pl.DataFrame(cols)))
     if kind:
+        print("---")
+        print("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1")
+
+
+def _drop1_gmm(model, *, test, k):
+    """Single fixed-term deletions for a ``gmm`` fit — lme4's ``drop1.merMod``.
+
+    Refits the model without each *droppable* fixed-effect term (random-effect
+    bars and ``offset()`` terms preserved), comparing each reduced fit to the
+    full one by the Laplace-deviance LRT. Droppability respects marginality
+    (``_drop_scope``): a main effect inside an interaction is not dropped. A
+    REML LMM input is refit by ML first (a valid LRT needs ML), mirroring
+    :func:`_anova_gmm`. Columns match lme4: ``npar`` (the Δnpar removed — 3 for
+    a 4-level factor), ``AIC`` (= ``-2logL + k·npar``, i.e. ``extractAIC``),
+    and with a test ``LRT`` / ``Pr(Chi)``.
+    """
+    if test is not None and test.upper() not in ("CHISQ", "LRT"):
+        raise ValueError(
+            f"drop1(gmm): test must be 'Chisq'/'LRT' or None; got {test!r}"
+        )
+    do_test = test is not None
+    # Valid LRT needs ML; refit a REML LMM by ML (glmer is already ML).
+    if model.REML:
+        print("refitting model(s) with ML (instead of REML)")
+        m = gmm(model.formula, model.data, REML=False)
+    else:
+        m = model
+
+    terms = m._expanded.terms
+    if not terms:
+        raise TypeError(
+            "drop1(gmm): need at least one fixed-effect term to drop"
+        )
+    lhs = m.formula.split("~", 1)[0].strip()
+    intercept_str = "1" if m._expanded.intercept else "0"
+    # Preserve the random-effect bars and any offset() exactly (deparse → the
+    # canonical formula text, re-parsed by every sub-fit).
+    keep_tail = [f"({deparse(b)})" for b in m._expanded.bars]
+    keep_tail += [f"offset({deparse(o)})" for o in m._expanded.offsets]
+
+    def _dev(mm):
+        return float(getattr(mm, "deviance_laplace", mm.deviance))
+
+    def _aic_table(dev, npar):
+        # extractAIC.merMod: -2logL + k·npar (standard AIC at k=2).
+        return dev + k * npar
+
+    dev_full = _dev(m)
+    npar_full = m.npar
+    fam = m.family
+    scope = _drop_scope(terms)
+
+    labels = ["<none>"]
+    npar_col: list[int | None] = [None]
+    aic_col: list[float] = [round(_aic_table(dev_full, npar_full), 1)]
+    lrt_col: list[float | None] = [None]
+    p_col: list[float | None] = [None]
+    sig_col: list[str] = [""]
+
+    for j in scope:
+        rest = [terms[i].label for i in range(len(terms)) if i != j]
+        rhs_parts = [intercept_str] + rest + keep_tail
+        sub_formula = f"{lhs} ~ " + " + ".join(rhs_parts)
+        m_sub = gmm(sub_formula, m.data, family=fam, REML=False)
+        d_df = npar_full - m_sub.npar
+        lrt = _dev(m_sub) - dev_full
+
+        labels.append(terms[j].label)
+        npar_col.append(d_df)
+        aic_col.append(round(_aic_table(_dev(m_sub), m_sub.npar), 1))
+        if do_test and d_df > 0:
+            p = float(chi2.sf(lrt, d_df))
+            lrt_col.append(round(lrt, 4))
+            p_col.append(float(f"{p:.4g}"))
+            sig_col.append(significance_code([p])[0])
+        else:
+            lrt_col.append(None); p_col.append(None); sig_col.append("")
+
+    cols: dict[str, list] = {"": labels, "npar": npar_col, "AIC": aic_col}
+    if do_test:
+        cols["LRT"] = lrt_col
+        cols["Pr(Chi)"] = p_col
+        cols[" "] = sig_col
+
+    print(f"Single term deletions\n\nModel:\n{m.formula}\n")
+    print(format_df(pl.DataFrame(cols)))
+    if do_test:
         print("---")
         print("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1")
 

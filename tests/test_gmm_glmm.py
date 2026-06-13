@@ -2653,6 +2653,84 @@ def test_glmer_contraception_anova_cm1_to_cm4(cm_frame, capsys):
         19.198302291405525, rel=1e-5)
 
 
+def _parse_drop1(out):
+    """Parse a printed drop1 table into ``{label: {npar, AIC, LRT}}``."""
+    lines = out.splitlines()
+    hi = next(i for i, l in enumerate(lines)
+              if "npar" in l and "AIC" in l)
+    rows = {}
+    for l in lines[hi + 1:]:
+        if not l.strip() or l.lstrip().startswith("---"):
+            break
+        p = l.split()
+        if p[0] == "<none>":
+            rows[p[0]] = {"AIC": float(p[1])}
+        else:
+            row = {"npar": int(p[1]), "AIC": float(p[2])}
+            if len(p) > 3:                      # test=Chisq adds LRT/Pr
+                row["LRT"] = float(p[3])
+            rows[p[0]] = row
+    return rows
+
+
+# Reference: drop1(cm{1,3}, test="Chisq") in lme4 (dev/cm_ref/drop1_ref.R).
+# LRT = Δ(-2logL); npar = #coefficients removed (livch = 3 dummies).
+_DROP1_REF = {
+    "cm1": {
+        "age_s":      {"npar": 1, "AIC": 2386.9, "LRT": 0.14469280800858542},
+        "I(age_s^2)": {"npar": 1, "AIC": 2427.6, "LRT": 40.887073899940333},
+        "urban":      {"npar": 1, "AIC": 2419.7, "LRT": 33.020369708456656},
+        "livch":      {"npar": 3, "AIC": 2417.9, "LRT": 35.214906898611389},
+    },
+    "cm3": {  # marginality: bare age_s / ch are NOT droppable (inside age_s:ch)
+        "I(age_s^2)": {"npar": 1, "AIC": 2428.3, "LRT": 51.136395895061469},
+        "urban":      {"npar": 1, "AIC": 2411.6, "LRT": 34.41381832595971},
+        "age_s:ch":   {"npar": 1, "AIC": 2385.2, "LRT": 8.0045111405906937},
+    },
+}
+
+
+@pytest.mark.parametrize("tag", ["cm1", "cm3"])
+def test_glmer_contraception_drop1_matches_lme4(cm_frame, capsys, tag):
+    """drop1(gmm, test="Chisq") matches lme4's drop1.merMod: single fixed-term
+    deletions (bars preserved), marginality-respecting term selection, Δnpar
+    column (3 for the 4-level livch), and the Laplace LRT / AIC per row."""
+    from hea.models.gmm import gmm
+    from hea.R.model_selection import drop1
+    m = gmm(_CM_REF[tag]["formula"], data=cm_frame, family=Binomial())
+    drop1(m, test="Chisq")
+    rows = _parse_drop1(capsys.readouterr().out)
+
+    ref = _DROP1_REF[tag]
+    # Exact term selection (incl. marginality): the dropped rows are exactly
+    # the droppable terms — cm3 excludes the bare age_s / ch main effects.
+    assert set(rows) == {"<none>"} | set(ref)
+    for term, exp in ref.items():
+        assert rows[term]["npar"] == exp["npar"], term
+        # AIC printed at 1 decimal; LRT pinned loosely (each row is a separate
+        # default-optimizer refit → the flat-surface drift, see cm-sweep note).
+        assert rows[term]["AIC"] == pytest.approx(exp["AIC"], abs=0.05), term
+        assert rows[term]["LRT"] == pytest.approx(exp["LRT"], abs=5e-3), term
+    # The <none> row carries the full-model AIC.
+    assert rows["<none>"]["AIC"] == pytest.approx(
+        _CM_REF[tag]["AIC"], abs=0.05)
+
+
+def test_glmer_drop1_no_test_emits_npar_aic_only(cm_frame, capsys):
+    """drop1(gmm) without a test prints just npar + AIC (lme4 default
+    test="none") — no LRT / Pr(Chi) columns, no signif legend."""
+    from hea.models.gmm import gmm
+    from hea.R.model_selection import drop1
+    m = gmm(_CM_REF["cm1"]["formula"], data=cm_frame, family=Binomial())
+    drop1(m)
+    out = capsys.readouterr().out
+    assert "npar" in out and "AIC" in out
+    assert "LRT" not in out and "Pr(Chi)" not in out
+    assert "Signif. codes" not in out
+    rows = _parse_drop1(out)
+    assert rows["livch"]["npar"] == 3       # multi-level factor Δnpar
+
+
 def test_deriv12_uses_supplied_fx_to_save_one_eval():
     """``fx`` argument skips the redundant ``fn(x)`` call. Pin: same answer."""
     def py_fn(x):
