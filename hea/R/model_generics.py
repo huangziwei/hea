@@ -128,26 +128,36 @@ def resid(model, type=None):
 
     For ``glm`` / ``gam`` / ``bam``, ``type`` selects among
     ``{"deviance"`` (default, matches R), ``"pearson"``, ``"working"``,
-    ``"response"}``. ``lm`` and ``gmm`` only have response residuals;
-    pass ``type=None`` or ``"response"`` (anything else raises).
+    ``"response"}``. For ``lm`` (matching ``residuals.lm``):
+    ``"response"`` / ``"working"`` are the raw residuals and
+    ``"pearson"`` / ``"deviance"`` are the weighted residuals ``√wᵢ·rᵢ``
+    (equal to raw when unweighted). ``gmm`` has response residuals only.
     """
     if hasattr(model, "residuals_of"):
         return model.residuals_of(type or "deviance")
-    if type not in (None, "response"):
-        raise ValueError(
-            f"resid(): type={type!r} not supported for "
-            f"{model.__class__.__name__} (only 'response' / None)"
-        )
     r = getattr(model, "residuals", None)
     if isinstance(r, pl.DataFrame):
-        arr = r.to_series().to_numpy()
+        raw = r.to_series().to_numpy()
     elif isinstance(r, np.ndarray):
-        arr = r
+        raw = r
     elif isinstance(r, pl.Series):
-        arr = r.to_numpy()
+        raw = r.to_numpy()
     else:
         raise TypeError(
             f"resid(): {model.__class__.__name__} has no usable residuals"
+        )
+    is_lm = hasattr(model, "_w")  # lm carries the prior-weight vector
+    if type in (None, "response") or (is_lm and type == "working"):
+        arr = raw
+    elif is_lm and type in ("pearson", "deviance"):
+        # residuals.lm: weighted residuals √wᵢ·rᵢ (== raw when unweighted)
+        arr = raw * np.sqrt(model._w)
+    else:
+        allowed = ("'response' / None, 'working', 'pearson', 'deviance'"
+                   if is_lm else "'response' / None")
+        raise ValueError(
+            f"resid(): type={type!r} not supported for "
+            f"{model.__class__.__name__} (only {allowed})"
         )
     # R's na.action="exclude" pads residuals back to the model-frame length
     # with NA (naresid). ``_na_pad`` is a no-op for omit/fail and absent on
@@ -292,6 +302,21 @@ def deviance(model):
 def nobs(model):
     """R: ``nobs()`` — number of observations used to fit."""
     return int(model.n)
+
+
+def weights(model):
+    """R: ``weights()`` — the prior weights used in fitting.
+
+    Returns the (subset / NA-aligned) weight vector as an ``ndarray``, or
+    ``None`` for an unweighted ``lm``/``gmm`` fit — matching R's
+    ``weights(m)`` (``NULL`` when no weights were supplied). For ``glm`` the
+    prior weights (ones by default) are returned.
+    """
+    for attr in ("weights", "_prior_w", "prior_weights"):
+        w = getattr(model, attr, None)
+        if w is not None:
+            return np.asarray(w)
+    return None
 
 
 def df_residual(model):
