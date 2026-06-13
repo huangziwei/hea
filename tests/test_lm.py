@@ -860,3 +860,215 @@ def test_lm_offset_argument_matches_R():
     # length mismatch against the input frame → error
     with pytest.raises(ValueError, match="Length of offset"):
         lm("y ~ x1", df, offset=np.ones(df.height + 1))
+
+
+def test_lm_predict_rankdeficient_nonestimable_match_R():
+    """predict() on a rank-deficient fit flags *non-estimable* newdata rows
+    (those leaving the training row span). R's rankdeficient=: 'warnif'
+    (default) keeps the estimable-column prediction + warns + attaches the
+    flagged row indices as .non_estim; 'NA' NA-fills those rows. Estimable
+    rows are unaffected. Fixed dataset (no RNG) → cross-platform exact."""
+    import warnings
+
+    tr = pl.DataFrame({
+        "y": [2, 3, 5, 6, 9, 9],
+        "x1": [1, 2, 3, 4, 5, 6],
+        "x2": [1, 0, 2, 1, 3, 2],
+    }).with_columns(pl.all().cast(pl.Float64)).with_columns(
+        (pl.col("x1") + pl.col("x2")).alias("x3")  # exact collinearity → x3 aliased
+    )
+    m = lm("y ~ x1 + x2 + x3", tr)
+    assert m._aliased_cols == ["x3"]
+
+    # row 0 satisfies x3 = x1+x2 (estimable); row 1 violates it (non-estimable)
+    nd = pl.DataFrame({"x1": [2.0, 2.0], "x2": [3.0, 3.0], "x3": [5.0, 77.0]})
+    with pytest.warns(UserWarning, match="rank-deficient"):
+        out = m.predict(nd, se_fit=True)
+    # R: both rows predict 4.666667 (x3 ignored), se 0.481125; non-estim = row 2
+    np.testing.assert_allclose(out["fit"].to_numpy(), [4.666667, 4.666667], rtol=1e-5)
+    np.testing.assert_allclose(out["se.fit"].to_numpy(), [0.481125, 0.481125], rtol=1e-5)
+    assert out.non_estim.tolist() == [1]
+
+    # rankdeficient='NA' → the non-estimable row becomes NA (R parity)
+    out_na = m.predict(nd, rankdeficient="NA")["fit"].to_numpy()
+    np.testing.assert_allclose(out_na[0], 4.666667, rtol=1e-5)
+    assert np.isnan(out_na[1])
+
+    # all-estimable newdata: no warning, no .non_estim (R's 'warnif' warns
+    # only if a non-estimable case exists)
+    nd_ok = pl.DataFrame({"x1": [2.0], "x2": [3.0], "x3": [5.0]})
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        ok = m.predict(nd_ok)
+    assert not any("rank-deficient" in str(x.message) for x in w)
+    np.testing.assert_allclose(ok["fit"].to_numpy(), [4.666667], rtol=1e-5)
+    assert getattr(ok, "non_estim", None) is None
+
+
+def test_lm_effects_match_R():
+    """effects(): orthogonal single-df effects Q'y from the fit's QR — first
+    ``rank`` entries named by the coefficients, the rest ''."""
+    from hea.R import effects
+
+    df = pl.DataFrame({
+        "y": [2, 4, 3, 6, 5, 8, 7, 9], "x1": [1, 2, 3, 4, 5, 6, 7, 8],
+    }).with_columns(pl.all().cast(pl.Float64))
+    eff = effects(lm("y ~ x1", df))
+    np.testing.assert_allclose(
+        eff.values,
+        [-15.556349, 6.017831, -1.106236, 1.07512, -0.743524, 1.437831,
+         -0.380813, 0.800542],
+        rtol=1e-5,
+    )
+    assert eff.names[:2] == ["(Intercept)", "x1"]
+    assert eff.names[2:] == [""] * 6
+
+
+def test_lm_simulate_matches_R_rng():
+    """simulate(seed=) reproduces R's ``set.seed(seed); simulate(m, nsim)``
+    bit-for-bit, drawing from hea's R Mersenne-Twister (NOT numpy)."""
+    from hea.R import simulate
+
+    df = pl.DataFrame({
+        "y": [2, 4, 3, 6, 5, 8, 7, 9], "x1": [1, 2, 3, 4, 5, 6, 7, 8],
+    }).with_columns(pl.all().cast(pl.Float64))
+    sim = simulate(lm("y ~ x1", df), nsim=2, seed=42)
+    assert sim.columns == ["sim_1", "sim_2"]
+    np.testing.assert_allclose(
+        sim["sim_1"].to_numpy(),
+        [3.596254, 2.624049, 4.463728, 5.657173, 6.361269, 6.788645,
+         9.305714, 8.657047],
+        rtol=1e-5,
+    )
+    np.testing.assert_allclose(
+        sim["sim_2"].to_numpy(),
+        [4.232053, 3.116987, 5.388499, 7.281155, 4.600452, 6.619092,
+         7.69051, 9.374491],
+        rtol=1e-5,
+    )
+
+
+def test_lm_name_accessors_and_dfbeta_match_R():
+    """dfbeta (unstandardized LOO coef changes), variable_names, labels,
+    case_names — R parity. case_names is 0-based (hea convention; R is
+    1-based) and drops zero-weight rows when full=False."""
+    from hea.R import case_names, dfbeta, labels, variable_names
+
+    df = pl.DataFrame({
+        "y": [2, 4, 3, 6, 5, 8, 7, 9], "x1": [1, 2, 3, 4, 5, 6, 7, 8],
+        "x2": [2, 1, 4, 3, 6, 5, 8, 7],
+    }).with_columns(pl.all().cast(pl.Float64))
+    m = lm("y ~ x1 + x2", df)
+
+    dfb = dfbeta(m)
+    assert dfb.columns == ["(Intercept)", "x1", "x2"]
+    np.testing.assert_allclose(dfb.row(0), [0.264286, -0.092857, 0.05], rtol=1e-4)
+    np.testing.assert_allclose(
+        dfb.row(1), [-0.176190, -0.033333, 0.061905], rtol=1e-4
+    )
+
+    assert variable_names(m) == ["(Intercept)", "x1", "x2"]
+    assert labels(m) == ["x1", "x2"]
+    assert case_names(m) == [str(i) for i in range(8)]  # 0-based (R: "1".."8")
+
+    # rank-deficient: variable_names(full=True) includes the aliased column
+    mc = lm("y ~ x1 + x2 + x3",
+            df.with_columns((pl.col("x1") + pl.col("x2")).alias("x3")))
+    assert variable_names(mc) == ["(Intercept)", "x1", "x2"]            # rank
+    assert variable_names(mc, full=True) == ["(Intercept)", "x1", "x2", "x3"]
+
+    # weighted: full=False drops the zero-weight row (R parity)
+    w = np.array([0, 1, 1, 1, 1, 1, 1, 1.0])
+    mw = lm("y ~ x1", df, weights=w)
+    assert case_names(mw) == [str(i) for i in range(1, 8)]
+    assert case_names(mw, full=True) == [str(i) for i in range(8)]
+
+
+def test_lm_method_model_frame_matches_R():
+    """R's lm(method='model.frame') returns the model frame — the formula's
+    referenced columns after subset + na.omit — not a fitted lm."""
+    df = pl.DataFrame({
+        "y": [2, 4, 3, None, 5, 8, 7, 9], "x1": [1, 2, 3, 4, 5, 6, 7, 8],
+        "x2": [2, 1, 4, 3, 6, 5, 8, 7], "z": [99] * 8,
+    }).with_columns(pl.col("y").cast(pl.Float64))
+
+    mf = lm("y ~ x1 + x2", df, method="model.frame")
+    assert not isinstance(mf, lm)             # a frame, not a fit
+    assert mf.columns == ["y", "x1", "x2"]    # referenced cols only (no z)
+    assert mf.height == 7                     # NA row dropped (na.omit)
+
+    # subset applies before na
+    mf2 = lm("y ~ x1", df, method="model.frame",
+             subset=(df["x1"] > 4).to_numpy())
+    assert mf2.columns == ["y", "x1"]
+    assert mf2.height == 4
+
+    # na.fail errors on a missing value (R: na.fail)
+    with pytest.raises(ValueError, match="missing values"):
+        lm("y ~ x1 + x2", df, method="model.frame", na_action="fail")
+
+    # the interception doesn't disturb normal fitting
+    assert isinstance(lm("y ~ x1 + x2", df), lm)
+
+
+def test_lm_summary_residual_block_small_n_and_saturated():
+    """print.summary.lm residual block has three forms keyed on residual df:
+    each residual for 0 < rdf ≤ 5, and a perfect-fit note for rdf == 0 (R
+    parity). rdf > 5 keeps the 5-number summary."""
+    # rdf == 2 (n=4): each residual printed, not the 5-number summary
+    ds = pl.DataFrame({"y": [1, 3, 2, 5], "x": [1, 2, 3, 4]}).with_columns(
+        pl.all().cast(pl.Float64)
+    )
+    lines = lm("y ~ x", ds)._residuals_lines()
+    assert lines[0] == "Residuals:"
+    assert lines[1].split() == ["0", "1", "2", "3"]   # 0-based (R: 1..4)
+    np.testing.assert_allclose(
+        [float(v) for v in lines[2].split()], [-0.1, 0.8, -1.3, 0.6], atol=1e-9
+    )
+
+    # rdf == 0 (saturated): the perfect-fit note (R: "ALL <rank> residuals…")
+    sat = pl.DataFrame({"y": [1, 3, 2], "x": [1, 2, 3]}).with_columns(
+        pl.all().cast(pl.Float64)
+    ).with_columns((pl.col("x") ** 2).alias("x2"))
+    msat = lm("y ~ x + x2", sat)
+    assert msat._residuals_lines() == [
+        "Residuals:",
+        "ALL 3 residuals are 0: no residual degrees of freedom!",
+    ]
+    # full summary repr still renders (sigma/t/p are NaN, no crash)
+    assert "ALL 3 residuals are 0" in repr(msat.summary())
+
+
+def test_lm_predict_scale_df_and_se_fit_metadata_match_R():
+    """predict() surface: the se.fit frame carries R's df + residual.scale;
+    scale= / df= override res.var and the quantile df for se.fit + intervals."""
+    df = pl.DataFrame({
+        "y": [2, 4, 3, 6, 5, 8, 7, 9], "x": [1, 2, 3, 4, 5, 6, 7, 8],
+    }).with_columns(pl.all().cast(pl.Float64))
+    m = lm("y ~ x", df)
+    nd = pl.DataFrame({"x": [2.5, 5.0]})
+
+    p = m.predict(nd, se_fit=True)
+    np.testing.assert_allclose(
+        p["se.fit"].to_numpy(), [0.460839, 0.355353], rtol=1e-5
+    )
+    assert p.df == 6                                   # R's df.residual
+    np.testing.assert_allclose(p.residual_scale, 0.981981, rtol=1e-5)
+
+    # scale=/df= override the residual scale and quantile df
+    p2 = m.predict(nd, se_fit=True, scale=2, df=10)
+    np.testing.assert_allclose(
+        p2["se.fit"].to_numpy(), [0.938591, 0.723747], rtol=1e-5
+    )
+    assert p2.df == 10
+    assert p2.residual_scale == 2.0
+    ci = m.predict(nd, interval="confidence", scale=2, df=10)
+    np.testing.assert_allclose(
+        [ci["lwr"][0], ci["upr"][0]], [1.551547, 5.734167], rtol=1e-5
+    )
+
+    # default interval is unchanged (backward compatible)
+    cid = m.predict(nd, interval="confidence")
+    np.testing.assert_allclose(
+        [cid["lwr"][0], cid["upr"][0]], [2.515225, 4.770489], rtol=1e-5
+    )

@@ -289,10 +289,12 @@ from .model_generics import (
     confint,
     deviance,
     df_residual,
+    effects,
     fitted,
     fitted_values,
     fixef,
     formula,
+    simulate,
     logLik,
     model_frame,
     model_matrix,
@@ -301,10 +303,13 @@ from .model_generics import (
     ranef,
     refit,
     refitML,
+    case_names,
+    labels,
     resid,
     residuals,
     terms,
     update,
+    variable_names,
     vcov,
     weights,
 )
@@ -312,6 +317,7 @@ from .model_generics import (
 # Regression diagnostics
 from .diagnostics import (
     cooks_distance,
+    dfbeta,
     dfbetas,
     dffits,
     hatvalues,
@@ -421,12 +427,14 @@ __all__ = [
     "resid", "residuals", "fitted", "fitted_values",
     "predict", "confint", "vcov",
     "logLik", "deviance", "nobs", "weights", "df_residual",
+    "effects", "simulate",
     "formula", "model_matrix", "model_frame",
     "AIC", "BIC", "anova", "add1", "drop1", "step",
     "update", "terms", "Terms",
     # regression diagnostics
     "hatvalues", "rstandard", "rstudent",
-    "cooks_distance", "dffits", "dfbetas", "influence",
+    "cooks_distance", "dffits", "dfbeta", "dfbetas", "influence",
+    "variable_names", "case_names", "labels",
     # time series construction (R's ts())
     "ts",
     # emmeans (CRAN port, parked here until the surface grows)

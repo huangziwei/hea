@@ -361,6 +361,68 @@ def weights(model):
     return None
 
 
+def effects(model):
+    """R: ``effects()`` — orthogonal single-degree-of-freedom effects ``Q'y``.
+
+    A length-``n`` vector from the fit's QR: the first ``rank`` entries are the
+    named regression effects, the remainder the residual effects (names beyond
+    the rank are ``""``, as in R). Computed on the offset-adjusted response and
+    ``√w``-weighted design, matching ``lm.wfit``. lm only.
+    """
+    if not hasattr(model, "X") or not hasattr(model, "column_names"):
+        raise TypeError(
+            f"effects(): {model.__class__.__name__} has no QR/effects component"
+        )
+    from scipy.linalg import qr as _qr_full
+
+    X = model.X.to_numpy().astype(float)
+    y = np.asarray(model.y.to_numpy(), dtype=float).reshape(-1)
+    off = getattr(model, "_offset", None)
+    if off is not None:
+        y = y - np.asarray(off, dtype=float)  # R fits effects on y − offset
+    w = getattr(model, "_w", None)
+    sw = np.ones(len(y)) if w is None else np.sqrt(np.asarray(w, dtype=float))
+    Q, _ = _qr_full(sw[:, None] * X, mode="full")
+    eff = Q.T @ (sw * y)
+    pad = len(y) - len(model.column_names)
+    names = list(model.column_names) + [""] * pad
+    return NamedVector(names, eff)
+
+
+def simulate(model, nsim=1, seed=None):
+    """R: ``simulate.lm`` — draw ``nsim`` response vectors from the fitted
+    Gaussian model: ``ŷ + N(0, σ²)`` with ``σ² = deviance/df.residual``
+    (per-row ``σ²/wᵢ`` for a weighted fit).
+
+    Pass ``seed=`` to reproduce R's ``set.seed(seed); simulate(object, nsim)``
+    bit-for-bit — draws come from hea's R Mersenne-Twister
+    (:class:`hea.R.rng.RMersenneTwister`), **not** numpy. ``seed=None`` picks a
+    fresh seed (stdlib ``random``). Returns a polars DataFrame with columns
+    ``sim_1`` … ``sim_{nsim}``. lm / gaussian only.
+    """
+    from .rng import RMersenneTwister
+
+    ftd = np.asarray(fitted(model), dtype=float).reshape(-1)
+    n = ftd.shape[0]
+    var0 = float(deviance(model)) / float(df_residual(model))
+    w = weights(model)
+    sd_vec = (
+        np.full(n, np.sqrt(var0)) if w is None
+        else np.sqrt(var0 / np.asarray(w, dtype=float))
+    )
+    if seed is None:
+        import random
+        seed = random.Random().randint(0, 2**31 - 1)
+    rng = RMersenneTwister(int(seed))
+    # R draws rnorm(n·nsim) column-major, recycling the per-row sd across cols.
+    z = rng.rnorm(int(n * nsim))
+    draws = z * np.tile(sd_vec, int(nsim))
+    return pl.DataFrame({
+        f"sim_{i + 1}": ftd + draws[i * n:(i + 1) * n]
+        for i in range(int(nsim))
+    })
+
+
 def df_residual(model):
     """R: ``df.residual()`` — residual degrees of freedom."""
     for attr in ("df_residual", "df_residuals", "df_resid"):
@@ -449,6 +511,41 @@ def terms(model) -> Terms:
     else:
         labels = [t.strip() for t in rhs.split("+") if t.strip()]
     return Terms(formula=f, response=response, term_labels=labels)
+
+
+def variable_names(model, full=False):
+    """R: ``variable.names()`` — the model's coefficient (design-column) names.
+
+    ``full=False`` (default) returns the estimable/kept columns (the fit's
+    rank); ``full=True`` returns every design column including aliased ones
+    (R's ``dimnames(qr$qr)[[2]]``).
+    """
+    if full and hasattr(model, "_full_names"):
+        return list(model._full_names)
+    return list(model.column_names)
+
+
+def labels(model):
+    """R: ``labels.lm()`` — the top-level term labels (RHS terms, no intercept)."""
+    return list(terms(model).term_labels)
+
+
+def case_names(model, full=False):
+    """R: ``case.names()`` — observation labels as strings.
+
+    0-based row indices (hea's convention; R uses 1-based). ``full=False``
+    (default) drops zero-weight rows for a weighted fit — R parity, the rows
+    that actually entered the fit — while ``full=True`` keeps every row.
+    """
+    n = int(model.n)
+    names = [str(i) for i in range(n)]
+    if full:
+        return names
+    w = weights(model)
+    if w is None:
+        return names
+    w = np.asarray(w)
+    return [names[i] for i in range(n) if w[i] != 0]
 
 
 _UPDATE_AUTO_FORWARD = ("family", "method", "weights", "REML")

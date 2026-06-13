@@ -341,6 +341,39 @@ def dfbetas(model):
     )
 
 
+def dfbeta(model):
+    """R: ``dfbeta()`` — *unstandardized* leave-one-out coefficient changes.
+
+    Returns an ``n × p`` polars DataFrame; element ``[i, j]`` is
+    ``β̂_j − β̂_j(−i)``, the raw change in coefficient ``j`` when observation
+    ``i`` is dropped. This is exactly :func:`dfbetas` *before* the
+    ``σ_(−i)·√diag((X'X)⁻¹)`` standardization. lm (closed form via ``XtXinv``)
+    and glm/gam/bam (IRLS closed form), mirroring ``dfbetas``.
+    """
+    if hasattr(model, "XtXinv"):  # lm
+        X = model.X.to_numpy().astype(float)
+        XtXinv = np.asarray(model.XtXinv)
+        e = model.residuals.to_series().to_numpy()
+        one_minus_h = np.clip(1 - hatvalues(model), 1e-12, None)
+        w = _lm_weights_array(model)
+        delta = (X @ XtXinv) * (w * e / one_minus_h)[:, None]
+        return pl.DataFrame(
+            {col: delta[:, i] for i, col in enumerate(model.column_names)}
+        )
+
+    if not hasattr(model, "residuals_of"):
+        raise TypeError(f"dfbeta(): {model.__class__.__name__} not supported")
+    inputs = _irls_inputs(model)
+    X, XtWXinv = inputs["X"], inputs["XtWXinv"]
+    one_minus_h = np.clip(1 - inputs["h"], 1e-12, None)
+    delta = (X @ XtWXinv) * (
+        inputs["w_irls"] * inputs["working_resid"] / one_minus_h
+    )[:, None]
+    return pl.DataFrame(
+        {col: delta[:, i] for i, col in enumerate(model.column_names)}
+    )
+
+
 def influence(model):
     """R: ``influence()`` / ``lm.influence()`` — deletion diagnostics bundle.
 

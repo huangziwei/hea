@@ -35,6 +35,7 @@ hea.models.bam).
 from __future__ import annotations
 
 import numpy as np
+from scipy.special import ndtri
 
 __all__ = ["RMersenneTwister"]
 
@@ -119,6 +120,33 @@ class RMersenneTwister:
         for i in range(int(n)):
             out[i] = self.unif_rand()
         return out
+
+    def norm_rand(self) -> float:
+        """R's ``norm_rand`` with ``normal.kind = "Inversion"`` (R's default).
+
+        One standard normal = ``qnorm`` of two combined uniforms for 53-bit
+        precision (``snorm.c`` INVERSION case): ``u = floor(2^27·u1) + u2``,
+        return ``qnorm(u / 2^27)``. So each normal consumes **two**
+        ``unif_rand`` draws. The MT uniforms are bit-exact to R; ``qnorm`` here
+        is SciPy's ``ndtri`` (agrees with R's Wichura AS-241 to ~1e-12).
+        """
+        big = 134217728.0  # 2^27
+        u1 = self.unif_rand()
+        u1 = float(int(big * u1)) + self.unif_rand()
+        return float(ndtri(u1 / big))
+
+    def rnorm(self, n: int | None = None, mean: float = 0.0, sd: float = 1.0):
+        """R's ``rnorm(n, mean, sd)`` on R's MT stream (Inversion normals).
+
+        ``n=None`` returns one draw; otherwise a length-``n`` array consuming
+        the identical sequence. Use this (not numpy / ``hea.R.rnorm``) whenever
+        the draws must line up with R's ``set.seed(); rnorm()``.
+        """
+        if n is None:
+            return mean + sd * self.norm_rand()
+        return mean + sd * np.array(
+            [self.norm_rand() for _ in range(int(n))]
+        )
 
     def _rbits(self, bits: int) -> int:
         # rbits (RNG.c:875-885): 16 bits per unif_rand draw.

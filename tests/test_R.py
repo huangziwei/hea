@@ -590,10 +590,11 @@ _R_EXPR_SKIP = {
     "resid", "residuals", "fitted", "fitted_values",
     "predict", "confint", "vcov", "logLik", "deviance",
     "nobs", "weights", "df_residual", "formula", "model_matrix", "model_frame",
-    "terms", "update", "AIC", "BIC",
+    "terms", "update", "AIC", "BIC", "effects", "simulate",
+    "variable_names", "case_names", "labels",
     "anova", "add1", "drop1", "step",
     "hatvalues", "rstandard", "rstudent",
-    "cooks_distance", "dffits", "dfbetas", "influence",
+    "cooks_distance", "dffits", "dfbeta", "dfbetas", "influence",
     # emmeans — model-shaped (operate on fitted models / EmmGrid tables).
     "emmeans", "EmmGrid", "summary_emmgrid_contrasts",
     # Distribution PDFs/CDFs/quantiles/random — scalar in, scalar out.

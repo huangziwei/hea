@@ -36,6 +36,20 @@ def _row_frame(values: np.ndarray, columns: list[str]) -> pl.DataFrame:
     return pl.DataFrame({c: [float(flat[i])] for i, c in enumerate(columns)})
 
 
+def _zapsmall(x: np.ndarray, digits: int) -> np.ndarray:
+    """R's ``zapsmall(x, digits)`` — round ``x``, zeroing entries negligible
+    relative to the largest magnitude: ``round(x, digits − ⌊log10(max|x|)⌋)``
+    (clamped at 0 decimals). Used on the residual 5-number summary so a
+    numerical-noise quantile prints as ``0`` rather than e.g. ``1.2e-16``."""
+    x = np.asarray(x, dtype=float)
+    finite = x[np.isfinite(x)]
+    if finite.size == 0:
+        return x
+    mx = float(np.max(np.abs(finite)))
+    nd = max(0, int(digits - int(np.log10(mx)))) if mx > 0 else digits
+    return np.round(x, nd)
+
+
 def _subset_keep(n: int, subset) -> list[int]:
     """0-based row indices kept by R's ``subset=`` argument.
 
@@ -78,6 +92,22 @@ def _apply_subset(data: pl.DataFrame, subset) -> pl.DataFrame:
     return data[_subset_keep(data.height, subset)]
 
 
+def _referenced_model_cols(formula: str, data: pl.DataFrame) -> list[str]:
+    """Columns of ``data`` referenced by the formula (response + RHS), in the
+    original column order — R's model-frame variable set."""
+    parsed = parse(formula)
+    columns = set(data.columns)
+    if parsed.lhs is None:
+        lhs_cols: set[str] = set()
+    elif isinstance(parsed.lhs, Name):
+        lhs_cols = {parsed.lhs.ident} & columns
+    else:
+        lhs_cols = _lhs_referenced_cols(parsed.lhs, columns)
+    expanded = expand(parsed, data_columns=list(data.columns))
+    ref = (referenced_columns(expanded) | lhs_cols) & columns
+    return [c for c in data.columns if c in ref]  # preserve original order
+
+
 def _model_frame_keep_mask(formula: str, data: pl.DataFrame) -> np.ndarray:
     """Boolean keep-mask matching ``prepare_design``'s ``na.omit`` policy.
 
@@ -90,16 +120,7 @@ def _model_frame_keep_mask(formula: str, data: pl.DataFrame) -> np.ndarray:
     Reuses ``prepare_design``'s own ``_na_mask_with_matrix_cols`` so the
     mask can't drift from the rows ``prepare_design`` actually keeps.
     """
-    parsed = parse(formula)
-    columns = set(data.columns)
-    if parsed.lhs is None:
-        lhs_cols: set[str] = set()
-    elif isinstance(parsed.lhs, Name):
-        lhs_cols = {parsed.lhs.ident} & columns
-    else:
-        lhs_cols = _lhs_referenced_cols(parsed.lhs, columns)
-    expanded = expand(parsed, data_columns=list(data.columns))
-    na_cols = (referenced_columns(expanded) | lhs_cols) & columns
+    na_cols = set(_referenced_model_cols(formula, data))
     if not na_cols:
         return np.ones(data.height, dtype=bool)
     return _na_mask_with_matrix_cols(data, na_cols)
@@ -442,6 +463,49 @@ def _format_summary_lm(model, digits: int, cor: bool) -> str:
 
 
 class lm:
+    def __new__(
+        cls,
+        formula: str = None,
+        data: pl.DataFrame = None,
+        weights=None,
+        method: str = "qr",
+        subset=None,
+        na_action: str = "omit",
+        contrasts=None,
+        singular_ok: bool = True,
+        offset=None,
+    ):
+        # R: ``lm(..., method="model.frame")`` returns the *model frame*, not a
+        # fit. A constructor can't return a non-``lm``, so intercept in
+        # ``__new__`` (standard factory idiom): returning a non-instance skips
+        # ``__init__``. Every other ``method`` builds an ``lm`` as usual.
+        if method == "model.frame":
+            return cls._model_frame(
+                formula, data, subset=subset, na_action=na_action
+            )
+        return super().__new__(cls)
+
+    @staticmethod
+    def _model_frame(formula, data, *, subset=None, na_action="omit"):
+        """R's ``lm(method="model.frame")``: the model frame — the formula's
+        referenced columns (response + RHS) after ``subset=`` and the
+        ``na.action`` row-drops — with no fit. ``na.fail`` errors on any NA;
+        ``omit``/``exclude`` drop NA rows (R keeps NA rows under exclude in the
+        frame, but the fit-facing frame is complete-case either way here)."""
+        norm = {"omit": "omit", "na.omit": "omit", "exclude": "omit",
+                "na.exclude": "omit", "fail": "fail", "na.fail": "fail"}
+        na = norm.get(str(na_action))
+        if na is None:
+            raise ValueError(f"na_action must be omit/exclude/fail; got {na_action!r}")
+        if subset is not None:
+            keep = _subset_keep(data.height, _resolve_subset(subset, data))
+            data = data[keep]
+        mask = _model_frame_keep_mask(formula, data)
+        if na == "fail" and not mask.all():
+            raise ValueError("missing values in object")  # R: na.fail
+        mf = data.select(_referenced_model_cols(formula, data))
+        return mf.filter(pl.Series(mask)) if not mask.all() else mf
+
     def __init__(
         self,
         formula: str,
@@ -569,7 +633,12 @@ class lm:
         if self._aliased_cols and not singular_ok:
             # R: lm.fit(singular.ok=FALSE) — refuse rank-deficient designs.
             raise ValueError("singular fit encountered")
+        # Keep the full (pre-drop) design when rank-deficient: predict() needs
+        # it to flag non-estimable newdata rows (rows that leave the training
+        # row space). ``None`` for a full-rank fit — no estimability check then.
+        self._X_full_train = None
         if self._aliased_cols:
+            self._X_full_train = self.X.to_numpy().astype(float)
             keep = [c for c in self.X.columns if c not in self._aliased_cols]
             self.X = self.X.select(keep)
 
@@ -884,7 +953,14 @@ class lm:
 
         return ci_bhat_bootstrap
 
-    def compute_yhat(self, Xnew=None, interval=None, alpha=0.05, se_fit=False):
+    def compute_yhat(self, Xnew=None, interval=None, alpha=0.05, se_fit=False,
+                     res_var=None, df_q=None, pred_var=None):
+        # ``res_var`` / ``df_q`` override the residual variance σ² and the
+        # interval-quantile df (R's ``scale²`` / ``df``); ``None`` → the fit's
+        # own σ² / df.residual. ``pred_var`` overrides the prediction-interval
+        # variance (R's ``pred.var``; default = ``res_var``). (``sigma_squared``
+        # isn't set yet during the fit-time ``compute_yhat()`` call, so it's
+        # only read in the ``se_fit`` / interval branches below.)
         if Xnew is None:
             X = self.X.to_numpy().astype(float)
             off = self._offset
@@ -902,11 +978,12 @@ class lm:
 
         if se_fit:
             # R's predict.lm `se.fit`: SE of the fitted mean,
-            # √(σ²·xᵀ(XᵀWX)⁻¹x). Same quantity the confidence interval uses
-            # (and reported even when interval="prediction").
+            # √(res_var·xᵀ(XᵀWX)⁻¹x). Same quantity the confidence interval
+            # uses (and reported even when interval="prediction").
+            rv = self.sigma_squared if res_var is None else res_var
             var_mean = np.einsum(
                 "ij,jk,ik->i", X, self.XtXinv, X
-            ) * self.sigma_squared
+            ) * rv
             yhat = yhat.with_columns(
                 pl.Series("se.fit", np.sqrt(np.maximum(var_mean, 0.0)))
             )
@@ -917,37 +994,41 @@ class lm:
             case True:
                 # Both CI and PI in one frame — column names are prefixed
                 # so the two interval kinds don't collide.
-                ci_yhat = self.compute_ci_yhat(yhat, Xnew, alpha).rename(
-                    {"lwr": "ci_lwr", "upr": "ci_upr"}
-                )
-                pi_yhat = self.compute_pi_yhat(yhat, Xnew, alpha).rename(
-                    {"lwr": "pi_lwr", "upr": "pi_upr"}
-                )
+                ci_yhat = self.compute_ci_yhat(
+                    yhat, Xnew, alpha, res_var, df_q
+                ).rename({"lwr": "ci_lwr", "upr": "ci_upr"})
+                pi_yhat = self.compute_pi_yhat(
+                    yhat, Xnew, alpha, res_var, df_q, pred_var
+                ).rename({"lwr": "pi_lwr", "upr": "pi_upr"})
                 return pl.concat([yhat, ci_yhat, pi_yhat], how="horizontal")
             case "prediction":
-                pi_yhat = self.compute_pi_yhat(yhat, Xnew, alpha)
+                pi_yhat = self.compute_pi_yhat(
+                    yhat, Xnew, alpha, res_var, df_q, pred_var
+                )
                 return pl.concat([yhat, pi_yhat], how="horizontal")
             case "confidence":
-                ci_yhat = self.compute_ci_yhat(yhat, Xnew, alpha)
+                ci_yhat = self.compute_ci_yhat(yhat, Xnew, alpha, res_var, df_q)
                 return pl.concat([yhat, ci_yhat], how="horizontal")
             case _:
                 raise ValueError(
                     "Please enter a valid value: [None, True, 'prediction', 'confidence']"
                 )
 
-    def compute_ci_yhat(self, yhat, Xnew=None, alpha=0.05):
-
+    def compute_ci_yhat(self, yhat, Xnew=None, alpha=0.05, res_var=None,
+                        df_q=None):
+        rv = self.sigma_squared if res_var is None else res_var
+        dq = self.df_residuals if df_q is None else df_q
         if Xnew is None:
             X = self.X.to_numpy().astype(float)
         else:
             X = materialize(self._expanded, Xnew).select(self.column_names).to_numpy().astype(float)
 
-        # Var(ŷ) = σ² · x'(X'X)⁻¹x  ⇒  se = √diag(σ² · X(X'X)⁻¹Xᵀ).
-        var_mean = np.einsum("ij,jk,ik->i", X, self.XtXinv, X) * self.sigma_squared
+        # Var(ŷ) = res_var · x'(X'X)⁻¹x  ⇒  se = √diag(res_var · X(X'X)⁻¹Xᵀ).
+        var_mean = np.einsum("ij,jk,ik->i", X, self.XtXinv, X) * rv
         se_yhat_mean = np.sqrt(np.maximum(var_mean, 0.0))
         yhat_vals = yhat["fit"].to_numpy().astype(float)[:, None]
         ci = (
-            t.ppf(1 - alpha / 2, self.df_residuals)
+            t.ppf(1 - alpha / 2, dq)
             * se_yhat_mean[:, None]
             * np.array([-1, 1])
             + yhat_vals
@@ -959,19 +1040,23 @@ class lm:
             }
         )
 
-    def compute_pi_yhat(self, yhat, Xnew=None, alpha=0.05):
-
+    def compute_pi_yhat(self, yhat, Xnew=None, alpha=0.05, res_var=None,
+                        df_q=None, pred_var=None):
+        rv = self.sigma_squared if res_var is None else res_var
+        dq = self.df_residuals if df_q is None else df_q
         if Xnew is None:
             X = self.X.to_numpy().astype(float)
         else:
             X = materialize(self._expanded, Xnew).select(self.column_names).to_numpy().astype(float)
 
-        # Var(y_new − ŷ) = σ²·(1 + x'(X'X)⁻¹x).
-        var_mean = np.einsum("ij,jk,ik->i", X, self.XtXinv, X) * self.sigma_squared
-        se_yhat = np.sqrt(self.sigma_squared + np.maximum(var_mean, 0.0))
+        # Var(y_new − ŷ) = pred_var + res_var·x'(X'X)⁻¹x  (R: ip + pred.var,
+        # pred.var defaulting to res_var).
+        var_mean = np.einsum("ij,jk,ik->i", X, self.XtXinv, X) * rv
+        pv = rv if pred_var is None else pred_var
+        se_yhat = np.sqrt(pv + np.maximum(var_mean, 0.0))
         yhat_vals = yhat["fit"].to_numpy().astype(float)[:, None]
         pi = (
-            t.ppf(1 - alpha / 2, self.df_residuals)
+            t.ppf(1 - alpha / 2, dq)
             * se_yhat[:, None]
             * np.array([-1, 1])
             + yhat_vals
@@ -1113,7 +1198,8 @@ class lm:
         return -2 * self.loglike + np.log(self._n_eff) * self.npar
 
     def predict(self, newdata=None, interval=None, alpha=0.05, *,
-                level=None, se_fit=False, type="response", terms=None):
+                level=None, se_fit=False, type="response", terms=None,
+                rankdeficient="warnif", scale=None, df=None, pred_var=None):
         """R: ``predict.lm`` — fitted/predicted values on ``newdata``.
 
         ``interval`` ∈ ``{None, "confidence", "prediction", True}`` adds
@@ -1122,8 +1208,17 @@ class lm:
         ``1 − alpha`` (``alpha`` still works; ``level`` wins if both given).
 
         ``se_fit=True`` adds an ``se.fit`` column: the SE of the fitted
-        mean, ``√(σ²·xᵀ(XᵀWX)⁻¹x)`` (reported even with
-        ``interval="prediction"``, matching R).
+        mean, ``√(res_var·xᵀ(XᵀWX)⁻¹x)`` (reported even with
+        ``interval="prediction"``, matching R). The returned frame also carries
+        R's other ``se.fit`` list elements as attributes: ``.df`` (the quantile
+        df) and ``.residual_scale`` (``√res_var``).
+
+        ``scale=`` / ``df=`` override the residual scale and quantile df used
+        for ``se.fit`` and the intervals — R's ``scale`` / ``df`` (``res.var =
+        scale²``; ``df`` defaults to ∞ ⇒ normal quantile). When ``scale`` is
+        None they default to the fit's own ``σ`` and ``df.residual``.
+        ``pred_var=`` overrides the prediction-interval variance (R's
+        ``pred.var``; default ``res_var``) — e.g. a known future-obs weight.
 
         ``type="terms"`` returns one *centered* column per RHS term — R's
         ``predict(type="terms")`` — with the overall constant attached as
@@ -1134,21 +1229,115 @@ class lm:
         With ``na_action="exclude"`` and no ``newdata``, the result is padded
         back to the model-frame length with NA at the omitted rows (R's
         ``napredict``), so it lines up with the original frame.
+
+        For a rank-deficient fit, ``rankdeficient=`` controls handling of
+        *non-estimable* ``newdata`` rows (those leaving the training row span,
+        where the dropped aliased columns would matter) — R's ``rankdeficient=``:
+        ``"warnif"`` (default) warn + attach the flagged row indices as
+        ``.non_estim``; ``"non-estim"`` attach silently; ``"simple"`` warn only;
+        ``"NA"`` set those rows to NA; ``"NAwarn"`` NA + warn.
         """
         if level is not None:
             alpha = 1.0 - level
+        # R: scale= overrides res.var (=scale²) and df= the quantile df
+        # (default ∞ ⇒ normal). With scale=None, R uses σ² and df.residual
+        # (the df= argument is ignored), so leave them None to pick the
+        # fit's own values downstream.
+        if scale is not None:
+            res_var = float(scale) ** 2
+            df_q = float("inf") if df is None else float(df)
+        else:
+            res_var = None
+            df_q = None
         if type == "terms":
             out = self._predict_terms(Xnew=newdata, se_fit=se_fit, terms=terms)
         elif type == "response":
             out = self.compute_yhat(
-                Xnew=newdata, interval=interval, alpha=alpha, se_fit=se_fit
+                Xnew=newdata, interval=interval, alpha=alpha, se_fit=se_fit,
+                res_var=res_var, df_q=df_q, pred_var=pred_var,
             )
         else:
             raise ValueError(
                 f"predict(): type must be 'response' or 'terms', got {type!r}"
             )
+        # Rank-deficient fit + new data: flag / NA non-estimable rows (R's
+        # rankdeficient=). type="terms" is exempt, matching R (its FIXME).
+        if type == "response" and newdata is not None and self._aliased_cols:
+            out = self._apply_rankdeficient(out, newdata, rankdeficient)
         if newdata is None and self.na_action == "exclude" and not self._na_mask.all():
             out = self._na_pad_frame(out)
+        # R's se.fit return is list(fit, se.fit, df, residual.scale); hea keeps
+        # the frame and carries df / residual.scale as attributes (an additive
+        # improvement on R's list shape).
+        if se_fit and type == "response":
+            from ..tidy import DataFrame as _DF  # local: avoid import cycle
+            if not isinstance(out, _DF):
+                out = _DF(out)
+            out.df = self.df_residuals if df_q is None else df_q
+            out.residual_scale = float(
+                np.sqrt(self.sigma_squared if res_var is None else res_var)
+            )
+        return out
+
+    def _nonestimable_mask(self, newdata, tol=1e-6):
+        """Boolean mask over ``newdata`` rows that are *non-estimable* from a
+        rank-deficient fit: the full (pre-drop) design row leaves the training
+        row space, so the dropped aliased columns would change the prediction.
+
+        R's ``predict.lm`` uses the QR null-space basis and flags rows where
+        ``tol·‖x‖ ≤ ‖N′x‖``. Equivalently we project each newdata row onto the
+        training row space (``P = X⁺X``) and flag rows whose out-of-span part
+        ``‖x·(I − P)‖`` exceeds ``tol·‖x‖``. ``None`` for a full-rank fit.
+        """
+        if not self._aliased_cols or self._X_full_train is None:
+            return None
+        Xtr = self._X_full_train  # n × p_full (pre-drop)
+        P = np.linalg.pinv(Xtr) @ Xtr  # projector onto the training row space
+        Xnew = (
+            materialize(self._expanded, newdata)
+            .select(self._full_names).to_numpy().astype(float)
+        )
+        resid_norm = np.linalg.norm(Xnew - Xnew @ P, axis=1)
+        x_norm = np.linalg.norm(Xnew, axis=1)
+        x_norm = np.where(x_norm == 0.0, 1.0, x_norm)
+        return resid_norm > tol * x_norm
+
+    def _apply_rankdeficient(self, out, newdata, mode):
+        """Apply R's ``rankdeficient=`` policy to a rank-deficient predict
+        frame — see :meth:`predict`. No-op when every newdata row is estimable
+        (so estimable prediction from a rank-deficient fit stays warning-free,
+        matching R's ``"warnif"``)."""
+        valid = ("warnif", "simple", "non-estim", "NA", "NAwarn")
+        if mode not in valid:
+            raise ValueError(
+                f"predict(): rankdeficient must be one of {valid}, got {mode!r}"
+            )
+        mask = self._nonestimable_mask(newdata)
+        if mask is None or not mask.any():
+            return out
+        import warnings
+
+        msg = "prediction from rank-deficient fit"
+        if mode == "simple":
+            warnings.warn(f'{msg}; consider predict(rankdeficient="NA")')
+            return out
+        if mode in ("NA", "NAwarn"):
+            cols = {}
+            for c in out.columns:
+                arr = out[c].to_numpy().astype(float).copy()
+                arr[mask] = np.nan
+                cols[c] = arr
+            if mode == "NAwarn":
+                warnings.warn(f"{msg}: NAs produced for non-estimable cases")
+            return pl.DataFrame(cols)
+        # "warnif" / "non-estim": attach the flagged 0-based row indices as
+        # ``.non_estim`` (R's attr(*, "non-estim")); "warnif" also warns.
+        if mode == "warnif":
+            warnings.warn(f'{msg}; .non_estim has doubtful cases')
+        from ..tidy import DataFrame as _DF  # local: avoid import cycle
+
+        out = _DF(out)
+        out.non_estim = np.flatnonzero(mask)
         return out
 
     def _na_pad(self, values) -> np.ndarray:
@@ -1248,15 +1437,32 @@ class lm:
     def _residuals_lines(self, digits: int = 4) -> list[str]:
         # R's print.summary.lm shows *weighted* residuals (√wᵢ·rᵢ) under a
         # "Weighted Residuals:" header when the weights vary; otherwise the
-        # raw residuals under "Residuals:".
+        # raw residuals under "Residuals:". The body has three forms keyed on
+        # the residual df (rdf): the 5-number summary for rdf > 5, each
+        # residual for 0 < rdf ≤ 5, and a perfect-fit note for rdf == 0.
         r = self._residuals_arr
         header = "Residuals:"
         if self.weights is not None and float(np.ptp(self._w)) > 0.0:
             r = np.sqrt(self._w) * r
             header = "Weighted Residuals:"
-        qs = np.quantile(r, [0.0, 0.25, 0.5, 0.75, 1.0])
-        labels = ["Min", "1Q", "Median", "3Q", "Max"]
-        vals = format_signif(qs, digits=digits)
+
+        rdf = self.df_residuals
+        if rdf == 0:
+            # R: "ALL <rank> residuals are 0: no residual degrees of freedom!"
+            return [
+                header,
+                f"ALL {self.p} residuals are 0: no residual degrees of freedom!",
+            ]
+        if rdf <= 5:
+            # R prints each residual, index-labelled (0-based here; R 1-based).
+            labels = [str(i) for i in range(len(r))]
+            vals = format_signif(r, digits=digits)
+        else:
+            # R: 5-number summary, zapsmall'd to (digits+1) so a numerically
+            # negligible quantile (e.g. a ~1e-16 median) prints as 0, not noise.
+            qs = _zapsmall(np.quantile(r, [0.0, 0.25, 0.5, 0.75, 1.0]), digits + 1)
+            labels = ["Min", "1Q", "Median", "3Q", "Max"]
+            vals = format_signif(qs, digits=digits)
         widths = [max(len(lab), len(v)) for lab, v in zip(labels, vals)]
         hdr = " ".join(lab.rjust(w) for lab, w in zip(labels, widths))
         row = " ".join(v.rjust(w) for v, w in zip(vals, widths))
