@@ -140,14 +140,20 @@ def resid(model, type=None):
         )
     r = getattr(model, "residuals", None)
     if isinstance(r, pl.DataFrame):
-        return r.to_series().to_numpy()
-    if isinstance(r, np.ndarray):
-        return r
-    if isinstance(r, pl.Series):
-        return r.to_numpy()
-    raise TypeError(
-        f"resid(): {model.__class__.__name__} has no usable residuals"
-    )
+        arr = r.to_series().to_numpy()
+    elif isinstance(r, np.ndarray):
+        arr = r
+    elif isinstance(r, pl.Series):
+        arr = r.to_numpy()
+    else:
+        raise TypeError(
+            f"resid(): {model.__class__.__name__} has no usable residuals"
+        )
+    # R's na.action="exclude" pads residuals back to the model-frame length
+    # with NA (naresid). ``_na_pad`` is a no-op for omit/fail and absent on
+    # models without na.action support, so this is transparent otherwise.
+    pad = getattr(model, "_na_pad", None)
+    return pad(arr) if pad is not None else arr
 
 
 def residuals(model, type=None):
@@ -163,19 +169,26 @@ def fitted(model):
     """
     fv = getattr(model, "fitted_values", None)
     if fv is not None:
-        return np.asarray(fv)
-    f = getattr(model, "fitted", None)
-    if f is not None and not callable(f):
-        return np.asarray(f)
-    yh = getattr(model, "yhat", None)
-    if isinstance(yh, pl.DataFrame):
-        col = "fit" if "fit" in yh.columns else yh.columns[0]
-        return yh[col].to_numpy()
-    if isinstance(yh, np.ndarray):
-        return yh
-    raise TypeError(
-        f"fitted(): {model.__class__.__name__} has no fitted values"
-    )
+        arr = np.asarray(fv)
+    else:
+        f = getattr(model, "fitted", None)
+        if f is not None and not callable(f):
+            arr = np.asarray(f)
+        else:
+            yh = getattr(model, "yhat", None)
+            if isinstance(yh, pl.DataFrame):
+                col = "fit" if "fit" in yh.columns else yh.columns[0]
+                arr = yh[col].to_numpy()
+            elif isinstance(yh, np.ndarray):
+                arr = yh
+            else:
+                raise TypeError(
+                    f"fitted(): {model.__class__.__name__} has no fitted values"
+                )
+    # na.action="exclude" pads fitted values back to model-frame length (R's
+    # napredict); ``_na_pad`` is a no-op otherwise / absent on other models.
+    pad = getattr(model, "_na_pad", None)
+    return pad(arr) if pad is not None else arr
 
 
 def fitted_values(model):

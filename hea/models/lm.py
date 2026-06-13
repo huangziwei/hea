@@ -105,6 +105,31 @@ def _model_frame_keep_mask(formula: str, data: pl.DataFrame) -> np.ndarray:
     return _na_mask_with_matrix_cols(data, na_cols)
 
 
+def _resolve_subset(subset, data: pl.DataFrame):
+    """Evaluate R's ``subset=`` to a form :func:`_subset_keep` accepts.
+
+    R evaluates ``subset`` as an expression in the data frame
+    (``subset = Area > 10``). hea accepts, in addition to a bool mask /
+    integer indices (returned untouched):
+
+    * a **polars expression** — ``pl.col("Area") > 10`` (native, full power);
+    * an **R-style string** — ``"Area > 10 & Elevation < 200"`` — run through
+      hea's R→Python translator first so R's operator precedence (``&`` /
+      ``|`` bind *looser* than comparisons, the opposite of Python) is
+      honored, then evaluated with the frame's columns bound as polars
+      Series. Returns a boolean ndarray for the string / expression forms.
+    """
+    if isinstance(subset, str):
+        from ..translate import translate_r  # local: avoid import cycle
+        py_src = translate_r(subset)
+        ns = {c: data[c] for c in data.columns}
+        result = eval(py_src, {"__builtins__": {}}, ns)  # noqa: S307 — R-style NSE
+        return np.asarray(result).astype(bool)
+    if isinstance(subset, pl.Expr):
+        return data.select(subset.alias("__subset__"))["__subset__"].to_numpy().astype(bool)
+    return subset
+
+
 def _drop_aliased_cols(X_df: pl.DataFrame) -> list[str]:
     """Identify linearly-dependent columns in a design matrix.
 
@@ -418,11 +443,30 @@ class lm:
         weights: Union[None, np.array] = None,
         method: str = "qr",
         subset=None,
+        na_action: str = "omit",
+        contrasts=None,
     ):
 
         # meta
         self.formula = formula
         self.method = method
+        self.contrasts = contrasts
+
+        # R's ``na.action``: how to treat rows with NA in a referenced
+        # column. ``omit`` (default) drops them — hea's established
+        # behaviour, matching R's default. ``fail`` errors on any NA.
+        # ``exclude`` fits on the complete cases but pads the *accessors*
+        # (resid / fitted / predict) back to the model-frame length with NA
+        # (see _na_pad). Accept R-style aliases.
+        _na_norm = {"omit": "omit", "na.omit": "omit",
+                    "exclude": "exclude", "na.exclude": "exclude",
+                    "fail": "fail", "na.fail": "fail"}
+        self.na_action = _na_norm.get(str(na_action))
+        if self.na_action is None:
+            raise ValueError(
+                "na_action must be one of 'omit' / 'exclude' / 'fail'; "
+                f"got {na_action!r}"
+            )
 
         # ``weights`` are validated against the input frame, then carried
         # through the *same* ``subset=`` + ``na.omit`` row-drops the data
@@ -441,26 +485,33 @@ class lm:
         else:
             w_arr = None
 
-        # R's ``subset=`` filters rows before fitting (bool mask / 0-based
-        # keep / negative drop — see _subset_keep). Filter weights in
-        # lockstep through the shared index.
+        # R's ``subset=`` filters rows before fitting. Accepts an R-style
+        # expression (string / polars expr) evaluated in the frame, a bool
+        # mask, or 0-based keep / negative drop indices (see _resolve_subset
+        # / _subset_keep). Filter weights in lockstep through the same index.
         if subset is not None:
+            subset = _resolve_subset(subset, data)
             keep = _subset_keep(data.height, subset)
             data = data[keep]
             if w_arr is not None:
                 w_arr = w_arr[keep]
 
-        # na.omit drops rows with NA in the response or any referenced RHS
-        # column; replay that drop on the weights so they match X's rows.
-        if w_arr is not None:
-            na_keep = _model_frame_keep_mask(formula, data)
-            if not na_keep.all():
-                w_arr = w_arr[na_keep]
+        # na.action keep-mask over the (post-subset) frame: which rows
+        # survive na.omit. Drives ``fail`` (error), ``exclude`` (output
+        # padding), and the weight alignment below.
+        na_keep = _model_frame_keep_mask(formula, data)
+        if self.na_action == "fail" and not na_keep.all():
+            raise ValueError("missing values in object")  # R: na.fail
+        self._na_mask = na_keep
+        self._n_full = data.height  # model-frame length (post-subset, pre-na)
+
+        if w_arr is not None and not na_keep.all():
+            w_arr = w_arr[na_keep]
 
         self.data = data
         self.weights = w_arr
 
-        d = prepare_design(formula, data)
+        d = prepare_design(formula, data, contrasts=contrasts)
         self._expanded = d.expanded
         self._design_data = d.data
         self.X = d.X
@@ -1025,18 +1076,56 @@ class lm:
         the ``.constant`` attribute (so ``fit = constant + rowSums``) and
         ``se.{term}`` columns when ``se_fit=True``. ``terms=`` (a label or
         list) selects a subset. See :meth:`_predict_terms`.
+
+        With ``na_action="exclude"`` and no ``newdata``, the result is padded
+        back to the model-frame length with NA at the omitted rows (R's
+        ``napredict``), so it lines up with the original frame.
         """
         if level is not None:
             alpha = 1.0 - level
         if type == "terms":
-            return self._predict_terms(Xnew=newdata, se_fit=se_fit, terms=terms)
-        if type != "response":
+            out = self._predict_terms(Xnew=newdata, se_fit=se_fit, terms=terms)
+        elif type == "response":
+            out = self.compute_yhat(
+                Xnew=newdata, interval=interval, alpha=alpha, se_fit=se_fit
+            )
+        else:
             raise ValueError(
                 f"predict(): type must be 'response' or 'terms', got {type!r}"
             )
-        return self.compute_yhat(
-            Xnew=newdata, interval=interval, alpha=alpha, se_fit=se_fit
-        )
+        if newdata is None and self.na_action == "exclude" and not self._na_mask.all():
+            out = self._na_pad_frame(out)
+        return out
+
+    def _na_pad(self, values) -> np.ndarray:
+        """R's ``naresid`` / ``napredict`` for ``na.action="exclude"``:
+        scatter complete-case ``values`` into the model-frame length with NA
+        at the omitted rows. Identity for ``omit`` / ``fail`` (no rows to
+        restore). Used by the ``resid()`` / ``fitted()`` accessors."""
+        arr = np.asarray(values, dtype=float)
+        if self.na_action != "exclude" or self._na_mask.all():
+            return arr
+        out = np.full(self._n_full, np.nan, dtype=float)
+        out[self._na_mask] = arr
+        return out
+
+    def _na_pad_frame(self, frame: pl.DataFrame) -> pl.DataFrame:
+        """Row-pad a (complete-case) predict frame to the model-frame length
+        with NA at the omitted rows — the ``na.action="exclude"`` form of
+        :meth:`_na_pad` for the multi-column predict output."""
+        idx = np.flatnonzero(self._na_mask)
+        cols = {}
+        for c in frame.columns:
+            out = np.full(self._n_full, np.nan, dtype=float)
+            out[idx] = frame[c].to_numpy().astype(float)
+            cols[c] = out
+        padded = pl.DataFrame(cols)
+        constant = getattr(frame, "constant", None)
+        if constant is not None:
+            from ..tidy import DataFrame as _DF
+            padded = _DF(padded)
+            padded.constant = constant
+        return padded
 
     def _predict_terms(self, Xnew=None, se_fit=False, terms=None):
         """R: ``predict.lm(type="terms")`` — per-term contributions.

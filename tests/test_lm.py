@@ -638,3 +638,77 @@ def test_rank_deficient_keeps_aliased_as_NA():
     su = m.summary()
     assert su.aliased.tolist() == [False, False, False, False, False, False, True]
     assert su.coefficients.shape == (6, 4)
+
+
+# ---------------------------------------------------------------------------
+# Track D — contrasts= / na.action= / subset-as-expression (R 4.6.0 oracles)
+# ---------------------------------------------------------------------------
+
+
+def test_lm_contrasts_argument_matches_R():
+    # lm(weight ~ group, contrasts=list(group="contr.sum"))
+    pg = load_dataset("R", "PlantGrowth")
+    m = lm("weight ~ group", pg, contrasts={"group": "contr.sum"})
+    assert list(m.bhat.columns) == ["(Intercept)", "group1", "group2"]
+    np.testing.assert_allclose(m._bhat_arr, [5.073, -0.041, -0.412], rtol=1e-5)
+    np.testing.assert_allclose(m.sigma, 0.62337463, rtol=1e-6)
+
+
+def test_lm_na_action_exclude_pads_accessors():
+    """na.action='exclude' pads resid/fitted/predict back to the model-frame
+    length with NA (R's naresid/napredict); the raw m.residuals stays
+    complete-case, like R's m$residuals."""
+    from hea.R import fitted, predict, resid
+    aq = load_dataset("R", "airquality")  # 153 rows, 42 with NA Ozone/Solar.R
+
+    me = lm("Ozone ~ Solar.R + Wind + Temp", aq, na_action="exclude")
+    r = resid(me)
+    assert len(r) == 153
+    assert int(np.isnan(r).sum()) == 42
+    np.testing.assert_allclose(
+        r[:6], [7.95452, 1.00129, -12.8228, -0.475226, np.nan, np.nan],
+        rtol=1e-4, equal_nan=True,
+    )
+    assert list(np.where(np.isnan(r))[0][:6]) == [4, 5, 9, 10, 24, 25]
+    assert len(fitted(me)) == 153
+    assert predict(me).height == 153
+    # raw component stays complete-case (R's m$residuals)
+    assert me.residuals.height == 111
+
+    # default na.action='omit' is unchanged (drops to complete cases)
+    mo = lm("Ozone ~ Solar.R + Wind + Temp", aq)
+    assert len(resid(mo)) == 111
+    # coefficients identical between omit and exclude (same fit)
+    np.testing.assert_allclose(me._bhat_arr, mo._bhat_arr, rtol=1e-10)
+
+
+def test_lm_na_action_fail_raises():
+    aq = load_dataset("R", "airquality")
+    with pytest.raises(ValueError, match="missing values"):
+        lm("Ozone ~ Solar.R + Wind + Temp", aq, na_action="fail")
+    # a complete-case frame fits fine under na.fail
+    pg = load_dataset("R", "PlantGrowth")
+    m = lm("weight ~ group", pg, na_action="fail")
+    assert m.n == 30
+
+
+def test_lm_subset_as_expression():
+    g = load_dataset("faraway", "gala")
+
+    # polars expression (native Python form)
+    m_e = lm("Species ~ Area", g, subset=pl.col("Area") > 10)
+    assert m_e.n == 13
+    np.testing.assert_allclose(m_e._bhat_arr, [134.33592, 0.058669392], rtol=1e-5)
+
+    # R-style string, single comparison
+    m_s = lm("Species ~ Area", g, subset="Area > 10")
+    assert m_s.n == 13
+    np.testing.assert_allclose(m_s._bhat_arr, m_e._bhat_arr, rtol=1e-12)
+
+    # R-style compound: R's `&` binds looser than `<`/`>` (opposite of
+    # Python) — routed through hea's translator so precedence matches R.
+    m_c = lm("Species ~ 1", g, subset="Area > 10 & Elevation < 200")
+    assert m_c.n == 2  # R: subset = Area > 10 & Elevation < 200  -> 2 rows
+    m_c2 = lm("Species ~ 1", g,
+              subset=(pl.col("Area") > 10) & (pl.col("Elevation") < 200))
+    assert m_c2.n == 2
