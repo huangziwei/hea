@@ -824,7 +824,7 @@ def m_gam():
 @pytest.fixture(scope="module")
 def m_lme():
     sleep = hea.data("sleepstudy", package="lme4")
-    return hea.models.lme("Reaction ~ Days + (Days|Subject)", sleep)
+    return hea.models.gmm("Reaction ~ Days + (Days|Subject)", sleep)
 
 
 # ---- coef / coefficients / fixef ------------------------------------
@@ -850,7 +850,7 @@ def test_coef_works_on_glm_gam_lme(m_glm, m_gam, m_lme):
     assert "(Intercept)" in coef(m_glm)
     # gam: intercept + 9 wt basis + 9 hp basis
     assert "(Intercept)" in coef(m_gam)
-    # lme: fixed effects only (= fixef)
+    # gmm: fixed effects only (= fixef)
     c = coef(m_lme)
     assert set(c.names) == {"(Intercept)", "Days"}
 
@@ -945,12 +945,12 @@ def test_confint_custom_level_lm_recomputes(m_lm):
 def test_confint_dispatches_to_profile_object():
     """``confint(profile(fm))`` defers to the Profile's own ``.confint``,
     mirroring R's S3 ``confint.profile`` dispatch — the
-    ``lme4::profile`` workflow Bates uses in the lme book.
+    ``lme4::profile`` workflow Bates uses in the gmm book.
     """
-    from hea.models import lme
+    from hea.models import gmm
     from hea import data
     dye = data("Dyestuff")
-    fm = lme("Yield ~ 1 + (1 | Batch)", dye, REML=False)
+    fm = gmm("Yield ~ 1 + (1 | Batch)", dye, REML=False)
     pr = fm.profile()
     out = confint(pr)
     assert isinstance(out, pl.DataFrame)
@@ -981,7 +981,7 @@ def test_vcov_gam_uses_Vp(m_gam):
 
 
 def test_vcov_lme_returns_dataframe(m_lme):
-    """lme stores ``vcov_beta`` as a DataFrame with named cols."""
+    """gmm stores ``vcov_beta`` as a DataFrame with named cols."""
     V = vcov(m_lme)
     assert isinstance(V, pl.DataFrame)
     assert V.shape == (2, 2)
@@ -1027,7 +1027,7 @@ def test_df_residual_lm(m_lm):
 
 
 def test_df_residual_raises_for_reml_lme(m_lme):
-    """REML lme fit has no defined residual df; we raise."""
+    """REML gmm fit has no defined residual df; we raise."""
     with pytest.raises(TypeError, match="residual df"):
         df_residual(m_lme)
 

@@ -13,7 +13,7 @@ construct a frame or run an ``isinstance`` check.
 * ``hea.data(...)``     — R's :func:`data` (dataset loader): hit in
                           almost every example to pull a frame from
                           rdatasets/faraway/lme4/etc.
-* ``hea.models``        — :func:`lm`, :func:`glm`, :func:`gam`, :func:`bam`, :func:`lme`
+* ``hea.models``        — :func:`lm`, :func:`glm`, :func:`gam`, :func:`bam`, :func:`gmm`
 * ``hea.tidy``          — tidyverse verbs (``desc``, ``case_when``,
                           ``fct_*``, …) plus the polars expression
                           builders (``col``, ``lit``, ``when``, …) used

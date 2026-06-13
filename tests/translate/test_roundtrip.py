@@ -364,3 +364,28 @@ class TestUserReportedCase:
         assert "gala" in out
         assert "lm(" in out
         assert "m0.summary()" in out
+
+
+class TestMixedModelRoundtrip:
+    """lme4's ``lmer``/``glmer`` survive R→hea→R: the function name (via the
+    ``gmm`` fold and family-based reverse dispatch), the parenthesized
+    random-effect bar, and the R family generator name."""
+
+    def test_glmer_poisson_r_py_r(self):
+        out = _r_py_r("glmer(y ~ x + (1|g), family=poisson, data=d)")
+        assert out.startswith("glmer(")
+        assert "(1 | g)" in out
+        assert "family = poisson" in out
+
+    def test_lmer_random_slope_r_py_r(self):
+        out = _r_py_r("lmer(y ~ x + (1+x|g), data=d)")
+        assert out.startswith("lmer(")
+        assert "(1 + x | g)" in out
+        assert "glmer(" not in out
+
+    def test_glmer_binomial_cbind_r_py_r(self):
+        out = _r_py_r("glmer(cbind(s, f) ~ x + (1|g), family=binomial, data=d)")
+        assert out.startswith("glmer(")
+        assert "cbind(s, f)" in out
+        assert "(1 | g)" in out
+        assert "family = binomial" in out

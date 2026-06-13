@@ -1,5 +1,5 @@
 """Free-function dispatch over hea's fitted model objects
-(``lm`` / ``glm`` / ``gam`` / ``bam`` / ``lme``).
+(``lm`` / ``glm`` / ``gam`` / ``bam`` / ``gmm``).
 
 Pure duck typing — no model-class imports needed at module load. Where R
 has multiple aliases (``coef`` / ``coefficients``, ``resid`` / ``residuals``,
@@ -33,7 +33,7 @@ def _bhat_to_named_vector(model):
 def coef(model):
     """R: ``coef()`` — coefficients as a named numeric vector.
 
-    Works for ``lm`` / ``glm`` / ``gam`` / ``bam`` / ``lme``. For ``lme``
+    Works for ``lm`` / ``glm`` / ``gam`` / ``bam`` / ``gmm``. For ``gmm``
     this returns FIXED effects only (= R's ``fixef(m)``); R's
     ``coef.lmerMod`` returns per-group BLUPs which hea doesn't compute
     in the same shape — use ``fixef()`` + ``ranef()`` to assemble.
@@ -51,7 +51,7 @@ def coefficients(model):
 
 
 def fixef(model):
-    """R: ``fixef()`` — fixed-effect coefficients (lme).
+    """R: ``fixef()`` — fixed-effect coefficients (gmm).
 
     For non-mixed models, identical to :func:`coef`.
     """
@@ -59,7 +59,7 @@ def fixef(model):
 
 
 def ranef(model):
-    """R: ``ranef()`` — random effects (lme only)."""
+    """R: ``ranef()`` — random effects (gmm only)."""
     if hasattr(model, "ranef"):
         return model.ranef
     raise TypeError(
@@ -72,7 +72,7 @@ def resid(model, type=None):
 
     For ``glm`` / ``gam`` / ``bam``, ``type`` selects among
     ``{"deviance"`` (default, matches R), ``"pearson"``, ``"working"``,
-    ``"response"}``. ``lm`` and ``lme`` only have response residuals;
+    ``"response"}``. ``lm`` and ``gmm`` only have response residuals;
     pass ``type=None`` or ``"response"`` (anything else raises).
     """
     if hasattr(model, "residuals_of"):
@@ -102,7 +102,7 @@ def residuals(model, type=None):
 def fitted(model):
     """R: ``fitted()`` — fitted values as 1D ``ndarray``.
 
-    For lm/glm this is the response-scale prediction (μ̂); for gam/lme
+    For lm/glm this is the response-scale prediction (μ̂); for gam/gmm
     same. Equivalent to ``model.predict()`` on the training data.
     """
     fv = getattr(model, "fitted_values", None)
@@ -148,8 +148,8 @@ def confint(model, level=0.95):
 
     Dispatch:
 
-    * Profile-likelihood objects (``lme.profile()`` output) — defer to
-      :meth:`hea.lme.Profile.confint`, which inverts each ζ-curve at
+    * Profile-likelihood objects (``gmm.profile()`` output) — defer to
+      :meth:`hea.gmm.Profile.confint`, which inverts each ζ-curve at
       ``±Φ⁻¹((1+level)/2)``. This is the lme4 ``confint(profile(fm))``
       workflow.
     * ``lm`` — exact CIs at ``alpha = 1 - level`` via
@@ -176,10 +176,10 @@ def vcov(model):
     """R: ``vcov()`` — variance-covariance matrix of the coefficients.
 
     Return type varies by model: lm/glm return ``ndarray`` (``V_bhat``);
-    gam/bam return ``ndarray`` (``Vp``, the Bayesian posterior); lme
+    gam/bam return ``ndarray`` (``Vp``, the Bayesian posterior); gmm
     returns a polars ``DataFrame`` (``vcov_beta``, fixed effects only).
     """
-    if hasattr(model, "vcov_beta"):  # lme
+    if hasattr(model, "vcov_beta"):  # gmm
         return model.vcov_beta
     if hasattr(model, "Vp"):  # gam / bam (Bayesian posterior)
         return model.Vp
@@ -193,7 +193,7 @@ def vcov(model):
 def logLik(model):
     """R: ``logLik()`` — model log-likelihood.
 
-    For REML-fit ``lme`` (no plain ``loglike``), returns the REML
+    For REML-fit ``gmm`` (no plain ``loglike``), returns the REML
     log-likelihood ``-REML_criterion / 2``, matching ``logLik.lmerMod``.
     """
     if hasattr(model, "loglike"):
@@ -336,7 +336,7 @@ def update(model, formula=None, **kwargs):
     Constructor kwargs auto-forwarded (when the model class accepts the
     name AND the model exposes a non-``None`` public attribute):
     ``family`` (glm/gam/bam), ``method`` (lm/gam/bam), ``weights`` (lm),
-    ``REML`` (lme). User-supplied ``**kwargs`` always override the
+    ``REML`` (gmm). User-supplied ``**kwargs`` always override the
     auto-forward. Anything not on this list (``offset``, ``sp``,
     ``select``, ``control``, …) must be passed explicitly if needed —
     forwarding ``sp`` for example would tie the new fit's smoothing

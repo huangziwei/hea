@@ -5,7 +5,7 @@ Implements the per-model-family dispatch: ``_anova_lm`` /
 ``_anova_glm_table`` for generalized linear models (with auto-pick of F
 vs Chisq tests), ``_anova_gam`` / ``_anova_gam_single`` /
 ``_anova_gam_table`` for mgcv-style GAM fits (uses ``edf1`` residual df),
-and ``_anova_lme`` for the LRT comparison between nested ``lme`` fits
+and ``_anova_gmm`` for the LRT comparison between nested ``gmm`` fits
 (with silent ML refit when REML inputs are passed).
 
 ``step()`` minimizes the Mallows-style extractAIC formula (see
@@ -26,7 +26,7 @@ from ._shared import _caller_names
 from ..models.gam import gam
 from ..models.glm import glm
 from ..models.lm import lm
-from ..models.lme import lme
+from ..models.gmm import gmm
 from ..utils import (
     _dig_tst,
     format_df,
@@ -46,7 +46,7 @@ def anova(*models, test: str | None = None, freq: bool = False,
     - Multiple ``lm`` fits → F-test ANOVA table (incremental for 3+).
     - Multiple ``glm`` fits → analysis-of-deviance table (incremental for
       3+); ``test=`` selects the test statistic (see below).
-    - Multiple ``lme`` fits → likelihood-ratio test (lme4-style, incremental
+    - Multiple ``gmm`` fits → likelihood-ratio test (lme4-style, incremental
       for 3+). REML fits are internally refit by ML before the LRT.
 
     Parameters
@@ -56,7 +56,7 @@ def anova(*models, test: str | None = None, freq: bool = False,
         picks ``"Chisq"`` for scale-known families (Poisson, Binomial) and
         ``"F"`` for unknown-scale (Gaussian, Gamma, IG), matching R's
         ``anova.glm`` recommendation. ``"LRT"`` is an alias for ``"Chisq"``.
-        ``"Rao"`` (score test) is not implemented yet. For ``lm`` and ``lme``
+        ``"Rao"`` (score test) is not implemented yet. For ``lm`` and ``gmm``
         the test is fixed (always F / Chisq LRT respectively); passing
         ``test=`` for those raises.
     freq, dispersion : single-``gam`` form only
@@ -91,13 +91,13 @@ def anova(*models, test: str | None = None, freq: bool = False,
             f"(got {type(m).__name__})"
         )
     labels = _caller_names(models, inspect.currentframe().f_back)
-    if all(isinstance(m, lme) for m in models):
+    if all(isinstance(m, gmm) for m in models):
         if test is not None and test.upper() not in ("CHISQ", "LRT"):
             raise ValueError(
-                f"anova(lme): only test='Chisq'/'LRT' (the default LRT) "
+                f"anova(gmm): only test='Chisq'/'LRT' (the default LRT) "
                 f"is supported, got {test!r}"
             )
-        return _anova_lme(*models, labels=labels)
+        return _anova_gmm(*models, labels=labels)
     if all(isinstance(m, gam) for m in models):
         return _anova_gam(*models, labels=labels, test=test)
     # glm before lm: glm is not an lm subclass, but the isinstance order
@@ -109,7 +109,7 @@ def anova(*models, test: str | None = None, freq: bool = False,
             raise TypeError("anova(lm): test= is not accepted (always F)")
         return _anova_lm(*models, labels=labels)
     raise TypeError(
-        "anova(): all models must be the same type (lm, glm, gam, or lme)"
+        "anova(): all models must be the same type (lm, glm, gam, or gmm)"
     )
 
 
@@ -150,8 +150,8 @@ def drop1(model, *, test: str | None = None, k: float = 2.0):
             "drop1(gam): not implemented yet — mgcv's drop1.gam has "
             "smoothing-parameter caveats we haven't ported."
         )
-    if isinstance(model, lme):
-        raise NotImplementedError("drop1(lme): not implemented yet.")
+    if isinstance(model, gmm):
+        raise NotImplementedError("drop1(gmm): not implemented yet.")
     # glm before lm: glm is not an lm subclass, but order matters if
     # that ever changes (mirrors anova()'s dispatch order).
     if isinstance(model, glm):
@@ -288,8 +288,8 @@ def add1(model, scope, *, test: str | None = None, k: float = 2.0):
             "add1(gam): not implemented yet — mgcv's add1.gam has "
             "smoothing-parameter caveats we haven't ported."
         )
-    if isinstance(model, lme):
-        raise NotImplementedError("add1(lme): not implemented yet.")
+    if isinstance(model, gmm):
+        raise NotImplementedError("add1(gmm): not implemented yet.")
 
     lhs = model.formula.split("~", 1)[0].strip()
     upper_formula = f"{lhs} ~ {scope}"
@@ -574,8 +574,8 @@ def step(
     """
     if isinstance(model, gam):
         raise NotImplementedError("step(gam): not implemented yet")
-    if isinstance(model, lme):
-        raise NotImplementedError("step(lme): not implemented yet")
+    if isinstance(model, gmm):
+        raise NotImplementedError("step(gmm): not implemented yet")
     if not isinstance(model, (lm, glm)):
         raise TypeError(f"step(): unsupported model type {type(model).__name__}")
 
@@ -1430,12 +1430,12 @@ def _anova_glm_table(*models, labels: list[str], test: str | None = None):
     return df_, docstring
 
 
-def _anova_lme(*models, labels: list[str]):
-    """Likelihood-ratio test for nested ``lme`` fits (lme4-style)."""
+def _anova_gmm(*models, labels: list[str]):
+    """Likelihood-ratio test for nested ``gmm`` fits (lme4-style)."""
     # LRT requires ML; silently refit any REML inputs.
     refit = any(m.REML for m in models)
     models = tuple(
-        (lme(m.formula, m.data, REML=False) if m.REML else m) for m in models
+        (gmm(m.formula, m.data, REML=False) if m.REML else m) for m in models
     )
     if refit:
         print("refitting model(s) with ML (instead of REML)")

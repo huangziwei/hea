@@ -3,7 +3,7 @@
 Covers everything exposed by ``hea/compare.py``:
 
 * ``anova(...)`` — multi-model F / Chisq / LRT tables across lm, glm,
-  gam, and lme dispatch branches; plus the single-model forms
+  gam, and gmm dispatch branches; plus the single-model forms
   (``anova(lm)`` Type-I, ``anova(gam)`` parametric + smooth tables).
 * ``AIC()`` / ``BIC()`` — printed comparison tables.
 * ``drop1(...)`` — single-term-deletion tables for lm and glm.
@@ -310,7 +310,7 @@ def test_anova_glm_F_printed_table_has_F_and_Pr_columns():
 
 
 def test_anova_lm_rejects_test_argument():
-    """`test=` is glm-only; lm/lme always use F/Chisq respectively."""
+    """`test=` is glm-only; lm/gmm always use F/Chisq respectively."""
     d = load_dataset("R", "iris")
     m1 = lm("Sepal.Length ~ Petal.Length", d)
     m2 = lm("Sepal.Length ~ Petal.Length + Petal.Width", d)
@@ -1066,7 +1066,7 @@ def test_step_rejects_invalid_direction():
 
 
 def test_step_unsupported_model_type():
-    """step(gam) and step(lme) intentionally raise NotImplementedError."""
+    """step(gam) and step(gmm) intentionally raise NotImplementedError."""
     trees = load_dataset("R", "trees")
     g = gam("Volume ~ s(Girth)",
             data=trees, family=Gamma(link="log"))

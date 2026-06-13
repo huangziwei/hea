@@ -1,4 +1,4 @@
-"""Pin :class:`hea.lme.NelderMead` against lme4's ``Nelder_Mead()``.
+"""Pin :class:`hea.gmm.NelderMead` against lme4's ``Nelder_Mead()``.
 
 Both run the same algorithm (NLopt-derived bounded simplex). With identical
 ``x0``, ``xstep``, ``xtol``, and the same objective, every reflection /
@@ -15,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from hea.models.lme import NelderMead, NMStatus
+from hea.models.gmm import NelderMead, NMStatus
 
 
 def test_nelder_mead_quadratic_matches_lme4():

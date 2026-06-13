@@ -413,7 +413,7 @@ __all__ = [
     "fisher_test", "prop_test", "binom_test", "var_test", "bartlett_test",
     "shapiro_test", "ks_test", "mcnemar_test", "friedman_test",
     "aov",
-    # model generics (lm / glm / gam / bam / lme)
+    # model generics (lm / glm / gam / bam / gmm)
     "coef", "coefficients", "fixef", "ranef",
     "resid", "residuals", "fitted", "fitted_values",
     "predict", "confint", "vcov",

@@ -7745,7 +7745,7 @@ class Design:
     ----------
     expanded : ExpandedFormula
         Output of ``formula.expand`` for the parsed formula. Pass this
-        to downstream materializers (``materialize_bars`` for lme,
+        to downstream materializers (``materialize_bars`` for gmm,
         ``materialize_smooths`` for gam) so they share the same parse.
     data : polars.DataFrame
         Input data with rows dropped where the response or any

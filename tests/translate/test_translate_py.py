@@ -601,3 +601,46 @@ class TestRoundTrip:
             "billboard |> pivot_longer(c(wk1, wk2), "
             'names_to = "week", values_to = "rank")'
         )
+
+
+class TestMixedModelsReverse:
+    """hea's single ``gmm`` class reverses to lme4's ``lmer`` (Gaussian) or
+    ``glmer`` (any other family); an explicit Gaussian family is dropped
+    because ``lmer`` takes no ``family`` argument."""
+
+    def test_gmm_no_family_to_lmer(self):
+        out = _tr("hea.models.gmm(formula='y ~ x + (1|g)', data=d)")
+        assert out == 'lmer(formula = "y ~ x + (1|g)", data = d)'
+
+    def test_gmm_poisson_to_glmer_lowercases_family(self):
+        # hea's ``Poisson()`` class → R's ``poisson`` generator (not ``Poisson()``).
+        out = _tr("hea.models.gmm(formula='y ~ x + (1|g)', data=d, family=Poisson())")
+        assert out == 'glmer(formula = "y ~ x + (1|g)", data = d, family = poisson)'
+
+    def test_gmm_binomial_to_glmer_lowercases_family(self):
+        out = _tr("hea.models.gmm(formula='y ~ x + (1|g)', data=d, family=Binomial())")
+        assert out == 'glmer(formula = "y ~ x + (1|g)", data = d, family = binomial)'
+
+    def test_gmm_gamma_and_inverse_gaussian_use_r_family_names(self):
+        # R capitalizes ``Gamma`` and dots ``inverse.gaussian``.
+        g = _tr("hea.models.gmm(formula='y ~ x + (1|g)', data=d, family=Gamma())")
+        assert g == 'glmer(formula = "y ~ x + (1|g)", data = d, family = Gamma)'
+        ig = _tr("hea.models.gmm(formula='y ~ x + (1|g)', data=d, family=InverseGaussian())")
+        assert ig == 'glmer(formula = "y ~ x + (1|g)", data = d, family = inverse.gaussian)'
+
+    def test_gmm_family_with_link_preserves_link_arg(self):
+        out = _tr("hea.models.gmm(formula='y ~ x + (1|g)', data=d, family=Gamma(link='log'))")
+        assert out == 'glmer(formula = "y ~ x + (1|g)", data = d, family = Gamma(link = "log"))'
+
+    def test_gmm_explicit_gaussian_to_lmer_drops_family(self):
+        out = _tr("hea.models.gmm(formula='y ~ x + (1|g)', data=d, family=Gaussian())")
+        assert out == 'lmer(formula = "y ~ x + (1|g)", data = d)'
+        out2 = _tr("hea.models.gmm(formula='y ~ x + (1|g)', data=d, family=gaussian())")
+        assert out2 == 'lmer(formula = "y ~ x + (1|g)", data = d)'
+
+    def test_bare_gmm_dispatches_like_namespaced(self):
+        # ``from_R`` emits bare ``gmm(...)`` (after the import) — it must
+        # dispatch the same as ``hea.models.gmm(...)`` for the round-trip.
+        assert _tr("gmm(formula='y ~ x + (1|g)', data=d)").startswith("lmer(")
+        out = _tr("gmm(formula='y ~ x + (1|g)', data=d, family=Poisson())")
+        assert out.startswith("glmer(") and "family = poisson" in out

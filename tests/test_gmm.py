@@ -1,5 +1,5 @@
 """
-Notebook examples → regression tests for hea.lme.
+Notebook examples → regression tests for hea.gmm.
 
 Pins printed numerical outputs from Bates, "lme4: Mixed-effects Modeling
 with R" (lMMwR.pdf, in example/data/) so the formulae→formula.py
@@ -8,7 +8,7 @@ covered: fm01, fm02 (Ch 1, Dyestuff/Dyestuff2); fm03, fm04, fm04a (Ch 2,
 Penicillin/Pastes); fm06, fm07 (Ch 3, sleepstudy); fm10, fm16, fm17
 (Ch 4, Machines/ergoStool).
 
-The post-migration lme is expected to expose, at minimum:
+The post-migration gmm is expected to expose, at minimum:
     m.n, m.n_groups       — sample size, dict of group → #levels
     m.sigma                — residual SD
     m.sd_re[group]         — np.ndarray of component SDs (length 1 for
@@ -32,12 +32,12 @@ from scipy.stats import chi2
 
 from conftest import assert_fp_equiv, load_dataset
 from hea.family import Binomial, Gaussian, Poisson
-from hea.models.lme import lme
+from hea.models.gmm import gmm
 
 
 # ---------------------------------------------------------------------------
 # Shared fits / profiles. Each model and (where applicable) its profile is
-# computed once per module — both are immutable post-construction in lmpy.lme,
+# computed once per module — both are immutable post-construction in lmpy.gmm,
 # and `profile()` here always uses the default n_grid=41, so the results are
 # bit-identical across the tests that consume them. Cuts ~14s off the file.
 # ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ from hea.models.lme import lme
 @pytest.fixture(scope="module")
 def fm01ML():
     data = load_dataset("lme4", "Dyestuff")
-    return lme("Yield ~ 1 + (1|Batch)", data, REML=False)
+    return gmm("Yield ~ 1 + (1|Batch)", data, REML=False)
 
 
 @pytest.fixture(scope="module")
@@ -57,7 +57,7 @@ def fm01ML_profile(fm01ML):
 @pytest.fixture(scope="module")
 def fm03ML():
     data = load_dataset("lme4", "Penicillin")
-    return lme("diameter ~ 1 + (1|plate) + (1|sample)", data, REML=False)
+    return gmm("diameter ~ 1 + (1|plate) + (1|sample)", data, REML=False)
 
 
 @pytest.fixture(scope="module")
@@ -68,25 +68,25 @@ def fm03ML_profile(fm03ML):
 @pytest.fixture(scope="module")
 def fm04ML():
     data = load_dataset("lme4", "Pastes")
-    return lme("strength ~ 1 + (1|sample) + (1|batch)", data, REML=False)
+    return gmm("strength ~ 1 + (1|sample) + (1|batch)", data, REML=False)
 
 
 @pytest.fixture(scope="module")
 def fm04aML():
     data = load_dataset("lme4", "Pastes")
-    return lme("strength ~ 1 + (1|sample)", data, REML=False)
+    return gmm("strength ~ 1 + (1|sample)", data, REML=False)
 
 
 @pytest.fixture(scope="module")
 def fm06ML():
     data = load_dataset("lme4", "sleepstudy")
-    return lme("Reaction ~ 1 + Days + (1+Days|Subject)", data, REML=False)
+    return gmm("Reaction ~ 1 + Days + (1+Days|Subject)", data, REML=False)
 
 
 @pytest.fixture(scope="module")
 def fm07ML():
     data = load_dataset("lme4", "sleepstudy")
-    return lme(
+    return gmm(
         "Reaction ~ 1 + Days + (1|Subject) + (0+Days|Subject)",
         data, REML=False,
     )
@@ -159,8 +159,8 @@ def _lrt(m_reduced, m_full):
 def test_family_default_equals_explicit_gaussian():
     """``family=None`` (default) and ``family=Gaussian()`` produce the same fit."""
     data = load_dataset("lme4", "Dyestuff")
-    m_default = lme("Yield ~ 1 + (1|Batch)", data, REML=True)
-    m_explicit = lme("Yield ~ 1 + (1|Batch)", data, family=Gaussian(), REML=True)
+    m_default = gmm("Yield ~ 1 + (1|Batch)", data, REML=True)
+    m_explicit = gmm("Yield ~ 1 + (1|Batch)", data, family=Gaussian(), REML=True)
 
     assert_fp_equiv(m_default.theta, m_explicit.theta)
     assert_fp_equiv(m_default._beta, m_explicit._beta)
@@ -171,14 +171,14 @@ def test_family_default_equals_explicit_gaussian():
 def test_family_non_gaussian_runs_glmm_path():
     """Poisson family dispatches to the GLMM Laplace path (Phase 5).
 
-    Just smoke-checks that ``hea.models.lme(..., family=poisson())`` fits without
+    Just smoke-checks that ``hea.models.gmm(..., family=poisson())`` fits without
     raising. Numerical parity with ``lme4::glmer`` is pinned in
-    ``test_lme_glmm.py``'s Phase 5 acceptance tests.
+    ``test_gmm_glmm.py``'s Phase 5 acceptance tests.
     """
     data = load_dataset("lme4", "Dyestuff")
     # Dyestuff's Yield is continuous, but for a smoke test we can fit a
     # Poisson model — the optimizer should still converge.
-    m = lme("Yield ~ 1 + (1|Batch)", data, family=Poisson())
+    m = gmm("Yield ~ 1 + (1|Batch)", data, family=Poisson())
     assert m.theta.shape == (1,)
     assert m._beta.shape == (1,)
     assert np.isfinite(m.deviance)
@@ -187,7 +187,7 @@ def test_family_non_gaussian_runs_glmm_path():
 def test_bates_1_4_dyestuff_fm01_REML():
     """fm01 <- lmer(Yield ~ 1 + (1|Batch), Dyestuff)  -- REML (default)"""
     data = load_dataset("lme4", "Dyestuff")
-    m = lme("Yield ~ 1 + (1|Batch)", data, REML=True)
+    m = gmm("Yield ~ 1 + (1|Batch)", data, REML=True)
 
     assert m.n == 30
     assert m.n_groups == {"Batch": 6}
@@ -318,10 +318,10 @@ def test_plot_ranef_layout_vertical_stacks_panels():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea.models import lme
+    from hea.models import gmm
     from hea import data
     pen = data("Penicillin", "lme4")
-    fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
+    fm = gmm("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
 
     fig_h = fm.plot_ranef()
     fig_v = fm.plot_ranef(layout="vertical")
@@ -351,10 +351,10 @@ def test_plot_ranef_aspect_controls_subplot_width():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea.models import lme
+    from hea.models import gmm
     from hea import data
     pen = data("Penicillin", "lme4")
-    fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
+    fm = gmm("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
 
     fig_wide = fm.plot_ranef(layout="vertical", aspect=2.0)
     fig_narrow = fm.plot_ranef(layout="vertical", aspect=0.5)
@@ -374,10 +374,10 @@ def test_plot_ranef_explicit_layout_tuple():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea.models import lme
+    from hea.models import gmm
     from hea import data
     pen = data("Penicillin", "lme4")
-    fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
+    fm = gmm("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
 
     fig = fm.plot_ranef(layout=(2, 2))
     try:
@@ -392,20 +392,20 @@ def test_plot_ranef_explicit_layout_tuple():
 
 def test_plot_ranef_layout_rejects_too_few_cells():
     """A (nrow, ncol) tuple with fewer cells than panels raises."""
-    from hea.models import lme
+    from hea.models import gmm
     from hea import data
     pen = data("Penicillin", "lme4")
-    fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
+    fm = gmm("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
 
     with pytest.raises(ValueError, match="holds 1 cells"):
         fm.plot_ranef(layout=(1, 1))
 
 
 def test_plot_ranef_layout_rejects_bad_value():
-    from hea.models import lme
+    from hea.models import gmm
     from hea import data
     pen = data("Penicillin", "lme4")
-    fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
+    fm = gmm("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
 
     with pytest.raises(ValueError, match="layout:"):
         fm.plot_ranef(layout="diagonal")
@@ -416,10 +416,10 @@ def test_plot_ranef_which_filters_to_one_term():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea.models import lme
+    from hea.models import gmm
     from hea import data
     pen = data("Penicillin", "lme4")
-    fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
+    fm = gmm("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
     fig = fm.plot_ranef(which="plate")
     try:
         titles = [a.get_title() for a in fig.axes if a.get_visible()]
@@ -433,10 +433,10 @@ def test_plot_ranef_which_filters_to_one_panel_title():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea.models import lme
+    from hea.models import gmm
     from hea import data
     sleep = data("sleepstudy", "lme4")
-    fm = lme("Reaction ~ 1 + Days + (1 + Days | Subject)", sleep)
+    fm = gmm("Reaction ~ 1 + Days + (1 + Days | Subject)", sleep)
 
     # Term key pulls both columns of the vector bar.
     fig_all = fm.plot_ranef(which="Subject")
@@ -457,10 +457,10 @@ def test_plot_ranef_which_accepts_list():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea.models import lme
+    from hea.models import gmm
     from hea import data
     sleep = data("sleepstudy", "lme4")
-    fm = lme("Reaction ~ 1 + Days + (1 + Days | Subject)", sleep)
+    fm = gmm("Reaction ~ 1 + Days + (1 + Days | Subject)", sleep)
     fig = fm.plot_ranef(which=["Subject: (Intercept)"])
     try:
         titles = [a.get_title() for a in fig.axes]
@@ -470,10 +470,10 @@ def test_plot_ranef_which_accepts_list():
 
 
 def test_plot_ranef_which_unknown_raises():
-    from hea.models import lme
+    from hea.models import gmm
     from hea import data
     pen = data("Penicillin", "lme4")
-    fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
+    fm = gmm("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
     with pytest.raises(KeyError, match="no matching panel"):
         fm.plot_ranef(which="nonexistent")
 
@@ -488,10 +488,10 @@ def test_bates_2_plot_design_layout_matches_fig_2_3_2_4():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea.models import lme
+    from hea.models import gmm
     from hea import data
     penicillin = data("Penicillin", "lme4")
-    fm = lme("diameter ~ 1 + (1 | plate) + (1 | sample)", penicillin)
+    fm = gmm("diameter ~ 1 + (1 | plate) + (1 | sample)", penicillin)
     fig = fm.plot_design()
     try:
         # Four labelled axes from subplot_mosaic: A, B, C, D.
@@ -536,7 +536,7 @@ def test_bates_1_4_dyestuff_fm01_ML_plot_density(fm01ML_profile):
 def test_bates_1_4_dyestuff2_fm02_REML():
     """fm02 <- lmer(Yield ~ 1 + (1|Batch), Dyestuff2)  -- singular fit, σ₁=0"""
     data = load_dataset("lme4", "Dyestuff2")
-    m = lme("Yield ~ 1 + (1|Batch)", data, REML=True)
+    m = gmm("Yield ~ 1 + (1|Batch)", data, REML=True)
 
     np.testing.assert_allclose(m.REML_criterion, 161.8, atol=0.1)
     np.testing.assert_allclose(m.sigma, 3.7165, atol=5e-3)
@@ -552,7 +552,7 @@ def test_bates_1_4_dyestuff2_fm02_REML():
 def test_bates_2_1_penicillin_fm03_REML():
     """fm03 <- lmer(diameter ~ 1 + (1|plate) + (1|sample), Penicillin)"""
     data = load_dataset("lme4", "Penicillin")
-    m = lme("diameter ~ 1 + (1|plate) + (1|sample)", data, REML=True)
+    m = gmm("diameter ~ 1 + (1|plate) + (1|sample)", data, REML=True)
 
     assert m.n == 144
     assert m.n_groups == {"plate": 24, "sample": 6}
@@ -777,7 +777,7 @@ def test_bates_4_1_machines_fm10_ML():
     """fm10 <- lmer(score ~ Machine + (1|Worker) + (1|Machine:Worker),
                     Machines, REML=FALSE)"""
     data = load_dataset("nlme", "Machines")
-    m = lme(
+    m = gmm(
         "score ~ Machine + (1|Worker) + (1|Machine:Worker)",
         data, REML=False,
     )
@@ -800,7 +800,7 @@ def test_bates_4_2_ergostool_fm16_ML():
     """fm16 <- lmer(effort ~ 1 + (1|Subject) + (1|Type),
                     ergoStool, REML=FALSE)"""
     data = load_dataset("nlme", "ergoStool")
-    m = lme("effort ~ 1 + (1|Subject) + (1|Type)", data, REML=False)
+    m = gmm("effort ~ 1 + (1|Subject) + (1|Type)", data, REML=False)
 
     assert m.n == 36
     assert m.n_groups == {"Subject": 9, "Type": 4}
@@ -817,7 +817,7 @@ def test_bates_4_2_ergostool_fm16_ML():
 def test_bates_4_2_ergostool_fm17_ML():
     """fm17 <- lmer(effort ~ 1 + Type + (1|Subject), ergoStool, REML=FALSE)"""
     data = load_dataset("nlme", "ergoStool")
-    m = lme("effort ~ 1 + Type + (1|Subject)", data, REML=False)
+    m = gmm("effort ~ 1 + Type + (1|Subject)", data, REML=False)
 
     _assert_ml_summary(
         m, AIC=134.1444, BIC=143.6456, loglike=-61.0722,
@@ -843,7 +843,7 @@ def test_predict_no_args_equals_fitted():
     R's ``predict(fm)`` → ``na.omit(fitted(fm))`` short-circuit."""
     import polars as pl
     gpa = pl.read_csv("datasets/m-clark/gpa.csv")
-    fm = lme("gpa ~ occasion + (1 | student)", data=gpa)
+    fm = gmm("gpa ~ occasion + (1 | student)", data=gpa)
     out = fm.predict()
     assert isinstance(out, pl.DataFrame)
     assert out.columns == ["fit"]
@@ -854,7 +854,7 @@ def test_predict_newdata_eq_orig_matches_fitted():
     """predict(newdata=fit_data) matches fitted (round-trips X, Z, BLUP)."""
     import polars as pl
     gpa = pl.read_csv("datasets/m-clark/gpa.csv")
-    fm = lme("gpa ~ occasion + (1 | student)", data=gpa)
+    fm = gmm("gpa ~ occasion + (1 | student)", data=gpa)
     p = fm.predict(newdata=gpa)["fit"].to_numpy()
     np.testing.assert_allclose(p, fm.fitted, atol=1e-10)
 
@@ -863,7 +863,7 @@ def test_predict_pinned_to_R_lmer():
     """predict.merMod cross-check: head values pinned to R 4.5 / lme4 4.5."""
     import polars as pl
     gpa = pl.read_csv("datasets/m-clark/gpa.csv")
-    fm = lme("gpa ~ occasion + (1 | student)", data=gpa)
+    fm = gmm("gpa ~ occasion + (1 | student)", data=gpa)
 
     # Conditional (re.form=NULL) — includes BLUPs.
     r_conditional = [2.528319363, 2.634633649, 2.740947934, 2.847262220,
@@ -889,7 +889,7 @@ def test_predict_allow_new_levels():
     """A new student id falls back to the population mean (Zb = 0)."""
     import polars as pl
     gpa = pl.read_csv("datasets/m-clark/gpa.csv")
-    fm = lme("gpa ~ occasion + (1 | student)", data=gpa)
+    fm = gmm("gpa ~ occasion + (1 | student)", data=gpa)
     nd = pl.DataFrame({"occasion": [0, 1, 2], "student": [99999, 99999, 99999]})
 
     with pytest.raises(ValueError, match="new level"):
@@ -904,7 +904,7 @@ def test_predict_random_only():
     """random_only=True returns just ZΛu — sum equals fitted minus Xβ-offset."""
     import polars as pl
     gpa = pl.read_csv("datasets/m-clark/gpa.csv")
-    fm = lme("gpa ~ occasion + (1 | student)", data=gpa)
+    fm = gmm("gpa ~ occasion + (1 | student)", data=gpa)
     pred_re = fm.predict(newdata=gpa.head(20), random_only=True)["fit"].to_numpy()
     X_head = fm._build_X_for_newdata(gpa.head(20))
     expected = fm.fitted[:20] - X_head @ fm._beta - fm._offset[:20]
@@ -915,7 +915,7 @@ def test_predict_se_fit_matches_R():
     """se.fit at the first 5 rows of gpa, pinned to R lme4 4.5."""
     import polars as pl
     gpa = pl.read_csv("datasets/m-clark/gpa.csv")
-    fm = lme("gpa ~ occasion + (1 | student)", data=gpa)
+    fm = gmm("gpa ~ occasion + (1 | student)", data=gpa)
     ans = fm.predict(newdata=gpa.head(5), se_fit=True)
     assert isinstance(ans, pl.DataFrame)
     assert ans.columns == ["fit", "se.fit"]
@@ -930,12 +930,12 @@ def test_predict_via_R_dispatcher():
     import polars as pl
     from hea.R import predict
     gpa = pl.read_csv("datasets/m-clark/gpa.csv")
-    fm = lme("gpa ~ occasion + (1 | student)", data=gpa)
+    fm = gmm("gpa ~ occasion + (1 | student)", data=gpa)
     out = predict(fm)
     np.testing.assert_array_equal(out["fit"].to_numpy(), fm.fitted)
 
 
-def test_lme_offset_matches_y_minus_offset():
+def test_gmm_offset_matches_y_minus_offset():
     import polars as pl
 
     rng = np.random.default_rng(0)
@@ -948,8 +948,8 @@ def test_lme_offset_matches_y_minus_offset():
     d = pl.DataFrame({"y": y, "x": x, "o": o, "g": g})
     d_minus = d.with_columns((pl.col("y") - 1.5 * pl.col("o")).alias("y_minus"))
 
-    m_off  = lme("y ~ x + offset(1.5*o) + (1|g)", data=d, REML=True)
-    m_pre  = lme("y_minus ~ x + (1|g)", data=d_minus, REML=True)
+    m_off  = gmm("y ~ x + offset(1.5*o) + (1|g)", data=d, REML=True)
+    m_pre  = gmm("y_minus ~ x + (1|g)", data=d_minus, REML=True)
 
     np.testing.assert_allclose(m_off._beta, m_pre._beta, atol=1e-10)
     np.testing.assert_allclose(m_off.sigma, m_pre.sigma, atol=1e-10)

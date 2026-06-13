@@ -457,7 +457,7 @@ class Translator:
         # is a scalar reducer with na_rm=True, not the polars expression
         # helper). Then hea.tidy for tidyverse-only ports (stringr / lubridate /
         # forcats / dplyr-window-helpers / readr / tibble). Then the
-        # restructure-split sub-namespaces — hea.models (lm/glm/lme/…),
+        # restructure-split sub-namespaces — hea.models (lm/glm/gmm/…),
         # hea.family (binomial/gaussian/…). Then ``hea`` top-level so
         # the user-facing surface (``data``, ``map_data``) imports via
         # ``from hea import data`` rather than the deeper
@@ -994,6 +994,11 @@ class Translator:
             if helper is not None:
                 return self._emit_helper_call(helper, name, n.args)
 
+            # Unify lme4's lmer/glmer onto hea's single ``gmm`` class before
+            # model handling, so both the no-data frame builder and the
+            # import resolver see the hea name.
+            name = self._R_MODEL_ALIASES.get(name, name)
+
             # 2.5) Model fits with no ``data`` argument — R resolves
             # ``lm(y ~ x)``'s ``y``/``x`` from the caller's environment.
             # Translate-time we can do the same by building a frame from
@@ -1420,7 +1425,11 @@ class Translator:
         finally:
             self._with_stack.pop()
 
-    _LM_LIKE: frozenset[str] = frozenset({"lm", "glm", "gam", "bam", "lme", "lmer", "glmer"})
+    _LM_LIKE: frozenset[str] = frozenset({"lm", "glm", "gam", "bam", "gmm", "lmer", "glmer"})
+    # lme4 exposes two entry points (lmer / glmer); hea folds both into one
+    # ``gmm`` class that dispatches lmer-vs-glmer on ``family`` internally.
+    # Reverse direction in ``py_to_r._emit_gmm_call``.
+    _R_MODEL_ALIASES: dict[str, str] = {"lmer": "gmm", "glmer": "gmm"}
     _FORMULA_OPS: frozenset[str] = frozenset({"+", "-", "*", "/", ":", "^", "|"})
 
     def _maybe_lm_no_data(self, name: str, args: tuple[R.Node, ...]) -> Optional[P.AST]:
@@ -2423,13 +2432,23 @@ def _unparse_for_formula(node: R.Node) -> str:
     if isinstance(node, R.Identifier):
         return node.name
     if isinstance(node, R.NumLit):
+        # Integer-valued doubles render without the ``.0`` — a formula's
+        # ``(1 | g)`` must stay ``1``, not become ``1.0``.
+        if node.value.is_integer():
+            return str(int(node.value))
         return str(node.value)
     if isinstance(node, R.IntLit):
         return str(node.value)
     if isinstance(node, R.UnaryOp):
         return f"{node.op}{_unparse_for_formula(node.operand)}"
     if isinstance(node, R.BinOp):
-        return f"{_unparse_for_formula(node.left)} {node.op} {_unparse_for_formula(node.right)}"
+        inner = f"{_unparse_for_formula(node.left)} {node.op} {_unparse_for_formula(node.right)}"
+        # lme4 random-effect bars are syntactically parenthesized — ``(1 | g)``,
+        # ``(x | g)``, ``(1 || g)`` — but the parser drops the grouping parens.
+        # Restore them around ``|``/``||`` so the formula round-trips.
+        if node.op in ("|", "||"):
+            return f"({inner})"
+        return inner
     if isinstance(node, R.Call):
         func_text = _unparse_for_formula(node.func)
         args = ", ".join(_unparse_for_formula(a) for a in node.args)

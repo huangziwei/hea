@@ -1,4 +1,10 @@
-"""Linear mixed-effects model — lme4-style profiled deviance.
+"""Generalized mixed models (``gmm``) — lme4's ``lmer`` + ``glmer`` under one class.
+
+Gaussian-identity fits take the LMM path (``lmer``: profiled deviance, REML/ML);
+any other family takes the GLMM path (``glmer``: Laplace approximation). The
+public entry dispatches on ``family`` internally — the ``gmm`` name reflects
+that it spans both, and is the long-term home for general families too (see
+``.claude/plans/lme-family-port.md`` Phase 14).
 
 Built on hea.formula's ``parse → expand → materialize / materialize_bars``
 pipeline. The fixed-effect side comes from ``materialize`` (R-canonical
@@ -52,7 +58,7 @@ from ..utils import (
     significance_code,
 )
 
-__all__ = ["lme", "Profile"]
+__all__ = ["gmm", "Profile"]
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +178,7 @@ def _warn_no_sksparse_once() -> None:
     if _SKSPARSE_WARNED:
         return
     warnings.warn(
-        "scikit-sparse is not installed; hea.lme is using a "
+        "scikit-sparse is not installed; hea.gmm is using a "
         "scipy.sparse.linalg.splu fallback. This is functional but slower "
         "than CHOLMOD for large mixed-effect models (no symbolic-analysis "
         "reuse across deviance evaluations). Install SuiteSparse "
@@ -194,9 +200,9 @@ def cho_factor(M):
 
 @dataclass(slots=True)
 class _FitInputs:
-    """Pre-assembled inputs for :meth:`lme._fit_from_components`.
+    """Pre-assembled inputs for :meth:`gmm._fit_from_components`.
 
-    Built by the public formula-based ``lme()`` constructor, or assembled
+    Built by the public formula-based ``gmm()`` constructor, or assembled
     directly by callers that bypass formula parsing (e.g. ``hea.gamm``,
     which composes ``smooth2random`` outputs into a unified design).
 
@@ -285,7 +291,7 @@ class _FitInputs:
     Mirrors ``glmerControl(optCtrl=)``."""
 
     # Diagnostic carries ------------------------------------------------
-    # These follow the data through the fit so the resulting ``lme`` instance
+    # These follow the data through the fit so the resulting ``gmm`` instance
     # can produce diagnostics, predict on new data, and round-trip formulas.
     expanded: Optional[ExpandedFormula] = None
     """The parsed/expanded formula, used by ``predict`` and ``profile``."""
@@ -730,7 +736,7 @@ class _PredState:
 
     PLS math is done via the Schur complement (single full-system CHOLMOD
     ``M⁻¹b`` solves), matching how the Gaussian path in
-    :meth:`lme._fit_from_components` already operates. Mathematically
+    :meth:`gmm._fit_from_components` already operates. Mathematically
     equivalent to lme4's staged ``P/L/Lt/Pt`` solveInPlace sequence in
     ``predModule.cpp:189-214``.
     """
@@ -3556,7 +3562,7 @@ def _build_optinfo(
     The singular check is unconditional in lme4 (ignored ``action`` is
     treated as ``message``): when any θ entry sits within ``tol`` of a
     finite bound, the fit is flagged as boundary/singular. Messages
-    surface in :meth:`lme.summary`'s convergence block.
+    surface in :meth:`gmm.summary`'s convergence block.
     """
     SINGULAR_TOL = 1e-4
     messages: list[str] = []
@@ -3728,8 +3734,11 @@ def _normalize_glmer_control(control) -> dict:
     return merged
 
 
-class lme:
-    """Linear mixed-effects model, fit by ML or REML profiled deviance.
+class gmm:
+    """Generalized mixed model — lme4's ``lmer`` + ``glmer`` under one class.
+
+    Gaussian-identity → LMM (``lmer``: ML/REML profiled deviance); any other
+    family → GLMM (``glmer``: Laplace). Dispatch on ``family`` is internal.
 
     Parameters
     ----------
@@ -3871,7 +3880,7 @@ class lme:
             )
         if not d.expanded.bars:
             raise ValueError(
-                f"lme requires at least one random-effect bar; got formula={formula!r}"
+                f"gmm requires at least one random-effect bar; got formula={formula!r}"
             )
         # materialize_bars is called on d.data (response-NA-cleaned) so it
         # applies the same NA-omit policy as materialize() did for X — the
@@ -3958,7 +3967,7 @@ class lme:
     def _fit_from_components(self, inputs: _FitInputs) -> None:
         """Fit the model given pre-assembled design pieces.
 
-        Public ``lme()`` calls this after running ``prepare_design`` and
+        Public ``gmm()`` calls this after running ``prepare_design`` and
         ``materialize_bars``. External callers (``hea.gamm``) call it
         directly after composing smooth random-effect blocks via
         ``smooth2random`` — bypassing the formula parser entirely.
@@ -5048,7 +5057,7 @@ class lme:
                 "vector bars like (1+x|g) need a different parameterization."
             )
         if self.REML:
-            return lme(self.formula, self.data, REML=False).profile(
+            return gmm(self.formula, self.data, REML=False).profile(
                 n_grid=n_grid, alphamax=alphamax,
             )
 
@@ -6160,7 +6169,7 @@ def _invert_zeta(
 
 
 class Profile:
-    """Profile-likelihood output from :meth:`lme.profile`.
+    """Profile-likelihood output from :meth:`gmm.profile`.
 
     Attributes
     ----------

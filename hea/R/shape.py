@@ -72,7 +72,7 @@ def names(x):
 def summary(x, **kwargs):
     """R: ``summary()`` — dispatches to ``x.summary(**kwargs)``.
 
-    Works on hea models (``lm``/``glm``/``gam``/``lme``/``bam``) and on
+    Works on hea models (``lm``/``glm``/``gam``/``gmm``/``bam``) and on
     ``hea.DataFrame``. For raw arrays / Series, wrap first:
     ``hea.tbl(pl.DataFrame({"x": arr})).summary()``.
 

@@ -892,3 +892,43 @@ class TestControlFlow:
         out = _tr("f <- \\(x) x + 1")
         # Body bare ``x`` is outside any verb slot (Slot.NONE) — emits as ``x``.
         assert out == "f = lambda x: x + 1"
+
+
+class TestMixedModels:
+    """lme4 exposes ``lmer`` + ``glmer``; both fold onto hea's single
+    ``gmm`` class (it dispatches on ``family`` internally)."""
+
+    def test_lmer_maps_to_gmm(self):
+        # ``translate`` keeps the import preamble (``_tr``/``_tr_full`` strip it).
+        out = translate("lmer(y ~ x + (1|g), data=d)")
+        assert "from hea.models import gmm" in out
+        assert "gmm(" in out
+        assert "lmer(" not in out
+
+    def test_glmer_maps_to_gmm_keeping_family(self):
+        out = translate("glmer(y ~ x + (1|g), family=poisson, data=d)")
+        assert "from hea.models import gmm" in out
+        assert "from hea.family import poisson" in out
+        assert "gmm(" in out
+        assert "family=poisson" in out
+        assert "glmer(" not in out
+
+    def test_lmer_no_data_synthesizes_frame_as_gmm(self):
+        out = _tr_full("lmer(y ~ x + (1|g))")
+        assert "gmm(" in out
+        assert "hea.tidy.DataFrame(" in out
+
+    def test_random_effect_bar_keeps_parens_not_floated(self):
+        # lme4's ``(1|g)`` must serialize as ``(1 | g)`` — parens restored
+        # (the parser drops them), and ``1`` stays ``1`` not ``1.0``.
+        out = translate("lmer(y ~ x + (1|g), data=d)")
+        assert "(1 | g)" in out
+        assert "1.0" not in out
+
+    def test_random_slope_and_double_bar(self):
+        assert "(1 + x | g)" in translate("lmer(y ~ x + (1+x|g), data=d)")
+        assert "(1 || g)" in translate("lmer(y ~ x + (1||g), data=d)")
+
+    def test_multiple_random_effects_each_parenthesized(self):
+        out = translate("lmer(y ~ x + (1|g) + (1|h), data=d)")
+        assert "(1 | g) + (1 | h)" in out
