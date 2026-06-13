@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
-import time
 import warnings
 from typing import Callable, Optional
 
@@ -39,7 +38,6 @@ from scipy.special import digamma, polygamma, roots_hermite
 
 from .. import family as _family_mod
 from ..family import Family, Gaussian, _coerce_response
-from ..R.rng import RMersenneTwister
 from ..formula import (
     BinOp,
     CONTRAST_FN_NAMES,
@@ -4438,22 +4436,25 @@ def _simulate_family_draw(rng, family, mu, weights, sigma):
     return out
 
 
-_GLOBAL_SIM_RNG = None  # R's global .Random.seed analog for simulate(seed=None)
-
-
 def _simulate_rng(seed):
-    """RNG for :meth:`gmm.simulate`, mirroring R's ``simulate.merMod`` seed
-    semantics on hea's bit-exact :class:`RMersenneTwister` (never numpy): an
-    explicit ``seed`` does ``set.seed(seed)`` — reseeding the global R stream —
-    and ``seed=None`` continues that global stream, lazily time-initialised the
-    way R's ``Randomize()`` seeds ``.Random.seed`` when none exists yet.
+    """RNG for :meth:`gmm.simulate` / :meth:`gmm.bootMer`, mirroring R's
+    ``simulate.merMod`` seed semantics on hea's bit-exact
+    :class:`~hea.R.rng.RMersenneTwister` (never numpy).
+
+    R keeps a **single** global ``.Random.seed``, so this shares the one
+    process-global R stream that :func:`hea.R.set_seed` controls (it lives in
+    :mod:`hea.R.distributions`): an explicit ``seed`` does ``set.seed(seed)`` —
+    reseeding that shared stream — while ``seed=None`` continues it (lazily
+    time-initialised the way R's ``Randomize()`` seeds ``.Random.seed`` when none
+    exists yet). Thus ``hea.R.set_seed(k); model.simulate()`` draws the same
+    stream as R's ``set.seed(k); simulate(model)``, and ``model.simulate(seed=k)``
+    consumes the identical stream as seeding the public R surface with ``k`` —
+    one ``set.seed`` controls one stream, exactly as in R.
     """
-    global _GLOBAL_SIM_RNG
+    from ..R import distributions as _dist
     if seed is not None:
-        _GLOBAL_SIM_RNG = RMersenneTwister(int(seed))
-    elif _GLOBAL_SIM_RNG is None:
-        _GLOBAL_SIM_RNG = RMersenneTwister(int(time.time()) & 0x7FFFFFFF)
-    return _GLOBAL_SIM_RNG
+        _dist.set_seed(int(seed))
+    return _dist._r_rng()
 
 
 def _check_rank_drop_cols(

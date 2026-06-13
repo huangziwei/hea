@@ -2157,6 +2157,31 @@ def test_gmm_simulate_shape_seed_and_refit():
     assert np.isfinite(m2.theta[0]) and m2._beta.shape == (2,)
 
 
+def test_gmm_simulate_shares_one_r_stream_with_set_seed():
+    """gmm.simulate draws from the ONE process-global R stream that
+    :func:`hea.R.set_seed` controls — R keeps a single ``.Random.seed``, so
+    ``set_seed(k); simulate()`` must equal ``simulate(seed=k)``, and
+    ``simulate(seed=k)`` leaves that shared stream advanced for the public R
+    surface (``runif``) to continue. (Regression for the gmm
+    ``_GLOBAL_SIM_RNG`` → shared-stream unification.)"""
+    import hea.R as R
+
+    m, _ = _sim_poisson_model()
+
+    s_seeded = m.simulate(nsim=4, seed=314)
+    R.set_seed(314)
+    s_global = m.simulate(nsim=4)                 # seed=None → continue the stream
+    assert s_global.equals(s_seeded), \
+        "set_seed(k); simulate() must equal simulate(seed=k) — one R stream"
+
+    # simulate(seed=k) and set_seed(k) leave the stream in the identical state,
+    # and runif() reads that very same stream (cross-module): same prefix → same
+    # continuation, deterministically.
+    R.set_seed(314); m.simulate(nsim=4); a = np.asarray(R.runif(3))
+    m.simulate(nsim=4, seed=314); b = np.asarray(R.runif(3))
+    assert np.array_equal(a, b)
+
+
 def test_gmm_simulate_conditional_mean_tracks_fitted():
     """use_u=True draws scatter around the fitted μ (conditional simulation)."""
     m, _ = _sim_poisson_model()
