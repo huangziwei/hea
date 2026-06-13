@@ -268,8 +268,11 @@ class _FitInputs:
     """PIRLS convergence tolerance — ``glmerControl(tolPwrss=)``."""
 
     maxit_pwrss: int = 100
-    """PIRLS iteration cap — ``glmerControl(maxit=)`` (n.b. lme4 hard-codes
-    this at 30 in pp_internal but exposes ``maxit`` via control)."""
+    """PIRLS iteration cap. Mirrors lme4's ``mkGlmerDevfun(maxit=)`` /
+    ``mkdevfun(maxit=)`` default of ``100L`` (lmer.R:308, modular.R:798).
+    This is **not** a ``glmerControl()`` argument in lme4 (the control
+    constructor has no ``maxit``); it lives on the modular devfun interface,
+    so ``gmm`` likewise does not expose it through ``control=``."""
 
     calc_derivs: bool = True
     """When True (default), compute the numerical gradient + Hessian of the
@@ -286,9 +289,16 @@ class _FitInputs:
     ``>2`` enables PIRLS iteration prints."""
 
     opt_ctrl: Optional[dict] = None
-    """Optimizer-specific control options. Currently only Nelder_Mead keys
-    are recognised (``maxfun``, ``xtol_rel``, ``ftol_abs``, ``ftol_rel``).
-    Mirrors ``glmerControl(optCtrl=)``."""
+    """Optimizer-specific control options. Nelder_Mead keys are recognised
+    with lme4's R-flavoured names (``maxfun``, ``XtolRel``, ``FtolAbs``,
+    ``FtolRel``, ``MinfMax``, ``verbose``). Mirrors ``glmerControl(optCtrl=)``."""
+
+    optimizer: tuple = ("bobyqa", "Nelder_Mead")
+    """Two-stage outer optimizer chain — ``glmerControl(optimizer=)``.
+    ``optimizer[0]`` runs Stage 0 (θ-only), ``optimizer[1]`` runs Stage 1
+    (θ+β); each is ``"bobyqa"`` or ``"Nelder_Mead"`` (both ported line-for-
+    line from minqa / lme4's ``optimizer.cpp``). lme4's glmer default is
+    ``c("bobyqa", "Nelder_Mead")``."""
 
     # Diagnostic carries ------------------------------------------------
     # These follow the data through the fit so the resulting ``gmm`` instance
@@ -3516,17 +3526,24 @@ def _validate_nagq(nAGQ: int) -> int:
 
 
 _GLMER_CONTROL_DEFAULTS = {
-    "optimizer": "Nelder_Mead",     # only NM currently ported (see Phase 5)
+    # glmer default chain c("bobyqa","Nelder_Mead") — both ported. Stage 0
+    # runs optimizer[0], Stage 1 runs optimizer[1] (see _normalize_optimizer
+    # _chain and _run_outer_stage).
+    "optimizer": ["bobyqa", "Nelder_Mead"],
     "restart_edge": False,          # Phase 8.12 (lmer-only, deferred)
     "boundary.tol": 1e-5,           # Phase 8.13 (deferred)
+    "calc.derivs": None,            # lme4 NULL → smart rule (resolved in __init__)
+    "use.last.params": False,
+    "sparseX": False,               # lme4 no-op (warns); accepted for parity
+    "standardize.X": False,         # autoscale sibling (Phase 8.16, deferred)
+    "autoscale": None,              # Phase 8.16 (deferred)
     "tolPwrss": 1e-7,
     "compDev": True,
     "nAGQ0initStep": True,
-    "calc.derivs": True,
-    "use.last.params": False,
-    "optCtrl": {},                  # Nelder_Mead kwargs (maxfun, xtol*, etc.)
+    "optCtrl": {},                  # Nelder_Mead kwargs (maxfun, XtolRel, etc.)
     # check.* keys — pre-fit and post-fit validation. Accepted now;
     # enforcement lands incrementally in Phases 8.14 / 8.15.
+    "check.nobs.vs.rankZ": "ignore",
     "check.nobs.vs.nlev": "stop",
     "check.nlev.gtreq.5": "ignore",
     "check.nlev.gtr.1": "stop",
@@ -3535,14 +3552,105 @@ _GLMER_CONTROL_DEFAULTS = {
     "check.scaleX": "warning",
     "check.formula.LHS": "stop",
     "check.response.not.const": "stop",
+    "check.conv.nobsmax": 1e4,
+    "check.conv.nparmax": 20,       # glmer default (lmer is 10)
     "check.conv.grad": {"action": "warning", "tol": 2e-3, "relTol": None},
     "check.conv.singular": {"action": "message", "tol": 1e-4},
     "check.conv.hess": {"action": "warning", "tol": 1e-6},
 }
 
 
+_PORTED_OPTIMIZERS = ("bobyqa", "Nelder_Mead")
+
+
+def _normalize_optimizer_chain(optimizer) -> list:
+    """Normalize ``glmerControl(optimizer=)`` to a ``[stage0, stage1]`` chain.
+
+    lme4 replicates a single optimizer to both stages for glmer
+    (lmerControl.R:109-112). Each stage must name a ported optimizer
+    (``bobyqa`` or ``Nelder_Mead``); anything else (``nloptwrap``,
+    ``optimx``, ``L-BFGS-B``, …) raises with a clear message.
+    """
+    if isinstance(optimizer, str):
+        chain = [optimizer, optimizer]
+    else:
+        chain = list(optimizer)
+        if len(chain) == 1:
+            chain = [chain[0], chain[0]]
+    if len(chain) != 2:
+        raise ValueError(
+            f"optimizer= must be a string or a length-1/2 sequence; "
+            f"got {optimizer!r}"
+        )
+    bad = [o for o in chain if o not in _PORTED_OPTIMIZERS]
+    if bad:
+        raise NotImplementedError(
+            f"optimizer={optimizer!r}: only {list(_PORTED_OPTIMIZERS)} are "
+            f"ported (unsupported: {bad}). nloptwrap / optimx / L-BFGS-B "
+            f"require a separate optimizer port."
+        )
+    return chain
+
+
+def _run_outer_stage(optimizer_name, devfun, x0, lb, ub, *,
+                     xst, xtol_abs, nm_kwargs, bobyqa_kwargs=None):
+    """Run one outer-optimizer stage, dispatching on ``optimizer_name``.
+
+    ``"bobyqa"`` → the ported minqa BOBYQA (finite bounds; one-sided ±inf
+    is clamped to ±1e20 exactly as minqa's R wrapper does; ``bobyqa_kwargs``
+    carries any ``rhobeg``/``rhoend``/``npt``/``maxfun`` from ``optCtrl``).
+    ``"Nelder_Mead"`` → the ported lme4 bounded Nelder-Mead (consumes one-
+    sided ±inf bounds directly, with the ``xst`` simplex step, ``xtol_abs``
+    tolerance, and ``nm_kwargs`` from ``optCtrl``). Each optimizer ignores
+    the other's ``optCtrl`` keys (lme4's per-stage behaviour). Returns
+    ``(par, fval, nfeval, status)`` for both branches.
+    """
+    if optimizer_name == "bobyqa":
+        lb_b = np.where(np.isfinite(lb), lb, -1.0e20)
+        ub_b = np.where(np.isfinite(ub), ub, 1.0e20)
+        par, fval, nf, ierr, _msg = _bobyqa_driver(
+            devfun, x0, lb_b, ub_b, **(bobyqa_kwargs or {}))
+        return np.asarray(par, dtype=float), float(fval), int(nf), int(ierr)
+    nm = NelderMead(lb, ub, xst, x0, xtol_abs=xtol_abs, **nm_kwargs)
+    status = nm.minimize(devfun)
+    return nm.xpos().copy(), float(nm.value()), int(nm.nevals), int(status)
+
+
 _NM_OPT_CTRL_KEYS = {"maxfun", "FtolAbs", "FtolRel", "XtolRel",
                      "MinfMax", "verbose"}
+
+# BOBYQA-stage optCtrl keys (minqa::bobyqa args). ``maxfun`` is shared with
+# Nelder_Mead; the rest are bobyqa-only. lme4 passes a single optCtrl list to
+# whichever optimizer runs each stage, and each ignores the keys it doesn't
+# understand — so a mixed chain may legitimately carry both families' keys.
+_BOBYQA_OPT_CTRL_KEYS = {"maxfun", "rhobeg", "rhoend", "npt"}
+
+
+def _bobyqa_kwargs_from_opt_ctrl(opt_ctrl) -> dict:
+    """Translate lme4's ``optCtrl`` dict to :func:`_bobyqa_driver` kwargs.
+
+    Picks up the minqa::bobyqa knobs (``rhobeg``, ``rhoend``, ``npt``,
+    ``maxfun``) and skips Nelder_Mead-only keys (which the NM stage consumes).
+    Genuinely unknown keys — in neither optimizer's vocabulary — raise.
+    """
+    if opt_ctrl is None or len(opt_ctrl) == 0:
+        return {}
+    out: dict = {}
+    for key, val in opt_ctrl.items():
+        if key == "maxfun":
+            out["maxfun"] = int(val)
+        elif key == "npt":
+            out["npt"] = int(val)
+        elif key in ("rhobeg", "rhoend"):
+            out[key] = float(val)
+        elif key in _NM_OPT_CTRL_KEYS:
+            pass  # consumed by the Nelder_Mead stage, not bobyqa
+        else:
+            raise ValueError(
+                f"unknown optCtrl key {key!r}; expected one of "
+                f"{sorted(_NM_OPT_CTRL_KEYS | _BOBYQA_OPT_CTRL_KEYS)}"
+            )
+    return out
 
 
 def _build_optinfo(
@@ -3552,6 +3660,7 @@ def _build_optinfo(
     optim: dict,
     optim_stage0: Optional[dict],
     ctrl: Optional[dict],
+    optimizer: tuple = ("bobyqa", "Nelder_Mead"),
 ) -> dict:
     """Port of lme4's ``m@optinfo`` (utilities.R:448) + ``checkConv`` runs.
 
@@ -3579,7 +3688,7 @@ def _build_optinfo(
         messages.append("boundary (singular) fit: see help('isSingular')")
 
     return {
-        "optimizer": "bobyqa+Nelder_Mead",
+        "optimizer": "+".join(optimizer),
         "control": dict(ctrl) if ctrl else {},
         "val": theta_arr.copy(),
         "feval": int(optim.get("feval", 0))
@@ -3620,10 +3729,12 @@ def _nm_kwargs_from_opt_ctrl(opt_ctrl) -> dict:
             # NelderMead doesn't print its own progress (lme4's wrapper does
             # at the R level). Accept but ignore so user code doesn't break.
             pass
+        elif key in _BOBYQA_OPT_CTRL_KEYS:
+            pass  # consumed by the bobyqa stage, not Nelder_Mead
         else:
             raise ValueError(
                 f"unknown optCtrl key {key!r}; expected one of "
-                f"{sorted(_NM_OPT_CTRL_KEYS)}"
+                f"{sorted(_NM_OPT_CTRL_KEYS | _BOBYQA_OPT_CTRL_KEYS)}"
             )
     return out
 
@@ -3704,9 +3815,10 @@ def _check_rank_drop_cols(
 def _normalize_glmer_control(control) -> dict:
     """Merge ``control=`` with lme4's ``glmerControl()`` defaults.
 
-    Unknown keys raise :class:`ValueError`. Optimizers other than
-    ``"Nelder_Mead"`` raise :class:`NotImplementedError` — bobyqa /
-    NLOPT_LN_BOBYQA / L-BFGS-B require separate optimizer ports.
+    Unknown keys raise :class:`ValueError`. The ``optimizer`` entry is
+    normalized to a two-stage ``[stage0, stage1]`` chain; optimizers other
+    than the ported ``bobyqa`` / ``Nelder_Mead`` raise
+    :class:`NotImplementedError`.
     """
     if control is None:
         merged = dict(_GLMER_CONTROL_DEFAULTS)
@@ -3725,12 +3837,7 @@ def _normalize_glmer_control(control) -> dict:
     merged = dict(_GLMER_CONTROL_DEFAULTS)
     merged["optCtrl"] = dict(merged["optCtrl"])
     merged.update(control)
-    if merged["optimizer"] != "Nelder_Mead":
-        raise NotImplementedError(
-            f"optimizer={merged['optimizer']!r}: only 'Nelder_Mead' is "
-            "currently ported. bobyqa / NLOPT_LN_BOBYQA / L-BFGS-B require "
-            "a separate optimizer port."
-        )
+    merged["optimizer"] = _normalize_optimizer_chain(merged["optimizer"])
     return merged
 
 
@@ -3928,6 +4035,19 @@ class gmm:
             X_for_fit = d.X
         self._dropped_cols = dropped_names
 
+        # calc.derivs=None is lme4's actual default (NULL); resolve it to the
+        # "smart" rule (lmer.R:51-53): compute the post-fit numerical Hessian
+        # only when the data AND the (θ, β) optimisation vector are both small
+        # enough that it's cheap. check.conv.nobsmax / nparmax are the gating
+        # knobs. An explicit True/False from the user passes through unchanged.
+        calc_derivs_resolved = ctrl["calc.derivs"]
+        if calc_derivs_resolved is None:
+            npar_opt = len(re.theta) + X_for_fit.width
+            calc_derivs_resolved = bool(
+                n < ctrl["check.conv.nobsmax"]
+                and npar_opt < ctrl["check.conv.nparmax"]
+            )
+
         fit_inputs = _FitInputs(
             X_df=X_for_fit,
             y=y,
@@ -3943,10 +4063,11 @@ class gmm:
                 if "nAGQ0initStep" in (control or {}) else nAGQ0initStep,
             nAGQ=nAGQ,
             tol_pwrss=ctrl["tolPwrss"],
-            calc_derivs=ctrl["calc.derivs"],
+            calc_derivs=calc_derivs_resolved,
             use_last_params=ctrl["use.last.params"],
             verbose=verbose,
             opt_ctrl=ctrl["optCtrl"],
+            optimizer=tuple(ctrl["optimizer"]),
             expanded=d.expanded,
             data=d.data,
         )
@@ -4306,6 +4427,10 @@ class gmm:
         # PIRLS inner-loop control, sourced from ``glmerControl(...)``.
         tol_pwrss = inputs.tol_pwrss
         maxit_pwrss = inputs.maxit_pwrss
+        # Two-stage outer optimizer chain (glmerControl(optimizer=)). Stage 0
+        # runs optimizer[0], Stage 1 runs optimizer[1]; each ∈ {bobyqa,
+        # Nelder_Mead}, both ported. Default c("bobyqa","Nelder_Mead").
+        optimizer = inputs.optimizer
         verbose_pirls = max(0, inputs.verbose - 2)  # PIRLS prints at v > 2
 
         # Translate the (lower, upper) tuple bounds into the arrays
@@ -4321,6 +4446,7 @@ class gmm:
 
         # Optional Nelder-Mead overrides from ``glmerControl(optCtrl=...)``.
         nm_kwargs = _nm_kwargs_from_opt_ctrl(inputs.opt_ctrl)
+        bobyqa_kwargs = _bobyqa_kwargs_from_opt_ctrl(inputs.opt_ctrl)
 
         if nagq0_init_step or not do_stage1:
             # Stage 0 — joint PIRLS at θ₀, then optimize devfun over θ only.
@@ -4337,15 +4463,16 @@ class gmm:
                 pred, resp, nagq=0, tol_pwrss=tol_pwrss,
                 maxit_pwrss=maxit_pwrss, verbose=verbose_pirls,
             )
-            # minqa's defaults (commonArgs in /tmp/minqa_src/minqa/R/minqa.R):
-            #   npt    = min(n+2, 2n)  (floored to n+2 by _bobyqa_driver)
-            #   rhobeg = min(0.95, 0.2*max|par|)
-            #   rhoend = 1e-6 * rhobeg
-            #   maxfun = 10000
-            lb_stage0 = np.where(np.isfinite(lb_theta), lb_theta, -1.0e20)
-            ub_stage0 = np.where(np.isfinite(ub_theta), ub_theta, 1.0e20)
-            theta_stage0_x, fval0, feval0, ierr0, _msg0 = _bobyqa_driver(
-                devfun_stage0, theta0, lb_stage0, ub_stage0,
+            # Stage 0 outer optimizer = optimizer[0]. BOBYQA self-scales via
+            # minqa's defaults (rhobeg=min(0.95,0.2·max|par|), rhoend=1e-6·
+            # rhobeg, npt=min(n+2,2n), maxfun=10000); Nelder-Mead uses lme4's
+            # default θ step xst=0.02 (optimizer.R:5). _run_outer_stage clamps
+            # ±inf bounds for BOBYQA and passes them through for Nelder-Mead.
+            xst0 = np.full(n_theta, 0.02)
+            theta_stage0_x, fval0, feval0, ierr0 = _run_outer_stage(
+                optimizer[0], devfun_stage0, theta0, lb_theta, ub_theta,
+                xst=xst0, xtol_abs=xst0 * 5e-4, nm_kwargs=nm_kwargs,
+                bobyqa_kwargs=bobyqa_kwargs,
             )
             theta_stage0 = np.asarray(theta_stage0_x, dtype=float)
             # Re-anchor pred/resp at the Stage 0 optimum.
@@ -4387,15 +4514,20 @@ class gmm:
                 np.minimum(beta_sd, 10.0),
             ])
             xt1 = xst1 * 5e-4
-            nm1 = NelderMead(lb_par, ub_par, xst1, start_par,
-                             xtol_abs=xt1, **nm_kwargs)
-            status1 = nm1.minimize(devfun_stage1)
-            theta_hat = nm1.xpos()[:n_theta].copy()
-            beta_hat = nm1.xpos()[n_theta:].copy()
-            devfun_stage1(nm1.xpos())
+            # Stage 1 outer optimizer = optimizer[1] (lme4 default Nelder_Mead;
+            # the βSD-scaled xst1 / xt1 step+tol apply to the NM branch, and
+            # BOBYQA self-scales over the joint (θ, β) vector).
+            theta_beta_x, fval1, feval1, status1 = _run_outer_stage(
+                optimizer[1], devfun_stage1, start_par, lb_par, ub_par,
+                xst=xst1, xtol_abs=xt1, nm_kwargs=nm_kwargs,
+                bobyqa_kwargs=bobyqa_kwargs,
+            )
+            theta_hat = theta_beta_x[:n_theta].copy()
+            beta_hat = theta_beta_x[n_theta:].copy()
+            devfun_stage1(theta_beta_x)
             self._optim = {
-                "par": nm1.xpos().copy(), "fval": nm1.value(),
-                "feval": nm1.nevals, "status": int(status1),
+                "par": theta_beta_x.copy(), "fval": fval1,
+                "feval": feval1, "status": status1,
             }
             self._devfun_stage1 = devfun_stage1  # Phase 8.14 reuses this
         else:
@@ -4582,6 +4714,7 @@ class gmm:
             optim=self._optim,
             optim_stage0=self._optim_stage0,
             ctrl=inputs.opt_ctrl,
+            optimizer=inputs.optimizer,
         )
 
     def _deviance_residuals_signed(self) -> np.ndarray:
@@ -5700,7 +5833,10 @@ class gmm:
             "conv", {}).get("lme4", {}).get("messages", [])
         if opt_messages:
             out.append("")
-            out.append("optimizer (bobyqa+Nelder_Mead) convergence code: 0 (OK)")
+            opt_name = getattr(self, "optinfo", {}).get(
+                "optimizer", "bobyqa+Nelder_Mead")
+            out.append(
+                f"optimizer ({opt_name}) convergence code: 0 (OK)")
             for msg in opt_messages:
                 out.append(msg)
         print("\n".join(out))

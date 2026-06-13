@@ -1765,12 +1765,27 @@ def test_glmer_control_defaults_match_lme4():
     from hea.models.gmm import _normalize_glmer_control
 
     out = _normalize_glmer_control(None)
-    assert out["optimizer"] == "Nelder_Mead"
+    # lme4's glmer default optimizer chain (lmerControl.R:177): bobyqa for
+    # Stage 0, Nelder_Mead for Stage 1 — both ported.
+    assert out["optimizer"] == ["bobyqa", "Nelder_Mead"]
     assert out["tolPwrss"] == 1e-7
-    assert out["calc.derivs"] is True
+    # lme4's glmerControl()$calc.derivs is literally NULL (resolved to the
+    # smart rule at fit time using nobsmax/nparmax — see __init__).
+    assert out["calc.derivs"] is None
     assert out["nAGQ0initStep"] is True
     assert out["use.last.params"] is False
     assert out["optCtrl"] == {}
+    assert out["restart_edge"] is False
+    assert out["boundary.tol"] == 1e-5
+    assert out["compDev"] is True
+    # Keys added for full glmerControl() surface parity (merControl
+    # signature, lmerControl.R:65-185).
+    assert out["sparseX"] is False
+    assert out["standardize.X"] is False
+    assert out["autoscale"] is None
+    assert out["check.nobs.vs.rankZ"] == "ignore"
+    assert out["check.conv.nobsmax"] == 1e4
+    assert out["check.conv.nparmax"] == 20
 
 
 def test_glmer_control_merges_user_overrides():
@@ -1792,12 +1807,50 @@ def test_glmer_control_rejects_unknown_keys():
         _normalize_glmer_control({"speed": 9000})
 
 
-def test_glmer_control_rejects_unsupported_optimizer():
-    """bobyqa / nloptwrap etc. await separate ports — clear NotImplementedError."""
+def test_glmer_control_optimizer_chain():
+    """lme4's glmer optimizer is ``c(stage0, stage1)`` with each entry in
+    {bobyqa, Nelder_Mead} (both ported). A scalar replicates to both stages
+    (lmerControl.R:109-112). Genuinely unported optimizers (nloptwrap /
+    optimx / L-BFGS-B) raise ``NotImplementedError``."""
     from hea.models.gmm import _normalize_glmer_control
 
-    with pytest.raises(NotImplementedError, match="bobyqa"):
-        _normalize_glmer_control({"optimizer": "bobyqa"})
+    # bobyqa is ported now → accepted, replicated to a 2-stage chain.
+    assert _normalize_glmer_control(
+        {"optimizer": "bobyqa"})["optimizer"] == ["bobyqa", "bobyqa"]
+    assert _normalize_glmer_control(
+        {"optimizer": "Nelder_Mead"})["optimizer"] == ["Nelder_Mead", "Nelder_Mead"]
+    assert _normalize_glmer_control(
+        {"optimizer": ["bobyqa", "Nelder_Mead"]})["optimizer"] == \
+        ["bobyqa", "Nelder_Mead"]
+    # Unported optimizers still raise with a clear message.
+    for opt in ("nloptwrap", "optimx", "L-BFGS-B"):
+        with pytest.raises(NotImplementedError, match="optimizer"):
+            _normalize_glmer_control({"optimizer": opt})
+
+
+def test_glmer_optimizer_dispatch_per_stage():
+    """Full per-stage dispatch — ``optimizer=c(stage0, stage1)`` actually
+    routes each stage to the named ported optimizer. The default chain
+    reproduces the no-control fit byte-for-byte; the other ported combos
+    minimise the same Laplace objective and label ``optinfo`` correctly."""
+    from hea.models.gmm import gmm
+    from hea.family import Poisson
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    base = gmm("y ~ x + (1|g)", df, family=Poisson())
+    explicit = gmm("y ~ x + (1|g)", df, family=Poisson(),
+                   control={"optimizer": ["bobyqa", "Nelder_Mead"]})
+    # Default and the explicit default chain are the same path → identical.
+    np.testing.assert_array_equal(base.theta, explicit.theta)
+    assert base.optinfo["optimizer"] == "bobyqa+Nelder_Mead"
+
+    # Every ported (stage0, stage1) combo fits and minimises the same devfun.
+    for chain in (["Nelder_Mead", "Nelder_Mead"], ["bobyqa", "bobyqa"],
+                  ["Nelder_Mead", "bobyqa"]):
+        m = gmm("y ~ x + (1|g)", df, family=Poisson(),
+                control={"optimizer": chain})
+        assert m.optinfo["optimizer"] == "+".join(chain)
+        assert m.deviance_laplace == pytest.approx(base.deviance_laplace, abs=1e-4)
 
 
 def test_glmer_control_optCtrl_translates_to_nelder_mead_kwargs():
@@ -1815,6 +1868,66 @@ def test_glmer_control_optCtrl_rejects_unknown_keys():
 
     with pytest.raises(ValueError, match="unknown optCtrl key"):
         _nm_kwargs_from_opt_ctrl({"PRNGseed": 42})
+
+
+def test_glmer_control_optCtrl_routes_per_optimizer():
+    """A single ``optCtrl`` list is split per stage: bobyqa picks up
+    ``rhobeg``/``rhoend``/``npt``/``maxfun``; Nelder_Mead picks up
+    ``XtolRel``/``FtolAbs``/… Each ignores the other's keys (lme4's per-stage
+    behaviour); a key in neither vocabulary still raises."""
+    from hea.models.gmm import (
+        _bobyqa_kwargs_from_opt_ctrl, _nm_kwargs_from_opt_ctrl,
+    )
+
+    mixed = {"rhoend": 1e-9, "XtolRel": 1e-10, "maxfun": 9}
+    assert _bobyqa_kwargs_from_opt_ctrl(mixed) == {"rhoend": 1e-9, "maxfun": 9}
+    assert _nm_kwargs_from_opt_ctrl(mixed) == {"xtol_rel": 1e-10, "maxeval": 9}
+    # bobyqa-only keys no longer crash the NM translator (skipped, not raised).
+    assert _nm_kwargs_from_opt_ctrl({"rhoend": 1e-9}) == {}
+    # NM-only keys are skipped by the bobyqa translator.
+    assert _bobyqa_kwargs_from_opt_ctrl({"XtolRel": 1e-9}) == {}
+    # Genuine typos still raise from both.
+    for fn in (_bobyqa_kwargs_from_opt_ctrl, _nm_kwargs_from_opt_ctrl):
+        with pytest.raises(ValueError, match="unknown optCtrl key"):
+            fn({"bogus": 1})
+
+
+def test_glmer_optCtrl_bobyqa_tuning_runs_end_to_end():
+    """Selecting bobyqa AND tuning its ``rhoend`` via ``optCtrl`` fits
+    (the knob is wired, not just accepted)."""
+    from hea.models.gmm import gmm
+    from hea.family import Poisson
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    m = gmm("y ~ x + (1|g)", df, family=Poisson(),
+            control={"optimizer": ["bobyqa", "bobyqa"],
+                     "optCtrl": {"rhoend": 1e-9}})
+    assert m.optinfo["optimizer"] == "bobyqa+bobyqa"
+    assert np.isfinite(m.deviance_laplace)
+
+
+def test_glmer_calc_derivs_null_resolves_to_smart_rule():
+    """calc.derivs=None (lme4's default) resolves via the nobsmax/nparmax
+    smart rule (lmer.R:51-53). A small fit → True → identical to explicit
+    True; squeezing nparmax below the (θ, β) count flips it off → identical
+    to explicit False (RX-based vcov). This makes those keys functional."""
+    from hea.models.gmm import gmm
+    from hea.family import Poisson
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    # None (default) → True for this small problem → same path as explicit True.
+    m_null = gmm("y ~ x + (1|g)", df, family=Poisson())
+    m_true = gmm("y ~ x + (1|g)", df, family=Poisson(),
+                 control={"calc.derivs": True})
+    np.testing.assert_array_equal(m_null._se_beta, m_true._se_beta)
+    # Squeezing nparmax below npar flips the smart rule OFF → RX fallback,
+    # i.e. the same path as an explicit calc.derivs=False.
+    m_off = gmm("y ~ x + (1|g)", df, family=Poisson(),
+                control={"check.conv.nparmax": 1})
+    m_false = gmm("y ~ x + (1|g)", df, family=Poisson(),
+                  control={"calc.derivs": False})
+    np.testing.assert_array_equal(m_off._se_beta, m_false._se_beta)
+    assert np.all(np.isfinite(m_off._se_beta))
 
 
 # ----------------------------------------------------------------------
