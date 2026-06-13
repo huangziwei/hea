@@ -1969,9 +1969,11 @@ def test_cohort_y_matches_basic(itsadug_fitted_model):
 
 
 def _borderline_gaussian(seed: int, amp: float, n: int = 130) -> pl.DataFrame:
-    rng = np.random.default_rng(seed)
-    x = rng.uniform(0, 1, n)
-    y = amp * np.sin(4 * np.pi * x) + rng.normal(0, 1, n)
+    # R-native (set.seed(seed), 0-ulp: runif/rnorm)
+    from hea.R.rng import RGenerator
+    g = RGenerator(seed)
+    x = g.uniform(0.0, 1.0, n)
+    y = amp * np.sin(4 * np.pi * x) + g.normal(0.0, 1.0, n)
     return pl.DataFrame({"x": x, "y": y})
 
 
@@ -1979,10 +1981,10 @@ def _borderline_gaussian(seed: int, amp: float, n: int = 130) -> pl.DataFrame:
     "seed, amp, expected",
     [
         # (edf, Ref.df, F, p) from mgcv summary(gam(y ~ s(x), method="REML"))
-        (23, 0.45, (2.920565601204, 3.635185663159,
-                    0.707551676855, 0.489004131254)),
-        (31, 0.50, (5.62568065646878, 6.76317580531274,
-                    4.83126594787145, 0.00011153338537)),
+        (16, 0.45, (2.67146916085, 3.32082935917,
+                    0.924820270116, 0.431982202344)),
+        (2, 0.50, (5.09662376462, 6.17398455164,
+                   4.31714021834, 0.000494598563479)),
     ],
 )
 def test_teststat_mixture_pvalue_gaussian_matches_mgcv(seed, amp, expected):
@@ -2002,17 +2004,20 @@ def test_teststat_mixture_pvalue_poisson_matches_mgcv():
     statistic built on the √W-weighted design (mgcv tests against object$R,
     the QR factor of √W·X — unweighted X is only its legacy fallback)."""
     from hea.family import Poisson
-    rng = np.random.default_rng(4)
+    from hea.R.rng import RGenerator
+    # R-native (set.seed(16), 0-ulp); reseeded 4→16 — R-native seed 4 fits
+    # ~linear (edf≈1), so reseeded for fractional rank (edf 3.61).
+    g = RGenerator(16)
     n = 160
-    x = rng.uniform(0, 1, n)
-    y = rng.poisson(np.exp(0.30 * np.sin(4 * np.pi * x)))
+    x = g.uniform(0.0, 1.0, n)
+    y = np.asarray(g.poisson(np.exp(0.30 * np.sin(4 * np.pi * x))), dtype=float)
     d = pl.DataFrame({"x": x, "y": y})
     m = gam("y ~ s(x)", d, family=Poisson(), method="REML")
     label, edf, ref_df, stat_col, p_val = m._smooth_significance_rows()[0]
     # mgcv: edf, Ref.df, Chi.sq, p-value
     np.testing.assert_allclose(
         [edf, ref_df, stat_col, p_val],
-        (3.155091929152, 3.902446682533, 6.195704535045, 0.222514468845),
+        (3.61350424706, 4.48011605323, 7.88459555761, 0.128871644663),
         rtol=5e-4, err_msg="s(x) row vs mgcv s.table (poisson)",
     )
 
@@ -2042,29 +2047,30 @@ def test_rank_deficient_design_detected_and_warned():
 
 
 def test_rank_deficient_drop_matches_mgcv_exactly():
-    # Same construction at rng(3): mgcv (1.9-4) keeps one twin with
-    # coefficient 1.98453773, rank 11, REML 22.46719612, sig2 0.07442324,
-    # first prediction 0.84075695. The criterion keeps the *pre-drop*
-    # Mp and log|S| basis (G$Mp and UrS are setup-time quantities) —
-    # using post-drop Mp shifts REML by exactly ΔMp/2·log(2πφ̂) ≈ 0.38.
-    rng = np.random.default_rng(3)
+    # Same construction at set.seed(3) (R-native, 0-ulp): mgcv (1.9-4) keeps
+    # one twin with coefficient 1.981807588, rank 11, REML 29.91747549, sig2
+    # 0.09205759387, first prediction -0.619726771. The criterion keeps the
+    # *pre-drop* Mp and log|S| basis (G$Mp and UrS are setup-time quantities) —
+    # using post-drop Mp shifts REML by exactly ΔMp/2·log(2πφ̂).
+    from hea.R.rng import RGenerator
+    g = RGenerator(3)
     n = 80
-    x1 = rng.uniform(0, 1, n)
-    z = rng.uniform(0, 1, n)
-    y = 1.96 * x1 + np.sin(2 * np.pi * z) + rng.normal(0, 0.3, n)
+    x1 = g.uniform(0.0, 1.0, n)
+    z = g.uniform(0.0, 1.0, n)
+    y = 1.96 * x1 + np.sin(2 * np.pi * z) + g.normal(0.0, 0.3, n)
     df = pl.DataFrame({"x1": x1, "x2": x1.copy(), "z": z, "y": y})
     with pytest.warns(UserWarning, match="rank deficient"):
         m = gam("y ~ x1 + x2 + s(z)", df, method="REML")
     kept = (float(np.asarray(m.bhat["x2"])[0])
             or float(np.asarray(m.bhat["x1"])[0]))
-    np.testing.assert_allclose(kept, 1.98453773, rtol=0, atol=1e-6)
-    np.testing.assert_allclose(m.REML_criterion / 2, 22.46719612,
+    np.testing.assert_allclose(kept, 1.981807588, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.REML_criterion / 2, 29.91747549,
                                rtol=0, atol=1e-6)
-    np.testing.assert_allclose(m.sigma_squared, 0.07442324,
+    np.testing.assert_allclose(m.sigma_squared, 0.09205759387,
                                rtol=0, atol=1e-7)
-    np.testing.assert_allclose(m.sp[0], 0.0085086098, rtol=1e-5)
+    np.testing.assert_allclose(m.sp[0], 0.01349564141, rtol=1e-5)
     np.testing.assert_allclose(
-        m.predict(df.head(1))["fit"][0], 0.84075695, rtol=0, atol=1e-6,
+        m.predict(df.head(1))["fit"][0], -0.619726771, rtol=0, atol=1e-6,
     )
     # t value of the dropped twin is NaN, like mgcv's p.table
     tvals = m.t_values
@@ -2085,25 +2091,27 @@ def test_full_rank_fit_reports_p_and_does_not_warn():
 
 def _id_linked_data() -> pl.DataFrame:
     """Two covariates on *different ranges* — the acid test for id basis
-    sharing (pooled knots over [0, 3] differ from each smooth's own)."""
-    rng = np.random.default_rng(13)
+    sharing (pooled knots over [0, 3] differ from each smooth's own).
+    R-native (set.seed(13), 0-ulp: runif/rnorm)."""
+    from hea.R.rng import RGenerator
+    g = RGenerator(13)
     n = 250
-    x0 = rng.uniform(0, 1, n)
-    x1 = rng.uniform(0, 3, n)
+    x0 = g.uniform(0.0, 1.0, n)
+    x1 = g.uniform(0.0, 3.0, n)
     y = np.sin(2 * np.pi * x0) + np.sin(2 * np.pi * x1 / 3) \
-        + rng.normal(0, 0.35, n)
+        + g.normal(0.0, 0.35, n)
     return pl.DataFrame({"x0": x0, "x1": x1, "y": y})
 
 
 @pytest.mark.parametrize(
     "formula, exp_sp, exp_edf, exp_reml",
     [
-        # mgcv references on the exact _id_linked_data() CSV:
+        # mgcv references on the exact _id_linked_data() R-native data:
         #   gam(y ~ s(x0, bs=..., id=1) + s(x1, bs=..., id=1), method="REML")
         ("y ~ s(x0, bs='cr', id=1) + s(x1, bs='cr', id=1)",
-         2.73138803, (5.388691, 7.840385), 111.9803343),
+         2.85748958973, (5.22667532821, 7.68279449191), 130.595923509),
         ("y ~ s(x0, id=1) + s(x1, id=1)",          # tp (default basis)
-         0.000950795685, (4.156817, 8.746249), 116.2335752),
+         0.00111215693922, (4.0700018545, 8.67029420876), 135.136095842),
     ],
 )
 def test_id_links_smoothing_parameters_matches_mgcv(
@@ -2194,7 +2202,7 @@ def test_id_fixed_sp_takes_working_length():
     sum(edf)=14.594997."""
     d = _id_linked_data()
     m = gam("y ~ s(x0, bs='cr', id=1) + s(x1, bs='cr', id=1)", d, sp=[2.0])
-    np.testing.assert_allclose(m.edf_total, 14.594997, rtol=1e-5)
+    np.testing.assert_allclose(m.edf_total, 14.3473868864, rtol=1e-5)
     with pytest.raises(ValueError, match="length 1"):
         gam("y ~ s(x0, bs='cr', id=1) + s(x1, bs='cr', id=1)", d,
             sp=[2.0, 3.0])
@@ -2239,14 +2247,15 @@ def test_sz_id_kwarg_still_allowed():
 def test_retest_with_sibling_random_effects_matches_mgcv():
     """reTest for one bs='re' term treats the *other* re terms as fully
     random (recov's re-branch, mgcv.r:3640-3713) — not as fixed."""
-    rng = np.random.default_rng(7)
+    from hea.R.rng import RGenerator
+    gen = RGenerator(7)          # R-native (set.seed(7), 0-ulp)
     n = 250
-    x = rng.uniform(0, 1, n)
-    g1 = rng.integers(0, 8, n)
-    g2 = rng.integers(0, 6, n)
-    b1 = rng.normal(0, 0.5, 8)
-    b2 = rng.normal(0, 0.09, 6)
-    y = np.sin(2 * np.pi * x) + b1[g1] + b2[g2] + rng.normal(0, 0.5, n)
+    x = gen.uniform(0.0, 1.0, n)
+    g1 = gen.mt.sample_int(8, n, replace=True)   # = R sample.int(8, …) - 1
+    g2 = gen.mt.sample_int(6, n, replace=True)
+    b1 = gen.normal(0.0, 0.5, 8)
+    b2 = gen.normal(0.0, 0.09, 6)
+    y = np.sin(2 * np.pi * x) + b1[g1] + b2[g2] + gen.normal(0.0, 0.5, n)
     df = pl.DataFrame({
         "x": x,
         "g1": [f"a{i}" for i in g1],
@@ -2261,12 +2270,12 @@ def test_retest_with_sibling_random_effects_matches_mgcv():
     # mgcv s.table (edf, Ref.df, F, p) on this exact dataset:
     np.testing.assert_allclose(
         rows["s(g1)"],
-        (6.90386745017, 7.0, 88.75859491707, 0.0),
+        (6.72214656471, 7.0, 24.6471297862, 0.0),
         rtol=5e-4, atol=1e-12, err_msg="s(g1) vs mgcv",
     )
     np.testing.assert_allclose(
         rows["s(g2)"],
-        (3.5166733495327, 5.0, 3.5106246383545, 0.0198880041678),
+        (3.51278498412, 5.0, 3.49421820734, 0.00267046065254),
         rtol=5e-4, err_msg="s(g2) vs mgcv",
     )
 
@@ -2343,31 +2352,32 @@ def test_null_deviance_offset_and_no_intercept_match_mgcv():
     # base null deviance is dev(weighted-mean) for every formula; for
     # intercept+offset models estimate.gam refits glm(y ~ offset(off))
     # (mgcv.r:2072-2075). df.null = n-1 always. mgcv 1.9-4 references.
-    rng = np.random.default_rng(33)
+    from hea.R.rng import RGenerator
+    gen = RGenerator(33)         # R-native (set.seed(33), 0-ulp)
     n = 200
-    x = rng.uniform(0, 1, n)
-    expo = rng.uniform(0.5, 2.0, n)
+    x = gen.uniform(0.0, 1.0, n)
+    expo = gen.uniform(0.5, 2.0, n)
     mu = expo * np.exp(0.4 + np.sin(2 * np.pi * x))
-    y = rng.poisson(mu).astype(float)
+    y = np.asarray(gen.poisson(mu), dtype=float)
     df = pl.DataFrame({"x": x, "expo": expo, "y": y})
     from hea.family import Poisson
 
     m = gam("y ~ s(x) - 1 + offset(log(expo))", df, family=Poisson(),
             method="REML")
-    np.testing.assert_allclose(m.null_deviance, 418.3499279531,
+    np.testing.assert_allclose(m.null_deviance, 493.6575994189,
                                rtol=0, atol=1e-7)
     assert m.df_null == n - 1
 
     m2 = gam("y ~ s(x) + offset(log(expo))", df, family=Poisson(),
              method="REML")
-    np.testing.assert_allclose(m2.null_deviance, 410.0056332077,
+    np.testing.assert_allclose(m2.null_deviance, 408.7157165875,
                                rtol=0, atol=1e-7)
 
     # scaled.pearson = pearson/√φ̂ (mgcv.r:3457); φ=1 for Poisson so the
     # no-intercept fit pins R's residuals(m, "scaled.pearson") directly.
     r = m.residuals_of("scaled.pearson")
     np.testing.assert_allclose(
-        r[:3], [0.2833041422, 1.0547593514, 0.9580616495],
+        r[:3], [-0.4081571746, -0.0352311928, -0.3567882629],
         rtol=0, atol=1e-5,
     )
     with pytest.raises(ValueError, match="scaled.pearson"):
@@ -2766,27 +2776,28 @@ def test_ill_conditioned_design_matches_mgcv():
     # precision for the normal-equations route, which previously produced
     # *negative* total edf here). The augmented-QR path matches mgcv
     # (1.9-4) on every reported quantity.
-    rng = np.random.default_rng(11)
+    from hea.R.rng import RGenerator
+    gen = RGenerator(11)         # R-native (set.seed(11), 0-ulp)
     n = 150
-    x = rng.uniform(10.0, 10.1, n)
-    z = rng.uniform(0, 1, n)
+    x = gen.uniform(10.0, 10.1, n)
+    z = gen.uniform(0.0, 1.0, n)
     y = (0.5 * (x - 10.0) + 0.05 * (x - 10.0) ** 2 + np.sin(2 * np.pi * z)
-         + rng.normal(0, 0.2, n))
+         + gen.normal(0.0, 0.2, n))
     df = pl.DataFrame({"x": x, "z": z, "y": y})
     m = gam("y ~ x + I(x^2) + I(x^3) + s(z)", df, method="REML")
     assert m.rank == 13 and m.p == 13       # no drop: below eps*100 tol
-    np.testing.assert_allclose(m.REML_criterion / 2, -19.28509474,
+    np.testing.assert_allclose(m.REML_criterion / 2, -35.59408964,
                                rtol=0, atol=1e-6)
-    np.testing.assert_allclose(m.sigma_squared, 0.0440145971,
+    np.testing.assert_allclose(m.sigma_squared, 0.03464417846,
                                rtol=0, atol=1e-8)
-    np.testing.assert_allclose(float(np.sum(m.edf)), 11.304399,
+    np.testing.assert_allclose(float(np.sum(m.edf)), 11.72237914,
                                rtol=0, atol=1e-4)
     np.testing.assert_allclose(
         np.asarray(m.coef)[:4],
-        [-258681.26995556, 77010.92217727, -7642.12350559, 252.78437541],
+        [-34137.84777, 10168.43994, -1009.697889, 33.42319007],
         rtol=1e-6,
     )
-    np.testing.assert_allclose(m.predict(df.head(1))["fit"][0], 0.74940624,
+    np.testing.assert_allclose(m.predict(df.head(1))["fit"][0], -0.4805246562,
                                rtol=0, atol=1e-7)
 
 
@@ -3910,11 +3921,16 @@ def test_plain_quasi_identity_link_full_newton_matches_mgcv():
 # ---------------------------------------------------------------------------
 
 def _scat_fixture():
-    rng = np.random.default_rng(99)
+    # R-native (set.seed(2): runif bit-identical; rt within ~3e-15 from rgamma's
+    # GD float-ordering gap, via rchisq — negligible vs the pins). Heavier-tailed seed
+    # ν≈4.24 (well-determined) replaces the old numpy seed-99 sample: R-native
+    # seed 99 lands ν≈26, a flat/ill-conditioned region. mgcv 1.9-4 pins below.
+    from hea.R.rng import RGenerator
+    g = RGenerator(2)
     n = 200
-    x = rng.uniform(0, 1, n)
+    x = g.uniform(size=n)
     f = np.sin(2 * np.pi * x) + 0.5 * x
-    y = f + 0.3 * rng.standard_t(df=4, size=n)
+    y = f + 0.3 * g.standard_t(4, size=n)
     return pl.DataFrame({"x": x, "y": y})
 
 
@@ -3926,39 +3942,39 @@ def test_scat_through_gam_matches_mgcv():
     from hea.family import Scat
     df = _scat_fixture()
     m = gam("y ~ s(x)", df, family=Scat(), method="REML")
-    np.testing.assert_allclose(m.REML_criterion / 2, 98.8661481421,
+    np.testing.assert_allclose(m.REML_criterion / 2, 93.4279560970729,
                                rtol=0, atol=1e-6)
-    np.testing.assert_allclose(m.sp[0], 0.2252719608, rtol=1e-4)
-    np.testing.assert_allclose(float(np.sum(m.edf)), 7.5698625762,
+    np.testing.assert_allclose(m.sp[0], 0.1550084027, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 7.8407668102,
                                rtol=0, atol=1e-4)
-    np.testing.assert_allclose(np.asarray(m.coef)[0], 0.2152614293,
+    np.testing.assert_allclose(np.asarray(m.coef)[0], 0.411261775854,
                                rtol=0, atol=1e-7)
     nu, sig = m.family.get_theta(trans=True)
-    np.testing.assert_allclose(nu, 10.79624285, rtol=1e-6)
-    np.testing.assert_allclose(sig, 0.33845196, rtol=1e-6)
-    np.testing.assert_allclose(m.deviance, 221.0135453303, rtol=0, atol=1e-5)
-    np.testing.assert_allclose(m.fitted_values[0], 0.1972092616,
-                               rtol=0, atol=1e-8)
-    np.testing.assert_allclose(m.Vp[0, 0], 0.0006698555932, rtol=1e-6)
-    # edf2/AIC tightened post-B9: the old ~1e-3 band was Vc2's Newton-
-    # seed Cholesky, NOT the FD θ-rows (those match mgcv's analytic
-    # REML2 to 1e-7); Fisher-seed Vc2 lands Δ ≈ 2e-9 here.
-    np.testing.assert_allclose(m.edf2_total, 7.70731486, rtol=0, atol=1e-6)
-    np.testing.assert_allclose(m.AIC, 183.9037075959, rtol=0, atol=1e-6)
+    # nu/deviance/fitted carry the hea-vs-mgcv (sp, θ) convergence gap
+    # (rel ~1e-7 on this heavier-tailed ν≈4.24 sample); the stationary
+    # criterion and intercept stay tight to ~1e-10.
+    np.testing.assert_allclose(nu, 4.23984596547, rtol=3e-6)
+    np.testing.assert_allclose(sig, 0.281128469435, rtol=1e-6)
+    np.testing.assert_allclose(m.deviance, 267.745438162, rtol=0, atol=3e-5)
+    np.testing.assert_allclose(m.fitted_values[0], 1.14677329548,
+                               rtol=0, atol=3e-8)
+    np.testing.assert_allclose(m.Vp[0, 0], 0.0005459972642, rtol=1e-6)
+    np.testing.assert_allclose(m.edf2_total, 7.9703610095, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.AIC, 171.0639212244, rtol=0, atol=1e-6)
 
 
 def test_scat_ml_through_gam_matches_mgcv():
     from hea.family import Scat
     df = _scat_fixture()
     m = gam("y ~ s(x)", df, family=Scat(), method="ML")
-    np.testing.assert_allclose(m.ML_criterion / 2, 96.0090311236,
+    np.testing.assert_allclose(m.ML_criterion / 2, 90.4358656257,
                                rtol=0, atol=1e-6)
-    np.testing.assert_allclose(m.sp[0], 0.2400137927, rtol=1e-4)
-    np.testing.assert_allclose(float(np.sum(m.edf)), 7.5083624461,
+    np.testing.assert_allclose(m.sp[0], 0.1649328349, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 7.7844589623,
                                rtol=0, atol=1e-4)
     nu, sig = m.family.get_theta(trans=True)
-    np.testing.assert_allclose(nu, 10.51763340, rtol=1e-6)
-    np.testing.assert_allclose(sig, 0.33616103, rtol=1e-6)
+    np.testing.assert_allclose(nu, 4.2099380606, rtol=1e-6)
+    np.testing.assert_allclose(sig, 0.2794428367, rtol=1e-6)
 
 
 def test_scat_fixed_theta_fixed_sp_matches_mgcv():
@@ -3967,13 +3983,13 @@ def test_scat_fixed_theta_fixed_sp_matches_mgcv():
     # (sp, θ) the criterion must reproduce mgcv's REML to all digits.
     from hea.family import Scat
     df = _scat_fixture()
-    fam = Scat(theta=(10.79624285, 0.33845196))
+    fam = Scat(theta=(4.23984596546644, 0.281128469435471))
     assert fam.n_theta == 0
     m = gam("y ~ s(x)", df, family=fam, method="REML",
-            sp=np.array([0.2252719608]))
-    np.testing.assert_allclose(m.REML_criterion / 2, 98.8661481421,
+            sp=np.array([0.155008402666293]))
+    np.testing.assert_allclose(m.REML_criterion / 2, 93.4279560970729,
                                rtol=0, atol=1e-7)
-    np.testing.assert_allclose(np.asarray(m.coef)[0], 0.2152614293,
+    np.testing.assert_allclose(np.asarray(m.coef)[0], 0.411261775854293,
                                rtol=0, atol=1e-8)
 
 
@@ -3986,13 +4002,16 @@ def test_extended_family_rejects_free_theta_with_fixed_sp():
 
 
 def _nb_fixture():
-    rng = np.random.default_rng(7)
+    # R-native (bit-exact to set.seed(7), verified byte-for-byte): runif →
+    # rgamma → rpois in R's draw order; mgcv pins are gam() fits on this data.
+    from hea.R.rng import RGenerator
+    g = RGenerator(7)
     n = 200
-    x = rng.uniform(0, 1, n)
+    x = g.uniform(size=n)
     mu = np.exp(0.3 + np.sin(2 * np.pi * x))
     Th = 3.0
-    lam = rng.gamma(shape=Th, scale=mu / Th)
-    y = rng.poisson(lam).astype(float)
+    lam = g.gamma(Th, scale=mu / Th)
+    y = np.asarray(g.poisson(lam), dtype=float)
     return pl.DataFrame({"x": x, "y": y})
 
 
@@ -4003,23 +4022,23 @@ def test_nb_through_gam_matches_mgcv():
     from hea.family import nb
     df = _nb_fixture()
     m = gam("y ~ s(x)", df, family=nb(), method="REML")
-    np.testing.assert_allclose(m.REML_criterion / 2, 294.7952161834,
+    np.testing.assert_allclose(m.REML_criterion / 2, 318.541902729,
                                rtol=0, atol=1e-6)
-    np.testing.assert_allclose(m.sp[0], 0.07132960482, rtol=1e-4)
-    np.testing.assert_allclose(float(np.sum(m.edf)), 5.8580493405,
+    np.testing.assert_allclose(m.sp[0], 0.0774062275045, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 5.33449838393,
                                rtol=0, atol=1e-4)
-    np.testing.assert_allclose(np.asarray(m.coef)[0], 0.08970849052,
+    np.testing.assert_allclose(np.asarray(m.coef)[0], 0.227494645531,
                                rtol=0, atol=1e-8)
     np.testing.assert_allclose(float(m.family.get_theta(trans=True)[0]),
-                               3.88313559, rtol=1e-6)
-    np.testing.assert_allclose(m.deviance, 209.2357768385, rtol=0, atol=1e-6)
-    np.testing.assert_allclose(m.null_deviance, 303.73000425,
+                               2.65778771157, rtol=1e-6)
+    np.testing.assert_allclose(m.deviance, 203.567374398, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.null_deviance, 312.800417888,
                                rtol=0, atol=1e-5)
-    np.testing.assert_allclose(m.fitted_values[0], 0.6182401827,
+    np.testing.assert_allclose(m.fitted_values[0], 0.656085286284,
                                rtol=0, atol=1e-8)
     # AIC/edf2 tightened post-B9 (Fisher-seed Vc2): Δ ≈ 3e-9 / 2e-11.
-    np.testing.assert_allclose(m.edf2_total, 6.19148710, rtol=0, atol=1e-6)
-    np.testing.assert_allclose(m.AIC, 583.8235859018, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.edf2_total, 6.32010404395, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.AIC, 633.965932303, rtol=0, atol=1e-6)
 
 
 def test_nb_fixed_theta_matches_mgcv():
@@ -4030,10 +4049,10 @@ def test_nb_fixed_theta_matches_mgcv():
     fam = nb(theta=3.0)
     assert fam.n_theta == 0
     m = gam("y ~ s(x)", df, family=fam, method="REML")
-    np.testing.assert_allclose(m.REML_criterion / 2, 295.0158222631,
+    np.testing.assert_allclose(m.REML_criterion / 2, 318.617850697,
                                rtol=0, atol=1e-6)
-    np.testing.assert_allclose(m.sp[0], 0.07201056219, rtol=1e-4)
-    np.testing.assert_allclose(float(np.sum(m.edf)), 5.7755018202,
+    np.testing.assert_allclose(m.sp[0], 0.0685065177646, rtol=1e-4)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 5.49625628987,
                                rtol=0, atol=1e-4)
 
 
@@ -4181,13 +4200,17 @@ def test_sl_machinery_invariants():
 # ---------------------------------------------------------------------------
 
 def _mf_fixture():
-    rng = np.random.default_rng(31)
+    # R-native (set.seed(31)): x,z bit-exact (runif); w and the y-noise within a
+    # few ulp (rnorm = scipy ndtri ≈ R qnorm5 to ~1e-12). Only sum|X| is pinned
+    # to mgcv (design basis from x,z,w, not y); matches to ~1e-9.
+    from hea.R.rng import RGenerator
+    g = RGenerator(31)
     n = 150
-    x = rng.uniform(0, 1, n)
-    z = rng.uniform(0, 1, n)
-    w = rng.normal(0, 1, n)
+    x = g.uniform(size=n)
+    z = g.uniform(size=n)
+    w = g.normal(0.0, 1.0, n)
     y = (np.sin(2 * np.pi * x) + 0.4 * w
-         + rng.normal(0, np.exp(0.3 * np.cos(2 * np.pi * z)), n))
+         + g.normal(0.0, np.exp(0.3 * np.cos(2 * np.pi * z)), n))
     return pl.DataFrame({"x": x, "z": z, "w": w, "y": y})
 
 
@@ -4214,7 +4237,7 @@ def test_multi_formula_design_matches_mgcv():
                                       "s.1(z).2"]
     assert md.blocks[0].label == "s(x)"
     assert md.blocks[1].label == "s.1(z)"
-    np.testing.assert_allclose(float(np.abs(md.X).sum()), 2023.30210226,
+    np.testing.assert_allclose(float(np.abs(md.X).sum()), 2023.2041595800,
                                rtol=0, atol=1e-6)
     assert md.offsets == [None, None]
     assert md.L is None and md.n_work == 2

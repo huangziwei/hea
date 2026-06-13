@@ -5887,16 +5887,18 @@ class shash(GeneralFamily):
         return np.sqrt(np.maximum(0.0, 2.0 * (0.0 - ll))) * sgn
 
     def rd(self, rng, mu, wt, scale):
-        """shash ``rd`` (gamlss.r:4026-4039): deviates via the
-        quantile transform of uniforms (R's qnorm(runif(n)))."""
-        from scipy.special import ndtri
+        """shash ``rd`` (gamlss.r:4026-4039): deviates via the quantile
+        transform of uniforms — R's ``qnorm(runif(n))`` (one uniform per draw).
+        Uses the bit-exact ``_qnorm5`` (AS-241), so given R-stream uniforms the
+        deviates are 0-ulp to R."""
+        from .R.rng import _qnorm5
         mu = np.asarray(mu, dtype=float)
         mu_e = mu[:, 0]
         sig_e = np.exp(mu[:, 1])
         eps_e = mu[:, 2]
         del_e = np.exp(mu[:, 3])
         n = mu_e.shape[0]
-        u = ndtri(rng.uniform(size=n))
+        u = np.array([_qnorm5(float(v)) for v in rng.uniform(size=n)])
         return mu_e + (del_e * sig_e) * np.sinh(
             (1.0 / del_e) * np.arcsinh(u) + eps_e / del_e)
 

@@ -38,7 +38,6 @@ import math
 
 import numpy as np
 from scipy.linalg.lapack import dpstrf
-from scipy.special import ndtri
 
 __all__ = ["RMersenneTwister", "RGenerator"]
 
@@ -56,6 +55,89 @@ _I2_32M1 = 2.328306437080797e-10
 # rbeta (rbeta.c) overflow guard: expmax = DBL_MAX_EXP * M_LN2, and DBL_MAX.
 _EXPMAX = 1024 * 0.6931471805599453
 _DBL_MAX = 1.7976931348623157e308
+
+# qnorm5 — R's normal quantile (nmath/qnorm.c, Wichura 1988 AS-241): the exact
+# rational-approx coefficients + Horner nesting R uses. norm_rand's Inversion
+# case calls this on the combined-uniform argument, so a bit-exact port (not
+# SciPy's ndtri, which differs ~1e-12) makes rnorm 0-ulp to R. Three branches
+# keyed on |p-0.5|: central, near-tail (r<=5), far-tail.
+_QN_A = (2509.0809287301226727, 33430.575583588128105, 67265.770927008700853,
+         45921.953931549871457, 13731.693765509461125, 1971.5909503065514427,
+         133.14166789178437745, 3.387132872796366608)
+_QN_B = (5226.495278852854561, 28729.085735721942674, 39307.89580009271061,
+         21213.794301586595867, 5394.1960214247511077, 687.1870074920579083,
+         42.313330701600911252, 1.0)
+_QN_C = (7.7454501427834140764e-4, 0.0227238449892691845833,
+         0.24178072517745061177, 1.27045825245236838258, 3.64784832476320460504,
+         5.7694972214606914055, 4.6303378461565452959, 1.42343711074968357734)
+_QN_D = (1.05075007164441684324e-9, 5.475938084995344946e-4,
+         0.0151986665636164571966, 0.14810397642748007459,
+         0.68976733498510000455, 1.6763848301838038494, 2.05319162663775882187,
+         1.0)
+_QN_E = (2.01033439929228813265e-7, 2.71155556874348757815e-5,
+         0.0012426609473880784386, 0.026532189526576123093,
+         0.29656057182850489123, 1.7848265399172913358, 5.4637849111641143699,
+         6.6579046435011037772)
+_QN_F = (2.04426310338993978564e-15, 1.4215117583164458887e-7,
+         1.8463183175100546818e-5, 7.868691311456132591e-4,
+         0.0148753612908506148525, 0.13692988092273580531,
+         0.59983220655588793769, 1.0)
+
+
+def _qn_horner(r: float, c: tuple) -> float:
+    v = c[0]
+    for k in c[1:]:
+        v = v * r + k
+    return v
+
+
+def _qnorm5(p: float) -> float:
+    """R's ``qnorm5(p, mu=0, sigma=1, lower_tail=TRUE, log_p=FALSE)``
+    (nmath/qnorm.c), bit-exact: same AS-241 coefficients and Horner nesting R
+    uses. Boundaries return ±Inf at 0/1 and NaN outside [0, 1] / for NaN."""
+    if math.isnan(p):
+        return math.nan
+    if p <= 0.0:
+        return -math.inf if p == 0.0 else math.nan
+    if p >= 1.0:
+        return math.inf if p == 1.0 else math.nan
+    q = p - 0.5
+    if abs(q) <= 0.425:
+        r = 0.180625 - q * q
+        return q * _qn_horner(r, _QN_A) / _qn_horner(r, _QN_B)
+    r = (1.0 - p) if q > 0.0 else p
+    r = math.sqrt(-math.log(r))
+    if r <= 5.0:
+        r += -1.6
+        val = _qn_horner(r, _QN_C) / _qn_horner(r, _QN_D)
+    else:
+        r += -5.0
+        val = _qn_horner(r, _QN_E) / _qn_horner(r, _QN_F)
+    return -val if q < 0.0 else val
+
+
+def _qnorm5_vec(p: np.ndarray) -> np.ndarray:
+    """Vectorized :func:`_qnorm5` for ``p`` strictly in (0, 1) — the only range
+    the Inversion deviates feed it. Bit-identical to the scalar version
+    elementwise (same AS-241 coefficients, Horner nesting, and op order;
+    ``_qn_horner`` is array-polymorphic). Both tail branches are evaluated and
+    selected with ``np.where``; for any ``p`` in (0, 1) all three branches are
+    finite (``min(p, 1-p)`` in (0, 0.5] ⇒ ``sqrt(-log)`` is real), so no NaNs
+    leak through the discarded lanes."""
+    p = np.asarray(p, dtype=float)
+    q = p - 0.5
+    # Central: r = 0.180625 - q^2 (finite for all q).
+    rc = 0.180625 - q * q
+    val_c = q * _qn_horner(rc, _QN_A) / _qn_horner(rc, _QN_B)
+    # Tails: r = sqrt(-log(min(p, 1-p))).
+    rt = np.sqrt(-np.log(np.where(q > 0.0, 1.0 - p, p)))
+    rn = rt - 1.6
+    rf = rt - 5.0
+    val_t = np.where(rt <= 5.0,
+                     _qn_horner(rn, _QN_C) / _qn_horner(rn, _QN_D),
+                     _qn_horner(rf, _QN_E) / _qn_horner(rf, _QN_F))
+    val_t = np.where(q < 0.0, -val_t, val_t)
+    return np.where(np.abs(q) <= 0.425, val_c, val_t)
 
 
 def _beta_vw(AA: float, u1: float, beta: float) -> tuple[float, float]:
@@ -206,9 +288,19 @@ class RMersenneTwister:
             v = float(self._buf[self._pos])
             self._pos += 1
             return v
-        out = np.empty(int(n))
-        for i in range(int(n)):
-            out[i] = self.unif_rand()
+        # Bulk-copy whole buffer slices instead of n scalar pulls — identical
+        # values (the buffer is already fixup'd in _refill), refilling at the
+        # same 624-word boundaries.
+        n = int(n)
+        out = np.empty(n)
+        filled = 0
+        while filled < n:
+            if self._pos >= self._buf.size:
+                self._refill()
+            take = min(n - filled, self._buf.size - self._pos)
+            out[filled:filled + take] = self._buf[self._pos:self._pos + take]
+            self._pos += take
+            filled += take
         return out
 
     def norm_rand(self) -> float:
@@ -217,13 +309,14 @@ class RMersenneTwister:
         One standard normal = ``qnorm`` of two combined uniforms for 53-bit
         precision (``snorm.c`` INVERSION case): ``u = floor(2^27·u1) + u2``,
         return ``qnorm(u / 2^27)``. So each normal consumes **two**
-        ``unif_rand`` draws. The MT uniforms are bit-exact to R; ``qnorm`` here
-        is SciPy's ``ndtri`` (agrees with R's Wichura AS-241 to ~1e-12).
+        ``unif_rand`` draws. The MT uniforms are bit-exact to R, and ``qnorm``
+        here is a bit-exact port of R's ``qnorm5`` (AS-241, see ``_qnorm5``),
+        so each normal is 0-ulp to ``set.seed(); rnorm()``.
         """
         big = 134217728.0  # 2^27
         u1 = self.unif_rand()
         u1 = float(int(big * u1)) + self.unif_rand()
-        return float(ndtri(u1 / big))
+        return _qnorm5(u1 / big)
 
     def rnorm(self, n: int | None = None, mean: float = 0.0, sd: float = 1.0):
         """R's ``rnorm(n, mean, sd)`` on R's MT stream (Inversion normals).
@@ -231,12 +324,17 @@ class RMersenneTwister:
         ``n=None`` returns one draw; otherwise a length-``n`` array consuming
         the identical sequence. Use this (not numpy / ``hea.R.rnorm``) whenever
         the draws must line up with R's ``set.seed(); rnorm()``.
+
+        Vectorized: the 2n Inversion uniforms are drawn in one batch (same
+        stream as 2n scalar draws) and run through ``_qnorm5_vec`` — bit-
+        identical to the per-draw scalar path, but without the Python loop.
         """
         if n is None:
             return mean + sd * self.norm_rand()
-        return mean + sd * np.array(
-            [self.norm_rand() for _ in range(int(n))]
-        )
+        big = 134217728.0  # 2^27
+        u = self.unif_rand(2 * int(n))
+        comb = np.floor(big * u[0::2]) + u[1::2]
+        return mean + sd * _qnorm5_vec(comb / big)
 
     def _rbits(self, bits: int) -> int:
         # rbits (RNG.c:875-885): 16 bits per unif_rand draw.
@@ -869,7 +967,7 @@ class RGenerator:
 
     def normal(self, loc=0.0, scale=1.0, size=None):
         n, scalar, (loc, scale) = _rgen_resolve(size, loc, scale)
-        z = np.array([self.mt.norm_rand() for _ in range(n)])
+        z = self.mt.rnorm(n)            # vectorized standard normals
         out = loc + scale * z
         return float(out[0]) if scalar else out
 
