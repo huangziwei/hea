@@ -449,6 +449,16 @@ class lm:
         self.X = d.X
         self.y = d.y  # pl.Series
 
+        # Column → term-assignment map (R's model.matrix ``assign``): 0 for
+        # the intercept, i for the columns of the i-th RHS term. Captured
+        # keyed by name so it survives the rank-deficiency column drop below,
+        # and used by predict(type="terms") to group columns into terms.
+        _assign = getattr(d, "param_assign", None)
+        self._col_assign = (
+            {c: int(a) for c, a in zip(self.X.columns, _assign)}
+            if _assign is not None else None
+        )
+
         # R's lm() drops linearly-dependent columns from X (via dqrdc2's
         # pivoted QR) before fitting — without this, df_residuals is off by
         # the alias count whenever the design is rank-deficient. Common
@@ -746,7 +756,7 @@ class lm:
 
         return ci_bhat_bootstrap
 
-    def compute_yhat(self, Xnew=None, interval=None, alpha=0.05):
+    def compute_yhat(self, Xnew=None, interval=None, alpha=0.05, se_fit=False):
         if Xnew is None:
             X = self.X.to_numpy().astype(float)
             off = self._offset
@@ -761,6 +771,17 @@ class lm:
         bhat = self._bhat_arr[:, None]
         yhat_vals = (X @ bhat).flatten() + off
         yhat = pl.DataFrame({"fit": yhat_vals})
+
+        if se_fit:
+            # R's predict.lm `se.fit`: SE of the fitted mean,
+            # √(σ²·xᵀ(XᵀWX)⁻¹x). Same quantity the confidence interval uses
+            # (and reported even when interval="prediction").
+            var_mean = np.einsum(
+                "ij,jk,ik->i", X, self.XtXinv, X
+            ) * self.sigma_squared
+            yhat = yhat.with_columns(
+                pl.Series("se.fit", np.sqrt(np.maximum(var_mean, 0.0)))
+            )
 
         match interval:
             case None:
@@ -912,8 +933,100 @@ class lm:
         # R's BIC uses log(nobs) with nobs = N = #{wᵢ ≠ 0}.
         return -2 * self.loglike + np.log(self._n_eff) * self.npar
 
-    def predict(self, newdata=None, interval=None, alpha=0.05):
-        return self.compute_yhat(Xnew=newdata, interval=interval, alpha=alpha)
+    def predict(self, newdata=None, interval=None, alpha=0.05, *,
+                level=None, se_fit=False, type="response", terms=None):
+        """R: ``predict.lm`` — fitted/predicted values on ``newdata``.
+
+        ``interval`` ∈ ``{None, "confidence", "prediction", True}`` adds
+        ``lwr``/``upr`` columns (``True`` returns both, ``ci_*``/``pi_*``).
+        ``level=`` is R's name for the interval level — an alias for
+        ``1 − alpha`` (``alpha`` still works; ``level`` wins if both given).
+
+        ``se_fit=True`` adds an ``se.fit`` column: the SE of the fitted
+        mean, ``√(σ²·xᵀ(XᵀWX)⁻¹x)`` (reported even with
+        ``interval="prediction"``, matching R).
+
+        ``type="terms"`` returns one *centered* column per RHS term — R's
+        ``predict(type="terms")`` — with the overall constant attached as
+        the ``.constant`` attribute (so ``fit = constant + rowSums``) and
+        ``se.{term}`` columns when ``se_fit=True``. ``terms=`` (a label or
+        list) selects a subset. See :meth:`_predict_terms`.
+        """
+        if level is not None:
+            alpha = 1.0 - level
+        if type == "terms":
+            return self._predict_terms(Xnew=newdata, se_fit=se_fit, terms=terms)
+        if type != "response":
+            raise ValueError(
+                f"predict(): type must be 'response' or 'terms', got {type!r}"
+            )
+        return self.compute_yhat(
+            Xnew=newdata, interval=interval, alpha=alpha, se_fit=se_fit
+        )
+
+    def _predict_terms(self, Xnew=None, se_fit=False, terms=None):
+        """R: ``predict.lm(type="terms")`` — per-term contributions.
+
+        Each column is the centered contribution of one RHS term,
+        ``(X[:, cols] − colMeans(Xtrain)[cols]) · β̂[cols]`` — R centers by
+        the *training* design's (unweighted) column means. The overall
+        constant ``Σ colMeans·β̂`` (= mean fitted value) is attached as the
+        ``.constant`` attribute, so ``fit = constant + rowSums(terms)``.
+        ``se_fit=True`` appends ``se.{label}`` columns,
+        ``√(σ²·diag(X_c[:,cols]·(XᵀWX)⁻¹[cols,cols]·X_cᵀ))``; ``terms=``
+        (label or list) selects a subset of term labels.
+        """
+        if self._col_assign is None:
+            raise RuntimeError(
+                "predict(type='terms') needs the column→term map "
+                "(no param_assign on the design)"
+            )
+        if Xnew is None:
+            X = self.X.to_numpy().astype(float)
+        else:
+            X = materialize(self._expanded, Xnew).select(
+                self.column_names
+            ).to_numpy().astype(float)
+
+        beta = self._bhat_arr
+        avx = self.X.to_numpy().astype(float).mean(axis=0)  # R: colMeans(mm)
+        Xc = X - avx
+        assign = np.array([self._col_assign[c] for c in self.column_names])
+        constant = float(np.sum(avx * beta))
+
+        XtXinv = np.asarray(self.XtXinv)
+        res_var = self.sigma_squared
+        present = [a for a in sorted(set(assign.tolist())) if a != 0]
+
+        data: dict[str, np.ndarray] = {}
+        se_data: dict[str, np.ndarray] = {}
+        for a in present:
+            label = self._expanded.terms[a - 1].label
+            idx = np.where(assign == a)[0]
+            data[label] = Xc[:, idx] @ beta[idx]
+            if se_fit:
+                sub = XtXinv[np.ix_(idx, idx)]
+                var_t = np.einsum(
+                    "ij,jk,ik->i", Xc[:, idx], sub, Xc[:, idx]
+                ) * res_var
+                se_data[label] = np.sqrt(np.maximum(var_t, 0.0))
+
+        if terms is not None:
+            sel = [terms] if isinstance(terms, str) else list(terms)
+            # R warns and ignores unknown labels; we just intersect.
+            data = {k: v for k, v in data.items() if k in sel}
+            se_data = {k: v for k, v in se_data.items() if k in sel}
+
+        if se_fit:
+            for k, v in se_data.items():
+                data[f"se.{k}"] = v
+
+        from ..tidy import DataFrame as _DF  # local: avoid import cycle
+        out = _DF(data)
+        # R attaches the term constant as attr(., "constant"); hea's
+        # DataFrame subclass carries it as a plain attribute.
+        out.constant = constant
+        return out
 
     def _residuals_lines(self, digits: int = 4) -> list[str]:
         # R's print.summary.lm shows *weighted* residuals (√wᵢ·rᵢ) under a

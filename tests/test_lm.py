@@ -519,3 +519,78 @@ def test_weighted_lm_input_validation():
     assert m.n == 10
     assert len(m.weights) == 10
     np.testing.assert_array_equal(m.weights, w[:10])
+
+
+# ---------------------------------------------------------------------------
+# predict.lm surface — se.fit, type="terms", level= (R 4.6.0 oracles)
+#
+#   m  <- lm(mpg ~ wt + hp, data = mtcars, weights = 1/wt)
+#   nd <- data.frame(wt = c(2.5, 3.5), hp = c(100, 200))
+# ---------------------------------------------------------------------------
+
+
+def test_lm_predict_se_fit_matches_R():
+    mt = load_dataset("R", "mtcars")
+    w = 1.0 / mt["wt"].to_numpy()
+    m = lm("mpg ~ wt + hp", mt, weights=w)
+    nd = pl.DataFrame({"wt": [2.5, 3.5], "hp": [100.0, 200.0]})
+
+    p = m.predict(newdata=nd, se_fit=True)
+    assert "se.fit" in p.columns
+    np.testing.assert_allclose(p["fit"].to_numpy(),    [24.74675, 17.156918],     rtol=1e-5)
+    np.testing.assert_allclose(p["se.fit"].to_numpy(), [0.52776628, 0.67550803], rtol=1e-5)
+
+    # se.fit travels with intervals too — it's the mean SE, not the PI width
+    pi = m.predict(newdata=nd, interval="prediction", se_fit=True)
+    assert {"fit", "se.fit", "lwr", "upr"}.issubset(pi.columns)
+    np.testing.assert_allclose(pi["se.fit"].to_numpy(), p["se.fit"].to_numpy())
+
+
+def test_lm_predict_level_is_alpha_alias():
+    mt = load_dataset("R", "mtcars")
+    m = lm("mpg ~ wt + hp", mt)
+    nd = pl.DataFrame({"wt": [3.0], "hp": [150.0]})
+    a = m.predict(newdata=nd, interval="confidence", level=0.90)
+    b = m.predict(newdata=nd, interval="confidence", alpha=0.10)
+    np.testing.assert_allclose(a["lwr"].to_numpy(), b["lwr"].to_numpy())
+    np.testing.assert_allclose(a["upr"].to_numpy(), b["upr"].to_numpy())
+
+
+def test_lm_predict_terms_numeric_matches_R():
+    mt = load_dataset("R", "mtcars")
+    w = 1.0 / mt["wt"].to_numpy()
+    m = lm("mpg ~ wt + hp", mt, weights=w)
+    nd = pl.DataFrame({"wt": [2.5, 3.5], "hp": [100.0, 200.0]})
+
+    pt = m.predict(newdata=nd, type="terms", se_fit=True)
+    assert pt.columns == ["wt", "hp", "se.wt", "se.hp"]
+    np.testing.assert_allclose(pt.constant, 20.090625, rtol=1e-6)
+    np.testing.assert_allclose(pt["wt"].to_numpy(),    [3.1873323, -1.2564911],  rtol=1e-5)
+    np.testing.assert_allclose(pt["hp"].to_numpy(),    [1.4687925, -1.6772156],  rtol=1e-5)
+    np.testing.assert_allclose(pt["se.wt"].to_numpy(), [0.49368287, 0.19461671], rtol=1e-5)
+    np.testing.assert_allclose(pt["se.hp"].to_numpy(), [0.45641882, 0.52118508], rtol=1e-5)
+
+    # R identity: fit == constant + rowSums(terms)
+    fit = m.predict(newdata=nd)["fit"].to_numpy()
+    np.testing.assert_allclose(
+        pt.constant + pt["wt"].to_numpy() + pt["hp"].to_numpy(), fit, rtol=1e-6
+    )
+
+    # terms= selects a subset of term labels
+    only_wt = m.predict(newdata=nd, type="terms", terms="wt")
+    assert only_wt.columns == ["wt"]
+    np.testing.assert_allclose(only_wt["wt"].to_numpy(), [3.1873323, -1.2564911], rtol=1e-5)
+
+
+def test_lm_predict_terms_factor_matches_R():
+    """A factor term's dummy columns collapse into one term column."""
+    pg = load_dataset("R", "PlantGrowth")
+    m = lm("weight ~ group", pg)
+    nd = pl.DataFrame({"group": ["ctrl", "trt1", "trt2"]})
+    pt = m.predict(newdata=nd, type="terms", se_fit=True)
+    assert pt.columns == ["group", "se.group"]
+    np.testing.assert_allclose(pt.constant, 5.073, rtol=1e-6)
+    np.testing.assert_allclose(pt["group"].to_numpy(), [-0.041, -0.412, 0.453], rtol=1e-5)
+    np.testing.assert_allclose(
+        pt["se.group"].to_numpy(), [0.16095464, 0.16095464, 0.16095464], rtol=1e-5
+    )
