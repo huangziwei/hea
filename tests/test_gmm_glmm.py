@@ -2351,6 +2351,36 @@ def test_confint_profile_glmm_unknown_scale_raises():
         m.confint(method="profile")
 
 
+def test_confint_profile_glmm_scale_known_matches_lme4_cbpp():
+    """11.1 — scale-known GLMM profile CIs. cbpp binomial ``(1|herd)``: the
+    constrained-Laplace profile (pin one param, re-optimise the rest over the
+    Stage-1 ``[θ,β]`` devfun) matches lme4's ``confint(method="profile")`` to
+    ~1e-3 (the profile-spline-inversion floor).
+
+    R recipe::
+        m <- glmer(cbind(incidence, size-incidence) ~ period + (1|herd),
+                   cbpp, binomial)
+        confint(m, method="profile")
+    """
+    d = load_dataset("lme4", "cbpp")
+    df = d.with_columns((pl.col("incidence") / pl.col("size")).alias("yp"))
+    size = df["size"].to_numpy().astype(float)
+    m = gmm("yp ~ period + (1|herd)", df, family=Binomial(), weights=size)
+    ci = m.confint(method="profile")
+
+    def row(p):
+        return ci.filter(pl.col("parameter") == p).row(0)[1:]
+
+    np.testing.assert_allclose(row(".sig01"),
+                               [0.3460704968, 1.0998887415], atol=2e-3)
+    np.testing.assert_allclose(row("(Intercept)"),
+                               [-1.9011888852, -0.9477681542], atol=2e-3)
+    np.testing.assert_allclose(row("period2"),
+                               [-1.6168537016, -0.4077095870], atol=2e-3)
+    np.testing.assert_allclose(row("period4"),
+                               [-2.5008377491, -0.8006870282], atol=2e-3)
+
+
 # ----------------------------------------------------------------------
 # Phase 13 — full-parity fixture matrix (named scenarios on vendored data).
 # Inline R recipes (the test-file convention); references from lme4 2.0-2.

@@ -6089,6 +6089,143 @@ class gmm:
         )
         return list(reversed(neg)) + [mle_tup, shift_tup] + pos
 
+    def _glmm_dev_with_theta_fixed(self, slot_i, v_tgt, theta_warm, beta_warm):
+        """Profile a GLMM variance component: pin ``θ[slot_i] = v_tgt`` and
+        re-optimise the remaining ``(θ_{-i}, β)`` over the Stage-1 Laplace
+        devfun, returning ``(dev, θ̂, σ=1, β̂)``. For a scale-known GLMM σ≡1, so
+        ``θ_i`` *is* the random-effect SD (the ``.sig0i`` profile axis)."""
+        devfun = self._devfun_stage1
+        n_theta = len(self.theta)
+        free_t = [k for k in range(n_theta) if k != slot_i]
+        nf = len(free_t)
+
+        def obj(x):
+            theta = np.empty(n_theta)
+            theta[slot_i] = v_tgt
+            for a, k in enumerate(free_t):
+                theta[k] = x[a]
+            return devfun(np.concatenate([theta, x[nf:]]))
+
+        x0 = np.concatenate([np.asarray(theta_warm, float)[free_t],
+                             np.asarray(beta_warm, float)])
+        bounds = [self._theta_bounds[k] for k in free_t] + [(None, None)] * self.p
+        res = minimize(obj, x0, method="L-BFGS-B", bounds=bounds,
+                       options={"ftol": 1e-12, "gtol": 1e-7, "maxiter": 500})
+        theta_opt = np.empty(n_theta)
+        theta_opt[slot_i] = v_tgt
+        for a, k in enumerate(free_t):
+            theta_opt[k] = res.x[a]
+        return float(res.fun), theta_opt, 1.0, res.x[nf:].copy()
+
+    def _glmm_dev_with_beta_fixed(self, j, v_tgt, theta_warm, beta_warm):
+        """Profile a GLMM fixed effect: pin ``β[j] = v_tgt`` and re-optimise
+        ``(θ, β_{-j})`` over the Stage-1 Laplace devfun. Returns ``(dev, θ̂, 1, β̂)``."""
+        devfun = self._devfun_stage1
+        n_theta = len(self.theta)
+        p = self.p
+        free_b = [k for k in range(p) if k != j]
+
+        def obj(x):
+            beta = np.empty(p)
+            beta[j] = v_tgt
+            for a, k in enumerate(free_b):
+                beta[k] = x[n_theta + a]
+            return devfun(np.concatenate([x[:n_theta], beta]))
+
+        x0 = np.concatenate([np.asarray(theta_warm, float),
+                             np.asarray(beta_warm, float)[free_b]])
+        bounds = list(self._theta_bounds) + [(None, None)] * len(free_b)
+        res = minimize(obj, x0, method="L-BFGS-B", bounds=bounds,
+                       options={"ftol": 1e-12, "gtol": 1e-7, "maxiter": 500})
+        theta_opt = res.x[:n_theta].copy()
+        beta_opt = np.empty(p)
+        beta_opt[j] = v_tgt
+        for a, k in enumerate(free_b):
+            beta_opt[k] = res.x[n_theta + a]
+        return float(res.fun), theta_opt, 1.0, beta_opt
+
+    def _profile_glmm(self, n_grid: int, alphamax: float) -> "Profile":
+        """Profile a **scale-known** GLMM (Poisson/Binomial) — the Phase-11.1
+        constrained-Laplace path. Mirrors the Gaussian :meth:`profile` but over
+        the Stage-1 ``[θ, β]`` Laplace devfun (no residual σ axis, ``useSc=0``),
+        re-optimising the free coordinates at each grid point with one pinned."""
+        from scipy.stats import chi2
+
+        if self._devfun_stage1 is None:
+            raise NotImplementedError(
+                "profile() needs the Stage-1 [θ,β] Laplace devfun, which "
+                "nAGQ=0 fits don't build; refit with nAGQ>=1")
+        d_hat = float(self._optim["fval"])
+        theta_hat = self.theta.copy()
+        n_theta = len(theta_hat)
+        # useSc=0 for scale-known GLMM ⇒ nptot = #θ + p (no residual σ).
+        nptot = n_theta + self.p
+        cutoff = float(np.sqrt(chi2.ppf(1.0 - alphamax, nptot)))
+        delta = cutoff / 8.0
+
+        bar_keys = list(self.sd_re.keys())
+        bar_labels = [f".sig{i + 1:02d}" for i in range(len(bar_keys))]
+        slot_offsets = list(np.cumsum([0] + self._bar_sizes[:-1]))
+        bar_slots = [int(s) for s in slot_offsets]
+        param_names: list[str] = bar_labels + list(self.column_names)
+
+        estimate: dict[str, float] = {}
+        for lbl, key in zip(bar_labels, bar_keys):
+            estimate[lbl] = float(self.sd_re[key][0])
+        for j, name in enumerate(self.column_names):
+            estimate[name] = float(self._beta[j])
+
+        def _state_to_row(theta_opt, sigma_opt, beta_opt) -> dict[str, float]:
+            row: dict[str, float] = {}
+            for lbl, slot in zip(bar_labels, bar_slots):
+                row[lbl] = float(theta_opt[slot])  # σ≡1 ⇒ SD = θ
+            for j, name in enumerate(self.column_names):
+                row[name] = float(beta_opt[j])
+            return row
+
+        rows_by_param: dict[str, list[dict[str, float]]] = {p: [] for p in param_names}
+        zetas_by_param: dict[str, np.ndarray] = {}
+
+        def _store(samples, lbl):
+            zetas_by_param[lbl] = np.array([s[1] for s in samples])
+            for s in samples:
+                rows_by_param[lbl].append(_state_to_row(s[2], s[3], s[4]))
+
+        for lbl, slot_i in zip(bar_labels, bar_slots):
+            samples = self._profile_param_adaptive(
+                fit_at_v=lambda v, th_w, sg_w, _slot=slot_i:
+                    self._glmm_dev_with_theta_fixed(_slot, v, th_w, self._beta),
+                v_start=estimate[lbl], theta_start=theta_hat,
+                sigma_start=1.0, beta_start=self._beta,
+                d_hat=d_hat, is_var_component=True,
+                cutoff=cutoff, delta=delta, v_min=0.0, max_steps_per_dir=n_grid,
+            )
+            _store(samples, lbl)
+
+        for j, name in enumerate(self.column_names):
+            se_j = float(self._se_beta[j])
+            samples = self._profile_param_adaptive(
+                fit_at_v=lambda v, th_w, sg_w, _j=j:
+                    self._glmm_dev_with_beta_fixed(_j, v, th_w, self._beta),
+                v_start=estimate[name], theta_start=theta_hat,
+                sigma_start=1.0, beta_start=self._beta,
+                d_hat=d_hat, is_var_component=False,
+                se_for_init=max(se_j, 1e-3),
+                cutoff=cutoff, delta=delta, max_steps_per_dir=n_grid,
+            )
+            _store(samples, name)
+
+        # Profiling mutated pred/resp (each devfun call re-runs PIRLS); restore
+        # them to the MLE state so predict()/residuals after profile() are right.
+        self._devfun_stage1(self._optim["par"])
+
+        data: dict[str, pl.DataFrame] = {}
+        for p in param_names:
+            cols = {q: [r[q] for r in rows_by_param[p]] for q in param_names}
+            cols["zeta"] = list(zetas_by_param[p])
+            data[p] = pl.DataFrame(cols)
+        return Profile(data, estimate)
+
     def profile(self, n_grid: int = 100, alphamax: float = 0.01) -> "Profile":
         """Compute profile-likelihood curves for σ_i, σ, and each β_j.
 
@@ -6120,12 +6257,9 @@ class gmm:
             if not bool(getattr(self.family, "scale_known", False)):
                 raise NotImplementedError(
                     "can't (yet) profile GLMMs with non-fixed scale parameters")
-            # 11.1 — scale-known GLMM (Poisson/Binomial) profiling needs the
-            # constrained-Laplace inner fit (re-optimise (θ,β) with one pinned);
-            # not yet ported. Wald / bootstrap CIs work today; use those.
-            raise NotImplementedError(
-                "profile() for GLMMs is not yet implemented; use "
-                "confint(method='Wald') or confint(method='boot') instead")
+            # 11.1 — scale-known GLMM (Poisson/Binomial): profile the [θ, β]
+            # Laplace devfun, re-optimising the free coords with one pinned.
+            return self._profile_glmm(n_grid, alphamax)
         if self.REML:
             return gmm(self.formula, self.data, REML=False).profile(
                 n_grid=n_grid, alphamax=alphamax,
