@@ -1832,6 +1832,9 @@ def _itsadug_parse_args(path: Path) -> dict:
         "rm_ranef": raw["rm.ranef"],
         "n_grid": int(raw["n_grid"]),
         "has_sim_ci_col": bool(raw["has_sim_ci_col"]),
+        # set.seed() the R fixture used before mgcv::rmvn (None for non-sim
+        # cases). Passing this as get_difference(rng=...) reproduces R's draws.
+        "sim_seed": raw.get("sim_seed"),
     }
 
 
@@ -1855,7 +1858,10 @@ def test_get_difference_matches_itsadug(itsadug_fitted_model, case_id: str):
         f=args["f"],
         sim_ci=args["sim_ci"],
         rm_ranef=rm_ranef,
-        rng=20260430,  # deterministic for the sim.ci path; loose tol on crit
+        # Seed hea's R MT with the SAME set.seed() the fixture used before
+        # mgcv::rmvn, so the simultaneous-CI draws come off R's stream (None
+        # for non-sim cases, where rng is unused).
+        rng=args["sim_seed"],
         n_sim=10_000,
     )
 
@@ -1907,14 +1913,21 @@ def test_get_difference_matches_itsadug(itsadug_fitted_model, case_id: str):
             err_msg=f"{case_id}: simultaneous se_fit diverges",
         )
 
-        # crit is an empirical 0.95 quantile over n_sim=10000 MVN draws.
-        # Cross-RNG comparison: the two implementations sample
-        # independently so the quantile differs by Monte-Carlo SE. The
-        # standard error of the 0.95 quantile of the MASD with n=10000
-        # draws is roughly 0.5–2% of the value; allow 5% for safety.
+        # crit is the empirical type-8 0.95 quantile of the MASD over
+        # n_sim=10000 MVN draws. hea now draws via mgcv::rmvn on R's *bit-exact*
+        # MT stream (RMersenneTwister.rmvn, seeded with the fixture's
+        # set.seed) — given identical Vc/p the quantile reproduces R's to
+        # ~1e-12 (see test_rmvn_matches_r). The residual ~4e-3 here is NOT
+        # RNG: the MVN draw mroot(Vc)@Z is basis-dependent and hea's smooth
+        # basis differs from mgcv's reparameterization, so the realized draw
+        # (hence the finite-sample quantile) differs at Monte-Carlo level even
+        # off the same stream. Basis-invariant quantities (difference / CI /
+        # se_fit above) match to ~5e-6; bit-exact crit would need full
+        # column-for-column basis parity. 8e-3 covers the measured gap with
+        # margin and is ~6× tighter than the old cross-RNG bound.
         ref_crit = float(pl.read_csv(case_dir / "crit.csv")["crit"][0])
         np.testing.assert_allclose(
-            res.crit, ref_crit, rtol=0.05,
+            res.crit, ref_crit, rtol=8e-3,
             err_msg=f"{case_id}: simultaneous crit diverges (ours={res.crit}, R={ref_crit})",
         )
 

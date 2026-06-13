@@ -1012,6 +1012,47 @@ def test_rgenerator_family_rd_matches_r():
          2.46511332727586])
 
 
+def test_rmvn_matches_r():
+    """``RMersenneTwister.rmvn`` (port of ``mgcv::rmvn``) reproduces R's
+    ``set.seed(k); mgcv::rmvn(n, mu, V)`` draws. The pivoted-Cholesky root
+    (``mroot``, via LAPACK ``dpstrf``) and the column-major ``rnorm(p*n)`` draw
+    order are bit-exact; only the trailing ``R %*% Z`` GEMM is BLAS-bound, so
+    the vector-``mu`` ``n==1`` branch is bit-identical and ``n>1`` matches to
+    machine precision. Reference: ``set.seed(101)`` in R 4.x / mgcv 1.9-4.
+
+    This is the bit-exact guarantee behind itsadug's simultaneous-CI path
+    (:meth:`hea.models.gam.gam.get_difference`): the MVN *draws* now come off
+    R's MT stream rather than numpy. The downstream ``crit`` is only
+    Monte-Carlo-close to R because hea's smooth basis differs from mgcv's, which
+    makes the (basis-dependent) realized draw differ — see the itsadug
+    get_difference test."""
+    from hea.R.rng import RGenerator, RMersenneTwister
+
+    V = np.array([[2.0, 0.3, -0.4],
+                  [0.3, 1.5, 0.2],
+                  [-0.4, 0.2, 1.0]])
+    mu = np.array([10.0, -5.0, 2.5])
+
+    # vector-mu, n=2 -> (2, 3); zero mean
+    A_R = np.array([[-0.46108522671538527, 0.59723538372992691, -0.4195265282782813],
+                    [0.30315005420217234, 0.42033284459609094, 1.1035833980527343]])
+    A = RMersenneTwister(101).rmvn(2, np.zeros(3), V)
+    assert A.shape == (2, 3)
+    np.testing.assert_allclose(A, A_R, rtol=0, atol=1e-13)
+
+    # vector-mu, n=1 -> length-3 vector (R's as.numeric); bit-identical
+    b_R = np.array([9.5389147732846151, -4.4027646162700727, 2.0804734717217186])
+    b = RMersenneTwister(101).rmvn(1, mu, V)
+    assert b.shape == (3,)
+    assert np.array_equal(b, b_R), "n=1 vector-mu rmvn must be bit-identical to R"
+
+    # RGenerator.multivariate_normal facade maps to the same draws.
+    sim = RGenerator(101).multivariate_normal(np.zeros(3), V, size=2)
+    np.testing.assert_allclose(sim, A_R, rtol=0, atol=1e-13)
+    v = RGenerator(101).multivariate_normal(mu, V)  # size=None -> (p,)
+    assert v.shape == (3,) and np.array_equal(v, b_R)
+
+
 # ---------------------------------------------------------------------------
 # Model generics
 # ---------------------------------------------------------------------------

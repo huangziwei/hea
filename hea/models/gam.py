@@ -7575,9 +7575,12 @@ class gam:
         n_sim : int
             Number of MVN draws for the simultaneous envelope. Default
             10,000, matching itsadug.
-        rng : numpy Generator | int | None
-            RNG for the simultaneous draws. ``None`` uses
-            ``np.random.default_rng()`` (non-deterministic).
+        rng : int | RMersenneTwister | RGenerator | numpy Generator | None
+            RNG for the simultaneous ``mgcv::rmvn`` draws. ``None`` uses the
+            process-global R stream (set via :func:`hea.R.set_seed`, as in
+            R+itsadug where ``set.seed()`` precedes the draws). An int seeds a
+            fresh R Mersenne-Twister, reproducing R's ``set.seed(int)`` draws.
+            A numpy ``Generator`` is also accepted but is *not* R-consistent.
         print_summary : bool
             Print a per-variable summary of the conditions used (mirror of
             itsadug's ``print.summary``).
@@ -7730,16 +7733,14 @@ class gam:
             Vb = self.Vc  # unconditional=TRUE covariance
             var_fit = np.einsum("ij,jk,ik->i", p, Vb, p)
             se_fit = np.sqrt(np.maximum(var_fit, 0.0))
-            if isinstance(rng, (int, np.integer)) or rng is None:
-                rng_obj = np.random.default_rng(rng)
-            else:
-                rng_obj = rng
-            # Draw from MVN(0, Vb). itsadug uses mgcv::rmvn which Cholesky-
-            # factors V; numpy's multivariate_normal uses SVD by default,
-            # which is also stable on near-PD matrices. n_sim defaults 10000.
+            rng_obj = _resolve_sim_rng(rng)
+            # itsadug draws MVN(0, Vb) via mgcv::rmvn (a pivoted-Cholesky root
+            # on R's MT stream). RGenerator routes that through hea's bit-exact
+            # R RNG, so set_seed()/an int seed reproduce R+itsadug's draws to
+            # machine precision (only the final GEMM is BLAS-bound). n_sim
+            # defaults to 10000, matching itsadug.
             mu0 = np.zeros(Vb.shape[0])
-            sim = rng_obj.multivariate_normal(mu0, Vb, size=n_sim,
-                                              method="cholesky")
+            sim = rng_obj.multivariate_normal(mu0, Vb, size=n_sim)
             # simDev[i, s] = (p · sim[s])[i] — deviation at grid point i for
             # draw s. Standardize by se_fit, take row-wise max, then quantile.
             simDev = p @ sim.T
@@ -8058,9 +8059,10 @@ class gam:
         n_sim : int
             Number of MVN draws for the simultaneous envelope. Default
             10,000 (matches itsadug). Ignored when ``sim_ci=False``.
-        rng : numpy Generator | int | None
-            RNG for the simultaneous draws. ``None`` is non-deterministic;
-            pass an int for reproducible runs.
+        rng : int | RMersenneTwister | RGenerator | numpy Generator | None
+            RNG for the simultaneous ``mgcv::rmvn`` draws (see
+            :meth:`get_difference`). ``None`` uses the :func:`hea.R.set_seed`
+            global R stream; an int seeds a fresh R Mersenne-Twister.
         show_diff : bool
             Overlay a translucent mask on grid cells where the CI excludes
             0 — itsadug's ``show.diff``. The mask uses the simultaneous
@@ -12442,6 +12444,27 @@ def _add_factor_stub_rows(grid: pl.DataFrame, src: pl.DataFrame):
         if stub_df[col].dtype != grid[col].dtype:
             stub_df = stub_df.with_columns(stub_df[col].cast(grid[col].dtype))
     return pl.concat([grid, stub_df], how="vertical_relaxed"), len(stubs)
+
+
+def _resolve_sim_rng(rng):
+    """Resolve :meth:`gam.get_difference`'s ``rng`` to an object exposing
+    ``multivariate_normal(mean, cov, size)`` for the simultaneous-CI draws.
+
+    ``None`` → the process-global R stream (``hea.R.set_seed``-controlled, as in
+    R+itsadug where ``set.seed()`` precedes ``mgcv::rmvn``). An int seeds a
+    fresh R ``RMersenneTwister``. An ``RMersenneTwister`` is wrapped in an
+    ``RGenerator``; an ``RGenerator`` — or any object already exposing
+    ``multivariate_normal`` (e.g. a ``numpy.random.Generator``, non-R) — is used
+    as-is."""
+    from ..R.rng import RGenerator, RMersenneTwister
+    if rng is None:
+        from ..R import distributions as _dist
+        return RGenerator(_dist._r_rng())
+    if isinstance(rng, (int, np.integer)):
+        return RGenerator(int(rng))
+    if isinstance(rng, RMersenneTwister):
+        return RGenerator(rng)
+    return rng
 
 
 def _format_difference_summary(*, comp, cond, su, cancelled, rm_ranef,

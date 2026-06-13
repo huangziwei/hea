@@ -37,6 +37,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+from scipy.linalg.lapack import dpstrf
 from scipy.special import ndtri
 
 __all__ = ["RMersenneTwister", "RGenerator"]
@@ -113,6 +114,32 @@ def _revsort(a: np.ndarray, ib: np.ndarray) -> None:
     for idx in range(n):
         a[idx] = A[idx + 1]
         ib[idx] = B[idx + 1]
+
+
+def _mroot_chol(V: np.ndarray) -> np.ndarray:
+    """``mgcv::mroot(V, rank=ncol(V), method="chol")`` — a pivoted-Cholesky
+    matrix square root ``R`` (p×p) with ``R @ R.T == V``.
+
+    Uses LAPACK ``dpstrf`` (the exact routine R's ``chol(pivot=TRUE, tol=0)``
+    calls), then un-pivots the columns and transposes, mirroring ``mroot``'s R
+    source line-for-line. Verified bit-identical to ``mgcv::mroot`` (the pivot
+    order and every factor entry match). Used by :meth:`RMersenneTwister.rmvn`."""
+    V = np.asarray(V, dtype=float)
+    if V.ndim != 2 or V.shape[0] != V.shape[1]:
+        raise ValueError("V must be a square matrix")
+    p = V.shape[1]
+    # Upper factor U (p×p) and 1-based pivot s.t. U' U == V[piv, piv]. tol=0
+    # matches mroot's chol(..., tol=0): stop only on a non-positive pivot.
+    c, piv, rank, info = dpstrf(V, lower=0, tol=0.0)
+    if info < 0:
+        raise ValueError(f"dpstrf: illegal argument {-info}")
+    U = np.triu(c[:p, :p])
+    r = int(rank)
+    if r < p:
+        U[r:p, r:p] = 0.0                 # mroot: zero the trailing block
+    oo = np.argsort(piv, kind="stable")   # order(attr(L, "pivot")), 0-based
+    Lp = U[:, oo]                         # un-pivot columns: t(Lp) Lp == V
+    return Lp.T.copy()                    # t(L[1:rank,]) with rank == ncol(V)
 
 
 class RMersenneTwister:
@@ -774,6 +801,34 @@ class RMersenneTwister:
             out[i] = kk if rU < q[kk] else int(a[kk])
         return out
 
+    def rmvn(self, n: int, mu, V) -> np.ndarray:
+        """``mgcv::rmvn(n, mu, V)`` on R's MT stream — multivariate normals via
+        the pivoted-Cholesky root :func:`_mroot_chol`.
+
+        ``mu`` is either a length-``p`` vector — returns an ``(n, p)`` array
+        (a length-``p`` vector when ``n == 1``, matching R's ``as.numeric``) —
+        or an ``n×p`` matrix, returning ``(n, p)``. The ``p*n`` standard
+        normals are drawn with bit-exact :meth:`rnorm` in R's column-major
+        ``matrix(rnorm(p*n), ...)`` order, so ``set.seed(k)`` reproduces R's
+        draws. The trailing ``R @ Z`` GEMM matches R to machine precision only
+        (BLAS associativity), which downstream quantiles/rounding absorb."""
+        V = np.asarray(V, dtype=float)
+        p = V.shape[1]
+        R = _mroot_chol(V)
+        mu = np.asarray(mu, dtype=float)
+        n = int(n)
+        z = self.rnorm(p * n)
+        if mu.ndim == 2:
+            # matrix-mu: z <- matrix(rnorm(p*n), n, p) %*% t(R) + mu
+            if mu.shape != (n, p):
+                raise ValueError("mu dimensions wrong")
+            return z.reshape((n, p), order="F") @ R.T + mu
+        # vector-mu: z <- t(R %*% matrix(rnorm(p*n), p, n) + as.numeric(mu))
+        if mu.shape[0] != p:
+            raise ValueError("mu dimensions wrong")
+        out = (R @ z.reshape((p, n), order="F") + mu[:, None]).T
+        return out.ravel() if n == 1 else out
+
 
 def _rgen_resolve(size, *params):
     """Shared shape logic for :class:`RGenerator`: returns ``(n, scalar, cols)``
@@ -803,7 +858,8 @@ class RGenerator:
     so ``set.seed(k)``-pinned R results (e.g. ``qq.gam(rep>0)``) reproduce
     bit-for-bit. (Inverse-Gaussian deviates use mgcv's ``rig`` — n ``normal`` +
     n ``uniform`` — and tweedie uses ``poisson`` + ``gamma``, so no dedicated
-    ``wald``/``rTweedie`` method is needed.)"""
+    ``wald``/``rTweedie`` method is needed.) ``multivariate_normal`` maps to
+    ``mgcv::rmvn`` for itsadug's simultaneous-CI draws."""
 
     __slots__ = ("mt",)
 
@@ -843,3 +899,15 @@ class RGenerator:
         n, scalar, (low, high) = _rgen_resolve(size, low, high)
         out = low + (high - low) * self.mt.unif_rand(n)
         return float(out[0]) if scalar else out
+
+    def multivariate_normal(self, mean, cov, size=None, method=None):
+        """Facade over :meth:`RMersenneTwister.rmvn` (``mgcv::rmvn``) matching
+        ``numpy.random.Generator.multivariate_normal``'s signature/return: a
+        ``(p,)`` vector when ``size is None``, else ``(size, p)``. ``method`` is
+        accepted for drop-in compatibility and ignored — ``rmvn`` always uses
+        the pivoted-Cholesky root, as itsadug does. Routes draws through R's
+        bit-exact stream so ``set_seed(k)`` reproduces R+itsadug's MVN draws."""
+        mean = np.asarray(mean, dtype=float)
+        if size is None:
+            return self.mt.rmvn(1, mean, cov)
+        return self.mt.rmvn(int(size), mean, cov)
