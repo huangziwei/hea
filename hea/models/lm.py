@@ -275,7 +275,8 @@ class SummaryLm:
     - ``.fstatistic`` — numpy array ``[F, df1, df2]`` (R's vector shape)
     - ``.coefficients`` — DataFrame with Estimate / Std. Error / t / p
       (R's coefficient matrix)
-    - ``.df`` — degrees-of-freedom triple
+    - ``.df`` — R's df triple ``(rank, residual_df, total_columns)``
+      (total columns counts aliased/dropped columns, like ``NCOL(qr)``)
     - ``.cov_unscaled`` — ``(X'X)^-1`` matrix
     - ``.residuals`` — raw residual Series
 
@@ -297,7 +298,12 @@ class SummaryLm:
             np.array([model.fstats, model.df_model, model.df_residuals])
             if model.fstats is not None else None
         )
-        self.df = (model.df_model, model.df_residuals, model.p)
+        # R: ``summary.lm`` sets ``ans$df <- c(p, rdf, NCOL(Qr$qr))`` — that's
+        # (rank incl. intercept, residual df, *total* columns incl. aliased),
+        # NOT (df_model, rdf, kept_cols). ``model.p`` is the kept-column count,
+        # which equals the rank (hea drops aliased columns up front), and
+        # ``len(model._full_names)`` is the pre-drop column total.
+        self.df = (model.p, model.df_residuals, len(model._full_names))
         self.cov_unscaled = np.asarray(model.XtXinv)
         self.residuals = model.residuals
         # Coefficients matrix — R's ``summary(lm)$coef`` is a numeric
@@ -446,6 +452,7 @@ class lm:
         na_action: str = "omit",
         contrasts=None,
         singular_ok: bool = True,
+        offset: Union[None, np.array] = None,
     ):
 
         # meta
@@ -486,6 +493,20 @@ class lm:
         else:
             w_arr = None
 
+        # ``offset=`` (R's lm ``offset`` argument): a length-n vector added to
+        # the linear predictor. R sums it with any in-formula ``offset(...)``
+        # term; we carry it through the same ``subset=`` + ``na.omit`` row-drops
+        # as ``weights`` so it stays aligned to the fit rows, then fold it into
+        # ``self._offset`` (see the offset summation below).
+        if offset is not None:
+            off_arg = np.asarray(offset, dtype=float).reshape(-1)
+            if off_arg.shape[0] != data.height:
+                raise ValueError(
+                    "Length of offset should be the same as the number of rows in the dataframe"
+                )
+        else:
+            off_arg = None
+
         # R's ``subset=`` filters rows before fitting. Accepts an R-style
         # expression (string / polars expr) evaluated in the frame, a bool
         # mask, or 0-based keep / negative drop indices (see _resolve_subset
@@ -496,6 +517,8 @@ class lm:
             data = data[keep]
             if w_arr is not None:
                 w_arr = w_arr[keep]
+            if off_arg is not None:
+                off_arg = off_arg[keep]
 
         # na.action keep-mask over the (post-subset) frame: which rows
         # survive na.omit. Drives ``fail`` (error), ``exclude`` (output
@@ -508,9 +531,12 @@ class lm:
 
         if w_arr is not None and not na_keep.all():
             w_arr = w_arr[na_keep]
+        if off_arg is not None and not na_keep.all():
+            off_arg = off_arg[na_keep]
 
         self.data = data
         self.weights = w_arr
+        self._offset_arg = off_arg
 
         d = prepare_design(formula, data, contrasts=contrasts)
         self._expanded = d.expanded
@@ -602,6 +628,14 @@ class lm:
         off = np.zeros(n)
         for off_node in d.expanded.offsets:
             off = off + _eval_atom(off_node, d.data).values.flatten().astype(float)
+        # R's lm() adds the ``offset=`` argument on top of any in-formula
+        # offset(...) term (the two sum). ``off_arg`` is already aligned to the
+        # fit rows by the subset + na.omit drops above. NOTE: predict() on *new*
+        # data re-evaluates only formula offsets (R replays object$call$offset);
+        # the constructor ``offset=`` is reflected in fitted values / residuals
+        # but not in predict(newdata=...).
+        if self._offset_arg is not None:
+            off = off + self._offset_arg
         self._offset = off
         y_solve = y - off
 

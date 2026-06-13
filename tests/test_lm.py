@@ -486,6 +486,10 @@ def test_weighted_lm_zero_weights_match_R():
     assert m.df_residuals == 27       # 30 nonzero rows − 3 params
     assert m._n_eff == 30
     assert len(m._residuals_arr) == 32  # rows retained, as in R
+    # R's nobs.lm counts only nonzero-weight rows (sum(w != 0)), not the 32
+    # retained rows — matches R's nobs(m) == 30 for this fit.
+    from hea.R import nobs
+    assert nobs(m) == 30
     _assert_coef(m, "(Intercept)", 37.612212,  1.6458459)
     _assert_coef(m, "wt",          -3.9191052, 0.64013433)
     np.testing.assert_allclose(m.sigma,     2.6185529,   rtol=1e-5)
@@ -639,6 +643,11 @@ def test_rank_deficient_keeps_aliased_as_NA():
     assert su.aliased.tolist() == [False, False, False, False, False, False, True]
     assert su.coefficients.shape == (6, 4)
 
+    # R's summary.lm $df is c(rank, residual_df, NCOL(qr)) = (6, 18, 7) here:
+    # rank (6, incl. intercept) — NOT df_model (5); and the *total* column
+    # count (7, counting aliased tree6) — NOT the kept count (6).
+    assert su.df == (6, 18, 7)
+
 
 # ---------------------------------------------------------------------------
 # Track D — contrasts= / na.action= / subset-as-expression (R 4.6.0 oracles)
@@ -761,6 +770,49 @@ def test_lm_residuals_types_match_R():
     np.testing.assert_allclose(resid(mu, "pearson"), resid(mu, "response"))
 
 
+def test_lm_partial_residuals_match_R():
+    """residuals.lm(type='partial'): component-plus-residual matrix, one
+    column per RHS term (r + predict(type='terms')). Returns a 2-D frame
+    like R's named matrix, with the overall constant on ``.constant``."""
+    from hea.R import resid
+
+    df = pl.DataFrame({
+        "y": [2, 4, 3, 6, 5, 8, 7, 9],
+        "x1": [1, 2, 3, 4, 5, 6, 7, 8],
+        "x2": [2, 1, 4, 3, 6, 5, 8, 7],
+    }).with_columns(pl.all().cast(pl.Float64))
+    m = lm("y ~ x1 + x2", df)
+    pr = resid(m, "partial")
+    assert list(pr.columns) == ["x1", "x2"]
+    np.testing.assert_allclose(
+        pr["x1"].to_numpy(),
+        [-5.5625, -4.3875, -2.9125, -0.7375, 0.7375, 2.9125, 4.3875, 5.5625],
+        rtol=1e-6,
+    )
+    np.testing.assert_allclose(
+        pr["x2"].to_numpy(),
+        [2.3625, 2.6875, 0.0125, 1.3375, -1.3375, -0.0125, -2.6875, -2.3625],
+        rtol=1e-6,
+    )
+    np.testing.assert_allclose(pr.constant, 5.5, rtol=1e-9)
+    # identity: partial[:, j] == raw residual + predict(type='terms')[:, j]
+    tt = m.predict(type="terms")
+    raw = resid(m, "response")
+    np.testing.assert_allclose(
+        pr["x1"].to_numpy(), raw + tt["x1"].to_numpy(), rtol=1e-9
+    )
+
+    # na.action='exclude': partial rows are NA exactly where resid() is NA
+    aq = load_dataset("R", "airquality")
+    me = lm("Ozone ~ Solar.R + Wind + Temp", aq, na_action="exclude")
+    pr_e = resid(me, "partial")
+    assert pr_e.height == 153
+    nan_rows = np.isnan(resid(me))
+    np.testing.assert_array_equal(
+        np.isnan(pr_e["Solar.R"].to_numpy()), nan_rows
+    )
+
+
 def test_lm_weights_generic():
     from hea.R import weights
     mt = load_dataset("R", "mtcars")
@@ -770,3 +822,41 @@ def test_lm_weights_generic():
         [0.38167939, 0.34782609, 0.43103448], rtol=1e-5,
     )
     assert weights(lm("mpg ~ wt", mt)) is None   # R: NULL when unweighted
+
+
+def test_lm_offset_argument_matches_R():
+    """R's ``lm(y ~ x, offset=z)`` — the offset vector is subtracted from y
+    before fitting and added back into ŷ. Carried through the same subset +
+    na.omit row-drops as weights, and *summed* with any in-formula offset()."""
+    from hea.R import fitted
+
+    df = pl.DataFrame({
+        "y": [2, 4, 3, 6, 5, 8, 7, 9],
+        "x1": [1, 2, 3, 4, 5, 6, 7, 8],
+        "x2": [2, 1, 4, 3, 6, 5, 8, 7],
+    }).with_columns(pl.all().cast(pl.Float64))
+
+    m = lm("y ~ x1", df, offset=df["x2"])
+    np.testing.assert_allclose(
+        m.bhat.row(0), [0.89285714, 0.02380952], rtol=1e-6
+    )
+    # offset flows into ŷ (fitted = Xβ̂ + offset)
+    np.testing.assert_allclose(
+        fitted(m)[:4], [2.916667, 1.940476, 4.964286, 3.988095], rtol=1e-5
+    )
+    np.testing.assert_allclose(m.sigma, 2.080713, rtol=1e-5)
+    assert m.df_residuals == 6
+
+    # offset= AND in-formula offset() sum (R: coef = 0.4642857, -0.8809524)
+    m2 = lm("y ~ x1 + offset(x2)", df, offset=df["x2"])
+    np.testing.assert_allclose(
+        m2.bhat.row(0), [0.4642857, -0.8809524], rtol=1e-6
+    )
+
+    # offset is filtered in lockstep with subset= (R: coef = -0.266667, 0.2)
+    m3 = lm("y ~ x1", df, offset=df["x2"], subset=(df["x1"] > 2).to_numpy())
+    np.testing.assert_allclose(m3.bhat.row(0), [-0.266667, 0.2], rtol=1e-5)
+
+    # length mismatch against the input frame → error
+    with pytest.raises(ValueError, match="Length of offset"):
+        lm("y ~ x1", df, offset=np.ones(df.height + 1))

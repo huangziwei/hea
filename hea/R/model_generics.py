@@ -131,7 +131,10 @@ def resid(model, type=None):
     ``"response"}``. For ``lm`` (matching ``residuals.lm``):
     ``"response"`` / ``"working"`` are the raw residuals and
     ``"pearson"`` / ``"deviance"`` are the weighted residuals ``√wᵢ·rᵢ``
-    (equal to raw when unweighted). ``gmm`` has response residuals only.
+    (equal to raw when unweighted). ``"partial"`` returns the
+    component-plus-residual *matrix* (one column per RHS term,
+    ``r + predict(type="terms")``) as a 2-D frame — see
+    :func:`_lm_partial_residuals`. ``gmm`` has response residuals only.
     """
     if hasattr(model, "residuals_of"):
         return model.residuals_of(type or "deviance")
@@ -152,9 +155,14 @@ def resid(model, type=None):
     elif is_lm and type in ("pearson", "deviance"):
         # residuals.lm: weighted residuals √wᵢ·rᵢ (== raw when unweighted)
         arr = raw * np.sqrt(model._w)
+    elif is_lm and type == "partial":
+        # residuals.lm(type="partial"): component-plus-residual, one column
+        # per RHS term. Returns a 2-D frame (n × nterms) like R's matrix —
+        # not a 1-D vector — so return early, padding handled inside.
+        return _lm_partial_residuals(model, raw)
     else:
-        allowed = ("'response' / None, 'working', 'pearson', 'deviance'"
-                   if is_lm else "'response' / None")
+        allowed = ("'response' / None, 'working', 'pearson', 'deviance', "
+                   "'partial'" if is_lm else "'response' / None")
         raise ValueError(
             f"resid(): type={type!r} not supported for "
             f"{model.__class__.__name__} (only {allowed})"
@@ -169,6 +177,33 @@ def resid(model, type=None):
 def residuals(model, type=None):
     """R alias for :func:`resid`."""
     return resid(model, type)
+
+
+def _lm_partial_residuals(model, raw):
+    """R: ``residuals.lm(type="partial")`` — component-plus-residual matrix.
+
+    For each RHS term ``j`` the partial residual is the raw residual plus
+    that term's centered contribution, ``r + predict(type="terms")[, j]``
+    (R's CR-plot input). ``model._predict_terms()`` already returns the
+    centered per-term contributions (and the overall ``constant``), so this
+    just adds ``raw`` to each column. Returns a ``hea.DataFrame`` with one
+    column per term label and ``.constant`` carried through — mirroring R's
+    named matrix with its ``"constant"`` attribute.
+
+    For ``na.action="exclude"`` each column is padded back to the
+    model-frame length with NA (R applies ``naresid`` then adds the already
+    ``napredict``-padded terms).
+    """
+    terms = model._predict_terms()  # centered per-term contributions
+    pad = getattr(model, "_na_pad", None)
+    cols = {}
+    for c in terms.columns:
+        partial = raw + terms[c].to_numpy().astype(float)
+        cols[c] = pad(partial) if pad is not None else partial
+    from ..tidy import DataFrame as _DF  # local: avoid import cycle
+    out = _DF(cols)
+    out.constant = getattr(terms, "constant", 0.0)
+    return out
 
 
 def fitted(model):
@@ -300,8 +335,15 @@ def deviance(model):
 
 
 def nobs(model):
-    """R: ``nobs()`` — number of observations used to fit."""
-    return int(model.n)
+    """R: ``nobs()`` — number of observations used to fit.
+
+    For a weighted ``lm``, R's ``nobs.lm`` counts only non-zero-weight rows
+    (``sum(w != 0)``) — ``model._n_eff`` already holds that count (and equals
+    ``n`` when unweighted or all weights are positive). Models without an
+    ``_n_eff`` attribute fall back to the full row count ``n``.
+    """
+    n_eff = getattr(model, "_n_eff", None)
+    return int(n_eff if n_eff is not None else model.n)
 
 
 def weights(model):
