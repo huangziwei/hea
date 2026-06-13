@@ -72,11 +72,12 @@ def rnorm(n, mean=0, sd=1):
     """
     import polars as pl
     if isinstance(n, pl.Expr):
-        # Lazy per-row generation inside a tibble — stays on numpy global
-        # (reproducible under set_seed, not R-bit-exact; polars row order
-        # wouldn't match R's stream order anyway).
+        # Lazy per-row generation inside a tibble — draws from R's stream in
+        # row order (reproducible and R-exact per draw; the in-frame generation
+        # order is not something R itself defines).
+        rng = _r_rng()
         return pl.int_range(0, n).map_elements(
-            lambda _: _sps.norm.rvs(loc=mean, scale=sd),
+            lambda _: mean + sd * rng.norm_rand(),
             return_dtype=pl.Float64,
         )
     return _r_rng().rnorm(int(n), mean=mean, sd=sd)
@@ -106,11 +107,18 @@ def qt(p, df, ncp=0, lower_tail=True):
 
 
 def rt(n, df, ncp=0):
-    """R: ``rt(n, df, ncp)``. scipy-backed (numpy global) — reproducible under
-    ``set_seed`` but **not R-bit-exact** (R's ``rt`` sampler isn't ported)."""
-    if ncp == 0:
-        return _sps.t.rvs(df=df, size=int(n))
-    return _sps.nct.rvs(df=df, nc=ncp, size=int(n))
+    """R: ``rt(n, df, ncp=0)`` on R's MT stream (bit-exact). Central: per-element
+    ``norm_rand()/sqrt(rchisq(df)/df)``. Noncentral: R's block form
+    ``rnorm(n, ncp)/sqrt(rchisq(n, df)/df)``."""
+    rng = _r_rng()
+    nn = int(n)
+    if np.all(np.asarray(ncp) == 0):
+        dfv = _recycle(df, nn)
+        return np.array([rng.rt(float(dfv[i])) for i in range(nn)])
+    num = rng.rnorm(nn, mean=_recycle(ncp, nn))
+    dfv = _recycle(df, nn)
+    den = np.array([rng.rchisq(float(dfv[i])) for i in range(nn)])
+    return num / np.sqrt(den / dfv)
 
 
 # F  (df() PDF intentionally omitted — clashes with `df` variable name)
@@ -131,11 +139,20 @@ def qf(p, df1, df2, ncp=0, lower_tail=True):
 
 
 def rf(n, df1, df2, ncp=0):
-    """R: ``rf(n, df1, df2, ncp)``. scipy-backed (numpy global) — reproducible
-    under ``set_seed`` but **not R-bit-exact** (``rf`` sampler isn't ported)."""
-    if ncp == 0:
-        return _sps.f.rvs(df1, df2, size=int(n))
-    return _sps.ncf.rvs(df1, df2, nc=ncp, size=int(n))
+    """R: ``rf(n, df1, df2, ncp=0)`` on R's MT stream (bit-exact). Central:
+    per-element. Noncentral: R's block form
+    ``(rchisq(n, df1, ncp)/df1)/(rchisq(n, df2)/df2)``."""
+    rng = _r_rng()
+    nn = int(n)
+    d1 = _recycle(df1, nn)
+    d2 = _recycle(df2, nn)
+    if np.all(np.asarray(ncp) == 0):
+        return np.array([rng.rf(float(d1[i]), float(d2[i])) for i in range(nn)])
+    ncpv = _recycle(ncp, nn)
+    num = np.array([rng.rchisq(float(d1[i]), float(ncpv[i]))
+                    for i in range(nn)]) / d1
+    den = np.array([rng.rchisq(float(d2[i])) for i in range(nn)]) / d2
+    return num / den
 
 
 # chi-squared
@@ -162,12 +179,14 @@ def qchisq(p, df, ncp=0, lower_tail=True):
 
 
 def rchisq(n, df, ncp=0):
-    """R: ``rchisq(n, df, ncp)``. scipy-backed (numpy global) — reproducible
-    under ``set_seed`` but **not R-bit-exact** (``rchisq`` sampler isn't ported;
-    likely expressible as ``rgamma(df/2, scale=2)`` — unverified)."""
-    if ncp == 0:
-        return _sps.chi2.rvs(df=df, size=int(n))
-    return _sps.ncx2.rvs(df=df, nc=ncp, size=int(n))
+    """R: ``rchisq(n, df, ncp=0)`` — per-element ``rnchisq`` on R's MT stream
+    (bit-exact)."""
+    rng = _r_rng()
+    nn = int(n)
+    dfv = _recycle(df, nn)
+    ncpv = _recycle(ncp, nn)
+    return np.array([rng.rchisq(float(dfv[i]), float(ncpv[i]))
+                     for i in range(nn)])
 
 
 # binomial
@@ -318,27 +337,26 @@ def qbeta(p, shape1, shape2, lower_tail=True):
 
 
 def rbeta(n, shape1, shape2):
-    """R: ``rbeta(n, shape1, shape2)``. scipy-backed (numpy global) —
-    reproducible under ``set_seed`` but **not R-bit-exact** (R's ``rbeta``
-    uses Cheng's BB/BC algorithm, not ported)."""
-    return _sps.beta.rvs(a=shape1, b=shape2, size=int(n))
+    """R: ``rbeta(n, shape1, shape2)`` — Cheng's BB/BC algorithm on R's MT
+    stream (bit-exact)."""
+    rng = _r_rng()
+    nn = int(n)
+    s1 = _recycle(shape1, nn)
+    s2 = _recycle(shape2, nn)
+    return np.array([rng.rbeta(float(s1[i]), float(s2[i])) for i in range(nn)])
 
 
 def set_seed(seed):
     """R: ``set.seed()`` — seed the process-global R Mersenne-Twister stream.
 
-    ``runif`` / ``rnorm`` / ``sample`` (unweighted) and the ported families
-    ``rpois`` / ``rgamma`` / ``rbinom`` / ``rexp`` then draw from R's stream, so
-    ``set_seed(k); runif(n)`` is **bit-exact** to R's ``set.seed(k); runif(n)``.
-
-    Also seeds numpy's global RNG so the not-yet-ported families
-    (``rt`` / ``rbeta`` / ``rchisq`` / ``rf`` and weighted ``sample(prob=)``)
-    stay reproducible under ``set_seed`` — though *not* R-bit-exact. For the
-    low-level stream object see :class:`hea.R.rng.RMersenneTwister`.
+    Every ``hea.R`` random draw (``runif`` / ``rnorm`` / ``sample`` / ``rpois`` /
+    ``rgamma`` / ``rbinom`` / ``rexp`` / ``rchisq`` / ``rt`` / ``rf`` / ``rbeta``)
+    routes through this one stream, so ``set_seed(k); <draw>`` is **bit-exact** to
+    R's ``set.seed(k); <draw>``. For the low-level stream object see
+    :class:`hea.R.rng.RMersenneTwister`.
     """
     global _R_RNG
     _R_RNG = RMersenneTwister(int(seed))
-    np.random.seed(int(seed))
 
 
 def sample(x, size=None, replace=False, prob=None):
@@ -371,10 +389,8 @@ def sample(x, size=None, replace=False, prob=None):
     if size is None:
         size = n
     if prob is not None:
-        # Weighted draw — R's algorithm isn't ported; numpy fallback
-        # (reproducible under set_seed, not R-bit-exact).
-        idx = np.random.choice(n, size=int(size), replace=replace,
-                               p=np.asarray(prob, dtype=float))
+        idx = _r_rng().sample_prob(np.asarray(prob, dtype=float),
+                                   int(size), replace=replace)
     else:
         idx = _r_rng().sample_int(n, int(size), replace=replace)
     if names is not None:

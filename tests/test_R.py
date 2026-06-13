@@ -819,6 +819,59 @@ def test_rmersenne_family_samplers_match_r():
         [4, 5, 6, 0, 8, 2, 5, 13]
 
 
+def test_rmersenne_composed_families_match_r():
+    """``RMersenneTwister``'s composed continuous families (rchisq/rt/rf central,
+    Cheng's rbeta BB+BC) and weighted ``sample_prob`` (ProbSample[No]Replace +
+    Walker alias) are bit-exact vs R's ``set.seed(); r*()`` / ``sample(prob=)``.
+    References from R 4.6.0 (Rejection sample.kind)."""
+    from hea.R.rng import RMersenneTwister as MT
+
+    def f(seed, fn, k):
+        r = MT(seed)
+        return [fn(r) for _ in range(k)]
+
+    np.testing.assert_allclose(f(1, lambda r: r.rchisq(3), 8),
+        [0.94331456701213001, 5.5437815656796143, 5.3543968318754569,
+         2.9152466284968503, 5.0531907965078293, 3.7492110953605073,
+         3.3173247857629455, 1.4358542591922681], rtol=1e-9)
+    np.testing.assert_allclose(f(1, lambda r: r.rchisq(3, 2.5), 8),
+        [1.4007473814073526, 5.3543968318754569, 4.5570610095050101,
+         5.6340352822938744, 3.092611107839025, 1.4629708539445847,
+         5.7511096054004343, 8.7129370516950448], rtol=1e-9)
+    np.testing.assert_allclose(f(1, lambda r: r.rt(4), 8),
+        [-0.67291659996486219, -0.5843383715604018, 0.57211571515607695,
+         -0.34111699754345642, -0.21805345233165202, 0.60311428389395705,
+         -0.41526835800270151, -0.013495013427469081], rtol=1e-9)
+    np.testing.assert_allclose(f(1, lambda r: r.rf(4, 7), 8),
+        [0.25307567624745586, 1.6113499786337722, 1.5400491076567895,
+         1.6052631863861921, 0.58985814242435342, 0.69212578066138286,
+         0.23118802715891759, 0.84371345838504663], rtol=1e-9)
+    # rbeta BB (min > 1), with the aa/bb swap (rbeta(a,b)+rbeta(b,a)==1).
+    np.testing.assert_allclose(f(2, lambda r: r.rbeta(2, 3), 6),
+        [0.20153661209123486, 0.44718349735790824, 0.16045907961851755,
+         0.3800521727916239, 0.4336392373583321, 0.58685628551895686], rtol=1e-9)
+    np.testing.assert_allclose(f(2, lambda r: r.rbeta(3, 2), 6),
+        [0.79846338790876514, 0.5528165026420917, 0.83954092038148243,
+         0.61994782720837605, 0.56636076264166801, 0.4131437144810432], rtol=1e-9)
+    # rbeta BC (min <= 1), incl. the a == 1 edge.
+    np.testing.assert_allclose(f(3, lambda r: r.rbeta(0.5, 0.8), 6),
+        [0.61473057792667174, 0.21442516685532181, 0.96858430275314145,
+         0.25050089115849417, 0.36212582276500171, 0.32241222305695116], rtol=1e-9)
+    np.testing.assert_allclose(f(4, lambda r: r.rbeta(1, 3), 6),
+        [0.19073474794599599, 0.44489425584764741, 0.070961268480035325,
+         0.11254197198550225, 0.017583976693441462, 0.097764348433268394], rtol=1e-9)
+    # weighted sample: ProbSampleReplace, ProbSampleNoReplace, and the Walker
+    # alias path (n=250, >200 sizeable weights → R_unif_index + unif_rand).
+    p = np.array([0.30, 0.11, 0.24, 0.05, 0.19, 0.07])
+    assert [int(x) + 1 for x in MT(5).sample_prob(p, 10, replace=True)] == \
+        [1, 5, 6, 1, 1, 5, 3, 2, 4, 1]
+    assert [int(x) + 1 for x in MT(6).sample_prob(p, 4, replace=False)] == \
+        [5, 4, 1, 3]
+    assert [int(x) + 1 for x in
+            MT(9).sample_prob(np.arange(1, 251, dtype=float), 8, replace=True)] == \
+        [187, 248, 152, 249, 227, 30, 232, 232]
+
+
 def test_public_r_surface_routes_through_mersenne_twister():
     """``set_seed`` + ``runif``/``rnorm``/``sample``/``rpois``/``rgamma``/
     ``rbinom``/``rexp`` now draw from R's bit-exact MT stream (subsystem A),
@@ -826,7 +879,8 @@ def test_public_r_surface_routes_through_mersenne_twister():
     ``set.seed(1)`` reference values; (2) every routed function reproduces a
     fresh ``RMersenneTwister(seed)`` draw, and all share ONE advancing stream
     like R's global RNG."""
-    from hea.R import runif, sample, rpois, rgamma, rbinom, rexp
+    from hea.R import (runif, sample, rpois, rgamma, rbinom, rexp,
+                       rchisq, rt, rf, rbeta)
     from hea.R.rng import RMersenneTwister as MT
 
     # (1) R parity — set.seed(1); runif(5) / rnorm(5) (R 4.x reference values).
@@ -874,6 +928,39 @@ def test_public_r_surface_routes_through_mersenne_twister():
     r = MT(99)
     np.testing.assert_array_equal(u, r.unif_rand(2))
     np.testing.assert_array_equal(p, np.array([r.rpois(4.0) for _ in range(3)]))
+
+    # (4) the composed/weighted families also route through the stream — R parity
+    # for rt/rbeta/walker-sample, and routing-equivalence for rchisq/rf.
+    def mt_draws(seed, fn, k):
+        r = MT(seed)
+        return np.array([fn(r) for _ in range(k)])
+
+    set_seed(1)
+    np.testing.assert_allclose(rt(8, 4),
+        [-0.67291659996486219, -0.5843383715604018, 0.57211571515607695,
+         -0.34111699754345642, -0.21805345233165202, 0.60311428389395705,
+         -0.41526835800270151, -0.013495013427469081], rtol=1e-9)
+    set_seed(2)
+    np.testing.assert_allclose(rbeta(6, 2, 3),
+        [0.20153661209123486, 0.44718349735790824, 0.16045907961851755,
+         0.3800521727916239, 0.4336392373583321, 0.58685628551895686], rtol=1e-9)
+    set_seed(9)
+    np.testing.assert_array_equal(
+        sample(250, 8, replace=True, prob=list(range(1, 251))),
+        [187, 248, 152, 249, 227, 30, 232, 232])
+    set_seed(7)
+    np.testing.assert_array_equal(rchisq(5, 3),
+                                  mt_draws(7, lambda r: r.rchisq(3), 5))
+    set_seed(8)
+    np.testing.assert_array_equal(rf(5, 4, 7),
+                                  mt_draws(8, lambda r: r.rf(4, 7), 5))
+
+    # (5) set_seed no longer touches numpy's global RNG — fully decoupled.
+    set_seed(123)
+    a = np.random.random()
+    set_seed(123)
+    b = np.random.random()
+    assert a != b
 
 
 # ---------------------------------------------------------------------------

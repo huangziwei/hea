@@ -52,6 +52,67 @@ _INV_2P32 = 2.3283064365386963e-10
 # fixup() boundary epsilon (RNG.c:86) — R's i2_32m1, a distinct constant
 # (1/(2^32-1)-ish); only reachable when a tempered word is exactly 0.
 _I2_32M1 = 2.328306437080797e-10
+# rbeta (rbeta.c) overflow guard: expmax = DBL_MAX_EXP * M_LN2, and DBL_MAX.
+_EXPMAX = 1024 * 0.6931471805599453
+_DBL_MAX = 1.7976931348623157e308
+
+
+def _beta_vw(AA: float, u1: float, beta: float) -> tuple[float, float]:
+    """Cheng's ``v`` / ``w`` step shared by rbeta's BB and BC branches
+    (rbeta.c ``v_w_from__u1_bet``), with R's overflow guard."""
+    v = beta * math.log(u1 / (1.0 - u1))
+    if v <= _EXPMAX:
+        w = AA * math.exp(v)
+        if not math.isfinite(w):
+            w = _DBL_MAX
+    else:
+        w = _DBL_MAX
+    return v, w
+
+
+def _revsort(a: np.ndarray, ib: np.ndarray) -> None:
+    """R's ``revsort`` (sort.c): heapsort ``a`` into **descending** order,
+    applying the same permutation to ``ib``. In place; reproduces R's exact
+    (non-stable) tie order so weighted ``sample`` is bit-exact."""
+    n = len(a)
+    if n <= 1:
+        return
+    A = [0.0] + list(a)                       # 1-based: A[1..n]
+    B = [0] + [int(x) for x in ib]
+    lo = (n >> 1) + 1
+    ir = n
+    while True:
+        if lo > 1:
+            lo -= 1
+            ra = A[lo]
+            ii = B[lo]
+        else:
+            ra = A[ir]
+            ii = B[ir]
+            A[ir] = A[1]
+            B[ir] = B[1]
+            ir -= 1
+            if ir == 1:
+                A[1] = ra
+                B[1] = ii
+                break
+        i = lo
+        j = lo + lo
+        while j <= ir:
+            if j < ir and A[j] > A[j + 1]:
+                j += 1
+            if ra > A[j]:
+                A[i] = A[j]
+                B[i] = B[j]
+                i = j
+                j += j
+            else:
+                j = ir + 1
+        A[i] = ra
+        B[i] = ii
+    for idx in range(n):
+        a[idx] = A[idx + 1]
+        ib[idx] = B[idx + 1]
 
 
 class RMersenneTwister:
@@ -532,3 +593,183 @@ class RMersenneTwister:
         if mu <= 0.0:
             return 0.0
         return self.rpois(self.rgamma(size, scale=mu / size))
+
+    # ------------------------------------------------------------------
+    # Composed continuous families (R's rchisq/rt/rf built from the already
+    # bit-exact rgamma/rnorm/rpois) and Cheng's rbeta. Central rt/rf are
+    # per-draw scalars; the noncentral *block* ordering lives in
+    # hea.R.distributions, where R applies it at the vector level.
+    # ------------------------------------------------------------------
+
+    def rchisq(self, df: float, ncp: float = 0.0) -> float:
+        """R's ``rchisq(df, ncp=0)`` — central ``rgamma(df/2, 2)``; noncentral
+        ``rnchisq`` = ``rpois(ncp/2)`` → ``rchisq(2·that)`` + ``rgamma(df/2, 2)``
+        (rchisq.c / rnchisq.c)."""
+        if ncp == 0.0:
+            return 0.0 if df == 0.0 else self.rgamma(df / 2.0, scale=2.0)
+        r = self.rpois(ncp / 2.0)
+        out = self.rgamma(r, scale=2.0) if r > 0.0 else 0.0  # rchisq(2r)=rgamma(r,2)
+        if df > 0.0:
+            out += self.rgamma(df / 2.0, scale=2.0)
+        return out
+
+    def rt(self, df: float) -> float:
+        """R's central ``rt(df)`` = ``norm_rand() / sqrt(rchisq(df)/df)`` (rt.c).
+        Noncentral t is block-ordered at the vector level (see distributions)."""
+        if not math.isfinite(df):
+            return self.norm_rand()
+        return self.norm_rand() / math.sqrt(self.rchisq(df) / df)
+
+    def rf(self, df1: float, df2: float) -> float:
+        """R's central ``rf(df1, df2)`` = ``(rchisq(df1)/df1)/(rchisq(df2)/df2)``
+        (rf.c). Noncentral F is block-ordered at the vector level."""
+        v1 = self.rchisq(df1) / df1 if math.isfinite(df1) else 1.0
+        v2 = self.rchisq(df2) / df2 if math.isfinite(df2) else 1.0
+        return v1 / v2
+
+    def rbeta(self, aa: float, bb: float) -> float:
+        """R's ``rbeta(aa, bb)`` — Cheng's BB (min > 1) / BC (min <= 1)
+        algorithm (rbeta.c) on R's uniform stream."""
+        if aa < 0.0 or bb < 0.0:
+            raise ValueError("rbeta: shapes must be >= 0")
+        if aa == 0.0 and bb == 0.0:
+            return 0.0 if self.unif_rand() < 0.5 else 1.0
+        a = aa if aa < bb else bb            # min(aa, bb)
+        b = bb if aa < bb else aa            # max(aa, bb)
+        alpha = a + b
+        if a <= 1.0:                         # --- Algorithm BC ---
+            beta = 1.0 / a
+            delta = 1.0 + b - a
+            k1 = delta * (0.0138889 + 0.0416667 * a) / (b * beta - 0.777778)
+            k2 = 0.25 + (0.5 + 0.25 / delta) * a
+            while True:
+                u1 = self.unif_rand()
+                u2 = self.unif_rand()
+                if u1 < 0.5:
+                    y = u1 * u2
+                    z = u1 * y
+                    if 0.25 * u2 + z - y >= k1:
+                        continue
+                else:
+                    z = u1 * u1 * u2
+                    if z <= 0.25:
+                        v, w = _beta_vw(b, u1, beta)
+                        break
+                    if z >= k2:
+                        continue
+                v, w = _beta_vw(b, u1, beta)
+                if alpha * (math.log(alpha / (a + w)) + v) - 1.3862944 >= math.log(z):
+                    break
+            return a / (a + w) if aa == a else w / (a + w)
+        # --- Algorithm BB ---
+        beta = math.sqrt((alpha - 2.0) / (2.0 * a * b - alpha))
+        gamma = a + 1.0 / beta
+        while True:
+            u1 = self.unif_rand()
+            u2 = self.unif_rand()
+            v, w = _beta_vw(a, u1, beta)
+            z = u1 * u1 * u2
+            r = gamma * v - 1.3862944
+            s = a + r - w
+            if s + 2.609438 >= 5.0 * z:
+                break
+            t = math.log(z)
+            if s > t:
+                break
+            if r + alpha * math.log(alpha / (b + w)) >= t:
+                break
+        return b / (b + w) if aa != a else w / (b + w)
+
+    def sample_prob(self, prob, k: int, replace: bool = False) -> np.ndarray:
+        """R's weighted ``sample(n, k, replace=, prob=)`` as 0-based indices.
+        Replicates ``FixupProb`` + ``revsort`` + ``ProbSample[No]Replace`` and,
+        for replacement when >200 weights are sizeable, the Walker alias method
+        — matching R's algorithm selection (``do_sample``, random.c)."""
+        p = np.asarray(prob, dtype=float).copy()
+        n = p.size
+        if not np.all(np.isfinite(p)):
+            raise ValueError("sample: NA/Inf in prob")
+        if np.any(p < 0.0):
+            raise ValueError("sample: negative prob")
+        npos = int(np.count_nonzero(p > 0.0))
+        if npos == 0 or (not replace and k > npos):
+            raise ValueError("sample: too few positive probabilities")
+        p /= float(p.sum())
+        perm = np.arange(n, dtype=np.int64)
+        if replace:
+            if int(np.count_nonzero(n * p > 0.1)) > 200:
+                return self._walker_sample(p, k)
+            pw = p.copy()
+            pm = perm.copy()
+            _revsort(pw, pm)
+            cs = np.cumsum(pw)
+            out = np.empty(k, dtype=np.int64)
+            nm1 = n - 1
+            for i in range(k):
+                rU = self.unif_rand()
+                j = 0
+                while j < nm1 and rU > cs[j]:
+                    j += 1
+                out[i] = pm[j]
+            return out
+        # ProbSampleNoReplace — revsort once, then shrinking-pool walk.
+        pw = p.copy()
+        pm = perm.copy()
+        _revsort(pw, pm)
+        out = np.empty(k, dtype=np.int64)
+        totalmass = 1.0
+        n1 = n - 1
+        for i in range(k):
+            rT = totalmass * self.unif_rand()
+            mass = 0.0
+            j = 0
+            while j < n1:
+                mass += pw[j]
+                if rT <= mass:
+                    break
+                j += 1
+            out[i] = pm[j]
+            totalmass -= pw[j]
+            for kk in range(j, n1):
+                pw[kk] = pw[kk + 1]
+                pm[kk] = pm[kk + 1]
+            n1 -= 1
+        return out
+
+    def _walker_sample(self, p: np.ndarray, k: int) -> np.ndarray:
+        """Walker alias method (``walker_ProbSampleReplace``, random.c) — R's
+        with-replacement weighted path when >200 weights are sizeable."""
+        n = p.size
+        q = np.empty(n)
+        a = np.zeros(n, dtype=np.int64)
+        HL = np.empty(n, dtype=np.int64)
+        hpos = -1          # H = HL-1; ``*++H`` fills HL[0..] (low, q<1)
+        lpos = n           # L = HL+n; ``*--L`` fills HL[n-1..] (high, q>=1)
+        for i in range(n):
+            q[i] = p[i] * n
+            if q[i] < 1.0:
+                hpos += 1
+                HL[hpos] = i
+            else:
+                lpos -= 1
+                HL[lpos] = i
+        if hpos >= 0 and lpos < n:
+            for kk in range(n - 1):
+                i = int(HL[kk])
+                j = int(HL[lpos])
+                a[i] = j
+                q[j] += q[i] - 1.0
+                if q[j] < 1.0:
+                    lpos += 1
+                if lpos >= n:
+                    break
+        for i in range(n):
+            q[i] += i
+        out = np.empty(k, dtype=np.int64)
+        for i in range(k):
+            # Sample_kind = REJECTION (R's default): index via R_unif_index,
+            # then one more unif_rand for the within-cell test (random.c).
+            kk = int(self.unif_index(n))
+            rU = kk + self.unif_rand()
+            out[i] = kk if rU < q[kk] else int(a[kk])
+        return out
