@@ -67,6 +67,62 @@ def ranef(model):
     )
 
 
+def refitML(model):
+    """R: ``refitML()`` — refit a REML-fitted LMM by ML (lme4's
+    ``refitML.merMod``).
+
+    A model already fitted by ML is returned unchanged — that covers any
+    GLMM (``glmer`` is ML by construction, via the Laplace approximation) and
+    an LMM fit with ``REML=False``. A REML LMM is refit with ``REML=False`` so
+    its likelihood is comparable across models with different fixed effects
+    (the reason ``anova`` / AIC need ML).
+    """
+    from ..models.gmm import gmm
+    if not isinstance(model, gmm):
+        raise TypeError(
+            "refitML(): only mixed models (gmm) have a REML/ML distinction; "
+            f"got {model.__class__.__name__}"
+        )
+    if not model.REML:
+        return model                       # already ML (ML-LMM or any GLMM)
+    return gmm(model.formula, model.data, family=model.family, REML=False)
+
+
+def refit(model, newresp=None):
+    """R: ``refit()`` — refit a mixed model, optionally to a new response
+    (lme4's ``refit.merMod``).
+
+    With ``newresp=None`` the same model is re-fit (a fresh run of the
+    optimizer). With a numeric ``newresp`` of length ``n`` the response column
+    is replaced and the model is refit keeping the same formula, family, REML
+    flag, and random-effect structure — the building block for parametric
+    bootstrap / ``simulate`` (Phases 10–11). The response must be a bare data
+    column (``cbind()`` / transformed LHS isn't supported yet).
+    """
+    from ..models.gmm import gmm
+    if not isinstance(model, gmm):
+        raise TypeError(
+            f"refit(): only mixed models (gmm) are supported; "
+            f"got {model.__class__.__name__}"
+        )
+    data = model.data
+    if newresp is not None:
+        resp = np.asarray(newresp, dtype=float).ravel()
+        if resp.shape != (model.n,):
+            raise ValueError(
+                f"refit(): newresp must have length {model.n}; "
+                f"got {resp.shape}"
+            )
+        lhs = model.formula.split("~", 1)[0].strip()
+        if lhs not in data.columns:
+            raise NotImplementedError(
+                f"refit(newresp=): response {lhs!r} is not a bare data column "
+                f"(cbind() / transformed LHS not supported yet)"
+            )
+        data = data.with_columns(pl.Series(lhs, resp))
+    return gmm(model.formula, data, family=model.family, REML=model.REML)
+
+
 def resid(model, type=None):
     """R: ``resid()`` / ``residuals()`` — residuals as 1D ``ndarray``.
 

@@ -299,6 +299,8 @@ from .model_generics import (
     nobs,
     predict,
     ranef,
+    refit,
+    refitML,
     resid,
     residuals,
     terms,
@@ -414,7 +416,7 @@ __all__ = [
     "shapiro_test", "ks_test", "mcnemar_test", "friedman_test",
     "aov",
     # model generics (lm / glm / gam / bam / gmm)
-    "coef", "coefficients", "fixef", "ranef",
+    "coef", "coefficients", "fixef", "ranef", "refit", "refitML",
     "resid", "residuals", "fitted", "fitted_values",
     "predict", "confint", "vcov",
     "logLik", "deviance", "nobs", "df_residual",

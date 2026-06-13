@@ -586,7 +586,7 @@ _R_EXPR_SKIP = {
     # Result classes — not callable in the vector-shape sense.
     "HTest", "AnovaTable", "Terms",
     # Model generics — operate on fitted models, not columns.
-    "coef", "coefficients", "fixef", "ranef",
+    "coef", "coefficients", "fixef", "ranef", "refit", "refitML",
     "resid", "residuals", "fitted", "fitted_values",
     "predict", "confint", "vcov", "logLik", "deviance",
     "nobs", "df_residual", "formula", "model_matrix", "model_frame",

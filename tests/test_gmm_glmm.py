@@ -2731,6 +2731,58 @@ def test_glmer_drop1_no_test_emits_npar_aic_only(cm_frame, capsys):
     assert rows["livch"]["npar"] == 3       # multi-level factor Δnpar
 
 
+def test_gmm_refitML_lmm_refits_by_ml():
+    """refitML(REML LMM) → an ML fit (lme4 refitML.merMod); an already-ML LMM
+    and any GLMM (ML by construction) are returned unchanged."""
+    from hea.models.gmm import gmm
+    from hea.family import Poisson
+    from hea.R import refitML
+
+    rng = np.random.default_rng(2026)
+    n = 120
+    g = np.repeat(np.arange(12), 10)
+    x = rng.normal(size=n)
+    u = rng.normal(scale=0.5, size=12)[g]
+    y = 1.0 + 2.0 * x + u + rng.normal(scale=0.3, size=n)
+    df = pl.DataFrame({"y": y, "x": x, "g": g})
+
+    m_reml = gmm("y ~ x + (1|g)", df)                 # REML=True (default)
+    m_ml = refitML(m_reml)
+    assert m_reml.REML is True and m_ml.REML is False
+    ref = gmm("y ~ x + (1|g)", df, REML=False)
+    np.testing.assert_allclose(m_ml.theta, ref.theta, atol=1e-9)
+    assert m_ml.AIC == pytest.approx(ref.AIC, rel=1e-9)
+    # already-ML LMM and any GLMM are no-ops (same object back).
+    assert refitML(ref) is ref
+    pois = gmm("y ~ x + (1|g)", _synthetic_poisson_grouped(seed=7),
+               family=Poisson())
+    assert pois.REML is False and refitML(pois) is pois
+
+
+def test_gmm_refit_newresp_and_validation():
+    """refit() re-fits; refit(newresp=) swaps the response (idempotent on the
+    original y, different on a perturbed one); bad type / length / non-gmm
+    raise."""
+    from hea.models.gmm import gmm
+    from hea.family import Poisson
+    from hea.models.lm import lm
+    from hea.R import refit
+
+    df = _synthetic_poisson_grouped(seed=2026)
+    m = gmm("y ~ x + (1|g)", df, family=Poisson())
+    y0 = df["y"].to_numpy().astype(float)
+    # refit with the original response reproduces the fit; no-newresp too.
+    np.testing.assert_allclose(refit(m, y0).theta, m.theta, atol=1e-8)
+    np.testing.assert_allclose(refit(m).theta, m.theta, atol=1e-8)
+    # a different response gives a different fit.
+    assert not np.allclose(refit(m, y0 + 2.0).theta, m.theta)
+    # guards
+    with pytest.raises(TypeError):
+        refit(lm("y ~ x", df))
+    with pytest.raises(ValueError, match="length"):
+        refit(m, y0[:-1])
+
+
 def test_deriv12_uses_supplied_fx_to_save_one_eval():
     """``fx`` argument skips the redundant ``fn(x)`` call. Pin: same answer."""
     def py_fn(x):
