@@ -3968,6 +3968,83 @@ def _nm_kwargs_from_opt_ctrl(opt_ctrl) -> dict:
     return out
 
 
+def _do_check(action: object) -> bool:
+    """lme4's ``doCheck`` (modular.R:6-8): a check runs unless its configured
+    level is ``"ignore"`` (or not a string)."""
+    return isinstance(action, str) and action != "ignore"
+
+
+def _emit_check(action: str, msg: str) -> None:
+    """Dispatch a pre-fit check message at its action level — ``stop`` raises,
+    ``warning`` warns, ``message`` prints. ``ignore`` is filtered upstream by
+    :func:`_do_check`."""
+    if action == "stop":
+        raise ValueError(msg)
+    if action == "warning":
+        warnings.warn(msg, stacklevel=3)
+    elif action == "message":
+        print(msg)
+
+
+def _run_prefit_glmm_checks(re: ReTerms, y: np.ndarray, n: int,
+                            ctrl: dict) -> None:
+    """Port of lme4's pre-fit identifiability / response validation, run from
+    ``lFormula``/``glFormula`` (modular.R): ``checkNlevels`` (167-212),
+    ``checkZdims`` (63-85), ``checkZrank`` (88-117), ``checkResponse``
+    (296-307). Each fires at its ``glmerControl(check.*=)`` action level
+    (ignore/message/warning/stop). The X-side checks live elsewhere —
+    ``chkRank.drop.cols`` in :func:`_check_rank_drop_cols`, and ``checkScaleX``
+    with autoscale (8.16).
+    """
+    nlev = {g: len(levs) for g, levs in re.flist_levels.items()}
+
+    # checkNlevels — modular.R:167-212.
+    a = ctrl["check.nlev.gtr.1"]
+    if _do_check(a) and any(v < 2 for v in nlev.values()):
+        _emit_check(a, "grouping factors must have > 1 sampled level")
+    a = ctrl["check.nobs.vs.nlev"]
+    if _do_check(a):
+        bad = [g for g, v in nlev.items() if v >= n]
+        if bad:
+            _emit_check(
+                a, "number of levels of each grouping factor must be < number "
+                f"of observations (problems: {', '.join(bad)})")
+    a = ctrl["check.nlev.gtreq.5"]
+    if _do_check(a) and any(v < 5 for v in nlev.values()):
+        _emit_check(a, "grouping factors with < 5 sampled levels may give "
+                    "unreliable estimates")
+
+    # checkZdims — per-term #random-effects vs #obs (modular.R:63-85).
+    a = ctrl["check.nobs.vs.nRE"]
+    if _do_check(a):
+        Gp = re.Gp
+        for k, key in enumerate(re.cnms):
+            n_re = Gp[k + 1] - Gp[k]
+            if n_re >= n:
+                _emit_check(
+                    a, f"number of observations (={n}) <= number of random "
+                    f"effects (={n_re}) for term ({key}); the random-effects "
+                    "parameters and the residual variance (or scale parameter) "
+                    "are probably unidentifiable")
+
+    # checkZrank — rank(Z) vs #obs; opt-in (default "ignore") (modular.R:88-117).
+    a = ctrl["check.nobs.vs.rankZ"]
+    if _do_check(a):
+        small = a.endswith("Small")
+        if not (small and re.Z.size > 1e6):
+            rank_z = int(np.linalg.matrix_rank(re.Z))
+            if n <= rank_z:
+                act = "warning" if a.startswith("warning") else "stop"
+                _emit_check(
+                    act, f"number of observations (={n}) <= rank(Z) (={rank_z});"
+                    " the random-effects parameters are probably unidentifiable")
+
+    # checkResponse — constant response (modular.R:296-307).
+    a = ctrl["check.response.not.const"]
+    if _do_check(a) and len(np.unique(np.asarray(y))) < 2:
+        _emit_check(a, "Response is constant")
+
+
 def _check_rank_drop_cols(
     X: np.ndarray, col_names: list[str], *,
     tol: float = 1e-7, action: str = "message+drop.cols",
@@ -4244,6 +4321,12 @@ class gmm:
                     f"offset= must have length {n}; got {offset_arr.shape}"
                 )
             off = off + offset_arr
+
+        # 8.15 — pre-fit identifiability / response validation (lme4's
+        # checkNlevels / checkZdims / checkZrank / checkResponse). Runs before
+        # the X-rank drop, mirroring lFormula/glFormula's ordering; each check
+        # fires at its glmerControl(check.*=) action level.
+        _run_prefit_glmm_checks(re, y, n, ctrl)
 
         # 8.15 — rank-deficient column drop (lme4's ``chkRank.drop.cols``).
         # Detect and drop columns at __init__ time so the fit only sees a

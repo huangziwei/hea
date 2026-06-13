@@ -8,6 +8,8 @@ _internal_glmer_wrk_iter, _pwrss_update) against ``lme4::glmer``.
 """
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import polars as pl
 import pytest
@@ -1933,6 +1935,89 @@ def test_glmer_agq_rejects_non_scalar_re():
         gmm("y ~ x + (1|a) + (1|b)", df, family=Binomial(), nAGQ=3)
     with pytest.raises(ValueError, match="single, scalar random-effects term"):
         gmm("y ~ x + (1 + x|a)", df, family=Binomial(), nAGQ=3)
+
+
+# ----------------------------------------------------------------------
+# 8.15 — pre-fit identifiability / response validation (checkNlevels /
+# checkZdims / checkZrank / checkResponse — modular.R lFormula/glFormula).
+# ----------------------------------------------------------------------
+
+
+def _pois_df(n, glevels, *, const_y=False, seed=0):
+    rng = np.random.default_rng(seed)
+    y = np.ones(n) if const_y else (rng.integers(0, 5, n)).astype(float)
+    return pl.DataFrame({
+        "y": y,
+        "x": rng.normal(size=n),
+        "g": np.array([str(i % glevels) for i in range(n)]),
+    })
+
+
+def test_gmm_prefit_single_level_grouping_factor_raises():
+    """check.nlev.gtr.1 (default stop): grouping factor with one level."""
+    from hea.models.gmm import gmm
+
+    df = pl.DataFrame({"y": np.arange(20.0) % 4, "x": np.linspace(0, 1, 20),
+                       "g": ["A"] * 20})
+    with pytest.raises(ValueError, match="> 1 sampled level"):
+        gmm("y ~ x + (1|g)", df, family=Poisson())
+
+
+def test_gmm_prefit_constant_response_raises():
+    """check.response.not.const (default stop): constant response."""
+    from hea.models.gmm import gmm
+
+    df = _pois_df(28, 4, const_y=True)
+    with pytest.raises(ValueError, match="Response is constant"):
+        gmm("y ~ x + (1|g)", df, family=Poisson())
+
+
+def test_gmm_prefit_nlevels_ge_nobs_raises():
+    """check.nobs.vs.nlev (default stop): as many groups as observations."""
+    from hea.models.gmm import gmm
+
+    n = 24
+    df = pl.DataFrame({"y": np.arange(n) % 5.0, "x": np.linspace(0, 1, n),
+                       "g": [str(i) for i in range(n)]})
+    with pytest.raises(ValueError, match="must be < number of observations"):
+        gmm("y ~ x + (1|g)", df, family=Poisson())
+
+
+def test_gmm_prefit_few_levels_warns_only_when_enabled():
+    """check.nlev.gtreq.5 defaults to ignore (silent); opt-in → warning."""
+    from hea.models.gmm import gmm
+
+    df = _pois_df(30, 3)  # 3 < 5 sampled levels
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        gmm("y ~ x + (1|g)", df, family=Poisson())
+    assert not any("5 sampled levels" in str(w.message) for w in rec)
+    with pytest.warns(UserWarning, match="< 5 sampled levels"):
+        gmm("y ~ x + (1|g)", df, family=Poisson(),
+            control={"check.nlev.gtreq.5": "warning"})
+
+
+def test_gmm_prefit_level_check_downgrade_to_ignore():
+    """The stop-by-default level checks are downgradable: a single-level
+    factor with check.nlev.gtr.1='ignore' no longer raises *that* error."""
+    from hea.models.gmm import gmm
+
+    df = pl.DataFrame({"y": np.arange(20.0) % 4, "x": np.linspace(0, 1, 20),
+                       "g": ["A"] * 20})
+    try:
+        gmm("y ~ x + (1|g)", df, family=Poisson(),
+            control={"check.nlev.gtr.1": "ignore",
+                     "check.nobs.vs.nlev": "ignore"})
+    except ValueError as e:
+        assert "sampled level" not in str(e)
+
+
+def test_gmm_prefit_checks_pass_for_well_posed_model():
+    """≥5 well-sampled levels + varying response → no spurious pre-fit error."""
+    from hea.models.gmm import gmm
+
+    m = gmm("y ~ x + (1|g)", _pois_df(40, 8), family=Poisson())
+    assert m.theta.shape == (1,)
 
 
 # ----------------------------------------------------------------------
