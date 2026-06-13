@@ -819,6 +819,45 @@ def _response_names(lhs) -> set[str]:
     return out
 
 
+def _source_var_order(node) -> dict[str, int]:
+    """First-appearance order of atom leaves scanning the RHS left-to-right.
+
+    Mirrors R's ``terms()`` ``variables`` attribute, and must mirror the leaf
+    vs descend decisions of ``_expand_non_additive``: descend through the
+    formula operators (``+ - * : / %in%`` and ``^`` with a literal exponent),
+    treat everything else (``Name``, ``Call``, ``Subscript``, comparison
+    ``BinOp``, ``a^b`` with non-literal ``b``) as an atom leaf. Used to order
+    each interaction term's atoms by *source* appearance — so ``(x1+x2):f2``
+    renders ``x2:f2`` (R), not ``f2:x2``. Keys are ``_deparse`` of each leaf,
+    matching ``Term`` atom keys.
+    """
+    order: dict[str, int] = {}
+
+    def walk(n):
+        if isinstance(n, Paren):
+            walk(n.expr)
+            return
+        if isinstance(n, UnaryOp) and n.op in ("+", "-"):
+            walk(n.operand)
+            return
+        if _is_bar(n):
+            return  # bars never contribute fixed-effect variables
+        if isinstance(n, BinOp):
+            if n.op in ("+", "-", "*", ":", "/", "%in%"):
+                walk(n.left)
+                walk(n.right)
+                return
+            if n.op == "^":
+                if isinstance(n.right, Literal) and n.right.kind == "num":
+                    walk(n.left)        # power expansion: only base vars appear
+                    return
+                # non-literal exponent: whole node is one atom (see expansion)
+        order.setdefault(_deparse(n), len(order))
+
+    walk(node)
+    return order
+
+
 def expand(
     formula: Formula,
     data_columns: Optional[list[str]] = None,
@@ -866,15 +905,13 @@ def expand(
         kept.append(t)
 
     # R renders every term's variables in `variables`-attribute order — the
-    # global first-appearance order across the RHS — not the order written
-    # inside the term. So `a + b:a` → `a:b`, `z + x:z` → `z:x`, `c + a:b:c`
-    # → `c:a:b`. Build that order by scanning the (source-ordered) terms, then
-    # reorder each term's atoms by it before the degree sort. Affects column
-    # labels/order only — the interaction's column set is unchanged.
-    var_order: dict[str, int] = {}
-    for t in kept:
-        for a in t.atoms:
-            var_order.setdefault(_deparse(a), len(var_order))
+    # global first-appearance order scanning the *source* RHS left-to-right —
+    # not the order written inside the term. So `a + b:a` → `a:b`, `z + x:z` →
+    # `z:x`, `(x1+x2):f2` → `x2:f2`. The order MUST come from the source AST
+    # (`_source_var_order`), not from iterating the already-expanded terms: for
+    # `(x1+x2):f2` expansion emits `x1:f2` first, which would wrongly rank `f2`
+    # before `x2`. Affects column labels/order only — the column set is unchanged.
+    var_order = _source_var_order(rhs)
     kept = [
         t if len(t.atoms) <= 1
         else Term(tuple(sorted(t.atoms, key=lambda a: var_order[_deparse(a)])))
@@ -1353,21 +1390,93 @@ def _eval_numeric(node, data: pl.DataFrame) -> np.ndarray:
     raise TypeError(f"cannot numerically evaluate {type(node).__name__}")
 
 
+_COMPARISON_OPS = frozenset({"==", "!=", "<", ">", "<=", ">="})
+
+
+def _is_logical_node(node) -> bool:
+    """True if `node` evaluates to a logical vector — R coerces those to a
+    2-level factor `FALSE < TRUE` in a model frame (true for *computed*
+    logicals too, e.g. `I(x > 0)`, `x > 0`, `!flag`), not a 0/1 numeric.
+    Only the *top-level* op matters: `I((x>0) + (z>0))` is arithmetic → numeric.
+    """
+    while isinstance(node, Paren):
+        node = node.expr
+    if isinstance(node, BinOp) and node.op in _COMPARISON_OPS:
+        return True
+    return isinstance(node, UnaryOp) and node.op == "!"
+
+
+def _apply_factor_levels_labels(blk: "_FactorBlock", call: Call,
+                                s: pl.Series, label: str) -> "_FactorBlock":
+    """Apply R's factor()/ordered() ``levels=`` (recode order) and ``labels=``
+    (rename) kwargs to an already-built factor block.
+
+    ``levels=`` recodes against the given key order (values not in it → NA).
+    ``labels=`` renames the levels (drives column suffixes); R accepts a vector
+    matching the levels, or a single string used as a ``<label><1..k>`` prefix.
+    Neither present → ``blk`` unchanged.
+    """
+    has_levels = "levels" in call.kwargs
+    has_labels = "labels" in call.kwargs
+    if not has_levels and not has_labels:
+        return blk
+    if has_levels:
+        keys = _eval_level_list(call.kwargs["levels"])
+        code_map = {lv: i for i, lv in enumerate(keys)}
+        codes = np.array([code_map.get(v, -1) for v in s.to_list()], dtype=int)
+    else:
+        keys = list(blk.levels)
+        codes = blk.codes
+    if has_labels:
+        labels = [str(v) for v in _eval_level_list(call.kwargs["labels"])]
+        if len(labels) == 1 and len(keys) > 1:        # R: single label → prefix
+            labels = [f"{labels[0]}{i + 1}" for i in range(len(keys))]
+        display = labels
+    else:
+        display = keys
+    return _FactorBlock(codes=codes, levels=display,
+                        ordered=blk.ordered, label=label)
+
+
+def _logical_factor_block(node, data: pl.DataFrame, label: str) -> "_FactorBlock":
+    """Materialize a logical-valued atom as R's `FALSE < TRUE` 2-level factor.
+
+    Routes through the same `pl.Boolean` path `_factor_from_series` uses for a
+    real logical column (levels ``["FALSE","TRUE"]``, treatment coding, FALSE as
+    reference), so naming (`…TRUE`) and no-intercept full coding (`…FALSE`,
+    `…TRUE`) match R for free.
+    """
+    v = _eval_numeric(node, data)        # 0.0 / 1.0 for comparisons and `!`
+    s = pl.Series(np.asarray(v).astype(bool))
+    return _factor_from_series(s, label=label)
+
+
 # Function-call atom evaluator: returns _NumBlock or _FactorBlock.
 def _eval_call(call: Call, data: pl.DataFrame):
     fn = call.fn
     label = _deparse(call)
 
     if fn == "I":
-        # `I(e)` protects e from formula algebra; evaluate as pure numeric.
+        # `I(e)` protects e from formula algebra. A logical-valued e becomes a
+        # 2-level factor (R coerces logical model-frame columns to factors);
+        # otherwise it's a numeric column.
+        if _is_logical_node(call.args[0]):
+            return _logical_factor_block(call.args[0], data, label)
         v = _eval_numeric(call.args[0], data)
         return _NumBlock(values=v.reshape(-1, 1), suffixes=[""], label=label)
 
     if fn in ("log", "exp", "sqrt", "abs", "cos", "sin", "tan", "expm1", "log1p", "log2", "log10"):
         v = _eval_numeric(call.args[0], data)
+        if fn == "log":
+            # R's log(x, base): base is the 2nd positional arg OR base= kwarg
+            # (kwarg wins). log(x) alone is natural log.
+            base_node = call.kwargs.get("base")
+            if base_node is None and len(call.args) >= 2:
+                base_node = call.args[1]
+            out = (np.log(v) if base_node is None
+                   else np.log(v) / np.log(_eval_numeric(base_node, data)))
+            return _NumBlock(values=out.reshape(-1, 1), suffixes=[""], label=label)
         f = {
-            "log": lambda x: np.log(x) if "base" not in call.kwargs
-                            else np.log(x) / np.log(_eval_numeric(call.kwargs["base"], data)),
             "exp": np.exp, "sqrt": np.sqrt, "abs": np.abs,
             "cos": np.cos, "sin": np.sin, "tan": np.tan,
             "expm1": np.expm1, "log1p": np.log1p,
@@ -1395,10 +1504,15 @@ def _eval_call(call: Call, data: pl.DataFrame):
             center_val = out.mean()
             out = out - center_val
         if s:
-            sd = out.std(ddof=1)
-            if sd != 0:
-                scale_val = sd
-                out = out / sd
+            # R's scale() divides by the root-mean-square of the
+            # (already-centered-if-requested) column: sqrt(sum(v^2)/max(1,n-1)).
+            # With center=TRUE this equals the sd; with center=FALSE it's the
+            # RMS about zero, NOT the sd about the mean (the divergence fixed).
+            n = out.shape[0]
+            rms = float(np.sqrt(np.sum(out ** 2) / max(1, n - 1)))
+            if rms != 0:
+                scale_val = rms
+                out = out / rms
         if store is not None:                           # capture (R's scaled:center/scale)
             store[label] = {"center": center_val, "scale": scale_val}
         return _NumBlock(values=out.reshape(-1, 1), suffixes=[""], label=label)
@@ -1415,30 +1529,14 @@ def _eval_call(call: Call, data: pl.DataFrame):
             ok = call.kwargs["ordered"]
             ordered = isinstance(ok, Literal) and ok.value is True
         blk = _factor_from_series(s, label=label, ordered_hint=ordered or (fn == "ordered"))
-        if "levels" in call.kwargs:
-            lvl_node = call.kwargs["levels"]
-            lvls = _eval_level_list(lvl_node)
-            # Recode to the explicit level order.
-            code_map = {lv: i for i, lv in enumerate(lvls)}
-            new_codes = np.array(
-                [code_map.get(v, -1) for v in s.to_list()], dtype=int
-            )
-            blk = _FactorBlock(codes=new_codes, levels=lvls, ordered=blk.ordered, label=label)
-        return blk
+        return _apply_factor_levels_labels(blk, call, s, label)
 
     if fn == "ordered":
         # Same as factor() but ordered=TRUE, and default contrast becomes poly.
         src = call.args[0]
         s = _series(data, src.ident) if isinstance(src, Name) else pl.Series(_eval_numeric(src, data))
         blk = _factor_from_series(s, label=label, ordered_hint=True)
-        if "levels" in call.kwargs:
-            lvls = _eval_level_list(call.kwargs["levels"])
-            code_map = {lv: i for i, lv in enumerate(lvls)}
-            new_codes = np.array(
-                [code_map.get(v, -1) for v in s.to_list()], dtype=int
-            )
-            blk = _FactorBlock(codes=new_codes, levels=lvls, ordered=True, label=label)
-        return blk
+        return _apply_factor_levels_labels(blk, call, s, label)
 
     if fn == "dummy":
         # lme4's dummy(f, level) → 0/1 indicator for `f == level`.
@@ -1759,18 +1857,17 @@ def _bs_basis(x, degree, boundary, interior_knots, df, intercept):
     ])
     n_basis = len(Aknots) - ord
     out = np.zeros((len(x), n_basis))
-    # Evaluate each basis function. scipy's BSpline returns NaN outside [t[k], t[n]]
-    # but we want the right endpoint included, so clamp.
-    xe = np.clip(x, boundary[0], boundary[1])
+    # R's bs() extrapolates the boundary polynomial piece for x beyond
+    # Boundary.knots (predict.bs — it warns the basis is ill-conditioned there).
+    # scipy's extrapolate=True reproduces that polynomial extrapolation exactly,
+    # so evaluate without clamping: out-of-range predict rows then match R
+    # instead of collapsing to the (wrong) clamped boundary value.
+    x = np.asarray(x, dtype=float)
     for i in range(n_basis):
         c = np.zeros(n_basis)
         c[i] = 1.0
-        spl = _BSpline(Aknots, c, degree, extrapolate=False)
-        y = spl(xe)
-        # scipy gives 0 (not NaN) for points outside the half-open interval at
-        # the right boundary for all but the last basis. Force the last basis
-        # to 1 at the right endpoint (R's behavior).
-        out[:, i] = np.nan_to_num(y, nan=0.0)
+        spl = _BSpline(Aknots, c, degree, extrapolate=True)
+        out[:, i] = np.nan_to_num(spl(x), nan=0.0)
     # At exact right boundary, scipy's half-open interval gives 0 for all
     # basis functions; R gives 1 for the last. Patch points == boundary[1].
     right_mask = x == boundary[1]
@@ -1992,6 +2089,10 @@ def _eval_atom(node, data: pl.DataFrame, cache: dict | None = None):
             return blk
         raise TypeError("`$` only supported as `df$col`")
     if isinstance(node, (UnaryOp, BinOp, Subscript)):
+        # A bare logical-valued expression (`x > 0`, `!flag`) is a 2-level
+        # factor in R, same as `I(x > 0)`.
+        if _is_logical_node(node):
+            return _logical_factor_block(node, data, _deparse(node))
         v = _eval_numeric(node, data)
         return _NumBlock(values=v.reshape(-1, 1), suffixes=[""], label=_deparse(node))
     raise TypeError(f"cannot evaluate atom {type(node).__name__}")
