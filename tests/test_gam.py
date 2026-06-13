@@ -5543,12 +5543,20 @@ def test_twlss_weighted_residuals_match_mgcv():
         np.asarray(mu.residuals)[:3],
         [1.2353023924, -1.2775862268, -2.0311914008], rtol=0,
         atol=1e-4)
-    # the pw=2 rows scale by √2 exactly; pw=1 rows are untouched
-    np.testing.assert_allclose(
-        np.asarray(mw.residuals)[1::2],
-        np.asarray(mu.residuals)[1::2] * np.sqrt(2.0), rtol=1e-12)
-    _assert_fp_equiv(np.asarray(mw.residuals)[::2],
-                     np.asarray(mu.residuals)[::2])
+    # √w scaling of the deviance residual √(2(yθ−κ)w/φ) is a per-row
+    # property — verify it on ONE fitted object (μ/θ/φ identical) so the
+    # scaling is exact to ~1 ulp and BLAS-independent. Comparing the two
+    # SEPARATE fits mw/mu can't: their coefs are only BLAS-equal (≤3e-14,
+    # assert_fp_equiv's floor) and yθ−κ cancels catastrophically, so at
+    # the near-zero-residual rows that drift amplifies ~5000× (~1e-9 on
+    # x86_64 Accelerate / OpenBLAS) — far past any 1e-12 cross-fit gate.
+    # The end-to-end √2 wiring stays pinned above: mw.residuals[1] =
+    # −1.8068 = mu.residuals[1]·√2 (a pw=2 row), pw=1 rows 0/2 identical.
+    yv = np.asarray(df["y"], dtype=float)
+    fit = np.asarray(mu.fitted, dtype=float)
+    r_un = twlss().residuals(yv, fit, type="deviance")
+    r_wt = twlss().residuals(yv, fit, type="deviance", prior_weights=pw)
+    np.testing.assert_allclose(r_wt, r_un * np.sqrt(pw), rtol=1e-12)
 
 
 def test_shash_through_gam_matches_mgcv():
