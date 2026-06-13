@@ -588,7 +588,7 @@ _R_EXPR_SKIP = {
     # Model generics — operate on fitted models, not columns.
     "coef", "coefficients", "fixef", "ranef", "refit", "refitML",
     "resid", "residuals", "fitted", "fitted_values",
-    "predict", "confint", "vcov", "logLik", "deviance",
+    "predict", "confint", "vcov", "logLik", "deviance", "profile", "bootMer",
     "nobs", "weights", "df_residual", "formula", "model_matrix", "model_frame",
     "terms", "update", "AIC", "BIC", "effects", "simulate",
     "variable_names", "case_names", "labels",
@@ -961,6 +961,52 @@ def test_public_r_surface_routes_through_mersenne_twister():
     set_seed(123)
     b = np.random.random()
     assert a != b
+
+
+def test_rgenerator_family_rd_matches_r():
+    """``RGenerator`` (numpy-Generator facade over ``RMersenneTwister``) drives
+    ``family.py``'s ``rd`` hooks bit-exactly vs R's ``set.seed(k); family$rd(...)``
+    — the basis for R-exact ``qq.gam(rep>0)``. References from R 4.6.0 / mgcv.
+    Ported families: gaussian, Gamma, poisson, binomial, gaulss, shash, negbin,
+    scat. inverse.gaussian raises (R's ``rig`` unported → numpy fallback)."""
+    from hea.R.rng import RGenerator
+    from hea import family as F
+
+    mu = np.array([0.5, 1.5, 3.0, 6.0, 10.0])
+    wt = np.array([1, 1, 2, 1, 3.0])
+    mu2 = np.column_stack([[0.5, 1.5, 3, 6, 10], [0.8, 1.2, 1.5, 0.9, 2.0]])
+    mu4 = np.column_stack([[0.5, 1.5, 3, 6, 10], [-0.2, 0.1, 0.3, 0, 0.2],
+                           [0.1, -0.1, 0.2, 0, 0.3], [-0.3, 0, 0.1, 0.2, -0.1]])
+
+    def chk(got, ref):
+        np.testing.assert_allclose(np.asarray(got, float), ref,
+                                   rtol=1e-9, atol=1e-12)
+
+    chk(F.Poisson().rd(RGenerator(1), mu, wt, 1.0), [0, 1, 3, 9, 7])
+    chk(F.Gamma().rd(RGenerator(1), mu, wt, 0.7),
+        [0.148055784081653, 2.78469406100319, 5.37491660494231,
+         5.75866952765452, 16.3564500353662])
+    chk(F.Gaussian().rd(RGenerator(1), mu, wt, 2.0),
+        [-0.385939475352115, 1.75971087975415, 2.16437138758995,
+         8.2560677461767, 10.2690419690764])
+    chk(F.Binomial().rd(RGenerator(1), np.array([.2, .5, .8, .3, .6]),
+                        np.array([1, 2, 3, 1, 4.]), 1.0),
+        [0, 0.5, 0.666666666666667, 1, 0.75])
+    chk(F.gaulss().rd(RGenerator(1), mu2, wt, 1.0),
+        [-0.283067263427916, 1.6530361035184, 2.60608089440757,
+         7.77253422459755, 10.0951207003788])
+    chk(F.shash().rd(RGenerator(1), mu4, wt, 1.0),
+        [0.0675404284664644, 1.02120881215142, 3.52687189173171,
+         7.24982044353249, 9.4132951645412])
+    chk(F.nb(theta=2.0).rd(RGenerator(1), mu, wt, 1.0), [1, 1, 1, 3, 6])
+    chk(F.Scat(theta=(4.0, 1.5)).rd(RGenerator(1), mu, wt, 1.0),
+        [-0.509374899947293, 0.623492442659397, 3.85817357273412,
+         5.48832450368482, 9.67291982150252])
+
+    # inverse.gaussian: R's rig isn't ported, so the facade refuses (the
+    # qq.gam consumer catches this and falls back to numpy).
+    with pytest.raises(NotImplementedError):
+        F.InverseGaussian().rd(RGenerator(1), mu, wt, 0.5)
 
 
 # ---------------------------------------------------------------------------

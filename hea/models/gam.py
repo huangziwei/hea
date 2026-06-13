@@ -9125,10 +9125,14 @@ class gam:
         RNG: the direct (default) path randomizes only through R's
         ``sample(U)`` — run through the bit-exact ``hea.R.rng`` port, so
         ``seed=k`` reproduces R's ``set.seed(k); qq.gam(...)`` exactly.
-        The ``rep>0`` simulation path draws response deviates: R's
-        rpois/rgamma/rbinom rejection samplers are not ported, so it
-        uses a numpy Generator (same seed) and matches R only to
-        Monte-Carlo accuracy.
+        The ``rep>0`` simulation path draws response deviates through the
+        same bit-exact stream (``RGenerator`` over ``RMersenneTwister``), so
+        ``seed=k`` is **bit-exact to R's ``set.seed(k); qq.gam(rep=)``** for
+        every family whose deviates are ported: gaussian, gaulss, shash, scat,
+        Gamma, poisson, binomial, negbin. Two stay Monte-Carlo: tweedie (hea's
+        ``rTweedie`` uses the collapsed gamma-sum, a different stream than R's
+        per-jump algorithm) and inverse.gaussian (R's ``rig`` isn't ported, so
+        it falls back to numpy).
         """
         D = np.asarray(self.residuals_of(type), dtype=float)
         n = D.size
@@ -9146,11 +9150,24 @@ class gam:
         if rep > 0:  # simulate quantiles via the family's rd
             if getattr(fam, "rd", None) is None:
                 return {"D": D, "Dq": None, "lim": None, "dm": None}
-            rng = np.random.default_rng(seed)
-            dm = np.empty((n, rep))
-            for i in range(rep):
-                yr = fam.rd(rng, mu, wt, scale)
-                dm[:, i] = np.sort(self._residuals_for_y(yr, type))
+            from ..R.rng import RGenerator
+
+            def _simulate(rng):
+                out = np.empty((n, rep))
+                for i in range(rep):
+                    yr = fam.rd(rng, mu, wt, scale)
+                    out[:, i] = np.sort(self._residuals_for_y(yr, type))
+                return out
+
+            try:
+                # R-exact: rd hooks draw from the bit-exact MT stream, so
+                # seed=k reproduces R's set.seed(k); qq.gam(rep=) for every
+                # family whose deviates are ported (gaussian/gaulss/shash/scat/
+                # Gamma/poisson/binomial/negbin).
+                dm = _simulate(RGenerator(seed))
+            except NotImplementedError:
+                # inverse.gaussian's rig isn't ported → numpy (Monte-Carlo).
+                dm = _simulate(np.random.default_rng(seed))
             Dq = np.quantile(dm.ravel(), (np.arange(1, n + 1) - 0.5) / n)
             alpha = (1.0 - level) / 2.0
             if alpha > 0.5 or alpha < 0:
@@ -9188,11 +9205,12 @@ class gam:
         line). Families with neither hook fall back to a normal QQ plot
         of the residuals, like mgcv.
 
-        ``seed=k`` on the default direct path reproduces R's
-        ``set.seed(k); qq.gam(...)`` bit-exactly (the only randomness is
-        R's ``sample()``, run through the ``hea.R.rng`` port). The
-        simulation path draws deviates from numpy (R's rejection
-        samplers aren't ported) and matches R to Monte-Carlo accuracy.
+        ``seed=k`` reproduces R's ``set.seed(k); qq.gam(...)`` bit-exactly on
+        both paths for ported families — the direct path's ``sample()`` and the
+        ``rep>0`` path's response deviates both run through the ``hea.R.rng``
+        port (gaussian/gaulss/shash/scat/Gamma/poisson/binomial/negbin).
+        tweedie and inverse.gaussian remain Monte-Carlo (see
+        :meth:`_qq_gam_quantiles`).
         """
         if ax is None:
             _fig, ax = plt.subplots(figsize=figsize)

@@ -39,7 +39,7 @@ import math
 import numpy as np
 from scipy.special import ndtri
 
-__all__ = ["RMersenneTwister"]
+__all__ = ["RMersenneTwister", "RGenerator"]
 
 # Period parameters (RNG.c:646-650).
 _N = 624
@@ -773,3 +773,80 @@ class RMersenneTwister:
             rU = kk + self.unif_rand()
             out[i] = kk if rU < q[kk] else int(a[kk])
         return out
+
+
+def _rgen_resolve(size, *params):
+    """Shared shape logic for :class:`RGenerator`: returns ``(n, scalar, cols)``
+    where each ``col`` is the param broadcast to a length-``n`` 1-D array, and
+    ``scalar`` flags numpy's "all-scalar input, no size → return a scalar"
+    convention so the facade matches ``numpy.random.Generator``'s return type."""
+    arrs = [np.asarray(p, dtype=float) for p in params]
+    if size is None:
+        b = np.broadcast(*arrs)
+        n = b.size
+        scalar = (b.ndim == 0)
+    else:
+        n = int(size)
+        scalar = False
+    cols = [np.ravel(np.broadcast_to(a, (n,))) for a in arrs]
+    return n, scalar, cols
+
+
+class RGenerator:
+    """A numpy-``Generator``-compatible facade over :class:`RMersenneTwister`.
+
+    Code written against numpy's RNG API — notably ``family.py``'s ``rd`` hooks,
+    which call ``rng.normal`` / ``gamma`` / ``poisson`` / ``binomial`` /
+    ``standard_t`` / ``uniform`` — draws from R's bit-exact stream instead when
+    handed one of these. Each method maps to the matching R sampler in R's
+    vectorised (per-element) order and mirrors numpy's scalar-vs-array return,
+    so ``set.seed(k)``-pinned R results (e.g. ``qq.gam(rep>0)``) reproduce
+    bit-for-bit.
+
+    ``wald`` raises: R's ``rig`` (inverse Gaussian) isn't ported, so the
+    ``inverse.gaussian`` family can't be made R-exact this way (it stays on numpy
+    — Monte-Carlo accurate only)."""
+
+    __slots__ = ("mt",)
+
+    def __init__(self, seed_or_mt):
+        self.mt = (seed_or_mt if isinstance(seed_or_mt, RMersenneTwister)
+                   else RMersenneTwister(int(seed_or_mt)))
+
+    def normal(self, loc=0.0, scale=1.0, size=None):
+        n, scalar, (loc, scale) = _rgen_resolve(size, loc, scale)
+        z = np.array([self.mt.norm_rand() for _ in range(n)])
+        out = loc + scale * z
+        return float(out[0]) if scalar else out
+
+    def gamma(self, shape, scale=1.0, size=None):
+        n, scalar, (shape, scale) = _rgen_resolve(size, shape, scale)
+        out = np.array([self.mt.rgamma(float(shape[i]), scale=float(scale[i]))
+                        for i in range(n)])
+        return float(out[0]) if scalar else out
+
+    def poisson(self, lam=1.0, size=None):
+        n, scalar, (lam,) = _rgen_resolve(size, lam)
+        out = np.array([self.mt.rpois(float(lam[i])) for i in range(n)])
+        return float(out[0]) if scalar else out
+
+    def binomial(self, n, p, size=None):
+        m, scalar, (nt, pp) = _rgen_resolve(size, n, p)
+        out = np.array([self.mt.rbinom(int(round(float(nt[i]))), float(pp[i]))
+                        for i in range(m)])
+        return float(out[0]) if scalar else out
+
+    def standard_t(self, df, size=None):
+        n, scalar, (df,) = _rgen_resolve(size, df)
+        out = np.array([self.mt.rt(float(df[i])) for i in range(n)])
+        return float(out[0]) if scalar else out
+
+    def uniform(self, low=0.0, high=1.0, size=None):
+        n, scalar, (low, high) = _rgen_resolve(size, low, high)
+        out = low + (high - low) * self.mt.unif_rand(n)
+        return float(out[0]) if scalar else out
+
+    def wald(self, mean, scale, size=None):
+        raise NotImplementedError(
+            "R's rig (inverse Gaussian) is not ported to RMersenneTwister; "
+            "inverse.gaussian rd cannot be made R-bit-exact yet.")

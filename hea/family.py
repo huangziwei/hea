@@ -4760,9 +4760,13 @@ class nb(Family):
     def rd(self, rng, mu, wt, scale):
         Th = float(self.get_theta(trans=True)[0])
         mu = np.asarray(mu, dtype=float)
-        # NB as Gamma-Poisson mixture: rate ~ Gamma(Θ, μ/Θ).
-        lam = rng.gamma(shape=Th, scale=mu / Th)
-        return rng.poisson(lam).astype(float)
+        # R's rnbinom(n, size=Θ, mu): per-element rpois(rgamma(Θ, μ/Θ)),
+        # interleaved (gamma then poisson per draw, not block) so the draw
+        # order matches R's stream — required for set.seed bit-exactness.
+        out = np.empty(mu.shape[0])
+        for i in range(mu.shape[0]):
+            out[i] = rng.poisson(rng.gamma(shape=Th, scale=mu[i] / Th))
+        return out
 
     def __repr__(self):
         Th = float(self.get_theta(trans=True)[0])
