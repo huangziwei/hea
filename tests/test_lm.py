@@ -594,3 +594,47 @@ def test_lm_predict_terms_factor_matches_R():
     np.testing.assert_allclose(
         pt["se.group"].to_numpy(), [0.16095464, 0.16095464, 0.16095464], rtol=1e-5
     )
+
+
+# ---------------------------------------------------------------------------
+# Rank-deficient parity — aliased coefficients kept as NA rows (R 4.6.0)
+#
+#   m <- lm(area ~ CO2 + tree, data = stomata)   # tree nested in CO2
+#   coef(m) keeps all 7 columns with tree6 = NA; summary prints the NA row.
+# ---------------------------------------------------------------------------
+
+
+def test_rank_deficient_keeps_aliased_as_NA():
+    st = load_dataset("gamair", "stomata")
+    m = lm("area ~ CO2 + tree", st)
+
+    # coef(m) carries every original column, NA for the aliased one (R parity)
+    full = ["(Intercept)", "CO22", "tree2", "tree3", "tree4", "tree5", "tree6"]
+    assert list(m.bhat.columns) == full
+    assert m._aliased_cols == ["tree6"]
+    # the aliased coefficient resolves to NaN (not a KeyError) — the foot-gun fix
+    from hea.R import coef
+    assert np.isnan(coef(m)["tree6"])
+    assert np.isnan(m.se_bhat["tree6"][0])
+    assert np.isnan(m.p_values["tree6"][0])
+
+    # estimable coefficients + df unchanged (fit runs on the kept columns)
+    assert m.df_residuals == 18
+    np.testing.assert_allclose(
+        [m.bhat.row(0)[i] for i in range(6)],
+        [1.6233739, 0.7063876, -0.02473095, -0.46041298, 0.45947681, 0.5737821],
+        rtol=1e-6,
+    )
+    np.testing.assert_allclose(m.sigma, 0.21863203, rtol=1e-5)
+
+    # summary prints the singularities header + the aliased "NA" row
+    s = repr(m.summary())
+    assert "(1 not defined because of singularities)" in s
+    assert "tree6" in s
+    tree6_line = next(ln for ln in s.splitlines() if ln.startswith("tree6"))
+    assert tree6_line.split() == ["tree6", "NA", "NA", "NA", "NA", "NA", "NA"]
+
+    # summary.lm$aliased is the full-width logical; $coefficients stays estimable
+    su = m.summary()
+    assert su.aliased.tolist() == [False, False, False, False, False, False, True]
+    assert su.coefficients.shape == (6, 4)

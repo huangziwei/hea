@@ -286,6 +286,10 @@ class SummaryLm:
         self.coefficients = np.column_stack([bhat, se, t, p])
         self._coef_rownames = list(model.column_names)
         self._coef_colnames = ("Estimate", "Std. Error", "t value", "Pr(>|t|)")
+        # R's ``summary(lm)$aliased`` — a logical over the *full* column set
+        # flagging coefficients dropped for singularity (NA in coef()). The
+        # ``$coefficients`` matrix above holds only the estimable rows, as in R.
+        self.aliased = ~np.isfinite(np.asarray(model._bhat_disp, dtype=float))
 
     # ---- R-style ``$`` access (partial name matching) ---------------
 
@@ -338,20 +342,25 @@ def _format_summary_lm(model, digits: int, cor: bool) -> str:
     docstring += "\n".join(model._residuals_lines(digits=digits))
     docstring += "\n\n" + model._coef_header() + "\n"
 
-    t_arr = model._bhat_arr / model._se_bhat_arr
-    p_arr = np.asarray(model.p_values.row(0), dtype=float)
+    # Display-width arrays: equal to the fit columns normally, widened to the
+    # full column set with NA for aliased columns when rank-deficient.
+    bhat_disp = model._bhat_disp
+    se_disp = model._se_disp
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t_arr = bhat_disp / se_disp
+    p_arr = model._p_disp
     sig = significance_code(p_arr)
     ci_low_col, ci_hi_col = model.ci_bhat.columns[1], model.ci_bhat.columns[2]
     ci_low_arr = model.ci_bhat[ci_low_col].to_numpy()
     ci_hi_arr = model.ci_bhat[ci_hi_col].to_numpy()
     est_s, se_s = format_signif_jointly(
-        [model._bhat_arr, model._se_bhat_arr], digits=digits,
+        [bhat_disp, se_disp], digits=digits,
     )
     cilo_s, cihi_s = format_signif_jointly(
         [ci_low_arr, ci_hi_arr], digits=digits,
     )
     res = pl.DataFrame({
-        "": model.column_names,
+        "": model._names_disp,
         "Estimate": est_s,
         "Std. Error": se_s,
         ci_low_col: cilo_s,
@@ -360,9 +369,17 @@ def _format_summary_lm(model, digits: int, cor: bool) -> str:
         "Pr(>|t|)": format_pval(p_arr, digits=_dig_tst(digits)),
         " ": sig,
     })
-    num_align = {c: "right" for c in
-                 ("Estimate", "Std. Error", ci_low_col, ci_hi_col,
-                  "t value", "Pr(>|t|)")}
+    num_cols = ("Estimate", "Std. Error", ci_low_col, ci_hi_col,
+                "t value", "Pr(>|t|)")
+    # Aliased rows print "NA" in every numeric column (R's printCoefmat
+    # ``na.print="NA"``); the formatters emit "NaN" for those NaN entries.
+    aliased = ~np.isfinite(np.asarray(bhat_disp, dtype=float))
+    if aliased.any():
+        res = res.with_columns([
+            pl.when(pl.Series(aliased)).then(pl.lit("NA")).otherwise(pl.col(c)).alias(c)
+            for c in num_cols
+        ])
+    num_align = {c: "right" for c in num_cols}
     docstring += format_df(res, align=num_align)
     docstring += "\n---"
     docstring += "\nSignif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
@@ -469,12 +486,19 @@ class lm:
         # Surface the alias info via summary()/__repr__ rather than a fit-time
         # warning — R does the same (silent at construction, prints "(N not
         # defined because of singularities)" only when you look at the model).
+        _full_cols = list(self.X.columns)  # before the rank-deficiency drop
         self._aliased_cols: list[str] = _drop_aliased_cols(self.X)
         if self._aliased_cols:
             keep = [c for c in self.X.columns if c not in self._aliased_cols]
             self.X = self.X.select(keep)
 
         self.column_names = list(self.X.columns)
+        # Full (pre-drop) column set + the kept→full index map. The fit runs
+        # on the estimable (kept) columns; the *public* coefficient views are
+        # widened back to the full set with NA for the aliased columns, so
+        # coef(m)["<aliased>"] resolves and summary prints the NA row (R parity).
+        self._full_names = _full_cols
+        self._kept_idx = [_full_cols.index(c) for c in self.column_names]
         self.feature_names = (
             self.column_names[1:]
             if "(Intercept)" in self.column_names
@@ -599,6 +623,16 @@ class lm:
 
         # p values
         self.p_values = self.compute_p_values()
+
+        # Display-width coefficient views default to the estimable (fit)
+        # columns; widen to the full column set with NA for aliased columns
+        # when the design was rank-deficient (R keeps every column in coef()).
+        self._bhat_disp = self._bhat_arr
+        self._se_disp = self._se_bhat_arr
+        self._p_disp = np.asarray(self.p_values.row(0), dtype=float)
+        self._names_disp = self.column_names
+        if self._aliased_cols:
+            self._widen_public_coefs()
 
         # compute r2 and r2adjusted, aka coefficient of determination
         # aka percentage of variance explained. Noted that the formulae
@@ -868,6 +902,46 @@ class lm:
         t_arr = self._bhat_arr / self._se_bhat_arr
         p_values = 2 * t.sf(np.abs(t_arr), self.df_residuals)
         return _row_frame(p_values, self.column_names)
+
+    def _expand_to_full(self, kept_vals) -> np.ndarray:
+        """Scatter estimable-column values into the full column set, with NA
+        (NaN) in the aliased slots — the inverse of the rank-deficiency drop."""
+        out = np.full(len(self._full_names), np.nan, dtype=float)
+        out[self._kept_idx] = np.asarray(kept_vals, dtype=float)
+        return out
+
+    def _widen_public_coefs(self) -> None:
+        """Rank-deficient parity: present every original column in the public
+        coefficient views (``coef`` / ``bhat`` / ``se_bhat`` / ``t_values`` /
+        ``p_values`` / ``ci_bhat``), with NA for the aliased columns. The fit
+        itself stays on the estimable columns — ``_bhat_arr`` / ``XtXinv`` /
+        ``df_residuals`` are unchanged — so only the *display* widens, exactly
+        like R (``coef(m)`` carries NA rows; ``summary`` prints them)."""
+        from ..R import NamedVector
+
+        names = self._full_names
+        bhat_f = self._expand_to_full(self._bhat_arr)
+        se_f = self._expand_to_full(self._se_bhat_arr)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t_f = bhat_f / se_f
+        p_f = 2.0 * t.sf(np.abs(t_f), self.df_residuals)  # NaN stays NaN
+        tcrit = t.ppf(1 - 0.05 / 2, self.df_residuals)
+        cilo = bhat_f - tcrit * se_f
+        cihi = bhat_f + tcrit * se_f
+
+        self._bhat_disp = bhat_f
+        self._se_disp = se_f
+        self._p_disp = p_f
+        self._names_disp = names
+
+        self.bhat = _row_frame(bhat_f, names)
+        self.coef = NamedVector(names, bhat_f)
+        self.coefficients = self.coef
+        self.se_bhat = _row_frame(se_f, names)
+        self.t_values = _row_frame(t_f, names)
+        self.p_values = _row_frame(p_f, names)
+        lo_col, hi_col = self.ci_bhat.columns[1], self.ci_bhat.columns[2]
+        self.ci_bhat = pl.DataFrame({"coef": names, lo_col: cilo, hi_col: cihi})
 
     def compute_goodness_of_fit(self):
 
