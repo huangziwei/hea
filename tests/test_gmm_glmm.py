@@ -2441,6 +2441,218 @@ def test_glmer_bates_fm10_contraception_matches_lme4():
     np.testing.assert_allclose(m._se_beta, expected_se, atol=3e-2, rtol=1e-2)
 
 
+# ----------------------------------------------------------------------
+# Canonical Bates lme4 vignette sweep — Contraception cm1–cm4.
+# Reference: lme4 ``vignettes/glmer.Rnw`` §"Contraception" (cm1..cm6 built by
+# ``update()``). Transforms: ``age_s = age / (2*sd(age))``; ``ch = factor(
+# livch != 0, labels=c("N","Y"))``. Fits use lme4's DEFAULT optimizer chain
+# ``c("bobyqa","Nelder_Mead")``. Reference values were generated against
+# byte-identical data (``dev/cm_ref/_tmp_cm_ref.R``) — R is never run in CI.
+#
+# Tolerances follow the fm10 precedent: the Laplace objective (deviance /
+# AIC / BIC / logLik) is curvature-independent and pins tight (rel 1e-7);
+# θ̂/β̂ sit on a flat, ill-conditioned surface (age_s / I(age_s^2) / livch
+# correlated 0.5–0.76) where lme4's gradient-free optimiser only resolves
+# ~1e-5, so they pin loose (θ̂ abs 1e-4; β̂ in SE units < 3e-3). The parity
+# investigation (dev/cm_ref/) confirms this is an eval-noise floor, not a
+# tolerance bug: tightening both sides closes θ̂ to ~5e-7 but leaves the β̂
+# floor on the correlated columns.
+# ----------------------------------------------------------------------
+
+_CM_REF = {
+    "cm1": {
+        "formula": "use ~ age_s + I(age_s^2) + urban + livch + (1|district)",
+        "colnames": ["(Intercept)", "age_s", "I(age_s^2)", "urbanY",
+                     "livch1", "livch2", "livch3+"],
+        "theta": [0.47523606313475225],
+        "beta": [-1.0350274405489304, 0.063726453536789948,
+                 -1.4824808685473088, 0.69728511186961906,
+                 0.81497673072220556, 0.91645948135201727,
+                 0.91502720195197496],
+        "se": [0.17575150734060407, 0.16725908267340714, 0.23701672177850333,
+               0.12086082595584657, 0.16319404552565814, 0.1863459657207191,
+               0.18731529204621494],
+        "AIC": 2388.7287068547207, "BIC": 2433.2674722628267,
+        "logLik": -1186.3643534273604, "dev_laplace": 2372.7287068547207,
+        "dev_resid": 2289.7306592727905, "npar": 8, "df_resid": 1926,
+        "pearson_q": [-1.8438164551717313, -0.75918383875135065,
+                      -0.46400094058664731, 0.94930520663395612,
+                      3.0714958908257421],
+    },
+    "cm2": {
+        "formula": "use ~ age_s + I(age_s^2) + urban + ch + (1|district)",
+        "colnames": ["(Intercept)", "age_s", "I(age_s^2)", "urbanY", "chY"],
+        "theta": [0.47399234899802645],
+        "beta": [-1.0063736786246373, 0.11277569344137259,
+                 -1.5062536618932687, 0.69292195041328508,
+                 0.86038209211396821],
+        "se": [0.16911401578167221, 0.14213752282172851, 0.23418953619202565,
+               0.1206581477445645, 0.14830391129817388],
+        "AIC": 2385.1858190738521, "BIC": 2418.5898931299316,
+        "logLik": -1186.5929095369261, "dev_laplace": 2373.1858190738521,
+        "dev_resid": 2290.3956618293355, "npar": 6, "df_resid": 1928,
+        "pearson_q": [-1.8150497388800013, -0.76198051917562681,
+                      -0.46193204188532933, 0.9518062700522788,
+                      3.1033486907613974],
+    },
+    "cm3": {
+        "formula": ("use ~ age_s + I(age_s^2) + urban + ch + age_s:ch "
+                    "+ (1|district)"),
+        "colnames": ["(Intercept)", "age_s", "I(age_s^2)", "urbanY", "chY",
+                     "age_s:chY"],
+        "theta": [0.47226931870180711],
+        "beta": [-1.32329838287304, -0.85255290282845397,
+                 -1.8707276887929793, 0.7140073373117648,
+                 1.2107566086549038, 1.2321877016246101],
+        "se": [0.21505379700145275, 0.39318304454754804, 0.27312648602724332,
+               0.12125989955644181, 0.20733477577072387, 0.45856006976258906],
+        "AIC": 2379.1813079332615, "BIC": 2418.1527276653542,
+        "logLik": -1182.5906539666307, "dev_laplace": 2365.1813079332615,
+        "dev_resid": 2282.9246322145832, "npar": 7, "df_resid": 1927,
+        "pearson_q": [-1.8720410335459285, -0.75602285608215181,
+                      -0.46679093243452663, 0.9485588267712094,
+                      2.9973591301444071],
+    },
+    "cm4": {
+        "formula": ("use ~ age_s + I(age_s^2) + urban + ch + age_s:ch "
+                    "+ (1+urban|district)"),
+        "colnames": ["(Intercept)", "age_s", "I(age_s^2)", "urbanY", "chY",
+                     "age_s:chY"],
+        "theta": [0.61496553579326108, -0.57509470937327523,
+                  0.44190385654424946],
+        "beta": [-1.3441349102161679, -0.8324500403806161,
+                 -1.8362230871367438, 0.79013260776466188,
+                 1.2115315825963644, 1.1981322762954401],
+        "se": [0.223614513550251, 0.39491862178620152, 0.27608314721759164,
+               0.16332396584891001, 0.2087001594039371, 0.46105123099560541],
+        "AIC": 2371.5304045633152, "BIC": 2421.6365156474344,
+        "logLik": -1176.7652022816576, "dev_laplace": 2353.5304045633152,
+        "dev_resid": 2235.2914451677857, "npar": 9, "df_resid": 1925,
+        "pearson_q": [-1.9336610694581922, -0.73354163593473076,
+                      -0.44574628672232086, 0.89726774208216042,
+                      3.0327222434958871],
+    },
+}
+
+
+@pytest.fixture(scope="module")
+def cm_frame():
+    """Contraception with the vignette transforms (age_s, ch)."""
+    from hea import data
+    from hea.R import factor
+    c = data("Contraception")
+    sd_age = c["age"].std()
+    return c.with_columns(
+        (pl.col("age") / (2 * sd_age)).alias("age_s"),
+        pl.when(pl.col("livch") == "0").then(pl.lit("N"))
+            .otherwise(pl.lit("Y")).alias("ch"),
+    ).mutate(
+        factor("district"), factor("use"), factor("urban"),
+        factor("livch"), factor("ch"),
+    )
+
+
+@pytest.mark.parametrize("tag", ["cm1", "cm2", "cm3", "cm4"])
+def test_glmer_contraception_cm_components_match_lme4(cm_frame, tag):
+    from hea.models.gmm import gmm
+    ref = _CM_REF[tag]
+    m = gmm(ref["formula"], data=cm_frame, family=Binomial())
+
+    # Fixed-effect names line up with R's model.matrix expansion.
+    assert m.column_names == ref["colnames"]
+    assert m.npar == ref["npar"]
+    assert m.df_resid == ref["df_resid"]
+
+    # Laplace objective — curvature-independent, pins tight across platforms.
+    assert m.deviance_laplace == pytest.approx(ref["dev_laplace"], rel=1e-7)
+    assert m.AIC == pytest.approx(ref["AIC"], rel=1e-7)
+    assert m.BIC == pytest.approx(ref["BIC"], rel=1e-7)
+    assert m.loglike == pytest.approx(ref["logLik"], rel=1e-7)
+    # Residual deviance depends on β̂ → inherits the flat-surface drift.
+    assert m.deviance == pytest.approx(ref["dev_resid"], rel=1e-5)
+
+    # θ̂ (variance components) — loose, the gradient-free optimiser floor.
+    np.testing.assert_allclose(m.theta, ref["theta"], atol=1e-4, rtol=1e-4)
+
+    # β̂ in SE-relative units (fm10 convention): |Δβ̂|/SE stays small even
+    # where the raw β̂ is poorly identified.
+    beta_se_rel = np.abs(m.bhat.to_numpy().ravel()
+                         - np.array(ref["beta"])) / np.array(ref["se"])
+    assert beta_se_rel.max() < 3e-3, f"{tag}: |Δβ̂|/SE = {beta_se_rel}"
+
+    # SE magnitudes — loose (FD-Hessian cancellation + cross-platform BLAS
+    # noise; see fm10). Catches gross errors, not sub-ULP drift.
+    np.testing.assert_allclose(m._se_beta, ref["se"], atol=5e-2, rtol=3e-2)
+
+    # Scaled (Pearson, σ-divided) residual 5-number summary — what summary()
+    # prints. Drifts with the fit, hence the loose absolute tolerance.
+    pearson_scaled = m.residuals_of("pearson") / m.sigma
+    np.testing.assert_allclose(
+        np.quantile(pearson_scaled, [0, .25, .5, .75, 1]),
+        ref["pearson_q"], atol=5e-3, rtol=5e-3,
+    )
+
+
+def test_glmer_contraception_cm4_summary_layout_matches_lme4(cm_frame, capsys):
+    """cm4 (random slope + correlation) exercises the full summary layout:
+    the glmerMod header tag, the 1-decimal criterion table, the
+    Variance/Std.Dev./Corr random-effects block, the z+Pr fixed-effects
+    table, and the fixed-effect correlation matrix — each matching a section
+    of lme4's print.summary.merMod."""
+    from hea.models.gmm import gmm
+    m = gmm(_CM_REF["cm4"]["formula"], data=cm_frame, family=Binomial())
+    m.summary()
+    out = capsys.readouterr().out
+
+    assert ("Generalized linear mixed model fit by maximum likelihood "
+            "(Laplace Approximation) ['glmerMod']") in out
+    assert "Family: binomial  ( logit )" in out
+    # 1-decimal criterion row (lme4's .prt.aictab digits=1), not 4-decimal.
+    assert "2371.5" in out and "2353.5" in out
+    assert "2371.5304" not in out
+    # Random-effects block with the correlated random slope.
+    assert "Groups   Name        Variance Std.Dev. Corr" in out
+    assert "district (Intercept)" in out
+    assert "urbanY" in out
+    assert "-0.79" in out
+    assert "Number of obs: 1934, groups:  district, 60" in out
+    # GLMM fixed-effects table uses z + Pr(>|z|), with the signif legend.
+    assert "z value" in out and "Pr(>|z|)" in out
+    assert "Signif. codes:" in out
+    assert "Correlation of Fixed Effects:" in out
+
+
+def test_glmer_contraception_anova_cm1_to_cm4(cm_frame, capsys):
+    """anova(cm1..cm4): rows sort ascending by npar (cm2<cm3<cm1<cm4). The
+    cm1 row has MORE params than cm3 yet a worse deviance, so its LRT is
+    negative — lme4 clamps it to 0 (p=1). Pin the printed table against
+    lme4's anova.merMod."""
+    from hea.models.gmm import gmm
+    from hea.R.model_selection import anova
+    cm1 = gmm(_CM_REF["cm1"]["formula"], data=cm_frame, family=Binomial())
+    cm2 = gmm(_CM_REF["cm2"]["formula"], data=cm_frame, family=Binomial())
+    cm3 = gmm(_CM_REF["cm3"]["formula"], data=cm_frame, family=Binomial())
+    cm4 = gmm(_CM_REF["cm4"]["formula"], data=cm_frame, family=Binomial())
+    anova(cm1, cm2, cm3, cm4)
+    out = capsys.readouterr().out
+
+    # Caller names recovered (R-style), rows printed in npar order.
+    for name in ("cm1", "cm2", "cm3", "cm4"):
+        assert name in out
+    # The cm1 row's negative LRT is clamped to 0 (was -7.5474), p=1.
+    assert "0.0000" in out
+    assert "1.000000" in out
+    assert "-7.5" not in out                # no spurious negative χ²
+    # The two genuine LRTs match lme4 (cm2→cm3, cm1→cm4).
+    assert "8.0045" in out
+    assert "19.1983" in out
+    # Underlying LRT is exactly the Laplace-deviance gap (format-independent).
+    assert (cm2.deviance_laplace - cm3.deviance_laplace) == pytest.approx(
+        8.0045111405906937, rel=1e-5)
+    assert (cm1.deviance_laplace - cm4.deviance_laplace) == pytest.approx(
+        19.198302291405525, rel=1e-5)
+
+
 def test_deriv12_uses_supplied_fx_to_save_one_eval():
     """``fx`` argument skips the redundant ``fn(x)`` call. Pin: same answer."""
     def py_fn(x):

@@ -5600,14 +5600,16 @@ class gmm:
         return not (fam.name == "gaussian" and fam.link.name == "identity")
 
     def _header(self) -> str:
+        # lme4's print.merMod tags the header with the S4 class name in
+        # brackets (methods.R: ``['glmerMod']`` / ``['lmerMod']``).
         if self._is_glmm():
             return (
                 "Generalized linear mixed model fit by maximum likelihood "
-                "(Laplace Approximation)"
+                "(Laplace Approximation) ['glmerMod']"
             )
         if self.REML:
-            return "Linear mixed model fit by REML"
-        return "Linear mixed model fit by maximum likelihood"
+            return "Linear mixed model fit by REML ['lmerMod']"
+        return "Linear mixed model fit by maximum likelihood ['lmerMod']"
 
     def _fit_criterion_lines(self) -> list[str]:
         if self.REML:
@@ -5619,12 +5621,14 @@ class gmm:
             dev_val = self.deviance_laplace
         else:
             dev_val = self.deviance
+        # lme4's .prt.aictab rounds the criteria to 1 decimal (digits=1) and
+        # prints df.resid as an integer (methods.R / lme4:::print.merMod).
         labels = ["AIC", "BIC", "logLik", "-2*log(L)", "df.resid"]
         vals = [
-            f"{self.AIC:.4f}",
-            f"{self.BIC:.4f}",
-            f"{self.loglike:.4f}",
-            f"{dev_val:.4f}",
+            f"{self.AIC:.1f}",
+            f"{self.BIC:.1f}",
+            f"{self.loglike:.1f}",
+            f"{dev_val:.1f}",
             f"{self.df_resid}",
         ]
         widths = [max(len(l), len(v)) for l, v in zip(labels, vals)]
