@@ -1,7 +1,4 @@
-"""Phase B (fluent ggplot API) — entry point + auto-install tests.
-
-Plan: ``.claude/plans/method-based-ggplot-api.md`` Phase B.
-"""
+"""Fluent ggplot API — entry point + auto-install tests."""
 
 from __future__ import annotations
 

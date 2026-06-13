@@ -7,7 +7,6 @@ of ``poly``/``bs``/``ns``): ``K`` raw cos/sin harmonic pairs ``cos(2πj x/p)``,
 column suffixes. Its name is aligned with ``TSA::harmonic`` but it is NOT a
 port — it always emits ``2K`` columns (no integer-``ts`` Nyquist drop) and
 takes an explicit ``period`` (hea has no ``ts`` frequency to infer one from).
-See ``.claude/plans/harmonic-formula-term.md``.
 
 R references generated with R 4.6.0 (base ``lm``) on the deterministic data
 below — no RNG: an exact two-harmonic signal at period 12 plus a ``0.3*x``

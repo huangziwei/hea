@@ -1,9 +1,7 @@
-"""hea.ggplot tests — Phase 0 onward.
+"""hea.ggplot tests.
 
-Each test ID matches the inventory in `.claude/plans/ggplot2-port.md` §9.1.
-PNG diff parity (the visual-snapshot tests) come later; Phase 0 just
-asserts the build pipeline runs and produces a matplotlib Figure with
-expected primitives.
+PNG diff parity (the visual-snapshot tests) come later; these just assert the
+build pipeline runs and produces a matplotlib Figure with expected primitives.
 """
 
 from __future__ import annotations
