@@ -464,17 +464,29 @@ def _deriv12(
     g = np.empty(n)
     H = np.empty((n, n))
     for j in range(n):
-        xj = x.copy(); xj[j] = xadd[j]; fadd = float(fn(xj))
-        xj = x.copy(); xj[j] = xsub[j]; fsub = float(fn(xj))
+        xj = x.copy()
+        xj[j] = xadd[j]
+        fadd = float(fn(xj))
+        xj = x.copy()
+        xj[j] = xsub[j]
+        fsub = float(fn(xj))
         udj, ldj = udelta[j], ldelta[j]
         H[j, j] = fadd / udj**2 - 2.0 * fx / (udj * ldj) + fsub / ldj**2
         g[j] = (fadd - fsub) / (udj + ldj)
         for i in range(j):
             udi, ldi = udelta[i], ldelta[i]
-            x_aa = x.copy(); x_aa[i] = xadd[i]; x_aa[j] = xadd[j]
-            x_as = x.copy(); x_as[i] = xadd[i]; x_as[j] = xsub[j]
-            x_sa = x.copy(); x_sa[i] = xsub[i]; x_sa[j] = xadd[j]
-            x_ss = x.copy(); x_ss[i] = xsub[i]; x_ss[j] = xsub[j]
+            x_aa = x.copy()
+            x_aa[i] = xadd[i]
+            x_aa[j] = xadd[j]
+            x_as = x.copy()
+            x_as[i] = xadd[i]
+            x_as[j] = xsub[j]
+            x_sa = x.copy()
+            x_sa[i] = xsub[i]
+            x_sa[j] = xadd[j]
+            x_ss = x.copy()
+            x_ss[i] = xsub[i]
+            x_ss[j] = xsub[j]
             val = (
                 float(fn(x_aa)) / (udi + udj) ** 2
                 - float(fn(x_as)) / (udi + ldj) ** 2
@@ -1932,7 +1944,6 @@ def _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta,
     sth = 0.0
     xsav = 0.0
     itermax = 0
-    return_from = ''  # which label called L210; resume target after L210 runs
 
     state = 'L20'
     while True:
@@ -1958,7 +1969,6 @@ def _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta,
             if gredsq * delsq <= 1.0e-4 * qred * qred:
                 state = 'L190'
                 continue
-            return_from = 'L50'
             state = 'L210'
         elif state == 'L50':
             resid = delsq
@@ -2061,7 +2071,6 @@ def _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta,
                 else:
                     s[i] = ZERO
             itcsav = iterc
-            return_from = 'L150'
             state = 'L210'
         elif state == 'L120':
             iterc = iterc + 1
@@ -2115,7 +2124,6 @@ def _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta,
             if jumped_to_100:
                 state = 'L100'
                 continue
-            return_from = 'L150'
             state = 'L210'
         elif state == 'L150':
             shs = ZERO
@@ -2281,7 +2289,6 @@ def _bobyqa_rescue(calfun, n, npt, xl, xu, maxfun, xbase, xpt, fval,
             ptsaux[2, j] = HALF * ptsaux[1, j]
         for i in range(1, ndim + 1):
             bmat[i, j] = ZERO
-    fbase = fval[kopt]
     #
     # Set provisional interpolation point identifiers PTSID, and nonzero
     # elements of BMAT and ZMAT.
@@ -2654,7 +2661,6 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su):
             # F77: TRSBOX(N,NPT,XPT,XOPT,GOPT,HQ,PQ,SL,SU,DELTA,XNEW,D,
             #             W,W(NP),W(NP+N),W(NP+2*N),W(NP+3*N),DSQ,CRVMIN)
             # The W partition gives GNEW, XBDI, S, HS, HRED.
-            gnew_w = w[1:np_]  # placeholder; trsbox uses dedicated arrays below
             # Use private scratch arrays — F77 reuse of W() is just buffer
             # economy; results don't depend on overlap.
             gnew = np.zeros(n + 1)
@@ -4130,10 +4136,12 @@ def _restart_edge(devfun, par, lower, upper, refit, *, btol=1e-5, verbose=0):
     d0 = devfun(par0)
     grads = []
     for i in wl:
-        p = par0.copy(); p[i] = lower[i] + btol
+        p = par0.copy()
+        p[i] = lower[i] + btol
         grads.append((devfun(p) - d0) / btol)
     for i in wu:
-        p = par0.copy(); p[i] = upper[i] - btol
+        p = par0.copy()
+        p[i] = upper[i] - btol
         grads.append((devfun(p) - d0) / (-btol))
     devfun(par0)  # reset internal state after probing
     grads = np.asarray(grads)
@@ -4158,11 +4166,13 @@ def _check_boundary(devfun, par, fval, lower, upper, boundary_tol, dpars=None):
     for i in idx:
         dl, du = par0[i] - lower[i], upper[i] - par0[i]
         if 0 < dl < boundary_tol:
-            test = par0.copy(); test[i] = lower[i]
+            test = par0.copy()
+            test[i] = lower[i]
             if devfun(test) < fval:
                 par0[i] = lower[i]
         elif 0 < du < boundary_tol:
-            test = par0.copy(); test[i] = upper[i]
+            test = par0.copy()
+            test[i] = upper[i]
             if devfun(test) < fval:
                 par0[i] = upper[i]
     return par0
@@ -5037,7 +5047,6 @@ class gmm:
             for i in range(len(re.theta))
         ]
         self._theta_bounds = bounds_theta
-        bounds_beta = [(None, None)] * p
         n_theta = len(re.theta)
 
         # Build the live PIRLS state. _PredState holds X, Z, Λᵀ(θ);
@@ -6378,8 +6387,8 @@ class gmm:
             f"{dev_val:.1f}",
             f"{self.df_resid}",
         ]
-        widths = [max(len(l), len(v)) for l, v in zip(labels, vals)]
-        hdr = " ".join(l.rjust(w) for l, w in zip(labels, widths))
+        widths = [max(len(lab), len(v)) for lab, v in zip(labels, vals)]
+        hdr = " ".join(lab.rjust(w) for lab, w in zip(labels, widths))
         row = " ".join(v.rjust(w) for v, w in zip(vals, widths))
         return [hdr, row]
 
@@ -6515,8 +6524,8 @@ class gmm:
         qs = np.quantile(scaled, [0.0, 0.25, 0.5, 0.75, 1.0])
         labels = ["Min", "1Q", "Median", "3Q", "Max"]
         vals = [f"{v:.4f}" for v in qs]
-        widths = [max(len(l), len(v)) for l, v in zip(labels, vals)]
-        hdr = " ".join(l.rjust(w) for l, w in zip(labels, widths))
+        widths = [max(len(lab), len(v)) for lab, v in zip(labels, vals)]
+        hdr = " ".join(lab.rjust(w) for lab, w in zip(labels, widths))
         row = " ".join(v.rjust(w) for v, w in zip(vals, widths))
         return ["Scaled residuals:", hdr, row]
 

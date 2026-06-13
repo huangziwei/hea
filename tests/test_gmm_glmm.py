@@ -16,10 +16,8 @@ import pytest
 
 from hea.models.gmm import csc_array
 from hea.family import Binomial, Gamma, Gaussian, Poisson
-from hea.formula import materialize_bars, parse, expand
+from hea.formula import materialize_bars
 from hea.models.gmm import (
-    NelderMead,
-    NMStatus,
     _GlmResponse,
     _PredState,
     _deriv12,
@@ -1647,7 +1645,7 @@ def test_deriv12_1d_matches_lme4():
 
 def test_family_validation_accepts_instance():
     """Family instance is passed through unchanged."""
-    from hea.models.gmm import gmm, _resolve_lme_family
+    from hea.models.gmm import _resolve_lme_family
     from hea.family import Poisson, LogLink
 
     fam = Poisson(link=LogLink())
@@ -2207,12 +2205,15 @@ def test_check_boundary_pins_near_zero_when_improving():
     from hea.models.gmm import _check_boundary
 
     lower, upper = np.array([0.0]), np.array([np.inf])
-    devfun = lambda p: float(p[0] ** 2 + 1.0)            # minimised at 0
+    def devfun(p):  # minimised at 0
+        return float(p[0] ** 2 + 1.0)
     out = _check_boundary(devfun, np.array([1e-7]), devfun(np.array([1e-7])),
                           lower, upper, 1e-5)
     assert out[0] == 0.0                                  # pinned to the bound
+
     # not pinned when the interior point is strictly better
-    devfun2 = lambda p: float((p[0] - 1e-7) ** 2)
+    def devfun2(p):
+        return float((p[0] - 1e-7) ** 2)
     out2 = _check_boundary(devfun2, np.array([1e-7]), 0.0, lower, upper, 1e-5)
     assert out2[0] == 1e-7
 
@@ -2227,7 +2228,8 @@ def test_restart_edge_restarts_only_on_negative_inward_gradient():
     called = []
 
     def refit(p0):
-        called.append(np.asarray(p0)); return np.array([2.0])
+        called.append(np.asarray(p0))
+        return np.array([2.0])
     out = _restart_edge(lambda p: float(-p[0] + 1), np.array([0.0]),
                         lower, upper, refit)
     assert called and out[0] == 2.0
@@ -3260,13 +3262,13 @@ def test_glmer_contraception_anova_cm1_to_cm4(cm_frame, capsys):
 def _parse_drop1(out):
     """Parse a printed drop1 table into ``{label: {npar, AIC, LRT}}``."""
     lines = out.splitlines()
-    hi = next(i for i, l in enumerate(lines)
-              if "npar" in l and "AIC" in l)
+    hi = next(i for i, ln in enumerate(lines)
+              if "npar" in ln and "AIC" in ln)
     rows = {}
-    for l in lines[hi + 1:]:
-        if not l.strip() or l.lstrip().startswith("---"):
+    for ln in lines[hi + 1:]:
+        if not ln.strip() or ln.lstrip().startswith("---"):
             break
-        p = l.split()
+        p = ln.split()
         if p[0] == "<none>":
             rows[p[0]] = {"AIC": float(p[1])}
         else:
