@@ -306,6 +306,7 @@ from .model_generics import (
     terms,
     update,
     vcov,
+    weights,
 )
 
 # Regression diagnostics
@@ -419,7 +420,7 @@ __all__ = [
     "coef", "coefficients", "fixef", "ranef", "refit", "refitML",
     "resid", "residuals", "fitted", "fitted_values",
     "predict", "confint", "vcov",
-    "logLik", "deviance", "nobs", "df_residual",
+    "logLik", "deviance", "nobs", "weights", "df_residual",
     "formula", "model_matrix", "model_frame",
     "AIC", "BIC", "anova", "add1", "drop1", "step",
     "update", "terms", "Terms",

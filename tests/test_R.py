@@ -589,7 +589,7 @@ _R_EXPR_SKIP = {
     "coef", "coefficients", "fixef", "ranef", "refit", "refitML",
     "resid", "residuals", "fitted", "fitted_values",
     "predict", "confint", "vcov", "logLik", "deviance",
-    "nobs", "df_residual", "formula", "model_matrix", "model_frame",
+    "nobs", "weights", "df_residual", "formula", "model_matrix", "model_frame",
     "terms", "update", "AIC", "BIC",
     "anova", "add1", "drop1", "step",
     "hatvalues", "rstandard", "rstudent",
@@ -893,8 +893,10 @@ def test_resid_type_dispatch_glm(m_glm):
 
 
 def test_resid_type_invalid_for_lm(m_lm):
+    # lm supports R's residuals.lm types (response/working/pearson/deviance);
+    # an unknown type still raises.
     with pytest.raises(ValueError, match="not supported"):
-        resid(m_lm, type="pearson")
+        resid(m_lm, type="garbage")
 
 
 def test_fitted_shape_matches_resid(m_lm, m_glm, m_gam, m_lme):

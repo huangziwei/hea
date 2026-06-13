@@ -445,6 +445,7 @@ class lm:
         subset=None,
         na_action: str = "omit",
         contrasts=None,
+        singular_ok: bool = True,
     ):
 
         # meta
@@ -539,6 +540,9 @@ class lm:
         # defined because of singularities)" only when you look at the model).
         _full_cols = list(self.X.columns)  # before the rank-deficiency drop
         self._aliased_cols: list[str] = _drop_aliased_cols(self.X)
+        if self._aliased_cols and not singular_ok:
+            # R: lm.fit(singular.ok=FALSE) — refuse rank-deficient designs.
+            raise ValueError("singular fit encountered")
         if self._aliased_cols:
             keep = [c for c in self.X.columns if c not in self._aliased_cols]
             self.X = self.X.select(keep)
@@ -641,11 +645,16 @@ class lm:
         self.rss = float(np.sum(self._w * residuals * residuals))
 
         # compute standard deviation of model coefficients
-        # aka Residual SE: σ^2 = RSS / df_residuals
+        # aka Residual SE: σ^2 = RSS / df_residuals. A saturated fit
+        # (df_residuals == 0, e.g. n == rank) has no residual variance —
+        # R returns NaN (and NaN SEs / t / p) rather than erroring.
         if method == "nll":
             self.sigma_squared = self.sigma**2
         else:
-            self.sigma_squared = self.rss / self.df_residuals
+            self.sigma_squared = (
+                self.rss / self.df_residuals
+                if self.df_residuals > 0 else float("nan")
+            )
             self.sigma = np.sqrt(self.sigma_squared)
 
         # compute standard error for β̂
@@ -1003,28 +1012,35 @@ class lm:
         # all-ones weight vector this is the ordinary (unweighted) TSS.
         w = self._w
 
+        # Adjusted R² divides by df_residuals — NaN for a saturated fit
+        # (df_residuals == 0), matching R.
+        df_ok = self.df_residuals > 0
         if "(Intercept)" in self.column_names:
             ybar = float(np.sum(w * y) / np.sum(w))
             tss = float(np.sum(w * (y - ybar) ** 2))
             # Eq: r2 = 1 - RSS / TSS = 1 -  sum(w (ŷ - yi)**2) / sum(w (y - ȳ)**2)
             r_squared = float(1 - self.rss / tss)
             # Eq: r2adj = 1 - (1 - r2) * (n_eff - 1) / df_residuals
-            r_squared_adjusted = 1 - (1 - r_squared) * (self._n_eff - 1) / (
-                self.df_residuals
+            r_squared_adjusted = (
+                1 - (1 - r_squared) * (self._n_eff - 1) / self.df_residuals
+                if df_ok else float("nan")
             )
         else:
             tss = float(np.sum(w * y**2))
             # Eq: r2 = 1 - RSS / TSS = 1 -  sum(w (ŷ - yi)**2) / sum(w y**2)
             r_squared = float(1 - self.rss / tss)
             # Eq: r2adj = 1 - (1 - r2) * n_eff / df_residuals
-            r_squared_adjusted = 1 - (1 - r_squared) * self._n_eff / (
-                self.df_residuals
+            r_squared_adjusted = (
+                1 - (1 - r_squared) * self._n_eff / self.df_residuals
+                if df_ok else float("nan")
             )
 
         return tss, r_squared, r_squared_adjusted
 
     def compute_fstats(self):
-        if self.df_model != 0:
+        # No F-statistic for an intercept-only model (df_model == 0) or a
+        # saturated fit (df_residuals == 0, where the denominator vanishes).
+        if self.df_model != 0 and self.df_residuals > 0:
             fstats = float(
                 ((self.tss - self.rss) / self.df_model) / (self.rss / self.df_residuals)
             )
@@ -1039,6 +1055,10 @@ class lm:
         # with N = #{wᵢ ≠ 0} (zero-weight rows excluded) and Σ wᵢ rᵢ² the
         # weighted RSS. Reduces to −0.5·n·(log(rss/n)+log 2π+1) when w ≡ 1.
         n = self._n_eff
+        if self.rss <= 0.0:
+            # Perfect (saturated) fit: the Gaussian log-likelihood diverges;
+            # R returns +Inf. Guard the log(0) so construction stays warning-free.
+            return float("inf")
         if self.weights is None:
             sum_log_w = 0.0
         else:
@@ -1203,8 +1223,8 @@ class lm:
         qs = np.quantile(r, [0.0, 0.25, 0.5, 0.75, 1.0])
         labels = ["Min", "1Q", "Median", "3Q", "Max"]
         vals = format_signif(qs, digits=digits)
-        widths = [max(len(l), len(v)) for l, v in zip(labels, vals)]
-        hdr = " ".join(l.rjust(w) for l, w in zip(labels, widths))
+        widths = [max(len(lab), len(v)) for lab, v in zip(labels, vals)]
+        hdr = " ".join(lab.rjust(w) for lab, w in zip(labels, widths))
         row = " ".join(v.rjust(w) for v, w in zip(vals, widths))
         return [header, hdr, row]
 

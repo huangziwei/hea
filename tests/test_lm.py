@@ -712,3 +712,61 @@ def test_lm_subset_as_expression():
     m_c2 = lm("Species ~ 1", g,
               subset=(pl.col("Area") > 10) & (pl.col("Elevation") < 200))
     assert m_c2.n == 2
+
+
+# ---------------------------------------------------------------------------
+# Track E — saturated guard / singular.ok / residual types / weights()
+# ---------------------------------------------------------------------------
+
+
+def test_lm_saturated_fit_returns_nan_not_crash():
+    """df_residual == 0 (n == rank): R returns NaN sigma/SE/adj-R² and no
+    F-statistic rather than erroring (was a ZeroDivisionError in hea)."""
+    g = load_dataset("faraway", "gala")
+    m = lm("Species ~ Area", g, subset="Area > 10 & Elevation < 200")  # 2 rows
+    assert m.df_residuals == 0
+    np.testing.assert_allclose(m._bhat_arr, [15.8321, 1.39296], rtol=1e-4)
+    assert np.isnan(m.sigma)
+    assert np.all(np.isnan(m._se_bhat_arr))
+    assert np.isclose(m.r_squared, 1.0)          # perfect fit
+    assert np.isnan(m.r_squared_adjusted)
+    assert m.fstats is None
+    assert isinstance(repr(m.summary()), str)    # summary must not crash
+
+
+def test_lm_singular_ok_false_raises():
+    st = load_dataset("gamair", "stomata")
+    with pytest.raises(ValueError, match="singular fit"):
+        lm("area ~ CO2 + tree", st, singular_ok=False)
+    # default singular_ok=True still fits (drops the aliased dummy)
+    assert lm("area ~ CO2 + tree", st, singular_ok=True).df_residuals == 18
+
+
+def test_lm_residuals_types_match_R():
+    from hea.R import resid
+    mt = load_dataset("R", "mtcars")
+    w = 1.0 / mt["wt"].to_numpy()
+    m = lm("mpg ~ wt + hp", mt, weights=w)
+    # residuals.lm: response/working = raw r; pearson/deviance = √w·r
+    np.testing.assert_allclose(
+        resid(m, "response")[:3], [-2.8988903, -1.7657153, -2.9668587], rtol=1e-5
+    )
+    np.testing.assert_allclose(resid(m, "working"), resid(m, "response"))
+    np.testing.assert_allclose(
+        resid(m, "pearson")[:3], [-1.7909404, -1.0413621, -1.9478381], rtol=1e-5
+    )
+    np.testing.assert_allclose(resid(m, "deviance"), resid(m, "pearson"))
+    # unweighted: weighted residuals equal the raw residuals
+    mu = lm("mpg ~ wt", mt)
+    np.testing.assert_allclose(resid(mu, "pearson"), resid(mu, "response"))
+
+
+def test_lm_weights_generic():
+    from hea.R import weights
+    mt = load_dataset("R", "mtcars")
+    w = 1.0 / mt["wt"].to_numpy()
+    np.testing.assert_allclose(
+        weights(lm("mpg ~ wt + hp", mt, weights=w))[:3],
+        [0.38167939, 0.34782609, 0.43103448], rtol=1e-5,
+    )
+    assert weights(lm("mpg ~ wt", mt)) is None   # R: NULL when unweighted
