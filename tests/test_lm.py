@@ -14,6 +14,8 @@ and uses the syntax formula.py is designed for.
 from __future__ import annotations
 
 import numpy as np
+import polars as pl
+import pytest
 from scipy.stats import f as f_dist
 
 from conftest import load_dataset
@@ -371,3 +373,149 @@ def test_wood_2_1_1_stomata_anova_single_model_sequential(capsys):
     assert "tree" in out and "6.6654" in out and "0.001788" in out
     # Residuals row uses df=18 / SS=0.8604
     assert "Residuals" in out and "0.8604" in out
+
+
+# ---------------------------------------------------------------------------
+# Weighted least squares — parity with R's lm(..., weights=) inference
+#
+# R's summary.lm uses the *weighted* residual sum of squares (Σ wᵢrᵢ²) for
+# the residual variance, a weighted TSS for R², and adds Σ log wᵢ to the
+# Gaussian log-likelihood; zero-weight rows drop out of the effective
+# sample size. Oracle values below are from R 4.6.0 (hardcoded; CI never
+# calls R):
+#
+#   m1 <- lm(mpg ~ wt + hp, data = mtcars, weights = 1/wt)
+#   m2 <- lm(Ozone ~ Solar.R + Wind + Temp, data = airquality, weights = 1/Wind)
+# ---------------------------------------------------------------------------
+
+
+def test_weighted_lm_mtcars_summary_matches_R():
+    mt = load_dataset("R", "mtcars")
+    w = 1.0 / mt["wt"].to_numpy()
+    m = lm("mpg ~ wt + hp", mt, weights=w)
+
+    _assert_summary(
+        m, n=32, p=3, df_residuals=29, sigma=1.5539921,
+        r2=0.83887884, r2adj=0.82776704,
+        fstats=75.494389, f_pvalue=3.189423998e-12,
+        loglike=-75.885285, AIC=159.77057, BIC=165.63351,
+    )
+    _assert_coef(m, "(Intercept)", 39.002317,   1.5414618,    25.302163,  0.0)
+    _assert_coef(m, "wt",          -4.4438234,   0.68829958,   -6.4562344, 0.0)
+    _assert_coef(m, "hp",          -0.031460081, 0.0097760391, -3.2180805, 0.0031685207)
+
+    # deviance.lm == Σ wᵢ rᵢ² (weighted), not the raw Σ rᵢ²
+    np.testing.assert_allclose(m.rss, 70.031852, rtol=1e-5)
+
+    # confint(m)
+    ci = m.ci_bhat
+    np.testing.assert_allclose(
+        ci[ci.columns[1]].to_numpy(), [35.849673, -5.8515541, -0.051454326], rtol=1e-5
+    )
+    np.testing.assert_allclose(
+        ci[ci.columns[2]].to_numpy(), [42.15496, -3.0360927, -0.011465836], rtol=1e-5
+    )
+
+
+def test_weighted_lm_airquality_na_weight_alignment_matches_R():
+    """Weights are carried through na.omit: ``1/Wind`` is length-153, the
+    fit drops the 42 rows with NA Ozone/Solar.R, and the surviving 111
+    weights must line up with X's rows (R keeps weights in the model
+    frame). Before the fix this raised a length-mismatch error."""
+    aq = load_dataset("R", "airquality")
+    w = 1.0 / aq["Wind"].to_numpy()
+    m = lm("Ozone ~ Solar.R + Wind + Temp", aq, weights=w)
+
+    assert m.n == 111
+    assert len(m.weights) == 111
+    _assert_summary(
+        m, n=111, p=4, df_residuals=107, sigma=8.271088,
+        r2=0.63202682, r2adj=0.62170982,
+        fstats=61.260689, f_pvalue=3.921851128e-23,
+        loglike=-513.5424, AIC=1037.0848, BIC=1050.6325,
+    )
+    _assert_coef(m, "(Intercept)", -41.6861,     28.199857,   -1.478238,  0.1422818)
+    _assert_coef(m, "Solar.R",     0.088902323,  0.028574423,  3.1112553, 0.0023887572)
+    _assert_coef(m, "Wind",        -4.9880352,   0.80229441,  -6.217213,  0.0)
+    _assert_coef(m, "Temp",        1.5031619,    0.30449779,   4.9365281, 0.0)
+
+
+def test_weighted_lm_predict_intervals_match_R():
+    mt = load_dataset("R", "mtcars")
+    w = 1.0 / mt["wt"].to_numpy()
+    m = lm("mpg ~ wt + hp", mt, weights=w)
+    nd = pl.DataFrame({"wt": [3.0], "hp": [150.0]})
+
+    ci = m.predict(newdata=nd, interval="confidence")
+    np.testing.assert_allclose(ci["fit"][0], 20.951834, rtol=1e-5)
+    np.testing.assert_allclose(ci["lwr"][0], 19.949818, rtol=1e-5)
+    np.testing.assert_allclose(ci["upr"][0], 21.95385,  rtol=1e-5)
+
+    # R's predict.lm uses a constant prediction variance (res.var) for
+    # weighted fits by default (its "Assuming constant prediction
+    # variance" path); hea matches that.
+    pi = m.predict(newdata=nd, interval="prediction")
+    np.testing.assert_allclose(pi["lwr"][0], 17.619351, rtol=1e-5)
+    np.testing.assert_allclose(pi["upr"][0], 24.284317, rtol=1e-5)
+
+
+def test_weighted_lm_anova_sequential_matches_R(capsys):
+    """anova(m) sequential SS must use the *weighted* RSS chain."""
+    from hea.R import anova
+    mt = load_dataset("R", "mtcars")
+    w = 1.0 / mt["wt"].to_numpy()
+    m = lm("mpg ~ wt + hp", mt, weights=w)
+    anova(m)
+    out = capsys.readouterr().out
+    assert "339.6128" in out   # wt Sum Sq (weighted)
+    assert "140.6327" in out   # wt F value
+    assert "25.0087" in out    # hp Sum Sq
+    assert "10.356" in out     # hp F value
+    assert "70.0319" in out    # Residuals SS == deviance(m)
+
+
+def test_weighted_lm_zero_weights_match_R():
+    """R drops zero-weight rows from the fit: df.residual and the
+    log-likelihood sample size count only the nonzero-weight rows, while
+    the residual vector keeps every row."""
+    mt = load_dataset("R", "mtcars")
+    w = np.ones(mt.height)
+    w[:2] = 0.0
+    m = lm("mpg ~ wt + hp", mt, weights=w)
+
+    assert m.df_residuals == 27       # 30 nonzero rows − 3 params
+    assert m._n_eff == 30
+    assert len(m._residuals_arr) == 32  # rows retained, as in R
+    _assert_coef(m, "(Intercept)", 37.612212,  1.6458459)
+    _assert_coef(m, "wt",          -3.9191052, 0.64013433)
+    np.testing.assert_allclose(m.sigma,     2.6185529,   rtol=1e-5)
+    np.testing.assert_allclose(m.r_squared, 0.83533139,  rtol=1e-5)
+    np.testing.assert_allclose(m.loglike,   -69.866403,  rtol=1e-5)
+    np.testing.assert_allclose(m.AIC,       147.73281,   rtol=1e-5)
+    np.testing.assert_allclose(m.BIC,       153.3376,    rtol=1e-5)
+
+
+def test_weighted_lm_input_validation():
+    gala = load_dataset("faraway", "gala")
+    n = gala.height
+
+    # negative weights → hard error (R: lm.wfit "missing or negative ...")
+    with pytest.raises(ValueError, match="negative weights"):
+        lm("Species ~ Area", gala, weights=-np.ones(n))
+
+    # NaN weights → hard error
+    bad = np.ones(n)
+    bad[0] = np.nan
+    with pytest.raises(ValueError, match="negative weights"):
+        lm("Species ~ Area", gala, weights=bad)
+
+    # length mismatch against the input frame → error
+    with pytest.raises(ValueError, match="Length of weights"):
+        lm("Species ~ Area", gala, weights=np.ones(n + 1))
+
+    # weights + subset: filtered in lockstep, no crash
+    w = np.linspace(0.5, 2.0, n)
+    m = lm("Species ~ Area", gala, weights=w, subset=np.arange(10))
+    assert m.n == 10
+    assert len(m.weights) == 10
+    np.testing.assert_array_equal(m.weights, w[:10])

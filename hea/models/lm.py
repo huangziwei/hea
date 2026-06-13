@@ -7,7 +7,17 @@ from scipy.linalg import cholesky, lu, qr, solve_triangular
 from scipy.optimize import minimize
 from scipy.stats import f, norm, t
 
-from ..formula import _eval_atom, materialize, prepare_design
+from ..formula import (
+    Name,
+    _eval_atom,
+    _lhs_referenced_cols,
+    _na_mask_with_matrix_cols,
+    expand,
+    materialize,
+    parse,
+    prepare_design,
+    referenced_columns,
+)
 from ..utils import (
     _dig_tst,
     format_df,
@@ -26,9 +36,11 @@ def _row_frame(values: np.ndarray, columns: list[str]) -> pl.DataFrame:
     return pl.DataFrame({c: [float(flat[i])] for i, c in enumerate(columns)})
 
 
-def _apply_subset(data: pl.DataFrame, subset) -> pl.DataFrame:
-    """R: ``subset=`` filter for ``lm()`` / ``glm()`` / etc.
+def _subset_keep(n: int, subset) -> list[int]:
+    """0-based row indices kept by R's ``subset=`` argument.
 
+    Single source of truth for ``lm()`` / ``glm()`` / ``gmm()`` subsetting,
+    so the data frame and the ``weights`` vector get filtered identically.
     Three forms: boolean mask (length == nrow), non-negative 0-based
     indices (keep), or negative indices (drop). Negative indices use
     Python's ``range(n) − k`` semantics: ``-1`` is the last row, ``-2``
@@ -40,12 +52,11 @@ def _apply_subset(data: pl.DataFrame, subset) -> pl.DataFrame:
     if isinstance(subset, (pl.Series, np.ndarray, list, tuple)):
         arr = np.asarray(subset)
         if arr.dtype == bool:
-            return data.filter(pl.Series(arr))
+            return [int(i) for i in np.flatnonzero(arr)]
         ints = arr.astype(int)
     else:
         # scalar
         ints = np.asarray([int(subset)])
-    n = data.height
     has_nonneg = bool((ints >= 0).any())
     has_neg = bool((ints < 0).any())
     if has_nonneg and has_neg:
@@ -56,11 +67,42 @@ def _apply_subset(data: pl.DataFrame, subset) -> pl.DataFrame:
         # Negative indices drop the corresponding rows (Python convention:
         # -1 is the last row).
         drop_set = {n + int(idx) for idx in ints.tolist()}
-        keep = [i for i in range(n) if i not in drop_set]
-        return data[keep]
+        return [i for i in range(n) if i not in drop_set]
     # Non-negative indices: keep those rows.
-    keep = [int(i) for i in ints.tolist()]
-    return data[keep]
+    return [int(i) for i in ints.tolist()]
+
+
+def _apply_subset(data: pl.DataFrame, subset) -> pl.DataFrame:
+    """R: ``subset=`` filter for ``lm()`` / ``glm()`` / etc. — see
+    :func:`_subset_keep` for the index semantics."""
+    return data[_subset_keep(data.height, subset)]
+
+
+def _model_frame_keep_mask(formula: str, data: pl.DataFrame) -> np.ndarray:
+    """Boolean keep-mask matching ``prepare_design``'s ``na.omit`` policy.
+
+    Mirrors R's ``na.action = na.omit`` on the model frame: a row is
+    dropped when the response or any RHS-referenced column is NA. Used to
+    carry the ``weights`` vector through the *same* row-drops the design
+    matrix gets, so weights stay aligned to the rows actually fit (R keeps
+    weights inside the model frame, so this is automatic there).
+
+    Reuses ``prepare_design``'s own ``_na_mask_with_matrix_cols`` so the
+    mask can't drift from the rows ``prepare_design`` actually keeps.
+    """
+    parsed = parse(formula)
+    columns = set(data.columns)
+    if parsed.lhs is None:
+        lhs_cols: set[str] = set()
+    elif isinstance(parsed.lhs, Name):
+        lhs_cols = {parsed.lhs.ident} & columns
+    else:
+        lhs_cols = _lhs_referenced_cols(parsed.lhs, columns)
+    expanded = expand(parsed, data_columns=list(data.columns))
+    na_cols = (referenced_columns(expanded) | lhs_cols) & columns
+    if not na_cols:
+        return np.ones(data.height, dtype=bool)
+    return _na_mask_with_matrix_cols(data, na_cols)
 
 
 def _drop_aliased_cols(X_df: pl.DataFrame) -> list[str]:
@@ -361,17 +403,45 @@ class lm:
         subset=None,
     ):
 
-        # R's ``subset=`` filters rows before fitting. Mirror its semantics:
-        # bool vector → mask; positive ints → 1-based positions to keep;
-        # negative ints → 1-based positions to drop.
-        if subset is not None:
-            data = _apply_subset(data, subset)
-
         # meta
         self.formula = formula
-        self.data = data
-        self.weights = weights
         self.method = method
+
+        # ``weights`` are validated against the input frame, then carried
+        # through the *same* ``subset=`` + ``na.omit`` row-drops the data
+        # gets, so they stay aligned to the rows actually fit. R keeps
+        # weights inside the model frame, so this alignment is automatic
+        # there; hea takes a bare vector, so we replay the row-drops on it.
+        if weights is not None:
+            w_arr = np.asarray(weights, dtype=float).reshape(-1)
+            if w_arr.shape[0] != data.height:
+                raise ValueError(
+                    "Length of weights should be the same as the number of rows in the dataframe"
+                )
+            if not np.all(np.isfinite(w_arr)) or np.any(w_arr < 0.0):
+                # R: lm.wfit() — `any(w < 0 | is.na(w))` is a hard error.
+                raise ValueError("missing or negative weights not allowed")
+        else:
+            w_arr = None
+
+        # R's ``subset=`` filters rows before fitting (bool mask / 0-based
+        # keep / negative drop — see _subset_keep). Filter weights in
+        # lockstep through the shared index.
+        if subset is not None:
+            keep = _subset_keep(data.height, subset)
+            data = data[keep]
+            if w_arr is not None:
+                w_arr = w_arr[keep]
+
+        # na.omit drops rows with NA in the response or any referenced RHS
+        # column; replay that drop on the weights so they match X's rows.
+        if w_arr is not None:
+            na_keep = _model_frame_keep_mask(formula, data)
+            if not na_keep.all():
+                w_arr = w_arr[na_keep]
+
+        self.data = data
+        self.weights = w_arr
 
         d = prepare_design(formula, data)
         self._expanded = d.expanded
@@ -408,20 +478,29 @@ class lm:
             n,
             p,
         ) = X.shape  # n_samples x n_features (intercept included if available)
-        if weights is not None and len(weights) != n:
-            raise ValueError(
-                "Length of weights should be the same as the number of rows in the dataframe"
-            )
-        self.W = W = np.eye(n) if weights is None else np.diag(weights)
+        # Prior weights as a length-n vector (all-ones when unweighted);
+        # ``self.weights`` was already aligned to X's rows above. The
+        # solvers / leverage consume the diagonal ``W``.
+        self._w = (
+            np.ones(n) if self.weights is None
+            else np.asarray(self.weights, dtype=float)
+        )
+        # Effective sample size: R drops zero-weight rows from the fit, so
+        # df / logLik / adjusted-R² count only rows with w > 0 (n_eff == n
+        # whenever unweighted or all weights are positive).
+        self._n_eff = (
+            n if self.weights is None else int(np.count_nonzero(self._w > 0.0))
+        )
+        self.W = W = np.eye(n) if self.weights is None else np.diag(self._w)
 
         # model degree of freedom
         self.df_model = self.p - 1 if "(Intercept)" in self.column_names else self.p
 
-        # residual degrees of freedom (n - p)
+        # residual degrees of freedom (n_eff - p)
         self.df_residuals = (
-            self.n - self.df_model - 1
+            self._n_eff - self.df_model - 1
             if "(Intercept)" in self.column_names
-            else self.n - self.df_model
+            else self._n_eff - self.df_model
         )
 
         # total parameter count (p fixed + 1 residual variance), for the
@@ -469,8 +548,12 @@ class lm:
         self._residuals_arr = residuals
         self.residuals = pl.DataFrame({"residuals": residuals})
 
-        # compute residual sum of squares (RSS)
-        self.rss = float(residuals @ residuals)
+        # compute residual sum of squares (RSS). Weighted by the prior
+        # weights — R's summary.lm / deviance.lm use Σ wᵢ·rᵢ² for the
+        # residual variance, and zero-weight rows drop out naturally.
+        # ``self._w`` is all-ones when unweighted, so this is the ordinary
+        # Σ rᵢ² in that case.
+        self.rss = float(np.sum(self._w * residuals * residuals))
 
         # compute standard deviation of model coefficients
         # aka Residual SE: σ^2 = RSS / df_residuals
@@ -768,21 +851,29 @@ class lm:
     def compute_goodness_of_fit(self):
 
         y = self.y.to_numpy().astype(float)
+        # Weighted TSS — R's summary.lm uses the weighted mean ȳ_w =
+        # Σwy/Σw and tss = Σ w (y − ȳ_w)², so that tss = mss + rss and
+        # R² = 1 − rss/tss = mss/(mss+rss) matches R exactly. With the
+        # all-ones weight vector this is the ordinary (unweighted) TSS.
+        w = self._w
 
         if "(Intercept)" in self.column_names:
-            tss = np.sum((y - y.mean()) ** 2)
-            # Eq: r2 = 1 - RSS / TSS = 1 -  sum((ŷ - yi)**2) / sum((y - ȳ)**2)
+            ybar = float(np.sum(w * y) / np.sum(w))
+            tss = float(np.sum(w * (y - ybar) ** 2))
+            # Eq: r2 = 1 - RSS / TSS = 1 -  sum(w (ŷ - yi)**2) / sum(w (y - ȳ)**2)
             r_squared = float(1 - self.rss / tss)
-            # Eq: r2adj = 1 - (1 - r2) * (n - 1) / df_residuals
-            r_squared_adjusted = 1 - (1 - r_squared) * (self.n - 1) / (
+            # Eq: r2adj = 1 - (1 - r2) * (n_eff - 1) / df_residuals
+            r_squared_adjusted = 1 - (1 - r_squared) * (self._n_eff - 1) / (
                 self.df_residuals
             )
         else:
-            tss = np.sum(y**2)
-            # Eq: r2 = 1 - RSS / TSS = 1 -  sum((ŷ - yi)**2) / sum((y)**2)
+            tss = float(np.sum(w * y**2))
+            # Eq: r2 = 1 - RSS / TSS = 1 -  sum(w (ŷ - yi)**2) / sum(w y**2)
             r_squared = float(1 - self.rss / tss)
-            # Eq: r2adj = 1 - (1 - r2) * n / df_residuals
-            r_squared_adjusted = 1 - (1 - r_squared) * self.n / (self.df_residuals)
+            # Eq: r2adj = 1 - (1 - r2) * n_eff / df_residuals
+            r_squared_adjusted = 1 - (1 - r_squared) * self._n_eff / (
+                self.df_residuals
+            )
 
         return tss, r_squared, r_squared_adjusted
 
@@ -797,8 +888,19 @@ class lm:
         return fstats, f_p_value
 
     def compute_loglikelihood(self):
+        # R's logLik.lm (Gaussian):
+        #   0.5·(Σ log wᵢ − N·(log 2π + 1 − log N + log Σ wᵢ rᵢ²))
+        # with N = #{wᵢ ≠ 0} (zero-weight rows excluded) and Σ wᵢ rᵢ² the
+        # weighted RSS. Reduces to −0.5·n·(log(rss/n)+log 2π+1) when w ≡ 1.
+        n = self._n_eff
+        if self.weights is None:
+            sum_log_w = 0.0
+        else:
+            nz = self._w > 0.0
+            sum_log_w = float(np.sum(np.log(self._w[nz])))
         return float(
-            -0.5 * self.n * (np.log(self.rss / self.n) + np.log(2 * np.pi) + 1)
+            0.5 * (sum_log_w
+                   - n * (np.log(2 * np.pi) + 1 - np.log(n) + np.log(self.rss)))
         )
 
     def compute_AIC(self):
@@ -807,19 +909,28 @@ class lm:
         return -2 * self.loglike + 2 * self.npar
 
     def compute_BIC(self):
-        return -2 * self.loglike + np.log(self.n) * self.npar
+        # R's BIC uses log(nobs) with nobs = N = #{wᵢ ≠ 0}.
+        return -2 * self.loglike + np.log(self._n_eff) * self.npar
 
     def predict(self, newdata=None, interval=None, alpha=0.05):
         return self.compute_yhat(Xnew=newdata, interval=interval, alpha=alpha)
 
     def _residuals_lines(self, digits: int = 4) -> list[str]:
-        qs = np.quantile(self._residuals_arr, [0.0, 0.25, 0.5, 0.75, 1.0])
+        # R's print.summary.lm shows *weighted* residuals (√wᵢ·rᵢ) under a
+        # "Weighted Residuals:" header when the weights vary; otherwise the
+        # raw residuals under "Residuals:".
+        r = self._residuals_arr
+        header = "Residuals:"
+        if self.weights is not None and float(np.ptp(self._w)) > 0.0:
+            r = np.sqrt(self._w) * r
+            header = "Weighted Residuals:"
+        qs = np.quantile(r, [0.0, 0.25, 0.5, 0.75, 1.0])
         labels = ["Min", "1Q", "Median", "3Q", "Max"]
         vals = format_signif(qs, digits=digits)
         widths = [max(len(l), len(v)) for l, v in zip(labels, vals)]
         hdr = " ".join(l.rjust(w) for l, w in zip(labels, widths))
         row = " ".join(v.rjust(w) for v, w in zip(vals, widths))
-        return ["Residuals:", hdr, row]
+        return [header, hdr, row]
 
     def _correlation_block(self) -> str:
         # cov2cor(vcov(m)) — correlation between coefficient estimates,
@@ -1284,20 +1395,28 @@ def _svd(X: np.array, y: np.array, return_ss: bool = True):
 
 def _qr(X: np.array, y: np.array, W: np.array, return_ss: bool = True):
     """
-    QR decomposition.
-    """
+    QR decomposition (weighted least squares).
 
-    L = cholesky(W, lower=True)
-    Xhat = L.T @ X
-    yhat = L.T @ y
+    ``W`` is the diagonal prior-weight matrix. We whiten by √w row-scaling
+    rather than ``cholesky(W)`` so zero weights don't break the
+    factorization (Cholesky needs a positive-*definite* matrix; a zero on
+    the diagonal makes ``W`` only positive-semidefinite). For positive
+    weights this is bit-identical to ``L = cholesky(W); L.T @ X`` because
+    the Cholesky factor of a diagonal matrix is ``diag(√w)``. R's lm.wfit
+    fits on ``√w·X`` / ``√w·y`` the same way.
+    """
+    w = np.diag(W)
+    wts = np.sqrt(w)
+    Xhat = wts[:, None] * X
+    yhat = wts * y
 
     Q, R = qr(Xhat, mode="economic")
     f = Q.T @ yhat
     b = solve_triangular(R, f)
 
     if return_ss:
-        XtX = X.T @ W @ X
-        Xty = X.T @ W @ y
+        XtX = X.T @ (w[:, None] * X)
+        Xty = X.T @ (w * y)
         return b, XtX, Xty
     else:
         return b
