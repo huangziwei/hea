@@ -1727,12 +1727,13 @@ def test_nAGQ_validation_accepts_0_and_1():
     assert _validate_nagq(1) == 1
 
 
-def test_nAGQ_validation_rejects_above_1_with_phase9_message():
-    """``nAGQ > 1`` defers to Phase 9 with a clear message."""
+def test_nAGQ_validation_accepts_above_1_for_agq():
+    """``nAGQ > 1`` is accepted now that AGQ (Phase 9) lands; the
+    single-scalar-RE constraint is enforced at fit time, not here."""
     from hea.models.gmm import _validate_nagq
 
-    with pytest.raises(NotImplementedError, match="Phase 9"):
-        _validate_nagq(7)
+    assert _validate_nagq(7) == 7
+    assert _validate_nagq(25) == 25
 
 
 def test_nAGQ_validation_rejects_negative_or_too_large():
@@ -1753,6 +1754,185 @@ def test_nAGQ_validation_rejects_non_integer():
         _validate_nagq(1.5)
     with pytest.raises(ValueError, match="nAGQ must be an integer"):
         _validate_nagq("not-a-number")
+
+
+# ----------------------------------------------------------------------
+# 9.1 — GHrule: Gauss-Hermite quadrature nodes/weights (nAGQ>1)
+# Reference values from ``lme4:::GHrule(n)`` (lme4 2.0-2), columns (z, w, ldnorm).
+# ----------------------------------------------------------------------
+
+_GHRULE_REF = {
+    1: [(0.0, 1.0, -0.918938533204673)],
+    2: [(-1.0, 0.5, -1.41893853320467),
+        (1.0, 0.5, -1.41893853320467)],
+    3: [(-1.73205080756888, 0.166666666666667, -2.41893853320467),
+        (-1.34584108632233e-16, 0.666666666666667, -0.918938533204673),
+        (1.73205080756888, 0.166666666666667, -2.41893853320467)],
+    5: [(-2.85697001387281, 0.0112574113277207, -5.00007736328886),
+        (-1.35562617997427, 0.222075922005613, -1.83779970312048),
+        (3.86509861497841e-17, 0.533333333333333, -0.918938533204673),
+        (1.35562617997427, 0.222075922005613, -1.83779970312048),
+        (2.85697001387281, 0.0112574113277207, -5.00007736328886)],
+}
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 5])
+def test_gh_rule_matches_lme4_table(n):
+    """``_gh_rule(n)`` reproduces ``lme4:::GHrule(n)`` (z, w, ldnorm) columns.
+
+    atol carries the near-zero middle node of odd rules (scipy vs lme4 differ
+    at ~1e-16 there); rtol pins the O(1) nodes/weights.
+    """
+    from hea.models.gmm import _gh_rule
+
+    got = _gh_rule(n)
+    ref = np.array(_GHRULE_REF[n])
+    assert got.shape == (n, 3)
+    np.testing.assert_allclose(got, ref, rtol=1e-9, atol=1e-12)
+
+
+def test_gh_rule_spot_checks_high_order():
+    """n ∈ {10, 25}: pin the extreme node + a central weight vs lme4."""
+    from hea.models.gmm import _gh_rule
+
+    r10 = _gh_rule(10)
+    assert r10.shape == (10, 3)
+    np.testing.assert_allclose(
+        r10[0], (-4.85946282833231, 4.31065263071828e-06, -12.7261280231764),
+        rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(r10[4, :2], (-0.484935707515498, 0.344642334932019),
+                               rtol=1e-9)
+
+    r25 = _gh_rule(25)
+    assert r25.shape == (25, 3)
+    np.testing.assert_allclose(
+        r25[0], (-8.71759767839959, 1.5300389979987e-17, -38.9171931744236),
+        rtol=1e-9, atol=1e-20)
+    # central weight (row 13, 1-based) of the order-25 rule
+    np.testing.assert_allclose(r25[12, 1], 0.248169351176485, rtol=1e-9)
+
+
+@pytest.mark.parametrize("n", [1, 2, 4, 7, 10, 25, 100])
+def test_gh_rule_structural_properties(n):
+    """Weights sum to 1; nodes/weights symmetric; ldnorm = log φ(z)."""
+    from hea.models.gmm import _gh_rule
+
+    r = _gh_rule(n)
+    z, w, ldnorm = r[:, 0], r[:, 1], r[:, 2]
+    assert r.shape == (n, 3)
+    np.testing.assert_allclose(w.sum(), 1.0, rtol=0, atol=1e-12)
+    # forward/reverse symmetry (the lme4 #968 symmetrization guarantees it)
+    np.testing.assert_allclose(z, -z[::-1], rtol=0, atol=1e-13)
+    np.testing.assert_allclose(w, w[::-1], rtol=0, atol=1e-15)
+    np.testing.assert_allclose(
+        ldnorm, -0.5 * np.log(2 * np.pi) - 0.5 * z**2, rtol=1e-12, atol=0)
+
+
+def test_gh_rule_order_zero_and_out_of_range():
+    """ord=0 → empty (0,3) matrix (lme4 asMatrix); ord∉[0,100] raises."""
+    from hea.models.gmm import _gh_rule
+
+    assert _gh_rule(0).shape == (0, 3)
+    with pytest.raises(ValueError, match=r"\[0, 100\]"):
+        _gh_rule(101)
+    with pytest.raises(ValueError, match=r"\[0, 100\]"):
+        _gh_rule(-1)
+
+
+# ----------------------------------------------------------------------
+# 9.2–9.5 — nAGQ>1 adaptive Gauss-Hermite end-to-end (cbpp binomial).
+# References from ``lme4::glmer(cbind(incidence, size-incidence) ~ period +
+# (1|herd), cbpp, binomial(), nAGQ=k)`` (lme4 2.0-2, default optimizer chain).
+# ``lap`` = -2*logLik(m): on the aic scale at nAGQ=1 (glmerLaplace), on the
+# deviance scale at nAGQ>1 (glmerAGQ) — the ~84 jump is lme4's own behaviour.
+# ----------------------------------------------------------------------
+
+_CBPP_AGQ_REF = {
+    1: dict(
+        theta=0.642069925403,
+        beta=[-1.398342863999, -0.991924975393,
+              -1.128216216348, -1.579745414126],
+        dev=73.474283618704, lap=184.053132779086),
+    5: dict(
+        theta=0.647369199521,
+        beta=[-1.399201882121, -0.991438021208,
+              -1.127859471008, -1.579506387556],
+        dev=73.375824032273, lap=100.011367851843),
+    25: dict(
+        theta=0.647519912197,
+        beta=[-1.399223727356, -0.991408884230,
+              -1.127809594563, -1.579480951182],
+        dev=73.373002519661, lap=100.010030540190),
+}
+
+
+@pytest.fixture(scope="module")
+def cbpp_frame():
+    from hea import data as hea_data
+
+    return hea_data("cbpp").with_columns(
+        (pl.col("incidence") / pl.col("size")).alias("y_prop"),
+        pl.col("herd").cast(pl.String),
+        pl.col("period").cast(pl.String),
+    )
+
+
+@pytest.mark.parametrize("k", [1, 5, 25])
+def test_glmer_cbpp_agq_matches_lme4(cbpp_frame, k):
+    """nAGQ ∈ {1, 5, 25} on cbpp matches ``lme4::glmer(..., nAGQ=k)``.
+
+    θ̂/β̂ and the AGQ-corrected -2logL pin to lme4 at ~1e-9 (cbpp is a
+    well-conditioned surface). Residual deviance is a BLAS-touched reduction —
+    1e-6 abs covers OpenBLAS-vs-MKL FP-order drift.
+    """
+    from hea.models.gmm import gmm
+    from hea.family import Binomial
+
+    size = cbpp_frame["size"].to_numpy().astype(float)
+    m = gmm("y_prop ~ period + (1|herd)", cbpp_frame,
+            family=Binomial(), weights=size, nAGQ=k)
+    ref = _CBPP_AGQ_REF[k]
+    np.testing.assert_allclose(m.theta, [ref["theta"]], atol=1e-6, rtol=1e-6)
+    np.testing.assert_allclose(m._beta, ref["beta"], atol=1e-6, rtol=1e-6)
+    np.testing.assert_allclose(m.deviance, ref["dev"], atol=1e-6, rtol=1e-7)
+    np.testing.assert_allclose(m.deviance_laplace, ref["lap"],
+                               atol=1e-6, rtol=1e-7)
+
+
+def test_glmer_agq_deviance_decreases_with_nagq(cbpp_frame):
+    """The AGQ -2logL (nAGQ>1, all on the deviance scale) refines downward as
+    node count rises — Laplace (k=1) is the coarsest approximation."""
+    from hea.models.gmm import gmm
+    from hea.family import Binomial
+
+    size = cbpp_frame["size"].to_numpy().astype(float)
+    lap = {
+        k: gmm("y_prop ~ period + (1|herd)", cbpp_frame,
+               family=Binomial(), weights=size, nAGQ=k).deviance_laplace
+        for k in (5, 10)
+    }
+    # k=5 → k=10 is a clean ~1.3e-3 decrease, well above optimizer noise.
+    assert lap[5] > lap[10]
+
+
+def test_glmer_agq_rejects_non_scalar_re():
+    """nAGQ>1 requires a single scalar RE (modular.R:918-920): crossed factors
+    and vector (random-slope) terms raise lme4's exact message."""
+    from hea.models.gmm import gmm
+    from hea.family import Binomial
+
+    rng = np.random.default_rng(3)
+    n = 80
+    df = pl.DataFrame({
+        "y": rng.integers(0, 2, n).astype(float),
+        "x": rng.normal(size=n),
+        "a": (np.arange(n) % 8).astype(str),
+        "b": (np.arange(n) % 5).astype(str),
+    })
+    with pytest.raises(ValueError, match="single, scalar random-effects term"):
+        gmm("y ~ x + (1|a) + (1|b)", df, family=Binomial(), nAGQ=3)
+    with pytest.raises(ValueError, match="single, scalar random-effects term"):
+        gmm("y ~ x + (1 + x|a)", df, family=Binomial(), nAGQ=3)
 
 
 # ----------------------------------------------------------------------

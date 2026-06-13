@@ -35,6 +35,7 @@ import polars as pl
 from scipy.linalg import qr as _scipy_qr, solve_triangular
 from scipy.optimize import minimize
 from scipy.sparse import csc_array, eye_array
+from scipy.special import roots_hermite
 
 from .. import family as _family_mod
 from ..family import Family, Gaussian, _coerce_response
@@ -1122,6 +1123,102 @@ def _pwrss_update(
     return pdev
 
 
+def _gh_rule(ord: int) -> np.ndarray:
+    """Univariate Gauss-Hermite quadrature rule for adaptive GHQ (``nAGQ>1``).
+
+    Port of lme4's ``GHrule(ord)`` (R/GHrule.R). Returns an ``(ord, 3)`` array
+    whose columns are ``(z, w, ldnorm)``: node positions ``z`` and weights ``w``
+    for integrating ``f(x)`` against the standard-normal density, plus
+    ``ldnorm = log φ(z)``.
+
+    lme4 reads precomputed ``fastGHQuad::gaussHermiteData(ord)`` values from
+    ``sysdata.rda`` and rescales them (``w ← w/Σw``, ``x ← x·√2``); we compute
+    the same rule at runtime from :func:`scipy.special.roots_hermite` (both use
+    the physicists' ``e^{-x²}`` convention, so the nodes are the roots of the
+    same Hermite polynomial). The forward/reverse symmetrization
+    (``z ← (z−rev z)/2``, ``w ← (w+rev w)/2``; lme4 issue #968) forces exact
+    symmetry. Matches ``lme4:::GHrule`` to ≤5e-14 for ``ord ≤ 25``.
+
+    ``ord == 0`` returns an empty ``(0, 3)`` array (mirrors lme4's
+    ``asMatrix=TRUE`` zero case). The middle node of an odd-order rule is
+    near-zero-but-not-exactly-zero (numerical noise ~1e-16), matching lme4 —
+    which matters because :func:`_glmm_agq_deviance` special-cases ``z == 0``.
+    """
+    ord = int(ord)
+    if ord < 0 or ord > 100:
+        raise ValueError(f"GH rule order must be in [0, 100]; got {ord}")
+    if ord == 0:
+        return np.zeros((0, 3))
+    x, w = roots_hermite(ord)
+    z = x * np.sqrt(2.0)
+    w = w / w.sum()
+    # Symmetrize forward/reverse — lme4 GHrule.R (issue #968).
+    z = (z - z[::-1]) / 2.0
+    w = (w + w[::-1]) / 2.0
+    ldnorm = -0.5 * np.log(2.0 * np.pi) - 0.5 * z**2
+    return np.column_stack([z, w, ldnorm])
+
+
+def _devc_col(fac: np.ndarray, u: np.ndarray, dev_res: np.ndarray,
+              n_levels: int) -> np.ndarray:
+    """Per-level ``u² + Σ devResid`` — port of ``devcCol`` (external.cpp:398-406).
+
+    ``fac`` is the 0-based grouping-factor code per observation (length n);
+    ``u`` the conditional modes (length ``n_levels``); ``dev_res`` the
+    per-observation deviance residuals (length n). Returns a length-``n_levels``
+    vector: each level's squared conditional mode plus the sum of the deviance
+    residuals of the observations in that level.
+    """
+    ans = u * u
+    np.add.at(ans, fac, dev_res)
+    return ans
+
+
+def _glmm_agq_deviance(pred: "_PredState", resp: "_GlmResponse",
+                       gqmat: np.ndarray, fac: np.ndarray,
+                       n_levels: int) -> float:
+    """Adaptive Gauss-Hermite ``-2 log L`` for a single scalar RE.
+
+    Port of ``glmerAGQ`` (external.cpp:414-460). Assumes ``pred``/``resp`` are
+    at the conditional mode for the current ``(θ, β)`` — PIRLS has just
+    converged with ``pred.u0 == 0`` so ``pred.u(1) == mode`` and
+    ``pred.delu == mode`` (hea never ``install_pars`` during the outer loop;
+    see ``_fit_glmm_from_components``). The loop relies on that split:
+    ``set u0 = z·sd`` ⇒ ``u(1) = z·sd + mode`` (the adaptive GH shift).
+
+    Each level's posterior integral is approximated by GH nodes centred at the
+    mode and scaled by the posterior SD ``sd = 1/diag(L)``. For a single scalar
+    RE the system ``M = Λ'U U'Λ + I`` is diagonal, so ``diag(L) = √diag(M)``
+    and ``sd = 1/√(rowSums(lamt_ut²) + 1)`` — computed directly in u-indexing
+    (robust to CHOLMOD's permutation, and exactly lme4's ``1/L.factor()->x``
+    when M is diagonal).
+    """
+    sqrt2pi = np.sqrt(2.0 * np.pi)
+    devc0 = _devc_col(fac, pred.u(1.0), resp.deviance_residuals(), n_levels)
+    m_diag = np.asarray(
+        pred.lamt_ut.multiply(pred.lamt_ut).sum(axis=1)
+    ).ravel() + 1.0
+    sd = 1.0 / np.sqrt(m_diag)
+
+    u0_saved = pred.u0.copy()
+    mult = np.zeros(n_levels)
+    for zknot, w, ldnorm in gqmat:
+        if zknot == 0.0:
+            # Central node: integrand is exactly ``w`` (devc == devc0 and
+            # exp(-ldnorm₀)/√2π == 1). lme4 special-cases this.
+            mult += w
+        else:
+            pred.u0 = zknot * sd
+            resp.update_mu(pred.lin_pred(1.0))
+            devc = _devc_col(fac, pred.u(1.0), resp.deviance_residuals(),
+                             n_levels)
+            mult += np.exp(-0.5 * (devc - devc0) - ldnorm) * w / sqrt2pi
+    # Restore the conditional-mode state (u0 == 0 ⇒ u(1) == mode).
+    pred.u0 = u0_saved
+    resp.update_mu(pred.lin_pred(1.0))
+    return float(devc0.sum() + pred.log_det_l_sq - 2.0 * np.log(mult).sum())
+
+
 def _glmm_devfun_factory(
     pred: _PredState,
     resp: _GlmResponse,
@@ -1130,6 +1227,9 @@ def _glmm_devfun_factory(
     tol_pwrss: float = 1e-7,
     maxit_pwrss: int = 100,
     verbose: int = 0,
+    gqmat: Optional[np.ndarray] = None,
+    fac: Optional[np.ndarray] = None,
+    n_levels: Optional[int] = None,
 ) -> Callable[[np.ndarray], float]:
     """Build the Laplace deviance evaluator for a given optimization stage.
 
@@ -1156,9 +1256,10 @@ def _glmm_devfun_factory(
         offset" in ``ldL2``, producing ~1e-4 mismatches against lme4.
     nagq : int
         ``0`` for the Stage 0 (θ-only) closure, ``1`` for the Stage 1
-        (θ, β) closure. ``nagq > 1`` (adaptive Gauss-Hermite) is implemented
-        in Phase 9 — pass through this factory unchanged once the
-        ``_pwrss_update`` AGQ path is added.
+        (θ, β) Laplace closure, ``>1`` for the Stage 1 adaptive Gauss-Hermite
+        closure — which then requires ``gqmat`` (``_gh_rule(nagq)``), ``fac``
+        (per-obs 0-based grouping codes), and ``n_levels`` (a single scalar
+        RE; see :func:`_glmm_agq_deviance`).
     tol_pwrss, maxit_pwrss, verbose
         Passed to :func:`_pwrss_update`. Match lme4's
         ``glmerControl(tolPwrss=1e-7, ...)`` defaults.
@@ -1217,6 +1318,16 @@ def _glmm_devfun_factory(
     # before each PIRLS run (lmer.R:347-348, modular.R:996).
     base_offset = resp.offset.copy()
     n_theta = len(pred.theta)
+    # nagq > 1 → the Stage-1 closure returns the adaptive Gauss-Hermite
+    # deviance (port of updateGlmerDevfun + glmerAGQ) instead of the Laplace
+    # value. Requires the precomputed GH rule, the per-obs grouping codes, and
+    # the level count (a single scalar RE — enforced by the caller).
+    is_agq = nagq > 1
+    if is_agq and (gqmat is None or fac is None or n_levels is None):
+        raise ValueError(
+            "nagq > 1 requires gqmat, fac, and n_levels (the AGQ rule and "
+            "single-scalar-RE grouping)"
+        )
 
     def devfun_theta_beta(par: np.ndarray) -> float:
         par = np.asarray(par, dtype=float)
@@ -1241,6 +1352,8 @@ def _glmm_devfun_factory(
             maxit=maxit_pwrss, verbose=verbose,
         )
         resp.update_weights()
+        if is_agq:
+            return _glmm_agq_deviance(pred, resp, gqmat, fac, n_levels)
         return resp.laplace(
             pred.log_det_l_sq, pred.log_det_rx_sq, pred.sqr_l_u(1.0),
         )
@@ -3511,8 +3624,8 @@ def _resolve_lme_family(family) -> Family:
 def _validate_nagq(nAGQ: int) -> int:
     """Validate ``nAGQ=`` per lme4 (modular.R:980-987).
 
-    Integer in [0, 100]. ``nAGQ > 1`` (adaptive Gauss-Hermite) is reserved
-    for Phase 9 and raises :class:`NotImplementedError`.
+    Integer in [0, 100]. ``nAGQ > 1`` (adaptive Gauss-Hermite) is supported;
+    its single-scalar-RE constraint is checked at fit time, not here.
     """
     try:
         n = int(nAGQ)
@@ -3524,12 +3637,9 @@ def _validate_nagq(nAGQ: int) -> int:
         raise ValueError(f"nAGQ must be an integer; got {nAGQ!r}")
     if n < 0 or n > 100:
         raise ValueError(f"nAGQ must be in [0, 100]; got {n}")
-    if n > 1:
-        raise NotImplementedError(
-            f"nAGQ={n}: adaptive Gauss-Hermite quadrature awaits Phase 9 of "
-            "the lme-family port. Use nAGQ=1 (Laplace) or nAGQ=0 (no Stage-1 "
-            "outer refinement) for now."
-        )
+    # nAGQ > 1 (adaptive Gauss-Hermite) is supported (Phase 9). The
+    # single-scalar-RE constraint (modular.R:918-920) is enforced at fit time
+    # in _fit_glmm_from_components, where the RE structure is available.
     return n
 
 
@@ -4619,9 +4729,41 @@ class gmm:
             # Stage 1 — optimize over (θ, β) jointly. β is folded into the
             # offset; PIRLS uses u_only=True. The factory snapshots lp0 at
             # the current (post-Stage-0) state and base_offset = resp.offset.
+            #
+            # nAGQ=1 → Laplace; nAGQ>1 → adaptive Gauss-Hermite (Phase 9).
+            # AGQ requires a single scalar RE (modular.R:918-920) and feeds the
+            # factory the GH rule + per-obs grouping codes.
+            nagq_stage1 = inputs.nAGQ
+            agq_kwargs: dict = {}
+            if nagq_stage1 > 1:
+                # Single scalar RE term: one grouping factor, one bar, one
+                # component (modular.R:918-920). ``cnms`` values are a string
+                # for scalar bars / a list for vector bars, so count via
+                # ``_bar_sizes`` rather than ``len`` on the value.
+                if (len(re.flist_levels) != 1 or len(re.cnms) != 1
+                        or _bar_sizes(re.cnms)[0] != 1):
+                    raise ValueError(
+                        "nAGQ > 1 is only available for models with a single, "
+                        "scalar random-effects term"
+                    )
+                # fac = per-obs 0-based level code. Under the single-scalar-RE
+                # constraint Z is the n×q indicator (one nonzero per row), so
+                # the CSR column indices give each obs's level — in the same
+                # u-ordering used by sd / devc0.
+                z_csr = Z_sp.tocsr()
+                if z_csr.nnz != n:
+                    raise ValueError(
+                        "AGQ: random-effects design is not a clean indicator "
+                        "(expected one nonzero per row)"
+                    )
+                agq_kwargs = {
+                    "gqmat": _gh_rule(nagq_stage1),
+                    "fac": z_csr.indices.astype(np.intp),
+                    "n_levels": q,
+                }
             devfun_stage1 = _glmm_devfun_factory(
-                pred, resp, nagq=1, tol_pwrss=tol_pwrss,
-                maxit_pwrss=maxit_pwrss, verbose=verbose_pirls,
+                pred, resp, nagq=nagq_stage1, tol_pwrss=tol_pwrss,
+                maxit_pwrss=maxit_pwrss, verbose=verbose_pirls, **agq_kwargs,
             )
             start_par = np.concatenate([theta_stage0, beta_start])
             lb_par = np.concatenate([lb_theta, lb_beta])
