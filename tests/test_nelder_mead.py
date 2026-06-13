@@ -15,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from hea.models.gmm import NelderMead, NMStatus
+from hea.models.gmm import NelderMead
 
 
 def test_nelder_mead_quadratic_matches_lme4():

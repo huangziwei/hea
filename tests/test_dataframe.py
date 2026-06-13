@@ -1201,9 +1201,9 @@ def test_summary_repr_preserves_block_alignment():
     s = repr(df.summary(width=80))
     lines = s.split("\n")
     # Find the body lines (skip the centered header).
-    body = [l for l in lines if ":" in l]
+    body = [ln for ln in lines if ":" in ln]
     # Every line has the colon at the same column.
-    colon_positions = {l.index(":") for l in body}
+    colon_positions = {ln.index(":") for ln in body}
     assert len(colon_positions) == 1
 
 

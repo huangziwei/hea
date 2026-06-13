@@ -283,38 +283,18 @@ def _log1pmx(x: float) -> float:
     back to ``log1p(x) - x``; otherwise uses a series expansion.
     """
     minLog1Value = -0.79149064
-    two = 2.0
-    tol_logcf = 1e-14
     if x > 1.0 or x < minLog1Value:
         return np.log1p(x) - x
     # |x| <= 0.5 — use series
     # log1pmx(x) = -x²/2 + x³·(1/3 - x/4 + x²/5 - ...) = -x²/2 + x³·logcf(x, 3, 2)
-    # logcf evaluated via Lentz's continued-fraction algorithm.
     r = x / (x + 2.0)
     y = r * r
     if abs(x) < 1e-2:
         # Truncated series — used for very small |x|.
         return r * (2.0 + y * (2.0 / 3.0 + y * (2.0 / 5.0 + y * (2.0 / 7.0 + y * (2.0 / 9.0))))) - x
-    # General case via Lentz iteration of the continued fraction:
-    # logcf(y, 3, 2) for ln((1+x)/(1-x)) = 2r · logcf(r², 1, 2)
-    # We compute log1p(x) = 2r · sum directly.
-    a1 = 3.0
-    b1 = 1.0 - y * (a1 / (a1 + two))
-    a2 = a1 + 1.0  # = 4
-    c1 = 1.0
-    c2 = 1.0
-    c4 = a1 * a2
-    a1 = 1.0
-    while True:
-        c3 = c2 * c2
-        c2 = c4 - c3 * a1 * y
-        b2 = b1 * (c2 - c1 * y)
-        a3 = a1 * a2
-        # ...
-        # The full Lentz iteration is more involved; for our use-case
-        # |x| < 0.5 the simpler "long series" version is enough.
-        break
-    # Fallback: numpy log1p when series is unavailable.
+    # Larger |x| in (1e-2, 0.5]: fall back to numpy's log1p. (A full Lentz
+    # continued-fraction expansion was scaffolded here but never finished —
+    # it computed nothing the fallback doesn't, so it was removed.)
     return np.log1p(x) - x
 
 
@@ -515,7 +495,10 @@ def _ebd0(x, M):
         active_idx = np.where(active)[0]
         yh[active_idx[overflow]] = np.inf
         good = ~overflow
-        xa = xa[good]; Ma = Ma[good]; r = r[good]; e = e[good]
+        xa = xa[good]
+        Ma = Ma[good]
+        r = r[good]
+        e = e[good]
         active_idx = active_idx[good]
     else:
         active_idx = np.where(active)[0]
@@ -531,7 +514,11 @@ def _ebd0(x, M):
     if np.any(inf_fg):
         yh[active_idx[inf_fg]] = np.inf
         good = ~inf_fg
-        xa = xa[good]; Ma = Ma[good]; fg = fg[good]; i = i[good]; e = e[good]
+        xa = xa[good]
+        Ma = Ma[good]
+        fg = fg[good]
+        i = i[good]
+        e = e[good]
         active_idx = active_idx[good]
 
     if xa.size == 0:
@@ -573,8 +560,6 @@ def _ebd0(x, M):
 
     # ADD1(M); ADD1(-M·fg) only where fg != 1; for fg==1, the original
     # scalar code returns early before these — match that exactly.
-    M_inc = np.where(fg != 1.0, Ma, 0.0)
-    fg_inc = np.where(fg != 1.0, -Ma * fg, 0.0)
     # But: the scalar code returns IMMEDIATELY for fg==1 after the first
     # add1(-x·log1pmx). For fg==1, lh/ll already have the right value,
     # so skip the M / -M·fg adds.
@@ -633,14 +618,16 @@ def _dpois_raw(x, lambda_, give_log: bool = True):
         out[x_le_lt] = -lam[x_le_lt]
     if np.any(lam_lt_xt):
         sub = lam_lt_xt
-        xn = x[sub]; ln = lam[sub]
+        xn = x[sub]
+        ln = lam[sub]
         out[sub] = np.where(~np.isfinite(xn),
                             NEG_INF,
                             -ln + xn * np.log(ln) - gammaln(xn + 1.0))
 
     # Common (saddlepoint) path.
     if np.any(main):
-        xm = x[main]; lm = lam[main]
+        xm = x[main]
+        lm = lam[main]
         yh, yl = _ebd0(xm, lm)
         yl_total = yl + _stirlerr(xm)
         x_LRG = 2.86111748575702815380240589208115399625e307
@@ -693,7 +680,9 @@ def _dbinom_raw(x, n, p, q, give_log: bool = True):
     if np.any(edge_q0):
         out[edge_q0] = np.where(x[edge_q0] == n[edge_q0], 0.0, NEG_INF)
     if np.any(edge_x0):
-        n0 = n[edge_x0]; p0 = p[edge_x0]; q0 = q[edge_x0]
+        n0 = n[edge_x0]
+        p0 = p[edge_x0]
+        q0 = q[edge_x0]
         # n == 0 → log(1) = 0
         n_is_0 = n0 == 0.0
         # else: n*log(q) if p>q, n*log1p(-p) otherwise.
@@ -707,7 +696,9 @@ def _dbinom_raw(x, n, p, q, give_log: bool = True):
             val[big_q] = n0[big_q] * np.log1p(-p0[big_q])
         out[edge_x0] = val
     if np.any(edge_xn):
-        n0 = n[edge_xn]; p0 = p[edge_xn]; q0 = q[edge_xn]
+        n0 = n[edge_xn]
+        p0 = p[edge_xn]
+        q0 = q[edge_xn]
         big_p = p0 > q0
         val = np.empty_like(n0)
         if np.any(big_p):
@@ -719,7 +710,10 @@ def _dbinom_raw(x, n, p, q, give_log: bool = True):
         out[edge_oob] = NEG_INF
 
     if np.any(main):
-        xm = x[main]; nm = n[main]; pm = p[main]; qm = q[main]
+        xm = x[main]
+        nm = n[main]
+        pm = p[main]
+        qm = q[main]
         lc = (_stirlerr(nm) - _stirlerr(xm) - _stirlerr(nm - xm)
               - _bd0(xm, nm * pm) - _bd0(nm - xm, nm * qm))
         lf = _M_LN_2PI + np.log(xm) + np.log1p(-xm / nm)
@@ -1514,7 +1508,8 @@ class Gaussian(Family):
         return rng.normal(mu, np.sqrt(scale / np.asarray(wt, dtype=float)))
 
     def dev_resids(self, y, mu, wt, theta=None):
-        y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         return wt * (y - mu) ** 2
 
@@ -1559,16 +1554,19 @@ class Gamma(Family):
     scale_known = False
 
     def variance(self, mu):
-        mu = np.asarray(mu, dtype=float); return mu * mu
+        mu = np.asarray(mu, dtype=float)
+        return mu * mu
     def dvar(self, mu):
-        mu = np.asarray(mu, dtype=float); return 2.0 * mu
+        mu = np.asarray(mu, dtype=float)
+        return 2.0 * mu
     def d2var(self, mu):
         return np.full_like(np.asarray(mu, dtype=float), 2.0)
     def d3var(self, mu):
         return np.zeros_like(np.asarray(mu, dtype=float))
 
     def dev_resids(self, y, mu, wt, theta=None):
-        y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         # mgcv: -2 wt (log(y/μ) - (y-μ)/μ); use ifelse(y==0, 1, y/μ) so
         # log(0) doesn't propagate when an observation is exactly zero.
@@ -1600,9 +1598,11 @@ class Gamma(Family):
         # then a log-scale chain rule to match the hea convention:
         #   d/dlogφ  = φ · d/dφ
         #   d²/dlogφ² = φ · d/dφ + φ² · d²/dφ²
-        y = np.asarray(y, dtype=float); wt = np.asarray(wt, dtype=float)
+        y = np.asarray(y, dtype=float)
+        wt = np.asarray(wt, dtype=float)
         good = wt > 0
-        y = y[good]; w = wt[good]
+        y = y[good]
+        w = wt[good]
         sw = scale / w                                     # per-obs scale
         # k1 = -lgamma(1/sw) - log(sw)/sw - 1/sw
         k1 = -gammaln(1.0 / sw) - np.log(sw) / sw - 1.0 / sw
@@ -1644,7 +1644,8 @@ class Poisson(Family):
     def dev_resids(self, y, mu, wt, theta=None):
         # mgcv: 2 wt (y log(y/μ) - (y-μ)); with the convention 0·log(0/μ) = 0
         # so a y=0 row contributes 2 wt μ.
-        y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         positive = y > 0
         # avoid log(0) on y=0 rows by substituting μ inside the log (the
@@ -1671,7 +1672,8 @@ class Poisson(Family):
         # ``-2 · Σ wt[i] · Rf_dpois(y[i], mu[i], TRUE)`` with sequential
         # reduction. :func:`_dpois_raw` is vectorized; the final sum uses
         # ``np.cumsum(...)[-1]`` for sequential bit-match to Eigen3.
-        y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         logp = _dpois_raw(y, mu, True)
         return -2.0 * float(np.cumsum(logp * wt)[-1])
@@ -1679,7 +1681,8 @@ class Poisson(Family):
     def ls(self, y, wt, scale):
         # Saturated log-lik at μ=y; scale-known so d/dlogφ = d²/dlogφ² = 0.
         # mgcv: sum(dpois(y, y, log=TRUE) · w).
-        y = np.asarray(y, dtype=float); wt = np.asarray(wt, dtype=float)
+        y = np.asarray(y, dtype=float)
+        wt = np.asarray(wt, dtype=float)
         with np.errstate(divide="ignore", invalid="ignore"):
             logp = _poisson_dist.logpmf(y, y)
         ls0 = float(np.sum(logp * wt))
@@ -1709,7 +1712,8 @@ class Binomial(Family):
     scale_known = True
 
     def variance(self, mu):
-        mu = np.asarray(mu, dtype=float); return mu * (1.0 - mu)
+        mu = np.asarray(mu, dtype=float)
+        return mu * (1.0 - mu)
     def dvar(self, mu):
         return 1.0 - 2.0 * np.asarray(mu, dtype=float)
     def d2var(self, mu):
@@ -1720,7 +1724,8 @@ class Binomial(Family):
     def dev_resids(self, y, mu, wt, theta=None):
         # mgcv (C_binomial_dev_resids): 2 wt [ y_log_y(y, μ) + y_log_y(1-y, 1-μ) ]
         # where y_log_y(y, μ) = y log(y/μ) for y>0, else 0.
-        y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
 
         def yly(a, b):
@@ -1734,7 +1739,8 @@ class Binomial(Family):
         return 2.0 * wt * (yly(y, mu) + yly(1.0 - y, 1.0 - mu))
 
     def initialize(self, y, wt, n=None, warn_non_integer=True):
-        y = np.asarray(y, dtype=float); wt = np.asarray(wt, dtype=float)
+        y = np.asarray(y, dtype=float)
+        wt = np.asarray(wt, dtype=float)
         if np.any(y < 0) or np.any(y > 1):
             raise ValueError("y values must be 0 <= y <= 1 for the 'binomial' family")
         if n is not None:
@@ -1769,7 +1775,8 @@ class Binomial(Family):
         # ``-2 · Σ (wt[i]/m[i]) · Rf_dbinom(round(m·y), round(m), μ, TRUE)``
         # with sequential reduction. :func:`_dbinom_raw` is vectorized;
         # final sum uses ``np.cumsum(...)[-1]`` for bit-match to Eigen3.
-        y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         # R binomial()$aic: ``m <- if (any(n > 1)) n else wt`` — with a
         # cbind(succ, fail) response, ``n`` is the trials vector kept by
@@ -1836,9 +1843,11 @@ class InverseGaussian(Family):
     scale_known = False
 
     def variance(self, mu):
-        mu = np.asarray(mu, dtype=float); return mu ** 3
+        mu = np.asarray(mu, dtype=float)
+        return mu ** 3
     def dvar(self, mu):
-        mu = np.asarray(mu, dtype=float); return 3.0 * mu * mu
+        mu = np.asarray(mu, dtype=float)
+        return 3.0 * mu * mu
     def d2var(self, mu):
         return 6.0 * np.asarray(mu, dtype=float)
     def d3var(self, mu):
@@ -1846,7 +1855,8 @@ class InverseGaussian(Family):
 
     def dev_resids(self, y, mu, wt, theta=None):
         # mgcv: wt · (y - μ)² / (y · μ²).
-        y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         return wt * (y - mu) ** 2 / (y * mu * mu)
 
@@ -1864,7 +1874,8 @@ class InverseGaussian(Family):
 
     def aic(self, y, mu, dev, wt, n, theta=None):
         # mgcv: sum(wt) · (1 + log(dev/sum(wt) · 2π)) + 3 · Σ wt · log(y) + 2.
-        y = np.asarray(y, dtype=float); wt = np.asarray(wt, dtype=float)
+        y = np.asarray(y, dtype=float)
+        wt = np.asarray(wt, dtype=float)
         sw = float(wt.sum())
         return (sw * (1.0 + np.log(dev / sw * 2.0 * np.pi))
                 + 3.0 * float(np.sum(np.log(y) * wt)) + 2.0)
@@ -1875,7 +1886,8 @@ class InverseGaussian(Family):
         #   d/dφ ls = -nobs/(2φ),  d²/dφ² ls = +nobs/(2φ²)
         # Chain rule to log-scale: d/dlogφ = -nobs/2, d²/dlogφ² = 0
         # (same algebraic cancellation as Gaussian — the y³ term has no φ).
-        y = np.asarray(y, dtype=float); wt = np.asarray(wt, dtype=float)
+        y = np.asarray(y, dtype=float)
+        wt = np.asarray(wt, dtype=float)
         good = wt > 0
         nobs = int(np.sum(good))
         ls0 = (-0.5 * float(np.sum(np.log(2.0 * np.pi * scale * y[good] ** 3)))
@@ -4245,7 +4257,8 @@ class Scat(Family):
         th = self._theta if theta is None else np.asarray(theta, dtype=float)
         nu = np.float64(np.exp(th[0]) + self._min_df)
         sig = np.float64(np.exp(th[1]))
-        y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         return wt * (nu + 1.0) * np.log1p((1.0 / nu) * ((y - mu) / sig) ** 2)
 
@@ -4267,7 +4280,8 @@ class Scat(Family):
         th = self._theta if theta is None else np.asarray(theta, dtype=float)
         nu = np.float64(np.exp(th[0]) + self._min_df)
         sig = np.float64(np.exp(th[1]))
-        y = np.asarray(y, dtype=float); mu = np.asarray(mu, dtype=float)
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         term = (-gammaln((nu + 1.0) / 2.0)
                 + gammaln(nu / 2.0)
@@ -4338,7 +4352,8 @@ class Scat(Family):
         (Phase D) reads the richer θ-derivative shape via
         :meth:`ls_extended` instead.
         """
-        y = np.asarray(y, dtype=float); wt = np.asarray(wt, dtype=float)
+        y = np.asarray(y, dtype=float)
+        wt = np.asarray(wt, dtype=float)
         nu = np.float64(np.exp(self._theta[0]) + self._min_df)
         sig = np.float64(np.exp(self._theta[1]))
         term = (gammaln((nu + 1.0) / 2.0)

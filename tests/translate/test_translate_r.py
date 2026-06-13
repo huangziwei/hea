@@ -7,7 +7,6 @@ version). For end-to-end runnability we also ``compile()`` the output
 to catch any syntactic regressions.
 """
 
-import ast
 import re
 
 import pytest

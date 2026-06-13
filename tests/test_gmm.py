@@ -31,7 +31,7 @@ import pytest
 from scipy.stats import chi2
 
 from conftest import assert_fp_equiv, load_dataset
-from hea.family import Binomial, Gaussian, Poisson
+from hea.family import Gaussian, Poisson
 from hea.models.gmm import gmm
 
 

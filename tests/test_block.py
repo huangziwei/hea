@@ -22,10 +22,10 @@ import polars as pl
 import pytest
 
 from hea.ggplot import (
-    aes, facet_wrap, geom_bar, geom_point, ggplot, labs,
+    aes, facet_wrap, geom_point, ggplot, labs,
 )
 from hea.ggplot._block import (
-    PlotBlock, default_figsize_for, measure_block, render_block,
+    default_figsize_for, measure_block, render_block,
 )
 from hea.ggplot.build import build
 

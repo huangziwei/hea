@@ -7,7 +7,7 @@ tests use the canonical r4ds pipeline snippet.
 
 import pytest
 
-from hea.translate.r_lexer import RLexError, Token, tokenize
+from hea.translate.r_lexer import RLexError, tokenize
 
 
 def _kinds(src: str) -> list[str]:

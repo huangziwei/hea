@@ -784,11 +784,11 @@ def test_drop1_respects_marginality_on_gavote():
     # own rows. Anchor on the leading whitespace+name to avoid matching
     # them inside the "cpergore:usage" label.
     lines = out.splitlines()
-    drop_rows = [l for l in lines if l.startswith(("cperAA", "equip",
-                                                   "cpergore", "usage"))]
+    drop_rows = [ln for ln in lines if ln.startswith(("cperAA", "equip",
+                                                      "cpergore", "usage"))]
     # Each dropped term is one row; cpergore:usage is the only one
     # starting with "cpergore". No bare "cpergore " or "usage " row.
-    starts = {l.split()[0] for l in drop_rows}
+    starts = {ln.split()[0] for ln in drop_rows}
     assert starts == {"cperAA", "equip", "cpergore:usage"}
     # Numerics pinned to R's drop1.lm output: F values 0.83 / 2.50 / 0.05.
     assert "0.8264" in out
@@ -910,7 +910,7 @@ def test_add1_respects_marginality():
     assert "Petal.Width" in out
     # The interaction shouldn't appear as an addable row (the term label
     # would be "Petal.Length:Petal.Width" which contains ":").
-    rows = [l for l in out.splitlines() if ":" in l and l.startswith("Petal")]
+    rows = [ln for ln in out.splitlines() if ":" in ln and ln.startswith("Petal")]
     assert not rows, f"unexpected interaction rows: {rows}"
 
 

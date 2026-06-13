@@ -25,13 +25,13 @@ _U_N = 0.1978300664283
 _V_N = 0.4683199493879
 
 
-def _hcl_to_rgb(h: float, c: float, l: float) -> tuple[float, float, float]:
+def _hcl_to_rgb(h: float, c: float, lightness: float) -> tuple[float, float, float]:
     """HCL polar in CIE LUV → linear sRGB triple in [0, 1].
 
     Reference: ``grDevices/src/colors.c::hcl_to_rgb`` (R sources). The path
     is HCL → Luv → XYZ (D65) → linear RGB → sRGB-gamma.
     """
-    if l <= 0:
+    if lightness <= 0:
         return (0.0, 0.0, 0.0)
 
     # HCL → Luv (Cartesian)
@@ -40,15 +40,15 @@ def _hcl_to_rgb(h: float, c: float, l: float) -> tuple[float, float, float]:
     v = c * math.sin(h_rad)
 
     # Luv → XYZ. CIE 1976 inverse lightness function.
-    if l > 8:
-        y = ((l + 16) / 116) ** 3
+    if lightness > 8:
+        y = ((lightness + 16) / 116) ** 3
     else:
         # CIE 1976: y = L / kappa where kappa = 903.3 = 24389/27.
-        y = l * 27 / 24389
+        y = lightness * 27 / 24389
 
     # When L is non-positive the polar formulae blow up; we already returned.
-    u_prime = u / (13 * l) + _U_N
-    v_prime = v / (13 * l) + _V_N
+    u_prime = u / (13 * lightness) + _U_N
+    v_prime = v / (13 * lightness) + _V_N
 
     x = (9 * y * u_prime) / (4 * v_prime)
     z = (12 - 3 * u_prime - 20 * v_prime) * y / (4 * v_prime)
@@ -73,10 +73,10 @@ def _to_srgb(c_lin: float) -> float:
     return 12.92 * c_lin
 
 
-def hcl_to_hex(h: float, c: float, l: float) -> str:
+def hcl_to_hex(h: float, c: float, lightness: float) -> str:
     """``hcl(h, c, l)`` colour as ``#RRGGBB``. Out-of-gamut colours clip
     per channel (matches ``grDevices::hcl(fixup=TRUE)``)."""
-    r_lin, g_lin, b_lin = _hcl_to_rgb(h, c, l)
+    r_lin, g_lin, b_lin = _hcl_to_rgb(h, c, lightness)
     r = _to_srgb(r_lin)
     g = _to_srgb(g_lin)
     b = _to_srgb(b_lin)
@@ -87,7 +87,7 @@ def hcl_to_hex(h: float, c: float, l: float) -> str:
 # Discrete palettes
 # ---------------------------------------------------------------------------
 
-def hue_pal(*, h: tuple = (15, 375), c: float = 100, l: float = 65,
+def hue_pal(*, h: tuple = (15, 375), c: float = 100, lightness: float = 65,
             h_start: float = 0, direction: int = 1):
     """ggplot2's default qualitative palette — equally-spaced hues in HCL.
 
@@ -115,7 +115,7 @@ def hue_pal(*, h: tuple = (15, 375), c: float = 100, l: float = 65,
         rotated = [(hh + h_start) % 360 for hh in hues]
         if direction == -1:
             rotated = rotated[::-1]
-        return [hcl_to_hex(hh, c, l) for hh in rotated]
+        return [hcl_to_hex(hh, c, lightness) for hh in rotated]
 
     return palette
 

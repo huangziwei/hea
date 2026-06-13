@@ -525,20 +525,20 @@ def _liu2(x: float, lb: np.ndarray, h: np.ndarray) -> float:
     if s1 * s1 > s2:
         a = 1.0 / (s1 - math.sqrt(s1 * s1 - s2))
         delta = s1 * a ** 3 - a * a
-        l = a * a - 2.0 * delta
+        l_df = a * a - 2.0 * delta
     else:
         a = 1.0 / s1
         delta = 0.0
         if c3 == 0.0:
             return 1.0
-        l = c2 ** 3 / (c3 ** 2)
-    muX = l + delta
+        l_df = c2 ** 3 / (c3 ** 2)
+    muX = l_df + delta
     sigX = math.sqrt(2.0) * a
     arg = t * sigX + muX
     if delta == 0.0:
-        return float(_chi2.sf(arg, df=l))
+        return float(_chi2.sf(arg, df=l_df))
     from scipy.stats import ncx2
-    return float(ncx2.sf(arg, df=l, nc=delta))
+    return float(ncx2.sf(arg, df=l_df, nc=delta))
 
 
 def psum_chisq(q: float, lb: np.ndarray, df: np.ndarray | None = None,
@@ -1660,9 +1660,6 @@ class gam:
         # for those; for canonical links Newton ≡ Fisher and the view
         # reuses fit's chol — cheap.
         beta = fit.beta
-        rss = fit.rss
-        pen = fit.pen
-        Sλ = fit.S_full
 
         self._rho_hat = rho_hat
         # mgcv's ``m$full.sp`` (mgcv.r:2399-2401): the per-penalty sp
@@ -1673,7 +1670,6 @@ class gam:
         fit_F = self._fisher_view(fit)
         A_chol = fit_F.A_chol
         A_chol_lower = fit_F.A_chol_lower
-        log_det_A = fit_F.log_det_A
         # Fisher working weights — needed by reTest (Wood 2013) so summary()
         # can rebuild X'WX without re-running PIRLS. None ↔ unit weights.
         self._fisher_w = (
@@ -1701,7 +1697,6 @@ class gam:
         # K_w = Xw·C⁻¹  ⇔  C' K_w' = Xw'
         Kw_F = solve_triangular(C_F, Xw_F.T, lower=False, trans="T").T
         KtK_F = Kw_F.T @ Kw_F
-        XtWX = C_F.T @ KtK_F @ C_F
         A_inv_XtWX = solve_triangular(C_F, KtK_F @ C_F, lower=False)
         # Per-coefficient edf = diag(F) where F = A⁻¹ X'WX. F is not
         # symmetric, so individual diag entries can be negative — mgcv
@@ -4475,7 +4470,7 @@ class gam:
             d = ev_h.copy()
             d[nonpos] = 0.0
             d[~nonpos] = 1.0 / np.sqrt(d[~nonpos])
-            db = _sl_inirep(sl, db, l=1, r=0)    # undo initial repara
+            db = _sl_inirep(sl, db, lt=1, r=0)    # undo initial repara
             tmp = (d[:, None] * V_h.T) @ db.T
             Vc_corr = tmp.T @ tmp                # first correction
             d2 = ev_h.copy()
@@ -4611,7 +4606,6 @@ class gam:
             # general families: scale.est ≡ 1, family θ never in outer θ
             raise ValueError("REML5 (gam.fit5) outer θ is ρ-only.")
 
-        n_sp = len(self._slots)
         n_work = self._work_dim
         n_theta_fam = self.family.n_theta if include_family_theta else 0
         theta = np.asarray(theta0, dtype=float).copy()
@@ -5298,26 +5292,26 @@ class gam:
 
         out = np.empty((self.p, n_sp, n_sp))
         for k in range(n_sp):
-            for l in range(k, n_sp):
+            for m in range(k, n_sp):
                 # H⁻¹·X'·(h' · v_l · v_k)  — the W-deriv contribution.
-                rhs_W = X.T @ (dw_deta * v[:, l] * v[:, k])
+                rhs_W = X.T @ (dw_deta * v[:, m] * v[:, k])
                 # H⁻¹·S_l·dβ_k (full p-vector, only nonzero at slot l's range)
                 # and H⁻¹·S_k·dβ_l, embedded already in Skdb_full.
                 rhs = (
                     rhs_W
-                    + sp[l] * Skdb_full[l, :, k]
-                    + sp[k] * Skdb_full[k, :, l]
+                    + sp[m] * Skdb_full[m, :, k]
+                    + sp[k] * Skdb_full[k, :, m]
                 )
                 # The implicit-function-theorem formula above:
                 #   ∂²β̂/∂ρ_l∂ρ_k = δ_lk·dβ_k − H⁻¹·rhs_combined
                 d2 = -cho_solve(
                     (fit.A_chol, fit.A_chol_lower), rhs
                 )
-                if l == k:
+                if m == k:
                     d2 = d2 + db_drho[:, k]
-                out[:, l, k] = d2
-                if l != k:
-                    out[:, k, l] = d2
+                out[:, m, k] = d2
+                if m != k:
+                    out[:, k, m] = d2
         return out
 
     def _d2w_deta2(self, fit: "_FitState") -> np.ndarray:
@@ -5836,7 +5830,6 @@ class gam:
         sp = np.exp(rho)
         n, p = self.n, self.p
         X = self._X_full
-        family = self.family
 
         # Fisher X'W_F X for τ.
         w_F = fit_F.w if fit_F.w is not None else np.ones(n)
@@ -6012,7 +6005,6 @@ class gam:
             # the n_sp(n_sp+1)/2 pairs.
             for ll in range(n_sp):
                 a_ll, b_ll = self._slots[ll].col_start, self._slots[ll].col_end
-                k_ll = b_ll - a_ll
                 for k in range(ll, n_sp):
                     a_k, b_k = self._slots[k].col_start, self._slots[k].col_end
                     M_lk = AinvS_block[ll] @ AinvS_block[k][a_ll:b_ll, :]   # (p, k_k)
@@ -8508,7 +8500,7 @@ class gam:
         # multi-LP (general-family) fits: all link names, one formula
         # per line — mgcv's print.summary.gam layout.
         if getattr(self.family, "is_general", False):
-            link_disp = " ".join(l.name for l in self.family.links)
+            link_disp = " ".join(link.name for link in self.family.links)
         else:
             link_disp = self.family.link.name
         if isinstance(self.formula, (list, tuple)):
@@ -9944,7 +9936,7 @@ class gam:
                         color="black", markersize=6, alpha=0.6)
 
         ax.set_xticks(range(len(levels)))
-        ax.set_xticklabels([str(l) for l in levels])
+        ax.set_xticklabels([str(lev) for lev in levels])
         ax.set_xlabel(label)
         ax.set_ylabel(f"Partial for {label}")
 
@@ -10893,10 +10885,10 @@ def _sl_repara(rp: list[dict], X: np.ndarray, inverse: bool = False,
     return X
 
 
-def _sl_repa(rp: list[dict], X: np.ndarray, l: int = 0, r: int = 0):
+def _sl_repa(rp: list[dict], X: np.ndarray, lt: int = 0, r: int = 0):
     """mgcv ``Sl.repa`` (fast-REML.r:1062-1085): generalized applier.
-    ``l``/``r`` ∈ {−2,−1,0,1,2}: 0 = skip, 1 = D, 2 = D', −1 = Di,
-    −2 = Di', applied to rows (l) / columns (r). With Qs-only blocks
+    ``lt``/``r`` ∈ {−2,−1,0,1,2}: 0 = skip, 1 = D, 2 = D', −1 = Di,
+    −2 = Di', applied to rows (lt) / columns (r). With Qs-only blocks
     (the non-Cholesky path) D = Qs' and Di = Qs."""
     X = np.array(X, dtype=float, copy=True)
     for rec in rp:
@@ -10913,8 +10905,8 @@ def _sl_repa(rp: list[dict], X: np.ndarray, l: int = 0, r: int = 0):
             if code == -1:
                 return Qs
             return Qs.T          # code == -2
-        if l:
-            T = _T(l)
+        if lt:
+            T = _T(lt)
             if X.ndim == 2:
                 X[ind, :] = T @ X[ind, :]
             else:
@@ -10928,19 +10920,19 @@ def _sl_repa(rp: list[dict], X: np.ndarray, l: int = 0, r: int = 0):
     return X
 
 
-def _sl_inirep(sl: _Sl, X: np.ndarray, l: int = 0, r: int = 0):
+def _sl_inirep(sl: _Sl, X: np.ndarray, lt: int = 0, r: int = 0):
     """mgcv ``Sl.inirep`` (fast-REML.r:485-520): code-based applier of
     the Sl.setup INITIAL block transforms (the ``Sl.repa`` analog of
-    ``Sl.initial.repara``). ``l``/``r`` ∈ {−2,−1,0,1,2}: 0 = skip,
+    ``Sl.initial.repara``). ``lt``/``r`` ∈ {−2,−1,0,1,2}: 0 = skip,
     1 = D, 2 = D', −1 = Di (D' when Di is None — orthogonal D),
     −2 = Di'. Vector D blocks get the diagonal row/col scaling
     (Sl.initial.repara's vector semantics; mgcv's matrix-only ``%*%``
     would mangle them — no such block reaches this in practice). Note
-    mgcv's r-branch tests ``l`` for the transform choice (a quirk);
+    mgcv's r-branch tests ``lt`` for the transform choice (a quirk);
     hea keys it on ``r`` — gam.fit5.post.proc only ever calls (1, 0).
     """
     X = np.array(X, dtype=float, copy=True)
-    if len(sl) == 0 or (not l and not r):
+    if len(sl) == 0 or (not lt and not r):
         return X
     for blk in sl.blocks:
         if not blk.repara:
@@ -10963,8 +10955,8 @@ def _sl_inirep(sl: _Sl, X: np.ndarray, l: int = 0, r: int = 0):
                 return Dim
             return Dim.T            # code == -2
 
-        if l:
-            T = _mat(l)
+        if lt:
+            T = _mat(lt)
             if X.ndim == 2:
                 X[ind, :] = T @ X[ind, :]
             else:
@@ -11457,7 +11449,7 @@ def _gam_fit5(X, y, lsp, sl: _Sl, *, family, lpi, weights=None,
         # — efsud's update reads it from deriv-0 fits.
         rp = _ldet_s(sl, lsp, root=True, stot=True, deriv=2)
         X = _sl_repara(rp["rp"], X)
-        Sb = _sl_repa(rp["rp"], sl.S, l=-2, r=-1)   # balanced penalty
+        Sb = _sl_repa(rp["rp"], sl.S, lt=-2, r=-1)   # balanced penalty
         St = np.asarray(rp["S"], dtype=float)
         E = rp["E"]
         if start is not None:
@@ -11828,7 +11820,7 @@ def _gam_fit5(X, y, lsp, sl: _Sl, *, family, lpi, weights=None,
     else:
         db_drho = d1b
     if d1b is not None:
-        db_drho = _sl_repa(rp["rp"], db_drho, l=-1)
+        db_drho = _sl_repa(rp["rp"], db_drho, lt=-1)
 
     return {
         "coefficients": coef_out, "fitted_values": fitted_values,
@@ -11869,8 +11861,8 @@ def _efsud(X, y, lsp, sl: _Sl, sl_setup: _Sl, *, family, lpi,
     mult = 1.0
     tiny = float(np.finfo(float).eps) ** 0.5
 
-    def fit_at(l, st):
-        return _gam_fit5(X, y, l, sl, family=family, lpi=lpi,
+    def fit_at(lsp_arg, st):
+        return _gam_fit5(X, y, lsp_arg, sl, family=family, lpi=lpi,
                          weights=weights, offsets=offsets, Mp=Mp,
                          deriv=0, start=st, gamma=1.0, epsilon=epsilon)
 

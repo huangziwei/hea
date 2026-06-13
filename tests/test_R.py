@@ -1302,10 +1302,9 @@ def test_weighted_lm_rstudent_dffits_consistent(gala):
 
 from hea.R import (  # noqa: E402  — grouped with the test-batch tests
     HTest,
-    bartlett_test, binom_test, chisq_test, cor_test,
-    fisher_test, friedman_test, kruskal_test, ks_test,
+    bartlett_test, binom_test, chisq_test, fisher_test, friedman_test, ks_test,
     mcnemar_test, prop_test, shapiro_test,
-    t_test, var_test, wilcox_test,
+    t_test, var_test,
 )
 
 

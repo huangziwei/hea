@@ -383,7 +383,9 @@ def _add1_lm(m: lm, upper_terms, *, common_data, test: str | None, k: float):
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
         else:
-            f_col.append(None); p_col.append(None); sig_col.append("")
+            f_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
 
     cols: dict[str, list] = {
         "":          ["<none>"] + [upper_terms[i].label for i in add_indices],
@@ -497,7 +499,9 @@ def _add1_glm(m: glm, upper_terms, *, common_data, test: str | None, k: float):
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
         else:
-            stat_col.append(None); p_col.append(None); sig_col.append("")
+            stat_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
 
     cols: dict[str, list] = {
         "":         ["<none>"] + [upper_terms[i].label for i in add_indices],
@@ -792,7 +796,6 @@ def _drop1_lm(m: lm, *, test: str | None, k: float):
     sig_col: list[str] = [""]
 
     for j in scope:
-        t = terms[j]
         rest = [terms[i].label for i in range(len(terms)) if i != j]
         sub_rhs = " + ".join(rest) if rest else ""
         sub_formula = (
@@ -814,7 +817,9 @@ def _drop1_lm(m: lm, *, test: str | None, k: float):
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
         else:
-            f_col.append(None); p_col.append(None); sig_col.append("")
+            f_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
 
     cols: dict[str, list] = {
         "":          ["<none>"] + [terms[j].label for j in scope],
@@ -899,7 +904,6 @@ def _drop1_glm(m: glm, *, test: str | None, k: float):
         return (dev_drop - dev_full) / disp_full
 
     for j in scope:
-        t = terms[j]
         rest = [terms[i].label for i in range(len(terms)) if i != j]
         sub_rhs = " + ".join(rest) if rest else ""
         sub_formula = (
@@ -942,7 +946,9 @@ def _drop1_glm(m: glm, *, test: str | None, k: float):
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
         else:
-            stat_col.append(None); p_col.append(None); sig_col.append("")
+            stat_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
 
     cols: dict[str, list] = {
         "":         ["<none>"] + [terms[j].label for j in scope],
@@ -1040,7 +1046,9 @@ def _drop1_gmm(model, *, test, k):
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
         else:
-            lrt_col.append(None); p_col.append(None); sig_col.append("")
+            lrt_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
 
     cols: dict[str, list] = {"": labels, "npar": npar_col, "AIC": aic_col}
     if do_test:
@@ -1075,8 +1083,11 @@ def _anova_lm(*models, labels: list[str]):
         d_df = dfs[k - 1] - dfs[k]
         d_rss = rss[k - 1] - rss[k]
         if d_df <= 0:
-            df_col.append(d_df); sos_col.append(round(d_rss, 3))
-            f_col.append(None); p_col.append(None); sig_col.append("")
+            df_col.append(d_df)
+            sos_col.append(round(d_rss, 3))
+            f_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
             continue
         fstat = (d_rss / d_df) / mse_full
         p = float(f.sf(fstat, d_df, dfs[-1]))
@@ -1156,22 +1167,29 @@ def _anova_lm_single(m: lm):
         d_df = df_chain[i] - df_chain[i + 1]
         d_rss = rss_chain[i] - rss_chain[i + 1]
         if d_df <= 0:
-            df_col.append(d_df); sos_col.append(round(d_rss, 4))
+            df_col.append(d_df)
+            sos_col.append(round(d_rss, 4))
             ms_col.append(float("nan"))
-            f_col.append(None); p_col.append(None); sig_col.append("")
+            f_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
             continue
         ms = d_rss / d_df
         fstat = ms / mse_full
         p = float(f.sf(fstat, d_df, m.df_residuals))
-        df_col.append(d_df); sos_col.append(round(d_rss, 4))
+        df_col.append(d_df)
+        sos_col.append(round(d_rss, 4))
         ms_col.append(round(ms, 4))
         f_col.append(round(fstat, 4))
         p_col.append(float(f"{p:.4g}"))
         sig_col.append(significance_code([p])[0])
     # Residuals row
-    df_col.append(m.df_residuals); sos_col.append(round(m.rss, 4))
+    df_col.append(m.df_residuals)
+    sos_col.append(round(m.rss, 4))
     ms_col.append(round(mse_full, 4))
-    f_col.append(None); p_col.append(None); sig_col.append("")
+    f_col.append(None)
+    p_col.append(None)
+    sig_col.append("")
 
     docstring = "Analysis of Variance Table\n\n"
     docstring += f"Response: {lhs}\n"
@@ -1371,7 +1389,9 @@ def _anova_gam_table(*models: gam, labels: list[str], test: str | None = None):
         if d_df <= 0:
             df_col.append(round(d_df, 4))
             dev_col.append(round(d_dev, 4))
-            stat_col.append(None); p_col.append(None); sig_col.append("")
+            stat_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
             continue
         if test == "Chisq":
             stat = d_dev / disp_full
@@ -1483,8 +1503,11 @@ def _anova_glm_table(*models, labels: list[str], test: str | None = None):
         d_df = dfs[k - 1] - dfs[k]
         d_dev = devs[k - 1] - devs[k]
         if d_df <= 0:
-            df_col.append(d_df); dev_col.append(round(d_dev, 4))
-            stat_col.append(None); p_col.append(None); sig_col.append("")
+            df_col.append(d_df)
+            dev_col.append(round(d_dev, 4))
+            stat_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
             continue
         if test == "Chisq":
             # disp_full == 1 for scale-known families (Poisson/Binomial),
@@ -1559,7 +1582,10 @@ def _anova_gmm(*models, labels: list[str]):
         dev_val = float(getattr(m, "deviance_laplace", m.deviance))
         dev_col.append(round(dev_val, 1))
         if k == 0:
-            chi_col.append(None); dfc_col.append(None); p_col.append(None); sig_col.append("")
+            chi_col.append(None)
+            dfc_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
             continue
         prev = models[order[k - 1]]
         prev_dev = float(getattr(prev, "deviance_laplace", prev.deviance))

@@ -205,7 +205,6 @@ def _build_init_repara(slots: list, p: int) -> list:
         order = np.argsort(eigval)[::-1]
         U_full = U_full[:, order]
         eigval = eigval[order]
-        m = ce - cs
         # mgcv rank determination (fast-REML.r:357-358):
         # ``rank <- sum(D > .Machine$double.eps^.8 * max(D))``.
         thresh = float(np.finfo(float).eps) ** 0.8 * float(eigval[0])
@@ -424,13 +423,6 @@ def _estimate_theta(
             V = family.variance(mu)
             log_phi0 = float(np.log(np.mean((y - mu) ** 2 / V)))
         theta = np.concatenate([theta, [log_phi0]])
-    n_total = theta.shape[0]
-    # ``del.ind`` deletes the first n_theta slots when scale<0 AND
-    # n_theta=0 (the original n_theta-slot was a no-op then). When
-    # n_theta>0 we keep all slots and del.ind is unused. We follow
-    # mgcv's index discipline so future ``betar``-style families
-    # (n_theta=0, scale<0) get the right gradient/Hessian sub-block.
-    del_ind = slice(0, n_theta)
 
     def _nlogl(theta_eval: np.ndarray, deriv: int):
         # mgcv R/efam.r:14-45 verbatim. ``theta_eval`` may include a
@@ -2523,7 +2515,6 @@ class bam(gam):
         method = self.method
         n_sp = len(self._slots)
         beta = fit.beta
-        Sλ = fit.S_full
         self._rho_hat = rho_hat
 
         # Inverse Hessian — small (p×p), exact.
@@ -2844,7 +2835,6 @@ class bam(gam):
         family = self.family
         link = family.link
         n = self.n
-        p = self.p
         n_sp = len(self._slots)
         method = self.method   # already mapped fREML → REML
 
@@ -3264,7 +3254,6 @@ class bam(gam):
         family = self.family
         y = self._y_arr
         beta = fit.beta
-        Sλ = fit.S_full
         self._rho_hat = rho_hat
 
         A_inv = cho_solve((fit.A_chol, fit.A_chol_lower), np.eye(p))
@@ -4495,7 +4484,7 @@ def _tensor_Xb_raw(term: _DiscreteTerm, b_raw: np.ndarray,
             in_letters = "abcdefghij"[:d-1]
             X_at_rows = [Xd_list[j][k_per_marg[j]] for j in range(d-1)]
             C_gathered = C[(slice(None),) * (d-1) + (k_per_marg[d-1],)]
-            expr = (",".join(f"r{l}" for l in in_letters)
+            expr = (",".join(f"r{letter}" for letter in in_letters)
                     + "," + in_letters + "r" + "->r")
             result += np.einsum(expr, *X_at_rows, C_gathered)
     return result

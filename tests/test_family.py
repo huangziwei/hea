@@ -1238,21 +1238,23 @@ def test_gaulss_ll_derivatives_match_fd():
     fd_lb = np.zeros(p)
     fd_lbb = np.zeros((p, p))
     for k in range(p):
-        cp = coef.copy(); cp[k] += h
-        cm = coef.copy(); cm[k] -= h
+        cp = coef.copy()
+        cp[k] += h
+        cm = coef.copy()
+        cm[k] -= h
         fd_lb[k] = (fam.ll(y, X, cp, lpi=lpi)["l"]
                     - fam.ll(y, X, cm, lpi=lpi)["l"]) / (2 * h)
         fd_lbb[:, k] = (fam.ll(y, X, cp, lpi=lpi, deriv=1)["lb"]
                         - fam.ll(y, X, cm, lpi=lpi, deriv=1)["lb"]) / (2 * h)
     np.testing.assert_allclose(r1["lb"], fd_lb, rtol=0, atol=1e-6)
     np.testing.assert_allclose(r1["lbb"], fd_lbb, rtol=0, atol=1e-6)
-    # d1H along the d1b directions: H(β + h·d1b_l) FD.
+    # d1H along the d1b directions: H(β + h·d1b_j) FD.
     r3 = fam.ll(y, X, coef, lpi=lpi, deriv=3, d1b=d1b)
-    for l in range(d1b.shape[1]):
-        fdH = (fam.ll(y, X, coef + h * d1b[:, l], lpi=lpi, deriv=1)["lbb"]
-               - fam.ll(y, X, coef - h * d1b[:, l], lpi=lpi,
+    for j in range(d1b.shape[1]):
+        fdH = (fam.ll(y, X, coef + h * d1b[:, j], lpi=lpi, deriv=1)["lbb"]
+               - fam.ll(y, X, coef - h * d1b[:, j], lpi=lpi,
                         deriv=1)["lbb"]) / (2 * h)
-        np.testing.assert_allclose(r3["d1H"][l], fdH, rtol=0, atol=1e-5)
+        np.testing.assert_allclose(r3["d1H"][j], fdH, rtol=0, atol=1e-5)
 
 
 def test_gaulss_initialize_and_residuals():

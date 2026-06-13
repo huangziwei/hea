@@ -957,10 +957,10 @@ class DataFrame(pl.DataFrame):
         )
 
         same_name = [
-            l for l, r in zip(spec.equi_left, spec.equi_right) if l == r
+            left for left, r in zip(spec.equi_left, spec.equi_right) if left == r
         ]
         diff_name = [
-            (l, r) for l, r in zip(spec.equi_left, spec.equi_right) if l != r
+            (left, r) for left, r in zip(spec.equi_left, spec.equi_right) if left != r
         ]
         if not diff_name:
             out = pl.DataFrame.join(

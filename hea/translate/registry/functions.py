@@ -62,7 +62,6 @@ FUNCTION_TABLE: dict[str, Func] = {
     "exp":      Func("exp",      "method"),
     "sqrt":     Func("sqrt",     "method"),
     "abs":      Func("abs",      "method"),
-    "round":    Func("round",    "method"),
     "floor":    Func("floor",    "method"),
     "ceiling":  Func("ceil",     "method"),
     "sign":     Func("sign",     "method"),

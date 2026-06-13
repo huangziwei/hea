@@ -62,7 +62,6 @@ def apply(X, MARGIN, FUN, *args, **kwargs):
     named-vector primitive).
     """
     arr = _to_2d(X)
-    axis = 1 if MARGIN == 1 else 0  # iterate along the *other* axis
     results = []
     if MARGIN == 2:
         for j in range(arr.shape[1]):

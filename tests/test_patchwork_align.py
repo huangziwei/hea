@@ -17,7 +17,7 @@ import polars as pl
 import pytest
 
 from hea.ggplot import (
-    aes, facet_wrap, geom_bar, geom_bin2d, geom_boxplot, geom_point, ggplot,
+    aes, geom_bin2d, geom_point, ggplot,
     ggtitle, labs,
 )
 

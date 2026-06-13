@@ -73,14 +73,14 @@ def _plotmath_render(node) -> str:
         op = node.op
         return f"{op}{_plotmath_render(node.operand)}"
     if isinstance(node, _R.BinOp):
-        l = _plotmath_render(node.left)
+        left = _plotmath_render(node.left)
         r = _plotmath_render(node.right)
         op = node.op
         if op == "^":
-            return f"{l}^{{{r}}}"
+            return f"{left}^{{{r}}}"
         if op == "==":
-            return f"{l} = {r}"
-        return f"{l} {op} {r}"
+            return f"{left} = {r}"
+        return f"{left} {op} {r}"
     if isinstance(node, _R.Subscript):
         base = _plotmath_render(node.target)
         idx = ", ".join(

@@ -51,3 +51,11 @@ include-package-data = true
 #          can't statically resolve our ``__all__``).
 ignore = ["F403", "F405"]
 
+[tool.ruff.lint.per-file-ignores]
+# ``__init__.py`` modules deliberately re-export their submodules' public
+# names (and a few private helpers used cross-module). Those imports are
+# "unused" only within the file itself — F401 here is always an intentional
+# re-export, not a mistake. The curated ``__all__`` lists remain the source
+# of truth for ``from hea.X import *``.
+"**/__init__.py" = ["F401"]
+

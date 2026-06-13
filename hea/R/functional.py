@@ -37,21 +37,16 @@ def sapply(X, FUN, *args, **kwargs):
     """
     # Iterate respecting R's "elements of X." For a vector/list, it's
     # the elements. For a polars Series, the values. For a NamedVector,
-    # the values too (names are dropped on the FUN inputs but propagated
-    # to the column labels of the result matrix).
+    # the values too (names are dropped — sapply returns an unnamed array).
 
     if isinstance(X, NamedVector):
-        names = X.names
         items = list(X.values)
     elif isinstance(X, pl.Series):
-        names = X.to_list()
         items = list(X.to_list())
     elif isinstance(X, dict):
-        names = list(X.keys())
         items = list(X.values())
     else:
         items = list(X)
-        names = [str(x) for x in items]
 
     results = [FUN(it, *args, **kwargs) for it in items]
     if not results:

@@ -57,7 +57,6 @@ from . import (  # noqa: F401
     io,
     models,
     plot,
-    session_info,
     tidy,
     translate,
 )

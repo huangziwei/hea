@@ -126,17 +126,24 @@ def eval_node(node, data: pl.DataFrame | None, env: dict):
         L = _arr(eval_node(node.left, data, env))
         R = _arr(eval_node(node.right, data, env))
         op = node.op
-        if op == "+": return L + R
-        if op == "-": return L - R
-        if op == "*": return L * R
-        if op == "/": return L / R
-        if op == "^": return L ** R
+        if op == "+":
+            return L + R
+        if op == "-":
+            return L - R
+        if op == "*":
+            return L * R
+        if op == "/":
+            return L / R
+        if op == "^":
+            return L ** R
         raise ValueError(f"unsupported binary op {op!r} in expression")
 
     if isinstance(node, UnaryOp):
         v = _arr(eval_node(node.operand, data, env))
-        if node.op == "-": return -v
-        if node.op == "+": return v
+        if node.op == "-":
+            return -v
+        if node.op == "+":
+            return v
         raise ValueError(f"unsupported unary op {node.op!r}")
 
     if isinstance(node, Call):

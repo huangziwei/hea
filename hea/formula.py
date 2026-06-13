@@ -713,7 +713,7 @@ def _expand_toplevel(node) -> list[Term]:
 
 
 def _interact(L: list[Term], R: list[Term]) -> list[Term]:
-    return [l.union(r) for l in L for r in R]
+    return [lt.union(r) for lt in L for r in R]
 
 
 def _power_expand(L: list[Term], n: int) -> list[Term]:
@@ -803,7 +803,8 @@ def _response_names(lhs) -> set[str]:
         if isinstance(n, Name):
             out.add(n.ident)
         elif isinstance(n, BinOp):
-            walk(n.left); walk(n.right)
+            walk(n.left)
+            walk(n.right)
         elif isinstance(n, UnaryOp):
             walk(n.operand)
         elif isinstance(n, Paren):
@@ -1214,21 +1215,32 @@ def _eval_numeric(node, data: pl.DataFrame) -> np.ndarray:
         # sides with type preserved, then do the comparison, then convert to
         # float.
         if op in ("==", "!=", "<", ">", "<=", ">="):
-            l = _eval_maybe_string(node.left, data)
+            lhs = _eval_maybe_string(node.left, data)
             r = _eval_maybe_string(node.right, data)
-            if op == "==":  return (l == r).astype(float)
-            if op == "!=":  return (l != r).astype(float)
-            if op == "<":   return (l < r).astype(float)
-            if op == ">":   return (l > r).astype(float)
-            if op == "<=":  return (l <= r).astype(float)
-            if op == ">=":  return (l >= r).astype(float)
-        l = _eval_numeric(node.left, data)
+            if op == "==":
+                return (lhs == r).astype(float)
+            if op == "!=":
+                return (lhs != r).astype(float)
+            if op == "<":
+                return (lhs < r).astype(float)
+            if op == ">":
+                return (lhs > r).astype(float)
+            if op == "<=":
+                return (lhs <= r).astype(float)
+            if op == ">=":
+                return (lhs >= r).astype(float)
+        lhs = _eval_numeric(node.left, data)
         r = _eval_numeric(node.right, data)
-        if op == "+":   return l + r
-        if op == "-":   return l - r
-        if op == "*":   return l * r
-        if op == "/":   return l / r
-        if op == "^":   return l ** r
+        if op == "+":
+            return lhs + r
+        if op == "-":
+            return lhs - r
+        if op == "*":
+            return lhs * r
+        if op == "/":
+            return lhs / r
+        if op == "^":
+            return lhs ** r
         raise TypeError(f"unsupported binop {op!r} in numeric context")
     if isinstance(node, Call):
         block = _eval_call(node, data)
@@ -1621,19 +1633,22 @@ def _ns_basis(x, boundary, interior_knots, df, intercept):
         xc = np.clip(xe, boundary[0], boundary[1])
         out = np.zeros((len(xe), n_basis))
         for i in range(n_basis):
-            c = np.zeros(n_basis); c[i] = 1.0
+            c = np.zeros(n_basis)
+            c[i] = 1.0
             out[:, i] = np.nan_to_num(
                 _BSpline(Aknots, c, degree, extrapolate=False)(xc), nan=0.0
             )
         right = np.asarray(xe) == boundary[1]
         if right.any():
-            out[right, :] = 0; out[right, -1] = 1.0
+            out[right, :] = 0
+            out[right, -1] = 1.0
         return out
 
     def _Bdd(xe):
         out = np.zeros((len(xe), n_basis))
         for i in range(n_basis):
-            c = np.zeros(n_basis); c[i] = 1.0
+            c = np.zeros(n_basis)
+            c[i] = 1.0
             out[:, i] = _BSpline(Aknots, c, degree, extrapolate=False).derivative(2)(xe)
         return np.nan_to_num(out, nan=0.0)
 
@@ -1667,8 +1682,10 @@ def _harmonic_basis(x, K: int, period: float):
     cols, suffixes = [], []
     for j in range(1, K + 1):
         w = (2.0 * np.pi * j / period) * x
-        cols.append(np.cos(w)); suffixes.append(f"cos{j}")
-        cols.append(np.sin(w)); suffixes.append(f"sin{j}")
+        cols.append(np.cos(w))
+        suffixes.append(f"cos{j}")
+        cols.append(np.sin(w))
+        suffixes.append(f"sin{j}")
     return np.stack(cols, axis=1), suffixes
 
 
@@ -2303,8 +2320,8 @@ def materialize_bars(expanded: ExpandedFormula, data: pl.DataFrame) -> ReTerms:
                 idx += 1
                 tmpl[i, j] = theta_offset + idx
         Ltb = np.zeros((k * c, k * c), dtype=int)
-        for l in range(k):
-            Ltb[l*c:(l+1)*c, l*c:(l+1)*c] = tmpl
+        for b in range(k):
+            Ltb[b*c:(b+1)*c, b*c:(b+1)*c] = tmpl
         Lt_templates.append(Ltb)
         Lt_sizes.append(k * c)
 
@@ -3945,7 +3962,7 @@ def _cc_basis(x: np.ndarray, knots: np.ndarray, BD: np.ndarray) -> np.ndarray:
     # 0-based indices
     j1_0 = j1 - 1
     j_0 = j_wrap - 1
-    I = np.eye(nk - 1)
+    eye = np.eye(nk - 1)
     xk_right = knots[j1]  # knots[j1+1] 1-based → knots[j1] 0-based
     xk_left = knots[j1 - 1]  # knots[j1] 1-based → knots[j1-1] 0-based
     h_local = h[hj]
@@ -3956,8 +3973,8 @@ def _cc_basis(x: np.ndarray, knots: np.ndarray, BD: np.ndarray) -> np.ndarray:
     X = (
         BD[j1_0, :] * c_r[:, None]
         + BD[j_0, :] * c_l[:, None]
-        + I[j1_0, :] * a_r[:, None]
-        + I[j_0, :] * a_l[:, None]
+        + eye[j1_0, :] * a_r[:, None]
+        + eye[j_0, :] * a_l[:, None]
     )
     return X
 
@@ -4371,7 +4388,6 @@ def _bs_penalty(knots: np.ndarray, m0: int, m2: int) -> np.ndarray:
     pord = m0 - m2
     if pord < 0:
         raise ValueError("requested non-existent derivative in B-spline penalty")
-    n_basis = len(knots) - (m0 + 1)
 
     if pord == 0:
         # integrand is a step function; midpoint quadrature
@@ -5915,7 +5931,6 @@ def _nat_param(
             ind = np.arange(rank, p)
             rind = np.arange(p - 1, rank - 1, -1)  # reversed
             Xn = X_new[:, ind]
-            n_rows = Xn.shape[0]
             Xn_c = Xn - Xn.mean(axis=0, keepdims=True)
             w_n, V_n = np.linalg.eigh(Xn_c.T @ Xn_c)
             o = np.argsort(-w_n)
@@ -7422,21 +7437,36 @@ def materialize_smooths(
                 return _build_ti_smooth(call, d, knots=knots)
             return _build_t2_smooth(call, d, knots=knots)
         bs = _smooth_bs(call)
-        if bs == "re":   return _build_re_smooth(call, d)
-        if bs == "cr":   return _build_cr_smooth(call, d, knots=knots)
-        if bs == "cs":   return _build_cs_smooth(call, d, knots=knots)
-        if bs == "cc":   return _build_cc_smooth(call, d, knots=knots)
-        if bs == "tp":   return _build_tp_smooth(call, d)
-        if bs == "ts":   return _build_ts_smooth(call, d)
-        if bs == "ds":   return _build_ds_smooth(call, d, knots=knots)
-        if bs == "sos":  return _build_sos_smooth(call, d, knots=knots)
-        if bs == "ps":   return _build_ps_smooth(call, d, knots=knots)
-        if bs == "cp":   return _build_cp_smooth(call, d, knots=knots)
-        if bs == "bs":   return _build_bs_smooth(call, d, knots=knots)
-        if bs == "gp":   return _build_gp_smooth(call, d)
-        if bs == "fs":   return _build_fs_smooth(call, d)
-        if bs == "sz":   return _build_sz_smooth(call, d)
-        if bs == "ad":   return _build_ad_smooth(call, d)
+        if bs == "re":
+            return _build_re_smooth(call, d)
+        if bs == "cr":
+            return _build_cr_smooth(call, d, knots=knots)
+        if bs == "cs":
+            return _build_cs_smooth(call, d, knots=knots)
+        if bs == "cc":
+            return _build_cc_smooth(call, d, knots=knots)
+        if bs == "tp":
+            return _build_tp_smooth(call, d)
+        if bs == "ts":
+            return _build_ts_smooth(call, d)
+        if bs == "ds":
+            return _build_ds_smooth(call, d, knots=knots)
+        if bs == "sos":
+            return _build_sos_smooth(call, d, knots=knots)
+        if bs == "ps":
+            return _build_ps_smooth(call, d, knots=knots)
+        if bs == "cp":
+            return _build_cp_smooth(call, d, knots=knots)
+        if bs == "bs":
+            return _build_bs_smooth(call, d, knots=knots)
+        if bs == "gp":
+            return _build_gp_smooth(call, d)
+        if bs == "fs":
+            return _build_fs_smooth(call, d)
+        if bs == "sz":
+            return _build_sz_smooth(call, d)
+        if bs == "ad":
+            return _build_ad_smooth(call, d)
         raise NotImplementedError(
             f"smooth bs={bs!r} (class dispatch for {_smooth_label(call)}) "
             "not yet implemented"
@@ -7801,11 +7831,15 @@ def _lhs_referenced_cols(node, columns: set[str]) -> set[str]:
         if isinstance(n, Literal):
             return
         if isinstance(n, Paren):
-            visit(n.expr); return
+            visit(n.expr)
+            return
         if isinstance(n, UnaryOp):
-            visit(n.operand); return
+            visit(n.operand)
+            return
         if isinstance(n, BinOp):
-            visit(n.left); visit(n.right); return
+            visit(n.left)
+            visit(n.right)
+            return
         if isinstance(n, Call):
             for a in n.args:
                 visit(a)

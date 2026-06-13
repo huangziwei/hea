@@ -48,7 +48,6 @@ import pytest
 from conftest import assert_fp_equiv as _assert_fp_equiv, load_dataset
 from hea.models import gam, glm
 from hea.family import Gamma, Poisson, Tweedie, tw
-from hea.models.gam import VisResult
 
 matplotlib.use("Agg")  # headless — must be set before pyplot import below.
 import matplotlib.pyplot as plt   # noqa: E402
@@ -916,7 +915,6 @@ def test_check_outer_info_is_populated_after_fit():
 def test_gam_offset_in_formula_matches_glm():
     """No smooths → gam == glm. Offset(...) inside the formula must
     propagate identically through both."""
-    from hea.models import glm
     from hea.family import Quasi
     d = load_dataset("MASS", "quine")  # count data
     # Synthetic offset column to exercise the path.
@@ -3612,7 +3610,6 @@ def test_quasi_power_link_matches_r():
             edf 7.5915073119     sig2 0.0325949810
     """
     from hea.family import PowerLink, Quasi, power
-    from hea.models import glm
     assert power(0).name == "log" and power(-1).name == "log"
     assert power(1).name == "identity"
     assert power(1 / 3).name == "mu^0.333"
@@ -4125,8 +4122,10 @@ def test_sl_machinery_invariants():
     fd1 = np.zeros(n_sp)
     fdH = np.zeros((n_sp, n_sp))
     for k in range(n_sp):
-        rp_ = rho.copy(); rp_[k] += h
-        rm_ = rho.copy(); rm_[k] -= h
+        rp_ = rho.copy()
+        rp_[k] += h
+        rm_ = rho.copy()
+        rm_[k] -= h
         fd1[k] = (_ldet_s(_sl_setup(m._slots, m.p), rp_, deriv=0)["ldetS"]
                   - _ldet_s(_sl_setup(m._slots, m.p), rm_, deriv=0)["ldetS"]
                   ) / (2 * h)
