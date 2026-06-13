@@ -1454,22 +1454,26 @@ def _anova_gmm(*models, labels: list[str]):
     for k, idx in enumerate(order):
         m = models[idx]
         npar_col.append(m.npar)
-        aic_col.append(round(m.AIC, 4))
-        bic_col.append(round(m.BIC, 4))
-        ll_col.append(round(m.loglike, 4))
+        # lme4's print.anova.merMod shows the criteria at 1 decimal.
+        aic_col.append(round(m.AIC, 1))
+        bic_col.append(round(m.BIC, 1))
+        ll_col.append(round(m.loglike, 1))
         # ``-2*log(L)`` for the anova column — what R's ``anova.merMod``
         # prints. For LMM ``m.deviance`` already equals -2·log L; for GLMM
         # ``m.deviance`` is the residual deviance and the optimised
         # criterion lives on ``deviance_laplace``. Pick the latter when
         # available.
         dev_val = float(getattr(m, "deviance_laplace", m.deviance))
-        dev_col.append(round(dev_val, 4))
+        dev_col.append(round(dev_val, 1))
         if k == 0:
             chi_col.append(None); dfc_col.append(None); p_col.append(None); sig_col.append("")
             continue
         prev = models[order[k - 1]]
         prev_dev = float(getattr(prev, "deviance_laplace", prev.deviance))
-        chisq = prev_dev - dev_val
+        # lme4 clamps the LRT statistic at 0 (pmax) — a higher-npar model can
+        # land at a *worse* deviance (non-nested, or optimiser noise), giving a
+        # spurious negative χ². Clamping makes p=1 for those rows.
+        chisq = max(0.0, prev_dev - dev_val)
         d_df = m.npar - prev.npar
         p = float(chi2.sf(chisq, d_df)) if d_df > 0 else float("nan")
         chi_col.append(round(chisq, 4))
