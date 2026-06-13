@@ -1,6 +1,6 @@
 """Annotation/overlay calls — layered onto an existing ``Axes`` via ``ax=``.
 
-Phase 2 surface (from the Faraway inventory):
+Annotation surface (from the Faraway inventory):
     abline    — straight lines: from a fit, (a, b), or h=/v=
     points    — scatter overlay
     lines     — line overlay; accepts (x, y) or formula + data

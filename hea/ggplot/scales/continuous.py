@@ -1,9 +1,8 @@
 """``ScaleContinuous`` + ``scale_x_continuous`` / ``scale_y_continuous``.
 
-Phase 1.1 form: matplotlib autoscale handles axis limits (so geoms with
-non-trivial extents like bar widths still fit); the scale contributes
-breaks + labels. User-supplied ``limits=`` overrides autoscale. Wilkinson
-``extended_breaks`` parity is checklist 1.1c.
+matplotlib autoscale handles axis limits (so geoms with non-trivial
+extents like bar widths still fit); the scale contributes breaks +
+labels. User-supplied ``limits=`` overrides autoscale.
 """
 
 from __future__ import annotations

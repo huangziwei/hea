@@ -1,13 +1,9 @@
 """Build pipeline — turns a ``ggplot`` object into per-layer drawable data.
 
-Phase 0 form: identity scale + identity coord + identity stat + identity
-position. Just evaluates each layer's aes mapping against its data,
-stitches in default-aes constants, and returns the per-layer
+Evaluates each layer's aes mapping against its data, runs the stat and
+position adjustment, trains and maps scales, applies coord transforms and
+faceting, stitches in default-aes constants, and returns the per-layer
 DataFrame ready for :func:`render.render`.
-
-Real scale training, position adjustment, coord transformation, and
-faceting come in Phase 1 (checklist 1.1, 1.3, 1.7, plus polar in
-Phase 6).
 """
 
 from __future__ import annotations

@@ -3,9 +3,7 @@
 A scale is the contract between *data values* and *axis appearance*. For
 positional scales (x, y) on a Cartesian coord, the contract is mostly about
 ticks: matplotlib autoscales the limits from artist extents, and the scale
-contributes break positions + tick labels. Phase 1.1 ships only
-:class:`ScaleContinuous`; discrete and non-positional (colour, fill, size,
-shape) scales arrive in 1.5 / 1.6.
+contributes break positions + tick labels.
 """
 
 from __future__ import annotations
@@ -72,9 +70,9 @@ class Scale:
 def fmt_number(x: float) -> str:
     """Format a numeric break for display.
 
-    Phase 1.1 form: integer if exact, otherwise ``%g``. Full
-    ``scales::label_number`` parity (thousands separators, accuracy=,
-    big.mark, etc.) lands in Phase 3 alongside guides.
+    Integer if exact, otherwise ``%g``. Full ``scales::label_number``
+    parity (thousands separators, accuracy=, big.mark, etc.) is not yet
+    implemented.
     """
     if x == int(x):
         return str(int(x))

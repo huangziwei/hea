@@ -128,7 +128,7 @@ def emmeans(
     elif spec_lhs:
         raise NotImplementedError(
             f"emmeans: contrast type {spec_lhs!r} not yet supported "
-            f"(in v1: pairwise, trt.vs.ctrlk)"
+            f"(supported: pairwise, trt.vs.ctrlk)"
         )
 
     return EmmGrid(

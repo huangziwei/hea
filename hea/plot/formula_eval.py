@@ -149,7 +149,7 @@ def eval_node(node, data: pl.DataFrame | None, env: dict):
     if isinstance(node, Call):
         f = env.get(node.fn)
         if f is None:
-            raise NameError(f"function {node.fn!r} not in env (Phase 1 default env)")
+            raise NameError(f"function {node.fn!r} not in the plot default env")
         args = [eval_node(a, data, env) for a in node.args]
         kwargs = {k: eval_node(v, data, env) for k, v in (node.kwargs or {}).items()}
         return f(*args, **kwargs)

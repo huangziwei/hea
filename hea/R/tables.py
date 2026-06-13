@@ -70,7 +70,7 @@ def xtabs(formula: str, data: pl.DataFrame):
         if len(cols) == 2:
             return table(data[cols[0]], data[cols[1]], dnn=(cols[0], cols[1]))
         raise NotImplementedError(
-            "xtabs(): 3+ way tables not supported in v1"
+            "xtabs(): 3+ way tables not supported"
         )
     # Weighted form: ``w ~ a (+ b)`` — sum ``w`` per group.
     # Use polars directly (hea's GroupBy is dplyr-shaped).
@@ -92,7 +92,7 @@ def xtabs(formula: str, data: pl.DataFrame):
         other_cols = sorted(c for c in wide.columns if c != label_col)
         return wide.select([label_col, *other_cols])
     raise NotImplementedError(
-        "xtabs(): 3+ way weighted tables not supported in v1"
+        "xtabs(): 3+ way weighted tables not supported"
     )
 
 
@@ -149,7 +149,7 @@ def addmargins(tbl, margin=None):
     """
     if not isinstance(tbl, pl.DataFrame):
         raise NotImplementedError(
-            "addmargins(): only polars DataFrame inputs supported in v1"
+            "addmargins(): only polars DataFrame inputs supported"
         )
     if tbl.columns == ["value", "n"]:
         # 1-way: append a "Sum" row, cast `n` to keep types consistent

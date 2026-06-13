@@ -3,8 +3,7 @@
 Gaussian-identity fits take the LMM path (``lmer``: profiled deviance, REML/ML);
 any other family takes the GLMM path (``glmer``: Laplace approximation). The
 public entry dispatches on ``family`` internally — the ``gmm`` name reflects
-that it spans both, and is the long-term home for general families too (see
-``.claude/plans/lme-family-port.md`` Phase 14).
+that it spans both, and is the long-term home for general families too.
 
 Built on hea.formula's ``parse → expand → materialize / materialize_bars``
 pipeline. The fixed-effect side comes from ``materialize`` (R-canonical
@@ -232,8 +231,8 @@ class _FitInputs:
     # Inference mode ----------------------------------------------------
     family: Family
     """GLM family. Gaussian-identity is the current implemented path;
-    other families raise :class:`NotImplementedError` until Phase 2-5 of
-    ``lme-family-port.md`` land."""
+    other families raise :class:`NotImplementedError` until the GLMM
+    Laplace path lands."""
 
     reml: bool
     """``True`` for REML, ``False`` for ML."""
@@ -243,10 +242,10 @@ class _FitInputs:
     """Prior weights (``None`` ≡ unit weights)."""
 
     mustart: Optional[np.ndarray] = None
-    """Starting μ for GLMM PIRLS (Phase 2)."""
+    """Starting μ for GLMM PIRLS."""
 
     etastart: Optional[np.ndarray] = None
-    """Starting η for GLMM PIRLS (Phase 2)."""
+    """Starting η for GLMM PIRLS."""
 
     start: Optional[dict] = None
     """User-supplied starting values for the GLMM outer optimizer. Accepts
@@ -261,11 +260,11 @@ class _FitInputs:
     Stage 0 and run Stage 1 directly from ``θ₀`` and ``β=0``. Mirrors
     ``glmerControl(nAGQ0initStep=...)``."""
 
-    # Phase 8 plumbing --------------------------------------------------
+    # Argument plumbing -------------------------------------------------
     nAGQ: int = 1
     """Number of adaptive Gauss-Hermite quadrature points per group. Default
     1 ≡ Laplace approximation. ``0`` skips Stage 1 (LMM-style θ-only fit);
-    ``>1`` is reserved for Phase 9 (AGQ) and currently raises."""
+    ``>1`` is reserved for AGQ and currently raises."""
 
     tol_pwrss: float = 1e-7
     """PIRLS convergence tolerance — ``glmerControl(tolPwrss=)``."""
@@ -523,7 +522,7 @@ class _GlmResponse:
     the same state — no link inverse, no working weights — handled by
     skipping :meth:`update_weights` and reading ``μ`` directly as ``η``
     minus offset. For now the class is used only by the non-Gaussian
-    Laplace path (Phase 4); Phase 1's profiled-deviance code does not go
+    Laplace path; the LMM profiled-deviance code does not go
     through it.
 
     State (``snake_case`` mirrors of lme4's ``d_*`` members):
@@ -3783,7 +3782,7 @@ class NelderMead:
 
 
 # ---------------------------------------------------------------------------
-# Phase 8 — argument plumbing & validation helpers.
+# Argument plumbing & validation helpers.
 # ---------------------------------------------------------------------------
 
 
@@ -3845,7 +3844,7 @@ def _validate_nagq(nAGQ: int) -> int:
         raise ValueError(f"nAGQ must be an integer; got {nAGQ!r}")
     if n < 0 or n > 100:
         raise ValueError(f"nAGQ must be in [0, 100]; got {n}")
-    # nAGQ > 1 (adaptive Gauss-Hermite) is supported (Phase 9). The
+    # nAGQ > 1 (adaptive Gauss-Hermite) is supported. The
     # single-scalar-RE constraint (modular.R:918-920) is enforced at fit time
     # in _fit_glmm_from_components, where the RE structure is available.
     return n
@@ -3856,19 +3855,19 @@ _GLMER_CONTROL_DEFAULTS = {
     # runs optimizer[0], Stage 1 runs optimizer[1] (see _normalize_optimizer
     # _chain and _run_outer_stage).
     "optimizer": ["bobyqa", "Nelder_Mead"],
-    "restart_edge": False,          # Phase 8.12 (lmer-only, deferred)
-    "boundary.tol": 1e-5,           # Phase 8.13 (deferred)
+    "restart_edge": False,          # lmer-only, deferred
+    "boundary.tol": 1e-5,           # deferred
     "calc.derivs": None,            # lme4 NULL → smart rule (resolved in __init__)
     "use.last.params": False,
     "sparseX": False,               # lme4 no-op (warns); accepted for parity
-    "standardize.X": False,         # autoscale sibling (Phase 8.16, deferred)
-    "autoscale": None,              # Phase 8.16 (deferred)
+    "standardize.X": False,         # autoscale sibling, deferred
+    "autoscale": None,              # deferred
     "tolPwrss": 1e-7,
     "compDev": True,
     "nAGQ0initStep": True,
     "optCtrl": {},                  # Nelder_Mead kwargs (maxfun, XtolRel, etc.)
     # check.* keys — pre-fit and post-fit validation. Accepted now;
-    # enforcement lands incrementally in Phases 8.14 / 8.15.
+    # enforcement lands incrementally.
     "check.nobs.vs.rankZ": "ignore",
     "check.nobs.vs.nlev": "stop",
     "check.nlev.gtreq.5": "ignore",
@@ -4645,11 +4644,11 @@ class gmm:
     ):
         self.formula = formula
 
-        # 8.10 — family= validation. Accept None/Family/callable/str; reject
+        # family= validation. Accept None/Family/callable/str; reject
         # quasi* with lme4's exact error message (modular.R:733-735).
         family = _resolve_lme_family(family)
 
-        # 12 — glmer.nb: a free-θ negative-binomial family triggers the θ-
+        # glmer.nb: a free-θ negative-binomial family triggers the θ-
         # estimation outer loop (lme4::glmer.nb). Fixed-θ nb(theta=Θ) flows
         # through the standard Laplace path below. Delegate + adopt the fit.
         if isinstance(family, _family_mod.nb) and family.n_theta > 0:
@@ -4672,10 +4671,10 @@ class gmm:
             REML = False
         self.REML = REML
 
-        # 8.11 — nAGQ validation. Integer in [0, 100]; >1 awaits Phase 9.
+        # nAGQ validation. Integer in [0, 100]; >1 awaits AGQ.
         nAGQ = _validate_nagq(nAGQ)
         # Snapshot the fit knobs that ``_refit_response`` (the bootMer /
-        # simulate building block, Phase 11) must preserve when re-fitting on
+        # simulate building block) must preserve when re-fitting on
         # a fresh response: nAGQ, the user-supplied numeric ``offset=`` arg
         # (the formula's ``offset(...)`` terms re-evaluate from data on their
         # own — passing them again would double-count), and the control dict.
@@ -4683,11 +4682,11 @@ class gmm:
         self._offset_arg = None if offset is None else np.asarray(offset, dtype=float)
         self._control_arg = control
 
-        # 8.6 — control= normalization. Merges user-supplied keys with
+        # control= normalization. Merges user-supplied keys with
         # lme4's glmerControl defaults; unknown keys raise.
         ctrl = _normalize_glmer_control(control)
 
-        # 8.3 — subset= (R's row-filter) and na_action= (R's na.action).
+        # subset= (R's row-filter) and na_action= (R's na.action).
         # subset accepts: bool mask, positive 1-based ints (keep), negative
         # 1-based ints (drop). Filtered before prepare_design so the NA-omit
         # policy that runs inside prepare_design sees the same row set R does.
@@ -4704,7 +4703,7 @@ class gmm:
                 f"require carrying NA rows through PIRLS and are deferred."
             )
 
-        # 8.4 — contrasts= dict mapping factor-column name → R contrast name.
+        # contrasts= dict mapping factor-column name → R contrast name.
         # In-formula ``C(...)`` wraps win over this argument (R semantics).
         if contrasts is not None:
             valid_names = set(CONTRAST_FN_NAMES)
@@ -4746,7 +4745,7 @@ class gmm:
         off = np.zeros(n)
         for off_node in d.expanded.offsets:
             off = off + _eval_atom(off_node, d.data).values.flatten().astype(float)
-        # 8.2 — direct numeric ``offset=`` arg adds to the formula offset.
+        # direct numeric ``offset=`` arg adds to the formula offset.
         if offset is not None:
             offset_arr = np.asarray(offset, dtype=float)
             if offset_arr.shape != (n,):
@@ -4755,13 +4754,13 @@ class gmm:
                 )
             off = off + offset_arr
 
-        # 8.15 — pre-fit identifiability / response validation (lme4's
+        # pre-fit identifiability / response validation (lme4's
         # checkNlevels / checkZdims / checkZrank / checkResponse). Runs before
         # the X-rank drop, mirroring lFormula/glFormula's ordering; each check
         # fires at its glmerControl(check.*=) action level.
         _run_prefit_glmm_checks(re, y, n, ctrl)
 
-        # 8.15 — rank-deficient column drop (lme4's ``chkRank.drop.cols``).
+        # rank-deficient column drop (lme4's ``chkRank.drop.cols``).
         # Detect and drop columns at __init__ time so the fit only sees a
         # full-rank X. Without this, the inner-Cholesky in PIRLS dies on
         # rank-deficient designs (e.g. ``poly(age,2) + age:ch`` where
@@ -4780,7 +4779,7 @@ class gmm:
             X_for_fit = d.X
         self._dropped_cols = dropped_names
 
-        # 8.16 — autoscale (lme4 modular.R:442-453): centre/scale the non-
+        # autoscale (lme4 modular.R:442-453): centre/scale the non-
         # (Intercept) X columns to unit SD before fitting, for conditioning.
         # Reversed post-fit (after _fit_from_components) so the reported β̂/vcov
         # stay in the user's units — the fit is invariant to the reparam.
@@ -4803,7 +4802,7 @@ class gmm:
             self._autoscale_center = _center
             self._autoscale_scale = _scale
 
-        # 8.16 — checkScaleX (modular.R:128-158, run at 461): flag predictors
+        # checkScaleX (modular.R:128-158, run at 461): flag predictors
         # on very different scales (post-autoscale, so quiet once scaled).
         _check_scale_x(X_for_fit.to_numpy().astype(float),
                        list(X_for_fit.columns), ctrl["check.scaleX"])
@@ -4821,7 +4820,7 @@ class gmm:
                 and npar_opt < ctrl["check.conv.nparmax"]
             )
 
-        # 8.12 — restart_edge defaults TRUE for lmer (Gaussian-identity),
+        # restart_edge defaults TRUE for lmer (Gaussian-identity),
         # FALSE/unsupported for glmer, unless the user set it explicitly.
         _is_gaussian_id = (family.name == "gaussian"
                            and family.link.name == "identity")
@@ -4865,7 +4864,7 @@ class gmm:
             boundary_tol=ctrl["boundary.tol"],
         )
 
-        # 8.9 — ``devFunOnly=True``: _fit_from_components builds the stage
+        # ``devFunOnly=True``: _fit_from_components builds the stage
         # deviance closure, stores it on ``self.devfun`` (a _DevFunHandle), and
         # returns before optimizing — so gmm() hands back the unfitted instance
         # carrying that callable handle (lme4's diagnostic entry point).
@@ -4873,7 +4872,7 @@ class gmm:
         if devFunOnly:
             return
 
-        # 8.16 — undo autoscale on the reported fixed effects: map β̂ and its
+        # undo autoscale on the reported fixed effects: map β̂ and its
         # vcov from the scaled parameterisation back to the original predictor
         # units (lme4 fixef.merMod:973-982). β_orig[j]=β_s[j]/s[j];
         # β_orig[icpt] -= Σ_j β_s[j]·c[j]/s[j]. summary() reads _beta/_se_beta
@@ -4919,8 +4918,7 @@ class gmm:
 
         Dispatches on ``inputs.family``: Gaussian-identity uses the
         profiled-deviance + CHOLMOD path implemented here. Other families
-        raise :class:`NotImplementedError` until Phase 2-5 of
-        ``lme-family-port.md`` add the Laplace approximation.
+        take the GLMM Laplace path.
         """
         is_gaussian_identity = (
             inputs.family.name == "gaussian"
@@ -4932,7 +4930,7 @@ class gmm:
         if inputs.weights is not None:
             raise NotImplementedError(
                 "weights= is plumbed through _FitInputs but the Gaussian fit "
-                "path does not yet honour non-unit weights; Phase 8 adds this."
+                "path does not yet honour non-unit weights."
             )
 
         # Unpack inputs onto self — same attributes the original __init__ set.
@@ -5005,7 +5003,7 @@ class gmm:
         ]
         self._theta_bounds = bounds
 
-        # 8.9 — devFunOnly: hand back the lmer profiled-deviance closure over θ.
+        # devFunOnly: hand back the lmer profiled-deviance closure over θ.
         if inputs.dev_fun_only:
             tnames = [f"theta{i + 1}" for i in range(len(re.theta))]
             lb = np.array([b[0] if b[0] is not None else -np.inf for b in bounds])
@@ -5027,7 +5025,7 @@ class gmm:
         res = _nlopt_ln_bobyqa(_devfun_g, theta0, _lo, _hi)
         theta_hat = res.x
 
-        # 8.12 / 8.13 — boundary handling on θ (lme4 optimizeLmer:688-740).
+        # boundary handling on θ (lme4 optimizeLmer:688-740).
         # restart_edge is a near-no-op for BOBYQA (derivative-free, won't halt
         # at a false edge) but ported for parity; check.boundary pins near-zero
         # variance params to 0.
@@ -5171,10 +5169,10 @@ class gmm:
 
         The instance gets just the bare minimum after this method: ``theta``,
         ``_beta``, ``bhat``/``fixef``, ``deviance``, plus the live
-        ``_pred``/``_resp`` for downstream phases. Full post-fit attributes
+        ``_pred``/``_resp`` for downstream consumers. Full post-fit attributes
         (``fitted``, ``residuals``, ``AIC``, ``logLik``, ``sigma`` for
         unknown-scale families, σ-component summary tables, plotting hooks)
-        land in Phase 6 of ``.claude/plans/lme-family-port.md``.
+        are filled in by the post-fit attribute pass.
         """
         re = inputs.re_terms
         X_df = inputs.X_df
@@ -5317,7 +5315,7 @@ class gmm:
                 pred, resp, nagq=0, tol_pwrss=tol_pwrss,
                 maxit_pwrss=maxit_pwrss, verbose=verbose_pirls,
             )
-            # 8.9 — devFunOnly with nAGQ=0: return the θ-only Stage-0 closure
+            # devFunOnly with nAGQ=0: return the θ-only Stage-0 closure
             # before optimizing (lme4 lmer.R:151).
             if inputs.dev_fun_only and not do_stage1:
                 tnames = [f"theta{i + 1}" for i in range(n_theta)]
@@ -5361,7 +5359,7 @@ class gmm:
             # offset; PIRLS uses u_only=True. The factory snapshots lp0 at
             # the current (post-Stage-0) state and base_offset = resp.offset.
             #
-            # nAGQ=1 → Laplace; nAGQ>1 → adaptive Gauss-Hermite (Phase 9).
+            # nAGQ=1 → Laplace; nAGQ>1 → adaptive Gauss-Hermite.
             # AGQ requires a single scalar RE (modular.R:918-920) and feeds the
             # factory the GH rule + per-obs grouping codes.
             nagq_stage1 = inputs.nAGQ
@@ -5396,7 +5394,7 @@ class gmm:
                 pred, resp, nagq=nagq_stage1, tol_pwrss=tol_pwrss,
                 maxit_pwrss=maxit_pwrss, verbose=verbose_pirls, **agq_kwargs,
             )
-            # 8.9 — devFunOnly with nAGQ>0: return the [θ, β] Stage-1 closure
+            # devFunOnly with nAGQ>0: return the [θ, β] Stage-1 closure
             # (built at the Stage-0 optimum) before optimizing (lme4 lmer.R:175).
             if inputs.dev_fun_only:
                 tnames = [f"theta{i + 1}" for i in range(n_theta)]
@@ -5427,7 +5425,7 @@ class gmm:
                 xst=xst1, xtol_abs=xt1, nm_kwargs=nm_kwargs,
                 bobyqa_kwargs=bobyqa_kwargs,
             )
-            # 8.13 — check.boundary on the θ block (modular.R:871-872): pin a
+            # check.boundary on the θ block (modular.R:871-872): pin a
             # near-zero variance param to 0 if it lowers the deviance.
             if inputs.boundary_tol > 0:
                 theta_beta_x = _check_boundary(
@@ -5441,7 +5439,7 @@ class gmm:
                 "par": theta_beta_x.copy(), "fval": fval1,
                 "feval": feval1, "status": status1,
             }
-            self._devfun_stage1 = devfun_stage1  # Phase 8.14 reuses this
+            self._devfun_stage1 = devfun_stage1  # convergence diagnostics reuse this
         else:
             # nAGQ=0 — Stage 0 IS the final fit. θ̂ from NM, β̂ from the
             # converged PIRLS at θ̂.
@@ -5457,7 +5455,7 @@ class gmm:
         self._resp = resp
         self.method = "glmer.ML"   # lme4's @resp$family != gaussian path
 
-        # ----- post-fit attributes (Phase 6) ------------------------------
+        # ----- post-fit attributes ----------------------------------------
 
         # Caches that ``_ranef`` / ``predict`` need. Mirror what the
         # Gaussian path stashes in ``_fit_from_components``.
@@ -5528,7 +5526,7 @@ class gmm:
         # ``calc_derivs=False`` (or Stage 1 unavailable, e.g. nAGQ=0):
         # fall back to the Schur-complement RX, ``Var(β̂) = σ²·RX⁻ᵀ·RX⁻¹``.
         vcov_beta_hess = None
-        # 8.14 — the (θ, β) gradient + Hessian feed both vcov AND the
+        # the (θ, β) gradient + Hessian feed both vcov AND the
         # convergence diagnostics (checkConv); capture both. They stay None
         # when calc_derivs is off (lme4's checkConv then bails — no checks).
         deriv_grad = None
@@ -5621,11 +5619,11 @@ class gmm:
         self.AIC = laplace + 2.0 * self.npar
         self.BIC = laplace + np.log(n) * self.npar
 
-        # 8.14 — convergence diagnostics. Port of ``checkConv`` (checkConv.R)
+        # convergence diagnostics. Port of ``checkConv`` (checkConv.R)
         # plus ``m@optinfo`` (utilities.R:448): the singular check
         # (``check.conv.singular``) plus, when the Stage-1 (θ, β) gradient /
         # Hessian are available (calc_derivs on), the gradient and Hessian
-        # convergence diagnostics (8.14, ``check.conv.grad`` /
+        # convergence diagnostics (``check.conv.grad`` /
         # ``check.conv.hess``). lme4 skips the latter for a singular fit.
         self.optinfo = _build_optinfo(
             theta=self.theta,
@@ -6145,7 +6143,7 @@ class gmm:
         return float(res.fun), theta_opt, 1.0, beta_opt
 
     def _profile_glmm(self, n_grid: int, alphamax: float) -> "Profile":
-        """Profile a **scale-known** GLMM (Poisson/Binomial) — the Phase-11.1
+        """Profile a **scale-known** GLMM (Poisson/Binomial) — the
         constrained-Laplace path. Mirrors the Gaussian :meth:`profile` but over
         the Stage-1 ``[θ, β]`` Laplace devfun (no residual σ axis, ``useSc=0``),
         re-optimising the free coordinates at each grid point with one pinned."""
@@ -6251,13 +6249,13 @@ class gmm:
                 "vector bars like (1+x|g) need a different parameterization."
             )
         if self._is_glmm():
-            # 11.2 — unknown-scale GLMM (Gamma/IG): lme4 itself refuses to
+            # unknown-scale GLMM (Gamma/IG): lme4 itself refuses to
             # profile these (profile.R:74-75); match the message verbatim so
             # confint(method="profile") raises identically.
             if not bool(getattr(self.family, "scale_known", False)):
                 raise NotImplementedError(
                     "can't (yet) profile GLMMs with non-fixed scale parameters")
-            # 11.1 — scale-known GLMM (Poisson/Binomial): profile the [θ, β]
+            # scale-known GLMM (Poisson/Binomial): profile the [θ, β]
             # Laplace devfun, re-optimising the free coords with one pinned.
             return self._profile_glmm(n_grid, alphamax)
         if self.REML:
@@ -7012,7 +7010,7 @@ class gmm:
             y_mat = y_flat.reshape((nsim, n)).T
         return pl.DataFrame({f"sim_{k + 1}": y_mat[:, k] for k in range(nsim)})
 
-    # ---- refit / parametric bootstrap (Phase 11) ------------------------
+    # ---- refit / parametric bootstrap ----------------------------------
 
     def _refit_response(self, newresp) -> "gmm":
         """Refit this model to a new response vector, preserving family / REML
@@ -7067,7 +7065,7 @@ class gmm:
                 parallel: str = "no", ncpus: int = 1) -> "BootMer":
         """Model-based parametric bootstrap — port of ``bootMer`` (bootMer.R).
 
-        Simulates ``nsim`` responses from the fitted model (Phase 10's
+        Simulates ``nsim`` responses from the fitted model (via
         :meth:`simulate`), refits the model to each (:meth:`_refit_response`),
         and applies ``FUN`` to every refit. Returns a :class:`BootMer` holding
         ``t0 = FUN(self)`` and the ``nsim × len(t0)`` replicate matrix, ready
@@ -7230,7 +7228,7 @@ class gmm:
         if corr_lines:
             out.append("")
             out.extend(corr_lines)
-        # 8.14 — convergence diagnostics block, appended verbatim after the
+        # convergence diagnostics block, appended verbatim after the
         # correlation matrix when there's anything to report. Mirrors lme4's
         # ``print.summary.merMod`` (methods.R:158-176) which prints the
         # collected ``optinfo$conv$lme4$messages`` at the tail.

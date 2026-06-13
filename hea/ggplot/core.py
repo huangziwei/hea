@@ -218,7 +218,7 @@ class ggplot:
 
         ggplot2's grammar deliberately keeps size on the device, not the
         plot — see ``ggsave`` / ``options(repr.plot.width=...)``. We expose
-        these kwargs as a Python convenience (also a Phase C deviation).
+        these kwargs as a Python convenience (a deliberate deviation).
         """
         from .build import build
         from .render import render
@@ -485,8 +485,7 @@ def _install_fluent_methods(namespace: dict) -> None:
     ``hea.ggplot.__all__`` automatically get fluent methods on the next
     package import — no per-name maintenance needed.
 
-    Mirrors ``hea/dataframe.py:_install_series_subclass_overrides`` (Phase 4
-    of the prerequisite plan ``dataframe-subclass-coverage.md``).
+    Mirrors ``hea/dataframe.py:_install_series_subclass_overrides``.
     """
     names = namespace.get("__all__") or [n for n in namespace if not n.startswith("_")]
     for name in names:

@@ -1,9 +1,9 @@
 """``stat_bin()`` — histogram binning of a continuous x.
 
-Phase 1.2 form: simple equal-width bins via ``numpy.histogram``. Real
-Wilkinson break-finding (parity with ggplot2's ``bin_breaks``) is a
-later polish; this version handles the canonical "30 equal-width bins"
-default and explicit ``binwidth`` / ``bins`` overrides.
+Simple equal-width bins via ``numpy.histogram``. Real Wilkinson
+break-finding (parity with ggplot2's ``bin_breaks``) is a later polish;
+this version handles the canonical "30 equal-width bins" default and
+explicit ``binwidth`` / ``bins`` overrides.
 """
 
 from __future__ import annotations

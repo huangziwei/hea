@@ -1631,7 +1631,7 @@ def _is_identity_link(family: Family) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# bam class — Gaussian-identity chunked-QR fit (Phase 1 of three fitters)
+# bam class — Gaussian-identity chunked-QR fit (one of three fitters)
 # ---------------------------------------------------------------------------
 
 
@@ -2109,8 +2109,8 @@ class bam(gam):
           which re-evaluates each smooth's basis on training rows.
           For non-discrete bam this is bit-equal to the design used
           during the fit; for discrete bam it evaluates basis exactly
-          (vs. mgcv's discretize-then-gather via ``Xbd``) — *Phase 5.2
-          will replace this with the discrete-aware path*.
+          (vs. mgcv's discretize-then-gather via ``Xbd``) — a future
+          change will replace this with the discrete-aware path.
         * ``newdata=None`` with ``se_fit=True`` → cached eta (+ extra
           offset, if any) for the link-scale prediction; chunked
           ``diag(X·Vp·X')`` (via :meth:`_chunked_var_eta_diag`) for
@@ -2471,8 +2471,8 @@ class bam(gam):
             # Discrete: row gather via predict_mat on training data is
             # bit-equal to the design used at fit time when the
             # discretization didn't round (the common case for small or
-            # already-unique covariates). Phase 5.2 will replace this
-            # with a true Xbd-gather.
+            # already-unique covariates). A future change will replace
+            # this with a true Xbd-gather.
             X_param_full = self._X_param_full
             for start, end in _chunk_indices(n, self._chunk_size):
                 cols = [X_param_full[start:end]]

@@ -1,9 +1,9 @@
 """R AST → Python AST → Python source.
 
-This is Phase 1's emitter (scalars / operators / control flow) merged with
-Phase 2's verb dispatch and NSE handling. The split is logical, not
-file-level: one ``Translator`` walks the R AST, building stdlib ``ast``
-nodes that ``ast.unparse`` finally renders.
+The scalar / operator / control-flow emitter is merged here with verb
+dispatch and NSE handling. The split is logical, not file-level: one
+``Translator`` walks the R AST, building stdlib ``ast`` nodes that
+``ast.unparse`` finally renders.
 
 Public entry: :func:`translate`. Returns a Python source string. Callers
 needing the AST instead can use :class:`Translator` directly.
@@ -144,7 +144,7 @@ _PY_BUILTINS: frozenset[str] = frozenset(__builtins__.keys() if isinstance(__bui
 
 
 # ---------------------------------------------------------------------------
-# Unported-construct sentinel. R idioms outside the v1 sublanguage
+# Unported-construct sentinel. R idioms outside the supported sublanguage
 # (replacement-function assigns, ``with(df, expr)``, ...) emit a uniquely
 # tagged statement that ``Translator.translate`` rewrites to a Python
 # comment block after ``ast.unparse``. The sentinel survives a regular
@@ -1223,7 +1223,7 @@ class Translator:
                 kwargs.append(P.keyword(arg=name, value=value))
                 pos_idx += 1
             # Extra positional args (3rd+) in aes are non-standard. Drop
-            # silently in v1 rather than guess at color/fill/etc.
+            # silently rather than guess at color/fill/etc.
         return kwargs
 
     def _translate_aes_value(self, node: R.Node) -> P.AST:
@@ -1252,13 +1252,13 @@ class Translator:
     def _expand_across(self, call: R.Call) -> list[R.Node]:
         """Translate-time expansion of ``across(cols, fn[, .names = ...])``.
 
-        Supported in v1:
+        Supported:
         - ``across(col, fn)``               — single col, single fn
         - ``across(c(a, b, ...), fn)``      — multiple cols, single fn
         - ``fn`` may be an :class:`R.Identifier` (named function) or a
           :class:`R.FunctionDef` (anonymous lambda) of one parameter.
 
-        Out of scope (raise :class:`RTranslateError` until Phase 5+):
+        Out of scope (raises :class:`RTranslateError`):
         - list-of-functions form ``list(mean = mean, sd = sd)``
         - ``.names`` glue templates
 
@@ -1277,12 +1277,12 @@ class Translator:
         for extra in call.args[2:]:
             if isinstance(extra, R.NamedArg) and extra.name == ".names":
                 raise RTranslateError(
-                    "across(.names = ...) not supported in v1 — defer to Phase 5+",
+                    "across(.names = ...) not supported",
                     extra,
                 )
         if _is_named_call(fn_arg, "list"):
             raise RTranslateError(
-                "across() with list(...) of functions not supported in v1",
+                "across() with list(...) of functions not supported",
                 fn_arg,
             )
 
@@ -1830,10 +1830,9 @@ class Translator:
     def _visit_Assign(self, n: R.Assign) -> P.AST:
         """``x <- expr`` / ``x = expr`` → ``x = expr``.
 
-        ``<<-`` global-scope assignment is emitted the same as ``<-`` in
-        Phase 2; nested scope semantics aren't translatable to Python's
-        rules without ``global`` declarations, which we punt to a later
-        phase.
+        ``<<-`` global-scope assignment is emitted the same as ``<-``;
+        nested scope semantics aren't translatable to Python's rules
+        without ``global`` declarations, which is not currently handled.
         """
         # The LHS of an Assign is the variable name — NOT a column ref.
         with self.nse.enter(Slot.NONE):
@@ -1986,13 +1985,13 @@ class Translator:
     def _visit_Block(self, n: R.Block) -> P.AST:
         """Brace block. As a statement, becomes the sequence of inner
         statements. As an expression, the value is the last statement —
-        the surrounding context decides. v1 only handles the statement
-        case; an expression-form block falls through to its last value,
+        the surrounding context decides. Only the statement case is
+        handled; an expression-form block falls through to its last value,
         which is what R does at runtime."""
         if not n.statements:
             return P.Constant(value=None)
-        # In Phase 2 scope, only the statement case is required (function
-        # bodies, control-flow bodies). The expression case can come later.
+        # Only the statement case is required (function bodies,
+        # control-flow bodies). The expression case can come later.
         # For safety here, emit the last statement's value.
         return self._visit(n.statements[-1])
 
@@ -2085,7 +2084,7 @@ class Translator:
 
     def _visit_FunctionDef(self, n: R.FunctionDef) -> P.AST:
         """``function(x) body`` → Python ``lambda`` for simple expression
-        bodies, ``def`` otherwise. Phase 2 keeps it simple — always lambda.
+        bodies, ``def`` otherwise. Currently always emits a lambda.
         Top-level ``f <- function(...) ...`` becomes ``f = lambda ...``."""
         py_args = P.arguments(
             posonlyargs=[],
@@ -2337,8 +2336,8 @@ def _extract_col_names(cols_arg) -> list[str]:
 
     Accepts: ``a`` (bare ident), ``"a"`` (string), or ``c(a, b, "c")``.
     Rejects: tidy-select helpers (``starts_with("x")``), slices, etc. —
-    those need a runtime resolver (Phase 5+). Raise so the user sees the
-    gap instead of a silently-wrong expansion.
+    those need a runtime resolver, which is not supported. Raise so the
+    user sees the gap instead of a silently-wrong expansion.
     """
     if isinstance(cols_arg, R.Identifier):
         return [cols_arg.name]
@@ -2354,7 +2353,7 @@ def _extract_col_names(cols_arg) -> list[str]:
             else:
                 raise RTranslateError(
                     f"across() column list contains {type(a).__name__} "
-                    "— only bare names and strings are supported in v1",
+                    "— only bare names and strings are supported",
                     a,
                 )
         return names
