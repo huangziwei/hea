@@ -1895,10 +1895,21 @@ class InverseGaussian(Family):
         return np.array([ls0, -0.5 * nobs, 0.0], dtype=float)
 
     def rd(self, rng, mu, wt, scale):
-        # mgcv fix.family.rd: rig(n, mu, scale) — inverse Gaussian with
-        # variance scale·μ³, i.e. numpy's wald(mean=μ, scale=1/φ). No qf
-        # in mgcv, so qq machinery simulates for this family.
-        return rng.wald(np.asarray(mu, dtype=float), 1.0 / scale)
+        # mgcv rig(n, mu, scale) (Michael-Schucany-Haas): inverse Gaussian with
+        # variance scale·μ³, drawn as n rnorm (squared) then n runif — that draw
+        # order makes it bit-exact to R's rig on the hea.R.rng stream.
+        mu = np.asarray(mu, dtype=float)
+        n = mu.shape[0]
+        y = np.asarray(rng.normal(size=n)) ** 2
+        mys = mu * scale * y
+        x = np.empty(n)
+        big = mys < np.finfo(float).eps ** -0.5
+        x[big] = mu[big] * (1.0 + 0.5 * (mys[big]
+                            - np.sqrt(4.0 * mys[big] + mys[big] ** 2)))
+        x[~big] = mu[~big] / mys[~big]
+        swap = np.asarray(rng.uniform(size=n)) > mu / (mu + x)
+        x[swap] = mu[swap] ** 2 / x[swap]
+        return x
 
 
 # ---------------------------------------------------------------------------
@@ -3482,12 +3493,11 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
 
 
 def _r_tweedie(rng, mu, p: float, phi: float) -> np.ndarray:
-    """mgcv ``rTweedie`` (gam.fit3.r:3112-3146): compound Poisson-Gamma
-    deviates for 1 < p < 2. mgcv draws N_i ~ Poisson(λ_i) individual
-    Gamma(shape, scale_i) jumps and C_psum's them; equal in law to one
-    Gamma(N_i·shape, scale_i) draw per row (gamma additivity at shared
-    scale), which is what we sample. numpy RNG — Monte-Carlo-level
-    parity (R's rejection samplers aren't ported).
+    """mgcv ``rTweedie``: compound Poisson-Gamma deviates for 1 < p < 2 —
+    ``N_i ~ Poisson(λ_i)`` jumps per row, each ``Gamma(shape, scale_i)``, summed
+    (mgcv's ``C_psum``). R draws all ``rpois`` first, then every individual gamma
+    jump in row order; reproducing that order makes this bit-exact via
+    ``hea.R.rng`` (the earlier collapsed one-gamma-per-row form was Monte-Carlo).
     """
     mu = np.asarray(mu, dtype=float)
     if not (1.0 < p < 2.0):
@@ -3499,11 +3509,12 @@ def _r_tweedie(rng, mu, p: float, phi: float) -> np.ndarray:
     lam = mu ** (2.0 - p) / ((2.0 - p) * phi)
     shape = (2.0 - p) / (p - 1.0)
     scale = phi * (p - 1.0) * mu ** (p - 1.0)
-    N = rng.poisson(lam)
-    pos = N > 0
-    y = np.zeros(mu.shape[0], dtype=float)
-    if np.any(pos):
-        y[pos] = rng.gamma(N[pos] * shape, scale[pos])
+    n = mu.shape[0]
+    N = np.asarray(rng.poisson(lam)).astype(np.int64)   # n Poisson jump counts
+    gs = np.repeat(scale, N)                             # scale_i repeated N_i×
+    jumps = rng.gamma(shape, gs)                         # Σ N_i gamma jumps
+    y = np.zeros(n)
+    np.add.at(y, np.repeat(np.arange(n), N), jumps)      # C_psum per row
     return y
 
 

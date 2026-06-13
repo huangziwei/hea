@@ -801,11 +801,9 @@ class RGenerator:
     handed one of these. Each method maps to the matching R sampler in R's
     vectorised (per-element) order and mirrors numpy's scalar-vs-array return,
     so ``set.seed(k)``-pinned R results (e.g. ``qq.gam(rep>0)``) reproduce
-    bit-for-bit.
-
-    ``wald`` raises: R's ``rig`` (inverse Gaussian) isn't ported, so the
-    ``inverse.gaussian`` family can't be made R-exact this way (it stays on numpy
-    — Monte-Carlo accurate only)."""
+    bit-for-bit. (Inverse-Gaussian deviates use mgcv's ``rig`` — n ``normal`` +
+    n ``uniform`` — and tweedie uses ``poisson`` + ``gamma``, so no dedicated
+    ``wald``/``rTweedie`` method is needed.)"""
 
     __slots__ = ("mt",)
 
@@ -845,8 +843,3 @@ class RGenerator:
         n, scalar, (low, high) = _rgen_resolve(size, low, high)
         out = low + (high - low) * self.mt.unif_rand(n)
         return float(out[0]) if scalar else out
-
-    def wald(self, mean, scale, size=None):
-        raise NotImplementedError(
-            "R's rig (inverse Gaussian) is not ported to RMersenneTwister; "
-            "inverse.gaussian rd cannot be made R-bit-exact yet.")

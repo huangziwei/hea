@@ -967,8 +967,9 @@ def test_rgenerator_family_rd_matches_r():
     """``RGenerator`` (numpy-Generator facade over ``RMersenneTwister``) drives
     ``family.py``'s ``rd`` hooks bit-exactly vs R's ``set.seed(k); family$rd(...)``
     — the basis for R-exact ``qq.gam(rep>0)``. References from R 4.6.0 / mgcv.
-    Ported families: gaussian, Gamma, poisson, binomial, gaulss, shash, negbin,
-    scat. inverse.gaussian raises (R's ``rig`` unported → numpy fallback)."""
+    Covers all ten built-in families: gaussian, Gamma, poisson, binomial,
+    gaulss, shash, negbin, scat, inverse.gaussian (mgcv ``rig``) and tweedie
+    (per-jump ``rTweedie``)."""
     from hea.R.rng import RGenerator
     from hea import family as F
 
@@ -1003,10 +1004,12 @@ def test_rgenerator_family_rd_matches_r():
         [-0.509374899947293, 0.623492442659397, 3.85817357273412,
          5.48832450368482, 9.67291982150252])
 
-    # inverse.gaussian: R's rig isn't ported, so the facade refuses (the
-    # qq.gam consumer catches this and falls back to numpy).
-    with pytest.raises(NotImplementedError):
-        F.InverseGaussian().rd(RGenerator(1), mu, wt, 0.5)
+    chk(F.InverseGaussian().rd(RGenerator(1), mu, wt, 0.5),
+        [0.366005266522837, 1.2796574965637, 1.12218739016413,
+         0.62960207413193, 20.5664902471926])
+    chk(F.Tweedie(p=1.5).rd(RGenerator(1), mu, wt, 2.0),
+        [0, 2.21006742517074, 3.56580988134542, 6.63216281011408,
+         2.46511332727586])
 
 
 # ---------------------------------------------------------------------------

@@ -903,7 +903,16 @@ class lm:
             }
         )
 
-    def compute_ci_bhat_bootstrap(self, num_bootstrap=4000, alpha=0.05):
+    def compute_ci_bhat_bootstrap(self, num_bootstrap=4000, alpha=0.05,
+                                  *, seed=None):
+        """Residual bootstrap CI for the coefficients.
+
+        hea-original (``stats::lm`` has no bootstrap-CI method), so this is
+        **not an R-parity target** — it draws from numpy, not ``hea.R.rng``.
+        ``seed=None`` (default) uses numpy's global RNG, so results vary across
+        runs; pass an ``int`` or ``numpy.random.Generator`` for a reproducible
+        bootstrap.
+        """
 
         X = self.X.to_numpy().astype(float)
         W = self.W
@@ -922,11 +931,18 @@ class lm:
         Q, R = qr(Xhat, mode="economic")
         X_bhat_flat = (X @ bhat).flatten()
 
-        # ``np.random.choice(..., size=(B, n))`` produces the same draws
-        # and advances ``np.random`` by the same amount as B sequential
-        # ``size=n`` calls (verified on the legacy MT19937), so this
-        # batched sample is RNG-byte-equivalent to the unrolled loop.
-        residuals_star = np.random.choice(
+        # ``choice(..., size=(B, n))`` produces the same draws and advances the
+        # RNG by the same amount as B sequential ``size=n`` calls (verified on
+        # the legacy MT19937), so this batched sample is RNG-byte-equivalent to
+        # the unrolled loop. ``seed=None`` keeps the legacy global-``np.random``
+        # path; an int / Generator gives a reproducible local stream.
+        if seed is None:
+            gen = np.random
+        elif isinstance(seed, np.random.Generator):
+            gen = seed
+        else:
+            gen = np.random.default_rng(seed)
+        residuals_star = gen.choice(
             residuals, size=(num_bootstrap, n), replace=True
         )
 

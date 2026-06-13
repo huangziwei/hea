@@ -5414,17 +5414,21 @@ def test_general_family_authoring_contract():
 
 
 def _twlss_fixture():
-    # Tweedie response over smooth μ(x) + linear w — the SAME doubles
-    # were exported at %.17g and fit live in R (mgcv 1.9-4) for the
-    # pins below.
+    # Tweedie response over smooth μ(x) + linear w, generated on R's stream via
+    # hea.R.rng (bit-exact to set.seed(9)): runif for x/z/w, the ported rTweedie
+    # for y. So this is R's set.seed(9) data byte-for-byte (verified), and the
+    # pins below are mgcv fits on it, reproducible by a pure-R script:
+    #   set.seed(9); x<-runif(300); z<-runif(300); w<-runif(300)
+    #   mu<-exp(0.3+sin(2*pi*x)+0.3*w); y<-rTweedie(mu, p=1.55, phi=0.9)
     from hea.family import _r_tweedie
-    rng = np.random.default_rng(9)
+    from hea.R.rng import RGenerator
+    gen = RGenerator(9)
     n = 300
-    x = rng.uniform(0, 1, n)
-    z = rng.uniform(0, 1, n)
-    w = rng.uniform(0, 1, n)
+    x = gen.uniform(size=n)
+    z = gen.uniform(size=n)
+    w = gen.uniform(size=n)
     mu = np.exp(0.3 + np.sin(2 * np.pi * x) + 0.3 * w)
-    y = _r_tweedie(rng, mu, p=1.55, phi=0.9)
+    y = _r_tweedie(gen, mu, p=1.55, phi=0.9)
     return pl.DataFrame({"y": y, "x": x, "z": z, "w": w})
 
 
@@ -5441,39 +5445,39 @@ def test_twlss_through_gam_matches_mgcv():
     df = _twlss_fixture()
     m1 = gam(["y ~ s(x) + w", "~ 1", "~ s(z)"], df, family=twlss(),
              method="REML")
-    np.testing.assert_allclose(m1.REML_criterion / 2, 495.3552356778,
+    np.testing.assert_allclose(m1.REML_criterion / 2, 515.6445331249,
                                rtol=0, atol=1e-3)
-    np.testing.assert_allclose(m1.sp[0], 0.1235779327, rtol=1e-4)
+    np.testing.assert_allclose(m1.sp[0], 0.1810879219, rtol=1e-4)
     # second sp is a flat λ→∞ direction (s(z) on ρ shrunk to linear,
-    # edf 1.0014): R stops at 8836, hea at ~7915 — same working-
+    # edf 1.007): R stops at ~1574, hea at ~1580 — same working-
     # infinity band; pin the direction + its edf instead of the value.
     assert m1.sp[1] > 500.0
-    np.testing.assert_allclose(m1.edf_total, 10.3995210288, rtol=0,
+    np.testing.assert_allclose(m1.edf_total, 10.2292798004, rtol=0,
                                atol=2e-3)
     rows = m1._smooth_significance_rows()
-    np.testing.assert_allclose(rows[1][1], 1.0013803186, rtol=0,
+    np.testing.assert_allclose(rows[1][1], 1.0070551110, rtol=0,
                                atol=5e-3)
     # tp-basis eigenvector signs are build noise (cf. the fs record):
     # pin |coef|, plus fitted values which are sign-invariant.
     np.testing.assert_allclose(
         np.abs(np.asarray(m1._beta)[:4]),
-        np.abs([0.4243552129, 0.0458891478, -2.1074745630,
-                0.7379786690]), rtol=0, atol=1e-4)
+        np.abs([0.3636872521, 0.2340139050, 1.7497627520,
+                0.2383358048]), rtol=0, atol=1e-4)
     np.testing.assert_allclose(
         np.asarray(m1.fitted_values)[:2],
-        [[0.6581888497, 0.3261817526, -0.2348092602],
-         [4.7811905814, 0.3261817526, -0.1599234639]],
+        [[4.1009048580, -0.0109253440, -0.1731325510],
+         [2.7718950940, -0.0109253440, -0.0679816568]],
         rtol=0, atol=1e-4)
-    np.testing.assert_allclose(m1.deviance, 358.2875399725, rtol=0,
+    np.testing.assert_allclose(m1.deviance, 357.7929921000, rtol=0,
                                atol=1e-3)
-    np.testing.assert_allclose(m1.null_deviance, 632.1121270051,
+    np.testing.assert_allclose(m1.null_deviance, 567.2259056000,
                                rtol=0, atol=1e-3)
     np.testing.assert_allclose(
         np.asarray(m1.residuals)[:3],
-        [1.2877909886, -1.2883620195, -2.1466111271], rtol=0,
+        [-1.1855994500, -0.2774933634, -0.4901982250], rtol=0,
         atol=1e-4)
-    assert 3 <= m1.outer_info["iter"] <= 8          # R: 5
-    np.testing.assert_allclose(np.asarray(m1.Vp)[0, 0], 0.009975857963,
+    assert 6 <= m1.outer_info["iter"] <= 12         # R: 9
+    np.testing.assert_allclose(np.asarray(m1.Vp)[0, 0], 0.0102796362,
                                rtol=0, atol=1e-6)
     assert m1.sp_vcov() is None                     # deriv-0 fit
     pred = m1.predict(df[:3])
@@ -5484,23 +5488,23 @@ def test_twlss_through_gam_matches_mgcv():
 
     m2 = gam(["y ~ s(x)", "~ z", "~ 1"], df, family=twlss(),
              method="REML")
-    np.testing.assert_allclose(m2.REML_criterion / 2, 493.2079998178,
+    np.testing.assert_allclose(m2.REML_criterion / 2, 514.1250577000,
                                rtol=0, atol=1e-4)
-    np.testing.assert_allclose(m2.sp, [0.1283965998], rtol=1e-4)
-    np.testing.assert_allclose(m2.edf_total, 9.3607166433, rtol=0,
+    np.testing.assert_allclose(m2.sp, [0.1885776983], rtol=1e-4)
+    np.testing.assert_allclose(m2.edf_total, 9.1773799040, rtol=0,
                                atol=1e-4)
     # LP2 (θ) + LP3 (ρ) parametric coefficients — exact stop point
     np.testing.assert_allclose(
         np.asarray(m2._beta)[10:13],
-        [0.4148269229, -0.1577905892, -0.1466709101], rtol=0,
+        [-0.0034247063, -0.0106819944, -0.1195655320], rtol=0,
         atol=1e-5)
     np.testing.assert_allclose(
         np.asarray(m2.fitted_values)[0],
-        [0.6569874072, 0.2885374839, -0.1466709101], rtol=0,
+        [3.8117852460, -0.0062579028, -0.1195655320], rtol=0,
         atol=1e-5)
-    np.testing.assert_allclose(m2.deviance, 358.2223478383, rtol=0,
+    np.testing.assert_allclose(m2.deviance, 358.1491851000, rtol=0,
                                atol=1e-4)
-    np.testing.assert_allclose(m2.null_deviance, 626.0739164460,
+    np.testing.assert_allclose(m2.null_deviance, 564.4292756000,
                                rtol=0, atol=1e-3)
 
 
@@ -5522,25 +5526,25 @@ def test_twlss_weighted_residuals_match_mgcv():
     np.testing.assert_allclose(mw.REML_criterion, mu.REML_criterion,
                                rtol=0, atol=1e-9)
     _assert_fp_equiv(mw._beta, mu._beta)
-    np.testing.assert_allclose(mw.REML_criterion / 2, 493.3949778807,
+    np.testing.assert_allclose(mw.REML_criterion / 2, 514.2855621000,
                                rtol=0, atol=1e-4)
-    np.testing.assert_allclose(mw.sp, [0.1283235976], rtol=1e-4)
+    np.testing.assert_allclose(mw.sp, [0.1886027173], rtol=1e-4)
     # weighted deviance surface (R refs)
-    np.testing.assert_allclose(mw.deviance, 539.2703507203, rtol=0,
+    np.testing.assert_allclose(mw.deviance, 549.3608583000, rtol=0,
                                atol=1e-3)
-    np.testing.assert_allclose(mu.deviance, 358.2394763188, rtol=0,
+    np.testing.assert_allclose(mu.deviance, 358.1582964000, rtol=0,
                                atol=1e-3)
-    np.testing.assert_allclose(mw.null_deviance, 972.3090046659,
+    np.testing.assert_allclose(mw.null_deviance, 855.1007602000,
                                rtol=0, atol=1e-3)
-    np.testing.assert_allclose(mu.null_deviance, 625.4888863739,
+    np.testing.assert_allclose(mu.null_deviance, 564.4194261000,
                                rtol=0, atol=1e-3)
     np.testing.assert_allclose(
         np.asarray(mw.residuals)[:3],
-        [1.2353023924, -1.8067797691, -2.0311914008], rtol=0,
+        [-1.0646171470, -0.2494332248, -0.4555850390], rtol=0,
         atol=1e-4)
     np.testing.assert_allclose(
         np.asarray(mu.residuals)[:3],
-        [1.2353023924, -1.2775862268, -2.0311914008], rtol=0,
+        [-1.0646171470, -0.1763759247, -0.4555850390], rtol=0,
         atol=1e-4)
     # √w scaling of the deviance residual √(2(yθ−κ)w/φ) is a per-row
     # property — verify it on ONE fitted object (μ/θ/φ identical) so the
@@ -5550,7 +5554,7 @@ def test_twlss_weighted_residuals_match_mgcv():
     # the near-zero-residual rows that drift amplifies ~5000× (~1e-9 on
     # x86_64 Accelerate / OpenBLAS) — far past any 1e-12 cross-fit gate.
     # The end-to-end √2 wiring stays pinned above: mw.residuals[1] =
-    # −1.8068 = mu.residuals[1]·√2 (a pw=2 row), pw=1 rows 0/2 identical.
+    # −0.2494 = mu.residuals[1]·√2 (a pw=2 row), pw=1 rows 0/2 identical.
     yv = np.asarray(df["y"], dtype=float)
     fit = np.asarray(mu.fitted, dtype=float)
     r_un = twlss().residuals(yv, fit, type="deviance")

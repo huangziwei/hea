@@ -9125,14 +9125,11 @@ class gam:
         RNG: the direct (default) path randomizes only through R's
         ``sample(U)`` — run through the bit-exact ``hea.R.rng`` port, so
         ``seed=k`` reproduces R's ``set.seed(k); qq.gam(...)`` exactly.
-        The ``rep>0`` simulation path draws response deviates through the
-        same bit-exact stream (``RGenerator`` over ``RMersenneTwister``), so
-        ``seed=k`` is **bit-exact to R's ``set.seed(k); qq.gam(rep=)``** for
-        every family whose deviates are ported: gaussian, gaulss, shash, scat,
-        Gamma, poisson, binomial, negbin. Two stay Monte-Carlo: tweedie (hea's
-        ``rTweedie`` uses the collapsed gamma-sum, a different stream than R's
-        per-jump algorithm) and inverse.gaussian (R's ``rig`` isn't ported, so
-        it falls back to numpy).
+        The ``rep>0`` simulation path draws response deviates through the same
+        bit-exact stream (``RGenerator`` over ``RMersenneTwister``), so ``seed=k``
+        is **bit-exact to R's ``set.seed(k); qq.gam(rep=)``** for every built-in
+        family: gaussian, gaulss, shash, scat, Gamma, poisson, binomial, negbin,
+        inverse.gaussian (mgcv's ``rig``) and tweedie (per-jump ``rTweedie``).
         """
         D = np.asarray(self.residuals_of(type), dtype=float)
         n = D.size
@@ -9162,11 +9159,10 @@ class gam:
             try:
                 # R-exact: rd hooks draw from the bit-exact MT stream, so
                 # seed=k reproduces R's set.seed(k); qq.gam(rep=) for every
-                # family whose deviates are ported (gaussian/gaulss/shash/scat/
-                # Gamma/poisson/binomial/negbin).
+                # built-in family. Safety net: if a custom family's rd reaches an
+                # RNG method the facade doesn't cover, fall back to numpy (MC).
                 dm = _simulate(RGenerator(seed))
-            except NotImplementedError:
-                # inverse.gaussian's rig isn't ported → numpy (Monte-Carlo).
+            except (NotImplementedError, AttributeError):
                 dm = _simulate(np.random.default_rng(seed))
             Dq = np.quantile(dm.ravel(), (np.arange(1, n + 1) - 0.5) / n)
             alpha = (1.0 - level) / 2.0
@@ -9205,11 +9201,9 @@ class gam:
         line). Families with neither hook fall back to a normal QQ plot
         of the residuals, like mgcv.
 
-        ``seed=k`` reproduces R's ``set.seed(k); qq.gam(...)`` bit-exactly on
-        both paths for ported families — the direct path's ``sample()`` and the
-        ``rep>0`` path's response deviates both run through the ``hea.R.rng``
-        port (gaussian/gaulss/shash/scat/Gamma/poisson/binomial/negbin).
-        tweedie and inverse.gaussian remain Monte-Carlo (see
+        ``seed=k`` reproduces R's ``set.seed(k); qq.gam(...)`` bit-exactly — the
+        direct path's ``sample()`` and the ``rep>0`` path's response deviates run
+        through the ``hea.R.rng`` port for every built-in family (see
         :meth:`_qq_gam_quantiles`).
         """
         if ax is None:
