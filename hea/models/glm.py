@@ -351,7 +351,10 @@ class glm:
             )
             formula = f"_hea_cbind_p ~ {deparse(f_parsed.rhs)}"
 
-        d = prepare_design(formula, data)
+        # R's predvars: capture poly/bs/ns/scale training params at fit so
+        # predict() replays them on new data instead of recomputing.
+        self._basis_state: dict = {}
+        d = prepare_design(formula, data, basis_state=self._basis_state)
         self._expanded = d.expanded
         self._design_data = d.data
         self.X = d.X                                  # pl.DataFrame
@@ -670,7 +673,7 @@ class glm:
             # the fit-time offset so η̂ matches what was actually fit.
             default_off = self._offset
         else:
-            X_new = materialize(self._expanded, new).to_numpy().astype(float)
+            X_new = materialize(self._expanded, new, basis_state=self._basis_state).to_numpy().astype(float)
             n_new = X_new.shape[0]
             # Re-evaluate any formula offset(...) atoms against newdata
             # — predict.glm does the same. Caller's offset= still overrides.

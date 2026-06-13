@@ -1072,3 +1072,106 @@ def test_lm_predict_scale_df_and_se_fit_metadata_match_R():
     np.testing.assert_allclose(
         [cid["lwr"][0], cid["upr"][0]], [2.515225, 4.770489], rtol=1e-5
     )
+
+
+# ---------------------------------------------------------------------------
+# Multivariate response (R's mlm): cbind(y1, y2) ~ rhs. Reference from R 4.6.0:
+#   d <- data.frame(x=c(-0.626,0.184,-0.836,1.595,0.330,-0.820,0.487,0.738),
+#                   g=factor(c("a","b","a","b","a","b","a","b")),
+#                   y1=c(0.576,-0.305,1.512,0.390,-0.621,-2.215,1.125,-0.045),
+#                   y2=c(-0.016,0.944,0.821,0.594,0.919,0.782,0.075,-1.989))
+#   m <- lm(cbind(y1,y2) ~ x + g, d)
+# ---------------------------------------------------------------------------
+def test_mlm_cbind_response_matches_R():
+    from hea.models.lm import lm
+    d = pl.DataFrame({
+        "x": [-0.626, 0.184, -0.836, 1.595, 0.330, -0.820, 0.487, 0.738],
+        "g": pl.Series(["a", "b", "a", "b", "a", "b", "a", "b"], dtype=pl.Enum(["a", "b"])),
+        "y1": [0.576, -0.305, 1.512, 0.390, -0.621, -2.215, 1.125, -0.045],
+        "y2": [-0.016, 0.944, 0.821, 0.594, 0.919, 0.782, 0.075, -1.989],
+    })
+    m = lm("cbind(y1, y2) ~ x + g", d)
+    assert m._is_mlm and m._response_names == ["y1", "y2"]
+
+    # coef (p × m), R's coef(m)
+    coef = m.coef
+    assert coef["term"].to_list() == ["(Intercept)", "x", "gb"]
+    np.testing.assert_allclose(coef["y1"].to_numpy(),
+        [0.736093637468855, 0.546317131589798, -1.511618680545827], rtol=1e-9)
+    np.testing.assert_allclose(coef["y2"].to_numpy(),
+        [0.406769620582342, -0.266544988636641, -0.210937909153247], rtol=1e-9)
+
+    # sigma per column; df.residual shared
+    np.testing.assert_allclose(m.sigma, [1.02418005334668, 1.11233550606780], rtol=1e-9)
+    assert m.df_residual == 5
+
+    # fitted (n × m), first two rows
+    np.testing.assert_allclose(m.fitted["y1"].to_numpy()[:2],
+        [0.394099113093641, -0.675002690864449], rtol=1e-9)
+    np.testing.assert_allclose(m.fitted["y2"].to_numpy()[:2],
+        [0.573626783468879, 0.146787433519953], rtol=1e-9)
+
+    # predict on newdata (point predictions, n × m)
+    nd = pl.DataFrame({"x": [0.5, -0.5],
+                       "g": pl.Series(["a", "b"], dtype=pl.Enum(["a", "b"]))})
+    pred = m.predict(nd)
+    np.testing.assert_allclose(pred["y1"].to_numpy(),
+        [1.009252203263754, -1.048683608871871], rtol=1e-9)
+    np.testing.assert_allclose(pred["y2"].to_numpy(),
+        [0.273497126264021, 0.329104205747415], rtol=1e-9)
+
+    # summary is R's listof of per-response summary.lm
+    s = m.summary()
+    assert len(s) == 2 and s.names == ["Response y1", "Response y2"]
+    s1 = s["y1"]
+    np.testing.assert_allclose(s1.r_squared, 0.442099605289581, rtol=1e-7)
+
+    # predict interval/se on an mlm is unsupported (matches R's predict.mlm)
+    with pytest.raises(NotImplementedError):
+        m.predict(nd, interval="confidence")
+
+
+def test_mlm_joint_na_omit_and_expression_responses():
+    from hea.models.lm import lm
+    # joint na-omit: the NA-x row drops for BOTH columns → both sub-fits use the
+    # same 4 rows; and cbind of an expression response (log) is supported.
+    d = pl.DataFrame({"x": [1.0, 2, 3, None, 5],
+                      "a": [1.0, 4, 9, 16, 25], "b": [2.0, 3, 4, 5, 6]})
+    m = lm("cbind(sqrt(a), b) ~ x", d)
+    assert m._response_names == ["sqrt(a)", "b"]
+    # sqrt(a) = 1,2,3,5 on the kept rows (x non-NA); perfectly linear in... not x,
+    # but the fit must use 4 rows shared across columns.
+    assert m._mlm_models["b"].X.height == 4
+    assert m.fitted.height == 4
+
+
+# ---------------------------------------------------------------------------
+# predict reuses training transform parameters (R's predvars/makepredictcall)
+# for poly/ns/scale, instead of recomputing knots/centering from new data.
+# Reference from R 4.6.0 + splines; newdata is OUT OF RANGE (x,z,v all beyond
+# training) so a recompute would diverge but a correct replay matches R, incl.
+# ns's linear extrapolation beyond the boundary knots.
+#   tr <- data.frame(
+#     x=c(-1.2,-0.6,-0.1,0.3,0.8,1.1,1.5,2.0,-0.9,0.5),
+#     z=c(0.5,1.2,2.0,3.1,4.0,5.5,6.2,7.0,8.1,9.0),
+#     v=c(1,2,3,4,5,6,7,8,9,10),
+#     y=c(1.1,0.8,1.5,2.0,1.7,2.3,2.1,2.8,0.9,1.9))
+#   m <- lm(y ~ poly(x,2) + ns(z, df=3) + scale(v), tr)
+#   predict(m, data.frame(x=c(-2,0,3), z=c(-1,4.5,12), v=c(-5,5.5,20)))
+#     9.11936405516604  0.91132513915552  -3.87864686599048
+# ---------------------------------------------------------------------------
+def test_predict_reuses_training_predvars():
+    from hea.models.lm import lm
+    tr = pl.DataFrame({
+        "x": [-1.2, -0.6, -0.1, 0.3, 0.8, 1.1, 1.5, 2.0, -0.9, 0.5],
+        "z": [0.5, 1.2, 2.0, 3.1, 4.0, 5.5, 6.2, 7.0, 8.1, 9.0],
+        "v": [1.0, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "y": [1.1, 0.8, 1.5, 2.0, 1.7, 2.3, 2.1, 2.8, 0.9, 1.9],
+    })
+    m = lm("y ~ poly(x,2) + ns(z, df=3) + scale(v)", tr)
+    # training params captured under their deparse keys
+    assert set(m._basis_state) == {"poly(x, 2)", "ns(z, df = 3)", "scale(v)"}
+    nd = pl.DataFrame({"x": [-2.0, 0.0, 3.0], "z": [-1.0, 4.5, 12.0], "v": [-5.0, 5.5, 20.0]})
+    pred = m.predict(nd)["fit"].to_numpy()
+    np.testing.assert_allclose(
+        pred, [9.11936405516604, 0.91132513915552, -3.87864686599048], rtol=1e-9)

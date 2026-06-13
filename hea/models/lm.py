@@ -384,6 +384,45 @@ class SummaryLm:
         return _format_summary_lm(self._model, self._digits, self._cor)
 
 
+class SummaryMlm:
+    """R's ``summary.mlm`` — a list of per-response ``summary.lm`` objects.
+
+    Printed as ``Response <name> :`` blocks; indexable by 1-based position,
+    0-based position, or the ``"Response <name>"`` / ``<name>`` key, returning
+    the underlying :class:`SummaryLm` for that response column.
+    """
+
+    def __init__(self, model, *, digits: int = 4, cor: bool = False):
+        self._names = list(model._response_names)
+        self._summaries = {
+            name: model._mlm_models[name].summary(digits=digits, cor=cor)
+            for name in self._names
+        }
+
+    def __len__(self) -> int:
+        return len(self._names)
+
+    @property
+    def names(self) -> list[str]:
+        return [f"Response {n}" for n in self._names]
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            # R's summary(m)[[i]] is 1-based; allow Python negatives too.
+            return self._summaries[self._names[key - 1 if key > 0 else key]]
+        k = key[len("Response "):] if str(key).startswith("Response ") else key
+        return self._summaries[k]
+
+    def __iter__(self):
+        return iter(self._summaries.values())
+
+    def __repr__(self) -> str:
+        return "\n\n".join(
+            f"Response {name} :\n\n{self._summaries[name]!r}"
+            for name in self._names
+        )
+
+
 def _format_summary_lm(model, digits: int, cor: bool) -> str:
     """Build the R-style ``summary.lm`` print block.
 
@@ -519,6 +558,21 @@ class lm:
         offset: Union[None, np.array] = None,
     ):
 
+        # R's `cbind(y1, y2, ...) ~ rhs` fits a multivariate linear model
+        # (class "mlm") — m independent fits sharing one X/QR. Detect it from
+        # the LHS and route to the mlm builder (which wraps m per-column `lm`s).
+        from hea.formula import parse as _parse, _multivariate_lhs_specs
+        _lhs = _parse(formula).lhs
+        _mv = _multivariate_lhs_specs(_lhs) if _lhs is not None else None
+        if _mv is not None:
+            self._init_mlm(
+                formula, data, _mv, weights=weights, method=method,
+                subset=subset, na_action=na_action, contrasts=contrasts,
+                singular_ok=singular_ok, offset=offset,
+            )
+            return
+        self._is_mlm = False
+
         # meta
         self.formula = formula
         self.method = method
@@ -532,11 +586,12 @@ class lm:
         # (see _na_pad). Accept R-style aliases.
         _na_norm = {"omit": "omit", "na.omit": "omit",
                     "exclude": "exclude", "na.exclude": "exclude",
-                    "fail": "fail", "na.fail": "fail"}
+                    "fail": "fail", "na.fail": "fail",
+                    "pass": "pass", "na.pass": "pass"}
         self.na_action = _na_norm.get(str(na_action))
         if self.na_action is None:
             raise ValueError(
-                "na_action must be one of 'omit' / 'exclude' / 'fail'; "
+                "na_action must be one of 'omit' / 'exclude' / 'fail' / 'pass'; "
                 f"got {na_action!r}"
             )
 
@@ -590,6 +645,9 @@ class lm:
         na_keep = _model_frame_keep_mask(formula, data)
         if self.na_action == "fail" and not na_keep.all():
             raise ValueError("missing values in object")  # R: na.fail
+        if self.na_action == "pass":
+            # R's na.pass: keep every row (NA flows into X/y; the fit may be NaN).
+            na_keep = np.ones(data.height, dtype=bool)
         self._na_mask = na_keep
         self._n_full = data.height  # model-frame length (post-subset, pre-na)
 
@@ -602,11 +660,22 @@ class lm:
         self.weights = w_arr
         self._offset_arg = off_arg
 
-        d = prepare_design(formula, data, contrasts=contrasts)
+        # R's predvars: capture each poly/bs/ns/scale call's training params at
+        # fit so predict() replays them on new data instead of recomputing.
+        self._basis_state: dict = {}
+        d = prepare_design(formula, data, contrasts=contrasts,
+                           na_action="pass" if self.na_action == "pass" else "omit",
+                           basis_state=self._basis_state)
         self._expanded = d.expanded
         self._design_data = d.data
         self.X = d.X
         self.y = d.y  # pl.Series
+
+        # R's na.pass keeps NA rows in the model frame; lm.fit then rejects a
+        # non-finite design ("NA/NaN/Inf in 'x'"). Match that intentionally
+        # (rather than tripping over it in the QR below).
+        if self.na_action == "pass" and not np.all(np.isfinite(self.X.to_numpy())):
+            raise ValueError("NA/NaN/Inf in 'x'")
 
         # Column → term-assignment map (R's model.matrix ``assign``): 0 for
         # the intercept, i for the columns of the i-th RHS term. Captured
@@ -820,7 +889,138 @@ class lm:
         # compute BIC (Bayes Information criterian): -2logL + p * log(n)
         self.BIC = self.compute_BIC()
 
+    # ------------------------------------------------------------------
+    # Multivariate response (R's "mlm": cbind(y1, y2, ...) ~ rhs)
+    # ------------------------------------------------------------------
+    def _init_mlm(self, formula, data, mv_specs, *, weights, method, subset,
+                  na_action, contrasts, singular_ok, offset):
+        """Fit a multivariate linear model: one `lm` per response column, all
+        sharing a single jointly-na-omitted model frame (so every column has the
+        identical X/QR — R's mlm). Combined accessors (coef p×m, fitted/residuals
+        n×m, sigma per-column) delegate to the per-column sub-models."""
+        from hea.formula import parse as _parse, deparse as _deparse, _eval_lhs_expr
+        self._is_mlm = True
+        self.formula = formula
+        self.method = method
+        self.contrasts = contrasts
+
+        _na_norm = {"omit": "omit", "na.omit": "omit", "exclude": "exclude",
+                    "na.exclude": "exclude", "fail": "fail", "na.fail": "fail"}
+        self.na_action = _na_norm.get(str(na_action))
+        if self.na_action is None:
+            raise ValueError("na_action must be one of 'omit' / 'exclude' / "
+                             f"'fail'; got {na_action!r}")
+        if self.na_action == "exclude":
+            raise NotImplementedError(
+                "na_action='exclude' is not supported for multivariate (mlm) fits")
+
+        rhs_src = _deparse(_parse(formula).rhs)
+        resp_names = [lbl for lbl, _ in mv_specs]
+        if len(set(resp_names)) != len(resp_names):
+            raise ValueError(f"duplicate response columns in {resp_names}")
+        self._response_names = resp_names
+
+        # Replicate lm's subset → na-omit → weights/offset alignment, but
+        # na-omit JOINTLY over every response (R's shared model frame).
+        w_arr = None if weights is None else np.asarray(weights, dtype=float).reshape(-1)
+        off_arr = None if offset is None else np.asarray(offset, dtype=float).reshape(-1)
+        if w_arr is not None:
+            if w_arr.shape[0] != data.height:
+                raise ValueError("Length of weights should be the same as the "
+                                 "number of rows in the dataframe")
+            if not np.all(np.isfinite(w_arr)) or np.any(w_arr < 0.0):
+                raise ValueError("missing or negative weights not allowed")
+        if off_arr is not None and off_arr.shape[0] != data.height:
+            raise ValueError("Length of offset should be the same as the number "
+                             "of rows in the dataframe")
+        if subset is not None:
+            keep = _subset_keep(data.height, _resolve_subset(subset, data))
+            data = data[keep]
+            if w_arr is not None:
+                w_arr = w_arr[keep]
+            if off_arr is not None:
+                off_arr = off_arr[keep]
+        na_keep = _model_frame_keep_mask(formula, data)
+        if self.na_action == "fail" and not na_keep.all():
+            raise ValueError("missing values in object")
+        if not na_keep.all():
+            data = data.filter(pl.Series(na_keep))
+            if w_arr is not None:
+                w_arr = w_arr[na_keep]
+            if off_arr is not None:
+                off_arr = off_arr[na_keep]
+
+        # Materialize any expression responses (cbind(log(a), b)) into named
+        # columns so each per-column sub-formula can reference them.
+        cols = set(data.columns)
+        add = {}
+        for lbl, node in mv_specs:
+            if lbl not in cols:
+                add[lbl] = data.select(_eval_lhs_expr(node, cols).alias(lbl))[lbl].to_numpy()
+        if add:
+            data = data.with_columns([pl.Series(k, v) for k, v in add.items()])
+
+        # Per-column fits on the shared clean frame (na-omit now a no-op).
+        self._mlm_models = {
+            lbl: lm(f"`{lbl}` ~ {rhs_src}", data,
+                    weights=w_arr, method=method, contrasts=contrasts,
+                    singular_ok=singular_ok, offset=off_arr, na_action="omit")
+            for lbl in resp_names
+        }
+        self.response_models = self._mlm_models
+        m0 = self._mlm_models[resp_names[0]]
+
+        # Shared design pieces (identical across columns).
+        self.data = data
+        self.column_names = m0.column_names
+        self.X = m0.X
+        self._aliased_cols = m0._aliased_cols
+        self.df_residuals = m0.df_residuals
+        self.df_residual = m0.df_residuals
+
+        # Combined accessors.
+        self._coef_matrix = np.column_stack(
+            [self._mlm_models[r]._bhat_arr for r in resp_names])
+        self.coef = self._mlm_matrix_frame(
+            {r: self._mlm_models[r]._bhat_arr for r in resp_names}, index="term",
+            index_vals=self.column_names)
+        self.coefficients = self.coef
+        self.bhat = self.coef
+        self.fitted = self._mlm_matrix_frame(
+            {r: self._mlm_models[r].yhat["fit"].to_numpy() for r in resp_names})
+        self.yhat = self.fitted
+        self.residuals = self._mlm_matrix_frame(
+            {r: self._mlm_models[r].residuals.to_series(0).to_numpy() for r in resp_names})
+        self.sigma = np.array([self._mlm_models[r].sigma for r in resp_names])
+
+    def _mlm_matrix_frame(self, col_map, index=None, index_vals=None):
+        """Bundle per-response arrays into a hea.DataFrame (one column per
+        response). With ``index=``, prepend a label column (used by coef)."""
+        from ..tidy import DataFrame as _DF
+        cols = {}
+        if index is not None:
+            cols[index] = list(index_vals)
+        for name, arr in col_map.items():
+            cols[name] = np.asarray(arr, dtype=float)
+        return _DF(pl.DataFrame(cols))
+
+    def _mlm_predict(self, newdata, interval, se_fit, type_):
+        from ..tidy import DataFrame as _DF
+        if interval is not None or se_fit or type_ != "response":
+            raise NotImplementedError(
+                "predict() on a multivariate (mlm) fit returns point predictions "
+                "only (type='response', no interval/se_fit) — matching R's "
+                "predict.mlm. For per-column inference use "
+                ".response_models['<name>'].predict(...).")
+        return _DF(pl.DataFrame({
+            r: self._mlm_models[r].predict(newdata)["fit"].to_numpy()
+            for r in self._response_names
+        }))
+
     def __repr__(self):
+        if getattr(self, "_is_mlm", False):
+            out = f"Formula: {self.formula}\n\nCoefficients:\n"
+            return out + format_df(self.coef)
 
         docstring = f"""Formula: {self.formula}\n\n"""
         docstring += self._coef_header() + "\n"
@@ -981,7 +1181,7 @@ class lm:
             X = self.X.to_numpy().astype(float)
             off = self._offset
         else:
-            X = materialize(self._expanded, Xnew).select(self.column_names).to_numpy().astype(float)
+            X = materialize(self._expanded, Xnew, basis_state=self._basis_state).select(self.column_names).to_numpy().astype(float)
             # Re-evaluate formula offsets against newdata, mirroring R's
             # predict.lm. Offsets are zero unless the formula uses offset(...).
             off = np.zeros(X.shape[0])
@@ -1037,7 +1237,7 @@ class lm:
         if Xnew is None:
             X = self.X.to_numpy().astype(float)
         else:
-            X = materialize(self._expanded, Xnew).select(self.column_names).to_numpy().astype(float)
+            X = materialize(self._expanded, Xnew, basis_state=self._basis_state).select(self.column_names).to_numpy().astype(float)
 
         # Var(ŷ) = res_var · x'(X'X)⁻¹x  ⇒  se = √diag(res_var · X(X'X)⁻¹Xᵀ).
         var_mean = np.einsum("ij,jk,ik->i", X, self.XtXinv, X) * rv
@@ -1063,7 +1263,7 @@ class lm:
         if Xnew is None:
             X = self.X.to_numpy().astype(float)
         else:
-            X = materialize(self._expanded, Xnew).select(self.column_names).to_numpy().astype(float)
+            X = materialize(self._expanded, Xnew, basis_state=self._basis_state).select(self.column_names).to_numpy().astype(float)
 
         # Var(y_new − ŷ) = pred_var + res_var·x'(X'X)⁻¹x  (R: ip + pred.var,
         # pred.var defaulting to res_var).
@@ -1252,7 +1452,13 @@ class lm:
         ``"warnif"`` (default) warn + attach the flagged row indices as
         ``.non_estim``; ``"non-estim"`` attach silently; ``"simple"`` warn only;
         ``"NA"`` set those rows to NA; ``"NAwarn"`` NA + warn.
+
+        For a multivariate (mlm) fit the result is an ``n × m`` frame of point
+        predictions (one column per response); ``interval``/``se_fit`` are not
+        supported there (R's ``predict.mlm`` returns points only).
         """
+        if getattr(self, "_is_mlm", False):
+            return self._mlm_predict(newdata, interval, se_fit, type)
         if level is not None:
             alpha = 1.0 - level
         # R: scale= overrides res.var (=scale²) and df= the quantile df
@@ -1310,7 +1516,7 @@ class lm:
         Xtr = self._X_full_train  # n × p_full (pre-drop)
         P = np.linalg.pinv(Xtr) @ Xtr  # projector onto the training row space
         Xnew = (
-            materialize(self._expanded, newdata)
+            materialize(self._expanded, newdata, basis_state=self._basis_state)
             .select(self._full_names).to_numpy().astype(float)
         )
         resid_norm = np.linalg.norm(Xnew - Xnew @ P, axis=1)
@@ -1406,7 +1612,7 @@ class lm:
         if Xnew is None:
             X = self.X.to_numpy().astype(float)
         else:
-            X = materialize(self._expanded, Xnew).select(
+            X = materialize(self._expanded, Xnew, basis_state=self._basis_state).select(
                 self.column_names
             ).to_numpy().astype(float)
 
@@ -1522,7 +1728,13 @@ class lm:
         ``__repr__`` is the R-style print block and whose attributes
         (``.sigma``, ``.r_squared``, ``.fstatistic``, …) mirror the
         components of R's ``summary.lm`` return value.
+
+        For a multivariate (mlm) fit, returns a :class:`SummaryMlm` — R's
+        ``summary.mlm``: a list of per-response ``summary.lm`` objects, printed
+        and indexable as ``Response <name>``.
         """
+        if getattr(self, "_is_mlm", False):
+            return SummaryMlm(self, digits=digits, cor=cor)
         return SummaryLm(self, digits=digits, cor=cor)
 
     def plot_observed_fitted(
