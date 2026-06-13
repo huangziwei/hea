@@ -13,6 +13,37 @@ import numpy as np
 from scipy import stats as _sps
 
 from ._shared import NamedVector
+from .rng import RMersenneTwister
+
+# --- Process-global R Mersenne-Twister backing the r* / sample surface --------
+# R keeps ONE global RNG; ``set_seed`` (R's ``set.seed``) reseeds it and the
+# ported r* families draw from it, so ``set_seed(k); runif(n)`` is bit-exact to
+# R's ``set.seed(k); runif(n)``. Families R hasn't been ported for (rt / rbeta /
+# rchisq / rf, weighted ``sample``) stay on scipy/numpy — reproducible under
+# ``set_seed`` but not R-bit-exact (documented per-function).
+_R_RNG: RMersenneTwister | None = None
+
+
+def _r_rng() -> RMersenneTwister:
+    """The process-global R MT stream. Lazily seeded from the clock when
+    ``set_seed`` was never called (mirrors R seeding from time-of-day), so draws
+    are non-deterministic by default but always routed through R's algorithm."""
+    global _R_RNG
+    if _R_RNG is None:
+        import time
+        _R_RNG = RMersenneTwister(int(time.time()) & 0x7FFFFFFF)
+    return _R_RNG
+
+
+def _recycle(p, n: int) -> np.ndarray:
+    """R-style recycling of a parameter to length ``n`` (scalar → repeat,
+    length-n → as-is, else tile like R's recycling rule)."""
+    arr = np.asarray(p, dtype=float).ravel()
+    if arr.size == n:
+        return arr
+    if arr.size == 1:
+        return np.full(n, float(arr[0]))
+    return np.resize(arr, n)
 
 
 # normal
@@ -41,11 +72,14 @@ def rnorm(n, mean=0, sd=1):
     """
     import polars as pl
     if isinstance(n, pl.Expr):
+        # Lazy per-row generation inside a tibble — stays on numpy global
+        # (reproducible under set_seed, not R-bit-exact; polars row order
+        # wouldn't match R's stream order anyway).
         return pl.int_range(0, n).map_elements(
             lambda _: _sps.norm.rvs(loc=mean, scale=sd),
             return_dtype=pl.Float64,
         )
-    return _sps.norm.rvs(loc=mean, scale=sd, size=int(n))
+    return _r_rng().rnorm(int(n), mean=mean, sd=sd)
 
 
 # Student's t  (df = degrees of freedom, ncp = non-centrality)
@@ -72,6 +106,8 @@ def qt(p, df, ncp=0, lower_tail=True):
 
 
 def rt(n, df, ncp=0):
+    """R: ``rt(n, df, ncp)``. scipy-backed (numpy global) — reproducible under
+    ``set_seed`` but **not R-bit-exact** (R's ``rt`` sampler isn't ported)."""
     if ncp == 0:
         return _sps.t.rvs(df=df, size=int(n))
     return _sps.nct.rvs(df=df, nc=ncp, size=int(n))
@@ -95,6 +131,8 @@ def qf(p, df1, df2, ncp=0, lower_tail=True):
 
 
 def rf(n, df1, df2, ncp=0):
+    """R: ``rf(n, df1, df2, ncp)``. scipy-backed (numpy global) — reproducible
+    under ``set_seed`` but **not R-bit-exact** (``rf`` sampler isn't ported)."""
     if ncp == 0:
         return _sps.f.rvs(df1, df2, size=int(n))
     return _sps.ncf.rvs(df1, df2, nc=ncp, size=int(n))
@@ -124,6 +162,9 @@ def qchisq(p, df, ncp=0, lower_tail=True):
 
 
 def rchisq(n, df, ncp=0):
+    """R: ``rchisq(n, df, ncp)``. scipy-backed (numpy global) — reproducible
+    under ``set_seed`` but **not R-bit-exact** (``rchisq`` sampler isn't ported;
+    likely expressible as ``rgamma(df/2, scale=2)`` — unverified)."""
     if ncp == 0:
         return _sps.chi2.rvs(df=df, size=int(n))
     return _sps.ncx2.rvs(df=df, nc=ncp, size=int(n))
@@ -146,7 +187,13 @@ def qbinom(p, size, prob, lower_tail=True):
 
 
 def rbinom(n, size, prob):
-    return _sps.binom.rvs(n=size, p=prob, size=int(n))
+    """R: ``rbinom(n, size, prob)`` — on R's global MT stream (bit-exact)."""
+    rng = _r_rng()
+    nn = int(n)
+    sz = _recycle(size, nn)
+    pr = _recycle(prob, nn)
+    return np.array([rng.rbinom(int(round(sz[i])), float(pr[i]))
+                     for i in range(nn)], dtype=np.int64)
 
 
 # poisson  (R uses `lambda`, a Python keyword → spelled `lambda_`)
@@ -166,7 +213,12 @@ def qpois(p, lambda_, lower_tail=True):
 
 
 def rpois(n, lambda_):
-    return _sps.poisson.rvs(mu=lambda_, size=int(n))
+    """R: ``rpois(n, lambda)`` — on R's global MT stream (bit-exact)."""
+    rng = _r_rng()
+    nn = int(n)
+    lam = _recycle(lambda_, nn)
+    return np.array([rng.rpois(float(lam[i])) for i in range(nn)],
+                    dtype=np.int64)
 
 
 # uniform
@@ -186,7 +238,9 @@ def qunif(p, min=0, max=1, lower_tail=True):
 
 
 def runif(n, min=0, max=1):
-    return _sps.uniform.rvs(loc=min, scale=max - min, size=int(n))
+    """R: ``runif(n, min=0, max=1)`` — on R's global MT stream (bit-exact)."""
+    u = _r_rng().unif_rand(int(n))
+    return min + (max - min) * u
 
 
 # exponential  (R: rate = 1/scale)
@@ -206,7 +260,11 @@ def qexp(p, rate=1, lower_tail=True):
 
 
 def rexp(n, rate=1):
-    return _sps.expon.rvs(scale=1 / rate, size=int(n))
+    """R: ``rexp(n, rate=1)`` — ``exp_rand()/rate`` on R's MT stream (bit-exact)."""
+    rng = _r_rng()
+    nn = int(n)
+    rt_ = _recycle(rate, nn)
+    return np.array([rng.exp_rand() / rt_[i] for i in range(nn)])
 
 
 # gamma  (R: shape, rate; ``scale`` overrides if given)
@@ -232,9 +290,15 @@ def qgamma(p, shape, rate=1, scale=None, lower_tail=True):
 
 
 def rgamma(n, shape, rate=1, scale=None):
+    """R: ``rgamma(n, shape, rate=1, scale=1/rate)`` — R's MT stream (bit-exact)."""
     if scale is None:
         scale = 1 / rate
-    return _sps.gamma.rvs(a=shape, scale=scale, size=int(n))
+    rng = _r_rng()
+    nn = int(n)
+    sh = _recycle(shape, nn)
+    sc = _recycle(scale, nn)
+    return np.array([rng.rgamma(float(sh[i]), scale=float(sc[i]))
+                     for i in range(nn)])
 
 
 # beta
@@ -254,16 +318,26 @@ def qbeta(p, shape1, shape2, lower_tail=True):
 
 
 def rbeta(n, shape1, shape2):
+    """R: ``rbeta(n, shape1, shape2)``. scipy-backed (numpy global) —
+    reproducible under ``set_seed`` but **not R-bit-exact** (R's ``rbeta``
+    uses Cheng's BB/BC algorithm, not ported)."""
     return _sps.beta.rvs(a=shape1, b=shape2, size=int(n))
 
 
 def set_seed(seed):
-    """R: ``set.seed()`` — seeds numpy's global RNG (used by ``r*`` here).
+    """R: ``set.seed()`` — seed the process-global R Mersenne-Twister stream.
 
-    For bit-exact reproduction of R's RNG (mgcv parity), see
-    :class:`hea.R.rng.RMersenneTwister`. This wrapper is for
-    ordinary reproducibility.
+    ``runif`` / ``rnorm`` / ``sample`` (unweighted) and the ported families
+    ``rpois`` / ``rgamma`` / ``rbinom`` / ``rexp`` then draw from R's stream, so
+    ``set_seed(k); runif(n)`` is **bit-exact** to R's ``set.seed(k); runif(n)``.
+
+    Also seeds numpy's global RNG so the not-yet-ported families
+    (``rt`` / ``rbeta`` / ``rchisq`` / ``rf`` and weighted ``sample(prob=)``)
+    stay reproducible under ``set_seed`` — though *not* R-bit-exact. For the
+    low-level stream object see :class:`hea.R.rng.RMersenneTwister`.
     """
+    global _R_RNG
+    _R_RNG = RMersenneTwister(int(seed))
     np.random.seed(int(seed))
 
 
@@ -296,8 +370,13 @@ def sample(x, size=None, replace=False, prob=None):
     n = len(values)
     if size is None:
         size = n
-    idx = np.random.choice(n, size=int(size), replace=replace,
-                           p=(np.asarray(prob, dtype=float) if prob is not None else None))
+    if prob is not None:
+        # Weighted draw — R's algorithm isn't ported; numpy fallback
+        # (reproducible under set_seed, not R-bit-exact).
+        idx = np.random.choice(n, size=int(size), replace=replace,
+                               p=np.asarray(prob, dtype=float))
+    else:
+        idx = _r_rng().sample_int(n, int(size), replace=replace)
     if names is not None:
         return NamedVector([names[i] for i in idx], values[idx])
     return values[idx]

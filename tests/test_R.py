@@ -819,6 +819,63 @@ def test_rmersenne_family_samplers_match_r():
         [4, 5, 6, 0, 8, 2, 5, 13]
 
 
+def test_public_r_surface_routes_through_mersenne_twister():
+    """``set_seed`` + ``runif``/``rnorm``/``sample``/``rpois``/``rgamma``/
+    ``rbinom``/``rexp`` now draw from R's bit-exact MT stream (subsystem A),
+    not numpy. Proven two ways: (1) ``runif``/``rnorm`` match R's canonical
+    ``set.seed(1)`` reference values; (2) every routed function reproduces a
+    fresh ``RMersenneTwister(seed)`` draw, and all share ONE advancing stream
+    like R's global RNG."""
+    from hea.R import runif, sample, rpois, rgamma, rbinom, rexp
+    from hea.R.rng import RMersenneTwister as MT
+
+    # (1) R parity — set.seed(1); runif(5) / rnorm(5) (R 4.x reference values).
+    set_seed(1)
+    np.testing.assert_allclose(
+        runif(5),
+        [0.2655087, 0.3721239, 0.5728534, 0.9082078, 0.2016819], rtol=1e-6)
+    set_seed(1)
+    np.testing.assert_allclose(
+        rnorm(5),
+        [-0.6264538, 0.1836433, -0.8356286, 1.5952808, 0.3295078], rtol=1e-6)
+
+    # (2) routing — each public fn == the same draw off RMersenneTwister(seed).
+    def draws(seed, fn, k):
+        r = MT(seed)
+        return np.array([fn(r) for _ in range(k)])
+
+    set_seed(11)
+    np.testing.assert_array_equal(runif(4), MT(11).unif_rand(4))
+    set_seed(11)
+    np.testing.assert_array_equal(rnorm(4), MT(11).rnorm(4))
+    set_seed(11)
+    np.testing.assert_array_equal(rpois(6, 3.0),
+                                  draws(11, lambda r: r.rpois(3.0), 6))
+    set_seed(12)
+    np.testing.assert_array_equal(rgamma(5, 2.0, scale=1.5),
+                                  draws(12, lambda r: r.rgamma(2.0, scale=1.5), 5))
+    set_seed(13)
+    np.testing.assert_array_equal(rbinom(7, 20, 0.3),
+                                  draws(13, lambda r: r.rbinom(20, 0.3), 7))
+    set_seed(14)
+    np.testing.assert_array_equal(rexp(5, 2.0),
+                                  draws(14, lambda r: r.exp_rand() / 2.0, 5))
+
+    # unweighted sample is R's shrinking-pool walk on the same stream.
+    vals = np.arange(1, 11)
+    set_seed(2)
+    np.testing.assert_array_equal(sample(vals),
+                                  vals[MT(2).sample_int(10, 10)])
+
+    # (3) one advancing global stream: interleaved runif then rpois ==
+    # sequential draws off a single MT (R's global-RNG semantics).
+    set_seed(99)
+    u, p = runif(2), rpois(3, 4.0)
+    r = MT(99)
+    np.testing.assert_array_equal(u, r.unif_rand(2))
+    np.testing.assert_array_equal(p, np.array([r.rpois(4.0) for _ in range(3)]))
+
+
 # ---------------------------------------------------------------------------
 # Model generics
 # ---------------------------------------------------------------------------
