@@ -759,6 +759,25 @@ def test_bates_3_2_sleepstudy_fm06_correlated_ML(fm06ML):
     _assert_fixed(m, "Days",         10.467, se=1.502, tval=6.968)
 
 
+def test_sleepstudy_reml_theta_matches_lme4_nloptwrap():
+    """hea's lmer uses NLopt ``LN_BOBYQA`` — lme4's DEFAULT ``nloptwrap`` —
+    so θ̂/σ̂ land on lme4's fit to the CHOLMOD floor (~1e-9), not the ~1e-5
+    scatter the old scipy L-BFGS-B left.
+
+    Reference: ``lmer(Reaction ~ Days + (Days|Subject), sleepstudy)`` (REML,
+    default control) → ``getME(m,"theta")`` / ``sigma(m)`` at 16 digits.
+    """
+    data = load_dataset("lme4", "sleepstudy")
+    m = gmm("Reaction ~ Days + (Days|Subject)", data, REML=True)
+    # lme4 2.0-2 nloptwrap reference (16 sig figs).
+    np.testing.assert_allclose(
+        m.theta,
+        [0.9667417739793641, 0.01516905889466504, 0.2309099532076919],
+        rtol=0, atol=1e-7,
+    )
+    np.testing.assert_allclose(m.sigma, 25.591795721655899, rtol=0, atol=1e-6)
+
+
 def test_bates_3_2_sleepstudy_LRT_fm07_vs_fm06(fm06ML, fm07ML):
     """anova(fm07, fm06): test whether the (Intercept,Days) correlation
        is non-zero. Book: χ²=0.0639 on 1 df, p=0.8004."""

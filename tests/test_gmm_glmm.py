@@ -17,6 +17,7 @@ import pytest
 from hea.models.gmm import csc_array
 from hea.family import Binomial, Gamma, Gaussian, Poisson
 from hea.formula import materialize_bars
+from conftest import load_dataset
 from hea.models.gmm import (
     _GlmResponse,
     _PredState,
@@ -24,6 +25,7 @@ from hea.models.gmm import (
     _glmm_devfun_factory,
     _internal_glmer_wrk_iter,
     _pwrss_update,
+    gmm,
 )
 
 
@@ -2193,6 +2195,245 @@ def test_gmm_simulate_negative_binomial_counts():
     m = glmer_nb("y ~ x + (1|g)", _nb_frame())
     s = m.simulate(nsim=3, seed=6).to_numpy()
     assert np.all(s >= 0) and np.all(s == np.round(s))
+
+
+# ----------------------------------------------------------------------
+# Phase 11 — bootMer / confint(method=) (bootMer.R, profile.R:807).
+# ----------------------------------------------------------------------
+
+
+def test_boot_ci_conversions_match_boot_package():
+    """``_norm_inter`` + the perc/basic/norm conversions byte-match R's
+    ``boot::boot.ci`` (which ``confint.bootMer`` calls).
+
+    R recipe (reproduce the replicate vector with the bit-exact RNG)::
+        set.seed(7); t <- rnorm(500, 3.4, 0.8); t0 <- 3.5
+        b <- structure(list(t0=t0,t=matrix(t,ncol=1),R=500,sim="parametric"),
+                       class="boot")
+        sapply(c("perc","basic","norm"),
+               function(ty) boot.ci(b, type=ty)[[c(perc="percent",
+                   basic="basic",norm="normal")[[ty]]]])
+    """
+    from hea.R.rng import RMersenneTwister
+    from hea.models.gmm import _boot_ci_one
+
+    t = RMersenneTwister(7).rnorm(500, mean=3.4, sd=0.8)
+    t0 = 3.5
+    np.testing.assert_allclose(_boot_ci_one(t0, t, 0.95, "perc"),
+                               [1.91562019410927, 5.15293511924754], atol=1e-10)
+    np.testing.assert_allclose(_boot_ci_one(t0, t, 0.95, "basic"),
+                               [1.84706488075246, 5.08437980589073], atol=1e-10)
+    np.testing.assert_allclose(_boot_ci_one(t0, t, 0.95, "norm"),
+                               [1.99893156024296, 5.12905716082019], atol=1e-10)
+
+
+def test_bootMer_sleepstudy_fixef_ci_matches_lme4():
+    """``bootMer(m, fixef, nsim=20, seed=101)`` then percentile CI matches
+    lme4 — the NLopt-BOBYQA fit makes simulate byte-exact, so the whole
+    simulate→refit→boot.ci chain tracks lme4 to the CHOLMOD floor.
+
+    R recipe::
+        m <- lmer(Reaction ~ Days + (Days|Subject), sleepstudy)
+        b <- bootMer(m, function(x) fixef(x), nsim=20, seed=101, use.u=FALSE)
+        confint(b, type="perc")
+    """
+    m = gmm("Reaction ~ Days + (Days|Subject)",
+            load_dataset("lme4", "sleepstudy"), REML=True)
+
+    def fixef_fun(x):
+        return {n: float(v) for n, v in zip(x.column_names, x._beta)}
+
+    b = m.bootMer(fixef_fun, nsim=20, seed=101, use_u=False)
+    assert b.t.shape == (20, 2) and b.nfail == 0
+    ci = b.confint(type="perc")
+    np.testing.assert_allclose(
+        ci.filter(pl.col("parameter") == "(Intercept)").row(0)[1:],
+        [243.552942479216, 260.474381762565], atol=1e-4)
+    np.testing.assert_allclose(
+        ci.filter(pl.col("parameter") == "Days").row(0)[1:],
+        [7.41510477042856, 11.92888251008135], atol=1e-4)
+
+
+def test_bootMer_is_seed_reproducible():
+    """Same seed ⇒ identical bootstrap draws. The simulated *responses* are
+    bit-identical (the RNG is the bit-exact MT); the refit statistics agree to
+    the BLAS cross-fit floor (~1e-12 — refits go through CHOLMOD/BLAS, whose
+    reductions aren't bit-stable across separate fits, see
+    [[cross-fit-deviance-residual-blas-flake]])."""
+    m = gmm("Yield ~ 1 + (1|Batch)", load_dataset("lme4", "Dyestuff"))
+    # the RNG-driven part is exactly reproducible
+    s1 = m.simulate(nsim=15, seed=99).to_numpy()
+    s2 = m.simulate(nsim=15, seed=99).to_numpy()
+    np.testing.assert_array_equal(s1, s2)
+
+    def f(x):
+        return [float(x._beta[0])]
+
+    a = m.bootMer(f, nsim=15, seed=99)
+    b = m.bootMer(f, nsim=15, seed=99)
+    np.testing.assert_allclose(a.t, b.t, atol=1e-9)
+
+
+def test_confint_wald_matches_lme4_dyestuff():
+    """``confint(method="Wald")`` — β̂ ± z·SE; NaN rows for variance comps.
+
+    R: ``confint(lmer(Yield ~ 1 + (1|Batch), Dyestuff), method="Wald")``.
+    """
+    m = gmm("Yield ~ 1 + (1|Batch)", load_dataset("lme4", "Dyestuff"))
+    ci = m.confint(method="Wald")
+    row = ci.filter(pl.col("parameter") == "(Intercept)").row(0)
+    np.testing.assert_allclose(row[1:], [1489.50921023, 1565.49078977], atol=1e-4)
+    # variance components are NaN under Wald
+    sig = ci.filter(pl.col("parameter") == ".sig01").row(0)
+    assert np.isnan(sig[1]) and np.isnan(sig[2])
+
+
+def test_confint_boot_matches_lme4_dyestuff():
+    """``confint(method="boot", nsim=100, seed=42)`` matches lme4's
+    bootstrap CIs (NLopt fit ⇒ simulate byte-exact). ``.sigma`` and the
+    intercept pin tightly; ``.sig01``'s lower bound is a near-zero-variance
+    boundary case (one replicate fits θ≈0) so only its upper bound is pinned.
+
+    R: ``confint(m, method="boot", nsim=100, seed=42, boot.type="perc")``.
+    """
+    m = gmm("Yield ~ 1 + (1|Batch)", load_dataset("lme4", "Dyestuff"))
+    ci = m.confint(method="boot", nsim=100, seed=42, boot_type="perc")
+    np.testing.assert_allclose(
+        ci.filter(pl.col("parameter") == ".sigma").row(0)[1:],
+        [31.0015422409, 66.2635695910], atol=1e-3)
+    np.testing.assert_allclose(
+        ci.filter(pl.col("parameter") == "(Intercept)").row(0)[1:],
+        [1486.1377486083, 1565.6216518725], atol=1e-3)
+    # .sig01 upper bound (lower is a θ≈0 boundary flip vs R's exact 0)
+    assert ci.filter(pl.col("parameter") == ".sig01").row(0)[2] == \
+        pytest.approx(69.1179477023, abs=1e-2)
+
+
+def test_confint_profile_matches_lme4_dyestuff():
+    """``confint(method="profile")`` (the default) inverts the profile-ζ
+    curve — the canonical Dyestuff CIs (Bates §1.5).
+
+    R: ``confint(m)`` (default method="profile").
+    """
+    m = gmm("Yield ~ 1 + (1|Batch)", load_dataset("lme4", "Dyestuff"))
+    ci = m.confint(method="profile")
+    np.testing.assert_allclose(
+        ci.filter(pl.col("parameter") == ".sigma").row(0)[1:],
+        [38.2299848826, 67.6576962448], atol=1e-2)
+    np.testing.assert_allclose(
+        ci.filter(pl.col("parameter") == "(Intercept)").row(0)[1:],
+        [1486.4514999688, 1568.5484943681], atol=1e-2)
+
+
+def test_confint_parm_filter_and_unknown_method():
+    """``parm=`` subsets rows (names or indices); a bad method raises."""
+    m = gmm("Yield ~ 1 + (1|Batch)", load_dataset("lme4", "Dyestuff"))
+    one = m.confint(method="Wald", parm=["(Intercept)"])
+    assert one.height == 1 and one["parameter"][0] == "(Intercept)"
+    with pytest.raises(ValueError, match="method must be"):
+        m.confint(method="nope")
+
+
+def test_confint_profile_glmm_unknown_scale_raises():
+    """11.2 — profiling a non-fixed-scale GLMM (Gamma) raises lme4's exact
+    message (profile.R:74-75)."""
+    rng = np.random.default_rng(0)
+    g = np.repeat(np.arange(8), 6)
+    y = rng.gamma(2.0, 2.0, size=48) + 0.1
+    df = pl.DataFrame({"y": y, "x": rng.normal(size=48),
+                       "g": [f"g{i}" for i in g]})
+    m = gmm("y ~ x + (1|g)", df, family=Gamma(link="log"))
+    with pytest.raises(NotImplementedError,
+                       match="non-fixed scale parameters"):
+        m.profile()
+    with pytest.raises(NotImplementedError,
+                       match="non-fixed scale parameters"):
+        m.confint(method="profile")
+
+
+# ----------------------------------------------------------------------
+# Phase 13 — full-parity fixture matrix (named scenarios on vendored data).
+# Inline R recipes (the test-file convention); references from lme4 2.0-2.
+# ----------------------------------------------------------------------
+
+
+def test_glmer_salamander_crossed_re_binomial_matches_lme4():
+    """Crossed-RE binomial — the canonical salamander mating model
+    (Phase 13.4 'crossed REs' edge case + a binomial scenario).
+
+    R recipe::
+        m <- glmer(Mate ~ Cross + (1|Male) + (1|Female), salamander,
+                   family=binomial,
+                   control=glmerControl(optimizer=c("bobyqa","Nelder_Mead")))
+        getME(m,"theta"); fixef(m); AIC(m); logLik(m); deviance(m)
+        sqrt(diag(vcov(m)))
+
+    The deviance/AIC/logLik objective matches lme4 tightly (~1e-4); θ̂/β̂/SE
+    sit on the GLMM flat-surface eval-noise floor (~1e-4, the documented
+    Laplace optimiser floor — see the cm1–cm4 note in Phase 8).
+    """
+    m = gmm("Mate ~ Cross + (1|Male) + (1|Female)",
+            load_dataset("lme4", "salamander"), family=Binomial())
+    assert m.n_groups == {"Male": 60, "Female": 60}
+    assert m.npar == 6
+    # objective — tight
+    assert m.AIC == pytest.approx(430.55321272338, abs=1e-3)
+    assert m.loglike == pytest.approx(-209.27660636169, abs=1e-3)
+    assert m.deviance == pytest.approx(280.05266923684, abs=5e-2)  # residual dev
+    # variance components (= θ since σ≡1 for binomial) + β̂ — flat-surface floor
+    np.testing.assert_allclose(
+        [m.sd_re["Male"][0], m.sd_re["Female"][0]],
+        [1.02031290360, 1.08368233431], atol=2e-3)
+    np.testing.assert_allclose(
+        m._beta, [1.0082303061708, -0.7020656417882,
+                  -2.9043009109890, -0.0178654949691], atol=2e-3)
+    np.testing.assert_allclose(
+        m._se_beta, [0.3937554830, 0.4614657936, 0.5607604607, 0.5431333131],
+        atol=2e-3)
+
+
+def test_glmer_random_slope_poisson_singular_matches_lme4():
+    """Vector-bar (random-slope) Poisson GLMM ``(1+x|g)`` — exercises the
+    correlated-RE Laplace path AND a singular fit (Phase 13.4: θ on the
+    boundary, corr → −1). hea lands on lme4's singular fit to ~1e-7.
+
+    Data: ``datasets/synthetic/seed_synth_vbar_poisson.csv`` (R seed 2024:
+    x=rnorm·0.6, b0=rnorm·0.5, b1=rnorm·0.3, y=rpois(exp(0.4+0.5x+b0+b1·x))).
+    R recipe::
+        m <- glmer(y ~ x + (1+x|g), d, family=poisson,
+                   control=glmerControl(optimizer=c("bobyqa","Nelder_Mead")))
+        getME(m,"theta"); fixef(m); AIC(m); logLik(m); isSingular(m)
+    """
+    import polars as pl
+
+    d = pl.read_csv("datasets/synthetic/seed_synth_vbar_poisson.csv")
+    m = gmm("y ~ x + (1+x|g)", d, family=Poisson())
+    # singular vector-bar fit is sharply determined → tight (~1e-7) parity
+    np.testing.assert_allclose(
+        m.theta, [0.13383940, -0.11718276, 3.4184318e-05], atol=1e-6)
+    np.testing.assert_allclose(m._beta, [0.3396320812, 0.2940939975], atol=1e-6)
+    assert m.AIC == pytest.approx(363.072516146, abs=1e-5)
+    assert m.loglike == pytest.approx(-176.536258073, abs=1e-5)
+    # correlation driven to the −1 boundary (singular), matching lme4.
+    assert m.corr_re["g"][0, 1] == pytest.approx(-0.99999996, abs=1e-6)
+
+
+def test_lmer_sleepstudy_uncorrelated_bars_matches_lme4():
+    """gaussian_no_corr — the ``||`` uncorrelated-slopes syntax expands to two
+    independent scalar bars. With the NLopt-BOBYQA optimizer θ̂ matches lme4
+    to the CHOLMOD floor (~1e-7).
+
+    R: ``lmer(Reaction ~ Days + (Days || Subject), sleepstudy)`` →
+    ``getME(m,"theta")`` / ``fixef`` / ``sigma`` / ``REMLcrit``.
+    """
+    m = gmm("Reaction ~ Days + (Days || Subject)",
+            load_dataset("lme4", "sleepstudy"), REML=True)
+    assert m.corr_re["Subject"] is None  # bars are independent (no correlation)
+    np.testing.assert_allclose(
+        m.theta, [0.97989652794932, 0.23423122533467], atol=1e-7)
+    np.testing.assert_allclose(m._beta, [251.4051048485, 10.4672859596], atol=1e-6)
+    assert m.sigma == pytest.approx(25.5652792016, abs=1e-6)
+    assert m.REML_criterion == pytest.approx(1743.6692935815, abs=1e-6)
 
 
 # ----------------------------------------------------------------------

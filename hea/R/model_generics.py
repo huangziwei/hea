@@ -255,35 +255,61 @@ def predict(model, *args, **kwargs):
     return model.predict(*args, **kwargs)
 
 
-def confint(model, level=0.95):
+def confint(model, level=0.95, **kwargs):
     """R: ``confint()`` — confidence intervals.
 
     Returns a polars DataFrame with one row per parameter.
 
     Dispatch:
 
-    * Profile-likelihood objects (``gmm.profile()`` output) — defer to
-      :meth:`hea.gmm.Profile.confint`, which inverts each ζ-curve at
-      ``±Φ⁻¹((1+level)/2)``. This is the lme4 ``confint(profile(fm))``
-      workflow.
-    * ``lm`` — exact CIs at ``alpha = 1 - level`` via
-      ``compute_ci_bhat``.
+    * ``gmm`` (mixed model) / profile objects — defer to their ``.confint``.
+      For ``gmm`` the lme4 keyword surface passes through: ``method`` ∈
+      ``{"profile"(default),"Wald","boot"}``, plus ``parm``/``nsim``/
+      ``boot_type``/``seed``/``FUN`` (see :meth:`hea.models.gmm.confint`).
+    * ``lm`` — exact CIs at ``alpha = 1 - level`` via ``compute_ci_bhat``.
     * Other model types — return ``model.ci_bhat`` when ``level=0.95``;
       otherwise raise.
     """
-    # Profile objects expose their own ``confint`` — use it. Mirrors R's
-    # S3 ``confint.profile`` dispatch.
+    # Profile objects + gmm expose their own ``confint`` — use it (and pass the
+    # lme4 keyword surface through for gmm). Mirrors R's S3 confint dispatch.
     if hasattr(model, "confint") and not hasattr(model, "ci_bhat") \
             and not hasattr(model, "compute_ci_bhat"):
-        return model.confint(level=level)
-    if level == 0.95 and hasattr(model, "ci_bhat"):
+        return model.confint(level=level, **kwargs)
+    if not kwargs and level == 0.95 and hasattr(model, "ci_bhat"):
         return model.ci_bhat
-    if hasattr(model, "compute_ci_bhat"):
+    if not kwargs and hasattr(model, "compute_ci_bhat"):
         return model.compute_ci_bhat(alpha=1 - level)
     raise NotImplementedError(
         f"confint(): level={level} not supported for "
         f"{model.__class__.__name__}"
     )
+
+
+def profile(model, **kwargs):
+    """R: ``profile.merMod`` — profile-likelihood object for a ``gmm`` fit.
+
+    Thin delegator to :meth:`hea.models.gmm.profile`; the result's
+    ``.confint(level=)`` inverts each ζ-curve. Raises for non-``gmm`` models.
+    """
+    if not hasattr(model, "profile"):
+        raise TypeError(
+            f"profile(): {model.__class__.__name__} has no profile method "
+            f"(only mixed models / gmm)")
+    return model.profile(**kwargs)
+
+
+def bootMer(x, FUN, **kwargs):
+    """R: ``bootMer(x, FUN, ...)`` — parametric bootstrap of a ``gmm`` fit.
+
+    Delegates to :meth:`hea.models.gmm.bootMer` (simulate → refit → ``FUN``).
+    Keyword args mirror lme4: ``nsim``/``seed``/``use_u``/``type``/
+    ``parallel``/``ncpus``. Returns a :class:`hea.models.gmm.BootMer` whose
+    ``.confint(type=...)`` gives perc/basic/norm intervals.
+    """
+    if not hasattr(x, "bootMer"):
+        raise TypeError(
+            f"bootMer(): {x.__class__.__name__} is not a mixed model (gmm)")
+    return x.bootMer(FUN, **kwargs)
 
 
 def vcov(model):
@@ -389,18 +415,25 @@ def effects(model):
     return NamedVector(names, eff)
 
 
-def simulate(model, nsim=1, seed=None):
-    """R: ``simulate.lm`` — draw ``nsim`` response vectors from the fitted
-    Gaussian model: ``ŷ + N(0, σ²)`` with ``σ² = deviance/df.residual``
-    (per-row ``σ²/wᵢ`` for a weighted fit).
+def simulate(model, nsim=1, seed=None, **kwargs):
+    """R: ``simulate`` — draw ``nsim`` response vectors from the fitted model.
+
+    For a ``gmm`` (mixed model) this delegates to
+    :meth:`hea.models.gmm.simulate` — ``simulate.merMod`` (RE draws then
+    per-family draws, ``use_u=`` for conditional simulation). For ``lm`` /
+    gaussian it's ``simulate.lm``: ``ŷ + N(0, σ²)`` with
+    ``σ² = deviance/df.residual`` (per-row ``σ²/wᵢ`` for a weighted fit).
 
     Pass ``seed=`` to reproduce R's ``set.seed(seed); simulate(object, nsim)``
     bit-for-bit — draws come from hea's R Mersenne-Twister
     (:class:`hea.R.rng.RMersenneTwister`), **not** numpy. ``seed=None`` picks a
-    fresh seed (stdlib ``random``). Returns a polars DataFrame with columns
-    ``sim_1`` … ``sim_{nsim}``. lm / gaussian only.
+    fresh seed. Returns a polars DataFrame with columns ``sim_1`` … ``sim_{nsim}``.
     """
     from .rng import RMersenneTwister
+
+    # gmm carries its own simulate.merMod (RE + per-family draws); use it.
+    if hasattr(model, "simulate") and model.__class__.__name__ == "gmm":
+        return model.simulate(nsim=nsim, seed=seed, **kwargs)
 
     ftd = np.asarray(fitted(model), dtype=float).reshape(-1)
     n = ftd.shape[0]

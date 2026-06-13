@@ -2558,11 +2558,19 @@ def _bobyqa_rescue_finalize(calfun, n, npt, xl, xu, maxfun, xbase, xpt, fval,
     return nf, kopt
 
 
-def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su):
+def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
+                   stop=None):
     """Main BOBYQA iteration loop. Port of ``bobyqb.f``.
 
     Returns ``(x, f, nf, ierr)`` where IERR is 0 on normal exit,
     20/320/390/430 for the various Powell error codes.
+
+    ``stop`` (default ``None``) optionally carries NLopt's stopping criteria
+    (an object with ``.ftol(f, oldf)``). When supplied — the ``lmer`` path via
+    :func:`_nlopt_ln_bobyqa` — the loop also terminates at a trust-region
+    improvement whose ``F``-reduction is below ``ftol`` (NLopt ``bobyqa.c:2818``),
+    reproducing lme4's default ``nloptwrap`` optimizer. ``None`` (glmer's minqa
+    path) runs Powell's native rho→rhoend schedule unchanged.
     """
     HALF = 0.5
     ONE = 1.0
@@ -3043,6 +3051,16 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su):
                     temp = pq[k] * temp
                     for i in range(1, n + 1):
                         gopt[i] = gopt[i] + temp * xpt[k, i]
+                # NLopt LN_BOBYQA terminates here when a trust-region step
+                # improves F by less than ftol (bobyqa.c:2818 — checked only
+                # inside ``f < fopt``, after KOPT/XOPT/GOPT are updated, so the
+                # returned point is the improved one). ``stop=None`` (glmer's
+                # minqa path) skips this and runs to rhoend, unchanged.
+                if stop is not None and stop.ftol(f, fopt):
+                    fsave = f
+                    ierr = 0
+                    state = 'L720'
+                    continue
             #
             # Frobenius-norm interpolant gradient check (NTRITS>0 only).
             #
@@ -3174,7 +3192,7 @@ def _bobyqa_finalize(x, xl, xu, sl, su, xbase, xopt, fval, kopt, fsave, n, nf, i
 
 
 def _bobyqa_driver(calfun, x0, lower, upper, *,
-                   npt=None, rhobeg=None, rhoend=None, maxfun=10000):
+                   npt=None, rhobeg=None, rhoend=None, maxfun=10000, stop=None):
     """Public BOBYQA entry. Port of ``bobyqa.f`` (workspace partition,
     bound-aware initial X) plus the ``minqa`` R-wrapper defaults
     (``rhobeg``, ``rhoend``, ``npt`` when ``None``).
@@ -3255,7 +3273,7 @@ def _bobyqa_driver(calfun, x0, lower, upper, *,
     # Run the main loop.
     #
     x_out, f_out, nf, ierr = _bobyqa_bobyqb(
-        calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
+        calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su, stop=stop,
     )
     msgmap = {
         0:   "Normal exit from bobyqa",
@@ -3266,6 +3284,149 @@ def _bobyqa_driver(calfun, x0, lower, upper, *,
         430: "bobyqa -- a trust region step failed to reduce q",
     }
     return x_out[1:n + 1].copy(), f_out, nf, ierr, msgmap.get(ierr, "")
+
+
+# ----------------------------------------------------------------------
+# NLopt LN_BOBYQA — lme4's DEFAULT lmer optimizer (``nloptwrap``).
+#
+# lme4's ``lmer`` optimizes the profiled (RE)ML deviance over θ with
+# ``nloptwrap`` = NLopt's ``NLOPT_LN_BOBYQA`` (utilities.R:836-839,
+# ``xtol_abs=ftol_abs=1e-8, maxeval=1e5``). That is Powell's BOBYQA — the SAME
+# core as the minqa port above — wrapped with three NLopt-specific pieces
+# (ported verbatim from ``ref/nlopt/``): (1) a per-axis variable rescaling so
+# the initial steps are equal (rescale.c), (2) a default initial-step heuristic
+# from the bounds (options.c ``nlopt_set_default_initial_step``), and (3) an
+# ``ftol_abs`` stopping test woven into the trust-region loop (stop.c
+# ``relstop`` → injected at ``_bobyqa_bobyqb``'s ``f < fopt`` branch). Reusing
+# the minqa core + these three wrappers reproduces ``nloptwrap`` to the CHOLMOD
+# floor (~1e-9 on θ̂; the residual is scikit-sparse-vs-lme4 arithmetic, the same
+# gap that makes lme4's own optimizers disagree by ~1e-5 on flat surfaces).
+# ----------------------------------------------------------------------
+
+_DBL_MIN = 2.2250738585072014e-308  # for nlopt_istiny
+
+
+def _nlopt_default_step(x, lb, ub):
+    """Port of NLopt's ``nlopt_set_default_initial_step`` (options.c) — the
+    crude per-axis initial-step heuristic BOBYQA uses when no explicit step is
+    given (lme4 never sets one). Returns ``dx`` of length ``n``."""
+    x = np.asarray(x, float)
+    lb = np.asarray(lb, float)
+    ub = np.asarray(ub, float)
+    n = x.size
+    dx = np.empty(n)
+    for i in range(n):
+        step = np.inf
+        if (np.isfinite(ub[i]) and np.isfinite(lb[i])
+                and (ub[i] - lb[i]) * 0.25 < step and ub[i] > lb[i]):
+            step = (ub[i] - lb[i]) * 0.25
+        if np.isfinite(ub[i]) and ub[i] - x[i] < step and ub[i] > x[i]:
+            step = (ub[i] - x[i]) * 0.75
+        if np.isfinite(lb[i]) and x[i] - lb[i] < step and x[i] > lb[i]:
+            step = (x[i] - lb[i]) * 0.75
+        if np.isinf(step):
+            if np.isfinite(ub[i]) and abs(ub[i] - x[i]) < abs(step):
+                step = (ub[i] - x[i]) * 1.1
+            if np.isfinite(lb[i]) and abs(x[i] - lb[i]) < abs(step):
+                step = (x[i] - lb[i]) * 1.1
+        if np.isinf(step) or (step != 0.0 and abs(step) < _DBL_MIN):  # istiny
+            step = x[i]
+        if np.isinf(step) or step == 0.0:
+            step = 1.0
+        dx[i] = step
+    return dx
+
+
+def _nlopt_compute_rescaling(dx):
+    """Port of ``nlopt_compute_rescaling`` (rescale.c): ``s[i]=dx[i]/dx[0]``
+    when the initial steps differ (so ``dx[i]/s[i]`` is equal in all
+    directions), else all-ones. ``nlopt_rescale`` divides x by s; ``unscale``
+    multiplies."""
+    dx = np.asarray(dx, float)
+    n = dx.size
+    s = np.ones(n)
+    if n == 1:
+        return s
+    i = 1
+    while i < n and dx[i] == dx[i - 1]:
+        i += 1
+    if i < n:  # unequal steps → rescale to dx[0]
+        for i in range(1, n):
+            s[i] = dx[i] / dx[0]
+    return s
+
+
+class _NloptStopInfo:
+    """NLopt's ``ftol`` stopping predicate (stop.c ``relstop``/``nlopt_stop_ftol``):
+    ``|f-oldf| < ftol_abs`` or ``< ftol_rel·(|f|+|oldf|)/2`` (and never when
+    ``oldf`` is non-finite). Used by :func:`_nlopt_ln_bobyqa`."""
+
+    def __init__(self, ftol_abs=1e-8, ftol_rel=0.0):
+        self.ftol_abs = ftol_abs
+        self.ftol_rel = ftol_rel
+
+    def ftol(self, f, oldf):
+        if not np.isfinite(oldf):
+            return False
+        d = abs(f - oldf)
+        return (d < self.ftol_abs
+                or d < self.ftol_rel * (abs(f) + abs(oldf)) * 0.5
+                or (self.ftol_rel > 0 and f == oldf))
+
+
+class _NloptResult:
+    """scipy-``OptimizeResult``-shaped return from :func:`_nlopt_ln_bobyqa`
+    (``.x``/``.fun``/``.nfev``/``.success``) so it drops into the LMM fit path
+    where the old ``scipy.optimize.minimize`` result was used."""
+
+    def __init__(self, x, fun, nfev, success, message):
+        self.x = x
+        self.fun = fun
+        self.nfev = nfev
+        self.success = success
+        self.message = message
+
+
+def _nlopt_ln_bobyqa(fn, x0, lb, ub, *, ftol_abs=1e-8, ftol_rel=0.0,
+                     xtol_abs=1e-8, xtol_rel=0.0, maxeval=100000):
+    """NLopt ``NLOPT_LN_BOBYQA`` over box bounds — lme4's default ``lmer``
+    optimizer (``nloptwrap``). Wraps the minqa BOBYQA core (:func:`_bobyqa_driver`)
+    with NLopt's variable rescaling, default initial step, and ``ftol`` stop.
+
+    ``fn(x) -> float`` is the objective; ``lb``/``ub`` are the (possibly
+    ``±inf``) bounds. Returns an :class:`_NloptResult`. Defaults are lme4's
+    (``ftol_abs=xtol_abs=1e-8, maxeval=1e5``); ``ftol_rel``/``xtol_rel`` default
+    to 0 (NLopt's defaults — lme4 leaves them unset)."""
+    x0 = np.asarray(x0, float)
+    n = x0.size
+    lb = np.asarray(lb, float)
+    ub = np.asarray(ub, float)
+    # (1) default initial step + (2) per-axis rescaling so all steps are equal.
+    dx = _nlopt_default_step(x0, lb, ub)
+    s = _nlopt_compute_rescaling(dx)
+    if np.any(s == 0) or not np.all(np.isfinite(s)):
+        raise ValueError("nlopt_bobyqa: invalid rescaling (over/underflow?)")
+    x0s = x0 / s
+    lbs = lb / s
+    ubs = ub / s
+    for j in range(n):  # nlopt_reorder_bounds (s could flip sign; here s>0)
+        if lbs[j] > ubs[j]:
+            lbs[j], ubs[j] = ubs[j], lbs[j]
+    rhobeg = abs(dx[0] / s[0])
+    rhoend = xtol_rel * rhobeg
+    for j in range(n):
+        rhoend = max(rhoend, xtol_abs / abs(s[j]))
+    # (3) ftol stop woven into the trust-region loop via the ``stop`` hook.
+    stop = _NloptStopInfo(ftol_abs, ftol_rel)
+    npt = 2 * n + 1
+
+    def calfun(xs):  # objective in scaled space (unscale before calling fn)
+        return fn(xs * s)
+
+    par_s, fval, nf, ierr, msg = _bobyqa_driver(
+        calfun, x0s, lbs, ubs, npt=npt, rhobeg=rhobeg, rhoend=rhoend,
+        maxfun=int(maxeval), stop=stop)
+    return _NloptResult(par_s * s, fval, nf, ierr == 0, msg)
 
 
 # ----------------------------------------------------------------------
@@ -4513,6 +4674,14 @@ class gmm:
 
         # 8.11 — nAGQ validation. Integer in [0, 100]; >1 awaits Phase 9.
         nAGQ = _validate_nagq(nAGQ)
+        # Snapshot the fit knobs that ``_refit_response`` (the bootMer /
+        # simulate building block, Phase 11) must preserve when re-fitting on
+        # a fresh response: nAGQ, the user-supplied numeric ``offset=`` arg
+        # (the formula's ``offset(...)`` terms re-evaluate from data on their
+        # own — passing them again would double-count), and the control dict.
+        self._nAGQ = int(nAGQ)
+        self._offset_arg = None if offset is None else np.asarray(offset, dtype=float)
+        self._control_arg = control
 
         # 8.6 — control= normalization. Merges user-supplied keys with
         # lme4's glmerControl defaults; unknown keys raise.
@@ -4847,25 +5016,24 @@ class gmm:
             return
 
         theta0 = re.theta.astype(float).copy()
-        res = minimize(
-            lambda th: self._ml_deviance(th) if not REML else self._reml_deviance(th),
-            theta0, method="L-BFGS-B", bounds=bounds,
-            options={"ftol": 1e-12, "gtol": 1e-8, "maxiter": 1000},
-        )
-        theta_hat = res.x
-
-        # 8.12 / 8.13 — boundary handling on θ (lme4 optimizeLmer:688-740).
-        # restart_edge is a near-no-op for L-BFGS-B (gradient-based) but ported
-        # for parity; check.boundary pins near-zero variance params to 0.
         _devfun_g = self._reml_deviance if REML else self._ml_deviance
         _lo = np.array([b[0] if b[0] is not None else -np.inf for b in bounds])
         _hi = np.array([b[1] if b[1] is not None else np.inf for b in bounds])
+        # lme4's DEFAULT lmer optimizer is ``nloptwrap`` = NLopt LN_BOBYQA
+        # (utilities.R:836-839, xtol_abs=ftol_abs=1e-8, maxeval=1e5). Match it
+        # exactly so θ̂ lands on lme4's fit to the CHOLMOD floor (~1e-9); the
+        # old scipy L-BFGS-B converged to a *different* point ~1e-5 away on
+        # flat surfaces (the same scatter lme4's own optimizers show).
+        res = _nlopt_ln_bobyqa(_devfun_g, theta0, _lo, _hi)
+        theta_hat = res.x
+
+        # 8.12 / 8.13 — boundary handling on θ (lme4 optimizeLmer:688-740).
+        # restart_edge is a near-no-op for BOBYQA (derivative-free, won't halt
+        # at a false edge) but ported for parity; check.boundary pins near-zero
+        # variance params to 0.
         if inputs.restart_edge:
             def _refit(p0):
-                r = minimize(_devfun_g, p0, method="L-BFGS-B", bounds=bounds,
-                             options={"ftol": 1e-12, "gtol": 1e-8,
-                                      "maxiter": 1000})
-                return r.x
+                return _nlopt_ln_bobyqa(_devfun_g, p0, _lo, _hi).x
             theta_hat = _restart_edge(_devfun_g, theta_hat, _lo, _hi, _refit,
                                       verbose=inputs.verbose)
         if inputs.boundary_tol > 0:
@@ -5945,6 +6113,19 @@ class gmm:
                 "profile() currently requires scalar bars (1|g); "
                 "vector bars like (1+x|g) need a different parameterization."
             )
+        if self._is_glmm():
+            # 11.2 — unknown-scale GLMM (Gamma/IG): lme4 itself refuses to
+            # profile these (profile.R:74-75); match the message verbatim so
+            # confint(method="profile") raises identically.
+            if not bool(getattr(self.family, "scale_known", False)):
+                raise NotImplementedError(
+                    "can't (yet) profile GLMMs with non-fixed scale parameters")
+            # 11.1 — scale-known GLMM (Poisson/Binomial) profiling needs the
+            # constrained-Laplace inner fit (re-optimise (θ,β) with one pinned);
+            # not yet ported. Wald / bootstrap CIs work today; use those.
+            raise NotImplementedError(
+                "profile() for GLMMs is not yet implemented; use "
+                "confint(method='Wald') or confint(method='boot') instead")
         if self.REML:
             return gmm(self.formula, self.data, REML=False).profile(
                 n_grid=n_grid, alphamax=alphamax,
@@ -6045,15 +6226,124 @@ class gmm:
 
         return Profile(data, estimate)
 
-    def confint(self, level: float = 0.95) -> pl.DataFrame:
-        """R: ``confint.merMod`` — profile-likelihood CIs at ``level``.
+    def _ci_param_layout(self):
+        """Shared parameter-row layout for ``confint`` — the variance-component
+        SD names (``.sig01``, …), then ``.sigma`` if the family carries a scale
+        (``useSc``: LMM, or scale-unknown GLMM), then the fixed-effect names.
+        Mirrors lme4's ``profnames(object) ++ names(fixef)``. Returns
+        ``(bar_keys, vc_names, use_sc, fixef_names, all_names)``."""
+        bar_keys = list(self.sd_re.keys())
+        vc_names = [f".sig{i + 1:02d}" for i in range(len(bar_keys))]
+        use_sc = not bool(getattr(self.family, "scale_known", False))
+        fixef_names = list(self.column_names)
+        all_names = vc_names + ([".sigma"] if use_sc else []) + fixef_names
+        return bar_keys, vc_names, use_sc, fixef_names, all_names
 
-        Mirrors lme4's default ``method="profile"``: runs :meth:`profile`
-        and inverts each ζ-curve at ``±Φ⁻¹((1+level)/2)``. Returns one row
-        per variance-component SD (``.sig01``, …, ``.sigma``) and one row
-        per fixed effect.
+    @staticmethod
+    def _filter_parm(df: pl.DataFrame, parm, all_names) -> pl.DataFrame:
+        """Subset a CI table by ``parm`` (names or 0-based indices into
+        ``all_names``); ``None`` keeps every row, preserving order."""
+        if parm is None:
+            return df
+        if isinstance(parm, (str, int)):
+            parm = [parm]
+        keep = [all_names[p] if isinstance(p, (int, np.integer)) else p
+                for p in parm]
+        # Preserve the requested order rather than the table's.
+        order = {name: i for i, name in enumerate(keep)}
+        return (df.filter(pl.col("parameter").is_in(keep))
+                  .sort(pl.col("parameter").replace_strict(order, default=10**9)))
+
+    def confint(self, parm=None, level: float = 0.95, method: str = "profile",
+                *, nsim: int = 500, boot_type: str = "perc", FUN=None,
+                seed=None, boot_scale: str = "sdcor",
+                use_u: bool = False) -> pl.DataFrame:
+        """R: ``confint.merMod`` — fixed-effect & variance-component CIs.
+
+        ``method`` (lme4's three, profile.R:807):
+
+        * ``"profile"`` (default) — invert the profile-ζ curve at
+          ``±Φ⁻¹((1+level)/2)`` (:meth:`profile` → :meth:`Profile.confint`).
+          Raises lme4's exact message for unknown-scale GLMMs (Gamma/IG).
+        * ``"Wald"`` — ``β̂ ± z·SE(β̂)`` from ``vcov``; variance components
+          are ``NaN`` (lme4 doesn't Wald-CI those).
+        * ``"boot"`` — parametric bootstrap (:meth:`bootMer`) summarised by
+          ``boot_type`` ∈ ``{"perc","basic","norm"}`` (``nsim`` reps, ``seed``).
+          The default statistic is the variance-component SDs + fixed effects
+          on the ``sdcor`` scale (lme4's ``confint`` bootFun); pass ``FUN`` to
+          override.
+
+        ``parm`` restricts to a subset (names or 0-based indices). Returns a
+        polars frame: a ``parameter`` column + two ``%``-labelled bound columns.
         """
-        return self.profile().confint(level=level)
+        method = str(method).lower()
+        if method == "wald":
+            return self._confint_wald(parm, level)
+        if method == "profile":
+            df = self.profile().confint(level=level)
+            _, _, _, _, all_names = self._ci_param_layout()
+            return self._filter_parm(df, parm, all_names)
+        if method == "boot":
+            return self._confint_boot(parm, level, nsim, boot_type, FUN,
+                                      seed, boot_scale, use_u)
+        raise ValueError(
+            f"confint: method must be 'profile'/'Wald'/'boot'; got {method!r}")
+
+    def _confint_wald(self, parm, level: float) -> pl.DataFrame:
+        """``method="Wald"`` — ``β̂ ± z·SE`` for fixed effects; ``NaN`` rows for
+        the variance components / σ (confint.merMod:843-857)."""
+        from scipy.stats import norm
+
+        _, vc_names, use_sc, fixef_names, all_names = self._ci_param_layout()
+        z = float(norm.ppf((1 + level) / 2))
+        a = (1 - level) / 2
+        lo_lbl, hi_lbl = f"{100 * a:.1f}%", f"{100 * (1 - a):.1f}%"
+        names, los, his = [], [], []
+        for nm in vc_names + ([".sigma"] if use_sc else []):
+            names.append(nm)
+            los.append(float("nan"))
+            his.append(float("nan"))
+        for j, nm in enumerate(fixef_names):
+            b, se = float(self._beta[j]), float(self._se_beta[j])
+            names.append(nm)
+            los.append(b - z * se)
+            his.append(b + z * se)
+        df = pl.DataFrame({"parameter": names, lo_lbl: los, hi_lbl: his})
+        return self._filter_parm(df, parm, all_names)
+
+    def _boot_profile_stat(self, boot_scale: str = "sdcor") -> dict:
+        """Default ``confint(method="boot")`` statistic — the variance-component
+        SDs (``.sig0i`` [+ ``.sigma``]) and fixed effects on the ``sdcor`` scale
+        (confint.merMod:860-866's bootFun). Scalar bars only (like profile)."""
+        if boot_scale != "sdcor":
+            raise NotImplementedError(
+                "confint(boot_scale='vcov') not implemented; use 'sdcor'")
+        if any(c > 1 for c in self._bar_sizes):
+            raise NotImplementedError(
+                "bootstrap confint requires scalar bars (1|g); pass a custom "
+                "FUN for vector bars")
+        bar_keys, vc_names, use_sc, fixef_names, _ = self._ci_param_layout()
+        out: dict[str, float] = {}
+        for nm, key in zip(vc_names, bar_keys):
+            out[nm] = float(self.sd_re[key][0])
+        if use_sc:
+            out[".sigma"] = float(self.sigma)
+        for j, nm in enumerate(fixef_names):
+            out[nm] = float(self._beta[j])
+        return out
+
+    def _confint_boot(self, parm, level, nsim, boot_type, FUN, seed,
+                      boot_scale, use_u) -> pl.DataFrame:
+        """``method="boot"`` — bootstrap CIs via :meth:`bootMer` (confint.merMod:859)."""
+        if FUN is None:
+            def FUN(x):
+                return x._boot_profile_stat(boot_scale)
+        bb = self.bootMer(FUN, nsim=nsim, seed=seed, use_u=use_u)
+        if np.all(np.isnan(bb.t)):
+            raise RuntimeError("*all* bootstrap runs failed!")
+        df = bb.confint(level=level, type=boot_type)
+        _, _, _, _, all_names = self._ci_param_layout()
+        return self._filter_parm(df, parm, all_names)
 
     # ---- predict --------------------------------------------------------
 
@@ -6566,6 +6856,13 @@ class gmm:
         else:
             u_all = np.asarray(rng.rnorm(q * nsim)).reshape((nsim, q)).T
             reff = np.asarray(self._Z_sp @ (self.Lambda @ u_all))
+            # LMM scales the relative RE draw ``ZΛu`` by σ — lme4 writes the
+            # whole thing as ``etapred + σ·(sim.reff + ε)`` (predict.R:882),
+            # since ``u ~ N(0, σ²I)`` in lme4's parameterization. GLMM leaves
+            # the RE contribution **unscaled** (predict.R:890, σ≡1 on the link
+            # scale). ``use_u=True`` redraws nothing — it conditions on b̂.
+            if is_gaussian:
+                reff = self.sigma * reff
             eta_mat = eta_pop[:, None] + reff
 
         # (2) Response draws over the column-major-flattened (n, nsim) means.
@@ -6580,6 +6877,168 @@ class gmm:
                                            self.sigma)
             y_mat = y_flat.reshape((nsim, n)).T
         return pl.DataFrame({f"sim_{k + 1}": y_mat[:, k] for k in range(nsim)})
+
+    # ---- refit / parametric bootstrap (Phase 11) ------------------------
+
+    def _refit_response(self, newresp) -> "gmm":
+        """Refit this model to a new response vector, preserving family / REML
+        / weights / offset / nAGQ / control — the engine behind :meth:`bootMer`
+        and the ``refit(model, newresp=)`` generic (lme4's ``refit.merMod``).
+
+        The response must be a bare data column (a ``cbind(...)`` / transformed
+        LHS isn't supported); hea expresses binomial models in proportion form
+        (``y_prop`` + ``weights=size``), so this still covers the canonical
+        cbpp / Beetle dose-response cases. ``weights`` (the binomial trial
+        totals) and the user ``offset=`` arg ride along so the refit is the
+        same model with only the response swapped.
+        """
+        resp = np.asarray(newresp, dtype=float).ravel()
+        if resp.shape != (self.n,):
+            raise ValueError(
+                f"_refit_response: newresp must have length {self.n}; "
+                f"got {resp.shape}")
+        lhs = self.formula.split("~", 1)[0].strip()
+        if lhs not in self.data.columns:
+            raise NotImplementedError(
+                f"refit(newresp=): response {lhs!r} is not a bare data column "
+                f"(cbind() / transformed LHS not supported yet)")
+        data = self.data.with_columns(pl.Series(lhs, resp))
+        w = getattr(self, "prior_weights", None)
+        if w is not None and np.allclose(np.asarray(w, float), 1.0):
+            w = None  # unit weights ⇒ pass None (avoids a spurious weighted fit)
+        return gmm(
+            self.formula, data, family=self.family, REML=self.REML,
+            weights=w, offset=self._offset_arg, nAGQ=self._nAGQ,
+            control=self._control_arg,
+        )
+
+    @staticmethod
+    def _boot_apply_fun(FUN, model):
+        """Apply a bootstrap statistic ``FUN`` to a fit, returning
+        ``(values, names)``. A ``dict`` return carries its own names; anything
+        else (ndarray / list / scalar) gets positional ``t1, t2, …`` labels —
+        matching how R names an unnamed ``FUN`` result."""
+        raw = FUN(model)
+        if isinstance(raw, dict):
+            return (np.asarray(list(raw.values()), dtype=float).ravel(),
+                    list(raw.keys()))
+        if isinstance(raw, pl.Series):
+            return raw.to_numpy().astype(float).ravel(), [
+                f"t{i + 1}" for i in range(raw.len())]
+        arr = np.asarray(raw, dtype=float).ravel()
+        return arr, [f"t{i + 1}" for i in range(arr.size)]
+
+    def bootMer(self, FUN, nsim: int = 1, seed=None, use_u: bool = False,
+                type: str = "parametric", re_form=None, verbose: bool = False,
+                parallel: str = "no", ncpus: int = 1) -> "BootMer":
+        """Model-based parametric bootstrap — port of ``bootMer`` (bootMer.R).
+
+        Simulates ``nsim`` responses from the fitted model (Phase 10's
+        :meth:`simulate`), refits the model to each (:meth:`_refit_response`),
+        and applies ``FUN`` to every refit. Returns a :class:`BootMer` holding
+        ``t0 = FUN(self)`` and the ``nsim × len(t0)`` replicate matrix, ready
+        for :meth:`BootMer.confint`.
+
+        Parameters mirror lme4: ``use_u`` conditions the RE draws on ``b̂``;
+        ``type ∈ {"parametric","semiparametric"}`` (semiparametric needs
+        ``use_u=True`` — resampling response residuals — and warns for GLMMs,
+        exactly as lme4 does); ``seed`` drives the **bit-exact** RNG so a
+        matched seed reproduces R's stream. ``FUN`` must return a numeric
+        vector (or a ``{name: value}`` dict to label the statistics).
+
+        All ``nsim`` draws are generated up front in one sequential RNG pass,
+        so the refits are pure functions of the simulated data and ``parallel``
+        (``"multicore"`` / ``"snow"`` / ``"future"`` → a process pool) never
+        perturbs reproducibility. Failed refits become an all-``NaN`` row
+        (lme4's ``factory(errval=NA)``).
+        """
+        import warnings
+
+        nsim = int(nsim)
+        if nsim <= 0:
+            raise ValueError("bootMer: nsim must be a positive integer")
+        if type not in ("parametric", "semiparametric"):
+            raise ValueError(
+                f"bootMer: type must be 'parametric'/'semiparametric'; got {type!r}")
+
+        t0, t0_names = self._boot_apply_fun(FUN, self)
+        if not np.issubdtype(t0.dtype, np.number):
+            raise TypeError(
+                "bootMer currently only handles functions that return "
+                "numeric vectors")
+
+        # (1) Generate all nsim responses up front (one sequential RNG pass).
+        if type == "parametric":
+            ss = self.simulate(nsim=nsim, seed=seed, use_u=use_u)
+            sims = [ss[c].to_numpy() for c in ss.columns]
+        else:  # semiparametric — resample response residuals on top of fitted
+            if not use_u:
+                raise NotImplementedError(
+                    "semiparametric bootstrapping with use_u=False is not "
+                    "implemented (matches lme4)")
+            if self._is_glmm():
+                warnings.warn(
+                    "semiparametric bootstrapping is questionable for GLMMs")
+            rng = _simulate_rng(seed)
+            ftd = np.asarray(self.fitted, dtype=float).ravel()
+            res_resp = np.asarray(self.residuals_of("response")
+                                  if hasattr(self, "residuals_of")
+                                  else (self.y - self.fitted), dtype=float).ravel()
+            sims = [ftd + res_resp[rng.sample_int(self.n, self.n, replace=True)]
+                    for _ in range(nsim)]
+
+        # (2) Refit each simulated response and apply FUN; failures → NaN row.
+        def _one(y_k):
+            try:
+                return self._boot_apply_fun(FUN, self._refit_response(y_k))[0]
+            except Exception:  # noqa: BLE001 — lme4's factory swallows + NA-fills
+                return np.full(t0.shape, np.nan)
+
+        if parallel == "no" or ncpus <= 1:
+            results = []
+            for i, y_k in enumerate(sims):
+                results.append(_one(y_k))
+                if verbose:
+                    print(f"{i + 1:5d} : {results[-1]}")
+        else:
+            results = self._bootmer_parallel(sims, FUN, t0, ncpus)
+
+        t = np.vstack(results)
+        nfail = int(np.isnan(t).any(axis=1).sum())
+        if nfail > 0:
+            warnings.warn(f"some bootstrap runs failed ({nfail}/{nsim})")
+        return BootMer(t0, t, t0_names, R=nsim, seed=seed, nfail=nfail)
+
+    def _bootmer_parallel(self, sims, FUN, t0, ncpus):
+        """Process-pool refit fan-out for ``parallel != "no"``. Ships a
+        picklable fit-spec per simulation to top-level :func:`_bootmer_worker`.
+        Falls back to a sequential run (with a warning) if the model / FUN
+        can't be pickled — common when ``FUN`` is a lambda or closure."""
+        import warnings
+        from concurrent.futures import ProcessPoolExecutor
+
+        lhs = self.formula.split("~", 1)[0].strip()
+        w = getattr(self, "prior_weights", None)
+        if w is not None and np.allclose(np.asarray(w, float), 1.0):
+            w = None
+        spec_base = (self.formula, lhs, self.data, self.family, self.REML,
+                     w, self._offset_arg, self._nAGQ, self._control_arg,
+                     FUN, int(t0.size))
+        try:
+            with ProcessPoolExecutor(max_workers=int(ncpus)) as ex:
+                return list(ex.map(_bootmer_worker,
+                                   [(*spec_base, y_k) for y_k in sims]))
+        except Exception as exc:  # noqa: BLE001 — pickling / spawn failure
+            warnings.warn(
+                f"bootMer: parallel run failed ({exc!r}); falling back to "
+                f"sequential")
+            out = []
+            for y_k in sims:
+                try:
+                    out.append(self._boot_apply_fun(FUN, self._refit_response(y_k))[0])
+                except Exception:  # noqa: BLE001
+                    out.append(np.full(int(t0.size), np.nan))
+            return out
 
     def summary(self, digits: int = 4) -> None:
         from scipy.stats import norm
@@ -7116,6 +7575,88 @@ def _invert_zeta(
     return float(brentq(lambda v: float(fwd(v)) - target, v_sorted[i], v_sorted[i + 1]))
 
 
+def _norm_inter(t: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """Port of ``boot:::norm.inter`` — interpolated order statistics.
+
+    For each probability ``α`` the ``boot`` percentile method does NOT take a
+    plain ``quantile(t, α)``; it interpolates between the two adjacent order
+    statistics ``t_(k)``/``t_(k+1)`` (``k = ⌊(R+1)α⌋``) on the **normal-quantile**
+    scale: ``t_(k) + (Φ⁻¹(α) − Φ⁻¹(k/(R+1))) / (Φ⁻¹((k+1)/(R+1)) − Φ⁻¹(k/(R+1)))
+    · (t_(k+1) − t_(k))``. Endpoints (``k = 0`` / ``k ≥ R``) clamp to the min/max;
+    an exact integer ``rk`` returns ``t_(k)`` directly. Byte-matches R (verified
+    against ``boot.ci`` percentile/basic output).
+    """
+    from scipy.stats import norm
+
+    t = np.asarray(t, float)
+    t = t[np.isfinite(t)]
+    R = t.size
+    alpha = np.atleast_1d(np.asarray(alpha, float))
+    tstar = np.sort(t)  # ascending; R's tstar[j] is tstar[j-1] here (0-indexed)
+    rk = (R + 1) * alpha
+    k = np.trunc(rk).astype(int)
+    out = np.empty_like(alpha)
+    for i in range(alpha.size):
+        ki = int(k[i])
+        if ki == rk[i]:            # exact order statistic
+            out[i] = tstar[ki - 1]
+        elif ki == 0:              # below the first order statistic
+            out[i] = tstar[0]
+        elif ki >= R:              # at/above the last
+            out[i] = tstar[R - 1]
+        else:
+            t1 = norm.ppf(alpha[i])
+            t2 = norm.ppf(ki / (R + 1))
+            t3 = norm.ppf((ki + 1) / (R + 1))
+            tk, tk1 = tstar[ki - 1], tstar[ki]
+            out[i] = tk + (t1 - t2) / (t3 - t2) * (tk1 - tk)
+    return out
+
+
+def _boot_ci_one(t0: float, t_col: np.ndarray, conf: float, kind: str) -> tuple[float, float]:
+    """One parameter's bootstrap CI — port of ``boot::boot.ci`` for the three
+    types ``confint.bootMer`` exposes (the last two columns of each method):
+
+    * ``perc``  — ``boot:::perc.ci``:  interpolated percentiles at ``α/1−α``.
+    * ``basic`` — ``boot:::basic.ci``: ``2·t0 − perc`` (pivot reflection).
+    * ``norm``  — ``boot:::norm.ci``:  ``(t0 − bias) ± Φ⁻¹((1+conf)/2)·sd(t)``
+      with ``bias = mean(t) − t0`` and ``sd`` the bootstrap-replicate SD
+      (divisor ``R−1``).
+    """
+    from scipy.stats import norm
+
+    t_col = np.asarray(t_col, float)
+    finite = t_col[np.isfinite(t_col)]
+    if kind == "norm":
+        bias = float(finite.mean()) - t0
+        merr = float(finite.std(ddof=1)) * float(norm.ppf((1 + conf) / 2))
+        return (t0 - bias - merr, t0 - bias + merr)
+    if kind == "perc":
+        lo, hi = _norm_inter(t_col, np.array([(1 - conf) / 2, (1 + conf) / 2]))
+        return (float(lo), float(hi))
+    if kind == "basic":
+        # basic.ci uses the ((1+conf)/2, (1-conf)/2) order, then 2·t0 − qq.
+        qq = _norm_inter(t_col, np.array([(1 + conf) / 2, (1 - conf) / 2]))
+        return (float(2 * t0 - qq[0]), float(2 * t0 - qq[1]))
+    raise ValueError(f"unknown boot CI type {kind!r}; use perc/basic/norm")
+
+
+def _bootmer_worker(spec):
+    """Top-level (picklable) bootstrap worker for ``ProcessPoolExecutor`` —
+    refit on one simulated response and apply ``FUN``. Returns an all-``NaN``
+    row on failure (mirrors lme4's ``factory(errval=NA)``)."""
+    (formula, lhs, data, family, reml, weights, offset, nagq, control,
+     FUN, t0_len, y_k) = spec
+    try:
+        data_k = data.with_columns(
+            pl.Series(lhs, np.asarray(y_k, dtype=float).ravel()))
+        m = gmm(formula, data_k, family=family, REML=reml, weights=weights,
+                offset=offset, nAGQ=nagq, control=control)
+        return gmm._boot_apply_fun(FUN, m)[0]
+    except Exception:  # noqa: BLE001
+        return np.full(t0_len, np.nan)
+
+
 class Profile:
     """Profile-likelihood output from :meth:`gmm.profile`.
 
@@ -7593,3 +8134,75 @@ class Profile:
 
     def __repr__(self) -> str:
         return f"Profile({list(self.data)})"
+
+
+class BootMer:
+    """Parametric-bootstrap output from :meth:`gmm.bootMer` — the analogue of
+    lme4's ``"bootMer"`` / ``boot`` object.
+
+    Attributes
+    ----------
+    t0 : numpy.ndarray
+        ``FUN`` applied to the original fit (the point estimate).
+    t : numpy.ndarray
+        The ``R × len(t0)`` matrix of bootstrap replicates — ``FUN`` applied to
+        each refit. Rows for failed refits are all-``NaN`` (lme4's
+        ``factory(..., errval=NA)``).
+    t0_names : list[str]
+        Names of the ``t0`` entries (the row labels of a ``confint`` table).
+    R : int
+        Number of bootstrap samples (``nsim``).
+    seed : int
+        The seed that drove the simulation (echoes R's ``$seed``).
+    nfail : int
+        How many of the ``R`` refits failed.
+    """
+
+    def __init__(self, t0, t, t0_names, R, seed, nfail=0):
+        self.t0 = np.asarray(t0, dtype=float)
+        self.t = np.asarray(t, dtype=float)
+        self.t0_names = list(t0_names)
+        self.R = int(R)
+        self.seed = seed
+        self.nfail = int(nfail)
+
+    def __repr__(self) -> str:
+        return (f"BootMer(R={self.R}, statistics={self.t0_names!r}, "
+                f"nfail={self.nfail})")
+
+    def confint(self, parm=None, level: float = 0.95,
+                type: str = "perc") -> pl.DataFrame:
+        """Bootstrap CIs — port of ``confint.bootMer`` (bootMer.R:207-229).
+
+        ``type`` ∈ ``{"perc","basic","norm"}`` selects the ``boot::boot.ci``
+        method. ``parm`` restricts to a subset of statistics (names or 0-based
+        indices); default is all. Returns a polars frame with a ``parameter``
+        column and the two percentage-labelled bound columns, exactly like
+        R's ``confint(bootMer(...))``.
+        """
+        names = self.t0_names
+        if parm is None:
+            idx = list(range(len(names)))
+        elif isinstance(parm, (str, int)):
+            parm = [parm]
+            idx = None
+        else:
+            idx = None
+        if idx is None:
+            idx = []
+            for p in parm:
+                if isinstance(p, str):
+                    idx.append(names.index(p))
+                else:
+                    idx.append(int(p))
+        a = (1 - level) / 2
+        lo_lbl = f"{100 * a:.1f}%"
+        hi_lbl = f"{100 * (1 - a):.1f}%"
+        rows, los, his = [], [], []
+        for i in idx:
+            col = self.t[:, i]
+            lo, hi = _boot_ci_one(float(self.t0[i]), col, level, type)
+            rows.append(names[i])
+            los.append(lo)
+            his.append(hi)
+        return pl.DataFrame({"parameter": rows, lo_lbl: los, hi_lbl: his})
