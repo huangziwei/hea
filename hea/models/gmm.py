@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
+import time
 import warnings
 from typing import Callable, Optional
 
@@ -33,12 +34,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from scipy.linalg import qr as _scipy_qr, solve_triangular
-from scipy.optimize import minimize
+from scipy.optimize import minimize, minimize_scalar
 from scipy.sparse import csc_array, eye_array
-from scipy.special import roots_hermite
+from scipy.special import digamma, polygamma, roots_hermite
 
 from .. import family as _family_mod
 from ..family import Family, Gaussian, _coerce_response
+from ..R.rng import RMersenneTwister
 from ..formula import (
     BinOp,
     CONTRAST_FN_NAMES,
@@ -317,6 +319,21 @@ class _FitInputs:
 
     data: Optional[pl.DataFrame] = None
     """Post-NA-omit row set, in row-aligned order with X/Z/y/offset."""
+
+    dev_fun_only: bool = False
+    """When True, build the stage deviance closure and stop before optimizing —
+    ``gmm()`` returns the unfitted instance carrying ``m.devfun`` (a
+    :class:`_DevFunHandle`) instead of a fitted model. Mirrors
+    ``(g)lmer(devFunOnly=TRUE)`` (lmer.R:46 / 151 / 175)."""
+
+    restart_edge: bool = False
+    """Post-optimization boundary-gradient restart — ``glmerControl(restart_edge=)``
+    (8.12). lme4 default TRUE for lmer, FALSE/unsupported for glmer."""
+
+    boundary_tol: float = 0.0
+    """If > 0, after optimizing try pinning near-boundary θ to the bound when it
+    lowers the deviance — ``check.boundary`` / ``glmerControl(boundary.tol=)``
+    (8.13)."""
 
 
 def _sparse_Lt_spec(
@@ -1121,6 +1138,30 @@ def _pwrss_update(
             f"PIRLS did not converge in {maxit} iterations (last pdev={pdev})"
         )
     return pdev
+
+
+class _DevFunHandle:
+    """Callable deviance-function handle returned by ``gmm(..., devFunOnly=True)``
+    — lme4's diagnostic entry point (``mkdevfun`` / ``(g)lmer(devFunOnly=TRUE)``).
+
+    Call it with a parameter vector to evaluate ``-2 log L``: the profiled
+    REML/ML deviance for LMMs, the Laplace/AGQ deviance for GLMMs. ``par_names``
+    /``lower``/``upper`` describe the parameter vector — ``θ`` for the lmer and
+    glmer-``nAGQ=0`` closures, ``[θ, β]`` for the glmer ``nAGQ>0`` Stage-1
+    closure.
+    """
+
+    def __init__(self, fn, par_names, lower, upper):
+        self._fn = fn
+        self.par_names = list(par_names)
+        self.lower = np.asarray(lower, dtype=float)
+        self.upper = np.asarray(upper, dtype=float)
+
+    def __call__(self, par) -> float:
+        return float(self._fn(np.asarray(par, dtype=float)))
+
+    def __repr__(self) -> str:
+        return f"_DevFunHandle(npar={len(self.par_names)}, par_names={self.par_names})"
 
 
 def _gh_rule(ord: int) -> np.ndarray:
@@ -4045,6 +4086,206 @@ def _run_prefit_glmm_checks(re: ReTerms, y: np.ndarray, n: int,
         _emit_check(a, "Response is constant")
 
 
+def _check_scale_x(X: np.ndarray, col_names: list, kind: str) -> None:
+    """Port of lme4's ``checkScaleX`` (modular.R:128-158): warn/stop when
+    continuous predictor columns are on very different scales — their SDs, or
+    pairwise SD ratios, differ by more than ``tol = 1e3``. Fires at the
+    ``check.scaleX`` level (ignore/warning/stop); the ``*+rescale`` variants
+    map to their warn/message component — ``autoscale=True`` is the supported
+    rescaling path (8.16)."""
+    if not _do_check(kind) or X.shape[1] == 0:
+        return
+    tol = 1e3
+    cont = np.array([not np.all(np.isin(X[:, j], (0.0, 1.0)))
+                     for j in range(X.shape[1])])
+    if not cont.any():
+        return
+    sd = X[:, cont].std(axis=0, ddof=1)
+    sd = sd[sd > 0]
+    if sd.size == 0:
+        return
+    logsd = np.abs(np.log(sd))
+    iu = np.triu_indices(sd.size, k=1)
+    logratio = (np.abs(np.log(np.divide.outer(sd, sd)))[iu]
+                if iu[0].size else np.array([0.0]))
+    if max(logsd.max(), logratio.max()) > np.log(tol):
+        act = {"warn+rescale": "warning",
+               "message+rescale": "message"}.get(kind, kind)
+        _emit_check(act, "Some predictor variables are on very different "
+                    "scales: consider rescaling (or use autoscale=True).")
+
+
+def _restart_edge(devfun, par, lower, upper, refit, *, btol=1e-5, verbose=0):
+    """Port of ``optimizeLmer``'s ``restart_edge`` (modular.R:690-738): if any
+    parameter sits exactly on a bound and the inward finite-difference gradient
+    is negative, restart the outer optimizer from ``par``. ``refit(par0)``
+    re-runs the optimizer and returns the new vector. Returns ``par`` unchanged
+    when no boundary improvement is found. (Largely a no-op for hea's
+    gradient-based L-BFGS-B LMM optimizer, which won't halt at a false edge.)"""
+    par0 = np.asarray(par, dtype=float).copy()
+    wl = [i for i in range(len(par0)) if par0[i] == lower[i]]
+    wu = [i for i in range(len(par0)) if par0[i] == upper[i]]
+    if not wl and not wu:
+        return par0
+    d0 = devfun(par0)
+    grads = []
+    for i in wl:
+        p = par0.copy(); p[i] = lower[i] + btol
+        grads.append((devfun(p) - d0) / btol)
+    for i in wu:
+        p = par0.copy(); p[i] = upper[i] - btol
+        grads.append((devfun(p) - d0) / (-btol))
+    devfun(par0)  # reset internal state after probing
+    grads = np.asarray(grads)
+    if np.any(np.isnan(grads)):
+        warnings.warn("some gradient components are NA near boundaries, "
+                      "skipping boundary check", stacklevel=2)
+        return par0
+    if np.any(grads < 0):
+        if verbose:
+            print("some theta parameters on the boundary, restarting")
+        return np.asarray(refit(par0), dtype=float)
+    return par0
+
+
+def _check_boundary(devfun, par, fval, lower, upper, boundary_tol, dpars=None):
+    """Port of ``check.boundary`` (modular.R:879-907): for each covariance
+    parameter within ``boundary_tol`` of a bound, pin it to the bound if that
+    lowers the deviance. ``dpars`` restricts the check to the θ indices; ``None``
+    checks all parameters."""
+    par0 = np.asarray(par, dtype=float).copy()
+    idx = range(len(par0)) if dpars is None else dpars
+    for i in idx:
+        dl, du = par0[i] - lower[i], upper[i] - par0[i]
+        if 0 < dl < boundary_tol:
+            test = par0.copy(); test[i] = lower[i]
+            if devfun(test) < fval:
+                par0[i] = lower[i]
+        elif 0 < du < boundary_tol:
+            test = par0.copy(); test[i] = upper[i]
+            if devfun(test) < fval:
+                par0[i] = upper[i]
+    return par0
+
+
+def _theta_ml(y, mu, weights=None, limit=20, eps=1e-8):
+    """ML estimate of the negative-binomial dispersion θ given the response
+    ``y`` and fitted means ``μ`` — port of ``MASS::theta.ml``. Newton iteration
+    on the θ-score from a method-of-moments start ``n / Σ w(y/μ−1)²``.
+    """
+    y = np.asarray(y, dtype=float)
+    mu = np.asarray(mu, dtype=float)
+    n = len(y)
+    w = np.ones(n) if weights is None else np.asarray(weights, dtype=float)
+
+    def score(th):
+        return float(np.sum(w * (digamma(th + y) - digamma(th) + np.log(th)
+                                 + 1 - np.log(th + mu) - (y + th) / (mu + th))))
+
+    def info(th):
+        return float(np.sum(w * (-polygamma(1, th + y) + polygamma(1, th)
+                                 - 1 / th + 2 / (mu + th)
+                                 - (y + th) / (mu + th) ** 2)))
+
+    t0 = n / np.sum(w * (y / mu - 1) ** 2)
+    it, delta = 0, 1.0
+    while it < limit and abs(delta) > eps:
+        t0 = abs(t0)
+        delta = score(t0) / info(t0)
+        t0 = t0 + delta
+        it += 1
+    return max(float(t0), 0.0)
+
+
+def glmer_nb(formula, data, *, interval_width=3.0, tol=5e-5,
+             _gmm_kwargs=None, **kwargs):
+    """Negative-binomial GLMM with θ estimation — port of ``lme4::glmer.nb``
+    (nbinom.R:96-159).
+
+    Fits a Poisson GLMM, estimates the NB dispersion θ from its residuals
+    (``MASS::theta.ml`` ⇒ :func:`_theta_ml`), then 1D-optimises the NB profile
+    ``-2 log L`` over ``log θ`` (lme4's ``optTheta``: ``optimize`` over
+    ``log(th)+c(-3,3)``), refitting the GLMM at each candidate θ. Returns the
+    fit at θ̂ with ``m._nb_theta`` set and ``npar``/``AIC``/``BIC`` accounting
+    for the estimated dispersion (lmer.R:1053 adds 1 to ``npar`` for nbinom).
+    """
+    kw = dict(_gmm_kwargs) if _gmm_kwargs is not None else dict(kwargs)
+    kw.pop("family", None)
+
+    # 1. Poisson initialization → θ start from the residuals.
+    m0 = gmm(formula, data, family=_family_mod.Poisson(), **kw)
+    th0 = _theta_ml(np.asarray(m0._resp.y, dtype=float),
+                    np.asarray(m0.fitted_values, dtype=float),
+                    m0.prior_weights)
+    lo, hi = np.log(th0) - interval_width, np.log(th0) + interval_width
+
+    # 2. profile -2logL over log θ (lme4 optTheta).
+    def nbdev(t):
+        return gmm(formula, data,
+                   family=_family_mod.nb(theta=float(np.exp(t))),
+                   **kw).deviance_laplace
+
+    res = minimize_scalar(nbdev, bounds=(lo, hi), method="bounded",
+                          options={"xatol": tol})
+    th_hat = float(np.exp(res.x))
+
+    # 3. final fit at θ̂; account for the estimated dispersion parameter.
+    m = gmm(formula, data, family=_family_mod.nb(theta=th_hat), **kw)
+    m._nb_theta = th_hat
+    m.npar = m.npar + 1
+    m.df_resid = m.n - m.npar
+    m.AIC = m.deviance_laplace + 2.0 * m.npar
+    m.BIC = m.deviance_laplace + np.log(m.n) * m.npar
+    return m
+
+
+def _simulate_family_draw(rng, family, mu, weights, sigma):
+    """Draw one response per fitted mean in ``mu`` from ``family`` using R's
+    nmath samplers on the bit-exact :class:`RMersenneTwister` stream — byte-
+    matching lme4's per-family ``*_simfun`` (predict.R:1012-1090) draw-for-draw.
+    """
+    name = family.name
+    m = len(mu)
+    w = np.ones(m) if weights is None else np.asarray(weights, dtype=float)
+    out = np.empty(m)
+    if name == "poisson":
+        for i in range(m):
+            out[i] = rng.rpois(float(mu[i]))
+    elif name == "binomial":
+        for i in range(m):
+            out[i] = rng.rbinom(int(round(w[i])), float(mu[i])) / w[i]
+    elif name == "Gamma":
+        disp = sigma ** 2                     # Gamma_simfun: shape=1/disp
+        for i in range(m):
+            out[i] = rng.rgamma(1.0 / disp, scale=float(mu[i]) * disp)
+    elif name == "negative binomial":
+        th = float(family.get_theta(trans=True)[0])
+        for i in range(m):
+            out[i] = rng.rnbinom(th, float(mu[i]))
+    else:
+        raise NotImplementedError(
+            f"simulate is not implemented for family {name!r}")
+    return out
+
+
+_GLOBAL_SIM_RNG = None  # R's global .Random.seed analog for simulate(seed=None)
+
+
+def _simulate_rng(seed):
+    """RNG for :meth:`gmm.simulate`, mirroring R's ``simulate.merMod`` seed
+    semantics on hea's bit-exact :class:`RMersenneTwister` (never numpy): an
+    explicit ``seed`` does ``set.seed(seed)`` — reseeding the global R stream —
+    and ``seed=None`` continues that global stream, lazily time-initialised the
+    way R's ``Randomize()`` seeds ``.Random.seed`` when none exists yet.
+    """
+    global _GLOBAL_SIM_RNG
+    if seed is not None:
+        _GLOBAL_SIM_RNG = RMersenneTwister(int(seed))
+    elif _GLOBAL_SIM_RNG is None:
+        _GLOBAL_SIM_RNG = RMersenneTwister(int(time.time()) & 0x7FFFFFFF)
+    return _GLOBAL_SIM_RNG
+
+
 def _check_rank_drop_cols(
     X: np.ndarray, col_names: list[str], *,
     tol: float = 1e-7, action: str = "message+drop.cols",
@@ -4237,6 +4478,19 @@ class gmm:
         # quasi* with lme4's exact error message (modular.R:733-735).
         family = _resolve_lme_family(family)
 
+        # 12 — glmer.nb: a free-θ negative-binomial family triggers the θ-
+        # estimation outer loop (lme4::glmer.nb). Fixed-θ nb(theta=Θ) flows
+        # through the standard Laplace path below. Delegate + adopt the fit.
+        if isinstance(family, _family_mod.nb) and family.n_theta > 0:
+            _m = glmer_nb(formula, data, _gmm_kwargs=dict(
+                weights=weights, offset=offset, mustart=mustart,
+                etastart=etastart, nAGQ=nAGQ, start=start, subset=subset,
+                na_action=na_action, contrasts=contrasts, verbose=verbose,
+                control=control, nAGQ0initStep=nAGQ0initStep))
+            self.__dict__.update(_m.__dict__)
+            self.formula = formula
+            return
+
         # REML is only meaningful for the Gaussian-identity LMM; glmer is
         # ML by construction (the Laplace approximation evaluates the
         # marginal log-likelihood directly). Silently override the default
@@ -4347,6 +4601,34 @@ class gmm:
             X_for_fit = d.X
         self._dropped_cols = dropped_names
 
+        # 8.16 — autoscale (lme4 modular.R:442-453): centre/scale the non-
+        # (Intercept) X columns to unit SD before fitting, for conditioning.
+        # Reversed post-fit (after _fit_from_components) so the reported β̂/vcov
+        # stay in the user's units — the fit is invariant to the reparam.
+        self._autoscale_center = None
+        self._autoscale_scale = None
+        if ctrl["autoscale"]:
+            _cols = list(X_for_fit.columns)
+            _Xa = X_for_fit.to_numpy().astype(float)
+            _center = np.zeros(_Xa.shape[1])
+            _scale = np.ones(_Xa.shape[1])
+            for _j, _c in enumerate(_cols):
+                if _c == "(Intercept)":
+                    continue
+                _m, _s = float(_Xa[:, _j].mean()), float(_Xa[:, _j].std(ddof=1))
+                if _s > 0:
+                    _Xa[:, _j] = (_Xa[:, _j] - _m) / _s
+                    _center[_j], _scale[_j] = _m, _s
+            X_for_fit = pl.DataFrame({_c: _Xa[:, _j]
+                                      for _j, _c in enumerate(_cols)})
+            self._autoscale_center = _center
+            self._autoscale_scale = _scale
+
+        # 8.16 — checkScaleX (modular.R:128-158, run at 461): flag predictors
+        # on very different scales (post-autoscale, so quiet once scaled).
+        _check_scale_x(X_for_fit.to_numpy().astype(float),
+                       list(X_for_fit.columns), ctrl["check.scaleX"])
+
         # calc.derivs=None is lme4's actual default (NULL); resolve it to the
         # "smart" rule (lmer.R:51-53): compute the post-fit numerical Hessian
         # only when the data AND the (θ, β) optimisation vector are both small
@@ -4358,6 +4640,21 @@ class gmm:
             calc_derivs_resolved = bool(
                 n < ctrl["check.conv.nobsmax"]
                 and npar_opt < ctrl["check.conv.nparmax"]
+            )
+
+        # 8.12 — restart_edge defaults TRUE for lmer (Gaussian-identity),
+        # FALSE/unsupported for glmer, unless the user set it explicitly.
+        _is_gaussian_id = (family.name == "gaussian"
+                           and family.link.name == "identity")
+        restart_edge_resolved = (
+            ctrl["restart_edge"] if "restart_edge" in (control or {})
+            else _is_gaussian_id
+        )
+        if restart_edge_resolved and not _is_gaussian_id:
+            # lme4's optimizeGlmer raises for restart_edge=TRUE (modular.R:869).
+            raise NotImplementedError(
+                "restart_edge is not implemented for glmer (matches lme4's "
+                "optimizeGlmer); use restart_edge=False."
             )
 
         fit_inputs = _FitInputs(
@@ -4384,20 +4681,54 @@ class gmm:
             check_conv_hess=ctrl["check.conv.hess"],
             expanded=d.expanded,
             data=d.data,
+            dev_fun_only=devFunOnly,
+            restart_edge=restart_edge_resolved,
+            boundary_tol=ctrl["boundary.tol"],
         )
 
-        # 8.9 — ``devFunOnly=True`` returns a handle wrapping the Stage 1
-        # deviance closure. The caller can probe it manually (lme4's
-        # diagnostic / debugging entry point). The handle's lower/upper/
-        # par_names reflect θ followed by β (the Stage 1 parameter order).
-        if devFunOnly:
-            raise NotImplementedError(
-                "devFunOnly=True is reserved for a future Phase 8.9 plumb. "
-                "It will return a _DevFunHandle exposing the Stage 1 closure "
-                "with lower/upper/par_names — port pending."
-            )
-
+        # 8.9 — ``devFunOnly=True``: _fit_from_components builds the stage
+        # deviance closure, stores it on ``self.devfun`` (a _DevFunHandle), and
+        # returns before optimizing — so gmm() hands back the unfitted instance
+        # carrying that callable handle (lme4's diagnostic entry point).
         self._fit_from_components(fit_inputs)
+        if devFunOnly:
+            return
+
+        # 8.16 — undo autoscale on the reported fixed effects: map β̂ and its
+        # vcov from the scaled parameterisation back to the original predictor
+        # units (lme4 fixef.merMod:973-982). β_orig[j]=β_s[j]/s[j];
+        # β_orig[icpt] -= Σ_j β_s[j]·c[j]/s[j]. summary() reads _beta/_se_beta
+        # directly (covers GLMM); the bhat/se DataFrames cover the Gaussian API.
+        if self._autoscale_scale is not None:
+            cols = list(self.column_names)
+            s, c = self._autoscale_scale, self._autoscale_center
+            icpt = cols.index("(Intercept)") if "(Intercept)" in cols else None
+            T = np.eye(len(cols))
+            for j in range(len(cols)):
+                if j == icpt:
+                    continue
+                T[j, j] = 1.0 / s[j]
+                if icpt is not None:
+                    T[icpt, j] = -c[j] / s[j]
+            self._beta = T @ self._beta
+            self._vcov_beta_arr = T @ self._vcov_beta_arr @ T.T
+            self._se_beta = np.sqrt(np.diag(self._vcov_beta_arr))
+            _b, _se = self._beta, self._se_beta
+
+            def _df1(arr):
+                return pl.DataFrame({cc: [float(arr[i])]
+                                     for i, cc in enumerate(cols)})
+            self.bhat = _df1(_b)
+            self.fixef = self.bhat
+            if hasattr(self, "se_bhat"):
+                self.se_bhat = _df1(_se)
+            if hasattr(self, "t_values"):
+                self.t_values = _df1(_b / _se)
+            if hasattr(self, "z_values"):
+                self.z_values = _df1(_b / _se)
+            if hasattr(self, "vcov_beta"):
+                self.vcov_beta = pl.DataFrame(
+                    {cc: self._vcov_beta_arr[:, i] for i, cc in enumerate(cols)})
 
     def _fit_from_components(self, inputs: _FitInputs) -> None:
         """Fit the model given pre-assembled design pieces.
@@ -4495,6 +4826,16 @@ class gmm:
         ]
         self._theta_bounds = bounds
 
+        # 8.9 — devFunOnly: hand back the lmer profiled-deviance closure over θ.
+        if inputs.dev_fun_only:
+            tnames = [f"theta{i + 1}" for i in range(len(re.theta))]
+            lb = np.array([b[0] if b[0] is not None else -np.inf for b in bounds])
+            ub = np.array([b[1] if b[1] is not None else np.inf for b in bounds])
+            fn = self._reml_deviance if inputs.reml else self._ml_deviance
+            self.devfun = _DevFunHandle(fn, tnames, lb, ub)
+            self._dev_fun_only = True
+            return
+
         theta0 = re.theta.astype(float).copy()
         res = minimize(
             lambda th: self._ml_deviance(th) if not REML else self._reml_deviance(th),
@@ -4502,6 +4843,28 @@ class gmm:
             options={"ftol": 1e-12, "gtol": 1e-8, "maxiter": 1000},
         )
         theta_hat = res.x
+
+        # 8.12 / 8.13 — boundary handling on θ (lme4 optimizeLmer:688-740).
+        # restart_edge is a near-no-op for L-BFGS-B (gradient-based) but ported
+        # for parity; check.boundary pins near-zero variance params to 0.
+        _devfun_g = self._reml_deviance if REML else self._ml_deviance
+        _lo = np.array([b[0] if b[0] is not None else -np.inf for b in bounds])
+        _hi = np.array([b[1] if b[1] is not None else np.inf for b in bounds])
+        if inputs.restart_edge:
+            def _refit(p0):
+                r = minimize(_devfun_g, p0, method="L-BFGS-B", bounds=bounds,
+                             options={"ftol": 1e-12, "gtol": 1e-8,
+                                      "maxiter": 1000})
+                return r.x
+            theta_hat = _restart_edge(_devfun_g, theta_hat, _lo, _hi, _refit,
+                                      verbose=inputs.verbose)
+        if inputs.boundary_tol > 0:
+            theta_hat = _check_boundary(_devfun_g, theta_hat,
+                                        _devfun_g(theta_hat), _lo, _hi,
+                                        inputs.boundary_tol)
+        if not np.array_equal(theta_hat, res.x):
+            res.x = theta_hat
+            res.fun = _devfun_g(theta_hat)
         self.theta = theta_hat
         self._optim = res
 
@@ -4777,6 +5140,14 @@ class gmm:
                 pred, resp, nagq=0, tol_pwrss=tol_pwrss,
                 maxit_pwrss=maxit_pwrss, verbose=verbose_pirls,
             )
+            # 8.9 — devFunOnly with nAGQ=0: return the θ-only Stage-0 closure
+            # before optimizing (lme4 lmer.R:151).
+            if inputs.dev_fun_only and not do_stage1:
+                tnames = [f"theta{i + 1}" for i in range(n_theta)]
+                self.devfun = _DevFunHandle(
+                    devfun_stage0, tnames, lb_theta, ub_theta)
+                self._dev_fun_only = True
+                return
             # Stage 0 outer optimizer = optimizer[0]. BOBYQA self-scales via
             # minqa's defaults (rhobeg=min(0.95,0.2·max|par|), rhoend=1e-6·
             # rhobeg, npt=min(n+2,2n), maxfun=10000); Nelder-Mead uses lme4's
@@ -4848,6 +5219,17 @@ class gmm:
                 pred, resp, nagq=nagq_stage1, tol_pwrss=tol_pwrss,
                 maxit_pwrss=maxit_pwrss, verbose=verbose_pirls, **agq_kwargs,
             )
+            # 8.9 — devFunOnly with nAGQ>0: return the [θ, β] Stage-1 closure
+            # (built at the Stage-0 optimum) before optimizing (lme4 lmer.R:175).
+            if inputs.dev_fun_only:
+                tnames = [f"theta{i + 1}" for i in range(n_theta)]
+                bnames = list(inputs.X_df.columns)
+                self.devfun = _DevFunHandle(
+                    devfun_stage1, tnames + bnames,
+                    np.concatenate([lb_theta, lb_beta]),
+                    np.concatenate([ub_theta, ub_beta]))
+                self._dev_fun_only = True
+                return
             start_par = np.concatenate([theta_stage0, beta_start])
             lb_par = np.concatenate([lb_theta, lb_beta])
             ub_par = np.concatenate([ub_theta, ub_beta])
@@ -4868,6 +5250,13 @@ class gmm:
                 xst=xst1, xtol_abs=xt1, nm_kwargs=nm_kwargs,
                 bobyqa_kwargs=bobyqa_kwargs,
             )
+            # 8.13 — check.boundary on the θ block (modular.R:871-872): pin a
+            # near-zero variance param to 0 if it lowers the deviance.
+            if inputs.boundary_tol > 0:
+                theta_beta_x = _check_boundary(
+                    devfun_stage1, theta_beta_x, fval1, lb_par, ub_par,
+                    inputs.boundary_tol, dpars=range(n_theta))
+                fval1 = devfun_stage1(theta_beta_x)
             theta_hat = theta_beta_x[:n_theta].copy()
             beta_hat = theta_beta_x[n_theta:].copy()
             devfun_stage1(theta_beta_x)
@@ -6130,6 +6519,58 @@ class gmm:
         hdr = " ".join(l.rjust(w) for l, w in zip(labels, widths))
         row = " ".join(v.rjust(w) for v, w in zip(vals, widths))
         return ["Scaled residuals:", hdr, row]
+
+    def simulate(self, nsim: int = 1, seed=None, use_u: bool = False):
+        """Simulate ``nsim`` response vectors from the fitted model — port of
+        ``simulate.merMod`` (predict.R:673-938).
+
+        ``use_u=False`` (default; the parametric-bootstrap path) draws fresh
+        random effects ``b ~ N(0, Σ_θ)`` per simulation via the fitted ``Λ``;
+        ``use_u=True`` conditions on the fitted ``b̂``. Each draw then samples
+        from the response family at the simulated mean. Returns a polars
+        DataFrame with columns ``sim_1 … sim_nsim``.
+
+        ``seed`` seeds the **bit-exact** :class:`RMersenneTwister`, and both the
+        draw order (all ``q·nsim`` random-effect normals first, column-major,
+        then the family draws over the column-major-flattened ``(n, nsim)`` mean
+        matrix) and the per-family samplers (``rpois``/``rbinom``/``rgamma``/…)
+        mirror ``simulate.merMod`` draw-for-draw. Given **identical** fitted
+        parameters it reproduces R's ``simulate(model, seed=s)`` exactly; in
+        practice hea's fit differs from lme4's at the ~1e-9 optimiser floor, so
+        continuous draws agree to ~1e-9 and discrete draws can occasionally flip
+        (most visibly when an obs's μ straddles the rpois inversion/PD boundary
+        at μ=10, which switches RNG-consumption and desyncs the stream after it).
+        """
+        rng = _simulate_rng(seed)
+        n, q, nsim = self.n, self.q, int(nsim)
+        fam = self.family
+        is_gaussian = (fam.name == "gaussian")
+        eta_cond = self.fitted if is_gaussian else self.eta
+        # Z·b̂ = Z·Λ·û — the fitted random-effects contribution (link scale).
+        zb_hat = np.asarray(self._Z_sp @ (self.Lambda @ self._u)).ravel()
+        eta_pop = eta_cond - zb_hat
+
+        # (1) Random-effects normals — q·nsim drawn first (lme4 cluster.rand),
+        # packed column-major into (q, nsim); skipped when conditioning on û.
+        if use_u:
+            eta_mat = np.repeat(eta_cond[:, None], nsim, axis=1)
+        else:
+            u_all = np.asarray(rng.rnorm(q * nsim)).reshape((nsim, q)).T
+            reff = np.asarray(self._Z_sp @ (self.Lambda @ u_all))
+            eta_mat = eta_pop[:, None] + reff
+
+        # (2) Response draws over the column-major-flattened (n, nsim) means.
+        if is_gaussian:
+            resid = np.asarray(rng.rnorm(n * nsim)).reshape((nsim, n)).T
+            y_mat = eta_mat + self.sigma * resid
+        else:
+            mu_flat = fam.link.linkinv(eta_mat).ravel(order="F")
+            w = getattr(self, "prior_weights", None)
+            w_flat = None if w is None else np.tile(np.asarray(w, float), nsim)
+            y_flat = _simulate_family_draw(rng, fam, mu_flat, w_flat,
+                                           self.sigma)
+            y_mat = y_flat.reshape((nsim, n)).T
+        return pl.DataFrame({f"sim_{k + 1}": y_mat[:, k] for k in range(nsim)})
 
     def summary(self, digits: int = 4) -> None:
         from scipy.stats import norm

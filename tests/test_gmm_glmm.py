@@ -2021,6 +2021,302 @@ def test_gmm_prefit_checks_pass_for_well_posed_model():
 
 
 # ----------------------------------------------------------------------
+# 8.16 — autoscale + checkScaleX (modular.R:128-158 / 442-453).
+# ----------------------------------------------------------------------
+
+
+def test_gmm_autoscale_matches_unscaled_fit():
+    """autoscale=True is a numerical reparameterization — fitted θ/deviance and
+    the *un-scaled* β̂/SE match the unscaled fit to the optimizer floor."""
+    from hea.models.gmm import gmm
+
+    rng = np.random.default_rng(1)
+    ng, npg = 10, 12
+    g = np.repeat(np.arange(ng), npg)
+    b = rng.normal(0, 0.5, ng)
+    x = rng.normal(500, 200, ng * npg)          # large-scale predictor
+    xc = (x - x.mean()) / x.std()
+    y = rng.poisson(np.exp(0.4 + 0.8 * xc + b[g])).astype(float)
+    df = pl.DataFrame({"y": y, "x": x, "g": g.astype(str)})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m0 = gmm("y ~ x + (1|g)", df, family=Poisson())
+        m1 = gmm("y ~ x + (1|g)", df, family=Poisson(),
+                 control={"autoscale": True})
+    np.testing.assert_allclose(m1.theta, m0.theta, atol=1e-3)
+    np.testing.assert_allclose(m1.deviance, m0.deviance, atol=1e-2)
+    np.testing.assert_allclose(m1._beta, m0._beta, atol=1e-3)
+    np.testing.assert_allclose(m1._se_beta, m0._se_beta, atol=1e-3)
+
+
+def test_gmm_checkscalex_warns_on_disparate_scales():
+    """check.scaleX (default 'warning') flags very differently-scaled X cols."""
+    from hea.models.gmm import gmm
+
+    rng = np.random.default_rng(2)
+    n = 60
+    g = (np.arange(n) % 6).astype(str)
+    df = pl.DataFrame({
+        "y": rng.integers(0, 4, n).astype(float),
+        "x1": rng.normal(0, 1, n),
+        "x2": rng.normal(0, 1e4, n),       # SD ratio ~ 1e4 > tol=1e3
+        "g": g,
+    })
+    with pytest.warns(UserWarning, match="very different scales"):
+        gmm("y ~ x1 + x2 + (1|g)", df, family=Poisson())
+    # 'ignore' suppresses it
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        gmm("y ~ x1 + x2 + (1|g)", df, family=Poisson(),
+            control={"check.scaleX": "ignore"})
+
+
+# ----------------------------------------------------------------------
+# Phase 12 — glmer.nb (negative binomial + θ estimation, nbinom.R:96).
+# Reference: lme4::glmer.nb(y ~ x + (1|g)) on the committed synthetic NB data
+# (R seed 42, rnbinom size=2). getME(m,"glmer.nb.theta") / theta / fixef /
+# -2logLik / AIC.
+# ----------------------------------------------------------------------
+
+_NB_REF = dict(nb_theta=1.8720849154, cov_theta=0.8048198320,
+               beta=[0.7458609323, 0.8719223520],
+               m2logL=1248.88099643, AIC=1256.88099643, npar=4)
+
+
+def _nb_frame():
+    return pl.read_csv("datasets/synthetic/seed_synth_nb_count.csv").with_columns(
+        pl.col("g").cast(pl.String))
+
+
+def test_glmer_nb_matches_lme4():
+    """glmer_nb estimates the NB dispersion θ + (cov θ, β) matching lme4's
+    glmer.nb; -2logL/AIC carry the extra θ parameter (npar=4)."""
+    from hea.models.gmm import glmer_nb
+
+    m = glmer_nb("y ~ x + (1|g)", _nb_frame())
+    np.testing.assert_allclose(m._nb_theta, _NB_REF["nb_theta"], atol=1e-2, rtol=1e-2)
+    np.testing.assert_allclose(m.theta, [_NB_REF["cov_theta"]], atol=1e-2, rtol=1e-2)
+    np.testing.assert_allclose(m._beta, _NB_REF["beta"], atol=1e-2, rtol=1e-2)
+    np.testing.assert_allclose(m.deviance_laplace, _NB_REF["m2logL"], atol=2e-2)
+    np.testing.assert_allclose(m.AIC, _NB_REF["AIC"], atol=2e-2)
+    assert m.npar == _NB_REF["npar"]
+
+
+def test_gmm_free_theta_nb_delegates_to_glmer_nb():
+    """gmm(family=nb()) with free θ runs the θ-estimation loop (== glmer_nb)."""
+    from hea.models.gmm import gmm, glmer_nb
+    from hea.family import nb
+
+    df = _nb_frame()
+    m_gmm = gmm("y ~ x + (1|g)", df, family=nb())
+    m_fn = glmer_nb("y ~ x + (1|g)", df)
+    assert hasattr(m_gmm, "_nb_theta")
+    np.testing.assert_allclose(m_gmm._nb_theta, m_fn._nb_theta, atol=1e-6, rtol=1e-6)
+    np.testing.assert_allclose(m_gmm._beta, m_fn._beta, atol=1e-9, rtol=1e-9)
+
+
+def test_gmm_fixed_theta_nb_skips_loop():
+    """nb(theta=Θ) (fixed dispersion) fits directly — no θ-estimation loop."""
+    from hea.models.gmm import gmm
+    from hea.family import nb
+
+    m = gmm("y ~ x + (1|g)", _nb_frame(), family=nb(theta=2.0))
+    assert not hasattr(m, "_nb_theta")          # loop not triggered
+    assert m.theta.shape == (1,)
+
+
+# ----------------------------------------------------------------------
+# Phase 10 — simulate.merMod (predict.R:673-938). numpy RNG; distributions
+# (not R's byte-exact stream) — what the parametric bootstrap needs.
+# ----------------------------------------------------------------------
+
+
+def _sim_poisson_model(seed=0):
+    from hea.models.gmm import gmm
+
+    rng = np.random.default_rng(seed)
+    ng, npg = 12, 12
+    g = np.repeat(np.arange(ng), npg)
+    b = rng.normal(0, 0.6, ng)
+    x = rng.normal(size=ng * npg)
+    y = rng.poisson(np.exp(0.4 + 0.7 * x + b[g])).astype(float)
+    df = pl.DataFrame({"y": y, "x": x, "g": g.astype(str)})
+    return gmm("y ~ x + (1|g)", df, family=Poisson()), df
+
+
+def test_gmm_simulate_shape_seed_and_refit():
+    """simulate → (n × nsim), seed-reproducible, and the draws refit cleanly."""
+    from hea.models.gmm import gmm
+
+    m, df = _sim_poisson_model()
+    s = m.simulate(nsim=5, seed=1)
+    assert s.shape == (m.n, 5)
+    assert s.equals(m.simulate(nsim=5, seed=1))          # reproducible
+    df2 = df.with_columns(pl.Series("y", s["sim_1"]))
+    m2 = gmm("y ~ x + (1|g)", df2, family=Poisson())     # bootMer building block
+    assert np.isfinite(m2.theta[0]) and m2._beta.shape == (2,)
+
+
+def test_gmm_simulate_conditional_mean_tracks_fitted():
+    """use_u=True draws scatter around the fitted μ (conditional simulation)."""
+    m, _ = _sim_poisson_model()
+    sims = m.simulate(nsim=400, seed=2, use_u=True).to_numpy()
+    assert np.corrcoef(sims.mean(axis=1), m.fitted_values)[0, 1] > 0.99
+
+
+def test_gmm_simulate_binomial_bernoulli_and_gaussian_sd():
+    from hea.models.gmm import gmm
+
+    rng = np.random.default_rng(3)
+    ng, npg = 12, 12
+    g = np.repeat(np.arange(ng), npg)
+    b = rng.normal(0, 0.6, ng)
+    x = rng.normal(size=ng * npg)
+    p = 1 / (1 + np.exp(-(0.2 + 0.6 * x + b[g])))
+    yb = (rng.uniform(size=ng * npg) < p).astype(float)
+    mb = gmm("y ~ x + (1|g)",
+             pl.DataFrame({"y": yb, "x": x, "g": g.astype(str)}),
+             family=Binomial())
+    sb = mb.simulate(nsim=3, seed=4).to_numpy()
+    assert set(np.unique(sb)).issubset({0.0, 1.0})       # Bernoulli draws
+
+    yg = 0.4 + 0.7 * x + b[g] + rng.normal(0, 0.5, ng * npg)
+    mg = gmm("y ~ x + (1|g)", pl.DataFrame({"y": yg, "x": x, "g": g.astype(str)}))
+    sg = mg.simulate(nsim=150, seed=5, use_u=True).to_numpy()
+    # residual SD of conditional draws ≈ σ̂
+    np.testing.assert_allclose((sg - mg.fitted[:, None]).std(), mg.sigma,
+                               rtol=0.1)
+
+
+def test_gmm_simulate_negative_binomial_counts():
+    """NB simulate yields non-negative integer counts."""
+    from hea.models.gmm import glmer_nb
+
+    m = glmer_nb("y ~ x + (1|g)", _nb_frame())
+    s = m.simulate(nsim=3, seed=6).to_numpy()
+    assert np.all(s >= 0) and np.all(s == np.round(s))
+
+
+# ----------------------------------------------------------------------
+# 8.12 / 8.13 — restart_edge + check.boundary (modular.R:688-740 / 879-907).
+# ----------------------------------------------------------------------
+
+
+def test_check_boundary_pins_near_zero_when_improving():
+    """check.boundary pins a near-bound param to the bound iff it lowers dev."""
+    from hea.models.gmm import _check_boundary
+
+    lower, upper = np.array([0.0]), np.array([np.inf])
+    devfun = lambda p: float(p[0] ** 2 + 1.0)            # minimised at 0
+    out = _check_boundary(devfun, np.array([1e-7]), devfun(np.array([1e-7])),
+                          lower, upper, 1e-5)
+    assert out[0] == 0.0                                  # pinned to the bound
+    # not pinned when the interior point is strictly better
+    devfun2 = lambda p: float((p[0] - 1e-7) ** 2)
+    out2 = _check_boundary(devfun2, np.array([1e-7]), 0.0, lower, upper, 1e-5)
+    assert out2[0] == 1e-7
+
+
+def test_restart_edge_restarts_only_on_negative_inward_gradient():
+    """restart_edge restarts the optimizer when the inward gradient at a bound
+    is negative; otherwise it leaves θ alone."""
+    from hea.models.gmm import _restart_edge
+
+    lower, upper = np.array([0.0]), np.array([np.inf])
+    # decreasing in θ at the lower bound → inward gradient < 0 → restart
+    called = []
+
+    def refit(p0):
+        called.append(np.asarray(p0)); return np.array([2.0])
+    out = _restart_edge(lambda p: float(-p[0] + 1), np.array([0.0]),
+                        lower, upper, refit)
+    assert called and out[0] == 2.0
+    # interior point → no restart
+    out2 = _restart_edge(lambda p: float((p[0] - 1) ** 2), np.array([1.0]),
+                         lower, upper, lambda p: np.array([99.0]))
+    assert out2[0] == 1.0
+
+
+def test_gmm_restart_edge_rejected_for_glmer():
+    """restart_edge=True is unsupported for glmer (matches lme4 modular.R:869)."""
+    from hea.models.gmm import gmm
+    from hea.family import Poisson
+
+    df = _poisson_re_df()
+    with pytest.raises(NotImplementedError, match="restart_edge"):
+        gmm("y ~ x + (1|g)", df, family=Poisson(),
+            control={"restart_edge": True})
+    # default (off) fits fine
+    m = gmm("y ~ x + (1|g)", df, family=Poisson())
+    assert m.theta.shape == (1,)
+
+
+# ----------------------------------------------------------------------
+# 8.9 — devFunOnly=True returns a callable _DevFunHandle (lmer.R:46/151/175).
+# ----------------------------------------------------------------------
+
+
+def _poisson_re_df(seed=0):
+    rng = np.random.default_rng(seed)
+    ng, npg = 8, 10
+    g = np.repeat(np.arange(ng), npg)
+    b = rng.normal(0, 0.6, ng)
+    x = rng.normal(size=ng * npg)
+    y = rng.poisson(np.exp(0.3 + 0.5 * x + b[g])).astype(float)
+    return pl.DataFrame({"y": y, "x": x, "g": g.astype(str)})
+
+
+def test_gmm_devfunonly_glmer_stage1_handle():
+    """glmer(devFunOnly=True): a callable [θ, β] handle reproducing the Laplace
+    deviance at the fitted optimum."""
+    from hea.models.gmm import gmm, _DevFunHandle
+    from hea.family import Poisson
+
+    df = _poisson_re_df()
+    m = gmm("y ~ x + (1|g)", df, family=Poisson(), nAGQ=1)
+    h = gmm("y ~ x + (1|g)", df, family=Poisson(), nAGQ=1, devFunOnly=True)
+    assert isinstance(h.devfun, _DevFunHandle)
+    assert h.devfun.par_names == ["theta1", "(Intercept)", "x"]
+    assert h.devfun.lower.shape == (3,) and h.devfun.upper.shape == (3,)
+    assert h.devfun.lower[0] == 0.0                 # θ variance bound ≥ 0
+    assert np.isinf(h.devfun.lower[1])              # β unbounded
+    par = np.concatenate([m.theta, m._beta])
+    np.testing.assert_allclose(h.devfun(par), m.deviance_laplace,
+                               atol=1e-9, rtol=1e-9)
+
+
+def test_gmm_devfunonly_glmer_nagq0_theta_only():
+    """nAGQ=0 → θ-only Stage-0 closure (lmer.R:151)."""
+    from hea.models.gmm import gmm
+
+    df = _poisson_re_df()
+    m = gmm("y ~ x + (1|g)", df, family=Poisson(), nAGQ=0)
+    h = gmm("y ~ x + (1|g)", df, family=Poisson(), nAGQ=0, devFunOnly=True)
+    assert h.devfun.par_names == ["theta1"]
+    np.testing.assert_allclose(h.devfun(m.theta), m.deviance_laplace,
+                               atol=1e-9, rtol=1e-9)
+
+
+def test_gmm_devfunonly_lmer_profiled_deviance():
+    """lmer(devFunOnly=True) → the profiled REML deviance closure over θ."""
+    from hea.models.gmm import gmm
+
+    rng = np.random.default_rng(1)
+    ng, npg = 8, 10
+    g = np.repeat(np.arange(ng), npg)
+    b = rng.normal(0, 0.6, ng)
+    x = rng.normal(size=ng * npg)
+    y = 0.3 + 0.5 * x + b[g] + rng.normal(0, 0.4, ng * npg)
+    df = pl.DataFrame({"y": y, "x": x, "g": g.astype(str)})
+    m = gmm("y ~ x + (1|g)", df)
+    h = gmm("y ~ x + (1|g)", df, devFunOnly=True)
+    assert h.devfun.par_names == ["theta1"]
+    assert h.devfun.lower[0] == 0.0
+    np.testing.assert_allclose(h.devfun(m.theta), m._optim.fun,
+                               atol=1e-9, rtol=1e-9)
+
+
+# ----------------------------------------------------------------------
 # 8.6 — control= dict normalization
 # ----------------------------------------------------------------------
 
@@ -2200,14 +2496,17 @@ def test_glmer_calc_derivs_null_resolves_to_smart_rule():
 # ----------------------------------------------------------------------
 
 
-def test_gmm_devFunOnly_raises_until_handle_lands():
-    """``devFunOnly=True`` errors with a clear message until handle ports."""
-    from hea.models.gmm import gmm
+def test_gmm_devFunOnly_returns_callable_handle():
+    """``devFunOnly=True`` returns an unfitted instance carrying a callable
+    ``_DevFunHandle`` (8.9) — no longer raises."""
+    from hea.models.gmm import gmm, _DevFunHandle
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
-    with pytest.raises(NotImplementedError, match="devFunOnly"):
-        gmm("y ~ x + (1|g)", df, family=Poisson(), devFunOnly=True)
+    h = gmm("y ~ x + (1|g)", df, family=Poisson(), devFunOnly=True)
+    assert isinstance(h.devfun, _DevFunHandle)
+    val = h.devfun(np.concatenate([np.array([0.5]), np.zeros(2)]))
+    assert np.isfinite(val)
 
 
 # ----------------------------------------------------------------------

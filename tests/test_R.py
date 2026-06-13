@@ -785,6 +785,40 @@ def test_rnorm_size_and_params():
     assert abs(np.std(out, ddof=1) - 2) < 0.5
 
 
+def test_rmersenne_family_samplers_match_r():
+    """``RMersenneTwister``'s nmath samplers (exp_rand / rgamma / rpois /
+    rbinom / rnbinom) are bit-exact vs R's ``set.seed(); r*()`` — the basis for
+    byte-exact ``simulate.merMod`` / ``bootMer``. References from R 4.x."""
+    from hea.R.rng import RMersenneTwister as MT
+
+    def f(seed, fn, k):
+        r = MT(seed)
+        return [fn(r) for _ in range(k)]
+
+    np.testing.assert_allclose(
+        f(1, lambda r: r.exp_rand(), 5),
+        [0.755181833128345, 1.181642779107106, 0.145706726703793,
+         0.139795261868498, 0.436068625779175], rtol=1e-12)
+    np.testing.assert_allclose(
+        f(2, lambda r: r.rgamma(3, 2), 5),
+        [2.56593501810152, 2.42084845343624, 2.06431284019708,
+         5.40513641980691, 3.00717049677133], rtol=1e-10)
+    np.testing.assert_allclose(
+        f(3, lambda r: r.rgamma(0.4), 5),
+        [0.01631525060736624, 0.12958103428420428, 0.00772927389486502,
+         0.00584445661994953, 1.22420510697687734], rtol=1e-9)
+    assert [int(x) for x in f(4, lambda r: r.rpois(3.0), 8)] == \
+        [3, 0, 2, 2, 4, 2, 4, 5]
+    assert [int(x) for x in f(5, lambda r: r.rpois(25.0), 8)] == \
+        [20, 22, 25, 33, 21, 25, 20, 25]
+    assert [int(x) for x in f(6, lambda r: r.rbinom(10, 0.3), 8)] == \
+        [3, 5, 2, 2, 4, 6, 6, 4]
+    assert [int(x) for x in f(7, lambda r: r.rbinom(200, 0.4), 8)] == \
+        [82, 76, 76, 78, 81, 85, 90, 70]
+    assert [int(x) for x in f(8, lambda r: r.rnbinom(2, 5), 8)] == \
+        [4, 5, 6, 0, 8, 2, 5, 13]
+
+
 # ---------------------------------------------------------------------------
 # Model generics
 # ---------------------------------------------------------------------------

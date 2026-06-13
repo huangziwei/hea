@@ -34,6 +34,8 @@ hea.models.bam).
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from scipy.special import ndtri
 
@@ -204,3 +206,329 @@ class RMersenneTwister:
         """R's ``sample(x)`` — a full permutation of ``x``."""
         x = np.asarray(x)
         return x[self.sample_int(len(x), len(x))]
+
+    # ------------------------------------------------------------------
+    # Family samplers — ports of R's nmath ``r*`` on this bit-exact stream
+    # (sexp.c / rpois.c / rbinom.c / rgamma.c). Used by simulate.merMod.
+    # ------------------------------------------------------------------
+
+    # cumulative ln(2)^k / k! — R sexp.c
+    _EXP_Q = (
+        0.6931471805599453, 0.9333736875190459, 0.9888777961838675,
+        0.9984959252914960040, 0.9998292811061389, 0.9999833164100727,
+        0.9999985691438767, 0.9999998906925558, 0.9999999924734159,
+        0.9999999995283275, 0.9999999999728814, 0.9999999999985598,
+        0.9999999999999289, 0.9999999999999968, 0.9999999999999999,
+        1.0000000000000000,
+    )
+
+    def exp_rand(self) -> float:
+        """R's ``exp_rand`` (standard exponential) — sexp.c (Ahrens-Dieter)."""
+        q = self._EXP_Q
+        a = 0.0
+        u = self.unif_rand()
+        while u <= 0.0 or u >= 1.0:
+            u = self.unif_rand()
+        while True:
+            u += u
+            if u > 1.0:
+                break
+            a += q[0]
+        u -= 1.0
+        if u <= q[0]:
+            return a + u
+        i = 0
+        ustar = self.unif_rand()
+        umin = ustar
+        while True:
+            ustar = self.unif_rand()
+            if umin > ustar:
+                umin = ustar
+            i += 1
+            if u <= q[i]:
+                break
+        return a + umin * q[0]
+
+    def rpois(self, mu: float) -> float:
+        """R's ``rpois(mu)`` — rpois.c. Inversion for ``mu < 10`` (one uniform
+        per draw, CDF walk), transformed rejection (PTRS) for ``mu >= 10``."""
+        if mu <= 0.0:
+            return 0.0
+        if mu < 10.0:                      # inversion (consumes 1 uniform)
+            u = self.unif_rand()
+            p = q = p0 = math.exp(-mu)
+            if u <= p0:
+                return 0.0
+            k = 0
+            while k < 35:
+                k += 1
+                p *= mu / k
+                q += p
+                if u <= q:
+                    return float(k)
+            # tail: keep walking (rare)
+            while True:
+                k += 1
+                p *= mu / k
+                q += p
+                if u <= q or p == 0.0:
+                    return float(k)
+        # big mu (>= 10): Ahrens-Dieter (1982) "PD" algorithm — R rpois.c.
+        M_1_SQRT_2PI = 0.398942280401432677939946059934
+        a0, a1, a2, a3 = -0.5, 0.3333333, -0.2500068, 0.2000118
+        a4, a5, a6, a7 = -0.1661269, 0.1421878, -0.1384794, 0.1250060
+        fact = (1., 1., 2., 6., 24., 120., 720., 5040., 40320., 362880.)
+        one_7, one_12, one_24 = (0.1428571428571428571,
+                                 0.0833333333333333333, 0.0416666666666666667)
+        s = math.sqrt(mu)
+        d = 6.0 * mu * mu
+        big_l = math.floor(mu - 1.1484)
+        omega = M_1_SQRT_2PI / s
+        b1 = one_24 / mu
+        b2 = 0.3 * b1 * b1
+        c3 = one_7 * b1 * b2
+        c2 = b2 - 15.0 * c3
+        c1 = b1 - 6.0 * b2 + 45.0 * c3
+        c0 = 1.0 - b1 + 3.0 * b2 - 15.0 * c3
+        c = 0.1069 / mu
+
+        def step_f(pois, fk, difmuk):
+            if pois < 10:
+                px = -mu
+                py = mu ** pois / fact[int(pois)]
+            else:
+                del_ = one_12 / fk
+                del_ = del_ * (1.0 - 4.8 * del_ * del_)
+                v = difmuk / fk
+                if abs(v) <= 0.25:
+                    px = fk * v * v * (((((((a7 * v + a6) * v + a5) * v + a4) * v
+                          + a3) * v + a2) * v + a1) * v + a0) - del_
+                else:
+                    px = fk * math.log(1.0 + v) - difmuk - del_
+                py = M_1_SQRT_2PI / math.sqrt(fk)
+            x = (0.5 - difmuk) / s
+            xx = x * x
+            fx = -0.5 * xx
+            fy = omega * (((c3 * xx + c2) * xx + c1) * xx + c0)
+            return px, py, fx, fy
+
+        # Step N — normal candidate (immediate / squeeze acceptance)
+        g = mu + s * self.norm_rand()
+        if g >= 0.0:
+            pois = math.floor(g)
+            if pois >= big_l:
+                return float(pois)
+            fk = float(pois)
+            difmuk = mu - fk
+            u = self.unif_rand()
+            if d * u >= difmuk * difmuk * difmuk:
+                return float(pois)
+            px, py, fx, fy = step_f(pois, fk, difmuk)
+            if fy - u * fy <= py * math.exp(px - fx):
+                return float(pois)
+        # Step E — exponential candidates
+        while True:
+            e = self.exp_rand()
+            u = 2.0 * self.unif_rand() - 1.0
+            t = 1.8 + math.copysign(e, u)
+            if t <= -0.6744:
+                continue
+            pois = math.floor(mu + s * t)
+            fk = float(pois)
+            difmuk = mu - fk
+            px, py, fx, fy = step_f(pois, fk, difmuk)
+            if c * abs(u) <= py * math.exp(px + e) - fy * math.exp(fx + e):
+                return float(pois)
+
+    def rbinom(self, size: int, prob: float) -> float:
+        """R's ``rbinom(size, prob)`` — rbinom.c. Inversion for small
+        ``size·min(p,1-p)``, BTPE rejection otherwise."""
+        n = int(round(size))
+        if n == 0 or prob <= 0.0:
+            return 0.0
+        if prob >= 1.0:
+            return float(n)
+        p = min(prob, 1.0 - prob)
+        q = 1.0 - p
+        np_ = n * p
+        if np_ < 30.0:                     # inversion (BINV)
+            qn = q ** n
+            r = p / q
+            g = r * (n + 1)
+            while True:
+                ix = 0
+                f = qn
+                u = self.unif_rand()
+                while True:
+                    if u < f:
+                        return float(ix if prob <= 0.5 else n - ix)
+                    if ix > 110:
+                        break
+                    u -= f
+                    ix += 1
+                    f *= (g / ix - r)
+        # BTPE (Kachitvichyanukul & Schmeiser)
+        ffm = np_ + p
+        m = int(ffm)
+        fm = m
+        npq = np_ * q
+        p1 = math.floor(2.195 * math.sqrt(npq) - 4.6 * q) + 0.5
+        xm = fm + 0.5
+        xl = xm - p1
+        xr = xm + p1
+        c = 0.134 + 20.5 / (15.3 + fm)
+        al = (ffm - xl) / (ffm - xl * p)
+        xll = al * (1.0 + 0.5 * al)
+        al = (xr - ffm) / (xr * q)
+        xlr = al * (1.0 + 0.5 * al)
+        p2 = p1 * (1.0 + c + c)
+        p3 = p2 + c / xll
+        p4 = p3 + c / xlr
+        while True:
+            u = self.unif_rand() * p4
+            v = self.unif_rand()
+            if u <= p1:
+                ix = int(xm - p1 * v + u)
+                return float(ix if prob <= 0.5 else n - ix)
+            if u <= p2:
+                x = xl + (u - p1) / c
+                v = v * c + 1.0 - abs(xm - x) / p1
+                if v > 1.0 or v <= 0.0:
+                    continue
+                ix = int(x)
+            elif u <= p3:
+                ix = int(xl + math.log(v) / xll)
+                if ix < 0:
+                    continue
+                v = v * (u - p2) * xll
+            else:
+                ix = int(xr - math.log(v) / xlr)
+                if ix > n:
+                    continue
+                v = v * (u - p3) * xlr
+            k = abs(ix - m)
+            if k <= 20 or k >= npq / 2 - 1:
+                f = 1.0
+                r = p / q
+                g = (n + 1) * r
+                if m < ix:
+                    for i in range(m + 1, ix + 1):
+                        f *= (g / i - r)
+                elif m > ix:
+                    for i in range(ix + 1, m + 1):
+                        f /= (g / i - r)
+                if v <= f:
+                    return float(ix if prob <= 0.5 else n - ix)
+                continue
+            amaxp = (k / npq) * ((k * (k / 3.0 + 0.625) + 0.1666666666666) / npq + 0.5)
+            ynorm = -k * k / (2.0 * npq)
+            alv = math.log(v)
+            if alv < ynorm - amaxp:
+                return float(ix if prob <= 0.5 else n - ix)
+            if alv > ynorm + amaxp:
+                continue
+            x1 = ix + 1
+            f1 = fm + 1.0
+            z = n + 1 - fm
+            w = n - ix + 1.0
+            z2 = z * z
+            x2 = x1 * x1
+            f2 = f1 * f1
+            w2 = w * w
+            t = (xm * math.log(f1 / x1) + (n - m + 0.5) * math.log(z / w)
+                 + (ix - m) * math.log(w * p / (x1 * q))
+                 + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / f2) / f2) / f2) / f2) / f1 / 166320.0
+                 + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / z2) / z2) / z2) / z2) / z / 166320.0
+                 + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / x2) / x2) / x2) / x2) / x1 / 166320.0
+                 + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / w2) / w2) / w2) / w2) / w / 166320.0)
+            if alv <= t:
+                return float(ix if prob <= 0.5 else n - ix)
+
+    # rgamma coefficients (R rgamma.c)
+    _GA_Q = (0.04166669, 0.02083148, 0.00801191, 0.00144121,
+             -7.388e-5, 2.4511e-4, 2.424e-4)
+    _GA_A = (0.3333333, -0.250003, 0.2000062, -0.1662921,
+             0.1423657, -0.1367177, 0.1233795)
+
+    def rgamma(self, shape: float, scale: float = 1.0) -> float:
+        """R's ``rgamma(shape, scale=)`` — rgamma.c (GD for a>=1, GS for a<1)."""
+        a = float(shape)
+        if a < 1.0:                        # GS algorithm
+            if a == 0.0:
+                return 0.0
+            e1 = 0.36787944117144232159    # exp(-1)
+            e = 1.0 + e1 * a
+            while True:
+                p = e * self.unif_rand()
+                if p >= 1.0:
+                    x = -math.log((e - p) / a)
+                    if self.exp_rand() >= (1.0 - a) * math.log(x):
+                        break
+                else:
+                    x = math.exp(math.log(p) / a)
+                    if self.exp_rand() >= x:
+                        break
+            return scale * x
+        # GD algorithm (a >= 1)
+        sqrt32 = 5.656854
+        s2 = a - 0.5
+        s = math.sqrt(s2)
+        d = sqrt32 - 12.0 * s
+        t = self.norm_rand()
+        x = s + 0.5 * t
+        ret = x * x
+        if t >= 0.0:
+            return scale * ret
+        u = self.unif_rand()
+        if d * u <= t * t * t:
+            return scale * ret
+        r = 1.0 / a
+        q = self._GA_Q
+        q0 = ((((((q[6] * r + q[5]) * r + q[4]) * r + q[3]) * r + q[2]) * r
+               + q[1]) * r + q[0]) * r
+        if a <= 3.686:
+            b = 0.463 + s + 0.178 * s2
+            si = 1.235
+            c = 0.195 / s - 0.079 + 0.16 * s
+        elif a <= 13.022:
+            b = 1.654 + 0.0076 * s2
+            si = 1.68 / s + 0.275
+            c = 0.062 / s + 0.024
+        else:
+            b = 1.77
+            si = 0.75
+            c = 0.1515 / s
+        aa = self._GA_A
+        if x > 0.0:
+            v = t / (s + s)
+            if abs(v) <= 0.25:
+                qq = q0 + 0.5 * t * t * ((((((aa[6] * v + aa[5]) * v + aa[4]) * v
+                     + aa[3]) * v + aa[2]) * v + aa[1]) * v + aa[0]) * v
+            else:
+                qq = q0 - s * t + 0.25 * t * t + (s2 + s2) * math.log(1.0 + v)
+            if math.log(1.0 - u) <= qq:
+                return scale * ret
+        while True:
+            e = self.exp_rand()
+            u = 2.0 * self.unif_rand() - 1.0
+            t = b + math.copysign(si * e, u)
+            if t >= -0.71874483771719:
+                v = t / (s + s)
+                if abs(v) <= 0.25:
+                    qq = q0 + 0.5 * t * t * ((((((aa[6] * v + aa[5]) * v + aa[4]) * v
+                         + aa[3]) * v + aa[2]) * v + aa[1]) * v + aa[0]) * v
+                else:
+                    qq = q0 - s * t + 0.25 * t * t + (s2 + s2) * math.log(1.0 + v)
+                if qq > 0.0:
+                    w = math.expm1(qq)
+                    if c * abs(u) <= w * math.exp(e - 0.5 * t * t):
+                        break
+        x = s + 0.5 * t
+        return scale * x * x
+
+    def rnbinom(self, size: float, mu: float) -> float:
+        """R's ``rnbinom(size, mu=)`` — a Poisson-Gamma mixture
+        ``rpois(rgamma(size, scale=mu/size))`` (rnbinom.c)."""
+        if mu <= 0.0:
+            return 0.0
+        return self.rpois(self.rgamma(size, scale=mu / size))
