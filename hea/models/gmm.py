@@ -300,6 +300,14 @@ class _FitInputs:
     line from minqa / lme4's ``optimizer.cpp``). lme4's glmer default is
     ``c("bobyqa", "Nelder_Mead")``."""
 
+    check_conv_grad: Optional[dict] = None
+    """``glmerControl(check.conv.grad=)`` — ``{action, tol, relTol}`` for the
+    post-fit scaled-gradient convergence diagnostic (8.14)."""
+
+    check_conv_hess: Optional[dict] = None
+    """``glmerControl(check.conv.hess=)`` — ``{action, tol}`` for the post-fit
+    Hessian definiteness / conditioning diagnostic (8.14)."""
+
     # Diagnostic carries ------------------------------------------------
     # These follow the data through the fit so the resulting ``gmm`` instance
     # can produce diagnostics, predict on new data, and round-trip formulas.
@@ -3653,6 +3661,99 @@ def _bobyqa_kwargs_from_opt_ctrl(opt_ctrl) -> dict:
     return out
 
 
+def _check_hess(H_sub, tol, hesstype=""):
+    """Port of lme4's ``checkHess`` (checkConv.R:151-202). Eigenvalue-based
+    Hessian diagnostics. Returns ``(messages, code)``."""
+    try:
+        evd = np.linalg.eigvalsh(H_sub)
+    except np.linalg.LinAlgError:
+        return (["Problem with Hessian check (infinite or missing values?)"], -6)
+    neg = int(np.sum(evd < -tol))
+    if neg:
+        t = f" {hesstype}" if hesstype else ""
+        return ([f"Model failed to converge: degenerate{t} Hessian with "
+                 f"{neg} negative eigenvalues"], -3)
+    chol_fail = False
+    try:
+        np.linalg.cholesky(H_sub)
+    except np.linalg.LinAlgError:
+        chol_fail = True
+    if int(np.sum(np.abs(evd) < tol)) or chol_fail:
+        t = f"{hesstype} " if hesstype else ""
+        return ([f"{t}Hessian is numerically singular: parameters are not "
+                 f"uniquely determined"], -4)
+    msgs: list[str] = []
+    code = 0
+    if evd.max() * tol > 1:
+        code = 2
+        msgs.append("Model is nearly unidentifiable: very large eigenvalue\n"
+                    " - Rescale variables?")
+    if (evd.min() / evd.max()) < tol:
+        code = 3
+        msgs.append("Model is nearly unidentifiable: large eigenvalue ratio\n"
+                    " - Rescale variables?")
+    return (msgs, code)
+
+
+def _checkconv_grad_hess(grad, hess, *, n_theta, grad_cfg, hess_cfg):
+    """Port of lme4's ``checkConv`` gradient + Hessian blocks (checkConv.R:
+    60-144). Run only for a non-singular fit with numerical derivatives
+    available. Returns ``(messages, code)``.
+
+    Gradient: ``scgrad = chol(H)⁻¹·g`` (R's ``solve(chol(H), g)``); flags when
+    ``max(pmin(|scgrad|, |g|)) > tol`` — the parallel-minimum rule means a
+    component is bad only if BOTH its scaled and raw gradient are large (flat
+    curvature can blow up the scaled gradient alone). Hessian: per
+    :func:`_check_hess`, β-block first (GLMM) then the full matrix.
+    """
+    messages: list[str] = []
+    code = 0
+    grad = np.asarray(grad, dtype=float).ravel()
+    H = np.asarray(hess, dtype=float)
+    if np.isnan(grad).any():
+        return (["Gradient contains NAs"], -5)
+
+    grad_action = (grad_cfg or {}).get("action", "warning")
+    if grad_action != "ignore":
+        grad_tol = float((grad_cfg or {}).get("tol", 2e-3))
+        try:
+            # R's chol(H) is the upper U with H = UᵀU; numpy's is the lower L
+            # with H = LLᵀ, so U = Lᵀ and solve(U, g) = solve(Lᵀ, g).
+            L = np.linalg.cholesky(0.5 * (H + H.T))
+            scgrad = np.linalg.solve(L.T, grad)
+            ok = not np.isnan(scgrad).any()
+        except np.linalg.LinAlgError:
+            ok = False
+        if not ok:
+            messages.append("unable to evaluate scaled gradient")
+            code = -1
+        else:
+            mingrad = np.minimum(np.abs(scgrad), np.abs(grad))
+            maxmingrad = float(mingrad.max())
+            if maxmingrad > grad_tol:
+                comp = int(np.argmax(mingrad)) + 1     # 1-based component
+                code = -1
+                messages.append(
+                    f"Model failed to converge with max|grad| = "
+                    f"{maxmingrad:g} (tol = {grad_tol:g}, component {comp})"
+                )
+
+    hess_action = (hess_cfg or {}).get("action", "warning")
+    if hess_action != "ignore":
+        hess_tol = float((hess_cfg or {}).get("tol", 1e-6))
+        if H.shape[0] > n_theta:                       # GLMM: β-block first
+            mb, cb = _check_hess(H[n_theta:, n_theta:], hess_tol,
+                                 "fixed-effect")
+            if cb != 0:
+                messages.extend(mb)
+                code = cb
+        mh, ch = _check_hess(0.5 * (H + H.T), hess_tol)
+        if ch != 0:
+            messages.extend(mh)
+            code = ch
+    return (messages, code)
+
+
 def _build_optinfo(
     *,
     theta: np.ndarray,
@@ -3661,17 +3762,21 @@ def _build_optinfo(
     optim_stage0: Optional[dict],
     ctrl: Optional[dict],
     optimizer: tuple = ("bobyqa", "Nelder_Mead"),
+    grad=None,
+    hess=None,
+    n_theta: Optional[int] = None,
+    grad_cfg: Optional[dict] = None,
+    hess_cfg: Optional[dict] = None,
 ) -> dict:
     """Port of lme4's ``m@optinfo`` (utilities.R:448) + ``checkConv`` runs.
 
-    Currently fires only the singular-fit check (``check.conv.singular``,
-    checkConv.R:32-48). Gradient and Hessian checks need numerical
-    derivatives of the deviance function and are deferred to 8.14b/c.
-
-    The singular check is unconditional in lme4 (ignored ``action`` is
-    treated as ``message``): when any θ entry sits within ``tol`` of a
-    finite bound, the fit is flagged as boundary/singular. Messages
-    surface in :meth:`gmm.summary`'s convergence block.
+    Fires the singular-fit check unconditionally (``check.conv.singular``,
+    checkConv.R:32-48) and — when not singular and numerical ``grad``/``hess``
+    of the Stage-1 deviance are supplied — the gradient and Hessian
+    convergence diagnostics (8.14, :func:`_checkconv_grad_hess`). lme4 skips
+    the gradient/Hessian checks for a singular fit, and bails entirely when
+    no derivatives are available (``calc.derivs`` off). All messages surface
+    in :meth:`gmm.summary`'s convergence block.
     """
     SINGULAR_TOL = 1e-4
     messages: list[str] = []
@@ -3687,6 +3792,20 @@ def _build_optinfo(
     if is_singular:
         messages.append("boundary (singular) fit: see help('isSingular')")
 
+    derivs = None
+    code = 0
+    if grad is not None and hess is not None:
+        derivs = {"gradient": np.asarray(grad, dtype=float),
+                  "Hessian": np.asarray(hess, dtype=float)}
+        # lme4 runs the gradient/Hessian checks only for a NON-singular fit.
+        if not is_singular:
+            conv_msgs, code = _checkconv_grad_hess(
+                grad, hess,
+                n_theta=n_theta if n_theta is not None else len(theta_arr),
+                grad_cfg=grad_cfg, hess_cfg=hess_cfg,
+            )
+            messages.extend(conv_msgs)
+
     return {
         "optimizer": "+".join(optimizer),
         "control": dict(ctrl) if ctrl else {},
@@ -3696,9 +3815,9 @@ def _build_optinfo(
         "is_singular": is_singular,
         "conv": {
             "opt": int(optim.get("status", 0)),
-            "lme4": {"code": 0, "messages": messages},
+            "lme4": {"code": code, "messages": messages},
         },
-        "derivs": None,
+        "derivs": derivs,
         "warnings": list(messages),
     }
 
@@ -4068,6 +4187,8 @@ class gmm:
             verbose=verbose,
             opt_ctrl=ctrl["optCtrl"],
             optimizer=tuple(ctrl["optimizer"]),
+            check_conv_grad=ctrl["check.conv.grad"],
+            check_conv_hess=ctrl["check.conv.hess"],
             expanded=d.expanded,
             data=d.data,
         )
@@ -4616,12 +4737,18 @@ class gmm:
         # ``calc_derivs=False`` (or Stage 1 unavailable, e.g. nAGQ=0):
         # fall back to the Schur-complement RX, ``Var(β̂) = σ²·RX⁻ᵀ·RX⁻¹``.
         vcov_beta_hess = None
+        # 8.14 — the (θ, β) gradient + Hessian feed both vcov AND the
+        # convergence diagnostics (checkConv); capture both. They stay None
+        # when calc_derivs is off (lme4's checkConv then bails — no checks).
+        deriv_grad = None
+        deriv_hess = None
         if (inputs.calc_derivs and p > 0 and do_stage1
                 and self._devfun_stage1 is not None):
             try:
                 opt_par = np.concatenate([theta_hat, beta_hat])
-                _, H = _deriv12(self._devfun_stage1, opt_par,
-                                fx=self._optim["fval"])
+                deriv_grad, H = _deriv12(self._devfun_stage1, opt_par,
+                                         fx=self._optim["fval"])
+                deriv_hess = H
                 H_inv = np.linalg.solve(H, np.eye(H.shape[0]))
                 # β-block of inv(H); lme4 then adds its transpose for
                 # symmetry (= 2·H_inv[β,β] when H_inv is symmetric).
@@ -4704,10 +4831,11 @@ class gmm:
         self.BIC = laplace + np.log(n) * self.npar
 
         # 8.14 — convergence diagnostics. Port of ``checkConv`` (checkConv.R)
-        # plus ``m@optinfo`` (utilities.R:448). Currently only the singular
-        # check (``check.conv.singular``) fires — gradient/Hessian checks
-        # (``check.conv.grad`` / ``check.conv.hess``) require numerical
-        # derivatives of the deviance function and are deferred.
+        # plus ``m@optinfo`` (utilities.R:448): the singular check
+        # (``check.conv.singular``) plus, when the Stage-1 (θ, β) gradient /
+        # Hessian are available (calc_derivs on), the gradient and Hessian
+        # convergence diagnostics (8.14, ``check.conv.grad`` /
+        # ``check.conv.hess``). lme4 skips the latter for a singular fit.
         self.optinfo = _build_optinfo(
             theta=self.theta,
             theta_bounds=self._theta_bounds,
@@ -4715,6 +4843,11 @@ class gmm:
             optim_stage0=self._optim_stage0,
             ctrl=inputs.opt_ctrl,
             optimizer=inputs.optimizer,
+            grad=deriv_grad,
+            hess=deriv_hess,
+            n_theta=n_theta,
+            grad_cfg=inputs.check_conv_grad,
+            hess_cfg=inputs.check_conv_hess,
         )
 
     def _deviance_residuals_signed(self) -> np.ndarray:

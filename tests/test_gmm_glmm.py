@@ -2276,6 +2276,46 @@ def test_gmm_summary_omits_convergence_block_when_clean(capsys):
     out = capsys.readouterr().out
     assert "boundary" not in out
     assert "isSingular" not in out
+    assert "failed to converge" not in out
+
+
+def test_gmm_checkconv_gradient_diagnostic(capsys):
+    """8.14 — the scaled-gradient convergence check (lme4 checkConv): a clean
+    fit carries no message and attaches its (θ, β) derivatives; a deliberately
+    under-converged fit (loose Nelder-Mead, tiny maxfun) trips "Model failed
+    to converge with max|grad|" and summary() prints it; action="ignore"
+    suppresses the check."""
+    from hea.models.gmm import gmm
+    from hea.family import Poisson
+
+    df = _synthetic_poisson_grouped(seed=2026)
+
+    clean = gmm("y ~ x + (1|g)", df, family=Poisson())
+    assert clean.optinfo["conv"]["lme4"]["code"] == 0
+    assert clean.optinfo["conv"]["lme4"]["messages"] == []
+    # derivatives are attached (calc.derivs resolves on for this small fit).
+    assert clean.optinfo["derivs"] is not None
+    assert clean.optinfo["derivs"]["gradient"].shape == (3,)   # θ + (intercept, x)
+
+    under = gmm("y ~ x + (1|g)", df, family=Poisson(),
+                control={"optimizer": ["Nelder_Mead", "Nelder_Mead"],
+                         "optCtrl": {"XtolRel": 5e-2, "FtolAbs": 5e-2,
+                                     "maxfun": 40}})
+    msgs = under.optinfo["conv"]["lme4"]["messages"]
+    assert any("failed to converge with max|grad|" in m for m in msgs), msgs
+    assert under.optinfo["conv"]["lme4"]["code"] == -1
+    under.summary()
+    assert "failed to converge with max|grad|" in capsys.readouterr().out
+
+    # action="ignore" → the gradient check is skipped even when under-converged.
+    ignored = gmm("y ~ x + (1|g)", df, family=Poisson(),
+                  control={"optimizer": ["Nelder_Mead", "Nelder_Mead"],
+                           "optCtrl": {"XtolRel": 5e-2, "FtolAbs": 5e-2,
+                                       "maxfun": 40},
+                           "check.conv.grad": {"action": "ignore",
+                                               "tol": 2e-3, "relTol": None}})
+    assert not any("max|grad|" in m
+                   for m in ignored.optinfo["conv"]["lme4"]["messages"])
 
 
 def test_lmer_summary_omits_signif_codes_legend(capsys):
