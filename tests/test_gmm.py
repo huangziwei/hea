@@ -993,6 +993,65 @@ def test_fit_contract_is_enforced(sleepstudy_data):
 
 
 # ---------------------------------------------------------------------------
+# vcov() method (gmm-lmer-parity #14) — over the existing _vcov_beta_arr.
+# ---------------------------------------------------------------------------
+
+
+def test_vcov_method_matches_attr_and_se(fm06ML):
+    """#14: vcov() == the vcov_beta attr, its diagonal is se², and
+    correlation=True is unit-diagonal + symmetric."""
+    m = fm06ML
+    V = m.vcov().to_numpy()
+    np.testing.assert_allclose(V, m.vcov_beta.to_numpy(), rtol=0, atol=0)
+    np.testing.assert_allclose(
+        np.sqrt(np.diag(V)), m.se_bhat.to_numpy().ravel(), rtol=0, atol=1e-12)
+    C = m.vcov(correlation=True).to_numpy()
+    np.testing.assert_allclose(np.diag(C), 1.0, atol=1e-12)
+    np.testing.assert_allclose(C, C.T, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# logLik(REML=) toggle (gmm-lmer-parity #19) — one fit yields both criteria,
+# recomputing the other at the fitted θ̂ (lme4 devCrit). lme4 4.x reference.
+# ---------------------------------------------------------------------------
+
+
+def test_loglik_reml_toggle_matches_lme4(sleepstudy_data):
+    """#19: logLik(REML=) recomputes the other criterion at the fitted θ̂ (no
+    refit) — so a single REML fit reports both REML and ML log-likelihoods."""
+    mR = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    np.testing.assert_allclose(mR.logLik(), -871.8141359800, atol=1e-5)
+    np.testing.assert_allclose(mR.logLik(REML=True), -871.8141359800, atol=1e-5)
+    np.testing.assert_allclose(mR.logLik(REML=False), -875.9929332160, atol=1e-5)
+    mM = gmm(_SLEEP_F, sleepstudy_data, REML=False)
+    np.testing.assert_allclose(mM.logLik(), -875.9696722445, atol=1e-5)
+    np.testing.assert_allclose(mM.logLik(REML=False), -875.9696722445, atol=1e-5)
+    np.testing.assert_allclose(mM.logLik(REML=True), -871.8368952841, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# ranef(condVar=) (gmm-lmer-parity #21) — now a method (was a property), over
+# the posterior SDs _ranef() already computes. lme4 4.x postVar reference.
+# ---------------------------------------------------------------------------
+
+
+def test_ranef_condvar_matches_lme4_postvar(sleepstudy_data):
+    """#21: ranef(condVar=True) appends per-level conditional-SD columns
+    (√diag(postVar)) matching lme4's ranef(m, condVar=TRUE); the BLUP columns
+    and the default ranef() are unchanged."""
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    plain = m.ranef()["Subject"]
+    assert "(Intercept) condsd" not in plain.columns        # default: BLUPs only
+    cv = m.ranef(condVar=True)["Subject"]
+    np.testing.assert_allclose(
+        cv["(Intercept) condsd"].to_numpy()[0], 12.0708569506, atol=1e-5)
+    np.testing.assert_allclose(
+        cv["Days condsd"].to_numpy()[0], 2.3048390209, atol=1e-5)
+    np.testing.assert_allclose(
+        cv["(Intercept)"].to_numpy(), plain["(Intercept)"].to_numpy(), atol=0)
+
+
+# ---------------------------------------------------------------------------
 # Ch 4: Building Linear Mixed Models
 # ---------------------------------------------------------------------------
 

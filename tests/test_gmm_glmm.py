@@ -1131,7 +1131,7 @@ def test_glmer_phase6_ranef_match_lme4_poisson():
 
     df = _synthetic_poisson_grouped(seed=2026)
     m = gmm("y ~ x + (1|g)", df, family=PoissonFamily())
-    rf = m.ranef
+    rf = m.ranef()
     # Single bar named ``g`` — match the BLUPs column-by-column.
     assert "g" in rf
     blups_py = rf["g"]["(Intercept)"].to_numpy()

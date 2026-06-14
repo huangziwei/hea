@@ -7571,18 +7571,24 @@ class gmm:
         self._ranef_cache = out
         return out
 
-    @property
-    def ranef(self) -> dict[str, pl.DataFrame]:
-        """BLUPs per random-effect bar — lme4's ``ranef(m)`` shape.
+    def ranef(self, condVar: bool = False) -> dict[str, pl.DataFrame]:
+        """BLUPs per random-effect bar — lme4's ``ranef(m, condVar=)``.
 
         Returns one polars DataFrame per bar (keyed by bar name, e.g.
         ``"Subject"``, or ``"Subject.1"`` when the same grouping factor
         appears twice). First column carries the level labels under the
         grouping factor's name; remaining columns are the BLUPs, one per
         random-effect component (``(Intercept)``, slope names, …).
+
+        ``condVar=True`` appends one conditional-SD column per component,
+        named ``"<component> condsd"`` — the per-level posterior SDs
+        √diag(Var(b̂ᵢ|y)) lme4 attaches as ``postVar`` under
+        ``ranef(condVar=TRUE)``. (lme4 defaults condVar=TRUE; hea defaults
+        False to keep the plain BLUPs frame. The full per-level covariance
+        ``postVar`` array is not exposed — only the SDs.)
         """
         out: dict[str, pl.DataFrame] = {}
-        for key, levels, cnames, b_mat, _se in self._ranef():
+        for key, levels, cnames, b_mat, se in self._ranef():
             gname = key
             if gname not in self.n_groups:
                 base, _, tail = key.rpartition(".")
@@ -7591,8 +7597,46 @@ class gmm:
             cols: dict[str, list] = {gname: list(levels)}
             for j, cn in enumerate(cnames):
                 cols[cn] = b_mat[:, j].tolist()
+            if condVar:
+                for j, cn in enumerate(cnames):
+                    cols[f"{cn} condsd"] = se[:, j].tolist()
             out[key] = pl.DataFrame(cols)
         return out
+
+    def vcov(self, correlation: bool = False) -> pl.DataFrame:
+        """Variance–covariance matrix of the fixed effects β̂ — lme4's
+        ``vcov.merMod``. ``correlation=True`` returns the correlation matrix
+        (``cov2cor``) instead. Returned as a polars frame keyed by the
+        fixed-effect column names (hea convention; lme4 returns a base matrix);
+        identical numbers to the ``vcov_beta`` attribute, ``sqrt(diag(·))`` =
+        ``se_bhat``. The joint (θ, β) form (``full=TRUE``) and the
+        ``use.hessian`` variant are not implemented."""
+        V = self._vcov_beta_arr
+        if correlation:
+            d = np.sqrt(np.diag(V))
+            with np.errstate(invalid="ignore", divide="ignore"):
+                V = V / np.outer(d, d)
+            V = np.where(np.isfinite(V), V, 0.0)
+            np.fill_diagonal(V, 1.0)
+        return pl.DataFrame(
+            {c: np.asarray(V[:, i]) for i, c in enumerate(self.column_names)}
+        )
+
+    def logLik(self, REML=None) -> float:
+        """Log-likelihood — lme4's ``logLik.merMod(object, REML=NULL)``.
+
+        ``REML=None`` uses the fit's own criterion (a REML fit reports the REML
+        log-likelihood, an ML fit the ML one). ``REML=True`` / ``False``
+        recompute the *other* criterion AT THE FITTED θ̂ — lme4's ``devCrit``,
+        no refit — so a single REML fit yields both. The deviance for either
+        mode is ``-2 * logLik(REML=...)``. For a GLMM (Laplace, ML-only),
+        ``REML`` is ignored."""
+        if self._is_glmm():
+            return -0.5 * self.deviance
+        want_reml = self.REML if REML is None else bool(REML)
+        dev = (self._reml_deviance(self.theta) if want_reml
+               else self._ml_deviance(self.theta))
+        return -0.5 * (dev - self._log_det_weights)
 
     def _pooled_std_blups(self) -> np.ndarray:
         """All BLUPs concatenated, each component scaled by its model SD.

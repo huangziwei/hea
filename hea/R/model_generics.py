@@ -58,10 +58,10 @@ def fixef(model):
     return coef(model)
 
 
-def ranef(model):
-    """R: ``ranef()`` — random effects (gmm only)."""
+def ranef(model, condVar=False):
+    """R: ``ranef(model, condVar=)`` — random effects (gmm only)."""
     if hasattr(model, "ranef"):
-        return model.ranef
+        return model.ranef(condVar=condVar)
     raise TypeError(
         f"ranef(): {model.__class__.__name__} has no random effects"
     )
