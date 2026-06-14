@@ -1387,8 +1387,11 @@ def test_profile_vector_bar_matches_lme4(sleepstudy_data):
         ["sd_(Intercept)|Subject", "sd_Days|Subject", "cor_Days.(Intercept)|Subject"]
     # prof_scale='varcov' — the diagonal (variances, σ²) match lme4 (the
     # off-diagonal covariance is numerically fragile in lme4 too — it warns NAs)
+    # which= the two asserted components: profile CIs are per-parameter, so this
+    # is identical to profiling all 6 on the varcov scale but ~3× faster.
     vc = {r["parameter"]: (list(r.values())[1], list(r.values())[2])
-          for r in fm.profile(prof_scale="varcov").confint().iter_rows(named=True)}
+          for r in fm.profile(prof_scale="varcov", which=[".sigma", ".sig01"])
+          .confint().iter_rows(named=True)}
     np.testing.assert_allclose(vc[".sigma"], [524.331, 832.784], atol=3)     # σ²
     np.testing.assert_allclose(vc[".sig01"], [207.007, 1422.500], atol=3)    # var_int
 
