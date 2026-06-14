@@ -8,9 +8,9 @@ build-backend = "hatchling.build"
 # --- Rust extension (hea._rs), built from rust/ (crate hea-rs) by maturin -----
 # NOTE: build-backend stays hatchling during the spike so `uv run` keeps working
 # with the pure-Python fallback. The release switch to
-# `build-backend = "maturin"` happens once the wheel pipeline is verified
-# (plans/rust-port-implementation.md §1.1/§2). `maturin build` reads the config
-# below directly regardless of the active PEP 517 backend.
+# `build-backend = "maturin"` happens once the wheel pipeline is verified.
+# `maturin build` reads the config below directly regardless of the active
+# PEP 517 backend.
 [tool.maturin]
 manifest-path = "rust/Cargo.toml"   # Rust crate (hea-rs) lives in rust/
 python-source = "."                  # Python package `hea` stays at repo root

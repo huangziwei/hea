@@ -6,7 +6,7 @@ an unsupported platform, or when ``HEA_NO_RS`` is set to a truthy value, the
 pure-Python :mod:`hea.R.nmath` kernels run instead. Those kernels are the
 bit-exact reference to R (tests/test_R.py) *and* the oracle the Rust path is
 checked against (tests/test_rs_parity.py) — so the fallback is never "wrong",
-only slower. See plans/rust-port-implementation.md §1.3.
+only slower.
 
 Usage in a kernel module::
 

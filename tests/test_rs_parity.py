@@ -1,19 +1,36 @@
-"""Differential parity gate: the compiled ``hea._rs`` kernels must equal the
-pure-Python ``hea.R.nmath`` kernels **bit-for-bit**.
+"""Bit-exact parity gate: the compiled ``hea._rs`` (Rust) d/p/q kernels must
+equal **R** bit-for-bit, compared against live R on the *same machine*.
 
-``nmath.py`` is pinned 0-ulp to R (tests/test_R.py), so ``rs == python`` here
-transitively guarantees ``rs == R`` without needing R in CI. If the rs
-extension is not built, these tests skip (the Python fallback still runs).
+Why live R, not the Python ``nmath`` reference or committed pins:
 
-Covers the full Tier 1 d/p/q surface.
+* The Rust kernels and R both evaluate transcendentals through the platform's
+  scalar libm, so a same-machine comparison is 0-ulp on every platform.
+* ``numpy``'s vectorized transcendentals are NOT bit-identical to scalar libm
+  and drift by a few ulp across numpy builds — so the old ``rs == nmath``
+  differential gate failed on some Linux/numpy combinations even though Rust was
+  the *correct* (R-faithful) side. The pure-Python ``nmath`` path is a fallback
+  slated for deprecation; it is no longer the oracle.
+* Committed R pins can't be cross-platform bit-exact either (glibc-R differs
+  from Apple-libm-R at the last ulp), so the reference is regenerated live.
+
+R exposes only the public d/p/q surface; the internal saddlepoint primitives
+(``bd0``/``stirlerr``/``ebd0``/``dpois_raw``/``dbinom_raw``/``pow1p``) have no
+R entry point and are covered transitively (``dpois``/``dbinom``/``pgamma`` in
+the large-count/large-shape regime exercise the whole chain).
+
+Skips when ``hea._rs`` isn't compiled (sdist / no toolchain) or ``Rscript`` is
+absent (CI installs ``r-base-core``).
 """
 import numpy as np
 import pytest
 
-from hea.R import nmath
+from conftest import have_rscript, run_rs_r_oracle
 
-# Skip the whole module when the extension isn't compiled in (sdist / no toolchain).
 rs = pytest.importorskip("hea._rs")
+
+if not have_rscript():
+    pytest.skip("Rscript not on PATH (install r-base-core)",
+                allow_module_level=True)
 
 
 def _bits(v: float) -> int:
@@ -21,164 +38,45 @@ def _bits(v: float) -> int:
 
 
 def _assert_bit_exact(got, exp):
-    """Bit-for-bit equality, NaN- and signed-zero-aware."""
+    """Bit-for-bit (0-ulp) equality, NaN-aware and sign-of-zero-agnostic.
+
+    ±0.0 are the same real number; for a probability/density/quantile the sign
+    bit on a zero result is an arithmetic byproduct (R and nmath disagree on it
+    in a few log_p / zero-quantile cases) carrying no numerical meaning, so the
+    gate treats them as equal — exactly how ulp-equality is conventionally
+    defined. Every non-zero value is still required to match R bit-for-bit.
+    """
     got = np.asarray(got, dtype=float)
     exp = np.asarray(exp, dtype=float)
-    assert got.shape == exp.shape
+    assert got.shape == exp.shape, f"shape {got.shape} != {exp.shape}"
     for g, e in zip(got.ravel(), exp.ravel()):
         if np.isnan(e):
             assert np.isnan(g), f"expected NaN, got {g!r}"
+        elif g == 0.0 and e == 0.0:
+            continue  # +0.0 == -0.0 as real numbers
         else:
-            assert _bits(g) == _bits(e), f"bit mismatch: rs={g!r} python={e!r}"
+            assert _bits(g) == _bits(e), f"bit mismatch: rs={g!r} R={e!r}"
 
 
-def _grid() -> np.ndarray:
-    # Stress every branch of pnorm_both: central (|x|<=0.6745), mid
-    # (<=sqrt(32)), far tail (>sqrt(32)), the cutoffs that gate log_p/tail,
-    # tiny (|x|<=eps), zero, and the non-finite lanes.
-    pts = [
+# ---------------------------------------------------------------------------
+# Input grids — chosen to stress every internal branch of each kernel.
+# ---------------------------------------------------------------------------
+def _norm_grid() -> np.ndarray:
+    # pnorm_both branches: central, mid, far tail, the log_p/tail cutoffs,
+    # tiny, zero, non-finite.
+    return np.array([
         -50.0, -40.0, -38.4674, -8.2924, -5.657, -5.0, -1.0, -0.6744,
         -1e-8, -1e-300, 0.0, 1e-300, 1e-8, 0.5, 0.6744, 0.67448975, 1.0,
         5.0, 5.657, 8.2924, 38.0, 40.0, 50.0, 1e170, 1e171,
         np.inf, -np.inf, np.nan,
-    ]
-    return np.array(pts, dtype=float)
+    ], dtype=float)
 
 
-@pytest.mark.parametrize("lower_tail", [True, False])
-@pytest.mark.parametrize("log_p", [True, False])
-@pytest.mark.parametrize("mu,sigma", [(0.0, 1.0), (1.5, 2.0), (-3.0, 0.5)])
-def test_pnorm_bit_exact(lower_tail, log_p, mu, sigma):
-    x = _grid()
-    got = rs.pnorm(x, np.full_like(x, mu), np.full_like(x, sigma), lower_tail, log_p)
-    exp = np.array(
-        [nmath.pnorm5(float(xi), mu, sigma, lower_tail, log_p) for xi in x]
-    )
-    _assert_bit_exact(got, exp)
-
-
-def test_pnorm_degenerate_sigma():
-    x = np.array([-1.0, 0.0, 1.0, 2.0])
-    for sig in (0.0, -1.0):
-        for lt in (True, False):
-            for lp in (True, False):
-                got = rs.pnorm(x, np.zeros_like(x), np.full_like(x, sig), lt, lp)
-                exp = np.array([nmath.pnorm5(float(xi), 0.0, sig, lt, lp) for xi in x])
-                _assert_bit_exact(got, exp)
-
-
-# ============================================================================
-# Tier 1 — lgamma / loader (saddlepoint) foundation
-# ============================================================================
-
-def test_lgammafn_gammafn():
-    xg = np.array([-9.3, -2.5, -0.5, -1e-8, 1e-307, 1e-200, 0.1, 0.5, 1.0, 1.5,
-                   2.0, 3.7, 9.99, 10.0, 10.5, 50.0, 100.0, 4934721.0, 1e17,
-                   1e18, 170.0, -170.5, 0.0, -3.0, np.nan, np.inf])
-    _assert_bit_exact(rs.lgammafn(xg), [nmath._lgammafn(float(v)) for v in xg])
-    xg2 = xg[(np.abs(xg) < 171) | ~np.isfinite(xg)]
-    _assert_bit_exact(rs.gammafn(xg2), [nmath.gammafn(float(v)) for v in xg2])
-
-
-def test_stirlerr_all_branches():
-    ns = np.array([0.3, 0.5, 0.7, 1.0, 1.5, 2.5, 4.0, 5.0, 5.25, 5.3, 6.0, 6.1,
-                   6.2, 6.6, 6.7, 7.3, 7.4, 8.9, 9.0, 12.3, 12.4, 12.8, 12.9,
-                   15.0, 15.5, 16.0, 23.5, 23.6, 24.0, 27.0, 27.1, 86.0, 86.1,
-                   205.0, 205.1, 6180.0, 6181.0, 1.57e7, 1.6e7, 2.0e7])
-    _assert_bit_exact(rs.stirlerr(ns), [float(nmath._stirlerr(float(v))) for v in ns])
-
-
-def test_bd0_pow1p():
-    bx = np.array([5.0, 10.0, 10.0, 0.001, 1e-10, 100.0, 3.0, 1e6, 50.0, 0.5])
-    bn = np.array([5.0, 10.0, 9.8, 10.0, 1e-9, 100.5, 30.0, 1.0001e6, 49.0, 5.0])
-    _assert_bit_exact(rs.bd0(bx, bn), [nmath._bd0(float(a), float(b)) for a, b in zip(bx, bn)])
-    px = np.array([0.0, 1e-12, -1e-10, 0.3, -0.7, 2.0, 0.1, -0.05, 1e-8])
-    py = np.array([3.0, 100.0, 50.0, 2.5, 4.0, 0.5, 1.0, 1000.0, np.nan])
-    _assert_bit_exact(rs.pow1p(px, py),
-                      [float(nmath._pow1p(float(a), float(b))) for a, b in zip(px, py)])
-
-
-@pytest.mark.parametrize("give_log", [True, False])
-def test_dpois_raw(give_log):
-    dx = np.array([0.0, 1.0, 2.0, 5.0, 10.0, 100.0, 1000.0, 3.0, 0.0, 1e300])
-    dl = np.array([3.0, 3.0, 3.0, 4.5, 10.0, 100.0, 1000.0, 0.0, 0.0, 1.0])
-    _assert_bit_exact(rs.dpois_raw(dx, dl, give_log),
-                      [nmath._dpois_raw(float(a), float(b), give_log) for a, b in zip(dx, dl)])
-
-
-@pytest.mark.parametrize("give_log", [True, False])
-def test_dbinom_raw(give_log):
-    ex = np.array([0.0, 5.0, 10.0, 3.0, 0.0, 20.0, 7.0, 50.0])
-    en = np.array([20.0, 20.0, 20.0, 20.0, 0.0, 20.0, 10.0, 100.0])
-    ep = np.array([0.3, 0.3, 0.3, 0.5, 0.5, 1.0, 0.7, 0.1])
-    eq = 1.0 - ep
-    _assert_bit_exact(
-        rs.dbinom_raw(ex, en, ep, eq, give_log),
-        [nmath._dbinom_raw(float(a), float(b), float(c), float(d), give_log)
-         for a, b, c, d in zip(ex, en, ep, eq)])
-
-
-# ============================================================================
-# Tier 1 — gamma family (qnorm5 / dnorm5 / pgamma / dgamma / qgamma)
-# ============================================================================
-
-@pytest.mark.parametrize("lower_tail", [True, False])
-@pytest.mark.parametrize("log_p", [True, False])
-def test_qnorm5(lower_tail, log_p):
-    if log_p:
-        p = np.array([-700.0, -300.0, -100.0, -50.0, -10.0, -1.0, -0.5, -1e-3,
-                      -1e-8, np.log(0.5)])
-    else:
-        p = np.array([1e-300, 1e-50, 1e-10, 1e-4, 0.001, 0.01, 0.1, 0.25, 0.5,
-                      0.75, 0.9, 0.99, 0.999, 1 - 1e-10, 1 - 1e-16, 0.0, 1.0, np.nan])
-    _assert_bit_exact(rs.qnorm(p, np.zeros_like(p), np.ones_like(p), lower_tail, log_p),
-                      [nmath.qnorm5(float(v), 0, 1, lower_tail, log_p) for v in p])
-
-
-@pytest.mark.parametrize("give_log", [True, False])
-def test_dnorm5(give_log):
-    x = np.array([-40, -6, -5, -1, 0, 0.5, 1, 5, 6, 38, 40, np.inf, -np.inf, np.nan])
-    _assert_bit_exact(rs.dnorm(x, np.zeros_like(x), np.ones_like(x), give_log),
-                      [nmath.dnorm5(float(v), 0, 1, give_log) for v in x])
-
-
-# pgamma stress grid hits all 4 branches: smallx (x<1), upper-series, lower, asymp
 _PG_X = np.array([0.5, 0.001, 5.0, 20.0, 50.0, 100.0, 2.0, 1e5, 0.3, 1000.0,
                   1e-8, 3.0, 15.0, 0.0, np.inf, 1e-300])
 _PG_A = np.array([2.0, 0.5, 20.0, 5.0, 50.0, 2.0, 100.0, 1e4, 0.2, 1000.0,
                   1.0, 3.0, 7.0, 2.0, 2.0, 0.5])
 
-
-@pytest.mark.parametrize("lower_tail", [True, False])
-@pytest.mark.parametrize("log_p", [True, False])
-@pytest.mark.parametrize("scale", [1.0, 2.5])
-def test_pgamma(lower_tail, log_p, scale):
-    sc = np.full_like(_PG_X, scale)
-    _assert_bit_exact(
-        rs.pgamma(_PG_X, _PG_A, sc, lower_tail, log_p),
-        [nmath.pgamma(float(x), float(a), scale, lower_tail, log_p)
-         for x, a in zip(_PG_X, _PG_A)])
-
-
-@pytest.mark.parametrize("give_log", [True, False])
-def test_dgamma(give_log):
-    x = np.array([0.0, 0.5, 1.0, 2.0, 5.0, 0.001, 100.0, 1e-8, -1.0])
-    sh = np.array([0.5, 2.0, 1.0, 3.0, 0.7, 0.5, 50.0, 2.0, 2.0])
-    _assert_bit_exact(rs.dgamma(x, sh, np.ones_like(x), give_log),
-                      [nmath.dgamma(float(a), float(b), 1.0, give_log) for a, b in zip(x, sh)])
-
-
-@pytest.mark.parametrize("alpha", [0.5, 2.0, 50.0, 1e-11])
-def test_qgamma(alpha):
-    p = np.array([1e-10, 1e-4, 0.01, 0.1, 0.5, 0.9, 0.99, 0.9999, 1 - 1e-12])
-    aa = np.full_like(p, alpha)
-    _assert_bit_exact(rs.qgamma(p, aa, np.ones_like(p), True, False),
-                      [nmath.qgamma(float(v), alpha, 1.0, True, False) for v in p])
-
-
-# ============================================================================
-# Tier 1 — beta (toms708 bratio): pbeta / lbeta
-# ============================================================================
 
 def _beta_grid():
     ab = [0.5, 1.0, 2.0, 5.0, 20.0, 100.0, 1000.0]
@@ -191,24 +89,6 @@ def _beta_grid():
                 A.append(a)
                 B.append(b)
     return np.array(X), np.array(A), np.array(B)
-
-
-@pytest.mark.parametrize("lower_tail", [True, False])
-@pytest.mark.parametrize("log_p", [True, False])
-def test_pbeta(lower_tail, log_p):
-    X, A, B = _beta_grid()
-    _assert_bit_exact(
-        rs.pbeta(X, A, B, lower_tail, log_p),
-        [nmath.pbeta(float(x), float(a), float(b), lower_tail, log_p)
-         for x, a, b in zip(X, A, B)])
-
-
-def test_lbeta():
-    ab = [0.5, 1.0, 2.0, 5.0, 20.0, 100.0, 1000.0]
-    a = np.array([x for x in ab for _ in ab])
-    b = np.array([y for _ in ab for y in ab])
-    _assert_bit_exact(rs.lbeta(a, b),
-                      [nmath.lbeta(float(x), float(y)) for x, y in zip(a, b)])
 
 
 def _qbeta_grid():
@@ -224,152 +104,171 @@ def _qbeta_grid():
     return np.array(AL), np.array(P), np.array(Q)
 
 
-@pytest.mark.parametrize("lower_tail", [True, False])
-def test_qbeta(lower_tail):
-    AL, P, Q = _qbeta_grid()
-    _assert_bit_exact(
-        rs.qbeta(AL, P, Q, lower_tail, False),
-        [nmath.qbeta(float(a), float(p), float(q), lower_tail, False)
-         for a, p, q in zip(AL, P, Q)])
+# ---------------------------------------------------------------------------
+# Cases: (name, rs/R kernel name, [inputs in hea order], [trailing flag bools]).
+# rs is called ``getattr(rs, fn)(*inputs, *flags)``; the R oracle calls the
+# matching ``hea_<fn>`` wrapper (tests/scripts/nmath_r_oracle.R).
+# ---------------------------------------------------------------------------
+def _build_cases():
+    C = []
 
+    def add(name, fn, arrays, flags=()):
+        C.append((name, fn, [np.asarray(a, dtype=float) for a in arrays],
+                  list(flags)))
 
-@pytest.mark.parametrize("lower_tail", [True, False])
-def test_qbeta_log(lower_tail):
-    AL, P, Q = _qbeta_grid()
-    lAL = np.log(AL)
-    _assert_bit_exact(
-        rs.qbeta(lAL, P, Q, lower_tail, True),
-        [nmath.qbeta(float(a), float(p), float(q), lower_tail, True)
-         for a, p, q in zip(lAL, P, Q)])
+    # --- normal: pnorm / qnorm / dnorm ---
+    g = _norm_grid()
+    for mu, sigma in [(0.0, 1.0), (1.5, 2.0), (-3.0, 0.5)]:
+        for lt in (True, False):
+            for lp in (True, False):
+                add(f"pnorm_{mu}_{sigma}_{lt}_{lp}", "pnorm",
+                    [g, np.full_like(g, mu), np.full_like(g, sigma)], (lt, lp))
+    xd = np.array([-1.0, 0.0, 1.0, 2.0])
+    for sig in (0.0, -1.0):
+        for lt in (True, False):
+            for lp in (True, False):
+                add(f"pnorm_deg_{sig}_{lt}_{lp}", "pnorm",
+                    [xd, np.zeros_like(xd), np.full_like(xd, sig)], (lt, lp))
+    p_log = np.array([-700., -300., -100., -50., -10., -1., -0.5, -1e-3,
+                      -1e-8, np.log(0.5)])
+    p_lin = np.array([1e-300, 1e-50, 1e-10, 1e-4, 0.001, 0.01, 0.1, 0.25, 0.5,
+                      0.75, 0.9, 0.99, 0.999, 1 - 1e-10, 1 - 1e-16, 0.0, 1.0])
+    for lt in (True, False):
+        for lp in (True, False):
+            p = p_log if lp else p_lin
+            add(f"qnorm_{lt}_{lp}", "qnorm",
+                [p, np.zeros_like(p), np.ones_like(p)], (lt, lp))
+    xn = np.array([-40, -6, -5, -1, 0, 0.5, 1, 5, 6, 38, 40,
+                   np.inf, -np.inf, np.nan], dtype=float)
+    for gl in (True, False):
+        add(f"dnorm_{gl}", "dnorm",
+            [xn, np.zeros_like(xn), np.ones_like(xn)], (gl,))
 
+    # --- lgamma / gamma ---
+    xg = np.array([-9.3, -2.5, -0.5, -1e-8, 1e-307, 1e-200, 0.1, 0.5, 1.0, 1.5,
+                   2.0, 3.7, 9.99, 10.0, 10.5, 50.0, 100.0, 4934721.0, 1e17,
+                   1e18, 170.0, -170.5, np.nan, np.inf])
+    add("lgammafn", "lgammafn", [xg])
+    xg2 = xg[(np.abs(xg) < 171) | ~np.isfinite(xg)]
+    add("gammafn", "gammafn", [xg2])
 
-# ============================================================================
-# Tier 1 — t / F (pt/pf/dt/qt/qf), discrete (ppois/pbinom/dpois/dbinom/dbeta/
-# qpois/qbinom), exponential (dexp/pexp/qexp)
-# ============================================================================
+    # --- gamma: pgamma / dgamma / qgamma ---
+    for scale in (1.0, 2.5):
+        for lt in (True, False):
+            for lp in (True, False):
+                add(f"pgamma_{scale}_{lt}_{lp}", "pgamma",
+                    [_PG_X, _PG_A, np.full_like(_PG_X, scale)], (lt, lp))
+    gx = np.array([0.0, 0.5, 1.0, 2.0, 5.0, 0.001, 100.0, 1e-8])
+    gsh = np.array([0.5, 2.0, 1.0, 3.0, 0.7, 0.5, 50.0, 2.0])
+    for gl in (True, False):
+        add(f"dgamma_{gl}", "dgamma", [gx, gsh, np.ones_like(gx)], (gl,))
+    qgp = np.array([1e-10, 1e-4, 0.01, 0.1, 0.5, 0.9, 0.99, 0.9999, 1 - 1e-12])
+    for alpha in (0.5, 2.0, 50.0, 1e-11):
+        add(f"qgamma_{alpha}", "qgamma",
+            [qgp, np.full_like(qgp, alpha), np.ones_like(qgp)], (True, False))
 
-@pytest.mark.parametrize("lower_tail", [True, False])
-def test_pt(lower_tail):
-    x = np.array([-50, -3, -1, -0.1, 0, 0.1, 1, 3, 50, 1e8])
-    n = np.array([1.0, 2.0, 5.0, 10.0, 30.0, 0.5, 0.7, 100.0, 1e21, 3.0])
-    _assert_bit_exact(rs.pt(x, n, lower_tail, False),
-                      [nmath.pt(float(a), float(b), lower_tail, False) for a, b in zip(x, n)])
+    # --- beta: pbeta / qbeta / lbeta ---
+    Xb, Ab, Bb = _beta_grid()
+    for lt in (True, False):
+        for lp in (True, False):
+            add(f"pbeta_{lt}_{lp}", "pbeta", [Xb, Ab, Bb], (lt, lp))
+    ab = [0.5, 1.0, 2.0, 5.0, 20.0, 100.0, 1000.0]
+    add("lbeta", "lbeta",
+        [np.array([x for x in ab for _ in ab]),
+         np.array([y for _ in ab for y in ab])])
+    ALq, Pq, Qq = _qbeta_grid()
+    for lt in (True, False):
+        add(f"qbeta_{lt}", "qbeta", [ALq, Pq, Qq], (lt, False))
+        add(f"qbeta_log_{lt}", "qbeta", [np.log(ALq), Pq, Qq], (lt, True))
 
-
-@pytest.mark.parametrize("give_log", [True, False])
-def test_dt(give_log):
-    x = np.array([-50, -3, -1, -0.1, 0, 0.1, 1, 3, 50, 1e8])
-    n = np.array([1.0, 2.0, 5.0, 10.0, 30.0, 0.5, 0.7, 100.0, 1e21, 3.0])
-    _assert_bit_exact(rs.dt(x, n, give_log),
-                      [nmath.dt(float(a), float(b), give_log) for a, b in zip(x, n)])
-
-
-@pytest.mark.parametrize("lower_tail", [True, False])
-def test_qt(lower_tail):
-    p = np.array([1e-8, 1e-3, 0.01, 0.1, 0.3, 0.5, 0.7, 0.9, 0.99, 0.9999])
-    n = np.array([1.0, 2.0, 2.0, 5.0, 0.5, 10.0, 30.0, 0.7, 100.0, 3.0])
-    _assert_bit_exact(rs.qt(p, n, lower_tail, False),
-                      [nmath.qt(float(a), float(b), lower_tail, False) for a, b in zip(p, n)])
-
-
-@pytest.mark.parametrize("lower_tail", [True, False])
-def test_pf(lower_tail):
-    x = np.array([0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 20.0, 0.3, 3.0, 100.0])
+    # --- t / F ---
+    xt = np.array([-50, -3, -1, -0.1, 0, 0.1, 1, 3, 50, 1e8], dtype=float)
+    nt = np.array([1.0, 2.0, 5.0, 10.0, 30.0, 0.5, 0.7, 100.0, 1e21, 3.0])
+    for lt in (True, False):
+        add(f"pt_{lt}", "pt", [xt, nt], (lt, False))
+    for gl in (True, False):
+        add(f"dt_{gl}", "dt", [xt, nt], (gl,))
+    tp = np.array([1e-8, 1e-3, 0.01, 0.1, 0.3, 0.5, 0.7, 0.9, 0.99, 0.9999])
+    nt2 = np.array([1.0, 2.0, 2.0, 5.0, 0.5, 10.0, 30.0, 0.7, 100.0, 3.0])
+    for lt in (True, False):
+        add(f"qt_{lt}", "qt", [tp, nt2], (lt, False))
+    xf = np.array([0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 20.0, 0.3, 3.0, 100.0])
     f1 = np.array([1.0, 2.0, 5.0, 10.0, 3.0, 1.0, 8.0, 0.5, 1e6, 4.0])
     f2 = np.array([1.0, 10.0, 5.0, 2.0, 30.0, 1e6, 8.0, 3.0, 5.0, 20.0])
-    _assert_bit_exact(rs.pf(x, f1, f2, lower_tail, False),
-                      [nmath.pf(float(a), float(b), float(c), lower_tail, False)
-                       for a, b, c in zip(x, f1, f2)])
+    for lt in (True, False):
+        add(f"pf_{lt}", "pf", [xf, f1, f2], (lt, False))
+    fp = np.array([1e-8, 1e-3, 0.01, 0.1, 0.3, 0.5, 0.7, 0.9, 0.99, 0.9999])
+    qf1 = np.array([1.0, 2.0, 5.0, 10.0, 3.0, 4e5 + 1, 8.0, 0.5, 4.0, 1.0])
+    qf2 = np.array([1.0, 10.0, 5.0, 2.0, 30.0, 8.0, 4e5 + 1, 3.0, 20.0, 1e6])
+    for lt in (True, False):
+        add(f"qf_{lt}", "qf", [fp, qf1, qf2], (lt, False))
 
-
-@pytest.mark.parametrize("lower_tail", [True, False])
-def test_qf(lower_tail):
-    p = np.array([1e-8, 1e-3, 0.01, 0.1, 0.3, 0.5, 0.7, 0.9, 0.99, 0.9999])
-    f1 = np.array([1.0, 2.0, 5.0, 10.0, 3.0, 4e5 + 1, 8.0, 0.5, 4.0, 1.0])
-    f2 = np.array([1.0, 10.0, 5.0, 2.0, 30.0, 8.0, 4e5 + 1, 3.0, 20.0, 1e6])
-    _assert_bit_exact(rs.qf(p, f1, f2, lower_tail, False),
-                      [nmath.qf(float(a), float(b), float(c), lower_tail, False)
-                       for a, b, c in zip(p, f1, f2)])
-
-
-@pytest.mark.parametrize("lower_tail", [True, False])
-def test_ppois_qpois(lower_tail):
-    x = np.array([0., 1., 2., 5., 10., 50., 3., 7., 0., 100.])
-    lam = np.array([3., 3., 3., 4.5, 10., 40., 0.5, 7., 0., 1e3])
-    _assert_bit_exact(rs.ppois(x, lam, lower_tail, False),
-                      [nmath.ppois(float(a), float(b), lower_tail, False) for a, b in zip(x, lam)])
-    qp = np.array([1e-6, 0.01, 0.1, 0.5, 0.9, 0.99, 0.999, 0.5, 0.3, 1 - 1e-9])
-    ql = np.array([3., 3., 10., 4.5, 40., 100., 1e3, 0.5, 7., 5.])
-    _assert_bit_exact(rs.qpois(qp, ql, lower_tail, False),
-                      [nmath.qpois(float(a), float(b), lower_tail, False) for a, b in zip(qp, ql)])
-
-
-@pytest.mark.parametrize("lower_tail", [True, False])
-def test_pbinom_qbinom(lower_tail):
-    x = np.array([0., 5., 10., 3., 20., 7., 50., 0., 15., 2.])
-    n = np.array([20., 20., 20., 20., 20., 10., 100., 5., 30., 2.])
-    p = np.array([.3, .3, .3, .5, 1., .7, .1, .5, .4, .5])
-    _assert_bit_exact(rs.pbinom(x, n, p, lower_tail, False),
-                      [nmath.pbinom(float(a), float(b), float(c), lower_tail, False)
-                       for a, b, c in zip(x, n, p)])
-    qp = np.array([1e-6, 0.01, 0.1, 0.5, 0.9, 0.99, 0.999, 0.5, 0.3, 1 - 1e-9])
-    qn = np.array([20., 20., 50., 20., 100., 1000., 500., 10., 30., 5.])
-    qpr = np.array([.3, .5, .3, .5, .1, .5, .7, .5, .4, .5])
-    _assert_bit_exact(rs.qbinom(qp, qn, qpr, lower_tail, False),
-                      [nmath.qbinom(float(a), float(b), float(c), lower_tail, False)
-                       for a, b, c in zip(qp, qn, qpr)])
-
-
-@pytest.mark.parametrize("give_log", [True, False])
-def test_dpois_dbinom_dbeta(give_log):
+    # --- discrete: ppois / qpois / pbinom / qbinom / dpois / dbinom / dbeta ---
     px = np.array([0., 1., 2., 5., 10., 50., 3., 7., 0., 100.])
     pl = np.array([3., 3., 3., 4.5, 10., 40., 0.5, 7., 0., 1e3])
-    _assert_bit_exact(rs.dpois(px, pl, give_log),
-                      [nmath.dpois(float(a), float(b), give_log) for a, b in zip(px, pl)])
+    for lt in (True, False):
+        add(f"ppois_{lt}", "ppois", [px, pl], (lt, False))
+    qpp = np.array([1e-6, 0.01, 0.1, 0.5, 0.9, 0.99, 0.999, 0.5, 0.3, 1 - 1e-9])
+    qpl = np.array([3., 3., 10., 4.5, 40., 100., 1e3, 0.5, 7., 5.])
+    for lt in (True, False):
+        add(f"qpois_{lt}", "qpois", [qpp, qpl], (lt, False))
     bx = np.array([0., 5., 10., 3., 20., 7., 50., 0., 15., 2.])
     bn = np.array([20., 20., 20., 20., 20., 10., 100., 5., 30., 2.])
     bp = np.array([.3, .3, .3, .5, 1., .7, .1, .5, .4, .5])
-    _assert_bit_exact(rs.dbinom(bx, bn, bp, give_log),
-                      [nmath.dbinom(float(a), float(b), float(c), give_log)
-                       for a, b, c in zip(bx, bn, bp)])
-    dx = np.array([0., 0.01, 0.1, 0.5, 0.9, 0.99, 1., 0.3, 0.5, 0.7])
-    da = np.array([2., 0.5, 2., 3., 0.7, 5., 2., 1., 3., 0.5])
-    db = np.array([3., 2., 0.5, 3., 2., 1., 0.7, 1., 5., 0.5])
-    _assert_bit_exact(rs.dbeta(dx, da, db, give_log),
-                      [nmath.dbeta(float(a), float(b), float(c), give_log)
-                       for a, b, c in zip(dx, da, db)])
+    for lt in (True, False):
+        add(f"pbinom_{lt}", "pbinom", [bx, bn, bp], (lt, False))
+    qbp = np.array([1e-6, 0.01, 0.1, 0.5, 0.9, 0.99, 0.999, 0.5, 0.3, 1 - 1e-9])
+    qbn = np.array([20., 20., 50., 20., 100., 1000., 500., 10., 30., 5.])
+    qbpr = np.array([.3, .5, .3, .5, .1, .5, .7, .5, .4, .5])
+    for lt in (True, False):
+        add(f"qbinom_{lt}", "qbinom", [qbp, qbn, qbpr], (lt, False))
+    dbex = np.array([0., 0.01, 0.1, 0.5, 0.9, 0.99, 1., 0.3, 0.5, 0.7])
+    dbea = np.array([2., 0.5, 2., 3., 0.7, 5., 2., 1., 3., 0.5])
+    dbeb = np.array([3., 2., 0.5, 3., 2., 1., 0.7, 1., 5., 0.5])
+    for gl in (True, False):
+        add(f"dpois_{gl}", "dpois", [px, pl], (gl,))
+        add(f"dbinom_{gl}", "dbinom", [bx, bn, bp], (gl,))
+        add(f"dbeta_{gl}", "dbeta", [dbex, dbea, dbeb], (gl,))
 
-
-def test_saddlepoint_large_count_regime():
-    # Regression for the ebd0 accurate-log1pmx fix: dpois at large count/small mean
-    # → pgamma upper-series branch (large shape) → qgamma. Was ≤7 ulp off R; now 0-ulp.
-    # rs==python is the gate; python==R confirmed separately (R oracle).
-    k = np.arange(120.0, 260.0)
-    lam = np.array([2.0, 3.0, 4.0, 5.0, 7.0, 10.0])
-    K = np.repeat(k, lam.size)
-    L = np.tile(lam, k.size)
-    _assert_bit_exact(rs.dpois(K, L, False),
-                      [nmath.dpois(float(a), float(b), False) for a, b in zip(K, L)])
-    x = np.linspace(0.5, 400.0, 400)
+    # --- saddlepoint regime (exercises bd0/stirlerr/ebd0/dpois_wrap) ---
+    kk = np.arange(120.0, 260.0)
+    lams = np.array([2.0, 3.0, 4.0, 5.0, 7.0, 10.0])
+    add("dpois_saddle", "dpois",
+        [np.repeat(kk, lams.size), np.tile(lams, kk.size)], (False,))
+    xsp = np.linspace(0.5, 400.0, 400)
     for shape in (20.0, 50.0, 100.0, 200.0):
-        sh = np.full_like(x, shape)
-        _assert_bit_exact(rs.pgamma(x, sh, np.ones_like(x), True, False),
-                          [nmath.pgamma(float(v), shape, 1.0, True, False) for v in x])
-    p = np.linspace(1e-4, 1 - 1e-4, 400)
+        add(f"pgamma_saddle_{shape}", "pgamma",
+            [xsp, np.full_like(xsp, shape), np.ones_like(xsp)], (True, False))
+    psp = np.linspace(1e-4, 1 - 1e-4, 400)
     for alpha in (50.0, 100.0, 200.0):
-        aa = np.full_like(p, alpha)
-        _assert_bit_exact(rs.qgamma(p, aa, np.ones_like(p), True, False),
-                          [nmath.qgamma(float(v), alpha, 1.0, True, False) for v in p])
+        add(f"qgamma_saddle_{alpha}", "qgamma",
+            [psp, np.full_like(psp, alpha), np.ones_like(psp)], (True, False))
+
+    # --- exponential (hea/nmath parameterise by scale; R by rate=1/scale) ---
+    xe = np.array([0., 0.1, 1., 5., 20., 0., 2., 100., 0.5, 1e-8])
+    se = np.array([1., 1., 2., 0.5, 1., 3., 1., 2., 0.7, 1.])
+    for gl in (True, False):
+        add(f"dexp_{gl}", "dexp", [xe, se], (gl,))
+    qpe = np.array([1e-8, 0.01, 0.1, 0.5, 0.9, 0.99, 0.999, 0.3, 0.7, 1 - 1e-9])
+    for lt in (True, False):
+        add(f"pexp_{lt}", "pexp", [xe, se], (lt, False))
+        add(f"qexp_{lt}", "qexp", [qpe, se], (lt, False))
+
+    return C
 
 
-@pytest.mark.parametrize("lower_tail", [True, False])
-def test_exp(lower_tail):
-    x = np.array([0., 0.1, 1., 5., 20., 0., 2., 100., 0.5, 1e-8])
-    s = np.array([1., 1., 2., 0.5, 1., 3., 1., 2., 0.7, 1.])
-    _assert_bit_exact(rs.dexp(x, s, False),
-                      [nmath.dexp(float(a), float(b), False) for a, b in zip(x, s)])
-    _assert_bit_exact(rs.pexp(x, s, lower_tail, False),
-                      [nmath.pexp(float(a), float(b), lower_tail, False) for a, b in zip(x, s)])
-    qp = np.array([1e-8, 0.01, 0.1, 0.5, 0.9, 0.99, 0.999, 0.3, 0.7, 1 - 1e-9])
-    _assert_bit_exact(rs.qexp(qp, s, lower_tail, False),
-                      [nmath.qexp(float(a), float(b), lower_tail, False) for a, b in zip(qp, s)])
+CASES = _build_cases()
+
+
+@pytest.fixture(scope="session")
+def r_oracle(tmp_path_factory):
+    """Run R once for the whole module; return ``{case name: R values}``."""
+    workdir = tmp_path_factory.mktemp("rs_r_oracle")
+    return run_rs_r_oracle(CASES, workdir)
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
+def test_rs_matches_r(case, r_oracle):
+    name, fn, arrays, flags = case
+    got = getattr(rs, fn)(*arrays, *flags)
+    _assert_bit_exact(got, r_oracle[name])

@@ -35,13 +35,17 @@ jobs:
       uses: Swatinem/rust-cache@v2
       with:
         workspaces: rust
-    - name: Install SuiteSparse (CHOLMOD backend)
+    - name: Install SuiteSparse (CHOLMOD backend) and R (nmath parity oracle)
       # scikit-sparse builds against libsuitesparse-dev. Without it, hea
       # falls back to scipy.sparse.linalg.splu, whose different sparse
       # reduction order opens a wider FP floor on glmer fits — enough
       # to fail the FD-Hessian SE pin on poly() contrasts (~2e-2 abs)
       # and the predict tolerance (~3e-9 abs).
-      run: sudo apt-get update && sudo apt-get install -y libsuitesparse-dev
+      #
+      # r-base-core gives Rscript + the base `stats` package (all d/p/q): the
+      # tests/test_rs_parity.py gate runs R on this same runner and checks the
+      # Rust kernels bit-for-bit against it (same libm → 0-ulp; see that file).
+      run: sudo apt-get update && sudo apt-get install -y libsuitesparse-dev r-base-core
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip

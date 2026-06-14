@@ -6247,8 +6247,7 @@ def test_concurvity_full_and_pairwise_match_mgcv():
     # design-only concurvity (worst / estimate / para) is fit-independent
     # and matches mgcv EXACTLY; only the β̂-dependent "observed" row sees
     # the sp gap (≤8.5e-3 full, ≤6.7e-2 pairwise), so it is pinned to
-    # hea's fit. (hea outer-Newton sp-underfit for smooth-of-linear — see
-    # plans/rng-r-consistency-audit.md.)
+    # hea's fit. (hea outer-Newton sp-underfit for smooth-of-linear.)
     np.testing.assert_allclose(cf["para"].to_numpy(),
                                [0.7888546768] * 3, rtol=1e-7)
     np.testing.assert_allclose(                       # worst, estimate: mgcv

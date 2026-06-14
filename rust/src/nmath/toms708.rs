@@ -9,7 +9,6 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
 
 use super::consts::{DBL_MIN, M_LN2, M_LN_SQRT_2PI};
-use super::gamma::r_log1_exp;
 use super::lgamma::{gammafn, lgammacor, lgammafn};
 use super::norm::{dt0, dt1};
 use super::util::ldexp;
@@ -1248,6 +1247,19 @@ fn basym(a: f64, b: f64, lambda: f64, eps: f64, log_p: bool) -> f64 {
 }
 
 #[inline]
+/// `R_Log1_Exp` as redefined *inside* toms708.c (its lines 46-47 `#undef` the
+/// dpq.h macro and re-`#define` it to call the file-local `rexpm1` instead of
+/// libm `expm1`). Every `R_Log1_Exp` reached from `bratio` is this variant; it
+/// differs from `gamma::r_log1_exp` by ~1 ulp on the `x > -M_LN2` branch, which
+/// the `log_p` beta tails expose.
+fn log1_exp_rexpm1(x: f64) -> f64 {
+    if x > -M_LN2 {
+        (-rexpm1(x)).ln()
+    } else {
+        (-x.exp()).ln_1p()
+    }
+}
+
 fn br_end(wv: f64, w1v: f64, do_swap: bool, ierr: i32) -> (f64, f64, i32) {
     if do_swap {
         (w1v, wv, ierr)
@@ -1283,7 +1295,7 @@ fn br_end_from_w(wv: f64, do_swap: bool, log_p: bool, ierr: i32) -> (f64, f64, i
 fn br_end_from_w1_log(w1v: f64, do_swap: bool, log_p: bool, ierr: i32) -> (f64, f64, i32) {
     let (w, w1);
     if log_p {
-        w = r_log1_exp(w1v);
+        w = log1_exp_rexpm1(w1v);
         w1 = w1v;
     } else {
         w = -(w1v.exp_m1());
@@ -1366,7 +1378,7 @@ fn bratio(a: f64, b: f64, x: f64, y: f64, log_p: bool) -> (f64, f64, i32) {
         }
         if b0 < eps.min(eps * a0) {
             let wv = fpser(a0, b0, x0, eps, log_p);
-            let w1v = if log_p { r_log1_exp(wv) } else { 0.5 - wv + 0.5 };
+            let w1v = if log_p { log1_exp_rexpm1(wv) } else { 0.5 - wv + 0.5 };
             return br_end(wv, w1v, do_swap, ierr);
         }
         if a0 < eps.min(eps * b0) && b0 * x0 <= 1.0 {
@@ -1397,12 +1409,12 @@ fn bratio(a: f64, b: f64, x: f64, y: f64, log_p: bool) -> (f64, f64, i32) {
         }
         if go_bpser_w {
             let wv = bpser(a0, b0, x0, eps, log_p);
-            let w1v = if log_p { r_log1_exp(wv) } else { 0.5 - wv + 0.5 };
+            let w1v = if log_p { log1_exp_rexpm1(wv) } else { 0.5 - wv + 0.5 };
             return br_end(wv, w1v, do_swap, ierr);
         }
         if go_bpser_w1 {
             let w1v = bpser(b0, a0, y0, eps, log_p);
-            let wv = if log_p { r_log1_exp(w1v) } else { 0.5 - w1v + 0.5 };
+            let wv = if log_p { log1_exp_rexpm1(w1v) } else { 0.5 - w1v + 0.5 };
             return br_end(wv, w1v, do_swap, ierr);
         }
         let mut w1v;
@@ -1475,12 +1487,12 @@ fn bratio(a: f64, b: f64, x: f64, y: f64, log_p: bool) -> (f64, f64, i32) {
         }
         if go_bpser_w {
             let wv = bpser(a0m, b0, x0, eps, log_p);
-            let w1v = if log_p { r_log1_exp(wv) } else { 0.5 - wv + 0.5 };
+            let w1v = if log_p { log1_exp_rexpm1(wv) } else { 0.5 - wv + 0.5 };
             return br_end(wv, w1v, do_swap, ierr);
         }
         if go_bfrac {
             let wv = bfrac(a0m, b0, x0, y0, lam, eps * 15.0, log_p);
-            let w1v = if log_p { r_log1_exp(wv) } else { 0.5 - wv + 0.5 };
+            let w1v = if log_p { log1_exp_rexpm1(wv) } else { 0.5 - wv + 0.5 };
             return br_end(wv, w1v, do_swap, ierr);
         }
         if go_l140 {
@@ -1494,7 +1506,7 @@ fn bratio(a: f64, b: f64, x: f64, y: f64, log_p: bool) -> (f64, f64, i32) {
             if wv < DBL_MIN && log_p {
                 b0 += nn as f64;
                 let wv2 = bpser(a0m, b0, x0, eps, log_p);
-                let w1v = if log_p { r_log1_exp(wv2) } else { 0.5 - wv2 + 0.5 };
+                let w1v = if log_p { log1_exp_rexpm1(wv2) } else { 0.5 - wv2 + 0.5 };
                 return br_end(wv2, w1v, do_swap, ierr);
             }
             if x0 <= 0.7 {
@@ -1514,7 +1526,7 @@ fn bratio(a: f64, b: f64, x: f64, y: f64, log_p: bool) -> (f64, f64, i32) {
         }
         // L180 — basym
         let wv = basym(a0m, b0, lam, eps * 100.0, log_p);
-        let w1v = if log_p { r_log1_exp(wv) } else { 0.5 - wv + 0.5 };
+        let w1v = if log_p { log1_exp_rexpm1(wv) } else { 0.5 - wv + 0.5 };
         br_end(wv, w1v, do_swap, ierr)
     }
 }

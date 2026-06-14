@@ -1,8 +1,7 @@
 //! Ports of R's `src/nmath/` probability kernels (mirror of `hea/R/nmath.py`).
 //!
 //! The auto-generated tables (consts.rs, coeffs.rs, bd0_scale.rs) are emitted
-//! from the live Python reference; regenerate with the generator snippets kept
-//! in plans/rust-port-implementation.md.
+//! from the live Python reference (hea/R/nmath.py).
 
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;

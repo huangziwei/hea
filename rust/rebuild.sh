@@ -2,9 +2,8 @@
 # Rebuild the hea._rs extension (crate hea-rs) from rust/ and drop the compiled
 # module into the source tree (hea/_rs.*.so), where the editable install finds it.
 #
-# Used during the T0/Tier-1 spike while build-backend is still `hatchling`. Once
-# the release switch to build-backend = "maturin" lands (plans/rust-port-
-# implementation.md §2.3), prefer `maturin develop` / `uv pip install -e .`.
+# Used while build-backend is still `hatchling`. Once the release switch to
+# build-backend = "maturin" lands, prefer `maturin develop` / `uv pip install -e .`.
 #
 # Sandbox note: cargo cannot write ~/.cargo here, so CARGO_HOME is redirected
 # into the workdir. Network is needed on the first build (crate downloads).

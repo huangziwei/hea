@@ -1,4 +1,7 @@
 import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -153,3 +156,51 @@ def load_glm_oracle(name: str) -> dict:
             "regenerate via `Rscript tests/scripts/make_glm_oracles.R`"
         )
     return json.loads(path.read_text())
+
+
+# ---------------------------------------------------------------------------
+# Live-R nmath oracle — drives the hea._rs (Rust) bit-exact parity gate.
+# tests/scripts/nmath_r_oracle.R evaluates R's d/p/q on the SAME machine, so
+# Rust and R share that platform's scalar libm and agree 0-ulp everywhere.
+# ---------------------------------------------------------------------------
+_NMATH_R_ORACLE = Path(__file__).parent / "scripts" / "nmath_r_oracle.R"
+
+
+def have_rscript() -> bool:
+    return shutil.which("Rscript") is not None
+
+
+def run_rs_r_oracle(cases, workdir) -> dict:
+    """Evaluate R's d/p/q for each case and return ``{name: np.ndarray}``.
+
+    ``cases``: iterable of ``(name, fn, arrays, flags)`` where ``fn`` is the
+    hea/rs kernel name, ``arrays`` are the inputs in hea's argument order, and
+    ``flags`` are the trailing booleans (``lower_tail``/``log_p`` or
+    ``give_log``; empty for no-flag kernels). Inputs are written as raw little-
+    endian f64 so R sees the exact same bits the Rust side receives.
+    """
+    workdir = str(workdir)
+    os.makedirs(workdir, exist_ok=True)
+    spec_lines = []
+    for name, fn, arrays, flags in cases:
+        argfiles = []
+        for i, a in enumerate(arrays):
+            fname = f"{name}__{i}.bin"
+            np.ascontiguousarray(a, dtype="<f8").ravel().tofile(
+                os.path.join(workdir, fname))
+            argfiles.append(fname)
+        flagstr = ",".join("TRUE" if b else "FALSE" for b in flags)
+        spec_lines.append(f"{name}|{fn}|{','.join(argfiles)}|{flagstr}")
+    (Path(workdir) / "spec.txt").write_text("\n".join(spec_lines) + "\n")
+
+    subprocess.run(
+        ["Rscript", str(_NMATH_R_ORACLE), workdir],
+        stdin=subprocess.DEVNULL, check=True, timeout=300,
+        capture_output=True, text=True,
+    )
+
+    out = {}
+    for name, fn, arrays, flags in cases:
+        out[name] = np.fromfile(
+            os.path.join(workdir, f"{name}.out.bin"), dtype="<f8")
+    return out

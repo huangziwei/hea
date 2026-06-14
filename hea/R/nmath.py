@@ -3058,6 +3058,15 @@ def _basym(a, b, lambda_, eps, log_p):
     return e0 * t * u * sum_
 
 
+def _R_Log1_Exp_toms(x):
+    """``R_Log1_Exp`` as redefined *inside* toms708.c (its lines 46-47 ``#undef``
+    the dpq.h macro and re-``#define`` it to use the file-local ``rexpm1`` in
+    place of libm ``expm1``). Every ``R_Log1_Exp`` reached from :func:`_bratio`
+    is this variant — it differs from the stock macro by ~1 ulp on the
+    ``x > -M_LN2`` branch, which the ``log_p`` beta tails expose."""
+    return math.log(-_rexpm1(x)) if x > -_M_LN2 else math.log1p(-math.exp(x))
+
+
 def _bratio(a, b, x, y, log_p):
     """R's ``bratio`` (toms708.c) -> (w, w1, ierr)."""
     rd0 = _NEGINF if log_p else 0.0
@@ -3125,7 +3134,7 @@ def _bratio(a, b, x, y, log_p):
 
     def end_from_w1_log(w1v):
         if log_p:
-            wv = _R_Log1_Exp(w1v)
+            wv = _R_Log1_Exp_toms(w1v)
         else:
             wv = -math.expm1(w1v)
             w1v = math.exp(w1v)
@@ -3139,7 +3148,7 @@ def _bratio(a, b, x, y, log_p):
             a0, x0, b0, y0 = a, x, b, y
         if b0 < min(eps, eps * a0):
             w = _fpser(a0, b0, x0, eps, log_p)
-            w1 = _R_Log1_Exp(w) if log_p else 0.5 - w + 0.5
+            w1 = _R_Log1_Exp_toms(w) if log_p else 0.5 - w + 0.5
             return _end(w, w1)
         if a0 < min(eps, eps * b0) and b0 * x0 <= 1.:
             w1 = _apser(a0, b0, x0, eps)
@@ -3166,11 +3175,11 @@ def _bratio(a, b, x, y, log_p):
                 go_bpser_w1 = True
         if go_bpser_w:
             w = _bpser(a0, b0, x0, eps, log_p)
-            w1 = _R_Log1_Exp(w) if log_p else 0.5 - w + 0.5
+            w1 = _R_Log1_Exp_toms(w) if log_p else 0.5 - w + 0.5
             return _end(w, w1)
         if go_bpser_w1:
             w1 = _bpser(b0, a0, y0, eps, log_p)
-            w = _R_Log1_Exp(w1) if log_p else 0.5 - w1 + 0.5
+            w = _R_Log1_Exp_toms(w1) if log_p else 0.5 - w1 + 0.5
             return _end(w, w1)
         if not do_L131:
             n = 20
@@ -3217,11 +3226,11 @@ def _bratio(a, b, x, y, log_p):
             go_bfrac = True
         if go_bpser_w:
             w = _bpser(a0, b0, x0, eps, log_p)
-            w1 = _R_Log1_Exp(w) if log_p else 0.5 - w + 0.5
+            w1 = _R_Log1_Exp_toms(w) if log_p else 0.5 - w + 0.5
             return _end(w, w1)
         if go_bfrac:
             w = _bfrac(a0, b0, x0, y0, lambda_, eps * 15., log_p)
-            w1 = _R_Log1_Exp(w) if log_p else 0.5 - w + 0.5
+            w1 = _R_Log1_Exp_toms(w) if log_p else 0.5 - w + 0.5
             return _end(w, w1)
         if go_L140:
             n = int(b0)
@@ -3233,7 +3242,7 @@ def _bratio(a, b, x, y, log_p):
             if w < _DBL_MIN and log_p:
                 b0 += n
                 w = _bpser(a0, b0, x0, eps, log_p)
-                w1 = _R_Log1_Exp(w) if log_p else 0.5 - w + 0.5
+                w1 = _R_Log1_Exp_toms(w) if log_p else 0.5 - w + 0.5
                 return _end(w, w1)
             if x0 <= 0.7:
                 w += _bpser(a0, b0, x0, eps, False)
@@ -3248,7 +3257,7 @@ def _bratio(a, b, x, y, log_p):
             return end_from_w(w)
         # basym (L180)
         w = _basym(a0, b0, lambda_, eps * 100., log_p)
-        w1 = _R_Log1_Exp(w) if log_p else 0.5 - w + 0.5
+        w1 = _R_Log1_Exp_toms(w) if log_p else 0.5 - w + 0.5
         return _end(w, w1)
 
 
