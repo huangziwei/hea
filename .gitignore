@@ -34,6 +34,6 @@ worktrees/
 /target/
 rust/target/
 .cargo-home/
-hea/_native*.so
-hea/_native*.pyd
+hea/_rs*.so
+hea/_rs*.pyd
 *.dylib

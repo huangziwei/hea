@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Rebuild the hea._native extension from rust/ and drop the compiled module into
-# the source tree (hea/_native.*.so), where the editable install resolves it.
+# Rebuild the hea._rs extension (crate hea-rs) from rust/ and drop the compiled
+# module into the source tree (hea/_rs.*.so), where the editable install finds it.
 #
 # Used during the T0/Tier-1 spike while build-backend is still `hatchling`. Once
 # the release switch to build-backend = "maturin" lands (plans/rust-port-
@@ -19,5 +19,5 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
 whl="$(ls -t target/wheels/hea-*.whl | head -1)"
 rm -rf target/wheel_extract
 .venv/bin/python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall('target/wheel_extract')" "$whl"
-cp target/wheel_extract/hea/_native*.so hea/
-echo "✓ installed $(ls hea/_native*.so) from $(basename "$whl")"
+cp target/wheel_extract/hea/_rs*.so hea/
+echo "✓ installed $(ls hea/_rs*.so) from $(basename "$whl")"

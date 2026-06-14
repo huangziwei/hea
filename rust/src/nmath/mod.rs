@@ -21,7 +21,7 @@ pub mod tf;
 pub mod toms708;
 pub mod util;
 
-/// Register every nmath pyfunction onto the `_native` module.
+/// Register every nmath pyfunction onto the `_rs` module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // norm
     m.add_function(wrap_pyfunction!(norm::pnorm, m)?)?;
