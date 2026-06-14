@@ -889,6 +889,81 @@ def test_lmm_optctrl_unknown_key_raises(sleepstudy_data):
 
 
 # ---------------------------------------------------------------------------
+# Prior weights on the LMM path (gmm-lmer-parity #4). weights= used to raise
+# NotImplementedError; now lmer(y~x+(1|g), weights=w) is reproduced via √w
+# row-scaling of the profiled-deviance design. Reference: lme4 4.x,
+# lmer(Reaction~Days+(Days|Subject), sleepstudy, weights=rep(c(1,2,3),len=180)).
+# ---------------------------------------------------------------------------
+
+_W = np.tile([1.0, 2.0, 3.0], 60)                 # == R rep(c(1,2,3), len=180)
+_W_THETA = (0.5720719237602743, 0.02526250546376536, 0.1520012796905056)
+_W_SIGMA = 38.62892535113247
+_W_BETA = (251.804690405274, 10.43587074687652)
+_W_SE = (6.446985455645814, 1.573630563126574)
+_W_REMLCRIT = 1778.291462756913
+_W_ML_THETA = (0.5468139587813955, 0.02800468576341488, 0.1458069717176397)
+_W_ML_DEV = 1786.531026746311
+
+
+def test_lmm_weights_deviance_fn_bit_exact(sleepstudy_data):
+    """#4 headline: hea's weighted profiled REML deviance, evaluated at lme4's
+    exact θ̂, equals lme4's REMLcrit to the CHOLMOD floor. The √w row-scaling
+    reproduces lme4's objective bit-for-bit; θ̂ only scatters because the
+    surface is flat."""
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True, weights=_W)
+    dev_at_lme4 = m._reml_deviance(np.array(_W_THETA)) - m._log_det_weights
+    np.testing.assert_allclose(dev_at_lme4, _W_REMLCRIT, rtol=0, atol=1e-6)
+
+
+def test_lmm_weights_reml_matches_lme4(sleepstudy_data):
+    """#4: weighted REML fit reproduces lme4 (θ̂/σ̂/β̂/se at flat-surface
+    optimizer scatter; criterion ~1e-8)."""
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True, weights=_W)
+    np.testing.assert_allclose(m.theta, _W_THETA, rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.sigma, _W_SIGMA, rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m._beta, _W_BETA, rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m._se_beta, _W_SE, rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.REML_criterion, _W_REMLCRIT, rtol=0, atol=1e-5)
+
+
+def test_lmm_weights_ml_matches_lme4(sleepstudy_data):
+    """#4: weighted ML fit + deviance (bit-exact at lme4's θ̂)."""
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=False, weights=_W)
+    np.testing.assert_allclose(m.theta, _W_ML_THETA, rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.sigma, 38.63274937880161, rtol=0, atol=1e-3)
+    dev_at_lme4 = m._ml_deviance(np.array(_W_ML_THETA)) - m._log_det_weights
+    np.testing.assert_allclose(dev_at_lme4, _W_ML_DEV, rtol=0, atol=1e-6)
+
+
+def test_lmm_weights_residuals_response_and_pearson(sleepstudy_data):
+    """#4: residuals = y−μ on the original scale; the 'scaled' (Pearson)
+    residuals fold in √w — matches lme4 residuals(type='pearson')."""
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True, weights=_W)
+    np.testing.assert_allclose(
+        m.residuals[:3],
+        [-5.319909703504237, -15.53001223271121, -42.78891476191828],
+        rtol=0, atol=5e-3)
+    np.testing.assert_allclose(
+        (m.scaled_residuals * m.sigma)[:3],
+        [-5.319909703504237, -21.96275392332027, -74.1125743683764],
+        rtol=0, atol=5e-3)
+
+
+def test_lmm_unit_weights_reproduce_unweighted(sleepstudy_data):
+    """#4: all-ones weights must reproduce the unweighted fit (√w≡1)."""
+    m_w = gmm(_SLEEP_F, sleepstudy_data, REML=True, weights=np.ones(180))
+    m_0 = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    np.testing.assert_allclose(m_w.theta, m_0.theta, rtol=0, atol=1e-10)
+    np.testing.assert_allclose(m_w.REML_criterion, m_0.REML_criterion,
+                               rtol=0, atol=1e-9)
+
+
+def test_lmm_weights_bad_length_raises(sleepstudy_data):
+    with pytest.raises(ValueError, match="length"):
+        gmm(_SLEEP_F, sleepstudy_data, REML=True, weights=np.ones(5))
+
+
+# ---------------------------------------------------------------------------
 # Ch 4: Building Linear Mixed Models
 # ---------------------------------------------------------------------------
 

@@ -5083,11 +5083,27 @@ class gmm:
         if not is_gaussian_identity:
             self._fit_glmm_from_components(inputs)
             return
+        # Prior weights w_i (y_i ~ N(μ_i, σ²/w_i)). lme4's mkLmerDevfun folds
+        # them in by row-scaling response + design with √w, turning the weighted
+        # LMM into a standard one in "tilde space"; θ̂/σ̂/β̂ are then the weighted
+        # estimates and the reported −2logL gains a −Σlog w_i Jacobian term
+        # (constant in θ). Unit weights ⇒ √w≡1 ⇒ byte-identical to before.
+        sqrt_w = None
         if inputs.weights is not None:
-            raise NotImplementedError(
-                "weights= is plumbed through _FitInputs but the Gaussian fit "
-                "path does not yet honour non-unit weights."
-            )
+            w_arr = np.asarray(inputs.weights, dtype=float)
+            if w_arr.shape != (len(inputs.y),):
+                raise ValueError(
+                    f"weights= must have length {len(inputs.y)}; got "
+                    f"{tuple(w_arr.shape)}"
+                )
+            if np.any(w_arr < 0):
+                raise ValueError("weights= must be non-negative")
+            sqrt_w = np.sqrt(w_arr)
+        self._sqrt_w = sqrt_w
+        self._log_det_weights = (
+            0.0 if sqrt_w is None
+            else float(np.sum(np.log(w_arr[w_arr > 0])))
+        )
 
         # Unpack inputs onto self — same attributes the original __init__ set.
         re = inputs.re_terms
@@ -5099,6 +5115,9 @@ class gmm:
         q = Z.shape[1]
         off = inputs.offset
         y_solve = y - off
+        # √w-scaled response for the weighted profiled deviance (originals kept
+        # for fitted values / RE contributions); sqrt_w set above.
+        yw = y_solve if sqrt_w is None else y_solve * sqrt_w
         REML = inputs.reml
 
         self.family = inputs.family
@@ -5107,7 +5126,7 @@ class gmm:
         self._expanded = inputs.expanded
         self.X = X_df
         self.y = y
-        self._y_solve = y_solve
+        self._y_solve = yw
         self.Z = Z
         self.column_names = list(X_df.columns)
         self.n = n
@@ -5130,11 +5149,18 @@ class gmm:
         # dense Cholesky for O(q³) flops per deviance eval.
         template = re.Lambdat
         lt_theta_pos, lt_indices, lt_indptr = _sparse_Lt_spec(template)
-        Z_sp = csc_array(Z)
+        Z_sp = csc_array(Z)                       # original-space (fitted/ranef)
         eye_q_sp = eye_array(q, format="csc")
-        XtX = X.T @ X
-        Xty = X.T @ y_solve
-        yty = float(y_solve @ y_solve)
+        # Row-scale X / Z / y by √w for the (tilde-space) weighted profiled
+        # deviance; for unit weights these are the originals (byte-identical).
+        if sqrt_w is None:
+            Xw, Z_sp_w = X, Z_sp
+        else:
+            Xw = X * sqrt_w[:, None]
+            Z_sp_w = csc_array(Z_sp.multiply(sqrt_w[:, None]))
+        XtX = Xw.T @ Xw
+        Xty = Xw.T @ yw
+        yty = float(yw @ yw)
         log2pi = float(np.log(2.0 * np.pi))
 
         # Cache pieces profile() and other post-fit methods reuse.
@@ -5143,7 +5169,9 @@ class gmm:
         self._lt_indices = lt_indices
         self._lt_indptr = lt_indptr
         self._lt_shape = template.shape
-        self._Z_sp = Z_sp
+        self._Z_sp = Z_sp                  # original-space Z (fitted, RE contrib)
+        self._Z_sp_solve = Z_sp_w          # √w-scaled Z for the profiled deviance
+        self._X_solve = Xw                 # √w-scaled X for the profiled deviance
         self._eye_q_sp = eye_q_sp
         self._chol_factor = None
         self._XtX = XtX
@@ -5237,7 +5265,7 @@ class gmm:
         # products against ``M⁻¹(ZLᵀy)`` and ``M⁻¹(ZLᵀX)`` without ever
         # materializing ``cu`` or ``RZX``.
         Lt = self._build_Lt_sparse(theta_hat)
-        ZL = Z_sp @ Lt.T
+        ZL = Z_sp_w @ Lt.T
         M = (ZL.T @ ZL + eye_q_sp).tocsc()
         if self._chol_factor is None:
             self._chol_factor = cho_factor(M)
@@ -5255,8 +5283,8 @@ class gmm:
 
         # Use the offset-stripped response so this final β̂/û recompute is
         # consistent with the cached Xty/yty the optimizer ran on.
-        ZLty = np.asarray(ZL.T @ y_solve).ravel()
-        ZLtX = np.asarray(ZL.T @ X)
+        ZLty = np.asarray(ZL.T @ yw).ravel()
+        ZLtX = np.asarray(ZL.T @ Xw)
         M_inv_ZLty = F.solve(ZLty)
         M_inv_ZLtX = F.solve(ZLtX)
         # See _chol_block for why this reach uses einsum instead of @.
@@ -5275,12 +5303,16 @@ class gmm:
         self.sigma = sigma
         self.sigma_squared = sigma2
 
-        # Fitted values ŷ = Xβ̂ + Z Λ û + offset (response scale).
+        # Fitted values ŷ = Xβ̂ + Z Λ û + offset (response scale) — uses the
+        # ORIGINAL (unscaled) X / Z, not the √w-scaled deviance design.
         # Residuals = y − ŷ = y_solve − Xβ̂ − Z Λ û (offset cancels).
-        self.fitted = np.einsum("ij,j->i", X, beta) + ZL @ self._u + off
+        ZL_orig = ZL if sqrt_w is None else Z_sp @ Lt.T
+        self.fitted = np.einsum("ij,j->i", X, beta) + ZL_orig @ self._u + off
         self.residuals = y - self.fitted
-        # ε̂ / σ̂ — what lme4 calls Pearson / "Scaled residuals"
-        self.scaled_residuals = self.residuals / sigma
+        # ε̂ / σ̂ — what lme4 calls Pearson / "Scaled residuals": √w·(y−μ)/σ̂
+        # (≡ (y−μ)/σ̂ for unit weights).
+        _pearson = self.residuals if sqrt_w is None else sqrt_w * self.residuals
+        self.scaled_residuals = _pearson / sigma
 
         # Var(β̂) = σ̂² (XᵀX_eff)⁻¹ = σ̂² R_x⁻ᵀ R_x⁻¹
         Rx_inv = solve_triangular(Rx, np.eye(p), lower=True)
@@ -5324,7 +5356,9 @@ class gmm:
         # ------------- summary statistics ----------------------------------
         # npar = fixed-effect coefficients + θ entries + 1 residual variance
         self.npar = p + len(theta_hat) + 1
-        opt = float(res.fun)
+        # y-space −2logL = (tilde-space deviance) − Σlog w_i (the weight
+        # Jacobian; 0 for unit weights). θ̂/σ̂/β̂ are invariant to this shift.
+        opt = float(res.fun) - self._log_det_weights
         if REML:
             self.REML_criterion = opt
         else:
@@ -5652,6 +5686,10 @@ class gmm:
         self._lt_indptr = lt_indptr
         self._lt_shape = template.shape
         self._Z_sp = Z_sp
+        # The shared _ranef posterior-covariance reads self._Z_sp_solve (the
+        # √w-scaled Z on the LMM path); the GLMM path's analogue is the plain Z
+        # used in the Laplace M, so alias it here so the accessor stays shared.
+        self._Z_sp_solve = Z_sp
         self._eye_q_sp = eye_array(q, format="csc")
         self._chol_factor = pred.chol_factor
 
@@ -5918,12 +5956,12 @@ class gmm:
         ``Lz Lzᵀ = M`` means ``|M| = |Lz|²``. ``y`` here is offset-stripped
         (``y_solve``); cached ``Xty/yty`` are built from ``y_solve`` to match."""
         y = self._y_solve if y is None else y
-        X = self.X.to_numpy().astype(float) if X is None else X
+        X = self._X_solve if X is None else X
         XtX = self._XtX if XtX is None else XtX
         Xty = self._Xty if Xty is None else Xty
         yty = self._yty if yty is None else yty
         Lt = self._build_Lt_sparse(theta)
-        ZL = self._Z_sp @ Lt.T
+        ZL = self._Z_sp_solve @ Lt.T
         M = (ZL.T @ ZL + self._eye_q_sp).tocsc()
         try:
             if self._chol_factor is None:
@@ -6022,13 +6060,13 @@ class gmm:
         when σ was either pinned or optimized as a free variable upstream.
         """
         y_ = self._y_solve if y is None else y
-        X_ = self.X.to_numpy().astype(float) if X is None else X
+        X_ = self._X_solve if X is None else X
         XtX_ = self._XtX if XtX is None else XtX
         Xty_ = self._Xty if Xty is None else Xty
         yty_ = self._yty if yty is None else yty
         n = len(y_)
         Lt = self._build_Lt_sparse(theta)
-        ZL = self._Z_sp @ Lt.T
+        ZL = self._Z_sp_solve @ Lt.T
         M = (ZL.T @ ZL + self._eye_q_sp).tocsc()
         self._chol_factor.factorize(M)
         F = self._chol_factor
@@ -6057,7 +6095,7 @@ class gmm:
         ``x_j · β_j_tgt`` from y and drop column j — the remaining fit has
         the same functional form. Returns ``(dev, θ̂, σ̂, β̂)`` where β̂ is
         in the full original column order with ``β_j = beta_j_tgt``."""
-        X_full = self.X.to_numpy().astype(float)
+        X_full = self._X_solve          # √w-scaled design (weighted profile)
         x_j = X_full[:, j]
         X_rest = np.delete(X_full, j, axis=1)
         # ``self._y_solve`` already has the offset removed; subtracting
@@ -7447,7 +7485,7 @@ class gmm:
         if cache is not None:
             return cache
         Lt = self._build_Lt_sparse(self.theta)
-        ZL = self._Z_sp @ Lt.T
+        ZL = self._Z_sp_solve @ Lt.T
         M = (ZL.T @ ZL + self._eye_q_sp).tocsc()
         self._chol_factor.factorize(M)
         F = self._chol_factor
