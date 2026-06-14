@@ -4,7 +4,12 @@ equal **R** bit-for-bit, compared against live R on the *same machine*.
 Why live R, not the Python ``nmath`` reference or committed pins:
 
 * The Rust kernels and R both evaluate transcendentals through the platform's
-  scalar libm, so a same-machine comparison is 0-ulp on every platform.
+  scalar libm. On macOS (Apple libm) that is 0-ulp; on Linux glibc the
+  transcendental-heavy kernels (pbeta/qbeta/pgamma/…) drift a few ulp because
+  Rust-std-math and R's glibc path don't agree bit-for-bit even on one machine
+  (the cross-platform libm floor — 0-ulp to an arbitrary R is not promisable).
+  So this strict gate runs on macOS ONLY (local + the macOS CI job); the Linux
+  matrix exercises the Rust port via the tolerance-pinned R tests instead.
 * ``numpy``'s vectorized transcendentals are NOT bit-identical to scalar libm
   and drift by a few ulp across numpy builds — so the old ``rs == nmath``
   differential gate failed on some Linux/numpy combinations even though Rust was
@@ -18,9 +23,11 @@ R exposes only the public d/p/q surface; the internal saddlepoint primitives
 R entry point and are covered transitively (``dpois``/``dbinom``/``pgamma`` in
 the large-count/large-shape regime exercise the whole chain).
 
-Skips when ``hea._rs`` isn't compiled (sdist / no toolchain) or ``Rscript`` is
-absent (CI installs ``r-base-core``).
+Skips off-macOS (the libm floor above), when ``hea._rs`` isn't compiled (sdist /
+no toolchain), or when ``Rscript`` is absent.
 """
+import sys
+
 import numpy as np
 import pytest
 
@@ -28,9 +35,12 @@ from conftest import have_rscript, run_rs_r_oracle
 
 rs = pytest.importorskip("hea._rs")
 
+if sys.platform != "darwin":
+    pytest.skip("Rust==R 0-ulp gate is macOS-only — Linux glibc libm diverges a "
+                "few ulp from R's; the Linux matrix exercises Rust via the "
+                "tolerance-pinned R tests instead.", allow_module_level=True)
 if not have_rscript():
-    pytest.skip("Rscript not on PATH (install r-base-core)",
-                allow_module_level=True)
+    pytest.skip("Rscript not on PATH (install R)", allow_module_level=True)
 
 
 def _bits(v: float) -> int:

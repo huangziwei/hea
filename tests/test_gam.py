@@ -1705,7 +1705,12 @@ def test_factor_view_too_far_returns_no_mask(factor_model):
 
 def test_invalid_view():
     """View must be 2 names from the formula's RHS variables."""
-    df = pl.DataFrame({"y": np.arange(10.0), "x": np.arange(10.0)})
+    # Non-degenerate y: a perfectly linear y=x sends REML's sp to the flat
+    # +∞ ridge and the outer Newton wanders for ~1.3s. The fit value is
+    # irrelevant here — we only exercise vis()'s view-validation — so use
+    # noise and keep the fit ~0.04s.
+    rng = np.random.RandomState(0)
+    df = pl.DataFrame({"y": rng.standard_normal(10), "x": np.arange(10.0)})
     m = gam("y ~ s(x)", data=df, method="REML")
     with pytest.raises(ValueError):
         # only one RHS var with variation — auto-pick fails
