@@ -64,3 +64,38 @@ pub fn ldexp(x: f64, mut n: i32) -> f64 {
 pub fn round_half_even(x: f64) -> f64 {
     x.round_ties_even()
 }
+
+/// R's `R_pow_di(x, n)` (src/nmath/../main/arithmetic.c): integer power by
+/// repeated squaring. This is deliberately NOT libm `powf` — R uses it (e.g.
+/// `rbinom`'s `qn = q^n`) and the two differ by up to hundreds of ulp, which can
+/// flip a rejection-sampling result. Bit-exact mirror of R's loop.
+pub fn r_pow_di(mut x: f64, mut n: i64) -> f64 {
+    let mut pow = 1.0;
+    if x.is_nan() {
+        return x;
+    }
+    if n != 0 {
+        if !x.is_finite() {
+            return x.powf(n as f64); // R: R_pow(x, (double)n)
+        }
+        let is_neg = n < 0;
+        if is_neg {
+            n = -n;
+        }
+        loop {
+            if n & 1 == 1 {
+                pow *= x;
+            }
+            n >>= 1;
+            if n != 0 {
+                x *= x;
+            } else {
+                break;
+            }
+        }
+        if is_neg {
+            pow = 1.0 / pow;
+        }
+    }
+    pow
+}

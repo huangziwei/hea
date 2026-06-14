@@ -11,9 +11,11 @@
 use pyo3::prelude::*;
 
 mod nmath;
+mod rng;
 
 #[pymodule]
 fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     nmath::register(m)?;
+    rng::register(m)?;
     Ok(())
 }

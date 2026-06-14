@@ -39,7 +39,45 @@ import math
 import numpy as np
 from scipy.linalg.lapack import dpstrf
 
+from ._dispatch import rs as _rs_mod
+
 __all__ = ["RMersenneTwister", "RGenerator"]
+
+
+def _make_impl(seed):
+    """The compiled Rust MT (``hea._rs.RsMt``) for ``seed``, or ``None`` when the
+    extension is unavailable / disabled — in which case the pure-Python stream
+    runs. Both are bit-exact to R; the Rust path just skips the per-draw Python
+    overhead in the rejection-sampling loops."""
+    m = _rs_mod()
+    return m.RsMt(int(seed)) if m is not None else None
+
+
+def _R_pow_di(x: float, n: int) -> float:
+    """R's ``R_pow_di(x, n)`` (arithmetic.c): integer power by repeated squaring.
+    Deliberately NOT ``x ** n`` (libm ``pow``): R uses this in ``rbinom``'s
+    ``qn = q^n`` and the two differ by up to hundreds of ulp, which can flip a
+    rejection-sampling result. Bit-exact mirror of R's loop."""
+    pow_ = 1.0
+    if math.isnan(x):
+        return x
+    if n != 0:
+        if not math.isfinite(x):
+            return x ** float(n)        # R: R_pow(x, (double)n)
+        is_neg = n < 0
+        if is_neg:
+            n = -n
+        while True:
+            if n & 1:
+                pow_ *= x
+            n >>= 1
+            if n:
+                x *= x
+            else:
+                break
+        if is_neg:
+            pow_ = 1.0 / pow_
+    return pow_
 
 # Period parameters (RNG.c:646-650).
 _N = 624
@@ -228,13 +266,26 @@ class RMersenneTwister:
     """R's default RNG after ``set.seed(seed)``, bit-exact and
     platform-independent."""
 
-    __slots__ = ("_mt", "_buf", "_pos")
+    __slots__ = ("_mt", "_buf", "_pos", "_impl")
 
-    def __init__(self, seed: int):
-        self.set_seed(seed)
+    def __init__(self, seed: int, *, force_py: bool = False):
+        self._impl = None
+        self.set_seed(seed, force_py=force_py)
 
-    def set_seed(self, seed: int) -> None:
-        """R's ``set.seed(seed)`` (Mersenne-Twister kind)."""
+    def set_seed(self, seed: int, *, force_py: bool = False) -> None:
+        """R's ``set.seed(seed)`` (Mersenne-Twister kind).
+
+        When the Rust extension is present (and ``force_py`` is False) the whole
+        stream — uniforms, normals, and every ``r*`` sampler — runs natively via
+        ``self._impl`` (an ``hea._rs.RsMt``). Otherwise the pure-Python state set
+        up below is used; it is the bit-exact reference and fallback. The Python
+        methods that aren't individually ported (weighted ``sample_prob``,
+        ``rmvn``) still work in either mode because they consume the stream only
+        through the delegating primitives. ``force_py=True`` pins the pure-Python
+        path (used by the 3-way Rust/Python/R parity gate)."""
+        self._impl = None if force_py else _make_impl(seed)
+        if self._impl is not None:
+            return
         s = int(seed) & 0xFFFFFFFF
         for _ in range(50):
             s = (69069 * s + 1) & 0xFFFFFFFF
@@ -282,6 +333,9 @@ class RMersenneTwister:
     def unif_rand(self, n: int | None = None):
         """R's ``runif`` stream: one draw (``n=None``) or a length-``n``
         array — consuming the identical sequence either way."""
+        if self._impl is not None:
+            return (self._impl.unif_rand() if n is None
+                    else self._impl.unif_rand_n(int(n)))
         if n is None:
             if self._pos >= self._buf.size:
                 self._refill()
@@ -313,6 +367,8 @@ class RMersenneTwister:
         here is a bit-exact port of R's ``qnorm5`` (AS-241, see ``_qnorm5``),
         so each normal is 0-ulp to ``set.seed(); rnorm()``.
         """
+        if self._impl is not None:
+            return self._impl.norm_rand()
         big = 134217728.0  # 2^27
         u1 = self.unif_rand()
         u1 = float(int(big * u1)) + self.unif_rand()
@@ -329,6 +385,10 @@ class RMersenneTwister:
         stream as 2n scalar draws) and run through ``_qnorm5_vec`` — bit-
         identical to the per-draw scalar path, but without the Python loop.
         """
+        if self._impl is not None:
+            if n is None:
+                return mean + sd * self._impl.norm_rand()
+            return mean + sd * self._impl.rnorm_n(int(n))
         if n is None:
             return mean + sd * self.norm_rand()
         big = 134217728.0  # 2^27
@@ -350,6 +410,8 @@ class RMersenneTwister:
         """``R_unif_index(dn)``, ``Sample_kind = REJECTION`` — an integer
         in [0, dn). R computes ``bits = ceil(log2(dn))`` in C-double
         arithmetic; kept literally for fidelity."""
+        if self._impl is not None:
+            return self._impl.unif_index(int(dn))
         if dn <= 0:
             return 0
         bits = int(np.ceil(np.log2(dn)))
@@ -364,6 +426,8 @@ class RMersenneTwister:
         Without replacement: ``do_sample``'s shrinking-pool walk
         (src/main/random.c). With replacement: independent
         ``R_unif_index(n)`` per draw."""
+        if self._impl is not None:
+            return self._impl.sample_int(int(n), int(k), bool(replace))
         if replace:
             out = np.empty(k, dtype=np.int64)
             for i in range(k):
@@ -410,6 +474,8 @@ class RMersenneTwister:
 
     def exp_rand(self) -> float:
         """R's ``exp_rand`` (standard exponential) — sexp.c (Ahrens-Dieter)."""
+        if self._impl is not None:
+            return self._impl.exp_rand()
         q = self._EXP_Q
         a = 0.0
         u = self.unif_rand()
@@ -438,6 +504,8 @@ class RMersenneTwister:
     def rpois(self, mu: float) -> float:
         """R's ``rpois(mu)`` — rpois.c. Inversion for ``mu < 10`` (one uniform
         per draw, CDF walk), transformed rejection (PTRS) for ``mu >= 10``."""
+        if self._impl is not None:
+            return self._impl.rpois(float(mu))
         if mu <= 0.0:
             return 0.0
         if mu < 10.0:                      # inversion (consumes 1 uniform)
@@ -529,6 +597,8 @@ class RMersenneTwister:
     def rbinom(self, size: int, prob: float) -> float:
         """R's ``rbinom(size, prob)`` — rbinom.c. Inversion for small
         ``size·min(p,1-p)``, BTPE rejection otherwise."""
+        if self._impl is not None:
+            return self._impl.rbinom(float(size), float(prob))
         n = int(round(size))
         if n == 0 or prob <= 0.0:
             return 0.0
@@ -538,7 +608,7 @@ class RMersenneTwister:
         q = 1.0 - p
         np_ = n * p
         if np_ < 30.0:                     # inversion (BINV)
-            qn = q ** n
+            qn = _R_pow_di(q, n)           # R_pow_di, NOT q**n (libm pow); see helper
             r = p / q
             g = r * (n + 1)
             while True:
@@ -638,6 +708,8 @@ class RMersenneTwister:
 
     def rgamma(self, shape: float, scale: float = 1.0) -> float:
         """R's ``rgamma(shape, scale=)`` — rgamma.c (GD for a>=1, GS for a<1)."""
+        if self._impl is not None:
+            return self._impl.rgamma(float(shape), float(scale))
         a = float(shape)
         if a < 1.0:                        # GS algorithm
             if a == 0.0:
@@ -715,6 +787,8 @@ class RMersenneTwister:
     def rnbinom(self, size: float, mu: float) -> float:
         """R's ``rnbinom(size, mu=)`` — a Poisson-Gamma mixture
         ``rpois(rgamma(size, scale=mu/size))`` (rnbinom.c)."""
+        if self._impl is not None:
+            return self._impl.rnbinom(float(size), float(mu))
         if mu <= 0.0:
             return 0.0
         return self.rpois(self.rgamma(size, scale=mu / size))
@@ -730,6 +804,8 @@ class RMersenneTwister:
         """R's ``rchisq(df, ncp=0)`` — central ``rgamma(df/2, 2)``; noncentral
         ``rnchisq`` = ``rpois(ncp/2)`` → ``rchisq(2·that)`` + ``rgamma(df/2, 2)``
         (rchisq.c / rnchisq.c)."""
+        if self._impl is not None:
+            return self._impl.rchisq(float(df), float(ncp))
         if ncp == 0.0:
             return 0.0 if df == 0.0 else self.rgamma(df / 2.0, scale=2.0)
         r = self.rpois(ncp / 2.0)
@@ -741,6 +817,8 @@ class RMersenneTwister:
     def rt(self, df: float) -> float:
         """R's central ``rt(df)`` = ``norm_rand() / sqrt(rchisq(df)/df)`` (rt.c).
         Noncentral t is block-ordered at the vector level (see distributions)."""
+        if self._impl is not None:
+            return self._impl.rt(float(df))
         if not math.isfinite(df):
             return self.norm_rand()
         return self.norm_rand() / math.sqrt(self.rchisq(df) / df)
@@ -748,6 +826,8 @@ class RMersenneTwister:
     def rf(self, df1: float, df2: float) -> float:
         """R's central ``rf(df1, df2)`` = ``(rchisq(df1)/df1)/(rchisq(df2)/df2)``
         (rf.c). Noncentral F is block-ordered at the vector level."""
+        if self._impl is not None:
+            return self._impl.rf(float(df1), float(df2))
         v1 = self.rchisq(df1) / df1 if math.isfinite(df1) else 1.0
         v2 = self.rchisq(df2) / df2 if math.isfinite(df2) else 1.0
         return v1 / v2
@@ -755,6 +835,8 @@ class RMersenneTwister:
     def rbeta(self, aa: float, bb: float) -> float:
         """R's ``rbeta(aa, bb)`` — Cheng's BB (min > 1) / BC (min <= 1)
         algorithm (rbeta.c) on R's uniform stream."""
+        if self._impl is not None:
+            return self._impl.rbeta(float(aa), float(bb))
         if aa < 0.0 or bb < 0.0:
             raise ValueError("rbeta: shapes must be >= 0")
         if aa == 0.0 and bb == 0.0:
@@ -804,6 +886,76 @@ class RMersenneTwister:
             if r + alpha * math.log(alpha / (b + w)) >= t:
                 break
         return b / (b + w) if aa != a else w / (b + w)
+
+    # ------------------------------------------------------------------
+    # Batch samplers — the whole per-element loop runs in one call (Rust when
+    # available, else a Python list-comp), saving n Python↔Rust crossings for
+    # the family ``$rd`` hooks and the public ``hea.R.r*`` vector draws. Each
+    # element is bit-identical to the scalar method and the draw order is the
+    # same as n scalar calls.
+    # ------------------------------------------------------------------
+    def rpois_n(self, mu) -> np.ndarray:
+        mu = np.ascontiguousarray(mu, dtype=float)
+        if self._impl is not None:
+            return self._impl.rpois_n(mu)
+        return np.array([self.rpois(float(m)) for m in mu])
+
+    def rbinom_n(self, size, prob) -> np.ndarray:
+        size = np.ascontiguousarray(size, dtype=float)
+        prob = np.ascontiguousarray(prob, dtype=float)
+        if self._impl is not None:
+            return self._impl.rbinom_n(size, prob)
+        return np.array([self.rbinom(int(round(float(s))), float(p))
+                         for s, p in zip(size, prob)])
+
+    def rgamma_n(self, shape, scale) -> np.ndarray:
+        shape = np.ascontiguousarray(shape, dtype=float)
+        scale = np.ascontiguousarray(scale, dtype=float)
+        if self._impl is not None:
+            return self._impl.rgamma_n(shape, scale)
+        return np.array([self.rgamma(float(a), scale=float(c))
+                         for a, c in zip(shape, scale)])
+
+    def rt_n(self, df) -> np.ndarray:
+        df = np.ascontiguousarray(df, dtype=float)
+        if self._impl is not None:
+            return self._impl.rt_n(df)
+        return np.array([self.rt(float(d)) for d in df])
+
+    def rf_n(self, df1, df2) -> np.ndarray:
+        df1 = np.ascontiguousarray(df1, dtype=float)
+        df2 = np.ascontiguousarray(df2, dtype=float)
+        if self._impl is not None:
+            return self._impl.rf_n(df1, df2)
+        return np.array([self.rf(float(a), float(b)) for a, b in zip(df1, df2)])
+
+    def rchisq_n(self, df, ncp) -> np.ndarray:
+        df = np.ascontiguousarray(df, dtype=float)
+        ncp = np.ascontiguousarray(ncp, dtype=float)
+        if self._impl is not None:
+            return self._impl.rchisq_n(df, ncp)
+        return np.array([self.rchisq(float(d), float(c))
+                         for d, c in zip(df, ncp)])
+
+    def rnbinom_n(self, size, mu) -> np.ndarray:
+        size = np.ascontiguousarray(size, dtype=float)
+        mu = np.ascontiguousarray(mu, dtype=float)
+        if self._impl is not None:
+            return self._impl.rnbinom_n(size, mu)
+        return np.array([self.rnbinom(float(s), float(m))
+                         for s, m in zip(size, mu)])
+
+    def rbeta_n(self, aa, bb) -> np.ndarray:
+        aa = np.ascontiguousarray(aa, dtype=float)
+        bb = np.ascontiguousarray(bb, dtype=float)
+        if self._impl is not None:
+            return self._impl.rbeta_n(aa, bb)
+        return np.array([self.rbeta(float(a), float(b)) for a, b in zip(aa, bb)])
+
+    def exp_rand_n(self, n: int) -> np.ndarray:
+        if self._impl is not None:
+            return self._impl.exp_rand_n(int(n))
+        return np.array([self.exp_rand() for _ in range(int(n))])
 
     def sample_prob(self, prob, k: int, replace: bool = False) -> np.ndarray:
         """R's weighted ``sample(n, k, replace=, prob=)`` as 0-based indices.
@@ -973,24 +1125,22 @@ class RGenerator:
 
     def gamma(self, shape, scale=1.0, size=None):
         n, scalar, (shape, scale) = _rgen_resolve(size, shape, scale)
-        out = np.array([self.mt.rgamma(float(shape[i]), scale=float(scale[i]))
-                        for i in range(n)])
+        out = self.mt.rgamma_n(shape, scale)
         return float(out[0]) if scalar else out
 
     def poisson(self, lam=1.0, size=None):
         n, scalar, (lam,) = _rgen_resolve(size, lam)
-        out = np.array([self.mt.rpois(float(lam[i])) for i in range(n)])
+        out = self.mt.rpois_n(lam)
         return float(out[0]) if scalar else out
 
     def binomial(self, n, p, size=None):
         m, scalar, (nt, pp) = _rgen_resolve(size, n, p)
-        out = np.array([self.mt.rbinom(int(round(float(nt[i]))), float(pp[i]))
-                        for i in range(m)])
+        out = self.mt.rbinom_n(nt, pp)              # rounds size per-element
         return float(out[0]) if scalar else out
 
     def standard_t(self, df, size=None):
         n, scalar, (df,) = _rgen_resolve(size, df)
-        out = np.array([self.mt.rt(float(df[i])) for i in range(n)])
+        out = self.mt.rt_n(df)
         return float(out[0]) if scalar else out
 
     def uniform(self, low=0.0, high=1.0, size=None):

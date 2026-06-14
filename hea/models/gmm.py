@@ -4504,22 +4504,20 @@ def _simulate_family_draw(rng, family, mu, weights, sigma):
     """
     name = family.name
     m = len(mu)
+    mu = np.asarray(mu, dtype=float)
     w = np.ones(m) if weights is None else np.asarray(weights, dtype=float)
-    out = np.empty(m)
+    # Batch draws (whole loop in one call) — bit-identical to the per-element
+    # rng.r* calls and in the same draw order.
     if name == "poisson":
-        for i in range(m):
-            out[i] = rng.rpois(float(mu[i]))
+        out = rng.rpois_n(mu)
     elif name == "binomial":
-        for i in range(m):
-            out[i] = rng.rbinom(int(round(w[i])), float(mu[i])) / w[i]
+        out = rng.rbinom_n(w, mu) / w        # size=wts (rounded), then /wts
     elif name == "Gamma":
         disp = sigma ** 2                     # Gamma_simfun: shape=1/disp
-        for i in range(m):
-            out[i] = rng.rgamma(1.0 / disp, scale=float(mu[i]) * disp)
+        out = rng.rgamma_n(np.full(m, 1.0 / disp), mu * disp)
     elif name == "negative binomial":
         th = float(family.get_theta(trans=True)[0])
-        for i in range(m):
-            out[i] = rng.rnbinom(th, float(mu[i]))
+        out = rng.rnbinom_n(np.full(m, th), mu)
     else:
         raise NotImplementedError(
             f"simulate is not implemented for family {name!r}")

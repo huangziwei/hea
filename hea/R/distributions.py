@@ -129,11 +129,10 @@ def rt(n, df, ncp=0):
     rng = _r_rng()
     nn = int(n)
     if np.all(np.asarray(ncp) == 0):
-        dfv = _recycle(df, nn)
-        return np.array([rng.rt(float(dfv[i])) for i in range(nn)])
+        return rng.rt_n(_recycle(df, nn))
     num = rng.rnorm(nn, mean=_recycle(ncp, nn))
     dfv = _recycle(df, nn)
-    den = np.array([rng.rchisq(float(dfv[i])) for i in range(nn)])
+    den = rng.rchisq_n(dfv, np.zeros(nn))
     return num / np.sqrt(den / dfv)
 
 
@@ -164,11 +163,10 @@ def rf(n, df1, df2, ncp=0):
     d1 = _recycle(df1, nn)
     d2 = _recycle(df2, nn)
     if np.all(np.asarray(ncp) == 0):
-        return np.array([rng.rf(float(d1[i]), float(d2[i])) for i in range(nn)])
+        return rng.rf_n(d1, d2)
     ncpv = _recycle(ncp, nn)
-    num = np.array([rng.rchisq(float(d1[i]), float(ncpv[i]))
-                    for i in range(nn)]) / d1
-    den = np.array([rng.rchisq(float(d2[i])) for i in range(nn)]) / d2
+    num = rng.rchisq_n(d1, ncpv) / d1
+    den = rng.rchisq_n(d2, np.zeros(nn)) / d2
     return num / den
 
 
@@ -205,8 +203,7 @@ def rchisq(n, df, ncp=0):
     nn = int(n)
     dfv = _recycle(df, nn)
     ncpv = _recycle(ncp, nn)
-    return np.array([rng.rchisq(float(dfv[i]), float(ncpv[i]))
-                     for i in range(nn)])
+    return rng.rchisq_n(dfv, ncpv)
 
 
 # binomial
@@ -231,8 +228,7 @@ def rbinom(n, size, prob):
     nn = int(n)
     sz = _recycle(size, nn)
     pr = _recycle(prob, nn)
-    return np.array([rng.rbinom(int(round(sz[i])), float(pr[i]))
-                     for i in range(nn)], dtype=np.int64)
+    return rng.rbinom_n(sz, pr).astype(np.int64)
 
 
 # poisson  (R uses `lambda`, a Python keyword → spelled `lambda_`)
@@ -256,8 +252,7 @@ def rpois(n, lambda_):
     rng = _r_rng()
     nn = int(n)
     lam = _recycle(lambda_, nn)
-    return np.array([rng.rpois(float(lam[i])) for i in range(nn)],
-                    dtype=np.int64)
+    return rng.rpois_n(lam).astype(np.int64)
 
 
 # uniform
@@ -305,7 +300,7 @@ def rexp(n, rate=1):
     rng = _r_rng()
     nn = int(n)
     rt_ = _recycle(rate, nn)
-    return np.array([rng.exp_rand() / rt_[i] for i in range(nn)])
+    return rng.exp_rand_n(nn) / rt_
 
 
 # gamma  (R: shape, rate; ``scale`` overrides if given)
@@ -338,8 +333,7 @@ def rgamma(n, shape, rate=1, scale=None):
     nn = int(n)
     sh = _recycle(shape, nn)
     sc = _recycle(scale, nn)
-    return np.array([rng.rgamma(float(sh[i]), scale=float(sc[i]))
-                     for i in range(nn)])
+    return rng.rgamma_n(sh, sc)
 
 
 # beta
@@ -365,7 +359,7 @@ def rbeta(n, shape1, shape2):
     nn = int(n)
     s1 = _recycle(shape1, nn)
     s2 = _recycle(shape2, nn)
-    return np.array([rng.rbeta(float(s1[i]), float(s2[i])) for i in range(nn)])
+    return rng.rbeta_n(s1, s2)
 
 
 def set_seed(seed):

@@ -204,3 +204,43 @@ def run_rs_r_oracle(cases, workdir) -> dict:
         out[name] = np.fromfile(
             os.path.join(workdir, f"{name}.out.bin"), dtype="<f8")
     return out
+
+
+# ---------------------------------------------------------------------------
+# Live-R RNG oracle — drives the 3-way (Rust / pure-Python / R) parity gate for
+# hea.R.rng (tests/test_rs_rng_parity.py). tests/scripts/rng_r_oracle.R draws
+# from R's default Mersenne-Twister stream on the SAME machine.
+# ---------------------------------------------------------------------------
+_RNG_R_ORACLE = Path(__file__).parent / "scripts" / "rng_r_oracle.R"
+
+
+def run_rng_r_oracle(seed, cases, workdir) -> dict:
+    """Evaluate R's `set.seed(seed); <rcall>` for each case; return ``{name:
+    np.ndarray}``.
+
+    ``cases``: iterable of ``(name, rcall, params)`` where ``rcall`` is an R
+    expression producing a numeric vector and ``params`` is a list of f64 arrays
+    exposed to it as ``p0``, ``p1``, ... (written as raw little-endian f64 so R
+    sees the exact bits the Rust/Python sides use). The seed is shared, so the
+    three implementations draw the identical MT stream.
+    """
+    workdir = str(workdir)
+    os.makedirs(workdir, exist_ok=True)
+    spec_lines = [str(int(seed))]
+    for case in cases:
+        name, rcall, params = case[0], case[1], case[2]
+        for i, a in enumerate(params):
+            np.ascontiguousarray(a, dtype="<f8").ravel().tofile(
+                os.path.join(workdir, f"{name}__{i}.bin"))
+        spec_lines.append(f"{name}|{rcall}|{len(params)}")
+    (Path(workdir) / "spec.txt").write_text("\n".join(spec_lines) + "\n")
+
+    subprocess.run(
+        ["Rscript", str(_RNG_R_ORACLE), workdir],
+        stdin=subprocess.DEVNULL, check=True, timeout=300,
+        capture_output=True, text=True,
+    )
+
+    return {case[0]: np.fromfile(os.path.join(workdir, f"{case[0]}.out.bin"),
+                                 dtype="<f8")
+            for case in cases}
