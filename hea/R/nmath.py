@@ -32,6 +32,10 @@ _nat_pnorm = native_fn("pnorm")
 _nat_qnorm = native_fn("qnorm")
 _nat_dnorm = native_fn("dnorm")
 
+# name -> numpy-vectorized pure-Python kernel, used by _disp as the no-native
+# fallback (populated at end of module, after the kernels are defined).
+_PY_VEC = {}
+
 
 def _norm_native(nat_fn, x, mu, sigma, flags):
     """Broadcast (x, mu, sigma), run the native norm kernel, reshape. The native
@@ -72,14 +76,22 @@ def _disp(name, scalar_fn, num_args, flags=()):
     """
     nat_fn = native_fn(name)
     arrs = [np.asarray(a, dtype=float) for a in num_args]
+    scalar = all(a.ndim == 0 for a in arrs)
     if nat_fn is not None:
-        if all(a.ndim == 0 for a in arrs):
+        if scalar:
             r = nat_fn(*[a.reshape(1) for a in arrs], *flags)
             return float(r[0])
         barr = np.broadcast_arrays(*arrs)
         shape = barr[0].shape
         flat = [np.ascontiguousarray(a.reshape(-1)) for a in barr]
         return nat_fn(*flat, *flags).reshape(shape)
+    # No native extension: use the numpy-vectorized pure-Python kernel if one is
+    # registered (bit-identical, ~C-speed); else the scalar loop (the bratio /
+    # Newton-quantile kernels are not vectorizable cheaply — see plan §5).
+    py_vec = _PY_VEC.get(name)
+    if py_vec is not None:
+        r = py_vec(*num_args, *flags)
+        return float(r) if scalar else r
     return _vec(lambda *a: scalar_fn(*a, *flags), *num_args)
 
 
@@ -4171,3 +4183,644 @@ def qexp(p, scale, lower_tail=True, log_p=False):
     if p == _dt0(lower_tail, log_p):
         return 0.
     return -scale * _R_DT_Clog(p, lower_tail, log_p)
+
+
+# ============================================================================
+# numpy-vectorized pure-Python fallbacks (bit-identical to the scalar kernels;
+# used by _disp when the native Rust extension is absent). Same float-op order,
+# masked per-element convergence. The TOMS-708 incomplete-beta core (pbeta ->
+# pt/pf/pbinom) and the Newton quantiles (qgamma/qbeta) are NOT vectorized
+# (deeply branched + per-element convergence) and keep the scalar loop.
+# ============================================================================
+
+def dgamma_vec(x, shape, scale, give_log=False):
+    """Vectorised :func:`dgamma` over broadcast (x, shape, scale)."""
+    x, shape, scale = np.broadcast_arrays(
+        np.asarray(x, dtype=float), np.asarray(shape, dtype=float),
+        np.asarray(scale, dtype=float))
+    rd0 = _NEGINF if give_log else 0.0
+    out = np.full(x.shape, np.nan)
+    ok = ~((shape < 0) | (scale <= 0))
+    s0 = ok & (shape == 0)
+    out[s0] = np.where(x[s0] == 0.0, _INF, rd0)
+    ok = ok & ~s0
+    out[ok & (x < 0)] = rd0
+    ok = ok & (x >= 0)
+    xz = ok & (x == 0.0)
+    if xz.any():
+        sh = shape[xz]
+        out[xz] = np.where(sh < 1, _INF, np.where(
+            sh > 1, rd0, (-np.log(scale[xz])) if give_log else 1.0 / scale[xz]))
+    pos = ok & (x > 0)
+    lt1 = pos & (shape < 1)
+    ge1 = pos & (shape >= 1)
+    if lt1.any():
+        sh, xm, sc = shape[lt1], x[lt1], scale[lt1]
+        pr = _dpois_raw(sh, xm / sc, give_log)
+        if give_log:
+            sx = sh / xm
+            out[lt1] = pr + np.where(np.isfinite(sx),
+                                     np.log(np.where(np.isfinite(sx), sx, 1.0)),
+                                     np.log(sh) - np.log(xm))
+        else:
+            out[lt1] = pr * sh / xm
+    if ge1.any():
+        sh, xm, sc = shape[ge1], x[ge1], scale[ge1]
+        pr = _dpois_raw(sh - 1.0, xm / sc, give_log)
+        out[ge1] = (pr - np.log(sc)) if give_log else pr / sc
+    return out
+
+
+_PY_VEC["dgamma"] = dgamma_vec
+
+
+def _R_Log1_Exp_vec(x):
+    x = np.asarray(x, dtype=float)
+    return np.where(x > -_M_LN2, np.log(-np.expm1(x)), np.log1p(-np.exp(x)))
+
+
+def _logcf_vec(x, i, d, eps):
+    """Vectorised :func:`_logcf` (x array; i, d, eps scalar). Masked CF."""
+    x = np.asarray(x, dtype=float)
+    shp = x.shape
+    c1 = np.full(shp, 2.0 * d)
+    c2 = np.full(shp, i + d)
+    c4 = np.full(shp, (i + d) + d)
+    a1 = np.full(shp, i + d)
+    b1 = i * ((i + d) - i * x)
+    b2 = d * d * x
+    a2 = c4 * c2 - b2
+    b2 = c4 * b1 - i * b2
+    sf = _PG_SCALEFACTOR
+    for _ in range(100000):
+        m = np.abs(a2 * b1 - a1 * b2) > np.abs(eps * b1 * b2)
+        if not m.any():
+            break
+        c3 = c2 * c2 * x
+        c2 = np.where(m, c2 + d, c2)
+        c4 = np.where(m, c4 + d, c4)
+        a1 = np.where(m, c4 * a2 - c3 * a1, a1)
+        b1 = np.where(m, c4 * b2 - c3 * b1, b1)
+        c3 = c1 * c1 * x
+        c1 = np.where(m, c1 + d, c1)
+        c4 = np.where(m, c4 + d, c4)
+        a2 = np.where(m, c4 * a1 - c3 * a2, a2)
+        b2 = np.where(m, c4 * b1 - c3 * b2, b2)
+        big = m & (np.abs(b2) > sf)
+        sml = m & (np.abs(b2) < 1.0 / sf)
+        if big.any():
+            a1 = np.where(big, a1 / sf, a1)
+            b1 = np.where(big, b1 / sf, b1)
+            a2 = np.where(big, a2 / sf, a2)
+            b2 = np.where(big, b2 / sf, b2)
+        if sml.any():
+            a1 = np.where(sml, a1 * sf, a1)
+            b1 = np.where(sml, b1 * sf, b1)
+            a2 = np.where(sml, a2 * sf, a2)
+            b2 = np.where(sml, b2 * sf, b2)
+    return a2 / b2
+
+
+def _log1pmx_vec(x):
+    x = np.asarray(x, dtype=float)
+    out = np.empty(x.shape)
+    far = (x > 1) | (x < -0.79149064)
+    out[far] = np.log1p(x[far]) - x[far]
+    near = ~far
+    if near.any():
+        xr = x[near]
+        r = xr / (2 + xr)
+        y = r * r
+        res = np.empty(xr.shape)
+        small = np.abs(xr) < 1e-2
+        if small.any():
+            two = 2.0
+            ys, xs, rs = y[small], xr[small], r[small]
+            res[small] = rs * ((((two / 9 * ys + two / 7) * ys + two / 5) * ys
+                                + two / 3) * ys - xs)
+        big = ~small
+        if big.any():
+            res[big] = r[big] * (2 * y[big] * _logcf_vec(y[big], 3, 2, 1e-14) - xr[big])
+        out[near] = res
+    return out
+
+
+def _lgamma1p_vec(a):
+    a = np.asarray(a, dtype=float)
+    out = np.empty(a.shape)
+    big = np.abs(a) >= 0.5
+    out[big] = _lgammafn_arr(a[big] + 1)
+    sm = ~big
+    if sm.any():
+        am = a[sm]
+        eulers = 0.5772156649015328606065120900824024
+        c = 0.2273736845824652515226821577978691e-12
+        lgam = c * _logcf_vec(-am / 2, 42, 1, 1e-14)
+        for i in range(39, -1, -1):
+            lgam = _LGAMMA1P_COEFFS[i] - am * lgam
+        out[sm] = (am * lgam - eulers) * am - _log1pmx_vec(am)
+    return out
+
+
+def _dpois_wrap_vec(x_plus_1, lam, give_log):
+    x_plus_1, lam = np.broadcast_arrays(np.asarray(x_plus_1, float), np.asarray(lam, float))
+    out = np.empty(x_plus_1.shape)
+    notfin = ~np.isfinite(lam)
+    out[notfin] = _NEGINF if give_log else 0.0
+    m = ~notfin
+    big_x = m & (x_plus_1 > 1)
+    if big_x.any():
+        out[big_x] = _dpois_raw(x_plus_1[big_x] - 1, lam[big_x], give_log)
+    rest = m & ~big_x
+    cut = rest & (lam > np.abs(x_plus_1 - 1) * _M_CUTOFF)
+    if cut.any():
+        v = -lam[cut] - _lgammafn_arr(x_plus_1[cut])
+        out[cut] = v if give_log else np.exp(v)
+    last = rest & ~cut
+    if last.any():
+        dd = _dpois_raw(x_plus_1[last], lam[last], give_log)
+        xl = x_plus_1[last] / lam[last]
+        out[last] = (dd + np.log(xl)) if give_log else dd * xl
+    return out
+
+
+def _pgamma_smallx_vec(x, alph, lower_tail, log_p):
+    x, alph = np.broadcast_arrays(np.asarray(x, float), np.asarray(alph, float))
+    sm = np.zeros(x.shape)
+    c = np.array(alph, dtype=float)
+    n = np.zeros(x.shape)
+    active = np.ones(x.shape, dtype=bool)
+    for _ in range(100000):
+        if not active.any():
+            break
+        n = np.where(active, n + 1, n)
+        c = np.where(active, c * (-x / n), c)
+        term = c / (alph + n)
+        sm = np.where(active, sm + term, sm)
+        active = active & (np.abs(term) > _DBL_EPSILON * np.abs(sm))
+    if lower_tail:
+        f1 = np.log1p(sm) if log_p else 1 + sm
+        f2 = np.empty(x.shape)
+        a_gt1 = alph > 1
+        if a_gt1.any():
+            t = _dpois_raw(alph[a_gt1], x[a_gt1], log_p)
+            f2[a_gt1] = (t + x[a_gt1]) if log_p else (t * np.exp(x[a_gt1]))
+        rest = ~a_gt1
+        if rest.any():
+            if log_p:
+                f2[rest] = alph[rest] * np.log(x[rest]) - _lgamma1p_vec(alph[rest])
+            else:
+                f2[rest] = np.power(x[rest], alph[rest]) / np.exp(_lgamma1p_vec(alph[rest]))
+        return (f1 + f2) if log_p else (f1 * f2)
+    lf2 = alph * np.log(x) - _lgamma1p_vec(alph)
+    if log_p:
+        return _R_Log1_Exp_vec(np.log1p(sm) + lf2)
+    f1m1 = sm
+    f2m1 = np.expm1(lf2)
+    return -(f1m1 + f2m1 + f1m1 * f2m1)
+
+
+def _pd_upper_series_vec(x, y, log_p):
+    x, y = np.broadcast_arrays(np.asarray(x, float), np.asarray(y, float))
+    y = y.copy()
+    term = x / y
+    sm = term.copy()
+    active = np.ones(x.shape, dtype=bool)
+    for _ in range(100000):
+        if not active.any():
+            break
+        y = np.where(active, y + 1, y)
+        term = np.where(active, term * (x / y), term)
+        sm = np.where(active, sm + term, sm)
+        active = active & (term > sm * _DBL_EPSILON)
+    return np.log(sm) if log_p else sm
+
+
+def _pd_lower_cf_vec(y, d):
+    y, d = np.broadcast_arrays(np.asarray(y, float), np.asarray(d, float))
+    shp = y.shape
+    sf = _PG_SCALEFACTOR
+    out = np.empty(shp)
+    zero = y == 0.0
+    out[zero] = 0.0
+    f0 = y / d
+    early = (~zero) & (np.abs(y - 1) < np.abs(d) * _DBL_EPSILON)
+    out[early] = f0[early]
+    act = (~zero) & (~early)
+    f0 = np.where(f0 > 1.0, 1.0, f0)
+    c2 = y.copy()
+    c4 = d.copy()
+    a1 = np.zeros(shp)
+    b1 = np.ones(shp)
+    a2 = y.copy()
+    b2 = d.copy()
+    for _ in range(100000):
+        resc = act & (b2 > sf)
+        if not resc.any():
+            break
+        a1 = np.where(resc, a1 / sf, a1)
+        b1 = np.where(resc, b1 / sf, b1)
+        a2 = np.where(resc, a2 / sf, a2)
+        b2 = np.where(resc, b2 / sf, b2)
+    of = np.full(shp, -1.0)
+    f = np.zeros(shp)
+    converged = np.zeros(shp, dtype=bool)
+    i = 0.0
+    for _ in range(100001):
+        run = act & ~converged
+        if not run.any():
+            break
+        i += 1.0
+        c2 = np.where(run, c2 - 1, c2)
+        c3 = i * c2
+        c4 = np.where(run, c4 + 2, c4)
+        a1 = np.where(run, c4 * a2 + c3 * a1, a1)
+        b1 = np.where(run, c4 * b2 + c3 * b1, b1)
+        i += 1.0
+        c2 = np.where(run, c2 - 1, c2)
+        c3 = i * c2
+        c4 = np.where(run, c4 + 2, c4)
+        a2 = np.where(run, c4 * a1 + c3 * a2, a2)
+        b2 = np.where(run, c4 * b1 + c3 * b2, b2)
+        big = run & (b2 > sf)
+        if big.any():
+            a1 = np.where(big, a1 / sf, a1)
+            b1 = np.where(big, b1 / sf, b1)
+            a2 = np.where(big, a2 / sf, a2)
+            b2 = np.where(big, b2 / sf, b2)
+        nz = run & (b2 != 0.0)
+        fnew = np.where(nz, a2 / np.where(b2 == 0.0, 1.0, b2), f)
+        conv = nz & (np.abs(fnew - of) <= _DBL_EPSILON * np.maximum(f0, np.abs(fnew)))
+        f = np.where(nz, fnew, f)
+        of = np.where(nz, fnew, of)
+        converged = converged | conv
+    out[act] = f[act]
+    return out
+
+
+def _pd_lower_series_vec(lam, y):
+    lam, y = np.broadcast_arrays(np.asarray(lam, float), np.asarray(y, float))
+    y = y.copy()
+    term = np.ones(y.shape)
+    sm = np.zeros(y.shape)
+    active = (y >= 1) & (term > sm * _DBL_EPSILON)
+    for _ in range(100000):
+        if not active.any():
+            break
+        term = np.where(active, term * (y / lam), term)
+        sm = np.where(active, sm + term, sm)
+        y = np.where(active, y - 1, y)
+        active = (y >= 1) & (term > sm * _DBL_EPSILON)
+    nf = y != np.floor(y)
+    if nf.any():
+        f = _pd_lower_cf_vec(y[nf], lam[nf] + 1 - y[nf])
+        sm[nf] = sm[nf] + term[nf] * f
+    return sm
+
+
+def _dpnorm_vec(x, lower_tail, lp):
+    x, lp = np.broadcast_arrays(np.asarray(x, float), np.asarray(lp, float))
+    x = x.copy()
+    lt = np.broadcast_to(lower_tail, x.shape).copy()
+    neg = x < 0
+    x = np.where(neg, -x, x)
+    lt = np.where(neg, ~lt, lt)
+    out = np.empty(x.shape)
+    series = (x > 10) & (~lt)
+    if series.any():
+        xs = x[series]
+        x2 = xs * xs
+        term = 1 / xs
+        sm = term.copy()
+        i = 1.0
+        active = np.ones(xs.shape, dtype=bool)
+        for _ in range(100000):
+            term = np.where(active, term * (-i / x2), term)
+            sm = np.where(active, sm + term, sm)
+            i += 2.0
+            active = active & (np.abs(term) > _DBL_EPSILON * sm)
+            if not active.any():
+                break
+        out[series] = 1 / sm
+    rest = ~series
+    if rest.any():
+        dd = dnorm5_vec(x[rest], 0.0, 1.0, False)
+        out[rest] = dd / np.exp(lp[rest])
+    return out
+
+
+def _ppois_asymp_vec(x, lam, lower_tail, log_p):
+    x, lam = np.broadcast_arrays(np.asarray(x, float), np.asarray(lam, float))
+    dfm = lam - x
+    pt_ = -_log1pmx_vec(dfm / x)
+    s2pt = np.sqrt(2 * x * pt_)
+    s2pt = np.where(dfm < 0, -s2pt, s2pt)
+    res12 = np.zeros(x.shape)
+    res1_ig = np.sqrt(x)
+    res1_term = res1_ig.copy()
+    res2_ig = s2pt.copy()
+    res2_term = s2pt.copy()
+    for i in range(1, 8):
+        res12 = res12 + res1_ig * _PPA_COEFS_A[i]
+        res12 = res12 + res2_ig * _PPA_COEFS_B[i]
+        res1_term = res1_term * (pt_ / i)
+        res2_term = res2_term * (2 * pt_ / (2 * i + 1))
+        res1_ig = res1_ig / x + res1_term
+        res2_ig = res2_ig / x + res2_term
+    elfb = x.copy()
+    elfb_term = np.ones(x.shape)
+    for i in range(1, 8):
+        elfb = elfb + elfb_term * _PPA_COEFS_B[i]
+        elfb_term = elfb_term / x
+    if not lower_tail:
+        elfb = -elfb
+    f = res12 / elfb
+    np_ = pnorm5_vec(s2pt, 0.0, 1.0, not lower_tail, log_p)
+    if log_p:
+        n_d_over_p = _dpnorm_vec(s2pt, not lower_tail, np_)
+        return np_ + np.log1p(f * n_d_over_p)
+    nd = dnorm5_vec(s2pt, 0.0, 1.0, False)
+    return np_ + f * nd
+
+
+def pgamma_raw_vec(x, alph, lower_tail, log_p):
+    x, alph = np.broadcast_arrays(np.asarray(x, float), np.asarray(alph, float))
+    out = np.empty(x.shape)
+    le0 = x <= 0
+    out[le0] = _dt0(lower_tail, log_p)
+    infm = (~le0) & (x >= _INF)
+    out[infm] = _dt1(lower_tail, log_p)
+    rest = (~le0) & (~infm)
+    b_small = rest & (x < 1)
+    b_upper = rest & (~b_small) & (x <= alph - 1) & (x < 0.8 * (alph + 50))
+    b_lower = rest & (~b_small) & (~b_upper) & (alph - 1 < x) & (alph < 0.8 * (x + 50))
+    b_asymp = rest & (~b_small) & (~b_upper) & (~b_lower)
+    if b_small.any():
+        out[b_small] = _pgamma_smallx_vec(x[b_small], alph[b_small], lower_tail, log_p)
+    if b_upper.any():
+        xs, al = x[b_upper], alph[b_upper]
+        sm = _pd_upper_series_vec(xs, al, log_p)
+        dd = _dpois_wrap_vec(al, xs, log_p)
+        if not lower_tail:
+            out[b_upper] = _R_Log1_Exp_vec(dd + sm) if log_p else 1 - dd * sm
+        else:
+            out[b_upper] = (sm + dd) if log_p else sm * dd
+    if b_lower.any():
+        xs, al = x[b_lower], alph[b_lower]
+        dd = _dpois_wrap_vec(al, xs, log_p)
+        sm = np.empty(xs.shape)
+        a_lt1 = al < 1
+        if a_lt1.any():
+            xa, aa = xs[a_lt1], al[a_lt1]
+            sub = np.empty(xa.shape)
+            cond = xa * _DBL_EPSILON > 1 - aa
+            if cond.any():
+                sub[cond] = 0.0 if log_p else 1.0
+            nc = ~cond
+            if nc.any():
+                fcf = _pd_lower_cf_vec(aa[nc], xa[nc] - (aa[nc] - 1)) * xa[nc] / aa[nc]
+                sub[nc] = np.log(fcf) if log_p else fcf
+            sm[a_lt1] = sub
+        a_ge1 = ~a_lt1
+        if a_ge1.any():
+            s = _pd_lower_series_vec(xs[a_ge1], al[a_ge1] - 1)
+            sm[a_ge1] = np.log1p(s) if log_p else 1 + s
+        if not lower_tail:
+            out[b_lower] = (sm + dd) if log_p else sm * dd
+        else:
+            out[b_lower] = _R_Log1_Exp_vec(dd + sm) if log_p else 1 - dd * sm
+    if b_asymp.any():
+        out[b_asymp] = _ppois_asymp_vec(alph[b_asymp] - 1, x[b_asymp], not lower_tail, log_p)
+    if not log_p:
+        small_res = rest & (out < _DBL_MIN / _DBL_EPSILON)
+        if small_res.any():
+            out[small_res] = np.exp(
+                pgamma_raw_vec(x[small_res], alph[small_res], lower_tail, True))
+    return out
+
+
+def pgamma_vec(x, alph, scale, lower_tail=True, log_p=False):
+    x, alph, scale = np.broadcast_arrays(
+        np.asarray(x, float), np.asarray(alph, float), np.asarray(scale, float))
+    out = np.empty(x.shape)
+    nan = np.isnan(x) | np.isnan(alph) | np.isnan(scale)
+    out[nan] = (x + alph + scale)[nan]
+    bad = (~nan) & ((alph < 0) | (scale <= 0))
+    out[bad] = _NAN
+    ok = (~nan) & (~bad)
+    if ok.any():
+        xs = x[ok] / scale[ok]
+        al = alph[ok]
+        res = np.empty(xs.shape)
+        xnan = np.isnan(xs)
+        res[xnan] = xs[xnan]
+        a0 = (~xnan) & (al == 0)
+        if a0.any():
+            res[a0] = np.where(xs[a0] <= 0, _dt0(lower_tail, log_p), _dt1(lower_tail, log_p))
+        main = (~xnan) & (al != 0)
+        if main.any():
+            res[main] = pgamma_raw_vec(xs[main], al[main], lower_tail, log_p)
+        out[ok] = res
+    return out
+
+
+def ppois_vec(x, lam, lower_tail=True, log_p=False):
+    x, lam = np.broadcast_arrays(np.asarray(x, float), np.asarray(lam, float))
+    out = np.empty(x.shape)
+    nan = np.isnan(x) | np.isnan(lam)
+    out[nan] = (x + lam)[nan]
+    bad = (~nan) & (lam < 0)
+    out[bad] = _NAN
+    ok = (~nan) & (~bad)
+    xneg = ok & (x < 0)
+    out[xneg] = _dt0(lower_tail, log_p)
+    lz = ok & (~xneg) & (lam == 0)
+    out[lz] = _dt1(lower_tail, log_p)
+    xinf = ok & (~xneg) & (lam != 0) & (~np.isfinite(x))
+    out[xinf] = _dt1(lower_tail, log_p)
+    main = ok & (~xneg) & (lam != 0) & np.isfinite(x)
+    if main.any():
+        xf = np.floor(x[main] + 1e-7)
+        out[main] = pgamma_vec(lam[main], xf + 1, 1.0, not lower_tail, log_p)
+    return out
+
+
+_PY_VEC["pgamma"] = pgamma_vec
+_PY_VEC["ppois"] = ppois_vec
+
+
+def _chebyshev_eval_vec(x, a, n):
+    x = np.asarray(x, dtype=float)
+    twox = x * 2
+    b2 = np.zeros(x.shape)
+    b1 = np.zeros(x.shape)
+    b0 = np.zeros(x.shape)
+    for i in range(1, n + 1):
+        b2 = b1
+        b1 = b0
+        b0 = twox * b1 - b2 + a[n - i]
+    out = (b0 - b2) * 0.5
+    return np.where((x < -1.1) | (x > 1.1), np.nan, out)
+
+
+def _lgammacor_vec(x):
+    x = np.asarray(x, dtype=float)
+    out = np.where(x < 10, np.nan, 1.0 / (x * 12))
+    small = (x >= 10) & (x < _LGC_XBIG)
+    if small.any():
+        tmp = 10 / x[small]
+        out[small] = _chebyshev_eval_vec(tmp * tmp * 2 - 1, _ALGMCS, _NALGM) / x[small]
+    return out
+
+
+def gammafn_vec(x):
+    """Vectorised :func:`gammafn`. x <= 0 routed to the scalar kernel (not hit by
+    lbeta/dbeta, which only pass positive args)."""
+    x = np.asarray(x, dtype=float)
+    out = np.empty(x.shape)
+    neg = ~(x > 0)
+    if neg.any():
+        out[neg] = np.array([gammafn(float(v)) for v in np.atleast_1d(x[neg])]).reshape(x[neg].shape)
+    pos = x > 0
+    if pos.any():
+        xs = x[pos]
+        res = np.empty(xs.shape)
+        le10 = xs <= 10
+        if le10.any():
+            xl = xs[le10]
+            n = np.trunc(xl).astype(np.int64)
+            frac = xl - n
+            n = n - 1
+            r = _chebyshev_eval_vec(frac * 2 - 1, _GAMCS, _NGAM) + 0.9375
+            npos = n[n > 0]
+            maxn = int(npos.max()) if npos.size else 0
+            for i in range(1, maxn + 1):
+                r = np.where(n >= i, r * (frac + i), r)
+            ng = n < 0
+            if ng.any():
+                negn = -n
+                xsml = ng & (frac < _GAM_XSML)
+                minn = int(negn[ng].max()) if ng.any() else 0
+                for i in range(0, minn):
+                    r = np.where(ng & (negn > i), r / (xl + i), r)
+                r = np.where(xsml, _INF, r)
+            res[le10] = r
+        gt10 = ~le10
+        if gt10.any():
+            xg = xs[gt10]
+            v = np.where(xg > _GAM_XMAX, _INF, 0.0)
+            main = xg <= _GAM_XMAX
+            if main.any():
+                ym = xg[main]
+                vv = np.empty(ym.shape)
+                intfac = (ym <= 50) & (ym == np.trunc(ym))
+                if intfac.any():
+                    yi = np.trunc(ym[intfac]).astype(np.int64)
+                    prod = np.ones(yi.shape)
+                    maxk = int(yi.max()) if yi.size else 0
+                    for k in range(2, maxk):
+                        prod = np.where(yi > k, prod * k, prod)
+                    vv[intfac] = prod
+                els = ~intfac
+                if els.any():
+                    ye = ym[els]
+                    half = (2 * ye) == np.trunc(2 * ye)
+                    corr = np.where(half, _stirlerr(ye), _lgammacor_vec(ye))
+                    vv[els] = np.exp((ye - 0.5) * np.log(ye) - ye + _M_LN_SQRT_2PI + corr)
+                v[main] = vv
+            res[gt10] = v
+        out[pos] = res
+    return out
+
+
+def lbeta_vec(a, b):
+    a, b = np.broadcast_arrays(np.asarray(a, float), np.asarray(b, float))
+    out = np.empty(a.shape)
+    nan = np.isnan(a) | np.isnan(b)
+    out[nan] = (a + b)[nan]
+    ok = ~nan
+    p = np.minimum(a, b)
+    q = np.maximum(a, b)
+    out[ok & (p < 0)] = np.nan
+    out[ok & (p == 0)] = _INF
+    out[ok & (p > 0) & (~np.isfinite(q))] = _NEGINF
+    m = ok & (p > 0) & np.isfinite(q)
+    if m.any():
+        pp, qq = p[m], q[m]
+        r = np.empty(pp.shape)
+        b1 = pp >= 10
+        if b1.any():
+            pv, qv = pp[b1], qq[b1]
+            corr = _lgammacor_vec(pv) + _lgammacor_vec(qv) - _lgammacor_vec(pv + qv)
+            r[b1] = (np.log(qv) * -0.5 + _M_LN_SQRT_2PI + corr
+                     + (pv - 0.5) * np.log(pv / (pv + qv)) + qv * np.log1p(-pv / (pv + qv)))
+        b2 = (~b1) & (qq >= 10)
+        if b2.any():
+            pv, qv = pp[b2], qq[b2]
+            corr = _lgammacor_vec(qv) - _lgammacor_vec(pv + qv)
+            r[b2] = (_lgammafn_arr(pv) + corr + pv - pv * np.log(pv + qv)
+                     + (qv - 0.5) * np.log1p(-pv / (pv + qv)))
+        b3 = (~b1) & (~b2) & (pp < 1e-306)
+        if b3.any():
+            pv, qv = pp[b3], qq[b3]
+            r[b3] = _lgammafn_arr(pv) + (_lgammafn_arr(qv) - _lgammafn_arr(pv + qv))
+        b4 = (~b1) & (~b2) & (pp >= 1e-306)
+        if b4.any():
+            pv, qv = pp[b4], qq[b4]
+            r[b4] = np.log(gammafn_vec(pv) * (gammafn_vec(qv) / gammafn_vec(pv + qv)))
+        out[m] = r
+    return out
+
+
+def dbeta_vec(x, a, b, give_log=False):
+    x, a, b = np.broadcast_arrays(
+        np.asarray(x, float), np.asarray(a, float), np.asarray(b, float))
+    rd0 = _NEGINF if give_log else 0.0
+    out = np.full(x.shape, np.nan)
+    nan = np.isnan(x) | np.isnan(a) | np.isnan(b)
+    out[nan] = (x + a + b)[nan]
+    ok = (~nan) & (~((a < 0) | (b < 0)))
+    oob = ok & ((x < 0) | (x > 1))
+    out[oob] = rd0
+    ok2 = ok & (~oob)
+    edge = ok2 & ((a == 0) | (b == 0) | (~np.isfinite(a)) | (~np.isfinite(b)))
+    if edge.any():
+        xe, ae, be = x[edge], a[edge], b[edge]
+        both0 = (ae == 0) & (be == 0)
+        e_a = (~both0) & ((ae == 0) | (ae / be == 0))
+        e_b = (~both0) & (~e_a) & ((be == 0) | (be / ae == 0))
+        e_o = (~both0) & (~e_a) & (~e_b)
+        ve = np.full(xe.shape, rd0)
+        ve = np.where(both0, np.where((xe == 0) | (xe == 1), _INF, rd0), ve)
+        ve = np.where(e_a, np.where(xe == 0, _INF, rd0), ve)
+        ve = np.where(e_b, np.where(xe == 1, _INF, rd0), ve)
+        ve = np.where(e_o, np.where(xe == 0.5, _INF, rd0), ve)
+        out[edge] = ve
+    main = ok2 & (~edge)
+    if main.any():
+        xm, am, bm = x[main], a[main], b[main]
+        lval = np.empty(xm.shape)
+        small = (am <= 2) | (bm <= 2)
+        # x in {0,1} feeds log(0) into the formula but is overwritten below by
+        # the boundary values — silence the (discarded) warnings.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            if small.any():
+                lval[small] = ((am[small] - 1) * np.log(xm[small])
+                               + (bm[small] - 1) * np.log1p(-xm[small])
+                               - lbeta_vec(am[small], bm[small]))
+            big = ~small
+            if big.any():
+                lval[big] = (np.log(am[big] + bm[big] - 1)
+                             + _dbinom_raw(am[big] - 1, am[big] + bm[big] - 2,
+                                           xm[big], 1 - xm[big], True))
+            val = lval if give_log else np.exp(lval)
+        x0, x1 = xm == 0, xm == 1
+        val = np.where(x0 & (am > 1), rd0, val)
+        val = np.where(x0 & (am < 1), _INF, val)
+        val = np.where(x1 & (bm > 1), rd0, val)
+        val = np.where(x1 & (bm < 1), _INF, val)
+        out[main] = val
+    return out
+
+
+_PY_VEC["dbeta"] = dbeta_vec
