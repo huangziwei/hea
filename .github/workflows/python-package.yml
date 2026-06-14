@@ -1,5 +1,8 @@
-# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
+# Installs Python + Rust, builds the hea._rs extension, and runs the test suite
+# against the Rust-backed (active) numeric path. The pure-Python nmath path is
+# still exercised inside the run via tests/test_rs_parity.py, which compares the
+# Rust kernels against the Python fallback element-for-element.
+# See: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
 
 name: Python package
 
@@ -13,6 +16,8 @@ jobs:
   build:
 
     runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -21,9 +26,15 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
+    - name: Set up Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+    - name: Cache cargo build (rust/)
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: rust
     - name: Install SuiteSparse (CHOLMOD backend)
       # scikit-sparse builds against libsuitesparse-dev. Without it, hea
       # falls back to scipy.sparse.linalg.splu, whose different sparse
@@ -35,6 +46,22 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         python -m pip install '.[fast]' --group dev
-    - name: Test with pytest
+    - name: Build hea._rs (Rust extension) into the source tree
+      # build-backend is still hatchling, so `pip install .` ships no Rust.
+      # Build the crate with maturin and copy the compiled module into hea/,
+      # where pytest's `pythonpath = ["."]` import resolution finds it
+      # (mirrors rust/rebuild.sh). abi3-py310 means one build is portable
+      # across the whole 3.10–3.14 matrix.
       run: |
-        pytest
+        python -m pip install 'maturin==1.14.0'
+        maturin build --release --interpreter python -o dist
+        whl="$(ls -t dist/hea-*.whl | head -1)"
+        python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall('dist/extract')" "$whl"
+        cp dist/extract/hea/_rs*.so hea/
+        ls -l hea/_rs*.so
+    - name: Verify the Rust extension is active (no silent fallback)
+      # Hard-fail if hea._rs is missing: otherwise the parity tests would
+      # importorskip and the suite would quietly green on the numpy path.
+      run: python -c "import hea, hea._rs; print('hea:', hea.__file__); print('hea._rs:', hea._rs.__file__)"
+    - name: Test with pytest
+      run: pytest
