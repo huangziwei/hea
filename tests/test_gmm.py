@@ -788,6 +788,107 @@ def test_bates_3_2_sleepstudy_LRT_fm07_vs_fm06(fm06ML, fm07ML):
 
 
 # ---------------------------------------------------------------------------
+# lmer control parity (gmm-lmer-parity #1-#3, #5): optimizer / optCtrl / start
+# are honored on the LMM path. Each was previously read only by the GLMM
+# branch and silently dropped for a Gaussian-identity (lmer) fit.
+# ---------------------------------------------------------------------------
+
+_SLEEP_F = "Reaction ~ Days + (Days|Subject)"
+# lme4 2.0-2 nloptwrap REML reference (16 sig figs; same pin as
+# test_sleepstudy_reml_theta_matches_lme4_nloptwrap above).
+_SLEEP_THETA = (0.9667417739793641, 0.01516905889466504, 0.2309099532076919)
+_SLEEP_SIGMA = 25.591795721655899
+
+
+@pytest.fixture(scope="module")
+def sleepstudy_data():
+    return load_dataset("lme4", "sleepstudy")
+
+
+def test_lmm_optimizer_nloptwrap_explicit_accepted(sleepstudy_data):
+    """#5: control(optimizer="nloptwrap") — lme4's lmer default — used to raise
+    NotImplementedError by name, even though the LMM path runs exactly it. Now
+    accepted and identical to the default fit."""
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True,
+            control={"optimizer": "nloptwrap"})
+    np.testing.assert_allclose(m.theta, _SLEEP_THETA, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.sigma, _SLEEP_SIGMA, rtol=0, atol=1e-6)
+
+
+@pytest.mark.parametrize("opt", ["bobyqa", "Nelder_Mead"])
+def test_lmm_optimizer_alternatives_converge_to_same_optimum(
+        sleepstudy_data, opt):
+    """#1: control(optimizer="bobyqa"/"Nelder_Mead") was silently ignored —
+    NLopt BOBYQA ran regardless. Now honored: the other two ported optimizers
+    minimize the SAME profiled deviance and land on the same θ̂/σ̂."""
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True, control={"optimizer": opt})
+    np.testing.assert_allclose(m.theta, _SLEEP_THETA, rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.sigma, _SLEEP_SIGMA, rtol=0, atol=1e-3)
+
+
+def test_lmm_optimizer_unsupported_raises(sleepstudy_data):
+    """#1: an un-ported optimizer must raise, not silently fall back to NLopt
+    BOBYQA."""
+    with pytest.raises(NotImplementedError, match="separate port"):
+        gmm(_SLEEP_F, sleepstudy_data, REML=True,
+            control={"optimizer": "nlminbwrap"})
+
+
+def test_lmm_start_theta_array_gives_valid_fit(sleepstudy_data):
+    """#3: start= (θ vector) was silently ignored (θ₀=identity always). A warm
+    start near the optimum now produces a correct fit."""
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True, start=np.array(_SLEEP_THETA))
+    np.testing.assert_allclose(m.theta, _SLEEP_THETA, rtol=0, atol=1e-4)
+
+
+def test_lmm_start_theta_dict_form(sleepstudy_data):
+    """#3: start={'theta': ...} — lme4's named-list form."""
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True,
+            start={"theta": list(_SLEEP_THETA)})
+    np.testing.assert_allclose(m.theta, _SLEEP_THETA, rtol=0, atol=1e-4)
+
+
+def test_lmm_start_is_actually_used(sleepstudy_data):
+    """#2+#3: a far start + a 2-evaluation cap leaves θ̂ pinned at that start —
+    proving start= is the optimizer's θ₀ (not the identity [1,0,1]) AND that
+    optCtrl's maxeval bites. If start were dropped, θ̂ would sit at the
+    identity start instead."""
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True,
+            start=np.array([5.0, 0.0, 5.0]),
+            control={"optCtrl": {"maxeval": 2}})
+    np.testing.assert_allclose(m.theta, [5.0, 0.0, 5.0], rtol=0, atol=1e-9)
+
+
+def test_lmm_start_bad_shape_raises(sleepstudy_data):
+    with pytest.raises(ValueError, match="shape"):
+        gmm(_SLEEP_F, sleepstudy_data, REML=True, start=np.array([1.0, 2.0]))
+
+
+def test_lmm_start_fixef_rejected(sleepstudy_data):
+    """#3: lmer profiles β out of the deviance, so a beta/fixef start has no
+    meaning and must raise rather than be silently dropped."""
+    with pytest.raises(ValueError, match="profiles"):
+        gmm(_SLEEP_F, sleepstudy_data, REML=True,
+            start={"theta": list(_SLEEP_THETA), "fixef": [0.0, 0.0]})
+
+
+def test_lmm_optctrl_maxeval_starves_optimizer(sleepstudy_data):
+    """#2: optCtrl was silently dropped on the LMM path. A tiny maxeval now
+    starves the optimizer so it stops far short of the optimum (much worse
+    REML criterion) — proof the knob is threaded through."""
+    full = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    capped = gmm(_SLEEP_F, sleepstudy_data, REML=True,
+                 control={"optCtrl": {"maxeval": 2}})
+    assert capped.REML_criterion > full.REML_criterion + 1.0
+
+
+def test_lmm_optctrl_unknown_key_raises(sleepstudy_data):
+    with pytest.raises(ValueError, match="unknown optCtrl key"):
+        gmm(_SLEEP_F, sleepstudy_data, REML=True,
+            control={"optCtrl": {"bogus": 1}})
+
+
+# ---------------------------------------------------------------------------
 # Ch 4: Building Linear Mixed Models
 # ---------------------------------------------------------------------------
 

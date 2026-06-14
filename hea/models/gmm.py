@@ -293,12 +293,16 @@ class _FitInputs:
     with lme4's R-flavoured names (``maxfun``, ``XtolRel``, ``FtolAbs``,
     ``FtolRel``, ``MinfMax``, ``verbose``). Mirrors ``glmerControl(optCtrl=)``."""
 
-    optimizer: tuple = ("bobyqa", "Nelder_Mead")
-    """Two-stage outer optimizer chain — ``glmerControl(optimizer=)``.
-    ``optimizer[0]`` runs Stage 0 (θ-only), ``optimizer[1]`` runs Stage 1
-    (θ+β); each is ``"bobyqa"`` or ``"Nelder_Mead"`` (both ported line-for-
-    line from minqa / lme4's ``optimizer.cpp``). lme4's glmer default is
-    ``c("bobyqa", "Nelder_Mead")``."""
+    optimizer: object = ("bobyqa", "Nelder_Mead")
+    """Outer optimizer. **glmer** (Laplace path): a two-stage chain —
+    ``glmerControl(optimizer=)`` — where ``optimizer[0]`` runs Stage 0 (θ-only)
+    and ``optimizer[1]`` runs Stage 1 (θ+β); each is ``"bobyqa"`` or
+    ``"Nelder_Mead"`` (both ported line-for-line from minqa / lme4's
+    ``optimizer.cpp``); lme4's glmer default is ``c("bobyqa", "Nelder_Mead")``.
+    **lmer** (Gaussian-identity LMM path): a single optimizer *name* string —
+    ``lmerControl(optimizer=)`` — one of ``"nloptwrap"`` (lme4's default; NLopt
+    LN_BOBYQA), ``"bobyqa"``, or ``"Nelder_Mead"``. A non-string here (the tuple
+    default, e.g. a direct construction) is read as the lmer default."""
 
     check_conv_grad: Optional[dict] = None
     """``glmerControl(check.conv.grad=)`` — ``{action, tol, relTol}`` for the
@@ -3915,6 +3919,50 @@ def _normalize_optimizer_chain(optimizer) -> list:
     return chain
 
 
+_LMER_PORTED_OPTIMIZERS = ("nloptwrap", "bobyqa", "Nelder_Mead")
+
+# lmer (Gaussian-identity LMM) control defaults. lme4 splits lmerControl
+# (lmerControl.R:65-185) from glmerControl: the default optimizer is the
+# single ``nloptwrap`` (NLopt LN_BOBYQA), ``restart_edge`` defaults TRUE, and
+# ``check.conv.nparmax`` is 10 (glmer's is 20). The glmer-only inner-loop keys
+# (tolPwrss / compDev / nAGQ0initStep / check.response.not.const) are carried
+# here inertly so the shared ``__init__`` plumbing still finds them; they have
+# no effect on the LMM fit path.
+_LMER_CONTROL_DEFAULTS = {
+    **_GLMER_CONTROL_DEFAULTS,
+    "optimizer": "nloptwrap",
+    "restart_edge": True,
+    "check.conv.nparmax": 10,
+}
+
+
+def _normalize_lmer_optimizer(optimizer) -> str:
+    """Normalize ``lmerControl(optimizer=)`` to a single ported optimizer name.
+
+    lme4's lmer runs ONE optimizer over the profiled deviance
+    (modular.R ``optimizeLmer``), default ``nloptwrap``. hea ports
+    ``nloptwrap`` (NLopt LN_BOBYQA — the bit-exact default), ``bobyqa``
+    (minqa), and ``Nelder_Mead`` (lme4's bounded NM). ``nlminbwrap`` /
+    ``optimx`` / custom function optimizers raise :class:`NotImplementedError`.
+    """
+    if isinstance(optimizer, str):
+        name = optimizer
+    else:
+        chain = list(optimizer)
+        if len(chain) != 1:
+            raise ValueError(
+                f"lmer uses a single optimizer; got {optimizer!r}"
+            )
+        name = chain[0]
+    if name not in _LMER_PORTED_OPTIMIZERS:
+        raise NotImplementedError(
+            f"optimizer={optimizer!r}: lmer supports "
+            f"{list(_LMER_PORTED_OPTIMIZERS)} (nloptwrap is lme4's default). "
+            f"nlminbwrap / optimx / custom functions need a separate port."
+        )
+    return name
+
+
 def _run_outer_stage(optimizer_name, devfun, x0, lb, ub, *,
                      xst, xtol_abs, nm_kwargs, bobyqa_kwargs=None):
     """Run one outer-optimizer stage, dispatching on ``optimizer_name``.
@@ -4169,6 +4217,40 @@ def _nm_kwargs_from_opt_ctrl(opt_ctrl) -> dict:
             raise ValueError(
                 f"unknown optCtrl key {key!r}; expected one of "
                 f"{sorted(_NM_OPT_CTRL_KEYS | _BOBYQA_OPT_CTRL_KEYS)}"
+            )
+    return out
+
+
+_NLOPT_OPT_CTRL_KEYS = {"maxeval", "ftol_abs", "ftol_rel", "xtol_abs",
+                        "xtol_rel", "algorithm"}
+
+
+def _nlopt_kwargs_from_opt_ctrl(opt_ctrl) -> dict:
+    """Translate lme4's ``nloptwrap`` ``optCtrl`` to :func:`_nlopt_ln_bobyqa`
+    kwargs. nloptwrap's control vocabulary (lme4 utilities.R:836-839) is
+    NLopt-flavoured — ``maxeval``, ``ftol_abs`` / ``ftol_rel``, ``xtol_abs`` /
+    ``xtol_rel`` — plus ``algorithm`` (only ``NLOPT_LN_BOBYQA``, lme4's lmer
+    default, is ported). Empty ``optCtrl`` → ``{}``, i.e. the lme4 defaults,
+    so the default fit stays byte-identical. Unknown keys raise.
+    """
+    if opt_ctrl is None or len(opt_ctrl) == 0:
+        return {}
+    out: dict = {}
+    for key, val in opt_ctrl.items():
+        if key == "maxeval":
+            out["maxeval"] = int(val)
+        elif key in ("ftol_abs", "ftol_rel", "xtol_abs", "xtol_rel"):
+            out[key] = float(val)
+        elif key == "algorithm":
+            if val != "NLOPT_LN_BOBYQA":
+                raise NotImplementedError(
+                    f"nloptwrap algorithm={val!r}: only 'NLOPT_LN_BOBYQA' "
+                    f"(lme4's lmer default) is ported"
+                )
+        else:
+            raise ValueError(
+                f"unknown optCtrl key {key!r} for nloptwrap; expected one of "
+                f"{sorted(_NLOPT_OPT_CTRL_KEYS)}"
             )
     return out
 
@@ -4559,6 +4641,72 @@ def _normalize_glmer_control(control) -> dict:
     return merged
 
 
+def _normalize_lmer_control(control) -> dict:
+    """Merge ``control=`` with lme4's ``lmerControl()`` defaults (the LMM /
+    Gaussian-identity path). Unknown keys raise :class:`ValueError`. The
+    ``optimizer`` entry is normalized to a single ported optimizer name
+    (``nloptwrap`` / ``bobyqa`` / ``Nelder_Mead``); others raise
+    :class:`NotImplementedError`.
+    """
+    if control is None:
+        merged = dict(_LMER_CONTROL_DEFAULTS)
+        merged["optCtrl"] = dict(merged["optCtrl"])  # don't share the default
+        return merged
+    if not isinstance(control, dict):
+        raise TypeError(
+            f"control= must be a dict; got {type(control).__name__}"
+        )
+    bad = set(control) - set(_LMER_CONTROL_DEFAULTS)
+    if bad:
+        raise ValueError(
+            f"unknown control keys: {sorted(bad)}; expected one of "
+            f"{sorted(_LMER_CONTROL_DEFAULTS)}"
+        )
+    merged = dict(_LMER_CONTROL_DEFAULTS)
+    merged["optCtrl"] = dict(merged["optCtrl"])
+    merged.update(control)
+    merged["optimizer"] = _normalize_lmer_optimizer(merged["optimizer"])
+    return merged
+
+
+def _lmer_start_theta(start, theta_shape) -> np.ndarray:
+    """Parse lmer ``start=`` to a θ₀ warm-start vector.
+
+    lme4's profiled LMM deviance is over θ only (β is profiled out), so
+    ``start`` is a θ vector (ndarray / sequence) or a dict carrying ``theta``
+    (alias ``par``). A ``beta`` / ``fixef`` component is glmer-only and raises
+    here — there is no β to warm-start on the LMM path. Mirrors lme4's
+    ``getStart`` (modular.R:472-533, lmer branch).
+    """
+    if isinstance(start, dict):
+        if "theta" in start and "par" in start:
+            raise ValueError("start= must not have both 'theta' and 'par' keys")
+        if "theta" in start or "par" in start:
+            theta0 = np.asarray(
+                start.get("theta", start.get("par")), dtype=float
+            ).copy()
+        else:
+            raise ValueError(
+                "lmer start= dict must supply 'theta' (or 'par'); the profiled "
+                "LMM deviance has no β to warm-start"
+            )
+        if "beta" in start or "fixef" in start:
+            raise ValueError(
+                "lmer profiles β out of the deviance; start= takes only "
+                "'theta'/'par', not 'beta'/'fixef'"
+            )
+        bad = set(start) - {"theta", "par"}
+        if bad:
+            raise ValueError(f"unrecognised start keys: {sorted(bad)}")
+    else:
+        theta0 = np.asarray(start, dtype=float).copy()
+    if theta0.shape != theta_shape:
+        raise ValueError(
+            f"start theta has shape {theta0.shape}; expected {theta_shape}"
+        )
+    return theta0
+
+
 class gmm:
     """Generalized mixed model — lme4's ``lmer`` + ``glmer`` under one class.
 
@@ -4662,13 +4810,18 @@ class gmm:
             self.formula = formula
             return
 
+        # lmer (Gaussian-identity LMM) vs glmer (any other family) split the
+        # control defaults, the optimizer surface, and the REML toggle below.
+        _is_gaussian_id = (family.name == "gaussian"
+                           and family.link.name == "identity")
+
         # REML is only meaningful for the Gaussian-identity LMM; glmer is
         # ML by construction (the Laplace approximation evaluates the
         # marginal log-likelihood directly). Silently override the default
         # ``REML=True`` for non-Gaussian-identity families so summary /
         # ``__repr__`` print AIC/BIC/logLik rather than reaching for a
         # non-existent ``REML_criterion``.
-        if not (family.name == "gaussian" and family.link.name == "identity"):
+        if not _is_gaussian_id:
             REML = False
         self.REML = REML
 
@@ -4683,9 +4836,12 @@ class gmm:
         self._offset_arg = None if offset is None else np.asarray(offset, dtype=float)
         self._control_arg = control
 
-        # control= normalization. Merges user-supplied keys with
-        # lme4's glmerControl defaults; unknown keys raise.
-        ctrl = _normalize_glmer_control(control)
+        # control= normalization. lmer (Gaussian-identity) and glmer use
+        # different lme4 control defaults — lmerControl vs glmerControl: the
+        # default optimizer ("nloptwrap" vs c("bobyqa","Nelder_Mead")) and
+        # check.conv.nparmax (10 vs 20). Unknown keys raise either way.
+        ctrl = (_normalize_lmer_control(control) if _is_gaussian_id
+                else _normalize_glmer_control(control))
 
         # subset= (R's row-filter) and na_action= (R's na.action).
         # subset accepts: bool mask, positive 1-based ints (keep), negative
@@ -4823,8 +4979,6 @@ class gmm:
 
         # restart_edge defaults TRUE for lmer (Gaussian-identity),
         # FALSE/unsupported for glmer, unless the user set it explicitly.
-        _is_gaussian_id = (family.name == "gaussian"
-                           and family.link.name == "identity")
         restart_edge_resolved = (
             ctrl["restart_edge"] if "restart_edge" in (control or {})
             else _is_gaussian_id
@@ -4855,7 +5009,8 @@ class gmm:
             use_last_params=ctrl["use.last.params"],
             verbose=verbose,
             opt_ctrl=ctrl["optCtrl"],
-            optimizer=tuple(ctrl["optimizer"]),
+            optimizer=(ctrl["optimizer"] if _is_gaussian_id
+                       else tuple(ctrl["optimizer"])),
             check_conv_grad=ctrl["check.conv.grad"],
             check_conv_hess=ctrl["check.conv.hess"],
             expanded=d.expanded,
@@ -5015,25 +5170,54 @@ class gmm:
             return
 
         theta0 = re.theta.astype(float).copy()
+        if inputs.start is not None:
+            # lmer start= warm-start (lme4 getStart, modular.R:472-533): θ only.
+            theta0 = _lmer_start_theta(inputs.start, re.theta.shape)
         _devfun_g = self._reml_deviance if REML else self._ml_deviance
         _lo = np.array([b[0] if b[0] is not None else -np.inf for b in bounds])
         _hi = np.array([b[1] if b[1] is not None else np.inf for b in bounds])
-        # lme4's DEFAULT lmer optimizer is ``nloptwrap`` = NLopt LN_BOBYQA
-        # (utilities.R:836-839, xtol_abs=ftol_abs=1e-8, maxeval=1e5). Match it
-        # exactly so θ̂ lands on lme4's fit to the CHOLMOD floor (~1e-9); the
-        # old scipy L-BFGS-B converged to a *different* point ~1e-5 away on
-        # flat surfaces (the same scatter lme4's own optimizers show).
-        res = _nlopt_ln_bobyqa(_devfun_g, theta0, _lo, _hi)
+        # Outer optimizer over the profiled deviance — honor
+        # ``lmerControl(optimizer=)`` / ``optCtrl``. lme4's DEFAULT is
+        # ``nloptwrap`` = NLopt LN_BOBYQA (utilities.R:836-839,
+        # xtol_abs=ftol_abs=1e-8, maxeval=1e5): the default (empty-optCtrl)
+        # path below is byte-identical to before, landing θ̂ on lme4's fit to
+        # the CHOLMOD floor (~1e-9). ``bobyqa`` (minqa) and ``Nelder_Mead``
+        # (lme4 bounded NM) are the other ported lmer optimizers; they run the
+        # SAME profiled deviance single-stage via _run_outer_stage (lme4's
+        # default θ step xst=0.02, xt=xst·5e-4 — optimizer.R:5).
+        optimizer = inputs.optimizer
+        if not isinstance(optimizer, str):
+            # the _FitInputs tuple default (e.g. a direct construction that
+            # bypasses lmerControl) means "no explicit optimizer" → lme4 default.
+            optimizer = "nloptwrap"
+        if optimizer == "nloptwrap":
+            _nlopt_kw = _nlopt_kwargs_from_opt_ctrl(inputs.opt_ctrl)
+
+            def _run_opt(p0):
+                return _nlopt_ln_bobyqa(_devfun_g, p0, _lo, _hi, **_nlopt_kw)
+        else:
+            _nm_kw = _nm_kwargs_from_opt_ctrl(inputs.opt_ctrl)
+            _bob_kw = _bobyqa_kwargs_from_opt_ctrl(inputs.opt_ctrl)
+
+            def _run_opt(p0):
+                xst = np.full(p0.size, 0.02)
+                par, fval, nf, status = _run_outer_stage(
+                    optimizer, _devfun_g, p0, _lo, _hi,
+                    xst=xst, xtol_abs=xst * 5e-4,
+                    nm_kwargs=_nm_kw, bobyqa_kwargs=_bob_kw)
+                return _NloptResult(np.asarray(par, float), float(fval),
+                                    int(nf), status == 0, "")
+
+        res = _run_opt(theta0)
         theta_hat = res.x
 
         # boundary handling on θ (lme4 optimizeLmer:688-740).
         # restart_edge is a near-no-op for BOBYQA (derivative-free, won't halt
         # at a false edge) but ported for parity; check.boundary pins near-zero
-        # variance params to 0.
+        # variance params to 0. The restart refit reuses the chosen optimizer.
         if inputs.restart_edge:
-            def _refit(p0):
-                return _nlopt_ln_bobyqa(_devfun_g, p0, _lo, _hi).x
-            theta_hat = _restart_edge(_devfun_g, theta_hat, _lo, _hi, _refit,
+            theta_hat = _restart_edge(_devfun_g, theta_hat, _lo, _hi,
+                                      lambda p0: _run_opt(p0).x,
                                       verbose=inputs.verbose)
         if inputs.boundary_tol > 0:
             theta_hat = _check_boundary(_devfun_g, theta_hat,
