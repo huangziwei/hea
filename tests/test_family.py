@@ -1164,14 +1164,16 @@ def test_trind_generator_matches_mgcv():
 
 
 def _gaulss_oracle_inputs():
-    rng = np.random.default_rng(17)
+    from hea.R.rng import RGenerator
+    gen = RGenerator(17)        # column-major reshape == R matrix(rnorm())
     n = 40
-    X = np.hstack([np.ones((n, 1)), rng.normal(size=(n, 2)),
-                   np.ones((n, 1)), rng.normal(size=(n, 1))])
-    y = 1.0 + X[:, 1] * 0.5 + rng.normal(0, 0.7, n)
+    c2 = gen.normal(0, 1, 2 * n).reshape((n, 2), order="F")
+    c1 = gen.normal(0, 1, n).reshape((n, 1), order="F")
+    X = np.hstack([np.ones((n, 1)), c2, np.ones((n, 1)), c1])
+    y = 1.0 + X[:, 1] * 0.5 + gen.normal(0, 0.7, n)
     coef = np.array([0.8, 0.4, -0.2, 0.3, 0.1])
-    d1b = rng.normal(size=(5, 2)) * 0.3
-    d2b = rng.normal(size=(5, 3)) * 0.2
+    d1b = gen.normal(0, 1, 5 * 2).reshape((5, 2), order="F") * 0.3
+    d2b = gen.normal(0, 1, 5 * 3).reshape((5, 3), order="F") * 0.2
     lpi = [np.arange(0, 3), np.arange(3, 5)]
     return X, y, coef, d1b, d2b, lpi
 
@@ -1187,31 +1189,31 @@ def test_gaulss_ll_matches_mgcv_oracle():
     fam = gaulss()
 
     r1 = fam.ll(y, X, coef, lpi=lpi, deriv=1)
-    np.testing.assert_allclose(r1["l"], -54.793169613785, rtol=0,
+    np.testing.assert_allclose(r1["l"], -57.9372871859, rtol=0,
                                atol=1e-10)
     np.testing.assert_allclose(
         r1["lb"],
-        [4.7999681426, 1.3391588398, -1.6129245631, -29.6772211001,
-         -5.2891939141], rtol=0, atol=1e-9)
-    np.testing.assert_allclose(r1["lbb"][0, 0], -21.2901328670,
+        [4.0145452690, -1.1669739590, 6.2728855900, -22.5854933110,
+         -7.3560025880], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(r1["lbb"][0, 0], -21.7376940450,
                                rtol=0, atol=1e-9)
     np.testing.assert_allclose(float(np.sum(np.abs(r1["lbb"]))),
-                               255.3526070152, rtol=0, atol=1e-8)
-    np.testing.assert_allclose(r1["lbb"][0, 4], -7.5504145515,
+                               269.7531350500, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(r1["lbb"][0, 4], 0.6777580010,
                                rtol=0, atol=1e-9)
 
     Hp = -r1["lbb"] + np.eye(5) * 0.5
     r2 = fam.ll(y, X, coef, lpi=lpi, deriv=2, d1b=d1b,
                 fh=np.linalg.inv(Hp))
-    np.testing.assert_allclose(r2["d1H"], [2.4746058080, -0.7768359917],
+    np.testing.assert_allclose(r2["d1H"], [-3.0610301460, -0.2929096240],
                                rtol=0, atol=1e-9)
 
     r3 = fam.ll(y, X, coef, lpi=lpi, deriv=3, d1b=d1b)
     np.testing.assert_allclose(float(np.sum(np.abs(r3["d1H"][0]))),
-                               345.3335722086, rtol=0, atol=1e-8)
+                               406.9875674700, rtol=0, atol=1e-8)
     np.testing.assert_allclose(float(np.sum(np.abs(r3["d1H"][1]))),
-                               246.6055510218, rtol=0, atol=1e-8)
-    np.testing.assert_allclose(r3["d1H"][0][0, 0], 10.8408987310,
+                               116.4523491000, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(r3["d1H"][0][0, 0], -13.7169040930,
                                rtol=0, atol=1e-9)
 
     D = 1.0 / np.sqrt(np.diag(Hp))
@@ -1219,7 +1221,7 @@ def test_gaulss_ll_matches_mgcv_oracle():
     r4 = fam.ll(y, X, coef, lpi=lpi, deriv=4, d1b=d1b, d2b=d2b,
                 fh=(R, np.arange(5)), D=D)
     np.testing.assert_allclose(
-        r4["trHid2H"], [-6.7777512659, 2.3794298623, -3.2244531536],
+        r4["trHid2H"], [-12.8681383050, 0.3818310880, 2.5707114050],
         rtol=0, atol=1e-9)
     # The eigendecomposition fh variant must agree with the Cholesky one.
     w, V = np.linalg.eigh(D[:, None] * Hp * D[None, :])
