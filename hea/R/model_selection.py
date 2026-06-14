@@ -20,7 +20,7 @@ import itertools
 
 import numpy as np
 import polars as pl
-from scipy.stats import chi2, f
+from . import distributions as _dist
 
 from ._shared import _caller_names
 from ..formula import deparse
@@ -378,7 +378,7 @@ def _add1_lm(m: lm, upper_terms, *, common_data, test: str | None, k: float):
             # rule (denom is always the bigger model's residual MS).
             mse_aug = m_aug.rss / m_aug.df_residuals
             fstat = (d_rss / d_df) / mse_aug
-            p = float(f.sf(fstat, d_df, m_aug.df_residuals))
+            p = float(_dist.pf(fstat, d_df, m_aug.df_residuals, lower_tail=False))
             f_col.append(round(fstat, 4))
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
@@ -488,13 +488,13 @@ def _add1_glm(m: glm, upper_terms, *, common_data, test: str | None, k: float):
             # mirror of drop1's "current model's residual mean deviance".
             rms_aug = m_aug.deviance / m_aug.df_residual
             fstat = (d_dev / d_df) / rms_aug
-            p = float(f.sf(fstat, d_df, m_aug.df_residual))
+            p = float(_dist.pf(fstat, d_df, m_aug.df_residual, lower_tail=False))
             stat_col.append(round(fstat, 4))
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
         elif kind == "Chisq" and d_df > 0:
             stat = d_loglik
-            p = float(chi2.sf(stat, d_df))
+            p = float(_dist.pchisq(stat, d_df, lower_tail=False))
             stat_col.append(round(stat, 4))
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
@@ -812,7 +812,7 @@ def _drop1_lm(m: lm, *, test: str | None, k: float):
         aic_col.append(round(_extract_aic_lm(m_sub.rss, m_sub.df_residuals, n, k), 4))
         if use_F and d_df > 0:
             fstat = (d_rss / d_df) / mse_full
-            p = float(f.sf(fstat, d_df, df_full))
+            p = float(_dist.pf(fstat, d_df, df_full, lower_tail=False))
             f_col.append(round(fstat, 4))
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
@@ -935,13 +935,13 @@ def _drop1_glm(m: glm, *, test: str | None, k: float):
             # quasi-likelihood-style scale rather than 1).
             rms_full = dev_full / df_full
             fstat = (d_dev / d_df) / rms_full
-            p = float(f.sf(fstat, d_df, df_full))
+            p = float(_dist.pf(fstat, d_df, df_full, lower_tail=False))
             stat_col.append(round(fstat, 4))
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
         elif kind == "Chisq" and d_df > 0:
             stat = d_loglik
-            p = float(chi2.sf(stat, d_df))
+            p = float(_dist.pchisq(stat, d_df, lower_tail=False))
             stat_col.append(round(stat, 4))
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
@@ -1041,7 +1041,7 @@ def _drop1_gmm(model, *, test, k):
         npar_col.append(d_df)
         aic_col.append(round(_aic_table(_dev(m_sub), m_sub.npar), 1))
         if do_test and d_df > 0:
-            p = float(chi2.sf(lrt, d_df))
+            p = float(_dist.pchisq(lrt, d_df, lower_tail=False))
             lrt_col.append(round(lrt, 4))
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
@@ -1090,7 +1090,7 @@ def _anova_lm(*models, labels: list[str]):
             sig_col.append("")
             continue
         fstat = (d_rss / d_df) / mse_full
-        p = float(f.sf(fstat, d_df, dfs[-1]))
+        p = float(_dist.pf(fstat, d_df, dfs[-1], lower_tail=False))
         df_col.append(d_df)
         sos_col.append(round(d_rss, 3))
         f_col.append(round(fstat, 3))
@@ -1176,7 +1176,7 @@ def _anova_lm_single(m: lm):
             continue
         ms = d_rss / d_df
         fstat = ms / mse_full
-        p = float(f.sf(fstat, d_df, m.df_residuals))
+        p = float(_dist.pf(fstat, d_df, m.df_residuals, lower_tail=False))
         df_col.append(d_df)
         sos_col.append(round(d_rss, 4))
         ms_col.append(round(ms, 4))
@@ -1395,10 +1395,10 @@ def _anova_gam_table(*models: gam, labels: list[str], test: str | None = None):
             continue
         if test == "Chisq":
             stat = d_dev / disp_full
-            p = float(chi2.sf(stat, d_df))
+            p = float(_dist.pchisq(stat, d_df, lower_tail=False))
         else:  # "F"
             stat = (d_dev / d_df) / disp_full
-            p = float(f.sf(stat, d_df, rdf_full))
+            p = float(_dist.pf(stat, d_df, rdf_full, lower_tail=False))
         df_col.append(round(d_df, 4))
         dev_col.append(round(d_dev, 4))
         stat_col.append(round(stat, 4))
@@ -1516,10 +1516,10 @@ def _anova_glm_table(*models, labels: list[str], test: str | None = None):
             # formula R uses when `test="Chisq"` is passed for Gaussian/
             # Gamma/IG fits.
             stat = d_dev / disp_full
-            p = float(chi2.sf(stat, d_df))
+            p = float(_dist.pchisq(stat, d_df, lower_tail=False))
         else:
             stat = (d_dev / d_df) / disp_full
-            p = float(f.sf(stat, d_df, df_full))
+            p = float(_dist.pf(stat, d_df, df_full, lower_tail=False))
         df_col.append(d_df)
         dev_col.append(round(d_dev, 4))
         stat_col.append(round(stat, 4))
@@ -1594,7 +1594,7 @@ def _anova_gmm(*models, labels: list[str]):
         # spurious negative χ². Clamping makes p=1 for those rows.
         chisq = max(0.0, prev_dev - dev_val)
         d_df = m.npar - prev.npar
-        p = float(chi2.sf(chisq, d_df)) if d_df > 0 else float("nan")
+        p = float(_dist.pchisq(chisq, d_df, lower_tail=False)) if d_df > 0 else float("nan")
         chi_col.append(round(chisq, 4))
         dfc_col.append(d_df)
         p_col.append(float(f"{p:.4g}"))

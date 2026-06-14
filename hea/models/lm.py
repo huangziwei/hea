@@ -5,8 +5,10 @@ import numpy as np
 import polars as pl
 from scipy.linalg import cholesky, lu, qr, solve_triangular
 from scipy.optimize import minimize
-from scipy.stats import f, norm, t
+from scipy.stats import norm
+from ..R import distributions as _dist
 
+from ..R import nmath as _nmath
 from ..formula import (
     Name,
     _eval_atom,
@@ -260,10 +262,10 @@ def _qq_plot(
     v = vals[sort_idx]
     a = 3.0 / 8.0 if n <= 10 else 0.5
     probs = (np.arange(1, n + 1) - a) / (n + 1 - 2 * a)
-    q = norm.ppf(probs)
+    q = _nmath.qnorm5_vec(probs)
     ax.scatter(q, v, facecolor="none", edgecolor="black")
     ry1, ry3 = np.quantile(v, [0.25, 0.75])
-    qx1, qx3 = norm.ppf([0.25, 0.75])
+    qx1, qx3 = _nmath.qnorm5_vec(np.array([0.25, 0.75]))
     slope = (ry3 - ry1) / (qx3 - qx1)
     intercept = ry1 - slope * qx1
     xs = np.array([q.min(), q.max()])
@@ -333,8 +335,7 @@ class SummaryLm:
         bhat = np.asarray(model._bhat_arr, dtype=float)
         se = np.asarray(model._se_bhat_arr, dtype=float)
         t = np.divide(bhat, se, out=np.full_like(bhat, np.nan), where=se > 0)
-        from scipy.stats import t as _t
-        p = 2.0 * _t.sf(np.abs(t), model.df_residuals)
+        p = 2.0 * _dist.pt(np.abs(t), model.df_residuals, lower_tail=False)
         self.coefficients = np.column_stack([bhat, se, t, p])
         self._coef_rownames = list(model.column_names)
         self._coef_colnames = ("Estimate", "Std. Error", "t value", "Pr(>|t|)")
@@ -1093,7 +1094,7 @@ class lm:
         se_bhat = self._se_bhat_arr[:, None]
         bhat = self._bhat_arr[:, None]
         ci = (
-            t.ppf(1 - alpha / 2, self.df_residuals) * se_bhat * np.array([-1, 1]) + bhat
+            _dist.qt(1 - alpha / 2, self.df_residuals) * se_bhat * np.array([-1, 1]) + bhat
         )
         return pl.DataFrame(
             {
@@ -1244,7 +1245,7 @@ class lm:
         se_yhat_mean = np.sqrt(np.maximum(var_mean, 0.0))
         yhat_vals = yhat["fit"].to_numpy().astype(float)[:, None]
         ci = (
-            t.ppf(1 - alpha / 2, dq)
+            _dist.qt(1 - alpha / 2, dq)
             * se_yhat_mean[:, None]
             * np.array([-1, 1])
             + yhat_vals
@@ -1272,7 +1273,7 @@ class lm:
         se_yhat = np.sqrt(pv + np.maximum(var_mean, 0.0))
         yhat_vals = yhat["fit"].to_numpy().astype(float)[:, None]
         pi = (
-            t.ppf(1 - alpha / 2, dq)
+            _dist.qt(1 - alpha / 2, dq)
             * se_yhat[:, None]
             * np.array([-1, 1])
             + yhat_vals
@@ -1295,7 +1296,7 @@ class lm:
         # H0: βi==0
         # H1: βi!=0
         t_arr = self._bhat_arr / self._se_bhat_arr
-        p_values = 2 * t.sf(np.abs(t_arr), self.df_residuals)
+        p_values = 2 * _dist.pt(np.abs(t_arr), self.df_residuals, lower_tail=False)
         return _row_frame(p_values, self.column_names)
 
     def _expand_to_full(self, kept_vals) -> np.ndarray:
@@ -1319,8 +1320,8 @@ class lm:
         se_f = self._expand_to_full(self._se_bhat_arr)
         with np.errstate(divide="ignore", invalid="ignore"):
             t_f = bhat_f / se_f
-        p_f = 2.0 * t.sf(np.abs(t_f), self.df_residuals)  # NaN stays NaN
-        tcrit = t.ppf(1 - 0.05 / 2, self.df_residuals)
+        p_f = 2.0 * _dist.pt(np.abs(t_f), self.df_residuals, lower_tail=False)  # NaN stays NaN
+        tcrit = _dist.qt(1 - 0.05 / 2, self.df_residuals)
         cilo = bhat_f - tcrit * se_f
         cihi = bhat_f + tcrit * se_f
 
@@ -1379,7 +1380,7 @@ class lm:
             fstats = float(
                 ((self.tss - self.rss) / self.df_model) / (self.rss / self.df_residuals)
             )
-            f_p_value = float(f.sf(fstats, self.df_model, self.df_residuals))
+            f_p_value = float(_dist.pf(fstats, self.df_model, self.df_residuals, lower_tail=False))
         else:
             fstats, f_p_value = None, None
         return fstats, f_p_value
@@ -1989,7 +1990,7 @@ class lm:
             Vx = (xx - xxbar) ** 2 * se_scalar ** 2
             se = np.sqrt(Vx)
 
-            tt = t.ppf(1 - 0.05 / 2, self.df_residuals)
+            tt = _dist.qt(1 - 0.05 / 2, self.df_residuals)
             yy = (xx - xxbar) * float(self.bhat[name].item())
             idx_sorted = np.argsort(xx)
             ax[i].plot(xx[idx_sorted], yy[idx_sorted], color="black")
@@ -2074,7 +2075,7 @@ class lm:
             Vx = Xnew @ self.V_bhat @ Xnew.T
             se = np.sqrt(np.diag(Vx))
 
-            tt = t.ppf(1 - 0.05 / 2, self.df_residuals)
+            tt = _dist.qt(1 - 0.05 / 2, self.df_residuals)
             yy = (Xnew @ self._bhat_arr).flatten()
 
             ax[i].plot(xx[np.argsort(xx)], yy[np.argsort(xx)], color="black")

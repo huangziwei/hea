@@ -31,697 +31,10 @@ import itertools
 import numpy as np
 import polars as pl
 from scipy.linalg import solve_triangular
-from scipy.special import digamma, expit, gammaln, ndtr, ndtri, polygamma
-from scipy.stats import gamma as _gamma_dist
-from scipy.stats import poisson as _poisson_dist
+from scipy.special import digamma, expit, gammaln, polygamma
 
-
-# ---------------------------------------------------------------------------
-# R nmath ports — bit-exact ``dpois`` / ``dbinom`` (saddlepoint algorithm,
-# Loader 1999). Used by ``Poisson.aic`` and ``Binomial.aic`` so that the
-# Laplace deviance reported by hea matches ``rho$resp$aic()`` from lme4 at
-# the ULP level. scipy's ``poisson.logpmf`` / ``binom.logpmf`` use the
-# direct formula ``y·log(μ) - μ - lgamma(y+1)`` (and analog for binomial),
-# which differs from R's ``dpois`` / ``dbinom`` by ~1 ULP per call — and
-# that 1 ULP compounded over n obs is what propagates into deriv12's
-# numerator and produces visible SE / vcov gaps against R.
-#
-# Sources (R 4.5):
-# - /tmp/R-src/src/nmath/stirlerr.c
-# - /tmp/R-src/src/nmath/bd0.c   (both bd0 and ebd0)
-# - /tmp/R-src/src/nmath/dpois.c
-# - /tmp/R-src/src/nmath/dbinom.c
-# ---------------------------------------------------------------------------
-
-
-# stirlerr(n) = log(n!) - log(sqrt(2πn)·(n/e)ⁿ)
-# Exact table for half-integer arguments 0, 0.5, 1.0, …, 15.0
-# (stirlerr.c:78-110).
-_STIRLERR_HALVES = (
-    0.0,                              # n=0 — placeholder, never used
-    0.1534264097200273452913848,      # 0.5
-    0.0810614667953272582196702,      # 1.0
-    0.0548141210519176538961390,      # 1.5
-    0.0413406959554092940938221,      # 2.0
-    0.03316287351993628748511048,     # 2.5
-    0.02767792568499833914878929,     # 3.0
-    0.02374616365629749597132920,     # 3.5
-    0.02079067210376509311152277,     # 4.0
-    0.01848845053267318523077934,     # 4.5
-    0.01664469118982119216319487,     # 5.0
-    0.01513497322191737887351255,     # 5.5
-    0.01387612882307074799874573,     # 6.0
-    0.01281046524292022692424986,     # 6.5
-    0.01189670994589177009505572,     # 7.0
-    0.01110455975820691732662991,     # 7.5
-    0.010411265261972096497478567,    # 8.0
-    0.009799416126158803298389475,    # 8.5
-    0.009255462182712732917728637,    # 9.0
-    0.008768700134139385462952823,    # 9.5
-    0.008330563433362871256469318,    # 10.0
-    0.007934114564314020547248100,    # 10.5
-    0.007573675487951840794972024,    # 11.0
-    0.007244554301320383179543912,    # 11.5
-    0.006942840107209529865664152,    # 12.0
-    0.006665247032707682442354394,    # 12.5
-    0.006408994188004207068439631,    # 13.0
-    0.006171712263039457647532867,    # 13.5
-    0.005951370112758847735624416,    # 14.0
-    0.005746216513010115682023589,    # 14.5
-    0.005554733551962801371038690,    # 15.0
-)
-
-# Asymptotic-series coefficients (stirlerr.c:56-72).
-_S0  = 0.083333333333333333333          # 1/12
-_S1  = 0.00277777777777777777778        # 1/360
-_S2  = 0.00079365079365079365079365     # 1/1260
-_S3  = 0.000595238095238095238095238    # 1/1680
-_S4  = 0.0008417508417508417508417508   # 1/1188
-_S5  = 0.0019175269175269175269175262   # 691/360360
-_S6  = 0.0064102564102564102564102561   # 1/156
-_S7  = 0.029550653594771241830065352    # 3617/122400
-_S8  = 0.17964437236883057316493850     # 43867/244188
-_S9  = 1.3924322169059011164274315      # 174611/125400
-_S10 = 13.402864044168391994478957      # 77683/5796
-_S11 = 156.84828462600201730636509      # 236364091/1506960
-_S12 = 2193.1033333333333333333333      # 657931/300
-_S13 = 36108.771253724989357173269      # 3392780147/93960
-_S14 = 691472.26885131306710839498      # 1723168255201/2492028
-_S15 = 15238221.539407416192283370      # 7709321041217/505920
-_S16 = 382900751.39141414141414141      # 151628697551/396
-
-_M_LN_2PI = 1.8378770664093454835606594728112352798  # log(2π)
-_M_LN_SQRT_2PI = 0.918938533204672741780329736406  # log(sqrt(2π))
-_M_LN2 = 0.6931471805599453094172321214581766
-_M_2PI = 6.283185307179586476925286766559
-
-
-_STIRLERR_HALVES_ARR = np.array(_STIRLERR_HALVES, dtype=float)
-
-
-def _stirlerr(n):
-    """Port of nmath ``stirlerr(n)`` (stirlerr.c). Vectorized over ``n``.
-
-    Returns log(n!) - log(sqrt(2πn)·(n/e)ⁿ). The error term in
-    Stirling's formula. Used by Loader's saddlepoint algorithm for
-    dpois/dbinom. Accepts a scalar or array; returns the same shape.
-    Bit-identical to the scalar Fortran source — branches via
-    ``np.where``, all arithmetic ops in the same order.
-    """
-    n = np.asarray(n, dtype=float)
-    scalar_input = (n.ndim == 0)
-    n = np.atleast_1d(n)
-
-    out = np.empty_like(n)
-    nn2 = n + n
-    nn2_int = np.rint(nn2).astype(np.int64)
-
-    # ---- n <= 23.5 ----
-    le_235 = n <= 23.5
-    # Table path: n <= 15.0 and 2n is integer.
-    table_mask = le_235 & (n <= 15.0) & (nn2 == nn2_int)
-    if np.any(table_mask):
-        idx = nn2_int[table_mask]
-        out[table_mask] = _STIRLERR_HALVES_ARR[idx]
-
-    # MM2 (n>=1, n<=5.25, not in table)
-    mm2_mask = le_235 & ~table_mask & (n <= 5.25) & (n >= 1.0)
-    if np.any(mm2_mask):
-        nm = n[mm2_mask]
-        l_n = np.log(nm)
-        out[mm2_mask] = (gammaln(nm) + nm * (1.0 - l_n)
-                         + (l_n - _M_LN_2PI) * 0.5)
-
-    # n < 1, not in table
-    lt1_mask = le_235 & ~table_mask & ~mm2_mask & (n < 1.0)
-    if np.any(lt1_mask):
-        nm = n[lt1_mask]
-        out[lt1_mask] = (gammaln(1.0 + nm) - (nm + 0.5) * np.log(nm)
-                         + nm - _M_LN_SQRT_2PI)
-
-    # 5.25 < n <= 23.5 — asymptotic series, branches by n threshold.
-    series_mask = le_235 & ~table_mask & ~mm2_mask & ~lt1_mask
-    if np.any(series_mask):
-        nm = n[series_mask]
-        nn = nm * nm
-        # We need different series lengths per element. Compute the longest
-        # branch (k=16) and shorter ones; np.where picks per element.
-        s_k7  = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - _S6 / nn) / nn) / nn) / nn) / nn) / nn) / nm
-        s_k8  = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - _S7 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
-        s_k9  = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - _S8 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
-        s_k11 = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - (_S8 - (_S9 - _S10 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
-        s_k13 = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - (_S8 - (_S9 - (_S10 - (_S11 - _S12 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
-        s_k15 = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - (_S8 - (_S9 - (_S10 - (_S11 - (_S12 - (_S13 - _S14 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
-        s_k16 = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - (_S8 - (_S9 - (_S10 - (_S11 - (_S12 - (_S13 - (_S14 - (_S15 - _S16 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
-        # Select per-element by threshold.
-        ser = np.where(nm > 12.8, s_k7,
-              np.where(nm > 12.3, s_k8,
-              np.where(nm > 8.9,  s_k9,
-              np.where(nm > 7.3,  s_k11,
-              np.where(nm > 6.6,  s_k13,
-              np.where(nm > 6.1,  s_k15, s_k16))))))
-        out[series_mask] = ser
-
-    # ---- n > 23.5 ----
-    gt235 = ~le_235
-    if np.any(gt235):
-        nm = n[gt235]
-        nn = nm * nm
-        a_k1 = _S0 / nm
-        a_k2 = (_S0 - _S1 / nn) / nm
-        a_k3 = (_S0 - (_S1 - _S2 / nn) / nn) / nm
-        a_k4 = (_S0 - (_S1 - (_S2 - _S3 / nn) / nn) / nn) / nm
-        a_k5 = (_S0 - (_S1 - (_S2 - (_S3 - _S4 / nn) / nn) / nn) / nn) / nm
-        a_k6 = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - _S5 / nn) / nn) / nn) / nn) / nn) / nm
-        a = np.where(nm > 15.7e6, a_k1,
-            np.where(nm > 6180.0, a_k2,
-            np.where(nm > 205.0,  a_k3,
-            np.where(nm > 86.0,   a_k4,
-            np.where(nm > 27.0,   a_k5, a_k6)))))
-        out[gt235] = a
-
-    return float(out[0]) if scalar_input else out
-
-
-def _bd0(x, np_):
-    """Port of nmath ``bd0(x, np)`` (bd0.c:48-87). Vectorized.
-
-    Evaluates ``M·D₀(x/M) = x·log(x/M) + M - x`` (where ``M = np_``) with
-    small relative error even when ``x/M ≈ 1``. Bit-identical per element
-    to the scalar Fortran source — Taylor series for the close branch,
-    direct evaluation otherwise.
-    """
-    x = np.asarray(x, dtype=float)
-    np_ = np.asarray(np_, dtype=float)
-    scalar = (x.ndim == 0 and np_.ndim == 0)
-    x = np.atleast_1d(x)
-    np_ = np.atleast_1d(np.broadcast_to(np_, x.shape).copy())
-
-    out = np.empty_like(x)
-    out[:] = np.nan
-    valid = np.isfinite(x) & np.isfinite(np_) & (np_ != 0.0)
-
-    close = valid & (np.abs(x - np_) < 0.1 * (x + np_))
-    far = valid & ~close
-
-    # Far branch: direct formula.
-    if np.any(far):
-        xf, nf = x[far], np_[far]
-        xnp = xf / nf
-        # Safe log: fall back to log(x) - log(np_) if xnp non-finite.
-        with np.errstate(invalid="ignore"):
-            lg_x_n = np.where(np.isfinite(xnp),
-                              np.log(np.where(np.isfinite(xnp), xnp, 1.0)),
-                              np.log(xf) - np.log(nf))
-        out[far] = np.where(xf > nf,
-                            xf * (lg_x_n - 1.0) + nf,
-                            xf * lg_x_n + nf - xf)
-
-    # Close branch: Taylor series with per-element early exit.
-    if np.any(close):
-        xc, nc = x[close], np_[close]
-        d = xc - nc
-        v = d / (xc + nc)
-        # Underflow fix: scale by 2^-2 to avoid x+np overflow path.
-        underflow = (d != 0.0) & (v == 0.0)
-        if np.any(underflow):
-            x_ = np.ldexp(xc[underflow], -2)
-            n_ = np.ldexp(nc[underflow], -2)
-            v_uf = (x_ - n_) / (x_ + n_)
-            v[underflow] = v_uf
-        s = np.ldexp(d, -1) * v
-        # Underflow early-return: ldexp(s, 1) < tiny.
-        s2 = np.ldexp(s, 1)
-        early = np.abs(s2) < np.finfo(float).tiny
-        ej = xc * v
-        v2 = v * v
-        # Iterate Taylor series; mask out converged/early-returned elements.
-        active = ~early
-        for j in range(1, 1000):
-            if not np.any(active):
-                break
-            ej_a = ej[active] * v2[active]
-            ej[active] = ej_a
-            s_old = s[active].copy()
-            s_new = s[active] + ej_a / ((j << 1) + 1)
-            s[active] = s_new
-            still_changed = s_new != s_old
-            # Re-build active mask
-            idx = np.where(active)[0]
-            active = np.zeros_like(active)
-            active[idx[still_changed]] = True
-        # Return 2*s for converged; 2*early-s for early.
-        out[close] = np.where(early, s2, np.ldexp(s, 1))
-
-    return float(out[0]) if scalar else out
-
-
-def _log1pmx(x: float) -> float:
-    """``log(1+x) - x`` evaluated accurately for small ``|x|``.
-
-    Port of R's ``log1pmx`` (nmath/log1pmx.c). For ``|x| > 0.5`` falls
-    back to ``log1p(x) - x``; otherwise uses a series expansion.
-    """
-    minLog1Value = -0.79149064
-    if x > 1.0 or x < minLog1Value:
-        return np.log1p(x) - x
-    # |x| <= 0.5 — use series
-    # log1pmx(x) = -x²/2 + x³·(1/3 - x/4 + x²/5 - ...) = -x²/2 + x³·logcf(x, 3, 2)
-    r = x / (x + 2.0)
-    y = r * r
-    if abs(x) < 1e-2:
-        # Truncated series — used for very small |x|.
-        return r * (2.0 + y * (2.0 / 3.0 + y * (2.0 / 5.0 + y * (2.0 / 7.0 + y * (2.0 / 9.0))))) - x
-    # Larger |x| in (1e-2, 0.5]: fall back to numpy's log1p. (A full Lentz
-    # continued-fraction expansion was scaffolded here but never finished —
-    # it computed nothing the fallback doesn't, so it was removed.)
-    return np.log1p(x) - x
-
-
-# ebd0 (extended bd0) — Welinder's improved-precision version used by R
-# dpois. The 128-entry log table from bd0.c:102-231 (each row: 4 floats
-# encoding log(p/1024) where p = floor(1024/(0.5+i/256)+0.5), p ≈ 1024 to
-# 2048). Decoded from hex-float to plain double values.
-
-# Hex-float decoder: each entry "+0x1.62e430p-1" → that float value.
-def _hex_to_float(s: str) -> float:
-    return float.fromhex(s)
-
-
-# Hex-float table from bd0.c:102-231. Reproduced verbatim so this file
-# can be diffed against the C source. Each tuple is the 4 float parts
-# (a high-bit chunk + three corrections) of one log value.
-_BD0_SCALE_HEX = (
-    ("+0x1.62e430p-1", "-0x1.05c610p-29", "-0x1.950d88p-54", "+0x1.d9cc02p-79"),
-    ("+0x1.5ee02cp-1", "-0x1.6dbe98p-25", "-0x1.51e540p-50", "+0x1.2bfa48p-74"),
-    ("+0x1.5ad404p-1", "+0x1.86b3e4p-26", "+0x1.9f6534p-50", "+0x1.54be04p-74"),
-    ("+0x1.570124p-1", "-0x1.9ed750p-25", "-0x1.f37dd0p-51", "+0x1.10b770p-77"),
-    ("+0x1.5326e4p-1", "-0x1.9b9874p-25", "-0x1.378194p-49", "+0x1.56feb2p-74"),
-    ("+0x1.4f4528p-1", "+0x1.aca70cp-28", "+0x1.103e74p-53", "+0x1.9c410ap-81"),
-    ("+0x1.4b5bd8p-1", "-0x1.6a91d8p-25", "-0x1.8e43d0p-50", "-0x1.afba9ep-77"),
-    ("+0x1.47ae54p-1", "-0x1.abb51cp-25", "+0x1.19b798p-51", "+0x1.45e09cp-76"),
-    ("+0x1.43fa00p-1", "-0x1.d06318p-25", "-0x1.8858d8p-49", "-0x1.1927c4p-75"),
-    ("+0x1.3ffa40p-1", "+0x1.1a427cp-25", "+0x1.151640p-53", "-0x1.4f5606p-77"),
-    ("+0x1.3c7c80p-1", "-0x1.19bf48p-34", "+0x1.05fc94p-58", "-0x1.c096fcp-82"),
-    ("+0x1.38b320p-1", "+0x1.6b5778p-25", "+0x1.be38d0p-50", "-0x1.075e96p-74"),
-    ("+0x1.34e288p-1", "+0x1.d9ce1cp-25", "+0x1.316eb8p-49", "+0x1.2d885cp-73"),
-    ("+0x1.315124p-1", "+0x1.c2fc60p-29", "-0x1.4396fcp-53", "+0x1.acf376p-78"),
-    ("+0x1.2db954p-1", "+0x1.720de4p-25", "-0x1.d39b04p-49", "-0x1.f11176p-76"),
-    ("+0x1.2a1b08p-1", "-0x1.562494p-25", "+0x1.a7863cp-49", "+0x1.85dd64p-73"),
-    ("+0x1.267620p-1", "+0x1.3430e0p-29", "-0x1.96a958p-56", "+0x1.f8e636p-82"),
-    ("+0x1.23130cp-1", "+0x1.7bebf4p-25", "+0x1.416f1cp-52", "-0x1.78dd36p-77"),
-    ("+0x1.1faa34p-1", "+0x1.70e128p-26", "+0x1.81817cp-50", "-0x1.c2179cp-76"),
-    ("+0x1.1bf204p-1", "+0x1.3a9620p-28", "+0x1.2f94c0p-52", "+0x1.9096c0p-76"),
-    ("+0x1.187ce4p-1", "-0x1.077870p-27", "+0x1.655a80p-51", "+0x1.eaafd6p-78"),
-    ("+0x1.1501c0p-1", "-0x1.406cacp-25", "-0x1.e72290p-49", "+0x1.5dd800p-73"),
-    ("+0x1.11cb80p-1", "+0x1.787cd0p-25", "-0x1.efdc78p-51", "-0x1.5380cep-77"),
-    ("+0x1.0e4498p-1", "+0x1.747324p-27", "-0x1.024548p-51", "+0x1.77a5a6p-75"),
-    ("+0x1.0b036cp-1", "+0x1.690c74p-25", "+0x1.5d0cc4p-50", "-0x1.c0e23cp-76"),
-    ("+0x1.077070p-1", "-0x1.a769bcp-27", "+0x1.452234p-52", "+0x1.6ba668p-76"),
-    ("+0x1.04240cp-1", "-0x1.a686acp-27", "-0x1.ef46b0p-52", "-0x1.5ce10cp-76"),
-    ("+0x1.00d22cp-1", "+0x1.fc0e10p-25", "+0x1.6ee034p-50", "-0x1.19a2ccp-74"),
-    ("+0x1.faf588p-2", "+0x1.ef1e64p-27", "-0x1.26504cp-54", "-0x1.b15792p-82"),
-    ("+0x1.f4d87cp-2", "+0x1.d7b980p-26", "-0x1.a114d8p-50", "+0x1.9758c6p-75"),
-    ("+0x1.ee1414p-2", "+0x1.2ec060p-26", "+0x1.dc00fcp-52", "+0x1.f8833cp-76"),
-    ("+0x1.e7e32cp-2", "-0x1.ac796cp-27", "-0x1.a68818p-54", "+0x1.235d02p-78"),
-    ("+0x1.e108a0p-2", "-0x1.768ba4p-28", "-0x1.f050a8p-52", "+0x1.00d632p-82"),
-    ("+0x1.dac354p-2", "-0x1.d3a6acp-30", "+0x1.18734cp-57", "-0x1.f97902p-83"),
-    ("+0x1.d47424p-2", "+0x1.7dbbacp-31", "-0x1.d5ada4p-56", "+0x1.56fcaap-81"),
-    ("+0x1.ce1af0p-2", "+0x1.70be7cp-27", "+0x1.6f6fa4p-51", "+0x1.7955a2p-75"),
-    ("+0x1.c7b798p-2", "+0x1.ec36ecp-26", "-0x1.07e294p-50", "-0x1.ca183cp-75"),
-    ("+0x1.c1ef04p-2", "+0x1.c1dfd4p-26", "+0x1.888eecp-50", "-0x1.fd6b86p-75"),
-    ("+0x1.bb7810p-2", "+0x1.478bfcp-26", "+0x1.245b8cp-50", "+0x1.ea9d52p-74"),
-    ("+0x1.b59da0p-2", "-0x1.882b08p-27", "+0x1.31573cp-53", "-0x1.8c249ap-77"),
-    ("+0x1.af1294p-2", "-0x1.b710f4p-27", "+0x1.622670p-51", "+0x1.128578p-76"),
-    ("+0x1.a925d4p-2", "-0x1.0ae750p-27", "+0x1.574ed4p-51", "+0x1.084996p-75"),
-    ("+0x1.a33040p-2", "+0x1.027d30p-29", "+0x1.b9a550p-53", "-0x1.b2e38ap-78"),
-    ("+0x1.9d31c0p-2", "-0x1.5ec12cp-26", "-0x1.5245e0p-52", "+0x1.2522d0p-79"),
-    ("+0x1.972a34p-2", "+0x1.135158p-30", "+0x1.a5c09cp-56", "+0x1.24b70ep-80"),
-    ("+0x1.911984p-2", "+0x1.0995d4p-26", "+0x1.3bfb5cp-50", "+0x1.2c9dd6p-75"),
-    ("+0x1.8bad98p-2", "-0x1.1d6144p-29", "+0x1.5b9208p-53", "+0x1.1ec158p-77"),
-    ("+0x1.858b58p-2", "-0x1.1b4678p-27", "+0x1.56cab4p-53", "-0x1.2fdc0cp-78"),
-    ("+0x1.7f5fa0p-2", "+0x1.3aaf48p-27", "+0x1.461964p-51", "+0x1.4ae476p-75"),
-    ("+0x1.79db68p-2", "-0x1.7e5054p-26", "+0x1.673750p-51", "-0x1.a11f7ap-76"),
-    ("+0x1.744f88p-2", "-0x1.cc0e18p-26", "-0x1.1e9d18p-50", "-0x1.6c06bcp-78"),
-    ("+0x1.6e08ecp-2", "-0x1.5d45e0p-26", "-0x1.c73ec8p-50", "+0x1.318d72p-74"),
-    ("+0x1.686c80p-2", "+0x1.e9b14cp-26", "-0x1.13bbd4p-50", "-0x1.efeb1cp-78"),
-    ("+0x1.62c830p-2", "-0x1.a8c70cp-27", "-0x1.5a1214p-51", "-0x1.bab3fcp-79"),
-    ("+0x1.5d1bdcp-2", "-0x1.4fec6cp-31", "+0x1.423638p-56", "+0x1.ee3feep-83"),
-    ("+0x1.576770p-2", "+0x1.7455a8p-26", "-0x1.3ab654p-50", "-0x1.26be4cp-75"),
-    ("+0x1.5262e0p-2", "-0x1.146778p-26", "-0x1.b9f708p-52", "-0x1.294018p-77"),
-    ("+0x1.4c9f08p-2", "+0x1.e152c4p-26", "-0x1.dde710p-53", "+0x1.fd2208p-77"),
-    ("+0x1.46d2d8p-2", "+0x1.c28058p-26", "-0x1.936284p-50", "+0x1.9fdd68p-74"),
-    ("+0x1.41b940p-2", "+0x1.cce0c0p-26", "-0x1.1a4050p-50", "+0x1.bc0376p-76"),
-    ("+0x1.3bdd24p-2", "+0x1.d6296cp-27", "+0x1.425b48p-51", "-0x1.cddb2cp-77"),
-    ("+0x1.36b578p-2", "-0x1.287ddcp-27", "-0x1.2d0f4cp-51", "+0x1.38447ep-75"),
-    ("+0x1.31871cp-2", "+0x1.2a8830p-27", "+0x1.3eae54p-52", "-0x1.898136p-77"),
-    ("+0x1.2b9304p-2", "-0x1.51d8b8p-28", "+0x1.27694cp-52", "-0x1.fd852ap-76"),
-    ("+0x1.265620p-2", "-0x1.d98f3cp-27", "+0x1.a44338p-51", "-0x1.56e85ep-78"),
-    ("+0x1.211254p-2", "+0x1.986160p-26", "+0x1.73c5d0p-51", "+0x1.4a861ep-75"),
-    ("+0x1.1bc794p-2", "+0x1.fa3918p-27", "+0x1.879c5cp-51", "+0x1.16107cp-78"),
-    ("+0x1.1675ccp-2", "-0x1.4545a0p-26", "+0x1.c07398p-51", "+0x1.f55c42p-76"),
-    ("+0x1.111ce4p-2", "+0x1.f72670p-37", "-0x1.b84b5cp-61", "+0x1.a4a4dcp-85"),
-    ("+0x1.0c81d4p-2", "+0x1.0c150cp-27", "+0x1.218600p-51", "-0x1.d17312p-76"),
-    ("+0x1.071b84p-2", "+0x1.fcd590p-26", "+0x1.a3a2e0p-51", "+0x1.fe5ef8p-76"),
-    ("+0x1.01ade4p-2", "-0x1.bb1844p-28", "+0x1.db3cccp-52", "+0x1.1f56fcp-77"),
-    ("+0x1.fa01c4p-3", "-0x1.12a0d0p-29", "-0x1.f71fb0p-54", "+0x1.e287a4p-78"),
-    ("+0x1.ef0adcp-3", "+0x1.7b8b28p-28", "-0x1.35bce4p-52", "-0x1.abc8f8p-79"),
-    ("+0x1.e598ecp-3", "+0x1.5a87e4p-27", "-0x1.134bd0p-51", "+0x1.c2cebep-76"),
-    ("+0x1.da85d8p-3", "-0x1.df31b0p-27", "+0x1.94c16cp-57", "+0x1.8fd7eap-82"),
-    ("+0x1.d0fb80p-3", "-0x1.bb5434p-28", "-0x1.ea5640p-52", "-0x1.8ceca4p-77"),
-    ("+0x1.c765b8p-3", "+0x1.e4d68cp-27", "+0x1.5b59b4p-51", "+0x1.76f6c4p-76"),
-    ("+0x1.bdc46cp-3", "-0x1.1cbb50p-27", "+0x1.2da010p-51", "+0x1.eb282cp-75"),
-    ("+0x1.b27980p-3", "-0x1.1b9ce0p-27", "+0x1.7756f8p-52", "+0x1.2ff572p-76"),
-    ("+0x1.a8bed0p-3", "-0x1.bbe874p-30", "+0x1.85cf20p-56", "+0x1.b9cf18p-80"),
-    ("+0x1.9ef83cp-3", "+0x1.2769a4p-27", "-0x1.85bda0p-52", "+0x1.8c8018p-79"),
-    ("+0x1.9525a8p-3", "+0x1.cf456cp-27", "-0x1.7137d8p-52", "-0x1.f158e8p-76"),
-    ("+0x1.8b46f8p-3", "+0x1.11b12cp-30", "+0x1.9f2104p-54", "-0x1.22836ep-78"),
-    ("+0x1.83040cp-3", "+0x1.2379e4p-28", "+0x1.b71c70p-52", "-0x1.990cdep-76"),
-    ("+0x1.790ed4p-3", "+0x1.dc4c68p-28", "-0x1.910ac8p-52", "+0x1.dd1bd6p-76"),
-    ("+0x1.6f0d28p-3", "+0x1.5cad68p-28", "+0x1.737c94p-52", "-0x1.9184bap-77"),
-    ("+0x1.64fee8p-3", "+0x1.04bf88p-28", "+0x1.6fca28p-52", "+0x1.8884a8p-76"),
-    ("+0x1.5c9400p-3", "+0x1.d65cb0p-29", "-0x1.b2919cp-53", "+0x1.b99bcep-77"),
-    ("+0x1.526e60p-3", "-0x1.c5e4bcp-27", "-0x1.0ba380p-52", "+0x1.d6e3ccp-79"),
-    ("+0x1.483bccp-3", "+0x1.9cdc7cp-28", "-0x1.5ad8dcp-54", "-0x1.392d3cp-83"),
-    ("+0x1.3fb25cp-3", "-0x1.a6ad74p-27", "+0x1.5be6b4p-52", "-0x1.4e0114p-77"),
-    ("+0x1.371fc4p-3", "-0x1.fe1708p-27", "-0x1.78864cp-52", "-0x1.27543ap-76"),
-    ("+0x1.2cca10p-3", "-0x1.4141b4p-28", "-0x1.ef191cp-52", "+0x1.00ee08p-76"),
-    ("+0x1.242310p-3", "+0x1.3ba510p-27", "-0x1.d003c8p-51", "+0x1.162640p-76"),
-    ("+0x1.1b72acp-3", "+0x1.52f67cp-27", "-0x1.fd6fa0p-51", "+0x1.1a3966p-77"),
-    ("+0x1.10f8e4p-3", "+0x1.129cd8p-30", "+0x1.31ef30p-55", "+0x1.a73e38p-79"),
-    ("+0x1.08338cp-3", "-0x1.005d7cp-27", "-0x1.661a9cp-51", "+0x1.1f138ap-79"),
-    ("+0x1.fec914p-4", "-0x1.c482a8p-29", "-0x1.55746cp-54", "+0x1.99f932p-80"),
-    ("+0x1.ed1794p-4", "+0x1.d06f00p-29", "+0x1.75e45cp-53", "-0x1.d0483ep-78"),
-    ("+0x1.db5270p-4", "+0x1.87d928p-32", "-0x1.0f52a4p-57", "+0x1.81f4a6p-84"),
-    ("+0x1.c97978p-4", "+0x1.af1d24p-29", "-0x1.0977d0p-60", "-0x1.8839d0p-84"),
-    ("+0x1.b78c84p-4", "-0x1.44f124p-28", "-0x1.ef7bc4p-52", "+0x1.9e0650p-78"),
-    ("+0x1.a58b60p-4", "+0x1.856464p-29", "+0x1.c651d0p-55", "+0x1.b06b0cp-79"),
-    ("+0x1.9375e4p-4", "+0x1.5595ecp-28", "+0x1.dc3738p-52", "+0x1.86c89ap-81"),
-    ("+0x1.814be4p-4", "-0x1.c073fcp-28", "-0x1.371f88p-53", "-0x1.5f4080p-77"),
-    ("+0x1.6f0d28p-4", "+0x1.5cad68p-29", "+0x1.737c94p-53", "-0x1.9184bap-78"),
-    ("+0x1.60658cp-4", "-0x1.6c8af4p-28", "+0x1.d8ef74p-55", "+0x1.c4f792p-80"),
-    ("+0x1.4e0110p-4", "+0x1.146b5cp-29", "+0x1.73f7ccp-54", "-0x1.d28db8p-79"),
-    ("+0x1.3b8758p-4", "+0x1.8b1b70p-28", "-0x1.20aca4p-52", "-0x1.651894p-76"),
-    ("+0x1.28f834p-4", "+0x1.43b6a4p-30", "-0x1.452af8p-55", "+0x1.976892p-80"),
-    ("+0x1.1a0fbcp-4", "-0x1.e4075cp-28", "+0x1.1fe618p-52", "+0x1.9d6dc2p-77"),
-    ("+0x1.075984p-4", "-0x1.4ce370p-29", "-0x1.d9fc98p-53", "+0x1.4ccf12p-77"),
-    ("+0x1.f0a30cp-5", "+0x1.162a68p-37", "-0x1.e83368p-61", "-0x1.d222a6p-86"),
-    ("+0x1.cae730p-5", "-0x1.1a8f7cp-31", "-0x1.5f9014p-55", "+0x1.2720c0p-79"),
-    ("+0x1.ac9724p-5", "-0x1.e8ee08p-29", "+0x1.a7de04p-54", "-0x1.9bba74p-78"),
-    ("+0x1.868a84p-5", "-0x1.ef8128p-30", "+0x1.dc5eccp-54", "-0x1.58d250p-79"),
-    ("+0x1.67f950p-5", "-0x1.ed684cp-30", "-0x1.f060c0p-55", "-0x1.b1294cp-80"),
-    ("+0x1.494accp-5", "+0x1.a6c890p-32", "-0x1.c3ad48p-56", "-0x1.6dc66cp-84"),
-    ("+0x1.22c71cp-5", "-0x1.8abe2cp-32", "-0x1.7e7078p-56", "-0x1.ddc3dcp-86"),
-    ("+0x1.03d5d8p-5", "+0x1.79cfbcp-31", "-0x1.da7c4cp-58", "+0x1.4e7582p-83"),
-    ("+0x1.c98d18p-6", "+0x1.a01904p-31", "-0x1.854164p-55", "+0x1.883c36p-79"),
-    ("+0x1.8b31fcp-6", "-0x1.356500p-30", "+0x1.c3ab48p-55", "+0x1.b69bdap-80"),
-    ("+0x1.3cea44p-6", "+0x1.a352bcp-33", "-0x1.8865acp-57", "-0x1.48159cp-81"),
-    ("+0x1.fc0a8cp-7", "-0x1.e07f84p-32", "+0x1.e7cf6cp-58", "+0x1.3a69c0p-82"),
-    ("+0x1.7dc474p-7", "+0x1.f810a8p-31", "-0x1.245b5cp-56", "-0x1.a1f4f8p-80"),
-    ("+0x1.fe02a8p-8", "-0x1.4ef988p-32", "+0x1.1f86ecp-57", "+0x1.20723cp-81"),
-    ("+0x1.ff00acp-9", "-0x1.d4ef44p-33", "+0x1.2821acp-63", "+0x1.5a6d32p-87"),
-    ("0",              "0",               "0",               "0"),  # log(1) = 0
-)
-_BD0_SCALE = tuple(tuple(_hex_to_float(s) for s in row) for row in _BD0_SCALE_HEX)
-_BD0_SCALE_NP = np.array(_BD0_SCALE, dtype=float)  # shape (129, 4) for vectorized lookup
-
-
-def _ebd0(x, M):
-    """Port of nmath ``ebd0(x, M)`` (bd0.c:241-355). Vectorized.
-
-    Computes ``x·log(x/M) + (M - x)`` with extended precision. Returns
-    ``(yh, yl)`` arrays such that ``yh + yl`` is the value. Welinder's
-    improved algorithm (R Bugzilla PR#15628).
-    """
-    Sb = 10
-    S = 1 << Sb  # = 1024
-    N = 128
-
-    x = np.asarray(x, dtype=float)
-    M = np.asarray(M, dtype=float)
-    scalar = (x.ndim == 0 and M.ndim == 0)
-    x = np.atleast_1d(x)
-    M = np.atleast_1d(np.broadcast_to(M, x.shape).copy())
-
-    yh = np.zeros_like(x)
-    yl = np.zeros_like(x)
-
-    # Edge cases.
-    eq = x == M
-    x_zero = ~eq & (x == 0.0)
-    M_zero = ~eq & ~x_zero & (M == 0.0)
-    yh[x_zero] = M[x_zero]
-    yh[M_zero] = np.inf
-
-    # M/x → ∞ (M >> x).
-    Mox = np.where(eq | x_zero | M_zero, 1.0, M / np.where(x == 0.0, 1.0, x))
-    inf_Mox = ~eq & ~x_zero & ~M_zero & (Mox == np.inf)
-    yh[inf_Mox] = M[inf_Mox]
-
-    active = ~(eq | x_zero | M_zero | inf_Mox)
-    if not np.any(active):
-        return (float(yh[0]), float(yl[0])) if scalar else (yh, yl)
-
-    xa = x[active]
-    Ma = M[active]
-    Mox_a = Ma / xa
-
-    # M/x = r · 2^e
-    r, e = np.frexp(Mox_a)
-
-    # Overflow check (rare): M_LN2 * (-e) > 1 + DBL_MAX/x → yh = +inf
-    overflow = _M_LN2 * (-e.astype(float)) > (1.0 + np.finfo(float).max / xa)
-    if np.any(overflow):
-        active_idx = np.where(active)[0]
-        yh[active_idx[overflow]] = np.inf
-        good = ~overflow
-        xa = xa[good]
-        Ma = Ma[good]
-        r = r[good]
-        e = e[good]
-        active_idx = active_idx[good]
-    else:
-        active_idx = np.where(active)[0]
-
-    if xa.size == 0:
-        return (float(yh[0]), float(yl[0])) if scalar else (yh, yl)
-
-    i = np.floor((r - 0.5) * (2 * N) + 0.5).astype(np.int64)
-    f = np.floor(S / (0.5 + i / (2.0 * N)) + 0.5)
-    fg = np.ldexp(f, -(e + Sb))
-
-    inf_fg = fg == np.inf
-    if np.any(inf_fg):
-        yh[active_idx[inf_fg]] = np.inf
-        good = ~inf_fg
-        xa = xa[good]
-        Ma = Ma[good]
-        fg = fg[good]
-        i = i[good]
-        e = e[good]
-        active_idx = active_idx[good]
-
-    if xa.size == 0:
-        return (float(yh[0]), float(yl[0])) if scalar else (yh, yl)
-
-    # Local accumulators (we update yh/yl only via these arrays).
-    lh = np.zeros_like(xa)
-    ll = np.zeros_like(xa)
-
-    def add1(d_arr):
-        d1 = np.floor(d_arr + 0.5)
-        d2 = d_arr - d1
-        np.add(lh, d1, out=lh)
-        np.add(ll, d2, out=ll)
-
-    # ADD1(-x * log1pmx((M*fg - x) / x))
-    arg = (Ma * fg - xa) / xa
-    log1pmx_val = np.log1p(arg) - arg
-    add1(-xa * log1pmx_val)
-
-    fg_ne_1 = fg != 1.0
-    if np.any(fg_ne_1):
-        # Process the 4-iteration table corrections only where fg != 1.
-        # We compute updates for the WHOLE active set; for fg==1 elements
-        # the increments are 0 (since x * 0 = 0 with proper masking).
-        for j in range(4):
-            tbl_i = _BD0_SCALE_NP[i, j]
-            tbl_0 = _BD0_SCALE_NP[0, j]
-            inc1 = np.where(fg_ne_1, xa * tbl_i, 0.0)
-            inc2 = np.where(fg_ne_1, -xa * tbl_0 * e, 0.0)
-            add1(inc1)
-            add1(inc2)
-            # Per-iter overflow check: any !isfinite → set to inf and freeze.
-            nonfinite = ~np.isfinite(lh)
-            if np.any(nonfinite):
-                lh[nonfinite] = np.inf
-                ll[nonfinite] = 0.0
-                fg_ne_1 = fg_ne_1 & ~nonfinite
-
-    # ADD1(M); ADD1(-M·fg) only where fg != 1; for fg==1, the original
-    # scalar code returns early before these — match that exactly.
-    # But: the scalar code returns IMMEDIATELY for fg==1 after the first
-    # add1(-x·log1pmx). For fg==1, lh/ll already have the right value,
-    # so skip the M / -M·fg adds.
-    fg_eq_1 = fg == 1.0
-    fg_ne_1 = ~fg_eq_1
-    if np.any(fg_ne_1):
-        # Apply M / -M·fg adds only for fg != 1 (otherwise scalar returns
-        # early so we shouldn't add).
-        i_ne = np.where(fg_ne_1)[0]
-        d = Ma[i_ne]
-        d1 = np.floor(d + 0.5)
-        lh[i_ne] = lh[i_ne] + d1
-        ll[i_ne] = ll[i_ne] + (d - d1)
-        d = -Ma[i_ne] * fg[i_ne]
-        d1 = np.floor(d + 0.5)
-        lh[i_ne] = lh[i_ne] + d1
-        ll[i_ne] = ll[i_ne] + (d - d1)
-
-    yh[active_idx] = lh
-    yl[active_idx] = ll
-    return (float(yh[0]), float(yl[0])) if scalar else (yh, yl)
-
-
-def _dpois_raw(x, lambda_, give_log: bool = True):
-    """Port of nmath ``dpois_raw(x, lambda, give_log)`` (dpois.c:43-69).
-
-    Vectorized over ``x`` and ``lambda``. Uses Loader's saddlepoint with
-    ebd0 (R 4.5). Returns the same shape as the broadcast of inputs.
-    """
-    x_in = np.asarray(x, dtype=float)
-    l_in = np.asarray(lambda_, dtype=float)
-    scalar = (x_in.ndim == 0 and l_in.ndim == 0)
-    x = np.atleast_1d(x_in.copy())
-    lam = np.atleast_1d(np.broadcast_to(l_in, x.shape).copy())
-
-    NEG_INF = float('-inf')
-    out = np.empty_like(x)
-
-    # Edge cases (rare in PIRLS; cheap to test).
-    lam_zero = (lam == 0.0)
-    lam_inf  = ~np.isfinite(lam)
-    x_neg    = x < 0
-    tiny = np.finfo(float).tiny
-    x_le_lt = (x <= lam * tiny) & ~lam_zero & ~lam_inf & ~x_neg
-    lam_lt_xt = (lam < x * tiny) & ~lam_zero & ~lam_inf & ~x_neg & ~x_le_lt
-    main = ~(lam_zero | lam_inf | x_neg | x_le_lt | lam_lt_xt)
-
-    # lam == 0: x==0 → log(1)=0; else -inf
-    if np.any(lam_zero):
-        out[lam_zero] = np.where(x[lam_zero] == 0.0, 0.0, NEG_INF)
-    if np.any(lam_inf):
-        out[lam_inf] = NEG_INF
-    if np.any(x_neg):
-        out[x_neg] = NEG_INF
-    if np.any(x_le_lt):
-        out[x_le_lt] = -lam[x_le_lt]
-    if np.any(lam_lt_xt):
-        sub = lam_lt_xt
-        xn = x[sub]
-        ln = lam[sub]
-        out[sub] = np.where(~np.isfinite(xn),
-                            NEG_INF,
-                            -ln + xn * np.log(ln) - gammaln(xn + 1.0))
-
-    # Common (saddlepoint) path.
-    if np.any(main):
-        xm = x[main]
-        lm = lam[main]
-        yh, yl = _ebd0(xm, lm)
-        yl_total = yl + _stirlerr(xm)
-        x_LRG = 2.86111748575702815380240589208115399625e307
-        Lrg = xm >= x_LRG
-        r = np.where(Lrg, 2.5066282746310005024 * np.sqrt(xm), _M_2PI * xm)
-        log_correction = np.where(Lrg, np.log(r), 0.5 * np.log(r))
-        out[main] = -yl_total - yh - log_correction
-
-    if not give_log:
-        out = np.exp(out)
-    return float(out[0]) if scalar else out
-
-
-def _dbinom_raw(x, n, p, q, give_log: bool = True):
-    """Port of nmath ``dbinom_raw(x, n, p, q, give_log)`` (dbinom.c:72-118).
-
-    Vectorized. Uses Loader's saddlepoint with the older (non-extended)
-    ``bd0`` — matches dbinom.c which calls ``bd0(...)`` not ``ebd0(...)``.
-    """
-    x_in = np.asarray(x, dtype=float)
-    n_in = np.asarray(n, dtype=float)
-    p_in = np.asarray(p, dtype=float)
-    q_in = np.asarray(q, dtype=float)
-    scalar = (x_in.ndim == 0 and n_in.ndim == 0 and p_in.ndim == 0 and q_in.ndim == 0)
-    # Broadcast to common shape.
-    shape = np.broadcast_shapes(x_in.shape, n_in.shape, p_in.shape, q_in.shape)
-    x = np.broadcast_to(x_in, shape).astype(float).copy()
-    n = np.broadcast_to(n_in, shape).astype(float).copy()
-    p = np.broadcast_to(p_in, shape).astype(float).copy()
-    q = np.broadcast_to(q_in, shape).astype(float).copy()
-
-    NEG_INF = float('-inf')
-    out = np.empty(shape, dtype=float)
-
-    p_zero = p == 0.0
-    q_zero = q == 0.0
-    x_zero = x == 0.0
-    x_eq_n = x == n
-    x_oob = (x < 0) | (x > n)
-
-    edge_p0 = p_zero
-    edge_q0 = q_zero & ~p_zero
-    edge_x0 = x_zero & ~p_zero & ~q_zero
-    edge_xn = x_eq_n & ~p_zero & ~q_zero & ~x_zero
-    edge_oob = x_oob & ~p_zero & ~q_zero & ~x_zero & ~x_eq_n
-    main = ~(edge_p0 | edge_q0 | edge_x0 | edge_xn | edge_oob)
-
-    if np.any(edge_p0):
-        out[edge_p0] = np.where(x[edge_p0] == 0.0, 0.0, NEG_INF)
-    if np.any(edge_q0):
-        out[edge_q0] = np.where(x[edge_q0] == n[edge_q0], 0.0, NEG_INF)
-    if np.any(edge_x0):
-        n0 = n[edge_x0]
-        p0 = p[edge_x0]
-        q0 = q[edge_x0]
-        # n == 0 → log(1) = 0
-        n_is_0 = n0 == 0.0
-        # else: n*log(q) if p>q, n*log1p(-p) otherwise.
-        big_p = (p0 > q0) & ~n_is_0
-        big_q = ~big_p & ~n_is_0
-        val = np.empty_like(n0)
-        val[n_is_0] = 0.0
-        if np.any(big_p):
-            val[big_p] = n0[big_p] * np.log(q0[big_p])
-        if np.any(big_q):
-            val[big_q] = n0[big_q] * np.log1p(-p0[big_q])
-        out[edge_x0] = val
-    if np.any(edge_xn):
-        n0 = n[edge_xn]
-        p0 = p[edge_xn]
-        q0 = q[edge_xn]
-        big_p = p0 > q0
-        val = np.empty_like(n0)
-        if np.any(big_p):
-            val[big_p] = n0[big_p] * np.log1p(-q0[big_p])
-        if np.any(~big_p):
-            val[~big_p] = n0[~big_p] * np.log(p0[~big_p])
-        out[edge_xn] = val
-    if np.any(edge_oob):
-        out[edge_oob] = NEG_INF
-
-    if np.any(main):
-        xm = x[main]
-        nm = n[main]
-        pm = p[main]
-        qm = q[main]
-        lc = (_stirlerr(nm) - _stirlerr(xm) - _stirlerr(nm - xm)
-              - _bd0(xm, nm * pm) - _bd0(nm - xm, nm * qm))
-        lf = _M_LN_2PI + np.log(xm) + np.log1p(-xm / nm)
-        out[main] = lc - 0.5 * lf
-
-    if not give_log:
-        out = np.exp(out)
-    return float(out.reshape(())) if scalar else out
+from .R import nmath as _nmath
+from .R.nmath import _dpois_raw, _dbinom_raw
 
 
 # ---------------------------------------------------------------------------
@@ -934,32 +247,34 @@ class LogitLink(Link):
 
 
 def _dnorm(x):
-    return np.exp(-0.5 * x * x) / np.sqrt(2.0 * np.pi)
+    # R's dnorm (nmath/dnorm.c) — bit-exact, incl. the |x|>=5 split path that
+    # the naive exp(-x²/2)/√(2π) misses when probit η drifts into the tail.
+    return _nmath.dnorm5_vec(np.asarray(x, dtype=float))
 
 
 class ProbitLink(Link):
     """``g(μ) = Φ⁻¹(μ)`` — probit binomial link."""
     name = "probit"
-    def link(self, mu): return ndtri(np.asarray(mu, dtype=float))
+    def link(self, mu): return _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
     def linkinv(self, eta):
         # R: clamp η to ±qnorm(eps); pnorm of clamped η.
         eta = np.asarray(eta, dtype=float)
-        thresh = -ndtri(np.finfo(float).eps)
-        return ndtr(np.clip(eta, -thresh, thresh))
+        thresh = -_nmath.qnorm5(np.finfo(float).eps)
+        return _nmath.pnorm5_vec(np.clip(eta, -thresh, thresh))
     def mu_eta(self, eta):
         # dnorm(η), lower-clamped.
         eps = np.finfo(float).eps
         return np.maximum(_dnorm(np.asarray(eta, dtype=float)), eps)
     def d2link(self, mu):
-        eta = ndtri(np.asarray(mu, dtype=float))
+        eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
         d = np.maximum(_dnorm(eta), np.finfo(float).eps)
         return eta / d ** 2
     def d3link(self, mu):
-        eta = ndtri(np.asarray(mu, dtype=float))
+        eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
         d = np.maximum(_dnorm(eta), np.finfo(float).eps)
         return (1.0 + 2.0 * eta * eta) / d ** 3
     def d4link(self, mu):
-        eta = ndtri(np.asarray(mu, dtype=float))
+        eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
         d = np.maximum(_dnorm(eta), np.finfo(float).eps)
         return (7.0 * eta + 6.0 * eta ** 3) / d ** 4
 
@@ -1500,9 +815,9 @@ class Gaussian(Family):
         return y.copy()
 
     def qf(self, p, mu, wt, scale):
-        from scipy.stats import norm
-        return norm.ppf(p, loc=mu, scale=np.sqrt(
-            scale / np.asarray(wt, dtype=float)))
+        sd = np.sqrt(scale / np.asarray(wt, dtype=float))
+        return _nmath._vec(lambda pp, m, s: _nmath.qnorm5(pp, m, s, True, False),
+                           p, mu, sd)
 
     def rd(self, rng, mu, wt, scale):
         return rng.normal(mu, np.sqrt(scale / np.asarray(wt, dtype=float)))
@@ -1590,7 +905,9 @@ class Gamma(Family):
         # R's Gamma()$aic: -2·Σ wt·log dgamma(y; 1/disp, scale=μ·disp) + 2.
         # +2 mirrors mgcv (one "extra" df for the dispersion).
         with np.errstate(divide="ignore", invalid="ignore"):
-            logp = _gamma_dist.logpdf(y, a=1.0 / disp, scale=mu * disp)
+            logp = _nmath._vec(
+                lambda yy, sc: _nmath.dgamma(yy, 1.0 / disp, sc, True),
+                y, np.asarray(mu, dtype=float) * disp)
         return -2.0 * float(np.sum(logp * wt)) + 2.0
 
     def ls(self, y, wt, scale):
@@ -1621,9 +938,9 @@ class Gamma(Family):
     def qf(self, p, mu, wt, scale):
         # mgcv fix.family.qf: qgamma(p, shape=1/scale, scale=mu*scale) —
         # prior weights are ignored (as in mgcv).
-        from scipy.stats import gamma as _gamma_dist
-        return _gamma_dist.ppf(p, a=1.0 / scale,
-                               scale=np.asarray(mu, dtype=float) * scale)
+        sc = np.asarray(mu, dtype=float) * scale
+        return _nmath._vec(
+            lambda pp, s: _nmath.qgamma(pp, 1.0 / scale, s, True, False), p, sc)
 
     def rd(self, rng, mu, wt, scale):
         mu = np.asarray(mu, dtype=float)
@@ -1684,12 +1001,13 @@ class Poisson(Family):
         y = np.asarray(y, dtype=float)
         wt = np.asarray(wt, dtype=float)
         with np.errstate(divide="ignore", invalid="ignore"):
-            logp = _poisson_dist.logpmf(y, y)
+            logp = _nmath._vec(lambda yy: _nmath.dpois(yy, yy, True), y)
         ls0 = float(np.sum(logp * wt))
         return np.array([ls0, 0.0, 0.0], dtype=float)
 
     def qf(self, p, mu, wt, scale):
-        return _poisson_dist.ppf(p, np.asarray(mu, dtype=float))
+        return _nmath._vec(lambda pp, m: _nmath.qpois(pp, m, True, False),
+                           p, np.asarray(mu, dtype=float))
 
     def rd(self, rng, mu, wt, scale):
         return rng.poisson(np.asarray(mu, dtype=float)).astype(float)
@@ -1819,14 +1137,14 @@ class Binomial(Family):
     def qf(self, p, mu, wt, scale):
         # mgcv fix.family.qf: ceiling non-integer denominators with a
         # warning; qbinom(p, wt, mu)/(wt + (wt==0)).
-        from scipy.stats import binom as _binom_dist
         wt = np.asarray(wt, dtype=float)
         if not np.allclose(wt, np.ceil(wt)):
             wt = np.ceil(wt)
             import warnings as _w
             _w.warn("non-integer binomial denominator: quantiles "
                     "incorrect", stacklevel=2)
-        q = _binom_dist.ppf(p, wt, np.asarray(mu, dtype=float))
+        q = _nmath._vec(lambda pp, n, m: _nmath.qbinom(pp, n, m, True, False),
+                        p, wt, np.asarray(mu, dtype=float))
         return q / (wt + (wt == 0))
 
     def rd(self, rng, mu, wt, scale):
@@ -5904,7 +5222,6 @@ class shash(GeneralFamily):
 
     def qf(self, p, mu, wt, scale):
         """shash quantile function (gamlss.r:4041-4053)."""
-        from scipy.special import ndtri
         mu = np.asarray(mu, dtype=float)
         p = np.asarray(p, dtype=float)
         mu_e = mu[:, 0]
@@ -5912,12 +5229,11 @@ class shash(GeneralFamily):
         eps_e = mu[:, 2]
         del_e = np.exp(mu[:, 3])
         return mu_e + (del_e * sig_e) * np.sinh(
-            (1.0 / del_e) * np.arcsinh(ndtri(p)) + eps_e / del_e)
+            (1.0 / del_e) * np.arcsinh(_nmath.qnorm5_vec(p)) + eps_e / del_e)
 
     def cdf(self, q, mu, wt, scale, logp: bool = False):
         """shash cdf (gamlss.r:4055-4067). Ported for surface parity —
         mgcv consumes family$cdf only in (unported) NCV machinery."""
-        from scipy.special import log_ndtr, ndtr
         mu = np.asarray(mu, dtype=float)
         q = np.asarray(q, dtype=float)
         mu_e = mu[:, 0]
@@ -5926,7 +5242,7 @@ class shash(GeneralFamily):
         del_e = np.exp(mu[:, 3])
         s = np.sinh((np.arcsinh((q - mu_e) / (del_e * sig_e))
                      - eps_e / del_e) * del_e)
-        return log_ndtr(s) if logp else ndtr(s)
+        return _nmath.pnorm5_vec(s, log_p=True) if logp else _nmath.pnorm5_vec(s)
 
     def __repr__(self):
         return (f"shash(link=('identity', 'logeb', 'identity', "

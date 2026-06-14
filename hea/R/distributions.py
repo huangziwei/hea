@@ -1,17 +1,25 @@
-"""R's d* / p* / q* / r* distribution wrappers around scipy.stats, plus
-``set.seed`` and ``sample``.
+"""R's d* / p* / q* / r* distribution surface, plus ``set.seed`` and ``sample``.
 
-Conventions kept from R: ``lower_tail`` (R's ``lower.tail``) for p* / q*;
-``ncp`` non-centrality where applicable; ``lambda_`` for Poisson (R's
-``lambda`` is a Python keyword). ``df`` PDF is intentionally omitted —
-``df`` is too common as a DataFrame variable; use ``scipy.stats.f.pdf``
-directly when you need it.
+The **central** d/p/q functions (normal, t, F, chi-square, gamma, beta,
+binomial, Poisson, exponential, uniform) route through :mod:`hea.R.nmath` —
+bit-exact ports of R's ``src/nmath/`` C kernels (Cody pnorm, Wichura qnorm,
+Welinder pgamma, TOMS 708 pbeta, Loader dpois/dbinom, AS 91/109 qgamma/qbeta)
+— so ``hea.R`` d/p/q is 0-ulp to R, not scipy's ~1-3 ulp approximations.
+Only the **non-central** variants (``ncp != 0``: nct/ncf/ncx2) still defer to
+``scipy.stats`` (a separate algorithm family, not yet ported).
+
+Conventions kept from R: ``lower_tail`` (R's ``lower.tail``) and ``log_p`` /
+``log`` for p* / q* / d*; ``ncp`` non-centrality where applicable; ``lambda_``
+for Poisson (R's ``lambda`` is a Python keyword). ``df`` PDF is intentionally
+omitted — ``df`` is too common as a DataFrame variable; use
+``scipy.stats.f.pdf`` directly when you need it.
 """
 from __future__ import annotations
 
 import numpy as np
 from scipy import stats as _sps
 
+from . import nmath as _nm
 from ._shared import NamedVector
 from .rng import RMersenneTwister
 
@@ -47,19 +55,36 @@ def _recycle(p, n: int) -> np.ndarray:
 
 
 # normal
-def dnorm(x, mean=0, sd=1):
-    return _sps.norm.pdf(x, loc=mean, scale=sd)
+def dnorm(x, mean=0, sd=1, log=False):
+    """R's ``dnorm`` — bit-exact via the ported ``dnorm5`` (nmath/dnorm.c)."""
+    if np.ndim(mean) == 0 and np.ndim(sd) == 0:
+        if np.ndim(x) == 0:
+            return _nm.dnorm5(float(x), float(mean), float(sd), log)
+        return _nm.dnorm5_vec(np.asarray(x, dtype=float), float(mean),
+                              float(sd), log)
+    return _nm._vec(lambda v, m, s: _nm.dnorm5(v, m, s, log), x, mean, sd)
 
 
-def pnorm(q, mean=0, sd=1, lower_tail=True):
-    p = _sps.norm.cdf(q, loc=mean, scale=sd)
-    return p if lower_tail else 1 - p
+def pnorm(q, mean=0, sd=1, lower_tail=True, log_p=False):
+    """R's ``pnorm`` — bit-exact via the ported ``pnorm5`` (nmath/pnorm.c, Cody)."""
+    if np.ndim(mean) == 0 and np.ndim(sd) == 0:
+        if np.ndim(q) == 0:
+            return _nm.pnorm5(float(q), float(mean), float(sd), lower_tail, log_p)
+        return _nm.pnorm5_vec(np.asarray(q, dtype=float), float(mean), float(sd),
+                              lower_tail, log_p)
+    return _nm._vec(lambda x, m, s: _nm.pnorm5(x, m, s, lower_tail, log_p),
+                    q, mean, sd)
 
 
-def qnorm(p, mean=0, sd=1, lower_tail=True):
-    if not lower_tail:
-        p = 1 - np.asarray(p)
-    return _sps.norm.ppf(p, loc=mean, scale=sd)
+def qnorm(p, mean=0, sd=1, lower_tail=True, log_p=False):
+    """R's ``qnorm`` — bit-exact via the ported ``qnorm5`` (nmath/qnorm.c, AS-241)."""
+    if np.ndim(mean) == 0 and np.ndim(sd) == 0:
+        if np.ndim(p) == 0:
+            return _nm.qnorm5(float(p), float(mean), float(sd), lower_tail, log_p)
+        return _nm.qnorm5_vec(np.asarray(p, dtype=float), float(mean), float(sd),
+                              lower_tail, log_p)
+    return _nm._vec(lambda pp, m, s: _nm.qnorm5(pp, m, s, lower_tail, log_p),
+                    p, mean, sd)
 
 
 def rnorm(n, mean=0, sd=1):
@@ -84,25 +109,27 @@ def rnorm(n, mean=0, sd=1):
 
 
 # Student's t  (df = degrees of freedom, ncp = non-centrality)
-def dt(x, df, ncp=0):
-    if ncp == 0:
-        return _sps.t.pdf(x, df=df)
+def dt(x, df, ncp=0, log=False):
+    """R's ``dt`` — central case bit-exact via ported dt (nmath/dt.c)."""
+    if np.all(np.asarray(ncp) == 0):
+        return _nm._vec(lambda v, n: _nm.dt(v, n, log), x, df)
     return _sps.nct.pdf(x, df=df, nc=ncp)
 
 
-def pt(q, df, ncp=0, lower_tail=True):
-    if ncp == 0:
-        p = _sps.t.cdf(q, df=df)
-    else:
-        p = _sps.nct.cdf(q, df=df, nc=ncp)
+def pt(q, df, ncp=0, lower_tail=True, log_p=False):
+    """R's ``pt`` — central case bit-exact via ported pt (nmath/pt.c)."""
+    if np.all(np.asarray(ncp) == 0):
+        return _nm._vec(lambda x, n: _nm.pt(x, n, lower_tail, log_p), q, df)
+    p = _sps.nct.cdf(q, df=df, nc=ncp)
     return p if lower_tail else 1 - p
 
 
-def qt(p, df, ncp=0, lower_tail=True):
+def qt(p, df, ncp=0, lower_tail=True, log_p=False):
+    """R's ``qt`` — central case bit-exact via ported qt (nmath/qt.c)."""
+    if np.all(np.asarray(ncp) == 0):
+        return _nm._vec(lambda pp, n: _nm.qt(pp, n, lower_tail, log_p), p, df)
     if not lower_tail:
         p = 1 - np.asarray(p)
-    if ncp == 0:
-        return _sps.t.ppf(p, df=df)
     return _sps.nct.ppf(p, df=df, nc=ncp)
 
 
@@ -122,19 +149,22 @@ def rt(n, df, ncp=0):
 
 
 # F  (df() PDF intentionally omitted — clashes with `df` variable name)
-def pf(q, df1, df2, ncp=0, lower_tail=True):
-    if ncp == 0:
-        p = _sps.f.cdf(q, df1, df2)
-    else:
-        p = _sps.ncf.cdf(q, df1, df2, nc=ncp)
+def pf(q, df1, df2, ncp=0, lower_tail=True, log_p=False):
+    """R's ``pf`` — central case bit-exact via ported pf (nmath/pf.c)."""
+    if np.all(np.asarray(ncp) == 0):
+        return _nm._vec(lambda x, a, b: _nm.pf(x, a, b, lower_tail, log_p),
+                        q, df1, df2)
+    p = _sps.ncf.cdf(q, df1, df2, nc=ncp)
     return p if lower_tail else 1 - p
 
 
-def qf(p, df1, df2, ncp=0, lower_tail=True):
+def qf(p, df1, df2, ncp=0, lower_tail=True, log_p=False):
+    """R's ``qf`` — central case bit-exact via ported qf (nmath/qf.c)."""
+    if np.all(np.asarray(ncp) == 0):
+        return _nm._vec(lambda pp, a, b: _nm.qf(pp, a, b, lower_tail, log_p),
+                        p, df1, df2)
     if not lower_tail:
         p = 1 - np.asarray(p)
-    if ncp == 0:
-        return _sps.f.ppf(p, df1, df2)
     return _sps.ncf.ppf(p, df1, df2, nc=ncp)
 
 
@@ -157,24 +187,26 @@ def rf(n, df1, df2, ncp=0):
 
 # chi-squared
 def dchisq(x, df, ncp=0):
-    if ncp == 0:
-        return _sps.chi2.pdf(x, df=df)
+    # central chi-square = gamma(shape=df/2, scale=2) — bit-exact via nmath.
+    if np.all(np.asarray(ncp) == 0):
+        return _nm._vec(lambda v, d: _nm.dgamma(v, d / 2.0, 2.0, False), x, df)
     return _sps.ncx2.pdf(x, df=df, nc=ncp)
 
 
 def pchisq(q, df, ncp=0, lower_tail=True):
-    if ncp == 0:
-        p = _sps.chi2.cdf(q, df=df)
-    else:
-        p = _sps.ncx2.cdf(q, df=df, nc=ncp)
+    if np.all(np.asarray(ncp) == 0):
+        return _nm._vec(
+            lambda x, d: _nm.pgamma(x, d / 2.0, 2.0, lower_tail, False), q, df)
+    p = _sps.ncx2.cdf(q, df=df, nc=ncp)
     return p if lower_tail else 1 - p
 
 
 def qchisq(p, df, ncp=0, lower_tail=True):
+    if np.all(np.asarray(ncp) == 0):
+        return _nm._vec(
+            lambda pp, d: _nm.qgamma(pp, d / 2.0, 2.0, lower_tail, False), p, df)
     if not lower_tail:
         p = 1 - np.asarray(p)
-    if ncp == 0:
-        return _sps.chi2.ppf(p, df=df)
     return _sps.ncx2.ppf(p, df=df, nc=ncp)
 
 
@@ -190,19 +222,21 @@ def rchisq(n, df, ncp=0):
 
 
 # binomial
-def dbinom(x, size, prob):
-    return _sps.binom.pmf(x, size, prob)
+def dbinom(x, size, prob, log=False):
+    """R's ``dbinom`` — bit-exact via ported dbinom (nmath/dbinom.c)."""
+    return _nm._vec(lambda v, n, p: _nm.dbinom(v, n, p, log), x, size, prob)
 
 
-def pbinom(q, size, prob, lower_tail=True):
-    p = _sps.binom.cdf(q, size, prob)
-    return p if lower_tail else 1 - p
+def pbinom(q, size, prob, lower_tail=True, log_p=False):
+    """R's ``pbinom`` — bit-exact via ported pbinom (nmath/pbinom.c -> pbeta)."""
+    return _nm._vec(lambda x, n, p: _nm.pbinom(x, n, p, lower_tail, log_p),
+                    q, size, prob)
 
 
-def qbinom(p, size, prob, lower_tail=True):
-    if not lower_tail:
-        p = 1 - np.asarray(p)
-    return _sps.binom.ppf(p, size, prob)
+def qbinom(p, size, prob, lower_tail=True, log_p=False):
+    """R's ``qbinom`` — bit-exact via ported qbinom (nmath discrete search)."""
+    return _nm._vec(lambda pp, n, pr: _nm.qbinom(pp, n, pr, lower_tail, log_p),
+                    p, size, prob)
 
 
 def rbinom(n, size, prob):
@@ -216,19 +250,21 @@ def rbinom(n, size, prob):
 
 
 # poisson  (R uses `lambda`, a Python keyword → spelled `lambda_`)
-def dpois(x, lambda_):
-    return _sps.poisson.pmf(x, mu=lambda_)
+def dpois(x, lambda_, log=False):
+    """R's ``dpois`` — bit-exact via ported dpois (nmath/dpois.c, Loader)."""
+    return _nm._vec(lambda v, lam: _nm.dpois(v, lam, log), x, lambda_)
 
 
-def ppois(q, lambda_, lower_tail=True):
-    p = _sps.poisson.cdf(q, mu=lambda_)
-    return p if lower_tail else 1 - p
+def ppois(q, lambda_, lower_tail=True, log_p=False):
+    """R's ``ppois`` — bit-exact via ported ppois (nmath/ppois.c -> pgamma)."""
+    return _nm._vec(lambda x, lam: _nm.ppois(x, lam, lower_tail, log_p),
+                    q, lambda_)
 
 
-def qpois(p, lambda_, lower_tail=True):
-    if not lower_tail:
-        p = 1 - np.asarray(p)
-    return _sps.poisson.ppf(p, mu=lambda_)
+def qpois(p, lambda_, lower_tail=True, log_p=False):
+    """R's ``qpois`` — bit-exact via ported qpois (nmath discrete search)."""
+    return _nm._vec(lambda pp, lam: _nm.qpois(pp, lam, lower_tail, log_p),
+                    p, lambda_)
 
 
 def rpois(n, lambda_):
@@ -263,19 +299,19 @@ def runif(n, min=0, max=1):
 
 
 # exponential  (R: rate = 1/scale)
-def dexp(x, rate=1):
-    return _sps.expon.pdf(x, scale=1 / rate)
+def dexp(x, rate=1, log=False):
+    """R's ``dexp`` — bit-exact via ported dexp (nmath/dexp.c)."""
+    return _nm._vec(lambda v, r: _nm.dexp(v, 1 / r, log), x, rate)
 
 
-def pexp(q, rate=1, lower_tail=True):
-    p = _sps.expon.cdf(q, scale=1 / rate)
-    return p if lower_tail else 1 - p
+def pexp(q, rate=1, lower_tail=True, log_p=False):
+    """R's ``pexp`` — bit-exact via ported pexp (nmath/pexp.c)."""
+    return _nm._vec(lambda v, r: _nm.pexp(v, 1 / r, lower_tail, log_p), q, rate)
 
 
-def qexp(p, rate=1, lower_tail=True):
-    if not lower_tail:
-        p = 1 - np.asarray(p)
-    return _sps.expon.ppf(p, scale=1 / rate)
+def qexp(p, rate=1, lower_tail=True, log_p=False):
+    """R's ``qexp`` — bit-exact via ported qexp (nmath/qexp.c)."""
+    return _nm._vec(lambda pp, r: _nm.qexp(pp, 1 / r, lower_tail, log_p), p, rate)
 
 
 def rexp(n, rate=1):
@@ -287,25 +323,27 @@ def rexp(n, rate=1):
 
 
 # gamma  (R: shape, rate; ``scale`` overrides if given)
-def dgamma(x, shape, rate=1, scale=None):
+def dgamma(x, shape, rate=1, scale=None, log=False):
+    """R's ``dgamma`` — bit-exact via the ported ``dgamma`` (nmath/dgamma.c)."""
     if scale is None:
         scale = 1 / rate
-    return _sps.gamma.pdf(x, a=shape, scale=scale)
+    return _nm._vec(lambda v, a, s: _nm.dgamma(v, a, s, log), x, shape, scale)
 
 
-def pgamma(q, shape, rate=1, scale=None, lower_tail=True):
+def pgamma(q, shape, rate=1, scale=None, lower_tail=True, log_p=False):
+    """R's ``pgamma`` — bit-exact via the ported ``pgamma`` (nmath/pgamma.c)."""
     if scale is None:
         scale = 1 / rate
-    p = _sps.gamma.cdf(q, a=shape, scale=scale)
-    return p if lower_tail else 1 - p
+    return _nm._vec(lambda x, a, s: _nm.pgamma(x, a, s, lower_tail, log_p),
+                    q, shape, scale)
 
 
-def qgamma(p, shape, rate=1, scale=None, lower_tail=True):
+def qgamma(p, shape, rate=1, scale=None, lower_tail=True, log_p=False):
+    """R's ``qgamma`` — bit-exact via the ported ``qgamma`` (nmath/qgamma.c)."""
     if scale is None:
         scale = 1 / rate
-    if not lower_tail:
-        p = 1 - np.asarray(p)
-    return _sps.gamma.ppf(p, a=shape, scale=scale)
+    return _nm._vec(lambda pp, a, s: _nm.qgamma(pp, a, s, lower_tail, log_p),
+                    p, shape, scale)
 
 
 def rgamma(n, shape, rate=1, scale=None):
@@ -321,19 +359,21 @@ def rgamma(n, shape, rate=1, scale=None):
 
 
 # beta
-def dbeta(x, shape1, shape2):
-    return _sps.beta.pdf(x, a=shape1, b=shape2)
+def dbeta(x, shape1, shape2, log=False):
+    """R's ``dbeta`` — bit-exact via ported dbeta (nmath/dbeta.c)."""
+    return _nm._vec(lambda v, a, b: _nm.dbeta(v, a, b, log), x, shape1, shape2)
 
 
-def pbeta(q, shape1, shape2, lower_tail=True):
-    p = _sps.beta.cdf(q, a=shape1, b=shape2)
-    return p if lower_tail else 1 - p
+def pbeta(q, shape1, shape2, lower_tail=True, log_p=False):
+    """R's ``pbeta`` — bit-exact via ported pbeta (nmath/toms708 bratio)."""
+    return _nm._vec(lambda x, a, b: _nm.pbeta(x, a, b, lower_tail, log_p),
+                    q, shape1, shape2)
 
 
-def qbeta(p, shape1, shape2, lower_tail=True):
-    if not lower_tail:
-        p = 1 - np.asarray(p)
-    return _sps.beta.ppf(p, a=shape1, b=shape2)
+def qbeta(p, shape1, shape2, lower_tail=True, log_p=False):
+    """R's ``qbeta`` — bit-exact via ported qbeta (nmath/qbeta.c, AS 109)."""
+    return _nm._vec(lambda pp, a, b: _nm.qbeta(pp, a, b, lower_tail, log_p),
+                    p, shape1, shape2)
 
 
 def rbeta(n, shape1, shape2):

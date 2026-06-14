@@ -19,7 +19,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from scipy.linalg import qr, solve_triangular
-from scipy.stats import norm, t as student_t
+from scipy.stats import t as student_t
+
+from ..R import nmath as _nmath
 
 from ..family import (
     Binomial,
@@ -539,7 +541,7 @@ class glm:
     def _wald_p(self, stat: np.ndarray) -> np.ndarray:
         with np.errstate(invalid="ignore"):
             if self._test_kind == "z":
-                return 2.0 * norm.sf(np.abs(stat))
+                return 2.0 * _nmath.pnorm5_vec(np.abs(stat), lower_tail=False)
             return 2.0 * student_t.sf(np.abs(stat), self.df_residual)
 
     def _compute_ci(self, alpha: float) -> pl.DataFrame:
@@ -548,7 +550,7 @@ class glm:
         # unknown-scale ones (Gaussian/Gamma/IG). The t-quantile is
         # only used by confint.lm. (confint.glm itself returns profile-
         # likelihood CIs, which are out of scope here.)
-        q = float(norm.ppf(1.0 - alpha / 2.0))
+        q = float(_nmath.qnorm5(1.0 - alpha / 2.0))
         bhat = self._bhat_arr
         se = self._se_bhat_arr
         lo = bhat - q * se

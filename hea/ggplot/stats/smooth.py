@@ -16,8 +16,8 @@ from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
-from scipy.stats import norm
 
+from ...R import nmath as _nmath
 from .._util import to_numeric_aes
 from .stat import Stat
 
@@ -233,7 +233,7 @@ class StatSmooth(Stat):
             span=self.span, family=self.family,
         )
 
-        z = norm.ppf(0.5 + self.level / 2)
+        z = _nmath.qnorm5(0.5 + self.level / 2)
         ymin = yhat - z * se
         ymax = yhat + z * se
 

@@ -710,37 +710,39 @@ def test_R_vector_functions_dispatch_on_expr():
 
 
 def test_dnorm_pnorm_qnorm():
-    assert dnorm(0) == pytest.approx(0.3989422804, rel=1e-6)
-    assert pnorm(1.96) == pytest.approx(0.9750021048, rel=1e-6)
-    assert qnorm(0.975) == pytest.approx(1.959963985, rel=1e-6)
+    # Bit-exact to R 4.6.0 (ported nmath dnorm/pnorm/qnorm kernels).
+    assert dnorm(0) == 0.3989422804014327
+    assert pnorm(1.96) == 0.97500210485177963
+    assert qnorm(0.975) == 1.9599639845400536
 
 
 def test_pnorm_lower_tail_false():
-    assert pnorm(1.96, lower_tail=False) == pytest.approx(
-        1 - 0.9750021048, rel=1e-6
-    )
+    # R's pnorm(.., lower.tail=FALSE) uses the upper-tail kernel directly.
+    assert pnorm(1.96, lower_tail=False) == 0.024997895148220428
 
 
 def test_qnorm_lower_tail_false():
-    # P(Z > q) = 0.025  →  q = qnorm(0.975) ≈ 1.959964
-    assert qnorm(0.025, lower_tail=False) == pytest.approx(
-        1.959963985, rel=1e-6
-    )
+    # P(Z > q) = 0.025  →  q = qnorm(0.975); R's lower.tail=FALSE path differs
+    # from 1-p by 1 ulp (0.5 - p + 0.5 idiom) — we replicate it exactly.
+    assert qnorm(0.025, lower_tail=False) == 1.9599639845400538
 
 
 def test_t_distribution():
-    assert qt(0.975, df=10) == pytest.approx(2.228138852, rel=1e-6)
-    assert pt(2, df=10) == pytest.approx(0.963306167, rel=1e-6)
+    # Bit-exact to R (ported pt/qt -> pbeta toms708).
+    assert qt(0.975, df=10) == 2.2281388519862739
+    assert pt(2, df=10) == 0.96330598261462974
 
 
 def test_chisq_distribution():
-    assert qchisq(0.95, df=1) == pytest.approx(3.841458821, rel=1e-6)
-    assert pchisq(3.841458821, df=1) == pytest.approx(0.95, abs=1e-6)
+    # Bit-exact to R (central chisq -> ported pgamma/qgamma).
+    assert qchisq(0.95, df=1) == 3.841458820694124
+    assert pchisq(3.841458821, df=1) == 0.9500000000091211
 
 
 def test_f_distribution():
-    assert qf(0.95, 2, 10) == pytest.approx(4.102821, rel=1e-5)
-    assert pf(4.102821, 2, 10) == pytest.approx(0.95, abs=1e-5)
+    # Bit-exact to R (ported pf/qf -> pbeta/qbeta).
+    assert qf(0.95, 2, 10) == 4.1028210151304005
+    assert pf(4.102821, 2, 10) == 0.94999999958445847
 
 
 def test_binom():
@@ -752,20 +754,17 @@ def test_binom():
 
 def test_poisson_with_lambda_keyword():
     # dpois(2, lambda=3) = 3^2 * exp(-3) / 2 = 9 * 0.04979 / 2
-    expected = 9 * np.exp(-3) / 2
-    assert float(dpois(2, lambda_=3)) == pytest.approx(expected, rel=1e-6)
-    assert float(ppois(2, lambda_=3)) == pytest.approx(0.4231900811, rel=1e-6)
+    # dpois / ppois are bit-exact to R (ported dpois saddlepoint, ppois->pgamma).
+    assert float(dpois(2, lambda_=3)) == 0.22404180765538773
+    assert float(ppois(2, lambda_=3)) == 0.42319008112684348
 
 
 def test_uniform_exp_gamma_beta():
     assert float(punif(0.3)) == pytest.approx(0.3)
     assert float(qexp(0.5)) == pytest.approx(np.log(2), rel=1e-6)
-    # pgamma(1, shape=2, rate=1) = 1 - 2*exp(-1) = 0.2642411
-    assert float(pgamma(1, shape=2, rate=1)) == pytest.approx(
-        1 - 2 * np.exp(-1), rel=1e-6
-    )
-    # pbeta(0.5, 2, 5) = 57/64 = 0.890625
-    assert float(pbeta(0.5, 2, 5)) == pytest.approx(57 / 64)
+    # pgamma / pbeta are bit-exact to R (ported nmath pgamma / toms708 pbeta).
+    assert float(pgamma(1, shape=2, rate=1)) == 0.26424111765711528
+    assert float(pbeta(0.5, 2, 5)) == 0.890625
 
 
 def test_set_seed_reproducible():

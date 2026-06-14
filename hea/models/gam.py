@@ -43,8 +43,9 @@ import numpy as np
 import polars as pl
 from matplotlib.transforms import blended_transform_factory
 from scipy.linalg import cho_factor, cho_solve, solve_triangular
-from scipy.stats import chi2 as _chi2, f as f_dist, norm, t as t_dist
 
+from ..R import distributions as _dist
+from ..R import nmath as _nmath
 from ..family import (
     Binomial,
     Family,
@@ -536,7 +537,7 @@ def _liu2(x: float, lb: np.ndarray, h: np.ndarray) -> float:
     sigX = math.sqrt(2.0) * a
     arg = t * sigX + muX
     if delta == 0.0:
-        return float(_chi2.sf(arg, df=l_df))
+        return float(_dist.pchisq(arg, df=l_df, lower_tail=False))
     from scipy.stats import ncx2
     return float(ncx2.sf(arg, df=l_df, nc=delta))
 
@@ -1834,7 +1835,7 @@ class gam:
         self.t_values = _row_frame(t_stats, names_rep)
         # Use Student-t on df.residual (parametric Wald in mgcv summary).
         if df_resid > 0 and np.isfinite(df_resid):
-            pv = 2 * t_dist.sf(np.abs(t_stats), df_resid)
+            pv = 2 * _dist.pt(np.abs(t_stats), df_resid, lower_tail=False)
         else:
             pv = np.full_like(t_stats, np.nan)
         self.p_values = _row_frame(pv, names_rep)
@@ -4365,7 +4366,8 @@ class gam:
                                 out=np.full_like(coefs, np.nan),
                                 where=se > 0)
         self.t_values = _row_frame(t_stats, names)
-        self.p_values = _row_frame(2 * norm.sf(np.abs(t_stats)), names)
+        self.p_values = _row_frame(
+            2 * _nmath.pnorm5_vec(np.abs(t_stats), lower_tail=False), names)
         # mgcv's m$aic = fit5's −2l + 2Σedf (mgcv.r:1843); AIC()'s df is
         # Σedf2 capped at #coef (logLik.gam; sc.p = 0 — scale fixed).
         mgcv_aic = fit["aic"] + 2.0 * self.edf_total
@@ -6205,12 +6207,12 @@ class gam:
         if not (pval <= 1.0):
             if res_df <= 0:
                 pval = 0.5 * (
-                    float(_chi2.sf(d, rank1)) + float(_chi2.sf(d1, rank1))
+                    float(_dist.pchisq(d, rank1, lower_tail=False)) + float(_dist.pchisq(d1, rank1, lower_tail=False))
                 )
             else:
                 pval = 0.5 * (
-                    float(f_dist.sf(d / rank1, rank1, res_df))
-                    + float(f_dist.sf(d1 / rank1, rank1, res_df))
+                    float(_dist.pf(d / rank1, rank1, res_df, lower_tail=False))
+                    + float(_dist.pf(d1 / rank1, rank1, res_df, lower_tail=False))
                 )
 
         return d, float(min(1.0, pval)), float(rank)
@@ -6880,7 +6882,7 @@ class gam:
 
         Vc = J @ Hinv @ J.T
         se = np.sqrt(np.maximum(np.diag(Vc), 0.0))
-        z = float(norm.ppf(1.0 - (1.0 - conf_lev) / 2.0))
+        z = float(_nmath.qnorm5(1.0 - (1.0 - conf_lev) / 2.0))
         lower = np.exp(log_sd - z * se)
         upper = np.exp(log_sd + z * se)
         return pl.DataFrame({
@@ -7749,7 +7751,7 @@ class gam:
             # itsadug's exact prob: 1 − round(2·(1 − Φ(f)), 2). For f=1.96
             # → 0.95; f=2.58 → 0.99. Using R's type-8 quantile (Hyndman-Fan)
             # via numpy's "median_unbiased" method (equivalent).
-            prob = 1.0 - round(2.0 * (1.0 - float(norm.cdf(f))), 2)
+            prob = 1.0 - round(2.0 * (1.0 - float(_nmath.pnorm5(f))), 2)
             crit_val = float(np.quantile(masd, prob, method="median_unbiased"))
             sim_ci_arr = crit_val * se_fit
 
@@ -8459,11 +8461,11 @@ class gam:
                     chi = float(b @ Vi @ b)
                 lab = label if j == 0 else f"{label}.{j}"
                 if not est_disp:
-                    pv = float(_chi2.sf(chi, nb))
+                    pv = float(_dist.pchisq(chi, nb, lower_tail=False))
                     rows.append((lab, nb, chi, pv))
                 else:
                     stat = chi / nb
-                    pv = (float(f_dist.sf(stat, nb, residual_df))
+                    pv = (float(_dist.pf(stat, nb, residual_df, lower_tail=False))
                           if residual_df > 0 else float("nan"))
                     rows.append((lab, nb, stat, pv))
         return rows
@@ -8547,11 +8549,11 @@ class gam:
             with np.errstate(divide="ignore", invalid="ignore"):
                 t_stats = est / se
             if not est_disp:
-                pv = 2 * norm.sf(np.abs(t_stats))
+                pv = 2 * _nmath.pnorm5_vec(np.abs(t_stats), lower_tail=False)
                 stat_col = "z value"
                 pcol = "Pr(>|z|)"
             elif self.df_residuals > 0 and np.isfinite(self.df_residuals):
-                pv = 2 * t_dist.sf(np.abs(t_stats), self.df_residuals)
+                pv = 2 * _dist.pt(np.abs(t_stats), self.df_residuals, lower_tail=False)
                 stat_col = "t value"
                 pcol = "Pr(>|t|)"
             else:
@@ -9219,8 +9221,7 @@ class gam:
             n = D.size
             a = 3.0 / 8.0 if n <= 10 else 0.5
             pp = (np.arange(1, n + 1) - a) / (n + 1.0 - 2.0 * a)
-            from scipy.stats import norm as _norm
-            ax.scatter(_norm.ppf(pp), np.sort(D), s=8,
+            ax.scatter(_nmath.qnorm5_vec(pp), np.sort(D), s=8,
                        facecolor="none", edgecolor="black")
             ax.set_xlabel("Theoretical Quantiles")
             ax.set_ylabel(ylab)
@@ -12501,7 +12502,7 @@ def _format_difference_summary(*, comp, cond, su, cancelled, rm_ranef,
         else:
             lines.append("\tNOTE: No random effects in the model to cancel.")
     if sim_ci:
-        pct = 100.0 * (1.0 - round(2.0 * (1.0 - float(norm.cdf(f))), 2))
+        pct = 100.0 * (1.0 - round(2.0 * (1.0 - float(_nmath.pnorm5(f))), 2))
         lines.append(f"\tSimultaneous {pct:.0f}%-CI used.")
     return "\n".join(lines)
 

@@ -50,7 +50,7 @@ import numpy as np
 import polars as pl
 from scipy.linalg import cho_factor, cho_solve, qr as scipy_qr, solve_triangular
 from scipy.linalg.lapack import dpstrf
-from scipy.stats import t as t_dist
+from ..R import distributions as _dist
 
 from ..family import Family, Gaussian, _coerce_response
 from ..formula import (
@@ -2576,7 +2576,7 @@ class bam(gam):
         t_stats = np.divide(beta, se, out=np.full_like(beta, np.nan), where=se > 0)
         self.t_values = _row_frame(t_stats, self.column_names)
         if df_resid > 0 and np.isfinite(df_resid):
-            pv = 2 * t_dist.sf(np.abs(t_stats), df_resid)
+            pv = 2 * _dist.pt(np.abs(t_stats), df_resid, lower_tail=False)
         else:
             pv = np.full_like(t_stats, np.nan)
         self.p_values = _row_frame(pv, self.column_names)
@@ -3316,7 +3316,7 @@ class bam(gam):
         t_stats = np.divide(beta, se, out=np.full_like(beta, np.nan), where=se > 0)
         self.t_values = _row_frame(t_stats, self.column_names)
         if df_resid > 0 and np.isfinite(df_resid):
-            pv = 2 * t_dist.sf(np.abs(t_stats), df_resid)
+            pv = 2 * _dist.pt(np.abs(t_stats), df_resid, lower_tail=False)
         else:
             pv = np.full_like(t_stats, np.nan)
         self.p_values = _row_frame(pv, self.column_names)

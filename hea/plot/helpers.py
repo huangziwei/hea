@@ -12,8 +12,8 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-from scipy.stats import norm
 
+from ..R import nmath as _nmath
 from ._util import draw_points, r_lty, resolve_ax, to_value_series
 
 
@@ -36,7 +36,7 @@ def qqnorm(
         return ax
     sorted_vals = np.sort(vals)
     probs = (np.arange(1, n + 1) - 0.5) / n
-    q = norm.ppf(probs)
+    q = _nmath.qnorm5_vec(probs)
     draw_points(ax, q, sorted_vals, pch=pch)
     ax.set_xlabel("Theoretical Quantiles")
     ax.set_ylabel(ylab)
@@ -81,7 +81,7 @@ def halfnorm(
     sort_idx = np.argsort(abs_x)
     sorted_vals = abs_x[sort_idx]
     sorted_labs = [labels[i] for i in sort_idx]
-    ui = norm.ppf((n + np.arange(1, n + 1)) / (2 * n + 1))
+    ui = _nmath.qnorm5_vec((n + np.arange(1, n + 1)) / (2 * n + 1))
 
     nlab_eff = max(0, min(int(nlab), n))
     if nlab_eff < n:

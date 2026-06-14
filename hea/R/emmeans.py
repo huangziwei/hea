@@ -38,6 +38,7 @@ from dataclasses import dataclass
 import numpy as np
 import polars as pl
 from scipy import stats as _sps
+from . import distributions as _dist
 
 
 @dataclass
@@ -170,13 +171,13 @@ def summary_emmgrid_contrasts(
     k_levels = _infer_k_levels(k)
 
     if adjust is not None:
-        p_raw = 2.0 * _sps.t.sf(np.abs(t_vals), dfs)
+        p_raw = 2.0 * _dist.pt(np.abs(t_vals), dfs, lower_tail=False)
         p_adj = _p_adjust(p_raw, t_vals, dfs, adjust, k_levels)
         df = df.with_columns(pl.Series("p.value", p_adj))
         df = df.with_columns(pl.lit(adjust).alias("adjust"))
 
     if infer:
-        z = _sps.t.ppf((1 + level) / 2, dfs)
+        z = _dist.qt((1 + level) / 2, dfs)
         est = df["estimate"].to_numpy()
         se = df["SE"].to_numpy()
         df = df.with_columns([
@@ -257,7 +258,7 @@ def _means_table(
     """Marginal means with SE and confidence intervals."""
     means = L @ beta
     se = np.sqrt(np.einsum("ij,jk,ik->i", L, V, L))
-    z = _sps.t.ppf((1 + level) / 2, df_resid)
+    z = _dist.qt((1 + level) / 2, df_resid)
     return pl.DataFrame({
         target: [str(lvl) for lvl in levels],
         "emmean": means,
@@ -283,7 +284,7 @@ def _pairwise_table(
     with np.errstate(invalid="ignore", divide="ignore"):
         ts_a = np.where(ses_a > 0, ests_a / ses_a, np.nan)
     labels = [f"{levels[int(i)]} - {levels[int(j)]}" for i, j in zip(iu, ju)]
-    p_raw = 2.0 * _sps.t.sf(np.abs(ts_a), df_resid)
+    p_raw = 2.0 * _dist.pt(np.abs(ts_a), df_resid, lower_tail=False)
     p_adj = _p_adjust(p_raw, ts_a, np.full_like(ts_a, df_resid), adjust, k)
     return pl.DataFrame({
         "contrast": labels,
@@ -312,11 +313,11 @@ def _vs_control_table(
         ts_a = np.where(ses_a > 0, ests_a / ses_a, np.nan)
     labels = [f"{levels[int(i)]} - {levels[ref_pos]}" for i in nonref]
     if side == "<":
-        p_raw = _sps.t.cdf(ts_a, df_resid)
+        p_raw = _dist.pt(ts_a, df_resid)
     elif side == ">":
-        p_raw = _sps.t.sf(ts_a, df_resid)
+        p_raw = _dist.pt(ts_a, df_resid, lower_tail=False)
     else:
-        p_raw = 2.0 * _sps.t.sf(np.abs(ts_a), df_resid)
+        p_raw = 2.0 * _dist.pt(np.abs(ts_a), df_resid, lower_tail=False)
     p_adj = _p_adjust(p_raw, ts_a, np.full_like(ts_a, df_resid), adjust, k - 1)
     return pl.DataFrame({
         "contrast": labels,

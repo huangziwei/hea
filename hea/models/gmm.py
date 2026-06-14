@@ -37,6 +37,7 @@ from scipy.sparse import csc_array, eye_array
 from scipy.special import digamma, polygamma, roots_hermite
 
 from .. import family as _family_mod
+from ..R import nmath as _nmath
 from ..family import Family, Gaussian, _coerce_response
 from ..formula import (
     BinOp,
@@ -6425,10 +6426,8 @@ class gmm:
     def _confint_wald(self, parm, level: float) -> pl.DataFrame:
         """``method="Wald"`` — ``β̂ ± z·SE`` for fixed effects; ``NaN`` rows for
         the variance components / σ (confint.merMod:843-857)."""
-        from scipy.stats import norm
-
         _, vc_names, use_sc, fixef_names, all_names = self._ci_param_layout()
-        z = float(norm.ppf((1 + level) / 2))
+        z = float(_nmath.qnorm5((1 + level) / 2))
         a = (1 - level) / 2
         lo_lbl, hi_lbl = f"{100 * a:.1f}%", f"{100 * (1 - a):.1f}%"
         names, los, his = [], [], []
@@ -7174,7 +7173,6 @@ class gmm:
             return out
 
     def summary(self, digits: int = 4) -> None:
-        from scipy.stats import norm
         out = [self._header()]
         if self._is_glmm():
             out.append(f" Family: {self.family.name}  ( {self.family.link.name} )")
@@ -7197,7 +7195,7 @@ class gmm:
         # GLMM uses z + Pr(>|z|) (asymptotic normal — lme4's print.coefmat
         # for glmerMod); LMM keeps lme4's t-no-p convention.
         if self._is_glmm():
-            p_arr = 2.0 * (1.0 - norm.cdf(np.abs(tval)))
+            p_arr = 2.0 * _nmath.pnorm5_vec(np.abs(tval), lower_tail=False)
             tbl = pl.DataFrame({
                 "":           raw[""].to_list(),
                 "Estimate":   est_s,
@@ -7481,8 +7479,7 @@ class gmm:
         95%); vertical line at x=0. ``strip=False`` suppresses per-panel
         titles.
         """
-        from scipy.stats import norm
-        z = float(norm.ppf(0.5 + level / 2))
+        z = float(_nmath.qnorm5(0.5 + level / 2))
         panels = []
         for key, _levels, cnames, b_mat, se_mat in self._ranef():
             for j, cname in enumerate(cnames):
@@ -7497,7 +7494,7 @@ class gmm:
             b_s = b[order]
             se_s = se[order]
             n = len(b_s)
-            q = norm.ppf((np.arange(1, n + 1) - 0.5) / n)
+            q = _nmath.qnorm5_vec((np.arange(1, n + 1) - 0.5) / n)
             ax.grid(True, color="lightgray", linewidth=0.4)
             ax.axvline(0, color="black", linewidth=0.8)
             ax.errorbar(
@@ -7546,8 +7543,7 @@ class gmm:
 
             ``None`` (default) plots every panel.
         """
-        from scipy.stats import norm
-        z = float(norm.ppf(0.5 + level / 2))
+        z = float(_nmath.qnorm5(0.5 + level / 2))
         panels = []
         for key, levels, cnames, b_mat, se_mat in self._ranef():
             for j, cname in enumerate(cnames):
@@ -7719,8 +7715,6 @@ def _norm_inter(t: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     an exact integer ``rk`` returns ``t_(k)`` directly. Byte-matches R (verified
     against ``boot.ci`` percentile/basic output).
     """
-    from scipy.stats import norm
-
     t = np.asarray(t, float)
     t = t[np.isfinite(t)]
     R = t.size
@@ -7738,9 +7732,9 @@ def _norm_inter(t: np.ndarray, alpha: np.ndarray) -> np.ndarray:
         elif ki >= R:              # at/above the last
             out[i] = tstar[R - 1]
         else:
-            t1 = norm.ppf(alpha[i])
-            t2 = norm.ppf(ki / (R + 1))
-            t3 = norm.ppf((ki + 1) / (R + 1))
+            t1 = _nmath.qnorm5(float(alpha[i]))
+            t2 = _nmath.qnorm5(ki / (R + 1))
+            t3 = _nmath.qnorm5((ki + 1) / (R + 1))
             tk, tk1 = tstar[ki - 1], tstar[ki]
             out[i] = tk + (t1 - t2) / (t3 - t2) * (tk1 - tk)
     return out
@@ -7756,13 +7750,11 @@ def _boot_ci_one(t0: float, t_col: np.ndarray, conf: float, kind: str) -> tuple[
       with ``bias = mean(t) − t0`` and ``sd`` the bootstrap-replicate SD
       (divisor ``R−1``).
     """
-    from scipy.stats import norm
-
     t_col = np.asarray(t_col, float)
     finite = t_col[np.isfinite(t_col)]
     if kind == "norm":
         bias = float(finite.mean()) - t0
-        merr = float(finite.std(ddof=1)) * float(norm.ppf((1 + conf) / 2))
+        merr = float(finite.std(ddof=1)) * float(_nmath.qnorm5((1 + conf) / 2))
         return (t0 - bias - merr, t0 - bias + merr)
     if kind == "perc":
         lo, hi = _norm_inter(t_col, np.array([(1 - conf) / 2, (1 + conf) / 2]))
@@ -7817,9 +7809,7 @@ class Profile:
         (matches lme4; see book Fig. 1.8). Unbounded parameters return
         ``NaN`` if the curve doesn't cross the threshold within the grid.
         """
-        from scipy.stats import norm
-
-        z = float(norm.ppf(0.5 + level / 2))
+        z = float(_nmath.qnorm5(0.5 + level / 2))
         lo_lbl = f"{100 * (1 - level) / 2:.1f}%"
         hi_lbl = f"{100 * (0.5 + level / 2):.1f}%"
         names: list[str] = []
@@ -7863,7 +7853,6 @@ class Profile:
             pr.plot(which=".sigma", transform="square", ax=axes[2])
         """
         import matplotlib.pyplot as plt
-        from scipy.stats import norm
 
         if which is None:
             names = list(self.data.keys())
@@ -7911,7 +7900,7 @@ class Profile:
                 ax_i.axhline(0, color="k", lw=0.4)
             lo_fb = 0.0 if name.startswith(".sig") else float("nan")
             for lvl in levels:
-                z = float(norm.ppf(0.5 + lvl / 2))
+                z = float(_nmath.qnorm5(0.5 + lvl / 2))
                 for tgt in (-z, z):
                     fb = lo_fb if tgt < 0 else float("nan")
                     v_at = _invert_zeta(v, s, tgt, fallback=fb)
@@ -7941,7 +7930,6 @@ class Profile:
         """
         import matplotlib.pyplot as plt
         from scipy.interpolate import PchipInterpolator
-        from scipy.stats import norm
 
         names = list(self.data.keys())
         n = len(names)
@@ -7951,7 +7939,7 @@ class Profile:
         if n == 1:
             axes = [axes]
 
-        z_max = float(norm.ppf(upper))
+        z_max = float(_nmath.qnorm5(upper))
         for ax, name in zip(axes, names):
             df = self.data[name]
             v = df[name].to_numpy()
@@ -7969,7 +7957,7 @@ class Profile:
             grid = np.linspace(v_lo, v_hi, npts)
             zeta_g = spl(grid)
             dz_dv = spl.derivative()(grid)
-            density = norm.pdf(zeta_g) * np.abs(dz_dv)
+            density = _nmath.dnorm5_vec(zeta_g) * np.abs(dz_dv)
             ax.plot(grid, density, lw=1)
             ax.set_title(name)
             ax.set_xlabel(name)
