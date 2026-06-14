@@ -1151,7 +1151,7 @@ def test_glmer_phase6_ranef_match_lme4_poisson():
 
     df = _synthetic_poisson_grouped(seed=2026)
     m = gmm("y ~ x + (1|g)", df, family=PoissonFamily())
-    rf = m.ranef
+    rf = m.ranef()
     # Single bar named ``g`` — match the BLUPs column-by-column.
     assert "g" in rf
     blups_py = rf["g"]["(Intercept)"].to_numpy()
@@ -2520,6 +2520,34 @@ def test_glmer_random_slope_poisson_singular_matches_lme4():
     assert m.corr_re["g"][0, 1] == pytest.approx(-0.99999996, abs=1e-6)
 
 
+def test_glmm_predicates_and_logLik_method():
+    """GLMM predicate surface + the logLik() method (gmm-lmer-parity #17/#19).
+
+    isGLMM=True / isLMM=isREML=isNLMM=False; a boundary GLMM is isSingular. The
+    logLik() METHOD must return the Laplace log-likelihood (= ``m.loglike`` =
+    −deviance_Laplace/2), NOT −residual_deviance/2 — this regression-locks the
+    GLMM branch fix (``self.deviance`` holds Σ deviance-residuals, a different
+    quantity). The hea.R generics route to the same answers.
+    """
+    import polars as pl
+    import hea.R as R
+
+    d = pl.read_csv("datasets/synthetic/seed_synth_vbar_poisson.csv")
+    m = gmm("y ~ x + (1+x|g)", d, family=Poisson())
+    assert m.isGLMM() is True and m.isLMM() is False
+    assert m.isREML() is False and m.isNLMM() is False
+    assert m.isSingular() is True                       # corr → −1 boundary
+    # logLik() == Laplace logLik (= loglike == −deviance_Laplace/2)
+    assert m.logLik() == pytest.approx(m.loglike, abs=0)
+    assert m.logLik() == pytest.approx(-0.5 * m.deviance_laplace, abs=0)
+    # the two deviances genuinely differ, so the old −residual_dev/2 was wrong
+    assert m.deviance != pytest.approx(m.deviance_laplace, abs=1e-6)
+    # getME on a GLMM + generic routing
+    np.testing.assert_array_equal(R.getME(m, "theta"), m.theta)
+    assert R.isGLMM(m) is True and R.isSingular(m) is True
+    assert R.logLik(m) == pytest.approx(m.loglike, abs=0)
+
+
 def test_lmer_sleepstudy_uncorrelated_bars_matches_lme4():
     """gaussian_no_corr — the ``||`` uncorrelated-slopes syntax expands to two
     independent scalar bars. With the NLopt-BOBYQA optimizer θ̂ matches lme4
@@ -2982,16 +3010,17 @@ def test_gmm_na_action_fail_raises_on_na():
 
 
 def test_gmm_na_action_pass_raises_not_implemented():
-    """``na_action='na.pass'`` and 'na.exclude' are not implemented yet —
-    they require carrying NA rows through PIRLS."""
+    """``na_action='na.pass'`` is not implemented (it would carry NA rows
+    through PIRLS); ``'na.exclude'`` IS implemented now (pads fitted/residuals
+    back) and fits cleanly when there are no missing rows."""
     from hea.models.gmm import gmm
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
     with pytest.raises(NotImplementedError, match=r"na.pass"):
         gmm("y ~ x + (1|g)", df, family=Poisson(), na_action="na.pass")
-    with pytest.raises(NotImplementedError, match=r"na.exclude"):
-        gmm("y ~ x + (1|g)", df, family=Poisson(), na_action="na.exclude")
+    m = gmm("y ~ x + (1|g)", df, family=Poisson(), na_action="na.exclude")
+    assert m.n == df.height                     # no NA rows → fits normally
 
 
 def test_glmer_summary_prints_signif_codes_legend(capsys):

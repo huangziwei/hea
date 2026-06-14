@@ -593,6 +593,9 @@ _R_EXPR_SKIP = {
     "terms", "update", "AIC", "BIC", "effects", "simulate",
     "variable_names", "case_names", "labels",
     "anova", "add1", "drop1", "step",
+    # lme4 merMod accessors (operate on a fitted gmm, not on columns).
+    "VarCorr", "getME", "getData", "extractAIC", "rePCA",
+    "isREML", "isLMM", "isGLMM", "isNLMM", "isSingular",
     "hatvalues", "rstandard", "rstudent",
     "cooks_distance", "dffits", "dfbeta", "dfbetas", "influence",
     # emmeans — model-shaped (operate on fitted models / EmmGrid tables).
@@ -1118,16 +1121,30 @@ def test_coef_works_on_glm_gam_lme(m_glm, m_gam, m_lme):
     assert "(Intercept)" in coef(m_glm)
     # gam: intercept + 9 wt basis + 9 hp basis
     assert "(Intercept)" in coef(m_gam)
-    # gmm: fixed effects only (= fixef)
+    # gmm: lme4 coef.merMod — a per-group dict (fixef + matching ranef BLUP),
+    # keyed by grouping factor; use fixef() for the fixed effects alone.
     c = coef(m_lme)
-    assert set(c.names) == {"(Intercept)", "Days"}
+    assert isinstance(c, dict) and set(c) == {"Subject"}
+    sub = c["Subject"]
+    assert "(Intercept)" in sub.columns and "Days" in sub.columns
 
 
-def test_fixef_equals_coef(m_lm, m_lme):
-    for fn_model in [(m_lm,), (m_lme,)]:
-        a, b = fixef(*fn_model), coef(*fn_model)
-        assert a.names == b.names
-        assert (a.values == b.values).all()
+def test_fixef_equals_coef_for_non_mixed(m_lm):
+    """For a non-mixed model fixef and coef coincide (both the fixed-effect
+    NamedVector). For a gmm they differ — coef is the per-group
+    coef.merMod dict; fixef is the fixed effects only."""
+    a, b = fixef(m_lm), coef(m_lm)
+    assert a.names == b.names
+    assert (a.values == b.values).all()
+
+
+def test_fixef_is_fixed_effects_only(m_lme):
+    """gmm fixef() = fixed effects β̂ as a NamedVector — not the per-group
+    coef.merMod dict."""
+    from hea.R import NamedVector
+    f = fixef(m_lme)
+    assert isinstance(f, NamedVector)
+    assert set(f.names) == {"(Intercept)", "Days"}
 
 
 def test_ranef_returns_random_effects(m_lme):
