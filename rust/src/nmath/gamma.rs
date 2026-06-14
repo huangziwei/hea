@@ -108,7 +108,7 @@ fn logcf(x: f64, i: f64, d: f64, eps: f64) -> f64 {
     a2 / b2
 }
 
-fn log1pmx(x: f64) -> f64 {
+pub(crate) fn log1pmx(x: f64) -> f64 {
     let min_log1_value = -0.79149064;
     if x > 1.0 || x < min_log1_value {
         return x.ln_1p() - x;

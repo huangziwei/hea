@@ -336,6 +336,27 @@ def test_dpois_dbinom_dbeta(give_log):
                        for a, b, c in zip(dx, da, db)])
 
 
+def test_saddlepoint_large_count_regime():
+    # Regression for the ebd0 accurate-log1pmx fix: dpois at large count/small mean
+    # → pgamma upper-series branch (large shape) → qgamma. Was ≤7 ulp off R; now 0-ulp.
+    # native==python is the gate; python==R confirmed separately (R oracle).
+    k = np.arange(120.0, 260.0)
+    lam = np.array([2.0, 3.0, 4.0, 5.0, 7.0, 10.0])
+    K = np.repeat(k, lam.size); L = np.tile(lam, k.size)
+    _assert_bit_exact(native.dpois(K, L, False),
+                      [nmath.dpois(float(a), float(b), False) for a, b in zip(K, L)])
+    x = np.linspace(0.5, 400.0, 400)
+    for shape in (20.0, 50.0, 100.0, 200.0):
+        sh = np.full_like(x, shape)
+        _assert_bit_exact(native.pgamma(x, sh, np.ones_like(x), True, False),
+                          [nmath.pgamma(float(v), shape, 1.0, True, False) for v in x])
+    p = np.linspace(1e-4, 1 - 1e-4, 400)
+    for alpha in (50.0, 100.0, 200.0):
+        aa = np.full_like(p, alpha)
+        _assert_bit_exact(native.qgamma(p, aa, np.ones_like(p), True, False),
+                          [nmath.qgamma(float(v), alpha, 1.0, True, False) for v in p])
+
+
 @pytest.mark.parametrize("lower_tail", [True, False])
 def test_exp(lower_tail):
     x = np.array([0., 0.1, 1., 5., 20., 0., 2., 100., 0.5, 1e-8])

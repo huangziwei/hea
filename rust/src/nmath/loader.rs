@@ -162,9 +162,9 @@ pub fn ebd0(x: f64, m: f64) -> (f64, f64) {
         }};
     }
 
-    // ADD1(-x * log1pmx((M*fg - x)/x))  where log1pmx here = log1p(arg)-arg (naive)
+    // ADD1(-x * log1pmx((M*fg - x)/x)) — R's ebd0 uses the accurate log1pmx.
     let arg = (m * fg - x) / x;
-    add1!(-x * (arg.ln_1p() - arg));
+    add1!(-x * super::gamma::log1pmx(arg));
 
     if fg != 1.0 {
         let iu = i as usize;

@@ -1368,7 +1368,7 @@ def _ebd0(x, M):
 
     # ADD1(-x * log1pmx((M*fg - x) / x))
     arg = (Ma * fg - xa) / xa
-    log1pmx_val = np.log1p(arg) - arg
+    log1pmx_val = _log1pmx_vec(arg)  # R's ebd0 uses the accurate log1pmx, not log1p(arg)-arg
     add1(-xa * log1pmx_val)
 
     fg_ne_1 = fg != 1.0
