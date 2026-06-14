@@ -9,6 +9,10 @@
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
 
+use super::coeffs::{QN_A, QN_B, QN_C, QN_D, QN_E, QN_F};
+use super::consts::{M_2PI, M_LN2, M_LN_SQRT_2PI, M_SQRT2};
+use super::util::{ldexp, round_half_even};
+
 // --- constants (Rmath.h) -----------------------------------------------------
 const M_SQRT_32: f64 = 5.656854249492380195206754896838; // sqrt(32)
 const M_1_SQRT_2PI: f64 = 0.398942280401432677939946059934; // 1/sqrt(2pi)
@@ -66,7 +70,7 @@ const PN_Q: [f64; 5] = [
 
 // R_DT_0 = lower_tail ? R_D__0 : R_D__1
 #[inline]
-fn dt0(lower_tail: bool, log_p: bool) -> f64 {
+pub(crate) fn dt0(lower_tail: bool, log_p: bool) -> f64 {
     if lower_tail {
         if log_p {
             f64::NEG_INFINITY
@@ -82,7 +86,7 @@ fn dt0(lower_tail: bool, log_p: bool) -> f64 {
 
 // R_DT_1 = lower_tail ? R_D__1 : R_D__0
 #[inline]
-fn dt1(lower_tail: bool, log_p: bool) -> f64 {
+pub(crate) fn dt1(lower_tail: bool, log_p: bool) -> f64 {
     if lower_tail {
         if log_p {
             0.0
@@ -265,19 +269,219 @@ pub fn pnorm5_scalar(x: f64, mu: f64, sigma: f64, lower_tail: bool, log_p: bool)
 /// the scalar-params case (R recycling of array-vs-scalar args is handled in
 /// Python before the native call).
 #[pyfunction]
-#[pyo3(signature = (x, mu=0.0, sigma=1.0, lower_tail=true, log_p=false))]
+#[pyo3(signature = (x, mu, sigma, lower_tail=true, log_p=false))]
 pub fn pnorm<'py>(
     py: Python<'py>,
     x: PyReadonlyArray1<'py, f64>,
-    mu: f64,
-    sigma: f64,
+    mu: PyReadonlyArray1<'py, f64>,
+    sigma: PyReadonlyArray1<'py, f64>,
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let xv = x.as_array();
-    let out: Vec<f64> = xv
-        .iter()
-        .map(|&xi| pnorm5_scalar(xi, mu, sigma, lower_tail, log_p))
+    let (xv, mv, sv) = (x.as_array(), mu.as_array(), sigma.as_array());
+    let out: Vec<f64> = (0..xv.len())
+        .map(|i| pnorm5_scalar(xv[i], mv[i], sv[i], lower_tail, log_p))
         .collect();
     out.into_pyarray(py)
+}
+
+// === qnorm5 — normal quantile (nmath/qnorm.c, Wichura AS-241) =================
+#[inline]
+fn qn_horner(r: f64, c: &[f64]) -> f64 {
+    let mut v = c[0];
+    for &k in &c[1..] {
+        v = v * r + k;
+    }
+    v
+}
+
+/// R's `qnorm5(p, mu, sigma, lower_tail, log_p)`, bit-exact.
+pub fn qnorm5_scalar(p: f64, mu: f64, sigma: f64, lower_tail: bool, log_p: bool) -> f64 {
+    if p.is_nan() || mu.is_nan() || sigma.is_nan() {
+        return p + mu + sigma;
+    }
+    if log_p {
+        if p > 0.0 {
+            return f64::NAN;
+        }
+        if p == 0.0 {
+            return if lower_tail { f64::INFINITY } else { f64::NEG_INFINITY };
+        }
+        if p == f64::NEG_INFINITY {
+            return if lower_tail { f64::NEG_INFINITY } else { f64::INFINITY };
+        }
+    } else {
+        if p < 0.0 || p > 1.0 {
+            return f64::NAN;
+        }
+        if p == 0.0 {
+            return if lower_tail { f64::NEG_INFINITY } else { f64::INFINITY };
+        }
+        if p == 1.0 {
+            return if lower_tail { f64::INFINITY } else { f64::NEG_INFINITY };
+        }
+    }
+    if sigma < 0.0 {
+        return f64::NAN;
+    }
+    if sigma == 0.0 {
+        return mu;
+    }
+
+    let p_ = if log_p {
+        if lower_tail {
+            p.exp()
+        } else {
+            -p.exp_m1()
+        }
+    } else if lower_tail {
+        p
+    } else {
+        0.5 - p + 0.5
+    };
+    let q = p_ - 0.5;
+
+    if q.abs() <= 0.425 {
+        let r = 0.180625 - q * q;
+        let val = q * qn_horner(r, &QN_A) / qn_horner(r, &QN_B);
+        return mu + sigma * val;
+    }
+
+    let lp;
+    if log_p && ((lower_tail && q <= 0.0) || (!lower_tail && q > 0.0)) {
+        lp = p;
+    } else if q > 0.0 {
+        let civ = if log_p {
+            if lower_tail {
+                -p.exp_m1()
+            } else {
+                p.exp()
+            }
+        } else if lower_tail {
+            0.5 - p + 0.5
+        } else {
+            p
+        };
+        lp = civ.ln();
+    } else {
+        lp = p_.ln();
+    }
+    let mut r = (-lp).sqrt();
+
+    let mut val;
+    if r <= 5.0 {
+        r += -1.6;
+        val = qn_horner(r, &QN_C) / qn_horner(r, &QN_D);
+    } else if r <= 27.0 {
+        r += -5.0;
+        val = qn_horner(r, &QN_E) / qn_horner(r, &QN_F);
+    } else if r >= 6.4e8 {
+        val = r * M_SQRT2;
+    } else {
+        let s2 = -ldexp(lp, 1);
+        let mut x2 = s2 - (M_2PI * s2).ln();
+        if r < 36000.0 {
+            x2 = s2 - (M_2PI * x2).ln() - 2.0 / (2.0 + x2);
+            if r < 840.0 {
+                x2 = s2 - (M_2PI * x2).ln()
+                    + 2.0 * (-(1.0 - 1.0 / (4.0 + x2)) / (2.0 + x2)).ln_1p();
+                if r < 109.0 {
+                    x2 = s2 - (M_2PI * x2).ln()
+                        + 2.0
+                            * (-(1.0 - (1.0 - 5.0 / (6.0 + x2)) / (4.0 + x2)) / (2.0 + x2))
+                                .ln_1p();
+                    if r < 55.0 {
+                        x2 = s2 - (M_2PI * x2).ln()
+                            + 2.0
+                                * (-(1.0
+                                    - (1.0 - (5.0 - 9.0 / (8.0 + x2)) / (6.0 + x2)) / (4.0 + x2))
+                                    / (2.0 + x2))
+                                    .ln_1p();
+                    }
+                }
+            }
+        }
+        val = x2.sqrt();
+    }
+    if q < 0.0 {
+        val = -val;
+    }
+    mu + sigma * val
+}
+
+// === dnorm5 — normal density (nmath/dnorm.c) =================================
+/// R's `dnorm4/dnorm5(x, mu, sigma, give_log)`, bit-exact (non-FAST variant).
+pub fn dnorm5_scalar(x: f64, mu: f64, sigma: f64, give_log: bool) -> f64 {
+    if x.is_nan() || mu.is_nan() || sigma.is_nan() {
+        return x + mu + sigma;
+    }
+    let rd0 = if give_log { f64::NEG_INFINITY } else { 0.0 };
+    if sigma.is_infinite() {
+        return rd0;
+    }
+    if x.is_infinite() && mu == x {
+        return f64::NAN;
+    }
+    if sigma <= 0.0 {
+        if sigma < 0.0 {
+            return f64::NAN;
+        }
+        return if x == mu { f64::INFINITY } else { rd0 };
+    }
+    let mut x = (x - mu) / sigma;
+    if x.is_infinite() {
+        return rd0;
+    }
+    x = x.abs();
+    let two_sqrt_dbl_max = 2.0 * f64::MAX.sqrt();
+    if x >= two_sqrt_dbl_max {
+        return rd0;
+    }
+    if give_log {
+        return -(M_LN_SQRT_2PI + 0.5 * x * x + sigma.ln());
+    }
+    if x < 5.0 {
+        return M_1_SQRT_2PI * (-0.5 * x * x).exp() / sigma;
+    }
+    // _DNORM_BIG = sqrt(-2*M_LN2*(DBL_MIN_EXP+1-DBL_MANT_DIG)), exprs match nmath.py
+    let dnorm_big = (-2.0 * M_LN2 * (-1021.0 + 1.0 - 53.0)).sqrt();
+    if x > dnorm_big {
+        return 0.0;
+    }
+    let x1 = ldexp(round_half_even(ldexp(x, 16)), -16);
+    let x2 = x - x1;
+    M_1_SQRT_2PI / sigma * ((-0.5 * x1 * x1).exp() * ((-0.5 * x2 - x1) * x2).exp())
+}
+
+#[pyfunction]
+#[pyo3(name = "qnorm", signature = (p, mu, sigma, lower_tail=true, log_p=false))]
+pub fn qnorm<'py>(
+    py: Python<'py>,
+    p: PyReadonlyArray1<'py, f64>,
+    mu: PyReadonlyArray1<'py, f64>,
+    sigma: PyReadonlyArray1<'py, f64>,
+    lower_tail: bool,
+    log_p: bool,
+) -> Bound<'py, PyArray1<f64>> {
+    let (pv, mv, sv) = (p.as_array(), mu.as_array(), sigma.as_array());
+    let v: Vec<f64> = (0..pv.len())
+        .map(|i| qnorm5_scalar(pv[i], mv[i], sv[i], lower_tail, log_p))
+        .collect();
+    v.into_pyarray(py)
+}
+
+#[pyfunction]
+#[pyo3(name = "dnorm", signature = (x, mu, sigma, give_log=false))]
+pub fn dnorm<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<'py, f64>,
+    mu: PyReadonlyArray1<'py, f64>,
+    sigma: PyReadonlyArray1<'py, f64>,
+    give_log: bool,
+) -> Bound<'py, PyArray1<f64>> {
+    let (xv, mv, sv) = (x.as_array(), mu.as_array(), sigma.as_array());
+    let v: Vec<f64> = (0..xv.len())
+        .map(|i| dnorm5_scalar(xv[i], mv[i], sv[i], give_log))
+        .collect();
+    v.into_pyarray(py)
 }

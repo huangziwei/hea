@@ -816,8 +816,7 @@ class Gaussian(Family):
 
     def qf(self, p, mu, wt, scale):
         sd = np.sqrt(scale / np.asarray(wt, dtype=float))
-        return _nmath._vec(lambda pp, m, s: _nmath.qnorm5(pp, m, s, True, False),
-                           p, mu, sd)
+        return _nmath.qnorm5_vec(p, mu, sd, True, False)
 
     def rd(self, rng, mu, wt, scale):
         return rng.normal(mu, np.sqrt(scale / np.asarray(wt, dtype=float)))
@@ -905,9 +904,9 @@ class Gamma(Family):
         # R's Gamma()$aic: -2·Σ wt·log dgamma(y; 1/disp, scale=μ·disp) + 2.
         # +2 mirrors mgcv (one "extra" df for the dispersion).
         with np.errstate(divide="ignore", invalid="ignore"):
-            logp = _nmath._vec(
-                lambda yy, sc: _nmath.dgamma(yy, 1.0 / disp, sc, True),
-                y, np.asarray(mu, dtype=float) * disp)
+            logp = _nmath._disp(
+                "dgamma", _nmath.dgamma,
+                [y, 1.0 / disp, np.asarray(mu, dtype=float) * disp], (True,))
         return -2.0 * float(np.sum(logp * wt)) + 2.0
 
     def ls(self, y, wt, scale):
@@ -939,8 +938,8 @@ class Gamma(Family):
         # mgcv fix.family.qf: qgamma(p, shape=1/scale, scale=mu*scale) —
         # prior weights are ignored (as in mgcv).
         sc = np.asarray(mu, dtype=float) * scale
-        return _nmath._vec(
-            lambda pp, s: _nmath.qgamma(pp, 1.0 / scale, s, True, False), p, sc)
+        return _nmath._disp(
+            "qgamma", _nmath.qgamma, [p, 1.0 / scale, sc], (True, False))
 
     def rd(self, rng, mu, wt, scale):
         mu = np.asarray(mu, dtype=float)
@@ -1001,13 +1000,13 @@ class Poisson(Family):
         y = np.asarray(y, dtype=float)
         wt = np.asarray(wt, dtype=float)
         with np.errstate(divide="ignore", invalid="ignore"):
-            logp = _nmath._vec(lambda yy: _nmath.dpois(yy, yy, True), y)
+            logp = _nmath._disp("dpois", _nmath.dpois, [y, y], (True,))
         ls0 = float(np.sum(logp * wt))
         return np.array([ls0, 0.0, 0.0], dtype=float)
 
     def qf(self, p, mu, wt, scale):
-        return _nmath._vec(lambda pp, m: _nmath.qpois(pp, m, True, False),
-                           p, np.asarray(mu, dtype=float))
+        return _nmath._disp("qpois", _nmath.qpois, [p, np.asarray(mu, dtype=float)],
+                            (True, False))
 
     def rd(self, rng, mu, wt, scale):
         return rng.poisson(np.asarray(mu, dtype=float)).astype(float)
@@ -1143,8 +1142,8 @@ class Binomial(Family):
             import warnings as _w
             _w.warn("non-integer binomial denominator: quantiles "
                     "incorrect", stacklevel=2)
-        q = _nmath._vec(lambda pp, n, m: _nmath.qbinom(pp, n, m, True, False),
-                        p, wt, np.asarray(mu, dtype=float))
+        q = _nmath._disp("qbinom", _nmath.qbinom, [p, wt, np.asarray(mu, dtype=float)],
+                         (True, False))
         return q / (wt + (wt == 0))
 
     def rd(self, rng, mu, wt, scale):

@@ -29,6 +29,20 @@ from ._dispatch import native_fn
 # Native (Rust) kernels — None when the extension is absent/disabled, in which
 # case the pure-Python kernels below run unchanged (bit-identical, just slower).
 _nat_pnorm = native_fn("pnorm")
+_nat_qnorm = native_fn("qnorm")
+_nat_dnorm = native_fn("dnorm")
+
+
+def _norm_native(nat_fn, x, mu, sigma, flags):
+    """Broadcast (x, mu, sigma), run the native norm kernel, reshape. The native
+    norm kernels take mu/sigma as arrays (uniform with the rest of the surface),
+    so array mean/sd route through Rust too — no scalar-loop special case."""
+    xa, ma, sa = np.broadcast_arrays(
+        np.asarray(x, dtype=float), np.asarray(mu, dtype=float),
+        np.asarray(sigma, dtype=float))
+    return nat_fn(
+        np.ascontiguousarray(xa.reshape(-1)), np.ascontiguousarray(ma.reshape(-1)),
+        np.ascontiguousarray(sa.reshape(-1)), *flags).reshape(xa.shape)
 
 # --- R constants (Rmath.h) ----------------------------------------------------
 _M_SQRT_32 = 5.656854249492380195206754896838      # sqrt(32)
@@ -44,6 +58,29 @@ _DBL_EPSILON = 2.220446049250313080847e-16
 _INF = math.inf
 _NEGINF = -math.inf
 _NAN = math.nan
+
+
+def _disp(name, scalar_fn, num_args, flags=()):
+    """Native-accelerated vectorised dispatch with pure-Python fallback.
+
+    ``name`` is the :mod:`hea._native` kernel (e.g. ``"pgamma"``); ``scalar_fn``
+    is the matching :mod:`hea.R.nmath` scalar kernel; ``num_args`` are the
+    numeric (array-or-scalar) arguments in native-call order; ``flags`` are the
+    trailing bool flags (lower_tail/log_p/give_log). When the extension is built
+    the kernel runs in Rust (broadcast → flat → reshape, 0-ulp to the Python
+    path); otherwise the scalar loop runs. Scalar inputs → Python float.
+    """
+    nat_fn = native_fn(name)
+    arrs = [np.asarray(a, dtype=float) for a in num_args]
+    if nat_fn is not None:
+        if all(a.ndim == 0 for a in arrs):
+            r = nat_fn(*[a.reshape(1) for a in arrs], *flags)
+            return float(r[0])
+        barr = np.broadcast_arrays(*arrs)
+        shape = barr[0].shape
+        flat = [np.ascontiguousarray(a.reshape(-1)) for a in barr]
+        return nat_fn(*flat, *flags).reshape(shape)
+    return _vec(lambda *a: scalar_fn(*a, *flags), *num_args)
 
 
 def _vec(fn, *args):
@@ -193,6 +230,10 @@ def dnorm5(x: float, mu: float = 0.0, sigma: float = 1.0,
 
 def dnorm5_vec(x, mu=0.0, sigma=1.0, give_log=False):
     """Vectorised :func:`dnorm5`; bit-identical to the scalar version."""
+    if _nat_dnorm is not None:
+        return _norm_native(_nat_dnorm, x, mu, sigma, (bool(give_log),))
+    if np.ndim(mu) or np.ndim(sigma):  # array params w/o native → scalar loop
+        return _vec(lambda v, m, s: dnorm5(v, m, s, give_log), x, mu, sigma)
     x = np.asarray(x, dtype=float)
     out = np.empty(x.shape, dtype=float)
     rd0 = _NEGINF if give_log else 0.0
@@ -390,6 +431,10 @@ def _dt1(lower_tail, log_p):
 
 def qnorm5_vec(p, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
     """Vectorised :func:`qnorm5`; bit-identical to the scalar version."""
+    if _nat_qnorm is not None:
+        return _norm_native(_nat_qnorm, p, mu, sigma, (bool(lower_tail), bool(log_p)))
+    if np.ndim(mu) or np.ndim(sigma):  # array params w/o native → scalar loop
+        return _vec(lambda v, m, s: qnorm5(v, m, s, lower_tail, log_p), p, mu, sigma)
     p = np.asarray(p, dtype=float)
     out = np.full(p.shape, np.nan, dtype=float)
     if log_p:  # rare — scalar fallback for the whole array
@@ -434,11 +479,9 @@ def qnorm5_vec(p, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
 def pnorm5_vec(x, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
     """Vectorised :func:`pnorm5`; bit-identical to the scalar version."""
     if _nat_pnorm is not None:
-        xa = np.asarray(x, dtype=float)
-        flat = np.ascontiguousarray(xa.reshape(-1))
-        return _nat_pnorm(
-            flat, float(mu), float(sigma), bool(lower_tail), bool(log_p)
-        ).reshape(xa.shape)
+        return _norm_native(_nat_pnorm, x, mu, sigma, (bool(lower_tail), bool(log_p)))
+    if np.ndim(mu) or np.ndim(sigma):  # array params w/o native → scalar loop
+        return _vec(lambda v, m, s: pnorm5(v, m, s, lower_tail, log_p), x, mu, sigma)
     x = np.asarray(x, dtype=float)
     out = np.empty(x.shape, dtype=float)
     if log_p:  # rare — scalar fallback for the whole array
