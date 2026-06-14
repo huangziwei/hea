@@ -2963,16 +2963,17 @@ def test_gmm_na_action_fail_raises_on_na():
 
 
 def test_gmm_na_action_pass_raises_not_implemented():
-    """``na_action='na.pass'`` and 'na.exclude' are not implemented yet —
-    they require carrying NA rows through PIRLS."""
+    """``na_action='na.pass'`` is not implemented (it would carry NA rows
+    through PIRLS); ``'na.exclude'`` IS implemented now (pads fitted/residuals
+    back) and fits cleanly when there are no missing rows."""
     from hea.models.gmm import gmm
     from hea.family import Poisson
 
     df = _synthetic_poisson_grouped(seed=2026)
     with pytest.raises(NotImplementedError, match=r"na.pass"):
         gmm("y ~ x + (1|g)", df, family=Poisson(), na_action="na.pass")
-    with pytest.raises(NotImplementedError, match=r"na.exclude"):
-        gmm("y ~ x + (1|g)", df, family=Poisson(), na_action="na.exclude")
+    m = gmm("y ~ x + (1|g)", df, family=Poisson(), na_action="na.exclude")
+    assert m.n == df.height                     # no NA rows → fits normally
 
 
 def test_glmer_summary_prints_signif_codes_legend(capsys):

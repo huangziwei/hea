@@ -87,8 +87,12 @@ def anova(*models, test: str | None = None, freq: bool = False,
             if test is not None:
                 raise TypeError("anova(lm): test= is not accepted (always F)")
             return _anova_lm_single(m)
+        if isinstance(m, gmm):
+            if test is not None:
+                raise TypeError("anova(gmm): test= is not accepted (sequential F)")
+            return _anova_gmm_single(m)
         raise TypeError(
-            "anova(m): single-model form supports lm and gam only "
+            "anova(m): single-model form supports lm, gam and gmm only "
             f"(got {type(m).__name__})"
         )
     labels = _caller_names(models, inspect.currentframe().f_back)
@@ -1544,6 +1548,39 @@ def _anova_glm_table(*models, labels: list[str], test: str | None = None):
         " ":          sig_col,
     })
     return df_, docstring
+
+
+def _anova_gmm_single(model):
+    """Single-model Type-I (sequential) fixed-effect F-table — lme4's
+    ``anova.merMod``.
+
+    The rotated coefficients ``effects = RX · β̂`` (``RX`` = the fixed-effect
+    Cholesky) are squared and summed within each term to give the sequential
+    sums of squares; ``F = MeanSq / σ̂²``. There is no p-value (a mixed model
+    has no exact denominator df), matching ``anova(fm)`` with a single model.
+    """
+    from ..formula import materialize
+
+    _, assign = materialize(model._expanded, model.data, return_assign=True)
+    RX, _ = model._getme_rx_rzx()
+    effects = RX @ np.asarray(model._beta, dtype=float).ravel()
+    sigma2 = float(model.sigma_squared)
+    rows, npar, ss_col, ms_col, f_col = [], [], [], [], []
+    for i, lbl in enumerate(model._expanded.term_labels, start=1):
+        cols = [j for j, a in enumerate(assign) if a == i]
+        if not cols:
+            continue
+        ss = float(np.sum(effects[cols] ** 2))
+        df = len(cols)
+        rows.append(lbl)
+        npar.append(df)
+        ss_col.append(ss)
+        ms_col.append(ss / df)
+        f_col.append((ss / df) / sigma2)
+    return pl.DataFrame({
+        "": rows, "npar": npar, "Sum Sq": ss_col,
+        "Mean Sq": ms_col, "F value": f_col,
+    })
 
 
 def _anova_gmm(*models, labels: list[str]):

@@ -1010,6 +1010,29 @@ def test_vcov_method_matches_attr_and_se(fm06ML):
     np.testing.assert_allclose(C, C.T, atol=1e-12)
 
 
+def test_vcov_full_joint_matches_lme4(sleepstudy_data):
+    """#14: vcov(full=True) is the joint [b̂; β̂] conditional covariance
+    (lme4 vcov(full=TRUE)). The bottom-right p×p block == the default vcov; the
+    RE blocks inflate the postVar by the fixed-effect uncertainty. Labels are
+    '<grp>.<level>.<comp>' then the fixed-effect names."""
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    Vf = m.vcov(full=True)
+    A = Vf.to_numpy()
+    assert A.shape == (38, 38)
+    assert Vf.columns[:2] == ["Subject.308.(Intercept)", "Subject.308.Days"]
+    assert Vf.columns[-2:] == ["(Intercept)", "Days"]
+    np.testing.assert_allclose(A[-2:, -2:], m.vcov().to_numpy(), atol=1e-9)
+    np.testing.assert_allclose(
+        A[:2, :2],
+        [[171.616396993957, -19.7195640120661],
+         [-19.7195640120661, 6.96558466442668]], atol=1e-4)
+    np.testing.assert_allclose(
+        A[:2, 2:4],
+        [[25.9108094732363, 1.72493958602702],
+         [1.72493958602702, 1.65330175214122]], atol=1e-4)
+    np.testing.assert_allclose(A, A.T, atol=1e-9)               # symmetric
+
+
 # ---------------------------------------------------------------------------
 # logLik(REML=) toggle (gmm-lmer-parity #19) — one fit yields both criteria,
 # recomputing the other at the fitted θ̂ (lme4 devCrit). lme4 4.x reference.
@@ -1049,6 +1072,32 @@ def test_ranef_condvar_matches_lme4_postvar(sleepstudy_data):
         cv["Days condsd"].to_numpy()[0], 2.3048390209, atol=1e-5)
     np.testing.assert_allclose(
         cv["(Intercept)"].to_numpy(), plain["(Intercept)"].to_numpy(), atol=0)
+
+
+def test_ranef_postvar_drop_whichel(sleepstudy_data):
+    """#21: ranef(postVar=True) attaches the full (c×c×n_levels) conditional
+    covariance arrays (lme4's postVar); drop= reduces scalar bars to level-named
+    vectors; whichel= selects grouping factors. postVar diag == condsd²."""
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    rf = m.ranef(postVar=True)
+    assert isinstance(rf, dict)                       # back-compat dict access
+    pv = rf.postVar["Subject"]
+    assert pv.shape == (2, 2, 18)
+    np.testing.assert_allclose(
+        pv[:, :, 0],
+        [[145.705587520721, -21.4445035980931],
+         [-21.4445035980931, 5.31228291228546]], atol=1e-4)
+    cv = m.ranef(condVar=True)["Subject"]
+    np.testing.assert_allclose(
+        cv["(Intercept) condsd"].to_numpy()[0], np.sqrt(pv[0, 0, 0]), atol=1e-7)
+    # drop on a scalar bar → level-named vector
+    dy = gmm("Yield ~ 1 + (1|Batch)", load_dataset("lme4", "Dyestuff"), REML=True)
+    dv = dy.ranef(drop=True)["Batch"]
+    assert len(dv) == 6 and "A" in list(dv.names)
+    # whichel selects the grouping factor (both its bars)
+    m2 = gmm("Reaction ~ Days + (1|Subject) + (0+Days|Subject)",
+             sleepstudy_data, REML=True)
+    assert set(m2.ranef(whichel="Subject")) == {"Subject", "Subject.1"}
 
 
 # ---------------------------------------------------------------------------
@@ -1102,7 +1151,46 @@ def test_getME_matches_contract_and_lme4(sleepstudy_data):
     np.testing.assert_allclose(b[:, 0], rf["(Intercept)"].to_numpy(), atol=1e-9)
     np.testing.assert_allclose(b[:, 1], rf["Days"].to_numpy(), atol=1e-9)
     with pytest.raises(ValueError, match="not supported"):
-        m.getME("RX")
+        m.getME("Cm")               # a real lme4 name hea doesn't expose
+
+
+def test_getME_advanced_names_match_lme4(sleepstudy_data):
+    """#11: the advanced getME pieces — RX/A/Tlist/ST/mmList/Tp/devcomp and the
+    per-term dims — bit-exact to lme4 2.0.1. RX (fixed-effect Cholesky) and A
+    (=Λᵀ Zᵀ) are basis-invariant; RZX is in hea's Cholesky basis but satisfies
+    the invariant RXᵀRX + RZXᵀRZX = XᵀX."""
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    np.testing.assert_allclose(
+        m.getME("RX"),
+        [[3.7859220865198, 2.299136523593964], [0.0, 16.555807462279105]],
+        atol=1e-8)
+    RX, RZX, X = m.getME("RX"), m.getME("RZX"), m.getME("X")
+    np.testing.assert_allclose(RX.T @ RX + RZX.T @ RZX, X.T @ X, atol=1e-6)
+    A = m.getME("A")
+    assert A.shape == (36, 180)
+    np.testing.assert_allclose(
+        A[:3, :3],
+        [[0.96674177397936, 0.98191083287403, 0.99707989176869],
+         [0.0, 0.23090995320769, 0.46181990641538], [0.0, 0.0, 0.0]], atol=1e-8)
+    np.testing.assert_allclose(
+        m.getME("Tlist")[0],
+        [[0.96674177397936, 0.0], [0.01516905889467, 0.23090995320769]], atol=1e-8)
+    np.testing.assert_allclose(
+        m.getME("ST")["Subject"],
+        [[0.96674177397936, 0.0], [0.01569091075089, 0.23090995320769]], atol=1e-8)
+    np.testing.assert_allclose(m.getME("mmList")[0][:3], [[1, 0], [1, 1], [1, 2]])
+    np.testing.assert_array_equal(m.getME("Tp"), [0, 3])
+    assert m.getME("p_i").tolist() == [2] and m.getME("l_i").tolist() == [18]
+    assert m.getME("q_i").tolist() == [36] and m.getME("m_i").tolist() == [3]
+    assert m.getME("k") == 1 and m.getME("m") == 3
+    cmp = m.getME("devcomp")["cmp"]
+    np.testing.assert_allclose(cmp["ldL2"], 75.9613332066632, atol=1e-6)
+    np.testing.assert_allclose(cmp["ldRX2"], 8.27605283509015, atol=1e-6)
+    np.testing.assert_allclose(cmp["wrss"], 98881.5684446342, atol=1e-3)
+    np.testing.assert_allclose(cmp["ussq"], 17697.7530254616, atol=1e-3)
+    np.testing.assert_allclose(cmp["sigmaREML"], 25.5917957216559, atol=1e-6)
+    np.testing.assert_allclose(cmp["sigmaML"], 25.4492219341985, atol=1e-6)
+    assert m.getME("devcomp")["dims"]["nmp"] == 178
 
 
 def test_VarCorr_matches_lme4(sleepstudy_data):
@@ -1218,10 +1306,144 @@ def test_predict_population_sentinels(sleepstudy_data):
     for s in ("NA", "~0", "~ 0", float("nan")):
         np.testing.assert_allclose(m.predict(re_form=s)["fit"].to_numpy(), pop, atol=0)
     assert not np.allclose(pop, m.predict()["fit"].to_numpy())   # pop != full-RE
-    with pytest.raises(NotImplementedError, match="newparams"):
-        m.predict(newparams={"beta": [1.0, 2.0]})
-    with pytest.raises(NotImplementedError, match="partial-bars"):
-        m.predict(re_form="~ (1+Days|Subject)")
+    # a re_form naming the full bar == including all RE
+    np.testing.assert_allclose(
+        m.predict(re_form="~(1+Days|Subject)")["fit"].to_numpy(),
+        m.predict()["fit"].to_numpy(), atol=1e-9)
+
+
+def test_predict_newparams_partial_bars_na_action(sleepstudy_data):
+    """#22: predict newparams (β/θ substitution with the fitted modes kept),
+    partial-bars re_form (a subset of RE terms), and na.omit / na.exclude — all
+    bit-exact / correct vs lme4 2.0.1."""
+    import polars as pl
+    fm7 = gmm("Reaction ~ Days + (1|Subject) + (0+Days|Subject)",
+              sleepstudy_data, REML=True)
+    np.testing.assert_allclose(
+        fm7.predict(re_form="~(1|Subject)")["fit"].to_numpy()[:3],
+        [252.917769618, 263.385055577, 273.852341537], atol=1e-4)
+    np.testing.assert_allclose(
+        fm7.predict(re_form="~(0+Days|Subject)")["fit"].to_numpy()[:3],
+        [251.405104848, 271.195887848, 290.986670847], atol=1e-4)
+    fm = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    np.testing.assert_allclose(                       # substitute β, keep modes
+        fm.predict(newparams={"beta": [240, 11]})["fit"].to_numpy()[:3],
+        [242.25855095, 262.457526715, 282.656502481], atol=1e-4)
+    np.testing.assert_allclose(                       # population at new β
+        fm.predict(re_form="NA", newparams={"beta": [250, 10]})["fit"].to_numpy()[:3],
+        [250.0, 260.0, 270.0], atol=1e-9)
+    with pytest.raises(ValueError, match="length"):
+        fm.predict(newparams={"beta": [1, 2, 3]})
+    # na.omit drops NA rows; na.exclude pads them back with NaN
+    nd = sleepstudy_data.head(4).with_columns(pl.Series("Days", [0.0, None, 2.0, 3.0]))
+    base = fm.predict(sleepstudy_data.head(4))["fit"].to_numpy()
+    om = fm.predict(nd, na_action="na.omit")
+    assert om.height == 3
+    np.testing.assert_allclose(om["fit"].to_numpy(), base[[0, 2, 3]], atol=1e-9)
+    ex = fm.predict(nd, na_action="na.exclude")["fit"].to_numpy()
+    assert ex.shape == (4,) and np.isnan(ex[1])
+    np.testing.assert_allclose(ex[[0, 2, 3]], base[[0, 2, 3]], atol=1e-9)
+
+
+def test_simulate_newparams_newdata_bit_exact(sleepstudy_data):
+    """#25: simulate newparams (β/θ/σ substitution, draw order preserved) and
+    newdata (fresh design — newdata's grouping levels set the RE-draw dimension
+    q) reproduce R's simulate(seed=42) bit-for-bit (lme4 2.0.1)."""
+    fm = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    np.testing.assert_allclose(                       # default preserved
+        fm.simulate(nsim=1, seed=42)["sim_1"].to_numpy()[:3],
+        [265.247804221, 271.209734781, 238.864548297], atol=1e-2)
+    np.testing.assert_allclose(                       # newparams β=(250,10)
+        fm.simulate(nsim=1, seed=42,
+                    newparams={"beta": [250, 10], "theta": fm.theta,
+                               "sigma": fm.sigma})["sim_1"].to_numpy()[:3],
+        [263.842699372, 269.337343973, 236.524871529], atol=1e-2)
+    np.testing.assert_allclose(                       # newdata (subject 308 ×6)
+        fm.simulate(nsim=1, seed=42,
+                    newdata=sleepstudy_data.head(6))["sim_1"].to_numpy()[:3],
+        [294.616627039, 309.182078615, 310.994409646], atol=1e-2)
+
+
+def test_profile_vector_bar_matches_lme4(sleepstudy_data):
+    """#24: profile() supports vector bars (1+x|g) — the component SDs and the
+    correlation are profiled on the sd/cor scale (a constrained re-optimization
+    of the relative-Cholesky θ); confint matches lme4 2.0.1 across every
+    parameter. Plus the maxpts / which / signames / prof_scale tuning args."""
+    fm = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    ci = fm.confint(method="profile")
+    d = {r["parameter"]: (list(r.values())[1], list(r.values())[2])
+         for r in ci.iter_rows(named=True)}
+    np.testing.assert_allclose(d[".sig01"], [14.3815, 37.7160], atol=2e-2)  # sd_int
+    np.testing.assert_allclose(d[".sig02"], [3.8012, 8.7534], atol=2e-2)    # sd_Days
+    np.testing.assert_allclose(d[".sig03"], [-0.4815, 0.6850], atol=2e-2)   # cor
+    np.testing.assert_allclose(d[".sigma"], [22.8983, 28.8580], atol=2e-2)
+    np.testing.assert_allclose(d["(Intercept)"], [237.6807, 265.1295], atol=2e-2)
+    np.testing.assert_allclose(d["Days"], [7.3587, 13.5759], atol=2e-2)
+    # which= profiles a subset (maxpts is R's name for n_grid)
+    assert [r["parameter"] for r in
+            fm.profile(which=["Days"], maxpts=60).confint().iter_rows(named=True)] == ["Days"]
+    # signames= controls the variance-component labelling
+    assert [s[0] for s in fm._variance_component_specs(signames=False)] == \
+        ["sd_(Intercept)|Subject", "sd_Days|Subject", "cor_Days.(Intercept)|Subject"]
+    # prof_scale='varcov' — the diagonal (variances, σ²) match lme4 (the
+    # off-diagonal covariance is numerically fragile in lme4 too — it warns NAs)
+    vc = {r["parameter"]: (list(r.values())[1], list(r.values())[2])
+          for r in fm.profile(prof_scale="varcov").confint().iter_rows(named=True)}
+    np.testing.assert_allclose(vc[".sigma"], [524.331, 832.784], atol=3)     # σ²
+    np.testing.assert_allclose(vc[".sig01"], [207.007, 1422.500], atol=3)    # var_int
+
+
+def test_confint_oldnames_signames_zeta():
+    """#23: confint oldNames/signames relabel the variance components to the
+    descriptive sd_…/sigma names (same CI values as .sig0i); zeta overrides the
+    ±Φ⁻¹((1+level)/2) cutoff. Pinned to lme4 2.0.1 (Dyestuff)."""
+    import polars as pl
+    dy = gmm("Yield ~ 1 + (1|Batch)", load_dataset("lme4", "Dyestuff"), REML=True)
+    default = dy.confint(method="profile")
+    assert default["parameter"].to_list() == [".sig01", ".sigma", "(Intercept)"]
+    new = dy.confint(method="profile", oldNames=False)
+    assert new["parameter"].to_list() == [
+        "sd_(Intercept)|Batch", "sigma", "(Intercept)"]
+    np.testing.assert_allclose(             # same CI, only relabeled
+        new.select(new.columns[1:]).to_numpy(),
+        default.select(default.columns[1:]).to_numpy(), atol=1e-6)
+    d = {r["parameter"]: tuple(list(r.values())[1:])
+         for r in default.iter_rows(named=True)}
+    np.testing.assert_allclose(d[".sig01"], [12.19853, 84.06305], atol=2e-2)
+    np.testing.assert_allclose(d[".sigma"], [38.22998, 67.65770], atol=2e-2)
+    np.testing.assert_allclose(d["(Intercept)"], [1486.4515, 1568.5485], atol=2e-2)
+    # zeta overrides the cutoff (zeta=1 → ~68% interval, strictly narrower)
+    z1 = dy.confint(method="profile", zeta=1.0)
+    zc = z1.filter(pl.col("parameter") == "(Intercept)").row(0)[1:]
+    assert zc[0] > d["(Intercept)"][0] and zc[1] < d["(Intercept)"][1]
+
+
+def test_na_exclude_padding_and_varcorr_alignment(sleepstudy_data):
+    """#18 polish: na.action='na.exclude' pads fitted()/residuals() back to the
+    full model-frame length with NaN at the dropped rows (R's napredict/naresid);
+    the VarCorr / RE-table Std.Dev. column right-aligns so decimals line up
+    (lme4's print layout)."""
+    import re
+    import polars as pl
+    import hea.R as R
+    d_na = sleepstudy_data.with_columns(
+        pl.when(pl.int_range(pl.len()) == 5).then(None)
+        .otherwise(pl.col("Reaction")).alias("Reaction"))
+    m = gmm(_SLEEP_F, d_na, na_action="na.exclude")
+    assert m.n == 179
+    fv, rs = R.fitted(m), R.resid(m)
+    assert len(fv) == 180 and np.isnan(fv[5]) and np.isfinite(fv[[0, 1, 2, 6]]).all()
+    assert len(rs) == 180 and np.isnan(rs[5]) and np.isfinite(rs[[0, 1, 2, 6]]).all()
+    assert len(R.fitted(gmm(_SLEEP_F, d_na))) == 179      # na.omit: unpadded
+    # VarCorr Std.Dev. decimals align (right-justified numeric column)
+    fm = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    lines = repr(fm.VarCorr()).split("\n")
+    dot_cols = []
+    for ln in lines[1:]:
+        mt = re.search(r"\d+\.\d+", ln)
+        if mt:
+            dot_cols.append(ln.index(mt.group()) + mt.group().index("."))
+    assert len(dot_cols) == 3 and len(set(dot_cols)) == 1   # all . at one column
 
 
 def test_confint_boot_scale_vcov_and_cosmetic_args(fm01ML):
@@ -1233,10 +1455,9 @@ def test_confint_boot_scale_vcov_and_cosmetic_args(fm01ML):
     assert np.isclose(vc[".sig01"], sd[".sig01"] ** 2)
     assert np.isclose(vc[".sigma"], sd[".sigma"] ** 2)
     assert np.isclose(vc["(Intercept)"], sd["(Intercept)"])      # fixef unscaled
-    with pytest.raises(NotImplementedError, match="zeta"):
-        m.confint(zeta=[1.0, 2.0])
-    assert m.confint(method="Wald", quiet=True, oldNames=False,
-                     signames=False).height > 0
+    # Wald with the descriptive (oldNames=False) labels for the var components
+    w = m.confint(method="Wald", quiet=True, oldNames=False, signames=False)
+    assert w.height > 0 and "sd_(Intercept)|Batch" in w["parameter"].to_list()
     ci = m.confint(method="boot", boot_scale="vcov", nsim=25, seed=1)
     bounds = ci.select(ci.columns[1:]).to_numpy().astype(float)
     assert ci.height == 3 and np.isfinite(bounds).all()
@@ -1244,19 +1465,104 @@ def test_confint_boot_scale_vcov_and_cosmetic_args(fm01ML):
 
 def test_simulate_bootMer_re_form_preserve_bit_exact(fm01ML):
     """#25/#26: the re_form=NA sentinel reproduces the default (use_u=False)
-    draw bit-for-bit; newdata/newparams raise; bootMer threads re_form through
-    simulate without perturbing the bit-exact RNG path."""
+    draw bit-for-bit; a no-op newdata/newparams also reproduce it; bootMer
+    threads re_form through simulate without perturbing the bit-exact RNG."""
     m = fm01ML
     s0 = m.simulate(nsim=3, seed=7)
     s1 = m.simulate(nsim=3, seed=7, re_form="NA")
     np.testing.assert_array_equal(s0.to_numpy(), s1.to_numpy())
-    with pytest.raises(NotImplementedError):
-        m.simulate(nsim=1, newdata=m.data)
-    with pytest.raises(NotImplementedError):
-        m.simulate(nsim=1, newparams={})
+    # newdata=self.data and an empty newparams are no-ops → same draw
+    np.testing.assert_array_equal(
+        m.simulate(nsim=3, seed=7, newdata=m.data).to_numpy(), s0.to_numpy())
+    np.testing.assert_array_equal(
+        m.simulate(nsim=3, seed=7, newparams={}).to_numpy(), s0.to_numpy())
     b0 = m.bootMer(lambda x: np.asarray(x._beta), nsim=4, seed=3)
     b1 = m.bootMer(lambda x: np.asarray(x._beta), nsim=4, seed=3, re_form="NA")
     np.testing.assert_array_equal(b0.t, b1.t)
+
+
+def test_anova_single_model_sequential_F(sleepstudy_data):
+    """#13: anova(m) for one mixed model — the Type-I sequential fixed-effect
+    F-table (lme4 anova.merMod). effects = RX·β̂; per-term SS = Σ effects²;
+    F = MeanSq/σ̂²; no p-value (no exact denominator df)."""
+    import hea.R as R
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    a = R.anova(m)
+    assert a[""].to_list() == ["Days"] and a["npar"].to_list() == [1]
+    np.testing.assert_allclose(a["Sum Sq"][0], 30030.9390201738, atol=1e-3)
+    np.testing.assert_allclose(a["Mean Sq"][0], 30030.9390201738, atol=1e-3)
+    np.testing.assert_allclose(a["F value"][0], 45.85296, atol=1e-4)
+    # a multi-column factor term (Machine: 3 levels → 2 cols, one term)
+    mm = gmm("score ~ Machine + (1|Worker)",
+             load_dataset("nlme", "Machines"), REML=True)
+    am = R.anova(mm)
+    assert am["npar"].to_list() == [2]
+    np.testing.assert_allclose(am["Sum Sq"][0], 1755.263333, atol=1e-3)
+    np.testing.assert_allclose(am["F value"][0], 87.79816, atol=1e-4)
+
+
+def test_influence_family_matches_lme4(sleepstudy_data):
+    """#20: the merMod influence diagnostics — hatvalues / cooks.distance /
+    rstudent (closed form) and influence() (case/group-deletion refits) —
+    bit-exact to lme4 2.0.1."""
+    import hea.R as R
+    fm = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    h = fm.hatvalues()
+    np.testing.assert_allclose(
+        h[:3], [0.229304037742, 0.1697299938, 0.126823715021], atol=1e-6)
+    np.testing.assert_allclose(h.sum(), 29.0221239507, atol=1e-4)
+    np.testing.assert_allclose(
+        fm.rstudent()[:3],
+        [-0.182653763073, -0.627179564317, -1.76447385118], atol=1e-6)
+    np.testing.assert_allclose(
+        fm.cooks_distance()[:3],
+        [0.00496313251478, 0.0402062018559, 0.22609918476], atol=1e-6)
+    np.testing.assert_allclose(R.hatvalues(fm), h)            # generic routes
+    # Dyestuff (scalar bar) — closed-form cooks + case/group-deletion influence
+    dy = gmm("Yield ~ 1 + (1|Batch)", load_dataset("lme4", "Dyestuff"), REML=True)
+    np.testing.assert_allclose(
+        dy.cooks_distance()[:4],
+        [0.117739352431, 0.466667001741, 0.466667001741, 0.00975819830532],
+        atol=1e-6)
+    infg = dy.influence(groups="Batch")          # 6 group-deletion refits
+    np.testing.assert_allclose(
+        infg.dfbeta().ravel(), [4.5, -0.1, -7.3, 5.9, -14.5, 11.5], atol=1e-3)
+    np.testing.assert_allclose(
+        infg.cooks_distance(),
+        [0.0449141639196, 2.21798340342e-05, 0.118196335569,
+         0.0772080022736, 0.466331010572, 0.293328305104], atol=1e-5)
+    info = dy.influence()                         # 30 obs-deletion refits
+    np.testing.assert_allclose(
+        info.dfbeta().ravel()[:4],
+        [-1.40934940504, 2.78490516842, 2.78490516842, -0.399076317567], atol=1e-4)
+    np.testing.assert_allclose(
+        info.cooks_distance()[:4],
+        [0.00511038517164, 0.0199543278625, 0.0199543278625, 0.000409758709795],
+        atol=1e-6)
+    np.testing.assert_allclose(R.cooks_distance(infg), infg.cooks_distance())
+
+
+def test_lmer_rejects_glmer_keys_and_wires_optinfo(sleepstudy_data):
+    """#6 remainder: lmerControl() rejects glmer-only inner-loop keys; the LMM
+    fit now populates m.optinfo via calc.derivs (the post-fit gradient/Hessian
+    checkConv that was previously inert). A clean fit yields no message; a
+    boundary (singular) fit surfaces lme4's message in optinfo + the summary."""
+    import io
+    import contextlib
+    for key in ("tolPwrss", "compDev", "nAGQ0initStep", "check.response.not.const"):
+        with pytest.raises(ValueError, match="glmer-only"):
+            gmm(_SLEEP_F, sleepstudy_data, control={key: 1})
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True, control={"restart_edge": False})
+    assert m.optinfo["derivs"] is not None
+    np.testing.assert_allclose(m.optinfo["derivs"]["gradient"], 0.0, atol=1e-2)
+    assert m.optinfo["conv"]["lme4"]["messages"] == []          # clean → no warning
+    sing = gmm("Yield ~ 1 + (1|Batch)",
+               load_dataset("lme4", "Dyestuff2"), REML=True)
+    assert any("singular" in msg for msg in sing.optinfo["conv"]["lme4"]["messages"])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        sing.summary()
+    assert "isSingular" in buf.getvalue()
 
 
 # ---------------------------------------------------------------------------

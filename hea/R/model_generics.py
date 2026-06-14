@@ -62,10 +62,14 @@ def fixef(model):
     return _bhat_to_named_vector(model)
 
 
-def ranef(model, condVar=False):
-    """R: ``ranef(model, condVar=)`` — random effects (gmm only)."""
+def ranef(model, condVar=False, postVar=False, drop=False, whichel=None):
+    """R: ``ranef(model, condVar=, postVar=, drop=, whichel=)`` — random
+    effects (gmm only). ``postVar=True`` attaches the full per-level
+    conditional-covariance arrays under ``.postVar``; ``drop=`` returns a
+    level-named vector for scalar bars; ``whichel=`` selects grouping factors."""
     if hasattr(model, "ranef"):
-        return model.ranef(condVar=condVar)
+        return model.ranef(condVar=condVar, postVar=postVar, drop=drop,
+                           whichel=whichel)
     raise TypeError(
         f"ranef(): {model.__class__.__name__} has no random effects"
     )
@@ -157,7 +161,9 @@ def resid(model, type=None, scaled=False):
             is_lmm = (is_gmm and is_glmm_fn is not None and not is_glmm_fn())
             type = "response" if is_lmm else "deviance"
         if is_gmm:
-            return model.residuals_of(type, scaled=scaled)
+            arr = np.asarray(model.residuals_of(type, scaled=scaled))
+            pad = getattr(model, "_na_pad", None)     # na.exclude → pad to full len
+            return pad(arr) if pad is not None else arr
         return model.residuals_of(type)
     r = getattr(model, "residuals", None)
     if isinstance(r, pl.DataFrame):
@@ -333,20 +339,22 @@ def bootMer(x, FUN, **kwargs):
     return x.bootMer(FUN, **kwargs)
 
 
-def vcov(model, correlation=False):
+def vcov(model, correlation=False, full=False, use_hessian=None):
     """R: ``vcov()`` — variance-covariance matrix of the coefficients.
 
     Return type varies by model: lm/glm return ``ndarray`` (``V_bhat``);
     gam/bam return ``ndarray`` (``Vp``, the Bayesian posterior); gmm
-    returns a polars ``DataFrame`` (fixed effects only). ``correlation=True``
-    (gmm's ``vcov.merMod`` correlation form) returns the correlation matrix
-    instead and is only supported for mixed models.
+    returns a polars ``DataFrame`` (fixed effects only). For a gmm,
+    ``correlation=True`` returns the correlation matrix and ``full=True`` the
+    joint ``[b̂; β̂]`` conditional covariance (``vcov.merMod`` forms); both are
+    mixed-model only.
     """
     if model.__class__.__name__ == "gmm":
-        return model.vcov(correlation=correlation)
-    if correlation:
+        return model.vcov(correlation=correlation, full=full,
+                          use_hessian=use_hessian)
+    if correlation or full:
         raise TypeError(
-            "vcov(): correlation=True is only supported for mixed models (gmm)"
+            "vcov(): correlation=/full= are only supported for mixed models (gmm)"
         )
     if hasattr(model, "Vp"):  # gam / bam (Bayesian posterior)
         return model.Vp
