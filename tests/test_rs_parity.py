@@ -8,8 +8,9 @@ Why live R, not the Python ``nmath`` reference or committed pins:
   transcendental-heavy kernels (pbeta/qbeta/pgamma/…) drift a few ulp because
   Rust-std-math and R's glibc path don't agree bit-for-bit even on one machine
   (the cross-platform libm floor — 0-ulp to an arbitrary R is not promisable).
-  So this strict gate runs on macOS ONLY (local + the macOS CI job); the Linux
-  matrix exercises the Rust port via the tolerance-pinned R tests instead.
+  So this strict gate runs on macOS ONLY (locally — it's not in CI; CI covers the
+  Linux platform that local dev doesn't); the Linux matrix exercises the Rust port
+  via the tolerance-pinned R tests instead.
 * ``numpy``'s vectorized transcendentals are NOT bit-identical to scalar libm
   and drift by a few ulp across numpy builds — so the old ``rs == nmath``
   differential gate failed on some Linux/numpy combinations even though Rust was

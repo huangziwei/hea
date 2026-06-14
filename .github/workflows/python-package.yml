@@ -1,8 +1,9 @@
-# Linux matrix: installs Python + Rust, builds the hea._rs extension, and runs the
-# suite against the Rust-backed (active) numeric path. The strict bit-exact Rust==R
-# gate (tests/test_rs_parity.py) is 0-ulp only on macOS (Apple libm), so it runs in
-# the separate macOS job below and skips on Linux (glibc libm floor); the Linux
-# matrix exercises the Rust port via the tolerance-pinned R tests.
+# CI covers Linux (the platform not exercised by local macOS dev). Installs Python +
+# Rust, builds the hea._rs extension, and runs the suite against the Rust-backed
+# (active) numeric path. The strict bit-exact Rust==R gate (tests/test_rs_parity.py)
+# is 0-ulp only on macOS (Apple libm) — on Linux glibc the transcendental kernels
+# drift a few ulp (libm floor) — so it skips here and is run LOCALLY on macOS (not in
+# CI). The Linux matrix still exercises the Rust port via the tolerance-pinned R tests.
 # See: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
 
 name: Python package
@@ -42,7 +43,7 @@ jobs:
       # reduction order opens a wider FP floor on glmer fits — enough
       # to fail the FD-Hessian SE pin on poly() contrasts (~2e-2 abs)
       # and the predict tolerance (~3e-9 abs).
-      # (No R here: the Rust==R gate is macOS-only — see the job below — and the
+      # (No R here: the Rust==R gate is macOS-only and run locally, not in CI; the
       # translator tests, the only other live-R users, are skipped on Linux.)
       run: sudo apt-get update && sudo apt-get install -y libsuitesparse-dev
     - name: Install dependencies
@@ -80,47 +81,5 @@ jobs:
       # tests/translate/ exercises the R<->Python translator end-to-end against
       # tidyverse (library(dplyr)/…), which isn't installed here and takes far too
       # long to install in CI. Those run locally where tidyverse is present.
-      # tests/test_rs_parity.py skips here (macOS-only gate — see the job below).
+      # tests/test_rs_parity.py skips here (macOS-only gate, run locally not in CI).
       run: pytest -n auto --dist worksteal --ignore=tests/translate
-
-  rs-parity-macos:
-    # The strict bit-exact Rust==R gate (tests/test_rs_parity.py). It is 0-ulp
-    # only on macOS (Apple libm); on Linux glibc the transcendental kernels drift
-    # a few ulp (cross-platform libm floor), so the gate skips on the Linux matrix
-    # above and runs here instead. macos-13 is x86_64 (matches the dev machine the
-    # gate was verified 0-ulp on).
-    name: Rust==R bit-exact gate (macOS)
-    runs-on: macos-13
-    env:
-      RUST_BACKTRACE: "1"
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.13"
-    - name: Set up Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-    - name: Cache cargo build (rust/)
-      uses: Swatinem/rust-cache@v2
-      with:
-        workspaces: rust
-    - name: Set up R (Rscript + base stats = all d/p/q)
-      uses: r-lib/actions/setup-r@v2
-      with:
-        r-version: 'release'
-    - name: Install dependencies
-      # No [fast]/scikit-sparse — the gate only needs hea + numpy + Rscript.
-      run: |
-        python -m pip install --upgrade pip
-        python -m pip install . --group dev
-    - name: Build hea._rs (Rust extension) into the source tree
-      run: |
-        python -m pip install 'maturin==1.14.0'
-        maturin build --release --interpreter python -o dist
-        whl="$(ls -t dist/hea-*.whl | head -1)"
-        python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall('dist/extract')" "$whl"
-        cp dist/extract/hea/_rs*.so hea/
-        ls -l hea/_rs*.so
-    - name: Run the bit-exact Rust==R gate
-      run: pytest tests/test_rs_parity.py -q
