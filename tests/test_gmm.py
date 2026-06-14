@@ -964,6 +964,35 @@ def test_lmm_weights_bad_length_raises(sleepstudy_data):
 
 
 # ---------------------------------------------------------------------------
+# Fit → accessor contract (gmm._FIT_CONTRACT). Both fit paths must populate the
+# post-fit state the shared accessor layer relies on; _assert_fit_contract()
+# enforces it at fit time. Prompted by the _ranef/_Z_sp_solve coupling bug (#4).
+# ---------------------------------------------------------------------------
+
+
+def test_fit_contract_satisfied_by_lmm_fits(sleepstudy_data):
+    """Every _FIT_CONTRACT attribute is present on a fitted LMM — REML, ML, and
+    weighted. (The GLMM path is exercised by the glmer suite, which now also
+    runs _assert_fit_contract on every fit.)"""
+    for m in (
+        gmm(_SLEEP_F, sleepstudy_data, REML=True),
+        gmm(_SLEEP_F, sleepstudy_data, REML=False),
+        gmm(_SLEEP_F, sleepstudy_data, REML=True, weights=_W),
+    ):
+        missing = [a for a in gmm._FIT_CONTRACT if not hasattr(m, a)]
+        assert not missing, f"fit missing contract attrs: {missing}"
+
+
+def test_fit_contract_is_enforced(sleepstudy_data):
+    """_assert_fit_contract raises (naming the gap) when a contract attribute is
+    absent — so the _ranef/_Z_sp_solve class of bug fails loudly at fit time."""
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    del m._Z_sp_solve
+    with pytest.raises(RuntimeError, match=r"_Z_sp_solve"):
+        m._assert_fit_contract()
+
+
+# ---------------------------------------------------------------------------
 # Ch 4: Building Linear Mixed Models
 # ---------------------------------------------------------------------------
 

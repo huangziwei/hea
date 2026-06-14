@@ -4770,6 +4770,58 @@ class gmm:
         with the same fixed-effects structure.
     """
 
+    # ── fit → accessor contract ─────────────────────────────────────────────
+    # Post-fit state the SHARED accessor layer (predict / ranef / confint /
+    # profile / summary / vcov / simulate / bootMer) may rely on. BOTH fit paths
+    # (_fit_from_components, _fit_glmm_from_components) populate every one, and
+    # _assert_fit_contract() enforces it at the end of each fit — so a path that
+    # forgets one fails THERE, naming the gap, instead of surfacing later as an
+    # AttributeError deep inside an accessor (cf. the _ranef/_Z_sp_solve coupling
+    # bug fixed in #4). Derived by auditing the attributes both paths set.
+    #
+    # Deliberately OUTSIDE the contract — family-/mode-specific; accessors guard
+    # these (hasattr / the family predicate), they are NOT universal:
+    #   LMM-only : REML_criterion, _X_solve, _y_solve, _XtX, _Xty, _yty,
+    #              _log2pi, _sqrt_w, _log_det_weights, scaled_residuals
+    #   ML-only  : deviance, loglike, df_resid   (REML LMM sets REML_criterion)
+    #   GLMM-only: mu, eta, linear_predictors, fitted_values, working_weights,
+    #              prior_weights, optinfo, deviance_laplace, method, _resp,
+    #              _pred, _devfun_stage1, _optim_stage0
+    _FIT_CONTRACT = (
+        # identity & dimensions
+        "family", "n", "p", "q", "npar", "column_names", "n_groups",
+        "data", "_re", "_expanded", "_offset", "_bar_sizes",
+        # design (response scale) the accessors re-use
+        "X", "y", "Z",
+        # fixed-effect estimates + inference
+        "theta", "_beta", "_se_beta", "_vcov_beta_arr",
+        "bhat", "fixef", "se_bhat", "t_values", "vcov_beta",
+        # variance components & residual scale
+        "sigma", "sigma_squared", "sd_re", "corr_re",
+        # random-effect machinery the posterior / profile accessors reach into
+        "_u", "Lambda", "L", "_Z_sp", "_Z_sp_solve", "_chol_factor",
+        "_eye_q_sp", "_optim",
+        # sparse-Λ structure profile() / ranef() rebuild from
+        "_template", "_lt_theta_pos", "_lt_indices", "_lt_indptr",
+        "_lt_shape", "_theta_bounds", "_diag_set",
+        # fitted-model outputs
+        "fitted", "residuals", "AIC", "BIC",
+    )
+
+    def _assert_fit_contract(self) -> None:
+        """Enforce :data:`_FIT_CONTRACT` at the end of a full fit. Both fit
+        paths call this, so a forgotten shared attribute fails here — at fit
+        time, naming the gap — not later inside an accessor. Not called on the
+        ``devFunOnly`` path (which returns a deliberately partial object)."""
+        missing = [a for a in self._FIT_CONTRACT if not hasattr(self, a)]
+        if missing:
+            raise RuntimeError(
+                f"gmm fit did not populate the fit→accessor contract: "
+                f"{missing}. Both _fit_from_components and "
+                f"_fit_glmm_from_components must set every gmm._FIT_CONTRACT "
+                f"attribute before returning (see its definition)."
+            )
+
     def __init__(
         self,
         formula: str,
@@ -5369,6 +5421,7 @@ class gmm:
         # for REML fits, matching lme4's ``AIC.merMod`` / ``BIC.merMod``.
         self.AIC = opt + 2.0 * self.npar
         self.BIC = opt + np.log(n) * self.npar
+        self._assert_fit_contract()
 
     # ---- GLMM fit -------------------------------------------------------
 
@@ -5861,6 +5914,7 @@ class gmm:
             grad_cfg=inputs.check_conv_grad,
             hess_cfg=inputs.check_conv_hess,
         )
+        self._assert_fit_contract()
 
     def _deviance_residuals_signed(self) -> np.ndarray:
         """Signed √dev_resid_i — what ``residuals(m, type="deviance")`` returns.
