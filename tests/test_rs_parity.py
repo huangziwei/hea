@@ -187,7 +187,9 @@ def _beta_grid():
     for a in ab:
         for b in ab:
             for x in xs:
-                X.append(x); A.append(a); B.append(b)
+                X.append(x)
+                A.append(a)
+                B.append(b)
     return np.array(X), np.array(A), np.array(B)
 
 
@@ -216,7 +218,9 @@ def _qbeta_grid():
     for p in pq:
         for q in pq:
             for a in al:
-                AL.append(a); P.append(p); Q.append(q)
+                AL.append(a)
+                P.append(p)
+                Q.append(q)
     return np.array(AL), np.array(P), np.array(Q)
 
 
@@ -342,7 +346,8 @@ def test_saddlepoint_large_count_regime():
     # rs==python is the gate; python==R confirmed separately (R oracle).
     k = np.arange(120.0, 260.0)
     lam = np.array([2.0, 3.0, 4.0, 5.0, 7.0, 10.0])
-    K = np.repeat(k, lam.size); L = np.tile(lam, k.size)
+    K = np.repeat(k, lam.size)
+    L = np.tile(lam, k.size)
     _assert_bit_exact(rs.dpois(K, L, False),
                       [nmath.dpois(float(a), float(b), False) for a, b in zip(K, L)])
     x = np.linspace(0.5, 400.0, 400)
