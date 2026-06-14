@@ -68,4 +68,14 @@ jobs:
       # importorskip and the suite would quietly green on the numpy path.
       run: python -c "import hea, hea._rs; print('hea:', hea.__file__); print('hea._rs:', hea._rs.__file__)"
     - name: Test with pytest
-      run: pytest
+      # Parallelize across the runner's cores (pytest-xdist). Pin BLAS/OpenMP to
+      # one thread per worker so N workers don't oversubscribe the cores — and so
+      # each fit uses a single, deterministic reduction order (steadier than
+      # multi-threaded BLAS on the FP-sensitive lmer/gam pins). `worksteal`
+      # rebalances the few very-long fits (profile/drop1/bootstrap) across idle
+      # workers. ~3-4× faster on a 4-core runner.
+      env:
+        OPENBLAS_NUM_THREADS: "1"
+        OMP_NUM_THREADS: "1"
+        MKL_NUM_THREADS: "1"
+      run: pytest -n auto --dist worksteal
