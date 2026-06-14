@@ -5932,7 +5932,7 @@ class gmm:
             return np.asarray(self.y, dtype=float) - np.asarray(self.fitted, dtype=float)
         return np.sign(rp.y - rp.mu) * np.sqrt(rp.deviance_residuals())
 
-    def residuals_of(self, type: str = "deviance") -> np.ndarray:
+    def residuals_of(self, type: str = "deviance", scaled: bool = False) -> np.ndarray:
         """Residuals on the chosen scale — mirrors ``residuals.merMod``.
 
         Types:
@@ -5942,10 +5942,16 @@ class gmm:
         - ``"working"``: ``(y − μ) / μ_η`` (PIRLS working residual).
         - ``"response"``: ``y − μ`` on the response scale.
 
+        ``scaled=True`` divides by σ̂ (lme4's ``residuals(., scaled=TRUE)``).
+
         Port of ``residuals.glmResp`` (respModule.cpp / methods.R:1310-1349).
         For Gaussian-identity (LMM, or GLMM with the trivial family), all
         four collapse to ``y − μ``.
         """
+        r = self._residuals_raw(type)
+        return r / self.sigma if scaled else r
+
+    def _residuals_raw(self, type: str) -> np.ndarray:
         rp = getattr(self, "_resp", None)
         if rp is None:
             # Gaussian-identity LMM path: every type collapses to y − μ,
@@ -6666,7 +6672,8 @@ class gmm:
     def confint(self, parm=None, level: float = 0.95, method: str = "profile",
                 *, nsim: int = 500, boot_type: str = "perc", FUN=None,
                 seed=None, boot_scale: str = "sdcor",
-                use_u: bool = False) -> pl.DataFrame:
+                use_u: bool = False, zeta=None, quiet: bool = False,
+                oldNames: bool = True, signames: bool = True) -> pl.DataFrame:
         """R: ``confint.merMod`` — fixed-effect & variance-component CIs.
 
         ``method`` (lme4's three, profile.R:807):
@@ -6684,7 +6691,17 @@ class gmm:
 
         ``parm`` restricts to a subset (names or 0-based indices). Returns a
         polars frame: a ``parameter`` column + two ``%``-labelled bound columns.
+
+        lme4 print-cosmetic args: ``quiet`` (no-op — hea prints no profiling
+        progress), ``oldNames`` / ``signames`` (accepted; hea already labels the
+        variance components in the ``.sig0i`` / ``.sigma`` style these select).
+        ``zeta`` (custom ζ cutoffs in place of ``±Φ⁻¹``) is not implemented —
+        passing a non-``None`` ``zeta`` raises.
         """
+        if zeta is not None:
+            raise NotImplementedError(
+                "confint: custom zeta= cutoffs are not implemented; the CI uses "
+                "±Φ⁻¹((1+level)/2)")
         method = str(method).lower()
         if method == "wald":
             return self._confint_wald(parm, level)
@@ -6722,21 +6739,29 @@ class gmm:
 
     def _boot_profile_stat(self, boot_scale: str = "sdcor") -> dict:
         """Default ``confint(method="boot")`` statistic — the variance-component
-        SDs (``.sig0i`` [+ ``.sigma``]) and fixed effects on the ``sdcor`` scale
-        (confint.merMod:860-866's bootFun). Scalar bars only (like profile)."""
-        if boot_scale != "sdcor":
+        SDs (``.sig0i`` [+ ``.sigma``]) and fixed effects (confint.merMod:860-866's
+        bootFun). Scalar bars only (like profile).
+
+        ``boot_scale`` ∈ ``{"sdcor"`` (standard deviations / correlations — the
+        default), ``"vcov"`` (variances / covariances — each variance component
+        squared)``}``; the fixed effects are unaffected by the scale."""
+        if boot_scale not in ("sdcor", "vcov"):
             raise NotImplementedError(
-                "confint(boot_scale='vcov') not implemented; use 'sdcor'")
+                f"confint(boot_scale={boot_scale!r}) not implemented; "
+                "use 'sdcor' or 'vcov'")
         if any(c > 1 for c in self._bar_sizes):
             raise NotImplementedError(
                 "bootstrap confint requires scalar bars (1|g); pass a custom "
                 "FUN for vector bars")
         bar_keys, vc_names, use_sc, fixef_names, _ = self._ci_param_layout()
+        sq = boot_scale == "vcov"               # variance = sd² on the vcov scale
         out: dict[str, float] = {}
         for nm, key in zip(vc_names, bar_keys):
-            out[nm] = float(self.sd_re[key][0])
+            sd = float(self.sd_re[key][0])
+            out[nm] = sd * sd if sq else sd
         if use_sc:
-            out[".sigma"] = float(self.sigma)
+            s = float(self.sigma)
+            out[".sigma"] = s * s if sq else s
         for j, nm in enumerate(fixef_names):
             out[nm] = float(self._beta[j])
         return out
@@ -6876,6 +6901,7 @@ class gmm:
         na_action: str = "na.pass",
         se_fit: bool = False,
         terms=None,
+        newparams=None,
     ):
         """R: ``predict.merMod`` — predict at the original or new data.
 
@@ -6886,8 +6912,10 @@ class gmm:
             at the original fit data (i.e. fitted values).
         re_form
             ``None`` (default) — include all random effects (``Xβ + Zb``).
-            ``False`` — population-level only (``Xβ``). A formula restricting
-            to a subset of bars is not yet implemented.
+            Any of lme4's "no random effects" sentinels — ``False``, ``"NA"``,
+            ``NaN``, or ``"~0"`` (R's ``re.form = NA`` / ``~0``) — gives the
+            population-level prediction (``Xβ``). A formula restricting to a
+            subset of bars is not yet implemented.
         random_only
             If ``True``, return only the random-effect contribution (``Zb``).
         type
@@ -6914,6 +6942,11 @@ class gmm:
         """
         if terms is not None:
             raise NotImplementedError("predict: terms= is not implemented")
+        if newparams is not None:
+            raise NotImplementedError(
+                "predict: newparams= (predict at supplied θ/β instead of the "
+                "fitted values) is not implemented yet"
+            )
         if type not in ("response", "link"):
             raise ValueError(f"predict: type must be 'response' or 'link', got {type!r}")
         if na_action != "na.pass":
@@ -6923,14 +6956,24 @@ class gmm:
         # R's ``isRE``: re.form=None (include all) and re.form=NA (exclude
         # all) are the two we support; a partial-bars formula needs a
         # separate code path that we haven't ported yet.
+        # R's ``isRE``: re.form=None (include all) and the no-RE sentinels
+        # (NA / ~0, spelled False / "NA" / NaN / "~0" here) are the two we
+        # support; a partial-bars formula needs a separate code path.
+        _no_re = (
+            re_form is False
+            or (isinstance(re_form, float) and re_form != re_form)        # NaN
+            or (isinstance(re_form, str)
+                and re_form.strip().replace(" ", "") in ("NA", "~0", "0"))
+        )
         if re_form is None:
             include_re = True
-        elif re_form is False:
+        elif _no_re:
             include_re = False
         else:
             raise NotImplementedError(
-                "predict: re_form= only accepts None (include all RE) or "
-                "False (population-level / no RE) in this port"
+                "predict: re_form= accepts None (include all RE) or a no-RE "
+                "sentinel (False / 'NA' / NaN / '~0', i.e. population-level); a "
+                "partial-bars formula is not yet supported"
             )
 
         is_glmm = self.family.name != "gaussian" or self.family.link.name != "identity"
@@ -7228,7 +7271,8 @@ class gmm:
         row = " ".join(v.rjust(w) for v, w in zip(vals, widths))
         return ["Scaled residuals:", hdr, row]
 
-    def simulate(self, nsim: int = 1, seed=None, use_u: bool = False):
+    def simulate(self, nsim: int = 1, seed=None, use_u: bool = False, *,
+                 re_form=None, newdata=None, newparams=None):
         """Simulate ``nsim`` response vectors from the fitted model — port of
         ``simulate.merMod`` (predict.R:673-938).
 
@@ -7237,6 +7281,12 @@ class gmm:
         ``use_u=True`` conditions on the fitted ``b̂``. Each draw then samples
         from the response family at the simulated mean. Returns a polars
         DataFrame with columns ``sim_1 … sim_nsim``.
+
+        ``re_form`` accepts ``None`` (the default — RE conditioning is governed
+        by ``use_u``) or a no-RE sentinel (``False`` / ``"NA"`` / ``NaN`` /
+        ``"~0"`` — lme4's ``re.form=NA``, i.e. fresh RE draws, the same as the
+        ``use_u=False`` default). A partial-bars formula, ``newdata=``, and
+        ``newparams=`` are not implemented yet.
 
         ``seed`` seeds the **bit-exact** :class:`RMersenneTwister`, and both the
         draw order (all ``q·nsim`` random-effect normals first, column-major,
@@ -7249,6 +7299,21 @@ class gmm:
         (most visibly when an obs's μ straddles the rpois inversion/PD boundary
         at μ=10, which switches RNG-consumption and desyncs the stream after it).
         """
+        if newdata is not None or newparams is not None:
+            raise NotImplementedError(
+                "simulate: newdata= / newparams= are not implemented yet")
+        _ok_re = (
+            re_form is None
+            or re_form is False
+            or (isinstance(re_form, float) and re_form != re_form)        # NaN
+            or (isinstance(re_form, str)
+                and re_form.strip().replace(" ", "") in ("NA", "~0", "0"))
+        )
+        if not _ok_re:
+            raise NotImplementedError(
+                "simulate: re_form= accepts None or a no-RE sentinel (False / "
+                "'NA' / NaN / '~0'); a partial-bars formula is not supported — "
+                "use use_u= to condition on the fitted RE modes")
         rng = _simulate_rng(seed)
         n, q, nsim = self.n, self.q, int(nsim)
         fam = self.family
@@ -7378,7 +7443,7 @@ class gmm:
 
         # (1) Generate all nsim responses up front (one sequential RNG pass).
         if type == "parametric":
-            ss = self.simulate(nsim=nsim, seed=seed, use_u=use_u)
+            ss = self.simulate(nsim=nsim, seed=seed, use_u=use_u, re_form=re_form)
             sims = [ss[c].to_numpy() for c in ss.columns]
         else:  # semiparametric — resample response residuals on top of fitted
             if not use_u:
@@ -7630,13 +7695,220 @@ class gmm:
         recompute the *other* criterion AT THE FITTED θ̂ — lme4's ``devCrit``,
         no refit — so a single REML fit yields both. The deviance for either
         mode is ``-2 * logLik(REML=...)``. For a GLMM (Laplace, ML-only),
-        ``REML`` is ignored."""
+        ``REML`` is ignored and the Laplace log-likelihood is returned."""
         if self._is_glmm():
-            return -0.5 * self.deviance
+            # lme4's logLik(glmer) is -deviance_Laplace/2 (= self.loglike), NOT
+            # -residual_deviance/2 — self.deviance holds Σ deviance-residuals.
+            return -0.5 * self.deviance_laplace
         want_reml = self.REML if REML is None else bool(REML)
         dev = (self._reml_deviance(self.theta) if want_reml
                else self._ml_deviance(self.theta))
         return -0.5 * (dev - self._log_det_weights)
+
+    # ------------------------------------------------------------------
+    # lme4 predicate / extractor surface (isREML…/getME/VarCorr/coef/
+    # getData/refit/extractAIC/rePCA) — Tier 2 of the lmer-parity chart.
+    # All read straight off the fit→accessor contract; only refit re-fits.
+    # ------------------------------------------------------------------
+    def isREML(self) -> bool:
+        """``isREML()`` — ``True`` only for a REML-fit LMM.
+
+        A GLMM (Laplace, ML by construction) and an ML-fit LMM both return
+        ``False``, matching ``lme4::isREML``."""
+        return (not self._is_glmm()) and bool(self.REML)
+
+    def isLMM(self) -> bool:
+        """``isLMM()`` — ``True`` for a linear mixed model (Gaussian/identity)."""
+        return not self._is_glmm()
+
+    def isGLMM(self) -> bool:
+        """``isGLMM()`` — ``True`` for a generalized LMM (Laplace path)."""
+        return self._is_glmm()
+
+    def isNLMM(self) -> bool:
+        """``isNLMM()`` — always ``False``; hea has no nonlinear mixed model."""
+        return False
+
+    def isSingular(self, tol: float = 1e-4) -> bool:
+        """``isSingular()`` — ``True`` if the fit sits on the boundary of the
+        feasible θ region (a variance driven to ~0, or a ±1 correlation).
+
+        Mirrors ``lme4::isSingular``: tests the θ components whose lower bound
+        is 0 (the relative-Cholesky diagonal / variance entries) for ``θ <
+        tol``. Off-diagonal correlation entries, whose lower bound is −∞, are
+        excluded — lme4's exact rule (``theta[lower == 0] < tol``)."""
+        theta = np.asarray(self.theta, dtype=float).ravel()
+        for th, (lo, _hi) in zip(theta, self._theta_bounds):
+            if lo is not None and lo == 0.0 and th < tol:
+                return True
+        return False
+
+    _GETME_NAMES = (
+        "X", "Z", "Zt", "y", "mu", "beta", "fixef", "theta", "u", "b",
+        "Lambda", "Lambdat", "L", "sigma", "lower", "flist", "cnms", "Gp",
+        "n", "N", "p", "q", "n_rtrms", "n_rfacs", "is_REML", "REML",
+    )
+
+    def getME(self, name: str):
+        """``getME(name)`` — extract a named piece of the fitted model
+        (``lme4::getME``).
+
+        Supported names (raw matrices/vectors as ``ndarray``, scalars as
+        ``int``/``float``): ``X`` ``Z`` ``Zt`` design matrices; ``y`` response;
+        ``mu`` fitted mean; ``beta``/``fixef`` fixed effects; ``theta``
+        relative-covariance parameters; ``u`` spherical and ``b`` original-scale
+        random effects; ``Lambda`` ``Lambdat`` ``L`` the relative-covariance
+        factor and its Cholesky; ``sigma`` residual SD; ``lower`` θ lower
+        bounds; ``flist`` ``cnms`` ``Gp`` RE bookkeeping; ``n``/``N`` ``p`` ``q``
+        dims; ``n_rtrms`` ``n_rfacs`` term/factor counts; ``is_REML``/``REML``.
+
+        Names lme4 supports but hea does not (``Ztlist``, ``mmList``, ``A``,
+        ``RX``, ``RZX``, ``Tlist``, ``devcomp``, …) raise ``ValueError``."""
+        re = self._re
+        if name == "X":
+            X = self.X
+            return np.asarray(X.to_numpy() if hasattr(X, "to_numpy") else X, dtype=float)
+        if name == "Z":
+            return np.asarray(self.Z, dtype=float)
+        if name == "Zt":
+            return np.asarray(self.Z, dtype=float).T
+        if name == "y":
+            return np.asarray(self.y, dtype=float).ravel()
+        if name == "mu":
+            return np.asarray(self.fitted, dtype=float).ravel()
+        if name in ("beta", "fixef"):
+            return np.asarray(self._beta, dtype=float).ravel()
+        if name == "theta":
+            return np.asarray(self.theta, dtype=float).ravel()
+        if name == "u":
+            return np.asarray(self._u, dtype=float).ravel()
+        if name == "b":
+            return np.asarray(self.Lambda @ self._u, dtype=float).ravel()
+        if name == "Lambda":
+            return np.asarray(self.Lambda, dtype=float)
+        if name == "Lambdat":
+            return np.asarray(self.Lambda, dtype=float).T
+        if name == "L":
+            return np.asarray(self.L, dtype=float)
+        if name == "sigma":
+            return float(self.sigma)
+        if name == "lower":
+            return np.array(
+                [(-np.inf if lo is None else float(lo)) for lo, _hi in self._theta_bounds],
+                dtype=float,
+            )
+        if name == "flist":
+            return re.flist_levels
+        if name == "cnms":
+            return re.cnms
+        if name == "Gp":
+            return np.asarray(re.Gp, dtype=int)
+        if name in ("n", "N"):
+            return int(self.n)
+        if name == "p":
+            return int(self.p)
+        if name == "q":
+            return int(self.q)
+        if name == "n_rtrms":
+            return int(len(re.cnms))
+        if name == "n_rfacs":
+            return int(len(re.flist_levels))
+        if name == "is_REML":
+            return self.isREML()
+        if name == "REML":
+            # lme4's devcomp$dims["REML"]: p when REML, 0 otherwise.
+            return int(self.p) if self.REML else 0
+        raise ValueError(
+            f"getME(): name {name!r} not supported. Supported names: "
+            f"{', '.join(self._GETME_NAMES)}."
+        )
+
+    def VarCorr(self) -> "VarCorr":
+        """``VarCorr()`` — the estimated random-effect (co)variances
+        (``lme4::VarCorr.merMod``).
+
+        Returns a :class:`VarCorr` object: per grouping-factor bar a covariance
+        matrix ``σ²·Λ_gΛ_gᵀ`` with standard-deviation and correlation views,
+        plus the residual SD ``sc``. Printing reproduces lme4's
+        Groups / Name / Std.Dev. / Corr layout."""
+        return VarCorr(self)
+
+    def coef(self) -> dict[str, pl.DataFrame]:
+        """``coef()`` — per-group coefficients: fixed effects plus the matching
+        random-effect BLUP at every level of each grouping factor
+        (``lme4::coef.merMod``).
+
+        Returns one polars DataFrame per bar (a level-label column named for the
+        grouping factor, then one column per coefficient). A fixed-only
+        coefficient is the fixef value repeated down the column; a coefficient
+        that also varies by group has its BLUP added; a random-only coefficient
+        is the BLUP alone. Column order is the fixed-effect order, then any
+        random-only names appended (lme4's order)."""
+        fixef_names = list(self.column_names)
+        fixef_map = dict(zip(fixef_names, np.asarray(self._beta, dtype=float).ravel()))
+        out: dict[str, pl.DataFrame] = {}
+        for key, levels, cnames, b_mat, _se in self._ranef():
+            gname = key
+            if gname not in self.n_groups:
+                base, _, tail = key.rpartition(".")
+                if tail.isdigit() and base in self.n_groups:
+                    gname = base
+            cols_order = list(fixef_names)
+            for cn in cnames:
+                if cn not in cols_order:
+                    cols_order.append(cn)
+            ranef_idx = {cn: j for j, cn in enumerate(cnames)}
+            n_levels = len(levels)
+            data: dict[str, list] = {gname: list(levels)}
+            for cn in cols_order:
+                col = np.full(n_levels, float(fixef_map.get(cn, 0.0)), dtype=float)
+                if cn in ranef_idx:
+                    col = col + b_mat[:, ranef_idx[cn]]
+                data[cn] = col.tolist()
+            out[key] = pl.DataFrame(data)
+        return out
+
+    def getData(self) -> pl.DataFrame:
+        """``getData()`` — the data frame the model was fit to (``model.data``)."""
+        return self.data
+
+    def refit(self, newresp=None) -> "gmm":
+        """``refit()`` — refit this model, optionally to a new response vector
+        (thin wrapper over :func:`hea.R.model_generics.refit`)."""
+        from ..R.model_generics import refit as _refit
+        return _refit(self, newresp)
+
+    def refitML(self) -> "gmm":
+        """``refitML()`` — an ML-fit copy of a REML LMM (a no-op for an ML fit
+        or any GLMM); thin wrapper over
+        :func:`hea.R.model_generics.refitML`."""
+        from ..R.model_generics import refitML as _refitML
+        return _refitML(self)
+
+    def extractAIC(self, scale: float = 0.0, k: float = 2.0) -> tuple[int, float]:
+        """``extractAIC()`` — ``(edf, AIC)`` where ``edf`` is the number of
+        estimated parameters and ``AIC = -2·logLik + k·edf`` on the fit's own
+        criterion (REML for a REML fit), matching ``extractAIC.merMod``."""
+        edf = int(self.npar)
+        return (edf, float(-2.0 * self.logLik() + k * edf))
+
+    def rePCA(self) -> dict[str, np.ndarray]:
+        """``rePCA()`` — principal-component SDs of each grouping factor's
+        relative covariance (``lme4::rePCA``).
+
+        Per bar, returns the singular values of the relative covariance
+        ``Σ_g/σ² = Λ_gΛ_gᵀ`` (the component SDs in units of σ, largest first).
+        A near-zero entry flags a degenerate / singular random-effects term.
+        Basis-invariant, so bit-exact to lme4 despite hea's distinct Λ basis."""
+        out: dict[str, np.ndarray] = {}
+        for key in self.sd_re:
+            sd_rel = np.asarray(self.sd_re[key], dtype=float) / self.sigma
+            corr = self.corr_re.get(key)
+            corr = np.eye(len(sd_rel)) if corr is None else np.asarray(corr, dtype=float)
+            Sigma_rel = np.outer(sd_rel, sd_rel) * corr
+            evals = np.linalg.eigvalsh(Sigma_rel)[::-1]
+            out[key] = np.sqrt(np.clip(evals, 0.0, None))
+        return out
 
     def _pooled_std_blups(self) -> np.ndarray:
         """All BLUPs concatenated, each component scaled by its model SD.
@@ -8108,6 +8380,66 @@ def _bootmer_worker(spec):
         return gmm._boot_apply_fun(FUN, m)[0]
     except Exception:  # noqa: BLE001
         return np.full(t0_len, np.nan)
+
+
+class VarCorr:
+    """Estimated random-effect (co)variances of a :class:`gmm` fit — the
+    object ``lme4::VarCorr.merMod`` returns.
+
+    Built from the fit's ``sd_re`` / ``corr_re`` / ``sigma``. For each
+    grouping-factor bar it carries the covariance matrix ``σ²·Λ_gΛ_gᵀ`` with
+    its standard-deviation (:meth:`stddev`) and correlation (:meth:`correlation`)
+    views; ``sc`` is the residual SD. Indexing by bar name returns that bar's
+    covariance ``ndarray``; :meth:`as_dict` gives every bar (plus ``"sc"``);
+    ``print`` / ``repr`` reproduces lme4's Groups / Name / Std.Dev. / Corr table.
+    """
+
+    def __init__(self, model: "gmm"):
+        self._model = model
+        self.sc = float(model.sigma)
+        self._keys = list(model.sd_re.keys())
+        self._cov: dict[str, np.ndarray] = {}
+        self._sd: dict[str, np.ndarray] = {}
+        self._corr: dict[str, np.ndarray] = {}
+        self._names: dict[str, list] = {}
+        for key in self._keys:
+            sd = np.asarray(model.sd_re[key], dtype=float)
+            corr = model.corr_re.get(key)
+            corr = np.eye(len(sd)) if corr is None else np.asarray(corr, dtype=float)
+            self._sd[key] = sd
+            self._corr[key] = corr
+            self._cov[key] = np.outer(sd, sd) * corr
+            names = model._re.cnms[key]
+            self._names[key] = list(names) if isinstance(names, list) else [names]
+
+    def __getitem__(self, key: str) -> np.ndarray:
+        return self._cov[key]
+
+    def keys(self) -> list:
+        return list(self._keys)
+
+    def stddev(self, key: str) -> np.ndarray:
+        """Per-component standard deviations of bar ``key`` (= ``sd_re``)."""
+        return self._sd[key]
+
+    def correlation(self, key: str) -> np.ndarray:
+        """Component correlation matrix of bar ``key`` (identity for a
+        single-component / uncorrelated bar)."""
+        return self._corr[key]
+
+    def as_dict(self) -> dict:
+        """Per-bar covariance matrices keyed by grouping factor, plus the
+        residual SD under ``"sc"``."""
+        out: dict = {k: self._cov[k] for k in self._keys}
+        out["sc"] = self.sc
+        return out
+
+    def __repr__(self) -> str:
+        # lme4's print.VarCorr default shows Std.Dev. + Corr (no Variance).
+        return "\n".join(self._model._re_table_lines(include_variance=False))
+
+    def __str__(self) -> str:
+        return self.__repr__()
 
 
 class Profile:

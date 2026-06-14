@@ -1052,6 +1052,214 @@ def test_ranef_condvar_matches_lme4_postvar(sleepstudy_data):
 
 
 # ---------------------------------------------------------------------------
+# lme4 predicate / extractor surface (gmm-lmer-parity #10–#12, #17, #18, #20):
+# isREML/isLMM/isGLMM/isNLMM/isSingular, getME, VarCorr, coef (per-group),
+# getData, extractAIC, rePCA — additive shims over the fit→accessor contract,
+# each also reachable through the hea.R generic of the same name.
+# ---------------------------------------------------------------------------
+
+
+def test_predicates_match_lme4(sleepstudy_data, fm06ML):
+    """#17: isREML/isLMM/isGLMM/isNLMM/isSingular on an LMM. A REML LMM is
+    isREML; an ML LMM is not; neither is a GLMM. isSingular flags a boundary
+    fit (Dyestuff2, variance → 0) and is False for sleepstudy."""
+    import hea.R as R
+    mR = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    assert (mR.isREML(), mR.isLMM(), mR.isGLMM(), mR.isNLMM()) == \
+        (True, True, False, False)
+    assert fm06ML.isREML() is False and fm06ML.isLMM() is True
+    assert mR.isSingular() is False
+    # classic singular fit: lmer(Yield ~ 1 + (1|Batch), Dyestuff2) → θ ≈ 0
+    sing = gmm("Yield ~ 1 + (1|Batch)", load_dataset("lme4", "Dyestuff2"), REML=True)
+    assert sing.isSingular() is True
+    # hea.R generics route to the same answers (and are merMod-only)
+    assert R.isREML(mR) is True and R.isLMM(mR) is True
+    assert R.isGLMM(mR) is False and R.isSingular(sing) is True
+    with pytest.raises(TypeError):
+        R.isREML(object())
+
+
+def test_getME_matches_contract_and_lme4(sleepstudy_data):
+    """#11: getME(name) extracts named pieces off the fit→accessor contract.
+    θ/β match the pinned lme4 values; b = Λu equals the concatenated ranef
+    BLUPs; lower = [0, −inf, 0]; dims are right; an unknown name raises."""
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    np.testing.assert_allclose(m.getME("theta"), _SLEEP_THETA, atol=1e-7)
+    np.testing.assert_allclose(m.getME("beta"), m._beta, atol=0)
+    np.testing.assert_array_equal(m.getME("fixef"), m.getME("beta"))
+    assert m.getME("n") == 180 and m.getME("p") == 2 and m.getME("q") == 36
+    assert m.getME("n_rtrms") == 1 and m.getME("n_rfacs") == 1
+    np.testing.assert_array_equal(m.getME("lower"), [0.0, -np.inf, 0.0])
+    assert m.getME("X").shape == (180, 2) and m.getME("Z").shape == (180, 36)
+    np.testing.assert_allclose(m.getME("Zt"), m.getME("Z").T, atol=0)
+    np.testing.assert_allclose(m.getME("mu"), m.fitted, atol=0)
+    np.testing.assert_allclose(m.getME("y"), m.y, atol=0)
+    assert m.getME("sigma") == pytest.approx(m.sigma)
+    assert m.getME("is_REML") is True and m.getME("REML") == 2   # p when REML
+    # b = Λu == the BLUPs ranef() reports (level-major, 2 components/level)
+    b = m.getME("b").reshape(18, 2)
+    rf = m.ranef()["Subject"]
+    np.testing.assert_allclose(b[:, 0], rf["(Intercept)"].to_numpy(), atol=1e-9)
+    np.testing.assert_allclose(b[:, 1], rf["Days"].to_numpy(), atol=1e-9)
+    with pytest.raises(ValueError, match="not supported"):
+        m.getME("RX")
+
+
+def test_VarCorr_matches_lme4(sleepstudy_data):
+    """#10: VarCorr() repackages sd_re/corr_re/sigma into lme4's object — a
+    per-bar covariance σ²ΛΛᵀ with stddev/correlation views and residual sc.
+    Std.Dev. = [24.740, 5.922], corr = 0.0655, sc = 25.592 (lme4 4.x)."""
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    vc = m.VarCorr()
+    assert vc.sc == pytest.approx(25.5918, abs=1e-3)
+    np.testing.assert_allclose(vc.stddev("Subject"), [24.7404, 5.9221], atol=1e-2)
+    np.testing.assert_allclose(vc.stddev("Subject"), m.sd_re["Subject"], atol=0)
+    assert vc.correlation("Subject")[0, 1] == pytest.approx(0.0655, abs=1e-3)
+    sd, corr = m.sd_re["Subject"], m.corr_re["Subject"]
+    np.testing.assert_allclose(vc["Subject"], np.outer(sd, sd) * corr, atol=1e-9)
+    # print layout (lme4 print.VarCorr default): Std.Dev. + Corr, Residual row,
+    # no Variance column.
+    txt = repr(vc)
+    assert "Std.Dev." in txt and "Residual" in txt and "Corr" in txt
+    assert "Variance" not in txt
+    assert set(vc.as_dict()) == {"Subject", "sc"}
+
+
+def test_coef_is_fixef_plus_ranef(sleepstudy_data):
+    """#12: coef() = fixef broadcast to each level + the matching ranef BLUP
+    (lme4 coef.merMod). fixef() stays fixed-effects-only after the change."""
+    import hea.R as R
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    cf = m.coef()["Subject"]
+    fx = dict(zip(m.column_names, np.asarray(m._beta).ravel()))
+    rf = m.ranef()["Subject"]
+    np.testing.assert_allclose(
+        cf["(Intercept)"].to_numpy(),
+        fx["(Intercept)"] + rf["(Intercept)"].to_numpy(), atol=1e-12)
+    np.testing.assert_allclose(
+        cf["Days"].to_numpy(), fx["Days"] + rf["Days"].to_numpy(), atol=1e-12)
+    row0 = cf.row(0, named=True)                       # Subject 308 (first level)
+    assert row0["Subject"] == "308"
+    np.testing.assert_allclose(
+        [row0["(Intercept)"], row0["Days"]], [253.6637, 19.6663], atol=1e-2)
+    # R.coef(gmm) → per-group dict; R.fixef → fixed effects only
+    assert isinstance(R.coef(m), dict)
+    np.testing.assert_allclose(list(R.fixef(m)), [251.4051, 10.4673], atol=1e-3)
+
+
+def test_extractAIC_and_rePCA_match_lme4(sleepstudy_data, fm06ML):
+    """#20: extractAIC()=(edf,AIC) on the fit's own criterion (REML AIC for a
+    REML fit, ML for ML); rePCA() = PC SDs of the relative RE covariance
+    (basis-invariant → bit-exact to lme4 despite hea's distinct Λ basis)."""
+    mR = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    edf, aic = mR.extractAIC()
+    assert edf == 6
+    np.testing.assert_allclose(aic, 1755.6283, atol=1e-2)        # REML AIC
+    np.testing.assert_allclose(mR.extractAIC(k=0)[1], -2 * mR.logLik(), atol=1e-9)
+    assert fm06ML.extractAIC() == (6, pytest.approx(fm06ML.AIC))  # ML AIC
+    # rePCA: PC SDs of the relative covariance, largest first
+    pcs = mR.rePCA()["Subject"]
+    np.testing.assert_allclose(pcs, [0.96687, 0.23088], atol=1e-4)
+    sd_rel = mR.sd_re["Subject"] / mR.sigma
+    Srel = np.outer(sd_rel, sd_rel) * mR.corr_re["Subject"]
+    np.testing.assert_allclose(np.prod(pcs), np.sqrt(np.linalg.det(Srel)), atol=1e-9)
+
+
+def test_getData_and_R_generic_routing(sleepstudy_data):
+    """#18 + routing: getData() returns the fit's data frame; the new hea.R
+    generics delegate to the methods and thread the new method kwargs
+    (vcov correlation=, logLik REML=)."""
+    import hea.R as R
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    assert m.getData() is m.data
+    assert R.getData(m) is m.data
+    assert R.VarCorr(m).sc == pytest.approx(m.sigma)
+    np.testing.assert_array_equal(R.getME(m, "theta"), m.getME("theta"))
+    assert R.extractAIC(m) == m.extractAIC()
+    np.testing.assert_allclose(R.rePCA(m)["Subject"], m.rePCA()["Subject"], atol=0)
+    np.testing.assert_allclose(
+        R.vcov(m, correlation=True).to_numpy(),
+        m.vcov(correlation=True).to_numpy(), atol=0)
+    assert R.logLik(m, REML=False) == pytest.approx(m.logLik(REML=False))
+    with pytest.raises(TypeError):       # REML= meaningless off a mixed model
+        R.logLik(object(), REML=True)
+
+
+# ---------------------------------------------------------------------------
+# Method-signature fills (gmm-lmer-parity #22, #23, #25, #26, #27): the
+# remaining lme4 keyword surface. Real-behavior args (re.form=NA sentinel,
+# boot_scale="vcov", residuals scaled=) are honored; deep ports (newparams,
+# newdata, partial-bars, custom zeta) raise NotImplementedError rather than
+# silently no-op; the bit-exact simulate/bootMer RNG path is untouched.
+# ---------------------------------------------------------------------------
+
+
+def test_residuals_type_default_and_scaled(sleepstudy_data):
+    """#27: LMM residual types all collapse to y−μ; the R generic defaults to
+    'response' (lme4's LMM default, not 'deviance'); scaled= divides by σ̂."""
+    import hea.R as R
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    r = m.residuals_of("response")
+    for t in ("deviance", "working", "pearson"):
+        np.testing.assert_allclose(m.residuals_of(t), r, atol=1e-12)
+    np.testing.assert_allclose(
+        m.residuals_of("response", scaled=True), r / m.sigma, atol=1e-12)
+    np.testing.assert_allclose(R.residuals(m), r, atol=1e-12)        # default = response
+    np.testing.assert_allclose(R.residuals(m, scaled=True), r / m.sigma, atol=1e-12)
+    with pytest.raises(TypeError):              # scaled= is mixed-model only
+        R.residuals(object(), scaled=True)
+
+
+def test_predict_population_sentinels(sleepstudy_data):
+    """#22: re_form accepts lme4's no-RE sentinels (False / 'NA' / NaN / '~0')
+    for population-level (Xβ); a partial-bars formula and newparams= raise."""
+    m = gmm(_SLEEP_F, sleepstudy_data, REML=True)
+    pop = m.predict(re_form=False)["fit"].to_numpy()
+    for s in ("NA", "~0", "~ 0", float("nan")):
+        np.testing.assert_allclose(m.predict(re_form=s)["fit"].to_numpy(), pop, atol=0)
+    assert not np.allclose(pop, m.predict()["fit"].to_numpy())   # pop != full-RE
+    with pytest.raises(NotImplementedError, match="newparams"):
+        m.predict(newparams={"beta": [1.0, 2.0]})
+    with pytest.raises(NotImplementedError, match="partial-bars"):
+        m.predict(re_form="~ (1+Days|Subject)")
+
+
+def test_confint_boot_scale_vcov_and_cosmetic_args(fm01ML):
+    """#23: boot_scale='vcov' reports variance components squared (= sdcor²);
+    zeta= raises; quiet/oldNames/signames are accepted (no-op labels)."""
+    m = fm01ML                                          # Dyestuff, scalar bar
+    sd = m._boot_profile_stat("sdcor")
+    vc = m._boot_profile_stat("vcov")
+    assert np.isclose(vc[".sig01"], sd[".sig01"] ** 2)
+    assert np.isclose(vc[".sigma"], sd[".sigma"] ** 2)
+    assert np.isclose(vc["(Intercept)"], sd["(Intercept)"])      # fixef unscaled
+    with pytest.raises(NotImplementedError, match="zeta"):
+        m.confint(zeta=[1.0, 2.0])
+    assert m.confint(method="Wald", quiet=True, oldNames=False,
+                     signames=False).height > 0
+    ci = m.confint(method="boot", boot_scale="vcov", nsim=25, seed=1)
+    bounds = ci.select(ci.columns[1:]).to_numpy().astype(float)
+    assert ci.height == 3 and np.isfinite(bounds).all()
+
+
+def test_simulate_bootMer_re_form_preserve_bit_exact(fm01ML):
+    """#25/#26: the re_form=NA sentinel reproduces the default (use_u=False)
+    draw bit-for-bit; newdata/newparams raise; bootMer threads re_form through
+    simulate without perturbing the bit-exact RNG path."""
+    m = fm01ML
+    s0 = m.simulate(nsim=3, seed=7)
+    s1 = m.simulate(nsim=3, seed=7, re_form="NA")
+    np.testing.assert_array_equal(s0.to_numpy(), s1.to_numpy())
+    with pytest.raises(NotImplementedError):
+        m.simulate(nsim=1, newdata=m.data)
+    with pytest.raises(NotImplementedError):
+        m.simulate(nsim=1, newparams={})
+    b0 = m.bootMer(lambda x: np.asarray(x._beta), nsim=4, seed=3)
+    b1 = m.bootMer(lambda x: np.asarray(x._beta), nsim=4, seed=3, re_form="NA")
+    np.testing.assert_array_equal(b0.t, b1.t)
+
+
+# ---------------------------------------------------------------------------
 # Ch 4: Building Linear Mixed Models
 # ---------------------------------------------------------------------------
 

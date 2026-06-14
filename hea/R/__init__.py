@@ -314,6 +314,17 @@ from .model_generics import (
     variable_names,
     vcov,
     weights,
+    # lme4 merMod accessor surface (Tier 2 lmer-parity additions)
+    VarCorr,
+    getME,
+    getData,
+    isREML,
+    isLMM,
+    isGLMM,
+    isNLMM,
+    isSingular,
+    extractAIC,
+    rePCA,
 )
 
 # Regression diagnostics
@@ -433,6 +444,9 @@ __all__ = [
     "formula", "model_matrix", "model_frame",
     "AIC", "BIC", "anova", "add1", "drop1", "step",
     "update", "terms", "Terms",
+    # lme4 merMod accessors (VarCorr / getME / predicates / getData / rePCA)
+    "VarCorr", "getME", "getData", "extractAIC", "rePCA",
+    "isREML", "isLMM", "isGLMM", "isNLMM", "isSingular",
     # regression diagnostics
     "hatvalues", "rstandard", "rstudent",
     "cooks_distance", "dffits", "dfbeta", "dfbetas", "influence",

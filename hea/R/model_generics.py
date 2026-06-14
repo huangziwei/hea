@@ -31,17 +31,20 @@ def _bhat_to_named_vector(model):
 
 
 def coef(model):
-    """R: ``coef()`` — coefficients as a named numeric vector.
+    """R: ``coef()`` — model coefficients.
 
-    Works for ``lm`` / ``glm`` / ``gam`` / ``bam`` / ``gmm``. For ``gmm``
-    this returns FIXED effects only (= R's ``fixef(m)``); R's
-    ``coef.lmerMod`` returns per-group BLUPs which hea doesn't compute
-    in the same shape — use ``fixef()`` + ``ranef()`` to assemble.
-
-    Returns :class:`hea.R.NamedVector` — supports 0-based positional
+    For ``lm`` / ``glm`` / ``gam`` / ``bam`` returns a
+    :class:`hea.R.NamedVector` of the fitted coefficients — 0-based positional
     indexing (``coef(m)[0]`` is the first coefficient), name lookup
     (``coef(m)["x"]``), and elementwise arithmetic.
+
+    For a ``gmm`` (mixed model) returns ``lme4::coef.merMod`` — a dict of
+    per-group coefficient frames (the fixed effects plus the matching
+    random-effect BLUP at each level of every grouping factor). Use
+    :func:`fixef` for the fixed effects alone.
     """
+    if model.__class__.__name__ == "gmm":
+        return model.coef()
     return _bhat_to_named_vector(model)
 
 
@@ -51,11 +54,12 @@ def coefficients(model):
 
 
 def fixef(model):
-    """R: ``fixef()`` — fixed-effect coefficients (gmm).
+    """R: ``fixef()`` — fixed-effect coefficients as a named numeric vector.
 
-    For non-mixed models, identical to :func:`coef`.
+    For a ``gmm`` these are the fixed effects β̂ only (unlike :func:`coef`,
+    which adds the per-group BLUPs); for non-mixed models the two coincide.
     """
-    return coef(model)
+    return _bhat_to_named_vector(model)
 
 
 def ranef(model, condVar=False):
@@ -123,7 +127,7 @@ def refit(model, newresp=None):
     return gmm(model.formula, data, family=model.family, REML=model.REML)
 
 
-def resid(model, type=None):
+def resid(model, type=None, scaled=False):
     """R: ``resid()`` / ``residuals()`` — residuals as 1D ``ndarray``.
 
     For ``glm`` / ``gam`` / ``bam``, ``type`` selects among
@@ -134,10 +138,27 @@ def resid(model, type=None):
     (equal to raw when unweighted). ``"partial"`` returns the
     component-plus-residual *matrix* (one column per RHS term,
     ``r + predict(type="terms")``) as a 2-D frame — see
-    :func:`_lm_partial_residuals`. ``gmm`` has response residuals only.
+    :func:`_lm_partial_residuals`.
+
+    For a ``gmm`` (mixed model) ``type`` selects the same four scales
+    (``residuals.merMod``); the default is ``"response"`` for an LMM and
+    ``"deviance"`` for a GLMM (lme4's defaults). On the LMM path all four
+    collapse to ``y − μ``. ``scaled=True`` divides by σ̂ (lme4's
+    ``residuals(., scaled=TRUE)``) and is mixed-model only.
     """
+    is_gmm = model.__class__.__name__ == "gmm"
+    if scaled and not is_gmm:
+        raise TypeError(
+            "resid(): scaled= is only supported for mixed models (gmm)")
     if hasattr(model, "residuals_of"):
-        return model.residuals_of(type or "deviance")
+        if type is None:
+            # lme4 default: LMM "response", GLMM (and glm/gam/bam) "deviance".
+            is_glmm_fn = getattr(model, "_is_glmm", None)
+            is_lmm = (is_gmm and is_glmm_fn is not None and not is_glmm_fn())
+            type = "response" if is_lmm else "deviance"
+        if is_gmm:
+            return model.residuals_of(type, scaled=scaled)
+        return model.residuals_of(type)
     r = getattr(model, "residuals", None)
     if isinstance(r, pl.DataFrame):
         raw = r.to_series().to_numpy()
@@ -174,9 +195,9 @@ def resid(model, type=None):
     return pad(arr) if pad is not None else arr
 
 
-def residuals(model, type=None):
+def residuals(model, type=None, scaled=False):
     """R alias for :func:`resid`."""
-    return resid(model, type)
+    return resid(model, type, scaled=scaled)
 
 
 def _lm_partial_residuals(model, raw):
@@ -312,15 +333,21 @@ def bootMer(x, FUN, **kwargs):
     return x.bootMer(FUN, **kwargs)
 
 
-def vcov(model):
+def vcov(model, correlation=False):
     """R: ``vcov()`` — variance-covariance matrix of the coefficients.
 
     Return type varies by model: lm/glm return ``ndarray`` (``V_bhat``);
     gam/bam return ``ndarray`` (``Vp``, the Bayesian posterior); gmm
-    returns a polars ``DataFrame`` (``vcov_beta``, fixed effects only).
+    returns a polars ``DataFrame`` (fixed effects only). ``correlation=True``
+    (gmm's ``vcov.merMod`` correlation form) returns the correlation matrix
+    instead and is only supported for mixed models.
     """
-    if hasattr(model, "vcov_beta"):  # gmm
-        return model.vcov_beta
+    if model.__class__.__name__ == "gmm":
+        return model.vcov(correlation=correlation)
+    if correlation:
+        raise TypeError(
+            "vcov(): correlation=True is only supported for mixed models (gmm)"
+        )
     if hasattr(model, "Vp"):  # gam / bam (Bayesian posterior)
         return model.Vp
     if hasattr(model, "V_bhat"):  # lm / glm
@@ -330,12 +357,20 @@ def vcov(model):
     )
 
 
-def logLik(model):
+def logLik(model, REML=None):
     """R: ``logLik()`` — model log-likelihood.
 
-    For REML-fit ``gmm`` (no plain ``loglike``), returns the REML
-    log-likelihood ``-REML_criterion / 2``, matching ``logLik.lmerMod``.
+    For a ``gmm`` (mixed model) defers to ``logLik.merMod``: ``REML=None``
+    uses the fit's own criterion, while ``REML=True``/``False`` recomputes the
+    other criterion at the fitted θ̂ (no refit). ``REML=`` is only meaningful
+    for a ``gmm``.
     """
+    if model.__class__.__name__ == "gmm":
+        return model.logLik(REML=REML)
+    if REML is not None:
+        raise TypeError(
+            "logLik(): REML= is only meaningful for mixed models (gmm)"
+        )
     if hasattr(model, "loglike"):
         return float(model.loglike)
     if hasattr(model, "REML_criterion"):
@@ -343,6 +378,88 @@ def logLik(model):
     raise TypeError(
         f"logLik(): {model.__class__.__name__} has no log-likelihood"
     )
+
+
+def _require_gmm(model, fn):
+    """Raise unless ``model`` is a ``gmm`` — for the merMod-only generics."""
+    if model.__class__.__name__ != "gmm":
+        raise TypeError(
+            f"{fn}(): only mixed models (gmm) are supported; "
+            f"got {model.__class__.__name__}"
+        )
+
+
+def VarCorr(model):
+    """R: ``VarCorr()`` — estimated random-effect (co)variances of a mixed
+    model. Returns the :class:`hea.models.gmm.VarCorr` object (per-bar
+    covariance with stddev / correlation views and residual SD ``sc``; prints
+    in lme4's Groups / Name / Std.Dev. / Corr layout)."""
+    _require_gmm(model, "VarCorr")
+    return model.VarCorr()
+
+
+def getME(model, name):
+    """R: ``getME(object, name)`` — extract a named component of a fitted mixed
+    model (design matrices, θ/β, Λ/L, dims, …). See
+    :meth:`hea.models.gmm.gmm.getME` for the supported names."""
+    _require_gmm(model, "getME")
+    return model.getME(name)
+
+
+def isREML(model):
+    """R: ``isREML()`` — ``True`` only for a REML-fit LMM (a GLMM or ML LMM is
+    ``False``)."""
+    _require_gmm(model, "isREML")
+    return model.isREML()
+
+
+def isLMM(model):
+    """R: ``isLMM()`` — ``True`` for a linear mixed model (Gaussian/identity)."""
+    _require_gmm(model, "isLMM")
+    return model.isLMM()
+
+
+def isGLMM(model):
+    """R: ``isGLMM()`` — ``True`` for a generalized linear mixed model."""
+    _require_gmm(model, "isGLMM")
+    return model.isGLMM()
+
+
+def isNLMM(model):
+    """R: ``isNLMM()`` — ``True`` for a nonlinear mixed model (always ``False``
+    in hea; there is no NLMM path)."""
+    _require_gmm(model, "isNLMM")
+    return model.isNLMM()
+
+
+def isSingular(model, tol=1e-4):
+    """R: ``isSingular(x, tol=1e-4)`` — ``True`` if the fit sits on the boundary
+    of the feasible θ region (a variance driven to ~0 or a ±1 correlation)."""
+    _require_gmm(model, "isSingular")
+    return model.isSingular(tol=tol)
+
+
+def getData(model):
+    """R: ``getData()`` — the data frame the mixed model was fit to."""
+    _require_gmm(model, "getData")
+    return model.getData()
+
+
+def extractAIC(model, scale=0, k=2):
+    """R: ``extractAIC()`` — ``(edf, AIC)`` for a mixed model, with
+    ``AIC = -2·logLik + k·edf`` on the fit's own criterion (``extractAIC.merMod``).
+    Only mixed models are handled here (lm/glm use the Mallows-style formula
+    inside :mod:`hea.R.model_selection`)."""
+    _require_gmm(model, "extractAIC")
+    return model.extractAIC(scale=scale, k=k)
+
+
+def rePCA(model):
+    """R: ``rePCA()`` — principal-component SDs of each grouping factor's
+    relative random-effect covariance (a degeneracy / over-parameterization
+    diagnostic; a near-zero component flags a singular RE term)."""
+    _require_gmm(model, "rePCA")
+    return model.rePCA()
 
 
 def deviance(model):
