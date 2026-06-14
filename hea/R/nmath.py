@@ -24,6 +24,11 @@ import math
 import numpy as np
 
 from .rng import _QN_A, _QN_B, _QN_C, _QN_D, _QN_E, _QN_F, _qn_horner
+from ._dispatch import native_fn
+
+# Native (Rust) kernels — None when the extension is absent/disabled, in which
+# case the pure-Python kernels below run unchanged (bit-identical, just slower).
+_nat_pnorm = native_fn("pnorm")
 
 # --- R constants (Rmath.h) ----------------------------------------------------
 _M_SQRT_32 = 5.656854249492380195206754896838      # sqrt(32)
@@ -428,6 +433,12 @@ def qnorm5_vec(p, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
 
 def pnorm5_vec(x, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
     """Vectorised :func:`pnorm5`; bit-identical to the scalar version."""
+    if _nat_pnorm is not None:
+        xa = np.asarray(x, dtype=float)
+        flat = np.ascontiguousarray(xa.reshape(-1))
+        return _nat_pnorm(
+            flat, float(mu), float(sigma), bool(lower_tail), bool(log_p)
+        ).reshape(xa.shape)
     x = np.asarray(x, dtype=float)
     out = np.empty(x.shape, dtype=float)
     if log_p:  # rare — scalar fallback for the whole array

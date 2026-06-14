@@ -1,0 +1,24 @@
+[package]
+name = "hea-native"
+version = "0.1.5"
+edition = "2021"
+description = "Bit-exact, vectorized Rust ports of hea's R-parity numeric kernels"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "_native"
+# cdylib → a Python-loadable shared object; rlib → usable from Rust unit tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# abi3-py310: one wheel works on CPython 3.10+ (matches requires-python).
+# extension-module: don't link libpython (symbols resolved by the host interpreter).
+pyo3 = { version = "0.23", features = ["abi3-py310", "extension-module"] }
+numpy = "0.23"
+
+[profile.release]
+opt-level = 3
+# NOTE: deliberately NO fast-math / no FMA contraction. Rust f64 ops are strict
+# IEEE-754 by default; that is REQUIRED for 0-ulp parity with R/nmath.py. Do not
+# add `-C target-feature=+fma`-style codegen flags or `lto`-driven reassociation
+# without re-running the bit-exactness gate (tests/test_native_parity.py).

@@ -29,3 +29,11 @@ Rplots.pdf
 
 ref/
 worktrees/
+
+# Rust / maturin
+/target/
+rust/target/
+.cargo-home/
+hea/_native*.so
+hea/_native*.pyd
+*.dylib
