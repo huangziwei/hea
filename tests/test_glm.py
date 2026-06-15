@@ -359,6 +359,29 @@ def test_cbind_lhs_rejects_non_binomial():
         glm("cbind(s, f) ~ x", d, family=Gaussian())
 
 
+def test_bracket_lhs_equals_cbind_binomial():
+    """`[s, f] ~ x` is hea-dialect sugar for `cbind(s, f) ~ x`: identical AST,
+    identical code path → byte-for-byte the same binomial two-column fit."""
+    d = pl.DataFrame({
+        "s": [1.0, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "f": [9.0, 8, 7, 6, 5, 4, 3, 2, 1, 0.1],
+        "x": np.arange(10, dtype=float),
+    })
+    m_br = glm("[s, f] ~ x", d, family=Binomial())
+    m_cb = glm("cbind(s, f) ~ x", d, family=Binomial())
+    np.testing.assert_array_equal(m_br._bhat_arr, m_cb._bhat_arr)
+    np.testing.assert_array_equal(m_br._se_bhat_arr, m_cb._se_bhat_arr)
+    assert m_br.deviance == m_cb.deviance
+
+
+def test_bracket_lhs_rejects_non_binomial():
+    # Brackets inherit cbind's family guard exactly (same canonical AST, so the
+    # error still names cbind).
+    d = pl.DataFrame({"s": [1.0, 2], "f": [3.0, 4], "x": [1.0, 2]})
+    with pytest.raises(ValueError, match="cbind.*Binomial"):
+        glm("[s, f] ~ x", d, family=Gaussian())
+
+
 def test_cbind_prior_weights_and_na_drop_match_r():
     """The two C10 corners on glm's cbind path (family-review B7):
     (1) prior weights pw≠1 — R's binomial aic evaluates dbinom at the

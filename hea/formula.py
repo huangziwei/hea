@@ -376,6 +376,32 @@ class _Parser:
 
     def _parse_atom(self) -> Node:
         t = self.peek()
+        if t.kind == "LBRACKET":
+            # hea-dialect sugar: `[y1, y2, ...]` lowers to `cbind(y1, ...)`
+            # right here at parse time, so nothing downstream ever sees a
+            # bracket-list. It inherits cbind's semantics exactly (mlm under
+            # lm, the two-column `[succ, fail]` binomial under glm/gam), and
+            # deparse re-emits `cbind(...)` — brackets are input-only; cbind
+            # stays canonical. Args parse via the same `parse_expr(0)` as
+            # `_parse_call_tail`, so `[a, b]` is byte-identical to
+            # `cbind(a, b)`. Stricter than a call-arg list though: responses
+            # are never empty, so no Empty() slots, no trailing comma, no
+            # `[]`. A postfix `a[i]` (Subscript) never reaches here — it needs
+            # a preceding operand and is handled in `_parse_postfix`; this
+            # branch fires only when `[` opens an atom.
+            self.advance()
+            items: list[Node] = []
+            while True:
+                if self.peek().kind in ("COMMA", "RBRACKET"):
+                    raise ParseError(
+                        f"empty slot in [...] response list at {self.peek().pos}"
+                    )
+                items.append(self.parse_expr(0))
+                if self.peek().kind != "COMMA":
+                    break
+                self.advance()
+            self.expect("RBRACKET")
+            return Call("cbind", items)
         if t.kind == "LPAREN":
             self.advance()
             e = self.parse_expr(0)
@@ -441,6 +467,11 @@ def parse(src: str) -> Formula:
 
     Accepts one-sided (`~ x + y`) and two-sided (`y ~ x + y`) formulas. For a
     bare expression (no tilde), returns `Formula(lhs=None, rhs=expr)`.
+
+    hea-dialect sugar: `[y1, y2]` is an alias for `cbind(y1, y2)` — identical
+    semantics in every position, including the binomial `[succ, fail]`
+    two-column form. `cbind` stays canonical; `deparse` and translate always
+    emit `cbind(...)`, never `[...]`.
     """
     tokens = tokenize(src)
     p = _Parser(tokens)

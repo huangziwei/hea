@@ -3109,6 +3109,25 @@ def test_cbind_response_equals_proportion_idiom_and_mgcv():
     _assert_fp_equiv(m.AIC, p.AIC)
 
 
+def test_bracket_response_equals_cbind_binomial():
+    """`[succ, fail] ~ s(x)` is hea-dialect sugar for `cbind(succ, fail) ~
+    s(x)`. Exercises the gam intake fix: the binomial two-column rewrite is
+    gated on the parsed AST, not a `"cbind" in formula` substring, so the
+    bracket form (no literal "cbind") still takes the two-column path. Before
+    the fix this test fails — `[succ, fail]` is mis-handled as a univariate
+    response."""
+    from hea.family import Binomial
+    d, _, _ = _cbind_fixture()
+    m_br = gam("[succ, fail] ~ s(x)", d, family=Binomial(), method="REML")
+    m_cb = gam("cbind(succ, fail) ~ s(x)", d, family=Binomial(), method="REML")
+    _assert_fp_equiv(m_br.coef, m_cb.coef)
+    _assert_fp_equiv(m_br.sp, m_cb.sp)
+    _assert_fp_equiv(m_br.REML_criterion, m_cb.REML_criterion)
+    _assert_fp_equiv(m_br.AIC, m_cb.AIC)
+    # Original bracket text is preserved verbatim (input-only, not rewritten).
+    assert m_br.formula == "[succ, fail] ~ s(x)"
+
+
 def test_cbind_with_prior_weights_matches_mgcv():
     # weights= on top of a cbind response: wt = pw·n while family$aic and
     # fix.family.ls's binomial ls keep the TRIALS vector n distinct

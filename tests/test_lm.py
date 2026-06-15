@@ -1145,6 +1145,27 @@ def test_mlm_joint_na_omit_and_expression_responses():
     assert m.fitted.height == 4
 
 
+def test_mlm_bracket_response_equals_cbind():
+    """`[y1, y2] ~ x + g` is hea-dialect sugar for `cbind(y1, y2) ~ x + g`:
+    same mlm, same response names, byte-identical per-column coef and fitted."""
+    from hea.models.lm import lm
+    d = pl.DataFrame({
+        "x": [-0.626, 0.184, -0.836, 1.595, 0.330, -0.820, 0.487, 0.738],
+        "g": pl.Series(["a", "b", "a", "b", "a", "b", "a", "b"], dtype=pl.Enum(["a", "b"])),
+        "y1": [0.576, -0.305, 1.512, 0.390, -0.621, -2.215, 1.125, -0.045],
+        "y2": [-0.016, 0.944, 0.821, 0.594, 0.919, 0.782, 0.075, -1.989],
+    })
+    m_br = lm("[y1, y2] ~ x + g", d)
+    m_cb = lm("cbind(y1, y2) ~ x + g", d)
+    assert m_br._is_mlm
+    assert m_br._response_names == m_cb._response_names == ["y1", "y2"]
+    for col in ("y1", "y2"):
+        np.testing.assert_array_equal(m_br.coef[col].to_numpy(),
+                                      m_cb.coef[col].to_numpy())
+        np.testing.assert_array_equal(m_br.fitted[col].to_numpy(),
+                                      m_cb.fitted[col].to_numpy())
+
+
 # ---------------------------------------------------------------------------
 # predict reuses training transform parameters (R's predvars/makepredictcall)
 # for poly/ns/scale, instead of recomputing knots/centering from new data.

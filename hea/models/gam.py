@@ -1047,7 +1047,11 @@ class gam:
         # runs on the proportion form; ``self._binom_n`` carries the
         # trials to the aic/ls/mustart consumers. ``self.formula`` keeps
         # the original text.
-        _cbind = isinstance(formula, str) and "cbind" in formula
+        # Parse any string formula and let the AST decide — a substring
+        # `"cbind" in formula` test would miss the `[succ, fail]` bracket
+        # alias (which lowers to a cbind Call). Parse cost is negligible
+        # against a gam fit.
+        _cbind = isinstance(formula, str)
         if _cbind:
             lhs = parse(formula).lhs
             _cbind = isinstance(lhs, Call) and lhs.fn == "cbind"

@@ -13,7 +13,17 @@ import polars as pl
 import pytest
 
 from conftest import FIXTURE_ROOT, fixture_meta, fixtures_by_kind, load_dataset
-from hea.formula import expand, materialize, parse, prepare_design, referenced_columns
+from hea.formula import (
+    Call,
+    ParseError,
+    Subscript,
+    deparse,
+    expand,
+    materialize,
+    parse,
+    prepare_design,
+    referenced_columns,
+)
 
 WR_FIXTURES = fixtures_by_kind("wr")
 WR_IDS = [e["id"] for e in WR_FIXTURES]
@@ -395,3 +405,47 @@ def test_factor_labels_rename_matches_R():
     assert _suffixes("factor(f3, labels = \"g\")") == ["g2", "g3"]
     X = materialize(expand(parse("~ factor(f3, labels = c(\"L1\", \"L2\", \"L3\"))")), d)
     assert X.to_numpy()[:, 1].tolist() == [0.0, 1.0, 0.0, 0.0, 1.0, 0.0]
+
+
+# ---------------------------------------------------------------------------
+# hea-dialect `[y1, y2]` sugar — a pure alias for `cbind(y1, y2)` lowered at
+# parse time. `cbind` stays canonical (deparse always emits it); brackets are
+# an input convenience only. See plans/formula-cbind-bracket-alias.md.
+# ---------------------------------------------------------------------------
+
+def test_bracket_response_is_cbind_alias():
+    # Byte-identical AST: `[a, b]` lowers to Call("cbind", [a, b]).
+    assert parse("[y1, y2] ~ x") == parse("cbind(y1, y2) ~ x")
+    lhs = parse("[y1, y2] ~ x").lhs
+    assert isinstance(lhs, Call) and lhs.fn == "cbind" and not lhs.kwargs
+    # Expression elements pass through the same `parse_expr` as a call arg list.
+    assert parse("[log(a), b] ~ x") == parse("cbind(log(a), b) ~ x")
+    # Binomial two-column form is just cbind too — no carve-out.
+    assert parse("[succ, fail] ~ s(x)") == parse("cbind(succ, fail) ~ s(x)")
+
+
+def test_bracket_response_deparses_to_cbind():
+    # cbind is canonical: deparse/round-trip never emit `[...]`.
+    assert deparse(parse("[y1, y2] ~ x").lhs) == "cbind(y1, y2)"
+    assert deparse(parse("[log(a), b] ~ x").lhs) == "cbind(log(a), b)"
+
+
+def test_bracket_single_element_stays_cbind():
+    # Invariant: `[y1]` is `cbind(y1)`, NOT unwrapped to bare `y1`.
+    lhs = parse("[y1] ~ x").lhs
+    assert isinstance(lhs, Call) and lhs.fn == "cbind"
+    assert lhs == parse("cbind(y1) ~ x").lhs
+
+
+def test_bracket_does_not_disturb_subscript():
+    # Postfix `a[i]` needs a preceding operand → still Subscript, both sides.
+    assert isinstance(parse("y[1] ~ x").lhs, Subscript)
+    assert isinstance(parse("y ~ x[1]").rhs, Subscript)
+    assert isinstance(parse("y ~ a[b]").rhs, Subscript)
+
+
+@pytest.mark.parametrize("formula", ["[] ~ x", "[a,] ~ x", "[a,,b] ~ x", "[,a] ~ x"])
+def test_bracket_response_rejects_empty_and_trailing(formula):
+    # Responses are never empty: no `[]`, no trailing comma, no empty slot.
+    with pytest.raises(ParseError):
+        parse(formula)

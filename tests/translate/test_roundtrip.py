@@ -389,3 +389,7 @@ class TestMixedModelRoundtrip:
         assert "cbind(s, f)" in out
         assert "(1 | g)" in out
         assert "family = binomial" in out
+        # `cbind` is canonical: R→hea→R keeps it verbatim and never emits hea's
+        # `[...]` input-sugar (which lives only in hea.formula's fit-time
+        # parser, not in this code-translation layer).
+        assert "[" not in out
