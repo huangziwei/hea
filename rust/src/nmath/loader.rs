@@ -287,7 +287,7 @@ pub fn dbinom_raw(x: f64, n: f64, p: f64, q: f64, give_log: bool) -> f64 {
 #[pyfunction]
 #[pyo3(name = "stirlerr")]
 pub fn py_stirlerr<'py>(py: Python<'py>, n: PyReadonlyArray1<'py, f64>) -> Bound<'py, PyArray1<f64>> {
-    let v: Vec<f64> = n.as_array().iter().map(|&x| stirlerr(x)).collect();
+    let v = crate::par::map1(py, n.as_slice().unwrap(), stirlerr);
     v.into_pyarray(py)
 }
 
@@ -298,9 +298,7 @@ pub fn py_bd0<'py>(
     x: PyReadonlyArray1<'py, f64>,
     np_: PyReadonlyArray1<'py, f64>,
 ) -> Bound<'py, PyArray1<f64>> {
-    let xv = x.as_array();
-    let nv = np_.as_array();
-    let v: Vec<f64> = xv.iter().zip(nv.iter()).map(|(&a, &b)| bd0(a, b)).collect();
+    let v = crate::par::map2(py, x.as_slice().unwrap(), np_.as_slice().unwrap(), bd0);
     v.into_pyarray(py)
 }
 
@@ -311,9 +309,7 @@ pub fn py_pow1p<'py>(
     x: PyReadonlyArray1<'py, f64>,
     y: PyReadonlyArray1<'py, f64>,
 ) -> Bound<'py, PyArray1<f64>> {
-    let xv = x.as_array();
-    let yv = y.as_array();
-    let v: Vec<f64> = xv.iter().zip(yv.iter()).map(|(&a, &b)| pow1p(a, b)).collect();
+    let v = crate::par::map2(py, x.as_slice().unwrap(), y.as_slice().unwrap(), pow1p);
     v.into_pyarray(py)
 }
 
@@ -325,13 +321,9 @@ pub fn py_dpois_raw<'py>(
     lam: PyReadonlyArray1<'py, f64>,
     give_log: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let xv = x.as_array();
-    let lv = lam.as_array();
-    let v: Vec<f64> = xv
-        .iter()
-        .zip(lv.iter())
-        .map(|(&a, &b)| dpois_raw(a, b, give_log))
-        .collect();
+    let v = crate::par::map2(py, x.as_slice().unwrap(), lam.as_slice().unwrap(), |x, l| {
+        dpois_raw(x, l, give_log)
+    });
     v.into_pyarray(py)
 }
 
@@ -345,13 +337,13 @@ pub fn py_dbinom_raw<'py>(
     q: PyReadonlyArray1<'py, f64>,
     give_log: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let xv = x.as_array();
-    let nv = n.as_array();
-    let pv = p.as_array();
-    let qv = q.as_array();
-    let mut out = Vec::with_capacity(xv.len());
-    for i in 0..xv.len() {
-        out.push(dbinom_raw(xv[i], nv[i], pv[i], qv[i], give_log));
-    }
+    let out = crate::par::map4(
+        py,
+        x.as_slice().unwrap(),
+        n.as_slice().unwrap(),
+        p.as_slice().unwrap(),
+        q.as_slice().unwrap(),
+        |x, n, p, q| dbinom_raw(x, n, p, q, give_log),
+    );
     out.into_pyarray(py)
 }

@@ -278,10 +278,13 @@ pub fn pnorm<'py>(
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (xv, mv, sv) = (x.as_array(), mu.as_array(), sigma.as_array());
-    let out: Vec<f64> = (0..xv.len())
-        .map(|i| pnorm5_scalar(xv[i], mv[i], sv[i], lower_tail, log_p))
-        .collect();
+    let out = crate::par::map3(
+        py,
+        x.as_slice().unwrap(),
+        mu.as_slice().unwrap(),
+        sigma.as_slice().unwrap(),
+        |x, m, s| pnorm5_scalar(x, m, s, lower_tail, log_p),
+    );
     out.into_pyarray(py)
 }
 
@@ -463,10 +466,13 @@ pub fn qnorm<'py>(
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (pv, mv, sv) = (p.as_array(), mu.as_array(), sigma.as_array());
-    let v: Vec<f64> = (0..pv.len())
-        .map(|i| qnorm5_scalar(pv[i], mv[i], sv[i], lower_tail, log_p))
-        .collect();
+    let v = crate::par::map3(
+        py,
+        p.as_slice().unwrap(),
+        mu.as_slice().unwrap(),
+        sigma.as_slice().unwrap(),
+        |p, m, s| qnorm5_scalar(p, m, s, lower_tail, log_p),
+    );
     v.into_pyarray(py)
 }
 
@@ -479,9 +485,12 @@ pub fn dnorm<'py>(
     sigma: PyReadonlyArray1<'py, f64>,
     give_log: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (xv, mv, sv) = (x.as_array(), mu.as_array(), sigma.as_array());
-    let v: Vec<f64> = (0..xv.len())
-        .map(|i| dnorm5_scalar(xv[i], mv[i], sv[i], give_log))
-        .collect();
+    let v = crate::par::map3(
+        py,
+        x.as_slice().unwrap(),
+        mu.as_slice().unwrap(),
+        sigma.as_slice().unwrap(),
+        |x, m, s| dnorm5_scalar(x, m, s, give_log),
+    );
     v.into_pyarray(py)
 }

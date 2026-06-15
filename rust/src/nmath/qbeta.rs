@@ -430,10 +430,12 @@ pub fn qbeta<'py>(
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (al, pv, qv) = (alpha.as_array(), p.as_array(), q.as_array());
-    let mut out = Vec::with_capacity(al.len());
-    for i in 0..al.len() {
-        out.push(qbeta_scalar(al[i], pv[i], qv[i], lower_tail, log_p));
-    }
+    let out = crate::par::map3(
+        py,
+        alpha.as_slice().unwrap(),
+        p.as_slice().unwrap(),
+        q.as_slice().unwrap(),
+        |al, p, q| qbeta_scalar(al, p, q, lower_tail, log_p),
+    );
     out.into_pyarray(py)
 }

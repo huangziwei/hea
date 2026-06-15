@@ -429,10 +429,9 @@ pub fn pt<'py>(
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (xv, nv) = (x.as_array(), n.as_array());
-    let v: Vec<f64> = (0..xv.len())
-        .map(|i| pt_scalar(xv[i], nv[i], lower_tail, log_p))
-        .collect();
+    let v = crate::par::map2(py, x.as_slice().unwrap(), n.as_slice().unwrap(), |x, n| {
+        pt_scalar(x, n, lower_tail, log_p)
+    });
     v.into_pyarray(py)
 }
 
@@ -445,10 +444,9 @@ pub fn qt<'py>(
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (pv, nv) = (p.as_array(), ndf.as_array());
-    let v: Vec<f64> = (0..pv.len())
-        .map(|i| qt_scalar(pv[i], nv[i], lower_tail, log_p))
-        .collect();
+    let v = crate::par::map2(py, p.as_slice().unwrap(), ndf.as_slice().unwrap(), |p, n| {
+        qt_scalar(p, n, lower_tail, log_p)
+    });
     v.into_pyarray(py)
 }
 
@@ -460,8 +458,9 @@ pub fn dt<'py>(
     n: PyReadonlyArray1<'py, f64>,
     give_log: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (xv, nv) = (x.as_array(), n.as_array());
-    let v: Vec<f64> = (0..xv.len()).map(|i| dt_scalar(xv[i], nv[i], give_log)).collect();
+    let v = crate::par::map2(py, x.as_slice().unwrap(), n.as_slice().unwrap(), |x, n| {
+        dt_scalar(x, n, give_log)
+    });
     v.into_pyarray(py)
 }
 
@@ -475,10 +474,13 @@ pub fn pf<'py>(
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (xv, d1, d2) = (x.as_array(), df1.as_array(), df2.as_array());
-    let v: Vec<f64> = (0..xv.len())
-        .map(|i| pf_scalar(xv[i], d1[i], d2[i], lower_tail, log_p))
-        .collect();
+    let v = crate::par::map3(
+        py,
+        x.as_slice().unwrap(),
+        df1.as_slice().unwrap(),
+        df2.as_slice().unwrap(),
+        |x, a, b| pf_scalar(x, a, b, lower_tail, log_p),
+    );
     v.into_pyarray(py)
 }
 
@@ -492,9 +494,12 @@ pub fn qf<'py>(
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (pv, d1, d2) = (p.as_array(), df1.as_array(), df2.as_array());
-    let v: Vec<f64> = (0..pv.len())
-        .map(|i| qf_scalar(pv[i], d1[i], d2[i], lower_tail, log_p))
-        .collect();
+    let v = crate::par::map3(
+        py,
+        p.as_slice().unwrap(),
+        df1.as_slice().unwrap(),
+        df2.as_slice().unwrap(),
+        |p, a, b| qf_scalar(p, a, b, lower_tail, log_p),
+    );
     v.into_pyarray(py)
 }

@@ -185,13 +185,13 @@ pub fn lgammafn(x: f64) -> f64 {
 #[pyfunction]
 #[pyo3(name = "lgammafn")]
 pub fn py_lgammafn<'py>(py: Python<'py>, x: PyReadonlyArray1<'py, f64>) -> Bound<'py, PyArray1<f64>> {
-    let v: Vec<f64> = x.as_array().iter().map(|&a| lgammafn(a)).collect();
+    let v = crate::par::map1(py, x.as_slice().unwrap(), lgammafn);
     v.into_pyarray(py)
 }
 
 #[pyfunction]
 #[pyo3(name = "gammafn")]
 pub fn py_gammafn<'py>(py: Python<'py>, x: PyReadonlyArray1<'py, f64>) -> Bound<'py, PyArray1<f64>> {
-    let v: Vec<f64> = x.as_array().iter().map(|&a| gammafn(a)).collect();
+    let v = crate::par::map1(py, x.as_slice().unwrap(), gammafn);
     v.into_pyarray(py)
 }

@@ -1616,11 +1616,13 @@ pub fn pbeta<'py>(
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (xv, av, bv) = (x.as_array(), a.as_array(), b.as_array());
-    let mut out = Vec::with_capacity(xv.len());
-    for i in 0..xv.len() {
-        out.push(pbeta_scalar(xv[i], av[i], bv[i], lower_tail, log_p));
-    }
+    let out = crate::par::map3(
+        py,
+        x.as_slice().unwrap(),
+        a.as_slice().unwrap(),
+        b.as_slice().unwrap(),
+        |x, a, b| pbeta_scalar(x, a, b, lower_tail, log_p),
+    );
     out.into_pyarray(py)
 }
 
@@ -1631,10 +1633,6 @@ pub fn lbeta<'py>(
     a: PyReadonlyArray1<'py, f64>,
     b: PyReadonlyArray1<'py, f64>,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (av, bv) = (a.as_array(), b.as_array());
-    let mut out = Vec::with_capacity(av.len());
-    for i in 0..av.len() {
-        out.push(lbeta_scalar(av[i], bv[i]));
-    }
+    let out = crate::par::map2(py, a.as_slice().unwrap(), b.as_slice().unwrap(), lbeta_scalar);
     out.into_pyarray(py)
 }

@@ -74,8 +74,9 @@ pub fn dexp<'py>(
     scale: PyReadonlyArray1<'py, f64>,
     give_log: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (xv, sv) = (x.as_array(), scale.as_array());
-    let v: Vec<f64> = (0..xv.len()).map(|i| dexp_scalar(xv[i], sv[i], give_log)).collect();
+    let v = crate::par::map2(py, x.as_slice().unwrap(), scale.as_slice().unwrap(), |x, s| {
+        dexp_scalar(x, s, give_log)
+    });
     v.into_pyarray(py)
 }
 
@@ -88,10 +89,9 @@ pub fn pexp<'py>(
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (xv, sv) = (x.as_array(), scale.as_array());
-    let v: Vec<f64> = (0..xv.len())
-        .map(|i| pexp_scalar(xv[i], sv[i], lower_tail, log_p))
-        .collect();
+    let v = crate::par::map2(py, x.as_slice().unwrap(), scale.as_slice().unwrap(), |x, s| {
+        pexp_scalar(x, s, lower_tail, log_p)
+    });
     v.into_pyarray(py)
 }
 
@@ -104,9 +104,8 @@ pub fn qexp<'py>(
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (pv, sv) = (p.as_array(), scale.as_array());
-    let v: Vec<f64> = (0..pv.len())
-        .map(|i| qexp_scalar(pv[i], sv[i], lower_tail, log_p))
-        .collect();
+    let v = crate::par::map2(py, p.as_slice().unwrap(), scale.as_slice().unwrap(), |p, s| {
+        qexp_scalar(p, s, lower_tail, log_p)
+    });
     v.into_pyarray(py)
 }

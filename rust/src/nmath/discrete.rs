@@ -351,8 +351,9 @@ macro_rules! wrap2 {
             $p2: bool,
             $p3: bool,
         ) -> Bound<'py, PyArray1<f64>> {
-            let (xv, av) = (x.as_array(), a.as_array());
-            let v: Vec<f64> = (0..xv.len()).map(|i| $sc(xv[i], av[i], $p2, $p3)).collect();
+            let v = crate::par::map2(py, x.as_slice().unwrap(), a.as_slice().unwrap(), |x, a| {
+                $sc(x, a, $p2, $p3)
+            });
             v.into_pyarray(py)
         }
     };
@@ -369,8 +370,9 @@ pub fn dpois<'py>(
     lam: PyReadonlyArray1<'py, f64>,
     give_log: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (xv, lv) = (x.as_array(), lam.as_array());
-    let v: Vec<f64> = (0..xv.len()).map(|i| dpois_scalar(xv[i], lv[i], give_log)).collect();
+    let v = crate::par::map2(py, x.as_slice().unwrap(), lam.as_slice().unwrap(), |x, l| {
+        dpois_scalar(x, l, give_log)
+    });
     v.into_pyarray(py)
 }
 
@@ -384,10 +386,13 @@ pub fn pbinom<'py>(
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (xv, nv, pv) = (x.as_array(), n.as_array(), p.as_array());
-    let v: Vec<f64> = (0..xv.len())
-        .map(|i| pbinom_scalar(xv[i], nv[i], pv[i], lower_tail, log_p))
-        .collect();
+    let v = crate::par::map3(
+        py,
+        x.as_slice().unwrap(),
+        n.as_slice().unwrap(),
+        p.as_slice().unwrap(),
+        |x, n, p| pbinom_scalar(x, n, p, lower_tail, log_p),
+    );
     v.into_pyarray(py)
 }
 
@@ -400,10 +405,13 @@ pub fn dbinom<'py>(
     p: PyReadonlyArray1<'py, f64>,
     give_log: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (xv, nv, pv) = (x.as_array(), n.as_array(), p.as_array());
-    let v: Vec<f64> = (0..xv.len())
-        .map(|i| dbinom_scalar(xv[i], nv[i], pv[i], give_log))
-        .collect();
+    let v = crate::par::map3(
+        py,
+        x.as_slice().unwrap(),
+        n.as_slice().unwrap(),
+        p.as_slice().unwrap(),
+        |x, n, p| dbinom_scalar(x, n, p, give_log),
+    );
     v.into_pyarray(py)
 }
 
@@ -417,10 +425,13 @@ pub fn qbinom<'py>(
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (pv, nv, prv) = (p.as_array(), n.as_array(), pr.as_array());
-    let v: Vec<f64> = (0..pv.len())
-        .map(|i| qbinom_scalar(pv[i], nv[i], prv[i], lower_tail, log_p))
-        .collect();
+    let v = crate::par::map3(
+        py,
+        p.as_slice().unwrap(),
+        n.as_slice().unwrap(),
+        pr.as_slice().unwrap(),
+        |p, n, pr| qbinom_scalar(p, n, pr, lower_tail, log_p),
+    );
     v.into_pyarray(py)
 }
 
@@ -433,9 +444,12 @@ pub fn dbeta<'py>(
     b: PyReadonlyArray1<'py, f64>,
     give_log: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (xv, av, bv) = (x.as_array(), a.as_array(), b.as_array());
-    let v: Vec<f64> = (0..xv.len())
-        .map(|i| dbeta_scalar(xv[i], av[i], bv[i], give_log))
-        .collect();
+    let v = crate::par::map3(
+        py,
+        x.as_slice().unwrap(),
+        a.as_slice().unwrap(),
+        b.as_slice().unwrap(),
+        |x, a, b| dbeta_scalar(x, a, b, give_log),
+    );
     v.into_pyarray(py)
 }

@@ -12,6 +12,7 @@ use pyo3::prelude::*;
 
 mod linalg;
 mod nmath;
+mod par;
 mod rng;
 
 #[pymodule]

@@ -683,11 +683,13 @@ pub fn pgamma<'py>(
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (xv, av, sv) = (x.as_array(), alph.as_array(), scale.as_array());
-    let mut out = Vec::with_capacity(xv.len());
-    for i in 0..xv.len() {
-        out.push(pgamma_scalar(xv[i], av[i], sv[i], lower_tail, log_p));
-    }
+    let out = crate::par::map3(
+        py,
+        x.as_slice().unwrap(),
+        alph.as_slice().unwrap(),
+        scale.as_slice().unwrap(),
+        |x, a, s| pgamma_scalar(x, a, s, lower_tail, log_p),
+    );
     out.into_pyarray(py)
 }
 
@@ -700,11 +702,13 @@ pub fn dgamma<'py>(
     scale: PyReadonlyArray1<'py, f64>,
     give_log: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (xv, sh, sc) = (x.as_array(), shape.as_array(), scale.as_array());
-    let mut out = Vec::with_capacity(xv.len());
-    for i in 0..xv.len() {
-        out.push(dgamma_scalar(xv[i], sh[i], sc[i], give_log));
-    }
+    let out = crate::par::map3(
+        py,
+        x.as_slice().unwrap(),
+        shape.as_slice().unwrap(),
+        scale.as_slice().unwrap(),
+        |x, sh, sc| dgamma_scalar(x, sh, sc, give_log),
+    );
     out.into_pyarray(py)
 }
 
@@ -718,10 +722,12 @@ pub fn qgamma<'py>(
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let (pv, av, sv) = (p.as_array(), alpha.as_array(), scale.as_array());
-    let mut out = Vec::with_capacity(pv.len());
-    for i in 0..pv.len() {
-        out.push(qgamma_scalar(pv[i], av[i], sv[i], lower_tail, log_p));
-    }
+    let out = crate::par::map3(
+        py,
+        p.as_slice().unwrap(),
+        alpha.as_slice().unwrap(),
+        scale.as_slice().unwrap(),
+        |p, a, s| qgamma_scalar(p, a, s, lower_tail, log_p),
+    );
     out.into_pyarray(py)
 }
