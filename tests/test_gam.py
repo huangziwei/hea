@@ -6340,6 +6340,14 @@ def test_cox_ph_pbc_textbook_matches_mgcv():
     for lab in rows:
         assert 0.0 <= rows[lab][4] <= 1.0
     m.summary()
+    # plot_smooth resolves the s(sqrt(protime)) smooth-arg expression
+    # against self.data (the general path now materializes it like the
+    # single-formula path) — regression for the ColumnNotFound on
+    # "sqrt(protime)".
+    assert "sqrt(protime)" in m.data.columns
+    fig = m.plot_smooth()
+    assert len(fig.axes) == 5
+    plt.close(fig)
 
 
 def test_shash_through_gam_matches_mgcv():

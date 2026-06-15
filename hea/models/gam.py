@@ -4163,7 +4163,16 @@ class gam:
         n = md.n
         self.n = n
         self.p = md.p
-        self.data = data
+        # Materialize smooth-arg expressions (e.g. ``s(sqrt(protime))``)
+        # into ``self.data`` so plot_smooth / partial-residual lookups
+        # find the transformed covariate column, matching the single-
+        # formula path (gam.py:1104). Each LP carries its own map.
+        from ..formula import (_apply_smooth_arg_exprs as _asae,
+                               _smooth_arg_expr_map as _saem)
+        _expr_map: dict = {}
+        for _lp in md.lps:
+            _expr_map.update(_saem(_lp.expanded))
+        self.data = _asae(data, _expr_map) if _expr_map else data
         if weights is None:
             self._wt = np.ones(n)
         else:
