@@ -10,6 +10,7 @@
 
 use pyo3::prelude::*;
 
+mod linalg;
 mod nmath;
 mod rng;
 
@@ -17,5 +18,6 @@ mod rng;
 fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     nmath::register(m)?;
     rng::register(m)?;
+    linalg::register(m)?;
     Ok(())
 }

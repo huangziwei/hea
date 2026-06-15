@@ -35,6 +35,36 @@ from scipy.special import digamma, expit, gammaln, polygamma
 
 from .R import nmath as _nmath
 from .R.nmath import _dpois_raw, _dbinom_raw
+from .R._dispatch import rs_fn as _rs_fn
+
+# The GLM/GLMM aic hooks evaluate the saddlepoint log-density primitives
+# (_dpois_raw / _dbinom_raw) on n-vectors every objective eval. Route them to the
+# Rust kernels when present (bit-identical to the pure-Python ones — verified by
+# the T1 parity gate — so the cumsum reduction stays bit-for-bit); the scalar
+# Python path was a measured hot spot (≈16% of a cbpp glmer fit via _bd0/
+# _stirlerr). See plans/rust-port-implementation.md.
+_rs_dbinom_raw = _rs_fn("dbinom_raw")
+_rs_dpois_raw = _rs_fn("dpois_raw")
+
+
+def _dbinom_raw_disp(x, n, p, q, give_log=True):
+    """``_dbinom_raw`` via Rust when available, else the pure-Python kernel."""
+    if _rs_dbinom_raw is None:
+        return _dbinom_raw(x, n, p, q, give_log)
+    shape = np.broadcast_shapes(np.shape(x), np.shape(n), np.shape(p), np.shape(q))
+    a = [np.ascontiguousarray(np.broadcast_to(v, shape), dtype=float).ravel()
+         for v in (x, n, p, q)]
+    return np.asarray(_rs_dbinom_raw(a[0], a[1], a[2], a[3], give_log)).reshape(shape)
+
+
+def _dpois_raw_disp(x, lam, give_log=True):
+    """``_dpois_raw`` via Rust when available, else the pure-Python kernel."""
+    if _rs_dpois_raw is None:
+        return _dpois_raw(x, lam, give_log)
+    shape = np.broadcast_shapes(np.shape(x), np.shape(lam))
+    bx = np.ascontiguousarray(np.broadcast_to(x, shape), dtype=float).ravel()
+    bl = np.ascontiguousarray(np.broadcast_to(lam, shape), dtype=float).ravel()
+    return np.asarray(_rs_dpois_raw(bx, bl, give_log)).reshape(shape)
 
 
 # ---------------------------------------------------------------------------
@@ -991,7 +1021,7 @@ class Poisson(Family):
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
-        logp = _dpois_raw(y, mu, True)
+        logp = _dpois_raw_disp(y, mu, True)
         return -2.0 * float(np.cumsum(logp * wt)[-1])
 
     def ls(self, y, wt, scale):
@@ -1108,7 +1138,7 @@ class Binomial(Family):
             weight = np.where(good, wt / np.where(good, n_arr, 1.0), 0.0)
             s_arr = np.rint(np.where(good, n_arr * y, 0.0))
             size = np.rint(n_arr)
-            logp = _dbinom_raw(s_arr, size, mu, 1.0 - mu, True)
+            logp = _dbinom_raw_disp(s_arr, size, mu, 1.0 - mu, True)
             terms = np.where(good & np.isfinite(logp), weight * logp, 0.0)
             return -2.0 * float(np.cumsum(terms)[-1])
         m = np.rint(wt)
@@ -1118,7 +1148,7 @@ class Binomial(Family):
             return 0.0
         s_arr = np.rint(np.where(good, m * y, 0.0))
         weight = np.where(good, wt / np.where(good, m, 1.0), 0.0)
-        logp = _dbinom_raw(s_arr, m, mu, 1.0 - mu, True)
+        logp = _dbinom_raw_disp(s_arr, m, mu, 1.0 - mu, True)
         terms = weight * logp
         # Replace -inf entries (oob) by 0 so they don't contaminate the
         # sum (lme4 filters via the m<=0 branch which sets contribution
