@@ -3776,21 +3776,31 @@ def _apply_by_and_absorb(
         if _is_ordered_by(by_col) and len(levels) > 1:
             levels = levels[1:]
         by_arr = by_col.to_numpy()
-        # mgcv sets `sm$C = colSums(sm$X)` once on the full (pre-by) X, then
-        # applies the same Householder Q to every per-level X_lev. Without
-        # this each level's absorb uses colSums(X_lev) → a different Z, and
-        # the resulting subspaces diverge from mgcv's.
+        # mgcv applies the identifiability constraint to the SHARED pre-by
+        # basis, then multiplies each level by its 0/1 dummy
+        # (smoothCon, smooth.r:3947-3991):
+        #  * sumzero (sparse.cons=0): C = colSums(sm$X) is computed once on
+        #    the full X; the same Householder Q absorbs every per-level X_lev
+        #    (passed as ``C_source`` below). Without it each level's absorb
+        #    would use colSums(X_lev) → a divergent Z.
+        #  * sweep-drop (sparse.cons=-1, smooth.r:3947-3962): the drop column
+        #    and the de-meaning colMeans are taken from the SHARED sm$X ONCE,
+        #    BEFORE by (smooth.r:3947 "sweep and drop constraints have to be
+        #    applied before by variables"); each level is then ``by.dum *
+        #    (constrained sm$X)`` (smooth.r:3982). Deriving drop/colMeans from
+        #    the masked X_lev instead reads the by-zeroed rows' (near-zero)
+        #    variance/means — wrong, and worst for the sparsest level (P20:
+        #    s(x2,by=fac) lowest-amplitude level edf 7.5 vs mgcv-bam 4.5).
+        sd_shared = (_absorb_sweep_drop(X, S_list)
+                     if sparse_cons == -1 else None)
         blocks: list[SmoothBlock] = []
         for lev in levels:
             mask = (by_arr == lev).astype(float)
-            X_lev = X * mask[:, None]
             if sparse_cons == -1:
-                # mgcv-F by-factor + sparse.cons=-1: drop col / de-mean per level.
-                # (mgcv likely shares the drop column across levels via the same
-                # pre-by sm$C; for now per-level matches the no-by case and is
-                # what current bam-F use cases need.)
-                X2, S2, T = _absorb_sweep_drop(X_lev, S_list)
+                X2_sh, S2, T = sd_shared
+                X2 = X2_sh * mask[:, None]   # by.dum * constrained shared X
             else:
+                X_lev = X * mask[:, None]
                 X2, S2, T = _absorb_sumzero(
                     X_lev, S_list,
                     C_source=C_source if C_source is not None else X,

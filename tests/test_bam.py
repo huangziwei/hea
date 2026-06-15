@@ -681,3 +681,202 @@ def test_bam_scale_semantics():
     # non-finite scale rejected.
     with pytest.raises(ValueError, match="finite"):
         hea.models.bam("y ~ z + s(x, k=10)", dg, scale=float("inf"))
+
+
+# =============================================================================
+# 7. id= smoothing-parameter sharing — the L-matrix layer (plan item P9)
+# =============================================================================
+# bam used to REJECT id= (reject_unsupported_smooth_id): each linked penalty
+# would silently get its own λ. bam now ports gam's working-θ L layer —
+# ρ_full = L·θ maps ONE working smoothing parameter onto several penalties, the
+# bases are pooled across the linked smooths (idLinksBases, shared through
+# materialize_smooths), and the optimisers + post-fit run in working space
+# (g_θ = T'g, H_θ = T'HT, T = blockdiag(L, I)). Pinned vs mgcv **bam** (not
+# gam): bam builds bases on the mini.mf subsample, so the criterion's absolute
+# log-determinants carry a basis-dependent constant for data-quantile-knot
+# bases (cr) — the FIT (sp/edf/fitted/scale) is gauge-invariant and DOES pin.
+# Oracle: tests/r_oracle/dump_bam_id.R → tests/fixtures/bam_id/.
+_BAM_ID = Path(__file__).parent / "fixtures" / "bam_id"
+
+
+def _id_col(case, name):
+    return np.array(
+        [float(x) for x in (_BAM_ID / case / name).read_text().split()])
+
+
+def _id_meta(case):
+    with open(_BAM_ID / case / "meta.csv", newline="") as f:
+        return {k: float(v) for k, v in next(csv.DictReader(f)).items()}
+
+
+def _id_stable(case):
+    """summary s.table per-smooth edf, keyed by smooth label (col 0 → edf)."""
+    out = {}
+    with open(_BAM_ID / case / "stable.csv", newline="") as f:
+        for row in csv.reader(f):
+            if not row or not row[0]:
+                continue
+            try:
+                out[row[0]] = float(row[1])
+            except (ValueError, IndexError):
+                pass
+    return out
+
+
+def _bam_id_data():
+    """set.seed(13) data — bit-matches dump_bam_id.R's gauss cases (R-native
+    runif/rnorm via hea.R.rng), for the oracle-free logic tests below."""
+    from hea.R.rng import RGenerator
+    g = RGenerator(13)
+    n = 250
+    x0 = g.uniform(0.0, 1.0, n)
+    x1 = g.uniform(0.0, 3.0, n)
+    y = np.sin(2 * np.pi * x0) + np.sin(2 * np.pi * x1 / 3) \
+        + g.normal(0.0, 0.35, n)
+    return pl.DataFrame({"x0": x0, "x1": x1, "y": y})
+
+
+@pytest.mark.skipif(not (_BAM_ID / "gauss_tp" / "meta.csv").exists(),
+                    reason="bam_id oracle missing — run dump_bam_id.R")
+@pytest.mark.parametrize("case, formula, pin_crit", [
+    ("gauss_tp", "y ~ s(x0, id=1) + s(x1, id=1)", True),
+    ("gauss_cr", "y ~ s(x0, bs='cr', id=1) + s(x1, bs='cr', id=1)", False),
+    ("pois", "y ~ s(x0, id=1) + s(x1, id=1)", True),
+])
+def test_bam_id_links_lambda_matches_mgcv(case, formula, pin_crit):
+    """ONE working λ shared across the linked smooths; bases pooled over the
+    union of the (different-range) covariates; the fit pins to mgcv-bam.
+    gauss_tp/pois pin the fREML criterion VALUE too; gauss_cr does not — its
+    data-quantile cr knots on the mini.mf subsample shift the criterion's
+    absolute log-determinants (a non-id bam property as well), while
+    sp/edf/fitted stay invariant and DO pin."""
+    df = pl.read_csv(str(_BAM_ID / case / "data.csv"))
+    fam = dict(family=Poisson()) if case == "pois" else {}
+    m = hea.models.bam(formula, df, method="REML", **fam)
+    meta = _id_meta(case)
+    sp_ref, fsp_ref = _id_col(case, "sp.csv"), _id_col(case, "full_sp.csv")
+    fit_ref, stable = _id_col(case, "fitted.csv"), _id_stable(case)
+    # one working sp; two penalties share it; full.sp repeats the working value
+    assert len(m.sp) == 1 == int(meta["n_work"])
+    assert len(m._slots) == 2 == int(meta["n_slots"])
+    np.testing.assert_allclose(np.exp(m._rho_hat), [m.sp[0]] * 2, rtol=1e-12)
+    np.testing.assert_allclose(np.exp(m._rho_hat), fsp_ref, rtol=1e-4)
+    np.testing.assert_allclose(m.sp, sp_ref, rtol=1e-4)
+    np.testing.assert_allclose(m.sigma_squared, meta["scale"], rtol=1e-5)
+    for lbl, edf in m.edf_by_smooth.items():
+        np.testing.assert_allclose(edf, stable[lbl], rtol=1e-4)
+    np.testing.assert_allclose(m.fitted_values, fit_ref, rtol=1e-4, atol=1e-6)
+    if pin_crit:
+        np.testing.assert_allclose(m.REML_criterion / 2, meta["sp_criterion"],
+                                   rtol=1e-6)
+    # the shared raw basis must replay at predict time (renamed view for x1)
+    pred = m.predict(df.head(40))["fit"].to_numpy()
+    np.testing.assert_allclose(pred, m.fitted[:40], rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.skipif(not (_BAM_ID / "pois" / "meta.csv").exists(),
+                    reason="bam_id oracle missing — run dump_bam_id.R")
+def test_bam_id_discrete_poi_matches_mgcv():
+    """The discrete POI optimiser supports id via the working-space Newton step
+    (T'g, T'HT contraction of _pi_fit_chol's full per-penalty grad/Hessian).
+    On these continuous covariates hea bins by unique value (discrete ≡
+    non-discrete), so the discrete-id fit lands on the mgcv NON-discrete id
+    reference (= mgcv gam id). mgcv's own discrete=TRUE+id re-discretises the
+    pooled basis and drifts elsewhere — an mgcv-internal quirk not reproduced
+    (see dump_bam_id.R)."""
+    df = pl.read_csv(str(_BAM_ID / "pois" / "data.csv"))
+    sp_ref = _id_col("pois", "sp.csv")
+    m = hea.models.bam("y ~ s(x0, id=1) + s(x1, id=1)", df,
+                       family=Poisson(), method="REML", discrete=True)
+    assert len(m.sp) == 1 and len(m._slots) == 2
+    np.testing.assert_allclose(np.exp(m._rho_hat), [m.sp[0]] * 2, rtol=1e-12)
+    np.testing.assert_allclose(m.sp, sp_ref, rtol=1e-4)
+
+
+@pytest.mark.skipif(not (_BAM_ID / "byfac" / "meta.csv").exists(),
+                    reason="bam_id oracle missing — run dump_bam_id.R")
+def test_bam_id_by_factor_matches_mgcv():
+    """s(x2, by=fac, id=1): every by-level block shares ONE λ (full.sp repeats
+    sp[0] across the three blocks) + an unlinked s(x0) carries its own. sp/edf/
+    scale pin to mgcv-bam: the by-factor sweep-drop constraint (sparse.cons=-1)
+    is applied to the SHARED pre-by basis once, then × the level dummy
+    (smooth.r:3947-3991) — matching mgcv (plan item P20). Previously hea derived
+    it per masked level, so the sparsest level's edf was ~70% high."""
+    df = pl.read_csv(str(_BAM_ID / "byfac" / "data.csv")).with_columns(
+        pl.col("fac").cast(pl.Enum(["f1", "f2", "f3"])))
+    m = hea.models.bam("y ~ fac + s(x2, by=fac, id=1) + s(x0)", df,
+                       method="REML")
+    meta = _id_meta("byfac")
+    sp_ref = _id_col("byfac", "sp.csv")
+    fsp_ref = _id_col("byfac", "full_sp.csv")
+    stable = _id_stable("byfac")
+    assert len(m.sp) == 2 and len(m._slots) == 4
+    np.testing.assert_allclose(
+        np.exp(m._rho_hat), [m.sp[0], m.sp[0], m.sp[0], m.sp[1]], rtol=1e-12)
+    np.testing.assert_allclose(np.exp(m._rho_hat), fsp_ref, rtol=1e-4)
+    np.testing.assert_allclose(m.sp, sp_ref, rtol=1e-4)
+    np.testing.assert_allclose(m.sigma_squared, meta["scale"], rtol=1e-5)
+    for lbl, edf in m.edf_by_smooth.items():
+        np.testing.assert_allclose(edf, stable[lbl], rtol=1e-4)
+
+
+def test_bam_id_fixed_sp_takes_working_length():
+    """sp= supplies the *working* parameters (mgcv semantics): one value drives
+    both linked penalties. Length must be n_work (=1), not n_slots (=2)."""
+    d = _bam_id_data()
+    m = hea.models.bam("y ~ s(x0, id=1) + s(x1, id=1)", d, sp=[2.0])
+    assert len(m.sp) == 1 and len(m._slots) == 2
+    np.testing.assert_allclose(np.exp(m._rho_hat), [2.0, 2.0], rtol=1e-12)
+    with pytest.raises(ValueError, match="length 1"):
+        hea.models.bam("y ~ s(x0, id=1) + s(x1, id=1)", d, sp=[2.0, 3.0])
+
+
+def test_bam_id_singleton_is_noop():
+    """An id used by a single smooth links nothing — same model as no id."""
+    d = _bam_id_data()
+    m1 = hea.models.bam("y ~ s(x0, id=9) + s(x1)", d, method="REML")
+    m0 = hea.models.bam("y ~ s(x0) + s(x1)", d, method="REML")
+    assert len(m1.sp) == 2
+    np.testing.assert_allclose(m1.sp, m0.sp, rtol=1e-9)
+    np.testing.assert_allclose(m1.REML_criterion, m0.REML_criterion, rtol=1e-12)
+
+
+# =============================================================================
+# 8. scale-unknown non-Gaussian φ-estimation cadence (plan item P19)
+# =============================================================================
+# A scale-unknown non-Gaussian bam (Gamma, inverse Gaussian, fixed-p Tweedie,
+# the extended families) estimates φ jointly with the sp's. hea used to run the
+# converge-fully _outer_newton on each frozen (R, f) linearisation — minimising
+# the WORKING-RSS REML, whose (ρ, φ) optimum differs from the RESPONSE-deviance
+# optimum mgcv reaches by ONE POI step + re-linearise per PIRLS iter. The gap
+# was large (Gamma sp 0.158 vs mgcv-bam 0.205 = 3.7×; Tweedie 0.207 vs 0.259).
+# bam now routes these through the same one-step POI cadence, so sp/scale/edf/
+# fitted pin to mgcv-**bam** (φ≡1 families keep the outer-Newton path — they
+# already matched). NB this is genuine bam↔gam divergence: mgcv-gam Gamma sp is
+# 0.579, mgcv-bam 0.205 — bam's reduced-(R,f) cadence is a different estimator.
+# Oracle: tests/r_oracle/dump_bam_estscale.R → tests/fixtures/bam_estscale/.
+_BAM_ES = Path(__file__).parent / "fixtures" / "bam_estscale"
+
+
+@pytest.mark.skipif(not (_BAM_ES / "tweedie" / "meta.csv").exists(),
+                    reason="bam_estscale oracle missing — run dump_bam_estscale.R")
+@pytest.mark.parametrize("case, fam_factory", [
+    ("tweedie", lambda: __import__("hea.family", fromlist=["Tweedie"]).Tweedie(p=1.4)),
+    ("gamma", lambda: __import__("hea.family", fromlist=["Gamma"]).Gamma(link="log")),
+])
+def test_bam_estscale_phi_matches_mgcv_bam(case, fam_factory):
+    """Scale-unknown non-Gaussian bam pins sp/scale/edf/fitted to mgcv-bam via
+    the POI one-step φ-estimation cadence (P19). sp is an argmin/inverse-Hessian
+    quantity → BLAS flat-optimum band (rtol 1e-4); the well-determined fit
+    quantities (scale, edf, fitted μ̂) pin tighter."""
+    df = pl.read_csv(str(_BAM_ES / case / "data.csv"))
+    with open(_BAM_ES / case / "meta.csv", newline="") as f:
+        meta = {k: float(v) for k, v in next(csv.DictReader(f)).items()}
+    fit_ref = np.array(
+        [float(x) for x in (_BAM_ES / case / "fitted.csv").read_text().split()])
+    m = hea.models.bam("y ~ z + s(x, k=12)", df, family=fam_factory(),
+                       method="REML")
+    np.testing.assert_allclose(m.sp[0], meta["sp"], rtol=1e-4)
+    np.testing.assert_allclose(m.sigma_squared, meta["scale"], rtol=1e-4)
+    np.testing.assert_allclose(m.edf_total, meta["edf_total"], rtol=1e-4)
+    np.testing.assert_allclose(m.fitted_values, fit_ref, rtol=1e-4, atol=1e-6)

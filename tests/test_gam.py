@@ -2235,13 +2235,16 @@ def test_id_singleton_is_noop():
     )
 
 
-def test_bam_still_rejects_id():
-    """bam has no L-matrix layer yet — must refuse rather than silently
-    fit independent λ's."""
+def test_bam_links_id_like_gam():
+    """bam grew gam's working-θ L-matrix layer (plan P9): id= now shares ONE
+    working λ across the linked smooths instead of being rejected. Full
+    mgcv-bam parity (sp/edf/criterion/fitted) lives in test_bam.py §7; here we
+    just confirm bam links the same structure gam does on the shared fixture."""
     from hea.models.bam import bam
     d = _id_linked_data()
-    with pytest.raises(NotImplementedError, match="id="):
-        bam("y ~ s(x0, id=1) + s(x1, id=1)", d)
+    m = bam("y ~ s(x0, id=1) + s(x1, id=1)", d, method="REML")
+    assert len(m.sp) == 1 and len(m._slots) == 2
+    np.testing.assert_allclose(np.exp(m._rho_hat), [m.sp[0]] * 2, rtol=1e-12)
 
 
 def test_sz_id_kwarg_still_allowed():
