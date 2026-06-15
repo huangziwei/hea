@@ -41,6 +41,10 @@ fast = [
 
 [dependency-groups]
 dev = [
+    # Builds the hea._rs Rust extension via rust/rebuild.sh while build-backend is
+    # still hatchling (so `uv sync` doesn't uninstall it). Drops out once the
+    # release flip to build-backend = "maturin" lands. CI pins maturin==1.14.0.
+    "maturin>=1.14.0",
     "flake8>=7.1.1",
     "pytest>=9.0.3",
     "pytest-xdist>=3.6",
