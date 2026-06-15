@@ -5278,6 +5278,569 @@ class shash(GeneralFamily):
                 f"'identity'), b={self.b:g}, phiPen={self.phiPen:g})")
 
 
+class SoftplusLink(Link):
+    """mgcv's bounded "log" link for the log-scale LP of the location-
+    scale families ``gammals``/``gumbls`` (gamlss.r:2689-2718).
+
+    Inverse ``g⁻¹(η) = b + log(1 + exp(η − b))`` keeps the (already
+    log-scale) parameter strictly above ``b`` — the smooth softplus
+    floor mgcv substitutes for a plain ``log`` link when the user asks
+    for ``link="log"`` on the scale LP. The display ``name`` is ``"log"``
+    (mgcv stores the user's ``paste(link)`` string, so summaries print
+    ``log``), exactly as in mgcv. ``d2link``..``d4link`` are mgcv's
+    verbatim η-derivative forms; ``mu_eta`` is the logistic
+    ``σ(η − b)``."""
+    name = "log"
+
+    def __init__(self, b: float = -7.0):
+        self.b = float(b)
+
+    def link(self, mu):
+        # inverse of the softplus: η = b + log(exp(μ−b) − 1), with the
+        # μ−b→0 floor and the μ−b→∞ linear asymptote (gamlss.r:2692-2695).
+        mu = np.asarray(mu, dtype=float)
+        eps = np.finfo(float).eps
+        mub = mu - self.b
+        eta = mub.copy()
+        ii = mub < eps
+        eta[ii] = np.log(eps) + self.b
+        jj = mub > -np.log(eps)
+        eta[jj] = mub[jj] + self.b
+        kk = ~jj & ~ii
+        eta[kk] = np.log(np.expm1(mub[kk])) + self.b
+        return eta
+
+    def linkinv(self, eta):
+        eta = np.asarray(eta, dtype=float)
+        mu = eta.copy()
+        ii = eta - self.b < -np.log(np.finfo(float).eps)
+        mu[ii] = self.b + np.log1p(np.exp(eta[ii] - self.b))
+        return mu
+
+    def mu_eta(self, eta):
+        # dμ/dη = σ(η − b) (gamlss.r:2697-2701, stable logistic).
+        return expit(np.asarray(eta, dtype=float) - self.b)
+
+    def d2link(self, mu):
+        mu = np.asarray(mu, dtype=float)
+        mub = mu - self.b
+        mub = np.exp(-mub * np.sign(mub))
+        return -mub / (mub - 1.0) ** 2
+
+    def d3link(self, mu):
+        mu = np.asarray(mu, dtype=float)
+        mub = mu - self.b
+        sm = -np.sign(mub)
+        mub = np.exp(mub * sm)
+        return sm * (mub + mub ** 2) / (mub - 1.0) ** 3
+
+    def d4link(self, mu):
+        mu = np.asarray(mu, dtype=float)
+        mub = mu - self.b
+        sm = -np.sign(mub)
+        mub = np.exp(mub * sm)
+        return sm * (mub + 4.0 * mub ** 2 + mub ** 3) / (mub - 1.0) ** 4
+
+
+class gammals(GeneralFamily):
+    """Gamma location-scale general family — mgcv ``gammals()``
+    (gamlss.r:2664-2980). Two linear predictors, parameterized in **log
+    mean** and **log scale**: LP1 is ``log μ`` (identity link only,
+    so η₁ ≡ log μ); LP2 is ``log σ`` through the bounded
+    :class:`SoftplusLink` (``link="log"``, σ > exp(b)) or identity.
+
+        log f = (log y − μ − θ)/e^θ − log y − y·e^{−θ−μ} − log Γ(e^{−θ})
+
+    where ``μ = η₁`` (log mean) and ``θ = η₂`` (log scale); the gamma
+    has shape ``1/φ`` and scale ``mean·φ`` with ``φ = e^θ`` (so
+    Var = mean²·φ). The fitted matrix is reported as ``(mean, log σ)``
+    — :meth:`postproc` exponentiates the mean column, mirroring mgcv's
+    in-place ``fitted.values[,1] <- exp(...)``.
+    """
+    name = "gammals"
+    scale_known = True
+    n_theta = 0
+    n_lp = 2
+    available_derivs = 2
+
+    def __init__(self, link: tuple[str, str] = ("identity", "log"),
+                 b: float = -7.0):
+        mu_link, scale_link = link
+        if mu_link != "identity":
+            raise ValueError(
+                'only the "identity" link is available for the mean '
+                "parameter of gammals"
+            )
+        if scale_link not in ("identity", "log"):
+            raise ValueError(
+                f'link "{scale_link}" not available for the scale '
+                "parameter of gammals; available links are "
+                "('identity', 'log')"
+            )
+        links = [
+            IdentityLink(),
+            SoftplusLink(b=b) if scale_link == "log" else IdentityLink(),
+        ]
+        self.b = float(b)
+        self._scale_link_name = scale_link
+        self.tri = trind_generator(2)
+        super().__init__(links)
+
+    def ll(self, y, X, coef, wt=None, *, lpi, offset=None, deriv: int = 0,
+           d1b=None, d2b=None, fh=None, D=None) -> dict:
+        y = np.asarray(y, dtype=float)
+        X = np.asarray(X, dtype=float)
+        coef = np.asarray(coef, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        eta = X[:, jj[0]] @ coef[jj[0]]
+        etat = X[:, jj[1]] @ coef[jj[1]]
+        if offset is not None:
+            if offset[0] is not None:
+                eta = eta + offset[0]
+            if len(offset) > 1 and offset[1] is not None:
+                etat = etat + offset[1]
+        mu = self.links[0].linkinv(eta)     # log mean
+        th = self.links[1].linkinv(etat)    # log sigma
+
+        eth = np.exp(-th)
+        logy = np.log(y)
+        ethmu = np.exp(-th - mu)
+        ethmuy = ethmu * y
+        etlymt = eth * (logy - mu - th)
+        n = y.shape[0]
+
+        l0 = etlymt - logy - ethmuy - gammaln(eth)
+        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        if deriv == 0:
+            return ret
+
+        digeth = digamma(eth)
+        l1 = np.column_stack([
+            ethmuy - eth,                              # lm
+            -etlymt + ethmuy + eth * digeth - eth,     # lt
+        ])
+        eth2 = eth * eth
+        treth = polygamma(1, eth)                       # trigamma
+        l2 = np.column_stack([
+            -ethmuy,                                            # lmm
+            eth - ethmuy,                                       # lmt
+            etlymt - ethmuy - treth * eth2 - eth * digeth + 2.0 * eth,  # ltt
+        ])
+        ig1 = np.column_stack([self.links[0].mu_eta(eta),
+                               self.links[1].mu_eta(etat)])
+        g2 = np.column_stack([self.links[0].d2link(mu),
+                              self.links[1].d2link(th)])
+        l3 = l4 = g3 = g4 = None
+        g3eth = None
+        if deriv > 1:
+            eth3 = eth2 * eth
+            g3eth = polygamma(2, eth)
+            l3 = np.column_stack([
+                ethmuy,            # lmmm
+                ethmuy,            # lmmt
+                ethmuy - eth,      # lmtt
+                (-etlymt + ethmuy + g3eth * eth3 + 3.0 * treth * eth2
+                 + eth * digeth - 3.0 * eth),          # lttt
+            ])
+            g3 = np.column_stack([self.links[0].d3link(mu),
+                                  self.links[1].d3link(th)])
+        if deriv > 3:
+            eth4 = eth3 * eth
+            l4 = np.column_stack([
+                -ethmuy,           # lmmmm
+                -ethmuy,           # lmmmt
+                -ethmuy,           # lmmtt
+                eth - ethmuy,      # lmttt
+                (etlymt - ethmuy - polygamma(3, eth) * eth4
+                 - 6.0 * g3eth * eth3 - 7.0 * treth * eth2
+                 - eth * digeth + 4.0 * eth),          # ltttt
+            ])
+            g4 = np.column_stack([self.links[0].d4link(mu),
+                                  self.links[1].d4link(th)])
+
+        tri = self.tri
+        de = gamlss_etamu(l1, l2, l3, l4, ig1, g2, g3, g4,
+                          tri["i2"], tri["i3"], tri["i4"], deriv - 1)
+        gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
+                       l3=de["l3"], i3=tri["i3"], l4=de["l4"],
+                       i4=tri["i4"], d1b=d1b, d2b=d2b, deriv=deriv - 1,
+                       fh=fh, D=D)
+        ret.update(gh)
+        return ret
+
+    def initialize_coef(self, y, X, lpi, E=None, offset=None,
+                        use_unscaled: bool = False) -> np.ndarray:
+        """gammals ``initialize`` (gamlss.r:2855-2920, dense branch):
+        regress ``log(y + max(y)·eps^0.75)`` on LP1's columns, then the
+        link-transformed log absolute residuals on LP2's, with ``E`` as
+        regularizer (``use_unscaled`` ⇒ stacked LS, else ``pen.reg``)."""
+        y = np.asarray(y, dtype=float)
+        X = np.asarray(X, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        p = X.shape[1]
+        if E is None:
+            E = np.zeros((0, p))
+        start = np.zeros(p)
+
+        def _reg(cols, target):
+            if use_unscaled:
+                xa = np.vstack([X[:, cols], E[:, cols]])
+                b, *_ = np.linalg.lstsq(
+                    xa, np.concatenate([target, np.zeros(E.shape[0])]),
+                    rcond=None)
+                b[~np.isfinite(b)] = 0.0
+                return b
+            return _pen_reg(X[:, cols], E[:, cols], target)
+
+        yt1 = np.log(y + float(np.max(y)) * np.finfo(float).eps ** 0.75)
+        if offset is not None and offset[0] is not None:
+            yt1 = yt1 - offset[0]
+        b1 = _reg(jj[0], yt1)
+        start[jj[0]] = b1
+        lres1 = self.links[1].link(np.log(np.abs(
+            y - self.links[0].linkinv(X[:, jj[0]] @ b1))))
+        if offset is not None and len(offset) > 1 and offset[1] is not None:
+            lres1 = lres1 - offset[1]
+        start[jj[1]] = _reg(jj[1], lres1)
+        return start
+
+    def postproc(self, y, prior_weights, fitted, linear_predictors,
+                 offset, intercept) -> dict:
+        """gammals postproc (gamlss.r:2737-2742): exponentiate the mean
+        column of the fitted matrix (LP1 carries log μ) and compute the
+        null deviance ``2·Σ((y−ȳ)/ȳ − log(y/ȳ))·e^{−θ̂}``."""
+        y = np.asarray(y, dtype=float)
+        fitted = np.asarray(fitted, dtype=float)
+        my = float(np.mean(y))
+        nd = 2.0 * float(np.sum(
+            ((y - my) / my - np.log(y / my)) * np.exp(-fitted[:, 1])))
+        new_fitted = fitted.copy()
+        new_fitted[:, 0] = np.exp(fitted[:, 0])
+        return {"null_deviance": nd, "fitted": new_fitted}
+
+    def rd(self, rng, mu, wt, scale):
+        """gammals rd (gamlss.r:2922-2926): ``rgamma(n, 1/φ, mean·φ)``
+        with ``φ = e^{θ̂}``. ``mu`` is the (n, 2) fitted matrix
+        (mean, log σ); the mean column is already exponentiated by
+        :meth:`postproc`."""
+        mu = np.asarray(mu, dtype=float)
+        phi = np.exp(mu[:, 1])
+        return rng.gamma(1.0 / phi, mu[:, 0] * phi)
+
+    def residuals(self, y, fitted, type: str = "deviance") -> np.ndarray:
+        """gammals residuals (gamlss.r:2721-2735). ``fitted`` is the
+        (n, 2) matrix (mean, log σ) — col 0 already exponentiated by
+        :meth:`postproc`."""
+        if type not in ("deviance", "pearson", "response"):
+            raise ValueError(
+                "type must be one of 'deviance', 'pearson', 'response' "
+                f"for gammals residuals; got {type!r}")
+        y = np.asarray(y, dtype=float)
+        fitted = np.asarray(fitted, dtype=float)
+        mu = fitted[:, 0]
+        rho = fitted[:, 1]
+        if type == "response":
+            return y - mu
+        if type == "pearson":
+            return (y - mu) / (np.exp(rho * 0.5) * mu)
+        rsd = 2.0 * ((y - mu) / mu - np.log(y / mu)) * np.exp(-rho)
+        return np.sqrt(np.maximum(0.0, rsd)) * np.sign(y - mu)
+
+    def predict(self, *, se: bool = False, eta=None, y=None, X=None,
+                beta=None, off=None, Vb=None, lpi=None) -> dict:
+        """gammals ``family$predict`` (gamlss.r:2928-2969): response-scale
+        fit ``(mean, σ) = (e^{η₁}, g₂⁻¹(η₂))`` with delta-method SEs.
+        Either ``eta`` (the (n, 2) linear-predictor matrix) or
+        ``{X, beta, off, Vb, lpi}`` is supplied; returns ``{"fit": (n, 2)
+        [, "se_fit": (n, 2)]}``."""
+        if eta is None:
+            X = np.asarray(X, dtype=float)
+            beta = np.asarray(beta, dtype=float)
+            nobs = X.shape[0]
+            eta = np.zeros((nobs, 2))
+            ve = np.zeros((nobs, 2))
+            for i in range(2):
+                cols = np.asarray(lpi[i], dtype=int)
+                Xi = X[:, cols]
+                eta[:, i] = Xi @ beta[cols]
+                if off is not None and off[i] is not None:
+                    eta[:, i] = eta[:, i] + off[i]
+                if se:
+                    Vii = Vb[np.ix_(cols, cols)]
+                    ve[:, i] = np.maximum(
+                        0.0, np.einsum("ij,jk,ik->i", Xi, Vii, Xi))
+        else:
+            eta = np.asarray(eta, dtype=float)
+            se = False
+        gamma = np.column_stack([np.exp(eta[:, 0]),
+                                 self.links[1].linkinv(eta[:, 1])])
+        if se:
+            vp = np.column_stack([
+                np.abs(gamma[:, 0]) * np.sqrt(ve[:, 0]),
+                np.abs(self.links[1].mu_eta(eta[:, 1])) * np.sqrt(ve[:, 1]),
+            ])
+            return {"fit": gamma, "se_fit": vp}
+        return {"fit": gamma}
+
+    def __repr__(self):
+        return (f"gammals(link=('identity', {self._scale_link_name!r}), "
+                f"b={self.b:g})")
+
+
+_EULER = 0.5772156649015328606065121   # Euler-Mascheroni constant (gumbls)
+
+
+class gumbls(GeneralFamily):
+    """Gumbel location-scale general family — mgcv ``gumbls()``
+    (gamlss.r:2985-3329). Two linear predictors: LP1 the Gumbel
+    **location** μ (identity link only, η₁ ≡ μ); LP2 ``log β`` (the
+    Gumbel scale) through the bounded :class:`SoftplusLink`
+    (``link="log"``) or identity.
+
+        log f = −β − z − e^{−z},   z = (y − μ)·e^{−β}
+
+    where ``β = η₂`` is log-scale. The fitted matrix is reported as
+    ``(mean, log β)`` with ``mean = μ + e^{β}·γ`` (γ = Euler's constant)
+    — :meth:`postproc` adds the correction in place, mirroring mgcv's
+    ``fitted.values[,1] <- ... + exp(...)·.euler``. Null deviance is NA
+    (mgcv leaves it undefined for gumbls).
+    """
+    name = "gumbls"
+    scale_known = True
+    n_theta = 0
+    n_lp = 2
+    available_derivs = 2
+
+    def __init__(self, link: tuple[str, str] = ("identity", "log"),
+                 b: float = -7.0):
+        mu_link, scale_link = link
+        if mu_link != "identity":
+            raise ValueError(
+                'only the "identity" link is available for the location '
+                "parameter of gumbls"
+            )
+        if scale_link not in ("identity", "log"):
+            raise ValueError(
+                f'link "{scale_link}" not available for the scale '
+                "parameter of gumbls; available links are "
+                "('identity', 'log')"
+            )
+        links = [
+            IdentityLink(),
+            SoftplusLink(b=b) if scale_link == "log" else IdentityLink(),
+        ]
+        self.b = float(b)
+        self._scale_link_name = scale_link
+        self.tri = trind_generator(2)
+        super().__init__(links)
+
+    def ll(self, y, X, coef, wt=None, *, lpi, offset=None, deriv: int = 0,
+           d1b=None, d2b=None, fh=None, D=None) -> dict:
+        y = np.asarray(y, dtype=float)
+        X = np.asarray(X, dtype=float)
+        coef = np.asarray(coef, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        eta = X[:, jj[0]] @ coef[jj[0]]
+        etab = X[:, jj[1]] @ coef[jj[1]]
+        if offset is not None:
+            if offset[0] is not None:
+                eta = eta + offset[0]
+            if len(offset) > 1 and offset[1] is not None:
+                etab = etab + offset[1]
+        mu = self.links[0].linkinv(eta)      # Gumbel location
+        beta = self.links[1].linkinv(etab)   # log scale
+
+        eb = np.exp(-beta)
+        z = (y - mu) * eb
+        ez = np.exp(-z)
+        l0 = -beta - z - ez
+        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        if deriv == 0:
+            return ret
+
+        lz = ez - 1.0
+        zm = -eb
+        zb = -z
+        l1 = np.column_stack([lz * zm, lz * zb - 1.0])
+        lzz = -ez
+        zmb = eb
+        zbb = z
+        l2 = np.column_stack([
+            lzz * zm ** 2,
+            lzz * zm * zb + lz * zmb,
+            lzz * zb ** 2 + lz * zbb,
+        ])
+        ig1 = np.column_stack([self.links[0].mu_eta(eta),
+                               self.links[1].mu_eta(etab)])
+        g2 = np.column_stack([self.links[0].d2link(mu),
+                              self.links[1].d2link(beta)])
+        l3 = l4 = g3 = g4 = None
+        if deriv > 1:
+            lzzz = ez
+            zbbb = -z
+            zmbb = -eb
+            l3 = np.column_stack([
+                lzzz * zm ** 3,
+                lzzz * zm ** 2 * zb + 2.0 * lzz * zm * zmb,
+                (lzzz * zb ** 2 * zm + 2.0 * lzz * zb * zmb
+                 + lzz * zbb * zm + lz * zmbb),
+                lzzz * zb ** 3 + 3.0 * lzz * zb * zbb + lz * zbbb,
+            ])
+            g3 = np.column_stack([self.links[0].d3link(mu),
+                                  self.links[1].d3link(beta)])
+        if deriv > 3:
+            lzzzz = -ez
+            zbbbb = z
+            zmbbb = eb
+            l4 = np.column_stack([
+                lzzzz * zm ** 4,
+                lzzzz * zm ** 3 * zb + 3.0 * lzzz * zm ** 2 * zmb,
+                (lzzzz * zm ** 2 * zb ** 2 + 4.0 * lzzz * zm * zb * zmb
+                 + lzzz * zm ** 2 * zbb + 2.0 * lzz * zmb ** 2
+                 + 2.0 * lzz * zm * zmbb),
+                (lzzzz * zb ** 3 * zm + 3.0 * lzzz * zb ** 2 * zmb
+                 + 3.0 * lzzz * zm * zb * zbb + 3.0 * lzz * zmb * zbb
+                 + 3.0 * lzz * zb * zmbb + lzz * zm * zbbb + lz * zmbbb),
+                (lzzzz * zb ** 4 + 6.0 * lzzz * zb ** 2 * zbb
+                 + 3.0 * lzz * zbb ** 2 + 4.0 * lzz * zb * zbbb
+                 + lz * zbbbb),
+            ])
+            g4 = np.column_stack([self.links[0].d4link(mu),
+                                  self.links[1].d4link(beta)])
+
+        tri = self.tri
+        de = gamlss_etamu(l1, l2, l3, l4, ig1, g2, g3, g4,
+                          tri["i2"], tri["i3"], tri["i4"], deriv - 1)
+        gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
+                       l3=de["l3"], i3=tri["i3"], l4=de["l4"],
+                       i4=tri["i4"], d1b=d1b, d2b=d2b, deriv=deriv - 1,
+                       fh=fh, D=D)
+        ret.update(gh)
+        return ret
+
+    def initialize_coef(self, y, X, lpi, E=None, offset=None,
+                        use_unscaled: bool = False) -> np.ndarray:
+        """gumbls ``initialize`` (gamlss.r:3236-3264, dense branch): two
+        passes — regress y on LP1, then ``g₂(½log((y−μ̂)²) − ¼)`` on LP2,
+        then re-regress ``y − 0.57721·e^{η₂}`` on LP1."""
+        y = np.asarray(y, dtype=float)
+        X = np.asarray(X, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        p = X.shape[1]
+        if E is None:
+            E = np.zeros((0, p))
+        start = np.zeros(p)
+
+        def _reg(cols, target):
+            if use_unscaled:
+                xa = np.vstack([X[:, cols], E[:, cols]])
+                b, *_ = np.linalg.lstsq(
+                    xa, np.concatenate([target, np.zeros(E.shape[0])]),
+                    rcond=None)
+                b[~np.isfinite(b)] = 0.0
+                return b
+            return _pen_reg(X[:, cols], E[:, cols], target)
+
+        yt1 = y.copy()
+        if offset is not None and offset[0] is not None:
+            yt1 = yt1 - offset[0]
+        start[jj[0]] = _reg(jj[0], yt1)
+        lres1 = self.links[1].link(
+            np.log((y - self.links[0].linkinv(X[:, jj[0]] @ start[jj[0]]))
+                   ** 2) / 2.0 - 0.25)
+        if offset is not None and len(offset) > 1 and offset[1] is not None:
+            lres1 = lres1 - offset[1]
+        start[jj[1]] = _reg(jj[1], lres1)
+        eta2 = X[:, jj[1]] @ start[jj[1]]
+        if offset is not None and len(offset) > 1 and offset[1] is not None:
+            eta2 = eta2 + offset[1]
+        yt1 = yt1 - 0.57721 * np.exp(self.links[1].linkinv(eta2))
+        start[jj[0]] = _reg(jj[0], yt1)
+        return start
+
+    def postproc(self, y, prior_weights, fitted, linear_predictors,
+                 offset, intercept) -> dict:
+        """gumbls postproc (gamlss.r:3063-3073): convert the location
+        column to the **mean** ``μ + e^{β}·γ`` in place; null deviance
+        is left undefined (NA)."""
+        fitted = np.asarray(fitted, dtype=float)
+        new_fitted = fitted.copy()
+        new_fitted[:, 0] = fitted[:, 0] + np.exp(fitted[:, 1]) * _EULER
+        return {"fitted": new_fitted}
+
+    def rd(self, rng, mu, wt, scale):
+        """gumbls rd (gamlss.r:3268-3275): inverse-CDF Gumbel draws
+        ``mean − β·(γ + log(−log U))`` with ``β = e^{fitted[:,1]}``;
+        ``mu[:,0]`` is the mean (post-:meth:`postproc`)."""
+        mu = np.asarray(mu, dtype=float)
+        u = rng.uniform(size=mu.shape[0])
+        beta = np.exp(mu[:, 1])
+        return mu[:, 0] - beta * (_EULER + np.log(-np.log(u)))
+
+    def residuals(self, y, fitted, type: str = "deviance") -> np.ndarray:
+        """gumbls residuals (gamlss.r:3043-3061). ``fitted`` is the
+        (n, 2) matrix (mean, log β); the location is recovered as
+        ``mean − e^{β}·γ``."""
+        if type not in ("deviance", "pearson", "response"):
+            raise ValueError(
+                "type must be one of 'deviance', 'pearson', 'response' "
+                f"for gumbls residuals; got {type!r}")
+        y = np.asarray(y, dtype=float)
+        fitted = np.asarray(fitted, dtype=float)
+        mean = fitted[:, 0]
+        beta = np.exp(fitted[:, 1])
+        mu = mean - beta * _EULER
+        if type == "response":
+            return y - mean
+        if type == "pearson":
+            return (y - mean) / (np.pi * beta / np.sqrt(6.0))
+        z = (y - mu) / beta
+        rsd = 2.0 * (z + np.exp(-z) - 1.0)
+        return np.sqrt(np.maximum(0.0, rsd)) * np.sign(y - mu)
+
+    def predict(self, *, se: bool = False, eta=None, y=None, X=None,
+                beta=None, off=None, Vb=None, lpi=None) -> dict:
+        """gumbls ``family$predict`` (gamlss.r:3277-3318): returns the
+        (Gumbel **location**, log β) — mgcv does NOT add the Euler mean
+        correction here, so the response ``fit`` differs from the mean
+        column of ``fitted_values`` (a deliberate mgcv asymmetry). SEs
+        are delta-method; mgcv's gumbls uses ``ve[2]`` (a scalar-index
+        typo) for the scale SE — hea uses the correct per-row
+        ``ve[:,2]``."""
+        if eta is None:
+            X = np.asarray(X, dtype=float)
+            beta = np.asarray(beta, dtype=float)
+            nobs = X.shape[0]
+            eta = np.zeros((nobs, 2))
+            ve = np.zeros((nobs, 2))
+            for i in range(2):
+                cols = np.asarray(lpi[i], dtype=int)
+                Xi = X[:, cols]
+                eta[:, i] = Xi @ beta[cols]
+                if off is not None and off[i] is not None:
+                    eta[:, i] = eta[:, i] + off[i]
+                if se:
+                    Vii = Vb[np.ix_(cols, cols)]
+                    ve[:, i] = np.maximum(
+                        0.0, np.einsum("ij,jk,ik->i", Xi, Vii, Xi))
+        else:
+            eta = np.asarray(eta, dtype=float)
+            se = False
+        gamma = np.column_stack([eta[:, 0],
+                                 self.links[1].linkinv(eta[:, 1])])
+        if se:
+            vp = np.column_stack([
+                np.sqrt(ve[:, 0]),
+                np.abs(self.links[1].mu_eta(eta[:, 1])) * np.sqrt(ve[:, 1]),
+            ])
+            return {"fit": gamma, "se_fit": vp}
+        return {"fit": gamma}
+
+    def __repr__(self):
+        return (f"gumbls(link=('identity', {self._scale_link_name!r}), "
+                f"b={self.b:g})")
+
+
 def _coerce_response(y_series: pl.Series, family: "Family") -> np.ndarray:
     """Cast the response column to a numeric float array, with R's
     factor-response convention for :class:`Binomial`.
@@ -5339,7 +5902,8 @@ __all__ = [
     "Tweedie", "tw",
     "Scat", "scat",
     "nb",
-    "GeneralFamily", "gaulss", "twlss", "shash", "LogebLink",
+    "GeneralFamily", "gaulss", "twlss", "shash", "gammals", "gumbls",
+    "LogebLink", "SoftplusLink",
     "trind_generator", "gamlss_etamu", "gamlss_gH",
     "IdentityLink", "LogLink", "InverseLink",
     "SqrtLink", "LogitLink", "ProbitLink", "CauchitLink", "CloglogLink",

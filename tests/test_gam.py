@@ -5512,6 +5512,42 @@ def _twlss_fixture():
     return pl.DataFrame({"y": y, "x": x, "z": z, "w": w})
 
 
+def _gammals_fixture():
+    # Gamma location-scale data on R's set.seed(11) stream via hea.R.rng
+    # (bit-exact runif + the rust-backed rgamma), so the mgcv fit below is
+    # reproducible by a pure-R script:
+    #   set.seed(11); n<-250; x<-runif(n); z<-runif(n)
+    #   mean<-exp(0.5+sin(2*pi*x)); sigma<-exp(-1+0.6*z)
+    #   y<-rgamma(n, shape=1/sigma, scale=mean*sigma)
+    from hea.R.rng import RGenerator
+    gen = RGenerator(11)
+    n = 250
+    x = gen.uniform(size=n)
+    z = gen.uniform(size=n)
+    mean = np.exp(0.5 + np.sin(2 * np.pi * x))
+    sigma = np.exp(-1.0 + 0.6 * z)
+    y = gen.gamma(shape=1.0 / sigma, scale=mean * sigma)
+    return pl.DataFrame({"y": y, "x": x, "z": z})
+
+
+def _gumbls_fixture():
+    # Gumbel location-scale data on R's set.seed(13) stream via hea.R.rng:
+    # inverse-CDF draws (bit-exact runif), reproducible by:
+    #   set.seed(13); n<-250; x<-runif(n); z<-runif(n)
+    #   loc<-0.5+sin(2*pi*x); logbeta<- -0.5+0.4*z; u<-runif(n)
+    #   y<-loc - exp(logbeta)*log(-log(u))
+    from hea.R.rng import RGenerator
+    gen = RGenerator(13)
+    n = 250
+    x = gen.uniform(size=n)
+    z = gen.uniform(size=n)
+    loc = 0.5 + np.sin(2 * np.pi * x)
+    logbeta = -0.5 + 0.4 * z
+    u = gen.uniform(size=n)
+    y = loc - np.exp(logbeta) * np.log(-np.log(u))
+    return pl.DataFrame({"y": y, "x": x, "z": z})
+
+
 def test_twlss_through_gam_matches_mgcv():
     # R: gam(list(y ~ s(x) + w, ~ 1, ~ s(z)), family=twlss(),
     # method="REML") — available.derivs=0, so mgcv coerces the
@@ -5640,6 +5676,113 @@ def test_twlss_weighted_residuals_match_mgcv():
     r_un = twlss().residuals(yv, fit, type="deviance")
     r_wt = twlss().residuals(yv, fit, type="deviance", prior_weights=pw)
     np.testing.assert_allclose(r_wt, r_un * np.sqrt(pw), rtol=1e-12)
+
+
+def test_gammals_through_gam_matches_mgcv():
+    # R: gam(list(y ~ s(x), ~ s(z)), family=gammals(), method="REML") on
+    # the set.seed(11) fixture — gammals is available.derivs=2, so this
+    # drives the full outer Newton (REML1/REML2 ⇒ ll deriv 3/4) and the
+    # new family$predict hook (predict.gam, mgcv.r:3171-3198).
+    from hea.family import gammals
+
+    df = _gammals_fixture()
+    m = gam(["y ~ s(x)", "~ s(z)"], df, family=gammals(), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 376.9788523,
+                               rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.sp[0], 0.1010813233, rtol=1e-4)
+    # s(z) on the log-scale LP is a flat λ→∞ direction (R sp ≈ 2.4e4,
+    # edf ≈ 1): pin the direction, not the value (cf. twlss/shash).
+    assert m.sp[1] > 500.0
+    np.testing.assert_allclose(m.edf_total, 8.586757468, rtol=0, atol=2e-3)
+    # tp-basis eigenvector signs are build noise (cf. the fs record):
+    # pin |coef|; coef[0] (the log-mean intercept) is sign-fixed.
+    np.testing.assert_allclose(
+        np.abs(np.asarray(m._beta)[:4]),
+        np.abs([0.5351402153, 2.185161584, 0.1922625554, 0.1110607536]),
+        rtol=0, atol=1e-4)
+    # fitted matrix is (mean, log σ): col 0 exponentiated by postproc
+    # (gamlss.r:2739) — mgcv's object$fitted.values after the in-place
+    # rewrite. R: rows 1-2 = (4.5658, -0.3322), (1.8810, -0.7676).
+    np.testing.assert_allclose(
+        np.asarray(m.fitted_values)[:2],
+        [[4.56583108, -0.3321797963], [1.881021014, -0.7676485103]],
+        rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.deviance, 272.1383283, rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.null_deviance, 532.7823068, rtol=0,
+                               atol=1e-3)
+    np.testing.assert_allclose(np.asarray(m.Vp)[0, 0], 0.002131979348,
+                               rtol=0, atol=1e-6)
+
+    # family$predict hook: type="response" returns (mean, σ) — mean is
+    # e^{η₁}, NOT the per-LP linkinv — with delta-method SEs (R:
+    # predict(m, type="response", se.fit=TRUE)).
+    pr = m.predict(df[:3], se_fit=True)
+    np.testing.assert_allclose(
+        pr["fit"].to_numpy(),
+        [4.56583108, 1.881021014, 1.385835927], rtol=0, atol=1e-5)
+    np.testing.assert_allclose(
+        pr["fit.1"].to_numpy(),
+        [-0.3321797963, -0.7676485103, -0.3454239398], rtol=0, atol=1e-5)
+    np.testing.assert_allclose(
+        pr["se.fit"].to_numpy(),
+        [0.4412707648, 0.4300296758, 0.1464255231], rtol=0, atol=1e-5)
+    np.testing.assert_allclose(
+        pr["se.fit.1"].to_numpy(),
+        [0.149232104, 0.1060445032, 0.1444384638], rtol=0, atol=1e-5)
+    # response prediction on training rows == the (exp'd-mean) fitted col.
+    pr_all = m.predict(type="response")
+    np.testing.assert_allclose(
+        pr_all["fit"].to_numpy(), np.asarray(m.fitted_values)[:, 0],
+        rtol=0, atol=1e-9)
+    # link-scale prediction returns η (log mean / log σ), unhooked.
+    pr_lnk = m.predict(df[:2], type="link")
+    np.testing.assert_allclose(
+        pr_lnk["fit"].to_numpy(),
+        np.log(np.asarray(m.fitted_values)[:2, 0]), rtol=0, atol=1e-9)
+    m.summary()
+
+
+def test_gumbls_through_gam_matches_mgcv():
+    # R: gam(list(y ~ s(x), ~ s(z)), family=gumbls(), method="REML") on
+    # the set.seed(13) Gumbel fixture — derivs=2 full Newton; rides the
+    # same SoftplusLink + predict-hook engine path as gammals.
+    from hea.family import gumbls
+
+    df = _gumbls_fixture()
+    m = gam(["y ~ s(x)", "~ s(z)"], df, family=gumbls(), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 355.4765655,
+                               rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.sp[0], 0.1329424295, rtol=1e-3)
+    assert m.sp[1] > 500.0          # flat λ→∞ direction (s(z) on log β)
+    np.testing.assert_allclose(m.edf_total, 8.327469431, rtol=0, atol=2e-3)
+    np.testing.assert_allclose(
+        np.abs(np.asarray(m._beta)[:4]),
+        np.abs([0.4872208906, -1.993640641, 0.2718586452, 0.1469972102]),
+        rtol=0, atol=1e-3)
+    # fitted matrix is (mean, log β): col 0 = location + e^β·γ, added in
+    # place by postproc (gamlss.r:3070). R: rows 1-2 of fitted.values.
+    np.testing.assert_allclose(
+        np.asarray(m.fitted_values)[:2],
+        [[-0.09536002225, -0.2589687628], [1.836117586, -0.4267671006]],
+        rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.deviance, 291.9068221, rtol=0, atol=1e-2)
+    assert np.isnan(m.null_deviance)      # mgcv leaves gumbls null dev NA
+    np.testing.assert_allclose(np.asarray(m.Vp)[0, 0], 0.00270728526,
+                               rtol=0, atol=1e-5)
+
+    # gumbls predict returns the (location, log β) — NOT the mean —
+    # deliberately differing from the mean column of fitted_values
+    # (mgcv's gumbls predict omits the Euler correction).
+    pr = m.predict(df[:3], se_fit=True)
+    np.testing.assert_allclose(
+        pr["fit"].to_numpy(),
+        [-0.5408822784, 1.45941768, 1.0853551], rtol=0, atol=1e-4)
+    np.testing.assert_allclose(
+        pr["fit.1"].to_numpy(),
+        [-0.2589687628, -0.4267671006, -0.2658441114], rtol=0, atol=1e-4)
+    # the asymmetry: predict response fit[0] (location) ≠ fitted mean[0].
+    assert abs(float(pr["fit"][0]) - float(m.fitted_values[0, 0])) > 0.1
+    m.summary()
 
 
 def test_shash_through_gam_matches_mgcv():

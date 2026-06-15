@@ -4298,19 +4298,26 @@ class gam:
         # problem for general families.
         self.scale = 1.0
         self.sigma_squared = 1.0
-        self.residuals = family.residuals(
-            y, fit["fitted_values"], **self._family_residuals_kw())
-        # deviance: family postproc override when provided, else
-        # estimate.gam's generic Σ deviance-residuals² (mgcv.r:2429,
-        # via the postproc hook at mgcv.r:2092-2098). r² machinery is
-        # skipped for general families (no.r.sq) — null_deviance only
-        # exists when the family's postproc supplies one (gaulss does).
+        # mgcv runs the family postproc on the converged fit
+        # (estimate.gam, mgcv.r:2092-2098): family-specific deviance /
+        # null-deviance and, for families whose fitted matrix needs a
+        # final transform, an in-place `fitted.values` rewrite (gammals
+        # exponentiates its log-mean column, gamlss.r:2739). hea returns
+        # that as an optional `fitted` key, applied BEFORE residuals so
+        # residuals_of/qq see the same matrix mgcv does. r² is skipped
+        # (no.r.sq); null_deviance exists only when postproc supplies it.
         pp = family.postproc(
             y, prior_weights=self._wt, fitted=fit["fitted_values"],
             linear_predictors=fit["linear_predictors"],
             offset=md.offsets, intercept=True,
         )
+        fitted_override = pp.pop("fitted", None)
+        if fitted_override is not None:
+            self.fitted_values = np.asarray(fitted_override, dtype=float)
+            self.fitted = self.fitted_values
         self._postproc = pp
+        self.residuals = family.residuals(
+            y, self.fitted_values, **self._family_residuals_kw())
         self.deviance = (float(pp["deviance"])
                          if pp.get("deviance") is not None
                          else float(np.sum(np.asarray(self.residuals,
@@ -7338,11 +7345,22 @@ class gam:
 
         K = len(md.lpi)
         beta = np.asarray(self._beta, dtype=float)
-        fits = []
-        ses = []
         V = self.Vp
         if unconditional:
             V = self.Vc        # general fits are always REML
+        # mgcv's predict.gam dispatches response-scale prediction to the
+        # family's own `predict` hook when it defines one (mgcv.r:3171-3198):
+        # e.g. gammals returns (mean, σ) — its mean is e^{η₁}, not the
+        # per-LP linkinv — with delta-method SEs, and a hook may emit a
+        # different column count than n_lp. Link/terms scales never use it.
+        fam_predict = getattr(self.family, "predict", None)
+        if type == "response" and fam_predict is not None:
+            ffv = fam_predict(se=se_fit, X=X_new, beta=beta, off=offs,
+                              Vb=V, lpi=md.lpi, y=None)
+            return self._general_response_frame(
+                ffv["fit"], ffv.get("se_fit") if se_fit else None)
+        fits = []
+        ses = []
         for j in range(K):
             cols = np.asarray(md.lpi[j], dtype=int)
             eta_j = X_new[:, cols] @ beta[cols]
@@ -7363,12 +7381,29 @@ class gam:
                 fits.append(eta_j)
                 if se_fit:
                     ses.append(se_j)
+        return self._general_response_frame(
+            np.column_stack(fits),
+            np.column_stack(ses) if se_fit else None)
+
+    @staticmethod
+    def _general_response_frame(fit, se) -> "pl.DataFrame":
+        """Pack a general-family prediction into hea's per-LP DataFrame
+        (``fit``, ``fit.{j}`` + ``se.fit``/``se.fit.{j}``). Accepts a
+        1-D or (n, c) ``fit`` — a ``family.predict`` hook may return a
+        different column count than ``n_lp`` (mgcv.r:3180)."""
+        fit = np.asarray(fit, dtype=float)
+        if fit.ndim == 1:
+            fit = fit[:, None]
+        c = fit.shape[1]
         cols_out: dict = {}
-        for j in range(K):
-            cols_out["fit" if j == 0 else f"fit.{j}"] = fits[j]
-        if se_fit:
-            for j in range(K):
-                cols_out["se.fit" if j == 0 else f"se.fit.{j}"] = ses[j]
+        for j in range(c):
+            cols_out["fit" if j == 0 else f"fit.{j}"] = fit[:, j]
+        if se is not None:
+            se = np.asarray(se, dtype=float)
+            if se.ndim == 1:
+                se = se[:, None]
+            for j in range(c):
+                cols_out["se.fit" if j == 0 else f"se.fit.{j}"] = se[:, j]
         return pl.DataFrame(cols_out)
 
     def vis(

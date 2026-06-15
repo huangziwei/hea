@@ -1283,6 +1283,255 @@ def test_gaulss_initialize_and_residuals():
 
 
 # ---------------------------------------------------------------------------
+# gammals (Gamma location-scale, gamlss.r:2664-2980) — mgcv 1.9-4 oracle.
+# Inputs reproduce R's set.seed(21) stream via hea.R.rng (bit-exact rnorm),
+# so gammals()$ll evaluated in R at the identical (X, y, coef, d1b, d2b)
+# matches hea below; the bounded "log" scale link is SoftplusLink.
+# ---------------------------------------------------------------------------
+
+def _gammals_oracle_inputs():
+    from hea.R.rng import RGenerator
+    gen = RGenerator(21)            # == R set.seed(21)
+    n = 40
+    x1 = gen.normal(0, 1, n)
+    x2 = gen.normal(0, 1, n)
+    e = gen.normal(0, 1, n)
+    X = np.column_stack([np.ones(n), x1, np.ones(n), x2])
+    y = np.exp(0.6 + 0.4 * x1 + 0.25 * e)          # positive gamma response
+    coef = np.array([0.5, 0.3, -0.8, 0.2])
+    d1b = gen.normal(0, 1, 4 * 2).reshape((4, 2), order="F") * 0.3
+    d2b = gen.normal(0, 1, 4 * 3).reshape((4, 3), order="F") * 0.2
+    lpi = [np.arange(0, 2), np.arange(2, 4)]
+    return X, y, coef, d1b, d2b, lpi
+
+
+def test_gammals_ll_matches_mgcv_oracle():
+    # Every gammals()$ll output at deriv 1/2/3/4, pinned to the live
+    # R values (Rscript: gammals()$ll on the set.seed(21) inputs above).
+    from scipy.linalg import cholesky
+    from hea.family import gammals
+    X, y, coef, d1b, d2b, lpi = _gammals_oracle_inputs()
+    fam = gammals()
+    p = 4
+
+    r1 = fam.ll(y, X, coef, lpi=lpi, deriv=1)
+    np.testing.assert_allclose(r1["l"], -50.1287641294, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        r1["lb"], [10.4292062387, 11.368308003, -18.2209272134,
+                   -1.5743414661], rtol=0, atol=1e-8)
+    np.testing.assert_allclose(r1["lbb"][0, 0], -99.9024955545,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(float(np.sum(np.abs(r1["lbb"]))),
+                               311.139546477, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(r1["lbb"][0, 2], -10.4058942597,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(r1["lbb"][2, 2], -4.74349105844,
+                               rtol=0, atol=1e-8)
+
+    Hp = -r1["lbb"] + np.eye(p) * 0.5
+    r2 = fam.ll(y, X, coef, lpi=lpi, deriv=2, d1b=d1b,
+                fh=np.linalg.inv(Hp))
+    np.testing.assert_allclose(
+        r2["d1H"], [-0.0843074527955, -0.640211644011], rtol=0, atol=1e-9)
+
+    r3 = fam.ll(y, X, coef, lpi=lpi, deriv=3, d1b=d1b)
+    np.testing.assert_allclose(float(np.sum(np.abs(r3["d1H"][0]))),
+                               136.804494605, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(float(np.sum(np.abs(r3["d1H"][1]))),
+                               193.697974752, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(r3["d1H"][0][0, 0], -12.4965794289,
+                               rtol=0, atol=1e-8)
+
+    D = 1.0 / np.sqrt(np.diag(Hp))
+    R = cholesky(D[:, None] * Hp * D[None, :], lower=False)
+    r4 = fam.ll(y, X, coef, lpi=lpi, deriv=4, d1b=d1b, d2b=d2b,
+                fh=(R, np.arange(p)), D=D)
+    np.testing.assert_allclose(
+        r4["trHid2H"],
+        [-2.07694884277, 3.65876948038, -9.30036542487], rtol=0, atol=1e-8)
+    # eigen fh variant agrees with the Cholesky one.
+    w, V = np.linalg.eigh(D[:, None] * Hp * D[None, :])
+    r4e = fam.ll(y, X, coef, lpi=lpi, deriv=4, d1b=d1b, d2b=d2b,
+                 fh={"values": w, "vectors": V}, D=D)
+    np.testing.assert_allclose(r4e["trHid2H"], r4["trHid2H"], atol=1e-9)
+
+
+def test_gammals_ll_derivatives_match_fd():
+    from hea.family import gammals
+    X, y, coef, d1b, _, lpi = _gammals_oracle_inputs()
+    fam = gammals()
+    r1 = fam.ll(y, X, coef, lpi=lpi, deriv=1)
+    h = 1e-6
+    p = coef.size
+    fd_lb = np.zeros(p)
+    fd_lbb = np.zeros((p, p))
+    for k in range(p):
+        cp = coef.copy(); cp[k] += h
+        cm = coef.copy(); cm[k] -= h
+        fd_lb[k] = (fam.ll(y, X, cp, lpi=lpi)["l"]
+                    - fam.ll(y, X, cm, lpi=lpi)["l"]) / (2 * h)
+        fd_lbb[:, k] = (fam.ll(y, X, cp, lpi=lpi, deriv=1)["lb"]
+                        - fam.ll(y, X, cm, lpi=lpi, deriv=1)["lb"]) / (2 * h)
+    np.testing.assert_allclose(r1["lb"], fd_lb, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(r1["lbb"], fd_lbb, rtol=0, atol=1e-5)
+    # d1H along d1b directions: H(β + h·d1b_j) FD.
+    r3 = fam.ll(y, X, coef, lpi=lpi, deriv=3, d1b=d1b)
+    for j in range(d1b.shape[1]):
+        fdH = (fam.ll(y, X, coef + h * d1b[:, j], lpi=lpi, deriv=1)["lbb"]
+               - fam.ll(y, X, coef - h * d1b[:, j], lpi=lpi,
+                        deriv=1)["lbb"]) / (2 * h)
+        np.testing.assert_allclose(r3["d1H"][j], fdH, rtol=0, atol=1e-4)
+
+
+def test_gammals_initialize_residuals_and_link():
+    from hea.family import gammals, SoftplusLink
+    X, y, coef, _, _, lpi = _gammals_oracle_inputs()
+    fam = gammals()
+    start = fam.initialize_coef(y, X, lpi)
+    assert start.shape == (4,) and np.all(np.isfinite(start))
+    # residuals on the (mean, log σ) fitted matrix (cols as postproc
+    # leaves them): deviance/pearson/response forms (gamlss.r:2721-2735).
+    mu = np.array([2.0, 3.0, 1.5])
+    rho = np.array([-0.5, 0.2, -1.0])
+    yy = np.array([2.2, 2.5, 1.7])
+    fitted = np.column_stack([mu, rho])
+    np.testing.assert_allclose(fam.residuals(yy, fitted, type="response"),
+                               yy - mu, atol=0)
+    np.testing.assert_allclose(
+        fam.residuals(yy, fitted, type="pearson"),
+        (yy - mu) / (np.exp(rho * 0.5) * mu), atol=0)
+    dexp = (np.sqrt(np.maximum(0.0, 2.0 * ((yy - mu) / mu
+            - np.log(yy / mu)) * np.exp(-rho))) * np.sign(yy - mu))
+    np.testing.assert_allclose(fam.residuals(yy, fitted), dexp, atol=0)
+    # SoftplusLink round-trips and floors at b.
+    lk = SoftplusLink(b=-7.0)
+    eta = np.linspace(-4, 6, 11)
+    np.testing.assert_allclose(lk.link(lk.linkinv(eta)), eta, atol=1e-9)
+    assert np.all(lk.linkinv(np.array([-50.0, 0.0, 50.0])) >= -7.0)
+    # identity is the only allowed mean link; scale link must be valid.
+    with pytest.raises(ValueError, match="mean parameter of gammals"):
+        gammals(link=("log", "log"))
+    with pytest.raises(ValueError, match="scale"):
+        gammals(link=("identity", "sqrt"))
+
+
+# ---------------------------------------------------------------------------
+# gumbls (Gumbel location-scale, gamlss.r:2985-3329) — mgcv 1.9-4 oracle,
+# set.seed(23) stream (bit-exact rnorm); shares SoftplusLink with gammals.
+# ---------------------------------------------------------------------------
+
+def _gumbls_oracle_inputs():
+    from hea.R.rng import RGenerator
+    gen = RGenerator(23)
+    n = 40
+    x1 = gen.normal(0, 1, n)
+    x2 = gen.normal(0, 1, n)
+    e = gen.normal(0, 1, n)
+    X = np.column_stack([np.ones(n), x1, np.ones(n), x2])
+    y = 1.0 + 0.5 * x1 + 0.8 * e            # Gumbel support is all of R
+    coef = np.array([0.5, 0.3, -0.4, 0.2])
+    d1b = gen.normal(0, 1, 4 * 2).reshape((4, 2), order="F") * 0.3
+    d2b = gen.normal(0, 1, 4 * 3).reshape((4, 3), order="F") * 0.2
+    lpi = [np.arange(0, 2), np.arange(2, 4)]
+    return X, y, coef, d1b, d2b, lpi
+
+
+def test_gumbls_ll_matches_mgcv_oracle():
+    from scipy.linalg import cholesky
+    from hea.family import gumbls
+    X, y, coef, d1b, d2b, lpi = _gumbls_oracle_inputs()
+    fam = gumbls()
+    p = 4
+
+    r1 = fam.ll(y, X, coef, lpi=lpi, deriv=1)
+    np.testing.assert_allclose(r1["l"], -57.8884083473, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        r1["lb"], [5.76161239291, 2.53486659051, 24.5358131205,
+                   -24.1421493465], rtol=0, atol=1e-8)
+    np.testing.assert_allclose(r1["lbb"][0, 0], -97.2333719429,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(float(np.sum(np.abs(r1["lbb"]))),
+                               963.95750617, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(r1["lbb"][0, 2], 38.9766385199,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(r1["lbb"][2, 2], -133.911330844,
+                               rtol=0, atol=1e-7)
+
+    Hp = -r1["lbb"] + np.eye(p) * 0.5
+    r2 = fam.ll(y, X, coef, lpi=lpi, deriv=2, d1b=d1b,
+                fh=np.linalg.inv(Hp))
+    np.testing.assert_allclose(
+        r2["d1H"], [3.07537910463, 5.94416984003], rtol=0, atol=1e-8)
+
+    r3 = fam.ll(y, X, coef, lpi=lpi, deriv=3, d1b=d1b)
+    np.testing.assert_allclose(float(np.sum(np.abs(r3["d1H"][0]))),
+                               1488.93342144, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(float(np.sum(np.abs(r3["d1H"][1]))),
+                               3114.42700999, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(r3["d1H"][0][0, 0], 81.6327066253,
+                               rtol=0, atol=1e-7)
+
+    D = 1.0 / np.sqrt(np.diag(Hp))
+    R = cholesky(D[:, None] * Hp * D[None, :], lower=False)
+    r4 = fam.ll(y, X, coef, lpi=lpi, deriv=4, d1b=d1b, d2b=d2b,
+                fh=(R, np.arange(p)), D=D)
+    np.testing.assert_allclose(
+        r4["trHid2H"],
+        [-9.32912949141, -9.22534206361, -22.1211490539], rtol=0,
+        atol=1e-7)
+
+
+def test_gumbls_ll_derivatives_match_fd():
+    from hea.family import gumbls
+    X, y, coef, d1b, _, lpi = _gumbls_oracle_inputs()
+    fam = gumbls()
+    r1 = fam.ll(y, X, coef, lpi=lpi, deriv=1)
+    h = 1e-6
+    p = coef.size
+    fd_lb = np.zeros(p)
+    fd_lbb = np.zeros((p, p))
+    for k in range(p):
+        cp = coef.copy(); cp[k] += h
+        cm = coef.copy(); cm[k] -= h
+        fd_lb[k] = (fam.ll(y, X, cp, lpi=lpi)["l"]
+                    - fam.ll(y, X, cm, lpi=lpi)["l"]) / (2 * h)
+        fd_lbb[:, k] = (fam.ll(y, X, cp, lpi=lpi, deriv=1)["lb"]
+                        - fam.ll(y, X, cm, lpi=lpi, deriv=1)["lb"]) / (2 * h)
+    np.testing.assert_allclose(r1["lb"], fd_lb, rtol=0, atol=1e-5)
+    np.testing.assert_allclose(r1["lbb"], fd_lbb, rtol=0, atol=1e-4)
+    r3 = fam.ll(y, X, coef, lpi=lpi, deriv=3, d1b=d1b)
+    for j in range(d1b.shape[1]):
+        fdH = (fam.ll(y, X, coef + h * d1b[:, j], lpi=lpi, deriv=1)["lbb"]
+               - fam.ll(y, X, coef - h * d1b[:, j], lpi=lpi,
+                        deriv=1)["lbb"]) / (2 * h)
+        np.testing.assert_allclose(r3["d1H"][j], fdH, rtol=0, atol=1e-3)
+
+
+def test_gumbls_residuals_and_validation():
+    from hea.family import gumbls
+    fam = gumbls()
+    euler = 0.5772156649015328606065121
+    # fitted matrix is (mean, log β); location = mean − β·γ.
+    mean = np.array([1.0, 2.0, 0.5])
+    lb = np.array([-0.3, 0.1, -0.6])
+    yy = np.array([1.2, 1.7, 0.8])
+    fitted = np.column_stack([mean, lb])
+    beta = np.exp(lb)
+    mu = mean - beta * euler
+    np.testing.assert_allclose(fam.residuals(yy, fitted, type="response"),
+                               yy - mean, atol=0)
+    np.testing.assert_allclose(
+        fam.residuals(yy, fitted, type="pearson"),
+        (yy - mean) / (np.pi * beta / np.sqrt(6.0)), atol=0)
+    z = (yy - mu) / beta
+    dexp = np.sqrt(np.maximum(0.0, 2.0 * (z + np.exp(-z) - 1.0))) \
+        * np.sign(yy - mu)
+    np.testing.assert_allclose(fam.residuals(yy, fitted), dexp, atol=0)
+    with pytest.raises(ValueError, match="location parameter of gumbls"):
+        gumbls(link=("log", "log"))
+
+
+# ---------------------------------------------------------------------------
 # twlss (Tweedie location-scale-shape, gamlss.r:2493-2662) — mgcv 1.9-4
 # oracle references generated live (R --vanilla): ldTweedie in the working
 # (rho, theta) parameterization with all.derivs=TRUE, tw.null.fit, and
