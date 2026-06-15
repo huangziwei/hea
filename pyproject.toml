@@ -2,15 +2,16 @@
 pythonpath = [".", "tests"]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
 
 # --- Rust extension (hea._rs), built from rust/ (crate hea-rs) by maturin -----
-# NOTE: build-backend stays hatchling during the spike so `uv run` keeps working
-# with the pure-Python fallback. The release switch to
-# `build-backend = "maturin"` happens once the wheel pipeline is verified.
-# `maturin build` reads the config below directly regardless of the active
-# PEP 517 backend.
+# maturin is the build backend: `pip install` / `uv build` / a git dependency on
+# this branch compile the Rust crate into the wheel, so source-build downstreams
+# get the native `hea._rs` kernels — not just the pure-Python fallback. Building
+# from source therefore needs the Rust toolchain; prebuilt wheels (CI, §2.4 of the
+# rust-port plan) let end users `pip install` with no Rust. In-session/sandbox
+# builds need CARGO_HOME redirected into the workdir (see rust/rebuild.sh).
 [tool.maturin]
 manifest-path = "rust/Cargo.toml"   # Rust crate (hea-rs) lives in rust/
 python-source = "."                  # Python package `hea` stays at repo root
@@ -41,9 +42,9 @@ fast = [
 
 [dependency-groups]
 dev = [
-    # Builds the hea._rs Rust extension via rust/rebuild.sh while build-backend is
-    # still hatchling (so `uv sync` doesn't uninstall it). Drops out once the
-    # release flip to build-backend = "maturin" lands. CI pins maturin==1.14.0.
+    # maturin is the build backend (see [build-system]); `uv sync` builds the
+    # hea._rs extension in editable mode and the `maturin develop` CLI lives here.
+    # CI pins maturin==1.14.0.
     "maturin>=1.14.0",
     "flake8>=7.1.1",
     "pytest>=9.0.3",
@@ -53,10 +54,6 @@ dev = [
     "nbconvert>=7.17.1",
     "ruff>=0.15.13",
 ]
-
-[tool.setuptools]
-packages = {find = {}}
-include-package-data = true
 
 [tool.ruff.lint]
 # ``from hea.R import *`` is the intentional ergonomic for the R-flavored
