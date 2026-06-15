@@ -35,6 +35,7 @@ hea.models.bam).
 from __future__ import annotations
 
 import math
+import platform
 
 import numpy as np
 from scipy.linalg.lapack import dpstrf
@@ -42,6 +43,31 @@ from scipy.linalg.lapack import dpstrf
 from ._dispatch import rs as _rs_mod
 
 __all__ = ["RMersenneTwister", "RGenerator"]
+
+
+# --- R-parity FMA, per-arch (mirrors rust `nmath::util::rfma`) ----------------
+# R's nmath is built `clang -O2` (no -ffp-contract flag); clang's default fuses
+# `a*b + c` within one C expression to fmadd ONLY where the ISA has baseline FMA
+# (aarch64: yes; generic x86-64: no). To stay 0-ulp to the *live* R on this
+# machine, fuse on arm64 and stay plain (two roundings) on x86-64 — where it is
+# byte-identical to the pre-fix code already green vs R on Intel. numpy has no fma
+# ufunc, so the vectorized path loops `math.fma` via frompyfunc (correct; slower —
+# this is the pure-Python fallback, where correctness > speed).
+_R_FMA = platform.machine().lower() in ("arm64", "aarch64") and hasattr(math, "fma")
+if _R_FMA:
+    def _rfma(a, b, c):
+        return math.fma(a, b, c)
+
+    _rfma_ufunc = np.frompyfunc(math.fma, 3, 1)
+
+    def _rfma_vec(a, b, c):
+        return _rfma_ufunc(a, b, c).astype(np.float64)
+else:
+    def _rfma(a, b, c):
+        return a * b + c
+
+    def _rfma_vec(a, b, c):
+        return a * b + c
 
 
 def _make_impl(seed):
@@ -122,10 +148,12 @@ _QN_F = (2.04426310338993978564e-15, 1.4215117583164458887e-7,
          0.59983220655588793769, 1.0)
 
 
-def _qn_horner(r: float, c: tuple) -> float:
+def _qn_horner(r, c, fma=_rfma):
+    # `((c[0]*r + c[1])*r + …)` — R fuses each step to fmadd on arm64. `fma` is
+    # `_rfma` (scalar) or `_rfma_vec` (array); both per-arch.
     v = c[0]
     for k in c[1:]:
-        v = v * r + k
+        v = fma(v, r, k)
     return v
 
 
@@ -141,7 +169,7 @@ def _qnorm5(p: float) -> float:
         return math.inf if p == 1.0 else math.nan
     q = p - 0.5
     if abs(q) <= 0.425:
-        r = 0.180625 - q * q
+        r = _rfma(-q, q, 0.180625)
         return q * _qn_horner(r, _QN_A) / _qn_horner(r, _QN_B)
     r = (1.0 - p) if q > 0.0 else p
     r = math.sqrt(-math.log(r))
@@ -165,15 +193,15 @@ def _qnorm5_vec(p: np.ndarray) -> np.ndarray:
     p = np.asarray(p, dtype=float)
     q = p - 0.5
     # Central: r = 0.180625 - q^2 (finite for all q).
-    rc = 0.180625 - q * q
-    val_c = q * _qn_horner(rc, _QN_A) / _qn_horner(rc, _QN_B)
+    rc = _rfma_vec(-q, q, 0.180625)
+    val_c = q * _qn_horner(rc, _QN_A, _rfma_vec) / _qn_horner(rc, _QN_B, _rfma_vec)
     # Tails: r = sqrt(-log(min(p, 1-p))).
     rt = np.sqrt(-np.log(np.where(q > 0.0, 1.0 - p, p)))
     rn = rt - 1.6
     rf = rt - 5.0
     val_t = np.where(rt <= 5.0,
-                     _qn_horner(rn, _QN_C) / _qn_horner(rn, _QN_D),
-                     _qn_horner(rf, _QN_E) / _qn_horner(rf, _QN_F))
+                     _qn_horner(rn, _QN_C, _rfma_vec) / _qn_horner(rn, _QN_D, _rfma_vec),
+                     _qn_horner(rf, _QN_E, _rfma_vec) / _qn_horner(rf, _QN_F, _rfma_vec))
     val_t = np.where(q < 0.0, -val_t, val_t)
     return np.where(np.abs(q) <= 0.425, val_c, val_t)
 
@@ -499,7 +527,7 @@ class RMersenneTwister:
             i += 1
             if u <= q[i]:
                 break
-        return a + umin * q[0]
+        return _rfma(umin, q[0], a)
 
     def rpois(self, mu: float) -> float:
         """R's ``rpois(mu)`` — rpois.c. Inversion for ``mu < 10`` (one uniform
@@ -715,7 +743,7 @@ class RMersenneTwister:
             if a == 0.0:
                 return 0.0
             e1 = 0.36787944117144232159    # exp(-1)
-            e = 1.0 + e1 * a
+            e = _rfma(e1, a, 1.0)
             while True:
                 p = e * self.unif_rand()
                 if p >= 1.0:
@@ -731,9 +759,9 @@ class RMersenneTwister:
         sqrt32 = 5.656854
         s2 = a - 0.5
         s = math.sqrt(s2)
-        d = sqrt32 - 12.0 * s
+        d = _rfma(-12.0, s, sqrt32)
         t = self.norm_rand()
-        x = s + 0.5 * t
+        x = _rfma(0.5, t, s)
         ret = x * x
         if t >= 0.0:
             return scale * ret
@@ -742,14 +770,13 @@ class RMersenneTwister:
             return scale * ret
         r = 1.0 / a
         q = self._GA_Q
-        q0 = ((((((q[6] * r + q[5]) * r + q[4]) * r + q[3]) * r + q[2]) * r
-               + q[1]) * r + q[0]) * r
+        q0 = _qn_horner(r, q[::-1]) * r
         if a <= 3.686:
-            b = 0.463 + s + 0.178 * s2
+            b = _rfma(0.178, s2, 0.463 + s)
             si = 1.235
-            c = 0.195 / s - 0.079 + 0.16 * s
+            c = _rfma(0.16, s, 0.195 / s - 0.079)
         elif a <= 13.022:
-            b = 1.654 + 0.0076 * s2
+            b = _rfma(0.0076, s2, 1.654)
             si = 1.68 / s + 0.275
             c = 0.062 / s + 0.024
         else:
@@ -760,28 +787,30 @@ class RMersenneTwister:
         if x > 0.0:
             v = t / (s + s)
             if abs(v) <= 0.25:
-                qq = q0 + 0.5 * t * t * ((((((aa[6] * v + aa[5]) * v + aa[4]) * v
-                     + aa[3]) * v + aa[2]) * v + aa[1]) * v + aa[0]) * v
+                qq = _rfma(0.5 * t * t * _qn_horner(v, aa[::-1]), v, q0)
             else:
-                qq = q0 - s * t + 0.25 * t * t + (s2 + s2) * math.log(1.0 + v)
+                qq = _rfma(s2 + s2, math.log(1.0 + v),
+                           _rfma(0.25 * t, t, _rfma(-s, t, q0)))
             if math.log(1.0 - u) <= qq:
                 return scale * ret
         while True:
             e = self.exp_rand()
             u = 2.0 * self.unif_rand() - 1.0
-            t = b + math.copysign(si * e, u)
+            # R: `t = b - si*e` / `b + si*e` (clang fuses to fma on arm64);
+            # copysign(si*e, u) rounds si*e first → diverges. Match R's fused form.
+            t = _rfma(-si, e, b) if u < 0.0 else _rfma(si, e, b)
             if t >= -0.71874483771719:
                 v = t / (s + s)
                 if abs(v) <= 0.25:
-                    qq = q0 + 0.5 * t * t * ((((((aa[6] * v + aa[5]) * v + aa[4]) * v
-                         + aa[3]) * v + aa[2]) * v + aa[1]) * v + aa[0]) * v
+                    qq = _rfma(0.5 * t * t * _qn_horner(v, aa[::-1]), v, q0)
                 else:
-                    qq = q0 - s * t + 0.25 * t * t + (s2 + s2) * math.log(1.0 + v)
+                    qq = _rfma(s2 + s2, math.log(1.0 + v),
+                               _rfma(0.25 * t, t, _rfma(-s, t, q0)))
                 if qq > 0.0:
                     w = math.expm1(qq)
-                    if c * abs(u) <= w * math.exp(e - 0.5 * t * t):
+                    if c * abs(u) <= w * math.exp(_rfma(-(0.5 * t), t, e)):
                         break
-        x = s + 0.5 * t
+        x = _rfma(0.5, t, s)
         return scale * x * x
 
     def rnbinom(self, size: float, mu: float) -> float:

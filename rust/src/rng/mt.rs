@@ -16,7 +16,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::nmath::norm::qnorm5_scalar;
-use crate::nmath::util::r_pow_di;
+use crate::nmath::util::{r_pow_di, rfma};
 
 // --- MT period parameters (RNG.c:650-654) -----------------------------------
 const N: usize = 624;
@@ -148,7 +148,7 @@ impl RsMt {
                 break;
             }
         }
-        a + umin * q
+        rfma(umin, q, a)
     }
 
     /// R's `R_unif_index(dn)` (REJECTION) — integer in [0, dn).
@@ -177,6 +177,17 @@ impl RsMt {
         }
         (v & ((1u64 << bits) - 1)) as i64
     }
+}
+
+/// Horner with R-parity FMA (see `nmath::util::rfma`): `((c[0]*x+c[1])*x+…)`.
+/// Used for rgamma's GD `q0`/`a()` series, fused to match R's clang on arm64.
+#[inline]
+fn horner(x: f64, c: &[f64]) -> f64 {
+    let mut v = c[0];
+    for &k in &c[1..] {
+        v = rfma(v, x, k);
+    }
+    v
 }
 
 // Cheng's v/w step shared by rbeta's BB and BC branches (rbeta.c).
@@ -552,7 +563,7 @@ impl RsMt {
                 return 0.0;
             }
             let e1 = 0.36787944117144232159; // exp(-1)
-            let e = 1.0 + e1 * a;
+            let e = rfma(e1, a, 1.0);
             loop {
                 let p = e * self.next_unif();
                 if p >= 1.0 {
@@ -572,9 +583,9 @@ impl RsMt {
         let sqrt32 = 5.656854;
         let s2 = a - 0.5;
         let s = s2.sqrt();
-        let d = sqrt32 - 12.0 * s;
+        let d = rfma(-12.0, s, sqrt32);
         let t0 = self.next_norm();
-        let x0 = s + 0.5 * t0;
+        let x0 = rfma(0.5, t0, s);
         let ret = x0 * x0;
         if t0 >= 0.0 {
             return scale * ret;
@@ -584,18 +595,17 @@ impl RsMt {
             return scale * ret;
         }
         let r = 1.0 / a;
-        let q0 = ((((((GA_Q[6] * r + GA_Q[5]) * r + GA_Q[4]) * r + GA_Q[3]) * r + GA_Q[2]) * r
-            + GA_Q[1])
-            * r
-            + GA_Q[0])
-            * r;
+        let q0 = horner(
+            r,
+            &[GA_Q[6], GA_Q[5], GA_Q[4], GA_Q[3], GA_Q[2], GA_Q[1], GA_Q[0]],
+        ) * r;
         let (b, si, c);
         if a <= 3.686 {
-            b = 0.463 + s + 0.178 * s2;
+            b = rfma(0.178, s2, 0.463 + s);
             si = 1.235;
-            c = 0.195 / s - 0.079 + 0.16 * s;
+            c = rfma(0.16, s, 0.195 / s - 0.079);
         } else if a <= 13.022 {
-            b = 1.654 + 0.0076 * s2;
+            b = rfma(0.0076, s2, 1.654);
             si = 1.68 / s + 0.275;
             c = 0.062 / s + 0.024;
         } else {
@@ -606,14 +616,15 @@ impl RsMt {
         if x0 > 0.0 {
             let v = t0 / (s + s);
             let qq = if v.abs() <= 0.25 {
-                q0 + 0.5 * t0 * t0
-                    * ((((((GA_A[6] * v + GA_A[5]) * v + GA_A[4]) * v + GA_A[3]) * v + GA_A[2]) * v
-                        + GA_A[1])
-                        * v
-                        + GA_A[0])
-                    * v
+                rfma(
+                    0.5 * t0
+                        * t0
+                        * horner(v, &[GA_A[6], GA_A[5], GA_A[4], GA_A[3], GA_A[2], GA_A[1], GA_A[0]]),
+                    v,
+                    q0,
+                )
             } else {
-                q0 - s * t0 + 0.25 * t0 * t0 + (s2 + s2) * (1.0 + v).ln()
+                rfma(s2 + s2, (1.0 + v).ln(), rfma(0.25 * t0, t0, rfma(-s, t0, q0)))
             };
             if (1.0 - u0).ln() <= qq {
                 return scale * ret;
@@ -622,24 +633,26 @@ impl RsMt {
         loop {
             let e = self.next_exp();
             let u = 2.0 * self.next_unif() - 1.0;
-            let t = b + (si * e).copysign(u);
+            // R: `t = b - si*e` / `b + si*e` — clang fuses `b ± si*e` to fma on
+            // arm64. copysign(si*e, u) rounds si*e first (two roundings) → 4-ulp off.
+            let t = if u < 0.0 { rfma(-si, e, b) } else { rfma(si, e, b) };
             if t >= -0.71874483771719 {
                 let v = t / (s + s);
                 let qq = if v.abs() <= 0.25 {
-                    q0 + 0.5 * t * t
-                        * ((((((GA_A[6] * v + GA_A[5]) * v + GA_A[4]) * v + GA_A[3]) * v + GA_A[2])
-                            * v
-                            + GA_A[1])
-                            * v
-                            + GA_A[0])
-                        * v
+                    rfma(
+                        0.5 * t
+                            * t
+                            * horner(v, &[GA_A[6], GA_A[5], GA_A[4], GA_A[3], GA_A[2], GA_A[1], GA_A[0]]),
+                        v,
+                        q0,
+                    )
                 } else {
-                    q0 - s * t + 0.25 * t * t + (s2 + s2) * (1.0 + v).ln()
+                    rfma(s2 + s2, (1.0 + v).ln(), rfma(0.25 * t, t, rfma(-s, t, q0)))
                 };
                 if qq > 0.0 {
                     let w = qq.exp_m1();
-                    if c * u.abs() <= w * (e - 0.5 * t * t).exp() {
-                        let x = s + 0.5 * t;
+                    if c * u.abs() <= w * rfma(-(0.5 * t), t, e).exp() {
+                        let x = rfma(0.5, t, s);
                         return scale * x * x;
                     }
                 }
