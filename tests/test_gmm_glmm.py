@@ -1092,7 +1092,8 @@ _GLMER_PHASE6_POISSON_REF = {
 
 
 def test_glmer_phase6_attrs_match_lme4_poisson():
-    """Every Phase 6 attribute on a Poisson fit matches lme4 at ≤ 1e-9."""
+    """Every Phase 6 attribute on a Poisson fit matches lme4 — well-determined
+    quantities at ≤1e-7; Hessian-derived se/t/vcov at ≤1e-5 (flat-optimum drift)."""
     from hea.models.gmm import gmm
     from hea.family import Poisson as PoissonFamily
 
@@ -1127,17 +1128,20 @@ def test_glmer_phase6_attrs_match_lme4_poisson():
     np.testing.assert_allclose(m.AIC, r["aic"], atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m.BIC, r["bic"], atol=1e-7, rtol=1e-7)
     assert m.sigma == pytest.approx(r["sigma"])
-    # SE(β̂) and t-values. Hessian-based vcov is computed by deriv12
-    # (central differences, δ=1e-4) on the Stage-1 closure, so the FD
-    # formula ``(f+ − 2f₀ + f−)/δ²`` divides a ~3e-9-scale second difference
-    # by 1e-8 — about 11 digits of catastrophic cancellation. For
-    # well-conditioned columns the noise is far below H_jj and the SE
-    # carries it cleanly. For this n≈70 fit the floor lands at ~1e-7 rel.
-    np.testing.assert_allclose(m._se_beta, r["se_beta"], atol=1e-9, rtol=1e-6)
-    np.testing.assert_allclose(m.t_values.row(0), r["t_value"], atol=1e-7, rtol=1e-6)
-    # vcov_beta — full p×p matrix. Same FP-arithmetic floor as SE; the
-    # near-zero off-diagonal (~3.4e-5) carries the FD floor as ~1.6e-9 abs.
-    np.testing.assert_allclose(m._vcov_beta_arr, r["vcov"], atol=5e-9, rtol=1e-6)
+    # SE(β̂), t-values and vcov are all derived from the Hessian-based vcov,
+    # computed by deriv12 (central differences, δ=1e-4) on the Stage-1 closure:
+    # the FD formula ``(f+ − 2f₀ + f−)/δ²`` divides a ~3e-9-scale second
+    # difference by 1e-8 — ~11 digits of catastrophic cancellation. That FD
+    # floor sits ON TOP OF the glmer flat-optimum θ̂-wander, which differs across
+    # BLAS/LAPACK builds (CI Linux OpenBLAS vs the reference); the vcov, being an
+    # inverse Hessian, amplifies it. A measured CI flip on vcov[0,0] (≈0.105) was
+    # 1.7e-6 rel — so this Hessian-derived TRIO (se/t/vcov) is pinned at
+    # rtol=1e-5 (≈6× margin), distinct from the well-determined quantities above
+    # which stay at 1e-7. (T4 — bit-exact reference-BLAS linalg — would remove
+    # this cross-platform drift; held for now.)
+    np.testing.assert_allclose(m._se_beta, r["se_beta"], atol=1e-9, rtol=1e-5)
+    np.testing.assert_allclose(m.t_values.row(0), r["t_value"], atol=1e-7, rtol=1e-5)
+    np.testing.assert_allclose(m._vcov_beta_arr, r["vcov"], atol=5e-9, rtol=1e-5)
     # Variance components: SD per bar.
     np.testing.assert_allclose(m.sd_re["g"], r["sd_re_g"], atol=1e-9, rtol=1e-7)
     # method string.
