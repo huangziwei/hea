@@ -90,6 +90,7 @@ def gam_control(
     edge_correct: bool | float = False,
     efs_lspmax: float = 15.0,
     efs_tol: float = 0.1,
+    efs_maxit: int = 200,
     idLinksBases: bool = True,
     scalePenalty: bool = True,
     nthreads: int = 1,
@@ -108,7 +109,14 @@ def gam_control(
     controls, ``scale_est`` ("fletcher"/"pearson"/"deviance",
     gam.fit3.r:596-606), ``edge_correct`` (was a gam() argument;
     mgcv keeps it in control), ``efs_lspmax``/``efs_tol`` (general-
-    family EFS). ``rank_tol`` is accepted but the fit path overrides it
+    family EFS). ``efs_maxit`` caps the EFS outer loop (mgcv's
+    ``efsud`` hard-codes ``for (iter in 1:200)``, gam.fit4.r:1493);
+    it defaults to **200 to preserve mgcv parity** and is a hea-only
+    knob for native fits of hard multi-LP families (≥2 flat shape
+    directions) that genuinely need more iterations to satisfy
+    ``efs_tol`` — raising it makes hea diverge from mgcv, which still
+    stops at 200, so leave it at 200 for cross-engine work.
+    ``rank_tol`` is accepted but the fit path overrides it
     to eps·100 exactly like mgcv (gam.fit3.r:133 — the knob only feeds
     the unported magic path); ``nthreads``/``keepData``/``trace`` are
     accepted no-ops. Unported knobs raise (never silent): non-zero
@@ -159,6 +167,8 @@ def gam_control(
         )
     if efs_tol <= 0:
         efs_tol = 0.1                       # mgcv's silent reset
+    if not (np.isscalar(efs_maxit) and efs_maxit > 0):
+        raise ValueError("efs_maxit (EFS iteration cap) must be > 0")
     nt = dict(newton or {})
     newton_full = {
         "conv_tol": float(nt.pop("conv_tol", 1e-6)),
@@ -185,6 +195,7 @@ def gam_control(
         "edge_correct": edge_correct,
         "efs_lspmax": float(efs_lspmax),
         "efs_tol": float(efs_tol),
+        "efs_maxit": int(efs_maxit),
         "idLinksBases": True,
         "scalePenalty": True,
         "nthreads": int(nthreads),
@@ -4228,11 +4239,13 @@ class gam:
                 Mp=Mp, start=self._g5["start"],
                 epsilon=self._control["epsilon"],
                 efs_lspmax=self._control["efs_lspmax"],
-                efs_tol=self._control["efs_tol"])
+                efs_tol=self._control["efs_tol"],
+                efs_maxit=self._control["efs_maxit"])
             self._g5["fit"] = fit_efs
             self._g5["start"] = fit_efs["coefficients"]
             self._outer_info = {
-                "conv": ("iteration limit reached" if it_efs == 200
+                "conv": ("iteration limit reached"
+                         if it_efs == self._control["efs_maxit"]
                          else "full convergence"),
                 "iter": it_efs,
             }
@@ -11889,7 +11902,8 @@ def _gam_fit5(X, y, lsp, sl: _Sl, *, family, lpi, weights=None,
 def _efsud(X, y, lsp, sl: _Sl, sl_setup: _Sl, *, family, lpi,
            weights=None, offsets=None, Mp: int = -1, start=None,
            epsilon: float = 1e-7, efs_lspmax: float = 15.0,
-           efs_tol: float = 0.1) -> tuple[dict, np.ndarray, int]:
+           efs_tol: float = 0.1,
+           efs_maxit: int = 200) -> tuple[dict, np.ndarray, int]:
     """mgcv ``efsud`` (gam.fit4.r:1479-1569): the extended
     Fellner-Schall outer loop for general families. Every gam.fit5
     call runs at deriv=0, so the family only ever needs ``ll`` with
@@ -11899,7 +11913,12 @@ def _efsud(X, y, lsp, sl: _Sl, sl_setup: _Sl, *, family, lpi,
     ÷2 contraction step control and the two stop rules (EFS step small
     + REML flat over 3 steps; or log-lik change < 100·ε·|l| — mgcv's
     ``control$eps`` PARTIAL-MATCHES gam.control's ``epsilon`` in R, no
-    eps field exists).
+    eps field exists). The outer cap ``efs_maxit`` mirrors mgcv's
+    hard-coded ``for (iter in 1:200)`` (gam.fit4.r:1493) and defaults
+    to 200; it is exposed only so hea-native fits of families with two
+    or more flat shape directions (which can need >200 EFS steps to
+    satisfy ``efs_tol``) can converge — keep it at 200 for mgcv
+    cross-engine parity.
 
     ``sl`` is the fitting penalty object (each fit's ldetS updates its
     λ state in place); ``sl_setup`` must be a pristine Sl.setup copy
@@ -11917,10 +11936,10 @@ def _efsud(X, y, lsp, sl: _Sl, sl_setup: _Sl, *, family, lpi,
                          deriv=0, start=st, gamma=1.0, epsilon=epsilon)
 
     fit = fit_at(lsp, start)
-    score_hist = np.zeros(200)
+    score_hist = np.zeros(efs_maxit)
     old_ll = None
     it = 0
-    for it in range(1, 201):
+    for it in range(1, efs_maxit + 1):
         start = fit["coefficients"]
         L_f, piv, ipiv = fit["L"], fit["piv"], fit["ipiv"]
         D = np.asarray(fit["D"], dtype=float)

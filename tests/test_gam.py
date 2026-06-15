@@ -5141,6 +5141,52 @@ def test_optimizer_knob_efs_and_validation():
     assert m_def.optimizer == ("outer", "newton")
 
 
+def test_efs_maxit_control_caps_outer_loop():
+    # hea-only knob: the EFS outer-loop cap (mgcv hard-codes
+    # ``for (iter in 1:200)`` in efsud, gam.fit4.r:1493). Default is
+    # 200 — identical to mgcv — so cross-engine parity is unchanged;
+    # the knob exists only for hea-native fits of hard multi-LP
+    # families that need >200 EFS steps to satisfy efs_tol.
+    from hea.family import gaulss
+    from hea.models.gam import gam_control
+
+    df = _fit5_fixture()
+    forms = ["y ~ s(x) + w", "~ s(z)"]
+
+    # default (200) converges in 5 steps (the gaulss-efs pin); a
+    # generous cap raising the ceiling above the natural convergence
+    # point is INERT — byte-identical fit, same iter, same conv flag.
+    # This is the parity guarantee: efs_maxit only matters when the
+    # loop would otherwise run past it.
+    m_def = gam(forms, df, family=gaulss(), method="REML",
+                optimizer="efs")
+    assert m_def.outer_info["conv"] == "full convergence"
+    assert m_def.outer_info["iter"] == 5
+    m_big = gam(forms, df, family=gaulss(), method="REML",
+                optimizer="efs", control={"efs_maxit": 500})
+    _assert_fp_equiv(m_big._beta, m_def._beta)
+    _assert_fp_equiv(m_big.sp, m_def.sp)
+    assert m_big.outer_info["conv"] == "full convergence"
+    assert m_big.outer_info["iter"] == 5
+
+    # a cap below the natural convergence point BINDS: the loop stops
+    # at exactly efs_maxit and reports mgcv's "iteration limit
+    # reached" conv message (the same string surfaced at iter==200).
+    m_cap = gam(forms, df, family=gaulss(), method="REML",
+                optimizer="efs", control={"efs_maxit": 3})
+    assert m_cap.outer_info["conv"] == "iteration limit reached"
+    assert m_cap.outer_info["iter"] == 3
+
+    # validation: a non-positive cap is rejected at gam.control intake
+    # (mirrors maxit's "must be > 0"), both via gam.control directly
+    # and through the gam() control= revalidation path.
+    with pytest.raises(ValueError, match="efs_maxit"):
+        gam_control(efs_maxit=0)
+    with pytest.raises(ValueError, match="efs_maxit"):
+        gam(forms, df, family=gaulss(), method="REML",
+            optimizer="efs", control={"efs_maxit": -1})
+
+
 def test_general_family_authoring_contract():
     # The GeneralFamily authoring contract (the documented public
     # extension API, mgcv general.family analog), frozen as a test: a
@@ -5491,6 +5537,287 @@ def test_general_family_authoring_contract():
     assert label == "s(x)" and ref_df > 0
     assert np.isfinite(stat) and 0.0 <= p_cc <= 1.0
     m_cc.summary()
+
+
+def test_general_family_newton_reml_nlp4_robustness():
+    # The general-family Newton/REML path exercised and verified at
+    # n_lp == 4 — the regime the gevlss (n_lp == 3) and _TLSS (n_lp ==
+    # 3) tests cannot reach. trind_generator/gamlss_etamu/gamlss_gH are
+    # all K-generic, but the FULLY-MIXED fourth-derivative branch
+    # (family.py: ``d4 = l4 * ig1*ig1*ig1*ig1`` for four DISTINCT
+    # params, the mo==1 case) needs four distinct LP indices, so it is
+    # STRUCTURALLY unreachable below K==4 — no other test in the suite
+    # touches it. This drives a from-scratch 4-LP family on the full
+    # Newton-REML path (gam.fit5 to ll deriv 4) and validates: (a) the
+    # K=4 l1/l2 chain by FD, (b) the all-distinct etamu l3/l4 columns
+    # both against their closed form (index plumbing) and an
+    # independent η-space mixed-difference stencil (numeric), and (c)
+    # an end-to-end fit that itself reaches ll(deriv=4) at K==4.
+    from itertools import (combinations_with_replacement,
+                           product as iproduct)
+    from hea.family import (GeneralFamily, IdentityLink, LogLink, Link,
+                            gamlss_etamu, gamlss_gH, trind_generator)
+
+    K = 4
+    AQ = np.ones(K)        # per-parameter quadratic curvature
+    DQ = 1.0               # quartic floor -> l0 bounded above
+    CC = 0.5               # all-distinct coupling (|CC|/4 < DQ)
+
+    class _TanhLink(Link):
+        # bounded shape link (cf. the consumer families' (-1,1) link)
+        name = "tanh"
+
+        def link(self, mu):
+            return np.arctanh(np.asarray(mu, float))
+
+        def linkinv(self, eta):
+            eps = np.finfo(float).eps
+            return np.clip(np.tanh(np.asarray(eta, float)),
+                           -1 + eps, 1 - eps)
+
+        def mu_eta(self, eta):
+            a = np.exp(-2.0 * np.abs(np.asarray(eta, float)))
+            return np.maximum(4.0 * a / (1.0 + a) ** 2,
+                              np.finfo(float).eps)
+
+        def d2link(self, mu):
+            mu = np.asarray(mu, float)
+            return 2.0 * mu / (1.0 - mu * mu) ** 2
+
+        def d3link(self, mu):
+            mu = np.asarray(mu, float)
+            return (2.0 + 6.0 * mu * mu) / (1.0 - mu * mu) ** 3
+
+        def d4link(self, mu):
+            mu = np.asarray(mu, float)
+            return 24.0 * mu * (1.0 + mu * mu) / (1.0 - mu * mu) ** 4
+
+    def _u(y, mus):
+        # u_k = mu_k - target; target_0 = y (LP1 tracks the response),
+        # the shape LPs target (1, 0, 0) inside each link's range
+        u = mus - np.array([0.0, 1.0, 0.0, 0.0])[None, :]
+        u[:, 0] = mus[:, 0] - y
+        return u
+
+    def _l0(y, mus):
+        # synthetic 4-LP quasi-log-likelihood, bounded above and smooth,
+        # with a NONZERO all-distinct 4th partial (the CC product term)
+        u = _u(y, mus)
+        return (-0.5 * (AQ[None, :] * u * u).sum(1)
+                - DQ * (u ** 4).sum(1) + CC * np.prod(u, axis=1))
+
+    def _partial(u, idx):
+        # exact mixed partial of _l0 w.r.t. the multi-index idx: the
+        # quadratic/quartic terms feed only PURE columns; the CC product
+        # (multilinear) feeds only DISTINCT-index columns
+        n = u.shape[0]
+        s = set(idx)
+        if len(idx) == 1:
+            k = idx[0]
+            prod = np.full(n, CC)
+            for j in range(K):
+                if j != k:
+                    prod = prod * u[:, j]
+            return -AQ[k] * u[:, k] - 4.0 * DQ * u[:, k] ** 3 + prod
+        if len(s) != len(idx):                 # some repeated index
+            if len(idx) == 2 and len(s) == 1:
+                return -AQ[idx[0]] - 12.0 * DQ * u[:, idx[0]] ** 2
+            if len(idx) == 3 and len(s) == 1:
+                return -24.0 * DQ * u[:, idx[0]]
+            if len(idx) == 4 and len(s) == 1:
+                return np.full(n, -24.0 * DQ)
+            return np.zeros(n)
+        missing = [j for j in range(K) if j not in s]   # all distinct
+        prod = np.full(n, CC)
+        for j in missing:
+            prod = prod * u[:, j]
+        return prod
+
+    class _K4(GeneralFamily):
+        name = "k4-dummy"
+        n_lp = 4
+        available_derivs = 2
+        scale_known = True
+        n_theta = 0
+
+        def __init__(self):
+            super().__init__([IdentityLink(), LogLink(),
+                              IdentityLink(), _TanhLink()])
+            self.tri = trind_generator(4)
+            self.seen = {"deriv": [], "lpi_cols": None}
+
+        def ll(self, y, X, coef, wt, *, lpi, offset=None, deriv=0,
+               d1b=None, d2b=None, fh=None, D=None):
+            self.seen["deriv"].append(deriv)
+            y = np.asarray(y, float)
+            X = np.asarray(X, float)
+            coef = np.asarray(coef, float)
+            jj = [np.asarray(ix, int) for ix in lpi]
+            self.seen["lpi_cols"] = sorted(
+                int(c) for ix in jj for c in ix)
+            etas = []
+            for j in range(K):
+                eta = X[:, jj[j]] @ coef[jj[j]]
+                if offset is not None and offset[j] is not None:
+                    eta = eta + offset[j]
+                etas.append(eta)
+            mus = np.column_stack([lnk.linkinv(e)
+                                   for lnk, e in zip(self.links, etas)])
+            w = (np.ones_like(y) if wt is None
+                 else np.asarray(wt, float))
+            ret = {"l": float(np.sum(w * _l0(y, mus)))}
+            if deriv == 0:
+                return ret
+            u = _u(y, mus)
+            packs = [list(combinations_with_replacement(range(K), m))
+                     for m in (1, 2, 3, 4)]
+            l1, l2, l3, l4 = (
+                np.column_stack([_partial(u, c) for c in cs]) * w[:, None]
+                for cs in packs)
+            ig1 = np.column_stack([lnk.mu_eta(e)
+                                   for lnk, e in zip(self.links, etas)])
+            g2 = np.column_stack([lnk.d2link(mus[:, k])
+                                  for k, lnk in enumerate(self.links)])
+            g3 = np.column_stack([lnk.d3link(mus[:, k])
+                                  for k, lnk in enumerate(self.links)])
+            g4 = np.column_stack([lnk.d4link(mus[:, k])
+                                  for k, lnk in enumerate(self.links)])
+            t = self.tri
+            de = gamlss_etamu(l1, l2, l3, l4, ig1, g2, g3, g4,
+                              t["i2"], t["i3"], t["i4"], deriv - 1)
+            if deriv > 1 and d1b is None:
+                # standalone high-deriv etamu inspection (the engine
+                # always supplies d1b on the fit path)
+                return {**ret, "_de": de, "_ig1": ig1, "_u": u}
+            gh = gamlss_gH(X, jj, de["l1"], de["l2"], t["i2"],
+                           l3=de["l3"], i3=t["i3"], l4=de["l4"],
+                           i4=t["i4"], d1b=d1b, d2b=d2b,
+                           deriv=deriv - 1, fh=fh, D=D)
+            ret.update(gh)
+            return ret
+
+        def initialize_coef(self, y, X, lpi, E=None, offset=None,
+                            use_unscaled=False):
+            y = np.asarray(y, float)
+            X = np.asarray(X, float)
+            jj = [np.asarray(ix, int) for ix in lpi]
+            n, p = X.shape
+            if E is None:
+                E = np.zeros((0, p))
+            start = np.zeros(p)
+            tgt0 = [float(np.median(y)), 1.0, 0.0, 0.0]
+            for j, lnk in enumerate(self.links):
+                target = np.full(n, float(lnk.link(tgt0[j])))
+                if offset is not None and offset[j] is not None:
+                    target = target - offset[j]
+                cols = jj[j]
+                xa = np.vstack([X[:, cols], E[:, cols]])
+                ta = np.concatenate([target, np.zeros(E.shape[0])])
+                b, *_ = np.linalg.lstsq(xa, ta, rcond=None)
+                start[cols] = np.where(np.isfinite(b), b, 0.0)
+            return start
+
+        def postproc(self, y, prior_weights, fitted,
+                     linear_predictors, offset, intercept):
+            y = np.asarray(y, float)
+            r0 = y - float(np.median(y))
+            return {"null_deviance": float(np.sum(r0 * r0))}
+
+        def residuals(self, y, fitted, type: str = "deviance"):
+            y = np.asarray(y, float)
+            fitted = np.asarray(fitted, float)
+            return y - fitted[:, 0]
+
+    # --- (a) FD validation of lb/lbb on a hand-built 4-LP design ---
+    fam = _K4()
+    rng = np.random.default_rng(7)
+    n = 36
+    Xs = np.hstack([np.ones((n, 1)), rng.normal(size=(n, 2)),   # LP1: 3
+                    np.ones((n, 1)), rng.normal(size=(n, 1)),   # LP2: 2
+                    np.ones((n, 1)),                            # LP3: 1
+                    np.ones((n, 1)), rng.normal(size=(n, 1))])  # LP4: 2
+    lpi = [np.arange(0, 3), np.arange(3, 5), np.arange(5, 6),
+           np.arange(6, 8)]
+    p = Xs.shape[1]
+    yv = rng.normal(size=n) * 0.5 + 0.3
+    coef = rng.normal(size=p) * 0.2
+    wt = np.ones(n)
+    base = fam.ll(yv, Xs, coef, wt, lpi=lpi, deriv=1)
+    h = 1e-6
+    fd_lb = np.empty(p)
+    fd_lbb = np.empty((p, p))
+    for k in range(p):
+        cp = coef.copy(); cm = coef.copy()
+        cp[k] += h; cm[k] -= h
+        fd_lb[k] = (fam.ll(yv, Xs, cp, wt, lpi=lpi, deriv=0)["l"]
+                    - fam.ll(yv, Xs, cm, wt, lpi=lpi,
+                             deriv=0)["l"]) / (2 * h)
+        fd_lbb[:, k] = (
+            fam.ll(yv, Xs, cp, wt, lpi=lpi, deriv=1)["lb"]
+            - fam.ll(yv, Xs, cm, wt, lpi=lpi, deriv=1)["lb"]) / (2 * h)
+    np.testing.assert_allclose(base["lb"], fd_lb, rtol=2e-5, atol=1e-7)
+    np.testing.assert_allclose(base["lbb"], 0.5 * (fd_lbb + fd_lbb.T),
+                               rtol=5e-5, atol=5e-6)
+
+    # --- (b) the K=4-only all-distinct etamu branch: closed form ---
+    dd = fam.ll(yv, Xs, coef, wt, lpi=lpi, deriv=4)
+    de, ig1, u = dd["_de"], dd["_ig1"], dd["_u"]
+    cols3 = list(combinations_with_replacement(range(K), 3))
+    cols4 = list(combinations_with_replacement(range(K), 4))
+    ad4 = cols4.index((0, 1, 2, 3))
+    ad3 = cols3.index((0, 1, 2))
+    # full chain rule of an all-distinct mixed partial is just the
+    # product of first-order link factors (no repeated index -> no
+    # g2/g3/g4 correction): l4=CC -> CC*prod(ig1); l3 -> CC*u_miss*ig1s
+    want4 = CC * ig1[:, 0] * ig1[:, 1] * ig1[:, 2] * ig1[:, 3]
+    want3 = CC * u[:, 3] * ig1[:, 0] * ig1[:, 1] * ig1[:, 2]
+    np.testing.assert_allclose(de["l4"][:, ad4], want4, rtol=0,
+                               atol=1e-12)
+    np.testing.assert_allclose(de["l3"][:, ad3], want3, rtol=0,
+                               atol=1e-12)
+    # independent numeric corroboration: a 16-point mixed central
+    # difference of l0 w.r.t. the four DISTINCT etas (wt == 1 here)
+    etas0 = np.column_stack([Xs[:, lpi[j]] @ coef[lpi[j]]
+                             for j in range(K)])
+    hs = 8e-3
+    acc = np.zeros(n)
+    for signs in iproduct((1, -1), repeat=K):
+        et = etas0 + hs * np.array(signs)[None, :]
+        mus = np.column_stack([lnk.linkinv(et[:, j])
+                               for j, lnk in enumerate(fam.links)])
+        acc += float(np.prod(signs)) * _l0(yv, mus)
+    np.testing.assert_allclose(de["l4"][:, ad4], acc / (2 * hs) ** 4,
+                               rtol=0, atol=1e-4)
+
+    # --- (c) end-to-end Newton-REML fit at n_lp == 4 ---
+    N = 300
+    x = rng.uniform(size=N)
+    y = np.sin(2 * np.pi * x) + rng.normal(size=N) * 0.3
+    df = pl.DataFrame({"y": y, "x": x})
+    fam2 = _K4()
+    m = gam(["y ~ s(x)", "~ 1", "~ 1", "~ 1"], df, family=fam2,
+            method="REML")
+    # the Newton-REML path drove the family to ll(deriv=4) AT K==4 --
+    # i.e. trHid2H exercised the all-distinct l4 branch inside the fit
+    assert 4 in fam2.seen["deriv"] and 3 in fam2.seen["deriv"]
+    assert m.outer_info["conv"] == "full convergence"
+    # lpi spans the 4-LP stacked design, 0-based
+    assert fam2.seen["lpi_cols"] == list(range(len(np.asarray(m._beta))))
+    fitted = np.asarray(m.fitted_values)
+    assert fitted.shape == (N, 4)
+    # LP1 recovered the smooth signal; the posterior surface is finite
+    assert np.corrcoef(fitted[:, 0], np.sin(2 * np.pi * x))[0, 1] > 0.95
+    assert np.all(np.isfinite(np.asarray(m.Vp)))
+    assert np.isfinite(m.REML_criterion)
+    assert np.isfinite(m.null_deviance) and m.null_deviance > 0
+    np.testing.assert_allclose(
+        m.deviance, float(np.sum(np.asarray(m.residuals) ** 2)),
+        rtol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(m.residuals_of("response")), y - fitted[:, 0],
+        rtol=0, atol=1e-12)
+    assert m.predict(df[:5]).shape[0] == 5
+    m.summary()
 
 
 def _twlss_fixture():
