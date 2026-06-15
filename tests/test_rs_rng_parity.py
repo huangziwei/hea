@@ -25,12 +25,18 @@ from conftest import have_rscript, run_rng_r_oracle
 rs = pytest.importorskip("hea._rs")
 from hea.R.rng import RGenerator, RMersenneTwister  # noqa: E402
 
-if sys.platform != "darwin":
-    pytest.skip("RNG Rust/Python/R 0-ulp gate is macOS-only (glibc libm diverges "
-                "a few ulp from R); the Linux matrix covers it via pinned R tests.",
-                allow_module_level=True)
 if not have_rscript():
     pytest.skip("Rscript not on PATH (install R)", allow_module_level=True)
+
+# Strict 0-ulp on macOS (shared Apple libm). Off-macOS this is a DIAGNOSTIC run
+# (rtol=0): unlike d/p/q, RNG rejection samplers (rgamma/rbeta/rt/rf/rchisq) can
+# *desync* on a 1-ulp libm difference — a flipped accept/reject changes the draw
+# AND the uniform consumption, cascading through the rest of the vector. So the CI
+# log will tell us per kernel whether off-macOS is a small floor (low "Mismatched
+# elements") or a desync (high) — i.e. whether this gate can be tolerance-relaxed
+# to Linux at all, or must stay macOS-only. Calibrate or revert after reading it.
+_STRICT = sys.platform == "darwin"
+_LINUX_RTOL = 0.0  # DIAGNOSTIC
 
 SEEDS = (1, 42, 4357)
 _g = np.random.default_rng(20260614)
@@ -44,6 +50,11 @@ def _assert_bit_exact(got, exp, label):
     got = np.atleast_1d(np.asarray(got, dtype=float))
     exp = np.atleast_1d(np.asarray(exp, dtype=float))
     assert got.shape == exp.shape, f"{label}: shape {got.shape} != {exp.shape}"
+    if not _STRICT:
+        # tolerance/diagnostic off-macOS; reports "Mismatched elements: N/M" per kernel.
+        np.testing.assert_allclose(got, exp, rtol=_LINUX_RTOL, atol=1e-300,
+                                   equal_nan=True, err_msg=label)
+        return
     for i, (g, e) in enumerate(zip(got.ravel(), exp.ravel())):
         if np.isnan(e):
             assert np.isnan(g), f"{label}[{i}]: expected NaN, got {g!r}"
