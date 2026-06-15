@@ -46,11 +46,11 @@ if not have_rscript():
 # catches gross / platform-specific Rust regressions (notably the x86-64 `rfma`
 # plain-path, otherwise only gated on a local Intel Mac), just not at the last ulp.
 _STRICT = sys.platform == "darwin"
-# DIAGNOSTIC: rtol=0 makes each off-macOS kernel report its "Max relative difference"
-# (the true glibc libm floor) in the CI log — read those, then set the calibrated
-# tolerance (~2–4× the worst kernel, or an ULP-count bound). Intentionally turns the
-# Linux job RED for this one measurement run.
-_LINUX_RTOL = 0.0
+# Calibrated from the diagnostic CI run (glibc, Python 3.10–3.14): off-macOS, 14
+# kernels drift and the rest are 0-ulp; the worst is ~1.8e-15 (≈8 ulp — pgamma_saddle
+# / pbeta). 1e-14 sits ~5× above that floor: it absorbs the glibc libm floor + numpy-
+# build variation, while still catching any real Rust regression (those are ≫1e-14).
+_LINUX_RTOL = 1e-14
 
 
 def _bits(v: float) -> int:

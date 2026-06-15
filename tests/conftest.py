@@ -4,11 +4,25 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import pytest
 
 from hea.formula import set_ordered_cols
+
+# Tests must never pop GUI windows or leak figures. Force the non-interactive Agg
+# backend (force=True: hea may have imported pyplot already during the import
+# above), and the autouse `_close_figures` fixture closes every figure after each
+# test so the plot tests don't accumulate past matplotlib's 20-open warning.
+matplotlib.use("Agg", force=True)
+
+
+@pytest.fixture(autouse=True)
+def _close_figures():
+    yield
+    plt.close("all")
 
 
 def assert_fp_equiv(a, b):

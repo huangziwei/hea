@@ -28,15 +28,15 @@ from hea.R.rng import RGenerator, RMersenneTwister  # noqa: E402
 if not have_rscript():
     pytest.skip("Rscript not on PATH (install R)", allow_module_level=True)
 
-# Strict 0-ulp on macOS (shared Apple libm). Off-macOS this is a DIAGNOSTIC run
-# (rtol=0): unlike d/p/q, RNG rejection samplers (rgamma/rbeta/rt/rf/rchisq) can
-# *desync* on a 1-ulp libm difference — a flipped accept/reject changes the draw
-# AND the uniform consumption, cascading through the rest of the vector. So the CI
-# log will tell us per kernel whether off-macOS is a small floor (low "Mismatched
-# elements") or a desync (high) — i.e. whether this gate can be tolerance-relaxed
-# to Linux at all, or must stay macOS-only. Calibrate or revert after reading it.
+# Strict 0-ulp on macOS (shared Apple libm). The diagnostic CI run showed this 3-way
+# gate is ALSO bit-exact on Linux/glibc for the committed seeds — no continuous drift
+# AND no rejection-sampler desync (the feared 1-ulp accept/reject flip, which would
+# change a draw AND its uniform consumption and cascade, never triggered). So it runs
+# off-macOS too, with a small tolerance purely as insurance against numpy/glibc-build
+# variation; a real desync would blow past any tolerance and fail loudly — the correct
+# signal, not something to mask.
 _STRICT = sys.platform == "darwin"
-_LINUX_RTOL = 0.0  # DIAGNOSTIC
+_LINUX_RTOL = 1e-14
 
 SEEDS = (1, 42, 4357)
 _g = np.random.default_rng(20260614)
