@@ -11,6 +11,7 @@
 use pyo3::prelude::*;
 
 mod linalg;
+mod loess;
 mod nmath;
 mod par;
 mod rng;
@@ -20,5 +21,6 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     nmath::register(m)?;
     rng::register(m)?;
     linalg::register(m)?;
+    loess::register(m)?;
     Ok(())
 }
