@@ -1532,6 +1532,124 @@ def test_gumbls_residuals_and_validation():
 
 
 # ---------------------------------------------------------------------------
+# gevlss (GEV location-scale-shape, gamlss.r:1945-2446) — mgcv 1.9-4 oracle,
+# set.seed(31) stream. 3-LP; auto-generated Maxima l1..l4 (3/6/10/15 cols)
+# transcribed verbatim; ShiftedLogitLink confines ξ to (−1, 0.5).
+# ---------------------------------------------------------------------------
+
+def _gevlss_oracle_inputs():
+    from hea.R.rng import RGenerator
+    gen = RGenerator(31)
+    n = 40
+    x1 = gen.normal(0, 1, n)
+    x2 = gen.normal(0, 1, n)
+    x3 = gen.normal(0, 1, n)
+    e = gen.normal(0, 1, n)
+    X = np.column_stack([np.ones(n), x1, np.ones(n), x2, np.ones(n), x3])
+    y = 0.5 + 0.7 * e                       # inside the (wide) GEV support
+    coef = np.array([0.3, 0.2, -0.1, 0.15, 1.0, 0.1])
+    d1b = gen.normal(0, 1, 6 * 2).reshape((6, 2), order="F") * 0.2
+    d2b = gen.normal(0, 1, 6 * 3).reshape((6, 3), order="F") * 0.15
+    lpi = [np.arange(0, 2), np.arange(2, 4), np.arange(4, 6)]
+    return X, y, coef, d1b, d2b, lpi
+
+
+def test_gevlss_ll_matches_mgcv_oracle():
+    # gevlss()$ll at deriv 1/2/3/4 vs live R (set.seed(31) inputs;
+    # Hp = −lbb + 5·I keeps the off-optimum penalized Hessian PD).
+    from scipy.linalg import cholesky
+    from hea.family import gevlss
+    X, y, coef, d1b, d2b, lpi = _gevlss_oracle_inputs()
+    fam = gevlss()
+    p = 6
+
+    r1 = fam.ll(y, X, coef, lpi=lpi, deriv=1)
+    np.testing.assert_allclose(r1["l"], -43.80220977, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(
+        r1["lb"], [2.871313816, -1.72187301, -25.60284638, -0.92031962,
+                   -1.577838505, -0.7972557566], rtol=0, atol=1e-7)
+    np.testing.assert_allclose(r1["lbb"][0, 0], -53.22895994, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(float(np.sum(np.abs(r1["lbb"]))),
+                               279.1671661, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(r1["lbb"][0, 4], 5.895272599, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(r1["lbb"][4, 4], 1.330649383, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(r1["lbb"][2, 2], -27.58408247, rtol=0, atol=1e-7)
+
+    Hp = -r1["lbb"] + np.eye(p) * 5.0
+    r2 = fam.ll(y, X, coef, lpi=lpi, deriv=2, d1b=d1b, fh=np.linalg.inv(Hp))
+    np.testing.assert_allclose(
+        r2["d1H"], [2.288605619, -3.991901518], rtol=0, atol=1e-8)
+
+    r3 = fam.ll(y, X, coef, lpi=lpi, deriv=3, d1b=d1b)
+    np.testing.assert_allclose(r3["d1H"][0][0, 0], 43.54938912, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(r3["d1H"][1][0, 0], -59.38174154, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(float(np.sum(np.abs(r3["d1H"][0]))),
+                               301.8381504, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(float(np.sum(np.abs(r3["d1H"][1]))),
+                               457.9403905, rtol=0, atol=1e-6)
+
+    D = 1.0 / np.sqrt(np.diag(Hp))
+    R = cholesky(D[:, None] * Hp * D[None, :], lower=False)
+    r4 = fam.ll(y, X, coef, lpi=lpi, deriv=4, d1b=d1b, d2b=d2b,
+                fh=(R, np.arange(p)), D=D)
+    np.testing.assert_allclose(
+        r4["trHid2H"],
+        [-2.058358974, 6.146709207, -10.58300064], rtol=0, atol=1e-7)
+
+
+def test_gevlss_ll_derivatives_match_fd():
+    from hea.family import gevlss
+    X, y, coef, d1b, _, lpi = _gevlss_oracle_inputs()
+    fam = gevlss()
+    r1 = fam.ll(y, X, coef, lpi=lpi, deriv=1)
+    h = 1e-6
+    p = coef.size
+    fd_lb = np.zeros(p)
+    fd_lbb = np.zeros((p, p))
+    for k in range(p):
+        cp = coef.copy(); cp[k] += h
+        cm = coef.copy(); cm[k] -= h
+        fd_lb[k] = (fam.ll(y, X, cp, lpi=lpi)["l"]
+                    - fam.ll(y, X, cm, lpi=lpi)["l"]) / (2 * h)
+        fd_lbb[:, k] = (fam.ll(y, X, cp, lpi=lpi, deriv=1)["lb"]
+                        - fam.ll(y, X, cm, lpi=lpi, deriv=1)["lb"]) / (2 * h)
+    np.testing.assert_allclose(r1["lb"], fd_lb, rtol=0, atol=1e-5)
+    np.testing.assert_allclose(r1["lbb"], fd_lbb, rtol=0, atol=1e-4)
+    r3 = fam.ll(y, X, coef, lpi=lpi, deriv=3, d1b=d1b)
+    for j in range(d1b.shape[1]):
+        fdH = (fam.ll(y, X, coef + h * d1b[:, j], lpi=lpi, deriv=1)["lbb"]
+               - fam.ll(y, X, coef - h * d1b[:, j], lpi=lpi,
+                        deriv=1)["lbb"]) / (2 * h)
+        np.testing.assert_allclose(r3["d1H"][j], fdH, rtol=0, atol=1e-3)
+
+
+def test_gevlss_link_residuals_and_validation():
+    from hea.family import gevlss, ShiftedLogitLink
+    # shifted-logit confines ξ to (−1, 0.5) and round-trips.
+    lk = ShiftedLogitLink()
+    eta = np.linspace(-6, 6, 13)
+    xi = lk.linkinv(eta)
+    assert np.all(xi > -1.0) and np.all(xi < 0.5)
+    np.testing.assert_allclose(lk.link(xi), eta, atol=1e-7)
+    # mu.eta finite-diff
+    fd = (lk.linkinv(eta + 1e-6) - lk.linkinv(eta - 1e-6)) / 2e-6
+    np.testing.assert_allclose(lk.mu_eta(eta), fd, atol=1e-7)
+    # response residual = y − GEV mean (μ + e^ρ(Γ(1−ξ)−1)/ξ).
+    from scipy.special import gamma as _g
+    fam = gevlss()
+    mu = np.array([0.5, 1.0]); rho = np.array([-0.2, 0.1]); xi3 = np.array([0.1, 0.2])
+    yy = np.array([0.7, 1.3])
+    fitted = np.column_stack([mu, rho, xi3])
+    fv = mu + np.exp(rho) * (_g(1.0 - xi3) - 1.0) / xi3
+    np.testing.assert_allclose(fam.residuals(yy, fitted, type="response"),
+                               yy - fv, atol=1e-12)
+    with pytest.raises(ValueError, match="shape parameter of gevlss"):
+        gevlss(link=("identity", "identity", "log"))
+    with pytest.raises(ValueError, match="log-scale parameter of gevlss"):
+        gevlss(link=("identity", "log", "logit"))
+
+
+# ---------------------------------------------------------------------------
 # twlss (Tweedie location-scale-shape, gamlss.r:2493-2662) — mgcv 1.9-4
 # oracle references generated live (R --vanilla): ldTweedie in the working
 # (rho, theta) parameterization with all.derivs=TRUE, tw.null.fit, and

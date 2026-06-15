@@ -31,7 +31,7 @@ import itertools
 import numpy as np
 import polars as pl
 from scipy.linalg import solve_triangular
-from scipy.special import digamma, expit, gammaln, polygamma
+from scipy.special import digamma, expit, gamma as _gamma_fn, gammaln, logit, polygamma
 
 from .R import nmath as _nmath
 from .R.nmath import _dpois_raw, _dbinom_raw
@@ -5841,6 +5841,561 @@ class gumbls(GeneralFamily):
                 f"b={self.b:g})")
 
 
+class ShiftedLogitLink(Link):
+    """mgcv's shifted-logit link for gevlss's shape LP (gamlss.r:
+    1970-1978): ``g⁻¹(η) = 1.5·logistic(η) − 1`` confines ξ to
+    (−1, 0.5) (Smith 1985 — the −1 bound is needed for MLE
+    consistency). Display ``name`` is ``"logit"`` (mgcv's link string).
+    The d2link..d4link are the plain logit-link η-derivatives of
+    ``m = (ξ+1)/1.5`` scaled by ``1.5^{−k}``."""
+    name = "logit"
+
+    @staticmethod
+    def _clamp_eta(eta):
+        thr = -np.log(np.finfo(float).eps)
+        return np.clip(np.asarray(eta, dtype=float), -thr, thr)
+
+    def link(self, mu):
+        return logit((np.asarray(mu, dtype=float) + 1.0) / 1.5)
+
+    def linkinv(self, eta):
+        e = self._clamp_eta(eta)
+        return 1.5 * (np.exp(e) / (1.0 + np.exp(e))) - 1.0
+
+    def mu_eta(self, eta):
+        e = self._clamp_eta(eta)
+        return np.exp(e) / (1.0 + np.exp(e)) ** 2 * 1.5
+
+    def d2link(self, mu):
+        m = (np.asarray(mu, dtype=float) + 1.0) / 1.5
+        return (1.0 / (1.0 - m) ** 2 - 1.0 / m ** 2) / 1.5 ** 2
+
+    def d3link(self, mu):
+        m = (np.asarray(mu, dtype=float) + 1.0) / 1.5
+        return (2.0 / (1.0 - m) ** 3 + 2.0 / m ** 3) / 1.5 ** 3
+
+    def d4link(self, mu):
+        m = (np.asarray(mu, dtype=float) + 1.0) / 1.5
+        return (6.0 / (1.0 - m) ** 4 - 6.0 / m ** 4) / 1.5 ** 4
+
+
+def _gevlss_derivs(y, mu, rho, xi, deriv):
+    """gevlss log-density + packed parameter-space derivatives — mgcv's
+    gevlss ``ll`` body (gamlss.r:2060-2278): the auto-generated /
+    auto-simplified Maxima code transcribed VERBATIM (R ``^``→``**``,
+    ``exp1^{kρ}``→``e^{kρ}``, dotted aux names underscored; the aa/bb/…
+    auxiliaries kept to minimize transcription error). ``xi`` is
+    pre-clamped away from 0 by the caller. Returns ``(l0, l1, l2, l3,
+    l4)``; higher orders are ``None`` below the requested ``deriv``.
+    """
+    n = y.shape[0]
+    ymu = y - mu
+    aa0 = xi * ymu * np.exp(-rho)
+    log_aa1 = np.log1p(aa0)
+    aa1 = aa0 + 1.0
+    aa2 = 1.0 / xi
+    l0 = -aa2 * (1.0 + xi) * log_aa1 - aa1 ** (-aa2) - rho
+    if deriv == 0:
+        return l0, None, None, None, None
+
+    er = np.exp(rho)
+    l1 = np.zeros((n, 3))
+    bb1 = 1.0 / er
+    bb2 = bb1 * xi * ymu + 1.0
+    l1[:, 0] = bb1 * (xi + 1.0) / bb2 - bb1 * bb2 ** ((-1.0 / xi) - 1.0)
+    cc2 = ymu
+    cc0 = bb1 * xi * cc2
+    log_cc3 = np.log1p(cc0)
+    cc3 = cc0 + 1.0
+    l1[:, 1] = (-bb1 * cc2 * cc3 ** ((-1.0 / xi) - 1.0)
+                + bb1 * (xi + 1.0) * cc2 / cc3 - 1.0)
+    dd3 = xi + 1.0
+    dd6 = 1.0 / cc3
+    dd7 = log_cc3
+    dd8 = 1.0 / xi ** 2
+    l1[:, 2] = (-(dd8 * dd7 - bb1 * aa2 * cc2 * dd6) / cc3 ** aa2
+                + dd8 * dd3 * dd7 - aa2 * dd7 - bb1 * aa2 * dd3 * cc2 * dd6)
+
+    l2 = np.zeros((n, 6))
+    ee1 = 1.0 / er ** 2
+    ee3 = -1.0 / xi
+    l2[:, 0] = (ee1 * (ee3 - 1.0) * xi * aa1 ** (ee3 - 2.0)
+                + ee1 * xi * (xi + 1.0) / aa1 ** 2)
+    ff7 = ee3 - 1.0
+    l2[:, 1] = (bb1 * cc3 ** ff7 + ee1 * ff7 * xi * cc2 * cc3 ** (ee3 - 2.0)
+                - bb1 * dd3 / cc3 + ee1 * xi * dd3 * cc2 / cc3 ** 2)
+    gg7 = -aa2
+    l2[:, 2] = (-bb1 * cc3 ** (gg7 - 1.0)
+                * (log_cc3 / xi ** 2 - bb1 * aa2 * cc2 * dd6)
+                + ee1 * cc2 * cc3 ** (gg7 - 2.0) + bb1 * dd6
+                - ee1 * (xi + 1.0) * cc2 / cc3 ** 2)
+    hh4 = cc2 ** 2
+    l2[:, 3] = (bb1 * cc2 * cc3 ** ff7 + ee1 * ff7 * xi * hh4 * cc3 ** (ee3 - 2.0)
+                - bb1 * dd3 * cc2 / cc3 + ee1 * xi * dd3 * hh4 / cc3 ** 2)
+    l2[:, 4] = (-bb1 * cc2 * cc3 ** (gg7 - 1.0)
+                * (log_cc3 / xi ** 2 - bb1 * aa2 * cc2 * dd6)
+                + ee1 * hh4 * cc3 ** (gg7 - 2.0) + bb1 * cc2 * dd6
+                - ee1 * (xi + 1.0) * hh4 / cc3 ** 2)
+    jj08 = 1.0 / cc3 ** 2
+    jj12 = 1.0 / xi ** 3
+    jj13 = 1.0 / cc3 ** aa2
+    l2[:, 5] = (-jj13 * (dd8 * dd7 - bb1 * aa2 * cc2 * dd6) ** 2
+                - jj13 * (ee1 * aa2 * hh4 * jj08 + 2.0 * bb1 * dd8 * cc2 * dd6
+                          - 2.0 * jj12 * dd7)
+                - 2.0 * jj12 * dd3 * dd7 + 2.0 * dd8 * dd7
+                + 2.0 * bb1 * dd8 * dd3 * cc2 * dd6 - 2.0 * bb1 * aa2 * cc2 * dd6
+                + ee1 * aa2 * dd3 * hh4 * jj08)
+
+    l3 = l4 = None
+    if deriv > 1:
+        l3 = np.zeros((n, 10))
+        kk1 = 1.0 / er ** 3
+        kk2 = xi ** 2
+        l3[:, 0] = (2.0 * kk1 * kk2 * (xi + 1.0) / aa1 ** 3
+                    - kk1 * (ee3 - 2.0) * (ee3 - 1.0) * kk2 * aa1 ** (ee3 - 3.0))
+        ll5 = xi * cc2 / er + 1.0
+        ll8 = ee3 - 2.0
+        l3[:, 1] = (-2.0 * ee1 * ff7 * xi * ll5 ** ll8
+                    - kk1 * ll8 * ff7 * kk2 * cc2 * ll5 ** (ee3 - 3.0)
+                    - 2.0 * ee1 * xi * dd3 / ll5 ** 2
+                    + 2.0 * kk1 * kk2 * dd3 * cc2 / ll5 ** 3)
+        mm10 = cc3 ** (gg7 - 3.0)
+        mm11 = gg7 - 2.0
+        mm12 = cc3 ** mm11
+        l3[:, 2] = (ee1 * (gg7 - 1.0) * xi * mm12
+                    * (log_cc3 / xi ** 2 - bb1 * aa2 * cc2 / cc3)
+                    - ee1 * mm12 - kk1 * mm11 * xi * cc2 * mm10
+                    + kk1 * cc2 * mm10 + ee1 * dd3 * jj08 + ee1 * xi * jj08
+                    - 2.0 * kk1 * xi * dd3 * cc2 / cc3 ** 3)
+        l3[:, 3] = (-bb1 * cc3 ** ff7 - 3.0 * ee1 * ff7 * xi * cc2 * cc3 ** ll8
+                    - kk1 * ll8 * ff7 * kk2 * hh4 * cc3 ** (ee3 - 3.0)
+                    + bb1 * dd3 / cc3 - 3.0 * ee1 * xi * dd3 * cc2 / cc3 ** 2
+                    + 2.0 * kk1 * kk2 * dd3 * hh4 / cc3 ** 3)
+        oo10 = gg7 - 1.0
+        oo13 = log_cc3 / xi ** 2
+        l3[:, 4] = (bb1 * cc3 ** oo10 * (bb1 * oo10 * cc2 * dd6 + oo13)
+                    + ee1 * oo10 * xi * cc2 * mm12
+                    * (bb1 * mm11 * cc2 * dd6 + oo13)
+                    + ee1 * aa2 * cc2 * mm12 + ee1 * oo10 * cc2 * mm12
+                    - bb1 * dd6 + 2.0 * ee1 * dd3 * cc2 * jj08
+                    + ee1 * xi * cc2 * jj08
+                    - 2.0 * xi * dd3 * cc2 ** 2 / (er ** 3 * cc3 ** 3))
+        pp07 = (-1.0 / xi) - 1.0
+        pp08 = cc3 ** pp07
+        l3[:, 5] = (-bb1 * pp08 * (bb1 * pp07 * cc2 * dd6 + dd8 * dd7) ** 2
+                    - bb1 * pp08 * (-ee1 * pp07 * hh4 * jj08
+                                    + 2.0 * bb1 * dd8 * cc2 * dd6
+                                    - 2.0 * dd7 / xi ** 3)
+                    - 2.0 * ee1 * cc2 * jj08
+                    + 2.0 * (xi + 1.0) * hh4 / (er ** 3 * cc3 ** 3))
+        qq05 = cc2 ** 3
+        l3[:, 6] = (-bb1 * cc2 * cc3 ** ff7 - 3.0 * ee1 * ff7 * xi * hh4 * cc3 ** ll8
+                    - kk1 * ll8 * ff7 * kk2 * qq05 * cc3 ** (ee3 - 3.0)
+                    + bb1 * dd3 * cc2 / cc3 - 3.0 * ee1 * xi * dd3 * hh4 / cc3 ** 2
+                    + 2.0 * kk1 * kk2 * dd3 * qq05 / cc3 ** 3)
+        rr17 = log_cc3 / xi ** 2 - bb1 * aa2 * cc2 * dd6
+        l3[:, 7] = (bb1 * cc2 * cc3 ** oo10 * rr17
+                    + ee1 * oo10 * xi * hh4 * mm12 * rr17 - 2.0 * ee1 * hh4 * mm12
+                    - kk1 * mm11 * xi * qq05 * mm10 + kk1 * qq05 * mm10
+                    - bb1 * cc2 * dd6 + 2.0 * ee1 * dd3 * hh4 * jj08
+                    + ee1 * xi * hh4 * jj08 - 2.0 * kk1 * xi * dd3 * qq05 / cc3 ** 3)
+        l3[:, 8] = (-bb1 * cc2 * pp08 * (bb1 * pp07 * cc2 * dd6 + dd8 * dd7) ** 2
+                    - bb1 * cc2 * pp08 * (-ee1 * pp07 * hh4 * jj08
+                                          + 2.0 * bb1 * dd8 * cc2 * dd6
+                                          - 2.0 * dd7 / xi ** 3)
+                    - 2.0 * ee1 * hh4 * jj08
+                    + 2.0 * (xi + 1.0) * cc2 ** 3 / (er ** 3 * cc3 ** 3))
+        tt08 = 1.0 / cc3 ** 3
+        tt16 = 1.0 / xi ** 4
+        tt18 = dd8 * dd7 - bb1 * aa2 * cc2 * dd6
+        l3[:, 9] = (-jj13 * tt18 ** 3
+                    - 3.0 * jj13 * (ee1 * aa2 * hh4 * jj08
+                                    + 2.0 * bb1 * dd8 * cc2 * dd6
+                                    - 2.0 * jj12 * dd7) * tt18
+                    - jj13 * (-2.0 * kk1 * aa2 * qq05 * tt08
+                              - 3.0 * ee1 * dd8 * hh4 * jj08
+                              - 6.0 * bb1 * jj12 * cc2 * dd6 + 6.0 * tt16 * dd7)
+                    + 6.0 * tt16 * dd3 * dd7 - 6.0 * jj12 * dd7
+                    - 6.0 * bb1 * jj12 * dd3 * cc2 * dd6
+                    + 6.0 * bb1 * dd8 * cc2 * dd6
+                    - 3.0 * ee1 * dd8 * dd3 * hh4 * jj08
+                    + 3.0 * ee1 * aa2 * hh4 * jj08
+                    - 2.0 * kk1 * aa2 * dd3 * qq05 * tt08)
+
+    if deriv > 3:
+        l4 = np.zeros((n, 15))
+        uu1 = 1.0 / er ** 4
+        uu2 = xi ** 3
+        l4[:, 0] = (uu1 * (ee3 - 3.0) * (ee3 - 2.0) * (ee3 - 1.0) * uu2
+                    * aa1 ** (ee3 - 4.0)
+                    + 6.0 * uu1 * uu2 * (xi + 1.0) / aa1 ** 4)
+        vv09 = ee3 - 3.0
+        l4[:, 1] = (3.0 * kk1 * ll8 * ff7 * kk2 * ll5 ** vv09
+                    + uu1 * vv09 * ll8 * ff7 * uu2 * cc2 * ll5 ** (ee3 - 4.0)
+                    - 6.0 * kk1 * kk2 * dd3 / ll5 ** 3
+                    + 6.0 * uu1 * uu2 * dd3 * cc2 / ll5 ** 4)
+        ww11 = gg7 - 3.0
+        ww12 = cc3 ** (gg7 - 4.0)
+        ww15 = cc3 ** ww11
+        l4[:, 2] = (-kk1 * mm11 * oo10 * kk2 * ww15
+                    * (log_cc3 / kk2 - bb1 * aa2 * cc2 / cc3)
+                    + 2.0 * kk1 * mm11 * xi * ww15 - kk1 * ww15
+                    + uu1 * ww11 * mm11 * kk2 * cc2 * ww12
+                    - uu1 * oo10 * xi * cc2 * ww12 - uu1 * ww11 * xi * cc2 * ww12
+                    + 2.0 * kk1 * kk2 * tt08 + 4.0 * kk1 * xi * dd3 * tt08
+                    - 6.0 * uu1 * kk2 * dd3 * cc2 / cc3 ** 4)
+        l4[:, 3] = (4.0 * ee1 * ff7 * xi * ll5 ** ll8
+                    + 5.0 * kk1 * ll8 * ff7 * kk2 * cc2 * ll5 ** vv09
+                    + uu1 * vv09 * ll8 * ff7 * uu2 * hh4 * ll5 ** (ee3 - 4.0)
+                    + 4.0 * ee1 * xi * dd3 / ll5 ** 2
+                    - 10.0 * kk1 * kk2 * dd3 * cc2 / ll5 ** 3
+                    + 6.0 * uu1 * uu2 * dd3 * hh4 / ll5 ** 4)
+        yy18 = log_cc3 / kk2
+        l4[:, 4] = (-2.0 * ee1 * oo10 * xi * mm12 * (bb1 * mm11 * cc2 * dd6 + yy18)
+                    - kk1 * mm11 * oo10 * kk2 * cc2 * ww15
+                    * (bb1 * ww11 * cc2 * dd6 + yy18)
+                    - 2.0 * ee1 * aa2 * mm12 - 2.0 * ee1 * oo10 * mm12
+                    - 2.0 * kk1 * mm11 * oo10 * xi * cc2 * ww15
+                    - kk1 * oo10 * cc2 * ww15 - kk1 * mm11 * cc2 * ww15
+                    - 2.0 * ee1 * dd3 * jj08 - 2.0 * ee1 * xi * jj08
+                    + 2.0 * kk1 * kk2 * cc2 * tt08
+                    + 8.0 * kk1 * xi * dd3 * cc2 * tt08
+                    - 6.0 * kk2 * dd3 * cc2 ** 2 / (er ** 4 * cc3 ** 4))
+        l4[:, 5] = (ee1 * oo10 * xi * mm12 * tt18 ** 2 - 2.0 * ee1 * mm12 * tt18
+                    - 2.0 * kk1 * mm11 * xi * cc2 * ww15 * tt18
+                    + 2.0 * kk1 * cc2 * ww15 * tt18
+                    + ee1 * oo10 * xi * mm12 * (ee1 * aa2 * hh4 * jj08
+                                                + 2.0 * bb1 * dd8 * cc2 * dd6
+                                                - 2.0 * dd7 / xi ** 3)
+                    + 4.0 * kk1 * cc2 * ww15 + 2.0 * uu1 * ww11 * xi * hh4 * ww12
+                    - 4.0 * uu1 * hh4 * ww12 + 2.0 * ee1 * jj08
+                    - 4.0 * kk1 * dd3 * cc2 * tt08 - 4.0 * kk1 * xi * cc2 * tt08
+                    + 6.0 * uu1 * xi * dd3 * hh4 / cc3 ** 4)
+        l4[:, 6] = (bb1 * cc3 ** ff7 + 7.0 * ee1 * ff7 * xi * cc2 * cc3 ** ll8
+                    + 6.0 * kk1 * ll8 * ff7 * kk2 * hh4 * cc3 ** vv09
+                    + uu1 * vv09 * ll8 * ff7 * uu2 * qq05 * cc3 ** (ee3 - 4.0)
+                    - bb1 * dd3 / cc3 + 7.0 * ee1 * xi * dd3 * cc2 / cc3 ** 2
+                    - 12.0 * kk1 * kk2 * dd3 * hh4 / cc3 ** 3
+                    + 6.0 * uu1 * uu2 * dd3 * qq05 / cc3 ** 4)
+        l4[:, 7] = (-bb1 * cc3 ** oo10 * (bb1 * oo10 * cc2 * dd6 + yy18)
+                    - 3.0 * ee1 * oo10 * xi * cc2 * mm12
+                    * (bb1 * mm11 * cc2 * dd6 + yy18)
+                    - kk1 * mm11 * oo10 * kk2 * hh4 * ww15
+                    * (bb1 * ww11 * cc2 * dd6 + yy18)
+                    - 3.0 * ee1 * aa2 * cc2 * mm12 - 3.0 * ee1 * oo10 * cc2 * mm12
+                    - 2.0 * kk1 * mm11 * oo10 * xi * hh4 * ww15
+                    - kk1 * oo10 * hh4 * ww15 - kk1 * mm11 * hh4 * ww15
+                    + bb1 * dd6 - 4.0 * ee1 * dd3 * cc2 * jj08
+                    - 3.0 * ee1 * xi * cc2 * jj08 + 2.0 * kk1 * kk2 * hh4 * tt08
+                    + 10.0 * kk1 * xi * dd3 * hh4 * tt08
+                    - 6.0 * kk2 * dd3 * cc2 ** 3 / (er ** 4 * cc3 ** 4))
+        ad17 = 2.0 * bb1 * dd8 * cc2 * dd6
+        ad19 = -2.0 * dd7 / xi ** 3
+        ad20 = cc3 ** oo10
+        ad21 = dd8 * dd7
+        ad22 = ad21 + bb1 * mm11 * cc2 * dd6
+        l4[:, 8] = (bb1 * ad20 * (bb1 * oo10 * cc2 * dd6 + ad21) ** 2
+                    + ee1 * oo10 * xi * cc2 * mm12 * ad22 ** 2
+                    + 2.0 * ee1 * aa2 * cc2 * mm12 * ad22
+                    + 2.0 * ee1 * oo10 * cc2 * mm12 * ad22
+                    + bb1 * ad20 * (-ee1 * oo10 * hh4 * jj08 + ad17 + ad19)
+                    + ee1 * oo10 * xi * cc2 * mm12
+                    * (-ee1 * mm11 * hh4 * jj08 + ad17 + ad19)
+                    + 4.0 * ee1 * cc2 * jj08 - 6.0 * kk1 * dd3 * hh4 * tt08
+                    - 4.0 * kk1 * xi * hh4 * tt08
+                    + 6.0 * xi * dd3 * cc2 ** 3 / (er ** 4 * cc3 ** 4))
+        ae16 = dd8 * dd7 + bb1 * pp07 * cc2 * dd6
+        l4[:, 9] = (-bb1 * pp08 * ae16 ** 3
+                    - 3.0 * bb1 * pp08 * (-ee1 * pp07 * hh4 * jj08
+                                          + 2.0 * bb1 * dd8 * cc2 * dd6
+                                          - 2.0 * jj12 * dd7) * ae16
+                    - bb1 * pp08 * (2.0 * kk1 * pp07 * qq05 * tt08
+                                    - 3.0 * ee1 * dd8 * hh4 * jj08
+                                    - 6.0 * bb1 * jj12 * cc2 * dd6
+                                    + 6.0 * dd7 / xi ** 4)
+                    + 6.0 * kk1 * hh4 * tt08
+                    - 6.0 * (xi + 1.0) * qq05 / (er ** 4 * cc3 ** 4))
+        af05 = cc2 ** 4
+        l4[:, 10] = (bb1 * cc2 * cc3 ** ff7 + 7.0 * ee1 * ff7 * xi * hh4 * cc3 ** ll8
+                     + 6.0 * kk1 * ll8 * ff7 * kk2 * qq05 * cc3 ** vv09
+                     + uu1 * vv09 * ll8 * ff7 * uu2 * af05 * cc3 ** (ee3 - 4.0)
+                     - bb1 * dd3 * cc2 / cc3 + 7.0 * ee1 * xi * dd3 * hh4 / cc3 ** 2
+                     - 12.0 * kk1 * kk2 * dd3 * qq05 / cc3 ** 3
+                     + 6.0 * uu1 * uu2 * dd3 * af05 / cc3 ** 4)
+        ag23 = log_cc3 / kk2 - bb1 * aa2 * cc2 * dd6
+        l4[:, 11] = (-bb1 * cc2 * cc3 ** oo10 * ag23
+                     - 3.0 * ee1 * oo10 * xi * hh4 * mm12 * ag23
+                     - kk1 * mm11 * oo10 * kk2 * qq05 * ww15 * ag23
+                     + 4.0 * ee1 * hh4 * mm12 + 5.0 * kk1 * mm11 * xi * qq05 * ww15
+                     - 4.0 * kk1 * qq05 * ww15
+                     + uu1 * ww11 * mm11 * kk2 * af05 * ww12
+                     - uu1 * oo10 * xi * af05 * ww12 - uu1 * ww11 * xi * af05 * ww12
+                     + bb1 * cc2 * dd6 - 4.0 * ee1 * dd3 * hh4 * jj08
+                     - 3.0 * ee1 * xi * hh4 * jj08 + 2.0 * kk1 * kk2 * qq05 * tt08
+                     + 10.0 * kk1 * xi * dd3 * qq05 * tt08
+                     - 6.0 * uu1 * kk2 * dd3 * af05 / cc3 ** 4)
+        ah24 = (-2.0 * dd7 / xi ** 3 + 2.0 * bb1 * dd8 * cc2 * dd6
+                + ee1 * aa2 * hh4 * jj08)
+        ah27 = tt18 ** 2
+        l4[:, 12] = (bb1 * cc2 * ad20 * ah27 + ee1 * oo10 * xi * hh4 * mm12 * ah27
+                     - 4.0 * ee1 * hh4 * mm12 * tt18
+                     - 2.0 * kk1 * mm11 * xi * qq05 * ww15 * tt18
+                     + 2.0 * kk1 * qq05 * ww15 * tt18 + bb1 * cc2 * ad20 * ah24
+                     + ee1 * oo10 * xi * hh4 * mm12 * ah24 + 6.0 * kk1 * qq05 * ww15
+                     + 2.0 * uu1 * ww11 * xi * af05 * ww12 - 4.0 * uu1 * af05 * ww12
+                     + 4.0 * ee1 * hh4 * jj08 - 6.0 * kk1 * dd3 * qq05 * tt08
+                     - 4.0 * kk1 * xi * qq05 * tt08
+                     + 6.0 * uu1 * xi * dd3 * af05 / cc3 ** 4)
+        l4[:, 13] = (-bb1 * cc2 * pp08 * ae16 ** 3
+                     - 3.0 * bb1 * cc2 * pp08 * (-ee1 * pp07 * hh4 * jj08
+                                                 + 2.0 * bb1 * dd8 * cc2 * dd6
+                                                 - 2.0 * jj12 * dd7) * ae16
+                     - bb1 * cc2 * pp08 * (2.0 * kk1 * pp07 * qq05 * tt08
+                                           - 3.0 * ee1 * dd8 * hh4 * jj08
+                                           - 6.0 * bb1 * jj12 * cc2 * dd6
+                                           + 6.0 * dd7 / xi ** 4)
+                     + 6.0 * kk1 * qq05 * tt08
+                     - 6.0 * (xi + 1.0) * cc2 ** 4 / (er ** 4 * cc3 ** 4))
+        aj08 = 1.0 / cc3 ** 4
+        aj20 = 1.0 / xi ** 5
+        aj23 = (-2.0 * jj12 * dd7 + 2.0 * bb1 * dd8 * cc2 * dd6
+                + ee1 * aa2 * hh4 * jj08)
+        l4[:, 14] = (-jj13 * tt18 ** 4 - 6.0 * jj13 * aj23 * tt18 ** 2
+                     - 3.0 * jj13 * aj23 ** 2
+                     - 4.0 * jj13 * (-2.0 * kk1 * aa2 * qq05 * tt08
+                                     - 3.0 * ee1 * dd8 * hh4 * jj08
+                                     - 6.0 * bb1 * jj12 * cc2 * dd6
+                                     + 6.0 * tt16 * dd7) * tt18
+                     - jj13 * (6.0 * uu1 * aa2 * af05 * aj08
+                               + 8.0 * kk1 * dd8 * qq05 * tt08
+                               + 12.0 * ee1 * jj12 * hh4 * jj08
+                               + 24.0 * bb1 * tt16 * cc2 * dd6 - 24.0 * aj20 * dd7)
+                     - 24.0 * aj20 * dd3 * dd7 + 24.0 * tt16 * dd7
+                     + 24.0 * bb1 * tt16 * dd3 * cc2 * dd6
+                     - 24.0 * bb1 * jj12 * cc2 * dd6
+                     + 12.0 * ee1 * jj12 * dd3 * hh4 * jj08
+                     - 12.0 * ee1 * dd8 * hh4 * jj08
+                     + 8.0 * kk1 * dd8 * dd3 * qq05 * tt08
+                     - 8.0 * kk1 * aa2 * qq05 * tt08
+                     + 6.0 * uu1 * aa2 * dd3 * af05 * aj08)
+
+    return l0, l1, l2, l3, l4
+
+
+class gevlss(GeneralFamily):
+    """Generalized extreme value location-scale-shape general family —
+    mgcv ``gevlss()`` (gamlss.r:1945-2446). Three linear predictors:
+    LP1 the location μ (identity/log), LP2 ``ρ = log σ`` (identity),
+    LP3 the shape ξ through the :class:`ShiftedLogitLink` (ξ∈(−1,.5))
+    or identity. The GEV has **parameter-dependent support** — the
+    log-likelihood is −∞ wherever ``1 + ξ(y−μ)/σ ≤ 0`` — so this family
+    is hea's fixture for gam.fit5's robustness protocols (non-finite-ll
+    step rejection, step-halving → steepest-ascent, saddle
+    perturbation). No ``predict`` hook (response = per-LP linkinv);
+    null deviance is NA.
+    """
+    name = "gevlss"
+    scale_known = True
+    n_theta = 0
+    n_lp = 3
+    available_derivs = 2
+
+    def __init__(self, link: tuple[str, str, str]
+                 = ("identity", "identity", "logit")):
+        if len(link) != 3:
+            raise ValueError("gevlss requires 3 links")
+        ok = [("log", "identity"), ("identity",), ("identity", "logit")]
+        names = ("location", "log-scale", "shape")
+        for i in range(3):
+            if link[i] not in ok[i]:
+                raise ValueError(
+                    f'link "{link[i]}" not available for the {names[i]} '
+                    f"parameter of gevlss; available links are {ok[i]}")
+        loc = {"identity": IdentityLink, "log": LogLink}[link[0]]()
+        scale = IdentityLink()
+        shape = (ShiftedLogitLink() if link[2] == "logit"
+                 else IdentityLink())
+        self._link_names = tuple(link)
+        self.tri = trind_generator(3)
+        super().__init__([loc, scale, shape])
+
+    @staticmethod
+    def _clamp_xi(xi):
+        eps = 1e-7
+        xi = np.asarray(xi, dtype=float).copy()
+        xi[(xi >= 0) & (xi < eps)] = eps
+        xi[(xi < 0) & (xi > -eps)] = -eps
+        return xi
+
+    def ll(self, y, X, coef, wt=None, *, lpi, offset=None, deriv: int = 0,
+           d1b=None, d2b=None, fh=None, D=None) -> dict:
+        y = np.asarray(y, dtype=float)
+        X = np.asarray(X, dtype=float)
+        coef = np.asarray(coef, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        eta = X[:, jj[0]] @ coef[jj[0]]
+        etar = X[:, jj[1]] @ coef[jj[1]]
+        etax = X[:, jj[2]] @ coef[jj[2]]
+        if offset is not None:
+            if offset[0] is not None:
+                eta = eta + offset[0]
+            if len(offset) > 1 and offset[1] is not None:
+                etar = etar + offset[1]
+            if len(offset) > 2 and offset[2] is not None:
+                etax = etax + offset[2]
+        mu = self.links[0].linkinv(eta)
+        rho = self.links[1].linkinv(etar)
+        xi = self._clamp_xi(self.links[2].linkinv(etax))
+
+        # The GEV support is parameter-dependent: 1 + ξ(y−μ)/σ ≤ 0 makes
+        # the log-density −∞ (NaN from log1p/power). That is the EXPECTED
+        # signal gam.fit5 step-rejects on — mgcv warns "NaNs produced"
+        # there too — so the invalid-value warnings are silenced; the
+        # non-finite values still propagate to the fitter.
+        with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+            l0, l1, l2, l3, l4 = _gevlss_derivs(y, mu, rho, xi, deriv)
+        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        if deriv == 0:
+            return ret
+
+        ig1 = np.column_stack([self.links[0].mu_eta(eta),
+                               self.links[1].mu_eta(etar),
+                               self.links[2].mu_eta(etax)])
+        g2 = np.column_stack([self.links[0].d2link(mu),
+                              self.links[1].d2link(rho),
+                              self.links[2].d2link(xi)])
+        g3 = g4 = None
+        if deriv > 1:
+            g3 = np.column_stack([self.links[0].d3link(mu),
+                                  self.links[1].d3link(rho),
+                                  self.links[2].d3link(xi)])
+        if deriv > 3:
+            g4 = np.column_stack([self.links[0].d4link(mu),
+                                  self.links[1].d4link(rho),
+                                  self.links[2].d4link(xi)])
+
+        tri = self.tri
+        with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+            de = gamlss_etamu(l1, l2, l3, l4, ig1, g2, g3, g4,
+                              tri["i2"], tri["i3"], tri["i4"], deriv - 1)
+            gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
+                           l3=de["l3"], i3=tri["i3"], l4=de["l4"],
+                           i4=tri["i4"], d1b=d1b, d2b=d2b, deriv=deriv - 1,
+                           fh=fh, D=D)
+        ret.update(gh)
+        return ret
+
+    def initialize_coef(self, y, X, lpi, E=None, offset=None,
+                        use_unscaled: bool = False) -> np.ndarray:
+        """gevlss ``initialize`` (gamlss.r:2378-2423, dense branch):
+        regress g₁(y) on LP1, log|residuals| on LP2, then seed ξ near 0
+        (``g₃(1e-3)``) and run mgcv's crude ll line-search over a
+        scaling ``m`` of the ξ-start to escape the non-finite regime."""
+        y = np.asarray(y, dtype=float)
+        X = np.asarray(X, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        p = X.shape[1]
+        if E is None:
+            E = np.zeros((0, p))
+        start = np.zeros(p)
+
+        def _reg(cols, target):
+            if use_unscaled:
+                xa = np.vstack([X[:, cols], E[:, cols]])
+                b, *_ = np.linalg.lstsq(
+                    xa, np.concatenate([target, np.zeros(E.shape[0])]),
+                    rcond=None)
+                b[~np.isfinite(b)] = 0.0
+                return b
+            return _pen_reg(X[:, cols], E[:, cols], target)
+
+        if self._link_names[0] == "identity":
+            yt1 = y.copy()
+        else:
+            yt1 = self.links[0].link(np.abs(y) + float(np.max(y)) * 1e-7)
+        start[jj[0]] = _reg(jj[0], yt1)
+        lres1 = np.log(np.abs(y - self.links[0].linkinv(X[:, jj[0]]
+                                                        @ start[jj[0]])))
+        start[jj[1]] = _reg(jj[1], lres1)
+
+        # LP3: plain LS of the constant g₃(1e-3) target, then line-search.
+        x1 = X[:, jj[2]]
+        yt3 = np.full(x1.shape[0], self.links[2].link(np.array(1e-3)))
+
+        def fob(m=1.0):
+            bji, *_ = np.linalg.lstsq(x1, yt3 * m, rcond=None)
+            bji[~np.isfinite(bji)] = 0.0
+            st = start.copy()
+            st[jj[2]] = bji
+            return self.ll(y, X, st, lpi=lpi, offset=offset)["l"], st
+
+        f0l, f0s = fob()
+        dm = 0.2
+        mm = 1.0
+        up = False
+        f1l = f0l
+        while -4.2 < mm < 4.2:
+            f1l, f1s = fob(mm + dm)
+            if np.isfinite(f1l) and f1l > f0l:
+                up = True
+                f0l, f0s = f1l, f1s
+                mm = mm + dm
+            elif up:
+                break
+            elif dm > 0:
+                dm = -dm
+            else:
+                break
+        if not np.isfinite(f1l):
+            f1l, f1s = fob(mm - dm)
+            if np.isfinite(f1l):
+                f0l, f0s = f1l, f1s
+        return f0s
+
+    def rd(self, rng, mu, wt, scale):
+        """gevlss rd (gamlss.r:2427-2434): GEV inverse-CDF draws
+        ``μ + ((−log U)^{−ξ} − 1)·σ/ξ`` with ``σ = e^{fitted[:,1]}``,
+        ``ξ`` clamped away from 0."""
+        mu = np.asarray(mu, dtype=float)
+        z = rng.uniform(size=mu.shape[0])
+        loc = mu[:, 0]
+        sigma = np.exp(mu[:, 1])
+        xi = mu[:, 2].copy()
+        xi[np.abs(xi) < 1e-8] = 1e-8
+        return loc + ((-np.log(z)) ** (-xi) - 1.0) * sigma / xi
+
+    def residuals(self, y, fitted, type: str = "deviance") -> np.ndarray:
+        """gevlss residuals (gamlss.r:1981-2000). ``fitted`` is the
+        (n, 3) matrix (μ, ρ=log σ, ξ); the GEV mean is
+        ``fv = μ + e^ρ·(Γ(1−ξ)−1)/ξ``."""
+        if type not in ("deviance", "pearson", "response"):
+            raise ValueError(
+                "type must be one of 'deviance', 'pearson', 'response' "
+                f"for gevlss residuals; got {type!r}")
+        y = np.asarray(y, dtype=float)
+        fitted = np.asarray(fitted, dtype=float)
+        mu = fitted[:, 0]
+        rho = fitted[:, 1]
+        xi = fitted[:, 2].copy()
+        fv = mu + np.exp(rho) * (_gamma_fn(1.0 - xi) - 1.0) / xi
+        eps = 1e-7
+        xi[(xi >= 0) & (xi < eps)] = eps
+        xi[(xi < 0) & (xi > -eps)] = -eps
+        if type == "response":
+            return y - fv
+        if type == "pearson":
+            sd = np.exp(rho) / xi * np.sqrt(np.maximum(
+                0.0, _gamma_fn(1.0 - 2.0 * xi) - _gamma_fn(1.0 - xi) ** 2))
+            return (y - fv) / sd
+        ymr = (y - mu) * np.exp(-rho) * xi
+        rsd = ((xi + 1.0) / xi * np.log(1.0 + ymr) + (1.0 + ymr) ** (-1.0 / xi)
+               + (1.0 + xi) * np.log(1.0 + xi) - (1.0 + xi))
+        return np.sqrt(np.maximum(0.0, rsd)) * np.sign(y - fv)
+
+    def __repr__(self):
+        return f"gevlss(link={self._link_names!r})"
+
+
 def _coerce_response(y_series: pl.Series, family: "Family") -> np.ndarray:
     """Cast the response column to a numeric float array, with R's
     factor-response convention for :class:`Binomial`.
@@ -5903,7 +6458,7 @@ __all__ = [
     "Scat", "scat",
     "nb",
     "GeneralFamily", "gaulss", "twlss", "shash", "gammals", "gumbls",
-    "LogebLink", "SoftplusLink",
+    "gevlss", "LogebLink", "SoftplusLink", "ShiftedLogitLink",
     "trind_generator", "gamlss_etamu", "gamlss_gH",
     "IdentityLink", "LogLink", "InverseLink",
     "SqrtLink", "LogitLink", "ProbitLink", "CauchitLink", "CloglogLink",

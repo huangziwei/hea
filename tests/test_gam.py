@@ -5548,6 +5548,25 @@ def _gumbls_fixture():
     return pl.DataFrame({"y": y, "x": x, "z": z})
 
 
+def _gevlss_fixture():
+    # GEV data on R's set.seed(17) stream (bit-exact runif), GEV inverse-CDF
+    # with shape ξ=0.1. Reproducible by:
+    #   set.seed(17); n<-300; x<-runif(n); z<-runif(n)
+    #   mu<-0.5+sin(2*pi*x); logsig<- -0.5+0.3*z; xi<-0.1; u<-runif(n)
+    #   y<-mu + ((-log(u))^(-xi)-1)*exp(logsig)/xi
+    from hea.R.rng import RGenerator
+    gen = RGenerator(17)
+    n = 300
+    x = gen.uniform(size=n)
+    z = gen.uniform(size=n)
+    mu = 0.5 + np.sin(2 * np.pi * x)
+    logsig = -0.5 + 0.3 * z
+    xi = 0.1
+    u = gen.uniform(size=n)
+    y = mu + ((-np.log(u)) ** (-xi) - 1.0) * np.exp(logsig) / xi
+    return pl.DataFrame({"y": y, "x": x, "z": z})
+
+
 def test_twlss_through_gam_matches_mgcv():
     # R: gam(list(y ~ s(x) + w, ~ 1, ~ s(z)), family=twlss(),
     # method="REML") — available.derivs=0, so mgcv coerces the
@@ -5783,6 +5802,67 @@ def test_gumbls_through_gam_matches_mgcv():
     # the asymmetry: predict response fit[0] (location) ≠ fitted mean[0].
     assert abs(float(pr["fit"][0]) - float(m.fitted_values[0, 0])) > 0.1
     m.summary()
+
+
+def test_gevlss_through_gam_matches_mgcv():
+    # R: gam(list(y ~ s(x), ~ s(z), ~ 1), family=gevlss(), method="REML")
+    # on the set.seed(17) GEV fixture. gevlss has parameter-dependent
+    # support, so the inner Newton hits 1+ξ(y−μ)/σ ≤ 0 on trial steps —
+    # exercising gam.fit5's non-finite-ll step rejection (mgcv warns
+    # "NaNs produced" there too; hea silences it, fit converges
+    # identically). derivs=2 full Newton; no predict hook (response =
+    # per-LP linkinv).
+    from hea.family import gevlss
+
+    df = _gevlss_fixture()
+    m = gam(["y ~ s(x)", "~ s(z)", "~ 1"], df, family=gevlss(),
+            method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 400.7915694,
+                               rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.sp[0], 0.09316907739, rtol=1e-3)
+    assert m.sp[1] > 50.0           # s(z)-on-log-σ flat-ish direction
+    np.testing.assert_allclose(m.edf_total, 10.54442778, rtol=0, atol=2e-3)
+    # ξ is intercept-only (LP3 ~ 1): the shifted-logit shape intercept.
+    np.testing.assert_allclose(np.asarray(m._beta)[-1], 1.184566711,
+                               rtol=0, atol=1e-4)
+    # fitted matrix is (μ, ρ=log σ, ξ) — per-LP linkinv, no override.
+    np.testing.assert_allclose(
+        np.asarray(m.fitted_values)[:2],
+        [[1.268048747, -0.3566666145, 0.1486518752],
+         [0.02079092758, -0.4185000686, 0.1486518752]], rtol=0, atol=1e-3)
+    np.testing.assert_allclose(float(np.sum(np.diag(np.asarray(m.Vp)))),
+                               2.90608114, rtol=0, atol=1e-2)
+    assert np.isnan(m.null_deviance)        # mgcv leaves gevlss null dev NA
+    assert 4 <= m.outer_info["iter"] <= 10  # R: 6
+
+    # no predict hook: type="response" is the per-LP linkinv (μ, ρ, ξ),
+    # so the μ column equals the fitted μ on training rows.
+    pr = m.predict(type="response")
+    np.testing.assert_allclose(
+        pr["fit"].to_numpy(), np.asarray(m.fitted_values)[:, 0],
+        rtol=0, atol=1e-9)
+    m.summary()
+
+
+def test_gevlss_rank_deficient_matches_mgcv():
+    # A rank-deficient general design (duplicate LP1 covariate) drives
+    # gam.fit5's end-stage balanced-Hessian rank check → parameter drop +
+    # lpi reindex (gam.fit4.r:1150-1199) — a path no other ported family
+    # fires. R: gam(list(y ~ x + xb, ~ s(z), ~ 1), gevlss()) drops the
+    # duplicate (rank 13/14, coef 0).
+    from hea.family import gevlss
+
+    base = _gevlss_fixture()
+    df = base.with_columns(pl.col("x").alias("xb"))
+    m = gam(["y ~ x + xb", "~ s(z)", "~ 1"], df, family=gevlss(),
+            method="REML")
+    assert m.rank == 13 and len(np.asarray(m._beta)) == 14
+    np.testing.assert_allclose(m.REML_criterion / 2, 448.9062817,
+                               rtol=0, atol=1e-3)
+    beta = np.asarray(m._beta)
+    np.testing.assert_allclose(beta[2], 0.0, rtol=0, atol=0)   # dropped
+    np.testing.assert_allclose(beta[0], 1.3078499, rtol=0, atol=1e-3)
+    np.testing.assert_allclose(beta[1], -1.9194328, rtol=0, atol=1e-3)
 
 
 def test_shash_through_gam_matches_mgcv():
