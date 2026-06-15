@@ -105,3 +105,20 @@ where
             .collect()
     }
 }
+
+/// Map a kernel over indices `0..n` — for outputs computed from arbitrary
+/// indexed/strided inputs (e.g. rnorm's paired uniforms) rather than one
+/// aligned slice element. Parallel above `PAR_THRESHOLD`, serial below. The
+/// closure must be a pure index→value map (no shared mutable state) so the
+/// parallel and serial results are bit-for-bit identical.
+#[inline]
+pub fn map_index<F>(py: Python<'_>, n: usize, f: F) -> Vec<f64>
+where
+    F: Fn(usize) -> f64 + Sync + Send,
+{
+    if n >= PAR_THRESHOLD {
+        py.allow_threads(|| (0..n).into_par_iter().map(|i| f(i)).collect())
+    } else {
+        (0..n).map(|i| f(i)).collect()
+    }
+}

@@ -244,12 +244,13 @@ impl RsMt {
     /// (same stream as 2n scalar draws; bit-identical to the per-draw path).
     fn rnorm_n<'py>(&mut self, py: Python<'py>, n: usize) -> Bound<'py, PyArray1<f64>> {
         let u = self.unif_vec(2 * n);
-        let out: Vec<f64> = (0..n)
-            .map(|i| {
-                let comb = (BIG * u[2 * i]).trunc() + u[2 * i + 1];
-                qnorm5_scalar(comb / BIG, 0.0, 1.0, true, false)
-            })
-            .collect();
+        // Uniforms are drawn serially (stream order); the qnorm transform of the
+        // already-materialized uniforms is an independent per-index map, so it
+        // parallelizes above the threshold — bit-for-bit identical to serial.
+        let out = crate::par::map_index(py, n, |i| {
+            let comb = (BIG * u[2 * i]).trunc() + u[2 * i + 1];
+            qnorm5_scalar(comb / BIG, 0.0, 1.0, true, false)
+        });
         out.into_pyarray(py)
     }
 
