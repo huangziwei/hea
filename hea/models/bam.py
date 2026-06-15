@@ -1257,13 +1257,17 @@ def _build_qr_chunked_gaussian(
     use_chol: bool = False,
     rho: float = 0.0,
     ar_start: Optional[np.ndarray] = None,
+    prior_w: Optional[np.ndarray] = None,
 ) -> _BamQR:
     """Chunked QR build for the Gaussian-identity (am=TRUE) path.
 
     Walks ``data`` in chunks of ``chunk_size``, materialises each chunk's
     full design via :func:`_materialize_chunk`, and accumulates ``(R, f,
-    ‖z‖²)`` with :func:`_qr_update`. ``z = y − offset`` (prior weights = 1
-    in this iteration; user-facing ``weights=`` lands later).
+    ‖z‖²)`` with :func:`_qr_update`. ``z = y − offset``. ``prior_w`` (mgcv
+    ``G$w``) scales each row by ``√w`` BEFORE the AR1 transform — mgcv weights
+    then ``rwMatrix``-decorrelates (bam.r:654: ``rwMatrix(..., sqrt(w)*z)``);
+    ``None`` ≡ all-ones. The resulting ``R'R = X'WX`` and ``y_norm2 =
+    Σ wᵢ(yᵢ−offᵢ)²`` are the prior-weighted Gram / working-RSS.
 
     For ``rho == 0`` this mirrors mgcv ``bam.fit`` single-thread loop
     (bam.r:1576-1613). For ``rho ≠ 0`` (AR1 error model) each chunk is
@@ -1303,6 +1307,12 @@ def _build_qr_chunked_gaussian(
         X_param_chunk = X_param_full[start:end]
         X_chunk = _materialize_chunk(blocks, chunk_data, X_param_chunk)
         z_chunk = y[start:end] - offset[start:end]
+        if prior_w is not None:
+            # mgcv weights the working data (√w·X, √w·z) before the AR1
+            # rwMatrix transform — see bam.r:654.
+            sw = np.sqrt(prior_w[start:end])
+            X_chunk = sw[:, None] * X_chunk
+            z_chunk = sw * z_chunk
         if ar1:
             N_block = end - start
             ar_start_block = (
@@ -1658,6 +1668,9 @@ class bam(gam):
     discrete (``bgam.fitd``) follow.
     """
 
+    # Lazily-filled cache for the :attr:`_cmX` property (mgcv object$cmX).
+    _cmX_cache: np.ndarray | None = None
+
     def __init__(
         self,
         formula: str,
@@ -1667,6 +1680,8 @@ class bam(gam):
         sp: np.ndarray | None = None,
         family: Family | None = None,
         offset: np.ndarray | list | None = None,
+        weights: np.ndarray | list | None = None,
+        scale: float = 0.0,
         gamma: float = 1.0,
         select: bool = False,
         chunk_size: int = 10000,
@@ -1739,6 +1754,47 @@ class bam(gam):
         self._select = bool(select)
         self._gamma = float(gamma)
         self.family = family
+
+        # bam(scale=) resolution — identical to gam (estimate.gam,
+        # mgcv.r:1936-1971). scale=0 → family default (the historical bam
+        # path); scale>0 → φ KNOWN at that value (REML/ML drop the log-φ slot,
+        # GCV.Cp → UBRE at φ=scale); scale<0 → force φ estimation. The
+        # inherited _scale_known_fit / _scale_fixed_value properties read
+        # _scale_resolved; every fit/post-fit branch below dispatches on
+        # _scale_known_fit (== family.scale_known on the default scale=0 path,
+        # so existing behaviour is byte-identical).
+        if not (np.isscalar(scale) and np.isfinite(scale)):
+            raise ValueError(f"scale must be a finite number, got {scale!r}")
+        scale = float(scale)
+        if self._family_mgcv_extended:
+            if scale != 0.0:
+                raise NotImplementedError(
+                    "scale= for mgcv-extended families (tw, scat, nb) is not "
+                    "ported — their scale handling is family-driven "
+                    "(mgcv.r:1948-1949)."
+                )
+            self._scale_resolved = 1.0 if self.family.scale_known else -1.0
+        elif self.family.scale_known:
+            # poisson/binomial carry φ ≡ 1 through hea's PIRLS. mgcv-bam would
+            # fix (scale>0) or estimate a quasi-dispersion (scale<0) here
+            # (bam.r:472, 617-624), but the inner φ-slot diverges for a
+            # scale-known family in hea, so only the φ=1 default is supported.
+            if scale != 0.0:
+                raise NotImplementedError(
+                    "scale= for scale-known families (poisson/binomial) is "
+                    "not ported — bam's quasi-likelihood dispersion handling "
+                    "needs a PIRLS φ-slot hea doesn't carry for these "
+                    "families. Only scale=0 (φ=1) is supported."
+                )
+            self._scale_resolved = 1.0
+        elif method in ("REML", "ML"):
+            # scale-unknown family (gaussian/Gamma/inverse.gaussian): scale>0
+            # fixes φ (REML/ML drop the log-φ slot); scale≤0 estimates it.
+            self._scale_resolved = scale if scale > 0 else -1.0
+        else:  # GCV.Cp
+            self._scale_resolved = scale if scale != 0.0 else -1.0
+        self.scale_estimated = not self._scale_known_fit
+
         self._chunk_size = int(chunk_size)
         self._use_chol = bool(use_chol)
         self._discrete = bool(discrete)
@@ -1754,6 +1810,12 @@ class bam(gam):
         d = prepare_design(formula, data)
         reject_unsupported_smooth_id(d.expanded)
         self._expanded = d.expanded
+        # R model.matrix's ``assign`` for the parametric block (0 = intercept,
+        # i = expanded.terms[i-1]). The inherited predict()/summary() term
+        # machinery (gam.py:_term_column_groups, _pterms_rows) groups parametric
+        # columns by this; without it, type='terms'/terms=/exclude= silently
+        # drop every parametric term (P4).
+        self._param_assign = list(d.param_assign or [])
         _expr_map = _smooth_arg_expr_map(self._expanded)
         self.data = (
             _apply_smooth_arg_exprs(d.data, _expr_map) if _expr_map else d.data
@@ -1883,10 +1945,27 @@ class bam(gam):
         self.y = d.y
         self._y_arr = y_full
         self.n = n
-        # Prior weights: bam's user-facing ``weights=`` is not plumbed yet
-        # (bam plan), but inherited gam methods (_reml/_reml_grad/ls calls)
-        # read ``self._wt`` — keep it ones until then.
-        self._wt = np.ones(n)
+        # Prior weights (mgcv bam(weights=) → G$w). Threaded into the chunked
+        # QR build (√w row scaling), the PIRLS Fisher weights (w·μ_η²/V), and
+        # every post-fit consumer that reads ``self._wt`` (scale, leverage,
+        # Pearson/deviance residuals, null deviance, R²). The common
+        # binomial-trials case is the cbind(succ, fail) response, so this is
+        # analytic/prior weights.
+        if weights is None:
+            self._wt = np.ones(n)
+            self._has_prior_weights = False
+        else:
+            w_arr = np.asarray(weights, dtype=float).flatten()
+            if w_arr.shape != (n,):
+                raise ValueError(
+                    f"weights must have length {n}, got {w_arr.shape}"
+                )
+            if not np.all(np.isfinite(w_arr)) or np.any(w_arr < 0):
+                raise ValueError(
+                    "weights must be finite and non-negative"
+                )
+            self._wt = w_arr
+            self._has_prior_weights = True
         self.prior_weights = self._wt
         self.p = p
         self.p_param = p_param
@@ -1912,12 +1991,13 @@ class bam(gam):
             )
 
         # ---- family-independent post-setup --------------------------------
-        # tss for r-squared. We need the full y'y (not the offset-stripped
-        # y_norm2) and the intercept-conditioned variance.
-        full_yty = float(y_full @ y_full)
+        # tss for r-squared, prior-weighted (mgcv summary.gam uses the weighted
+        # mean / weighted TSS; reduces to the unweighted form when weights=1).
+        w = self._wt
+        full_yty = float(np.sum(w * y_full * y_full))
         if has_intercept:
-            mean_y = float(y_full.mean())
-            tss = float(np.sum((y_full - mean_y) ** 2))
+            mean_y = float(np.sum(w * y_full) / np.sum(w))
+            tss = float(np.sum(w * (y_full - mean_y) ** 2))
         else:
             tss = full_yty
         self._yty_full = full_yty
@@ -1970,6 +2050,7 @@ class bam(gam):
                 self.data, blocks, X_param_full, y_full, off,
                 chunk_size=chunk_size, use_chol=self._use_chol,
                 rho=self._rho, ar_start=self._ar_start,
+                prior_w=(None if not self._has_prior_weights else self._wt),
             )
             self._bam_qr = qr
             # Sufficient statistics from (R, f). These are exact identities:
@@ -2009,7 +2090,7 @@ class bam(gam):
                 rho_hat = np.log(np.maximum(sp_arr, 1e-10))
                 self.sp = sp_arr
                 fit = self._fit_given_rho(rho_hat)
-                if (not self.family.scale_known) and method in ("REML", "ML"):
+                if (not self._scale_known_fit) and method in ("REML", "ML"):
                     Dp = float(fit.dev + fit.pen)
                     denom = (max(float(n - self._Mp), 1.0)
                              if method == "REML" else max(float(n), 1.0))
@@ -2018,7 +2099,7 @@ class bam(gam):
                     )
             else:
                 include_log_phi = (
-                    (not family.scale_known) and method in ("REML", "ML")
+                    (not self._scale_known_fit) and method in ("REML", "ML")
                 )
                 include_family_theta = False  # tw / extended families not in this iter
                 if method in ("REML", "ML"):
@@ -2085,6 +2166,10 @@ class bam(gam):
         type: str = "response",
         se_fit: bool = False,
         offset: np.ndarray | list | None = None,
+        unconditional: bool = False,
+        terms: str | list[str] | None = None,
+        exclude: str | list[str] | None = None,
+        iterms_type: int | None = None,
     ):
         """Predict from the fitted bam — :func:`predict.bam` parity.
 
@@ -2117,21 +2202,42 @@ class bam(gam):
           per-row link-scale variance; delta-method
           ``|μ_η|`` multiplier for response-scale SE.
         """
-        if type not in ("link", "response", "lpmatrix"):
+        if type not in ("link", "response", "terms", "iterms", "lpmatrix"):
             raise ValueError(
-                f"type must be 'link', 'response', or 'lpmatrix'; got {type!r}"
+                "type must be 'link', 'response', 'terms', 'iterms', or "
+                f"'lpmatrix'; got {type!r}"
             )
         if type == "lpmatrix" and se_fit:
             raise ValueError(
                 "se_fit=True is not allowed with type='lpmatrix'"
             )
 
+        # predict.bam delegates the non-discrete case to predict.gam, so the
+        # whole gam.predict surface (terms/iterms decomposition, terms=/
+        # exclude= selection, unconditional=Vc) is available. bam only
+        # *overrides* the cached/chunked fast paths for whole-model
+        # link/response/lpmatrix; everything else routes to the parent.
         if newdata is not None:
             return super().predict(
                 newdata=newdata, type=type, se_fit=se_fit, offset=offset,
+                unconditional=unconditional, terms=terms, exclude=exclude,
+                iterms_type=iterms_type,
             )
 
         # ---- newdata=None branch -------------------------------------------
+        # Per-term decomposition, term selection, or the sp-uncertainty
+        # covariance all need the full n×p design, which bam's fast paths
+        # don't carry (self._X_full is the p×p R factor). Route those through
+        # the parent on the training frame — same mechanism as the lpmatrix
+        # branch below, bit-equal to the fit-time design for non-discrete bam.
+        if (type in ("terms", "iterms")
+                or terms is not None or exclude is not None or unconditional):
+            return super().predict(
+                newdata=self.data, type=type, se_fit=se_fit, offset=offset,
+                unconditional=unconditional, terms=terms, exclude=exclude,
+                iterms_type=iterms_type,
+            )
+
         extra: Optional[np.ndarray] = None
         if offset is not None:
             extra = np.asarray(offset, dtype=float).flatten()
@@ -2434,6 +2540,58 @@ class bam(gam):
             out[start:end] = X_chunk @ beta
         return out
 
+    @property
+    def _cmX(self) -> np.ndarray:
+        """mgcv ``object$cmX`` — true design column means, computed lazily.
+
+        bam's ``_X_full`` is the p×p QR factor, so the inherited iterms SE
+        widening (gam.py ``_terms_frame``) can't recover ``colMeans(X)`` from
+        it — its ``_X_full.mean(axis=0)`` fallback would average the R factor's
+        rows, not the design. Only ``type='iterms'`` + ``se_fit`` on a
+        constrained smooth reads this, so compute on first access and cache —
+        ordinary fits (and the matrix-argument/distributed-lag smooths whose
+        bases don't re-materialise from a ``self.data`` chunk) never pay for
+        it.
+        """
+        if self._cmX_cache is None:
+            self._cmX_cache = self._chunked_colmeans()
+        return self._cmX_cache
+
+    def _chunked_colmeans(self) -> np.ndarray:
+        """Column means of the full n×p design (backs :attr:`_cmX`).
+
+        Same chunk-walk dispatch as :meth:`_chunked_var_eta_diag`: discrete bam
+        gathers each block via ``spec.predict_mat``, non-discrete re-evaluates
+        the basis with :func:`_materialize_chunk`.
+        """
+        n = self.n
+        acc = np.zeros(self.p, dtype=float)
+        if self._discrete_design is not None:
+            X_param_full = self._X_param_full
+            for start, end in _chunk_indices(n, self._chunk_size):
+                cols = [X_param_full[start:end]]
+                for b in self._blocks:
+                    if b.spec is None:
+                        raise RuntimeError(
+                            f"smooth block {b.label!r} (cls={b.cls!r}) "
+                            f"has no BasisSpec; cmX requires every smooth "
+                            f"to carry one."
+                        )
+                    cols.append(np.asarray(
+                        b.spec.predict_mat(self.data[start:end]),
+                        dtype=float,
+                    ))
+                acc += np.concatenate(cols, axis=1).sum(axis=0)
+            return acc / n
+        for start, end in _chunk_indices(n, self._chunk_size):
+            X_chunk = _materialize_chunk(
+                self._blocks,
+                self.data[start:end],
+                self._X_param_full[start:end],
+            )
+            acc += X_chunk.sum(axis=0)
+        return acc / n
+
     def _chunked_leverage_diag(self, A_inv: np.ndarray) -> np.ndarray:
         """Diagonal of the unweighted hat matrix ``H = X·A⁻¹·X'``.
 
@@ -2525,18 +2683,21 @@ class bam(gam):
         edf = np.diag(A_inv_XtWX).copy()
         edf_total = float(edf.sum())
 
-        # Prior weights (=1 for now). Same convention as gam.
-        self._wt = np.ones(n)
+        # Prior weights (mgcv G$w) — resolved in __init__; the chunked QR was
+        # built from √w·(X, z) so fit.dev is the weighted RSS Σ wᵢ(yᵢ−μ̂ᵢ)².
         wt = self._wt
         df_resid = float(n - edf_total)
-        # Gaussian: V=1, scale = ‖y - μ̂‖²/(n - edf). fit.dev already holds
+        # Gaussian: V=1, scale = Σwᵢ(yᵢ - μ̂ᵢ)²/(n - edf). fit.dev already holds
         # the full-data residual sum of squares (rss_extra absorbed).
         if df_resid > 0:
             pearson_scale = float(fit.dev) / df_resid
         else:
             pearson_scale = float("nan")
         self._pearson_scale = pearson_scale
-        sigma_squared = pearson_scale
+        # A user scale=φ fixes the Gaussian scale; otherwise the REML/Pearson
+        # estimate (mgcv G$sig2 <- scale when known, mgcv.r:1942).
+        sigma_squared = (self._scale_fixed_value if self._scale_known_fit
+                         else pearson_scale)
         sigma = (float(np.sqrt(sigma_squared))
                  if np.isfinite(sigma_squared) and sigma_squared >= 0
                  else float("nan"))
@@ -2573,6 +2734,21 @@ class bam(gam):
         se = np.sqrt(np.diag(Vp))
         self.se_bhat = _row_frame(se, self.column_names)
         self._se = se
+        # User-facing coefficient reporting (mirrors gam.py:1840-1854). The
+        # inherited summary()/_se_report_for read _beta_report/_se_report; bam
+        # never set them, so summary() raised AttributeError. bam doesn't drop
+        # columns today (_keep_cols is None) but keep gam's full branch for
+        # forward-compat with drop.intercept (P7).
+        if self._keep_cols is not None:
+            beta_rep = np.zeros(self._keep_cols.size)
+            beta_rep[self._keep_cols] = np.asarray(beta).reshape(-1)
+            se_rep = np.zeros(self._keep_cols.size)
+            se_rep[self._keep_cols] = se
+        else:
+            beta_rep = np.asarray(beta).reshape(-1)
+            se_rep = se
+        self._beta_report = beta_rep
+        self._se_report = se_rep
         t_stats = np.divide(beta, se, out=np.full_like(beta, np.nan), where=se > 0)
         self.t_values = _row_frame(t_stats, self.column_names)
         if df_resid > 0 and np.isfinite(df_resid):
@@ -2589,29 +2765,31 @@ class bam(gam):
         self.fitted_values = mu
         self.fitted = mu
         y = self._y_arr
-        # Gaussian deviance residuals = sign(y-μ)·√((y-μ)²) = y - μ.
-        self.residuals = y - mu
+        # Gaussian deviance residuals = sign(y-μ)·√(w(y-μ)²) = √w·(y-μ)
+        # (mirrors gam.py:1881; reduces to y-μ when weights=1).
+        self.residuals = self._deviance_residuals(y, mu, self._wt)
         self.sigma = sigma
         self.sigma_squared = sigma_squared
         self.scale = sigma_squared
 
-        # Leverage diag: chunked. For Gaussian-identity W=I, leverage_i =
-        # (X A⁻¹ X')_ii — no √W factors. Σ leverage_i = edf_total exactly.
-        leverage = self._chunked_leverage_diag(A_inv)
+        # Leverage diag: chunked. WLS hat h_i = w_i·(X A⁻¹ X')_ii (A = X'WX);
+        # the chunk walk returns the unweighted (X A⁻¹ X')_ii, so scale by the
+        # prior weight. Σ h_i = tr(A⁻¹ X'WX) = edf_total exactly.
+        leverage = self._chunked_leverage_diag(A_inv) * self._wt
         self.leverage = leverage
         sigma_for_std = sigma if np.isfinite(sigma) and sigma > 0 else 1.0
         denom = sigma_for_std * np.sqrt(np.clip(1.0 - leverage, 1e-12, None))
-        # V(μ)=1, Pearson residual = (y - μ)/√V = y - μ.
-        pearson_res = (y - mu)
+        # V(μ)=1, Pearson residual = √w·(y - μ)/√V = √w·(y - μ).
+        pearson_res = np.sqrt(self._wt) * (y - mu)
         self.std_dev_residuals = self.residuals / denom
         self.std_pearson_residuals = pearson_res / denom
         self.df_residuals = df_resid
-        # mgcv bam.r:2774 — ``object$deviance = sum(object$residuals^2)`` where
-        # ``residuals = y - μ`` is *response-space*. For AR1 (rho != 0) the
-        # AR1-decorrelated RSS lives separately in ``std.rsd`` (used for σ²
-        # and AIC scale calcs). The response-space ``deviance`` is what
-        # ``deviance.explained`` reports against ``null.deviance``, both on the
-        # original y scale.
+        # mgcv bam.r:2774 — ``object$deviance = sum(object$residuals^2)``. With
+        # the weighted deviance residuals √w·(y−μ) this is Σ wᵢ(yᵢ−μᵢ)² (=
+        # fit.dev), the weighted RSS. For AR1 (rho != 0) the AR1-decorrelated
+        # RSS lives separately in ``std.rsd`` (used for σ² and AIC scale
+        # calcs). The ``deviance`` is what ``deviance.explained`` reports
+        # against ``null.deviance``, both on the original y scale.
         self.deviance = float(np.sum(self.residuals ** 2))
         self.rss = self.deviance
         # AR1-decorrelated residuals (mgcv ``object$std.rsd``, bam.r:2772) —
@@ -2678,6 +2856,12 @@ class bam(gam):
         # No further patching needed here.
         self._fisher_w = None
 
+        # mgcv oo$rank.est (P5). bam's _X_full = R already encodes √W·X
+        # (R'R = X'WX); with _fisher_w=None the inherited _estimate_rank runs
+        # the pivoted-QR rank reveal on R directly — rank-equivalent to gam's
+        # √W·X path (same Gram, same column space, same Frobenius scaling).
+        self.rank = self._estimate_rank()
+
         # Augmented REML Hessian (only built if (R)EML and finite σ²).
         if (
             method in ("REML", "ML")
@@ -2715,7 +2899,7 @@ class bam(gam):
         self.Vc = Vp + Vc_corr
 
         # AIC / BIC.
-        sc_p = 0.0 if self.family.scale_known else 1.0
+        sc_p = 0.0 if self._scale_known_fit else 1.0
         dev1 = self.family._aic_dev1(self.deviance, sigma_squared, wt)
         family_aic = float(self.family.aic(y, fit.mu, dev1, wt, n))
         mgcv_aic = family_aic + 2.0 * edf_total
@@ -2842,9 +3026,9 @@ class bam(gam):
         chunk_size = self._chunk_size
         y = self._y_arr
         off = self._offset
-        prior_w = np.ones(n)   # user-facing weights= lands later
+        prior_w = self._wt     # mgcv bam(weights=) → G$w (ones if unset)
 
-        include_log_phi = (not family.scale_known) and method in ("REML", "ML")
+        include_log_phi = (not self._scale_known_fit) and method in ("REML", "ML")
 
         # ---- Extended-family preinit (mgcv bgam.fitd, bam.r:534-541) ----
         # ``family.preinitialize(y)`` may return ``{"Theta": ...}`` to
@@ -3262,21 +3446,25 @@ class bam(gam):
         edf = np.diag(A_inv_XtWX).copy()
         edf_total = float(edf.sum())
 
-        # Prior weights (=1 for now). Same convention as gam.
-        self._wt = np.ones(n)
+        # Prior weights (mgcv G$w) — resolved in __init__. The PIRLS Fisher
+        # weight self._wt_full already folds these in (w = w_prior·μ_η²/V), so
+        # leverage uses _wt_full; scale/Pearson/null-deviance read self._wt.
         wt = self._wt
         df_resid = float(n - edf_total)
 
         # Pearson scale = Σ wᵢ·(yᵢ - μᵢ)²/V(μᵢ) / df_resid (mgcv gam.fit3.r:606).
-        if df_resid > 0 and not family.scale_known:
+        # When φ is KNOWN (scale-known family, or user scale=φ), report the
+        # fixed value (mgcv G$sig2 <- scale, mgcv.r:1942) — mirrors gam.
+        if df_resid > 0 and not self._scale_known_fit:
             V = family.variance(fit.mu)
             pearson_scale = float(
                 np.sum(wt * (y - fit.mu) ** 2 / V)
             ) / df_resid
         else:
-            pearson_scale = 1.0 if family.scale_known else float("nan")
+            pearson_scale = (self._scale_fixed_value
+                             if self._scale_known_fit else float("nan"))
         self._pearson_scale = pearson_scale
-        scale = 1.0 if family.scale_known else pearson_scale
+        scale = self._scale_fixed_value if self._scale_known_fit else pearson_scale
         sigma_squared = scale
         sigma = (float(np.sqrt(sigma_squared))
                  if np.isfinite(sigma_squared) and sigma_squared >= 0
@@ -3313,6 +3501,21 @@ class bam(gam):
         se = np.sqrt(np.diag(Vp))
         self.se_bhat = _row_frame(se, self.column_names)
         self._se = se
+        # User-facing coefficient reporting (mirrors gam.py:1840-1854). The
+        # inherited summary()/_se_report_for read _beta_report/_se_report; bam
+        # never set them, so summary() raised AttributeError. bam doesn't drop
+        # columns today (_keep_cols is None) but keep gam's full branch for
+        # forward-compat with drop.intercept (P7).
+        if self._keep_cols is not None:
+            beta_rep = np.zeros(self._keep_cols.size)
+            beta_rep[self._keep_cols] = np.asarray(beta).reshape(-1)
+            se_rep = np.zeros(self._keep_cols.size)
+            se_rep[self._keep_cols] = se
+        else:
+            beta_rep = np.asarray(beta).reshape(-1)
+            se_rep = se
+        self._beta_report = beta_rep
+        self._se_report = se_rep
         t_stats = np.divide(beta, se, out=np.full_like(beta, np.nan), where=se > 0)
         self.t_values = _row_frame(t_stats, self.column_names)
         if df_resid > 0 and np.isfinite(df_resid):
@@ -3417,6 +3620,11 @@ class bam(gam):
         # XtWX-rebuild short-circuit on (line 3228 in gam.py).
         self._fisher_w = None
 
+        # mgcv oo$rank.est (P5) — see _post_fit_gaussian. _X_full = R
+        # (R'R = X'WX) with _fisher_w=None → rank reveal on R is
+        # rank-equivalent to the √W·X path.
+        self.rank = self._estimate_rank()
+
         if (
             method in ("REML", "ML")
             and n_sp > 0
@@ -3453,7 +3661,7 @@ class bam(gam):
         self.Vc = Vp + Vc_corr
 
         # AIC / BIC.
-        sc_p = 0.0 if family.scale_known else 1.0
+        sc_p = 0.0 if self._scale_known_fit else 1.0
         dev1 = family._aic_dev1(self.deviance, sigma_squared, wt)
         family_aic = float(family.aic(y, fit.mu, dev1, wt, n))
         mgcv_aic = family_aic + 2.0 * edf_total
@@ -3473,6 +3681,18 @@ class bam(gam):
                     if self._log_phi_hat is not None else 0.0
                 )
                 score = float(self._reml(rho_hat, log_phi_hat, fit=fit))
+                # bam's _fit_given_rho returns fit.dev = the working-data RSS
+                # (the reduced Gaussian-on-(R,f) problem). mgcv's fREML reports
+                # the criterion on the RESPONSE deviance (bgam.fit recomputes
+                # dev each PIRLS iter, bam.r:1084). _reml enters dev ONLY as
+                # Dp/φ, so swap the working RSS for the response deviance
+                # (self.deviance) — matches mgcv-bam's sp.criterion to ~5e-9
+                # (P16). Non-Gaussian only; for Gaussian-identity the two
+                # coincide so the correction is 0. The argmin is unchanged
+                # (the fit is already pinned to mgcv).
+                phi = float(np.exp(log_phi_hat))
+                if np.isfinite(phi) and phi > 0 and np.isfinite(score):
+                    score = score + (self.deviance - float(fit.dev)) / phi
             else:
                 score = float("nan")
             if method == "REML":
