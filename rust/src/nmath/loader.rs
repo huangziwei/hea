@@ -10,7 +10,7 @@ use super::bd0_scale::BD0_SCALE;
 use super::coeffs::{S, STIRLERR_HALVES};
 use super::consts::{DBL_MIN, M_2PI, M_LN2, M_LN_2PI, M_LN_SQRT_2PI, M_SQRT_2PI, X_LRG};
 use super::lgamma::lgammafn;
-use super::util::{frexp, ldexp};
+use super::util::{frexp, ldexp, rfma};
 
 /// R's `stirlerr(n) = log(n!) - log(sqrt(2*pi*n)*(n/e)^n)`.
 pub fn stirlerr(n: f64) -> f64 {
@@ -21,10 +21,11 @@ pub fn stirlerr(n: f64) -> f64 {
         }
         if n >= 1.0 && n <= 5.25 {
             let l_n = n.ln();
-            return lgammafn(n) + n * (1.0 - l_n) + (l_n - M_LN_2PI) * 0.5;
+            // C: lgamma(n) + n*(1 - l_n) + ldexp(..); only the n*(..)+lgamma fuses.
+            return rfma(n, 1.0 - l_n, lgammafn(n)) + (l_n - M_LN_2PI) * 0.5;
         }
         if n < 1.0 {
-            return lgammafn(1.0 + n) - (n + 0.5) * n.ln() + n - M_LN_SQRT_2PI;
+            return rfma(-(n + 0.5), n.ln(), lgammafn(1.0 + n)) + n - M_LN_SQRT_2PI;
         }
         // 5.25 < n <= 23.5 — asymptotic series, length by threshold
         let nn = n * n;
@@ -112,9 +113,9 @@ pub fn bd0(x: f64, np_: f64) -> f64 {
             x.ln() - np_.ln()
         };
         if x > np_ {
-            x * (lg - 1.0) + np_
+            rfma(x, lg - 1.0, np_)
         } else {
-            x * lg + np_ - x
+            rfma(x, lg, np_) - x
         }
     }
 }
@@ -143,7 +144,7 @@ pub fn ebd0(x: f64, m: f64) -> (f64, f64) {
     if M_LN2 * (-(e as f64)) > 1.0 + f64::MAX / x {
         return (f64::INFINITY, 0.0);
     }
-    let i = ((r - 0.5) * (2.0 * n_f) + 0.5).floor() as i64;
+    let i = rfma(r - 0.5, 2.0 * n_f, 0.5).floor() as i64;
     let f = (s_f / (0.5 + (i as f64) / (2.0 * n_f)) + 0.5).floor();
     let fg = ldexp(f, -(e + SB));
     if fg == f64::INFINITY {
@@ -163,7 +164,7 @@ pub fn ebd0(x: f64, m: f64) -> (f64, f64) {
     }
 
     // ADD1(-x * log1pmx((M*fg - x)/x)) — R's ebd0 uses the accurate log1pmx.
-    let arg = (m * fg - x) / x;
+    let arg = rfma(m, fg, -x) / x;
     add1!(-x * super::gamma::log1pmx(arg));
 
     if fg != 1.0 {
@@ -190,9 +191,9 @@ pub fn pow1p(x: f64, y: f64) -> f64 {
         return match y as i32 {
             0 => 1.0,
             1 => x + 1.0,
-            2 => x * (x + 2.0) + 1.0,
-            3 => x * (x * (x + 3.0) + 3.0) + 1.0,
-            _ => x * (x * (x * (x + 4.0) + 6.0) + 4.0) + 1.0,
+            2 => rfma(x, x + 2.0, 1.0),
+            3 => rfma(x, rfma(x, x + 3.0, 3.0), 1.0),
+            _ => rfma(x, rfma(x, rfma(x, x + 4.0, 6.0), 4.0), 1.0),
         };
     }
     let xp1 = x + 1.0;
@@ -225,7 +226,7 @@ pub fn dpois_raw(x: f64, lam: f64, give_log: bool) -> f64 {
         let lr = if !x.is_finite() {
             f64::NEG_INFINITY
         } else {
-            -lam + x * lam.ln() - lgammafn(x + 1.0)
+            rfma(x, lam.ln(), -lam) - lgammafn(x + 1.0)
         };
         return if give_log { lr } else { lr.exp() };
     }
@@ -274,7 +275,7 @@ pub fn dbinom_raw(x: f64, n: f64, p: f64, q: f64, give_log: bool) -> f64 {
     let lc =
         stirlerr(n) - stirlerr(x) - stirlerr(n - x) - bd0(x, n * p) - bd0(n - x, n * q);
     let lf = M_LN_2PI + x.ln() + (-x / n).ln_1p();
-    let lr = lc - 0.5 * lf;
+    let lr = rfma(-0.5, lf, lc);
     if give_log {
         lr
     } else {

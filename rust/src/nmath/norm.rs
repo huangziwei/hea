@@ -11,7 +11,7 @@ use pyo3::prelude::*;
 
 use super::coeffs::{QN_A, QN_B, QN_C, QN_D, QN_E, QN_F};
 use super::consts::{M_2PI, M_LN2, M_LN_SQRT_2PI, M_SQRT2};
-use super::util::{ldexp, round_half_even};
+use super::util::{ldexp, rfma, round_half_even};
 
 // --- constants (Rmath.h) -----------------------------------------------------
 const M_SQRT_32: f64 = 5.656854249492380195206754896838; // sqrt(32)
@@ -289,11 +289,14 @@ pub fn pnorm<'py>(
 }
 
 // === qnorm5 — normal quantile (nmath/qnorm.c, Wichura AS-241) =================
+// FMA NOTE: R's qnorm.c writes each rational as ONE C expression, so on arm64 R
+// fuses every `a*b + c` to `fmadd`; on x86-64 it does not. `rfma` mirrors that
+// per-arch (see util::rfma) — plain `v*r + k` diverges from R-arm64 by up to 7 ulp.
 #[inline]
 fn qn_horner(r: f64, c: &[f64]) -> f64 {
     let mut v = c[0];
     for &k in &c[1..] {
-        v = v * r + k;
+        v = rfma(v, r, k);
     }
     v
 }
@@ -345,7 +348,8 @@ pub fn qnorm5_scalar(p: f64, mu: f64, sigma: f64, lower_tail: bool, log_p: bool)
     let q = p_ - 0.5;
 
     if q.abs() <= 0.425 {
-        let r = 0.180625 - q * q;
+        // `r = .180625 - q*q` is one C expression → R fuses to fnmadd on arm64.
+        let r = rfma(-q, q, 0.180625);
         let val = q * qn_horner(r, &QN_A) / qn_horner(r, &QN_B);
         return mu + sigma * val;
     }

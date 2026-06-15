@@ -6,6 +6,30 @@
 //! `round` (round-half-to-even), which R uses for `R_forceint`.
 #![allow(dead_code)]
 
+/// R-parity fused multiply-add (`a*b + c`), matching how CRAN R's nmath is
+/// compiled on the *current* arch.
+///
+/// R is built `clang -O2` with no `-ffp-contract` flag, so clang's default
+/// (`=on`) fuses `a*b + c` written within a single C expression to an `fmadd` —
+/// but only where the ISA has baseline FMA: **true on aarch64, false on generic
+/// x86-64**. So to stay 0-ulp to the *live* R on whatever machine the gate runs,
+/// hea must fuse on aarch64 and stay plain (two roundings) on x86-64. R itself is
+/// NOT bit-identical across the two arches for these polynomial kernels — that is
+/// the root of the Apple-Silicon parity drift — so this match must be per-arch.
+///
+/// On x86-64 this is literally `a*b + c` (the pre-FMA-fix code that was already
+/// green vs R on Intel), so switching a kernel to `rfma` is a no-op there.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn rfma(a: f64, b: f64, c: f64) -> f64 {
+    a.mul_add(b, c)
+}
+#[cfg(not(target_arch = "aarch64"))]
+#[inline(always)]
+pub fn rfma(a: f64, b: f64, c: f64) -> f64 {
+    a * b + c
+}
+
 /// C `frexp`: `(m, e)` with `x = m * 2^e`, `m` in `[0.5, 1)`; for 0/inf/nan
 /// returns `(x, 0)`. Matches `np.frexp`.
 pub fn frexp(x: f64) -> (f64, i32) {

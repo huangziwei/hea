@@ -11,7 +11,7 @@ use pyo3::prelude::*;
 use super::consts::{DBL_MIN, M_LN2, M_LN_SQRT_2PI};
 use super::lgamma::{gammafn, lgammacor, lgammafn};
 use super::norm::{dt0, dt1};
-use super::util::ldexp;
+use super::util::{ldexp, rfma};
 
 const TOMS_EPS: f64 = 2.220446049250313e-16;
 const M_SQRT_PI: f64 = 1.772453850905516027298167483341;
@@ -1592,11 +1592,15 @@ pub(crate) fn lbeta_scalar(a: f64, b: f64) -> f64 {
     }
     if p >= 10.0 {
         let corr = lgammacor(p) + lgammacor(q) - lgammacor(p + q);
-        return q.ln() * -0.5 + M_LN_SQRT_2PI + corr + (p - 0.5) * (p / (p + q)).ln()
-            + q * (-p / (p + q)).ln_1p();
+        // C one-liner; clang fuses each `mul (+/-) acc` left-to-right on arm64.
+        let s = rfma(q.ln(), -0.5, M_LN_SQRT_2PI) + corr;
+        let s = rfma(p - 0.5, (p / (p + q)).ln(), s);
+        return rfma(q, (-p / (p + q)).ln_1p(), s);
     } else if q >= 10.0 {
         let corr = lgammacor(q) - lgammacor(p + q);
-        return lgammafn(p) + corr + p - p * (p + q).ln() + (q - 0.5) * (-p / (p + q)).ln_1p();
+        let s = lgammafn(p) + corr + p;
+        let s = rfma(-p, (p + q).ln(), s); // - p*log(p+q)
+        return rfma(q - 0.5, (-p / (p + q)).ln_1p(), s);
     }
     if p < 1e-306 {
         return lgammafn(p) + (lgammafn(q) - lgammafn(p + q));

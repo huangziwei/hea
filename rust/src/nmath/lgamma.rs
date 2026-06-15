@@ -13,6 +13,7 @@ use super::consts::{
     GAM_XMAX, GAM_XMIN, GAM_XSML, LGC_XBIG, LGM_XMAX, M_LN_SQRT_2PI, M_LN_SQRT_PId2, NALGM, NGAM,
 };
 use super::loader::stirlerr;
+use super::util::rfma;
 
 const PI: f64 = std::f64::consts::PI;
 
@@ -31,7 +32,8 @@ pub fn chebyshev_eval(x: f64, a: &[f64], n: usize) -> f64 {
     for i in 1..=n {
         b2 = b1;
         b1 = b0;
-        b0 = twox * b1 - b2 + a[n - i];
+        // C `twox*b1 - b2 + a[..]` → clang fuses the mul-sub to fmsub on arm64.
+        b0 = rfma(twox, b1, -b2) + a[n - i];
     }
     (b0 - b2) * 0.5
 }
@@ -43,7 +45,7 @@ pub fn lgammacor(x: f64) -> f64 {
     }
     if x < LGC_XBIG {
         let tmp = 10.0 / x;
-        return chebyshev_eval(tmp * tmp * 2.0 - 1.0, &ALGMCS, NALGM) / x;
+        return chebyshev_eval(rfma(tmp * tmp, 2.0, -1.0), &ALGMCS, NALGM) / x;
     }
     1.0 / (x * 12.0)
 }
@@ -92,7 +94,7 @@ pub fn gammafn(x: f64) -> f64 {
         }
         let frac = x - n as f64;
         n -= 1;
-        let mut value = chebyshev_eval(frac * 2.0 - 1.0, &GAMCS, NGAM) + 0.9375;
+        let mut value = chebyshev_eval(rfma(frac, 2.0, -1.0), &GAMCS, NGAM) + 0.9375;
         if n == 0 {
             return value;
         }
@@ -138,7 +140,7 @@ pub fn gammafn(x: f64) -> f64 {
         } else {
             lgammacor(y)
         };
-        value = ((y - 0.5) * y.ln() - y + M_LN_SQRT_2PI + corr).exp();
+        value = (rfma(y - 0.5, y.ln(), -y) + M_LN_SQRT_2PI + corr).exp();
     }
     if x > 0.0 {
         return value;
@@ -172,12 +174,12 @@ pub fn lgammafn(x: f64) -> f64 {
         if x > 1e17 {
             return x * (x.ln() - 1.0);
         } else if x > 4934720.0 {
-            return M_LN_SQRT_2PI + (x - 0.5) * x.ln() - x;
+            return rfma(x - 0.5, x.ln(), M_LN_SQRT_2PI) - x;
         }
-        return M_LN_SQRT_2PI + (x - 0.5) * x.ln() - x + lgammacor(x);
+        return rfma(x - 0.5, x.ln(), M_LN_SQRT_2PI) - x + lgammacor(x);
     }
     let sinpiy = sinpi(y).abs();
-    M_LN_SQRT_PId2 + (x - 0.5) * y.ln() - x - sinpiy.ln() - lgammacor(y)
+    rfma(x - 0.5, y.ln(), M_LN_SQRT_PId2) - x - sinpiy.ln() - lgammacor(y)
 }
 
 // === PyO3 wrappers ===========================================================

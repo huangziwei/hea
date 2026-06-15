@@ -12,6 +12,7 @@ use super::consts::{DBL_MIN, M_CUTOFF, M_LN2, PG_SCALEFACTOR};
 use super::lgamma::lgammafn;
 use super::loader::dpois_raw;
 use super::norm::{dnorm5_scalar, dt0, dt1, pnorm5_scalar, qnorm5_scalar};
+use super::util::rfma;
 
 const EPS: f64 = f64::EPSILON;
 
@@ -77,22 +78,23 @@ fn logcf(x: f64, i: f64, d: f64, eps: f64) -> f64 {
     let mut c2 = i + d;
     let mut c4 = c2 + d;
     let mut a1 = c2;
-    let mut b1 = i * (c2 - i * x);
+    // C: `a*b - c*d` fuses the first product (clang fmadd/fnmul), `a - c` → fmsub.
+    let mut b1 = i * rfma(-i, x, c2); // i*(c2 - i*x)
     let mut b2 = d * d * x;
-    let mut a2 = c4 * c2 - b2;
-    b2 = c4 * b1 - i * b2;
+    let mut a2 = rfma(c4, c2, -b2); // c4*c2 - b2
+    b2 = rfma(c4, b1, -(i * b2)); // c4*b1 - i*b2
     let sf = PG_SCALEFACTOR;
-    while (a2 * b1 - a1 * b2).abs() > (eps * b1 * b2).abs() {
+    while rfma(a2, b1, -(a1 * b2)).abs() > (eps * b1 * b2).abs() {
         let mut c3 = c2 * c2 * x;
         c2 += d;
         c4 += d;
-        a1 = c4 * a2 - c3 * a1;
-        b1 = c4 * b2 - c3 * b1;
+        a1 = rfma(c4, a2, -(c3 * a1));
+        b1 = rfma(c4, b2, -(c3 * b1));
         c3 = c1 * c1 * x;
         c1 += d;
         c4 += d;
-        a2 = c4 * a1 - c3 * a2;
-        b2 = c4 * b1 - c3 * b2;
+        a2 = rfma(c4, a1, -(c3 * a2));
+        b2 = rfma(c4, b1, -(c3 * b2));
         if b2.abs() > sf {
             a1 /= sf;
             b1 /= sf;
@@ -117,10 +119,15 @@ pub(crate) fn log1pmx(x: f64) -> f64 {
     let y = r * r;
     if x.abs() < 1e-2 {
         let two = 2.0;
-        return r * ((((two / 9.0 * y + two / 7.0) * y + two / 5.0) * y + two / 3.0) * y - x);
+        return r
+            * rfma(
+                rfma(rfma(rfma(two / 9.0, y, two / 7.0), y, two / 5.0), y, two / 3.0),
+                y,
+                -x,
+            );
     }
     let tol_logcf = 1e-14;
-    r * (2.0 * y * logcf(y, 3.0, 2.0, tol_logcf) - x)
+    r * rfma(2.0 * y, logcf(y, 3.0, 2.0, tol_logcf), -x)
 }
 
 fn lgamma1p(a: f64) -> f64 {
@@ -133,9 +140,9 @@ fn lgamma1p(a: f64) -> f64 {
     let tol_logcf = 1e-14;
     let mut lgam = c * logcf(-a / 2.0, (n + 2) as f64, 1.0, tol_logcf);
     for i in (0..n).rev() {
-        lgam = LGAMMA1P_COEFFS[i as usize] - a * lgam;
+        lgam = rfma(-a, lgam, LGAMMA1P_COEFFS[i as usize]);
     }
-    (a * lgam - eulers_const) * a - log1pmx(a)
+    rfma(rfma(a, lgam, -eulers_const), a, -log1pmx(a))
 }
 
 fn dpois_wrap(x_plus_1: f64, lambda: f64, give_log: bool) -> f64 {
@@ -180,7 +187,7 @@ fn pgamma_smallx(x: f64, alph: f64, lower_tail: bool, log_p: bool) -> f64 {
                 t * x.exp()
             }
         } else if log_p {
-            alph * x.ln() - lgamma1p(alph)
+            rfma(alph, x.ln(), -lgamma1p(alph))
         } else {
             x.powf(alph) / lgamma1p(alph).exp()
         };
@@ -190,13 +197,13 @@ fn pgamma_smallx(x: f64, alph: f64, lower_tail: bool, log_p: bool) -> f64 {
             f1 * f2
         }
     } else {
-        let lf2 = alph * x.ln() - lgamma1p(alph);
+        let lf2 = rfma(alph, x.ln(), -lgamma1p(alph));
         if log_p {
             r_log1_exp(sum.ln_1p() + lf2)
         } else {
             let f1m1 = sum;
             let f2m1 = lf2.exp_m1();
-            -(f1m1 + f2m1 + f1m1 * f2m1)
+            -rfma(f1m1, f2m1, f1m1 + f2m1)
         }
     }
 }
@@ -252,14 +259,14 @@ fn pd_lower_cf(y: f64, d: f64) -> f64 {
         c2 -= 1.0;
         let mut c3 = i * c2;
         c4 += 2.0;
-        a1 = c4 * a2 + c3 * a1;
-        b1 = c4 * b2 + c3 * b1;
+        a1 = rfma(c4, a2, c3 * a1);
+        b1 = rfma(c4, b2, c3 * b1);
         i += 1.0;
         c2 -= 1.0;
         c3 = i * c2;
         c4 += 2.0;
-        a2 = c4 * a1 + c3 * a2;
-        b2 = c4 * b1 + c3 * b2;
+        a2 = rfma(c4, a1, c3 * a2);
+        b2 = rfma(c4, b1, c3 * b2);
         if b2 > sf {
             a1 /= sf;
             b1 /= sf;
@@ -329,8 +336,8 @@ fn ppois_asymp(x: f64, lambda: f64, lower_tail: bool, log_p: bool) -> f64 {
     let mut res2_ig = s2pt;
     let mut res2_term = s2pt;
     for i in 1..8 {
-        res12 += res1_ig * PPA_COEFS_A[i];
-        res12 += res2_ig * PPA_COEFS_B[i];
+        res12 = rfma(res1_ig, PPA_COEFS_A[i], res12);
+        res12 = rfma(res2_ig, PPA_COEFS_B[i], res12);
         res1_term *= pt_ / i as f64;
         res2_term *= 2.0 * pt_ / (2.0 * i as f64 + 1.0);
         res1_ig = res1_ig / x + res1_term;
@@ -339,7 +346,7 @@ fn ppois_asymp(x: f64, lambda: f64, lower_tail: bool, log_p: bool) -> f64 {
     let mut elfb = x;
     let mut elfb_term = 1.0;
     for i in 1..8 {
-        elfb += elfb_term * PPA_COEFS_B[i];
+        elfb = rfma(elfb_term, PPA_COEFS_B[i], elfb);
         elfb_term /= x;
     }
     if !lower_tail {
@@ -352,7 +359,7 @@ fn ppois_asymp(x: f64, lambda: f64, lower_tail: bool, log_p: bool) -> f64 {
         np_ + (f * n_d_over_p).ln_1p()
     } else {
         let nd = dnorm5_scalar(s2pt, 0.0, 1.0, false);
-        np_ + f * nd
+        rfma(f, nd, np_)
     }
 }
 
@@ -373,7 +380,7 @@ pub fn pgamma_raw(x: f64, alph: f64, lower_tail: bool, log_p: bool) -> f64 {
             if log_p {
                 r_log1_exp(d + sum)
             } else {
-                1.0 - d * sum
+                rfma(-d, sum, 1.0)
             }
         } else if log_p {
             sum + d
@@ -414,7 +421,7 @@ pub fn pgamma_raw(x: f64, alph: f64, lower_tail: bool, log_p: bool) -> f64 {
         } else if log_p {
             r_log1_exp(d + sum)
         } else {
-            1.0 - d * sum
+            rfma(-d, sum, 1.0)
         };
     } else {
         res = ppois_asymp(alph - 1.0, x, !lower_tail, log_p);
@@ -513,20 +520,21 @@ fn qchisq_appr(p: f64, nu: f64, g: f64, lower_tail: bool, log_p: bool, tol: f64)
     } else if nu > 0.32 {
         let x = qnorm5_scalar(p, 0.0, 1.0, lower_tail, log_p);
         let p1b = 2.0 / (9.0 * nu);
-        let mut ch = nu * (x * p1b.sqrt() + 1.0 - p1b).powf(3.0);
-        if ch > 2.2 * nu + 6.0 {
-            ch = -2.0 * (r_dt_clog(p, lower_tail, log_p) - c * (0.5 * ch).ln() + g);
+        let mut ch = nu * (rfma(x, p1b.sqrt(), 1.0) - p1b).powf(3.0);
+        if ch > rfma(2.2, nu, 6.0) {
+            ch = -2.0 * (rfma(-c, (0.5 * ch).ln(), r_dt_clog(p, lower_tail, log_p)) + g);
         }
         ch
     } else {
         let mut ch = 0.4;
-        let a = r_dt_clog(p, lower_tail, log_p) + g + c * M_LN2;
+        let a = rfma(c, M_LN2, r_dt_clog(p, lower_tail, log_p) + g);
         loop {
             let q = ch;
-            let p1c = 1.0 / (1.0 + ch * (c7 + ch));
-            let p2 = ch * (c9 + ch * (c8 + ch));
-            let t = -0.5 + (c7 + 2.0 * ch) * p1c - (c9 + ch * (c10 + 3.0 * ch)) / p2;
-            ch -= (1.0 - (a + 0.5 * ch).exp() * p2 * p1c) / t;
+            let p1c = 1.0 / rfma(ch, c7 + ch, 1.0);
+            let p2 = ch * rfma(ch, c8 + ch, c9);
+            let t = rfma(rfma(2.0, ch, c7), p1c, -0.5)
+                - rfma(ch, rfma(3.0, ch, c10), c9) / p2;
+            ch -= rfma(-(rfma(0.5, ch, a).exp() * p2), p1c, 1.0) / t;
             if !((q - ch).abs() > tol * ch.abs()) {
                 break;
             }
@@ -595,7 +603,7 @@ pub fn qgamma_scalar(mut p: f64, alpha: f64, scale: f64, lower_tail: bool, mut l
     }
     if !at_end {
         let c = alpha - 1.0;
-        let s6 = (120.0 + c * (346.0 + 127.0 * c)) * i5040;
+        let s6 = rfma(c, rfma(127.0, c, 346.0), 120.0) * i5040;
         let ch0 = ch;
         for i in 1..=maxit {
             let q = ch;
@@ -606,18 +614,29 @@ pub fn qgamma_scalar(mut p: f64, alpha: f64, scale: f64, lower_tail: bool, mut l
                 max_it_newton = 27;
                 break;
             }
-            let t = p2 * (alpha * M_LN2 + g + p1 - c * ch.ln()).exp();
+            let t = p2 * rfma(-c, ch.ln(), rfma(alpha, M_LN2, g) + p1).exp();
             let b = t / ch;
-            let a = 0.5 * t - b * c;
-            let s1 = (210.0 + a * (140.0 + a * (105.0 + a * (84.0 + a * (70.0 + 60.0 * a))))) * i420;
-            let s2 = (420.0 + a * (735.0 + a * (966.0 + a * (1141.0 + 1278.0 * a)))) * i2520;
-            let s3 = (210.0 + a * (462.0 + a * (707.0 + 932.0 * a))) * i2520;
-            let s4 = (252.0 + a * (672.0 + 1182.0 * a) + c * (294.0 + a * (889.0 + 1740.0 * a)))
-                * i5040;
-            let s5 = (84.0 + 2264.0 * a + c * (1175.0 + 606.0 * a)) * i2520;
-            ch += t
-                * (1.0 + 0.5 * t * s1
-                    - b * c * (s1 - b * (s2 - b * (s3 - b * (s4 - b * (s5 - b * s6))))));
+            let a = rfma(0.5, t, -(b * c));
+            // Nested Horners; clang fuses every `acc*a + C` within the expression.
+            let s1 = rfma(
+                a,
+                rfma(a, rfma(a, rfma(a, rfma(60.0, a, 70.0), 84.0), 105.0), 140.0),
+                210.0,
+            ) * i420;
+            let s2 = rfma(a, rfma(a, rfma(a, rfma(1278.0, a, 1141.0), 966.0), 735.0), 420.0) * i2520;
+            let s3 = rfma(a, rfma(a, rfma(932.0, a, 707.0), 462.0), 210.0) * i2520;
+            let s4 = rfma(
+                c,
+                rfma(a, rfma(1740.0, a, 889.0), 294.0),
+                rfma(a, rfma(1182.0, a, 672.0), 252.0),
+            ) * i5040;
+            let s5 = rfma(c, rfma(606.0, a, 1175.0), rfma(2264.0, a, 84.0)) * i2520;
+            let poly = rfma(
+                -b,
+                rfma(-b, rfma(-b, rfma(-b, rfma(-b, s6, s5), s4), s3), s2),
+                s1,
+            );
+            ch = rfma(t, rfma(-(b * c), poly, rfma(0.5 * t, s1, 1.0)), ch);
             if (q - ch).abs() < eps2 * ch {
                 break;
             }
