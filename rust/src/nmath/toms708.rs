@@ -52,6 +52,19 @@ const BCORR_C: [f64; 6] = [
     -5.9520293135187e-4, 8.37308034031215e-4, -0.00165322962780713,
 ];
 
+/// Horner with R-parity FMA: `((c[0]*x + c[1])*x + … )`. Each `*x +` step is a
+/// single-expression `a*b + c` that R's clang fuses to fmadd on arm64; `rfma`
+/// is per-arch (plain on x86-64, so a no-op there). Use for any C polynomial
+/// written `(((c0*t+c1)*t+c2)…)` — append a trailing `1.0` for the `…+1` forms.
+#[inline]
+fn horner(x: f64, c: &[f64]) -> f64 {
+    let mut v = c[0];
+    for &k in &c[1..] {
+        v = rfma(v, x, k);
+    }
+    v
+}
+
 fn exparg(which: i32) -> f64 {
     let lnb = 0.69314718055995;
     let m = if which == 0 { 1024.0 } else { (-1021 - 1) as f64 };
@@ -91,8 +104,7 @@ fn rexpm1(x: f64) -> f64 {
     let q3 = -0.0119041179760821;
     let q4 = 5.95130811860248e-4;
     if x.abs() <= 0.15 {
-        return x * (((p2 * x + p1) * x + 1.0)
-            / ((((q4 * x + q3) * x + q2) * x + q1) * x + 1.0));
+        return x * (horner(x, &[p2, p1, 1.0]) / horner(x, &[q4, q3, q2, q1, 1.0]));
     }
     let w = x.exp();
     if x > 0.0 {
@@ -114,8 +126,7 @@ fn alnrel(a: f64) -> f64 {
     let q3 = -0.0845104217945565;
     let t = a / (a + 2.0);
     let t2 = t * t;
-    let w = (((p3 * t2 + p2) * t2 + p1) * t2 + 1.0)
-        / (((q3 * t2 + q2) * t2 + q1) * t2 + 1.0);
+    let w = horner(t2, &[p3, p2, p1, 1.0]) / horner(t2, &[q3, q2, q1, 1.0]);
     t * 2.0 * w
 }
 
@@ -135,9 +146,9 @@ fn rlog1(x: f64) -> f64 {
     let w1;
     if x < -0.18 {
         h = (x + 0.3) / 0.7;
-        w1 = a - h * 0.3;
+        w1 = rfma(-h, 0.3, a);
     } else if x > 0.18 {
-        h = x * 0.75 - 0.25;
+        h = rfma(x, 0.75, -0.25);
         w1 = b + h / 3.0;
     } else {
         h = x;
@@ -145,8 +156,8 @@ fn rlog1(x: f64) -> f64 {
     }
     let r = h / (h + 2.0);
     let t = r * r;
-    let w = ((p2 * t + p1) * t + p0) / ((q2 * t + q1) * t + 1.0);
-    t * 2.0 * (1.0 / (1.0 - r) - r * w) + w1
+    let w = horner(t, &[p2, p1, p0]) / horner(t, &[q2, q1, 1.0]);
+    rfma(t * 2.0, rfma(-r, w, 1.0 / (1.0 - r)), w1)
 }
 
 fn erf_(x: f64) -> f64 {
@@ -154,15 +165,13 @@ fn erf_(x: f64) -> f64 {
     let ax = x.abs();
     if ax <= 0.5 {
         let t = x * x;
-        let top = (((a[0] * t + a[1]) * t + a[2]) * t + a[3]) * t + a[4] + 1.0;
-        let bot = ((b[0] * t + b[1]) * t + b[2]) * t + 1.0;
+        let top = horner(t, a) + 1.0;
+        let bot = horner(t, &[b[0], b[1], b[2], 1.0]);
         return x * (top / bot);
     }
     if ax <= 4.0 {
-        let top = ((((((p[0] * ax + p[1]) * ax + p[2]) * ax + p[3]) * ax + p[4]) * ax + p[5])
-            * ax + p[6]) * ax + p[7];
-        let bot = ((((((q[0] * ax + q[1]) * ax + q[2]) * ax + q[3]) * ax + q[4]) * ax + q[5])
-            * ax + q[6]) * ax + q[7];
+        let top = horner(ax, p);
+        let bot = horner(ax, q);
         let rr = 0.5 - (-x * x).exp() * top / bot + 0.5;
         return if x < 0.0 { -rr } else { rr };
     }
@@ -171,10 +180,10 @@ fn erf_(x: f64) -> f64 {
     }
     let x2 = x * x;
     let t = 1.0 / x2;
-    let top = (((r[0] * t + r[1]) * t + r[2]) * t + r[3]) * t + r[4];
-    let bot = (((s[0] * t + s[1]) * t + s[2]) * t + s[3]) * t + 1.0;
+    let top = horner(t, r);
+    let bot = horner(t, &[s[0], s[1], s[2], s[3], 1.0]);
     let t = (ERF_C - top / (x2 * bot)) / ax;
-    let rr = 0.5 - (-x2).exp() * t + 0.5;
+    let rr = rfma(-(-x2).exp(), t, 0.5) + 0.5;
     if x < 0.0 { -rr } else { rr }
 }
 
@@ -184,19 +193,17 @@ fn erfc1(ind: i32, x: f64) -> f64 {
     let mut ret;
     if ax <= 0.5 {
         let t = x * x;
-        let top = (((a[0] * t + a[1]) * t + a[2]) * t + a[3]) * t + a[4] + 1.0;
-        let bot = ((b[0] * t + b[1]) * t + b[2]) * t + 1.0;
-        ret = 0.5 - x * (top / bot) + 0.5;
+        let top = horner(t, a) + 1.0;
+        let bot = horner(t, &[b[0], b[1], b[2], 1.0]);
+        ret = rfma(-x, top / bot, 0.5) + 0.5;
         if ind != 0 {
             ret = t.exp() * ret;
         }
         return ret;
     }
     if ax <= 4.0 {
-        let top = ((((((p[0] * ax + p[1]) * ax + p[2]) * ax + p[3]) * ax + p[4]) * ax + p[5])
-            * ax + p[6]) * ax + p[7];
-        let bot = ((((((q[0] * ax + q[1]) * ax + q[2]) * ax + q[3]) * ax + q[4]) * ax + q[5])
-            * ax + q[6]) * ax + q[7];
+        let top = horner(ax, p);
+        let bot = horner(ax, q);
         ret = top / bot;
     } else {
         if x <= -5.6 {
@@ -210,8 +217,8 @@ fn erfc1(ind: i32, x: f64) -> f64 {
             return 0.0;
         }
         let t = 1.0 / (x * x);
-        let top = (((r[0] * t + r[1]) * t + r[2]) * t + r[3]) * t + r[4];
-        let bot = (((s[0] * t + s[1]) * t + s[2]) * t + s[3]) * t + 1.0;
+        let top = horner(t, r);
+        let bot = horner(t, &[s[0], s[1], s[2], s[3], 1.0]);
         ret = (ERF_C - t * top / bot) / ax;
     }
     if ind != 0 {
@@ -241,9 +248,8 @@ fn gam1(a: f64) -> f64 {
         ];
         let s1 = 0.273076135303957;
         let s2 = 0.0559398236957378;
-        let top = (((((((r[8] * t + r[7]) * t + r[6]) * t + r[5]) * t + r[4]) * t + r[3]) * t
-            + r[2]) * t + r[1]) * t + r[0];
-        let bot = (s2 * t + s1) * t + 1.0;
+        let top = horner(t, &[r[8], r[7], r[6], r[5], r[4], r[3], r[2], r[1], r[0]]);
+        let bot = horner(t, &[s2, s1, 1.0]);
         let w = top / bot;
         if d > 0.0 { t * w / a } else { a * (w + 0.5 + 0.5) }
     } else if t == 0.0 {
@@ -256,8 +262,8 @@ fn gam1(a: f64) -> f64 {
         let q = [
             1.0, 0.427569613095214, 0.158451672430138, 0.0261132021441447, 0.00423244297896961,
         ];
-        let top = (((((p[6] * t + p[5]) * t + p[4]) * t + p[3]) * t + p[2]) * t + p[1]) * t + p[0];
-        let bot = (((q[4] * t + q[3]) * t + q[2]) * t + q[1]) * t + 1.0;
+        let top = horner(t, &[p[6], p[5], p[4], p[3], p[2], p[1], p[0]]);
+        let bot = horner(t, &[q[4], q[3], q[2], q[1], 1.0]);
         let w = top / bot;
         if d > 0.0 { t / a * (w - 0.5 - 0.5) } else { a * w }
     }
@@ -278,8 +284,8 @@ fn gamln1(a: f64) -> f64 {
         let q4 = 0.361951990101499;
         let q5 = 0.0325038868253937;
         let q6 = 6.67465618796164e-4;
-        let w = ((((((p6 * a + p5) * a + p4) * a + p3) * a + p2) * a + p1) * a + p0)
-            / ((((((q6 * a + q5) * a + q4) * a + q3) * a + q2) * a + q1) * a + 1.0);
+        let w = horner(a, &[p6, p5, p4, p3, p2, p1, p0])
+            / horner(a, &[q6, q5, q4, q3, q2, q1, 1.0]);
         return -a * w;
     }
     let r0 = 0.422784335098467;
@@ -294,8 +300,7 @@ fn gamln1(a: f64) -> f64 {
     let s4 = 0.00713309612391;
     let s5 = 1.16165475989616e-4;
     let x = a - 0.5 - 0.5;
-    let w = (((((r5 * x + r4) * x + r3) * x + r2) * x + r1) * x + r0)
-        / (((((s5 * x + s4) * x + s3) * x + s2) * x + s1) * x + 1.0);
+    let w = horner(x, &[r5, r4, r3, r2, r1, r0]) / horner(x, &[s5, s4, s3, s2, s1, 1.0]);
     x * w
 }
 
@@ -330,7 +335,7 @@ fn psi(x: f64) -> f64 {
             let mut nq = w as i64;
             w -= nq as f64;
             nq = (w * 4.0) as i64;
-            w = (w - nq as f64 * 0.25) * 4.0;
+            w = rfma(-(nq as f64), 0.25, w) * 4.0;
             let n1 = nq / 2;
             if n1 + n1 != nq {
                 w = 1.0 - w;
@@ -363,7 +368,7 @@ fn psi(x: f64) -> f64 {
         }
         den = (upper + p1[6]) / (den + q1[5]);
         let xmx0 = x - dx0;
-        return den * xmx0 + aug;
+        return rfma(den, xmx0, aug);
     }
     if x < xmax1 {
         let w = 1.0 / (x * x);
@@ -387,17 +392,21 @@ fn bcorr(a0: f64, b0: f64) -> f64 {
     let x = 1.0 / (h + 1.0);
     let x2 = x * x;
     let s3 = x + x2 + 1.0;
-    let s5 = x + x2 * s3 + 1.0;
-    let s7 = x + x2 * s5 + 1.0;
-    let s9 = x + x2 * s7 + 1.0;
-    let s11 = x + x2 * s9 + 1.0;
+    let s5 = rfma(x2, s3, x) + 1.0;
+    let s7 = rfma(x2, s5, x) + 1.0;
+    let s9 = rfma(x2, s7, x) + 1.0;
+    let s11 = rfma(x2, s9, x) + 1.0;
     let mut t = 1.0 / b;
     t *= t;
-    let mut w = ((((c5 * s11 * t + c4 * s9) * t + c3 * s7) * t + c2 * s5) * t + c1 * s3) * t + c0;
+    let mut w = rfma(
+        rfma(rfma(rfma(rfma(c5 * s11, t, c4 * s9), t, c3 * s7), t, c2 * s5), t, c1 * s3),
+        t,
+        c0,
+    );
     w *= c / b;
     let mut t = 1.0 / a;
     t *= t;
-    (((((c5 * t + c4) * t + c3) * t + c2) * t + c1) * t + c0) / a + w
+    horner(t, &[c5, c4, c3, c2, c1, c0]) / a + w
 }
 
 fn algdiv(a: f64, b: f64) -> f64 {
@@ -416,12 +425,16 @@ fn algdiv(a: f64, b: f64) -> f64 {
     }
     let x2 = x * x;
     let s3 = x + x2 + 1.0;
-    let s5 = x + x2 * s3 + 1.0;
-    let s7 = x + x2 * s5 + 1.0;
-    let s9 = x + x2 * s7 + 1.0;
-    let s11 = x + x2 * s9 + 1.0;
+    let s5 = rfma(x2, s3, x) + 1.0;
+    let s7 = rfma(x2, s5, x) + 1.0;
+    let s9 = rfma(x2, s7, x) + 1.0;
+    let s11 = rfma(x2, s9, x) + 1.0;
     let t = 1.0 / (b * b);
-    let mut w = ((((c5 * s11 * t + c4 * s9) * t + c3 * s7) * t + c2 * s5) * t + c1 * s3) * t + c0;
+    let mut w = rfma(
+        rfma(rfma(rfma(rfma(c5 * s11, t, c4 * s9), t, c3 * s7), t, c2 * s5), t, c1 * s3),
+        t,
+        c0,
+    );
     w *= c / b;
     let u = d * alnrel(a / b);
     let v = a * (b.ln() - 1.0);
@@ -446,8 +459,8 @@ fn gamln(a: f64) -> f64 {
         return gamln1(t - 1.0) + w.ln();
     }
     let t = 1.0 / (a * a);
-    let w = (((((c5 * t + c4) * t + c3) * t + c2) * t + c1) * t + c0) / a;
-    d + w + (a - 0.5) * (a.ln() - 1.0)
+    let w = horner(t, &[c5, c4, c3, c2, c1, c0]) / a;
+    rfma(a - 0.5, a.ln() - 1.0, d + w)
 }
 
 fn gsumln(a: f64, b: f64) -> f64 {
@@ -504,7 +517,7 @@ fn betaln(a0: f64, b0: f64) -> f64 {
                     a += -1.0;
                     ww *= a / (a / b + 1.0);
                 }
-                return ww.ln() - (n as f64) * b.ln() + (gamln(a) + algdiv(a, b));
+                return rfma(-(n as f64), b.ln(), ww.ln()) + (gamln(a) + algdiv(a, b));
             }
         }
         // L40
@@ -522,9 +535,9 @@ fn betaln(a0: f64, b0: f64) -> f64 {
     let u = -(a - 0.5) * (h / (h + 1.0)).ln();
     let v = b * alnrel(h);
     if u > v {
-        b.ln() * -0.5 + e + w - v - u
+        rfma(b.ln(), -0.5, e) + w - v - u
     } else {
-        b.ln() * -0.5 + e + w - u - v
+        rfma(b.ln(), -0.5, e) + w - u - v
     }
 }
 
@@ -562,7 +575,7 @@ fn fpser(a: f64, b: f64, x: f64, eps: f64, log_p: bool) -> f64 {
     if log_p {
         ans += (a * s).ln_1p();
     } else {
-        ans *= a * s + 1.0;
+        ans *= rfma(a, s, 1.0);
     }
     ans
 }
@@ -600,7 +613,7 @@ fn bpser(a: f64, b: f64, x: f64, eps: f64, log_p: bool) -> f64 {
     let a0 = a.min(b);
     let mut ans;
     if a0 >= 1.0 {
-        let z = a * x.ln() - betaln(a, b);
+        let z = rfma(a, x.ln(), -betaln(a, b));
         ans = if log_p { z - a.ln() } else { z.exp() / a };
     } else {
         let mut b0 = a.max(b);
@@ -635,7 +648,7 @@ fn bpser(a: f64, b: f64, x: f64, eps: f64, log_p: bool) -> f64 {
                     }
                     u += c.ln();
                 }
-                let z = a * x.ln() - u;
+                let z = rfma(a, x.ln(), -u);
                 b0 += -1.0;
                 let apb = a0 + b0;
                 let t;
@@ -653,7 +666,7 @@ fn bpser(a: f64, b: f64, x: f64, eps: f64, log_p: bool) -> f64 {
             }
         } else {
             let u = gamln1(a0) + algdiv(a0, b0);
-            let z = a * x.ln() - u;
+            let z = rfma(a, x.ln(), -u);
             ans = if log_p { z + (a0 / a).ln() } else { a0 / a * z.exp() };
         }
     }
@@ -681,7 +694,7 @@ fn bpser(a: f64, b: f64, x: f64, eps: f64, log_p: bool) -> f64 {
             ans = f64::NEG_INFINITY;
         }
     } else if a * sum > -1.0 {
-        ans *= a * sum + 1.0;
+        ans *= rfma(a, sum, 1.0);
     } else {
         ans = 0.0;
     }
@@ -785,16 +798,16 @@ fn bfrac(a: f64, b: f64, x: f64, y: f64, lambda: f64, eps: f64, log_p: bool) -> 
         e = (t + 1.0) / (c1 + t + t);
         let beta = w / s
             + if rescale {
-                ldexp(n + e * (c + n * yp1), -20)
+                ldexp(rfma(e, rfma(n, yp1, c), n), -20)
             } else {
-                n + e * (c + n * yp1)
+                rfma(e, rfma(n, yp1, c), n)
             };
         p = t + 1.0;
         s += 2.0;
-        let mut tt = alpha * an + beta * anp1;
+        let mut tt = rfma(alpha, an, beta * anp1);
         an = anp1;
         anp1 = tt;
-        tt = alpha * bn + beta * bnp1;
+        tt = rfma(alpha, bn, beta * bnp1);
         bn = bnp1;
         bnp1 = tt;
         r0 = r;
@@ -828,7 +841,7 @@ fn brcomp(a: f64, b: f64, x: f64, y: f64, log_p: bool) -> f64 {
             lnx = alnrel(-y);
             lny = y.ln();
         }
-        let mut z = a * lnx + b * lny;
+        let mut z = rfma(a, lnx, b * lny);
         if a0 >= 1.0 {
             z -= betaln(a, b);
             return if log_p { z } else { z.exp() };
@@ -886,9 +899,9 @@ fn brcomp(a: f64, b: f64, x: f64, y: f64, log_p: bool) -> f64 {
         let const__: f64 = 0.398942280401433;
         let apb = a + b;
         let lambda = if apb.is_finite() {
-            if a <= b { a - apb * x } else { apb * y - b }
+            if a <= b { rfma(-apb, x, a) } else { rfma(apb, y, -b) }
         } else {
-            a * y - b * x
+            rfma(a, y, -(b * x))
         };
         let (h, x0, y0);
         if a <= b {
@@ -904,9 +917,9 @@ fn brcomp(a: f64, b: f64, x: f64, y: f64, log_p: bool) -> f64 {
         let u = if e.abs() > 0.6 { e - (x / x0).ln() } else { rlog1(e) };
         e = lambda / b;
         let v = if e.abs() <= 0.6 { rlog1(e) } else { e - (y / y0).ln() };
-        let z = if log_p { -(a * u + b * v) } else { (-(a * u + b * v)).exp() };
+        let z = if log_p { -rfma(a, u, b * v) } else { (-rfma(a, u, b * v)).exp() };
         if log_p {
-            -M_LN_SQRT_2PI + 0.5 * (b * x0).ln() + z - bcorr(a, b)
+            rfma(0.5, (b * x0).ln(), -M_LN_SQRT_2PI) + z - bcorr(a, b)
         } else {
             const__ * (b * x0).sqrt() * z * (-bcorr(a, b)).exp()
         }
@@ -927,7 +940,7 @@ fn brcmp1(mu: f64, a: f64, b: f64, x: f64, y: f64, give_log: bool) -> f64 {
             lnx = alnrel(-y);
             lny = y.ln();
         }
-        let mut z = a * lnx + b * lny;
+        let mut z = rfma(a, lnx, b * lny);
         if a0 >= 1.0 {
             z -= betaln(a, b);
             return esum(mu, z, give_log);
@@ -991,9 +1004,9 @@ fn brcmp1(mu: f64, a: f64, b: f64, x: f64, y: f64, give_log: bool) -> f64 {
         let const__: f64 = 0.398942280401433;
         let apb = a + b;
         let lambda = if apb.is_finite() {
-            if a <= b { a - apb * x } else { apb * y - b }
+            if a <= b { rfma(-apb, x, a) } else { rfma(apb, y, -b) }
         } else {
-            a * y - b * x
+            rfma(a, y, -(b * x))
         };
         let (h, x0, y0);
         if a > b {
@@ -1010,7 +1023,7 @@ fn brcmp1(mu: f64, a: f64, b: f64, x: f64, y: f64, give_log: bool) -> f64 {
         let u = if e.abs() > 0.6 { e - (x / x0).ln() } else { rlog1(e) };
         e = lambda / b;
         let v = if e.abs() > 0.6 { e - (y / y0).ln() } else { rlog1(e) };
-        let z = esum(mu, -(a * u + b * v), give_log);
+        let z = esum(mu, -rfma(a, u, b * v), give_log);
         if give_log {
             const__.ln() + (b.ln() + lx0) / 2.0 + z - bcorr(a, b)
         } else {
@@ -1043,13 +1056,13 @@ fn grat_r(a: f64, x: f64, log_r: f64, eps: f64) -> f64 {
                 break;
             }
         }
-        let j = a * x * ((sum / 6.0 - 0.5 / (a + 2.0)) * x + 1.0 / (a + 1.0));
+        let j = a * x * rfma(sum / 6.0 - 0.5 / (a + 2.0), x, 1.0 / (a + 1.0));
         let z = a * x.ln();
         let h = gam1(a);
         let g = h + 1.0;
         if (x >= 0.25 && (a < x / 2.59)) || (z > -0.13394) {
             let ll = rexpm1(z);
-            let q = ((ll + 0.5 + 0.5) * j - ll) * g - h;
+            let q = rfma(rfma(ll + 0.5 + 0.5, j, -ll), g, -h);
             if q <= 0.0 { 0.0 } else { q * (-log_r).exp() }
         } else {
             let p = z.exp() * g * (0.5 - j + 0.5);
@@ -1063,13 +1076,13 @@ fn grat_r(a: f64, x: f64, log_r: f64, eps: f64) -> f64 {
         let mut c = 1.0;
         let mut an0;
         loop {
-            a2n_1 = x * a2n + c * a2n_1;
-            b2n_1 = x * b2n + c * b2n_1;
+            a2n_1 = rfma(x, a2n, c * a2n_1);
+            b2n_1 = rfma(x, b2n, c * b2n_1);
             let am0 = a2n_1 / b2n_1;
             c += 1.0;
             let c_a = c - a;
-            a2n = a2n_1 + c_a * a2n;
-            b2n = b2n_1 + c_a * b2n;
+            a2n = rfma(c_a, a2n, a2n_1);
+            b2n = rfma(c_a, b2n, b2n_1);
             an0 = a2n / b2n;
             if !((an0 - am0).abs() >= eps * an0) {
                 break;
@@ -1094,8 +1107,8 @@ fn bgrat(a: f64, b: f64, x: f64, y: f64, mut w: f64, eps: f64, log_w: bool) -> (
     if b * z == 0.0 {
         return (w, 1);
     }
-    let log_r = b.ln() + gam1(b).ln_1p() + b * z.ln() + nu * lnx;
-    let log_u = log_r - (algdiv(b, a) + b * nu.ln());
+    let log_r = rfma(nu, lnx, rfma(b, z.ln(), b.ln() + gam1(b).ln_1p()));
+    let log_u = log_r - rfma(b, nu.ln(), algdiv(b, a));
     let u = log_u.exp();
     if log_u == f64::NEG_INFINITY {
         return (w, 2);
@@ -1119,7 +1132,7 @@ fn bgrat(a: f64, b: f64, x: f64, y: f64, mut w: f64, eps: f64, log_w: bool) -> (
     let mut ierr = 0;
     for n in 1..=n_terms {
         let bp2n = b + n2;
-        j = (bp2n * (bp2n + 1.0) * j + (z + bp2n + 1.0) * t) * v;
+        j = rfma(bp2n * (bp2n + 1.0), j, (z + bp2n + 1.0) * t) * v;
         n2 += 2.0;
         t *= t2;
         cn /= n2 * (n2 + 1.0);
@@ -1129,11 +1142,11 @@ fn bgrat(a: f64, b: f64, x: f64, y: f64, mut w: f64, eps: f64, log_w: bool) -> (
         if n > 1 {
             let mut coef = b - n as f64;
             for i in 1..=nm1 {
-                s += coef * c[i - 1] * d[nm1 - i];
+                s = rfma(coef * c[i - 1], d[nm1 - i], s);
                 coef += b;
             }
         }
-        d[nm1] = bm1 * cn + s / n as f64;
+        d[nm1] = rfma(bm1, cn, s / n as f64);
         let dj = d[nm1] * j;
         sum += dj;
         if sum <= 0.0 {
@@ -1163,7 +1176,7 @@ fn basym(a: f64, b: f64, lambda: f64, eps: f64, log_p: bool) -> f64 {
     let mut b0 = [0.0f64; 21];
     let mut c = [0.0f64; 21];
     let mut d = [0.0f64; 21];
-    let f = a * rlog1(-lambda / a) + b * rlog1(lambda / b);
+    let f = rfma(a, rlog1(-lambda / a), b * rlog1(lambda / b));
     let t;
     if log_p {
         t = -f;
@@ -1193,7 +1206,7 @@ fn basym(a: f64, b: f64, lambda: f64, eps: f64, log_p: bool) -> f64 {
     d[0] = -c[0];
     let mut j0 = 0.5 / e0 * erfc1(1, z0);
     let mut j1 = e1;
-    let mut sum = j0 + d[0] * w0 * j1;
+    let mut sum = rfma(d[0] * w0, j1, j0);
     let mut s = 1.0;
     let h2 = h * h;
     let mut hn = 1.0;
@@ -1203,7 +1216,7 @@ fn basym(a: f64, b: f64, lambda: f64, eps: f64, log_p: bool) -> f64 {
     let mut n = 2usize;
     while n <= num_it {
         hn *= h2;
-        a0[n - 1] = r0 * 2.0 * (h * hn + 1.0) / (n as f64 + 2.0);
+        a0[n - 1] = r0 * 2.0 * rfma(h, hn, 1.0) / (n as f64 + 2.0);
         let np1 = n + 1;
         s += hn;
         a0[np1 - 1] = r1 * 2.0 * s / (n as f64 + 3.0);
@@ -1214,19 +1227,23 @@ fn basym(a: f64, b: f64, lambda: f64, eps: f64, log_p: bool) -> f64 {
                 let mut bsum = 0.0;
                 for jj in 1..m {
                     let mmj = m - jj;
-                    bsum += (jj as f64 * r - mmj as f64) * a0[jj - 1] * b0[mmj - 1];
+                    bsum = rfma(
+                        rfma(jj as f64, r, -(mmj as f64)) * a0[jj - 1],
+                        b0[mmj - 1],
+                        bsum,
+                    );
                 }
-                b0[m - 1] = r * a0[m - 1] + bsum / m as f64;
+                b0[m - 1] = rfma(r, a0[m - 1], bsum / m as f64);
             }
             c[i - 1] = b0[i - 1] / (i as f64 + 1.0);
             let mut dsum = 0.0;
             for jj in 1..i {
-                dsum += d[i - jj - 1] * c[jj - 1];
+                dsum = rfma(d[i - jj - 1], c[jj - 1], dsum);
             }
             d[i - 1] = -(dsum + c[i - 1]);
         }
-        j0 = e1 * znm1 + (n as f64 - 1.0) * j0;
-        j1 = e1 * zn + n as f64 * j1;
+        j0 = rfma(e1, znm1, (n as f64 - 1.0) * j0);
+        j1 = rfma(e1, zn, n as f64 * j1);
         znm1 = z2 * znm1;
         zn = z2 * zn;
         w *= w0;
@@ -1447,9 +1464,9 @@ fn bratio(a: f64, b: f64, x: f64, y: f64, log_p: bool) -> (f64, f64, i32) {
         br_end_from_w1(w1v, do_swap, log_p, ierr)
     } else {
         let lambda = if (a + b).is_finite() {
-            if a > b { (a + b) * y - b } else { a - (a + b) * x }
+            if a > b { rfma(a + b, y, -b) } else { rfma(-(a + b), x, a) }
         } else {
-            a * y - b * x
+            rfma(a, y, -(b * x))
         };
         let do_swap = lambda < 0.0;
         let mut lam = lambda;

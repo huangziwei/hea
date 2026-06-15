@@ -13,6 +13,7 @@ use super::consts::{DBL_MIN, M_LN2};
 use super::gamma::{r_dt_clog, r_dt_log, r_dt_qiv, r_log1_exp};
 use super::norm::{dt0, dt1};
 use super::toms708::{lbeta_scalar, pbeta_raw};
+use super::util::rfma;
 
 const DBL_VERY_MIN: f64 = 2.2250738585072014e-308 / 4.0;
 const DBL_LOG_V_MIN: f64 = M_LN2 * (-1021.0 - 2.0);
@@ -128,9 +129,12 @@ pub(crate) fn qbeta_raw(alpha: f64, p: f64, q: f64, lower_tail: bool, log_p: boo
         u_n = 1.0;
         let mut skip_init = false;
         if u0_maybe
-            && u0 < (t * log_eps_c
-                - clog((pp * (1.0 - qq) * (2.0 - qq) / (2.0 * (pp + 2.0))).abs()))
-                / 2.0
+            && u0
+                < rfma(
+                    t,
+                    log_eps_c,
+                    -clog((pp * (1.0 - qq) * (2.0 - qq) / (2.0 * (pp + 2.0))).abs()),
+                ) / 2.0
         {
             rp *= u0.exp();
             u = if rp > -1.0 { u0 - rp.ln_1p() / pp } else { u0 };
@@ -142,13 +146,17 @@ pub(crate) fn qbeta_raw(alpha: f64, p: f64, q: f64, lower_tail: bool, log_p: boo
 
         if !skip_init {
             let mut r = (-2.0 * la).sqrt();
-            y = r - (const1 + const2 * r) / (1.0 + (const3 + const4 * r) * r);
+            y = r - rfma(const2, r, const1) / rfma(rfma(const4, r, const3), r, 1.0);
             if pp > 1.0 && qq > 1.0 {
-                r = (y * y - 3.0) / 6.0;
+                r = rfma(y, y, -3.0) / 6.0;
                 let s = 1.0 / (pp + pp - 1.0);
                 t = 1.0 / (qq + qq - 1.0);
                 let h = 2.0 / (s + t);
-                let w = y * (h + r).sqrt() / h - (t - s) * (r + 5.0 / 6.0 - 2.0 / (3.0 * h));
+                let w = rfma(
+                    -(t - s),
+                    r + 5.0 / 6.0 - 2.0 / (3.0 * h),
+                    y * (h + r).sqrt() / h,
+                );
                 if w > 300.0 {
                     t = w + w + qq.ln() - pp.ln();
                     u = if t <= 18.0 {
@@ -158,14 +166,14 @@ pub(crate) fn qbeta_raw(alpha: f64, p: f64, q: f64, lower_tail: bool, log_p: boo
                     };
                     xinbta = u.exp();
                 } else {
-                    xinbta = pp / (pp + qq * (w + w).exp());
+                    xinbta = pp / rfma(qq, (w + w).exp(), pp);
                     u = -(qq / pp * (w + w).exp()).ln_1p();
                 }
             } else {
                 r = qq + qq;
                 t = 1.0 / (3.0 * qq.sqrt());
-                t = r * r_pow_di3(1.0 + t * (-t + y));
-                let s = 4.0 * pp + r - 2.0;
+                t = r * r_pow_di3(rfma(t, -t + y, 1.0));
+                let s = rfma(4.0, pp, r) - 2.0;
                 if t == 0.0 || (t < 0.0 && s >= t) {
                     let l1ma = if swap_tail {
                         r_dt_log(alpha, lower_tail, log_p)
@@ -272,7 +280,8 @@ pub(crate) fn qbeta_raw(alpha: f64, p: f64, q: f64, lower_tail: bool, log_p: boo
                 let w = if y == f64::NEG_INFINITY {
                     0.0
                 } else {
-                    (y - la) * (y - u + logbeta + r * u + t * r_log1_exp(u)).exp()
+                    (y - la)
+                        * rfma(t, r_log1_exp(u), rfma(r, u, y - u + logbeta)).exp()
                 };
                 if !w.is_finite() {
                     if n_maybe_swaps <= 1 {
@@ -314,9 +323,10 @@ pub(crate) fn qbeta_raw(alpha: f64, p: f64, q: f64, lower_tail: bool, log_p: boo
             for i_pb in 0..1000 {
                 y = pbeta_raw(xinbta, pp, qq, true, log_p);
                 let w = if log_p {
-                    (y - la) * (y + logbeta + r * xinbta.ln() + t * (-xinbta).ln_1p()).exp()
+                    (y - la)
+                        * rfma(t, (-xinbta).ln_1p(), rfma(r, xinbta.ln(), y + logbeta)).exp()
                 } else {
-                    (y - a) * (logbeta + r * xinbta.ln() + t * (-xinbta).ln_1p()).exp()
+                    (y - a) * rfma(t, (-xinbta).ln_1p(), rfma(r, xinbta.ln(), logbeta)).exp()
                 };
                 if !w.is_finite() {
                     if n_maybe_swaps <= 2 {
@@ -392,9 +402,9 @@ pub(crate) fn qbeta_raw(alpha: f64, p: f64, q: f64, lower_tail: bool, log_p: boo
             }
             y = pbeta_raw(xinbta, pp, qq, true, log_p);
             let w = if log_p {
-                (y - la) * (y + logbeta + r * xinbta.ln() + t * (-xinbta).ln_1p()).exp()
+                (y - la) * rfma(t, (-xinbta).ln_1p(), rfma(r, xinbta.ln(), y + logbeta)).exp()
             } else {
-                (y - a) * (logbeta + r * xinbta.ln() + t * (-xinbta).ln_1p()).exp()
+                (y - a) * rfma(t, (-xinbta).ln_1p(), rfma(r, xinbta.ln(), logbeta)).exp()
             };
             tx = if w.is_finite() { xinbta - w } else { xinbta };
         } else if swap_tail {
