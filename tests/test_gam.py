@@ -6192,6 +6192,156 @@ def test_gevlss_rank_deficient_matches_mgcv():
     np.testing.assert_allclose(beta[1], -1.9194328, rtol=0, atol=1e-3)
 
 
+def _cox_ph_fixture():
+    # Cox PH data on R's set.seed(7) stream via hea.R.rng (bit-exact runif):
+    # exponential survival times (continuous, no ties), a random censoring
+    # indicator passed as weights. Reproducible by:
+    #   set.seed(7); n<-200; x<-runif(n); z<-runif(n)
+    #   lp<-0.7*sin(2*pi*x)+0.4*z; time<- -log(runif(n))/exp(lp)
+    #   event<-as.integer(runif(n)<0.75)
+    from hea.R.rng import RGenerator
+    gen = RGenerator(7)
+    n = 200
+    x = gen.uniform(size=n)
+    z = gen.uniform(size=n)
+    lp = 0.7 * np.sin(2 * np.pi * x) + 0.4 * z
+    u = gen.uniform(size=n)
+    time = -np.log(u) / np.exp(lp)
+    ev = gen.uniform(size=n)
+    event = (ev < 0.75).astype(float)
+    return pl.DataFrame({"time": time, "x": x, "z": z, "event": event})
+
+
+def test_cox_ph_through_gam_matches_mgcv():
+    # R: gam(time ~ s(x) + z, family=cox.ph(), weights=event,
+    # method="REML"). The first single-formula general entry (nlp=1) and
+    # the first non-gamlss_gH ll (partial likelihood over risk sets). The
+    # intercept is dropped (drop.intercept=TRUE) — coef names carry no
+    # "(Intercept)" — and the survivor function lands in fitted.values.
+    from hea.family import cox_ph
+
+    df = _cox_ph_fixture()
+    m = gam("time ~ s(x) + z", df, family=cox_ph(), weights=df["event"],
+            method="REML")
+    # drop.intercept: 10 coefs (z + 9 smooth), no intercept column
+    assert m.column_names == ["z"] + [f"s(x).{i}" for i in range(1, 10)]
+    assert "(Intercept)" not in m.column_names
+    # basis-invariant fit quantities vs mgcv (tp eigenvector signs are
+    # build noise → the parametric z coef and |smooth coef| are pinned)
+    np.testing.assert_allclose(m.REML_criterion / 2, 619.504025083614,
+                               rtol=0, atol=1e-3)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 5.04951670043,
+                               rtol=0, atol=1e-2)
+    np.testing.assert_allclose(m.sp[0], 0.0888380593715, rtol=2e-3, atol=0)
+    np.testing.assert_allclose(m.null_deviance, 251.817485857,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.deviance, 244.337920299, rtol=0, atol=1e-3)
+    beta = np.asarray(m._beta)
+    np.testing.assert_allclose(beta[0], 0.5347033442229, rtol=0, atol=1e-3)
+    np.testing.assert_allclose(
+        np.abs(beta[1:]),
+        np.abs([1.1918412609676, 0.9055424491633, -0.0820593633819,
+                -0.1120411669932, -0.0370197861409, -0.3200248848103,
+                -0.1442647042816, 0.7227752645372, 0.5849763355643]),
+        rtol=0, atol=2e-3)
+    # fitted = survivor function (n,), matches mgcv element-wise
+    fitted = np.asarray(m.fitted_values)
+    assert fitted.shape == (200,)
+    np.testing.assert_allclose(
+        fitted[:5], [0.984691862732, 0.734034958684, 0.779977961331,
+                     0.889916922677, 0.544964819219], rtol=0, atol=1e-5)
+
+
+def test_cox_ph_residuals_predict_match_mgcv():
+    # cox.ph deviance/martingale residuals and the survivor-function
+    # prediction hook (predict.gam → family$predict, coxph.r:199-245),
+    # which needs the new event times from newdata.
+    from hea.family import cox_ph
+
+    df = _cox_ph_fixture()
+    m = gam("time ~ s(x) + z", df, family=cox_ph(), weights=df["event"],
+            method="REML")
+    np.testing.assert_allclose(
+        np.asarray(m.residuals)[:5],
+        [2.52471540, 0.98282250, 1.13211646, -0.48296411, 0.46087840],
+        rtol=0, atol=1e-4)
+    np.testing.assert_allclose(
+        np.asarray(m.residuals_of("martingale"))[:5],
+        [0.98457348, 0.69080138, 0.75151039, -0.11662717, 0.39296596],
+        rtol=0, atol=1e-4)
+    with pytest.raises(NotImplementedError, match="score/schoenfeld"):
+        m.residuals_of("score")
+    # response-scale prediction = survivor function at the new times
+    nd = df[:6].select(["time", "x", "z"])
+    pr = m.predict(nd, type="response", se_fit=True)
+    np.testing.assert_allclose(
+        np.asarray(pr["fit"]),
+        [0.9846918627, 0.7340349587, 0.7799779613, 0.8899169227,
+         0.5449648192, 0.0735293562], rtol=0, atol=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(pr["se.fit"]),
+        [0.00851784061, 0.05314490011, 0.05525484119, 0.03550937447,
+         0.06468752039, 0.04388060327], rtol=0, atol=1e-4)
+
+
+def test_cox_ph_pbc_textbook_matches_mgcv():
+    # Wood (2017) GAMs §7.8, "Primary biliary cirrhosis survival
+    # analysis" (book p.377-378): the cox.ph fixed-covariates model on
+    # the survival::pbc data. Status==2 (death) is the event; transplant
+    # /censored are censored. The selected model (after dropping
+    # alk.phos, ast, stage) is
+    #   gam(time ~ trt + sex + s(sqrt(protime)) + s(platelet) + s(age)
+    #       + s(bili) + s(albumin), weights=(status==2), family=cox.ph)
+    # Pinned to CURRENT mgcv (1.9.4) on complete cases (n=308 — mgcv's
+    # na.omit on the model frame; hea needs weights aligned to the
+    # dropped rows, so we filter explicitly). The three near-linear
+    # smooths sit on flat λ→∞ ridges (edf≈1, huge disparate sp) so only
+    # their edf/Chi²/p are pinned, not sp; s(age)/s(bili) are tight.
+    from hea.family import cox_ph
+
+    pbc = load_dataset("survival", "pbc")
+    mv = ["time", "status", "trt", "sex", "protime",
+          "platelet", "age", "bili", "albumin"]
+    cc = pbc.drop_nulls(subset=mv)
+    assert cc.height == 308
+    status1 = (cc["status"] == 2).cast(pl.Float64)
+    m = gam("time ~ trt + sex + s(sqrt(protime)) + s(platelet) + s(age) "
+            "+ s(bili) + s(albumin)", cc, family=cox_ph(),
+            weights=status1, method="REML")
+    # drop.intercept + factor reference (sex levels m,f → "sexf"); the
+    # sqrt(protime) smooth-arg expression resolves
+    assert "(Intercept)" not in m.column_names
+    assert m.column_names[:2] == ["trt", "sexf"]
+    # overall fit (flat ridges → modest tolerances)
+    np.testing.assert_allclose(m.REML_criterion / 2, 547.256744526281,
+                               rtol=0, atol=5e-2)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 15.3095029449,
+                               rtol=0, atol=5e-2)
+    np.testing.assert_allclose(m.null_deviance, 413.412618165,
+                               rtol=0, atol=1e-2)
+    # parametric terms (no treatment effect; sex marginal) — mgcv exact
+    beta = dict(zip(m.column_names, np.asarray(m._beta)))
+    np.testing.assert_allclose(beta["trt"], 0.06715634, rtol=0, atol=2e-3)
+    np.testing.assert_allclose(beta["sexf"], -0.49515759, rtol=0, atol=3e-3)
+    # smooth table vs summary(b)$s.table
+    rows = {r[0]: r for r in m._smooth_significance_rows()}
+    # meaningful curves — tight
+    np.testing.assert_allclose(rows["s(age)"][1], 6.042792, rtol=0, atol=2e-2)
+    np.testing.assert_allclose(rows["s(age)"][3], 29.417277, rtol=0, atol=0.3)
+    np.testing.assert_allclose(rows["s(bili)"][1], 4.264429, rtol=0, atol=2e-2)
+    np.testing.assert_allclose(rows["s(bili)"][3], 89.540337, rtol=0, atol=0.5)
+    # flat ridges — edf≈1, Chi² pinned (sp itself is a free λ→∞ direction)
+    for lab, chi in (("s(sqrt(protime))", 13.333751),
+                     ("s(platelet)", 5.787376),
+                     ("s(albumin)", 31.086251)):
+        np.testing.assert_allclose(rows[lab][1], 1.0, rtol=0, atol=2e-2)
+        np.testing.assert_allclose(rows[lab][3], chi, rtol=0, atol=0.3)
+    # every smooth significant at 5% except none here is non-sig
+    for lab in rows:
+        assert 0.0 <= rows[lab][4] <= 1.0
+    m.summary()
+
+
 def test_shash_through_gam_matches_mgcv():
     # R: gam(list(y ~ s(x), ~ s(z), ~ 1, ~ 1), family=shash(),
     # method="REML") — available.derivs=2, the FULL outer-Newton

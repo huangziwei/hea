@@ -1650,6 +1650,148 @@ def test_gevlss_link_residuals_and_validation():
 
 
 # ---------------------------------------------------------------------------
+# cox_ph (Cox proportional hazards, coxph.r + src/coxph.c) — mgcv 1.9-4
+# oracle references generated live (R --vanilla): cox.ph()$ll / $hazard at
+# fixed inputs (set.seed(5), n=12 with tied integer times so Peto's tie
+# correction is exercised; the synthetic d1b/d2b/Hp from set.seed(99)).
+# ---------------------------------------------------------------------------
+
+def _cox_oracle_inputs():
+    # 12 obs in descending-time order (cox.ph's internal sort handles any
+    # order; pinned here as R produced them). Two covariates, integer times
+    # WITH TIES, censoring indicator d (1 = event).
+    time = np.array([11, 10, 10, 9, 7, 7, 5, 5, 4, 4, 3, 2], float)
+    d = np.array([0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0], int)
+    X = np.array([
+        -0.60290798145, 1.71144087270, -0.47216638517, -0.84085548079,
+        1.38435934348, 0.07014276643, -1.25549186263, -0.63537131252,
+        -0.28577363487, 0.13810822480, 1.22763034385, -0.80177945465,
+        -2.18396676009, -0.59731309471, 0.24081725594, -1.08039260003,
+        -0.15753435611, -0.13898614055, -1.07176003988, -0.25935540673,
+        0.90051194533, 0.94186939387, 1.46796190342, 0.70676108956,
+    ]).reshape(2, 12).T
+    beta = np.array([0.3, -0.2])
+    d1b = np.array([0.02139625021848798, 0.04796581345708748,
+                    0.00878287049737438, 0.04438585074947837]
+                   ).reshape(2, 2).T
+    d2b = np.array([-0.0181418960259587, 0.0061337014762436,
+                    -0.0431922594072422, 0.0244812133346184,
+                    -0.0182058456273331, -0.0647121003340961]
+                   ).reshape(3, 2).T
+    return time, d, X, beta, d1b, d2b
+
+
+def test_cox_ph_ll_matches_mgcv_oracle():
+    # cox.ph()$ll at every engine deriv level (= C deriv 0..3) vs live R.
+    from scipy.linalg import cholesky
+    from hea.family import cox_ph
+    time, d, X, beta, d1b, d2b = _cox_oracle_inputs()
+    fam = cox_ph()
+    lpi = [np.arange(2)]
+    p = 2
+
+    r1 = fam.ll(time, X, beta, d, lpi=lpi, deriv=1)
+    np.testing.assert_allclose(r1["l"], -5.58629239323487, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(r1["lb"], [-1.001195162311, 0.829726360424],
+                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        r1["lbb"], [[-3.607277244680, -0.991185222861],
+                    [-0.991185222861, -1.796449359815]], rtol=0, atol=1e-9)
+
+    Hp = -r1["lbb"] + 0.5 * np.eye(p)
+    # deriv 2 → d1H as the trace vector tr(Hp⁻¹ ∂H/∂ρ) (fh = Hp⁻¹)
+    r2 = fam.ll(time, X, beta, d, lpi=lpi, deriv=2, d1b=d1b,
+                fh=np.linalg.inv(Hp))
+    np.testing.assert_allclose(r2["d1H"], [0.0149517979284, 0.0110099642008],
+                               rtol=0, atol=1e-9)
+    # deriv 3 → d1H as the per-ρ matrix list
+    r3 = fam.ll(time, X, beta, d, lpi=lpi, deriv=3, d1b=d1b,
+                fh=np.linalg.inv(Hp))
+    np.testing.assert_allclose(
+        r3["d1H"][0], [[-0.0241339294506, 0.0590998865919],
+                       [0.0590998865919, 0.0727777783225]], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        r3["d1H"][1], [[-0.0090719771863, 0.0543165991505],
+                       [0.0543165991505, 0.0539383891138]], rtol=0, atol=1e-9)
+    # deriv 4 → trHid2H; cox rebuilds eigen(Hp) from the preconditioned
+    # Cholesky pieces (D = ones, L = chol(Hp)) the engine passes
+    L = cholesky(Hp, lower=False)
+    r4 = fam.ll(time, X, beta, d, lpi=lpi, deriv=4, d1b=d1b, d2b=d2b,
+                fh=(L, np.arange(p)), D=np.ones(p))
+    np.testing.assert_allclose(
+        r4["trHid2H"],
+        [-0.000159634648342, -0.004026984816385, -0.015872013597495],
+        rtol=0, atol=1e-9)
+
+
+def test_cox_ph_ll_derivatives_match_fd():
+    # internal self-consistency: lb vs FD of l, lbb vs FD of lb, and the
+    # ∂H/∂ρ matrices vs FD of lbb along the d1b directions.
+    from hea.family import cox_ph
+    time, d, X, beta, d1b, _ = _cox_oracle_inputs()
+    fam = cox_ph()
+    lpi = [np.arange(2)]
+    p = 2
+    r1 = fam.ll(time, X, beta, d, lpi=lpi, deriv=1)
+    h = 1e-6
+    fd_lb = np.zeros(p)
+    fd_lbb = np.zeros((p, p))
+    for k in range(p):
+        cp = beta.copy(); cp[k] += h
+        cm = beta.copy(); cm[k] -= h
+        fd_lb[k] = (fam.ll(time, X, cp, d, lpi=lpi, deriv=0)["l"]
+                    - fam.ll(time, X, cm, d, lpi=lpi, deriv=0)["l"]) / (2 * h)
+        fd_lbb[:, k] = (fam.ll(time, X, cp, d, lpi=lpi, deriv=1)["lb"]
+                        - fam.ll(time, X, cm, d, lpi=lpi,
+                                 deriv=1)["lb"]) / (2 * h)
+    np.testing.assert_allclose(r1["lb"], fd_lb, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(r1["lbb"], 0.5 * (fd_lbb + fd_lbb.T),
+                               rtol=0, atol=1e-6)
+    r3 = fam.ll(time, X, beta, d, lpi=lpi, deriv=3, d1b=d1b,
+                fh=np.linalg.inv(-r1["lbb"] + 0.5 * np.eye(p)))
+    for j in range(d1b.shape[1]):
+        fdH = (fam.ll(time, X, beta + h * d1b[:, j], d, lpi=lpi,
+                      deriv=1)["lbb"]
+               - fam.ll(time, X, beta - h * d1b[:, j], d, lpi=lpi,
+                        deriv=1)["lbb"]) / (2 * h)
+        np.testing.assert_allclose(r3["d1H"][j], fdH, rtol=0, atol=1e-4)
+
+
+def test_cox_ph_hazard_matches_mgcv_oracle():
+    # cox.ph()$hazard (the coxpp kernel): baseline cumulative hazard h,
+    # its variance q, Kaplan-Meier hazard km, and the `a` vectors — and
+    # the internal sort handles arbitrary row order.
+    from hea.family import _coxpp
+    time, d, X, beta, _, _ = _cox_oracle_inputs()
+    rng = np.random.default_rng(2)
+    perm = rng.permutation(time.size)
+    hz = _coxpp((X @ beta)[perm], X[perm], d[perm], time[perm])
+    np.testing.assert_allclose(
+        hz["h"], [0.440813001016, 0.440813001016, 0.440813001016,
+                  0.239455306944, 0.107523327814, 0, 0, 0], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        hz["q"], [0.0695122341035, 0.0695122341035, 0.0695122341035,
+                  0.0289673131413, 0.0115612660241, 0, 0, 0],
+        rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        hz["km"], [0.541666666667, 0.541666666667, 0.541666666667,
+                   0.291666666667, 0.125, 0, 0, 0], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        hz["a"][:, 0], [0.1324572533078, 0.1324572533078, 0.1324572533078,
+                        0.0820811959820, 0.0215023786239, 0, 0, 0],
+        rtol=0, atol=1e-9)
+
+
+def test_cox_ph_validation():
+    from hea.family import cox_ph
+    with pytest.raises(ValueError, match="link not available"):
+        cox_ph(link="log")
+    fam = cox_ph()
+    assert fam.n_lp == 1 and fam.drop_intercept is True
+    assert fam.available_derivs == 2 and fam.is_general
+
+
+# ---------------------------------------------------------------------------
 # twlss (Tweedie location-scale-shape, gamlss.r:2493-2662) — mgcv 1.9-4
 # oracle references generated live (R --vanilla): ldTweedie in the working
 # (rho, theta) parameterization with all.derivs=TRUE, tw.null.fit, and

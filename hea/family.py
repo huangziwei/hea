@@ -6396,6 +6396,380 @@ class gevlss(GeneralFamily):
         return f"gevlss(link={self._link_names!r})"
 
 
+def _coxlpl(eta, X, d, time, deriv, d1b=None, d2b=None, D=None,
+            eigen=None):
+    """mgcv's ``coxlpl`` C kernel (src/coxph.c:141-394): the Cox log
+    PARTIAL likelihood (Peto/Breslow tie handling) and its coefficient-
+    and smoothing-parameter derivatives, in pure numpy.
+
+    ``deriv`` is the C-level code (= the engine's ll deriv minus one):
+      0 → ``l``, ``lb`` (= g), ``lbb`` (= H);
+      1,2 → + ``d1H`` the per-ρ ∂H/∂ρ matrices (original basis);
+      3 → + ``trHid2H`` = tr(Hp⁻¹ ∂²H/∂ρ∂ρ'), computed in the
+          eigenbasis of the (raw) penalized Hessian — ``eigen`` is
+          ``{"values","vectors"}`` and ``D`` the preconditioner, exactly
+          mgcv's ``X<-X%*%(ev$vectors*D); d1b<-t(V)%*%(d1b/D)`` step.
+
+    Rows need NOT be pre-sorted: risk sets are formed by descending
+    ``time`` internally, and every return is coefficient-space (so it is
+    invariant to the row storage order)."""
+    eta = np.asarray(eta, float)
+    X = np.asarray(X, float)
+    time = np.asarray(time, float)
+    d = np.asarray(d, int)
+    n, p = X.shape
+    M = 0 if d1b is None else d1b.shape[1]
+    # risk sets are cumulative in DESCENDING time; sort rows internally so
+    # the engine may pass them in any order (l/lb/lbb/d1H/trHid2H are all
+    # coefficient-space, hence invariant to the row permutation). d1b/d2b
+    # are coefficient-space and stay put.
+    order = np.argsort(-time, kind="stable")
+    eta = eta[order]
+    X = X[order]
+    time = time[order]
+    d = d[order]
+    gamma = np.exp(eta)
+    tr = np.unique(-time)
+    nt = tr.size
+    r = np.searchsorted(tr, -time)                        # 0-based group
+    last = np.searchsorted(r, np.arange(nt), side="right") - 1
+    gamma_p = np.cumsum(gamma)[last]
+    b_p = np.cumsum(gamma[:, None] * X, 0)[last]
+    gXX = gamma[:, None, None] * X[:, :, None] * X[:, None, :]
+    A_p = np.cumsum(gXX, 0)[last]
+    ev = np.asarray(d, int) == 1
+    dr = np.zeros(nt)
+    np.add.at(dr, r[ev], 1.0)
+    eta_sum = np.zeros(nt)
+    np.add.at(eta_sum, r[ev], eta[ev])
+    g_ev = X[ev].sum(0) if ev.any() else np.zeros(p)
+
+    lpl = float(np.sum(eta_sum - dr * np.log(gamma_p)))
+    g = g_ev - np.sum((dr / gamma_p)[:, None] * b_p, 0)
+    H = -np.sum(dr[:, None, None] * (
+        A_p / gamma_p[:, None, None]
+        - b_p[:, :, None] * b_p[:, None, :]
+        / (gamma_p ** 2)[:, None, None]), 0)
+    out = {"l": lpl, "lb": g, "lbb": H}
+    if deriv < 1:
+        return out
+
+    if deriv <= 2:                          # ∂H/∂ρ matrices, original basis
+        d1eta = X @ d1b
+        d1gamma = d1eta * gamma[:, None]
+        d1b_p = np.cumsum(d1gamma[:, None, :] * X[:, :, None], 0)[last]
+        d1gamma_p = np.cumsum(d1gamma, 0)[last]
+        d1A_p = np.cumsum(
+            d1gamma[:, None, None, :] * gXX[..., None]
+            / gamma[:, None, None, None], 0)[last]
+        xx0 = dr / gamma_p
+        xx1 = xx0 / gamma_p
+        d1H = np.zeros((p, p, M))
+        for m in range(M):
+            xx = d1gamma_p[:, m] * xx0 / gamma_p
+            xx2 = xx1 * 2 * d1gamma_p[:, m] / gamma_p
+            term = (xx1[:, None, None]
+                    * (d1b_p[:, :, None, m] * b_p[:, None, :]
+                       + b_p[:, :, None] * d1b_p[:, None, :, m])
+                    - xx2[:, None, None] * b_p[:, :, None] * b_p[:, None, :]
+                    + xx[:, None, None] * A_p
+                    - xx0[:, None, None] * d1A_p[:, :, :, m])
+            d1H[:, :, m] = term.sum(0)
+        out["d1H"] = d1H
+        return out
+
+    # deriv == 3: trHid2H in the eigenbasis (recompute risk sums there)
+    val = np.asarray(eigen["values"], float)
+    vec = np.asarray(eigen["vectors"], float)
+    dvec = np.where(val > 0, 1.0 / np.where(val > 0, val, 1.0), 0.0)
+    Xp = X @ (D[:, None] * vec)
+    d1bp = vec.T @ (d1b / D[:, None])
+    d2bp = vec.T @ (d2b / D[:, None])
+    gXXp = gamma[:, None, None] * Xp[:, :, None] * Xp[:, None, :]
+    b_p = np.cumsum(gamma[:, None] * Xp, 0)[last]
+    A_p = np.cumsum(gXXp, 0)[last]
+    Adiag = np.diagonal(A_p, axis1=1, axis2=2)
+    d1eta = Xp @ d1bp
+    d1gamma = d1eta * gamma[:, None]
+    d1gamma_p = np.cumsum(d1gamma, 0)[last]
+    d1b_p = np.cumsum(d1gamma[:, None, :] * Xp[:, :, None], 0)[last]
+    d1A_p = np.cumsum(d1gamma[:, None, None, :] * gXXp[..., None]
+                      / gamma[:, None, None, None], 0)[last]
+    d1Adiag = np.diagonal(d1A_p, axis1=1, axis2=2)        # (nt,M,p)
+    nhh = M * (M + 1) // 2
+    pairs = [(a, b) for a in range(M) for b in range(a, M)]
+    d2eta = Xp @ d2bp
+    d2gamma = np.empty((n, nhh))
+    for off, (a, b) in enumerate(pairs):
+        d2gamma[:, off] = gamma * (d2eta[:, off] + d1eta[:, a] * d1eta[:, b])
+    d2gamma_p = np.cumsum(d2gamma, 0)[last]
+    d2b_p = np.cumsum(d2gamma[:, None, :] * Xp[:, :, None], 0)[last]
+    d2ldA_p = np.cumsum(d2gamma[:, None, :] * (Xp ** 2)[:, :, None], 0)[last]
+    xx = dr / gamma_p
+    xx0 = xx / gamma_p
+    xx1 = xx0 / gamma_p
+    xx2 = xx1 / gamma_p
+    d2H = np.zeros((p, nhh))
+    for off, (m, k) in enumerate(pairs):
+        xx3 = -2 * xx1 * d1gamma_p[:, m]
+        contrib = (
+            xx3[:, None] * (Adiag * d1gamma_p[:, k][:, None]
+                            + 2 * d1b_p[:, :, k] * b_p)
+            + xx0[:, None] * (d1Adiag[:, m, :] * d1gamma_p[:, k][:, None]
+                              + Adiag * d2gamma_p[:, off][:, None]
+                              + d2b_p[:, :, off] * b_p
+                              + 2 * d1b_p[:, :, k] * d1b_p[:, :, m]
+                              + b_p * d2b_p[:, :, off])
+            + xx0[:, None] * d1gamma_p[:, m][:, None] * d1Adiag[:, k, :]
+            - xx[:, None] * d2ldA_p[:, :, off]
+            + 6 * xx2[:, None] * d1gamma_p[:, m][:, None] * b_p * b_p
+            * d1gamma_p[:, k][:, None]
+            - 2 * xx1[:, None] * (2 * d1b_p[:, :, m] * b_p
+                                  * d1gamma_p[:, k][:, None]
+                                  + b_p * b_p * d2gamma_p[:, off][:, None]))
+        d2H[:, off] = contrib.sum(0)
+    out["trHid2H"] = np.sum(d2H * dvec[:, None], 0)
+    return out
+
+
+def _coxpp(eta, X, d, time):
+    """mgcv's ``coxpp`` C kernel (src/coxph.c:61-137): baseline cumulative
+    hazard ``h``, its variance ``q``, the Kaplan-Meier hazard ``km`` and
+    the ``a`` vectors used for survival-curve standard errors. Reduces to
+    reverse-cumulative sums of the same risk-set quantities ``_coxlpl``
+    forms. Sorts internally; ``r`` is the 0-based unique-time index per
+    (original-order) row."""
+    eta = np.asarray(eta, float)
+    X = np.asarray(X, float)
+    time = np.asarray(time, float)
+    d = np.asarray(d, int)
+    n, p = X.shape
+    order = np.argsort(-time, kind="stable")     # descending time
+    eta = eta[order]
+    X = X[order]
+    time = time[order]
+    d = d[order]
+    gamma = np.exp(eta)
+    tr_neg = np.unique(-time)
+    nt = tr_neg.size
+    tr = -tr_neg
+    r_sorted = np.searchsorted(tr_neg, -time)
+    last = np.searchsorted(r_sorted, np.arange(nt), side="right") - 1
+    r = np.empty(n, int)
+    r[order] = r_sorted                          # back to original row order
+    gamma_p = np.cumsum(gamma)[last]
+    gamma_np = (last + 1).astype(float)
+    b_p = (np.cumsum(gamma[:, None] * X, 0)[last] if p
+           else np.zeros((nt, 0)))
+    dr = np.zeros(nt)
+    np.add.at(dr, r_sorted[d == 1], 1.0)         # sorted-order events
+
+    def _rev(a):
+        return np.cumsum(a[::-1], 0)[::-1]
+
+    h = _rev(dr / gamma_p)
+    km = _rev(dr / gamma_np)
+    q = _rev(dr / gamma_p ** 2)
+    a = (_rev(b_p * (dr / gamma_p ** 2)[:, None]) if p
+         else np.zeros((nt, 0)))
+    return {"tr": tr, "h": h, "q": q, "km": km, "nt": nt, "r": r, "a": a}
+
+
+def _coxpred(Xnew, tnew, beta, off, Vb, a, h, q, tr):
+    """mgcv's ``coxpred`` C kernel (src/coxph.c:20-59): predicted survivor
+    function and its s.e. for new ``(Xnew, tnew)`` given the fitted
+    baseline-hazard pieces (``a``, ``h``, ``q``, unique times ``tr``).
+    New data must arrive in DESCENDING time order (the interval pointer
+    advances monotonically); the caller sorts and unsorts."""
+    Xnew = np.asarray(Xnew, float)
+    n = Xnew.shape[0]
+    nt = tr.size
+    s = np.zeros(n)
+    se = np.zeros(n)
+    ir = 0
+    for i in range(n):
+        while ir < nt and tnew[i] < tr[ir]:
+            ir += 1
+        if ir == nt:                # earlier than every fit time
+            s[i] = 1.0
+            se[i] = 0.0
+            continue
+        hi = h[ir]
+        eta = float(Xnew[i] @ beta)
+        v = a[ir] - Xnew[i] * hi
+        exp_eta = np.exp(eta + off[i])
+        s[i] = np.exp(-hi * exp_eta)
+        vVv = float(v @ Vb @ v)
+        se[i] = exp_eta * s[i] * np.sqrt(max(q[ir] + vVv, 0.0))
+    return s, se
+
+
+class cox_ph(GeneralFamily):
+    """Cox proportional-hazards general family — mgcv ``cox.ph()``
+    (coxph.r). A SINGLE linear predictor (``n_lp == 1``), the intercept
+    dropped (the baseline hazard absorbs it), fit by partial likelihood
+    over risk sets. The response is the event time; the prior
+    ``weights`` are the censoring indicator (1 = event, 0 = censored).
+
+    Unlike the gamlss families the likelihood is supplied directly by
+    :func:`_coxlpl` (its own gradient/Hessian and smoothing-parameter
+    derivatives), not through :func:`gamlss_gH`. ``ll`` reconstructs the
+    raw penalized Hessian from gam.fit5's preconditioned Cholesky pieces
+    (``fh``/``D``) at deriv 4 to match mgcv's own eigen-decomposition of
+    ``Hp``.
+    """
+    name = "Cox PH"
+    scale_known = True
+    n_theta = 0
+    n_lp = 1
+    available_derivs = 2
+    drop_intercept = True
+
+    def __init__(self, link="identity"):
+        if link != "identity":
+            raise ValueError(
+                f"{link!r} link not available for cox.ph family; the only "
+                "available link is 'identity'")
+        super().__init__([IdentityLink()])
+        self._fit_ctx = None
+        self._cox_data = None
+
+    def ll(self, y, X, coef, wt, *, lpi, offset=None, deriv: int = 0,
+           d1b=None, d2b=None, fh=None, D=None) -> dict:
+        y = np.asarray(y, float)
+        X = np.asarray(X, float)
+        coef = np.asarray(coef, float)
+        d = np.rint(np.asarray(wt, float)).astype(int)
+        eta = X @ coef
+        if offset is not None and offset[0] is not None:
+            eta = eta + offset[0]
+        if deriv == 0:
+            return {"l": _coxlpl(eta, X, d, y, -1)["l"]}
+        cderiv = deriv - 1                  # C-level deriv code
+        if cderiv < 3:
+            res = _coxlpl(eta, X, d, y, cderiv, d1b=d1b)
+            out = {"l": res["l"], "lb": res["lb"], "lbb": res["lbb"]}
+            if deriv == 2:                  # d1H as a TRACE vector (fh=Hp⁻¹)
+                fh = np.asarray(fh, float)
+                out["d1H"] = np.array(
+                    [float(np.sum(fh * res["d1H"][:, :, m]))
+                     for m in range(res["d1H"].shape[2])])
+            elif deriv == 3:                # d1H as a matrix list
+                out["d1H"] = [res["d1H"][:, :, m]
+                              for m in range(res["d1H"].shape[2])]
+            return out
+        # deriv == 4 → trHid2H: rebuild eigen(raw Hp) from fh=(L,piv)+D
+        eigen = self._eigen_from_fh(fh, D, X.shape[1])
+        res = _coxlpl(eta, X, d, y, 3, d1b=d1b, d2b=d2b, D=np.asarray(D, float),
+                      eigen=eigen)
+        return {"l": res["l"], "lb": res["lb"], "lbb": res["lbb"],
+                "trHid2H": res["trHid2H"]}
+
+    @staticmethod
+    def _eigen_from_fh(fh, D, p):
+        """Raw penalized Hessian Hp = D⁻¹·unpivot(LᵀL)·D⁻¹ from gam.fit5's
+        preconditioned pivoted Cholesky (gamlss_gH's ``fh``/``D``
+        convention), then its symmetric eigen-decomposition — what mgcv's
+        cox ll gets by ``eigen(Hp)`` directly."""
+        if isinstance(fh, dict):
+            return fh
+        R_f, piv = fh
+        D = np.asarray(D, float)
+        M = R_f.T @ R_f                     # (LᵀL) in pivoted order
+        ipiv = np.empty_like(piv)
+        ipiv[piv] = np.arange(p)
+        M = M[np.ix_(ipiv, ipiv)]           # natural order
+        Hr = M / D[:, None] / D[None, :]
+        val, vec = np.linalg.eigh(Hr)
+        return {"values": val, "vectors": vec}
+
+    def initialize_coef(self, y, X, lpi, E=None, offset=None,
+                        use_unscaled: bool = False) -> np.ndarray:
+        # mgcv: start <- rep(0, ncol(x))  (coxph.r:76)
+        return np.zeros(np.asarray(X, float).shape[1])
+
+    def set_fit_context(self, *, X, coef, offset):
+        """Stash the converged design (original basis, original row order)
+        + coefficients so :meth:`postproc`/:meth:`predict` can form the
+        baseline hazard's ``a`` vectors, which need ``X`` (absent from the
+        6-arg postproc signature)."""
+        self._fit_ctx = {"X": np.asarray(X, float),
+                         "coef": np.asarray(coef, float),
+                         "offset": offset}
+
+    def postproc(self, y, prior_weights, fitted, linear_predictors,
+                 offset, intercept) -> dict:
+        """cox.ph postproc (coxph.r:48-72): baseline hazard estimation,
+        the per-observation survivor function into ``fitted``, and the
+        null deviance (no-covariate baseline survival)."""
+        eps = float(np.finfo(float).eps)
+        y = np.asarray(y, float)
+        eta = np.asarray(linear_predictors, float)[:, 0]
+        d = np.rint(np.asarray(prior_weights, float)).astype(int)
+        ctx = self._fit_ctx
+        Xc = ctx["X"] if ctx is not None else np.zeros((y.size, 0))
+        hz = _coxpp(eta, Xc, d, y)
+        self._cox_data = hz
+        # baseline survival of the NULL (no-covariate) model
+        hz0 = _coxpp(np.zeros_like(eta), np.zeros((y.size, 0)), d, y)
+        s0 = np.exp(-hz0["h"][hz0["r"]])
+        s0 = np.minimum(s0, 1.0 - 2.0 * eps)
+        s_model = np.exp(-hz["h"][hz["r"]] * np.exp(eta))   # survivor
+        w = np.asarray(prior_weights, float)
+        null_dev = 2.0 * float(np.sum(np.abs(
+            w + np.log(s0) + w * np.log(-np.log(s0)))))
+        return {"fitted": s_model, "null_deviance": null_dev}
+
+    def residuals(self, y, fitted, type: str = "deviance",
+                  prior_weights=None):
+        """cox.ph residuals (coxph.r:165-196): martingale and deviance
+        (score/schoenfeld need the fit covariance and live on the model
+        object). ``fitted`` is the (n,) survivor function; ``prior_weights``
+        is the event indicator, passed by the engine."""
+        if type not in ("deviance", "martingale"):
+            raise NotImplementedError(
+                f"cox.ph residuals support 'deviance'/'martingale'; got "
+                f"{type!r} (score/schoenfeld need Vp and are model-level)")
+        w = np.asarray(prior_weights, float)
+        log_s = np.log(np.asarray(fitted, float))
+        res = w + log_s                     # martingale residuals
+        if type == "martingale":
+            return res
+        log_s = np.minimum(log_s, -1e-50)
+        return np.sign(res) * np.sqrt(np.maximum(
+            -2.0 * (res + w * np.log(-log_s)), 0.0))
+
+    def predict(self, *, se, y, X, beta, off, Vb, lpi, eta=None):
+        """cox.ph survivor-function prediction (coxph.r:199-245). ``y``
+        carries the NEW event times (predict.gam supplies them for
+        cox.ph). Returns survival probabilities (and their s.e.)."""
+        if self._cox_data is None:
+            raise RuntimeError("cox.ph predict needs a fitted model")
+        if y is None:
+            raise ValueError(
+                "cox.ph response-scale prediction needs the event time "
+                "column in newdata")
+        t = np.asarray(y, float)
+        X = np.asarray(X, float)
+        n = X.shape[0]
+        if isinstance(off, (list, tuple)):       # per-LP list (n_lp == 1)
+            off = off[0]
+        off = np.zeros(n) if off is None else np.asarray(off, float)
+        order = np.argsort(-t, kind="stable")     # descending
+        s = np.zeros(n)
+        sef = np.zeros(n)
+        cd = self._cox_data
+        s_o, se_o = _coxpred(X[order], t[order], np.asarray(beta, float),
+                             off[order], np.asarray(Vb, float),
+                             cd["a"], cd["h"], cd["q"], cd["tr"])
+        s[order] = s_o
+        sef[order] = se_o
+        return {"fit": s, "se_fit": sef if se else None}
+
+    def __repr__(self):
+        return "cox_ph(link='identity')"
+
+
 def _coerce_response(y_series: pl.Series, family: "Family") -> np.ndarray:
     """Cast the response column to a numeric float array, with R's
     factor-response convention for :class:`Binomial`.
@@ -6458,7 +6832,7 @@ __all__ = [
     "Scat", "scat",
     "nb",
     "GeneralFamily", "gaulss", "twlss", "shash", "gammals", "gumbls",
-    "gevlss", "LogebLink", "SoftplusLink", "ShiftedLogitLink",
+    "gevlss", "cox_ph", "LogebLink", "SoftplusLink", "ShiftedLogitLink",
     "trind_generator", "gamlss_etamu", "gamlss_gH",
     "IdentityLink", "LogLink", "InverseLink",
     "SqrtLink", "LogitLink", "ProbitLink", "CauchitLink", "CloglogLink",

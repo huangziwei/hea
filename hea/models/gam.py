@@ -929,6 +929,21 @@ class gam:
             )
             return
         if getattr(family, "is_general", False):
+            if family.n_lp == 1:
+                # single-formula general entry (cox.ph is nlp=1 with no
+                # formula list, coxph.r:349-357): route the bare formula
+                # through the general path as a 1-element list.
+                if etastart is not None or mustart is not None:
+                    raise NotImplementedError(
+                        "etastart/mustart apply to the PIRLS fitters "
+                        "only; general-family fits take start=.")
+                self._init_general(
+                    [str(formula)], data, method=method, sp=sp,
+                    family=family, offset=offset, weights=weights,
+                    gamma=gamma, select=select, knots=knots,
+                    control=control, start=start, optimizer=opt,
+                )
+                return
             raise ValueError(
                 f"family {family!r} has {family.n_lp} linear predictors"
                 " — pass a list of formulas, one per linear predictor."
@@ -4131,7 +4146,19 @@ class gam:
         self._edge_correct = False
         self._edge_theta1 = None
 
-        md = _prepare_multi_design(list(formulas), data, knots, select)
+        md = _prepare_multi_design(list(formulas), data, knots, select,
+                                   allow_single=(family.n_lp == 1))
+        self._drop_intercept_col = None
+        if getattr(family, "drop_intercept", False):
+            # cox.ph drops the intercept (drop.intercept=TRUE, coxph.r:355):
+            # the partial likelihood is invariant to a constant shift of η
+            # (the baseline hazard absorbs it), so the intercept is
+            # unidentified and removed from the design. Remember its column
+            # so predict's newdata design drops the same one.
+            if "(Intercept)" in md.column_names:
+                self._drop_intercept_col = md.column_names.index(
+                    "(Intercept)")
+            md = _drop_general_intercept(md)
         y = np.asarray(md.y, dtype=float)
         n = md.n
         self.n = n
@@ -4319,6 +4346,13 @@ class gam:
         # that as an optional `fitted` key, applied BEFORE residuals so
         # residuals_of/qq see the same matrix mgcv does. r² is skipped
         # (no.r.sq); null_deviance exists only when postproc supplies it.
+        # families whose postproc/predict need the design (cox.ph forms
+        # the baseline-hazard `a` vectors, absent from the 6-arg postproc
+        # signature) get it via an optional context hook, set on the
+        # ORIGINAL-basis design + coefficients before postproc runs.
+        ctx_hook = getattr(family, "set_fit_context", None)
+        if ctx_hook is not None:
+            ctx_hook(X=md.X, coef=coefs, offset=md.offsets[0])
         pp = family.postproc(
             y, prior_weights=self._wt, fitted=fit["fitted_values"],
             linear_predictors=fit["linear_predictors"],
@@ -7329,6 +7363,10 @@ class gam:
             from ..formula import _eval_atom, normalize_data
             newdata_n = normalize_data(newdata)
             X_new, _ = _multi_lpmatrix(md, newdata_n)
+            # drop_intercept families (cox.ph) rebuild the newdata design
+            # with the intercept; remove the same column the fit dropped.
+            if getattr(self, "_drop_intercept_col", None) is not None:
+                X_new = np.delete(X_new, self._drop_intercept_col, axis=1)
             offs = []
             for lp in md.lps:
                 if lp.expanded.offsets:
@@ -7368,8 +7406,18 @@ class gam:
         # different column count than n_lp. Link/terms scales never use it.
         fam_predict = getattr(self.family, "predict", None)
         if type == "response" and fam_predict is not None:
+            # families whose response surface depends on the response
+            # itself (cox.ph: the survivor function at the new event
+            # times) get it via ``y``; in-sample uses the training y, and
+            # newdata supplies it through the response column when present.
+            if newdata is None:
+                y_new = np.asarray(md.y, dtype=float)
+            else:
+                resp = self.formula[0].split("~", 1)[0].strip()
+                y_new = (newdata_n[resp].to_numpy().astype(float)
+                         if resp in newdata_n.columns else None)
             ffv = fam_predict(se=se_fit, X=X_new, beta=beta, off=offs,
-                              Vb=V, lpi=md.lpi, y=None)
+                              Vb=V, lpi=md.lpi, y=y_new)
             return self._general_response_frame(
                 ffv["fit"], ffv.get("se_fit") if se_fit else None)
         fits = []
@@ -11253,7 +11301,8 @@ def _build_lp_design(formula: str, data, knots: dict | None,
 
 def _prepare_multi_design(formulas: list[str], data,
                           knots: dict | None = None,
-                          select: bool = False) -> _MultiDesign:
+                          select: bool = False,
+                          allow_single: bool = False) -> _MultiDesign:
     """mgcv ``gam.setup.list`` (mgcv.r:922-1092) for hea: a list of
     formula strings → one stacked design with ``lpi``.
 
@@ -11265,7 +11314,7 @@ def _prepare_multi_design(formulas: list[str], data,
     ``offset()`` atom); penalties carry global column offsets; the id
     L-matrix is block-diagonal across formulas.
     """
-    if len(formulas) < 2:
+    if len(formulas) < 1 or (len(formulas) < 2 and not allow_single):
         raise ValueError(
             "multi-formula gam needs at least 2 formulas; pass a plain "
             "string for single-predictor models"
@@ -11353,6 +11402,42 @@ def _prepare_multi_design(formulas: list[str], data,
                         column_names=names, nsdf=nsdf, pstart=pstart,
                         offsets=offsets, n_lp=len(lps), L=L,
                         n_work=n_work, p=X.shape[1], n=n)
+
+
+def _drop_general_intercept(md: _MultiDesign) -> _MultiDesign:
+    """Drop the ``(Intercept)`` column from a general-family design
+    (mgcv ``drop.intercept=TRUE``, used by cox.ph). Implemented for the
+    single-LP families that set the flag: the intercept is column 0 of
+    LP 0; every later column index shifts down by one."""
+    if md.n_lp != 1:
+        raise NotImplementedError(
+            "drop.intercept is only wired for single-LP general families")
+    if "(Intercept)" not in md.column_names:
+        return md
+    idx = md.column_names.index("(Intercept)")
+    keep = [c for c in range(md.p) if c != idx]
+    X = md.X[:, keep]
+
+    def _shift(c):
+        return c - 1 if c > idx else c
+
+    slots = [_PenaltySlot(block=s.block, col_start=_shift(s.col_start),
+                          col_end=_shift(s.col_end), S=s.S, S_scale=s.S_scale)
+             for s in md.slots]
+    ranges = [(_shift(a), _shift(b)) for (a, b) in md.block_col_ranges]
+    names = [nm for k, nm in enumerate(md.column_names) if k != idx]
+    nsdf = [md.nsdf[0] - 1]
+    lp0 = md.lps[0]
+    lp0.X = X
+    lp0.nsdf = nsdf[0]
+    lp0.column_names = names
+    lp0.block_col_ranges = ranges
+    lp0.slots = slots
+    return _MultiDesign(
+        lps=md.lps, X=X, lpi=[np.arange(X.shape[1])], y=md.y,
+        blocks=md.blocks, block_col_ranges=ranges, slots=slots,
+        column_names=names, nsdf=nsdf, pstart=[0], offsets=md.offsets,
+        n_lp=1, L=md.L, n_work=md.n_work, p=X.shape[1], n=md.n)
 
 
 def _multi_lpmatrix(md: _MultiDesign, newdata) -> tuple[np.ndarray,
