@@ -170,6 +170,22 @@ def have_rscript() -> bool:
     return shutil.which("Rscript") is not None
 
 
+def r_scalar_values(exprs):
+    """Evaluate each scalar R expression on THIS machine; return ``{expr: float}``.
+
+    ``sprintf("%.17g")`` round-trips an IEEE double exactly, so callers can compare
+    bit-for-bit. Drives the macOS-only live-R bit-exact checks in test_R.py (same
+    libm rationale as :func:`run_rs_r_oracle` — hea and R share the platform's
+    scalar libm only on macOS; on glibc the few-ulp floor means callers must
+    compare with tolerance instead)."""
+    body = "".join(f'cat(sprintf("%.17g\\n", as.double({e})))\n' for e in exprs)
+    out = subprocess.run(
+        ["Rscript", "-e", body], stdin=subprocess.DEVNULL, check=True,
+        capture_output=True, text=True, timeout=120,
+    ).stdout
+    return dict(zip(exprs, (float(x) for x in out.split())))
+
+
 def run_rs_r_oracle(cases, workdir) -> dict:
     """Evaluate R's d/p/q for each case and return ``{name: np.ndarray}``.
 

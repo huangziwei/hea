@@ -8,10 +8,14 @@ none of it shadows a Python builtin.
 from __future__ import annotations
 
 import builtins
+import math
+import sys
 
 import numpy as np
 import polars as pl
 import pytest
+
+from conftest import have_rscript, r_scalar_values
 
 import hea
 from hea import R as R_mod
@@ -712,40 +716,69 @@ def test_R_vector_functions_dispatch_on_expr():
 # ---------------------------------------------------------------------------
 
 
+# --- Live-R bit-exact distribution checks -----------------------------------
+# Bit-exactness to R is achievable only on macOS, where hea and R share Apple's
+# scalar libm (on BOTH Intel and arm64); on Linux/glibc they drift a few ulp
+# (the libm floor — see tests/test_rs_parity.py header, and note R itself is not
+# bit-identical across arches because clang fuses nmath's Horners to FMA on arm64
+# but not on x86-64). So: bit-for-bit vs the *live* R on this machine when on
+# macOS+Rscript (no frozen, arch-locked literals); otherwise a tolerance check vs
+# the committed R 4.6.0 value (a ~portable reference, exact only where libm matches).
+_R_BITEXACT = sys.platform == "darwin" and have_rscript()
+
+
+def _assert_r(checks, *, rel_tol=1e-12):
+    """``checks``: list of ``(got, r_expr, fallback)`` — bit-exact vs live R on
+    macOS, else ``math.isclose`` vs the committed fallback."""
+    if _R_BITEXACT:
+        ref = r_scalar_values([e for _, e, _ in checks])
+        for got, expr, _ in checks:
+            assert got == ref[expr], f"{expr}: {got!r} != live R {ref[expr]!r}"
+    else:
+        for got, expr, fb in checks:
+            assert math.isclose(got, fb, rel_tol=rel_tol), f"{expr}: {got!r} !~ R {fb!r}"
+
+
 def test_dnorm_pnorm_qnorm():
-    # Bit-exact to R 4.6.0 (ported nmath dnorm/pnorm/qnorm kernels).
-    assert dnorm(0) == 0.3989422804014327
-    assert pnorm(1.96) == 0.97500210485177963
-    assert qnorm(0.975) == 1.9599639845400536
+    _assert_r([
+        (dnorm(0), "dnorm(0)", 0.3989422804014327),
+        (pnorm(1.96), "pnorm(1.96)", 0.97500210485177963),
+        (qnorm(0.975), "qnorm(0.975)", 1.9599639845400536),
+    ])
 
 
 def test_pnorm_lower_tail_false():
     # R's pnorm(.., lower.tail=FALSE) uses the upper-tail kernel directly.
-    assert pnorm(1.96, lower_tail=False) == 0.024997895148220428
+    _assert_r([(pnorm(1.96, lower_tail=False),
+                "pnorm(1.96, lower.tail=FALSE)", 0.024997895148220428)])
 
 
 def test_qnorm_lower_tail_false():
     # P(Z > q) = 0.025  →  q = qnorm(0.975); R's lower.tail=FALSE path differs
     # from 1-p by 1 ulp (0.5 - p + 0.5 idiom) — we replicate it exactly.
-    assert qnorm(0.025, lower_tail=False) == 1.9599639845400538
+    _assert_r([(qnorm(0.025, lower_tail=False),
+                "qnorm(0.025, lower.tail=FALSE)", 1.9599639845400538)])
 
 
 def test_t_distribution():
-    # Bit-exact to R (ported pt/qt -> pbeta toms708).
-    assert qt(0.975, df=10) == 2.2281388519862739
-    assert pt(2, df=10) == 0.96330598261462974
+    _assert_r([
+        (qt(0.975, df=10), "qt(0.975, df=10)", 2.2281388519862739),
+        (pt(2, df=10), "pt(2, df=10)", 0.96330598261462974),
+    ])
 
 
 def test_chisq_distribution():
-    # Bit-exact to R (central chisq -> ported pgamma/qgamma).
-    assert qchisq(0.95, df=1) == 3.841458820694124
-    assert pchisq(3.841458821, df=1) == 0.9500000000091211
+    _assert_r([
+        (qchisq(0.95, df=1), "qchisq(0.95, df=1)", 3.841458820694124),
+        (pchisq(3.841458821, df=1), "pchisq(3.841458821, df=1)", 0.9500000000091211),
+    ])
 
 
 def test_f_distribution():
-    # Bit-exact to R (ported pf/qf -> pbeta/qbeta).
-    assert qf(0.95, 2, 10) == 4.1028210151304005
-    assert pf(4.102821, 2, 10) == 0.94999999958445847
+    _assert_r([
+        (qf(0.95, 2, 10), "qf(0.95, 2, 10)", 4.1028210151304005),
+        (pf(4.102821, 2, 10), "pf(4.102821, 2, 10)", 0.94999999958445847),
+    ])
 
 
 def test_binom():
@@ -756,18 +789,21 @@ def test_binom():
 
 
 def test_poisson_with_lambda_keyword():
-    # dpois(2, lambda=3) = 3^2 * exp(-3) / 2 = 9 * 0.04979 / 2
-    # dpois / ppois are bit-exact to R (ported dpois saddlepoint, ppois->pgamma).
-    assert float(dpois(2, lambda_=3)) == 0.22404180765538773
-    assert float(ppois(2, lambda_=3)) == 0.42319008112684348
+    # dpois / ppois bit-exact to R (ported dpois saddlepoint, ppois->pgamma).
+    _assert_r([
+        (float(dpois(2, lambda_=3)), "dpois(2, 3)", 0.22404180765538773),
+        (float(ppois(2, lambda_=3)), "ppois(2, 3)", 0.42319008112684348),
+    ])
 
 
 def test_uniform_exp_gamma_beta():
     assert float(punif(0.3)) == pytest.approx(0.3)
     assert float(qexp(0.5)) == pytest.approx(np.log(2), rel=1e-6)
-    # pgamma / pbeta are bit-exact to R (ported nmath pgamma / toms708 pbeta).
-    assert float(pgamma(1, shape=2, rate=1)) == 0.26424111765711528
-    assert float(pbeta(0.5, 2, 5)) == 0.890625
+    # pgamma / pbeta bit-exact to R (ported nmath pgamma / toms708 pbeta).
+    _assert_r([
+        (float(pgamma(1, shape=2, rate=1)), "pgamma(1, shape=2, rate=1)", 0.26424111765711528),
+        (float(pbeta(0.5, 2, 5)), "pbeta(0.5, 2, 5)", 0.890625),
+    ])
 
 
 def test_set_seed_reproducible():

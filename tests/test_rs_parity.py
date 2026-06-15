@@ -8,9 +8,9 @@ Why live R, not the Python ``nmath`` reference or committed pins:
   transcendental-heavy kernels (pbeta/qbeta/pgamma/…) drift a few ulp because
   Rust-std-math and R's glibc path don't agree bit-for-bit even on one machine
   (the cross-platform libm floor — 0-ulp to an arbitrary R is not promisable).
-  So this strict gate runs on macOS ONLY (locally — it's not in CI; CI covers the
-  Linux platform that local dev doesn't); the Linux matrix exercises the Rust port
-  via the tolerance-pinned R tests instead.
+  So the strict 0-ulp form runs on macOS (Intel & arm64); off-macOS (Linux, incl.
+  CI when R is installed) the same cases run as a *tolerance* check — see
+  ``_STRICT`` below — which still catches gross / platform-specific Rust bugs.
 * ``numpy``'s vectorized transcendentals are NOT bit-identical to scalar libm
   and drift by a few ulp across numpy builds — so the old ``rs == nmath``
   differential gate failed on some Linux/numpy combinations even though Rust was
@@ -24,8 +24,8 @@ R exposes only the public d/p/q surface; the internal saddlepoint primitives
 R entry point and are covered transitively (``dpois``/``dbinom``/``pgamma`` in
 the large-count/large-shape regime exercise the whole chain).
 
-Skips off-macOS (the libm floor above), when ``hea._rs`` isn't compiled (sdist /
-no toolchain), or when ``Rscript`` is absent.
+Skips when ``hea._rs`` isn't compiled (sdist / no toolchain) or when ``Rscript``
+is absent; off-macOS it relaxes to a tolerance check (the libm floor) not 0-ulp.
 """
 import sys
 
@@ -36,12 +36,20 @@ from conftest import have_rscript, run_rs_r_oracle
 
 rs = pytest.importorskip("hea._rs")
 
-if sys.platform != "darwin":
-    pytest.skip("Rust==R 0-ulp gate is macOS-only — Linux glibc libm diverges a "
-                "few ulp from R's; the Linux matrix exercises Rust via the "
-                "tolerance-pinned R tests instead.", allow_module_level=True)
 if not have_rscript():
     pytest.skip("Rscript not on PATH (install R)", allow_module_level=True)
+
+# Bit-exactness to R holds only where hea and R share the platform's scalar libm:
+# macOS (Apple libm) → 0-ulp on BOTH Intel & arm64. On Linux/glibc the
+# transcendental-heavy kernels drift a few ulp (Rust-std-math vs R's glibc path —
+# see the module docstring), so off-macOS this runs as a TOLERANCE check: it still
+# catches gross / platform-specific Rust regressions (notably the x86-64 `rfma`
+# plain-path, otherwise only gated on a local Intel Mac), just not at the last ulp.
+_STRICT = sys.platform == "darwin"
+# PROVISIONAL Linux tolerance — deliberately generous so the first CI run is green;
+# tighten toward the true glibc floor (a few ulp ≈ 1e-13) once that run reports the
+# actual drift.
+_LINUX_RTOL = 1e-9
 
 
 def _bits(v: float) -> int:
@@ -60,6 +68,12 @@ def _assert_bit_exact(got, exp):
     got = np.asarray(got, dtype=float)
     exp = np.asarray(exp, dtype=float)
     assert got.shape == exp.shape, f"shape {got.shape} != {exp.shape}"
+    if not _STRICT:
+        # Off-macOS: glibc libm floor → a few-ulp tolerance (NaN/±Inf-aware;
+        # atol covers the underflow corner where R rounds to 0).
+        np.testing.assert_allclose(got, exp, rtol=_LINUX_RTOL, atol=1e-300,
+                                   equal_nan=True)
+        return
     for g, e in zip(got.ravel(), exp.ravel()):
         if np.isnan(e):
             assert np.isnan(g), f"expected NaN, got {g!r}"

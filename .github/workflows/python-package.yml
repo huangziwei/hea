@@ -1,9 +1,9 @@
 # CI covers Linux (the platform not exercised by local macOS dev). Installs Python +
-# Rust, builds the hea._rs extension, and runs the suite against the Rust-backed
-# (active) numeric path. The strict bit-exact Rust==R gate (tests/test_rs_parity.py)
-# is 0-ulp only on macOS (Apple libm) — on Linux glibc the transcendental kernels
-# drift a few ulp (libm floor) — so it skips here and is run LOCALLY on macOS (not in
-# CI). The Linux matrix still exercises the Rust port via the tolerance-pinned R tests.
+# Rust + R, builds the hea._rs extension, and runs the suite against the Rust-backed
+# (active) numeric path. The Rust==R parity gate (tests/test_rs_parity.py) is 0-ulp
+# only on macOS (Apple libm); on Linux/glibc the transcendental kernels drift a few
+# ulp (libm floor), so here it runs as a TOLERANCE check against live R — still
+# gating the x86-64 Rust path (incl. the `rfma` plain branch) per-commit.
 # See: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
 
 name: Python package
@@ -37,15 +37,17 @@ jobs:
       uses: Swatinem/rust-cache@v2
       with:
         workspaces: rust
-    - name: Install SuiteSparse (CHOLMOD backend)
+    - name: Install SuiteSparse (CHOLMOD backend) + R (live-R parity oracle)
       # scikit-sparse builds against libsuitesparse-dev. Without it, hea
       # falls back to scipy.sparse.linalg.splu, whose different sparse
       # reduction order opens a wider FP floor on glmer fits — enough
       # to fail the FD-Hessian SE pin on poly() contrasts (~2e-2 abs)
       # and the predict tolerance (~3e-9 abs).
-      # (No R here: the Rust==R gate is macOS-only and run locally, not in CI; the
-      # translator tests, the only other live-R users, are skipped on Linux.)
-      run: sudo apt-get update && sudo apt-get install -y libsuitesparse-dev
+      # r-base-core gives Rscript for the live-R oracle: test_rs_parity.py runs here
+      # as a TOLERANCE check (Linux/glibc isn't 0-ulp to R — that's macOS only),
+      # gating the x86-64 Rust path per-commit. (The tidyverse translator tests still
+      # skip — they need a full tidyverse install, too slow for CI.)
+      run: sudo apt-get update && sudo apt-get install -y libsuitesparse-dev r-base-core
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip

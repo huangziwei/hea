@@ -2815,10 +2815,15 @@ def test_ill_conditioned_design_matches_mgcv():
                                rtol=0, atol=1e-8)
     np.testing.assert_allclose(float(np.sum(m.edf)), 11.72237914,
                                rtol=0, atol=1e-4)
+    # Raw coefficients of this κ(X)≈6e10 block are inherently platform/BLAS
+    # sensitive (~1e-6 across reduction orders) — rtol=1e-6 was flaky on Intel
+    # (~0.5%) and consistently ~2.5e-6 off on arm64. The *stable* quantities
+    # (REML/σ²/edf/prediction above) are what pin the fit; the coefficients get
+    # a looser bound that still catches gross errors but tolerates the conditioning.
     np.testing.assert_allclose(
         np.asarray(m.coef)[:4],
         [-34137.84777, 10168.43994, -1009.697889, 33.42319007],
-        rtol=1e-6,
+        rtol=1e-5,
     )
     np.testing.assert_allclose(m.predict(df.head(1))["fit"][0], -0.4805246562,
                                rtol=0, atol=1e-7)
