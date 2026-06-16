@@ -602,6 +602,41 @@ def psum_chisq(q: float, lb: np.ndarray, df: np.ndarray | None = None,
     return sf if not lower_tail else 1.0 - sf
 
 
+def _r_cat_num(x: float) -> str:
+    """R's ``cat(x)`` default scalar formatting: ``getOption("digits")`` = 7
+    significant figures with trailing zeros dropped. Used for print.gam's
+    ``total =`` and ``{method} score:`` values (which mgcv emits via ``cat``)."""
+    return f"{float(x):.7g}"
+
+
+def _sigfig_decimals(v: float, digits: int) -> int:
+    """Decimal places in the ``digits``-significant-figure rendering of ``|v|``
+    (R ``scientific()``'s ``nsig - kpower - 1``, floored at 0). ``%.*g`` already
+    rounds to ``digits`` sig figs and drops trailing zeros, so its fractional
+    width is exactly that count."""
+    if v == 0:
+        return 0
+    s = f"{abs(v):.{digits}g}"
+    if "e" in s or "E" in s:                       # below 1e-4 / very large
+        mant, _, exp = s.partition("e")
+        dec = len(mant.split(".")[1]) if "." in mant else 0
+        return max(dec - int(exp), 0)
+    return len(s.split(".")[1]) if "." in s else 0
+
+
+def _format_edf_vector(vals: list[float]) -> list[str]:
+    """mgcv print.gam's ``format(round(edf, 4), digits = 3, scientific = FALSE)``
+    (mgcv.r:2457). R's vector ``format`` picks one decimal count — the most any
+    element needs to show 3 significant figures — applies it to all, and
+    right-aligns to a common width. So large elements can show >3 sig figs
+    (``123.456`` → ``123.5`` when a sibling forces one decimal)."""
+    rounded = [round(float(v), 4) for v in vals]
+    rgt = max((_sigfig_decimals(v, 3) for v in rounded), default=0)
+    strs = [f"{v:.{rgt}f}" for v in rounded]
+    width = max((len(s) for s in strs), default=0)
+    return [s.rjust(width) for s in strs]
+
+
 class gam:
     """Generalized additive model — mgcv's ``gam()``.
 
@@ -2221,29 +2256,36 @@ class gam:
         self._mgcv_aic = float(mgcv_aic)                           # mgcv's m$aic (different from AIC!)
 
         if method in ("REML", "ML"):
+            # `_reml` returns -2·V_R (REML) or -2·V_ML (ML); `summary()`'s
+            # `/2` recovers mgcv's `-REML`/`-ML` display value. Known-
+            # scale fits substitute log φ = log(scale) — 0 on the
+            # poisson/binomial defaults, log(gam(scale=)) when fixed;
+            # estimated-scale fits read the outer-optimizer's (or sp=
+            # path's profile-out) log φ̂.
             if n_sp > 0:
-                # `_reml` returns -2·V_R (REML) or -2·V_ML (ML); `summary()`'s
-                # `/2` recovers mgcv's `-REML`/`-ML` display value. Known-
-                # scale fits substitute log φ = log(scale) — 0 on the
-                # poisson/binomial defaults, log(gam(scale=)) when fixed;
-                # estimated-scale fits read the outer-optimizer's (or sp=
-                # path's profile-out) log φ̂.
                 log_phi_hat = (
                     self._log_phi_hat if self._log_phi_hat is not None
                     else float(np.log(self._scale_fixed_value))
                 )
-                score = float(self._reml(rho_hat, log_phi_hat, fit=fit))
+            elif self._scale_known_fit:
+                log_phi_hat = float(np.log(self._scale_fixed_value))
             else:
-                score = float("nan")
+                # No penalties (a purely parametric formula): no outer
+                # optimizer ran, but mgcv still reports a (RE)ML score
+                # (gam.fit3 with 0 sp). Profile φ̂ exactly as the criterion's
+                # reduction-to-Gaussian does — REML: Dp/(n−Mp), ML: Dp/n.
+                Dp = fit.dev + fit.pen
+                denom = (float(n) - float(self._Mp)) if method == "REML" else float(n)
+                log_phi_hat = float(np.log(Dp / denom))
+            score = float(self._reml(rho_hat, log_phi_hat, fit=fit))
             if method == "REML":
                 self.REML_criterion = score
             else:
                 self.ML_criterion = score
         else:
-            if n_sp > 0:
-                self.GCV_score = float(self._gcv(rho_hat))
-            else:
-                self.GCV_score = float("nan")
+            # GCV/UBRE: `_gcv` estimates φ internally, so the no-penalty
+            # case (empty rho) evaluates the same closed form mgcv reports.
+            self.GCV_score = float(self._gcv(rho_hat))
 
         # Variance components: σ² and the implied per-slot std.dev's
         # σ_k = σ/√(sp_k/S.scale_k), with delta-method CIs (REML only).
@@ -8874,16 +8916,68 @@ class gam:
             return str(pp["family_name"])
         return self.family.name
 
+    def _print_score(self) -> tuple[str, float]:
+        """The ``{method} score:`` label + value of print.gam (= ``x$method`` +
+        ``x$gcv.ubre``). REML/ML report the Laplace criterion (hea stores 2×);
+        bam's fREML keeps its label; otherwise UBRE (known scale) or GCV."""
+        if self.method == "REML":
+            label = ("fREML" if getattr(self, "_method_in", None) == "fREML"
+                     else "REML")
+            return label, self.REML_criterion / 2.0
+        if self.method == "ML":
+            return "ML", self.ML_criterion / 2.0
+        return ("UBRE" if self._scale_known_fit else "GCV"), self.GCV_score
+
     def __repr__(self) -> str:
+        # mgcv print.gam (mgcv.r:2443-2467): family block → Formula → per-smooth
+        # estimated edf (round-4/3-sig, 7 per line, ``total =``) → method score
+        # → optional rank. Family/link/formula displays mirror summary()'s
+        # multi-LP handling (one link name per LP, one formula per line).
+        if getattr(self.family, "is_general", False):
+            link_disp = " ".join(link.name for link in self.family.links)
+        else:
+            link_disp = self.family.link.name
+        formulas = (self.formula if isinstance(self.formula, (list, tuple))
+                    else [self.formula])
+
         out = [
-            f"Family: {self._family_display_name()}",
-            f"Link function: {self.family.link.name}",
             "",
-            f"Formula: {self.formula}",
+            f"Family: {self._family_display_name()} ",
+            f"Link function: {link_disp} ",
             "",
-            "Coefficients:",
-            format_df(self.bhat),
+            "Formula:",
+            *[str(f) for f in formulas],
         ]
+
+        if not self._blocks:
+            # cat("Total model degrees of freedom", sum(edf), "\n")
+            out.append(
+                f"Total model degrees of freedom {_r_cat_num(self.edf_total)} "
+            )
+        else:
+            edf_per = [float(self.edf[a:bcol].sum())
+                       for (a, bcol) in self._block_col_ranges]
+            edf_str = _format_edf_vector(edf_per)
+            out.append("")
+            out.append("Estimated degrees of freedom:")
+            # each entry + a space, wrapping after 7; the trailing
+            # " total = X " rides the final (unwrapped) line.
+            line = ""
+            for i, s in enumerate(edf_str, start=1):
+                line += s + " "
+                if i % 7 == 0:
+                    out.append(line)
+                    line = ""
+            line += f" total = {_r_cat_num(round(self.edf_total, 2))} "
+            out.append(line)
+
+        label, score = self._print_score()
+        score_line = f"{label} score: {_r_cat_num(score)}     "
+        p = len(self.coef)
+        if self.rank is not None and self.rank < p:
+            score_line += f"rank: {self.rank}/{p}"
+        out.append("")
+        out.append(score_line)
         return "\n".join(out)
 
     def __str__(self) -> str:

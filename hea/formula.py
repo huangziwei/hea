@@ -4081,6 +4081,59 @@ def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     )]
 
 
+def _pol2nb(polys: Mapping) -> dict[str, list[str]]:
+    """Port of mgcv ``pol2nb`` (smooth.r:2668-2723): derive a neighbour list
+    from boundary polygons. ``polys`` maps each region label to a 2-column
+    vertex matrix (rows of NA separate disjoint sub-polygons of one region).
+    Two regions are neighbours iff they share at least one vertex.
+
+    A bounding-box overlap test pre-filters candidate pairs (mgcv's spdep
+    speed-up); the shared-vertex count is ``nrow(co) - nrow(uniquecombs(co))``
+    on the stacked, de-duplicated vertex sets — here via ``_mgcv_ordered_unique``
+    (the same %.15g text-label row de-dup mgcv's ``uniquecombs`` uses).
+
+    WARNING (mgcv's own): neighbours are defined by *shared vertices* — a region
+    whose vertex merely lies on another's line segment (no shared vertex) is not
+    detected. Returns a dict keyed by region label whose values are the lists of
+    neighbour labels (ready for ``_mrf_penalty_from_nb``)."""
+    names = [str(name) for name in polys]
+    n_poly = len(names)
+    lo1 = np.empty(n_poly)
+    hi1 = np.empty(n_poly)
+    lo2 = np.empty(n_poly)
+    hi2 = np.empty(n_poly)
+    verts: list[np.ndarray] = []
+    for i, key in enumerate(polys):
+        m = np.asarray(polys[key], dtype=float)
+        if m.ndim != 2 or m.shape[1] != 2:
+            raise ValueError(
+                f"mrf polys[{names[i]!r}] must be a 2-column vertex matrix"
+            )
+        m = m[~np.isnan(m).any(axis=1)]      # strip NA separator rows (rowSums NA)
+        lo1[i], hi1[i] = m[:, 0].min(), m[:, 0].max()
+        lo2[i], hi2[i] = m[:, 1].min(), m[:, 1].max()
+        verts.append(_mgcv_ordered_unique(m))   # strip duplicate vertices
+    nb: dict[str, list[str]] = {name: [] for name in names}
+    for k in range(n_poly):
+        ol1 = (((lo1[k] <= hi1) & (lo1[k] >= lo1))
+               | ((hi1[k] <= hi1) & (hi1[k] >= lo1))
+               | ((lo1 <= hi1[k]) & (lo1 >= lo1[k]))
+               | ((hi1 <= hi1[k]) & (hi1 >= lo1[k])))
+        ol2 = (((lo2[k] <= hi2) & (lo2[k] >= lo2))
+               | ((hi2[k] <= hi2) & (hi2[k] >= lo2))
+               | ((lo2 <= hi2[k]) & (lo2 >= lo2[k]))
+               | ((hi2 <= hi2[k]) & (hi2 >= lo2[k])))
+        ol = ol1 & ol2
+        ol[k] = False
+        cok = verts[k]
+        for j in np.flatnonzero(ol):
+            co = np.vstack([verts[j], cok])
+            n_shared = co.shape[0] - _mgcv_ordered_unique(co).shape[0]
+            if n_shared > 0:
+                nb[names[k]].append(names[j])
+    return {name: list(dict.fromkeys(neigh)) for name, neigh in nb.items()}
+
+
 def _mrf_penalty_from_nb(nb: Mapping, levels: list) -> np.ndarray:
     """Graph-Laplacian penalty from a neighbour list (smooth.r:2807-2816).
 
@@ -4120,7 +4173,8 @@ def _build_mrf_smooth(
     The covariate is a factor of region labels; the basis is the region
     indicator and the penalty is supplied via ``xt`` — a penalty matrix
     (``penalty``), a neighbour list (``nb``, → graph Laplacian), or boundary
-    polygons (``polys``, not yet ported). hea threads ``xt`` from
+    polygons (``polys``, → neighbour list via pol2nb → graph Laplacian). hea
+    threads ``xt`` from
     ``gam(..., xt={region: {...}})`` (the object-arg channel, like ``knots=``).
     """
     term_vars = _smooth_term_vars(call)
@@ -4161,10 +4215,8 @@ def _build_mrf_smooth(
     elif spec.get("nb") is not None:
         S = _mrf_penalty_from_nb(spec["nb"], k_levels)
     elif spec.get("polys") is not None:
-        raise NotImplementedError(
-            "mrf polys= (pol2nb boundary→neighbour derivation) is not yet "
-            "ported; supply nb= (neighbour list) or penalty= instead"
-        )
+        # Boundary polygons → neighbour list (mgcv pol2nb) → graph Laplacian.
+        S = _mrf_penalty_from_nb(_pol2nb(spec["polys"]), k_levels)
     else:
         raise ValueError("mrf xt must contain 'penalty', 'nb', or 'polys'")
 

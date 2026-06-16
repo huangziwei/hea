@@ -7904,15 +7904,206 @@ def test_mrf_low_rank_matches_mgcv():
         pr, [-0.672186, -0.262192, -0.106166], atol=1e-5)
 
 
+# pol2nb on a grid of unit squares yields QUEEN adjacency: diagonal squares
+# share a corner vertex, so (e.g.) region 0 neighbours 1, 3 AND 4. Pinned vs
+# mgcv:::pol2nb (≠ the rook _MRF_NB above).
+_MRF_POLYS_NB = {
+    "0": ["1", "3", "4"], "1": ["0", "2", "3", "4", "5"], "2": ["1", "4", "5"],
+    "3": ["0", "1", "4", "6", "7"],
+    "4": ["0", "1", "2", "3", "5", "6", "7", "8"],
+    "5": ["1", "2", "4", "7", "8"], "6": ["3", "4", "7"],
+    "7": ["3", "4", "5", "6", "8"], "8": ["4", "5", "7"],
+}
+
+
+def _mrf_grid_polys() -> dict:
+    """3x3 grid of closed unit squares; region r at (row=r//3, col=r%3)."""
+    polys = {}
+    for r in range(9):
+        row, col = r // 3, r % 3
+        polys[str(r)] = np.array(
+            [[col, row], [col + 1, row], [col + 1, row + 1],
+             [col, row + 1], [col, row]], dtype=float)
+    return polys
+
+
+def test_mrf_polys_pol2nb_matches_mgcv():
+    """polys= path: derive the neighbour list from boundary polygons via the
+    pol2nb port (smooth.r:2668-2723), then build the graph-Laplacian penalty.
+    The neighbour structure (queen adjacency) is pinned exactly vs mgcv:::pol2nb;
+    the end-to-end fit + predict are pinned vs mgcv; and polys= is shown
+    equivalent to supplying the derived nb= directly."""
+    from hea.formula import _pol2nb
+    polys = _mrf_grid_polys()
+    assert _pol2nb(polys) == _MRF_POLYS_NB
+
+    d = _mrf_fixture()
+    m = gam('y ~ s(region, bs="mrf")', d, method="REML",
+            xt={"region": {"polys": polys}})
+    assert m.REML_criterion / 2 == pytest.approx(147.85997000, abs=1e-6)
+    assert float(np.sum(m.edf)) == pytest.approx(8.83460016, rel=1e-6)
+    assert float(m.scale) == pytest.approx(0.24833166, rel=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(m.coef),
+        [-0.108221, -0.236804, 0.360208, 1.106102, 0.604543,
+         -0.454536, 0.729667, 1.411282, -0.959663], atol=1e-5)
+    pr = np.asarray(m.predict(pl.DataFrame({"region": [0, 4, 8]}))).ravel()
+    np.testing.assert_allclose(pr, [-0.961820, 0.282922, -1.281283], atol=1e-5)
+
+    # polys= ≡ nb= (the derived neighbour list) through the same fit
+    m2 = gam('y ~ s(region, bs="mrf")', d, method="REML",
+             xt={"region": {"nb": _MRF_POLYS_NB}})
+    assert m2.REML_criterion == pytest.approx(m.REML_criterion, abs=1e-9)
+
+
 def test_mrf_unsupported_and_validation_raise():
-    """Honest boundaries: missing xt; polys (pol2nb) not yet ported;
+    """Honest boundaries: missing xt; malformed polys vertex matrix;
     wrong-dimension penalty."""
     d = _mrf_fixture()
     with pytest.raises(ValueError, match="needs xt"):
         gam('y ~ s(region, bs="mrf")', d, method="REML")
-    with pytest.raises(NotImplementedError, match="polys"):
+    with pytest.raises(ValueError, match="2-column"):
         gam('y ~ s(region, bs="mrf")', d, method="REML",
-            xt={"region": {"polys": [1]}})
+            xt={"region": {"polys": {"0": [[0.0, 0.0, 0.0]]}}})
     with pytest.raises(ValueError, match="expected"):
         gam('y ~ s(region, bs="mrf")', d, method="REML",
             xt={"region": {"penalty": np.eye(5)}})
+
+
+# =============================================================================
+# B7 — print(gam) mgcv layout (mgcv.r:2443-2467, print.gam) and the no-penalty
+# (RE)ML/GCV score. Family/Formula → per-smooth estimated edf (round-4/3-sig,
+# 7 per line, ``total =``) → ``{method} score:`` → optional ``rank: r/p``. Each
+# repr is pinned BYTE-FOR-BYTE against mgcv 1.9-4's print() output; the score
+# values are mgcv-exact (gam fits match mgcv). Pins: mgcv 1.9-4.
+# -----------------------------------------------------------------------------
+
+
+def _repr_fixture_11() -> pl.DataFrame:
+    """set.seed(11); runif(x), runif(x2), runif(x3 unused), rnorm(y), rpois(yc)
+    — the bit-exact R stream (hea.R.rng)."""
+    from hea.R.rng import RGenerator
+    g = RGenerator(11)
+    n = 220
+    x = g.uniform(0, 1, n)
+    x2 = g.uniform(0, 1, n)
+    g.uniform(0, 1, n)                          # x3 — consumes the stream
+    grp = np.array(["a", "b"] * (n // 2))
+    y = np.sin(2 * np.pi * x) + 0.6 * x2 + g.normal(0, 1, n) * 0.3
+    yc = g.poisson(np.exp(0.4 + np.sin(2 * np.pi * x)))
+    return pl.DataFrame({"y": y, "x": x, "x2": x2, "grp": grp, "yc": yc})
+
+
+def test_print_gam_layout_matches_mgcv():
+    """print.gam layout pinned byte-for-byte vs mgcv: REML / multi-smooth+factor
+    / GCV (scale unknown) / no-smooth (Total model d.f.) / UBRE (poisson)."""
+    d = _repr_fixture_11()
+
+    assert repr(gam("y ~ s(x)", d, method="REML")).split("\n") == [
+        "", "Family: gaussian ", "Link function: identity ", "",
+        "Formula:", "y ~ s(x)", "",
+        "Estimated degrees of freedom:", "6.92  total = 7.92 ", "",
+        "REML score: 101.8412     ",
+    ]
+    assert repr(gam("y ~ s(x) + s(x2) + grp", d, method="REML")).split("\n") == [
+        "", "Family: gaussian ", "Link function: identity ", "",
+        "Formula:", "y ~ s(x) + s(x2) + grp", "",
+        "Estimated degrees of freedom:", "7.28 1.49  total = 10.77 ", "",
+        "REML score: 74.98641     ",
+    ]
+    assert repr(gam("y ~ s(x) + s(x2)", d)).split("\n") == [
+        "", "Family: gaussian ", "Link function: identity ", "",
+        "Formula:", "y ~ s(x) + s(x2)", "",
+        "Estimated degrees of freedom:", "6.08 1.43  total = 8.51 ", "",
+        "GCV score: 0.1006444     ",
+    ]
+    assert repr(gam("y ~ x + x2", d, method="REML")).split("\n") == [
+        "", "Family: gaussian ", "Link function: identity ", "",
+        "Formula:", "y ~ x + x2", "Total model degrees of freedom 3 ", "",
+        "REML score: 185.1315     ",
+    ]
+    assert repr(gam("yc ~ s(x)", d, family=Poisson())).split("\n") == [
+        "", "Family: poisson ", "Link function: log ", "",
+        "Formula:", "yc ~ s(x)", "",
+        "Estimated degrees of freedom:", "4.73  total = 5.73 ", "",
+        "UBRE score: 0.1213043     ",
+    ]
+
+
+def test_print_gam_layout_wrap_general_and_rank():
+    """The fiddly print.gam corners: edf wrapping (7 per line, >7 smooths), a
+    general family (multi-link + one-sided LP formula), and the rank-deficient
+    ``rank: r/p`` tail. All pinned byte-for-byte vs mgcv 1.9-4."""
+    from hea.family import gaulss
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(21)
+    n = 400
+    X = g.uniform(0, 1, n * 8).reshape(n, 8, order="F")   # R fills column-major
+    cols = {f"v{j}": X[:, j] for j in range(8)}
+    v0, v1, v2 = cols["v0"], cols["v1"], cols["v2"]
+    y = (np.sin(2 * np.pi * v0) + np.cos(2 * np.pi * v1) + v2
+         + g.normal(0, 1, n) * 0.4)
+    y2 = 2 + 0.5 * v0 + g.normal(0, 1, n) * (0.2 + 0.4 * v1)
+    d = pl.DataFrame({**cols, "y": y, "y2": y2})
+
+    mw = gam("y ~ s(v0) + s(v1) + s(v2) + s(v3) + s(v4) + s(v5) + s(v6) + s(v7)",
+             d, method="REML")
+    assert repr(mw).split("\n") == [
+        "", "Family: gaussian ", "Link function: identity ", "",
+        "Formula:",
+        "y ~ s(v0) + s(v1) + s(v2) + s(v3) + s(v4) + s(v5) + s(v6) + s(v7)", "",
+        "Estimated degrees of freedom:",
+        "7.18 6.98 1.00 1.80 1.00 1.00 1.00 ",     # wraps after the 7th
+        "1.86  total = 22.82 ", "",
+        "REML score: 242.7806     ",
+    ]
+
+    mg = gam(["y2 ~ s(v0)", "~s(v1)"], d, family=gaulss(), method="REML")
+    assert repr(mg).split("\n") == [
+        "", "Family: gaulss ", "Link function: identity logb ", "",
+        "Formula:", "y2 ~ s(v0)", "~s(v1)", "",
+        "Estimated degrees of freedom:", "1.00 1.46  total = 4.46 ", "",
+        "REML score: 199.7328     ",
+    ]
+
+    # rank-deficient (perfectly collinear parametric): mgcv appends ``rank: r/p``
+    g2 = RGenerator(1)
+    m = 60
+    xa = g2.uniform(0, 1, m)
+    xb = 2 * xa
+    yy = xa + g2.normal(0, 1, m) * 0.2
+    dr = pl.DataFrame({"yy": yy, "xa": xa, "xb": xb})
+    with pytest.warns(UserWarning, match="rank deficient"):
+        mr = gam("yy ~ xa + xb", dr, method="REML")
+    assert repr(mr).split("\n") == [
+        "", "Family: gaussian ", "Link function: identity ", "",
+        "Formula:", "yy ~ xa + xb", "Total model degrees of freedom 2 ", "",
+        "REML score: -14.09846     rank: 2/3",
+    ]
+
+
+def test_no_penalty_score_matches_mgcv():
+    """No-smooth (no-penalty) fits still report mgcv's (RE)ML/GCV/UBRE score —
+    the criterion's φ̂ is profiled exactly as mgcv's reduction-to-Gaussian does
+    (REML: Dp/(n−Mp), ML: Dp/n; GCV/UBRE estimate φ internally). Pins: mgcv
+    1.9-4. Previously hea returned NaN here."""
+    from hea.R.rng import RGenerator
+    g = RGenerator(11)
+    n = 220
+    x = g.uniform(0, 1, n)
+    x2 = g.uniform(0, 1, n)
+    g.uniform(0, 1, n)
+    y = np.sin(2 * np.pi * x) + 0.6 * x2 + g.normal(0, 1, n) * 0.3
+    yc = g.poisson(np.exp(0.4 + 0.7 * x))
+    d = pl.DataFrame({"y": y, "x": x, "x2": x2, "yc": yc})
+
+    assert gam("y ~ x + x2", d, method="REML").REML_criterion / 2 == \
+        pytest.approx(185.1315, abs=1e-4)
+    assert gam("y ~ x + x2", d, method="ML").ML_criterion / 2 == \
+        pytest.approx(180.5841, abs=1e-4)
+    assert gam("y ~ x + x2", d).GCV_score == pytest.approx(0.3107573, abs=1e-7)
+    assert gam("yc ~ x", d, family=Poisson(), method="REML").REML_criterion / 2 \
+        == pytest.approx(383.5616, abs=1e-4)
+    assert gam("yc ~ x", d, family=Poisson()).GCV_score == \
+        pytest.approx(0.154332, abs=1e-6)
