@@ -779,8 +779,9 @@ def _pi_fit_chol(
     ) / 2.0
 
     # 12. log φ slot for non-fixed scale (Gaussian etc.).
+    #     rss_bSb = ‖y-Xβ‖²+β'Sβ = yy - β'X'Wz (Sl.fitChol:1646 identity).
+    rss_bSb = float(yy - beta @ Xy)
     if not phi_fixed:
-        rss_bSb = float(yy - beta @ Xy)
         grad_phi = (-rss_bSb / (phi * gamma) + n / gamma - Mp) / 2.0
         grad = np.concatenate([grad, [grad_phi]])
         # cross derivatives w.r.t. log φ
@@ -794,6 +795,22 @@ def _pi_fit_chol(
         hess_new[n_old, :n_old] = d_phi[:n_old]
         hess_new[n_old, n_old] = d_phi[n_old]
         hess = hess_new
+
+    # 12b. REML VALUE + unpenalised working RSS (Sl.fit:1714, 1736) for
+    #      fast.REML.fit's step-halving + reml.scale. The discrete POI never
+    #      needs the value (it step-halves on the gradient), so it's only
+    #      meaningful when the caller passes the log|S|_+ VALUE in ``ldet_S``.
+    #      This is the Gaussian working-model REML on the reduced (R, f) —
+    #      ``(nobs/γ-Mp)·log(2πφ)`` normalisation, NOT any non-Gaussian ls:
+    #      ``fast.REML.fit``/``Sl.fit`` treat the linearised (R, f) as Gaussian
+    #      (the family lives only in the OUTER PIRLS loop's W, z build).
+    reml_value = (
+        rss_bSb / (phi * gamma)
+        + (n / gamma - Mp) * float(np.log(2.0 * np.pi * phi))
+        + Mp * float(np.log(gamma))
+        + ldetXXS - ldet_S
+    ) / 2.0
+    rss_unpen = float(yy - 2.0 * (beta @ Xy) + beta @ XX @ beta)
 
     # 13. Newton step from eigen-regularised Hessian (Sl.fitChol:1430-1440).
     if hess.shape[0] > 0:
@@ -817,6 +834,8 @@ def _pi_fit_chol(
         "grad": grad,
         "hess": hess,
         "step": step,
+        "reml": reml_value,
+        "rss": rss_unpen,
         "ldetXXS": ldetXXS,
         "rank": rank_A,
         "PP": PP,
@@ -827,12 +846,20 @@ def _pi_fit_chol(
     }
 
 
-def _reg_newton_step(grad: np.ndarray, hess: np.ndarray) -> np.ndarray:
-    """Eigen-regularised Newton step ``-H⁻¹g`` with the ``|step| ≤ 4`` cap —
-    the exact formula ``_pi_fit_chol`` uses internally (Sl.fitChol:1430-1440),
-    factored out so the discrete-POI optimiser can recompute the step in
-    *working* (id-linked) space from the L-contracted ``(T'g, T'HT)`` instead
-    of the full per-penalty grad/Hessian ``_pi_fit_chol`` returns."""
+def _reg_newton_step(grad: np.ndarray, hess: np.ndarray,
+                     max_step: float = 4.0) -> np.ndarray:
+    """Eigen-regularised Newton step ``-H⁻¹g`` with a ``|step| ≤ max_step``
+    cap — the exact formula ``_pi_fit_chol`` uses internally
+    (Sl.fitChol:1430-1440), factored out so the discrete-POI optimiser can
+    recompute the step in *working* (id-linked) space from the L-contracted
+    ``(T'g, T'HT)`` instead of the full per-penalty grad/Hessian
+    ``_pi_fit_chol`` returns.
+
+    ``max_step`` is mgcv's per-routine cap: ``4`` in ``Sl.fitChol``
+    (fast-REML.r:1438) for the discrete POI, ``maxNstep = 5`` in
+    ``fast.REML.fit`` (fast-REML.r:1749, 1818) for the non-discrete
+    converge-fully Newton. The eigen-flip-and-floor regularisation
+    (negative λ → |λ|, then floor at ``max|λ|·√eps``) is identical in both."""
     if hess.shape[0] == 0:
         return np.zeros(0)
     eig_w, eig_v = np.linalg.eigh(hess)
@@ -844,8 +871,8 @@ def _reg_newton_step(grad: np.ndarray, hess: np.ndarray) -> np.ndarray:
         eig_w_clamped = eig_w_abs
     step = -eig_v @ ((eig_v.T @ grad) / eig_w_clamped)
     ms = float(np.max(np.abs(step))) if step.size else 0.0
-    if ms > 4.0:
-        step = step * (4.0 / ms)
+    if ms > max_step:
+        step = step * (max_step / ms)
     return step
 
 
@@ -2257,48 +2284,53 @@ class bam(gam):
                 include_log_phi = (
                     (not self._scale_known_fit) and method in ("REML", "ML")
                 )
-                include_family_theta = False  # tw / extended families not in this iter
+                # initial.spg seed → working space by least squares (mgcv
+                # ``coef(lm(lsp ~ L - 1 + offset(lsp0)))``, mgcv.r:4617-4618 /
+                # fast-REML.r:1768; identity when no smooths share an id).
+                # mgcv's Gaussian bam seeds fast.REML.fit from
+                # ``initial.sp(qrx$R)`` exactly like the non-Gaussian path
+                # (bam.r:1229) — there is no PIRLS outer loop for Gaussian
+                # identity (W=I, z=y), so the seed feeds the one and only
+                # converge-fully REML solve.
+                rho0_full = self._initial_sp_rho()
+                if self._lsp0 is not None:
+                    rho0_full = rho0_full - self._lsp0
+                if self._L is None:
+                    cur_rho = rho0_full
+                else:
+                    cur_rho, *_ = np.linalg.lstsq(self._L, rho0_full,
+                                                  rcond=None)
+
                 if method in ("REML", "ML"):
-                    cur_rho = np.zeros(n_work)
+                    # Non-discrete Gaussian REML/ML → ``fast.REML.fit``
+                    # (bam.r:1240), converge-fully on the fixed (R, f).
                     if include_log_phi:
                         try:
-                            fit_seed = self._fit_given_rho(self._rho_full(cur_rho))
+                            fit_seed = self._fit_given_rho(
+                                self._rho_full(cur_rho))
                             df_resid_seed = max(self.n - self._Mp, 1.0)
-                            # Gaussian: V(μ)=1, so pearson = ‖y - μ̂‖². At the
-                            # seed the dev returned by ``_fit_given_rho`` already
-                            # includes rss_extra ⇒ direct.
+                            # Gaussian: V(μ)=1, so pearson = ‖y - μ̂‖²; the
+                            # dev from ``_fit_given_rho`` already includes
+                            # rss_extra ⇒ direct working-RSS seed for log φ.
                             cur_logphi = float(np.log(
                                 max(fit_seed.dev / df_resid_seed, 1e-12)
                             ))
                         except Exception:
                             cur_logphi = 0.0
+                        theta0 = np.concatenate([cur_rho, [cur_logphi]])
                     else:
-                        cur_logphi = 0.0
+                        theta0 = cur_rho
+                    theta_hat = self._fast_reml_fit(
+                        theta0, include_log_phi=include_log_phi,
+                    )
                 else:
-                    # GCV: full-space initial.spg seed mapped to working space
-                    # by least squares (mgcv ``coef(lm(lsp ~ L - 1 +
-                    # offset(lsp0)))``, mgcv.r:4617-4618; gam.py:1613-1620).
-                    rho0_full = self._initial_sp_rho()
-                    if self._lsp0 is not None:
-                        rho0_full = rho0_full - self._lsp0
-                    if self._L is None:
-                        cur_rho = rho0_full
-                    else:
-                        cur_rho, *_ = np.linalg.lstsq(self._L, rho0_full,
-                                                      rcond=None)
-                    cur_logphi = 0.0
-
-                theta0_parts = [cur_rho]
-                if include_log_phi:
-                    theta0_parts.append(np.array([cur_logphi]))
-                theta0 = np.concatenate(theta0_parts)
-
-                theta_hat = self._outer_newton(
-                    theta0,
-                    criterion="REML" if method in ("REML", "ML") else "GCV",
-                    include_log_phi=include_log_phi,
-                    include_family_theta=include_family_theta,
-                )
+                    # GCV.Cp → outer-Newton on V_g/V_u (no log φ in outer θ).
+                    theta_hat = self._outer_newton(
+                        cur_rho,
+                        criterion="GCV",
+                        include_log_phi=False,
+                        include_family_theta=False,
+                    )
 
                 theta_sp = theta_hat[:n_work]
                 if include_log_phi:
@@ -3166,6 +3198,205 @@ class bam(gam):
             out[start:end] = w_full[start:end] * (HX * X_chunk).sum(axis=1)
         return out
 
+    def _fast_reml_fit(
+        self, theta0: np.ndarray, *, include_log_phi: bool,
+        max_iter: int = 200,
+    ) -> np.ndarray:
+        """mgcv ``fast.REML.fit`` (fast-REML.r:1740-1875) — Newton optimiser
+        for the working log-sp (and log φ when the scale is free) on the
+        reduced ``(R, f)`` data, run to FULL convergence.
+
+        This is the optimiser mgcv's *non-discrete* ``bgam.fit`` (bam.r:1240)
+        calls once per PIRLS iter, via ``Sl.fit``. ``Sl.fit`` and ``Sl.fitChol``
+        compute the SAME REML score/grad/Hessian (QR vs Cholesky numerics), so
+        this drives :func:`_pi_fit_chol` (hea's ``Sl.fitChol`` port) as the
+        per-evaluation oracle — the very same routine the *discrete*
+        ``bgam.fitd`` (bam.r:733) one-step POI uses. The two paths differ only
+        in CADENCE: ``bgam.fitd`` takes ONE step per PIRLS iter with
+        gradient-based halving; this runs the step to FULL convergence with
+        reml-VALUE halving.
+
+        CRITICAL: the REML here is the **Gaussian working-model** REML on the
+        reduced ``(R, f)`` — ``(nobs/γ−Mp)·log(2πφ)`` normalisation, NO
+        non-Gaussian ``ls`` term (``Sl.fit``/``Sl.fitChol`` treat the linearised
+        ``(R, f)`` as Gaussian; the family lives only in the OUTER PIRLS loop's
+        W, z build). This is why it must come from ``_pi_fit_chol`` and NOT from
+        ``_reml`` (the full non-Gaussian Tweedie/Gamma REML, which gam uses):
+        on a scale-unknown Tweedie bam, mgcv-bam reaches sp 0.259 (Gaussian
+        working REML); ``_reml`` on the same reduced data minimises a different
+        objective (0.207) — verified against mgcv-bam.
+
+        ``fast.REML.fit``'s loop (vs gam.fit3's ``newton`` in
+        :meth:`_outer_newton`):
+
+        * eigen-flip Hessian regularisation (negative λ → |λ|, floor at
+          ``max|λ|·√eps``), step capped at ``maxNstep = 5`` — :func:`_reg_newton_step`
+          with ``max_step=5`` (fast-REML.r:1805-1818);
+        * step-halving on the reml VALUE (``trial$reml > best$reml``), with the
+          ``not.moved`` early-stall detector (fast-REML.r:1827-1839);
+        * the TIGHT convergence threshold ``max|grad| ≤ reml.scale·√eps`` AND
+          ``|Δreml| ≤ reml.scale·√eps`` (fast-REML.r:1855-1857), where
+          ``reml.scale = |reml| + rss/nobs`` (fast-REML.r:1776).
+
+        ``theta`` layout matches :meth:`_outer_newton`: working ρ (``n_work``)
+        then a single log φ slot when ``include_log_phi``. The working↔full
+        map is ``T = blockdiag(L, I_φ)`` — ``_T_working`` — exactly mgcv's
+        augmented ``L`` (fast-REML.r:1782) and its ``t(L)`` grad/Hess
+        contraction (fast-REML.r:1784-1785, 1848-1849). Returns ``theta_hat``;
+        the caller recovers β̂ via ``_fit_given_rho(_rho_full(θ_hat[:n_work]))``.
+        """
+        n_work = self._work_dim
+        # T = blockdiag(L, 1_φ): the working→full Jacobian (mgcv's augmented
+        # L). None ⇔ identity (no id linkage, no φ slot) → zero-cost contract.
+        T_work = self._T_working(1 if include_log_phi else 0)
+        conv_tol = float(np.finfo(float).eps) ** 0.5     # mgcv conv.tol
+        max_step = 5.0                                   # mgcv maxNstep
+        nobs = float(self.n)
+        n_int = int(self.n)
+
+        # ``Sl.initial.repara`` data (rotate XX, Xy into the multi-S blocks'
+        # eigen basis so _pi_fit_chol's pivoted Cholesky runs in mgcv's gauge,
+        # matching the discrete POI). Lazily built — depends only on the slot
+        # S matrices. ``_apply_init_repara`` is orthogonal, so the reml VALUE
+        # and RSS scalars it feeds back are gauge-invariant (β is recovered by
+        # the caller, not used here).
+        if not hasattr(self, "_repara_blocks"):
+            self._repara_blocks = _build_init_repara(self._slots, self.p)
+            self._repara_slots = _build_repara_slots(
+                self._slots, self._repara_blocks)
+        XX_pre, Xy_pre = _apply_init_repara(
+            self._XtX, self._Xty, self._repara_blocks)
+
+        def _eval(t):
+            # One Sl.fit / Sl.fitChol evaluation at working θ → dict with the
+            # Gaussian working-model REML VALUE, the t(L)-contracted working
+            # grad/Hess, and the unpenalised working RSS (for reml.scale).
+            theta_sp = t[:n_work]
+            rho = self._rho_full(theta_sp)
+            log_phi = (float(t[n_work]) if include_log_phi
+                       else float(np.log(self._scale_fixed_value)))
+            # log|S|_+ value + ρ-derivatives — the XX-independent pieces.
+            S_full = self._build_S_lambda(rho)
+            S_full = 0.5 * (S_full + S_full.T)
+            S_pinv = self._S_pinv(S_full)
+            ldS_val = float(self._log_det_S_pos(rho))
+            ldS_grad = self._dlog_det_S_drho(
+                rho, S_pinv=S_pinv, S_full=S_full)
+            ldS_hess = self._d2log_det_S_drho_drho(
+                rho, S_pinv=S_pinv, S_full=S_full)
+            try:
+                out = _pi_fit_chol(
+                    XX_pre, Xy_pre, rho, self._repara_slots, self.p,
+                    yy=self._yty, log_phi=log_phi, n=n_int,
+                    Mp=self._Mp, gamma=self._gamma,
+                    phi_fixed=not include_log_phi,
+                    ldet_S=ldS_val, ldet_S_grad=ldS_grad, ldet_S_hess=ldS_hess,
+                )
+            except (np.linalg.LinAlgError, FloatingPointError, ValueError):
+                return None
+            reml_val = float(out["reml"])
+            if not np.isfinite(reml_val):
+                return None
+            g = out["grad"]
+            H = out["hess"]
+            if T_work is not None:
+                g = T_work.T @ g
+                H = T_work.T @ H @ T_work
+            H = 0.5 * (H + H.T)
+            return {"reml": reml_val, "grad": g, "hess": H,
+                    "rss": float(out["rss"])}
+
+        theta = np.asarray(theta0, dtype=float).copy()
+
+        # ---- initial fit + typical reml scale (fast-REML.r:1774-1776) ----
+        best = _eval(theta)
+        if best is None:
+            self._outer_info = {
+                "conv": "initial fit failed", "iter": 0,
+                "grad": np.zeros_like(theta),
+                "hess": np.zeros((theta.size, theta.size)),
+                "score": float("inf"), "score_scale": float("nan"),
+            }
+            return theta
+        reml_scale = abs(best["reml"]) + best["rss"] / nobs
+        grad = best["grad"]
+        hess = best["hess"]
+        grad2 = np.diag(hess)
+        # active set: drop dims with ~0 grad AND ~0 curvature (fast-REML.r:1791).
+        uconv_ind = ((np.abs(grad) > reml_scale * conv_tol * 0.1)
+                     | (np.abs(grad2) > reml_scale * conv_tol * 0.1))
+        if not np.any(uconv_ind):
+            uconv_ind = np.ones_like(uconv_ind, dtype=bool)
+
+        step_failed = False
+        conv_text = "no convergence in 200 iterations"
+        it_done = 0
+        for it in range(max_iter):
+            it_done = it + 1
+            # Newton step on the active subblock (fast-REML.r:1802-1821).
+            if hess.size > 0:
+                H1 = hess[np.ix_(uconv_ind, uconv_ind)]
+                g1 = grad[uconv_ind]
+                uc_step = _reg_newton_step(g1, H1, max_step=max_step)
+                step = np.zeros_like(grad)
+                step[uconv_ind] = uc_step
+            else:
+                step = np.zeros_like(grad)
+
+            # Try the step; step-halve on the reml VALUE until improvement
+            # or failure (fast-REML.r:1822-1839).
+            theta_try = theta + step
+            trial = _eval(theta_try)
+            k = 0
+            not_moved = 0
+            while trial is None or trial["reml"] > best["reml"]:
+                # ``not.moved``: count consecutive halvings with a
+                # numerically-insignificant reml change from best — an
+                # early step-failure indicator (fast-REML.r:1828-1831).
+                if (trial is not None
+                        and (trial["reml"] - best["reml"])
+                        < conv_tol * reml_scale):
+                    not_moved += 1
+                else:
+                    not_moved = 0
+                if (k == 25 or not np.any(step != 0.0) or not_moved > 3):
+                    step_failed = True
+                    break
+                step = step / 2.0
+                k += 1
+                theta_try = theta + step
+                trial = _eval(theta_try)
+            if step_failed:
+                conv_text = "step failed"
+                break
+
+            # Step accepted. Convergence test (fast-REML.r:1847-1864).
+            grad = trial["grad"]
+            hess = trial["hess"]
+            grad2 = np.diag(hess)
+            uconv_ind = ((np.abs(grad) > reml_scale * conv_tol * 0.1)
+                         | (np.abs(grad2) > reml_scale * conv_tol * 0.1))
+            converged = True
+            if np.any(np.abs(grad) > reml_scale * conv_tol):
+                converged = False
+            if abs(best["reml"] - trial["reml"]) > reml_scale * conv_tol:
+                if converged:           # otherwise can't progress
+                    uconv_ind = np.ones_like(uconv_ind, dtype=bool)
+                converged = False
+            best = trial
+            theta = theta_try
+            if converged:
+                conv_text = "full convergence"
+                break
+            reml_scale = abs(best["reml"]) + best["rss"] / nobs
+
+        self._outer_info = {
+            "conv": conv_text, "iter": it_done,
+            "grad": grad, "hess": hess,
+            "score": float(best["reml"]), "score_scale": float(reml_scale),
+        }
+        return theta
+
     def _bgam_fit_loop(self, *, sp_user) -> tuple["_FitState", np.ndarray]:
         """Outer PIRLS loop with chunked QR rebuild per iter.
 
@@ -3177,8 +3408,17 @@ class bam(gam):
            iter 1, when β is still ``None``).
         2. Update reduced sufficient stats ``self._XtX = R'R``, ``self._Xty
            = R'f``, ``self._yty = ‖z̃‖²``, ``self._X_full = R``.
-        3. Run ``_outer_newton`` over (ρ, log φ) on the reduced (R, f) data,
-           then recover β̂ at converged ρ̂ via ``_fit_given_rho``.
+        3. Update (ρ, log φ) on the reduced (R, f), then recover β̂ at the new
+           ρ̂ via ``_fit_given_rho``. The sp-update optimiser mirrors mgcv's
+           per-``discrete`` split EXACTLY:
+             * discrete=TRUE  → one ``_pi_fit_chol`` (Sl.fitChol) POI step,
+               gradient-halving, warm-started (mgcv ``bgam.fitd``);
+             * discrete=FALSE → ``_fast_reml_fit`` (mgcv ``fast.REML.fit``) run
+               to full convergence, reml-value halving, re-seeded from
+               ``initial.sp`` each iter (mgcv ``bgam.fit``);
+             * GCV.Cp → ``_outer_newton`` on V_g/V_u.
+           Both REML optimisers see the SAME Gaussian working-model REML on
+           (R, f) and reach mgcv's true optimum (tight √eps convergence).
         4. Step-halving (mgcv "kk" inner loop): if ``it > 1`` and the new
            penalised deviance increases, halve β toward ``β₀`` and rebuild.
 
@@ -3418,47 +3658,45 @@ class bam(gam):
                              if method == "REML" else max(float(n), 1.0))
                     log_phi_hat = float(np.log(max(Dp / denom, 1e-300)))
             else:
-                # mgcv POI ("perf" optimizer, bgam.fitd at bam.r:430-780):
-                # take a *single* Newton step on (ρ, log φ) per PIRLS
-                # iter, with step-halving when the prior step was uphill.
-                # The Newton step / β / REML grad+Hess come from
-                # ``_pi_fit_chol`` (mgcv's ``Sl.fitChol``) which uses
-                # diagonal preconditioning + pivoted Chol + IFT
-                # derivatives — joint sp-and-coef updates, NOT the nested
-                # outer-Newton-on-frozen-(R,f) below.
+                # mgcv bam's REML sp-update splits by *discrete* — port both
+                # cadences exactly. CRUCIALLY both optimise the **Gaussian
+                # working-model REML** on the reduced (R, f): ``Sl.fit`` /
+                # ``Sl.fitChol`` treat the IRLS-linearised (R, f) as Gaussian
+                # (``(nobs/γ−Mp)·log(2πφ)`` normalisation, NO family ``ls``
+                # term) — the non-Gaussianness lives only in the OUTER PIRLS
+                # loop that rebuilds W, z. ``_pi_fit_chol`` computes exactly
+                # this.
                 #
-                # Used for (a) ``discrete=TRUE`` non-Gaussian fits — mgcv's
-                # ``bgam.fitd`` POI cadence proper — AND (b) ALL scale-UNKNOWN
-                # non-Gaussian fits (``include_log_phi``: Gamma, inverse
-                # Gaussian, fixed-p Tweedie, the extended families), the FIX for
-                # plan item P19.
+                # (1) discrete=TRUE → ``bgam.fitd`` (bam.r:706-757): a *single*
+                #     ``Sl.fitChol`` Newton step on (ρ, log φ) per PIRLS iter,
+                #     GRADIENT-based halving (``sum(grad·Nstep) > dev·1e-7``),
+                #     warm-started ``Nstep``/sp. The branch below.
                 #
-                # WHY (b): ``_pi_fit_chol`` IS mgcv's ``Sl.fitChol`` — the exact
-                # REML Newton STEP that mgcv's non-discrete ``bgam.fit`` iterates
-                # to convergence inside ``fast.REML.fit`` (fast-REML.r:1740, the
-                # ``for iter in 1:200`` loop calling ``Sl.fit`` with the same
-                # ``t(L)`` grad/Hess contraction and eigen-regularised step).
-                # bam used to run ``_outer_newton`` (a port of gam.fit3's
-                # ``newton``) here instead, which converges on the LOOSER
-                # ``max|grad| ≤ score_scale·tol·5`` (gam.fit3.r:1646) and so on
-                # the flat scale-unknown REML basin it quit early at the wrong
-                # (ρ, φ) — its converged log φ disagreed with the Pearson scale,
-                # impossible at a true REML optimum. ``Sl.fitChol`` /
-                # ``fast.REML.fit`` converge tight (grad·.1, fast-REML.r:52) to
-                # mgcv's actual optimum. So this uses mgcv's real bam optimiser
-                # STEP and reaches ``fast.REML.fit``'s fixed point (Tweedie+Gamma
-                # sp/scale/edf to 1e-5, test_bam.py §8). The remaining deviation
-                # from ``bgam.fit`` is cadence only: ONE step per PIRLS iter (the
-                # discrete ``bgam.fitd`` cadence) vs converge-fully — the outer
-                # PIRLS loop co-converges (β, ρ, φ) to the SAME joint fixed
-                # point either way. φ≡1 families (Poisson/Binomial) agree under
-                # both optimisers, so they keep the simpler outer-Newton below.
+                # (2) discrete=FALSE → ``bgam.fit`` (bam.r:1226-1261):
+                #     ``fast.REML.fit`` run to FULL convergence on (R, f) each
+                #     PIRLS iter, sp RE-SEEDED from ``initial.sp(R)`` every
+                #     iter, reml-VALUE halving. ``_fast_reml_fit`` ports that
+                #     loop (fast-REML.r:1740-1875), driving the SAME
+                #     ``_pi_fit_chol`` evaluator. The ``elif`` after this.
                 #
-                # ``method == "GCV.Cp"`` falls back to ``_outer_newton``
-                # because POI's REML formulas don't apply to GCV/UBRE.
+                # Both reach the SAME optimum (verified: mgcv bgam.fit and
+                # bgam.fitd BOTH give Tweedie sp 0.258993) — cadence does not
+                # change the result. The FIX for plan item P19 (scale-UNKNOWN
+                # Gamma / inverse-Gaussian / fixed-p Tweedie / extended φ) is
+                # using *these* (Gaussian-working-REML) optimisers instead of
+                # the old ``_outer_newton``, which minimised ``_reml`` — the
+                # FULL non-Gaussian REML carrying the family's ``ls0(φ)``
+                # saturated-likelihood term (what mgcv-**gam** uses). On the
+                # reduced (R, f) that is a DIFFERENT objective with a different
+                # φ̂ optimum (Tweedie sp 0.207, not 0.259) — the divergence was
+                # the WRONG OBJECTIVE, not loose convergence (the tight
+                # ``√eps`` ``_fast_reml_fit`` reproduces 0.207 too when fed
+                # ``_reml``; only ``_pi_fit_chol``'s Gaussian working REML
+                # hits 0.259). ``_outer_newton`` now serves only
+                # ``method == "GCV.Cp"`` (no REML/φ formulas) — the final
+                # ``else``.
                 if (method in ("REML", "ML")
-                        and (self._discrete_design is not None
-                             or include_log_phi)):
+                        and self._discrete_design is not None):
                     # Lazily build ``Sl.initial.repara`` data on first
                     # PIRLS iter — depends only on the slot S matrices,
                     # not on rho/W.
@@ -3589,10 +3827,55 @@ class bam(gam):
                     self.sp = np.exp(theta_sp_warm)          # mgcv m$sp
                     rho_hat = self._rho_full(theta_sp_warm)  # full per-penalty
                     fit = self._fit_given_rho(rho_hat)
+                elif method in ("REML", "ML"):
+                    # Non-discrete REML/ML → mgcv ``bgam.fit`` (bam.r:1226-1261):
+                    # ``fast.REML.fit`` to FULL convergence on the current
+                    # reduced (R, f). The sp is RE-SEEDED from ``initial.sp(R)``
+                    # every PIRLS iter (bam.r:1229 — NOT warm-started; the
+                    # converge-fully Newton makes the seed immaterial to the
+                    # result), while log φ is carried forward from the previous
+                    # iter's scale estimate (bam.r:1233). ``_initial_sp_rho``
+                    # gives the full-space seed; ``coef(lm(lsp ~ L-1+offset))``
+                    # (the lstsq) projects it to working space, identity when
+                    # no smooths share an id (fast-REML.r:1768).
+                    rho0_full = self._initial_sp_rho()
+                    if self._lsp0 is not None:
+                        rho0_full = rho0_full - self._lsp0
+                    if self._L is None:
+                        rho0 = rho0_full
+                    else:
+                        rho0, *_ = np.linalg.lstsq(
+                            self._L, rho0_full, rcond=None)
+                    if include_log_phi:
+                        if log_phi_hat is None:    # iter 1 — working-RSS seed
+                            try:
+                                fit_seed = self._fit_given_rho(
+                                    self._rho_full(rho0))
+                                df_resid_seed = max(n - self._Mp, 1.0)
+                                log_phi0 = float(np.log(
+                                    max(fit_seed.dev / df_resid_seed, 1e-12)
+                                ))
+                            except Exception:
+                                log_phi0 = 0.0
+                        else:                       # iter > 1 — carry forward
+                            log_phi0 = log_phi_hat
+                        theta0 = np.concatenate([rho0, [log_phi0]])
+                    else:
+                        theta0 = rho0
+
+                    theta_hat = self._fast_reml_fit(
+                        theta0, include_log_phi=include_log_phi,
+                    )
+                    theta_sp_warm = theta_hat[:n_work]   # log φ carry-forward
+                    log_phi_hat = (float(theta_hat[n_work])
+                                   if include_log_phi else None)
+                    self.sp = np.exp(theta_hat[:n_work])
+                    rho_hat = self._rho_full(theta_hat[:n_work])
+                    fit = self._fit_given_rho(rho_hat)
                 else:
-                    # Non-discrete or GCV path: fall back to the
-                    # converge-fully outer-Newton (already L-aware — it
-                    # optimises in working space and maps via _rho_full).
+                    # GCV.Cp only (no log φ in the outer vector): the
+                    # converge-fully outer-Newton on V_g/V_u. L-aware — it
+                    # optimises in working space and maps via ``_rho_full``.
                     if theta_sp_warm is None:
                         rho0_full = self._initial_sp_rho()
                         if self._lsp0 is not None:
@@ -3604,34 +3887,15 @@ class bam(gam):
                                 self._L, rho0_full, rcond=None)
                     else:
                         rho0 = theta_sp_warm.copy()
-                    if include_log_phi:
-                        if log_phi_hat is None:
-                            try:
-                                fit_seed = self._fit_given_rho(
-                                    self._rho_full(rho0))
-                                df_resid_seed = max(n - self._Mp, 1.0)
-                                log_phi0 = float(np.log(
-                                    max(fit_seed.dev / df_resid_seed, 1e-12)
-                                ))
-                            except Exception:
-                                log_phi0 = 0.0
-                        else:
-                            log_phi0 = log_phi_hat
-                        theta0 = np.concatenate([rho0, [log_phi0]])
-                    else:
-                        theta0 = rho0
 
                     theta_hat = self._outer_newton(
-                        theta0,
-                        criterion=(
-                            "REML" if method in ("REML", "ML") else "GCV"
-                        ),
-                        include_log_phi=include_log_phi,
+                        rho0,
+                        criterion="GCV",
+                        include_log_phi=False,
                         include_family_theta=False,
                     )
                     theta_sp_warm = theta_hat[:n_work]
-                    log_phi_hat = (float(theta_hat[n_work])
-                                   if include_log_phi else None)
+                    log_phi_hat = None
                     self.sp = np.exp(theta_sp_warm)
                     rho_hat = self._rho_full(theta_sp_warm)
                     fit = self._fit_given_rho(rho_hat)

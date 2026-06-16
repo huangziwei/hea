@@ -2,15 +2,22 @@
 ##
 ## bam fits a scale-unknown non-Gaussian family (Gamma, inverse Gaussian,
 ## fixed-p Tweedie, the extended families) by PIRLS over a reduced (R, f)
-## problem. hea USED to run the converge-fully ``_outer_newton`` on each frozen
-## (R, f) linearisation, which minimises the WORKING-RSS REML — whose (ρ, φ)
-## optimum differs from the RESPONSE-deviance optimum mgcv reaches by taking ONE
-## POI step then re-linearising (recompute W, z, dev at the new β̂). The gap was
-## large: Gamma sp 0.158 vs mgcv-bam 0.205 (3.7×), Tweedie sp 0.207 vs 0.259.
-## hea now routes these families through the same one-step POI cadence mgcv uses
-## (bgam.fitd), so sp / scale / edf / fitted pin to mgcv-**bam** (NOT gam —
-## bam's reduced-(R,f) cadence genuinely differs from gam's full-data fit:
-## mgcv-gam Gamma sp 0.579 vs mgcv-bam 0.205).
+## problem. mgcv optimises the smoothing parameters + scale on that reduced
+## problem with the GAUSSIAN working-model REML (Sl.fit / Sl.fitChol treat the
+## IRLS-linearised (R, f) as Gaussian: (nobs-Mp)*log(2*pi*phi) normalisation,
+## NO family ls term — the non-Gaussianness lives only in the OUTER loop that
+## rebuilds W, z). hea USED to run ``_outer_newton`` on ``_reml`` — the FULL
+## non-Gaussian REML carrying the family's saturated-likelihood ls0(phi) term
+## (what mgcv-**gam** uses). On the reduced (R, f) that is a DIFFERENT objective
+## with a different phi-hat optimum: Tweedie sp 0.207 vs mgcv-bam 0.259, Gamma
+## likewise off. hea now routes these families through ``_pi_fit_chol`` /
+## ``_fast_reml_fit`` (the Gaussian working REML, mgcv's Sl.fitChol /
+## fast.REML.fit), so sp / scale / edf / fitted pin to mgcv-**bam** to ~7
+## digits. NB the WRONG-objective story, not a cadence story: mgcv's one-step
+## bgam.fitd (discrete=TRUE) and converge-fully bgam.fit (discrete=FALSE) BOTH
+## give Tweedie sp 0.258993 — cadence does not move the optimum. (mgcv-gam,
+## which DOES use the full non-Gaussian REML, gives a third value: Tweedie sp
+## 0.2666, Gamma sp 0.579 — bam's reduced (R,f) genuinely differs from gam.)
 ##
 ## Dumps (tests/fixtures/bam_estscale/<case>/): data.csv, fitted.csv,
 ## meta.csv (sp, scale=sig2, edf_total, n).
