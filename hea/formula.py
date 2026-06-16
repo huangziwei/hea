@@ -3187,6 +3187,30 @@ class _RERawBasis(_RawBasis):
 
 
 @dataclass(slots=True)
+class _MRFRawBasis(_RawBasis):
+    """`smooth.construct.mrf.smooth.spec` — Markov random field indicator basis.
+
+    The basis is a region indicator: ``model.matrix(~ factor(x, levels=k) - 1)``,
+    one column per knot region (regions with no data included — they still get a
+    column). Predict (``Predict.matrix.mrf.smooth``, smooth.r:2868-2875)
+    re-evaluates the indicator on new data's region labels and, for a low-rank
+    fit, post-multiplies by the reparameterization matrix ``P``.
+    """
+    term: str
+    levels: list
+    P: Optional[np.ndarray] = None
+
+    def eval(self, data: pl.DataFrame) -> np.ndarray:
+        col = data[self.term].to_numpy()
+        out = np.zeros((len(col), len(self.levels)))
+        for j, lev in enumerate(self.levels):
+            out[:, j] = (col == lev)
+        if self.P is not None:
+            out = out @ self.P
+        return out
+
+
+@dataclass(slots=True)
 class _FSRawBasis(_RawBasis):
     """`smooth.construct.fs.smooth.spec` — factor-smooth interaction.
 
@@ -3605,6 +3629,56 @@ def _smooth_by_expr(call: Call) -> str | None:
     return _deparse(by)
 
 
+def _smooth_pc_value(call: Call) -> tuple[float, ...] | None:
+    """The smooth's ``pc=`` argument (s/te/ti/t2): a **point constraint**
+    forcing the smooth through zero at the given covariate value(s).
+
+    mgcv (s/te/ti/t2, smooth.r:480-486/600-606/656-662) stores ``pc`` as
+    ``ret$point.con``; ``smooth.construct3`` (smooth.r:3655-3679) then makes
+    the identifiability constraint ``C = Predict.matrix(object, pc)`` — the
+    smooth's basis row evaluated AT the point — with ``always.apply=TRUE``,
+    REPLACING the default sum-to-zero ``C = colMeans(X)``. So the smooth
+    passes through zero at the point and the intercept absorbs the shift
+    (the fitted values are identifiability-invariant; the parameterization,
+    REML, and per-term values differ — see the S1a tests).
+
+    Returns a tuple of floats (one coordinate per smooth covariate, in term
+    order — mgcv's ``names(pc) <- vars``), or None when absent/NULL. Scalar
+    ``pc=0.5`` and vector ``pc=c(0.5, 0.3)`` both parse. The general
+    list-of-lists form (``C beta = d`` plus inequality constraints,
+    smooth.r:3656-3675) is not supported — honest raise."""
+    node = call.kwargs.get("pc")
+    if node is None:
+        return None
+    if isinstance(node, Name) and node.ident == "NULL":
+        return None
+    if isinstance(node, Call) and node.fn == "list":
+        raise NotImplementedError(
+            f"pc= general (list-of-lists) point/inequality constraints in "
+            f"{call.fn}() are not supported; only a simple point constraint "
+            f"pc=value or pc=c(v1, v2, ...) is."
+        )
+
+    def scalar(nd) -> float:
+        if isinstance(nd, Paren):
+            return scalar(nd.expr)
+        if isinstance(nd, UnaryOp) and nd.op in ("-", "+"):
+            v = scalar(nd.operand)
+            return -v if nd.op == "-" else v
+        if isinstance(nd, Literal) and nd.kind == "num":
+            return float(nd.value)
+        raise ValueError(
+            f"pc= in {call.fn}() must be numeric (a scalar or c(...)); "
+            f"got {_deparse(nd)!r}"
+        )
+
+    if isinstance(node, Call) and node.fn == "c":
+        if node.kwargs:
+            raise ValueError("pc=c(...) takes no named arguments")
+        return tuple(scalar(a) for a in node.args)
+    return (scalar(node),)
+
+
 def _eval_by_col(by_expr: str, data: pl.DataFrame) -> pl.Series | np.ndarray:
     """Evaluate a smooth's ``by=`` expression against ``data``.
 
@@ -3755,11 +3829,45 @@ def _apply_by_and_absorb(
     sparse_cons = _SPARSE_CONS_CV.get()
     by_expr = _smooth_by_expr(call)
     base_label = _smooth_label(call)
+
+    # pc= point constraint (smooth.r:3676-3679): mgcv REPLACES the default
+    # sum-to-zero C = colMeans(X) with the smooth's basis row evaluated at the
+    # point (Predict.matrix at pc), always-applied. Build that row in the same
+    # pre-absorb column space as X and feed it as C_source to the standard
+    # sum-to-zero absorb (whose colMeans of a 1-row matrix is the row itself),
+    # so the existing Householder-drop + predict-replay machinery carries it.
+    pc_vals = _smooth_pc_value(call)
+    pc_C: np.ndarray | None = None
+    if pc_vals is not None:
+        if raw_basis is None:
+            raise NotImplementedError(
+                f"pc= point constraint on {base_label} needs a basis with a "
+                "predict hook (unavailable for this smooth class)"
+            )
+        if len(pc_vals) != len(term):
+            raise ValueError(  # mgcv: "supply a value for each variable"
+                f"pc= must supply one value per smooth covariate: {base_label} "
+                f"has {len(term)} covariate(s) but pc= has {len(pc_vals)}"
+            )
+        pc_frame = pl.DataFrame(
+            {t: [float(v)] for t, v in zip(term, pc_vals)}
+        )
+        pc_C = np.asarray(raw_basis.eval(pc_frame), dtype=float).reshape(
+            1, X.shape[1]
+        )
+
     if by_expr is None:
         if sparse_cons == -1:
+            if pc_C is not None:
+                raise NotImplementedError(
+                    f"pc= point constraint with the sweep-drop constraint "
+                    f"(bs with sparse.cons=-1) on {base_label} is not supported"
+                )
             X2, S2, T = _absorb_sweep_drop(X, S_list)
         else:
-            X2, S2, T = _absorb_sumzero(X, S_list, C_source=C_source)
+            X2, S2, T = _absorb_sumzero(
+                X, S_list, C_source=pc_C if pc_C is not None else C_source,
+            )
         spec = (
             BasisSpec(raw=raw_basis, by=None, absorb=T)
             if raw_basis is not None else None
@@ -3791,6 +3899,11 @@ def _apply_by_and_absorb(
         #    the masked X_lev instead reads the by-zeroed rows' (near-zero)
         #    variance/means — wrong, and worst for the sparsest level (P20:
         #    s(x2,by=fac) lowest-amplitude level edf 7.5 vs mgcv-bam 4.5).
+        if pc_C is not None and sparse_cons == -1:
+            raise NotImplementedError(
+                f"pc= point constraint with the sweep-drop constraint "
+                f"(bs with sparse.cons=-1) on {base_label} is not supported"
+            )
         sd_shared = (_absorb_sweep_drop(X, S_list)
                      if sparse_cons == -1 else None)
         blocks: list[SmoothBlock] = []
@@ -3801,9 +3914,14 @@ def _apply_by_and_absorb(
                 X2 = X2_sh * mask[:, None]   # by.dum * constrained shared X
             else:
                 X_lev = X * mask[:, None]
+                # pc= shares one always-applied constraint across by-levels
+                # (smooth.r: point.con's C is on the unmasked basis).
                 X2, S2, T = _absorb_sumzero(
                     X_lev, S_list,
-                    C_source=C_source if C_source is not None else X,
+                    C_source=(
+                        pc_C if pc_C is not None
+                        else (C_source if C_source is not None else X)
+                    ),
                 )
             label = f"{base_label}:{by_expr}{lev}"
             spec = (
@@ -3820,6 +3938,11 @@ def _apply_by_and_absorb(
         return blocks
 
     # Numeric by: multiply X by by-column, skip absorb.cons.
+    if pc_C is not None:
+        raise NotImplementedError(
+            f"pc= point constraint with a numeric by= on {base_label} is not "
+            "supported (numeric-by smooths skip identifiability absorption)"
+        )
     if isinstance(by_col, pl.Series):
         by_arr = by_col.to_numpy().astype(float)
     else:
@@ -3956,6 +4079,124 @@ def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         ),
         S_scale=S_scale,
     )]
+
+
+def _mrf_penalty_from_nb(nb: Mapping, levels: list) -> np.ndarray:
+    """Graph-Laplacian penalty from a neighbour list (smooth.r:2807-2816).
+
+    ``S[i,i]`` = #neighbours of region i; ``S[i,j] = -1`` for each neighbour
+    j≠i. ``nb`` is keyed by region label (matched to ``levels`` by string), and
+    ``levels`` fixes the column order. The neighbour relation must be symmetric
+    (mgcv's "Something wrong with auto-penalty construction" check)."""
+    k = len(levels)
+    pos = {str(lev): i for i, lev in enumerate(levels)}
+    if {str(key) for key in nb} != set(pos):
+        raise ValueError(
+            "mrf nb names must match the region levels exactly "
+            "(every region needs a neighbour-list entry)"
+        )
+    S = np.zeros((k, k))
+    for name, neighbours in nb.items():
+        i = pos[str(name)]
+        idx = [pos[str(v)] for v in neighbours]
+        S[i, i] = len(idx)
+        for j in idx:
+            if j != i:
+                S[i, j] = -1.0
+    if not np.allclose(S, S.T):
+        raise ValueError(
+            "mrf neighbour relation is not symmetric (if j is a neighbour of "
+            "i, i must be a neighbour of j)"
+        )
+    return S
+
+
+def _build_mrf_smooth(
+    call: Call, data: pl.DataFrame, xt: Mapping | None = None,
+) -> list[SmoothBlock]:
+    """`bs="mrf"` — Markov random field smooth (smooth.construct.mrf.smooth.spec,
+    smooth.r:2726-2866).
+
+    The covariate is a factor of region labels; the basis is the region
+    indicator and the penalty is supplied via ``xt`` — a penalty matrix
+    (``penalty``), a neighbour list (``nb``, → graph Laplacian), or boundary
+    polygons (``polys``, not yet ported). hea threads ``xt`` from
+    ``gam(..., xt={region: {...}})`` (the object-arg channel, like ``knots=``).
+    """
+    term_vars = _smooth_term_vars(call)
+    if len(term_vars) != 1:
+        raise ValueError("bs='mrf' takes exactly one (region) argument")
+    term = term_vars[0]
+    spec = dict((xt or {}).get(term) or {})
+    if not spec:
+        raise ValueError(
+            f"s({term}, bs='mrf') needs xt with a penalty matrix, neighbour "
+            f"list, or boundary polygons — pass gam(..., xt={{{term!r}: "
+            f"{{'nb': ...}}}}) (or 'penalty'/'polys')"
+        )
+
+    col = data[term]
+    k_levels = _factor_levels(col)          # mgcv: as.factor; knots = levels(x)
+    nlev = len(k_levels)
+    k_node = call.kwargs.get("k")
+    bs_dim = (int(k_node.value)
+              if isinstance(k_node, Literal) and k_node.kind == "num" else -1)
+    if bs_dim < 0:
+        bs_dim = nlev                       # default knots = all regions
+    if bs_dim > nlev:
+        raise ValueError("MRF basis dimension set too high")
+
+    vals = col.to_numpy()
+    X = np.zeros((len(vals), nlev))
+    for j, lev in enumerate(k_levels):
+        X[:, j] = (vals == lev)
+
+    if spec.get("penalty") is not None:
+        S = np.asarray(spec["penalty"], dtype=float)
+        if S.shape != (nlev, nlev):
+            raise ValueError(
+                f"supplied mrf penalty is {S.shape}, expected "
+                f"({nlev}, {nlev}) for {nlev} regions"
+            )
+    elif spec.get("nb") is not None:
+        S = _mrf_penalty_from_nb(spec["nb"], k_levels)
+    elif spec.get("polys") is not None:
+        raise NotImplementedError(
+            "mrf polys= (pol2nb boundary→neighbour derivation) is not yet "
+            "ported; supply nb= (neighbour list) or penalty= instead"
+        )
+    else:
+        raise ValueError("mrf xt must contain 'penalty', 'nb', or 'polys'")
+
+    P = None
+    if bs_dim < nlev:
+        # Low-rank natural-parameter approximation (smooth.r:2838-2853): retain
+        # the bs.dim least-penalized basis elements. Regions with no data get a
+        # dummy observation first so X is full column rank for nat.param, then
+        # the dummies are dropped from the returned model matrix.
+        mi = np.flatnonzero(X.sum(axis=0) == 0)
+        Xn = X
+        if len(mi) > 0:
+            dummy = np.zeros((len(mi), nlev))
+            for r, c in enumerate(mi):
+                dummy[r, int(c)] = 1.0
+            Xn = np.vstack([dummy, X])
+        Xr, D, Pmat, rp_rank = _nat_param(
+            Xn, S, rank=None, type_=0, unit_fnorm=True, return_rank=True,
+        )
+        ind = np.arange(nlev - bs_dim, nlev)   # final bs.dim (least-penalized) cols
+        Xr_data = Xr[len(mi):, :] if len(mi) > 0 else Xr
+        X = Xr_data[:, ind]
+        P = Pmat[:, ind]
+        in_range = ind[ind < rp_rank]
+        S = np.diag(np.concatenate(
+            [D[in_range], np.zeros(int(np.sum(ind >= rp_rank)))]
+        ))
+
+    raw = _MRFRawBasis(term=term, levels=list(k_levels), P=P)
+    return _apply_by_and_absorb(
+        call, data, X, [S], "mrf.smooth", term_vars, raw_basis=raw,
+    )
 
 
 def _absorb_sumzero(
@@ -6276,21 +6517,28 @@ def _build_sos_smooth(
 
 
 def _nat_param(
-    X: np.ndarray, S: np.ndarray, rank: int, type_: int = 1, unit_fnorm: bool = True,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    X: np.ndarray, S: np.ndarray, rank: int | None = None, type_: int = 1,
+    unit_fnorm: bool = True, return_rank: bool = False,
+):
     """Port of mgcv's `nat.param(X, S, rank, type, unit.fnorm)`.
 
-    type=1: QR on X, then eigendecompose R^-T S R^-1; rescale so the
-    penalty is identity on its range. mgcv stops there, leaving the
-    degenerate null-space basis to LAPACK noise; hea additionally applies
-    the type=3 centered-Gram null rotation — see the inline note.
+    type=0: QR on X, eigendecompose R^-T S R^-1; leave the penalty diagonal
+    (the natural parameterization). type=1: as type=0 then rescale so the
+    penalty is identity on its range (mgcv stops there, leaving the degenerate
+    null-space basis to LAPACK noise; hea additionally applies the type=3
+    centered-Gram null rotation — see the inline note).
     type=3: eigendecompose S directly; rescale columns by sqrt(eigenvalue)
     (range) or by a col-norm match (null). Null-space eigenvectors are
     post-rotated via the eigen of the centered null-block Gram.
 
+    `rank=None` computes the penalty rank internally as mgcv does
+    (`sum(eigenvalues > max·eps^0.8)`, on RSR for type 0/1, on S for type 2/3).
     Returns `(X_new, D, P)`: X_new = X @ P; D is the range diagonal of the
-    transformed penalty (length `rank`); P is the parameter-transform."""
+    transformed penalty (length `rank`); P is the parameter-transform — or
+    `(X_new, D, P, rank)` when ``return_rank`` (mgcv's mrf low-rank path needs
+    the computed rank)."""
     p = X.shape[1]
+    _np_tol = float(np.finfo(float).eps) ** 0.8
 
     if type_ == 3:
         S_sym = 0.5 * (S + S.T)
@@ -6356,6 +6604,8 @@ def _nat_param(
     w = w[order]
     V = V[:, order]
 
+    if rank is None:  # mgcv: rank = sum(eigenvalues > max·tol)
+        rank = int(np.sum(w > (w.max() * _np_tol))) if w.size else 0
     D = np.clip(w[:rank].copy(), 0.0, None)
     X_new = Q @ V
     P = _sla_tri(R, V, lower=False)
@@ -6402,6 +6652,8 @@ def _nat_param(
             X_new[:, rank:] *= scalef
             P[:, rank:] *= scalef
 
+    if return_rank:
+        return X_new, D, P, rank
     return X_new, D, P
 
 
@@ -7049,17 +7301,20 @@ def _apply_tero(specs: list[dict]) -> list[dict]:
 
 
 def _te_make_margin_call(spec: dict) -> Call:
-    """Build a synthetic `s(term..., k=..., bs=..., m=..., fx=...)` Call
-    for a single margin so we can reuse the existing bs-specific raw
-    helpers."""
+    """Build a synthetic `s(term..., k=..., bs=..., m=...)` Call for a single
+    margin so we can reuse the existing bs-specific raw helpers.
+
+    `fx` is deliberately NOT forwarded: mgcv builds every margin penalized
+    ("NOTE: fx and by not dealt with here!", smooth.r:462) and instead drops
+    the corresponding TENSOR penalty for fx margins after the product is
+    formed (smooth.r:830). Forwarding fx here would leave the margin with no
+    penalty and break the one-penalty-per-margin tensor assembly."""
     args: list = [Name(ident=t) for t in spec["term"]]
     kwargs: dict = {}
     kwargs["k"] = Literal(value=spec["k"], kind="num")
     kwargs["bs"] = Literal(value=spec["bs"], kind="str")
     if spec["m"] is not None:
         kwargs["m"] = spec["m"]
-    if spec["fx"]:
-        kwargs["fx"] = Name(ident="TRUE")
     return Call(fn="s", args=args, kwargs=kwargs)
 
 
@@ -7320,6 +7575,10 @@ def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
             raise NotImplementedError(
                 "by= with matrix-arg te() is not yet supported"
             )
+        if _smooth_pc_value(call) is not None:
+            raise NotImplementedError(
+                "pc= point constraint with matrix-arg te() is not yet supported"
+            )
         return [SmoothBlock(
             label=label, term=term_all, cls=cls, X=X, S=S_list,
             spec=BasisSpec(raw=tensor_raw, by=None, absorb=None),
@@ -7465,8 +7724,22 @@ def _build_t2_smooth(
     The tensor's null space is then constrained by a single row C
     (smooth.r:1117-1120) before scaling and constraint absorption.
     """
+    if _smooth_pc_value(call) is not None:
+        raise NotImplementedError(
+            "pc= point constraint with t2() is not yet supported"
+        )
     specs = _te_parse_margins(call, data)
     n_bases = len(specs)
+
+    # t2 has no fx: mgcv's t2() hardcodes `fx <- FALSE` (smooth.r:539) — there
+    # is no fixed/unpenalized t2 (use te(..., fx=TRUE) for that). Reject it
+    # cleanly rather than mis-fitting a penalized t2 under a fx= the user
+    # expected to take effect.
+    if any(spec["fx"] for spec in specs):
+        raise NotImplementedError(
+            "t2() does not support fx= (mgcv hardcodes fx=FALSE for t2; use "
+            "te(..., fx=TRUE) for a fixed/unpenalized tensor smooth)"
+        )
 
     Xm: list[np.ndarray] = []
     ranks: list[int] = []
@@ -7496,11 +7769,7 @@ def _build_t2_smooth(
         D[cx[j]:cx[j + 1]] = 1.0
         S_list.append(np.diag(D))
 
-    # fx handling: drop penalties for margins marked fx (mgcv only has per-margin fx,
-    # but applies it per-sub-block by index — no fixture exercises it here).
-    for i in reversed(range(n_bases)):
-        if specs[i]["fx"]:
-            raise NotImplementedError("t2 with fx=TRUE not yet supported")
+    # (t2 fx is rejected up front — mgcv hardcodes fx=FALSE for t2.)
 
     # Tensor null-space constraint (smooth.r:1117-1120). Rank of the null is
     # p - sum(sub_cols). Build C = [0_{nup}, colSums(X[:, nup:])] as 1×p.
@@ -7745,6 +8014,7 @@ def reject_unsupported_smooth_id(expanded: ExpandedFormula) -> None:
 def materialize_smooths(
     expanded: ExpandedFormula, data: pl.DataFrame,
     *, sparse_cons: int = 0, tero: bool = False, knots: dict | None = None,
+    xt: Mapping | None = None,
 ) -> list[list[SmoothBlock]]:
     """Materialize each smooth in `expanded.smooths` to one or more blocks.
 
@@ -7857,6 +8127,8 @@ def materialize_smooths(
             return _build_sz_smooth(call, d)
         if bs == "ad":
             return _build_ad_smooth(call, d)
+        if bs == "mrf":
+            return _build_mrf_smooth(call, d, xt=xt)
         raise NotImplementedError(
             f"smooth bs={bs!r} (class dispatch for {_smooth_label(call)}) "
             "not yet implemented"

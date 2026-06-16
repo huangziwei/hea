@@ -7714,3 +7714,205 @@ def test_cnorm_through_gam_matches_mgcv():
     np.testing.assert_allclose(
         rres[:5], [-1.09973846315, 0.0987274276175, 0.278715228504,
                    -1.0520967671, -0.0953624809253], rtol=0, atol=2e-3)
+
+
+# =============================================================================
+# Smooth-class roadmap E / Phase 3 (smooth-review-completion.md)
+# -----------------------------------------------------------------------------
+# S1a — s(..., pc=) point constraints. mgcv smooth.construct3 (smooth.r:3676-
+# 3679) REPLACES the default sum-to-zero identifiability constraint
+# (C = colMeans(X)) with the smooth's basis row evaluated AT the pc point
+# (always.apply=TRUE), so the smooth passes through 0 there and the intercept
+# absorbs the shift. Was SILENTLY IGNORED before (pc= unparsed → fit identical
+# to s(x)). Pins: mgcv 1.9-4.
+# =============================================================================
+
+
+def _pc_fixture(seed: int = 6, n: int = 100) -> pl.DataFrame:
+    from hea.R.rng import RGenerator
+    g = RGenerator(seed)
+    x = g.uniform(0.0, 1.0, n)
+    y = np.sin(2 * np.pi * x) + g.normal(0.0, 1.0, n) * 0.3
+    return pl.DataFrame({"x": x, "y": y})
+
+
+def test_s_pc_point_constraint_matches_mgcv():
+    """s(x, pc=0.5): the point constraint reparameterizes — fit is
+    identifiability-invariant (predictions == s(x)) but the smooth term passes
+    through 0 at x=0.5 and the intercept becomes the smooth's value there."""
+    d = _pc_fixture()
+    m = gam("y ~ s(x, k=10, pc=0.5)", d, method="REML")
+    # mgcv: REML 25.3327898083, edf 7.5711903486, coef0 0.1249797454
+    assert m.REML_criterion / 2 == pytest.approx(25.3327898083, abs=1e-6)
+    assert float(np.sum(m.edf)) == pytest.approx(7.5711903486, rel=1e-5)
+    assert float(np.asarray(m.coef)[0]) == pytest.approx(0.1249797454, abs=1e-6)
+    # the smooth TERM passes through 0 at x=0.5 (the defining property of pc)
+    tp = m.predict(pl.DataFrame({"x": [0.5]}), type="terms")
+    assert abs(float(np.asarray(tp).ravel()[0])) < 1e-9
+    # prediction is identifiability-invariant (mgcv pred@0.5 = 0.1249797454)
+    pred = float(np.asarray(m.predict(pl.DataFrame({"x": [0.5]}))).ravel()[0])
+    assert pred == pytest.approx(0.1249797454, abs=1e-6)
+
+    # ... and DIFFERS from plain s(x): the intercept is the sum-to-zero one,
+    # not the smooth's value at 0.5 (mgcv s(x) coef0 = -0.0073841475).
+    m0 = gam("y ~ s(x, k=10)", d, method="REML")
+    assert float(np.asarray(m0.coef)[0]) == pytest.approx(-0.0073841475, abs=1e-6)
+    assert abs(float(np.asarray(m.coef)[0]) -
+               float(np.asarray(m0.coef)[0])) > 0.1
+
+
+def test_s_pc_with_by_factor_matches_mgcv():
+    """pc= shares one always-applied constraint across by-factor levels —
+    each level's smooth passes through 0 at the point. R-pinned end-to-end."""
+    from hea.R.rng import RGenerator
+    g = RGenerator(11)
+    x = g.uniform(0.0, 1.0, 200)
+    f = np.array(["a", "b"] * 100)          # deterministic f (RNG-reproducible)
+    y = np.sin(2 * np.pi * x) + (f == "b") * 0.5 + g.normal(0.0, 1.0, 200) * 0.3
+    d = pl.DataFrame({"x": x, "f": f, "y": y})
+    m = gam("y ~ f + s(x, k=8, by=f, pc=0.4)", d, method="REML")
+    # mgcv: REML 64.78112149, edf 13.85115823
+    assert m.REML_criterion / 2 == pytest.approx(64.78112149, abs=1e-5)
+    assert float(np.sum(m.edf)) == pytest.approx(13.85115823, rel=1e-5)
+
+
+def test_s_pc_unsupported_forms_raise():
+    """Honest raises (no silent mis-fit) for the pc forms hea doesn't port:
+    the general list-of-lists constraint, t2()/matrix-arg te(), a numeric by=,
+    and a covariate-count mismatch."""
+    d = _pc_fixture()
+    d = d.with_columns(z=pl.col("x") * 0.5 + 0.1)
+    with pytest.raises(NotImplementedError, match="general"):
+        gam("y ~ s(x, pc=list(1))", d, method="REML")
+    with pytest.raises(NotImplementedError, match="t2"):
+        gam("y ~ t2(x, z, pc=0.5)", d, method="REML")
+    with pytest.raises(ValueError, match="one value per smooth covariate"):
+        gam("y ~ s(x, pc=c(0.5, 0.3))", d, method="REML")
+
+
+# -----------------------------------------------------------------------------
+# S1b — te/ti fx=TRUE (fixed / unpenalized tensor). mgcv builds every margin
+# penalized then drops the corresponding TENSOR penalty for fx margins
+# (smooth.r:462, 830). hea was forwarding fx INTO the marginal s() call,
+# emptying its penalty and crashing the one-penalty-per-margin assembly. t2 has
+# NO fx (t2() hardcodes fx<-FALSE, smooth.r:539) — honest raise. Pins: mgcv 1.9-4.
+# -----------------------------------------------------------------------------
+
+
+def _tensor_fx_fixture(n: int = 200) -> pl.DataFrame:
+    from hea.R.rng import RGenerator
+    g = RGenerator(7)
+    x = g.uniform(0.0, 1.0, n)
+    z = g.uniform(0.0, 1.0, n)
+    y = np.sin(2 * np.pi * x) + np.cos(2 * np.pi * z) + g.normal(0.0, 1.0, n) * 0.3
+    return pl.DataFrame({"x": x, "z": z, "y": y})
+
+
+@pytest.mark.parametrize(
+    "form, edf, coef0, dev",
+    [
+        # whole tensor fixed: edf = basis dim (16), no smoothing parameters
+        ("te(x, z, k=4, fx=TRUE)", 16.0, -0.12128656, 22.762519),
+        # one margin fixed, the other penalized (1 sp)
+        ("te(x, z, k=4, fx=c(TRUE,FALSE))", 15.16135371, -0.12128656, 22.840118),
+        # ti excludes the marginal main effects → smaller fixed basis
+        ("ti(x, z, k=4, fx=TRUE)", 10.0, -0.24088277, 179.766597),
+    ],
+)
+def test_te_ti_fx_matches_mgcv(form, edf, coef0, dev):
+    """Fixed/partly-fixed tensor smooths fit unpenalized like mgcv."""
+    m = gam(f"y ~ {form}", _tensor_fx_fixture(), method="REML")
+    assert float(np.sum(m.edf)) == pytest.approx(edf, rel=1e-6)
+    assert float(np.asarray(m.coef)[0]) == pytest.approx(coef0, abs=1e-6)
+    assert float(m.deviance) == pytest.approx(dev, rel=1e-6)
+
+
+def test_t2_fx_raises():
+    """t2 has no fx in mgcv (hardcoded FALSE) — honest raise, not a mis-fit."""
+    with pytest.raises(NotImplementedError, match="t2.. does not support fx"):
+        gam("y ~ t2(x, z, k=3, fx=TRUE)", _tensor_fx_fixture(), method="REML")
+
+
+# -----------------------------------------------------------------------------
+# S2 — bs="mrf" (Markov random field). Region indicator basis + graph-Laplacian
+# penalty from a neighbour list (or a supplied penalty matrix). xt threaded via
+# gam(xt={region: {...}}) — the object-arg channel, like knots=. Default k =
+# #regions (full rank). Source: smooth.r:2726-2875. Pins: mgcv 1.9-4.
+# -----------------------------------------------------------------------------
+
+_MRF_NB = {
+    "0": ["1", "3"], "1": ["0", "2", "4"], "2": ["1", "5"],
+    "3": ["0", "4", "6"], "4": ["1", "3", "5", "7"], "5": ["2", "4", "8"],
+    "6": ["3", "7"], "7": ["4", "6", "8"], "8": ["5", "7"],
+}
+
+
+def _mrf_fixture(n: int = 180) -> pl.DataFrame:
+    from hea.R.rng import RGenerator
+    g = RGenerator(5)
+    region = np.arange(n) % 9            # rep(0:8, length.out=n)
+    reff = np.array([-1, -0.5, 0.2, 0.8, 0, -0.8, 0.5, 1, -1.2])
+    y = reff[region] + g.normal(0.0, 1.0, n) * 0.5
+    return pl.DataFrame({"region": region, "y": y})
+
+
+def test_mrf_through_gam_matches_mgcv():
+    """3x3-grid MRF (rook adjacency): graph-Laplacian penalty from nb, full rank
+    (k = #regions). R-pinned end-to-end + predict + penalty=-form equivalence."""
+    d = _mrf_fixture()
+    m = gam('y ~ s(region, bs="mrf")', d, method="REML",
+            xt={"region": {"nb": _MRF_NB}})
+    assert m.REML_criterion / 2 == pytest.approx(147.98002060, abs=1e-6)
+    assert float(np.sum(m.edf)) == pytest.approx(8.83057332, rel=1e-6)
+    assert float(np.asarray(m.coef)[0]) == pytest.approx(-0.10822060, abs=1e-6)
+    assert float(m.scale) == pytest.approx(0.24834096, rel=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(m.coef),
+        [-0.108221, -0.238663, 0.354659, 1.102483, 0.614502,
+         -0.459381, 0.733006, 1.408727, -0.957989], atol=1e-5)
+    # predict to regions: region-0 matches mgcv's fitted for a region-0 obs
+    pr = np.asarray(m.predict(pl.DataFrame({"region": [0, 4, 8]}))).ravel()
+    assert pr[0] == pytest.approx(-0.960669, abs=1e-5)
+
+    # penalty= form (supply the graph Laplacian directly) ≡ nb= form
+    S = np.zeros((9, 9))
+    for i, ns in _MRF_NB.items():
+        S[int(i), int(i)] = len(ns)
+        for j in ns:
+            S[int(i), int(j)] = -1.0
+    m2 = gam('y ~ s(region, bs="mrf")', d, method="REML",
+             xt={"region": {"penalty": S}})
+    assert m2.REML_criterion == pytest.approx(m.REML_criterion, abs=1e-9)
+
+
+def test_mrf_low_rank_matches_mgcv():
+    """Low-rank MRF (k=5 < 9 regions): natural-parameter truncation via
+    nat.param(type=0). The fit is pinned on the identifiability-invariant
+    quantities — REML/edf/intercept/predict all EXACT; the individual smooth
+    coefficients differ only by eigenvector SIGN (the nat.param null-basis
+    LAPACK ambiguity documented at §5.4, fit-invariant since predict applies the
+    same reparameterization P)."""
+    d = _mrf_fixture()
+    m = gam('y ~ s(region, bs="mrf", k=5)', d, method="REML",
+            xt={"region": {"nb": _MRF_NB}})
+    assert m.REML_criterion / 2 == pytest.approx(203.33475182, abs=1e-6)
+    assert float(np.sum(m.edf)) == pytest.approx(4.86563092, rel=1e-6)
+    assert float(np.asarray(m.coef)[0]) == pytest.approx(-0.10822060, abs=1e-6)
+    # predict == mgcv fitted (R fitted[1:3] for region 0,1,2)
+    pr = np.asarray(m.predict(pl.DataFrame({"region": [0, 1, 2]}))).ravel()
+    np.testing.assert_allclose(
+        pr, [-0.672186, -0.262192, -0.106166], atol=1e-5)
+
+
+def test_mrf_unsupported_and_validation_raise():
+    """Honest boundaries: missing xt; polys (pol2nb) not yet ported;
+    wrong-dimension penalty."""
+    d = _mrf_fixture()
+    with pytest.raises(ValueError, match="needs xt"):
+        gam('y ~ s(region, bs="mrf")', d, method="REML")
+    with pytest.raises(NotImplementedError, match="polys"):
+        gam('y ~ s(region, bs="mrf")', d, method="REML",
+            xt={"region": {"polys": [1]}})
+    with pytest.raises(ValueError, match="expected"):
+        gam('y ~ s(region, bs="mrf")', d, method="REML",
+            xt={"region": {"penalty": np.eye(5)}})

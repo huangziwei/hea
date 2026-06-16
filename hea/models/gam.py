@@ -871,6 +871,7 @@ class gam:
         gamma: float = 1.0,
         select: bool = False,
         knots: dict | None = None,
+        xt: dict | None = None,
         control: dict | None = None,
         scale: float = 0.0,
         start: np.ndarray | list | None = None,
@@ -986,6 +987,10 @@ class gam:
         # and consumed by the cr/cc/ps/cp/bs builders. None ⇒ data-adaptive
         # defaults (byte-identical to pre-knots behavior).
         self.knots = knots
+        # mgcv's per-smooth ``xt`` extras, keyed by covariate name (the
+        # object-arg channel, like ``knots=``). Currently consumed by the mrf
+        # builder (penalty / nb / polys). None ⇒ no extras.
+        self.xt = xt
         self._select = bool(select)
         # mgcv's smoothing-strength multiplier. ``gamma > 1`` produces
         # smoother fits by inflating the apparent edf cost in the GCV/UBRE
@@ -1208,7 +1213,7 @@ class gam:
                 y = np.asarray(pre["y"], dtype=float).reshape(-1)
 
         sb_lists = (
-            materialize_smooths(d.expanded, d.data, knots=knots)
+            materialize_smooths(d.expanded, d.data, knots=knots, xt=self.xt)
             if d.expanded.smooths else []
         )
         blocks: list[SmoothBlock] = [b for group in sb_lists for b in group]
