@@ -7886,22 +7886,31 @@ def test_mrf_through_gam_matches_mgcv():
 
 
 def test_mrf_low_rank_matches_mgcv():
-    """Low-rank MRF (k=5 < 9 regions): natural-parameter truncation via
-    nat.param(type=0). The fit is pinned on the identifiability-invariant
-    quantities — REML/edf/intercept/predict all EXACT; the individual smooth
-    coefficients differ only by eigenvector SIGN (the nat.param null-basis
-    LAPACK ambiguity documented at §5.4, fit-invariant since predict applies the
-    same reparameterization P)."""
+    """Low-rank MRF (k=4 < 9 regions): natural-parameter truncation via
+    nat.param(type=0), keeping the 4 least-penalized basis directions.
+
+    k MUST land on a clean penalty-eigenvalue gap. The rook-grid MRF penalty
+    has eigenvalues ``[0, 1, 1, 2, 3, 3, 4, 4, 6]`` — degenerate. k=4 keeps
+    ``{0,1,1,2}`` (boundary at the simple eigenvalue 2; the {1,1} pair is fully
+    retained, the {3,3} pair fully dropped), so the retained subspace is a
+    spectral projector — uniquely determined and BLAS-invariant. A k that
+    SPLITS a degenerate pair (e.g. k=5, which keeps only one of the two
+    eigenvalue-3 vectors) makes the retained subspace ambiguous: Accelerate and
+    OpenBLAS then pick different subspaces and the whole fit diverges (not a
+    sign flip — REML/edf themselves differ). The fit is pinned on the
+    basis-invariant quantities (REML/edf/intercept/predict all EXACT); the raw
+    smooth coefficients still differ by an arbitrary within-eigenspace rotation,
+    fit-invariant since predict applies the same reparameterization P."""
     d = _mrf_fixture()
-    m = gam('y ~ s(region, bs="mrf", k=5)', d, method="REML",
+    m = gam('y ~ s(region, bs="mrf", k=4)', d, method="REML",
             xt={"region": {"nb": _MRF_NB}})
-    assert m.REML_criterion / 2 == pytest.approx(203.33475182, abs=1e-6)
-    assert float(np.sum(m.edf)) == pytest.approx(4.86563092, rel=1e-6)
+    assert m.REML_criterion / 2 == pytest.approx(203.18732238, abs=1e-6)
+    assert float(np.sum(m.edf)) == pytest.approx(3.93834728, rel=1e-6)
     assert float(np.asarray(m.coef)[0]) == pytest.approx(-0.10822060, abs=1e-6)
     # predict == mgcv fitted (R fitted[1:3] for region 0,1,2)
     pr = np.asarray(m.predict(pl.DataFrame({"region": [0, 1, 2]}))).ravel()
     np.testing.assert_allclose(
-        pr, [-0.672186, -0.262192, -0.106166], atol=1e-5)
+        pr, [-0.677186, -0.390348, -0.103510], atol=1e-5)
 
 
 # pol2nb on a grid of unit squares yields QUEEN adjacency: diagonal squares
