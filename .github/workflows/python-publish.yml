@@ -66,15 +66,16 @@ jobs:
           path: dist
 
   macos:
-    runs-on: ${{ matrix.runner }}
+    # GitHub retired the macos-13 (Intel) runners, so build BOTH mac arches on
+    # the Apple-Silicon runner: the macOS toolchain is universal, so x86_64
+    # cross-compiles cleanly. The wheel is identical to a native Intel build —
+    # `rfma` keys off target_arch, so an x86_64 target gets the plain a*b+c
+    # branch regardless of the build host.
+    runs-on: macos-14
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: macos-13      # Intel
-            target: x86_64
-          - runner: macos-14      # Apple Silicon
-            target: aarch64
+        target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

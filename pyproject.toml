@@ -33,6 +33,10 @@ dependencies = [
 ]
 
 license = "GPL-3.0-or-later"
+# Explicit so maturin packs LICENSE into the SDIST too (not just the wheel).
+# Without it the sdist's METADATA declares `License-File: LICENSE` but omits the
+# file, and PyPI's PEP 639 check rejects the upload (400).
+license-files = ["LICENSE"]
 readme = {file = "README.md", content-type = "text/markdown"}
 
 [project.optional-dependencies]
