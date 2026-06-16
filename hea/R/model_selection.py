@@ -5,7 +5,7 @@ Implements the per-model-family dispatch: ``_anova_lm`` /
 ``_anova_glm_table`` for generalized linear models (with auto-pick of F
 vs Chisq tests), ``_anova_gam`` / ``_anova_gam_single`` /
 ``_anova_gam_table`` for mgcv-style GAM fits (uses ``edf1`` residual df),
-and ``_anova_lme`` for the LRT comparison between nested ``lme`` fits
+and ``_anova_gmm`` for the LRT comparison between nested ``gmm`` fits
 (with silent ML refit when REML inputs are passed).
 
 ``step()`` minimizes the Mallows-style extractAIC formula (see
@@ -20,13 +20,14 @@ import itertools
 
 import numpy as np
 import polars as pl
-from scipy.stats import chi2, f
+from . import distributions as _dist
 
 from ._shared import _caller_names
+from ..formula import deparse
 from ..models.gam import gam
 from ..models.glm import glm
 from ..models.lm import lm
-from ..models.lme import lme
+from ..models.gmm import gmm
 from ..utils import (
     _dig_tst,
     format_df,
@@ -46,7 +47,7 @@ def anova(*models, test: str | None = None, freq: bool = False,
     - Multiple ``lm`` fits → F-test ANOVA table (incremental for 3+).
     - Multiple ``glm`` fits → analysis-of-deviance table (incremental for
       3+); ``test=`` selects the test statistic (see below).
-    - Multiple ``lme`` fits → likelihood-ratio test (lme4-style, incremental
+    - Multiple ``gmm`` fits → likelihood-ratio test (lme4-style, incremental
       for 3+). REML fits are internally refit by ML before the LRT.
 
     Parameters
@@ -56,7 +57,7 @@ def anova(*models, test: str | None = None, freq: bool = False,
         picks ``"Chisq"`` for scale-known families (Poisson, Binomial) and
         ``"F"`` for unknown-scale (Gaussian, Gamma, IG), matching R's
         ``anova.glm`` recommendation. ``"LRT"`` is an alias for ``"Chisq"``.
-        ``"Rao"`` (score test) is not implemented yet. For ``lm`` and ``lme``
+        ``"Rao"`` (score test) is not implemented yet. For ``lm`` and ``gmm``
         the test is fixed (always F / Chisq LRT respectively); passing
         ``test=`` for those raises.
     freq, dispersion : single-``gam`` form only
@@ -86,18 +87,22 @@ def anova(*models, test: str | None = None, freq: bool = False,
             if test is not None:
                 raise TypeError("anova(lm): test= is not accepted (always F)")
             return _anova_lm_single(m)
+        if isinstance(m, gmm):
+            if test is not None:
+                raise TypeError("anova(gmm): test= is not accepted (sequential F)")
+            return _anova_gmm_single(m)
         raise TypeError(
-            "anova(m): single-model form supports lm and gam only "
+            "anova(m): single-model form supports lm, gam and gmm only "
             f"(got {type(m).__name__})"
         )
     labels = _caller_names(models, inspect.currentframe().f_back)
-    if all(isinstance(m, lme) for m in models):
+    if all(isinstance(m, gmm) for m in models):
         if test is not None and test.upper() not in ("CHISQ", "LRT"):
             raise ValueError(
-                f"anova(lme): only test='Chisq'/'LRT' (the default LRT) "
+                f"anova(gmm): only test='Chisq'/'LRT' (the default LRT) "
                 f"is supported, got {test!r}"
             )
-        return _anova_lme(*models, labels=labels)
+        return _anova_gmm(*models, labels=labels)
     if all(isinstance(m, gam) for m in models):
         return _anova_gam(*models, labels=labels, test=test)
     # glm before lm: glm is not an lm subclass, but the isinstance order
@@ -109,12 +114,12 @@ def anova(*models, test: str | None = None, freq: bool = False,
             raise TypeError("anova(lm): test= is not accepted (always F)")
         return _anova_lm(*models, labels=labels)
     raise TypeError(
-        "anova(): all models must be the same type (lm, glm, gam, or lme)"
+        "anova(): all models must be the same type (lm, glm, gam, or gmm)"
     )
 
 
 def drop1(model, *, test: str | None = None, k: float = 2.0):
-    """Single-term deletions, R's ``drop1.lm`` / ``drop1.glm``.
+    """Single-term deletions, R's ``drop1.lm`` / ``drop1.glm`` / ``drop1.merMod``.
 
     For each non-intercept term in ``model``, refits with that term
     removed and prints a one-row-per-term table comparing each reduced
@@ -134,6 +139,11 @@ def drop1(model, *, test: str | None = None, k: float = 2.0):
       Δdev — appropriate when ``dispersion=1``) and ``"scaled dev."``
       (Δdev/dispersion_full — what mgcv/R uses for unknown-scale),
       matching ``drop1.glm`` exactly.
+    * ``gmm``: refits without each droppable fixed-effect term (random-effect
+      bars / offsets preserved), comparing by the Laplace-deviance LRT.
+      Columns ``npar`` (Δnpar) / ``AIC`` (``-2logL + k·npar``) and, with a
+      test, ``LRT`` / ``Pr(Chi)`` — matching ``drop1.merMod``. ``test`` accepts
+      only ``"Chisq"``/``"LRT"`` or ``None`` (no F test for GLMMs).
 
     Parameters
     ----------
@@ -150,8 +160,8 @@ def drop1(model, *, test: str | None = None, k: float = 2.0):
             "drop1(gam): not implemented yet — mgcv's drop1.gam has "
             "smoothing-parameter caveats we haven't ported."
         )
-    if isinstance(model, lme):
-        raise NotImplementedError("drop1(lme): not implemented yet.")
+    if isinstance(model, gmm):
+        return _drop1_gmm(model, test=test, k=k)
     # glm before lm: glm is not an lm subclass, but order matters if
     # that ever changes (mirrors anova()'s dispatch order).
     if isinstance(model, glm):
@@ -288,8 +298,8 @@ def add1(model, scope, *, test: str | None = None, k: float = 2.0):
             "add1(gam): not implemented yet — mgcv's add1.gam has "
             "smoothing-parameter caveats we haven't ported."
         )
-    if isinstance(model, lme):
-        raise NotImplementedError("add1(lme): not implemented yet.")
+    if isinstance(model, gmm):
+        raise NotImplementedError("add1(gmm): not implemented yet.")
 
     lhs = model.formula.split("~", 1)[0].strip()
     upper_formula = f"{lhs} ~ {scope}"
@@ -372,12 +382,14 @@ def _add1_lm(m: lm, upper_terms, *, common_data, test: str | None, k: float):
             # rule (denom is always the bigger model's residual MS).
             mse_aug = m_aug.rss / m_aug.df_residuals
             fstat = (d_rss / d_df) / mse_aug
-            p = float(f.sf(fstat, d_df, m_aug.df_residuals))
+            p = float(_dist.pf(fstat, d_df, m_aug.df_residuals, lower_tail=False))
             f_col.append(round(fstat, 4))
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
         else:
-            f_col.append(None); p_col.append(None); sig_col.append("")
+            f_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
 
     cols: dict[str, list] = {
         "":          ["<none>"] + [upper_terms[i].label for i in add_indices],
@@ -480,18 +492,20 @@ def _add1_glm(m: glm, upper_terms, *, common_data, test: str | None, k: float):
             # mirror of drop1's "current model's residual mean deviance".
             rms_aug = m_aug.deviance / m_aug.df_residual
             fstat = (d_dev / d_df) / rms_aug
-            p = float(f.sf(fstat, d_df, m_aug.df_residual))
+            p = float(_dist.pf(fstat, d_df, m_aug.df_residual, lower_tail=False))
             stat_col.append(round(fstat, 4))
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
         elif kind == "Chisq" and d_df > 0:
             stat = d_loglik
-            p = float(chi2.sf(stat, d_df))
+            p = float(_dist.pchisq(stat, d_df, lower_tail=False))
             stat_col.append(round(stat, 4))
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
         else:
-            stat_col.append(None); p_col.append(None); sig_col.append("")
+            stat_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
 
     cols: dict[str, list] = {
         "":         ["<none>"] + [upper_terms[i].label for i in add_indices],
@@ -574,8 +588,8 @@ def step(
     """
     if isinstance(model, gam):
         raise NotImplementedError("step(gam): not implemented yet")
-    if isinstance(model, lme):
-        raise NotImplementedError("step(lme): not implemented yet")
+    if isinstance(model, gmm):
+        raise NotImplementedError("step(gmm): not implemented yet")
     if not isinstance(model, (lm, glm)):
         raise TypeError(f"step(): unsupported model type {type(model).__name__}")
 
@@ -786,7 +800,6 @@ def _drop1_lm(m: lm, *, test: str | None, k: float):
     sig_col: list[str] = [""]
 
     for j in scope:
-        t = terms[j]
         rest = [terms[i].label for i in range(len(terms)) if i != j]
         sub_rhs = " + ".join(rest) if rest else ""
         sub_formula = (
@@ -803,12 +816,14 @@ def _drop1_lm(m: lm, *, test: str | None, k: float):
         aic_col.append(round(_extract_aic_lm(m_sub.rss, m_sub.df_residuals, n, k), 4))
         if use_F and d_df > 0:
             fstat = (d_rss / d_df) / mse_full
-            p = float(f.sf(fstat, d_df, df_full))
+            p = float(_dist.pf(fstat, d_df, df_full, lower_tail=False))
             f_col.append(round(fstat, 4))
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
         else:
-            f_col.append(None); p_col.append(None); sig_col.append("")
+            f_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
 
     cols: dict[str, list] = {
         "":          ["<none>"] + [terms[j].label for j in scope],
@@ -893,7 +908,6 @@ def _drop1_glm(m: glm, *, test: str | None, k: float):
         return (dev_drop - dev_full) / disp_full
 
     for j in scope:
-        t = terms[j]
         rest = [terms[i].label for i in range(len(terms)) if i != j]
         sub_rhs = " + ".join(rest) if rest else ""
         sub_formula = (
@@ -925,18 +939,20 @@ def _drop1_glm(m: glm, *, test: str | None, k: float):
             # quasi-likelihood-style scale rather than 1).
             rms_full = dev_full / df_full
             fstat = (d_dev / d_df) / rms_full
-            p = float(f.sf(fstat, d_df, df_full))
+            p = float(_dist.pf(fstat, d_df, df_full, lower_tail=False))
             stat_col.append(round(fstat, 4))
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
         elif kind == "Chisq" and d_df > 0:
             stat = d_loglik
-            p = float(chi2.sf(stat, d_df))
+            p = float(_dist.pchisq(stat, d_df, lower_tail=False))
             stat_col.append(round(stat, 4))
             p_col.append(float(f"{p:.4g}"))
             sig_col.append(significance_code([p])[0])
         else:
-            stat_col.append(None); p_col.append(None); sig_col.append("")
+            stat_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
 
     cols: dict[str, list] = {
         "":         ["<none>"] + [terms[j].label for j in scope],
@@ -962,6 +978,95 @@ def _drop1_glm(m: glm, *, test: str | None, k: float):
         print("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1")
 
 
+def _drop1_gmm(model, *, test, k):
+    """Single fixed-term deletions for a ``gmm`` fit — lme4's ``drop1.merMod``.
+
+    Refits the model without each *droppable* fixed-effect term (random-effect
+    bars and ``offset()`` terms preserved), comparing each reduced fit to the
+    full one by the Laplace-deviance LRT. Droppability respects marginality
+    (``_drop_scope``): a main effect inside an interaction is not dropped. A
+    REML LMM input is refit by ML first (a valid LRT needs ML), mirroring
+    :func:`_anova_gmm`. Columns match lme4: ``npar`` (the Δnpar removed — 3 for
+    a 4-level factor), ``AIC`` (= ``-2logL + k·npar``, i.e. ``extractAIC``),
+    and with a test ``LRT`` / ``Pr(Chi)``.
+    """
+    if test is not None and test.upper() not in ("CHISQ", "LRT"):
+        raise ValueError(
+            f"drop1(gmm): test must be 'Chisq'/'LRT' or None; got {test!r}"
+        )
+    do_test = test is not None
+    # Valid LRT needs ML; refit a REML LMM by ML (glmer is already ML).
+    if model.REML:
+        print("refitting model(s) with ML (instead of REML)")
+        m = gmm(model.formula, model.data, REML=False)
+    else:
+        m = model
+
+    terms = m._expanded.terms
+    if not terms:
+        raise TypeError(
+            "drop1(gmm): need at least one fixed-effect term to drop"
+        )
+    lhs = m.formula.split("~", 1)[0].strip()
+    intercept_str = "1" if m._expanded.intercept else "0"
+    # Preserve the random-effect bars and any offset() exactly (deparse → the
+    # canonical formula text, re-parsed by every sub-fit).
+    keep_tail = [f"({deparse(b)})" for b in m._expanded.bars]
+    keep_tail += [f"offset({deparse(o)})" for o in m._expanded.offsets]
+
+    def _dev(mm):
+        return float(getattr(mm, "deviance_laplace", mm.deviance))
+
+    def _aic_table(dev, npar):
+        # extractAIC.merMod: -2logL + k·npar (standard AIC at k=2).
+        return dev + k * npar
+
+    dev_full = _dev(m)
+    npar_full = m.npar
+    fam = m.family
+    scope = _drop_scope(terms)
+
+    labels = ["<none>"]
+    npar_col: list[int | None] = [None]
+    aic_col: list[float] = [round(_aic_table(dev_full, npar_full), 1)]
+    lrt_col: list[float | None] = [None]
+    p_col: list[float | None] = [None]
+    sig_col: list[str] = [""]
+
+    for j in scope:
+        rest = [terms[i].label for i in range(len(terms)) if i != j]
+        rhs_parts = [intercept_str] + rest + keep_tail
+        sub_formula = f"{lhs} ~ " + " + ".join(rhs_parts)
+        m_sub = gmm(sub_formula, m.data, family=fam, REML=False)
+        d_df = npar_full - m_sub.npar
+        lrt = _dev(m_sub) - dev_full
+
+        labels.append(terms[j].label)
+        npar_col.append(d_df)
+        aic_col.append(round(_aic_table(_dev(m_sub), m_sub.npar), 1))
+        if do_test and d_df > 0:
+            p = float(_dist.pchisq(lrt, d_df, lower_tail=False))
+            lrt_col.append(round(lrt, 4))
+            p_col.append(float(f"{p:.4g}"))
+            sig_col.append(significance_code([p])[0])
+        else:
+            lrt_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
+
+    cols: dict[str, list] = {"": labels, "npar": npar_col, "AIC": aic_col}
+    if do_test:
+        cols["LRT"] = lrt_col
+        cols["Pr(Chi)"] = p_col
+        cols[" "] = sig_col
+
+    print(f"Single term deletions\n\nModel:\n{m.formula}\n")
+    print(format_df(pl.DataFrame(cols)))
+    if do_test:
+        print("---")
+        print("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1")
+
+
 def _anova_lm(*models, labels: list[str]):
     """F-test ANOVA table comparing nested ``lm`` fits."""
     # Sort ascending by npar (= descending by df_residuals, matching R).
@@ -982,11 +1087,14 @@ def _anova_lm(*models, labels: list[str]):
         d_df = dfs[k - 1] - dfs[k]
         d_rss = rss[k - 1] - rss[k]
         if d_df <= 0:
-            df_col.append(d_df); sos_col.append(round(d_rss, 3))
-            f_col.append(None); p_col.append(None); sig_col.append("")
+            df_col.append(d_df)
+            sos_col.append(round(d_rss, 3))
+            f_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
             continue
         fstat = (d_rss / d_df) / mse_full
-        p = float(f.sf(fstat, d_df, dfs[-1]))
+        p = float(_dist.pf(fstat, d_df, dfs[-1], lower_tail=False))
         df_col.append(d_df)
         sos_col.append(round(d_rss, 3))
         f_col.append(round(fstat, 3))
@@ -1063,22 +1171,29 @@ def _anova_lm_single(m: lm):
         d_df = df_chain[i] - df_chain[i + 1]
         d_rss = rss_chain[i] - rss_chain[i + 1]
         if d_df <= 0:
-            df_col.append(d_df); sos_col.append(round(d_rss, 4))
+            df_col.append(d_df)
+            sos_col.append(round(d_rss, 4))
             ms_col.append(float("nan"))
-            f_col.append(None); p_col.append(None); sig_col.append("")
+            f_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
             continue
         ms = d_rss / d_df
         fstat = ms / mse_full
-        p = float(f.sf(fstat, d_df, m.df_residuals))
-        df_col.append(d_df); sos_col.append(round(d_rss, 4))
+        p = float(_dist.pf(fstat, d_df, m.df_residuals, lower_tail=False))
+        df_col.append(d_df)
+        sos_col.append(round(d_rss, 4))
         ms_col.append(round(ms, 4))
         f_col.append(round(fstat, 4))
         p_col.append(float(f"{p:.4g}"))
         sig_col.append(significance_code([p])[0])
     # Residuals row
-    df_col.append(m.df_residuals); sos_col.append(round(m.rss, 4))
+    df_col.append(m.df_residuals)
+    sos_col.append(round(m.rss, 4))
     ms_col.append(round(mse_full, 4))
-    f_col.append(None); p_col.append(None); sig_col.append("")
+    f_col.append(None)
+    p_col.append(None)
+    sig_col.append("")
 
     docstring = "Analysis of Variance Table\n\n"
     docstring += f"Response: {lhs}\n"
@@ -1278,14 +1393,16 @@ def _anova_gam_table(*models: gam, labels: list[str], test: str | None = None):
         if d_df <= 0:
             df_col.append(round(d_df, 4))
             dev_col.append(round(d_dev, 4))
-            stat_col.append(None); p_col.append(None); sig_col.append("")
+            stat_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
             continue
         if test == "Chisq":
             stat = d_dev / disp_full
-            p = float(chi2.sf(stat, d_df))
+            p = float(_dist.pchisq(stat, d_df, lower_tail=False))
         else:  # "F"
             stat = (d_dev / d_df) / disp_full
-            p = float(f.sf(stat, d_df, rdf_full))
+            p = float(_dist.pf(stat, d_df, rdf_full, lower_tail=False))
         df_col.append(round(d_df, 4))
         dev_col.append(round(d_dev, 4))
         stat_col.append(round(stat, 4))
@@ -1390,8 +1507,11 @@ def _anova_glm_table(*models, labels: list[str], test: str | None = None):
         d_df = dfs[k - 1] - dfs[k]
         d_dev = devs[k - 1] - devs[k]
         if d_df <= 0:
-            df_col.append(d_df); dev_col.append(round(d_dev, 4))
-            stat_col.append(None); p_col.append(None); sig_col.append("")
+            df_col.append(d_df)
+            dev_col.append(round(d_dev, 4))
+            stat_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
             continue
         if test == "Chisq":
             # disp_full == 1 for scale-known families (Poisson/Binomial),
@@ -1400,10 +1520,10 @@ def _anova_glm_table(*models, labels: list[str], test: str | None = None):
             # formula R uses when `test="Chisq"` is passed for Gaussian/
             # Gamma/IG fits.
             stat = d_dev / disp_full
-            p = float(chi2.sf(stat, d_df))
+            p = float(_dist.pchisq(stat, d_df, lower_tail=False))
         else:
             stat = (d_dev / d_df) / disp_full
-            p = float(f.sf(stat, d_df, df_full))
+            p = float(_dist.pf(stat, d_df, df_full, lower_tail=False))
         df_col.append(d_df)
         dev_col.append(round(d_dev, 4))
         stat_col.append(round(stat, 4))
@@ -1430,12 +1550,45 @@ def _anova_glm_table(*models, labels: list[str], test: str | None = None):
     return df_, docstring
 
 
-def _anova_lme(*models, labels: list[str]):
-    """Likelihood-ratio test for nested ``lme`` fits (lme4-style)."""
+def _anova_gmm_single(model):
+    """Single-model Type-I (sequential) fixed-effect F-table — lme4's
+    ``anova.merMod``.
+
+    The rotated coefficients ``effects = RX · β̂`` (``RX`` = the fixed-effect
+    Cholesky) are squared and summed within each term to give the sequential
+    sums of squares; ``F = MeanSq / σ̂²``. There is no p-value (a mixed model
+    has no exact denominator df), matching ``anova(fm)`` with a single model.
+    """
+    from ..formula import materialize
+
+    _, assign = materialize(model._expanded, model.data, return_assign=True)
+    RX, _ = model._getme_rx_rzx()
+    effects = RX @ np.asarray(model._beta, dtype=float).ravel()
+    sigma2 = float(model.sigma_squared)
+    rows, npar, ss_col, ms_col, f_col = [], [], [], [], []
+    for i, lbl in enumerate(model._expanded.term_labels, start=1):
+        cols = [j for j, a in enumerate(assign) if a == i]
+        if not cols:
+            continue
+        ss = float(np.sum(effects[cols] ** 2))
+        df = len(cols)
+        rows.append(lbl)
+        npar.append(df)
+        ss_col.append(ss)
+        ms_col.append(ss / df)
+        f_col.append((ss / df) / sigma2)
+    return pl.DataFrame({
+        "": rows, "npar": npar, "Sum Sq": ss_col,
+        "Mean Sq": ms_col, "F value": f_col,
+    })
+
+
+def _anova_gmm(*models, labels: list[str]):
+    """Likelihood-ratio test for nested ``gmm`` fits (lme4-style)."""
     # LRT requires ML; silently refit any REML inputs.
     refit = any(m.REML for m in models)
     models = tuple(
-        (lme(m.formula, m.data, REML=False) if m.REML else m) for m in models
+        (gmm(m.formula, m.data, REML=False) if m.REML else m) for m in models
     )
     if refit:
         print("refitting model(s) with ML (instead of REML)")
@@ -1454,24 +1607,31 @@ def _anova_lme(*models, labels: list[str]):
     for k, idx in enumerate(order):
         m = models[idx]
         npar_col.append(m.npar)
-        aic_col.append(round(m.AIC, 4))
-        bic_col.append(round(m.BIC, 4))
-        ll_col.append(round(m.loglike, 4))
+        # lme4's print.anova.merMod shows the criteria at 1 decimal.
+        aic_col.append(round(m.AIC, 1))
+        bic_col.append(round(m.BIC, 1))
+        ll_col.append(round(m.loglike, 1))
         # ``-2*log(L)`` for the anova column — what R's ``anova.merMod``
         # prints. For LMM ``m.deviance`` already equals -2·log L; for GLMM
         # ``m.deviance`` is the residual deviance and the optimised
         # criterion lives on ``deviance_laplace``. Pick the latter when
         # available.
         dev_val = float(getattr(m, "deviance_laplace", m.deviance))
-        dev_col.append(round(dev_val, 4))
+        dev_col.append(round(dev_val, 1))
         if k == 0:
-            chi_col.append(None); dfc_col.append(None); p_col.append(None); sig_col.append("")
+            chi_col.append(None)
+            dfc_col.append(None)
+            p_col.append(None)
+            sig_col.append("")
             continue
         prev = models[order[k - 1]]
         prev_dev = float(getattr(prev, "deviance_laplace", prev.deviance))
-        chisq = prev_dev - dev_val
+        # lme4 clamps the LRT statistic at 0 (pmax) — a higher-npar model can
+        # land at a *worse* deviance (non-nested, or optimiser noise), giving a
+        # spurious negative χ². Clamping makes p=1 for those rows.
+        chisq = max(0.0, prev_dev - dev_val)
         d_df = m.npar - prev.npar
-        p = float(chi2.sf(chisq, d_df)) if d_df > 0 else float("nan")
+        p = float(_dist.pchisq(chisq, d_df, lower_tail=False)) if d_df > 0 else float("nan")
         chi_col.append(round(chisq, 4))
         dfc_col.append(d_df)
         p_col.append(float(f"{p:.4g}"))

@@ -94,7 +94,7 @@ VERB_TABLE: dict[str, Verb] = {
     "slice_sample": Verb("slice_sample", Slot.NONE),
     # ``add_count`` / ``add_tally`` are NOT mapped here — they need a
     # mutate(n = n(), _by = cols) expansion, which isn't a 1:1 verb
-    # rename. Tracked as a Phase 4+ item.
+    # rename, so they are not currently handled.
 }
 # fmt: on
 

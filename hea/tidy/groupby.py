@@ -284,6 +284,8 @@ class GroupBy:
         replace: bool = False,
         seed: int | None = None,
     ) -> "GroupBy":
+        """Random rows per group. ``seed`` is a **polars** seed, not R's — see
+        :meth:`hea.tidy.dataframe.DataFrame.slice_sample`."""
         if (n is None) == (prop is None):
             raise ValueError("slice_sample(): pass exactly one of n= or prop=.")
         # No native per-group sample on polars GroupBy; approximate with

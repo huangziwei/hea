@@ -82,8 +82,8 @@ class Result:
     - ``source`` — the translated source text (Python for ``from_R``,
       R for ``to_R``).
     - ``gaps``   — gaps logged during translation. Currently always
-      empty (the translator's gap-emission surface is built out as
-      part of the parity runner — see Phase 7).
+      empty (the translator's gap-emission surface is driven by the
+      parity runner).
 
     The ``__repr__`` and ``_repr_html_`` methods pass through to
     ``value`` so notebook cells show the DataFrame / plot directly.

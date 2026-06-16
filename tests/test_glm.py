@@ -359,6 +359,79 @@ def test_cbind_lhs_rejects_non_binomial():
         glm("cbind(s, f) ~ x", d, family=Gaussian())
 
 
+def test_bracket_lhs_equals_cbind_binomial():
+    """`[s, f] ~ x` is hea-dialect sugar for `cbind(s, f) ~ x`: identical AST,
+    identical code path → byte-for-byte the same binomial two-column fit."""
+    d = pl.DataFrame({
+        "s": [1.0, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "f": [9.0, 8, 7, 6, 5, 4, 3, 2, 1, 0.1],
+        "x": np.arange(10, dtype=float),
+    })
+    m_br = glm("[s, f] ~ x", d, family=Binomial())
+    m_cb = glm("cbind(s, f) ~ x", d, family=Binomial())
+    np.testing.assert_array_equal(m_br._bhat_arr, m_cb._bhat_arr)
+    np.testing.assert_array_equal(m_br._se_bhat_arr, m_cb._se_bhat_arr)
+    assert m_br.deviance == m_cb.deviance
+
+
+def test_bracket_lhs_rejects_non_binomial():
+    # Brackets inherit cbind's family guard exactly (same canonical AST, so the
+    # error still names cbind).
+    d = pl.DataFrame({"s": [1.0, 2], "f": [3.0, 4], "x": [1.0, 2]})
+    with pytest.raises(ValueError, match="cbind.*Binomial"):
+        glm("[s, f] ~ x", d, family=Gaussian())
+
+
+def test_cbind_prior_weights_and_na_drop_match_r():
+    """The two C10 corners on glm's cbind path (family-review B7):
+    (1) prior weights pw≠1 — R's binomial aic evaluates dbinom at the
+    true counts with coefficient wt/n = pw, needing the trials vector
+    kept distinct from the merged weights (pre-fix hea folded trials
+    into wt and rounded pw·n as the size); (2) counts evaluated
+    pre-NA-drop — both cbind columns now ride the design frame so
+    prepare_design's NA-omit keeps trials/proportions row-aligned.
+
+    R 4.6.0 reference (set.seed(4): x~runif(40), ntr~rpois(8)+1,
+    s~rbinom(ntr, plogis(-0.5+2.1x)), pw alternating 1.0/2.5):
+        glm(cbind(s,f) ~ x, binomial, weights=pw)
+            coef -0.3590009136 1.8278292807  dev 77.4834446946
+            AIC 246.1291034502  null.dev 116.3366152535
+        with x[7] <- NA (1-indexed):
+            coef -0.3540628519 1.7828651293  dev 74.1404894214
+            AIC 240.8651231928  nobs 39
+    (hea's weights= contract is post-drop length — R subsets length-n
+    weights in model.frame; that intake difference is glm-wide and
+    out of scope here.)
+    """
+    # R's set.seed(4) fixture captured as literals (no R dependency).
+    import json
+    from pathlib import Path
+    fx = Path(__file__).parent / "fixtures" / "glm_cbind_pw.json"
+    data = json.loads(fx.read_text())
+    d = pl.DataFrame({k: np.asarray(v, dtype=float)
+                      for k, v in data.items()})
+    pw = d["pw"].to_numpy()
+    m = glm("cbind(s, f) ~ x", d, family=Binomial(), weights=pw)
+    np.testing.assert_allclose(m._bhat_arr, [-0.3590009136, 1.8278292807],
+                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(m.deviance, 77.4834446946, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(m.AIC, 246.1291034502, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(m.null_deviance, 116.3366152535,
+                               rtol=0, atol=1e-9)
+    # NA in a covariate: row dropped, trials/weights stay aligned.
+    d2 = d.with_columns(
+        pl.when(pl.arange(0, d.height) == 6).then(None)
+        .otherwise(pl.col("x")).alias("x")
+    )
+    m2 = glm("cbind(s, f) ~ x", d2, family=Binomial(),
+             weights=pw[np.arange(d.height) != 6])
+    assert m2.n == 39
+    np.testing.assert_allclose(m2._bhat_arr, [-0.3540628519, 1.7828651293],
+                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(m2.deviance, 74.1404894214, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(m2.AIC, 240.8651231928, rtol=0, atol=1e-8)
+
+
 # 6.2 — offset(...) inside the formula.
 
 def test_formula_offset_matches_kwarg_offset():
@@ -602,4 +675,30 @@ def test_quasi_poisson_matches_poisson_betas_with_estimated_dispersion():
 def test_quasi_rejects_unknown_variance():
     with pytest.raises(ValueError, match="variance must be"):
         Quasi(variance="bogus")
+
+
+def test_quasibinomial_quasipoisson_constructors_through_glm():
+    # R's convenience constructors: quasipoisson == Quasi(log, "mu") at
+    # the point-estimate level (initialize differs only in mustart);
+    # quasibinomial additionally accepts the cbind response form, which
+    # plain Quasi("mu(1-mu)") does not. Bare-class family= mirrors R's
+    # function-valued family argument.
+    from hea.family import quasibinomial, quasipoisson
+    d = load_dataset("MASS", "quine")
+    m_q = glm("Days ~ Sex + Age", d, family=Quasi(link="log", variance="mu"))
+    m_qp = glm("Days ~ Sex + Age", d, family=quasipoisson)
+    np.testing.assert_allclose(m_qp._bhat_arr, m_q._bhat_arr, atol=1e-10)
+    np.testing.assert_allclose(m_qp.dispersion, m_q.dispersion, atol=1e-12)
+    assert m_qp.family.name == "quasipoisson"
+    assert np.isnan(m_qp.aic)
+
+    men = load_dataset("MASS", "menarche")
+    m_qb = glm("cbind(Menarche, Total - Menarche) ~ Age", men,
+               family=quasibinomial)
+    m_b = glm("cbind(Menarche, Total - Menarche) ~ Age", men,
+              family=Binomial())
+    # Same IRLS fixed point as binomial; dispersion estimated, t tests.
+    np.testing.assert_allclose(m_qb._bhat_arr, m_b._bhat_arr, atol=1e-8)
+    assert m_qb.dispersion != 1.0 and m_qb._test_kind == "t"
+    assert np.isnan(m_qb.aic)
 

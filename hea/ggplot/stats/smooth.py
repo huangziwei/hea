@@ -16,10 +16,15 @@ from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
-from scipy.stats import norm
 
+from ...R import nmath as _nmath
+from ...R._dispatch import rs_fn
 from .._util import to_numeric_aes
 from .stat import Stat
+
+# Rust+rayon LOESS kernel (None when the extension is absent or HEA_NO_RS=1);
+# the fit and predict share it so they agree bit-for-bit at common points.
+_rs_loess = rs_fn("loess_eval")
 
 
 # ---------------------------------------------------------------------------
@@ -68,19 +73,11 @@ class LoessFit:
         returns ``(fit, se)`` where ``se`` is the pointwise standard error.
         """
         newx = np.asarray(newx, dtype=float)
-        n_new = len(newx)
-        fit = np.empty(n_new)
-        if se:
-            se_arr = np.empty(n_new)
-
-        for i, xi in enumerate(newx):
-            beta, var00 = _loess_local_fit(
-                xi, self.x, self.y, self.span, self.degree, self.robust_weights,
-                want_var=se,
-            )
-            fit[i] = beta[0]
-            if se:
-                se_arr[i] = self.sigma * np.sqrt(max(var00, 0.0))
+        fit, var = _loess_eval(
+            newx, self.x, self.y, self.span, self.degree, self.robust_weights,
+            want_var=se,
+        )
+        se_arr = self.sigma * np.sqrt(np.maximum(var, 0.0)) if se else None
 
         return (fit, se_arr) if se else fit
 
@@ -106,14 +103,8 @@ def loess(x, y, *, span: float = 0.75, degree: int = 2,
     n_robust_iter = iterations if family == "symmetric" else 0
 
     for _ in range(n_robust_iter + 1):
-        fitted = np.empty(n)
-        leverages = np.empty(n)
-        for i in range(n):
-            beta, var00 = _loess_local_fit(
-                x[i], x, y, span, degree, robust_w, want_var=True,
-            )
-            fitted[i] = beta[0]
-            leverages[i] = var00  # (X^T W X)^-1[0,0]; sum ≈ tr(S)
+        fitted, leverages = _loess_eval(x, x, y, span, degree, robust_w,
+                                        want_var=True)
 
         residuals = y - fitted
 
@@ -201,6 +192,36 @@ def _loess_local_fit(x_query: float, x: np.ndarray, y: np.ndarray, span: float,
     return beta, np.nan
 
 
+def _loess_eval(xq, x, y, span, degree, extra_w, want_var):
+    """Per-query local fits at ``xq`` against data ``(x, y)``.
+
+    Rust+rayon when the extension is present (the fit and predict both call this,
+    so they agree bit-for-bit at shared query points), else the pure-Python loop
+    over :func:`_loess_local_fit` (unchanged behaviour under ``HEA_NO_RS=1``).
+    Returns ``(fitted, var00)`` arrays aligned with ``xq``.
+    """
+    xq = np.asarray(xq, dtype=float)
+    if _rs_loess is not None:
+        fitted, var = _rs_loess(
+            np.ascontiguousarray(xq),
+            np.ascontiguousarray(np.asarray(x, dtype=float)),
+            np.ascontiguousarray(np.asarray(y, dtype=float)),
+            float(span), int(degree),
+            np.ascontiguousarray(np.asarray(extra_w, dtype=float)),
+            bool(want_var),
+        )
+        return np.asarray(fitted), np.asarray(var)
+    m = len(xq)
+    fitted = np.empty(m)
+    var = np.empty(m)
+    for i in range(m):
+        beta, var00 = _loess_local_fit(xq[i], x, y, span, degree, extra_w,
+                                       want_var=want_var)
+        fitted[i] = beta[0]
+        var[i] = var00
+    return fitted, var
+
+
 @dataclass
 class StatSmooth(Stat):
     method: str = "loess"  # "loess" | "lm" | "glm" | "gam"
@@ -233,7 +254,7 @@ class StatSmooth(Stat):
             span=self.span, family=self.family,
         )
 
-        z = norm.ppf(0.5 + self.level / 2)
+        z = _nmath.qnorm5(0.5 + self.level / 2)
         ymin = yhat - z * se
         ymax = yhat + z * se
 

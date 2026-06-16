@@ -63,7 +63,9 @@ def _parse_join_binary(expr: pl.Expr) -> tuple[str, str, str] | None:
     if not isinstance(tree, dict) or "BinaryExpr" not in tree:
         return None
     bx = tree["BinaryExpr"]
-    left = bx.get("left"); right = bx.get("right"); op = bx.get("op")
+    left = bx.get("left")
+    right = bx.get("right")
+    op = bx.get("op")
     if op not in _BIN_OPS:
         return None
     if not (isinstance(left, dict) and isinstance(right, dict)):
@@ -177,21 +179,28 @@ def join_by(*args: Any) -> _JoinBy:
 
 def _consume_join_by_arg(spec: _JoinBy, a: Any) -> None:
     if isinstance(a, str):
-        spec.equi_left.append(a); spec.equi_right.append(a); return
+        spec.equi_left.append(a)
+        spec.equi_right.append(a)
+        return
     if isinstance(a, _Closest):
         if spec.asof is not None:
             raise ValueError(
                 "join_by(): only one closest() condition is supported per call."
             )
-        spec.asof = a; return
+        spec.asof = a
+        return
     if isinstance(a, pl.Expr):
         parsed = _parse_join_binary(a)
         if parsed is not None:
             op, L, R = parsed
             if op == "Eq":
-                spec.equi_left.append(L); spec.equi_right.append(R); return
-            spec.ineqs.append((op, L, R)); return
-        spec.exprs.append(a); return
+                spec.equi_left.append(L)
+                spec.equi_right.append(R)
+                return
+            spec.ineqs.append((op, L, R))
+            return
+        spec.exprs.append(a)
+        return
     raise TypeError(
         f"join_by(): unsupported arg type {type(a).__name__}. "
         "Pass strings, col() comparisons, closest(), between(), "
@@ -202,10 +211,10 @@ def _consume_join_by_arg(spec: _JoinBy, a: Any) -> None:
 # Map "Lt"/"LtEq"/"Gt"/"GtEq" → corresponding Expr builder for non-equi
 # predicates (used to reconstitute inequalities with suffixed right refs).
 _INEQ_BUILDERS: dict[str, Callable[[pl.Expr, pl.Expr], pl.Expr]] = {
-    "Lt":   lambda l, r: l < r,
-    "LtEq": lambda l, r: l <= r,
-    "Gt":   lambda l, r: l > r,
-    "GtEq": lambda l, r: l >= r,
+    "Lt":   lambda left, r: left < r,
+    "LtEq": lambda left, r: left <= r,
+    "Gt":   lambda left, r: left > r,
+    "GtEq": lambda left, r: left >= r,
 }
 
 

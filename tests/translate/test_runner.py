@@ -11,16 +11,13 @@ each gap category.
 
 import json
 import shutil
-import subprocess
-import tempfile
 from pathlib import Path
 
 import polars as pl
 import pytest
 
-from hea.translate.gaps import Gap, _make_id, log_gap, read_gaps
+from hea.translate.gaps import Gap, log_gap, read_gaps
 from hea.translate.runner import (
-    RunResult,
     diff_frames,
     parity,
     run_py,

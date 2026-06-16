@@ -639,7 +639,15 @@ class Translator:
         if stripped is not None:
             if stripped in ("DataFrame", "from_dict"):
                 return self._emit_data_frame_reverse(call.args, call.keywords)
+            if stripped == "gmm":
+                return self._emit_gmm_call(call.args, call.keywords)
             return self._emit_plain_call(stripped, call.args, call.keywords)
+
+        # Bare ``gmm(...)`` (after ``from hea.models import gmm`` — the shape
+        # ``from_R`` emits) dispatches like the namespaced form, so the
+        # R→hea→R round-trip preserves ``lmer``/``glmer``.
+        if isinstance(call.func, P.Name) and call.func.id == "gmm":
+            return self._emit_gmm_call(call.args, call.keywords)
 
         # 4) Fallback: plain call.
         if isinstance(call.func, P.Name):
@@ -711,6 +719,45 @@ class Translator:
     def _emit_plain_call(self, name: str, args: list, kwargs: list) -> str:
         """Plain function call ``name(args)`` with no NSE rewriting."""
         return f"{name}({self._emit_args(args, kwargs)})"
+
+    def _emit_gmm_call(self, args: list, kwargs: list) -> str:
+        """``hea.models.gmm(...)`` → R ``lmer(...)`` or ``glmer(..., family=)``.
+
+        hea folds lme4's ``lmer`` (Gaussian LMM) and ``glmer`` (GLMM) into a
+        single ``gmm`` class. The reverse picks the R entry point from the
+        ``family=`` argument: absent or Gaussian → ``lmer`` (which takes no
+        ``family``, so it's dropped); anything else → ``glmer``.
+        """
+        family_kw = next((k for k in kwargs if k.arg == "family"), None)
+        if family_kw is None or _is_gaussian_family(family_kw.value):
+            kept = [k for k in kwargs if k.arg != "family"]
+            return self._emit_plain_call("lmer", args, kept)
+        # glmer: emit the family as its R generator (``Poisson()`` → ``poisson``).
+        others = [k for k in kwargs if k.arg != "family"]
+        base = self._emit_args(args, others)
+        fam = self._emit_r_family(family_kw.value)
+        inner = f"{base}, family = {fam}" if base else f"family = {fam}"
+        return f"glmer({inner})"
+
+    def _emit_r_family(self, value: P.expr) -> str:
+        """R family-generator text for a hea family value. ``Poisson()`` →
+        ``poisson``; ``Gamma(link="log")`` → ``Gamma(link = "log")``;
+        ``InverseGaussian()`` → ``inverse.gaussian``. Unrecognized families
+        emit unchanged (the user sees the gap)."""
+        node, cargs, ckw = value, [], []
+        if isinstance(node, P.Call):
+            cargs, ckw, node = node.args, node.keywords, node.func
+        name = (
+            node.attr if isinstance(node, P.Attribute)
+            else node.id if isinstance(node, P.Name)
+            else None
+        )
+        r_name = _R_FAMILY_NAMES.get(name.lower()) if name else None
+        if r_name is None:
+            return self._emit_expr(value, prec=20)
+        if cargs or ckw:
+            return f"{r_name}({self._emit_args(cargs, ckw)})"
+        return r_name
 
     def _emit_data_frame_reverse(self, args: list, kwargs: list) -> str:
         """``hea.DataFrame({"a": [1, 2], "b": [3, 4]})`` → ``data.frame(a = c(1, 2), b = c(3, 4))``.
@@ -1079,6 +1126,38 @@ class Translator:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+# hea family class/alias name (lowercased) → R family-generator name. R
+# capitalizes ``Gamma`` (to avoid the ``gamma`` function) and dots
+# ``inverse.gaussian``; the rest are plain lowercase.
+_R_FAMILY_NAMES: dict[str, str] = {
+    "gaussian": "gaussian",
+    "poisson": "poisson",
+    "binomial": "binomial",
+    "gamma": "Gamma",
+    "inversegaussian": "inverse.gaussian",
+}
+
+
+def _is_gaussian_family(value: P.expr) -> bool:
+    """True if a ``family=`` value denotes Gaussian (→ ``lmer``, not ``glmer``).
+
+    Recognizes ``Gaussian()`` / ``gaussian()`` / ``hea.family.Gaussian`` /
+    the string ``"gaussian"``. Anything unrecognized is treated as
+    non-Gaussian — the safe default, since an explicit ``family=`` almost
+    always means a GLMM.
+    """
+    node = value
+    if isinstance(node, P.Call):
+        node = node.func
+    if isinstance(node, P.Attribute):
+        return node.attr.lower() == "gaussian"
+    if isinstance(node, P.Name):
+        return node.id.lower() == "gaussian"
+    if isinstance(node, P.Constant) and isinstance(node.value, str):
+        return node.value.lower() == "gaussian"
+    return False
 
 
 def _strip_hea_prefix(func: P.expr) -> Optional[str]:

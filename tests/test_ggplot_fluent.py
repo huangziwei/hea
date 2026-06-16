@@ -1,7 +1,4 @@
-"""Phase B (fluent ggplot API) — entry point + auto-install tests.
-
-Plan: ``.claude/plans/method-based-ggplot-api.md`` Phase B.
-"""
+"""Fluent ggplot API — entry point + auto-install tests."""
 
 from __future__ import annotations
 
@@ -14,12 +11,8 @@ import pytest
 
 import hea
 import hea.ggplot as hg
-from hea.ggplot import aes, geom_point, geom_smooth, scale_x_log10, theme_minimal
+from hea.ggplot import aes, geom_point, geom_smooth, theme_minimal
 from hea.ggplot.core import (
-    _FLUENT_INSTALL_EXACT,
-    _FLUENT_INSTALL_PREFIXES,
-    _FLUENT_SKIP_EXACT,
-    _FLUENT_SKIP_PREFIXES,
     _should_install_fluent,
     ggplot as ggplot_class,
 )
@@ -209,7 +202,6 @@ def test_fluent_method_matches_plus_form(df, name, call_args, call_kwargs):
     """For each representative name, the fluent and ``+`` forms produce
     structurally equivalent plots."""
     df_with_g = df.with_columns(g=hea.tidy.lit("a"))
-    base_args = ("g",) if name == "facet_wrap" else ()
     fn = getattr(hg, name)
 
     p_fluent = getattr(df_with_g.ggplot(aes("x", "y")), name)(*call_args, **call_kwargs)
@@ -300,7 +292,6 @@ def test_layer_level_x_y_kwargs_work(df):
     so they previously landed in ``geom_params`` (= dropped). Layer now
     sweeps aes-named keys out of geom_params into aes_params.
     """
-    from hea.ggplot import geom_point
     p = df.ggplot().geom_point(x="x", y="y")
     fig = p.draw()
     try:
@@ -311,7 +302,6 @@ def test_layer_level_x_y_kwargs_work(df):
 
 def test_layer_level_color_constant_still_means_set(df):
     """``geom_point(color="red")`` — "red" is not a column → still SET."""
-    from hea.ggplot import geom_point
     p = df.ggplot(x="x", y="y").geom_point(color="red")
     fig = p.draw()
     try:
@@ -324,7 +314,6 @@ def test_layer_level_color_constant_still_means_set(df):
 
 def test_layer_level_color_column_means_map(df):
     """``geom_point(color="g")`` where "g" is a column → MAP via promotion."""
-    from hea.ggplot import geom_point
     df_g = df.with_columns(g=hea.tidy.lit("a"))
     p = df_g.ggplot(x="x", y="y").geom_point(color="g")
     # The promoted mapping should now contain colour: "g".

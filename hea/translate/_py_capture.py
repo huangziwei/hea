@@ -11,7 +11,7 @@ Behaviour:
    ``__hea_last__ = <expr>`` so its value is recoverable.
 3. Build a namespace with every public name from ``hea`` pre-imported
    (so the translated script doesn't need its own ``from hea import ...``
-   preamble — same convention as ``hea.from_R`` will use in Phase 9).
+   preamble — same convention ``hea.from_R`` uses).
 4. ``exec`` the rewritten AST.
 5. Read ``__hea_last__`` from the namespace. If it's a hea/polars
    DataFrame, serialize to CSV + a schema JSON sidecar capturing

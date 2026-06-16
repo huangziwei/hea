@@ -395,7 +395,6 @@ class _Lexer:
         """Try to match a punctuation/operator at ``self.i``. Returns True
         on match. Order matters — longest first within each starting char."""
         src = self.src
-        n = self.n
         i = self.i
 
         def emit(kind: str, length: int):
@@ -412,38 +411,53 @@ class _Lexer:
         # 3-char operators.
         three = src[i:i+3]
         if three == "<<-":
-            emit("<<-", 3); return True
+            emit("<<-", 3)
+            return True
         if three == "->>":
-            emit("->>", 3); return True
+            emit("->>", 3)
+            return True
         if three == ":::":
-            emit(":::", 3); return True
+            emit(":::", 3)
+            return True
 
         # 2-char operators.
         two = src[i:i+2]
         if two == "<-":
-            emit("<-", 2); return True
+            emit("<-", 2)
+            return True
         if two == "->":
-            emit("->", 2); return True
+            emit("->", 2)
+            return True
         if two == "<=":
-            emit("<=", 2); return True
+            emit("<=", 2)
+            return True
         if two == ">=":
-            emit(">=", 2); return True
+            emit(">=", 2)
+            return True
         if two == "==":
-            emit("==", 2); return True
+            emit("==", 2)
+            return True
         if two == "!=":
-            emit("!=", 2); return True
+            emit("!=", 2)
+            return True
         if two == "&&":
-            emit("&&", 2); return True
+            emit("&&", 2)
+            return True
         if two == "||":
-            emit("||", 2); return True
+            emit("||", 2)
+            return True
         if two == "|>":
-            emit("|>", 2); return True
+            emit("|>", 2)
+            return True
         if two == "::":
-            emit("::", 2); return True
+            emit("::", 2)
+            return True
         if two == "[[":
-            emit("[[", 2); return True
+            emit("[[", 2)
+            return True
         if two == "]]":
-            emit("]]", 2); return True
+            emit("]]", 2)
+            return True
 
         # 1-char operators / punctuation.
         SINGLES = {

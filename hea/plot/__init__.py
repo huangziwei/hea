@@ -22,8 +22,8 @@ Spec
   (``xlab=r"$\\hat{\\epsilon}_i$"``); an ``r_expr()`` translator for R's
   ``expression()`` mini-language ships in a later phase.
 
-Dispatch table (Phase 1)
-------------------------
+Dispatch table
+--------------
 ``plot(formula_str, data=df)``  : route on RHS dtype
     num ~ num, with multi-RHS                          → scatter (one panel per RHS term)
     num ~ factor                                       → boxplot grouped by factor
@@ -33,7 +33,7 @@ Dispatch table (Phase 1)
 ``plot(vec)``                   : single vector        → vec vs index
 ``plot(lm_or_glm)``             : 4-panel diagnostic   → resid-fit / QQ / scale-loc / leverage
 
-Phase 2+: annotations (``abline``/``points``/``lines``/``legend``/``segments``/
+Later additions: annotations (``abline``/``points``/``lines``/``legend``/``segments``/
 ``qqline``), Faraway helpers (``qqnorm``/``halfnorm``/``termplot``), and the
 long tail (``matplot``/``stripchart``/``interaction_plot``/``r_expr``).
 """

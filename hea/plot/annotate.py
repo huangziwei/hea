@@ -1,6 +1,6 @@
 """Annotation/overlay calls — layered onto an existing ``Axes`` via ``ax=``.
 
-Phase 2 surface (from the Faraway inventory):
+Annotation surface (from the Faraway inventory):
     abline    — straight lines: from a fit, (a, b), or h=/v=
     points    — scatter overlay
     lines     — line overlay; accepts (x, y) or formula + data
@@ -15,8 +15,8 @@ import inspect
 
 import numpy as np
 import polars as pl
-from scipy.stats import norm
 
+from ..R import nmath as _nmath
 from ..formula import parse
 from ._util import draw_points, r_lty, resolve_overlay_ax, to_float, to_value_series
 from .formula_eval import eval_side
@@ -282,7 +282,7 @@ def qqline(x, *, ax=None, col="black", lty=None):
     if vals.size < 2:
         return ax
     ry1, ry3 = np.quantile(vals, [0.25, 0.75])
-    qx1, qx3 = norm.ppf([0.25, 0.75])
+    qx1, qx3 = _nmath.qnorm5_vec(np.array([0.25, 0.75]))
     slope = (ry3 - ry1) / (qx3 - qx1)
     intercept = ry1 - slope * qx1
     xlim = ax.get_xlim()

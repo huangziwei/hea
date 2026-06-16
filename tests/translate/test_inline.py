@@ -6,13 +6,12 @@ inside ``from_R`` don't propagate to the test function's locals. Module
 globals do work, which matches the realistic notebook-cell use case.
 """
 
-from pathlib import Path
 
 import polars as pl
 import pytest
 
 import hea
-from hea.translate.inline import Result, from_R, to_R
+from hea.translate.inline import from_R, to_R
 
 
 # ---------------------------------------------------------------------------

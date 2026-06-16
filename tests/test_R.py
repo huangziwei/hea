@@ -8,10 +8,14 @@ none of it shadows a Python builtin.
 from __future__ import annotations
 
 import builtins
+import math
+import sys
 
 import numpy as np
 import polars as pl
 import pytest
+
+from conftest import have_rscript, r_scalar_values
 
 import hea
 from hea import R as R_mod
@@ -586,14 +590,18 @@ _R_EXPR_SKIP = {
     # Result classes — not callable in the vector-shape sense.
     "HTest", "AnovaTable", "Terms",
     # Model generics — operate on fitted models, not columns.
-    "coef", "coefficients", "fixef", "ranef",
+    "coef", "coefficients", "fixef", "ranef", "refit", "refitML",
     "resid", "residuals", "fitted", "fitted_values",
-    "predict", "confint", "vcov", "logLik", "deviance",
-    "nobs", "df_residual", "formula", "model_matrix", "model_frame",
-    "terms", "update", "AIC", "BIC",
+    "predict", "confint", "vcov", "logLik", "deviance", "profile", "bootMer",
+    "nobs", "weights", "df_residual", "formula", "model_matrix", "model_frame",
+    "terms", "update", "AIC", "BIC", "effects", "simulate",
+    "variable_names", "case_names", "labels",
     "anova", "add1", "drop1", "step",
+    # lme4 merMod accessors (operate on a fitted gmm, not on columns).
+    "VarCorr", "getME", "getData", "extractAIC", "rePCA",
+    "isREML", "isLMM", "isGLMM", "isNLMM", "isSingular",
     "hatvalues", "rstandard", "rstudent",
-    "cooks_distance", "dffits", "dfbetas", "influence",
+    "cooks_distance", "dffits", "dfbeta", "dfbetas", "influence",
     # emmeans — model-shaped (operate on fitted models / EmmGrid tables).
     "emmeans", "EmmGrid", "summary_emmgrid_contrasts",
     # Distribution PDFs/CDFs/quantiles/random — scalar in, scalar out.
@@ -708,38 +716,69 @@ def test_R_vector_functions_dispatch_on_expr():
 # ---------------------------------------------------------------------------
 
 
+# --- Live-R bit-exact distribution checks -----------------------------------
+# Bit-exactness to R is achievable only on macOS, where hea and R share Apple's
+# scalar libm (on BOTH Intel and arm64); on Linux/glibc they drift a few ulp
+# (the libm floor — see tests/test_rs_parity.py header, and note R itself is not
+# bit-identical across arches because clang fuses nmath's Horners to FMA on arm64
+# but not on x86-64). So: bit-for-bit vs the *live* R on this machine when on
+# macOS+Rscript (no frozen, arch-locked literals); otherwise a tolerance check vs
+# the committed R 4.6.0 value (a ~portable reference, exact only where libm matches).
+_R_BITEXACT = sys.platform == "darwin" and have_rscript()
+
+
+def _assert_r(checks, *, rel_tol=1e-12):
+    """``checks``: list of ``(got, r_expr, fallback)`` — bit-exact vs live R on
+    macOS, else ``math.isclose`` vs the committed fallback."""
+    if _R_BITEXACT:
+        ref = r_scalar_values([e for _, e, _ in checks])
+        for got, expr, _ in checks:
+            assert got == ref[expr], f"{expr}: {got!r} != live R {ref[expr]!r}"
+    else:
+        for got, expr, fb in checks:
+            assert math.isclose(got, fb, rel_tol=rel_tol), f"{expr}: {got!r} !~ R {fb!r}"
+
+
 def test_dnorm_pnorm_qnorm():
-    assert dnorm(0) == pytest.approx(0.3989422804, rel=1e-6)
-    assert pnorm(1.96) == pytest.approx(0.9750021048, rel=1e-6)
-    assert qnorm(0.975) == pytest.approx(1.959963985, rel=1e-6)
+    _assert_r([
+        (dnorm(0), "dnorm(0)", 0.3989422804014327),
+        (pnorm(1.96), "pnorm(1.96)", 0.97500210485177963),
+        (qnorm(0.975), "qnorm(0.975)", 1.9599639845400536),
+    ])
 
 
 def test_pnorm_lower_tail_false():
-    assert pnorm(1.96, lower_tail=False) == pytest.approx(
-        1 - 0.9750021048, rel=1e-6
-    )
+    # R's pnorm(.., lower.tail=FALSE) uses the upper-tail kernel directly.
+    _assert_r([(pnorm(1.96, lower_tail=False),
+                "pnorm(1.96, lower.tail=FALSE)", 0.024997895148220428)])
 
 
 def test_qnorm_lower_tail_false():
-    # P(Z > q) = 0.025  →  q = qnorm(0.975) ≈ 1.959964
-    assert qnorm(0.025, lower_tail=False) == pytest.approx(
-        1.959963985, rel=1e-6
-    )
+    # P(Z > q) = 0.025  →  q = qnorm(0.975); R's lower.tail=FALSE path differs
+    # from 1-p by 1 ulp (0.5 - p + 0.5 idiom) — we replicate it exactly.
+    _assert_r([(qnorm(0.025, lower_tail=False),
+                "qnorm(0.025, lower.tail=FALSE)", 1.9599639845400538)])
 
 
 def test_t_distribution():
-    assert qt(0.975, df=10) == pytest.approx(2.228138852, rel=1e-6)
-    assert pt(2, df=10) == pytest.approx(0.963306167, rel=1e-6)
+    _assert_r([
+        (qt(0.975, df=10), "qt(0.975, df=10)", 2.2281388519862739),
+        (pt(2, df=10), "pt(2, df=10)", 0.96330598261462974),
+    ])
 
 
 def test_chisq_distribution():
-    assert qchisq(0.95, df=1) == pytest.approx(3.841458821, rel=1e-6)
-    assert pchisq(3.841458821, df=1) == pytest.approx(0.95, abs=1e-6)
+    _assert_r([
+        (qchisq(0.95, df=1), "qchisq(0.95, df=1)", 3.841458820694124),
+        (pchisq(3.841458821, df=1), "pchisq(3.841458821, df=1)", 0.9500000000091211),
+    ])
 
 
 def test_f_distribution():
-    assert qf(0.95, 2, 10) == pytest.approx(4.102821, rel=1e-5)
-    assert pf(4.102821, 2, 10) == pytest.approx(0.95, abs=1e-5)
+    _assert_r([
+        (qf(0.95, 2, 10), "qf(0.95, 2, 10)", 4.1028210151304005),
+        (pf(4.102821, 2, 10), "pf(4.102821, 2, 10)", 0.94999999958445847),
+    ])
 
 
 def test_binom():
@@ -750,21 +789,21 @@ def test_binom():
 
 
 def test_poisson_with_lambda_keyword():
-    # dpois(2, lambda=3) = 3^2 * exp(-3) / 2 = 9 * 0.04979 / 2
-    expected = 9 * np.exp(-3) / 2
-    assert float(dpois(2, lambda_=3)) == pytest.approx(expected, rel=1e-6)
-    assert float(ppois(2, lambda_=3)) == pytest.approx(0.4231900811, rel=1e-6)
+    # dpois / ppois bit-exact to R (ported dpois saddlepoint, ppois->pgamma).
+    _assert_r([
+        (float(dpois(2, lambda_=3)), "dpois(2, 3)", 0.22404180765538773),
+        (float(ppois(2, lambda_=3)), "ppois(2, 3)", 0.42319008112684348),
+    ])
 
 
 def test_uniform_exp_gamma_beta():
     assert float(punif(0.3)) == pytest.approx(0.3)
     assert float(qexp(0.5)) == pytest.approx(np.log(2), rel=1e-6)
-    # pgamma(1, shape=2, rate=1) = 1 - 2*exp(-1) = 0.2642411
-    assert float(pgamma(1, shape=2, rate=1)) == pytest.approx(
-        1 - 2 * np.exp(-1), rel=1e-6
-    )
-    # pbeta(0.5, 2, 5) = 57/64 = 0.890625
-    assert float(pbeta(0.5, 2, 5)) == pytest.approx(57 / 64)
+    # pgamma / pbeta bit-exact to R (ported nmath pgamma / toms708 pbeta).
+    _assert_r([
+        (float(pgamma(1, shape=2, rate=1)), "pgamma(1, shape=2, rate=1)", 0.26424111765711528),
+        (float(pbeta(0.5, 2, 5)), "pbeta(0.5, 2, 5)", 0.890625),
+    ])
 
 
 def test_set_seed_reproducible():
@@ -782,6 +821,274 @@ def test_rnorm_size_and_params():
     # very loose sanity
     assert abs(np.mean(out) - 10) < 0.5
     assert abs(np.std(out, ddof=1) - 2) < 0.5
+
+
+def test_rmersenne_family_samplers_match_r():
+    """``RMersenneTwister``'s nmath samplers (exp_rand / rgamma / rpois /
+    rbinom / rnbinom) are bit-exact vs R's ``set.seed(); r*()`` — the basis for
+    byte-exact ``simulate.merMod`` / ``bootMer``. References from R 4.x."""
+    from hea.R.rng import RMersenneTwister as MT
+
+    def f(seed, fn, k):
+        r = MT(seed)
+        return [fn(r) for _ in range(k)]
+
+    np.testing.assert_allclose(
+        f(1, lambda r: r.exp_rand(), 5),
+        [0.755181833128345, 1.181642779107106, 0.145706726703793,
+         0.139795261868498, 0.436068625779175], rtol=1e-12)
+    np.testing.assert_allclose(
+        f(2, lambda r: r.rgamma(3, 2), 5),
+        [2.56593501810152, 2.42084845343624, 2.06431284019708,
+         5.40513641980691, 3.00717049677133], rtol=1e-10)
+    np.testing.assert_allclose(
+        f(3, lambda r: r.rgamma(0.4), 5),
+        [0.01631525060736624, 0.12958103428420428, 0.00772927389486502,
+         0.00584445661994953, 1.22420510697687734], rtol=1e-9)
+    assert [int(x) for x in f(4, lambda r: r.rpois(3.0), 8)] == \
+        [3, 0, 2, 2, 4, 2, 4, 5]
+    assert [int(x) for x in f(5, lambda r: r.rpois(25.0), 8)] == \
+        [20, 22, 25, 33, 21, 25, 20, 25]
+    assert [int(x) for x in f(6, lambda r: r.rbinom(10, 0.3), 8)] == \
+        [3, 5, 2, 2, 4, 6, 6, 4]
+    assert [int(x) for x in f(7, lambda r: r.rbinom(200, 0.4), 8)] == \
+        [82, 76, 76, 78, 81, 85, 90, 70]
+    assert [int(x) for x in f(8, lambda r: r.rnbinom(2, 5), 8)] == \
+        [4, 5, 6, 0, 8, 2, 5, 13]
+
+
+def test_rmersenne_composed_families_match_r():
+    """``RMersenneTwister``'s composed continuous families (rchisq/rt/rf central,
+    Cheng's rbeta BB+BC) and weighted ``sample_prob`` (ProbSample[No]Replace +
+    Walker alias) are bit-exact vs R's ``set.seed(); r*()`` / ``sample(prob=)``.
+    References from R 4.6.0 (Rejection sample.kind)."""
+    from hea.R.rng import RMersenneTwister as MT
+
+    def f(seed, fn, k):
+        r = MT(seed)
+        return [fn(r) for _ in range(k)]
+
+    np.testing.assert_allclose(f(1, lambda r: r.rchisq(3), 8),
+        [0.94331456701213001, 5.5437815656796143, 5.3543968318754569,
+         2.9152466284968503, 5.0531907965078293, 3.7492110953605073,
+         3.3173247857629455, 1.4358542591922681], rtol=1e-9)
+    np.testing.assert_allclose(f(1, lambda r: r.rchisq(3, 2.5), 8),
+        [1.4007473814073526, 5.3543968318754569, 4.5570610095050101,
+         5.6340352822938744, 3.092611107839025, 1.4629708539445847,
+         5.7511096054004343, 8.7129370516950448], rtol=1e-9)
+    np.testing.assert_allclose(f(1, lambda r: r.rt(4), 8),
+        [-0.67291659996486219, -0.5843383715604018, 0.57211571515607695,
+         -0.34111699754345642, -0.21805345233165202, 0.60311428389395705,
+         -0.41526835800270151, -0.013495013427469081], rtol=1e-9)
+    np.testing.assert_allclose(f(1, lambda r: r.rf(4, 7), 8),
+        [0.25307567624745586, 1.6113499786337722, 1.5400491076567895,
+         1.6052631863861921, 0.58985814242435342, 0.69212578066138286,
+         0.23118802715891759, 0.84371345838504663], rtol=1e-9)
+    # rbeta BB (min > 1), with the aa/bb swap (rbeta(a,b)+rbeta(b,a)==1).
+    np.testing.assert_allclose(f(2, lambda r: r.rbeta(2, 3), 6),
+        [0.20153661209123486, 0.44718349735790824, 0.16045907961851755,
+         0.3800521727916239, 0.4336392373583321, 0.58685628551895686], rtol=1e-9)
+    np.testing.assert_allclose(f(2, lambda r: r.rbeta(3, 2), 6),
+        [0.79846338790876514, 0.5528165026420917, 0.83954092038148243,
+         0.61994782720837605, 0.56636076264166801, 0.4131437144810432], rtol=1e-9)
+    # rbeta BC (min <= 1), incl. the a == 1 edge.
+    np.testing.assert_allclose(f(3, lambda r: r.rbeta(0.5, 0.8), 6),
+        [0.61473057792667174, 0.21442516685532181, 0.96858430275314145,
+         0.25050089115849417, 0.36212582276500171, 0.32241222305695116], rtol=1e-9)
+    np.testing.assert_allclose(f(4, lambda r: r.rbeta(1, 3), 6),
+        [0.19073474794599599, 0.44489425584764741, 0.070961268480035325,
+         0.11254197198550225, 0.017583976693441462, 0.097764348433268394], rtol=1e-9)
+    # weighted sample: ProbSampleReplace, ProbSampleNoReplace, and the Walker
+    # alias path (n=250, >200 sizeable weights → R_unif_index + unif_rand).
+    p = np.array([0.30, 0.11, 0.24, 0.05, 0.19, 0.07])
+    assert [int(x) + 1 for x in MT(5).sample_prob(p, 10, replace=True)] == \
+        [1, 5, 6, 1, 1, 5, 3, 2, 4, 1]
+    assert [int(x) + 1 for x in MT(6).sample_prob(p, 4, replace=False)] == \
+        [5, 4, 1, 3]
+    assert [int(x) + 1 for x in
+            MT(9).sample_prob(np.arange(1, 251, dtype=float), 8, replace=True)] == \
+        [187, 248, 152, 249, 227, 30, 232, 232]
+
+
+def test_public_r_surface_routes_through_mersenne_twister():
+    """``set_seed`` + ``runif``/``rnorm``/``sample``/``rpois``/``rgamma``/
+    ``rbinom``/``rexp`` now draw from R's bit-exact MT stream (subsystem A),
+    not numpy. Proven two ways: (1) ``runif``/``rnorm`` match R's canonical
+    ``set.seed(1)`` reference values; (2) every routed function reproduces a
+    fresh ``RMersenneTwister(seed)`` draw, and all share ONE advancing stream
+    like R's global RNG."""
+    from hea.R import (runif, sample, rpois, rgamma, rbinom, rexp,
+                       rchisq, rt, rf, rbeta)
+    from hea.R.rng import RMersenneTwister as MT
+
+    # (1) R parity — set.seed(1); runif(5) / rnorm(5) (R 4.x reference values).
+    set_seed(1)
+    np.testing.assert_allclose(
+        runif(5),
+        [0.2655087, 0.3721239, 0.5728534, 0.9082078, 0.2016819], rtol=1e-6)
+    set_seed(1)
+    np.testing.assert_allclose(
+        rnorm(5),
+        [-0.6264538, 0.1836433, -0.8356286, 1.5952808, 0.3295078], rtol=1e-6)
+
+    # (2) routing — each public fn == the same draw off RMersenneTwister(seed).
+    def draws(seed, fn, k):
+        r = MT(seed)
+        return np.array([fn(r) for _ in range(k)])
+
+    set_seed(11)
+    np.testing.assert_array_equal(runif(4), MT(11).unif_rand(4))
+    set_seed(11)
+    np.testing.assert_array_equal(rnorm(4), MT(11).rnorm(4))
+    set_seed(11)
+    np.testing.assert_array_equal(rpois(6, 3.0),
+                                  draws(11, lambda r: r.rpois(3.0), 6))
+    set_seed(12)
+    np.testing.assert_array_equal(rgamma(5, 2.0, scale=1.5),
+                                  draws(12, lambda r: r.rgamma(2.0, scale=1.5), 5))
+    set_seed(13)
+    np.testing.assert_array_equal(rbinom(7, 20, 0.3),
+                                  draws(13, lambda r: r.rbinom(20, 0.3), 7))
+    set_seed(14)
+    np.testing.assert_array_equal(rexp(5, 2.0),
+                                  draws(14, lambda r: r.exp_rand() / 2.0, 5))
+
+    # unweighted sample is R's shrinking-pool walk on the same stream.
+    vals = np.arange(1, 11)
+    set_seed(2)
+    np.testing.assert_array_equal(sample(vals),
+                                  vals[MT(2).sample_int(10, 10)])
+
+    # (3) one advancing global stream: interleaved runif then rpois ==
+    # sequential draws off a single MT (R's global-RNG semantics).
+    set_seed(99)
+    u, p = runif(2), rpois(3, 4.0)
+    r = MT(99)
+    np.testing.assert_array_equal(u, r.unif_rand(2))
+    np.testing.assert_array_equal(p, np.array([r.rpois(4.0) for _ in range(3)]))
+
+    # (4) the composed/weighted families also route through the stream — R parity
+    # for rt/rbeta/walker-sample, and routing-equivalence for rchisq/rf.
+    def mt_draws(seed, fn, k):
+        r = MT(seed)
+        return np.array([fn(r) for _ in range(k)])
+
+    set_seed(1)
+    np.testing.assert_allclose(rt(8, 4),
+        [-0.67291659996486219, -0.5843383715604018, 0.57211571515607695,
+         -0.34111699754345642, -0.21805345233165202, 0.60311428389395705,
+         -0.41526835800270151, -0.013495013427469081], rtol=1e-9)
+    set_seed(2)
+    np.testing.assert_allclose(rbeta(6, 2, 3),
+        [0.20153661209123486, 0.44718349735790824, 0.16045907961851755,
+         0.3800521727916239, 0.4336392373583321, 0.58685628551895686], rtol=1e-9)
+    set_seed(9)
+    np.testing.assert_array_equal(
+        sample(250, 8, replace=True, prob=list(range(1, 251))),
+        [187, 248, 152, 249, 227, 30, 232, 232])
+    set_seed(7)
+    np.testing.assert_array_equal(rchisq(5, 3),
+                                  mt_draws(7, lambda r: r.rchisq(3), 5))
+    set_seed(8)
+    np.testing.assert_array_equal(rf(5, 4, 7),
+                                  mt_draws(8, lambda r: r.rf(4, 7), 5))
+
+    # (5) set_seed no longer touches numpy's global RNG — fully decoupled.
+    set_seed(123)
+    a = np.random.random()
+    set_seed(123)
+    b = np.random.random()
+    assert a != b
+
+
+def test_rgenerator_family_rd_matches_r():
+    """``RGenerator`` (numpy-Generator facade over ``RMersenneTwister``) drives
+    ``family.py``'s ``rd`` hooks bit-exactly vs R's ``set.seed(k); family$rd(...)``
+    — the basis for R-exact ``qq.gam(rep>0)``. References from R 4.6.0 / mgcv.
+    Covers all ten built-in families: gaussian, Gamma, poisson, binomial,
+    gaulss, shash, negbin, scat, inverse.gaussian (mgcv ``rig``) and tweedie
+    (per-jump ``rTweedie``)."""
+    from hea.R.rng import RGenerator
+    from hea import family as F
+
+    mu = np.array([0.5, 1.5, 3.0, 6.0, 10.0])
+    wt = np.array([1, 1, 2, 1, 3.0])
+    mu2 = np.column_stack([[0.5, 1.5, 3, 6, 10], [0.8, 1.2, 1.5, 0.9, 2.0]])
+    mu4 = np.column_stack([[0.5, 1.5, 3, 6, 10], [-0.2, 0.1, 0.3, 0, 0.2],
+                           [0.1, -0.1, 0.2, 0, 0.3], [-0.3, 0, 0.1, 0.2, -0.1]])
+
+    def chk(got, ref):
+        np.testing.assert_allclose(np.asarray(got, float), ref,
+                                   rtol=1e-9, atol=1e-12)
+
+    chk(F.Poisson().rd(RGenerator(1), mu, wt, 1.0), [0, 1, 3, 9, 7])
+    chk(F.Gamma().rd(RGenerator(1), mu, wt, 0.7),
+        [0.148055784081653, 2.78469406100319, 5.37491660494231,
+         5.75866952765452, 16.3564500353662])
+    chk(F.Gaussian().rd(RGenerator(1), mu, wt, 2.0),
+        [-0.385939475352115, 1.75971087975415, 2.16437138758995,
+         8.2560677461767, 10.2690419690764])
+    chk(F.Binomial().rd(RGenerator(1), np.array([.2, .5, .8, .3, .6]),
+                        np.array([1, 2, 3, 1, 4.]), 1.0),
+        [0, 0.5, 0.666666666666667, 1, 0.75])
+    chk(F.gaulss().rd(RGenerator(1), mu2, wt, 1.0),
+        [-0.283067263427916, 1.6530361035184, 2.60608089440757,
+         7.77253422459755, 10.0951207003788])
+    chk(F.shash().rd(RGenerator(1), mu4, wt, 1.0),
+        [0.0675404284664644, 1.02120881215142, 3.52687189173171,
+         7.24982044353249, 9.4132951645412])
+    chk(F.nb(theta=2.0).rd(RGenerator(1), mu, wt, 1.0), [1, 1, 1, 3, 6])
+    chk(F.Scat(theta=(4.0, 1.5)).rd(RGenerator(1), mu, wt, 1.0),
+        [-0.509374899947293, 0.623492442659397, 3.85817357273412,
+         5.48832450368482, 9.67291982150252])
+
+    chk(F.InverseGaussian().rd(RGenerator(1), mu, wt, 0.5),
+        [0.366005266522837, 1.2796574965637, 1.12218739016413,
+         0.62960207413193, 20.5664902471926])
+    chk(F.Tweedie(p=1.5).rd(RGenerator(1), mu, wt, 2.0),
+        [0, 2.21006742517074, 3.56580988134542, 6.63216281011408,
+         2.46511332727586])
+
+
+def test_rmvn_matches_r():
+    """``RMersenneTwister.rmvn`` (port of ``mgcv::rmvn``) reproduces R's
+    ``set.seed(k); mgcv::rmvn(n, mu, V)`` draws. The pivoted-Cholesky root
+    (``mroot``, via LAPACK ``dpstrf``) and the column-major ``rnorm(p*n)`` draw
+    order are bit-exact; only the trailing ``R %*% Z`` GEMM is BLAS-bound, so
+    the vector-``mu`` ``n==1`` branch is bit-identical and ``n>1`` matches to
+    machine precision. Reference: ``set.seed(101)`` in R 4.x / mgcv 1.9-4.
+
+    This is the bit-exact guarantee behind itsadug's simultaneous-CI path
+    (:meth:`hea.models.gam.gam.get_difference`): the MVN *draws* now come off
+    R's MT stream rather than numpy. The downstream ``crit`` is only
+    Monte-Carlo-close to R because hea's smooth basis differs from mgcv's, which
+    makes the (basis-dependent) realized draw differ — see the itsadug
+    get_difference test."""
+    from hea.R.rng import RGenerator, RMersenneTwister
+
+    V = np.array([[2.0, 0.3, -0.4],
+                  [0.3, 1.5, 0.2],
+                  [-0.4, 0.2, 1.0]])
+    mu = np.array([10.0, -5.0, 2.5])
+
+    # vector-mu, n=2 -> (2, 3); zero mean
+    A_R = np.array([[-0.46108522671538527, 0.59723538372992691, -0.4195265282782813],
+                    [0.30315005420217234, 0.42033284459609094, 1.1035833980527343]])
+    A = RMersenneTwister(101).rmvn(2, np.zeros(3), V)
+    assert A.shape == (2, 3)
+    np.testing.assert_allclose(A, A_R, rtol=0, atol=1e-13)
+
+    # vector-mu, n=1 -> length-3 vector (R's as.numeric); bit-identical
+    b_R = np.array([9.5389147732846151, -4.4027646162700727, 2.0804734717217186])
+    b = RMersenneTwister(101).rmvn(1, mu, V)
+    assert b.shape == (3,)
+    assert np.array_equal(b, b_R), "n=1 vector-mu rmvn must be bit-identical to R"
+
+    # RGenerator.multivariate_normal facade maps to the same draws.
+    sim = RGenerator(101).multivariate_normal(np.zeros(3), V, size=2)
+    np.testing.assert_allclose(sim, A_R, rtol=0, atol=1e-13)
+    v = RGenerator(101).multivariate_normal(mu, V)  # size=None -> (p,)
+    assert v.shape == (3,) and np.array_equal(v, b_R)
 
 
 # ---------------------------------------------------------------------------
@@ -824,7 +1131,7 @@ def m_gam():
 @pytest.fixture(scope="module")
 def m_lme():
     sleep = hea.data("sleepstudy", package="lme4")
-    return hea.models.lme("Reaction ~ Days + (Days|Subject)", sleep)
+    return hea.models.gmm("Reaction ~ Days + (Days|Subject)", sleep)
 
 
 # ---- coef / coefficients / fixef ------------------------------------
@@ -850,16 +1157,30 @@ def test_coef_works_on_glm_gam_lme(m_glm, m_gam, m_lme):
     assert "(Intercept)" in coef(m_glm)
     # gam: intercept + 9 wt basis + 9 hp basis
     assert "(Intercept)" in coef(m_gam)
-    # lme: fixed effects only (= fixef)
+    # gmm: lme4 coef.merMod — a per-group dict (fixef + matching ranef BLUP),
+    # keyed by grouping factor; use fixef() for the fixed effects alone.
     c = coef(m_lme)
-    assert set(c.names) == {"(Intercept)", "Days"}
+    assert isinstance(c, dict) and set(c) == {"Subject"}
+    sub = c["Subject"]
+    assert "(Intercept)" in sub.columns and "Days" in sub.columns
 
 
-def test_fixef_equals_coef(m_lm, m_lme):
-    for fn_model in [(m_lm,), (m_lme,)]:
-        a, b = fixef(*fn_model), coef(*fn_model)
-        assert a.names == b.names
-        assert (a.values == b.values).all()
+def test_fixef_equals_coef_for_non_mixed(m_lm):
+    """For a non-mixed model fixef and coef coincide (both the fixed-effect
+    NamedVector). For a gmm they differ — coef is the per-group
+    coef.merMod dict; fixef is the fixed effects only."""
+    a, b = fixef(m_lm), coef(m_lm)
+    assert a.names == b.names
+    assert (a.values == b.values).all()
+
+
+def test_fixef_is_fixed_effects_only(m_lme):
+    """gmm fixef() = fixed effects β̂ as a NamedVector — not the per-group
+    coef.merMod dict."""
+    from hea.R import NamedVector
+    f = fixef(m_lme)
+    assert isinstance(f, NamedVector)
+    assert set(f.names) == {"(Intercept)", "Days"}
 
 
 def test_ranef_returns_random_effects(m_lme):
@@ -893,8 +1214,10 @@ def test_resid_type_dispatch_glm(m_glm):
 
 
 def test_resid_type_invalid_for_lm(m_lm):
+    # lm supports R's residuals.lm types (response/working/pearson/deviance);
+    # an unknown type still raises.
     with pytest.raises(ValueError, match="not supported"):
-        resid(m_lm, type="pearson")
+        resid(m_lm, type="garbage")
 
 
 def test_fitted_shape_matches_resid(m_lm, m_glm, m_gam, m_lme):
@@ -945,12 +1268,12 @@ def test_confint_custom_level_lm_recomputes(m_lm):
 def test_confint_dispatches_to_profile_object():
     """``confint(profile(fm))`` defers to the Profile's own ``.confint``,
     mirroring R's S3 ``confint.profile`` dispatch — the
-    ``lme4::profile`` workflow Bates uses in the lme book.
+    ``lme4::profile`` workflow Bates uses in the gmm book.
     """
-    from hea.models import lme
+    from hea.models import gmm
     from hea import data
     dye = data("Dyestuff")
-    fm = lme("Yield ~ 1 + (1 | Batch)", dye, REML=False)
+    fm = gmm("Yield ~ 1 + (1 | Batch)", dye, REML=False)
     pr = fm.profile()
     out = confint(pr)
     assert isinstance(out, pl.DataFrame)
@@ -981,7 +1304,7 @@ def test_vcov_gam_uses_Vp(m_gam):
 
 
 def test_vcov_lme_returns_dataframe(m_lme):
-    """lme stores ``vcov_beta`` as a DataFrame with named cols."""
+    """gmm stores ``vcov_beta`` as a DataFrame with named cols."""
     V = vcov(m_lme)
     assert isinstance(V, pl.DataFrame)
     assert V.shape == (2, 2)
@@ -1027,7 +1350,7 @@ def test_df_residual_lm(m_lm):
 
 
 def test_df_residual_raises_for_reml_lme(m_lme):
-    """REML lme fit has no defined residual df; we raise."""
+    """REML gmm fit has no defined residual df; we raise."""
     with pytest.raises(TypeError, match="residual df"):
         df_residual(m_lme)
 
@@ -1299,10 +1622,9 @@ def test_weighted_lm_rstudent_dffits_consistent(gala):
 
 from hea.R import (  # noqa: E402  — grouped with the test-batch tests
     HTest,
-    bartlett_test, binom_test, chisq_test, cor_test,
-    fisher_test, friedman_test, kruskal_test, ks_test,
+    bartlett_test, binom_test, chisq_test, fisher_test, friedman_test, ks_test,
     mcnemar_test, prop_test, shapiro_test,
-    t_test, var_test, wilcox_test,
+    t_test, var_test,
 )
 
 

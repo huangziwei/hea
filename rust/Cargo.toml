@@ -1,0 +1,29 @@
+[package]
+name = "hea-rs"
+version = "0.1.5"
+edition = "2021"
+description = "Bit-exact, vectorized Rust ports of hea's R-parity numeric kernels"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "_rs"
+# cdylib → a Python-loadable shared object; rlib → usable from Rust unit tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# abi3-py310: one wheel works on CPython 3.10+ (matches requires-python).
+# extension-module: don't link libpython (symbols resolved by the host interpreter).
+pyo3 = { version = "0.23", features = ["abi3-py310", "extension-module"] }
+numpy = "0.23"
+# Data-parallel array maps for the nmath d/p/q kernels (each element is
+# independent → embarrassingly parallel). Used only above a length threshold,
+# under py.allow_threads; the per-element float ops are unchanged so 0-ulp
+# parity holds (parallel == serial bit-for-bit; no cross-element reduction).
+rayon = "1"
+
+[profile.release]
+opt-level = 3
+# Do NOT add fast-math / `-C target-feature=+fma` / `target-cpu=native`: FMA
+# contraction reorders float ops and breaks 0-ulp parity with R (re-run
+# tests/test_rs_parity.py if you touch codegen flags). LTO is intentionally off —
+# measured to give no speedup here (intra-crate hot path; opt-level=3 inlines it).

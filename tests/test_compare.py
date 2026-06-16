@@ -3,7 +3,7 @@
 Covers everything exposed by ``hea/compare.py``:
 
 * ``anova(...)`` — multi-model F / Chisq / LRT tables across lm, glm,
-  gam, and lme dispatch branches; plus the single-model forms
+  gam, and gmm dispatch branches; plus the single-model forms
   (``anova(lm)`` Type-I, ``anova(gam)`` parametric + smooth tables).
 * ``AIC()`` / ``BIC()`` — printed comparison tables.
 * ``drop1(...)`` — single-term-deletion tables for lm and glm.
@@ -310,7 +310,7 @@ def test_anova_glm_F_printed_table_has_F_and_Pr_columns():
 
 
 def test_anova_lm_rejects_test_argument():
-    """`test=` is glm-only; lm/lme always use F/Chisq respectively."""
+    """`test=` is glm-only; lm/gmm always use F/Chisq respectively."""
     d = load_dataset("R", "iris")
     m1 = lm("Sepal.Length ~ Petal.Length", d)
     m2 = lm("Sepal.Length ~ Petal.Length + Petal.Width", d)
@@ -784,11 +784,11 @@ def test_drop1_respects_marginality_on_gavote():
     # own rows. Anchor on the leading whitespace+name to avoid matching
     # them inside the "cpergore:usage" label.
     lines = out.splitlines()
-    drop_rows = [l for l in lines if l.startswith(("cperAA", "equip",
-                                                   "cpergore", "usage"))]
+    drop_rows = [ln for ln in lines if ln.startswith(("cperAA", "equip",
+                                                      "cpergore", "usage"))]
     # Each dropped term is one row; cpergore:usage is the only one
     # starting with "cpergore". No bare "cpergore " or "usage " row.
-    starts = {l.split()[0] for l in drop_rows}
+    starts = {ln.split()[0] for ln in drop_rows}
     assert starts == {"cperAA", "equip", "cpergore:usage"}
     # Numerics pinned to R's drop1.lm output: F values 0.83 / 2.50 / 0.05.
     assert "0.8264" in out
@@ -910,7 +910,7 @@ def test_add1_respects_marginality():
     assert "Petal.Width" in out
     # The interaction shouldn't appear as an addable row (the term label
     # would be "Petal.Length:Petal.Width" which contains ":").
-    rows = [l for l in out.splitlines() if ":" in l and l.startswith("Petal")]
+    rows = [ln for ln in out.splitlines() if ":" in ln and ln.startswith("Petal")]
     assert not rows, f"unexpected interaction rows: {rows}"
 
 
@@ -1066,7 +1066,7 @@ def test_step_rejects_invalid_direction():
 
 
 def test_step_unsupported_model_type():
-    """step(gam) and step(lme) intentionally raise NotImplementedError."""
+    """step(gam) and step(gmm) intentionally raise NotImplementedError."""
     trees = load_dataset("R", "trees")
     g = gam("Volume ~ s(Girth)",
             data=trees, family=Gamma(link="log"))

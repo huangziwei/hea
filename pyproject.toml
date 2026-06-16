@@ -2,12 +2,24 @@
 pythonpath = [".", "tests"]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+# --- Rust extension (hea._rs), built from rust/ (crate hea-rs) by maturin -----
+# maturin is the build backend: `pip install` / `uv build` / a git dependency on
+# this branch compile the Rust crate into the wheel, so source-build downstreams
+# get the native `hea._rs` kernels — not just the pure-Python fallback. Building
+# from source therefore needs the Rust toolchain; prebuilt wheels (CI, §2.4 of the
+# rust-port plan) let end users `pip install` with no Rust. In-session/sandbox
+# builds need CARGO_HOME redirected into the workdir (see rust/rebuild.sh).
+[tool.maturin]
+manifest-path = "rust/Cargo.toml"   # Rust crate (hea-rs) lives in rust/
+python-source = "."                  # Python package `hea` stays at repo root
+module-name = "hea._rs"              # compiled module installs as hea/_rs
 
 [project]
 name = "hea"
-version = "0.1.4"
+version = "0.1.5"
 description = "Linear Models with Python"
 authors = []
 requires-python = ">=3.10.0"
@@ -30,17 +42,18 @@ fast = [
 
 [dependency-groups]
 dev = [
+    # maturin is the build backend (see [build-system]); `uv sync` builds the
+    # hea._rs extension in editable mode and the `maturin develop` CLI lives here.
+    # CI pins maturin==1.14.0.
+    "maturin>=1.14.0",
     "flake8>=7.1.1",
     "pytest>=9.0.3",
+    "pytest-xdist>=3.6",
     "pyyaml>=6.0.3",
     "ipykernel>=7.2.0",
     "nbconvert>=7.17.1",
     "ruff>=0.15.13",
 ]
-
-[tool.setuptools]
-packages = {find = {}}
-include-package-data = true
 
 [tool.ruff.lint]
 # ``from hea.R import *`` is the intentional ergonomic for the R-flavored
@@ -50,4 +63,12 @@ include-package-data = true
 #   F405 — flags every name that *might* come from a star import (ruff
 #          can't statically resolve our ``__all__``).
 ignore = ["F403", "F405"]
+
+[tool.ruff.lint.per-file-ignores]
+# ``__init__.py`` modules deliberately re-export their submodules' public
+# names (and a few private helpers used cross-module). Those imports are
+# "unused" only within the file itself — F401 here is always an intentional
+# re-export, not a mistake. The curated ``__all__`` lists remain the source
+# of truth for ``from hea.X import *``.
+"**/__init__.py" = ["F401"]
 

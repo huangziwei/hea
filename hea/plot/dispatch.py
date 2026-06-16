@@ -1,6 +1,6 @@
 """``plot()`` — single dispatch entry, mirrors R's S3 ``plot.*`` family.
 
-Routes positional argument types to the appropriate Phase 1 renderer.
+Routes positional argument types to the appropriate renderer.
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ def plot(*args, data: pl.DataFrame | None = None, env: dict | None = None,
         plot(lm_or_glm)                    # 4-panel diagnostic (uses `which=`)
 
     Returns a matplotlib ``Axes`` (or list/array of ``Axes`` for multi-panel).
-    Annotations (``abline`` etc., Phase 2) take ``ax=`` explicitly.
+    Annotations (``abline`` etc.) take ``ax=`` explicitly.
     """
     if len(args) == 0:
         raise TypeError("plot() requires at least one positional argument")

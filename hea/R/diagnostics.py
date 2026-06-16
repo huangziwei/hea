@@ -19,6 +19,8 @@ import polars as pl
 
 def hatvalues(model):
     """R: ``hatvalues()`` — leverage ``h_ii`` (hat-matrix diagonal)."""
+    if model.__class__.__name__ == "gmm":                 # mixed model
+        return np.asarray(model.hatvalues())
     if hasattr(model, "leverage"):
         return np.asarray(model.leverage)
     raise TypeError(
@@ -205,6 +207,8 @@ def rstudent(model):
     where ``d_i`` and ``p_i`` are raw deviance and Pearson residuals.
     Known-scale families fix ``σ_(-i) = 1``.
     """
+    if model.__class__.__name__ == "gmm":                 # mixed model
+        return np.asarray(model.rstudent())
     # lm path — direct formula ``e_i · √w_i / (σ_(-i) · √(1-h_i))``
     # (equivalent to the closed form for unweighted lm; weighted-aware).
     if hasattr(model, "std_residuals"):
@@ -239,6 +243,10 @@ def cooks_distance(model):
     uses ``model.p``; ``cooks.distance.glm`` uses ``sum(hat)`` — we
     follow that split to match R numerically.
     """
+    # gmm (mixed model) and the Influence deletion object carry their own
+    # lme4-exact cooks.distance — dispatch to it.
+    if model.__class__.__name__ in ("gmm", "Influence"):
+        return np.asarray(model.cooks_distance())
     h = hatvalues(model)
     one_minus_h = np.clip(1 - h, 1e-12, None)
     if hasattr(model, "std_pearson_residuals"):  # glm / gam / bam
@@ -297,6 +305,8 @@ def dfbetas(model):
     ``bam``: IRLS closed form using ``Vp/scale`` (or ``V_bhat/dispersion``)
     and IRLS working weights recovered from ``leverage``.
     """
+    if model.__class__.__name__ == "Influence":       # deletion object
+        return model.dfbetas()
     # lm path — closed form
     # β̂ - β̂_(-i) = (X'WX)^{-1} · X_i · w_i · e_i / (1 - h_i)
     # (XtXinv stores (X'WX)^{-1} in hea's weighted lm.)
@@ -341,10 +351,55 @@ def dfbetas(model):
     )
 
 
-def influence(model):
+def dfbeta(model):
+    """R: ``dfbeta()`` — *unstandardized* leave-one-out coefficient changes.
+
+    Returns an ``n × p`` polars DataFrame; element ``[i, j]`` is
+    ``β̂_j − β̂_j(−i)``, the raw change in coefficient ``j`` when observation
+    ``i`` is dropped. This is exactly :func:`dfbetas` *before* the
+    ``σ_(−i)·√diag((X'X)⁻¹)`` standardization. lm (closed form via ``XtXinv``)
+    and glm/gam/bam (IRLS closed form), mirroring ``dfbetas``.
+
+    For an :class:`hea.models.gmm.Influence` deletion object, returns lme4's
+    ``dfbeta.influence.merMod`` (``β̂[-i] − β̂``, the *deleted minus full*
+    convention — opposite sign to ``dfbeta.lm``).
+    """
+    if model.__class__.__name__ == "Influence":      # deletion object
+        return model.dfbeta()
+    if hasattr(model, "XtXinv"):  # lm
+        X = model.X.to_numpy().astype(float)
+        XtXinv = np.asarray(model.XtXinv)
+        e = model.residuals.to_series().to_numpy()
+        one_minus_h = np.clip(1 - hatvalues(model), 1e-12, None)
+        w = _lm_weights_array(model)
+        delta = (X @ XtXinv) * (w * e / one_minus_h)[:, None]
+        return pl.DataFrame(
+            {col: delta[:, i] for i, col in enumerate(model.column_names)}
+        )
+
+    if not hasattr(model, "residuals_of"):
+        raise TypeError(f"dfbeta(): {model.__class__.__name__} not supported")
+    inputs = _irls_inputs(model)
+    X, XtWXinv = inputs["X"], inputs["XtWXinv"]
+    one_minus_h = np.clip(1 - inputs["h"], 1e-12, None)
+    delta = (X @ XtWXinv) * (
+        inputs["w_irls"] * inputs["working_resid"] / one_minus_h
+    )[:, None]
+    return pl.DataFrame(
+        {col: delta[:, i] for i, col in enumerate(model.column_names)}
+    )
+
+
+def influence(model, groups=None, **kwargs):
     """R: ``influence()`` / ``lm.influence()`` — deletion diagnostics bundle.
 
-    Returns a dict mirroring R's ``lm.influence(do.coef=TRUE)``:
+    For a ``gmm`` (mixed model) this is ``influence.merMod``: each observation
+    (``groups=None``) or grouping-factor level (``groups="<factor>"``) is
+    deleted and the model refit, returning an :class:`hea.models.gmm.Influence`
+    object (``.dfbeta()`` / ``.dfbetas()`` / ``.cooks_distance()``).
+
+    For ``lm`` / ``glm`` / ``gam`` / ``bam`` returns a dict mirroring R's
+    ``lm.influence(do.coef=TRUE)``:
 
     * ``hat`` — leverage ``h_ii`` (ndarray, length ``n``)
     * ``sigma`` — leave-one-out σ estimates ``σ_(-i)`` (ndarray, length ``n``)
@@ -354,6 +409,8 @@ def influence(model):
       ``gam`` / ``bam``, working residuals (matches R's
       ``influence.glm`` "wt.res")
     """
+    if model.__class__.__name__ == "gmm":             # → Influence object
+        return model.influence(groups=groups, **kwargs)
     # lm path
     if hasattr(model, "XtXinv"):
         X = model.X.to_numpy().astype(float)

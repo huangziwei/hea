@@ -18,7 +18,7 @@ from .position import Position
 @dataclass
 class PositionDodge(Position):
     width: float | None = None
-    preserve: str = "total"  # ``"total"`` or ``"single"``; phase 1.3 ignores
+    preserve: str = "total"  # ``"total"`` or ``"single"``; currently ignored
 
     def compute_layer(self, data: pl.DataFrame) -> pl.DataFrame:
         """Mirrors ggplot2's ``collide()`` + ``pos_dodge()``: groups are
@@ -90,8 +90,8 @@ class PositionDodge(Position):
 
 
 # ggplot2's position_dodge2 differs from dodge only when boxplot-style geoms
-# need uneven slot widths. For Phase 1.3 we alias to PositionDodge — refine
-# in Phase 1.9c when geom_boxplot lands.
+# need uneven slot widths. For now we alias to PositionDodge — to be refined
+# when geom_boxplot lands.
 PositionDodge2 = PositionDodge
 
 

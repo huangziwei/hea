@@ -19,9 +19,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from scipy.linalg import qr, solve_triangular
-from scipy.stats import norm, t as student_t
+from scipy.stats import t as student_t
 
-from ..family import Binomial, Family, Gaussian, Link, _coerce_response
+from ..R import nmath as _nmath
+
+from ..family import (
+    Binomial,
+    Family,
+    Gaussian,
+    Link,
+    QuasiBinomial,
+    _coerce_response,
+)
 from ..formula import _eval_atom, deparse, materialize, parse, prepare_design, Call
 from .lm import _label_top_n, _lowess, _qq_plot
 from ..utils import (
@@ -71,6 +80,7 @@ def _fit_irls(
     epsilon: float = 1e-8,
     maxit: int = 25,
     qr_tol: float = 1e-7,
+    binom_n: np.ndarray | None = None,
 ) -> _IRLSResult:
     """Fisher-scored IRLS — drop-in replacement for ``stats::glm.fit``.
 
@@ -80,11 +90,16 @@ def _fit_irls(
     rule, also what ``glm.fit`` does via ``valideta`` / ``validmu``).
 
     Convergence rule mirrors R: ``|Δdev| / (|dev| + 0.1) < epsilon``.
+
+    ``binom_n``: the cbind-response trials vector — selects binomial
+    initialize's NCOL=2 mustart ``(n·y + 0.5)/(n + 1)`` (R keeps the
+    trials distinct from the merged ``weights = pw·n``).
     """
     link: Link = family.link
     n, p = X.shape
 
-    mu = family.initialize(y, prior_w)
+    mu = (family.initialize(y, prior_w, n=binom_n)
+          if binom_n is not None else family.initialize(y, prior_w))
     eta = link.link(mu) - offset           # η excludes offset; offset added on use
     beta = np.zeros(p)
 
@@ -234,9 +249,11 @@ class glm:
     Parameters
     ----------
     formula : str
-        R-style formula, e.g. ``"y ~ x1 + x2"``. Single-name LHS only;
-        the ``cbind(success, failure) ~ ...`` binomial form is not yet
-        supported (use ``weights=`` to pass the binomial size ``m``).
+        R-style formula, e.g. ``"y ~ x1 + x2"``. The binomial
+        ``cbind(success, failure) ~ ...`` form is rewritten to
+        (proportion, ``weights=`` · trials) exactly like R's binomial
+        ``initialize``; small LHS expressions (``log(y)``, ``y/100``)
+        are also accepted.
     data : polars.DataFrame
         Input data; rows with NA in any referenced column are dropped
         (R's ``na.action = na.omit``).
@@ -287,6 +304,10 @@ class glm:
     ):
         self.formula = formula
         self.data = data
+        if isinstance(family, type) and issubclass(family, Family):
+            # R: glm(family=quasipoisson) passes the constructor itself;
+            # R calls it (`if (is.function(family)) family <- family()`).
+            family = family()
         self.family = Gaussian() if family is None else family
         ctl = {"epsilon": 1e-8, "maxit": 25}
         if control:
@@ -297,33 +318,45 @@ class glm:
         # pipeline runs unchanged. This must happen before prepare_design,
         # which doesn't accept Call() on the LHS.
         f_parsed = parse(formula)
-        if (isinstance(f_parsed.lhs, Call)
-                and f_parsed.lhs.fn == "cbind"
-                and len(f_parsed.lhs.args) == 2):
-            if not isinstance(self.family, Binomial):
+        _cbind = (isinstance(f_parsed.lhs, Call)
+                  and f_parsed.lhs.fn == "cbind"
+                  and len(f_parsed.lhs.args) == 2)
+        if _cbind:
+            if not isinstance(self.family, (Binomial, QuasiBinomial)):
                 raise ValueError(
                     "cbind(success, failure) ~ ... LHS only makes sense "
-                    "for Binomial; got family="
+                    "for Binomial/QuasiBinomial; got family="
                     f"{self.family.name!r}"
                 )
             s_blk = _eval_atom(f_parsed.lhs.args[0], data)
             f_blk = _eval_atom(f_parsed.lhs.args[1], data)
             s = s_blk.values.flatten().astype(float)
             f = f_blk.values.flatten().astype(float)
+            if np.any(s < 0) or np.any(f < 0):
+                raise ValueError("negative counts in cbind() response")
+            if (np.any(np.abs(s - np.rint(s)) > 0.001)
+                    or np.any(np.abs(f - np.rint(f)) > 0.001)):
+                import warnings
+                warnings.warn("non-integer counts in a binomial glm!",
+                              stacklevel=2)
             tot = s + f
             with np.errstate(divide="ignore", invalid="ignore"):
                 p = np.where(tot > 0, s / tot, 0.0)
-            data = data.with_columns(pl.Series("_hea_cbind_p", p))
-            cb_w = tot
-            # Multiply onto caller-supplied weights (R's frequency-weight
-            # convention), defaulting to ones.
-            if weights is None:
-                weights = cb_w
-            else:
-                weights = np.asarray(weights, dtype=float).flatten() * cb_w
+            # NaN counts → NaN proportion so prepare_design's NA-omit
+            # drops the row (R's model.frame does the same before
+            # initialize); both columns ride the frame so the trials
+            # stay row-aligned through the drop (same as gam's C10).
+            p = np.where(np.isnan(tot), np.nan, p)
+            data = data.with_columns(
+                pl.Series("_hea_cbind_p", p),
+                pl.Series("_hea_cbind_n", tot),
+            )
             formula = f"_hea_cbind_p ~ {deparse(f_parsed.rhs)}"
 
-        d = prepare_design(formula, data)
+        # R's predvars: capture poly/bs/ns/scale training params at fit so
+        # predict() replays them on new data instead of recomputing.
+        self._basis_state: dict = {}
+        d = prepare_design(formula, data, basis_state=self._basis_state)
         self._expanded = d.expanded
         self._design_data = d.data
         self.X = d.X                                  # pl.DataFrame
@@ -345,6 +378,15 @@ class glm:
             )
         if np.any(prior_w < 0):
             raise ValueError("negative weights not allowed")
+        # cbind responses: weights ← weights·n (R binomial initialize's
+        # NCOL=2 branch). Trials re-read from the NA-filtered design
+        # frame so rows stay aligned; the unmerged trials vector feeds
+        # family.aic's n argument (R: aic(y, n, mu, weights, dev) with
+        # weight coefficient wt/n = the caller's prior weight).
+        self._binom_n = None
+        if _cbind:
+            self._binom_n = d.data["_hea_cbind_n"].to_numpy().astype(float)
+            prior_w = prior_w * self._binom_n
         self._prior_w = prior_w
 
         off = (np.zeros(n) if offset is None
@@ -377,6 +419,7 @@ class glm:
         fit = _fit_irls(
             X, y, family=self.family, prior_w=prior_w, offset=off,
             epsilon=ctl["epsilon"], maxit=ctl["maxit"],
+            binom_n=self._binom_n,
         )
         self._fit = fit
         self.iter = fit.iter
@@ -498,7 +541,7 @@ class glm:
     def _wald_p(self, stat: np.ndarray) -> np.ndarray:
         with np.errstate(invalid="ignore"):
             if self._test_kind == "z":
-                return 2.0 * norm.sf(np.abs(stat))
+                return 2.0 * _nmath.pnorm5_vec(np.abs(stat), lower_tail=False)
             return 2.0 * student_t.sf(np.abs(stat), self.df_residual)
 
     def _compute_ci(self, alpha: float) -> pl.DataFrame:
@@ -507,7 +550,7 @@ class glm:
         # unknown-scale ones (Gaussian/Gamma/IG). The t-quantile is
         # only used by confint.lm. (confint.glm itself returns profile-
         # likelihood CIs, which are out of scope here.)
-        q = float(norm.ppf(1.0 - alpha / 2.0))
+        q = float(_nmath.qnorm5(1.0 - alpha / 2.0))
         bhat = self._bhat_arr
         se = self._se_bhat_arr
         lo = bhat - q * se
@@ -546,6 +589,7 @@ class glm:
         try:
             null_fit = _fit_irls(
                 X1, y, family=self.family, prior_w=prior_w, offset=offset,
+                binom_n=self._binom_n,
             )
             null_dev = null_fit.deviance
         except FloatingPointError:
@@ -561,8 +605,13 @@ class glm:
         # mgcv's gam.fit3 swaps in `scale · Σwt` (see family._aic_dev1) so
         # the AIC tracks the REML/Pearson scale; that's a GAM-only choice
         # and matching R glm requires bypassing it here.
+        # cbind responses: ``n`` is the trials vector (R binomial's aic
+        # evaluates dbinom at the true counts with coefficient wt/n =
+        # the caller's prior weight — distinct from the merged wt=pw·n);
+        # otherwise R passes nobs.
+        n_aic = self._binom_n if self._binom_n is not None else self.n
         family_aic = float(self.family.aic(
-            y, mu, self.deviance, prior_w, self.n,
+            y, mu, self.deviance, prior_w, n_aic,
         ))
         return family_aic + 2.0 * k_for_aic
 
@@ -626,7 +675,7 @@ class glm:
             # the fit-time offset so η̂ matches what was actually fit.
             default_off = self._offset
         else:
-            X_new = materialize(self._expanded, new).to_numpy().astype(float)
+            X_new = materialize(self._expanded, new, basis_state=self._basis_state).to_numpy().astype(float)
             n_new = X_new.shape[0]
             # Re-evaluate any formula offset(...) atoms against newdata
             # — predict.glm does the same. Caller's offset= still overrides.

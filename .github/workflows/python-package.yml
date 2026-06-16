@@ -1,5 +1,10 @@
-# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
+# CI covers Linux (the platform not exercised by local macOS dev). Installs Python +
+# Rust + R, builds the hea._rs extension, and runs the suite against the Rust-backed
+# (active) numeric path. The Rust==R parity gate (tests/test_rs_parity.py) is 0-ulp
+# only on macOS (Apple libm); on Linux/glibc the transcendental kernels drift a few
+# ulp (libm floor), so here it runs as a TOLERANCE check against live R — still
+# gating the x86-64 Rust path (incl. the `rfma` plain branch) per-commit.
+# See: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
 
 name: Python package
 
@@ -13,6 +18,8 @@ jobs:
   build:
 
     runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -21,20 +28,60 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
-    - name: Install SuiteSparse (CHOLMOD backend)
+    - name: Set up Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+    - name: Cache cargo build (rust/)
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: rust
+    - name: Install SuiteSparse (CHOLMOD backend) + R (live-R parity oracle)
       # scikit-sparse builds against libsuitesparse-dev. Without it, hea
       # falls back to scipy.sparse.linalg.splu, whose different sparse
       # reduction order opens a wider FP floor on glmer fits — enough
       # to fail the FD-Hessian SE pin on poly() contrasts (~2e-2 abs)
       # and the predict tolerance (~3e-9 abs).
-      run: sudo apt-get update && sudo apt-get install -y libsuitesparse-dev
+      # r-base-core gives Rscript for the live-R oracle: test_rs_parity.py runs here
+      # as a TOLERANCE check (Linux/glibc isn't 0-ulp to R — that's macOS only),
+      # gating the x86-64 Rust path per-commit. (The tidyverse translator tests still
+      # skip — they need a full tidyverse install, too slow for CI.)
+      run: sudo apt-get update && sudo apt-get install -y libsuitesparse-dev r-base-core
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         python -m pip install '.[fast]' --group dev
-    - name: Test with pytest
+    - name: Build hea._rs (Rust extension) into the source tree
+      # build-backend is still hatchling, so `pip install .` ships no Rust.
+      # Build the crate with maturin and copy the compiled module into hea/,
+      # where pytest's `pythonpath = ["."]` import resolution finds it
+      # (mirrors rust/rebuild.sh). abi3-py310 means one build is portable
+      # across the whole 3.10–3.14 matrix.
       run: |
-        pytest
+        python -m pip install 'maturin==1.14.0'
+        maturin build --release --interpreter python -o dist
+        whl="$(ls -t dist/hea-*.whl | head -1)"
+        python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall('dist/extract')" "$whl"
+        cp dist/extract/hea/_rs*.so hea/
+        ls -l hea/_rs*.so
+    - name: Verify the Rust extension is active (no silent fallback)
+      # Hard-fail if hea._rs is missing: otherwise the parity tests would
+      # importorskip and the suite would quietly green on the numpy path.
+      run: python -c "import hea, hea._rs; print('hea:', hea.__file__); print('hea._rs:', hea._rs.__file__)"
+    - name: Test with pytest
+      # Parallelize across the runner's cores (pytest-xdist). Pin BLAS/OpenMP to
+      # one thread per worker so N workers don't oversubscribe the cores — and so
+      # each fit uses a single, deterministic reduction order (steadier than
+      # multi-threaded BLAS on the FP-sensitive lmer/gam pins). `worksteal`
+      # rebalances the few very-long fits (profile/drop1/bootstrap) across idle
+      # workers. ~3-4× faster on a 4-core runner.
+      env:
+        OPENBLAS_NUM_THREADS: "1"
+        OMP_NUM_THREADS: "1"
+        MKL_NUM_THREADS: "1"
+      # tests/translate/ exercises the R<->Python translator end-to-end against
+      # tidyverse (library(dplyr)/…), which isn't installed here and takes far too
+      # long to install in CI. Those run locally where tidyverse is present.
+      # tests/test_rs_parity.py skips here (macOS-only gate, run locally not in CI).
+      run: pytest -n auto --dist worksteal --ignore=tests/translate

@@ -376,6 +376,32 @@ class _Parser:
 
     def _parse_atom(self) -> Node:
         t = self.peek()
+        if t.kind == "LBRACKET":
+            # hea-dialect sugar: `[y1, y2, ...]` lowers to `cbind(y1, ...)`
+            # right here at parse time, so nothing downstream ever sees a
+            # bracket-list. It inherits cbind's semantics exactly (mlm under
+            # lm, the two-column `[succ, fail]` binomial under glm/gam), and
+            # deparse re-emits `cbind(...)` — brackets are input-only; cbind
+            # stays canonical. Args parse via the same `parse_expr(0)` as
+            # `_parse_call_tail`, so `[a, b]` is byte-identical to
+            # `cbind(a, b)`. Stricter than a call-arg list though: responses
+            # are never empty, so no Empty() slots, no trailing comma, no
+            # `[]`. A postfix `a[i]` (Subscript) never reaches here — it needs
+            # a preceding operand and is handled in `_parse_postfix`; this
+            # branch fires only when `[` opens an atom.
+            self.advance()
+            items: list[Node] = []
+            while True:
+                if self.peek().kind in ("COMMA", "RBRACKET"):
+                    raise ParseError(
+                        f"empty slot in [...] response list at {self.peek().pos}"
+                    )
+                items.append(self.parse_expr(0))
+                if self.peek().kind != "COMMA":
+                    break
+                self.advance()
+            self.expect("RBRACKET")
+            return Call("cbind", items)
         if t.kind == "LPAREN":
             self.advance()
             e = self.parse_expr(0)
@@ -441,6 +467,11 @@ def parse(src: str) -> Formula:
 
     Accepts one-sided (`~ x + y`) and two-sided (`y ~ x + y`) formulas. For a
     bare expression (no tilde), returns `Formula(lhs=None, rhs=expr)`.
+
+    hea-dialect sugar: `[y1, y2]` is an alias for `cbind(y1, y2)` — identical
+    semantics in every position, including the binomial `[succ, fail]`
+    two-column form. `cbind` stays canonical; `deparse` and translate always
+    emit `cbind(...)`, never `[...]`.
     """
     tokens = tokenize(src)
     p = _Parser(tokens)
@@ -713,7 +744,7 @@ def _expand_toplevel(node) -> list[Term]:
 
 
 def _interact(L: list[Term], R: list[Term]) -> list[Term]:
-    return [l.union(r) for l in L for r in R]
+    return [lt.union(r) for lt in L for r in R]
 
 
 def _power_expand(L: list[Term], n: int) -> list[Term]:
@@ -803,7 +834,8 @@ def _response_names(lhs) -> set[str]:
         if isinstance(n, Name):
             out.add(n.ident)
         elif isinstance(n, BinOp):
-            walk(n.left); walk(n.right)
+            walk(n.left)
+            walk(n.right)
         elif isinstance(n, UnaryOp):
             walk(n.operand)
         elif isinstance(n, Paren):
@@ -816,6 +848,45 @@ def _response_names(lhs) -> set[str]:
 
     walk(lhs)
     return out
+
+
+def _source_var_order(node) -> dict[str, int]:
+    """First-appearance order of atom leaves scanning the RHS left-to-right.
+
+    Mirrors R's ``terms()`` ``variables`` attribute, and must mirror the leaf
+    vs descend decisions of ``_expand_non_additive``: descend through the
+    formula operators (``+ - * : / %in%`` and ``^`` with a literal exponent),
+    treat everything else (``Name``, ``Call``, ``Subscript``, comparison
+    ``BinOp``, ``a^b`` with non-literal ``b``) as an atom leaf. Used to order
+    each interaction term's atoms by *source* appearance — so ``(x1+x2):f2``
+    renders ``x2:f2`` (R), not ``f2:x2``. Keys are ``_deparse`` of each leaf,
+    matching ``Term`` atom keys.
+    """
+    order: dict[str, int] = {}
+
+    def walk(n):
+        if isinstance(n, Paren):
+            walk(n.expr)
+            return
+        if isinstance(n, UnaryOp) and n.op in ("+", "-"):
+            walk(n.operand)
+            return
+        if _is_bar(n):
+            return  # bars never contribute fixed-effect variables
+        if isinstance(n, BinOp):
+            if n.op in ("+", "-", "*", ":", "/", "%in%"):
+                walk(n.left)
+                walk(n.right)
+                return
+            if n.op == "^":
+                if isinstance(n.right, Literal) and n.right.kind == "num":
+                    walk(n.left)        # power expansion: only base vars appear
+                    return
+                # non-literal exponent: whole node is one atom (see expansion)
+        order.setdefault(_deparse(n), len(order))
+
+    walk(node)
+    return order
 
 
 def expand(
@@ -863,6 +934,20 @@ def expand(
                 smooths.append(c)
                 continue
         kept.append(t)
+
+    # R renders every term's variables in `variables`-attribute order — the
+    # global first-appearance order scanning the *source* RHS left-to-right —
+    # not the order written inside the term. So `a + b:a` → `a:b`, `z + x:z` →
+    # `z:x`, `(x1+x2):f2` → `x2:f2`. The order MUST come from the source AST
+    # (`_source_var_order`), not from iterating the already-expanded terms: for
+    # `(x1+x2):f2` expansion emits `x1:f2` first, which would wrongly rank `f2`
+    # before `x2`. Affects column labels/order only — the column set is unchanged.
+    var_order = _source_var_order(rhs)
+    kept = [
+        t if len(t.atoms) <= 1
+        else Term(tuple(sorted(t.atoms, key=lambda a: var_order[_deparse(a)])))
+        for t in kept
+    ]
 
     # R's terms() sorts by interaction order (main effects → pairwise → …),
     # with ties broken by first-appearance. Python's sort is stable.
@@ -958,6 +1043,34 @@ _TERO_CV: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
+# R's "safe prediction" (`predvars` / `makepredictcall`): data-dependent RHS
+# transforms — `poly` (centering + orthogonal basis), `bs`/`ns` (knots +
+# boundary), `scale` (center + sd) — must reuse their *training* parameters at
+# predict time, not recompute from the new data. When this context-var holds a
+# dict, `_eval_call` captures each such call's parameters under its deparse key
+# on the first (fit) pass and replays them when the key is already present
+# (predict pass). `None` (default) = recompute every time (the model-frame /
+# one-shot path). `cut` is intentionally absent — R doesn't capture it either.
+_BASIS_STATE_CV: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "_hea_basis_state", default=None
+)
+
+
+def _basis_capture_replay(label: str):
+    """Return ``(store, state)`` for predvars capture/replay on a transform call.
+
+    ``store`` is the active capture dict (or ``None`` if disabled); ``state`` is
+    the previously-captured params for ``label`` (or ``None`` on the fit pass /
+    when disabled). On the fit pass ``store`` is non-None and ``state`` is None —
+    the caller computes params and assigns ``store[label]``. On predict ``state``
+    is the stored params to replay.
+    """
+    cv = _BASIS_STATE_CV.get()
+    if cv is None:
+        return None, None
+    return cv, cv.get(label)
+
+
 # Capture channel for id-linked basis construction (mgcv's smoothCon
 # ``n=``/``dataX=`` path, smooth.r:3888-3894). When set to a dict,
 # ``_apply_by_and_absorb`` records the constructor output (raw X on the
@@ -1002,12 +1115,45 @@ _CONTRASTS_CV: contextvars.ContextVar[dict] = contextvars.ContextVar(
 def with_contrasts(mapping):
     """Context manager: inside the `with` block, the given mapping is consulted
     by ``_factor_from_series`` to override the default treatment/poly contrast
-    on bare factor references. Empty mapping is a no-op."""
+    on bare factor references. Each value is either a contrast *name*
+    (``"contr.sum"``, …) or a custom contrast *matrix* — an ``np.ndarray`` of
+    shape ``(k, m)`` (R's ``contrasts.arg = list(f = matrix)``), optionally a
+    ``(matrix, column_names)`` tuple for named columns. Empty mapping is a
+    no-op."""
     token = _CONTRASTS_CV.set(dict(mapping) if mapping else {})
     try:
         yield
     finally:
         _CONTRASTS_CV.reset(token)
+
+
+# R's ``options(contrasts = c(unordered, ordered))`` — the process-wide default
+# contrast pair used when a factor has no ``C(...)`` wrap and no per-factor
+# ``contrasts.arg`` override. Defaults match R: treatment for unordered, poly
+# for ordered.
+_DEFAULT_CONTRASTS_CV: contextvars.ContextVar[tuple[str, str]] = contextvars.ContextVar(
+    "_hea_default_contrasts", default=("contr.treatment", "contr.poly"),
+)
+
+
+def set_default_contrasts(unordered: str = "contr.treatment",
+                          ordered: str = "contr.poly") -> None:
+    """Set the default contrasts — R's ``options(contrasts = c(unordered,
+    ordered))``. Applies to factors with no ``C(...)`` wrap or per-factor
+    override. No restore-on-exit; use :func:`with_default_contrasts` for that."""
+    _DEFAULT_CONTRASTS_CV.set((unordered, ordered))
+
+
+@contextlib.contextmanager
+def with_default_contrasts(unordered: str = "contr.treatment",
+                           ordered: str = "contr.poly"):
+    """Context manager form of :func:`set_default_contrasts` (R's
+    ``options(contrasts=...)`` scoped to the ``with`` block)."""
+    token = _DEFAULT_CONTRASTS_CV.set((unordered, ordered))
+    try:
+        yield
+    finally:
+        _DEFAULT_CONTRASTS_CV.reset(token)
 
 
 # R's factor() sorts levels via locale-aware `sort(unique(x))`. On macOS the
@@ -1073,11 +1219,28 @@ def _is_categorical(series: pl.Series) -> bool:
         return True
     if dt in (pl.String, pl.Utf8, pl.Object):
         return True
+    # R treats a logical column as a 2-level factor FALSE < TRUE (so `~ l`
+    # gives `lTRUE`, `~ 0 + l` gives `lFALSE`, `lTRUE`), not a 0/1 numeric.
+    if dt == pl.Boolean:
+        return True
     return False
 
 
 def _factor_from_series(series: pl.Series, label: str, ordered_hint: bool = False) -> _FactorBlock:
     dt = series.dtype
+    if dt == pl.Boolean:
+        # R's factor(logical): fixed levels "FALSE" < "TRUE" (uppercase, the
+        # character coercion of the logical), False→0 / True→1, NA→-1. Unordered
+        # by default (treatment contrast, FALSE as reference).
+        null_mask = series.is_null().to_numpy() if series.null_count() > 0 else None
+        codes = series.fill_null(False).to_numpy().astype(int)
+        if null_mask is not None:
+            codes = np.where(null_mask, -1, codes)
+        ordered = ordered_hint or (label in _ORDERED_COLS_CV.get())
+        forced = _CONTRASTS_CV.get().get(label)
+        return _FactorBlock(codes=codes.astype(int, copy=False),
+                            levels=["FALSE", "TRUE"], ordered=ordered,
+                            label=label, forced_contrast=forced)
     if dt in (pl.Categorical, pl.Enum):
         # polars 1.40+ gives all pl.Categorical columns in one DataFrame a merged
         # string pool, so cat.get_categories() returns every category seen across
@@ -1214,21 +1377,32 @@ def _eval_numeric(node, data: pl.DataFrame) -> np.ndarray:
         # sides with type preserved, then do the comparison, then convert to
         # float.
         if op in ("==", "!=", "<", ">", "<=", ">="):
-            l = _eval_maybe_string(node.left, data)
+            lhs = _eval_maybe_string(node.left, data)
             r = _eval_maybe_string(node.right, data)
-            if op == "==":  return (l == r).astype(float)
-            if op == "!=":  return (l != r).astype(float)
-            if op == "<":   return (l < r).astype(float)
-            if op == ">":   return (l > r).astype(float)
-            if op == "<=":  return (l <= r).astype(float)
-            if op == ">=":  return (l >= r).astype(float)
-        l = _eval_numeric(node.left, data)
+            if op == "==":
+                return (lhs == r).astype(float)
+            if op == "!=":
+                return (lhs != r).astype(float)
+            if op == "<":
+                return (lhs < r).astype(float)
+            if op == ">":
+                return (lhs > r).astype(float)
+            if op == "<=":
+                return (lhs <= r).astype(float)
+            if op == ">=":
+                return (lhs >= r).astype(float)
+        lhs = _eval_numeric(node.left, data)
         r = _eval_numeric(node.right, data)
-        if op == "+":   return l + r
-        if op == "-":   return l - r
-        if op == "*":   return l * r
-        if op == "/":   return l / r
-        if op == "^":   return l ** r
+        if op == "+":
+            return lhs + r
+        if op == "-":
+            return lhs - r
+        if op == "*":
+            return lhs * r
+        if op == "/":
+            return lhs / r
+        if op == "^":
+            return lhs ** r
         raise TypeError(f"unsupported binop {op!r} in numeric context")
     if isinstance(node, Call):
         block = _eval_call(node, data)
@@ -1247,21 +1421,93 @@ def _eval_numeric(node, data: pl.DataFrame) -> np.ndarray:
     raise TypeError(f"cannot numerically evaluate {type(node).__name__}")
 
 
+_COMPARISON_OPS = frozenset({"==", "!=", "<", ">", "<=", ">="})
+
+
+def _is_logical_node(node) -> bool:
+    """True if `node` evaluates to a logical vector — R coerces those to a
+    2-level factor `FALSE < TRUE` in a model frame (true for *computed*
+    logicals too, e.g. `I(x > 0)`, `x > 0`, `!flag`), not a 0/1 numeric.
+    Only the *top-level* op matters: `I((x>0) + (z>0))` is arithmetic → numeric.
+    """
+    while isinstance(node, Paren):
+        node = node.expr
+    if isinstance(node, BinOp) and node.op in _COMPARISON_OPS:
+        return True
+    return isinstance(node, UnaryOp) and node.op == "!"
+
+
+def _apply_factor_levels_labels(blk: "_FactorBlock", call: Call,
+                                s: pl.Series, label: str) -> "_FactorBlock":
+    """Apply R's factor()/ordered() ``levels=`` (recode order) and ``labels=``
+    (rename) kwargs to an already-built factor block.
+
+    ``levels=`` recodes against the given key order (values not in it → NA).
+    ``labels=`` renames the levels (drives column suffixes); R accepts a vector
+    matching the levels, or a single string used as a ``<label><1..k>`` prefix.
+    Neither present → ``blk`` unchanged.
+    """
+    has_levels = "levels" in call.kwargs
+    has_labels = "labels" in call.kwargs
+    if not has_levels and not has_labels:
+        return blk
+    if has_levels:
+        keys = _eval_level_list(call.kwargs["levels"])
+        code_map = {lv: i for i, lv in enumerate(keys)}
+        codes = np.array([code_map.get(v, -1) for v in s.to_list()], dtype=int)
+    else:
+        keys = list(blk.levels)
+        codes = blk.codes
+    if has_labels:
+        labels = [str(v) for v in _eval_level_list(call.kwargs["labels"])]
+        if len(labels) == 1 and len(keys) > 1:        # R: single label → prefix
+            labels = [f"{labels[0]}{i + 1}" for i in range(len(keys))]
+        display = labels
+    else:
+        display = keys
+    return _FactorBlock(codes=codes, levels=display,
+                        ordered=blk.ordered, label=label)
+
+
+def _logical_factor_block(node, data: pl.DataFrame, label: str) -> "_FactorBlock":
+    """Materialize a logical-valued atom as R's `FALSE < TRUE` 2-level factor.
+
+    Routes through the same `pl.Boolean` path `_factor_from_series` uses for a
+    real logical column (levels ``["FALSE","TRUE"]``, treatment coding, FALSE as
+    reference), so naming (`…TRUE`) and no-intercept full coding (`…FALSE`,
+    `…TRUE`) match R for free.
+    """
+    v = _eval_numeric(node, data)        # 0.0 / 1.0 for comparisons and `!`
+    s = pl.Series(np.asarray(v).astype(bool))
+    return _factor_from_series(s, label=label)
+
+
 # Function-call atom evaluator: returns _NumBlock or _FactorBlock.
 def _eval_call(call: Call, data: pl.DataFrame):
     fn = call.fn
     label = _deparse(call)
 
     if fn == "I":
-        # `I(e)` protects e from formula algebra; evaluate as pure numeric.
+        # `I(e)` protects e from formula algebra. A logical-valued e becomes a
+        # 2-level factor (R coerces logical model-frame columns to factors);
+        # otherwise it's a numeric column.
+        if _is_logical_node(call.args[0]):
+            return _logical_factor_block(call.args[0], data, label)
         v = _eval_numeric(call.args[0], data)
         return _NumBlock(values=v.reshape(-1, 1), suffixes=[""], label=label)
 
     if fn in ("log", "exp", "sqrt", "abs", "cos", "sin", "tan", "expm1", "log1p", "log2", "log10"):
         v = _eval_numeric(call.args[0], data)
+        if fn == "log":
+            # R's log(x, base): base is the 2nd positional arg OR base= kwarg
+            # (kwarg wins). log(x) alone is natural log.
+            base_node = call.kwargs.get("base")
+            if base_node is None and len(call.args) >= 2:
+                base_node = call.args[1]
+            out = (np.log(v) if base_node is None
+                   else np.log(v) / np.log(_eval_numeric(base_node, data)))
+            return _NumBlock(values=out.reshape(-1, 1), suffixes=[""], label=label)
         f = {
-            "log": lambda x: np.log(x) if "base" not in call.kwargs
-                            else np.log(x) / np.log(_eval_numeric(call.kwargs["base"], data)),
             "exp": np.exp, "sqrt": np.sqrt, "abs": np.abs,
             "cos": np.cos, "sin": np.sin, "tan": np.tan,
             "expm1": np.expm1, "log1p": np.log1p,
@@ -1271,17 +1517,35 @@ def _eval_call(call: Call, data: pl.DataFrame):
 
     if fn == "scale":
         v = _eval_numeric(call.args[0], data)
+        store, st = _basis_capture_replay(label)
+        if st is not None:                              # replay training center/scale
+            out = v.copy()
+            if st["center"] is not None:
+                out = out - st["center"]
+            if st["scale"] is not None:
+                out = out / st["scale"]
+            return _NumBlock(values=out.reshape(-1, 1), suffixes=[""], label=label)
         center = call.kwargs.get("center")
         scale_ = call.kwargs.get("scale")
         c = True if center is None else (isinstance(center, Literal) and center.value is True)
         s = True if scale_ is None else (isinstance(scale_, Literal) and scale_.value is True)
         out = v.copy()
+        center_val = scale_val = None
         if c:
-            out = out - out.mean()
+            center_val = out.mean()
+            out = out - center_val
         if s:
-            sd = out.std(ddof=1)
-            if sd != 0:
-                out = out / sd
+            # R's scale() divides by the root-mean-square of the
+            # (already-centered-if-requested) column: sqrt(sum(v^2)/max(1,n-1)).
+            # With center=TRUE this equals the sd; with center=FALSE it's the
+            # RMS about zero, NOT the sd about the mean (the divergence fixed).
+            n = out.shape[0]
+            rms = float(np.sqrt(np.sum(out ** 2) / max(1, n - 1)))
+            if rms != 0:
+                scale_val = rms
+                out = out / rms
+        if store is not None:                           # capture (R's scaled:center/scale)
+            store[label] = {"center": center_val, "scale": scale_val}
         return _NumBlock(values=out.reshape(-1, 1), suffixes=[""], label=label)
 
     if fn in ("factor", "as.factor"):
@@ -1296,30 +1560,14 @@ def _eval_call(call: Call, data: pl.DataFrame):
             ok = call.kwargs["ordered"]
             ordered = isinstance(ok, Literal) and ok.value is True
         blk = _factor_from_series(s, label=label, ordered_hint=ordered or (fn == "ordered"))
-        if "levels" in call.kwargs:
-            lvl_node = call.kwargs["levels"]
-            lvls = _eval_level_list(lvl_node)
-            # Recode to the explicit level order.
-            code_map = {lv: i for i, lv in enumerate(lvls)}
-            new_codes = np.array(
-                [code_map.get(v, -1) for v in s.to_list()], dtype=int
-            )
-            blk = _FactorBlock(codes=new_codes, levels=lvls, ordered=blk.ordered, label=label)
-        return blk
+        return _apply_factor_levels_labels(blk, call, s, label)
 
     if fn == "ordered":
         # Same as factor() but ordered=TRUE, and default contrast becomes poly.
         src = call.args[0]
         s = _series(data, src.ident) if isinstance(src, Name) else pl.Series(_eval_numeric(src, data))
         blk = _factor_from_series(s, label=label, ordered_hint=True)
-        if "levels" in call.kwargs:
-            lvls = _eval_level_list(call.kwargs["levels"])
-            code_map = {lv: i for i, lv in enumerate(lvls)}
-            new_codes = np.array(
-                [code_map.get(v, -1) for v in s.to_list()], dtype=int
-            )
-            blk = _FactorBlock(codes=new_codes, levels=lvls, ordered=True, label=label)
-        return blk
+        return _apply_factor_levels_labels(blk, call, s, label)
 
     if fn == "dummy":
         # lme4's dummy(f, level) → 0/1 indicator for `f == level`.
@@ -1367,7 +1615,8 @@ def _eval_call(call: Call, data: pl.DataFrame):
         )
 
     if fn == "cut":
-        # cut(x, breaks, labels=NULL, right=TRUE) — bin numeric into factor.
+        # cut(x, breaks, labels=NULL, include.lowest=FALSE, right=TRUE,
+        # dig.lab=3, ordered_result=FALSE) — bin numeric into factor.
         x = _eval_numeric(call.args[0], data)
         breaks_node = call.args[1] if len(call.args) >= 2 else call.kwargs.get("breaks")
         if isinstance(breaks_node, Call) and breaks_node.fn == "c":
@@ -1377,31 +1626,73 @@ def _eval_call(call: Call, data: pl.DataFrame):
                 for a in breaks_node.args
             ], dtype=float)
         elif isinstance(breaks_node, Literal) and breaks_node.kind == "num":
-            # cut(x, 3) → 3 equal-width breaks between min and max
-            n_breaks = int(breaks_node.value)
-            lo, hi = x.min(), x.max()
-            # R widens endpoints by 0.1% like cut.default does
-            span = hi - lo
-            lo2, hi2 = lo - 0.001 * span, hi + 0.001 * span
-            breaks = np.linspace(lo2, hi2, n_breaks + 1)
+            # cut(x, n): n equal-width intervals. R seeds the breaks evenly
+            # between the *original* min and max, then widens only the two
+            # outer endpoints by dx/1000 (cut.default) — so the interior knots
+            # sit at seq(min, max), NOT at seq(widened_min, widened_max).
+            nb = int(breaks_node.value)
+            if nb < 2:
+                raise ValueError("invalid number of intervals")
+            lo, hi = float(x.min()), float(x.max())
+            dx = hi - lo
+            if dx == 0:
+                dx = abs(lo)
+                breaks = np.linspace(lo - dx / 1000, hi + dx / 1000, nb + 1)
+            else:
+                breaks = np.linspace(lo, hi, nb + 1)
+                breaks[0] = lo - dx / 1000
+                breaks[-1] = hi + dx / 1000
         else:
             raise TypeError(f"cut(): can't parse breaks from {breaks_node!r}")
         right_kw = call.kwargs.get("right")
         right = True if right_kw is None else bool(right_kw.value)
-        # Build R-style level labels: "(a,b]" or "[a,b)"
-        def _fmt(v):
-            return f"{v:g}"
-        if right:
-            level_labels = [f"({_fmt(breaks[i])},{_fmt(breaks[i+1])}]" for i in range(len(breaks) - 1)]
-            # np.digitize(x, bins, right=True): returns i such that bins[i-1] < x <= bins[i]
-            idx = np.digitize(x, breaks, right=True) - 1
+        incl_kw = call.kwargs.get("include.lowest")
+        include_lowest = bool(incl_kw.value) if incl_kw is not None else False
+        ord_kw = call.kwargs.get("ordered_result")
+        ordered_result = bool(ord_kw.value) if ord_kw is not None else False
+
+        # Level labels: explicit labels= win; labels=FALSE is integer codes
+        # (unsupported in a model term). Otherwise R's formatC(breaks,
+        # digits=dig, width=1, format="g") with dig increasing from dig.lab
+        # until adjacent breakpoint labels are distinct (matches Python ".g").
+        labels_node = call.kwargs.get("labels")
+        if isinstance(labels_node, Literal) and labels_node.kind == "bool" \
+                and labels_node.value is False:
+            raise NotImplementedError("cut(labels=FALSE) (integer codes) "
+                                      "is not supported in a formula term")
+        if labels_node is not None:
+            level_labels = [str(v) for v in _eval_level_list(labels_node)]
         else:
-            level_labels = [f"[{_fmt(breaks[i])},{_fmt(breaks[i+1])})" for i in range(len(breaks) - 1)]
-            idx = np.digitize(x, breaks, right=False) - 1
+            dig_lab = _int_kw_or_arg(call, "dig.lab", 3)
+            ch = [f"{b:.{dig_lab}g}" for b in breaks]
+            for dig in range(dig_lab, max(12, dig_lab) + 1):
+                ch = [f"{b:.{dig}g}" for b in breaks]
+                if all(ch[i] != ch[i + 1] for i in range(len(ch) - 1)):
+                    break
+            if right:
+                level_labels = [f"({ch[i]},{ch[i+1]}]" for i in range(len(breaks) - 1)]
+                if include_lowest and level_labels:
+                    # close the first interval's open left bracket: (a,b] → [a,b]
+                    level_labels[0] = "[" + level_labels[0][1:]
+            else:
+                level_labels = [f"[{ch[i]},{ch[i+1]})" for i in range(len(breaks) - 1)]
+                if include_lowest and level_labels:
+                    # close the last interval's open right bracket: [a,b) → [a,b]
+                    level_labels[-1] = level_labels[-1][:-1] + "]"
+
+        # np.digitize(x, bins, right=True): index i with bins[i-1] < x <= bins[i].
+        idx = np.digitize(x, breaks, right=right) - 1
+        if include_lowest:
+            # close the otherwise-open outer endpoint of the first/last interval
+            if right:
+                idx = np.where(x == breaks[0], 0, idx)
+            else:
+                idx = np.where(x == breaks[-1], len(level_labels) - 1, idx)
         # Values outside breaks become NA (code -1)
         mask = (idx < 0) | (idx >= len(level_labels))
         idx = np.where(mask, -1, idx)
-        return _FactorBlock(codes=idx.astype(int), levels=level_labels, ordered=False, label=label)
+        return _FactorBlock(codes=idx.astype(int), levels=level_labels,
+                            ordered=ordered_result, label=label)
 
     if fn == "C":
         # C(f, contrast, how.many) — wrap factor with explicit contrast choice.
@@ -1441,10 +1732,18 @@ def _eval_call(call: Call, data: pl.DataFrame):
             else 1
         raw_k = call.kwargs.get("raw")
         is_raw = isinstance(raw_k, Literal) and raw_k.value is True
-        if not is_raw:
-            cols = _poly_orthogonal(v, degree)
-        else:
+        if is_raw:
             cols = np.stack([v ** d for d in range(1, degree + 1)], axis=1)
+        else:
+            store, st = _basis_capture_replay(label)
+            if st is not None:                          # replay training basis
+                cols = _poly_orthogonal(v, degree, state=st)
+            elif store is not None:                     # capture
+                st = {}
+                cols = _poly_orthogonal(v, degree, state=st)
+                store[label] = st
+            else:
+                cols = _poly_orthogonal(v, degree)
         suffixes = [str(d) for d in range(1, degree + 1)]
         return _NumBlock(values=cols, suffixes=suffixes, label=label)
 
@@ -1455,11 +1754,23 @@ def _eval_call(call: Call, data: pl.DataFrame):
         knots_node = call.kwargs.get("knots")
         if knots_node is None and len(call.args) >= 3:
             knots_node = call.args[2]
-        interior = _parse_knots(knots_node, data)
-        bnd = _parse_boundary(call.kwargs.get("Boundary.knots"), data, v)
         intercept_kw = call.kwargs.get("intercept")
         intercept = isinstance(intercept_kw, Literal) and intercept_kw.value is True
-        cols = _bs_basis(v, degree, bnd, interior, df, intercept)
+        store, st = _basis_capture_replay(label)
+        if st is not None:                              # replay training knots/boundary
+            interior, bnd = st["interior"], st["bnd"]
+        else:
+            interior = _parse_knots(knots_node, data)
+            bnd = _parse_boundary(call.kwargs.get("Boundary.knots"), data, v)
+            if df is not None and len(interior) == 0:
+                n_interior = df - degree - (1 if intercept else 0)
+                if n_interior > 0:
+                    interior = np.quantile(v, np.linspace(0, 1, n_interior + 2)[1:-1])
+            if store is not None:
+                store[label] = {"interior": interior, "bnd": bnd}
+        # df=None: the final interior knots are passed explicitly (already
+        # resolved above), so no data-dependent quantile placement re-runs.
+        cols = _bs_basis(v, degree, bnd, interior, None, intercept)
         suffixes = [str(i + 1) for i in range(cols.shape[1])]
         return _NumBlock(values=cols, suffixes=suffixes, label=label)
 
@@ -1467,18 +1778,25 @@ def _eval_call(call: Call, data: pl.DataFrame):
         v = _eval_numeric(call.args[0], data)
         df = _int_kw_or_arg(call, "df", default=None)
         knots_node = call.kwargs.get("knots")
-        if knots_node is None and len(call.args) >= 2 and not isinstance(call.args[1], Literal):
-            # ns(x, knots=...) via positional — but ns's 2nd positional is df.
-            pass
-        # ns(x, df=k): df = len(interior_knots) + 1 + intercept. Interior knots
-        # at evenly-spaced quantiles of x, like R's ns default.
-        interior = _parse_knots(knots_node, data)
         if df is None and len(call.args) >= 2 and isinstance(call.args[1], Literal):
             df = int(call.args[1].value)
-        bnd = _parse_boundary(call.kwargs.get("Boundary.knots"), data, v)
         intercept_kw = call.kwargs.get("intercept")
         intercept = isinstance(intercept_kw, Literal) and intercept_kw.value is True
-        cols = _ns_basis(v, bnd, interior, df, intercept)
+        store, st = _basis_capture_replay(label)
+        if st is not None:                              # replay training knots/boundary
+            interior, bnd = st["interior"], st["bnd"]
+        else:
+            # ns(x, df=k): interior knots at evenly-spaced quantiles of x.
+            interior = _parse_knots(knots_node, data)
+            bnd = _parse_boundary(call.kwargs.get("Boundary.knots"), data, v)
+            if df is not None and len(interior) == 0:
+                n_interior = df - 1 - (1 if intercept else 0)
+                if n_interior > 0:
+                    interior = np.quantile(v, np.linspace(0, 1, n_interior + 2)[1:-1])
+            if store is not None:
+                store[label] = {"interior": interior, "bnd": bnd}
+        # df=None: pass the resolved interior knots so no quantile re-placement runs.
+        cols = _ns_basis(v, bnd, interior, None, intercept)
         suffixes = [str(i + 1) for i in range(cols.shape[1])]
         return _NumBlock(values=cols, suffixes=suffixes, label=label)
 
@@ -1486,8 +1804,8 @@ def _eval_call(call: Call, data: pl.DataFrame):
         # hea-native periodic basis: k cos/sin harmonic pairs at an explicit
         # period (the trig sibling of poly/bs/ns; see _harmonic_basis). The
         # count and period take positional — harmonic(x, k, period) — or
-        # keyword forms. The count keyword is `k` (canonical, matches
-        # pycircstat2) or `K` (forecast spelling); `k` wins if both are given.
+        # keyword forms. The count keyword is `k` (canonical) or `K`
+        # (forecast spelling); `k` wins if both are given.
         # period must be a positive scalar (e.g. 12 or 2*pi); hea has no ts
         # frequency to infer it from, so it has no default.
         v = _eval_numeric(call.args[0], data)
@@ -1570,18 +1888,17 @@ def _bs_basis(x, degree, boundary, interior_knots, df, intercept):
     ])
     n_basis = len(Aknots) - ord
     out = np.zeros((len(x), n_basis))
-    # Evaluate each basis function. scipy's BSpline returns NaN outside [t[k], t[n]]
-    # but we want the right endpoint included, so clamp.
-    xe = np.clip(x, boundary[0], boundary[1])
+    # R's bs() extrapolates the boundary polynomial piece for x beyond
+    # Boundary.knots (predict.bs — it warns the basis is ill-conditioned there).
+    # scipy's extrapolate=True reproduces that polynomial extrapolation exactly,
+    # so evaluate without clamping: out-of-range predict rows then match R
+    # instead of collapsing to the (wrong) clamped boundary value.
+    x = np.asarray(x, dtype=float)
     for i in range(n_basis):
         c = np.zeros(n_basis)
         c[i] = 1.0
-        spl = _BSpline(Aknots, c, degree, extrapolate=False)
-        y = spl(xe)
-        # scipy gives 0 (not NaN) for points outside the half-open interval at
-        # the right boundary for all but the last basis. Force the last basis
-        # to 1 at the right endpoint (R's behavior).
-        out[:, i] = np.nan_to_num(y, nan=0.0)
+        spl = _BSpline(Aknots, c, degree, extrapolate=True)
+        out[:, i] = np.nan_to_num(spl(x), nan=0.0)
     # At exact right boundary, scipy's half-open interval gives 0 for all
     # basis functions; R gives 1 for the last. Patch points == boundary[1].
     right_mask = x == boundary[1]
@@ -1621,33 +1938,68 @@ def _ns_basis(x, boundary, interior_knots, df, intercept):
         xc = np.clip(xe, boundary[0], boundary[1])
         out = np.zeros((len(xe), n_basis))
         for i in range(n_basis):
-            c = np.zeros(n_basis); c[i] = 1.0
+            c = np.zeros(n_basis)
+            c[i] = 1.0
             out[:, i] = np.nan_to_num(
                 _BSpline(Aknots, c, degree, extrapolate=False)(xc), nan=0.0
             )
         right = np.asarray(xe) == boundary[1]
         if right.any():
-            out[right, :] = 0; out[right, -1] = 1.0
+            out[right, :] = 0
+            out[right, -1] = 1.0
         return out
 
     def _Bdd(xe):
         out = np.zeros((len(xe), n_basis))
         for i in range(n_basis):
-            c = np.zeros(n_basis); c[i] = 1.0
+            c = np.zeros(n_basis)
+            c[i] = 1.0
             out[:, i] = _BSpline(Aknots, c, degree, extrapolate=False).derivative(2)(xe)
         return np.nan_to_num(out, nan=0.0)
 
+    def _Bd(xe):
+        # First derivative of the B-spline basis. At a boundary knot (multiplicity
+        # 4) scipy returns NaN, so evaluate the one-sided derivative a hair inside.
+        eps = (boundary[1] - boundary[0]) * 1e-7
+        xc = np.clip(xe, boundary[0] + eps, boundary[1] - eps)
+        out = np.zeros((len(xe), n_basis))
+        for i in range(n_basis):
+            c = np.zeros(n_basis)
+            c[i] = 1.0
+            out[:, i] = np.nan_to_num(
+                _BSpline(Aknots, c, degree, extrapolate=False).derivative(1)(xc), nan=0.0)
+        return out
+
+    lo, hi = boundary
     B = _B(x)
-    const = _Bdd(np.array([boundary[0], boundary[1]], dtype=float))  # 2 × n_basis
+    const = _Bdd(np.array([lo, hi], dtype=float))  # 2 × n_basis
+    Bd_bnd = _Bd(np.array([lo, hi], dtype=float))  # boundary slopes
+    Blo = _B(np.array([lo], dtype=float))
+    Bhi = _B(np.array([hi], dtype=float))
     # R's ns drops the first (intercept) column of basis & const BEFORE the
     # QR-based null-space projection; the order matters because it changes
     # which Q we compute.
     if not intercept:
         B = B[:, 1:]
         const = const[:, 1:]
+        Bd_bnd = Bd_bnd[:, 1:]
+        Blo = Blo[:, 1:]
+        Bhi = Bhi[:, 1:]
     Q, _ = np.linalg.qr(const.T, mode="complete")
     H = Q[:, 2:]
-    return B @ H
+    N = B @ H
+
+    # A natural spline is LINEAR beyond its boundary knots (R extrapolates it,
+    # rather than clamping like `_B` does). Patch out-of-range rows with the
+    # boundary value + (x − boundary)·slope so predict on new data matches R.
+    xv = np.asarray(x, dtype=float)
+    below = xv < lo
+    above = xv > hi
+    if below.any():
+        N[below] = (Blo @ H)[0] + np.outer(xv[below] - lo, (Bd_bnd[0:1] @ H)[0])
+    if above.any():
+        N[above] = (Bhi @ H)[0] + np.outer(xv[above] - hi, (Bd_bnd[1:2] @ H)[0])
+    return N
 
 
 def _harmonic_basis(x, K: int, period: float):
@@ -1667,8 +2019,10 @@ def _harmonic_basis(x, K: int, period: float):
     cols, suffixes = [], []
     for j in range(1, K + 1):
         w = (2.0 * np.pi * j / period) * x
-        cols.append(np.cos(w)); suffixes.append(f"cos{j}")
-        cols.append(np.sin(w)); suffixes.append(f"sin{j}")
+        cols.append(np.cos(w))
+        suffixes.append(f"cos{j}")
+        cols.append(np.sin(w))
+        suffixes.append(f"sin{j}")
     return np.stack(cols, axis=1), suffixes
 
 
@@ -1689,17 +2043,32 @@ def _eval_level_list(node) -> list:
     raise TypeError(f"level list expected, got {type(node).__name__}")
 
 
-def _poly_orthogonal(x: np.ndarray, degree: int) -> np.ndarray:
+def _poly_orthogonal(x: np.ndarray, degree: int, state: dict | None = None) -> np.ndarray:
     """Orthogonal polynomials matching R's `poly(x, degree)` (non-raw).
 
     R's algorithm: QR on outer(x - mean(x), 0:degree, "^"). The returned
     columns are Q with signs flipped to match R's diagonal, drop constant.
+
+    ``state`` drives R's safe-prediction (`predvars`): if it holds captured
+    params (``mean``/``Rinv``/``signs``) the basis is *replayed* on ``x`` using
+    the training transform (`Q = X·R⁻¹`, so new data maps through the same
+    `R⁻¹`); if it's an empty dict the params are *captured* into it; if ``None``
+    the basis is computed fresh with no capture (the one-shot path).
     """
     x = np.asarray(x, dtype=float)
-    xc = x - x.mean()
+    if state and "Rinv" in state:                       # replay (predict)
+        xc = x - state["mean"]
+        Xn = np.column_stack([xc ** d for d in range(degree + 1)])
+        return ((Xn @ state["Rinv"]) * state["signs"])[:, 1:]
+    mean = x.mean()
+    xc = x - mean
     X = np.column_stack([xc ** d for d in range(degree + 1)])
     Q, R_mat = np.linalg.qr(X)
     signs = np.sign(np.diag(R_mat))
+    if state is not None:                               # capture (fit)
+        state["mean"] = mean
+        state["Rinv"] = np.linalg.inv(R_mat)
+        state["signs"] = signs
     return (Q * signs)[:, 1:]
 
 
@@ -1751,6 +2120,10 @@ def _eval_atom(node, data: pl.DataFrame, cache: dict | None = None):
             return blk
         raise TypeError("`$` only supported as `df$col`")
     if isinstance(node, (UnaryOp, BinOp, Subscript)):
+        # A bare logical-valued expression (`x > 0`, `!flag`) is a 2-level
+        # factor in R, same as `I(x > 0)`.
+        if _is_logical_node(node):
+            return _logical_factor_block(node, data, _deparse(node))
         v = _eval_numeric(node, data)
         return _NumBlock(values=v.reshape(-1, 1), suffixes=[""], label=_deparse(node))
     raise TypeError(f"cannot evaluate atom {type(node).__name__}")
@@ -1827,8 +2200,25 @@ def _contrast_matrix(fb: _FactorBlock, reduced: bool) -> tuple[np.ndarray, list[
     k = len(fb.levels)
     if reduced:
         name = fb.forced_contrast
+        # Custom contrast matrix (R's contrasts.arg = list(f = matrix)): an
+        # (k, m) ndarray used verbatim, or a (matrix, column_names) tuple.
+        # Unnamed columns get R's 1..m suffixes; named columns use the names.
+        if isinstance(name, np.ndarray) or (
+            isinstance(name, tuple) and len(name) == 2 and isinstance(name[0], np.ndarray)
+        ):
+            if isinstance(name, tuple):
+                M_in, colnames = np.asarray(name[0], dtype=float), [str(c) for c in name[1]]
+            else:
+                M_in, colnames = np.asarray(name, dtype=float), None
+            if M_in.ndim != 2 or M_in.shape[0] != k:
+                raise ValueError(
+                    f"custom contrast matrix for {fb.label!r} must be "
+                    f"({k}, m); got shape {M_in.shape}")
+            suffs = colnames if colnames is not None else [str(i + 1) for i in range(M_in.shape[1])]
+            return _truncate_contrast(M_in, suffs, fb.how_many)
         if name is None:
-            name = "contr.poly" if fb.ordered else "contr.treatment"
+            unordered_default, ordered_default = _DEFAULT_CONTRASTS_CV.get()
+            name = ordered_default if fb.ordered else unordered_default
         # C(f, base=N) is encoded as a pseudo-name.
         if isinstance(name, str) and name.startswith("contr.treatment:base="):
             base = int(name.split("=")[1]) - 1  # R is 1-indexed
@@ -1909,35 +2299,31 @@ def _khatri_rao(blocks: list[_NumBlock]) -> _NumBlock:
     return _NumBlock(values=cur_values, suffixes=cur_names, label="")
 
 
-def _term_needs_full_first_factor(term: Term, earlier_terms: list[Term], intercept: bool) -> bool:
-    """R's promote1: the first factor atom in a term gets FULL coding iff the
-    term formed by removing that atom isn't already present in the model
-    (including the empty/intercept term).
-    """
-    if not term.atoms:
-        return False
-    # Find first factor atom — we only "check the hole" for it.
-    # Build residual = Term(atoms minus first factor index). For the
-    # promote1 check we use atom keys.
-    # But here we don't know yet which atom is a factor — caller decides.
-    # This helper is invoked per-factor candidate; for the outer logic we
-    # check the singleton "hole" using Term equality.
-    raise NotImplementedError  # placeholder — see _encode_term
-
-
 def _encode_term(
     term: Term,
     data: pl.DataFrame,
-    earlier_terms: list[Term],
-    intercept: bool,
+    covered: set["Term"],
     cache: dict | None = None,
 ) -> _NumBlock:
     """Encode a single term to its numeric column block.
 
-    Applies R's promote1 for factor coding: walk atoms, and the FIRST factor
-    whose "hole" (term minus this atom) isn't already covered gets FULL
-    coding; other factors stay REDUCED. If intercept is on, the empty term
-    is in-model, so all factors are REDUCED when their hole is {}.
+    Factor coding follows R's ``model.matrix`` marginality rule, driven by a
+    running set of **covered margins** (``covered``). For each factor atom, its
+    "hole" (this term minus that atom) is checked: if the hole is already
+    covered the factor is REDUCED (k-1 contrast columns); otherwise it is FULL
+    (k dummy columns) and the hole *becomes* covered. The caller seeds
+    ``covered`` with the empty term iff the model has an intercept, and adds the
+    whole term to ``covered`` after this returns. Consequences:
+
+      * intercept models: `~ a` reduces `a` (hole ∅ covered by the intercept);
+        `~ a:b` promotes both factors (neither {a} nor {b} covered) → full 2×3.
+      * no-intercept models: `~ a + b - 1` codes `a` FULL (covering ∅), then
+        `b` REDUCED (∅ now covered) — a full-rank X matching R, not the
+        rank-deficient both-full coding. Likewise `~ a:b + b:c - 1` reduces `c`
+        because a:b's full `a` already covered {b}.
+
+    Holes within one term are distinct (one per factor), so mutating ``covered``
+    mid-loop is order-independent.
 
     `cache` is forwarded to `_eval_atom` so an outer loop (e.g. `materialize`)
     can memoize per-atom encoding across sibling terms in interaction-heavy
@@ -1949,17 +2335,15 @@ def _encode_term(
 
     atom_blocks: list[_NumBlock | _FactorBlock] = [_eval_atom(a, data, cache) for a in term.atoms]
 
-    # R's promote1: for each factor atom, FULL coding iff its "hole" (this
-    # term minus that atom) is NOT in the model (including the intercept/empty
-    # term). Multiple factors can get promoted in the same term — e.g.
-    # `~ wool:tension` with intercept on produces the full 2×3 = 6 interaction
-    # cells because neither {wool} nor {tension} is in the model.
     encoded_blocks: list[_NumBlock] = []
     for i, blk in enumerate(atom_blocks):
         if isinstance(blk, _FactorBlock):
-            hole_atoms = tuple(a for j, a in enumerate(term.atoms) if j != i)
-            hole = Term(hole_atoms)
-            hole_in_model = (hole == _EMPTY_TERM and intercept) or (hole in earlier_terms)
+            hole = Term(tuple(a for j, a in enumerate(term.atoms) if j != i))
+            reduced = hole in covered
+            if not reduced:
+                # Full-coding this factor spans the hole's margin, so any later
+                # term (or sibling factor) whose hole equals it now reduces.
+                covered.add(hole)
             # Cache encoded factor blocks: in a full crossing like `A*B*C*D`
             # each factor is always REDUCED in every term it appears in, so
             # one _encode_factor call suffices per (factor, reduced) pair
@@ -1969,14 +2353,14 @@ def _encode_term(
             # atom_cache so their _FactorBlock refs can be GC'd between
             # terms, causing id() reuse to collide across different factors.
             if cache is not None:
-                enc_key = ("enc", blk.label, hole_in_model)
+                enc_key = ("enc", blk.label, reduced)
                 enc = cache.get(enc_key)
                 if enc is None:
-                    enc = _encode_factor(blk, reduced=hole_in_model)
+                    enc = _encode_factor(blk, reduced=reduced)
                     cache[enc_key] = enc
                 encoded_blocks.append(enc)
             else:
-                encoded_blocks.append(_encode_factor(blk, reduced=hole_in_model))
+                encoded_blocks.append(_encode_factor(blk, reduced=reduced))
         else:
             encoded_blocks.append(blk)
 
@@ -2042,53 +2426,67 @@ def referenced_columns(expanded: ExpandedFormula) -> set[str]:
 
 
 def materialize(expanded: ExpandedFormula, data: pl.DataFrame,
-                return_assign: bool = False):
+                return_assign: bool = False, *, drop_na: bool = True,
+                basis_state: dict | None = None):
     """Turn an expanded formula + data frame into a design matrix X.
 
-    NA-omit: rows with missing values in any referenced column are dropped
-    first (R's `na.action = na.omit` default). Column order: intercept (if
-    on), then each term in `expanded.terms` order, with term-internal column
-    order matching R's interaction convention (first atom's levels vary
-    fastest). Column names follow R: `(Intercept)`, `x`, `fb`, `x:fb`,
-    `I(x^2)`, etc.
+    NA handling: with ``drop_na=True`` (default, R's `na.omit`), rows with
+    missing values in any referenced column are dropped first. ``drop_na=False``
+    (R's `na.pass`) keeps every row, so NA flows into X — used by
+    ``prepare_design(na_action="pass")`` to keep X and y the same length.
+    Column order: intercept (if on), then each term in `expanded.terms` order,
+    with term-internal column order matching R's interaction convention (first
+    atom's levels vary fastest). Column names follow R: `(Intercept)`, `x`,
+    `fb`, `x:fb`, `I(x^2)`, etc.
+
+    ``basis_state`` enables R's safe prediction (`predvars`): pass an empty dict
+    on the fit pass to *capture* each `poly`/`bs`/`ns`/`scale` call's training
+    parameters, then the *same* dict on the predict pass to *replay* them on new
+    data (instead of recomputing knots/centering). ``None`` (default) recomputes.
 
     ``return_assign=True`` additionally returns R's ``model.matrix``
     ``assign`` attribute: one int per column — 0 for the intercept,
     ``i`` (1-based) for columns of ``expanded.terms[i-1]``. Exact by
     construction (columns are emitted term block by term block).
     """
-    referenced = referenced_columns(expanded) & set(data.columns)
-    ref_list = list(referenced)
-    if ref_list and any(data[c].null_count() > 0 for c in ref_list):
-        data = data.drop_nulls(subset=ref_list)
+    token = _BASIS_STATE_CV.set(basis_state)
+    try:
+        referenced = referenced_columns(expanded) & set(data.columns)
+        ref_list = list(referenced)
+        if drop_na and ref_list and any(data[c].null_count() > 0 for c in ref_list):
+            data = data.drop_nulls(subset=ref_list)
 
-    blocks: list[_NumBlock] = []
-    block_term_idx: list[int] = []          # R assign value per block
-    running_terms: list[Term] = []
-    atom_cache: dict = {}
+        blocks: list[_NumBlock] = []
+        block_term_idx: list[int] = []          # R assign value per block
+        # Covered margins for R's marginality coding (see `_encode_term`). Seeded
+        # with the empty term iff there's an intercept; each term joins after it
+        # is encoded so later terms reduce against it.
+        covered: set[Term] = {_EMPTY_TERM} if expanded.intercept else set()
+        atom_cache: dict = {}
 
-    if expanded.intercept:
-        blocks.append(_encode_term(_EMPTY_TERM, data, running_terms, expanded.intercept, atom_cache))
-        block_term_idx.append(0)
-        running_terms.append(_EMPTY_TERM)
+        if expanded.intercept:
+            blocks.append(_encode_term(_EMPTY_TERM, data, covered, atom_cache))
+            block_term_idx.append(0)
 
-    for i, t in enumerate(expanded.terms):
-        blocks.append(_encode_term(t, data, running_terms, expanded.intercept, atom_cache))
-        block_term_idx.append(i + 1)
-        running_terms.append(t)
+        for i, t in enumerate(expanded.terms):
+            blocks.append(_encode_term(t, data, covered, atom_cache))
+            block_term_idx.append(i + 1)
+            covered.add(t)
 
-    all_names: list[str] = []
-    assign: list[int] = []
-    for b, ti in zip(blocks, block_term_idx):
-        all_names.extend(b.suffixes)
-        assign.extend([ti] * b.values.shape[1])
-    if not blocks or sum(b.values.shape[1] for b in blocks) == 0:
-        # Polars can't represent (n, 0); return an empty frame and let
-        # callers use ``len(input_data)`` if they need the row count.
-        return (pl.DataFrame(), []) if return_assign else pl.DataFrame()
-    all_values = np.hstack([b.values for b in blocks])
-    X = pl.from_numpy(all_values, schema=all_names)
-    return (X, assign) if return_assign else X
+        all_names: list[str] = []
+        assign: list[int] = []
+        for b, ti in zip(blocks, block_term_idx):
+            all_names.extend(b.suffixes)
+            assign.extend([ti] * b.values.shape[1])
+        if not blocks or sum(b.values.shape[1] for b in blocks) == 0:
+            # Polars can't represent (n, 0); return an empty frame and let
+            # callers use ``len(input_data)`` if they need the row count.
+            return (pl.DataFrame(), []) if return_assign else pl.DataFrame()
+        all_values = np.hstack([b.values for b in blocks])
+        X = pl.from_numpy(all_values, schema=all_names)
+        return (X, assign) if return_assign else X
+    finally:
+        _BASIS_STATE_CV.reset(token)
 
 
 # ---------------------------------------------------------------------------
@@ -2130,14 +2528,13 @@ def _materialize_re_lhs(lhs_ef: ExpandedFormula, data: pl.DataFrame) -> tuple[np
     factors, Khatri–Rao for interactions, promote1 for hole-filling.
     """
     blocks: list[_NumBlock] = []
-    running_terms: list[Term] = []
+    covered: set[Term] = {_EMPTY_TERM} if lhs_ef.intercept else set()
     atom_cache: dict = {}
     if lhs_ef.intercept:
-        blocks.append(_encode_term(_EMPTY_TERM, data, running_terms, lhs_ef.intercept, atom_cache))
-        running_terms.append(_EMPTY_TERM)
+        blocks.append(_encode_term(_EMPTY_TERM, data, covered, atom_cache))
     for t in lhs_ef.terms:
-        blocks.append(_encode_term(t, data, running_terms, lhs_ef.intercept, atom_cache))
-        running_terms.append(t)
+        blocks.append(_encode_term(t, data, covered, atom_cache))
+        covered.add(t)
     if not blocks:
         return np.zeros((len(data), 0)), []
     values = np.hstack([b.values for b in blocks])
@@ -2303,8 +2700,8 @@ def materialize_bars(expanded: ExpandedFormula, data: pl.DataFrame) -> ReTerms:
                 idx += 1
                 tmpl[i, j] = theta_offset + idx
         Ltb = np.zeros((k * c, k * c), dtype=int)
-        for l in range(k):
-            Ltb[l*c:(l+1)*c, l*c:(l+1)*c] = tmpl
+        for b in range(k):
+            Ltb[b*c:(b+1)*c, b*c:(b+1)*c] = tmpl
         Lt_templates.append(Ltb)
         Lt_sizes.append(k * c)
 
@@ -2790,6 +3187,30 @@ class _RERawBasis(_RawBasis):
 
 
 @dataclass(slots=True)
+class _MRFRawBasis(_RawBasis):
+    """`smooth.construct.mrf.smooth.spec` — Markov random field indicator basis.
+
+    The basis is a region indicator: ``model.matrix(~ factor(x, levels=k) - 1)``,
+    one column per knot region (regions with no data included — they still get a
+    column). Predict (``Predict.matrix.mrf.smooth``, smooth.r:2868-2875)
+    re-evaluates the indicator on new data's region labels and, for a low-rank
+    fit, post-multiplies by the reparameterization matrix ``P``.
+    """
+    term: str
+    levels: list
+    P: Optional[np.ndarray] = None
+
+    def eval(self, data: pl.DataFrame) -> np.ndarray:
+        col = data[self.term].to_numpy()
+        out = np.zeros((len(col), len(self.levels)))
+        for j, lev in enumerate(self.levels):
+            out[:, j] = (col == lev)
+        if self.P is not None:
+            out = out @ self.P
+        return out
+
+
+@dataclass(slots=True)
 class _FSRawBasis(_RawBasis):
     """`smooth.construct.fs.smooth.spec` — factor-smooth interaction.
 
@@ -3068,6 +3489,39 @@ def _smooth_id_value(call: Call) -> str | None:
     return _deparse(node)
 
 
+def _smooth_sp_value(call: Call) -> tuple[float, ...] | None:
+    """The smooth's ``sp=`` argument (s/te/ti/t2): per-penalty supplied
+    smoothing parameters, **negative = "estimate this one"** (mgcv
+    gam.setup, mgcv.r:1417-1440). Returns a tuple of floats, or None
+    when absent/NULL. Scalar ``sp=2`` and vector ``sp=c(2, -1)`` forms
+    both parse; anything non-numeric is an error (mgcv would fail in
+    its own way downstream)."""
+    node = call.kwargs.get("sp")
+    if node is None:
+        return None
+    if isinstance(node, Name) and node.ident == "NULL":
+        return None
+
+    def scalar(nd) -> float:
+        if isinstance(nd, Paren):
+            return scalar(nd.expr)
+        if isinstance(nd, UnaryOp) and nd.op in ("-", "+"):
+            v = scalar(nd.operand)
+            return -v if nd.op == "-" else v
+        if isinstance(nd, Literal) and nd.kind == "num":
+            return float(nd.value)
+        raise ValueError(
+            f"sp= in {call.fn}() must be numeric (a scalar or c(...)); "
+            f"got {_deparse(nd)!r}"
+        )
+
+    if isinstance(node, Call) and node.fn == "c":
+        if node.kwargs:
+            raise ValueError("sp=c(...) takes no named arguments")
+        return tuple(scalar(a) for a in node.args)
+    return (scalar(node),)
+
+
 def _clone_smooth_spec(base: Call, member: Call) -> Call:
     """mgcv ``clone.smooth.spec`` (mgcv.r:730-765): a repeat-``id`` smooth
     is rebuilt from the *first* smooth with that id — same bs class, k, m,
@@ -3173,6 +3627,56 @@ def _smooth_by_expr(call: Call) -> str | None:
     if isinstance(by, Name) and by.ident == "NA":
         return None
     return _deparse(by)
+
+
+def _smooth_pc_value(call: Call) -> tuple[float, ...] | None:
+    """The smooth's ``pc=`` argument (s/te/ti/t2): a **point constraint**
+    forcing the smooth through zero at the given covariate value(s).
+
+    mgcv (s/te/ti/t2, smooth.r:480-486/600-606/656-662) stores ``pc`` as
+    ``ret$point.con``; ``smooth.construct3`` (smooth.r:3655-3679) then makes
+    the identifiability constraint ``C = Predict.matrix(object, pc)`` — the
+    smooth's basis row evaluated AT the point — with ``always.apply=TRUE``,
+    REPLACING the default sum-to-zero ``C = colMeans(X)``. So the smooth
+    passes through zero at the point and the intercept absorbs the shift
+    (the fitted values are identifiability-invariant; the parameterization,
+    REML, and per-term values differ — see the S1a tests).
+
+    Returns a tuple of floats (one coordinate per smooth covariate, in term
+    order — mgcv's ``names(pc) <- vars``), or None when absent/NULL. Scalar
+    ``pc=0.5`` and vector ``pc=c(0.5, 0.3)`` both parse. The general
+    list-of-lists form (``C beta = d`` plus inequality constraints,
+    smooth.r:3656-3675) is not supported — honest raise."""
+    node = call.kwargs.get("pc")
+    if node is None:
+        return None
+    if isinstance(node, Name) and node.ident == "NULL":
+        return None
+    if isinstance(node, Call) and node.fn == "list":
+        raise NotImplementedError(
+            f"pc= general (list-of-lists) point/inequality constraints in "
+            f"{call.fn}() are not supported; only a simple point constraint "
+            f"pc=value or pc=c(v1, v2, ...) is."
+        )
+
+    def scalar(nd) -> float:
+        if isinstance(nd, Paren):
+            return scalar(nd.expr)
+        if isinstance(nd, UnaryOp) and nd.op in ("-", "+"):
+            v = scalar(nd.operand)
+            return -v if nd.op == "-" else v
+        if isinstance(nd, Literal) and nd.kind == "num":
+            return float(nd.value)
+        raise ValueError(
+            f"pc= in {call.fn}() must be numeric (a scalar or c(...)); "
+            f"got {_deparse(nd)!r}"
+        )
+
+    if isinstance(node, Call) and node.fn == "c":
+        if node.kwargs:
+            raise ValueError("pc=c(...) takes no named arguments")
+        return tuple(scalar(a) for a in node.args)
+    return (scalar(node),)
 
 
 def _eval_by_col(by_expr: str, data: pl.DataFrame) -> pl.Series | np.ndarray:
@@ -3325,11 +3829,45 @@ def _apply_by_and_absorb(
     sparse_cons = _SPARSE_CONS_CV.get()
     by_expr = _smooth_by_expr(call)
     base_label = _smooth_label(call)
+
+    # pc= point constraint (smooth.r:3676-3679): mgcv REPLACES the default
+    # sum-to-zero C = colMeans(X) with the smooth's basis row evaluated at the
+    # point (Predict.matrix at pc), always-applied. Build that row in the same
+    # pre-absorb column space as X and feed it as C_source to the standard
+    # sum-to-zero absorb (whose colMeans of a 1-row matrix is the row itself),
+    # so the existing Householder-drop + predict-replay machinery carries it.
+    pc_vals = _smooth_pc_value(call)
+    pc_C: np.ndarray | None = None
+    if pc_vals is not None:
+        if raw_basis is None:
+            raise NotImplementedError(
+                f"pc= point constraint on {base_label} needs a basis with a "
+                "predict hook (unavailable for this smooth class)"
+            )
+        if len(pc_vals) != len(term):
+            raise ValueError(  # mgcv: "supply a value for each variable"
+                f"pc= must supply one value per smooth covariate: {base_label} "
+                f"has {len(term)} covariate(s) but pc= has {len(pc_vals)}"
+            )
+        pc_frame = pl.DataFrame(
+            {t: [float(v)] for t, v in zip(term, pc_vals)}
+        )
+        pc_C = np.asarray(raw_basis.eval(pc_frame), dtype=float).reshape(
+            1, X.shape[1]
+        )
+
     if by_expr is None:
         if sparse_cons == -1:
+            if pc_C is not None:
+                raise NotImplementedError(
+                    f"pc= point constraint with the sweep-drop constraint "
+                    f"(bs with sparse.cons=-1) on {base_label} is not supported"
+                )
             X2, S2, T = _absorb_sweep_drop(X, S_list)
         else:
-            X2, S2, T = _absorb_sumzero(X, S_list, C_source=C_source)
+            X2, S2, T = _absorb_sumzero(
+                X, S_list, C_source=pc_C if pc_C is not None else C_source,
+            )
         spec = (
             BasisSpec(raw=raw_basis, by=None, absorb=T)
             if raw_basis is not None else None
@@ -3346,24 +3884,44 @@ def _apply_by_and_absorb(
         if _is_ordered_by(by_col) and len(levels) > 1:
             levels = levels[1:]
         by_arr = by_col.to_numpy()
-        # mgcv sets `sm$C = colSums(sm$X)` once on the full (pre-by) X, then
-        # applies the same Householder Q to every per-level X_lev. Without
-        # this each level's absorb uses colSums(X_lev) → a different Z, and
-        # the resulting subspaces diverge from mgcv's.
+        # mgcv applies the identifiability constraint to the SHARED pre-by
+        # basis, then multiplies each level by its 0/1 dummy
+        # (smoothCon, smooth.r:3947-3991):
+        #  * sumzero (sparse.cons=0): C = colSums(sm$X) is computed once on
+        #    the full X; the same Householder Q absorbs every per-level X_lev
+        #    (passed as ``C_source`` below). Without it each level's absorb
+        #    would use colSums(X_lev) → a divergent Z.
+        #  * sweep-drop (sparse.cons=-1, smooth.r:3947-3962): the drop column
+        #    and the de-meaning colMeans are taken from the SHARED sm$X ONCE,
+        #    BEFORE by (smooth.r:3947 "sweep and drop constraints have to be
+        #    applied before by variables"); each level is then ``by.dum *
+        #    (constrained sm$X)`` (smooth.r:3982). Deriving drop/colMeans from
+        #    the masked X_lev instead reads the by-zeroed rows' (near-zero)
+        #    variance/means — wrong, and worst for the sparsest level (P20:
+        #    s(x2,by=fac) lowest-amplitude level edf 7.5 vs mgcv-bam 4.5).
+        if pc_C is not None and sparse_cons == -1:
+            raise NotImplementedError(
+                f"pc= point constraint with the sweep-drop constraint "
+                f"(bs with sparse.cons=-1) on {base_label} is not supported"
+            )
+        sd_shared = (_absorb_sweep_drop(X, S_list)
+                     if sparse_cons == -1 else None)
         blocks: list[SmoothBlock] = []
         for lev in levels:
             mask = (by_arr == lev).astype(float)
-            X_lev = X * mask[:, None]
             if sparse_cons == -1:
-                # mgcv-F by-factor + sparse.cons=-1: drop col / de-mean per level.
-                # (mgcv likely shares the drop column across levels via the same
-                # pre-by sm$C; for now per-level matches the no-by case and is
-                # what current bam-F use cases need.)
-                X2, S2, T = _absorb_sweep_drop(X_lev, S_list)
+                X2_sh, S2, T = sd_shared
+                X2 = X2_sh * mask[:, None]   # by.dum * constrained shared X
             else:
+                X_lev = X * mask[:, None]
+                # pc= shares one always-applied constraint across by-levels
+                # (smooth.r: point.con's C is on the unmasked basis).
                 X2, S2, T = _absorb_sumzero(
                     X_lev, S_list,
-                    C_source=C_source if C_source is not None else X,
+                    C_source=(
+                        pc_C if pc_C is not None
+                        else (C_source if C_source is not None else X)
+                    ),
                 )
             label = f"{base_label}:{by_expr}{lev}"
             spec = (
@@ -3380,6 +3938,11 @@ def _apply_by_and_absorb(
         return blocks
 
     # Numeric by: multiply X by by-column, skip absorb.cons.
+    if pc_C is not None:
+        raise NotImplementedError(
+            f"pc= point constraint with a numeric by= on {base_label} is not "
+            "supported (numeric-by smooths skip identifiability absorption)"
+        )
     if isinstance(by_col, pl.Series):
         by_arr = by_col.to_numpy().astype(float)
     else:
@@ -3516,6 +4079,176 @@ def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         ),
         S_scale=S_scale,
     )]
+
+
+def _pol2nb(polys: Mapping) -> dict[str, list[str]]:
+    """Port of mgcv ``pol2nb`` (smooth.r:2668-2723): derive a neighbour list
+    from boundary polygons. ``polys`` maps each region label to a 2-column
+    vertex matrix (rows of NA separate disjoint sub-polygons of one region).
+    Two regions are neighbours iff they share at least one vertex.
+
+    A bounding-box overlap test pre-filters candidate pairs (mgcv's spdep
+    speed-up); the shared-vertex count is ``nrow(co) - nrow(uniquecombs(co))``
+    on the stacked, de-duplicated vertex sets — here via ``_mgcv_ordered_unique``
+    (the same %.15g text-label row de-dup mgcv's ``uniquecombs`` uses).
+
+    WARNING (mgcv's own): neighbours are defined by *shared vertices* — a region
+    whose vertex merely lies on another's line segment (no shared vertex) is not
+    detected. Returns a dict keyed by region label whose values are the lists of
+    neighbour labels (ready for ``_mrf_penalty_from_nb``)."""
+    names = [str(name) for name in polys]
+    n_poly = len(names)
+    lo1 = np.empty(n_poly)
+    hi1 = np.empty(n_poly)
+    lo2 = np.empty(n_poly)
+    hi2 = np.empty(n_poly)
+    verts: list[np.ndarray] = []
+    for i, key in enumerate(polys):
+        m = np.asarray(polys[key], dtype=float)
+        if m.ndim != 2 or m.shape[1] != 2:
+            raise ValueError(
+                f"mrf polys[{names[i]!r}] must be a 2-column vertex matrix"
+            )
+        m = m[~np.isnan(m).any(axis=1)]      # strip NA separator rows (rowSums NA)
+        lo1[i], hi1[i] = m[:, 0].min(), m[:, 0].max()
+        lo2[i], hi2[i] = m[:, 1].min(), m[:, 1].max()
+        verts.append(_mgcv_ordered_unique(m))   # strip duplicate vertices
+    nb: dict[str, list[str]] = {name: [] for name in names}
+    for k in range(n_poly):
+        ol1 = (((lo1[k] <= hi1) & (lo1[k] >= lo1))
+               | ((hi1[k] <= hi1) & (hi1[k] >= lo1))
+               | ((lo1 <= hi1[k]) & (lo1 >= lo1[k]))
+               | ((hi1 <= hi1[k]) & (hi1 >= lo1[k])))
+        ol2 = (((lo2[k] <= hi2) & (lo2[k] >= lo2))
+               | ((hi2[k] <= hi2) & (hi2[k] >= lo2))
+               | ((lo2 <= hi2[k]) & (lo2 >= lo2[k]))
+               | ((hi2 <= hi2[k]) & (hi2 >= lo2[k])))
+        ol = ol1 & ol2
+        ol[k] = False
+        cok = verts[k]
+        for j in np.flatnonzero(ol):
+            co = np.vstack([verts[j], cok])
+            n_shared = co.shape[0] - _mgcv_ordered_unique(co).shape[0]
+            if n_shared > 0:
+                nb[names[k]].append(names[j])
+    return {name: list(dict.fromkeys(neigh)) for name, neigh in nb.items()}
+
+
+def _mrf_penalty_from_nb(nb: Mapping, levels: list) -> np.ndarray:
+    """Graph-Laplacian penalty from a neighbour list (smooth.r:2807-2816).
+
+    ``S[i,i]`` = #neighbours of region i; ``S[i,j] = -1`` for each neighbour
+    j≠i. ``nb`` is keyed by region label (matched to ``levels`` by string), and
+    ``levels`` fixes the column order. The neighbour relation must be symmetric
+    (mgcv's "Something wrong with auto-penalty construction" check)."""
+    k = len(levels)
+    pos = {str(lev): i for i, lev in enumerate(levels)}
+    if {str(key) for key in nb} != set(pos):
+        raise ValueError(
+            "mrf nb names must match the region levels exactly "
+            "(every region needs a neighbour-list entry)"
+        )
+    S = np.zeros((k, k))
+    for name, neighbours in nb.items():
+        i = pos[str(name)]
+        idx = [pos[str(v)] for v in neighbours]
+        S[i, i] = len(idx)
+        for j in idx:
+            if j != i:
+                S[i, j] = -1.0
+    if not np.allclose(S, S.T):
+        raise ValueError(
+            "mrf neighbour relation is not symmetric (if j is a neighbour of "
+            "i, i must be a neighbour of j)"
+        )
+    return S
+
+
+def _build_mrf_smooth(
+    call: Call, data: pl.DataFrame, xt: Mapping | None = None,
+) -> list[SmoothBlock]:
+    """`bs="mrf"` — Markov random field smooth (smooth.construct.mrf.smooth.spec,
+    smooth.r:2726-2866).
+
+    The covariate is a factor of region labels; the basis is the region
+    indicator and the penalty is supplied via ``xt`` — a penalty matrix
+    (``penalty``), a neighbour list (``nb``, → graph Laplacian), or boundary
+    polygons (``polys``, → neighbour list via pol2nb → graph Laplacian). hea
+    threads ``xt`` from
+    ``gam(..., xt={region: {...}})`` (the object-arg channel, like ``knots=``).
+    """
+    term_vars = _smooth_term_vars(call)
+    if len(term_vars) != 1:
+        raise ValueError("bs='mrf' takes exactly one (region) argument")
+    term = term_vars[0]
+    spec = dict((xt or {}).get(term) or {})
+    if not spec:
+        raise ValueError(
+            f"s({term}, bs='mrf') needs xt with a penalty matrix, neighbour "
+            f"list, or boundary polygons — pass gam(..., xt={{{term!r}: "
+            f"{{'nb': ...}}}}) (or 'penalty'/'polys')"
+        )
+
+    col = data[term]
+    k_levels = _factor_levels(col)          # mgcv: as.factor; knots = levels(x)
+    nlev = len(k_levels)
+    k_node = call.kwargs.get("k")
+    bs_dim = (int(k_node.value)
+              if isinstance(k_node, Literal) and k_node.kind == "num" else -1)
+    if bs_dim < 0:
+        bs_dim = nlev                       # default knots = all regions
+    if bs_dim > nlev:
+        raise ValueError("MRF basis dimension set too high")
+
+    vals = col.to_numpy()
+    X = np.zeros((len(vals), nlev))
+    for j, lev in enumerate(k_levels):
+        X[:, j] = (vals == lev)
+
+    if spec.get("penalty") is not None:
+        S = np.asarray(spec["penalty"], dtype=float)
+        if S.shape != (nlev, nlev):
+            raise ValueError(
+                f"supplied mrf penalty is {S.shape}, expected "
+                f"({nlev}, {nlev}) for {nlev} regions"
+            )
+    elif spec.get("nb") is not None:
+        S = _mrf_penalty_from_nb(spec["nb"], k_levels)
+    elif spec.get("polys") is not None:
+        # Boundary polygons → neighbour list (mgcv pol2nb) → graph Laplacian.
+        S = _mrf_penalty_from_nb(_pol2nb(spec["polys"]), k_levels)
+    else:
+        raise ValueError("mrf xt must contain 'penalty', 'nb', or 'polys'")
+
+    P = None
+    if bs_dim < nlev:
+        # Low-rank natural-parameter approximation (smooth.r:2838-2853): retain
+        # the bs.dim least-penalized basis elements. Regions with no data get a
+        # dummy observation first so X is full column rank for nat.param, then
+        # the dummies are dropped from the returned model matrix.
+        mi = np.flatnonzero(X.sum(axis=0) == 0)
+        Xn = X
+        if len(mi) > 0:
+            dummy = np.zeros((len(mi), nlev))
+            for r, c in enumerate(mi):
+                dummy[r, int(c)] = 1.0
+            Xn = np.vstack([dummy, X])
+        Xr, D, Pmat, rp_rank = _nat_param(
+            Xn, S, rank=None, type_=0, unit_fnorm=True, return_rank=True,
+        )
+        ind = np.arange(nlev - bs_dim, nlev)   # final bs.dim (least-penalized) cols
+        Xr_data = Xr[len(mi):, :] if len(mi) > 0 else Xr
+        X = Xr_data[:, ind]
+        P = Pmat[:, ind]
+        in_range = ind[ind < rp_rank]
+        S = np.diag(np.concatenate(
+            [D[in_range], np.zeros(int(np.sum(ind >= rp_rank)))]
+        ))
+
+    raw = _MRFRawBasis(term=term, levels=list(k_levels), P=P)
+    return _apply_by_and_absorb(
+        call, data, X, [S], "mrf.smooth", term_vars, raw_basis=raw,
+    )
 
 
 def _absorb_sumzero(
@@ -3912,7 +4645,7 @@ def _cc_basis(x: np.ndarray, knots: np.ndarray, BD: np.ndarray) -> np.ndarray:
     # 0-based indices
     j1_0 = j1 - 1
     j_0 = j_wrap - 1
-    I = np.eye(nk - 1)
+    eye = np.eye(nk - 1)
     xk_right = knots[j1]  # knots[j1+1] 1-based → knots[j1] 0-based
     xk_left = knots[j1 - 1]  # knots[j1] 1-based → knots[j1-1] 0-based
     h_local = h[hj]
@@ -3923,8 +4656,8 @@ def _cc_basis(x: np.ndarray, knots: np.ndarray, BD: np.ndarray) -> np.ndarray:
     X = (
         BD[j1_0, :] * c_r[:, None]
         + BD[j_0, :] * c_l[:, None]
-        + I[j1_0, :] * a_r[:, None]
-        + I[j_0, :] * a_l[:, None]
+        + eye[j1_0, :] * a_r[:, None]
+        + eye[j_0, :] * a_l[:, None]
     )
     return X
 
@@ -4338,7 +5071,6 @@ def _bs_penalty(knots: np.ndarray, m0: int, m2: int) -> np.ndarray:
     pord = m0 - m2
     if pord < 0:
         raise ValueError("requested non-existent derivative in B-spline penalty")
-    n_basis = len(knots) - (m0 + 1)
 
     if pord == 0:
         # integrand is a step function; midpoint quadrature
@@ -5180,6 +5912,43 @@ def _mgcv_ordered_unique(xm: np.ndarray) -> np.ndarray:
     return xm[idx]
 
 
+def _xt_max_knots_seed(call: Call) -> tuple[int, int]:
+    """tp/ds/sos ``xt=list(max.knots=, seed=)`` — the large-n knot-
+    subsample controls (smooth.r:1286-1302 tp, :3239-3266 ds,
+    :3031-3050 sos). Defaults (2000, 1), mgcv's. Other ``xt`` entries
+    are an error here — no other xt semantics are ported for these
+    bases (never silent)."""
+    node = call.kwargs.get("xt")
+    mk, seed = 2000, 1
+    if node is None or (isinstance(node, Name) and node.ident == "NULL"):
+        return mk, seed
+    if not (isinstance(node, Call) and node.fn == "list"):
+        raise ValueError(
+            f"xt= for {call.fn}() must be list(max.knots=, seed=); "
+            f"got {_deparse(node)!r}"
+        )
+
+    def _int(nd, what):
+        if isinstance(nd, Literal) and nd.kind == "num":
+            return int(nd.value)
+        raise ValueError(f"xt ${what} must be a number; got {_deparse(nd)!r}")
+
+    for key, v in node.kwargs.items():
+        if key == "max.knots":
+            mk = _int(v, "max.knots")
+        elif key == "seed":
+            seed = _int(v, "seed")
+        else:
+            raise ValueError(
+                f"unsupported xt entry {key!r} for {call.fn}() "
+                "(ported: max.knots, seed)"
+            )
+    if node.args:
+        raise ValueError("xt=list(...) entries must be named "
+                         "(max.knots=, seed=)")
+    return mk, seed
+
+
 def _mgcv_knot_subsample(xm: np.ndarray, max_knots: int,
                          seed: int = 1) -> np.ndarray | None:
     """The shared large-n knot rule of mgcv's tp/ds/sos constructors:
@@ -5229,7 +5998,8 @@ def _tp_raw(
     # rows — in which case data rows no longer index into Xu and the model
     # matrix is built by kernel evaluation instead (yxindex=None).
     # Otherwise preserve the index mapping from data rows to Xu.
-    Xu_sub = _mgcv_knot_subsample(x_c, 2000, seed=1)
+    mk_tp, seed_tp = _xt_max_knots_seed(call)
+    Xu_sub = _mgcv_knot_subsample(x_c, mk_tp, seed=seed_tp)
     if Xu_sub is not None:
         Xu = Xu_sub
         yxindex = None
@@ -5545,7 +6315,7 @@ class _DSRawBasis(_RawBasis):
 
 def _ds_raw(
     call: Call, data: pl.DataFrame, term: list[str],
-    knots: dict | None = None, max_knots: int = 2000,
+    knots: dict | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], _DSRawBasis]:
     from math import comb
     d = len(term)
@@ -5568,7 +6338,8 @@ def _ds_raw(
         # sp compensates for) depends on knot order. np.unique's lexsort
         # ordering left 2-D ds sp off mgcv by a data-dependent factor
         # while leaving the fitted model identical.
-        knt = _mgcv_knot_subsample(x, max_knots, seed=1)
+        mk_ds, seed_ds = _xt_max_knots_seed(call)
+        knt = _mgcv_knot_subsample(x, mk_ds, seed=seed_ds)
         if knt is None:
             knt = _mgcv_ordered_unique(x)
     nk = knt.shape[0]
@@ -5736,7 +6507,7 @@ class _SOSRawBasis(_RawBasis):
 
 def _sos_raw(
     call: Call, data: pl.DataFrame, term: list[str],
-    knots: dict | None = None, max_knots: int = 2000,
+    knots: dict | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], _SOSRawBasis]:
     if len(term) != 2:
         raise ValueError('bs="sos" needs exactly 2 covariates (lat, long)')
@@ -5753,8 +6524,9 @@ def _sos_raw(
     else:
         # mgcv's seeded max.knots subsample above 2000 unique (lat,long)
         # locations (smooth.r:3031-3050, bit-exact R RNG).
-        pts = _mgcv_knot_subsample(np.column_stack([la, lo]), max_knots,
-                                   seed=1)
+        mk_sos, seed_sos = _xt_max_knots_seed(call)
+        pts = _mgcv_knot_subsample(np.column_stack([la, lo]), mk_sos,
+                                   seed=seed_sos)
         if pts is None:
             pts = np.unique(np.column_stack([la, lo]), axis=0)
         la_k, lo_k = pts[:, 0], pts[:, 1]
@@ -5797,21 +6569,28 @@ def _build_sos_smooth(
 
 
 def _nat_param(
-    X: np.ndarray, S: np.ndarray, rank: int, type_: int = 1, unit_fnorm: bool = True,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    X: np.ndarray, S: np.ndarray, rank: int | None = None, type_: int = 1,
+    unit_fnorm: bool = True, return_rank: bool = False,
+):
     """Port of mgcv's `nat.param(X, S, rank, type, unit.fnorm)`.
 
-    type=1: QR on X, then eigendecompose R^-T S R^-1; rescale so the
-    penalty is identity on its range. The chain is fp-faithful to mgcv
-    (triangular solves, unsymmetrized evr eigen) so the degenerate
-    null-space basis reproduces R's to ~1e-14 — see the inline note.
+    type=0: QR on X, eigendecompose R^-T S R^-1; leave the penalty diagonal
+    (the natural parameterization). type=1: as type=0 then rescale so the
+    penalty is identity on its range (mgcv stops there, leaving the degenerate
+    null-space basis to LAPACK noise; hea additionally applies the type=3
+    centered-Gram null rotation — see the inline note).
     type=3: eigendecompose S directly; rescale columns by sqrt(eigenvalue)
     (range) or by a col-norm match (null). Null-space eigenvectors are
-    post-rotated so the final column is closest to a constant vector.
+    post-rotated via the eigen of the centered null-block Gram.
 
+    `rank=None` computes the penalty rank internally as mgcv does
+    (`sum(eigenvalues > max·eps^0.8)`, on RSR for type 0/1, on S for type 2/3).
     Returns `(X_new, D, P)`: X_new = X @ P; D is the range diagonal of the
-    transformed penalty (length `rank`); P is the parameter-transform."""
+    transformed penalty (length `rank`); P is the parameter-transform — or
+    `(X_new, D, P, rank)` when ``return_rank`` (mgcv's mrf low-rank path needs
+    the computed rank)."""
     p = X.shape[1]
+    _np_tol = float(np.finfo(float).eps) ** 0.8
 
     if type_ == 3:
         S_sym = 0.5 * (S + S.T)
@@ -5842,7 +6621,6 @@ def _nat_param(
             ind = np.arange(rank, p)
             rind = np.arange(p - 1, rank - 1, -1)  # reversed
             Xn = X_new[:, ind]
-            n_rows = Xn.shape[0]
             Xn_c = Xn - Xn.mean(axis=0, keepdims=True)
             w_n, V_n = np.linalg.eigh(Xn_c.T @ Xn_c)
             o = np.argsort(-w_n)
@@ -5868,17 +6646,8 @@ def _nat_param(
     Q, R = np.linalg.qr(X, mode="reduced")
     # RSR = R^-T @ S @ R^-1, via the same two triangular solves as mgcv's
     # forwardsolve(t(R), t(forwardsolve(t(R), t(S)))) — and, like mgcv, NO
-    # symmetrization before eigen. The exact-arithmetic null space of RSR is
-    # degenerate, and dsyevr (R's eigen(symmetric=TRUE) and scipy's evr
-    # driver) resolves the within-cluster basis deterministically from the
-    # well-determined part of the matrix: given this solve chain, scipy
-    # reproduces R's null VECTORS to ~1e-14. Only their column ORDER (the
-    # sort of the two noise-level eigenvalues) is build-dependent — a model-
-    # invariant permutation that even two R installs with different BLAS
-    # would not agree on. An LU solve (np.linalg.solve) or a pre-eigen
-    # 0.5*(A+A') symmetrization perturbs the cluster enough to ROTATE the
-    # basis instead, which does change the model (each null dimension gets
-    # its own λ).
+    # symmetrization before eigen (an LU solve or a 0.5*(A+A') perturbs the
+    # null cluster enough to land on a different resolution).
     from scipy.linalg import eigh as _sla_eigh, solve_triangular as _sla_tri
     Y = _sla_tri(R.T, S.T, lower=True)        # R^-T S'
     RSR = _sla_tri(R.T, Y.T, lower=True)      # R^-T (S R^-1)
@@ -5887,6 +6656,8 @@ def _nat_param(
     w = w[order]
     V = V[:, order]
 
+    if rank is None:  # mgcv: rank = sum(eigenvalues > max·tol)
+        rank = int(np.sum(w > (w.max() * _np_tol))) if w.size else 0
     D = np.clip(w[:rank].copy(), 0.0, None)
     X_new = Q @ V
     P = _sla_tri(R, V, lower=False)
@@ -5897,6 +6668,30 @@ def _nat_param(
         X_new = X_new / E_safe
         P = P / E_safe
         D = np.ones(rank)
+
+    # mgcv stops here for type=1: the null block keeps eigen()'s arbitrary
+    # resolution of the zero-eigenvalue cluster — pure LAPACK noise, decided
+    # by the last bits of RSR. macOS x86 Accelerate doesn't even keep those
+    # bits stable per call (heap-phase-sensitive kernels): the cluster came
+    # out rotated 44° between two fits in ONE process, which is a different
+    # model whenever each null dimension carries its own λ (fs) — measured
+    # 2.1 on a free-sp fs REML and 0.7 at fixed sp. So hea pins the
+    # resolution down with the SAME centered-Gram rotation mgcv applies in
+    # the type=3 branch: orientation and order become data-determined
+    # (eigengap O(1) vs O(1e-20)) and reproduce across BLAS builds to
+    # ~1e-14. This is a deliberate deviation from nat.param; the fs
+    # reference pins are R-validated against this exact parametrization via
+    # paraPen (see the fs tests in tests/test_gam.py).
+    if type_ == 1 and rank < p - 1:
+        ind = np.arange(rank, p)
+        rind = np.arange(p - 1, rank - 1, -1)  # reversed
+        Xn = X_new[:, ind]
+        Xn_c = Xn - Xn.mean(axis=0, keepdims=True)
+        w_n, V_n = np.linalg.eigh(Xn_c.T @ Xn_c)
+        o = np.argsort(-w_n)
+        V_n = V_n[:, o]
+        X_new[:, rind] = X_new[:, ind] @ V_n
+        P[:, rind] = P[:, ind] @ V_n
 
     if unit_fnorm:
         if rank > 0:
@@ -5909,6 +6704,8 @@ def _nat_param(
             X_new[:, rank:] *= scalef
             P[:, rank:] *= scalef
 
+    if return_rank:
+        return X_new, D, P, rank
     return X_new, D, P
 
 
@@ -5953,9 +6750,10 @@ def _build_fs_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     Sb = Sb_list[0]
 
     # nat.param(type=1) — make the base penalty an identity on its range.
-    # The null-space basis matches mgcv's eigen choice (see _nat_param);
-    # only the order of the null columns is LAPACK-build noise, in hea
-    # exactly as in R itself.
+    # The null-space basis is canonicalized by the centered-Gram rotation
+    # (see _nat_param): column rank+0 is the constant-like direction, the
+    # final column the most-variable one, deterministically on every BLAS
+    # build (mgcv leaves this order/orientation to LAPACK noise).
     Xr, D, P = _nat_param(Xb, Sb, rank=rank, type_=1, unit_fnorm=True)
     p = Xr.shape[1]
 
@@ -6555,17 +7353,20 @@ def _apply_tero(specs: list[dict]) -> list[dict]:
 
 
 def _te_make_margin_call(spec: dict) -> Call:
-    """Build a synthetic `s(term..., k=..., bs=..., m=..., fx=...)` Call
-    for a single margin so we can reuse the existing bs-specific raw
-    helpers."""
+    """Build a synthetic `s(term..., k=..., bs=..., m=...)` Call for a single
+    margin so we can reuse the existing bs-specific raw helpers.
+
+    `fx` is deliberately NOT forwarded: mgcv builds every margin penalized
+    ("NOTE: fx and by not dealt with here!", smooth.r:462) and instead drops
+    the corresponding TENSOR penalty for fx margins after the product is
+    formed (smooth.r:830). Forwarding fx here would leave the margin with no
+    penalty and break the one-penalty-per-margin tensor assembly."""
     args: list = [Name(ident=t) for t in spec["term"]]
     kwargs: dict = {}
     kwargs["k"] = Literal(value=spec["k"], kind="num")
     kwargs["bs"] = Literal(value=spec["bs"], kind="str")
     if spec["m"] is not None:
         kwargs["m"] = spec["m"]
-    if spec["fx"]:
-        kwargs["fx"] = Name(ident="TRUE")
     return Call(fn="s", args=args, kwargs=kwargs)
 
 
@@ -6826,6 +7627,10 @@ def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
             raise NotImplementedError(
                 "by= with matrix-arg te() is not yet supported"
             )
+        if _smooth_pc_value(call) is not None:
+            raise NotImplementedError(
+                "pc= point constraint with matrix-arg te() is not yet supported"
+            )
         return [SmoothBlock(
             label=label, term=term_all, cls=cls, X=X, S=S_list,
             spec=BasisSpec(raw=tensor_raw, by=None, absorb=None),
@@ -6971,8 +7776,22 @@ def _build_t2_smooth(
     The tensor's null space is then constrained by a single row C
     (smooth.r:1117-1120) before scaling and constraint absorption.
     """
+    if _smooth_pc_value(call) is not None:
+        raise NotImplementedError(
+            "pc= point constraint with t2() is not yet supported"
+        )
     specs = _te_parse_margins(call, data)
     n_bases = len(specs)
+
+    # t2 has no fx: mgcv's t2() hardcodes `fx <- FALSE` (smooth.r:539) — there
+    # is no fixed/unpenalized t2 (use te(..., fx=TRUE) for that). Reject it
+    # cleanly rather than mis-fitting a penalized t2 under a fx= the user
+    # expected to take effect.
+    if any(spec["fx"] for spec in specs):
+        raise NotImplementedError(
+            "t2() does not support fx= (mgcv hardcodes fx=FALSE for t2; use "
+            "te(..., fx=TRUE) for a fixed/unpenalized tensor smooth)"
+        )
 
     Xm: list[np.ndarray] = []
     ranks: list[int] = []
@@ -7002,11 +7821,7 @@ def _build_t2_smooth(
         D[cx[j]:cx[j + 1]] = 1.0
         S_list.append(np.diag(D))
 
-    # fx handling: drop penalties for margins marked fx (mgcv only has per-margin fx,
-    # but applies it per-sub-block by index — no fixture exercises it here).
-    for i in reversed(range(n_bases)):
-        if specs[i]["fx"]:
-            raise NotImplementedError("t2 with fx=TRUE not yet supported")
+    # (t2 fx is rejected up front — mgcv hardcodes fx=FALSE for t2.)
 
     # Tensor null-space constraint (smooth.r:1117-1120). Rank of the null is
     # p - sum(sub_cols). Build C = [0_{nup}, colSums(X[:, nup:])] as 1×p.
@@ -7251,6 +8066,7 @@ def reject_unsupported_smooth_id(expanded: ExpandedFormula) -> None:
 def materialize_smooths(
     expanded: ExpandedFormula, data: pl.DataFrame,
     *, sparse_cons: int = 0, tero: bool = False, knots: dict | None = None,
+    xt: Mapping | None = None,
 ) -> list[list[SmoothBlock]]:
     """Materialize each smooth in `expanded.smooths` to one or more blocks.
 
@@ -7333,21 +8149,38 @@ def materialize_smooths(
                 return _build_ti_smooth(call, d, knots=knots)
             return _build_t2_smooth(call, d, knots=knots)
         bs = _smooth_bs(call)
-        if bs == "re":   return _build_re_smooth(call, d)
-        if bs == "cr":   return _build_cr_smooth(call, d, knots=knots)
-        if bs == "cs":   return _build_cs_smooth(call, d, knots=knots)
-        if bs == "cc":   return _build_cc_smooth(call, d, knots=knots)
-        if bs == "tp":   return _build_tp_smooth(call, d)
-        if bs == "ts":   return _build_ts_smooth(call, d)
-        if bs == "ds":   return _build_ds_smooth(call, d, knots=knots)
-        if bs == "sos":  return _build_sos_smooth(call, d, knots=knots)
-        if bs == "ps":   return _build_ps_smooth(call, d, knots=knots)
-        if bs == "cp":   return _build_cp_smooth(call, d, knots=knots)
-        if bs == "bs":   return _build_bs_smooth(call, d, knots=knots)
-        if bs == "gp":   return _build_gp_smooth(call, d)
-        if bs == "fs":   return _build_fs_smooth(call, d)
-        if bs == "sz":   return _build_sz_smooth(call, d)
-        if bs == "ad":   return _build_ad_smooth(call, d)
+        if bs == "re":
+            return _build_re_smooth(call, d)
+        if bs == "cr":
+            return _build_cr_smooth(call, d, knots=knots)
+        if bs == "cs":
+            return _build_cs_smooth(call, d, knots=knots)
+        if bs == "cc":
+            return _build_cc_smooth(call, d, knots=knots)
+        if bs == "tp":
+            return _build_tp_smooth(call, d)
+        if bs == "ts":
+            return _build_ts_smooth(call, d)
+        if bs == "ds":
+            return _build_ds_smooth(call, d, knots=knots)
+        if bs == "sos":
+            return _build_sos_smooth(call, d, knots=knots)
+        if bs == "ps":
+            return _build_ps_smooth(call, d, knots=knots)
+        if bs == "cp":
+            return _build_cp_smooth(call, d, knots=knots)
+        if bs == "bs":
+            return _build_bs_smooth(call, d, knots=knots)
+        if bs == "gp":
+            return _build_gp_smooth(call, d)
+        if bs == "fs":
+            return _build_fs_smooth(call, d)
+        if bs == "sz":
+            return _build_sz_smooth(call, d)
+        if bs == "ad":
+            return _build_ad_smooth(call, d)
+        if bs == "mrf":
+            return _build_mrf_smooth(call, d, xt=xt)
         raise NotImplementedError(
             f"smooth bs={bs!r} (class dispatch for {_smooth_label(call)}) "
             "not yet implemented"
@@ -7656,7 +8489,7 @@ class Design:
     ----------
     expanded : ExpandedFormula
         Output of ``formula.expand`` for the parsed formula. Pass this
-        to downstream materializers (``materialize_bars`` for lme,
+        to downstream materializers (``materialize_bars`` for gmm,
         ``materialize_smooths`` for gam) so they share the same parse.
     data : polars.DataFrame
         Input data with rows dropped where the response or any
@@ -7712,11 +8545,15 @@ def _lhs_referenced_cols(node, columns: set[str]) -> set[str]:
         if isinstance(n, Literal):
             return
         if isinstance(n, Paren):
-            visit(n.expr); return
+            visit(n.expr)
+            return
         if isinstance(n, UnaryOp):
-            visit(n.operand); return
+            visit(n.operand)
+            return
         if isinstance(n, BinOp):
-            visit(n.left); visit(n.right); return
+            visit(n.left)
+            visit(n.right)
+            return
         if isinstance(n, Call):
             for a in n.args:
                 visit(a)
@@ -7830,18 +8667,44 @@ def _na_mask_with_matrix_cols(
     return keep
 
 
+def _multivariate_lhs_specs(lhs) -> Optional[list[tuple[str, "Node"]]]:
+    """Response columns for a multivariate LHS, else ``None``.
+
+    R's ``cbind(y1, y2, ...) ~ rhs`` fits a multivariate linear model (class
+    ``mlm``): each ``cbind`` argument is one response column, labelled by its
+    deparse (``y1``, ``log(a)``, …) exactly as R names the ``cbind`` result.
+    Returns ``[(label, node), ...]`` so ``prepare_design`` can build a 2-D
+    ``Design.y``. A bare single-name/expression LHS returns ``None`` (the
+    ordinary univariate path).
+    """
+    if isinstance(lhs, Call) and lhs.fn == "cbind" and not lhs.kwargs:
+        return [(deparse(a), a) for a in lhs.args]
+    return None
+
+
 def prepare_design(
     formula: str,
     data: pl.DataFrame | Mapping[str, np.ndarray | list | pl.Series],
     *,
     contrasts: Optional[Mapping[str, str]] = None,
+    na_action: str = "omit",
+    basis_state: dict | None = None,
 ) -> Design:
     """Parse a formula, expand, and materialize the fixed-effect design.
 
-    NA-omit policy matches R's ``na.action = na.omit``: rows with NA in
-    the response or in any RHS-referenced column are dropped before the
-    design matrix is built. All three outputs (``Design.data``,
-    ``Design.X``, ``Design.y``) share the same row ordering.
+    ``na_action`` mirrors R's ``na.action`` for rows with NA in the response or
+    any referenced column:
+
+    * ``"omit"`` (default, R's ``na.omit``) / ``"exclude"`` — drop NA rows; the
+      design is complete-case. (``exclude`` differs from ``omit`` only in that R
+      *pads accessors back to the original length*, which is the model's job —
+      ``prepare_design`` builds the same complete-case design for both.)
+    * ``"fail"`` (R's ``na.fail``) — raise if any NA is present.
+    * ``"pass"`` (R's ``na.pass``) — keep every row untouched (NA flows into
+      ``X``/``y``).
+
+    All three outputs (``Design.data``, ``Design.X``, ``Design.y``) share the
+    same row ordering.
 
     The LHS may be either a bare column name or a small expression
     R/mgcv accepts: arithmetic (``y/100``, ``y^0.25``), unary minus,
@@ -7855,10 +8718,13 @@ def prepare_design(
     enabling mgcv's matrix-argument summation convention for ``s()`` and
     ``te()`` smooths (Wood §7.4.1's distributed-lag models).
 
-    ``contrasts`` mirrors R's ``model.matrix(contrasts.arg=)`` — a name →
-    contrast-name mapping overriding the default treatment/poly coding
-    for matching bare-name factor references. In-formula ``C(...)``
-    wraps still win (R semantics).
+    ``contrasts`` mirrors R's ``model.matrix(contrasts.arg=)`` — a mapping from
+    factor-column name to either a contrast *name* (``"contr.sum"``, …) or a
+    custom contrast *matrix* (``np.ndarray`` of shape ``(k, m)``, or a
+    ``(matrix, column_names)`` tuple), overriding the default coding for
+    matching bare-name factor references. The process-wide default pair is
+    :func:`set_default_contrasts` (R's ``options(contrasts)``). In-formula
+    ``C(...)`` wraps still win (R semantics).
     """
     data = normalize_data(data)
     f_parsed = parse(formula)
@@ -7875,18 +8741,34 @@ def prepare_design(
 
     expanded = expand(f_parsed, data_columns=list(data.columns))
 
+    _na = {"omit": "omit", "na.omit": "omit", "exclude": "omit",
+           "na.exclude": "omit", "fail": "fail", "na.fail": "fail",
+           "pass": "pass", "na.pass": "pass"}.get(str(na_action))
+    if _na is None:
+        raise ValueError("na_action must be one of 'omit' / 'exclude' / 'fail' "
+                         f"/ 'pass'; got {na_action!r}")
     na_cols = (referenced_columns(expanded) | lhs_cols) & columns
-    if na_cols:
+    if na_cols and _na != "pass":
         # Custom NA mask so that NaN inside ``Array(Float64, m)`` matrix
         # columns triggers a row drop (polars' drop_nulls keeps these).
         keep = _na_mask_with_matrix_cols(data, na_cols)
         if not keep.all():
+            if _na == "fail":
+                raise ValueError("missing values in object")  # R: na.fail
             data_clean = data.filter(pl.Series(keep))
         else:
             data_clean = data
     else:
-        data_clean = data
+        data_clean = data   # "pass": keep NA rows untouched
 
+    # NOTE: a multivariate `cbind(y1, y2) ~ ...` LHS is NOT handled here — it
+    # stays an `_eval_lhs_expr` raise (below). Models that accept a two-column
+    # response intercept `cbind` *before* `prepare_design`: `glm`/`gam` rewrite
+    # it to R's binomial proportion+trials form, and `lm` routes a multivariate
+    # response to its own per-column `mlm` builder (`lm._init_mlm`). Returning a
+    # 2-D `Design.y` here would break models that rely on the raise as their
+    # "cbind unsupported" boundary (e.g. `bam`), so prepare_design keeps a
+    # single-column `Design.y` contract.
     if isinstance(f_parsed.lhs, Name):
         y = data_clean[f_parsed.lhs.ident]
     else:
@@ -7898,6 +8780,7 @@ def prepare_design(
         )[response_label]
 
     with with_contrasts(contrasts):
-        X, param_assign = materialize(expanded, data_clean, return_assign=True)
+        X, param_assign = materialize(expanded, data_clean, return_assign=True,
+                                      drop_na=(_na != "pass"), basis_state=basis_state)
     return Design(expanded=expanded, data=data_clean, X=X, y=y,
                   response=response_label, param_assign=param_assign)

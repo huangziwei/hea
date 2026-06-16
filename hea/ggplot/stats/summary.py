@@ -22,6 +22,7 @@ import polars as pl
 
 from ..aes import split_layer_kwargs
 from .stat import Stat
+from ...R import distributions as _dist
 
 
 # ---------------------------------------------------------------------------
@@ -38,14 +39,13 @@ def mean_se(x: np.ndarray, mult: float = 1.0) -> dict:
 
 
 def mean_cl_normal(x: np.ndarray, conf: float = 0.95) -> dict:
-    from scipy import stats as scstats
 
     n = len(x)
     m = float(np.mean(x))
     if n < 2:
         return {"y": m, "ymin": m, "ymax": m}
     se = float(np.std(x, ddof=1)) / np.sqrt(n)
-    t = float(scstats.t.ppf(0.5 + conf / 2, n - 1))
+    t = float(_dist.qt(0.5 + conf / 2, n - 1))
     return {"y": m, "ymin": m - t * se, "ymax": m + t * se}
 
 

@@ -62,7 +62,7 @@ def plot_lm(
         else:
             raise ValueError(
                 f"plot(lmod, which={p}): only panels 0, 1, 2, 4 are supported "
-                f"in Phase 1 (Cook's distance and Cook-vs-leverage are deferred)"
+                f"(Cook's distance and Cook-vs-leverage are not yet implemented)"
             )
     fig.tight_layout()
     return axes[0] if n == 1 else axes

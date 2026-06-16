@@ -16,8 +16,7 @@ import pytest
 
 import hea
 from hea.ggplot import (
-    aes, geom_density, geom_boxplot, geom_point,
-    guide_area, plot_annotation, plot_layout, theme,
+    aes, guide_area, plot_layout, theme,
 )
 
 

@@ -15,6 +15,7 @@ from typing import Optional, Union
 import numpy as np
 import polars as pl
 from scipy import stats as _sps
+from . import distributions as _dist
 
 from ._shared import _as_array, _fmt, _fmt_pval
 from ..models.lm import lm
@@ -388,7 +389,7 @@ def chisq_test(
     expected = counts.sum() * p
     stat = float(np.sum((counts - expected) ** 2 / expected))
     df = len(counts) - 1
-    pval = float(_sps.chi2.sf(stat, df))
+    pval = float(_dist.pchisq(stat, df, lower_tail=False))
     return HTest(
         method="Chi-squared test for given probabilities",
         statistic={"X-squared": stat},
@@ -503,7 +504,7 @@ def prop_test(
         else:
             stat = (diff ** 2) / (p_null * (1 - p_null) / n0)
         df = 1
-        pval = float(_sps.chi2.sf(stat, df))
+        pval = float(_dist.pchisq(stat, df, lower_tail=False))
         return HTest(
             method="1-sample test for given proportion"
             + (" with continuity correction" if correct else ""),
@@ -613,23 +614,23 @@ def var_test(
     F = (var_x / var_y) / float(ratio)
 
     if alternative == "two.sided":
-        p = 2 * min(_sps.f.cdf(F, df1, df2), _sps.f.sf(F, df1, df2))
+        p = 2 * min(_dist.pf(F, df1, df2), _dist.pf(F, df1, df2, lower_tail=False))
     elif alternative == "less":
-        p = float(_sps.f.cdf(F, df1, df2))
+        p = float(_dist.pf(F, df1, df2))
     elif alternative == "greater":
-        p = float(_sps.f.sf(F, df1, df2))
+        p = float(_dist.pf(F, df1, df2, lower_tail=False))
     else:
         raise ValueError(f"var_test(): unknown alternative {alternative!r}")
 
     alpha = 1 - conf_level
     if alternative == "two.sided":
-        lo = F / _sps.f.ppf(1 - alpha / 2, df1, df2)
-        hi = F / _sps.f.ppf(alpha / 2, df1, df2)
+        lo = F / _dist.qf(1 - alpha / 2, df1, df2)
+        hi = F / _dist.qf(alpha / 2, df1, df2)
     elif alternative == "less":
         lo = 0.0
-        hi = F / _sps.f.ppf(alpha, df1, df2)
+        hi = F / _dist.qf(alpha, df1, df2)
     else:  # greater
-        lo = F / _sps.f.ppf(1 - alpha, df1, df2)
+        lo = F / _dist.qf(1 - alpha, df1, df2)
         hi = float("inf")
 
     return HTest(
@@ -740,7 +741,7 @@ def mcnemar_test(x, y=None, *, correct: bool = True) -> HTest:
         stat = diff ** 2 / (b + c)
     else:
         stat = (b - c) ** 2 / (b + c)
-    pval = float(_sps.chi2.sf(stat, 1))
+    pval = float(_dist.pchisq(stat, 1, lower_tail=False))
     return HTest(
         method="McNemar's Chi-squared test"
         + (" with continuity correction" if correct else ""),
@@ -812,7 +813,7 @@ def aov(formula: str, data: pl.DataFrame, *, type: str = "II") -> AnovaTable:
         ss = float(sub.rss - rss_full)
         df_term = int(sub.df_residuals - df_full)
         F = (ss / df_term) / (rss_full / df_full) if df_term > 0 else None
-        p = float(_sps.f.sf(F, df_term, df_full)) if F is not None else None
+        p = float(_dist.pf(F, df_term, df_full, lower_tail=False)) if F is not None else None
         rows.append(
             {
                 "term": term,

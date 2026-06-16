@@ -7,8 +7,7 @@
 #   tests/fixtures/glm/<id>/oracle.json   — pinned numerical outputs of glm()
 #
 # Tests load these via tests/conftest.py:load_glm_oracle(). Each fixture
-# corresponds to one (dataset, formula, family, link) triple from the plan
-# (.claude/plans/glm-port.md, Phase 0.2).
+# corresponds to one (dataset, formula, family, link) triple.
 
 suppressPackageStartupMessages({
   library(jsonlite)

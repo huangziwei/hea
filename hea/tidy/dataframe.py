@@ -722,7 +722,15 @@ class DataFrame(pl.DataFrame):
         replace: bool = False,
         seed: int | None = None,
     ) -> "DataFrame":
-        """Random rows. Pass ``n=`` for a count or ``prop=`` for a fraction."""
+        """Random rows. Pass ``n=`` for a count or ``prop=`` for a fraction.
+
+        ``seed`` is a **polars** seed, not R's. dplyr's ``slice_sample`` draws
+        from R's ``sample.int`` (you call ``set.seed`` separately), so
+        ``set.seed(k); slice_sample(...)`` in R will not reproduce
+        ``slice_sample(seed=k)`` here. (Bit-parity with a dplyr oracle would
+        need ``hea.R.rng``'s ``sample_int`` — not done; row-sampling parity is
+        rarely the point.)
+        """
         if (n is None) == (prop is None):
             raise ValueError("slice_sample(): pass exactly one of n= or prop=.")
         return self._wrap(
@@ -957,10 +965,10 @@ class DataFrame(pl.DataFrame):
         )
 
         same_name = [
-            l for l, r in zip(spec.equi_left, spec.equi_right) if l == r
+            left for left, r in zip(spec.equi_left, spec.equi_right) if left == r
         ]
         diff_name = [
-            (l, r) for l, r in zip(spec.equi_left, spec.equi_right) if l != r
+            (left, r) for left, r in zip(spec.equi_left, spec.equi_right) if left != r
         ]
         if not diff_name:
             out = pl.DataFrame.join(

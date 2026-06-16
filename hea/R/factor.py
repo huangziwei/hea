@@ -131,7 +131,7 @@ def factor(
         rename into one pass. Mutually exclusive with ``levels``.
     ordered : bool, optional
         If True, also register the series's name in hea's ordered-cols
-        contextvar so subsequent ``gam``/``lm``/``lme`` calls in this
+        contextvar so subsequent ``gam``/``lm``/``gmm`` calls in this
         session apply poly contrasts. Process-global; pair with
         ``hea.formula.with_ordered_cols`` if you need scoped use.
         ``ordered=False`` does NOT remove an already-registered name —
@@ -213,7 +213,7 @@ def ordered(series, levels=None, labels: dict | None = None):
 
     Returns an Enum series with the ordered-factor flag set: the
     series's name (if any) is registered in hea's ordered-cols
-    contextvar so subsequent model fitting (``gam`` / ``lm`` / ``lme``)
+    contextvar so subsequent model fitting (``gam`` / ``lm`` / ``gmm``)
     applies polynomial contrasts, and ``print(s)`` shows
     ``Levels: a < b < c`` (with ``<`` separators) to match R's display.
     Polars ``Enum`` already provides ``<`` / ``>`` / sort semantics from

@@ -28,3 +28,12 @@ MANIFEST
 Rplots.pdf
 
 ref/
+worktrees/
+
+# Rust / maturin
+/target/
+rust/target/
+.cargo-home/
+hea/_rs*.so
+hea/_rs*.pyd
+*.dylib

@@ -71,7 +71,7 @@ def _polar_x_range(x_scale):
     closed circle it would leave a gap at the 0/2π seam.
 
     Continuous scales: the trained data range ``(min, max)``. For data
-    already in ``[0, 2π]`` (pycircstat2's radians) this yields a
+    already in ``[0, 2π]`` (radians) this yields a
     factor of 1.0 in :meth:`CoordPolar.rescale_theta` — no-op.
     """
     from .scales.continuous import ScaleContinuous
@@ -316,7 +316,7 @@ def _render_single(plot, build_output, ax, subplotspec=None):
     # Polar pre-pass: resolve ordinal strings to numeric positions and
     # rescale the theta-axis data to [0, 2π] so ordinal x fans evenly
     # around the circle (matches ggplot2). For continuous data already
-    # in [0, 2π] (pycircstat2's radians) this is a no-op.
+    # in [0, 2π] (radians) this is a no-op.
     if is_polar:
         x_scale = _panel_scale(build_output, 1, "x")
         x_range = _polar_x_range(x_scale)
@@ -984,7 +984,7 @@ def _default_labels(plot, build_output=None):
     # labels (categories around the rim, radial tick numbers) already
     # carry the per-axis context, and matplotlib drops the ylabel at the
     # 9 o'clock spoke where it collides with the 180° tick label. ggplot2
-    # and pycircstat2 both follow this convention. Users opt back in with
+    # follows this convention too. Users opt back in with
     # ``labs(x="...", y="...")`` — that lands in ``explicit`` and bypasses
     # this branch.
     is_polar = (

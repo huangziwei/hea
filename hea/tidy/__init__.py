@@ -13,7 +13,7 @@ Design choices:
 
 * Subclass, not wrap. ``DataFrame(pl.DataFrame)`` preserves IS-A so any
   function that already accepts a polars DataFrame (including hea's own
-  ``lm`` / ``lme`` / ``glm`` / ``gam``) keeps working. Native polars
+  ``lm`` / ``gmm`` / ``glm`` / ``gam``) keeps working. Native polars
   methods on the subclass return plain ``pl.DataFrame``; tidyverse
   methods always return our subclass via ``_wrap``.
 * Polars expressions pass through unchanged. ``filter(pl.col("x") > 1)``

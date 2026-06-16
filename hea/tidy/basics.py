@@ -21,7 +21,7 @@ import polars as pl
 def tbl(obj):
     """Re-wrap a plain polars container as the corresponding hea subclass.
 
-    Rarely needed in normal code: Phase 1-5 of the subclass-coverage work
+    Rarely needed in normal code: the subclass-coverage work
     means every operation hea exposes already returns the right subclass.
     ``tbl`` is the documented escape hatch for the remaining cases — e.g.
     when an external library hands you a ``pl.DataFrame`` and you want

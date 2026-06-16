@@ -1,9 +1,7 @@
-"""hea.ggplot tests — Phase 0 onward.
+"""hea.ggplot tests.
 
-Each test ID matches the inventory in `.claude/plans/ggplot2-port.md` §9.1.
-PNG diff parity (the visual-snapshot tests) come later; Phase 0 just
-asserts the build pipeline runs and produces a matplotlib Figure with
-expected primitives.
+PNG diff parity (the visual-snapshot tests) come later; these just assert the
+build pipeline runs and produces a matplotlib Figure with expected primitives.
 """
 
 from __future__ import annotations
@@ -22,36 +20,33 @@ from hea.tidy import (
     fct_infreq, fct_relevel, fct_rev, fct_reorder, fct_reorder2,
 )
 from hea.ggplot import (
-    PlotGrid, aes, after_scale, after_stat, annotate, annotation_custom,
+    PlotGrid, aes, after_stat, annotate, annotation_custom,
     coord_cartesian, coord_fixed,
     coord_flip, coord_polar, coord_trans, expansion,
-    element_blank, element_line, element_rect,
+    element_blank, element_rect,
     plot_annotation, plot_layout, wrap_plots,
     element_text, facet_grid, facet_wrap, geom_abline, geom_area, geom_bar, geom_blank,
     geom_boxplot, geom_col, geom_contour, geom_contour_filled, geom_count,
     geom_crossbar, geom_curve, geom_density, geom_dotplot, geom_errorbar, geom_errorbarh,
     geom_hex, geom_histogram, geom_hline, geom_jitter,
     geom_label, geom_line, geom_linerange, geom_path, geom_point,
-    geom_pointrange, geom_polygon, geom_qq, geom_qq_line, geom_raster,
+    geom_pointrange, geom_polygon, geom_qq, geom_raster,
     geom_rect, geom_ribbon, geom_segment, geom_smooth,
     geom_step, geom_text, geom_tile, geom_violin, geom_vline, ggplot, ggtitle,
     labs, lims,
     guide_axis, guide_legend, guides,
     position_dodge, position_fill, position_jitter, position_nudge,
-    position_stack, scale_color_hue, scale_fill_hue, stat_ecdf, stat_function,
-    stat_qq, stat_qq_line, stat_sum, stat_summary, stat_unique, geom_function,
-    scale_alpha_continuous, scale_color_brewer, scale_color_gradient,
+    position_stack, scale_color_hue, stat_ecdf, stat_function,
+    stat_qq, stat_qq_line, stat_summary, stat_unique, geom_function,
+    scale_color_brewer, scale_color_gradient,
     scale_color_gradient2, scale_color_gradientn, scale_color_identity,
     scale_color_manual, scale_color_viridis_c, scale_color_viridis_d,
-    scale_fill_identity, scale_fill_manual, scale_linetype,
-    scale_linetype_manual, scale_radius, scale_shape, scale_shape_manual,
-    scale_size_area, scale_size_continuous, scale_size_manual,
-    scale_x_continuous, scale_x_date, scale_x_datetime, scale_x_discrete,
+    scale_fill_identity, scale_radius, scale_shape_manual,
+    scale_size_area, scale_size_continuous, scale_x_continuous, scale_x_date, scale_x_datetime, scale_x_discrete,
     scale_x_log10,
-    scale_x_ordinal, scale_x_percent, scale_x_reverse, scale_x_sqrt,
-    scale_x_time, scale_y_continuous, scale_y_date, scale_y_datetime,
-    scale_y_log10, scale_y_percent, scale_y_sqrt,
-    theme, theme_bw, theme_classic, theme_dark, theme_gray,
+    scale_x_ordinal, scale_x_reverse, scale_x_sqrt,
+    scale_y_continuous, scale_y_log10, scale_y_percent, scale_y_sqrt,
+    theme, theme_bw, theme_classic, theme_gray,
     theme_minimal, theme_void, xlab, xlim, ylab, ylim,
 )
 
@@ -300,7 +295,6 @@ def test_scale_y_log10():
     """``scale_y_log10`` pre-transforms the data (matches ggplot2 — stat
     sees log values), so the matplotlib axis stays linear and the y
     coordinates the geom plotted live in log10 space."""
-    import numpy as np
 
     mtcars = load_dataset("datasets", "mtcars")
     p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
@@ -476,7 +470,6 @@ def test_extended_breaks_degenerate_range_returns_single_tick():
 
 def test_geom_line_sorts_by_x():
     """`geom_line` connects points sorted by x — what most line plots want."""
-    import numpy as np
 
     mtcars = load_dataset("datasets", "mtcars")
     p = ggplot(mtcars, aes("wt", "mpg")) + geom_line()
@@ -1593,7 +1586,6 @@ def test_facet_wrap_unknown_scales_value_errors():
 
 def test_facet_wrap_with_geom_smooth_per_panel_fits():
     """`facet_wrap` runs the stat per panel, so each panel gets its own fit."""
-    import numpy as np
 
     mtcars = load_dataset("datasets", "mtcars")
     p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point() + geom_smooth(method="lm")
@@ -2326,7 +2318,6 @@ def test_stat_summary_default_is_mean_se_pointrange():
         # The point centres are the means: x=1 → 11, x=2 → 15, x=3 → 21.
         offsets = ax.collections[1].get_offsets()
         import numpy as np
-        import numpy as np
         np.testing.assert_array_almost_equal(
             sorted(offsets.tolist()), [[1.0, 11.0], [2.0, 15.0], [3.0, 21.0]]
         )
@@ -2361,7 +2352,6 @@ def test_stat_summary_componentwise_min_max_median():
         offsets = ax.collections[1].get_offsets()
         import numpy as np
         # x=1: median=11, min=10, max=12; same shape across x.
-        import numpy as np
         np.testing.assert_array_almost_equal(
             sorted(offsets.tolist()), [[1.0, 11.0], [2.0, 15.0], [3.0, 21.0]]
         )
@@ -2381,7 +2371,6 @@ def test_stat_summary_componentwise_min_max_median():
 
 def test_stat_summary_median_hilow():
     """``fun_data='median_hilow'`` matches numpy quantiles at conf=0.95."""
-    import numpy as np
     df = _summary_test_df()
     p = ggplot(df, aes("x", "y")) + stat_summary(fun_data="median_hilow")
     fig = p.draw()
@@ -2606,7 +2595,7 @@ def test_stat_ecdf_basic_step_to_one():
     try:
         ax = fig.axes[0]
         line = ax.lines[0]
-        xs, ys = line.get_xdata(), line.get_ydata()
+        ys = line.get_ydata()
         assert ys[0] == pytest.approx(0.2, abs=1e-9)
         assert ys[-1] == pytest.approx(1.0, abs=1e-9)
         # ys is non-decreasing.
@@ -2712,7 +2701,6 @@ def test_geom_hex_renders_polycollection():
 def test_geom_dotplot_stacks_within_bin():
     """`geom_dotplot()` produces one scatter point per data row, stacked
     vertically within each bin."""
-    import numpy as np
     df = pl.DataFrame({"x": [1.0] * 5 + [2.0] * 3 + [3.0] * 1})
     p = ggplot(df, aes("x")) + geom_dotplot()
     fig = p.draw()
@@ -3149,7 +3137,7 @@ def test_theme_panel_grid_blank_overrides_earlier_set_children():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        grid_visible = [l.get_visible() for l in ax.xaxis.get_gridlines()]
+        grid_visible = [ln.get_visible() for ln in ax.xaxis.get_gridlines()]
         assert not any(grid_visible), f"gridlines still visible: {grid_visible}"
     finally:
         plt.close(fig)
@@ -3269,12 +3257,12 @@ def test_scale_x_date_custom_format():
     fig = p.draw()
     try:
         labels = [t.get_text() for t in fig.axes[0].xaxis.get_majorticklabels()]
-        nonempty = [l for l in labels if l]
+        nonempty = [lbl for lbl in labels if lbl]
         # "Jan 2020" / "Feb 2020" — month abbreviation + year.
-        assert all(any(m in l for m in
+        assert all(any(m in lbl for m in
                        ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])
-                   for l in nonempty)
+                   for lbl in nonempty)
     finally:
         plt.close(fig)
 
@@ -3292,9 +3280,9 @@ def test_scale_x_datetime_includes_time():
     fig = p.draw()
     try:
         labels = [t.get_text() for t in fig.axes[0].xaxis.get_majorticklabels()]
-        nonempty = [l for l in labels if l]
+        nonempty = [lbl for lbl in labels if lbl]
         # Default datetime format includes ":" for the hh:mm part.
-        assert any(":" in l for l in nonempty)
+        assert any(":" in lbl for lbl in nonempty)
     finally:
         plt.close(fig)
 
@@ -3309,8 +3297,8 @@ def test_scale_y_percent_formats_as_percent():
     fig = p.draw()
     try:
         labels = [t.get_text() for t in fig.axes[0].yaxis.get_majorticklabels()]
-        nonempty = [l for l in labels if l]
-        assert all(l.endswith("%") for l in nonempty)
+        nonempty = [lbl for lbl in labels if lbl]
+        assert all(lbl.endswith("%") for lbl in nonempty)
     finally:
         plt.close(fig)
 
@@ -3323,10 +3311,10 @@ def test_scale_y_percent_xmax_100():
     fig = p.draw()
     try:
         labels = [t.get_text() for t in fig.axes[0].yaxis.get_majorticklabels()]
-        nonempty = [l for l in labels if l]
-        assert all(l.endswith("%") for l in nonempty)
+        nonempty = [lbl for lbl in labels if lbl]
+        assert all(lbl.endswith("%") for lbl in nonempty)
         # 50.0 should render as "50%", not "5000%".
-        assert any("50%" in l for l in nonempty)
+        assert any("50%" in lbl for lbl in nonempty)
     finally:
         plt.close(fig)
 
@@ -5651,12 +5639,14 @@ def test_coord_cartesian_default_is_no_op():
     mtcars = load_dataset("datasets", "mtcars")
     p_no_coord = ggplot(mtcars, aes("wt", "mpg")) + geom_point()
     p_default_coord = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + coord_cartesian()
-    f1 = p_no_coord.draw(); f2 = p_default_coord.draw()
+    f1 = p_no_coord.draw()
+    f2 = p_default_coord.draw()
     try:
         assert f1.axes[0].get_xlim() == pytest.approx(f2.axes[0].get_xlim())
         assert f1.axes[0].get_ylim() == pytest.approx(f2.axes[0].get_ylim())
     finally:
-        plt.close(f1); plt.close(f2)
+        plt.close(f1)
+        plt.close(f2)
 
 
 def test_coord_cartesian_xlim_zooms_axis():
@@ -5751,14 +5741,16 @@ def test_scale_color_hue_direction_reverses_palette():
     df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3], "g": ["a", "b", "c"]})
     p_fwd = ggplot(df, aes("x", "y", color="g")) + geom_point() + scale_color_hue()
     p_rev = ggplot(df, aes("x", "y", color="g")) + geom_point() + scale_color_hue(direction=-1)
-    f1 = p_fwd.draw(); f2 = p_rev.draw()
+    f1 = p_fwd.draw()
+    f2 = p_rev.draw()
     try:
         from matplotlib.colors import to_hex
         c1 = [to_hex(c) for c in f1.axes[0].collections[0].get_facecolors()]
         c2 = [to_hex(c) for c in f2.axes[0].collections[0].get_facecolors()]
         assert c1 == c2[::-1]
     finally:
-        plt.close(f1); plt.close(f2)
+        plt.close(f1)
+        plt.close(f2)
 
 
 # ---------------------------------------------------------------------------
@@ -5869,7 +5861,8 @@ def test_geom_function_alias():
         xs2 = f2.axes[0].lines[0].get_xdata()
         assert list(xs1) == pytest.approx(list(xs2))
     finally:
-        plt.close(f1); plt.close(f2)
+        plt.close(f1)
+        plt.close(f2)
 
 
 def test_stat_function_unknown_geom_errors():

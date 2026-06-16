@@ -5,8 +5,7 @@ it. Use ``from hea.ggplot import ggplot, aes, geom_point`` rather than
 ``from hea import ggplot`` (the latter binds the package, not the function).
 
 Surface today: ``ggplot``, ``aes``, the ``geom_*`` / ``stat_*`` /
-``scale_*`` / ``coord_*`` / ``facet_*`` / ``theme_*`` families, plus
-circular-statistics extensions in :mod:`hea.ggplot.circular`.
+``scale_*`` / ``coord_*`` / ``facet_*`` / ``theme_*`` families.
 """
 
 from __future__ import annotations
