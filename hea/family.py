@@ -274,6 +274,17 @@ class LogitLink(Link):
     def d4link(self, mu):
         mu = np.asarray(mu, dtype=float)
         return 6.0 / (1.0 - mu) ** 4 - 6.0 / mu ** 4
+    # extended-family ratios (gam.fit3.r:2237-2241): g'=1/(μ(1-μ)) ⇒
+    # g2g=g″/g'²=μ²−(1−μ)², g3g=2μ³+2(1−μ)³, g4g=6μ⁴−6(1−μ)⁴.
+    def g2g(self, mu):
+        mu = np.asarray(mu, dtype=float)
+        return mu ** 2 - (1.0 - mu) ** 2
+    def g3g(self, mu):
+        mu = np.asarray(mu, dtype=float)
+        return 2.0 * mu ** 3 + 2.0 * (1.0 - mu) ** 3
+    def g4g(self, mu):
+        mu = np.asarray(mu, dtype=float)
+        return 6.0 * mu ** 4 - 6.0 * (1.0 - mu) ** 4
 
 
 def _dnorm(x):
@@ -307,6 +318,16 @@ class ProbitLink(Link):
         eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
         d = np.maximum(_dnorm(eta), np.finfo(float).eps)
         return (7.0 * eta + 6.0 * eta ** 3) / d ** 4
+    # extended-family ratios (gam.fit3.r:2249-2266): with η=Φ⁻¹(μ) and
+    # g'=1/φ(η), the g″/g'ᵏ ratios collapse to polynomials in η.
+    def g2g(self, mu):
+        return _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
+    def g3g(self, mu):
+        eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
+        return 1.0 + 2.0 * eta * eta
+    def g4g(self, mu):
+        eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
+        return 7.0 * eta + 6.0 * eta ** 3
 
 
 class CauchitLink(Link):
@@ -340,6 +361,19 @@ class CauchitLink(Link):
         eta = np.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
         eta2 = eta * eta
         return 2.0 * np.pi ** 4 * (8.0 * eta + 12.0 * eta2 * eta) * (1.0 + eta2)
+    # extended-family ratios (gam.fit3.r:2272-2291): η=qcauchy(μ),
+    # g'=1/f(η) with f the Cauchy density — the g″/g'ᵏ ratios in η.
+    def g2g(self, mu):
+        eta = np.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
+        return eta / (1.0 + eta * eta)
+    def g3g(self, mu):
+        eta = np.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
+        eta2 = eta * eta
+        return (1.0 + 3.0 * eta2) / (1.0 + eta2) ** 2
+    def g4g(self, mu):
+        eta = np.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
+        eta2 = eta * eta
+        return ((8.0 + 12.0 * eta2) / (1.0 + eta2) ** 2) * (eta / (1.0 + eta2))
 
 
 class CloglogLink(Link):
@@ -370,6 +404,18 @@ class CloglogLink(Link):
         mu = np.asarray(mu, dtype=float)
         l1m = np.log1p(-mu)
         return (-12.0 - 11.0 * l1m - 6.0 * l1m ** 2 - 6.0 / l1m) / (1.0 - mu) ** 4 / l1m ** 3
+    # extended-family ratios (gam.fit3.r:2293-2303), l1m = log1p(−μ):
+    # g'=−1/(l1m·(1−μ)) ⇒ g2g=−l1m−1, g3g=l1m(2·l1m+3)+2,
+    # g4g=−l1m(l1m(6·l1m+11)+12)−6.
+    def g2g(self, mu):
+        l1m = np.log1p(-np.asarray(mu, dtype=float))
+        return -l1m - 1.0
+    def g3g(self, mu):
+        l1m = np.log1p(-np.asarray(mu, dtype=float))
+        return l1m * (2.0 * l1m + 3.0) + 2.0
+    def g4g(self, mu):
+        l1m = np.log1p(-np.asarray(mu, dtype=float))
+        return -l1m * (l1m * (6.0 * l1m + 11.0) + 12.0) - 6.0
 
 
 class InverseSquareLink(Link):
@@ -4131,6 +4177,358 @@ class nb(Family):
         return f"nb(theta={Th:.4g}, link={self.link.name})"
 
 
+class betar(Family):
+    """Beta regression extended family — direct port of mgcv ``betar()``
+    (efam.r:3269-3546).
+
+    The response lies in (0, 1); ``μ`` is the mean and the single
+    parameter ``θ`` (log-precision internally, ``φ = e^θ``) controls
+    dispersion: ``Var(y) = μ(1−μ)/(1+φ)``. betar is mgcv's prototype for
+    "−2logLik as deviance": :meth:`dev_resids` returns ``−2 logLik`` (the
+    saturated term is omitted), ``ls`` is identically 0, and the true
+    deviance (with its saturated reference) is assembled in
+    :meth:`postproc` / :meth:`residuals` via the :meth:`saturated_ll`
+    Newton solver. φ is estimated jointly with the smoothing parameters.
+
+    Constructor ``theta`` follows mgcv's sign convention: ``None``/``0``
+    → free θ starting at φ=1; ``theta > 0`` → φ fixed (``n_theta = 0``);
+    ``theta < 0`` → free θ starting at ``|theta|``. Links: logit
+    (default), probit, cloglog, cauchit.
+    """
+    name = "Beta regression"
+    canonical_link_name = "logit"
+    _newton_canonical = "none"  # extended family: no Fisher shortcut.
+    scale_known = True
+    is_extended = True
+    n_theta = 1
+
+    _OK_LINKS = ("logit", "probit", "cloglog", "cauchit")
+
+    def __init__(self, theta: float | None = None, link: str = "logit",
+                 eps: float | None = None):
+        if link not in self._OK_LINKS:
+            raise ValueError(
+                f'link "{link}" not available for betar family; available '
+                f'links are {self._OK_LINKS}'
+            )
+        n_theta = 1
+        if theta is not None and theta != 0.0:
+            if theta > 0:
+                ini = float(np.log(theta))
+                n_theta = 0
+            else:
+                ini = float(np.log(-theta))
+        else:
+            ini = 0.0
+        self.n_theta = int(n_theta)
+        self._theta = np.array([ini], dtype=float)
+        # mgcv default eps = .Machine$double.eps*100
+        self._eps = float(np.finfo(float).eps * 100) if eps is None \
+            else float(eps)
+        super().__init__(link=link)
+
+    # ----- θ accessors ---------------------------------------------------
+
+    def set_theta(self, values) -> None:
+        v = np.asarray(values, dtype=float).reshape(-1)
+        if v.shape != (1,):
+            raise ValueError(
+                f"betar.set_theta expects a single log φ; got shape "
+                f"{v.shape}")
+        self._theta = v.copy()
+
+    def get_theta(self, trans: bool = False) -> np.ndarray:
+        if trans:
+            return np.exp(self._theta).copy()
+        return self._theta.copy()
+
+    # ----- variance ------------------------------------------------------
+
+    def variance(self, mu):
+        th = float(self._theta[0])
+        mu = np.asarray(mu, dtype=float)
+        return mu * (1.0 - mu) / (1.0 + np.exp(th))
+
+    def dvar(self, mu):
+        th = float(self._theta[0])
+        return (1.0 - 2.0 * np.asarray(mu, dtype=float)) / (1.0 + np.exp(th))
+
+    def d2var(self, mu):
+        th = float(self._theta[0])
+        return np.full_like(np.asarray(mu, dtype=float),
+                            -2.0 / (1.0 + np.exp(th)))
+
+    def d3var(self, mu):
+        return np.zeros_like(np.asarray(mu, dtype=float))
+
+    # ----- deviance (−2logLik) / Dd / aic --------------------------------
+
+    def dev_resids(self, y, mu, wt, theta=None):
+        # mgcv betar dev.resids (efam.r:3316-3324): −2logLik per datum
+        # (the saturated reference is added later via saturated_ll).
+        th = self._theta if theta is None else np.asarray(theta, dtype=float)
+        theta = float(np.exp(np.asarray(th).reshape(-1)[0]))
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        muth = mu * theta
+        return 2.0 * wt * (
+            -gammaln(theta) + gammaln(muth) + gammaln(theta - muth)
+            - muth * (np.log(y) - np.log1p(-y)) - theta * np.log1p(-y)
+            + np.log(y) + np.log1p(-y))
+
+    def Dd(self, y, mu, theta, wt, level: int = 0) -> dict:
+        # mgcv betar()$Dd verbatim (efam.r:3326-3367); θ = log φ supplied.
+        theta = float(np.exp(np.asarray(theta, dtype=float).reshape(-1)[0]))
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        onemu = 1.0 - mu
+        muth = mu * theta
+        onemuth = onemu * theta
+        psi0_th = digamma(theta)
+        psi1_th = polygamma(1, theta)
+        psi0_muth = digamma(muth)
+        psi0_onemuth = digamma(onemuth)
+        psi1_muth = polygamma(1, muth)
+        psi1_onemuth = polygamma(1, onemuth)
+        psi2_muth = polygamma(2, muth)
+        psi2_onemuth = polygamma(2, onemuth)
+        psi3_muth = polygamma(3, muth)
+        psi3_onemuth = polygamma(3, onemuth)
+        log_yoney = np.log(y) - np.log1p(-y)
+        r: dict = {}
+        r["Dmu"] = 2.0 * wt * theta * (psi0_muth - psi0_onemuth - log_yoney)
+        r["Dmu2"] = 2.0 * wt * theta ** 2 * (psi1_muth + psi1_onemuth)
+        r["EDmu2"] = r["Dmu2"]
+        if level > 0:
+            r["Dth"] = 2.0 * wt * theta * (
+                -mu * log_yoney - np.log1p(-y) + mu * psi0_muth
+                + onemu * psi0_onemuth - psi0_th)
+            r["Dmuth"] = r["Dmu"] + 2.0 * wt * theta ** 2 * (
+                mu * psi1_muth - onemu * psi1_onemuth)
+            r["Dmu3"] = 2.0 * wt * theta ** 3 * (psi2_muth - psi2_onemuth)
+            r["Dmu2th"] = 2.0 * r["Dmu2"] + 2.0 * wt * theta ** 3 * (
+                mu * psi2_muth + onemu * psi2_onemuth)
+            r["EDmu2th"] = r["Dmu2th"]
+        if level > 1:
+            r["Dmu4"] = 2.0 * wt * theta ** 4 * (psi3_muth + psi3_onemuth)
+            r["Dth2"] = r["Dth"] + 2.0 * wt * theta ** 2 * (
+                mu ** 2 * psi1_muth + onemu ** 2 * psi1_onemuth - psi1_th)
+            r["Dmuth2"] = r["Dmuth"] + 2.0 * wt * theta ** 2 * (
+                mu ** 2 * theta * psi2_muth + 2.0 * mu * psi1_muth
+                - theta * onemu ** 2 * psi2_onemuth
+                - 2.0 * onemu * psi1_onemuth)
+            r["Dmu2th2"] = 2.0 * r["Dmu2th"] + 2.0 * wt * theta ** 3 * (
+                mu ** 2 * theta * psi3_muth + 3.0 * mu * psi2_muth
+                + onemu ** 2 * theta * psi3_onemuth
+                + 3.0 * onemu * psi2_onemuth)
+            r["Dmu3th"] = 3.0 * r["Dmu3"] + 2.0 * wt * theta ** 4 * (
+                mu * psi3_muth - onemu * psi3_onemuth)
+        return r
+
+    def aic(self, y, mu, dev, wt, n, theta=None):
+        # mgcv betar()$aic (efam.r:3369-3376); `dev` unused.
+        th = self._theta if theta is None else np.asarray(theta, dtype=float)
+        theta = float(np.exp(np.asarray(th).reshape(-1)[0]))
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        muth = mu * theta
+        term = (-gammaln(theta) + gammaln(muth) + gammaln(theta - muth)
+                - (muth - 1.0) * np.log(y)
+                - (theta - muth - 1.0) * np.log1p(-y))
+        return 2.0 * float(np.sum(term * wt))
+
+    def ls_extended(self, y, wt, theta=None, scale: float = 1.0) -> dict:
+        # betar ls ≡ 0 (efam.r:3378-3385): deviance is −2logLik, the
+        # saturated reference is folded in via saturated_ll instead.
+        y = np.asarray(y, dtype=float)
+        return {"ls": 0.0, "lsth1": np.array([0.0]),
+                "lsth2": np.array([[0.0]]),
+                "LSTH1": np.zeros((y.shape[0], 1))}
+
+    def ls(self, y, wt, scale):
+        return np.array([0.0, 0.0, 0.0], dtype=float)
+
+    # ----- saturated likelihood (Newton) ---------------------------------
+
+    def saturated_ll(self, y, wt, theta):
+        """Saturated log-lik by per-datum Newton — mgcv ``saturated.ll``
+        (efam.r:3393-3462). ``theta`` is the precision φ (already
+        exp'd). Returns ``{"f", "term", "mu"}``: the wt-summed saturated
+        log-lik, the per-datum saturated log-lik, and the maximizing μ."""
+        eps = self._eps
+        y = np.asarray(y, dtype=float).copy()
+        wt = np.asarray(wt, dtype=float)
+        phi = float(theta)
+
+        def gbh(yy, eta, deriv=False, a=1e-8):
+            b = 1.0 - a
+            ind = eta > 0
+            expeta = np.where(ind, np.exp(-np.where(ind, eta, 0.0)),
+                              np.exp(np.where(ind, 0.0, eta)))
+            mu = np.where(ind, (a * expeta + b) / (1.0 + expeta),
+                          (a + b * expeta) / (1.0 + expeta))
+            la = phi * mu
+            lb = phi * (1.0 - mu)
+            ll = ((la - 1.0) * np.log(yy) + (lb - 1.0) * np.log1p(-yy)
+                  - gammaln(la) - gammaln(lb) + gammaln(la + lb))
+            g = h = None
+            if deriv:
+                g = (phi * np.log(yy) - phi * np.log1p(-yy)
+                     - phi * digamma(mu * phi) + phi * digamma((1.0 - mu) * phi))
+                h = -phi ** 2 * (polygamma(1, mu * phi)
+                                 + polygamma(1, (1.0 - mu) * phi))
+                dmueta1 = expeta * (b - a) / (1.0 + expeta) ** 2
+                dmueta2 = (np.sign(eta) * ((a - b) * expeta
+                           + (b - a) * expeta ** 2) / (expeta + 1.0) ** 3)
+                h = h * dmueta1 ** 2 + g * dmueta2
+                g = g * dmueta1
+            return ll, g, h, mu
+
+        n = y.shape[0]
+        a = eps
+        b = 1.0 - eps
+        eta = y.copy()
+        yc = y.copy()
+        yc[yc < eps] = eps
+        yc[yc > 1.0 - eps] = 1.0 - eps
+        eta[yc <= eps * 1.2] = eps * 1.2
+        eta[yc >= 1.0 - eps * 1.2] = 1.0 - eps * 1.2
+        eta = np.log((eta - a) / (b - eta))
+        yw = yc
+        LS = np.zeros(n)
+        muout = np.zeros(n)
+        ii = np.arange(n)
+        ls_l = ls_g = ls_h = None
+        for _ in range(200):
+            ls_l, ls_g, ls_h, ls_mu = gbh(yw, eta, True, a=eps / 10.0)
+            conv = np.abs(ls_g) < np.mean(np.abs(ls_l) + 0.1) * 1e-8
+            if np.sum(conv) > 0:
+                LS[ii[conv]] = ls_l[conv]
+                muout[ii[conv]] = ls_mu[conv]
+                ii = ii[~conv]
+                if ii.size > 0:
+                    yw = yw[~conv]
+                    eta = eta[~conv]
+                    ls_l = ls_l[~conv]
+                    ls_g = ls_g[~conv]
+                    ls_h = ls_h[~conv]
+                else:
+                    break
+            h = -ls_h
+            if h.size:
+                hmin = np.max(h) * 1e-4
+                h[h < hmin] = hmin
+            delta = ls_g / h
+            big = np.abs(delta) > 2.0
+            delta[big] = np.sign(delta[big]) * 2.0
+            ls1_l = gbh(yw, eta + delta, False, a=eps / 10.0)[0]
+            fail = ls1_l < ls_l
+            k = 0
+            while np.sum(fail) > 0 and k < 20:
+                k += 1
+                delta[fail] = delta[fail] / 2.0
+                ls1_l[fail] = gbh(yw[fail], eta[fail] + delta[fail],
+                                  False, a=eps / 10.0)[0]
+                fail = ls1_l < ls_l
+            eta = eta + delta
+        if ii.size > 0:
+            LS[ii] = ls_l
+            import warnings
+            warnings.warn("saturated likelihood may be inaccurate",
+                          stacklevel=2)
+        return {"f": float(np.sum(wt * LS)), "term": LS, "mu": muout}
+
+    # ----- initialization / validity -------------------------------------
+
+    def preinitialize(self, y) -> dict | None:
+        # mgcv betar preinitialize (efam.r:3387-3391): clamp y into
+        # (eps, 1−eps) so the log-lik is finite at the boundaries.
+        eps = self._eps
+        y = np.asarray(y, dtype=float).copy()
+        y[y >= 1.0 - eps] = 1.0 - eps
+        y[y <= eps] = eps
+        return {"y": y}
+
+    def initialize(self, y, wt):
+        # mgcv: mustart <- y
+        return np.asarray(y, dtype=float).copy()
+
+    def validmu(self, mu) -> bool:
+        mu = np.asarray(mu)
+        return bool(np.all(mu > 0.0) and np.all(mu < 1.0))
+
+    def postproc(self, y, prior_weights, fitted, linear_predictors,
+                 offset, intercept) -> dict:
+        # betar postproc (efam.r:3468-3486): the TRUE deviance and null
+        # deviance fold in the saturated log-lik (2·f) on top of the
+        # −2logLik dev_resids; relabel "Beta regression(φ)".
+        theta = float(self.get_theta(trans=True)[0])
+        y = np.asarray(y, dtype=float)
+        wt = np.asarray(prior_weights, dtype=float)
+        fitted = np.asarray(fitted, dtype=float)
+        lf = self.saturated_ll(y, wt, theta)
+        dev = 2.0 * lf["f"] + float(np.sum(self.dev_resids(y, fitted, wt)))
+        if intercept:
+            wtdmu = float(np.sum(wt * y) / np.sum(wt))
+            mu_null = np.full(y.shape, wtdmu)
+        else:
+            mu_null = self.link.linkinv(np.asarray(offset, dtype=float))
+        null_dev = 2.0 * lf["f"] + float(
+            np.sum(self.dev_resids(y, mu_null, wt)))
+        return {"deviance": dev, "null_deviance": null_dev,
+                "family_name": f"Beta regression({np.round(theta, 3):g})"}
+
+    def residuals_extended(self, y, mu, wt, type: str = "deviance"):
+        """betar deviance residuals (efam.r:3493-3513): the saturated
+        reference makes ``2·ls_term + dev_resids`` a proper (≥0) squared
+        deviance residual, signed by ``sign(y−μ)``."""
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        if type == "response":
+            return y - mu
+        if type == "pearson":
+            return (y - mu) / np.sqrt(self.variance(mu))
+        if type != "deviance":
+            raise ValueError(
+                "betar residuals are 'deviance', 'response' or 'pearson'; "
+                f"got {type!r}")
+        theta = float(self.get_theta(trans=True)[0])
+        lf = self.saturated_ll(y, wt, theta)
+        res = 2.0 * lf["term"] + self.dev_resids(y, mu, wt)
+        res = np.maximum(res, 0.0)
+        return np.sqrt(res) * np.sign(y - mu)
+
+    def rd(self, rng, mu, wt, scale):
+        # mgcv betar rd (efam.r:3515-3523): Beta(φμ, φ(1−μ)) draws,
+        # clamped into (eps, 1−eps).
+        theta = float(self.get_theta(trans=True)[0])
+        mu = np.asarray(mu, dtype=float)
+        r = rng.beta(theta * mu, theta * (1.0 - mu))
+        eps = self._eps
+        r = np.where(r >= 1.0 - eps, 1.0 - eps, r)
+        r = np.where(r < eps, eps, r)
+        return r
+
+    def qf(self, p, mu, wt, scale):
+        # mgcv betar qf (efam.r:3525-3532): Beta quantile, clamped.
+        from scipy.stats import beta as _beta
+        theta = float(self.get_theta(trans=True)[0])
+        mu = np.asarray(mu, dtype=float)
+        q = _beta.ppf(p, theta * mu, theta * (1.0 - mu))
+        eps = self._eps
+        q = np.where(q >= 1.0 - eps, 1.0 - eps, q)
+        q = np.where(q < eps, eps, q)
+        return q
+
+    def __repr__(self):
+        phi = float(self.get_theta(trans=True)[0])
+        return f"betar(theta={phi:.4g}, link={self.link.name})"
+
+
 # ---------------------------------------------------------------------------
 # General-family seam — mgcv gamlss.r authoring kit (§5.3 prerequisite 5).
 #
@@ -7538,6 +7936,323 @@ class multinom(GeneralFamily):
         return f"multinom(K={self.n_lp})"
 
 
+def _mvn_ll(y, X, coef, lpi, m, *, deriv=0, d1b=None, fh=None) -> dict:
+    """Multivariate-normal log-likelihood + derivatives — a numpy port of
+    mgcv's C kernel ``mvn_ll`` (src/mvn.c).
+
+    Model: each row ``y_i`` (m-dimensional) is ``N(μ_i, Σ)`` with a shared
+    precision ``Σ⁻¹ = RᵀR``; ``R`` is the m×m upper-triangular Choleski
+    factor whose ``d(d+1)/2`` parameters ``θ`` are the trailing coefs
+    (diagonal stored as ``log R_ii``, off-diagonals stored directly).
+    ``coef = [β (the m mean-LP blocks), θ]``; ``lpi[k]`` indexes LP k's
+    (contiguous) mean columns. The trailing ``X`` columns for ``θ`` are
+    structural zeros (mgcv's dummy columns).
+
+        ll = −½ Σ_i ‖R(y_i−μ_i)‖² + n·log|R|.
+
+    ``deriv`` follows mgcv's mvn codes (NOT the gamlss_gH shift): 0 → l;
+    1 → +grad ``lb`` / Hessian ``lbb``; 2 → +``d1H`` = the per-ρ traces
+    ``tr(fh·∂H/∂ρ)`` given ``fh = H_p⁻¹`` and ``d1b = ∂coef/∂ρ``; 3 →
+    +``d1H`` as the list of ``∂H/∂ρ`` matrices. ``XX`` is recomputed from
+    the supplied (already-reparameterized) mean columns each call —
+    self-consistent with mgcv's ``Sl.repara``-d ``attr(X,"XX")``.
+    """
+    y = np.asarray(y, dtype=float)
+    X = np.asarray(X, dtype=float)
+    coef = np.asarray(coef, dtype=float)
+    n = y.shape[0]
+    ntheta = m * (m + 1) // 2
+    nb = coef.size
+    ncoef = nb - ntheta
+    theta = coef[ncoef:nb]
+    # build R (upper-tri), the θ→(row,col) maps, and dR_ii/dθ = R_ii (1 off-diag)
+    R = np.zeros((m, m))
+    rri = np.zeros(ntheta, int)
+    rci = np.zeros(ntheta, int)
+    dth = np.zeros(ntheta)
+    ldetR = 0.0
+    k = 0
+    for i in range(m):
+        dth[k] = np.exp(theta[k]); R[i, i] = dth[k]; ldetR += theta[k]
+        rri[k] = rci[k] = i; k += 1
+        for j in range(i + 1, m):
+            R[i, j] = theta[k]; dth[k] = 1.0
+            rri[k] = i; rci[k] = j; k += 1
+    jj = [np.asarray(ix, dtype=int) for ix in lpi]
+    mu = np.zeros((n, m))
+    for l in range(m):
+        mu[:, l] = X[:, jj[l]] @ coef[jj[l]]
+    e = y - mu
+    Re = e @ R.T                          # Re[obs,c] = Σ_d R[c,d] e[obs,d]
+    ll = -0.5 * float(np.sum(Re * Re)) + ldetR * n
+    if deriv == 0:
+        return {"l": ll}
+    P = R.T @ R                           # precision
+    Xm = X[:, :ncoef]
+    XX = Xm.T @ Xm
+    din = np.zeros(ncoef, int)
+    for l in range(m):
+        din[jj[l]] = l
+    # ---- gradient ----
+    lb = np.zeros(nb)
+    Me = e @ P
+    for l in range(m):
+        lb[jj[l]] = Xm[:, jj[l]].T @ Me[:, l]
+    Ree_diag = np.einsum("ij,ij->j", Re, e)
+    for kk in range(ntheta):
+        i, j = rri[kk], rci[kk]
+        lb[ncoef + kk] = (n - dth[kk] * Ree_diag[i] if i == j
+                          else -float(np.dot(Re[:, i], e[:, j])))
+    # ---- Hessian ----
+    lbb = np.zeros((nb, nb))
+    lbb[:ncoef, :ncoef] = -XX * P[np.ix_(din, din)]
+    Xe = Xm.T @ e
+    XRe = Xm.T @ Re
+    for j in range(ntheta):
+        ri, rj = rri[j], rci[j]
+        col = dth[j] * ((din == rj) * XRe[:, ri]
+                        + (ri <= din) * R[ri, din] * Xe[:, rj])
+        lbb[:ncoef, ncoef + j] = col
+        lbb[ncoef + j, :ncoef] = col
+    ee = e.T @ e
+    Ree = Re.T @ e
+    for kk in range(ntheta):
+        ri, rj = rri[kk], rci[kk]
+        for ll_ in range(kk + 1):
+            ril, rjl = rri[ll_], rci[ll_]
+            xx = 0.0
+            if kk == ll_ and ri == rj:
+                xx -= dth[kk] * Ree[ri, ri]
+            if ril == ri:
+                yy = ee[rjl, rj] * dth[kk]
+                if ril == rjl:
+                    yy *= dth[ll_]
+                xx -= yy
+            lbb[ncoef + kk, ncoef + ll_] = xx
+            lbb[ncoef + ll_, ncoef + kk] = xx
+    out = {"l": ll, "lb": lb, "lbb": lbb}
+    if deriv == 1:
+        return out
+    # ---- ∂H/∂ρ (mvn.c lines 168-262), given d1b = ∂coef/∂ρ ----
+    nsp = d1b.shape[1]
+    yX = Xe.T                             # (m, ncoef)
+    yRX = XRe.T
+    yty = ee
+    d1H_list = []
+    for r in range(nsp):
+        db = d1b[:, r]
+        dtheta = db[ncoef:]
+        dH = np.zeros((nb, nb))
+        # mean-coef block: dH[i,j] = -XX[i,j]·C[din[i],din[j]]
+        C = np.zeros((m, m))
+        for q in range(ntheta):
+            ri_q, rj_q, w = rri[q], rci[q], dth[q] * dtheta[q]
+            C[rj_q, :] += R[ri_q, :] * w        # rj_q==l term
+            C[:, rj_q] += R[ri_q, :] * w        # rj_q==k term
+        dH[:ncoef, :ncoef] = -XX * C[np.ix_(din, din)]
+        # mixed block
+        for i in range(ncoef):
+            l = din[i]
+            for j in range(ntheta):
+                ri, rj = rri[j], rci[j]
+                zz = dth[j]
+                xx = 0.0
+                for q in range(ncoef):
+                    kdim = din[q]
+                    if rj == l:
+                        xx += -R[ri, kdim] * zz * XX[i, q] * db[q]
+                    if rj == kdim:
+                        xx += -R[ri, l] * zz * XX[i, q] * db[q]
+                for kk2 in range(ntheta):
+                    rik, rjk = rri[kk2], rci[kk2]
+                    z2 = 0.0
+                    if ri == rik and (l == rj or l == rjk):
+                        if l == rj:
+                            z2 += yX[rjk, i] * dth[j] * dth[kk2]
+                        if l == rjk:
+                            z2 += yX[rj, i] * dth[j] * dth[kk2]
+                        if kk2 == j and rik == rjk:
+                            z2 += dth[kk2] * yRX[rj, i]
+                        xx += z2 * dtheta[kk2]
+                    if kk2 == j and rik == rjk:
+                        xx += dtheta[kk2] * dth[kk2] * R[rj, l] * yX[rj, i]
+                dH[i, ncoef + j] = xx
+                dH[ncoef + j, i] = xx
+        # theta block
+        for j in range(ntheta):
+            rij, rjj = rri[j], rci[j]
+            for kk2 in range(j, ntheta):
+                rik, rjk = rri[kk2], rci[kk2]
+                xx = 0.0
+                for i in range(ncoef):
+                    l = din[i]
+                    z2 = 0.0
+                    if rij == rik and (l == rjj or l == rjk):
+                        if l == rjj:
+                            z2 += yX[rjk, i] * dth[j] * dth[kk2]
+                        if l == rjk:
+                            z2 += yX[rjj, i] * dth[j] * dth[kk2]
+                        if kk2 == j and rik == rjk and l == rjj:
+                            z2 += dth[kk2] * yRX[rjj, i]
+                        xx += z2 * db[i]
+                    if kk2 == j and rij == rjj:
+                        xx += db[i] * dth[kk2] * R[rjj, l] * yX[rjj, i]
+                for i in range(ntheta):
+                    ri, rj = rri[i], rci[i]
+                    z2 = 0.0
+                    if j == kk2 and ri == rij and rjk == rik:
+                        z2 += dth[j] * dth[i] * yty[rjj, rj]
+                    if i == kk2 and rik == rij and rj == ri:
+                        z2 += dth[j] * dth[i] * yty[rjj, rjk]
+                    if i == j and rik == rij and rj == ri:
+                        z2 += dth[kk2] * dth[i] * yty[rj, rjk]
+                    if i == j and j == kk2 and ri == rj:
+                        z2 += dth[kk2] * Ree[ri, ri]
+                    xx += -z2 * dtheta[i]
+                dH[ncoef + kk2, ncoef + j] = xx
+                dH[ncoef + j, ncoef + kk2] = xx
+        d1H_list.append(dH)
+    if deriv == 2:
+        out["d1H"] = np.array([float(np.sum(fh * dH)) for dH in d1H_list])
+    else:
+        out["d1H"] = d1H_list
+    return out
+
+
+class mvn(GeneralFamily):
+    """Multivariate normal additive model — mgcv ``mvn(d)`` (mvam.r).
+
+    A d-dimensional Gaussian response with a per-row mean from d linear
+    predictors (all identity-linked) and a SHARED covariance, parameterized
+    by the upper-triangular Choleski factor ``R`` of the precision matrix
+    (``Σ⁻¹ = RᵀR``). ``gam`` takes d formulas, each carrying its own
+    dimension's response (``gam(list(y0~s(x), y1~s(z)), family=mvn(2))``);
+    the responses stack into the (n, d) matrix response.
+
+    ``available_derivs = 1`` — the ll supplies the gradient/Hessian of the
+    log-lik and its first ρ-derivative (``∂H/∂ρ``) but NOT ``∂²H/∂ρ²``, so
+    the smoothing parameters are estimated by the **BFGS** outer optimizer
+    (mgcv.r:1907), not Newton. The d(d+1)/2 covariance params ride the
+    coefficient vector as unpenalized "dummy" columns appended to the
+    design (``n_extra_coef``, mgcv's ``preinitialize``)."""
+    name = "Multivariate normal"
+    scale_known = True
+    n_theta = 0
+    available_derivs = 1
+    matrix_response = True
+
+    def __init__(self, d: int = 2):
+        if d < 2:
+            raise ValueError("mvn requires 2 or more dimensional data")
+        self.d = int(d)
+        self.n_lp = int(d)
+        self.n_extra_coef = int(d) * (int(d) + 1) // 2
+        self._R = None
+        super().__init__([IdentityLink() for _ in range(int(d))])
+
+    def ll(self, y, X, coef, wt=None, *, lpi, offset=None, deriv: int = 0,
+           d1b=None, d2b=None, fh=None, D=None) -> dict:
+        if offset is not None and any(
+                o is not None and np.any(np.asarray(o) != 0) for o in offset):
+            raise NotImplementedError("mvn does not handle offsets")
+        if deriv >= 4:
+            raise NotImplementedError(
+                "mvn supplies ll only to deriv 3 (available_derivs=1); "
+                "the smoothing parameters are estimated by bfgs, which "
+                "never asks for trHid2H.")
+        return _mvn_ll(y, X, coef, lpi, self.d, deriv=deriv, d1b=d1b, fh=fh)
+
+    def _R_from_coef(self, coef) -> np.ndarray:
+        """Rebuild the precision Choleski factor R from the trailing θ
+        coefs (mvam.r postproc: diag = exp(θ), off-diag = θ)."""
+        coef = np.asarray(coef, dtype=float)
+        m = self.d
+        theta = coef[coef.size - self.n_extra_coef:]
+        R = np.zeros((m, m))
+        k = 0
+        for i in range(m):
+            for j in range(i, m):
+                R[i, j] = np.exp(theta[k]) if i == j else theta[k]
+                k += 1
+        return R
+
+    def set_fit_context(self, *, X=None, coef=None, offset=None) -> None:
+        """Stash the converged R factor so postproc/residuals can use it
+        (the 6-arg postproc signature lacks the coefficient vector)."""
+        self._R = self._R_from_coef(coef)
+
+    def initialize_coef(self, y, X, lpi, E=None, offset=None,
+                        use_unscaled: bool = False) -> np.ndarray:
+        """mvn ``preinitialize`` init (mvam.r:116-125): per dimension k,
+        penalized-regress ``y[:,k]`` on LP k's columns for the mean coefs,
+        seed the diagonal θ at ``−½ log(residual scale)`` (the initial log
+        root precision), all off-diagonals at 0."""
+        y = np.asarray(y, dtype=float)
+        X = np.asarray(X, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        p = X.shape[1]
+        m = self.d
+        if E is None:
+            E = np.zeros((0, p))
+        start = np.zeros(p)
+
+        def _reg(cols, target):
+            if use_unscaled:
+                xa = np.vstack([X[:, cols], E[:, cols]])
+                b, *_ = np.linalg.lstsq(
+                    xa, np.concatenate([target, np.zeros(E.shape[0])]),
+                    rcond=None)
+                b[~np.isfinite(b)] = 0.0
+                return b
+            return _pen_reg(X[:, cols], E[:, cols], target)
+
+        ntheta = self.n_extra_coef
+        ncoef = p - ntheta
+        kdiag = 0
+        for kdim in range(m):
+            bk = _reg(jj[kdim], y[:, kdim])
+            start[jj[kdim]] = bk
+            resid = y[:, kdim] - X[:, jj[kdim]] @ bk
+            df = max(len(jj[kdim]), 1)
+            scale = max(float(resid @ resid) / max(len(resid) - df, 1),
+                        1e-8)
+            start[ncoef + kdiag] = -0.5 * np.log(scale)
+            kdiag += m - kdim          # advance to next diagonal θ slot
+        return start
+
+    def postproc(self, y, prior_weights, fitted, linear_predictors,
+                 offset, intercept) -> dict:
+        """mvn postproc (mvam.r:134-150): deviance ``Σ‖R(y−μ̂)‖²`` and null
+        deviance ``Σ‖R(y−ȳ)‖²`` using the fitted precision factor R."""
+        y = np.asarray(y, dtype=float)
+        fitted = np.asarray(fitted, dtype=float)
+        R = self._R if self._R is not None else self._R_from_coef(
+            np.zeros(self.d))
+        rsd = (y - fitted) @ R.T
+        dev = float(np.sum(rsd * rsd))
+        rsd0 = (y - np.mean(y, axis=0)) @ R.T
+        return {"deviance": dev, "null_deviance": float(np.sum(rsd0 * rsd0))}
+
+    def residuals(self, y, fitted, type: str = "deviance") -> np.ndarray:
+        """mvn residuals (mvam.r:162-167): ``response`` = ``y − μ̂``;
+        ``deviance`` = ``(y − μ̂)·Rᵀ`` (the whitened residual)."""
+        y = np.asarray(y, dtype=float)
+        fitted = np.asarray(fitted, dtype=float)
+        res = y - fitted
+        if type == "response":
+            return res
+        if type != "deviance":
+            raise ValueError(
+                "mvn residuals are 'response' or 'deviance'; got "
+                f"{type!r}")
+        R = self._R if self._R is not None else self._R_from_coef(
+            np.zeros(self.d))
+        return res @ R.T
+
+    def __repr__(self):
+        return f"mvn(d={self.d})"
+
+
 def _coerce_response(y_series: pl.Series, family: "Family") -> np.ndarray:
     """Cast the response column to a numeric float array, with R's
     factor-response convention for :class:`Binomial`.
@@ -7598,9 +8313,9 @@ __all__ = [
     "QuasiBinomial", "quasibinomial",
     "Tweedie", "tw",
     "Scat", "scat",
-    "nb",
+    "nb", "betar",
     "GeneralFamily", "gaulss", "twlss", "shash", "gammals", "gumbls",
-    "gevlss", "cox_ph", "ziplss", "multinom",
+    "gevlss", "cox_ph", "ziplss", "multinom", "mvn",
     "LogebLink", "SoftplusLink", "ShiftedLogitLink",
     "trind_generator", "gamlss_etamu", "gamlss_gH",
     "IdentityLink", "LogLink", "InverseLink",

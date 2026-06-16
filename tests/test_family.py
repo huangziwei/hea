@@ -2538,3 +2538,302 @@ def test_shash_hooks_match_mgcv():
     u = fam.cdf(draws, Fc, None, None, False)
     np.testing.assert_allclose(u.mean(), 0.5, rtol=0, atol=5e-3)
     np.testing.assert_allclose(u.var(), 1.0 / 12.0, rtol=0, atol=5e-3)
+
+
+# ---------------------------------------------------------------------------
+# mvn (multivariate normal, mvam.r) — the matrix-response general family and
+# the only available_derivs=1 family (fit by the bfgs outer optimizer). The
+# ll is a numpy port of mgcv's C kernel mvn_ll (src/mvn.c). Inputs reproduce
+# R's set.seed stream via hea.R.rng; the dH derivative blocks are exercised
+# at m=2 AND m=3 (m=3 lights the off-diagonal × off-diagonal theta cross
+# terms a 2-D covariance never reaches).
+# ---------------------------------------------------------------------------
+
+def _mvn_oracle_inputs(m, n, pv, seed, beta):
+    from hea.R.rng import RGenerator
+    g = RGenerator(seed)               # X/Y stream == R set.seed(seed)
+    Xlps = []
+    for p in pv:
+        inner = g.normal(size=n * (p - 1)).reshape(n, p - 1, order="F")
+        Xlps.append(np.column_stack([np.ones(n), inner]))
+    Xm = np.concatenate(Xlps, axis=1)
+    Y = g.normal(size=n * m).reshape(n, m, order="F")
+    ncoef = sum(pv)
+    ntheta = m * (m + 1) // 2
+    nb = ncoef + ntheta
+    X = np.concatenate([Xm, np.zeros((n, ntheta))], axis=1)
+    cs = np.cumsum([0] + list(pv))
+    lpi = [np.arange(cs[k], cs[k + 1]) for k in range(m)]
+    from hea.R.rng import RGenerator as _RG
+    g2 = _RG(seed + 1000)              # d1b stream == R set.seed(seed+1000)
+    d1b = g2.normal(size=nb * 2).reshape(nb, 2, order="F")
+    return X, Y, np.asarray(beta, dtype=float), lpi, d1b
+
+
+# live mvn(d)$ll references (Rscript, mgcv 1.9-4) at the inputs above.
+_MVN_ORACLE = {
+    (2, 101): dict(
+        beta=[0.4, -0.3, 0.2, 0.5, 0.15, 0.1, -0.2, -0.05],
+        n=12, pv=(3, 2),
+        l=-15.7256094975,
+        lb=[-4.9632116233, 2.4997313471, 1.3787612378, -6.7585550687,
+            -0.4513484407, -6.2541223309, -0.2294738282, -2.4429914298],
+        lbb_sum=-191.5095845216, lbb_fro=67.3135835142,
+        lbb_diag=[-14.6568330979, -5.5978210354, -15.4202009864,
+                  -11.3380490164, -10.7476175503, -37.1926183914,
+                  -15.9619740982, -28.8859828595],
+        d1Htr=[-26.7424444768, -3.3268032864],
+        d1H0_fro=139.9866331557, d1H1_fro=118.8887931462,
+        d1H0_sum=238.6527021845, d1H1_sum=187.9967632078),
+    (3, 103): dict(
+        beta=[0.3, -0.2, 0.4, 0.1, -0.15, 0.25, 0.2,
+              0.05, -0.1, 0.03, 0.0, 0.08, -0.04],
+        n=14, pv=(2, 3, 2),
+        l=-21.8485684831,
+        lb=[-2.7005117456, -5.4481415192, -1.7222714051, 1.0765211381,
+            -1.4765460177, -6.8279173238, -3.5559462890, 2.6549350058,
+            5.1388436379, -4.3797131544, -0.5040107190, -1.5259774175,
+            -3.3607073011],
+        lbb_sum=-314.4691803182, lbb_fro=77.6586394144,
+        lbb_diag=[-15.4723928531, -18.2212267690, -14.1400000000,
+                  -8.6564737967, -11.1090117136, -13.0258288494,
+                  -5.9106796852, -22.2066744641, -14.5022949557,
+                  -18.8066297050, -29.0063056747, -18.8066297050,
+                  -34.7214146023],
+        d1Htr=[2.4098222737, -4.4527135016],
+        d1H0_fro=174.1301225815, d1H1_fro=105.8376694333,
+        d1H0_sum=151.3467988839, d1H1_sum=-153.5943517839),
+}
+
+
+@pytest.mark.parametrize("m,seed", [(2, 101), (3, 103)])
+def test_mvn_ll_matches_mgcv_oracle(m, seed):
+    from hea.family import mvn, _mvn_ll
+    ref = _MVN_ORACLE[(m, seed)]
+    X, Y, beta, lpi, d1b = _mvn_oracle_inputs(
+        m, ref["n"], ref["pv"], seed, ref["beta"])
+    nb = beta.size
+
+    # the family ll dispatches to _mvn_ll with mgcv's deriv codes intact.
+    fam = mvn(d=m)
+    r1 = fam.ll(Y, X, beta, lpi=lpi, deriv=1)
+    np.testing.assert_allclose(r1["l"], ref["l"], rtol=0, atol=1e-8)
+    np.testing.assert_allclose(r1["lb"], ref["lb"], rtol=0, atol=1e-8)
+    np.testing.assert_allclose(float(np.sum(r1["lbb"])), ref["lbb_sum"],
+                               rtol=0, atol=1e-7)
+    np.testing.assert_allclose(float(np.sqrt(np.sum(r1["lbb"] ** 2))),
+                               ref["lbb_fro"], rtol=0, atol=1e-7)
+    np.testing.assert_allclose(np.diag(r1["lbb"]), ref["lbb_diag"],
+                               rtol=0, atol=1e-8)
+    # the precision factor couples the dimensions: the off-diagonal
+    # mean×mean blocks are nonzero (full d×d precision, not block-diagonal).
+    assert abs(r1["lbb"][0, lpi[1][0]]) > 1e-6
+
+    # deriv 2 — the per-rho traces tr(fh·dH/drho), fh = Hp^{-1}.
+    fh = np.linalg.inv(-r1["lbb"] + np.eye(nb))
+    r2 = fam.ll(Y, X, beta, lpi=lpi, deriv=2, d1b=d1b, fh=fh)
+    np.testing.assert_allclose(r2["d1H"], ref["d1Htr"], rtol=0, atol=1e-7)
+
+    # deriv 3 — the dH/drho matrices themselves.
+    r3 = fam.ll(Y, X, beta, lpi=lpi, deriv=3, d1b=d1b)
+    np.testing.assert_allclose(float(np.sqrt(np.sum(r3["d1H"][0] ** 2))),
+                               ref["d1H0_fro"], rtol=0, atol=1e-7)
+    np.testing.assert_allclose(float(np.sqrt(np.sum(r3["d1H"][1] ** 2))),
+                               ref["d1H1_fro"], rtol=0, atol=1e-7)
+    np.testing.assert_allclose(float(np.sum(r3["d1H"][0])), ref["d1H0_sum"],
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(float(np.sum(r3["d1H"][1])), ref["d1H1_sum"],
+                               rtol=0, atol=1e-6)
+    # the trace at deriv 2 must equal sum(fh * dH) from the deriv-3 matrices.
+    np.testing.assert_allclose(
+        [float(np.sum(fh * dH)) for dH in r3["d1H"]], r2["d1H"],
+        rtol=0, atol=1e-10)
+    # deriv 4 is genuinely unavailable (available_derivs=1 ⇒ bfgs path).
+    with pytest.raises(NotImplementedError, match="deriv 3"):
+        fam.ll(Y, X, beta, lpi=lpi, deriv=4, d1b=d1b)
+
+
+@pytest.mark.parametrize("m,seed", [(2, 101), (3, 103)])
+def test_mvn_ll_derivatives_match_fd(m, seed):
+    from hea.family import mvn
+    ref = _MVN_ORACLE[(m, seed)]
+    X, Y, beta, lpi, d1b = _mvn_oracle_inputs(
+        m, ref["n"], ref["pv"], seed, ref["beta"])
+    fam = mvn(d=m)
+    r1 = fam.ll(Y, X, beta, lpi=lpi, deriv=1)
+    h = 1e-6
+    nb = beta.size
+    fd_lb = np.zeros(nb)
+    fd_lbb = np.zeros((nb, nb))
+    for k in range(nb):
+        cp = beta.copy(); cp[k] += h
+        cm = beta.copy(); cm[k] -= h
+        fd_lb[k] = (fam.ll(Y, X, cp, lpi=lpi)["l"]
+                    - fam.ll(Y, X, cm, lpi=lpi)["l"]) / (2 * h)
+        fd_lbb[:, k] = (fam.ll(Y, X, cp, lpi=lpi, deriv=1)["lb"]
+                        - fam.ll(Y, X, cm, lpi=lpi, deriv=1)["lb"]) / (2 * h)
+    np.testing.assert_allclose(r1["lb"], fd_lb, rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(r1["lbb"], fd_lbb, rtol=1e-5, atol=1e-5)
+
+
+def test_mvn_components_and_validation():
+    from hea.family import mvn, _mvn_ll
+    fam = mvn(d=2)
+    assert fam.n_lp == 2 and fam.n_extra_coef == 3
+    assert fam.available_derivs == 1 and fam.matrix_response is True
+
+    # R-factor rebuild from theta: diag = exp(theta), off-diag = theta.
+    coef = np.array([1.0, 2.0, 3.0, 0.05, -0.3, -0.52])   # 3 mean + 3 theta
+    R = fam._R_from_coef(coef)
+    np.testing.assert_allclose(np.diag(R), [np.exp(0.05), np.exp(-0.52)],
+                               rtol=0, atol=1e-12)
+    np.testing.assert_allclose([R[0, 1], R[1, 0]], [-0.3, 0.0],
+                               rtol=0, atol=1e-12)
+
+    # postproc deviance ≡ Σ‖R(y−μ̂)‖²; residuals deviance ≡ (y−μ̂)·Rᵀ.
+    y = np.array([[1.0, 2.0], [0.5, -1.0], [2.0, 0.5]])
+    fitted = np.array([[0.9, 1.8], [0.6, -0.8], [1.7, 0.7]])
+    fam.set_fit_context(coef=coef)
+    pp = fam.postproc(y, np.ones(3), fitted, None, [None, None], True)
+    rsd = (y - fitted) @ R.T
+    np.testing.assert_allclose(pp["deviance"], float(np.sum(rsd ** 2)),
+                               rtol=0, atol=1e-12)
+    rsd0 = (y - y.mean(axis=0)) @ R.T
+    np.testing.assert_allclose(pp["null_deviance"],
+                               float(np.sum(rsd0 ** 2)), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(fam.residuals(y, fitted, type="deviance"),
+                               rsd, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(fam.residuals(y, fitted, type="response"),
+                               y - fitted, rtol=0, atol=1e-12)
+
+    # initialize_coef returns the full (mean + theta) vector; the diagonal
+    # theta seeds are −½ log(residual scale), off-diagonals zero.
+    X, Y, beta, lpi, _ = _mvn_oracle_inputs(
+        2, 12, (3, 2), 101, _MVN_ORACLE[(2, 101)]["beta"])
+    E = np.zeros((0, X.shape[1]))
+    start = fam.initialize_coef(Y, X, lpi, E=E, offset=[None, None],
+                                use_unscaled=True)
+    assert start.shape == (8,) and np.all(np.isfinite(start))
+    assert start[6] == 0.0          # the single off-diagonal theta
+
+    # validation: d<2 rejected; offsets rejected.
+    with pytest.raises(ValueError, match="2 or more"):
+        mvn(d=1)
+    with pytest.raises(NotImplementedError, match="offset"):
+        fam.ll(Y, X, beta, lpi=lpi, deriv=1,
+               offset=[np.ones(12), None])
+
+
+# ---------------------------------------------------------------------------
+# betar (Beta regression, efam.r:3269-3546) — the first D1b extended family
+# and mgcv's prototype for "-2logLik as deviance" (dev_resids omit the
+# saturated reference; ls≡0; the saturated log-lik is folded in by a Newton
+# solver only for the reported deviance/residuals). Inputs reproduce R's
+# set.seed(202) runif stream via hea.R.rng.
+# ---------------------------------------------------------------------------
+
+def _betar_dd_inputs():
+    from hea.R.rng import RGenerator
+    g = RGenerator(202)
+    n = 9
+    y = g.uniform(0.05, 0.95, n)
+    mu = g.uniform(0.1, 0.9, n)
+    return y, mu, np.ones(n)
+
+
+def test_betar_components_match_mgcv():
+    from hea.family import betar
+    fam = betar(theta=8, link="logit")
+    th = fam.get_theta()                 # log φ
+    y, mu, wt = _betar_dd_inputs()
+    D = fam.Dd(y, mu, th, wt, level=2)
+    # live betar(theta=8)$Dd references (Rscript, mgcv 1.9-4).
+    ref = dict(
+        Dmu=[34.2887061086, -42.2888136009, -7.2280831059, 1.0291405749,
+             22.0623768581, -58.0012103192, 0.0717342770, 25.0824892008,
+             12.7764533599],
+        Dmu2=[77.7453285973, 167.5795893924, 95.5390226276, 97.4278924302,
+              87.8326134591, 239.6591074798, 101.7925754531, 76.3881169600,
+              79.0007145291],
+        Dth=[7.0207781840, 7.1218338511, -0.9256218382, -1.0076881530,
+             1.9454945428, 13.1964579256, -1.0391933060, 3.3601482647,
+             -0.0420342682],
+        Dmu3=[95.4725129451, -1230.3954193622, -273.1248071677,
+              -292.3136124966, 196.9375226494, -2647.7474545772,
+              -337.6647022406, 79.6729211303, 109.1267089537],
+        Dmu2th2=[68.2749537031, 123.1224623633, 80.5672546417,
+                 81.8239313358, 75.3467745148, 157.2427064925,
+                 84.6944775667, 67.3017228061, 69.1704603378],
+        Dmu3th=[60.5529734155, -470.2984365066, -154.3149409500,
+                -163.2230554834, 116.8599251673, -749.4336166052,
+                -183.5497409113, 50.9977946726, 68.6314414742],
+    )
+    for nm, val in ref.items():
+        np.testing.assert_allclose(D[nm], val, rtol=0, atol=1e-8)
+    # EDmu2 ≡ Dmu2 (observed = expected here); Dmu2th ≡ EDmu2th.
+    np.testing.assert_allclose(D["EDmu2"], D["Dmu2"], rtol=0, atol=1e-12)
+    np.testing.assert_allclose(D["Dmu2th"], D["EDmu2th"], rtol=0, atol=1e-12)
+
+    # dev_resids (the −2logLik), variance, aic.
+    np.testing.assert_allclose(
+        fam.dev_resids(y, mu, wt),
+        [5.3971578279, 7.1706034046, -1.3766068861, -1.9131058921,
+         1.4996938245, 13.1550170991, -1.9336677014, 2.3120105027,
+         -0.4907305916], rtol=0, atol=1e-8)
+    np.testing.assert_allclose(
+        fam.variance(mu),
+        [0.0263382964, 0.0150105684, 0.0224799726, 0.0221506673,
+         0.0239649202, 0.0118411627, 0.0214348104, 0.0267040863,
+         0.0260108531], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(fam.aic(y, mu, 0, wt, 9), 23.8203715876,
+                               rtol=0, atol=1e-7)
+
+    # saturated_ll: the per-datum Newton matches mgcv's saturated.ll.
+    sl = fam.saturated_ll(y, wt, np.exp(th[0]))
+    np.testing.assert_allclose(sl["f"], 8.1716871009, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(
+        sl["term"],
+        [1.0966594358, 0.8344161099, 0.8344537876, 0.9592418787,
+         0.8130724065, 0.9401460009, 0.9668464788, 0.9383451518,
+         0.7885058510], rtol=0, atol=1e-8)
+
+    # ls ≡ 0 (the saturated reference lives in saturated_ll, not ls).
+    le = fam.ls_extended(y, wt)
+    assert le["ls"] == 0.0 and float(np.sum(np.abs(le["LSTH1"]))) == 0.0
+
+
+def test_betar_Dd_matches_fd():
+    # FD-check the μ/θ derivatives of dev_resids (the −2logLik).
+    from hea.family import betar
+    fam = betar(theta=5, link="logit")
+    th = fam.get_theta()
+    y, mu, wt = _betar_dd_inputs()
+    D = fam.Dd(y, mu, th, wt, level=1)
+    h = 1e-6
+    fd_mu = (fam.dev_resids(y, mu + h, wt)
+             - fam.dev_resids(y, mu - h, wt)) / (2 * h)
+    fd_mu2 = (fam.dev_resids(y, mu + h, wt) - 2 * fam.dev_resids(y, mu, wt)
+              + fam.dev_resids(y, mu - h, wt)) / h ** 2
+    fd_th = (fam.dev_resids(y, mu, wt, theta=th + h)
+             - fam.dev_resids(y, mu, wt, theta=th - h)) / (2 * h)
+    np.testing.assert_allclose(D["Dmu"], fd_mu, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(D["Dmu2"], fd_mu2, rtol=1e-4, atol=1e-3)
+    np.testing.assert_allclose(D["Dth"], fd_th, rtol=1e-5, atol=1e-5)
+
+
+def test_betar_construction_and_validation():
+    from hea.family import betar
+    # theta sign convention: fixed (>0, n_theta=0) vs free start (<0).
+    assert betar(theta=4).n_theta == 0
+    assert betar(theta=-4).n_theta == 1
+    assert betar().n_theta == 1
+    np.testing.assert_allclose(betar(theta=4).get_theta(trans=True)[0], 4.0)
+    # okLinks
+    for lk in ("logit", "probit", "cloglog", "cauchit"):
+        betar(link=lk)
+    with pytest.raises(ValueError, match="not available"):
+        betar(link="log")
+    # preinitialize clamps y into (eps, 1-eps).
+    fam = betar()
+    pre = fam.preinitialize(np.array([0.0, 0.5, 1.0]))
+    assert pre["y"][0] > 0 and pre["y"][2] < 1

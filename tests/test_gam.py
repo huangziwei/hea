@@ -5030,21 +5030,42 @@ def test_gaulss_fixed_sp_through_gam_matches_mgcv():
 
 def test_general_family_derivs_dispatch_guards():
     # mgcv's optimizer dispatch on available.derivs (mgcv.r:1906-1908):
-    # ==1 → c("outer","bfgs") — unported, so hea refuses with a clear
-    # message instead of crashing at ll(deriv=3) inside gam.fit5;
+    # ==1 → c("outer","bfgs") — the BFGS outer optimizer (item 7): a
+    # derivs-1 family fits through gam.fit5 at deriv ≤ 1 (score + grad),
+    # never the deriv-2/trHid2H path Newton needs;
     # ==0 → every fit5 call stays at deriv 0 (ll deriv ≤ 1), including
     # the fixed-sp and no-smooth paths that previously hard-coded a
     # deriv-2 final fit (mgcv fits derivs-0 families only through
     # efsudr's deriv=0 calls, gam.fit4.r:1479+).
     from hea.family import gaulss
 
+    df = _fit5_fixture()
+
+    # available_derivs==1 forces bfgs. gaulss's ll supports every order,
+    # so the bfgs fit must reach the SAME REML optimum as the derivs-2
+    # newton fit — a cross-check of the bfgs port against newton. The
+    # faithful subclass asserts ll is never asked past the bfgs tier
+    # (deriv ≤ 2, i.e. gam.fit5's dH/trace order — gamlss_gH deriv ≤ 1).
     class _gaulss_d1(gaulss):
         available_derivs = 1
 
-    df = _fit5_fixture()
-    with pytest.raises(NotImplementedError, match="bfgs"):
-        gam(["y ~ s(x) + w", "~ s(z)"], df, family=_gaulss_d1(),
-            method="REML")
+        def ll(self, y, X, coef, wt, *, lpi, offset=None, deriv=0,
+               d1b=None, d2b=None, fh=None, D=None):
+            assert deriv <= 2, \
+                f"bfgs asked a derivs-1 family for ll(deriv={deriv})"
+            return super().ll(y, X, coef, wt, lpi=lpi, offset=offset,
+                              deriv=deriv, d1b=d1b, d2b=d2b, fh=fh, D=D)
+
+    m_bfgs = gam(["y ~ s(x) + w", "~ s(z)"], df, family=_gaulss_d1(),
+                 method="REML")
+    m_newton = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+                   method="REML")
+    np.testing.assert_allclose(m_bfgs.REML_criterion,
+                               m_newton.REML_criterion, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(m_bfgs._beta),
+                               np.asarray(m_newton._beta), rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m_bfgs.sp, m_newton.sp, rtol=1e-3)
+    assert m_bfgs.outer_info["conv"] == "full convergence"
 
     class _gaulss_d0(gaulss):
         # faithful derivs-0 family: anything above ll deriv 1 is an
@@ -5149,9 +5170,19 @@ def test_optimizer_knob_efs_and_validation():
                        match="unknown outer optimization method"):
         gam("y ~ s(x)", df, method="REML",
             optimizer=("outer", "magic"))
+    # optimizer=("outer","bfgs") forces bfgs on a general family (item 7);
+    # gaulss supports every ll order, so the forced-bfgs fit reaches the
+    # same REML optimum as the default newton fit.
+    m_bfgs = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+                 method="REML", optimizer=("outer", "bfgs"))
+    m_newton = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+                   method="REML")
+    np.testing.assert_allclose(m_bfgs.REML_criterion,
+                               m_newton.REML_criterion, rtol=0, atol=1e-6)
+    assert m_bfgs.optimizer == ("outer", "bfgs")
+    # standard-family bfgs is still unported (gam.fit3 outer loop, C9).
     with pytest.raises(NotImplementedError, match="C9"):
-        gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
-            method="REML", optimizer=("outer", "bfgs"))
+        gam("y ~ s(x)", df, method="REML", optimizer=("outer", "bfgs"))
     with pytest.raises(NotImplementedError, match="efsudr"):
         gam("y ~ s(x)", df, method="REML", optimizer="efs")
 
@@ -6531,6 +6562,89 @@ def test_multinom_through_gam_matches_mgcv():
     m.summary()
 
 
+def _mvn_fixture():
+    # 2-D multivariate-normal data on R's set.seed(52) stream via hea.R.rng
+    # (bit-exact runif/rnorm), reproducible by a pure-R script:
+    #   set.seed(52); n<-200; x<-runif(n); z<-runif(n)
+    #   e1<-rnorm(n); e2<-rnorm(n)
+    #   y1<-2*sin(pi*x)+e1
+    #   y2<-0.6*sin(pi*x)+exp(1.5*z)-2+0.5*e1+0.8*e2  # correlated with y1
+    from hea.R.rng import RGenerator
+    gen = RGenerator(52)
+    n = 200
+    x = gen.uniform(size=n)
+    z = gen.uniform(size=n)
+    e1 = gen.normal(size=n)
+    e2 = gen.normal(size=n)
+    y1 = 2 * np.sin(np.pi * x) + e1
+    y2 = (0.6 * np.sin(np.pi * x) + np.exp(1.5 * z) - 2
+          + 0.5 * e1 + 0.8 * e2)
+    return pl.DataFrame({"y1": y1, "y2": y2, "x": x, "z": z})
+
+
+def test_mvn_through_gam_matches_mgcv():
+    # R: gam(list(y1 ~ s(x), y2 ~ s(z)), family=mvn(d=2)) on the set.seed(52)
+    # correlated 2-D fixture. The whole item-7 stack end-to-end: the matrix
+    # response front end (each formula carries its own dimension), the
+    # preinitialize dummy-column extension for the d(d+1)/2 covariance
+    # params, the mvn_ll C-kernel port, AND the BFGS outer optimizer
+    # (available.derivs=1). Both smoothing parameters are informative here
+    # (no flat λ→∞ ridge); the bfgs convergence path drifts the sp/edf at
+    # the ~1e-4 band while REML/Vp pin tight.
+    from hea.family import mvn
+
+    df = _mvn_fixture()
+    m = gam(["y1 ~ s(x)", "y2 ~ s(z)"], df, family=mvn(d=2))
+    assert m.method == "REML"
+    np.testing.assert_allclose(m.REML_criterion / 2, 205.7441216777,
+                               rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m.sp, [0.2006855377, 3.4818966647],
+                               rtol=2e-3)
+    np.testing.assert_allclose(m.edf_total, 11.51223604, rtol=0, atol=2e-3)
+    np.testing.assert_allclose(m.deviance, 400.0, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.null_deviance, 627.91988172, rtol=0,
+                               atol=2e-2)
+    # the d(d+1)/2 = 3 covariance (precision Choleski) params are the
+    # trailing coefs R.1/R.2/R.3 — sign-stable, pinned directly.
+    np.testing.assert_allclose(
+        np.asarray(m._beta)[-3:],
+        [0.12714762, -0.57915894, -0.04044921], rtol=0, atol=1e-4)
+    # tp-basis eigenvector signs are build noise → pin |coef| (the per-LP
+    # intercepts coef[0]/coef[10] are sign-stable).
+    np.testing.assert_allclose(
+        np.abs(np.asarray(m._beta)[[0, 1, 10, 11]]),
+        np.abs([1.249452, 0.033666, 0.559357, 0.115879]),
+        rtol=0, atol=1e-4)
+    # fitted is the (n, 2) matrix of per-dimension means (identity links).
+    np.testing.assert_allclose(
+        np.asarray(m.fitted_values)[:2],
+        [[0.826858, 1.016451], [0.453129, -0.089196]], rtol=0, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(m.Vp)[0, 0], 0.00528745,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(m.Vp)[22, 22], 0.00251721,
+                               rtol=0, atol=1e-6)
+    assert m.outer_info["iter"] == 4
+    assert m.outer_info["conv"] == "full convergence"
+
+    # response predict: the per-dimension means + delta-method SEs (mvn has
+    # no predict hook — identity links route through the per-LP path).
+    pr = m.predict(df[:2], se_fit=True, type="response")
+    np.testing.assert_allclose(
+        [pr["fit"][0], pr["fit.1"][0]], [0.826858, 1.016451],
+        rtol=0, atol=1e-4)
+    np.testing.assert_allclose(
+        [pr["se.fit"][0], pr["se.fit.1"][0], pr["se.fit"][1],
+         pr["se.fit.1"][1]],
+        [0.140909, 0.103364, 0.182820, 0.105579], rtol=0, atol=1e-4)
+
+    # deviance residuals are the whitened (y−μ̂)·Rᵀ; Σr² ≡ deviance.
+    rr = np.asarray(m.residuals_of("deviance"))
+    assert rr.shape == (200, 2)
+    np.testing.assert_allclose(float(np.sum(rr ** 2)), m.deviance,
+                               rtol=0, atol=1e-8)
+    m.summary()
+
+
 def test_shash_through_gam_matches_mgcv():
     # R: gam(list(y ~ s(x), ~ s(z), ~ 1, ~ 1), family=shash(),
     # method="REML") — available.derivs=2, the FULL outer-Newton
@@ -7266,3 +7380,74 @@ def test_influence_cooks_distance_match_mgcv():
         mg.influence()
     with pytest.raises(NotImplementedError, match="general-family"):
         mg.cooks_distance()
+
+
+def _betar_fixture():
+    # Beta-distributed response on R's set.seed(71) stream via hea.R.rng:
+    #   set.seed(71); n<-250; x<-runif(n); u<-runif(n)
+    #   mu<-plogis(0.8*sin(2*pi*x)-0.3); y<-qbeta(u, 12*mu, 12*(1-mu))
+    # qbeta (R) and scipy beta.ppf invert the same regularized incomplete
+    # beta, so the response matches to ~1e-12.
+    from scipy.stats import beta as _B
+    from hea.R.rng import RGenerator
+    gen = RGenerator(71)
+    n = 250
+    x = gen.uniform(0, 1, n)
+    u = gen.uniform(0, 1, n)
+    mu = 1.0 / (1.0 + np.exp(-(0.8 * np.sin(2 * np.pi * x) - 0.3)))
+    y = _B.ppf(u, 12.0 * mu, 12.0 * (1.0 - mu))
+    return pl.DataFrame({"y": y, "x": x})
+
+
+def test_betar_through_gam_matches_mgcv():
+    # R: gam(y ~ s(x), family=betar(), method="REML") — the first D1b
+    # extended family end-to-end: the −2logLik-as-deviance criterion (Dp<0
+    # is legitimate for betar, unlike a proper deviance), joint φ
+    # estimation, the LogitLink extended g2g/g3g/g4g forms the extended
+    # IRLS needs, and the saturated-ll Newton folded into the reported
+    # deviance + deviance residuals.
+    from hea.family import betar
+
+    df = _betar_fixture()
+    m = gam("y ~ s(x)", df, family=betar(), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, -161.49936705,
+                               rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m.sp, [0.1881112502], rtol=1e-4)
+    np.testing.assert_allclose(
+        float(np.exp(m.family.get_theta()[0])), 14.41333656,
+        rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.edf_total, 6.82912381, rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m.deviance, 234.26619683, rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.null_deviance, 468.30180613, rtol=0,
+                               atol=1e-4)
+    np.testing.assert_allclose(np.asarray(m.Vp)[0, 0], 0.00110098,
+                               rtol=0, atol=1e-6)
+    # tp-basis sign noise → |coef|; the intercept (coef[0]) is sign-stable.
+    np.testing.assert_allclose(
+        np.abs(np.asarray(m._beta)[:3]),
+        np.abs([0.236147, 1.665602, 0.753554]), rtol=0, atol=1e-4)
+
+    # response predict + delta-method SE (logit linkinv on the mean).
+    pr = m.predict(df[:3], se_fit=True, type="response")
+    np.testing.assert_allclose(pr["fit"].to_numpy(),
+                               [0.5893680, 0.3717789, 0.5918235],
+                               rtol=0, atol=1e-5)
+    np.testing.assert_allclose(pr["se.fit"].to_numpy(),
+                               [0.0179293, 0.0206123, 0.0178807],
+                               rtol=0, atol=1e-5)
+
+    # deviance residuals fold in the saturated log-lik (without it the
+    # √(max(0,−2logLik)) clamp zeros most of them).
+    np.testing.assert_allclose(
+        np.asarray(m.residuals_of("deviance"))[:3],
+        [-0.179788, -0.679496, 1.748929], rtol=0, atol=1e-5)
+
+    # the other three okLinks exercise the probit/cloglog/cauchit
+    # g2g/g3g/g4g extended forms (gam.fit3.r:2249-2303) in the extended
+    # IRLS — REML matched to R per link.
+    for lk, reml_ref in (("probit", -160.5668040),
+                         ("cloglog", -160.8250744),
+                         ("cauchit", -160.9522179)):
+        ml = gam("y ~ s(x)", df, family=betar(link=lk), method="REML")
+        np.testing.assert_allclose(ml.REML_criterion / 2, reml_ref,
+                                   rtol=0, atol=1e-4)

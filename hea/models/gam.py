@@ -902,10 +902,16 @@ class gam:
         if opt[1] not in ("newton", "bfgs", "nlm", "optim"):
             raise ValueError("unknown outer optimization method.")
         if opt[0] == "outer" and opt[1] != "newton":
-            raise NotImplementedError(
-                f"optimizer=('outer', '{opt[1]}') is not ported — only "
-                "'newton' (and the 'efs' first element) are available "
-                "(bfgs/nlm/optim: roadmap C9).")
+            # bfgs is ported for GENERAL families (item 7 — the gam.fit5
+            # outer loop, mgcv's bfgs gam.fit3.r:1722); the standard
+            # gam.fit3 bfgs and nlm/optim remain unported (roadmap C9).
+            _gen = getattr(family, "is_general", False)
+            if not (opt[1] == "bfgs" and _gen):
+                raise NotImplementedError(
+                    f"optimizer=('outer', '{opt[1]}') is not ported — only "
+                    "'newton' (and the 'efs' first element) are available "
+                    "for this model (bfgs is ported for general families; "
+                    "standard-family bfgs/nlm/optim: roadmap C9).")
         self.optimizer = opt
         if isinstance(formula, (list, tuple)):
             # Multiple linear predictors → general-family fitting via
@@ -1937,6 +1943,13 @@ class gam:
             self._postproc = pp
             if pp.get("null_deviance") is not None:
                 self.null_deviance = float(pp["null_deviance"])
+            # betar reports "-2logLik as deviance": its dev_resids omit the
+            # saturated reference, so postproc folds 2·saturated_ll into both
+            # the deviance and the null deviance (efam.r:3479-3482). Other
+            # extended families return no "deviance" key — byte-unchanged.
+            if pp.get("deviance") is not None:
+                self.deviance = float(pp["deviance"])
+                self.rss = self.deviance
 
         self.Vp = Vp
         self.Ve = Ve
@@ -3416,7 +3429,13 @@ class gam:
         if fit is None:
             fit = self._fit_given_rho(rho)
         Dp = fit.dev + fit.pen
-        if Dp <= 0 or not np.isfinite(Dp):
+        if not np.isfinite(Dp):
+            return 1e15
+        # Dp ≤ 0 is degenerate ONLY for scale-unknown families, where the
+        # criterion profiles φ̂ = Dp/(n−Mp) and needs log(Dp). For scale-
+        # known families Dp enters only as Dp/φ (φ fixed): betar's
+        # "−2logLik as deviance" is legitimately negative — keep it.
+        if Dp <= 0 and not self.family.scale_known:
             return 1e15
         Mp = float(self._Mp)
         phi = float(np.exp(log_phi))
@@ -4150,8 +4169,18 @@ class gam:
         self._edge_correct = False
         self._edge_theta1 = None
 
-        md = _prepare_multi_design(list(formulas), data, knots, select,
-                                   allow_single=(family.n_lp == 1))
+        md = _prepare_multi_design(
+            list(formulas), data, knots, select,
+            allow_single=(family.n_lp == 1),
+            matrix_response=getattr(family, "matrix_response", False))
+        # families with parameters beyond the linear-predictor coefs (mvn's
+        # Choleski-factor params) append unpenalized "dummy" columns to the
+        # design — mgcv's preinitialize (mvam.r:92-131). They sit in NO
+        # linear predictor and carry no penalty; the family's ll reads them
+        # as the trailing coefs.
+        self._n_extra_coef = int(getattr(family, "n_extra_coef", 0) or 0)
+        if self._n_extra_coef:
+            md = _append_extra_params(md, self._n_extra_coef)
         self._drop_intercept_col = None
         if getattr(family, "drop_intercept", False):
             # cox.ph drops the intercept (drop.intercept=TRUE, coxph.r:355):
@@ -4209,6 +4238,11 @@ class gam:
                 continue
             Mp += k - _sym_rank(np.sum(
                 [np.asarray(s_, dtype=float) for s_ in b.S], axis=0))
+        # NOTE: the appended covariance params do NOT enter Mp. mgcv fixes
+        # G$Mp at gam.setup — before preinitialize appends the dummy
+        # columns — so the family's extra params are absent from the REML
+        # normalizing constant Mp·log(2π)/2 (verified: mvn REML matches R
+        # only with Mp = the mean-design null space, not +d(d+1)/2).
         self._Mp = Mp
         self._penalty_rank = md.p - Mp
 
@@ -4234,18 +4268,15 @@ class gam:
         n_work = self._work_dim
         avail_derivs = int(getattr(family, "available_derivs", 2) or 0)
         efs_forced = optimizer[0] == "efs"
-        if avail_derivs == 1 and not efs_forced:
-            # mgcv coerces available.derivs==1 families to the bfgs
-            # outer optimizer unless efs was requested (mgcv.r:1907) —
-            # bfgs is unported. Refuse here rather than crash at
-            # ll(deriv=3) inside gam.fit5.
-            raise NotImplementedError(
-                "general family with available_derivs=1 needs the "
-                "'bfgs' outer optimizer (mgcv.r:1907), which is not "
-                "ported; supply ll derivatives to order 4 "
-                "(available_derivs=2, full Newton), only to order 2 "
-                "(available_derivs=0, EFS), or pass optimizer='efs'.")
+        # mgcv coerces available.derivs==1 families to the bfgs outer
+        # optimizer unless efs was requested (mgcv.r:1907): the ll only
+        # supplies up to the dH/trace order (gamlss_gH deriv ≤ 2), so
+        # Newton's REML2 — needing the ll's trHid2H — is unavailable. The
+        # public knob optimizer=("outer","bfgs") forces bfgs on any general
+        # family (even a derivs-2 one, exactly like mgcv).
+        bfgs_forced = len(optimizer) > 1 and optimizer[1] == "bfgs"
         use_efs = avail_derivs == 0 or efs_forced
+        use_bfgs = (avail_derivs == 1 or bfgs_forced) and not efs_forced
         if sp is not None:
             sp_arr = np.asarray(sp, dtype=float).flatten()
             if sp_arr.shape != (n_work,):
@@ -4289,6 +4320,16 @@ class gam:
                          else "full convergence"),
                 "iter": it_efs,
             }
+        elif use_bfgs:
+            # available_derivs == 1 → BFGS over the REML5 score (mgcv's
+            # bfgs, gam.fit3.r:1722): only gam.fit5 deriv ≤ 1 (score +
+            # gradient) is ever asked of the family.
+            theta0 = _initial_sp_general(
+                X_irp, y, family, md.slots, md.lpi, weights=self._wt,
+                offsets=md.offsets, L=md.L)
+            _nt = self._control["newton"]
+            theta_hat = self._outer_bfgs(
+                theta0, conv_tol=_nt["conv_tol"], max_Nstep=_nt["maxNstep"])
         else:
             theta0 = _initial_sp_general(
                 X_irp, y, family, md.slots, md.lpi, weights=self._wt,
@@ -5116,6 +5157,296 @@ class gam:
                 _apply_family_theta(theta)
             self._edge_theta1 = theta1
         return theta
+
+    def _outer_bfgs(
+        self, theta0: np.ndarray, *, conv_tol: float = 1e-6,
+        max_Nstep: float = 3.0, max_step: int = 200,
+    ) -> np.ndarray:
+        """mgcv ``bfgs`` (gam.fit3.r:1722-2141) for general families.
+
+        BFGS over the REML5 score using only ``gam.fit5`` at deriv ≤ 1
+        (score ``REML`` + gradient ``REML1`` + the ``dVkk`` curvature
+        matrix). This is the outer optimizer mgcv coerces to for
+        ``available.derivs == 1`` families (mgcv.r:1907) — ``mvn`` and any
+        custom family that supplies ll only to the dH/trace order
+        (gamlss_gH deriv ≤ 2), where Newton's REML2 (needing the ll's
+        ``trHid2H``, gamlss_gH deriv 3) is unavailable.
+
+        Step lengths meet the Wolfe conditions via Nocedal & Wright
+        (2006) Algorithms 3.5 (main loop) and 3.6 (``zoom`` bisection).
+        The initial inverse Hessian is seeded by finite-differencing the
+        gradient, then adjusted on the first accepted step (mgcv's p143
+        variant). ``score.scale = 1 + |score|`` (REML path; general
+        families have ``scale.est ≡ 1``). The working-infinite-sp
+        roll-back (gam.fit3.r:2065-2100) is ported for parity.
+
+        ``theta0`` is the *working* log-sp seed; the returned vector is
+        the converged working log-sp. ``self._outer_info`` is populated
+        with ``conv``/``iter``/``grad``/``hess``/``score.hist`` like
+        mgcv's ``object$outer.info``; the accepted deriv-1 fit is cached
+        on ``self._g5["fit"]`` so the caller never refits.
+        """
+        g5 = self._g5
+        fam = self.family
+        L = self._L                      # working→full sp (None ⇔ I)
+        n_sp = int(np.asarray(theta0).size)
+        eps_mach = float(np.finfo(float).eps)
+
+        # mgcv caps the inner PIRLS tol at conv.tol/100 (gam.fit3.r:1797).
+        inner_eps = min(1e-7, conv_tol / 100.0)
+
+        def _to_working(g):
+            return g if L is None else L.T @ g
+
+        def _fit5(lsp_work, d):
+            rho = self._rho_full(np.asarray(lsp_work, dtype=float))
+            fit = _gam_fit5(
+                g5["X"], g5["y"], rho, g5["sl"], family=fam,
+                lpi=g5["lpi"], weights=g5["weights"],
+                offsets=g5["offsets"], Mp=g5["Mp"], deriv=d,
+                start=g5["start"], gamma=g5["gamma"], epsilon=inner_eps,
+            )
+            g5["start"] = fit["coefficients"]
+            return fit
+
+        def _dvkk_diag(fit):
+            dV = np.asarray(fit["dVkk"], dtype=float)
+            if L is None:
+                return np.diag(dV).copy()
+            return np.diag(L.T @ dV @ L)
+
+        def _grad(fit):
+            return _to_working(np.asarray(fit["REML1"], dtype=float))
+
+        # all sp slots carry curvature info for general families (mvn has
+        # no family$n.theta and gam.fit5's dVkk is n_sp×n_sp) — spind ≡
+        # every working sp (mgcv.r-bfgs: nind = ncol(L), spind = 1:nind).
+        spind = np.ones(n_sp, dtype=bool)
+
+        ilsp = np.asarray(theta0, dtype=float).copy()
+        initial_lsp = ilsp.copy()
+
+        # ---- initial fit + gradient -----------------------------------
+        b = _fit5(ilsp, 1)
+        score = float(b["REML"])
+        grad = _grad(b)
+        i_dvkk = _dvkk_diag(b)
+        start0 = g5["start"].copy()
+        i_score = score
+        i_grad = grad.copy()
+        score_scale = 1.0 + abs(i_score)
+
+        # ---- FD inverse-Hessian seed (gam.fit3.r:1852-1873) -----------
+        Bmat = np.eye(n_sp)
+        feps = 1e-4
+        for k in range(n_sp):
+            jlsp = ilsp.copy()
+            jlsp[k] += feps
+            g5["start"] = start0.copy()
+            bk = _fit5(jlsp, 1)
+            grad1 = _grad(bk)
+            Bmat[k, :] = (grad1 - grad) / feps
+        Bmat = (Bmat + Bmat.T) / 2.0
+        evals, evecs = np.linalg.eigh(Bmat)
+        evals = np.abs(evals)
+        thresh = float(np.max(evals)) * 1e-4 if evals.size else 0.0
+        evals[evals < thresh] = thresh
+        # B ← V diag(1/λ) V'  (the approximate INVERSE Hessian)
+        Bmat = evecs @ ((evecs / evals).T)
+        g5["start"] = start0.copy()
+
+        c1, c2 = 1e-4, 0.9          # Wolfe constants
+        score_hist = [i_score]
+        uconv = np.ones(n_sp, dtype=bool)
+        rolled_back = False
+        # the "initial" record for the current line search
+        cur = {"alpha": 0.0, "score": i_score, "grad": i_grad,
+               "dVkk": i_dvkk, "start": start0.copy()}
+        step = np.zeros(n_sp)
+        trial = None
+        ct = "iteration limit reached"
+        iters = 0
+
+        def zoom(lo, hi):
+            # N&W Alg 3.6: bisection for a Wolfe-satisfying step.
+            for _ in range(40):
+                al = (lo["alpha"] + hi["alpha"]) / 2.0
+                tr = {"alpha": al}
+                lspz = ilsp + step * al
+                g5["start"] = cur["start"].copy()
+                bz = _fit5(lspz, 0)
+                tr["score"] = float(bz["REML"])
+                tr["start"] = g5["start"].copy()
+                if (tr["score"] > cur["score"] + al * c1 * cur["dscore"]
+                        or tr["score"] >= lo["score"]):
+                    hi = tr
+                else:
+                    g5["start"] = cur["start"].copy()
+                    bz = _fit5(lspz, 1)
+                    tr["grad"] = _grad(bz)
+                    tr["dVkk"] = _dvkk_diag(bz)
+                    tr["start"] = g5["start"].copy()
+                    tr["dscore"] = float(np.sum(step * tr["grad"]))
+                    if abs(tr["dscore"]) <= -c2 * cur["dscore"]:
+                        return tr
+                    if tr["dscore"] * (hi["alpha"] - lo["alpha"]) >= 0:
+                        hi = lo
+                    lo = tr
+            return None
+
+        for it in range(1, max_step + 1):
+            iters = it
+            # trial step from the approximate inverse Hessian
+            step = np.zeros(n_sp)
+            step[uconv] = -(Bmat[np.ix_(uconv, uconv)] @ i_grad[uconv])
+            if float(np.sum(step * i_grad)) >= 0:    # not descending
+                step = -np.diag(Bmat) * i_grad
+                step[~uconv] = 0.0
+            ms = float(np.max(np.abs(step))) if step.size else 0.0
+            if ms > max_Nstep:
+                alpha = max_Nstep / ms
+                alpha_max = alpha * 1.05
+            else:
+                alpha = 1.0
+                alpha_max = min(2.0, max_Nstep / ms) if ms > 0 else 2.0
+            cur["dscore"] = float(np.sum(step * i_grad))
+            prev = dict(cur)
+            trial = {"alpha": alpha}
+            deriv = 1
+            while True:                       # N&W Alg 3.5
+                lsp = ilsp + trial["alpha"] * step
+                g5["start"] = prev["start"].copy()
+                b = _fit5(lsp, deriv)
+                trial["score"] = float(b["REML"])
+                if deriv > 0:
+                    trial["grad"] = _grad(b)
+                    trial["dVkk"] = _dvkk_diag(b)
+                    trial["dscore"] = float(np.sum(trial["grad"] * step))
+                    deriv = 0
+                else:
+                    trial["grad"] = None
+                    trial["dscore"] = None
+                trial["start"] = g5["start"].copy()
+                Wolfe2 = True
+                # Wolfe 1: sufficient decrease
+                if (trial["score"] > cur["score"]
+                        + c1 * trial["alpha"] * cur["dscore"]
+                        or (deriv == 0 and trial["score"] >= prev["score"])):
+                    trial = zoom(prev, trial)
+                    break
+                if trial["dscore"] is None:   # need gradient at trial
+                    g5["start"] = trial["start"].copy()
+                    b = _fit5(lsp, 1)
+                    trial["grad"] = _grad(b)
+                    trial["dscore"] = float(np.sum(trial["grad"] * step))
+                    trial["dVkk"] = _dvkk_diag(b)
+                    trial["start"] = g5["start"].copy()
+                if abs(trial["dscore"]) <= -c2 * cur["dscore"]:
+                    break                     # Wolfe 2 met
+                Wolfe2 = False
+                if trial["dscore"] >= 0:      # increase at trial end
+                    trial = zoom(trial, prev)
+                    Wolfe2 = trial is not None
+                    break
+                prev = dict(trial)
+                if trial["alpha"] == alpha_max:
+                    break
+                trial["alpha"] = min(prev["alpha"] * 1.3, alpha_max)
+
+            if trial is None:                 # step failed
+                lsp = ilsp.copy()
+                if rolled_back:
+                    break
+                uconv = np.abs(i_grad) > score_scale * conv_tol * 0.1
+                uconv[spind] = uconv[spind] | (
+                    np.abs(i_dvkk)[spind] > score_scale * conv_tol * 0.1)
+                if np.sum(~uconv) == 0:
+                    break
+                trial = dict(cur)
+                converged = True
+            else:                             # BFGS inverse-Hessian update
+                yg = trial["grad"] - i_grad
+                step_full = step * trial["alpha"]
+                rho_bfgs = float(np.sum(yg * step_full))
+                if rho_bfgs > 0:
+                    if it == 1:
+                        Bmat = Bmat * trial["alpha"]
+                    rinv = 1.0 / rho_bfgs
+                    Bmat = Bmat - rinv * np.outer(step_full, yg @ Bmat)
+                    Bmat = (Bmat - rinv * np.outer(Bmat @ yg, step_full)
+                            + rinv * np.outer(step_full, step_full))
+                score_hist.append(trial["score"])
+                ilsp = ilsp + step_full
+                lsp = ilsp.copy()
+                converged = True
+                score_scale = 1.0 + abs(trial["score"])
+                uconv = np.abs(trial["grad"]) > score_scale * conv_tol
+                if np.sum(uconv):
+                    converged = False
+                uconv = np.abs(trial["grad"]) > score_scale * conv_tol * 0.1
+                uconv[spind] = uconv[spind] | (
+                    np.abs(trial["dVkk"])[spind]
+                    > score_scale * conv_tol * 0.1)
+                if abs(i_score - trial["score"]) > score_scale * conv_tol:
+                    if not np.sum(uconv):
+                        uconv = np.ones(n_sp, dtype=bool)
+                    converged = False
+
+            # roll back any "working infinite" sps (gam.fit3.r:2065-2100)
+            if converged:
+                if np.sum(~uconv) == 0 or rolled_back:
+                    break
+                rolled_back = True
+                counter = 0
+                uconv0 = uconv.copy()
+                while np.sum(~uconv0) > 0 and counter < 5:
+                    lsp[~uconv0] = (lsp[~uconv0] * 0.8
+                                    + initial_lsp[~uconv0] * 0.2)
+                    g5["start"] = trial["start"].copy()
+                    b = _fit5(lsp, 1)
+                    trial["score"] = float(b["REML"])
+                    trial["grad"] = _grad(b)
+                    trial["dscore"] = float(np.sum(trial["grad"] * step))
+                    trial["dVkk"] = _dvkk_diag(b)
+                    trial["start"] = g5["start"].copy()
+                    counter += 1
+                    uconv0 = np.abs(trial["grad"]) > score_scale * conv_tol * 20
+                    uconv0[spind] = uconv0[spind] | (
+                        np.abs(trial["dVkk"])[spind]
+                        > score_scale * conv_tol * 20)
+                    uconv0 = uconv0 | uconv
+                uconv = np.ones(n_sp, dtype=bool)
+                ilsp = lsp.copy()
+
+            cur = dict(trial)
+            cur["alpha"] = 0.0
+            i_score = trial["score"]
+            i_grad = np.asarray(trial["grad"], dtype=float).copy()
+            i_dvkk = np.asarray(trial["dVkk"], dtype=float).copy()
+
+        if trial is None:
+            ct = "step failed"
+            lsp = ilsp.copy()
+        elif iters == max_step:
+            ct = "iteration limit reached"
+        else:
+            ct = "full convergence"
+
+        # ---- final fit (gam.fit3.r:2116) ------------------------------
+        g5["start"] = (cur.get("start", start0)).copy()
+        bfin = _fit5(lsp, 1)
+        g5["fit"] = bfin
+        gfin = _grad(bfin)
+        # approximate Hessian (invert the inverse-Hessian B)
+        evals, evecs = np.linalg.eigh((Bmat + Bmat.T) / 2.0)
+        keep = evals > float(np.max(evals)) * eps_mach ** 0.9
+        inv = np.where(keep, 1.0 / np.where(keep, evals, 1.0), 0.0)
+        hess = evecs @ (inv[:, None] * evecs.T)
+        self._outer_info = {
+            "conv": ct, "iter": iters, "grad": gfin, "hess": hess,
+            "score.hist": np.asarray(score_hist, dtype=float),
+        }
+        return ilsp
 
     def _S_pinv(self, S_full: np.ndarray) -> np.ndarray:
         """Pseudo-inverse of Sλ on its fixed range space.
@@ -6964,7 +7295,15 @@ class gam:
     # -----------------------------------------------------------------------
 
     def _deviance_residuals(self, y, mu, wt) -> np.ndarray:
-        """``sign(y - μ)·√(per-obs deviance)`` — mgcv's default residual."""
+        """``sign(y - μ)·√(per-obs deviance)`` — mgcv's default residual.
+
+        Families whose ``dev_resids`` returns ``−2logLik`` rather than a
+        proper (≥0) deviance (betar & co) supply a ``residuals_extended``
+        hook that folds in the saturated log-lik reference; without it the
+        ``√(max(0, −2logLik))`` clamp would zero most residuals."""
+        ext = getattr(self.family, "residuals_extended", None)
+        if ext is not None:
+            return np.asarray(ext(y, mu, wt, "deviance"), dtype=float)
         d_i = self.family.dev_resids(y, mu, wt)
         d_i = np.maximum(d_i, 0.0)            # FP cleanup near zero
         return np.sign(y - mu) * np.sqrt(d_i)
@@ -11159,6 +11498,23 @@ def _sl_term_mult(sl: _Sl, A: np.ndarray, full: bool = False):
     return SA, inds
 
 
+def _append_extra_params(md: "_MultiDesign", n_extra: int) -> "_MultiDesign":
+    """Append ``n_extra`` unpenalized "dummy" columns to a multi-formula
+    design — mgcv's ``preinitialize`` for ``mvn`` (mvam.r:103-107): the
+    Choleski-factor parameters of the precision matrix get zero design
+    columns so they ride the coefficient vector, but they belong to no
+    linear predictor and carry no penalty. Only ``X``/``p``/
+    ``column_names`` change; ``lpi``/slots/blocks/nsdf/L are untouched
+    (the params are pure unpenalized coefficients, like extra parametric
+    terms living outside every LP)."""
+    n = md.X.shape[0]
+    X = np.concatenate([md.X, np.zeros((n, n_extra))], axis=1)
+    names = list(md.column_names) + [f"R.{i + 1}" for i in range(n_extra)]
+    kw = {k: getattr(md, k) for k in _MultiDesign.__slots__}
+    kw.update(X=X, p=X.shape[1], column_names=names)
+    return _MultiDesign(**kw)
+
+
 # ---------------------------------------------------------------------------
 # Multi-formula front end — mgcv interpret.gam list branch (mgcv.r:431-498)
 # + gam.setup.list (mgcv.r:922-1092). §5.3 prerequisite 4.
@@ -11315,7 +11671,8 @@ def _build_lp_design(formula: str, data, knots: dict | None,
 def _prepare_multi_design(formulas: list[str], data,
                           knots: dict | None = None,
                           select: bool = False,
-                          allow_single: bool = False) -> _MultiDesign:
+                          allow_single: bool = False,
+                          matrix_response: bool = False) -> _MultiDesign:
     """mgcv ``gam.setup.list`` (mgcv.r:922-1092) for hea: a list of
     formula strings → one stacked design with ``lpi``.
 
@@ -11326,6 +11683,12 @@ def _prepare_multi_design(formulas: list[str], data,
     indices; offsets are per-LP (``None`` when a formula has no
     ``offset()`` atom); penalties carry global column offsets; the id
     L-matrix is block-diagonal across formulas.
+
+    ``matrix_response=True`` (the ``mvn`` front end): EVERY formula
+    carries its own response and they stack column-wise into an
+    ``(n, n_lp)`` matrix ``y`` (mgcv stacks the per-formula LHS into the
+    matrix response ``G$y``). The designs are still built from the
+    per-formula RHS exactly as in the standard case.
     """
     if len(formulas) < 1 or (len(formulas) < 2 and not allow_single):
         raise ValueError(
@@ -11339,10 +11702,20 @@ def _prepare_multi_design(formulas: list[str], data,
     if not resp:
         raise ValueError("first formula must have a response on the lhs")
     full_formulas = [first]
+    resp_exprs = [resp]
     for j, f in enumerate(formulas[1:], start=1):
         if "~" not in f:
             raise ValueError(f"formula {j} must contain '~': {f!r}")
         lhs = f.split("~", 1)[0].strip()
+        if matrix_response:
+            # mvn: each formula supplies its own dimension's response.
+            if not lhs:
+                raise ValueError(
+                    "matrix-response family: every formula must carry a "
+                    f"response on the lhs; formula {j} is response-less")
+            resp_exprs.append(lhs)
+            full_formulas.append(f)
+            continue
         if lhs:
             raise NotImplementedError(
                 "formulas after the first must be response-less "
@@ -11355,13 +11728,23 @@ def _prepare_multi_design(formulas: list[str], data,
 
     lps: list[_LpDesign] = []
     for j, f in enumerate(full_formulas):
+        # response-less RHS for design building when each formula has its
+        # own LHS (mvn): reuse the shared response label so _build_lp_design
+        # finds a valid y to discard.
+        build_f = (f"{resp} ~ {f.split('~', 1)[1].strip()}"
+                   if matrix_response else f)
         lps.append(_build_lp_design(
-            f, data, knots, select,
+            build_f, data, knots, select,
             label_suffix=(f".{j}" if j > 0 else None),
         ))
 
     n = lps[0].X.shape[0]
-    y = prepare_design(full_formulas[0], data).y.to_numpy().astype(float)
+    if matrix_response:
+        y = np.column_stack([
+            prepare_design(f"{r} ~ 1", data).y.to_numpy().astype(float)
+            for r in resp_exprs])
+    else:
+        y = prepare_design(full_formulas[0], data).y.to_numpy().astype(float)
     X = np.concatenate([lp.X for lp in lps], axis=1)
     lpi: list[np.ndarray] = []
     blocks: list[SmoothBlock] = []
