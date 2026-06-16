@@ -7543,3 +7543,92 @@ def test_ocat_through_gam_matches_mgcv():
                    1.0698318351438267], rtol=0, atol=1e-4)
     np.testing.assert_allclose(float(np.sum(dres ** 2)), m.deviance,
                                rtol=0, atol=1e-8)
+
+
+def _ziP_fixture():
+    # Zero-inflated Poisson counts via R's set.seed(7) stream, reproduced
+    # bit-exactly by hea.R.rng with three fixed runif(n) draws (avoids the
+    # variable-consumption interleaving of rpois):
+    #   set.seed(7); n<-400; x<-runif(n); u_count<-runif(n); u_pres<-runif(n)
+    #   gamma<-1.5*sin(2*pi*x)+0.2; lambda<-exp(gamma)
+    #   eta<- -1.0+1.6*gamma; p<-1-exp(-exp(eta))
+    #   y<-ifelse(u_pres<p, qpois(u_count,lambda), 0)
+    # R's qpois and scipy poisson.ppf invert the same Poisson CDF (verified
+    # bit-identical on this stream). 235 zeros / 165 positives, max 10.
+    from scipy.stats import poisson
+    from hea.R.rng import RGenerator
+    gen = RGenerator(7)
+    n = 400
+    x = gen.uniform(0, 1, n)
+    u_count = gen.uniform(0, 1, n)
+    u_pres = gen.uniform(0, 1, n)
+    gamma = 1.5 * np.sin(2 * np.pi * x) + 0.2
+    p = 1.0 - np.exp(-np.exp(-1.0 + 1.6 * gamma))
+    y = np.where(u_pres < p, poisson.ppf(u_count, np.exp(gamma)), 0.0)
+    return pl.DataFrame({"y": y.astype(int), "x": x})
+
+
+def test_ziP_through_gam_matches_mgcv():
+    # R: gam(y ~ s(x), family=ziP(), method="REML") — single-formula
+    # zero-inflated Poisson. Exercises: the shared zipll kernel via the
+    # extended Dd path, the observed≠expected Hessian (EDmu2 ≠ Dmu2,
+    # ziP-specific El2), the −2logLik-as-deviance fold with the saturated_ll
+    # Newton, the optimize-based null deviance, and the `predict` hook
+    # returning E(y) (NOT linkinv(η) — ziP keeps fitted = the log-mean LP).
+    from hea.family import ziP
+
+    df = _ziP_fixture()
+    m = gam("y ~ s(x)", df, family=ziP(), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 422.7206170258,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.sp, [0.083619872403188383], rtol=2e-3)
+    np.testing.assert_allclose(
+        m.family.get_theta(), [-3.2949401719022888, 1.2258053436229546],
+        rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.edf_total, 6.9362279961, rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.deviance, 236.9705123525, rtol=0, atol=5e-3)
+    np.testing.assert_allclose(m.null_deviance, 761.4398775608, rtol=0,
+                               atol=5e-3)
+    np.testing.assert_allclose(np.asarray(m.Vp)[0, 0], 0.00352127204674,
+                               rtol=0, atol=1e-5)
+    # ziP keeps fitted = the linear predictor γ (NOT E(y)); the mean only
+    # comes from the predict hook.
+    np.testing.assert_allclose(
+        m.fitted_values[:4],
+        [0.49477606138778263, 1.1932554070862351, 1.2263867543910303,
+         0.98869377799869562], rtol=0, atol=1e-4)
+    assert m._postproc["family_name"] == "Zero inflated Poisson(-3.295,3.407)"
+    # intercept sign-stable; tp s(x) basis carries sign noise → |coef|.
+    np.testing.assert_allclose(
+        np.abs(np.asarray(m._beta)[:3]),
+        np.abs([0.58794071413230287, 1.9594814883910816,
+                0.61803791743402448]), rtol=0, atol=2e-3)
+
+    # the predict hook returns E(y) = p·E(y|present) + delta SE.
+    pr = m.predict(pl.DataFrame({"x": [0.2, 0.5, 0.8]}), type="response",
+                   se_fit=True)
+    np.testing.assert_allclose(
+        pr["fit"].to_numpy(),
+        [4.7469199014934222, 0.43993064312301344, 0.03157416057280106],
+        rtol=0, atol=1e-3)
+    np.testing.assert_allclose(
+        pr["se.fit"].to_numpy(),
+        [0.27815576114349722, 0.12612620416309303, 0.020997731734616366],
+        rtol=0, atol=1e-3)
+
+    # deviance residuals fold in the saturated_ll; Σ res² = deviance. The
+    # response residual is y − E(y) (not y − fitted_LP), routed through the
+    # family hook.
+    dres = np.asarray(m.residuals_of("deviance"))
+    np.testing.assert_allclose(
+        dres[:6], [-0.63250442710168497, 0.56473914672204939,
+                   0.88371319063094189, -1.4671154974843927,
+                   -0.024871912805149807, -0.2035584951393099],
+        rtol=0, atol=2e-3)
+    np.testing.assert_allclose(float(np.sum(dres ** 2)), m.deviance,
+                               rtol=0, atol=1e-6)
+    rres = np.asarray(m.residuals_of("response"))
+    np.testing.assert_allclose(
+        rres[:4], [-0.3688958956021644, 0.97031232323179584,
+                   1.7883819521639648, -1.9008466174667389],
+        rtol=0, atol=2e-3)

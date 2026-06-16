@@ -711,9 +711,12 @@ class Family:
                     "Detath": r["Dmuth"],
                     "Deta3": r["Dmu3"],
                     "Deta2th": r["Dmu2th"],
-                    "EDeta2th": r["EDmu2th"],
                     "EDeta3": r.get("EDmu3"),
                 })
+                # EDmu2th is optional (ziP omits it; mgcv's R-NULL list
+                # access silently skips it, gam.fit4.r:23) — mirror that.
+                if r.get("EDmu2th") is not None:
+                    d["EDeta2th"] = r["EDmu2th"]
             if level > 1:
                 d.update({
                     "Deta4": r["Dmu4"],
@@ -4999,6 +5002,401 @@ class ocat(Family):
 
 
 # ---------------------------------------------------------------------------
+# ziP — single-formula zero-inflated Poisson (mgcv ziP(), efam.r:3848-4147).
+# The ONE linear predictor μ is the log Poisson mean γ (E(Poisson)=e^γ);
+# presence has probability p = 1 − exp(−exp(η)) with η = θ₁ + (b+e^θ₂)·γ a
+# fixed affine map of γ (so presence rises with the mean). n_theta = 2.
+# The log-lik kernel `zipll` is shared with the 2-LP `ziplss` GeneralFamily;
+# the affine map's derivatives come from `lind`. mgcv's "−2logLik as
+# deviance" (like betar): dev_resids omit the saturated reference, folded
+# back via `saturated_ll` for the reported deviance/residuals.
+# ---------------------------------------------------------------------------
+
+
+def _zip_lind(mu, theta, deriv, k=0.0):
+    """mgcv ``lind`` (efam.r:3774-3792): the affine presence map
+    ``p = θ₁ + (k+e^θ₂)·μ`` and its μ/θ derivatives. Linear in μ, so
+    ``p_ll = p_lll = p_llll = 0``."""
+    mu = np.asarray(mu, dtype=float)
+    th2 = np.exp(theta[1])
+    n = mu.shape[0]
+    r = {"p": theta[0] + (k + th2) * mu, "p_l": k + th2, "p_ll": 0.0,
+         "p_lll": 0.0, "p_llll": 0.0}
+    if deriv:
+        r["p_th"] = np.zeros((n, 2))
+        r["p_th"][:, 0] = 1.0
+        r["p_th"][:, 1] = th2 * mu
+        r["p_lth"] = np.zeros((n, 2))
+        r["p_lth"][:, 1] = th2
+        r["p_llth"] = np.zeros((n, 2))
+        r["p_lllth"] = np.zeros((n, 2))
+        r["p_th2"] = np.zeros((n, 3))     # ordered th1th1, th1th2, th2th2
+        r["p_th2"][:, 2] = mu * th2
+        r["p_lth2"] = np.zeros((n, 3))
+        r["p_lth2"][:, 2] = th2
+        r["p_llth2"] = np.zeros((n, 3))
+    return r
+
+
+def _zip_Dd(y, mu, theta, wt, b, level: int = 0) -> dict:
+    """mgcv ``ziP()$Dd`` (efam.r:3892-3949): the ZIP deviance derivatives in
+    μ (= log Poisson mean γ) and θ, assembled from ``zipll`` (derivs w.r.t.
+    γ and the presence LP) chained through ``lind`` (presence LP w.r.t. μ,θ).
+    ``mu`` is the Poisson-mean linear predictor."""
+    y = np.asarray(y, dtype=float)
+    mu = np.asarray(mu, dtype=float)
+    wt = np.ones_like(mu) if wt is None else np.asarray(wt, dtype=float)
+    deriv = 1
+    if level == 1:
+        deriv = 2
+    elif level > 1:
+        deriv = 4
+    g = _zip_lind(mu, theta, level, k=b)
+    z = _zipll(y, mu, g["p"], deriv)
+    pL = g["p_l"]
+    pll = g["p_ll"]
+    l1, l2, El2 = z["l1"], z["l2"], z["El2"]
+    w2 = wt[:, None]
+    oo: dict = {}
+    oo["Dmu"] = -2.0 * wt * (l1[:, 0] + l1[:, 1] * pL)
+    oo["Dmu2"] = -2.0 * wt * (l2[:, 0] + 2.0 * l2[:, 1] * pL
+                             + l2[:, 2] * pL ** 2 + l1[:, 1] * pll)
+    oo["EDmu2"] = -2.0 * wt * (El2[:, 0] + 2.0 * El2[:, 1] * pL
+                              + El2[:, 2] * pL ** 2)
+    if level > 0:
+        l3 = z["l3"]
+        pth, plth, pllth = g["p_th"], g["p_lth"], g["p_llth"]
+        plll = g["p_lll"]
+        c1 = l1[:, 1][:, None]
+        c2g, c2e = l2[:, 1][:, None], l2[:, 2][:, None]
+        oo["Dth"] = -2.0 * w2 * (c1 * pth)
+        oo["Dmuth"] = -2.0 * w2 * (c2g * pth + c2e * pL * pth + c1 * plth)
+        oo["Dmu2th"] = -2.0 * w2 * (
+            l3[:, 1][:, None] * pth + 2.0 * l3[:, 2][:, None] * pL * pth
+            + 2.0 * c2g * plth + l3[:, 3][:, None] * pL ** 2 * pth
+            + c2e * (2.0 * pL * plth + pth * pll) + c1 * pllth)
+        oo["Dmu3"] = -2.0 * wt * (
+            l3[:, 0] + 3.0 * l3[:, 1] * pL + 3.0 * l3[:, 2] * pL ** 2
+            + 3.0 * l2[:, 1] * pll + l3[:, 3] * pL ** 3
+            + 3.0 * l2[:, 2] * pL * pll + l1[:, 1] * plll)
+    if level > 1:
+        l4 = z["l4"]
+        pth, plth = g["p_th"], g["p_lth"]
+        pllth, plllth = g["p_llth"], g["p_lllth"]
+        pth2, plth2, pllth2 = g["p_th2"], g["p_lth2"], g["p_llth2"]
+        plll, pllll = g["p_lll"], g["p_llll"]
+        # p.thth, p.lthth, p.lthlth, p.llthth (ordered th1th1, th1th2, th2th2)
+        pthth = np.zeros((y.shape[0], 3))
+        pthth[:, 0] = pth[:, 0] ** 2
+        pthth[:, 1] = pth[:, 0] * pth[:, 1]
+        pthth[:, 2] = pth[:, 1] ** 2
+        plthth = np.zeros((y.shape[0], 3))
+        plthth[:, 0] = pth[:, 0] * plth[:, 0] * 2.0
+        plthth[:, 1] = pth[:, 0] * plth[:, 1] + pth[:, 1] * plth[:, 0]
+        plthth[:, 2] = pth[:, 1] * plth[:, 1] * 2.0
+        plthlth = np.zeros((y.shape[0], 3))
+        plthlth[:, 0] = plth[:, 0] * plth[:, 0] * 2.0
+        plthlth[:, 1] = plth[:, 0] * plth[:, 1] + plth[:, 1] * plth[:, 0]
+        plthlth[:, 2] = plth[:, 1] * plth[:, 1] * 2.0
+        pllthth = np.zeros((y.shape[0], 3))
+        pllthth[:, 0] = pth[:, 0] * pllth[:, 0] * 2.0
+        pllthth[:, 1] = pth[:, 0] * pllth[:, 1] + pth[:, 1] * pllth[:, 0]
+        pllthth[:, 2] = pth[:, 1] * pllth[:, 1] * 2.0
+        c1 = l1[:, 1][:, None]
+        c2g, c2e = l2[:, 1][:, None], l2[:, 2][:, None]
+        c3 = [l3[:, j][:, None] for j in range(4)]
+        c4 = [l4[:, j][:, None] for j in range(5)]
+        oo["Dth2"] = -2.0 * w2 * (c2e * pthth + c1 * pth2)
+        oo["Dmuth2"] = -2.0 * w2 * (
+            c3[2] * pthth + c2g * pth2 + c3[3] * pL * pthth
+            + c2e * (pth2 * pL + plthth) + c1 * plth2)
+        oo["Dmu2th2"] = -2.0 * w2 * (
+            c4[2] * pthth + c3[1] * pth2 + 2.0 * c4[3] * pthth * pL
+            + 2.0 * c3[2] * (pth2 * pL + plthth) + 2.0 * c2g * plth2
+            + c4[4] * pthth * pL ** 2
+            + c3[3] * (pth2 * pL ** 2 + 2.0 * plthth * pL + pthth * pll)
+            + c2e * (plthlth + 2.0 * pL * plth2 + pllthth + pth2 * pll)
+            + c1 * pllth2)
+        oo["Dmu3th"] = -2.0 * w2 * (
+            c4[1] * pth + 3.0 * c4[2] * pth * pL + 3.0 * c3[1] * plth
+            + 2.0 * c4[3] * pth * pL ** 2
+            + c3[2] * (6.0 * plth * pL + 3.0 * pth * pll) + 3.0 * c2g * pllth
+            + c4[3] * pth * pL ** 2 + c4[4] * pth * pL ** 3
+            + 3.0 * c3[3] * (pL ** 2 * plth + pth * pL * pll)
+            + c2e * (3.0 * plth * pll + 3.0 * pL * pllth + pth * plll)
+            + c1 * plllth)
+        oo["Dmu4"] = -2.0 * wt * (
+            l4[:, 0] + 4.0 * l4[:, 1] * pL + 6.0 * l4[:, 2] * pL ** 2
+            + 6.0 * l3[:, 1] * pll + 4.0 * l4[:, 3] * pL ** 3
+            + 12.0 * l3[:, 2] * pL * pll + 4.0 * l2[:, 1] * plll
+            + l4[:, 4] * pL ** 4 + 6.0 * l3[:, 3] * pL ** 2 * pll
+            + l2[:, 2] * (4.0 * pL * plll + 3.0 * pll ** 2) + l1[:, 1] * pllll)
+    return oo
+
+
+class ziP(Family):
+    """Zero-inflated Poisson extended family — port of mgcv ``ziP()``
+    (efam.r:3848-4147).
+
+    The single linear predictor ``μ`` is the **log Poisson mean** ``γ``
+    (so ``E(Poisson) = e^μ``); the probability of presence is
+    ``p = 1 − exp(−exp(η))`` with ``η = θ₁ + (b + e^θ₂)·μ`` a fixed affine
+    map (the slope ``b + e^θ₂ > b ≥ 0`` ties presence to the mean). The two
+    parameters ``θ`` are estimated jointly with the smoothing parameters
+    (``ziP(theta=…)`` fixes them, ``n_theta = 0``). Like :class:`betar`,
+    ``dev_resids`` is the bare ``−2logLik`` and the saturated reference is
+    folded back in :meth:`postproc` / :meth:`residuals_extended` via the
+    :meth:`saturated_ll` Newton solver. Identity link only.
+    """
+    name = "zero inflated Poisson"
+    canonical_link_name = "identity"
+    _newton_canonical = "none"
+    scale_known = True
+    is_extended = True
+    n_theta = 2
+    _OK_LINKS = ("identity",)
+
+    def __init__(self, theta=None, link: str = "identity", b: float = 0.0):
+        if link not in self._OK_LINKS:
+            raise ValueError(
+                f'link "{link}" not available for ziP family; available '
+                f'links are {self._OK_LINKS}')
+        self._b = max(float(b), 0.0)
+        if theta is not None:
+            ini = np.asarray(theta, dtype=float).reshape(-1)[:2]
+            self.n_theta = 0
+        else:
+            ini = np.array([0.0, 0.0])        # start at plain Poisson
+        self._theta = ini.astype(float)
+        super().__init__(link=link)
+
+    # ----- θ accessors ---------------------------------------------------
+
+    def set_theta(self, values) -> None:
+        v = np.asarray(values, dtype=float).reshape(-1)
+        if v.shape[0] != 2:
+            raise ValueError(
+                f"ziP.set_theta expects 2 params (θ₁, θ₂); got shape {v.shape}")
+        self._theta = v.copy()
+
+    def get_theta(self, trans: bool = False) -> np.ndarray:
+        th = self._theta.copy()
+        if trans:
+            th[1] = self._b + np.exp(th[1])
+        return th
+
+    # ----- deviance / Dd / aic -------------------------------------------
+
+    def _presence_lp(self, mu, theta):
+        return theta[0] + (self._b + np.exp(theta[1])) * np.asarray(
+            mu, dtype=float)
+
+    def dev_resids(self, y, mu, wt, theta=None):
+        th = self._theta if theta is None else np.asarray(theta, dtype=float)
+        p = self._presence_lp(mu, th)
+        return -2.0 * _zipll(np.asarray(y, dtype=float),
+                             np.asarray(mu, dtype=float), p, deriv=0)["l"]
+
+    def Dd(self, y, mu, theta, wt, level: int = 0) -> dict:
+        return _zip_Dd(y, mu, np.asarray(theta, dtype=float), wt,
+                       self._b, level=level)
+
+    def aic(self, y, mu, dev, wt, n, theta=None):
+        th = self._theta if theta is None else np.asarray(theta, dtype=float)
+        p = self._presence_lp(mu, th)
+        wt = np.asarray(wt, dtype=float)
+        ll = _zipll(np.asarray(y, dtype=float), np.asarray(mu, dtype=float),
+                    p, deriv=0)["l"]
+        return float(np.sum(-2.0 * wt * ll))
+
+    def ls_extended(self, y, wt, theta=None, scale: float = 1.0) -> dict:
+        # ziP ls ≡ 0 (efam.r:3958-3967); deviance is −2logLik.
+        n = np.asarray(y).shape[0]
+        return {"ls": 0.0, "lsth1": np.zeros(2),
+                "lsth2": np.zeros((2, 2)), "LSTH1": np.zeros((n, 2))}
+
+    def ls(self, y, wt, scale):
+        return np.array([0.0, 0.0, 0.0], dtype=float)
+
+    # ----- saturated likelihood (Newton over the latent log-mean) --------
+
+    def saturated_ll(self, y, wt):
+        """mgcv ``saturated.ll`` (efam.r:4032-4068): per-datum Newton
+        minimization of the ZIP deviance over the latent log-mean μ (only
+        y>0 contribute). Returns the per-datum ``−2·saturated logLik``
+        (0 where y==0)."""
+        y = np.asarray(y, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        theta = self._theta
+        pind = y > 0
+        yp = y[pind]
+        wp = wt[pind]
+        if yp.shape[0] == 0:
+            return np.zeros(y.shape[0])
+        mu = np.log(yp)
+        r = self.Dd(yp, mu, theta, wp, level=0)
+        l = self.dev_resids(yp, mu, wp, theta=theta)
+        lmax = float(np.max(np.abs(l)))
+        ucov = np.abs(r["Dmu"]) > lmax * 1e-7
+        k = 0
+        while True:
+            step = -r["Dmu"] / r["Dmu2"]
+            step[~ucov] = 0.0
+            mu1 = mu + step
+            l1 = self.dev_resids(yp, mu1, wp, theta=theta)
+            ind = (l1 > l) & ucov
+            kk = 0
+            while np.sum(ind) > 0 and kk < 50:
+                step[ind] = step[ind] / 2.0
+                mu1 = mu + step
+                l1 = self.dev_resids(yp, mu1, wp, theta=theta)
+                ind = (l1 > l) & ucov
+                kk += 1
+            mu = mu1
+            l = l1
+            r = self.Dd(yp, mu, theta, wp, level=0)
+            ucov = np.abs(r["Dmu"]) > lmax * 1e-7
+            k += 1
+            if (not np.any(ucov)) or k == 100:
+                break
+        out = np.zeros(y.shape[0])
+        out[pind] = l
+        return out
+
+    # ----- initialization / validity -------------------------------------
+
+    def initialize(self, y, wt):
+        # mgcv ziP initialize (efam.r:3970-3978).
+        y = np.asarray(y, dtype=float)
+        if np.any(y < 0):
+            raise ValueError(
+                "negative values not allowed for the zero inflated Poisson "
+                "family")
+        if not np.allclose(y, np.round(y)):
+            raise ValueError(
+                "Non-integer response variables are not allowed with ziP ")
+        if y.min() == 0 and y.max() == 1:
+            raise ValueError("Using ziP for binary data makes no sense")
+        return np.log(y + (y == 0) / 5.0)
+
+    def validmu(self, mu) -> bool:
+        return bool(np.all(np.isfinite(np.asarray(mu))))
+
+    # ----- E(y), postproc, residuals, predict ----------------------------
+
+    def _expected_y(self, gamma):
+        """E(y) = p·E(y | present): p the presence prob, E(y|present) the
+        zero-truncated Poisson mean (efam.r:4110-4119). Returns
+        (fv, p, mu_trunc, lambda)."""
+        gamma = np.asarray(gamma, dtype=float)
+        th = self._theta
+        with np.errstate(over="ignore", invalid="ignore"):
+            eta = th[0] + (self._b + np.exp(th[1])) * gamma
+            et = np.exp(eta)
+            p = 1.0 - np.exp(-et)
+            lam = np.exp(gamma)
+            ind = gamma < np.log(np.finfo(float).eps) / 2.0
+            mu = np.where(ind, 1.0, lam / (1.0 - np.exp(-lam)))
+        return p * mu, p, mu, lam
+
+    def postproc(self, y, prior_weights, fitted, linear_predictors,
+                 offset, intercept) -> dict:
+        # ziP postproc (efam.r:3982-4004): deviance folds in the saturated
+        # ll; null deviance from a 1-D optimize over the constant LP.
+        y = np.asarray(y, dtype=float)
+        wt = np.asarray(prior_weights, dtype=float)
+        lf = self.saturated_ll(y, wt)
+        dev = float(np.sum(self.dev_resids(y, linear_predictors, wt) - lf))
+
+        def fnull(gamma):
+            return float(np.sum(self.dev_resids(
+                y, np.full(y.shape, gamma), wt)))
+
+        meany = float(np.mean(y))
+        tol = float(np.finfo(float).eps ** 0.25)
+        _, obj = _brent_fmin(fnull, meany / 5.0, meany * 3.0, tol)
+        null_dev = obj - float(np.sum(lf))
+        cuts = ",".join(f"{c:g}" for c in np.round(self.get_theta(True), 3))
+        return {"deviance": dev, "null_deviance": null_dev,
+                "family_name": f"Zero inflated Poisson({cuts})"}
+
+    def residuals_extended(self, y, mu, wt, type: str = "deviance"):
+        """ziP residuals (efam.r:4070-4088). ``mu`` is the linear predictor
+        γ. ``deviance``: signed √(dev_resids − saturated_ll). ``response``:
+        ``y − E(y)``."""
+        y = np.asarray(y, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        fv = self._expected_y(mu)[0]
+        if type == "response":
+            return y - fv
+        if type != "deviance":
+            raise ValueError(
+                f"ziP residuals are 'deviance' or 'response'; got {type!r}")
+        res = self.dev_resids(y, mu, wt) - self.saturated_ll(y, wt)
+        s = np.sign(y - fv)
+        return np.sqrt(np.maximum(res, 0.0)) * s
+
+    def predict(self, se=False, X=None, beta=None, off=None, Vb=None,
+                eta=None, y=None, lpi=None) -> dict:
+        """ziP ``predict`` hook (efam.r:4090-4130): ``type="response"``
+        returns ``E(y) = p·E(y|present)`` with optional delta-method SE."""
+        th = self._theta
+        if eta is None:
+            gamma = X @ beta
+            if off is not None:
+                gamma = gamma + np.asarray(off, dtype=float)
+            se_v = None
+            if se:
+                se_v = np.sqrt(np.maximum(
+                    0.0, np.einsum("ij,jk,ik->i", X, Vb, X)))
+        else:
+            gamma = np.asarray(eta, dtype=float)
+            se_v = None
+        fv, p, mu, lam = self._expected_y(gamma)
+        if se_v is None:
+            return {"fit": fv}
+        with np.errstate(over="ignore", invalid="ignore"):
+            eta_p = th[0] + (self._b + np.exp(th[1])) * gamma
+            et = np.exp(eta_p)
+            dp_dg = np.exp(-et) * et * (self._b + np.exp(th[1]))
+            dmu_dg = (lam + 1.0) * mu - mu ** 2
+        se_fit = np.abs(dp_dg * mu + dmu_dg * p) * se_v
+        return {"fit": fv, "se_fit": se_fit}
+
+    def rd(self, rng, mu, wt, scale):
+        # mgcv ziP rd (efam.r:4006-4030): presence ~ Bernoulli(p), counts ~
+        # zero-truncated Poisson(λ) via the inverse-CDF.
+        from scipy.stats import poisson as _pois
+        gamma = np.asarray(mu, dtype=float)
+        th = self._theta
+        n = gamma.shape[0]
+        with np.errstate(over="ignore", invalid="ignore"):
+            lam = np.exp(gamma)
+            finite = np.isfinite(lam)
+            mlam = max(float(np.max(lam[finite])) if np.any(finite) else 0.0,
+                       np.finfo(float).eps ** 0.2)
+            lam = np.where(finite, lam, mlam)
+            eta = th[0] + (self._b + np.exp(th[1])) * gamma
+            p = 1.0 - np.exp(-np.exp(eta))
+        y = np.zeros(n)
+        present = p > rng.uniform(size=n)
+        lami = lam[present]
+        p0 = _pois.pmf(0, lami)
+        nearly1 = 1.0 - np.finfo(float).eps * 10.0
+        ii = p0 > nearly1
+        yi = np.ones(lami.shape[0])
+        m = ~ii
+        if np.any(m):
+            u = rng.uniform(p0[m], nearly1, size=int(np.sum(m)))
+            yi[m] = _pois.ppf(u, lami[m])
+        y[present] = yi
+        return y
+
+    def __repr__(self):
+        return f"ziP(theta={self._theta}, b={self._b}, link={self.link.name})"
+
+
+# ---------------------------------------------------------------------------
 # General-family seam — mgcv gamlss.r authoring kit (§5.3 prerequisite 5).
 #
 # General families (gam.fit5: multiple linear predictors, likelihood
@@ -7648,7 +8046,8 @@ def _l1ee(x):
     x = np.asarray(x, dtype=float)
     eps = np.finfo(float).eps
     xmax = np.finfo(float).max
-    with np.errstate(over="ignore", invalid="ignore"):
+    # divide: log(1-e^{-e^x})→-inf for very negative x, overwritten below.
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         ex = np.exp(x)
         l = np.log(1.0 - np.exp(-ex))
         ind = x < np.log(eps) / 3.0
@@ -7664,7 +8063,8 @@ def _lee1(x):
     x = np.asarray(x, dtype=float)
     eps = np.finfo(float).eps
     xmax = np.finfo(float).max
-    with np.errstate(over="ignore", invalid="ignore"):
+    # divide: log(e^{e^x}-1)→-inf for very negative x, overwritten below.
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         ex = np.exp(x)
         l = np.log(np.exp(ex) - 1.0)
         ind = x < np.log(eps) / 3.0
@@ -7792,8 +8192,9 @@ def _zipll(y, g, eta, deriv=0):
     1-p = exp(-exp(eta)), lambda = exp(g) (mgcv zipll, gamlss.r:1586-1640).
     Packed columns follow mgcv: l1 (g, e); l2 (gg, ge, ee); l3 (ggg, gge,
     gee, eee); l4 (gggg, ggge, ggee, geee, eeee). The expected Hessian
-    ``El2`` mgcv also returns is unused by the gamlss fit (the ``ll`` hook
-    consumes the observed ``l2``) and is omitted."""
+    ``El2`` (cols gg, ge, ee) is consumed by the single-formula ``ziP``
+    family's ``EDmu2`` (Fisher weight); the ``ziplss`` ``ll`` hook ignores
+    it (it uses the observed ``l2``)."""
     y = np.asarray(y, dtype=float)
     g = np.asarray(g, dtype=float)
     eta = np.asarray(eta, dtype=float)
@@ -7820,8 +8221,16 @@ def _zipll(y, g, eta, deriv=0):
     l2[nz, 0] = lg[1][nz]
     l2[nz, 2] = le[1][nz]
     l2[zind, 2] = l[zind]
+    # Expected Hessian (mgcv El2, gamlss.r:1620-1621): E[l_gg] = p·lg2,
+    # E[l_ee] = −(1−p)·e^eta + p·le2 (cols gg, ge≡0, ee). p = 1 − e^{−e^eta}.
+    with np.errstate(over="ignore", invalid="ignore"):
+        p = 1.0 - np.exp(-et)
+        El2 = np.zeros((n, 3))
+        El2[:, 0] = p * lg[1]
+        El2[:, 2] = -(1.0 - p) * et + p * le[1]
     ret["l1"] = l1
     ret["l2"] = l2
+    ret["El2"] = El2
     if deriv > 1:                    # order ggg, gge, gee, eee
         l3 = np.zeros((n, 4))
         l3[nz, 0] = lg[2][nz]
@@ -8782,7 +9191,7 @@ __all__ = [
     "QuasiBinomial", "quasibinomial",
     "Tweedie", "tw",
     "Scat", "scat",
-    "nb", "betar", "ocat",
+    "nb", "betar", "ocat", "ziP",
     "GeneralFamily", "gaulss", "twlss", "shash", "gammals", "gumbls",
     "gevlss", "cox_ph", "ziplss", "multinom", "mvn",
     "LogebLink", "SoftplusLink", "ShiftedLogitLink",

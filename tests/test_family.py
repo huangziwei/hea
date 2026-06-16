@@ -3031,3 +3031,165 @@ def test_ocat_construction_and_validation():
     # initialize rejects out-of-range classes (0..R−1).
     with pytest.raises(ValueError, match="out of range"):
         ocat(R=4).initialize(np.array([0, 1, 4]), np.ones(3))
+
+
+# ---------------------------------------------------------------------------
+# ziP (single-formula zero-inflated Poisson, efam.r:3848-4147). The 1 LP μ is
+# the log Poisson mean γ; presence p = 1−exp(−exp(θ₁+(b+e^θ₂)·γ)). Its Dd
+# chains the shared `zipll` kernel (also used by the 2-LP ziplss general
+# family) through the affine `lind` map. Oracle: live ziP()$Dd / dev.resids /
+# aic / saturated.ll (Rscript, mgcv 1.9-4) on a fixed (y, γ, θ) table with a
+# y=0/y>0 mix lighting both zipll branches.
+# ---------------------------------------------------------------------------
+
+def _zip_dd_inputs():
+    y = np.array([0, 1, 2, 0, 3, 0, 5, 1.0])
+    mu = np.array([-0.5, 0.3, 0.8, 0.1, 1.2, -0.2, 1.5, 0.4])  # log Pois mean
+    th = np.array([-0.3, 0.5])
+    wt = np.array([1.0, 1, 1, 2, 1, 1, 1, 2])
+    return y, mu, th, wt
+
+
+def test_ziP_components_match_mgcv():
+    from hea.family import ziP
+    y, mu, th, wt = _zip_dd_inputs()
+    fam = ziP()
+    fam.set_theta(th)
+    D = fam.Dd(y, mu, th, wt, level=2)
+    np.testing.assert_allclose(
+        D["Dmu"], [1.071207530364356, -0.045702953296894222,
+                   0.37959551008497128, 5.7613192687163126,
+                   0.80561117203009136, 1.7566400578209209,
+                   -0.93847893199421539, 0.73725952565309738],
+        rtol=0, atol=1e-9)
+    # observed (Dmu2) ≠ expected (EDmu2) Hessian — ziP is the first extended
+    # family where they differ (zipll's El2 term, gamlss.r:1620-1621).
+    np.testing.assert_allclose(
+        D["Dmu2"], [1.7661226406458672, 3.9501198151604182,
+                    5.6134546907312206, 9.4988096256270929,
+                    6.6359440750126044, 2.8962098282932556,
+                    8.6578802094348006, 8.6715916500204102], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        D["EDmu2"], [1.6965919520630381, 4.7378473526773135,
+                     6.2052588566875286, 7.6897751651358615,
+                     6.7419479391751942, 2.6213385128948734,
+                     8.663861663445525, 10.319785479013458], rtol=0, atol=1e-9)
+    assert not np.allclose(D["Dmu2"], D["EDmu2"])
+    np.testing.assert_allclose(
+        D["Dmu3"], [2.9118439642979204, 3.8670656254252247,
+                    2.3243406650630134, 15.660889476102508,
+                    4.2024063395585829, 4.7750427483178566,
+                    9.1778599926392399, 7.644548876750628], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        D["Dmu4"], [4.8008190808977655, 0.25290016932971637,
+                    -4.10270399115561, 25.820441597333993,
+                    15.434163778299446, 7.8727145476540485,
+                    14.094571640120012, -2.3911089052853205],
+        rtol=0, atol=1e-8)
+    # θ-blocks (n×2): Dth, Dmuth, Dmu2th, Dmu3th.
+    np.testing.assert_allclose(D["Dth"], np.column_stack([
+        [0.64972021008103364, -1.0252845008523144, -0.37026076261421353,
+         3.4944167768696115, -0.050742490399748402, 1.0654560531477617,
+         -0.0026880592208130411, -1.7966052442293883],
+        [-0.535603765182178, -0.5071225095223123, -0.48836543602216376,
+         0.57613192687163128, -0.10039226790043468, -0.35132801156418425,
+         -0.0066477906213841106, -1.1848405124849566]]), rtol=0, atol=1e-9)
+    np.testing.assert_allclose(D["Dmuth"], np.column_stack([
+        [1.071207530364356, 1.2297502965642129, 1.1937419527052584,
+         5.7613192687163126, 0.36665767864736087, 1.7566400578209209,
+         0.034509398702116112, 2.6118262198238336],
+        [0.1881462100414224, -1.0821537235958119, 0.96406140429410825,
+         6.7112002312790224, 0.64175935337136103, 1.1773980921622698,
+         0.080912709104619271, -1.2396319036140457]]), rtol=0, atol=1e-9)
+    np.testing.assert_allclose(D["Dmu2th"], np.column_stack([
+        [1.7661226406458672, 0.87140601345902002, -1.4247644203663541,
+         9.4988096256270929, -1.925801924952341, 2.8962098282932556,
+         -0.37891588167269141, 1.2652595228228209],
+        [2.0763232991427745, 4.4860426321321833, 2.0570639738287344,
+         20.563708198864436, -2.6011000884861391, 4.8374111069229393,
+         -0.82329725152128841, 9.4467710032852779]]), rtol=0, atol=1e-9)
+    np.testing.assert_allclose(D["Dmu3th"], np.column_stack([
+        [2.9118439642979204, -1.8281291989265558, -6.0042497164072683,
+         15.660889476102508, 4.7570126547021756, 4.7750427483178566,
+         3.324939807886468, -5.9597820298435131],
+        [6.3351223524448779, 3.405894240660206, -14.966585594412944,
+         49.564712588040926, -0.11374625191593601, 12.750585335422757,
+         6.348668455830448, 2.3277731041658822]]), rtol=0, atol=1e-8)
+    # θ²-blocks (n×3, ordered th1th1, th1th2, th2th2) — third col pins the
+    # th2th2 term (the only nonzero p.th2 entry).
+    np.testing.assert_allclose(D["Dth2"][:, 2], [
+        -0.094073105020711201, -0.32464611707874358, 0.77124912343528684,
+        0.6711200231279022, 0.77011122404563315, -0.23547961843245402,
+        0.12136906365692891, -0.49585276144561841], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(D["Dmuth2"][:, 2], [
+        -0.85001543952996506, 0.26365906604384293, 2.6097125833570955,
+        8.767571051165465, -2.4795607528120067, 0.20991587077768203,
+        -1.1540331681773133, 2.5390764977000653], rtol=0, atol=1e-8)
+    np.testing.assert_allclose(D["Dmu2th2"][:, 2], [
+        0.98508542206310956, 9.9938535364624279, -7.8591405278728868,
+        46.083887656532966, -5.3386956792714049, 7.124705146761328,
+        7.8764081807030975, 19.824651248236911], rtol=0, atol=1e-8)
+
+    # dev_resids (the −2logLik), aic (≡ Σ dev), saturated_ll (−2 sat ll).
+    np.testing.assert_allclose(
+        fam.dev_resids(y, mu, wt, theta=th),
+        [0.64972021008103364, 2.2035637592855939, 2.5381524505282114,
+         1.7472083884348057, 2.9595657277001139, 1.0654560531477617,
+         3.5159100149128975, 2.2193885014463297], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(fam.aic(y, mu, 0, wt, 0, theta=th),
+                               20.865561995417881, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        fam.saturated_ll(y, wt),
+        [0, 2.203300357324264, 2.5251914898914745, 0, 2.9094837035556234,
+         0, 3.4669063924766128, 2.203300357324264], rtol=0, atol=1e-8)
+    np.testing.assert_allclose(fam.get_theta(trans=True),
+                               [-0.3, 1.6487212707001282], rtol=0, atol=1e-12)
+    # ls ≡ 0.
+    le = fam.ls_extended(y, wt)
+    assert le["ls"] == 0.0 and float(np.sum(np.abs(le["LSTH1"]))) == 0.0
+
+
+def test_ziP_Dd_matches_fd():
+    from hea.family import ziP
+    y, mu, th, wt = _zip_dd_inputs()
+    fam = ziP()
+    fam.set_theta(th)
+    D = fam.Dd(y, mu, th, wt, level=1)
+    h = 1e-6
+    # ziP.dev_resids does NOT carry wt (mgcv: −2·zipll$l), but Dd does
+    # (−2·wt·…), so Dd = wt · FD(dev_resids).
+    fd_mu = (fam.dev_resids(y, mu + h, wt, theta=th)
+             - fam.dev_resids(y, mu - h, wt, theta=th)) / (2 * h)
+    np.testing.assert_allclose(D["Dmu"], wt * fd_mu, rtol=1e-5, atol=1e-5)
+    for k in range(2):
+        thp = th.copy(); thp[k] += h
+        thm = th.copy(); thm[k] -= h
+        fd_thk = (fam.dev_resids(y, mu, wt, theta=thp)
+                  - fam.dev_resids(y, mu, wt, theta=thm)) / (2 * h)
+        np.testing.assert_allclose(D["Dth"][:, k], wt * fd_thk,
+                                   rtol=1e-5, atol=1e-5)
+
+
+def test_ziP_construction_and_validation():
+    from hea.family import ziP
+    assert ziP().n_theta == 2
+    assert ziP(theta=[-1.0, 0.5]).n_theta == 0       # fixed θ supplied
+    np.testing.assert_allclose(ziP().get_theta(), [0.0, 0.0])  # start Poisson
+    # getTheta(trans): θ₂ → b + e^θ₂ (the presence slope).
+    np.testing.assert_allclose(ziP(theta=[-1.0, 0.5], b=0.2).get_theta(True),
+                               [-1.0, 0.2 + np.exp(0.5)], rtol=0, atol=1e-12)
+    with pytest.raises(ValueError, match="2 params"):
+        ziP().set_theta([0.1])
+    with pytest.raises(ValueError, match="not available"):
+        ziP(link="log")
+    # initialize validation: negatives, non-integer, binary-only all rejected.
+    with pytest.raises(ValueError, match="negative"):
+        ziP().initialize(np.array([0.0, 1, -1]), np.ones(3))
+    with pytest.raises(ValueError, match="Non-integer"):
+        ziP().initialize(np.array([0.0, 1.5, 2]), np.ones(3))
+    with pytest.raises(ValueError, match="binary"):
+        ziP().initialize(np.array([0.0, 1, 0, 1]), np.ones(4))
+    # mustart = log(y + (y==0)/5).
+    np.testing.assert_allclose(
+        ziP().initialize(np.array([0.0, 2, 5]), np.ones(3)),
+        np.log(np.array([0.2, 2.0, 5.0])), rtol=0, atol=1e-12)

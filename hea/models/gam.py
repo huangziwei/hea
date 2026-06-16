@@ -7376,6 +7376,12 @@ class gam:
         mu = self.fitted_values
         wt = self._wt
         if type == "response":
+            # Extended families whose fitted value is NOT the response mean
+            # (ziP: fitted = log-Poisson-mean LP; ocat: latent LP) define the
+            # response residual themselves (y − E(y) / y − class), mgcv-style.
+            ext = getattr(self.family, "residuals_extended", None)
+            if ext is not None:
+                return np.asarray(ext(y, mu, wt, "response"), dtype=float)
             return y - mu
         if type == "deviance":
             return self._deviance_residuals(y, mu, wt)
