@@ -54,6 +54,7 @@ from ..family import (
     Quasi,
     QuasiBinomial,
     _coerce_response,
+    cnorm as _cnorm_family,
     tw as _tw_family,
 )
 from ..formula import (
@@ -1062,13 +1063,36 @@ class gam:
         if _cbind:
             lhs = parse(formula).lhs
             _cbind = isinstance(lhs, Call) and lhs.fn == "cbind"
+        # cnorm's censored response is also a two-column ``cbind(y, yat)``
+        # (col 0 the observed value, col 1 the censoring bound) — routed to
+        # its own matrix intake below, NOT the binomial proportion rewrite.
+        _cnorm_cbind = False
         if _cbind:
             if len(lhs.args) != 2 or lhs.kwargs:
                 raise ValueError(
                     "cbind() response must have exactly two columns: "
                     "cbind(successes, failures)"
                 )
-            if not isinstance(self.family, (Binomial, QuasiBinomial)):
+            if isinstance(self.family, _cnorm_family):
+                _cbind = False          # not the binomial cbind path
+                _cnorm_cbind = True
+                data = normalize_data(data)
+                cols = set(data.columns)
+                yobs, yat = (
+                    data.select(_eval_lhs_expr(a, cols).alias("_v"))["_v"]
+                    .to_numpy().astype(float)
+                    for a in lhs.args
+                )
+                # Stash both columns as frame columns so prepare_design's
+                # NA-omit keeps them row-aligned; the observed column
+                # becomes the response, the censoring bound is re-read after
+                # prepare_design (below) and handed to the family.
+                data = data.with_columns(
+                    pl.Series("_hea_cnorm_y", yobs),
+                    pl.Series("_hea_cnorm_yat", yat),
+                )
+                formula = "_hea_cnorm_y ~" + formula.split("~", 1)[1]
+            elif not isinstance(self.family, (Binomial, QuasiBinomial)):
                 # mgcv dies obscurely here ("logical subscript too
                 # long") — only (quasi)binomial's initialize understands
                 # a two-column y.
@@ -1077,6 +1101,7 @@ class gam:
                     "family=Binomial() or QuasiBinomial(); got "
                     f"{self.family.name!r}"
                 )
+        if _cbind:
             data = normalize_data(data)
             cols = set(data.columns)
             succ, fail = (
@@ -1117,6 +1142,12 @@ class gam:
         # R's binomial initialize accepts a 2-level factor / boolean
         # response (level 1 = failure); same coercion as glm's intake.
         y = _coerce_response(d.y, self.family)
+        # cnorm censored response: re-read the (NA-aligned) censoring bound
+        # and hand it to the family, which carries it through dev_resids /
+        # Dd / aic / ls the way mgcv's ``attr(y,"censor")`` rides along.
+        if _cnorm_cbind:
+            self.family.set_censor(
+                d.data["_hea_cnorm_yat"].to_numpy().astype(float))
         X_param = X_param_df.to_numpy().astype(float)
         if X_param.shape[1] == 0:
             # 0-column polars frame → to_numpy() collapses to (0, 0); keep

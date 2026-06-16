@@ -7632,3 +7632,85 @@ def test_ziP_through_gam_matches_mgcv():
         rres[:4], [-0.3688958956021644, 0.97031232323179584,
                    1.7883819521639648, -1.9008466174667389],
         rtol=0, atol=2e-3)
+
+
+def _cnorm_fixture():
+    # Tobit-style censored normal via R's set.seed(6) stream, reproduced
+    # bit-exactly by hea.R.rng (runif(n) then rnorm(n)):
+    #   set.seed(6); n<-200; x<-runif(n); ys<-2*sin(pi*x)+rnorm(n)*1.3
+    #   y1<-ys; y2<-ys; y1[ys< -1]<- -1; y2[ys< -1]<- -Inf  (left censor)
+    #                   y1[ys>  3]<-  3; y2[ys>  3]<-  Inf   (right censor)
+    # → 173 uncensored / 10 left / 17 right. The cbind(y1, y2) response is
+    # the censoring-interval matrix (col 0 observed, col 1 the bound).
+    from hea.R.rng import RGenerator
+    gen = RGenerator(6)
+    n = 200
+    x = gen.uniform(0, 1, n)
+    ys = 2.0 * np.sin(np.pi * x) + gen.normal(size=n) * 1.3
+    y1 = ys.copy()
+    y2 = ys.copy()
+    m = ys < -1.0
+    y1[m] = -1.0
+    y2[m] = -np.inf
+    m = ys > 3.0
+    y1[m] = 3.0
+    y2[m] = np.inf
+    return pl.DataFrame({"x": x, "y1": y1, "y2": y2})
+
+
+def test_cnorm_through_gam_matches_mgcv():
+    # R: gam(cbind(y1, y2) ~ s(x), family=cnorm(), method="REML") — censored
+    # normal / Tobit. Exercises: the 2-column censored-response matrix intake
+    # (a cousin of mvn's), the cancellation-safe Dd (uncensored + left +
+    # right cases via dpnorm/ddnorm/log_ndtr), the single log-scale θ outer
+    # Newton, and — unlike betar/ziP/ocat — the PROPER-deviance path with a
+    # genuinely nonzero ls0 entering the (Dp/φ − 2·ls0) REML term while
+    # lsth1 = 0 keeps the θ-gradient consistent.
+    from hea.family import cnorm
+
+    df = _cnorm_fixture()
+    m = gam("cbind(y1, y2) ~ s(x)", df, family=cnorm(), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 320.1707496643,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.sp, [0.321192647856], rtol=2e-3)
+    np.testing.assert_allclose(m.family.get_theta(), [0.228565516296],
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.family.get_theta(True), [1.25679586304],
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.edf_total, 4.3945575588, rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.deviance, 229.8452755840, rtol=0, atol=5e-3)
+    np.testing.assert_allclose(m.null_deviance, 275.8797556247, rtol=0,
+                               atol=5e-3)
+    np.testing.assert_allclose(m.scale, 1.0, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(m.Vp)[0, 0], 0.00809956779924,
+                               rtol=0, atol=1e-5)
+    assert m._family_display_name() == "cnorm(1.257)"
+    # intercept sign-stable; tp s(x) basis carries sign noise → |coef|.
+    np.testing.assert_allclose(
+        np.sum(np.abs(np.asarray(m._beta))), 7.23645196361, rtol=0, atol=2e-3)
+
+    # type="response" prediction is the latent mean μ = linkinv(η) (cnorm has
+    # no predict hook — fitted IS the mean) with the standard delta SE.
+    pr = m.predict(pl.DataFrame({"x": [0.1, 0.3, 0.5, 0.7, 0.9]}),
+                   type="response", se_fit=True)
+    np.testing.assert_allclose(
+        pr["fit"].to_numpy(),
+        [0.52039066828, 1.40609052147, 1.80902094522, 1.54790986302,
+         0.64630975498], rtol=0, atol=2e-3)
+    np.testing.assert_allclose(
+        pr["se.fit"].to_numpy(),
+        [0.186345591375, 0.17266137593, 0.174231865377, 0.177779241717,
+         0.172302773093], rtol=0, atol=1e-3)
+
+    # cnorm's dev_resids is the proper deviance (≥ 0), so the DEFAULT
+    # √-deviance residual works (no residuals_extended hook); Σ res² = dev.
+    dres = np.asarray(m.residuals_of("deviance"))
+    np.testing.assert_allclose(
+        dres[:5], [-0.875033484349, 0.0785548636183, 0.221766506956,
+                   -0.837126217578, -0.0758774624658], rtol=0, atol=2e-3)
+    np.testing.assert_allclose(float(np.sum(dres ** 2)), m.deviance,
+                               rtol=0, atol=1e-6)
+    rres = np.asarray(m.residuals_of("response"))
+    np.testing.assert_allclose(
+        rres[:5], [-1.09973846315, 0.0987274276175, 0.278715228504,
+                   -1.0520967671, -0.0953624809253], rtol=0, atol=2e-3)

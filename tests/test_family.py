@@ -3193,3 +3193,156 @@ def test_ziP_construction_and_validation():
     np.testing.assert_allclose(
         ziP().initialize(np.array([0.0, 2, 5]), np.ones(3)),
         np.log(np.array([0.2, 2.0, 5.0])), rtol=0, atol=1e-12)
+
+
+def _cnorm_dd_inputs():
+    # 5 obs covering all four censoring cases (mgcv efam.r:836-843):
+    #   i0,i2 uncensored (yat==y); i1 interval [-0.5,0.8]; i3 left (-∞);
+    #   i4 right (+∞).
+    y = np.array([1.2, -0.5, 2.0, 0.7, -1.0])
+    yat = np.array([1.2, 0.8, 2.0, -np.inf, np.inf])
+    mu = np.array([0.5, 0.1, 1.7, 0.3, -0.4])
+    wt = np.array([1.0, 1.0, 1.0, 2.0, 1.0])
+    return y, yat, mu, wt
+
+
+def test_cnorm_components_match_mgcv():
+    from hea.family import cnorm
+    y, yat, mu, wt = _cnorm_dd_inputs()
+    th = np.array([0.3])
+    fam = cnorm()
+    fam.set_theta(th)
+    fam.set_censor(yat)
+    D = fam.Dd(y, mu, th, wt, level=2)
+    # cnorm has a single log-scale θ, so every θ-block is a length-n vector
+    # (no n×2 packing like ziP). Full level-2 table vs mgcv 1.9-4.
+    np.testing.assert_allclose(
+        D["Dmu"], [-0.768336290531637, -0.0507690995168156,
+                   -0.329286981656416, 1.1558448812426, -0.797264561425975],
+        rtol=0, atol=1e-12)
+    np.testing.assert_allclose(
+        D["Dmu2"], [1.09762327218805, 1.01538528180947, 1.09762327218805,
+                    1.17546159102389, 0.580344231466461], rtol=0, atol=1e-12)
+    # observed == expected Hessian for cnorm (mgcv sets EDmu2 = Dmu2,
+    # EDmu2th = Dmu2th, efam.r:1056-1059).
+    np.testing.assert_array_equal(D["EDmu2"], D["Dmu2"])
+    np.testing.assert_array_equal(D["EDmu2th"], D["Dmu2th"])
+    np.testing.assert_allclose(
+        D["Dth"], [1.46216459662785, 1.84780435468546, 1.90121390550308,
+                   0.462337952497041, 0.478358736855585], rtol=0, atol=1e-12)
+    np.testing.assert_allclose(
+        D["Dmuth"], [1.53667258106327, 0.0935707485602448,
+                     0.658573963312832, -0.685660244833047,
+                     0.449058022546098], rtol=0, atol=1e-12)
+    np.testing.assert_allclose(
+        D["Dmu3"], [0, -0.000197480812203978, 0, 0.60605462153934,
+                    -0.21623962112153], rtol=0, atol=1e-11)
+    np.testing.assert_allclose(
+        D["Dmu2th"], [-2.19524654437611, -1.87144071001021,
+                      -2.19524654437611, -2.10850133343205, -1.03094469026],
+        rtol=0, atol=1e-12)
+    np.testing.assert_allclose(
+        D["Dmu4"], [0, 0.00394885852463045, 0, -0.232125048982469,
+                    -0.0565948284912688], rtol=0, atol=1e-10)
+    np.testing.assert_allclose(
+        D["Dth2"], [1.07567080674429, 0.294277388026857, 0.19757218899385,
+                    -0.274264097933219, -0.269434813527659],
+        rtol=0, atol=1e-12)
+    np.testing.assert_allclose(
+        D["Dmuth2"], [-3.07334516212655, -0.156286864452314,
+                      -1.31714792662566, -0.157740288539771,
+                      0.169508791609905], rtol=0, atol=1e-11)
+    np.testing.assert_allclose(
+        D["Dmu2th2"], [4.39049308875221, 3.12593735397926, 4.39049308875221,
+                       3.45259711317969, 1.6522839242444], rtol=0, atol=1e-11)
+    np.testing.assert_allclose(
+        D["Dmu3th"], [0, 0.00154423954643431, 0, -1.91101388421101,
+                      0.682675760459353], rtol=0, atol=1e-10)
+
+    # dev_resids is the PROPER deviance (≥ 0; uncensored → z²), distinct
+    # from the −2logLik that Dd differentiates.
+    dr = fam.dev_resids(y, mu, wt)
+    np.testing.assert_allclose(
+        dr, [0.268917701686073, 0.00126922645931482, 0.0493930472484624,
+             0.823718399219946, 0.796017476899608], rtol=0, atol=1e-12)
+    assert np.all(dr >= 0.0)
+    # aic = Σ(−2logLik); ls is a genuinely NONZERO saturated log-lik whose
+    # θ-derivatives are forced to zero (Dd already carries them).
+    np.testing.assert_allclose(fam.aic(y, mu, 0, wt, 0), 7.60432360893484,
+                               rtol=0, atol=1e-11)
+    le = fam.ls_extended(y, wt)
+    np.testing.assert_allclose(le["ls"], -3.43250387871072, rtol=0, atol=1e-11)
+    assert float(np.sum(np.abs(le["lsth1"]))) == 0.0
+    assert float(np.sum(np.abs(le["LSTH1"]))) == 0.0
+    np.testing.assert_allclose(fam.get_theta(trans=True), [np.exp(0.3)],
+                               rtol=0, atol=1e-12)
+
+
+def test_cnorm_Dd_matches_fd():
+    from hea.family import cnorm, _cnorm_dpnorm
+    from scipy.special import log_ndtr
+    y, yat, mu, wt = _cnorm_dd_inputs()
+    th0 = 0.3
+    fam = cnorm()
+    fam.set_theta([th0])
+    fam.set_censor(yat)
+    D = fam.Dd(y, mu, np.array([th0]), wt, level=1)
+    log2pi = float(np.log(2.0 * np.pi))
+
+    def m2ll(mu_, th_):
+        # per-datum −2logLik — what cnorm's Dd differentiates (NOT the
+        # proper deviance dev_resids, which folds in the θ-dependent
+        # saturated reference).
+        thw = th_ - np.log(wt) / 2.0
+        eth = np.exp(-thw)
+        out = np.zeros(y.shape[0])
+        iu = [0, 2]
+        z = (y[iu] - mu_[iu]) * eth[iu]
+        out[iu] = z ** 2 + log2pi + 2.0 * thw[iu]            # density: 1/σ Jac
+        i = 1
+        y0 = min(y[i], yat[i]); y1 = max(y[i], yat[i])
+        z0 = (y0 - mu_[i]) * eth[i]; z1 = (y1 - mu_[i]) * eth[i]
+        out[i] = -2.0 * _cnorm_dpnorm(np.array([z0]), np.array([z1]))[0]
+        out[3] = -2.0 * log_ndtr((y[3] - mu_[3]) * eth[3])  # left
+        out[4] = -2.0 * log_ndtr(-(y[4] - mu_[4]) * eth[4])  # right
+        return out
+
+    h = 1e-4
+    fd_mu = (m2ll(mu + h, th0) - m2ll(mu - h, th0)) / (2 * h)
+    fd_th = (m2ll(mu, th0 + h) - m2ll(mu, th0 - h)) / (2 * h)
+    np.testing.assert_allclose(D["Dmu"], fd_mu, rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(D["Dth"], fd_th, rtol=1e-5, atol=1e-6)
+    fd_mu2 = (m2ll(mu + h, th0) - 2 * m2ll(mu, th0)
+              + m2ll(mu - h, th0)) / h ** 2
+    np.testing.assert_allclose(D["Dmu2"], fd_mu2, rtol=1e-4, atol=1e-5)
+
+
+def test_cnorm_construction_and_validation():
+    from hea.family import cnorm
+    # θ intake (mgcv efam.r:743-753): None → working 0; θ>0 fixed (store
+    # log θ, n_theta=0); θ<0 an initial value (store log|θ|).
+    assert cnorm().n_theta == 1
+    np.testing.assert_allclose(cnorm().get_theta(), [0.0])
+    assert cnorm(theta=2.0).n_theta == 0
+    np.testing.assert_allclose(cnorm(theta=2.0).get_theta(), [np.log(2.0)])
+    np.testing.assert_allclose(cnorm(theta=2.0).get_theta(True), [2.0])
+    assert cnorm(theta=-0.5).n_theta == 1
+    np.testing.assert_allclose(cnorm(theta=-0.5).get_theta(), [np.log(0.5)])
+    for lk in ("identity", "log", "sqrt"):
+        assert cnorm(link=lk).link.name == lk
+    with pytest.raises(ValueError, match="not available"):
+        cnorm(link="logit")
+    with pytest.raises(ValueError, match="1 param"):
+        cnorm().set_theta([0.1, 0.2])
+    # No censor set ⇒ all uncensored: dev_resids reduces to z² (= the
+    # Gaussian deviance with σ = e^θ).
+    fam = cnorm()
+    fam.set_theta([0.0])
+    y = np.array([1.0, 2.0, 3.0])
+    mu = np.array([1.5, 1.5, 2.0])
+    np.testing.assert_allclose(fam.dev_resids(y, mu, np.ones(3)),
+                               (y - mu) ** 2, rtol=0, atol=1e-12)
+    # identity link mustart = y; non-identity validmu requires μ > 0.
+    np.testing.assert_array_equal(fam.initialize(y, np.ones(3)), y)
+    assert cnorm(link="log").validmu(np.array([0.1, 1.0]))
+    assert not cnorm(link="log").validmu(np.array([-0.1, 1.0]))
