@@ -50,6 +50,7 @@ from ..family import (
     Binomial,
     Family,
     Gaussian,
+    GeneralFamily,
     Quasi,
     QuasiBinomial,
     _coerce_response,
@@ -1898,8 +1899,14 @@ class gam:
         self.leverage = (HX * X).sum(axis=1) * w_F
         sigma_for_std = sigma if np.isfinite(sigma) and sigma > 0 else 1.0
         denom = sigma_for_std * np.sqrt(np.clip(1.0 - self.leverage, 1e-12, None))
-        V_mu = self.family.variance(mu)
-        pearson_res = (y - mu) * np.sqrt(self._wt / np.maximum(V_mu, 0.0))
+        # Pearson residuals need a variance function; ocat (ordered
+        # categorical latent variable) has none — mgcv leaves type="pearson"
+        # unavailable there too. Fall back to NaN rather than crash.
+        try:
+            V_mu = self.family.variance(mu)
+            pearson_res = (y - mu) * np.sqrt(self._wt / np.maximum(V_mu, 0.0))
+        except NotImplementedError:
+            pearson_res = np.full(n, np.nan)
         self.std_dev_residuals = self.residuals / denom
         self.std_pearson_residuals = pearson_res / denom
         self.df_residuals = df_resid
@@ -7549,6 +7556,20 @@ class gam:
         if type == "lpmatrix":
             return X_new
         eta = X_new @ self._beta + off_new
+
+        # Extended-family `predict` hook (mgcv predict.gam, mgcv.r:3171-3198):
+        # on type="response" an extended family that defines `predict` (ocat
+        # returns the per-class probability matrix, not linkinv(η)) is called
+        # with {X, beta, off, Vb} and its {"fit"[, "se_fit"]} used directly.
+        fam_predict = getattr(self.family, "predict", None)
+        if (type == "response" and fam_predict is not None
+                and not isinstance(self.family, GeneralFamily)):
+            Vb = self._predict_V(unconditional) if se_fit else None
+            ffv = fam_predict(se=se_fit, X=X_new, beta=self._beta,
+                              off=off_new, Vb=Vb, eta=None,
+                              y=None, lpi=None)
+            return self._general_response_frame(
+                ffv["fit"], ffv.get("se_fit") if se_fit else None)
 
         fit = eta if type == "link" else self.family.link.linkinv(eta)
 

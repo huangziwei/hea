@@ -4530,6 +4530,475 @@ class betar(Family):
 
 
 # ---------------------------------------------------------------------------
+# Ordered categorical — mgcv ocat() (efam.r:2618-3081). The response is one
+# of R ordered classes; a single latent variable μ (identity link, the only
+# okLink) is split by R−1 cut points into class probabilities. The cut
+# points are α = [−∞, −1, −1+cumsum(e^θ), +∞] with θ the n_theta = R−2 free
+# log-step parameters. mgcv labels classes 1..R; hea is 0-based everywhere
+# user-facing (and ``multinom`` already uses 0..K), so ``ocat`` exposes
+# classes 0..R−1. The verbatim-transcribed Dd/dev/aic helpers below work in
+# mgcv's 1-based convention (so they oracle-pin directly against mgcv); the
+# ``ocat`` class converts 0↔1 only at the engine boundary.
+# ---------------------------------------------------------------------------
+
+
+def _ocat_alpha_full(theta: np.ndarray) -> tuple[np.ndarray, int]:
+    """mgcv's ``alpha`` cut-point vector for Dd/dev.resids/aic: length R+1,
+    ``alpha = [−∞, −1, −1+cumsum(e^θ), +∞]`` (0-based: alpha[0]=−∞,
+    alpha[1]=−1, alpha[2:R]=…, alpha[R]=+∞). Returns (alpha, R)."""
+    th = np.asarray(theta, dtype=float).reshape(-1)
+    R = th.shape[0] + 2
+    alpha = np.zeros(R + 1)
+    alpha[0] = -np.inf
+    alpha[R] = np.inf
+    alpha[1] = -1.0
+    if R > 2:
+        alpha[2:R] = alpha[1] + np.cumsum(np.exp(th))
+    return alpha, R
+
+
+def _ocat_Fdiff(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Cancellation-resistant ``F(b) − F(a)`` for the logistic CDF F,
+    with ``b > a`` (mgcv's inner ``Fdiff``, efam.r:2685-2696)."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    hb = np.ones_like(b)
+    hb[b > 0] = -1.0
+    eb = np.exp(b * hb)
+    ha = np.ones_like(a)
+    ha[a > 0] = -1.0
+    ea = np.exp(a * ha)
+    out = np.empty_like(b)
+    indb = b < 0
+    out[indb] = eb[indb] / (1.0 + eb[indb]) - ea[indb] / (1.0 + ea[indb])
+    inda = a > 0
+    out[inda] = ((ea[inda] - eb[inda])
+                 / ((ea[inda] + 1.0) * (eb[inda] + 1.0)))
+    indm = (~indb) & (~inda)
+    out[indm] = ((1.0 - ea[indm] * eb[indm])
+                 / ((eb[indm] + 1.0) * (ea[indm] + 1.0)))
+    return out
+
+
+def _ocat_abcd(x: np.ndarray, level: int) -> tuple:
+    """mgcv's ``abcd`` (efam.r:2736-2759): cancellation-resistant
+    ``a_j = f_j²−f_j``, ``b_j = f_j−3f_j²+2f_j³``, ``c_j``, ``d_j`` for the
+    logistic CDF, returned up to the requested level (None past it)."""
+    x = np.asarray(x, dtype=float)
+    h = np.ones_like(x)
+    h[x > 0] = -1.0
+    ex = np.exp(x * h)
+    ex1 = ex + 1.0
+    ex1k = ex1 ** 2
+    aj = -ex / ex1k
+    bj = cj = dj = None
+    if level >= 0:
+        ex1k = ex1k * ex1
+        ex2 = ex ** 2
+        bj = h * (ex - ex2) / ex1k
+        if level > 0:
+            ex1k = ex1k * ex1
+            ex3 = ex2 * ex
+            cj = (-ex3 + 4.0 * ex2 - ex) / ex1k
+            if level > 1:
+                ex1k = ex1k * ex1
+                ex4 = ex3 * ex
+                dj = h * (-ex4 + 11.0 * ex3 - 11.0 * ex2 + ex) / ex1k
+    return aj, bj, cj, dj
+
+
+def _ocat_Dd(y1, mu, theta, wt, level: int = 0) -> dict:
+    """mgcv ``ocat()$Dd`` (efam.r:2721-2887) verbatim. ``y1`` is the class
+    label in mgcv's 1-based convention (1..R)."""
+    y1 = np.asarray(y1).astype(int)
+    mu = np.asarray(mu, dtype=float)
+    theta = np.asarray(theta, dtype=float).reshape(-1)
+    wt = np.ones_like(mu) if wt is None else np.asarray(wt, dtype=float)
+    alpha, R = _ocat_alpha_full(theta)
+    al1 = alpha[y1]
+    al0 = alpha[y1 - 1]
+    al1mu = al1 - mu
+    al0mu = al0 - mu
+    f = np.maximum(_ocat_Fdiff(al0mu, al1mu), np.finfo(float).tiny)
+    a1, b1, c1, d1 = _ocat_abcd(al1mu, level)
+    a0, b0, c0, d0 = _ocat_abcd(al0mu, level)
+    a = a1 - a0
+    if level >= 0:
+        b = b1 - b0
+    if level > 0:
+        c = c1 - c0
+    if level > 1:
+        d = d1 - d0
+    n = y1.shape[0]
+    oo: dict = {}
+    oo["D"] = -2.0 * wt * np.log(f)
+    if level >= 0:
+        oo["Dmu"] = -2.0 * wt * a / f
+        a2 = a ** 2
+        oo["Dmu2"] = oo["EDmu2"] = 2.0 * wt * (a2 / f - b) / f
+    if R < 3:
+        level = 0
+    if level > 0:
+        f2 = f ** 2
+        a3 = a2 * a
+        oo["Dmu3"] = 2.0 * wt * (-c - 2.0 * a3 / f2 + 3.0 * a * b / f) / f
+        Dmua0 = 2.0 * (a0 * a / f - b0) / f
+        Dmua1 = -2.0 * (a1 * a / f - b1) / f
+        Dmu2a0 = -2.0 * (c0 + (a0 * (2.0 * a2 / f - b) - 2.0 * b0 * a) / f) / f
+        Dmu2a1 = 2.0 * (c1 + (2.0 * (a1 * a2 / f - b1 * a) - a1 * b) / f) / f
+        Da0 = -2.0 * a0 / f
+        Da1 = 2.0 * a1 / f
+        Dth = np.zeros((n, R - 2))
+        Dmuth = np.zeros((n, R - 2))
+        Dmu2th = np.zeros((n, R - 2))
+        for kk in range(R - 2):
+            etk = np.exp(theta[kk])
+            ind = y1 == kk + 2
+            Dth[ind, kk] = wt[ind] * Da1[ind] * etk
+            Dmuth[ind, kk] = wt[ind] * Dmua1[ind] * etk
+            Dmu2th[ind, kk] = wt[ind] * Dmu2a1[ind] * etk
+            if R > kk + 3:
+                ind = (y1 > kk + 2) & (y1 < R)
+                Dth[ind, kk] = wt[ind] * (Da1[ind] + Da0[ind]) * etk
+                Dmuth[ind, kk] = wt[ind] * (Dmua1[ind] + Dmua0[ind]) * etk
+                Dmu2th[ind, kk] = wt[ind] * (Dmu2a1[ind] + Dmu2a0[ind]) * etk
+            ind = y1 == R
+            Dth[ind, kk] = wt[ind] * Da0[ind] * etk
+            Dmuth[ind, kk] = wt[ind] * Dmua0[ind] * etk
+            Dmu2th[ind, kk] = wt[ind] * Dmu2a0[ind] * etk
+        oo["Dth"] = Dth
+        oo["Dmuth"] = Dmuth
+        oo["Dmu2th"] = oo["EDmu2th"] = Dmu2th
+    if level > 1:
+        oo["Dmu4"] = 2.0 * wt * ((3.0 * b ** 2 + 4.0 * a * c) / f
+                                 + a2 * (6.0 * a2 / f - 12.0 * b) / f2 - d) / f
+        Dmu3a0 = 2.0 * ((a0 * c + 3.0 * c0 * a + 3.0 * b0 * b) / f - d0
+                        + 6.0 * a * (a0 * a2 / f - b0 * a - a0 * b) / f2) / f
+        Dmu3a1 = 2.0 * (d1 - (a1 * c + 3.0 * (c1 * a + b1 * b)) / f
+                        + 6.0 * a * (b1 * a - a1 * a2 / f + a1 * b) / f2) / f
+        Dmua0a0 = 2.0 * (c0 + (2.0 * a0 * (b0 - a0 * a / f) - b0 * a) / f) / f
+        Dmua1a1 = 2.0 * ((b1 * a + 2.0 * a1 * (b1 - a1 * a / f)) / f - c1) / f
+        Dmua0a1 = 2.0 * (a0 * (2.0 * a1 * a / f - b1) - b0 * a1) / f2
+        Dmu2a0a0 = 2.0 * (d0 + (b0 * (2.0 * b0 - b) + 2.0 * c0 * (a0 - a)) / f
+                          + 2.0 * (b0 * a2 + a0 * (3.0 * a0 * a2 / f
+                                                   - 4.0 * b0 * a
+                                                   - a0 * b)) / f2) / f
+        Dmu2a1a1 = 2.0 * ((2.0 * c1 * (a + a1) + b1 * (2.0 * b1 + b)) / f
+                          + 2.0 * (a1 * (3.0 * a1 * a2 / f - a1 * b)
+                                   - b1 * a * (a + 4.0 * a1)) / f2 - d1) / f
+        Dmu2a0a1 = 0.0
+        Da0a0 = 2.0 * (b0 + a0 ** 2 / f) / f
+        Da1a1 = -2.0 * (b1 - a1 ** 2 / f) / f
+        Da0a1 = -2.0 * a0 * a1 / f2
+        n2d = (R - 2) * (R - 1) // 2
+        Dmu3th = np.zeros((n, R - 2))
+        Dth2 = np.zeros((n, n2d))
+        Dmuth2 = np.zeros((n, n2d))
+        Dmu2th2 = np.zeros((n, n2d))
+        i = -1
+        for jj in range(R - 2):
+            for kk in range(jj, R - 2):
+                i += 1
+                ind = y1 >= jj + 1
+                ar_k = np.full(n, np.exp(theta[kk]))
+                ar1_k = ar_k.copy()
+                ar_k[(y1 == R) | (y1 <= kk + 1)] = 0.0
+                ar1_k[y1 < kk + 3] = 0.0
+                ar_j = np.full(n, np.exp(theta[jj]))
+                ar1_j = ar_j.copy()
+                ar_j[(y1 == R) | (y1 <= jj + 1)] = 0.0
+                ar1_j[y1 < jj + 3] = 0.0
+                ar_kj = np.zeros(n)
+                ar1_kj = np.zeros(n)
+                if kk == jj:
+                    ar_kj[(y1 > kk + 1) & (y1 < R)] = np.exp(theta[kk])
+                    ar1_kj[y1 > kk + 2] = np.exp(theta[kk])
+                    Dmu3th[ind, kk] = wt[ind] * (Dmu3a1[ind] * ar_k[ind]
+                                                 + Dmu3a0[ind] * ar1_k[ind])
+                Dth2[:, i] = wt * (Da1a1 * ar_k * ar_j + Da0a1 * ar_k * ar1_j
+                                   + Da1 * ar_kj + Da0a0 * ar1_k * ar1_j
+                                   + Da0a1 * ar1_k * ar_j + Da0 * ar1_kj)
+                Dmuth2[:, i] = wt * (Dmua1a1 * ar_k * ar_j
+                                     + Dmua0a1 * ar_k * ar1_j + Dmua1 * ar_kj
+                                     + Dmua0a0 * ar1_k * ar1_j
+                                     + Dmua0a1 * ar1_k * ar_j + Dmua0 * ar1_kj)
+                Dmu2th2[:, i] = wt * (Dmu2a1a1 * ar_k * ar_j
+                                      + Dmu2a0a1 * ar_k * ar1_j
+                                      + Dmu2a1 * ar_kj
+                                      + Dmu2a0a0 * ar1_k * ar1_j
+                                      + Dmu2a0a1 * ar1_k * ar_j
+                                      + Dmu2a0 * ar1_kj)
+        oo["Dmu3th"] = Dmu3th
+        oo["Dth2"] = Dth2
+        oo["Dmuth2"] = Dmuth2
+        oo["Dmu2th2"] = Dmu2th2
+    return oo
+
+
+def _ocat_dev_signed(y1, mu, wt, theta) -> tuple[np.ndarray, np.ndarray]:
+    """ocat deviance residuals ``−2 wt log f`` plus the latent-midpoint
+    sign (efam.r:2683-2719). ``y1`` 1-based."""
+    y1 = np.asarray(y1).astype(int)
+    mu = np.asarray(mu, dtype=float)
+    wt = np.asarray(wt, dtype=float)
+    alpha, R = _ocat_alpha_full(theta)
+    al1 = alpha[y1]
+    al0 = alpha[y1 - 1]
+    s = np.sign((al1 + al0) / 2.0 - mu)
+    f = _ocat_Fdiff(al0 - mu, al1 - mu)
+    return -2.0 * wt * np.log(f), s
+
+
+def _ocat_ini(R: int, y0) -> np.ndarray | None:
+    """mgcv ``ocat.ini`` (efam.r:2927-2938): seed the R−2 log-step θ from
+    the empirical cumulative class proportions. ``y0`` 0-based labels."""
+    if R < 3:
+        return None
+    yy = np.concatenate([np.arange(1, R + 1),
+                         np.asarray(y0).astype(int) + 1]).astype(float)
+    yy = yy[np.isfinite(yy)].astype(int)
+    counts = np.bincount(yy, minlength=R + 1)[1:R + 1].astype(float)
+    p = np.cumsum(counts / yy.shape[0])
+    eta = 5.0 if p[0] == 0 else -1.0 - np.log(p[0] / (1.0 - p[0]))
+    theta = np.full(R - 1, -1.0)
+    for i in range(1, R - 1):
+        theta[i] = np.log(p[i] / (1.0 - p[i])) + eta
+    theta = np.diff(theta)
+    theta[theta <= 0.01] = 0.01
+    return np.log(theta)
+
+
+def _ocat_prob(theta, lp, se=None) -> tuple:
+    """mgcv ``ocat.prob`` (efam.r:3002-3021): per-class probabilities (and
+    optional delta-method SE) from the finite cut points ``theta`` (length
+    R−1) and the latent linear predictor ``lp``."""
+    theta = np.asarray(theta, dtype=float).reshape(-1)
+    lp = np.asarray(lp, dtype=float)
+    R = theta.shape[0]
+    n = lp.shape[0]
+    prob = np.zeros((n, R + 2))
+    dp = np.zeros((n, R + 2))
+    prob[:, R + 1] = 1.0
+    for i in range(R):
+        p = expit(theta[i] - lp)
+        prob[:, i + 1] = p
+        dp[:, i + 1] = p * (p - 1.0)
+    prob = np.diff(prob, axis=1)
+    dp = np.diff(dp, axis=1)
+    if se is not None:
+        se = np.asarray(se, dtype=float).reshape(-1, 1) * np.abs(dp)
+    return prob, se
+
+
+class ocat(Family):
+    """Ordered categorical extended family — port of mgcv ``ocat()``
+    (efam.r:2618-3081).
+
+    The R ordered response classes (hea: 0..R−1, mgcv: 1..R) arise from a
+    single latent variable with mean ``μ`` (identity link — the only
+    okLink) split by R−1 cut points ``[−1, −1+cumsum(e^θ)]``. The
+    ``n_theta = R−2`` free log-step parameters ``θ`` are estimated jointly
+    with the smoothing parameters (the first cut point is fixed at −1 for
+    identifiability). ``ls ≡ 0``; the deviance is the standard
+    ``Σ −2 wt log f`` (no saturated fold, unlike :class:`betar`). Construct
+    with ``ocat(R=k)`` (free θ) or ``ocat(theta=…)`` (mgcv's sign
+    convention: positive → fixed, ``n_theta = 0``).
+    """
+    name = "Ordered Categorical"
+    canonical_link_name = "identity"
+    _newton_canonical = "none"
+    scale_known = True
+    is_extended = True
+    _OK_LINKS = ("identity",)
+
+    def __init__(self, theta=None, R: int | None = None,
+                 link: str = "identity"):
+        if link not in self._OK_LINKS:
+            raise ValueError(
+                f'link "{link}" not available for ocat family; available '
+                f'links are {self._OK_LINKS}')
+        if theta is None and R is None:
+            raise ValueError("Must supply theta or R to ocat")
+        if theta is not None:
+            theta = np.asarray(theta, dtype=float).reshape(-1)
+            R = theta.shape[0] + 2
+        R = int(R)
+        if R < 2:
+            raise ValueError(f"ocat requires R >= 2 categories; got R={R}")
+        self._R = R
+        n_theta = R - 2
+        if theta is not None and np.sum(theta == 0.0) == 0:
+            if np.sum(theta < 0.0):
+                ini = np.log(np.abs(theta))           # initial θ supplied
+            else:
+                ini = np.log(theta)                   # fixed θ
+                n_theta = 0
+        else:
+            ini = np.full(R - 2, -1.0)
+        self.n_theta = int(n_theta)
+        self._theta = np.asarray(ini, dtype=float).reshape(-1)
+        super().__init__(link=link)
+
+    # ----- θ accessors ---------------------------------------------------
+
+    def set_theta(self, values) -> None:
+        v = np.asarray(values, dtype=float).reshape(-1)
+        if v.shape[0] != self._R - 2:
+            raise ValueError(
+                f"ocat.set_theta expects {self._R - 2} log-step params; got "
+                f"shape {v.shape}")
+        self._theta = v.copy()
+
+    def get_theta(self, trans: bool = False) -> np.ndarray:
+        th = self._theta.copy()
+        if not trans:
+            return th
+        # Finite cut points (R−1 of them): [−1, −1+cumsum(e^θ)].
+        R = th.shape[0] + 2
+        alpha = np.zeros(R - 1)
+        alpha[0] = -1.0
+        if R > 2:
+            alpha[1:] = alpha[0] + np.cumsum(np.exp(th))
+        return alpha
+
+    # ----- deviance / Dd / aic -------------------------------------------
+
+    def dev_resids(self, y, mu, wt, theta=None):
+        th = self._theta if theta is None else np.asarray(theta, dtype=float)
+        y1 = np.asarray(y).astype(int) + 1
+        rsd, _ = _ocat_dev_signed(y1, mu, wt, th)
+        return rsd
+
+    def Dd(self, y, mu, theta, wt, level: int = 0) -> dict:
+        y1 = np.asarray(y).astype(int) + 1
+        return _ocat_Dd(y1, mu, theta, wt, level=level)
+
+    def aic(self, y, mu, dev, wt, n, theta=None):
+        th = self._theta if theta is None else np.asarray(theta, dtype=float)
+        y1 = np.asarray(y).astype(int) + 1
+        mu = np.asarray(mu, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        alpha, _ = _ocat_alpha_full(th)
+        al1 = alpha[y1]
+        al0 = alpha[y1 - 1]
+        f = _ocat_Fdiff(al0 - mu, al1 - mu)
+        return -2.0 * float(np.sum(np.log(f) * wt))
+
+    def ls_extended(self, y, wt, theta=None, scale: float = 1.0) -> dict:
+        # ocat ls ≡ 0 (efam.r:2918-2921).
+        n = np.asarray(y).shape[0]
+        nt = self._R - 2
+        return {"ls": 0.0, "lsth1": np.zeros(nt),
+                "lsth2": np.zeros((nt, nt)), "LSTH1": np.zeros((n, nt))}
+
+    def ls(self, y, wt, scale):
+        # Scale-known: the log-φ ls path is never taken; provide the stub.
+        return np.array([0.0, 0.0, 0.0], dtype=float)
+
+    # ----- initialization / validity -------------------------------------
+
+    def preinitialize(self, y) -> dict | None:
+        # mgcv ocat preinitialize (efam.r:2926-2945): integer-class check +
+        # seed θ from the empirical class proportions.
+        y = np.asarray(y)
+        if not np.issubdtype(y.dtype, np.number):
+            raise ValueError("Response should be integer class labels")
+        if self._R > 2 and self.n_theta > 0:
+            theta = _ocat_ini(self._R, y)
+            if theta is not None:
+                return {"Theta": theta}
+        return None
+
+    def initialize(self, y, wt):
+        # mgcv ocat initialize (efam.r:2947-2960): mustart is the midpoint
+        # of the (finite, init-only) cut interval bracketing each class.
+        R = self._theta.shape[0] + 2
+        y0 = np.asarray(y).astype(int)
+        if np.any(y0 < 0) or np.any(y0 > R - 1):
+            raise ValueError("values out of range")
+        alpha = np.zeros(R + 1)
+        alpha[0] = -2.0
+        alpha[1] = -1.0
+        if R > 2:
+            alpha[2:R] = alpha[1] + np.cumsum(np.exp(self._theta))
+        alpha[R] = alpha[R - 1] + 1.0
+        y1 = y0 + 1
+        return (alpha[y1] + alpha[y1 - 1]) / 2.0
+
+    def validmu(self, mu) -> bool:
+        return bool(np.all(np.isfinite(np.asarray(mu))))
+
+    def postproc(self, y, prior_weights, fitted, linear_predictors,
+                 offset, intercept) -> dict:
+        # ocat postproc (efam.r:2672-2679): null deviance via find.null.dev
+        # (the optimal latent constant ≠ weighted mean), and the cut-point
+        # relabel "Ordered Categorical(c1,c2,…)".
+        null_dev = find_null_dev(self, y, eta=linear_predictors,
+                                 offset=offset, weights=prior_weights)
+        cuts = ",".join(f"{c:g}" for c in np.round(self.get_theta(True), 2))
+        return {"null_deviance": null_dev,
+                "family_name": f"Ordered Categorical({cuts})"}
+
+    def residuals_extended(self, y, mu, wt, type: str = "deviance"):
+        """ocat residuals (efam.r:2962-2993). ``deviance``: signed
+        ``√(−2 wt log f)``. ``response``: ``y − ŷ`` with ŷ the class implied
+        by the latent ``mu`` (both 0-based). ``working`` is the engine's."""
+        y0 = np.asarray(y).astype(int)
+        mu = np.asarray(mu, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        if type == "response":
+            alpha, R = _ocat_alpha_full(self._theta)
+            fv = np.zeros(mu.shape[0], dtype=float)
+            for i in range(R):                # 0-based class i ⇔ (α_i, α_{i+1}]
+                fv[(mu > alpha[i]) & (mu <= alpha[i + 1])] = i
+            return y0.astype(float) - fv
+        if type != "deviance":
+            raise ValueError(
+                f"ocat residuals are 'deviance' or 'response'; got {type!r}")
+        rsd, s = _ocat_dev_signed(y0 + 1, mu, wt, self._theta)
+        return np.sqrt(np.maximum(rsd, 0.0)) * s
+
+    def predict(self, se=False, X=None, beta=None, off=None, Vb=None,
+                eta=None, y=None, lpi=None) -> dict:
+        """ocat ``predict`` hook (efam.r:2996-3049): ``type="response"``
+        returns the per-class probability matrix (n × R) with optional
+        delta-method SE."""
+        cuts = self.get_theta(trans=True)        # finite cut points (R−1)
+        if eta is None:
+            mu = X @ beta
+            if off is not None:
+                mu = mu + np.asarray(off, dtype=float)
+            se_v = None
+            if se:
+                se_v = np.sqrt(np.maximum(
+                    0.0, np.einsum("ij,jk,ik->i", X, Vb, X)))
+            prob, sep = _ocat_prob(cuts, mu, se_v)
+            return {"fit": prob, "se_fit": sep} if se else {"fit": prob}
+        # Category implied by the latent η (mean of the latent variable).
+        eta = np.asarray(eta, dtype=float)
+        alpha = np.concatenate([[-np.inf], cuts, [np.inf]])
+        fv = np.zeros(eta.shape[0], dtype=float)
+        for i in range(alpha.shape[0] - 1):
+            fv[(eta > alpha[i]) & (eta <= alpha[i + 1])] = i
+        return {"fit": fv}
+
+    def rd(self, rng, mu, wt, scale):
+        # mgcv ocat rd (efam.r:3051-3070): latent = mu + logit(U), allocate
+        # to classes by the [−∞,−1,…,+∞] cut points. Returns 0-based labels.
+        alpha, R = _ocat_alpha_full(self._theta)
+        mu = np.asarray(mu, dtype=float)
+        u = rng.uniform(size=mu.shape[0])
+        lat = mu + np.log(u / (1.0 - u))
+        y = np.zeros(mu.shape[0], dtype=float)
+        for i in range(R):                        # 0-based class i
+            y[(lat > alpha[i]) & (lat <= alpha[i + 1])] = i
+        return y
+
+    def __repr__(self):
+        return f"ocat(R={self._R}, link={self.link.name})"
+
+
+# ---------------------------------------------------------------------------
 # General-family seam — mgcv gamlss.r authoring kit (§5.3 prerequisite 5).
 #
 # General families (gam.fit5: multiple linear predictors, likelihood
@@ -8313,7 +8782,7 @@ __all__ = [
     "QuasiBinomial", "quasibinomial",
     "Tweedie", "tw",
     "Scat", "scat",
-    "nb", "betar",
+    "nb", "betar", "ocat",
     "GeneralFamily", "gaulss", "twlss", "shash", "gammals", "gumbls",
     "gevlss", "cox_ph", "ziplss", "multinom", "mvn",
     "LogebLink", "SoftplusLink", "ShiftedLogitLink",

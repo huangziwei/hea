@@ -7451,3 +7451,95 @@ def test_betar_through_gam_matches_mgcv():
         ml = gam("y ~ s(x)", df, family=betar(link=lk), method="REML")
         np.testing.assert_allclose(ml.REML_criterion / 2, reml_ref,
                                    rtol=0, atol=1e-4)
+
+
+def _ocat_fixture():
+    # Ordered categorical (R=4) via R's set.seed(54) stream, reproduced
+    # bit-exactly by hea.R.rng:
+    #   set.seed(54); n<-300; x<-runif(n); f0<-2*sin(2*pi*x)-0.3
+    #   fam<-ocat(R=4); fam$putTheta(log(c(1.1,1.0)))  # cut points -1,0.1,1.1
+    #   y<-fam$rd(f0, rep(1,n), 1)                      # latent + logit(U)
+    # hea exposes 0-based classes (0..3); the rd allocation is reproduced
+    # exactly. table(y) = (123,50,38,89): all four classes well-populated
+    # so both θ steps are identified (no flat ridge).
+    from hea.R.rng import RGenerator
+    gen = RGenerator(54)
+    n = 300
+    x = gen.uniform(0, 1, n)
+    f0 = 2.0 * np.sin(2 * np.pi * x) - 0.3
+    u = gen.uniform(0, 1, n)
+    lat = f0 + np.log(u / (1.0 - u))
+    alpha = np.array([-np.inf, -1.0, 0.1, 1.1, np.inf])
+    y = np.zeros(n, dtype=int)
+    for i in range(4):
+        y[(lat > alpha[i]) & (lat <= alpha[i + 1])] = i
+    return pl.DataFrame({"y": y, "x": x})
+
+
+def test_ocat_through_gam_matches_mgcv():
+    # R: gam(y ~ s(x), family=ocat(R=4), method="REML") — the first extended
+    # family with VECTOR θ (n_theta = R−2 = 2 ordered cut-point log-steps),
+    # exercising the vector-θ outer-Newton gradient/Hessian, ls≡0, the
+    # find.null.dev null deviance, and the single-formula `predict` hook
+    # (per-class probability matrix, not linkinv(η)).
+    from hea.family import ocat
+
+    df = _ocat_fixture()
+    m = gam("y ~ s(x)", df, family=ocat(R=4), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 311.1907401388,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.sp, [0.017735245992525465], rtol=1e-4)
+    np.testing.assert_allclose(
+        m.family.get_theta(), [0.10714304251230537, -0.16319455867953944],
+        rtol=0, atol=1e-5)
+    # finite cut points (the first is pinned at −1 for identifiability).
+    np.testing.assert_allclose(
+        m.family.get_theta(trans=True),
+        [-1.0, 0.113093462777623, 0.96251937193122572], rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m.edf_total, 6.5603973369, rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.deviance, 600.2801127222, rtol=0, atol=1e-4)
+    # find.null.dev (optimal latent constant ≠ weighted mean) — Brent band.
+    np.testing.assert_allclose(m.null_deviance, 802.6873793845, rtol=0,
+                               atol=1e-3)
+    np.testing.assert_allclose(np.asarray(m.Vp)[0, 0], 0.015303883954,
+                               rtol=0, atol=1e-6)
+    # intercept (coef[0]) sign-stable; the tp-basis s(x) coefs carry sign
+    # noise → pin |coef|.
+    assert float(np.asarray(m._beta)[0]) < 0
+    np.testing.assert_allclose(
+        np.abs(np.asarray(m._beta)[:4]),
+        np.abs([-0.4253831825912549, -5.7504861424827149,
+                0.64506034454421934, 0.72245036970946885]),
+        rtol=0, atol=1e-3)
+    # family relabel carries the rounded cut points.
+    assert m._postproc["family_name"] == "Ordered Categorical(-1,0.11,0.96)"
+
+    # the `predict` hook returns the per-class probability matrix (4 cols,
+    # summing to 1) + delta-method SE — NOT the per-LP linkinv.
+    pr = m.predict(pl.DataFrame({"x": [0.2, 0.5, 0.8]}), type="response",
+                   se_fit=True)
+    fit = np.column_stack([pr[c].to_numpy()
+                           for c in ("fit", "fit.1", "fit.2", "fit.3")])
+    se = np.column_stack([pr[c].to_numpy() for c in
+                          ("se.fit", "se.fit.1", "se.fit.2", "se.fit.3")])
+    np.testing.assert_allclose(fit.sum(axis=1), [1, 1, 1], rtol=0, atol=1e-10)
+    np.testing.assert_allclose(
+        fit[0], [0.0586729857099971, 0.10079153292851062,
+                 0.1478313777963898, 0.69270410356510248], rtol=0, atol=1e-5)
+    np.testing.assert_allclose(
+        fit[2], [0.8502720903780735, 0.095037812305111879,
+                 0.030545553826115346, 0.024144543490699277],
+        rtol=0, atol=1e-5)
+    np.testing.assert_allclose(
+        se[0], [0.016432665667876309, 0.023446808696688203,
+                0.023454075265177548, 0.063333549629742053],
+        rtol=0, atol=1e-5)
+
+    # deviance residuals: signed √(−2 wt log f); Σ res² = deviance.
+    dres = np.asarray(m.residuals_of("deviance"))
+    np.testing.assert_allclose(
+        dres[:5], [1.6159625596856027, 2.6002725708653465,
+                   -0.55428957625776465, 0.85980858568121443,
+                   1.0698318351438267], rtol=0, atol=1e-4)
+    np.testing.assert_allclose(float(np.sum(dres ** 2)), m.deviance,
+                               rtol=0, atol=1e-8)

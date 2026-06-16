@@ -2837,3 +2837,197 @@ def test_betar_construction_and_validation():
     fam = betar()
     pre = fam.preinitialize(np.array([0.0, 0.5, 1.0]))
     assert pre["y"][0] > 0 and pre["y"][2] < 1
+
+
+# ---------------------------------------------------------------------------
+# ocat (ordered categorical, efam.r:2618-3081) — the first extended family
+# with VECTOR θ (n_theta = R−2 ordered log-step params). Classes are 0-based
+# in hea (mgcv: 1..R); the verbatim Dd/dev/aic helpers work 1-based and the
+# class converts at the boundary. Oracle: live ocat(R=4)$Dd / dev.resids /
+# aic / preinitialize (Rscript, mgcv 1.9-4) on a fixed (y, μ, θ) table whose
+# classes 0..3 light every branch (y==1, mid, y==R) of the θ-chain.
+# ---------------------------------------------------------------------------
+
+def _ocat_dd_inputs():
+    # Fixed probe table; y0 0-based classes spanning 0..3 (mgcv 1..4).
+    y0 = np.array([0, 1, 2, 3, 1, 2, 0, 3])
+    mu = np.array([-1.5, -0.5, 0.5, 1.5, -0.3, 0.8, -2.0, 2.0])
+    th = np.array([-0.3, 0.4])
+    wt = np.array([1.0, 1, 1, 2, 1, 1, 1, 2])
+    return y0, mu, th, wt
+
+
+def test_ocat_components_match_mgcv():
+    from hea.family import ocat
+    y0, mu, th, wt = _ocat_dd_inputs()
+    fam = ocat(R=4)
+    fam.set_theta(th)        # so residuals_extended uses the same θ as Dd
+    D = fam.Dd(y0, mu, th, wt, level=2)
+    # live ocat(R=4)$Dd(y, mu, theta, wt, level=2) references.
+    np.testing.assert_allclose(
+        D["D"], [0.94815396836021326, 3.4033848405830938, 2.0624996810431218,
+                 2.2735085228913441, 3.4475560178681786, 2.1051446787034322,
+                 0.62652337503644562, 1.5253409548574155], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        D["Dmu"], [0.75508133759629081, 0.12508810834514919,
+                   0.01158217642058367, -1.7342241692960858,
+                   0.31596926720447793, 0.27205911041460462,
+                   0.53788284273999032, -1.268204398689236], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        D["Dmu2"], [0.47000742440318893, 0.96282774356019796,
+                    0.8728306898144822, 0.98234080195341111,
+                    0.94321753851302692, 0.85966791304002421,
+                    0.3932238664829637, 0.86611879947555437], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        D["Dmu3"], [0.11511358970464147, -0.056058657808741363,
+                    -0.0035821305595196231, -0.13054122133675861,
+                    -0.13895868706639994, -0.0837958137273902,
+                    0.18171549534589687, -0.31691096383438538],
+        rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        D["Dmu4"], [-0.19271351257916913, -0.42850879434420946,
+                    -0.26994501209635102, -0.46514937482029561,
+                    -0.39603714552583974, -0.26240133428201973,
+                    -0.070651161032471238, -0.25912386273190896],
+        rtol=0, atol=1e-9)
+    # vector-θ blocks (n_theta = 2): Dth/Dmuth/Dmu2th (n×2), Dmu3th (n×2).
+    np.testing.assert_allclose(D["Dth"], np.array([
+        [0, 0], [-2.0018700821058992, 0],
+        [-0.0085802873275185494, -1.8345684322093283],
+        [1.2847448633611565, 2.5871584470023166],
+        [-2.0755253980313082, 0], [-0.20154634609759842, -2.0400833323027197],
+        [0, 0], [0.93950892609768777, 1.8919386436218986]]),
+        rtol=0, atol=1e-9)
+    np.testing.assert_allclose(D["Dmuth"], np.array([
+        [0, 0], [-0.3650902719536912, 0],
+        [-0.64660887858476102, -0.65413562360419775],
+        [-0.72773596500617788, -1.4654802698548306],
+        [-0.37025486600654539, 0],
+        [-0.63685765371547653, -0.71206813055814888],
+        [0, 0], [-0.64163658792646583, -1.2920974161490391]]),
+        rtol=0, atol=1e-9)
+    np.testing.assert_allclose(D["Dmu2th"], np.array([
+        [0, 0], [-0.043748969569600636, 0],
+        [0.0026537075873529679, -0.22945111953838168],
+        [0.096707315316315809, 0.19474461805043206],
+        [-0.0075555234051465454, 0],
+        [0.062077465626101752, -0.15167705715753937],
+        [0, 0], [0.23477341634231763, 0.47277560280143555]]),
+        rtol=0, atol=1e-9)
+    np.testing.assert_allclose(D["Dmu3th"], np.array([
+        [0, 0], [0.17468144108232198, 0],
+        [0.19998018354312383, 0.206340975445134],
+        [0.34459113220558429, 0.69392132544931229],
+        [0.18489616284655114, 0], [0.19439168956731451, 0.30757115418809855],
+        [0, 0], [0.19196367892522651, 0.38656737817166814]]),
+        rtol=0, atol=1e-9)
+    # second-θ-deriv blocks (n×3, packed (j,k≥j)): Dth2/Dmuth2/Dmu2th2.
+    np.testing.assert_allclose(D["Dth2"], np.array([
+        [0, 0, 0], [0.17958315855029516, 0, 0],
+        [0.47043935158264499, 0.48459558876298758, 0.8082585471108592],
+        [1.8238649260831261, 1.0856544859580193, 4.7733981074777461],
+        [0.10975386800166609, 0, 0],
+        [0.2702494077554346, 0.52751304548424494, 0.68916879168764833],
+        [0, 0, 0],
+        [1.4148450014896607, 0.95720930877897625, 3.8195214807915052]]),
+        rtol=0, atol=1e-9)
+    np.testing.assert_allclose(D["Dmuth2"], np.array([
+        [0, 0, 0], [-0.3326802381604822, 0, 0],
+        [-0.64857479351783343, 0.1699815701098521, -0.31183477657540037],
+        [-0.79937850626571694, -0.14427036143146205, -1.7560051007951816],
+        [-0.36465759660122665, 0, 0],
+        [-0.68284577134503588, 0.1123651276016875, -0.48579255062498522],
+        [0, 0, 0],
+        [-0.81556101248454971, -0.35024078084908605, -1.99739573685046]]),
+        rtol=0, atol=1e-9)
+    np.testing.assert_allclose(D["Dmu2th2"], np.array([
+        [0, 0, 0], [-0.173156163938325, 0, 0],
+        [-0.14549525615666759, -0.15286115428299446, -0.53727568284282401],
+        [-0.15857207410692392, -0.5140695616124592, -0.84046435347481852],
+        [-0.14452996977600635, 0, 0],
+        [-0.081931439954469026, -0.22785431517864946, -0.61051930125737597],
+        [0, 0, 0],
+        [0.092563225285414746, -0.28637615727073196, -0.1039151592574919]]),
+        rtol=0, atol=1e-9)
+    # EDmu2 ≡ Dmu2, EDmu2th ≡ Dmu2th (observed = expected, mgcv ocat).
+    np.testing.assert_allclose(D["EDmu2"], D["Dmu2"], rtol=0, atol=1e-12)
+    np.testing.assert_allclose(D["EDmu2th"], D["Dmu2th"], rtol=0, atol=1e-12)
+
+    # dev_resids(theta=th) ≡ Dd$D; the latent-midpoint sign; aic ≡ Σ Dd$D.
+    np.testing.assert_allclose(fam.dev_resids(y0, mu, wt, theta=th), D["D"],
+                               rtol=0, atol=1e-12)
+    res = fam.residuals_extended(y0, mu, wt, "deviance")
+    # sign(res) reproduces mgcv's attr(.,"sign"); |res| = √(Dd$D).
+    np.testing.assert_array_equal(np.sign(res), [-1, -1, -1, 1, -1, -1, -1, 1])
+    np.testing.assert_allclose(np.abs(res), np.sqrt(D["D"]), rtol=0, atol=1e-9)
+    np.testing.assert_allclose(fam.aic(y0, mu, 0, wt, 0, theta=th),
+                               16.392112039343242, rtol=0, atol=1e-9)
+
+    # ls ≡ 0 (vector θ); lsth1/LSTH1/lsth2 all zero.
+    le = fam.ls_extended(y0, wt)
+    assert le["ls"] == 0.0
+    assert float(np.sum(np.abs(le["lsth1"]))) == 0.0
+    assert le["lsth2"].shape == (2, 2) and float(np.sum(np.abs(le["lsth2"]))) == 0.0
+
+    # preinitialize seeds θ from empirical cumulative class proportions.
+    yc = np.array([0, 0, 0, 1, 1, 2, 2, 2, 3, 3, 3, 3, 1, 2, 0, 3, 1, 2, 3, 0])
+    pre = ocat(R=4).preinitialize(yc)
+    np.testing.assert_allclose(
+        pre["Theta"], [-0.070896606721916375, 0.052931367693468845],
+        rtol=0, atol=1e-9)
+
+
+def test_ocat_Dd_matches_fd():
+    # FD-check the μ/θ derivatives of the ocat deviance.
+    from hea.family import ocat
+    fam = ocat(R=4)
+    y0, mu, th, wt = _ocat_dd_inputs()
+    D = fam.Dd(y0, mu, th, wt, level=1)
+    h = 1e-6
+    fd_mu = (fam.dev_resids(y0, mu + h, wt, theta=th)
+             - fam.dev_resids(y0, mu - h, wt, theta=th)) / (2 * h)
+    h2 = 1e-4   # second difference: coarser step keeps cancellation in check
+    fd_mu2 = (fam.dev_resids(y0, mu + h2, wt, theta=th)
+              - 2 * fam.dev_resids(y0, mu, wt, theta=th)
+              + fam.dev_resids(y0, mu - h2, wt, theta=th)) / h2 ** 2
+    np.testing.assert_allclose(D["Dmu"], fd_mu, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(D["Dmu2"], fd_mu2, rtol=1e-4, atol=1e-4)
+    # θ-gradient column k via central diff in θ_k.
+    for k in range(2):
+        thp = th.copy(); thp[k] += h
+        thm = th.copy(); thm[k] -= h
+        fd_thk = (fam.dev_resids(y0, mu, wt, theta=thp)
+                  - fam.dev_resids(y0, mu, wt, theta=thm)) / (2 * h)
+        np.testing.assert_allclose(D["Dth"][:, k], fd_thk, rtol=1e-5, atol=1e-5)
+
+
+def test_ocat_construction_and_validation():
+    from hea.family import ocat
+    # R derived from theta length; n_theta = R−2; sign convention.
+    assert ocat(R=4).n_theta == 2
+    assert ocat(theta=[0.5, 0.5]).n_theta == 0          # fixed (all >0)
+    assert ocat(theta=[-0.5, -0.5]).n_theta == 2        # free start (<0)
+    assert ocat(theta=[0.2, 0.3, 0.4])._R == 5
+    # negative theta = "initial supplied" → ini = log|θ| ([−1,−1] → [0,0]).
+    np.testing.assert_allclose(ocat(theta=[-1.0, -1.0]).get_theta(), [0.0, 0.0])
+    # get_theta(trans) = finite cut points [−1, −1+cumsum(e^θ)]; the default
+    # ocat(R=4) seeds θ = [−1,−1].
+    np.testing.assert_allclose(
+        ocat(R=4).get_theta(trans=True),
+        [-1.0, -0.6321205588, -0.2642411177], rtol=0, atol=1e-9)
+    # set_theta requires the right length.
+    fam = ocat(R=4)
+    fam.set_theta([0.1, -0.2])
+    np.testing.assert_allclose(fam.get_theta(), [0.1, -0.2])
+    with pytest.raises(ValueError, match="log-step"):
+        fam.set_theta([0.1])
+    # okLinks: identity only.
+    ocat(R=3, link="identity")
+    with pytest.raises(ValueError, match="not available"):
+        ocat(R=3, link="logit")
+    # must supply theta or R.
+    with pytest.raises(ValueError, match="theta or R"):
+        ocat()
+    # initialize rejects out-of-range classes (0..R−1).
+    with pytest.raises(ValueError, match="out of range"):
+        ocat(R=4).initialize(np.array([0, 1, 4]), np.ones(3))
