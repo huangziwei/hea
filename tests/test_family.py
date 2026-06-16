@@ -1792,6 +1792,352 @@ def test_cox_ph_validation():
 
 
 # ---------------------------------------------------------------------------
+# ziplss (zero-inflated Poisson location-scale, gamlss.r:1455-1939) — mgcv
+# 1.9-4 oracle. Inputs reproduce R's set.seed(27) stream via hea.R.rng
+# (bit-exact rnorm/runif/rpois), so ziplss()$ll evaluated in R at the
+# identical (X, y, coef, d1b, d2b) matches hea below.
+# ---------------------------------------------------------------------------
+
+def _ziplss_oracle_inputs():
+    from hea.R.rng import RGenerator
+    gen = RGenerator(27)            # == R set.seed(27)
+    n = 40
+    x1 = gen.normal(0, 1, n)
+    x2 = gen.normal(0, 1, n)
+    d1b = gen.normal(0, 1, 4 * 2).reshape((4, 2), order="F") * 0.3
+    d2b = gen.normal(0, 1, 4 * 3).reshape((4, 3), order="F") * 0.2
+    lam = np.exp(0.5 + 0.6 * x1)                     # Poisson mean
+    pu = gen.uniform(0, 1, n)
+    y = (gen.poisson(lam) * (pu < 0.7)).astype(float)   # zero-inflated counts
+    X = np.column_stack([np.ones(n), x1, np.ones(n), x2])
+    coef = np.array([0.4, 0.3, 0.2, -0.5])
+    lpi = [np.arange(0, 2), np.arange(2, 4)]
+    return X, y, coef, d1b, d2b, lpi
+
+
+def test_ziplss_ll_matches_mgcv_oracle():
+    # Every ziplss()$ll output at deriv 1/2/3/4, pinned to the live R
+    # values (Rscript: ziplss()$ll on the set.seed(27) inputs above).
+    from scipy.linalg import cholesky
+    from hea.family import ziplss
+    X, y, coef, d1b, d2b, lpi = _ziplss_oracle_inputs()
+    fam = ziplss()
+    p = 4
+
+    r1 = fam.ll(y, X, coef, lpi=lpi, deriv=1)
+    np.testing.assert_allclose(r1["l"], -67.9945015131, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        r1["lb"], [10.3739285482, 7.0452932554, -14.9712013386,
+                   17.7409397677], rtol=0, atol=1e-8)
+    np.testing.assert_allclose(r1["lbb"][0, 0], -25.7869884817,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(float(np.sum(np.abs(r1["lbb"]))),
+                               163.3090407273, rtol=0, atol=1e-7)
+    # gamma and eta never share a term (the log-lik is separable in the two
+    # LPs), so the whole cross-block of the Hessian is exactly zero.
+    np.testing.assert_allclose(r1["lbb"][0, 2], 0.0, rtol=0, atol=0)
+    np.testing.assert_array_equal(r1["lbb"][lpi[0]][:, lpi[1]], 0.0)
+    np.testing.assert_allclose(r1["lbb"][2, 2], -32.8245236943,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(r1["lbb"][3, 3], -31.0262755407,
+                               rtol=0, atol=1e-8)
+
+    Hp = -r1["lbb"] + np.eye(p) * 0.5
+    r2 = fam.ll(y, X, coef, lpi=lpi, deriv=2, d1b=d1b,
+                fh=np.linalg.inv(Hp))
+    np.testing.assert_allclose(
+        r2["d1H"], [-1.6738041395, 0.2376725511], rtol=0, atol=1e-9)
+
+    r3 = fam.ll(y, X, coef, lpi=lpi, deriv=3, d1b=d1b)
+    np.testing.assert_allclose(float(np.sum(np.abs(r3["d1H"][0]))),
+                               104.8260123501, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(float(np.sum(np.abs(r3["d1H"][1]))),
+                               35.1235191591, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(r3["d1H"][0][0, 0], -25.5797222722,
+                               rtol=0, atol=1e-8)
+
+    D = 1.0 / np.sqrt(np.diag(Hp))
+    R = cholesky(D[:, None] * Hp * D[None, :], lower=False)
+    r4 = fam.ll(y, X, coef, lpi=lpi, deriv=4, d1b=d1b, d2b=d2b,
+                fh=(R, np.arange(p)), D=D)
+    np.testing.assert_allclose(
+        r4["trHid2H"],
+        [-0.6446428047, -0.5142583615, -0.7976950165], rtol=0, atol=1e-8)
+    # eigen fh variant agrees with the Cholesky one.
+    w, V = np.linalg.eigh(D[:, None] * Hp * D[None, :])
+    r4e = fam.ll(y, X, coef, lpi=lpi, deriv=4, d1b=d1b, d2b=d2b,
+                 fh={"values": w, "vectors": V}, D=D)
+    np.testing.assert_allclose(r4e["trHid2H"], r4["trHid2H"], atol=1e-9)
+
+
+def test_ziplss_ll_derivatives_match_fd():
+    from hea.family import ziplss
+    X, y, coef, d1b, _, lpi = _ziplss_oracle_inputs()
+    fam = ziplss()
+    r1 = fam.ll(y, X, coef, lpi=lpi, deriv=1)
+    h = 1e-6
+    p = coef.size
+    fd_lb = np.zeros(p)
+    fd_lbb = np.zeros((p, p))
+    for k in range(p):
+        cp = coef.copy(); cp[k] += h
+        cm = coef.copy(); cm[k] -= h
+        fd_lb[k] = (fam.ll(y, X, cp, lpi=lpi)["l"]
+                    - fam.ll(y, X, cm, lpi=lpi)["l"]) / (2 * h)
+        fd_lbb[:, k] = (fam.ll(y, X, cp, lpi=lpi, deriv=1)["lb"]
+                        - fam.ll(y, X, cm, lpi=lpi, deriv=1)["lb"]) / (2 * h)
+    np.testing.assert_allclose(r1["lb"], fd_lb, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(r1["lbb"], fd_lbb, rtol=0, atol=1e-5)
+    # d1H along d1b directions: H(β + h·d1b_j) FD.
+    r3 = fam.ll(y, X, coef, lpi=lpi, deriv=3, d1b=d1b)
+    for j in range(d1b.shape[1]):
+        fdH = (fam.ll(y, X, coef + h * d1b[:, j], lpi=lpi, deriv=1)["lbb"]
+               - fam.ll(y, X, coef - h * d1b[:, j], lpi=lpi,
+                        deriv=1)["lbb"]) / (2 * h)
+        np.testing.assert_allclose(r3["d1H"][j], fdH, rtol=0, atol=1e-4)
+
+
+def test_ziplss_helpers_initialize_and_validation():
+    from hea.family import (ziplss, _l1ee, _lee1, _ldg, _lde, _zipll,
+                            _ziplss_ls)
+    # robustified scalar helpers, incl. the tail branches the moderate-eta
+    # oracle never reaches (R: mgcv:::l1ee/lee1/ldg/lde).
+    np.testing.assert_allclose(
+        _l1ee(np.array([-30., -1, 0.5, 3, 8])),
+        [-30, -1.17830709642, -0.213559185373, -1.89217874881e-09, 0],
+        rtol=0, atol=1e-11)
+    np.testing.assert_allclose(
+        _lee1(np.array([-30., -1, 0.5, 3, 8])),
+        [-30, -0.810427655249, 1.43516208533, 20.0855369213,
+         2980.95798704], rtol=1e-11, atol=0)
+    lg = _ldg(np.array([-30., -1, 0.5, 2]), 4)
+    np.testing.assert_allclose(
+        lg[0], [-1, -1.19519230416, -2.04124350898, -7.39362520396],
+        rtol=1e-10, atol=1e-13)
+    np.testing.assert_allclose(
+        lg[3], [-4.67881148442e-14, -0.272552750274, -2.10286784068,
+                -6.80541955362], rtol=1e-9, atol=1e-13)
+    le = _lde(np.array([-30., -1, 0.5, 2]), 4)
+    np.testing.assert_allclose(
+        le[0], [1, 0.82731286299, 0.39252223828, 0.00456910503104],
+        rtol=1e-10, atol=1e-13)
+    np.testing.assert_allclose(
+        le[3], [-4.67881148442e-14, -0.0953266908979, 0.45414656998,
+                -0.583636545308], rtol=1e-9, atol=1e-13)
+
+    fam = ziplss()
+    X, y, coef, _, _, lpi = _ziplss_oracle_inputs()
+    start = fam.initialize_coef(y, X, lpi)
+    assert start.shape == (4,) and np.all(np.isfinite(start))
+
+    # residuals: response = y − E(y), E(y) = p·λ/(1−e^{−λ}). fitted is
+    # (gamma, presence-eta) — ziplss leaves it unrewritten.
+    gamma = np.array([0.5, -3.0, 1.0])      # log Poisson mean
+    eta = np.array([0.3, 1.2, -0.5])        # presence LP
+    yy = np.array([2.0, 0.0, 3.0])
+    fitted = np.column_stack([gamma, eta])
+    lam = np.exp(gamma)
+    p_pres = 1.0 - np.exp(-np.exp(eta))
+    ey = np.where(lam > np.sqrt(np.finfo(float).eps),
+                  p_pres * lam / (1.0 - np.exp(-lam)), p_pres)
+    np.testing.assert_allclose(fam.residuals(yy, fitted, type="response"),
+                               yy - ey, rtol=0, atol=1e-12)
+    dev = (np.sqrt(np.maximum(0.0, 2.0 * (_ziplss_ls(yy)
+           - _zipll(yy, gamma, eta)["l"]))) * np.sign(yy - ey))
+    np.testing.assert_allclose(fam.residuals(yy, fitted), dev,
+                               rtol=0, atol=1e-12)
+    with pytest.raises(ValueError, match="deviance"):
+        fam.residuals(yy, fitted, type="pearson")
+
+    # rd: structural absence → exact zeros; present rows are zero-truncated
+    # Poisson (never 0), so P(y=0) == 1−p; draws are integer-valued.
+    rng = np.random.default_rng(0)
+    big = 200000
+    mu = np.column_stack([np.full(big, np.log(3.0)), np.full(big, 0.4)])
+    draws = fam.rd(rng, mu, np.ones(big), 1.0)
+    assert np.allclose(draws, np.round(draws)) and draws.min() == 0.0
+    p04 = 1.0 - np.exp(-np.exp(0.4))
+    np.testing.assert_allclose((draws == 0).mean(), 1.0 - p04,
+                               rtol=0, atol=5e-3)
+    ey3 = p04 * 3.0 / (1.0 - np.exp(-3.0))
+    np.testing.assert_allclose(draws.mean(), ey3, rtol=0, atol=2e-2)
+
+    # count intake: non-integer and binary responses are rejected.
+    with pytest.raises(ValueError, match="non-integer"):
+        fam.initialize_coef(y + 0.5, X, lpi)
+    with pytest.raises(ValueError, match="binary"):
+        fam.initialize_coef((y > 0).astype(float), X, lpi)
+    with pytest.raises(ValueError, match="identity"):
+        ziplss(link=("log", "identity"))
+
+
+# ---------------------------------------------------------------------------
+# multinom (multinomial logistic, gamlss.r:1107-1411) — the variable-K
+# family. Inputs reproduce R's set.seed stream via hea.R.rng (bit-exact
+# rnorm/runif), so multinom(K)$ll at the identical (X, y, coef, d1b, d2b)
+# matches hea. K=2 and K=4 together cover every l3/l4 packing branch (l3
+# all-different needs K≥3, l4 all-unique needs K≥4).
+# ---------------------------------------------------------------------------
+
+def _multinom_oracle_inputs(K, seed):
+    from hea.R.rng import RGenerator
+    gen = RGenerator(seed)
+    n = 30 + 10 * K
+    xs = [gen.normal(0, 1, n) for _ in range(K)]
+    p = 2 * K
+    d1b = gen.normal(0, 1, p * 2).reshape((p, 2), order="F") * 0.3
+    d2b = gen.normal(0, 1, p * 3).reshape((p, 3), order="F") * 0.2
+    a = np.array([0.4, -0.2, 0.3, -0.1, 0.2, -0.3])
+    b = np.array([0.7, 0.5, -0.6, 0.4, -0.5, 0.45])
+    etas = [a[i] + b[i] * xs[i] for i in range(K)]
+    ee = np.exp(np.column_stack([np.zeros(n)] + etas))
+    P = ee / ee.sum(axis=1, keepdims=True)
+    u = gen.uniform(0, 1, n)
+    y = (np.cumsum(P, axis=1) > u[:, None]).argmax(axis=1).astype(float)
+    cols = []
+    for i in range(K):
+        cols += [np.ones(n), xs[i]]
+    X = np.column_stack(cols)
+    coef = np.array([0.3, 0.5, -0.2, 0.4, 0.1, -0.3, 0.25, -0.15,
+                     0.2, -0.1, 0.35, -0.05])[:p]
+    lpi = [np.arange(2 * i, 2 * i + 2) for i in range(K)]
+    return X, y, coef, d1b, d2b, lpi
+
+
+# live multinom(K)$ll references (Rscript, mgcv 1.9-4) at the inputs above.
+_MULTINOM_ORACLE = {
+    (2, 41): dict(
+        l=-38.0695935472, lb_sumabs=9.2002046302, lbb_sumabs=75.4481988693,
+        lbb00=-11.5076064746, d1H_sumabs=0.8726944587,
+        d1H0mat_sumabs=15.8743078433,
+        trHid2H=[0.0018660042, -0.3379211462, 0.0702141514],
+        lb=[-1.7610060440, 1.3832675257, 3.4277307608, 2.6282002998],
+        lbb02=5.4228156488, lbb22=-9.4456506089),
+    (4, 43): dict(
+        l=-100.8787924997, lb_sumabs=43.6795492702,
+        lbb_sumabs=167.9531090628, lbb00=-12.3369275107,
+        d1H_sumabs=0.5315310582, d1H0mat_sumabs=50.9607930529,
+        trHid2H=[0.4880585105, -0.0145410370, 0.8359873276]),
+}
+
+
+@pytest.mark.parametrize("K,seed", [(2, 41), (4, 43)])
+def test_multinom_ll_matches_mgcv_oracle(K, seed):
+    from scipy.linalg import cholesky
+    from hea.family import multinom
+    X, y, coef, d1b, d2b, lpi = _multinom_oracle_inputs(K, seed)
+    fam = multinom(K)
+    p = 2 * K
+    ref = _MULTINOM_ORACLE[(K, seed)]
+
+    r1 = fam.ll(y, X, coef, lpi=lpi, deriv=1)
+    np.testing.assert_allclose(r1["l"], ref["l"], rtol=0, atol=1e-8)
+    np.testing.assert_allclose(float(np.sum(np.abs(r1["lb"]))),
+                               ref["lb_sumabs"], rtol=0, atol=1e-7)
+    np.testing.assert_allclose(float(np.sum(np.abs(r1["lbb"]))),
+                               ref["lbb_sumabs"], rtol=0, atol=1e-7)
+    np.testing.assert_allclose(r1["lbb"][0, 0], ref["lbb00"],
+                               rtol=0, atol=1e-8)
+    if "lb" in ref:
+        np.testing.assert_allclose(r1["lb"], ref["lb"], rtol=0, atol=1e-8)
+        # the two LPs are coupled — the cross-block is nonzero (unlike
+        # ziplss, whose log-lik is separable in its two LPs).
+        np.testing.assert_allclose(r1["lbb"][0, 2], ref["lbb02"],
+                                   rtol=0, atol=1e-8)
+        np.testing.assert_allclose(r1["lbb"][2, 2], ref["lbb22"],
+                                   rtol=0, atol=1e-8)
+
+    Hp = -r1["lbb"] + np.eye(p) * 0.5
+    r2 = fam.ll(y, X, coef, lpi=lpi, deriv=2, d1b=d1b,
+                fh=np.linalg.inv(Hp))
+    np.testing.assert_allclose(float(np.sum(np.abs(r2["d1H"]))),
+                               ref["d1H_sumabs"], rtol=0, atol=1e-8)
+
+    r3 = fam.ll(y, X, coef, lpi=lpi, deriv=3, d1b=d1b)
+    np.testing.assert_allclose(float(np.sum(np.abs(r3["d1H"][0]))),
+                               ref["d1H0mat_sumabs"], rtol=0, atol=1e-7)
+
+    D = 1.0 / np.sqrt(np.diag(Hp))
+    R = cholesky(D[:, None] * Hp * D[None, :], lower=False)
+    r4 = fam.ll(y, X, coef, lpi=lpi, deriv=4, d1b=d1b, d2b=d2b,
+                fh=(R, np.arange(p)), D=D)
+    np.testing.assert_allclose(r4["trHid2H"], ref["trHid2H"],
+                               rtol=0, atol=1e-8)
+
+
+@pytest.mark.parametrize("K,seed", [(2, 41), (4, 43)])
+def test_multinom_ll_derivatives_match_fd(K, seed):
+    # FD self-checks at K=2 and K=4 — the K=4 d1H validates the l4
+    # all-unique branch against the (R-pinned) lower-order derivatives.
+    from hea.family import multinom
+    X, y, coef, d1b, _, lpi = _multinom_oracle_inputs(K, seed)
+    fam = multinom(K)
+    r1 = fam.ll(y, X, coef, lpi=lpi, deriv=1)
+    h = 1e-6
+    p = coef.size
+    fd_lb = np.zeros(p)
+    fd_lbb = np.zeros((p, p))
+    for k in range(p):
+        cp = coef.copy(); cp[k] += h
+        cm = coef.copy(); cm[k] -= h
+        fd_lb[k] = (fam.ll(y, X, cp, lpi=lpi)["l"]
+                    - fam.ll(y, X, cm, lpi=lpi)["l"]) / (2 * h)
+        fd_lbb[:, k] = (fam.ll(y, X, cp, lpi=lpi, deriv=1)["lb"]
+                        - fam.ll(y, X, cm, lpi=lpi, deriv=1)["lb"]) / (2 * h)
+    np.testing.assert_allclose(r1["lb"], fd_lb, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(r1["lbb"], fd_lbb, rtol=0, atol=1e-5)
+    r3 = fam.ll(y, X, coef, lpi=lpi, deriv=3, d1b=d1b)
+    for j in range(d1b.shape[1]):
+        fdH = (fam.ll(y, X, coef + h * d1b[:, j], lpi=lpi, deriv=1)["lbb"]
+               - fam.ll(y, X, coef - h * d1b[:, j], lpi=lpi,
+                        deriv=1)["lbb"]) / (2 * h)
+        np.testing.assert_allclose(r3["d1H"][j], fdH, rtol=0, atol=1e-4)
+
+
+def test_multinom_components_and_validation():
+    from hea.family import multinom
+    X, y, coef, _, _, lpi = _multinom_oracle_inputs(2, 41)
+    fam = multinom(2)
+    assert fam.n_lp == 2 and fam.is_general and fam.available_derivs == 2
+    start = fam.initialize_coef(y, X, lpi)
+    assert start.shape == (4,) and np.all(np.isfinite(start))
+
+    # residuals: sign +ve when the most-probable category equals y, mag
+    # √(−2 log P̂(y)); fitted is the (n, 2) η matrix.
+    eta = np.array([[2.0, -1.0], [-0.5, 1.5], [0.2, 0.3]])
+    yy = np.array([1.0, 0.0, 2.0])
+    p = fam.predict(eta=eta)["fit"]
+    assert p.shape == (3, 3)
+    np.testing.assert_allclose(p.sum(axis=1), 1.0, atol=1e-12)
+    pc = np.argmax(p, axis=1)
+    exp = np.where(pc == yy.astype(int), 1.0, -1.0) * np.sqrt(
+        -2.0 * np.log(p[np.arange(3), yy.astype(int)]))
+    np.testing.assert_allclose(fam.residuals(yy, eta), exp, rtol=0, atol=1e-12)
+    with pytest.raises(ValueError, match="deviance"):
+        fam.residuals(yy, eta, type="response")
+
+    # rd: categories land in 0..K with frequencies tracking the softmax
+    # probabilities at a fixed η.
+    rng = np.random.default_rng(0)
+    big = 200000
+    mu = np.tile(np.array([0.5, -0.3]), (big, 1))
+    draws = fam.rd(rng, mu, np.ones(big), 1.0)
+    assert set(np.unique(draws).astype(int)).issubset({0, 1, 2})
+    probs = np.exp(np.array([0.0, 0.5, -0.3]))
+    probs = probs / probs.sum()
+    for c in range(3):
+        np.testing.assert_allclose((draws == c).mean(), probs[c],
+                                   rtol=0, atol=5e-3)
+
+    # variable-K validation: K<1 rejected; response outside 0..K rejected.
+    with pytest.raises(ValueError, match="at least 2"):
+        multinom(0)
+    with pytest.raises(ValueError, match="0\\.\\.2"):
+        fam.initialize_coef(y + 5, X, lpi)
+    assert multinom(4).n_lp == 4
+
+
+# ---------------------------------------------------------------------------
 # twlss (Tweedie location-scale-shape, gamlss.r:2493-2662) — mgcv 1.9-4
 # oracle references generated live (R --vanilla): ldTweedie in the working
 # (rho, theta) parameterization with all.derivs=TRUE, tw.null.fit, and

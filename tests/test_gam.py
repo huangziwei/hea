@@ -6372,6 +6372,165 @@ def test_cox_ph_pbc_textbook_matches_mgcv():
     plt.close(fig)
 
 
+def _ziplss_fixture():
+    # Zero-inflated Poisson data on R's set.seed(31) stream via hea.R.rng
+    # (bit-exact runif + rpois), so the mgcv fit below is reproducible by a
+    # pure-R script:
+    #   set.seed(31); n<-300; x<-runif(n); z<-runif(n)
+    #   gamma<-0.6+sin(2*pi*x); eta<-1.2*sin(2*pi*z)
+    #   y<-rpois(n, exp(gamma)) * (runif(n) < 1-exp(-exp(eta)))
+    from hea.R.rng import RGenerator
+    gen = RGenerator(31)
+    n = 300
+    x = gen.uniform(size=n)
+    z = gen.uniform(size=n)
+    gamma = 0.6 + np.sin(2 * np.pi * x)
+    eta = 1.2 * np.sin(2 * np.pi * z)
+    p = 1.0 - np.exp(-np.exp(eta))
+    y = gen.poisson(np.exp(gamma)) * (gen.uniform(size=n) < p)
+    return pl.DataFrame({"y": y.astype(float), "x": x, "z": z})
+
+
+def test_ziplss_through_gam_matches_mgcv():
+    # R: gam(list(y ~ s(x), ~ s(z)), family=ziplss(), method="REML") on the
+    # set.seed(31) zero-inflated-Poisson fixture. ziplss is
+    # available.derivs=2 ⇒ full outer Newton (ll deriv 3/4) and the
+    # family$predict hook; unlike twlss/shash/gammals both smooths here are
+    # informative, so neither sp is a flat λ→∞ ridge.
+    from hea.family import ziplss
+
+    df = _ziplss_fixture()
+    m = gam(["y ~ s(x)", "~ s(z)"], df, family=ziplss(), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 424.2451262,
+                               rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.sp, [0.1515432173, 0.1131497668],
+                               rtol=1e-4)
+    np.testing.assert_allclose(m.edf_total, 11.14924342, rtol=0, atol=2e-3)
+    # tp-basis eigenvector signs are build noise: pin |coef| (cf. gammals).
+    np.testing.assert_allclose(
+        np.abs(np.asarray(m._beta)[:4]),
+        np.abs([0.6705247844, -1.655109582, 0.3424055272, -0.0520844202]),
+        rtol=0, atol=1e-4)
+    # fitted matrix is (gamma = log λ, presence-eta) — ziplss leaves it
+    # unrewritten (no postproc fitted override). R: rows 1-2.
+    np.testing.assert_allclose(
+        np.asarray(m.fitted_values)[:2],
+        [[0.4844884226, 0.2271978785], [0.3148140516, -0.2381554759]],
+        rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.deviance, 500.745984, rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.null_deviance, 674.6005762, rtol=0,
+                               atol=1e-3)
+    np.testing.assert_allclose(np.asarray(m.Vp)[0, 0], 0.006223781606,
+                               rtol=0, atol=1e-6)
+
+    # family$predict hook: type="response" returns the single column
+    # E(y) = p·μ (mgcv emits one fit column for ziplss, not n_lp), with a
+    # delta-method SE — note mgcv reuses gamma's variance for the eta term
+    # (gamlss.r:1718), reproduced bug-for-bug so the SE matches predict.gam.
+    pr = m.predict(df[:3], se_fit=True, type="response")
+    np.testing.assert_allclose(
+        pr["fit"].to_numpy(),
+        [1.445763757, 1.001536501, 2.231325171], rtol=0, atol=1e-5)
+    np.testing.assert_allclose(
+        pr["se.fit"].to_numpy(),
+        [0.1624539204, 0.2429565392, 0.2415688359], rtol=0, atol=1e-5)
+    # response prediction on training rows == E(y) for all rows.
+    pr_all = m.predict(type="response")
+    np.testing.assert_allclose(
+        pr_all["fit"].to_numpy()[:3],
+        [1.445763757, 1.001536501, 2.231325171], rtol=0, atol=1e-5)
+
+    # residuals: deviance head + response head, and Σ deviance² == deviance.
+    np.testing.assert_allclose(
+        m.residuals_of("deviance")[:5],
+        [-1.584347308, -1.255452233, 0.9717809043, -1.168783967,
+         -1.423877013], rtol=0, atol=1e-5)
+    np.testing.assert_allclose(
+        m.residuals_of("response")[:5],
+        [-1.445763757, -1.001536501, 1.768674829, -1.500289883,
+         -0.3922964182], rtol=0, atol=1e-5)
+    np.testing.assert_allclose(
+        float(np.sum(m.residuals_of("deviance") ** 2)), m.deviance,
+        rtol=0, atol=1e-9)
+    m.summary()
+
+
+def _multinom_fixture():
+    # 3-category multinomial-logistic data on R's set.seed(33) stream via
+    # hea.R.rng (bit-exact runif), reproducible by a pure-R script:
+    #   set.seed(33); n<-400; x<-runif(n); z<-runif(n)
+    #   eta1<-1.4*sin(2*pi*x); eta2<-1.2*cos(2*pi*z)-0.3
+    #   P<-softmax(cbind(0,eta1,eta2)); y<-inverse-CDF sample of P
+    from hea.R.rng import RGenerator
+    gen = RGenerator(33)
+    n = 400
+    x = gen.uniform(size=n)
+    z = gen.uniform(size=n)
+    eta1 = 1.4 * np.sin(2 * np.pi * x)
+    eta2 = 1.2 * np.cos(2 * np.pi * z) - 0.3
+    ee = np.exp(np.column_stack([np.zeros(n), eta1, eta2]))
+    P = ee / ee.sum(axis=1, keepdims=True)
+    u = gen.uniform(0, 1, n)
+    y = (np.cumsum(P, axis=1) > u[:, None]).argmax(axis=1).astype(float)
+    return pl.DataFrame({"y": y, "x": x, "z": z})
+
+
+def test_multinom_through_gam_matches_mgcv():
+    # R: gam(list(y ~ s(x), ~ s(z)), family=multinom(2), method="REML") on
+    # the set.seed(33) 3-category fixture — the variable-K front end (here
+    # K=2) through a real fit, available.derivs=2 ⇒ full outer Newton, the
+    # softmax family$predict hook, and the class-frequency null deviance.
+    from hea.family import multinom
+
+    df = _multinom_fixture()
+    m = gam(["y ~ s(x)", "~ s(z)"], df, family=multinom(2), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 252.9000533,
+                               rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.sp, [0.05569991114, 0.1433165651],
+                               rtol=1e-4)
+    np.testing.assert_allclose(m.edf_total, 10.00551406, rtol=0, atol=2e-3)
+    # tp-basis eigenvector signs are build noise: pin |coef| (the per-LP
+    # intercepts coef[0]/coef[2] are sign-stable).
+    np.testing.assert_allclose(
+        np.abs(np.asarray(m._beta)[:4]),
+        np.abs([-0.01450008726, 2.368136713, 0.7424680446, 0.4313548243]),
+        rtol=0, atol=1e-4)
+    # fitted matrix is the (n, 2) η (NOT probabilities): (η₁, η₂) — the
+    # softmax probabilities come from the predict hook. R: rows 1-2.
+    np.testing.assert_allclose(
+        np.asarray(m.fitted_values)[:2],
+        [[0.07480023513, 0.02199777687], [0.3881200015, -1.508606099]],
+        rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.deviance, 762.0647414, rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.null_deviance, 871.2817292, rtol=0,
+                               atol=1e-3)
+    np.testing.assert_allclose(np.asarray(m.Vp)[0, 0], 0.01566970018,
+                               rtol=0, atol=1e-6)
+
+    # family$predict hook: type="response" returns the (K+1)=3 category
+    # probabilities (more columns than n_lp=2) with delta-method SEs.
+    pr = m.predict(df[:3], se_fit=True, type="response")
+    np.testing.assert_allclose(
+        [pr["fit"][0], pr["fit.1"][0], pr["fit.2"][0]],
+        [0.3225899731, 0.347645165, 0.3297648618], rtol=0, atol=1e-5)
+    np.testing.assert_allclose(
+        [pr["se.fit"][0], pr["se.fit.1"][0], pr["se.fit.2"][0]],
+        [0.03781883063, 0.05422039848, 0.0523534205], rtol=0, atol=1e-5)
+    # probabilities sum to 1 across categories, every row.
+    np.testing.assert_allclose(
+        pr["fit"].to_numpy() + pr["fit.1"].to_numpy()
+        + pr["fit.2"].to_numpy(), 1.0, atol=1e-12)
+
+    np.testing.assert_allclose(
+        m.residuals_of("deviance")[:5],
+        [1.453666372, -1.408229965, -1.357551087, 1.078630867,
+         1.19190966], rtol=0, atol=1e-5)
+    np.testing.assert_allclose(
+        float(np.sum(m.residuals_of("deviance") ** 2)), m.deviance,
+        rtol=0, atol=1e-9)
+    m.summary()
+
+
 def test_shash_through_gam_matches_mgcv():
     # R: gam(list(y ~ s(x), ~ s(z), ~ 1, ~ 1), family=shash(),
     # method="REML") — available.derivs=2, the FULL outer-Newton

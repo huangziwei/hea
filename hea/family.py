@@ -6770,6 +6770,774 @@ class cox_ph(GeneralFamily):
         return "cox_ph(link='identity')"
 
 
+# --- zero-inflated Poisson (ziplss, gamlss.r:1455-1939) --------------------
+# Robustified scalar helpers behind the ziplss likelihood: l1ee/lee1 evaluate
+# log(1-e^{-e^x}) / log(e^{e^x}-1) accurately into the tails; ldg/lde give the
+# y>0 log-likelihood derivatives w.r.t. gamma = log(Poisson mean) and the
+# presence linear predictor eta.
+
+def _l1ee(x):
+    """``log(1 - exp(-exp(x)))`` (mgcv l1ee, gamlss.r:1483-1492)."""
+    x = np.asarray(x, dtype=float)
+    eps = np.finfo(float).eps
+    xmax = np.finfo(float).max
+    with np.errstate(over="ignore", invalid="ignore"):
+        ex = np.exp(x)
+        l = np.log(1.0 - np.exp(-ex))
+        ind = x < np.log(eps) / 3.0
+        exi = ex[ind]
+        l[ind] = np.log(exi - exi ** 2 / 2.0 + exi ** 3 / 6.0)
+        ind = x < -np.log(xmax)
+        l[ind] = x[ind]
+    return l
+
+
+def _lee1(x):
+    """``log(exp(exp(x)) - 1)`` (mgcv lee1, gamlss.r:1494-1505)."""
+    x = np.asarray(x, dtype=float)
+    eps = np.finfo(float).eps
+    xmax = np.finfo(float).max
+    with np.errstate(over="ignore", invalid="ignore"):
+        ex = np.exp(x)
+        l = np.log(np.exp(ex) - 1.0)
+        ind = x < np.log(eps) / 3.0
+        exi = ex[ind]
+        l[ind] = np.log(exi + exi ** 2 / 2.0 + exi ** 3 / 6.0)
+        ind = x < -np.log(xmax)
+        l[ind] = x[ind]
+        ind = x > np.log(np.log(xmax))
+        l[ind] = ex[ind]
+    return l
+
+
+def _ldg(g, deriv=4):
+    """Derivatives of the y>0 ziplss log-lik w.r.t. gamma = log(Poisson
+    mean), robustified in both tails (mgcv ldg, gamlss.r:1507-1550).
+    Returns ``(l1, l2, l3, l4)`` with l3/l4 = ``None`` below the requested
+    order."""
+    g = np.asarray(g, dtype=float)
+    eps = np.finfo(float).eps
+    xmax = np.finfo(float).max
+    lo = np.log(eps) / 3.0
+
+    def alpha(gg):
+        a = gg.copy()
+        m = gg > lo
+        eg = np.exp(gg)
+        a[m] = eg[m] / (1.0 - np.exp(-eg[m]))
+        nm = ~m
+        a[nm] = 1.0 + eg[nm] / 2.0 + eg[nm] ** 2 / 12.0
+        return a
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        ind = g < lo
+        ghi = np.log(np.log(xmax)) + 1.0
+        ii = g > ghi
+        a = alpha(g)
+        eg = np.exp(g)
+        l2 = a * (a - eg - 1.0)
+        egi = eg[ind]
+        b = egi * (1.0 + egi / 6.0) / 2.0
+        l2[ind] = a[ind] * (b - egi)
+        l2[ii] = -np.exp(g[ii])
+        l3 = l4 = None
+        if deriv > 1:
+            l3 = a * (a * (-2.0 * a + 3.0 * (eg + 1.0)) - 3.0 * eg
+                      - eg ** 2 - 1.0)
+            l3[ind] = a[ind] * (-b - 2.0 * b ** 2 + 3.0 * b * egi - egi ** 2)
+            l3[ii] = -np.exp(g[ii])
+        if deriv > 2:
+            l4 = a * (6.0 * a ** 3 - 12.0 * (eg + 1.0) * a ** 2
+                      + 4.0 * eg * a + 7.0 * (eg + 1.0) ** 2 * a
+                      - (4.0 + 3.0 * eg) * eg - (eg + 1.0) ** 3)
+            l4[ind] = a[ind] * (
+                6.0 * b * (3.0 + 3.0 * b + b ** 2)
+                - 12.0 * egi * (1.0 + 2.0 * b + b ** 2)
+                - 12.0 * b * (2.0 - b) + 4.0 * egi * (1.0 + b)
+                + 7.0 * (egi ** 2 + 2.0 * egi + b * egi ** 2
+                         + 2.0 * b * egi + b)
+                - (4.0 + 3.0 * egi) * egi
+                - egi * (3.0 + 3.0 * egi + egi ** 2))
+            l4[ii] = -np.exp(g[ii])
+        l1 = -a
+        # final overflow guard: above log(xmax)/5 every order saturates to
+        # -exp of that threshold (mgcv gamlss.r:1544-1548).
+        ghi2 = np.log(xmax) / 5.0
+        ii2 = g > ghi2
+        if np.any(ii2):
+            clamp = -np.exp(ghi2)
+            l1[ii2] = clamp
+            l2[ii2] = clamp
+            if l3 is not None:
+                l3[ii2] = clamp
+            if l4 is not None:
+                l4[ii2] = clamp
+    return l1, l2, l3, l4
+
+
+def _lde(eta, deriv=4):
+    """Derivatives of the y>0 ziplss presence log-lik ``log(1-e^{-e^eta})``
+    w.r.t. eta, robustified (mgcv lde, gamlss.r:1552-1583)."""
+    eta = np.asarray(eta, dtype=float)
+    eps = np.finfo(float).eps
+    xmax = np.finfo(float).max
+    lo = np.log(eps) / 3.0
+    lxmax = np.log(xmax)
+    with np.errstate(over="ignore", invalid="ignore"):
+        ind = eta < lo
+        ii = eta > lxmax
+        et = np.exp(eta)
+        l1 = et.copy()
+        eti = et[ind]
+        nm = ~ind
+        l1[nm] = et[nm] / (np.exp(et[nm]) - 1.0)
+        b = -eti * (1.0 + eti / 6.0) / 2.0
+        l1[ind] = 1.0 + b
+        l1[ii] = 0.0
+        l2 = l1 * ((1.0 - et) - l1)
+        l2[ind] = -b * (1.0 + eti + b) - eti
+        l2[ii] = 0.0
+        l3 = l4 = None
+        if deriv > 1:
+            ii2 = eta > lxmax / 2.0
+            l3 = l1 * ((1.0 - et) ** 2 - et - 3.0 * (1.0 - et) * l1
+                       + 2.0 * l1 ** 2)
+            l3[ind] = l1[ind] * (-3.0 * eti + eti ** 2
+                                 - 3.0 * (-eti + b - eti * b)
+                                 + 2.0 * b * (2.0 + b))
+            l3[ii2] = 0.0
+        if deriv > 2:
+            ii3 = eta > lxmax / 3.0
+            l4 = l1 * ((3.0 * et - 4.0) * et + 4.0 * et * l1
+                       + (1.0 - et) ** 3 - 7.0 * (1.0 - et) ** 2 * l1
+                       + 12.0 * (1.0 - et) * l1 ** 2 - 6.0 * l1 ** 3)
+            l4[ii3] = 0.0
+            l4[ind] = l1[ind] * (4.0 * l1[ind] * eti - eti ** 3 - b
+                                 - 7.0 * b * eti ** 2 - eti ** 2 - 5.0 * eti
+                                 - 10.0 * b * eti - 12.0 * eti * b ** 2
+                                 - 6.0 * b ** 2 - 6.0 * b ** 3)
+    return l1, l2, l3, l4
+
+
+def _zipll(y, g, eta, deriv=0):
+    """Zero-inflated Poisson log-likelihood and its derivatives w.r.t.
+    gamma = log(Poisson mean) (=``g``) and the presence LP ``eta``, where
+    1-p = exp(-exp(eta)), lambda = exp(g) (mgcv zipll, gamlss.r:1586-1640).
+    Packed columns follow mgcv: l1 (g, e); l2 (gg, ge, ee); l3 (ggg, gge,
+    gee, eee); l4 (gggg, ggge, ggee, geee, eeee). The expected Hessian
+    ``El2`` mgcv also returns is unused by the gamlss fit (the ``ll`` hook
+    consumes the observed ``l2``) and is omitted."""
+    y = np.asarray(y, dtype=float)
+    g = np.asarray(g, dtype=float)
+    eta = np.asarray(eta, dtype=float)
+    n = y.shape[0]
+    zind = y == 0
+    nz = ~zind
+    yp = y[nz]
+    with np.errstate(over="ignore", invalid="ignore"):
+        et = np.exp(eta)
+        l = et.copy()
+        l[zind] = -et[zind]
+        l[nz] = (_l1ee(eta[nz]) + yp * g[nz] - _lee1(g[nz])
+                 - gammaln(yp + 1.0))
+    ret = {"l": l}
+    if not deriv:
+        return ret
+    le = _lde(eta, deriv)
+    lg = _ldg(g, deriv)
+    l1 = np.zeros((n, 2))
+    l1[nz, 0] = yp + lg[0][nz]       # l_gamma, y>0
+    l1[zind, 1] = l[zind]            # l_eta, y==0 (all e-derivs = -exp(eta))
+    l1[nz, 1] = le[0][nz]            # l_eta, y>0
+    l2 = np.zeros((n, 3))            # order gg, ge, ee
+    l2[nz, 0] = lg[1][nz]
+    l2[nz, 2] = le[1][nz]
+    l2[zind, 2] = l[zind]
+    ret["l1"] = l1
+    ret["l2"] = l2
+    if deriv > 1:                    # order ggg, gge, gee, eee
+        l3 = np.zeros((n, 4))
+        l3[nz, 0] = lg[2][nz]
+        l3[nz, 3] = le[2][nz]
+        l3[zind, 3] = l[zind]
+        ret["l3"] = l3
+    if deriv > 3:                    # order gggg, ggge, ggee, geee, eeee
+        l4 = np.zeros((n, 5))
+        l4[nz, 0] = lg[3][nz]
+        l4[nz, 4] = le[3][nz]
+        l4[zind, 4] = l[zind]
+        ret["l4"] = l4
+    return ret
+
+
+# lambda maximizing the zero-truncated Poisson likelihood for y=2..17
+# (mgcv ziplss residuals/postproc, gamlss.r:1670-1672); above y=17 the
+# maximizer is essentially y, and y<2 contributes 0.
+_ZIPLSS_GLO = np.array([
+    1.593624, 2.821439, 3.920690, 4.965114, 5.984901, 6.993576,
+    7.997309, 8.998888, 9.999546, 10.999816, 11.999926, 12.999971,
+    13.999988, 14.999995, 15.999998, 16.999999])
+
+
+def _ziplss_ls(y):
+    """ziplss saturated (per-datum max) log-likelihood (gamlss.r:1665-1678
+    / 1772-1785): the maximizing lambda is tabulated for 2≤y≤17, ≈y above,
+    and y<2 contributes 0 (the zero-truncated Poisson is degenerate there).
+    Evaluated at presence eta=1e10 (always present)."""
+    y = np.asarray(y, dtype=float)
+    l = y.copy()
+    l[y < 2] = 0.0
+    g = y.copy()
+    ind = (y > 1) & (y < 18)
+    g[ind] = _ZIPLSS_GLO[y[ind].astype(int) - 2]
+    ind2 = y > 1
+    l[ind2] = _zipll(y[ind2], np.log(g[ind2]),
+                     np.full(int(ind2.sum()), 1e10))["l"]
+    return l
+
+
+class ziplss(GeneralFamily):
+    """Zero-inflated Poisson location-scale general family — mgcv
+    ``ziplss()`` (gamlss.r:1643-1939). Two identity-linked linear
+    predictors: LP1 is gamma = log(Poisson mean) given presence
+    (lambda = e^{η₁}); LP2 sets the probability of presence through
+    1 − p = exp(−exp(η₂)). The response is non-negative integer counts.
+
+        log f = −e^{η₂}                                       (y = 0)
+        log f = log(1−e^{−e^{η₂}}) + y·η₁ − log(e^{e^{η₁}}−1) − log y!  (y > 0)
+
+    ``available_derivs = 2``: full Newton. Like mgcv's other general
+    families the likelihood ignores prior weights (gamlss.r:1814 — ``wt``
+    unread); they enter neither the deviance nor the null deviance here.
+    The fitted matrix stays (gamma, presence-eta) — ziplss does not rewrite
+    it in :meth:`postproc`.
+    """
+    name = "ziplss"
+    scale_known = True
+    n_theta = 0
+    n_lp = 2
+    available_derivs = 2
+
+    def __init__(self, link: tuple[str, str] = ("identity", "identity")):
+        la, lb = link
+        if la != "identity" or lb != "identity":
+            raise ValueError(
+                'only the "identity" link is available for both parameters '
+                "of ziplss")
+        self.tri = trind_generator(2)
+        super().__init__([IdentityLink(), IdentityLink()])
+
+    def ll(self, y, X, coef, wt=None, *, lpi, offset=None, deriv: int = 0,
+           d1b=None, d2b=None, fh=None, D=None) -> dict:
+        y = np.asarray(y, dtype=float)
+        X = np.asarray(X, dtype=float)
+        coef = np.asarray(coef, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        eta = X[:, jj[0]] @ coef[jj[0]]
+        eta1 = X[:, jj[1]] @ coef[jj[1]]
+        if offset is not None:
+            if offset[0] is not None:
+                eta = eta + offset[0]
+            if len(offset) > 1 and offset[1] is not None:
+                eta1 = eta1 + offset[1]
+        lam = self.links[0].linkinv(eta)     # gamma = log Poisson mean
+        p = self.links[1].linkinv(eta1)      # presence LP
+        zl = _zipll(y, lam, p, deriv)
+        ret: dict = {"l": float(np.sum(zl["l"])), "l0": zl["l"]}
+        if deriv == 0:
+            return ret
+        ig1 = np.column_stack([self.links[0].mu_eta(eta),
+                               self.links[1].mu_eta(eta1)])
+        g2 = np.column_stack([self.links[0].d2link(lam),
+                              self.links[1].d2link(p)])
+        g3 = g4 = None
+        if deriv > 1:
+            g3 = np.column_stack([self.links[0].d3link(lam),
+                                  self.links[1].d3link(p)])
+        if deriv > 3:
+            g4 = np.column_stack([self.links[0].d4link(lam),
+                                  self.links[1].d4link(p)])
+        tri = self.tri
+        de = gamlss_etamu(zl["l1"], zl["l2"], zl.get("l3"), zl.get("l4"),
+                          ig1, g2, g3, g4, tri["i2"], tri["i3"],
+                          tri["i4"], deriv - 1)
+        gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
+                       l3=de["l3"], i3=tri["i3"], l4=de["l4"],
+                       i4=tri["i4"], d1b=d1b, d2b=d2b, deriv=deriv - 1,
+                       fh=fh, D=D)
+        ret.update(gh)
+        return ret
+
+    def initialize_coef(self, y, X, lpi, E=None, offset=None,
+                        use_unscaled: bool = False) -> np.ndarray:
+        """ziplss ``initialize`` (gamlss.r:1882-1929): regress the binarized
+        response on LP2's columns (the presence model), down-weight the
+        zeros whose fitted presence < 0.5, then regress
+        ``log(|y| + 0.2·(y==0))`` on LP1's columns under those weights.
+        Validates integer, non-binary counts. mgcv's ziplss initialize
+        ignores ``offset`` — so does this. ``E``/``use_unscaled`` as in
+        :meth:`gaulss.initialize_coef`."""
+        y = np.asarray(y, dtype=float)
+        if not np.allclose(y, np.round(y)):
+            raise ValueError(
+                "non-integer response values are not allowed with ziplss")
+        if y.min() == 0 and y.max() == 1:
+            raise ValueError("using ziplss for binary data makes no sense")
+        X = np.asarray(X, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        p = X.shape[1]
+        n = X.shape[0]
+        if E is None:
+            E = np.zeros((0, p))
+        start = np.zeros(p)
+
+        def _reg(xx, cols, target):
+            if use_unscaled:
+                xa = np.vstack([xx, E[:, cols]])
+                b, *_ = np.linalg.lstsq(
+                    xa, np.concatenate([target, np.zeros(E.shape[0])]),
+                    rcond=None)
+                b[~np.isfinite(b)] = 0.0
+                return b
+            return _pen_reg(xx, E[:, cols], target)
+
+        # LP2: binarized response on the presence design.
+        yt = (y != 0).astype(float)
+        b2 = _reg(X[:, jj[1]], jj[1], yt)
+        start[jj[1]] = b2
+        pres = X[:, jj[1]] @ b2
+        w = np.ones(n)
+        w[(y == 0) & (pres < 0.5)] = 0.1
+        # LP1: log|y| (presence-conditional Poisson log-mean) under w; the
+        # data rows are w-scaled, the penalty root E1 is not (mgcv stacks
+        # rbind(w·X1, E1)).
+        yt2 = self.links[0].link(np.log(np.abs(y) + (y == 0) * 0.2)) * w
+        x1 = w[:, None] * X[:, jj[0]]
+        start[jj[0]] = _reg(x1, jj[0], yt2)
+        return start
+
+    def postproc(self, y, prior_weights, fitted, linear_predictors,
+                 offset, intercept) -> dict:
+        """ziplss postproc (gamlss.r:1769-1807): null deviance from a
+        two-parameter null model — the zero/non-zero part ``fp`` maximized
+        over p and the y>0 Poisson part ``flam`` maximized over lambda by
+        R's 1-D ``optimize`` (Brent), reproduced via :func:`_brent_fmin`.
+        No fitted rewrite."""
+        y = np.asarray(y, dtype=float)
+        nz = int(np.sum(y == 0))
+        npos = int(np.sum(y > 0))
+        eps_h = np.sqrt(np.finfo(float).eps)
+
+        def fp(pp):
+            l1p = np.log(1.0 - pp) if pp > eps_h else -pp - pp * pp / 2.0
+            return l1p * nz + np.log(pp) * npos
+
+        ypos = y[y > 0]
+
+        def flam(lam):
+            return float(np.sum(ypos * np.log(lam) - np.log(np.exp(lam) - 1.0)
+                                - gammaln(ypos + 1.0)))
+
+        tol = np.finfo(float).eps ** 0.25     # R optimize() default
+        _, neg1 = _brent_fmin(lambda v: -fp(v), 1e-60, 1.0 - 1e-10, tol)
+        my = float(np.mean(ypos))
+        _, neg2 = _brent_fmin(lambda v: -flam(v), my / 2.0, my * 2.0, tol)
+        lnull = -neg1 - neg2
+        nd = 2.0 * (float(np.sum(_ziplss_ls(y))) - lnull)
+        return {"null_deviance": nd}
+
+    def residuals(self, y, fitted, type: str = "deviance") -> np.ndarray:
+        """ziplss residuals (gamlss.r:1664-1696): response = y − E(y) with
+        E(y) = p·λ/(1−e^{−λ}) (→ p as λ→0); deviance =
+        sign(y−E(y))·√(2(ls−ll̂)). ``fitted`` is the (n, 2) matrix
+        (gamma, presence-eta). Only ``deviance``/``response`` (mgcv's two
+        types)."""
+        if type not in ("deviance", "response"):
+            raise ValueError(
+                "type must be one of 'deviance', 'response' for ziplss "
+                f"residuals; got {type!r}")
+        y = np.asarray(y, dtype=float)
+        fitted = np.asarray(fitted, dtype=float)
+        with np.errstate(over="ignore", invalid="ignore"):
+            p = 1.0 - np.exp(-np.exp(fitted[:, 1]))
+            lam = np.exp(fitted[:, 0])
+            ind = lam > np.sqrt(np.finfo(float).eps)
+            ey = p.copy()
+            ey[ind] = p[ind] * lam[ind] / (1.0 - np.exp(-lam[ind]))
+        rsd = y - ey
+        if type == "response":
+            return rsd
+        d = np.maximum(0.0, 2.0 * (_ziplss_ls(y)
+                       - _zipll(y, fitted[:, 0], fitted[:, 1])["l"]))
+        return np.sqrt(d) * np.sign(rsd)
+
+    def rd(self, rng, mu, wt, scale):
+        """ziplss rd (gamlss.r:1747-1767): draw presence ~ Bernoulli(p),
+        then a zero-truncated Poisson(λ) for the present rows by inverse
+        CDF. ``mu`` is the (n, 2) fitted matrix (gamma, presence-eta)."""
+        from scipy.stats import poisson as _poisson
+        mu = np.asarray(mu, dtype=float)
+        gamma = mu[:, 0]
+        eta = mu[:, 1]
+        n = gamma.shape[0]
+        lam = np.exp(gamma)
+        p = 1.0 - np.exp(-np.exp(eta))
+        y = np.zeros(n)
+        ind = p > rng.uniform(0.0, 1.0, n)
+        m = int(np.sum(ind))
+        if m:
+            lo = np.exp(-lam[ind])             # dpois(0, lambda)
+            u = rng.uniform(lo, 1.0, m)
+            one_eps = 1.0 - np.finfo(float).eps ** 0.75
+            u[u > one_eps] = one_eps
+            y[ind] = _poisson.ppf(u, lam[ind])
+        return y
+
+    def predict(self, *, se: bool = False, eta=None, y=None, X=None,
+                beta=None, off=None, Vb=None, lpi=None) -> dict:
+        """ziplss ``family$predict`` (gamlss.r:1698-1744): response-scale
+        fit E(y) = p·μ with μ the zero-truncated Poisson mean (→ 1 as
+        λ→0). Returns a single ``fit`` column (mgcv emits one column for
+        ziplss, not n_lp). With ``se`` a delta-method SE; mgcv reuses
+        gamma's variance for the eta term ``v.e`` (gamlss.r:1718 — a
+        copy-paste of the line above), reproduced bug-for-bug so the SE
+        matches ``predict.gam``."""
+        if eta is None:
+            X = np.asarray(X, dtype=float)
+            beta = np.asarray(beta, dtype=float)
+            c1 = np.asarray(lpi[0], dtype=int)
+            c2 = np.asarray(lpi[1], dtype=int)
+            X1 = X[:, c1]
+            X2 = X[:, c2]
+            gamma = X1 @ beta[c1]
+            eta_p = X2 @ beta[c2]
+            if off is not None:
+                if off[0] is not None:
+                    gamma = gamma + off[0]
+                if len(off) > 1 and off[1] is not None:
+                    eta_p = eta_p + off[1]
+            if se:
+                v_g = np.maximum(0.0, np.einsum(
+                    "ij,jk,ik->i", X1, Vb[np.ix_(c1, c1)], X1))
+                v_e = v_g     # mgcv copy-paste (gamlss.r:1718 reuses X1/lpi1)
+                v_eg = np.maximum(0.0, np.einsum(
+                    "ij,jk,ik->i", X1, Vb[np.ix_(c1, c2)], X2))
+        else:
+            eta = np.asarray(eta, dtype=float)
+            se = False
+            gamma = eta[:, 0]
+            eta_p = eta[:, 1]
+        with np.errstate(over="ignore", invalid="ignore"):
+            et = np.exp(eta_p)
+            p = 1.0 - np.exp(-et)
+            lam = np.exp(gamma)
+            mu = np.where(gamma < np.log(np.finfo(float).eps) / 2.0, 1.0,
+                          lam / (1.0 - np.exp(-lam)))
+            ey = p * mu
+        if not se:
+            return {"fit": ey}
+        with np.errstate(over="ignore", invalid="ignore"):
+            df_de = np.where(eta_p < np.log(np.finfo(float).max) / 2.0,
+                             np.exp(-et) * et, 0.0) * mu
+            df_dg = ((lam + 1.0) * mu - mu ** 2) * p
+            se_fit = np.sqrt(df_dg ** 2 * v_g + df_de ** 2 * v_e
+                             + 2.0 * df_de * df_dg * v_eg)
+        return {"fit": ey, "se_fit": se_fit}
+
+    def __repr__(self):
+        return "ziplss(link=('identity', 'identity'))"
+
+
+# --- multinomial logistic (multinom, gamlss.r:1107-1411) -------------------
+
+def _multinom_derivs(y, eta, tri, deriv):
+    """Dense l0..l4 log-likelihood derivatives for the multinomial logistic
+    model (mgcv multinom ll, gamlss.r:1246-1330). ``eta`` is the (n, K)
+    matrix of the K real linear predictors (category 0 is the reference,
+    η₀ ≡ 0); ``y`` integer classes 0..K. The packed l1..l4 arrays follow
+    mgcv exactly (NO remap — every column dense) and feed gamlss_gH with no
+    etamu transform (the links are identity, so ∂/∂η ≡ ∂/∂μ)."""
+    y = np.round(np.asarray(y, dtype=float)).astype(int)
+    eta = np.asarray(eta, dtype=float)
+    n, K = eta.shape
+    ee = np.exp(eta)                       # (n, K) = exp of the real LPs
+    beta = 1.0 + ee.sum(axis=1)            # normalizer 1 + Σ exp(η_j)
+    alpha = np.log(beta)
+    # mgcv pads eta with a dummy first column of 1's (eta[,1] <- 1): for a
+    # y=0 datum l0 gathers that 1, NOT 0 — a constant +1 per reference-class
+    # datum baked into mgcv's reported log-lik (it cancels from grad/Hess).
+    # Reproduced bug-for-bug so the REML value matches mgcv.
+    eta_full = np.column_stack([np.ones(n), eta])
+    l0 = eta_full[np.arange(n), y] - alpha
+    out = {"l0": l0, "l": float(np.sum(l0))}
+    if not deriv:
+        return out
+    i2 = tri["i2"]
+    i3 = tri["i3"]
+    b2 = beta * beta
+    alpha1 = ee / beta[:, None]            # ee_i / beta
+    # second derivatives (packed i<=j) — built while l1 still holds alpha1.
+    l2 = np.zeros((n, K * (K + 1) // 2))
+    for i in range(K):
+        for j in range(i, K):
+            col = i2[i, j]
+            if i == j:
+                l2[:, col] = -alpha1[:, i] + ee[:, i] ** 2 / b2
+            else:
+                l2[:, col] = ee[:, i] * ee[:, j] / b2
+    # first derivatives: (y == category i+1) − ee_i/beta.
+    l1 = np.zeros((n, K))
+    for i in range(K):
+        l1[:, i] = (y == i + 1).astype(float) - alpha1[:, i]
+    out["l1"] = l1
+    out["l2"] = l2
+    if deriv > 1:                          # third derivatives (packed i<=j<=k)
+        b3 = b2 * beta
+        l3 = np.zeros((n, int(i3.max()) + 1))
+        for i in range(K):
+            for j in range(i, K):
+                for k in range(j, K):
+                    col = i3[i, j, k]
+                    eijk = ee[:, i] * ee[:, j] * ee[:, k]
+                    if i == j == k:
+                        l3[:, col] = (l2[:, i2[i, i]] + 2.0 * ee[:, i] ** 2 / b2
+                                      - 2.0 * ee[:, i] ** 3 / b3)
+                    elif i != j and j != k and i != k:
+                        l3[:, col] = -2.0 * eijk / b3
+                    else:                  # two equal, one different
+                        kk = k if i == j else j
+                        l3[:, col] = l2[:, i2[i, kk]] - 2.0 * eijk / b3
+        out["l3"] = l3
+    if deriv > 3:                          # fourth derivs (packed i<=j<=k<=l)
+        i4 = tri["i4"]
+        b3 = b2 * beta
+        b4 = b3 * beta
+        l3 = out["l3"]
+        l4 = np.zeros((n, int(i4.max()) + 1))
+        for i in range(K):
+            for j in range(i, K):
+                for k in range(j, K):
+                    for m in range(k, K):
+                        col = i4[i, j, k, m]
+                        eijkl = ee[:, i] * ee[:, j] * ee[:, k] * ee[:, m]
+                        uni = np.unique([i, j, k, m])      # sorted (= 1st-seen)
+                        nun = uni.size
+                        if nun == 1:
+                            l4[:, col] = (l3[:, i3[i, i, i]]
+                                          + 4.0 * ee[:, i] ** 2 / b2
+                                          - 10.0 * ee[:, i] ** 3 / b3
+                                          + 6.0 * ee[:, i] ** 4 / b4)
+                        elif nun == 4:
+                            l4[:, col] = 6.0 * eijkl / b4
+                        elif nun == 3:
+                            l4[:, col] = (l3[:, i3[uni[0], uni[1], uni[2]]]
+                                          + 6.0 * eijkl / b4)
+                        else:              # nun == 2: split 2+2 or 3+1
+                            cnt0 = int(np.sum(np.array([i, j, k, m]) == uni[0]))
+                            if cnt0 == 2:
+                                l4[:, col] = (l3[:, i3[uni[0], uni[1], uni[1]]]
+                                              - 2.0 * ee[:, uni[0]] ** 2
+                                              * ee[:, uni[1]] / b3
+                                              + 6.0 * eijkl / b4)
+                            else:          # 3 of one, 1 of the other
+                                u = uni if cnt0 == 3 else uni[::-1]
+                                l4[:, col] = (l3[:, i3[u[0], u[0], u[1]]]
+                                              - 4.0 * ee[:, u[0]] ** 2
+                                              * ee[:, u[1]] / b3
+                                              + 6.0 * eijkl / b4)
+        out["l4"] = l4
+    return out
+
+
+class multinom(GeneralFamily):
+    """Multinomial logistic regression general family — mgcv ``multinom(K)``
+    (gamlss.r:1107-1411). The only **variable-K** family: K linear
+    predictors for K+1 categories coded ``0..K``, category 0 the reference
+    (η₀ ≡ 0), all identity-linked.
+
+        P(y = j) = e^{η_j} / (1 + Σ_{m=1}^K e^{η_m}),  j = 1..K;
+        P(y = 0) = 1 / (1 + Σ_{m=1}^K e^{η_m}).
+
+    ``gam`` takes K formulas (the first carries the integer-class response).
+    ``available_derivs = 2``: full Newton. The likelihood derivatives are
+    built as DENSE packed tensors exactly as mgcv does (no ``remap``
+    sparsity — dormant in shipped mgcv) and passed straight to
+    :func:`gamlss_gH` (identity links ⇒ no :func:`gamlss_etamu` step)."""
+    name = "multinom"
+    scale_known = True
+    n_theta = 0
+    available_derivs = 2
+
+    def __init__(self, K: int = 1):
+        if K < 1:
+            raise ValueError("number of categories must be at least 2 "
+                             "(multinom K must be >= 1)")
+        self.n_lp = int(K)
+        self.tri = trind_generator(int(K))
+        super().__init__([IdentityLink() for _ in range(int(K))])
+
+    def ll(self, y, X, coef, wt=None, *, lpi, offset=None, deriv: int = 0,
+           d1b=None, d2b=None, fh=None, D=None) -> dict:
+        y = np.asarray(y, dtype=float)
+        X = np.asarray(X, dtype=float)
+        coef = np.asarray(coef, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        K = len(jj)
+        n = y.shape[0]
+        eta = np.zeros((n, K))
+        for i in range(K):
+            eta[:, i] = X[:, jj[i]] @ coef[jj[i]]
+            if (offset is not None and i < len(offset)
+                    and offset[i] is not None):
+                eta[:, i] = eta[:, i] + offset[i]
+        d = _multinom_derivs(y, eta, self.tri, deriv)
+        ret: dict = {"l": d["l"], "l0": d["l0"]}
+        if deriv == 0:
+            return ret
+        gh = gamlss_gH(X, jj, d["l1"], d["l2"], self.tri["i2"],
+                       l3=d.get("l3"), i3=self.tri["i3"], l4=d.get("l4"),
+                       i4=self.tri["i4"], d1b=d1b, d2b=d2b, deriv=deriv - 1,
+                       fh=fh, D=D)
+        ret.update(gh)
+        return ret
+
+    def initialize_coef(self, y, X, lpi, E=None, offset=None,
+                        use_unscaled: bool = False) -> np.ndarray:
+        """multinom ``initialize`` (gamlss.r:1356-1399): for each LP k
+        regress the binarized signal ``6·(y==k) − 3`` on that LP's columns
+        with the penalty root ``E`` as a regularizer. Validates the integer
+        class coding 0..K. mgcv's multinom initialize ignores ``offset`` —
+        so does this."""
+        y = np.round(np.asarray(y, dtype=float)).astype(int)
+        K = len(lpi)
+        if y.min() < 0 or y.max() > K:
+            raise ValueError(
+                f"multinom response must be integer classes in 0..{K} "
+                f"(K={K} linear predictors); got range "
+                f"{int(y.min())}..{int(y.max())}")
+        X = np.asarray(X, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        p = X.shape[1]
+        if E is None:
+            E = np.zeros((0, p))
+        start = np.zeros(p)
+
+        def _reg(cols, target):
+            if use_unscaled:
+                xa = np.vstack([X[:, cols], E[:, cols]])
+                b, *_ = np.linalg.lstsq(
+                    xa, np.concatenate([target, np.zeros(E.shape[0])]),
+                    rcond=None)
+                b[~np.isfinite(b)] = 0.0
+                return b
+            return _pen_reg(X[:, cols], E[:, cols], target)
+
+        for k in range(K):
+            yt = 6.0 * (y == k + 1).astype(float) - 3.0
+            start[jj[k]] = _reg(jj[k], yt)
+        return start
+
+    def postproc(self, y, prior_weights, fitted, linear_predictors,
+                 offset, intercept) -> dict:
+        """multinom postproc (gamlss.r:1219-1231): null deviance from the
+        class-frequency null model — solve ``(diag(n/n_j) − 1)·γ = 1`` for
+        the K non-reference categories, normalize to probabilities, then
+        ``−2·Σ_i log P̂(y_i)``."""
+        y = np.round(np.asarray(y, dtype=float)).astype(int)
+        K = self.n_lp
+        nj = np.bincount(y, minlength=K + 1).astype(float)
+        ntot = float(nj.sum())
+        A = np.diag(ntot / nj[1:]) - np.ones((K, K))
+        gamma = np.concatenate([[1.0], np.linalg.solve(A, np.ones(K))])
+        gamma = np.log(gamma / gamma.sum())
+        return {"null_deviance": -2.0 * float(np.sum(gamma[y]))}
+
+    def residuals(self, y, fitted, type: str = "deviance") -> np.ndarray:
+        """multinom residuals (gamlss.r:1133-1146): deviance only, signed +
+        when the most-probable category equals the observed class, − else,
+        magnitude ``√(−2 log P̂(y))``. ``fitted`` is the (n, K) η matrix."""
+        if type != "deviance":
+            raise ValueError(
+                "only 'deviance' residuals are available for multinom; "
+                f"got {type!r}")
+        y = np.round(np.asarray(y, dtype=float)).astype(int)
+        p = self.predict(eta=np.asarray(fitted, dtype=float))["fit"]
+        n = y.shape[0]
+        pc = np.argmax(p, axis=1)
+        sgn = np.where(pc == y, 1.0, -1.0)
+        py = p[np.arange(n), y]
+        return sgn * np.sqrt(-2.0 * np.log(
+            np.maximum(np.finfo(float).eps, py)))
+
+    def rd(self, rng, mu, wt, scale):
+        """multinom rd (gamlss.r:1348-1354): sample a category by inverse
+        CDF of the softmax probabilities (category 0 the reference, η₀ ≡ 0).
+        ``mu`` is the (n, K) η matrix."""
+        mu = np.asarray(mu, dtype=float)
+        n = mu.shape[0]
+        p = np.exp(np.column_stack([np.zeros(n), mu]))
+        p = p / p.sum(axis=1, keepdims=True)
+        cp = np.cumsum(p, axis=1)
+        u = rng.uniform(0.0, 1.0, n)
+        return (cp > u[:, None]).argmax(axis=1).astype(float)
+
+    def predict(self, *, se: bool = False, eta=None, y=None, X=None,
+                beta=None, off=None, Vb=None, lpi=None) -> dict:
+        """multinom ``family$predict`` (gamlss.r:1148-1217): the (n, K+1)
+        matrix of category probabilities (more columns than ``n_lp``), with
+        delta-method SEs over the full η covariance when ``se``."""
+        if eta is None:
+            X = np.asarray(X, dtype=float)
+            beta = np.asarray(beta, dtype=float)
+            K = len(lpi)
+            n = X.shape[0]
+            eta = np.zeros((n, K))
+            ve = np.zeros((n, K))
+            ce = np.zeros((n, K * (K - 1) // 2))
+            ii = 0
+            for i in range(K):
+                ci = np.asarray(lpi[i], dtype=int)
+                Xi = X[:, ci]
+                eta[:, i] = Xi @ beta[ci]
+                if off is not None and i < len(off) and off[i] is not None:
+                    eta[:, i] = eta[:, i] + off[i]
+                if se:
+                    ve[:, i] = np.maximum(0.0, np.einsum(
+                        "ij,jk,ik->i", Xi, Vb[np.ix_(ci, ci)], Xi))
+                    for k in range(i + 1, K):
+                        ck = np.asarray(lpi[k], dtype=int)
+                        ce[:, ii] = np.maximum(0.0, np.einsum(
+                            "ij,jk,ik->i", Xi, Vb[np.ix_(ci, ck)], X[:, ck]))
+                        ii += 1
+        else:
+            eta = np.asarray(eta, dtype=float)
+            se = False
+        n, K = eta.shape
+        gamma = np.column_stack([np.ones(n), np.exp(eta)])
+        bb = gamma.sum(axis=1)
+        gamma = gamma / bb[:, None]
+        if not se:
+            return {"fit": gamma}
+        vp = np.zeros((n, K + 1))
+        for jcat in range(K + 1):
+            if jcat == 0:
+                dp = -gamma[:, 1:] / bb[:, None]
+            else:
+                dp = -gamma[:, jcat:jcat + 1] * gamma[:, 1:]
+                dp[:, jcat - 1] = gamma[:, jcat] * (1.0 - gamma[:, jcat])
+            vj = (dp ** 2 * ve).sum(axis=1)
+            ii = 0
+            for i in range(K):
+                for k in range(i + 1, K):
+                    vj = vj + 2.0 * dp[:, i] * dp[:, k] * ce[:, ii]
+                    ii += 1
+            vp[:, jcat] = np.sqrt(np.maximum(0.0, vj))
+        return {"fit": gamma, "se_fit": vp}
+
+    def __repr__(self):
+        return f"multinom(K={self.n_lp})"
+
+
 def _coerce_response(y_series: pl.Series, family: "Family") -> np.ndarray:
     """Cast the response column to a numeric float array, with R's
     factor-response convention for :class:`Binomial`.
@@ -6832,7 +7600,8 @@ __all__ = [
     "Scat", "scat",
     "nb",
     "GeneralFamily", "gaulss", "twlss", "shash", "gammals", "gumbls",
-    "gevlss", "cox_ph", "LogebLink", "SoftplusLink", "ShiftedLogitLink",
+    "gevlss", "cox_ph", "ziplss", "multinom",
+    "LogebLink", "SoftplusLink", "ShiftedLogitLink",
     "trind_generator", "gamlss_etamu", "gamlss_gH",
     "IdentityLink", "LogLink", "InverseLink",
     "SqrtLink", "LogitLink", "ProbitLink", "CauchitLink", "CloglogLink",
