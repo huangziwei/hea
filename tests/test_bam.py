@@ -603,7 +603,7 @@ def test_bam_discrete_scatter_kernels_match_full_X():
     the dense ``X``. They must be bit-equivalent to hea's default materialised
     full-X matmul on a supported (no by=) design, else the large-``n`` path
     silently diverges from the fitted path. Pinned to machine precision."""
-    from hea.models.bam import Xbd, XWXd, XWyd, discrete_full_X
+    from hea.models.bam import Xbd, XWXd, XWyd
     rng = np.random.default_rng(0)
     n = 4000
     x = rng.uniform(0, 1, n)

@@ -2253,6 +2253,9 @@ class bam(gam):
                     )
                 else:
                     # GCV.Cp → outer-Newton on V_g/V_u (no log φ in outer θ).
+                    # mgcv uses ``magic`` here, which has no Sl.fitChol β/PP to
+                    # reuse — null the F9 slots so the fit re-solves.
+                    self._reml_beta = self._reml_A_inv = None
                     theta_hat = self._outer_newton(
                         cur_rho,
                         criterion="GCV",
@@ -2269,6 +2272,12 @@ class bam(gam):
                 self.sp = np.exp(theta_sp)            # mgcv m$sp (working)
                 rho_hat = self._rho_full(theta_sp)    # full per-penalty log-sp
                 fit = self._fit_given_rho(rho_hat)
+                # F9: reuse fast.REML.fit's Sl.fitChol β̂ / A⁻¹ instead of the
+                # re-solve (mgcv bgam.fit:1310 Sl.postproc). None on the GCV
+                # path ⇒ keep the _fit_given_rho solve.
+                if self._reml_beta is not None:
+                    fit.beta = self._reml_beta
+                    fit.A_inv = self._reml_A_inv
 
             # ---- post-fit assembly (Gaussian-identity) ----------------------
             # Most of gam.__init__'s post-fit code reads ``self._X_full`` and
@@ -2947,8 +2956,13 @@ class bam(gam):
         # Equals m$sp when nothing shares an id and nothing is fixed.
         self.full_sp = np.exp(np.asarray(rho_hat, dtype=float))
 
-        # Inverse Hessian — small (p×p), exact.
-        A_inv = cho_solve((fit.A_chol, fit.A_chol_lower), np.eye(p))
+        # Inverse Hessian — small (p×p), exact. ``fit.A_inv`` is set (= mgcv's
+        # un-repara'd Sl.fitChol PP, bgam.fitd:823) when fast.REML.fit supplied
+        # the reuse (F9); otherwise cho_solve the A_chol. Identical full-rank.
+        if fit.A_inv is not None:
+            A_inv = fit.A_inv
+        else:
+            A_inv = cho_solve((fit.A_chol, fit.A_chol_lower), np.eye(p))
         # XtWX with W=I is just X'X = R'R, already cached.
         XtWX = self._XtX
         A_inv_XtWX = A_inv @ XtWX
@@ -3382,8 +3396,17 @@ class bam(gam):
                 g = T_work.T @ g
                 H = T_work.T @ H @ T_work
             H = 0.5 * (H + H.T)
+            # Keep ``out`` (β/PP in the repara'd gauge) so the converged fit
+            # reuses Sl.fitChol's solution instead of re-solving — F5/F9, mgcv
+            # bgam.fit:1310 Sl.postproc. Carrying the reference is free.
             return {"reml": reml_val, "grad": g, "hess": H,
-                    "rss": float(out["rss"])}
+                    "rss": float(out["rss"]), "out": out}
+
+        # F5/F9 reuse slots: the converged β̂ / A⁻¹ from Sl.fitChol, un-repara'd
+        # to the original basis (bgam.fitd:759/823). ``None`` until the fit
+        # succeeds, so a failed initial eval falls back to ``_fit_given_rho``.
+        self._reml_beta = None
+        self._reml_A_inv = None
 
         theta = np.asarray(theta0, dtype=float).copy()
 
@@ -3474,6 +3497,20 @@ class bam(gam):
             "grad": grad, "hess": hess,
             "score": float(best["reml"]), "score_scale": float(reml_scale),
         }
+        # F5/F9: reuse Sl.fitChol's converged β̂ / A⁻¹ (mgcv bgam.fit:1310's
+        # Sl.postproc does NOT re-solve). ``best["out"]`` is the _pi_fit_chol
+        # result at the accepted θ; un-repara β (both_sides=False) per
+        # bgam.fitd:759 and PP (both_sides=True, cov=True) per bgam.fitd:823.
+        # Full-rank: identical to _fit_given_rho's solve (~1e-12); rank-
+        # deficient: mgcv's pivoted-Cholesky null-space gauge.
+        best_out = best.get("out")
+        if best_out is not None:
+            self._reml_beta = _sl_initial_repara(
+                self._sl, best_out["beta"], inverse=True,
+                both_sides=False, cov=False)
+            self._reml_A_inv = _sl_initial_repara(
+                self._sl, best_out["PP"], inverse=True,
+                both_sides=True, cov=True)
         return theta
 
     def _bgam_fit_loop(self, *, sp_user) -> tuple["_FitState", np.ndarray]:
@@ -3957,6 +3994,12 @@ class bam(gam):
                     self.sp = np.exp(theta_hat[:n_work])
                     rho_hat = self._rho_full(theta_hat[:n_work])
                     fit = self._fit_given_rho(rho_hat)
+                    # F9: reuse fast.REML.fit's Sl.fitChol β̂ / A⁻¹ (mgcv
+                    # bgam.fit:1310 Sl.postproc — no re-solve). Full-rank:
+                    # identical; rank-deficient: mgcv's null-space gauge.
+                    if self._reml_beta is not None:
+                        fit.beta = self._reml_beta
+                        fit.A_inv = self._reml_A_inv
                 else:
                     # GCV.Cp only (no log φ in the outer vector): the
                     # converge-fully outer-Newton on V_g/V_u. L-aware — it
