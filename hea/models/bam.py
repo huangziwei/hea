@@ -4804,6 +4804,16 @@ class _DiscreteTerm:
     # Predict-time replay (used for predict.bamd, not the fitter).
     spec: Optional[BasisSpec] = None
     label: str = ""
+    # Constant-coordinate-grid fast path (signal regression / RF), set lazily
+    # by ``_term_full_design`` on first call. ``grid_constant`` memoises the
+    # predicate "every matrix-arg margin's k-block is row-constant" (all
+    # observations share the same summation-column grid); ``_grid_B`` caches the
+    # resulting (n_sum, p_raw) tensor basis on that fixed grid. Both depend only
+    # on the design's ``k`` / ``Xd_list`` (invariant under PIRLS / outer-Newton)
+    # and are keyed to the term's single owning design. See
+    # .claude/plans/bam-matrix-by-vectorization.md.
+    grid_constant: Optional[bool] = None
+    _grid_B: Optional[np.ndarray] = None
 
 
 @dataclass(slots=True)
@@ -5038,6 +5048,45 @@ def _split_term_vars_by_margins(term_vars: list[str],
 # ---------------------------------------------------------------------------
 
 
+def _khatri_rao_cols(blocks: list[np.ndarray]) -> np.ndarray:
+    """Column-wise Khatri-Rao (row tensor) of per-margin basis blocks.
+
+    Each ``blocks[j]`` is ``(m, p_j)``; the result is ``(m, Π p_j)`` with
+    ``blocks[0]`` the OUTERMOST (slowest-varying) column index, matching the
+    per-row Khatri-Rao in :func:`_term_full_design`'s loop
+    (``col = ((a)·p_1 + b)·p_2 + c …``). Identical structure to that loop, but
+    contracted along the shared grid axis ``m`` rather than the n rows, so the
+    fast path's columns line up with the penalty ``S`` / ``absorb`` / ``keep``.
+    """
+    out = blocks[0]
+    for nxt in blocks[1:]:
+        pa = out.shape[1]
+        pb = nxt.shape[1]
+        out = (out[:, :, None] * nxt[:, None, :]).reshape(out.shape[0], pa * pb)
+    return out
+
+
+def _grid_is_constant(term: _DiscreteTerm, k: np.ndarray, n_sum: int) -> bool:
+    """True iff every margin's summation k-block is constant down the rows.
+
+    The signal-regression / RF case: all observations share the same ``n_sum``
+    coordinate-grid indices, so the per-row Khatri-Rao reduces to a single
+    fixed grid basis and the ``Σ_q`` row-sum collapses to one matmul (see
+    :func:`_term_full_design`). The scan is ``O(n·n_sum)`` integer compares — a
+    few hundred ms for the largest RF design, against the ~30s loop it guards —
+    and is memoised on ``term.grid_constant`` after the first call. Returns
+    ``False`` for the empty design so the general loop handles the edge.
+    """
+    n = k.shape[0]
+    if n == 0 or n_sum == 0:
+        return False
+    for _Xd_j, (ks_lo, _ks_hi) in zip(term.Xd_list, term.k_cols):
+        block = k[:, ks_lo:ks_lo + n_sum]
+        if not bool((block == block[0]).all()):
+            return False
+    return True
+
+
 def _term_full_design(term: _DiscreteTerm, k: np.ndarray, n: int) -> np.ndarray:
     """Materialise ``X_term`` (n × p_term_post) for one term.
 
@@ -5079,31 +5128,57 @@ def _term_full_design(term: _DiscreteTerm, k: np.ndarray, n: int) -> np.ndarray:
             "by-matrix to match the matrix-argument dimension."
         )
 
-    # Khatri-Rao across margins, by-weight per column, then sum over
-    # summation columns.
-    X_full = None
-    for q_off in range(n_sum):
-        # For each margin, gather rows: Xd_j[k[:, ks_j_lo + q_off], :]
-        Xq_blocks = []
-        for Xd_j, (ks_lo, ks_hi) in zip(term.Xd_list, term.k_cols):
-            kcol = k[:, ks_lo + q_off]
-            Xq_blocks.append(Xd_j[kcol])
-        # Khatri-Rao over the margin blocks.
-        if len(Xq_blocks) == 1:
-            Xq = Xq_blocks[0]
-        else:
-            Xq = Xq_blocks[0]
-            for nxt in Xq_blocks[1:]:
-                # Row tensor: (n, p1) ⊗_row (n, p2) → (n, p1*p2)
-                pa = Xq.shape[1]
-                pb = nxt.shape[1]
-                Xq = (Xq[:, :, None] * nxt[:, None, :]).reshape(-1, pa * pb)
+    # Khatri-Rao across margins, by-weight per column, then sum over the
+    # summation columns. Two paths produce the SAME (n, p_raw) row-sum:
+    #
+    #   * constant-grid fast path (signal regression / RF) — when every margin's
+    #     k-block is row-constant, the per-row Khatri-Rao is one fixed
+    #     (n_sum, p_raw) grid basis ``B`` and ``X[i] = Σ_q by[i,q]·B[q]`` is
+    #     exactly ``by_mask @ B`` (matrix by=) or ``B.sum(0)`` broadcast
+    #     (scalar/no by=). One BLAS matmul replaces the n_sum-iteration Python
+    #     loop. See .claude/plans/bam-matrix-by-vectorization.md.
+    #   * general loop fallback — genuine per-row-varying coordinates (non-RF);
+    #     also covers n_sum==1 ordinary smooths, where the grid is NOT constant.
+    #
+    if term.grid_constant is None:
+        term.grid_constant = _grid_is_constant(term, k, n_sum)
+    if term.grid_constant:
+        B = term._grid_B
+        if B is None:
+            grid_blocks = [
+                Xd_j[k[0, ks_lo:ks_lo + n_sum]]
+                for Xd_j, (ks_lo, _ks_hi) in zip(term.Xd_list, term.k_cols)
+            ]
+            B = _khatri_rao_cols(grid_blocks)          # (n_sum, p_raw)
+            term._grid_B = B
         if by_is_matrix:
-            Xq = Xq * by_mask[:, q_off][:, None]
-        if X_full is None:
-            X_full = Xq
+            X_full = by_mask @ B                       # (n, n_sum)@(n_sum, p)
         else:
-            X_full = X_full + Xq
+            X_full = np.broadcast_to(B.sum(0), (n, B.shape[1])).copy()
+    else:
+        X_full = None
+        for q_off in range(n_sum):
+            # For each margin, gather rows: Xd_j[k[:, ks_j_lo + q_off], :]
+            Xq_blocks = []
+            for Xd_j, (ks_lo, ks_hi) in zip(term.Xd_list, term.k_cols):
+                kcol = k[:, ks_lo + q_off]
+                Xq_blocks.append(Xd_j[kcol])
+            # Khatri-Rao over the margin blocks.
+            if len(Xq_blocks) == 1:
+                Xq = Xq_blocks[0]
+            else:
+                Xq = Xq_blocks[0]
+                for nxt in Xq_blocks[1:]:
+                    # Row tensor: (n, p1) ⊗_row (n, p2) → (n, p1*p2)
+                    pa = Xq.shape[1]
+                    pb = nxt.shape[1]
+                    Xq = (Xq[:, :, None] * nxt[:, None, :]).reshape(-1, pa * pb)
+            if by_is_matrix:
+                Xq = Xq * by_mask[:, q_off][:, None]
+            if X_full is None:
+                X_full = Xq
+            else:
+                X_full = X_full + Xq
 
     # Apply (scalar/factor) by-mask, then absorb, then keep_cols. Order
     # matches ``BasisSpec.predict_mat`` (formula.py:2415-2435): raw → by →
