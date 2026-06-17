@@ -4437,6 +4437,54 @@ def _is_factor_arr(a: np.ndarray) -> bool:
     return a.dtype.kind in ("U", "O", "S")
 
 
+# Span cap for the integer-lattice fast path in :func:`_unique_inverse`: above
+# this the offset/bincount table would cost more memory than the sort it
+# replaces, so we fall back to ``np.unique``. Pixel-coordinate lattices and
+# low-level by-stimuli sit far below it (span ≤ a few hundred).
+_UNIQUE_FAST_SPAN_CAP = 1 << 20
+
+
+def _unique_inverse(col: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``np.unique(col, return_inverse=True)`` with an O(n) fast path for
+    low-cardinality integer-valued columns — **byte-identical** output.
+
+    For a signal-regression / RF smooth the broadcast coordinate margins are a
+    tiny integer pixel grid repeated n times (and a binary/low-level by= can be
+    too); the generic ``np.unique`` argsorts all n·m flattened entries — the
+    S3 hotspot (67s of the 2D fit). When the values span a small contiguous
+    integer range we factorise by ``offset + bincount`` in one pass instead.
+
+    Safety is structural: we only return the fast result if it **exactly
+    reconstructs** the input (``u[inv] == col``). Because ``u`` is built from
+    the sorted distinct offsets (ascending, distinct), an exact reconstruction
+    is sufficient for ``(u, inv)`` to equal ``np.unique``'s output bit-for-bit
+    — so any non-integer / NaN / rounding mismatch silently falls back. The
+    discretisation downstream (the seeded ``compress_df`` shuffle, ``k``, the
+    RNG state) is therefore provably unchanged. See
+    .claude/plans/bam-matrix-by-vectorization.md (S3).
+    """
+    a = np.asarray(col)
+    if a.size and a.dtype.kind in "fiu":
+        mn = a.min()
+        mx = a.max()
+        if np.isfinite(mn) and np.isfinite(mx):
+            span = int(round(float(mx - mn))) + 1
+            if 1 <= span <= _UNIQUE_FAST_SPAN_CAP:
+                # a ∈ [mn, mx] ⇒ codes ∈ [0, span-1] (no out-of-range gather).
+                codes = np.rint(a - mn).astype(np.intp)
+                seen = np.zeros(span, dtype=bool)
+                seen[codes] = True
+                present = np.nonzero(seen)[0]              # sorted distinct
+                u = (present + mn).astype(a.dtype)         # sorted unique
+                remap = np.empty(span, dtype=np.int64)
+                remap[present] = np.arange(present.size, dtype=np.int64)
+                inv = remap[codes]
+                if np.array_equal(u[inv], a):
+                    return u, inv
+    u, inv = np.unique(a, return_inverse=True)
+    return u, np.asarray(inv).reshape(-1).astype(np.int64)
+
+
 def _uniquecombs(work: dict[str, np.ndarray],
                  names: list[str]) -> tuple[dict[str, np.ndarray], np.ndarray]:
     """Numpy port of R's ``uniquecombs`` (single-thread).
@@ -4448,8 +4496,8 @@ def _uniquecombs(work: dict[str, np.ndarray],
     n = next(iter(work.values())).size
     if len(names) == 1:
         col = work[names[0]]
-        u, inv = np.unique(col, return_inverse=True)
-        return {names[0]: u}, inv.astype(np.int64)
+        u, inv = _unique_inverse(col)
+        return {names[0]: u}, inv
     # Multi-column: stack into a structured key. Numeric columns are kept
     # numeric; factor columns are converted to integer codes with the
     # same lex order as ``np.unique``.
