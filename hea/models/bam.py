@@ -4490,8 +4490,7 @@ def _unique_inverse(col: np.ndarray, max_unique: Optional[int] = None):
     is sufficient for ``(u, inv)`` to equal ``np.unique``'s output bit-for-bit
     — so any non-integer / NaN / rounding mismatch silently falls back. The
     discretisation downstream (the seeded ``compress_df`` shuffle, ``k``, the
-    RNG state) is therefore provably unchanged. See
-    .claude/plans/bam-matrix-by-vectorization.md (S3).
+    RNG state) is therefore provably unchanged.
 
     ``max_unique`` (R5): when set, the caller only needs to know whether the
     distinct count exceeds it (``compress.df`` rounds a continuous variable
@@ -4500,7 +4499,7 @@ def _unique_inverse(col: np.ndarray, max_unique: Optional[int] = None):
     of paying the full argsort for a table that will be thrown away. The lattice
     fast path is unaffected (it is already O(n) and returns the real table). The
     round/keep decision is identical (``_distinct_exceeds_1d`` is exact), so the
-    bamT fit is byte-identical. See .claude/plans/bam-rf1a-binned-by-parity.md (R5).
+    bamT fit is byte-identical.
 
     Parity note — pure speedup, **not an mgcv divergence.** The non-sentinel
     output is identical to ``np.unique`` (hence to mgcv's ``uniquecombs``); only
@@ -4692,9 +4691,7 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
     (un-binned) by lives at ``bam(discrete=FALSE)`` (bamF); a continuous by
     makes bamF ≠ bamT by ~1e-3. Do **not** substitute the raw by here or in
     ``build_discrete_design`` to "improve accuracy" — that reproduces bamF
-    under the ``discrete=TRUE`` flag, a parity bug (RF1a). See memory
-    ``feedback_parity_first_then_improvement`` and
-    .claude/plans/bam-rf1a-binned-by-parity.md.
+    under the ``discrete=TRUE`` flag, a parity bug (RF1a).
     """
     if rng is None:
         rng = RMersenneTwister(8547)
@@ -4934,8 +4931,7 @@ class _DiscreteTerm:
     # observations share the same summation-column grid); ``_grid_B`` caches the
     # resulting (n_sum, p_raw) tensor basis on that fixed grid. Both depend only
     # on the design's ``k`` / ``Xd_list`` (invariant under PIRLS / outer-Newton)
-    # and are keyed to the term's single owning design. See
-    # .claude/plans/bam-matrix-by-vectorization.md.
+    # and are keyed to the term's single owning design.
     grid_constant: Optional[bool] = None
     _grid_B: Optional[np.ndarray] = None
 
@@ -5082,8 +5078,7 @@ def build_discrete_design(blocks: list[SmoothBlock],
         # would make hea ``discrete=True`` reproduce ``discrete=FALSE`` (bamF)
         # under the discrete=TRUE flag — a parity bug. The exact by lives at
         # discrete=False (the non-discrete fitter reads raw). Do NOT "restore"
-        # the raw read. See discrete_mf's Parity note and
-        # .claude/plans/bam-rf1a-binned-by-parity.md.
+        # the raw read. See discrete_mf's Parity note.
         by_mask: Optional[np.ndarray] = None
         if spec.by is not None:
             if data is None:
@@ -5262,7 +5257,6 @@ def _term_full_design(term: _DiscreteTerm, k: np.ndarray, n: int) -> np.ndarray:
     removed was hea-specific to hea's materialise-then-BLAS strategy). The fast
     path is bit-equal to hea's own summation loop (≈1e-15) and the fit still
     pins to mgcv; it changes only *how* the row-sum is computed, not the result.
-    See .claude/plans/bam-matrix-by-vectorization.md.
     """
     if term.kind == "param":
         return term.Xd_list[0]
@@ -5299,7 +5293,7 @@ def _term_full_design(term: _DiscreteTerm, k: np.ndarray, n: int) -> np.ndarray:
     #     (n_sum, p_raw) grid basis ``B`` and ``X[i] = Σ_q by[i,q]·B[q]`` is
     #     exactly ``by_mask @ B`` (matrix by=) or ``B.sum(0)`` broadcast
     #     (scalar/no by=). One BLAS matmul replaces the n_sum-iteration Python
-    #     loop. See .claude/plans/bam-matrix-by-vectorization.md.
+    #     loop.
     #   * general loop fallback — genuine per-row-varying coordinates (non-RF);
     #     also covers n_sum==1 ordinary smooths, where the grid is NOT constant.
     #
