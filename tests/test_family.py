@@ -1286,7 +1286,7 @@ def test_gaulss_initialize_and_residuals():
 # gammals (Gamma location-scale, gamlss.r:2664-2980) — mgcv 1.9-4 oracle.
 # Inputs reproduce R's set.seed(21) stream via hea.R.rng (bit-exact rnorm),
 # so gammals()$ll evaluated in R at the identical (X, y, coef, d1b, d2b)
-# matches hea below; the bounded "log" scale link is SoftplusLink.
+# matches hea below; the bounded "log" scale link is BoundedLogLink.
 # ---------------------------------------------------------------------------
 
 def _gammals_oracle_inputs():
@@ -1384,7 +1384,7 @@ def test_gammals_ll_derivatives_match_fd():
 
 
 def test_gammals_initialize_residuals_and_link():
-    from hea.family import gammals, SoftplusLink
+    from hea.family import gammals, BoundedLogLink
     X, y, coef, _, _, lpi = _gammals_oracle_inputs()
     fam = gammals()
     start = fam.initialize_coef(y, X, lpi)
@@ -1403,8 +1403,8 @@ def test_gammals_initialize_residuals_and_link():
     dexp = (np.sqrt(np.maximum(0.0, 2.0 * ((yy - mu) / mu
             - np.log(yy / mu)) * np.exp(-rho))) * np.sign(yy - mu))
     np.testing.assert_allclose(fam.residuals(yy, fitted), dexp, atol=0)
-    # SoftplusLink round-trips and floors at b.
-    lk = SoftplusLink(b=-7.0)
+    # BoundedLogLink round-trips and floors at b.
+    lk = BoundedLogLink(b=-7.0)
     eta = np.linspace(-4, 6, 11)
     np.testing.assert_allclose(lk.link(lk.linkinv(eta)), eta, atol=1e-9)
     assert np.all(lk.linkinv(np.array([-50.0, 0.0, 50.0])) >= -7.0)
@@ -1417,7 +1417,7 @@ def test_gammals_initialize_residuals_and_link():
 
 # ---------------------------------------------------------------------------
 # gumbls (Gumbel location-scale, gamlss.r:2985-3329) — mgcv 1.9-4 oracle,
-# set.seed(23) stream (bit-exact rnorm); shares SoftplusLink with gammals.
+# set.seed(23) stream (bit-exact rnorm); shares BoundedLogLink with gammals.
 # ---------------------------------------------------------------------------
 
 def _gumbls_oracle_inputs():
@@ -3346,3 +3346,82 @@ def test_cnorm_construction_and_validation():
     np.testing.assert_array_equal(fam.initialize(y, np.ones(3)), y)
     assert cnorm(link="log").validmu(np.array([0.1, 1.0]))
     assert not cnorm(link="log").validmu(np.array([-0.1, 1.0]))
+
+
+# ---------------------------------------------------------------------------
+# SoftplusLink (Thread A) — the genuine softplus *mean* link μ = log(1+e^η)
+# for Poisson RF/point-process GLMs (comp-neuro soft-rectifier; Paninski 2004).
+# NOT an mgcv built-in, so the link math is checked against closed forms +
+# finite differences; the fit is R-pinned via a custom-link glm (exact). Must
+# stay distinct from BoundedLogLink (mgcv's bounded "log" gamlss-scale link).
+# ---------------------------------------------------------------------------
+
+
+def test_softplus_link_math():
+    from hea.family import SoftplusLink, BoundedLogLink, _resolve_link
+    L = SoftplusLink()
+    assert L.name == "softplus"
+    assert isinstance(_resolve_link("softplus", "log"), SoftplusLink)
+    # distinct from the bounded-log gamlss link (which displays as "log")
+    assert BoundedLogLink().name == "log"
+    assert not isinstance(BoundedLogLink(), SoftplusLink)
+
+    # round-trips both ways
+    eta = np.linspace(-9, 9, 19)
+    np.testing.assert_allclose(L.link(L.linkinv(eta)), eta, atol=1e-9)
+    mu = np.linspace(0.05, 7, 25)
+    np.testing.assert_allclose(L.linkinv(L.link(mu)), mu, atol=1e-9)
+
+    # μ = softplus(η), dμ/dη = σ(η) (vs finite diff of linkinv)
+    np.testing.assert_allclose(L.linkinv(eta), np.logaddexp(0.0, eta), atol=1e-12)
+    h = 1e-6
+    fd = (L.linkinv(eta + h) - L.linkinv(eta - h)) / (2 * h)
+    np.testing.assert_allclose(L.mu_eta(eta), fd, atol=1e-7)
+
+    # link derivatives vs closed forms (u = e^{-μ}, s = 1-u)
+    u = np.exp(-mu)
+    s = 1.0 - u
+    np.testing.assert_allclose(L.d2link(mu), -u / s ** 2, rtol=1e-12)
+    np.testing.assert_allclose(L.d3link(mu), u * (1 + u) / s ** 3, rtol=1e-12)
+    np.testing.assert_allclose(
+        L.d4link(mu), -u * (1 + 4 * u + u * u) / s ** 4, rtol=1e-12)
+    # extended-family ratios g_kg = d^k link / g'^k, g'(μ)=1/s
+    np.testing.assert_allclose(L.g2g(mu), -u, rtol=1e-12)
+    np.testing.assert_allclose(L.g3g(mu), u * (1 + u), rtol=1e-12)
+    np.testing.assert_allclose(L.g4g(mu), -u * (1 + 4 * u + u * u), rtol=1e-12)
+    # the ratio identity itself: d2link == g2g * g'^2
+    gp = 1.0 / s
+    np.testing.assert_allclose(L.d2link(mu), L.g2g(mu) * gp ** 2, rtol=1e-12)
+    np.testing.assert_allclose(L.d3link(mu), L.g3g(mu) * gp ** 3, rtol=1e-12)
+    np.testing.assert_allclose(L.d4link(mu), L.g4g(mu) * gp ** 4, rtol=1e-12)
+
+    # numerically safe at extreme η (no overflow; μ>0, μ_η finite)
+    big = np.array([-700.0, -50.0, 0.0, 50.0, 700.0])
+    assert np.all(np.isfinite(L.linkinv(big))) and np.all(L.linkinv(big) > 0)
+    assert np.all(np.isfinite(L.mu_eta(big)))
+
+
+def test_softplus_poisson_glm_matches_mgcv():
+    """Poisson GLM with the softplus link, R-pinned EXACT against a custom
+    link-glm fit (``glm(y~x+z, poisson(link=softplus))``), mgcv-independent —
+    R 4.x glm IRLS. The reusable R link lives in
+    ``tests/r_oracle/softplus_link.R``. Data: softplus is the true link."""
+    from hea.R.rng import RGenerator
+    from hea.family import SoftplusLink
+    from hea.models import glm
+    g = RGenerator(7)
+    n = 300
+    x = g.uniform(-1.0, 2.0, n)
+    z = g.uniform(-1.0, 1.0, n)
+    mu = np.log1p(np.exp(0.6 + 1.1 * x - 0.5 * z))
+    y = g.poisson(mu).astype(float)
+    d = pl.DataFrame({"y": y, "x": x, "z": z})
+    m = glm("y ~ x + z", d, family=Poisson(link=SoftplusLink()))
+    np.testing.assert_allclose(
+        np.asarray(m.bhat.to_numpy()).ravel(),
+        [0.595080256, 1.21651587, -0.704083015], atol=1e-6)
+    assert float(m.deviance) == pytest.approx(328.072958, abs=1e-4)
+    # string form resolves to the same link
+    m2 = glm("y ~ x + z", d, family=Poisson(link="softplus"))
+    np.testing.assert_allclose(np.asarray(m2.bhat.to_numpy()).ravel(),
+                               np.asarray(m.bhat.to_numpy()).ravel(), atol=0)

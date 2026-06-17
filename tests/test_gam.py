@@ -6144,7 +6144,7 @@ def test_gammals_through_gam_matches_mgcv():
 def test_gumbls_through_gam_matches_mgcv():
     # R: gam(list(y ~ s(x), ~ s(z)), family=gumbls(), method="REML") on
     # the set.seed(13) Gumbel fixture — derivs=2 full Newton; rides the
-    # same SoftplusLink + predict-hook engine path as gammals.
+    # same BoundedLogLink + predict-hook engine path as gammals.
     from hea.family import gumbls
 
     df = _gumbls_fixture()
@@ -8257,3 +8257,27 @@ def test_no_penalty_score_matches_mgcv():
         == pytest.approx(383.5616, abs=1e-4)
     assert gam("yc ~ x", d, family=Poisson()).GCV_score == \
         pytest.approx(0.154332, abs=1e-6)
+
+
+def test_softplus_poisson_gam_matches_mgcv():
+    """Poisson gam with the softplus link (Thread A), R-pinned EXACT against
+    mgcv 1.9-4. mgcv has no softplus link, but ``fix.family.link`` returns the
+    family unchanged when it already carries d2link/d3link/d4link — so the
+    oracle is an mgcv gam whose family was handed the same analytic softplus
+    link derivatives hea uses (``tests/r_oracle/softplus_link.R``). Validates
+    the full REML path (non-canonical inner Newton + the link's 2nd
+    derivative), not just the link algebra."""
+    from hea.R.rng import RGenerator
+    g = RGenerator(3)
+    n = 200
+    x = g.uniform(0.0, 1.0, n)
+    y = g.poisson(np.log1p(np.exp(1.0 + 1.5 * np.sin(2 * np.pi * x)))).astype(float)
+    d = pl.DataFrame({"y": y, "x": x})
+    m = gam("y ~ s(x)", d, family=Poisson(link="softplus"), method="REML")
+    assert float(np.sum(m.edf)) == pytest.approx(5.718371, rel=1e-5)
+    assert m.REML_criterion / 2 == pytest.approx(306.8628, abs=1e-3)
+    assert float(m.deviance) == pytest.approx(231.490028, rel=1e-6)
+    assert float(np.asarray(m.coef)[0]) == pytest.approx(1.2129598, abs=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(m.fitted_values)[:4],
+        [2.3735475, 0.5884992, 2.1839568, 2.5833613], atol=1e-5)

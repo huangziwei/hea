@@ -443,6 +443,76 @@ class InverseSquareLink(Link):
         return bool(np.all(np.isfinite(eta)) and np.all(eta > 0))
 
 
+class SoftplusLink(Link):
+    """``μ = softplus(η) = log(1 + e^η)`` — the smooth-rectifier link.
+
+    Not an mgcv/`make.link` built-in (its variance-function home is the
+    transcendental ``V(μ)=1−e^{−μ}``, outside the Morris NEF-QVF families), but
+    standard in the neural-GLM literature (Paninski 2004; Pillow et al.) as a
+    numerically gentle, concavity-preserving alternative to the canonical log
+    link for `Poisson()` point-process / RF models: log-link-like (μ≈e^η) at
+    low rates, identity-like (μ≈η) at high rates, so no exponential blow-up.
+
+    ``g(μ) = log(e^μ − 1)`` (μ>0); ``g′(μ) = 1/(1−e^{−μ})``. Writing
+    ``u = e^{−μ}``, ``s = 1−u``:
+
+    * ``g″  = −u/s²``            ``g‴  =  u(1+u)/s³``      ``g⁗ = −u(1+4u+u²)/s⁴``
+    * ``g2g = g″/g′²  = −u``     ``g3g = g‴/g′³ = u(1+u)`` ``g4g = g⁗/g′⁴ = −u(1+4u+u²)``
+
+    PIRLS handles this as an ordinary non-canonical link (full-Newton inner
+    steps); pairing with `Poisson()` forfeits only the canonical-log
+    convenience, not global concavity. Use ``s = -expm1(-μ)`` for ``1−u`` so the
+    small-μ (log-like) regime keeps full precision.
+    """
+    name = "softplus"
+
+    def link(self, mu):
+        # g(μ) = log(e^μ − 1); expm1 keeps small-μ accurate.
+        mu = np.maximum(np.asarray(mu, dtype=float), np.finfo(float).eps)
+        return np.log(np.expm1(mu))
+
+    def linkinv(self, eta):
+        # μ = log1p(e^η) = logaddexp(0, η); eps-floored like LogLink so μ>0
+        # feeds V(μ) / divisions safely at extreme negative η.
+        return np.maximum(np.logaddexp(0.0, np.asarray(eta, dtype=float)),
+                          np.finfo(float).eps)
+
+    def mu_eta(self, eta):
+        # dμ/dη = σ(η); expit is the stable logistic. Lower-clamp like mgcv.
+        return np.maximum(expit(np.asarray(eta, dtype=float)),
+                          np.finfo(float).eps)
+
+    def _u_s(self, mu):
+        mu = np.maximum(np.asarray(mu, dtype=float), np.finfo(float).eps)
+        u = np.exp(-mu)
+        s = -np.expm1(-mu)        # 1 − e^{−μ}, accurate as μ→0⁺
+        return u, s
+
+    def d2link(self, mu):
+        u, s = self._u_s(mu)
+        return -u / s ** 2
+
+    def d3link(self, mu):
+        u, s = self._u_s(mu)
+        return u * (1.0 + u) / s ** 3
+
+    def d4link(self, mu):
+        u, s = self._u_s(mu)
+        return -u * (1.0 + 4.0 * u + u * u) / s ** 4
+
+    def g2g(self, mu):
+        u, _ = self._u_s(mu)
+        return -u
+
+    def g3g(self, mu):
+        u, _ = self._u_s(mu)
+        return u * (1.0 + u)
+
+    def g4g(self, mu):
+        u, _ = self._u_s(mu)
+        return -u * (1.0 + 4.0 * u + u * u)
+
+
 _LINKS = {
     "identity": IdentityLink,
     "log": LogLink,
@@ -453,6 +523,7 @@ _LINKS = {
     "cauchit": CauchitLink,
     "cloglog": CloglogLink,
     "1/mu^2": InverseSquareLink,
+    "softplus": SoftplusLink,
 }
 
 
@@ -7120,9 +7191,13 @@ class shash(GeneralFamily):
                 f"'identity'), b={self.b:g}, phiPen={self.phiPen:g})")
 
 
-class SoftplusLink(Link):
+class BoundedLogLink(Link):
     """mgcv's bounded "log" link for the log-scale LP of the location-
     scale families ``gammals``/``gumbls`` (gamlss.r:2689-2718).
+
+    (Despite the softplus *form* of its inverse, this is mgcv's bounded
+    **log** link — ``name="log"`` — distinct from :class:`BoundedLogLink`, the
+    genuine softplus *mean* link for `Poisson()`.)
 
     Inverse ``g⁻¹(η) = b + log(1 + exp(η − b))`` keeps the (already
     log-scale) parameter strictly above ``b`` — the smooth softplus
@@ -7189,7 +7264,7 @@ class gammals(GeneralFamily):
     (gamlss.r:2664-2980). Two linear predictors, parameterized in **log
     mean** and **log scale**: LP1 is ``log μ`` (identity link only,
     so η₁ ≡ log μ); LP2 is ``log σ`` through the bounded
-    :class:`SoftplusLink` (``link="log"``, σ > exp(b)) or identity.
+    :class:`BoundedLogLink` (``link="log"``, σ > exp(b)) or identity.
 
         log f = (log y − μ − θ)/e^θ − log y − y·e^{−θ−μ} − log Γ(e^{−θ})
 
@@ -7221,7 +7296,7 @@ class gammals(GeneralFamily):
             )
         links = [
             IdentityLink(),
-            SoftplusLink(b=b) if scale_link == "log" else IdentityLink(),
+            BoundedLogLink(b=b) if scale_link == "log" else IdentityLink(),
         ]
         self.b = float(b)
         self._scale_link_name = scale_link
@@ -7436,7 +7511,7 @@ class gumbls(GeneralFamily):
     """Gumbel location-scale general family — mgcv ``gumbls()``
     (gamlss.r:2985-3329). Two linear predictors: LP1 the Gumbel
     **location** μ (identity link only, η₁ ≡ μ); LP2 ``log β`` (the
-    Gumbel scale) through the bounded :class:`SoftplusLink`
+    Gumbel scale) through the bounded :class:`BoundedLogLink`
     (``link="log"``) or identity.
 
         log f = −β − z − e^{−z},   z = (y − μ)·e^{−β}
@@ -7469,7 +7544,7 @@ class gumbls(GeneralFamily):
             )
         links = [
             IdentityLink(),
-            SoftplusLink(b=b) if scale_link == "log" else IdentityLink(),
+            BoundedLogLink(b=b) if scale_link == "log" else IdentityLink(),
         ]
         self.b = float(b)
         self._scale_link_name = scale_link
@@ -9771,7 +9846,7 @@ __all__ = [
     "nb", "betar", "ocat", "ziP", "cnorm",
     "GeneralFamily", "gaulss", "twlss", "shash", "gammals", "gumbls",
     "gevlss", "cox_ph", "ziplss", "multinom", "mvn",
-    "LogebLink", "SoftplusLink", "ShiftedLogitLink",
+    "LogebLink", "SoftplusLink", "BoundedLogLink", "ShiftedLogitLink",
     "trind_generator", "gamlss_etamu", "gamlss_gH",
     "IdentityLink", "LogLink", "InverseLink",
     "SqrtLink", "LogitLink", "ProbitLink", "CauchitLink", "CloglogLink",
