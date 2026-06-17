@@ -4628,24 +4628,20 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
     mgcv uses ``temp.seed(8547)`` (bam.r:233) — the default
     ``RMersenneTwister(8547)`` matches that exactly.
 
-    Parity note — **deliberate divergence from mgcv; do NOT "restore" it.**
-    A *matrix-argument* ``by=`` (the RF summation convention) is intentionally
-    NOT discretised: it is given a zero placeholder (the ``dead`` path in the
-    smooth walk below). mgcv's ``discrete.mf`` *does* discretise the by and then
-    bins it for the fit (bam.r:2469-2483, a lossy step), but hea weights the
-    smooth by the **exact raw** by (``by_mask`` in :func:`build_discrete_design`)
-    and pins to ``bam(discrete=FALSE)`` — so hea's discretised by is dead
-    weight, never read. A line-by-line parity audit against ``discrete.mf`` will
-    see two artefacts and must NOT "fix" them:
-      * the by's k-column / ``nr`` / ``mf`` entry differ from mgcv's;
-      * skipping the by's seeded-RNG draw shifts the *coordinate* margins'
-        unique-row shuffle, so the discretised ``(Xd, k)`` no longer byte-equals
-        mgcv's ``discrete.mf`` output.
-    Both are fitted-value-invariant — the fit is invariant to the unique-row
-    shuffle (verified seeds 8547/12345/999 ⇒ Δfitted = 0), and the R-pins to
-    ``discrete=FALSE`` stay exact. Replicating mgcv's by-discretisation would
-    re-add a sort costing ~60s for a continuous by with **zero** effect on the
-    fit. See .claude/plans/bam-skip-matrix-by-discretisation.md.
+    Parity note — the ``by=`` is discretised here like any other marginal,
+    and the fit weights the smooth by the **binned** by, NOT the raw by. This
+    matches mgcv ``bam(discrete=TRUE)`` (bamT), which bins the by-variable at
+    bam.r:2469-2483: ``by.var <- dk$mf[[termk]][1:dk$nr[termk]]`` (the
+    discretised uniques) and applies ``by.var[dk$k[, ks_by]]`` — the bin
+    representative the raw ``by[i,q]`` was rounded to (a *lossy* step for a
+    continuous by). :func:`build_discrete_design` reconstructs that exact
+    weight as ``by_unique[k_by]`` from this frame's ``mf``/``k``. The *exact*
+    (un-binned) by lives at ``bam(discrete=FALSE)`` (bamF); a continuous by
+    makes bamF ≠ bamT by ~1e-3. Do **not** substitute the raw by here or in
+    ``build_discrete_design`` to "improve accuracy" — that reproduces bamF
+    under the ``discrete=TRUE`` flag, a parity bug (RF1a). See memory
+    ``feedback_parity_first_then_improvement`` and
+    .claude/plans/bam-rf1a-binned-by-parity.md.
     """
     if rng is None:
         rng = RMersenneTwister(8547)
@@ -4672,8 +4668,7 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
     ik = -1  # 0-based marginal index counter (mgcv ``ik`` is 1-based)
 
     # Walk smooths, discretising each marginal once.
-    def _discretise_marginal(termi: list[str], mi: Optional[int],
-                             dead: bool = False):
+    def _discretise_marginal(termi: list[str], mi: Optional[int]):
         nonlocal ik
         prev = check_term(termi, rec)
         if prev != 0:
@@ -4687,29 +4682,7 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
                 dat[nm] = matrix_to_2d(s)
             else:
                 dat[nm] = s.to_numpy()
-        if dead:
-            # Parity note (deliberate mgcv divergence — full rationale in the
-            # discrete_mf docstring): a matrix-arg ``by=`` whose discretised
-            # table is never read by the matrix-by fit path.
-            # ``build_discrete_design`` takes the by-weights
-            # from the *raw* data (``by_mask``), and no term references the by's
-            # k-column. So skip ``compress_df`` entirely — its only effect here
-            # would be an expensive sort/shuffle of a (possibly continuous) by
-            # (≈60s of the 2D RF fit). A zero-index placeholder of the right
-            # (n, n_sum) shape keeps the k-layout identical while drawing no RNG;
-            # the matrix-by fit is invariant to the discretisation shuffle
-            # (seeds 8547/12345/999 ⇒ Δfitted=0). See
-            # .claude/plans/bam-skip-matrix-by-discretisation.md.
-            a0 = dat[termi[0]]
-            ncols = a0.shape[1] if a0.ndim == 2 else 1
-            k_dead = (np.zeros((n, ncols), dtype=np.int64) if a0.ndim == 2
-                      else np.zeros(n, dtype=np.int64))
-            cr = _CompressResult(
-                xu={nm: np.zeros(1, dtype=dat[nm].dtype) for nm in termi},
-                k=k_dead,
-            )
-        else:
-            cr = compress_df(dat, m=mi, rng=rng)
+        cr = compress_df(dat, m=mi, rng=rng)
         ki = cr.k                                # (n,) or (n, m_cols)
         if ki.ndim == 1:
             ks[ik, 0] = ks[ik - 1, 1] if ik > 0 else 0
@@ -4775,14 +4748,13 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
     for spec in smooth_specs:
         margins = spec.get("margins", [{"term": spec["term"]}])
         by = spec.get("by")
-        # ``by`` is processed first (matches mgcv jj==1 path). A matrix-arg by=
-        # (RF summation convention) is discretised to a dead placeholder — its
-        # table is unused (by_mask drives the fit) and a continuous by would
-        # otherwise dominate the fit time. Scalar/factor by= keeps the exact
-        # mgcv path, so the byte-exact discrete=TRUE pins (e.g. chicago) and
-        # their RNG sequence are untouched by construction.
+        # ``by`` is processed first (matches mgcv jj==1 path). It is discretised
+        # like any other marginal — including a matrix-arg by= (RF summation
+        # convention), which mgcv ``bam(discrete=TRUE)`` also bins (bam.r:2469-
+        # 2483). ``build_discrete_design`` then weights the smooth by the
+        # *binned* by (``by_unique[k_by]``), so hea ``discrete=True`` == bamT.
         if by not in (None, "NA"):
-            _discretise_marginal([by], m, dead=is_matrix_col(mf[by]))
+            _discretise_marginal([by], m)
         for marg in margins:
             _discretise_marginal(list(marg["term"]), m)
 
@@ -5048,6 +5020,17 @@ def build_discrete_design(blocks: list[SmoothBlock],
         # summation convention) yields an (n, n_sum) array — one weight per
         # row × summation column — applied per-column before the row-sum in
         # ``_term_full_design``; scalar/factor masks apply once after.
+        #
+        # Parity note (RF1a) — for a matrix-arg numeric by= the weight is the
+        # **binned** by ``by_unique[k_by]``, read from the discretised frame,
+        # NOT the raw ``data`` column. mgcv ``bam(discrete=TRUE)`` bins the
+        # by-variable (bam.r:2469-2483): ``by.var <- dk$mf[[termk]]`` then
+        # weight ``by.var[dk$k[, ks_by]]``. Sourcing the exact raw by here
+        # would make hea ``discrete=True`` reproduce ``discrete=FALSE`` (bamF)
+        # under the discrete=TRUE flag — a parity bug. The exact by lives at
+        # discrete=False (the non-discrete fitter reads raw). Do NOT "restore"
+        # the raw read. See discrete_mf's Parity note and
+        # .claude/plans/bam-rf1a-binned-by-parity.md.
         by_mask: Optional[np.ndarray] = None
         if spec.by is not None:
             if data is None:
@@ -5057,17 +5040,35 @@ def build_discrete_design(blocks: list[SmoothBlock],
                     "by-column on the original n rows. Pass ``data=`` "
                     "to build_discrete_design."
                 )
-            col = _eval_by_col(spec.by.expr, data)
-            arr = col.to_numpy() if isinstance(col, pl.Series) else col
-            if spec.by.kind == "factor":
-                by_mask = (arr == spec.by.level).astype(float)
-            elif spec.by.kind == "numeric":
-                by_mask = np.asarray(arr, dtype=float)
+            by_name = spec.by.expr
+            j_by = var_index.get(by_name, -1)
+            is_matrix_by = (
+                spec.by.kind == "numeric"
+                and j_by >= 0
+                and by_name in data.columns
+                and is_matrix_col(data[by_name])
+            )
+            if is_matrix_by:
+                # Binned matrix-arg by (RF summation): the per-cell weight is
+                # ``by_unique[k_by]`` — mgcv bamT (bam.r:2469-2483). Shape
+                # (n, n_sum); aligns column-for-column with the coordinate
+                # margins (jointly the same summation dimension).
+                nr_by = int(dframe.nr[j_by])
+                ks_lo, ks_hi = int(dframe.ks[j_by, 0]), int(dframe.ks[j_by, 1])
+                by_unique = np.asarray(dframe.mf[by_name][:nr_by], dtype=float)
+                by_mask = by_unique[dframe.k[:, ks_lo:ks_hi]]
             else:
-                raise ValueError(
-                    f"build_discrete_design: unsupported by.kind="
-                    f"{spec.by.kind!r} on smooth {block.label!r}"
-                )
+                col = _eval_by_col(spec.by.expr, data)
+                arr = col.to_numpy() if isinstance(col, pl.Series) else col
+                if spec.by.kind == "factor":
+                    by_mask = (arr == spec.by.level).astype(float)
+                elif spec.by.kind == "numeric":
+                    by_mask = np.asarray(arr, dtype=float)
+                else:
+                    raise ValueError(
+                        f"build_discrete_design: unsupported by.kind="
+                        f"{spec.by.kind!r} on smooth {block.label!r}"
+                    )
 
         terms.append(_DiscreteTerm(
             kind=kind,

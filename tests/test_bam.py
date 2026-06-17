@@ -319,11 +319,15 @@ def test_chicago_lag():
 # BEFORE the row-sum (mgcv smooth.r:3997-4008), mirroring the non-discrete
 # S1c path (formula.py:_summation_apply_blocks).
 #
-# hea's discrete path uses the EXACT (un-discretised) by=, so it pins to
-# mgcv ``bam(discrete=FALSE)`` (bamF) tightly. mgcv ``bam(discrete=TRUE)``
-# (bamT) additionally bins the by-variable (bam.r:2469-2483), a lossy step
-# hea does not yet replicate, so bamT is pinned loosely to document that
-# residual by-discretisation gap (bam-plan RF1 follow-up).
+# mgcv ``bam(discrete=TRUE)`` (bamT) BINS the matrix-arg by-variable
+# (bam.r:2469-2483: ``by.var <- dk$mf[[termk]]``; weight ``by.var[dk$k]``) —
+# a lossy step for a continuous by. hea ``discrete=True`` now replicates this
+# (RF1a fix): it weights the smooth by the **binned** by, so it pins to bamT
+# tightly. The EXACT (un-binned) by lives at ``bam(discrete=FALSE)`` (bamF) —
+# a continuous by makes bamF ≠ bamT by ~1e-3. Sourcing the raw by under
+# discrete=TRUE would be a parity bug (reproducing bamF under the bamT flag);
+# the bamF check below carries a lower bound to guard against that regression.
+# See .claude/plans/bam-rf1a-binned-by-parity.md.
 
 _RF_BY = Path(__file__).parent / "fixtures" / "bam_rf_by"
 
@@ -343,8 +347,11 @@ def _load_rf_matrix(name: str, cols: list[str]) -> dict:
 def test_bam_discrete_matrix_by_2d_matches_mgcv():
     """2-D ``te(Lag, Xc, by=Stim)`` signal regression under discrete=True.
 
-    The RF1 fix: matrix-arg by= must no longer broadcast-crash and must
-    reproduce the non-discrete (exact-by) REML fit.
+    Parity (RF1a): mgcv ``bam(discrete=TRUE)`` makes the by the term's first
+    rank-1 marginal (bam.r:2470-2482) and the fit applies the **binned** by
+    ``by.var[k[:, ks_by+q]]`` per summation column (discrete.c:tensorXb). hea
+    weights the smooth by that same binned by, so discrete=True must match
+    **bamT**, not bamF (exact-by, which lives at discrete=False).
     """
     sub = "te"
     d = _load_rf_matrix(sub, ["y"])
@@ -356,18 +363,22 @@ def test_bam_discrete_matrix_by_2d_matches_mgcv():
 
     fitF = np.loadtxt(_RF_BY / sub / "bamF_fitted.csv")
     fitT = np.loadtxt(_RF_BY / sub / "bamT_fitted.csv")
-    edfF = float(np.loadtxt(_RF_BY / sub / "bamF_edfsum.csv"))
+    edfT = float(np.loadtxt(_RF_BY / sub / "bamT_edfsum.csv"))
     fit_hea = np.asarray(m.fitted_values)
 
     rel_F = float(np.linalg.norm(fit_hea - fitF) / np.linalg.norm(fitF))
     rel_T = float(np.linalg.norm(fit_hea - fitT) / np.linalg.norm(fitT))
-    # Exact-by equivalence to mgcv bam(discrete=FALSE): the meaningful pin.
-    assert rel_F < 1e-5, f"hea-discrete vs mgcv bamF fitted rel {rel_F:.2e} > 1e-5"
-    assert abs(float(np.sum(m.edf)) - edfF) < 1e-3, (
-        f"edf {np.sum(m.edf):.5f} vs mgcv bamF {edfF:.5f}"
+    # Binned-by equivalence to mgcv bam(discrete=TRUE): the meaningful pin.
+    assert rel_T < 1e-6, f"hea-discrete vs mgcv bamT fitted rel {rel_T:.2e} > 1e-6"
+    assert abs(float(np.sum(m.edf)) - edfT) < 1e-4, (
+        f"edf {np.sum(m.edf):.5f} vs mgcv bamT {edfT:.5f}"
     )
-    # bamT bins the by-variable (hea doesn't yet) ⇒ only ~1e-3 close.
-    assert rel_T < 5e-3, f"hea-discrete vs mgcv bamT fitted rel {rel_T:.2e} > 5e-3"
+    # The exact (un-binned) by lives at discrete=False (== bamF); discrete=True
+    # is ~1e-3 off it. The lower bound guards against silently reverting to
+    # exact-by (the RF1a parity bug), which would collapse rel_F to ~1e-8.
+    assert 1e-4 < rel_F < 5e-3, (
+        f"hea-discrete vs mgcv bamF fitted rel {rel_F:.2e} not in (1e-4, 5e-3)"
+    )
 
 
 @pytest.mark.skipif(
@@ -386,16 +397,21 @@ def test_bam_discrete_matrix_by_1d_matches_mgcv():
 
     fitF = np.loadtxt(_RF_BY / sub / "bamF_fitted.csv")
     fitT = np.loadtxt(_RF_BY / sub / "bamT_fitted.csv")
-    edfF = float(np.loadtxt(_RF_BY / sub / "bamF_edfsum.csv"))
+    edfT = float(np.loadtxt(_RF_BY / sub / "bamT_edfsum.csv"))
     fit_hea = np.asarray(m.fitted_values)
 
     rel_F = float(np.linalg.norm(fit_hea - fitF) / np.linalg.norm(fitF))
     rel_T = float(np.linalg.norm(fit_hea - fitT) / np.linalg.norm(fitT))
-    assert rel_F < 1e-5, f"hea-discrete vs mgcv bamF fitted rel {rel_F:.2e} > 1e-5"
-    assert abs(float(np.sum(m.edf)) - edfF) < 1e-3, (
-        f"edf {np.sum(m.edf):.5f} vs mgcv bamF {edfF:.5f}"
+    # Binned-by equivalence to mgcv bam(discrete=TRUE): the meaningful pin.
+    assert rel_T < 1e-6, f"hea-discrete vs mgcv bamT fitted rel {rel_T:.2e} > 1e-6"
+    assert abs(float(np.sum(m.edf)) - edfT) < 1e-4, (
+        f"edf {np.sum(m.edf):.5f} vs mgcv bamT {edfT:.5f}"
     )
-    assert rel_T < 5e-3, f"hea-discrete vs mgcv bamT fitted rel {rel_T:.2e} > 5e-3"
+    # Exact-by lives at discrete=False (== bamF); discrete=True is ~1e-3 off.
+    # Lower bound guards against silently reverting to exact-by (RF1a bug).
+    assert 1e-4 < rel_F < 5e-3, (
+        f"hea-discrete vs mgcv bamF fitted rel {rel_F:.2e} not in (1e-4, 5e-3)"
+    )
 
 
 def test_bam_discrete_matrix_by_kernel_path_guarded():
