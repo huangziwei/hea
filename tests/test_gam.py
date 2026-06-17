@@ -7834,6 +7834,147 @@ def test_t2_fx_raises():
 
 
 # -----------------------------------------------------------------------------
+# S1c — matrix-argument (summation convention) te()/ti()/s() with a numeric
+# by= (anisotropic signal regression / distributed-lag / receptive-field
+# models). mgcv smoothCon (smooth.r:3877-4051) for a matrix argument:
+#   * scale.penalty on the LONG-FORM (n*m, p) X — *before* the by-multiply
+#     (3879); scaling the row-summed X gives a different S.scale.
+#   * numeric by-multiply on the long form, then row-block summation (3997).
+#   * the centering constraint is DROPPED when the by-matrix row-sums vary
+#     (sd(L1) > mean(L1)·eps·1000, 3925-3943) — so the smooth keeps all its
+#     raw columns (s k=6 → 7 coefs incl. intercept; te 5×4 → 21).
+#   * check.rank on the summed design (4035).
+# Factor by= and pc= with matrix args are rejected (mgcv stops on factor by,
+# smooth.r:3970). Fixed-sp pins validate the design+penalty+scale.penalty
+# independent of the outer optimiser. Pins: mgcv 1.9-4.
+# -----------------------------------------------------------------------------
+
+
+def _rf_matrix_fixture(seed: int = 42, n: int = 120, nlag: int = 6, nx: int = 4):
+    """Receptive-field-style matrix-arg fixture (R-bit-exact RNG draw order:
+    Stim1, Stim2, y-noise, then the no-by covariates A, B)."""
+    from hea.formula import normalize_data
+    from hea.R.rng import RGenerator
+    g = RGenerator(seed)
+    Stim1 = g.normal(0.0, 1.0, n * nlag).reshape(n, nlag, order="F")
+    Lag = np.tile(np.arange(nlag, dtype=float), (n, 1))
+    m2 = nlag * nx
+    Stim2 = g.normal(0.0, 1.0, n * m2).reshape(n, m2, order="F")
+    lag2 = np.array([lg for x in range(nx) for lg in range(nlag)], dtype=float)
+    xc = np.array([x for x in range(nx) for lg in range(nlag)], dtype=float)
+    Lag2 = np.tile(lag2, (n, 1))
+    Xc = np.tile(xc, (n, 1))
+    eta = Stim1 @ np.exp(-np.arange(nlag) / 2.0) * 1.2
+    y = eta + g.normal(0.0, 1.0, n) * 0.5
+    A = g.uniform(0.0, 1.0, n * 8).reshape(n, 8, order="F")
+    B = g.uniform(0.0, 1.0, n * 8).reshape(n, 8, order="F")
+    return normalize_data({"y": y, "Stim1": Stim1, "Lag": Lag, "Stim2": Stim2,
+                           "Lag2": Lag2, "Xc": Xc, "A": A, "B": B})
+
+
+def test_s_matrix_arg_by_matches_mgcv():
+    """1-D matrix-arg s(Lag, by=Stim) (temporal RF). The varying by-matrix
+    row-sums drop the centering constraint ⇒ 7 coefs (1 intercept + 6 raw),
+    not 6. Free fit lands in the flat-optimum band; sp= is exact."""
+    d = _rf_matrix_fixture()
+    m = gam("y ~ s(Lag, by=Stim1, k=6)", d, method="REML")
+    assert len(np.asarray(m.coef)) == 7                       # no constraint dropped
+    assert float(np.sum(m.edf)) == pytest.approx(5.42301495, rel=1e-5)
+    assert m.REML_criterion / 2 == pytest.approx(95.1808698, abs=1e-4)
+    assert float(m.scale) == pytest.approx(0.244131395, rel=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(m.fitted_values)[:3],
+        [-0.111997576, -2.01465219, 0.78631313], atol=1e-4)
+    # fixed sp — exact (design + penalty + scale.penalty, no optimiser)
+    mf = gam("y ~ s(Lag, by=Stim1, k=6)", d, method="REML", sp=[0.5])
+    assert float(np.sum(mf.edf)) == pytest.approx(4.83969374, rel=1e-6)
+    assert mf.REML_criterion / 2 == pytest.approx(95.7033854, abs=1e-6)
+    assert float(mf.scale) == pytest.approx(0.24526852, rel=1e-6)
+    assert float(mf.deviance) == pytest.approx(28.2451979, rel=1e-6)
+
+
+def test_te_matrix_arg_by_matches_mgcv():
+    """Anisotropic 2-D matrix-arg te(Lag, Xc, by=Stim) — the distributed-lag /
+    spatiotemporal RF model (was NotImplementedError). Per-margin smoothing,
+    no centering constraint (21 = 1 + 5·4 coefs). predict() reproduces the
+    in-sample fit through the BasisSpec replay (raw → by → row-sum → no
+    absorb). Free + fixed-sp pins, mgcv 1.9-4."""
+    d = _rf_matrix_fixture()
+    m = gam("y ~ te(Lag2, Xc, by=Stim2, k=c(5,4))", d, method="REML")
+    assert len(np.asarray(m.coef)) == 21
+    assert float(np.sum(m.edf)) == pytest.approx(6.38619524, rel=1e-5)
+    assert m.REML_criterion / 2 == pytest.approx(222.256481, abs=1e-4)
+    assert float(m.scale) == pytest.approx(2.21967292, rel=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(m.fitted_values)[:3],
+        [-0.143668096, -0.0772378245, 0.647804128], atol=1e-5)
+    # predict on the first 4 (in-sample) rows reproduces the fit
+    from hea.formula import normalize_data
+    nd = normalize_data({"Lag2": d["Lag2"].to_numpy()[:4],
+                         "Xc": d["Xc"].to_numpy()[:4],
+                         "Stim2": d["Stim2"].to_numpy()[:4]})
+    pr = np.asarray(m.predict(nd)).ravel()
+    np.testing.assert_allclose(
+        pr, [-0.143668096, -0.0772378245, 0.647804128, 0.193445483], atol=1e-5)
+    # fixed sp — exact, including coefficients
+    mf = gam("y ~ te(Lag2, Xc, by=Stim2, k=c(5,4))", d, method="REML",
+             sp=[0.3, 2.0])
+    assert float(np.sum(mf.edf)) == pytest.approx(20.8201247, rel=1e-6)
+    assert mf.REML_criterion / 2 == pytest.approx(261.321131, abs=1e-6)
+    assert float(mf.scale) == pytest.approx(2.38783979, rel=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(mf.coef)[:5],
+        [-0.121393561, -0.172502089, 0.102475379, -0.0678943387,
+         -0.0657378187], atol=1e-6)
+
+
+def test_ti_matrix_arg_by_matches_mgcv():
+    """Matrix-arg ti(Lag, Xc, by=Stim) — the pure-interaction tensor (centered
+    margins, no outer constraint). Free + fixed-sp, mgcv 1.9-4."""
+    d = _rf_matrix_fixture()
+    m = gam("y ~ ti(Lag2, Xc, by=Stim2, k=c(5,4))", d, method="REML")
+    assert len(np.asarray(m.coef)) == 13
+    assert float(np.sum(m.edf)) == pytest.approx(2.67806372, rel=1e-5)
+    assert m.REML_criterion / 2 == pytest.approx(221.768248, abs=1e-4)
+    mf = gam("y ~ ti(Lag2, Xc, by=Stim2, k=c(5,4))", d, method="REML",
+             sp=[0.4, 1.1])
+    assert float(np.sum(mf.edf)) == pytest.approx(12.64987, rel=1e-6)
+    assert mf.REML_criterion / 2 == pytest.approx(240.652234, abs=1e-6)
+    assert float(mf.scale) == pytest.approx(2.38504158, rel=1e-6)
+
+
+def test_te_matrix_arg_no_by_scale_penalty_matches_mgcv():
+    """No-by matrix-arg te(A, B): locks the scale.penalty-on-long-form fix
+    (previously scaled on the row-summed X → wrong S.scale, wrong fit). Fixed
+    sp pins coef-level, mgcv 1.9-4."""
+    d = _rf_matrix_fixture()
+    mf = gam("y ~ te(A, B, k=c(4,4))", d, method="REML", sp=[0.7, 1.3])
+    assert len(np.asarray(mf.coef)) == 16
+    assert float(np.sum(mf.edf)) == pytest.approx(14.6812672, rel=1e-6)
+    assert mf.REML_criterion / 2 == pytest.approx(234.960699, abs=1e-6)
+    assert float(mf.scale) == pytest.approx(2.39505718, rel=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(mf.coef)[:4],
+        [-0.0446469446, 0.119795764, 0.0241560802, 0.141054417], atol=1e-6)
+
+
+def test_matrix_arg_by_unsupported_forms_raise():
+    """Honest raises (no silent mis-fit): factor by= (mgcv stops too,
+    smooth.r:3970), t2() matrix args (no summation port), and pc= with a
+    matrix argument."""
+    d = _rf_matrix_fixture()
+    d = d.with_columns(
+        fac=pl.Series((np.arange(d.height) % 2).astype(str)))
+    with pytest.raises(NotImplementedError, match="factor by="):
+        gam("y ~ te(Lag2, Xc, by=fac, k=c(5,4))", d, method="REML")
+    with pytest.raises(NotImplementedError, match="t2.. with matrix arguments"):
+        gam("y ~ t2(Lag2, Xc, by=Stim2)", d, method="REML")
+    with pytest.raises(NotImplementedError, match="pc="):
+        gam("y ~ te(Lag2, Xc, by=Stim2, pc=c(1.0, 1.0), k=c(5,4))", d,
+            method="REML")
+
+
+# -----------------------------------------------------------------------------
 # S2 — bs="mrf" (Markov random field). Region indicator basis + graph-Laplacian
 # penalty from a neighbour list (or a supplied penalty matrix). xt threaded via
 # gam(xt={region: {...}}) — the object-arg channel, like knots=. Default k =

@@ -1028,6 +1028,20 @@ _SPARSE_CONS_CV: contextvars.ContextVar[int] = contextvars.ContextVar(
 )
 
 
+# mgcv's summation convention (smoothCon with a matrix argument): when set,
+# the per-bs builders return the RAW long-form (n*m, p_raw) block — no
+# scale.penalty, no by-multiply, no absorb.cons — and defer all of that to
+# ``_summation_apply_blocks``, which runs mgcv's smoothCon pipeline on the
+# correct shapes (scale.penalty on the long-form X, then by-multiply, then
+# row-summation, then the centering constraint and check.rank on the summed
+# X). Set by ``materialize_smooths`` around the matrix-arg ``_dispatch`` call;
+# consulted in ``_apply_by_and_absorb`` (s-family / t2) and honoured inline by
+# ``_build_te_smooth`` (te/ti). Default ``False`` ⇒ ordinary (scalar-arg) path.
+_MATRIX_ARG_CV: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_hea_matrix_arg", default=False
+)
+
+
 # mgcv's ``tero`` (bam.r:1900-1917) reorders te/ti/t2 margins so the largest
 # basis (by ``bs.dim``, broken ties by latest position) is *last*. It runs
 # only on the ``discrete=TRUE`` path (bam.r:2103-2129) before ``discrete.mf``,
@@ -3772,6 +3786,56 @@ def _factor_levels(col: pl.Series) -> list:
     return sorted(uniq, key=_factor_sort_key)
 
 
+def _defer_matrix_block(
+    call: Call,
+    data: pl.DataFrame,
+    X: np.ndarray,
+    S_list: list[np.ndarray],
+    cls: str,
+    term: list[str],
+    raw_basis: _RawBasis | None,
+) -> list[SmoothBlock]:
+    """Matrix-argument (summation-convention) deferral.
+
+    Returns the single RAW long-form block: ``X`` is the (n*m, p_raw) basis,
+    ``S_list`` the symmetrised (but *un-scaled*) penalties, and the spec
+    records the numeric ``by=`` (if any). ``_summation_apply_blocks`` then runs
+    mgcv's ``smoothCon`` pipeline in order — scale.penalty on this long-form X
+    (smooth.r:3879, *before* the by-multiply), by-multiply + summation
+    (smooth.r:3997-4008), the centering constraint (dropped when the by-matrix
+    row-sums vary, smooth.r:3925-3943) and check.rank (smooth.r:4035) on the
+    row-summed (n, p) design.
+
+    Factor ``by`` and ``pc=`` are rejected: mgcv itself stops on a factor by
+    with matrix arguments (smooth.r:3970), and the point-constraint path has no
+    summation-convention analogue.
+    """
+    base_label = _smooth_label(call)
+    if _smooth_pc_value(call) is not None:
+        raise NotImplementedError(
+            f"pc= point constraint with a matrix-argument (summation "
+            f"convention) smooth ({base_label}) is not supported"
+        )
+    by_expr = _smooth_by_expr(call)
+    by_mask: _ByMask | None = None
+    label = base_label
+    if by_expr is not None:
+        by_col = _eval_by_col(by_expr, data)
+        if _is_factor_like(by_col):
+            raise NotImplementedError(
+                f"factor by= cannot be used with matrix-argument (summation "
+                f"convention) smooths ({base_label}); mgcv stops here too "
+                "(smooth.r:3970). Use a numeric by."
+            )
+        by_mask = _ByMask(expr=by_expr, kind="numeric")
+        label = f"{base_label}:{by_expr}"
+    spec = (
+        BasisSpec(raw=raw_basis, by=by_mask, absorb=None)
+        if raw_basis is not None else None
+    )
+    return [SmoothBlock(label=label, term=term, cls=cls, X=X, S=S_list, spec=spec)]
+
+
 def _apply_by_and_absorb(
     call: Call,
     data: pl.DataFrame,
@@ -3821,6 +3885,11 @@ def _apply_by_and_absorb(
         # absorb — the caller re-enters per linked smooth.
         _id_cap.update(X=X, S=S_list, raw=raw_basis, cls=cls)
         return []
+    if _MATRIX_ARG_CV.get():
+        # Matrix-argument (summation convention): defer scale.penalty / by /
+        # absorb to _summation_apply_blocks, which has the long-vs-summed
+        # shapes mgcv's smoothCon needs. S is already symmetrised above.
+        return _defer_matrix_block(call, data, X, S_list, cls, term, raw_basis)
     if not pre_scaled:
         S_list, S_scale = _scale_penalty(X, S_list)
     elif S_scale is None:
@@ -7607,6 +7676,18 @@ def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
     term_all = _smooth_term_vars(call)
     tensor_raw = _TensorRawBasis(margins=margin_raws)
 
+    if matrix_arg:
+        # Matrix-argument (summation convention) te()/ti(): defer
+        # scale.penalty (on the long-form X) + numeric by-multiply + row-sum +
+        # the centering constraint + check.rank to _summation_apply_blocks,
+        # which has the long-vs-summed shapes mgcv's smoothCon needs. For ti
+        # (inter) the dispatcher passes no_outer_cons=True so the centering
+        # step is skipped regardless of the by-row-sum test. Symmetrize S now.
+        S_list = [(S + S.T) / 2.0 for S in S_list]
+        return _defer_matrix_block(
+            call, data, X, S_list, cls, term_all, tensor_raw,
+        )
+
     if inter:
         # Skip outer absorb.cons (C = matrix(0,0,0)).
         S_list, S_scale = _scale_penalty(X, S_list)
@@ -7614,26 +7695,6 @@ def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
             label=label, term=term_all, cls=cls, X=X, S=S_list,
             spec=BasisSpec(raw=tensor_raw, by=None, absorb=None),
             S_scale=S_scale,
-        )]
-
-    if matrix_arg:
-        # Defer scale.penalty + absorb.cons + check.rank to
-        # _summation_apply_blocks (mgcv's sparse.cons=-1 path: those steps
-        # run on the row-summed (n, p_raw) X). Symmetrize S now so callers
-        # don't need to.
-        S_list = [(S + S.T) / 2.0 for S in S_list]
-        by_expr = _smooth_by_expr(call)
-        if by_expr is not None:
-            raise NotImplementedError(
-                "by= with matrix-arg te() is not yet supported"
-            )
-        if _smooth_pc_value(call) is not None:
-            raise NotImplementedError(
-                "pc= point constraint with matrix-arg te() is not yet supported"
-            )
-        return [SmoothBlock(
-            label=label, term=term_all, cls=cls, X=X, S=S_list,
-            spec=BasisSpec(raw=tensor_raw, by=None, absorb=None),
         )]
 
     # te: outer absorb.cons.
@@ -7644,6 +7705,7 @@ def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
 
 def _build_ti_smooth(
     call: Call, data: pl.DataFrame, knots: dict | None = None,
+    matrix_arg: bool = False,
 ) -> list[SmoothBlock]:
     """`ti(...)` — like te but each margin is centered (absorb.cons
     applied) before the tensor, and the outer absorb.cons is skipped.
@@ -7656,7 +7718,9 @@ def _build_ti_smooth(
         mc_vals = [_te_cast_int(a) != 0 for a in mc_src.args]
     else:
         mc_vals = [_te_cast_int(mc_src) != 0]
-    return _build_te_smooth(call, data, inter=True, mc=mc_vals, knots=knots)
+    return _build_te_smooth(
+        call, data, inter=True, mc=mc_vals, matrix_arg=matrix_arg, knots=knots,
+    )
 
 
 def _t2_margin_raw_and_rank(
@@ -7979,28 +8043,32 @@ def _check_rank(
 
 def _summation_apply_blocks(
     blocks: list[SmoothBlock], n: int, m: int, matrix_vars: list[str],
+    long_data: pl.DataFrame, no_outer_cons: bool = False,
 ) -> list[SmoothBlock]:
-    """Reshape each long-form block's X (n*m, p) → (n, p), then run mgcv's
-    ``smoothCon`` post-construction pipeline on the row-summed design.
+    """Run mgcv's ``smoothCon`` matrix-argument pipeline on each raw long-form
+    block, in mgcv's order (smooth.r:3877-4051):
 
-    For matrix-arg smooths, mgcv runs ``smooth.construct.<bs>.smooth.spec``
-    with ``matrixArg=TRUE``, which returns ``sm$X`` already row-summed
-    (n × p_raw); ``smoothCon`` then applies in this order:
+      1. ``scale.penalty`` — rescale each ``S`` against
+         ``maXX = norm(X,"I")^2`` of the **long-form** (n*m, p) X, *before* the
+         by-multiply (smooth.r:3879). Scaling on the row-summed X instead
+         inflates maXX by the summation and gives a different ``S.scale``.
+      2. numeric ``by``-multiply on the long form, then row-block summation
+         ``Σ_k by[i,k]·X[i,k,:]`` (smooth.r:3997-4008).
+      3. centering constraint — applied unless either the by-matrix row-sums
+         ``L1[i]=Σ_k by[i,k]`` vary (``sd(L1) > mean(L1)·eps·1000`` ⇒ no
+         constraint, smooth.r:3925-3943) or ``no_outer_cons`` (ti, whose
+         margins are already centered). ``sparse.cons=-1`` ⇒ sweep-drop.
+      4. ``check.rank`` — pivoted-Cholesky probe on the summed (n, p) design
+         (matrixArg always sets ``check.rank=TRUE``, smooth.r:4035).
 
-      * ``scale.penalty`` — rescales each ``S`` against ``maXX = norm(X,"I")^2``
-      * ``sparse.cons = -1`` (the ``bam(discrete=FALSE)`` setting):
-        sweep-drop absorb (drop min-variance col, de-mean the rest).
-      * ``check.rank`` — pivoted-Cholesky probe of
-        ``X'X/|X'X|_1 + Σ S_i/|S_i|_1`` to drop trailing redundant cols.
-
-    Each step happens on the row-summed (n, p) matrix, NOT the long form, so
-    the col means/variances and norms match mgcv exactly. The matching
-    predict-time replay (``BasisSpec.predict_mat``) row-sums first, then
-    applies absorb + ``keep_cols``.
+    The matching predict-time replay (``BasisSpec.predict_mat``) evaluates the
+    raw basis on the long form, by-multiplies, row-sums, then applies absorb +
+    ``keep_cols`` — the same order.
     """
     out: list[SmoothBlock] = []
     mvars = tuple(matrix_vars)
     sparse_cons = _SPARSE_CONS_CV.get()
+    eps = float(np.finfo(float).eps)
     for b in blocks:
         X = b.X
         if X.shape[0] != n * m:
@@ -8008,14 +8076,34 @@ def _summation_apply_blocks(
                 f"matrix-arg summation: builder for {b.label!r} returned X "
                 f"with {X.shape[0]} rows, expected n*m = {n*m}"
             )
-        X_summed = X.reshape(n, m, X.shape[1]).sum(axis=1)
         S_list = list(b.S)
-        # mgcv smoothCon pipeline on the row-summed design.
-        S_list, S_scale = _scale_penalty(X_summed, S_list)
-        if sparse_cons == -1:
-            X_summed, S_list, abs_T = _absorb_sweep_drop(X_summed, S_list)
-        else:
-            X_summed, S_list, abs_T = _absorb_sumzero(X_summed, S_list)
+        # (1) scale.penalty on the long-form (pre-by) X.
+        S_list, S_scale = _scale_penalty(X, S_list)
+        # (2) numeric by-multiply (long form) + the centering-constraint test.
+        drop_cons = False
+        by_mask = b.spec.by if b.spec is not None else None
+        if by_mask is not None:
+            by_col = _eval_by_col(by_mask.expr, long_data)
+            by_arr = (by_col.to_numpy() if isinstance(by_col, pl.Series)
+                      else np.asarray(by_col))
+            by_arr = by_arr.astype(float)
+            X = X * by_arr[:, None]
+            # L1 = row-sums of the by-matrix (one per original row). mgcv drops
+            # the centering constraint when these vary (sd(L1) on R's n-1
+            # denominator vs the signed mean — mean<0 ⇒ RHS<0 ⇒ always drop).
+            L1 = by_arr.reshape(n, m).sum(axis=1)
+            sd_L1 = float(np.std(L1, ddof=1)) if n > 1 else 0.0
+            drop_cons = sd_L1 > float(np.mean(L1)) * eps * 1000.0
+        # (3) row-block summation.
+        X_summed = X.reshape(n, m, X.shape[1]).sum(axis=1)
+        # (4) centering constraint (unless ti, or dropped by the by-row test).
+        abs_T = None
+        if not no_outer_cons and not drop_cons:
+            if sparse_cons == -1:
+                X_summed, S_list, abs_T = _absorb_sweep_drop(X_summed, S_list)
+            else:
+                X_summed, S_list, abs_T = _absorb_sumzero(X_summed, S_list)
+        # (5) check.rank (always, for matrixArg).
         X_summed, S_list, keep_mask = _check_rank(X_summed, S_list)
         if b.spec is not None:
             b.spec.summation_dim = m
@@ -8146,7 +8234,7 @@ def materialize_smooths(
             if call.fn == "te":
                 return _build_te_smooth(call, d, matrix_arg=matrix_arg, knots=knots)
             if call.fn == "ti":
-                return _build_ti_smooth(call, d, knots=knots)
+                return _build_ti_smooth(call, d, knots=knots, matrix_arg=matrix_arg)
             return _build_t2_smooth(call, d, knots=knots)
         bs = _smooth_bs(call)
         if bs == "re":
@@ -8307,9 +8395,24 @@ def materialize_smooths(
                     )
                 blocks = _dispatch_id_linked(call_group[i], i)
             elif mvars:
+                if call.fn == "t2":
+                    # t2()'s fit/predict basis remap (sm$Cp full absorb) has no
+                    # summation-convention port; the deferred matrix pipeline
+                    # would double-absorb. Honest raise, not a silent mis-fit.
+                    raise NotImplementedError(
+                        f"{_smooth_label(call)}: t2() with matrix arguments "
+                        "(summation convention) is not supported; use te()."
+                    )
                 long_data, n_orig, m = long_form_view(data, mvars)
-                blocks = _dispatch(call, long_data, matrix_arg=True)
-                blocks = _summation_apply_blocks(blocks, n_orig, m, mvars)
+                ma_token = _MATRIX_ARG_CV.set(True)
+                try:
+                    blocks = _dispatch(call, long_data, matrix_arg=True)
+                finally:
+                    _MATRIX_ARG_CV.reset(ma_token)
+                blocks = _summation_apply_blocks(
+                    blocks, n_orig, m, mvars, long_data,
+                    no_outer_cons=(call.fn == "ti"),
+                )
             else:
                 blocks = _dispatch(call, data)
             out.append(blocks)
