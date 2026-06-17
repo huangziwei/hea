@@ -309,6 +309,117 @@ def test_chicago_lag():
 
 
 # =============================================================================
+# 2b. RF signal-regression: matrix-argument by= under discrete=True (RF1)
+# =============================================================================
+#
+# bam(discrete=TRUE) with a matrix-argument ``by=`` (mgcv summation
+# convention) was the RF1 blocker — ``_term_full_design`` applied the
+# (n, n_sum) by-matrix as a length-n scalar mask AFTER the row-sum and
+# raised a broadcast error. The fix multiplies the by per summation column
+# BEFORE the row-sum (mgcv smooth.r:3997-4008), mirroring the non-discrete
+# S1c path (formula.py:_summation_apply_blocks).
+#
+# hea's discrete path uses the EXACT (un-discretised) by=, so it pins to
+# mgcv ``bam(discrete=FALSE)`` (bamF) tightly. mgcv ``bam(discrete=TRUE)``
+# (bamT) additionally bins the by-variable (bam.r:2469-2483), a lossy step
+# hea does not yet replicate, so bamT is pinned loosely to document that
+# residual by-discretisation gap (bam-plan RF1 follow-up).
+
+_RF_BY = Path(__file__).parent / "fixtures" / "bam_rf_by"
+
+
+def _load_rf_matrix(name: str, cols: list[str]) -> dict:
+    out = {}
+    for c in cols:
+        arr = pl.read_csv(str(_RF_BY / f"{name}_{c}.csv")).to_numpy().astype(float)
+        out[c] = arr.ravel() if c == "y" else arr
+    return out
+
+
+@pytest.mark.skipif(
+    not (_RF_BY / "te" / "bamF_fitted.csv").exists(),
+    reason="bam_rf_by oracle missing — run tests/r_oracle/dump_bam_rf_by.R",
+)
+def test_bam_discrete_matrix_by_2d_matches_mgcv():
+    """2-D ``te(Lag, Xc, by=Stim)`` signal regression under discrete=True.
+
+    The RF1 fix: matrix-arg by= must no longer broadcast-crash and must
+    reproduce the non-discrete (exact-by) REML fit.
+    """
+    sub = "te"
+    d = _load_rf_matrix(sub, ["y"])
+    M = _load_rf_matrix(sub, ["Lag", "Xc", "Stim"])
+    dat = {"y": d["y"], "Lag": M["Lag"], "Xc": M["Xc"], "Stim": M["Stim"]}
+    f = "y ~ te(Lag, Xc, by=Stim, k=c(4,3))"
+
+    m = hea.models.bam(f, dat, family=Poisson(), discrete=True)
+
+    fitF = np.loadtxt(_RF_BY / sub / "bamF_fitted.csv")
+    fitT = np.loadtxt(_RF_BY / sub / "bamT_fitted.csv")
+    edfF = float(np.loadtxt(_RF_BY / sub / "bamF_edfsum.csv"))
+    fit_hea = np.asarray(m.fitted_values)
+
+    rel_F = float(np.linalg.norm(fit_hea - fitF) / np.linalg.norm(fitF))
+    rel_T = float(np.linalg.norm(fit_hea - fitT) / np.linalg.norm(fitT))
+    # Exact-by equivalence to mgcv bam(discrete=FALSE): the meaningful pin.
+    assert rel_F < 1e-5, f"hea-discrete vs mgcv bamF fitted rel {rel_F:.2e} > 1e-5"
+    assert abs(float(np.sum(m.edf)) - edfF) < 1e-3, (
+        f"edf {np.sum(m.edf):.5f} vs mgcv bamF {edfF:.5f}"
+    )
+    # bamT bins the by-variable (hea doesn't yet) ⇒ only ~1e-3 close.
+    assert rel_T < 5e-3, f"hea-discrete vs mgcv bamT fitted rel {rel_T:.2e} > 5e-3"
+
+
+@pytest.mark.skipif(
+    not (_RF_BY / "s" / "bamF_fitted.csv").exists(),
+    reason="bam_rf_by oracle missing — run tests/r_oracle/dump_bam_rf_by.R",
+)
+def test_bam_discrete_matrix_by_1d_matches_mgcv():
+    """1-D ``s(Lag, by=Stim)`` signal regression under discrete=True."""
+    sub = "s"
+    d = _load_rf_matrix(sub, ["y"])
+    M = _load_rf_matrix(sub, ["Lag", "Stim"])
+    dat = {"y": d["y"], "Lag": M["Lag"], "Stim": M["Stim"]}
+    f = "y ~ s(Lag, by=Stim, k=8)"
+
+    m = hea.models.bam(f, dat, family=Poisson(), discrete=True)
+
+    fitF = np.loadtxt(_RF_BY / sub / "bamF_fitted.csv")
+    fitT = np.loadtxt(_RF_BY / sub / "bamT_fitted.csv")
+    edfF = float(np.loadtxt(_RF_BY / sub / "bamF_edfsum.csv"))
+    fit_hea = np.asarray(m.fitted_values)
+
+    rel_F = float(np.linalg.norm(fit_hea - fitF) / np.linalg.norm(fitF))
+    rel_T = float(np.linalg.norm(fit_hea - fitT) / np.linalg.norm(fitT))
+    assert rel_F < 1e-5, f"hea-discrete vs mgcv bamF fitted rel {rel_F:.2e} > 1e-5"
+    assert abs(float(np.sum(m.edf)) - edfF) < 1e-3, (
+        f"edf {np.sum(m.edf):.5f} vs mgcv bamF {edfF:.5f}"
+    )
+    assert rel_T < 5e-3, f"hea-discrete vs mgcv bamT fitted rel {rel_T:.2e} > 5e-3"
+
+
+def test_bam_discrete_matrix_by_kernel_path_guarded():
+    """The opt-in scatter kernels don't apply by= weighting (bam-plan P2);
+    they must fail loudly on a by-term, not silently miscompute."""
+    from hea.models.bam import XWXd, _assert_kernels_support
+    # Build a tiny matrix-by design to get a DiscreteDesign with a by-term,
+    # then assert the kernel guard trips.
+    rng = np.random.default_rng(0)
+    n, mm = 80, 6
+    Lag = np.tile(np.arange(mm, dtype=float), (n, 1))
+    Stim = rng.standard_normal((n, mm))
+    yv = rng.poisson(1.0, n).astype(float)
+    m = hea.models.bam("y ~ s(Lag, by=Stim, k=5)",
+                       {"y": yv, "Lag": Lag, "Stim": Stim},
+                       family=Poisson(), discrete=True)
+    design = m._discrete_design
+    with pytest.raises(NotImplementedError, match="by="):
+        _assert_kernels_support(design)
+    with pytest.raises(NotImplementedError, match="by="):
+        XWXd(design, np.ones(n), use_kernel=True)
+
+
+# =============================================================================
 # 3. small_data oracle (Phase 1 + Phase 2′)
 # =============================================================================
 

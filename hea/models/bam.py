@@ -4795,10 +4795,11 @@ class _DiscreteTerm:
     absorb: Optional[object] = None
     by: Optional[object] = None
     keep_cols: Optional[np.ndarray] = None
-    # Pre-computed length-n by-mask (factor: indicator; numeric: scalar
-    # multiplier). Cached at design-build time because the by-column lives
-    # in the original input data, not in ``dframe.mf`` (which only carries
-    # discretised marginals). Invariant under PIRLS / outer-Newton.
+    # Pre-computed by-mask (factor: length-n indicator; numeric scalar:
+    # length-n multiplier; numeric matrix-arg: (n, n_sum) per-summation-
+    # column weights). Cached at design-build time because the by-column
+    # lives in the original input data, not in ``dframe.mf`` (which only
+    # carries discretised marginals). Invariant under PIRLS / outer-Newton.
     by_mask: Optional[np.ndarray] = None
     # Predict-time replay (used for predict.bamd, not the fitter).
     spec: Optional[BasisSpec] = None
@@ -4933,8 +4934,11 @@ def build_discrete_design(blocks: list[SmoothBlock],
 
         # Pre-compute the by-mask on the original n rows so the kernels
         # (which can't see ``data``) can apply it row-wise. Factor:
-        # indicator (col == level), float; numeric: col values, float.
-        # Both apply identically as ``X *= by_mask[:, None]``.
+        # indicator (col == level), float, length n; numeric scalar: col
+        # values, float, length n. A numeric **matrix-arg** by= (mgcv
+        # summation convention) yields an (n, n_sum) array — one weight per
+        # row × summation column — applied per-column before the row-sum in
+        # ``_term_full_design``; scalar/factor masks apply once after.
         by_mask: Optional[np.ndarray] = None
         if spec.by is not None:
             if data is None:
@@ -5056,7 +5060,27 @@ def _term_full_design(term: _DiscreteTerm, k: np.ndarray, n: int) -> np.ndarray:
     q_lo, q_hi = term.k_cols[0]
     n_sum = q_hi - q_lo
 
-    # Khatri-Rao across margins, then sum over summation columns.
+    # ``by`` semantics (mgcv smooth.r:3997-4008): a numeric **matrix-arg**
+    # by= weights *per summation column* on the long form, BEFORE the row-sum
+    # — ``X_summed[i] = Σ_q by[i,q]·basis(coord[i,q])``. A scalar/factor by=
+    # (length-n) is constant across summation columns, so it factors out of
+    # the sum and is applied once afterwards (cheaper, numerically identical).
+    # The matrix case mirrors the non-discrete S1c path
+    # (formula.py:_summation_apply_blocks: by-multiply on the long form, then
+    # row-block summation); centering-drop + scale.penalty already happened
+    # at materialize time and are inherited via ``term.absorb`` / the scaled
+    # ``S`` — only the by-weighting is replayed here.
+    by_mask = term.by_mask
+    by_is_matrix = by_mask is not None and by_mask.ndim == 2
+    if by_is_matrix and by_mask.shape[1] != n_sum:
+        raise ValueError(
+            f"matrix-arg by= has {by_mask.shape[1]} summation columns but "
+            f"the term's coordinate margins have {n_sum}; mgcv requires the "
+            "by-matrix to match the matrix-argument dimension."
+        )
+
+    # Khatri-Rao across margins, by-weight per column, then sum over
+    # summation columns.
     X_full = None
     for q_off in range(n_sum):
         # For each margin, gather rows: Xd_j[k[:, ks_j_lo + q_off], :]
@@ -5074,17 +5098,21 @@ def _term_full_design(term: _DiscreteTerm, k: np.ndarray, n: int) -> np.ndarray:
                 pa = Xq.shape[1]
                 pb = nxt.shape[1]
                 Xq = (Xq[:, :, None] * nxt[:, None, :]).reshape(-1, pa * pb)
+        if by_is_matrix:
+            Xq = Xq * by_mask[:, q_off][:, None]
         if X_full is None:
             X_full = Xq
         else:
             X_full = X_full + Xq
 
-    # Apply by-mask, then absorb, then keep_cols. Order matches
-    # ``BasisSpec.predict_mat`` (formula.py:2415-2435): raw → by → absorb.
-    # ``term.by_mask`` is pre-computed length-n at build_discrete_design
-    # time (factor: indicator; numeric: scalar multiplier per row).
-    if term.by_mask is not None:
-        X_full = X_full * term.by_mask[:, None]
+    # Apply (scalar/factor) by-mask, then absorb, then keep_cols. Order
+    # matches ``BasisSpec.predict_mat`` (formula.py:2415-2435): raw → by →
+    # absorb. ``term.by_mask`` is pre-computed at build_discrete_design time
+    # (factor: indicator; numeric scalar: length-n multiplier per row;
+    # numeric matrix: (n, n_sum) weights, applied per-column in the loop
+    # above).
+    if by_mask is not None and not by_is_matrix:
+        X_full = X_full * by_mask[:, None]
     if term.absorb is not None:
         X_full = term.absorb.apply(X_full)
     if term.keep_cols is not None:
@@ -5474,6 +5502,27 @@ def _general_XWX(term_a: _DiscreteTerm, term_b: _DiscreteTerm,
 # ---------------------------------------------------------------------------
 
 
+def _assert_kernels_support(design: DiscreteDesign) -> None:
+    """Guard the opt-in scatter-kernel path against unsupported terms.
+
+    The per-term scatter kernels (``_term_Xb_raw`` / ``_term_pair_XWX_raw``
+    / ``_term_Xty_raw``) operate purely on the unconstrained raw column
+    space and do **not** apply ``term.by_mask`` — so a ``by=`` term would be
+    computed without its by-weighting. The default full-X path
+    (:func:`discrete_full_X` → :func:`_term_full_design`) handles by= (incl.
+    matrix-arg summation); wiring by= into the kernels is bam-plan queue P2.
+    Until then, fail loudly rather than return a silently-wrong Gram.
+    """
+    for t in design.terms:
+        if t.by_mask is not None:
+            raise NotImplementedError(
+                f"discrete scatter kernels (use_kernel=True) do not apply "
+                f"by= weighting for term {t.label!r}; use the default "
+                "full-X path (use_kernel=False). Kernel by= support is "
+                "bam-parity queue P2."
+            )
+
+
 def Xbd(design: DiscreteDesign, beta: np.ndarray,
         *, X: Optional[np.ndarray] = None,
         use_kernel: bool = False) -> np.ndarray:
@@ -5492,6 +5541,7 @@ def Xbd(design: DiscreteDesign, beta: np.ndarray,
         return X @ beta
     if not use_kernel:
         return discrete_full_X(design) @ beta
+    _assert_kernels_support(design)
     n = design.n
     eta = np.zeros(n, dtype=float)
     Ts = _design_constraint_Ts(design)
@@ -5527,6 +5577,7 @@ def XWXd(design: DiscreteDesign, w: np.ndarray,
         # ``X' (w·X)`` is the same FLOP count and handles any sign.
         return X.T @ (w_arr[:, None] * X)
 
+    _assert_kernels_support(design)
     n = design.n
     p = design.p
     XWX = np.zeros((p, p), dtype=float)
@@ -5582,6 +5633,7 @@ def XWyd(design: DiscreteDesign, w: np.ndarray, y: np.ndarray,
     if X is not None:
         return X.T @ (w_arr * y_arr)
 
+    _assert_kernels_support(design)
     n = design.n
     p = design.p
     wy = w_arr * y_arr
