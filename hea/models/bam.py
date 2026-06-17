@@ -69,17 +69,23 @@ from ..formula import (
     _T2RawBasis,
     _TensorRawBasis,
     is_matrix_col,
+    materialize,
     materialize_smooths,
     matrix_to_2d,
+    normalize_data,
     prepare_design,
 )
 from .gam import (
     _FitState,
     _PenaltySlot,
+    _Sl,
+    _add_factor_stub_rows,
     _add_null_space_penalties,
     _apply_gam_side,
     _block_s_scale,
     _row_frame,
+    _sl_initial_repara,
+    _sl_setup,
     _sym_rank,
     gam,
 )
@@ -150,219 +156,89 @@ def _rw_matrix(stop: np.ndarray, row: np.ndarray, weight: np.ndarray,
     return out.ravel() if not is_matrix else out
 
 
-@dataclass
-class _BlockRepara:
-    """Per-penalty-block initial reparameterization — line-by-line port
-    of mgcv ``Sl.setup`` (fast-REML.r:267-418, linear case) feeding
-    ``Sl.initial.repara`` (517-588).
+def _sl_pi_slots(sl: _Sl) -> list:
+    """Per-penalty slot view consumed by :func:`_pi_fit_chol`, read off an
+    ``Sl`` object built by gam's :func:`_sl_setup` (mgcv ``Sl.setup``,
+    fast-REML.r:68-429).
 
-    mgcv reparameterizes **every** penalty block of a bam before the
-    pivoted Cholesky, so ``X'WX + Sλ`` is well-scaled and the rank-
-    revealing factorization runs in a stable gauge:
+    ``_pi_fit_chol`` adds ``exp(rho_k)·slot.S`` at ``[col_start, col_end)``
+    of the already initial-repara'd gram, one slot per penalty in ρ order.
+    After ``Sl.setup`` each block carries its REPARAMETERISED penalty, which
+    is the (partial) identity / range-space projection of the original:
 
-      * Singleton block, diagonal S (``bs="re"`` etc., fast-REML.r:
-        268-278): ``D[j] = 1/sqrt(S_jj)`` on penalized entries
-        (``S_jj > 0``), 1 elsewhere; ``D`` is a 1-D diagonal vector,
-        penalty → partial identity on ``ind = S_jj > 0``.
-      * Singleton block, non-diagonal S (spline penalties, 288-302):
-        eigen ``S = U diag(λ) U'`` (λ descending); ``D = U·diag(g)``
-        with ``g = [1/sqrt(λ_pen) (rank of them), 1 (null)]``; penalty →
-        identity on the first ``rank`` columns. ``D`` is the full
-        (m, m) matrix (square, invertible — no QR completion needed).
-      * Multi-S block (356-417): ``D = U`` = the **full** eigenvectors
-        of ``ΣS_j`` (orthogonal); each ``S_j`` projected to
-        ``U[:,:rank]'·S_j·U[:,:rank]`` ((rank, rank)) in the range space.
+      * diagonal singleton → partial identity ``diag(ind)`` over the full
+        block ``[start, stop)`` (penalised columns need not be leading);
+      * eigen singleton → ``I_rank`` over the leading ``[start, start+rank)``;
+      * multi-S block → the projected penalties ``blk.S[j]`` (rank×rank) over
+        ``[start, start+rank)``, one slot per penalty (a block split by
+        ``Sl.setup``'s no-overlap test arrives here already as singletons).
 
-    ``is_diag`` distinguishes the 1-D diagonal ``D`` from the 2-D matrix
-    ``D``. ``S_proj`` is the list of repara'd penalties (one per slot,
-    placed at columns ``[col_start, pen_col_end)``). ``ldet_const`` is
-    the rho-independent ``Σ_pen log λ`` that the non-orthogonal singleton
-    transform subtracts from ``log|Sλ|_+`` (``log|D'SλD|_+ = log|Sλ|_+ −
-    Σ_pen log λ``); the REML grad/Hess wrt rho are congruence-invariant,
-    so only the score VALUE needs this correction. 0 for orthogonal D
-    (multi-S / pure rotation).
+    Slot order follows ``sl.blocks`` — i.e. ``self._slots`` order — so ρ
+    indexing is preserved exactly as the old ``_build_repara_slots`` did.
     """
-    col_start: int
-    col_end: int
-    D: np.ndarray              # (m,) diagonal if is_diag else (m, m) matrix
-    is_diag: bool
-    rank: int                  # numerical rank of the block penalty
-    slot_indices: list         # global slot indices in this block
-    S_proj: list               # repara'd penalty per slot
-    pen_col_end: int           # penalty block end: col_end (diag) | col_start+rank
-    ldet_const: float          # Σ_pen log λ (non-orthogonal singleton); else 0
-
-
-def _eigen_descending(S: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """``eigen(S, symmetric=TRUE)`` — eigenvalues in **descending** order
-    (R's convention), with the matching eigenvectors. numpy ``eigh``
-    returns ascending, so reverse."""
-    eigval, U = np.linalg.eigh(S)
-    order = np.argsort(eigval)[::-1]
-    return eigval[order], U[:, order]
-
-
-def _build_init_repara(slots: list, p: int) -> list:
-    """Port of mgcv ``Sl.setup``'s reparameterization (fast-REML.r:
-    267-418, linear case): reparameterize **every** penalty block.
-
-    Singleton ``s()`` smooths become (partial) identity penalties
-    (diagonal S → column scaling 268-278; non-diagonal S → eigen
-    ``U·diag(1/√λ)`` 288-302), multi-S ``te()``/additive blocks are
-    rotated by the full eigenvectors of ``ΣS_j`` and each ``S_j``
-    projected into the rank-r range space (376-389).
-
-    Returns: list of ``_BlockRepara``, one per block, covering every slot
-    (so ``Sl.initial.repara`` can drive all blocks).
-    """
-    eps = float(np.finfo(float).eps)
-    # Group slots by col range. Multi-S blocks have multiple slots
-    # sharing the same range; singletons have exactly one.
-    by_range: dict = {}
-    for k, slot in enumerate(slots):
-        key = (int(slot.col_start), int(slot.col_end))
-        by_range.setdefault(key, []).append(k)
-
-    repara_blocks: list = []
-    for (cs, ce), slot_idxs in by_range.items():
-        m = ce - cs
-        if len(slot_idxs) == 1:
-            # ---- singleton block (Sl.setup:267-355) ----
-            S = np.asarray(slots[slot_idxs[0]].S, dtype=float)
-            iu = np.triu_indices(m, k=1)
-            if m == 1 or float(np.sum(np.abs(S[iu]))) == 0.0:
-                # S diagonal → D[j] = 1/sqrt(S_jj) (fast-REML.r:273-278).
-                dvec = np.diag(S).astype(float).copy()
-                ind = dvec > 0.0
-                rank = int(np.sum(ind))
-                ldet_const = (float(np.sum(np.log(dvec[ind])))
-                              if rank else 0.0)
-                D = np.ones(m, dtype=float)
-                D[ind] = 1.0 / np.sqrt(dvec[ind])
-                repara_blocks.append(_BlockRepara(
-                    col_start=cs, col_end=ce, D=D, is_diag=True, rank=rank,
-                    slot_indices=list(slot_idxs),
-                    S_proj=[np.diag(ind.astype(float))],
-                    pen_col_end=ce, ldet_const=ldet_const,
-                ))
+    from types import SimpleNamespace
+    out: list = []
+    for blk in sl.blocks:
+        if blk.n_sp == 1:
+            if not blk.repara:
+                # No transform → original penalty over the whole block.
+                out.append(SimpleNamespace(
+                    col_start=int(blk.start), col_end=int(blk.stop),
+                    S=np.asarray(blk.S[0], dtype=float)))
+            elif blk.D.ndim == 1:
+                # Diagonal repara → partial identity over the full block.
+                out.append(SimpleNamespace(
+                    col_start=int(blk.start), col_end=int(blk.stop),
+                    S=np.diag(blk.ind.astype(float))))
             else:
-                # S non-diagonal → eigen repara (fast-REML.r:288-302).
-                eigval, U = _eigen_descending(S)
-                # rank <- sum(D > .Machine$double.eps^.8*max(D)) (292).
-                thresh = eps ** 0.8 * float(eigval[0])
-                rank = int(np.sum(eigval > thresh))
-                if rank == 0:
-                    continue
-                g = np.ones(m, dtype=float)
-                g[:rank] = 1.0 / np.sqrt(eigval[:rank])
-                D = U * g[None, :]                       # U %*% diag(g)
-                ldet_const = float(np.sum(np.log(eigval[:rank])))
-                repara_blocks.append(_BlockRepara(
-                    col_start=cs, col_end=ce, D=D, is_diag=False, rank=rank,
-                    slot_indices=list(slot_idxs), S_proj=[np.eye(rank)],
-                    pen_col_end=cs + rank, ldet_const=ldet_const,
-                ))
+                # Eigen repara → identity on the leading ``rank`` columns.
+                out.append(SimpleNamespace(
+                    col_start=int(blk.start),
+                    col_end=int(blk.start + blk.rank),
+                    S=np.eye(int(blk.rank))))
         else:
-            # ---- multi-S block (Sl.setup:356-417) ----
-            S_total = np.zeros((m, m), dtype=float)
-            for k in slot_idxs:
-                S_total = S_total + np.asarray(slots[k].S, dtype=float)
-            S_total = 0.5 * (S_total + S_total.T)
-            eigval, U = _eigen_descending(S_total)     # D <- U (full, 377)
-            thresh = eps ** 0.8 * float(eigval[0])     # rank (379)
-            rank = int(np.sum(eigval > thresh))
-            if rank == 0:
-                continue
-            Uind = U[:, :rank]
-            S_proj = []
-            for k in slot_idxs:                        # project (382-384)
-                bob = Uind.T @ np.asarray(slots[k].S, dtype=float) @ Uind
-                bob = 0.5 * (bob + bob.T)
-                S_proj.append(bob)
-            repara_blocks.append(_BlockRepara(
-                col_start=cs, col_end=ce, D=U, is_diag=False, rank=rank,
-                slot_indices=list(slot_idxs), S_proj=S_proj,
-                pen_col_end=cs + rank, ldet_const=0.0,
-            ))
-    return repara_blocks
-
-
-def _apply_init_repara(
-    XX: np.ndarray, Xy: np.ndarray, repara_blocks: list,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Apply ``Sl.initial.repara`` (forward, model-matrix branch
-    fast-REML.r:564-575) to the gram ``XX = X'WX`` and ``Xy = X'Wz``.
-
-    Under the design repara ``X[:,blk] → X[:,blk]·D`` (``D`` matrix) or
-    ``X[:,blk] → X[:,blk]·diag(D)`` (``D`` diagonal), the gram transforms
-    two-sided: ``XX[blk,:] → D'·XX[blk,:]`` and ``XX[:,blk] →
-    XX[:,blk]·D`` (``both.sides=TRUE``), and ``Xy[blk] → D'·Xy[blk]``.
-    Blocks are disjoint, so applying them sequentially realizes the full
-    block-diagonal ``D'·XX·D`` (the cross-block ``XX[bi,bj]`` picks up
-    ``Di'`` on the left and ``Dj`` on the right). ``D`` is always square
-    (m×m matrix or m-vector) — no null completion is needed.
-    """
-    XX_new = XX.copy()
-    Xy_new = Xy.copy()
-    for blk in repara_blocks:
-        cs, ce = blk.col_start, blk.col_end
-        D = blk.D
-        if blk.is_diag:
-            XX_new[cs:ce, :] = D[:, None] * XX_new[cs:ce, :]
-            XX_new[:, cs:ce] = XX_new[:, cs:ce] * D[None, :]
-            Xy_new[cs:ce] = D * Xy_new[cs:ce]
-        else:
-            XX_new[cs:ce, :] = D.T @ XX_new[cs:ce, :]
-            XX_new[:, cs:ce] = XX_new[:, cs:ce] @ D
-            Xy_new[cs:ce] = D.T @ Xy_new[cs:ce]
-    return XX_new, Xy_new
-
-
-def _undo_init_repara_beta(
-    beta: np.ndarray, repara_blocks: list,
-) -> np.ndarray:
-    """Map a repara'd coefficient vector back to the original
-    parameterization — ``Sl.initial.repara(..., inverse=TRUE,
-    both.sides=FALSE)`` parameter-vector branch (fast-REML.r:557-563):
-    ``β[blk] = D·β_repara[blk]`` (matrix) or ``D*β_repara[blk]`` (diag).
-    """
-    out = beta.copy()
-    for blk in repara_blocks:
-        cs, ce = blk.col_start, blk.col_end
-        if blk.is_diag:
-            out[cs:ce] = blk.D * out[cs:ce]
-        else:
-            out[cs:ce] = blk.D @ out[cs:ce]
+            # Multi-S → one projected penalty per slot, leading-rank block.
+            ce = int(blk.start + blk.rank)
+            for Sj in blk.S:
+                out.append(SimpleNamespace(
+                    col_start=int(blk.start), col_end=ce,
+                    S=np.asarray(Sj, dtype=float)))
     return out
 
 
-def _build_repara_slots(slots: list, repara_blocks: list) -> list:
-    """Build the repara'd penalty-slot view fed to ``_pi_fit_chol``.
+def _sl_initial_repara_ldet_const(sl: _Sl) -> float:
+    """``Σ_pen log λ`` — the ρ-independent gauge shift the non-orthogonal
+    ``Sl.setup`` transforms fold into ``log|Sλ|_+``.
 
-    Every slot is replaced by its repara'd penalty (singleton → (partial)
-    identity; multi-S → rank×rank projected ``S_j``), placed at columns
-    ``[col_start, pen_col_end)``. Original slot ordering is preserved (rho
-    indexing keys off it).
+    bam evaluates ``log|Sλ|_+`` in the ORIGINAL gauge (``_log_det_S_pos``)
+    but :func:`_pi_fit_chol` returns ``ldetXXS`` in the reparameterised gauge
+    (its gram is ``D'(X'WX)D`` and its penalties are the repara'd
+    identities/projections). The REML score is ``ldetXXS − ldetS``; under the
+    block transform ``X→XD`` both terms pick up the SAME ρ-independent
+    ``2·log|D|_pen``, so subtracting this constant from the original-gauge
+    ``ldetS`` realigns the score VALUE while leaving the
+    congruence-invariant ρ-grad/Hessian untouched.
+
+    Per repara block the shift is ``−2·Σ_j log‖D[:,j]‖``: a diagonal/eigen
+    singleton has ``‖D[:,j]‖ = 1/√λ_j`` on penalised columns (and 1
+    elsewhere, contributing 0), so it sums to ``Σ log λ_j``; an orthogonal
+    multi-S ``D`` has unit columns → 0. This recovers exactly the value the
+    old ``_repara_ldet_const`` computed, read off gam's ``Sl`` blocks (so a
+    block ``Sl.setup`` split into singletons is accounted for correctly —
+    its now-nonzero shift cancels the matching shift in ``_pi_fit_chol``'s
+    ``ldetXXS``).
     """
-    from types import SimpleNamespace
-    slots_pre = list(slots)
-    for blk in repara_blocks:
-        for local_idx, k in enumerate(blk.slot_indices):
-            slots_pre[k] = SimpleNamespace(
-                col_start=int(blk.col_start),
-                col_end=int(blk.pen_col_end),
-                S=blk.S_proj[local_idx],
-            )
-    return slots_pre
-
-
-def _repara_ldet_const(repara_blocks: list) -> float:
-    """``Σ_b ldet_const`` — the rho-independent shift the non-orthogonal
-    singleton transforms subtract from ``log|Sλ|_+``. Callers correct the
-    externally-computed (original-gauge) ``ldet_S`` VALUE by this so the
-    REML score matches ``_pi_fit_chol``'s repara'd-gauge ``ldetXXS`` (the
-    grad/Hess are congruence-invariant and need no correction)."""
-    return float(sum(blk.ldet_const for blk in repara_blocks))
+    total = 0.0
+    for blk in sl.blocks:
+        if not blk.repara:
+            continue
+        D = blk.D
+        if D.ndim == 1:
+            colnorm = np.abs(D)
+        else:
+            colnorm = np.sqrt(np.einsum("ij,ij->j", D, D))
+        total += -2.0 * float(np.sum(np.log(colnorm)))
+    return total
 
 
 def _estimate_theta(
@@ -2400,7 +2276,15 @@ class bam(gam):
         full ``n × p`` design and shape-clashes against ``_offset``
         (length n) when ``newdata=None``.
 
-        Behaviour for each (newdata, type, se_fit) combination:
+        ``predict.bam`` routes a DISCRETE fit to ``predict.bamd``
+        (bam.r:1421); hea mirrors that for the value / SE / lpmatrix surface
+        via :meth:`_predict_bamd` (bin the covariates, gather via the
+        discrete kernels). ``terms``/``iterms`` and term selection on a
+        discrete fit fall through to the exact-eval parent path below
+        (the per-term discrete decomposition is not ported).
+
+        Behaviour for each (newdata, type, se_fit) combination (non-discrete
+        fit, or the discrete decomposition surface):
 
         * ``newdata`` not None → delegate to ``super().predict(...)`` —
           parent rebuilds the design via per-block ``spec.predict_mat``
@@ -2410,11 +2294,8 @@ class bam(gam):
           :attr:`linear_predictors` / :attr:`fitted_values`.
         * ``newdata=None`` with ``type='lpmatrix'`` → route through
           ``super().predict(newdata=self.data, type='lpmatrix')``,
-          which re-evaluates each smooth's basis on training rows.
-          For non-discrete bam this is bit-equal to the design used
-          during the fit; for discrete bam it evaluates basis exactly
-          (vs. mgcv's discretize-then-gather via ``Xbd``) — a future
-          change will replace this with the discrete-aware path.
+          which re-evaluates each smooth's basis on training rows
+          (bit-equal to the fit-time design for non-discrete bam).
         * ``newdata=None`` with ``se_fit=True`` → cached eta (+ extra
           offset, if any) for the link-scale prediction; chunked
           ``diag(X·Vp·X')`` (via :meth:`_chunked_var_eta_diag`) for
@@ -2429,6 +2310,22 @@ class bam(gam):
         if type == "lpmatrix" and se_fit:
             raise ValueError(
                 "se_fit=True is not allowed with type='lpmatrix'"
+            )
+
+        # predict.bam routes a DISCRETE fit (``object$dinfo`` set) to
+        # predict.bamd (bam.r:1421) — bin newdata's covariates to the
+        # compress.df grid and gather via the discrete kernels, NOT exact
+        # basis evaluation. hea mirrors this for the value / SE / lpmatrix
+        # surface; ``terms``/``iterms`` and term selection stay on the
+        # exact-eval parent (the per-term discrete decomposition with
+        # mgcv's parametric-term grouping is not ported — see
+        # :meth:`_predict_bamd`).
+        if (self._discrete_design is not None
+                and type in ("link", "response", "lpmatrix")
+                and terms is None and exclude is None):
+            return self._predict_bamd(
+                newdata, type=type, se_fit=se_fit, offset=offset,
+                unconditional=unconditional,
             )
 
         # predict.bam delegates the non-discrete case to predict.gam, so the
@@ -2493,6 +2390,142 @@ class bam(gam):
         if type == "link":
             return pl.DataFrame({"fit": eta, "se.fit": se_link})
         mu = self.family.link.linkinv(eta)
+        mu_eta = self.family.link.mu_eta(eta)
+        return pl.DataFrame({"fit": mu, "se.fit": se_link * np.abs(mu_eta)})
+
+    # -----------------------------------------------------------------------
+    # predict.bamd — discrete (binned) prediction path
+    # -----------------------------------------------------------------------
+
+    def _build_predict_discrete_design(self, newdata):
+        """Re-discretise ``newdata`` and assemble its binned
+        :class:`DiscreteDesign`, mirroring mgcv ``predict.bamd``'s discrete
+        setup (bam.r:1843-1921).
+
+        Like ``predict.bamd`` (bam.r:1847 calls ``discrete.mf`` with no
+        ``m=``) this always re-grids to ``compress.df``'s DEFAULT resolution
+        (1-D: 1000 levels), independent of the fit's ``discrete=`` — so for a
+        coarse fit the prediction grid is FINER than the fit grid. The fitted
+        per-margin bases (frozen in ``block.spec``) are evaluated on the new
+        grid (mgcv ``PredictMat``) and a numeric by-variable is binned
+        (bam.r:1889), exactly as the fitter does.
+
+        Returns ``(design, n_user, n_stubs, off_new)`` where ``off_new`` is
+        the (stub-trimmed) formula offset evaluated on ``newdata``.
+        """
+        newdata = normalize_data(newdata)
+        expr_map = _smooth_arg_expr_map(self._expanded)
+        if expr_map:
+            newdata = _apply_smooth_arg_exprs(newdata, expr_map)
+        # Carry fit-time factor levels through (predict.gam's xlevels); the
+        # stubs keep the parametric contrasts at the fit's column count.
+        n_user = newdata.height
+        newdata, n_stubs = _add_factor_stub_rows(newdata, self.data)
+        # Parametric design on newdata — response-free, the same call
+        # gam.predict uses. ``build_discrete_design`` stores these columns
+        # directly (identity gather), so the parametric part is exact
+        # (matching the fitter's ``X_param_full`` handling), not re-binned.
+        X_param = materialize(self._expanded, newdata).to_numpy().astype(float)
+        # Discretise the smooth covariates at the default resolution.
+        specs = _smooth_specs_from_expanded(self._expanded, newdata)
+        names_pmf = [c for c in self.parametric_columns
+                     if c != "(Intercept)" and c in newdata.columns]
+        frame = discrete_mf(specs, newdata, names_pmf=names_pmf, m=None)
+        design = build_discrete_design(
+            self._blocks, X_param, frame, data=newdata)
+        off_new = np.zeros(newdata.height)
+        for off_node in self._expanded.offsets:
+            blk = _eval_atom(off_node, newdata)
+            off_new = off_new + blk.values.flatten().astype(float)
+        if n_stubs > 0:
+            off_new = off_new[:n_user]
+        return design, n_user, n_stubs, off_new
+
+    def _predict_bamd(self, newdata, *, type, se_fit, offset, unconditional):
+        """Predict from a discrete bam fit via the discrete kernels — port
+        of mgcv ``predict.bamd`` (bam.r:1773-2033), value/SE/lpmatrix
+        surface.
+
+        The covariates of ``newdata`` (or the training frame when
+        ``newdata=None``) are binned to ``compress.df``'s grid and the
+        prediction is gathered from the per-marginal compressed design
+        (mgcv ``Xbd``); link-scale SE is ``sqrt(diag(Xd·V·Xd'))`` (mgcv
+        ``diagXVXd``), realised here on the materialised binned design
+        ``discrete_full_X`` (= ``Xbd(Xd, I)``). For a continuous covariate
+        this differs from exact basis evaluation by the binning — exactly
+        the divergence F1 was about, and it makes ``lpmatrix @ coef ==
+        fitted`` hold for a continuous discrete fit. ``type='response'``
+        applies the delta-method ``|dμ/dη|`` SE multiplier and ``linkinv``
+        (bam.r:1989-1990).
+
+        ``newdata=None`` + the DEFAULT discretisation (``discrete_m is
+        None``) ⇒ the prediction grid equals the fit grid, so the cached
+        fit values / design are reused (bit-identical to ``fitted``, which
+        is what mgcv returns there too); a fit with a custom ``discrete=m``
+        is re-gridded at the (finer) default resolution, matching mgcv.
+
+        ``terms``/``iterms`` and term selection are handled by the caller
+        on the exact-eval parent path, not here.
+        """
+        beta = np.asarray(self.coefficients).reshape(-1)
+        extra = None
+        if offset is not None:
+            extra = np.asarray(offset, dtype=float).flatten()
+
+        # Reuse the fit grid only when it provably equals the predict grid
+        # (newdata omitted AND the fit used the default resolution).
+        reuse = newdata is None and self._discrete_m is None
+        if reuse:
+            design = self._discrete_design
+            n_pred = self.n
+        else:
+            src = self.data if newdata is None else newdata
+            design, n_pred, n_stubs, off_new = (
+                self._build_predict_discrete_design(src))
+
+        if extra is not None and extra.shape != (n_pred,):
+            raise ValueError(
+                f"offset must have length {n_pred}, got {extra.shape}")
+
+        # lpmatrix: the binned design matrix (= mgcv ``Xbd(Xd, I)``).
+        Xf = discrete_full_X(design)
+        if Xf.shape[0] != n_pred:
+            Xf = Xf[:n_pred]
+        if type == "lpmatrix":
+            return Xf
+
+        # value (link scale). Reuse the cached η for bit-identical
+        # newdata=None default-resolution predictions.
+        if reuse:
+            eta = self.linear_predictors.copy()
+        else:
+            eta = Xf @ beta + off_new
+        if extra is not None:
+            eta = eta + extra
+
+        if not se_fit:
+            if type == "link":
+                return pl.DataFrame({"fit": eta})
+            if reuse and extra is None:
+                return pl.DataFrame({"fit": self.fitted_values.copy()})
+            return pl.DataFrame({"fit": self.family.link.linkinv(eta)})
+
+        # SE = sqrt(diag(Xd·V·Xd')). unconditional=True uses the
+        # sp-uncertainty-corrected Vc (predict.gam's ``unconditional``),
+        # falling back to Vp when Vc is unavailable (GCV fits).
+        V = self.Vp
+        if unconditional:
+            Vc = getattr(self, "Vc", None)
+            if Vc is not None:
+                V = Vc
+        var_eta = ((Xf @ V) * Xf).sum(axis=1)
+        se_link = np.sqrt(np.maximum(var_eta, 0.0))
+        if type == "link":
+            return pl.DataFrame({"fit": eta, "se.fit": se_link})
+        if reuse and extra is None:
+            mu = self.fitted_values.copy()
+        else:
+            mu = self.family.link.linkinv(eta)
         mu_eta = self.family.link.mu_eta(eta)
         return pl.DataFrame({"fit": mu, "se.fit": se_link * np.abs(mu_eta)})
 
@@ -2833,39 +2866,22 @@ class bam(gam):
 
         Per-row link-scale variance ``Var(η_i) = X_i·Vp·X_iᵀ``. Same chunk
         walk as :meth:`_chunked_leverage_diag`; passing ``Vp`` instead of
-        ``A_inv`` returns the predict-time link-scale variance used by
-        :meth:`predict` ``se_fit=True``. Discrete bam dispatches on
-        :attr:`_discrete_design`: each chunk's design rows are gathered
-        from ``Xbd``-style per-marginal-Xd lookups, identical to what the
-        fit would use; non-discrete bam re-evaluates basis on the
-        ``self.data`` chunk via :func:`_materialize_chunk`.
+        ``A_inv`` returns the link-scale variance. For a discrete fit the
+        predict-time SE goes through :meth:`_predict_bamd` (mgcv
+        ``diagXVXd``) instead, so this is reached only by the non-discrete
+        path; the discrete branch is kept consistent with that — it uses the
+        BINNED design (:func:`discrete_full_X`, = the fit/edf gauge), not
+        exact basis evaluation.
         """
         n = self.n
         out = np.empty(n, dtype=float)
         if self._discrete_design is not None:
-            # Discrete: row gather via predict_mat on training data is
-            # bit-equal to the design used at fit time when the
-            # discretization didn't round (the common case for small or
-            # already-unique covariates). A future change will replace
-            # this with a true Xbd-gather.
-            X_param_full = self._X_param_full
-            for start, end in _chunk_indices(n, self._chunk_size):
-                cols = [X_param_full[start:end]]
-                for b in self._blocks:
-                    if b.spec is None:
-                        raise RuntimeError(
-                            f"smooth block {b.label!r} (cls={b.cls!r}) "
-                            f"has no BasisSpec; predict requires every "
-                            f"smooth to carry one."
-                        )
-                    cols.append(np.asarray(
-                        b.spec.predict_mat(self.data[start:end]),
-                        dtype=float,
-                    ))
-                X_chunk = np.concatenate(cols, axis=1)
-                HX = X_chunk @ Vp
-                out[start:end] = (HX * X_chunk).sum(axis=1)
-            return out
+            # Binned diag(Xd·Vp·Xd') on the compressed design — the same
+            # gauge as the fit and edf (mgcv diagXVXd), matching
+            # _predict_bamd's SE.
+            Xf = discrete_full_X(self._discrete_design)
+            HX = Xf @ Vp
+            return (HX * Xf).sum(axis=1)
         for start, end in _chunk_indices(n, self._chunk_size):
             X_chunk = _materialize_chunk(
                 self._blocks,
@@ -3273,24 +3289,26 @@ class bam(gam):
         nobs = float(self.n)
         n_int = int(self.n)
 
-        # ``Sl.setup`` + ``Sl.initial.repara`` (fast-REML.r:267-418, 564-575):
-        # reparameterize every penalty block into mgcv's well-scaled gauge so
-        # _pi_fit_chol's pivoted Cholesky factorizes the same conditioned
-        # matrix mgcv does. Singleton transforms are non-orthogonal (eigen
-        # ``U·diag(1/√λ)``), so the reml VALUE's ``ldetXXS`` shifts by
+        # ``Sl.setup`` + ``Sl.initial.repara`` (fast-REML.r:68-429, 517-588):
+        # relay to gam's shared Sl machinery (the SAME ``Sl.setup`` mgcv calls
+        # from both gam and bam) to reparameterize every penalty block into
+        # mgcv's well-scaled gauge, so _pi_fit_chol's pivoted Cholesky
+        # factorizes the same conditioned matrix mgcv does (bam.r:541/664).
+        # ``both_sides=True`` realises the two-sided gram transform
+        # ``D'(X'WX)D`` / ``D'(X'Wz)``. Singleton transforms are non-orthogonal
+        # (eigen ``U·diag(1/√λ)``), so the reml VALUE's ``ldetXXS`` shifts by
         # ``ldet_const``; the grad/Hess are congruence-invariant. β is
         # recovered by the caller (not used here). Lazily built — depends only
         # on the slot S matrices.
-        if not hasattr(self, "_repara_blocks"):
-            self._repara_blocks = _build_init_repara(self._slots, self.p)
-            self._repara_slots = _build_repara_slots(
-                self._slots, self._repara_blocks)
-        XX_pre, Xy_pre = _apply_init_repara(
-            self._XtX, self._Xty, self._repara_blocks)
+        if not hasattr(self, "_sl"):
+            self._sl = _sl_setup(self._slots, self.p)
+            self._repara_slots = _sl_pi_slots(self._sl)
+        XX_pre = _sl_initial_repara(self._sl, self._XtX, both_sides=True)
+        Xy_pre = _sl_initial_repara(self._sl, self._Xty, both_sides=True)
         # ``log|Sλ|_+`` correction to the repara'd gauge: subtract the
         # rho-independent ``Σ_pen log λ`` so ``ldetXXS − ldet_S`` (computed in
         # _pi_fit_chol's repara'd gauge) matches mgcv's invariant difference.
-        ldS_const = _repara_ldet_const(self._repara_blocks)
+        ldS_const = _sl_initial_repara_ldet_const(self._sl)
 
         def _eval(t):
             # One Sl.fit / Sl.fitChol evaluation at working θ → dict with the
@@ -3742,16 +3760,12 @@ class bam(gam):
                 # ``else``.
                 if (method in ("REML", "ML")
                         and self._discrete_design is not None):
-                    # Lazily build ``Sl.initial.repara`` data on first
-                    # PIRLS iter — depends only on the slot S matrices,
+                    # Lazily build the shared ``Sl`` (gam's ``Sl.setup``) on
+                    # first PIRLS iter — depends only on the slot S matrices,
                     # not on rho/W.
-                    if not hasattr(self, "_repara_blocks"):
-                        self._repara_blocks = _build_init_repara(
-                            self._slots, self.p,
-                        )
-                        self._repara_slots = _build_repara_slots(
-                            self._slots, self._repara_blocks,
-                        )
+                    if not hasattr(self, "_sl"):
+                        self._sl = _sl_setup(self._slots, self.p)
+                        self._repara_slots = _sl_pi_slots(self._sl)
                     if theta_sp_warm is None:
                         # Full-space initial.spg seed → working space by least
                         # squares (mgcv mgcv.r:4617-4618); identity when no id.
@@ -3810,18 +3824,20 @@ class bam(gam):
                         ldS_hess = self._d2log_det_S_drho_drho(
                             rho_try, S_pinv=S_pinv_try, S_full=S_full_try,
                         )
-                        # ``Sl.initial.repara`` (fast-REML.r:564-575) —
-                        # reparameterize XX, Xy into mgcv's well-scaled
-                        # gauge (every penalty block) so the pivoted
-                        # Cholesky in ``_pi_fit_chol`` factorizes the same
-                        # conditioned matrix mgcv does. β comes back in the
-                        # repara'd basis and gets un-rotated below. The POI
-                        # step-halves on the (congruence-invariant) gradient
-                        # and passes no ``ldet_S`` value, so no value
-                        # correction is needed here.
-                        XX_pre, Xy_pre = _apply_init_repara(
-                            self._XtX, self._Xty, self._repara_blocks,
-                        )
+                        # ``Sl.initial.repara`` (fast-REML.r:517-588,
+                        # bam.r:664-665) — reparameterize XX, Xy into mgcv's
+                        # well-scaled gauge (every penalty block, two-sided)
+                        # so the pivoted Cholesky in ``_pi_fit_chol``
+                        # factorizes the same conditioned matrix mgcv does. β
+                        # comes back in the repara'd basis and gets un-rotated
+                        # below. The POI step-halves on the
+                        # (congruence-invariant) gradient and passes no
+                        # ``ldet_S`` value, so no value correction is needed
+                        # here.
+                        XX_pre = _sl_initial_repara(
+                            self._sl, self._XtX, both_sides=True)
+                        Xy_pre = _sl_initial_repara(
+                            self._sl, self._Xty, both_sides=True)
                         out = _pi_fit_chol(
                             XX_pre, Xy_pre, rho_try,
                             self._repara_slots, self.p,
@@ -3830,11 +3846,13 @@ class bam(gam):
                             phi_fixed=not include_log_phi,
                             ldet_S_grad=ldS_grad, ldet_S_hess=ldS_hess,
                         )
-                        # Undo the initial-repara on β — the rest of
-                        # the PIRLS / post-fit machinery (chunked X·β,
-                        # variance, edf) operates in the original basis.
-                        out["beta"] = _undo_init_repara_beta(
-                            out["beta"], self._repara_blocks,
+                        # Undo the initial-repara on β (bam.r:759,
+                        # inverse=TRUE) — the rest of the PIRLS / post-fit
+                        # machinery (chunked X·β, variance, edf) operates in
+                        # the original basis.
+                        out["beta"] = _sl_initial_repara(
+                            self._sl, out["beta"], inverse=True,
+                            both_sides=False, cov=False,
                         )
                         # Contract the full per-penalty grad/Hessian to working
                         # space (g_θ = T'g, H_θ = T'HT) and recompute the step

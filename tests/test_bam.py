@@ -212,6 +212,85 @@ def test_predict_unconditional_accepted():
 
 
 # =============================================================================
+# 1c. predict.bamd — discrete (binned) prediction path (F1)
+# =============================================================================
+
+_BAM_PREDICT_D = Path(__file__).parent / "fixtures" / "bam_predict_discrete"
+
+
+@pytest.mark.skipif(
+    not (_BAM_PREDICT_D / "gauss" / "data.csv").exists(),
+    reason="predict.bamd oracle missing — run "
+           "tests/r_oracle/dump_bam_predict_discrete.R",
+)
+@pytest.mark.parametrize("tag,family", [
+    ("gauss", None),
+    ("pois", Poisson()),
+])
+def test_predict_bamd_matches_mgcv(tag, family):
+    """Discrete bam prediction == mgcv predict.bamd (F1).
+
+    Before F1, hea routed discrete fits through predict.gam (exact basis
+    evaluation); mgcv routes them through predict.bamd, which bins newdata's
+    covariates to the compress.df grid and gathers via the discrete kernels.
+    For a continuous covariate the binning is lossy, so exact-eval diverged
+    from mgcv (and broke ``lpmatrix @ coef == fitted``). The fit uses the
+    DEFAULT discretisation on n=3000 (where hea-bam matches mgcv-bam) but
+    n > 1000 grid levels, so the binning is genuinely lossy — exact-eval
+    differs from mgcv-bamd by ~3e-3, this port matches to fit precision.
+
+    coef / lpmatrix are basis-GAUGE dependent (hea and mgcv use different but
+    equivalent s(x) parameterisations), so they are NOT compared directly;
+    every gauge-INVARIANT prediction (link, response, SE on both scales) is.
+    """
+    base = _BAM_PREDICT_D / tag
+
+    def L(nm):
+        return np.loadtxt(str(base / nm))
+
+    df = pl.read_csv(str(base / "data.csv"))
+    kw = dict(family=family) if family is not None else {}
+    m = hea.models.bam("y ~ s(x, k=15)", df, discrete=True, **kw)
+    coef = np.asarray(m.coefficients).reshape(-1)
+
+    # --- training-data predictions (newdata=None) ---
+    tol = dict(rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(
+        m.predict(type="link")["fit"].to_numpy(), L("train_link.csv"), **tol)
+    np.testing.assert_allclose(
+        m.predict(type="response")["fit"].to_numpy(), L("train_fitted.csv"),
+        **tol)
+    np.testing.assert_allclose(
+        m.predict(type="link", se_fit=True)["se.fit"].to_numpy(),
+        L("train_se.csv"), **tol)
+
+    # F1 consistency: the binned lpmatrix reproduces the link prediction
+    # exactly (exact-eval breaks this for a continuous discrete fit).
+    lp = m.predict(type="lpmatrix")
+    assert lp.shape == (m.n, m.p)
+    np.testing.assert_allclose(lp @ coef, m.linear_predictors,
+                               rtol=0, atol=1e-9)
+
+    # --- novel newdata: dense grid that re-discretises (binned, lossy) ---
+    xg = L("nd_x.csv")
+    nd = pl.DataFrame({"x": xg})
+    np.testing.assert_allclose(
+        m.predict(nd, type="link")["fit"].to_numpy(), L("nd_link.csv"), **tol)
+    np.testing.assert_allclose(
+        m.predict(nd, type="response")["fit"].to_numpy(), L("nd_resp.csv"),
+        **tol)
+    np.testing.assert_allclose(
+        m.predict(nd, type="link", se_fit=True)["se.fit"].to_numpy(),
+        L("nd_se.csv"), **tol)
+    np.testing.assert_allclose(
+        m.predict(nd, type="response", se_fit=True)["se.fit"].to_numpy(),
+        L("nd_resp_se.csv"), **tol)
+    # NB: exact basis eval would miss mgcv predict.bamd by ~3e-3 here (the
+    # lossy binning), so the rtol=1e-5 match above already guards against a
+    # regression to the old exact-eval path.
+
+
+# =============================================================================
 # 2. chicago oracle (Phase 3)
 # =============================================================================
 
