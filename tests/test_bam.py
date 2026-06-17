@@ -414,6 +414,109 @@ def test_bam_discrete_matrix_by_1d_matches_mgcv():
     )
 
 
+@pytest.mark.skipif(
+    not (_RF_BY / "te_ridge" / "bamT_fitted.csv").exists(),
+    reason="bam_rf_by oracle missing — run tests/r_oracle/dump_bam_rf_by.R",
+)
+def test_bam_discrete_matrix_by_ridge_basin_matches_mgcv():
+    """RF1b regression guard: a near-ridge ``te(Lag, Xc, by=Stim)`` whose true
+    RF varies in Lag but is ~flat in Xc, so the fREML sp-search pushes the Xc
+    margin onto a near-linear ridge (sp ~5e3).
+
+    This is the regime where hea's OLD exact-by ``discrete=True`` design built a
+    different REML surface than mgcv and the outer sp-search landed in a worse
+    basin (edf 6.81 vs mgcv 10.65 — RF1b). RF1a (bin the by like mgcv,
+    bam.r:2470-2482) aligned the design, hence the surface, hence the basin: hea
+    ``discrete=True`` now tracks mgcv **bamT** into the SAME basin. A basin
+    regression would move edf by ~O(1), so the tight bamT pin trips hard on any
+    recurrence. The case is well-determined (sp ~5472 vs ~30, both modes agree
+    to 1e-4) — not flat-optimum indeterminacy.
+    """
+    sub = "te_ridge"
+    d = _load_rf_matrix(sub, ["y"])
+    M = _load_rf_matrix(sub, ["Lag", "Xc", "Stim"])
+    dat = {"y": d["y"], "Lag": M["Lag"], "Xc": M["Xc"], "Stim": M["Stim"]}
+    f = "y ~ te(Lag, Xc, by=Stim, k=c(4,3))"
+
+    m = hea.models.bam(f, dat, family=Poisson(), discrete=True)
+
+    fitF = np.loadtxt(_RF_BY / sub / "bamF_fitted.csv")
+    fitT = np.loadtxt(_RF_BY / sub / "bamT_fitted.csv")
+    edfT = float(np.loadtxt(_RF_BY / sub / "bamT_edfsum.csv"))
+    fit_hea = np.asarray(m.fitted_values)
+
+    rel_F = float(np.linalg.norm(fit_hea - fitF) / np.linalg.norm(fitF))
+    rel_T = float(np.linalg.norm(fit_hea - fitT) / np.linalg.norm(fitT))
+    # Same fREML basin as mgcv bamT — the RF1b guard. Measured rel_T 1.8e-7,
+    # edf Δ 5e-6; a basin regression moves edf by ~O(1), tripping both pins.
+    assert rel_T < 1e-5, f"hea-discrete vs mgcv bamT fitted rel {rel_T:.2e} > 1e-5"
+    assert abs(float(np.sum(m.edf)) - edfT) < 1e-3, (
+        f"edf {np.sum(m.edf):.5f} vs mgcv bamT {edfT:.5f} (basin drift?)"
+    )
+    # Binned (not exact) by: ~1.7e-3 off bamF; lower bound guards exact-by revert.
+    assert 1e-4 < rel_F < 5e-3, (
+        f"hea-discrete vs mgcv bamF fitted rel {rel_F:.2e} not in (1e-4, 5e-3)"
+    )
+
+
+@pytest.mark.skipif(
+    not (_RF_BY / "te" / "bamF_fitted.csv").exists(),
+    reason="bam_rf_by oracle missing — run tests/r_oracle/dump_bam_rf_by.R",
+)
+@pytest.mark.parametrize("sub,f,cols", [
+    ("te", "y ~ te(Lag, Xc, by=Stim, k=c(4,3))", ["Lag", "Xc", "Stim"]),
+    ("s", "y ~ s(Lag, by=Stim, k=8)", ["Lag", "Stim"]),
+])
+def test_bam_nondiscrete_matrix_by_matches_mgcv(sub, f, cols):
+    """RF2: hea ``bam(discrete=FALSE)`` matrix-by — the EXACT-by chunked-PIRLS
+    path (mgcv ``bgam.fit``, no n·m·p long form) — must equal mgcv
+    ``bam(discrete=FALSE)`` (bamF), the exact-by home. Complements the
+    ``discrete=True`` == bamT pins above (which bin the by)."""
+    d = _load_rf_matrix(sub, ["y"])
+    M = _load_rf_matrix(sub, cols)
+    dat = {"y": d["y"]}
+    dat.update(M)
+    m = hea.models.bam(f, dat, family=Poisson(), discrete=False)
+    fitF = np.loadtxt(_RF_BY / sub / "bamF_fitted.csv")
+    edfF = float(np.loadtxt(_RF_BY / sub / "bamF_edfsum.csv"))
+    fit_hea = np.asarray(m.fitted_values)
+    rel_F = float(np.linalg.norm(fit_hea - fitF) / np.linalg.norm(fitF))
+    assert rel_F < 1e-5, f"hea-nondiscrete vs mgcv bamF fitted rel {rel_F:.2e} > 1e-5"
+    assert abs(float(np.sum(m.edf)) - edfF) < 1e-3, (
+        f"edf {np.sum(m.edf):.5f} vs mgcv bamF {edfF:.5f}"
+    )
+
+
+@pytest.mark.skipif(
+    not (_RF_BY / "te" / "bamF_tw_fitted.csv").exists(),
+    reason="bam_rf_by Tweedie oracle missing — run tests/r_oracle/dump_bam_rf_by.R",
+)
+def test_bam_tweedie_matrix_by_matches_mgcv():
+    """RF4: extended-family (Tweedie, fixed p=1.5) + matrix-by RF must equal
+    mgcv ``bam(family=Tweedie(p=1.5), discrete=FALSE)`` — confirming the
+    extended-family fREML cadence (B2) composes with the matrix-arg summation
+    design. The ``te`` data is near-ridge (one margin sp ~1e8), so the Tweedie
+    scale estimate is sensitive (~1.7e-4 edf, consistent with B2's Tweedie
+    rtol) — hence the honest tolerance. Negative-binomial RF is blocked on a
+    MISSING NB family in hea (a separate gap, not an RF one)."""
+    from hea.family import Tweedie
+    sub = "te"
+    d = _load_rf_matrix(sub, ["y"])
+    M = _load_rf_matrix(sub, ["Lag", "Xc", "Stim"])
+    dat = {"y": d["y"]}
+    dat.update(M)
+    m = hea.models.bam("y ~ te(Lag, Xc, by=Stim, k=c(4,3))", dat,
+                       family=Tweedie(p=1.5), discrete=False)
+    fitR = np.loadtxt(_RF_BY / sub / "bamF_tw_fitted.csv")
+    edfR = float(np.loadtxt(_RF_BY / sub / "bamF_tw_edfsum.csv"))
+    fit_hea = np.asarray(m.fitted_values)
+    rel = float(np.linalg.norm(fit_hea - fitR) / np.linalg.norm(fitR))
+    assert rel < 5e-5, f"hea Tweedie-RF vs mgcv fitted rel {rel:.2e} > 5e-5"
+    assert abs(float(np.sum(m.edf)) - edfR) < 1e-3, (
+        f"edf {np.sum(m.edf):.5f} vs mgcv Tweedie {edfR:.5f}"
+    )
+
+
 def test_bam_discrete_matrix_by_kernel_path_guarded():
     """The opt-in scatter kernels don't apply by= weighting (bam-plan P2);
     they must fail loudly on a by-term, not silently miscompute."""
