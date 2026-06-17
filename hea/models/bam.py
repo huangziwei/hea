@@ -78,6 +78,7 @@ from ..formula import (
 from .gam import (
     _FitState,
     _PenaltySlot,
+    _R_rank,
     _Sl,
     _add_factor_stub_rows,
     _add_null_space_penalties,
@@ -323,7 +324,13 @@ def _estimate_theta(
         # mgcv R/efam.r:14-45 verbatim. ``theta_eval`` may include a
         # trailing log φ slot when scale<0; strip it for the family
         # calls and re-add the φ-direction gradient / Hessian rows.
-        nth = n_theta
+        # mgcv efam.r:16 ``nth <- length(theta) - if (scale<0) 1 else 0`` —
+        # the count of FAMILY θ entries actually passed to ``Dd``/``ls``
+        # (= len(theta_eval) minus the appended scale slot). NOT
+        # ``family$n.theta``: those coincide for tw/nb/scat (the families
+        # bam fits, all free-θ) but DIVERGE when the family has fixed θ it
+        # reports as ``n.theta==0`` (then nth = n_passed, not 0).
+        nth = int(theta_eval.shape[0]) - (1 if scale < 0 else 0)
         if scale < 0:
             scale_eval = float(np.exp(theta_eval[nth]))
             theta_for_family = theta_eval[:nth]
@@ -396,12 +403,27 @@ def _estimate_theta(
             # Newton step via eigen: step = −V·diag(1/λ)·Vᵀ·g
             step0 = -evecs @ ((evecs.T @ g[uconv]) / evals)
             if n_theta == 0:
-                step0 = np.concatenate([np.zeros(n_theta), step0])
+                # mgcv efam.r:67 ``step0 <- c(rep(0,n.theta),step0)`` where R's
+                # ``n.theta`` is the PASSED count (``n_passed``), NOT the
+                # family's ``n.theta==0``. Pads the dropped fixed-θ slots back
+                # with zeros so the optimisation moves only the appended scale.
+                step0 = np.concatenate([np.zeros(n_passed), step0])
             ms = float(np.max(np.abs(step0)))
             if ms > 4.0:
                 step0 = step0 * 4.0 / ms
             step = np.zeros_like(theta)
-            step[uconv] = step0
+            if n_theta == 0:
+                # mgcv efam.r:71 ``step[uconv] <- step0``: after the del.ind
+                # reduction g/H/uconv cover only the appended scale slot
+                # (length len(theta)-n_passed == 1 for scale<0), and R recycles
+                # that length-1 logical mask across the full-length ``step``.
+                # numpy has no recycling — but with the n_passed zero-prepend
+                # ``step0`` is already full length and the recycled mask is
+                # all-TRUE (we only enter the loop when any(uconv)), so the
+                # assignment is just ``step <- step0``.
+                step[:] = step0
+            else:
+                step[uconv] = step0
 
             # mgcv R/efam.r:73: deriv-2 probe at the proposed θ+step.
             # Reused as the next iteration's (g, H) when no halving fires.
@@ -521,7 +543,16 @@ def _pi_fit_chol(
     A_pre_f = np.asfortranarray(A_pre.copy())
     R_pre, piv_1based, rank_A, _info = dpstrf(A_pre_f, lower=0)
     R_pre = np.triu(R_pre)
-    rank_A = int(rank_A)
+    # mgcv Sl.fitChol:1607 ``r <- min(attr(R,"rank"), Rrank(R))`` — take the
+    # SMALLER of dpstrf's pivot rank and mgcv's own Cline-condition rank
+    # estimate ``Rrank`` (mgcv.r:4, tol=eps^0.9) on the FULL pivoted factor.
+    # Full-rank, well-conditioned A: both = p (no change). Rank-deficient or
+    # near-singular: ``Rrank`` can drop a leading direction that dpstrf's
+    # tolerance kept, so the gauge + ``ldetXXS`` match mgcv. ``_R_rank``
+    # starts at p and reduces; the pseudo-det / β / IFT below all key off
+    # this ``rank_A`` exactly like mgcv truncates ``R <- R[1:r,1:r]``.
+    rank_A = min(int(rank_A),
+                 _R_rank(R_pre, tol=float(np.finfo(float).eps) ** 0.9))
     piv = np.asarray(piv_1based, dtype=int) - 1
     ipiv = np.empty(p, dtype=int)
     ipiv[piv] = np.arange(p)
@@ -2601,7 +2632,12 @@ class bam(gam):
         A_pre_f = np.asfortranarray(A_pre.copy())
         R_pre, piv_1based, rank_A, _info = dpstrf(A_pre_f, lower=0)
         R_pre = np.triu(R_pre)
-        rank_A = int(rank_A)
+        # mgcv Sl.fitChol:1607 ``r <- min(attr(R,"rank"), Rrank(R))`` — same
+        # min as ``_pi_fit_chol``: dpstrf's pivot rank ∧ mgcv's Cline-condition
+        # ``Rrank`` (mgcv.r:4, tol=eps^0.9). Full-rank → p (no change); only
+        # bites when a near-singular leading direction survives dpstrf's tol.
+        rank_A = min(int(rank_A),
+                     _R_rank(R_pre, tol=float(np.finfo(float).eps) ** 0.9))
         piv = np.asarray(piv_1based, dtype=int) - 1
         ipiv = np.empty(self.p, dtype=int)
         ipiv[piv] = np.arange(self.p)
@@ -3533,12 +3569,10 @@ class bam(gam):
         for it in range(maxit):
             devold = dev
 
-            # ---- Recompute (η, μ) at the current β before θ-update ------
-            # mgcv bgam.fitd:497-500: at iter > 1 set
-            # ``eta <- Xbd(coef) + offset; mu <- linkinv(eta)``. This makes
-            # the subsequent ``estimate.theta`` see the *post-β* μ, not
-            # the stale initialise'd μ from the previous (R,f) build (which
-            # was ≈ y on iter 0). We do the same for iter ≥ 1 here.
+            # ---- Recompute (η, μ) at the current β (mgcv bgam.fitd:571-572):
+            # ``eta <- Xbd(coef) + offset; mu <- linkinv(eta)`` so the
+            # subsequent step-halving + ``estimate.theta`` see the *post-β* μ,
+            # not the stale initialise'd μ (≈ y on iter 0).
             if it >= 1 and coef is not None:
                 if self._discrete_design is not None:
                     eta = (Xbd(self._discrete_design,
@@ -3549,12 +3583,44 @@ class bam(gam):
                         np.asarray(coef, dtype=float)) + off
                 mu = link.linkinv(eta)
 
-            # ---- Extended-family θ update (mgcv bgam.fitd:557-571) ------
-            # mgcv's ``iter > 1`` (1-based) ⇒ our ``it >= 1`` (0-based).
-            # Update θ at the current (μ, β) snapshot via inner Newton on
-            # ``-logL = dev/2 - ls``. Only fires for families whose θ is
-            # actually free (``estimate_theta_callback = True``) — Scat
-            # with both θ user-locked has ``n_theta = 0`` and stays put.
+            # ---- Coef step-halving BEFORE the working-model build ----------
+            # mgcv bgam.fitd:585-604 halves the β step (toward the previous
+            # accepted β₀) while the PENALISED deviance fails to improve,
+            # using the cheap deviance at the OLD θ — then builds (R,f)/W,z
+            # ONCE, after halving (632-665). hea formerly built first, then
+            # halved + REBUILT; reordering to mgcv's cadence (F7) means
+            # ``estimate.theta`` sees the halved μ (614-630 runs after 585-604)
+            # and the working model is built once. Identical on the monotone
+            # path: when halving never fires μ is unchanged, so θ and the build
+            # see exactly the same μ as before. ``it > 1`` == mgcv ``iter>2``
+            # (1-based; c.iter=2 since hea never warm-starts ``coef``).
+            kk = 0
+            if (it > 1 and coef is not None and coef0 is not None
+                    and rho_hat is not None and eta0 is not None):
+                Sλ_h = self._build_S_lambda(rho_hat)
+                Sλ_h = 0.5 * (Sλ_h + Sλ_h.T)
+                bSb0 = float(coef0 @ Sλ_h @ coef0)
+                # mgcv bgam.fitd:580 — dev0 at the saved μ₀ under the CURRENT
+                # (old) θ (estimate.theta has not run yet this iter).
+                mu0 = link.linkinv(eta0)
+                dev0 = float(np.sum(family.dev_resids(y, mu0, prior_w)))
+                dev_cur = float(np.sum(family.dev_resids(y, mu, prior_w)))
+                # mgcv bgam.fitd:596 — halve while penalised deviance is not
+                # improving OR is non-finite, up to kk < 30.
+                while ((not np.isfinite(dev_cur)
+                        or dev0 + bSb0 < dev_cur + float(coef @ Sλ_h @ coef))
+                       and kk < 30):
+                    coef = (coef0 + coef) / 2
+                    eta = (eta0 + eta) / 2
+                    mu = link.linkinv(eta)
+                    dev_cur = float(np.sum(family.dev_resids(y, mu, prior_w)))
+                    kk += 1
+
+            # ---- Extended-family θ update at the (halved) μ ----------------
+            # mgcv bgam.fitd:614-630. ``iter > 1`` (1-based) ⇒ ``it >= 1``.
+            # Inner Newton on ``-logL = dev/2 - ls`` at the post-halving μ.
+            # Only fires for families whose θ is free (Scat with both θ locked
+            # has ``n_theta = 0`` and stays put).
             if (it >= 1
                     and family.is_extended
                     and family.estimate_theta_callback):
@@ -3563,138 +3629,75 @@ class bam(gam):
                     wt=prior_w, tol=1e-7,
                 )
                 family.set_theta(theta_new)
-                # mgcv recomputes the deviance under the new θ before the
-                # convergence check (the alternating cadence: β-step at
-                # old θ → θ-step at new μ → β-step at new θ). Without
-                # this, ``devold`` and the iter-0-style seed compare
-                # against stale θ.
-                dev = 2.0 * float(np.sum(
-                    family.dev_resids(y, mu, prior_w, theta=theta_new)
-                ))
-                # mgcv bgam.fitd:567-569: re-evaluate the previous iter's
-                # ``dev0`` at the saved μ₀ but under the NEW θ. Without
-                # this the step-halving check at iter ≥ 2 compares
-                # ``dev0`` (under old θ) against ``new_dev`` (under new
-                # θ) — apples to oranges, and divergent β iterates slip
-                # through unhalved. eta0 is saved at the end of every
-                # iter > 0; mu0 = linkinv(eta0) is the corresponding μ.
-                if eta0 is not None:
-                    mu0_at_eta0 = link.linkinv(eta0)
-                    dev0 = float(np.sum(family.dev_resids(
-                        y, mu0_at_eta0, prior_w, theta=theta_new
-                    )))
 
-            kk = 0
-            while True:   # mgcv "repeat" — re-enters on step halving
-                if self._discrete_design is not None:
-                    qr = _build_qr_discrete_pirls(
-                        self._discrete_design, y, off, family,
-                        coef=coef,
-                        eta_init=eta if coef is None else None,
-                        use_chol=self._use_chol,
-                        prior_w=prior_w,
-                    )
-                else:
-                    qr = _build_qr_chunked_pirls(
-                        self.data, blocks, self._X_param_full, y, off,
-                        family,
-                        coef=coef,
-                        eta_init=eta if coef is None else None,
-                        chunk_size=chunk_size, use_chol=self._use_chol,
-                        prior_w=prior_w,
-                    )
-                self._bam_qr = qr
-                # Reduced-data sufficient stats consumed by ``_outer_newton``
-                # via the inherited ``_fit_given_rho`` machinery. ``_X_full =
-                # R`` keeps the inner-score routines on the (R, f) reduced
-                # design just like the Gaussian-identity path. The bam-class
-                # ``_dw_deta`` / ``_d2w_deta2`` overrides return ``zeros(p)``,
-                # which matches "Gaussian-on-(R, f)" exactly: at the PIRLS-
-                # converged β̂ the inner score sees a constant-W problem.
-                self._XtX = qr.R.T @ qr.R
-                self._Xty = qr.R.T @ qr.f
-                self._yty = float(qr.y_norm2)
-                self._X_full = qr.R
-                self._wt_full = qr.wt
+            # ---- Build the working model ONCE (mgcv bgam.fitd:632-665) ------
+            # at the (halved) coef and the freshly-updated θ.
+            if self._discrete_design is not None:
+                qr = _build_qr_discrete_pirls(
+                    self._discrete_design, y, off, family,
+                    coef=coef,
+                    eta_init=eta if coef is None else None,
+                    use_chol=self._use_chol,
+                    prior_w=prior_w,
+                )
+            else:
+                qr = _build_qr_chunked_pirls(
+                    self.data, blocks, self._X_param_full, y, off,
+                    family,
+                    coef=coef,
+                    eta_init=eta if coef is None else None,
+                    chunk_size=chunk_size, use_chol=self._use_chol,
+                    prior_w=prior_w,
+                )
+            self._bam_qr = qr
+            # Reduced-data sufficient stats consumed by ``_outer_newton``
+            # via the inherited ``_fit_given_rho`` machinery. ``_X_full =
+            # R`` keeps the inner-score routines on the (R, f) reduced
+            # design just like the Gaussian-identity path. The bam-class
+            # ``_dw_deta`` / ``_d2w_deta2`` overrides return ``zeros(p)``,
+            # which matches "Gaussian-on-(R, f)" exactly: at the PIRLS-
+            # converged β̂ the inner score sees a constant-W problem.
+            self._XtX = qr.R.T @ qr.R
+            self._Xty = qr.R.T @ qr.f
+            self._yty = float(qr.y_norm2)
+            self._X_full = qr.R
+            self._wt_full = qr.wt
 
-                new_eta = qr.eta
-                new_mu = qr.mu
-                new_dev = qr.dev
-                if not np.isfinite(new_dev):
-                    raise FloatingPointError(
-                        f"non-finite deviance at PIRLS iter {it}"
-                    )
+            eta = qr.eta
+            mu = qr.mu
+            dev = qr.dev
+            if not np.isfinite(dev):
+                raise FloatingPointError(
+                    f"non-finite deviance at PIRLS iter {it}"
+                )
 
-                dev = new_dev
-
-                # Convergence. it>1 == mgcv iter>2 (1-based). The DISCRETE
-                # path (bgam.fitd:678) ANDs a scale-unknown clause: the log-φ
-                # Newton step (last element of the previous iter's ``Nstep``)
-                # must also have shrunk below ``ε·(|log φ|+1)`` — so we don't
-                # declare convergence with φ̂ unsettled. The non-discrete path
-                # (bgam.fit:1154) has no such clause (φ converges fully inside
-                # ``_fast_reml_fit`` each iter).
-                phi_conv = True
-                if (self._discrete_design is not None and include_log_phi
-                        and Nstep is not None and Nstep.size):
-                    phi_step = float(Nstep[-1])
-                    log_phi_now = (log_phi_hat
-                                   if log_phi_hat is not None else 0.0)
-                    phi_conv = abs(phi_step) < eps * (abs(log_phi_now) + 1.0)
-                if (it > 1 and abs(dev - devold) / (0.1 + abs(dev)) < eps
-                        and phi_conv):
-                    conv = True
-                    eta = new_eta
-                    mu = new_mu
-                    break
-
-                if kk > 0:
-                    # mgcv:1159 — already shrunk this iter's step, accept.
-                    eta = new_eta
-                    mu = new_mu
-                    break
-
-                # Divergence test + step halving (mgcv:1163-1190).
-                if (it > 1 and coef is not None and coef0 is not None
-                        and rho_hat is not None and dev0 is not None):
-                    Sλ_h = self._build_S_lambda(rho_hat)
-                    Sλ_h = 0.5 * (Sλ_h + Sλ_h.T)
-                    Sb0 = Sλ_h @ coef0
-                    Sb = Sλ_h @ coef
-                    old_pdev = float(dev0) + float(coef0 @ Sb0)
-                    new_pdev = float(new_dev) + float(coef @ Sb)
-                    # mgcv bgam.fitd:596 — halve while the penalized deviance
-                    # is not improving OR is non-finite, up to kk < 30.
-                    while ((not np.isfinite(new_dev) or old_pdev < new_pdev)
-                           and kk < 30):
-                        coef = (coef0 + coef) / 2
-                        new_eta = (eta0 + new_eta) / 2
-                        new_mu = link.linkinv(new_eta)
-                        Sb = Sλ_h @ coef
-                        new_dev = float(np.sum(
-                            family.dev_resids(y, new_mu, prior_w)
-                        ))
-                        new_pdev = float(new_dev) + float(coef @ Sb)
-                        kk += 1
-                    if kk > 0:
-                        eta = new_eta
-                        mu = new_mu
-                        dev = new_dev
-                        continue   # rebuild (R, f) with halved coef
-
-                eta = new_eta
-                mu = new_mu
-                break
-            # end while
-
-            if conv:
+            # Convergence (mgcv bgam.fitd:678). it>1 == mgcv iter>2 (1-based).
+            # The DISCRETE path ANDs a scale-unknown clause: the log-φ Newton
+            # step (last element of the previous iter's ``Nstep``) must also
+            # have shrunk below ``ε·(|log φ|+1)`` — so we don't declare
+            # convergence with φ̂ unsettled. The non-discrete path
+            # (bgam.fit:1154) has no such clause (φ converges fully inside
+            # ``_fast_reml_fit`` each iter).
+            phi_conv = True
+            if (self._discrete_design is not None and include_log_phi
+                    and Nstep is not None and Nstep.size):
+                phi_step = float(Nstep[-1])
+                log_phi_now = (log_phi_hat
+                               if log_phi_hat is not None else 0.0)
+                phi_conv = abs(phi_step) < eps * (abs(log_phi_now) + 1.0)
+            if (it > 1 and abs(dev - devold) / (0.1 + abs(dev)) < eps
+                    and phi_conv):
+                conv = True
                 break
 
-            # Snapshot for next iter's divergence check (mgcv:1196-1202).
+            # Snapshot the start-of-next-β-step reference (mgcv bgam.fitd:606-
+            # 609 ``coef0 <- coef; eta0 <- eta``). dev0/μ0 are recomputed fresh
+            # from eta0 in the next iter's halving block (mgcv:580), so they
+            # are NOT snapshotted here. ``coef`` is this iter's (post-halving)
+            # β that built the working model; the sp step below overwrites it.
             if it > 0 and coef is not None:
                 coef0 = coef.copy()
                 eta0 = eta.copy()
-                dev0 = dev
 
             # ---- sp optimisation on the current (R, f, rss_extra) -----------
             if n_sp == 0:
@@ -3890,7 +3893,25 @@ class bam(gam):
                                    if include_log_phi else None)
                     self.sp = np.exp(theta_sp_warm)          # mgcv m$sp
                     rho_hat = self._rho_full(theta_sp_warm)  # full per-penalty
+                    # mgcv bgam.fitd REUSES Sl.fitChol's β / PP — the discrete
+                    # POI never re-solves: ``coef <- Sl.initial.repara(prop$beta,
+                    # inverse=TRUE)`` (bam.r:759) and ``PP <- Sl.initial.repara(
+                    # prop$PP, inverse=TRUE, both.sides=TRUE, cov=TRUE)``
+                    # (bam.r:823). ``out`` is the final accepted POI step (its
+                    # ``rho_try`` == ``rho_hat``) and ``out["beta"]`` is already
+                    # un-repara'd above. ``_fit_given_rho`` still supplies the
+                    # gauge-invariant η/μ/dev/pen/rss + the A_chol other code
+                    # paths need; we override only the gauge-DEPENDENT β and A⁻¹.
+                    # For full-rank A this is identical to the re-solve (~1e-12);
+                    # for rank-deficient A it adopts mgcv's pivoted-Cholesky
+                    # null-space gauge instead of _fit_given_rho's ridge
+                    # fallback (so coef + SE match mgcv, not just the fit).
                     fit = self._fit_given_rho(rho_hat)
+                    fit.beta = out["beta"]
+                    fit.A_inv = _sl_initial_repara(
+                        self._sl, out["PP"], inverse=True,
+                        both_sides=True, cov=True,
+                    )
                 elif method in ("REML", "ML"):
                     # Non-discrete REML/ML → mgcv ``bgam.fit`` (bam.r:1226-1261):
                     # ``fast.REML.fit`` to FULL convergence on the current
@@ -4000,7 +4021,8 @@ class bam(gam):
         at the converged β̂; ``self._wt_full`` holds the Fisher weights at β̂
         and ``self._XtX = R'R = X'WX`` is the Gram of √W·X. So
         ``Vp = σ²·A⁻¹`` and ``Ve = σ²·A⁻¹·X'WX·A⁻¹`` work directly with
-        ``A⁻¹ = (X'WX + Sλ)⁻¹`` from ``fit.A_chol``.
+        ``A⁻¹ = (X'WX + Sλ)⁻¹`` from ``fit.A_chol`` (or ``fit.A_inv`` when the
+        discrete POI reuses Sl.fitChol's PP — mgcv bgam.fitd:823).
         """
         n, p = self.n, self.p
         method = self.method
@@ -4012,7 +4034,14 @@ class bam(gam):
         # mgcv m$full.sp — per-penalty expansion exp(L·log(sp)+lsp0).
         self.full_sp = np.exp(np.asarray(rho_hat, dtype=float))
 
-        A_inv = cho_solve((fit.A_chol, fit.A_chol_lower), np.eye(p))
+        # A⁻¹ = (X'WX + Sλ)⁻¹. mgcv's discrete POI hands back Sl.fitChol's PP
+        # (the rank-revealing pseudo-inverse, un-repara'd — bgam.fitd:823) on
+        # ``fit.A_inv``; every other path leaves it None and we cho_solve the
+        # (ridge-stabilised) A_chol. Identical for full-rank A.
+        if fit.A_inv is not None:
+            A_inv = fit.A_inv
+        else:
+            A_inv = cho_solve((fit.A_chol, fit.A_chol_lower), np.eye(p))
         XtWX = self._XtX                # = R'R = X'WX at converged β̂
         A_inv_XtWX = A_inv @ XtWX
         edf = np.diag(A_inv_XtWX).copy()
@@ -5383,10 +5412,20 @@ def discrete_full_X(design: DiscreteDesign) -> np.ndarray:
     cached ``X_full``, which dominates scatter-add for the
     moderate-``n`` × moderate-``p`` regime where chicago lives.
 
-    For very large ``n`` where ``X_full`` doesn't fit in memory, callers
-    can opt out of caching by setting ``design._full_X_cache = False``
-    before invoking the kernels — they will then route through the
-    scatter-add paths in ``Xbd``/``XWXd``/``XWyd`` directly.
+    Two separate knobs (don't confuse them):
+
+    * ``design._full_X_cache = False`` only disables *caching* — this
+      function still materialises ``full`` transiently per call (no
+      ``n × p`` array is retained between calls, but one is still built).
+    * To avoid materialising ``X`` at all (mgcv's ``discrete=TRUE`` memory
+      collapse — ``discrete.c`` scatter-adds on the compressed ``Xd``/``k``
+      and never forms ``X``), call the kernels with ``use_kernel=True``.
+      ``Xbd``/``XWXd``/``XWyd`` then route through the per-term scatter-add
+      paths, which are bit-equivalent to this materialised matmul (verified
+      to ~1e-15) but never allocate the dense ``X``. That path is opt-in
+      because the materialised matmul is faster in the moderate-``n`` ×
+      moderate-``p`` regime where chicago/RF fits live; the kernels are for
+      very-large-``n`` memory scaling.
     """
     cache = design._full_X_cache
     if isinstance(cache, np.ndarray):

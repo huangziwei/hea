@@ -12770,7 +12770,7 @@ class _FitState:
     __slots__ = (
         "beta", "eta", "mu", "w", "z", "alpha",
         "dev", "pen", "rss",
-        "A_chol", "A_chol_lower",
+        "A_chol", "A_chol_lower", "A_inv",
         "S_full", "log_det_A", "E_aug",
         "is_fisher_fallback",
         "converged", "boundary", "warn",
@@ -12781,7 +12781,7 @@ class _FitState:
                  eta=None, mu=None, w=None, z=None, alpha=None,
                  is_fisher_fallback=False,
                  converged=True, boundary=False, warn=None,
-                 E_aug=None):
+                 E_aug=None, A_inv=None):
         self.beta = beta
         self.dev = dev
         self.rss = dev               # back-compat alias for Gaussian path
@@ -12793,6 +12793,13 @@ class _FitState:
         self.alpha = alpha
         self.A_chol = A_chol
         self.A_chol_lower = A_chol_lower
+        # Optional precomputed A⁻¹ in the ORIGINAL basis. When set (bam's
+        # discrete POI reuse of Sl.fitChol's PP — bgam.fitd:823), the
+        # post-fit reads it directly instead of cho_solve(A_chol); leaving
+        # it None preserves the standard A_chol path (gam + all other bam
+        # branches). Lets a rank-deficient pseudo-inverse gauge survive
+        # instead of the A_chol ridge fallback.
+        self.A_inv = A_inv
         self.S_full = S_full
         self.log_det_A = log_det_A
         # PIRLS bookkeeping, mirroring gam.fit3's converged/boundary/warn:

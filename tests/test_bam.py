@@ -596,6 +596,40 @@ def test_bam_tweedie_matrix_by_matches_mgcv():
     )
 
 
+def test_bam_discrete_scatter_kernels_match_full_X():
+    """The opt-in scatter-add kernels (``use_kernel=True``) are mgcv's
+    ``discrete=TRUE`` memory-collapse path — ``discrete.c`` accumulates
+    ``X'WX``/``X'Wy``/``Xβ`` on the compressed ``Xd``/``k`` and NEVER forms
+    the dense ``X``. They must be bit-equivalent to hea's default materialised
+    full-X matmul on a supported (no by=) design, else the large-``n`` path
+    silently diverges from the fitted path. Pinned to machine precision."""
+    from hea.models.bam import Xbd, XWXd, XWyd, discrete_full_X
+    rng = np.random.default_rng(0)
+    n = 4000
+    x = rng.uniform(0, 1, n)
+    z = rng.uniform(0, 1, n)
+    y = rng.poisson(np.exp(0.5 + np.sin(2 * np.pi * x)), n).astype(float)
+    m = hea.models.bam("y ~ s(x, k=12) + s(z, k=10)",
+                       {"y": y, "x": x, "z": z},
+                       family=Poisson(), discrete=True)
+    d = m._discrete_design
+    w = rng.uniform(0.1, 2.0, n)          # arbitrary (sign-safe) weights
+    yv = rng.standard_normal(n)
+    beta = rng.standard_normal(d.p)
+    # Xβ, X'Wy, X'WX: materialised full-X vs scatter-add kernel.
+    np.testing.assert_allclose(Xbd(d, beta),
+                               Xbd(d, beta, use_kernel=True), rtol=0, atol=1e-11)
+    np.testing.assert_allclose(XWyd(d, w, yv),
+                               XWyd(d, w, yv, use_kernel=True), rtol=0, atol=1e-10)
+    np.testing.assert_allclose(XWXd(d, w),
+                               XWXd(d, w, use_kernel=True), rtol=0, atol=1e-10)
+    # ``_full_X_cache=False`` only disables caching, NOT materialisation —
+    # the result is unchanged (still the full-X matmul).
+    d._full_X_cache = False
+    np.testing.assert_allclose(Xbd(d, beta), Xbd(d, beta, use_kernel=True),
+                               rtol=0, atol=1e-11)
+
+
 def test_bam_discrete_matrix_by_kernel_path_guarded():
     """The opt-in scatter kernels don't apply by= weighting (bam-plan P2);
     they must fail loudly on a by-term, not silently miscompute."""
