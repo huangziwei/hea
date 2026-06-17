@@ -4386,10 +4386,15 @@ def compress_df(dat: dict[str, np.ndarray], m: Optional[int] = None,
         work = {nm: np.asarray(dat[nm]).ravel() for nm in names}
         n_eff = n
 
-    # Initial uniquecombs on raw (or vectorised) input.
-    xu_table, k_idx = _uniquecombs(work, names)
+    # Initial uniquecombs on raw (or vectorised) input. R5: pass the round
+    # threshold so a high-cardinality (continuous) column early-exits to the
+    # ``(None, None)`` sentinel instead of argsorting a unique table we are
+    # about to discard by rounding (saves the ~47s continuous-by sort in 2D
+    # RF; byte-identical because the round decision is the same ``>`` test).
+    threshold = mm_total * mf_total
+    xu_table, k_idx = _uniquecombs(work, names, max_unique=threshold)
 
-    if xu_table[names[0]].size > mm_total * mf_total:
+    if xu_table is None or xu_table[names[0]].size > threshold:
         # Too many unique combinations — round metric variables to an
         # m-point grid before re-deduplicating (mgcv bam.r:155-163).
         rounded = {}
@@ -4444,7 +4449,32 @@ def _is_factor_arr(a: np.ndarray) -> bool:
 _UNIQUE_FAST_SPAN_CAP = 1 << 20
 
 
-def _unique_inverse(col: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _distinct_exceeds_1d(a: np.ndarray, threshold: int) -> bool:
+    """Exact predicate: does ``a`` have **more than** ``threshold`` distinct
+    values? Early-exits as soon as ``threshold + 1`` distinct are seen.
+
+    For a high-cardinality (continuous) column the first chunk already blows
+    past ``threshold`` ⇒ O(threshold), avoiding the full ``np.unique`` argsort
+    over all n·m flattened entries. For a low-cardinality column it scans all
+    of ``a`` in a few cheap chunked passes and returns ``False``. The result is
+    exactly ``np.unique(a).size > threshold`` — same ``>`` mgcv's ``compress.df``
+    uses to decide whether to round (bam.r:152), so the round/keep decision is
+    byte-identical; only the *route* to that boolean is faster.
+    """
+    n = a.size
+    if n <= threshold:
+        return False
+    step = max(int(threshold) + 1, 1 << 16)
+    seen: Optional[np.ndarray] = None
+    for s in range(0, n, step):
+        u = np.unique(a[s:s + step])
+        seen = u if seen is None else np.union1d(seen, u)
+        if seen.size > threshold:
+            return True
+    return False
+
+
+def _unique_inverse(col: np.ndarray, max_unique: Optional[int] = None):
     """``np.unique(col, return_inverse=True)`` with an O(n) fast path for
     low-cardinality integer-valued columns — **byte-identical** output.
 
@@ -4463,9 +4493,19 @@ def _unique_inverse(col: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     RNG state) is therefore provably unchanged. See
     .claude/plans/bam-matrix-by-vectorization.md (S3).
 
-    Parity note — pure speedup, **not an mgcv divergence.** The output is
-    identical to ``np.unique`` (hence to mgcv's ``uniquecombs``); only the
-    *route* to it is faster. Safe under a parity audit — nothing to restore.
+    ``max_unique`` (R5): when set, the caller only needs to know whether the
+    distinct count exceeds it (``compress.df`` rounds a continuous variable
+    whose unique table it then **discards**). If the slow path is reached and
+    ``a`` has > ``max_unique`` distinct values, return ``(None, None)`` instead
+    of paying the full argsort for a table that will be thrown away. The lattice
+    fast path is unaffected (it is already O(n) and returns the real table). The
+    round/keep decision is identical (``_distinct_exceeds_1d`` is exact), so the
+    bamT fit is byte-identical. See .claude/plans/bam-rf1a-binned-by-parity.md (R5).
+
+    Parity note — pure speedup, **not an mgcv divergence.** The non-sentinel
+    output is identical to ``np.unique`` (hence to mgcv's ``uniquecombs``); only
+    the *route* to it is faster, and the sentinel only fires when the result is
+    about to be discarded by rounding. Safe under a parity audit.
     """
     a = np.asarray(col)
     if a.size and a.dtype.kind in "fiu":
@@ -4485,22 +4525,35 @@ def _unique_inverse(col: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
                 inv = remap[codes]
                 if np.array_equal(u[inv], a):
                     return u, inv
+    # Slow path (continuous / non-lattice). If the caller only needs the
+    # >max_unique decision and we exceed it, skip the discarded argsort.
+    if max_unique is not None and _distinct_exceeds_1d(a, max_unique):
+        return None, None
     u, inv = np.unique(a, return_inverse=True)
     return u, np.asarray(inv).reshape(-1).astype(np.int64)
 
 
 def _uniquecombs(work: dict[str, np.ndarray],
-                 names: list[str]) -> tuple[dict[str, np.ndarray], np.ndarray]:
+                 names: list[str],
+                 max_unique: Optional[int] = None):
     """Numpy port of R's ``uniquecombs`` (single-thread).
 
     Returns ``(xu, idx)`` where ``xu`` is a dict of unique columns (in
     canonical sort order) and ``idx[i]`` is the unique-row index for
     input row ``i``.
+
+    ``max_unique`` (R5) is honoured only for the single-column case (the path
+    that hits the expensive continuous-by argsort): when the column has more
+    than ``max_unique`` distinct values, return ``(None, None)`` so the caller
+    can round without building a unique table it would discard. Multi-column
+    keys (joint margins — always low-cardinality lattices here) ignore it.
     """
     n = next(iter(work.values())).size
     if len(names) == 1:
         col = work[names[0]]
-        u, inv = _unique_inverse(col)
+        u, inv = _unique_inverse(col, max_unique=max_unique)
+        if u is None:
+            return None, None        # EXCEEDED — caller rounds, see compress_df
         return {names[0]: u}, inv
     # Multi-column: stack into a structured key. Numeric columns are kept
     # numeric; factor columns are converted to integer codes with the

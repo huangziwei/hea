@@ -435,6 +435,31 @@ def test_bam_discrete_matrix_by_kernel_path_guarded():
         XWXd(design, np.ones(n), use_kernel=True)
 
 
+def test_distinct_exceeds_1d_exact_vs_npunique():
+    """RF1a-R5: the early-exit ``>threshold distinct?`` predicate must be
+    EXACTLY ``np.unique(a).size > threshold`` (it drives compress.df's round
+    decision, bam.r:152). Any disagreement would change the bamT fit. Covers
+    continuous (early-exit), boundary (==, +1), binary/lattice (full scan),
+    and small-n (n<=threshold) paths."""
+    from hea.models.bam import _distinct_exceeds_1d
+    rng = np.random.default_rng(7)
+    cases = [
+        rng.standard_normal(200_000),            # continuous, many distinct
+        rng.integers(0, 2, 100_000).astype(float),  # binary
+        np.arange(1000.0),                        # distinct == threshold -> False
+        np.arange(1001.0),                        # distinct == threshold+1 -> True
+        np.tile(np.arange(37.0), 5000),           # low-card lattice
+        np.arange(50.0),                          # n <= threshold
+        np.full(10_000, 3.0),                     # single distinct value
+    ]
+    for a in cases:
+        assert _distinct_exceeds_1d(a, 1000) == (np.unique(a).size > 1000)
+    # chunk-boundary stress: threshold below the 1<<16 step, distinct straddles it
+    a = np.arange(70_000.0)
+    for t in (10, 65_535, 65_536, 69_999, 70_000):
+        assert _distinct_exceeds_1d(a, t) == (np.unique(a).size > t)
+
+
 # =============================================================================
 # 3. small_data oracle (Phase 1 + Phase 2′)
 # =============================================================================
