@@ -4649,7 +4649,8 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
     ik = -1  # 0-based marginal index counter (mgcv ``ik`` is 1-based)
 
     # Walk smooths, discretising each marginal once.
-    def _discretise_marginal(termi: list[str], mi: Optional[int]):
+    def _discretise_marginal(termi: list[str], mi: Optional[int],
+                             dead: bool = False):
         nonlocal ik
         prev = check_term(termi, rec)
         if prev != 0:
@@ -4663,7 +4664,27 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
                 dat[nm] = matrix_to_2d(s)
             else:
                 dat[nm] = s.to_numpy()
-        cr = compress_df(dat, m=mi, rng=rng)
+        if dead:
+            # A matrix-arg ``by=`` whose discretised table is never read by the
+            # matrix-by fit path: ``build_discrete_design`` takes the by-weights
+            # from the *raw* data (``by_mask``), and no term references the by's
+            # k-column. So skip ``compress_df`` entirely — its only effect here
+            # would be an expensive sort/shuffle of a (possibly continuous) by
+            # (≈60s of the 2D RF fit). A zero-index placeholder of the right
+            # (n, n_sum) shape keeps the k-layout identical while drawing no RNG;
+            # the matrix-by fit is invariant to the discretisation shuffle
+            # (seeds 8547/12345/999 ⇒ Δfitted=0). See
+            # .claude/plans/bam-skip-matrix-by-discretisation.md.
+            a0 = dat[termi[0]]
+            ncols = a0.shape[1] if a0.ndim == 2 else 1
+            k_dead = (np.zeros((n, ncols), dtype=np.int64) if a0.ndim == 2
+                      else np.zeros(n, dtype=np.int64))
+            cr = _CompressResult(
+                xu={nm: np.zeros(1, dtype=dat[nm].dtype) for nm in termi},
+                k=k_dead,
+            )
+        else:
+            cr = compress_df(dat, m=mi, rng=rng)
         ki = cr.k                                # (n,) or (n, m_cols)
         if ki.ndim == 1:
             ks[ik, 0] = ks[ik - 1, 1] if ik > 0 else 0
@@ -4729,9 +4750,14 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
     for spec in smooth_specs:
         margins = spec.get("margins", [{"term": spec["term"]}])
         by = spec.get("by")
-        # ``by`` is processed first (matches mgcv jj==1 path).
+        # ``by`` is processed first (matches mgcv jj==1 path). A matrix-arg by=
+        # (RF summation convention) is discretised to a dead placeholder — its
+        # table is unused (by_mask drives the fit) and a continuous by would
+        # otherwise dominate the fit time. Scalar/factor by= keeps the exact
+        # mgcv path, so the byte-exact discrete=TRUE pins (e.g. chicago) and
+        # their RNG sequence are untouched by construction.
         if by not in (None, "NA"):
-            _discretise_marginal([by], m)
+            _discretise_marginal([by], m, dead=is_matrix_col(mf[by]))
         for marg in margins:
             _discretise_marginal(list(marg["term"]), m)
 
