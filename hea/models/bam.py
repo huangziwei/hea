@@ -4462,6 +4462,10 @@ def _unique_inverse(col: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     discretisation downstream (the seeded ``compress_df`` shuffle, ``k``, the
     RNG state) is therefore provably unchanged. See
     .claude/plans/bam-matrix-by-vectorization.md (S3).
+
+    Parity note — pure speedup, **not an mgcv divergence.** The output is
+    identical to ``np.unique`` (hence to mgcv's ``uniquecombs``); only the
+    *route* to it is faster. Safe under a parity audit — nothing to restore.
     """
     a = np.asarray(col)
     if a.size and a.dtype.kind in "fiu":
@@ -4623,6 +4627,25 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
     ``rng`` should be supplied with a fixed seed for reproducibility.
     mgcv uses ``temp.seed(8547)`` (bam.r:233) — the default
     ``RMersenneTwister(8547)`` matches that exactly.
+
+    Parity note — **deliberate divergence from mgcv; do NOT "restore" it.**
+    A *matrix-argument* ``by=`` (the RF summation convention) is intentionally
+    NOT discretised: it is given a zero placeholder (the ``dead`` path in the
+    smooth walk below). mgcv's ``discrete.mf`` *does* discretise the by and then
+    bins it for the fit (bam.r:2469-2483, a lossy step), but hea weights the
+    smooth by the **exact raw** by (``by_mask`` in :func:`build_discrete_design`)
+    and pins to ``bam(discrete=FALSE)`` — so hea's discretised by is dead
+    weight, never read. A line-by-line parity audit against ``discrete.mf`` will
+    see two artefacts and must NOT "fix" them:
+      * the by's k-column / ``nr`` / ``mf`` entry differ from mgcv's;
+      * skipping the by's seeded-RNG draw shifts the *coordinate* margins'
+        unique-row shuffle, so the discretised ``(Xd, k)`` no longer byte-equals
+        mgcv's ``discrete.mf`` output.
+    Both are fitted-value-invariant — the fit is invariant to the unique-row
+    shuffle (verified seeds 8547/12345/999 ⇒ Δfitted = 0), and the R-pins to
+    ``discrete=FALSE`` stay exact. Replicating mgcv's by-discretisation would
+    re-add a sort costing ~60s for a continuous by with **zero** effect on the
+    fit. See .claude/plans/bam-skip-matrix-by-discretisation.md.
     """
     if rng is None:
         rng = RMersenneTwister(8547)
@@ -4665,8 +4688,10 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
             else:
                 dat[nm] = s.to_numpy()
         if dead:
-            # A matrix-arg ``by=`` whose discretised table is never read by the
-            # matrix-by fit path: ``build_discrete_design`` takes the by-weights
+            # Parity note (deliberate mgcv divergence — full rationale in the
+            # discrete_mf docstring): a matrix-arg ``by=`` whose discretised
+            # table is never read by the matrix-by fit path.
+            # ``build_discrete_design`` takes the by-weights
             # from the *raw* data (``by_mask``), and no term references the by's
             # k-column. So skip ``compress_df`` entirely — its only effect here
             # would be an expensive sort/shuffle of a (possibly continuous) by
@@ -5174,6 +5199,16 @@ def _term_full_design(term: _DiscreteTerm, k: np.ndarray, n: int) -> np.ndarray:
     For now the fallback is the only path — it still avoids the
     chunked-QR overhead because ``Xd_list`` is small and reusable
     across PIRLS iterations.
+
+    Parity note — hea-internal speedup, **no mgcv counterpart to diff against.**
+    The constant-grid fast path below (``term.grid_constant`` ⇒ ``by_mask @ B``)
+    optimises hea's *materialisation* of the full design. mgcv ``discrete=TRUE``
+    never materialises — it scatter-adds on the compressed ``Xd``/``k`` in C —
+    so there is no mgcv code or cost that mirrors this loop (the slowness it
+    removed was hea-specific to hea's materialise-then-BLAS strategy). The fast
+    path is bit-equal to hea's own summation loop (≈1e-15) and the fit still
+    pins to mgcv; it changes only *how* the row-sum is computed, not the result.
+    See .claude/plans/bam-matrix-by-vectorization.md.
     """
     if term.kind == "param":
         return term.Xd_list[0]
