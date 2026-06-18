@@ -1252,7 +1252,7 @@ def test_bam_estscale_phi_matches_mgcv_bam(case, fam_factory):
 
 
 def test_bam_discrete_multi_penalty_te_builds():
-    """A 1-D-time × 2-D-space-`ald` RF tensor (multi-penalty te margin — a hea
+    """A 1-D-time × 2-D-space-`ad` RF tensor (multi-penalty te margin — a hea
     extension beyond mgcv) flows through both bam(discrete=False) and
     bam(discrete=True). The discrete path needs ``discrete_mf`` to size its
     bins per marginal VARIABLE (the 2-D space margin has 2), which the
@@ -1278,10 +1278,10 @@ def test_bam_discrete_multi_penalty_te_builds():
         "Xc": np.broadcast_to(xc, (n, mcol)).copy(),
         "Yc": np.broadcast_to(yc, (n, mcol)).copy(),
     }
-    f = "y ~ te(Lag, Xc, Yc, by=Stim, d=c(1,2), bs=c('cr','ald'), k=c(4,6))"
+    f = "y ~ te(Lag, Xc, Yc, by=Stim, d=c(1,2), bs=c('cr','ad'), k=c(4,6))"
     for disc in (False, True):
         mb = bam(f, data=data, family=Gaussian(), discrete=disc)
-        assert np.asarray(mb.sp).size == 14   # cr(1) + 2D-ald(9 wig + 4 mass)
+        assert np.asarray(mb.sp).size == 10   # cr(1) + 2D-ad(9 wig)
 
 
 def test_bam_discrete_matrix_arg_te_predict():

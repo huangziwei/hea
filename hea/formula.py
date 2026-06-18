@@ -7310,192 +7310,6 @@ def _build_ad_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     )
 
 
-# ---- ald (adaptive-locality P-spline) — hea ORIGINAL extension --------------
-#
-# NOT an mgcv port: mgcv has no adaptive-mass smooth, so there is no R oracle.
-# bs="ald" = bs="ad" PLUS an adaptive MASS (amplitude) penalty — the ALD-style
-# soft-locality envelope. Same ps basis and same adaptive 2nd-difference
-# (wiggliness) penalties as bs="ad"; in addition, `m_mass` penalties
-# `diag(v_l)`, where v_l is an inner ps basis evaluated at the k coefficient
-# locations. Each carries its own smoothing parameter ρ_l, so the amplitude
-# shrinkage `ρ(x)=Σ_l ρ_l v_l(x)` varies over the domain and is REML-selected:
-# where ρ(x) is large the coefficients are pulled to ZERO (locality), unlike the
-# difference penalty whose large-weight limit is the null space {const, linear}
-# (flat, not zero). With the mass sp's at 0 the smooth reduces EXACTLY to bs="ad"
-# (the difference penalties and their independent scale.penalty are untouched).
-# Kept in a SEPARATE builder so the bit-exact bs="ad" path stays byte-identical.
-
-
-def _ald_orders_1d(call: Call) -> tuple[int, int]:
-    """`(m_wig, m_mass)` for `bs="ald"` (1D).
-
-    `m_wig` = number of adaptive *wiggliness* penalties (as for `bs="ad"`'s
-    `m`); `m_mass` = number of adaptive *mass* penalties (the locality
-    envelope). Read from `m`: a scalar sets `m_wig` only; `m=c(m_wig, m_mass)`
-    sets both. Defaults: `m_wig=5` (matching `bs="ad"`), `m_mass=3`.
-    """
-    m_src = call.kwargs.get("m")
-    vals = _eval_c_vec_ints(m_src) if m_src is not None else None
-    if not vals:
-        return (5, 3)
-    if len(vals) == 1:
-        return (vals[0], 3)
-    return (vals[0], vals[1])
-
-
-def _ald_orders_2d(call: Call) -> tuple[tuple[int, int], tuple[int, int]]:
-    """`((mi_wig, mj_wig), (mi_mass, mj_mass))` for `bs="ald"` (2D).
-
-    Wiggliness orders default to `(3, 3)` (matching `bs="ad"` 2D); mass-envelope
-    orders default to `(2, 2)`. `m=c(...)` overrides: 2 values set wiggliness, 3
-    values add a square mass order, 4 values set both pairs.
-    """
-    m_src = call.kwargs.get("m")
-    vals = _eval_c_vec_ints(m_src) if m_src is not None else None
-    if not vals:
-        return (3, 3), (2, 2)
-    if len(vals) == 1:
-        return (vals[0], vals[0]), (2, 2)
-    if len(vals) == 2:
-        return (vals[0], vals[1]), (2, 2)
-    if len(vals) == 3:
-        return (vals[0], vals[1]), (vals[2], vals[2])
-    return (vals[0], vals[1]), (vals[2], vals[3])
-
-
-def _ald_mass_basis_1d(nk: int, m_mass: int) -> np.ndarray:
-    """Adaptive MASS envelope columns `V` (shape `(nk, m_mass)`) on the `nk`
-    coefficient locations — each column `v_l ≥ 0` weights a region of the
-    coefficient domain, so `diag(v_l)` is a valid (PSD) amplitude penalty and
-    `ρ(x)=Σ_l ρ_l v_l(x)` is the REML-selected locality envelope.
-
-    - `m_mass == 1` → a single all-ones column = a global amplitude ridge
-      (global shrink, ≈ `select`).
-    - `m_mass >= 2` → degree-1 (linear / triangular) B-spline bumps over the
-      coefficient grid: nonneg, localized, and valid for any `k>=2`, so the
-      small `m_mass` the locality ladder wants is supported — unlike the cubic
-      difference-weight basis (:func:`_ad_penalty_basis_1d`), which needs
-      `k>=4`. Deliberately lower degree than the wiggliness inner basis: the
-      amplitude envelope and the smoothness envelope are different functions.
-    """
-    if m_mass <= 1:
-        return np.ones((nk, 1))
-    x_v = np.arange(1, nk + 1, dtype=float) / nk
-    knots = _ps_knots(x_v, m0=0, k=m_mass)
-    return _ps_basis(x_v, knots, m0=0)
-
-
-def _ald_mass_basis_2d(ki: int, kj: int, mi: int, mj: int) -> np.ndarray:
-    """2D adaptive MASS envelope columns `V` (shape `(ki*kj, mi'*mj')`) on the
-    `ki×kj` coefficient grid — the tensor of two 1D envelopes
-    (:func:`_ald_mass_basis_1d`). Column for region `(p, q)` is
-    `V[a*kj + b, p*mj' + q] = Bi[a, p] * Bj[b, q]`, matching the coefficient
-    flattening of the 2D ad/ald basis (`X[:, a*kj + b] = Xi[:, a] * Xj[:, b]`).
-    Each column is nonneg, so `diag(V[:, c])` is a valid amplitude penalty.
-    """
-    Bi = _ald_mass_basis_1d(ki, mi)
-    Bj = _ald_mass_basis_1d(kj, mj)
-    mi2, mj2 = Bi.shape[1], Bj.shape[1]
-    return (Bi[:, None, :, None] * Bj[None, :, None, :]).reshape(ki * kj, mi2 * mj2)
-
-
-def _ald_raw_build(
-    call: Call, data: pl.DataFrame,
-) -> tuple[np.ndarray, list[np.ndarray], _ADRawBasis]:
-    """Raw (pre-by/absorb) construction for ``bs="ald"`` — returns
-    ``(X, S_list, raw)``. Shared by :func:`_build_ald_smooth` and the te-margin
-    path.
-
-    ALD-style adaptive-locality P-spline (hea original; 1D/2D).
-
-    Same basis and adaptive 2nd-difference (wiggliness) penalties as `bs="ad"`,
-    PLUS adaptive MASS penalties `diag(v_l)` (`v_l` = inner envelope basis on the
-    coefficient grid — :func:`_ald_mass_basis_1d` / :func:`_ald_mass_basis_2d`) =
-    a REML-selected amplitude/locality envelope (the ALD piece). With the mass
-    sp's at 0 the fit reduces EXACTLY to `bs="ad"` — :func:`_scale_penalty` scales
-    each penalty independently, so appending the mass penalties leaves the
-    wiggliness penalties (and their scaling) untouched.
-
-    Not an mgcv port (no adaptive-mass smooth there) ⇒ no R oracle; validated
-    against the `bs="ad"` reduction and synthetic compact-RF recovery.
-    """
-    term = _smooth_term_vars(call)
-    d = len(term)
-    if d == 1:
-        x = data[term[0]].to_numpy().astype(float)
-        m_wig, m_mass = _ald_orders_1d(call)
-        k = _ad_default_k(call, 1)[0]
-        knots = _ps_knots(x, m0=2, k=k)
-        X = _ps_basis(x, knots, m0=2)
-        nk = X.shape[1]
-        if m_wig >= nk - 2:
-            raise ValueError("ald wiggliness penalty basis too large for smoothing basis")
-        if m_mass > nk:
-            raise ValueError("ald mass penalty basis too large for smoothing basis")
-        Db = _ad_Db_1d(nk)
-        Vw = _ad_penalty_basis_1d(nk, m_wig)
-        S_list = [Db.T @ (Vw[:, i : i + 1] * Db) for i in range(m_wig)]
-        if m_mass >= 1:
-            Vm = _ald_mass_basis_1d(nk, m_mass)
-            S_list += [np.diag(Vm[:, j]) for j in range(Vm.shape[1])]
-        raw = _ADRawBasis(
-            term=list(term), knots_per_term=[knots],
-            m0=2, k_per_term=[X.shape[1]],
-        )
-        return X, S_list, raw
-
-    if d == 2:
-        (mi_w, mj_w), (mi_m, mj_m) = _ald_orders_2d(call)
-        k_vec = _ad_default_k(call, 2)
-        ki, kj = int(k_vec[0]), int(k_vec[1])
-        xi = data[term[0]].to_numpy().astype(float)
-        xj = data[term[1]].to_numpy().astype(float)
-        knots_i = _ps_knots(xi, m0=2, k=ki)
-        knots_j = _ps_knots(xj, m0=2, k=kj)
-        Xi = _ps_basis(xi, knots_i, m0=2)
-        Xj = _ps_basis(xj, knots_j, m0=2)
-        n = Xi.shape[0]
-        X = (Xi[:, :, None] * Xj[:, None, :]).reshape(n, ki * kj)
-        # Adaptive wiggliness penalties — identical to bs="ad" 2D.
-        Db = _ad_D2(ki, kj)
-        Drr, Dcc, Dcr = Db["Drr"], Db["Dcc"], Db["Dcr"]
-        kp_tot = mi_w * mj_w
-        if kp_tot == 1:
-            S_list = [Drr.T @ Drr + Dcc.T @ Dcc + Dcr.T @ Dcr]
-        else:
-            Vrr, Vcc, Vcr = _ad_inner_2d_basis((mi_w, mj_w), Db)
-            S_list = [
-                Drr.T @ (Vrr[:, i : i + 1] * Drr)
-                + Dcc.T @ (Vcc[:, i : i + 1] * Dcc)
-                + Dcr.T @ (Vcr[:, i : i + 1] * Dcr)
-                for i in range(kp_tot)
-            ]
-        # NEW: 2D adaptive mass (amplitude/locality) penalties on the coef grid.
-        Vm = _ald_mass_basis_2d(ki, kj, mi_m, mj_m)
-        S_list += [np.diag(Vm[:, c]) for c in range(Vm.shape[1])]
-        raw = _ADRawBasis(
-            term=list(term), knots_per_term=[knots_i, knots_j],
-            m0=2, k_per_term=[ki, kj],
-        )
-        return X, S_list, raw
-
-    raise NotImplementedError('bs="ald" supports only 1 or 2 covariates')
-
-
-def _build_ald_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
-    """`bs="ald"` — ALD-style adaptive-locality P-spline (hea original; 1D/2D).
-
-    Thin wrapper: :func:`_ald_raw_build` (basis + adaptive wiggliness + mass
-    penalties) then mgcv's by-handling / absorb.cons. With the mass sp's at 0 it
-    reduces EXACTLY to ``bs="ad"``. Not an mgcv port ⇒ no R oracle.
-    """
-    term = _smooth_term_vars(call)
-    X, S_list, raw = _ald_raw_build(call, data)
-    return _apply_by_and_absorb(
-        call, data, X, S_list, "pspline.smooth", term, raw_basis=raw,
-    )
-
-
 # ---- te / ti / t2 (tensor-product smooths) ---------------------------------
 #
 # Port of mgcv's te()/ti()/t2() specifications and their constructors at
@@ -7724,14 +7538,13 @@ def _te_build_margin_raw(
             df = pl.DataFrame({term[0]: np.asarray(x_new, dtype=float)})
             return raw.eval(df)
         return X, S_list, _predict, False, raw
-    if bs in ("ad", "ald"):
+    if bs == "ad":
         # Adaptive (multi-penalty) margin — a hea extension beyond mgcv, which
         # refuses multi-penalty te margins (smooth.r:773). The raw construction
         # returns several penalties; the tensor builder lifts each one and skips
         # np-reparam (multi-penalty has no mgcv reparam analog). Predict replays
         # the ps basis via _ADRawBasis (so noterp=False is moot — np is skipped).
-        builder = _ad_raw_build if bs == "ad" else _ald_raw_build
-        X, S_list, raw = builder(mcall, data)
+        X, S_list, raw = _ad_raw_build(mcall, data)
         def _predict(x_new: np.ndarray, _raw=raw, _term=term) -> np.ndarray:
             xn = np.asarray(x_new, dtype=float)
             cols = ({_term[0]: xn} if xn.ndim == 1
@@ -7812,7 +7625,7 @@ def _tensor_prod_S(
     Matches mgcv's `tensor.prod.penalties` — `S` lifts to `I⊗…⊗S⊗…⊗I` (identities
     sized by the other margins' basis dims) — but GENERALISED so a margin may
     carry several penalties: `Sm_lists[i]` is margin `i`'s penalty list (one for
-    cr/ps/tp; several for ad/ald). mgcv stops on multi-penalty margins
+    cr/ps/tp; several for ad). mgcv stops on multi-penalty margins
     (smooth.r:773); this is the hea extension that lifts each one. Single-penalty
     margins reproduce the old output bit-for-bit (same order, same symmetrise).
 
@@ -7892,7 +7705,7 @@ def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
             Xi, Si_list, predict_i, noterp_i, raw_i = _te_build_margin_raw(spec, data, knots_vec=kv)
 
         # np=TRUE SVD reparam — 1-D, single-penalty, non-noterp margins only
-        # (cr/cc/cs opt out via noterp; ad/ald are multi-penalty and have no mgcv
+        # (cr/cc/cs opt out via noterp; ad is multi-penalty and has no mgcv
         # reparam analog — mgcv stops on them, smooth.r:773 — so keep their
         # parameterisation as built).
         if do_np and len(spec["term"]) == 1 and not noterp_i and len(Si_list) == 1:
@@ -8514,8 +8327,6 @@ def materialize_smooths(
             return _build_sz_smooth(call, d)
         if bs == "ad":
             return _build_ad_smooth(call, d)
-        if bs == "ald":
-            return _build_ald_smooth(call, d)
         if bs == "mrf":
             return _build_mrf_smooth(call, d, xt=xt)
         raise NotImplementedError(
