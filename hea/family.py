@@ -809,8 +809,11 @@ class Family:
             "Deta2": r["Dmu2"] * ig12 - r["Dmu"] * g2g * ig1,
             "EDeta2": r["EDmu2"] * ig12,
         }
-        d["Deta.Deta2"] = r["Dmu"] / (r["Dmu2"] * ig1 - r["Dmu"] * g2g)
-        d["Deta.EDeta2"] = r["Dmu"] / (r["EDmu2"] * ig1)
+        # Unguarded divisions, mirroring mgcv gam.fit4.r:39-40: where the
+        # denominator vanishes R yields Inf silently, so ignore the FP flag.
+        with np.errstate(divide="ignore"):
+            d["Deta.Deta2"] = r["Dmu"] / (r["Dmu2"] * ig1 - r["Dmu"] * g2g)
+            d["Deta.EDeta2"] = r["Dmu"] / (r["EDmu2"] * ig1)
         if level > 0:
             ig13 = ig12 * ig1
             d["Dth"] = r["Dth"]
