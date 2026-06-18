@@ -1885,6 +1885,33 @@ class bam(gam):
                     d.expanded, mf0, sparse_cons=-1, knots=self.knots,
                 )
             blocks: list[SmoothBlock] = [b for group in sb_lists for b in group]
+            if discrete:
+                # ``discrete_mf``'s binned model frame is NON-matrix, so the
+                # ``materialize_smooths`` above can't detect the matrix-argument
+                # summation convention — the blocks' specs get
+                # ``summation_dim = matrix_vars = None``. That makes
+                # ``BasisSpec.predict_mat`` take the non-summation branch and
+                # shape-crash on a matrix-arg te/s at PREDICT (whereas
+                # ``discrete=FALSE`` sets them and predicts fine). The metadata
+                # is predict-only (fit-method-independent — the discrete fit
+                # itself never calls ``predict_mat``), and the te covariates that
+                # are matrix-typed in the original data ARE the summation
+                # variables, so record them here. ``blk.term`` is the covariate
+                # list (the by lives in ``spec.by``, not here), matching the
+                # ``matrix_vars`` ``discrete=FALSE`` produces. ``predict_mat``
+                # recomputes ``m`` from the prediction data, so the stored
+                # ``summation_dim`` value only flags the route.
+                for blk in blocks:
+                    if blk.spec is None or blk.spec.summation_dim is not None:
+                        continue
+                    mvars = tuple(
+                        t for t in blk.term
+                        if t in self.data.columns and is_matrix_col(self.data[t])
+                    )
+                    if mvars:
+                        blk.spec.matrix_vars = mvars
+                        blk.spec.summation_dim = matrix_to_2d(
+                            self.data[mvars[0]]).shape[1]
             # Per-block ``id`` (mgcv's sp-linkage key) and ``sp=`` from the
             # smooth spec, parallel to ``blocks`` — every block born from a
             # smooth call inherits that call's id/sp (a by=factor smooth's

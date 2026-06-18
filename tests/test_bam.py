@@ -1282,3 +1282,41 @@ def test_bam_discrete_multi_penalty_te_builds():
     for disc in (False, True):
         mb = bam(f, data=data, family=Gaussian(), discrete=disc)
         assert np.asarray(mb.sp).size == 14   # cr(1) + 2D-ald(9 wig + 4 mass)
+
+
+def test_bam_discrete_matrix_arg_te_predict():
+    """bam(discrete=True).predict() works for matrix-arg (summation-convention)
+    te smooths. The discrete fit builds predict blocks from the binned non-matrix
+    frame, so summation_dim/matrix_vars must be recovered onto the blocks — else
+    BasisSpec.predict_mat takes the non-summation branch and shape-crashes (it
+    did before the fix). Pins that discrete predict reproduces non-discrete
+    predict to the bamT-vs-bamF binning tolerance."""
+    from hea.models import bam
+    from hea.family import Gaussian
+
+    rng = np.random.default_rng(0)
+    nlag, nx = 4, 5
+    m = nlag * nx
+    n = 300
+    c = np.arange(m)
+    lag = (c // nx).astype(float)
+    xc = (c % nx).astype(float)
+    data = {
+        "y": rng.normal(size=n),
+        "Stim": rng.normal(size=(n, m)),
+        "Lag": np.broadcast_to(lag, (n, m)).copy(),
+        "Xc": np.broadcast_to(xc, (n, m)).copy(),
+    }
+    grid = {"Stim": np.ones((m, 1)), "Lag": lag.reshape(-1, 1), "Xc": xc.reshape(-1, 1)}
+    preds = {}
+    for disc in (False, True):
+        mod = bam("y ~ te(Lag, Xc, by=Stim, k=c(4,5))", data=data,
+                  family=Gaussian(), discrete=disc)
+        sp = next(b.spec for b in mod._blocks if "Stim" in (b.label or ""))
+        assert sp.summation_dim is not None and sp.matrix_vars == ("Lag", "Xc")
+        # predict must not crash (the bug) and must return one value per grid row
+        preds[disc] = np.asarray(mod.predict(grid, type="terms").to_numpy()).ravel()
+        assert preds[disc].shape == (m,)
+    # discrete (bamT, binned by) vs non-discrete (bamF, exact by): same RF up to
+    # the binning difference (~1e-3).
+    assert np.corrcoef(preds[False], preds[True])[0, 1] > 0.999
