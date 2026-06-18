@@ -1320,3 +1320,43 @@ def test_bam_discrete_matrix_arg_te_predict():
     # discrete (bamT, binned by) vs non-discrete (bamF, exact by): same RF up to
     # the binning difference (~1e-3).
     assert np.corrcoef(preds[False], preds[True])[0, 1] > 0.999
+
+
+def test_matrix_arg_te_predict_accepts_vector_newdata():
+    """predict() on a matrix-arg (summation-convention) smooth accepts PLAIN
+    VECTOR coordinate columns, not only (m,1) matrices — matching mgcv.
+
+    mgcv's PredictMat row-sums the model matrix to ``n`` points only when it has
+    more than ``n`` rows (smooth.r:4361), so a length-m vector and an (m,1)
+    matrix both mean "no summation" and predict identically — verified against
+    mgcv 1.9.4: ``predict`` accepts either and ``max|vec - mat| == 0``. hea used
+    to force the long-form branch and raise ``not a matrix column`` on vectors;
+    this pins the per-row fallback. Covers gam, bam(discrete=False/True)."""
+    from hea.models import bam, gam
+    from hea.family import Gaussian
+
+    rng = np.random.default_rng(1)
+    nlag, nx = 4, 5
+    m = nlag * nx
+    n = 250
+    c = np.arange(m)
+    lag = (c // nx).astype(float)
+    xc = (c % nx).astype(float)
+    data = {
+        "y": rng.normal(size=n),
+        "Stim": rng.normal(size=(n, m)),
+        "Lag": np.broadcast_to(lag, (n, m)).copy(),
+        "Xc": np.broadcast_to(xc, (n, m)).copy(),
+    }
+    vec = {"Stim": np.ones(m), "Lag": lag.copy(), "Xc": xc.copy()}
+    mat = {"Stim": np.ones((m, 1)), "Lag": lag.reshape(-1, 1), "Xc": xc.reshape(-1, 1)}
+    f = "y ~ te(Lag, Xc, by=Stim, k=c(4,5))"
+    fits = {"gam": gam(f, data=data, family=Gaussian(), method="REML"),
+            "bamF": bam(f, data=data, family=Gaussian(), discrete=False),
+            "bamT": bam(f, data=data, family=Gaussian(), discrete=True)}
+    for tag, mod in fits.items():
+        pv = np.asarray(mod.predict(vec, type="terms").to_numpy()).ravel()
+        pm = np.asarray(mod.predict(mat, type="terms").to_numpy()).ravel()
+        assert pv.shape == (m,), tag
+        # vector and (m,1) predict identically (mgcv: max|vec - mat| == 0)
+        assert np.max(np.abs(pv - pm)) < 1e-12, tag

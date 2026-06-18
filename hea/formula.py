@@ -2972,8 +2972,23 @@ class BasisSpec:
     matrix_vars: Optional[tuple[str, ...]] = None
 
     def predict_mat(self, data: pl.DataFrame) -> np.ndarray:
-        if self.summation_dim is not None and self.matrix_vars:
-            long_data, n, m = long_form_view(data, list(self.matrix_vars))
+        # mgcv applies the summation convention from the PREDICT data's SHAPE,
+        # not a stored flag: ``PredictMat`` row-sums the model matrix down to
+        # ``n`` points only when it has more than ``n`` rows (smooth.r:4361),
+        # so a length-``n`` vector and an ``(n, 1)`` matrix both mean "no
+        # summation" and predict identically (verified against mgcv 1.9.4:
+        # ``predict`` accepts either and ``max|vec - mat| == 0``). Take the
+        # long-form/summation branch only when this smooth's matrix variables
+        # are actually supplied as matrix columns; plain vector columns (which
+        # mgcv accepts for a summation smooth) fall through to the per-row
+        # branch below, evaluating one term per row with no summation.
+        matrix_vars = self.matrix_vars or ()
+        if (
+            self.summation_dim is not None
+            and matrix_vars
+            and any(v in data.columns and is_matrix_col(data[v]) for v in matrix_vars)
+        ):
+            long_data, n, m = long_form_view(data, list(matrix_vars))
             raw = self.predict_raw if self.predict_raw is not None else self.raw
             X = raw.eval(long_data)
             if self.by is not None:
