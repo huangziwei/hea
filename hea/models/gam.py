@@ -648,13 +648,21 @@ class gam:
     data : polars.DataFrame
         Data table; rows with NA in any referenced column are dropped
         before fitting.
-    method : {"REML", "ML", "GCV.Cp"}, default "GCV.Cp"
-        Smoothing-parameter selection criterion (mgcv's default too;
-        prefer ``"REML"`` for most work). ``"ML"`` is Laplace marginal
-        likelihood — like REML but does not profile out the unpenalized
-        fixed effects. Useful for ``anova(m1, m2)``-style likelihood-
-        ratio comparisons across different fixed-effect structures,
-        where REML scores aren't comparable.
+    method : str, default "GCV.Cp"
+        Smoothing-parameter selection criterion — one of ``"REML"``,
+        ``"ML"``, ``"GCV.Cp"``, ``"GACV.Cp"``, ``"P-REML"``, ``"P-ML"``
+        (mgcv's default is ``"GCV.Cp"`` too; prefer ``"REML"`` for most
+        work). ``"ML"`` is Laplace marginal likelihood — like REML but
+        does not profile out the unpenalized fixed effects; useful for
+        ``anova(m1, m2)``-style likelihood-ratio comparisons across
+        different fixed-effect structures, where REML scores aren't
+        comparable. ``"GACV.Cp"`` is the generalized-ACV sibling of GCV
+        (a Pearson-weighted denominator). ``"P-REML"``/``"P-ML"`` are
+        the Pearson-Laplace variants — φ estimated from the Pearson
+        statistic rather than the deviance — and coincide with
+        ``"REML"``/``"ML"`` when the scale is known. mgcv's ``"NCV"``/
+        ``"QNCV"`` (neighbourhood cross-validation) are not yet ported
+        and raise ``NotImplementedError``.
     optimizer : str or (str, str), default ("outer", "newton")
         mgcv's ``gam(optimizer=)``. ``"efs"`` forces the extended
         Fellner-Schall loop for general (formula-list) families —
