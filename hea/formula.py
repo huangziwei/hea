@@ -7212,16 +7212,12 @@ def _ad_inner_2d_basis(kp: tuple[int, int], Db: dict) -> tuple[np.ndarray, np.nd
     return Vrr, Vcc, Vcr
 
 
-def _build_ad_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
-    """`bs="ad"` — adaptive P-spline (1D or 2D).
-
-    1D: builds a standard ps basis, then replaces its single penalty with
-    `k_pen = m` adaptive penalties of the form `Db^T diag(V[:,i]) Db`.
-    2D: builds a tensor of two ps bases (equivalent to the X matrix of
-    `te(..., bs="ps", np=FALSE)`), then replaces penalties with either a
-    single discrete-TPS penalty (kp.tot=1) or `kp[0]*kp[1]` adaptive
-    versions weighted by an inner ps basis.
-    """
+def _ad_raw_build(
+    call: Call, data: pl.DataFrame,
+) -> tuple[np.ndarray, list[np.ndarray], _ADRawBasis]:
+    """Raw (pre-by/absorb) construction for ``bs="ad"`` (1D/2D): returns
+    ``(X, S_list, raw)``. Shared by :func:`_build_ad_smooth` and the te-margin
+    path, so an ``ad`` margin builds identically to a standalone ad smooth."""
     term = _smooth_term_vars(call)
     d = len(term)
     if d > 2:
@@ -7244,9 +7240,7 @@ def _build_ad_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
             term=list(term), knots_per_term=[knots],
             m0=2, k_per_term=[X.shape[1]],
         )
-        return _apply_by_and_absorb(
-            call, data, X, S_list, "pspline.smooth", term, raw_basis=raw,
-        )
+        return X, S_list, raw
 
     # d == 2
     k_vec = _ad_default_k(call, 2)
@@ -7281,6 +7275,207 @@ def _build_ad_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         term=list(term), knots_per_term=[knots_i, knots_j],
         m0=2, k_per_term=[Xi.shape[1], Xj.shape[1]],
     )
+    return X, S_list, raw
+
+
+def _build_ad_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
+    """`bs="ad"` — adaptive P-spline (1D or 2D).
+
+    1D: builds a standard ps basis, then replaces its single penalty with
+    `k_pen = m` adaptive penalties of the form `Db^T diag(V[:,i]) Db`.
+    2D: builds a tensor of two ps bases (equivalent to the X matrix of
+    `te(..., bs="ps", np=FALSE)`), then replaces penalties with either a
+    single discrete-TPS penalty (kp.tot=1) or `kp[0]*kp[1]` adaptive
+    versions weighted by an inner ps basis.
+    """
+    term = _smooth_term_vars(call)
+    X, S_list, raw = _ad_raw_build(call, data)
+    return _apply_by_and_absorb(
+        call, data, X, S_list, "pspline.smooth", term, raw_basis=raw,
+    )
+
+
+# ---- ald (adaptive-locality P-spline) — hea ORIGINAL extension --------------
+#
+# NOT an mgcv port: mgcv has no adaptive-mass smooth, so there is no R oracle.
+# bs="ald" = bs="ad" PLUS an adaptive MASS (amplitude) penalty — the ALD-style
+# soft-locality envelope. Same ps basis and same adaptive 2nd-difference
+# (wiggliness) penalties as bs="ad"; in addition, `m_mass` penalties
+# `diag(v_l)`, where v_l is an inner ps basis evaluated at the k coefficient
+# locations. Each carries its own smoothing parameter ρ_l, so the amplitude
+# shrinkage `ρ(x)=Σ_l ρ_l v_l(x)` varies over the domain and is REML-selected:
+# where ρ(x) is large the coefficients are pulled to ZERO (locality), unlike the
+# difference penalty whose large-weight limit is the null space {const, linear}
+# (flat, not zero). With the mass sp's at 0 the smooth reduces EXACTLY to bs="ad"
+# (the difference penalties and their independent scale.penalty are untouched).
+# Kept in a SEPARATE builder so the bit-exact bs="ad" path stays byte-identical.
+
+
+def _ald_orders_1d(call: Call) -> tuple[int, int]:
+    """`(m_wig, m_mass)` for `bs="ald"` (1D).
+
+    `m_wig` = number of adaptive *wiggliness* penalties (as for `bs="ad"`'s
+    `m`); `m_mass` = number of adaptive *mass* penalties (the locality
+    envelope). Read from `m`: a scalar sets `m_wig` only; `m=c(m_wig, m_mass)`
+    sets both. Defaults: `m_wig=5` (matching `bs="ad"`), `m_mass=3`.
+    """
+    m_src = call.kwargs.get("m")
+    vals = _eval_c_vec_ints(m_src) if m_src is not None else None
+    if not vals:
+        return (5, 3)
+    if len(vals) == 1:
+        return (vals[0], 3)
+    return (vals[0], vals[1])
+
+
+def _ald_orders_2d(call: Call) -> tuple[tuple[int, int], tuple[int, int]]:
+    """`((mi_wig, mj_wig), (mi_mass, mj_mass))` for `bs="ald"` (2D).
+
+    Wiggliness orders default to `(3, 3)` (matching `bs="ad"` 2D); mass-envelope
+    orders default to `(2, 2)`. `m=c(...)` overrides: 2 values set wiggliness, 3
+    values add a square mass order, 4 values set both pairs.
+    """
+    m_src = call.kwargs.get("m")
+    vals = _eval_c_vec_ints(m_src) if m_src is not None else None
+    if not vals:
+        return (3, 3), (2, 2)
+    if len(vals) == 1:
+        return (vals[0], vals[0]), (2, 2)
+    if len(vals) == 2:
+        return (vals[0], vals[1]), (2, 2)
+    if len(vals) == 3:
+        return (vals[0], vals[1]), (vals[2], vals[2])
+    return (vals[0], vals[1]), (vals[2], vals[3])
+
+
+def _ald_mass_basis_1d(nk: int, m_mass: int) -> np.ndarray:
+    """Adaptive MASS envelope columns `V` (shape `(nk, m_mass)`) on the `nk`
+    coefficient locations — each column `v_l ≥ 0` weights a region of the
+    coefficient domain, so `diag(v_l)` is a valid (PSD) amplitude penalty and
+    `ρ(x)=Σ_l ρ_l v_l(x)` is the REML-selected locality envelope.
+
+    - `m_mass == 1` → a single all-ones column = a global amplitude ridge
+      (global shrink, ≈ `select`).
+    - `m_mass >= 2` → degree-1 (linear / triangular) B-spline bumps over the
+      coefficient grid: nonneg, localized, and valid for any `k>=2`, so the
+      small `m_mass` the locality ladder wants is supported — unlike the cubic
+      difference-weight basis (:func:`_ad_penalty_basis_1d`), which needs
+      `k>=4`. Deliberately lower degree than the wiggliness inner basis: the
+      amplitude envelope and the smoothness envelope are different functions.
+    """
+    if m_mass <= 1:
+        return np.ones((nk, 1))
+    x_v = np.arange(1, nk + 1, dtype=float) / nk
+    knots = _ps_knots(x_v, m0=0, k=m_mass)
+    return _ps_basis(x_v, knots, m0=0)
+
+
+def _ald_mass_basis_2d(ki: int, kj: int, mi: int, mj: int) -> np.ndarray:
+    """2D adaptive MASS envelope columns `V` (shape `(ki*kj, mi'*mj')`) on the
+    `ki×kj` coefficient grid — the tensor of two 1D envelopes
+    (:func:`_ald_mass_basis_1d`). Column for region `(p, q)` is
+    `V[a*kj + b, p*mj' + q] = Bi[a, p] * Bj[b, q]`, matching the coefficient
+    flattening of the 2D ad/ald basis (`X[:, a*kj + b] = Xi[:, a] * Xj[:, b]`).
+    Each column is nonneg, so `diag(V[:, c])` is a valid amplitude penalty.
+    """
+    Bi = _ald_mass_basis_1d(ki, mi)
+    Bj = _ald_mass_basis_1d(kj, mj)
+    mi2, mj2 = Bi.shape[1], Bj.shape[1]
+    return (Bi[:, None, :, None] * Bj[None, :, None, :]).reshape(ki * kj, mi2 * mj2)
+
+
+def _ald_raw_build(
+    call: Call, data: pl.DataFrame,
+) -> tuple[np.ndarray, list[np.ndarray], _ADRawBasis]:
+    """Raw (pre-by/absorb) construction for ``bs="ald"`` — returns
+    ``(X, S_list, raw)``. Shared by :func:`_build_ald_smooth` and the te-margin
+    path.
+
+    ALD-style adaptive-locality P-spline (hea original; 1D/2D).
+
+    Same basis and adaptive 2nd-difference (wiggliness) penalties as `bs="ad"`,
+    PLUS adaptive MASS penalties `diag(v_l)` (`v_l` = inner envelope basis on the
+    coefficient grid — :func:`_ald_mass_basis_1d` / :func:`_ald_mass_basis_2d`) =
+    a REML-selected amplitude/locality envelope (the ALD piece). With the mass
+    sp's at 0 the fit reduces EXACTLY to `bs="ad"` — :func:`_scale_penalty` scales
+    each penalty independently, so appending the mass penalties leaves the
+    wiggliness penalties (and their scaling) untouched.
+
+    Not an mgcv port (no adaptive-mass smooth there) ⇒ no R oracle; validated
+    against the `bs="ad"` reduction and synthetic compact-RF recovery.
+    """
+    term = _smooth_term_vars(call)
+    d = len(term)
+    if d == 1:
+        x = data[term[0]].to_numpy().astype(float)
+        m_wig, m_mass = _ald_orders_1d(call)
+        k = _ad_default_k(call, 1)[0]
+        knots = _ps_knots(x, m0=2, k=k)
+        X = _ps_basis(x, knots, m0=2)
+        nk = X.shape[1]
+        if m_wig >= nk - 2:
+            raise ValueError("ald wiggliness penalty basis too large for smoothing basis")
+        if m_mass > nk:
+            raise ValueError("ald mass penalty basis too large for smoothing basis")
+        Db = _ad_Db_1d(nk)
+        Vw = _ad_penalty_basis_1d(nk, m_wig)
+        S_list = [Db.T @ (Vw[:, i : i + 1] * Db) for i in range(m_wig)]
+        if m_mass >= 1:
+            Vm = _ald_mass_basis_1d(nk, m_mass)
+            S_list += [np.diag(Vm[:, j]) for j in range(Vm.shape[1])]
+        raw = _ADRawBasis(
+            term=list(term), knots_per_term=[knots],
+            m0=2, k_per_term=[X.shape[1]],
+        )
+        return X, S_list, raw
+
+    if d == 2:
+        (mi_w, mj_w), (mi_m, mj_m) = _ald_orders_2d(call)
+        k_vec = _ad_default_k(call, 2)
+        ki, kj = int(k_vec[0]), int(k_vec[1])
+        xi = data[term[0]].to_numpy().astype(float)
+        xj = data[term[1]].to_numpy().astype(float)
+        knots_i = _ps_knots(xi, m0=2, k=ki)
+        knots_j = _ps_knots(xj, m0=2, k=kj)
+        Xi = _ps_basis(xi, knots_i, m0=2)
+        Xj = _ps_basis(xj, knots_j, m0=2)
+        n = Xi.shape[0]
+        X = (Xi[:, :, None] * Xj[:, None, :]).reshape(n, ki * kj)
+        # Adaptive wiggliness penalties — identical to bs="ad" 2D.
+        Db = _ad_D2(ki, kj)
+        Drr, Dcc, Dcr = Db["Drr"], Db["Dcc"], Db["Dcr"]
+        kp_tot = mi_w * mj_w
+        if kp_tot == 1:
+            S_list = [Drr.T @ Drr + Dcc.T @ Dcc + Dcr.T @ Dcr]
+        else:
+            Vrr, Vcc, Vcr = _ad_inner_2d_basis((mi_w, mj_w), Db)
+            S_list = [
+                Drr.T @ (Vrr[:, i : i + 1] * Drr)
+                + Dcc.T @ (Vcc[:, i : i + 1] * Dcc)
+                + Dcr.T @ (Vcr[:, i : i + 1] * Dcr)
+                for i in range(kp_tot)
+            ]
+        # NEW: 2D adaptive mass (amplitude/locality) penalties on the coef grid.
+        Vm = _ald_mass_basis_2d(ki, kj, mi_m, mj_m)
+        S_list += [np.diag(Vm[:, c]) for c in range(Vm.shape[1])]
+        raw = _ADRawBasis(
+            term=list(term), knots_per_term=[knots_i, knots_j],
+            m0=2, k_per_term=[ki, kj],
+        )
+        return X, S_list, raw
+
+    raise NotImplementedError('bs="ald" supports only 1 or 2 covariates')
+
+
+def _build_ald_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
+    """`bs="ald"` — ALD-style adaptive-locality P-spline (hea original; 1D/2D).
+
+    Thin wrapper: :func:`_ald_raw_build` (basis + adaptive wiggliness + mass
+    penalties) then mgcv's by-handling / absorb.cons. With the mass sp's at 0 it
+    reduces EXACTLY to ``bs="ad"``. Not an mgcv port ⇒ no R oracle.
+    """
+    term = _smooth_term_vars(call)
+    X, S_list, raw = _ald_raw_build(call, data)
     return _apply_by_and_absorb(
         call, data, X, S_list, "pspline.smooth", term, raw_basis=raw,
     )
@@ -7354,12 +7549,25 @@ def _te_parse_margins(call: Call, data: pl.DataFrame) -> list[dict]:
     if d_src is None:
         d_list = [1] * dim
     else:
-        d_list = _te_parse_vec(d_src, dim, 1, _te_cast_int)
-        if sum(d_list) != dim:
-            raise ValueError(f"te d= must sum to dim ({sum(d_list)} != {dim})")
+        # d='s LENGTH defines the number of margins (n.bases) and it must SUM to
+        # the covariate count (mgcv smooth.r:399-410) — so parse it directly, NOT
+        # via _te_parse_vec, whose "length must equal n" rule is for per-margin
+        # vectors (k=/bs=). This is what lets a 2-D margin exist, e.g.
+        # te(Lag, X, Y, d=c(1,2)) → margin 1 = s(Lag), margin 2 = s(X, Y).
+        d_list = _eval_c_vec_ints(d_src) or [1] * dim
+        if any(v <= 0 for v in d_list) or sum(d_list) != dim:
+            raise ValueError(
+                f"te d= must be positive and sum to the covariate count "
+                f"({sum(d_list)} != {dim})"
+            )
     n_bases = len(d_list)
 
-    k_list = _te_parse_vec(call.kwargs.get("k"), n_bases, 5, _te_cast_int)
+    # Default k is 5^d per margin (mgcv smooth.r:414) — a 2-D margin gets 25, not 5.
+    k_src = call.kwargs.get("k")
+    if k_src is None:
+        k_list = [5 ** d_list[i] for i in range(n_bases)]
+    else:
+        k_list = _te_parse_vec(k_src, n_bases, 5, _te_cast_int)
     bs_list = _te_parse_vec(call.kwargs.get("bs"), n_bases, "cr", _te_cast_str)
     fx_list = _te_parse_vec(call.kwargs.get("fx"), n_bases, False, _te_cast_bool)
     # m is parsed as-is per margin (default NA → None here); each margin's
@@ -7501,6 +7709,20 @@ def _te_build_margin_raw(
             df = pl.DataFrame({term[0]: np.asarray(x_new, dtype=float)})
             return raw.eval(df)
         return X, S_list, _predict, False, raw
+    if bs in ("ad", "ald"):
+        # Adaptive (multi-penalty) margin — a hea extension beyond mgcv, which
+        # refuses multi-penalty te margins (smooth.r:773). The raw construction
+        # returns several penalties; the tensor builder lifts each one and skips
+        # np-reparam (multi-penalty has no mgcv reparam analog). Predict replays
+        # the ps basis via _ADRawBasis (so noterp=False is moot — np is skipped).
+        builder = _ad_raw_build if bs == "ad" else _ald_raw_build
+        X, S_list, raw = builder(mcall, data)
+        def _predict(x_new: np.ndarray, _raw=raw, _term=term) -> np.ndarray:
+            xn = np.asarray(x_new, dtype=float)
+            cols = ({_term[0]: xn} if xn.ndim == 1
+                    else {_term[c]: xn[:, c] for c in range(len(_term))})
+            return _raw.eval(pl.DataFrame(cols))
+        return X, S_list, _predict, False, raw
     raise NotImplementedError(f"te/ti margin with bs={bs!r} not yet supported")
 
 
@@ -7567,22 +7789,35 @@ def _tensor_prod_X(Xm: list[np.ndarray]) -> np.ndarray:
     return out
 
 
-def _tensor_prod_S(Sm: list[np.ndarray]) -> list[np.ndarray]:
+def _tensor_prod_S(
+    Sm_lists: list[list[np.ndarray]],
+) -> tuple[list[np.ndarray], list[int]]:
     """Kronecker-lift each marginal penalty over the tensor basis.
-    Matches mgcv's `tensor.prod.penalties`: S_i lifts to `I_1 ⊗ ... ⊗ S_i ⊗ ... ⊗ I_m`.
+
+    Matches mgcv's `tensor.prod.penalties` — `S` lifts to `I⊗…⊗S⊗…⊗I` (identities
+    sized by the other margins' basis dims) — but GENERALISED so a margin may
+    carry several penalties: `Sm_lists[i]` is margin `i`'s penalty list (one for
+    cr/ps/tp; several for ad/ald). mgcv stops on multi-penalty margins
+    (smooth.r:773); this is the hea extension that lifts each one. Single-penalty
+    margins reproduce the old output bit-for-bit (same order, same symmetrise).
+
+    Returns the lifted penalties (margin-grouped) and a parallel list giving each
+    penalty's source-margin index (so fx margins can drop all their penalties).
     """
-    m = len(Sm)
-    dims = [S.shape[0] for S in Sm]
+    m = len(Sm_lists)
+    dims = [Sm_lists[i][0].shape[0] for i in range(m)]
     out: list[np.ndarray] = []
+    pen_margin: list[int] = []
     for i in range(m):
-        M = Sm[i] if i == 0 else np.eye(dims[0])
-        for j in range(1, m):
-            M = np.kron(M, Sm[i] if i == j else np.eye(dims[j]))
-        # Symmetrize (mgcv does this too).
-        if M.shape[0] == M.shape[1]:
-            M = 0.5 * (M + M.T)
-        out.append(M)
-    return out
+        for S in Sm_lists[i]:
+            M: np.ndarray | None = None
+            for j in range(m):
+                blk = S if j == i else np.eye(dims[j])
+                M = blk if M is None else np.kron(M, blk)
+            assert M is not None
+            out.append(0.5 * (M + M.T))   # always square (kron of squares)
+            pen_margin.append(i)
+    return out, pen_margin
 
 
 def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
@@ -7629,7 +7864,7 @@ def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
         do_np = _te_cast_bool(np_flag)
 
     Xm: list[np.ndarray] = []
-    Sm: list[np.ndarray] = []
+    Sm_lists: list[list[np.ndarray]] = []   # per-margin penalty lists (≥1)
     margin_raws: list[_RawBasis] = []
     for i, spec in enumerate(specs):
         # mgcv passes the same knots= list to every marginal smooth.construct;
@@ -7640,36 +7875,34 @@ def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
             Xi, Si_list, predict_i, noterp_i, raw_i = _te_build_margin_centered(spec, data, knots_vec=kv)
         else:
             Xi, Si_list, predict_i, noterp_i, raw_i = _te_build_margin_raw(spec, data, knots_vec=kv)
-        if len(Si_list) != 1:
-            raise ValueError(f"te margin {i} has {len(Si_list)} penalties; only one allowed")
-        S_i = Si_list[0]
 
-        # np=TRUE SVD reparam, skipped for margins that opt out (cr/cc/cs set
-        # noterp=TRUE — their basis is already "nicely parameterised").
-        if do_np and len(spec["term"]) == 1 and not noterp_i:
+        # np=TRUE SVD reparam — 1-D, single-penalty, non-noterp margins only
+        # (cr/cc/cs opt out via noterp; ad/ald are multi-penalty and have no mgcv
+        # reparam analog — mgcv stops on them, smooth.r:773 — so keep their
+        # parameterisation as built).
+        if do_np and len(spec["term"]) == 1 and not noterp_i and len(Si_list) == 1:
             x_vals = data[spec["term"][0]].to_numpy().astype(float)
-            Xi, S_list_new, XP = _te_reparam_margin(Xi, [S_i], x_vals, predict_i)
-            S_i = S_list_new[0]
+            Xi, Si_list, XP = _te_reparam_margin(Xi, Si_list, x_vals, predict_i)
             if XP is not None:
                 raw_i = _LinearTransformRawBasis(inner=raw_i, M=XP)
 
         # Scale each marginal penalty by its largest eigenvalue.
-        eigs = np.linalg.eigvalsh(0.5 * (S_i + S_i.T))
-        top = float(eigs[-1])
-        if top > 0:
-            S_i = S_i / top
+        scaled = []
+        for S in Si_list:
+            top = float(np.linalg.eigvalsh(0.5 * (S + S.T))[-1])
+            scaled.append(S / top if top > 0 else S)
 
         Xm.append(Xi)
-        Sm.append(S_i)
+        Sm_lists.append(scaled)
         margin_raws.append(raw_i)
 
     X = _tensor_prod_X(Xm)
-    S_list = _tensor_prod_S(Sm)
+    S_list, pen_margin = _tensor_prod_S(Sm_lists)
 
-    # fx: drop margins whose fx=TRUE.
-    for i in reversed(range(n_bases)):
-        if specs[i]["fx"]:
-            del S_list[i]
+    # fx: drop ALL tensor penalties belonging to margins with fx=TRUE.
+    for idx in reversed(range(len(S_list))):
+        if specs[pen_margin[idx]]["fx"]:
+            del S_list[idx]
 
     cls = "tensor.smooth"
     label = _smooth_label(call)
@@ -8266,6 +8499,8 @@ def materialize_smooths(
             return _build_sz_smooth(call, d)
         if bs == "ad":
             return _build_ad_smooth(call, d)
+        if bs == "ald":
+            return _build_ald_smooth(call, d)
         if bs == "mrf":
             return _build_mrf_smooth(call, d, xt=xt)
         raise NotImplementedError(

@@ -4788,12 +4788,16 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
 
     n = mf.height
     # Pre-count how many index columns ``k`` will need: each smooth term
-    # contributes ``len(margins) + (by != None)`` marginals; each parametric
-    # variable contributes 1.
+    # contributes one slot per marginal VARIABLE plus ``(by != None)``; each
+    # parametric variable contributes 1. A multi-D margin (e.g. a 2-D ad/tp
+    # space margin, ``d=c(1,2)``) has >1 variable and is jointly discretised one
+    # ``ik`` per variable, so counting per-margin (the old behaviour) undersizes
+    # ``nr``/``ks`` and crashes; count per-variable to match.
     nk = 0
     for spec in smooth_specs:
-        n_marg = len(spec.get("margins", [{"term": spec["term"]}]))
-        nk += n_marg + (1 if spec.get("by") not in (None, "NA") else 0)
+        margins = spec.get("margins", [{"term": spec["term"]}])
+        n_marg_vars = sum(len(marg["term"]) for marg in margins)
+        nk += n_marg_vars + (1 if spec.get("by") not in (None, "NA") else 0)
     pmf_in_mf = [nm for nm in names_pmf if nm in mf.columns]
     nk += len(pmf_in_mf)
 

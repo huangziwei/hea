@@ -1249,3 +1249,36 @@ def test_bam_estscale_phi_matches_mgcv_bam(case, fam_factory):
     np.testing.assert_allclose(m.sigma_squared, meta["scale"], rtol=1e-4)
     np.testing.assert_allclose(m.edf_total, meta["edf_total"], rtol=1e-4)
     np.testing.assert_allclose(m.fitted_values, fit_ref, rtol=1e-4, atol=1e-6)
+
+
+def test_bam_discrete_multi_penalty_te_builds():
+    """A 1-D-time × 2-D-space-`ald` RF tensor (multi-penalty te margin — a hea
+    extension beyond mgcv) flows through both bam(discrete=False) and
+    bam(discrete=True). The discrete path needs ``discrete_mf`` to size its
+    bins per marginal VARIABLE (the 2-D space margin has 2), which the
+    pre-count now does. No R oracle (mgcv refuses multi-penalty te margins);
+    this pins that the scalable RF fitter assembles + solves the tensor."""
+    from hea.models import bam
+    from hea.family import Gaussian
+
+    rng = np.random.default_rng(6)
+    nlag, nx, ny = 4, 3, 2
+    P = nx * ny
+    mcol = nlag * P
+    n = 250
+    c = np.arange(mcol)
+    lag = (c // P).astype(float)
+    rem = c % P
+    xc = (rem // ny).astype(float)
+    yc = (rem % ny).astype(float)
+    data = {
+        "y": rng.normal(size=n),
+        "Stim": rng.normal(size=(n, mcol)),
+        "Lag": np.broadcast_to(lag, (n, mcol)).copy(),
+        "Xc": np.broadcast_to(xc, (n, mcol)).copy(),
+        "Yc": np.broadcast_to(yc, (n, mcol)).copy(),
+    }
+    f = "y ~ te(Lag, Xc, Yc, by=Stim, d=c(1,2), bs=c('cr','ald'), k=c(4,6))"
+    for disc in (False, True):
+        mb = bam(f, data=data, family=Gaussian(), discrete=disc)
+        assert np.asarray(mb.sp).size == 14   # cr(1) + 2D-ald(9 wig + 4 mass)

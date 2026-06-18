@@ -8427,3 +8427,118 @@ def test_ncv_method_raises_not_implemented():
     for method in ("NCV", "QNCV"):
         with pytest.raises(NotImplementedError, match="NCV"):
             gam("accel ~ s(times)", d, method=method)
+
+
+def test_ald_reduces_to_ad_when_mass_sp_zero():
+    """bs="ald" (Thread B, hea original) = bs="ad" + adaptive MASS penalties.
+
+    The mass penalties are appended to the smooth's penalty list, so with their
+    smoothing parameters forced to 0 the fit must reduce EXACTLY to bs="ad":
+    ``_scale_penalty`` scales each penalty independently, so the wiggliness
+    penalties (and their scaling/absorb) are untouched by the extra mass
+    penalties. Pins the structural invariant — there is no R oracle for this
+    hea-only basis (mgcv has no adaptive-mass smooth).
+    """
+    rng = np.random.default_rng(0)
+    n = 200
+    x = np.linspace(0.0, 1.0, n)
+    f = np.exp(-((x - 0.5) ** 2) / (2 * 0.05**2))  # compact bump (RF-like)
+    y = f + rng.normal(0.0, 0.1, n)
+    d = pl.DataFrame({"x": x, "y": y})
+
+    m_ad = gam("y ~ s(x, bs='ad')", d, method="REML")
+    m_ald = gam("y ~ s(x, bs='ald')", d, method="REML")
+    # ald default = m_wig=5 wiggliness + m_mass=3 mass penalties (ad has 5).
+    assert np.asarray(m_ad.sp).size == 5
+    assert np.asarray(m_ald.sp).size == 8
+
+    # Fix wiggliness sp at ad's optimum and mass sp at 0 → must reproduce ad.
+    sp_fix = list(np.asarray(m_ad.sp, dtype=float)) + [0.0, 0.0, 0.0]
+    m_ald_fix = gam("y ~ s(x, bs='ald')", d, method="REML", sp=sp_fix)
+    assert np.allclose(
+        np.asarray(m_ald_fix.coef), np.asarray(m_ad.coef), atol=1e-8, rtol=0,
+    )
+    assert np.allclose(
+        np.asarray(m_ald_fix.fitted_values),
+        np.asarray(m_ad.fitted_values), atol=1e-8, rtol=0,
+    )
+
+
+def test_ald_m_mass_override_and_ladder_rungs():
+    """`m=c(m_wig, m_mass)` sets the two penalty counts; `m_mass=1` is the
+    global-ridge rung; 2D ald builds; 3D ald raises honestly (ad/ald are ≤2D)."""
+    rng = np.random.default_rng(1)
+    n = 150
+    x = np.linspace(0.0, 1.0, n)
+    y = np.sin(2 * np.pi * x) + rng.normal(0.0, 0.1, n)
+    d = pl.DataFrame({
+        "x": x, "y": y, "z": rng.uniform(size=n), "w": rng.uniform(size=n),
+    })
+
+    # m_wig=4, m_mass=2 → 6 smoothing params.
+    assert np.asarray(gam("y ~ s(x, bs='ald', m=c(4,2))", d, method="REML").sp).size == 6
+    # m_mass=1 → global amplitude ridge rung: 4 + 1 = 5.
+    assert np.asarray(gam("y ~ s(x, bs='ald', m=c(4,1))", d, method="REML").sp).size == 5
+    # 2D ald builds (3x3 wig + 2x2 mass = 13 sp).
+    assert np.asarray(gam("y ~ s(x, z, bs='ald')", d, method="REML").sp).size == 13
+    # 3D ald is not supported (ad/ald are 1D/2D only) — raise, don't mis-fit.
+    with pytest.raises(NotImplementedError, match="ald"):
+        gam("y ~ s(x, z, w, bs='ald')", d, method="REML")
+
+
+def test_ald_2d_reduces_to_2d_ad_when_mass_sp_zero():
+    """2D bs="ald" = 2D bs="ad" (3x3 wiggliness) + a 2x2 tensor mass envelope.
+    With the 4 mass sp's at 0 it must reproduce 2D bs="ad" exactly."""
+    rng = np.random.default_rng(2)
+    n = 600
+    x, z = rng.uniform(size=n), rng.uniform(size=n)
+    f = np.exp(-(((x - 0.5) ** 2 + (z - 0.5) ** 2) / (2 * 0.04)))  # compact blob
+    y = f + rng.normal(0.0, 0.1, n)
+    d = pl.DataFrame({"x": x, "z": z, "y": y})
+
+    m_ad = gam("y ~ s(x, z, bs='ad')", d, method="REML")
+    m_ald = gam("y ~ s(x, z, bs='ald')", d, method="REML")
+    assert np.asarray(m_ad.sp).size == 9          # 3x3 wiggliness
+    assert np.asarray(m_ald.sp).size == 13         # + 2x2 mass
+
+    sp_fix = list(np.asarray(m_ad.sp, dtype=float)) + [0.0] * 4
+    m_fix = gam("y ~ s(x, z, bs='ald')", d, method="REML", sp=sp_fix)
+    assert np.allclose(
+        np.asarray(m_fix.coef), np.asarray(m_ad.coef), atol=1e-7, rtol=0,
+    )
+
+
+def test_te_multi_dim_margin_d_arg():
+    """te(..., d=c(1,2)) groups covariates into margins of given dims (mgcv
+    smooth.r:399-414): one sp per MARGIN, default k=5^d, cr/ps promoted to tp."""
+    rng = np.random.default_rng(3)
+    n = 400
+    d = pl.DataFrame({c: rng.uniform(size=n) for c in "xzw"} | {"y": rng.normal(size=n)})
+    m = gam("y ~ te(x, z, w, d=c(1,2))", d, method="REML")  # 1D lag + 2D space
+    assert np.asarray(m.sp).size == 2                       # one sp per margin
+    # equal to explicitly naming the margin bases (1D cr + 2D tp)
+    m2 = gam("y ~ te(x, z, w, d=c(1,2), bs=c('cr','tp'))", d, method="REML")
+    assert np.asarray(m2.sp).size == 2
+    # a single 2D margin == an ordinary 2D tp tensor; must still sum-check d
+    with pytest.raises(ValueError, match="sum to"):
+        gam("y ~ te(x, z, w, d=c(1,1))", d, method="REML")  # sums to 2 != 3
+
+
+def test_te_ald_margin_reduces_to_te_ad_margin():
+    """Multi-penalty te (hea extension beyond mgcv, which refuses it at
+    smooth.r:773): a 2-D *ald* space margin = a 2-D *ad* space margin + a mass
+    envelope. With the ald margin's mass sp's fixed at 0 and the SAME wiggliness
+    sp's, the tensor reduces EXACTLY to the ad-margin te — each margin penalty is
+    lifted independently through tensor.prod.penalties. Uses fixed sp (single
+    PIRLS each) so it is fast and deterministic."""
+    rng = np.random.default_rng(5)
+    n = 400
+    d = pl.DataFrame({c: rng.uniform(size=n) for c in "xzw"} | {"y": rng.normal(size=n)})
+    fad = "y ~ te(x, z, w, d=c(1,2), bs=c('cr','ad'),  k=c(5,5))"
+    fald = "y ~ te(x, z, w, d=c(1,2), bs=c('cr','ald'), k=c(5,5))"
+    # cr(1) + 2D-ad(3x3=9) = 10 sp; ald adds a 2x2 mass envelope = +4 → 14 sp.
+    m_ad = gam(fad, d, method="REML", sp=[1.0] * 10)
+    m_ald = gam(fald, d, method="REML", sp=[1.0] * 10 + [0.0] * 4)
+    assert np.asarray(m_ad.sp).size == 10
+    assert np.asarray(m_ald.sp).size == 14
+    assert np.allclose(np.asarray(m_ald.coef), np.asarray(m_ad.coef), atol=1e-8, rtol=0)
