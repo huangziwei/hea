@@ -42,7 +42,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from matplotlib.transforms import blended_transform_factory
-from scipy.linalg import cho_factor, cho_solve, solve_triangular
+from scipy.linalg import cho_factor, cho_solve, qr, solve_triangular
 
 from ..R import distributions as _dist
 from ..R import nmath as _nmath
@@ -11281,6 +11281,30 @@ def _mroot(A: np.ndarray, rank: int | None = None) -> np.ndarray:
     return U[:rank, inv_piv].T
 
 
+def _qr_ldet_inv(X: np.ndarray, get_inv: bool) -> tuple[float, np.ndarray | None]:
+    """mgcv ``qr_ldet_inv`` (gdi.c:257): ``log|X|`` and, optionally, the
+    inverse of ``X`` via pivoted QR.
+
+    ``log|X| = sum_i log|R_ii|`` from the column-pivoted QR ``X[:, piv] = Q R``
+    (LAPACK dgeqp3, matching mgcv's ``mgcv_qr``). When ``get_inv``, the inverse
+    is ``X^{-1} = P R^{-1} Q'`` — ``solve_triangular`` for ``R^{-1} Q'`` then row
+    unpivot by ``piv`` (mgcv's column-by-column ``pivot[i]`` permutation).
+
+    Replaces a ``np.linalg.slogdet``/``np.linalg.inv`` (LU) shortcut: LU and QR
+    agree to rounding on the log-determinant, but numpy's ``slogdet`` sets the
+    divide-by-zero/overflow FP flags (raising spurious RuntimeWarnings) even on
+    healthy, well-conditioned ``S``; the QR path mgcv actually uses does not.
+    """
+    Q, R, piv = qr(X, pivoting=True)
+    ldet = float(np.sum(np.log(np.abs(np.diag(R)))))
+    Xi = None
+    if get_inv:
+        RiQt = solve_triangular(R, Q.T, lower=False)
+        Xi = np.empty_like(X)
+        Xi[piv, :] = RiQt
+    return ldet, Xi
+
+
 def _get_stable_S(rS_list: list[np.ndarray], sp: np.ndarray, deriv: int,
                   d_tol: float, r_tol: float,
                   fixed_penalty: bool = False):
@@ -11388,11 +11412,10 @@ def _get_stable_S(rS_list: list[np.ndarray], sp: np.ndarray, deriv: int,
         Q -= r
         gamma = gamma1
 
-    sign, det = np.linalg.slogdet(S)
+    det, B = _qr_ldet_inv(S, get_inv=bool(deriv))
     det1 = None
     det2 = None
     if deriv:
-        B = np.linalg.inv(S)
         det1 = np.array([
             float(np.sum((rS[i].T @ B) * rS[i].T)) * spf[i]
             for i in range(M)
