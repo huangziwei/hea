@@ -75,4 +75,10 @@ ignore = ["F403", "F405"]
 # re-export, not a mistake. The curated ``__all__`` lists remain the source
 # of truth for ``from hea.X import *``.
 "**/__init__.py" = ["F401"]
+# ``family.py`` is a mechanical port of mgcv's efam.r / coxph.r / mvam.r,
+# where single-letter math names (``l`` = log-likelihood / deviance residual,
+# loop indices, …) mirror the R/C source verbatim. Renaming them would reduce
+# port fidelity, so E741 (ambiguous name) is silenced for this file only — the
+# names are deliberate, not mistakes.
+"hea/family.py" = ["E741"]
 

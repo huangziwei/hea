@@ -7845,7 +7845,6 @@ def _build_t2_smooth(
             "pc= point constraint with t2() is not yet supported"
         )
     specs = _te_parse_margins(call, data)
-    n_bases = len(specs)
 
     # t2 has no fx: mgcv's t2() hardcodes `fx <- FALSE` (smooth.r:539) — there
     # is no fixed/unpenalized t2 (use te(..., fx=TRUE) for that). Reject it

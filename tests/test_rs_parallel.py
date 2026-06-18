@@ -39,12 +39,12 @@ def _build_cases():
     pb = g.uniform(0.05, 0.95, n)
     sx = g.uniform(-0.4, 0.4, n)       # small |x| for pow1p
     Z = np.zeros(n)
-    O = np.ones(n)
+    ONE = np.ones(n)
     # (rs name, [inputs in native order], (trailing flag bools))
     return [
-        ("pnorm", [xr, Z, O], (True, False)),
-        ("qnorm", [p01, Z, O], (True, False)),
-        ("dnorm", [xr, Z, O], (False,)),
+        ("pnorm", [xr, Z, ONE], (True, False)),
+        ("qnorm", [p01, Z, ONE], (True, False)),
+        ("dnorm", [xr, Z, ONE], (False,)),
         ("lgammafn", [al], ()),
         ("gammafn", [al], ()),
         ("stirlerr", [al], ()),

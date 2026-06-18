@@ -987,7 +987,8 @@ def test_bam_weights_validation():
     with pytest.raises(ValueError, match="length"):
         hea.models.bam("y ~ z + s(x, k=10)", df, weights=np.ones(n - 1))
     with pytest.raises(ValueError, match="non-negative"):
-        bad = np.ones(n); bad[0] = -1.0
+        bad = np.ones(n)
+        bad[0] = -1.0
         hea.models.bam("y ~ z + s(x, k=10)", df, weights=bad)
 
 

@@ -6354,27 +6354,35 @@ class gmm:
                 lbl = (f".sig{sig_n:02d}" if signames
                        else f"{pre}_{cnames[i]}|{gname}")
                 if varcov:
-                    val = (lambda th, sg, _bi=bi, _i=i:
-                           float((sg * np.linalg.norm(self._theta_bar_block(th, _bi)[_i, :])) ** 2))
-                    fit = (lambda v, th, sg, _bi=bi, _i=i:
-                           self._dev_with_vc_fixed(
-                               (lambda t, s, __bi=_bi, __i=_i:
-                                (s * np.linalg.norm(self._theta_bar_block(t, __bi)[__i, :])) ** 2),
-                               v, th, sg))
+                    def val(th, sg, _bi=bi, _i=i):
+                        return float((sg * np.linalg.norm(
+                            self._theta_bar_block(th, _bi)[_i, :])) ** 2)
+
+                    def fit(v, th, sg, _bi=bi, _i=i):
+                        return self._dev_with_vc_fixed(
+                            (lambda t, s, __bi=_bi, __i=_i:
+                             (s * np.linalg.norm(
+                                 self._theta_bar_block(t, __bi)[__i, :])) ** 2),
+                            v, th, sg)
                     mle = float(sd[i]) ** 2
                 elif c == 1:
-                    val = (lambda th, sg, _s=theta_off: float(sg * np.asarray(th)[_s]))
-                    fit = (lambda v, th, sg, _s=theta_off:
-                           self._dev_with_sd_fixed(_s, v, sg, th))
+                    def val(th, sg, _s=theta_off):
+                        return float(sg * np.asarray(th)[_s])
+
+                    def fit(v, th, sg, _s=theta_off):
+                        return self._dev_with_sd_fixed(_s, v, sg, th)
                     mle = float(sd[i])
                 else:
-                    val = (lambda th, sg, _bi=bi, _i=i:
-                           float(sg * np.linalg.norm(self._theta_bar_block(th, _bi)[_i, :])))
-                    fit = (lambda v, th, sg, _bi=bi, _i=i:
-                           self._dev_with_vc_fixed(
-                               (lambda t, s, __bi=_bi, __i=_i:
-                                s * np.linalg.norm(self._theta_bar_block(t, __bi)[__i, :])),
-                               v, th, sg))
+                    def val(th, sg, _bi=bi, _i=i):
+                        return float(sg * np.linalg.norm(
+                            self._theta_bar_block(th, _bi)[_i, :]))
+
+                    def fit(v, th, sg, _bi=bi, _i=i):
+                        return self._dev_with_vc_fixed(
+                            (lambda t, s, __bi=_bi, __i=_i:
+                             s * np.linalg.norm(
+                                 self._theta_bar_block(t, __bi)[__i, :])),
+                            v, th, sg)
                     mle = float(sd[i])
                 specs.append((lbl, mle, fit, val, 0.0, np.inf))
             for j in range(c):                                   # off-diagonal terms
@@ -6397,9 +6405,9 @@ class gmm:
                             return float((ri @ rj) / nn) if nn > 0 else 0.0
                         mle = float(corr[i, j]) if corr is not None else 0.0
                         vmin, vmax = -1.0, 1.0
-                    fit = (lambda v, th, sg, _vc=_val:
-                           self._dev_with_vc_fixed(_vc, v, th, sg))
-                    specs.append((lbl, mle, fit, _val, vmin, vmax))
+                    def _fit(v, th, sg, _vc=_val):
+                        return self._dev_with_vc_fixed(_vc, v, th, sg)
+                    specs.append((lbl, mle, _fit, _val, vmin, vmax))
             theta_off += c * (c + 1) // 2
         return specs
 

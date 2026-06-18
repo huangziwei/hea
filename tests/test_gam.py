@@ -1399,14 +1399,21 @@ def test_wesdr_binomial_ML():
 
 
 def test_method_validation():
-    """gam() rejects bogus method strings before doing any work."""
+    """gam() rejects bogus method strings before doing any work, but accepts
+    mgcv's full criterion set. ``UBRE`` is an internal criterion, not a user
+    ``method=`` value (mgcv.r:1915), so it still raises; ``NCV``/``QNCV`` are
+    valid in mgcv but not yet ported, so they raise NotImplementedError."""
     d = load_dataset("MASS", "mcycle")
     with pytest.raises(ValueError, match="REML.*ML.*GCV"):
         gam("accel ~ s(times)", d, method="UBRE")
     with pytest.raises(ValueError, match="REML.*ML.*GCV"):
-        gam("accel ~ s(times)", d, method="GACV.Cp")
-    with pytest.raises(ValueError, match="REML.*ML.*GCV"):
-        gam("accel ~ s(times)", d, method="P-REML")
+        gam("accel ~ s(times)", d, method="bogus")
+    with pytest.raises(NotImplementedError, match="NCV"):
+        gam("accel ~ s(times)", d, method="NCV")
+    # GACV.Cp / P-REML / P-ML are now accepted (see the Phase-4 method= tests).
+    for m in ("GACV.Cp", "P-REML", "P-ML"):
+        assert gam("accel ~ s(times)", d, method=m).method in (
+            m, "REML", "ML")
 
 
 # ---------------------------------------------------------------------------
@@ -5800,8 +5807,10 @@ def test_general_family_newton_reml_nlp4_robustness():
     fd_lb = np.empty(p)
     fd_lbb = np.empty((p, p))
     for k in range(p):
-        cp = coef.copy(); cm = coef.copy()
-        cp[k] += h; cm[k] -= h
+        cp = coef.copy()
+        cm = coef.copy()
+        cp[k] += h
+        cm[k] -= h
         fd_lb[k] = (fam.ll(yv, Xs, cp, wt, lpi=lpi, deriv=0)["l"]
                     - fam.ll(yv, Xs, cm, wt, lpi=lpi,
                              deriv=0)["l"]) / (2 * h)
@@ -8281,3 +8290,140 @@ def test_softplus_poisson_gam_matches_mgcv():
     np.testing.assert_allclose(
         np.asarray(m.fitted_values)[:4],
         [2.3735475, 0.5884992, 2.1839568, 2.5833613], atol=1e-5)
+
+
+# ===========================================================================
+# Phase-4 (F1) — method= extensions: GACV.Cp + P-REML / P-ML
+#
+# mgcv adds four criteria over hea's {REML, ML, GCV.Cp}: GACV.Cp, P-REML,
+# P-ML (F1, ported here) and NCV/QNCV (F2, deferred). The new surface is only
+# the scale-UNKNOWN standard-family path — for known scale (binomial/poisson,
+# or gam(scale>0)) GACV.Cp degenerates to UBRE and P-REML/P-ML to REML/ML
+# (mgcv.r:1956-1970), and extended families coerce everything to REML
+# (mgcv.r:1892). Pins: mgcv 1.9-4.
+# ===========================================================================
+
+def _score_of(b):
+    """The optimized smoothness criterion (mgcv's b$gcv.ubre), whatever it is."""
+    if b.method in ("REML", "P-REML"):
+        return b.REML_criterion / 2.0
+    if b.method in ("ML", "P-ML"):
+        return b.ML_criterion / 2.0
+    return b.GCV_score
+
+
+def test_preml_pml_gacv_gaussian_match_mgcv():
+    """mcycle gaussian-identity, the three new criteria pinned to mgcv 1.9-4
+    (gam(accel ~ s(times, k=20), method=...)). sp tolerance is loose-ish —
+    the optimum is flat in log λ so the converged sp carries ~1e-5 stopping
+    noise (same character as REML, §2.3) — while edf/scale/score pin tight."""
+    d = load_dataset("MASS", "mcycle")
+    # (method, sp, edf, scale, score)
+    pins = {
+        "P-REML":  (0.001201225072, 13.34821187, 511.085904, 618.2469636),
+        "P-ML":    (0.00125673145,  13.23891672, 511.118452, 624.9696944),
+        "GACV.Cp": (0.002051451768, 12.06929732, 513.1780453, 559.7472062),
+    }
+    for method, (sp_t, edf_t, sc_t, score_t) in pins.items():
+        b = gam("accel ~ s(times, k=20)", d, method=method)
+        assert float(b.sp[0]) == pytest.approx(sp_t, rel=2e-3)
+        assert float(b.edf_total) == pytest.approx(edf_t, rel=1e-3)
+        assert float(b.sigma_squared) == pytest.approx(sc_t, rel=1e-3)
+        assert _score_of(b) == pytest.approx(score_t, rel=1e-5)
+
+
+def test_preml_pml_gacv_gamma_match_mgcv():
+    """trees + Gamma(log), two smooths, the three new criteria pinned to mgcv.
+    The Height smooth is essentially linear (fully penalized → a huge, flat
+    sp), so only the well-determined Girth sp[1] is pinned tight; edf/scale/
+    score pin to ~1e-6."""
+    d = load_dataset("datasets", "trees")
+    pins = {
+        "P-REML":  (0.2044224642, 4.760659811, 0.006827033793, 78.03936884),
+        "P-ML":    (0.3019696627, 4.501993974, 0.006875739433, 69.64771768),
+        "GACV.Cp": (0.2793119364, 4.552183321, 0.006863431057, 0.007903434983),
+    }
+    for method, (sp1_t, edf_t, sc_t, score_t) in pins.items():
+        b = gam("Volume ~ s(Height) + s(Girth)", d,
+                family=Gamma(link="log"), method=method)
+        assert float(b.sp[1]) == pytest.approx(sp1_t, rel=1e-4)
+        assert float(b.edf_total) == pytest.approx(edf_t, rel=1e-5)
+        assert float(b.sigma_squared) == pytest.approx(sc_t, rel=1e-5)
+        assert _score_of(b) == pytest.approx(score_t, rel=1e-6)
+
+
+def test_preml_pml_gacv_fixed_tweedie_match_mgcv():
+    """Fixed-power Tweedie(p) is a *standard* exponential family (NOT
+    extended), so GACV.Cp / P-REML / P-ML are valid for it and mgcv does not
+    coerce to REML. Pinned on trees (Tweedie(p=1.5, log), Girth k=8)."""
+    d = load_dataset("datasets", "trees")
+    pins = {
+        "GACV.Cp": (1.581523002, 3.68659722,  0.07249915935, 0.07999616904),
+        "P-REML":  (2.063876052, 3.513077485, 0.07298142699, 85.43315024),
+        "P-ML":    (4.816226123, 3.013187879, 0.07506138845, 80.60773045),
+    }
+    for method, (sp_t, edf_t, sc_t, score_t) in pins.items():
+        b = gam("Volume ~ s(Girth, k=8)", d, family=Tweedie(p=1.5),
+                method=method)
+        assert b.method == method            # not coerced — fixed Tweedie
+        assert float(b.sp[0]) == pytest.approx(sp_t, rel=2e-3)
+        assert float(b.edf_total) == pytest.approx(edf_t, rel=1e-4)
+        assert float(b.sigma_squared) == pytest.approx(sc_t, rel=1e-4)
+        assert _score_of(b) == pytest.approx(score_t, rel=1e-5)
+
+
+def _synth_poisson_frame():
+    """Deterministic count frame for the known-scale reduction checks
+    (self-contained — no mgcv pin needed, the assertions are reduction
+    identities)."""
+    rng = np.random.default_rng(0)
+    x = np.sort(rng.uniform(size=120))
+    yp = rng.poisson(np.exp(0.3 + 1.2 * np.sin(2 * np.pi * x)))
+    return pl.DataFrame({"x": x, "yp": yp.astype(float)})
+
+
+def test_preml_collapses_to_reml_when_scale_known():
+    """Known scale (poisson) collapses P-REML→REML and P-ML→ML
+    (mgcv.r:1968-1970): the resolved method string flips and the fit is
+    identical to the plain criterion."""
+    df = _synth_poisson_frame()
+    b_p = gam("yp ~ s(x, k=12)", df, family=Poisson(), method="P-REML")
+    b_r = gam("yp ~ s(x, k=12)", df, family=Poisson(), method="REML")
+    assert b_p.method == "REML"
+    np.testing.assert_allclose(np.asarray(b_p.sp), np.asarray(b_r.sp), rtol=1e-9)
+    assert b_p.REML_criterion == pytest.approx(b_r.REML_criterion, rel=1e-9)
+
+    b_pm = gam("yp ~ s(x, k=12)", df, family=Poisson(), method="P-ML")
+    b_ml = gam("yp ~ s(x, k=12)", df, family=Poisson(), method="ML")
+    assert b_pm.method == "ML"
+    assert b_pm.ML_criterion == pytest.approx(b_ml.ML_criterion, rel=1e-9)
+
+
+def test_gacv_collapses_to_ubre_when_scale_known():
+    """Known scale (poisson) makes GACV.Cp degenerate to UBRE — same fit and
+    score as GCV.Cp (mgcv.r:1956)."""
+    df = _synth_poisson_frame()
+    b_g = gam("yp ~ s(x, k=12)", df, family=Poisson(), method="GACV.Cp")
+    b_c = gam("yp ~ s(x, k=12)", df, family=Poisson(), method="GCV.Cp")
+    np.testing.assert_allclose(np.asarray(b_g.sp), np.asarray(b_c.sp), rtol=1e-7)
+    assert b_g.GCV_score == pytest.approx(b_c.GCV_score, rel=1e-9)
+    # known-scale GACV.Cp prints the UBRE label, not "GACV".
+    assert b_g._print_score()[0] == "UBRE"
+
+
+def test_extended_family_coerces_exotic_methods_to_reml():
+    """Estimated-power tw() (and scat/nb) is an extended.family — gam.fit4 has
+    no GCV/UBRE/GACV/Pearson-Laplace path, so mgcv coerces any criterion other
+    than REML/ML to REML (mgcv.r:1892). hea matches (silently, like mgcv)."""
+    d = load_dataset("datasets", "trees")
+    for method in ("GACV.Cp", "P-REML", "P-ML", "GCV.Cp"):
+        b = gam("Volume ~ s(Girth, k=8)", d, family=tw(), method=method)
+        assert b.method == "REML"
+
+
+def test_ncv_method_raises_not_implemented():
+    """NCV/QNCV are valid mgcv methods but not yet ported (F2)."""
+    d = load_dataset("MASS", "mcycle")
+    for method in ("NCV", "QNCV"):
+        with pytest.raises(NotImplementedError, match="NCV"):
+            gam("accel ~ s(times)", d, method=method)

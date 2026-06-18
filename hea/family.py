@@ -5669,7 +5669,6 @@ def _cnorm_Dd(y, mu, theta, wt, censor, level=0):
     th3 = 3.0 * th
     eth = np.exp(-th)
     e2th = eth * eth
-    e3th = e2th * eth
     yat, iu, ii, il, ir = _cnorm_cases(y, censor)
 
     n = mu.shape[0]
@@ -5712,7 +5711,6 @@ def _cnorm_Dd(y, mu, theta, wt, censor, level=0):
         y1 = np.maximum(y[ii], yat[ii])
         ethi = eth[ii]
         e2thi = e2th[ii]
-        e3thi = e3th[ii]
         thi = th[ii]
         th3i = th3[ii]
         z0 = (y0 - muu) * ethi
@@ -7324,7 +7322,6 @@ class gammals(GeneralFamily):
         ethmu = np.exp(-th - mu)
         ethmuy = ethmu * y
         etlymt = eth * (logy - mu - th)
-        n = y.shape[0]
 
         l0 = etlymt - logy - ethmuy - gammaln(eth)
         ret: dict = {"l": float(np.sum(l0)), "l0": l0}
@@ -9503,11 +9500,17 @@ def _mvn_ll(y, X, coef, lpi, m, *, deriv=0, d1b=None, fh=None) -> dict:
     ldetR = 0.0
     k = 0
     for i in range(m):
-        dth[k] = np.exp(theta[k]); R[i, i] = dth[k]; ldetR += theta[k]
-        rri[k] = rci[k] = i; k += 1
+        dth[k] = np.exp(theta[k])
+        R[i, i] = dth[k]
+        ldetR += theta[k]
+        rri[k] = rci[k] = i
+        k += 1
         for j in range(i + 1, m):
-            R[i, j] = theta[k]; dth[k] = 1.0
-            rri[k] = i; rci[k] = j; k += 1
+            R[i, j] = theta[k]
+            dth[k] = 1.0
+            rri[k] = i
+            rci[k] = j
+            k += 1
     jj = [np.asarray(ix, dtype=int) for ix in lpi]
     mu = np.zeros((n, m))
     for l in range(m):

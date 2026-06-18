@@ -851,6 +851,37 @@ class gam:
         if self._scale_resolved is None or self._scale_resolved <= 0:
             return 1.0
         return float(self._scale_resolved)
+
+    # ---- Phase-4 method= predicates (keyed on the resolved ``self.method``;
+    # mgcv's scoreType after the scale-known reductions). Properties, not
+    # init-time state, so ``bam`` (which sets ``self.method`` to REML/ML/
+    # GCV.Cp after mapping fREML→REML) inherits them correctly.
+    @property
+    def _is_laplace(self) -> bool:
+        """Outer Laplace-criterion path (REML/ML/P-REML/P-ML), as opposed to
+        the GCV/UBRE/GACV performance-style path."""
+        return self.method in ("REML", "ML", "P-REML", "P-ML")
+
+    @property
+    def _reml_ind(self) -> float:
+        """mgcv's ``remlInd`` (gam.fit3.r:545): 1 for REML/P-REML (profile out
+        the Mp fixed-effect prior), 0 for ML/P-ML."""
+        return 1.0 if self.method in ("REML", "P-REML") else 0.0
+
+    @property
+    def _use_ml_proj(self) -> bool:
+        """ML-style range-only log|H| projection (ML and P-ML)."""
+        return self.method in ("ML", "P-ML")
+
+    @property
+    def _pearson_scale_criterion(self) -> bool:
+        """Pearson-Laplace scale criteria (P-REML/P-ML): φ = Pearson/(n−Mp)
+        is the analytic plug-in (ρ-only outer problem, γ≡1), not the
+        profiled/​outer-variable scale of plain REML/ML. (Distinct from the
+        instance attribute ``_pearson_scale``, which is the Pearson scale
+        *value* reported by every fit.)"""
+        return self.method in ("P-REML", "P-ML")
+
     # Class-level fallbacks so inherited methods stay usable from ``bam``
     # (same pattern as ``_L``): edge.correct off, no edge-corrected θ, no
     # family-θ slots in the augmented Hessian, no reparam basis (bam's
@@ -997,9 +1028,16 @@ class gam:
                 "optimizer='efs' on the single-formula path needs the "
                 "efsudr port (gam.fit4.r:822) — efs is available for "
                 "general families (formula lists) only.")
-        if method not in ("REML", "ML", "GCV.Cp"):
+        if method in ("NCV", "QNCV"):
+            raise NotImplementedError(
+                "method='NCV'/'QNCV' (neighbourhood cross validation, "
+                "mgcv gam.fit3.r:667 + ncv.c) is not yet ported. Use 'REML', "
+                "'P-REML', 'ML', 'P-ML', 'GCV.Cp' or 'GACV.Cp'."
+            )
+        if method not in ("REML", "ML", "GCV.Cp", "GACV.Cp", "P-REML", "P-ML"):
             raise ValueError(
-                f"method must be 'REML', 'ML', or 'GCV.Cp', got {method!r}"
+                "method must be one of 'REML', 'ML', 'GCV.Cp', 'GACV.Cp', "
+                f"'P-REML', 'P-ML', got {method!r}"
             )
         if not (np.isfinite(gamma) and gamma > 0):
             raise ValueError(f"gamma must be a positive finite number, got {gamma!r}")
@@ -1041,9 +1079,11 @@ class gam:
         if not isinstance(family, Family) and callable(family):
             family = family()
         self.family = Gaussian() if family is None else family
-        # mgcv coerces extended families onto (RE)ML — gam.fit4 has no
-        # GCV/UBRE path (mgcv.r:1892; silent there, so silent here).
-        if self._family_mgcv_extended and method == "GCV.Cp":
+        # mgcv coerces extended families onto (RE)ML for any criterion other
+        # than REML/ML/NCV — gam.fit4 has no GCV/UBRE/GACV/Pearson-Laplace
+        # path (mgcv.r:1892; silent there, so silent here). So GCV.Cp,
+        # GACV.Cp, P-REML and P-ML all collapse to REML for tw/scat/nb/...
+        if self._family_mgcv_extended and method not in ("REML", "ML"):
             method = "REML"
             self.method = method
 
@@ -1067,17 +1107,26 @@ class gam:
                     "(mgcv.r:1948-1949)."
                 )
             self._scale_resolved = 1.0 if self.family.scale_known else -1.0
-        elif method in ("REML", "ML"):
+        elif method in ("REML", "ML", "P-REML", "P-ML"):
             if self.family.scale_known:
                 self._scale_resolved = 1.0          # mgcv.r:1947
             else:
                 self._scale_resolved = scale if scale > 0 else -1.0
-        else:  # GCV.Cp
+            # Known scale collapses the Pearson-Laplace criteria onto their
+            # plain Laplace siblings (mgcv.r:1968-1970): there is no φ to
+            # profile, so P-REML ≡ REML and P-ML ≡ ML.
+            if self._scale_resolved > 0:
+                if method == "P-REML":
+                    method = "REML"
+                elif method == "P-ML":
+                    method = "ML"
+                self.method = method
+        else:  # GCV.Cp / GACV.Cp
             if scale == 0.0:
                 self._scale_resolved = (1.0 if self.family.scale_known
                                         else -1.0)
             else:
-                self._scale_resolved = scale  # >0 → UBRE at φ; <0 → GCV
+                self._scale_resolved = scale  # >0 → UBRE at φ; <0 → GCV/GACV
         # mgcv's object$scale.estimated.
         self.scale_estimated = not self._scale_known_fit
         # GCV.Cp dispatches by family.scale_known: scale-unknown (Gaussian,
@@ -1641,7 +1690,13 @@ class gam:
             # was a value-level REML bug at fixed sp (family-review A1).
             # A gam(scale=)-fixed φ skips the profile-out (φ is not
             # estimated; the criterion runs at log(scale) via _split).
-            if (not self._scale_known_fit) and method in ("REML", "ML"):
+            if (not self._scale_known_fit) and self._pearson_scale_criterion:
+                # P-REML/P-ML: φ̂ is the Pearson-Laplace plug-in φ = P/(n−Mp)
+                # (gam.fit3.r:641), not the deviance profile — there is no
+                # 1-D φ minimization, the scale is analytic at this ρ.
+                self._log_phi_hat = float(np.log(
+                    max(self._phi_pearson(fit), 1e-300)))
+            elif (not self._scale_known_fit) and method in ("REML", "ML"):
                 Dp = float(fit.dev + fit.pen)
                 denom = max(float(n - self._Mp), 1.0) if method == "REML" else max(float(n), 1.0)
                 log_phi = float(np.log(max(Dp / denom, 1e-300)))
@@ -1721,10 +1776,23 @@ class gam:
                 theta0_parts.append(np.asarray(family.get_theta(), dtype=float))
             theta0 = np.concatenate(theta0_parts)
 
+            # Map the resolved user method onto the outer-Newton criterion
+            # (mgcv's scoreType, mgcv.r:1945-1959): REML/ML → "REML";
+            # P-REML/P-ML → "PREML" (ρ-only Pearson-Laplace); GACV.Cp →
+            # "GACV" when the scale is estimated, else UBRE via "GCV"; plain
+            # GCV.Cp → "GCV" (which itself picks GCV vs UBRE on scale).
+            if method in ("REML", "ML"):
+                _criterion = "REML"
+            elif method in ("P-REML", "P-ML"):
+                _criterion = "PREML"
+            elif method == "GACV.Cp" and not self._scale_known_fit:
+                _criterion = "GACV"
+            else:
+                _criterion = "GCV"
             _nt = self._control["newton"]
             theta_hat = self._outer_newton(
                 theta0,
-                criterion="REML" if method in ("REML", "ML") else "GCV",
+                criterion=_criterion,
                 include_log_phi=include_log_phi,
                 include_family_theta=include_family_theta,
                 conv_tol=_nt["conv_tol"], max_step=_nt["maxNstep"],
@@ -1753,6 +1821,12 @@ class gam:
             self.sp = np.exp(theta_sp)
             rho_hat = self._rho_full(theta_sp)
             fit = self._fit_given_rho(rho_hat)
+            # P-REML/P-ML carry no log φ in the outer θ — their scale is the
+            # analytic Pearson-Laplace plug-in at the converged ρ̂. Record it
+            # so the criterion/scale/AIC consumers read φ = P/(n−Mp).
+            if self._pearson_scale_criterion:
+                self._log_phi_hat = float(np.log(
+                    max(self._phi_pearson(fit), 1e-300)))
 
         # Surface inner-loop warnings once, for the final fit only — mgcv
         # accumulates them in gam.fit3's warn list and intermediate newton()
@@ -2255,14 +2329,17 @@ class gam:
         self.BIC = -2.0 * logLik + float(np.log(n)) * df_for_aic
         self._mgcv_aic = float(mgcv_aic)                           # mgcv's m$aic (different from AIC!)
 
-        if method in ("REML", "ML"):
-            # `_reml` returns -2·V_R (REML) or -2·V_ML (ML); `summary()`'s
-            # `/2` recovers mgcv's `-REML`/`-ML` display value. Known-
-            # scale fits substitute log φ = log(scale) — 0 on the
-            # poisson/binomial defaults, log(gam(scale=)) when fixed;
-            # estimated-scale fits read the outer-optimizer's (or sp=
-            # path's profile-out) log φ̂.
-            if n_sp > 0:
+        if self._is_laplace:
+            # `_reml` returns -2·V_R (REML/P-REML) or -2·V_ML (ML/P-ML);
+            # `summary()`'s `/2` recovers mgcv's `-REML`/`-ML` display value.
+            # P-REML/P-ML always use the Pearson-Laplace scale φ = P/(n−Mp)
+            # at the converged fit (the criterion's own scale, gam.fit3.r:641),
+            # regardless of how ρ̂ was found. Plain REML/ML: known-scale fits
+            # substitute log φ = log(scale); estimated-scale fits read the
+            # outer-optimizer's (or sp= profile-out) log φ̂.
+            if self._pearson_scale_criterion:
+                log_phi_hat = float(np.log(max(self._phi_pearson(fit), 1e-300)))
+            elif n_sp > 0:
                 log_phi_hat = (
                     self._log_phi_hat if self._log_phi_hat is not None
                     else float(np.log(self._scale_fixed_value))
@@ -2275,17 +2352,24 @@ class gam:
                 # (gam.fit3 with 0 sp). Profile φ̂ exactly as the criterion's
                 # reduction-to-Gaussian does — REML: Dp/(n−Mp), ML: Dp/n.
                 Dp = fit.dev + fit.pen
-                denom = (float(n) - float(self._Mp)) if method == "REML" else float(n)
+                denom = ((float(n) - float(self._Mp)) if self._reml_ind == 1.0
+                         else float(n))
                 log_phi_hat = float(np.log(Dp / denom))
             score = float(self._reml(rho_hat, log_phi_hat, fit=fit))
-            if method == "REML":
+            # REML/P-REML → REML_criterion; ML/P-ML → ML_criterion.
+            if self._reml_ind == 1.0:
                 self.REML_criterion = score
             else:
                 self.ML_criterion = score
+        elif self.method == "GACV.Cp" and not self._scale_known_fit:
+            # GACV.Cp (scale estimated): the optimized GACV score
+            # (gam.fit3.r:751). Stored in the GCV_score slot (mgcv's shared
+            # `gcv.ubre`). Scale-known GACV.Cp falls through to UBRE below.
+            self.GCV_score = float(self._gacv(rho_hat, fit=fit))
         else:
             # GCV/UBRE: `_gcv` estimates φ internally, so the no-penalty
             # case (empty rho) evaluates the same closed form mgcv reports.
-            self.GCV_score = float(self._gcv(rho_hat))
+            self.GCV_score = float(self._gcv(rho_hat, fit=fit))
 
         # Variance components: σ² and the implied per-slot std.dev's
         # σ_k = σ/√(sp_k/S.scale_k), with delta-method CIs (REML only).
@@ -3548,7 +3632,7 @@ class gam:
         log_det_S = (rp["det"] if rp is not None
                      else self._log_det_S_pos(rho))
         log_det_H = fit.log_det_A
-        if self.method == "ML":
+        if self._use_ml_proj:
             adj, _, _ = self._ml_logdet_adj(fit)
             log_det_H = log_det_H + adj
         # mgcv (gam.fit3.r:622): ``gamma`` divides the data-fit piece
@@ -3557,8 +3641,11 @@ class gam:
         # with the partially-profiled likelihood interpretation. For
         # method="ML", remlInd=0 drops both Mp pieces — β is treated as
         # deterministic, so there is no fixed-effect prior to integrate out.
-        gamma = self._gamma
-        reml_ind = 1.0 if self.method == "REML" else 0.0
+        # The Pearson-Laplace criteria (P-REML/P-ML) have no γ at all
+        # (gam.fit3.r:652) — γ≡1 there; ``_reml`` is then called with
+        # φ = Pearson/(n−Mp) plugged in, reproducing mgcv's P-REML value.
+        gamma = 1.0 if self._pearson_scale_criterion else self._gamma
+        reml_ind = self._reml_ind
         return (
             (Dp / phi - 2.0 * ls0) / gamma
             + log_det_H
@@ -3595,7 +3682,7 @@ class gam:
         Dp = float(fit.dev + fit.pen)
         gamma = self._gamma
         Mp = float(self._Mp)
-        reml_ind = 1.0 if self.method == "REML" else 0.0
+        reml_ind = self._reml_ind
 
         def score_g_h(lp: float):
             phi = float(np.exp(lp))
@@ -3673,7 +3760,9 @@ class gam:
             size = n_sp + (1 if include_log_phi else 0)
             return np.full(size, 1e15)
 
-        gamma = self._gamma
+        # γ≡1 for the Pearson-Laplace criteria (see `_reml`); `_preml_grad`
+        # calls this with include_log_phi=False and adds the φ(ρ) chain term.
+        gamma = 1.0 if self._pearson_scale_criterion else self._gamma
         if n_sp == 0:
             grad_rho = np.zeros(0)
         else:
@@ -3691,7 +3780,7 @@ class gam:
             # correction has two pieces. Mirrors mgcv's ``MLpenalty1`` →
             # ``get_ddetXWXpS`` in gdi.c, which fills trA1 with the
             # ML-version derivatives via the same projected-Hessian logic.
-            if self.method == "ML":
+            if self._use_ml_proj:
                 _, M_inv, B = self._ml_logdet_adj(fit)
                 if M_inv is not None:
                     sp = np.exp(rho)
@@ -3721,7 +3810,7 @@ class gam:
         out = grad_rho
         wt = self._wt
         Dp = fit.dev + fit.pen
-        reml_ind = 1.0 if self.method == "REML" else 0.0
+        reml_ind = self._reml_ind
         if include_log_phi:
             Mp = float(self._Mp)
             ls = np.asarray(self.family.ls(self._y_arr, wt, phi),
@@ -3755,7 +3844,7 @@ class gam:
                                         scale=phi)
             lsth1 = np.asarray(ls_ext["lsth1"], dtype=float).reshape(-1)[:nt]
             dlogH_dth = self._dlog_det_H_dtheta(fit, dd1=dd1)
-            if self.method == "ML":
+            if self._use_ml_proj:
                 # Projected-Hessian correction ∂log|M|/∂θ_j
                 # (M = U_n'A⁻¹U_n) — the penalty carries no θ, so only
                 # the ∂W/∂θ piece contributes:
@@ -3873,7 +3962,7 @@ class gam:
         size = n_sp + (1 if include_log_phi else 0)
         if not (np.isfinite(phi) and phi > 0):
             return np.full((size, size), 1e15)
-        gamma = self._gamma
+        gamma = 1.0 if self._pearson_scale_criterion else self._gamma
         if n_sp == 0:
             H = np.zeros((size, size))
             if include_log_phi:
@@ -3983,7 +4072,7 @@ class gam:
         # the comment above. Mirrors mgcv's ``MLpenalty1`` → ``get_ddetXWXpS``
         # in gdi.c, which fills ``det2`` from the projected K, P.
         ml_active = False
-        if self.method == "ML":
+        if self._use_ml_proj:
             _, M_proj_inv, B_proj = self._ml_logdet_adj(fit)
             if M_proj_inv is not None:
                 ml_active = True
@@ -4789,14 +4878,19 @@ class gam:
           put log φ or family θ in the outer vector — φ̂ is the Pearson
           estimate post-fit, not optimized; family θ has no GCV path).
         """
-        if criterion not in ("REML", "GCV", "REML5"):
+        if criterion not in ("REML", "GCV", "REML5", "GACV", "PREML"):
             raise ValueError(
-                f"criterion must be 'REML', 'GCV' or 'REML5', got "
-                f"{criterion!r}")
-        if criterion == "GCV" and include_log_phi:
-            raise ValueError("GCV path does not include log φ in outer θ.")
-        if criterion == "GCV" and include_family_theta:
-            raise ValueError("GCV path does not include family θ in outer θ.")
+                "criterion must be 'REML', 'GCV', 'REML5', 'GACV' or "
+                f"'PREML', got {criterion!r}")
+        # GCV/GACV (performance-style) and PREML (Pearson-Laplace, φ profiled
+        # analytically at each ρ) are all ρ-only outer problems — no log φ or
+        # family θ in θ.
+        if criterion in ("GCV", "GACV", "PREML") and include_log_phi:
+            raise ValueError(
+                f"{criterion} path does not include log φ in outer θ.")
+        if criterion in ("GCV", "GACV", "PREML") and include_family_theta:
+            raise ValueError(
+                f"{criterion} path does not include family θ in outer θ.")
         if criterion == "REML5" and (include_log_phi or include_family_theta):
             # general families: scale.est ≡ 1, family θ never in outer θ
             raise ValueError("REML5 (gam.fit5) outer θ is ρ-only.")
@@ -4901,6 +4995,41 @@ class gam:
             def _hess(rho, log_phi, fit):
                 return _to_working_hess(np.asarray(fit["REML2"],
                                                    dtype=float))
+        elif criterion == "GACV":
+            # GACV (gam.fit3.r:751): a GCV sibling for scale-unknown standard
+            # families. ρ-only; analytic gradient, FD Hessian on it.
+            def _eval(t):
+                rho_t, _ = _split(t)
+                try:
+                    fit_t = self._fit_given_rho(rho_t)
+                except Exception:
+                    return float("inf"), None
+                return float(self._gacv(rho_t, fit=fit_t)), fit_t
+            def _grad(rho, log_phi, fit):
+                return _to_working(self._gacv_grad(rho, fit=fit))
+            def _hess(rho, log_phi, fit):
+                return _to_working_hess(
+                    self._fd_hessian_of_grad(self._gacv_grad, rho))
+        elif criterion == "PREML":
+            # P-REML / P-ML (gam.fit3.r:640-665): the Laplace (RE)ML criterion
+            # with the Pearson-Laplace scale φ = P/(n−Mp) plugged in (γ≡1),
+            # ρ-only. Value reuses `_reml` at log φ_P; gradient `_preml_grad`
+            # (= reused REML ρ-grad − φ(ρ) chain term); FD Hessian on it.
+            def _eval(t):
+                rho_t, _ = _split(t)
+                try:
+                    fit_t = self._fit_given_rho(rho_t)
+                except Exception:
+                    return float("inf"), None
+                phi = self._phi_pearson(fit_t)
+                val_2v = float(self._reml(
+                    rho_t, float(np.log(max(phi, 1e-300))), fit=fit_t))
+                return val_2v / 2.0, fit_t
+            def _grad(rho, log_phi, fit):
+                return _to_working(0.5 * self._preml_grad(rho, fit))
+            def _hess(rho, log_phi, fit):
+                return _to_working_hess(
+                    0.5 * self._fd_hessian_of_grad(self._preml_grad, rho))
         else:  # GCV
             def _eval(t):
                 rho_t, _ = _split(t)
@@ -4915,7 +5044,9 @@ class gam:
             def _hess(rho, log_phi, fit):
                 return _to_working_hess(self._gcv_hessian(rho, fit=fit))
 
-        is_reml = criterion in ("REML", "REML5")
+        # P-REML/P-ML are (RE)ML-type for the convergence score scale
+        # (|log scale.est| + |score|); GCV/GACV/UBRE use |scale.est| + |score|.
+        is_reml = criterion in ("REML", "REML5", "PREML")
 
         def _score_scale(fit_, val):
             # mgcv's score.scale: |scale.est| + |score| (GCV/UBRE) or
@@ -5412,7 +5543,6 @@ class gam:
                     trial["grad"] = None
                     trial["dscore"] = None
                 trial["start"] = g5["start"].copy()
-                Wolfe2 = True
                 # Wolfe 1: sufficient decrease
                 if (trial["score"] > cur["score"]
                         + c1 * trial["alpha"] * cur["dscore"]
@@ -5428,10 +5558,8 @@ class gam:
                     trial["start"] = g5["start"].copy()
                 if abs(trial["dscore"]) <= -c2 * cur["dscore"]:
                     break                     # Wolfe 2 met
-                Wolfe2 = False
                 if trial["dscore"] >= 0:      # increase at trial end
                     trial = zoom(trial, prev)
-                    Wolfe2 = trial is not None
                     break
                 prev = dict(trial)
                 if trial["alpha"] == alpha_max:
@@ -6145,15 +6273,8 @@ class gam:
         """
         if fit is None:
             fit = self._fit_given_rho(rho)
-        fit_F = self._fisher_view(fit)
         n = self.n
-        if fit_F.w is None or np.allclose(fit_F.w, 1.0):
-            XtWX = self._XtX
-        else:
-            Xw = self._X_full * np.sqrt(fit_F.w)[:, None]
-            XtWX = Xw.T @ Xw
-        A_inv = cho_solve((fit_F.A_chol, fit_F.A_chol_lower), np.eye(self.p))
-        edf_total = float(np.trace(A_inv @ XtWX))
+        edf_total = self._fisher_edf(fit)
         # mgcv (gam.fit3.r): ``gamma`` inflates the apparent edf cost in
         # the criterion: V_g = n·D / (n − γ·τ)²; V_u = D/n + 2·γ·τ/n − 1.
         gamma = self._gamma
@@ -6168,6 +6289,166 @@ class gam:
         if denom <= 0:
             return 1e15
         return n * fit.dev / (denom * denom)
+
+    def _fisher_edf(self, fit: "_FitState") -> float:
+        """τ = tr(A_F⁻¹ X'W_F X), the Fisher-weight effective degrees of
+        freedom — mgcv's ``oo$trA`` for the GCV/UBRE/GACV criteria
+        (gam.fit3.r:644). Shared by `_gcv`, `_gcv_grad_pieces`, `_gacv`."""
+        fit_F = self._fisher_view(fit)
+        if fit_F.w is None or np.allclose(fit_F.w, 1.0):
+            XtWX = self._XtX
+        else:
+            Xw = self._X_full * np.sqrt(fit_F.w)[:, None]
+            XtWX = Xw.T @ Xw
+        A_inv = cho_solve((fit_F.A_chol, fit_F.A_chol_lower), np.eye(self.p))
+        return float(np.trace(A_inv @ XtWX))
+
+    def _pearson_and_deriv(
+        self, rho: "np.ndarray | None", fit: "_FitState", deriv: bool = True,
+    ) -> tuple[float, "np.ndarray | None"]:
+        """Raw Pearson statistic ``P = Σ wᵢ(yᵢ−μᵢ)²/V(μᵢ)`` and (when
+        ``deriv``) its ρ-gradient ``∂P/∂ρ`` (length n_sp), at PIRLS-
+        converged β̂.
+
+        mgcv's ``oo$P``/``oo$P1`` from ``pearson2`` (gdi.c:1207-1255). For
+        the GCV/GACV path (scoreType has ``REML=0``) this is the *raw*
+        statistic; the P-REML/P-ML scale is ``P/(n−Mp)`` (gdi.c:2696-2703,
+        unpenalized ``i=0``) — see `_phi_pearson`. Re-derived directly from
+        ``Pᵢ = w·r²/V`` (``r = y−μ``):
+
+            dPᵢ/dη   = −(w·r/V)·(2 + r·V'(μ)/V)·μ'(η)
+            ∂P/∂ρ_k  = Σᵢ (dPᵢ/dη)·(X·∂β̂/∂ρ)ᵢₖ
+
+        β̂'s ρ-dependence uses the Newton IFT (`_dbeta_drho`), as in the
+        deviance derivative `_gcv_grad_pieces` builds.
+        """
+        family = self.family
+        wt = self._wt
+        mu = fit.mu
+        V = family.variance(mu)
+        r = self._y_arr - mu
+        P = float(np.sum(wt * r * r / V))
+        n_sp = len(self._slots)
+        if not deriv or n_sp == 0:
+            return P, (np.zeros(n_sp) if deriv else None)
+        Vp = family.dvar(mu)
+        me = family.link.mu_eta(fit.eta)
+        dP_deta = -(wt * r / V) * (2.0 + r * Vp / V) * me     # (n,)
+        dP_deta = np.where(np.isfinite(dP_deta), dP_deta, 0.0)
+        db_drho = self._dbeta_drho(fit, rho)                  # (p, n_sp)
+        deta_drho = self._X_full @ db_drho                    # (n, n_sp)
+        return P, dP_deta @ deta_drho                         # (n_sp,)
+
+    def _phi_pearson(self, fit: "_FitState") -> float:
+        """The Pearson-Laplace ("REMLish") scale φ = P/(n−Mp) for the
+        P-REML/P-ML criteria (gam.fit3.r:641, with pearson.extra=0 and
+        n.true=nobs for standard families). P is the *unpenalized* Pearson
+        statistic; Mp is the penalty null-space dimension."""
+        P, _ = self._pearson_and_deriv(None, fit, deriv=False)
+        denom = float(self.n - self._Mp)
+        return P / denom if denom > 0 else P
+
+    def _gacv(self, rho: np.ndarray, fit: "_FitState | None" = None) -> float:
+        """GACV (generalized approximate cross-validation, scale-unknown).
+        mgcv gam.fit3.r:751:
+
+            GACV = dev/n + P·2γ·trA / (δ·n),   δ = n − γ·trA
+
+        with P the raw Pearson statistic and trA the Fisher edf. The
+        scale-*known* ``GACV.Cp`` degenerates to UBRE and is routed through
+        `_gcv` instead (mgcv.r:1956)."""
+        if fit is None:
+            fit = self._fit_given_rho(rho)
+        n = self.n
+        gamma = self._gamma
+        trA = self._fisher_edf(fit)
+        P, _ = self._pearson_and_deriv(None, fit, deriv=False)
+        delta = n - gamma * trA
+        if delta <= 0:
+            return 1e15
+        return fit.dev / n + P * 2.0 * gamma * trA / (delta * n)
+
+    def _gacv_grad(self, rho: np.ndarray,
+                   fit: "_FitState | None" = None) -> np.ndarray:
+        """Analytical gradient of `_gacv` (mgcv gam.fit3.r:769):
+
+            GACV1_k = D1_k/n + 2P/δ²·trA1_k + 2γ·trA·P1_k/(δ·n)
+
+        reusing `_gcv_grad_pieces` for D1=∂dev/∂ρ and trA1=∂τ/∂ρ, plus the
+        Pearson statistic P and its derivative P1."""
+        if fit is None:
+            fit = self._fit_given_rho(rho)
+        n_sp = len(self._slots)
+        if n_sp == 0:
+            return np.zeros(0)
+        n = self.n
+        gamma = self._gamma
+        dev, trA, dD_drho, dtau_drho = self._gcv_grad_pieces(rho, fit)
+        P, P1 = self._pearson_and_deriv(rho, fit, deriv=True)
+        delta = n - gamma * trA
+        if delta <= 0:
+            return np.zeros(n_sp)
+        return (
+            dD_drho / n
+            + 2.0 * P / (delta * delta) * dtau_drho
+            + 2.0 * gamma * trA * P1 / (delta * n)
+        )
+
+    def _preml_grad(self, rho: np.ndarray, fit: "_FitState") -> np.ndarray:
+        """Gradient of the P-REML/P-ML criterion in hea's 2·V units
+        (length n_sp), mgcv gam.fit3.r:656 (×2).
+
+        φ = P/(n−Mp) is the Pearson-Laplace scale, a function of ρ, so the
+        criterion's ρ-gradient is the plain-(RE)ML ρ-block (reused from
+        `_reml_grad`, which runs at γ≡1 under `_pearson_scale`) minus the
+        φ(ρ) chain term:
+
+            2V1_k = [Dp1_k/φ + ∂log|H|_k − ∂log|S|₊_k]        (= `_reml_grad`)
+                    − φ1_k·(Dp/φ² + Mp/φ·remlInd + 2·ls'(φ))
+
+        with φ1_k = P1_k/(n−Mp), ls'(φ) = family.ls[1]/φ (hea's ls is the
+        d/d(logφ) value, so dividing by φ recovers mgcv's dls/dφ = ls[2]).
+        The ∂log|H| block carries the ML range-projection for P-ML via the
+        `_use_ml_proj` predicate inside `_reml_grad`.
+        """
+        n_sp = len(self._slots)
+        if n_sp == 0:
+            return np.zeros(0)
+        phi = self._phi_pearson(fit)
+        log_phi = float(np.log(max(phi, 1e-300)))
+        base = self._reml_grad(rho, log_phi, fit=fit, include_log_phi=False)
+        Dp = float(fit.dev + fit.pen)
+        Mp = float(self._Mp)
+        denom = float(self.n - self._Mp)
+        _, P1 = self._pearson_and_deriv(rho, fit, deriv=True)
+        phi1 = (P1 / denom) if denom > 0 else P1
+        ls1 = float(self.family.ls(self._y_arr, self._wt, phi)[1])
+        ls_dphi = ls1 / phi                       # mgcv's ls[2] = dls/dφ
+        reml_ind = self._reml_ind
+        corr = phi1 * (Dp / (phi * phi) + Mp / phi * reml_ind + 2.0 * ls_dphi)
+        return base - corr
+
+    def _fd_hessian_of_grad(
+        self, grad_fn, rho: np.ndarray, h: float = 1e-4,
+    ) -> np.ndarray:
+        """Central-difference Hessian of an analytic FULL-ρ-space gradient
+        ``grad_fn(ρ, fit) → (n_sp,)``. Used by the outer Newton for the
+        GACV / P-REML / P-ML criteria, mirroring the FD-on-analytic-gradient
+        pattern hea already uses for the tw family-θ Hessian rows: the
+        gradient is exact (pinned to mgcv) and the FD here only approximates
+        curvature for the search direction (truncation ~1e-8 ≪ the outer
+        Newton tol; the optimum pins because gradient-zero matches mgcv)."""
+        n_sp = len(rho)
+        H = np.zeros((n_sp, n_sp))
+        for k in range(n_sp):
+            rp = rho.copy()
+            rp[k] += h
+            rm = rho.copy()
+            rm[k] -= h
+            gp = grad_fn(rp, self._fit_given_rho(rp))
+            gm = grad_fn(rm, self._fit_given_rho(rm))
+            H[:, k] = (gp - gm) / (2.0 * h)
+        return 0.5 * (H + H.T)
 
     def _gcv_grad(self, rho: np.ndarray,
                   fit: "_FitState | None" = None) -> np.ndarray:
@@ -6197,11 +6478,40 @@ class gam:
         """
         if fit is None:
             fit = self._fit_given_rho(rho)
-        fit_F = self._fisher_view(fit)
         n_sp = len(self._slots)
         if n_sp == 0:
             return np.zeros(0)
+        n = self.n
+        dev, edf_total, dD_drho, dtau_drho = self._gcv_grad_pieces(rho, fit)
 
+        # ``gamma`` inflates τ in the criterion: V_g = n·D/(n−γ·τ)²,
+        # V_u = D/n + 2γτ/n − 1. Chain-rule the τ-derivative pieces by γ.
+        gamma = self._gamma
+        if self._scale_known_fit:
+            s_phi = self._scale_fixed_value
+            return dD_drho / n + 2.0 * gamma * dtau_drho * s_phi / n
+        denom = n - gamma * edf_total
+        if denom <= 0:
+            return np.zeros(n_sp)
+        return (
+            n * dD_drho / (denom * denom)
+            + 2.0 * n * gamma * dev * dtau_drho / (denom**3)
+        )
+
+    def _gcv_grad_pieces(
+        self, rho: np.ndarray, fit: "_FitState",
+    ) -> tuple[float, float, np.ndarray, np.ndarray]:
+        """Shared first-derivative ingredients for the GCV/UBRE *and* GACV
+        gradients — ``(dev, trA, ∂D/∂ρ, ∂τ/∂ρ)`` at PIRLS-converged β̂.
+
+        See `_gcv_grad` for the maths. Factored out so `_gacv_grad`
+        (gam.fit3.r:769) reuses the exact same deviance/trace derivatives
+        rather than re-deriving them.
+        """
+        fit_F = self._fisher_view(fit)
+        n_sp = len(self._slots)
+        if n_sp == 0:
+            return float(fit.dev), 0.0, np.zeros(0), np.zeros(0)
         sp = np.exp(rho)
         n, p = self.n, self.p
         X = self._X_full
@@ -6254,21 +6564,7 @@ class gam:
             s = np.einsum("ij,ij->i", KM_w, K_F)                   # (n,) diag(K·M_w·K')
             w_piece = (d_diag - s) @ hv                    # (n_sp,)
 
-        dtau_drho = w_piece + pen_piece
-
-        # ``gamma`` inflates τ in the criterion: V_g = n·D/(n−γ·τ)²,
-        # V_u = D/n + 2γτ/n − 1. Chain-rule the τ-derivative pieces by γ.
-        gamma = self._gamma
-        if self._scale_known_fit:
-            s_phi = self._scale_fixed_value
-            return dD_drho / n + 2.0 * gamma * dtau_drho * s_phi / n
-        denom = n - gamma * edf_total
-        if denom <= 0:
-            return np.zeros(n_sp)
-        return (
-            n * dD_drho / (denom * denom)
-            + 2.0 * n * gamma * fit.dev * dtau_drho / (denom**3)
-        )
+        return float(fit.dev), edf_total, dD_drho, w_piece + pen_piece
 
     def _gcv_hessian(self, rho: np.ndarray,
                      fit: "_FitState | None" = None) -> np.ndarray:
@@ -8919,13 +9215,20 @@ class gam:
     def _print_score(self) -> tuple[str, float]:
         """The ``{method} score:`` label + value of print.gam (= ``x$method`` +
         ``x$gcv.ubre``). REML/ML report the Laplace criterion (hea stores 2×);
-        bam's fREML keeps its label; otherwise UBRE (known scale) or GCV."""
+        P-REML/P-ML the Pearson-Laplace variant; bam's fREML keeps its label;
+        GACV.Cp (scale est) reports GACV; otherwise UBRE (known scale) or GCV."""
+        if self.method == "P-REML":
+            return "P-REML", self.REML_criterion / 2.0
+        if self.method == "P-ML":
+            return "P-ML", self.ML_criterion / 2.0
         if self.method == "REML":
             label = ("fREML" if getattr(self, "_method_in", None) == "fREML"
                      else "REML")
             return label, self.REML_criterion / 2.0
         if self.method == "ML":
             return "ML", self.ML_criterion / 2.0
+        if self.method == "GACV.Cp" and not self._scale_known_fit:
+            return "GACV", self.GCV_score
         return ("UBRE" if self._scale_known_fit else "GCV"), self.GCV_score
 
     def __repr__(self) -> str:
@@ -9233,11 +9536,11 @@ class gam:
             out.append(
                 f"Deviance explained = {self.deviance_explained * 100:.3g}%"
             )
-        # mgcv summary.gam line 4058: prepend "-" only for "REML"/"ML"
-        # (and "P-REML"/"P-ML" which we don't expose); leave "fREML"
-        # alone — mgcv prints it as ``fREML = X``. ``_method_in``
-        # preserves the user's choice across bam's internal fREML→REML
-        # rename so the footer label tracks the original.
+        # mgcv summary.gam line 4058: prepend "-" only for "REML"/"ML";
+        # "P-REML"/"P-ML" print bare (mgcv leaves them untouched), and
+        # "fREML" prints as ``fREML = X``. ``_method_in`` preserves the
+        # user's choice across bam's internal fREML→REML rename so the
+        # footer label tracks the original.
         method_label = getattr(self, "_method_in", self.method)
         # print.summary.gam shows x$scale — the dispersion override when
         # one was supplied (mgcv.r:3900/4097).
@@ -9252,6 +9555,21 @@ class gam:
         elif self.method == "ML":
             out.append(
                 f"-ML = {self.ML_criterion / 2:.5g}  "
+                f"Scale est. = {disp_print:.5g}  n = {self.n}"
+            )
+        elif self.method == "P-REML":
+            out.append(
+                f"P-REML = {self.REML_criterion / 2:.5g}  "
+                f"Scale est. = {disp_print:.5g}  n = {self.n}"
+            )
+        elif self.method == "P-ML":
+            out.append(
+                f"P-ML = {self.ML_criterion / 2:.5g}  "
+                f"Scale est. = {disp_print:.5g}  n = {self.n}"
+            )
+        elif self.method == "GACV.Cp" and not self._scale_known_fit:
+            out.append(
+                f"GACV = {self.GCV_score:.5g}  "
                 f"Scale est. = {disp_print:.5g}  n = {self.n}"
             )
         else:

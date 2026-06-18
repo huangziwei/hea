@@ -1366,8 +1366,10 @@ def test_gammals_ll_derivatives_match_fd():
     fd_lb = np.zeros(p)
     fd_lbb = np.zeros((p, p))
     for k in range(p):
-        cp = coef.copy(); cp[k] += h
-        cm = coef.copy(); cm[k] -= h
+        cp = coef.copy()
+        cp[k] += h
+        cm = coef.copy()
+        cm[k] -= h
         fd_lb[k] = (fam.ll(y, X, cp, lpi=lpi)["l"]
                     - fam.ll(y, X, cm, lpi=lpi)["l"]) / (2 * h)
         fd_lbb[:, k] = (fam.ll(y, X, cp, lpi=lpi, deriv=1)["lb"]
@@ -1491,8 +1493,10 @@ def test_gumbls_ll_derivatives_match_fd():
     fd_lb = np.zeros(p)
     fd_lbb = np.zeros((p, p))
     for k in range(p):
-        cp = coef.copy(); cp[k] += h
-        cm = coef.copy(); cm[k] -= h
+        cp = coef.copy()
+        cp[k] += h
+        cm = coef.copy()
+        cm[k] -= h
         fd_lb[k] = (fam.ll(y, X, cp, lpi=lpi)["l"]
                     - fam.ll(y, X, cm, lpi=lpi)["l"]) / (2 * h)
         fd_lbb[:, k] = (fam.ll(y, X, cp, lpi=lpi, deriv=1)["lb"]
@@ -1607,8 +1611,10 @@ def test_gevlss_ll_derivatives_match_fd():
     fd_lb = np.zeros(p)
     fd_lbb = np.zeros((p, p))
     for k in range(p):
-        cp = coef.copy(); cp[k] += h
-        cm = coef.copy(); cm[k] -= h
+        cp = coef.copy()
+        cp[k] += h
+        cm = coef.copy()
+        cm[k] -= h
         fd_lb[k] = (fam.ll(y, X, cp, lpi=lpi)["l"]
                     - fam.ll(y, X, cm, lpi=lpi)["l"]) / (2 * h)
         fd_lbb[:, k] = (fam.ll(y, X, cp, lpi=lpi, deriv=1)["lb"]
@@ -1637,7 +1643,9 @@ def test_gevlss_link_residuals_and_validation():
     # response residual = y − GEV mean (μ + e^ρ(Γ(1−ξ)−1)/ξ).
     from scipy.special import gamma as _g
     fam = gevlss()
-    mu = np.array([0.5, 1.0]); rho = np.array([-0.2, 0.1]); xi3 = np.array([0.1, 0.2])
+    mu = np.array([0.5, 1.0])
+    rho = np.array([-0.2, 0.1])
+    xi3 = np.array([0.1, 0.2])
     yy = np.array([0.7, 1.3])
     fitted = np.column_stack([mu, rho, xi3])
     fv = mu + np.exp(rho) * (_g(1.0 - xi3) - 1.0) / xi3
@@ -1737,8 +1745,10 @@ def test_cox_ph_ll_derivatives_match_fd():
     fd_lb = np.zeros(p)
     fd_lbb = np.zeros((p, p))
     for k in range(p):
-        cp = beta.copy(); cp[k] += h
-        cm = beta.copy(); cm[k] -= h
+        cp = beta.copy()
+        cp[k] += h
+        cm = beta.copy()
+        cm[k] -= h
         fd_lb[k] = (fam.ll(time, X, cp, d, lpi=lpi, deriv=0)["l"]
                     - fam.ll(time, X, cm, d, lpi=lpi, deriv=0)["l"]) / (2 * h)
         fd_lbb[:, k] = (fam.ll(time, X, cp, d, lpi=lpi, deriv=1)["lb"]
@@ -1880,8 +1890,10 @@ def test_ziplss_ll_derivatives_match_fd():
     fd_lb = np.zeros(p)
     fd_lbb = np.zeros((p, p))
     for k in range(p):
-        cp = coef.copy(); cp[k] += h
-        cm = coef.copy(); cm[k] -= h
+        cp = coef.copy()
+        cp[k] += h
+        cm = coef.copy()
+        cm[k] -= h
         fd_lb[k] = (fam.ll(y, X, cp, lpi=lpi)["l"]
                     - fam.ll(y, X, cm, lpi=lpi)["l"]) / (2 * h)
         fd_lbb[:, k] = (fam.ll(y, X, cp, lpi=lpi, deriv=1)["lb"]
@@ -2078,8 +2090,10 @@ def test_multinom_ll_derivatives_match_fd(K, seed):
     fd_lb = np.zeros(p)
     fd_lbb = np.zeros((p, p))
     for k in range(p):
-        cp = coef.copy(); cp[k] += h
-        cm = coef.copy(); cm[k] -= h
+        cp = coef.copy()
+        cp[k] += h
+        cm = coef.copy()
+        cm[k] -= h
         fd_lb[k] = (fam.ll(y, X, cp, lpi=lpi)["l"]
                     - fam.ll(y, X, cm, lpi=lpi)["l"]) / (2 * h)
         fd_lbb[:, k] = (fam.ll(y, X, cp, lpi=lpi, deriv=1)["lb"]
@@ -2608,7 +2622,7 @@ _MVN_ORACLE = {
 
 @pytest.mark.parametrize("m,seed", [(2, 101), (3, 103)])
 def test_mvn_ll_matches_mgcv_oracle(m, seed):
-    from hea.family import mvn, _mvn_ll
+    from hea.family import mvn
     ref = _MVN_ORACLE[(m, seed)]
     X, Y, beta, lpi, d1b = _mvn_oracle_inputs(
         m, ref["n"], ref["pv"], seed, ref["beta"])
@@ -2666,8 +2680,10 @@ def test_mvn_ll_derivatives_match_fd(m, seed):
     fd_lb = np.zeros(nb)
     fd_lbb = np.zeros((nb, nb))
     for k in range(nb):
-        cp = beta.copy(); cp[k] += h
-        cm = beta.copy(); cm[k] -= h
+        cp = beta.copy()
+        cp[k] += h
+        cm = beta.copy()
+        cm[k] -= h
         fd_lb[k] = (fam.ll(Y, X, cp, lpi=lpi)["l"]
                     - fam.ll(Y, X, cm, lpi=lpi)["l"]) / (2 * h)
         fd_lbb[:, k] = (fam.ll(Y, X, cp, lpi=lpi, deriv=1)["lb"]
@@ -2677,7 +2693,7 @@ def test_mvn_ll_derivatives_match_fd(m, seed):
 
 
 def test_mvn_components_and_validation():
-    from hea.family import mvn, _mvn_ll
+    from hea.family import mvn
     fam = mvn(d=2)
     assert fam.n_lp == 2 and fam.n_extra_coef == 3
     assert fam.available_derivs == 1 and fam.matrix_response is True
@@ -2994,8 +3010,10 @@ def test_ocat_Dd_matches_fd():
     np.testing.assert_allclose(D["Dmu2"], fd_mu2, rtol=1e-4, atol=1e-4)
     # θ-gradient column k via central diff in θ_k.
     for k in range(2):
-        thp = th.copy(); thp[k] += h
-        thm = th.copy(); thm[k] -= h
+        thp = th.copy()
+        thp[k] += h
+        thm = th.copy()
+        thm[k] -= h
         fd_thk = (fam.dev_resids(y0, mu, wt, theta=thp)
                   - fam.dev_resids(y0, mu, wt, theta=thm)) / (2 * h)
         np.testing.assert_allclose(D["Dth"][:, k], fd_thk, rtol=1e-5, atol=1e-5)
@@ -3162,8 +3180,10 @@ def test_ziP_Dd_matches_fd():
              - fam.dev_resids(y, mu - h, wt, theta=th)) / (2 * h)
     np.testing.assert_allclose(D["Dmu"], wt * fd_mu, rtol=1e-5, atol=1e-5)
     for k in range(2):
-        thp = th.copy(); thp[k] += h
-        thm = th.copy(); thm[k] -= h
+        thp = th.copy()
+        thp[k] += h
+        thm = th.copy()
+        thm[k] -= h
         fd_thk = (fam.dev_resids(y, mu, wt, theta=thp)
                   - fam.dev_resids(y, mu, wt, theta=thm)) / (2 * h)
         np.testing.assert_allclose(D["Dth"][:, k], wt * fd_thk,
@@ -3300,8 +3320,10 @@ def test_cnorm_Dd_matches_fd():
         z = (y[iu] - mu_[iu]) * eth[iu]
         out[iu] = z ** 2 + log2pi + 2.0 * thw[iu]            # density: 1/σ Jac
         i = 1
-        y0 = min(y[i], yat[i]); y1 = max(y[i], yat[i])
-        z0 = (y0 - mu_[i]) * eth[i]; z1 = (y1 - mu_[i]) * eth[i]
+        y0 = min(y[i], yat[i])
+        y1 = max(y[i], yat[i])
+        z0 = (y0 - mu_[i]) * eth[i]
+        z1 = (y1 - mu_[i]) * eth[i]
         out[i] = -2.0 * _cnorm_dpnorm(np.array([z0]), np.array([z1]))[0]
         out[3] = -2.0 * log_ndtr((y[3] - mu_[3]) * eth[3])  # left
         out[4] = -2.0 * log_ndtr(-(y[4] - mu_[4]) * eth[4])  # right
