@@ -6563,6 +6563,37 @@ class GeneralFamily(Family):
         """
         raise NotImplementedError
 
+    @staticmethod
+    def _apply_prior_weights(wt, l1, l2, l3=None, l4=None):
+        """Scale the packed per-datum derivative blocks by ``wt`` for a
+        *weighted* log-likelihood (``Σ wt_i·l0_i``).
+
+        A weighted log-likelihood scales every per-observation
+        derivative row by ``wt_i``. :func:`gamlss_etamu` and
+        :func:`gamlss_gH` are linear, row by row, in ``(l1, l2, l3,
+        l4)`` — ``gamlss_gH`` assembles the gradient ``lb`` and Hessian
+        ``lbb`` as plain sums over observations — so scaling these
+        inputs by ``wt`` yields exactly the weighted-MLE
+        gradient/Hessian. Absent derivative orders (``None``) pass
+        through unchanged. ``wt`` is the (n,) weight vector; ``l0``
+        itself is never scaled (the per-observation log-density is
+        reported raw).
+
+        Unlike mgcv's own gamlss families — which drop prior weights —
+        hea's general families honour them here as a weighted
+        likelihood. At unit weights the scaling is the identity, so
+        unweighted fits are bit-for-bit unchanged; weighting a row by
+        integer ``w`` is equivalent to duplicating that row ``w`` times.
+        """
+        w = wt[:, None]
+        l1 = l1 * w
+        l2 = l2 * w
+        if l3 is not None:
+            l3 = l3 * w
+        if l4 is not None:
+            l4 = l4 * w
+        return l1, l2, l3, l4
+
     def initialize_coef(self, y, X, lpi, E=None, offset=None,
                         use_unscaled: bool = False) -> np.ndarray:
         """Starting coefficients (mgcv ``family$initialize``).
@@ -6639,11 +6670,12 @@ class gaulss(GeneralFamily):
         tau = self.links[1].linkinv(eta1)
 
         n = y.shape[0]
+        wt = np.ones(n) if wt is None else np.asarray(wt, dtype=float).ravel()
         ymu = y - mu
         ymu2 = ymu * ymu
         tau2 = tau * tau
         l0 = -0.5 * ymu2 * tau2 - 0.5 * np.log(2.0 * np.pi) + np.log(tau)
-        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        ret: dict = {"l": float(np.sum(wt * l0)), "l0": l0}
         if deriv == 0:
             return ret
 
@@ -6672,6 +6704,7 @@ class gaulss(GeneralFamily):
                                   self.links[1].d4link(tau)])
 
         tri = self.tri
+        l1, l2, l3, l4 = self._apply_prior_weights(wt, l1, l2, l3, l4)
         de = gamlss_etamu(l1, l2, l3, l4, ig1, g2, g3, g4,
                           tri["i2"], tri["i3"], tri["i4"], deriv - 1)
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
@@ -6840,8 +6873,10 @@ class twlss(GeneralFamily):
         # ldTweedie columns: l; ρ, ρρ; θ, θθ, θρ; μ, μμ, μθ, μρ —
         # reordered into the packed (μ, θ, ρ) layout (gamlss.r:2575-2580)
         ld = _ld_tweedie_work(y, mu, theta, rho, a=self.a, b=self.b)
+        wt = np.ones(y.shape[0]) if wt is None else np.asarray(
+            wt, dtype=float).ravel()
         l0 = ld[:, 0]
-        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        ret: dict = {"l": float(np.sum(wt * l0)), "l0": l0}
         if deriv == 0:
             return ret
         l1 = ld[:, [6, 3, 1]]
@@ -6855,6 +6890,7 @@ class twlss(GeneralFamily):
         # no l3/l4 for this family: etamu/gH run at deriv 0 whenever
         # any derivative is requested (gamlss.r:2592-2599)
         tri = self.tri
+        l1, l2, _, _ = self._apply_prior_weights(wt, l1, l2)
         de = gamlss_etamu(l1, l2, None, None, ig1, g2, None, None,
                           tri["i2"], tri["i3"], tri["i4"], 0)
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
@@ -7054,7 +7090,9 @@ class shash(GeneralFamily):
 
         l0, L1, L2, L3, L4 = _shash_derivs(y, mu, tau, eps, phi,
                                            self.phiPen, deriv)
-        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        wt = np.ones(y.shape[0]) if wt is None else np.asarray(
+            wt, dtype=float).ravel()
+        ret: dict = {"l": float(np.sum(wt * l0)), "l0": l0}
         if deriv == 0:
             return ret
         params = (mu, tau, eps, phi)
@@ -7072,6 +7110,7 @@ class shash(GeneralFamily):
                                   for lnk, par in zip(self.links,
                                                       params)])
         tri = self.tri
+        L1, L2, L3, L4 = self._apply_prior_weights(wt, L1, L2, L3, L4)
         de = gamlss_etamu(L1, L2, L3, L4, ig1, g2, g3, g4,
                           tri["i2"], tri["i3"], tri["i4"], deriv - 1)
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
@@ -7326,8 +7365,10 @@ class gammals(GeneralFamily):
         ethmuy = ethmu * y
         etlymt = eth * (logy - mu - th)
 
+        wt = np.ones(y.shape[0]) if wt is None else np.asarray(
+            wt, dtype=float).ravel()
         l0 = etlymt - logy - ethmuy - gammaln(eth)
-        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        ret: dict = {"l": float(np.sum(wt * l0)), "l0": l0}
         if deriv == 0:
             return ret
 
@@ -7376,6 +7417,7 @@ class gammals(GeneralFamily):
                                   self.links[1].d4link(th)])
 
         tri = self.tri
+        l1, l2, l3, l4 = self._apply_prior_weights(wt, l1, l2, l3, l4)
         de = gamlss_etamu(l1, l2, l3, l4, ig1, g2, g3, g4,
                           tri["i2"], tri["i3"], tri["i4"], deriv - 1)
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
@@ -7570,8 +7612,10 @@ class gumbls(GeneralFamily):
         eb = np.exp(-beta)
         z = (y - mu) * eb
         ez = np.exp(-z)
+        wt = np.ones(y.shape[0]) if wt is None else np.asarray(
+            wt, dtype=float).ravel()
         l0 = -beta - z - ez
-        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        ret: dict = {"l": float(np.sum(wt * l0)), "l0": l0}
         if deriv == 0:
             return ret
 
@@ -7626,6 +7670,7 @@ class gumbls(GeneralFamily):
                                   self.links[1].d4link(beta)])
 
         tri = self.tri
+        l1, l2, l3, l4 = self._apply_prior_weights(wt, l1, l2, l3, l4)
         de = gamlss_etamu(l1, l2, l3, l4, ig1, g2, g3, g4,
                           tri["i2"], tri["i3"], tri["i4"], deriv - 1)
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
@@ -8171,7 +8216,9 @@ class gevlss(GeneralFamily):
         # non-finite values still propagate to the fitter.
         with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
             l0, l1, l2, l3, l4 = _gevlss_derivs(y, mu, rho, xi, deriv)
-        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        wt = np.ones(y.shape[0]) if wt is None else np.asarray(
+            wt, dtype=float).ravel()
+        ret: dict = {"l": float(np.sum(wt * l0)), "l0": l0}
         if deriv == 0:
             return ret
 
@@ -8193,6 +8240,7 @@ class gevlss(GeneralFamily):
 
         tri = self.tri
         with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+            l1, l2, l3, l4 = self._apply_prior_weights(wt, l1, l2, l3, l4)
             de = gamlss_etamu(l1, l2, l3, l4, ig1, g2, g3, g4,
                               tri["i2"], tri["i3"], tri["i4"], deriv - 1)
             gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
@@ -8971,7 +9019,9 @@ class ziplss(GeneralFamily):
         lam = self.links[0].linkinv(eta)     # gamma = log Poisson mean
         p = self.links[1].linkinv(eta1)      # presence LP
         zl = _zipll(y, lam, p, deriv)
-        ret: dict = {"l": float(np.sum(zl["l"])), "l0": zl["l"]}
+        wt = np.ones(y.shape[0]) if wt is None else np.asarray(
+            wt, dtype=float).ravel()
+        ret: dict = {"l": float(np.sum(wt * zl["l"])), "l0": zl["l"]}
         if deriv == 0:
             return ret
         ig1 = np.column_stack([self.links[0].mu_eta(eta),
@@ -8986,7 +9036,9 @@ class ziplss(GeneralFamily):
             g4 = np.column_stack([self.links[0].d4link(lam),
                                   self.links[1].d4link(p)])
         tri = self.tri
-        de = gamlss_etamu(zl["l1"], zl["l2"], zl.get("l3"), zl.get("l4"),
+        l1, l2, l3, l4 = self._apply_prior_weights(
+            wt, zl["l1"], zl["l2"], zl.get("l3"), zl.get("l4"))
+        de = gamlss_etamu(l1, l2, l3, l4,
                           ig1, g2, g3, g4, tri["i2"], tri["i3"],
                           tri["i4"], deriv - 1)
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
@@ -9319,11 +9371,14 @@ class multinom(GeneralFamily):
                     and offset[i] is not None):
                 eta[:, i] = eta[:, i] + offset[i]
         d = _multinom_derivs(y, eta, self.tri, deriv)
-        ret: dict = {"l": d["l"], "l0": d["l0"]}
+        wt = np.ones(n) if wt is None else np.asarray(wt, dtype=float).ravel()
+        ret: dict = {"l": float(np.sum(wt * d["l0"])), "l0": d["l0"]}
         if deriv == 0:
             return ret
-        gh = gamlss_gH(X, jj, d["l1"], d["l2"], self.tri["i2"],
-                       l3=d.get("l3"), i3=self.tri["i3"], l4=d.get("l4"),
+        l1, l2, l3, l4 = self._apply_prior_weights(
+            wt, d["l1"], d["l2"], d.get("l3"), d.get("l4"))
+        gh = gamlss_gH(X, jj, l1, l2, self.tri["i2"],
+                       l3=l3, i3=self.tri["i3"], l4=l4,
                        i4=self.tri["i4"], d1b=d1b, d2b=d2b, deriv=deriv - 1,
                        fh=fh, D=D)
         ret.update(gh)

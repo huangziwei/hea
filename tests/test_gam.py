@@ -6032,53 +6032,53 @@ def test_twlss_through_gam_matches_mgcv():
                                rtol=0, atol=1e-3)
 
 
-def test_twlss_weighted_residuals_match_mgcv():
-    # mgcv's twlss ll IGNORES prior weights (gamlss.r:2556 — wt
-    # unread), so a weighted fit is IDENTICAL to the unweighted one;
-    # weights enter only the deviance residuals (object$prior.weights,
-    # gamlss.r:2541 — hea's optional prior_weights residuals keyword)
-    # and the postproc null deviance. R-verified both ways.
+def test_twlss_prior_weights_honoured():
+    # hea's twlss honours gam(weights=) as a weighted log-likelihood — a
+    # defined divergence from mgcv, whose twlss ll DROPS prior weights
+    # (gamlss.r:2556, wt unread). There is therefore no mgcv oracle for a
+    # weighted twlss fit; the contract is the duplication identity —
+    # weighting a row by integer w equals the unweighted fit on the
+    # row-duplicated design. That is exact for a parametric model; a
+    # data-driven s(x) basis shifts under duplication (quantile knots move),
+    # so the smooth fit is only approximately invariant and is not asserted.
     from hea.family import twlss
 
     df = _twlss_fixture()
     pw = np.tile([1.0, 2.0], 150)
-    mw = gam(["y ~ s(x)", "~ 1", "~ 1"], df, family=twlss(),
-             method="REML", weights=pw)
-    mu = gam(["y ~ s(x)", "~ 1", "~ 1"], df, family=twlss(),
-             method="REML")
-    # fit invariance (R: REML/sp/coef all.equal TRUE)
-    np.testing.assert_allclose(mw.REML_criterion, mu.REML_criterion,
-                               rtol=0, atol=1e-9)
-    _assert_fp_equiv(mw._beta, mu._beta)
-    np.testing.assert_allclose(mw.REML_criterion / 2, 514.2855621000,
+    reps = pw.astype(int)
+    dfd = pl.DataFrame(
+        {c: np.repeat(df[c].to_numpy(), reps) for c in df.columns})
+
+    # 1. The unweighted smooth fit is unchanged — the weighting is bit-for-bit
+    #    the identity at unit weights, so the mgcv pins still hold.
+    mu = gam(["y ~ s(x)", "~ 1", "~ 1"], df, family=twlss(), method="REML")
+    np.testing.assert_allclose(mu.REML_criterion / 2, 514.2855621000,
                                rtol=0, atol=1e-4)
-    np.testing.assert_allclose(mw.sp, [0.1886027173], rtol=1e-4)
-    # weighted deviance surface (R refs)
-    np.testing.assert_allclose(mw.deviance, 549.3608583000, rtol=0,
-                               atol=1e-3)
+    np.testing.assert_allclose(mu.sp, [0.1886027173], rtol=1e-4)
     np.testing.assert_allclose(mu.deviance, 358.1582964000, rtol=0,
                                atol=1e-3)
-    np.testing.assert_allclose(mw.null_deviance, 855.1007602000,
-                               rtol=0, atol=1e-3)
     np.testing.assert_allclose(mu.null_deviance, 564.4194261000,
                                rtol=0, atol=1e-3)
-    np.testing.assert_allclose(
-        np.asarray(mw.residuals)[:3],
-        [-1.0646171470, -0.2494332248, -0.4555850390], rtol=0,
-        atol=1e-4)
-    np.testing.assert_allclose(
-        np.asarray(mu.residuals)[:3],
-        [-1.0646171470, -0.1763759247, -0.4555850390], rtol=0,
-        atol=1e-4)
-    # √w scaling of the deviance residual √(2(yθ−κ)w/φ) is a per-row
-    # property — verify it on ONE fitted object (μ/θ/φ identical) so the
-    # scaling is exact to ~1 ulp and BLAS-independent. Comparing the two
-    # SEPARATE fits mw/mu can't: their coefs are only BLAS-equal (≤3e-14,
-    # assert_fp_equiv's floor) and yθ−κ cancels catastrophically, so at
-    # the near-zero-residual rows that drift amplifies ~5000× (~1e-9 on
-    # x86_64 Accelerate / OpenBLAS) — far past any 1e-12 cross-fit gate.
-    # The end-to-end √2 wiring stays pinned above: mw.residuals[1] =
-    # −0.2494 = mu.residuals[1]·√2 (a pw=2 row), pw=1 rows 0/2 identical.
+
+    # 2. Weighted contract (parametric, exact): the weighted fit equals the
+    #    unweighted fit on the row-duplicated design — the executable form of
+    #    "weighting a row by w ≡ duplicating it w times".
+    mwp = gam(["y ~ w", "~ 1", "~ 1"], df, family=twlss(), weights=pw)
+    mdp = gam(["y ~ w", "~ 1", "~ 1"], dfd, family=twlss())
+    np.testing.assert_allclose(np.asarray(mwp._beta), np.asarray(mdp._beta),
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(mwp.deviance, mdp.deviance, rtol=0, atol=1e-4)
+
+    # 3. The weights genuinely bite: the weighted fit differs from the
+    #    unweighted one (mgcv, dropping the weights, would not).
+    mup = gam(["y ~ w", "~ 1", "~ 1"], df, family=twlss())
+    assert np.max(
+        np.abs(np.asarray(mwp._beta) - np.asarray(mup._beta))) > 1e-3
+    # 4. Deviance residuals carry the prior weights as a per-row √w scaling
+    #    (√(2(yθ−κ)w/φ); object$prior.weights, gamlss.r:2541) — mgcv-faithful
+    #    and unchanged by the likelihood-weighting fix. Verified on ONE fitted
+    #    object (μ/θ/φ identical) so the scaling is exact to ~1 ulp and
+    #    BLAS-independent.
     yv = np.asarray(df["y"], dtype=float)
     fit = np.asarray(mu.fitted, dtype=float)
     r_un = twlss().residuals(yv, fit, type="deviance")

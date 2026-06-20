@@ -2741,6 +2741,154 @@ def test_mvn_components_and_validation():
 
 
 # ---------------------------------------------------------------------------
+# Prior weights in general-family ll() — the weighted-likelihood contract.
+#
+# hea's general families honour gam(weights=) as a weighted log-likelihood:
+# l = Σ wᵢ·l0ᵢ and every per-observation derivative row scales by wᵢ. This is
+# a defined extension beyond mgcv, whose gamlss families drop prior weights.
+# The gate is the *duplication identity* — weighting row i by integer wᵢ is
+# exactly the unweighted fit on the design with row i repeated wᵢ times — which
+# holds to machine precision for l/lb/lbb because gamlss_etamu/gamlss_gH are
+# linear, row by row, in (l1..l4). At unit weights the scaling is the identity,
+# so every oracle pin above is bit-for-bit unchanged (cox_ph, whose prior
+# weights ARE the censoring indicator, and mvn, fit by bfgs, are excluded).
+# ---------------------------------------------------------------------------
+
+_WEIGHTED_LL_FAMILIES = ["gaulss", "gammals", "gumbls", "gevlss", "ziplss",
+                         "shash", "twlss", "multinom"]
+
+
+def _twlss_weighted_design():
+    yt = _twlss_oracle_y()
+    n = 60
+    i = np.arange(1, n + 1, dtype=float)
+    X = np.hstack([
+        np.column_stack([np.ones(n), np.sin(i / 7), np.cos(i / 5)]),
+        np.column_stack([np.ones(n), (i % 5) / 10]),
+        np.column_stack([np.ones(n), i / n]),
+    ])
+    lpi = [np.arange(0, 3), np.arange(3, 5), np.arange(5, 7)]
+    coef = np.array([0.4, 0.3, -0.2, 0.1, -0.3, -0.5, 0.6])
+    return X, yt, coef, lpi
+
+
+def _weighted_ll_build(name):
+    """One (family, X, y, coef, lpi) row per weightable general family,
+    reusing the per-family oracle designs above."""
+    if name == "gaulss":
+        from hea.family import gaulss
+        X, y, coef, _, _, lpi = _gaulss_oracle_inputs()
+        return gaulss(), X, y, coef, lpi
+    if name == "gammals":
+        from hea.family import gammals
+        X, y, coef, _, _, lpi = _gammals_oracle_inputs()
+        return gammals(), X, y, coef, lpi
+    if name == "gumbls":
+        from hea.family import gumbls
+        X, y, coef, _, _, lpi = _gumbls_oracle_inputs()
+        return gumbls(), X, y, coef, lpi
+    if name == "gevlss":
+        from hea.family import gevlss
+        X, y, coef, _, _, lpi = _gevlss_oracle_inputs()
+        return gevlss(), X, y, coef, lpi
+    if name == "ziplss":
+        from hea.family import ziplss
+        X, y, coef, _, _, lpi = _ziplss_oracle_inputs()
+        return ziplss(), X, y, coef, lpi
+    if name == "shash":
+        from hea.family import shash
+        y, X, lpi, coef, _, _ = _shash_oracle_inputs()
+        return shash(), X, y, coef, lpi
+    if name == "twlss":
+        from hea.family import twlss
+        X, y, coef, lpi = _twlss_weighted_design()
+        return twlss(), X, y, coef, lpi
+    if name == "multinom":
+        from hea.family import multinom
+        X, y, coef, _, _, lpi = _multinom_oracle_inputs(3, 41)
+        return multinom(3), X, y, coef, lpi
+    raise ValueError(name)
+
+
+@pytest.mark.parametrize("name", _WEIGHTED_LL_FAMILIES)
+def test_general_family_weighted_ll_duplication_identity(name):
+    # The hard gate: integer weights ≡ row duplication, exact for l/lb/lbb.
+    fam, X, y, coef, lpi = _weighted_ll_build(name)
+    y = np.asarray(y, dtype=float)
+    n = y.shape[0]
+    rng = np.random.default_rng(7)
+    w = rng.integers(1, 5, size=n).astype(float)
+    reps = w.astype(int)
+    Xd = np.repeat(X, reps, axis=0)
+    yd = np.repeat(y, reps, axis=0)
+
+    rw = fam.ll(y, X, coef, w, lpi=lpi, deriv=1)
+    rd = fam.ll(yd, Xd, coef, np.ones(yd.shape[0]), lpi=lpi, deriv=1)
+    for k in ("l", "lb", "lbb"):
+        np.testing.assert_allclose(
+            np.asarray(rw[k]), np.asarray(rd[k]), rtol=1e-8, atol=1e-8,
+            err_msg=f"{name}: {k} breaks the weight=duplication identity")
+
+    # l0 is the raw per-observation log-density — never scaled by wt.
+    l0_w = fam.ll(y, X, coef, w, lpi=lpi, deriv=0)["l0"]
+    l0_1 = np.asarray(fam.ll(y, X, coef, lpi=lpi, deriv=0)["l0"])
+    np.testing.assert_array_equal(np.asarray(l0_w), l0_1)
+    # the weighted objective is exactly Σ wt·l0.
+    np.testing.assert_allclose(rw["l"], float(np.sum(w * l0_1)),
+                               rtol=0, atol=1e-9)
+    # wt=None is the unit-weight path, bit-for-bit (so the oracle pins hold).
+    r_none = fam.ll(y, X, coef, lpi=lpi, deriv=1)
+    r_ones = fam.ll(y, X, coef, np.ones(n), lpi=lpi, deriv=1)
+    for k in ("l", "lb", "lbb"):
+        np.testing.assert_array_equal(np.asarray(r_none[k]),
+                                      np.asarray(r_ones[k]))
+
+
+def test_gaulss_weighted_ll_matches_fd():
+    # Non-integer precision weights: lb/lbb are the gradient/Hessian of the
+    # weighted objective Σ wt·l0, and the sp-derivative blocks inherit it.
+    from hea.family import gaulss
+    X, y, coef, d1b, d2b, lpi = _gaulss_oracle_inputs()
+    fam = gaulss()
+    n = y.shape[0]
+    rng = np.random.default_rng(3)
+    w = rng.uniform(0.3, 2.5, size=n)
+    r1 = fam.ll(y, X, coef, w, lpi=lpi, deriv=1)
+    h = 1e-6
+    p = coef.size
+    fd_lb = np.zeros(p)
+    fd_lbb = np.zeros((p, p))
+    for k in range(p):
+        cp = coef.copy()
+        cp[k] += h
+        cm = coef.copy()
+        cm[k] -= h
+        fd_lb[k] = (fam.ll(y, X, cp, w, lpi=lpi)["l"]
+                    - fam.ll(y, X, cm, w, lpi=lpi)["l"]) / (2 * h)
+        fd_lbb[:, k] = (fam.ll(y, X, cp, w, lpi=lpi, deriv=1)["lb"]
+                        - fam.ll(y, X, cm, w, lpi=lpi, deriv=1)["lb"]) / (2 * h)
+    np.testing.assert_allclose(r1["lb"], fd_lb, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(r1["lbb"], fd_lbb, rtol=0, atol=1e-6)
+    # deriv=3: each ∂H/∂ρ matrix is the FD of the weighted Hessian along d1b.
+    r3 = fam.ll(y, X, coef, w, lpi=lpi, deriv=3, d1b=d1b)
+    for j in range(d1b.shape[1]):
+        fdH = (fam.ll(y, X, coef + h * d1b[:, j], w, lpi=lpi,
+                      deriv=1)["lbb"]
+               - fam.ll(y, X, coef - h * d1b[:, j], w, lpi=lpi,
+                        deriv=1)["lbb"]) / (2 * h)
+        np.testing.assert_allclose(r3["d1H"][j], fdH, rtol=0, atol=1e-5)
+    # deriv=4: trHid2H stays finite under non-unit weights (the gam.fit5
+    # preconditioned-Cholesky fh/D convention).
+    from scipy.linalg import cholesky
+    Hp = -r1["lbb"] + np.eye(p) * 0.5
+    D = 1.0 / np.sqrt(np.diag(Hp))
+    R = cholesky(D[:, None] * Hp * D[None, :], lower=False)
+    r4 = fam.ll(y, X, coef, w, lpi=lpi, deriv=4, d1b=d1b, d2b=d2b,
+                fh=(R, np.arange(p)), D=D)
+    assert np.all(np.isfinite(r4["trHid2H"]))
+
+
+# ---------------------------------------------------------------------------
 # betar (Beta regression, efam.r:3269-3546) — the first D1b extended family
 # and mgcv's prototype for "-2logLik as deviance" (dev_resids omit the
 # saturated reference; ls≡0; the saturated log-lik is folded in by a Newton
