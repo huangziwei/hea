@@ -517,25 +517,17 @@ def effects(model):
 
     A length-``n`` vector from the fit's QR: the first ``rank`` entries are the
     named regression effects, the remainder the residual effects (names beyond
-    the rank are ``""``, as in R). Computed on the offset-adjusted response and
-    ``√w``-weighted design, matching ``lm.wfit``. lm only.
+    the rank are ``""``, as in R). Read off the ``effects`` component the fit
+    already stored (``Qᵀ(√w·y)`` on the offset-adjusted response, ``lm.wfit``).
+    lm only.
     """
-    if not hasattr(model, "X") or not hasattr(model, "column_names"):
+    eff = getattr(model, "effects", None)
+    if eff is None or not hasattr(model, "column_names"):
         raise TypeError(
             f"effects(): {model.__class__.__name__} has no QR/effects component"
         )
-    from scipy.linalg import qr as _qr_full
-
-    X = model.X.to_numpy().astype(float)
-    y = np.asarray(model.y.to_numpy(), dtype=float).reshape(-1)
-    off = getattr(model, "_offset", None)
-    if off is not None:
-        y = y - np.asarray(off, dtype=float)  # R fits effects on y − offset
-    w = getattr(model, "_w", None)
-    sw = np.ones(len(y)) if w is None else np.sqrt(np.asarray(w, dtype=float))
-    Q, _ = _qr_full(sw[:, None] * X, mode="full")
-    eff = Q.T @ (sw * y)
-    pad = len(y) - len(model.column_names)
+    eff = np.asarray(eff, dtype=float).reshape(-1)
+    pad = len(eff) - len(model.column_names)
     names = list(model.column_names) + [""] * pad
     return NamedVector(names, eff)
 
