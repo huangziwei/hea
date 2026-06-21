@@ -57,6 +57,29 @@ fn daxpy(t: f64, x: &[f64], y: &mut [f64]) {
     }
 }
 
+/// Copy a 2-D view into a fresh column-major `Vec`, as cheaply as the input
+/// layout allows. When the array is already F-contiguous (the polars-origin
+/// path — its memory order *is* column-major) this is a single `memcpy` with no
+/// zero-fill and no per-element stride math; only a C-order/strided caller pays
+/// the transpose loop.
+fn to_colmajor(xv: &numpy::ndarray::ArrayView2<f64>) -> Vec<f64> {
+    let (n, p) = (xv.nrows(), xv.ncols());
+    if !xv.is_standard_layout() {
+        if let Some(s) = xv.as_slice_memory_order() {
+            if s.len() == n * p {
+                return s.to_vec(); // F-contiguous: column-major already
+            }
+        }
+    }
+    let mut v = vec![0.0_f64; n * p];
+    for j in 0..p {
+        for i in 0..n {
+            v[j * n + i] = xv[[i, j]];
+        }
+    }
+    v
+}
+
 /// R's `dqrdc2` (lower-level): factor the column-major `n×p` matrix `x`
 /// in place. Returns `(qraux, jpvt, rank)`; `jpvt` is 1-based.
 fn dqrdc2(x: &mut [f64], n: usize, p: usize, tol: f64) -> (Vec<f64>, Vec<usize>, usize) {
@@ -303,13 +326,7 @@ pub fn dqrls<'py>(
     let xv = x.as_array();
     let (n, p) = (xv.nrows(), xv.ncols());
     let yv = y.as_array();
-    // copy into column-major buffer
-    let mut xcol = vec![0.0_f64; n * p];
-    for j in 0..p {
-        for i in 0..n {
-            xcol[j * n + i] = xv[[i, j]];
-        }
-    }
+    let mut xcol = to_colmajor(&xv);
     let yvec: Vec<f64> = yv.iter().copied().collect();
 
     let (coef, rsd, qty, rank, jpvt, qraux) = dqrls_impl(&mut xcol, n, p, &yvec, tol);
@@ -346,12 +363,7 @@ pub fn dqrls_rank<'py>(
 ) -> PyResult<(usize, Bound<'py, PyArray1<i64>>)> {
     let xv = x.as_array();
     let (n, p) = (xv.nrows(), xv.ncols());
-    let mut xcol = vec![0.0_f64; n * p];
-    for j in 0..p {
-        for i in 0..n {
-            xcol[j * n + i] = xv[[i, j]];
-        }
-    }
+    let mut xcol = to_colmajor(&xv);
     let (_qraux, jpvt, rank) = dqrdc2(&mut xcol, n, p, tol);
     let pivot: Vec<i64> = jpvt.iter().map(|&v| v as i64).collect();
     Ok((rank, PyArray1::from_vec(py, pivot)))

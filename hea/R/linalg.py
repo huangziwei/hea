@@ -38,7 +38,11 @@ def dqrls_rank(x: np.ndarray, tol: float = 1e-7):
     ``pivot`` is 1-based."""
     x = np.asarray(x, dtype=float)
     if _rs_dqrls_rank is not None:
-        rank, pivot = _rs_dqrls_rank(np.ascontiguousarray(x, dtype=float), tol)
+        # The kernel works column-major, so hand it a Fortran-order array — for
+        # polars-origin designs (already F-order) this is a no-op; forcing C with
+        # ascontiguousarray would add a needless F→C transpose (then a second
+        # transpose inside Rust). asfortranarray only copies for a C-order caller.
+        rank, pivot = _rs_dqrls_rank(np.asfortranarray(x, dtype=float), tol)
         return int(rank), np.asarray(pivot)
     _, _, _, _, k, jpvt, _ = dqrls(x.copy(), np.zeros(x.shape[0]), tol)
     return int(k), np.asarray(jpvt)
@@ -249,9 +253,11 @@ def Cdqrls(x: np.ndarray, y: np.ndarray, tol: float = 1e-7) -> dict:
     if not np.all(np.isfinite(y)):
         raise ValueError("NA/NaN/Inf in 'y'")
     if _rs_dqrls is not None:                # Rust active path (pure-Py = oracle)
+        # F-order X so the column-major kernel copies contiguously (no transpose);
+        # no-op for polars-origin (F) designs. y is 1-D (layout-agnostic).
         qr, coef, rsd, qty, k, jpvt, qraux = _rs_dqrls(
-            np.ascontiguousarray(x, dtype=float),
-            np.ascontiguousarray(y, dtype=float), tol)
+            np.asfortranarray(x, dtype=float),
+            np.asarray(y, dtype=float), tol)
         k = int(k)
     else:
         qr, coef, rsd, qty, k, jpvt, qraux = dqrls(x.copy(), y, tol)
