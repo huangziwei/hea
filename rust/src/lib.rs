@@ -10,6 +10,7 @@
 
 use pyo3::prelude::*;
 
+mod cluster;
 mod linalg;
 mod loess;
 mod nmath;
@@ -22,5 +23,6 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     rng::register(m)?;
     linalg::register(m)?;
     loess::register(m)?;
+    cluster::register(m)?;
     Ok(())
 }

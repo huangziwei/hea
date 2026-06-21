@@ -15,10 +15,11 @@ crate-type = ["cdylib", "rlib"]
 # extension-module: don't link libpython (symbols resolved by the host interpreter).
 pyo3 = { version = "0.23", features = ["abi3-py310", "extension-module"] }
 numpy = "0.23"
-# Data-parallel array maps for the nmath d/p/q kernels (each element is
-# independent → embarrassingly parallel). Used only above a length threshold,
-# under py.allow_threads; the per-element float ops are unchanged so 0-ulp
-# parity holds (parallel == serial bit-for-bit; no cross-element reduction).
+# Data-parallel maps for the element-wise nmath d/p/q kernels and for
+# cluster/dist (rayon over independent point-pairs, each pair's column reduction
+# kept serial). Used only above a length threshold, under py.allow_threads; the
+# per-unit float ops are unchanged so 0-ulp parity holds (parallel == serial
+# bit-for-bit; no cross-unit reduction). hclust/kmns are serial — never rayon.
 rayon = "1"
 
 [profile.release]

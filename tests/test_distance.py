@@ -360,3 +360,57 @@ def test_dist_vs_live_R(method, with_na):
         x[7, 4] = np.nan
     p = 1.7 if method == "minkowski" else 2
     _assert_eq(dist(x, method=method, p=p), _r_dist(x, method, p))
+
+
+# --------------------------------------------------------------------------- #
+# Rust ``cdist`` kernel: A/B 0-ulp vs the pure-Python ``_cdist`` oracle.
+# The pure-Python kernel is the spec (pinned to R above); the Rust kernel must
+# mirror it bit-for-bit. We call BOTH kernels directly (not via the import-time
+# ``_rs_cdist`` seam) so the A/B runs in one process regardless of ``HEA_NO_RS``.
+# --------------------------------------------------------------------------- #
+_rs_mod = pytest.importorskip("hea._rs")
+_HAS_CDIST = hasattr(_rs_mod, "cdist")
+
+
+def _ab_inputs():
+    rng = np.random.default_rng(424242)
+    x = rng.standard_normal((40, 7))
+    x[3, 2] = np.nan
+    x[10, 0] = np.nan
+    x[25, 5] = np.nan
+    x[0, 0] = 0.0  # zeros for binary/canberra signal
+    b = (rng.standard_normal((30, 6)) > 0.3).astype(float)
+    b[2, 1] = np.nan
+    return x, b
+
+
+@pytest.mark.skipif(not _HAS_CDIST, reason="hea._rs.cdist not built")
+@pytest.mark.parametrize("mi,method,p", [
+    (0, "euclidean", 2.0), (1, "maximum", 2.0), (2, "manhattan", 2.0),
+    (3, "canberra", 2.0), (5, "minkowski", 1.7), (5, "minkowski", 3.0),
+])
+def test_rs_cdist_matches_python(mi, method, p):
+    from hea.R.distance import _cdist
+    x, _ = _ab_inputs()
+    arr = np.ascontiguousarray(x, dtype=float)
+    py = _cdist(arr, mi, p)
+    rs = np.asarray(_rs_mod.cdist(arr, mi, float(p)))
+    _assert_eq(rs, py)
+
+
+@pytest.mark.skipif(not _HAS_CDIST, reason="hea._rs.cdist not built")
+def test_rs_cdist_binary_matches_python():
+    from hea.R.distance import _cdist
+    _, b = _ab_inputs()
+    arr = np.ascontiguousarray(b, dtype=float)
+    py = _cdist(arr, 4, 2.0)
+    rs = np.asarray(_rs_mod.cdist(arr, 4, 2.0))
+    _assert_eq(rs, py)
+
+
+@pytest.mark.skipif(not _HAS_CDIST, reason="hea._rs.cdist not built")
+def test_rs_cdist_n1_empty():
+    # single row -> no pairs -> empty vector (parity at the degenerate edge).
+    arr = np.ascontiguousarray(np.array([[1.0, 2.0, 3.0]]))
+    rs = np.asarray(_rs_mod.cdist(arr, 0, 2.0))
+    assert rs.size == 0

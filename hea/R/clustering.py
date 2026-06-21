@@ -978,10 +978,32 @@ class Kmeans:
         return print_kmeans(self, _return=True)
 
 
+def _kmns_rs(x, centers, k, iter_max):
+    """Rust ``kmns`` (Hartigan-Wong) → the same dict shape as :func:`_kmns`.
+    The pure-Python :func:`_kmns` stays the spec/oracle (A/B'd in test_kmeans)."""
+    ifault, cluster, cen_flat, nc, wss, it = _rs_kmns(
+        np.ascontiguousarray(x, dtype=float),
+        np.ascontiguousarray(centers, dtype=float),
+        int(k), int(iter_max))
+    if ifault in (1, 3):
+        return {"ifault": int(ifault)}
+    return {
+        "cluster": np.asarray(cluster, dtype=np.int64),
+        "centers": np.asarray(cen_flat, dtype=float).reshape(k, x.shape[1]),
+        "nc": np.asarray(nc, dtype=np.int64),
+        "wss": np.asarray(wss, dtype=float),
+        "iter": int(it),
+        "ifault": int(ifault),
+    }
+
+
 def _do_one(nmeth, x, centers, k, iter_max, trace):
     """R ``do_one(nmeth)`` — dispatch to a kernel + the post-run warnings."""
     if nmeth == 1:  # Hartigan-Wong
-        z = _kmns(x, centers, k, iter_max, 1 if trace else 0)
+        if _rs_kmns is not None:  # Rust accelerator; pure-Python _kmns is the spec
+            z = _kmns_rs(x, centers, k, iter_max)
+        else:
+            z = _kmns(x, centers, k, iter_max, 1 if trace else 0)
         ifault = z.get("ifault")
         if ifault == 1:
             raise ValueError(

@@ -316,3 +316,51 @@ def test_hclust_members_vs_live_R():
     assert np.array_equal(h.merge, merge)
     assert h.order.tolist() == order
     _assert_height(h.height, height)
+
+
+# --------------------------------------------------------------------------- #
+# Rust ``hclust`` kernel: A/B 0-ulp vs the pure-Python ``_hclust_fortran``.
+# Both kernels are called directly (not via the import-time seam) so the A/B
+# runs in one process. The Rust kernel returns the [1..=n] slices of the 1-based
+# Fortran arrays; ``_hclust_fortran`` returns the full 1-based arrays, so we
+# compare against ``py[1:]`` (drop the unused leading 0).
+# --------------------------------------------------------------------------- #
+_rs_mod = pytest.importorskip("hea._rs")
+_HAS_RS_HCLUST = hasattr(_rs_mod, "hclust")
+
+
+@pytest.mark.skipif(not _HAS_RS_HCLUST, reason="hea._rs.hclust not built")
+@pytest.mark.parametrize("method", _METHODS)
+def test_rs_hclust_matches_python(method):
+    from hea.R.clustering import _hclust_fortran
+    rng = np.random.default_rng(314)
+    x = rng.standard_normal((22, 5))
+    d = dist(x)
+    data = np.ascontiguousarray(d.data, dtype=float)
+    n = d.Size
+    iopt = _METHODS.index(method) + 1
+    members = np.ones(n)
+    p_ia, p_ib, p_crit = _hclust_fortran(n, data, iopt, members)
+    r_ia, r_ib, r_crit = _rs_mod.hclust(n, data, iopt, members)
+    assert list(r_ia) == list(p_ia[1:])
+    assert list(r_ib) == list(p_ib[1:])
+    # crit holds the merge heights -> 0-ulp bit-view on macOS, tol off
+    _assert_height(np.asarray(r_crit), np.asarray(p_crit[1:], dtype=float))
+
+
+@pytest.mark.skipif(not _HAS_RS_HCLUST, reason="hea._rs.hclust not built")
+def test_rs_hclust_members_matches_python():
+    from hea.R.clustering import _hclust_fortran
+    rng = np.random.default_rng(2718)
+    x = rng.standard_normal((12, 3))
+    d = dist(x)
+    n = d.Size
+    data = np.ascontiguousarray(d.data, dtype=float)
+    members = np.array([1.0, 2, 1, 3, 1, 2, 1, 1, 2, 1, 1, 2])
+    for method in ("ward.D", "centroid", "ward.D2"):
+        iopt = _METHODS.index(method) + 1
+        p_ia, p_ib, p_crit = _hclust_fortran(n, data, iopt, members)
+        r_ia, r_ib, r_crit = _rs_mod.hclust(n, data, iopt, members)
+        assert list(r_ia) == list(p_ia[1:])
+        assert list(r_ib) == list(p_ib[1:])
+        _assert_height(np.asarray(r_crit), np.asarray(p_crit[1:], dtype=float))

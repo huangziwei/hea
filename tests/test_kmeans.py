@@ -214,3 +214,52 @@ def test_kmeans_column_mismatch_raises():
     x = _blobs()
     with pytest.raises(ValueError, match="same number of columns"):
         kmeans(x, np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 2.0, 2.0]]))
+
+
+# --------------------------------------------------------------------------- #
+# Rust ``kmns`` kernel: A/B 0-ulp vs the pure-Python ``_kmns`` (Hartigan-Wong).
+# Both kernels are called directly (not via the ``_do_one`` seam), so the A/B
+# runs in one process. ``kmns`` is pure IEEE arithmetic (no transcendentals), so
+# rs == python is bit-for-bit on every platform.
+# --------------------------------------------------------------------------- #
+_rs_mod = pytest.importorskip("hea._rs")
+_HAS_RS_KMNS = hasattr(_rs_mod, "kmns")
+
+
+def _hw_fixture():
+    rng = np.random.default_rng(2026)
+    x = np.vstack([
+        rng.normal(0, 0.5, (15, 4)),
+        rng.normal(5, 0.5, (15, 4)),
+        rng.normal([0, 5, 0, 5], 0.5, (15, 4)),
+        rng.normal(-4, 0.6, (15, 4)),
+    ])
+    centers = np.array([x[0], x[16], x[31], x[46]])
+    return x, centers, 4
+
+
+@pytest.mark.skipif(not _HAS_RS_KMNS, reason="hea._rs.kmns not built")
+@pytest.mark.parametrize("iter_max", [10, 50])
+def test_rs_kmns_matches_python(iter_max):
+    from hea.R.clustering import _kmns
+    x, centers, k = _hw_fixture()
+    py = _kmns(x, centers, k, iter_max)
+    ifault, cluster, cen_flat, nc, wss, it = _rs_mod.kmns(
+        np.ascontiguousarray(x), np.ascontiguousarray(centers), k, iter_max)
+    assert int(ifault) == py["ifault"]
+    assert np.array_equal(np.asarray(cluster), py["cluster"])
+    assert np.array_equal(np.asarray(nc), py["nc"])
+    assert int(it) == py["iter"]
+    cen = np.asarray(cen_flat, dtype=float).reshape(k, x.shape[1])
+    assert _bits_equal(cen, py["centers"])      # 0-ulp (pure arithmetic)
+    assert _bits_equal(np.asarray(wss), py["wss"])
+
+
+@pytest.mark.skipif(not _HAS_RS_KMNS, reason="hea._rs.kmns not built")
+def test_rs_kmns_ifault3_k_out_of_range():
+    # k <= 1 or k >= m -> ifault 3, empty arrays (matches _kmns early return).
+    x = np.ascontiguousarray(_blobs())
+    centers = np.ascontiguousarray(x[:1])
+    ifault, cluster, cen_flat, nc, wss, it = _rs_mod.kmns(x, centers, 1, 10)
+    assert int(ifault) == 3
+    assert np.asarray(cluster).size == 0
