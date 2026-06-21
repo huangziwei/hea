@@ -23,7 +23,7 @@ import math
 
 import numpy as np
 
-from ._dispatch import rs_fn
+from .._dispatch import rs_fn
 
 __all__ = ["dqrdc2", "dqrsl", "dqrls", "Cdqrls", "dqrls_rank"]
 

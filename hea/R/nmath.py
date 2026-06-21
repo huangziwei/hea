@@ -24,7 +24,7 @@ import math
 import numpy as np
 
 from .rng import _QN_A, _QN_B, _QN_C, _QN_D, _QN_E, _QN_F, _qn_horner
-from ._dispatch import rs_fn
+from .._dispatch import rs_fn
 
 # Rust kernels — None when the extension is absent/disabled, in which
 # case the pure-Python kernels below run unchanged (bit-identical, just slower).

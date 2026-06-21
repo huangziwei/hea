@@ -1008,6 +1008,14 @@ import numpy as np  # noqa: E402  — kept near usage to localize heavy import
 import polars as pl  # noqa: E402
 from scipy.linalg import eigh_tridiagonal as _eigh_tridiagonal  # noqa: E402
 
+from hea._dispatch import rs_fn  # noqa: E402
+
+# Rust tp kernel-eval: rayon-parallel build of b=[E|T] (XBuild) and the knot
+# matrix E (tpsE); byte-exact to the numpy builds (tests/test_rs_parity.py),
+# None when _rs is absent/HEA_NO_RS.
+_tp_eval_b_rs = rs_fn("tp_eval_b")
+_tp_eval_E_rs = rs_fn("tp_eval_E")
+
 
 # Polars 1.40+ made pl.Categorical process-global (shared string cache across
 # DataFrames), so hea can no longer use pl.Enum vs pl.Categorical as the
@@ -3176,17 +3184,10 @@ class _TPRawBasis(_RawBasis):
             [data[v].to_numpy().astype(float) for v in self.term]
         )
         x_c = x_full - self.shift
-        n = x_c.shape[0]
-        nu = self.Xu.shape[0]
         eta0 = _tp_eta_const(self.m, self.d)
-        # Pairwise η(||x_i - Xu_j||): (n, nu).
-        diff = x_c[:, None, :] - self.Xu[None, :, :]
-        rsq = (diff * diff).sum(axis=-1)
-        E = _tp_fast_eta_vec(self.m, self.d, rsq.ravel(), eta0).reshape(n, nu)
-        T_mat = _tp_T(x_c, self.m, self.d)
-        # b = [E | T] is (n, nu + M); X_raw = b @ UZ then rescale by w.
-        b = np.hstack([E, T_mat])
-        X_raw = b @ self.UZ
+        # X_raw = [η(||x_i - Xu_j||) | T(x_i)] @ UZ, built row-chunked (mgcv's
+        # XBuild), then rescale by the column-norm w.
+        X_raw = _tp_eval_X_raw(x_c, self.Xu, self.m, self.d, self.UZ, eta0)
         return X_raw / self.w
 
 
@@ -5576,25 +5577,34 @@ def _tp_fast_eta(m: int, d: int, rsq: float, f0: float) -> float:
 def _tp_fast_eta_vec(m: int, d: int, rsq: np.ndarray, f0: float) -> np.ndarray:
     """Broadcasted `_tp_fast_eta`. Replicates the scalar form's iterated-
     multiplication order so the output matches bit-for-bit on shared ops
-    (sign of Ritz vectors inside _tp_rlanczos is sensitive to any drift)."""
-    out = np.zeros_like(rsq, dtype=float)
-    mask = rsq > 0.0
-    if not np.any(mask):
-        return out
-    r = rsq[mask]
+    (sign of Ritz vectors inside _tp_rlanczos is sensitive to any drift).
+
+    For d ODD the kernel f0·(r²)^(m−d/2−1)·√(r²) is naturally 0 at r²=0
+    (√0=0, and any leading r² factor is 0), so no ``r>0`` mask is needed —
+    this matches the scalar `fast_eta`'s early ``return 0`` byte-for-byte
+    while skipping the boolean-mask compaction/scatter. For d EVEN the
+    log(r²) term diverges at r²=0, so that branch keeps the mask."""
+    rsq = np.asarray(rsq, dtype=float)
     d2 = d // 2
     if d % 2 == 0:
+        out = np.zeros_like(rsq)
+        mask = rsq > 0.0
+        if not np.any(mask):
+            return out
+        r = rsq[mask]
         f = np.log(r) * 0.5
         f *= f0
         for _ in range(m - d2):
             f *= r
-    else:
-        f = np.full_like(r, f0)
-        for _ in range(m - d2 - 1):
-            f *= r
-        f *= np.sqrt(r)
-    out[mask] = f
-    return out
+        out[mask] = f
+        return out
+    # d odd: maskless — √(r²)=0 at r²=0 gives the exact 0 fast_eta returns,
+    # with the same multiplication order as the masked form on r²>0 entries.
+    f = np.full_like(rsq, f0)
+    for _ in range(m - d2 - 1):
+        f *= rsq
+    f *= np.sqrt(rsq)
+    return f
 
 
 def _tp_null_space_dim(d: int, m: int) -> int:
@@ -5705,15 +5715,65 @@ def _tp_E(Xu: np.ndarray, m: int, d: int) -> np.ndarray:
     eta0 = _tp_eta_const(m, d)
     if nu == 0:
         return np.zeros((0, 0))
+    if _tp_eval_E_rs is not None:
+        # Rust tpsE: rayon over rows, byte-identical to the numpy build below.
+        return _tp_eval_E_rs(np.ascontiguousarray(Xu), int(m), int(d),
+                             float(eta0))
     # Pairwise squared distances. `(diff*diff).sum(axis=-1)` matches the scalar
     # `np.dot(diff, diff)` summation order for d ≤ 2 (trivially); for d ≥ 3 the
     # reduction order could differ by a ULP from BLAS ddot, which would rotate
     # Ritz vectors inside near-degenerate eigenspaces — tests catch that.
     diff = Xu[:, None, :] - Xu[None, :, :]
     rsq = (diff * diff).sum(axis=-1)
-    # Diagonal is exactly 0 from the subtraction; the vec helper also returns
-    # 0 there because its `rsq > 0` mask excludes it, so no fill is needed.
+    # Diagonal is exactly 0 from the subtraction; the vec helper returns 0
+    # there too (d-even mask excludes it, d-odd √0=0), so no fill is needed.
     return _tp_fast_eta_vec(m, d, rsq, eta0)
+
+
+def _tp_eval_X_raw(
+    x_c: np.ndarray, Xu: np.ndarray, m: int, d: int, UZ: np.ndarray,
+    eta0: float, *, _chunk_elems: int = 1 << 22,
+) -> np.ndarray:
+    """Build the (n, k) tp design block ``[η(‖x_i−Xu_j‖) | T(x_i)] @ UZ`` for
+    mgcv's kernel-eval path (knots ≠ data; `XBuild`, tprs.c:560).
+
+    Speed/memory: the radial table E is filled **row-chunked** so the (n, nu, d)
+    distance temporary (the old ½ GB allocation) never fully materialises, and
+    d=1 takes a 2-D ``diff`` (no length-1 axis to reduce). **Bit-identical to
+    the old unchunked build:** the chunked fill is elementwise (each E entry is
+    the same scalar regardless of chunking — for d=1 the 2-D diff equals the
+    (n,nu,1) form reduced over a no-op axis), and the matmul is done **once on
+    the full E** (NOT per chunk — a per-chunk matmul drifts ~1 ULP under
+    Accelerate's shape-dependent kernel dispatch, which `absorb.cons` can
+    amplify into an O(1) basis rotation for near-degenerate d≥2 bases). Used by
+    both the fit-time `_tp_raw` subsample branch and predict-time
+    `_TPRawBasis.eval`.
+    """
+    n = x_c.shape[0]
+    nu = Xu.shape[0]
+    M = UZ.shape[0] - nu
+    if _tp_eval_b_rs is not None:
+        # Rust XBuild: rayon-parallel b=[E|T], byte-identical to the numpy build
+        # below (3-way parity gated); keep the BLAS matmul in numpy so `b @ UZ`
+        # stays byte-exact too.
+        pp = np.ascontiguousarray(_tp_gen_poly_powers(M, m, d).astype(np.int64))
+        b = _tp_eval_b_rs(np.ascontiguousarray(x_c), np.ascontiguousarray(Xu),
+                          int(m), int(d), float(eta0), pp)
+        return b @ UZ
+    E = np.empty((n, nu))
+    chunk = max(1, _chunk_elems // max(nu, 1))
+    Xu0 = np.ascontiguousarray(Xu[:, 0]) if d == 1 else None
+    for s in range(0, n, chunk):
+        e = min(s + chunk, n)
+        xs = x_c[s:e]
+        if d == 1:
+            diff = xs[:, 0][:, None] - Xu0[None, :]       # (c, nu)
+            rsq = diff * diff
+        else:
+            diff = xs[:, None, :] - Xu[None, :, :]          # (c, nu, d)
+            rsq = (diff * diff).sum(axis=-1)
+        E[s:e] = _tp_fast_eta_vec(m, d, rsq, eta0)
+    return np.hstack([E, _tp_T(x_c, m, d)]) @ UZ            # one full matmul
 
 
 def _tp_qt_factor(A_in: np.ndarray) -> np.ndarray:
@@ -6225,10 +6285,7 @@ def _tp_raw(
             # data rows (mgcv builds X through the same map as
             # Predict.matrix.tp when knots ≠ data; cf. _TPRawBasis.eval).
             eta0 = _tp_eta_const(m, d)
-            diff = x_c[:, None, :] - Xu[None, :, :]
-            rsq = (diff * diff).sum(axis=-1)
-            E_xk = _tp_fast_eta_vec(m, d, rsq.ravel(), eta0).reshape(n, nu)
-            X_raw = np.hstack([E_xk, _tp_T(x_c, m, d)]) @ UZ
+            X_raw = _tp_eval_X_raw(x_c, Xu, m, d, UZ, eta0)
 
         # Penalty S: Q' diag(v) Q, zero-pad last M rows/cols (polynomial
         # part is unpenalized).

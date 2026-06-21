@@ -389,3 +389,46 @@ def test_dqrls_3way_parity(name, tmp_path):
     np.testing.assert_allclose(rust["residuals"], R["resid"], atol=1e-9)
     # coefficients are in pivoted order on both sides
     np.testing.assert_allclose(rust["coefficients"][:rk], R["coef"][:rk], atol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# tp basis kernel eval (XBuild + tpsE) — Rust ≡ pure-Python, BIT-EXACT.
+#
+# Pure element-wise fast_eta + polynomial powers (NO matmul inside), so the Rust
+# build of b=[E|T] and the knot matrix E are byte-identical to the numpy
+# `_tp_fast_eta_vec`/`_tp_T` build (the `b @ UZ` matmul stays in numpy). d=1 is
+# the common `s(x)`; d=2 exercises the even-d log branch, d=3 the odd-d √ branch
+# + the degree-2 polynomial null space (powi vs `**`). Sizes ≥256 hit rayon.
+# ---------------------------------------------------------------------------
+from hea.formula import (  # noqa: E402
+    _tp_eta_const, _tp_fast_eta_vec, _tp_gen_poly_powers, _tp_null_space_dim,
+    _tp_T,
+)
+
+
+@pytest.mark.parametrize("d,m", [(1, 2), (2, 2), (3, 3)])
+def test_tp_eval_b_bit_exact(d, m):
+    rng = np.random.default_rng(d)
+    x_c = rng.uniform(-2.0, 2.0, (500, d))
+    Xu = rng.uniform(-2.0, 2.0, (60, d))
+    eta0 = _tp_eta_const(m, d)
+    M = _tp_null_space_dim(d, m)
+    pp = np.ascontiguousarray(_tp_gen_poly_powers(M, m, d).astype(np.int64))
+    b_rs = rs.tp_eval_b(np.ascontiguousarray(x_c), np.ascontiguousarray(Xu),
+                        int(m), int(d), float(eta0), pp)
+    diff = x_c[:, None, :] - Xu[None, :, :]
+    rsq = (diff * diff).sum(axis=-1)
+    b_np = np.hstack([_tp_fast_eta_vec(m, d, rsq, eta0), _tp_T(x_c, m, d)])
+    np.testing.assert_array_equal(b_rs, b_np)
+
+
+@pytest.mark.parametrize("d,m", [(1, 2), (2, 2), (3, 3)])
+def test_tp_eval_E_bit_exact(d, m):
+    rng = np.random.default_rng(d + 10)
+    Xu = rng.uniform(-2.0, 2.0, (300, d))
+    eta0 = _tp_eta_const(m, d)
+    E_rs = rs.tp_eval_E(np.ascontiguousarray(Xu), int(m), int(d), float(eta0))
+    diff = Xu[:, None, :] - Xu[None, :, :]
+    rsq = (diff * diff).sum(axis=-1)
+    E_np = _tp_fast_eta_vec(m, d, rsq, eta0)
+    np.testing.assert_array_equal(E_rs, E_np)

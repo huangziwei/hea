@@ -33,7 +33,7 @@ import warnings
 
 import numpy as np
 
-from ._dispatch import rs_fn
+from .._dispatch import rs_fn
 
 __all__ = [
     "Dist",

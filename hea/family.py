@@ -37,7 +37,7 @@ from scipy.special import (
 
 from .R import nmath as _nmath
 from .R.nmath import _dpois_raw, _dbinom_raw
-from .R._dispatch import rs_fn as _rs_fn
+from ._dispatch import rs_fn as _rs_fn
 
 # The GLM/GLMM aic hooks evaluate the saddlepoint log-density primitives
 # (_dpois_raw / _dbinom_raw) on n-vectors every objective eval. Route them to the

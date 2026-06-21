@@ -40,7 +40,7 @@ import platform
 import numpy as np
 from scipy.linalg.lapack import dpstrf
 
-from ._dispatch import rs as _rs_mod
+from .._dispatch import rs as _rs_mod
 
 __all__ = ["RMersenneTwister", "RGenerator"]
 

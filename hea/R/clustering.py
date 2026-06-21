@@ -20,7 +20,7 @@ import warnings
 
 import numpy as np
 
-from ._dispatch import rs_fn
+from .._dispatch import rs_fn
 from .distance import Dist, _pmatch, as_dist, as_matrix_dist
 from .distributions import _r_rng
 
