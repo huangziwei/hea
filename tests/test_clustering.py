@@ -319,20 +319,28 @@ def test_hclust_members_vs_live_R():
 
 
 # --------------------------------------------------------------------------- #
-# Rust ``hclust`` kernel: A/B 0-ulp vs the pure-Python ``_hclust_fortran``.
-# Both kernels are called directly (not via the import-time seam) so the A/B
-# runs in one process. The Rust kernel returns the [1..=n] slices of the 1-based
-# Fortran arrays; ``_hclust_fortran`` returns the full 1-based arrays, so we
-# compare against ``py[1:]`` (drop the unused leading 0).
+# Rust ``hclust`` kernel: A/B 0-ulp vs the pure-Python ``_hclust_fortran`` +
+# ``_hcass2``. The Rust kernel does the agglomeration AND hcass2 and returns the
+# final ``(merge_a, merge_b, height, order)``; the Python reference runs both
+# stages. merge/order are integer-exact; height is 0-ulp (macOS) / tol (off).
 # --------------------------------------------------------------------------- #
 _rs_mod = pytest.importorskip("hea._rs")
 _HAS_RS_HCLUST = hasattr(_rs_mod, "hclust")
 
 
+def _py_hclust_cols(n, data, iopt, members):
+    """Pure-Python reference: ``_hclust_fortran`` + ``_hcass2`` -> the same
+    ``(merge_a, merge_b, height, order)`` columns the Rust kernel returns."""
+    from hea.R.clustering import _hclust_fortran, _hcass2
+    ia, ib, crit = _hclust_fortran(n, data, iopt, members)
+    iorder, iia, iib = _hcass2(n, ia, ib)
+    return (list(iia[1:n]), list(iib[1:n]),
+            np.asarray(crit[1:n], dtype=float), list(iorder[1:n + 1]))
+
+
 @pytest.mark.skipif(not _HAS_RS_HCLUST, reason="hea._rs.hclust not built")
 @pytest.mark.parametrize("method", _METHODS)
 def test_rs_hclust_matches_python(method):
-    from hea.R.clustering import _hclust_fortran
     rng = np.random.default_rng(314)
     x = rng.standard_normal((22, 5))
     d = dist(x)
@@ -340,17 +348,30 @@ def test_rs_hclust_matches_python(method):
     n = d.Size
     iopt = _METHODS.index(method) + 1
     members = np.ones(n)
-    p_ia, p_ib, p_crit = _hclust_fortran(n, data, iopt, members)
-    r_ia, r_ib, r_crit = _rs_mod.hclust(n, data, iopt, members)
-    assert list(r_ia) == list(p_ia[1:])
-    assert list(r_ib) == list(p_ib[1:])
-    # crit holds the merge heights -> 0-ulp bit-view on macOS, tol off
-    _assert_height(np.asarray(r_crit), np.asarray(p_crit[1:], dtype=float))
+    p_a, p_b, p_h, p_o = _py_hclust_cols(n, data, iopt, members)
+    r_a, r_b, r_h, r_o = _rs_mod.hclust(n, data, iopt, members)
+    assert list(r_a) == p_a
+    assert list(r_b) == p_b
+    assert list(r_o) == p_o
+    _assert_height(np.asarray(r_h), p_h)
+
+
+@pytest.mark.skipif(not hasattr(_rs_mod, "cutree"), reason="hea._rs.cutree not built")
+def test_rs_cutree_matches_python():
+    # A/B: Rust cutree (C_cutree port) vs pure-Python _cutree_c. Integer-exact.
+    from hea.R.clustering import _cutree_c
+    rng = np.random.default_rng(11)
+    x = rng.standard_normal((60, 4))
+    h = hclust(dist(x), method="average")
+    merge = np.ascontiguousarray(h.merge, dtype=np.int64)
+    which = np.array([2, 3, 5, 7, 12, 30, 60], dtype=np.int64)
+    py = _cutree_c(merge, which)
+    rs = np.asarray(_rs_mod.cutree(merge, which))
+    assert np.array_equal(rs, py)
 
 
 @pytest.mark.skipif(not _HAS_RS_HCLUST, reason="hea._rs.hclust not built")
 def test_rs_hclust_members_matches_python():
-    from hea.R.clustering import _hclust_fortran
     rng = np.random.default_rng(2718)
     x = rng.standard_normal((12, 3))
     d = dist(x)
@@ -359,8 +380,9 @@ def test_rs_hclust_members_matches_python():
     members = np.array([1.0, 2, 1, 3, 1, 2, 1, 1, 2, 1, 1, 2])
     for method in ("ward.D", "centroid", "ward.D2"):
         iopt = _METHODS.index(method) + 1
-        p_ia, p_ib, p_crit = _hclust_fortran(n, data, iopt, members)
-        r_ia, r_ib, r_crit = _rs_mod.hclust(n, data, iopt, members)
-        assert list(r_ia) == list(p_ia[1:])
-        assert list(r_ib) == list(p_ib[1:])
-        _assert_height(np.asarray(r_crit), np.asarray(p_crit[1:], dtype=float))
+        p_a, p_b, p_h, p_o = _py_hclust_cols(n, data, iopt, members)
+        r_a, r_b, r_h, r_o = _rs_mod.hclust(n, data, iopt, members)
+        assert list(r_a) == p_a
+        assert list(r_b) == p_b
+        assert list(r_o) == p_o
+        _assert_height(np.asarray(r_h), p_h)

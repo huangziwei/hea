@@ -263,3 +263,24 @@ def test_rs_kmns_ifault3_k_out_of_range():
     ifault, cluster, cen_flat, nc, wss, it = _rs_mod.kmns(x, centers, 1, 10)
     assert int(ifault) == 3
     assert np.asarray(cluster).size == 0
+
+
+@pytest.mark.skipif(not hasattr(_rs_mod, "lloyd"), reason="hea._rs.lloyd not built")
+@pytest.mark.parametrize("algo,rs_name,py_name", [
+    ("Lloyd", "lloyd", "_kmeans_lloyd"),
+    ("MacQueen", "macqueen", "_kmeans_macqueen"),
+])
+def test_rs_lloyd_macqueen_matches_python(algo, rs_name, py_name):
+    # A/B: Rust Lloyd/MacQueen vs the pure-Python kernels. Pure IEEE arithmetic
+    # (no transcendentals) -> 0-ulp on every platform.
+    import hea.R.clustering as C
+    x, centers, k = _hw_fixture()
+    py_kernel = getattr(C, py_name)
+    cl, cen, nc, wss, it = py_kernel(x, centers, k, 50)
+    r_cl, r_cen, r_nc, r_wss, r_it = getattr(_rs_mod, rs_name)(
+        np.ascontiguousarray(x), np.ascontiguousarray(centers), k, 50)
+    assert np.array_equal(np.asarray(r_cl), cl)
+    assert np.array_equal(np.asarray(r_nc), nc)
+    assert int(r_it) == it
+    assert _bits_equal(np.asarray(r_cen).reshape(k, x.shape[1]), cen)
+    assert _bits_equal(np.asarray(r_wss), wss)

@@ -1,22 +1,216 @@
-//! k-means, Hartigan-Wong — the OPTRA/QTRAN transfer loops of `kmeans()`.
+//! k-means — ALL three of R's algorithms in one module (R splits them across
+//! `kmeans_kmns.f` (Hartigan-Wong, Fortran) and `cluster_kmeans.c` (Lloyd /
+//! MacQueen, C) — a historical language artifact we don't mirror; they're all
+//! `kmeans()`):
+//!   * `kmns`      — Hartigan-Wong (mirrors `_kmns`; OPTRA/QTRAN, serial),
+//!   * `lloyd`     — Lloyd / Forgy (mirrors `_kmeans_lloyd`),
+//!   * `macqueen`  — MacQueen     (mirrors `_kmeans_macqueen`).
 //!
-//! A line-by-line mirror of `hea/R/clustering.py::_kmns` (itself a 1:1 port of
-//! R's `src/library/stats/src/kmns.f` — `KMNS` + `OPTRA` + `QTRAN`). The optimal-
-//! and quick-transfer stages mutate the assignment/centre state in place with
-//! data-dependent control flow, so this is INHERENTLY SERIAL — never parallelize
-//! (like `rng/mt.rs` / `linalg/chol.rs`). All bookkeeping arrays are 1-based
-//! (index 0 unused), matching the Fortran/Python.
-//!
-//! Returns `(ifault, cluster, centers_flat, nc, wss, iter)`; the Python seam
-//! reshapes `centers_flat` to `(k, p)` and assembles the result dict. `ifault`
-//! 1 (empty cluster) / 3 (k out of range) come back with empty arrays, exactly
-//! as `_kmns` returns `{"ifault": ...}`.
+//! All float reductions (per-point distance, centroid accumulation, WSS) are
+//! kept SEQUENTIAL in the same order as the C/Fortran/Python, so parity is
+//! 0-ulp. Lloyd's assignment phase (independent per point, `argmin` only — no
+//! cross-point float reduction) is parallelized with rayon (parallel == serial
+//! bit-for-bit); HW and MacQueen's incremental refinement are inherently serial.
+//! Empty clusters divide by zero → ±inf/NaN exactly as the numpy path (IEEE).
 
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::prelude::*;
+use rayon::prelude::*;
 
-const BIG: f64 = 1.0e30;
+const KM_PAR_MIN: usize = 256;
+const BIG: f64 = 1.0e30; // Hartigan-Wong "infinity" sentinel (matches _kmns)
 
+/// 0-based index of the nearest centre to point `i` (ties → smallest index,
+/// matching the strict `dd < best` in the C/Python).
+#[inline]
+fn nearest(x: &[f64], cen: &[f64], p: usize, k: usize, i: usize) -> usize {
+    let mut best = f64::INFINITY;
+    let mut inew = 0usize;
+    let xi = &x[i * p..i * p + p];
+    for j in 0..k {
+        let cj = &cen[j * p..j * p + p];
+        let mut dd = 0.0;
+        for c in 0..p {
+            let tmp = xi[c] - cj[c];
+            dd += tmp * tmp;
+        }
+        if dd < best {
+            best = dd;
+            inew = j;
+        }
+    }
+    inew
+}
+
+/// Per-cluster within sum-of-squares (`_kmeans_wss`): sequential over points
+/// (i-order) and dims (c-order) to match the pure-Python accumulation.
+fn wss_of(x: &[f64], cen: &[f64], cl: &[i64], n: usize, p: usize, k: usize) -> Vec<f64> {
+    let mut wss = vec![0.0f64; k];
+    for i in 0..n {
+        let it = (cl[i] - 1) as usize;
+        let xi = &x[i * p..i * p + p];
+        let ci = &cen[it * p..it * p + p];
+        for c in 0..p {
+            let tmp = xi[c] - ci[c];
+            wss[it] += tmp * tmp;
+        }
+    }
+    wss
+}
+
+/// Recompute centres as cluster means (the Lloyd / MacQueen-init step): zero,
+/// accumulate points in i-order, divide. Sequential accumulation (0-ulp).
+fn recompute_centres(x: &[f64], cen: &mut [f64], nc: &mut [i64], cl: &[i64], n: usize, p: usize, k: usize) {
+    cen.iter_mut().for_each(|v| *v = 0.0);
+    nc.iter_mut().for_each(|v| *v = 0);
+    for i in 0..n {
+        let it = (cl[i] - 1) as usize;
+        nc[it] += 1;
+        let xi = &x[i * p..i * p + p];
+        let ci = &mut cen[it * p..it * p + p];
+        for c in 0..p {
+            ci[c] += xi[c];
+        }
+    }
+    for j in 0..k {
+        let aa = nc[j] as f64;
+        for c in 0..p {
+            cen[j * p + c] /= aa;
+        }
+    }
+}
+
+#[inline]
+fn assign_all(py: Python<'_>, x: &[f64], cen: &[f64], n: usize, p: usize, k: usize) -> Vec<usize> {
+    if n >= KM_PAR_MIN {
+        py.allow_threads(|| (0..n).into_par_iter().map(|i| nearest(x, cen, p, k, i)).collect())
+    } else {
+        (0..n).map(|i| nearest(x, cen, p, k, i)).collect()
+    }
+}
+
+type KmOut<'py> = (
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<f64>>,
+    i64,
+);
+
+fn finish<'py>(py: Python<'py>, cl: Vec<i64>, cen: Vec<f64>, nc: Vec<i64>, wss: Vec<f64>, it: i64) -> KmOut<'py> {
+    (
+        cl.into_pyarray(py),
+        cen.into_pyarray(py),
+        nc.into_pyarray(py),
+        wss.into_pyarray(py),
+        it,
+    )
+}
+
+/// Lloyd's algorithm. Returns `(cl, cen_flat, nc, wss, iter)`.
+#[pyfunction]
+#[pyo3(name = "lloyd", signature = (x, centers, k, maxiter))]
+pub fn lloyd<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<'py, f64>,
+    centers: PyReadonlyArray2<'py, f64>,
+    k: usize,
+    maxiter: usize,
+) -> KmOut<'py> {
+    let xs = x.as_slice().unwrap();
+    let n = x.shape()[0];
+    let p = x.shape()[1];
+    let mut cen = centers.as_slice().unwrap().to_vec();
+    let mut cl = vec![-1i64; n];
+    let mut nc = vec![0i64; k];
+    let mut broke = false;
+    let mut iteration = 0usize;
+    for it in 0..maxiter {
+        iteration = it;
+        let newcl = assign_all(py, xs, &cen, n, p, k);
+        let mut updated = false;
+        for i in 0..n {
+            let inew = newcl[i] as i64 + 1;
+            if cl[i] != inew {
+                updated = true;
+                cl[i] = inew;
+            }
+        }
+        if !updated {
+            broke = true;
+            break;
+        }
+        recompute_centres(xs, &mut cen, &mut nc, &cl, n, p, k);
+    }
+    let c_iter = if broke { iteration } else { maxiter };
+    let wss = wss_of(xs, &cen, &cl, n, p, k);
+    finish(py, cl, cen, nc, wss, c_iter as i64 + 1)
+}
+
+/// MacQueen's algorithm. Returns `(cl, cen_flat, nc, wss, iter)`.
+#[pyfunction]
+#[pyo3(name = "macqueen", signature = (x, centers, k, maxiter))]
+pub fn macqueen<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<'py, f64>,
+    centers: PyReadonlyArray2<'py, f64>,
+    k: usize,
+    maxiter: usize,
+) -> KmOut<'py> {
+    let xs = x.as_slice().unwrap();
+    let n = x.shape()[0];
+    let p = x.shape()[1];
+    let mut cen = centers.as_slice().unwrap().to_vec();
+    let mut nc = vec![0i64; k];
+
+    // initial nearest-centre assignment + centroids
+    let init = assign_all(py, xs, &cen, n, p, k);
+    let mut cl: Vec<i64> = init.iter().map(|&j| j as i64 + 1).collect();
+    recompute_centres(xs, &mut cen, &mut nc, &cl, n, p, k);
+
+    // incremental refinement (inherently sequential: each transfer shifts cen)
+    let mut broke = false;
+    let mut iteration = 0usize;
+    for it in 0..maxiter {
+        iteration = it;
+        let mut updated = false;
+        for i in 0..n {
+            let inew = nearest(xs, &cen, p, k, i);
+            let iold = (cl[i] - 1) as usize;
+            if iold != inew {
+                updated = true;
+                cl[i] = inew as i64 + 1;
+                nc[iold] -= 1;
+                nc[inew] += 1;
+                let aold = nc[iold] as f64;
+                let anew = nc[inew] as f64;
+                for c in 0..p {
+                    let xic = xs[i * p + c];
+                    cen[iold * p + c] += (cen[iold * p + c] - xic) / aold;
+                    cen[inew * p + c] += (xic - cen[inew * p + c]) / anew;
+                }
+            }
+        }
+        if !updated {
+            broke = true;
+            break;
+        }
+    }
+    let c_iter = if broke { iteration } else { maxiter };
+    let wss = wss_of(xs, &cen, &cl, n, p, k);
+    finish(py, cl, cen, nc, wss, c_iter as i64 + 1)
+}
+
+pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(kmns, m)?)?;
+    m.add_function(wrap_pyfunction!(lloyd, m)?)?;
+    m.add_function(wrap_pyfunction!(macqueen, m)?)?;
+    Ok(())
+}
+
+// --------------------------------------------------------------------------- #
+// Hartigan-Wong (kmns.f) — consolidated here from the former kmns.rs.
+// --------------------------------------------------------------------------- #
 struct Hw<'a> {
     x: &'a [f64], // m*p, row-major: x(i,j) = x[(i-1)*p + (j-1)]
     m: usize,
@@ -411,9 +605,4 @@ pub fn kmns<'py>(
         wss.into_pyarray(py),
         iter_ret,
     )
-}
-
-pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(kmns, m)?)?;
-    Ok(())
 }

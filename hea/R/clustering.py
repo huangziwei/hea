@@ -69,6 +69,14 @@ _rs_hclust = rs_fn("hclust")
 # Sequential OPTRA/QTRAN transfer loops — NEVER parallelize.
 _rs_kmns = rs_fn("kmns")
 
+# Rust seams for the remaining compiled-in-R kernels (R does these in C/Fortran,
+# so the pure-Python ports are slow): the cutree grouping (`C_cutree`) and the
+# Lloyd/MacQueen k-means (`cluster_kmeans.c`). Lloyd's assignment phase is
+# rayon-parallel (independent per point); the rest stays sequential (0-ulp).
+_rs_cutree = rs_fn("cutree")
+_rs_lloyd = rs_fn("lloyd")
+_rs_macqueen = rs_fn("macqueen")
+
 
 # --------------------------------------------------------------------------- #
 # Fortran core (hclust.f), ported 1:1 with 1-based indexing
@@ -796,21 +804,24 @@ def hclust(d, method="complete", members=None):
         if members.size != n:
             raise ValueError("invalid length of members")
 
-    if _rs_hclust is not None:  # Rust accelerator (step 10); pure-Python is spec
-        ia, ib, crit = _rs_hclust(n, np.ascontiguousarray(data), iopt, members)
-        ia = [0, *list(ia)]
-        ib = [0, *list(ib)]
-        crit = [0.0, *list(crit)]
+    merge = np.empty((n - 1, 2), dtype=np.int64)
+    if _rs_hclust is not None:
+        # Rust does the agglomeration AND hcass2 (the merge->order transform),
+        # returning the final columns directly — no O(n^2) Python post-processing.
+        # The pure-Python ``_hclust_fortran``/``_hcass2`` below stay the spec.
+        iia, iib, height, order = _rs_hclust(
+            n, np.ascontiguousarray(data), iopt, members)
+        merge[:, 0] = iia
+        merge[:, 1] = iib
+        height = np.asarray(height, dtype=float)
+        order = np.asarray(order, dtype=np.int64)
     else:
         ia, ib, crit = _hclust_fortran(n, data, iopt, members)
-
-    iorder, iia, iib = _hcass2(n, ia, ib)
-
-    merge = np.empty((n - 1, 2), dtype=np.int64)
-    merge[:, 0] = iia[1:n]
-    merge[:, 1] = iib[1:n]
-    height = np.asarray(crit[1:n], dtype=float)
-    order = np.asarray(iorder[1:n + 1], dtype=np.int64)
+        iorder, iia, iib = _hcass2(n, ia, ib)
+        merge[:, 0] = iia[1:n]
+        merge[:, 1] = iib[1:n]
+        height = np.asarray(crit[1:n], dtype=float)
+        order = np.asarray(iorder[1:n + 1], dtype=np.int64)
 
     return Hclust(merge, height, order, labels=labels, method=_METHODS[i_meth],
                   dist_method=dist_method)
@@ -849,7 +860,10 @@ def cutree(tree, k=None, h=None):
         if which.min() < 1 or which.max() > n:
             raise ValueError(f"elements of 'k' must be between 1 and {n}")
 
-    ans = _cutree_c(merge, which)
+    if _rs_cutree is not None:  # Rust C_cutree port; pure-Python _cutree_c is spec
+        ans = np.asarray(_rs_cutree(np.ascontiguousarray(merge), which))
+    else:
+        ans = _cutree_c(merge, which)
     if which.size == 1:
         return ans[:, 0]
     return ans
@@ -997,6 +1011,20 @@ def _kmns_rs(x, centers, k, iter_max):
     }
 
 
+def _kmeans_cd_rs(rs_kernel, x, centers, k, iter_max):
+    """Rust Lloyd/MacQueen → ``(cl, cen, nc, wss, iter)`` like the pure-Python
+    kernels (which stay the spec/oracle). ``cen`` is reshaped to ``(k, p)``."""
+    cl, cen, nc, wss, it = rs_kernel(
+        np.ascontiguousarray(x, dtype=float),
+        np.ascontiguousarray(centers, dtype=float),
+        int(k), int(iter_max))
+    return (np.asarray(cl, dtype=np.int64),
+            np.asarray(cen, dtype=float).reshape(k, x.shape[1]),
+            np.asarray(nc, dtype=np.int64),
+            np.asarray(wss, dtype=float),
+            int(it))
+
+
 def _do_one(nmeth, x, centers, k, iter_max, trace):
     """R ``do_one(nmeth)`` — dispatch to a kernel + the post-run warnings."""
     if nmeth == 1:  # Hartigan-Wong
@@ -1021,9 +1049,16 @@ def _do_one(nmeth, x, centers, k, iter_max, trace):
         return z
 
     if nmeth == 2:  # Lloyd / Forgy
-        cl, cen, nc, wss, it = _kmeans_lloyd(x, centers, k, iter_max)
+        if _rs_lloyd is not None:
+            cl, cen, nc, wss, it = _kmeans_cd_rs(_rs_lloyd, x, centers, k, iter_max)
+        else:
+            cl, cen, nc, wss, it = _kmeans_lloyd(x, centers, k, iter_max)
     else:  # MacQueen
-        cl, cen, nc, wss, it = _kmeans_macqueen(x, centers, k, iter_max)
+        if _rs_macqueen is not None:
+            cl, cen, nc, wss, it = _kmeans_cd_rs(
+                _rs_macqueen, x, centers, k, iter_max)
+        else:
+            cl, cen, nc, wss, it = _kmeans_macqueen(x, centers, k, iter_max)
     ifault = None
     if np.any(nc == 0):
         warnings.warn("empty cluster: try a better set of initial centers",

@@ -1,17 +1,17 @@
-//! Agglomerative hierarchical clustering — the O(n²) NN-chain core of `hclust()`.
+//! Agglomerative hierarchical clustering — the O(n²) NN-chain core of `hclust()`,
+//! plus the merge-sequence→`order` transform (`HCASS2`).
 //!
-//! A line-by-line mirror of `hea/R/clustering.py::_hclust_fortran`, which is a
-//! 1:1 port of R's `src/library/stats/src/hclust.f` (`SUBROUTINE HCLUST`). The
-//! merge sequence has data-dependent tie-breaking and the Lance-Williams update
-//! mutates the dissimilarity vector in place, so this is INHERENTLY SERIAL —
-//! never parallelize (it would reorder merges and break `$merge`/`$height`
-//! parity), exactly like `rng/mt.rs` and `linalg/chol.rs`.
+//! `HCLUST` is a line-by-line mirror of `hea/R/clustering.py::_hclust_fortran`,
+//! and `hcass2` of `_hcass2` — both 1:1 ports of R's
+//! `src/library/stats/src/hclust.f`. The merge sequence has data-dependent
+//! tie-breaking and the Lance-Williams update mutates the dissimilarity vector in
+//! place, so this is INHERENTLY SERIAL — never parallelize (it would reorder
+//! merges and break parity), like `rng/mt.rs` / `linalg/chol.rs`.
 //!
-//! Contract with the Python seam (`clustering.py`): returns the agglomeration
-//! arrays `(ia, ib, crit)` as the `[1..=n]` slices of the 1-based Fortran arrays
-//! (entries `1..n-1` are the merges, entry `n` is the unused trailing 0); the
-//! seam prepends the unused leading `0` to recover the full 1-based arrays that
-//! `_hcass2` consumes — so `[0, *rs] == _hclust_fortran(...)` bit-for-bit.
+//! Returns the FINAL R `hclust` data — `(merge_a, merge_b, height, order)` — so
+//! the Python seam only builds the object (no O(n²) Python post-processing).
+//! `hcass2` is pure integer work, so there is no float-parity concern; the merge
+//! columns / order are bit-identical to the pure-Python path.
 
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
@@ -20,8 +20,76 @@ use pyo3::prelude::*;
 // "minimum dissimilarity" sentinel, mirrored so comparisons agree bit-for-bit.
 const INF: f64 = 1.0e300;
 
-/// `(ia, ib, crit)` for an `n`-point clustering with packed dissimilarities
-/// `diss` (length `n*(n-1)/2`), method code `iopt` (1..8), and `members`.
+/// Port of `SUBROUTINE HCASS2` (`_hcass2`): turn the agglomeration sequence
+/// `(ia, ib)` into R's `merge` columns (`iia`/`iib`) and the leaf `order`. All
+/// 1-based (index 0 unused); `ia`/`ib` have length >= n+1. Integer-exact.
+fn hcass2(n: usize, ia: &[i64], ib: &[i64]) -> (Vec<i64>, Vec<i64>, Vec<i64>) {
+    let mut iorder = vec![0i64; n + 1];
+    let mut iia = vec![0i64; n + 1];
+    let mut iib = vec![0i64; n + 1];
+    for i in 1..=n {
+        iia[i] = ia[i];
+        iib[i] = ib[i];
+    }
+    for i in 1..(n - 1) {
+        let k = ia[i].min(ib[i]); // smallest (+ve or -ve) seq. no.
+        for j in (i + 1)..n {
+            if ia[j] == k {
+                iia[j] = -(i as i64);
+            }
+            if ib[j] == k {
+                iib[j] = -(i as i64);
+            }
+        }
+    }
+    for i in 1..n {
+        iia[i] = -iia[i];
+        iib[i] = -iib[i];
+    }
+    for i in 1..n {
+        if iia[i] > 0 && iib[i] < 0 {
+            std::mem::swap(&mut iia[i], &mut iib[i]);
+        }
+        if iia[i] > 0 && iib[i] > 0 {
+            let k1 = iia[i].min(iib[i]);
+            let k2 = iia[i].max(iib[i]);
+            iia[i] = k1;
+            iib[i] = k2;
+        }
+    }
+    iorder[1] = iia[n - 1];
+    iorder[2] = iib[n - 1];
+    let mut loc = 2usize;
+    for i in (1..=(n - 2)).rev() {
+        for j in 1..=loc {
+            if iorder[j] == i as i64 {
+                iorder[j] = iia[i];
+                if j == loc {
+                    loc += 1;
+                    iorder[loc] = iib[i];
+                } else {
+                    loc += 1;
+                    let mut kk = loc;
+                    while kk > j + 1 {
+                        iorder[kk] = iorder[kk - 1];
+                        kk -= 1;
+                    }
+                    iorder[j + 1] = iib[i];
+                }
+                break;
+            }
+        }
+    }
+    for i in 1..=n {
+        iorder[i] = -iorder[i];
+    }
+    (iorder, iia, iib)
+}
+
+/// Final R `hclust` columns `(merge_a, merge_b, height, order)` for an `n`-point
+/// clustering with packed dissimilarities `diss` (length `n*(n-1)/2`), method
+/// code `iopt` (1..8), and `members`. `merge_a`/`merge_b`/`height` have length
+/// `n-1`; `order` has length `n`.
 #[pyfunction]
 #[pyo3(name = "hclust", signature = (n, diss, iopt, members))]
 pub fn hclust<'py>(
@@ -34,11 +102,12 @@ pub fn hclust<'py>(
     Bound<'py, PyArray1<i64>>,
     Bound<'py, PyArray1<i64>>,
     Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<i64>>,
 ) {
     let diss = diss.as_slice().unwrap();
     let memb0 = members.as_slice().unwrap();
 
-    let (ia_out, ib_out, crit_out) = py.allow_threads(|| {
+    let (iia_out, iib_out, height_out, order_out) = py.allow_threads(|| {
         let length = n * (n - 1) / 2;
 
         // 1-based working arrays (index 0 unused), mirroring the Fortran decls.
@@ -75,14 +144,17 @@ pub fn hclust<'py>(
             }
         }
 
-        // initial nearest-neighbour list (NN to the RIGHT of i)
+        // initial nearest-neighbour list (NN to the RIGHT of i).
+        // ioffst(i, j) for fixed i is contiguous in j (= lo + (j-(i+1))), so we
+        // scan the slice d[lo..lo+(n-i)] — no per-element index recompute / bounds
+        // check, same values in the same order (0-ulp preserved).
         for i in 1..n {
             let mut dmin = INF;
-            for j in (i + 1)..=n {
-                let ind = ioffst(i, j);
-                if dmin > d[ind] {
-                    dmin = d[ind];
-                    jm = j;
+            let lo = ioffst(i, i + 1);
+            for (off, &dv) in d[lo..lo + (n - i)].iter().enumerate() {
+                if dmin > dv {
+                    dmin = dv;
+                    jm = i + 1 + off;
                 }
             }
             nn[i] = jm;
@@ -111,13 +183,15 @@ pub fn hclust<'py>(
             crit[n - ncl] = dmin;
             flag[j2] = false;
 
-            // update dissimilarities from the new cluster
+            // update dissimilarities from the new cluster. d12 = d[ioffst(i2,j2)]
+            // is loop-invariant (i2,j2 fixed; the loop only writes d[ind1] with
+            // ind1 != ioffst(i2,j2) since flag[j2] is false) — hoist the load.
+            let d12 = d[ioffst(i2, j2)];
             let mut dmin_nn = INF;
             for k in 1..=n {
                 if flag[k] && k != i2 {
                     let ind1 = if i2 < k { ioffst(i2, k) } else { ioffst(k, i2) };
                     let ind2 = if j2 < k { ioffst(j2, k) } else { ioffst(k, j2) };
-                    let d12 = d[ioffst(i2, j2)];
 
                     if isward {
                         d[ind1] = (membr[i2] + membr[k]) * d[ind1]
@@ -157,17 +231,17 @@ pub fn hclust<'py>(
             disnn[i2] = dmin_nn;
             nn[i2] = jj;
 
-            // rebuild the NN list where it pointed at the merged pair
+            // rebuild the NN list where it pointed at the merged pair (same
+            // contiguous-slice scan as the initial NN loop).
             for i in 1..n {
                 if flag[i] && (nn[i] == i2 || nn[i] == j2) {
                     let mut dmin_r = INF;
-                    for j in (i + 1)..=n {
-                        if flag[j] {
-                            let ind = ioffst(i, j);
-                            if d[ind] < dmin_r {
-                                dmin_r = d[ind];
-                                jj = j;
-                            }
+                    let lo = ioffst(i, i + 1);
+                    for (off, &dv) in d[lo..lo + (n - i)].iter().enumerate() {
+                        let j = i + 1 + off;
+                        if flag[j] && dv < dmin_r {
+                            dmin_r = dv;
+                            jj = j;
                         }
                     }
                     nn[i] = jj;
@@ -181,13 +255,21 @@ pub fn hclust<'py>(
             break;
         }
 
-        (ia[1..=n].to_vec(), ib[1..=n].to_vec(), crit[1..=n].to_vec())
+        // merge-sequence -> R merge columns + leaf order (was pure-Python O(n^2)).
+        let (iorder, iia, iib) = hcass2(n, &ia, &ib);
+        (
+            iia[1..n].to_vec(),       // merge_a, length n-1
+            iib[1..n].to_vec(),       // merge_b, length n-1
+            crit[1..n].to_vec(),      // height,  length n-1
+            iorder[1..=n].to_vec(),   // order,   length n
+        )
     });
 
     (
-        ia_out.into_pyarray(py),
-        ib_out.into_pyarray(py),
-        crit_out.into_pyarray(py),
+        iia_out.into_pyarray(py),
+        iib_out.into_pyarray(py),
+        height_out.into_pyarray(py),
+        order_out.into_pyarray(py),
     )
 }
 
