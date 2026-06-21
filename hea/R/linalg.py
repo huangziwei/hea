@@ -25,9 +25,23 @@ import numpy as np
 
 from ._dispatch import rs_fn
 
-__all__ = ["dqrdc2", "dqrsl", "dqrls", "Cdqrls"]
+__all__ = ["dqrdc2", "dqrsl", "dqrls", "Cdqrls", "dqrls_rank"]
 
 _rs_dqrls = rs_fn("dqrls")
+_rs_dqrls_rank = rs_fn("dqrls_rank")
+
+
+def dqrls_rank(x: np.ndarray, tol: float = 1e-7):
+    """``(rank, pivot)`` from R's ``dqrdc2`` only — for alias/rank detection,
+    where the coefficients/effects/QR aren't needed. Rust active path (lean: no
+    big-array marshalling), pure-Python ``dqrls`` as the fallback/oracle.
+    ``pivot`` is 1-based."""
+    x = np.asarray(x, dtype=float)
+    if _rs_dqrls_rank is not None:
+        rank, pivot = _rs_dqrls_rank(np.ascontiguousarray(x, dtype=float), tol)
+        return int(rank), np.asarray(pivot)
+    _, _, _, _, k, jpvt, _ = dqrls(x.copy(), np.zeros(x.shape[0]), tol)
+    return int(k), np.asarray(jpvt)
 
 
 def dqrdc2(x: np.ndarray, tol: float = 1e-7):

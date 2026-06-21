@@ -194,12 +194,12 @@ def _drop_aliased_cols(X_df: pl.DataFrame, tol: float = 1e-7) -> list[str]:
     if not suspect:
         return []                                   # clearly full rank — fast path
 
-    if _linalg._rs_dqrls is not None:
+    if _linalg._rs_dqrls_rank is not None:
         # Rank-deficient → resolve EXACTLY with R's dqrdc2 (Rust): the columns
         # deferred to pivot positions rank+1..p are bit-identically R's aliased
         # set, and the decision is deterministic (no BLAS-bistable rank flake).
-        z = _linalg.Cdqrls(X, np.zeros(X.shape[0]), tol)
-        rank, pivot = z["rank"], z["pivot"]
+        # dqrls_rank is the lean path — rank+pivot only, no QR/coef marshalling.
+        rank, pivot = _linalg.dqrls_rank(X, tol)
         if rank >= p:
             return []
         return [cols[i] for i in sorted(int(pivot[j]) - 1 for j in range(rank, p))]

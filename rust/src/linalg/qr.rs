@@ -16,6 +16,7 @@
 use numpy::ndarray::Array2;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
+use rayon::prelude::*;
 
 /// Reference-BLAS `dnrm2` — Euclidean norm via the classic scaled sum-of-squares
 /// (overflow-safe, in-order → deterministic, matches R's `dnrm2`).
@@ -42,19 +43,17 @@ fn dnrm2(v: &[f64]) -> f64 {
     }
 }
 
-/// In-order dot product (deterministic).
+/// In-order dot product (deterministic). Iterator form so the bounds checks are
+/// elided and the fold stays strictly sequential (f64 `sum` is not reassociated
+/// without fast-math, so this matches R's `ddot` order — no SIMD reduction).
 fn ddot(a: &[f64], b: &[f64]) -> f64 {
-    let mut s = 0.0;
-    for i in 0..a.len() {
-        s += a[i] * b[i];
-    }
-    s
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
-/// `y += t*x` over equal-length slices (deterministic daxpy).
+/// `y += t*x` over equal-length slices (deterministic daxpy, bounds-check-free).
 fn daxpy(t: f64, x: &[f64], y: &mut [f64]) {
-    for i in 0..y.len() {
-        y[i] += t * x[i];
+    for (yi, &xi) in y.iter_mut().zip(x) {
+        *yi += t * xi;
     }
 }
 
@@ -109,39 +108,59 @@ fn dqrdc2(x: &mut [f64], n: usize, p: usize, tol: f64) -> (Vec<f64>, Vec<usize>,
                     nrmxl = nrmxl.copysign(x[col_l + l0]);
                 }
                 let inv = 1.0 / nrmxl;
-                for i in l0..n {
-                    x[col_l + i] *= inv; // dscal
+                for xi in x[col_l + l0..col_l + n].iter_mut() {
+                    *xi *= inv; // dscal
                 }
                 x[col_l + l0] += 1.0;
-                // apply to columns l+1..p, updating norms
                 let pivot_diag = x[col_l + l0];
-                for j in l..p {
-                    let col_j = j * n;
-                    // t = -ddot(x(l:n,l), x(l:n,j)) / x(l,l)
-                    let dot = {
-                        let mut s = 0.0;
-                        for i in l0..n {
-                            s += x[col_l + i] * x[col_j + i];
-                        }
-                        s
-                    };
+                // Split so the pivot column l0 (read) and the trailing columns
+                // l0+1..p (written) are disjoint borrows. Each trailing column's
+                // update depends ONLY on the shared pivot column `cl` (read-only)
+                // — columns are mutually independent, so they run in parallel
+                // (rayon) with each column's dot/daxpy kept strictly in order →
+                // bit-identical regardless of thread count (deterministic). This
+                // is the lever that beats R's single-threaded dqrdc2 at scale.
+                let (left, right) = x.split_at_mut((l0 + 1) * n);
+                let cl = &left[col_l + l0..col_l + n]; // pivot col, rows l0..n
+                // per-column Householder update (col rows l0..n, its qraux, work1)
+                let update = |cj: &mut [f64], qx: &mut f64, w1: &mut f64| {
+                    let cj = &mut cj[l0..n]; // rows l0..n of this column
+                    let dot: f64 = cl.iter().zip(cj.iter()).map(|(a, b)| a * b).sum();
                     let t = -dot / pivot_diag;
-                    for i in l0..n {
-                        x[col_j + i] += t * x[col_l + i]; // daxpy
+                    for (b, &a) in cj.iter_mut().zip(cl.iter()) {
+                        *b += t * a; // daxpy
                     }
-                    if qraux[j] != 0.0 {
-                        let ratio = x[col_j + l0].abs() / qraux[j];
+                    if *qx != 0.0 {
+                        let ratio = cj[0].abs() / *qx; // |x(l,j)|
                         let mut tt = 1.0 - ratio * ratio;
                         if tt < 0.0 {
                             tt = 0.0;
                         }
                         if tt.abs() >= 1e-6 {
-                            qraux[j] *= tt.sqrt();
+                            *qx *= tt.sqrt();
                         } else {
-                            qraux[j] = dnrm2(&x[col_j + l0 + 1..col_j + n]);
-                            work1[j] = qraux[j];
+                            *qx = dnrm2(&cj[1..]); // dnrm2(x(l+1:n, j))
+                            *w1 = *qx;
                         }
                     }
+                };
+                let qx = &mut qraux[l..p];
+                let w1 = &mut work1[l..p];
+                // Parallelize only when the trailing block is big enough to beat
+                // rayon's dispatch overhead (small fits stay serial).
+                const PAR_MIN_ELEMS: usize = 1 << 15;
+                if right.len() >= PAR_MIN_ELEMS {
+                    right
+                        .par_chunks_mut(n)
+                        .zip(qx.par_iter_mut())
+                        .zip(w1.par_iter_mut())
+                        .for_each(|((cj, qx), w1)| update(cj, qx, w1));
+                } else {
+                    right
+                        .chunks_mut(n)
+                        .zip(qx.iter_mut())
+                        .zip(w1.iter_mut())
+                        .for_each(|((cj, qx), w1)| update(cj, qx, w1));
                 }
                 qraux[l0] = x[col_l + l0];
                 x[col_l + l0] = -nrmxl;
@@ -312,4 +331,28 @@ pub fn dqrls<'py>(
         PyArray1::from_vec(py, pivot),
         PyArray1::from_vec(py, qraux),
     ))
+}
+
+/// Rank + pivot only (R's `dqrdc2`) — for alias detection, which needs neither
+/// the coefficients/effects/residuals nor the `n×p` factor. Runs only `dqrdc2`
+/// (no `dqrsl`) and marshals back only the rank and the length-p pivot, so it
+/// avoids the large-array copies `dqrls` does. `pivot` is 1-based.
+#[pyfunction]
+#[pyo3(signature = (x, tol=1e-7))]
+pub fn dqrls_rank<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<'py, f64>,
+    tol: f64,
+) -> PyResult<(usize, Bound<'py, PyArray1<i64>>)> {
+    let xv = x.as_array();
+    let (n, p) = (xv.nrows(), xv.ncols());
+    let mut xcol = vec![0.0_f64; n * p];
+    for j in 0..p {
+        for i in 0..n {
+            xcol[j * n + i] = xv[[i, j]];
+        }
+    }
+    let (_qraux, jpvt, rank) = dqrdc2(&mut xcol, n, p, tol);
+    let pivot: Vec<i64> = jpvt.iter().map(|&v| v as i64).collect();
+    Ok((rank, PyArray1::from_vec(py, pivot)))
 }

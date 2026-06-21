@@ -14,5 +14,6 @@ pub mod qr;
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chol::chol_lower, m)?)?;
     m.add_function(wrap_pyfunction!(qr::dqrls, m)?)?;
+    m.add_function(wrap_pyfunction!(qr::dqrls_rank, m)?)?;
     Ok(())
 }
