@@ -228,7 +228,13 @@ def test_cmdscale_from_matrix():
 def test_cmdscale_add_constant():
     res = cmdscale(dist(_XC), k=2, add=True)
     _assert_points_up_to_sign(res["points"], _CMD_PTS, atol=1e-6)
-    assert abs(res["ac"]) < 1e-10
+    # _XC is perfectly Euclidean, so the additive constant is theoretically 0.
+    # ``ac`` is ``max(Re(eigvals(Z)))`` (1:1 with R) of a matrix whose largest
+    # eigenvalue is 0, so the computed value is pure ``dgeev`` noise and varies
+    # by BLAS build: R/hea on Accelerate ~1e-15, OpenBLAS (Linux CI) ~1e-7. The
+    # 1e-6 bound matches the sibling points tolerance and still separates "~0"
+    # from a genuine (O(1)+) additive constant.
+    assert abs(res["ac"]) < 1e-6
 
 
 def test_cmdscale_k_out_of_range():
