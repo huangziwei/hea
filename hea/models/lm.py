@@ -1,3 +1,4 @@
+from functools import cached_property
 from typing import Union
 
 import matplotlib.pyplot as plt
@@ -921,14 +922,11 @@ class lm:
         self.se_bhat = _row_frame(self._se_bhat_arr, self.column_names)
 
         # hat-matrix diagonal h_ii (leverages) and internally studentized
-        # residuals — cached once so plot_qq / plot_scale_location /
-        # plot_leverage don't each recompute them.
-        HX = X @ self.XtXinv
-        h = (HX * X).sum(axis=1)
-        w = self._w
-        self.leverage = h * w
-        denom = self.sigma * np.sqrt(np.clip(1.0 - self.leverage, 1e-12, None))
-        self.std_residuals = residuals * np.sqrt(w) / denom
+        # residuals are now LAZY (``leverage`` / ``std_residuals`` cached
+        # properties below): only diagnostics (hatvalues/rstandard/rstudent/
+        # cooks/dffits/influence) and plot_* read them, never the fit/predict/
+        # summary path, so a plain fit no longer pays the O(n·p²) hat matmul.
+        # R is lazy here too (lm() omits leverage; hat()/lm.influence compute it).
 
         # compute confidence interval for β̂
         self.ci_bhat = self.compute_ci_bhat()
@@ -1154,6 +1152,29 @@ class lm:
         V_bhat = self.sigma_squared * self.XtXinv
         se_bhat = np.sqrt(np.diag(V_bhat))[:, None]
         return se_bhat, V_bhat
+
+    @cached_property
+    def leverage(self) -> np.ndarray:
+        """Hat-matrix diagonal hᵢᵢ = wᵢ·(Xᵢᵀ(XᵀWX)⁻¹Xᵢ) — R's ``hatvalues``.
+
+        Lazy + cached: only the influence diagnostics (``hatvalues``/``rstandard``
+        /``rstudent``/``cooks_distance``/``dffits``/``influence``) and the
+        ``plot_*`` methods read it; the fit/predict/summary path never does, so a
+        plain fit skips the O(n·p²) ``X @ (XᵀWX)⁻¹`` matmul (R's ``lm()`` is lazy
+        here too). Computed from the kept design + ``XtXinv`` + prior weights, all
+        retained on the model — bit-identical to the former eager value."""
+        X = self._X_values if self._X_values is not None else self.X.to_numpy().astype(float)
+        HX = X @ self.XtXinv
+        return (HX * X).sum(axis=1) * self._w
+
+    @cached_property
+    def std_residuals(self) -> np.ndarray:
+        """Internally studentized residuals rᵢ·√wᵢ / (σ·√(1−hᵢᵢ)) — R's
+        ``rstandard`` core. Lazy/cached for the same reason as :attr:`leverage`
+        (only diagnostics/plots consume it); bit-identical to the former eager
+        value (same expression on the retained residuals/σ/weights/leverage)."""
+        denom = self.sigma * np.sqrt(np.clip(1.0 - self.leverage, 1e-12, None))
+        return self._residuals_arr * np.sqrt(self._w) / denom
 
     def compute_ci_bhat(self, alpha=0.05):
 
