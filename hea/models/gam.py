@@ -1638,6 +1638,11 @@ class gam:
         # no-smooth and fixed-`sp` paths — `gam.check()` skips the
         # convergence block in those cases.
         self._outer_info: dict | None = None
+        # True when the Gaussian-additive GCV `magic` fast path runs (mgcv's
+        # am.fit). Its post-proc mirrors magic.post.proc (mgcv.r:4475): edf1
+        # only, edf2 NULL → edf, no Vc — mgcv computes no sp-uncertainty
+        # correction for the GCV/magic path.
+        self._used_magic = False
         # Set by the joint outer Newton in the tw() path (estimated-p
         # Tweedie); None otherwise. Holds θ̂, p̂, log φ̂.
         self._tw_info: dict | None = None
@@ -1798,14 +1803,22 @@ class gam:
             else:
                 _criterion = "GCV"
             _nt = self._control["newton"]
-            theta_hat = self._outer_newton(
-                theta0,
-                criterion=_criterion,
-                include_log_phi=include_log_phi,
-                include_family_theta=include_family_theta,
-                conv_tol=_nt["conv_tol"], max_step=_nt["maxNstep"],
-                max_sd_step=_nt["maxSstep"], max_half=_nt["maxHalf"],
-            )
+            if self._use_magic(_criterion, include_log_phi,
+                               include_family_theta):
+                # Gaussian-identity additive + GCV.Cp → mgcv's `magic` fast
+                # path (am.fit, mgcv.r:2001): QR once, optimize GCV on the
+                # reduced q×q system. theta == per-penalty ρ here (L is None).
+                self._used_magic = True
+                theta_hat = self._magic_optimize(theta0)
+            else:
+                theta_hat = self._outer_newton(
+                    theta0,
+                    criterion=_criterion,
+                    include_log_phi=include_log_phi,
+                    include_family_theta=include_family_theta,
+                    conv_tol=_nt["conv_tol"], max_step=_nt["maxNstep"],
+                    max_sd_step=_nt["maxSstep"], max_half=_nt["maxHalf"],
+                )
 
             theta_sp = theta_hat[:n_work]
             base = n_work
@@ -1828,7 +1841,10 @@ class gam:
             # below for every path via ``_rho_full``.
             self.sp = np.exp(theta_sp)
             rho_hat = self._rho_full(theta_sp)
-            fit = self._fit_given_rho(rho_hat)
+            # magic path: build the final fit from the cached QR (no full
+            # re-fit) — bit-identical β/A_chol at (q+e)×q cost.
+            fit = (self._magic_fit_state(rho_hat) if self._used_magic
+                   else self._fit_given_rho(rho_hat))
             # P-REML/P-ML carry no log φ in the outer θ — their scale is the
             # analytic Pearson-Laplace plug-in at the converged ρ̂. Record it
             # so the criterion/scale/AIC consumers read φ = P/(n−Mp).
@@ -2219,7 +2235,18 @@ class gam:
         # ρ-dependence of L^{-T} in the Bayesian draw β̃ = β̂ + σ L^{-T} z.
         # edf1 = tr(2F-F²) is the upper bound; cap edf2 at edf1 in total
         # only. sc.p = 1 if scale is estimated, 0 if known (mgcv convention).
-        if n_sp > 0:
+        if n_sp > 0 and self._used_magic:
+            # mgcv's magic.post.proc (mgcv.r:4475-4501): edf1 = 2·edf − diag(FF)
+            # only; it computes NO edf2 / Vc for the GCV/magic path (edf2 NULL →
+            # edf in logLik.gam). Skips the ~20 ms profiled-Hessian Vr/Vc.
+            F = A_inv_XtWX
+            edf1_per_coef = 2.0 * np.diag(F) - np.einsum("ij,ji->i", F, F)
+            self.edf1 = edf1_per_coef
+            self.edf2 = edf.copy()
+            self.edf1_total = float(edf1_per_coef.sum())
+            self.edf2_total = edf_total
+            Vc_corr = np.zeros_like(Vp)
+        elif n_sp > 0:
             edf2_per_coef, edf1_per_coef, Vc_corr = self._compute_edf12(
                 rho_hat, fit, sigma_squared, A_inv, A_inv_XtWX, edf, H_aug,
             )
@@ -6310,6 +6337,316 @@ class gam:
             XtWX = Xw.T @ Xw
         A_inv = cho_solve((fit_F.A_chol, fit_F.A_chol_lower), np.eye(self.p))
         return float(np.trace(A_inv @ XtWX))
+
+    # ---- magic: mgcv's performance-iteration GCV/UBRE optimizer ----------
+    # For a Gaussian-identity additive model under GCV.Cp (the default
+    # ``gam()`` call) mgcv does NOT run the outer Newton over gam.fit3 — it
+    # dispatches to ``am.fit`` → the C routine ``magic`` (mgcv.r:1932-2002,
+    # 2580-2640). magic QR-decomposes the n×q design ONCE, then optimizes the
+    # GCV/UBRE score over log-sp entirely on the q×q *reduced* system (each
+    # trial augments ``[R; St^½]`` and SVDs it — magic.c fit_magic), instead
+    # of re-fitting the full (n+e)×q system per score-eval as the Newton path
+    # does. That single reuse is the whole speedup (constant weights ⇒ the QR
+    # is valid for every sp). Ported mechanically from src/magic.c; the GCV
+    # score is bit-identical to ``_gcv`` (validated, dev/magic_fit_validate.py).
+
+    def _use_magic(self, criterion: str, include_log_phi: bool,
+                   include_family_theta: bool) -> bool:
+        """mgcv's ``outer.looping == FALSE`` dispatch (mgcv.r:1932): Gaussian
+        family + identity link (``G$am``, mgcv.r:2327), GCV (scale unknown),
+        no id-linkage / fixed-sp (so working-sp == per-penalty log-sp)."""
+        return (
+            criterion == "GCV"
+            and not self._scale_known_fit
+            and isinstance(self.family, Gaussian)
+            and getattr(self.family.link, "name", None) == "identity"
+            and self._L is None and self._lsp0 is None
+            and not include_log_phi and not include_family_theta
+            and len(self._slots) > 0
+        )
+
+    def _magic_setup(self):
+        """magic's ``getRpqr`` (magic.c:451): QR the n×q √w-weighted design
+        ONCE → R (q×q), y0 = Q₁'(√w·y), yy = ‖√w·y‖². Reused for every
+        reduced score-eval — this is the work the Newton path repeats n times."""
+        sqw = np.sqrt(self._wt)
+        yv = self._y_arr - self._offset
+        Q, R = np.linalg.qr(sqw[:, None] * self._X_full)
+        y0 = Q.T @ (sqw * yv)
+        yy = float((sqw * yv) @ (sqw * yv))
+        return R, y0, yy
+
+    def _magic_penalty_roots(self) -> list[np.ndarray]:
+        """Per-penalty full p×cS_i roots rS_i (rS_i rS_iᵀ = S_i), one per
+        ``self._slots`` entry (== the ρ order). cS_i = rank(S_i)."""
+        p = self.p
+        roots = []
+        for slot in self._slots:
+            a, b = slot.col_start, slot.col_end
+            ev, V = np.linalg.eigh(0.5 * (slot.S + slot.S.T))
+            pos = ev > ev.max() * 1e-12 if ev.max() > 0 else np.zeros_like(ev, bool)
+            rb = V[:, pos] * np.sqrt(ev[pos])           # k × cS_i
+            full = np.zeros((p, rb.shape[1]))
+            full[a:b, :] = rb
+            roots.append(full)
+        return roots
+
+    def _magic_fit_reduced(self, rho, R, y0, yy):
+        """Port of magic.c ``fit_magic`` (Gaussian/GCV): GCV score from the
+        SVD of the reduced ``[R; St^½]`` ((q+rank_S)×q). St = Σ exp(ρ_k) S_k.
+        Returns score, scale, rss, trA, rank, β, plus the SVD pieces
+        (U1, V, d, y1, delta) the derivative routine reuses."""
+        q = R.shape[1]
+        n_score = float(np.sum(self._wt != 0.0))
+        gamma = self._gamma
+        rank_tol = np.sqrt(np.finfo(float).eps)
+        St = self._build_S_lambda(rho)
+        St = 0.5 * (St + St.T)
+        ev, Vev = np.linalg.eigh(St)
+        pos = ev > ev.max() * 1e-14 if ev.max() > 0 else np.zeros_like(ev, bool)
+        root = (Vev[:, pos] * np.sqrt(ev[pos])).T       # rank_S × q, rootᵀroot = St
+        R_aug = np.vstack([R, root])
+        U, d, Vt = np.linalg.svd(R_aug, full_matrices=False)
+        rank = q
+        thresh = d[0] * rank_tol
+        while d[rank - 1] < thresh:
+            rank -= 1
+        Vr = Vt[:rank].T                                # q × rank
+        U1 = U[:q, :rank]                               # q × rank (top q rows)
+        y1 = U1.T @ y0
+        yAy = float(y1 @ y1)
+        b_proj = U1 @ y1
+        yAAy = float(b_proj @ b_proj)
+        norm = yy - 2 * yAy + yAAy
+        if norm < 0.0:
+            norm = 0.0
+        trA = float(np.sum(U1 * U1))
+        delta = n_score - gamma * trA
+        score = n_score * norm / (delta * delta)
+        scale = norm / (n_score - trA)
+        beta = Vr @ (y1 / d[:rank])
+        return dict(score=score, scale=scale, norm=norm, trA=trA, rank=rank,
+                    beta=beta, U1=U1, V=Vr, d=d[:rank], y1=y1, delta=delta,
+                    n_score=n_score, gamma=gamma)
+
+    def _magic_gH(self, mg, rho, roots):
+        """Port of magic.c ``magic_gH``: gradient (exact) and Hessian of the
+        GCV score wrt ρ, from the reduced SVD in ``mg`` — O(m·rank²), no
+        re-fit. The Hessian is magic's frozen-basis *search-direction* approx
+        (it differentiates the explicit sp-dependence, not the SVD basis); the
+        driver converges on the exact gradient with an SD fallback."""
+        U1, V, d, y1 = mg["U1"], mg["V"], mg["d"], mg["y1"]
+        gamma, n = mg["gamma"], mg["n_score"]
+        norm, delta = mg["norm"], mg["delta"]
+        m = len(roots)
+        Dinv = 1.0 / d
+        U1U1 = U1.T @ U1
+        esp = np.exp(np.asarray(rho, float))
+        M = [None] * m
+        K = [None] * m
+        My = [None] * m
+        yK = [None] * m
+        Ky = [None] * m
+        for i in range(m):
+            VSi = (V.T @ roots[i]) * Dinv[:, None]      # D⁻¹V'rS_i (rank×cS_i)
+            Mi = VSi @ VSi.T                            # D⁻¹V'S_iVD⁻¹
+            Ki = Mi @ U1U1
+            M[i], K[i] = Mi, Ki
+            My[i] = Mi @ y1
+            yK[i] = Ki.T @ y1
+            Ky[i] = Ki @ y1
+        ddelta = np.zeros(m)
+        dnorm = np.zeros(m)
+        d2delta = np.zeros((m, m))
+        d2norm = np.zeros((m, m))
+        for i in range(m):
+            ddelta[i] = gamma * np.trace(K[i]) * esp[i]
+            for j in range(i + 1):
+                v = float(np.sum(M[j] * K[i]))
+                d2delta[i, j] = d2delta[j, i] = -gamma * 2 * esp[i] * esp[j] * v
+            d2delta[i, i] += ddelta[i]
+            dnorm[i] = 2 * esp[i] * float(y1 @ (My[i] - Ky[i]))
+            for j in range(i + 1):
+                v = float(np.sum(My[i] * Ky[j] + My[j] * Ky[i]
+                                 - 2 * My[i] * My[j] + yK[i] * My[j]))
+                d2norm[i, j] = d2norm[j, i] = v * 2 * esp[i] * esp[j]
+            d2norm[i, i] += dnorm[i]
+        grad = np.zeros(m)
+        hess = np.zeros((m, m))
+        # GCV (control[0]==1) — magic.c:263-273.
+        xx = n / (delta * delta)
+        xx1 = xx * 2 * norm / delta
+        x1 = -2 * xx / delta
+        x2 = 3 * xx1 / delta
+        for i in range(m):
+            grad[i] = xx * dnorm[i] - xx1 * ddelta[i]
+            for j in range(i + 1):
+                hess[i, j] = hess[j, i] = (
+                    x1 * (ddelta[j] * dnorm[i] + ddelta[i] * dnorm[j])
+                    + xx * d2norm[i, j] + x2 * ddelta[i] * ddelta[j]
+                    - xx1 * d2delta[i, j])
+        return grad, hess
+
+    def _magic_optimize(self, rho0, tol: float = 1e-7, max_half: int = 15):
+        """Port of magic.c ``magic`` (the driver, magic.c:286-707): Newton
+        over log-sp backed by steepest descent with step halving, plus the
+        infinite-sp check, on the reduced GCV system. Returns ρ̂ and records
+        ``self._outer_info``. (Flat-deriv reset + exact initial.sp deferred —
+        the seed is initial.spg, which magic converges from.)"""
+        R, y0, yy = self._magic_setup()
+        # Stash the once-computed QR so the final fit reuses it (the reduced
+        # [R; E] system gives β/A_chol bit-identical to the full (n+e)×q QR
+        # — same R'R = X'WX+Sλ — at (q+e)×q cost). See _magic_fit_state.
+        self._magic_R = R
+        self._magic_y0 = y0
+        roots = self._magic_penalty_roots()
+        mp = len(rho0)
+        sp0 = np.asarray(rho0, float).copy()
+
+        def feval(sp):
+            return self._magic_fit_reduced(sp, R, y0, yy)
+
+        mg = feval(sp0)
+        min_score = mg["score"]
+        n_step = np.zeros(mp)
+        sd_step = np.zeros(mp)
+        use_sd = True
+        d_score = np.inf
+        grad = np.zeros(mp)
+        converged = False
+        it = 0
+        fit_calls = 1
+        while not converged:
+            it += 1
+            if it > 400:
+                converged = True
+                break
+            if it > 1:
+                step = sd_step if use_sd else n_step
+                try_i = 0
+                ok = True
+                while ok:
+                    try_i += 1
+                    if try_i == 4 and not use_sd:
+                        use_sd = True
+                        step = sd_step
+                    nsp = sp0 + step
+                    mg = feval(nsp)
+                    fit_calls += 1
+                    if mg["score"] < min_score:
+                        d_score = min_score - mg["score"]
+                        min_score = mg["score"]
+                        sp0 = nsp.copy()
+                        ok = False
+                    else:
+                        step = step / 2
+                    if try_i == max_half - 1 and ok:
+                        step = step * 0.0
+                    if try_i == max_half:
+                        ok = False
+            if it > 3:
+                converged = True
+                if d_score > tol * (1 + min_score):
+                    converged = False
+                gnorm = np.sqrt(float(grad @ grad))
+                if gnorm > tol ** (1 / 3) * (1 + abs(min_score)):
+                    converged = False
+            mg = feval(sp0)
+            grad, hess = self._magic_gH(mg, sp0, roots)
+            ev, U = np.linalg.eigh(0.5 * (hess + hess.T))
+            use_sd = bool(np.any(ev <= 0.0))
+            if not use_sd:
+                gtil = U.T @ grad
+                n_step = -(U @ (gtil / ev))
+                mx = np.max(np.abs(n_step))
+                if mx > 5.0:
+                    n_step *= 5.0 / mx
+            gmx = np.max(np.abs(grad))
+            sd_step = -grad / gmx if gmx > 0 else grad * 0.0
+        # infinite-sp check (magic.c:638-656): push each sp in its descent
+        # direction by ±2 in log-sp (≤5 steps) while the score keeps improving.
+        for k in range(mp):
+            steps_left = 5
+            sign = 1.0 if grad[k] < 0.0 else -1.0
+            while steps_left:
+                sp0[k] += sign * 2.0
+                steps_left -= 1
+                sc = feval(sp0)["score"]
+                fit_calls += 1
+                if sc < min_score:
+                    min_score = sc
+                else:
+                    sp0[k] -= sign * 2.0
+                    steps_left = 0
+        self._outer_info = {
+            "iter": it,
+            "conv": "full convergence" if converged else "iteration limit reached",
+            "grad": grad,
+            "score": min_score,
+            "optimizer": "magic",
+        }
+        return sp0
+
+    def _magic_fit_state(self, rho):
+        """Build the Gaussian-identity ``_FitState`` at ρ̂ from magic's cached
+        QR, WITHOUT the full (n+e)×q re-fit. The reduced augmented system
+        ``[R_mag; E]`` (R_mag = QR factor of √w·X, cached by `_magic_setup`)
+        has ``R_fin'R_fin = R_mag'R_mag + Sλ = X'WX + Sλ`` and RHS reduces to
+        ``[y0; 0]`` (y0 = Q_mag'(√w·z), z = y−off) — so β, A_chol, log|A| are
+        the same as `_pls_qr`'s full solve at (q+e)×q cost. Mirrors the
+        Gaussian branch of `_fit_given_rho` field-for-field. Falls back to the
+        full fit if anything is degenerate (rank deficiency / non-finite)."""
+        R_mag = self._magic_R
+        y0 = self._magic_y0
+        if R_mag is None:
+            return self._fit_given_rho(rho)
+        family = self.family
+        link = family.link
+        X = self._X_full
+        off = self._offset
+        y = self._y_arr
+        wt = self._wt
+        q = R_mag.shape[1]
+        Sλ = self._build_S_lambda(rho)
+        Sλ = 0.5 * (Sλ + Sλ.T)
+        E_aug = self._penalty_root(rho)
+        # reduced augmented QR (mirrors _pls_qr's no-negative-weight branch)
+        aug = np.vstack([R_mag, E_aug])
+        Q, R_fin = np.linalg.qr(aug)
+        diag_R = np.diag(R_fin)
+        if (not np.all(np.isfinite(R_fin))) or np.any(diag_R == 0.0):
+            return self._fit_given_rho(rho)
+        c = Q[:q].T @ y0
+        beta = solve_triangular(R_fin, c, lower=False)
+        if not np.all(np.isfinite(beta)):
+            return self._fit_given_rho(rho)
+        log_det_A = 2.0 * float(np.sum(np.log(np.abs(diag_R))))
+        sgn = np.where(diag_R < 0, -1.0, 1.0)
+        A_chol = R_fin * sgn[:, None]
+        # Gaussian-identity fit fields — identical to _fit_given_rho's tail.
+        eta = X @ beta                       # offset-stripped
+        eta_full = eta + off
+        mu = link.linkinv(eta_full)
+        dev = float(np.sum(family.dev_resids(y, mu, wt)))
+        pen = float(beta @ Sλ @ beta)
+        mu_eta_v = link.mu_eta(eta_full)
+        V = family.variance(mu)
+        d2g = link.d2link(mu)
+        good = (wt > 0.0) & (mu_eta_v != 0.0)
+        safe_mu_eta = np.where(good, mu_eta_v, 1.0)
+        alpha = 1.0 + (y - mu) * (family.dvar(mu) / V + d2g * mu_eta_v)
+        alpha = np.where(alpha == 0.0, np.finfo(float).eps, alpha)
+        z = np.where(good, eta + (y - mu) / (safe_mu_eta * alpha), 0.0)
+        w = np.where(good, wt * alpha * mu_eta_v ** 2 / V, 0.0)
+        return _FitState(
+            beta=beta, dev=dev, pen=pen,
+            A_chol=A_chol, A_chol_lower=False,
+            S_full=Sλ, log_det_A=log_det_A,
+            eta=eta_full, mu=mu, w=w, z=z, alpha=alpha,
+            is_fisher_fallback=False,
+            converged=True, boundary=False, warn=[],
+            E_aug=E_aug,
+        )
 
     def _pearson_and_deriv(
         self, rho: "np.ndarray | None", fit: "_FitState", deriv: bool = True,
