@@ -175,6 +175,28 @@ fn r_dist_binary(x: &[f64], nc: usize, i1: usize, i2: usize, nonfinite: &AtomicB
     (dist as f64) / (count as f64)
 }
 
+/// `R_pow(x, y)` for non-negative `x`, mirroring the pure-Python `_r_pow_nonneg`
+/// (itself a port of R's `src/main/arithmetic.c`; see `ref/r-base/arithmetic.c`).
+/// `minkowski` calls `R_pow`, not bare `powf`: R special-cases `y==2` as `x*x`
+/// and, for `|x|<=11`, `y==3`/`y==4` as the naive products `x*x*x`/`x*x*x*x`
+/// (up to 1 ulp from `pow`); everything else is libm `pow`. Here `x` is `|dev|`
+/// or the running `dist` (always finite and >= 0), so the `x>=-11` half of R's
+/// range test holds automatically and the `x==1`/`x==0` short circuits coincide
+/// with the products.
+#[inline]
+fn r_pow_nonneg(x: f64, y: f64) -> f64 {
+    if y == 2.0 {
+        return x * x;
+    }
+    if y == 3.0 {
+        return if x <= 11.0 { x * x * x } else { x.powf(3.0) };
+    }
+    if y == 4.0 {
+        return if x <= 11.0 { x * x * x * x } else { x.powf(4.0) };
+    }
+    x.powf(y)
+}
+
 #[inline]
 fn r_minkowski(x: &[f64], nc: usize, i1: usize, i2: usize, p: f64) -> f64 {
     let (mut p1, mut p2) = (i1 * nc, i2 * nc);
@@ -185,7 +207,7 @@ fn r_minkowski(x: &[f64], nc: usize, i1: usize, i2: usize, p: f64) -> f64 {
         if !a.is_nan() && !b.is_nan() {
             let dev = a - b;
             if !dev.is_nan() {
-                dist += dev.abs().powf(p); // mirrors _cdist's np.power
+                dist += r_pow_nonneg(dev.abs(), p);
                 count += 1;
             }
         }
@@ -198,7 +220,7 @@ fn r_minkowski(x: &[f64], nc: usize, i1: usize, i2: usize, p: f64) -> f64 {
     if count != nc {
         dist /= (count as f64) / (nc as f64);
     }
-    dist.powf(1.0 / p)
+    r_pow_nonneg(dist, 1.0 / p)
 }
 
 /// Packed lower-triangle distance vector for 0-based method index `method`

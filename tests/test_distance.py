@@ -31,8 +31,11 @@ from hea.R.distance import (
     mahalanobis,
 )
 
-# hea and R share the platform scalar libm only on macOS → 0-ulp there; off
-# macOS the transcendental-bearing metric (minkowski's ``pow``) drifts a few ulp.
+# minkowski is the only metric using ``pow``, and it is 0-ulp to R only when hea
+# reproduces R's ``R_pow`` exactly: that needs the shared platform scalar libm
+# (macOS: Apple libm) for the general path AND the ported integer special-cases
+# (``x*x*x``/``x*x*x*x`` for ``|x|<=11``; see ref/r-base/arithmetic.c). Off macOS
+# the libm differs, so ``pow`` drifts a few ulp.
 _STRICT = sys.platform == "darwin"
 _RTOL = 1e-14
 
@@ -362,6 +365,24 @@ def test_dist_vs_live_R(method, with_na):
     _assert_eq(dist(x, method=method, p=p), _r_dist(x, method, p))
 
 
+@pytest.mark.skipif(not have_rscript(), reason="Rscript not on PATH (install R)")
+@pytest.mark.parametrize("p", [1.5, 2.0, 3.0, 4.0, 5.0])
+def test_minkowski_pow_vs_live_R(p):
+    """``R_pow`` parity across both regimes. For integer ``p in {3,4}`` R uses the
+    naive products ``x*x*x``/``x*x*x*x`` (up to 1 ulp off libm ``pow``) when
+    ``|dev|<=11``, and falls back to ``pow`` for larger deviations; ``p in {2}``
+    is ``x*x`` and non-integer/``p>=5`` is plain ``pow``. The deviations are
+    non-integer so the products genuinely differ from ``pow``; large rows force
+    the fallback. Caught nothing before because the only integer-p pin used
+    integer-valued inputs (``x*x*x == pow`` exactly there)."""
+    rng = np.random.default_rng(0xB16B00B5)
+    x = np.vstack([
+        rng.standard_normal((6, 5)),        # |dev| <= 11  -> naive products
+        rng.standard_normal((3, 5)) * 25.0,  # |dev| >  11  -> libm pow fallback
+    ])
+    _assert_eq(dist(x, method="minkowski", p=p), _r_dist(x, "minkowski", p))
+
+
 # --------------------------------------------------------------------------- #
 # Rust ``cdist`` kernel: A/B 0-ulp vs the pure-Python ``_cdist`` oracle.
 # The pure-Python kernel is the spec (pinned to R above); the Rust kernel must
@@ -388,6 +409,7 @@ def _ab_inputs():
 @pytest.mark.parametrize("mi,method,p", [
     (0, "euclidean", 2.0), (1, "maximum", 2.0), (2, "manhattan", 2.0),
     (3, "canberra", 2.0), (5, "minkowski", 1.7), (5, "minkowski", 3.0),
+    (5, "minkowski", 4.0),
 ])
 def test_rs_cdist_matches_python(mi, method, p):
     from hea.R.distance import _cdist

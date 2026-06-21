@@ -118,6 +118,25 @@ def _finish_scaled(dist, count, nc):
     return out
 
 
+def _r_pow_nonneg(x, y):
+    """``R_pow(x, y)`` for non-negative ``x`` (mirrors R's ``src/main/arithmetic.c``;
+    see ``ref/r-base/arithmetic.c``). ``minkowski`` calls ``R_pow`` -- not bare libm
+    ``pow`` -- so parity requires its special cases: ``y==2`` is ``x*x``, and for
+    ``|x|<=11`` ``y==3``/``y==4`` are the *naive* products ``x*x*x``/``x*x*x*x``
+    (one/two more roundings than ``pow``, so up to 1 ulp from it); all else is libm
+    ``pow``. ``x`` here is ``|dev|`` or the running ``dist`` (both >= 0), so the
+    ``x>=-11`` half of R's range test is automatic and the ``x==1``/``x==0`` short
+    circuits coincide with the products.
+    """
+    if y == 2.0:
+        return x * x
+    if y == 3.0:
+        return np.where(x <= 11.0, x * x * x, np.power(x, 3.0))
+    if y == 4.0:
+        return np.where(x <= 11.0, x * x * x * x, np.power(x, 4.0))
+    return np.power(x, y)
+
+
 # --------------------------------------------------------------------------- #
 # the six metric kernels (distance.c), pair-vectorized, column-sequential
 # --------------------------------------------------------------------------- #
@@ -218,9 +237,9 @@ def _cdist(x, mi, p):
                 ok = ~(np.isnan(a) | np.isnan(b))
                 dev = a - b
                 use = ok & ~np.isnan(dev)
-                dist += np.where(use, np.power(np.abs(dev), p), 0.0)
+                dist += np.where(use, _r_pow_nonneg(np.abs(dev), p), 0.0)
                 count += use
-            return np.power(_finish_scaled(dist, count, nc), 1.0 / p)
+            return _r_pow_nonneg(_finish_scaled(dist, count, nc), 1.0 / p)
 
     raise ValueError("distance(): invalid distance")  # pragma: no cover
 
