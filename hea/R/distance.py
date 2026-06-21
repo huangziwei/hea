@@ -79,13 +79,16 @@ def _pmatch(x, table):
 def _lower_tri_ij(n):
     """Row/column index arrays for R's ``dist`` packing: the strict lower
     triangle in **column-major** order — for ``j = 0..n-2``, ``i = j+1..n-1``.
+
+    The column-major lower triangle (``i>j``, column outer) is exactly the
+    **upper**-triangle indices (``r<c``, row outer) with the two axes swapped, so
+    ``np.triu_indices`` builds both arrays in C with no Python-level loop.
     """
     if n < 2:
         z = np.empty(0, dtype=np.intp)
         return z, z
-    rows = np.concatenate([np.arange(j + 1, n) for j in range(n - 1)])
-    cols = np.concatenate([np.full(n - 1 - j, j, dtype=np.intp) for j in range(n - 1)])
-    return rows.astype(np.intp), cols
+    tr, tc = np.triu_indices(n, k=1)
+    return tc.astype(np.intp), tr.astype(np.intp)
 
 
 def _as_matrix(x):

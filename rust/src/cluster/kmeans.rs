@@ -20,6 +20,63 @@ use rayon::prelude::*;
 const KM_PAR_MIN: usize = 256;
 const BIG: f64 = 1.0e30; // Hartigan-Wong "infinity" sentinel (matches _kmns)
 
+/// Σ (a−b)² over equal-length contiguous rows, accumulated SEQUENTIALLY (same
+/// order as the C/Fortran/Python `for j: dd += (x-c)^2`) → 0-ulp. Slices give the
+/// compiler the length, so no per-element index math / bounds check, and the
+/// row-major access is contiguous (cache-friendlier than R's column-major
+/// `X(I,J)` strided-by-M access).
+#[inline]
+fn sqdist(a: &[f64], b: &[f64]) -> f64 {
+    let mut s = 0.0;
+    for (x, y) in a.iter().zip(b) {
+        let d = x - y;
+        s += d * d;
+    }
+    s
+}
+
+/// The two closest centres (1-based, `ic1`/`ic2` with `dt[ic1] <= dt[ic2]`) to
+/// 0-based point `i0` — the Hartigan-Wong initial assignment. Independent per
+/// point (reads x, cen; no shared state), so the init map is rayon-parallel
+/// while staying 0-ulp.
+#[inline]
+fn two_closest(x: &[f64], cen: &[f64], p: usize, k: usize, i0: usize) -> (usize, usize) {
+    let xrow = &x[i0 * p..i0 * p + p];
+    let (mut ic1, mut ic2) = (1usize, 2usize);
+    let mut dt = [sqdist(xrow, &cen[0..p]), sqdist(xrow, &cen[p..2 * p])];
+    if dt[0] > dt[1] {
+        ic1 = 2;
+        ic2 = 1;
+        dt.swap(0, 1);
+    }
+    for ell in 3..=k {
+        let crow = &cen[(ell - 1) * p..(ell - 1) * p + p];
+        let mut db = 0.0;
+        let mut skip = false;
+        for c in 0..p {
+            let dc = xrow[c] - crow[c];
+            db += dc * dc;
+            if db >= dt[1] {
+                skip = true;
+                break;
+            }
+        }
+        if skip {
+            continue;
+        }
+        if db >= dt[0] {
+            dt[1] = db;
+            ic2 = ell;
+        } else {
+            dt[1] = dt[0];
+            ic2 = ic1;
+            dt[0] = db;
+            ic1 = ell;
+        }
+    }
+    (ic1, ic2)
+}
+
 /// 0-based index of the nearest centre to point `i` (ties → smallest index,
 /// matching the strict `dd < best` in the C/Python).
 #[inline]
@@ -257,19 +314,13 @@ impl<'a> Hw<'a> {
             let mut l2 = self.ic2[i];
             let ll = l2;
             if self.nc[l1] != 1 {
+                let xb = (i - 1) * p;
+                let xrow = &self.x[xb..xb + p];
                 if self.ncp[l1] != 0 {
-                    let mut de = 0.0;
-                    for j in 1..=p {
-                        let df = self.xv(i, j) - self.cv(l1, j);
-                        de += df * df;
-                    }
+                    let de = sqdist(xrow, &self.cen[(l1 - 1) * p..(l1 - 1) * p + p]);
                     self.d[i] = de * self.an1[l1];
                 }
-                let mut da = 0.0;
-                for j in 1..=p {
-                    let db = self.xv(i, j) - self.cv(l2, j);
-                    da += db * db;
-                }
+                let da = sqdist(xrow, &self.cen[(l2 - 1) * p..(l2 - 1) * p + p]);
                 let mut r2 = da * self.an2[l2];
                 for ell in 1..=k {
                     if ((i as i64) >= self.live[l1] && (i as i64) >= self.live[ell])
@@ -279,10 +330,11 @@ impl<'a> Hw<'a> {
                         continue;
                     }
                     let rr = r2 / self.an2[ell];
+                    let crow = &self.cen[(ell - 1) * p..(ell - 1) * p + p];
                     let mut dc = 0.0;
                     let mut skip = false;
-                    for j in 1..=p {
-                        let dd = self.xv(i, j) - self.cv(ell, j);
+                    for c in 0..p {
+                        let dd = xrow[c] - crow[c];
                         dc += dd * dd;
                         if dc >= rr {
                             skip = true;
@@ -307,11 +359,11 @@ impl<'a> Hw<'a> {
                     let alw = al1 - 1.0;
                     let al2 = self.nc[l2] as f64;
                     let alt = al2 + 1.0;
-                    for j in 1..=p {
-                        let c1 = (self.cv(l1, j) * al1 - self.xv(i, j)) / alw;
-                        let c2 = (self.cv(l2, j) * al2 + self.xv(i, j)) / alt;
-                        self.cset(l1, j, c1);
-                        self.cset(l2, j, c2);
+                    let (xb, cb1, cb2) = ((i - 1) * p, (l1 - 1) * p, (l2 - 1) * p);
+                    for c in 0..p {
+                        let xic = self.x[xb + c];
+                        self.cen[cb1 + c] = (self.cen[cb1 + c] * al1 - xic) / alw;
+                        self.cen[cb2 + c] = (self.cen[cb2 + c] * al2 + xic) / alt;
                     }
                     self.nc[l1] -= 1;
                     self.nc[l2] += 1;
@@ -353,20 +405,19 @@ impl<'a> Hw<'a> {
                 let l1 = self.ic1[i];
                 let l2 = self.ic2[i];
                 if self.nc[l1] != 1 {
+                    let xb = (i - 1) * p;
+                    let xrow = &self.x[xb..xb + p];
                     if istep <= self.ncp[l1] {
-                        let mut da = 0.0;
-                        for j in 1..=p {
-                            let db = self.xv(i, j) - self.cv(l1, j);
-                            da += db * db;
-                        }
+                        let da = sqdist(xrow, &self.cen[(l1 - 1) * p..(l1 - 1) * p + p]);
                         self.d[i] = da * self.an1[l1];
                     }
                     if istep < self.ncp[l1] || istep < self.ncp[l2] {
                         let r2 = self.d[i] / self.an2[l2];
+                        let crow = &self.cen[(l2 - 1) * p..(l2 - 1) * p + p];
                         let mut dd = 0.0;
                         let mut skip = false;
-                        for j in 1..=p {
-                            let de = self.xv(i, j) - self.cv(l2, j);
+                        for c in 0..p {
+                            let de = xrow[c] - crow[c];
                             dd += de * de;
                             if dd >= r2 {
                                 skip = true;
@@ -384,11 +435,11 @@ impl<'a> Hw<'a> {
                             let alw = al1 - 1.0;
                             let al2 = self.nc[l2] as f64;
                             let alt = al2 + 1.0;
-                            for j in 1..=p {
-                                let c1 = (self.cv(l1, j) * al1 - self.xv(i, j)) / alw;
-                                let c2 = (self.cv(l2, j) * al2 + self.xv(i, j)) / alt;
-                                self.cset(l1, j, c1);
-                                self.cset(l2, j, c2);
+                            let (xb, cb1, cb2) = ((i - 1) * p, (l1 - 1) * p, (l2 - 1) * p);
+                            for c in 0..p {
+                                let xic = self.x[xb + c];
+                                self.cen[cb1 + c] = (self.cen[cb1 + c] * al1 - xic) / alw;
+                                self.cen[cb2 + c] = (self.cen[cb2 + c] * al2 + xic) / alt;
                             }
                             self.nc[l1] -= 1;
                             self.nc[l2] += 1;
@@ -462,47 +513,20 @@ pub fn kmns<'py>(
             imaxqtr: (50 * m as i64).min(2147483647),
         };
 
-        // two closest centres IC1, IC2 for each point
+        // two closest centres IC1, IC2 for each point. Independent per point, so
+        // the map is rayon-parallel (the one parallelizable HW phase; OPTRA/QTRAN
+        // below are inherently serial). Parallel == serial bit-for-bit (0-ulp).
+        let pairs: Vec<(usize, usize)> = if m >= KM_PAR_MIN {
+            (0..m)
+                .into_par_iter()
+                .map(|i0| two_closest(xs, &hw.cen, p, k, i0))
+                .collect()
+        } else {
+            (0..m).map(|i0| two_closest(xs, &hw.cen, p, k, i0)).collect()
+        };
         for i in 1..=m {
-            hw.ic1[i] = 1;
-            hw.ic2[i] = 2;
-            let mut dt = [0.0f64; 2];
-            for il in 1..=2usize {
-                dt[il - 1] = 0.0;
-                for j in 1..=p {
-                    let da = hw.xv(i, j) - hw.cv(il, j);
-                    dt[il - 1] += da * da;
-                }
-            }
-            if dt[0] > dt[1] {
-                hw.ic1[i] = 2;
-                hw.ic2[i] = 1;
-                dt.swap(0, 1);
-            }
-            for ell in 3..=k {
-                let mut db = 0.0;
-                let mut skip = false;
-                for j in 1..=p {
-                    let dc = hw.xv(i, j) - hw.cv(ell, j);
-                    db += dc * dc;
-                    if db >= dt[1] {
-                        skip = true;
-                        break;
-                    }
-                }
-                if skip {
-                    continue;
-                }
-                if db >= dt[0] {
-                    dt[1] = db;
-                    hw.ic2[i] = ell;
-                } else {
-                    dt[1] = dt[0];
-                    hw.ic2[i] = hw.ic1[i];
-                    dt[0] = db;
-                    hw.ic1[i] = ell;
-                }
-            }
+            hw.ic1[i] = pairs[i - 1].0;
+            hw.ic2[i] = pairs[i - 1].1;
         }
 
         // update centres to cluster means; sizes NC; an1/an2
