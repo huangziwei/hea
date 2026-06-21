@@ -43,6 +43,7 @@ import numpy as np
 import polars as pl
 from matplotlib.transforms import blended_transform_factory
 from scipy.linalg import cho_factor, cho_solve, qr, solve_triangular
+from scipy.linalg.lapack import dgeqrf, dormqr
 
 from ..R import distributions as _dist
 from ..R import nmath as _nmath
@@ -1643,6 +1644,15 @@ class gam:
         # only, edf2 NULL → edf, no Vc — mgcv computes no sp-uncertainty
         # correction for the GCV/magic path.
         self._used_magic = False
+        # mgcv get.null.coef (mgcv.r:1854) is ρ-independent and computed ONCE,
+        # passed into every gam.fit3 call; hea recomputed the lstsq per
+        # `_fit_given_rho`/`_fit_extended` score-eval. Cache the (null_coef,
+        # eta_null, mu_null) baseline here, computed lazily on the first fit.
+        self._null_baseline_cache: tuple | None = None
+        # Cached LAPACK workspace sizes for the _pls_qr no-Q path (geqrf +
+        # ormqr); shape-stable (driven by p, fixed per fit) → queried once.
+        self._pls_lwork_g: int | None = None
+        self._pls_lwork_o: int | None = None
         # Set by the joint outer Newton in the tw() path (estimated-p
         # Tweedie); None otherwise. Holds θ̂, p̂, log φ̂.
         self._tw_info: dict | None = None
@@ -2663,21 +2673,26 @@ class gam:
             eta = link.link(mu) - off       # β-only η
         beta = np.zeros(p)
 
-        mu_null_const = float(np.average(mu_default, weights=wt))
-        eta_null_full = link.link(np.full(n, mu_null_const))
-        # Solve null_coef from X·null_coef = (full η at null) − offset.
-        null_coef, *_ = np.linalg.lstsq(X, eta_null_full - off, rcond=None)
-        eta_null = X @ null_coef
-        mu_null = link.linkinv(eta_null + off)
-        if not (link.valideta(eta_null + off) and family.validmu(mu_null)):
-            # Constant-η projection drifted out of valid region — only
-            # plausible for an X with no near-constant column. Fall back
-            # to zeros; if the canonical link rejects η=off the user will
-            # still get a clear error from the validity step-halver below
-            # rather than silent divergence.
-            null_coef = np.zeros(p)
-            eta_null = np.zeros(n)
-            mu_null = link.linkinv(off)
+        # null baseline = mgcv get.null.coef: ρ-independent, so the lstsq is
+        # computed once per fit and cached (was recomputed every score-eval).
+        if self._null_baseline_cache is None:
+            mu_null_const = float(np.average(mu_default, weights=wt))
+            eta_null_full = link.link(np.full(n, mu_null_const))
+            # Solve null_coef from X·null_coef = (full η at null) − offset.
+            nc, *_ = np.linalg.lstsq(X, eta_null_full - off, rcond=None)
+            en = X @ nc
+            mn = link.linkinv(en + off)
+            if not (link.valideta(en + off) and family.validmu(mn)):
+                # Constant-η projection drifted out of valid region — only
+                # plausible for an X with no near-constant column. Fall back
+                # to zeros; if the canonical link rejects η=off the user will
+                # still get a clear error from the validity step-halver below
+                # rather than silent divergence.
+                nc = np.zeros(p)
+                en = np.zeros(n)
+                mn = link.linkinv(off)
+            self._null_baseline_cache = (nc, en, mn)
+        null_coef, eta_null, mu_null = self._null_baseline_cache
         # gam.fit3.r:286-292: shrink invalid starting values toward the
         # null η (20 tries, then R's exact refusal). Only reachable with
         # user-supplied values — family mustarts are valid by design.
@@ -3029,17 +3044,22 @@ class gam:
         else:
             eta = link.link(mu) - off       # β-only η
 
-        # Null baseline — same construction as the standard branch
-        # (mgcv's get.null.coef projection of a constant valid η).
-        mu_null_const = float(np.average(mu_default, weights=wt))
-        eta_null_full = link.link(np.full(n, mu_null_const))
-        null_coef, *_ = np.linalg.lstsq(X, eta_null_full - off, rcond=None)
-        eta_null = X @ null_coef
-        mu_null = link.linkinv(eta_null + off)
-        if not (link.valideta(eta_null + off) and family.validmu(mu_null)):
-            null_coef = np.zeros(p)
-            eta_null = np.zeros(n)
-            mu_null = link.linkinv(off)
+        # Null baseline — same construction as the standard branch (mgcv's
+        # get.null.coef projection of a constant valid η). ρ-independent, so the
+        # lstsq is computed once per fit and cached (shared with _fit_given_rho;
+        # a model is fit3 XOR fit4, so the attribute is never cross-used).
+        if self._null_baseline_cache is None:
+            mu_null_const = float(np.average(mu_default, weights=wt))
+            eta_null_full = link.link(np.full(n, mu_null_const))
+            nc, *_ = np.linalg.lstsq(X, eta_null_full - off, rcond=None)
+            en = X @ nc
+            mn = link.linkinv(en + off)
+            if not (link.valideta(en + off) and family.validmu(mn)):
+                nc = np.zeros(p)
+                en = np.zeros(n)
+                mn = link.linkinv(off)
+            self._null_baseline_cache = (nc, en, mn)
+        null_coef, eta_null, mu_null = self._null_baseline_cache
         if (self._pirls_mustart is not None
                 or self._pirls_etastart is not None
                 or self._pirls_start is not None):
@@ -3472,16 +3492,39 @@ class gam:
         neg = w < 0.0
         sqw = np.sqrt(np.abs(w))
         aug = np.vstack([X * sqw[:, None], E_aug])
-        Q, R = np.linalg.qr(aug)            # economic: (n+e)×p, p×p
-        diag_R = np.diag(R)
-        if (not np.all(np.isfinite(R))) or np.any(diag_R == 0.0):
-            return None, None, float("nan"), False
-        Q1 = Q[:n]
         if not np.any(neg):
+            # mgcv pls_fit1: apply Q' to the rhs via Householder reflectors
+            # (LAPACK geqrf + ormqr) WITHOUT forming Q — the economic Q is
+            # dorgqr's O(np²) cost, the dominant per-PIRLS-iter term. Called
+            # straight (not via scipy.qr_multiply, whose per-call check_finite
+            # scan of the whole (n+e)×p matrix + double lwork-query dominate at
+            # high iteration counts); byte-identical to qr_multiply. R is
+            # byte-identical to the formed-Q path; only Q'·rhs differs ~1 ulp
+            # (ormqr vs formed-Q·dgemv), under the fit's BLAS floor — and
+            # pls_fit1 is exactly what mgcv runs. lwork is shape-stable (driven
+            # by p, fixed per fit) so it is queried once and cached.
+            pcol = X.shape[1]
+            if self._pls_lwork_g is None:
+                _, _, wq, _ = dgeqrf(aug, lwork=-1)
+                self._pls_lwork_g = int(wq[0])
+            qr_f, tau, _, info = dgeqrf(aug, lwork=self._pls_lwork_g,
+                                        overwrite_a=True)
+            R = np.triu(qr_f[:pcol])
+            diag_R = np.diag(R)
+            if info != 0 or (not np.all(np.isfinite(R))) or np.any(diag_R == 0.0):
+                return None, None, float("nan"), False
             if Xtwz is not None:
+                # z may be non-finite (w≈0) — use R only, project X'Wz instead.
                 c = solve_triangular(R, Xtwz, lower=False, trans="T")
             else:
-                c = Q1.T @ (sqw * z)
+                b_aug = np.concatenate([sqw * z, np.zeros(E_aug.shape[0])])
+                if self._pls_lwork_o is None:
+                    _, wq, _ = dormqr("L", "T", qr_f, tau, b_aug[:, None],
+                                      lwork=-1)
+                    self._pls_lwork_o = int(wq[0])
+                cqv, _, _ = dormqr("L", "T", qr_f, tau, b_aug[:, None],
+                                   lwork=self._pls_lwork_o)
+                c = cqv[:pcol, 0]
             beta = solve_triangular(R, c, lower=False)
             log_det = 2.0 * float(np.sum(np.log(np.abs(diag_R))))
             if not np.all(np.isfinite(beta)):
@@ -3493,9 +3536,21 @@ class gam:
             sgn = np.where(diag_R < 0, -1.0, 1.0)
             return beta, R * sgn[:, None], log_det, True
         # --- negative Newton weights: SVD determinant correction --------
+        # Needs the actual Q₁ rows (IQ = Q₁[neg]), so form Q here (rare path).
         # X'WX + Sλ = R'(I − 2·IQ'IQ)R = R'V(I − 2D²)V'R, IQ = Q₁[neg].
+        Q, R = np.linalg.qr(aug)            # economic: (n+e)×p, p×p
+        diag_R = np.diag(R)
+        if (not np.all(np.isfinite(R))) or np.any(diag_R == 0.0):
+            return None, None, float("nan"), False
+        Q1 = Q[:n]
         IQ = Q1[neg]                            # (n_neg, p)
-        _U, d, Vt = np.linalg.svd(IQ, full_matrices=True)   # Vt: (p, p)
+        # Only d and Vt (p×p) are used — U is discarded. full_matrices=True
+        # would build the (n_neg × n_neg) U (the gauss/log pathology: every
+        # PIRLS step has many negative Newton weights, n_neg ≫ p, so that U is
+        # huge and dominates). The thin SVD gives byte-identical d/Vt when
+        # n_neg ≥ p; only when n_neg < p does full_matrices give the padded
+        # (p×p) Vt the correction needs.
+        _U, d, Vt = np.linalg.svd(IQ, full_matrices=(IQ.shape[0] < IQ.shape[1]))
         d2 = np.ones(R.shape[0])
         d2[:d.size] = 1.0 - 2.0 * d * d         # eigenvalues of I − 2D²
         if np.any(d2 <= 0.0):

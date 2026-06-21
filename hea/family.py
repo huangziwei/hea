@@ -1075,15 +1075,26 @@ class Gamma(Family):
         y = y[good]
         w = wt[good]
         sw = scale / w                                     # per-obs scale
+        # k1/k2/k3 depend on the observation only through sw, and lgamma/digamma/
+        # trigamma(1/sw) (trigamma=zeta is the gamma-REML hot spot) are the cost.
+        # With constant prior weights (the usual case) sw is constant, so
+        # evaluate those on the UNIQUE sw values and index back: byte-identical
+        # to the per-obs form (each k·[i] = the same scalar ops on sw[i]) but
+        # O(unique) special-function calls instead of O(n).
+        usw, inv = np.unique(sw, return_inverse=True)
+        isw = 1.0 / usw
+        lsw = np.log(usw)
+        u_lg = gammaln(isw)
+        u_dg = digamma(isw)
+        u_tg = polygamma(1, isw)
         # k1 = -lgamma(1/sw) - log(sw)/sw - 1/sw
-        k1 = -gammaln(1.0 / sw) - np.log(sw) / sw - 1.0 / sw
+        k1 = (-u_lg - lsw / usw - isw)[inv]
         ls0 = float(np.sum(k1 - np.log(y)))
         # k2 = (digamma(1/sw) + log(sw)) / sw²       (mgcv's d/dφ)
-        k2 = (digamma(1.0 / sw) + np.log(sw)) / (sw * sw)
+        k2 = ((u_dg + lsw) / (usw * usw))[inv]
         d1_phi = float(np.sum(k2 / w))
         # k3 = (-trigamma(1/sw)/sw + 1 - 2 log(sw) - 2 digamma(1/sw)) / sw³
-        k3 = (-polygamma(1, 1.0 / sw) / sw
-              + 1.0 - 2.0 * np.log(sw) - 2.0 * digamma(1.0 / sw)) / (sw ** 3)
+        k3 = ((-u_tg / usw + 1.0 - 2.0 * lsw - 2.0 * u_dg) / (usw ** 3))[inv]
         d2_phi = float(np.sum(k3 / (w * w)))             # mgcv's d²/dφ²
         d1 = scale * d1_phi
         d2 = scale * d1_phi + scale * scale * d2_phi
