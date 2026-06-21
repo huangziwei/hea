@@ -298,3 +298,94 @@ def test_rs_matches_r(case, r_oracle):
     name, fn, arrays, flags = case
     got = getattr(rs, fn)(*arrays, *flags)
     _assert_bit_exact(got, r_oracle[name])
+
+
+# ---------------------------------------------------------------------------
+# dqrls (R's lm.fit QR kernel) — 3-way parity: Rust ≡ pure-Python ≡ live R.
+#
+# Linear algebra, not transcendental libm, so this is a *tolerance* gate (BLAS
+# reduction order differs across Accelerate/OpenBLAS/our in-order Rust), but
+# rank + pivot must match R EXACTLY (the whole point of porting dqrdc2: a
+# deterministic, R-faithful rank/pivot, immune to BLAS-bistable flakes).
+# ---------------------------------------------------------------------------
+import subprocess  # noqa: E402
+
+from hea.R import linalg  # noqa: E402
+
+_DQRLS_R = r"""
+args <- commandArgs(trailingOnly=TRUE)
+x <- as.matrix(read.csv(args[1], header=FALSE))
+y <- as.numeric(read.csv(args[2], header=FALSE)[[1]])
+z <- .lm.fit(x, y)
+writeLines(c(
+  paste("rank", z$rank),
+  paste("pivot", paste(z$pivot, collapse=" ")),
+  paste("coef", paste(sprintf("%.17g", z$coefficients), collapse=" ")),
+  paste("effects", paste(sprintf("%.17g", z$effects), collapse=" ")),
+  paste("resid", paste(sprintf("%.17g", z$residuals), collapse=" "))
+), args[3])
+"""
+
+
+def _dqrls_cases():
+    rng = np.random.default_rng(11)
+    a = rng.standard_normal(12)
+    b = rng.standard_normal(15)
+    return {
+        # full-rank well-conditioned
+        "full_rank": (np.c_[np.ones(20), rng.standard_normal((20, 4))],
+                      rng.standard_normal(20)),
+        # one alias: col3 == 2·col2
+        "rank_def": (np.c_[np.ones(12), a, 2.0 * a, rng.standard_normal(12)],
+                     rng.standard_normal(12)),
+        # two aliases: col3 == 3·col2, col5 == col2 − col1  → rank 3 of 5
+        "two_alias": (np.c_[np.ones(15), b, 3.0 * b, rng.standard_normal(15),
+                            b - 1.0], rng.standard_normal(15)),
+    }
+
+
+def _r_lmfit(x, y, tmp_path):
+    xf, yf, of = tmp_path / "x.csv", tmp_path / "y.csv", tmp_path / "o.txt"
+    rf = tmp_path / "f.R"
+    rf.write_text(_DQRLS_R)
+    np.savetxt(xf, x, delimiter=",")
+    np.savetxt(yf, np.asarray(y), delimiter=",")
+    subprocess.run(["Rscript", str(rf), str(xf), str(yf), str(of)],
+                   check=True, stdin=subprocess.DEVNULL,
+                   capture_output=True, text=True)
+    res = {}
+    for line in of.read_text().splitlines():
+        key, _, rest = line.partition(" ")
+        if key == "rank":
+            res[key] = int(rest)
+        elif key == "pivot":
+            res[key] = np.array([int(v) for v in rest.split()])
+        else:
+            res[key] = np.array([float(v) for v in rest.split()])
+    return res
+
+
+@pytest.mark.parametrize("name", list(_dqrls_cases()))
+def test_dqrls_3way_parity(name, tmp_path):
+    """Rust dqrls ≡ pure-Python dqrls ≡ R .lm.fit (rank/pivot exact; the rest
+    within a BLAS tolerance)."""
+    x, y = _dqrls_cases()[name]
+    rust = linalg.Cdqrls(x, y)                          # Rust active path
+    qr, coef, rsd, qty, k, jpvt, qraux = linalg.dqrls(x.copy(), y)  # pure-Python oracle
+    R = _r_lmfit(x, y, tmp_path)
+
+    # rank + pivot: EXACT, all three
+    assert rust["rank"] == k == R["rank"]
+    assert np.array_equal(rust["pivot"], jpvt)
+    assert np.array_equal(rust["pivot"], R["pivot"])
+
+    rk = R["rank"]
+    # Rust ≡ pure-Python: deterministic in-order BLAS both sides → tight
+    np.testing.assert_allclose(rust["coefficients"], coef, rtol=0, atol=1e-10)
+    np.testing.assert_allclose(rust["effects"], qty, rtol=0, atol=1e-10)
+    np.testing.assert_allclose(rust["residuals"], rsd, rtol=0, atol=1e-10)
+    # Rust ≡ R: BLAS tolerance, but the USED (first-rank) effects/coef match tightly
+    np.testing.assert_allclose(rust["effects"][:rk], R["effects"][:rk], atol=1e-9)
+    np.testing.assert_allclose(rust["residuals"], R["resid"], atol=1e-9)
+    # coefficients are in pivoted order on both sides
+    np.testing.assert_allclose(rust["coefficients"][:rk], R["coef"][:rk], atol=1e-9)

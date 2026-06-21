@@ -6,6 +6,7 @@ import polars as pl
 from scipy.linalg import qr, solve_triangular
 from scipy.linalg.lapack import dgeqrf, dormqr
 from ..R import distributions as _dist
+from ..R import linalg as _linalg
 
 from ..R import nmath as _nmath
 from ..formula import (
@@ -155,29 +156,56 @@ def _resolve_subset(subset, data: pl.DataFrame):
     return subset
 
 
-def _drop_aliased_cols(X_df: pl.DataFrame) -> list[str]:
+def _drop_aliased_cols(X_df: pl.DataFrame, tol: float = 1e-7) -> list[str]:
     """Identify linearly-dependent columns in a design matrix.
 
-    Uses left-to-right (non-pivoted) QR so the *later* of two collinear
-    columns is the one flagged — matches R's ``dqrdc2``, which prefers
-    earlier columns (intercept first, then formula RHS terms in order)
-    instead of strict-norm pivoting. Without this the intercept could
-    get dropped when a later predictor is constant + a centered copy.
-    Needed so ``df_residuals`` reflects effective rank, not column count.
+    With the Rust kernel present, use R's **exact** ``dqrdc2`` pivot/rank
+    (``hea._rs`` ``dqrls``, ``ref/r-stats/src/dqrdc2.f``): the columns deferred
+    to pivot positions ``rank+1..p`` are precisely the ones R's ``lm`` aliases,
+    so hea drops bit-identically what R drops and the rank decision is
+    *deterministic* (immune to BLAS-bistable rank flakes). ``tol=1e-7`` is R's
+    ``lm.fit`` default.
+
+    Fallback (no Rust / ``HEA_NO_RS``): a left-to-right ``dgeqrf`` +
+    relative-tolerance heuristic — the *later* of two collinear columns is
+    flagged (``dqrdc2`` prefers earlier columns: intercept first, then RHS terms
+    in order), so the intercept isn't dropped when a later predictor is a
+    constant + centered copy. Either way ``df_residuals`` reflects effective rank.
     """
     if X_df.height == 0 or X_df.width == 0:
         return []
     X = X_df.to_numpy().astype(float)
-    # Only R's diagonal is needed for rank detection — use dgeqrf (which leaves
-    # R in the upper triangle of the compact factor) and skip forming Q.
+    cols = X_df.columns
+    p = X.shape[1]
+
+    # Fast screen (always): the in-order dgeqrf R-diagonal. The common case —
+    # a clearly full-rank design — is decided here with no Rust call, so the hot
+    # path keeps its speed (the dqrdc2 factorization is ~2-3× the Accelerate one,
+    # per the receipt). A column is "suspect" when its pivot diagonal has
+    # collapsed relative to the column's original norm (R's dqrdc2 negligibility,
+    # relative tol = 1e-7) — only then is an *exact* rank/pivot decision needed.
     qr_c, _tau, _wk, _info = dgeqrf(X)
     diag_abs = np.abs(np.diag(qr_c))
     if diag_abs.size == 0:
         return []
-    ref = max(float(diag_abs.max()), 1.0)
-    tol = ref * np.finfo(float).eps * max(X.shape)
-    cols = X_df.columns
-    return [cols[i] for i, v in enumerate(diag_abs) if v <= tol]
+    col_norms = np.linalg.norm(X, axis=0)
+    ref = np.where(col_norms > 0.0, col_norms, 1.0)
+    suspect = bool(np.any(diag_abs < ref * tol))
+    if not suspect:
+        return []                                   # clearly full rank — fast path
+
+    if _linalg._rs_dqrls is not None:
+        # Rank-deficient → resolve EXACTLY with R's dqrdc2 (Rust): the columns
+        # deferred to pivot positions rank+1..p are bit-identically R's aliased
+        # set, and the decision is deterministic (no BLAS-bistable rank flake).
+        z = _linalg.Cdqrls(X, np.zeros(X.shape[0]), tol)
+        rank, pivot = z["rank"], z["pivot"]
+        if rank >= p:
+            return []
+        return [cols[i] for i in sorted(int(pivot[j]) - 1 for j in range(rank, p))]
+    # no Rust: the strict-tolerance heuristic (later of two collinear cols flagged)
+    tol_h = max(float(diag_abs.max()), 1.0) * np.finfo(float).eps * max(X.shape)
+    return [cols[i] for i, v in enumerate(diag_abs) if v <= tol_h]
 
 
 def _lowess(x, y, frac=2 / 3, it=3):
