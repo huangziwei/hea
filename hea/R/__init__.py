@@ -220,16 +220,33 @@ from .distance import (
 # Clustering algorithms (base-R stats: hclust + tree objects). Imports the
 # distance layer one-way (acyclic).
 from .clustering import (
+    Dendrogram,
     Hclust,
     Kmeans,
+    as_dendrogram,
     as_hclust,
     cophenetic,
+    cophenetic_dendrogram,
+    cut_dendrogram,
     cutree,
+    dendrapply,
     fitted_kmeans,
     hclust,
+    is_leaf,
     kmeans,
+    labels_dendrogram,
+    merge_dendrogram,
+    midcache_dendrogram,
+    nleaves,
+    nobs_dendrogram,
+    order_dendrogram,
+    print_dendrogram,
     print_hclust,
     print_kmeans,
+    reorder,
+    reorder_dendrogram,
+    rev_dendrogram,
+    str_dendrogram,
 )
 
 # Distributions
@@ -450,6 +467,12 @@ __all__ = [
     "format_dist", "labels_dist", "print_dist", "mahalanobis", "cmdscale",
     # clustering (base-R stats: hclust + tree objects)
     "Hclust", "hclust", "as_hclust", "cutree", "cophenetic", "print_hclust",
+    # dendrogram subsystem (base-R stats: dendrogram.R, non-graphics)
+    "Dendrogram", "as_dendrogram", "cophenetic_dendrogram",
+    "cut_dendrogram", "dendrapply", "is_leaf", "labels_dendrogram",
+    "merge_dendrogram", "midcache_dendrogram", "nleaves", "nobs_dendrogram",
+    "order_dendrogram", "print_dendrogram", "reorder", "reorder_dendrogram",
+    "rev_dendrogram", "str_dendrogram",
     # k-means (base-R stats: Hartigan-Wong / Lloyd / Forgy / MacQueen)
     "Kmeans", "kmeans", "fitted_kmeans", "print_kmeans",
     # distributions: d/p/q/r families

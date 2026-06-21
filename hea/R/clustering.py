@@ -21,7 +21,7 @@ import warnings
 import numpy as np
 
 from ._dispatch import rs_fn
-from .distance import Dist, _pmatch, as_dist
+from .distance import Dist, _pmatch, as_dist, as_matrix_dist
 from .distributions import _r_rng
 
 __all__ = [
@@ -35,6 +35,24 @@ __all__ = [
     "kmeans",
     "print_hclust",
     "print_kmeans",
+    # dendrogram subsystem (cluster_dendrogram.R)
+    "Dendrogram",
+    "as_dendrogram",
+    "cophenetic_dendrogram",
+    "cut_dendrogram",
+    "dendrapply",
+    "is_leaf",
+    "labels_dendrogram",
+    "merge_dendrogram",
+    "midcache_dendrogram",
+    "nleaves",
+    "nobs_dendrogram",
+    "order_dendrogram",
+    "print_dendrogram",
+    "reorder",
+    "reorder_dendrogram",
+    "rev_dendrogram",
+    "str_dendrogram",
 ]
 
 # order --> i.meth --> Fortran iOpt codes (1..8)
@@ -845,8 +863,11 @@ def cophenetic(x):
     Mirrors ``cluster_hclust.R:220``: walk ``merge`` bottom-up, accumulating each
     cluster's leaf set, and write the join height into the cross-block of the two
     children; symmetrize (``out + tᵀ``) and coerce with ``as_dist``.
-    (``cophenetic.dendrogram`` lands with the dendrogram subsystem, step 7.)
+    ``cophenetic.dendrogram`` (recursing over a :class:`Dendrogram`) is dispatched
+    here when ``x`` is a dendrogram.
     """
+    if isinstance(x, Dendrogram):
+        return cophenetic_dendrogram(x)
     x = as_hclust(x)
     n = len(x.order)
     ilist = [None] * (n + 1)  # leaf sets per 1-based merge step (1..n-1)
@@ -869,11 +890,13 @@ def cophenetic(x):
 
 
 def as_hclust(x, **kwargs):
-    """R ``as.hclust(x)`` / ``as.hclust.default`` — identity for an
-    :class:`Hclust`; otherwise an error (other coercions land with the
-    dendrogram subsystem)."""
+    """R ``as.hclust(x)`` — identity for an :class:`Hclust`
+    (``as.hclust.default``); a :class:`Dendrogram` is coerced back to an
+    :class:`Hclust` via ``as.hclust.dendrogram``; otherwise an error."""
     if isinstance(x, Hclust):
         return x
+    if isinstance(x, Dendrogram):
+        return as_hclust_dendrogram(x, **kwargs)
     raise TypeError("argument 'x' cannot be coerced to class 'hclust'")
 
 
@@ -1088,3 +1111,645 @@ def print_kmeans(x, _return=False):
         return s
     print(s, end="")
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Dendrogram subsystem (port of cluster_dendrogram.R, non-graphics surface)
+# --------------------------------------------------------------------------- #
+class Dendrogram:
+    """R's ``"dendrogram"`` object — a binary (or k-ary) tree carried as nested
+    nodes with attributes, mirroring R's "list / integer + attributes" layout so
+    the accessors/transforms compose.
+
+    * a **node** has ``children`` (a list of :class:`Dendrogram`) and
+      ``value = None``;
+    * a **leaf** has ``children = None`` and ``value`` = its observation index
+      (R's atomic-integer-with-attributes leaf), with ``attrs['leaf'] = True``.
+
+    ``attrs`` holds R's node attributes verbatim (``members``, ``height``,
+    ``midpoint``, ``label``, ``leaf``, ``x.member``, ``value`` …). ``len`` and
+    ``[[`` follow R: ``len`` is the branch count (1 for a leaf) and ``d[k]`` is
+    R's **1-based** ``[[.dendrogram`` (a tuple descends recursively)."""
+
+    __slots__ = ("children", "value", "attrs")
+
+    def __init__(self, children=None, value=None, attrs=None):
+        self.children = children
+        self.value = value
+        self.attrs = {} if attrs is None else attrs
+
+    def __len__(self):
+        # R length(): #{branches} for a node, 1 for a leaf (a scalar integer).
+        return 1 if self.children is None else len(self.children)
+
+    def __int__(self):
+        # R as.integer(<leaf>) — the observation index.
+        return int(self.value)
+
+    def __getitem__(self, key):
+        # R `[[.dendrogram` (1-based); a sequence descends recursively.
+        if isinstance(key, (tuple, list, np.ndarray)):
+            node = self
+            for k in key:
+                node = node._child(int(k))
+            return node
+        return self._child(int(key))
+
+    def _child(self, k):
+        if self.children is None:
+            raise IndexError("subscript out of bounds (leaf has no branches)")
+        return self.children[k - 1]
+
+    def __repr__(self):
+        return print_dendrogram(self, _return=True)
+
+
+def is_leaf(object):
+    """R ``is.leaf(object)`` — ``attr(object, "leaf")`` is logical ``TRUE``."""
+    return isinstance(object, Dendrogram) and object.attrs.get("leaf") is True
+
+
+def _member_dend(x):
+    """``.memberDend``: ``x.member %||% (members %||% 1)``."""
+    v = x.attrs.get("x.member")
+    if v is not None:
+        return v
+    v = x.attrs.get("members")
+    return v if v is not None else 1
+
+
+def _mid_dend(x):
+    """``.midDend``: ``midpoint %||% 0``."""
+    v = x.attrs.get("midpoint")
+    return v if v is not None else 0
+
+
+def _clone(d):
+    """Deep copy of a dendrogram (structure + a fresh ``attrs`` dict at each
+    node). R's copy-on-modify means each transform yields an independent tree;
+    we mirror that by cloning where R would copy."""
+    if d.children is None:
+        return Dendrogram(children=None, value=d.value, attrs=dict(d.attrs))
+    return Dendrogram(children=[_clone(c) for c in d.children],
+                      value=d.value, attrs=dict(d.attrs))
+
+
+def _unlist(d):
+    """R ``unlist(<dendrogram>)`` — the leaf observation indices, in pre-order."""
+    if d.children is None:
+        return [d.value]
+    out = []
+    for ch in d.children:
+        out.extend(_unlist(ch))
+    return out
+
+
+def _rapply_label(d):
+    """``rapply(object, attr, which="label")`` — leaf labels, pre-order."""
+    if d.children is None:
+        return [d.attrs.get("label")]
+    out = []
+    for ch in d.children:
+        out.extend(_rapply_label(ch))
+    return out
+
+
+def _fmt_digits(v, digits):
+    """Approximate R ``format(v, digits=)`` for a single value (display only —
+    the dendrogram parity gate is the numeric/structural data, not print text)."""
+    if v is None:
+        return "NA"
+    if isinstance(v, str):
+        return v
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if f == 0:
+        return "0"
+    return np.format_float_positional(f, precision=int(digits),
+                                      fractional=False, trim="-")
+
+
+def nleaves(node):
+    """R ``nleaves(node)`` — count the leaves of a dendrogram (iterative, the
+    todo-stack traversal from ``cluster_dendrogram.R:85``)."""
+    if is_leaf(node):
+        return 1
+    todo = None  # linked list of pending non-leaf nodes
+    count = 0
+    cur = list(node.children)
+    while True:
+        while cur:
+            child = cur.pop(0)          # node[[1L]] ; node <- node[-1L]
+            if is_leaf(child):
+                count += 1
+            else:
+                todo = (child, todo)
+        if todo is None:
+            break
+        node_, todo = todo
+        cur = list(node_.children)
+    return count
+
+
+def _validity_hclust(x, merge=None, order=True):
+    """Port of ``.validity.hclust`` (``cluster_hclust.R:121``) — returns ``True``
+    or an error message string."""
+    if merge is None:
+        merge = x.merge
+    merge = np.asarray(merge)
+    if merge.ndim != 2 or merge.shape[1] != 2:
+        return "invalid dendrogram"
+    if np.any(merge.astype(np.int64) != merge):
+        return "'merge' component in dendrogram must be integer"
+    n1 = merge.shape[0]
+    n = n1 + 1
+    if len(x.height) != n1:
+        return "'height' is of wrong length"
+    if order and len(x.order) != n:
+        return "'order' is of wrong length"
+    # identical(sort(as.integer(merge)), c(-(n:1L), +seq_len(n-2L)))
+    expected = np.concatenate([np.arange(-n, 0), np.arange(1, n - 1)])
+    if np.array_equal(np.sort(merge.astype(np.int64).ravel()), expected):
+        return True
+    return "'merge' matrix has invalid contents"
+
+
+def as_dendrogram(object, hang=-1, check=True, **kwargs):
+    """R ``as.dendrogram(object)`` — coerce to a :class:`Dendrogram`.
+
+    ``as.dendrogram.dendrogram`` is the identity; ``as.dendrogram.hclust``
+    (``cluster_dendrogram.R:23``) is the main builder (``hang`` controls the
+    height at which leaves hang below their merge)."""
+    if isinstance(object, Dendrogram):
+        return object
+    if isinstance(object, Hclust):
+        return _as_dendrogram_hclust(object, hang=hang, check=check)
+    raise TypeError("no applicable method for 'as.dendrogram'")
+
+
+def _as_dendrogram_hclust(object, hang=-1, check=True):
+    """Port of ``as.dendrogram.hclust`` (``cluster_dendrogram.R:23``)."""
+    nolabels = object.labels is None
+    merge = object.merge
+    if check:
+        msg = _validity_hclust(object, merge, order=nolabels)
+        if msg is not True:
+            raise ValueError(msg)
+    if nolabels:
+        labels = np.arange(1, len(object.order) + 1)  # seq_along(order)
+    else:
+        labels = object.labels
+
+    z = {}                                            # keyed by str(merge step)
+    oHgt = object.height
+    nMerge = len(oHgt)
+    hMax = oHgt[nMerge - 1]
+    k = 0
+    for k in range(1, nMerge + 1):
+        x0 = int(merge[k - 1, 0])
+        x1 = int(merge[k - 1, 1])
+        n0, n1 = x0 < 0, x1 < 0
+        h0 = None
+        if n0 or n1:
+            h0 = 0 if hang < 0 else max(0, oHgt[k - 1] - hang * hMax)
+        if n0 and n1:                                 # two leaves
+            left = Dendrogram(value=-x0)
+            right = Dendrogram(value=-x1)
+            zk = Dendrogram(children=[left, right])
+            zk.attrs["members"] = 2
+            zk.attrs["midpoint"] = 0.5
+            left.attrs["label"] = labels[-x0 - 1]
+            right.attrs["label"] = labels[-x1 - 1]
+            left.attrs["members"] = right.attrs["members"] = 1
+            left.attrs["height"] = right.attrs["height"] = h0
+            left.attrs["leaf"] = right.attrs["leaf"] = True
+        elif n0 or n1:                                # one leaf, one node
+            isL = n0                                  # leaf on the left?
+            node = z[str(x1 if isL else x0)]          # z[[X[1 + isL]]]
+            if isL:
+                leaf = Dendrogram(value=-x0)
+                zk = Dendrogram(children=[leaf, node])
+            else:
+                leaf = Dendrogram(value=-x1)
+                zk = Dendrogram(children=[node, leaf])
+            zk.attrs["members"] = node.attrs["members"] + 1
+            zk.attrs["midpoint"] = (
+                _member_dend(zk.children[0]) + node.attrs["midpoint"]) / 2
+            leaf.attrs["members"] = 1                 # set AFTER midpoint (as in R)
+            leaf.attrs["height"] = h0
+            leaf.attrs["label"] = labels[leaf.value - 1]
+            leaf.attrs["leaf"] = True
+            del z[str(x1 if isL else x0)]
+        else:                                         # two non-leaf nodes
+            ln = z[str(x0)]
+            rn = z[str(x1)]
+            zk = Dendrogram(children=[ln, rn])
+            zk.attrs["members"] = ln.attrs["members"] + rn.attrs["members"]
+            zk.attrs["midpoint"] = (ln.attrs["members"]
+                                    + ln.attrs["midpoint"]
+                                    + rn.attrs["midpoint"]) / 2
+            del z[str(x0)]
+            del z[str(x1)]
+        zk.attrs["height"] = oHgt[k - 1]
+        z[str(k)] = zk
+    return z[str(k)]
+
+
+def as_hclust_dendrogram(x, **kwargs):
+    """Port of ``as.hclust.dendrogram`` (``cluster_dendrogram.R:115``) — reverse
+    a *binary* dendrogram into an :class:`Hclust` (``merge``/``height``/``order``).
+    The pre-order traversal and the stable height sort reproduce R's merge order
+    (``method``/``dist.method`` are ``NA``, lost in the round-trip)."""
+    if not (x.children is not None and len(x.children) == 2):
+        raise ValueError("as.hclust.dendrogram: need a list dendrogram of length 2")
+    n = nleaves(x)
+    if n != x.attrs.get("members"):
+        raise ValueError("number of leaves != 'members' attribute")
+
+    ord_ = np.zeros(n, dtype=np.int64)
+    labsu = [None] * n
+    n_h = n - 1
+    height = np.zeros(n_h, dtype=float)
+    myIdx = np.zeros((2, n_h), dtype=np.int64)        # NA -> 0 (root col unused)
+    merge = np.zeros((2, n_h), dtype=np.int64)        # NA -> 0 (filled later)
+
+    rem = list(x.children)                            # remaining children of node
+    cur_height = x.attrs["height"]
+    position = 0
+    stack = None
+    leafCount = 0
+    nodeCount = 0
+    myNodeIndex = 0
+    while True:
+        while len(rem):
+            if position == 0:                         # first visit to this node
+                nodeCount += 1
+                myNodeIndex = nodeCount
+                if nodeCount != 1:
+                    myIdx[0, nodeCount - 1] = stack["position"]
+                    myIdx[1, nodeCount - 1] = stack["myNodeIndex"]
+                height[nodeCount - 1] = cur_height
+            position += 1
+            child = rem.pop(0)                        # x[[1L]] ; x <- x[-1L]
+            if is_leaf(child):
+                leafCount += 1
+                labsu[leafCount - 1] = child.attrs.get("label")
+                ord_[leafCount - 1] = int(child.value)
+                merge[position - 1, myNodeIndex - 1] = -ord_[leafCount - 1]
+            else:
+                if len(child.children) != 2:
+                    raise ValueError("as.hclust.dendrogram: non-binary node")
+                stack = {"node": rem, "position": position,
+                         "myNodeIndex": myNodeIndex, "stack": stack}
+                rem = list(child.children)
+                cur_height = child.attrs["height"]
+                position = 0
+        if stack is None:
+            break
+        position = stack["position"]
+        rem = stack["node"]
+        myNodeIndex = stack["myNodeIndex"]
+        stack = stack["stack"]
+
+    iOrd = np.argsort(ord_, kind="stable")            # sort.list(ord)
+    if not np.array_equal(ord_[iOrd], np.arange(1, n + 1)):
+        raise ValueError(
+            f"dendrogram entries must be 1,2,..,{n} (in any order), "
+            'to be coercible to "hclust"')
+    # ii <- sort.list(height, decreasing=TRUE)[n.h:1L]  (stable; ties reversed)
+    ii = np.argsort(-height, kind="stable")[::-1]
+    if not (n_h == 0 or ii[n_h - 1] == 0):
+        raise ValueError("internal: root is not the last (tallest) node")
+    for kk in range(1, n_h):                          # k <- seq_len(n.h-1L)
+        col = ii[kk - 1]
+        pos = myIdx[0, col]
+        node_idx = myIdx[1, col]
+        merge[pos - 1, node_idx - 1] = kk             # merge[t(myIdx[,ii[k]])] <- +k
+
+    final_merge = merge[:, ii].T                      # t(merge[,ii])
+    final_height = height[ii]
+    final_labels = [labsu[i] for i in iOrd]           # labsu[iOrd]
+    return Hclust(merge=final_merge, height=final_height, order=ord_,
+                  labels=final_labels, method=None, dist_method=None)
+
+
+def nobs_dendrogram(object):
+    """R ``nobs.dendrogram`` — the ``"members"`` attribute."""
+    return object.attrs.get("members")
+
+
+def order_dendrogram(x):
+    """R ``order.dendrogram(x)`` — the leaf observation indices in plot order
+    (``unlist`` of the leaves, pre-order)."""
+    if not isinstance(x, Dendrogram):
+        raise TypeError("'order.dendrogram' requires a dendrogram")
+    if x.children is not None:
+        return np.array(_unlist(x), dtype=np.int64)
+    return np.array([x.value], dtype=np.int64)
+
+
+def labels_dendrogram(object):
+    """R ``labels.dendrogram`` — the leaf labels, pre-order."""
+    if object.children is not None:
+        return np.array(_rapply_label(object))
+    return object.attrs.get("label")
+
+
+def midcache_dendrogram(x, type="hclust", quiet=False):
+    """R ``midcache.dendrogram`` (``cluster_dendrogram.R:232``) — recompute every
+    node's ``"midpoint"`` (e.g. after ``reorder``/``rev``). Returns a fresh tree;
+    for a binary node ``midpoint = (.memberDend(child1) + Σ .midDend(child)) / 2``,
+    matching ``as.dendrogram.hclust``."""
+    if not isinstance(x, Dendrogram):
+        raise TypeError("'midcache.dendrogram' requires a dendrogram")
+
+    def setmid(d):
+        if is_leaf(d):                                # no "midpoint" for a leaf
+            return Dendrogram(children=None, value=d.value, attrs=dict(d.attrs))
+        new_children = [setmid(c) for c in d.children]
+        k = len(new_children)
+        if (not quiet) and type == "hclust" and k != 2:
+            warnings.warn(
+                "midcache() of non-binary dendrograms only partly implemented",
+                stacklevel=2)
+        midS = math.fsum(_mid_dend(c) for c in new_children)
+        new = Dendrogram(children=new_children, value=d.value, attrs=dict(d.attrs))
+        new.attrs["midpoint"] = (_member_dend(new_children[0]) + midS) / 2
+        return new
+
+    return setmid(x)
+
+
+def rev_dendrogram(x):
+    """R ``rev.dendrogram`` — reverse the order of branches recursively, then
+    recompute midpoints (``cluster_dendrogram.R:755``)."""
+    def _rev(d):
+        if is_leaf(d):
+            return Dendrogram(children=None, value=d.value, attrs=dict(d.attrs))
+        k = len(d.children)
+        new_children = [_rev(d.children[k - 1 - j]) for j in range(k)]
+        return Dendrogram(children=new_children, value=d.value,
+                          attrs=dict(d.attrs))
+    return midcache_dendrogram(_rev(x))
+
+
+def reorder_dendrogram(x, wts, agglo_FUN=np.sum):
+    """R ``reorder.dendrogram`` (``cluster_dendrogram.R:710``) — give each leaf a
+    weight ``wts[leaf]``, sort each node's branches by their aggregated weight
+    (``agglo.FUN``, default ``sum``), then recompute midpoints."""
+    if not isinstance(x, Dendrogram):
+        raise TypeError("'reorder.dendrogram' requires a dendrogram")
+    wts = np.asarray(wts, dtype=float)
+
+    def oV(d):
+        if is_leaf(d):
+            new = Dendrogram(children=None, value=d.value, attrs=dict(d.attrs))
+            new.attrs["value"] = wts[d.value - 1]     # wts[x[1L]]
+            return new
+        new_children = [oV(c) for c in d.children]
+        vals = np.array([c.attrs["value"] for c in new_children])
+        iOrd = np.argsort(vals, kind="stable")        # sort.list(vals)
+        new_children = [new_children[i] for i in iOrd]
+        new = Dendrogram(children=new_children, value=d.value,
+                         attrs=dict(d.attrs))
+        new.attrs["value"] = float(agglo_FUN(vals[iOrd]))
+        return new
+
+    return midcache_dendrogram(oV(x))
+
+
+def reorder(x, *args, **kwargs):
+    """R ``reorder(x, ...)`` generic — dispatches to :func:`reorder_dendrogram`
+    for a :class:`Dendrogram`."""
+    if isinstance(x, Dendrogram):
+        return reorder_dendrogram(x, *args, **kwargs)
+    raise TypeError("no applicable 'reorder' method")
+
+
+def _add_ifleaf(i, add):
+    """``add.ifleaf`` from ``merge.dendrogram`` — shift a leaf's observation index
+    by ``add`` (R arithmetic keeps the leaf's other attributes)."""
+    if is_leaf(i):
+        return Dendrogram(children=None, value=i.value + add, attrs=dict(i.attrs))
+    return i
+
+
+def merge_dendrogram(x, y, *others, height=None, adjust="auto"):
+    """R ``merge.dendrogram`` (``cluster_dendrogram.R:775``) — combine
+    dendrograms under a new root. ``adjust="add.max"`` (the ``"auto"`` default
+    when every component's leaves start at 1) shifts later components' leaf
+    indices so they stay distinct; ``height`` defaults to ``1.1 * max`` child
+    height."""
+    if not (isinstance(x, Dendrogram) and isinstance(y, Dendrogram)):
+        raise TypeError("merge: 'x' and 'y' must be dendrograms")
+    adjust = _match_arg(adjust, ("auto", "add.max", "none"))
+    if adjust == "auto":
+        adjust = ("add.max" if (min(_unlist(x)) == 1 and min(_unlist(y)) == 1)
+                  else "none")
+    add = None
+    if adjust == "add.max":
+        add = max(_unlist(x))
+        y = dendrapply(y, _add_ifleaf, add)
+    xtr = list(others)
+    for e in xtr:
+        if not isinstance(e, Dendrogram):
+            raise TypeError('extra argument is not of class "dendrogram"')
+    r_children = [x, y]
+    if xtr:
+        if adjust == "add.max":
+            add = max(add, max(_unlist(y)))
+            for i in range(len(xtr)):
+                if i > 0:
+                    add = max(add, max(_unlist(xtr[i - 1])))
+                xtr[i] = dendrapply(xtr[i], _add_ifleaf, add)
+        r_children = r_children + xtr
+    r = Dendrogram(children=r_children)
+    r.attrs["members"] = sum(ch.attrs.get("members") for ch in r_children)
+    h_max = max(ch.attrs.get("height") for ch in r_children)
+    if height is None:
+        height = 1.1 * h_max
+    elif height < h_max:
+        raise ValueError(
+            f"'height' must be at least {h_max}, "
+            "the maximal height of its components")
+    r.attrs["height"] = height
+    return midcache_dendrogram(r, quiet=True)
+
+
+def dendrapply(X, FUN, *args, **kwargs):
+    """R ``dendrapply(X, FUN, ...)`` (``cluster_dendrogram.R:825``) — apply ``FUN``
+    to every node (the node first, then its children recursively replace the
+    node's branches while keeping ``FUN(node)``'s attributes)."""
+    if not isinstance(X, Dendrogram):
+        raise TypeError("'X' is not a dendrogram")
+
+    def napply(d):
+        r = FUN(d, *args, **kwargs)
+        if not is_leaf(d):
+            new_children = [napply(c) for c in d.children]
+            if isinstance(r, Dendrogram):
+                r = Dendrogram(children=new_children, value=r.value,
+                               attrs=dict(r.attrs))
+            else:
+                r = Dendrogram(children=new_children)
+        return r
+
+    return napply(X)
+
+
+def cut_dendrogram(x, h):
+    """R ``cut.dendrogram(x, h)`` (``cluster_dendrogram.R:644``) — cut at height
+    ``h`` into ``{upper, lower}``: every subtree with ``height <= h`` becomes a
+    leaf ``"Branch k"`` in ``upper`` and is collected (whole) into ``lower``."""
+    lower = []
+    counter = [1]
+
+    def assign_nodes(subtree):
+        if is_leaf(subtree):
+            return subtree
+        K = len(subtree.children)
+        if K == 0:
+            raise ValueError("non-leaf subtree of length 0")
+        new_children = []
+        new_mem = 0
+        for k in range(K):
+            sub = subtree.children[k]
+            if sub.attrs.get("height") <= h:
+                X = counter[0]
+                at = dict(sub.attrs)                  # attributes(sub)
+                at["leaf"] = True
+                at.pop("class", None)
+                at["x.member"] = at.get("members")    # before members <- 1
+                at["members"] = 1
+                new_mem += 1
+                at["label"] = f"Branch {X}"
+                new_children.append(Dendrogram(children=None, value=X, attrs=at))
+                lower.append(_clone(sub))             # LOWER[[X]] <- sub
+                counter[0] += 1
+            else:
+                child = assign_nodes(sub)
+                new_children.append(child)
+                new_mem += child.attrs.get("members")
+        new = Dendrogram(children=new_children, value=subtree.value,
+                         attrs=dict(subtree.attrs))
+        new.attrs["x.member"] = new.attrs.get("members")
+        new.attrs["members"] = new_mem
+        return new
+
+    return {"upper": assign_nodes(x), "lower": lower}
+
+
+def print_dendrogram(x, digits=7, _return=False):
+    """R ``print.dendrogram`` (``cluster_dendrogram.R:285``) — the concise
+    one-line summary (display only; not byte-pinned to R)."""
+    parts = ["'dendrogram' "]
+    if is_leaf(x):
+        parts.append("leaf '" + _fmt_digits(x.attrs.get("label"), digits) + "'")
+    else:
+        parts.append(f"with {len(x)} branches and "
+                     f"{x.attrs.get('members')} members total")
+    parts.append(", at height " + _fmt_digits(x.attrs.get("height"), digits) + " ")
+    s = "".join(parts) + "\n"
+    if _return:
+        return s
+    print(s, end="")
+    return None
+
+
+def str_dendrogram(object, max_level=None, digits_d=3, give_attr=False,
+                   nest_lev=0, indent_str="", last_str="`", stem="--",
+                   _return=False):
+    """R ``str.dendrogram`` (``cluster_dendrogram.R:298``) — the nested-tree
+    text rendering (display only; not byte-pinned to R)."""
+    out = []
+
+    def pasteLis(at, dropNam):
+        items = [(k, v) for k, v in at.items() if k not in dropNam]
+        return ", ".join(f"{k} = {_fmt_digits(v, digits_d)}" for k, v in items)
+
+    todo = None
+    while True:
+        istr = (indent_str[:-1] + last_str) if indent_str.endswith(" ") \
+            else indent_str
+        out.append(istr + stem)
+        at = object.attrs
+        memb = at.get("members")
+        hgt = at.get("height")
+        if not is_leaf(object):
+            le = len(object)
+            extra = ""
+            if give_attr:
+                extra = pasteLis(at, ("class", "height", "members"))
+                if extra:
+                    extra = ", " + extra
+            tail = (" .." if (max_level is not None and nest_lev == max_level)
+                    else "")
+            out.append(f"[dendrogram w/ {le} branches and {memb} members at h = "
+                       f"{_fmt_digits(hgt, digits_d)}{extra}]{tail}\n")
+            if max_level is None or nest_lev < max_level:
+                nest_lev += 1
+                todo = (object.children[le - 1], nest_lev,
+                        indent_str + "  ", todo)
+                indent_str = indent_str + " |"
+                le -= 1
+                while le > 0:
+                    todo = (object.children[le - 1], nest_lev, indent_str, todo)
+                    le -= 1
+        else:                                         # leaf
+            label = at.get("label")
+            if isinstance(label, str):
+                out.append('leaf "' + label + '" ')
+            else:
+                out.append("leaf " + _fmt_digits(object.value, digits_d) + " ")
+            any_at = hgt != 0
+            if any_at:
+                out.append("(h=" + _fmt_digits(hgt, digits_d))
+            if memb != 1:
+                if any_at:
+                    out.append(", memb= " + str(memb))
+                else:
+                    any_at = True
+                    out.append("(memb= " + str(memb))
+            tail = pasteLis(at, ("class", "height", "members", "leaf", "label"))
+            if any_at or tail:
+                out.append(("" if any_at else "(") + " " + tail + " )")
+            out.append("\n")
+        if todo is None:
+            break
+        object, nest_lev, indent_str, todo = todo
+    s = "".join(out)
+    if _return:
+        return s
+    print(s, end="")
+    return None
+
+
+def cophenetic_dendrogram(x):
+    """R ``cophenetic.dendrogram`` (``cluster_hclust.R:238``) — cophenetic
+    distances by recursing over a :class:`Dendrogram`: each split fills the
+    between-children block with the node's height; leaves contribute a labelled
+    ``0``. Returns a :class:`~hea.R.distance.Dist`."""
+    if is_leaf(x):
+        label = x.attrs.get("label")
+        if label is None:
+            raise ValueError("need dendrograms where all leaves have labels")
+        d = as_dist(np.zeros((1, 1)))
+        d.Labels = [label]
+        return d
+    children = [cophenetic_dendrogram(ch) for ch in x.children]
+    lens = [c.Size for c in children]
+    total = int(sum(lens))
+    m = np.full((total, total), x.attrs.get("height"), dtype=float)
+    hi = np.cumsum(lens)
+    lo = np.concatenate([[0], hi[:-1]]).astype(int)
+    for i, c in enumerate(children):
+        m[lo[i]:hi[i], lo[i]:hi[i]] = as_matrix_dist(c)
+    labels = []
+    for c in children:
+        if c.Labels is not None:
+            labels.extend(c.Labels)
+    d = as_dist(m)
+    d.Labels = labels
+    return d
