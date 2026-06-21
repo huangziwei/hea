@@ -17,6 +17,7 @@ and separates fixed-effect terms from lme4 RE bars. No X/Z materialization yet.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 from itertools import combinations
 from typing import Mapping, Optional, Union
 
@@ -462,6 +463,7 @@ class _Parser:
         return Call(fn, args, kwargs)
 
 
+@lru_cache(maxsize=1024)
 def parse(src: str) -> Formula:
     """Parse an R-style formula string into an AST.
 
@@ -472,6 +474,13 @@ def parse(src: str) -> Formula:
     semantics in every position, including the binomial `[succ, fail]`
     two-column form. `cbind` stays canonical; `deparse` and translate always
     emit `cbind(...)`, never `[...]`.
+
+    The result is **cached by source string and shared** across callers, so
+    treat the returned ``Formula`` and its AST nodes as immutable — never
+    mutate them in place. ``expand`` rebuilds its output fresh from the parse
+    (it never mutates the input), so this is safe; the repeated-fit workloads
+    (bootstrap / CV / ``anova`` refits / ``simulate``) re-call with the same
+    formula string and hit the cache instead of re-tokenizing/re-parsing.
     """
     tokens = tokenize(src)
     p = _Parser(tokens)
@@ -2463,12 +2472,44 @@ def materialize(expanded: ExpandedFormula, data: pl.DataFrame,
     ``i`` (1-based) for columns of ``expanded.terms[i-1]``. Exact by
     construction (columns are emitted term block by term block).
     """
+    values, all_names, assign = _build_design(
+        expanded, data, drop_na=drop_na, basis_state=basis_state)
+    if values is None:
+        # Polars can't represent (n, 0); return an empty frame and let
+        # callers use ``len(input_data)`` if they need the row count.
+        return (pl.DataFrame(), []) if return_assign else pl.DataFrame()
+    # ``orient="row"`` is REQUIRED: ``_build_design`` returns a column-major
+    # (F-contiguous) array, and ``pl.from_numpy``'s orientation inference is
+    # inconclusive for a *square* (n == p) design — it then defaults to column
+    # orientation and silently transposes it. Pinning row orientation is correct
+    # for every shape and keeps the F-order fast path (no transpose copy).
+    X = pl.from_numpy(values, schema=all_names, orient="row")
+    return (X, assign) if return_assign else X
+
+
+def _build_design(expanded: ExpandedFormula, data: pl.DataFrame, *,
+                  drop_na: bool = True, basis_state: dict | None = None,
+                  ) -> tuple[Optional[np.ndarray], list[str], list[int]]:
+    """Core design assembly shared by ``materialize`` and ``prepare_design``.
+
+    Returns ``(values, names, assign)`` where ``values`` is an **F-contiguous**
+    (column-major) ``(n, p)`` float array, or ``None`` for the empty ``(n, 0)``
+    design. Column-major is deliberate: each per-term block lands in a
+    *contiguous* slice, so the assembly is a sequence of cheap column memcpys
+    (≈5× faster than ``np.hstack``'s strided row-major copy at n=10k); the same
+    layout lets ``pl.from_numpy`` adopt the columns without a transpose copy and
+    keeps the downstream weighted-QR fit column-major (no LAPACK transpose).
+    The values are bit-identical to the former ``np.hstack`` result.
+
+    ``drop_na`` / ``basis_state`` behave exactly as in :func:`materialize`.
+    """
     token = _BASIS_STATE_CV.set(basis_state)
     try:
-        referenced = referenced_columns(expanded) & set(data.columns)
-        ref_list = list(referenced)
-        if drop_na and ref_list and any(data[c].null_count() > 0 for c in ref_list):
-            data = data.drop_nulls(subset=ref_list)
+        if drop_na:
+            referenced = referenced_columns(expanded) & set(data.columns)
+            ref_list = list(referenced)
+            if ref_list and any(data[c].null_count() > 0 for c in ref_list):
+                data = data.drop_nulls(subset=ref_list)
 
         blocks: list[_NumBlock] = []
         block_term_idx: list[int] = []          # R assign value per block
@@ -2492,13 +2533,18 @@ def materialize(expanded: ExpandedFormula, data: pl.DataFrame,
         for b, ti in zip(blocks, block_term_idx):
             all_names.extend(b.suffixes)
             assign.extend([ti] * b.values.shape[1])
-        if not blocks or sum(b.values.shape[1] for b in blocks) == 0:
-            # Polars can't represent (n, 0); return an empty frame and let
-            # callers use ``len(input_data)`` if they need the row count.
-            return (pl.DataFrame(), []) if return_assign else pl.DataFrame()
-        all_values = np.hstack([b.values for b in blocks])
-        X = pl.from_numpy(all_values, schema=all_names)
-        return (X, assign) if return_assign else X
+        total = sum(b.values.shape[1] for b in blocks)
+        if not blocks or total == 0:
+            return None, all_names, assign
+        n = blocks[0].values.shape[0]
+        dtype = np.result_type(*(b.values for b in blocks))
+        values = np.empty((n, total), dtype=dtype, order="F")
+        c = 0
+        for b in blocks:
+            w = b.values.shape[1]
+            values[:, c:c + w] = b.values
+            c += w
+        return values, all_names, assign
     finally:
         _BASIS_STATE_CV.reset(token)
 
@@ -8677,6 +8723,15 @@ class Design:
     # 1-based index into ``expanded.terms``. Exact term→column mapping
     # (factors contribute several columns) — summary/anova pTerms use it.
     param_assign: list[int] = None
+    # Fast-lane numpy view of the design (additive; ``X`` stays the canonical
+    # polars contract). ``X_values`` is the F-contiguous ``(n, p)`` array that
+    # ``X`` was built from — the *same* buffer (``pl.from_numpy`` views it), so
+    # numpy consumers can read it directly and skip ``X.to_numpy()``. Treat it
+    # as read-only (mutating it would corrupt ``X``). ``None`` for an empty
+    # design or a ``Design`` built without the fast lane. ``X_names`` are the
+    # matching column labels (== ``X.columns``).
+    X_values: Optional[np.ndarray] = None
+    X_names: Optional[list[str]] = None
 
 
 # LHS function table — maps R-side function names to a polars-expr builder.
@@ -8823,10 +8878,15 @@ def _na_mask_with_matrix_cols(
         else:
             arr = s.to_numpy()
             if np.issubdtype(arr.dtype, np.floating):
+                # ``to_numpy`` maps polars null → NaN for float/int columns, so
+                # ``isnan`` already catches *both* nulls and NaNs — the separate
+                # ``is_null`` pass (one extra O(n) scan + materialization per
+                # column) is redundant here. Only non-float columns
+                # (bool/string/categorical) need it, since their ``to_numpy``
+                # keeps nulls as objects rather than NaN.
                 keep &= ~np.isnan(arr)
-            # null check for non-float columns (categoricals etc.)
-            null_mask = s.is_null().to_numpy()
-            keep &= ~null_mask
+            else:
+                keep &= ~s.is_null().to_numpy()
     return keep
 
 
@@ -8942,8 +9002,18 @@ def prepare_design(
             _eval_lhs_expr(f_parsed.lhs, columns).alias(response_label)
         )[response_label]
 
+    # ``data_clean`` is already NA-resolved above (rows dropped for omit/fail,
+    # kept for pass), so the design build skips its own redundant NA scan
+    # (``drop_na=False``). ``_build_design`` hands back the F-order numpy design
+    # directly; we keep the polars ``X`` for the public ``Design.X`` contract
+    # *and* stash the same array as ``X_values`` so numpy consumers (the lm/glm
+    # fit + rank screen) skip the ``pl.from_numpy`` → ``to_numpy`` round-trip.
     with with_contrasts(contrasts):
-        X, param_assign = materialize(expanded, data_clean, return_assign=True,
-                                      drop_na=(_na != "pass"), basis_state=basis_state)
+        X_values, X_names, param_assign = _build_design(
+            expanded, data_clean, drop_na=False, basis_state=basis_state)
+    # ``orient="row"`` required for the square-design case — see ``materialize``.
+    X = (pl.DataFrame() if X_values is None
+         else pl.from_numpy(X_values, schema=X_names, orient="row"))
     return Design(expanded=expanded, data=data_clean, X=X, y=y,
-                  response=response_label, param_assign=param_assign)
+                  response=response_label, param_assign=param_assign,
+                  X_values=X_values, X_names=X_names)

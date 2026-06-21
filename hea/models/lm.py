@@ -156,7 +156,8 @@ def _resolve_subset(subset, data: pl.DataFrame):
     return subset
 
 
-def _drop_aliased_cols(X_df: pl.DataFrame, tol: float = 1e-7) -> list[str]:
+def _drop_aliased_cols(X_df: pl.DataFrame, tol: float = 1e-7, *,
+                       values: np.ndarray | None = None) -> list[str]:
     """Identify linearly-dependent columns in a design matrix.
 
     With the Rust kernel present, use R's **exact** ``dqrdc2`` pivot/rank
@@ -171,10 +172,15 @@ def _drop_aliased_cols(X_df: pl.DataFrame, tol: float = 1e-7) -> list[str]:
     flagged (``dqrdc2`` prefers earlier columns: intercept first, then RHS terms
     in order), so the intercept isn't dropped when a later predictor is a
     constant + centered copy. Either way ``df_residuals`` reflects effective rank.
+
+    ``values`` is an optional precomputed numpy view of ``X_df`` (the design's
+    F-order ``X_values`` fast lane); when supplied, the screen reads it directly
+    and skips ``X_df.to_numpy()``. It is read-only here (``dgeqrf`` does not
+    overwrite its input), so reusing the buffer shared with ``X_df`` is safe.
     """
     if X_df.height == 0 or X_df.width == 0:
         return []
-    X = X_df.to_numpy().astype(float)
+    X = values if values is not None else X_df.to_numpy().astype(float)
     cols = X_df.columns
     p = X.shape[1]
 
@@ -725,6 +731,12 @@ class lm:
         self._design_data = d.data
         self.X = d.X
         self.y = d.y  # pl.Series
+        # F-order numpy fast lane: the same buffer ``self.X`` (polars) views, so
+        # the rank screen + fit read it directly instead of round-tripping
+        # through ``self.X.to_numpy()``. Read-only (mutating it corrupts
+        # ``self.X``); ``_qr`` row-scales into a fresh array, never in place.
+        # ``None`` if the design is empty; reset below if columns get dropped.
+        self._X_values = d.X_values
 
         # R's na.pass keeps NA rows in the model frame; lm.fit then rejects a
         # non-finite design ("NA/NaN/Inf in 'x'"). Match that intentionally
@@ -753,7 +765,8 @@ class lm:
         # warning — R does the same (silent at construction, prints "(N not
         # defined because of singularities)" only when you look at the model).
         _full_cols = list(self.X.columns)  # before the rank-deficiency drop
-        self._aliased_cols: list[str] = _drop_aliased_cols(self.X)
+        self._aliased_cols: list[str] = _drop_aliased_cols(
+            self.X, values=self._X_values)
         if self._aliased_cols and not singular_ok:
             # R: lm.fit(singular.ok=FALSE) — refuse rank-deficient designs.
             raise ValueError("singular fit encountered")
@@ -765,6 +778,9 @@ class lm:
             self._X_full_train = self.X.to_numpy().astype(float)
             keep = [c for c in self.X.columns if c not in self._aliased_cols]
             self.X = self.X.select(keep)
+            # The kept-column subset no longer matches the full F-order buffer;
+            # the fit below falls back to ``self.X.to_numpy()`` for this design.
+            self._X_values = None
 
         self.column_names = list(self.X.columns)
         # Full (pre-drop) column set + the kept→full index map. The fit runs
@@ -779,7 +795,15 @@ class lm:
             else self.column_names
         )
 
-        X = self.X.to_numpy().astype(float)
+        # Common full-rank path: reuse the F-order design buffer directly (no
+        # ``to_numpy`` round-trip). ``_X_values`` is float64 + F-contiguous by
+        # construction; the ``dtype`` guard is a cheap no-op safety net.
+        if self._X_values is not None:
+            X = self._X_values
+            if X.dtype != np.float64:
+                X = X.astype(np.float64)
+        else:
+            X = self.X.to_numpy().astype(float)
         y = self.y.to_numpy().astype(float).flatten()
 
         self.n, self.p = (

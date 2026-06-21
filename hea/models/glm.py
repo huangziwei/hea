@@ -362,7 +362,15 @@ class glm:
         self.X = d.X                                  # pl.DataFrame
         self.y = d.y                                  # pl.Series
 
-        X = self.X.to_numpy().astype(float)
+        # Reuse the design's F-order numpy buffer (the same one ``self.X`` views)
+        # directly — IRLS reads X read-only (it row-scales / column-subsets into
+        # fresh arrays), so no ``self.X.to_numpy()`` round-trip is needed.
+        # float64 + F-contiguous by construction; the guard is a no-op safety net.
+        X = d.X_values
+        if X is None:
+            X = self.X.to_numpy().astype(float)
+        elif X.dtype != np.float64:
+            X = X.astype(np.float64)
         y = _coerce_response(self.y, self.family)
         # Numeric form of y (factor → 0/1 for Binomial, etc.) — kept so
         # residuals_of / plots don't re-coerce self.y, which fails on
