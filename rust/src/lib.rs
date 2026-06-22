@@ -44,6 +44,7 @@
 use pyo3::prelude::*;
 
 mod cluster;
+mod cox;
 mod linalg;
 mod loess;
 mod nmath;
@@ -59,5 +60,6 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     loess::register(m)?;
     cluster::register(m)?;
     tprs::register(m)?;
+    cox::register(m)?;
     Ok(())
 }

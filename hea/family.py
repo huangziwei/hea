@@ -47,6 +47,13 @@ from ._dispatch import rs_fn as _rs_fn
 # _stirlerr). See plans/rust-port-implementation.md.
 _rs_dbinom_raw = _rs_fn("dbinom_raw")
 _rs_dpois_raw = _rs_fn("dpois_raw")
+# mgcv coxlpl (coxph.c:141) single-pass risk-set sweeps (deriv 0 → l/lb/lbb,
+# deriv 1/2 → +d1H, deriv 3 → d2H); the numpy `_coxlpl` below is the bit-close
+# oracle + HEA_NO_RS fallback. None when the extension is absent.
+_rs_cox_l = _rs_fn("cox_l")
+_rs_cox_lpl0 = _rs_fn("cox_lpl0")
+_rs_cox_lpl_d1 = _rs_fn("cox_lpl_d1")
+_rs_cox_d2h = _rs_fn("cox_d2h")
 
 
 def _dbinom_raw_disp(x, n, p, q, give_log=True):
@@ -8470,6 +8477,34 @@ class gevlss(GeneralFamily):
         return f"gevlss(link={self._link_names!r})"
 
 
+_COX_SORT_CACHE: dict = {}
+
+
+def _cox_sort(X, d, time, n, p):
+    """Descending-time sort structure for ``_coxlpl`` — ``(order, r, nt, X, d)``
+    with ``r`` the 0-based unique-time group per (sorted) row, ``X``/``d`` the
+    sorted, contiguous design + event indicator. Depends only on time/X/d, which
+    are fixed across a fit's many ll calls, so it is memoized (keyed on a content
+    fingerprint, bounded). Mirrors the in-function sort the C caller does once."""
+    key = (n, p, float(time[0]), float(time[-1]), float(time.sum()),
+           float(X[0, 0]), float(X[-1, -1]), int(np.asarray(d).sum()))
+    hit = _COX_SORT_CACHE.get(key)
+    if hit is not None:
+        return hit
+    order = np.argsort(-time, kind="stable")
+    ts = -time[order]                                     # ascending
+    tr = np.unique(ts)
+    nt = tr.size
+    r = np.ascontiguousarray(np.searchsorted(tr, ts).astype(np.int64))
+    Xc = np.ascontiguousarray(X[order])
+    dc = np.ascontiguousarray(np.asarray(d, np.int64)[order])
+    val = (order, r, nt, Xc, dc)
+    if len(_COX_SORT_CACHE) > 16:
+        _COX_SORT_CACHE.clear()
+    _COX_SORT_CACHE[key] = val
+    return val
+
+
 def _coxlpl(eta, X, d, time, deriv, d1b=None, d2b=None, D=None,
             eigen=None):
     """mgcv's ``coxlpl`` C kernel (src/coxph.c:141-394): the Cox log
@@ -8493,32 +8528,65 @@ def _coxlpl(eta, X, d, time, deriv, d1b=None, d2b=None, D=None,
     d = np.asarray(d, int)
     n, p = X.shape
     M = 0 if d1b is None else d1b.shape[1]
-    # risk sets are cumulative in DESCENDING time; sort rows internally so
-    # the engine may pass them in any order (l/lb/lbb/d1H/trHid2H are all
-    # coefficient-space, hence invariant to the row permutation). d1b/d2b
-    # are coefficient-space and stay put.
-    order = np.argsort(-time, kind="stable")
-    eta = eta[order]
-    X = X[order]
-    time = time[order]
-    d = d[order]
+    # risk sets are cumulative in DESCENDING time; sort rows internally so the
+    # engine may pass them in any order (l/lb/lbb/d1H/trHid2H are all
+    # coefficient-space, hence invariant to the row permutation). The sort
+    # structure is cached (fixed across a fit); only eta changes per call.
+    # d1b/d2b are coefficient-space and stay put.
+    order, r, nt, X, d = _cox_sort(X, d, time, n, p)
+    eta = np.ascontiguousarray(eta[order])
+    if _rs_cox_l is not None and deriv < 0:    # the many line-search l evals
+        return {"l": float(_rs_cox_l(eta, d, r, int(nt)))}
+    if _rs_cox_lpl0 is not None and 0 <= deriv <= 3:
+        # the per-iteration l/lb/lbb (+d1H/+trHid2H) evaluations: the C
+        # single-pass risk-set sweep, no (n,p,p[,M]) gXX/d1A_p temporaries
+        # (coxph.c:266-368). X/d/r are pre-sorted contiguous from the cache;
+        # d1b/d2b/eigen stay coefficient-/eigen-space.
+        lpl, g, H = _rs_cox_lpl0(eta, X, d, r, int(nt))
+        if deriv == 0:
+            return {"l": float(lpl), "lb": g, "lbb": H}
+        gamma = np.exp(eta)
+        if deriv <= 2:                    # + ∂H/∂ρ matrices (original basis)
+            d1gamma = np.ascontiguousarray((X @ d1b) * gamma[:, None])
+            lpl, g, H, d1H = _rs_cox_lpl_d1(eta, X, d, r, int(nt), d1gamma)
+            return {"l": float(lpl), "lb": g, "lbb": H, "d1H": d1H}
+        # deriv == 3: + trHid2H in the eigenbasis (reuse original-basis l/g/H);
+        # the eigenbasis transform is cheap BLAS, the sweep is rust (cox_d2h).
+        val = np.asarray(eigen["values"], float)
+        vec = np.asarray(eigen["vectors"], float)
+        dvec = np.where(val > 0, 1.0 / np.where(val > 0, val, 1.0), 0.0)
+        Xp = X @ (D[:, None] * vec)
+        d1bp = vec.T @ (d1b / D[:, None])
+        d2bp = vec.T @ (d2b / D[:, None])
+        d1eta = Xp @ d1bp
+        d1gamma = d1eta * gamma[:, None]
+        nhh = M * (M + 1) // 2
+        pairs = [(a, b) for a in range(M) for b in range(a, M)]
+        d2eta = Xp @ d2bp
+        d2gamma = np.empty((n, nhh))
+        for off, (a, b) in enumerate(pairs):
+            d2gamma[:, off] = gamma * (d2eta[:, off] + d1eta[:, a] * d1eta[:, b])
+        d2H = _rs_cox_d2h(np.ascontiguousarray(Xp), d, r, int(nt), eta,
+                          np.ascontiguousarray(d1gamma),
+                          np.ascontiguousarray(d2gamma))
+        trHid2H = np.sum(np.asarray(d2H) * dvec[:, None], 0)
+        return {"l": float(lpl), "lb": g, "lbb": H, "trHid2H": trHid2H}
     gamma = np.exp(eta)
-    tr = np.unique(-time)
-    nt = tr.size
-    r = np.searchsorted(tr, -time)                        # 0-based group
     last = np.searchsorted(r, np.arange(nt), side="right") - 1
     gamma_p = np.cumsum(gamma)[last]
-    b_p = np.cumsum(gamma[:, None] * X, 0)[last]
-    gXX = gamma[:, None, None] * X[:, :, None] * X[:, None, :]
-    A_p = np.cumsum(gXX, 0)[last]
     ev = np.asarray(d, int) == 1
     dr = np.zeros(nt)
     np.add.at(dr, r[ev], 1.0)
     eta_sum = np.zeros(nt)
     np.add.at(eta_sum, r[ev], eta[ev])
-    g_ev = X[ev].sum(0) if ev.any() else np.zeros(p)
 
     lpl = float(np.sum(eta_sum - dr * np.log(gamma_p)))
+    if deriv < 0:                  # C coxlpl: deriv<0 returns lp only, no b_p/A_p/g/H
+        return {"l": lpl}
+    b_p = np.cumsum(gamma[:, None] * X, 0)[last]
+    gXX = gamma[:, None, None] * X[:, :, None] * X[:, None, :]
+    A_p = np.cumsum(gXX, 0)[last]
+    g_ev = X[ev].sum(0) if ev.any() else np.zeros(p)
     g = g_ev - np.sum((dr / gamma_p)[:, None] * b_p, 0)
     H = -np.sum(dr[:, None, None] * (
         A_p / gamma_p[:, None, None]
