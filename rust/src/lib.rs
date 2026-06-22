@@ -44,14 +44,13 @@
 use pyo3::prelude::*;
 
 mod cluster;
-mod cox;
+mod family;
 mod linalg;
 mod loess;
 mod nmath;
 mod par;
 mod rng;
 mod tprs;
-mod tweedie;
 
 #[pymodule]
 fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -61,7 +60,6 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     loess::register(m)?;
     cluster::register(m)?;
     tprs::register(m)?;
-    cox::register(m)?;
-    tweedie::register(m)?;
+    family::register(m)?;
     Ok(())
 }

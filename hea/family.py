@@ -4372,6 +4372,20 @@ class nb(Family):
         Th = float(np.exp(th0))
         y = np.asarray(y, dtype=float)
         w = np.asarray(wt, dtype=float)
+        # The REML grad/Hessian/score each evaluate this saturated-likelihood
+        # at the SAME (θ, scale) within an outer step (profiled 17 calls / 5
+        # distinct = 71% redundant). It's a pure function of (y, wt, θ); memoise
+        # like Tweedie._saturated_series (bit-identical — callers only read).
+        cache = getattr(self, "_ls_cache", None)
+        if cache is None:
+            cache = self._ls_cache = {}
+        key = (th0, float(scale), y.size,
+               float(y[0]) if y.size else 0.0,
+               float(y[-1]) if y.size else 0.0,
+               float(y.sum()), float(w.sum()) if w.size else 0.0)
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
         ylogy = np.where(y > 0, y * np.log(np.maximum(y, 1e-300)), 0.0)
         term = ((y + Th) * np.log(y + Th) - ylogy
                 + gammaln(y + 1.0) - Th * np.log(Th) + gammaln(Th)
@@ -4389,12 +4403,16 @@ class nb(Family):
         term2 = Th * (lyth - Th * psi1_yth - psi0_yth + Th / yth
                       + Th * psi1_th + psi0_th - th0 - 1.0)
         lsth2 = -float(np.sum(term2 * w))
-        return {
+        res = {
             "ls": ls0,
             "lsth1": np.array([lsth]),
             "lsth2": np.array([[lsth2]]),
             "LSTH1": LSTH,
         }
+        if len(cache) >= 64:
+            cache.clear()
+        cache[key] = res
+        return res
 
     # ----- initialization / validity -------------------------------------
 

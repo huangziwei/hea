@@ -4014,7 +4014,7 @@ class gam:
             family = self.family
             nt = family.n_theta
             theta = family.get_theta()
-            dd1 = family.dDeta(self._y_arr, fit.mu, wt, theta, level=1)
+            dd1 = self._dDeta(fit, 1)
             Dth = np.asarray(dd1["Dth"], dtype=float)
             if Dth.ndim == 1:
                 Dth = Dth[:, None]
@@ -4049,11 +4049,8 @@ class gam:
         β̂(θ)-coupled piece (∂w/∂η)·(X·∂β̂/∂θ). The Dd-table version of
         the old tw-only ``_dW_dp_tw_total`` (identical values for tw by
         the exponential-family identity)."""
-        family = self.family
-        wt = self._wt
         if dd1 is None:
-            dd1 = family.dDeta(self._y_arr, fit.mu, wt,
-                               family.get_theta(), level=1)
+            dd1 = self._dDeta(fit, 1)
         Deta2th = np.asarray(dd1["Deta2th"], dtype=float)
         if Deta2th.ndim == 1:
             Deta2th = Deta2th[:, None]
@@ -4439,8 +4436,7 @@ class gam:
 
         # Per-obs deviance derivatives (η-space; mgcv Det*/Dth* names) and the
         # θ first/second β-derivatives via the IFT.
-        dd2 = family.dDeta(self._y_arr, fit.mu, self._wt,
-                           family.get_theta(), level=2)
+        dd2 = self._dDeta(fit, 2)
         Deta = np.asarray(dd2["Deta"], dtype=float)
         Deta2 = np.asarray(dd2["Deta2"], dtype=float)
         Deta3 = np.asarray(dd2["Deta3"], dtype=float)
@@ -6108,6 +6104,27 @@ class gam:
             )
         return c
 
+    def _dDeta(self, fit: "_FitState", level: int) -> dict:
+        """Cached ``family.dDeta`` at the converged fit. The REML grad/Hessian,
+        ``db.drho``/``d2b.drho`` and ``_dw_deta``/``_d2w_deta2`` each call
+        ``dDeta`` with the SAME ``(y, fit.mu, wt, θ)`` — recomputing the per-obs
+        ``Dd`` table (the extended-family #1 cost). Profiling a tw fit found 62%
+        of the ``Dd`` calls were redundant repeats; memoising on the FitState by
+        level removes them (a cached higher level is a superset → serves
+        lower-level reads). Pure function of the converged fit ⇒ 0-ulp; the gam.
+        fit4 analog of the ``_dwdeta``/``_lderivs`` caches."""
+        cache = fit._ddeta
+        if cache is None:
+            cache = fit._ddeta = {}
+        else:
+            for lv in (2, 1, 0):
+                if lv >= level and cache.get(lv) is not None:
+                    return cache[lv]
+        res = self.family.dDeta(self._y_arr, fit.mu, self._wt,
+                                self.family.get_theta(), level)
+        cache[level] = res
+        return res
+
     def _dw_deta(self, fit: "_FitState") -> np.ndarray:
         """∂w_i/∂η_i at PIRLS-converged β̂. Length-n.
 
@@ -6132,7 +6149,6 @@ class gam:
         # the fit, like _fit_link_derivs (W3.3d part 2, here for gam.fit4).
         if fit._dwdeta is not None:
             return fit._dwdeta
-        family = self.family
         y = self._y_arr
         mu = fit.mu
         w = fit.w
@@ -6142,7 +6158,7 @@ class gam:
         # from the family's Dd tables (gam.fit4/gdi2 convention). Rows
         # dropped from the working model (stored w == 0) contribute 0.
         if self._family_mgcv_extended:
-            dd = family.dDeta(y, mu, self._wt, family.get_theta(), level=1)
+            dd = self._dDeta(fit, 1)
             d3 = 0.5 * np.asarray(dd["Deta3"], dtype=float)
             res = np.where((w != 0.0) & np.isfinite(d3), d3, 0.0)
             fit._dwdeta = res
@@ -6354,7 +6370,6 @@ class gam:
         """
         if fit._d2wdeta2 is not None:
             return fit._d2wdeta2
-        family = self.family
         y = self._y_arr
         mu = fit.mu
         w = fit.w
@@ -6362,7 +6377,7 @@ class gam:
 
         # Extended families: ∂²w/∂η² = ½·Deta4 from the Dd tables.
         if self._family_mgcv_extended:
-            dd = family.dDeta(y, mu, self._wt, family.get_theta(), level=2)
+            dd = self._dDeta(fit, 2)
             d4 = 0.5 * np.asarray(dd["Deta4"], dtype=float)
             res = np.where((w != 0.0) & np.isfinite(d4), d4, 0.0)
             fit._d2wdeta2 = res
@@ -13963,7 +13978,7 @@ class _FitState:
         "S_full", "log_det_A", "E_aug",
         "is_fisher_fallback",
         "converged", "boundary", "warn",
-        "_lderivs", "_dwdeta", "_d2wdeta2",
+        "_lderivs", "_dwdeta", "_d2wdeta2", "_ddeta",
     )
 
     def __init__(self, *, beta, dev, pen, A_chol, A_chol_lower,
@@ -14014,6 +14029,7 @@ class _FitState:
         self._lderivs = None
         self._dwdeta = None
         self._d2wdeta2 = None
+        self._ddeta = None
 
 
 # ---------------------------------------------------------------------------
