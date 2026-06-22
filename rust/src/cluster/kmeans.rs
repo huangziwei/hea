@@ -13,6 +13,7 @@
 //! bit-for-bit); HW and MacQueen's incremental refinement are inherently serial.
 //! Empty clusters divide by zero → ±inf/NaN exactly as the numpy path (IEEE).
 
+use crate::nmath::util::rfma;
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 use rayon::prelude::*;
@@ -109,7 +110,8 @@ fn wss_of(x: &[f64], cen: &[f64], cl: &[i64], n: usize, p: usize, k: usize) -> V
         let ci = &cen[it * p..it * p + p];
         for c in 0..p {
             let tmp = xi[c] - ci[c];
-            wss[it] += tmp * tmp;
+            // R fuses `wss += d*d` to fmadd on arm64; `rfma` mirrors per-arch.
+            wss[it] = rfma(tmp, tmp, wss[it]);
         }
     }
     wss
@@ -611,7 +613,7 @@ pub fn kmns<'py>(
             for i in 1..=m {
                 let ii = hw.ic1[i];
                 let da = hw.xv(i, j) - hw.cv(ii, j);
-                wss[ii] += da * da;
+                wss[ii] = rfma(da, da, wss[ii]);
             }
         }
 

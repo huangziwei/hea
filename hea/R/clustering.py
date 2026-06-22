@@ -21,6 +21,7 @@ import warnings
 import numpy as np
 
 from .._dispatch import rs_fn
+from ._shared import _rfma
 from .distance import Dist, _pmatch, as_dist, as_matrix_dist
 from .distributions import _r_rng
 
@@ -156,23 +157,25 @@ def _hclust_fortran(n, diss, iopt, membr0):
                 d12 = d[ioffst(i2, j2)]
 
                 if isward:
-                    d[ind1] = ((membr[i2] + membr[k]) * d[ind1]
-                               + (membr[j2] + membr[k]) * d[ind2]
-                               - membr[k] * d12)
+                    # R's gfortran fuses the LW update to fmadd on arm64;
+                    # ``_rfma`` mirrors it per-arch (plain a*b+c on x86).
+                    d[ind1] = _rfma(membr[i2] + membr[k], d[ind1],
+                                    (membr[j2] + membr[k]) * d[ind2])
+                    d[ind1] = _rfma(-membr[k], d12, d[ind1])
                     d[ind1] = d[ind1] / (membr[i2] + membr[j2] + membr[k])
                 elif iopt == 2:  # single
                     d[ind1] = min(d[ind1], d[ind2])
                 elif iopt == 3:  # complete
                     d[ind1] = max(d[ind1], d[ind2])
                 elif iopt == 4:  # average (UPGMA)
-                    d[ind1] = ((membr[i2] * d[ind1] + membr[j2] * d[ind2])
+                    d[ind1] = (_rfma(membr[i2], d[ind1], membr[j2] * d[ind2])
                                / (membr[i2] + membr[j2]))
                 elif iopt == 5:  # mcquitty (WPGMA)
                     d[ind1] = (d[ind1] + d[ind2]) / 2
                 elif iopt == 6:  # median (WPGMC)
                     d[ind1] = ((d[ind1] + d[ind2]) - d12 / 2) / 2
                 elif iopt == 7:  # centroid (UPGMC)
-                    d[ind1] = ((membr[i2] * d[ind1] + membr[j2] * d[ind2]
+                    d[ind1] = ((_rfma(membr[i2], d[ind1], membr[j2] * d[ind2])
                                 - membr[i2] * membr[j2] * d12
                                 / (membr[i2] + membr[j2]))
                                / (membr[i2] + membr[j2]))
@@ -452,7 +455,8 @@ def _kmeans_wss(x, cen, cl, k):
         it = cl[i] - 1
         for c in range(p):
             tmp = x[i, c] - cen[it, c]
-            wss[it] += tmp * tmp
+            # R fuses `wss += d*d` to fmadd on arm64; ``_rfma`` mirrors per-arch.
+            wss[it] = _rfma(tmp, tmp, wss[it])
     return wss
 
 
@@ -707,7 +711,7 @@ def _kmns(x, centers, k, iter_max, trace=0):
         for i in range(1, m + 1):
             ii = ic1[i]
             da = x[i - 1, j - 1] - cen[ii - 1, j - 1]
-            wss[ii] += da * da
+            wss[ii] = _rfma(da, da, wss[ii])
 
     return {
         "cluster": np.array(ic1[1:m + 1], dtype=np.int64),

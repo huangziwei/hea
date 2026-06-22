@@ -21,11 +21,13 @@ Bit-exactness
 -------------
 ``C_Cdist`` accumulates each pair's reduction **sequentially over columns**
 (``dist += dev*dev`` for ``j = 0 .. nc-1``). Floating-point ``+`` is not
-associative, so the column order is load-bearing. We reproduce it by keeping the
-reduction loop over columns sequential while vectorizing across the independent
-pairs (``for j: dist += dev_j**2`` over the whole pair vector) — identical
-arithmetic order to the C loop, so the pure-Python kernel is the 0-ulp spec the
-Rust kernel (end goal, see the plan) is checked against.
+associative, so the column order is load-bearing; and euclidean's ``dev*dev +
+dist`` step fuses to a single ``fmadd`` on arm64 (clang's default contraction in
+R's build), reproduced per-arch by ``_rfma_vec`` (see :mod:`hea.R._shared`). We
+reproduce the order by keeping the reduction loop over columns sequential while
+vectorizing across the independent pairs (``for j: dist = rfma(dev, dev, dist)``
+over the whole pair vector) — identical arithmetic to the C loop, so the
+pure-Python kernel is the 0-ulp spec the Rust kernel is checked against.
 """
 from __future__ import annotations
 
@@ -34,6 +36,7 @@ import warnings
 import numpy as np
 
 from .._dispatch import rs_fn
+from ._shared import _rfma_vec
 
 __all__ = [
     "Dist",
@@ -159,7 +162,9 @@ def _cdist(x, mi, p):
                 ok = ~(np.isnan(a) | np.isnan(b))
                 dev = a - b
                 use = ok & ~np.isnan(dev)
-                dist += np.where(use, dev * dev, 0.0)
+                # R fuses `dist += dev*dev` to a single fmadd on arm64 (clang's
+                # default contraction); ``_rfma_vec`` mirrors that per-arch.
+                dist = np.where(use, _rfma_vec(dev, dev, dist), dist)
                 count += use
             return np.sqrt(_finish_scaled(dist, count, nc))
 

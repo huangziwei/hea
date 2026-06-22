@@ -58,8 +58,8 @@ _CENTERS = np.array([[0.2, 0.1], [4.8, 5.1], [0.1, 4.9]])
 def _r_kmeans_explicit(x, centers, algo):
     n, p = x.shape
     k = centers.shape[0]
-    xs = ",".join(repr(float(v)) for v in x.flatten(order="F"))
-    cs = ",".join(repr(float(v)) for v in centers.flatten(order="F"))
+    xs = ",".join(float(v).hex() for v in x.flatten(order="F"))
+    cs = ",".join(float(v).hex() for v in centers.flatten(order="F"))
     rexpr = (
         f"x<-matrix(c({xs}),{n},{p});C<-matrix(c({cs}),{k},{p});"
         f'z<-kmeans(x,C,algorithm="{algo}");'
@@ -133,7 +133,7 @@ def test_kmeans_nstart_cost_vs_R(algo, seed, k, nstart):
     n, p = x.shape
     set_seed(seed)
     z = kmeans(x, k, nstart=nstart, algorithm=algo)
-    xs = ",".join(repr(float(v)) for v in x.flatten(order="F"))
+    xs = ",".join(float(v).hex() for v in x.flatten(order="F"))
     rexpr = (
         f"set.seed({seed});x<-matrix(c({xs}),{n},{p});"
         f'z<-kmeans(x,{k},nstart={nstart},algorithm="{algo}");'

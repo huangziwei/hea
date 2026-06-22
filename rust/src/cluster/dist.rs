@@ -12,6 +12,7 @@
 //! (no cross-pair reduction; like `loess.rs`). Packing is R's column-major
 //! strict lower triangle: for `j = 0..nr`, `i = j+1..nr`, push `(i, j)`.
 
+use crate::nmath::util::rfma;
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use rayon::prelude::*;
@@ -41,7 +42,9 @@ fn r_euclidean(x: &[f64], nc: usize, i1: usize, i2: usize) -> f64 {
         if !a.is_nan() && !b.is_nan() {
             let dev = a - b;
             if !dev.is_nan() {
-                dist += dev * dev;
+                // R fuses `dist += dev*dev` to one fmadd on arm64 (clang's
+                // default contraction); `rfma` mirrors that per-arch.
+                dist = rfma(dev, dev, dist);
                 count += 1;
             }
         }

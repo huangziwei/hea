@@ -4,9 +4,13 @@ Committed pins (always run) plus a live-R differential (skipped without
 ``Rscript``). ``merge``/``order`` are integer encodings (exact on every
 platform); ``height`` is strict 0-ulp on macOS (shared Apple libm) and a few-ulp
 tolerance off macOS — same rationale as ``test_distance`` / ``test_rs_parity``.
+On arm64 macOS R's gfortran fuses the Lance-Williams update to ``fmadd`` (hea
+mirrors it per-arch via ``_rfma``), so fma-affected committed heights use a
+small arm64 pin branch (``_HEIGHT_ARM64``); see that table.
 """
 from __future__ import annotations
 
+import platform
 import subprocess
 import sys
 
@@ -26,6 +30,7 @@ from hea.R.clustering import (
 from hea.R.distance import dist
 
 _STRICT = sys.platform == "darwin"
+_ARM64 = platform.machine().lower() in ("arm64", "aarch64")
 _RTOL = 1e-13
 _METHODS = ["ward.D", "single", "complete", "average", "mcquitty",
             "median", "centroid", "ward.D2"]
@@ -62,6 +67,20 @@ _PINS = {
 }
 
 
+# R's Fortran hclust (`hclust.f`) fuses the Lance-Williams update
+# `(membr*d + membr*d) ...` to a single `fmadd` on arm64 (gfortran's default
+# contraction), where x86 keeps two roundings. So the committed (x86-captured)
+# heights differ by <= a few ulp on arm64 for the multiply-add methods. hea
+# mirrors R per-arch via ``_rfma`` (see hea/R/_shared.py); these overrides keep
+# ``test_hclust_pins`` 0-ulp on arm64 too. The bit-exact arch-correct guarantee
+# is ``test_hclust_vs_live_R`` (live R on whatever machine runs); only the
+# always-run committed pin needs the branch. Only ward.D2 differs for ``_X``.
+_HEIGHT_ARM64 = {
+    "ward.D2": [1.0, 1.0, 1.2909944487358058, 1.2909944487358058,
+                12.24744871391589],
+}
+
+
 def _assert_height(got, exp):
     got = np.asarray(got, dtype=float)
     exp = np.asarray(exp, dtype=float)
@@ -74,6 +93,8 @@ def _assert_height(got, exp):
 @pytest.mark.parametrize("method", _METHODS)
 def test_hclust_pins(method):
     merge_exp, height_exp, order_exp = _PINS[method]
+    if _ARM64 and method in _HEIGHT_ARM64:
+        height_exp = _HEIGHT_ARM64[method]
     h = hclust(dist(_X), method=method)
     assert h.merge.ravel(order="F").tolist() == merge_exp
     assert h.order.tolist() == order_exp
@@ -191,7 +212,7 @@ def test_cutree_vs_live_R(method):
     d = dist(x)
     h = hclust(d, method=method)
     # build the same hclust in R, then cut by a range of k and h.
-    elems = ",".join(repr(float(v)) for v in d.data)
+    elems = ",".join(float(v).hex() for v in d.data)
     rexpr = (
         f'd<-structure(c({elems}),Size={d.Size}L,Diag=FALSE,Upper=FALSE,'
         f'method="euclidean",class="dist");h<-hclust(d,method="{method}");'
@@ -247,7 +268,7 @@ def test_cophenetic_vs_live_R(method):
     x = rng.standard_normal((13, 4))
     d = dist(x)
     h = hclust(d, method=method)
-    elems = ",".join(repr(float(v)) for v in d.data)
+    elems = ",".join(float(v).hex() for v in d.data)
     rexpr = (
         f'd<-structure(c({elems}),Size={d.Size}L,Diag=FALSE,Upper=FALSE,'
         f'method="euclidean",class="dist");h<-hclust(d,method="{method}");'
@@ -270,8 +291,8 @@ def _r_hclust(packed, n, method, members=None):
     The packed lower-triangle vector is rebuilt into a ``"dist"`` object in R so
     the exact same dissimilarities are clustered.
     """
-    elems = ",".join(repr(float(v)) for v in packed)
-    mem = (f"members=c({','.join(repr(float(v)) for v in members)})"
+    elems = ",".join(float(v).hex() for v in packed)
+    mem = (f"members=c({','.join(float(v).hex() for v in members)})"
            if members is not None else "")
     rexpr = (
         f'd<-structure(c({elems}),Size={n}L,Diag=FALSE,Upper=FALSE,'

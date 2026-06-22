@@ -13,6 +13,7 @@
 //! `hcass2` is pure integer work, so there is no float-parity concern; the merge
 //! columns / order are bit-identical to the pure-Python path.
 
+use crate::nmath::util::rfma;
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
 
@@ -194,23 +195,28 @@ pub fn hclust<'py>(
                     let ind2 = if j2 < k { ioffst(j2, k) } else { ioffst(k, j2) };
 
                     if isward {
-                        d[ind1] = (membr[i2] + membr[k]) * d[ind1]
-                            + (membr[j2] + membr[k]) * d[ind2]
-                            - membr[k] * d12;
+                        // R's gfortran fuses the LW update to fmadd on arm64;
+                        // `rfma` mirrors it per-arch (plain a*b+c on x86).
+                        let v = rfma(
+                            membr[i2] + membr[k],
+                            d[ind1],
+                            (membr[j2] + membr[k]) * d[ind2],
+                        );
+                        d[ind1] = rfma(-membr[k], d12, v);
                         d[ind1] /= membr[i2] + membr[j2] + membr[k];
                     } else if iopt == 2 {
                         d[ind1] = d[ind1].min(d[ind2]);
                     } else if iopt == 3 {
                         d[ind1] = d[ind1].max(d[ind2]);
                     } else if iopt == 4 {
-                        d[ind1] = (membr[i2] * d[ind1] + membr[j2] * d[ind2])
+                        d[ind1] = rfma(membr[i2], d[ind1], membr[j2] * d[ind2])
                             / (membr[i2] + membr[j2]);
                     } else if iopt == 5 {
                         d[ind1] = (d[ind1] + d[ind2]) / 2.0;
                     } else if iopt == 6 {
                         d[ind1] = ((d[ind1] + d[ind2]) - d12 / 2.0) / 2.0;
                     } else if iopt == 7 {
-                        d[ind1] = (membr[i2] * d[ind1] + membr[j2] * d[ind2]
+                        d[ind1] = (rfma(membr[i2], d[ind1], membr[j2] * d[ind2])
                             - membr[i2] * membr[j2] * d12 / (membr[i2] + membr[j2]))
                             / (membr[i2] + membr[j2]);
                     }

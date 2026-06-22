@@ -283,7 +283,7 @@ def test_order_dendrogram_type_error():
 # --------------------------------------------------------------------------- #
 def _r_dend_diff(d, method):
     """Build the same hclust->dendrogram in R; return its accessors."""
-    elems = ",".join(repr(float(v)) for v in d.data)
+    elems = ",".join(float(v).hex() for v in d.data)
     rexpr = (
         f'd<-structure(c({elems}),Size={d.Size}L,Diag=FALSE,Upper=FALSE,'
         f'method="euclidean",class="dist");h<-hclust(d,method="{method}");'
@@ -352,8 +352,8 @@ def test_merge_dendrogram_vs_live_R():
     db = as_dendrogram(hclust(dist(xb)))
     m = merge_dendrogram(da, db)
 
-    ea = ",".join(repr(float(v)) for v in dist(xa).data)
-    eb = ",".join(repr(float(v)) for v in dist(xb).data)
+    ea = ",".join(float(v).hex() for v in dist(xa).data)
+    eb = ",".join(float(v).hex() for v in dist(xb).data)
     rexpr = (
         f'da<-as.dendrogram(hclust(structure(c({ea}),Size=5L,Diag=FALSE,'
         'Upper=FALSE,method="euclidean",class="dist")));'

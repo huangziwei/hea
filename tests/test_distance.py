@@ -168,9 +168,9 @@ def test_mahalanobis_vs_live_R():
     center = x.mean(axis=0)
     cov = np.cov(x, rowvar=False)
     n, k = x.shape
-    xs = ",".join(repr(float(v)) for v in x.flatten(order="F"))
-    cs = ",".join(repr(float(v)) for v in center)
-    ss = ",".join(repr(float(v)) for v in cov.flatten(order="F"))
+    xs = ",".join(float(v).hex() for v in x.flatten(order="F"))
+    cs = ",".join(float(v).hex() for v in center)
+    ss = ",".join(float(v).hex() for v in cov.flatten(order="F"))
     rexpr = (
         f"x<-matrix(c({xs}),{n},{k});ctr<-c({cs});S<-matrix(c({ss}),{k},{k});"
         f'cat(sprintf("%.17g",as.double(mahalanobis(x,ctr,S))),sep="\\n")'
@@ -250,7 +250,7 @@ def test_cmdscale_vs_live_R():
     x = rng.standard_normal((10, 4))
     d = dist(x)
     res = cmdscale(d, k=3, eig=True)
-    elems = ",".join(repr(float(v)) for v in d.data)
+    elems = ",".join(float(v).hex() for v in d.data)
     rexpr = (
         f'd<-structure(c({elems}),Size={d.Size}L,Diag=FALSE,Upper=FALSE,'
         f'method="euclidean",class="dist");r<-cmdscale(d,k=3,eig=TRUE);'
@@ -335,13 +335,15 @@ def test_single_row_empty_dist():
 def _r_dist(mat, method, p=2):
     """``as.vector(stats::dist(mat, method, p))`` via Rscript on this machine.
 
-    The matrix is embedded as an exact-round-trip ``matrix(c(...))`` literal
-    (Python ``repr`` of each double; NaN -> R ``NA``); R prints the packed
-    vector with ``%.17g`` (exact f64 round-trip).
+    The matrix is embedded as a ``matrix(c(...))`` literal using Python
+    ``float.hex()`` per double (a C99 hex-float literal — bit-exact, unlike a
+    decimal ``repr`` which this R build's ``strtod`` rounds by up to 1 ulp; that
+    lossy transfer, not the kernel, was the arm64 ``*_vs_live_R`` failure). NaN
+    -> R ``NA``; R prints the packed vector with ``%.17g`` (exact f64 round-trip).
     """
     n, k = mat.shape
     flat = mat.flatten(order="F")
-    elems = ",".join("NA" if np.isnan(v) else repr(float(v)) for v in flat)
+    elems = ",".join("NA" if np.isnan(v) else float(v).hex() for v in flat)
     rexpr = (
         f"x<-matrix(c({elems}),{n},{k});"
         f'cat(sprintf("%.17g",as.double(as.vector('
