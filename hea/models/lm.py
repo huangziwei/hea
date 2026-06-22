@@ -1373,16 +1373,22 @@ class lm:
         )
 
     def compute_t_values(self):
-
-        t_values = self._bhat_arr / self._se_bhat_arr
-
+        # R's summary.lm forms `est/se` directly. For an essentially perfect
+        # fit the SE collapses to (near) zero; R's QR leaves ~1e-17 dust so it
+        # gets a finite-huge t, but with an exactly-zero SE the ratio is the
+        # honest ±Inf / NaN limit. R's division is silent at the C level (it
+        # only warns separately via "essentially perfect fit"), so suppress
+        # numpy's 0/0 and x/0 warnings to match that silent ratio.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t_values = self._bhat_arr / self._se_bhat_arr
         return _row_frame(t_values, self.column_names)
 
     def compute_p_values(self):
         # compute p values of model coefficients with scipy.stats.t.sf
         # H0: βi==0
         # H1: βi!=0
-        t_arr = self._bhat_arr / self._se_bhat_arr
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t_arr = self._bhat_arr / self._se_bhat_arr
         p_values = 2 * _dist.pt(np.abs(t_arr), self.df_residuals, lower_tail=False)
         return _row_frame(p_values, self.column_names)
 

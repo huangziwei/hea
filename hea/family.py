@@ -5477,8 +5477,13 @@ class ziP(Family):
     def dev_resids(self, y, mu, wt, theta=None):
         th = self._theta if theta is None else np.asarray(theta, dtype=float)
         p = self._presence_lp(mu, th)
-        return -2.0 * _zipll(np.asarray(y, dtype=float),
-                             np.asarray(mu, dtype=float), p, deriv=0)["l"]
+        # mgcv's R dev.resids is exactly `-2*zipll(...)$l` (efam.r:3884-3890).
+        # For extreme trial η the Poisson mean e^η overflows; R folds that to
+        # ±Inf silently (R's exp/`*` never warn), so mirror R's silence — the
+        # Inf deviance for a rejected step is what mgcv's fitter sees too.
+        with np.errstate(over="ignore", invalid="ignore"):
+            return -2.0 * _zipll(np.asarray(y, dtype=float),
+                                 np.asarray(mu, dtype=float), p, deriv=0)["l"]
 
     def Dd(self, y, mu, theta, wt, level: int = 0) -> dict:
         return _zip_Dd(y, mu, np.asarray(theta, dtype=float), wt,

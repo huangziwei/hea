@@ -326,7 +326,11 @@ def test_cbind_lhs_matches_proportion_weights_form():
         "f": [9.0, 8, 7, 6, 5, 4, 3, 2, 1, 0.1],
         "x": np.arange(10, dtype=float),
     })
-    m_cb = glm("cbind(s, f) ~ x", d, family=Binomial())
+    # f has a non-integer entry (0.1) → hea warns exactly like R's two-column
+    # binomial initialize ("non-integer counts in a binomial glm!"); assert it
+    # so the expected R-parity warning is captured, not leaked.
+    with pytest.warns(UserWarning, match="non-integer counts"):
+        m_cb = glm("cbind(s, f) ~ x", d, family=Binomial())
 
     # Equivalent rewrite the user could do by hand.
     p = d["s"] / (d["s"] + d["f"])
@@ -367,8 +371,12 @@ def test_bracket_lhs_equals_cbind_binomial():
         "f": [9.0, 8, 7, 6, 5, 4, 3, 2, 1, 0.1],
         "x": np.arange(10, dtype=float),
     })
-    m_br = glm("[s, f] ~ x", d, family=Binomial())
-    m_cb = glm("cbind(s, f) ~ x", d, family=Binomial())
+    # Both go through the cbind two-column path; f's 0.1 makes counts
+    # non-integer, so each warns exactly like R (and like the cbind test above).
+    with pytest.warns(UserWarning, match="non-integer counts"):
+        m_br = glm("[s, f] ~ x", d, family=Binomial())
+    with pytest.warns(UserWarning, match="non-integer counts"):
+        m_cb = glm("cbind(s, f) ~ x", d, family=Binomial())
     np.testing.assert_array_equal(m_br._bhat_arr, m_cb._bhat_arr)
     np.testing.assert_array_equal(m_br._se_bhat_arr, m_cb._se_bhat_arr)
     assert m_br.deviance == m_cb.deviance
