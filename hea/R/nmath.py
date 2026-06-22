@@ -32,6 +32,7 @@ from .._dispatch import rs_fn
 _rs_pnorm = rs_fn("pnorm")
 _rs_qnorm = rs_fn("qnorm")
 _rs_dnorm = rs_fn("dnorm")
+_rs_psigamma = rs_fn("psigamma")
 
 # name -> numpy-vectorized pure-Python kernel, used by _disp as the no-native
 # fallback (populated at end of module, after the kernels are defined).
@@ -68,6 +69,7 @@ _M_LN_SQRT_2PI = 0.918938533204672741780329736406  # log(sqrt(2pi))
 _M_2PI = 6.283185307179586476925286766559          # 2*pi
 _M_SQRT2 = 1.414213562373095048801688724210        # sqrt(2)
 _M_LN2 = 0.693147180559945309417232121458          # ln(2)
+_M_LOG10_2 = 0.301029995663981195213738894724       # log10(2) (R d1mach(5))
 _M_LN_2PI = 1.8378770664093454835606594728112352798  # log(2*pi)
 _M_SQRT_2PI = 2.50662827463100050241576528481104525301  # sqrt(2*pi)
 _X_LRG = 2.86111748575702815380240589208115399625e307  # 2^1023 / pi
@@ -932,6 +934,247 @@ def _sinpi(x):
     if x == -0.5:
         return -1.0
     return math.sin(math.pi * x)
+
+
+# --- psigamma / polygamma (R nmath/polygamma.c, Amos TOMS 610) --------------
+# Bernoulli numbers B_2k for the asymptotic expansion (polygamma.c:177-200).
+_BVALUES = (
+    1.00000000000000000e+00,
+    -5.00000000000000000e-01,
+    1.66666666666666667e-01,
+    -3.33333333333333333e-02,
+    2.38095238095238095e-02,
+    -3.33333333333333333e-02,
+    7.57575757575757576e-02,
+    -2.53113553113553114e-01,
+    1.16666666666666667e+00,
+    -7.09215686274509804e+00,
+    5.49711779448621554e+01,
+    -5.29124242424242424e+02,
+    6.19212318840579710e+03,
+    -8.65802531135531136e+04,
+    1.42551716666666667e+06,
+    -2.72982310678160920e+07,
+    6.01580873900642368e+08,
+    -1.51163157670921569e+10,
+    4.29614643061166667e+11,
+    -1.37116552050883328e+13,
+    4.88332318973593167e+14,
+    -1.92965793419400681e+16,
+)
+
+
+def _r_pow_di(x, n):
+    """R's ``R_pow_di(x, n)`` — integer power by repeated squaring (NOT libm
+    ``pow``); bit-exact mirror of arithmetic.c."""
+    pow_ = 1.0
+    if math.isnan(x):
+        return x
+    if n != 0:
+        if not math.isfinite(x):
+            return x ** float(n)
+        is_neg = n < 0
+        if is_neg:
+            n = -n
+        while True:
+            if n & 1:
+                pow_ *= x
+            n >>= 1
+            if n != 0:
+                x *= x
+            else:
+                break
+        if is_neg:
+            pow_ = 1.0 / pow_
+    return pow_
+
+
+def _d_n_cot(x, n):
+    """``(d/dx)^n cot(x)`` for n in {0..5} (polygamma.c:149-172); else NaN."""
+    if n == 0:
+        return math.cos(x) / math.sin(x)
+    elif n == 1:                                       # -1/sin^2
+        return -1.0 / _r_pow_di(math.sin(x), 2)
+    elif n == 2:                                       # 2 cos / sin^3
+        return 2.0 * math.cos(x) / _r_pow_di(math.sin(x), 3)
+    elif n == 3:                                       # -2(3 - 2 sin^2)/sin^4
+        sin2 = _r_pow_di(math.sin(x), 2)
+        return -2.0 * (3 - 2 * sin2) / _r_pow_di(sin2, 2)
+    elif n == 4:                                       # 8 cos (cos^2 + 2)/sin^5
+        co = math.cos(x)
+        return 8 * co * (_r_pow_di(co, 2) + 2) / _r_pow_di(math.sin(x), 5)
+    elif n == 5:                                       # (-16 c^4 -88 c^2 -16)/sin^6
+        co2 = _r_pow_di(math.cos(x), 2)
+        return -8 * (2 * _r_pow_di(co2, 2) + 11 * co2 + 2) / _r_pow_di(math.sin(x), 6)
+    else:
+        return _NAN
+
+
+def _dpsifn_m1(x, n):
+    """R's ``dpsifn(x, n, kode=1, m=1)`` (polygamma.c:175-485): the single
+    scaled derivative ``(-1)^(n+1)/gamma(n+1) * psi(n,x)``. Returns NaN on the
+    C ``ierr != 0`` exits. Only the R case (kode=1, m=1) is ported."""
+    if n < 0:
+        return _NAN                                    # ierr = 1
+    if x <= 0.0:
+        if x == round(x):                              # non-positive integer
+            return _INF if (n % 2) else _NAN
+        ans = _dpsifn_m1(1.0 - x, n)                   # reflection (A&S 6.4.7)
+        if n > 5:
+            return _NAN                                # ierr = 4
+        x = x * math.pi
+        t1 = 1.0
+        t2 = 1.0
+        s = 1.0
+        k = 0
+        j = k - n
+        while j < 1:                                   # m == 1  => j < 1
+            t1 *= math.pi                              # t1 == pi^(k+1)
+            if k >= 2:
+                t2 *= k                                # t2 == k!
+            if j >= 0:
+                # R fuses `ans + (t1/t2)*d_n_cot` to one fmadd on arm64 (clang
+                # -ffp-contract); the reflection cancels badly so the 1-ulp FMA
+                # diff amplifies (~45 ulp). _rfma matches R per-arch.
+                ans = s * _rfma(t1 / t2, _d_n_cot(x, k), ans)
+            k += 1
+            j += 1
+            s = -s
+        return ans
+    # x > 0
+    xln = math.log(x)
+    lrg = 1.0 / (2.0 * _DBL_EPSILON)
+    if n == 0 and x * xln > lrg:
+        return -xln
+    if n >= 1 and x > n * lrg:
+        return math.exp(-n * xln) / n                  # x^-n / n
+    nx = 1021                                          # imin2(-i1mach(15), i1mach(16))
+    r1m5 = _M_LOG10_2
+    r1m4 = _DBL_EPSILON * 0.5
+    wdtol = max(r1m4, 0.5e-18)
+    elim = 2.302 * (nx * r1m5 - 3.0)
+    rln = min(r1m5 * 53, 18.06)                        # i1mach(14) == 53
+    fln = max(rln, 3.0) - 3.0
+    yint = 3.50 + 0.40 * fln
+    slope = 0.21 + fln * (0.0006038 * fln + 0.008677)
+    nn = n
+    fn = n
+    t = (fn + 1) * xln
+    if abs(t) > elim:
+        if t <= 0.0:
+            return _NAN                                # ierr = 2 (overflow)
+        return 0.0                                     # underflow (m == 1)
+    if x < wdtol:
+        return _r_pow_di(x, -n - 1)                    # kode == 1: no +xln
+    xm = yint + slope * fn
+    xmin = float(int(xm) + 1)
+    if n != 0:
+        xm = -2.302 * rln - min(0.0, xln)
+        arg = min(0.0, xm / n)
+        eps = math.exp(arg)
+        xm = (-arg) if abs(arg) < 1.0e-3 else (1.0 - eps)
+        fln = x * xm / eps
+        xm = xmin - x
+        if xm > 7.0 and fln < 15.0:                    # rapidly-converging series
+            nn = int(fln) + 1
+            np_ = n + 1
+            t = math.exp(-(n + 1) * xln)
+            s = t
+            den = x
+            for _i in range(1, nn + 1):
+                den += 1.0
+                s += math.pow(den, float(-np_))
+            return s
+    xdmy = x
+    xdmln = xln
+    xinc = 0.0
+    if x < xmin:
+        nx = int(x)
+        xinc = xmin - nx
+        xdmy = x + xinc
+        xdmln = math.log(xdmy)
+    t = fn * xdmln
+    t1 = xdmln + xdmln
+    t2 = t + xdmln
+    tk = max(abs(t), abs(t1), abs(t2))
+    if tk > elim:
+        return 0.0                                     # underflow
+    # L10: asymptotic (Bernoulli) expansion in 1/xdmy^2
+    tss = math.exp(-t)
+    tt = 0.5 / xdmy
+    t1 = tt
+    tst = wdtol * tt
+    if nn != 0:
+        t1 = tt + 1.0 / fn
+    rxsq = 1.0 / (xdmy * xdmy)
+    ta = 0.5 * rxsq
+    t = (fn + 1) * ta
+    s = t * _BVALUES[2]
+    if abs(s) >= tst:
+        tk = 2.0
+        for k in range(4, 23):
+            t = t * ((tk + fn + 1) / (tk + 1.0)) * ((tk + fn) / (tk + 2.0)) * rxsq
+            trm_k = t * _BVALUES[k - 1]
+            if abs(trm_k) < tst:
+                break
+            s += trm_k
+            tk += 2.0
+    s = (s + t1) * tss
+    if xinc != 0.0:                                    # backward recur xdmy -> x
+        nx = int(xinc)
+        np_ = nn + 1
+        if nx > 100:                                   # n_max
+            return _NAN                                # ierr = 3
+        if nn == 0:
+            for i in range(1, nx + 1):                 # L20 (avoids cancellation)
+                s += 1.0 / (x + (nx - i))
+            return s - xdmln                           # L30, kode == 1
+        xm = xinc - 1.0
+        fx = x + xm
+        for _i in range(1, nx + 1):
+            s += math.pow(fx, float(-np_))
+            xm -= 1.0
+            fx = x + xm
+    if fn == 0:
+        return s - xdmln                               # L30, kode == 1
+    return s
+
+
+def psigamma5(x, deriv):
+    """R's ``psigamma(x, deriv)`` (polygamma.c:499-520): the ``deriv``-th
+    derivative of the digamma function; ``psigamma(x, 0) == digamma(x)``."""
+    if math.isnan(x):
+        return x
+    n = int(round(deriv))                              # R_forceint (half-even)
+    if n > 100:
+        return _NAN
+    ans = _dpsifn_m1(x, n)
+    ans = -ans                                         # (-1)^(0+1) gamma(1) A
+    for k in range(1, n + 1):
+        ans = ans * (-k)                               # (-1)^(k+1) gamma(k+1) A
+    return ans
+
+
+def psigamma_vec(x, deriv):
+    """Vectorised :func:`psigamma5` (rust fast path, else the scalar oracle).
+    ``deriv`` is the scalar polygamma order; mirrors ``scipy``'s
+    ``polygamma(deriv, x)`` but uses R's ``dpsifn`` (mgcv-faithful).
+
+    Bit-exact vs R for x > 0 (all of betar/nb/scat use); the x < 0 reflection
+    cancels badly, so a residual ~5-ulp libm/cancellation noise can appear at
+    rare arguments (sub-fixture-tolerance; high-order derivatives at x < 0 are
+    unused in hea — only the n=1 negative case, twlss, is exercised)."""
+    if _rs_psigamma is not None:
+        xa = np.ascontiguousarray(x, dtype=float)
+        return _rs_psigamma(xa.reshape(-1), float(deriv)).reshape(xa.shape)
+    xa = np.asarray(x, dtype=float)
+    out = np.empty(xa.shape, dtype=float)
+    flat = xa.reshape(-1)
+    of = out.reshape(-1)
+    d = float(deriv)
+    for i in range(flat.size):
+        of[i] = psigamma5(float(flat[i]), d)
+    return out
 
 
 def gammafn(x):

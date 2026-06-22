@@ -562,3 +562,47 @@ def test_tweedie_series_parity(p, phi):
         _fam._rs_tweedie_series = orig
     for a, b in zip(out_rs, out_np):
         np.testing.assert_allclose(a, b, rtol=1e-8, atol=1e-9)
+
+
+# --- psigamma (R dpsifn) — rust vs the pure-Python oracle --------------------
+from hea.R import nmath as _nmath  # noqa: E402
+
+
+@pytest.mark.parametrize("deriv", [0, 1, 2, 3])
+def test_psigamma_parity_positive(deriv):
+    """x > 0 (the betar/nb/scat domain) — bit-exact on darwin, libm-floor off.
+    Spans the three dpsifn regimes (backward-recursion / series / asymptotic)."""
+    if _nmath._rs_psigamma is None:
+        pytest.skip("hea._rs.psigamma unavailable")
+    rng = np.random.default_rng(deriv + 1)
+    x = np.concatenate([rng.uniform(1e-3, 0.5, 200), rng.uniform(0.5, 9.0, 200),
+                        rng.uniform(9.0, 1e4, 200)])
+    got = _nmath.psigamma_vec(x, deriv)
+    orig = _nmath._rs_psigamma
+    _nmath._rs_psigamma = None
+    try:
+        want = _nmath.psigamma_vec(x, deriv)
+    finally:
+        _nmath._rs_psigamma = orig
+    _assert_bit_exact(got, want)
+
+
+@pytest.mark.parametrize("deriv", [0, 1])
+def test_psigamma_parity_reflection(deriv):
+    """x < 0 reflection (twlss's deriv=1 negative-arg trigamma). The A&S
+    reflection cancels badly, so a last-bit libm sin/cos difference between
+    rust-std and python-math gets amplified to ~1 ulp even on shared-libm
+    darwin — so this is a tolerance gate (rtol=1e-9, the reduction precedent)
+    on all platforms, not bit-exact. Both sides are ~5-ulp vs R here."""
+    if _nmath._rs_psigamma is None:
+        pytest.skip("hea._rs.psigamma unavailable")
+    rng = np.random.default_rng(deriv + 7)
+    x = -rng.uniform(0.01, 8.0, 400)
+    got = _nmath.psigamma_vec(x, deriv)
+    orig = _nmath._rs_psigamma
+    _nmath._rs_psigamma = None
+    try:
+        want = _nmath.psigamma_vec(x, deriv)
+    finally:
+        _nmath._rs_psigamma = orig
+    np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-300, equal_nan=True)

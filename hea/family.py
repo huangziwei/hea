@@ -39,6 +39,14 @@ from .R import nmath as _nmath
 from .R.nmath import _dpois_raw, _dbinom_raw
 from ._dispatch import rs_fn as _rs_fn
 
+
+def _polygamma(deriv, x):
+    """``scipy.special.polygamma``-signature shim over R's ``dpsifn``
+    (nmath/polygamma.c) — mgcv-faithful and rust-accelerated. scipy's
+    Hurwitz-zeta ``polygamma`` is ~2.2x slower than R's ``psigamma`` for
+    deriv>=1 (its digamma is faster, so deriv 0 stays on scipy)."""
+    return _nmath.psigamma_vec(x, deriv)
+
 # The GLM/GLMM aic hooks evaluate the saddlepoint log-density primitives
 # (_dpois_raw / _dbinom_raw) on n-vectors every objective eval. Route them to the
 # Rust kernels when present (bit-identical to the pure-Python ones — verified by
@@ -4376,8 +4384,8 @@ class nb(Family):
         term1 = Th * (lyth - psi0_yth + psi0_th - th0)
         LSTH = (-term1 * w)[:, None]
         lsth = float(np.sum(LSTH))
-        psi1_yth = polygamma(1, yth)
-        psi1_th = polygamma(1, Th)
+        psi1_yth = _polygamma(1, yth)
+        psi1_th = _polygamma(1, Th)
         term2 = Th * (lyth - Th * psi1_yth - psi0_yth + Th / yth
                       + Th * psi1_th + psi0_th - th0 - 1.0)
         lsth2 = -float(np.sum(term2 * w))
@@ -4543,15 +4551,15 @@ class betar(Family):
         muth = mu * theta
         onemuth = onemu * theta
         psi0_th = digamma(theta)
-        psi1_th = polygamma(1, theta)
+        psi1_th = _polygamma(1, theta)
         psi0_muth = digamma(muth)
         psi0_onemuth = digamma(onemuth)
-        psi1_muth = polygamma(1, muth)
-        psi1_onemuth = polygamma(1, onemuth)
-        psi2_muth = polygamma(2, muth)
-        psi2_onemuth = polygamma(2, onemuth)
-        psi3_muth = polygamma(3, muth)
-        psi3_onemuth = polygamma(3, onemuth)
+        psi1_muth = _polygamma(1, muth)
+        psi1_onemuth = _polygamma(1, onemuth)
+        psi2_muth = _polygamma(2, muth)
+        psi2_onemuth = _polygamma(2, onemuth)
+        psi3_muth = _polygamma(3, muth)
+        psi3_onemuth = _polygamma(3, onemuth)
         log_yoney = np.log(y) - np.log1p(-y)
         r: dict = {}
         r["Dmu"] = 2.0 * wt * theta * (psi0_muth - psi0_onemuth - log_yoney)
@@ -4634,8 +4642,8 @@ class betar(Family):
             if deriv:
                 g = (phi * np.log(yy) - phi * np.log1p(-yy)
                      - phi * digamma(mu * phi) + phi * digamma((1.0 - mu) * phi))
-                h = -phi ** 2 * (polygamma(1, mu * phi)
-                                 + polygamma(1, (1.0 - mu) * phi))
+                h = -phi ** 2 * (_polygamma(1, mu * phi)
+                                 + _polygamma(1, (1.0 - mu) * phi))
                 dmueta1 = expeta * (b - a) / (1.0 + expeta) ** 2
                 dmueta2 = (np.sign(eta) * ((a - b) * expeta
                            + (b - a) * expeta ** 2) / (expeta + 1.0) ** 3)
