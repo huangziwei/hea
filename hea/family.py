@@ -54,6 +54,10 @@ _rs_cox_l = _rs_fn("cox_l")
 _rs_cox_lpl0 = _rs_fn("cox_lpl0")
 _rs_cox_lpl_d1 = _rs_fn("cox_lpl_d1")
 _rs_cox_d2h = _rs_fn("cox_d2h")
+# mgcv tweedious (misc.c:170) per-row series sweep for the scalar-p Tweedie
+# saturated-likelihood moments; the dense-matrix `_tweedie_log_a_vec` below is
+# the numpy oracle + HEA_NO_RS fallback. None when the extension is absent.
+_rs_tweedie_series = _rs_fn("tweedie_series")
 
 
 def _dbinom_raw_disp(x, n, p, q, give_log=True):
@@ -1699,6 +1703,41 @@ def _tweedie_log_a_one(y_i: float, phi_i: float, p: float):
             j2_psi_bar, j2_psi2_bar, j2_trig_bar)
 
 
+def _tweedie_series_rs(log_z, j_int, alpha, J, near):
+    """Rust ``tweedious`` sweep for the scalar-p saturated-likelihood moments.
+
+    Builds the shared length-``J`` special-function tables with the SAME scipy
+    routines :func:`_tweedie_log_a_vec`'s numpy path uses (so the special-fn
+    values are bit-identical), verifies ``J`` covers every row's eps window
+    (growing the right edge if needed — an O(n)+O(J) check, never the n×J
+    matrix), then calls the per-row rust kernel. Returns the seven
+    ``(n_active,)`` moment arrays in :func:`_tweedie_log_a_vec`'s order."""
+    log_z = np.ascontiguousarray(np.asarray(log_z, dtype=float))
+    j_int = np.ascontiguousarray(np.asarray(j_int, dtype=np.int64))
+    J = int(J)
+    while True:
+        j_grid = np.arange(1, J + 1, dtype=float)
+        lgam_j1 = gammaln(j_grid + 1.0)
+        nja = -j_grid * alpha
+        lgam_nja = gammaln(nja)
+        # eps-window right-edge check (O(n)); reference = lw at each row's
+        # integer peak, exactly the rust kernel's ``wmax``.
+        lw_right = J * log_z - lgam_j1[-1] - lgam_nja[-1]
+        lw_peak = j_int * log_z - lgam_j1[j_int - 1] - lgam_nja[j_int - 1]
+        if J >= _LD_J_MAX or not bool(np.any(lw_right >= lw_peak - _LD_EPS)):
+            break
+        J = min(J * 2, _LD_J_MAX)
+    psi_tab = digamma(nja)
+    trig_tab = polygamma(1, nja)
+    res = _rs_tweedie_series(
+        log_z, j_int,
+        np.ascontiguousarray(lgam_j1), np.ascontiguousarray(lgam_nja),
+        np.ascontiguousarray(psi_tab), np.ascontiguousarray(trig_tab),
+        int(near), float(_LD_EPS))
+    return (res[:, 0], res[:, 1], res[:, 2], res[:, 3],
+            res[:, 4], res[:, 5], res[:, 6])
+
+
 def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     """Vectorised over y (and per-obs phi). Returns seven arrays of shape
     ``y.shape``: ``log_a``, ``j_bar``, ``j_var``, ``j_psi_bar``,
@@ -1758,73 +1797,86 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     # bit-exactness GUARANTEE — it stops only once the eps gate has provably
     # fired inside the window for every row (the rightmost column is below
     # `log_max − _LD_EPS`), so by unimodality no retained term is ever
-    # truncated and the sum is identical to any wider J.
+    # truncated and the sum is identical to any wider J. `j_int + half` is
+    # monotone increasing in j_int (ψ' decreasing ⇒ peak_var increasing), so
+    # max_i(j_int_i + half_i) is attained at j_int_max — evaluate the curvature
+    # at that one scalar instead of ψ' over the whole n_active j_int array
+    # (which was a REML-loop hot spot via scipy zeta). Identical J, far cheaper.
     peak_var = 1.0 / (
-        polygamma(1, j_int + 1.0)
-        + alpha * alpha * polygamma(1, -j_int * alpha)
+        polygamma(1, j_int_max + 1.0)
+        + alpha * alpha * polygamma(1, -j_int_max * alpha)
     )
-    half = np.sqrt(2.0 * _LD_EPS * np.maximum(peak_var, 0.0))
-    right = int(np.ceil(float(np.max(j_int + half)))) + 16
+    half = np.sqrt(2.0 * _LD_EPS * max(float(peak_var), 0.0))
+    right = int(np.ceil(j_int_max + half)) + 16
     J = min(max(right, j_int_max + near + 1), _LD_J_MAX)
 
-    out_la = np.empty(n_active)
-    out_jb = np.empty(n_active)
-    out_jv = np.empty(n_active)
-    out_jpb = np.empty(n_active)
-    out_j2pb = np.empty(n_active)
-    out_j2p2b = np.empty(n_active)
-    out_j2tb = np.empty(n_active)
-    while True:
-        j_grid = np.arange(1, J + 1, dtype=float)
-        j_grid_int = j_grid.astype(int)
-        lgamma_jp1 = gammaln(j_grid + 1.0)
-        lgamma_neg_ja = gammaln(-j_grid * alpha)
-        psi_arr = digamma(-j_grid * alpha)
-        trig_arr = polygamma(1, -j_grid * alpha)
+    if _rs_tweedie_series is not None:
+        # Rust per-row sweep (mgcv tweedious): Python builds the shared length-J
+        # scipy tables + grows J (both O(n)/O(J)); rust does the O(Σ width_i)
+        # windowed sum. Matches this numpy oracle to the reduction floor.
+        (out_la, out_jb, out_jv, out_jpb,
+         out_j2pb, out_j2p2b, out_j2tb) = _tweedie_series_rs(
+            log_z, j_int, alpha, J, near)
+    else:
+        out_la = np.empty(n_active)
+        out_jb = np.empty(n_active)
+        out_jv = np.empty(n_active)
+        out_jpb = np.empty(n_active)
+        out_j2pb = np.empty(n_active)
+        out_j2p2b = np.empty(n_active)
+        out_j2tb = np.empty(n_active)
+        while True:
+            j_grid = np.arange(1, J + 1, dtype=float)
+            j_grid_int = j_grid.astype(int)
+            lgamma_jp1 = gammaln(j_grid + 1.0)
+            lgamma_neg_ja = gammaln(-j_grid * alpha)
+            psi_arr = digamma(-j_grid * alpha)
+            trig_arr = polygamma(1, -j_grid * alpha)
 
-        # Chunk on the n_active axis to bound the (chunk, J) working set.
-        # Each row carries 5 J-wide arrays in flight (lw / 2 masks / w /
-        # transient), 8 bytes each → 40 J bytes per row.
-        chunk = max(1, _chunk_bytes // (40 * J))
-        grow = False
-        for s in range(0, n_active, chunk):
-            e = min(s + chunk, n_active)
-            lz_c = log_z[s:e]
-            ji_c = j_int[s:e]
-            lw = (j_grid[None, :] * lz_c[:, None]
-                  - lgamma_jp1[None, :] - lgamma_neg_ja[None, :])
-            log_max = np.max(lw, axis=1)
-            above_eps = lw >= (log_max[:, None] - _LD_EPS)
-            # Right boundary still carrying weight ⇒ the eps-window extends
-            # past J for some row ⇒ grow and recompute (rare — the analytic
-            # width above covers it first-try in practice). j_int+near < J
-            # by construction, so the last column is pure above_eps.
-            if J < _LD_J_MAX and above_eps[:, -1].any():
-                grow = True
+            # Chunk on the n_active axis to bound the (chunk, J) working set.
+            # Each row carries 5 J-wide arrays in flight (lw / 2 masks / w /
+            # transient), 8 bytes each → 40 J bytes per row.
+            chunk = max(1, _chunk_bytes // (40 * J))
+            grow = False
+            for s in range(0, n_active, chunk):
+                e = min(s + chunk, n_active)
+                lz_c = log_z[s:e]
+                ji_c = j_int[s:e]
+                lw = (j_grid[None, :] * lz_c[:, None]
+                      - lgamma_jp1[None, :] - lgamma_neg_ja[None, :])
+                log_max = np.max(lw, axis=1)
+                above_eps = lw >= (log_max[:, None] - _LD_EPS)
+                # Right boundary still carrying weight ⇒ the eps-window extends
+                # past J for some row ⇒ grow and recompute (rare — the analytic
+                # width above covers it first-try in practice). j_int+near < J
+                # by construction, so the last column is pure above_eps.
+                if J < _LD_J_MAX and above_eps[:, -1].any():
+                    grow = True
+                    break
+                within_near = (
+                    np.abs(j_grid_int[None, :] - ji_c[:, None]) <= near)
+                keep = within_near | above_eps
+                w = np.where(keep, np.exp(lw - log_max[:, None]), 0.0)
+                sum_w = np.sum(w, axis=1)
+                out_la[s:e] = log_max + np.log(sum_w)
+                p_w = w / sum_w[:, None]
+                jb_c = np.sum(p_w * j_grid[None, :], axis=1)
+                out_jb[s:e] = jb_c
+                out_jv[s:e] = np.sum(
+                    p_w * (j_grid[None, :] - jb_c[:, None]) ** 2, axis=1,
+                )
+                out_jpb[s:e] = np.sum(
+                    p_w * j_grid[None, :] * psi_arr[None, :], axis=1,
+                )
+                jpsi = j_grid[None, :] * psi_arr[None, :]
+                out_j2pb[s:e] = np.sum(p_w * j_grid[None, :] * jpsi, axis=1)
+                out_j2p2b[s:e] = np.sum(p_w * jpsi * jpsi, axis=1)
+                out_j2tb[s:e] = np.sum(
+                    p_w * j_grid[None, :] ** 2 * trig_arr[None, :], axis=1,
+                )
+            if not grow:
                 break
-            within_near = np.abs(j_grid_int[None, :] - ji_c[:, None]) <= near
-            keep = within_near | above_eps
-            w = np.where(keep, np.exp(lw - log_max[:, None]), 0.0)
-            sum_w = np.sum(w, axis=1)
-            out_la[s:e] = log_max + np.log(sum_w)
-            p_w = w / sum_w[:, None]
-            jb_c = np.sum(p_w * j_grid[None, :], axis=1)
-            out_jb[s:e] = jb_c
-            out_jv[s:e] = np.sum(
-                p_w * (j_grid[None, :] - jb_c[:, None]) ** 2, axis=1,
-            )
-            out_jpb[s:e] = np.sum(
-                p_w * j_grid[None, :] * psi_arr[None, :], axis=1,
-            )
-            jpsi = j_grid[None, :] * psi_arr[None, :]
-            out_j2pb[s:e] = np.sum(p_w * j_grid[None, :] * jpsi, axis=1)
-            out_j2p2b[s:e] = np.sum(p_w * jpsi * jpsi, axis=1)
-            out_j2tb[s:e] = np.sum(
-                p_w * j_grid[None, :] ** 2 * trig_arr[None, :], axis=1,
-            )
-        if not grow:
-            break
-        J = min(J * 2, _LD_J_MAX)
+            J = min(J * 2, _LD_J_MAX)
 
     flat_la = log_a.ravel()
     flat_jb = j_bar.ravel()
@@ -3671,24 +3723,33 @@ class tw(Tweedie):
                      / (np.exp(th) + 1) ** 3)
         mu1p = mu ** (1 - p)
         mup = mu ** p
+        # mu**(-1-p) == mu**(-p-1) bit-for-bit (commutative exponent add); the
+        # mgcv source recomputes it as `mup1` at level>0 — share the one pow.
+        mupm1 = mu ** (-1 - p)
         r = {}
         ymupi = y / mup
         r["Dmu"] = 2 * wt * (mu1p - ymupi)
-        r["Dmu2"] = 2 * wt * (mu ** (-1 - p) * p * y + (1 - p) / mup)
+        r["Dmu2"] = 2 * wt * (mupm1 * p * y + (1 - p) / mup)
         r["EDmu2"] = (2 * wt) / mup
         if level > 0:
             i1p = 1 / (1 - p)
             y1 = y + (y == 0)
             logmu = np.log(mu)
+            # Hoist sub-expressions the verbatim mgcv source recomputes (R's
+            # `^`/`log` re-evaluate each time): y**(2-p), log(y1), their product,
+            # and mu**(-p-1) — all byte-identical to the inline forms, just once.
+            logy1 = np.log(y1)
+            y2p = y ** (2 - p)
+            y2plogy = y2p * logy1
             mu2p = mu * mu1p
+            mup1 = mupm1
             r["Dth"] = 2 * wt * (
-                (y ** (2 - p) * np.log(y1) - mu2p * logmu) / (2 - p)
-                + (y * mu1p * logmu - y ** (2 - p) * np.log(y1)) / (1 - p)
-                - (y ** (2 - p) - mu2p) / (2 - p) ** 2
-                + (y ** (2 - p) - y * mu1p) * i1p ** 2
+                (y2plogy - mu2p * logmu) / (2 - p)
+                + (y * mu1p * logmu - y2plogy) / (1 - p)
+                - (y2p - mu2p) / (2 - p) ** 2
+                + (y2p - y * mu1p) * i1p ** 2
             ) * dpth1
             r["Dmuth"] = 2 * wt * logmu * (ymupi - mu1p) * dpth1
-            mup1 = mu ** (-p - 1)
             r["Dmu3"] = -2 * wt * mup1 * p * (y / mu * (p + 1) + 1 - p)
             r["Dmu2th"] = 2 * wt * (
                 mup1 * y * (1 - p * logmu) - (logmu * (1 - p) + 1) / mup
@@ -3696,20 +3757,20 @@ class tw(Tweedie):
             r["EDmu3"] = -2 * wt * p * mup1
             r["EDmu2th"] = -2 * wt * logmu / mup * dpth1
         if level > 1:
+            logmu2 = logmu ** 2
             mup2 = mup1 / mu
             r["Dmu4"] = 2 * wt * mup2 * p * (p + 1) * (y * (p + 2) / mu + 1 - p)
-            y2plogy = y ** (2 - p) * np.log(y1)
-            y2plog2y = y2plogy * np.log(y1)
+            y2plog2y = y2plogy * logy1
             r["Dth2"] = 2 * wt * (
-                (mu2p * logmu ** 2 - y2plog2y) / (2 - p)
-                + (y2plog2y - y * mu1p * logmu ** 2) / (1 - p)
+                (mu2p * logmu2 - y2plog2y) / (2 - p)
+                + (y2plog2y - y * mu1p * logmu2) / (1 - p)
                 + 2 * (y2plogy - mu2p * logmu) / (2 - p) ** 2
                 + 2 * (y * mu1p * logmu - y2plogy) / (1 - p) ** 2
-                + 2 * (mu2p - y ** (2 - p)) / (2 - p) ** 3
-                + 2 * (y ** (2 - p) - y * mu ** (1 - p)) / (1 - p) ** 3
+                + 2 * (mu2p - y2p) / (2 - p) ** 3
+                + 2 * (y2p - y * mu1p) / (1 - p) ** 3
             ) * dpth1 ** 2 + r["Dth"] * dpth2 / dpth1
-            r["Dmuth2"] = (2 * wt * ((mu1p * logmu ** 2
-                                      - logmu ** 2 * ymupi) * dpth1 ** 2)
+            r["Dmuth2"] = (2 * wt * ((mu1p * logmu2
+                                      - logmu2 * ymupi) * dpth1 ** 2)
                            + r["Dmuth"] * dpth2 / dpth1)
             r["Dmu2th2"] = (2 * wt * ((mup1 * logmu * y * (logmu * p - 2)
                             + logmu / mup * (logmu * (1 - p) + 2)) * dpth1 ** 2)

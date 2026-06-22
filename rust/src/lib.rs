@@ -51,6 +51,7 @@ mod nmath;
 mod par;
 mod rng;
 mod tprs;
+mod tweedie;
 
 #[pymodule]
 fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -61,5 +62,6 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     cluster::register(m)?;
     tprs::register(m)?;
     cox::register(m)?;
+    tweedie::register(m)?;
     Ok(())
 }

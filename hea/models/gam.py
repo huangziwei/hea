@@ -3073,17 +3073,29 @@ class gam:
         # branch (gam.fit4 mirrors gam.fit3's block); the null baseline
         # below stays user-independent.
         mu_default = mu
-        if self._pirls_mustart is not None:
-            mu = np.asarray(self._pirls_mustart, dtype=float)
-        if self._pirls_etastart is not None:
-            eta_user = np.asarray(self._pirls_etastart, dtype=float)
-            eta = eta_user - off
-            mu = link.linkinv(eta_user)
-        elif self._pirls_start is not None:
-            eta = X @ self._pirls_start
-            mu = link.linkinv(eta + off)
+        if self._pirls_warm_eta is not None:
+            # Warm start from the previous score-eval's converged predictor.
+            # mgcv carries etastart<-b$linear.predictors across the outer
+            # Newton (gam.fit3.r:1366-1367) and passes it straight into
+            # gam.fit4 (gam.fit3.r:111-113), so each penalized IRLS starts near
+            # its solution. Takes precedence over the user seed (which only
+            # seeds the first fit); mu_default stays the ρ-independent null
+            # baseline. Mirrors _fit_given_rho's gam.fit3 warm start.
+            eta_warm = self._pirls_warm_eta
+            eta = eta_warm - off
+            mu = link.linkinv(eta_warm)
         else:
-            eta = link.link(mu) - off       # β-only η
+            if self._pirls_mustart is not None:
+                mu = np.asarray(self._pirls_mustart, dtype=float)
+            if self._pirls_etastart is not None:
+                eta_user = np.asarray(self._pirls_etastart, dtype=float)
+                eta = eta_user - off
+                mu = link.linkinv(eta_user)
+            elif self._pirls_start is not None:
+                eta = X @ self._pirls_start
+                mu = link.linkinv(eta + off)
+            else:
+                eta = link.link(mu) - off       # β-only η
 
         # Null baseline — same construction as the standard branch (mgcv's
         # get.null.coef projection of a constant valid η). ρ-independent, so the
@@ -3332,11 +3344,17 @@ class gam:
             )
             log_det_A = 2.0 * float(np.log(np.abs(np.diag(A_chol))).sum())
 
+        # Carry the converged predictor as the next score-eval's warm start
+        # (mgcv gam.fit3.r:1367, passed into gam.fit4). Only on a finite
+        # converged fit — a degenerate one must not poison the next start.
+        eta_full = eta + off
+        if conv and np.all(np.isfinite(eta_full)):
+            self._pirls_warm_eta = eta_full
         return _FitState(
             beta=beta, dev=dev, pen=float(beta @ Sλ @ beta),
             A_chol=A_chol, A_chol_lower=lower,
             S_full=Sλ, log_det_A=log_det_A,
-            eta=eta + off, mu=mu, w=w_f, z=z_f, alpha=None,
+            eta=eta_full, mu=mu, w=w_f, z=z_f, alpha=None,
             is_fisher_fallback=is_fisher_fallback,
             converged=conv, boundary=boundary, warn=warn_msgs,
             E_aug=E_aug,
@@ -5989,6 +6007,12 @@ class gam:
         ``fit.is_fisher_fallback`` we explicitly drop the α'/α term to
         stay consistent with the α=1 override the PIRLS path applied.
         """
+        # ∂w/∂η depends only on the converged fit; the REML grad/Hessian +
+        # db.drho/d2b.drho call this several times per fit (and the extended
+        # branch's dDeta(level=1) is a 9-output Dd — the tw #1 cost). Cache on
+        # the fit, like _fit_link_derivs (W3.3d part 2, here for gam.fit4).
+        if fit._dwdeta is not None:
+            return fit._dwdeta
         family = self.family
         y = self._y_arr
         mu = fit.mu
@@ -6001,7 +6025,9 @@ class gam:
         if self._family_mgcv_extended:
             dd = family.dDeta(y, mu, self._wt, family.get_theta(), level=1)
             d3 = 0.5 * np.asarray(dd["Deta3"], dtype=float)
-            return np.where((w != 0.0) & np.isfinite(d3), d3, 0.0)
+            res = np.where((w != 0.0) & np.isfinite(d3), d3, 0.0)
+            fit._dwdeta = res
+            return res
 
         mu_eta, V, Vp, Vpp, _Vppp, g2, g3, _g4 = self._fit_link_derivs(fit)
 
@@ -6015,7 +6041,9 @@ class gam:
             alpha_prime_over_alpha = alpha_prime / alpha
 
         dlogw_dmu = alpha_prime_over_alpha - 2.0 * g2 * mu_eta - Vp / V
-        return w * mu_eta * dlogw_dmu
+        res = w * mu_eta * dlogw_dmu
+        fit._dwdeta = res
+        return res
 
     def _d2beta_drho_drho(self, fit: "_FitState", rho: np.ndarray,
                           db_drho: np.ndarray | None = None,
@@ -6104,6 +6132,8 @@ class gam:
         For the Fisher fallback path (PIRLS forced α=1 because Newton-w<0),
         α'/α and α''/α are both dropped — same convention as ``_dw_deta``.
         """
+        if fit._d2wdeta2 is not None:
+            return fit._d2wdeta2
         family = self.family
         y = self._y_arr
         mu = fit.mu
@@ -6114,7 +6144,9 @@ class gam:
         if self._family_mgcv_extended:
             dd = family.dDeta(y, mu, self._wt, family.get_theta(), level=2)
             d4 = 0.5 * np.asarray(dd["Deta4"], dtype=float)
-            return np.where((w != 0.0) & np.isfinite(d4), d4, 0.0)
+            res = np.where((w != 0.0) & np.isfinite(d4), d4, 0.0)
+            fit._d2wdeta2 = res
+            return res
 
         mu_eta, V, Vp, Vpp, Vppp, g2, g3, g4 = self._fit_link_derivs(fit)
 
@@ -6147,7 +6179,9 @@ class gam:
             - 2.0 * g3 * mu_eta + 2.0 * g2 ** 2 * mu_eta ** 2
             - Vpp_V + Vp_V ** 2
         )
-        return w * mu_eta ** 2 * (D ** 2 + Dp - D * g2 * mu_eta)
+        res = w * mu_eta ** 2 * (D ** 2 + Dp - D * g2 * mu_eta)
+        fit._d2wdeta2 = res
+        return res
 
     def _dlog_det_S_drho(self, rho: np.ndarray,
                          S_pinv: np.ndarray | None = None,
@@ -13576,7 +13610,7 @@ class _FitState:
         "S_full", "log_det_A", "E_aug",
         "is_fisher_fallback",
         "converged", "boundary", "warn",
-        "_lderivs",
+        "_lderivs", "_dwdeta", "_d2wdeta2",
     )
 
     def __init__(self, *, beta, dev, pen, A_chol, A_chol_lower,
@@ -13625,6 +13659,8 @@ class _FitState:
         # (μ, η) feed _dw_deta, _d2w_deta2 and the gradient, which recomputed
         # variance/dvar/d2link/… independently; mgcv computes them once (gdi1).
         self._lderivs = None
+        self._dwdeta = None
+        self._d2wdeta2 = None
 
 
 # ---------------------------------------------------------------------------

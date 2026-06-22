@@ -533,3 +533,32 @@ def test_pls_fit1_xtwz_mode_parity():
     assert ok
     np.testing.assert_allclose(beta, b0, rtol=0, atol=1e-9)
     np.testing.assert_allclose(ld, ld0, rtol=0, atol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# tweedie_series — mgcv `tweedious` (misc.c:170) scalar-p saturated-series
+# moments via the rust per-row sweep vs the numpy dense-matrix oracle (==
+# `_tweedie_log_a_vec` with the extension forced off). Not 0-ulp: the sweep
+# reduces in a different order and uses mgcv's uncentered Var = E[j²]−E[j]²
+# (misc.c:499) where the numpy path centres it — both far inside the tw
+# fixture tolerance (5e-5). Moments span many orders of magnitude (j² grows as
+# p→1), so the gate is relative (atol floors the near-zero variance spikes).
+import hea.family as _fam  # noqa: E402
+
+
+@pytest.mark.parametrize("p", [1.05, 1.1, 1.5, 1.93, 1.99])
+@pytest.mark.parametrize("phi", [0.3, 1.0, 5.0])
+def test_tweedie_series_parity(p, phi):
+    if _fam._rs_tweedie_series is None:
+        pytest.skip("hea._rs.tweedie_series unavailable")
+    rng = np.random.default_rng(int(p * 100) + int(phi * 10))
+    y = rng.uniform(0.01, 500.0, 1500)
+    out_rs = _fam._tweedie_log_a_vec(y, phi, p)
+    orig = _fam._rs_tweedie_series
+    _fam._rs_tweedie_series = None
+    try:
+        out_np = _fam._tweedie_log_a_vec(y, phi, p)
+    finally:
+        _fam._rs_tweedie_series = orig
+    for a, b in zip(out_rs, out_np):
+        np.testing.assert_allclose(a, b, rtol=1e-8, atol=1e-9)
