@@ -78,6 +78,18 @@ from ..utils import (
     format_signif_jointly,
     significance_code,
 )
+from .._dispatch import rs_fn
+
+# mgcv pls_fit1 (gdi.c) — the per-PIRLS-iteration penalized least-squares solve.
+# The rust kernel (rust/src/linalg/pls.rs) does it as one call with a row-blocked
+# parallel TSQR; the pure-Python ``_pls_qr`` below is the bit-exact oracle and
+# the HEA_NO_RS fallback. ``None`` when the extension is absent.
+_pls_fit1_rs = rs_fn("pls_fit1")
+_PLS_EMPTY = np.empty(0, dtype=np.float64)
+# Below this row count the numpy dgeqrf path is used (see ``_pls_qr``): it is the
+# accuracy oracle for the small-n ill-conditioned fixtures and the rust win is
+# negligible at small n. Matches the rust TSQR block threshold (n_blocks).
+_PLS_RS_MIN_N = 1024
 
 __all__ = ["gam", "gam_control"]
 
@@ -3488,31 +3500,50 @@ class gam:
         Fisher weights; gam.fit4.r:392 retries with positive weights).
         """
         X = self._X_full
-        n = X.shape[0]
+        pcol = X.shape[1]
+        if _pls_fit1_rs is not None and X.shape[0] >= _PLS_RS_MIN_N:
+            # Rust does the whole solve (TSQR + neg-weight correction) in one
+            # call — see rust/src/linalg/pls.rs. Returns the same (β, Cholesky
+            # factor, log-det) as the numpy path below, to the BLAS floor.
+            # Gated to large n: rust's row-blocked TSQR factor is marginally
+            # less accurate than LAPACK dgeqrf on *deliberately* ill-conditioned
+            # designs (κ≈1e10), and those fixtures are all small-n; the per-call
+            # rust win there is negligible anyway (the glue it removes is a small
+            # share of a fast fit). Large-n fits — where the QR cost and the
+            # per-call glue actually dominate — take the rust path.
+            if Xtwz is not None:
+                ok, beta, R_out, ld = _pls_fit1_rs(
+                    X, w, E_aug, _PLS_EMPTY, Xtwz, True)
+            else:
+                ok, beta, R_out, ld = _pls_fit1_rs(
+                    X, w, E_aug, z, _PLS_EMPTY, False)
+            if not ok:
+                return None, None, float("nan"), False
+            return beta, R_out, ld, True
         neg = w < 0.0
+        any_neg = bool(np.any(neg))
         sqw = np.sqrt(np.abs(w))
         aug = np.vstack([X * sqw[:, None], E_aug])
-        if not np.any(neg):
-            # mgcv pls_fit1: apply Q' to the rhs via Householder reflectors
-            # (LAPACK geqrf + ormqr) WITHOUT forming Q — the economic Q is
-            # dorgqr's O(np²) cost, the dominant per-PIRLS-iter term. Called
-            # straight (not via scipy.qr_multiply, whose per-call check_finite
-            # scan of the whole (n+e)×p matrix + double lwork-query dominate at
-            # high iteration counts); byte-identical to qr_multiply. R is
-            # byte-identical to the formed-Q path; only Q'·rhs differs ~1 ulp
-            # (ormqr vs formed-Q·dgemv), under the fit's BLAS floor — and
-            # pls_fit1 is exactly what mgcv runs. lwork is shape-stable (driven
-            # by p, fixed per fit) so it is queried once and cached.
-            pcol = X.shape[1]
-            if self._pls_lwork_g is None:
-                _, _, wq, _ = dgeqrf(aug, lwork=-1)
-                self._pls_lwork_g = int(wq[0])
-            qr_f, tau, _, info = dgeqrf(aug, lwork=self._pls_lwork_g,
-                                        overwrite_a=True)
-            R = np.triu(qr_f[:pcol])
-            diag_R = np.diag(R)
-            if info != 0 or (not np.all(np.isfinite(R))) or np.any(diag_R == 0.0):
-                return None, None, float("nan"), False
+        # mgcv pls_fit1: factor [√|W|X; E] ONCE via LAPACK geqrf WITHOUT
+        # forming Q — the economic Q is dorgqr's O(np²) cost, the dominant
+        # per-PIRLS-iter term. Both the ordinary and the negative-Newton-weight
+        # paths run off this single factorization. lwork is shape-stable
+        # (driven by the fixed aug shape) so it is queried once and cached.
+        if self._pls_lwork_g is None:
+            _, _, wq, _ = dgeqrf(aug, lwork=-1)
+            self._pls_lwork_g = int(wq[0])
+        qr_f, tau, _, info = dgeqrf(aug, lwork=self._pls_lwork_g,
+                                    overwrite_a=True)
+        R = np.triu(qr_f[:pcol])
+        diag_R = np.diag(R)
+        if info != 0 or (not np.all(np.isfinite(R))) or np.any(diag_R == 0.0):
+            return None, None, float("nan"), False
+
+        if not any_neg:
+            # Apply Q' to the rhs via Householder reflectors (ormqr), no Q
+            # formed — exactly what pls_fit1 runs. R is byte-identical to the
+            # formed-Q path; only Q'·rhs differs ~1 ulp (ormqr vs formed-Q·
+            # dgemv), under the fit's BLAS floor.
             if Xtwz is not None:
                 # z may be non-finite (w≈0) — use R only, project X'Wz instead.
                 c = solve_triangular(R, Xtwz, lower=False, trans="T")
@@ -3535,33 +3566,28 @@ class gam:
             # any triangular root.
             sgn = np.where(diag_R < 0, -1.0, 1.0)
             return beta, R * sgn[:, None], log_det, True
-        # --- negative Newton weights: SVD determinant correction --------
-        # Needs the actual Q₁ rows (IQ = Q₁[neg]), so form Q here (rare path).
-        # X'WX + Sλ = R'(I − 2·IQ'IQ)R = R'V(I − 2D²)V'R, IQ = Q₁[neg].
-        Q, R = np.linalg.qr(aug)            # economic: (n+e)×p, p×p
-        diag_R = np.diag(R)
-        if (not np.all(np.isfinite(R))) or np.any(diag_R == 0.0):
-            return None, None, float("nan"), False
-        Q1 = Q[:n]
-        IQ = Q1[neg]                            # (n_neg, p)
-        # Only d and Vt (p×p) are used — U is discarded. full_matrices=True
-        # would build the (n_neg × n_neg) U (the gauss/log pathology: every
-        # PIRLS step has many negative Newton weights, n_neg ≫ p, so that U is
-        # huge and dominates). The thin SVD gives byte-identical d/Vt when
-        # n_neg ≥ p; only when n_neg < p does full_matrices give the padded
-        # (p×p) Vt the correction needs.
-        _U, d, Vt = np.linalg.svd(IQ, full_matrices=(IQ.shape[0] < IQ.shape[1]))
-        d2 = np.ones(R.shape[0])
-        d2[:d.size] = 1.0 - 2.0 * d * d         # eigenvalues of I − 2D²
+        # --- negative Newton weights: eigen determinant correction ------
+        # X'WX + Sλ = R'(I − 2·IQ'IQ)R = R'V(I − 2D²)V'R, IQ = Q₁[neg]. Since
+        # [√|W|X; E] = QR ⇒ Q₁ = √|W|X·R⁻¹, so IQ'IQ = R⁻ᵀ·(X[neg]'diag|w_neg|·
+        # X[neg])·R⁻¹: form the p×p weighted gram and eigendecompose it
+        # (V diag(d²) V') directly — never the (n+e)×p economic Q (dorgqr) nor
+        # the n_neg×p IQ/SVD. The gauss/log & ig/log pathology takes this path
+        # every PIRLS step with n_neg ≫ p; eigh of the p×p gram is ~2.5× the
+        # SVD's speed, and U / the SVD's full_matrices padding are never used.
+        # The correction V(I−2D²)⁻¹V' is invariant to eigenvector order/sign,
+        # so this matches the formed-Q SVD path to ~1e-15 (the rhs uses mgcv's
+        # own R⁻ᵀX'Wz use_wy-stable form, gdi.c:3132).
+        A = sqw[neg][:, None] * X[neg]              # √|w_neg| · X[neg]
+        Y = solve_triangular(R, A.T @ A, lower=False, trans="T")  # R⁻ᵀ·G
+        Z = solve_triangular(R, Y.T, lower=False, trans="T").T    # R⁻ᵀGR⁻¹
+        evals, V = np.linalg.eigh(0.5 * (Z + Z.T))
+        d2 = 1.0 - 2.0 * evals                  # eigenvalues of I − 2D²
         if np.any(d2 <= 0.0):
             return None, None, float("nan"), False
-        if Xtwz is not None:
-            # X'Wz = (√|W|X)'·(signed √|W|z) ⇒ Q₁'·zt = R⁻ᵀ·X'Wz.
-            c = Vt @ solve_triangular(R, Xtwz, lower=False, trans="T")
-        else:
-            zt = sqw * z
-            zt[neg] = -zt[neg]                  # signed √|W|z
-            c = Vt @ (Q1.T @ zt)
+        Vt = V.T
+        # rhs: Q₁'·(signed √|W|z) = R⁻ᵀ·X'Wz, X'Wz = X'(w⊙z) (w signed).
+        XWz = Xtwz if Xtwz is not None else X.T @ (w * z)
+        c = Vt @ solve_triangular(R, XWz, lower=False, trans="T")
         beta = solve_triangular(
             R, Vt.T @ (c / d2), lower=False,
         )

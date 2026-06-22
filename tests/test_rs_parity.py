@@ -432,3 +432,82 @@ def test_tp_eval_E_bit_exact(d, m):
     rsq = (diff * diff).sum(axis=-1)
     E_np = _tp_fast_eta_vec(m, d, rsq, eta0)
     np.testing.assert_array_equal(E_rs, E_np)
+
+
+# ---------------------------------------------------------------------------
+# pls_fit1 — mgcv's penalized least-squares inner solve (rust TSQR + neg-weight
+# eigen correction) vs the numpy QR/eigh oracle (== hea gam._pls_qr's pure path).
+# Not 0-ulp (different QR — TSQR vs LAPACK), but every returned quantity (β, the
+# Cholesky factor of X'WX+Sλ, log|X'WX+Sλ|) is QR-convention-invariant so they
+# agree to the BLAS floor on well-conditioned problems.
+from scipy.linalg import solve_triangular  # noqa: E402
+
+
+def _pls_oracle(X, w, E, z=None, Xtwz=None):
+    neg = w < 0.0
+    sqw = np.sqrt(np.abs(w))
+    aug = np.vstack([X * sqw[:, None], E])
+    Q, R = np.linalg.qr(aug)
+    diag = np.diag(R)
+    XWz = Xtwz if Xtwz is not None else X.T @ (w * z)
+    if not neg.any():
+        c = solve_triangular(R, XWz, lower=False, trans="T")
+        beta = solve_triangular(R, c, lower=False)
+        sgn = np.where(diag < 0, -1.0, 1.0)
+        return beta, R * sgn[:, None], 2 * np.sum(np.log(np.abs(diag)))
+    A = sqw[neg][:, None] * X[neg]
+    Y = solve_triangular(R, A.T @ A, lower=False, trans="T")
+    Z = solve_triangular(R, Y.T, lower=False, trans="T").T
+    evals, V = np.linalg.eigh(0.5 * (Z + Z.T))
+    d2 = 1 - 2 * evals
+    if np.any(d2 <= 0.0):
+        return None  # penalized Hessian indefinite (Fisher-retry signal)
+    Vt = V.T
+    c = Vt @ solve_triangular(R, XWz, lower=False, trans="T")
+    beta = solve_triangular(R, Vt.T @ (c / d2), lower=False)
+    M = np.sqrt(d2)[:, None] * (Vt @ R)
+    Rc = np.linalg.qr(M, mode="r")
+    sgn = np.where(np.diag(Rc) < 0, -1.0, 1.0)
+    return beta, Rc * sgn[:, None], (2 * np.sum(np.log(np.abs(diag)))
+                                     + np.sum(np.log(d2)))
+
+
+@pytest.mark.parametrize("n,p,nneg", [(2000, 10, 0), (2000, 10, 200),
+                                      (1500, 14, 700), (1200, 8, 0)])
+@pytest.mark.parametrize("order", ["C", "F"])
+def test_pls_fit1_parity(n, p, nneg, order):
+    rng = np.random.default_rng(n + p + nneg)
+    X = rng.standard_normal((n, p))
+    X = np.ascontiguousarray(X) if order == "C" else np.asfortranarray(X)
+    w = np.abs(rng.standard_normal(n)) * rng.uniform(0.2, 3.0)
+    if nneg:
+        idx = rng.choice(n, nneg, replace=False)
+        w[idx] = -w[idx]
+    E = (np.asfortranarray if order == "F" else np.ascontiguousarray)(
+        rng.standard_normal((p, p)) * 0.7)
+    z = rng.standard_normal(n)
+    oracle = _pls_oracle(np.asarray(X), w, np.asarray(E), z=z)
+    ok, beta, R, ld = rs.pls_fit1(X, w, E, z, np.empty(0), False)
+    if oracle is None:  # indefinite penalized Hessian — both must decline
+        assert not ok
+        return
+    b0, R0, ld0 = oracle
+    assert ok
+    np.testing.assert_allclose(beta, b0, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(np.asarray(R), R0, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(ld, ld0, rtol=0, atol=1e-9)
+
+
+def test_pls_fit1_xtwz_mode_parity():
+    rng = np.random.default_rng(99)
+    n, p = 1800, 11
+    X = np.asfortranarray(rng.standard_normal((n, p)))
+    w = np.abs(rng.standard_normal(n)) + 0.1
+    E = np.asfortranarray(rng.standard_normal((p, p)) * 0.5)
+    wz = rng.standard_normal(n)
+    Xtwz = np.asarray(X).T @ wz
+    b0, R0, ld0 = _pls_oracle(np.asarray(X), w, np.asarray(E), Xtwz=Xtwz)
+    ok, beta, R, ld = rs.pls_fit1(X, w, E, np.empty(0), Xtwz, True)
+    assert ok
+    np.testing.assert_allclose(beta, b0, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(ld, ld0, rtol=0, atol=1e-9)

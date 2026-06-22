@@ -20,7 +20,7 @@ use rayon::prelude::*;
 
 /// Reference-BLAS `dnrm2` — Euclidean norm via the classic scaled sum-of-squares
 /// (overflow-safe, in-order → deterministic, matches R's `dnrm2`).
-fn dnrm2(v: &[f64]) -> f64 {
+pub(crate) fn dnrm2(v: &[f64]) -> f64 {
     let mut scale = 0.0_f64;
     let mut ssq = 1.0_f64;
     for &xi in v {
