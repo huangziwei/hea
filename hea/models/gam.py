@@ -856,6 +856,12 @@ class gam:
     _pirls_start: np.ndarray | None = None
     _pirls_etastart: np.ndarray | None = None
     _pirls_mustart: np.ndarray | None = None
+    # PIRLS warm start: the previous score-eval's converged linear predictor,
+    # carried across outer-Newton steps so each penalized IRLS starts near its
+    # solution (mgcv gam.fit3.r:1366-1368 sets etastart<-b$linear.predictors).
+    # ρ-trajectory points are close, so this cuts ~12 PIRLS iters/eval to ~2-3;
+    # result-preserving (the PIRLS solution at each ρ is unique).
+    _pirls_warm_eta: np.ndarray | None = None
 
     @property
     def _scale_known_fit(self) -> bool:
@@ -2672,9 +2678,26 @@ class gam:
         # mustart, kept past initialize). The null baseline below stays
         # user-independent like get.null.coef's mean(y) (mgcv.r:1863).
         mu_default = mu
-        if self._pirls_mustart is not None:
+        if self._pirls_warm_eta is not None:
+            # Warm start from the previous score-eval's converged predictor
+            # (mgcv gam.fit3.r:1366) — takes precedence over the user seed,
+            # which only seeds the first fit. ``mu_default`` (gam_initialize)
+            # is kept above for the ρ-independent null baseline.
+            eta_warm = self._pirls_warm_eta
+            eta = eta_warm - off            # β-only η
+            mu = link.linkinv(eta_warm)
+        elif self._pirls_mustart is not None:
             mu = np.asarray(self._pirls_mustart, dtype=float)
-        if self._pirls_etastart is not None:
+            if self._pirls_etastart is not None:
+                eta_user = np.asarray(self._pirls_etastart, dtype=float)
+                eta = eta_user - off        # R's η includes the offset
+                mu = link.linkinv(eta_user)
+            elif self._pirls_start is not None:
+                eta = X @ self._pirls_start  # β-only η
+                mu = link.linkinv(eta + off)
+            else:
+                eta = link.link(mu) - off    # β-only η
+        elif self._pirls_etastart is not None:
             eta_user = np.asarray(self._pirls_etastart, dtype=float)
             eta = eta_user - off            # R's η includes the offset
             mu = link.linkinv(eta_user)
@@ -3001,11 +3024,17 @@ class gam:
         # ``eta`` here is offset-stripped; downstream consumers
         # (linear_predictors, predict, residuals_of) expect the full
         # linear predictor — return ``eta + off``.
+        eta_full = eta + off
+        # Carry the converged predictor as the next score-eval's warm start
+        # (mgcv gam.fit3.r:1366). Only on a finite converged fit — a degenerate
+        # one must not poison the next start.
+        if conv and np.all(np.isfinite(eta_full)):
+            self._pirls_warm_eta = eta_full
         return _FitState(
             beta=beta, dev=dev, pen=pen,
             A_chol=A_chol, A_chol_lower=lower,
             S_full=Sλ, log_det_A=log_det_A,
-            eta=eta + off, mu=mu, w=w, z=z, alpha=alpha,
+            eta=eta_full, mu=mu, w=w, z=z, alpha=alpha,
             is_fisher_fallback=is_fisher_fallback,
             converged=conv, boundary=boundary, warn=warn_msgs,
             E_aug=E_aug,
@@ -5959,8 +5988,7 @@ class gam:
         V = family.variance(mu)
         Vp = family.dvar(mu)
         Vpp = family.d2var(mu)
-        g2 = link.d2link(mu)
-        g3 = link.d3link(mu)
+        g2, g3 = link.d23link(mu)   # shares η=g(μ)/φ once for probit-like links
 
         # α'/α term — set to zero for the Fisher fallback path.
         if fit.is_fisher_fallback:
@@ -6080,9 +6108,7 @@ class gam:
         Vp = family.dvar(mu)
         Vpp = family.d2var(mu)
         Vppp = family.d3var(mu)
-        g2 = link.d2link(mu)
-        g3 = link.d3link(mu)
-        g4 = link.d4link(mu)
+        g2, g3, g4 = link.d234link(mu)  # one η=g(μ)/φ for probit-like links
 
         Vp_V = Vp / V
         Vpp_V = Vpp / V

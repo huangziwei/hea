@@ -85,6 +85,18 @@ class Link:
     def d2link(self, mu: np.ndarray) -> np.ndarray: raise NotImplementedError
     def d3link(self, mu: np.ndarray) -> np.ndarray: raise NotImplementedError
     def d4link(self, mu: np.ndarray) -> np.ndarray: raise NotImplementedError
+
+    # Grouped link-derivative accessors for the REML weight-derivative chain
+    # (_dw_deta / _d2w_deta2). The default just calls the individual methods;
+    # links whose derivatives share an expensive transcantal (probit: η=Φ⁻¹(μ)
+    # and φ(η)) override to compute it ONCE — bit-identical to the separate
+    # calls, only the recomputed qnorm/dnorm are saved.
+    def d23link(self, mu: np.ndarray):
+        return self.d2link(mu), self.d3link(mu)
+
+    def d234link(self, mu: np.ndarray):
+        return self.d2link(mu), self.d3link(mu), self.d4link(mu)
+
     def valideta(self, eta: np.ndarray) -> bool: return True
 
     # mgcv ``link$g2g``, ``g3g``, ``g4g`` (R/efam.r): higher-order link
@@ -320,6 +332,19 @@ class ProbitLink(Link):
         eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
         d = np.maximum(_dnorm(eta), np.finfo(float).eps)
         return (7.0 * eta + 6.0 * eta ** 3) / d ** 4
+
+    def d23link(self, mu):
+        # η=Φ⁻¹(μ) and φ(η) computed once, shared by d2/d3 — bit-identical to
+        # d2link(mu), d3link(mu) (same η, same d, same expressions).
+        eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
+        d = np.maximum(_dnorm(eta), np.finfo(float).eps)
+        return eta / d ** 2, (1.0 + 2.0 * eta * eta) / d ** 3
+
+    def d234link(self, mu):
+        eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
+        d = np.maximum(_dnorm(eta), np.finfo(float).eps)
+        return (eta / d ** 2, (1.0 + 2.0 * eta * eta) / d ** 3,
+                (7.0 * eta + 6.0 * eta ** 3) / d ** 4)
     # extended-family ratios (gam.fit3.r:2249-2266): with η=Φ⁻¹(μ) and
     # g'=1/φ(η), the g″/g'ᵏ ratios collapse to polynomials in η.
     def g2g(self, mu):
