@@ -2559,19 +2559,26 @@ class bam(gam):
             raise ValueError(
                 f"offset must have length {n_pred}, got {extra.shape}")
 
-        # lpmatrix: the binned design matrix (= mgcv ``Xbd(Xd, I)``).
-        Xf = discrete_full_X(design)
-        if Xf.shape[0] != n_pred:
-            Xf = Xf[:n_pred]
+        # lpmatrix: the design matrix is the requested output — form it column
+        # by column via Xbd(e_kk) (mgcv predict.bamd's ``Xbd(Xd, I)``); no
+        # other branch needs the dense design.
         if type == "lpmatrix":
+            p = design.p
+            Xf = np.empty((n_pred, p), dtype=float)
+            ek = np.zeros(p, dtype=float)
+            for kk in range(p):
+                ek[kk] = 1.0
+                Xf[:, kk] = Xbd(design, ek)[:n_pred]
+                ek[kk] = 0.0
             return Xf
 
-        # value (link scale). Reuse the cached η for bit-identical
-        # newdata=None default-resolution predictions.
+        # value (link scale) — η = Xβ via the scatter (mgcv Xbd), no
+        # materialise. Reuse the cached η for bit-identical newdata=None
+        # default-resolution predictions.
         if reuse:
             eta = self.linear_predictors.copy()
         else:
-            eta = Xf @ beta + off_new
+            eta = Xbd(design, beta)[:n_pred] + off_new
         if extra is not None:
             eta = eta + extra
 
@@ -2590,7 +2597,7 @@ class bam(gam):
             Vc = getattr(self, "Vc", None)
             if Vc is not None:
                 V = Vc
-        var_eta = ((Xf @ V) * Xf).sum(axis=1)
+        var_eta = diagXVXd(design, V)[:n_pred]   # mgcv diagXVXd, no materialise
         se_link = np.sqrt(np.maximum(var_eta, 0.0))
         if type == "link":
             return pl.DataFrame({"fit": eta, "se.fit": se_link})
@@ -2953,12 +2960,9 @@ class bam(gam):
         n = self.n
         out = np.empty(n, dtype=float)
         if self._discrete_design is not None:
-            # Binned diag(Xd·Vp·Xd') on the compressed design — the same
-            # gauge as the fit and edf (mgcv diagXVXd), matching
-            # _predict_bamd's SE.
-            Xf = discrete_full_X(self._discrete_design)
-            HX = Xf @ Vp
-            return (HX * Xf).sum(axis=1)
+            # diag(Xd·Vp·Xd') on the compressed grid (mgcv diagXVXd) — same
+            # gauge as the fit/edf and _predict_bamd's SE; no materialise.
+            return diagXVXd(self._discrete_design, Vp)
         for start, end in _chunk_indices(n, self._chunk_size):
             X_chunk = _materialize_chunk(
                 self._blocks,
@@ -3294,15 +3298,11 @@ class bam(gam):
         (zero on rows the ``good`` mask dropped, by construction in
         :func:`_build_qr_chunked_pirls`).
 
-        For ``discrete=True`` we materialise the cached full-X once via
-        :func:`discrete_full_X` and compute the diag in a single matmul —
-        avoids the per-chunk re-gather, which the discrete kernels make
-        cheap anyway since basis values are stored per unique row.
+        For ``discrete=True`` the diagonal comes from :func:`diagXVXd` on the
+        compressed grid (mgcv ``diagXVXd``), never forming the n×p design.
         """
         if self._discrete_design is not None:
-            X = discrete_full_X(self._discrete_design)
-            HX = X @ A_inv
-            return w_full * (HX * X).sum(axis=1)
+            return w_full * diagXVXd(self._discrete_design, A_inv)
         n = self.n
         out = np.empty(n, dtype=float)
         for start, end in _chunk_indices(n, self._chunk_size):
@@ -5381,233 +5381,10 @@ def _split_term_vars_by_margins(term_vars: list[str],
 
 
 # ---------------------------------------------------------------------------
-# Kernels — Xbd / XWXd / XWyd
+# Per-term kernels — operate on the *unconstrained* raw column space
+# (``p_raw``). Constraint application via ``T`` is layered on top in
+# the public Xbd / XWyd / XWXd.
 # ---------------------------------------------------------------------------
-
-
-def _khatri_rao_cols(blocks: list[np.ndarray]) -> np.ndarray:
-    """Column-wise Khatri-Rao (row tensor) of per-margin basis blocks.
-
-    Each ``blocks[j]`` is ``(m, p_j)``; the result is ``(m, Π p_j)`` with
-    ``blocks[0]`` the OUTERMOST (slowest-varying) column index, matching the
-    per-row Khatri-Rao in :func:`_term_full_design`'s loop
-    (``col = ((a)·p_1 + b)·p_2 + c …``). Identical structure to that loop, but
-    contracted along the shared grid axis ``m`` rather than the n rows, so the
-    fast path's columns line up with the penalty ``S`` / ``absorb`` / ``keep``.
-    """
-    out = blocks[0]
-    for nxt in blocks[1:]:
-        pa = out.shape[1]
-        pb = nxt.shape[1]
-        out = (out[:, :, None] * nxt[:, None, :]).reshape(out.shape[0], pa * pb)
-    return out
-
-
-def _grid_is_constant(term: _DiscreteTerm, k: np.ndarray, n_sum: int) -> bool:
-    """True iff every margin's summation k-block is constant down the rows.
-
-    The signal-regression / RF case: all observations share the same ``n_sum``
-    coordinate-grid indices, so the per-row Khatri-Rao reduces to a single
-    fixed grid basis and the ``Σ_q`` row-sum collapses to one matmul (see
-    :func:`_term_full_design`). The scan is ``O(n·n_sum)`` integer compares — a
-    few hundred ms for the largest RF design, against the ~30s loop it guards —
-    and is memoised on ``term.grid_constant`` after the first call. Returns
-    ``False`` for the empty design so the general loop handles the edge.
-    """
-    n = k.shape[0]
-    if n == 0 or n_sum == 0:
-        return False
-    for _Xd_j, (ks_lo, _ks_hi) in zip(term.Xd_list, term.k_cols):
-        block = k[:, ks_lo:ks_lo + n_sum]
-        if not bool((block == block[0]).all()):
-            return False
-    return True
-
-
-def _term_full_design(term: _DiscreteTerm, k: np.ndarray, n: int) -> np.ndarray:
-    """Materialise ``X_term`` (n × p_term_post) for one term.
-
-    Used by the kernels as a generic fallback: gather per-marginal Xd,
-    Khatri-Rao multiply, sum across summation columns, then apply
-    ``by`` / ``absorb`` / ``keep_cols``. This is the *correct*
-    semantics; the optimised path (Householder constraint, tensor-
-    aware scatter-add for X'WX) replicates this row-by-row but avoids
-    forming the n × p_raw block.
-
-    For now the fallback is the only path — it still avoids the
-    chunked-QR overhead because ``Xd_list`` is small and reusable
-    across PIRLS iterations.
-
-    Parity note — hea-internal speedup, **no mgcv counterpart to diff against.**
-    The constant-grid fast path below (``term.grid_constant`` ⇒ ``by_mask @ B``)
-    optimises hea's *materialisation* of the full design. mgcv ``discrete=TRUE``
-    never materialises — it scatter-adds on the compressed ``Xd``/``k`` in C —
-    so there is no mgcv code or cost that mirrors this loop (the slowness it
-    removed was hea-specific to hea's materialise-then-BLAS strategy). The fast
-    path is bit-equal to hea's own summation loop (≈1e-15) and the fit still
-    pins to mgcv; it changes only *how* the row-sum is computed, not the result.
-    """
-    if term.kind == "param":
-        return term.Xd_list[0]
-
-    # Determine summation width (same across margins for a given term —
-    # mgcv enforces this by jointly discretising matrix-arg margins).
-    q_lo, q_hi = term.k_cols[0]
-    n_sum = q_hi - q_lo
-
-    # ``by`` semantics (mgcv smooth.r:3997-4008): a numeric **matrix-arg**
-    # by= weights *per summation column* on the long form, BEFORE the row-sum
-    # — ``X_summed[i] = Σ_q by[i,q]·basis(coord[i,q])``. A scalar/factor by=
-    # (length-n) is constant across summation columns, so it factors out of
-    # the sum and is applied once afterwards (cheaper, numerically identical).
-    # The matrix case mirrors the non-discrete S1c path
-    # (formula.py:_summation_apply_blocks: by-multiply on the long form, then
-    # row-block summation); centering-drop + scale.penalty already happened
-    # at materialize time and are inherited via ``term.absorb`` / the scaled
-    # ``S`` — only the by-weighting is replayed here.
-    by_mask = term.by_mask
-    by_is_matrix = by_mask is not None and by_mask.ndim == 2
-    if by_is_matrix and by_mask.shape[1] != n_sum:
-        raise ValueError(
-            f"matrix-arg by= has {by_mask.shape[1]} summation columns but "
-            f"the term's coordinate margins have {n_sum}; mgcv requires the "
-            "by-matrix to match the matrix-argument dimension."
-        )
-
-    # Khatri-Rao across margins, by-weight per column, then sum over the
-    # summation columns. Two paths produce the SAME (n, p_raw) row-sum:
-    #
-    #   * constant-grid fast path (signal regression / RF) — when every margin's
-    #     k-block is row-constant, the per-row Khatri-Rao is one fixed
-    #     (n_sum, p_raw) grid basis ``B`` and ``X[i] = Σ_q by[i,q]·B[q]`` is
-    #     exactly ``by_mask @ B`` (matrix by=) or ``B.sum(0)`` broadcast
-    #     (scalar/no by=). One BLAS matmul replaces the n_sum-iteration Python
-    #     loop.
-    #   * general loop fallback — genuine per-row-varying coordinates (non-RF);
-    #     also covers n_sum==1 ordinary smooths, where the grid is NOT constant.
-    #
-    if term.grid_constant is None:
-        term.grid_constant = _grid_is_constant(term, k, n_sum)
-    if term.grid_constant:
-        B = term._grid_B
-        if B is None:
-            grid_blocks = [
-                Xd_j[k[0, ks_lo:ks_lo + n_sum]]
-                for Xd_j, (ks_lo, _ks_hi) in zip(term.Xd_list, term.k_cols)
-            ]
-            B = _khatri_rao_cols(grid_blocks)          # (n_sum, p_raw)
-            term._grid_B = B
-        if by_is_matrix:
-            X_full = by_mask @ B                       # (n, n_sum)@(n_sum, p)
-        else:
-            X_full = np.broadcast_to(B.sum(0), (n, B.shape[1])).copy()
-    else:
-        X_full = None
-        for q_off in range(n_sum):
-            # For each margin, gather rows: Xd_j[k[:, ks_j_lo + q_off], :]
-            Xq_blocks = []
-            for Xd_j, (ks_lo, ks_hi) in zip(term.Xd_list, term.k_cols):
-                kcol = k[:, ks_lo + q_off]
-                Xq_blocks.append(Xd_j[kcol])
-            # Khatri-Rao over the margin blocks.
-            if len(Xq_blocks) == 1:
-                Xq = Xq_blocks[0]
-            else:
-                Xq = Xq_blocks[0]
-                for nxt in Xq_blocks[1:]:
-                    # Row tensor: (n, p1) ⊗_row (n, p2) → (n, p1*p2)
-                    pa = Xq.shape[1]
-                    pb = nxt.shape[1]
-                    Xq = (Xq[:, :, None] * nxt[:, None, :]).reshape(-1, pa * pb)
-            if by_is_matrix:
-                Xq = Xq * by_mask[:, q_off][:, None]
-            if X_full is None:
-                X_full = Xq
-            else:
-                X_full = X_full + Xq
-
-    # Apply (scalar/factor) by-mask, then absorb, then keep_cols. Order
-    # matches ``BasisSpec.predict_mat`` (formula.py:2415-2435): raw → by →
-    # absorb. ``term.by_mask`` is pre-computed at build_discrete_design time
-    # (factor: indicator; numeric scalar: length-n multiplier per row;
-    # numeric matrix: (n, n_sum) weights, applied per-column in the loop
-    # above).
-    if by_mask is not None and not by_is_matrix:
-        X_full = X_full * by_mask[:, None]
-    if term.absorb is not None:
-        X_full = term.absorb.apply(X_full)
-    if term.keep_cols is not None:
-        X_full = X_full[:, term.keep_cols]
-    return X_full
-
-
-def discrete_full_X(design: DiscreteDesign) -> np.ndarray:
-    """Materialise the full ``n × p`` design matrix from the compressed
-    representation.
-
-    Result is cached on the design object — basis values on the
-    discretised unique grid (``Xd_list``) are fixed for the life of the
-    design, so the materialisation is invariant across PIRLS iters and
-    across outer-Newton steps. The cache is populated lazily on first
-    call and reused thereafter; this turns every downstream
-    ``Xbd``/``XWXd``/``XWyd`` invocation into a single BLAS matmul on
-    cached ``X_full``, which dominates scatter-add for the
-    moderate-``n`` × moderate-``p`` regime where chicago lives.
-
-    Two separate knobs (don't confuse them):
-
-    * ``design._full_X_cache = False`` only disables *caching* — this
-      function still materialises ``full`` transiently per call (no
-      ``n × p`` array is retained between calls, but one is still built).
-    * To avoid materialising ``X`` at all (mgcv's ``discrete=TRUE`` memory
-      collapse — ``discrete.c`` scatter-adds on the compressed ``Xd``/``k``
-      and never forms ``X``), call the kernels with ``use_kernel=True``.
-      ``Xbd``/``XWXd``/``XWyd`` then route through the per-term scatter-add
-      paths, which are bit-equivalent to this materialised matmul (verified
-      to ~1e-15) but never allocate the dense ``X``. That path is opt-in
-      because the materialised matmul is faster in the moderate-``n`` ×
-      moderate-``p`` regime where chicago/RF fits live; the kernels are for
-      very-large-``n`` memory scaling.
-    """
-    cache = design._full_X_cache
-    if isinstance(cache, np.ndarray):
-        return cache
-    n = design.n
-    blocks = [_term_full_design(t, design.k, n) for t in design.terms]
-    full = np.concatenate(blocks, axis=1) if len(blocks) > 1 else blocks[0]
-    if cache is not False:                 # ``False`` disables caching
-        design._full_X_cache = full
-    return full
-
-
-# ---------------------------------------------------------------------------
-# Scatter-add kernel helpers
-# ---------------------------------------------------------------------------
-
-
-def _grouped_sum_axis0(idx: np.ndarray, values: np.ndarray,
-                       n_groups: int) -> np.ndarray:
-    """Sum rows of ``values`` grouped by integer keys ``idx``.
-
-    Pure-numpy equivalent of ``np.add.at(out, idx, values)`` but uses
-    argsort + ``np.add.reduceat`` so the inner accumulation runs at
-    BLAS-equivalent speed. ``idx`` is a length-n int array; ``values``
-    has shape ``(n, ...)``; the output has shape ``(n_groups, ...)``.
-
-    For 1-D ``values`` this collapses to ``np.bincount``.
-    """
-    if values.ndim == 1:
-        return np.bincount(idx, weights=values, minlength=n_groups)
-    if values.shape[0] == 0:
-        return np.zeros((n_groups,) + values.shape[1:], dtype=values.dtype)
-    order = np.argsort(idx, kind='stable')
-    sorted_idx = idx[order]
-    sorted_vals = values[order]
-    unique_groups, starts = np.unique(sorted_idx, return_index=True)
-    sums = np.add.reduceat(sorted_vals, starts, axis=0)
-    out = np.zeros((n_groups,) + values.shape[1:], dtype=sorted_vals.dtype)
-    out[unique_groups] = sums
-    return out
 
 
 def _term_constraint_T(term: _DiscreteTerm) -> Optional[np.ndarray]:
@@ -5648,13 +5425,6 @@ def _design_constraint_Ts(design: DiscreteDesign) -> list[Optional[np.ndarray]]:
     Ts = [_term_constraint_T(t) for t in design.terms]
     design._T_cache = Ts
     return Ts
-
-
-# ---------------------------------------------------------------------------
-# Per-term kernels — operate on the *unconstrained* raw column space
-# (``p_raw``). Constraint application via ``T`` is layered on top in
-# the public Xbd / XWyd / XWXd.
-# ---------------------------------------------------------------------------
 
 
 def _term_Xb_raw(term: _DiscreteTerm, b_raw: np.ndarray,
@@ -5792,187 +5562,20 @@ def _tensor_Xty_raw(term: _DiscreteTerm, wy: np.ndarray,
     return result.reshape(-1)
 
 
-def _term_pair_XWX_raw(term_a: _DiscreteTerm, term_b: _DiscreteTerm,
-                       w: np.ndarray, k: np.ndarray, n: int) -> np.ndarray:
-    """Compute the unconstrained ``X_a_raw.T @ diag(w) @ X_b_raw`` block
-    of shape ``(p_a_raw, p_b_raw)``.
-
-    Direct port of mgcv ``XWXijs`` (discrete.c:1073-1430) for the
-    ``acc_w == 1`` branch (n > m_im·m_jm — by far the common case for
-    our matrix-arg models). The ``r``/``c`` sub-block decomposition is
-    fused: we build the (n × p_a_pre × p_b_pre) outer-product weight
-    tensor, scatter into a (m_a_final · m_b_final, p_a_pre · p_b_pre)
-    grouped table, then contract with both final-marginal bases via a
-    single einsum — equivalent to the per-(r,c) loop but vectorised.
-    """
-    if term_a.kind == "param" and term_b.kind == "param":
-        Xa = term_a.Xd_list[0]
-        Xb = term_b.Xd_list[0]
-        return Xa.T @ (w[:, None] * Xb)
-
-    if term_a.kind == "param":
-        Xa = term_a.Xd_list[0]
-        p_a = Xa.shape[1]
-        p_b_raw = int(np.prod([Xd.shape[1] for Xd in term_b.Xd_list]))
-        result = np.empty((p_a, p_b_raw), dtype=float)
-        for i in range(p_a):
-            result[i, :] = _term_Xty_raw(term_b, w * Xa[:, i], k, n)
-        return result
-
-    if term_b.kind == "param":
-        return _term_pair_XWX_raw(term_b, term_a, w, k, n).T
-
-    if term_a.kind == "single" and term_b.kind == "single":
-        return _single_single_XWX(term_a, term_b, w, k, n)
-
-    return _general_XWX(term_a, term_b, w, k, n)
-
-
-def _single_single_XWX(term_a: _DiscreteTerm, term_b: _DiscreteTerm,
-                       w: np.ndarray, k: np.ndarray, n: int) -> np.ndarray:
-    Xd_a = term_a.Xd_list[0]
-    Xd_b = term_b.Xd_list[0]
-    m_a = Xd_a.shape[0]
-    m_b = Xd_b.shape[0]
-    ks_a_lo, ks_a_hi = term_a.k_cols[0]
-    ks_b_lo, ks_b_hi = term_b.k_cols[0]
-
-    W_total = np.zeros((m_a, m_b), dtype=float)
-    for q_a in range(ks_a_hi - ks_a_lo):
-        k_a = k[:, ks_a_lo + q_a]
-        for q_b in range(ks_b_hi - ks_b_lo):
-            k_b = k[:, ks_b_lo + q_b]
-            flat_idx = k_a * m_b + k_b
-            W_flat = np.bincount(flat_idx, weights=w, minlength=m_a * m_b)
-            W_total += W_flat.reshape(m_a, m_b)
-    return Xd_a.T @ W_total @ Xd_b
-
-
-def _row_tensor_pre(Xd_list: list[np.ndarray],
-                    k_per_marg: list[np.ndarray],
-                    da: int, n: int) -> np.ndarray:
-    """Row-tensor of the *pre-final* marginals at this q's indices.
-
-    Returns shape ``(n, p_pre)`` where ``p_pre = ∏_{j<da-1} p_j``.
-    For singleton terms (da == 1) returns ``(n, 1)`` ones — caller
-    treats it as the empty pre-tensor.
-    """
-    if da == 1:
-        return np.ones((n, 1), dtype=float)
-    if da == 2:
-        return Xd_list[0][k_per_marg[0]]
-    if da == 3:
-        X1 = Xd_list[0][k_per_marg[0]]                          # (n, p1)
-        X2 = Xd_list[1][k_per_marg[1]]                          # (n, p2)
-        return (X1[:, :, None] * X2[:, None, :]).reshape(n, -1)
-    blocks = [Xd_list[j][k_per_marg[j]] for j in range(da - 1)]
-    out = blocks[0]
-    for jj in range(1, da - 1):
-        out = (out[:, :, None] * blocks[jj][:, None, :]).reshape(n, -1)
-    return out
-
-
-def _general_XWX(term_a: _DiscreteTerm, term_b: _DiscreteTerm,
-                 w: np.ndarray, k: np.ndarray, n: int) -> np.ndarray:
-    Xd_a_list = term_a.Xd_list
-    Xd_b_list = term_b.Xd_list
-    da = len(Xd_a_list)
-    db = len(Xd_b_list)
-    pa = [Xd.shape[1] for Xd in Xd_a_list]
-    pb = [Xd.shape[1] for Xd in Xd_b_list]
-    p_a_raw = int(np.prod(pa))
-    p_b_raw = int(np.prod(pb))
-    p_a_pre = int(np.prod(pa[:-1])) if da > 1 else 1
-    p_b_pre = int(np.prod(pb[:-1])) if db > 1 else 1
-    p_a_final = pa[-1]
-    p_b_final = pb[-1]
-    Xd_a_final = Xd_a_list[-1]
-    Xd_b_final = Xd_b_list[-1]
-    m_a_final = Xd_a_final.shape[0]
-    m_b_final = Xd_b_final.shape[0]
-
-    ks_a_lo = [term_a.k_cols[j][0] for j in range(da)]
-    ks_b_lo = [term_b.k_cols[j][0] for j in range(db)]
-    n_sum_a = term_a.k_cols[0][1] - term_a.k_cols[0][0]
-    n_sum_b = term_b.k_cols[0][1] - term_b.k_cols[0][0]
-
-    XWX_block = np.zeros((p_a_pre, p_a_final, p_b_pre, p_b_final),
-                          dtype=float)
-
-    for q_a in range(n_sum_a):
-        k_a_per = [k[:, ks_a_lo[j] + q_a] for j in range(da)]
-        Xa_pre = _row_tensor_pre(Xd_a_list, k_a_per, da, n)    # (n, p_a_pre)
-        k_a_final = k_a_per[-1]
-
-        for q_b in range(n_sum_b):
-            k_b_per = [k[:, ks_b_lo[j] + q_b] for j in range(db)]
-            Xb_pre = _row_tensor_pre(Xd_b_list, k_b_per, db, n)
-            k_b_final = k_b_per[-1]
-
-            # Outer-product weight: F[row, r, c] = w[row] · Xa_pre[row,r] · Xb_pre[row,c]
-            F = (w[:, None, None]
-                 * Xa_pre[:, :, None] * Xb_pre[:, None, :]
-                 ).reshape(n, p_a_pre * p_b_pre)
-
-            joint_idx = (k_a_final.astype(np.int64) * m_b_final
-                          + k_b_final.astype(np.int64))
-            W_flat = _grouped_sum_axis0(joint_idx, F,
-                                         m_a_final * m_b_final)
-            W_grouped = W_flat.reshape(m_a_final, m_b_final,
-                                        p_a_pre, p_b_pre)
-
-            # Out[r, la, c, lb] = Σ_{ga, gb} Xd_af[ga,la] · W̄[ga,gb,r,c] · Xd_bf[gb,lb]
-            XWX_block += np.einsum('Aa,ABrc,Bb->racb',
-                                    Xd_a_final, W_grouped, Xd_b_final)
-
-    return XWX_block.reshape(p_a_raw, p_b_raw)
-
-
 # ---------------------------------------------------------------------------
 # Public kernels
 # ---------------------------------------------------------------------------
 
 
-def _assert_kernels_support(design: DiscreteDesign) -> None:
-    """Guard the opt-in scatter-kernel path against unsupported terms.
+def Xbd(design: DiscreteDesign, beta: np.ndarray) -> np.ndarray:
+    """Compute ``X β`` on the compressed design — per-term scatter-add only.
 
-    The per-term scatter kernels (``_term_Xb_raw`` / ``_term_pair_XWX_raw``
-    / ``_term_Xty_raw``) operate purely on the unconstrained raw column
-    space and do **not** apply ``term.by_mask`` — so a ``by=`` term would be
-    computed without its by-weighting. The default full-X path
-    (:func:`discrete_full_X` → :func:`_term_full_design`) handles by= (incl.
-    matrix-arg summation); wiring by= into the kernels is bam-plan queue P2.
-    Until then, fail loudly rather than return a silently-wrong Gram.
-    """
-    for t in design.terms:
-        if t.by_mask is not None:
-            raise NotImplementedError(
-                f"discrete scatter kernels (use_kernel=True) do not apply "
-                f"by= weighting for term {t.label!r}; use the default "
-                "full-X path (use_kernel=False). Kernel by= support is "
-                "bam-parity queue P2."
-            )
-
-
-def Xbd(design: DiscreteDesign, beta: np.ndarray,
-        *, X: Optional[np.ndarray] = None,
-        use_kernel: bool = False) -> np.ndarray:
-    """Compute ``X β`` on the compressed design.
-
-    Direct port of mgcv ``Xbd`` (misc.r:385 + src/discrete.c:474-557).
-    Default path uses the cached full-X matmul (set up by
-    :func:`discrete_full_X`); set ``use_kernel=True`` to instead route
-    through the per-term scatter-add kernels (lift
-    ``β_post → β_raw = T·β_post``, then ``_term_Xb_raw`` accumulates
-    into the n-vector η). The ``X=`` argument lets callers pass an
-    explicit X matrix — used mainly as a verification oracle.
+    Direct port of mgcv ``Xbd`` (src/discrete.c:502-572): lift each term's
+    post-constraint β to raw space (``β_raw = T·β_post``) and accumulate
+    ``_term_Xb_raw`` into the n-vector η. The ``n×p`` design is never formed
+    (mgcv ``discrete=TRUE`` scatter-adds on the compressed Xd/k grid).
     """
     beta = np.asarray(beta, dtype=float)
-    if X is not None:
-        return X @ beta
-    if not use_kernel:
-        return discrete_full_X(design) @ beta
-    _assert_kernels_support(design)
     n = design.n
     eta = np.zeros(n, dtype=float)
     Ts = _design_constraint_Ts(design)
@@ -5983,88 +5586,37 @@ def Xbd(design: DiscreteDesign, beta: np.ndarray,
     return eta
 
 
-def XWXd(design: DiscreteDesign, w: np.ndarray,
-         *, X: Optional[np.ndarray] = None,
-         use_kernel: bool = False) -> np.ndarray:
+def XWXd(design: DiscreteDesign, w: np.ndarray) -> np.ndarray:
     """Compute ``X' diag(w) X`` on the compressed design.
 
-    Direct port of mgcv ``XWXd0`` (discrete.c:1457 driver around
-    ``XWXijs``). Default path uses the cached full-X (single
-    ``X' diag(w) X`` BLAS gemm); set ``use_kernel=True`` to route
-    through per-term-pair scatter-add blocks (each block computed via
-    :func:`_term_pair_XWX_raw` in the unconstrained raw space, then
-    sandwiched ``T_a' (·) T_b`` to land in the post-constraint Gram).
-    The full Gram is symmetric so kernel mode only computes
-    upper-triangular blocks and mirrors.
+    PORT IN PROGRESS — raises. mgcv ``XWXd0``/``XWXijs`` (src/discrete.c:
+    1672-2273) forms ``X'WX`` by hash-scattering ``W`` onto the per-term-pair
+    grid of *occurring* index pairs (``indReduce``) and contracting
+    ``Xd' W̄ Xd`` via the ``r,c`` sub-block decomposition + ``Ztb`` constraints
+    — never allocating a dense ``m×m`` / ``n_sum²`` table. hea's old numpy
+    kernels (``_single_single_XWX`` / ``_general_XWX``) did exactly that dense
+    allocation: non-faithful, and pathologically slow (hangs) on matrix-arg
+    signal regression. They have been removed. Until the faithful ``XWXijs``
+    port lands, every discrete fit raises here.
     """
-    w_arr = np.asarray(w, dtype=float)
-    if X is None and not use_kernel:
-        X = discrete_full_X(design)
-    if X is not None:
-        # Signed-weight-safe form. ``sqrt(w)·X then Xw'·Xw`` is faster
-        # for non-negative ``w`` but NaN's on negative entries — and
-        # extended families (Scat etc) routinely produce per-row
-        # negative Newton-Hessian weights ``Deta2/2``. The direct
-        # ``X' (w·X)`` is the same FLOP count and handles any sign.
-        return X.T @ (w_arr[:, None] * X)
-
-    _assert_kernels_support(design)
-    n = design.n
-    p = design.p
-    XWX = np.zeros((p, p), dtype=float)
-    Ts = _design_constraint_Ts(design)
-    terms = design.terms
-
-    for i, term_i in enumerate(terms):
-        T_i = Ts[i]
-        s_i = term_i.coef_slice
-        block_raw = _term_pair_XWX_raw(term_i, term_i, w_arr,
-                                        design.k, n)
-        if T_i is None:
-            block_post = block_raw
-        else:
-            block_post = T_i.T @ block_raw @ T_i
-        XWX[s_i, s_i] = block_post
-
-        for j in range(i + 1, len(terms)):
-            term_j = terms[j]
-            T_j = Ts[j]
-            s_j = term_j.coef_slice
-            block_raw = _term_pair_XWX_raw(term_i, term_j, w_arr,
-                                            design.k, n)
-            if T_i is None and T_j is None:
-                block_post = block_raw
-            elif T_i is None:
-                block_post = block_raw @ T_j
-            elif T_j is None:
-                block_post = T_i.T @ block_raw
-            else:
-                block_post = T_i.T @ block_raw @ T_j
-            XWX[s_i, s_j] = block_post
-            XWX[s_j, s_i] = block_post.T
-    return XWX
+    raise NotImplementedError(
+        "discrete=True X'WX (mgcv XWXijs/XWXd0, src/discrete.c) is being "
+        "re-ported faithfully; the non-faithful dense numpy kernels were "
+        "removed. discrete=True is unavailable during this refactor."
+    )
 
 
-def XWyd(design: DiscreteDesign, w: np.ndarray, y: np.ndarray,
-         *, X: Optional[np.ndarray] = None,
-         use_kernel: bool = False) -> np.ndarray:
-    """Compute ``X' (w · y)`` on the compressed design.
+def XWyd(design: DiscreteDesign, w: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Compute ``X' (w · y)`` on the compressed design — scatter-add only.
 
-    Direct port of mgcv ``XWyd`` (misc.r:333 + src/discrete.c:717-802).
-    Default path uses the cached full-X (single ``X' · (w·y)`` BLAS
-    gemv); set ``use_kernel=True`` to scatter-add ``w·y`` into the
-    m-d-grouped weight tensor per term, then contract against every
-    marginal ``Xd`` to land in raw coefficient space, then apply ``T'``
-    to land in the post-constraint slot.
+    Direct port of mgcv ``XWyd``/``singleXty``/``tensorXty`` (src/discrete.c:
+    329-1186): scatter-add ``w·y`` into the per-term m-grouped weight tensor,
+    contract against every marginal ``Xd`` to land in raw coefficient space,
+    then apply ``T'`` to the post-constraint slot. The ``n×p`` design is never
+    materialised.
     """
     w_arr = np.asarray(w, dtype=float)
     y_arr = np.asarray(y, dtype=float)
-    if X is None and not use_kernel:
-        X = discrete_full_X(design)
-    if X is not None:
-        return X.T @ (w_arr * y_arr)
-
-    _assert_kernels_support(design)
     n = design.n
     p = design.p
     wy = w_arr * y_arr
@@ -6077,3 +5629,37 @@ def XWyd(design: DiscreteDesign, w: np.ndarray, y: np.ndarray,
         else:
             Xy[term.coef_slice] = T.T @ Xty_raw
     return Xy
+
+
+def diagXVXd(design: DiscreteDesign, V: np.ndarray) -> np.ndarray:
+    """Compute ``diag(X V X')`` (length ``n``) on the compressed design.
+
+    Direct port of mgcv ``diagXVXt`` (src/discrete.c:629-756), the kernel
+    behind R's ``diagXVXd``. For each column ``kk`` of the ``p×p`` matrix
+    ``V``::
+
+        (XV)[:, kk] = X · V[:, kk]      # one column of X·V, via Xbd
+        X[:, kk]    = X · e_kk          # the kk-th column of X, via Xbd(e_kk)
+        diag       += (XV)[:, kk] · X[:, kk]
+
+    summed over ``kk`` gives ``diag(X V X')``. mgcv forms each X column on the
+    fly through ``Xbd`` (line 743-749) so the ``n×p`` design is NEVER
+    materialised — this is the post-fit / predict de-materialisation kernel
+    (used for the hat diagonal ``w·diag(X A⁻¹ X')`` and the prediction SE
+    ``diag(X Vp X')``). The kernels apply the term constraint (``T``), so the
+    columns are post-constraint, exactly as mgcv's ``Xbd`` with ``v``/``qc``.
+
+    Term-subset selection (mgcv ``rs``/``cs`` for ``predict`` terms/iterms) is
+    not yet wired — callers needing it stay on the full design for now.
+    """
+    n, p = design.n, design.p
+    V = np.asarray(V, dtype=float)
+    diag = np.zeros(n, dtype=float)
+    e = np.zeros(p, dtype=float)
+    for kk in range(p):
+        xv = Xbd(design, V[:, kk])   # (X·V)[:, kk]
+        e[kk] = 1.0
+        xi = Xbd(design, e)          # X[:, kk]
+        e[kk] = 0.0
+        diag += xv * xi
+    return diag
