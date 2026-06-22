@@ -3569,10 +3569,10 @@ class tw(Tweedie):
     (mgcv's start) unless ``theta`` is passed (sets p = p(theta)).
 
     ``hea.gam`` estimates θ jointly with (ρ, log φ) in the analytical
-    outer Newton (the family-generic Dd chain supplies the θ gradient;
-    the Hessian θ rows are central differences of that gradient). The
-    fitted ``p̂`` is stored on ``family.p``; the converged θ̂ on
-    ``family.theta``.
+    outer Newton (the family-generic Dd chain supplies the θ gradient
+    and the analytic θ rows/cols of the REML Hessian — mgcv's gdi2
+    ``D2``/``P2``/``ldet2`` blocks). The fitted ``p̂`` is stored on
+    ``family.p``; the converged θ̂ on ``family.theta``.
     """
     name = "Tweedie"
     n_theta = 1
@@ -3669,10 +3669,10 @@ class tw(Tweedie):
         derivatives come from :meth:`Tweedie._d2ls_dp` (family-review
         B4; previously NaN-poisoned).
 
-        Note: hea's outer-Newton θ rows are still central differences
-        of the analytical gradient (gam.py `_reml_hessian`) — they
-        don't read lsth2 yet; mgcv's `estimate.theta` Newton and any
-        future analytic θ-row port do.
+        ``lsth2`` feeds the analytic θ rows/cols of the REML Hessian
+        (gam.py ``_reml_hessian``): the ``−2·lsth2/γ`` ``ls2`` block for
+        θ-θ and the ``−2·lsth2[θ,logφ]/γ`` cross for θ-log φ, matching
+        mgcv's gam.fit4.r:746,757.
         """
         saved = None
         if theta is not None:

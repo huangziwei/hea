@@ -4070,14 +4070,17 @@ class gam:
 
         Returns ((n_sp+1) × (n_sp+1)) when ``include_log_phi=True``, else
         (n_sp × n_sp). With ``include_family_theta``, the Hessian is
-        further augmented by ``family.n_theta`` rows/columns; those rows
-        are computed by central-difference of the **fully analytical**
-        ``_reml_grad`` along the family-θ direction. The gradient itself
-        (including the family-θ entries) is exact and pinned to mgcv;
-        the FD here is purely an algorithmic Hessian approximation for
-        the outer Newton's search direction. With h=1e-4 and a smooth
-        score the truncation error is ~1e-8, well below the outer
-        Newton's convergence tolerance.
+        further augmented by ``family.n_theta`` rows/columns computed
+        **analytically** — the family-θ rows of mgcv's REML2
+        (``gam.fit4.r:748``: ``REML2 = ((D2+bSb2)/(2φ) − ls2)/γ + ldet2/2``
+        over the joint (θ,ρ) space, with the log φ row from
+        ``gam.fit4.r:756-762``). ``D2`` (the deviance Hessian, ``gdi.c``
+        ``gdi2``:2145-2166), ``bSb2``/``P2`` (the penalty Hessian, ``get_bSb``
+        gdi.c:159-188) and ``ldet2`` (the ``log|H|`` Hessian, ``get_ddetXWXpS``
+        gdi.c:911-940) are assembled from the per-obs ``family.dDeta(level=2)``
+        tables and the IFT β-derivatives (:meth:`_d2beta_theta`). hea works in
+        2·V_R units, so ``hea_H = (D2+bSb2)/(φγ) − 2·ls2/γ + ldet2``. Pinned to
+        mgcv's analytic REML2 to ~1e-13.
 
         Wood 2011 §4 for non-Gaussian, with Newton-form W:
 
@@ -4402,59 +4405,161 @@ class gam:
         if not include_family_theta or self.family.n_theta == 0:
             return H_aug
 
-        # Family-θ rows/cols. The base θ-vector layout is
-        # (ρ[, log φ], θ_fam). We FD the analytical gradient
-        # `_reml_grad(..., include_family_theta=True)` along each θ_fam
-        # slot, refitting β̂ at the perturbed θ each time.
+        # Family-θ rows/cols — analytic port of mgcv's gam.fit4.r:748 REML2
+        # θ-rows: REML2 = ((D2+bSb2)/(2φ) − ls2)/γ + ldet2/2 over the joint
+        # (θ,ρ) space, with the log φ row/col bolted on (gam.fit4.r:756-762).
+        # D2 (gdi.c:2145-2166), bSb2/P2 (get_bSb gdi.c:159-188) and ldet2
+        # (get_ddetXWXpS gdi.c:911-940) are computed from the per-obs Dd
+        # tables + the IFT β-derivatives. hea works in 2·V_R units, so
+        # hea_H = (D2+bSb2)/(φγ) − 2·ls2/γ + ldet2. Replaces the former
+        # central-difference of _reml_grad (a non-mechanical FD shortcut).
         family = self.family
         n_extra = family.n_theta
         base_size = n_sp + (1 if include_log_phi else 0)
         new_size = base_size + n_extra
         H_full = np.zeros((new_size, new_size))
         H_full[:base_size, :base_size] = H_aug
+        nt = n_extra
 
-        # Step size: 1e-4 sits in the FD sweet spot for our score scale
-        # (truncation ~h²·g''' ~ 1e-8; round-off ~eps/h·||g|| ~ 1e-12).
-        h_step = 1e-4
-        theta_orig = family.get_theta().copy()
-        for k in range(n_extra):
-            theta_pert = theta_orig.copy()
-            # Forward.
-            theta_pert[k] = theta_orig[k] + h_step
-            family.set_theta(theta_pert)
-            try:
-                fit_p = self._fit_given_rho(rho)
-                grad_p = self._reml_grad(
-                    rho, log_phi, fit=fit_p,
-                    include_log_phi=include_log_phi,
-                    include_family_theta=True,
-                )
-            except Exception:
-                grad_p = np.full(new_size, 1e15)
-            # Backward.
-            theta_pert[k] = theta_orig[k] - h_step
-            family.set_theta(theta_pert)
-            try:
-                fit_m = self._fit_given_rho(rho)
-                grad_m = self._reml_grad(
-                    rho, log_phi, fit=fit_m,
-                    include_log_phi=include_log_phi,
-                    include_family_theta=True,
-                )
-            except Exception:
-                grad_m = np.full(new_size, 1e15)
-            family.set_theta(theta_orig)
+        # Per-obs deviance derivatives (η-space; mgcv Det*/Dth* names) and the
+        # θ first/second β-derivatives via the IFT.
+        dd2 = family.dDeta(self._y_arr, fit.mu, self._wt,
+                           family.get_theta(), level=2)
+        Deta = np.asarray(dd2["Deta"], dtype=float)
+        Deta2 = np.asarray(dd2["Deta2"], dtype=float)
+        Deta3 = np.asarray(dd2["Deta3"], dtype=float)
+        Deta4 = np.asarray(dd2["Deta4"], dtype=float)
+        Detath = self._as_n_nt(dd2["Detath"], nt)          # (n, nt)
+        Deta3th = self._as_n_nt(dd2["Deta3th"], nt)        # (n, nt)
+        Dth = self._as_n_nt(dd2["Dth"], nt)                # (n, nt)
+        Dth2 = self._theta2_arr(dd2["Dth2"], nt, X.shape[0])       # (n,nt,nt)
+        Deta2th2 = self._theta2_arr(dd2["Deta2th2"], nt, X.shape[0])
 
-            col = (grad_p - grad_m) / (2.0 * h_step)        # length new_size
-            col_idx = base_size + k
-            H_full[:, col_idx] = col
-            # Symmetrise by averaging row/col copy — the analytical Hessian is
-            # symmetric, and FD on the gradient is symmetric up to truncation.
-            H_full[col_idx, :base_size] = col[:base_size]
-        # Symmetrise the family-θ × family-θ block (n_extra small, this is cheap).
-        H_full[base_size:, base_size:] = 0.5 * (
-            H_full[base_size:, base_size:] + H_full[base_size:, base_size:].T
-        )
+        db_dtheta = self._db_dtheta_fam(fit)               # (p, nt)
+        eta1_th = X @ db_dtheta                             # (n, nt) η₁_θ
+        dW_dth = self._dW_dtheta_total(fit)                # (n, nt) ∂w/∂θ
+        d2b_thr, d2b_thth = self._d2beta_theta(
+            fit, rho, db_drho=db_drho, db_dtheta=db_dtheta, dd2=dd2)
+        eta2_thr = np.einsum("ij,jab->iab", X, d2b_thr)    # (n, nt, n_sp)
+        eta2_thth = np.einsum("ij,jac->iac", X, d2b_thth)  # (n, nt, nt)
+
+        # Penalty pieces (get_bSb): Sβ_total and the embedded S·v.
+        S_beta = (sp[:, None] * Sbeta_full).sum(axis=0)    # Σ sp_k S_k β
+
+        def _S_total_dot(vec_full: np.ndarray) -> np.ndarray:
+            out = np.zeros(p)
+            for kk, slot_kk in enumerate(self._slots):
+                aa, bb = slot_kk.col_start, slot_kk.col_end
+                out[aa:bb] += sp[kk] * (slot_kk.S @ vec_full[aa:bb])
+            return out
+
+        # ldet2 traces reuse the ρρ K/M machinery; build any pieces the ρρ
+        # pass skipped (needs_w False ⇒ ∂w/∂ρ≡0 so G_arr≡0, but the θ rows
+        # still need diag(KK'), M and diag(M'S_kM)).
+        if K is None:
+            K = self._make_K(fit.A_chol, fit.A_chol_lower)
+            d_diag = np.einsum("ij,ij->i", K, K)
+        if M is None:
+            M = cho_solve((fit.A_chol, fit.A_chol_lower), X.T)
+        if G_arr is None:
+            G_arr = np.zeros((n_sp, p, p))
+        if diag_MtSM is None:
+            diag_MtSM = []
+            for kk, slot_kk in enumerate(self._slots):
+                aa, bb = slot_kk.col_start, slot_kk.col_end
+                SkM = slot_kk.S @ M[aa:bb, :]
+                diag_MtSM.append(np.einsum("ji,ji->i", M[aa:bb, :], SkM))
+        # Gθ[a] = K' diag(∂w/∂θ_a) K — the θ analogue of G_arr.
+        Gth = np.empty((nt, p, p))
+        for a in range(nt):
+            G_a = K.T @ (K * dW_dth[:, a:a + 1])
+            Gth[a] = 0.5 * (G_a + G_a.T)
+
+        # ML range-projection θ-corrections (mirrors the ρρ ml block, with
+        # ∂A/∂θ_a = X'diag(∂w/∂θ_a)X — θ carries no penalty so the S term
+        # drops). Only built under method="ML".
+        if ml_active:
+            Mp_dim = M_proj_inv.shape[0]
+            Yth_arr = np.zeros((nt, p, Mp_dim))
+            Zth_arr = np.zeros((nt, p, Mp_dim))
+            Minv_dMth_arr = np.zeros((nt, Mp_dim, Mp_dim))
+            for a in range(nt):
+                Yth = X.T @ (dW_dth[:, a:a + 1] * Y_proj)
+                Yth_arr[a] = Yth
+                Zth_arr[a] = cho_solve((fit.A_chol, fit.A_chol_lower), Yth)
+                Minv_dMth_arr[a] = M_proj_inv @ (-B_proj.T @ Yth)
+
+        # Saturated-likelihood 2nd derivatives (θ,θ) and (θ,log φ): ls2.
+        ls_ext = family.ls_extended(self._y_arr, self._wt,
+                                    theta=family.get_theta(), scale=phi)
+        lsth2 = np.asarray(ls_ext["lsth2"], dtype=float)   # (nt+1, nt+1)
+
+        for a in range(nt):
+            col_idx = base_size + a
+            # θ_a × ρ_i rows.
+            for i in range(n_sp):
+                d2_dev = float(np.sum(
+                    Deta2 * eta1_th[:, a] * v[:, i]
+                    + Deta * eta2_thr[:, a, i]
+                    + Detath[:, a] * v[:, i]))
+                d2_pen = (
+                    2.0 * float(d2b_thr[:, a, i] @ S_beta)
+                    + 2.0 * float(db_drho[:, i] @ _S_total_dot(db_dtheta[:, a]))
+                    + 2.0 * float(db_dtheta[:, a] @ (sp[i] * Sbeta_full[i])))
+                d2w = 0.5 * (Deta4 * eta1_th[:, a] * v[:, i]
+                             + Deta3 * eta2_thr[:, a, i]
+                             + Deta3th[:, a] * v[:, i])
+                d2logH = (
+                    -(float(np.sum(Gth[a] * G_arr[i]))
+                      + sp[i] * float(dW_dth[:, a] @ diag_MtSM[i]))
+                    + float(np.sum(d_diag * d2w)))
+                if ml_active:
+                    T1 = -float(np.einsum(
+                        "ab,ba->", Minv_dMth_arr[a], Minv_dMk_arr[i]))
+                    T2 = 2.0 * float(np.einsum(
+                        "ab,ba->", M_proj_inv, Yth_arr[a].T @ Zk_arr[i]))
+                    d2logH += T1 + T2 - float(np.sum(d2w * q_vec))
+                val = (d2_dev + d2_pen) / (phi * gamma) + d2logH
+                H_full[i, col_idx] = H_full[col_idx, i] = val
+            # θ_a × log φ row (gam.fit4.r:756-757, 2·V_R units).
+            if include_log_phi:
+                val = (-float(np.sum(Dth[:, a])) / (phi * gamma)
+                       - 2.0 * lsth2[a, nt] / gamma)
+                H_full[n_sp, col_idx] = H_full[col_idx, n_sp] = val
+            # θ_a × θ_c block.
+            for c in range(a, nt):
+                d2_dev = float(np.sum(
+                    Deta2 * eta1_th[:, a] * eta1_th[:, c]
+                    + Deta * eta2_thth[:, a, c]
+                    + Dth2[:, a, c]
+                    + Detath[:, a] * eta1_th[:, c]
+                    + Detath[:, c] * eta1_th[:, a]))
+                # ∂²(β'Sβ)/∂θ_a∂θ_c = 2·(∂²β)'Sβ + 2·(∂β/∂θ_c)'S(∂β/∂θ_a)
+                # (get_bSb gdi.c:167-172). NO diagonal `+bSb1` term for θ:
+                # bSb1[θ]=0 during get_bSb's Hessian loop (gdi.c:156; the
+                # `2·b1'Sb` augmentation at gdi.c:194 runs *after*), and S
+                # carries no θ-dependence so there is no penalty-curvature term.
+                d2_pen = (
+                    2.0 * float(d2b_thth[:, a, c] @ S_beta)
+                    + 2.0 * float(db_dtheta[:, c]
+                                  @ _S_total_dot(db_dtheta[:, a])))
+                d2w = 0.5 * (Deta4 * eta1_th[:, a] * eta1_th[:, c]
+                             + Deta3 * eta2_thth[:, a, c]
+                             + Deta3th[:, a] * eta1_th[:, c]
+                             + Deta3th[:, c] * eta1_th[:, a]
+                             + Deta2th2[:, a, c])
+                d2logH = (-float(np.sum(Gth[a] * Gth[c]))
+                          + float(np.sum(d_diag * d2w)))
+                if ml_active:
+                    T1 = -float(np.einsum(
+                        "ab,ba->", Minv_dMth_arr[a], Minv_dMth_arr[c]))
+                    T2 = 2.0 * float(np.einsum(
+                        "ab,ba->", M_proj_inv, Yth_arr[a].T @ Zth_arr[c]))
+                    d2logH += T1 + T2 - float(np.sum(d2w * q_vec))
+                val = ((d2_dev + d2_pen) / (phi * gamma)
+                       - 2.0 * lsth2[a, c] / gamma + d2logH)
+                ci = base_size + c
+                H_full[col_idx, ci] = H_full[ci, col_idx] = val
         return H_full
 
     def _init_general(self, formulas, data, *, method, sp, family,
@@ -6113,6 +6218,107 @@ class gam:
                 if m != k:
                     out[:, k, m] = d2
         return out
+
+    @staticmethod
+    def _as_n_nt(arr, nt: int) -> np.ndarray:
+        """Normalise a per-θ family derivative (``Detath``/``Deta2th``/…) to
+        shape (n, nt). hea families return (n,) for n_theta==1 and either
+        (n, nt) or (nt, n) otherwise."""
+        a = np.asarray(arr, dtype=float)
+        if a.ndim == 1:
+            return a[:, None]
+        if a.shape[1] == nt:
+            return a
+        return a.T
+
+    def _theta2_arr(self, arr, nt: int, n: int) -> np.ndarray:
+        """Normalise a θ-θ second-derivative family array (``Dth2``,
+        ``Detath2``, ``Deta2th2``) to shape (n, nt, nt). For n_theta==1 it is
+        the single (n,) array; otherwise mgcv packs the upper-triangular
+        (i≤k) θ-pairs in column order — unpack to the symmetric (n,nt,nt)."""
+        a = np.asarray(arr, dtype=float)
+        if nt == 1:
+            return a.reshape(n, 1, 1)
+        out = np.zeros((n, nt, nt))
+        if a.ndim == 3:                       # already (n, nt, nt)
+            return a
+        # packed (n, npairs) in (i≤k) order: (0,0),(0,1),..,(0,nt-1),(1,1),..
+        if a.shape[0] != n:
+            a = a.T
+        col = 0
+        for i in range(nt):
+            for k in range(i, nt):
+                out[:, i, k] = out[:, k, i] = a[:, col]
+                col += 1
+        return out
+
+    def _d2beta_theta(self, fit: "_FitState", rho: np.ndarray, *,
+                      db_drho: np.ndarray, db_dtheta: np.ndarray,
+                      dd2: dict) -> tuple[np.ndarray, np.ndarray]:
+        """∂²β̂/∂θ_a∂ρ_b and ∂²β̂/∂θ_a∂θ_c at PIRLS-converged β̂ — the
+        family-θ rows of mgcv's ``b2`` (gdi.c ``ift2``:1412-1457).
+
+        Mechanical port of ift2's second-derivative loop for the θ-involving
+        pairs (the sp-sp pairs are ``_d2beta_drho_drho``, already confirmed to
+        equal ift2's sp-sp case). For a parameter pair (i, k) ift2 forms
+
+            Db = Xᵀ(−η₁ᵢ·η₁ₖ·Deta3) − t2 − t3 − t4 ;   ∂²β = A⁻¹·(½·Db)
+
+        (the ½ because mgcv's ``PPt = (X'WX+S)⁻¹`` is twice the inverse
+        Hessian) with, in joint [θ, ρ] order:
+
+          t2 = Xᵀ(Deta2th_k·η₁ᵢ)   if k is θ  else  2·sp_k·S_k·(∂β/∂param_i)
+          t3 = Xᵀ(Deta2th_i·η₁ₖ)   if i is θ  else  2·sp_i·S_i·(∂β/∂param_k)
+          t4 = Xᵀ·Detath2_{ik}     if both θ  else (i==k) 2·sp_i·S_i·β  else 0
+
+        η₁ are the first ∂η/∂param (= X·∂β/∂param). Returns
+        (∂²β over (θ, ρ); shape (p, nt, n_sp)) and
+        (∂²β over (θ, θ'); shape (p, nt, nt)).
+        """
+        family = self.family
+        nt = family.n_theta
+        n_sp = len(self._slots)
+        X = self._X_full
+        p = self.p
+        n = X.shape[0]
+        sp = np.exp(rho)
+        chol = (fit.A_chol, fit.A_chol_lower)
+        v = X @ db_drho                               # (n, n_sp) η₁_ρ
+        eta1_th = X @ db_dtheta                        # (n, nt)   η₁_θ
+        Deta3 = np.asarray(dd2["Deta3"], dtype=float)
+        Deta2th = self._as_n_nt(dd2["Deta2th"], nt)    # (n, nt)
+        Detath2 = self._theta2_arr(dd2["Detath2"], nt, n)  # (n, nt, nt)
+
+        def Sk_dot(vec_full: np.ndarray, k: int) -> np.ndarray:
+            """sp_k·S_k·vec embedded back into the full p-vector."""
+            a, b = self._slots[k].col_start, self._slots[k].col_end
+            out = np.zeros(p)
+            out[a:b] = sp[k] * (self._slots[k].S @ vec_full[a:b])
+            return out
+
+        d2b_thr = np.empty((p, nt, n_sp))
+        for a in range(nt):
+            for b in range(n_sp):
+                # i = θ_a (θ), k = ρ_b (sp).
+                Db = X.T @ (-eta1_th[:, a] * v[:, b] * Deta3)   # first term
+                Db -= 2.0 * Sk_dot(db_dtheta[:, a], b)          # t2 (k sp)
+                Db -= X.T @ (Deta2th[:, a] * v[:, b])           # t3 (i θ)
+                # t4: i θ, k sp, i≠k → none.
+                d2b_thr[:, a, b] = cho_solve(chol, 0.5 * Db)
+
+        d2b_thth = np.empty((p, nt, nt))
+        for a in range(nt):
+            for c in range(a, nt):
+                # i = θ_a, k = θ_c (both θ).
+                Db = X.T @ (-eta1_th[:, a] * eta1_th[:, c] * Deta3)
+                Db -= X.T @ (Deta2th[:, c] * eta1_th[:, a])     # t2 (k θ)
+                Db -= X.T @ (Deta2th[:, a] * eta1_th[:, c])     # t3 (i θ)
+                Db -= X.T @ Detath2[:, a, c]                    # t4 (both θ)
+                sol = cho_solve(chol, 0.5 * Db)
+                d2b_thth[:, a, c] = sol
+                if c != a:
+                    d2b_thth[:, c, a] = sol
+        return d2b_thr, d2b_thth
 
     def _d2w_deta2(self, fit: "_FitState") -> np.ndarray:
         """∂²w_i/∂η_i² at PIRLS-converged β̂. Length-n.
