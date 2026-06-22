@@ -58,7 +58,6 @@ from ..formula import (
     SmoothBlock,
     _apply_smooth_arg_exprs,
     _eval_atom,
-    _eval_by_col,
     _factor_levels,
     _LinearTransformRawBasis,
     _RawBasis,
@@ -5099,30 +5098,17 @@ class _DiscreteTerm:
     coef_slice: slice                # where this term lives in the full coef
     qc: int = 0                      # tensor-constraint indicator (1 if Householder)
     v: Optional[np.ndarray] = None   # Householder vec, length = Π p_j (qc=1 case)
-    # absorb / by / keep_cols replays for the *whole* term — applied as
-    # column transforms on the (Khatri-Rao) tensor block. None for params
-    # and unconstrained smooths.
+    # absorb / by / keep_cols for the term. The constraint ``T`` (absorb /
+    # keep_cols) is applied by the kernels via ``_design_constraint_Ts``; None
+    # for params and unconstrained smooths. ``by`` records the by-spec — the
+    # faithful by=-as-tensor-marginal construction (mgcv discrete.mf:261-294)
+    # is the pending port; ``by_mask`` (the old post-hoc weight) is removed.
     absorb: Optional[object] = None
     by: Optional[object] = None
     keep_cols: Optional[np.ndarray] = None
-    # Pre-computed by-mask (factor: length-n indicator; numeric scalar:
-    # length-n multiplier; numeric matrix-arg: (n, n_sum) per-summation-
-    # column weights). Cached at design-build time because the by-column
-    # lives in the original input data, not in ``dframe.mf`` (which only
-    # carries discretised marginals). Invariant under PIRLS / outer-Newton.
-    by_mask: Optional[np.ndarray] = None
     # Predict-time replay (used for predict.bamd, not the fitter).
     spec: Optional[BasisSpec] = None
     label: str = ""
-    # Constant-coordinate-grid fast path (signal regression / RF), set lazily
-    # by ``_term_full_design`` on first call. ``grid_constant`` memoises the
-    # predicate "every matrix-arg margin's k-block is row-constant" (all
-    # observations share the same summation-column grid); ``_grid_B`` caches the
-    # resulting (n_sum, p_raw) tensor basis on that fixed grid. Both depend only
-    # on the design's ``k`` / ``Xd_list`` (invariant under PIRLS / outer-Newton)
-    # and are keyed to the term's single owning design.
-    grid_constant: Optional[bool] = None
-    _grid_B: Optional[np.ndarray] = None
 
 
 @dataclass(slots=True)
@@ -5251,61 +5237,20 @@ def build_discrete_design(blocks: list[SmoothBlock],
         p_term = block.X.shape[1]
         kind = "single" if len(margin_raws) == 1 else "tensor"
 
-        # Pre-compute the by-mask on the original n rows so the kernels
-        # (which can't see ``data``) can apply it row-wise. Factor:
-        # indicator (col == level), float, length n; numeric scalar: col
-        # values, float, length n. A numeric **matrix-arg** by= (mgcv
-        # summation convention) yields an (n, n_sum) array — one weight per
-        # row × summation column — applied per-column before the row-sum in
-        # ``_term_full_design``; scalar/factor masks apply once after.
-        #
-        # Parity note (RF1a) — for a matrix-arg numeric by= the weight is the
-        # **binned** by ``by_unique[k_by]``, read from the discretised frame,
-        # NOT the raw ``data`` column. mgcv ``bam(discrete=TRUE)`` bins the
-        # by-variable (bam.r:2469-2483): ``by.var <- dk$mf[[termk]]`` then
-        # weight ``by.var[dk$k[, ks_by]]``. Sourcing the exact raw by here
-        # would make hea ``discrete=True`` reproduce ``discrete=FALSE`` (bamF)
-        # under the discrete=TRUE flag — a parity bug. The exact by lives at
-        # discrete=False (the non-discrete fitter reads raw). Do NOT "restore"
-        # the raw read. See discrete_mf's Parity note.
-        by_mask: Optional[np.ndarray] = None
-        if spec.by is not None:
-            if data is None:
-                raise ValueError(
-                    f"build_discrete_design: smooth {block.label!r} has "
-                    "by= but no data was passed; cannot evaluate the "
-                    "by-column on the original n rows. Pass ``data=`` "
-                    "to build_discrete_design."
-                )
-            by_name = spec.by.expr
-            j_by = var_index.get(by_name, -1)
-            is_matrix_by = (
-                spec.by.kind == "numeric"
-                and j_by >= 0
-                and by_name in data.columns
-                and is_matrix_col(data[by_name])
+        # PORT IN PROGRESS: the old post-hoc ``by_mask`` weight is removed (it
+        # was not how mgcv represents by=). mgcv builds by= as the FIRST tensor
+        # marginal (discrete.mf:261-294 — an m_by×1 basis) and handles the
+        # matrix-arg summation (n_sum>1) in the C scatter (XWXijs). Both are the
+        # pending faithful port; until they land, by= / matrix-argument discrete
+        # smooths raise here.
+        n_sum = (k_cols[0][1] - k_cols[0][0]) if k_cols else 1
+        if spec.by is not None or n_sum > 1:
+            raise NotImplementedError(
+                f"discrete=True for by= / matrix-argument smooth "
+                f"{block.label!r} is mid-port: by= must be built as a tensor "
+                "marginal (mgcv discrete.mf) and the summation X'WX via XWXijs "
+                "(src/discrete.c). Not available during this refactor."
             )
-            if is_matrix_by:
-                # Binned matrix-arg by (RF summation): the per-cell weight is
-                # ``by_unique[k_by]`` — mgcv bamT (bam.r:2469-2483). Shape
-                # (n, n_sum); aligns column-for-column with the coordinate
-                # margins (jointly the same summation dimension).
-                nr_by = int(dframe.nr[j_by])
-                ks_lo, ks_hi = int(dframe.ks[j_by, 0]), int(dframe.ks[j_by, 1])
-                by_unique = np.asarray(dframe.mf[by_name][:nr_by], dtype=float)
-                by_mask = by_unique[dframe.k[:, ks_lo:ks_hi]]
-            else:
-                col = _eval_by_col(spec.by.expr, data)
-                arr = col.to_numpy() if isinstance(col, pl.Series) else col
-                if spec.by.kind == "factor":
-                    by_mask = (arr == spec.by.level).astype(float)
-                elif spec.by.kind == "numeric":
-                    by_mask = np.asarray(arr, dtype=float)
-                else:
-                    raise ValueError(
-                        f"build_discrete_design: unsupported by.kind="
-                        f"{spec.by.kind!r} on smooth {block.label!r}"
-                    )
 
         terms.append(_DiscreteTerm(
             kind=kind,
@@ -5314,7 +5259,6 @@ def build_discrete_design(blocks: list[SmoothBlock],
             coef_slice=slice(p_total, p_total + p_term),
             absorb=spec.absorb,
             by=spec.by,
-            by_mask=by_mask,
             keep_cols=spec.keep_cols,
             spec=spec,
             label=block.label,
