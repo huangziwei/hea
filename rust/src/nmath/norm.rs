@@ -278,13 +278,22 @@ pub fn pnorm<'py>(
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let out = crate::par::map3(
-        py,
-        x.as_slice().unwrap(),
-        mu.as_slice().unwrap(),
-        sigma.as_slice().unwrap(),
-        |x, m, s| pnorm5_scalar(x, m, s, lower_tail, log_p),
-    );
+    let xs = x.as_slice().unwrap();
+    let ms = mu.as_slice().unwrap();
+    let ss = sigma.as_slice().unwrap();
+    // Scalar mean/sd (the common case: pnorm(x), the probit linkinv, …) arrive
+    // as length-1 arrays — broadcast the scalar over x with a unary map instead
+    // of materialising two length-n constant slices in Python. Bit-identical:
+    // pnorm5_scalar(x[i], m0, s0, …) is exactly what map3 over constant arrays
+    // computes (0 ulp).
+    let out = if ms.len() == 1 && ss.len() == 1 {
+        let (m0, s0) = (ms[0], ss[0]);
+        crate::par::map1(py, xs, |x| pnorm5_scalar(x, m0, s0, lower_tail, log_p))
+    } else {
+        crate::par::map3(py, xs, ms, ss, |x, m, s| {
+            pnorm5_scalar(x, m, s, lower_tail, log_p)
+        })
+    };
     out.into_pyarray(py)
 }
 
@@ -470,13 +479,19 @@ pub fn qnorm<'py>(
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let v = crate::par::map3(
-        py,
-        p.as_slice().unwrap(),
-        mu.as_slice().unwrap(),
-        sigma.as_slice().unwrap(),
-        |p, m, s| qnorm5_scalar(p, m, s, lower_tail, log_p),
-    );
+    let ps = p.as_slice().unwrap();
+    let ms = mu.as_slice().unwrap();
+    let ss = sigma.as_slice().unwrap();
+    // Scalar mean/sd (the common case: qnorm(p), the probit linkfun/d?link) —
+    // unary map over p, no length-n constant slices. Bit-identical to map3.
+    let v = if ms.len() == 1 && ss.len() == 1 {
+        let (m0, s0) = (ms[0], ss[0]);
+        crate::par::map1(py, ps, |p| qnorm5_scalar(p, m0, s0, lower_tail, log_p))
+    } else {
+        crate::par::map3(py, ps, ms, ss, |p, m, s| {
+            qnorm5_scalar(p, m, s, lower_tail, log_p)
+        })
+    };
     v.into_pyarray(py)
 }
 
@@ -489,12 +504,16 @@ pub fn dnorm<'py>(
     sigma: PyReadonlyArray1<'py, f64>,
     give_log: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let v = crate::par::map3(
-        py,
-        x.as_slice().unwrap(),
-        mu.as_slice().unwrap(),
-        sigma.as_slice().unwrap(),
-        |x, m, s| dnorm5_scalar(x, m, s, give_log),
-    );
+    let xs = x.as_slice().unwrap();
+    let ms = mu.as_slice().unwrap();
+    let ss = sigma.as_slice().unwrap();
+    // Scalar mean/sd (the common case: dnorm(x), the probit mu.eta) — unary map
+    // over x, no length-n constant slices. Bit-identical to map3.
+    let v = if ms.len() == 1 && ss.len() == 1 {
+        let (m0, s0) = (ms[0], ss[0]);
+        crate::par::map1(py, xs, |x| dnorm5_scalar(x, m0, s0, give_log))
+    } else {
+        crate::par::map3(py, xs, ms, ss, |x, m, s| dnorm5_scalar(x, m, s, give_log))
+    };
     v.into_pyarray(py)
 }

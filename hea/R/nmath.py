@@ -40,10 +40,22 @@ _PY_VEC = {}
 def _norm_rs(kern, x, mu, sigma, flags):
     """Broadcast (x, mu, sigma), run the native norm kernel, reshape. The native
     norm kernels take mu/sigma as arrays (uniform with the rest of the surface),
-    so array mean/sd route through Rust too — no scalar-loop special case."""
-    xa, ma, sa = np.broadcast_arrays(
-        np.asarray(x, dtype=float), np.asarray(mu, dtype=float),
-        np.asarray(sigma, dtype=float))
+    so array mean/sd route through Rust too — no scalar-loop special case.
+
+    Scalar mean/sd (the overwhelmingly common case — ``dnorm(x)``, ``qnorm(p)``,
+    the probit link surface) is passed straight through as length-1 mu/sigma:
+    the Rust kernel broadcasts the scalar over x with a unary map, so we skip
+    materialising two throwaway length-n constant arrays here every call. The
+    flat result is bit-identical to the broadcast path (the Rust scalar map and
+    map3-over-constants call the same per-element kernel)."""
+    xa = np.asarray(x, dtype=float)
+    ma = np.asarray(mu, dtype=float)
+    sa = np.asarray(sigma, dtype=float)
+    if ma.ndim == 0 and sa.ndim == 0:
+        flat = kern(np.ascontiguousarray(xa.reshape(-1)),
+                    ma.reshape(1), sa.reshape(1), *flags)
+        return flat.reshape(xa.shape)
+    xa, ma, sa = np.broadcast_arrays(xa, ma, sa)
     return kern(
         np.ascontiguousarray(xa.reshape(-1)), np.ascontiguousarray(ma.reshape(-1)),
         np.ascontiguousarray(sa.reshape(-1)), *flags).reshape(xa.shape)

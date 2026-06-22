@@ -6264,14 +6264,15 @@ class gam:
         deta_drho = X @ db_drho                  # (n, n_sp)
         dw_drho = dw_deta[:, None] * deta_drho   # (n, n_sp)
 
+        # H⁻¹ (p×p) is ρ-fixed across the slot loop — compute once, not once
+        # per slot (the old in-loop cho_solve(eye) was O(n_sp) redundant
+        # full-inverse solves). Bit-identical: same factor, same RHS.
+        A_inv = cho_solve((fit.A_chol, fit.A_chol_lower), np.eye(self.p))
         out = np.empty(n_sp)
         for k, slot in enumerate(self._slots):
             a, b = slot.col_start, slot.col_end
             # tr(H⁻¹ S_k): same block trick as `_reml_grad`.
-            Hinv_block = cho_solve(
-                (fit.A_chol, fit.A_chol_lower), np.eye(self.p)
-            )[a:b, a:b]
-            tr_Hinv_Sk = float(np.einsum("ij,ji->", Hinv_block, slot.S))
+            tr_Hinv_Sk = float(np.einsum("ij,ji->", A_inv[a:b, a:b], slot.S))
             out[k] = float(np.sum(d * dw_drho[:, k])) + sp[k] * tr_Hinv_Sk
         return out
 
