@@ -1464,9 +1464,16 @@ class lm:
         # No F-statistic for an intercept-only model (df_model == 0) or a
         # saturated fit (df_residuals == 0, where the denominator vanishes).
         if self.df_model != 0 and self.df_residuals > 0:
-            fstats = float(
-                ((self.tss - self.rss) / self.df_model) / (self.rss / self.df_residuals)
-            )
+            # R's summary.lm divides msr/mse with no rss>0 guard, so an exact
+            # fit (rss == 0 — which a solver that nails a perfectly collinear
+            # response hits, where R's QR usually leaves a tiny non-zero rss)
+            # gives F = +inf via IEEE division, not a Python ZeroDivisionError.
+            # Mirror R's plain formula with numpy float division (as the
+            # t-values just above already do for se == 0).
+            msr = (self.tss - self.rss) / self.df_model
+            mse = self.rss / self.df_residuals
+            with np.errstate(divide="ignore", invalid="ignore"):
+                fstats = float(np.float64(msr) / np.float64(mse))
             f_p_value = float(_dist.pf(fstats, self.df_model, self.df_residuals, lower_tail=False))
         else:
             fstats, f_p_value = None, None
