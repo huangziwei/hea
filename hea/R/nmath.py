@@ -23,6 +23,7 @@ import math
 
 import numpy as np
 
+from ._shared import _rfma, _rfma_vec
 from .rng import _QN_A, _QN_B, _QN_C, _QN_D, _QN_E, _QN_F, _qn_horner
 from .._dispatch import rs_fn
 
@@ -474,7 +475,10 @@ def qnorm5_vec(p, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
     central = np.abs(q) <= 0.425
     qc = q[central]
     rc = 0.180625 - qc * qc
-    res[central] = qc * _qn_horner(rc, _QN_A) / _qn_horner(rc, _QN_B)
+    # vector path: pass the per-arch ARRAY fma (`_rfma_vec`); the default scalar
+    # `_rfma` is `math.fma` on arm64, which rejects array args (rng.py qnorm does
+    # the same). x86's default `_rfma` is `a*b+c` so this was latent there.
+    res[central] = qc * _qn_horner(rc, _QN_A, _rfma_vec) / _qn_horner(rc, _QN_B, _rfma_vec)
     tail = ~central
     qt = q[tail]
     civ = (0.5 - pr[tail] + 0.5) if lower_tail else pr[tail]   # R_DT_CIv (log_p=F)
@@ -483,10 +487,10 @@ def qnorm5_vec(p, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
     valt = np.full(qt.shape, np.nan, dtype=float)   # r>27 lanes stay nan
     near = r <= 5.0
     rn = r[near] - 1.6
-    valt[near] = _qn_horner(rn, _QN_C) / _qn_horner(rn, _QN_D)
+    valt[near] = _qn_horner(rn, _QN_C, _rfma_vec) / _qn_horner(rn, _QN_D, _rfma_vec)
     far = (~near) & (r <= 27.0)
     rfr = r[far] - 5.0
-    valt[far] = _qn_horner(rfr, _QN_E) / _qn_horner(rfr, _QN_F)
+    valt[far] = _qn_horner(rfr, _QN_E, _rfma_vec) / _qn_horner(rfr, _QN_F, _rfma_vec)
     valt = np.where(qt < 0.0, -valt, valt)
     res[tail] = valt
     out[reg] = mu + sigma * res
@@ -1709,14 +1713,15 @@ def _pd_lower_cf(y, d):
         c2 -= 1
         c3 = i * c2
         c4 += 2
-        a1 = c4 * a2 + c3 * a1
-        b1 = c4 * b2 + c3 * b1
+        # R's clang fuses `c4*X + c3*Y` to fmadd on arm64; `_rfma` mirrors per-arch.
+        a1 = _rfma(c4, a2, c3 * a1)
+        b1 = _rfma(c4, b2, c3 * b1)
         i += 1
         c2 -= 1
         c3 = i * c2
         c4 += 2
-        a2 = c4 * a1 + c3 * a2
-        b2 = c4 * b1 + c3 * b2
+        a2 = _rfma(c4, a1, c3 * a2)
+        b2 = _rfma(c4, b1, c3 * b2)
         if b2 > sf:
             a1 /= sf
             b1 /= sf
@@ -4455,14 +4460,14 @@ def _pd_lower_cf_vec(y, d):
         c2 = np.where(run, c2 - 1, c2)
         c3 = i * c2
         c4 = np.where(run, c4 + 2, c4)
-        a1 = np.where(run, c4 * a2 + c3 * a1, a1)
-        b1 = np.where(run, c4 * b2 + c3 * b1, b1)
+        a1 = np.where(run, _rfma_vec(c4, a2, c3 * a1), a1)
+        b1 = np.where(run, _rfma_vec(c4, b2, c3 * b1), b1)
         i += 1.0
         c2 = np.where(run, c2 - 1, c2)
         c3 = i * c2
         c4 = np.where(run, c4 + 2, c4)
-        a2 = np.where(run, c4 * a1 + c3 * a2, a2)
-        b2 = np.where(run, c4 * b1 + c3 * b2, b2)
+        a2 = np.where(run, _rfma_vec(c4, a1, c3 * a2), a2)
+        b2 = np.where(run, _rfma_vec(c4, b1, c3 * b2), b2)
         big = run & (b2 > sf)
         if big.any():
             a1 = np.where(big, a1 / sf, a1)
