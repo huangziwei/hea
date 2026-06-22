@@ -406,6 +406,28 @@ from hea.formula import (  # noqa: E402
 )
 
 
+def _assert_eta_parity(d, got, want):
+    """Rust ``tp_eval_*`` vs the numpy ``_tp_fast_eta_vec`` build.
+
+    For ODD d the radial kernel is ``f0·(r²)^k·√(r²)`` — only ``sqrt`` (an
+    IEEE correctly-rounded operation, so bit-identical across every libm) plus
+    integer-power multiplies, hence byte-exact on every platform.
+
+    For EVEN d it is ``f0·log(r²)·…`` and ``log`` is NOT a correctly-rounded
+    IEEE operation: rust's scalar ``f64::ln`` and numpy's vectorised ``np.log``
+    are two conformant-but-distinct implementations. They coincide bit-for-bit
+    on the darwin capture box (both Intel and arm64), but a Linux numpy wheel's
+    SIMD ``log`` can disagree by ≤1 ULP (a py3.12 CI runner did). That is far
+    below the mgcv-oracle fixture tolerance (5e-5) the basis is actually gated
+    on, so off-darwin the even-d branch uses the shared libm-floor tolerance —
+    same ``_STRICT``/``_LINUX_RTOL`` split as :func:`_assert_bit_exact`."""
+    if d % 2 == 0 and not _STRICT:
+        np.testing.assert_allclose(got, want, rtol=_LINUX_RTOL, atol=1e-300,
+                                   equal_nan=True)
+    else:
+        np.testing.assert_array_equal(got, want)
+
+
 @pytest.mark.parametrize("d,m", [(1, 2), (2, 2), (3, 3)])
 def test_tp_eval_b_bit_exact(d, m):
     rng = np.random.default_rng(d)
@@ -419,7 +441,7 @@ def test_tp_eval_b_bit_exact(d, m):
     diff = x_c[:, None, :] - Xu[None, :, :]
     rsq = (diff * diff).sum(axis=-1)
     b_np = np.hstack([_tp_fast_eta_vec(m, d, rsq, eta0), _tp_T(x_c, m, d)])
-    np.testing.assert_array_equal(b_rs, b_np)
+    _assert_eta_parity(d, b_rs, b_np)
 
 
 @pytest.mark.parametrize("d,m", [(1, 2), (2, 2), (3, 3)])
@@ -431,7 +453,7 @@ def test_tp_eval_E_bit_exact(d, m):
     diff = Xu[:, None, :] - Xu[None, :, :]
     rsq = (diff * diff).sum(axis=-1)
     E_np = _tp_fast_eta_vec(m, d, rsq, eta0)
-    np.testing.assert_array_equal(E_rs, E_np)
+    _assert_eta_parity(d, E_rs, E_np)
 
 
 # ---------------------------------------------------------------------------
