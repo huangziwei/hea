@@ -3632,6 +3632,10 @@ class bam(gam):
         rho_hat: Optional[np.ndarray] = None      # full per-penalty log-sp
         log_phi_hat: Optional[float] = None
         fit: Optional[_FitState] = None
+        # Last accepted discrete-POI step (β, PP). For additive the per-iter
+        # ``_fit_given_rho`` is deferred (Item 2b) and the converged fit is built
+        # from this once, after the loop — skipping 6 of 7 O(n) η recomputes.
+        last_out: Optional[dict] = None
         # Persistent *working* (id-linked) sp warm-start across PIRLS iters.
         # ``None`` until the first sp step; equals ``rho_hat`` slot-for-slot
         # when no smooths share an id (``_work_dim == len(slots)``).
@@ -4005,12 +4009,25 @@ class bam(gam):
                     # for rank-deficient A it adopts mgcv's pivoted-Cholesky
                     # null-space gauge instead of _fit_given_rho's ridge
                     # fallback (so coef + SE match mgcv, not just the fit).
-                    fit = self._fit_given_rho(rho_hat)
-                    fit.beta = out["beta"]
-                    fit.A_inv = _sl_initial_repara(
-                        self._sl, out["PP"], inverse=True,
-                        both_sides=True, cov=True,
-                    )
+                    #
+                    # Item 2b: _fit_given_rho's only unique outputs here are the
+                    # gauge-invariant η/μ/A_chol for post-fit; its β is discarded
+                    # (overridden by out["beta"]). For additive (Gaussian-
+                    # identity) those η/μ don't feed the loop (dev is refreshed
+                    # cheaply, coef = out["beta"]), so we DEFER the full solve to
+                    # ONE post-loop call — dropping its per-iter O(n)
+                    # _chunked_xbeta η recompute (bam.py:2760). Non-additive
+                    # keeps solving each iter (its η/μ build the next W, z).
+                    last_out = out
+                    if additive:
+                        fit = None
+                    else:
+                        fit = self._fit_given_rho(rho_hat)
+                        fit.beta = out["beta"]
+                        fit.A_inv = _sl_initial_repara(
+                            self._sl, out["PP"], inverse=True,
+                            both_sides=True, cov=True,
+                        )
                 elif method in ("REML", "ML"):
                     # Non-discrete REML/ML → mgcv ``bgam.fit`` (bam.r:1226-1261):
                     # ``fast.REML.fit`` to FULL convergence on the current
@@ -4092,7 +4109,10 @@ class bam(gam):
 
             self._log_phi_hat = log_phi_hat
 
-            new_coef = fit.beta
+            # Additive deferred the per-iter solve: coef is the POI β directly
+            # (== the fit.beta the non-deferred path would have copied).
+            new_coef = (last_out["beta"] if (additive and fit is None)
+                        else fit.beta)
             if not np.all(np.isfinite(new_coef)):
                 warnings.warn(
                     f"non-finite coefficients at PIRLS iteration {it+1}",
@@ -4101,6 +4121,19 @@ class bam(gam):
                 break
             coef = new_coef.copy()
         # end outer iter loop
+
+        # Item 2b: additive deferred its per-iter _fit_given_rho; build the
+        # converged fit ONCE now from the last accepted (rho_hat, POI β/PP).
+        # Bit-identical to the per-iter path's *final* fit (same rho_hat, same
+        # out), minus the 6 discarded intermediate solves. ``rho_hat`` /
+        # ``last_out`` are from the last sp step (iter before the conv break).
+        if additive and fit is None and last_out is not None:
+            fit = self._fit_given_rho(rho_hat)
+            fit.beta = last_out["beta"]
+            fit.A_inv = _sl_initial_repara(
+                self._sl, last_out["PP"], inverse=True,
+                both_sides=True, cov=True,
+            )
 
         if not conv:
             warnings.warn("PIRLS algorithm did not converge", stacklevel=2)
