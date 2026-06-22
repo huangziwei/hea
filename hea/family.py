@@ -1737,26 +1737,28 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     )
     j_int = np.maximum(1, np.round(j_star).astype(int))
     j_int_max = int(j_int.max())
-
-    # Series decay rate scales with |alpha|; p close to 2 (slow decay)
-    # needs a wider window before the eps gate fires. Empirically
-    # ``1/|alpha| + 1`` × j_int_max suffices for ``p`` up to 1.99.
-    margin_mult = max(2.0, 1.0 / abs(alpha) + 1.0)
-    safe_margin = max(50, int(np.ceil(margin_mult * j_int_max)) + 20)
-    J = min(j_int_max + safe_margin, _LD_J_MAX)
-
-    j_grid = np.arange(1, J + 1, dtype=float)
-    j_grid_int = j_grid.astype(int)
-    lgamma_jp1 = gammaln(j_grid + 1.0)
-    lgamma_neg_ja = gammaln(-j_grid * alpha)
-    psi_arr = digamma(-j_grid * alpha)
-    trig_arr = polygamma(1, -j_grid * alpha)
-
-    # Chunk on the n_active axis to bound the (chunk, J) working set.
-    # Each row carries 5 J-wide arrays in flight (lw / 2 masks / w /
-    # transient), 8 bytes each → 40 J bytes per row.
     n_active = ya.size
-    chunk = max(1, _chunk_bytes // (40 * J))
+    near = 5
+
+    # Window width from the LOCAL curvature of log W_j, NOT the old
+    # conservative ``1/|alpha|`` bound (which over-allocated ~26× at p→2:
+    # J≈3300 where the true eps-window is ~125 wide, then masked the excess
+    # — mgcv's C `tweedious` sweeps a per-row window with early break,
+    # misc.c:301). Near its peak (j ≈ j_int) the log series term is locally
+    # Gaussian: d²logW_j/dj² = −(ψ'(j+1) + α²ψ'(−jα)), so it falls _LD_EPS
+    # below the peak within ±√(2·_LD_EPS·var) (var = −1/that 2nd deriv).
+    # Size J to the widest row's right edge; the grow-loop below is the
+    # bit-exactness GUARANTEE — it stops only once the eps gate has provably
+    # fired inside the window for every row (the rightmost column is below
+    # `log_max − _LD_EPS`), so by unimodality no retained term is ever
+    # truncated and the sum is identical to any wider J.
+    peak_var = 1.0 / (
+        polygamma(1, j_int + 1.0)
+        + alpha * alpha * polygamma(1, -j_int * alpha)
+    )
+    half = np.sqrt(2.0 * _LD_EPS * np.maximum(peak_var, 0.0))
+    right = int(np.ceil(float(np.max(j_int + half)))) + 16
+    J = min(max(right, j_int_max + near + 1), _LD_J_MAX)
 
     out_la = np.empty(n_active)
     out_jb = np.empty(n_active)
@@ -1765,35 +1767,57 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     out_j2pb = np.empty(n_active)
     out_j2p2b = np.empty(n_active)
     out_j2tb = np.empty(n_active)
-    near = 5
-    for s in range(0, n_active, chunk):
-        e = min(s + chunk, n_active)
-        lz_c = log_z[s:e]
-        ji_c = j_int[s:e]
-        lw = (j_grid[None, :] * lz_c[:, None]
-              - lgamma_jp1[None, :] - lgamma_neg_ja[None, :])
-        log_max = np.max(lw, axis=1)
-        within_near = np.abs(j_grid_int[None, :] - ji_c[:, None]) <= near
-        above_eps = lw >= (log_max[:, None] - _LD_EPS)
-        keep = within_near | above_eps
-        w = np.where(keep, np.exp(lw - log_max[:, None]), 0.0)
-        sum_w = np.sum(w, axis=1)
-        out_la[s:e] = log_max + np.log(sum_w)
-        p_w = w / sum_w[:, None]
-        jb_c = np.sum(p_w * j_grid[None, :], axis=1)
-        out_jb[s:e] = jb_c
-        out_jv[s:e] = np.sum(
-            p_w * (j_grid[None, :] - jb_c[:, None]) ** 2, axis=1,
-        )
-        out_jpb[s:e] = np.sum(
-            p_w * j_grid[None, :] * psi_arr[None, :], axis=1,
-        )
-        jpsi = j_grid[None, :] * psi_arr[None, :]
-        out_j2pb[s:e] = np.sum(p_w * j_grid[None, :] * jpsi, axis=1)
-        out_j2p2b[s:e] = np.sum(p_w * jpsi * jpsi, axis=1)
-        out_j2tb[s:e] = np.sum(
-            p_w * j_grid[None, :] ** 2 * trig_arr[None, :], axis=1,
-        )
+    while True:
+        j_grid = np.arange(1, J + 1, dtype=float)
+        j_grid_int = j_grid.astype(int)
+        lgamma_jp1 = gammaln(j_grid + 1.0)
+        lgamma_neg_ja = gammaln(-j_grid * alpha)
+        psi_arr = digamma(-j_grid * alpha)
+        trig_arr = polygamma(1, -j_grid * alpha)
+
+        # Chunk on the n_active axis to bound the (chunk, J) working set.
+        # Each row carries 5 J-wide arrays in flight (lw / 2 masks / w /
+        # transient), 8 bytes each → 40 J bytes per row.
+        chunk = max(1, _chunk_bytes // (40 * J))
+        grow = False
+        for s in range(0, n_active, chunk):
+            e = min(s + chunk, n_active)
+            lz_c = log_z[s:e]
+            ji_c = j_int[s:e]
+            lw = (j_grid[None, :] * lz_c[:, None]
+                  - lgamma_jp1[None, :] - lgamma_neg_ja[None, :])
+            log_max = np.max(lw, axis=1)
+            above_eps = lw >= (log_max[:, None] - _LD_EPS)
+            # Right boundary still carrying weight ⇒ the eps-window extends
+            # past J for some row ⇒ grow and recompute (rare — the analytic
+            # width above covers it first-try in practice). j_int+near < J
+            # by construction, so the last column is pure above_eps.
+            if J < _LD_J_MAX and above_eps[:, -1].any():
+                grow = True
+                break
+            within_near = np.abs(j_grid_int[None, :] - ji_c[:, None]) <= near
+            keep = within_near | above_eps
+            w = np.where(keep, np.exp(lw - log_max[:, None]), 0.0)
+            sum_w = np.sum(w, axis=1)
+            out_la[s:e] = log_max + np.log(sum_w)
+            p_w = w / sum_w[:, None]
+            jb_c = np.sum(p_w * j_grid[None, :], axis=1)
+            out_jb[s:e] = jb_c
+            out_jv[s:e] = np.sum(
+                p_w * (j_grid[None, :] - jb_c[:, None]) ** 2, axis=1,
+            )
+            out_jpb[s:e] = np.sum(
+                p_w * j_grid[None, :] * psi_arr[None, :], axis=1,
+            )
+            jpsi = j_grid[None, :] * psi_arr[None, :]
+            out_j2pb[s:e] = np.sum(p_w * j_grid[None, :] * jpsi, axis=1)
+            out_j2p2b[s:e] = np.sum(p_w * jpsi * jpsi, axis=1)
+            out_j2tb[s:e] = np.sum(
+                p_w * j_grid[None, :] ** 2 * trig_arr[None, :], axis=1,
+            )
+        if not grow:
+            break
+        J = min(J * 2, _LD_J_MAX)
 
     flat_la = log_a.ravel()
     flat_jb = j_bar.ravel()
@@ -1850,21 +1874,21 @@ def _tweedie_log_a_vec_pv(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     )
     j_int = np.maximum(1, np.round(j_star).astype(int))
     j_int_max = int(j_int.max())
-
-    # widest window needed across rows: decay slows as |alpha| shrinks
-    # (p → 2), so size the shared grid from the slowest-decaying row.
-    margin_mult = max(2.0, 1.0 / float(np.min(np.abs(alpha))) + 1.0)
-    safe_margin = max(50, int(np.ceil(margin_mult * j_int_max)) + 20)
-    J = min(j_int_max + safe_margin, _LD_J_MAX)
-
-    j_grid = np.arange(1, J + 1, dtype=float)
-    j_grid_int = j_grid.astype(int)
-    lgamma_jp1 = gammaln(j_grid + 1.0)
-
-    # per-row α ⇒ the -jα tables are (chunk, J); budget ~9 J-wide
-    # doubles per row in flight → 72 J bytes per row.
     n_active = ya.size
-    chunk = max(1, _chunk_bytes // (72 * J))
+    near = 5
+
+    # Per-row eps-window from the local curvature of log W_j (α is per-row
+    # here), NOT the old ``1/min|alpha|`` worst-row bound: see the scalar
+    # :func:`_tweedie_log_a_vec` for the derivation and the bit-exactness
+    # guarantee (the grow-loop only stops once the eps gate has fired inside
+    # the window for every row). Size the shared grid to the widest row.
+    peak_var = 1.0 / (
+        polygamma(1, j_int + 1.0)
+        + alpha * alpha * polygamma(1, -j_int * alpha)
+    )
+    half = np.sqrt(2.0 * _LD_EPS * np.maximum(peak_var, 0.0))
+    right = int(np.ceil(float(np.max(j_int + half)))) + 16
+    J = min(max(right, j_int_max + near + 1), _LD_J_MAX)
 
     out_la = np.empty(n_active)
     out_jb = np.empty(n_active)
@@ -1873,35 +1897,49 @@ def _tweedie_log_a_vec_pv(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     out_j2pb = np.empty(n_active)
     out_j2p2b = np.empty(n_active)
     out_j2tb = np.empty(n_active)
-    near = 5
-    for s in range(0, n_active, chunk):
-        e = min(s + chunk, n_active)
-        lz_c = log_z[s:e]
-        ji_c = j_int[s:e]
-        nja = -j_grid[None, :] * alpha[s:e, None]      # (c, J), > 0
-        lw = (j_grid[None, :] * lz_c[:, None]
-              - lgamma_jp1[None, :] - gammaln(nja))
-        log_max = np.max(lw, axis=1)
-        within_near = np.abs(j_grid_int[None, :] - ji_c[:, None]) <= near
-        above_eps = lw >= (log_max[:, None] - _LD_EPS)
-        keep = within_near | above_eps
-        w = np.where(keep, np.exp(lw - log_max[:, None]), 0.0)
-        sum_w = np.sum(w, axis=1)
-        out_la[s:e] = log_max + np.log(sum_w)
-        p_w = w / sum_w[:, None]
-        jb_c = np.sum(p_w * j_grid[None, :], axis=1)
-        out_jb[s:e] = jb_c
-        out_jv[s:e] = np.sum(
-            p_w * (j_grid[None, :] - jb_c[:, None]) ** 2, axis=1,
-        )
-        psi_c = digamma(nja)
-        out_jpb[s:e] = np.sum(p_w * j_grid[None, :] * psi_c, axis=1)
-        jpsi = j_grid[None, :] * psi_c
-        out_j2pb[s:e] = np.sum(p_w * j_grid[None, :] * jpsi, axis=1)
-        out_j2p2b[s:e] = np.sum(p_w * jpsi * jpsi, axis=1)
-        out_j2tb[s:e] = np.sum(
-            p_w * j_grid[None, :] ** 2 * polygamma(1, nja), axis=1,
-        )
+    while True:
+        j_grid = np.arange(1, J + 1, dtype=float)
+        j_grid_int = j_grid.astype(int)
+        lgamma_jp1 = gammaln(j_grid + 1.0)
+
+        # per-row α ⇒ the -jα tables are (chunk, J); budget ~9 J-wide
+        # doubles per row in flight → 72 J bytes per row.
+        chunk = max(1, _chunk_bytes // (72 * J))
+        grow = False
+        for s in range(0, n_active, chunk):
+            e = min(s + chunk, n_active)
+            lz_c = log_z[s:e]
+            ji_c = j_int[s:e]
+            nja = -j_grid[None, :] * alpha[s:e, None]      # (c, J), > 0
+            lw = (j_grid[None, :] * lz_c[:, None]
+                  - lgamma_jp1[None, :] - gammaln(nja))
+            log_max = np.max(lw, axis=1)
+            above_eps = lw >= (log_max[:, None] - _LD_EPS)
+            if J < _LD_J_MAX and above_eps[:, -1].any():
+                grow = True
+                break
+            within_near = np.abs(j_grid_int[None, :] - ji_c[:, None]) <= near
+            keep = within_near | above_eps
+            w = np.where(keep, np.exp(lw - log_max[:, None]), 0.0)
+            sum_w = np.sum(w, axis=1)
+            out_la[s:e] = log_max + np.log(sum_w)
+            p_w = w / sum_w[:, None]
+            jb_c = np.sum(p_w * j_grid[None, :], axis=1)
+            out_jb[s:e] = jb_c
+            out_jv[s:e] = np.sum(
+                p_w * (j_grid[None, :] - jb_c[:, None]) ** 2, axis=1,
+            )
+            psi_c = digamma(nja)
+            out_jpb[s:e] = np.sum(p_w * j_grid[None, :] * psi_c, axis=1)
+            jpsi = j_grid[None, :] * psi_c
+            out_j2pb[s:e] = np.sum(p_w * j_grid[None, :] * jpsi, axis=1)
+            out_j2p2b[s:e] = np.sum(p_w * jpsi * jpsi, axis=1)
+            out_j2tb[s:e] = np.sum(
+                p_w * j_grid[None, :] ** 2 * polygamma(1, nja), axis=1,
+            )
+        if not grow:
+            break
+        J = min(J * 2, _LD_J_MAX)
 
     log_a.ravel()[active] = out_la
     j_bar.ravel()[active] = out_jb
@@ -3048,6 +3086,11 @@ class Tweedie(Family):
         if not (1.0 < p < 2.0):
             raise ValueError(f"Tweedie requires 1 < p < 2; got p={p!r}")
         self.p = float(p)
+        # (φ, p, y-fingerprint) → 7-moment Dunn-Smyth bundle. The saturated
+        # series a(y, φ, p) is μ-INDEPENDENT, so ls/dls_dp/_d2ls_dp at one
+        # (φ, p) point — and every PIRLS iter / repeated outer eval at that
+        # point — recompute the same arrays. See _saturated_series.
+        self._sat_series_cache: dict = {}
         super().__init__(link=link)
 
     def variance(self, mu):
@@ -3141,6 +3184,35 @@ class Tweedie(Family):
         log_f = self._log_density(y, mu, phi)
         return -2.0 * float(np.sum(log_f * wt)) + 2.0
 
+    def _saturated_series(self, y_nz, phi_nz):
+        """Memoised :func:`_tweedie_log_a_vec` at the saturated point (μ = y).
+
+        ``ls``/``dls_dp``/``_d2ls_dp`` each evaluate the Dunn-Smyth series at
+        the SAME ``(y, φ=scale, p)`` and extract different moments; the series
+        is μ-independent, so within a score-eval (and wherever the joint outer
+        Newton revisits a ``(φ, p)``) it is otherwise recomputed redundantly
+        (a cliff fit makes 189 calls at only 33 distinct ``(φ, p)`` — 5.7×).
+        Mirrors mgcv's ``buffer=TRUE`` reuse in ``ldTweedie``. Bit-identical:
+        returns the very arrays ``_tweedie_log_a_vec`` would (the callers only
+        read them). Keyed on ``(φ, p)`` + a cheap y fingerprint (size/ends/sum
+        — exact within a fit, collision-proof across datasets); ``self.p`` is
+        the live power so a ``tw`` p-update invalidates stale entries."""
+        p = self.p
+        scale = float(phi_nz[0]) if y_nz.size else 0.0
+        key = (scale, p, y_nz.size,
+               float(y_nz[0]) if y_nz.size else 0.0,
+               float(y_nz[-1]) if y_nz.size else 0.0,
+               float(y_nz.sum()) if y_nz.size else 0.0)
+        cache = self._sat_series_cache
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+        res = _tweedie_log_a_vec(y_nz, phi_nz, p)
+        if len(cache) >= 64:
+            cache.clear()
+        cache[key] = res
+        return res
+
     def ls(self, y, wt, scale):
         """Saturated log-lik Σ w_i·log f(y_i; y_i, φ, p) and its 1st/2nd
         derivatives wrt log φ (hea log-scale convention).
@@ -3191,7 +3263,8 @@ class Tweedie(Family):
         j_bar = np.zeros_like(y_g)
         j_var = np.zeros_like(y_g)
         if np.any(~zero):
-            la_, jb_, jv_ = _tweedie_log_a_vec(y_g[~zero], phi_i[~zero], p)[:3]
+            la_, jb_, jv_ = self._saturated_series(
+                y_g[~zero], phi_i[~zero])[:3]
             log_a[~zero] = la_
             j_bar[~zero] = jb_
             j_var[~zero] = jv_
@@ -3317,8 +3390,8 @@ class Tweedie(Family):
         j_bar = np.zeros_like(y_g)
         j_psi_bar = np.zeros_like(y_g)
         if np.any(~zero):
-            _, jb_, _, jpb_, *_rest2 = _tweedie_log_a_vec(
-                y_g[~zero], phi_i[~zero], p
+            _, jb_, _, jpb_, *_rest2 = self._saturated_series(
+                y_g[~zero], phi_i[~zero]
             )
             j_bar[~zero] = jb_
             j_psi_bar[~zero] = jpb_
@@ -3395,8 +3468,8 @@ class Tweedie(Family):
         d2p_ser = np.zeros_like(y_g)
         cross_ser = np.zeros_like(y_g)
         if np.any(~zero):
-            (_, jb, jv, jpb, j2pb, j2p2b, j2tb) = _tweedie_log_a_vec(
-                y_g[~zero], phi_i[~zero], p
+            (_, jb, jv, jpb, j2pb, j2p2b, j2tb) = self._saturated_series(
+                y_g[~zero], phi_i[~zero]
             )
             C = log_phi[~zero] + np.log(p - 1.0) - L[~zero] - tm
             E_jK = jb * C + jpb
