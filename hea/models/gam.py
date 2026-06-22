@@ -2210,7 +2210,7 @@ class gam:
         # cached. For GCV / no-smooth / non-finite σ², leave as None and
         # the consumers fall back to whatever they can do.
         if (
-            method in ("REML", "ML")
+            method in ("REML", "ML", "P-REML", "P-ML")
             and n_sp > 0
             and np.isfinite(sigma_squared)
             and sigma_squared > 0
@@ -2237,12 +2237,24 @@ class gam:
             # log φ row — appending one shifts every Schur-complement ρρ
             # block (Vr → Vc1/Vc2 → edf2/Vc) off mgcv's, because the
             # (ρ, log φ) cross term −(∂Dp/∂ρ)/φ is nonzero at convergence.
-            include_phi_aug = not self._scale_known_fit
-            H_aug = 0.5 * self._reml_hessian(
-                rho_hat, log_phi_hat_for_aug, fit=fit,
-                include_log_phi=include_phi_aug,
-                include_family_theta=n_th_aug > 0,
-            )
+            if self._pearson_scale_criterion:
+                # P-REML / P-ML: the Vc sp-uncertainty correction uses the
+                # criterion's OWN Hessian (mgcv `object$outer.info$hess` =
+                # the P-REML/P-ML REML2 at the Pearson plug-in scale,
+                # gam.fit3.r:979) — ρ-only, since the scale is the Pearson
+                # plug-in φ_P(ρ), not a free outer parameter. NOT the
+                # free-log φ plain-REML Hessian.
+                n_th_aug = 0
+                self._n_theta_aug = 0
+                include_phi_aug = False
+                H_aug = self._preml_hessian(rho_hat, fit=fit)
+            else:
+                include_phi_aug = not self._scale_known_fit
+                H_aug = 0.5 * self._reml_hessian(
+                    rho_hat, log_phi_hat_for_aug, fit=fit,
+                    include_log_phi=include_phi_aug,
+                    include_family_theta=n_th_aug > 0,
+                )
             # Working-space view: the criterion is optimized over θ
             # (ρ = L·θ), so Vr — and every CI built on H_aug — lives in
             # working coordinates: H_θ = T'·H_ρ·T, T = blockdiag(L, I).
@@ -2375,11 +2387,15 @@ class gam:
         family_aic = float(self.family.aic(y, fit.mu, dev1, wt, n_aic))
         mgcv_aic = family_aic + 2.0 * edf_total                    # mgcv's m$aic
         logLik = sc_p + edf_total - 0.5 * mgcv_aic                 # mgcv's logLik value
-        # mgcv leaves edf2 NULL on the GCV/UBRE path (gam.fit3.post.proc
+        # mgcv leaves edf2 NULL on the GCV/UBRE/GACV path (gam.fit3.post.proc
         # gates on reml.scale), so logLik.gam's df falls back to edf there;
-        # hea's GCV edf2 attribute stays as a best-effort extra but must
-        # not leak into AIC/BIC.
-        df_base = self.edf2_total if method in ("REML", "ML") else edf_total
+        # hea's GCV/GACV edf2 attribute stays as a best-effort extra but must
+        # not leak into AIC/BIC. The Pearson-Laplace criteria (P-REML/P-ML)
+        # DO get a Vc/edf2 (reml.scale non-NA), so they use edf2 like REML/ML
+        # (logLik.gam: sum(edf2) whenever edf2 is non-NULL, mgcv.r:4431).
+        df_base = (self.edf2_total
+                   if method in ("REML", "ML", "P-REML", "P-ML")
+                   else edf_total)
         df_for_aic = min(df_base + sc_p, float(p) + sc_p)          # capped at np
         # logLik.gam (mgcv.r): extended families add n.theta to the df
         # *after* the np cap (tw: +1 for the free p).
@@ -5276,13 +5292,12 @@ class gam:
             def _grad(rho, log_phi, fit):
                 return _to_working(self._gacv_grad(rho, fit=fit))
             def _hess(rho, log_phi, fit):
-                return _to_working_hess(
-                    self._fd_hessian_of_grad(self._gacv_grad, rho))
+                return _to_working_hess(self._gacv_hessian(rho, fit=fit))
         elif criterion == "PREML":
             # P-REML / P-ML (gam.fit3.r:640-665): the Laplace (RE)ML criterion
             # with the Pearson-Laplace scale φ = P/(n−Mp) plugged in (γ≡1),
             # ρ-only. Value reuses `_reml` at log φ_P; gradient `_preml_grad`
-            # (= reused REML ρ-grad − φ(ρ) chain term); FD Hessian on it.
+            # (= reused REML ρ-grad − φ(ρ) chain term); analytic `_preml_hessian`.
             def _eval(t):
                 rho_t, _ = _split(t)
                 try:
@@ -5296,8 +5311,7 @@ class gam:
             def _grad(rho, log_phi, fit):
                 return _to_working(0.5 * self._preml_grad(rho, fit))
             def _hess(rho, log_phi, fit):
-                return _to_working_hess(
-                    0.5 * self._fd_hessian_of_grad(self._preml_grad, rho))
+                return _to_working_hess(self._preml_hessian(rho, fit))
         else:  # GCV
             def _eval(t):
                 rho_t, _ = _split(t)
@@ -7040,6 +7054,62 @@ class gam:
         deta_drho = self._X_full @ db_drho                    # (n, n_sp)
         return P, dP_deta @ deta_drho                         # (n_sp,)
 
+    def _pearson_hess(self, fit: "_FitState", rho: np.ndarray, *,
+                      db_drho: "np.ndarray | None" = None,
+                      d2b: "np.ndarray | None" = None) -> np.ndarray:
+        """Pearson statistic ρ-Hessian ``P2 = ∂²P/∂ρ_m∂ρ_k`` (n_sp × n_sp) at
+        PIRLS-converged β̂ — mechanical port of mgcv ``pearson2`` (gdi.c:1207-
+        1273), the ``deriv2`` branch. With ``Pe1 = ∂P_i/∂η`` (the
+        `_pearson_and_deriv` per-obs term) and ``Pe2 = ∂²P_i/∂η²``:
+
+            P2[m,k] = Σ_i [ Pe1ᵢ·(X·∂²β̂/∂ρ_m∂ρ_k)ᵢ + Pe2ᵢ·(X∂β̂/∂ρ_m)ᵢ·(X∂β̂/∂ρ_k)ᵢ ]
+
+        mgcv normalises ``V1 = V'/V``, ``V2 = V''/V`` and uses ``g1 = g'``,
+        ``g2/g1 = g''/g'²`` (= ``link.g2g``) before pearson2 (gam.fit3.r:534-
+        535); pearson2's Pe2 (gdi.c:1232-1233) becomes, in those units with
+        ``me = μ_η = 1/g'``:
+
+            Pe2 = −Pe1·g2g + me²·(2w/V + 2·xx·V1) − me·Pe1·V1 − me²·xx·r·(V2 − V1²)
+
+        with ``xx = r·w/V``, ``r = y − μ̂``. β̂'s ρ-derivatives use the Newton
+        IFT (`_dbeta_drho` / `_d2beta_drho_drho`), as `_pearson_and_deriv` does.
+        """
+        n_sp = len(self._slots)
+        if n_sp == 0:
+            return np.zeros((0, 0))
+        family = self.family
+        wt = self._wt
+        mu = fit.mu
+        V = family.variance(mu)
+        Vp = family.dvar(mu)
+        Vpp = family.d2var(mu)
+        me = family.link.mu_eta(fit.eta)
+        g2g = family.link.g2g(mu)
+        r = self._y_arr - mu
+        V1n = Vp / V
+        V2n = Vpp / V
+        xx = r * wt / V
+        Pe1 = -xx * (2.0 + r * V1n) * me
+        Pe2 = (-Pe1 * g2g
+               + me * me * (2.0 * wt / V + 2.0 * xx * V1n)
+               - me * Pe1 * V1n
+               - me * me * xx * r * (V2n - V1n * V1n))
+        Pe1 = np.where(np.isfinite(Pe1), Pe1, 0.0)
+        Pe2 = np.where(np.isfinite(Pe2), Pe2, 0.0)
+        if db_drho is None:
+            db_drho = self._dbeta_drho(fit, rho)
+        if d2b is None:
+            d2b = self._d2beta_drho_drho(fit, rho, db_drho=db_drho)
+        X = self._X_full
+        v = X @ db_drho                                        # (n, n_sp)
+        P2 = np.empty((n_sp, n_sp))
+        for m in range(n_sp):
+            for k in range(m, n_sp):
+                Xd2b = X @ d2b[:, m, k]
+                val = float(np.sum(Pe1 * Xd2b + Pe2 * v[:, m] * v[:, k]))
+                P2[m, k] = P2[k, m] = val
+        return P2
+
     def _phi_pearson(self, fit: "_FitState") -> float:
         """The Pearson-Laplace ("REMLish") scale φ = P/(n−Mp) for the
         P-REML/P-ML criteria (gam.fit3.r:641, with pearson.extra=0 and
@@ -7129,27 +7199,6 @@ class gam:
         corr = phi1 * (Dp / (phi * phi) + Mp / phi * reml_ind + 2.0 * ls_dphi)
         return base - corr
 
-    def _fd_hessian_of_grad(
-        self, grad_fn, rho: np.ndarray, h: float = 1e-4,
-    ) -> np.ndarray:
-        """Central-difference Hessian of an analytic FULL-ρ-space gradient
-        ``grad_fn(ρ, fit) → (n_sp,)``. Used by the outer Newton for the
-        GACV / P-REML / P-ML criteria, mirroring the FD-on-analytic-gradient
-        pattern hea already uses for the tw family-θ Hessian rows: the
-        gradient is exact (pinned to mgcv) and the FD here only approximates
-        curvature for the search direction (truncation ~1e-8 ≪ the outer
-        Newton tol; the optimum pins because gradient-zero matches mgcv)."""
-        n_sp = len(rho)
-        H = np.zeros((n_sp, n_sp))
-        for k in range(n_sp):
-            rp = rho.copy()
-            rp[k] += h
-            rm = rho.copy()
-            rm[k] -= h
-            gp = grad_fn(rp, self._fit_given_rho(rp))
-            gm = grad_fn(rm, self._fit_given_rho(rm))
-            H[:, k] = (gp - gm) / (2.0 * h)
-        return 0.5 * (H + H.T)
 
     def _gcv_grad(self, rho: np.ndarray,
                   fit: "_FitState | None" = None) -> np.ndarray:
@@ -7268,8 +7317,17 @@ class gam:
         return float(fit.dev), edf_total, dD_drho, w_piece + pen_piece
 
     def _gcv_hessian(self, rho: np.ndarray,
-                     fit: "_FitState | None" = None) -> np.ndarray:
+                     fit: "_FitState | None" = None,
+                     *, return_pieces: bool = False):
         """Analytical Hessian of `_gcv`. Shape (n_sp, n_sp). Wood 2008 §4.
+
+        With ``return_pieces=True`` the shared ρ-second-derivative blocks
+        (deviance ``D2``, edf ``trA2``, and the first derivatives ``D1``/
+        ``trA1``/``trA`` plus ``db_drho``/``d2b``) are returned as a dict
+        *before* the GCV/UBRE composition — these feed the analytic GACV2
+        (`_gacv_hessian`) and P-REML2/P-ML2 (`_preml_hessian`) assemblies,
+        which share the same deviance/edf Hessians (mgcv gdi1 ``oo$D2``/
+        ``oo$trA2``, gam.fit3.r:773-775). The default path is unchanged.
 
         scale_unknown:
             V_g = n D / (n−τ)²
@@ -7508,6 +7566,10 @@ class gam:
 
         d2tau = 0.5 * (d2tau + d2tau.T)
 
+        if return_pieces:
+            return {"D1": dD_drho, "trA1": dtau_drho, "trA": edf_total,
+                    "D2": d2D, "trA2": d2tau, "db_drho": db_drho, "d2b": d2b}
+
         # ---- Compose criterion Hessian --------------------------------
         # ``gamma`` inflates the τ-coefficient in V_u and V_g; chain-rule
         # picks up γ at every τ-derivative encounter.
@@ -7530,6 +7592,91 @@ class gam:
             + 6.0 * n * (gamma ** 2) * Dn * dτ_dτ / (denom**4)
         )
         return H
+
+    def _gacv_hessian(self, rho: np.ndarray,
+                      fit: "_FitState | None" = None) -> np.ndarray:
+        """Analytic GACV Hessian ``GACV2`` (n_sp × n_sp) — mechanical port of
+        mgcv gam.fit3.r:786-790:
+
+            GACV2 = D2/n + outer(trA1,trA1)·4P/δ³ + 2P·trA2/δ²
+                  + 2·outer(trA1,P1)/δ² + 2·outer(P1,trA1)·(1/(δn)+trA/(nδ²))
+                  + 2·trA·P2/(δn);   GACV2 = (GACV2+GACV2ᵀ)/2
+
+        with δ = n − γ·trA. D2 (deviance Hessian) and trA2 (edf Hessian) come
+        from the shared `_gcv_hessian` pieces; P/P1/P2 are the raw Pearson
+        statistic and its ρ-derivatives. Replaces the former FD Hessian."""
+        if fit is None:
+            fit = self._fit_given_rho(rho)
+        n_sp = len(self._slots)
+        if n_sp == 0:
+            return np.zeros((0, 0))
+        pc = self._gcv_hessian(rho, fit, return_pieces=True)
+        trA1, trA, trA2 = pc["trA1"], pc["trA"], pc["trA2"]
+        D2 = pc["D2"]
+        P, P1 = self._pearson_and_deriv(rho, fit, deriv=True)
+        P2 = self._pearson_hess(fit, rho, db_drho=pc["db_drho"], d2b=pc["d2b"])
+        n = self.n
+        gamma = self._gamma
+        delta = n - gamma * trA
+        if delta <= 0:
+            return np.full((n_sp, n_sp), 1e15)
+        d2 = delta * delta
+        d3 = delta * d2
+        G = (D2 / n
+             + np.outer(trA1, trA1) * 4.0 * P / d3
+             + 2.0 * P * trA2 / d2
+             + 2.0 * np.outer(trA1, P1) / d2
+             + 2.0 * np.outer(P1, trA1) * (1.0 / (delta * n)
+                                           + trA / (n * d2))
+             + 2.0 * trA * P2 / (delta * n))
+        return 0.5 * (G + G.T)
+
+    def _preml_hessian(self, rho: np.ndarray,
+                       fit: "_FitState | None" = None) -> np.ndarray:
+        """Analytic P-REML / P-ML Hessian ``REML2`` (n_sp × n_sp, mgcv's
+        V-scale), equal to mgcv gam.fit3.r:658-664.
+
+        The P-REML/P-ML score is the Laplace (RE)ML score with the
+        Pearson-Laplace scale φ_P(ρ) = P(ρ)/(n−Mp) plugged in for the scale
+        (mgcv.r coerces only the *known*-scale case to REML; for unknown
+        scale this Pearson plug-in is what distinguishes P-REML from REML).
+        So V_P(ρ) = V_REML(ρ, log φ_P(ρ)) and the ρ-Hessian is the chain
+        rule over hea's analytic `_reml_hessian` (which supplies the
+        (ρ,ρ), (ρ,log φ) and (log φ,log φ) blocks and the log φ gradient):
+
+            ∂²V_P/∂ρ_i∂ρ_j = Hρρ[i,j] + Hρφ[i]·u_j + Hρφ[j]·u_i
+                            + Hφφ·u_i·u_j + g_φ·u_ij
+
+        with u = log φ_P, u_i = ∂log P/∂ρ_i = P1_i/P,
+        u_ij = ∂²log P/∂ρ_i∂ρ_j = P2_ij/P − P1_i·P1_j/P². hea's
+        `_reml_hessian`/`_reml_grad` are in 2·V units (and run at γ≡1 for
+        the Pearson criteria), so the assembled 2·V Hessian is halved to
+        mgcv's V-scale. Replaces the former FD Hessian on `_preml_grad`."""
+        if fit is None:
+            fit = self._fit_given_rho(rho)
+        n_sp = len(self._slots)
+        if n_sp == 0:
+            return np.zeros((0, 0))
+        phi = self._phi_pearson(fit)
+        log_phi = float(np.log(max(phi, 1e-300)))
+        # 2·V REML grad/Hessian augmented with the log φ row/col.
+        H_full = self._reml_hessian(rho, log_phi, fit=fit,
+                                    include_log_phi=True)
+        g_full = self._reml_grad(rho, log_phi, fit=fit, include_log_phi=True)
+        Hrr = H_full[:n_sp, :n_sp]
+        Hrf = H_full[:n_sp, n_sp]
+        Hff = float(H_full[n_sp, n_sp])
+        gf = float(g_full[n_sp])
+        # Pearson scale derivatives: u = log φ_P = log P − log(n−Mp).
+        P, P1 = self._pearson_and_deriv(rho, fit, deriv=True)
+        P2 = self._pearson_hess(fit, rho)
+        u1 = P1 / P                                       # ∂log φ_P/∂ρ
+        u2 = P2 / P - np.outer(P1, P1) / (P * P)          # ∂²log φ_P/∂ρ²
+        REML2_2V = (Hrr
+                    + np.outer(Hrf, u1) + np.outer(u1, Hrf)
+                    + Hff * np.outer(u1, u1)
+                    + gf * u2)
+        return 0.5 * (REML2_2V + REML2_2V.T) / 2.0
 
     def _db_drho(self, rho: np.ndarray, beta: np.ndarray,
                  A_chol, A_chol_lower) -> np.ndarray:
