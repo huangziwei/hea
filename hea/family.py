@@ -801,7 +801,7 @@ class Family:
             "and implement Dd() to use the extended-family Newton path."
         )
 
-    def dDeta(self, y, mu, wt, theta, level: int = 0) -> dict:
+    def dDeta(self, y, mu, wt, theta, level: int = 0, dd: dict | None = None) -> dict:
         """Convert ``Dd`` (μ-space derivatives) to η-space via the link
         chain rule. Mirrors mgcv ``dDeta`` (R/efam.r). For identity link
         it copies ``Dmu → Deta``, ``Dmu2 → Deta2``, ...; for non-identity
@@ -811,8 +811,12 @@ class Family:
         Returns a dict with at minimum ``Deta``, ``Deta2``, ``EDeta2``
         (level 0). ``Deta.Deta2 = Dmu/(Dmu2·μ_η - Dmu·g2g)`` is the
         Newton-step working-response numerator that bam's PIRLS reads.
+
+        ``dd`` lets a caller pass a precomputed ``Dd`` table (≥ ``level``) to
+        share the per-obs deviance derivatives with raw-``Dd`` consumers (the
+        gam.fit4 ``_Dd``/``_dDeta`` caches) instead of recomputing them.
         """
-        r = self.Dd(y, mu, theta, wt, level=level)
+        r = dd if dd is not None else self.Dd(y, mu, theta, wt, level=level)
         link = self.link
         if link.name == "identity":
             d = {

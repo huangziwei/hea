@@ -6104,6 +6104,26 @@ class gam:
             )
         return c
 
+    def _Dd(self, fit: "_FitState", level: int) -> dict:
+        """Cached raw ``family.Dd`` (μ-space deviance table) at the converged
+        fit. Shared by :meth:`_dDeta` (passed in as ``dd=``) and the raw-``Dd``
+        consumer :meth:`_db_dtheta_fam` so the per-obs ``Dd`` is computed ONCE
+        per (fit, level) — a cached higher level is a superset → serves
+        lower-level reads. Pure function of the converged fit ⇒ 0-ulp. (``Dd``
+        takes ``(y, mu, θ, wt)`` — note the order differs from ``dDeta``.)
+        Keyed on the EXACT level (a higher level is NOT a safe substitute — e.g.
+        ziP's ``Dd`` omits ``EDmu2th`` and has level-dependent keys), which still
+        removes the dominant same-level repeats."""
+        cache = fit._ddraw
+        if cache is None:
+            cache = fit._ddraw = {}
+        elif cache.get(level) is not None:
+            return cache[level]
+        res = self.family.Dd(self._y_arr, fit.mu, self.family.get_theta(),
+                             self._wt, level=level)
+        cache[level] = res
+        return res
+
     def _dDeta(self, fit: "_FitState", level: int) -> dict:
         """Cached ``family.dDeta`` at the converged fit. The REML grad/Hessian,
         ``db.drho``/``d2b.drho`` and ``_dw_deta``/``_d2w_deta2`` each call
@@ -6111,17 +6131,19 @@ class gam:
         ``Dd`` table (the extended-family #1 cost). Profiling a tw fit found 62%
         of the ``Dd`` calls were redundant repeats; memoising on the FitState by
         level removes them (a cached higher level is a superset → serves
-        lower-level reads). Pure function of the converged fit ⇒ 0-ulp; the gam.
-        fit4 analog of the ``_dwdeta``/``_lderivs`` caches."""
+        lower-level reads). Computes via the shared raw-``Dd`` cache so a single
+        ``Dd`` feeds both the η-transform and raw-``Dd`` consumers. Pure
+        function of the converged fit ⇒ 0-ulp; the gam.fit4 analog of the
+        ``_dwdeta``/``_lderivs`` caches. Keyed on the EXACT level (see
+        :meth:`_Dd` — a higher level is not a safe substitute)."""
         cache = fit._ddeta
         if cache is None:
             cache = fit._ddeta = {}
-        else:
-            for lv in (2, 1, 0):
-                if lv >= level and cache.get(lv) is not None:
-                    return cache[lv]
+        elif cache.get(level) is not None:
+            return cache[level]
         res = self.family.dDeta(self._y_arr, fit.mu, self._wt,
-                                self.family.get_theta(), level)
+                                self.family.get_theta(), level,
+                                dd=self._Dd(fit, level))
         cache[level] = res
         return res
 
@@ -8253,10 +8275,9 @@ class gam:
 
         with ``A = X'WX + Sλ`` the converged penalized Newton Hessian
         from PIRLS (``fit.A_chol``) and ``Dmuth = ∂²D/∂μ∂θ`` from
-        ``family.Dd(level=1)``."""
+        ``family.Dd(level=1)`` (shared via the per-fit ``_Dd`` cache)."""
         family = self.family
-        dd = family.Dd(self._y_arr, fit.mu, family.get_theta(),
-                       self._wt, level=1)
+        dd = self._Dd(fit, 1)
         mu_eta = family.link.mu_eta(fit.eta)
         dmuth = np.asarray(dd["Dmuth"], dtype=float)
         if dmuth.ndim == 1:
@@ -13978,7 +13999,7 @@ class _FitState:
         "S_full", "log_det_A", "E_aug",
         "is_fisher_fallback",
         "converged", "boundary", "warn",
-        "_lderivs", "_dwdeta", "_d2wdeta2", "_ddeta",
+        "_lderivs", "_dwdeta", "_d2wdeta2", "_ddeta", "_ddraw",
     )
 
     def __init__(self, *, beta, dev, pen, A_chol, A_chol_lower,
@@ -14030,6 +14051,7 @@ class _FitState:
         self._dwdeta = None
         self._d2wdeta2 = None
         self._ddeta = None
+        self._ddraw = None
 
 
 # ---------------------------------------------------------------------------
