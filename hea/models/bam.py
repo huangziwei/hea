@@ -37,7 +37,7 @@ Wood, Goude & Shaw (2015), "Generalized additive models for large data
 sets", JRSS C 64(1):139-155.
 Wood (2017), *Generalized Additive Models* (2nd ed.), §6.5.
 
-mgcv source: ``/tmp/mgcv/R/bam.r`` (1.9-1).
+mgcv source: ``ref/mgcv/R/bam.r`` (1.9-4).
 """
 
 from __future__ import annotations
@@ -1533,9 +1533,14 @@ def _build_qr_discrete_pirls(
 
     link = family.link
 
-    # mgcv bam.r:537-539: ``if (is.null(coef)) eta1 <- eta else
-    # eta1 <- Xbd(...) + offset``.
-    if coef is None:
+    # mgcv bam.r:572 forms ``eta <- Xbd(coef) + offset`` ONCE per build. hea's
+    # outer loop (``_bgam_fit_loop``) already formed exactly that η before calling
+    # us (it needs it for step-halving), so it hands it back as ``eta_init`` —
+    # reusing it here drops a second, redundant ``Xbd`` pass. Xbd is linear in
+    # coef, so after step-halving ``eta_init == Xbd(halved coef) + offset`` to the
+    # bit; the recompute-from-coef branch is the fallback for callers that supply
+    # only coef. The not-both-None guard above makes the ``else`` safe.
+    if eta_init is not None:
         eta_full = np.asarray(eta_init, dtype=float)
     else:
         eta_full = Xbd(design, np.asarray(coef, dtype=float)) + offset
@@ -3590,6 +3595,12 @@ class bam(gam):
 
         include_log_phi = (not self._scale_known_fit) and method in ("REML", "ML")
 
+        # mgcv bgam.fitd:500 — Gaussian-identity ⇒ the PIRLS (W, z) are CONSTANT
+        # across iters, so the working model (R, f, X'X, X'y, ‖z‖²) is built ONCE
+        # and reused; later iters only refresh the penalised deviance and take
+        # another sp Newton step. ``additive`` gates that reuse (bam.r:567).
+        additive = _is_identity_link(family)
+
         # ---- Extended-family preinit (mgcv bgam.fitd, bam.r:534-541) ----
         # ``family.preinitialize(y)`` may return ``{"Theta": ...}`` to
         # override the family's internal θ from data (Scat: c(1.5,
@@ -3637,7 +3648,7 @@ class bam(gam):
             # ``eta <- Xbd(coef) + offset; mu <- linkinv(eta)`` so the
             # subsequent step-halving + ``estimate.theta`` see the *post-β* μ,
             # not the stale initialise'd μ (≈ y on iter 0).
-            if it >= 1 and coef is not None:
+            if it >= 1 and coef is not None and not additive:
                 if self._discrete_design is not None:
                     eta = (Xbd(self._discrete_design,
                                 np.asarray(coef, dtype=float))
@@ -3660,7 +3671,8 @@ class bam(gam):
             # (1-based; c.iter=2 since hea never warm-starts ``coef``).
             kk = 0
             if (it > 1 and coef is not None and coef0 is not None
-                    and rho_hat is not None and eta0 is not None):
+                    and rho_hat is not None and eta0 is not None
+                    and not additive):
                 Sλ_h = self._build_S_lambda(rho_hat)
                 Sλ_h = 0.5 * (Sλ_h + Sλ_h.T)
                 bSb0 = float(coef0 @ Sλ_h @ coef0)
@@ -3694,46 +3706,69 @@ class bam(gam):
                 )
                 family.set_theta(theta_new)
 
-            # ---- Build the working model ONCE (mgcv bgam.fitd:632-665) ------
-            # at the (halved) coef and the freshly-updated θ.
-            if self._discrete_design is not None:
-                qr = _build_qr_discrete_pirls(
-                    self._discrete_design, y, off, family,
-                    coef=coef,
-                    eta_init=eta if coef is None else None,
-                    use_chol=self._use_chol,
-                    prior_w=prior_w,
-                )
-            else:
-                qr = _build_qr_chunked_pirls(
-                    self.data, blocks, self._X_param_full, y, off,
-                    family,
-                    coef=coef,
-                    eta_init=eta if coef is None else None,
-                    chunk_size=chunk_size, use_chol=self._use_chol,
-                    prior_w=prior_w,
-                )
-            self._bam_qr = qr
-            # Reduced-data sufficient stats consumed by ``_outer_newton``
-            # via the inherited ``_fit_given_rho`` machinery. ``_X_full =
-            # R`` keeps the inner-score routines on the (R, f) reduced
-            # design just like the Gaussian-identity path. The bam-class
-            # ``_dw_deta`` / ``_d2w_deta2`` overrides return ``zeros(p)``,
-            # which matches "Gaussian-on-(R, f)" exactly: at the PIRLS-
-            # converged β̂ the inner score sees a constant-W problem.
-            self._XtX = qr.R.T @ qr.R
-            self._Xty = qr.R.T @ qr.f
-            self._yty = float(qr.y_norm2)
-            self._X_full = qr.R
-            self._wt_full = qr.wt
+            # ---- Build the working model (mgcv bgam.fitd:567 ``if (iter==1 ||
+            # !additive)``) ---------------------------------------------------
+            # Additive (Gaussian-identity) rebuilds only at iter 0; later iters
+            # reuse the cached (R, f, X'X, X'y, ‖z‖²) and refresh dev cheaply.
+            # Non-additive (PIRLS) rebuilds every iter, as W, z change.
+            if it == 0 or not additive:
+                # Build at the (halved) coef and the freshly-updated θ.
+                if self._discrete_design is not None:
+                    qr = _build_qr_discrete_pirls(
+                        self._discrete_design, y, off, family,
+                        coef=coef,
+                        # Pass the η we already formed above (iter 0: family
+                        # init; iter>0: Xbd(coef)+off, possibly step-halved) so
+                        # the build reuses it instead of a second Xbd pass (mgcv
+                        # forms η once, bam.r:572). Bit-identical; saves ~1
+                        # Xbd/iter.
+                        eta_init=eta,
+                        use_chol=self._use_chol,
+                        prior_w=prior_w,
+                    )
+                else:
+                    qr = _build_qr_chunked_pirls(
+                        self.data, blocks, self._X_param_full, y, off,
+                        family,
+                        coef=coef,
+                        eta_init=eta if coef is None else None,
+                        chunk_size=chunk_size, use_chol=self._use_chol,
+                        prior_w=prior_w,
+                    )
+                self._bam_qr = qr
+                # Reduced-data sufficient stats consumed by ``_outer_newton``
+                # via the inherited ``_fit_given_rho`` machinery. ``_X_full =
+                # R`` keeps the inner-score routines on the (R, f) reduced
+                # design just like the Gaussian-identity path. The bam-class
+                # ``_dw_deta`` / ``_d2w_deta2`` overrides return ``zeros(p)``,
+                # which matches "Gaussian-on-(R, f)" exactly: at the PIRLS-
+                # converged β̂ the inner score sees a constant-W problem.
+                self._XtX = qr.R.T @ qr.R
+                self._Xty = qr.R.T @ qr.f
+                self._yty = float(qr.y_norm2)
+                self._X_full = qr.R
+                self._wt_full = qr.wt
 
-            eta = qr.eta
-            mu = qr.mu
-            dev = qr.dev
-            if not np.isfinite(dev):
-                raise FloatingPointError(
-                    f"non-finite deviance at PIRLS iter {it}"
-                )
+                eta = qr.eta
+                mu = qr.mu
+                dev = qr.dev
+                if not np.isfinite(dev):
+                    raise FloatingPointError(
+                        f"non-finite deviance at PIRLS iter {it}"
+                    )
+            else:
+                # Additive, iter>1: cheap penalised-deviance refresh from the
+                # cached (R, f) and current coef — mgcv bgam.fitd:669
+                # ``dev <- qrx$y.norm2 - sum(coef*qrx$f)``. This equals ‖z‖² −
+                # βᵀX'Wz, which at the sp-update solution is ‖z−Xβ‖²_W + βᵀSβ
+                # (the penalised deviance the bam.r:678 convergence test reads).
+                # self._XtX/_Xty/_yty/_X_full/_wt_full/_bam_qr persist from iter
+                # 0; eta/mu stay stale (unused — halving and θ are gated off).
+                dev = self._yty - float(coef @ self._Xty)
+                if not np.isfinite(dev):
+                    raise FloatingPointError(
+                        f"non-finite penalised deviance at PIRLS iter {it}"
+                    )
 
             # Convergence (mgcv bgam.fitd:678). it>1 == mgcv iter>2 (1-based).
             # The DISCRETE path ANDs a scale-unknown clause: the log-φ Newton
