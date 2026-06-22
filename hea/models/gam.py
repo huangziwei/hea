@@ -5950,6 +5950,27 @@ class gam:
             out[:, k] = -sp[k] * Ainv_Skb
         return out
 
+    def _fit_link_derivs(self, fit: "_FitState"):
+        """``(μ_eta, V, V', V'', V''', g'', g''', g'''')`` at the converged
+        (μ, η), computed ONCE and cached on the fit. The Newton weight-
+        derivative chain (``_dw_deta``/``_d2w_deta2``) otherwise recomputes
+        these family/link derivatives independently each call though they
+        depend only on the shared converged predictor — mgcv evaluates them
+        once per ``gam.fit3`` (gdi1). Bit-identical to the separate calls
+        (``d234link``'s g'',g''' equal ``d23link``'s for every link)."""
+        c = fit._lderivs
+        if c is None:
+            family = self.family
+            link = family.link
+            mu = fit.mu
+            mu_eta = link.mu_eta(fit.eta)
+            g2, g3, g4 = link.d234link(mu)
+            c = fit._lderivs = (
+                mu_eta, family.variance(mu), family.dvar(mu),
+                family.d2var(mu), family.d3var(mu), g2, g3, g4,
+            )
+        return c
+
     def _dw_deta(self, fit: "_FitState") -> np.ndarray:
         """∂w_i/∂η_i at PIRLS-converged β̂. Length-n.
 
@@ -5968,11 +5989,9 @@ class gam:
         ``fit.is_fisher_fallback`` we explicitly drop the α'/α term to
         stay consistent with the α=1 override the PIRLS path applied.
         """
-        link = self.family.link
         family = self.family
         y = self._y_arr
         mu = fit.mu
-        eta = fit.eta
         w = fit.w
         alpha = fit.alpha
 
@@ -5984,11 +6003,7 @@ class gam:
             d3 = 0.5 * np.asarray(dd["Deta3"], dtype=float)
             return np.where((w != 0.0) & np.isfinite(d3), d3, 0.0)
 
-        mu_eta = link.mu_eta(eta)
-        V = family.variance(mu)
-        Vp = family.dvar(mu)
-        Vpp = family.d2var(mu)
-        g2, g3 = link.d23link(mu)   # shares η=g(μ)/φ once for probit-like links
+        mu_eta, V, Vp, Vpp, _Vppp, g2, g3, _g4 = self._fit_link_derivs(fit)
 
         # α'/α term — set to zero for the Fisher fallback path.
         if fit.is_fisher_fallback:
@@ -6089,11 +6104,9 @@ class gam:
         For the Fisher fallback path (PIRLS forced α=1 because Newton-w<0),
         α'/α and α''/α are both dropped — same convention as ``_dw_deta``.
         """
-        link = self.family.link
         family = self.family
         y = self._y_arr
         mu = fit.mu
-        eta = fit.eta
         w = fit.w
         alpha = fit.alpha
 
@@ -6103,12 +6116,7 @@ class gam:
             d4 = 0.5 * np.asarray(dd["Deta4"], dtype=float)
             return np.where((w != 0.0) & np.isfinite(d4), d4, 0.0)
 
-        mu_eta = link.mu_eta(eta)
-        V = family.variance(mu)
-        Vp = family.dvar(mu)
-        Vpp = family.d2var(mu)
-        Vppp = family.d3var(mu)
-        g2, g3, g4 = link.d234link(mu)  # one η=g(μ)/φ for probit-like links
+        mu_eta, V, Vp, Vpp, Vppp, g2, g3, g4 = self._fit_link_derivs(fit)
 
         Vp_V = Vp / V
         Vpp_V = Vpp / V
@@ -13567,6 +13575,7 @@ class _FitState:
         "S_full", "log_det_A", "E_aug",
         "is_fisher_fallback",
         "converged", "boundary", "warn",
+        "_lderivs",
     )
 
     def __init__(self, *, beta, dev, pen, A_chol, A_chol_lower,
@@ -13610,6 +13619,11 @@ class _FitState:
         # for derivative purposes (the analytical α'(μ) is not
         # consistent with the override).
         self.is_fisher_fallback = is_fisher_fallback
+        # Lazily-cached link/variance derivative bundle for the REML weight-
+        # derivative chain (set by gam._fit_link_derivs) — the same converged
+        # (μ, η) feed _dw_deta, _d2w_deta2 and the gradient, which recomputed
+        # variance/dvar/d2link/… independently; mgcv computes them once (gdi1).
+        self._lderivs = None
 
 
 # ---------------------------------------------------------------------------
