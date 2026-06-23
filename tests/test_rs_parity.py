@@ -586,6 +586,102 @@ def test_pls_fit1_xtwz_mode_parity():
     np.testing.assert_allclose(ld, ld0, rtol=0, atol=1e-9)
 
 
+# pls_fit1 — kernel-level R arm: the rust solve vs mgcv's OWN `pls_fit1` C
+# routine (.C(C_pls_fit1), gdi.c:2895, the same call gam.fit3.r:334 makes), and
+# its returned factor/log-det vs R's exact `chol`/`determinant` of the penalized
+# Hessian X'WX+Sλ. Not 0-ulp: mgcv solves via LAPACK `dgeqrf` (libRlapack) over
+# Accelerate BLAS leaf reductions while the rust kernel is a row-blocked TSQR,
+# so this gates rs==R at the LAPACK floor (~1e-14 on the factor, ~1e-15 on β).
+# Together with `test_pls_fit1_parity` (rs==numpy) this is the 3-way gate.
+_PLS_R = r"""
+suppressMessages(library(mgcv))
+a <- commandArgs(trailingOnly=TRUE)
+rd <- function(f) as.matrix(read.csv(f, header=FALSE))
+n <- as.integer(a[5]); p <- as.integer(a[6])
+X <- rd(a[1]); dim(X) <- c(n, p)
+w <- as.numeric(rd(a[2])); z <- as.numeric(rd(a[3]))
+E <- rd(a[4]); dim(E) <- c(p, p)
+oo <- .C("pls_fit1", y=as.double(z), X=as.double(X), w=as.double(w),
+         wy=as.double(w*z), E=as.double(E), Es=as.double(E),
+         n=as.integer(n), q=as.integer(p), rE=as.integer(p),
+         eta=as.double(z), penalty=as.double(1),
+         rank.tol=as.double(.Machine$double.eps^0.5),
+         nt=as.integer(1), use.wy=as.integer(0), PACKAGE="mgcv")
+out <- paste("nsig", oo$n)
+if (oo$n >= 0) {
+  M <- t(X) %*% (w * X) + t(E) %*% E
+  Rc <- tryCatch(chol(M), error=function(e) NULL)
+  lines <- c(out,
+    paste("beta", paste(sprintf("%.17g", oo$y[1:p]), collapse=" ")),
+    paste("penalty", sprintf("%.17g", oo$penalty)))
+  if (!is.null(Rc)) lines <- c(lines,
+    paste("pd", 1),
+    paste("rfac", paste(sprintf("%.17g", as.numeric(t(Rc))), collapse=" ")),
+    paste("logdet", sprintf("%.17g",
+          as.numeric(determinant(M, logarithm=TRUE)$modulus))))
+  else lines <- c(lines, paste("pd", 0))
+  out <- lines
+}
+writeLines(out, a[7])
+"""
+
+
+def _r_pls_fit1(X, w, z, E, tmp_path):
+    n, p = X.shape
+    xf, wf, zf, ef = (tmp_path / f"{s}.csv" for s in "xwze")
+    of, rf = tmp_path / "o.txt", tmp_path / "f.R"
+    rf.write_text(_PLS_R)
+    np.savetxt(xf, np.asarray(X), delimiter=",")
+    np.savetxt(wf, w, delimiter=",")
+    np.savetxt(zf, z, delimiter=",")
+    np.savetxt(ef, np.asarray(E), delimiter=",")
+    subprocess.run(["Rscript", str(rf), str(xf), str(wf), str(zf), str(ef),
+                    str(n), str(p), str(of)],
+                   check=True, stdin=subprocess.DEVNULL,
+                   capture_output=True, text=True)
+    res = {}
+    for line in of.read_text().splitlines():
+        key, _, rest = line.partition(" ")
+        if key in ("nsig", "pd"):
+            res[key] = int(rest)
+        elif key in ("penalty", "logdet"):
+            res[key] = float(rest)
+        else:
+            res[key] = np.array([float(v) for v in rest.split()])
+    return res
+
+
+@pytest.mark.parametrize("n,p,nneg", [(2000, 10, 0), (2000, 10, 200),
+                                      (1500, 14, 700), (200, 6, 40)])
+def test_pls_fit1_matches_r(n, p, nneg, tmp_path):
+    """Rust ``pls_fit1`` ≡ mgcv's own ``.C(C_pls_fit1)`` (β, penalty) and its
+    factor/log-det ≡ R ``chol``/``determinant`` of X'WX+Sλ, at the LAPACK floor.
+    The indefinite case must be declined by BOTH (mgcv's ``n<0`` Fisher-retry
+    signal)."""
+    rng = np.random.default_rng(n + p + nneg)
+    X = np.asfortranarray(rng.standard_normal((n, p)))
+    w = np.abs(rng.standard_normal(n)) * rng.uniform(0.2, 3.0)
+    if nneg:
+        idx = rng.choice(n, nneg, replace=False)
+        w[idx] = -w[idx]
+    E = np.asfortranarray(rng.standard_normal((p, p)) * 0.7)
+    z = rng.standard_normal(n)
+    R = _r_pls_fit1(X, w, z, E, tmp_path)
+    ok, beta, Rfac, ld = rs.pls_fit1(X, w, E, z, np.empty(0), False)
+    if R["nsig"] < 0:                       # X'WX+Sλ indefinite
+        assert not ok                       # rust must decline too
+        return
+    assert ok
+    # β vs mgcv's actual pls_fit1; penalty β'Sλβ = ‖Eβ‖² vs its `penalty` out.
+    np.testing.assert_allclose(beta, R["beta"], rtol=0, atol=1e-10)
+    pen_rust = float(np.asarray(E) @ beta @ (np.asarray(E) @ beta))
+    np.testing.assert_allclose(pen_rust, R["penalty"], rtol=1e-9, atol=1e-12)
+    if R.get("pd"):                         # factor + log-det vs R linear algebra
+        Rc = R["rfac"].reshape(p, p)        # chol(M), positive-diagonal upper
+        np.testing.assert_allclose(np.asarray(Rfac), Rc, rtol=0, atol=1e-9)
+        np.testing.assert_allclose(ld, R["logdet"], rtol=0, atol=1e-8)
+
+
 # ---------------------------------------------------------------------------
 # gamlss_xwx — gamlss.gH's Hessian-block crossprod `Σ_k X_i[k,r]·WX_j[k,c]`
 # (family.gamlss_gH under deterministic_xwx, gam.fit5's rank check). Not 0-ulp

@@ -20,8 +20,16 @@
 //! (≈15 numpy↔C transitions) that dominates the pure-Python path.
 //!
 //! Everything returned (β, the Cholesky factor of X'WX+Sλ, log|X'WX+Sλ|) is
-//! invariant to the QR convention, so this matches `_pls_qr`'s LAPACK path to
-//! the fit's BLAS floor (~1e-12); `tests/test_rs_parity.py` gates it 3-way.
+//! invariant to the QR convention, so this matches mgcv's own `pls_fit1`
+//! (gdi.c:2895, which factors via LAPACK `dgeqrf` over Accelerate BLAS) to the
+//! LAPACK floor — β to ~1e-15, the factor/log|·| to ~1e-14 — and declines the
+//! same indefinite X'WX+Sλ that mgcv signals with `n<0`. It is NOT 0-ulp vs R:
+//! the row-blocked TSQR is not LAPACK's panel factorization and the BLAS leaf
+//! reductions are SIMD, so 0-ulp is unreachable in scalar Rust (same floor as
+//! the qr/discrete-contraction kernels). `tests/test_rs_parity.py` gates this
+//! 3-way: `test_pls_fit1_parity` (rs == numpy `_pls_qr`) and
+//! `test_pls_fit1_matches_r` (rs == live `.C(C_pls_fit1)` β/penalty + R
+//! `chol`/`determinant` of the penalized Hessian).
 
 use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
