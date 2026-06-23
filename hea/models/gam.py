@@ -862,6 +862,12 @@ class gam:
     # ρ-trajectory points are close, so this cuts ~12 PIRLS iters/eval to ~2-3;
     # result-preserving (the PIRLS solution at each ρ is unique).
     _pirls_warm_eta: np.ndarray | None = None
+    # The outer optimizer's last accepted-step fit at the converged ρ̂ —
+    # mgcv's gam.outer reuses newton's `object=b` as the final fit rather than
+    # re-solving (mgcv.r:1684, gam.fit3.r:1718). Cached by `_outer_newton` so
+    # the constructor never refits at the optimum. None ⇔ optimizer never ran
+    # (magic path) or its initial fit failed.
+    _outer_fit: "_FitState | None" = None
 
     @property
     def _scale_known_fit(self) -> bool:
@@ -1869,10 +1875,21 @@ class gam:
             # below for every path via ``_rho_full``.
             self.sp = np.exp(theta_sp)
             rho_hat = self._rho_full(theta_sp)
-            # magic path: build the final fit from the cached QR (no full
-            # re-fit) — bit-identical β/A_chol at (q+e)×q cost.
-            fit = (self._magic_fit_state(rho_hat) if self._used_magic
-                   else self._fit_given_rho(rho_hat))
+            # Build the final fit WITHOUT re-solving PIRLS at ρ̂. mgcv's
+            # gam.outer reuses newton's accepted-step fit as the final model
+            # fit (object <- b$object, mgcv.r:1684; newton returns object=b,
+            # the last accepted gam.fit3 at the converged lsp, gam.fit3.r:1718)
+            # — only the nlm/optim path refits (mgcv.r:1711), which hea never
+            # takes. magic builds from its cached QR (bit-identical β/A_chol at
+            # (q+e)×q cost). `_outer_newton` caches its accepted fit on
+            # `_outer_fit`; fall back to a solve only if the optimizer never
+            # produced one (initial-fit failure).
+            if self._used_magic:
+                fit = self._magic_fit_state(rho_hat)
+            elif self._outer_fit is not None:
+                fit = self._outer_fit
+            else:
+                fit = self._fit_given_rho(rho_hat)
             # P-REML/P-ML carry no log φ in the outer θ — their scale is the
             # analytic Pearson-Laplace plug-in at the converged ρ̂. Record it
             # so the criterion/scale/AIC consumers read φ = P/(n−Mp).
@@ -2473,7 +2490,19 @@ class gam:
         # design time (so this re-estimate on the reduced design normally
         # comes back full); a *weight-induced* deficiency appearing only
         # at the converged W still warrants the loud warning.
-        self.rank = self._estimate_rank()
+        # When the working weights never moved from their initial values
+        # (gaussian-identity and any other constant-weight canonical fit),
+        # the converged-weight augmented system is bit-identical to the one
+        # the structural drop above already factored at the SAME tol, and
+        # that drop enforced full column rank — so rank.est is necessarily
+        # self.p. Skip the redundant n×q QR; only a genuine weight-induced
+        # deficiency (weights that actually changed) needs the re-estimate.
+        # Exact equality avoids false positives — changed weights differ.
+        _fw_now = self._fisher_w if self._fisher_w is not None else np.ones(n)
+        if _fw_now.shape == w0.shape and np.array_equal(_fw_now, w0):
+            self.rank = self.p
+        else:
+            self.rank = self._estimate_rank()
         if self.rank < p:
             import warnings as _w
             _w.warn(
@@ -5393,6 +5422,7 @@ class gam:
                 "grad": np.zeros_like(theta), "hess": np.zeros((theta.size, theta.size)),
                 "score": float(f_prev), "score_scale": float("nan"),
             }
+            self._outer_fit = None
             return theta
 
         # Initial grad/hess at θ₀ and starting active set
@@ -5659,6 +5689,12 @@ class gam:
                 # _eval calls mutate family state for tw).
                 _apply_family_theta(theta)
             self._edge_theta1 = theta1
+        # Cache the accepted-step fit at the converged θ for the caller to
+        # reuse (mgcv's `object <- b$object`, no refit). `fit` is the last
+        # accepted deriv-0 `_fit_given_rho` at `_rho_full(theta[:n_work])` ==
+        # the ρ̂ the caller will build from; the edge-correct walk above leaves
+        # it untouched. REML5 caches its own deriv-2 fit on `_g5["fit"]`.
+        self._outer_fit = fit
         return theta
 
     def _outer_bfgs(
@@ -11837,7 +11873,13 @@ class gam:
 
 
 def _row_frame(values: np.ndarray, columns: list[str]) -> pl.DataFrame:
-    flat = np.asarray(values).reshape(-1)
+    flat = np.asarray(values, dtype=float).reshape(-1)
+    # Row-oriented construction is ~4× faster than the dict-of-singletons
+    # build (one Series per column) for these 1×p reporting frames. Fall
+    # back to the dict form for the degenerate empty / duplicate-name cases,
+    # which the row form shapes (1×0 vs 0×0) or errors on differently.
+    if columns and len(set(columns)) == len(columns):
+        return pl.DataFrame([flat], schema=list(columns), orient="row")
     return pl.DataFrame({c: [float(flat[i])] for i, c in enumerate(columns)})
 
 

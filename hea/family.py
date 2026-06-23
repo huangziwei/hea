@@ -66,6 +66,11 @@ _rs_cox_d2h = _rs_fn("cox_d2h")
 # saturated-likelihood moments; the dense-matrix `_tweedie_log_a_vec` below is
 # the numpy oracle + HEA_NO_RS fallback. None when the extension is absent.
 _rs_tweedie_series = _rs_fn("tweedie_series")
+# mgcv tweedious2 (misc.c:513) per-row sweep for the VECTOR-p Tweedie moments
+# (α per row ⇒ no shared tables); the dense-matrix `_tweedie_log_a_vec_pv`
+# below is the numpy oracle + HEA_NO_RS fallback. None when the extension is
+# absent.
+_rs_tweedie_series_pv = _rs_fn("tweedie_series_pv")
 
 
 def _dbinom_raw_disp(x, n, p, q, give_log=True):
@@ -1961,56 +1966,76 @@ def _tweedie_log_a_vec_pv(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     right = int(np.ceil(float(np.max(j_int + half)))) + 16
     J = min(max(right, j_int_max + near + 1), _LD_J_MAX)
 
-    out_la = np.empty(n_active)
-    out_jb = np.empty(n_active)
-    out_jv = np.empty(n_active)
-    out_jpb = np.empty(n_active)
-    out_j2pb = np.empty(n_active)
-    out_j2p2b = np.empty(n_active)
-    out_j2tb = np.empty(n_active)
-    while True:
-        j_grid = np.arange(1, J + 1, dtype=float)
-        j_grid_int = j_grid.astype(int)
-        lgamma_jp1 = gammaln(j_grid + 1.0)
+    if _rs_tweedie_series_pv is not None:
+        # Rust per-row windowed sweep (mgcv tweedious2): recomputes the −jα
+        # special functions inside each row's eps-window via the nmath ports
+        # (same C source as R/mgcv), so it never builds the dense (n, J) matrix
+        # the numpy oracle below does — O(Σ width_i) work, not O(n·J). `J` here
+        # is only the numpy fallback's grid; the rust kernel caps its up-sweep
+        # at `_LD_J_MAX` and stops per-row once the eps gate fires.
+        res = _rs_tweedie_series_pv(
+            np.ascontiguousarray(log_z),
+            np.ascontiguousarray(j_int.astype(np.int64)),
+            np.ascontiguousarray(alpha),
+            int(near), float(_LD_EPS), int(_LD_J_MAX))
+        out_la = res[:, 0]
+        out_jb = res[:, 1]
+        out_jv = res[:, 2]
+        out_jpb = res[:, 3]
+        out_j2pb = res[:, 4]
+        out_j2p2b = res[:, 5]
+        out_j2tb = res[:, 6]
+    else:
+        out_la = np.empty(n_active)
+        out_jb = np.empty(n_active)
+        out_jv = np.empty(n_active)
+        out_jpb = np.empty(n_active)
+        out_j2pb = np.empty(n_active)
+        out_j2p2b = np.empty(n_active)
+        out_j2tb = np.empty(n_active)
+        while True:
+            j_grid = np.arange(1, J + 1, dtype=float)
+            j_grid_int = j_grid.astype(int)
+            lgamma_jp1 = gammaln(j_grid + 1.0)
 
-        # per-row α ⇒ the -jα tables are (chunk, J); budget ~9 J-wide
-        # doubles per row in flight → 72 J bytes per row.
-        chunk = max(1, _chunk_bytes // (72 * J))
-        grow = False
-        for s in range(0, n_active, chunk):
-            e = min(s + chunk, n_active)
-            lz_c = log_z[s:e]
-            ji_c = j_int[s:e]
-            nja = -j_grid[None, :] * alpha[s:e, None]      # (c, J), > 0
-            lw = (j_grid[None, :] * lz_c[:, None]
-                  - lgamma_jp1[None, :] - gammaln(nja))
-            log_max = np.max(lw, axis=1)
-            above_eps = lw >= (log_max[:, None] - _LD_EPS)
-            if J < _LD_J_MAX and above_eps[:, -1].any():
-                grow = True
+            # per-row α ⇒ the -jα tables are (chunk, J); budget ~9 J-wide
+            # doubles per row in flight → 72 J bytes per row.
+            chunk = max(1, _chunk_bytes // (72 * J))
+            grow = False
+            for s in range(0, n_active, chunk):
+                e = min(s + chunk, n_active)
+                lz_c = log_z[s:e]
+                ji_c = j_int[s:e]
+                nja = -j_grid[None, :] * alpha[s:e, None]      # (c, J), > 0
+                lw = (j_grid[None, :] * lz_c[:, None]
+                      - lgamma_jp1[None, :] - gammaln(nja))
+                log_max = np.max(lw, axis=1)
+                above_eps = lw >= (log_max[:, None] - _LD_EPS)
+                if J < _LD_J_MAX and above_eps[:, -1].any():
+                    grow = True
+                    break
+                within_near = np.abs(j_grid_int[None, :] - ji_c[:, None]) <= near
+                keep = within_near | above_eps
+                w = np.where(keep, np.exp(lw - log_max[:, None]), 0.0)
+                sum_w = np.sum(w, axis=1)
+                out_la[s:e] = log_max + np.log(sum_w)
+                p_w = w / sum_w[:, None]
+                jb_c = np.sum(p_w * j_grid[None, :], axis=1)
+                out_jb[s:e] = jb_c
+                out_jv[s:e] = np.sum(
+                    p_w * (j_grid[None, :] - jb_c[:, None]) ** 2, axis=1,
+                )
+                psi_c = digamma(nja)
+                out_jpb[s:e] = np.sum(p_w * j_grid[None, :] * psi_c, axis=1)
+                jpsi = j_grid[None, :] * psi_c
+                out_j2pb[s:e] = np.sum(p_w * j_grid[None, :] * jpsi, axis=1)
+                out_j2p2b[s:e] = np.sum(p_w * jpsi * jpsi, axis=1)
+                out_j2tb[s:e] = np.sum(
+                    p_w * j_grid[None, :] ** 2 * polygamma(1, nja), axis=1,
+                )
+            if not grow:
                 break
-            within_near = np.abs(j_grid_int[None, :] - ji_c[:, None]) <= near
-            keep = within_near | above_eps
-            w = np.where(keep, np.exp(lw - log_max[:, None]), 0.0)
-            sum_w = np.sum(w, axis=1)
-            out_la[s:e] = log_max + np.log(sum_w)
-            p_w = w / sum_w[:, None]
-            jb_c = np.sum(p_w * j_grid[None, :], axis=1)
-            out_jb[s:e] = jb_c
-            out_jv[s:e] = np.sum(
-                p_w * (j_grid[None, :] - jb_c[:, None]) ** 2, axis=1,
-            )
-            psi_c = digamma(nja)
-            out_jpb[s:e] = np.sum(p_w * j_grid[None, :] * psi_c, axis=1)
-            jpsi = j_grid[None, :] * psi_c
-            out_j2pb[s:e] = np.sum(p_w * j_grid[None, :] * jpsi, axis=1)
-            out_j2p2b[s:e] = np.sum(p_w * jpsi * jpsi, axis=1)
-            out_j2tb[s:e] = np.sum(
-                p_w * j_grid[None, :] ** 2 * polygamma(1, nja), axis=1,
-            )
-        if not grow:
-            break
-        J = min(J * 2, _LD_J_MAX)
+            J = min(J * 2, _LD_J_MAX)
 
     log_a.ravel()[active] = out_la
     j_bar.ravel()[active] = out_jb
@@ -2142,8 +2167,22 @@ def _ld_tweedie_work(y, mu, theta, rho, a: float = 1.001,
     # series part — added AFTER the transform: like the C code, it is
     # computed natively in (θ, ρ) (gam.fit3.r:3013-3020)
     if any_pos:
-        la, jb, jv, jpb, j2pb, j2p2b, j2tb = _tweedie_log_a_vec_pv(
-            y_i, phii, p_i)
+        # mgcv's ldTweedie dispatch (gam.fit3.r:2847,2942): when θ AND ρ are
+        # constant across rows it sets `buffer=TRUE` and calls the scalar-p
+        # C_tweedious, whose lgamma/digamma/trigamma(-jα) tables are shared
+        # across rows (α is then a single value); only genuinely per-row θ/ρ
+        # take the C_tweedious2 vector path. tw.null.fit's Newton evaluates a
+        # CONSTANT (μ,θ,ρ) on every row (~1200×), so the shared-table path is
+        # the difference between matching mgcv and a ~13× null-fit blow-up.
+        # `np.ptp == 0` ⇔ mgcv's `length(unique(·))==1` (ULP-exact).
+        buffer = (theta.size <= 1 or float(np.ptp(theta)) == 0.0) and \
+                 (rho.size <= 1 or float(np.ptp(rho)) == 0.0)
+        if buffer:
+            la, jb, jv, jpb, j2pb, j2p2b, j2tb = _tweedie_log_a_vec(
+                y_i, phii, float(p_i.flat[0]))
+        else:
+            la, jb, jv, jpb, j2pb, j2p2b, j2tb = _tweedie_log_a_vec_pv(
+                y_i, phii, p_i)
         al = twop / onep                      # α < 0
         alp = 1.0 / onep ** 2                 # dα/dp
         alpp = 2.0 / onep ** 3                # d²α/dp²
@@ -2188,13 +2227,41 @@ def _tw_null_fit(y, a: float = 1.001, b: float = 1.999):
     def _ld_sums(t):
         ld = _ld_tweedie_work(y, np.exp(t[0]) * ones, t[1] * ones,
                               t[2] * ones, a=a, b=b)
-        return ld.sum(axis=0)
+        # mgcv reduces ldTweedie with R's colSums, which accumulates in LDOUBLE
+        # (80-bit on x86). Near the flat MLE the step-halving accept test
+        # `Σl(θ₁) < Σl(θ)` resolves a ~1e-9 change inside a ~1e3 sum; a plain
+        # float64 reduction's ~1e-10 noise stalls the Newton (gradient frozen
+        # ~3e-5, well above the 1e-9·|l| break ⇒ all 50 iters × deep halving,
+        # ~1200 evals vs mgcv's ~60). Accumulate in long double to match R's
+        # colSums precision, then round to float64. (On ARM np.longdouble ≡
+        # float64 — same as R's LDOUBLE there, so the parity is preserved.)
+        return ld.sum(axis=0, dtype=np.longdouble).astype(np.float64)
 
     lds = _ld_sums(th)
+    # The log-μ Hessian uses mgcv's approximate chain (no g·∂²μ term), so the
+    # Newton converges only LINEARLY near the flat MLE — the μ-gradient drops
+    # one ~0.4 ratio per step, oscillating in sign. mgcv reaches its 1e-9·|l|
+    # gradient break before the step it accepts shrinks to FP noise; whether it
+    # does is decided by sub-1e-9 likelihood comparisons (hence the LDOUBLE
+    # colSums above). For datasets where the residual numpy-vs-R summation
+    # difference freezes the gradient just shy of the break, detect the stall
+    # (max|g| no longer falling) and stop — the (μ,p,φ) there already matches
+    # mgcv to ~6 sig figs. Without it the loop burns all 50 iters at ~20
+    # halvings each (~1000 evals vs mgcv's ~60-130).
+    gmag_prev = float("inf")
+    n_stall = 0
     for _ in range(50):
         g = lds[[6, 3, 1]].copy()
         if np.sum(np.abs(g) > 1e-9 * abs(lds[0])) == 0:
             break
+        gmag = float(np.max(np.abs(g)))
+        if gmag >= gmag_prev:
+            n_stall += 1
+            if n_stall >= 2:
+                break
+        else:
+            n_stall = 0
+        gmag_prev = gmag
         g[0] = g[0] * np.exp(th[0])      # work on log scale for mu
         H = np.zeros((3, 3))             # mu, th, rh
         H[0, 0] = lds[7]
@@ -2212,7 +2279,12 @@ def _tw_null_fit(y, a: float = 1.001, b: float = 1.999):
         ms = float(np.max(np.abs(step)))
         if ms > 3.0:
             step = step * 3.0 / ms
-        while True:
+        # Bounded step-halving (mgcv's tw.null.fit uses an unbounded while, but
+        # relies on the gradient break firing first; cap it so the flat-MLE
+        # stall can't spin — 40 halvings ⇒ a 1e-12 step, deep past any useful
+        # move).
+        accepted = False
+        for _h in range(40):
             th1 = th - step
             lds1 = _ld_sums(th1)
             if lds1[0] < lds[0]:
@@ -2220,7 +2292,10 @@ def _tw_null_fit(y, a: float = 1.001, b: float = 1.999):
             else:
                 th = th1
                 lds = lds1
+                accepted = True
                 break
+        if not accepted:
+            break
     t2 = th[1]
     if t2 > 0:
         p = (b + a * np.exp(-t2)) / (1.0 + np.exp(-t2))
@@ -9906,6 +9981,7 @@ def _mvn_ll(y, X, coef, lpi, m, *, deriv=0, d1b=None, fh=None) -> dict:
     for r in range(nsp):
         db = d1b[:, r]
         dtheta = db[ncoef:]
+        dbq = db[:ncoef]
         dH = np.zeros((nb, nb))
         # mean-coef block: dH[i,j] = -XX[i,j]·C[din[i],din[j]]
         C = np.zeros((m, m))
@@ -9914,53 +9990,53 @@ def _mvn_ll(y, X, coef, lpi, m, *, deriv=0, d1b=None, fh=None) -> dict:
             C[rj_q, :] += R[ri_q, :] * w        # rj_q==l term
             C[:, rj_q] += R[ri_q, :] * w        # rj_q==k term
         dH[:ncoef, :ncoef] = -XX * C[np.ix_(din, din)]
-        # mixed block
-        for i in range(ncoef):
-            l = din[i]
-            for j in range(ntheta):
-                ri, rj = rri[j], rci[j]
-                zz = dth[j]
-                xx = 0.0
-                for q in range(ncoef):
-                    kdim = din[q]
-                    if rj == l:
-                        xx += -R[ri, kdim] * zz * XX[i, q] * db[q]
-                    if rj == kdim:
-                        xx += -R[ri, l] * zz * XX[i, q] * db[q]
-                for kk2 in range(ntheta):
-                    rik, rjk = rri[kk2], rci[kk2]
-                    z2 = 0.0
-                    if ri == rik and (l == rj or l == rjk):
-                        if l == rj:
-                            z2 += yX[rjk, i] * dth[j] * dth[kk2]
-                        if l == rjk:
-                            z2 += yX[rj, i] * dth[j] * dth[kk2]
-                        if kk2 == j and rik == rjk:
-                            z2 += dth[kk2] * yRX[rj, i]
-                        xx += z2 * dtheta[kk2]
+        # mixed block (mvn.c:191-228) — vectorized over the ncoef mean-coef
+        # index i. The inner q-loop is the matmuls XX @ (R[ri,din]·db) and
+        # XX @ (db·[din==rj]); the kk2-loop is ntheta-small. Bit-identical to
+        # the C triple loop up to fp summation order (~5e-16 on random inputs,
+        # ~10× faster at d=4). `din==·` masks select mgcv's `l == r*` branches.
+        for j in range(ntheta):
+            ri, rj, zz = rri[j], rci[j], dth[j]
+            Rri_din = R[ri, din]
+            termA = XX @ (Rri_din * dbq)
+            termB = XX @ (dbq * (din == rj))
+            partQ = -zz * ((din == rj) * termA + Rri_din * termB)
+            partK = np.zeros(ncoef)
+            for kk2 in range(ntheta):
+                rik, rjk = rri[kk2], rci[kk2]
+                if ri == rik:
+                    c = dth[j] * dth[kk2]
+                    z2 = ((din == rj) * (yX[rjk, :] * c)
+                          + (din == rjk) * (yX[rj, :] * c))
                     if kk2 == j and rik == rjk:
-                        xx += dtheta[kk2] * dth[kk2] * R[rj, l] * yX[rj, i]
-                dH[i, ncoef + j] = xx
-                dH[ncoef + j, i] = xx
-        # theta block
+                        z2 = z2 + (((din == rj) | (din == rjk))
+                                   * (dth[kk2] * yRX[rj, :]))
+                    partK = partK + z2 * dtheta[kk2]
+                if kk2 == j and rik == rjk:
+                    partK = partK + (dtheta[kk2] * dth[kk2]) * (R[rj, din]
+                                                               * yX[rj, :])
+            col = partQ + partK
+            dH[:ncoef, ncoef + j] = col
+            dH[ncoef + j, :ncoef] = col
+        # theta block (mvn.c:230-262) — the ncoef sum is vectorized; the
+        # trailing theta×theta accumulation stays a small ntheta loop.
         for j in range(ntheta):
             rij, rjj = rri[j], rci[j]
             for kk2 in range(j, ntheta):
                 rik, rjk = rri[kk2], rci[kk2]
-                xx = 0.0
-                for i in range(ncoef):
-                    l = din[i]
-                    z2 = 0.0
-                    if rij == rik and (l == rjj or l == rjk):
-                        if l == rjj:
-                            z2 += yX[rjk, i] * dth[j] * dth[kk2]
-                        if l == rjk:
-                            z2 += yX[rjj, i] * dth[j] * dth[kk2]
-                        if kk2 == j and rik == rjk and l == rjj:
-                            z2 += dth[kk2] * yRX[rjj, i]
-                        xx += z2 * db[i]
-                    if kk2 == j and rij == rjj:
-                        xx += db[i] * dth[kk2] * R[rjj, l] * yX[rjj, i]
+                contrib = np.zeros(ncoef)
+                if rij == rik:
+                    m_jj = (din == rjj)
+                    m_jk = (din == rjk)
+                    z2 = (m_jj * (yX[rjk, :] * dth[j] * dth[kk2])
+                          + m_jk * (yX[rjj, :] * dth[j] * dth[kk2]))
+                    if kk2 == j and rik == rjk:
+                        z2 = z2 + m_jj * (dth[kk2] * yRX[rjj, :])
+                    contrib = contrib + z2 * dbq
+                if kk2 == j and rij == rjj:
+                    contrib = contrib + dbq * dth[kk2] * (R[rjj, din]
+                                                          * yX[rjj, :])
+                xx = float(contrib.sum())
                 for i in range(ntheta):
                     ri, rj = rri[i], rci[i]
                     z2 = 0.0

@@ -155,8 +155,130 @@ fn tweedie_series<'py>(
         .into_pyarray(py)
 }
 
+/// Vector-p Tweedie series + moments (mgcv `tweedious2`, misc.c:513). Here α
+/// varies by row, so the per-`j` special functions CANNOT be shared into length-J
+/// tables the way `tweedie_series` does — `tweedious2` recomputes `lgamma(j+1)`,
+/// `lgamma(-jα)`, `digamma(-jα)`, `trigamma(-jα)` inside its per-row sweep. This
+/// kernel does the same via the nmath ports (`lgammafn`/`psigamma_scalar` — the
+/// SAME C source as R/mgcv), so it evaluates the special functions only on each
+/// row's eps-window (`O(Σ_i width_i)`), never the dense `(n, J)` matrix the numpy
+/// path (`_tweedie_log_a_vec_pv`) builds. `log_z[i]`, the integer peak `j_int[i]`
+/// (1-based) and `alpha[i]` are per active row; `j_max` caps the up-sweep
+/// (`_LD_J_MAX`). Same `(n_active, 7)` column order as `tweedie_series`.
+#[pyfunction]
+#[pyo3(name = "tweedie_series_pv")]
+fn tweedie_series_pv<'py>(
+    py: Python<'py>,
+    log_z: PyReadonlyArray1<'py, f64>,
+    j_int: PyReadonlyArray1<'py, i64>,
+    alpha: PyReadonlyArray1<'py, f64>,
+    near: i64,
+    ld_eps: f64,
+    j_max: i64,
+) -> Bound<'py, PyArray2<f64>> {
+    use crate::nmath::lgamma::lgammafn;
+    use crate::nmath::psigamma::psigamma_scalar;
+    let log_z = log_z.as_slice().unwrap();
+    let j_int = j_int.as_slice().unwrap();
+    let alpha = alpha.as_slice().unwrap();
+    let n = log_z.len();
+
+    let mut out = vec![0.0f64; n * 7];
+
+    let fill = |i: usize, row: &mut [f64]| {
+        let lz = log_z[i];
+        let a = alpha[i];
+        let mut ji = j_int[i];
+        if ji < 1 {
+            ji = 1;
+        }
+        if ji > j_max {
+            ji = j_max;
+        }
+        // log W_j = j·lz − lgamma(j+1) − lgamma(−jα), j 1-based, −jα > 0.
+        let lw = |j: i64| -> f64 {
+            let jf = j as f64;
+            jf * lz - lgammafn(jf + 1.0) - lgammafn(-jf * a)
+        };
+        let wmax = lw(ji);
+        let wmin = wmax - ld_eps;
+
+        let mut s0 = 0.0f64;
+        let mut s1 = 0.0f64;
+        let mut s2 = 0.0f64;
+        let mut sp1 = 0.0f64;
+        let mut sp2 = 0.0f64;
+        let mut spp = 0.0f64;
+        let mut st = 0.0f64;
+
+        // One term's contribution; ψ/ψ' recomputed at −jα (α is per-row).
+        macro_rules! accumulate {
+            ($j:expr, $lwj:expr) => {{
+                let jf = $j as f64;
+                let nja = -jf * a;
+                let psi = psigamma_scalar(nja, 0.0);
+                let trig = psigamma_scalar(nja, 1.0);
+                let w = ($lwj - wmax).exp();
+                let jpsi = jf * psi;
+                s0 += w;
+                s1 += w * jf;
+                s2 += w * jf * jf;
+                sp1 += w * jpsi;
+                sp2 += w * jf * jpsi;
+                spp += w * jpsi * jpsi;
+                st += w * jf * jf * trig;
+            }};
+        }
+
+        accumulate!(ji, wmax);
+        let mut j = ji + 1;
+        while j <= j_max {
+            let lwj = lw(j);
+            if j - ji > near && lwj < wmin {
+                break;
+            }
+            accumulate!(j, lwj);
+            j += 1;
+        }
+        let mut j = ji - 1;
+        while j >= 1 {
+            let lwj = lw(j);
+            if ji - j > near && lwj < wmin {
+                break;
+            }
+            accumulate!(j, lwj);
+            j -= 1;
+        }
+
+        let jb = s1 / s0;
+        row[0] = wmax + s0.ln();
+        row[1] = jb;
+        row[2] = s2 / s0 - jb * jb;
+        row[3] = sp1 / s0;
+        row[4] = sp2 / s0;
+        row[5] = spp / s0;
+        row[6] = st / s0;
+    };
+
+    if n >= crate::par::PAR_THRESHOLD {
+        py.allow_threads(|| {
+            out.par_chunks_mut(7)
+                .enumerate()
+                .for_each(|(i, row)| fill(i, row));
+        });
+    } else {
+        out.chunks_mut(7)
+            .enumerate()
+            .for_each(|(i, row)| fill(i, row));
+    }
+    Array2::from_shape_vec((n, 7), out)
+        .unwrap()
+        .into_pyarray(py)
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tweedie_series, m)?)?;
+    m.add_function(wrap_pyfunction!(tweedie_series_pv, m)?)?;
     Ok(())
 }
 
