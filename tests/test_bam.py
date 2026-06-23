@@ -634,6 +634,72 @@ def test_bam_discrete_scatter_kernels_match_full_X():
                                rtol=0, atol=1e-10)
 
 
+def test_bam_discrete_ar1_kernels_match_dense_Weff():
+    """AR1 (``rho != 0``) under ``discrete=TRUE`` makes the weight the
+    symmetric tridiagonal ``W_eff = D·Tᵀ·T·D`` (mgcv XWXd0 ``tri`` path,
+    src/discrete.c:2143-2156): ``XWXd`` scatters the diagonal + super/sub
+    couplings, ``XWyd`` forms ``D·Tᵀ·T·D·y`` via two rwMatrix passes. Both must
+    equal the explicit dense cross-products with ``W_eff`` to the BLAS floor."""
+    from hea.models.bam import XWXd, XWyd, _ar1_rwmatrix_indices, _rw_matrix
+    rng = np.random.default_rng(0)
+    n = 800
+    x = rng.uniform(0, 1, n)
+    z = rng.uniform(0, 1, n)
+    y = rng.standard_normal(n)
+    m = hea.models.bam("y ~ s(x, k=10) + s(z, k=8)",
+                       {"y": y, "x": x, "z": z}, discrete=True)
+    d = m._discrete_design
+    X = _reconstruct_discrete_X(d)
+    w = rng.uniform(0.1, 2.0, n)
+    yv = rng.standard_normal(n)
+    rho = 0.5
+    ld = 1.0 / np.sqrt(1.0 - rho ** 2)
+    sd = -rho * ld
+    stop, row, weight = _ar1_rwmatrix_indices(n, ld, sd, None)
+    # Explicit dense effective weight W_eff = D·Tᵀ·T·D.
+    D = np.diag(np.sqrt(w))
+    T = np.eye(n)
+    for i in range(1, n):
+        T[i, i] = ld
+        T[i, i - 1] = sd
+    Weff = D @ T.T @ T @ D
+    np.testing.assert_allclose(XWXd(d, w, ar_weights=weight),
+                               X.T @ Weff @ X, rtol=0, atol=1e-8)
+    np.testing.assert_allclose(XWyd(d, w, yv, ar=(stop, row, weight)),
+                               X.T @ (Weff @ yv), rtol=0, atol=1e-10)
+    # y_norm2 = ‖T·D·y‖² = yᵀ W_eff y (bam.r:654).
+    tz = _rw_matrix(stop, row, weight, np.sqrt(w) * yv, trans=False)
+    np.testing.assert_allclose(float(tz @ tz), float(yv @ (Weff @ yv)),
+                               rtol=0, atol=1e-9)
+
+
+def test_bam_discrete_ar1_fit_matches_chunked():
+    """The whole ``discrete=True, rho!=0`` pipeline (tri X'WX, AR X'Wy,
+    whitened y_norm2, whitened scale) must agree with the established
+    non-discrete chunked AR1 path: same fitted values, scale and edf (both
+    track mgcv ``bam(..., rho=)``). The discrete-tensor binning leaves a small
+    gap only for ``ti``; pure ``s()`` terms agree to the BLAS floor."""
+    rng = np.random.default_rng(3)
+    n = 500
+    x = np.sort(rng.uniform(0, 1, n))
+    zc = rng.uniform(0, 1, n)
+    rho = 0.5
+    e = np.empty(n)
+    e[0] = rng.standard_normal()
+    for i in range(1, n):
+        e[i] = rho * e[i - 1] + rng.standard_normal() * 0.3
+    y = np.sin(2 * np.pi * x) + np.cos(2 * np.pi * zc) + e
+    data = {"y": y, "x": x, "z": zc}
+    md = hea.models.bam("y ~ s(x, k=10) + s(z, k=10)", data,
+                        discrete=True, rho=rho, method="fREML")
+    mc = hea.models.bam("y ~ s(x, k=10) + s(z, k=10)", data,
+                        discrete=False, rho=rho, method="fREML")
+    np.testing.assert_allclose(md.fitted_values, mc.fitted_values,
+                               rtol=0, atol=1e-7)
+    assert abs(md.scale - mc.scale) < 1e-7
+    assert abs(md.edf_total - mc.edf_total) < 1e-6
+
+
 def test_bam_discrete_matrix_by_scatter_matches_dense():
     """A ``by=`` smooth is the first marginal of a tensor term (mgcv
     discrete.mf:261-294 / bam.r:2469-2483); the X'WX scatter over that

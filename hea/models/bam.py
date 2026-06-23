@@ -52,6 +52,7 @@ import polars as pl
 from scipy.linalg import cho_factor, cho_solve, qr as scipy_qr, solve_triangular
 from scipy.linalg.lapack import dpstrf
 from ..R import distributions as _dist
+from ..R._shared import _rfma_vec
 
 from ..family import Family, Gaussian, _coerce_response
 from ..formula import (
@@ -1196,6 +1197,46 @@ def _ar1_rwmatrix_indices(N: int, ld: float, sd: float,
     return stop, row, weight
 
 
+def _ar1_tri_weight(w: np.ndarray, ar_weights: np.ndarray,
+                    ) -> tuple[np.ndarray, np.ndarray]:
+    """Build the symmetric tridiagonal effective weight ``W_eff = D·Tᵀ·T·D``.
+
+    Direct port of mgcv ``XWXd0`` (src/discrete.c:2143-2156). ``D =
+    diag(√w)`` is the √IRLS-weight diagonal and ``T`` the bidiagonal AR1
+    whitening transform encoded by ``ar_weights`` (the length-``2n-1``
+    ``ar.weight`` array from :func:`_ar1_rwmatrix_indices`: even indices
+    ``0,2,…,2n-2`` are the leading diagonals ``t_ii`` — ``ar_weights[0]=1``
+    for the un-transformed first row — odd indices ``1,3,…,2n-3`` are the
+    sub-diagonals ``t_{i+1,i}``). The product ``(T D)ᵀ(T D)`` is tridiagonal:
+
+    * diagonal   ``w_diag[i] = (t_{i+1,i}² + t_ii²)·d_i²`` (``i<n-1``),
+                 ``w_diag[n-1] = t_{n-1,n-1}²·d_{n-1}²``;
+    * off-diag   ``w_off[i]  = t_{i+1,i}·t_{i+1,i+1}·d_{i+1}·d_i`` (``i<n-1``),
+                 super == sub since ``W_eff`` is symmetric.
+
+    Mirrors the mgcv multiply order — ``ws = ((odd·even)·d₊)·d`` and the
+    ``odd²+even²`` sum-of-squares fuses on arm64 (clang single expression,
+    :func:`_rfma_vec`) — so the table matches arm64 R up to the downstream
+    ``dgemm`` reduction floor.
+    """
+    w = np.asarray(w, dtype=float)
+    aw = np.asarray(ar_weights, dtype=float)
+    n = w.shape[0]
+    d = np.sqrt(w)                       # mgcv discrete.c:2148  w[i] = sqrt(w[i])
+    even = aw[0::2]                      # leading diagonals t_ii   (len n)
+    odd = aw[1::2]                       # sub diagonals t_{i+1,i}  (len n-1)
+    if n == 1:
+        # single observation: T is the 1×1 identity ⇒ W_eff = w.
+        return (even * d) ** 2, np.zeros(0, dtype=float)
+    # off-diagonal: ws[i] = ((odd[i]·even[i+1])·d[i+1])·d[i]   (discrete.c:2150)
+    w_off = odd * even[1:] * d[1:] * d[:-1]
+    # diagonal: d·((odd²+even²)·d) for i<n-1; d·(even²·d) for i=n-1 (2151-2152).
+    sumsq = (even * even)                # even[i]²  (== last-row diagonal base)
+    sumsq[:-1] = _rfma_vec(odd, odd, sumsq[:-1])   # arm64: fma(odd,odd,even²)
+    w_diag = d * (sumsq * d)
+    return w_diag, w_off
+
+
 def _materialize_chunk(
     blocks: list[SmoothBlock],
     chunk_data: pl.DataFrame,
@@ -1502,6 +1543,8 @@ def _build_qr_discrete_pirls(
     eta_init: Optional[np.ndarray],
     use_chol: bool = False,
     prior_w: Optional[np.ndarray] = None,
+    rho: float = 0.0,
+    ar_start: Optional[np.ndarray] = None,
 ) -> _PirlsQR:
     """One PIRLS-step build for ``bam(..., discrete=True)``.
 
@@ -1534,6 +1577,18 @@ def _build_qr_discrete_pirls(
 
     link = family.link
 
+    # AR1 error model (mgcv bgam.fitd, bam.r:478-497). ``rho != 0`` builds the
+    # rwMatrix ``(stop, row, weight)`` once: ``weight`` (the length-2n-1
+    # ``ar.weight``) is the bidiagonal whitening transform, fed to XWXd as the
+    # tridiagonal ``tri`` weight and to XWyd / y_norm2 via :func:`_rw_matrix`.
+    ar1 = (rho != 0.0)
+    ar_stop = ar_row = ar_weight = None
+    if ar1:
+        ld = 1.0 / np.sqrt(1.0 - rho ** 2)
+        sd = -rho * ld
+        asb = None if ar_start is None else np.asarray(ar_start, dtype=bool)
+        ar_stop, ar_row, ar_weight = _ar1_rwmatrix_indices(n, ld, sd, asb)
+
     # mgcv bam.r:572 forms ``eta <- Xbd(coef) + offset`` ONCE per build. hea's
     # outer loop (``_bgam_fit_loop``) already formed exactly that η before calling
     # us (it needs it for step-halving), so it hands it back as ``eta_init`` —
@@ -1561,13 +1616,16 @@ def _build_qr_discrete_pirls(
         # ``dDeta``. The good-row mask is just finiteness of (w, z);
         # extended families have no μ_η==0 boundary the way the
         # standard Fisher branch does. mgcv's ``rho != 0`` AR1 branch
-        # (using ``EDeta2`` / ``Deta.EDeta2``) is not yet wired —
-        # ``rho`` is unsupported on the discrete path today.
+        # uses the EXPECTED (Fisher) Hessian ``EDeta2`` / ``Deta.EDeta2``
+        # instead of the observed ``Deta2`` (bam.r:638-641).
         theta = family.get_theta()
         deta = family.dDeta(y, mu_full, prior_w, theta, level=0)
-        Deta2 = deta["Deta2"]
-        w_full = Deta2 * 0.5
-        z_full = (eta_full - offset) - deta["Deta.Deta2"]
+        if ar1:
+            w_full = deta["EDeta2"] * 0.5
+            z_full = (eta_full - offset) - deta["Deta.EDeta2"]
+        else:
+            w_full = deta["Deta2"] * 0.5
+            z_full = (eta_full - offset) - deta["Deta.Deta2"]
         good = np.isfinite(z_full) & np.isfinite(w_full)
         w_full = np.where(good, w_full, 0.0)
         z_full = np.where(good, z_full, 0.0)
@@ -1601,9 +1659,17 @@ def _build_qr_discrete_pirls(
 
         dev_total = float(np.sum(family.dev_resids(y, mu_full, prior_w)))
 
-    XWX = XWXd(design, w_full)
-    Xy = XWyd(design, w_full, z_full)
-    y_norm2 = float(np.sum(w_full * z_full * z_full))
+    if ar1:
+        XWX = XWXd(design, w_full, ar_weights=ar_weight)
+        Xy = XWyd(design, w_full, z_full, ar=(ar_stop, ar_row, ar_weight))
+        # mgcv bam.r:654 — y_norm2 = ‖T·(√w·z)‖² (one rwMatrix, forward).
+        tz = _rw_matrix(ar_stop, ar_row, ar_weight,
+                        np.sqrt(w_full) * z_full, trans=False)
+        y_norm2 = float(np.sum(tz * tz))
+    else:
+        XWX = XWXd(design, w_full)
+        Xy = XWyd(design, w_full, z_full)
+        y_norm2 = float(np.sum(w_full * z_full * z_full))
 
     R, f = _chol2qr(XWX, Xy)
     rss_extra = float(y_norm2 - float(f @ f))
@@ -1783,10 +1849,6 @@ class bam(gam):
         self._use_chol = bool(use_chol)
         self._discrete = bool(discrete)
         self._discrete_m = discrete_m
-        if self._discrete and self._rho != 0.0:
-            raise NotImplementedError(
-                "discrete=True with AR1 (rho != 0) is not yet supported"
-            )
         self._discrete_design: Optional[DiscreteDesign] = None
         self._discrete_frame: Optional[DiscretizedFrame] = None
 
@@ -3766,6 +3828,7 @@ class bam(gam):
                         eta_init=eta,
                         use_chol=self._use_chol,
                         prior_w=prior_w,
+                        rho=self._rho, ar_start=self._ar_start,
                     )
                 else:
                     qr = _build_qr_chunked_pirls(
@@ -4232,10 +4295,22 @@ class bam(gam):
         # When φ is KNOWN (scale-known family, or user scale=φ), report the
         # fixed value (mgcv G$sig2 <- scale, mgcv.r:1942) — mirrors gam.
         if df_resid > 0 and not self._scale_known_fit:
-            V = family.variance(fit.mu)
-            pearson_scale = float(
-                np.sum(wt * (y - fit.mu) ** 2 / V)
-            ) / df_resid
+            if self._rho != 0.0:
+                # AR1 discrete: the scale is the AR1-WHITENED working RSS /
+                # (n−edf), NOT the raw Pearson statistic. mgcv bgam.fitd sets
+                # ``scale <- exp(log φ̂)`` (bam.r:787) from the fast-REML fit,
+                # whose ``y.norm2 = ‖T·√w·z‖²`` is the whitened working
+                # response SS (bam.r:654). ``fit.dev`` already holds that
+                # whitened working RSS (= ‖f−Rβ̂‖² + rss_extra, _fit_given_rho)
+                # — the same quantity the Gaussian-identity additive path uses
+                # in :func:`_post_fit_gaussian`. (For rho==0 the whitened RSS
+                # equals the raw Pearson statistic, so this only changes AR1.)
+                pearson_scale = float(fit.dev) / df_resid
+            else:
+                V = family.variance(fit.mu)
+                pearson_scale = float(
+                    np.sum(wt * (y - fit.mu) ** 2 / V)
+                ) / df_resid
         else:
             pearson_scale = (self._scale_fixed_value
                              if self._scale_known_fit else float("nan"))
@@ -5594,8 +5669,8 @@ def _wbar_contract(Ki_list: list[np.ndarray], Kj_list: list[np.ndarray],
     Two faithful paths from mgcv ``XWXijs`` (discrete.c:1793-2025), neither
     forming the ``n×p`` design:
 
-    * ``m_im·m_jm ≤ n`` (mgcv ``acc_w``, 1801): accumulate the dense
-      ``m_im×m_jm`` table by flat bincount, then ``Xd_im' W̄ Xd_jm``.
+    * ``n > m_im·m_jm`` (mgcv ``acc_w``, 1801 — STRICT ``>``): accumulate the
+      dense ``m_im×m_jm`` table by flat bincount, then ``Xd_im' W̄ Xd_jm``.
     * otherwise (``acc_w=0``, the ``rfac`` right-factor branch, 2009-2022):
       form ``C = W̄ Xd_jm`` (``m_im × p_jm``) by scattering ``vals·Xd_jm[K_j]``
       into row ``K_i`` (the ``indReduce`` accumulation, done here as one
@@ -5605,7 +5680,7 @@ def _wbar_contract(Ki_list: list[np.ndarray], Kj_list: list[np.ndarray],
     mjm, pjm = Xjm.shape
     msize = mim * mjm
     n = Ki_list[0].shape[0]
-    if msize <= max(n, 1):
+    if n > msize:  # mgcv acc_w = (n > mjm*mim), STRICT (discrete.c:1801)
         Wflat = np.zeros(msize, dtype=float)
         for Ki, Kj, vals in zip(Ki_list, Kj_list, vals_list):
             Wflat += np.bincount(Ki * mjm + Kj, weights=vals, minlength=msize)
@@ -5629,23 +5704,27 @@ def _wbar_contract(Ki_list: list[np.ndarray], Kj_list: list[np.ndarray],
 
 
 def _param_smooth_block(pterm: _DiscreteTerm, sterm: _DiscreteTerm,
-                        w: np.ndarray, k: np.ndarray, n: int) -> np.ndarray:
+                        w: np.ndarray, k: np.ndarray, n: int,
+                        w_off: Optional[np.ndarray] = None) -> np.ndarray:
     """Raw block ``X_param' W X_smooth`` (shape ``p_par × pt_smooth``).
 
     mgcv ``XWXijs`` forms the left factor ``D = W̄' X_param`` by direct
     accumulation when one term has ``m==n`` (discrete.c:1965-2006; the
     ``mim==n ⇒ rfac=0`` guard at 1811 guarantees no ``n×p`` product). Each
-    parametric column ``a`` is fed as the "y" of ``X_smooth'(w·X_param[:,a])``
-    — the same scatter as ``XWyd``.
+    parametric column ``a`` is fed as the "y" of ``X_smooth'(W·X_param[:,a])``
+    — the same scatter as ``XWyd``. For the AR1 ``tri`` weight (``w_off`` given)
+    ``W·X_param[:,a]`` is the tridiagonal matvec :func:`_tri_matvec`.
     """
     Xp = pterm.Xd_list[0]
     p_par = Xp.shape[1]
-    rows = [_term_Xty_raw(sterm, w * Xp[:, a], k, n) for a in range(p_par)]
+    WXp = (w[:, None] * Xp) if w_off is None else _tri_matvec(w, w_off, Xp)
+    rows = [_term_Xty_raw(sterm, WXp[:, a], k, n) for a in range(p_par)]
     return np.vstack(rows)
 
 
 def _smooth_smooth_block(ti: _DiscreteTerm, tj: _DiscreteTerm,
-                         w: np.ndarray, k: np.ndarray, n: int) -> np.ndarray:
+                         w: np.ndarray, k: np.ndarray, n: int,
+                         w_off: Optional[np.ndarray] = None) -> np.ndarray:
     """Raw block ``X_i' W X_j`` for two smooth terms (shape ``pt_i × pt_j``).
 
     Faithful port of mgcv ``XWXijs`` general case (discrete.c:1793-2027):
@@ -5653,6 +5732,19 @@ def _smooth_smooth_block(ti: _DiscreteTerm, tj: _DiscreteTerm,
     for each sub-block ``(r,c)`` accumulate the final-marginal weight table
     ``W̄[a,b] = Σ_{s,t,rows} w·dXi_r·dXj_c·[K_i=a][K_j=b]`` then contract
     ``Xd_im' W̄ Xd_jm``. The ``n×pt`` term design is never materialised.
+
+    For the AR1 ``tri`` weight (``w_off`` given, length ``n-1``) each ``(s,t)``
+    contributes THREE scatters into ``W̄`` (mgcv XWXijs ``tri`` branches,
+    discrete.c:1843-1881) — the diagonal plus the super/sub couplings::
+
+        diag : (K_i[l],   K_j[l])   += w[l]·dXi[l]·dXj[l]          l=0..n-1
+        super: (K_i[l],   K_j[l+1]) += w_off[l]·dXi[l]·dXj[l+1]    l=0..n-2
+        sub  : (K_i[l+1], K_j[l])   += w_off[l]·dXi[l+1]·dXj[l]    l=0..n-2
+
+    :func:`_wbar_contract` already contracts an arbitrary list of scatter
+    triples, so the only ``tri`` change here is emitting the extra two per
+    ``(s,t)`` (and routing every block through it — the ``si==1`` diagonal
+    shortcut and the rust kernel assume a diagonal ``W̄`` and so are skipped).
     """
     Xim = ti.Xd_list[-1]
     Xjm = tj.Xd_list[-1]
@@ -5675,7 +5767,7 @@ def _smooth_smooth_block(ti: _DiscreteTerm, tj: _DiscreteTerm,
     # small factor) and the si==1 diagonal shortcut already beat mgcv in numpy,
     # so they stay; rust handles everything with a tensor or summation axis.
     is_general = si > 1 or sj > 1 or ndi > 1 or ndj > 1
-    if (_rs_xwx_smooth_block is not None and is_general
+    if (w_off is None and _rs_xwx_smooth_block is not None and is_general
             and not (diag_term and si == 1)):
         TTi3 = np.ascontiguousarray(np.stack([t.T for t in TTi]))   # (si, ndi, n)
         TTj3 = (TTi3 if diag_term
@@ -5694,9 +5786,11 @@ def _smooth_smooth_block(ti: _DiscreteTerm, tj: _DiscreteTerm,
     for r in range(ndi):
         c0 = r if diag_term else 0          # symmetric term ⇒ only upper sub-blocks
         for c in range(c0, ndj):
-            if diag_term and si == 1:
+            if diag_term and si == 1 and w_off is None:
                 # Same final marginal ⇒ K_i ≡ K_j ⇒ W̄ is diagonal; skip the
                 # m_im×m_jm table (mgcv simple branch, discrete.c:1742-1792).
+                # (The AR1 ``tri`` super/sub couplings break this — w_off path
+                # routes through the general three-scatter contraction.)
                 wb = np.bincount(k[:, ks_im],
                                  weights=w * TTi[0][:, r] * TTj[0][:, c],
                                  minlength=mim)
@@ -5709,9 +5803,20 @@ def _smooth_smooth_block(ti: _DiscreteTerm, tj: _DiscreteTerm,
                     Ki = Ki_all[s]
                     dXi = TTi[s][:, r]
                     for t in range(sj):
+                        Kj = Kj_all[t]
+                        dXj = TTj[t][:, c]
                         Ki_list.append(Ki)
-                        Kj_list.append(Kj_all[t])
-                        vals_list.append(w * dXi * TTj[t][:, c])
+                        Kj_list.append(Kj)
+                        vals_list.append(w * dXi * dXj)
+                        if w_off is not None:
+                            # super: (K_i[l], K_j[l+1]) += w_off·dXi[l]·dXj[l+1]
+                            Ki_list.append(Ki[:-1])
+                            Kj_list.append(Kj[1:])
+                            vals_list.append(w_off * dXi[:-1] * dXj[1:])
+                            # sub: (K_i[l+1], K_j[l]) += w_off·dXi[l+1]·dXj[l]
+                            Ki_list.append(Ki[1:])
+                            Kj_list.append(Kj[:-1])
+                            vals_list.append(w_off * dXi[1:] * dXj[:-1])
                 sub = _wbar_contract(Ki_list, Kj_list, vals_list, Xim, Xjm)
             block[r * pim:(r + 1) * pim, c * pjm:(c + 1) * pjm] = sub
             if diag_term and c > r:
@@ -5719,23 +5824,45 @@ def _smooth_smooth_block(ti: _DiscreteTerm, tj: _DiscreteTerm,
     return block
 
 
+def _tri_matvec(w: np.ndarray, w_off: np.ndarray, V: np.ndarray) -> np.ndarray:
+    """``W_eff · V`` for the symmetric tridiagonal ``W_eff`` (diagonal ``w``,
+    off-diagonal ``w_off``), ``V`` an ``n`` vector or ``n×c`` matrix.
+
+    ``(W_eff V)[i] = w[i]·V[i] + w_off[i]·V[i+1] + w_off[i-1]·V[i-1]`` — the
+    dense form of the ``tri`` weight applied to a full-length column (mgcv
+    forms the same product implicitly in XWXijs' dense/direct branches).
+    """
+    col = V.ndim == 2
+    wb = w[:, None] if col else w
+    wo = w_off[:, None] if col else w_off
+    out = wb * V
+    out[:-1] += wo * V[1:]        # super: w_off[i]·V[i+1]
+    out[1:] += wo * V[:-1]        # sub:   w_off[i-1]·V[i-1]
+    return out
+
+
 def _term_pair_XWX_raw(ti: _DiscreteTerm, tj: _DiscreteTerm,
-                       w: np.ndarray, k: np.ndarray, n: int) -> np.ndarray:
+                       w: np.ndarray, k: np.ndarray, n: int,
+                       w_off: Optional[np.ndarray] = None) -> np.ndarray:
     """Raw (pre-constraint) cross-product block ``X_i' W X_j`` for one term
     pair, dispatching on parametric (``m==n``) vs smooth (compressed) terms —
     mgcv ``XWXijs`` (discrete.c:1672).
+
+    ``w_off`` (length ``n-1``) is the AR1 tridiagonal off-diagonal; ``None`` is
+    the plain ``diag(w)`` weight.
     """
     pi = ti.kind == "param"
     pj = tj.kind == "param"
     if pi and pj:
         Xi = ti.Xd_list[0]
         Xj = tj.Xd_list[0]
-        return Xi.T @ (w[:, None] * Xj)
+        WXj = (w[:, None] * Xj) if w_off is None else _tri_matvec(w, w_off, Xj)
+        return Xi.T @ WXj
     if pi:
-        return _param_smooth_block(ti, tj, w, k, n)
+        return _param_smooth_block(ti, tj, w, k, n, w_off=w_off)
     if pj:
-        return _param_smooth_block(tj, ti, w, k, n).T
-    return _smooth_smooth_block(ti, tj, w, k, n)
+        return _param_smooth_block(tj, ti, w, k, n, w_off=w_off).T
+    return _smooth_smooth_block(ti, tj, w, k, n, w_off=w_off)
 
 
 # ---------------------------------------------------------------------------
@@ -5762,9 +5889,9 @@ def Xbd(design: DiscreteDesign, beta: np.ndarray) -> np.ndarray:
     return eta
 
 
-def XWXd(design: DiscreteDesign, w: np.ndarray) -> np.ndarray:
-    """Compute ``X' diag(w) X`` (``p × p``, post-constraint) on the compressed
-    design.
+def XWXd(design: DiscreteDesign, w: np.ndarray,
+        ar_weights: Optional[np.ndarray] = None) -> np.ndarray:
+    """Compute ``X' W X`` (``p × p``, post-constraint) on the compressed design.
 
     Direct port of mgcv ``XWXd0``/``XWXijs`` (src/discrete.c:1672-2273): for
     each term pair ``(i ≤ j)`` form the raw cross-product block via
@@ -5774,10 +5901,20 @@ def XWXd(design: DiscreteDesign, w: np.ndarray) -> np.ndarray:
     ``Ztb`` (discrete.c:2230-2266); hea applies the equivalent dense constraint
     matrix ``T`` (= ``Z``) as ``T_i' B_raw T_j``. The upper triangle is mirrored
     to the lower (mgcv ``up2lo``, discrete.c:2269).
+
+    ``ar_weights`` (the length-``2n-1`` ``ar.weight`` array) selects the AR1
+    error model: ``W`` becomes the symmetric tridiagonal ``D·Tᵀ·T·D`` built by
+    :func:`_ar1_tri_weight` (discrete.c:2143-2156), and the ``tri`` super/sub
+    couplings are scattered alongside the diagonal in the block kernels
+    (XWXijs ``tri`` branches). ``ar_weights=None`` is the plain ``diag(w)``.
     """
     w = np.asarray(w, dtype=float)
     n = design.n
     p = design.p
+    if ar_weights is None:
+        w_off = None
+    else:
+        w, w_off = _ar1_tri_weight(w, ar_weights)
     XWX = np.zeros((p, p), dtype=float)
     Ts = _design_constraint_Ts(design)
     terms = design.terms
@@ -5786,7 +5923,8 @@ def XWXd(design: DiscreteDesign, w: np.ndarray) -> np.ndarray:
         sl_i = terms[i].coef_slice
         Ti = Ts[i]
         for j in range(i, nt):
-            raw = _term_pair_XWX_raw(terms[i], terms[j], w, design.k, n)
+            raw = _term_pair_XWX_raw(terms[i], terms[j], w, design.k, n,
+                                     w_off=w_off)
             Tj = Ts[j]
             blk = raw if Ti is None else (Ti.T @ raw)
             if Tj is not None:
@@ -5798,20 +5936,38 @@ def XWXd(design: DiscreteDesign, w: np.ndarray) -> np.ndarray:
     return XWX
 
 
-def XWyd(design: DiscreteDesign, w: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """Compute ``X' (w · y)`` on the compressed design — scatter-add only.
+def XWyd(design: DiscreteDesign, w: np.ndarray, y: np.ndarray,
+        ar: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None,
+        ) -> np.ndarray:
+    """Compute ``X' (W · y)`` on the compressed design — scatter-add only.
 
     Direct port of mgcv ``XWyd``/``singleXty``/``tensorXty`` (src/discrete.c:
-    329-1186): scatter-add ``w·y`` into the per-term m-grouped weight tensor,
+    329-1186): scatter-add ``W·y`` into the per-term m-grouped weight tensor,
     contract against every marginal ``Xd`` to land in raw coefficient space,
     then apply ``T'`` to the post-constraint slot. The ``n×p`` design is never
     materialised.
+
+    For ``ar = (stop, row, weight)`` (the AR1 error model, discrete.c:
+    1109-1157) the effective weight is the tridiagonal ``W = D·Tᵀ·T·D``
+    (``D = diag(√w)``, ``T`` the rwMatrix whitening transform): mgcv forms
+    ``Wy = D·Tᵀ·T·D·y`` as a dense n-vector via two :func:`_rw_matrix`
+    passes (forward then transpose) bracketed by ``√w``, then scatters
+    ``X'·Wy``. ``ar=None`` is the plain ``X'(w·y)`` diagonal path.
     """
     w_arr = np.asarray(w, dtype=float)
     y_arr = np.asarray(y, dtype=float)
     n = design.n
     p = design.p
-    wy = w_arr * y_arr
+    if ar is None:
+        wy = w_arr * y_arr
+    else:
+        # mgcv discrete.c:1110,1152-1156 — Wy = D·Tᵀ·T·D·y, D = diag(√w).
+        stop, row, weight = ar
+        sw = np.sqrt(w_arr)
+        wy = sw * y_arr
+        wy = _rw_matrix(stop, row, weight, wy, trans=False)
+        wy = _rw_matrix(stop, row, weight, wy, trans=True)
+        wy = sw * wy
     Xy = np.zeros(p, dtype=float)
     Ts = _design_constraint_Ts(design)
     for term, T in zip(design.terms, Ts):

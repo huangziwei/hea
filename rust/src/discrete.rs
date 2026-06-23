@@ -63,7 +63,7 @@ fn xwx_smooth_block<'py>(
     let w_f: Vec<f64> = w.as_array().iter().copied().collect();
 
     let msize = mim * mjm;
-    let dense = msize <= n.max(1);
+    let dense = n > msize; // mgcv acc_w = (n > mjm*mim), strict (discrete.c:1801)
     let rfac = pjm <= pim; // form C (m_im×p_jm) else D (m_jm×p_im)
     let nrow = ndi * pim;
     let ncol = ndj * pjm;
