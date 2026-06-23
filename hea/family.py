@@ -26,6 +26,7 @@ Gaussian REML derivatives in :mod:`hea.gam`.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 
 import numpy as np
@@ -71,6 +72,43 @@ _rs_tweedie_series = _rs_fn("tweedie_series")
 # below is the numpy oracle + HEA_NO_RS fallback. None when the extension is
 # absent.
 _rs_tweedie_series_pv = _rs_fn("tweedie_series_pv")
+# gamlss.gH Hessian block crossprod (gamlss.r:653-660), the deterministic,
+# row/col-consistent `crossprod(X_i, WX_j)` used only under `deterministic_xwx()`
+# (gam.fit5's rank check) — where numpy `@`'s BLAS GEMM can give a rank-deficient
+# duplicate column an asymmetric Hessian row that flips the QR rank-check drop
+# platform-dependently. ~1.5x the `np.einsum` fallback; einsum is the HEA_NO_RS
+# oracle (also row/col-consistent). None when the extension is absent.
+_rs_gamlss_xwx = _rs_fn("gamlss_xwx")
+
+# When set (by `deterministic_xwx()`), gamlss_gH assembles its Hessian blocks
+# with the fixed-order `_xwx` reduction instead of numpy `@` — see gamlss_gH.
+_GAMLSS_XWX_DETERMINISTIC = False
+
+
+@contextlib.contextmanager
+def deterministic_xwx():
+    """Within this block, gamlss_gH's Hessian-block crossprod uses the
+    row/col-consistent `_xwx` reduction (rust, else einsum) rather than the
+    alignment-sensitive numpy `@`. gam.fit5 wraps its rank-check Hessian
+    recompute in it so the dropped unidentifiable column is platform-stable."""
+    global _GAMLSS_XWX_DETERMINISTIC
+    prev = _GAMLSS_XWX_DETERMINISTIC
+    _GAMLSS_XWX_DETERMINISTIC = True
+    try:
+        yield
+    finally:
+        _GAMLSS_XWX_DETERMINISTIC = prev
+
+
+def _xwx(xi, wxj):
+    """`crossprod(xi, wxj) = Σ_k xi[k,r]·wxj[k,c]` via a fixed per-entry
+    reduction (identical output rows/cols for identical input columns): rust
+    `gamlss_xwx`, else `np.einsum`. Both are within ~n·eps of `@` but
+    construction-deterministic, unlike `@`."""
+    if _rs_gamlss_xwx is not None:
+        return np.asarray(_rs_gamlss_xwx(np.ascontiguousarray(xi),
+                                         np.ascontiguousarray(wxj)))
+    return np.einsum("kr,kc->rc", xi, wxj)
 
 
 def _dbinom_raw_disp(x, n, p, q, give_log=True):
@@ -6568,10 +6606,24 @@ def gamlss_gH(X, jj, l1, l2, i2, l3=None, i3=None, l4=None, i4=None,
     for i in range(K):
         lb[jj[i]] += X[:, jj[i]].T @ l1[:, i]
 
+    # crossprod(X_i, (w·l2)·X_j) per LP block. The hot path is numpy `@`
+    # (Accelerate/BLAS GEMM, ~peak FLOPS — mgcv uses the same). But an optimized
+    # GEMM tiles its output rows independently AND picks its micro-kernel by
+    # array alignment, so two bit-identical input columns (a rank-deficient
+    # duplicate covariate) can get output rows differing by ~1e-13 — enough to
+    # flip gam.fit5's end-stage QR rank-check pivot tie (gam.fit4.r:1172) →
+    # a different unidentifiable column dropped, platform-dependently. That only
+    # matters AT the rank check, so gam.fit5 recomputes this Hessian under
+    # `deterministic_xwx()` there (and only there): `_xwx` is a fixed-order
+    # reduction (rust gamlss_xwx, else einsum) — construction-identical across
+    # rows for identical columns, as mgcv's reference-BLAS crossprod is.
+    det = _GAMLSS_XWX_DETERMINISTIC
     lbb = np.zeros((p, p))
     for i in range(K):
         for j in range(i, K):
-            A = X[:, jj[i]].T @ (l2[:, i2[i, j]][:, None] * X[:, jj[j]])
+            Xi = X[:, jj[i]]
+            WXj = l2[:, i2[i, j]][:, None] * X[:, jj[j]]
+            A = _xwx(Xi, WXj) if det else Xi.T @ WXj
             lbb[np.ix_(jj[i], jj[j])] += A
             if j > i:
                 lbb[np.ix_(jj[j], jj[i])] += A.T

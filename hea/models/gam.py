@@ -56,6 +56,7 @@ from ..family import (
     QuasiBinomial,
     _coerce_response,
     cnorm as _cnorm_family,
+    deterministic_xwx as _deterministic_xwx,
     tw as _tw_family,
 )
 from ..formula import (
@@ -13624,9 +13625,14 @@ def _gam_fit5(X, y, lsp, sl: _Sl, *, family, lpi, weights=None,
                         Hp = -ll["lbb"] + St
                     else:
                         rank_checked = True
-                        # fundamental rank check on the balanced
-                        # penalized Hessian (gam.fit4.r:1162-1199)
-                        lbb = ll["lbb"]
+                        # fundamental rank check on the balanced penalized
+                        # Hessian (gam.fit4.r:1162-1199). Recompute lbb with
+                        # the row/col-consistent crossprod (family.gamlss_gH
+                        # under deterministic_xwx) so the dropped column is
+                        # platform-stable: the hot-path `@` lbb is alignment-
+                        # sensitive at the ~1e-13 that decides the QR pivot tie.
+                        with _deterministic_xwx():
+                            lbb = llf(coef, 1)["lbb"]
                         if penalized:
                             Hb = (-lbb / np.linalg.norm(lbb)
                                   + Sb / np.linalg.norm(Sb))

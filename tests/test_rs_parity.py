@@ -536,6 +536,41 @@ def test_pls_fit1_xtwz_mode_parity():
 
 
 # ---------------------------------------------------------------------------
+# gamlss_xwx — gamlss.gH's Hessian-block crossprod `Σ_k X_i[k,r]·WX_j[k,c]`
+# (family.gamlss_gH under deterministic_xwx, gam.fit5's rank check). Not 0-ulp
+# to numpy `@`/einsum (a different, fixed reduction order) but agrees to the
+# BLAS floor. The property that matters — and that numpy `@` fails — is row/col
+# consistency: bit-identical input columns must give bit-identical output rows
+# AND cols, else gam.fit5's QR rank-check drops a duplicate column platform-
+# dependently (the arm64 gevlss bug this kernel fixes).
+@pytest.mark.parametrize("n,p", [(300, 14), (2000, 41), (5000, 23)])
+def test_gamlss_xwx_parity(n, p):
+    rng = np.random.default_rng(n + p)
+    Xi = np.ascontiguousarray(rng.standard_normal((n, p)))
+    WXj = np.ascontiguousarray(rng.standard_normal(n)[:, None]
+                               * rng.standard_normal((n, p)))
+    A = np.asarray(rs.gamlss_xwx(Xi, WXj))
+    # agrees with the einsum oracle to the summation-order floor
+    np.testing.assert_allclose(A, np.einsum("kr,kc->rc", Xi, WXj),
+                               rtol=0, atol=1e-9)
+    # deterministic: identical across runs
+    np.testing.assert_array_equal(A, np.asarray(rs.gamlss_xwx(Xi, WXj)))
+
+
+def test_gamlss_xwx_row_col_consistent():
+    # Duplicate an input column (rank-deficient design) → its two output
+    # rows/cols must be bit-identical, the construction property `@` lacks.
+    rng = np.random.default_rng(7)
+    n, p = 4000, 18
+    Xi = np.ascontiguousarray(rng.standard_normal((n, p)))
+    Xi[:, 11] = Xi[:, 4]                       # column 11 ≡ column 4
+    WXj = np.ascontiguousarray(rng.standard_normal(n)[:, None] * Xi)
+    A = np.asarray(rs.gamlss_xwx(Xi, WXj))
+    np.testing.assert_array_equal(A[4], A[11])     # rows bit-identical
+    np.testing.assert_array_equal(A[:, 4], A[:, 11])  # cols bit-identical
+
+
+# ---------------------------------------------------------------------------
 # tweedie_series — mgcv `tweedious` (misc.c:170) scalar-p saturated-series
 # moments via the rust per-row sweep vs the numpy dense-matrix oracle (==
 # `_tweedie_log_a_vec` with the extension forced off). Not 0-ulp: the sweep
