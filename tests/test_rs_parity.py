@@ -404,6 +404,19 @@ from hea.formula import (  # noqa: E402
     _tp_eta_const, _tp_fast_eta_vec, _tp_gen_poly_powers, _tp_null_space_dim,
     _tp_T,
 )
+from hea.R._shared import _rfma_vec  # noqa: E402
+
+
+def _rsq_rfma(diff):
+    """Squared distance by the same per-arch ``r += z*z`` → fma fold that the
+    rust ``tp_eval_*`` kernels and the numpy ``_tp_E``/``_tp_eval_X_raw`` build
+    use (tprs.c:92 tpsE / :591 XBuild). Mirroring it here keeps the reference
+    0-ulp to both on arm64 (where clang fuses the accumulate to ``fmadd``)."""
+    rsq = np.zeros(diff.shape[:-1])
+    for k in range(diff.shape[-1]):
+        zk = diff[..., k]
+        rsq = _rfma_vec(zk, zk, rsq)
+    return rsq
 
 
 def _assert_eta_parity(d, got, want):
@@ -439,7 +452,7 @@ def test_tp_eval_b_bit_exact(d, m):
     b_rs = rs.tp_eval_b(np.ascontiguousarray(x_c), np.ascontiguousarray(Xu),
                         int(m), int(d), float(eta0), pp)
     diff = x_c[:, None, :] - Xu[None, :, :]
-    rsq = (diff * diff).sum(axis=-1)
+    rsq = _rsq_rfma(diff)
     b_np = np.hstack([_tp_fast_eta_vec(m, d, rsq, eta0), _tp_T(x_c, m, d)])
     _assert_eta_parity(d, b_rs, b_np)
 
@@ -451,9 +464,47 @@ def test_tp_eval_E_bit_exact(d, m):
     eta0 = _tp_eta_const(m, d)
     E_rs = rs.tp_eval_E(np.ascontiguousarray(Xu), int(m), int(d), float(eta0))
     diff = Xu[:, None, :] - Xu[None, :, :]
-    rsq = (diff * diff).sum(axis=-1)
+    rsq = _rsq_rfma(diff)
     E_np = _tp_fast_eta_vec(m, d, rsq, eta0)
     _assert_eta_parity(d, E_rs, E_np)
+
+
+# ---------------------------------------------------------------------------
+# coxlpl — mgcv's Cox partial-likelihood kernel (coxph.c:141). The rust single-
+# pass risk-set sweep vs the numpy cumsum oracle: agree to ~n·eps, NOT 0-ulp
+# (sequential vs pairwise reduction — a DIFFERENT algorithm, per the user's
+# "diverged from numpy, fine" rule). The rust kernel's per-statement fma + the
+# mult/div order are pinned bit-for-bit to the COMPILED coxph.c separately (the
+# d1H/d2H emit fma trees were verified 4000/6000-for-4000/6000 vs `clang -O2
+# -arch arm64` of the exact C emit); the live-R gate is the functional cox.ph
+# gam fixture (tests/test_gam.py::test_cox_ph_through_gam_matches_mgcv).
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("deriv", [0, 1])
+def test_coxlpl_kernel_parity(deriv):
+    import hea.family as fam
+
+    rng = np.random.default_rng(40 + deriv)
+    n, p = 250, 5
+    X = rng.standard_normal((n, p))
+    eta = X @ (rng.standard_normal(p) * 0.4)
+    time = rng.uniform(0.0, 12.0, n)
+    d = (rng.uniform(size=n) < 0.65).astype(int)
+    kw = {"d1b": rng.standard_normal((p, 3)) * 0.25} if deriv == 1 else {}
+
+    rust = fam._coxlpl(eta, X, d, time, deriv, **kw)               # rust active
+    saved = (fam._rs_cox_l, fam._rs_cox_lpl0, fam._rs_cox_lpl_d1, fam._rs_cox_d2h)
+    fam._rs_cox_l = fam._rs_cox_lpl0 = fam._rs_cox_lpl_d1 = fam._rs_cox_d2h = None
+    try:
+        npy = fam._coxlpl(eta, X, d, time, deriv, **kw)           # numpy oracle
+    finally:
+        (fam._rs_cox_l, fam._rs_cox_lpl0,
+         fam._rs_cox_lpl_d1, fam._rs_cox_d2h) = saved
+
+    assert abs(rust["l"] - npy["l"]) < 1e-11
+    np.testing.assert_allclose(rust["lb"], npy["lb"], rtol=0, atol=1e-11)
+    np.testing.assert_allclose(rust["lbb"], npy["lbb"], rtol=0, atol=1e-11)
+    if deriv == 1:
+        np.testing.assert_allclose(rust["d1H"], npy["d1H"], rtol=0, atol=1e-11)
 
 
 # ---------------------------------------------------------------------------

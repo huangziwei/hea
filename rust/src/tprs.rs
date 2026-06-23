@@ -9,13 +9,24 @@
 //!
 //! Bit-exactness: the fill is element-wise independent, so the parallel fill is
 //! byte-for-byte the serial one; and the per-element arithmetic mirrors
-//! `hea/formula.py::_tp_fast_eta_vec` / `_tp_T` exactly, so `b` equals the numpy
+//! `hea/formula.py::_tp_eval_X_raw` / `_tp_T` exactly, so `b` equals the numpy
 //! build. The caller keeps the BLAS `b @ UZ` matmul, so the design is identical.
+//!
+//! FMA/contraction parity with arm64 R: tprs.c is compiled `clang -O2`, which
+//! fuses single-expression `a*b+c` to `fmadd` where the ISA has baseline FMA
+//! (aarch64 yes, x86-64 no). So the squared-distance accumulate `z=a-b; r+=z*z;`
+//! (tprs.c:92 tpsE, :591 XBuild) is `fma(z,z,r)` on arm64 — mirrored here via
+//! `rfma` (per-arch). And the null-space monomial is built by *repeated multiply*
+//! `r=1; for(kk<pin) r*=xx[j];` (tprs.c:156 tpsT, :598 XBuild) — NOT `powi`, which
+//! reassociates at powers ≥4 even on x86. Both fixes keep `b` 0-ulp to the numpy
+//! `_rfma_vec`-fold build on every platform.
 
 use numpy::ndarray::Array2;
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
 use pyo3::prelude::*;
 use rayon::prelude::*;
+
+use crate::nmath::util::rfma;
 
 /// `fast_eta` (tprs.c:61) — η given r² in `rsq`, constant in `f0`. Same
 /// multiplication order as `_tp_fast_eta_vec`: d-odd is maskless (√0 = 0 gives
@@ -79,16 +90,18 @@ fn tp_eval_b<'py>(
             let mut r = 0.0;
             for k in 0..d {
                 let z = xi[k] - uj[k];
-                r += z * z;
+                r = rfma(z, z, r); // tprs.c:591 `z=a-b; r+=z*z;` → fmadd on arm64
             }
             row[j] = fast_eta(m, d, r, eta0);
         }
         for l in 0..mm {
+            // null-space monomial ∏_k x_k^{pin[l,k]} by repeated multiply, exactly
+            // as tprs.c:598 `r=1; for(j) for(kk<pin) r*=xx[j];` (NOT powi).
             let mut t = 1.0;
             for k in 0..d {
                 let pk = pp_flat[l * d + k];
-                if pk > 0 {
-                    t *= xi[k].powi(pk as i32);
+                for _ in 0..pk {
+                    t *= xi[k];
                 }
             }
             row[nu + l] = t;
@@ -138,7 +151,7 @@ fn tp_eval_e<'py>(
             let mut r = 0.0;
             for k in 0..d {
                 let z = xi[k] - uj[k];
-                r += z * z;
+                r = rfma(z, z, r); // tprs.c:92 `x=a-b; r+=x*x;` → fmadd on arm64
             }
             row[j] = fast_eta(m, d, r, eta0);
         }

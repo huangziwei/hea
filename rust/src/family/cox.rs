@@ -12,14 +12,21 @@
 //!
 //! Rows arrive sorted into DESCENDING time (the caller's `np.argsort(-time)`),
 //! with `r[i]` the 0-based unique-time group of row `i` (non-decreasing) and
-//! `nt` the number of groups. The accumulation order mirrors the C verbatim, so
-//! the result equals mgcv's bit-for-bit up to libm `exp`/`log`; it differs
-//! sub-ULP from the numpy port only because numpy reduces in pairwise (not
-//! sequential) order — both match R to the cox fixtures' tolerance.
+//! `nt` the number of groups. The accumulation order AND the per-statement
+//! multiply/divide order + FMA contraction mirror the C verbatim: coxph.c is
+//! `clang -O2`, which fuses single-expression `a*b+c` to `fmadd` on arm64, so
+//! every `acc += a*b` (the `b_p`/`A_p`/`d1*` accumulators) and `c - a*b` (the
+//! `lpl`/`g`/`H` emits) uses `rfma` (per-arch). The Hessian emit keeps C's
+//! mult-THEN-div order `-dr*A_p/g + dr*b_k*b_m/(g*g)` — NOT a pre-divided
+//! `inv=dr/g` (which reassociates the division and diverges on *both* arches).
+//! Result equals mgcv bit-for-bit up to libm `exp`/`log`; it differs sub-ULP
+//! from the numpy port only because numpy reduces pairwise, not sequentially.
 
 use numpy::ndarray::{Array2, Array3};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
+
+use crate::nmath::util::rfma;
 
 /// `coxlpl` `deriv<0`: the log partial likelihood `lpl` only — the
 /// line-search evaluation. The C guards `b_p`/`A_p`/`g`/`H` behind
@@ -52,7 +59,7 @@ fn cox_l(
             }
             i += 1;
         }
-        lpl += eta_sum - dr * gamma_p.ln();
+        lpl += rfma(-dr, gamma_p.ln(), eta_sum); // eta_sum - dr*log(g) (coxph.c:321)
     }
     lpl
 }
@@ -104,7 +111,7 @@ fn cox_lpl0<'py>(
                 eta_sum += eta[i];
             }
             for k in 0..p {
-                b_p[k] += gi * xi[k];
+                b_p[k] = rfma(gi, xi[k], b_p[k]); // b_p[k] += gamma[i]*X (coxph.c:275)
             }
             if is_ev {
                 for k in 0..p {
@@ -112,23 +119,25 @@ fn cox_lpl0<'py>(
                 }
             }
             for k in 0..p {
-                let xik = gi * xi[k];
+                let xik = gi * xi[k]; // rounded gamma[i]*X[k] (coxph.c:278)
                 for m in k..p {
-                    a_p[k * p + m] += xik * xi[m];
+                    a_p[k * p + m] = rfma(xik, xi[m], a_p[k * p + m]); // += ·X[m]
                 }
             }
             i += 1;
         }
         // emit this event time's contribution (coxph.c:321-327)
-        lpl += eta_sum - dr * gamma_p.ln();
-        let inv = dr / gamma_p;
-        let inv2 = inv / gamma_p; // dr/gamma_p^2
+        lpl += rfma(-dr, gamma_p.ln(), eta_sum); // eta_sum - dr*log(g)
+        let inv = dr / gamma_p; // dr/gamma_p (coxph.c:323 g only)
         for k in 0..p {
-            g[k] -= inv * b_p[k];
+            g[k] = rfma(-inv, b_p[k], g[k]); // g[k] += -dr/g*b_p[k]
         }
         for k in 0..p {
             for m in k..p {
-                h[k * p + m] += -inv * a_p[k * p + m] + inv2 * b_p[k] * b_p[m];
+                // coxph.c:325-326: mult-THEN-div, NOT a pre-divided inv (which
+                // reassociates the division → diverges on both arches).
+                h[k * p + m] +=
+                    -dr * a_p[k * p + m] / gamma_p + dr * b_p[k] * b_p[m] / (gamma_p * gamma_p);
             }
         }
     }
@@ -207,7 +216,7 @@ fn cox_lpl_d1<'py>(
                 eta_sum += eta[i];
             }
             for k in 0..p {
-                b_p[k] += gi * xi[k];
+                b_p[k] = rfma(gi, xi[k], b_p[k]); // += gamma[i]*X (coxph.c:275)
             }
             if is_ev {
                 for k in 0..p {
@@ -215,9 +224,9 @@ fn cox_lpl_d1<'py>(
                 }
             }
             for k in 0..p {
-                let xik = gi * xi[k];
+                let xik = gi * xi[k]; // rounded gamma[i]*X[k] (coxph.c:278)
                 for l in k..p {
-                    a_p[k * p + l] += xik * xi[l];
+                    a_p[k * p + l] = rfma(xik, xi[l], a_p[k * p + l]);
                 }
             }
             // first derivatives (coxph.c:282-288)
@@ -227,7 +236,7 @@ fn cox_lpl_d1<'py>(
             for m in 0..mm {
                 let xx = d1i[m];
                 for k in 0..p {
-                    d1b_p[k * mm + m] += xx * xi[k];
+                    d1b_p[k * mm + m] = rfma(xx, xi[k], d1b_p[k * mm + m]);
                 }
             }
             // first derivatives of A_p (coxph.c:301-306)
@@ -235,26 +244,31 @@ fn cox_lpl_d1<'py>(
                 let xx = d1i[m];
                 let base = m * p * p;
                 for k in 0..p {
-                    let xxk = xx * xi[k];
+                    let xxk = xx * xi[k]; // rounded d1gamma*X[k]
                     for l in k..p {
-                        d1a_p[base + k * p + l] += xxk * xi[l];
+                        d1a_p[base + k * p + l] = rfma(xxk, xi[l], d1a_p[base + k * p + l]);
                     }
                 }
             }
             i += 1;
         }
-        lpl += eta_sum - dr * gamma_p.ln();
-        let inv = dr / gamma_p;
-        let inv2 = inv / gamma_p;
+        lpl += rfma(-dr, gamma_p.ln(), eta_sum); // eta_sum - dr*log(g)
+        let inv = dr / gamma_p; // dr/gamma_p (coxph.c:323 g only)
         for k in 0..p {
-            g[k] -= inv * b_p[k];
+            g[k] = rfma(-inv, b_p[k], g[k]); // g[k] += -dr/g*b_p[k]
         }
         for k in 0..p {
             for l in k..p {
-                h[k * p + l] += -inv * a_p[k * p + l] + inv2 * b_p[k] * b_p[l];
+                // coxph.c:325-326: mult-THEN-div, NOT a pre-divided inv.
+                h[k * p + l] +=
+                    -dr * a_p[k * p + l] / gamma_p + dr * b_p[k] * b_p[l] / (gamma_p * gamma_p);
             }
         }
-        // first derivatives of H (coxph.c:329-340)
+        // first derivatives of H (coxph.c:337-338). Prefactors match C's
+        // mult/div order; the multi-product body uses the EXACT clang -O2 arm64
+        // fma tree (rule: at `P_left ± P_right` fuse the left product, round the
+        // right as the addend; chain the rest) — verified bit-for-bit against the
+        // compiled coxph.c emit (4000/4000 random inputs).
         let xx0 = dr / gamma_p;
         for m in 0..mm {
             let xx = d1gamma_p[m] * xx0 / gamma_p;
@@ -263,10 +277,11 @@ fn cox_lpl_d1<'py>(
             let base = m * p * p;
             for k in 0..p {
                 for l in k..p {
-                    let v = xx1 * (d1b_p[k * mm + m] * b_p[l] + b_p[k] * d1b_p[l * mm + m])
-                        - xx2 * b_p[k] * b_p[l]
-                        + xx * a_p[k * p + l]
-                        - xx0 * d1a_p[base + k * p + l];
+                    // d1b[k,m]*b_l + b_k*d1b[l,m]  (fuse left product)
+                    let pin = rfma(d1b_p[k * mm + m], b_p[l], b_p[k] * d1b_p[l * mm + m]);
+                    let mut v = rfma(xx1, pin, -(xx2 * b_p[k] * b_p[l])); // xx1*pin - xx2*b_k*b_l
+                    v = rfma(xx, a_p[k * p + l], v); // + xx*A_kl
+                    v = rfma(-xx0, d1a_p[base + k * p + l], v); // - xx0*d1A
                     d1h[(k * p + l) * mm + m] += v;
                 }
             }
@@ -353,23 +368,26 @@ fn cox_d2h<'py>(
                 dr += 1.0;
             }
             for l in 0..p {
-                b_p[l] += gi * xi[l];
-                adiag[l] += gi * xi[l] * xi[l];
+                b_p[l] = rfma(gi, xi[l], b_p[l]); // += gamma[i]*X[l] (coxph.c:275)
+                let t = gi * xi[l]; // rounded gamma[i]*X[l]; A_p[l,l] += t*X[l] (:278)
+                adiag[l] = rfma(t, xi[l], adiag[l]);
             }
             for m in 0..mm {
                 d1gamma_p[m] += d1i[m];
                 let xx = d1i[m];
                 for l in 0..p {
-                    d1b_p[l * mm + m] += xx * xi[l];
-                    d1adiag[l * mm + m] += xx * xi[l] * xi[l];
+                    d1b_p[l * mm + m] = rfma(xx, xi[l], d1b_p[l * mm + m]); // :284
+                    let t = xx * xi[l]; // d1A_p[l,l,m] += t*X[l] (:303)
+                    d1adiag[l * mm + m] = rfma(t, xi[l], d1adiag[l * mm + m]);
                 }
             }
             for off in 0..nhh {
                 d2gamma_p[off] += d2i[off];
                 let xx = d2i[off];
                 for l in 0..p {
-                    d2b_p[l * nhh + off] += xx * xi[l];
-                    d2lda_p[l * nhh + off] += xx * xi[l] * xi[l];
+                    d2b_p[l * nhh + off] = rfma(xx, xi[l], d2b_p[l * nhh + off]); // :293
+                    let t = xx * xi[l]; // d2ldA_p[l,off] += t*X[l] (:365)
+                    d2lda_p[l * nhh + off] = rfma(t, xi[l], d2lda_p[l * nhh + off]);
                 }
             }
             i += 1;
@@ -384,21 +402,26 @@ fn cox_d2h<'py>(
             let xx3 = -2.0 * xx1 * d1gamma_p[m];
             for k in m..mm {
                 for l in 0..p {
+                    // coxph.c:351-362 d2H emit, in the EXACT clang -O2 arm64 fma
+                    // tree (same left-fuse/right-round rule as d1H) — verified
+                    // bit-for-bit against the compiled emit (6000/6000 inputs).
                     let bl = b_p[l];
-                    let v = xx3 * (adiag[l] * d1gamma_p[k] + 2.0 * d1b_p[l * mm + k] * bl)
-                        + xx0
-                            * (d1adiag[l * mm + m] * d1gamma_p[k]
-                                + adiag[l] * d2gamma_p[off]
-                                + d2b_p[l * nhh + off] * bl
-                                + 2.0 * d1b_p[l * mm + k] * d1b_p[l * mm + m]
-                                + bl * d2b_p[l * nhh + off])
-                        + xx0 * d1gamma_p[m] * d1adiag[l * mm + k]
-                        - xx * d2lda_p[l * nhh + off]
-                        + 6.0 * xx2 * d1gamma_p[m] * bl * bl * d1gamma_p[k]
-                        - 2.0
-                            * xx1
-                            * (2.0 * d1b_p[l * mm + m] * bl * d1gamma_p[k]
-                                + bl * bl * d2gamma_p[off]);
+                    // A_p[l,l]*d1gamma[k] + 2*d1b[l,k]*b_l
+                    let inner1 = rfma(adiag[l], d1gamma_p[k], (2.0 * d1b_p[l * mm + k]) * bl);
+                    // 5-product group, left-assoc fused
+                    let mut big5 = rfma(d1adiag[l * mm + m], d1gamma_p[k], adiag[l] * d2gamma_p[off]);
+                    big5 = rfma(d2b_p[l * nhh + off], bl, big5);
+                    big5 = rfma(2.0 * d1b_p[l * mm + k], d1b_p[l * mm + m], big5);
+                    big5 = rfma(bl, d2b_p[l * nhh + off], big5);
+                    // 2*d1b[l,m]*b_l*d1gamma[k] + b_l*b_l*d2gamma[off]
+                    let inner6 =
+                        rfma((2.0 * d1b_p[l * mm + m]) * bl, d1gamma_p[k], (bl * bl) * d2gamma_p[off]);
+                    let mut v = rfma(xx3, inner1, xx0 * big5); // T1 fused, T2 rounded
+                    v = rfma(xx0 * d1gamma_p[m], d1adiag[l * mm + k], v); // + xx0*d1gamma[m]*d1A[l,l,k]
+                    v = rfma(-xx, d2lda_p[l * nhh + off], v); // - xx*d2ldA
+                    let t5 = (((6.0 * xx2) * d1gamma_p[m]) * bl) * bl;
+                    v = rfma(t5, d1gamma_p[k], v); // + 6*xx2*d1gamma[m]*b_l^2*d1gamma[k]
+                    v = rfma(-(2.0 * xx1), inner6, v); // - 2*xx1*inner6
                     d2h[l * nhh + off] += v;
                 }
                 off += 1;

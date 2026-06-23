@@ -1009,6 +1009,7 @@ import polars as pl  # noqa: E402
 from scipy.linalg import eigh_tridiagonal as _eigh_tridiagonal  # noqa: E402
 
 from hea._dispatch import rs_fn  # noqa: E402
+from hea.R._shared import _rfma_vec  # noqa: E402
 
 # Rust tp kernel-eval: rayon-parallel build of b=[E|T] (XBuild) and the knot
 # matrix E (tpsE); byte-exact to the numpy builds (tests/test_rs_parity.py),
@@ -5698,11 +5699,13 @@ def _tp_T(X: np.ndarray, m: int, d: int) -> np.ndarray:
     pi_pow = _tp_gen_poly_powers(M, m, d)
     n = X.shape[0]
     T = np.ones((n, M), dtype=float)
+    # tpsT (tprs.c:155-156): x=1; for(k) for(z<pin[j,k]) x*=X[i,k]; — repeated
+    # multiply into one accumulator, NOT `X**pk` (numpy's pow reassociates at
+    # powers ≥4, diverging from mgcv even on x86). Vectorised over rows.
     for j in range(M):
         for k in range(d):
-            pk = pi_pow[j, k]
-            if pk > 0:
-                T[:, j] *= X[:, k] ** pk
+            for _ in range(int(pi_pow[j, k])):
+                T[:, j] *= X[:, k]
     return T
 
 
@@ -5719,12 +5722,17 @@ def _tp_E(Xu: np.ndarray, m: int, d: int) -> np.ndarray:
         # Rust tpsE: rayon over rows, byte-identical to the numpy build below.
         return _tp_eval_E_rs(np.ascontiguousarray(Xu), int(m), int(d),
                              float(eta0))
-    # Pairwise squared distances. `(diff*diff).sum(axis=-1)` matches the scalar
-    # `np.dot(diff, diff)` summation order for d ≤ 2 (trivially); for d ≥ 3 the
-    # reduction order could differ by a ULP from BLAS ddot, which would rotate
-    # Ritz vectors inside near-degenerate eigenspaces — tests catch that.
+    # Squared distances by the SAME sequential accumulate as tpsE (tprs.c:91-94):
+    # `r=0; for(k) { x=Xu_i,k - Xu_j,k; r += x*x; }` → `fma(x,x,r)` on arm64. The
+    # per-arch `_rfma_vec` fold mirrors that (NOT `(diff*diff).sum()`, whose
+    # pairwise reduction drops the fused rounding and drifts ~1 ULP for d ≥ 2,
+    # which rotates Ritz vectors inside near-degenerate eigenspaces). Fallback
+    # path only — the rust `tp_eval_E` is primary; slow frompyfunc fma on arm64.
     diff = Xu[:, None, :] - Xu[None, :, :]
-    rsq = (diff * diff).sum(axis=-1)
+    rsq = np.zeros(diff.shape[:-1])
+    for k in range(d):
+        zk = diff[..., k]
+        rsq = _rfma_vec(zk, zk, rsq)
     # Diagonal is exactly 0 from the subtraction; the vec helper returns 0
     # there too (d-even mask excludes it, d-odd √0=0), so no fill is needed.
     return _tp_fast_eta_vec(m, d, rsq, eta0)
@@ -5768,10 +5776,16 @@ def _tp_eval_X_raw(
         xs = x_c[s:e]
         if d == 1:
             diff = xs[:, 0][:, None] - Xu0[None, :]       # (c, nu)
-            rsq = diff * diff
+            rsq = diff * diff                              # fma(z,z,0) ≡ z*z
         else:
+            # XBuild distance (tprs.c:591): r=0; for(k) {z=…; r += z*z;} →
+            # fma(z,z,r) on arm64. Sequential `_rfma_vec` fold (not the pairwise
+            # `(diff*diff).sum()`) to stay 0-ulp to the rust `tp_eval_b` build.
             diff = xs[:, None, :] - Xu[None, :, :]          # (c, nu, d)
-            rsq = (diff * diff).sum(axis=-1)
+            rsq = np.zeros(diff.shape[:-1])
+            for k in range(d):
+                zk = diff[..., k]
+                rsq = _rfma_vec(zk, zk, rsq)
         E[s:e] = _tp_fast_eta_vec(m, d, rsq, eta0)
     return np.hstack([E, _tp_T(x_c, m, d)]) @ UZ            # one full matmul
 
