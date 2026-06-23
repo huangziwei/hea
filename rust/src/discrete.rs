@@ -8,11 +8,20 @@
 //! weight table `W̄[a,b] = Σ_{s,t,rows} w·dXi_r·dXj_c·[K_i=a][K_j=b]` then
 //! contract `Xd_im' W̄ Xd_jm`. The `n×p` design is never formed.
 //!
+//! Three branches, mirroring mgcv's path selection (and the numpy spec):
+//!  * `dense` — accumulate the full `m_im×m_jm` W̄, then `Xim'(W̄ Xjm)`. Used
+//!    for `acc_w` (`n > m_im·m_jm`, 1801) AND the !acc_w large-p `indReduce`
+//!    branch (`min(p)>15`, 1884/1922) when W̄ fits `XWX_DENSE_MSIZE_CAP` —
+//!    collapsing the `(K_i,K_j)` duplicates the way indReduce's hash does.
+//!  * `rfac` / `!rfac` — form only the smaller factor `C = W̄ Xjm` /
+//!    `D = W̄' Xim` by direct per-row accumulation (1924-2006), for the !acc_w
+//!    small-p case or marginals past the cap (memory-safe fallback).
+//!
 //! The Python kernel is the spec and the test oracle (tests/test_rs_parity.py
-//! pins `rs == python` to machine precision); this just runs the
-//! `(r,c)×(s,t)×rows` accumulation in one tight pass instead of numpy's
-//! per-(s,t) `bincount` loop, which is call-overhead bound on the
-//! signal-regression cases (large summation count `s_i·s_j`).
+//! pins `rs == python` to a tight tolerance — the two sum W̄ in different orders,
+//! so not 0-ulp); this runs the `(r,c)×(s,t)×rows` accumulation in one tight
+//! pass instead of numpy's per-(s,t) `bincount` loop, which is call-overhead
+//! bound on the signal-regression cases (large summation count `s_i·s_j`).
 //!
 //! Layout contract (caller passes C-contiguous): `xim` (m_im, p_im) and `xjm`
 //! (m_jm, p_jm) are the final-marginal bases; `ki` (s_i, n) / `kj` (s_j, n) the
@@ -29,6 +38,11 @@ use numpy::{
 };
 use pyo3::prelude::*;
 use rayon::prelude::*;
+
+/// Largest dense `W̄` (m_im·m_jm) materialised on the !acc_w `indReduce` branch
+/// before falling back to the per-column factor path (~32 MB f64). MUST match
+/// `_XWX_DENSE_MSIZE_CAP` in `hea/models/bam.py`.
+const XWX_DENSE_MSIZE_CAP: usize = 4_000_000;
 
 #[pyfunction]
 #[pyo3(name = "xwx_smooth_block")]
@@ -63,7 +77,17 @@ fn xwx_smooth_block<'py>(
     let w_f: Vec<f64> = w.as_array().iter().copied().collect();
 
     let msize = mim * mjm;
-    let dense = n > msize; // mgcv acc_w = (n > mjm*mim), strict (discrete.c:1801)
+    let nst = si * sj; // summation-convention sets (same as bam.py len(Ki_list))
+    // mgcv acc_w = (n > mjm*mim), strict (discrete.c:1801) OR the !acc_w large-p
+    // `indReduce` branch (1884/1922): both collapse the (K_i,K_j) duplicates into
+    // the dense W̄ then contract once — cheaper than the per-column factor
+    // accumulation when the table fits. Two !acc_w guards so W̄ never costs more
+    // than the factor path: `msize ≤ CAP` (memory) and `msize ≤ 16·nst·n` (the W̄
+    // scan stays under the per-column factor work). MUST match the
+    // `_XWX_DENSE_MSIZE_CAP`/`min(p)>15`/`16·nst·n` gate in bam.py so the numpy
+    // spec and this kernel take the same branch (`rs == python`).
+    let dense = n > msize
+        || (pim.min(pjm) > 15 && msize <= XWX_DENSE_MSIZE_CAP && msize <= 16 * nst * n);
     let rfac = pjm <= pim; // form C (m_im×p_jm) else D (m_jm×p_im)
     let nrow = ndi * pim;
     let ncol = ndj * pjm;

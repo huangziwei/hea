@@ -5660,27 +5660,49 @@ def _truncated_tensor(term: _DiscreteTerm, s: int,
     return out
 
 
+# Largest dense ``W̄`` (m_im·m_jm entries) we will materialise on the !acc_w
+# ``indReduce`` branch before falling back to the per-column factor path. Bounds
+# the table to ~32 MB (f64); signal-regression marginals sit well under it. MUST
+# match ``XWX_DENSE_MSIZE_CAP`` in rust/src/discrete.rs (the rust kernel and this
+# numpy spec take the same branch so ``rs == python`` holds).
+_XWX_DENSE_MSIZE_CAP = 4_000_000
+
+
 def _wbar_contract(Ki_list: list[np.ndarray], Kj_list: list[np.ndarray],
                    vals_list: list[np.ndarray],
                    Xim: np.ndarray, Xjm: np.ndarray) -> np.ndarray:
     """Contract ``Xd_im' W̄ Xd_jm`` where ``W̄[a,b] = Σ vals·[K_i=a][K_j=b]``
     (summed over the summation-convention sets ``(K_i, K_j, vals)``).
 
-    Two faithful paths from mgcv ``XWXijs`` (discrete.c:1793-2025), neither
+    Three faithful paths from mgcv ``XWXijs`` (discrete.c:1793-2025), none
     forming the ``n×p`` design:
 
     * ``n > m_im·m_jm`` (mgcv ``acc_w``, 1801 — STRICT ``>``): accumulate the
       dense ``m_im×m_jm`` table by flat bincount, then ``Xd_im' W̄ Xd_jm``.
-    * otherwise (``acc_w=0``, the ``rfac`` right-factor branch, 2009-2022):
-      form ``C = W̄ Xd_jm`` (``m_im × p_jm``) by scattering ``vals·Xd_jm[K_j]``
-      into row ``K_i`` (the ``indReduce`` accumulation, done here as one
-      bincount per column of ``C``), then ``Xd_im' C``. Never builds ``m×m``.
+    * ``acc_w=0`` but ``min(p_im,p_jm) > 15`` and ``m_im·m_jm`` within the dense
+      cap: mgcv's ``indReduce`` sparse branch (1884, 1922). indReduce collapses
+      the ``(K_i,K_j)`` duplicates (hash table) then forms the product; the flat
+      bincount into ``W̄`` IS that dedup, and one BLAS ``Xd_im' W̄ Xd_jm``
+      replaces the per-column scatter loop below (measured 14-63× on
+      signal-regression blocks, within the contraction's dgemm floor).
+    * otherwise (``acc_w=0``, small ``p`` or marginals past the cap): mgcv's
+      DIRECT accumulation (1924-2006) — form the smaller factor (``rfac`` cost
+      choice, 1810) ``C = W̄ Xd_jm`` (m_im × p_jm) or ``D = W̄' Xd_im`` by one
+      bincount per column, then ``Xd_im' C`` / ``D' Xd_jm``. Never builds m×m.
     """
     mim, pim = Xim.shape
     mjm, pjm = Xjm.shape
     msize = mim * mjm
+    nst = len(Ki_list)              # summation-convention sets s_i·s_j (×3 for AR1)
     n = Ki_list[0].shape[0]
-    if n > msize:  # mgcv acc_w = (n > mjm*mim), STRICT (discrete.c:1801)
+    # mgcv acc_w (1801, STRICT >) OR the !acc_w large-p indReduce branch (1884):
+    # both collapse (K_i,K_j) into the dense W̄ then contract once. Two guards on
+    # the !acc_w case so the dense table never costs more than the factor path it
+    # replaces: ``msize ≤ cap`` (absolute memory) and ``msize ≤ 16·nst·n`` (the W̄
+    # scan stays under the per-column factor work — without it a few rows on a
+    # huge grid would scan an msize-sized table; mgcv's hash is O(n_u) there).
+    if n > msize or (min(pim, pjm) > 15 and msize <= _XWX_DENSE_MSIZE_CAP
+                     and msize <= 16 * nst * n):
         Wflat = np.zeros(msize, dtype=float)
         for Ki, Kj, vals in zip(Ki_list, Kj_list, vals_list):
             Wflat += np.bincount(Ki * mjm + Kj, weights=vals, minlength=msize)

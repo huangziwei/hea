@@ -858,3 +858,74 @@ def test_xwx_smooth_block_parity():
     finally:
         _bam._rs_xwx_smooth_block = orig
     np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-9)
+
+
+def test_xwx_smooth_block_largep_indreduce_parity():
+    """rust == numpy on the !acc_w large-``p`` ``indReduce`` dense branch
+    (bam.py ``min(p)>15`` gate / discrete.rs). A discretised functional covariate
+    bounds the final-marginal grid (``msize ≤ cap``) so the dense-W̄ path is taken
+    with p≈19 > 15 — the k=c(4,3) case above stays on the small-p factor path, so
+    this is the branch the existing parity test does not reach."""
+    import importlib
+    _bam = importlib.import_module("hea.models.bam")
+    if _bam._rs_xwx_smooth_block is None:
+        pytest.skip("hea._rs.xwx_smooth_block unavailable")
+    import polars as pl
+    from hea.family import Gaussian
+    rng = np.random.default_rng(5)
+    nm, L = 2500, 5
+    grid = np.linspace(0, 5, 70)
+    Xc = grid[rng.integers(0, 70, (nm, L))]      # discretised → bounded grid
+    lag = np.tile(np.linspace(0, 1, L), (nm, 1))
+    stim = rng.standard_normal((nm, L))
+    df = pl.DataFrame({"y": rng.standard_normal(nm), "Lag": lag,
+                       "Xc": Xc, "Stim": stim})
+    m = _bam.bam("y ~ te(Lag, Xc, by=Stim, k=c(4,20))", df,
+                 family=Gaussian(), discrete=True)
+    d = m._discrete_design
+    w = rng.uniform(0.1, 2.0, d.n)
+    got = _bam.XWXd(d, w)
+    orig = _bam._rs_xwx_smooth_block
+    _bam._rs_xwx_smooth_block = None
+    try:
+        want = _bam.XWXd(d, w)
+    finally:
+        _bam._rs_xwx_smooth_block = orig
+    np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-9)
+
+
+def test_wbar_contract_indreduce_dense_branch():
+    """``_wbar_contract``'s !acc_w large-``p`` branch (the dense-W̄ ``indReduce``
+    equivalent, mgcv discrete.c:1884/1922) equals the brute-force ``Xim' W̄ Xjm``
+    to the contraction floor — and the perf-guard (``n ≪ msize``), memory-cap
+    (``msize > cap``) and small-``p`` cases all fall back to the factor path and
+    stay exact. Verifies the dense gate matches across all four regimes."""
+    import importlib
+    _bam = importlib.import_module("hea.models.bam")
+    cap = _bam._XWX_DENSE_MSIZE_CAP
+
+    def brute(Ki_l, Kj_l, vl, Xim, Xjm):
+        W = np.zeros((Xim.shape[0], Xjm.shape[0]))
+        for Ki, Kj, v in zip(Ki_l, Kj_l, vl):
+            np.add.at(W, (Ki, Kj), v)
+        return Xim.T @ W @ Xjm
+
+    def check(n, mim, mjm, p, ss, seed, expect_dense):
+        rng = np.random.default_rng(seed)
+        Ki = [rng.integers(0, mim, n).astype(np.int64) for _ in range(ss)]
+        Kj = [rng.integers(0, mjm, n).astype(np.int64) for _ in range(ss)]
+        vl = [rng.standard_normal(n) for _ in range(ss)]
+        Xim = rng.standard_normal((mim, p))
+        Xjm = rng.standard_normal((mjm, p))
+        msize = mim * mjm
+        dense = (n > msize
+                 or (min(p, p) > 15 and msize <= cap and msize <= 16 * ss * n))
+        assert dense is expect_dense
+        got = _bam._wbar_contract(Ki, Kj, vl, Xim, Xjm)
+        np.testing.assert_allclose(got, brute(Ki, Kj, vl, Xim, Xjm),
+                                   rtol=0, atol=1e-9)
+
+    check(3000, 80, 80, 20, 4, 1, expect_dense=True)     # indReduce dense branch
+    check(400, 150, 150, 20, 1, 2, expect_dense=False)   # n≪msize → factor guard
+    check(2500, 2100, 2100, 18, 1, 3, expect_dense=False)  # msize>cap → factor
+    check(1000, 40, 40, 10, 3, 4, expect_dense=False)    # !acc_w p≤15 → factor
