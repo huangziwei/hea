@@ -868,6 +868,9 @@ class gam:
     # the constructor never refits at the optimum. None ⇔ optimizer never ran
     # (magic path) or its initial fit failed.
     _outer_fit: "_FitState | None" = None
+    # The n×q QR factor R of √w₀·X from the design-time structural rank drop,
+    # reused by the magic path's getRpqr so √w·X is factored ONCE (magic.c:393).
+    _struct_R: "np.ndarray | None" = None
 
     @property
     def _scale_known_fit(self) -> bool:
@@ -1570,7 +1573,14 @@ class gam:
             self._pirls_mustart = ms
         w0 = self._init_fisher_w(y, X=X)
         Xw0 = X * np.sqrt(np.maximum(w0, 0.0))[:, None]
-        rank0, drop0 = _pls_rank_drop(Xw0, slots, p)
+        rank0, drop0, R0_struct = _pls_rank_drop(Xw0, slots, p)
+        # Cache the n×q QR factor of √w₀·X for the magic path to reuse as its
+        # getRpqr R (no second n×q QR). Valid only with NO column drop — after a
+        # drop the magic design is the reduced X, factored fresh. Under
+        # gaussian-identity (the magic prerequisite) w₀ ≡ wt exactly, so this R
+        # equals magic_setup's qr(√wt·X).R bit-for-bit. (mgcv's magic does ONE
+        # n×q QR, magic.c:393; hea was doing two — structural drop + getRpqr.)
+        self._struct_R = R0_struct
         if drop0.size:
             import warnings as _w
             dropped_names = [column_names[j] for j in drop0]
@@ -5247,7 +5257,7 @@ class gam:
                 self.family.set_theta(t[base:base + n_theta_fam])
 
         if criterion == "REML":
-            def _eval(t):
+            def _eval(t, deriv=2):  # deriv: REML5-only hint, ignored here
                 rho_t, lp_t = _split(t)
                 _apply_family_theta(t)
                 try:
@@ -5275,8 +5285,14 @@ class gam:
             # evaluation (gam.fit3.r newton, "carries start values
             # forward...", incl. rejected trials) — the carry lives in
             # the pre-rp basis, exactly what _gam_fit5 returns/expects.
-            # Trial evaluations run deriv=0; the accepted iterate gets
-            # one deriv=2 call (mirroring mgcv's call pattern). Inner
+            # mgcv evaluates the first Newton trial at deriv = pdef·2
+            # (gam.fit3.r:1486): when the Hessian is +def it gets the score
+            # AND grad/hess from ONE fit and reuses them on accept (no second
+            # fit per iterate); only step-halving / SD trials run deriv=0,
+            # with one deriv=2 refit on the accepted halving (gam.fit3.r:1531,
+            # 1544). The newton below passes that `deriv` hint through `_eval`;
+            # `_grad`/`_hess` reuse the fit's REML1/REML2 when present and only
+            # refit when the accepted point came from a deriv=0 trial. Inner
             # epsilon: newton caps control$epsilon at conv.tol/100
             # (gam.fit3.r:1308) → 1e-8 at gam defaults.
             g5 = self._g5
@@ -5292,23 +5308,28 @@ class gam:
                 g5["start"] = fit_t["coefficients"]
                 return fit_t
 
-            def _eval(t):
+            def _eval(t, deriv=2):
                 rho_t, _ = _split(t)
                 try:
-                    fit_t = _fit5_at(rho_t, 0)
+                    fit_t = _fit5_at(rho_t, deriv)
                 except Exception:
                     return float("inf"), None
                 return float(fit_t["REML"]), fit_t
 
             def _grad(rho, log_phi, fit):
-                f2 = _fit5_at(rho, 2)
-                fit.update(f2)      # cache derivs on the accepted fit
+                # Reuse the deriv=2 data if the accepted fit already carries it
+                # (first-trial-pdef accept); else this point came from a deriv=0
+                # trial (halving/SD) and needs the one deriv=2 refit. NB a
+                # deriv=0 fit5 still has the "REML2" KEY (value None), so test
+                # the value, not key presence.
+                if fit.get("REML2") is None:
+                    fit.update(_fit5_at(rho, 2))
                 # newton's b IS the last accepted deriv-2 fit — keep it
                 # so the caller never refits at the optimum (a refit
                 # re-enters Newton from the converged coefs and can
                 # only exit through the step-failure paths).
                 g5["fit"] = fit
-                return _to_working(np.asarray(f2["REML1"], dtype=float))
+                return _to_working(np.asarray(fit["REML1"], dtype=float))
 
             def _hess(rho, log_phi, fit):
                 return _to_working_hess(np.asarray(fit["REML2"],
@@ -5316,7 +5337,7 @@ class gam:
         elif criterion == "GACV":
             # GACV (gam.fit3.r:751): a GCV sibling for scale-unknown standard
             # families. ρ-only; analytic gradient, FD Hessian on it.
-            def _eval(t):
+            def _eval(t, deriv=2):  # deriv: REML5-only hint, ignored here
                 rho_t, _ = _split(t)
                 try:
                     fit_t = self._fit_given_rho(rho_t)
@@ -5332,7 +5353,7 @@ class gam:
             # with the Pearson-Laplace scale φ = P/(n−Mp) plugged in (γ≡1),
             # ρ-only. Value reuses `_reml` at log φ_P; gradient `_preml_grad`
             # (= reused REML ρ-grad − φ(ρ) chain term); analytic `_preml_hessian`.
-            def _eval(t):
+            def _eval(t, deriv=2):  # deriv: REML5-only hint, ignored here
                 rho_t, _ = _split(t)
                 try:
                     fit_t = self._fit_given_rho(rho_t)
@@ -5347,7 +5368,7 @@ class gam:
             def _hess(rho, log_phi, fit):
                 return _to_working_hess(self._preml_hessian(rho, fit))
         else:  # GCV
-            def _eval(t):
+            def _eval(t, deriv=2):  # deriv: REML5-only hint, ignored here
                 rho_t, _ = _split(t)
                 try:
                     fit_t = self._fit_given_rho(rho_t)
@@ -5519,7 +5540,10 @@ class gam:
             accepted_fit = None
             sd_unused = True
 
-            f_try, fit_try = _eval(theta + Nstep)
+            # mgcv evaluates the first trial at deriv = pdef·2 (gam.fit3.r:1486):
+            # +def ⇒ get grad/hess in this fit so an immediate accept needs no
+            # second fit (REML5); indefinite ⇒ deriv=0, defer to the SD trial.
+            f_try, fit_try = _eval(theta + Nstep, deriv=2 if pdef else 0)
             score_change = f_try - f_prev
             qerror = _qerror(Nstep, score_change)
             if (
@@ -5541,7 +5565,7 @@ class gam:
                             sd_unused = False
                     else:
                         step = step / 2
-                    f_try, fit_try = _eval(theta + step)
+                    f_try, fit_try = _eval(theta + step, deriv=0)
                     score_change = f_try - f_prev
                     if ii > min(4, max_half // 2):
                         qerror = qerror_thresh / 2  # drop qerror requirement
@@ -5571,7 +5595,7 @@ class gam:
                 sd_step = Sstep * 2
                 for kk in range(40):
                     sd_step = sd_step / 2
-                    f_sd, fit_sd = _eval(theta + sd_step)
+                    f_sd, fit_sd = _eval(theta + sd_step, deriv=0)
                     score_change_sd = f_sd - f_prev
                     qerror_sd = _qerror(sd_step, score_change_sd)
                     accept_sd = (
@@ -5680,7 +5704,7 @@ class gam:
                         if f1 >= target:
                             break
                         theta1[i] = theta1[i] + step_dir[i]
-                        f1_new, _fit1 = _eval(theta1)
+                        f1_new, _fit1 = _eval(theta1, deriv=0)
                         if not np.isfinite(f1_new):
                             theta1[i] = theta1[i] - step_dir[i]
                             break
@@ -6823,9 +6847,19 @@ class gam:
         reduced score-eval — this is the work the Newton path repeats n times."""
         sqw = np.sqrt(self._wt)
         yv = self._y_arr - self._offset
-        Q, R = np.linalg.qr(sqw[:, None] * self._X_full)
-        y0 = Q.T @ (sqw * yv)
-        yy = float((sqw * yv) @ (sqw * yv))
+        b = sqw * yv
+        if self._struct_R is not None and self._keep_cols is None:
+            # Reuse the structural-drop QR (same √w·X under gaussian-identity,
+            # no drop): R is bit-identical to qr(√wt·X).R, and the getRpqr
+            # projection y0 = Q₁'b = R⁻ᵀ(Xw'b) needs no second QR (Xw = √w·X,
+            # so Xw'b = X'(wt·yv)). Matches the explicit-Q route to ~1e-15.
+            R = self._struct_R
+            y0 = solve_triangular(
+                R, self._X_full.T @ (self._wt * yv), lower=False, trans="T")
+        else:
+            Q, R = np.linalg.qr(sqw[:, None] * self._X_full)
+            y0 = Q.T @ b
+        yy = float(b @ b)
         return R, y0, yy
 
     def _magic_penalty_roots(self) -> list[np.ndarray]:
@@ -8508,7 +8542,7 @@ class gam:
             Xw = X * np.sqrt(self._fisher_w)[:, None]
         else:
             Xw = X
-        rank, _drop = _pls_rank_drop(Xw, self._slots, self.p)
+        rank, _drop, _R = _pls_rank_drop(Xw, self._slots, self.p)
         return rank
 
     def _compute_vcomp(self, rescale: bool = True,
@@ -12193,7 +12227,10 @@ def _pls_rank_drop(Xw: np.ndarray, slots: list["_PenaltySlot"],
     # gam.control's √eps (which magic's GCV path uses).
     rank = _R_rank(R_piv, tol=float(np.finfo(float).eps) * 100.0)
     drop = np.sort(piv[rank:]) if rank < p else np.zeros(0, dtype=int)
-    return rank, drop
+    # R1 (the n×q QR factor of √W·X) is returned so the magic path can reuse
+    # it for getRpqr instead of factoring √w·X a second time — they are the
+    # bit-identical matrix under gaussian-identity (W constant) with no drop.
+    return rank, drop, R1
 
 
 def _mroot(A: np.ndarray, rank: int | None = None) -> np.ndarray:

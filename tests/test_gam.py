@@ -4603,13 +4603,13 @@ def test_pls_rank_drop_alias_twin_canonical_on_any_blas():
     rng = np.random.default_rng(0)
     X = rng.standard_normal((40, 6))
     X[:, 3] = X[:, 1]                       # exact duplicate
-    rank, drop = _pls_rank_drop(X, [], 6)
+    rank, drop, _ = _pls_rank_drop(X, [], 6)
     assert rank == 5 and list(drop) == [3]
     X[:, 3] = -X[:, 1]                      # exact negated alias
-    rank, drop = _pls_rank_drop(X, [], 6)
+    rank, drop, _ = _pls_rank_drop(X, [], 6)
     assert rank == 5 and list(drop) == [3]
     X[:, 5] = X[:, 1]                       # three-way: keep first only
-    rank, drop = _pls_rank_drop(X, [], 6)
+    rank, drop, _ = _pls_rank_drop(X, [], 6)
     assert rank == 4 and list(drop) == [3, 5]
 
 
