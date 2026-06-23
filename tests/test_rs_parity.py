@@ -622,13 +622,13 @@ def test_gamlss_xwx_row_col_consistent():
 
 
 # ---------------------------------------------------------------------------
-# tweedie_series — mgcv `tweedious` (misc.c:170) scalar-p saturated-series
-# moments via the rust per-row sweep vs the numpy dense-matrix oracle (==
-# `_tweedie_log_a_vec` with the extension forced off). Not 0-ulp: the sweep
-# reduces in a different order and uses mgcv's uncentered Var = E[j²]−E[j]²
-# (misc.c:499) where the numpy path centres it — both far inside the tw
-# fixture tolerance (5e-5). Moments span many orders of magnitude (j² grows as
-# p→1), so the gate is relative (atol floors the near-zero variance spikes).
+# tweedie_series — mgcv `tweedious` (misc.c:170) scalar-p series via the rust
+# per-row sweep. The returned 7 columns are (log_a, E[j], Var[j], E[jψ]) plus
+# mgcv's three p-param working-derivative accumulators (m_wp1, m_comb, m_dwpp,
+# misc.c:346-503). Two gates: (1) rust vs the numpy dense-matrix oracle (==
+# `_tweedie_log_a_vec` forced off) — not 0-ulp, the sweep reduces in a
+# different order + uses `rfma` for the wp1²+wp2 combine; (2) the whole
+# `_ld_tweedie_work` vs LIVE R `ldTweedie` (the new R arm).
 import hea.family as _fam  # noqa: E402
 
 
@@ -648,6 +648,42 @@ def test_tweedie_series_parity(p, phi):
         _fam._rs_tweedie_series = orig
     for a, b in zip(out_rs, out_np):
         np.testing.assert_allclose(a, b, rtol=1e-8, atol=1e-9)
+
+
+@pytest.mark.parametrize("theta,rho", [(-0.5, 0.3), (0.0, -0.4), (0.7, 0.8)])
+def test_tweedie_ldwork_matches_r(theta, rho):
+    """R arm: hea ``_ld_tweedie_work`` vs live mgcv ``ldTweedie`` in the
+    (θ, ρ) working parameterisation (``all.derivs=TRUE``). The log-density,
+    1st derivatives and the closed-form μ columns hit the libm floor; the 2nd
+    p-derivatives (cols 2/4/5) carry an inherent saddle+series cancellation
+    that mgcv shares (R itself is ~1e-9 off the float128 truth for large y), so
+    those gate at the cancellation floor on moderate y. nmath (R's Rmath)
+    special functions + mgcv's working-derivative reduction back the tight arms."""
+    import subprocess
+
+    from hea.R import runif, set_seed
+    set_seed(abs(int(theta * 100) + int(rho * 10)) + 11)
+    y = np.concatenate([[0.0, 0.0], runif(18, 0.1, 60.0)])
+    mu = np.concatenate([[0.5, 1.5], runif(18, 0.2, 50.0)])
+    ld = _fam._ld_tweedie_work(y, mu, np.full_like(y, theta),
+                               np.full_like(y, rho), a=1.001, b=1.999)
+    ys = ",".join(map(repr, y.tolist()))
+    mus = ",".join(map(repr, mu.tolist()))
+    src = (f"suppressMessages(library(mgcv)); y<-c({ys}); mu<-c({mus}); "
+           f"M<-ldTweedie(y,mu,rho={rho!r},theta={theta!r},a=1.001,b=1.999,"
+           "all.derivs=TRUE); "
+           "write.table(format(M,digits=17),stdout(),row.names=F,"
+           "col.names=F,quote=F)")
+    out = subprocess.run(["Rscript", "-e", src], capture_output=True,
+                         text=True, check=True).stdout
+    R = np.array([[float(v) for v in ln.split()]
+                  for ln in out.splitlines() if ln.strip()])
+    # cols 0 (l), 1 (d/dρ), 3 (d/dθ), 6-9 (μ) — libm floor.
+    for c in (0, 1, 3, 6, 7, 8, 9):
+        np.testing.assert_allclose(ld[:, c], R[:, c], rtol=1e-9, atol=1e-10)
+    # cols 2/4/5 (2nd p-derivatives) — saddle+series cancellation floor.
+    for c in (2, 4, 5):
+        np.testing.assert_allclose(ld[:, c], R[:, c], rtol=1e-6, atol=1e-7)
 
 
 # --- psigamma (R dpsifn) — rust vs the pure-Python oracle --------------------
