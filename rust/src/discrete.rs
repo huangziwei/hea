@@ -27,9 +27,10 @@
 //! (m_jm, p_jm) are the final-marginal bases; `ki` (s_i, n) / `kj` (s_j, n) the
 //! final-marginal index columns; `tti` (s_i, nd_i, n) / `ttj` (s_j, nd_j, n) the
 //! truncated row-tensors (`tti[s, r, :]` contiguous so the inner row loop is
-//! unit-stride); `w` (n,). Returns the raw block (nd_i·p_im, nd_j·p_jm). For
-//! `diag_term` the term is its own pair: only sub-blocks `c ≥ r` are formed and
-//! `(c,r)` is the transpose.
+//! unit-stride); `w` (n,) the diagonal weight; `woff` (n-1,) the AR1
+//! tridiagonal off-diagonal (empty ⇒ plain `diag(w)`, no super/sub scatters).
+//! Returns the raw block (nd_i·p_im, nd_j·p_jm). For `diag_term` the term is its
+//! own pair: only sub-blocks `c ≥ r` are formed and `(c,r)` is the transpose.
 
 use numpy::ndarray::Array2;
 use numpy::{
@@ -55,6 +56,7 @@ fn xwx_smooth_block<'py>(
     tti: PyReadonlyArray3<'py, f64>,
     ttj: PyReadonlyArray3<'py, f64>,
     w: PyReadonlyArray1<'py, f64>,
+    woff: PyReadonlyArray1<'py, f64>,
     diag_term: bool,
 ) -> Bound<'py, PyArray2<f64>> {
     let mim = xim.shape()[0];
@@ -75,9 +77,14 @@ fn xwx_smooth_block<'py>(
     let tti_f: Vec<f64> = tti.as_array().iter().copied().collect(); // (si, ndi, n)
     let ttj_f: Vec<f64> = ttj.as_array().iter().copied().collect(); // (sj, ndj, n)
     let w_f: Vec<f64> = w.as_array().iter().copied().collect();
+    // AR1 tridiagonal off-diagonal (length n-1); empty ⇒ plain diag(w) weight.
+    let woff_f: Vec<f64> = woff.as_array().iter().copied().collect();
+    let tri = !woff_f.is_empty();
 
     let msize = mim * mjm;
-    let nst = si * sj; // summation-convention sets (same as bam.py len(Ki_list))
+    // s_i·s_j summation sets, ×3 for the AR1 tri scatters (diag+super+sub) so this
+    // matches `len(Ki_list)` in the numpy `_wbar_contract` spec.
+    let nst = if tri { 3 * si * sj } else { si * sj };
     // mgcv acc_w = (n > mjm*mim), strict (discrete.c:1801) OR the !acc_w large-p
     // `indReduce` branch (1884/1922): both collapse the (K_i,K_j) duplicates into
     // the dense W̄ then contract once — cheaper than the per-column factor
@@ -96,21 +103,51 @@ fn xwx_smooth_block<'py>(
     // over the shared flat inputs ⇒ the (r,c) map is embarrassingly parallel.
     let compute_sub = |r: usize, c: usize| -> Vec<f64> {
         let mut sub = vec![0.0f64; pim * pjm];
-        if dense {
-            let mut wbar = vec![0.0f64; msize];
+        // Deposit every W̄ entry the (r,c) sub-block needs: the diagonal weight
+        // `w` for every row, plus — when `tri` — the AR1 super/sub couplings
+        // `w_off` (mgcv XWXijs tri branches, discrete.c:1843-1880; super then sub
+        // then diag per row 0..n-2, then the final-row diag). `deposit(a,b,v)`
+        // adds `v` to W̄[a,b] in whatever factored form the active branch holds.
+        let accumulate = |deposit: &mut dyn FnMut(usize, usize, f64)| {
             for s in 0..si {
                 let ki_s = &ki_f[s * n..s * n + n];
                 let tti_sr = &tti_f[(s * ndi + r) * n..(s * ndi + r) * n + n];
                 for t in 0..sj {
                     let kj_t = &kj_f[t * n..t * n + n];
                     let ttj_tc = &ttj_f[(t * ndj + c) * n..(t * ndj + c) * n + n];
-                    for row in 0..n {
-                        let v = w_f[row] * tti_sr[row] * ttj_tc[row];
-                        wbar[(ki_s[row] as usize) * mjm + kj_t[row] as usize] += v;
+                    if tri {
+                        for row in 0..n - 1 {
+                            let a = ki_s[row] as usize;
+                            let a1 = ki_s[row + 1] as usize;
+                            let b = kj_t[row] as usize;
+                            let b1 = kj_t[row + 1] as usize;
+                            // super: (K_i[l], K_j[l+1]) += w_off·dXi[l]·dXj[l+1]
+                            deposit(a, b1, woff_f[row] * tti_sr[row] * ttj_tc[row + 1]);
+                            // sub:   (K_i[l+1], K_j[l]) += w_off·dXi[l+1]·dXj[l]
+                            deposit(a1, b, woff_f[row] * tti_sr[row + 1] * ttj_tc[row]);
+                            // diag:  (K_i[l], K_j[l])   += w·dXi[l]·dXj[l]
+                            deposit(a, b, w_f[row] * tti_sr[row] * ttj_tc[row]);
+                        }
+                        let row = n - 1;
+                        deposit(
+                            ki_s[row] as usize, kj_t[row] as usize,
+                            w_f[row] * tti_sr[row] * ttj_tc[row],
+                        );
+                    } else {
+                        for row in 0..n {
+                            deposit(
+                                ki_s[row] as usize, kj_t[row] as usize,
+                                w_f[row] * tti_sr[row] * ttj_tc[row],
+                            );
+                        }
                     }
                 }
             }
-            // sub = Xim' W̄ Xjm  (via tmp = W̄ Xjm)
+        };
+        if dense {
+            let mut wbar = vec![0.0f64; msize];
+            accumulate(&mut |a, b, v| wbar[a * mjm + b] += v);
+            // sub = Xim' W̄ Xjm  (via tmp = W̄ Xjm), iterating only nonzero W̄.
             let mut tmp = vec![0.0f64; mim * pjm];
             for a in 0..mim {
                 for b in 0..mjm {
@@ -134,22 +171,11 @@ fn xwx_smooth_block<'py>(
             }
         } else if rfac {
             let mut cfac = vec![0.0f64; mim * pjm];
-            for s in 0..si {
-                let ki_s = &ki_f[s * n..s * n + n];
-                let tti_sr = &tti_f[(s * ndi + r) * n..(s * ndi + r) * n + n];
-                for t in 0..sj {
-                    let kj_t = &kj_f[t * n..t * n + n];
-                    let ttj_tc = &ttj_f[(t * ndj + c) * n..(t * ndj + c) * n + n];
-                    for row in 0..n {
-                        let v = w_f[row] * tti_sr[row] * ttj_tc[row];
-                        let a = ki_s[row] as usize;
-                        let b = kj_t[row] as usize;
-                        for bj in 0..pjm {
-                            cfac[a * pjm + bj] += v * xjm_f[b * pjm + bj];
-                        }
-                    }
+            accumulate(&mut |a, b, v| {
+                for bj in 0..pjm {
+                    cfac[a * pjm + bj] += v * xjm_f[b * pjm + bj];
                 }
-            }
+            });
             for a in 0..mim {
                 for ai in 0..pim {
                     let xv = xim_f[a * pim + ai];
@@ -162,22 +188,11 @@ fn xwx_smooth_block<'py>(
             }
         } else {
             let mut dfac = vec![0.0f64; mjm * pim];
-            for s in 0..si {
-                let ki_s = &ki_f[s * n..s * n + n];
-                let tti_sr = &tti_f[(s * ndi + r) * n..(s * ndi + r) * n + n];
-                for t in 0..sj {
-                    let kj_t = &kj_f[t * n..t * n + n];
-                    let ttj_tc = &ttj_f[(t * ndj + c) * n..(t * ndj + c) * n + n];
-                    for row in 0..n {
-                        let v = w_f[row] * tti_sr[row] * ttj_tc[row];
-                        let a = ki_s[row] as usize;
-                        let b = kj_t[row] as usize;
-                        for ai in 0..pim {
-                            dfac[b * pim + ai] += v * xim_f[a * pim + ai];
-                        }
-                    }
+            accumulate(&mut |a, b, v| {
+                for ai in 0..pim {
+                    dfac[b * pim + ai] += v * xim_f[a * pim + ai];
                 }
-            }
+            });
             // sub = D' Xjm  (D is m_jm×p_im)
             for b in 0..mjm {
                 for ai in 0..pim {

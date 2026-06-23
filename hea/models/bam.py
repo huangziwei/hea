@@ -5667,6 +5667,10 @@ def _truncated_tensor(term: _DiscreteTerm, s: int,
 # numpy spec take the same branch so ``rs == python`` holds).
 _XWX_DENSE_MSIZE_CAP = 4_000_000
 
+# Empty ``woff`` sentinel for the rust ``xwx_smooth_block`` kernel: non-AR1 blocks
+# pass it to signal the plain ``diag(w)`` weight (no tridiagonal super/sub).
+_XWX_EMPTY_F64 = np.empty(0, dtype=float)
+
 
 def _wbar_contract(Ki_list: list[np.ndarray], Kj_list: list[np.ndarray],
                    vals_list: list[np.ndarray],
@@ -5786,11 +5790,15 @@ def _smooth_smooth_block(ti: _DiscreteTerm, tj: _DiscreteTerm,
     # Rust runs the (r,c)×(s,t)×rows accumulation in one tight pass — the
     # signal-regression / tensor case where numpy's per-(s,t) bincount loop is
     # call-overhead bound. The plain single×single off-diagonal (one bincount /
-    # small factor) and the si==1 diagonal shortcut already beat mgcv in numpy,
-    # so they stay; rust handles everything with a tensor or summation axis.
+    # small factor) and the non-AR1 si==1 diagonal shortcut already beat mgcv in
+    # numpy, so they stay; rust handles everything with a tensor or summation
+    # axis, including the AR1 ``tri`` weight (it does the diag + super/sub
+    # scatters internally — the ``si==1`` shortcut never applies under AR1, where
+    # ``W̄`` is tridiagonal not diagonal, so that exclusion is gated on non-AR1).
     is_general = si > 1 or sj > 1 or ndi > 1 or ndj > 1
-    if (w_off is None and _rs_xwx_smooth_block is not None and is_general
-            and not (diag_term and si == 1)):
+    ar1 = w_off is not None
+    if (_rs_xwx_smooth_block is not None and is_general
+            and not (diag_term and si == 1 and not ar1)):
         TTi3 = np.ascontiguousarray(np.stack([t.T for t in TTi]))   # (si, ndi, n)
         TTj3 = (TTi3 if diag_term
                 else np.ascontiguousarray(np.stack([t.T for t in TTj])))
@@ -5798,9 +5806,11 @@ def _smooth_smooth_block(ti: _DiscreteTerm, tj: _DiscreteTerm,
             np.stack([k[:, ks_im + s] for s in range(si)]).astype(np.int64))
         Kj = (Ki if diag_term else np.ascontiguousarray(
             np.stack([k[:, ks_jm + t] for t in range(sj)]).astype(np.int64)))
+        woff_arg = (np.ascontiguousarray(w_off, dtype=float) if ar1
+                    else _XWX_EMPTY_F64)
         return _rs_xwx_smooth_block(
             np.ascontiguousarray(Xim), np.ascontiguousarray(Xjm),
-            Ki, Kj, TTi3, TTj3, np.ascontiguousarray(w), diag_term)
+            Ki, Kj, TTi3, TTj3, np.ascontiguousarray(w), woff_arg, diag_term)
 
     Ki_all = [k[:, ks_im + s].astype(np.int64) for s in range(si)]
     Kj_all = [k[:, ks_jm + t] for t in range(sj)]

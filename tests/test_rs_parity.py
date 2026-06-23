@@ -929,3 +929,48 @@ def test_wbar_contract_indreduce_dense_branch():
     check(400, 150, 150, 20, 1, 2, expect_dense=False)   # n≪msize → factor guard
     check(2500, 2100, 2100, 18, 1, 3, expect_dense=False)  # msize>cap → factor
     check(1000, 40, 40, 10, 3, 4, expect_dense=False)    # !acc_w p≤15 → factor
+
+
+def test_xwx_smooth_block_ar1_tri_parity():
+    """rust == numpy on the AR1 ``tri`` path (the rust kernel does the diagonal +
+    super/sub tridiagonal scatters internally, mgcv XWXijs tri branches
+    discrete.c:1843-1880). Before this, general AR1 blocks were forced onto the
+    numpy per-(s,t) loop; now they take the rust pass. Covers both a plain tensor
+    ``te()`` (s_i=1, nd_i>1) and a signal-regression ``te(…, by=)`` (s_i·s_j=L²,
+    the case the rust pass is meant to win)."""
+    import importlib
+    _bam = importlib.import_module("hea.models.bam")
+    if _bam._rs_xwx_smooth_block is None:
+        pytest.skip("hea._rs.xwx_smooth_block unavailable")
+    import polars as pl
+    from hea.family import Gaussian
+    from hea.models.bam import _ar1_rwmatrix_indices
+
+    def check(formula, df):
+        m = _bam.bam(formula, df, family=Gaussian(), discrete=True)
+        d = m._discrete_design
+        rng = np.random.default_rng(0)
+        w = rng.uniform(0.1, 2.0, d.n)
+        ld = 1.0 / np.sqrt(1 - 0.5 ** 2)
+        _, _, wt = _ar1_rwmatrix_indices(d.n, ld, -0.5 * ld, None)
+        got = _bam.XWXd(d, w, ar_weights=wt)
+        orig = _bam._rs_xwx_smooth_block
+        _bam._rs_xwx_smooth_block = None
+        try:
+            want = _bam.XWXd(d, w, ar_weights=wt)
+        finally:
+            _bam._rs_xwx_smooth_block = orig
+        np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-9)
+
+    rng = np.random.default_rng(11)
+    n = 800
+    check("y ~ te(x, z, k=c(5,5))",      # plain tensor AR1 (s_i=1, nd_i>1)
+          pl.DataFrame({"y": rng.standard_normal(n),
+                        "x": rng.uniform(0, 1, n), "z": rng.uniform(0, 1, n)}))
+    nm, L = 2000, 6                       # signal-regression AR1 (s_i·s_j=36)
+    grid = np.linspace(0, 5, 50)
+    Xc = grid[rng.integers(0, 50, (nm, L))]
+    check("y ~ te(Lag, Xc, by=Stim, k=c(4,5))",
+          pl.DataFrame({"y": rng.standard_normal(nm),
+                        "Lag": np.tile(np.linspace(0, 1, L), (nm, 1)),
+                        "Xc": Xc, "Stim": rng.standard_normal((nm, L))}))
