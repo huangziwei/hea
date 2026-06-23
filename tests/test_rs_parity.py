@@ -606,3 +606,37 @@ def test_psigamma_parity_reflection(deriv):
     finally:
         _nmath._rs_psigamma = orig
     np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-300, equal_nan=True)
+
+
+# --- discrete X'WX smooth×smooth block — rust vs the numpy oracle ------------
+def test_xwx_smooth_block_parity():
+    """``hea._rs.xwx_smooth_block`` (the matrix-arg / tensor X'WX accumulation,
+    mgcv XWXijs) must equal the numpy ``_smooth_smooth_block`` oracle. The two
+    sum the final-marginal weight table in different orders (rust scatters per
+    row; numpy bincounts per (s,t)), so this is a tight tolerance gate, not
+    0-ulp. Exercises both a matrix-argument by= tensor and its diagonal."""
+    import importlib
+    _bam = importlib.import_module("hea.models.bam")
+    if _bam._rs_xwx_smooth_block is None:
+        pytest.skip("hea._rs.xwx_smooth_block unavailable")
+    import polars as pl
+    from hea.family import Poisson
+    rng = np.random.default_rng(0)
+    nm, mm = 600, 5
+    pm10 = rng.uniform(0, 5, (nm, mm))
+    lag = np.tile(np.arange(mm, dtype=float), (nm, 1))
+    stim = rng.standard_normal((nm, mm))
+    y = rng.poisson(1.0, nm).astype(float)
+    df = pl.DataFrame({"y": y, "Lag": lag, "Xc": pm10, "Stim": stim})
+    m = _bam.bam("y ~ te(Lag, Xc, by=Stim, k=c(4,3))", df,
+                 family=Poisson(), discrete=True)
+    d = m._discrete_design
+    w = rng.uniform(0.1, 2.0, nm)
+    got = _bam.XWXd(d, w)
+    orig = _bam._rs_xwx_smooth_block
+    _bam._rs_xwx_smooth_block = None
+    try:
+        want = _bam.XWXd(d, w)
+    finally:
+        _bam._rs_xwx_smooth_block = orig
+    np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-9)

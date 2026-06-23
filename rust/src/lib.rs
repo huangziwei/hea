@@ -44,6 +44,7 @@
 use pyo3::prelude::*;
 
 mod cluster;
+mod discrete;
 mod family;
 mod linalg;
 mod loess;
@@ -61,5 +62,6 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     cluster::register(m)?;
     tprs::register(m)?;
     family::register(m)?;
+    discrete::register(m)?;
     Ok(())
 }

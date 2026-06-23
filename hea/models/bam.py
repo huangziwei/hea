@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Optional, Sequence
 
 import numpy as np
@@ -92,8 +93,13 @@ from .gam import (
 # Safe at module level: nothing on the hea.R.__init__ chain
 # (model_selection → models.gam → formula) imports this module.
 from ..R.rng import RMersenneTwister
+from .._dispatch import rs_fn
 
 __all__ = ["bam"]
+
+# Rust accelerator for the discrete X'WX smooth×smooth raw block (mgcv XWXijs).
+# ``None`` when the extension is unavailable — the numpy oracle then runs.
+_rs_xwx_smooth_block = rs_fn("xwx_smooth_block")
 
 
 # ---------------------------------------------------------------------------
@@ -1513,14 +1519,10 @@ def _build_qr_discrete_pirls(
     * ``y_norm2 = Σ wᵢ·zᵢ²`` (the working-response sum-of-squares — for
       Gaussian-identity this collapses to ``Σ (yᵢ-offᵢ)²``).
 
-    Relies on the design-level ``X_full`` cache built by
-    :func:`discrete_full_X` on first access. ``Xd_list`` is invariant
-    across PIRLS iters, so the cached X persists across every outer
-    Newton step at no extra cost. The optimised scatter-add kernels in
-    ``Xbd`` / ``XWXd`` / ``XWyd`` (``use_kernel=True``) remain
-    available for very-large-n cases where the full ``n × p`` matrix
-    no longer fits — current default is BLAS-on-cached-X, which beats
-    the kernels at chicago-scale sizes.
+    The ``n × p`` design is never materialised: ``Xbd``/``XWXd``/``XWyd``
+    scatter-add directly on the per-marginal ``Xd``/``k`` store, exactly as
+    mgcv ``discrete=TRUE`` (src/discrete.c). ``Xd_list`` is invariant across
+    PIRLS iters, so the weight-table contractions are the only per-iter work.
     """
     n = design.n
     if n == 0:
@@ -2520,13 +2522,13 @@ class bam(gam):
         The covariates of ``newdata`` (or the training frame when
         ``newdata=None``) are binned to ``compress.df``'s grid and the
         prediction is gathered from the per-marginal compressed design
-        (mgcv ``Xbd``); link-scale SE is ``sqrt(diag(Xd·V·Xd'))`` (mgcv
-        ``diagXVXd``), realised here on the materialised binned design
-        ``discrete_full_X`` (= ``Xbd(Xd, I)``). For a continuous covariate
-        this differs from exact basis evaluation by the binning — exactly
-        the divergence F1 was about, and it makes ``lpmatrix @ coef ==
-        fitted`` hold for a continuous discrete fit. ``type='response'``
-        applies the delta-method ``|dμ/dη|`` SE multiplier and ``linkinv``
+        (mgcv ``Xbd``); link-scale SE is ``sqrt(diag(Xd·V·Xd'))`` via
+        :func:`diagXVXd` (mgcv ``diagXVXd``), one column at a time — the
+        ``n × p`` design is never formed. For a continuous covariate this
+        differs from exact basis evaluation by the binning — exactly the
+        divergence F1 was about, and it makes ``lpmatrix @ coef == fitted``
+        hold for a continuous discrete fit. ``type='response'`` applies the
+        delta-method ``|dμ/dη|`` SE multiplier and ``linkinv``
         (bam.r:1989-1990).
 
         ``newdata=None`` + the DEFAULT discretisation (``discrete_m is
@@ -2951,10 +2953,9 @@ class bam(gam):
         walk as :meth:`_chunked_leverage_diag`; passing ``Vp`` instead of
         ``A_inv`` returns the link-scale variance. For a discrete fit the
         predict-time SE goes through :meth:`_predict_bamd` (mgcv
-        ``diagXVXd``) instead, so this is reached only by the non-discrete
-        path; the discrete branch is kept consistent with that — it uses the
-        BINNED design (:func:`discrete_full_X`, = the fit/edf gauge), not
-        exact basis evaluation.
+        ``diagXVXd``) instead; the discrete branch here uses the same
+        compressed-grid :func:`diagXVXd` (the fit/edf gauge), one column at a
+        time — no materialise.
         """
         n = self.n
         out = np.empty(n, dtype=float)
@@ -3313,6 +3314,43 @@ class bam(gam):
             HX = X_chunk @ A_inv
             out[start:end] = w_full[start:end] * (HX * X_chunk).sum(axis=1)
         return out
+
+    # -----------------------------------------------------------------------
+    # On-demand leverage / standardised residuals (mgcv bgam.fitd stores no
+    # n-length hat — bam.r:806-894). The Gaussian-identity *non-discrete*
+    # post-fit (``_post_fit_gaussian``) still sets these eagerly as instance
+    # attributes, which shadow these (non-data-descriptor) cached properties;
+    # the PIRLS/discrete post-fit leaves them lazy, so the O(n·p²) ``diagXVXd``
+    # leverage runs only when a diagnostic (``hatvalues``/``rstandard``/Cook's
+    # D) actually asks for it.
+    # -----------------------------------------------------------------------
+
+    @cached_property
+    def leverage(self) -> np.ndarray:
+        """Hat-matrix diagonal ``hᵢ = wᵢ·(X A⁻¹ X')ᵢᵢ`` (mgcv ``influence``);
+        ``Σ hᵢ = edf_total``. Computed lazily via :func:`diagXVXd` on the
+        compressed grid (no n×p materialise)."""
+        return self._chunked_leverage_diag_weighted(self._A_inv, self._lev_w)
+
+    def _std_resid_denom(self) -> np.ndarray:
+        sigma = self.sigma
+        sigma_for_std = sigma if (np.isfinite(sigma) and sigma > 0) else 1.0
+        return sigma_for_std * np.sqrt(np.clip(1.0 - self.leverage, 1e-12, None))
+
+    @cached_property
+    def std_dev_residuals(self) -> np.ndarray:
+        """Standardised deviance residuals ``rᵢ / (σ·√(1−hᵢ))`` (mgcv
+        ``rstandard``)."""
+        return self.residuals / self._std_resid_denom()
+
+    @cached_property
+    def std_pearson_residuals(self) -> np.ndarray:
+        """Standardised Pearson residuals (mgcv ``rstandard(type="pearson")``).
+        ``V(μ)=1`` for Gaussian-identity, recovering ``√w·(y−μ)``."""
+        mu = self.fitted_values
+        V_mu = self.family.variance(mu)
+        pearson = (self._y_arr - mu) * np.sqrt(self._wt / np.maximum(V_mu, 0.0))
+        return pearson / self._std_resid_denom()
 
     def _fast_reml_fit(
         self, theta0: np.ndarray, *, include_log_phi: bool,
@@ -4275,15 +4313,14 @@ class bam(gam):
         self.sigma_squared = sigma_squared
         self.scale = sigma_squared
 
-        # Leverage h_i = w_i·(X A⁻¹ X')_ii via chunked walk.
-        leverage = self._chunked_leverage_diag_weighted(A_inv, self._wt_full)
-        self.leverage = leverage
-        sigma_for_std = sigma if np.isfinite(sigma) and sigma > 0 else 1.0
-        denom = sigma_for_std * np.sqrt(np.clip(1.0 - leverage, 1e-12, None))
-        V_mu = family.variance(mu)
-        pearson_res = (y - mu) * np.sqrt(self._wt / np.maximum(V_mu, 0.0))
-        self.std_dev_residuals = self.residuals / denom
-        self.std_pearson_residuals = pearson_res / denom
+        # Leverage / standardised residuals are NOT computed here. mgcv's
+        # ``bgam.fitd`` postproc (bam.r:806-894) stores no n-length hat —
+        # edf/edf1/edf2 are p-space (``diag(F)`` etc.); the per-observation
+        # ``hᵢ = wᵢ·(X A⁻¹ X')ᵢᵢ`` (O(n·p²) via ``diagXVXd``) and the
+        # standardised residuals built from it are deferred to the
+        # ``leverage`` / ``std_*_residuals`` cached properties, computed only
+        # if a diagnostic asks for them. ``_lev_w`` carries the Fisher weights.
+        self._lev_w = self._wt_full
         self.df_residuals = df_resid
         self.deviance = float(np.sum(di))
         self.rss = self.deviance     # Gaussian-era alias
@@ -4457,7 +4494,7 @@ class bam(gam):
 # Lives here per the single-consumer rule (only ``bam`` uses any of this).
 # Public symbols (``RMersenneTwister``, ``compress_df``, ``discrete_mf``,
 # ``DiscretizedFrame``, ``DiscreteDesign``, ``build_discrete_design``,
-# ``discrete_full_X``, ``Xbd``, ``XWXd``, ``XWyd``) are reachable as
+# ``Xbd``, ``XWXd``, ``XWyd``, ``diagXVXd``) are reachable as
 # ``from hea.models.bam import <name>`` per the inline convention.
 # ===========================================================================
 
@@ -5100,9 +5137,10 @@ class _DiscreteTerm:
     v: Optional[np.ndarray] = None   # Householder vec, length = Π p_j (qc=1 case)
     # absorb / by / keep_cols for the term. The constraint ``T`` (absorb /
     # keep_cols) is applied by the kernels via ``_design_constraint_Ts``; None
-    # for params and unconstrained smooths. ``by`` records the by-spec — the
-    # faithful by=-as-tensor-marginal construction (mgcv discrete.mf:261-294)
-    # is the pending port; ``by_mask`` (the old post-hoc weight) is removed.
+    # for params and unconstrained smooths. ``by`` records the by-spec for
+    # reference only — the by= weighting is carried by the by-marginal that
+    # :func:`build_discrete_design` prepends to ``Xd_list`` (mgcv
+    # discrete.mf:261-294 / bam.r:2469-2483), not by any post-hoc column mask.
     absorb: Optional[object] = None
     by: Optional[object] = None
     keep_cols: Optional[np.ndarray] = None
@@ -5235,22 +5273,32 @@ def build_discrete_design(blocks: list[SmoothBlock],
         # Term column count after by/absorb/keep_cols. Use block.X.shape[1]
         # as the authoritative post-transform width.
         p_term = block.X.shape[1]
-        kind = "single" if len(margin_raws) == 1 else "tensor"
 
-        # PORT IN PROGRESS: the old post-hoc ``by_mask`` weight is removed (it
-        # was not how mgcv represents by=). mgcv builds by= as the FIRST tensor
-        # marginal (discrete.mf:261-294 — an m_by×1 basis) and handles the
-        # matrix-arg summation (n_sum>1) in the C scatter (XWXijs). Both are the
-        # pending faithful port; until they land, by= / matrix-argument discrete
-        # smooths raise here.
-        n_sum = (k_cols[0][1] - k_cols[0][0]) if k_cols else 1
-        if spec.by is not None or n_sum > 1:
-            raise NotImplementedError(
-                f"discrete=True for by= / matrix-argument smooth "
-                f"{block.label!r} is mid-port: by= must be built as a tensor "
-                "marginal (mgcv discrete.mf) and the summation X'WX via XWXijs "
-                "(src/discrete.c). Not available during this refactor."
-            )
+        # by= is the FIRST marginal of the term (mgcv discrete.mf:261-269 +
+        # fit-side bam.r:2469-2483): an ``m_by × 1`` basis — the discretised
+        # unique by-values (numeric) or a factor-level indicator
+        # (``as.numeric(by.var==by.level)``). Gathering it at the by index
+        # columns reproduces the per-row by weight (summed over the matrix
+        # columns for a matrix-argument by=, the signal-regression convention);
+        # the smooth's own marginals follow, so the term becomes a tensor. The
+        # constraint (``absorb``) still acts on the smooth's raw column space:
+        # the by-marginal has ``p=1`` so it changes neither the term dimension
+        # nor the column order, and ``by·(X_raw @ T) == absorb.apply(by·X_raw)``
+        # for the linear ``T = absorb.apply(I)`` (mgcv ``apply.by=FALSE``).
+        if spec.by is not None:
+            by_name = spec.by.expr
+            j_by = var_index[by_name]
+            ks_by = (int(dframe.ks[j_by, 0]), int(dframe.ks[j_by, 1]))
+            nr_by = int(dframe.nr[j_by])
+            by_vals = np.asarray(dframe.mf[by_name][:nr_by])
+            if spec.by.kind == "factor":
+                by_col = (by_vals == spec.by.level).astype(float)
+            else:
+                by_col = by_vals.astype(float)
+            Xd_list = [by_col.reshape(nr_by, 1)] + Xd_list
+            k_cols = [ks_by] + k_cols
+
+        kind = "single" if len(Xd_list) == 1 else "tensor"
 
         terms.append(_DiscreteTerm(
             kind=kind,
@@ -5338,10 +5386,11 @@ def _term_constraint_T(term: _DiscreteTerm) -> Optional[np.ndarray]:
     Returns ``None`` for the identity case (no absorb / keep_cols), so
     callers can short-circuit the multiplication. For tensor smooths
     the absorb is the rank-1 sum-to-zero Householder; for singletons
-    it's the per-margin absorb chain. Both are realised here by
-    feeding ``np.eye(p_raw)`` through ``term.absorb.apply`` — the same
-    path ``_term_full_design`` would use, but applied once at term
-    setup rather than per row.
+    it's the per-margin absorb chain. Both are realised here by feeding
+    ``np.eye(p_raw)`` through ``term.absorb.apply`` once at term setup;
+    the kernels then sandwich each raw cross-product block with ``T``
+    (= mgcv's constraint ``Z``, applied post-hoc in ``XWXd0``,
+    discrete.c:2230-2266).
     """
     if term.kind == "param":
         return None
@@ -5506,6 +5555,189 @@ def _tensor_Xty_raw(term: _DiscreteTerm, wy: np.ndarray,
     return result.reshape(-1)
 
 
+def _khatri_rao_rows(A: np.ndarray, B: np.ndarray) -> np.ndarray:
+    """Row-wise tensor (Khatri-Rao) product: ``out[:, i*b+j] = A[:, i]·B[:, j]``.
+
+    C-order over ``(i, j)`` so the column index matches mgcv's tensor column
+    convention (first marginal slowest-varying — ``tensorXj``, discrete.c:301).
+    """
+    n, a = A.shape
+    b = B.shape[1]
+    return (A[:, :, None] * B[:, None, :]).reshape(n, a * b)
+
+
+def _truncated_tensor(term: _DiscreteTerm, s: int,
+                      k: np.ndarray, n: int) -> np.ndarray:
+    """Row-tensor product of a term's *non-final* marginals at summation index
+    ``s`` — the ``dXi`` working columns of mgcv ``XWXijs`` (the matrix whose
+    column ``r`` is extracted by ``tensorXj``, discrete.c:1754/1828).
+
+    Shape ``(n, Π_{l<d-1} p_l)``; a single column of ones for singletons.
+    """
+    d = len(term.Xd_list)
+    if d == 1:
+        return np.ones((n, 1), dtype=float)
+    out = None
+    for ell in range(d - 1):
+        ks_l = term.k_cols[ell][0]
+        G = term.Xd_list[ell][k[:, ks_l + s], :]      # (n, p_l)
+        out = G if out is None else _khatri_rao_rows(out, G)
+    return out
+
+
+def _wbar_contract(Ki_list: list[np.ndarray], Kj_list: list[np.ndarray],
+                   vals_list: list[np.ndarray],
+                   Xim: np.ndarray, Xjm: np.ndarray) -> np.ndarray:
+    """Contract ``Xd_im' W̄ Xd_jm`` where ``W̄[a,b] = Σ vals·[K_i=a][K_j=b]``
+    (summed over the summation-convention sets ``(K_i, K_j, vals)``).
+
+    Two faithful paths from mgcv ``XWXijs`` (discrete.c:1793-2025), neither
+    forming the ``n×p`` design:
+
+    * ``m_im·m_jm ≤ n`` (mgcv ``acc_w``, 1801): accumulate the dense
+      ``m_im×m_jm`` table by flat bincount, then ``Xd_im' W̄ Xd_jm``.
+    * otherwise (``acc_w=0``, the ``rfac`` right-factor branch, 2009-2022):
+      form ``C = W̄ Xd_jm`` (``m_im × p_jm``) by scattering ``vals·Xd_jm[K_j]``
+      into row ``K_i`` (the ``indReduce`` accumulation, done here as one
+      bincount per column of ``C``), then ``Xd_im' C``. Never builds ``m×m``.
+    """
+    mim, pim = Xim.shape
+    mjm, pjm = Xjm.shape
+    msize = mim * mjm
+    n = Ki_list[0].shape[0]
+    if msize <= max(n, 1):
+        Wflat = np.zeros(msize, dtype=float)
+        for Ki, Kj, vals in zip(Ki_list, Kj_list, vals_list):
+            Wflat += np.bincount(Ki * mjm + Kj, weights=vals, minlength=msize)
+        return Xim.T @ Wflat.reshape(mim, mjm) @ Xjm
+    # Form the smaller factor (mgcv ``rfac`` cost choice, discrete.c:1810):
+    # ``C = W̄ Xd_jm`` (m_im × p_jm) or ``D = W̄' Xd_im`` (m_jm × p_im) — one
+    # bincount per column of the chosen factor, never an m_im×m_jm table.
+    if pjm <= pim:
+        C = np.zeros((mim, pjm), dtype=float)
+        for Ki, Kj, vals in zip(Ki_list, Kj_list, vals_list):
+            WX = vals[:, None] * Xjm[Kj]
+            for c in range(pjm):
+                C[:, c] += np.bincount(Ki, weights=WX[:, c], minlength=mim)
+        return Xim.T @ C
+    D = np.zeros((mjm, pim), dtype=float)
+    for Ki, Kj, vals in zip(Ki_list, Kj_list, vals_list):
+        WX = vals[:, None] * Xim[Ki]
+        for c in range(pim):
+            D[:, c] += np.bincount(Kj, weights=WX[:, c], minlength=mjm)
+    return D.T @ Xjm
+
+
+def _param_smooth_block(pterm: _DiscreteTerm, sterm: _DiscreteTerm,
+                        w: np.ndarray, k: np.ndarray, n: int) -> np.ndarray:
+    """Raw block ``X_param' W X_smooth`` (shape ``p_par × pt_smooth``).
+
+    mgcv ``XWXijs`` forms the left factor ``D = W̄' X_param`` by direct
+    accumulation when one term has ``m==n`` (discrete.c:1965-2006; the
+    ``mim==n ⇒ rfac=0`` guard at 1811 guarantees no ``n×p`` product). Each
+    parametric column ``a`` is fed as the "y" of ``X_smooth'(w·X_param[:,a])``
+    — the same scatter as ``XWyd``.
+    """
+    Xp = pterm.Xd_list[0]
+    p_par = Xp.shape[1]
+    rows = [_term_Xty_raw(sterm, w * Xp[:, a], k, n) for a in range(p_par)]
+    return np.vstack(rows)
+
+
+def _smooth_smooth_block(ti: _DiscreteTerm, tj: _DiscreteTerm,
+                         w: np.ndarray, k: np.ndarray, n: int) -> np.ndarray:
+    """Raw block ``X_i' W X_j`` for two smooth terms (shape ``pt_i × pt_j``).
+
+    Faithful port of mgcv ``XWXijs`` general case (discrete.c:1793-2027):
+    decompose each tensor term into (non-final row-tensor) ⊗ (final marginal);
+    for each sub-block ``(r,c)`` accumulate the final-marginal weight table
+    ``W̄[a,b] = Σ_{s,t,rows} w·dXi_r·dXj_c·[K_i=a][K_j=b]`` then contract
+    ``Xd_im' W̄ Xd_jm``. The ``n×pt`` term design is never materialised.
+    """
+    Xim = ti.Xd_list[-1]
+    Xjm = tj.Xd_list[-1]
+    mim, pim = Xim.shape
+    mjm, pjm = Xjm.shape
+    ks_im = ti.k_cols[-1][0]
+    si = ti.k_cols[-1][1] - ks_im
+    ks_jm = tj.k_cols[-1][0]
+    sj = tj.k_cols[-1][1] - ks_jm
+    ndi = int(np.prod([Xd.shape[1] for Xd in ti.Xd_list[:-1]])) if len(ti.Xd_list) > 1 else 1
+    ndj = int(np.prod([Xd.shape[1] for Xd in tj.Xd_list[:-1]])) if len(tj.Xd_list) > 1 else 1
+
+    diag_term = ti is tj           # same term ⇒ K_i and K_j are the same columns
+    TTi = [_truncated_tensor(ti, s, k, n) for s in range(si)]
+    TTj = TTi if diag_term else [_truncated_tensor(tj, t, k, n) for t in range(sj)]
+
+    # Rust runs the (r,c)×(s,t)×rows accumulation in one tight pass — the
+    # signal-regression / tensor case where numpy's per-(s,t) bincount loop is
+    # call-overhead bound. The plain single×single off-diagonal (one bincount /
+    # small factor) and the si==1 diagonal shortcut already beat mgcv in numpy,
+    # so they stay; rust handles everything with a tensor or summation axis.
+    is_general = si > 1 or sj > 1 or ndi > 1 or ndj > 1
+    if (_rs_xwx_smooth_block is not None and is_general
+            and not (diag_term and si == 1)):
+        TTi3 = np.ascontiguousarray(np.stack([t.T for t in TTi]))   # (si, ndi, n)
+        TTj3 = (TTi3 if diag_term
+                else np.ascontiguousarray(np.stack([t.T for t in TTj])))
+        Ki = np.ascontiguousarray(
+            np.stack([k[:, ks_im + s] for s in range(si)]).astype(np.int64))
+        Kj = (Ki if diag_term else np.ascontiguousarray(
+            np.stack([k[:, ks_jm + t] for t in range(sj)]).astype(np.int64)))
+        return _rs_xwx_smooth_block(
+            np.ascontiguousarray(Xim), np.ascontiguousarray(Xjm),
+            Ki, Kj, TTi3, TTj3, np.ascontiguousarray(w), diag_term)
+
+    Ki_all = [k[:, ks_im + s].astype(np.int64) for s in range(si)]
+    Kj_all = [k[:, ks_jm + t] for t in range(sj)]
+    block = np.zeros((ndi * pim, ndj * pjm), dtype=float)
+    for r in range(ndi):
+        c0 = r if diag_term else 0          # symmetric term ⇒ only upper sub-blocks
+        for c in range(c0, ndj):
+            if diag_term and si == 1:
+                # Same final marginal ⇒ K_i ≡ K_j ⇒ W̄ is diagonal; skip the
+                # m_im×m_jm table (mgcv simple branch, discrete.c:1742-1792).
+                wb = np.bincount(k[:, ks_im],
+                                 weights=w * TTi[0][:, r] * TTj[0][:, c],
+                                 minlength=mim)
+                sub = (Xim * wb[:, None]).T @ Xjm
+            else:
+                Ki_list = []
+                Kj_list = []
+                vals_list = []
+                for s in range(si):
+                    Ki = Ki_all[s]
+                    dXi = TTi[s][:, r]
+                    for t in range(sj):
+                        Ki_list.append(Ki)
+                        Kj_list.append(Kj_all[t])
+                        vals_list.append(w * dXi * TTj[t][:, c])
+                sub = _wbar_contract(Ki_list, Kj_list, vals_list, Xim, Xjm)
+            block[r * pim:(r + 1) * pim, c * pjm:(c + 1) * pjm] = sub
+            if diag_term and c > r:
+                block[c * pim:(c + 1) * pim, r * pjm:(r + 1) * pjm] = sub.T
+    return block
+
+
+def _term_pair_XWX_raw(ti: _DiscreteTerm, tj: _DiscreteTerm,
+                       w: np.ndarray, k: np.ndarray, n: int) -> np.ndarray:
+    """Raw (pre-constraint) cross-product block ``X_i' W X_j`` for one term
+    pair, dispatching on parametric (``m==n``) vs smooth (compressed) terms —
+    mgcv ``XWXijs`` (discrete.c:1672).
+    """
+    pi = ti.kind == "param"
+    pj = tj.kind == "param"
+    if pi and pj:
+        Xi = ti.Xd_list[0]
+        Xj = tj.Xd_list[0]
+        return Xi.T @ (w[:, None] * Xj)
+    if pi:
+        return _param_smooth_block(ti, tj, w, k, n)
+    if pj:
+        return _param_smooth_block(tj, ti, w, k, n).T
+    return _smooth_smooth_block(ti, tj, w, k, n)
+
+
 # ---------------------------------------------------------------------------
 # Public kernels
 # ---------------------------------------------------------------------------
@@ -5531,23 +5763,39 @@ def Xbd(design: DiscreteDesign, beta: np.ndarray) -> np.ndarray:
 
 
 def XWXd(design: DiscreteDesign, w: np.ndarray) -> np.ndarray:
-    """Compute ``X' diag(w) X`` on the compressed design.
+    """Compute ``X' diag(w) X`` (``p × p``, post-constraint) on the compressed
+    design.
 
-    PORT IN PROGRESS — raises. mgcv ``XWXd0``/``XWXijs`` (src/discrete.c:
-    1672-2273) forms ``X'WX`` by hash-scattering ``W`` onto the per-term-pair
-    grid of *occurring* index pairs (``indReduce``) and contracting
-    ``Xd' W̄ Xd`` via the ``r,c`` sub-block decomposition + ``Ztb`` constraints
-    — never allocating a dense ``m×m`` / ``n_sum²`` table. hea's old numpy
-    kernels (``_single_single_XWX`` / ``_general_XWX``) did exactly that dense
-    allocation: non-faithful, and pathologically slow (hangs) on matrix-arg
-    signal regression. They have been removed. Until the faithful ``XWXijs``
-    port lands, every discrete fit raises here.
+    Direct port of mgcv ``XWXd0``/``XWXijs`` (src/discrete.c:1672-2273): for
+    each term pair ``(i ≤ j)`` form the raw cross-product block via
+    :func:`_term_pair_XWX_raw` (final-marginal weight-table scatter — never the
+    ``n×p`` design), then apply the term constraints. mgcv applies the
+    constraint post-hoc to the raw block column-by-column then row-by-row with
+    ``Ztb`` (discrete.c:2230-2266); hea applies the equivalent dense constraint
+    matrix ``T`` (= ``Z``) as ``T_i' B_raw T_j``. The upper triangle is mirrored
+    to the lower (mgcv ``up2lo``, discrete.c:2269).
     """
-    raise NotImplementedError(
-        "discrete=True X'WX (mgcv XWXijs/XWXd0, src/discrete.c) is being "
-        "re-ported faithfully; the non-faithful dense numpy kernels were "
-        "removed. discrete=True is unavailable during this refactor."
-    )
+    w = np.asarray(w, dtype=float)
+    n = design.n
+    p = design.p
+    XWX = np.zeros((p, p), dtype=float)
+    Ts = _design_constraint_Ts(design)
+    terms = design.terms
+    nt = len(terms)
+    for i in range(nt):
+        sl_i = terms[i].coef_slice
+        Ti = Ts[i]
+        for j in range(i, nt):
+            raw = _term_pair_XWX_raw(terms[i], terms[j], w, design.k, n)
+            Tj = Ts[j]
+            blk = raw if Ti is None else (Ti.T @ raw)
+            if Tj is not None:
+                blk = blk @ Tj
+            sl_j = terms[j].coef_slice
+            XWX[sl_i, sl_j] = blk
+            if i != j:
+                XWX[sl_j, sl_i] = blk.T
+    return XWX
 
 
 def XWyd(design: DiscreteDesign, w: np.ndarray, y: np.ndarray) -> np.ndarray:

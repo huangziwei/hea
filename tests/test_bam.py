@@ -596,14 +596,26 @@ def test_bam_tweedie_matrix_by_matches_mgcv():
     )
 
 
+def _reconstruct_discrete_X(d):
+    """Dense ``n × p`` design rebuilt one column at a time via ``Xbd(e_k)`` —
+    the reference the scatter kernels must reproduce (they never form it)."""
+    from hea.models.bam import Xbd
+    p = d.p
+    X = np.empty((d.n, p))
+    e = np.zeros(p)
+    for k in range(p):
+        e[k] = 1.0
+        X[:, k] = Xbd(d, e)
+        e[k] = 0.0
+    return X
+
+
 def test_bam_discrete_scatter_kernels_match_full_X():
-    """The opt-in scatter-add kernels (``use_kernel=True``) are mgcv's
-    ``discrete=TRUE`` memory-collapse path — ``discrete.c`` accumulates
-    ``X'WX``/``X'Wy``/``Xβ`` on the compressed ``Xd``/``k`` and NEVER forms
-    the dense ``X``. They must be bit-equivalent to hea's default materialised
-    full-X matmul on a supported (no by=) design, else the large-``n`` path
-    silently diverges from the fitted path. Pinned to machine precision."""
-    from hea.models.bam import Xbd, XWXd, XWyd
+    """mgcv ``discrete=TRUE`` accumulates ``X'WX``/``X'Wy``/``Xβ`` on the
+    compressed ``Xd``/``k`` and NEVER forms the dense ``X`` (src/discrete.c).
+    The scatter kernels must still equal the dense cross-products to machine
+    precision — verified here against a column-by-column reconstruction."""
+    from hea.models.bam import XWXd, XWyd
     rng = np.random.default_rng(0)
     n = 4000
     x = rng.uniform(0, 1, n)
@@ -613,42 +625,35 @@ def test_bam_discrete_scatter_kernels_match_full_X():
                        {"y": y, "x": x, "z": z},
                        family=Poisson(), discrete=True)
     d = m._discrete_design
+    X = _reconstruct_discrete_X(d)
     w = rng.uniform(0.1, 2.0, n)          # arbitrary (sign-safe) weights
     yv = rng.standard_normal(n)
-    beta = rng.standard_normal(d.p)
-    # Xβ, X'Wy, X'WX: materialised full-X vs scatter-add kernel.
-    np.testing.assert_allclose(Xbd(d, beta),
-                               Xbd(d, beta, use_kernel=True), rtol=0, atol=1e-11)
-    np.testing.assert_allclose(XWyd(d, w, yv),
-                               XWyd(d, w, yv, use_kernel=True), rtol=0, atol=1e-10)
-    np.testing.assert_allclose(XWXd(d, w),
-                               XWXd(d, w, use_kernel=True), rtol=0, atol=1e-10)
-    # ``_full_X_cache=False`` only disables caching, NOT materialisation —
-    # the result is unchanged (still the full-X matmul).
-    d._full_X_cache = False
-    np.testing.assert_allclose(Xbd(d, beta), Xbd(d, beta, use_kernel=True),
-                               rtol=0, atol=1e-11)
+    np.testing.assert_allclose(XWXd(d, w), X.T @ (w[:, None] * X),
+                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(XWyd(d, w, yv), X.T @ (w * yv),
+                               rtol=0, atol=1e-10)
 
 
-def test_bam_discrete_matrix_by_kernel_path_guarded():
-    """The opt-in scatter kernels don't apply by= weighting (bam-plan P2);
-    they must fail loudly on a by-term, not silently miscompute."""
-    from hea.models.bam import XWXd, _assert_kernels_support
-    # Build a tiny matrix-by design to get a DiscreteDesign with a by-term,
-    # then assert the kernel guard trips.
+def test_bam_discrete_matrix_by_scatter_matches_dense():
+    """A ``by=`` smooth is the first marginal of a tensor term (mgcv
+    discrete.mf:261-294 / bam.r:2469-2483); the X'WX scatter over that
+    by-marginal must equal the dense cross-product to machine precision."""
+    from hea.models.bam import XWXd, XWyd
     rng = np.random.default_rng(0)
-    n, mm = 80, 6
+    n, mm = 200, 6
     Lag = np.tile(np.arange(mm, dtype=float), (n, 1))
     Stim = rng.standard_normal((n, mm))
     yv = rng.poisson(1.0, n).astype(float)
     m = hea.models.bam("y ~ s(Lag, by=Stim, k=5)",
                        {"y": yv, "Lag": Lag, "Stim": Stim},
                        family=Poisson(), discrete=True)
-    design = m._discrete_design
-    with pytest.raises(NotImplementedError, match="by="):
-        _assert_kernels_support(design)
-    with pytest.raises(NotImplementedError, match="by="):
-        XWXd(design, np.ones(n), use_kernel=True)
+    d = m._discrete_design
+    X = _reconstruct_discrete_X(d)
+    w = rng.uniform(0.1, 2.0, n)
+    np.testing.assert_allclose(XWXd(d, w), X.T @ (w[:, None] * X),
+                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(XWyd(d, w, yv), X.T @ (w * yv),
+                               rtol=0, atol=1e-10)
 
 
 def test_distinct_exceeds_1d_exact_vs_npunique():
