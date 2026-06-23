@@ -2275,10 +2275,19 @@ class gam:
         # ρ-dependence of L^{-T} in the Bayesian draw β̃ = β̂ + σ L^{-T} z.
         # edf1 = tr(2F-F²) is the upper bound; cap edf2 at edf1 in total
         # only. sc.p = 1 if scale is estimated, 0 if known (mgcv convention).
-        if n_sp > 0 and self._used_magic:
+        # mgcv computes the sp-uncertainty correction (edf2 / Vc) ONLY on the
+        # (RE)ML path — gam.fit3.post.proc / magic.post.proc return edf2 NULL
+        # and Vc NULL for GCV/UBRE/GACV (verified: gamma/log GCV.Cp gives
+        # sum(edf2)=0 and Vc=NULL), so logLik.gam/AIC fall back to edf there.
+        # The magic branch already skipped it for gaussian GCV; extend the
+        # skip to EVERY GCV-type fit so the non-magic GCV path (gamma/log,
+        # binom, …) neither reports an edf2 mgcv doesn't nor pays for the ~2
+        # redundant `_compute_Vr` re-fits (it passes no `fit`, so the
+        # `_reml_hessian` fallback at the GCV branch re-solves the PIRLS).
+        compute_edf2 = method in ("REML", "ML", "P-REML", "P-ML")
+        if n_sp > 0 and (self._used_magic or not compute_edf2):
             # mgcv's magic.post.proc (mgcv.r:4475-4501): edf1 = 2·edf − diag(FF)
-            # only; it computes NO edf2 / Vc for the GCV/magic path (edf2 NULL →
-            # edf in logLik.gam). Skips the ~20 ms profiled-Hessian Vr/Vc.
+            # only; NO edf2 / Vc. edf2 := edf so logLik.gam/AIC use edf.
             F = A_inv_XtWX
             edf1_per_coef = 2.0 * np.diag(F) - np.einsum("ij,ji->i", F, F)
             self.edf1 = edf1_per_coef
@@ -6958,7 +6967,14 @@ class gam:
                 gnorm = np.sqrt(float(grad @ grad))
                 if gnorm > tol ** (1 / 3) * (1 + abs(min_score)):
                     converged = False
-            mg = feval(sp0)
+            # mgcv's magic builds the gradient/Hessian from the fit it
+            # already has in hand — magic.c:611 calls magic_gH on the U1/V/d
+            # left by the last fit_magic, with NO re-fit at sp0. `mg` already
+            # holds the fit at the current sp0 in every branch (the it==1
+            # seed; the accepted step, which sets sp0=nsp; or the step-failure
+            # path, whose last try evaluates sp0+0), and the reduced SVD is
+            # deterministic, so reusing it is bit-identical to re-evaluating
+            # — and saves one (q+e)×q SVD per outer iteration.
             grad, hess = self._magic_gH(mg, sp0, roots)
             ev, U = np.linalg.eigh(0.5 * (hess + hess.T))
             use_sd = bool(np.any(ev <= 0.0))
