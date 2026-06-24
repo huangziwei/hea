@@ -841,7 +841,12 @@ def test_bam_discrete_nongaussian_ar1_free_vs_live_R(famhea, famr, tmp_path):
     if famr == "poisson()":
         y = rng.poisson(np.exp(f - 0.5)).astype(float)
     elif famr.startswith("gaussian"):
-        y = rng.normal(np.exp(0.5 + f), 0.4)
+        # log link ⇒ the response must stay positive: mgcv's gaussian(link=
+        # "log") initialises η = log(y), so a single y ≤ 0 makes the live-R fit
+        # error out (seen on mgcv 1.9-1; 1.9-4 guards it). Floor the Gaussian
+        # noise to a small positive value — both R and hea fit the identical
+        # floored data, so the parity comparison is unaffected.
+        y = np.maximum(rng.normal(np.exp(0.5 + f), 0.4), 1e-2)
     else:
         y = rng.gamma(5.0, np.exp(0.5 + f) / 5.0)
     csv_path = tmp_path / "d.csv"
