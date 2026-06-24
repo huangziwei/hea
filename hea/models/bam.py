@@ -1786,11 +1786,20 @@ class bam(gam):
             raise ValueError(
                 f"rho must satisfy |rho|<1 for stationary AR1, got rho={rho!r}"
             )
-        # mgcv bam.r:2360-2361 — AR1 only valid with Gaussian-identity errors.
-        if rho != 0.0 and not _is_identity_link(family):
-            raise NotImplementedError(
-                "AR coefficients (rho != 0) require family=Gaussian(link='identity')"
+        # mgcv bam() dispatch (bam.r:2668-2698) is a three-way split on AR1
+        # (rho != 0): bam.fit (Gaussian-identity, non-discrete) honours it,
+        # bgam.fitd (discrete, ANY family) honours it, but bgam.fit (generalized,
+        # non-discrete) does NOT — there mgcv warns and silently drops rho
+        # (bam.r:2679 ``warning("AR1 parameter rho unused with generalized
+        # model")``; rho is never even passed to bgam.fit). Mirror that exactly:
+        # discrete non-Gaussian AR1 runs through the Fisher EDeta2 branch in
+        # ``_build_qr_discrete_pirls``; generalized non-discrete warns + rho=0.
+        if rho != 0.0 and not _is_identity_link(family) and not discrete:
+            warnings.warn(
+                "AR1 parameter rho unused with generalized model",
+                stacklevel=2,
             )
+            rho = 0.0
         self._rho = float(rho)
         if ar_start is not None:
             ar_start_arr = np.asarray(ar_start, dtype=bool).flatten()
@@ -3856,6 +3865,24 @@ class bam(gam):
                 eta = qr.eta
                 mu = qr.mu
                 dev = qr.dev
+                # mgcv bgam.fitd:606-611 — the convergence test (678) reads the
+                # PENALISED family deviance ``dev + βᵀSλβ`` (``dev <- dev +
+                # sum(rSb^2)``), added for iter>1 (it>=1; iter==1 keeps raw
+                # ``crit <- dev``). The penalty is at the post-halving β (rSb is
+                # halved alongside coef in the step loop). This term is what makes
+                # the AR1 step-halving stabilisation DETECTABLE: when the model-B
+                # solve overshoots it RAISES the penalised family deviance (the
+                # un-penalised one can plateau early), so reading the penalised
+                # one stops the outer (PIRLS + sp) loop at mgcv's sp — restoring
+                # free-fit sp/edf parity to ~1e-11 for Poisson/Binomial AR1. Gated
+                # on rho!=0: with no AR1 there is no overshoot, the PIRLS reaches a
+                # genuine fixed point where penalised≡un-penalised at the optimum,
+                # and the un-penalised test already matches mgcv's pins (the
+                # additive branch below folds the penalty in via ``yty−coef·Xty``).
+                if (self._rho != 0.0 and it >= 1 and coef is not None
+                        and rho_hat is not None):
+                    Sλ_dev = self._build_S_lambda(rho_hat)
+                    dev = float(dev) + float(coef @ Sλ_dev @ coef)
                 if not np.isfinite(dev):
                     raise FloatingPointError(
                         f"non-finite deviance at PIRLS iter {it}"
@@ -4240,6 +4267,39 @@ class bam(gam):
 
         if fit is None:
             raise FloatingPointError("bgam.fit produced no usable fit")
+
+        # mgcv bgam.fitd reports the *build-point* β of the converged iter
+        # (``object$coefficients <- coef``, bam.r:806): the (step-halved) β that
+        # built the final working model — NOT a further model solve from it.
+        # For a non-Gaussian AR1 fit the two differ. Near the optimum the
+        # per-iter model solve overshoots — it raises the penalised family
+        # deviance — so the step-control loop (bam.r:585-604) halves the next β
+        # back toward the previous accepted iterate and convergence (678) fires
+        # at that halving-stabilised *build point*, which is NOT a fixed point
+        # of the solve (one solve step moves it, e.g. dev 656.94 → 657.60).
+        # ``self._XtX`` and ``fit.A_inv`` are the converged working model built
+        # at this ``coef``; the loop deferred ``fit.beta`` is the prior iter's
+        # overshooting sp-step solve. Report ``coef`` so β / μ / the variance
+        # are mutually consistent and match mgcv. For rho==0 / Gaussian the
+        # iteration reaches a genuine fixed point (coef == fit.beta), so this is
+        # a no-op there — only the AR1 step-halving regime exposes the gap.
+        if (conv and not additive and coef is not None
+                and fit.beta is not None
+                and np.asarray(coef).shape == np.asarray(fit.beta).shape):
+            # Report at the build-point β, not the deferred overshoot solve.
+            # The loop's η = qr.eta (built from this β; Xbd is linear so the
+            # step-halved η equals Xbd(β) exactly) and μ = linkinv(η) are
+            # already at β, so override fit's η/μ/β together; recompute the
+            # working RSS ‖f − Rβ‖² + rss_extra = yty − 2β·Xty + β·XtX·β at β
+            # (the AR1-whitened working deviance the scale reads). fit.A_inv /
+            # self._XtX are the converged model (built at this β), so the
+            # variance / edf stay consistent. No-op for rho==0 / Gaussian.
+            cf = np.asarray(coef, dtype=float)
+            fit.beta = cf.copy()
+            fit.eta = np.asarray(eta, dtype=float)
+            fit.mu = np.asarray(mu, dtype=float)
+            fit.dev = float(self._yty - 2.0 * cf @ self._Xty
+                            + cf @ self._XtX @ cf)
 
         self._rho_hat = rho_hat if rho_hat is not None else np.zeros(0)
         self._log_phi_hat = log_phi_hat

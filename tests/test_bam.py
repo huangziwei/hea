@@ -43,8 +43,11 @@ import numpy as np
 import polars as pl
 import pytest
 
-from hea.family import Poisson
+import subprocess
+
+from hea.family import Poisson, Binomial, Gamma
 import hea
+from conftest import have_rscript
 
 
 # =============================================================================
@@ -698,6 +701,112 @@ def test_bam_discrete_ar1_fit_matches_chunked():
                                rtol=0, atol=1e-7)
     assert abs(md.scale - mc.scale) < 1e-7
     assert abs(md.edf_total - mc.edf_total) < 1e-6
+
+
+def test_bam_chunked_nongaussian_ar1_warns():
+    """mgcv bam() dispatch (bam.r:2677-2679): a generalized (non-Gaussian)
+    NON-discrete fit cannot use the AR1 error model — bgam.fit is never passed
+    rho and mgcv warns ``AR1 parameter rho unused with generalized model``. hea
+    mirrors: warn and silently drop to rho=0, so the fit equals the rho=0 fit."""
+    rng = np.random.default_rng(7)
+    n = 300
+    x = np.sort(rng.uniform(0, 1, n))
+    y = rng.poisson(np.exp(0.8 * np.sin(2 * np.pi * x))).astype(float)
+    data = {"y": y, "x": x}
+    with pytest.warns(UserWarning, match="rho unused with generalized model"):
+        m = hea.models.bam("y ~ s(x, k=8)", data, family=Poisson(),
+                           discrete=False, rho=0.5, method="fREML")
+    assert m._rho == 0.0
+    m0 = hea.models.bam("y ~ s(x, k=8)", data, family=Poisson(),
+                        discrete=False, rho=0.0, method="fREML")
+    np.testing.assert_array_equal(m.fitted_values, m0.fitted_values)
+
+
+@pytest.mark.parametrize("fam,ytr", [
+    ("pois", lambda rng, f, n: rng.poisson(np.exp(f - 1.0)).astype(float)),
+    ("binom", lambda rng, f, n: rng.binomial(1, 1 / (1 + np.exp(-f))).astype(float)),
+    ("gamma", lambda rng, f, n: rng.gamma(5.0, np.exp(f) / 5.0)),
+])
+def test_bam_discrete_nongaussian_ar1_self_consistent(fam, ytr):
+    """discrete=True honours non-Gaussian AR1 (mgcv bgam.fitd handles the
+    extended/standard family + rho!=0 branches). The converged fit must be
+    self-consistent: the reported deviance is the family deviance at the
+    reported fitted values — i.e. hea reports the step-halving build-point β
+    (mgcv bam.r:806), NOT the overshooting per-iter model solve. Pre-fix the
+    PIRLS reported the solve, so m.deviance != Σ dev_resids(y, μ̂)."""
+    rng = np.random.default_rng(11)
+    n = 400
+    x = np.sort(rng.uniform(0, 1, n))
+    zc = rng.uniform(0, 1, n)
+    f = 0.9 * np.sin(2 * np.pi * x) + 1.1 * np.cos(2.3 * np.pi * zc)
+    famobj = {"pois": Poisson(), "binom": Binomial(),
+              "gamma": Gamma(link="log")}[fam]
+    y = ytr(rng, f, n)
+    m = hea.models.bam("y ~ s(x, k=10) + s(z, k=10)",
+                       {"y": y, "x": x, "z": zc}, family=famobj,
+                       discrete=True, rho=0.4, method="fREML")
+    di = famobj.dev_resids(y, np.asarray(m.fitted_values), np.ones(n))
+    assert abs(m.deviance - float(np.sum(di))) < 1e-9 * (abs(m.deviance) + 1.0)
+    assert np.isfinite(m.scale) and m.scale > 0
+
+
+@pytest.mark.skipif(not have_rscript(), reason="Rscript not on PATH (install R)")
+@pytest.mark.parametrize("famhea,famr", [
+    (Poisson(), "poisson()"),
+    (Gamma(link="log"), "Gamma(link='log')"),
+])
+def test_bam_discrete_nongaussian_ar1_vs_live_R(famhea, famr, tmp_path):
+    """discrete=True non-Gaussian AR1 == mgcv bam(discrete=TRUE, rho=) at a
+    FIXED sp — the headline 4i parity. Compares the gauge-invariant deviance /
+    edf / dispersion / fitted against mgcv at mgcv's own optimal sp (exercises
+    the step-halving build-point β report, bam.r:585-604/806). Coefs are NOT
+    element-wise checked: the discrete basis sign convention differs."""
+    rng = np.random.default_rng(11)
+    n = 500
+    x = np.sort(rng.uniform(0, 1, n))
+    zc = rng.uniform(0, 1, n)
+    f = 0.9 * np.sin(2 * np.pi * x) + 1.1 * np.cos(2.3 * np.pi * zc)
+    ar = np.zeros(n, bool)
+    ar[0] = ar[n // 3] = ar[2 * n // 3] = True
+    if famr == "poisson()":
+        y = rng.poisson(np.exp(f - 1.0)).astype(float)
+    else:
+        y = rng.gamma(5.0, np.exp(f) / 5.0)
+    csv_path = tmp_path / "d.csv"
+    with open(csv_path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["y", "x", "z", "ar_start"])
+        for i in range(n):
+            # round-trip-exact floats via repr
+            w.writerow([repr(float(y[i])), repr(float(x[i])),
+                        repr(float(zc[i])), int(ar[i])])
+    rexpr = (
+        f'suppressMessages(library(mgcv));d<-read.csv("{csv_path}");'
+        'd$ar_start<-d$ar_start==1;'
+        f'mf<-bam(y~s(x,k=12)+s(z,k=12),data=d,family={famr},discrete=TRUE,'
+        'rho=0.4,AR.start=d$ar_start,method="fREML");'
+        f'm<-bam(y~s(x,k=12)+s(z,k=12),data=d,family={famr},discrete=TRUE,'
+        'rho=0.4,AR.start=d$ar_start,method="fREML",sp=mf$sp);'
+        'sm<-summary(m);'
+        'cat(mf$sp,"\\n##\\n",sum(m$edf),"\\n##\\n",sm$dispersion,"\\n##\\n",'
+        'm$deviance,"\\n##\\n");cat(sprintf("%.17g",fitted(m)),sep=" ")'
+    )
+    out = subprocess.run(
+        ["Rscript", "-e", rexpr], stdin=subprocess.DEVNULL, check=True,
+        capture_output=True, text=True, timeout=180,
+    ).stdout
+    sp_s, edf_s, disp_s, dev_s, fit_s = out.split("\n##\n")
+    sp = np.array([float(v) for v in sp_s.split()])
+    r_edf, r_disp, r_dev = (float(edf_s), float(disp_s), float(dev_s))
+    r_fit = np.array([float(v) for v in fit_s.split()])
+    m = hea.models.bam("y ~ s(x, k=12) + s(z, k=12)",
+                       {"y": y, "x": x, "z": zc}, family=famhea,
+                       discrete=True, rho=0.4, ar_start=ar,
+                       method="fREML", sp=sp)
+    assert abs(float(np.sum(m.edf)) - r_edf) < 1e-5
+    assert abs(float(m.scale) - r_disp) < 1e-4 * (abs(r_disp) + 1.0)
+    assert abs(float(m.deviance) - r_dev) < 1e-6 * (abs(r_dev) + 1.0)
+    np.testing.assert_allclose(m.fitted_values, r_fit, rtol=0, atol=1e-7)
 
 
 def test_bam_discrete_matrix_by_scatter_matches_dense():
