@@ -4015,15 +4015,21 @@ class bam(gam):
                         rho_cur = theta_sp_warm.copy()
                     if include_log_phi:
                         if log_phi_hat is None:
-                            try:
-                                fit_seed = self._fit_given_rho(
-                                    self._rho_full(rho_cur))
-                                df_resid_seed = max(n - self._Mp, 1.0)
-                                log_phi_cur = float(np.log(
-                                    max(fit_seed.dev / df_resid_seed, 1e-12)
-                                ))
-                            except Exception:
-                                log_phi_cur = 0.0
+                            # mgcv bgam.fitd:697-702 — the iter-1 log φ SEED is
+                            # ``log(var(y)·0.05)`` when ``coef`` is NULL (the
+                            # standard free fit; hea never warm-starts ``coef``
+                            # into this loop, so this branch always applies),
+                            # NOT a working-RSS estimate. The seed steers the
+                            # JOINT (sp, log φ, β) Newton trajectory, and because
+                            # the discrete PIRLS stops on a step-size test
+                            # (bgam.fitd:678) rather than a true fixed point, the
+                            # seed changes WHERE it stops — a wrong seed lands in
+                            # a different basin (sp/log φ off ~0.7%/2%). ``var``
+                            # uses R's n−1 denominator. The ``coef``-supplied /
+                            # ``y.norm2==0`` branches don't arise here.
+                            log_phi_cur = float(np.log(
+                                max(float(np.var(y, ddof=1)) * 0.05, 1e-300)
+                            ))
                         else:
                             log_phi_cur = log_phi_hat
                         theta_cur = np.concatenate(
@@ -4351,21 +4357,23 @@ class bam(gam):
         wt = self._wt
         df_resid = float(n - edf_total)
 
-        # Pearson scale = Σ wᵢ·(yᵢ - μᵢ)²/V(μᵢ) / df_resid (mgcv gam.fit3.r:606).
-        # When φ is KNOWN (scale-known family, or user scale=φ), report the
-        # fixed value (mgcv G$sig2 <- scale, mgcv.r:1942) — mirrors gam.
+        # Scale (φ) reporting. When φ is KNOWN (scale-known family, or user
+        # scale=φ), report the fixed value (mgcv G$sig2 <- scale, mgcv.r:1942).
+        # When φ is ESTIMATED:
+        #   * REML/ML/fREML → ``exp(log φ̂)``, the jointly REML-estimated log
+        #     scale (mgcv bgam.fitd:787 ``scale <- exp(log.phi)`` for discrete,
+        #     bam.r:1253 ``object$scale <- exp(fit$rho[nsp])`` for non-discrete).
+        #     At the REML optimum the grad-w.r.t.-log φ stationary condition
+        #     (Sl.fitChol:1647) gives ``exp(log φ̂) = rss_bSb/(n−Mp) =
+        #     (dev+pen)/(n−Mp)`` with Mp the NULL-SPACE dim — NOT a raw-Pearson
+        #     Σwᵢ(yᵢ−μᵢ)²/V/(n−edf) nor a working-RSS/(n−edf) statistic. Holds
+        #     for discrete + non-discrete, rho==0 + AR1 alike; ``self._log_phi_hat``
+        #     carries it from the fit loop (None ⇔ GCV.Cp or no joint log φ).
+        #   * GCV.Cp → magic's Pearson-type ``fit$scale`` (bam.r:1291): the raw
+        #     Pearson statistic over (n−edf).
         if df_resid > 0 and not self._scale_known_fit:
-            if self._rho != 0.0:
-                # AR1 discrete: the scale is the AR1-WHITENED working RSS /
-                # (n−edf), NOT the raw Pearson statistic. mgcv bgam.fitd sets
-                # ``scale <- exp(log φ̂)`` (bam.r:787) from the fast-REML fit,
-                # whose ``y.norm2 = ‖T·√w·z‖²`` is the whitened working
-                # response SS (bam.r:654). ``fit.dev`` already holds that
-                # whitened working RSS (= ‖f−Rβ̂‖² + rss_extra, _fit_given_rho)
-                # — the same quantity the Gaussian-identity additive path uses
-                # in :func:`_post_fit_gaussian`. (For rho==0 the whitened RSS
-                # equals the raw Pearson statistic, so this only changes AR1.)
-                pearson_scale = float(fit.dev) / df_resid
+            if self._log_phi_hat is not None:
+                pearson_scale = float(np.exp(self._log_phi_hat))
             else:
                 V = family.variance(fit.mu)
                 pearson_scale = float(

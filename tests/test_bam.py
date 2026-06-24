@@ -45,7 +45,7 @@ import pytest
 
 import subprocess
 
-from hea.family import Poisson, Binomial, Gamma
+from hea.family import Poisson, Binomial, Gamma, Gaussian
 import hea
 from conftest import have_rscript
 
@@ -807,6 +807,65 @@ def test_bam_discrete_nongaussian_ar1_vs_live_R(famhea, famr, tmp_path):
     assert abs(float(m.scale) - r_disp) < 1e-4 * (abs(r_disp) + 1.0)
     assert abs(float(m.deviance) - r_dev) < 1e-6 * (abs(r_dev) + 1.0)
     np.testing.assert_allclose(m.fitted_values, r_fit, rtol=0, atol=1e-7)
+
+
+@pytest.mark.skipif(not have_rscript(), reason="Rscript not on PATH (install R)")
+@pytest.mark.parametrize("famhea,famr", [
+    (Gamma(link="log"), "Gamma(link='log')"),       # scale-FREE, AR1
+    (Gaussian(link="log"), "gaussian(link='log')"),  # scale-FREE, AR1
+    (Poisson(), "poisson()"),                         # scale-known control
+])
+def test_bam_discrete_nongaussian_ar1_free_vs_live_R(famhea, famr, tmp_path):
+    """discrete=True non-Gaussian AR1 FREE fit (no ``sp=``) == mgcv
+    bam(discrete=TRUE, rho=). Unlike the fixed-sp test, this exercises the
+    JOINT (sp, log φ, β) Newton trajectory end-to-end: the iter-1 log φ seed
+    ``log(var(y)·0.05)`` (bgam.fitd:699), the per-iter step-halving, and the
+    scale report ``exp(log φ̂)`` (bgam.fitd:787). For scale-free families the
+    trajectory's STOPPING point is path-dependent (the discrete PIRLS stops on
+    a step-size test, not a true fixed point), so sp/φ/fitted match mgcv only
+    if the seed and cadence are bit-faithful — a wrong seed lands in a different
+    basin (~0.7% sp, ~2.5% fitted off). Coefs are not element-checked (discrete
+    basis sign convention differs); the gauge-invariant sp/edf/φ/dev/fitted are."""
+    rng = np.random.default_rng(3)
+    n = 450
+    x = np.sort(rng.uniform(0, 1, n))
+    zc = rng.uniform(0, 1, n)
+    f = 0.7 * np.sin(2 * np.pi * x) + 0.9 * np.cos(2.1 * np.pi * zc)
+    if famr == "poisson()":
+        y = rng.poisson(np.exp(f - 0.5)).astype(float)
+    elif famr.startswith("gaussian"):
+        y = rng.normal(np.exp(0.5 + f), 0.4)
+    else:
+        y = rng.gamma(5.0, np.exp(0.5 + f) / 5.0)
+    csv_path = tmp_path / "d.csv"
+    with open(csv_path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["y", "x", "z"])
+        for i in range(n):
+            w.writerow([repr(float(y[i])), repr(float(x[i])), repr(float(zc[i]))])
+    rexpr = (
+        f'suppressMessages(library(mgcv));d<-read.csv("{csv_path}");'
+        f'm<-bam(y~s(x,k=12)+s(z,k=12),data=d,family={famr},discrete=TRUE,'
+        'rho=0.5,method="fREML");'
+        'cat(m$sp,"\\n##\\n",sum(m$edf),"\\n##\\n",m$sig2,"\\n##\\n",'
+        'm$deviance,"\\n##\\n");cat(sprintf("%.17g",fitted(m)),sep=" ")'
+    )
+    out = subprocess.run(
+        ["Rscript", "-e", rexpr], stdin=subprocess.DEVNULL, check=True,
+        capture_output=True, text=True, timeout=180,
+    ).stdout
+    sp_s, edf_s, disp_s, dev_s, fit_s = out.split("\n##\n")
+    r_sp = np.array([float(v) for v in sp_s.split()])
+    r_edf, r_disp, r_dev = (float(edf_s), float(disp_s), float(dev_s))
+    r_fit = np.array([float(v) for v in fit_s.split()])
+    m = hea.models.bam("y ~ s(x, k=12) + s(z, k=12)",
+                       {"y": y, "x": x, "z": zc}, family=famhea,
+                       discrete=True, rho=0.5, method="fREML")
+    np.testing.assert_allclose(m.sp, r_sp, rtol=1e-6, atol=0)
+    assert abs(float(np.sum(m.edf)) - r_edf) < 1e-6 * (abs(r_edf) + 1.0)
+    assert abs(float(m.scale) - r_disp) < 1e-6 * (abs(r_disp) + 1.0)
+    assert abs(float(m.deviance) - r_dev) < 1e-6 * (abs(r_dev) + 1.0)
+    np.testing.assert_allclose(m.fitted_values, r_fit, rtol=1e-6, atol=1e-8)
 
 
 def test_bam_discrete_matrix_by_scatter_matches_dense():
