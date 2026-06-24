@@ -404,7 +404,7 @@ from hea.formula import (  # noqa: E402
     _tp_eta_const, _tp_fast_eta_vec, _tp_gen_poly_powers, _tp_null_space_dim,
     _tp_T,
 )
-from hea.R._shared import _rfma_vec  # noqa: E402
+from hea.R._shared import _rfma, _rfma_vec  # noqa: E402
 
 
 def _rsq_rfma(diff):
@@ -467,6 +467,60 @@ def test_tp_eval_E_bit_exact(d, m):
     rsq = _rsq_rfma(diff)
     E_np = _tp_fast_eta_vec(m, d, rsq, eta0)
     _assert_eta_parity(d, E_rs, E_np)
+
+
+def _rw_matrix_ref(stop, row, weight, X, trans):
+    """Scalar mirror of mgcv ``rwMatrix`` (misc.c:731-745): the i-outer/j-inner
+    fold the rust ``rw_matrix`` kernel ports, accumulating ``*X1p += weight *
+    *Xp`` via the per-arch ``_rfma`` (the C ``fmadd`` on arm64). Pins the kernel
+    here without an R round-trip; separately verified 0-ulp to live
+    ``mgcv:::rwMatrix`` on arm64."""
+    stop = np.asarray(stop, dtype=int) - 1
+    row = np.asarray(row, dtype=int) - 1
+    weight = np.asarray(weight, dtype=float)
+    X = np.asarray(X, dtype=float)
+    is_mat = X.ndim == 2
+    Xm = X if is_mat else X.reshape(-1, 1)
+    n, p = Xm.shape
+    out = np.zeros((n, p))
+    start = 0
+    for i in range(n):
+        end = int(stop[i]) + 1
+        for j in range(start, end):
+            rj, w = int(row[j]), float(weight[j])
+            src, dst = (i, rj) if trans else (rj, i)
+            for c in range(p):
+                out[dst, c] = _rfma(w, Xm[src, c], out[dst, c])
+        start = end
+    return out if is_mat else out.ravel()
+
+
+@pytest.mark.parametrize("n,p,arstart", [
+    (50, 4, None), (200, 1, None), (30, 3, (10, 21)),
+    (2, 2, None), (1, 5, None),
+])
+@pytest.mark.parametrize("rho", [0.3, 0.7, 0.9])
+@pytest.mark.parametrize("trans", [False, True])
+def test_rw_matrix_bit_exact(n, p, arstart, rho, trans):
+    """Rust ``rw_matrix`` (misc.c:710-748, the AR1 row-recombine) ≡ the scalar
+    per-arch fma fold of misc.c, bit-for-bit. Its only arithmetic is ``rfma``
+    (no transcendental), so the equality holds on every arch — arm64 fuses both
+    sides to ``fmadd``, x86 leaves both as ``a*b+c``. Separately verified 0-ulp
+    to live ``mgcv:::rwMatrix`` on arm64."""
+    from hea.models.bam import _ar1_rwmatrix_indices, _rw_matrix
+    rng = np.random.default_rng(n + p + int(rho * 100))
+    ld = 1.0 / np.sqrt(1.0 - rho ** 2)
+    sd = -rho * ld
+    ar_block = None
+    if arstart is not None:
+        ar_block = np.zeros(n, dtype=bool)
+        for k in arstart:               # 1-based AR-restart event -> 0-based
+            ar_block[k - 1] = True
+    stop, row, weight = _ar1_rwmatrix_indices(n, ld, sd, ar_block)
+    X = rng.standard_normal(n) if p == 1 else rng.standard_normal((n, p))
+    got = _rw_matrix(stop, row, weight, X, trans=trans)
+    want = _rw_matrix_ref(stop, row, weight, X, trans=trans)
+    np.testing.assert_array_equal(got, want)
 
 
 # ---------------------------------------------------------------------------

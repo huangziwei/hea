@@ -102,6 +102,10 @@ __all__ = ["bam"]
 # ``None`` when the extension is unavailable — the numpy oracle then runs.
 _rs_xwx_smooth_block = rs_fn("xwx_smooth_block")
 
+# Rust accelerator for ``rwMatrix`` (mgcv misc.c:710-748) — the AR1 row-recombine.
+# ``None`` when unavailable — :func:`_rw_matrix` then runs the numpy fallback.
+_rs_rw_matrix = rs_fn("rw_matrix")
+
 
 # ---------------------------------------------------------------------------
 # Utility ports — mgcv bam.r:1-200
@@ -120,12 +124,15 @@ def _rw_matrix(stop: np.ndarray, row: np.ndarray, weight: np.ndarray,
     scatter adjoint. BOTH are exercised by the AR1 X'Wy / y-norm² path
     (:func:`XWyd`, discrete.c:1152-1156 calls rwMatrix forward then transpose).
 
-    NOTE on FMA: mgcv's C accumulates ``*X1p += weight * *Xp`` in one
-    expression, which fuses to ``fma`` on arm64. This port pre-rounds the
-    ``weight·X`` products before summing (reduceat / scatter-add), so it
-    diverges from the fused C by ≤1 ULP per accumulation — but that is far
-    BELOW the downstream Accelerate ``dgemm`` reduction floor (~1e-13) the
-    discrete contraction sits at, so it does not move any end-to-end result.
+    FMA: mgcv's C accumulates ``*X1p += weight * *Xp`` in one expression, which
+    fuses to ``fma`` on arm64. The rust kernel (:data:`_rs_rw_matrix`, the
+    primary path) mirrors that with ``rfma`` and is 0-ULP to live arm64 R
+    (verified vs ``mgcv:::rwMatrix``). The numpy fallback below (used only when
+    the extension is unavailable) pre-rounds the ``weight·X`` products before
+    summing (reduceat / scatter-add), so it diverges from the fused C by ≤1 ULP
+    per accumulation — but that is far BELOW the downstream Accelerate ``dgemm``
+    reduction floor (~1e-13) the discrete contraction sits at, so it does not
+    move any end-to-end result.
 
     R indices ``stop`` and ``row`` are passed in 1-based form, matching the
     mgcv source. They are converted to 0-based here.
@@ -138,6 +145,17 @@ def _rw_matrix(stop: np.ndarray, row: np.ndarray, weight: np.ndarray,
     if not is_matrix:
         X = X.reshape(-1, 1)
     n, p = X.shape
+    if _rs_rw_matrix is not None:
+        # Native single-pass port (misc.c:710-748) with arm64 ``fma`` — 0-ULP to
+        # live R and avoids the fallback's ``np.add.at`` scatter on the X'Wy path.
+        out = _rs_rw_matrix(
+            np.ascontiguousarray(stop, dtype=np.int64),
+            np.ascontiguousarray(row, dtype=np.int64),
+            np.ascontiguousarray(weight, dtype=np.float64),
+            np.ascontiguousarray(X, dtype=np.float64),
+            bool(trans),
+        )
+        return out.ravel() if not is_matrix else out
     if trans:
         # Vectorised scatter-add (mgcv rwMatrix transpose, misc.c:734-742).
         # ``i_of_k`` maps each input index k to the output segment i it falls
@@ -233,6 +251,38 @@ def _sl_pi_slots(sl: _Sl) -> list:
                     col_start=int(blk.start), col_end=ce,
                     S=np.asarray(Sj, dtype=float)))
     return out
+
+
+def _sl_rsb(sl: _Sl, rho_full: np.ndarray, beta: np.ndarray) -> np.ndarray:
+    """mgcv ``Sl.rSb`` (fast-REML.r:453-482): stack every penalty's ``rS·β``
+    end to end. ``sum(a²)`` is the penalty ``βᵀSλβ`` — but as the per-block
+    root reduction the discrete/REML convergence test reads (``sum(rSb²)``,
+    bgam.fitd:591/611), NOT a full-matrix quadratic form ``coef·Sλ·coef`` (a
+    different FP reduction order). After ``Sl.setup``'s initial repara each
+    singleton penalty is a multiple of identity on its ``ind`` columns, so its
+    root is ``exp(ρ_k/2)·β[ind]``; a multi-S block contributes
+    ``exp(ρ_k/2)·(β[ind] · rS[j])`` per term.
+
+    ``beta`` is in the INITIAL-REPARA gauge (mgcv ``prop$beta``); ``rho_full``
+    is the full per-penalty log-sp (``lsp.full``), ordered to match
+    ``sl.blocks`` (so ``rho_full[k]`` is the k-th penalty's log-sp, exactly the
+    order :func:`_sl_pi_slots` / ``_build_S_lambda`` consume).
+    """
+    parts: list[np.ndarray] = []
+    k = 0
+    for blk in sl.blocks:
+        ind = blk.pen_cols()                       # (start:stop)[ind], absolute
+        if blk.n_sp == 1:                          # singleton — multiple of I
+            parts.append(beta[ind] * np.exp(rho_full[k] / 2.0))
+            k += 1
+        else:                                      # multi-S block
+            for j in range(blk.n_sp):
+                parts.append(np.exp(rho_full[k] / 2.0)
+                             * (beta[ind] @ blk.rS[j]))
+                k += 1
+    if not parts:
+        return np.zeros(0, dtype=float)
+    return np.concatenate(parts)
 
 
 def _sl_initial_repara_ldet_const(sl: _Sl) -> float:
@@ -3688,6 +3738,26 @@ class bam(gam):
                 both_sides=True, cov=True)
         return theta
 
+    def _bgam_rsb_penalty(self, rho_full: np.ndarray,
+                          coef: np.ndarray) -> float:
+        """mgcv ``sum(rSb²)`` (bgam.fitd:591/611) — the penalty ``βᵀSλβ`` as the
+        per-block penalty-root reduction the PIRLS step-halving + convergence
+        test read, NOT a full-matrix quadratic form ``coef·Sλ·coef``.
+
+        ``coef`` is original-gauge; reparam'd to mgcv's ``prop$beta`` (the
+        initial-repara gauge ``Sl.rSb`` operates in) by the FORWARD initial
+        repara before stacking the roots. ``rho_full`` is the full per-penalty
+        log-sp. Builds ``self._sl`` lazily if a path reached here before any
+        ``Sl.fitChol`` step did (it depends only on the slot S matrices).
+        """
+        if not hasattr(self, "_sl"):
+            self._sl = _sl_setup(self._slots, self.p)
+            self._repara_slots = _sl_pi_slots(self._sl)
+        b = _sl_initial_repara(self._sl, np.asarray(coef, dtype=float),
+                               inverse=False, both_sides=False, cov=False)
+        a = _sl_rsb(self._sl, rho_full, b)
+        return float(np.dot(a, a))
+
     def _bgam_fit_loop(self, *, sp_user) -> tuple["_FitState", np.ndarray]:
         """Outer PIRLS loop with chunked QR rebuild per iter.
 
@@ -3820,9 +3890,9 @@ class bam(gam):
             if (it > 1 and coef is not None and coef0 is not None
                     and rho_hat is not None and eta0 is not None
                     and not additive):
-                Sλ_h = self._build_S_lambda(rho_hat)
-                Sλ_h = 0.5 * (Sλ_h + Sλ_h.T)
-                bSb0 = float(coef0 @ Sλ_h @ coef0)
+                # mgcv bgam.fitd:578/591 — bSb0/bSb = sum(rSb²), the per-block
+                # penalty-root reduction (Sl.rSb), NOT coef·Sλ·coef.
+                bSb0 = self._bgam_rsb_penalty(rho_hat, coef0)
                 # mgcv bgam.fitd:580 — dev0 at the saved μ₀ under the CURRENT
                 # (old) θ (estimate.theta has not run yet this iter).
                 mu0 = link.linkinv(eta0)
@@ -3831,7 +3901,8 @@ class bam(gam):
                 # mgcv bgam.fitd:596 — halve while penalised deviance is not
                 # improving OR is non-finite, up to kk < 30.
                 while ((not np.isfinite(dev_cur)
-                        or dev0 + bSb0 < dev_cur + float(coef @ Sλ_h @ coef))
+                        or dev0 + bSb0
+                        < dev_cur + self._bgam_rsb_penalty(rho_hat, coef))
                        and kk < 30):
                     coef = (coef0 + coef) / 2
                     eta = (eta0 + eta) / 2
@@ -3902,22 +3973,20 @@ class bam(gam):
                 dev = qr.dev
                 # mgcv bgam.fitd:606-611 — the convergence test (678) reads the
                 # PENALISED family deviance ``dev + βᵀSλβ`` (``dev <- dev +
-                # sum(rSb^2)``), added for iter>1 (it>=1; iter==1 keeps raw
-                # ``crit <- dev``). The penalty is at the post-halving β (rSb is
-                # halved alongside coef in the step loop). This term is what makes
-                # the AR1 step-halving stabilisation DETECTABLE: when the model-B
-                # solve overshoots it RAISES the penalised family deviance (the
-                # un-penalised one can plateau early), so reading the penalised
-                # one stops the outer (PIRLS + sp) loop at mgcv's sp — restoring
-                # free-fit sp/edf parity to ~1e-11 for Poisson/Binomial AR1. Gated
-                # on rho!=0: with no AR1 there is no overshoot, the PIRLS reaches a
-                # genuine fixed point where penalised≡un-penalised at the optimum,
-                # and the un-penalised test already matches mgcv's pins (the
-                # additive branch below folds the penalty in via ``yty−coef·Xty``).
-                if (self._rho != 0.0 and it >= 1 and coef is not None
-                        and rho_hat is not None):
-                    Sλ_dev = self._build_S_lambda(rho_hat)
-                    dev = float(dev) + float(coef @ Sλ_dev @ coef)
+                # sum(rSb^2)``), added UNCONDITIONALLY for iter>1 (it>=1;
+                # iter==1 keeps raw ``crit <- dev``). The penalty is the per-
+                # block penalty-root reduction ``sum(rSb²)`` (:meth:`_bgam_rsb_
+                # penalty`), NOT a full-matrix quadratic form — matching mgcv's
+                # FP reduction so the relative-change convergence test (678)
+                # crosses ε at mgcv's iteration. (An earlier ``coef·Sλ·coef``
+                # form had to be gated on rho!=0 because its ~1e-13 reduction-
+                # order drift shifted sensitive extended-family convergence; the
+                # faithful ``sum(rSb²)`` removes that drift, so the gate is gone.)
+                # For AR1 the penalty makes the model-B overshoot DETECTABLE
+                # (it raises pen-dev while un-pen plateaus early), stopping the
+                # outer loop at mgcv's sp.
+                if it >= 1 and coef is not None and rho_hat is not None:
+                    dev = float(dev) + self._bgam_rsb_penalty(rho_hat, coef)
                 if not np.isfinite(dev):
                     raise FloatingPointError(
                         f"non-finite deviance at PIRLS iter {it}"

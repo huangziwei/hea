@@ -40,6 +40,8 @@ use numpy::{
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
+use crate::nmath::util::rfma;
+
 /// Largest dense `W̄` (m_im·m_jm) materialised on the !acc_w `indReduce` branch
 /// before falling back to the per-column factor path (~32 MB f64). MUST match
 /// `_XWX_DENSE_MSIZE_CAP` in `hea/models/bam.py`.
@@ -246,7 +248,69 @@ fn xwx_smooth_block<'py>(
         .into_pyarray(py)
 }
 
+/// `rwMatrix` (src/misc.c:710-748; R wrapper bam.r:18-29) — recombine the rows of
+/// the (n, p) matrix `x` per `stop`/`row`/`w`. Forward (`trans=false`): output row
+/// `i` is `Σ_{j ∈ seg(i)} w[j]·x[row[j], :]`, the segment `seg(i) = start..stop[i]+1`
+/// with `start = stop[i-1]+1` (`stop[-1] = -1`). Transpose (`trans=true`): the
+/// scatter adjoint `out[row[j], :] += w[j]·x[i, :]` over the same `(i, j)` pairs,
+/// `out` zero at outset (misc.c:730).
+///
+/// Both fold left-to-right in mgcv's i-outer/j-inner (== global k-ascending) order,
+/// fusing each `*X1p += weight * *Xp` (misc.c:742) to `fma` on arm64 via `rfma`. So
+/// this is 0-ulp to live arm64 R (verified vs `mgcv:::rwMatrix`), where the numpy
+/// `np.add.at`/`reduceat` fallback in `_rw_matrix` pre-rounds the `weight·x`
+/// products and so diverges ≤1 ulp (sub-floor). The single O(K·p) native pass also
+/// avoids the fallback's `np.add.at` scatter — the AR1 X'Wy hot path.
+///
+/// `stop` (length n) and `row` (length K = Σ segment lengths) arrive 0-based (the
+/// Python wrapper subtracts mgcv's 1-based R indices). Indexing is logical, so the
+/// column layout of `x` is irrelevant — each output column is an independent fold.
+#[pyfunction]
+#[pyo3(name = "rw_matrix")]
+fn rw_matrix<'py>(
+    py: Python<'py>,
+    stop: PyReadonlyArray1<'py, i64>,
+    row: PyReadonlyArray1<'py, i64>,
+    w: PyReadonlyArray1<'py, f64>,
+    x: PyReadonlyArray2<'py, f64>,
+    trans: bool,
+) -> Bound<'py, PyArray2<f64>> {
+    let n = x.shape()[0];
+    let p = x.shape()[1];
+    let stop_f: Vec<i64> = stop.as_array().iter().copied().collect();
+    let row_f: Vec<i64> = row.as_array().iter().copied().collect();
+    let w_f: Vec<f64> = w.as_array().iter().copied().collect();
+    let x_f: Vec<f64> = x.as_array().iter().copied().collect(); // (n, p) row-major
+    let mut out = vec![0.0f64; n * p];
+    // misc.c:731-745 verbatim: i outer over output rows, j inner over the segment's
+    // input rows; `start` advances to `stop[i]+1` each row. x_f (src) and out (dst)
+    // are separate buffers, so no aliasing across the borrow.
+    let mut start: i64 = 0;
+    for i in 0..n {
+        let end = stop_f[i] + 1;
+        let mut j = start;
+        while j < end {
+            let jj = j as usize;
+            let weight = w_f[jj];
+            let rj = row_f[jj] as usize;
+            // forward: out[i] += w·x[row[j]];  trans: out[row[j]] += w·x[i]
+            let (src_row, dst_row) = if trans { (i, rj) } else { (rj, i) };
+            let src = &x_f[src_row * p..src_row * p + p];
+            let dst = &mut out[dst_row * p..dst_row * p + p];
+            for c in 0..p {
+                dst[c] = rfma(weight, src[c], dst[c]); // misc.c:742 → fmadd on arm64
+            }
+            j += 1;
+        }
+        start = end;
+    }
+    Array2::from_shape_vec((n, p), out)
+        .unwrap()
+        .into_pyarray(py)
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(xwx_smooth_block, m)?)?;
+    m.add_function(wrap_pyfunction!(rw_matrix, m)?)?;
     Ok(())
 }
