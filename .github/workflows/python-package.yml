@@ -49,22 +49,28 @@ jobs:
       # skip — they need a full tidyverse install, too slow for CI.)
       #
       # mgcv: the live-R bam/gam oracles compare hea against mgcv, and hea is a
-      # mechanical port pinned to mgcv 1.9-4. Ubuntu's bundled `r-cran-mgcv`
-      # (pulled in by r-base-core) is 1.9-1, whose discrete `bgam.fitd` path
-      # differs from 1.9-4: it lacks fix.family's log-link `mustart=pmax(y,..)`
-      # guard (so gaussian(link="log") with y<=0 errors) AND gives a ~4e-6
-      # different sp on flat-optimum AR1 fits. Source-install the EXACT pinned
-      # 1.9-4 (src/contrib, falling back to the CRAN Archive) so the oracle
-      # matches hea's target. r-base-dev + gfortran are the build toolchain;
-      # nlme/Matrix come bundled with r-base-core.
+      # mechanical port pinned to mgcv 1.9-4. Ubuntu noble's bundled R is 4.3.3
+      # (and its `r-cran-mgcv` is 1.9-1, which differs from 1.9-4: lacks
+      # fix.family's log-link `mustart=pmax(y,..)` guard so gaussian(link="log")
+      # with y<=0 errors, AND gives a ~4e-6 different sp on flat-optimum AR1
+      # fits). mgcv 1.9-4 requires R>=4.4.0, so add CRAN's apt repo for a recent
+      # R (4.6.x) — `r-base` from it ships mgcv 1.9-4 as a recommended package.
+      # If that ever drifts off 1.9-4, source-install the exact tarball
+      # (src/contrib → CRAN Archive). The trailing assert is the safety net.
       run: |
+        wget -qO- https://cloud.r-project.org/bin/linux/ubuntu/marutter_pubkey.asc \
+          | sudo tee /etc/apt/trusted.gpg.d/cran_ubuntu_key.asc > /dev/null
+        echo "deb https://cloud.r-project.org/bin/linux/ubuntu $(lsb_release -cs)-cran40/" \
+          | sudo tee /etc/apt/sources.list.d/cran.list > /dev/null
         sudo apt-get update
-        sudo apt-get install -y libsuitesparse-dev r-base-core r-base-dev gfortran
-        curl -fL -o /tmp/mgcv.tar.gz \
-          https://cran.r-project.org/src/contrib/mgcv_1.9-4.tar.gz \
-          || curl -fL -o /tmp/mgcv.tar.gz \
-          https://cran.r-project.org/src/contrib/Archive/mgcv/mgcv_1.9-4.tar.gz
-        sudo R CMD INSTALL /tmp/mgcv.tar.gz
+        sudo apt-get install -y libsuitesparse-dev r-base r-base-dev gfortran
+        if [ "$(Rscript -e 'cat(as.character(packageVersion("mgcv")))')" != "1.9.4" ]; then
+          curl -fL -o /tmp/mgcv.tar.gz \
+            https://cran.r-project.org/src/contrib/mgcv_1.9-4.tar.gz \
+            || curl -fL -o /tmp/mgcv.tar.gz \
+            https://cran.r-project.org/src/contrib/Archive/mgcv/mgcv_1.9-4.tar.gz
+          sudo R CMD INSTALL /tmp/mgcv.tar.gz
+        fi
         Rscript -e 'cat("mgcv", as.character(packageVersion("mgcv")), "\n"); stopifnot(packageVersion("mgcv") == "1.9.4")'
     - name: Install dependencies
       run: |
