@@ -841,12 +841,7 @@ def test_bam_discrete_nongaussian_ar1_free_vs_live_R(famhea, famr, tmp_path):
     if famr == "poisson()":
         y = rng.poisson(np.exp(f - 0.5)).astype(float)
     elif famr.startswith("gaussian"):
-        # log link ⇒ the response must stay positive: mgcv's gaussian(link=
-        # "log") initialises η = log(y), so a single y ≤ 0 makes the live-R fit
-        # error out (seen on mgcv 1.9-1; 1.9-4 guards it). Floor the Gaussian
-        # noise to a small positive value — both R and hea fit the identical
-        # floored data, so the parity comparison is unaffected.
-        y = np.maximum(rng.normal(np.exp(0.5 + f), 0.4), 1e-2)
+        y = rng.normal(np.exp(0.5 + f), 0.4)
     else:
         y = rng.gamma(5.0, np.exp(0.5 + f) / 5.0)
     csv_path = tmp_path / "d.csv"
@@ -1504,31 +1499,60 @@ def test_bam_estscale_phi_matches_mgcv_bam(case, fam_factory):
     np.testing.assert_allclose(m.fitted_values, fit_ref, rtol=1e-10, atol=1e-11)
 
 
-_BAM_NDH = Path(__file__).parent / "fixtures" / "bam_nondiscrete_halving"
+_BAM_NDB = Path(__file__).parent / "fixtures" / "bam_nondiscrete_binomial"
 
 
-@pytest.mark.skipif(not (_BAM_NDH / "meta.csv").exists(),
-                    reason="bam_nondiscrete_halving oracle missing — "
-                           "run dump_bam_nondiscrete_halving.R")
-def test_bam_nondiscrete_step_halving_matches_mgcv():
-    """A binomial near-separation fit (steep η, k=20) overshoots the penalised
-    deviance early, so the non-discrete PIRLS (mgcv ``bgam.fit``) fires its
-    step-halving (bam.r:1163-1190). This exercises hea's non-discrete halving
-    branch — β'Sβ via ``Sl.Sb``, θ0, kk<6 — which is DISTINCT from the discrete
-    ``bgam.fitd`` halving (sum(rSb²), current θ, kk<30) the shared loop also
-    serves. Pins the whole fit to mgcv ``bam(discrete=FALSE)`` at the
-    reduced-(R,f) floor (the fit converges in 16 iters, matching mgcv)."""
+@pytest.mark.skipif(not (_BAM_NDB / "meta.csv").exists(),
+                    reason="bam_nondiscrete_binomial oracle missing — "
+                           "run dump_bam_nondiscrete_binomial.R")
+def test_bam_nondiscrete_binomial_matches_mgcv():
+    """A binomial near-separation fit (steep η, k=20) is a stress test for the
+    non-discrete generalized PIRLS path (mgcv ``bgam.fit``, bam.r:909-1353) on a
+    scale-known canonical-link family — complementing the scale-unknown
+    (estscale) and extended-family (scat) non-discrete pins. Pins the whole fit
+    to mgcv ``bam(discrete=FALSE)`` at the reduced-(R,f) floor (iter 18 = mgcv).
+    The fit converges monotonically here (the bgam.fit step-halving, bam.r:1163-
+    1190, is a defensive branch that genuine overshoot rarely reaches under the
+    per-iter converge-fully fast.REML.fit; see test_sl_sb_equals_rsb_quadform
+    for the Sl.Sb port that halving uses)."""
     from hea.family import Binomial
-    df = pl.read_csv(str(_BAM_NDH / "data.csv"))
-    with open(_BAM_NDH / "meta.csv", newline="") as f:
+    df = pl.read_csv(str(_BAM_NDB / "data.csv"))
+    with open(_BAM_NDB / "meta.csv", newline="") as f:
         meta = {k: float(v) for k, v in next(csv.DictReader(f)).items()}
     fit_ref = np.array(
-        [float(x) for x in (_BAM_NDH / "fitted.csv").read_text().split()])
+        [float(x) for x in (_BAM_NDB / "fitted.csv").read_text().split()])
     m = hea.models.bam("y ~ s(x, k=20)", df, family=Binomial(),
                        method="REML", discrete=False)
     np.testing.assert_allclose(m.sp[0], meta["sp"], rtol=1e-7)
     np.testing.assert_allclose(m.edf_total, meta["edf_total"], rtol=1e-9)
     np.testing.assert_allclose(m.fitted_values, fit_ref, rtol=1e-9, atol=1e-10)
+
+
+def test_sl_sb_equals_rsb_quadform():
+    """``_sl_sb`` (mgcv ``Sl.Sb``, the S·β the NON-discrete ``bgam.fit`` step-
+    halving reads, bam.r:1171) must give the penalty quadratic form ``βᵀSλβ``
+    that ``_sl_rsb`` (``Sl.rSb``, ``sum(rSb²)``) gives — mathematically equal,
+    different FP reduction. Covers both the singleton-penalty and the multi-S
+    (tensor) block branches without needing a step-halving-triggering fit.
+    Deterministic data/β (no RNG — the identity is β-independent)."""
+    from hea.models.bam import _sl_setup, _sl_sb, _sl_rsb
+    from hea.family import Gaussian
+    n = 200
+    t = np.linspace(0.0, 1.0, n)
+    cols = {"x": t, "a": t, "b": (np.sin(5.0 * t) + 1.0) / 2.0,
+            "y": np.sin(2.0 * np.pi * t)}
+    for formula in ("y ~ s(x, k=8)",                  # singleton penalty block
+                    "y ~ te(a, b, k=c(4, 4))"):        # multi-S (tensor) block
+        m = hea.models.bam(formula, dict(cols), family=Gaussian(),
+                           discrete=False)
+        sl = m._sl if hasattr(m, "_sl") else _sl_setup(m._slots, m.p)
+        rho_full = m._rho_full(np.log(np.asarray(m.sp, dtype=float)))
+        # deterministic, non-trivial β across all coefs
+        b = np.cos(np.arange(m.p, dtype=float) + 0.5)
+        q_sb = float(b @ _sl_sb(sl, rho_full, b))      # βᵀ Sl.Sb(β)
+        a = _sl_rsb(sl, rho_full, b)
+        q_rsb = float(a @ a)                            # Σ rSb²
+        np.testing.assert_allclose(q_sb, q_rsb, rtol=1e-12, atol=0)
 
 
 def test_bam_discrete_multi_penalty_te_builds():

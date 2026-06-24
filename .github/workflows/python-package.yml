@@ -37,7 +37,7 @@ jobs:
       uses: Swatinem/rust-cache@v2
       with:
         workspaces: rust
-    - name: Install SuiteSparse (CHOLMOD backend) + R (live-R parity oracle)
+    - name: Install SuiteSparse (CHOLMOD backend) + R + mgcv 1.9-4 (live-R parity oracle)
       # scikit-sparse builds against libsuitesparse-dev. Without it, hea
       # falls back to scipy.sparse.linalg.splu, whose different sparse
       # reduction order opens a wider FP floor on glmer fits — enough
@@ -47,7 +47,25 @@ jobs:
       # as a TOLERANCE check (Linux/glibc isn't 0-ulp to R — that's macOS only),
       # gating the x86-64 Rust path per-commit. (The tidyverse translator tests still
       # skip — they need a full tidyverse install, too slow for CI.)
-      run: sudo apt-get update && sudo apt-get install -y libsuitesparse-dev r-base-core
+      #
+      # mgcv: the live-R bam/gam oracles compare hea against mgcv, and hea is a
+      # mechanical port pinned to mgcv 1.9-4. Ubuntu's bundled `r-cran-mgcv`
+      # (pulled in by r-base-core) is 1.9-1, whose discrete `bgam.fitd` path
+      # differs from 1.9-4: it lacks fix.family's log-link `mustart=pmax(y,..)`
+      # guard (so gaussian(link="log") with y<=0 errors) AND gives a ~4e-6
+      # different sp on flat-optimum AR1 fits. Source-install the EXACT pinned
+      # 1.9-4 (src/contrib, falling back to the CRAN Archive) so the oracle
+      # matches hea's target. r-base-dev + gfortran are the build toolchain;
+      # nlme/Matrix come bundled with r-base-core.
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libsuitesparse-dev r-base-core r-base-dev gfortran
+        curl -fL -o /tmp/mgcv.tar.gz \
+          https://cran.r-project.org/src/contrib/mgcv_1.9-4.tar.gz \
+          || curl -fL -o /tmp/mgcv.tar.gz \
+          https://cran.r-project.org/src/contrib/Archive/mgcv/mgcv_1.9-4.tar.gz
+        sudo R CMD INSTALL /tmp/mgcv.tar.gz
+        Rscript -e 'cat("mgcv", as.character(packageVersion("mgcv")), "\n"); stopifnot(packageVersion("mgcv") == "1.9.4")'
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
