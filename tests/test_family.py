@@ -1164,6 +1164,49 @@ def test_scat_bam_factor_auto_fit():
     )
 
 
+_SCAT_BAM_ND = Path(__file__).parent / "fixtures" / "scat_bam_nondiscrete"
+
+
+@pytest.mark.skipif(
+    not (_SCAT_BAM_ND / "simple" / "fitted.csv").exists(),
+    reason="scat_bam_nondiscrete oracle missing — "
+           "run tests/r_oracle/dump_bam_scat_nondiscrete.R",
+)
+@pytest.mark.parametrize("sub,formula,has_g", [
+    ("simple", "y ~ s(x, k=10)", False),
+    ("factor", "y ~ g + s(x, by=g, k=10)", True),
+])
+def test_scat_bam_nondiscrete_matches_mgcv(sub, formula, has_g):
+    """``bam(family=scat, discrete=FALSE)`` routes through mgcv ``bgam.fit``
+    (bam.r:909-1353), whose PIRLS cadence differs from the discrete
+    ``bgam.fitd``: it estimates the family θ at the END of each iteration
+    (bam.r:1204), so each working-model build uses the PREVIOUS iteration's θ.
+    hea's shared loop was bgam.fitd-shaped (θ estimated mid-iter, build uses
+    this-iter θ), diverging ~3e-6 on the fitted values (simple: hea iter 10 vs
+    mgcv 12). This pins the faithful bgam.fit θ-cadence for both a single smooth
+    and a 3-level factor-by smooth; both land at the reduced-(R,f) floor."""
+    d = _SCAT_BAM_ND / sub
+    df = pl.read_csv(str(d / "data.csv"))
+    sp_mgcv = np.atleast_1d(np.loadtxt(d / "sp.csv"))
+    theta_mgcv = np.atleast_1d(np.loadtxt(d / "theta.csv"))
+    edf_mgcv = float(np.loadtxt(d / "edf.csv"))
+    fit_mgcv = np.loadtxt(d / "fitted.csv")
+    dat = {"y": df["y"].to_numpy().astype(float),
+           "x": df["x"].to_numpy().astype(float)}
+    if has_g:
+        dat["g"] = df["g"].to_numpy()
+    m = hea.models.bam(formula, dat, family=Scat(min_df=5),
+                       method="fREML", discrete=False)
+    fit_h = np.asarray(m.fitted_values)
+    rel = float(np.linalg.norm(fit_h - fit_mgcv) / np.linalg.norm(fit_mgcv))
+    assert rel < 1e-8, f"scat non-discrete {sub} fitted rel diff {rel:.3e}"
+    np.testing.assert_allclose(np.asarray(m.family.get_theta(trans=True)),
+                               theta_mgcv, rtol=1e-6, atol=0)
+    np.testing.assert_allclose(np.sort(np.asarray(m.sp)), np.sort(sp_mgcv),
+                               rtol=1e-6, atol=0)
+    np.testing.assert_allclose(float(m.edf_total), edf_mgcv, rtol=1e-7, atol=0)
+
+
 # ---------------------------------------------------------------------------
 # General-family seam (mgcv gamlss.r authoring kit) + gaulss — §5.3
 # prerequisite 5. mgcv 1.9-4 oracle references: gaulss()$ll evaluated in R

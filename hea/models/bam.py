@@ -285,6 +285,32 @@ def _sl_rsb(sl: _Sl, rho_full: np.ndarray, beta: np.ndarray) -> np.ndarray:
     return np.concatenate(parts)
 
 
+def _sl_sb(sl: _Sl, rho_full: np.ndarray, beta: np.ndarray) -> np.ndarray:
+    """mgcv ``Sl.Sb`` (fast-REML.r:431-451): ``S·β`` where ``S`` is the total
+    penalty in the INITIAL-REPARA gauge. ``sum(β·Sl.Sb(β))`` is ``βᵀSλβ`` — the
+    quadratic form mgcv's NON-discrete ``bgam.fit`` step-halving reads
+    (bam.r:1171-1179), as opposed to ``sum(rSb²)`` (the root reduction
+    ``bgam.fitd`` reads). Mathematically equal, different FP reduction.
+
+    After ``Sl.setup``'s initial repara a singleton penalty is a multiple of
+    identity on its ``ind`` columns ⇒ ``β[ind]·exp(ρ_k)``; a multi-S block
+    contributes ``Σ_j exp(ρ_k)·(S[j]·β[ind])``. ``beta`` is in the initial-repara
+    gauge (``prop$beta``); ``rho_full`` is the full per-penalty log-sp.
+    """
+    a = np.zeros_like(beta, dtype=float)
+    k = 0
+    for blk in sl.blocks:
+        ind = blk.pen_cols()                       # (start:stop)[ind], absolute
+        if blk.n_sp == 1:                          # singleton — multiple of I
+            a[ind] = a[ind] + beta[ind] * np.exp(rho_full[k])
+            k += 1
+        else:                                      # multi-S block
+            for j in range(blk.n_sp):
+                a[ind] = a[ind] + np.exp(rho_full[k]) * (blk.S[j] @ beta[ind])
+                k += 1
+    return a
+
+
 def _sl_initial_repara_ldet_const(sl: _Sl) -> float:
     """``Σ_pen log λ`` — the ρ-independent gauge shift the non-orthogonal
     ``Sl.setup`` transforms fold into ``log|Sλ|_+``.
@@ -2422,18 +2448,16 @@ class bam(gam):
                     # Non-discrete Gaussian REML/ML → ``fast.REML.fit``
                     # (bam.r:1240), converge-fully on the fixed (R, f).
                     if include_log_phi:
-                        try:
-                            fit_seed = self._fit_given_rho(
-                                self._rho_full(cur_rho))
-                            df_resid_seed = max(self.n - self._Mp, 1.0)
-                            # Gaussian: V(μ)=1, so pearson = ‖y - μ̂‖²; the
-                            # dev from ``_fit_given_rho`` already includes
-                            # rss_extra ⇒ direct working-RSS seed for log φ.
-                            cur_logphi = float(np.log(
-                                max(fit_seed.dev / df_resid_seed, 1e-12)
-                            ))
-                        except Exception:
-                            cur_logphi = 0.0
+                        # mgcv bam.fit:1689 — the Gaussian path has NO PIRLS
+                        # loop, so the log φ seed is unconditionally
+                        # ``log(var(y)·0.05)`` (scale<=0, in.out NULL). ``var``
+                        # uses R's n−1 denominator. fast.REML.fit converges fully
+                        # so the seed only sets the Newton start; mirror it for
+                        # source fidelity (and to share the discrete + non-
+                        # discrete-generalized seed, bam.py:4134/4302).
+                        cur_logphi = float(np.log(
+                            max(float(np.var(y_full, ddof=1)) * 0.05, 1e-300)
+                        ))
                         theta0 = np.concatenate([cur_rho, [cur_logphi]])
                     else:
                         theta0 = cur_rho
@@ -3835,6 +3859,10 @@ class bam(gam):
         coef0: Optional[np.ndarray] = None
         eta0: Optional[np.ndarray] = None
         dev0: Optional[float] = None
+        # NON-DISCRETE only (bgam.fit): the θ that built the PREVIOUS working
+        # model (mgcv ``theta0``, snapshotted at iter-end before estimate.theta,
+        # bam.r:1198) — the step-halving evaluates dev0/dev1 at this θ0.
+        theta0_snap: Optional[np.ndarray] = None
         # mgcv:969 — dev = sum(dev_resids) * 2 to avoid spurious convergence at iter 1.
         dev = 2.0 * float(np.sum(family.dev_resids(y, mu, prior_w)))
 
@@ -3886,36 +3914,93 @@ class bam(gam):
             # path: when halving never fires μ is unchanged, so θ and the build
             # see exactly the same μ as before. ``it > 1`` == mgcv ``iter>2``
             # (1-based; c.iter=2 since hea never warm-starts ``coef``).
+            #
+            # PATH SPLIT: mgcv's discrete (``bgam.fitd``) and non-discrete
+            # (``bgam.fit``) fitters genuinely differ in halving AND θ cadence,
+            # so branch on ``discrete``:
+            #   * DISCRETE — halve here (before the build), sum(rSb²), current θ,
+            #     kk<30 (bgam.fitd:585-604); estimate θ HERE too (mid-iter,
+            #     bgam.fitd:615), so this build sees this-iter θ.
+            #   * NON-DISCRETE — halve with β'Sβ (Sl.Sb), θ0 (the PREVIOUS
+            #     build's θ), kk<6 (bgam.fit:1163-1190); estimate θ at the END of
+            #     the iter (below, after the conv-check + snapshot, bgam.fit:1204)
+            #     so the NEXT build uses the PREVIOUS iter's θ. (hea used to
+            #     impose bgam.fitd's mid-iter θ on this path → ~3e-6 fitted drift
+            #     on scat, iter 10 vs mgcv 12; see test_scat_bam_simple_
+            #     nondiscrete_matches_mgcv.)
             kk = 0
+            discrete = self._discrete_design is not None
             if (it > 1 and coef is not None and coef0 is not None
                     and rho_hat is not None and eta0 is not None
                     and not additive):
-                # mgcv bgam.fitd:578/591 — bSb0/bSb = sum(rSb²), the per-block
-                # penalty-root reduction (Sl.rSb), NOT coef·Sλ·coef.
-                bSb0 = self._bgam_rsb_penalty(rho_hat, coef0)
-                # mgcv bgam.fitd:580 — dev0 at the saved μ₀ under the CURRENT
-                # (old) θ (estimate.theta has not run yet this iter).
-                mu0 = link.linkinv(eta0)
-                dev0 = float(np.sum(family.dev_resids(y, mu0, prior_w)))
-                dev_cur = float(np.sum(family.dev_resids(y, mu, prior_w)))
-                # mgcv bgam.fitd:596 — halve while penalised deviance is not
-                # improving OR is non-finite, up to kk < 30.
-                while ((not np.isfinite(dev_cur)
-                        or dev0 + bSb0
-                        < dev_cur + self._bgam_rsb_penalty(rho_hat, coef))
-                       and kk < 30):
-                    coef = (coef0 + coef) / 2
-                    eta = (eta0 + eta) / 2
-                    mu = link.linkinv(eta)
+                if discrete:
+                    # mgcv bgam.fitd:578/591 — bSb0/bSb = sum(rSb²), the per-block
+                    # penalty-root reduction (Sl.rSb), NOT coef·Sλ·coef; dev0 at
+                    # μ₀ under the CURRENT θ (estimate.theta runs after halving).
+                    bSb0 = self._bgam_rsb_penalty(rho_hat, coef0)
+                    mu0 = link.linkinv(eta0)
+                    dev0 = float(np.sum(family.dev_resids(y, mu0, prior_w)))
                     dev_cur = float(np.sum(family.dev_resids(y, mu, prior_w)))
-                    kk += 1
+                    # bgam.fitd:596 — halve while pen-dev not improving / nonfin.
+                    while ((not np.isfinite(dev_cur)
+                            or dev0 + bSb0
+                            < dev_cur + self._bgam_rsb_penalty(rho_hat, coef))
+                           and kk < 30):
+                        coef = (coef0 + coef) / 2
+                        eta = (eta0 + eta) / 2
+                        mu = link.linkinv(eta)
+                        dev_cur = float(np.sum(
+                            family.dev_resids(y, mu, prior_w)))
+                        kk += 1
+                else:
+                    # mgcv bgam.fit:1163-1190 — β'Sβ via Sl.Sb on the repara'd β
+                    # at the full sp, θ0 (=``theta0_snap``, the θ that built the
+                    # PREVIOUS working model) for an extended family, kk<6. Halve
+                    # the coef AND the Sb vector linearly (bam.r:1181-1184).
+                    if not hasattr(self, "_sl"):
+                        self._sl = _sl_setup(self._slots, self.p)
+                        self._repara_slots = _sl_pi_slots(self._sl)
+                    efam = family.is_extended
+                    theta_now = family.get_theta() if efam else None
+                    use_t0 = efam and theta0_snap is not None
+                    if use_t0:
+                        family.set_theta(theta0_snap)
+                    dev0 = float(np.sum(
+                        family.dev_resids(y, link.linkinv(eta0), prior_w)))
+                    dev1 = float(np.sum(
+                        family.dev_resids(y, link.linkinv(eta), prior_w)))
+                    if use_t0:
+                        family.set_theta(theta_now)
+                    pcoef0 = _sl_initial_repara(
+                        self._sl, coef0, inverse=False,
+                        both_sides=False, cov=False)
+                    pcoef = _sl_initial_repara(
+                        self._sl, coef, inverse=False,
+                        both_sides=False, cov=False)
+                    Sb0 = _sl_sb(self._sl, rho_hat, pcoef0)
+                    Sb = _sl_sb(self._sl, rho_hat, pcoef)
+                    while (dev0 + float(pcoef0 @ Sb0)
+                           < dev1 + float(pcoef @ Sb)) and kk < 6:
+                        coef = (coef0 + coef) / 2
+                        pcoef = (pcoef0 + pcoef) / 2
+                        eta = (eta0 + eta) / 2
+                        Sb = (Sb0 + Sb) / 2
+                        mu = link.linkinv(eta)
+                        if use_t0:
+                            family.set_theta(theta0_snap)
+                        dev1 = float(np.sum(
+                            family.dev_resids(y, mu, prior_w)))
+                        if use_t0:
+                            family.set_theta(theta_now)
+                        kk += 1
 
-            # ---- Extended-family θ update at the (halved) μ ----------------
-            # mgcv bgam.fitd:614-630. ``iter > 1`` (1-based) ⇒ ``it >= 1``.
-            # Inner Newton on ``-logL = dev/2 - ls`` at the post-halving μ.
-            # Only fires for families whose θ is free (Scat with both θ locked
-            # has ``n_theta = 0`` and stays put).
-            if (it >= 1
+            # ---- DISCRETE extended-family θ update at the (halved) μ --------
+            # mgcv bgam.fitd:614-630 — estimate θ MID-iter (before the build), so
+            # this iter's build sees this-iter θ. The NON-discrete path estimates
+            # θ at the END of the iter instead (bam.r:1204; see below). Only fires
+            # for families whose θ is free (Scat with both θ locked has
+            # ``n_theta = 0`` and stays put).
+            if (it >= 1 and discrete
                     and family.is_extended
                     and family.estimate_theta_callback):
                 theta_new = _estimate_theta(
@@ -3971,21 +4056,27 @@ class bam(gam):
                 eta = qr.eta
                 mu = qr.mu
                 dev = qr.dev
-                # mgcv bgam.fitd:606-611 — the convergence test (678) reads the
-                # PENALISED family deviance ``dev + βᵀSλβ`` (``dev <- dev +
-                # sum(rSb^2)``), added UNCONDITIONALLY for iter>1 (it>=1;
-                # iter==1 keeps raw ``crit <- dev``). The penalty is the per-
-                # block penalty-root reduction ``sum(rSb²)`` (:meth:`_bgam_rsb_
-                # penalty`), NOT a full-matrix quadratic form — matching mgcv's
-                # FP reduction so the relative-change convergence test (678)
-                # crosses ε at mgcv's iteration. (An earlier ``coef·Sλ·coef``
-                # form had to be gated on rho!=0 because its ~1e-13 reduction-
-                # order drift shifted sensitive extended-family convergence; the
-                # faithful ``sum(rSb²)`` removes that drift, so the gate is gone.)
-                # For AR1 the penalty makes the model-B overshoot DETECTABLE
-                # (it raises pen-dev while un-pen plateaus early), stopping the
-                # outer loop at mgcv's sp.
-                if it >= 1 and coef is not None and rho_hat is not None:
+                # Convergence-test deviance — mgcv's two non-Gaussian fitters
+                # DIFFER here, so gate on the path:
+                #   * DISCRETE (``bgam.fitd:606-611``) reads the PENALISED family
+                #     deviance ``dev + βᵀSλβ`` (``dev <- dev + sum(rSb^2)``),
+                #     added for iter>1 (it>=1; iter==1 keeps raw ``crit<-dev``).
+                #   * NON-DISCRETE (``bgam.fit:1058-1154``) converges on the RAW
+                #     (unpenalised) family deviance — the penalty appears ONLY in
+                #     its step-halving divergence check (bam.r:1179), never in the
+                #     1154 convergence test.
+                # The penalty is the per-block penalty-root reduction
+                # ``sum(rSb²)`` (:meth:`_bgam_rsb_penalty`), NOT a full-matrix
+                # quadratic form — matching mgcv's FP reduction so the relative-
+                # change test crosses ε at mgcv's iteration. (An earlier
+                # ``coef·Sλ·coef`` form had to be gated on rho!=0 because its
+                # ~1e-13 reduction-order drift shifted sensitive extended-family
+                # convergence; the faithful ``sum(rSb²)`` removes that drift.)
+                # For discrete AR1 the penalty makes the model-B overshoot
+                # DETECTABLE (it raises pen-dev while un-pen plateaus early),
+                # stopping the outer loop at mgcv's sp.
+                if (it >= 1 and coef is not None and rho_hat is not None
+                        and self._discrete_design is not None):
                     dev = float(dev) + self._bgam_rsb_penalty(rho_hat, coef)
                 if not np.isfinite(dev):
                     raise FloatingPointError(
@@ -4025,13 +4116,35 @@ class bam(gam):
                 break
 
             # Snapshot the start-of-next-β-step reference (mgcv bgam.fitd:606-
-            # 609 ``coef0 <- coef; eta0 <- eta``). dev0/μ0 are recomputed fresh
-            # from eta0 in the next iter's halving block (mgcv:580), so they
-            # are NOT snapshotted here. ``coef`` is this iter's (post-halving)
-            # β that built the working model; the sp step below overwrites it.
+            # 609 / bgam.fit:1196-1201 ``coef0 <- coef; eta0 <- eta``). dev0/μ0
+            # are recomputed fresh from eta0 in the next iter's halving block
+            # (mgcv:580/1166), so they are NOT snapshotted here. ``coef`` is this
+            # iter's (post-halving) β that built the working model; the sp step
+            # below overwrites it. For the non-discrete path also snapshot
+            # ``theta0`` (bam.r:1198) — the θ that built THIS model, read by the
+            # next iter's step-halving.
             if it > 0 and coef is not None:
                 coef0 = coef.copy()
                 eta0 = eta.copy()
+                if (not discrete) and family.is_extended:
+                    theta0_snap = np.asarray(family.get_theta(),
+                                             dtype=float).copy()
+
+            # ---- NON-DISCRETE extended-family θ update at iter END ----------
+            # mgcv bgam.fit:1204-1217 estimates θ at the END of the iter (after
+            # the conv-check + snapshot), so the NEXT iter's working-model build
+            # uses THIS θ — i.e. each build sees the PREVIOUS iter's θ. (The
+            # discrete path estimated θ mid-iter, above.) θ is fit at the current
+            # μ = linkinv(eta), the post-build/post-halving μ (== bam.r:1209's
+            # ``linkinv(eta)``).
+            if (it >= 1 and (not discrete)
+                    and family.is_extended
+                    and family.estimate_theta_callback):
+                theta_new = _estimate_theta(
+                    family, y, mu, scale=1.0,
+                    wt=prior_w, tol=1e-7,
+                )
+                family.set_theta(theta_new)
 
             # ---- sp optimisation on the current (R, f, rss_extra) -----------
             if n_sp == 0:
@@ -4285,16 +4398,18 @@ class bam(gam):
                         rho0, *_ = np.linalg.lstsq(
                             self._L, rho0_full, rcond=None)
                     if include_log_phi:
-                        if log_phi_hat is None:    # iter 1 — working-RSS seed
-                            try:
-                                fit_seed = self._fit_given_rho(
-                                    self._rho_full(rho0))
-                                df_resid_seed = max(n - self._Mp, 1.0)
-                                log_phi0 = float(np.log(
-                                    max(fit_seed.dev / df_resid_seed, 1e-12)
-                                ))
-                            except Exception:
-                                log_phi0 = 0.0
+                        if log_phi_hat is None:
+                            # mgcv bgam.fit:1232-1238 — at iter 1 ``coef`` is NULL
+                            # (hea never warm-starts it into this loop), so the
+                            # ``is.null(coef)`` branch fires and the seed is
+                            # ``log(var(y)·0.05)`` — NOT a working-RSS estimate.
+                            # ``var`` uses R's n−1 denominator. fast.REML.fit
+                            # converges fully each iter so the seed only sets the
+                            # Newton start, but mirror it for source fidelity (and
+                            # to share the discrete path's seed, bam.py:4134).
+                            log_phi0 = float(np.log(
+                                max(float(np.var(y, ddof=1)) * 0.05, 1e-300)
+                            ))
                         else:                       # iter > 1 — carry forward
                             log_phi0 = log_phi_hat
                         theta0 = np.concatenate([rho0, [log_phi0]])

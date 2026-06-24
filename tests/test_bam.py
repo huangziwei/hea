@@ -545,11 +545,17 @@ def test_bam_discrete_matrix_by_ridge_basin_matches_mgcv():
     not (_RF_BY / "te" / "bamF_fitted.csv").exists(),
     reason="bam_rf_by oracle missing — run tests/r_oracle/dump_bam_rf_by.R",
 )
-@pytest.mark.parametrize("sub,f,cols", [
-    ("te", "y ~ te(Lag, Xc, by=Stim, k=c(4,3))", ["Lag", "Xc", "Stim"]),
-    ("s", "y ~ s(Lag, by=Stim, k=8)", ["Lag", "Stim"]),
+@pytest.mark.parametrize("sub,f,cols,fit_rtol,edf_atol", [
+    # ``te`` has a near-ridge margin (sp ~1e8) ⇒ a flat REML direction whose
+    # argmin is platform-sensitive; the fit is honestly limited there. ``s`` is
+    # well-conditioned and lands at the reduced-(R,f) BLAS floor once the
+    # non-discrete convergence cadence is faithful to ``bgam.fit`` (unpenalised-
+    # deviance convergence — see ``_bgam_fit_loop``).
+    ("te", "y ~ te(Lag, Xc, by=Stim, k=c(4,3))", ["Lag", "Xc", "Stim"],
+     1e-5, 1e-3),
+    ("s", "y ~ s(Lag, by=Stim, k=8)", ["Lag", "Stim"], 1e-9, 1e-8),
 ])
-def test_bam_nondiscrete_matrix_by_matches_mgcv(sub, f, cols):
+def test_bam_nondiscrete_matrix_by_matches_mgcv(sub, f, cols, fit_rtol, edf_atol):
     """RF2: hea ``bam(discrete=FALSE)`` matrix-by — the EXACT-by chunked-PIRLS
     path (mgcv ``bgam.fit``, no n·m·p long form) — must equal mgcv
     ``bam(discrete=FALSE)`` (bamF), the exact-by home. Complements the
@@ -563,8 +569,9 @@ def test_bam_nondiscrete_matrix_by_matches_mgcv(sub, f, cols):
     edfF = float(np.loadtxt(_RF_BY / sub / "bamF_edfsum.csv"))
     fit_hea = np.asarray(m.fitted_values)
     rel_F = float(np.linalg.norm(fit_hea - fitF) / np.linalg.norm(fitF))
-    assert rel_F < 1e-5, f"hea-nondiscrete vs mgcv bamF fitted rel {rel_F:.2e} > 1e-5"
-    assert abs(float(np.sum(m.edf)) - edfF) < 1e-3, (
+    assert rel_F < fit_rtol, (
+        f"hea-nondiscrete vs mgcv bamF fitted rel {rel_F:.2e} > {fit_rtol:.0e}")
+    assert abs(float(np.sum(m.edf)) - edfF) < edf_atol, (
         f"edf {np.sum(m.edf):.5f} vs mgcv bamF {edfF:.5f}"
     )
 
@@ -1474,9 +1481,11 @@ _BAM_ES = Path(__file__).parent / "fixtures" / "bam_estscale"
 ])
 def test_bam_estscale_phi_matches_mgcv_bam(case, fam_factory):
     """Scale-unknown non-Gaussian bam pins sp/scale/edf/fitted to mgcv-bam via
-    the POI one-step φ-estimation cadence (P19). sp is an argmin/inverse-Hessian
-    quantity → BLAS flat-optimum band (rtol 1e-4); the well-determined fit
-    quantities (scale, edf, fitted μ̂) pin tighter."""
+    the POI one-step φ-estimation cadence (P19). With the non-discrete
+    convergence cadence faithful to ``bgam.fit`` (unpenalised-deviance
+    convergence + ``log(var(y)·0.05)`` log φ seed) the whole fit lands at the
+    reduced-(R,f) BLAS floor: scale/edf/fitted ~1e-13, sp ~1e-11 (sp is an
+    argmin/inverse-Hessian quantity, the loosest)."""
     df = pl.read_csv(str(_BAM_ES / case / "data.csv"))
     with open(_BAM_ES / case / "meta.csv", newline="") as f:
         meta = {k: float(v) for k, v in next(csv.DictReader(f)).items()}
@@ -1484,10 +1493,37 @@ def test_bam_estscale_phi_matches_mgcv_bam(case, fam_factory):
         [float(x) for x in (_BAM_ES / case / "fitted.csv").read_text().split()])
     m = hea.models.bam("y ~ z + s(x, k=12)", df, family=fam_factory(),
                        method="REML")
-    np.testing.assert_allclose(m.sp[0], meta["sp"], rtol=1e-4)
-    np.testing.assert_allclose(m.sigma_squared, meta["scale"], rtol=1e-4)
-    np.testing.assert_allclose(m.edf_total, meta["edf_total"], rtol=1e-4)
-    np.testing.assert_allclose(m.fitted_values, fit_ref, rtol=1e-4, atol=1e-6)
+    np.testing.assert_allclose(m.sp[0], meta["sp"], rtol=1e-8)
+    np.testing.assert_allclose(m.sigma_squared, meta["scale"], rtol=1e-10)
+    np.testing.assert_allclose(m.edf_total, meta["edf_total"], rtol=1e-10)
+    np.testing.assert_allclose(m.fitted_values, fit_ref, rtol=1e-10, atol=1e-11)
+
+
+_BAM_NDH = Path(__file__).parent / "fixtures" / "bam_nondiscrete_halving"
+
+
+@pytest.mark.skipif(not (_BAM_NDH / "meta.csv").exists(),
+                    reason="bam_nondiscrete_halving oracle missing — "
+                           "run dump_bam_nondiscrete_halving.R")
+def test_bam_nondiscrete_step_halving_matches_mgcv():
+    """A binomial near-separation fit (steep η, k=20) overshoots the penalised
+    deviance early, so the non-discrete PIRLS (mgcv ``bgam.fit``) fires its
+    step-halving (bam.r:1163-1190). This exercises hea's non-discrete halving
+    branch — β'Sβ via ``Sl.Sb``, θ0, kk<6 — which is DISTINCT from the discrete
+    ``bgam.fitd`` halving (sum(rSb²), current θ, kk<30) the shared loop also
+    serves. Pins the whole fit to mgcv ``bam(discrete=FALSE)`` at the
+    reduced-(R,f) floor (the fit converges in 16 iters, matching mgcv)."""
+    from hea.family import Binomial
+    df = pl.read_csv(str(_BAM_NDH / "data.csv"))
+    with open(_BAM_NDH / "meta.csv", newline="") as f:
+        meta = {k: float(v) for k, v in next(csv.DictReader(f)).items()}
+    fit_ref = np.array(
+        [float(x) for x in (_BAM_NDH / "fitted.csv").read_text().split()])
+    m = hea.models.bam("y ~ s(x, k=20)", df, family=Binomial(),
+                       method="REML", discrete=False)
+    np.testing.assert_allclose(m.sp[0], meta["sp"], rtol=1e-7)
+    np.testing.assert_allclose(m.edf_total, meta["edf_total"], rtol=1e-9)
+    np.testing.assert_allclose(m.fitted_values, fit_ref, rtol=1e-9, atol=1e-10)
 
 
 def test_bam_discrete_multi_penalty_te_builds():
