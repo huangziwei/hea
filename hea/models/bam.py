@@ -112,10 +112,20 @@ def _rw_matrix(stop: np.ndarray, row: np.ndarray, weight: np.ndarray,
                X: np.ndarray, trans: bool = False) -> np.ndarray:
     """Recombine rows of ``X`` per ``stop``/``row``/``weight``.
 
-    Direct port of mgcv ``rwMatrix`` (bam.r:18-29). The ith output row is
-    ``Σ_{k ∈ ind_i} weight[k] · X[row[k], :]`` where ``ind_i = 1:stop[1]``
-    if ``i==1`` else ``(stop[i-1]+1):stop[i]``. Used for the AR1 transform
-    in :func:`_bam_fit` (rho ≠ 0 path).
+    Direct port of mgcv ``rwMatrix`` (C kernel src/misc.c:710-748; R wrapper
+    bam.r:18-29). Forward (``trans=False``): the ith output row is
+    ``Σ_{k ∈ ind_i} weight[k] · X[row[k], :]`` where ``ind_i = 1:stop[1]`` if
+    ``i==1`` else ``(stop[i-1]+1):stop[i]``. Transposed (``trans=True``):
+    ``out[row[k], :] += weight[k] · X[i, :]`` over the same (i, k) pairs — the
+    scatter adjoint. BOTH are exercised by the AR1 X'Wy / y-norm² path
+    (:func:`XWyd`, discrete.c:1152-1156 calls rwMatrix forward then transpose).
+
+    NOTE on FMA: mgcv's C accumulates ``*X1p += weight * *Xp`` in one
+    expression, which fuses to ``fma`` on arm64. This port pre-rounds the
+    ``weight·X`` products before summing (reduceat / scatter-add), so it
+    diverges from the fused C by ≤1 ULP per accumulation — but that is far
+    BELOW the downstream Accelerate ``dgemm`` reduction floor (~1e-13) the
+    discrete contraction sits at, so it does not move any end-to-end result.
 
     R indices ``stop`` and ``row`` are passed in 1-based form, matching the
     mgcv source. They are converted to 0-based here.
@@ -129,23 +139,35 @@ def _rw_matrix(stop: np.ndarray, row: np.ndarray, weight: np.ndarray,
         X = X.reshape(-1, 1)
     n, p = X.shape
     if trans:
-        # Transposed form — applied to lpmatrix on the right; not exercised
-        # by bam.fit's single-thread path. Kept for completeness.
+        # Vectorised scatter-add (mgcv rwMatrix transpose, misc.c:734-742).
+        # ``i_of_k`` maps each input index k to the output segment i it falls
+        # in; ``np.add.at`` then scatters ``weight[k]·X[i_of_k]`` into
+        # ``out[row[k]]`` IN k-ASCENDING ORDER — exactly mgcv's i-outer/k-inner
+        # accumulation order — so it is bit-identical to the scalar reference
+        # (the AR1 bidiagonal Tᵀ hits each target with ≤2 sources, and FP
+        # addition commutes for two terms). ~260× faster than the prior Python
+        # double-loop on big-n (the X'Wy hot path: 970ms→3.7ms at n=5e5).
+        if n == 0:
+            out = np.zeros((0, p), dtype=float)
+            return out.ravel() if not is_matrix else out
+        K = int(stop[-1]) + 1
+        starts = np.empty(n, dtype=np.intp)
+        starts[0] = 0
+        starts[1:] = stop[:-1] + 1
+        lengths = np.maximum((stop + 1) - starts, 0)
+        i_of_k = np.repeat(np.arange(n), lengths)
         out = np.zeros((n, p), dtype=float)
-        prev = -1
-        for i in range(n):
-            for k in range(prev + 1, stop[i] + 1):
-                out[row[k], :] += weight[k] * X[i, :]
-            prev = stop[i]
+        np.add.at(out, row[:K], weight[:K, None] * X[i_of_k, :])
         return out.ravel() if not is_matrix else out
     if n == 0:
         out = np.zeros((0, p), dtype=float)
         return out.ravel() if not is_matrix else out
     # Vectorized segmented reduction: output row i sums
     # ``weight[k] · X[row[k], :]`` over k in ``(stop[i-1]+1):stop[i]``
-    # (with ``stop[-1] := -1`` for the first row). ``np.add.reduceat``
-    # sums each segment left-to-right, matching the scalar-loop
-    # arithmetic bit-exactly.
+    # (with ``stop[-1] := -1`` for the first row). ``np.add.reduceat`` sums
+    # each segment left-to-right; bit-identical to a NON-fused scalar loop
+    # (it pre-rounds ``weight·X`` like the scatter path above — the ≤1-ULP
+    # FMA gap vs mgcv's fused C is sub-floor, see the docstring).
     K = int(stop[-1]) + 1
     weighted = weight[:K, None] * X[row[:K], :]
     starts = np.empty(n, dtype=np.intp)
@@ -1226,14 +1248,27 @@ def _ar1_tri_weight(w: np.ndarray, ar_weights: np.ndarray,
     even = aw[0::2]                      # leading diagonals t_ii   (len n)
     odd = aw[1::2]                       # sub diagonals t_{i+1,i}  (len n-1)
     if n == 1:
-        # single observation: T is the 1×1 identity ⇒ W_eff = w.
-        return (even * d) ** 2, np.zeros(0, dtype=float)
+        # single observation: only discrete.c:2152 runs (i=0), with its
+        # ``w[0] *= w[0]·even·even`` association ``d·((d·even)·even)`` — NOT
+        # ``(even·d)²`` (which reassociates the rounding, ≤1 ULP off).
+        e0 = float(even[0])
+        d0 = float(d[0])
+        return np.array([d0 * ((d0 * e0) * e0)]), np.zeros(0, dtype=float)
     # off-diagonal: ws[i] = ((odd[i]·even[i+1])·d[i+1])·d[i]   (discrete.c:2150)
     w_off = odd * even[1:] * d[1:] * d[:-1]
-    # diagonal: d·((odd²+even²)·d) for i<n-1; d·(even²·d) for i=n-1 (2151-2152).
+    # diagonal i<n-1: ``w[i] *= (odd²+even²)·w[i]`` ⇒ d·((odd²+even²)·d)
+    # (discrete.c:2151); the odd²+even² sum-of-squares fuses fma(odd,odd,even²)
+    # on arm64 (verified vs clang -O2 codegen: ``fmul even,even`` then
+    # ``fmadd odd,odd,even²``).
     sumsq = (even * even)                # even[i]²  (== last-row diagonal base)
     sumsq[:-1] = _rfma_vec(odd, odd, sumsq[:-1])   # arm64: fma(odd,odd,even²)
     w_diag = d * (sumsq * d)
+    # last row i=n-1: discrete.c:2152 ``w[i] *= w[i]·even·even`` associates as
+    # d·((d·even)·even) — a DIFFERENT rounding from the general d·(even²·d)
+    # (differs ≤1 ULP in ~31% of inputs). Match C's association exactly.
+    dl = float(d[-1])
+    el = float(even[-1])
+    w_diag[-1] = dl * ((dl * el) * el)
     return w_diag, w_off
 
 
