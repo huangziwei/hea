@@ -36,8 +36,8 @@ def test_lme4_bars_matches_R(fx_id: str):
     ef = expand(f, data_columns=data_cols)
     got = materialize_bars(ef, data)
 
-    Z_ref = np.asarray(mmread(fx / "Z.mtx").todense())
-    Lt_ref = np.asarray(mmread(fx / "Lambdat.mtx").todense())
+    Z_ref = mmread(fx / "Z.mtx", spmatrix=False).toarray()
+    Lt_ref = mmread(fx / "Lambdat.mtx", spmatrix=False).toarray()
     theta_ref = _load_theta(fx / "theta.csv")
 
     assert got.Z.shape == Z_ref.shape, (

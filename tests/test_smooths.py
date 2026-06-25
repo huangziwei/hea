@@ -106,7 +106,8 @@ def test_mgcv_smooths_match_R(fx_id: str):
 
         for k, blk in enumerate(ours_blocks, start=1):
             X_ref = np.asarray(
-                mmread(fx / f"smooth_{i}_{k}_X.mtx").todense(), dtype=float
+                mmread(fx / f"smooth_{i}_{k}_X.mtx", spmatrix=False).toarray(),
+                dtype=float,
             )
             assert blk.X.shape == X_ref.shape, (
                 f"smooth #{i} block {k}: X shape got {blk.X.shape} want {X_ref.shape}"
@@ -166,7 +167,8 @@ def test_mgcv_smooths_match_R(fx_id: str):
             )
             for j, S_got in enumerate(blk.S, start=1):
                 S_ref = np.asarray(
-                    mmread(fx / f"smooth_{i}_{k}_S_{j}.mtx").todense(), dtype=float
+                    mmread(fx / f"smooth_{i}_{k}_S_{j}.mtx", spmatrix=False).toarray(),
+                    dtype=float,
                 ) * s_scale_ratio
                 assert S_got.shape == S_ref.shape, (
                     f"smooth #{i} block {k} S_{j}: got {S_got.shape} want {S_ref.shape}"
@@ -244,7 +246,9 @@ def test_mgcv_predict_mat_matches_R(fx_id: str):
                 f"smooth #{i} block {k} ({r_meta['class']}): missing BasisSpec"
             )
 
-            X_pred_ref = np.asarray(mmread(xpred_path).todense(), dtype=float)
+            X_pred_ref = np.asarray(
+                mmread(xpred_path, spmatrix=False).toarray(), dtype=float
+            )
             X_pred_ours = blk.spec.predict_mat(new)
 
             assert X_pred_ours.shape == X_pred_ref.shape, (
@@ -271,12 +275,13 @@ def test_mgcv_predict_mat_matches_R(fx_id: str):
             )
             if use_predfit_anchor:
                 anchor_ref = np.asarray(
-                    mmread(xpredfit_path).todense(), dtype=float
+                    mmread(xpredfit_path, spmatrix=False).toarray(), dtype=float
                 )
                 anchor_ours = np.asarray(blk.spec.predict_mat(data), dtype=float)
             else:
                 anchor_ref = np.asarray(
-                    mmread(fx / f"smooth_{i}_{k}_X.mtx").todense(), dtype=float
+                    mmread(fx / f"smooth_{i}_{k}_X.mtx", spmatrix=False).toarray(),
+                dtype=float,
                 )
                 anchor_ours = blk.X
 
