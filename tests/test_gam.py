@@ -1399,14 +1399,21 @@ def test_wesdr_binomial_ML():
 
 
 def test_method_validation():
-    """gam() rejects bogus method strings before doing any work."""
+    """gam() rejects bogus method strings before doing any work, but accepts
+    mgcv's full criterion set. ``UBRE`` is an internal criterion, not a user
+    ``method=`` value (mgcv.r:1915), so it still raises; ``NCV``/``QNCV`` are
+    valid in mgcv but not yet ported, so they raise NotImplementedError."""
     d = load_dataset("MASS", "mcycle")
     with pytest.raises(ValueError, match="REML.*ML.*GCV"):
         gam("accel ~ s(times)", d, method="UBRE")
     with pytest.raises(ValueError, match="REML.*ML.*GCV"):
-        gam("accel ~ s(times)", d, method="GACV.Cp")
-    with pytest.raises(ValueError, match="REML.*ML.*GCV"):
-        gam("accel ~ s(times)", d, method="P-REML")
+        gam("accel ~ s(times)", d, method="bogus")
+    with pytest.raises(NotImplementedError, match="NCV"):
+        gam("accel ~ s(times)", d, method="NCV")
+    # GACV.Cp / P-REML / P-ML are now accepted (see the Phase-4 method= tests).
+    for m in ("GACV.Cp", "P-REML", "P-ML"):
+        assert gam("accel ~ s(times)", d, method=m).method in (
+            m, "REML", "ML")
 
 
 # ---------------------------------------------------------------------------
@@ -4596,13 +4603,13 @@ def test_pls_rank_drop_alias_twin_canonical_on_any_blas():
     rng = np.random.default_rng(0)
     X = rng.standard_normal((40, 6))
     X[:, 3] = X[:, 1]                       # exact duplicate
-    rank, drop = _pls_rank_drop(X, [], 6)
+    rank, drop, _ = _pls_rank_drop(X, [], 6)
     assert rank == 5 and list(drop) == [3]
     X[:, 3] = -X[:, 1]                      # exact negated alias
-    rank, drop = _pls_rank_drop(X, [], 6)
+    rank, drop, _ = _pls_rank_drop(X, [], 6)
     assert rank == 5 and list(drop) == [3]
     X[:, 5] = X[:, 1]                       # three-way: keep first only
-    rank, drop = _pls_rank_drop(X, [], 6)
+    rank, drop, _ = _pls_rank_drop(X, [], 6)
     assert rank == 4 and list(drop) == [3, 5]
 
 
@@ -5800,8 +5807,10 @@ def test_general_family_newton_reml_nlp4_robustness():
     fd_lb = np.empty(p)
     fd_lbb = np.empty((p, p))
     for k in range(p):
-        cp = coef.copy(); cm = coef.copy()
-        cp[k] += h; cm[k] -= h
+        cp = coef.copy()
+        cm = coef.copy()
+        cp[k] += h
+        cm[k] -= h
         fd_lb[k] = (fam.ll(yv, Xs, cp, wt, lpi=lpi, deriv=0)["l"]
                     - fam.ll(yv, Xs, cm, wt, lpi=lpi,
                              deriv=0)["l"]) / (2 * h)
@@ -6023,53 +6032,53 @@ def test_twlss_through_gam_matches_mgcv():
                                rtol=0, atol=1e-3)
 
 
-def test_twlss_weighted_residuals_match_mgcv():
-    # mgcv's twlss ll IGNORES prior weights (gamlss.r:2556 — wt
-    # unread), so a weighted fit is IDENTICAL to the unweighted one;
-    # weights enter only the deviance residuals (object$prior.weights,
-    # gamlss.r:2541 — hea's optional prior_weights residuals keyword)
-    # and the postproc null deviance. R-verified both ways.
+def test_twlss_prior_weights_honoured():
+    # hea's twlss honours gam(weights=) as a weighted log-likelihood — a
+    # defined divergence from mgcv, whose twlss ll DROPS prior weights
+    # (gamlss.r:2556, wt unread). There is therefore no mgcv oracle for a
+    # weighted twlss fit; the contract is the duplication identity —
+    # weighting a row by integer w equals the unweighted fit on the
+    # row-duplicated design. That is exact for a parametric model; a
+    # data-driven s(x) basis shifts under duplication (quantile knots move),
+    # so the smooth fit is only approximately invariant and is not asserted.
     from hea.family import twlss
 
     df = _twlss_fixture()
     pw = np.tile([1.0, 2.0], 150)
-    mw = gam(["y ~ s(x)", "~ 1", "~ 1"], df, family=twlss(),
-             method="REML", weights=pw)
-    mu = gam(["y ~ s(x)", "~ 1", "~ 1"], df, family=twlss(),
-             method="REML")
-    # fit invariance (R: REML/sp/coef all.equal TRUE)
-    np.testing.assert_allclose(mw.REML_criterion, mu.REML_criterion,
-                               rtol=0, atol=1e-9)
-    _assert_fp_equiv(mw._beta, mu._beta)
-    np.testing.assert_allclose(mw.REML_criterion / 2, 514.2855621000,
+    reps = pw.astype(int)
+    dfd = pl.DataFrame(
+        {c: np.repeat(df[c].to_numpy(), reps) for c in df.columns})
+
+    # 1. The unweighted smooth fit is unchanged — the weighting is bit-for-bit
+    #    the identity at unit weights, so the mgcv pins still hold.
+    mu = gam(["y ~ s(x)", "~ 1", "~ 1"], df, family=twlss(), method="REML")
+    np.testing.assert_allclose(mu.REML_criterion / 2, 514.2855621000,
                                rtol=0, atol=1e-4)
-    np.testing.assert_allclose(mw.sp, [0.1886027173], rtol=1e-4)
-    # weighted deviance surface (R refs)
-    np.testing.assert_allclose(mw.deviance, 549.3608583000, rtol=0,
-                               atol=1e-3)
+    np.testing.assert_allclose(mu.sp, [0.1886027173], rtol=1e-4)
     np.testing.assert_allclose(mu.deviance, 358.1582964000, rtol=0,
                                atol=1e-3)
-    np.testing.assert_allclose(mw.null_deviance, 855.1007602000,
-                               rtol=0, atol=1e-3)
     np.testing.assert_allclose(mu.null_deviance, 564.4194261000,
                                rtol=0, atol=1e-3)
-    np.testing.assert_allclose(
-        np.asarray(mw.residuals)[:3],
-        [-1.0646171470, -0.2494332248, -0.4555850390], rtol=0,
-        atol=1e-4)
-    np.testing.assert_allclose(
-        np.asarray(mu.residuals)[:3],
-        [-1.0646171470, -0.1763759247, -0.4555850390], rtol=0,
-        atol=1e-4)
-    # √w scaling of the deviance residual √(2(yθ−κ)w/φ) is a per-row
-    # property — verify it on ONE fitted object (μ/θ/φ identical) so the
-    # scaling is exact to ~1 ulp and BLAS-independent. Comparing the two
-    # SEPARATE fits mw/mu can't: their coefs are only BLAS-equal (≤3e-14,
-    # assert_fp_equiv's floor) and yθ−κ cancels catastrophically, so at
-    # the near-zero-residual rows that drift amplifies ~5000× (~1e-9 on
-    # x86_64 Accelerate / OpenBLAS) — far past any 1e-12 cross-fit gate.
-    # The end-to-end √2 wiring stays pinned above: mw.residuals[1] =
-    # −0.2494 = mu.residuals[1]·√2 (a pw=2 row), pw=1 rows 0/2 identical.
+
+    # 2. Weighted contract (parametric, exact): the weighted fit equals the
+    #    unweighted fit on the row-duplicated design — the executable form of
+    #    "weighting a row by w ≡ duplicating it w times".
+    mwp = gam(["y ~ w", "~ 1", "~ 1"], df, family=twlss(), weights=pw)
+    mdp = gam(["y ~ w", "~ 1", "~ 1"], dfd, family=twlss())
+    np.testing.assert_allclose(np.asarray(mwp._beta), np.asarray(mdp._beta),
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(mwp.deviance, mdp.deviance, rtol=0, atol=1e-4)
+
+    # 3. The weights genuinely bite: the weighted fit differs from the
+    #    unweighted one (mgcv, dropping the weights, would not).
+    mup = gam(["y ~ w", "~ 1", "~ 1"], df, family=twlss())
+    assert np.max(
+        np.abs(np.asarray(mwp._beta) - np.asarray(mup._beta))) > 1e-3
+    # 4. Deviance residuals carry the prior weights as a per-row √w scaling
+    #    (√(2(yθ−κ)w/φ); object$prior.weights, gamlss.r:2541) — mgcv-faithful
+    #    and unchanged by the likelihood-weighting fix. Verified on ONE fitted
+    #    object (μ/θ/φ identical) so the scaling is exact to ~1 ulp and
+    #    BLAS-independent.
     yv = np.asarray(df["y"], dtype=float)
     fit = np.asarray(mu.fitted, dtype=float)
     r_un = twlss().residuals(yv, fit, type="deviance")
@@ -6144,7 +6153,7 @@ def test_gammals_through_gam_matches_mgcv():
 def test_gumbls_through_gam_matches_mgcv():
     # R: gam(list(y ~ s(x), ~ s(z)), family=gumbls(), method="REML") on
     # the set.seed(13) Gumbel fixture — derivs=2 full Newton; rides the
-    # same SoftplusLink + predict-hook engine path as gammals.
+    # same BoundedLogLink + predict-hook engine path as gammals.
     from hea.family import gumbls
 
     df = _gumbls_fixture()
@@ -7834,6 +7843,147 @@ def test_t2_fx_raises():
 
 
 # -----------------------------------------------------------------------------
+# S1c — matrix-argument (summation convention) te()/ti()/s() with a numeric
+# by= (anisotropic signal regression / distributed-lag / receptive-field
+# models). mgcv smoothCon (smooth.r:3877-4051) for a matrix argument:
+#   * scale.penalty on the LONG-FORM (n*m, p) X — *before* the by-multiply
+#     (3879); scaling the row-summed X gives a different S.scale.
+#   * numeric by-multiply on the long form, then row-block summation (3997).
+#   * the centering constraint is DROPPED when the by-matrix row-sums vary
+#     (sd(L1) > mean(L1)·eps·1000, 3925-3943) — so the smooth keeps all its
+#     raw columns (s k=6 → 7 coefs incl. intercept; te 5×4 → 21).
+#   * check.rank on the summed design (4035).
+# Factor by= and pc= with matrix args are rejected (mgcv stops on factor by,
+# smooth.r:3970). Fixed-sp pins validate the design+penalty+scale.penalty
+# independent of the outer optimiser. Pins: mgcv 1.9-4.
+# -----------------------------------------------------------------------------
+
+
+def _rf_matrix_fixture(seed: int = 42, n: int = 120, nlag: int = 6, nx: int = 4):
+    """Receptive-field-style matrix-arg fixture (R-bit-exact RNG draw order:
+    Stim1, Stim2, y-noise, then the no-by covariates A, B)."""
+    from hea.formula import normalize_data
+    from hea.R.rng import RGenerator
+    g = RGenerator(seed)
+    Stim1 = g.normal(0.0, 1.0, n * nlag).reshape(n, nlag, order="F")
+    Lag = np.tile(np.arange(nlag, dtype=float), (n, 1))
+    m2 = nlag * nx
+    Stim2 = g.normal(0.0, 1.0, n * m2).reshape(n, m2, order="F")
+    lag2 = np.array([lg for x in range(nx) for lg in range(nlag)], dtype=float)
+    xc = np.array([x for x in range(nx) for lg in range(nlag)], dtype=float)
+    Lag2 = np.tile(lag2, (n, 1))
+    Xc = np.tile(xc, (n, 1))
+    eta = Stim1 @ np.exp(-np.arange(nlag) / 2.0) * 1.2
+    y = eta + g.normal(0.0, 1.0, n) * 0.5
+    A = g.uniform(0.0, 1.0, n * 8).reshape(n, 8, order="F")
+    B = g.uniform(0.0, 1.0, n * 8).reshape(n, 8, order="F")
+    return normalize_data({"y": y, "Stim1": Stim1, "Lag": Lag, "Stim2": Stim2,
+                           "Lag2": Lag2, "Xc": Xc, "A": A, "B": B})
+
+
+def test_s_matrix_arg_by_matches_mgcv():
+    """1-D matrix-arg s(Lag, by=Stim) (temporal RF). The varying by-matrix
+    row-sums drop the centering constraint ⇒ 7 coefs (1 intercept + 6 raw),
+    not 6. Free fit lands in the flat-optimum band; sp= is exact."""
+    d = _rf_matrix_fixture()
+    m = gam("y ~ s(Lag, by=Stim1, k=6)", d, method="REML")
+    assert len(np.asarray(m.coef)) == 7                       # no constraint dropped
+    assert float(np.sum(m.edf)) == pytest.approx(5.42301495, rel=1e-5)
+    assert m.REML_criterion / 2 == pytest.approx(95.1808698, abs=1e-4)
+    assert float(m.scale) == pytest.approx(0.244131395, rel=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(m.fitted_values)[:3],
+        [-0.111997576, -2.01465219, 0.78631313], atol=1e-4)
+    # fixed sp — exact (design + penalty + scale.penalty, no optimiser)
+    mf = gam("y ~ s(Lag, by=Stim1, k=6)", d, method="REML", sp=[0.5])
+    assert float(np.sum(mf.edf)) == pytest.approx(4.83969374, rel=1e-6)
+    assert mf.REML_criterion / 2 == pytest.approx(95.7033854, abs=1e-6)
+    assert float(mf.scale) == pytest.approx(0.24526852, rel=1e-6)
+    assert float(mf.deviance) == pytest.approx(28.2451979, rel=1e-6)
+
+
+def test_te_matrix_arg_by_matches_mgcv():
+    """Anisotropic 2-D matrix-arg te(Lag, Xc, by=Stim) — the distributed-lag /
+    spatiotemporal RF model (was NotImplementedError). Per-margin smoothing,
+    no centering constraint (21 = 1 + 5·4 coefs). predict() reproduces the
+    in-sample fit through the BasisSpec replay (raw → by → row-sum → no
+    absorb). Free + fixed-sp pins, mgcv 1.9-4."""
+    d = _rf_matrix_fixture()
+    m = gam("y ~ te(Lag2, Xc, by=Stim2, k=c(5,4))", d, method="REML")
+    assert len(np.asarray(m.coef)) == 21
+    assert float(np.sum(m.edf)) == pytest.approx(6.38619524, rel=1e-5)
+    assert m.REML_criterion / 2 == pytest.approx(222.256481, abs=1e-4)
+    assert float(m.scale) == pytest.approx(2.21967292, rel=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(m.fitted_values)[:3],
+        [-0.143668096, -0.0772378245, 0.647804128], atol=1e-5)
+    # predict on the first 4 (in-sample) rows reproduces the fit
+    from hea.formula import normalize_data
+    nd = normalize_data({"Lag2": d["Lag2"].to_numpy()[:4],
+                         "Xc": d["Xc"].to_numpy()[:4],
+                         "Stim2": d["Stim2"].to_numpy()[:4]})
+    pr = np.asarray(m.predict(nd)).ravel()
+    np.testing.assert_allclose(
+        pr, [-0.143668096, -0.0772378245, 0.647804128, 0.193445483], atol=1e-5)
+    # fixed sp — exact, including coefficients
+    mf = gam("y ~ te(Lag2, Xc, by=Stim2, k=c(5,4))", d, method="REML",
+             sp=[0.3, 2.0])
+    assert float(np.sum(mf.edf)) == pytest.approx(20.8201247, rel=1e-6)
+    assert mf.REML_criterion / 2 == pytest.approx(261.321131, abs=1e-6)
+    assert float(mf.scale) == pytest.approx(2.38783979, rel=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(mf.coef)[:5],
+        [-0.121393561, -0.172502089, 0.102475379, -0.0678943387,
+         -0.0657378187], atol=1e-6)
+
+
+def test_ti_matrix_arg_by_matches_mgcv():
+    """Matrix-arg ti(Lag, Xc, by=Stim) — the pure-interaction tensor (centered
+    margins, no outer constraint). Free + fixed-sp, mgcv 1.9-4."""
+    d = _rf_matrix_fixture()
+    m = gam("y ~ ti(Lag2, Xc, by=Stim2, k=c(5,4))", d, method="REML")
+    assert len(np.asarray(m.coef)) == 13
+    assert float(np.sum(m.edf)) == pytest.approx(2.67806372, rel=1e-5)
+    assert m.REML_criterion / 2 == pytest.approx(221.768248, abs=1e-4)
+    mf = gam("y ~ ti(Lag2, Xc, by=Stim2, k=c(5,4))", d, method="REML",
+             sp=[0.4, 1.1])
+    assert float(np.sum(mf.edf)) == pytest.approx(12.64987, rel=1e-6)
+    assert mf.REML_criterion / 2 == pytest.approx(240.652234, abs=1e-6)
+    assert float(mf.scale) == pytest.approx(2.38504158, rel=1e-6)
+
+
+def test_te_matrix_arg_no_by_scale_penalty_matches_mgcv():
+    """No-by matrix-arg te(A, B): locks the scale.penalty-on-long-form fix
+    (previously scaled on the row-summed X → wrong S.scale, wrong fit). Fixed
+    sp pins coef-level, mgcv 1.9-4."""
+    d = _rf_matrix_fixture()
+    mf = gam("y ~ te(A, B, k=c(4,4))", d, method="REML", sp=[0.7, 1.3])
+    assert len(np.asarray(mf.coef)) == 16
+    assert float(np.sum(mf.edf)) == pytest.approx(14.6812672, rel=1e-6)
+    assert mf.REML_criterion / 2 == pytest.approx(234.960699, abs=1e-6)
+    assert float(mf.scale) == pytest.approx(2.39505718, rel=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(mf.coef)[:4],
+        [-0.0446469446, 0.119795764, 0.0241560802, 0.141054417], atol=1e-6)
+
+
+def test_matrix_arg_by_unsupported_forms_raise():
+    """Honest raises (no silent mis-fit): factor by= (mgcv stops too,
+    smooth.r:3970), t2() matrix args (no summation port), and pc= with a
+    matrix argument."""
+    d = _rf_matrix_fixture()
+    d = d.with_columns(
+        fac=pl.Series((np.arange(d.height) % 2).astype(str)))
+    with pytest.raises(NotImplementedError, match="factor by="):
+        gam("y ~ te(Lag2, Xc, by=fac, k=c(5,4))", d, method="REML")
+    with pytest.raises(NotImplementedError, match="t2.. with matrix arguments"):
+        gam("y ~ t2(Lag2, Xc, by=Stim2)", d, method="REML")
+    with pytest.raises(NotImplementedError, match="pc="):
+        gam("y ~ te(Lag2, Xc, by=Stim2, pc=c(1.0, 1.0), k=c(5,4))", d,
+            method="REML")
+
+
+# -----------------------------------------------------------------------------
 # S2 — bs="mrf" (Markov random field). Region indicator basis + graph-Laplacian
 # penalty from a neighbour list (or a supplied penalty matrix). xt threaded via
 # gam(xt={region: {...}}) — the object-arg channel, like knots=. Default k =
@@ -8116,3 +8266,216 @@ def test_no_penalty_score_matches_mgcv():
         == pytest.approx(383.5616, abs=1e-4)
     assert gam("yc ~ x", d, family=Poisson()).GCV_score == \
         pytest.approx(0.154332, abs=1e-6)
+
+
+def test_softplus_poisson_gam_matches_mgcv():
+    """Poisson gam with the softplus link (Thread A), R-pinned EXACT against
+    mgcv 1.9-4. mgcv has no softplus link, but ``fix.family.link`` returns the
+    family unchanged when it already carries d2link/d3link/d4link — so the
+    oracle is an mgcv gam whose family was handed the same analytic softplus
+    link derivatives hea uses (``tests/r_oracle/softplus_link.R``). Validates
+    the full REML path (non-canonical inner Newton + the link's 2nd
+    derivative), not just the link algebra."""
+    from hea.R.rng import RGenerator
+    g = RGenerator(3)
+    n = 200
+    x = g.uniform(0.0, 1.0, n)
+    y = g.poisson(np.log1p(np.exp(1.0 + 1.5 * np.sin(2 * np.pi * x)))).astype(float)
+    d = pl.DataFrame({"y": y, "x": x})
+    m = gam("y ~ s(x)", d, family=Poisson(link="softplus"), method="REML")
+    assert float(np.sum(m.edf)) == pytest.approx(5.718371, rel=1e-5)
+    assert m.REML_criterion / 2 == pytest.approx(306.8628, abs=1e-3)
+    assert float(m.deviance) == pytest.approx(231.490028, rel=1e-6)
+    assert float(np.asarray(m.coef)[0]) == pytest.approx(1.2129598, abs=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(m.fitted_values)[:4],
+        [2.3735475, 0.5884992, 2.1839568, 2.5833613], atol=1e-5)
+
+
+# ===========================================================================
+# Phase-4 (F1) — method= extensions: GACV.Cp + P-REML / P-ML
+#
+# mgcv adds four criteria over hea's {REML, ML, GCV.Cp}: GACV.Cp, P-REML,
+# P-ML (F1, ported here) and NCV/QNCV (F2, deferred). The new surface is only
+# the scale-UNKNOWN standard-family path — for known scale (binomial/poisson,
+# or gam(scale>0)) GACV.Cp degenerates to UBRE and P-REML/P-ML to REML/ML
+# (mgcv.r:1956-1970), and extended families coerce everything to REML
+# (mgcv.r:1892). Pins: mgcv 1.9-4.
+# ===========================================================================
+
+def _score_of(b):
+    """The optimized smoothness criterion (mgcv's b$gcv.ubre), whatever it is."""
+    if b.method in ("REML", "P-REML"):
+        return b.REML_criterion / 2.0
+    if b.method in ("ML", "P-ML"):
+        return b.ML_criterion / 2.0
+    return b.GCV_score
+
+
+def test_preml_pml_gacv_gaussian_match_mgcv():
+    """mcycle gaussian-identity, the three new criteria pinned to mgcv 1.9-4
+    (gam(accel ~ s(times, k=20), method=...)). sp tolerance is loose-ish —
+    the optimum is flat in log λ so the converged sp carries ~1e-5 stopping
+    noise (same character as REML, §2.3) — while edf/scale/score pin tight."""
+    d = load_dataset("MASS", "mcycle")
+    # (method, sp, edf, scale, score)
+    pins = {
+        "P-REML":  (0.001201225072, 13.34821187, 511.085904, 618.2469636),
+        "P-ML":    (0.00125673145,  13.23891672, 511.118452, 624.9696944),
+        "GACV.Cp": (0.002051451768, 12.06929732, 513.1780453, 559.7472062),
+    }
+    for method, (sp_t, edf_t, sc_t, score_t) in pins.items():
+        b = gam("accel ~ s(times, k=20)", d, method=method)
+        assert float(b.sp[0]) == pytest.approx(sp_t, rel=2e-3)
+        assert float(b.edf_total) == pytest.approx(edf_t, rel=1e-3)
+        assert float(b.sigma_squared) == pytest.approx(sc_t, rel=1e-3)
+        assert _score_of(b) == pytest.approx(score_t, rel=1e-5)
+
+
+def test_preml_pml_gacv_gamma_match_mgcv():
+    """trees + Gamma(log), two smooths, the three new criteria pinned to mgcv.
+    The Height smooth is essentially linear (fully penalized → a huge, flat
+    sp), so only the well-determined Girth sp[1] is pinned tight; edf/scale/
+    score pin to ~1e-6."""
+    d = load_dataset("datasets", "trees")
+    pins = {
+        "P-REML":  (0.2044224642, 4.760659811, 0.006827033793, 78.03936884),
+        "P-ML":    (0.3019696627, 4.501993974, 0.006875739433, 69.64771768),
+        "GACV.Cp": (0.2793119364, 4.552183321, 0.006863431057, 0.007903434983),
+    }
+    for method, (sp1_t, edf_t, sc_t, score_t) in pins.items():
+        b = gam("Volume ~ s(Height) + s(Girth)", d,
+                family=Gamma(link="log"), method=method)
+        assert float(b.sp[1]) == pytest.approx(sp1_t, rel=1e-4)
+        assert float(b.edf_total) == pytest.approx(edf_t, rel=1e-5)
+        assert float(b.sigma_squared) == pytest.approx(sc_t, rel=1e-5)
+        assert _score_of(b) == pytest.approx(score_t, rel=1e-6)
+
+
+def test_preml_pml_gacv_fixed_tweedie_match_mgcv():
+    """Fixed-power Tweedie(p) is a *standard* exponential family (NOT
+    extended), so GACV.Cp / P-REML / P-ML are valid for it and mgcv does not
+    coerce to REML. Pinned on trees (Tweedie(p=1.5, log), Girth k=8)."""
+    d = load_dataset("datasets", "trees")
+    pins = {
+        "GACV.Cp": (1.581523002, 3.68659722,  0.07249915935, 0.07999616904),
+        "P-REML":  (2.063876052, 3.513077485, 0.07298142699, 85.43315024),
+        "P-ML":    (4.816226123, 3.013187879, 0.07506138845, 80.60773045),
+    }
+    for method, (sp_t, edf_t, sc_t, score_t) in pins.items():
+        b = gam("Volume ~ s(Girth, k=8)", d, family=Tweedie(p=1.5),
+                method=method)
+        assert b.method == method            # not coerced — fixed Tweedie
+        assert float(b.sp[0]) == pytest.approx(sp_t, rel=2e-3)
+        assert float(b.edf_total) == pytest.approx(edf_t, rel=1e-4)
+        assert float(b.sigma_squared) == pytest.approx(sc_t, rel=1e-4)
+        assert _score_of(b) == pytest.approx(score_t, rel=1e-5)
+
+
+def _synth_poisson_frame():
+    """Deterministic count frame for the known-scale reduction checks
+    (self-contained — no mgcv pin needed, the assertions are reduction
+    identities)."""
+    rng = np.random.default_rng(0)
+    x = np.sort(rng.uniform(size=120))
+    yp = rng.poisson(np.exp(0.3 + 1.2 * np.sin(2 * np.pi * x)))
+    return pl.DataFrame({"x": x, "yp": yp.astype(float)})
+
+
+def test_preml_collapses_to_reml_when_scale_known():
+    """Known scale (poisson) collapses P-REML→REML and P-ML→ML
+    (mgcv.r:1968-1970): the resolved method string flips and the fit is
+    identical to the plain criterion."""
+    df = _synth_poisson_frame()
+    b_p = gam("yp ~ s(x, k=12)", df, family=Poisson(), method="P-REML")
+    b_r = gam("yp ~ s(x, k=12)", df, family=Poisson(), method="REML")
+    assert b_p.method == "REML"
+    np.testing.assert_allclose(np.asarray(b_p.sp), np.asarray(b_r.sp), rtol=1e-9)
+    assert b_p.REML_criterion == pytest.approx(b_r.REML_criterion, rel=1e-9)
+
+    b_pm = gam("yp ~ s(x, k=12)", df, family=Poisson(), method="P-ML")
+    b_ml = gam("yp ~ s(x, k=12)", df, family=Poisson(), method="ML")
+    assert b_pm.method == "ML"
+    assert b_pm.ML_criterion == pytest.approx(b_ml.ML_criterion, rel=1e-9)
+
+
+def test_gacv_collapses_to_ubre_when_scale_known():
+    """Known scale (poisson) makes GACV.Cp degenerate to UBRE — same fit and
+    score as GCV.Cp (mgcv.r:1956)."""
+    df = _synth_poisson_frame()
+    b_g = gam("yp ~ s(x, k=12)", df, family=Poisson(), method="GACV.Cp")
+    b_c = gam("yp ~ s(x, k=12)", df, family=Poisson(), method="GCV.Cp")
+    np.testing.assert_allclose(np.asarray(b_g.sp), np.asarray(b_c.sp), rtol=1e-7)
+    assert b_g.GCV_score == pytest.approx(b_c.GCV_score, rel=1e-9)
+    # known-scale GACV.Cp prints the UBRE label, not "GACV".
+    assert b_g._print_score()[0] == "UBRE"
+
+
+def test_extended_family_coerces_exotic_methods_to_reml():
+    """Estimated-power tw() (and scat/nb) is an extended.family — gam.fit4 has
+    no GCV/UBRE/GACV/Pearson-Laplace path, so mgcv coerces any criterion other
+    than REML/ML to REML (mgcv.r:1892). hea matches (silently, like mgcv)."""
+    d = load_dataset("datasets", "trees")
+    for method in ("GACV.Cp", "P-REML", "P-ML", "GCV.Cp"):
+        b = gam("Volume ~ s(Girth, k=8)", d, family=tw(), method=method)
+        assert b.method == "REML"
+
+
+def test_ncv_method_raises_not_implemented():
+    """NCV/QNCV are valid mgcv methods but not yet ported (F2)."""
+    d = load_dataset("MASS", "mcycle")
+    for method in ("NCV", "QNCV"):
+        with pytest.raises(NotImplementedError, match="NCV"):
+            gam("accel ~ s(times)", d, method=method)
+
+
+def test_te_multi_dim_margin_d_arg():
+    """te(..., d=c(1,2)) groups covariates into margins of given dims (mgcv
+    smooth.r:399-414): one sp per MARGIN, default k=5^d, cr/ps promoted to tp."""
+    rng = np.random.default_rng(3)
+    n = 400
+    d = pl.DataFrame({c: rng.uniform(size=n) for c in "xzw"} | {"y": rng.normal(size=n)})
+    m = gam("y ~ te(x, z, w, d=c(1,2))", d, method="REML")  # 1D lag + 2D space
+    assert np.asarray(m.sp).size == 2                       # one sp per margin
+    # equal to explicitly naming the margin bases (1D cr + 2D tp)
+    m2 = gam("y ~ te(x, z, w, d=c(1,2), bs=c('cr','tp'))", d, method="REML")
+    assert np.asarray(m2.sp).size == 2
+    # a single 2D margin == an ordinary 2D tp tensor; must still sum-check d
+    with pytest.raises(ValueError, match="sum to"):
+        gam("y ~ te(x, z, w, d=c(1,1))", d, method="REML")  # sums to 2 != 3
+
+
+def test_ad_adaptive_smooth_1d_2d():
+    """bs="ad" adaptive smooth (mgcv): 1-D builds 5 adaptive-wiggliness
+    penalties, 2-D builds a 3x3=9 grid, and >2-D raises (ad is 1-D/2-D only).
+    Each penalty carries its own sp so the smoothness varies over the domain."""
+    rng = np.random.default_rng(0)
+    n = 400
+    x = np.linspace(0.0, 1.0, n)
+    f = np.exp(-((x - 0.5) ** 2) / (2 * 0.05**2))  # compact bump (RF-like)
+    d = pl.DataFrame({
+        "x": x, "y": f + rng.normal(0.0, 0.1, n),
+        "z": rng.uniform(size=n), "w": rng.uniform(size=n),
+    })
+    m1 = gam("y ~ s(x, bs='ad')", d, method="REML")
+    assert np.asarray(m1.sp).size == 5            # 5 adaptive wiggliness penalties
+    assert np.isfinite(np.asarray(m1.fitted_values)).all()
+    m2 = gam("y ~ s(x, z, bs='ad')", d, method="REML")
+    assert np.asarray(m2.sp).size == 9            # 3x3 wiggliness grid
+    assert np.isfinite(np.asarray(m2.fitted_values)).all()
+    with pytest.raises(ValueError, match="ad smooth"):
+        gam("y ~ s(x, z, w, bs='ad')", d, method="REML")
+
+
+def test_te_ad_multi_penalty_margin():
+    """Multi-penalty te margin — a hea extension beyond mgcv, which refuses it
+    (smooth.r:773). A 1-D cr time margin x a 2-D *ad* space margin: cr(1) +
+    2D-ad(3x3=9) = 10 sp, each margin penalty lifted independently through
+    tensor.prod.penalties. Fixed sp (single PIRLS) keeps it fast/deterministic."""
+    rng = np.random.default_rng(5)
+    n = 400
+    d = pl.DataFrame({c: rng.uniform(size=n) for c in "xzw"} | {"y": rng.normal(size=n)})
+    m = gam("y ~ te(x, z, w, d=c(1,2), bs=c('cr','ad'), k=c(5,5))",
+            d, method="REML", sp=[1.0] * 10)
+    assert np.asarray(m.sp).size == 10
+    assert np.isfinite(np.asarray(m.coef)).all()

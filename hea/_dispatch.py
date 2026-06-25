@@ -1,16 +1,20 @@
 """Rust-extension dispatch with graceful pure-Python fallback.
 
 The compiled ``hea._rs`` (Rust/PyO3, crate ``hea-rs`` in ``rust/``) accelerates
-the nmath d/p/q kernels. It is **optional**: on sdist / no-toolchain installs, on
-an unsupported platform, or when ``HEA_NO_RS`` is set to a truthy value, the
-pure-Python :mod:`hea.R.nmath` kernels run instead. Those kernels are the
-bit-exact reference to R (tests/test_R.py) *and* the oracle the Rust path is
-checked against (tests/test_rs_parity.py) — so the fallback is never "wrong",
-only slower.
+hea's hot numeric kernels — nmath d/p/q, the RNG, clustering/distance, linalg,
+and the tp smooth basis. It is **optional**: on sdist / no-toolchain installs,
+on an unsupported platform, or when ``HEA_NO_RS`` is set to a truthy value, the
+pure-Python kernels run instead. Those kernels are the bit-exact reference (and
+the oracle the Rust path is checked against, tests/test_rs_parity.py) — so the
+fallback is never "wrong", only slower.
+
+This lives at the top level (not under ``hea/R/``) because the Rust extension is
+package-wide: consumers include ``hea.R.*`` (nmath/rng/clustering/distance/
+linalg) AND ``hea.formula`` / ``hea.family`` / ``hea.ggplot``.
 
 Usage in a kernel module::
 
-    from ._dispatch import rs_fn
+    from hea._dispatch import rs_fn
     _rs = rs_fn("pgamma")                 # None when unavailable/disabled
     ...
     if _rs is not None:
@@ -29,7 +33,7 @@ def _load():
     if os.environ.get("HEA_NO_RS", "").lower() not in ("", "0", "false", "no"):
         return None
     try:
-        from .. import _rs  # hea._rs — the compiled Rust extension
+        from . import _rs  # hea._rs — the compiled Rust extension
     except Exception:
         return None
     return _rs

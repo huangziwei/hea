@@ -202,6 +202,53 @@ from .predicates import (
     is_numeric,
 )
 
+# Distance layer (base-R stats: dist / as.dist / as.matrix.dist + accessors).
+# The clustering algorithms that consume a ``Dist`` (hclust/cutree/…) land in
+# ``hea.R.clustering`` and import one-way from here.
+from .distance import (
+    Dist,
+    as_dist,
+    as_matrix_dist,
+    cmdscale,
+    dist,
+    format_dist,
+    labels_dist,
+    mahalanobis,
+    print_dist,
+)
+
+# Clustering algorithms (base-R stats: hclust + tree objects). Imports the
+# distance layer one-way (acyclic).
+from .clustering import (
+    Dendrogram,
+    Hclust,
+    Kmeans,
+    as_dendrogram,
+    as_hclust,
+    cophenetic,
+    cophenetic_dendrogram,
+    cut_dendrogram,
+    cutree,
+    dendrapply,
+    fitted_kmeans,
+    hclust,
+    is_leaf,
+    kmeans,
+    labels_dendrogram,
+    merge_dendrogram,
+    midcache_dendrogram,
+    nleaves,
+    nobs_dendrogram,
+    order_dendrogram,
+    print_dendrogram,
+    print_hclust,
+    print_kmeans,
+    reorder,
+    reorder_dendrogram,
+    rev_dendrogram,
+    str_dendrogram,
+)
+
 # Distributions
 from .distributions import (
     dbeta,
@@ -415,6 +462,19 @@ __all__ = [
     "as_date", "as_Date",
     "is_na", "is_null", "is_finite", "is_numeric", "is_factor",
     "factor", "fct", "ordered", "interaction", "levels", "nlevels",
+    # distance layer (base-R stats: dist / as.dist / as.matrix.dist + accessors)
+    "Dist", "dist", "as_dist", "as_matrix_dist",
+    "format_dist", "labels_dist", "print_dist", "mahalanobis", "cmdscale",
+    # clustering (base-R stats: hclust + tree objects)
+    "Hclust", "hclust", "as_hclust", "cutree", "cophenetic", "print_hclust",
+    # dendrogram subsystem (base-R stats: dendrogram.R, non-graphics)
+    "Dendrogram", "as_dendrogram", "cophenetic_dendrogram",
+    "cut_dendrogram", "dendrapply", "is_leaf", "labels_dendrogram",
+    "merge_dendrogram", "midcache_dendrogram", "nleaves", "nobs_dendrogram",
+    "order_dendrogram", "print_dendrogram", "reorder", "reorder_dendrogram",
+    "rev_dendrogram", "str_dendrogram",
+    # k-means (base-R stats: Hartigan-Wong / Lloyd / Forgy / MacQueen)
+    "Kmeans", "kmeans", "fitted_kmeans", "print_kmeans",
     # distributions: d/p/q/r families
     "dnorm", "pnorm", "qnorm", "rnorm",
     "dt", "pt", "qt", "rt",

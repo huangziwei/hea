@@ -474,6 +474,44 @@ def test_weighted_lm_anova_sequential_matches_R(capsys):
     assert "70.0319" in out    # Residuals SS == deviance(m)
 
 
+def test_weighted_lm_anova_na_alignment_matches_R(capsys):
+    """anova(m) on a *weighted* fit whose data has NA rows. The fit drops
+    42 NA rows (153 → 111); a refit-based anova would crash re-passing the
+    length-111 weights against the 153-row frame. R's anova.lm reads the
+    QR effects (no refit). Pinned to R 4.x:
+        anova(lm(Ozone~Solar.R+Wind+Temp, airquality, weights=1/Wind))
+    """
+    from hea.R import anova
+    aq = load_dataset("R", "airquality")
+    w = 1.0 / aq["Wind"].to_numpy()
+    m = lm("Ozone ~ Solar.R + Wind + Temp", aq, weights=w)
+    anova(m)
+    out = capsys.readouterr().out
+    assert "2833.9612" in out and "41.4256" in out   # Solar.R SS / F
+    assert "8071.6084" in out and "117.9872" in out  # Wind SS / F
+    assert "1667.1263" in out and "24.3693" in out   # Temp SS / F
+    assert "7319.966" in out                          # Residuals SS (df 107)
+
+
+def test_lm_anova_rank_deficient_omits_aliased_term(capsys):
+    """anova(m) on a rank-deficient design omits the fully-aliased term
+    (R's split(effects, assign[pivot][1:rank]) drops it), rather than
+    emitting a bogus Df=0 row. ``x3 == x1 + x2`` is dropped; pinned to
+    R's anova(lm(y ~ x1 + x2 + x3))."""
+    from hea.R import anova
+    df = pl.DataFrame({
+        "y": [2, 4, 3, 6, 5, 8, 7, 9], "x1": [1, 2, 3, 4, 5, 6, 7, 8],
+        "x2": [2, 1, 4, 3, 6, 5, 8, 7],
+    }).with_columns(pl.all().cast(pl.Float64)).with_columns(
+        (pl.col("x1") + pl.col("x2")).alias("x3"))
+    anova(lm("y ~ x1 + x2 + x3", df))
+    out = capsys.readouterr().out
+    assert "x3" not in out                            # aliased term omitted
+    assert "36.2143" in out and "301.7857" in out     # x1 SS / F
+    assert "5.1857" in out and "43.2143" in out        # x2 SS / F
+    assert "0.6" in out                                # Residuals SS (df 5)
+
+
 def test_weighted_lm_zero_weights_match_R():
     """R drops zero-weight rows from the fit: df.residual and the
     log-likelihood sample size count only the nonzero-weight rows, while
@@ -1143,6 +1181,34 @@ def test_mlm_joint_na_omit_and_expression_responses():
     # but the fit must use 4 rows shared across columns.
     assert m._mlm_models["b"].X.height == 4
     assert m.fitted.height == 4
+
+
+def test_mlm_na_action_exclude_pads_combined_accessors():
+    """na.action='exclude' on an mlm pads the combined n×m fitted/residuals
+    back to the model-frame length with NA at the jointly-dropped rows (R's
+    naresid for an mlm). Pinned to R:
+        lm(cbind(y1,y2) ~ x, d, na.action=na.exclude)."""
+    from hea.models.lm import lm
+    d = pl.DataFrame({
+        "y1": [1, 2, None, 4, 5, 6], "y2": [2, 3, 4, 5, None, 7],
+        "x": [1, 2, 3, 4, 5, 6],
+    }).with_columns(pl.all().cast(pl.Float64))
+    m = lm("cbind(y1, y2) ~ x", d, na_action="exclude")
+    r = m.residuals
+    assert r.shape == (6, 2)                      # padded to full length
+    # rows 2 (y1 NA) and 4 (y2 NA) are jointly dropped → NA in both columns
+    for col in ("y1", "y2"):
+        arr = r[col].to_numpy()
+        assert np.isnan(arr[2]) and np.isnan(arr[4])
+        assert np.isfinite(arr[[0, 1, 3, 5]]).all()
+    fit = m.fitted["y1"].to_numpy()
+    np.testing.assert_allclose(fit[[0, 1, 3, 5]], [1, 2, 4, 6], atol=1e-9)
+    assert np.isnan(fit[2]) and np.isnan(fit[4])
+    # coefficients unaffected by exclude vs omit (same complete-case fit)
+    mo = lm("cbind(y1, y2) ~ x", d, na_action="omit")
+    np.testing.assert_allclose(
+        m.coef["y1"].to_numpy(), mo.coef["y1"].to_numpy(), rtol=1e-12
+    )
 
 
 def test_mlm_bracket_response_equals_cbind():

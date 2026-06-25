@@ -1,7 +1,7 @@
 """Type stubs for the compiled ``hea._rs`` extension (Rust crate ``hea-rs``, via
 PyO3). Built from ``rust/`` by maturin. Absent on sdist / no-toolchain installs —
 callers degrade to the pure-Python ``hea.R.nmath`` kernels (see
-``hea/R/_dispatch.py``). All kernels take/return 1-D float64 arrays (Python
+``hea/_dispatch.py``). All kernels take/return 1-D float64 arrays (Python
 pre-broadcasts to equal length); trailing flags are bools.
 """
 import numpy as np

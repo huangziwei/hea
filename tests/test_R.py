@@ -623,6 +623,18 @@ _R_EXPR_SKIP = {
     "rowSums", "colSums", "rowMeans", "colMeans",
     "apply", "rbind", "cbind", "sweep", "expand_grid", "matrix",
     "R_range", "R_round",
+    # Distance / clustering — operate on data matrices, Dist objects, or hclust
+    # trees, not single columns (base-R stats clustering surface).
+    "Dist", "dist", "as_dist", "as_matrix_dist", "format_dist", "labels_dist",
+    "print_dist", "mahalanobis", "cmdscale",
+    "Hclust", "hclust", "as_hclust", "cutree", "cophenetic", "print_hclust",
+    "Kmeans", "kmeans", "fitted_kmeans", "print_kmeans",
+    # Dendrogram subsystem — operate on Dendrogram trees, not single columns.
+    "Dendrogram", "as_dendrogram", "cophenetic_dendrogram", "cut_dendrogram",
+    "dendrapply", "is_leaf", "labels_dendrogram", "merge_dendrogram",
+    "midcache_dendrogram", "nleaves", "nobs_dendrogram", "order_dendrogram",
+    "print_dendrogram", "reorder", "reorder_dendrogram", "rev_dendrogram",
+    "str_dendrogram",
     # Vector primitives — variadic / multi-arg; not column ops.
     "rep", "sample", "sapply", "tapply",
     # Length-changing transforms — would shorten/lengthen the column.

@@ -1125,11 +1125,13 @@ def _anova_lm(*models, labels: list[str]):
 def _anova_lm_single(m: lm):
     """Sequential (Type I) ANOVA — R's ``anova.lm(m)`` for a single fit.
 
-    Refits the model with terms added one at a time in formula order,
-    attributing each step's drop in RSS to that term. F = MS_term /
-    MS_residual_full, p = upper-tail F. R uses QR-incremental SS, which
-    is bit-equivalent for full-rank designs; refitting is conceptually
-    simpler and reuses hea's existing rank-deficiency handling.
+    Mechanical port of ``stats:::anova.lm`` (``ref/r-stats/lm.R``): the
+    per-term sum of squares is ``split(effects[1:rank]^2, assign[pivot][1:rank])``
+    — read off the fit's QR in **one** decomposition, no refits. R drops
+    aliased columns to the right of the pivot; hea drops them from the design
+    at fit time, so the kept columns *are* ``pivot[1:rank]`` in order and their
+    term assignment is ``m._col_assign``. F = MS_term / MS_residual_full,
+    p = upper-tail F, weighted RSS Σ wᵢrᵢ² (R's ``ssr``).
     """
     terms = m._expanded.terms
     if not terms:
@@ -1139,48 +1141,40 @@ def _anova_lm_single(m: lm):
         )
 
     lhs = m.formula.split("~", 1)[0].strip()
-    intercept_str = "1" if m._expanded.intercept else "0"
 
-    def cumulative_formula(k: int) -> str:
-        if k == 0:
-            return f"{lhs} ~ {intercept_str}"
-        rhs = " + ".join(t.label for t in terms[:k])
-        return f"{lhs} ~ {intercept_str} + {rhs}"
+    # R: ssr <- sum(w * residuals^2); dfr <- df.residual(object)
+    e = np.asarray(m._residuals_arr, dtype=float)
+    w = np.asarray(m._w, dtype=float) if getattr(m, "_w", None) is not None \
+        else np.ones_like(e)
+    ssr = float(np.sum(w * e * e))
+    dfr = m.df_residuals
+    mse_full = ssr / dfr
 
-    rss_chain: list[float] = []
-    df_chain: list[int] = []
-    for k in range(len(terms)):
-        m_k = lm(cumulative_formula(k), m.data,
-                 weights=m.weights, method=m.method)
-        rss_chain.append(m_k.rss)
-        df_chain.append(m_k.df_residuals)
-    # Last entry = the original full model — reuse its values directly to
-    # avoid a redundant refit and any floating-point drift from re-solving.
-    rss_chain.append(m.rss)
-    df_chain.append(m.df_residuals)
+    # comp <- object$effects[1:rank] — read off the fit's stored effects
+    # (Qᵀ√w·(y−offset)); rank == m.rank (aliased columns already dropped from
+    # m.X at fit time, so the kept columns are R's pivot[1:rank] in order).
+    comp = np.asarray(m.effects, dtype=float)[: m.rank]
+    asgn = np.array([m._col_assign[c] for c in m.column_names])
 
-    mse_full = m.rss / m.df_residuals
-
+    # ss <- vapply(split(comp^2, asgn), sum); df <- lengths(split(asgn, asgn)).
+    # Groups in ascending assign order; the intercept group (assign==0) is the
+    # row R drops via ``if(intercept) table[-1,]``.
+    uniq = [a for a in sorted(set(asgn.tolist())) if a != 0]
+    labels: list[str] = []
     df_col: list[int] = []
     sos_col: list[float] = []
     ms_col: list[float] = []
     f_col: list[float | None] = []
     p_col: list[float | None] = []
     sig_col: list[str] = []
-    for i, t in enumerate(terms):
-        d_df = df_chain[i] - df_chain[i + 1]
-        d_rss = rss_chain[i] - rss_chain[i + 1]
-        if d_df <= 0:
-            df_col.append(d_df)
-            sos_col.append(round(d_rss, 4))
-            ms_col.append(float("nan"))
-            f_col.append(None)
-            p_col.append(None)
-            sig_col.append("")
-            continue
+    for a in uniq:
+        idx = np.where(asgn == a)[0]
+        d_df = int(idx.size)
+        d_rss = float(np.sum(comp[idx] ** 2))
         ms = d_rss / d_df
         fstat = ms / mse_full
-        p = float(_dist.pf(fstat, d_df, m.df_residuals, lower_tail=False))
+        p = float(_dist.pf(fstat, d_df, dfr, lower_tail=False))
+        labels.append(terms[a - 1].label)
         df_col.append(d_df)
         sos_col.append(round(d_rss, 4))
         ms_col.append(round(ms, 4))
@@ -1188,8 +1182,9 @@ def _anova_lm_single(m: lm):
         p_col.append(float(f"{p:.4g}"))
         sig_col.append(significance_code([p])[0])
     # Residuals row
-    df_col.append(m.df_residuals)
-    sos_col.append(round(m.rss, 4))
+    labels.append("Residuals")
+    df_col.append(dfr)
+    sos_col.append(round(ssr, 4))
     ms_col.append(round(mse_full, 4))
     f_col.append(None)
     p_col.append(None)
@@ -1199,7 +1194,7 @@ def _anova_lm_single(m: lm):
     docstring += f"Response: {lhs}\n"
 
     df_ = pl.DataFrame({
-        "":         [t.label for t in terms] + ["Residuals"],
+        "":         labels,
         "Df":       df_col,
         "Sum Sq":   sos_col,
         "Mean Sq":  ms_col,

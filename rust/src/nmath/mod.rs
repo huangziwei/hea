@@ -15,6 +15,7 @@ pub mod gamma;
 pub mod lgamma;
 pub mod loader;
 pub mod norm;
+pub mod psigamma;
 pub mod qbeta;
 pub mod tf;
 pub mod toms708;
@@ -29,6 +30,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // lgamma / gamma function
     m.add_function(wrap_pyfunction!(lgamma::py_lgammafn, m)?)?;
     m.add_function(wrap_pyfunction!(lgamma::py_gammafn, m)?)?;
+    // psigamma / polygamma
+    m.add_function(wrap_pyfunction!(psigamma::psigamma, m)?)?;
     // loader saddlepoint kernels
     m.add_function(wrap_pyfunction!(loader::py_stirlerr, m)?)?;
     m.add_function(wrap_pyfunction!(loader::py_bd0, m)?)?;

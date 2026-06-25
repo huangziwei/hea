@@ -2228,8 +2228,11 @@ def test_gmm_simulate_shares_one_r_stream_with_set_seed():
     # simulate(seed=k) and set_seed(k) leave the stream in the identical state,
     # and runif() reads that very same stream (cross-module): same prefix → same
     # continuation, deterministically.
-    R.set_seed(314); m.simulate(nsim=4); a = np.asarray(R.runif(3))
-    m.simulate(nsim=4, seed=314); b = np.asarray(R.runif(3))
+    R.set_seed(314)
+    m.simulate(nsim=4)
+    a = np.asarray(R.runif(3))
+    m.simulate(nsim=4, seed=314)
+    b = np.asarray(R.runif(3))
     assert np.array_equal(a, b)
 
 

@@ -1,12 +1,13 @@
+from functools import cached_property
 from typing import Union
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-from scipy.linalg import cholesky, lu, qr, solve_triangular
-from scipy.optimize import minimize
-from scipy.stats import norm
+from scipy.linalg import qr, solve_triangular
+from scipy.linalg.lapack import dgeqrf, dormqr
 from ..R import distributions as _dist
+from ..R import linalg as _linalg
 
 from ..R import nmath as _nmath
 from ..formula import (
@@ -33,9 +34,12 @@ __all__ = ["lm"]
 
 
 def _row_frame(values: np.ndarray, columns: list[str]) -> pl.DataFrame:
-    """Build a 1-row pl.DataFrame from a flat numpy array + column names."""
-    flat = np.asarray(values).reshape(-1)
-    return pl.DataFrame({c: [float(flat[i])] for i, c in enumerate(columns)})
+    """Build a 1-row pl.DataFrame from a flat numpy array + column names.
+
+    Constructs straight from the 2-D ``(1, p)`` array (≈2× faster than a
+    dict-of-singleton-lists for the per-fit coefficient frames)."""
+    arr = np.asarray(values, dtype=float).reshape(1, -1)
+    return pl.DataFrame(arr, schema=list(columns))
 
 
 def _zapsmall(x: np.ndarray, digits: int) -> np.ndarray:
@@ -153,27 +157,62 @@ def _resolve_subset(subset, data: pl.DataFrame):
     return subset
 
 
-def _drop_aliased_cols(X_df: pl.DataFrame) -> list[str]:
+def _drop_aliased_cols(X_df: pl.DataFrame, tol: float = 1e-7, *,
+                       values: np.ndarray | None = None) -> list[str]:
     """Identify linearly-dependent columns in a design matrix.
 
-    Uses left-to-right (non-pivoted) QR so the *later* of two collinear
-    columns is the one flagged — matches R's ``dqrdc2``, which prefers
-    earlier columns (intercept first, then formula RHS terms in order)
-    instead of strict-norm pivoting. Without this the intercept could
-    get dropped when a later predictor is constant + a centered copy.
-    Needed so ``df_residuals`` reflects effective rank, not column count.
+    With the Rust kernel present, use R's **exact** ``dqrdc2`` pivot/rank
+    (``hea._rs`` ``dqrls``, ``ref/r-stats/src/dqrdc2.f``): the columns deferred
+    to pivot positions ``rank+1..p`` are precisely the ones R's ``lm`` aliases,
+    so hea drops bit-identically what R drops and the rank decision is
+    *deterministic* (immune to BLAS-bistable rank flakes). ``tol=1e-7`` is R's
+    ``lm.fit`` default.
+
+    Fallback (no Rust / ``HEA_NO_RS``): a left-to-right ``dgeqrf`` +
+    relative-tolerance heuristic — the *later* of two collinear columns is
+    flagged (``dqrdc2`` prefers earlier columns: intercept first, then RHS terms
+    in order), so the intercept isn't dropped when a later predictor is a
+    constant + centered copy. Either way ``df_residuals`` reflects effective rank.
+
+    ``values`` is an optional precomputed numpy view of ``X_df`` (the design's
+    F-order ``X_values`` fast lane); when supplied, the screen reads it directly
+    and skips ``X_df.to_numpy()``. It is read-only here (``dgeqrf`` does not
+    overwrite its input), so reusing the buffer shared with ``X_df`` is safe.
     """
     if X_df.height == 0 or X_df.width == 0:
         return []
-    X = X_df.to_numpy().astype(float)
-    _, R_qr = qr(X, mode="economic")
-    diag_abs = np.abs(np.diag(R_qr))
+    X = values if values is not None else X_df.to_numpy().astype(float)
+    cols = X_df.columns
+    p = X.shape[1]
+
+    # Fast screen (always): the in-order dgeqrf R-diagonal. The common case —
+    # a clearly full-rank design — is decided here with no Rust call, so the hot
+    # path keeps its speed (the dqrdc2 factorization is ~2-3× the Accelerate one,
+    # per the receipt). A column is "suspect" when its pivot diagonal has
+    # collapsed relative to the column's original norm (R's dqrdc2 negligibility,
+    # relative tol = 1e-7) — only then is an *exact* rank/pivot decision needed.
+    qr_c, _tau, _wk, _info = dgeqrf(X)
+    diag_abs = np.abs(np.diag(qr_c))
     if diag_abs.size == 0:
         return []
-    ref = max(float(diag_abs.max()), 1.0)
-    tol = ref * np.finfo(float).eps * max(X.shape)
-    cols = X_df.columns
-    return [cols[i] for i, v in enumerate(diag_abs) if v <= tol]
+    col_norms = np.linalg.norm(X, axis=0)
+    ref = np.where(col_norms > 0.0, col_norms, 1.0)
+    suspect = bool(np.any(diag_abs < ref * tol))
+    if not suspect:
+        return []                                   # clearly full rank — fast path
+
+    if _linalg._rs_dqrls_rank is not None:
+        # Rank-deficient → resolve EXACTLY with R's dqrdc2 (Rust): the columns
+        # deferred to pivot positions rank+1..p are bit-identically R's aliased
+        # set, and the decision is deterministic (no BLAS-bistable rank flake).
+        # dqrls_rank is the lean path — rank+pivot only, no QR/coef marshalling.
+        rank, pivot = _linalg.dqrls_rank(X, tol)
+        if rank >= p:
+            return []
+        return [cols[i] for i in sorted(int(pivot[j]) - 1 for j in range(rank, p))]
+    # no Rust: the strict-tolerance heuristic (later of two collinear cols flagged)
+    tol_h = max(float(diag_abs.max()), 1.0) * np.finfo(float).eps * max(X.shape)
+    return [cols[i] for i, v in enumerate(diag_abs) if v <= tol_h]
 
 
 def _lowess(x, y, frac=2 / 3, it=3):
@@ -576,6 +615,16 @@ class lm:
 
         # meta
         self.formula = formula
+        # R supports only method="qr" for the fit (method="model.frame" is
+        # intercepted in __new__). Any other value warns and falls back to qr
+        # (lm.R:38-39) — hea keeps no alternative solvers.
+        if method != "qr":
+            import warnings
+            warnings.warn(
+                f"method = '{method}' is not supported. Using 'qr'",
+                stacklevel=2,
+            )
+            method = "qr"
         self.method = method
         self.contrasts = contrasts
 
@@ -640,22 +689,34 @@ class lm:
             if off_arg is not None:
                 off_arg = off_arg[keep]
 
-        # na.action keep-mask over the (post-subset) frame: which rows
-        # survive na.omit. Drives ``fail`` (error), ``exclude`` (output
-        # padding), and the weight alignment below.
-        na_keep = _model_frame_keep_mask(formula, data)
-        if self.na_action == "fail" and not na_keep.all():
-            raise ValueError("missing values in object")  # R: na.fail
-        if self.na_action == "pass":
-            # R's na.pass: keep every row (NA flows into X/y; the fit may be NaN).
-            na_keep = np.ones(data.height, dtype=bool)
-        self._na_mask = na_keep
+        # na.action keep-mask over the (post-subset) frame: which rows survive
+        # na.omit. Drives ``fail`` (error), ``exclude`` (output padding), and
+        # the weight/offset alignment below. ``prepare_design`` recomputes the
+        # same na.omit internally, so for the common path (omit/pass with no
+        # weights/offset) the lm-side mask is never read — skip it and avoid the
+        # duplicate ``_na_mask_with_matrix_cols`` pass (it is the redundant work
+        # the fit profile flagged). The ``exclude``-padding readers all guard on
+        # ``na_action == "exclude"`` first, so ``None`` is safe otherwise.
         self._n_full = data.height  # model-frame length (post-subset, pre-na)
-
-        if w_arr is not None and not na_keep.all():
-            w_arr = w_arr[na_keep]
-        if off_arg is not None and not na_keep.all():
-            off_arg = off_arg[na_keep]
+        need_mask = (
+            self.na_action in ("fail", "exclude")
+            or w_arr is not None
+            or off_arg is not None
+        )
+        if need_mask:
+            na_keep = _model_frame_keep_mask(formula, data)
+            if self.na_action == "fail" and not na_keep.all():
+                raise ValueError("missing values in object")  # R: na.fail
+            if self.na_action == "pass":
+                # R's na.pass: keep every row (NA flows into X/y; fit may be NaN).
+                na_keep = np.ones(data.height, dtype=bool)
+            self._na_mask = na_keep
+            if w_arr is not None and not na_keep.all():
+                w_arr = w_arr[na_keep]
+            if off_arg is not None and not na_keep.all():
+                off_arg = off_arg[na_keep]
+        else:
+            self._na_mask = None
 
         self.data = data
         self.weights = w_arr
@@ -671,6 +732,12 @@ class lm:
         self._design_data = d.data
         self.X = d.X
         self.y = d.y  # pl.Series
+        # F-order numpy fast lane: the same buffer ``self.X`` (polars) views, so
+        # the rank screen + fit read it directly instead of round-tripping
+        # through ``self.X.to_numpy()``. Read-only (mutating it corrupts
+        # ``self.X``); ``_qr`` row-scales into a fresh array, never in place.
+        # ``None`` if the design is empty; reset below if columns get dropped.
+        self._X_values = d.X_values
 
         # R's na.pass keeps NA rows in the model frame; lm.fit then rejects a
         # non-finite design ("NA/NaN/Inf in 'x'"). Match that intentionally
@@ -699,7 +766,8 @@ class lm:
         # warning — R does the same (silent at construction, prints "(N not
         # defined because of singularities)" only when you look at the model).
         _full_cols = list(self.X.columns)  # before the rank-deficiency drop
-        self._aliased_cols: list[str] = _drop_aliased_cols(self.X)
+        self._aliased_cols: list[str] = _drop_aliased_cols(
+            self.X, values=self._X_values)
         if self._aliased_cols and not singular_ok:
             # R: lm.fit(singular.ok=FALSE) — refuse rank-deficient designs.
             raise ValueError("singular fit encountered")
@@ -711,6 +779,9 @@ class lm:
             self._X_full_train = self.X.to_numpy().astype(float)
             keep = [c for c in self.X.columns if c not in self._aliased_cols]
             self.X = self.X.select(keep)
+            # The kept-column subset no longer matches the full F-order buffer;
+            # the fit below falls back to ``self.X.to_numpy()`` for this design.
+            self._X_values = None
 
         self.column_names = list(self.X.columns)
         # Full (pre-drop) column set + the kept→full index map. The fit runs
@@ -725,7 +796,15 @@ class lm:
             else self.column_names
         )
 
-        X = self.X.to_numpy().astype(float)
+        # Common full-rank path: reuse the F-order design buffer directly (no
+        # ``to_numpy`` round-trip). ``_X_values`` is float64 + F-contiguous by
+        # construction; the ``dtype`` guard is a cheap no-op safety net.
+        if self._X_values is not None:
+            X = self._X_values
+            if X.dtype != np.float64:
+                X = X.astype(np.float64)
+        else:
+            X = self.X.to_numpy().astype(float)
         y = self.y.to_numpy().astype(float).flatten()
 
         self.n, self.p = (
@@ -745,7 +824,8 @@ class lm:
         self._n_eff = (
             n if self.weights is None else int(np.count_nonzero(self._w > 0.0))
         )
-        self.W = W = np.eye(n) if self.weights is None else np.diag(self._w)
+        # NB: R never forms the n×n weight matrix W; lm.wfit row-scales by √w.
+        # We carry only the length-n diagonal ``self._w`` (O(n), not O(n²)).
 
         # model degree of freedom
         self.df_model = self.p - 1 if "(Intercept)" in self.column_names else self.p
@@ -782,14 +862,20 @@ class lm:
         # Estimation #
         ##############
 
-        if method == "nll":
-            bhat, self.sigma, self.XtX, self.Xty, self.loss = self.compute_bhat(
-                X, y_solve, W, "nll"
-            )
-        elif method == "sse":
-            bhat, self.XtX, self.Xty, self.loss = self.compute_bhat(X, y_solve, W, "sse")
-        else:
-            bhat, self.XtX, self.Xty = self.compute_bhat(X, y_solve, W, method)
+        # Single weighted QR (R's lm.wfit / Cdqrls) — yields β̂, the R factor
+        # (for chol2inv), the length-n effects (Qᵀ√w·y), and the Householder
+        # qraux, all stored below as R's lm components.
+        bhat, self._qr_R, self.effects, self.qraux = self.compute_bhat(
+            X, y_solve, self._w
+        )
+        # R's lm$rank / $assign. hea drops aliased columns at fit time, so the
+        # kept design is full rank → rank == p; assign is the model.matrix
+        # column→term map over the FULL (pre-drop) column set (R parity).
+        self.rank = self.p
+        self.assign = (
+            np.array([self._col_assign[c] for c in self._full_names])
+            if self._col_assign is not None else None
+        )
 
         self._bhat_arr = np.asarray(bhat).reshape(-1)
         from ..R import NamedVector
@@ -821,14 +907,11 @@ class lm:
         # aka Residual SE: σ^2 = RSS / df_residuals. A saturated fit
         # (df_residuals == 0, e.g. n == rank) has no residual variance —
         # R returns NaN (and NaN SEs / t / p) rather than erroring.
-        if method == "nll":
-            self.sigma_squared = self.sigma**2
-        else:
-            self.sigma_squared = (
-                self.rss / self.df_residuals
-                if self.df_residuals > 0 else float("nan")
-            )
-            self.sigma = np.sqrt(self.sigma_squared)
+        self.sigma_squared = (
+            self.rss / self.df_residuals
+            if self.df_residuals > 0 else float("nan")
+        )
+        self.sigma = np.sqrt(self.sigma_squared)
 
         # compute standard error for β̂
         self.XtXinv = self.compute_XtXinv()
@@ -839,14 +922,11 @@ class lm:
         self.se_bhat = _row_frame(self._se_bhat_arr, self.column_names)
 
         # hat-matrix diagonal h_ii (leverages) and internally studentized
-        # residuals — cached once so plot_qq / plot_scale_location /
-        # plot_leverage don't each recompute them.
-        HX = X @ self.XtXinv
-        h = (HX * X).sum(axis=1)
-        w = np.diag(W)
-        self.leverage = h * w
-        denom = self.sigma * np.sqrt(np.clip(1.0 - self.leverage, 1e-12, None))
-        self.std_residuals = residuals * np.sqrt(w) / denom
+        # residuals are now LAZY (``leverage`` / ``std_residuals`` cached
+        # properties below): only diagnostics (hatvalues/rstandard/rstudent/
+        # cooks/dffits/influence) and plot_* read them, never the fit/predict/
+        # summary path, so a plain fit no longer pays the O(n·p²) hat matmul.
+        # R is lazy here too (lm() omits leverage; hat()/lm.influence compute it).
 
         # compute confidence interval for β̂
         self.ci_bhat = self.compute_ci_bhat()
@@ -911,9 +991,6 @@ class lm:
         if self.na_action is None:
             raise ValueError("na_action must be one of 'omit' / 'exclude' / "
                              f"'fail'; got {na_action!r}")
-        if self.na_action == "exclude":
-            raise NotImplementedError(
-                "na_action='exclude' is not supported for multivariate (mlm) fits")
 
         rhs_src = _deparse(_parse(formula).rhs)
         resp_names = [lbl for lbl, _ in mv_specs]
@@ -944,6 +1021,11 @@ class lm:
         na_keep = _model_frame_keep_mask(formula, data)
         if self.na_action == "fail" and not na_keep.all():
             raise ValueError("missing values in object")
+        # Model-frame length (post-subset, pre-na) + the joint keep-mask, so
+        # na.action="exclude" can pad the combined n×m accessors back to full
+        # length with NA (R's naresid on an mlm). ``omit`` ignores both.
+        self._n_full = data.height
+        self._na_mask = na_keep
         if not na_keep.all():
             data = data.filter(pl.Series(na_keep))
             if w_arr is not None:
@@ -988,11 +1070,23 @@ class lm:
         self.coefficients = self.coef
         self.bhat = self.coef
         self.fitted = self._mlm_matrix_frame(
-            {r: self._mlm_models[r].yhat["fit"].to_numpy() for r in resp_names})
+            {r: self._mlm_pad(self._mlm_models[r].yhat["fit"].to_numpy())
+             for r in resp_names})
         self.yhat = self.fitted
         self.residuals = self._mlm_matrix_frame(
-            {r: self._mlm_models[r].residuals.to_series(0).to_numpy() for r in resp_names})
+            {r: self._mlm_pad(self._mlm_models[r].residuals.to_series(0).to_numpy())
+             for r in resp_names})
         self.sigma = np.array([self._mlm_models[r].sigma for r in resp_names])
+
+    def _mlm_pad(self, arr: np.ndarray) -> np.ndarray:
+        """na.action="exclude": pad a per-response fit-row vector back to the
+        model-frame length with NA (R's naresid for an mlm). No-op otherwise."""
+        arr = np.asarray(arr, dtype=float)
+        if self.na_action != "exclude" or self._na_mask.all():
+            return arr
+        out = np.full(self._n_full, np.nan, dtype=float)
+        out[self._na_mask] = arr
+        return out
 
     def _mlm_matrix_frame(self, col_map, index=None, index_vals=None):
         """Bundle per-response arrays into a hea.DataFrame (one column per
@@ -1042,52 +1136,45 @@ class lm:
         return self.__repr__()
 
     def compute_XtXinv(self):
-        U, S, Vt = np.linalg.svd(self.XtX, full_matrices=False)
-        XtXinv = Vt.T @ np.diag(1 / S) @ U.T
-        return XtXinv
+        """(XᵀWX)⁻¹ via ``chol2inv`` of the QR ``R`` factor — R's ``summary.lm``
+        (``chol2inv(Qr$qr[p1,p1])``, lm.R:326). More accurate than inverting an
+        explicitly-formed XᵀWX (which squares the condition number) and matches
+        R's path; this is R's ``cov.unscaled`` (``V_bhat = σ²·XtXinv``)."""
+        return _chol2inv(self._qr_R)
 
-    def compute_bhat(self, X, y, W, method="qr", return_ss=True):
-
-        match method:
-            case "qr":
-                bhat, XtX, Xty = _qr(X, y, W)
-            case "lu":
-                bhat, XtX, Xty = _lu(X, y, W)
-            case "chol":
-                bhat, XtX, Xty = _chol(X, y)
-            case "svd":
-                bhat, XtX, Xty = _svd(X, y)
-            case "nq":
-                bhat, XtX, Xty = _nq(X, y)
-            case "sse":
-                bhat, loss = _sse(X, y)
-                if return_ss:
-                    XtX = X.T @ X
-                    Xty = X.T @ y
-                    return bhat, XtX, Xty, loss
-                else:
-                    return bhat
-            case "nll":
-                bhat, sigma, loss = _nll(X, y)
-
-                if return_ss:
-                    XtX = X.T @ X
-                    Xty = X.T @ y
-                    return bhat, sigma, XtX, Xty, loss
-                else:
-                    return bhat
-            case _:
-                raise ValueError("Please enter a valid method.")
-
-        if return_ss:
-            return bhat, XtX, Xty
-        else:
-            return bhat
+    def compute_bhat(self, X, y, w):
+        """β̂ by weighted-least-squares QR — R's ``lm.wfit`` (the only method
+        R supports). ``w`` is the length-n prior-weight vector. Returns
+        ``(β̂, R, effects, qraux)`` (see :func:`_qr`)."""
+        return _qr(X, y, w)
 
     def compute_se_bhat(self):
         V_bhat = self.sigma_squared * self.XtXinv
         se_bhat = np.sqrt(np.diag(V_bhat))[:, None]
         return se_bhat, V_bhat
+
+    @cached_property
+    def leverage(self) -> np.ndarray:
+        """Hat-matrix diagonal hᵢᵢ = wᵢ·(Xᵢᵀ(XᵀWX)⁻¹Xᵢ) — R's ``hatvalues``.
+
+        Lazy + cached: only the influence diagnostics (``hatvalues``/``rstandard``
+        /``rstudent``/``cooks_distance``/``dffits``/``influence``) and the
+        ``plot_*`` methods read it; the fit/predict/summary path never does, so a
+        plain fit skips the O(n·p²) ``X @ (XᵀWX)⁻¹`` matmul (R's ``lm()`` is lazy
+        here too). Computed from the kept design + ``XtXinv`` + prior weights, all
+        retained on the model — bit-identical to the former eager value."""
+        X = self._X_values if self._X_values is not None else self.X.to_numpy().astype(float)
+        HX = X @ self.XtXinv
+        return (HX * X).sum(axis=1) * self._w
+
+    @cached_property
+    def std_residuals(self) -> np.ndarray:
+        """Internally studentized residuals rᵢ·√wᵢ / (σ·√(1−hᵢᵢ)) — R's
+        ``rstandard`` core. Lazy/cached for the same reason as :attr:`leverage`
+        (only diagnostics/plots consume it); bit-identical to the former eager
+        value (same expression on the retained residuals/σ/weights/leverage)."""
+        denom = self.sigma * np.sqrt(np.clip(1.0 - self.leverage, 1e-12, None))
+        return self._residuals_arr * np.sqrt(self._w) / denom
 
     def compute_ci_bhat(self, alpha=0.05):
 
@@ -1116,19 +1203,19 @@ class lm:
         """
 
         X = self.X.to_numpy().astype(float)
-        W = self.W
+        sw = np.sqrt(self._w)            # √w row-scaling (was cholesky(diag(w)))
         bhat = self._bhat_arr[:, None]
         residuals = self._residuals_arr
         n = len(residuals)
 
-        # X and W are constant across draws, so the QR-WLS factorisation
-        # (cholesky(W), L.T @ X, qr) is constant too — the per-iter
-        # ``compute_bhat`` call would otherwise redo all three on every
-        # draw. Hoist them and keep the per-iter ``L.T @ y_star``,
-        # ``Q.T @ ·``, ``solve_triangular`` exactly as ``_qr`` does, so
-        # each bhat_star matches the loop's arithmetic bit-for-bit.
-        L = cholesky(W, lower=True)
-        Xhat = L.T @ X
+        # X and w are constant across draws, so the QR-WLS factorisation
+        # (√w·X, qr) is constant too — the per-iter ``compute_bhat`` call
+        # would otherwise redo it on every draw. Hoist it and keep the
+        # per-iter ``√w·y_star``, ``Q.T @ ·``, ``solve_triangular`` exactly as
+        # ``_qr`` does, so each bhat_star matches the loop's arithmetic
+        # bit-for-bit. (cholesky(diag(w)) == diag(√w), so this is identical to
+        # the former L.T@· form for positive weights, and robust to zero w.)
+        Xhat = sw[:, None] * X
         Q, R = qr(Xhat, mode="economic")
         X_bhat_flat = (X @ bhat).flatten()
 
@@ -1150,7 +1237,7 @@ class lm:
         bhat_stars = np.zeros([num_bootstrap, self.p])
         for i in range(num_bootstrap):
             y_flat = X_bhat_flat + residuals_star[i]
-            f = Q.T @ (L.T @ y_flat)
+            f = Q.T @ (sw * y_flat)
             bhat_stars[i] = solve_triangular(R, f)
 
         quantiles = np.quantile(
@@ -1286,16 +1373,22 @@ class lm:
         )
 
     def compute_t_values(self):
-
-        t_values = self._bhat_arr / self._se_bhat_arr
-
+        # R's summary.lm forms `est/se` directly. For an essentially perfect
+        # fit the SE collapses to (near) zero; R's QR leaves ~1e-17 dust so it
+        # gets a finite-huge t, but with an exactly-zero SE the ratio is the
+        # honest ±Inf / NaN limit. R's division is silent at the C level (it
+        # only warns separately via "essentially perfect fit"), so suppress
+        # numpy's 0/0 and x/0 warnings to match that silent ratio.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t_values = self._bhat_arr / self._se_bhat_arr
         return _row_frame(t_values, self.column_names)
 
     def compute_p_values(self):
         # compute p values of model coefficients with scipy.stats.t.sf
         # H0: βi==0
         # H1: βi!=0
-        t_arr = self._bhat_arr / self._se_bhat_arr
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t_arr = self._bhat_arr / self._se_bhat_arr
         p_values = 2 * _dist.pt(np.abs(t_arr), self.df_residuals, lower_tail=False)
         return _row_frame(p_values, self.column_names)
 
@@ -1377,9 +1470,16 @@ class lm:
         # No F-statistic for an intercept-only model (df_model == 0) or a
         # saturated fit (df_residuals == 0, where the denominator vanishes).
         if self.df_model != 0 and self.df_residuals > 0:
-            fstats = float(
-                ((self.tss - self.rss) / self.df_model) / (self.rss / self.df_residuals)
-            )
+            # R's summary.lm divides msr/mse with no rss>0 guard, so an exact
+            # fit (rss == 0 — which a solver that nails a perfectly collinear
+            # response hits, where R's QR usually leaves a tiny non-zero rss)
+            # gives F = +inf via IEEE division, not a Python ZeroDivisionError.
+            # Mirror R's plain formula with numpy float division (as the
+            # t-values just above already do for se == 0).
+            msr = (self.tss - self.rss) / self.df_model
+            mse = self.rss / self.df_residuals
+            with np.errstate(divide="ignore", invalid="ignore"):
+                fstats = float(np.float64(msr) / np.float64(mse))
             f_p_value = float(_dist.pf(fstats, self.df_model, self.df_residuals, lower_tail=False))
         else:
             fstats, f_p_value = None, None
@@ -2095,135 +2195,58 @@ class lm:
 #################
 
 
-def _nq(X: np.array, y: np.array, W: np.array, return_ss: bool = True):
-    """
-    Solving the normal equations by directly inverting
-    the gram matrix.
+def _chol2inv(R: np.ndarray) -> np.ndarray:
+    """R's ``chol2inv``: ``(RᵀR)⁻¹`` from an upper-triangular factor ``R``,
+    via LAPACK ``dpotri`` — the exact routine R calls. Used on the QR ``R``
+    factor (where ``RᵀR == XᵀWX``) to get ``(XᵀWX)⁻¹`` the way ``summary.lm``
+    does (``chol2inv(Qr$qr[p1,p1])``, lm.R:326). The sign of ``R``'s diagonal
+    is irrelevant (``dpotri`` inverts then forms ``R⁻¹R⁻ᵀ``)."""
+    from scipy.linalg.lapack import dpotri
 
-    return_ss: return sufficient statistics
-
-    """
-    XtX = X.T @ W @ X
-    Xty = X.T @ W @ y
-    b = np.linalg.inv(XtX) @ (Xty)
-    if return_ss:
-        return b, XtX, Xty
-    else:
-        return b
-
-
-def _lu(X: np.array, y: np.array, W: np.array, return_ss: bool = True):
-    """
-    LU decomposition.
-    The same as using numpy.linalg.solve()
-    """
-    XtX = X.T @ W @ X
-    Xty = X.T @ W @ y
-    P, L, U = lu(XtX, permute_l=False)
-    z = solve_triangular(L, P @ Xty, lower=True)
-    b = solve_triangular(U, z)
-
-    if return_ss:
-        return b, XtX, Xty
-    else:
-        return b
+    inv, info = dpotri(np.ascontiguousarray(R), lower=0)
+    if info != 0:
+        # singular factor — fall back to the triangular-solve form (same value)
+        Rinv = solve_triangular(R, np.eye(R.shape[0]))
+        return Rinv @ Rinv.T
+    return np.triu(inv) + np.triu(inv, 1).T   # dpotri fills one triangle; mirror
 
 
-def _chol(X: np.array, y: np.array, W: np.array, return_ss: bool = True):
-    """
-    Cholesky decomposition.
-    """
-    XtX = X.T @ W @ X
-    Xty = X.T @ W @ y
-    L = cholesky(XtX, lower=True)
-    b = solve_triangular(L.T, solve_triangular(L, Xty, lower=True))
-    if return_ss:
-        return b, XtX, Xty
-    else:
-        return b
+def _qty_householder(qr_c: np.ndarray, tau: np.ndarray, c: np.ndarray) -> np.ndarray:
+    """Apply ``Qᵀ`` (from a ``dgeqrf`` compact factorization) to a vector ``c``
+    via LAPACK ``dormqr`` — the full length-n ``Qᵀc`` in O(np), without ever
+    forming the n×n ``Q`` (this is how R's ``dqrsl`` produces the ``effects``
+    vector cheaply; forming ``Q`` would reintroduce the O(n²) we just removed)."""
+    c2 = np.asfortranarray(c.reshape(-1, 1))
+    lwork = int(np.asarray(dormqr("L", "T", qr_c, tau, c2, -1)[1]).reshape(-1)[0].real)
+    out, _, info = dormqr("L", "T", qr_c, tau, c2, lwork)
+    if info != 0:
+        raise np.linalg.LinAlgError(f"dormqr failed (info={info})")
+    return out.reshape(-1)
 
 
-def _svd(X: np.array, y: np.array, return_ss: bool = True):
-    """
-    Single value decomposition.
-    """
-    U, S, Vt = np.linalg.svd(X, full_matrices=False)
-    Sinv = np.diag(1 / S)
-    b = Vt.T @ Sinv @ U.T @ y
-    if return_ss:
-        XtX = X.T @ X
-        Xty = X.T @ y
-        return b, XtX, Xty
-    else:
-        return b
+def _qr(X: np.ndarray, y: np.ndarray, w: np.ndarray):
+    """QR weighted least squares — R's ``lm.wfit`` (the only method R supports).
 
+    ``w`` is the length-n prior-weight vector. We whiten by √w row-scaling
+    (R fits on ``√w·X`` / ``√w·y``) rather than ``cholesky(W)`` so zero
+    weights don't break the factorization (a zero on the diagonal makes W
+    only positive-*semi*definite).
 
-def _qr(X: np.array, y: np.array, W: np.array, return_ss: bool = True):
-    """
-    QR decomposition (weighted least squares).
-
-    ``W`` is the diagonal prior-weight matrix. We whiten by √w row-scaling
-    rather than ``cholesky(W)`` so zero weights don't break the
-    factorization (Cholesky needs a positive-*definite* matrix; a zero on
-    the diagonal makes ``W`` only positive-semidefinite). For positive
-    weights this is bit-identical to ``L = cholesky(W); L.T @ X`` because
-    the Cholesky factor of a diagonal matrix is ``diag(√w)``. R's lm.wfit
-    fits on ``√w·X`` / ``√w·y`` the same way.
-    """
-    w = np.diag(W)
+    Returns ``(β̂, R, effects, qraux)`` mirroring R's ``Cdqrls`` outputs:
+    ``R`` is the upper-triangular factor (``RᵀR == XᵀWX``, fed to ``chol2inv``);
+    ``effects`` is the length-n ``Qᵀ(√w·y)`` (R's ``$effects``, first ``p``
+    named, used by ``anova``/``effects``); ``qraux`` are the Householder scalar
+    factors (R's ``$qr$qraux``). β̂ is the triangular solve on the first ``p``
+    effects — bit-identical to the former ``solve_triangular(R, Qᵀy)`` path."""
     wts = np.sqrt(w)
     Xhat = wts[:, None] * X
     yhat = wts * y
 
-    Q, R = qr(Xhat, mode="economic")
-    f = Q.T @ yhat
-    b = solve_triangular(R, f)
-
-    if return_ss:
-        XtX = X.T @ (w[:, None] * X)
-        Xty = X.T @ (w * y)
-        return b, XtX, Xty
-    else:
-        return b
-
-
-def _nll(X, y):
-
-    """
-    Negative log-likelihood.
-    """
-
-    y = y.flatten()
-    n, m = X.shape
-    b = np.zeros(m)
-    sigma = 1e-5
-    p = np.hstack([sigma, b])
-
-    def cost(p, X, y):
-        mu = X @ p[1:]
-        L = -np.sum(norm.logpdf(y, loc=mu, scale=p[0]))
-        return L
-
-    res = minimize(cost, p, args=(X, y), method="L-BFGS-B")
-    popt = res.x
-
-    return popt[1:], popt[0], res.fun
-
-
-def _sse(X, y):
-
-    """
-    Sum squared error.
-    """
-
-    y = y.flatten()
-    n, m = X.shape
-    p = np.zeros(m)
-
-    def cost(p, X, y):
-        mu = X @ p
-        L = np.sum((y - mu) ** 2)
-        return L
-
-    res = minimize(cost, p, args=(X, y), method="L-BFGS-B")
-    return res.x, res.fun
+    qr_c, qraux, _work, info = dgeqrf(Xhat)
+    if info != 0:
+        raise np.linalg.LinAlgError(f"dgeqrf failed (info={info})")
+    p = X.shape[1]
+    R = np.triu(qr_c[:p, :p])
+    effects = _qty_householder(qr_c, qraux, yhat)
+    b = solve_triangular(R, effects[:p])
+    return b, R, effects, qraux

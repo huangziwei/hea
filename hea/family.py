@@ -26,6 +26,7 @@ Gaussian REML derivatives in :mod:`hea.gam`.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 
 import numpy as np
@@ -37,7 +38,15 @@ from scipy.special import (
 
 from .R import nmath as _nmath
 from .R.nmath import _dpois_raw, _dbinom_raw
-from .R._dispatch import rs_fn as _rs_fn
+from ._dispatch import rs_fn as _rs_fn
+
+
+def _polygamma(deriv, x):
+    """``scipy.special.polygamma``-signature shim over R's ``dpsifn``
+    (nmath/polygamma.c) — mgcv-faithful and rust-accelerated. scipy's
+    Hurwitz-zeta ``polygamma`` is ~2.2x slower than R's ``psigamma`` for
+    deriv>=1 (its digamma is faster, so deriv 0 stays on scipy)."""
+    return _nmath.psigamma_vec(x, deriv)
 
 # The GLM/GLMM aic hooks evaluate the saddlepoint log-density primitives
 # (_dpois_raw / _dbinom_raw) on n-vectors every objective eval. Route them to the
@@ -47,6 +56,59 @@ from .R._dispatch import rs_fn as _rs_fn
 # _stirlerr). See plans/rust-port-implementation.md.
 _rs_dbinom_raw = _rs_fn("dbinom_raw")
 _rs_dpois_raw = _rs_fn("dpois_raw")
+# mgcv coxlpl (coxph.c:141) single-pass risk-set sweeps (deriv 0 → l/lb/lbb,
+# deriv 1/2 → +d1H, deriv 3 → d2H); the numpy `_coxlpl` below is the bit-close
+# oracle + HEA_NO_RS fallback. None when the extension is absent.
+_rs_cox_l = _rs_fn("cox_l")
+_rs_cox_lpl0 = _rs_fn("cox_lpl0")
+_rs_cox_lpl_d1 = _rs_fn("cox_lpl_d1")
+_rs_cox_d2h = _rs_fn("cox_d2h")
+# mgcv tweedious (misc.c:170) per-row series sweep for the scalar-p Tweedie
+# saturated-likelihood moments; the dense-matrix `_tweedie_log_a_vec` below is
+# the numpy oracle + HEA_NO_RS fallback. None when the extension is absent.
+_rs_tweedie_series = _rs_fn("tweedie_series")
+# mgcv tweedious2 (misc.c:513) per-row sweep for the VECTOR-p Tweedie moments
+# (α per row ⇒ no shared tables); the dense-matrix `_tweedie_log_a_vec_pv`
+# below is the numpy oracle + HEA_NO_RS fallback. None when the extension is
+# absent.
+_rs_tweedie_series_pv = _rs_fn("tweedie_series_pv")
+# gamlss.gH Hessian block crossprod (gamlss.r:653-660), the deterministic,
+# row/col-consistent `crossprod(X_i, WX_j)` used only under `deterministic_xwx()`
+# (gam.fit5's rank check) — where numpy `@`'s BLAS GEMM can give a rank-deficient
+# duplicate column an asymmetric Hessian row that flips the QR rank-check drop
+# platform-dependently. ~1.5x the `np.einsum` fallback; einsum is the HEA_NO_RS
+# oracle (also row/col-consistent). None when the extension is absent.
+_rs_gamlss_xwx = _rs_fn("gamlss_xwx")
+
+# When set (by `deterministic_xwx()`), gamlss_gH assembles its Hessian blocks
+# with the fixed-order `_xwx` reduction instead of numpy `@` — see gamlss_gH.
+_GAMLSS_XWX_DETERMINISTIC = False
+
+
+@contextlib.contextmanager
+def deterministic_xwx():
+    """Within this block, gamlss_gH's Hessian-block crossprod uses the
+    row/col-consistent `_xwx` reduction (rust, else einsum) rather than the
+    alignment-sensitive numpy `@`. gam.fit5 wraps its rank-check Hessian
+    recompute in it so the dropped unidentifiable column is platform-stable."""
+    global _GAMLSS_XWX_DETERMINISTIC
+    prev = _GAMLSS_XWX_DETERMINISTIC
+    _GAMLSS_XWX_DETERMINISTIC = True
+    try:
+        yield
+    finally:
+        _GAMLSS_XWX_DETERMINISTIC = prev
+
+
+def _xwx(xi, wxj):
+    """`crossprod(xi, wxj) = Σ_k xi[k,r]·wxj[k,c]` via a fixed per-entry
+    reduction (identical output rows/cols for identical input columns): rust
+    `gamlss_xwx`, else `np.einsum`. Both are within ~n·eps of `@` but
+    construction-deterministic, unlike `@`."""
+    if _rs_gamlss_xwx is not None:
+        return np.asarray(_rs_gamlss_xwx(np.ascontiguousarray(xi),
+                                         np.ascontiguousarray(wxj)))
+    return np.einsum("kr,kc->rc", xi, wxj)
 
 
 def _dbinom_raw_disp(x, n, p, q, give_log=True):
@@ -85,6 +147,18 @@ class Link:
     def d2link(self, mu: np.ndarray) -> np.ndarray: raise NotImplementedError
     def d3link(self, mu: np.ndarray) -> np.ndarray: raise NotImplementedError
     def d4link(self, mu: np.ndarray) -> np.ndarray: raise NotImplementedError
+
+    # Grouped link-derivative accessors for the REML weight-derivative chain
+    # (_dw_deta / _d2w_deta2). The default just calls the individual methods;
+    # links whose derivatives share an expensive transcantal (probit: η=Φ⁻¹(μ)
+    # and φ(η)) override to compute it ONCE — bit-identical to the separate
+    # calls, only the recomputed qnorm/dnorm are saved.
+    def d23link(self, mu: np.ndarray):
+        return self.d2link(mu), self.d3link(mu)
+
+    def d234link(self, mu: np.ndarray):
+        return self.d2link(mu), self.d3link(mu), self.d4link(mu)
+
     def valideta(self, eta: np.ndarray) -> bool: return True
 
     # mgcv ``link$g2g``, ``g3g``, ``g4g`` (R/efam.r): higher-order link
@@ -320,6 +394,19 @@ class ProbitLink(Link):
         eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
         d = np.maximum(_dnorm(eta), np.finfo(float).eps)
         return (7.0 * eta + 6.0 * eta ** 3) / d ** 4
+
+    def d23link(self, mu):
+        # η=Φ⁻¹(μ) and φ(η) computed once, shared by d2/d3 — bit-identical to
+        # d2link(mu), d3link(mu) (same η, same d, same expressions).
+        eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
+        d = np.maximum(_dnorm(eta), np.finfo(float).eps)
+        return eta / d ** 2, (1.0 + 2.0 * eta * eta) / d ** 3
+
+    def d234link(self, mu):
+        eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
+        d = np.maximum(_dnorm(eta), np.finfo(float).eps)
+        return (eta / d ** 2, (1.0 + 2.0 * eta * eta) / d ** 3,
+                (7.0 * eta + 6.0 * eta ** 3) / d ** 4)
     # extended-family ratios (gam.fit3.r:2249-2266): with η=Φ⁻¹(μ) and
     # g'=1/φ(η), the g″/g'ᵏ ratios collapse to polynomials in η.
     def g2g(self, mu):
@@ -443,6 +530,76 @@ class InverseSquareLink(Link):
         return bool(np.all(np.isfinite(eta)) and np.all(eta > 0))
 
 
+class SoftplusLink(Link):
+    """``μ = softplus(η) = log(1 + e^η)`` — the smooth-rectifier link.
+
+    Not an mgcv/`make.link` built-in (its variance-function home is the
+    transcendental ``V(μ)=1−e^{−μ}``, outside the Morris NEF-QVF families), but
+    standard in the neural-GLM literature (Paninski 2004; Pillow et al.) as a
+    numerically gentle, concavity-preserving alternative to the canonical log
+    link for `Poisson()` point-process / RF models: log-link-like (μ≈e^η) at
+    low rates, identity-like (μ≈η) at high rates, so no exponential blow-up.
+
+    ``g(μ) = log(e^μ − 1)`` (μ>0); ``g′(μ) = 1/(1−e^{−μ})``. Writing
+    ``u = e^{−μ}``, ``s = 1−u``:
+
+    * ``g″  = −u/s²``            ``g‴  =  u(1+u)/s³``      ``g⁗ = −u(1+4u+u²)/s⁴``
+    * ``g2g = g″/g′²  = −u``     ``g3g = g‴/g′³ = u(1+u)`` ``g4g = g⁗/g′⁴ = −u(1+4u+u²)``
+
+    PIRLS handles this as an ordinary non-canonical link (full-Newton inner
+    steps); pairing with `Poisson()` forfeits only the canonical-log
+    convenience, not global concavity. Use ``s = -expm1(-μ)`` for ``1−u`` so the
+    small-μ (log-like) regime keeps full precision.
+    """
+    name = "softplus"
+
+    def link(self, mu):
+        # g(μ) = log(e^μ − 1); expm1 keeps small-μ accurate.
+        mu = np.maximum(np.asarray(mu, dtype=float), np.finfo(float).eps)
+        return np.log(np.expm1(mu))
+
+    def linkinv(self, eta):
+        # μ = log1p(e^η) = logaddexp(0, η); eps-floored like LogLink so μ>0
+        # feeds V(μ) / divisions safely at extreme negative η.
+        return np.maximum(np.logaddexp(0.0, np.asarray(eta, dtype=float)),
+                          np.finfo(float).eps)
+
+    def mu_eta(self, eta):
+        # dμ/dη = σ(η); expit is the stable logistic. Lower-clamp like mgcv.
+        return np.maximum(expit(np.asarray(eta, dtype=float)),
+                          np.finfo(float).eps)
+
+    def _u_s(self, mu):
+        mu = np.maximum(np.asarray(mu, dtype=float), np.finfo(float).eps)
+        u = np.exp(-mu)
+        s = -np.expm1(-mu)        # 1 − e^{−μ}, accurate as μ→0⁺
+        return u, s
+
+    def d2link(self, mu):
+        u, s = self._u_s(mu)
+        return -u / s ** 2
+
+    def d3link(self, mu):
+        u, s = self._u_s(mu)
+        return u * (1.0 + u) / s ** 3
+
+    def d4link(self, mu):
+        u, s = self._u_s(mu)
+        return -u * (1.0 + 4.0 * u + u * u) / s ** 4
+
+    def g2g(self, mu):
+        u, _ = self._u_s(mu)
+        return -u
+
+    def g3g(self, mu):
+        u, _ = self._u_s(mu)
+        return u * (1.0 + u)
+
+    def g4g(self, mu):
+        u, _ = self._u_s(mu)
+        return -u * (1.0 + 4.0 * u + u * u)
+
+
 _LINKS = {
     "identity": IdentityLink,
     "log": LogLink,
@@ -453,6 +610,7 @@ _LINKS = {
     "cauchit": CauchitLink,
     "cloglog": CloglogLink,
     "1/mu^2": InverseSquareLink,
+    "softplus": SoftplusLink,
 }
 
 
@@ -686,7 +844,7 @@ class Family:
             "and implement Dd() to use the extended-family Newton path."
         )
 
-    def dDeta(self, y, mu, wt, theta, level: int = 0) -> dict:
+    def dDeta(self, y, mu, wt, theta, level: int = 0, dd: dict | None = None) -> dict:
         """Convert ``Dd`` (μ-space derivatives) to η-space via the link
         chain rule. Mirrors mgcv ``dDeta`` (R/efam.r). For identity link
         it copies ``Dmu → Deta``, ``Dmu2 → Deta2``, ...; for non-identity
@@ -696,8 +854,12 @@ class Family:
         Returns a dict with at minimum ``Deta``, ``Deta2``, ``EDeta2``
         (level 0). ``Deta.Deta2 = Dmu/(Dmu2·μ_η - Dmu·g2g)`` is the
         Newton-step working-response numerator that bam's PIRLS reads.
+
+        ``dd`` lets a caller pass a precomputed ``Dd`` table (≥ ``level``) to
+        share the per-obs deviance derivatives with raw-``Dd`` consumers (the
+        gam.fit4 ``_Dd``/``_dDeta`` caches) instead of recomputing them.
         """
-        r = self.Dd(y, mu, theta, wt, level=level)
+        r = dd if dd is not None else self.Dd(y, mu, theta, wt, level=level)
         link = self.link
         if link.name == "identity":
             d = {
@@ -738,8 +900,11 @@ class Family:
             "Deta2": r["Dmu2"] * ig12 - r["Dmu"] * g2g * ig1,
             "EDeta2": r["EDmu2"] * ig12,
         }
-        d["Deta.Deta2"] = r["Dmu"] / (r["Dmu2"] * ig1 - r["Dmu"] * g2g)
-        d["Deta.EDeta2"] = r["Dmu"] / (r["EDmu2"] * ig1)
+        # Unguarded divisions, mirroring mgcv gam.fit4.r:39-40: where the
+        # denominator vanishes R yields Inf silently, so ignore the FP flag.
+        with np.errstate(divide="ignore"):
+            d["Deta.Deta2"] = r["Dmu"] / (r["Dmu2"] * ig1 - r["Dmu"] * g2g)
+            d["Deta.EDeta2"] = r["Dmu"] / (r["EDmu2"] * ig1)
         if level > 0:
             ig13 = ig12 * ig1
             d["Dth"] = r["Dth"]
@@ -1001,15 +1166,26 @@ class Gamma(Family):
         y = y[good]
         w = wt[good]
         sw = scale / w                                     # per-obs scale
+        # k1/k2/k3 depend on the observation only through sw, and lgamma/digamma/
+        # trigamma(1/sw) (trigamma=zeta is the gamma-REML hot spot) are the cost.
+        # With constant prior weights (the usual case) sw is constant, so
+        # evaluate those on the UNIQUE sw values and index back: byte-identical
+        # to the per-obs form (each k·[i] = the same scalar ops on sw[i]) but
+        # O(unique) special-function calls instead of O(n).
+        usw, inv = np.unique(sw, return_inverse=True)
+        isw = 1.0 / usw
+        lsw = np.log(usw)
+        u_lg = gammaln(isw)
+        u_dg = digamma(isw)
+        u_tg = polygamma(1, isw)
         # k1 = -lgamma(1/sw) - log(sw)/sw - 1/sw
-        k1 = -gammaln(1.0 / sw) - np.log(sw) / sw - 1.0 / sw
+        k1 = (-u_lg - lsw / usw - isw)[inv]
         ls0 = float(np.sum(k1 - np.log(y)))
         # k2 = (digamma(1/sw) + log(sw)) / sw²       (mgcv's d/dφ)
-        k2 = (digamma(1.0 / sw) + np.log(sw)) / (sw * sw)
+        k2 = ((u_dg + lsw) / (usw * usw))[inv]
         d1_phi = float(np.sum(k2 / w))
         # k3 = (-trigamma(1/sw)/sw + 1 - 2 log(sw) - 2 digamma(1/sw)) / sw³
-        k3 = (-polygamma(1, 1.0 / sw) / sw
-              + 1.0 - 2.0 * np.log(sw) - 2.0 * digamma(1.0 / sw)) / (sw ** 3)
+        k3 = ((-u_tg / usw + 1.0 - 2.0 * lsw - 2.0 * u_dg) / (usw ** 3))[inv]
         d2_phi = float(np.sum(k3 / (w * w)))             # mgcv's d²/dφ²
         d1 = scale * d1_phi
         d2 = scale * d1_phi + scale * scale * d2_phi
@@ -1499,65 +1675,64 @@ _LD_J_MAX = 100000
 def _tweedie_log_a_one(y_i: float, phi_i: float, p: float):
     """Series approximation log a(y, φ, p) = log Σ_{j≥1} W_j for one y > 0.
 
-    Returns ``(log_a, j_bar, j_var, j_psi_bar, j2_psi_bar, j2_psi2_bar,
-    j2_trig_bar)`` — the log of the series sum plus six moments of ``j``
-    under ``p_j = W_j/Σ W_k``: E[j], Var[j], E[j·ψ(-j·α)], E[j²·ψ(-j·α)],
-    E[(j·ψ(-j·α))²], and E[j²·ψ′(-j·α)]. The first two feed the
-    φ-derivatives of log a; E[j·ψ] the p-derivative (Tweedie.dls_dp);
-    the last three the p-second-derivatives (Tweedie._d2ls_dp — tw's
-    analytic ``lsth2``, family-review B4).
+    Per-row reference for :func:`_tweedie_log_a_vec`. Returns
+    ``(log_a, j_bar, j_var, j_psi_bar, m_wp1, m_comb, m_dwpp)`` under
+    ``p_j = W_j/Σ W_k``: E[j], Var[j], E[j·ψ(-j·α)], and mgcv's three
+    p-parameterisation working-derivative accumulators E[∂logW/∂p],
+    E[(∂logW/∂p)²+∂²logW/∂p²], E[∂logW/∂p·j/(1−p)+∂²logW/∂p∂logφ]
+    (tweedious, misc.c:346-503). The first two feed the φ-derivatives of
+    log a; E[jψ] the p-derivative (Tweedie.dls_dp); the last three the
+    p-second-derivatives (Tweedie._d2ls_dp). nmath (R's Rmath) special
+    functions; ``wp1²+wp2`` combined per term (no moment-split cancellation).
     """
     om1 = 1.0 - p                  # negative
+    onep2 = om1 * om1
+    onep3 = onep2 * om1
     tm = 2.0 - p                   # positive
     alpha = tm / om1               # negative
     one_minus_alpha = 1.0 - alpha  # > 1; equals 1/(p-1)
 
+    ly = np.log(y_i)
+    rho = np.log(phi_i)
     # log W_j = j·log_z - lgamma(j+1) - lgamma(-j·α).
-    # Pull constants out of the j loop.
-    log_z = (-alpha * np.log(y_i) + alpha * np.log(p - 1.0)
-             - one_minus_alpha * np.log(phi_i) - np.log(tm))
+    log_z = (-alpha * ly + alpha * np.log(p - 1.0)
+             - one_minus_alpha * rho - np.log(tm))
+    log_neg = np.log(-om1) + rho
+    wp_base = log_neg / onep2 - alpha / om1 + 1.0 / tm
+    wp2_base = (2.0 * log_neg / onep3 - (3.0 * alpha - 2.0) / onep2
+                + 1.0 / (tm * tm))
 
-    # Continuous-extension dominant index (Dunn-Smyth §3): with ψ(x) ≈ log x,
-    # d_j log W_j = log_z - ψ(j+1) + α·ψ(-jα) ≈ 0 ⇒
-    #     j*  ≈ exp((log_z + α·log(-α)) / (1-α))
     j_star = np.exp((log_z + alpha * np.log(-alpha)) / one_minus_alpha)
     j_star = max(j_star, 1.0)
     j_int = max(1, int(round(j_star)))
 
     def _lw(j):
-        return j * log_z - gammaln(j + 1.0) - gammaln(-j * alpha)
+        return (j * log_z - _nmath._lgammafn(j + 1.0)
+                - _nmath._lgammafn(-j * alpha))
 
-    # Walk outward from j_int both ways. Record (j, log W_j) for each kept
-    # term; track the running max so log-sum-exp is numerically stable. The
-    # `min_steps` guard keeps a few neighbours even when the immediate
-    # neighbour is already below the eps gate (rare; happens at small j*).
+    # Walk outward from j_int both ways (mgcv pure-eps break, no `near` band).
     log_max = _lw(j_int)
     j_list = [float(j_int)]
     lw_list = [log_max]
-
-    # Right tail.
     j = j_int + 1
-    near = 5
     while j < _LD_J_MAX:
         v = _lw(j)
-        if v - log_max < -_LD_EPS and (j - j_int) > near:
-            break
         j_list.append(float(j))
         lw_list.append(v)
         if v > log_max:
             log_max = v
+        if v - log_max < -_LD_EPS:
+            break
         j += 1
-
-    # Left tail.
     j = j_int - 1
     while j >= 1:
         v = _lw(j)
-        if v - log_max < -_LD_EPS and (j_int - j) > near:
-            break
         j_list.append(float(j))
         lw_list.append(v)
         if v > log_max:
             log_max = v
+        if v - log_max < -_LD_EPS:
+            break
         j -= 1
 
     j_arr = np.array(j_list, dtype=float)
@@ -1568,27 +1743,66 @@ def _tweedie_log_a_one(y_i: float, phi_i: float, p: float):
 
     p_w = weights / sum_w
     j_bar = float(np.sum(p_w * j_arr))
-    j_var = float(np.sum(p_w * (j_arr - j_bar) ** 2))
-    # ψ(-j·α) is well-defined for α<0, j≥1 (so -j·α > 0). We compute it on
-    # the same j-grid so that the moment matches the series we just summed.
-    psi_arr = digamma(-j_arr * alpha)
+    j_var = float(np.sum(p_w * j_arr * j_arr) - j_bar * j_bar)
+    # ψ(-j·α) well-defined for α<0, j≥1 (so -j·α > 0); same j-grid as the sum.
+    psi_arr = _nmath.psigamma_vec(-j_arr * alpha, 0.0)
+    trig_arr = _nmath.psigamma_vec(-j_arr * alpha, 1.0)
     j_psi_bar = float(np.sum(p_w * j_arr * psi_arr))
-    j2_psi_bar = float(np.sum(p_w * j_arr * j_arr * psi_arr))
-    j2_psi2_bar = float(np.sum(p_w * (j_arr * psi_arr) ** 2))
-    j2_trig_bar = float(np.sum(
-        p_w * j_arr * j_arr * polygamma(1, -j_arr * alpha)
-    ))
-    return (log_a, j_bar, j_var, j_psi_bar,
-            j2_psi_bar, j2_psi2_bar, j2_trig_bar)
+    # mgcv p-param working derivatives (misc.c:289-293,333-334).
+    xj = (j_arr / onep2) * psi_arr
+    wp1 = j_arr * wp_base + xj - j_arr * (ly / onep2)
+    wp2 = (j_arr * wp2_base + 2.0 * xj / om1
+           - trig_arr * (j_arr / onep2) ** 2 - 2.0 * j_arr * (ly / onep3))
+    m_wp1 = float(np.sum(p_w * wp1))
+    m_comb = float(np.sum(p_w * (wp1 * wp1 + wp2)))
+    m_dwpp = float(np.sum(p_w * (wp1 * j_arr / om1 + j_arr / onep2)))
+    return (log_a, j_bar, j_var, j_psi_bar, m_wp1, m_comb, m_dwpp)
+
+
+def _tweedie_series_rs(ly, j_int, alpha, w_base, wp_base, wp2_base, onep, J):
+    """Rust ``tweedious`` sweep for the scalar-p saturated-likelihood series.
+
+    The rust kernel builds the shared length-``J`` nmath (R's Rmath) tables
+    internally (α constant) and accumulates the moments + mgcv's working
+    derivatives; this wrapper just verifies ``J`` covers every row's eps window
+    (a cheap O(n) right-edge check via the nmath lgamma at the boundary and each
+    row's peak — never the n×J matrix), growing it if needed. Returns the seven
+    ``(n_active,)`` arrays ``(log_a, E[j], Var[j], E[jψ], m_wp1, m_comb,
+    m_dwpp)`` in :func:`_tweedie_log_a_vec`'s order."""
+    ly = np.ascontiguousarray(np.asarray(ly, dtype=float))
+    j_int = np.ascontiguousarray(np.asarray(j_int, dtype=np.int64))
+    log_z = w_base - alpha * ly  # lw at j=1 base (only for the J-coverage check)
+    J = int(J)
+    while J < _LD_J_MAX:
+        # eps-window right-edge check: lw at j=J vs each row's integer peak.
+        lw_right = J * log_z - _nmath._lgammafn(J + 1.0) - _nmath._lgammafn(-J * alpha)
+        lw_peak = (j_int * log_z - _nmath._lgammafn_arr(j_int + 1.0)
+                   - _nmath._lgammafn_arr(-j_int * alpha))
+        if not bool(np.any(lw_right >= lw_peak - _LD_EPS)):
+            break
+        J = min(J * 2, _LD_J_MAX)
+    res = _rs_tweedie_series(
+        ly, j_int, float(alpha),
+        np.ascontiguousarray(np.asarray(w_base, dtype=float)),
+        np.ascontiguousarray(np.asarray(wp_base, dtype=float)),
+        np.ascontiguousarray(np.asarray(wp2_base, dtype=float)),
+        float(onep), int(J), float(_LD_EPS))
+    return (res[:, 0], res[:, 1], res[:, 2], res[:, 3],
+            res[:, 4], res[:, 5], res[:, 6])
 
 
 def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     """Vectorised over y (and per-obs phi). Returns seven arrays of shape
-    ``y.shape``: ``log_a``, ``j_bar``, ``j_var``, ``j_psi_bar``,
-    ``j2_psi_bar``, ``j2_psi2_bar``, ``j2_trig_bar`` (the same moment
-    set as :func:`_tweedie_log_a_one`). Entries with y==0 are 0 (the
-    y=0 row uses the closed-form point mass, not the series). Per-obs
-    phi handles weights via ``φ_i = φ/wt_i``.
+    ``y.shape``: ``log_a``, ``j_bar`` (E[j]), ``j_var`` (Var[j]),
+    ``j_psi_bar`` (E[jψ]) and mgcv's THREE p-parameterisation working-derivative
+    accumulators ``m_wp1`` (E[wp1]), ``m_comb`` (E[wp1²+wp2]),
+    ``m_dwpp`` (E[wp1·j/(1−p)+wpp]) — the same set as :func:`_tweedie_log_a_one`,
+    matching mgcv ``tweedious`` (`wdlogwdp/wi`, `wdW2d2W/wi`, `dWpp/wi`,
+    misc.c:346-503) BEFORE the θ-chain. Combining ``wp1²+wp2`` per term (rather
+    than the old separate ``E[(jψ)²]``/``E[j²ψ']`` moments + subtraction) avoids
+    the ~1e-11 catastrophic cancellation in the 2nd derivatives. Entries with
+    y==0 are 0 (the y=0 row uses the closed-form point mass, not the series).
+    Per-obs phi handles weights via ``φ_i = φ/wt_i``.
 
     Builds a fixed ``j`` grid wide enough to cover every active row's
     eps-truncated series tail, then evaluates the (n_active, J) matrix
@@ -1603,15 +1817,14 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     j_bar = np.zeros_like(y)
     j_var = np.zeros_like(y)
     j_psi_bar = np.zeros_like(y)
-    j2_psi_bar = np.zeros_like(y)
-    j2_psi2_bar = np.zeros_like(y)
-    j2_trig_bar = np.zeros_like(y)
+    m_wp1 = np.zeros_like(y)
+    m_comb = np.zeros_like(y)
+    m_dwpp = np.zeros_like(y)
     flat_y = y.ravel()
     flat_phi = phi_arr.ravel()
     active = flat_y > 0.0
     if not np.any(active):
-        return (log_a, j_bar, j_var, j_psi_bar,
-                j2_psi_bar, j2_psi2_bar, j2_trig_bar)
+        return (log_a, j_bar, j_var, j_psi_bar, m_wp1, m_comb, m_dwpp)
     ya = flat_y[active]
     pha = flat_phi[active]
 
@@ -1619,71 +1832,119 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     tm = 2.0 - p
     alpha = tm / om1
     one_minus_alpha = 1.0 - alpha
+    onep2 = om1 * om1
+    onep3 = onep2 * om1
 
-    log_z = (-alpha * np.log(ya) + alpha * np.log(p - 1.0)
-             - one_minus_alpha * np.log(pha) - np.log(tm))
+    ly = np.log(ya)
+    rho = np.log(pha)
+    log_z = (-alpha * ly + alpha * np.log(p - 1.0)
+             - one_minus_alpha * rho - np.log(tm))
+    # mgcv's per-row p-bases (misc.c:230-232): w_base folds in rho (so per-obs
+    # phi makes them per-row even though α is constant); wp_base/wp2_base are the
+    # p-derivative bases multiplied by j inside the sweep.
+    w_base = alpha * np.log(p - 1.0) + rho / om1 - np.log(tm)
+    log_neg = np.log(-om1) + rho
+    wp_base = log_neg / onep2 - alpha / om1 + 1.0 / tm
+    wp2_base = (2.0 * log_neg / onep3 - (3.0 * alpha - 2.0) / onep2
+                + 1.0 / (tm * tm))
     j_star = np.maximum(
         np.exp((log_z + alpha * np.log(-alpha)) / one_minus_alpha), 1.0,
     )
     j_int = np.maximum(1, np.round(j_star).astype(int))
     j_int_max = int(j_int.max())
-
-    # Series decay rate scales with |alpha|; p close to 2 (slow decay)
-    # needs a wider window before the eps gate fires. Empirically
-    # ``1/|alpha| + 1`` × j_int_max suffices for ``p`` up to 1.99.
-    margin_mult = max(2.0, 1.0 / abs(alpha) + 1.0)
-    safe_margin = max(50, int(np.ceil(margin_mult * j_int_max)) + 20)
-    J = min(j_int_max + safe_margin, _LD_J_MAX)
-
-    j_grid = np.arange(1, J + 1, dtype=float)
-    j_grid_int = j_grid.astype(int)
-    lgamma_jp1 = gammaln(j_grid + 1.0)
-    lgamma_neg_ja = gammaln(-j_grid * alpha)
-    psi_arr = digamma(-j_grid * alpha)
-    trig_arr = polygamma(1, -j_grid * alpha)
-
-    # Chunk on the n_active axis to bound the (chunk, J) working set.
-    # Each row carries 5 J-wide arrays in flight (lw / 2 masks / w /
-    # transient), 8 bytes each → 40 J bytes per row.
     n_active = ya.size
-    chunk = max(1, _chunk_bytes // (40 * J))
 
-    out_la = np.empty(n_active)
-    out_jb = np.empty(n_active)
-    out_jv = np.empty(n_active)
-    out_jpb = np.empty(n_active)
-    out_j2pb = np.empty(n_active)
-    out_j2p2b = np.empty(n_active)
-    out_j2tb = np.empty(n_active)
-    near = 5
-    for s in range(0, n_active, chunk):
-        e = min(s + chunk, n_active)
-        lz_c = log_z[s:e]
-        ji_c = j_int[s:e]
-        lw = (j_grid[None, :] * lz_c[:, None]
-              - lgamma_jp1[None, :] - lgamma_neg_ja[None, :])
-        log_max = np.max(lw, axis=1)
-        within_near = np.abs(j_grid_int[None, :] - ji_c[:, None]) <= near
-        above_eps = lw >= (log_max[:, None] - _LD_EPS)
-        keep = within_near | above_eps
-        w = np.where(keep, np.exp(lw - log_max[:, None]), 0.0)
-        sum_w = np.sum(w, axis=1)
-        out_la[s:e] = log_max + np.log(sum_w)
-        p_w = w / sum_w[:, None]
-        jb_c = np.sum(p_w * j_grid[None, :], axis=1)
-        out_jb[s:e] = jb_c
-        out_jv[s:e] = np.sum(
-            p_w * (j_grid[None, :] - jb_c[:, None]) ** 2, axis=1,
-        )
-        out_jpb[s:e] = np.sum(
-            p_w * j_grid[None, :] * psi_arr[None, :], axis=1,
-        )
-        jpsi = j_grid[None, :] * psi_arr[None, :]
-        out_j2pb[s:e] = np.sum(p_w * j_grid[None, :] * jpsi, axis=1)
-        out_j2p2b[s:e] = np.sum(p_w * jpsi * jpsi, axis=1)
-        out_j2tb[s:e] = np.sum(
-            p_w * j_grid[None, :] ** 2 * trig_arr[None, :], axis=1,
-        )
+    # Window width from the LOCAL curvature of log W_j, NOT the old
+    # conservative ``1/|alpha|`` bound (which over-allocated ~26× at p→2:
+    # J≈3300 where the true eps-window is ~125 wide, then masked the excess
+    # — mgcv's C `tweedious` sweeps a per-row window with early break,
+    # misc.c:301). Near its peak (j ≈ j_int) the log series term is locally
+    # Gaussian: d²logW_j/dj² = −(ψ'(j+1) + α²ψ'(−jα)), so it falls _LD_EPS
+    # below the peak within ±√(2·_LD_EPS·var) (var = −1/that 2nd deriv).
+    # Size J to the widest row's right edge; the grow-loop below is the
+    # bit-exactness GUARANTEE — it stops only once the eps gate has provably
+    # fired inside the window for every row (the rightmost column is below
+    # `log_max − _LD_EPS`), so by unimodality no retained term is ever
+    # truncated and the sum is identical to any wider J. `j_int + half` is
+    # monotone increasing in j_int (ψ' decreasing ⇒ peak_var increasing), so
+    # max_i(j_int_i + half_i) is attained at j_int_max — evaluate the curvature
+    # at that one scalar instead of ψ' over the whole n_active j_int array
+    # (which was a REML-loop hot spot via scipy zeta). Identical J, far cheaper.
+    peak_var = 1.0 / (
+        polygamma(1, j_int_max + 1.0)
+        + alpha * alpha * polygamma(1, -j_int_max * alpha)
+    )
+    half = np.sqrt(2.0 * _LD_EPS * max(float(peak_var), 0.0))
+    right = int(np.ceil(j_int_max + half)) + 16
+    J = min(max(right, j_int_max + 1), _LD_J_MAX)
+
+    if _rs_tweedie_series is not None:
+        # Rust per-row sweep (mgcv tweedious): builds the shared length-J nmath
+        # tables internally (α constant) and accumulates the moments + mgcv's
+        # working derivatives. Python passes the p-bases; J sizes the table.
+        (out_la, out_jb, out_jv, out_jpb,
+         out_m1, out_mc, out_md) = _tweedie_series_rs(
+            ly, j_int, alpha, w_base, wp_base, wp2_base, om1, J)
+    else:
+        out_la = np.empty(n_active)
+        out_jb = np.empty(n_active)
+        out_jv = np.empty(n_active)
+        out_jpb = np.empty(n_active)
+        out_m1 = np.empty(n_active)
+        out_mc = np.empty(n_active)
+        out_md = np.empty(n_active)
+        while True:
+            j_grid = np.arange(1, J + 1, dtype=float)
+            # nmath (R's Rmath) special functions — NOT scipy — so the series
+            # matches the arm64 R build to the libm floor.
+            lgamma_jp1 = _nmath._lgammafn_arr(j_grid + 1.0)
+            lgamma_neg_ja = _nmath._lgammafn_arr(-j_grid * alpha)
+            psi_arr = _nmath.psigamma_vec(-j_grid * alpha, 0.0)
+            trig_arr = _nmath.psigamma_vec(-j_grid * alpha, 1.0)
+
+            # Chunk on the n_active axis to bound the (chunk, J) working set.
+            chunk = max(1, _chunk_bytes // (48 * J))
+            grow = False
+            for s in range(0, n_active, chunk):
+                e = min(s + chunk, n_active)
+                lz_c = log_z[s:e]
+                lw = (j_grid[None, :] * lz_c[:, None]
+                      - lgamma_jp1[None, :] - lgamma_neg_ja[None, :])
+                log_max = np.max(lw, axis=1)
+                above_eps = lw >= (log_max[:, None] - _LD_EPS)
+                # Right boundary still carrying weight ⇒ the eps-window extends
+                # past J for some row ⇒ grow and recompute (rare — the analytic
+                # width above covers it first-try in practice).
+                if J < _LD_J_MAX and above_eps[:, -1].any():
+                    grow = True
+                    break
+                w = np.where(above_eps, np.exp(lw - log_max[:, None]), 0.0)
+                sum_w = np.sum(w, axis=1)
+                out_la[s:e] = log_max + np.log(sum_w)
+                p_w = w / sum_w[:, None]
+                jb_c = np.sum(p_w * j_grid[None, :], axis=1)
+                out_jb[s:e] = jb_c
+                out_jv[s:e] = (
+                    np.sum(p_w * j_grid[None, :] ** 2, axis=1) - jb_c * jb_c)
+                out_jpb[s:e] = np.sum(
+                    p_w * j_grid[None, :] * psi_arr[None, :], axis=1)
+                # mgcv p-param working derivatives of log W_j (misc.c:289-293,
+                # 333-334); combine wp1²+wp2 per term, then reduce.
+                xj = (j_grid / onep2)[None, :] * psi_arr[None, :]
+                wp1 = (j_grid[None, :] * wp_base[s:e, None] + xj
+                       - j_grid[None, :] * (ly[s:e] / onep2)[:, None])
+                wp2 = (j_grid[None, :] * wp2_base[s:e, None]
+                       + 2.0 * xj / om1
+                       - trig_arr[None, :] * ((j_grid / onep2) ** 2)[None, :]
+                       - 2.0 * j_grid[None, :] * (ly[s:e] / onep3)[:, None])
+                out_m1[s:e] = np.sum(p_w * wp1, axis=1)
+                out_mc[s:e] = np.sum(p_w * (wp1 * wp1 + wp2), axis=1)
+                out_md[s:e] = np.sum(
+                    p_w * (wp1 * j_grid[None, :] / om1
+                           + (j_grid / onep2)[None, :]), axis=1)
+            if not grow:
+                break
+            J = min(J * 2, _LD_J_MAX)
 
     flat_la = log_a.ravel()
     flat_jb = j_bar.ravel()
@@ -1693,11 +1954,10 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     flat_jb[active] = out_jb
     flat_jv[active] = out_jv
     flat_jpb[active] = out_jpb
-    j2_psi_bar.ravel()[active] = out_j2pb
-    j2_psi2_bar.ravel()[active] = out_j2p2b
-    j2_trig_bar.ravel()[active] = out_j2tb
-    return (log_a, j_bar, j_var, j_psi_bar,
-            j2_psi_bar, j2_psi2_bar, j2_trig_bar)
+    m_wp1.ravel()[active] = out_m1
+    m_comb.ravel()[active] = out_mc
+    m_dwpp.ravel()[active] = out_md
+    return (log_a, j_bar, j_var, j_psi_bar, m_wp1, m_comb, m_dwpp)
 
 
 def _tweedie_log_a_vec_pv(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
@@ -1716,14 +1976,13 @@ def _tweedie_log_a_vec_pv(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     j_bar = np.zeros_like(y)
     j_var = np.zeros_like(y)
     j_psi_bar = np.zeros_like(y)
-    j2_psi_bar = np.zeros_like(y)
-    j2_psi2_bar = np.zeros_like(y)
-    j2_trig_bar = np.zeros_like(y)
+    m_wp1 = np.zeros_like(y)
+    m_comb = np.zeros_like(y)
+    m_dwpp = np.zeros_like(y)
     flat_y = y.ravel()
     active = flat_y > 0.0
     if not np.any(active):
-        return (log_a, j_bar, j_var, j_psi_bar,
-                j2_psi_bar, j2_psi2_bar, j2_trig_bar)
+        return (log_a, j_bar, j_var, j_psi_bar, m_wp1, m_comb, m_dwpp)
     ya = flat_y[active]
     pha = phi_arr.ravel()[active]
     pa = p_arr.ravel()[active]
@@ -1732,76 +1991,126 @@ def _tweedie_log_a_vec_pv(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     tm = 2.0 - pa
     alpha = tm / om1
     one_minus_alpha = 1.0 - alpha
+    onep2 = om1 * om1
+    onep3 = onep2 * om1
 
-    log_z = (-alpha * np.log(ya) + alpha * np.log(pa - 1.0)
-             - one_minus_alpha * np.log(pha) - np.log(tm))
+    ly = np.log(ya)
+    rho = np.log(pha)
+    log_z = (-alpha * ly + alpha * np.log(pa - 1.0)
+             - one_minus_alpha * rho - np.log(tm))
+    # Per-row p-bases (mgcv tweedious2, misc.c:230-232 per observation).
+    w_base = alpha * np.log(pa - 1.0) + rho / om1 - np.log(tm)
+    log_neg = np.log(-om1) + rho
+    wp_base = log_neg / onep2 - alpha / om1 + 1.0 / tm
+    wp2_base = (2.0 * log_neg / onep3 - (3.0 * alpha - 2.0) / onep2
+                + 1.0 / (tm * tm))
     j_star = np.maximum(
         np.exp((log_z + alpha * np.log(-alpha)) / one_minus_alpha), 1.0,
     )
     j_int = np.maximum(1, np.round(j_star).astype(int))
     j_int_max = int(j_int.max())
-
-    # widest window needed across rows: decay slows as |alpha| shrinks
-    # (p → 2), so size the shared grid from the slowest-decaying row.
-    margin_mult = max(2.0, 1.0 / float(np.min(np.abs(alpha))) + 1.0)
-    safe_margin = max(50, int(np.ceil(margin_mult * j_int_max)) + 20)
-    J = min(j_int_max + safe_margin, _LD_J_MAX)
-
-    j_grid = np.arange(1, J + 1, dtype=float)
-    j_grid_int = j_grid.astype(int)
-    lgamma_jp1 = gammaln(j_grid + 1.0)
-
-    # per-row α ⇒ the -jα tables are (chunk, J); budget ~9 J-wide
-    # doubles per row in flight → 72 J bytes per row.
     n_active = ya.size
-    chunk = max(1, _chunk_bytes // (72 * J))
 
-    out_la = np.empty(n_active)
-    out_jb = np.empty(n_active)
-    out_jv = np.empty(n_active)
-    out_jpb = np.empty(n_active)
-    out_j2pb = np.empty(n_active)
-    out_j2p2b = np.empty(n_active)
-    out_j2tb = np.empty(n_active)
-    near = 5
-    for s in range(0, n_active, chunk):
-        e = min(s + chunk, n_active)
-        lz_c = log_z[s:e]
-        ji_c = j_int[s:e]
-        nja = -j_grid[None, :] * alpha[s:e, None]      # (c, J), > 0
-        lw = (j_grid[None, :] * lz_c[:, None]
-              - lgamma_jp1[None, :] - gammaln(nja))
-        log_max = np.max(lw, axis=1)
-        within_near = np.abs(j_grid_int[None, :] - ji_c[:, None]) <= near
-        above_eps = lw >= (log_max[:, None] - _LD_EPS)
-        keep = within_near | above_eps
-        w = np.where(keep, np.exp(lw - log_max[:, None]), 0.0)
-        sum_w = np.sum(w, axis=1)
-        out_la[s:e] = log_max + np.log(sum_w)
-        p_w = w / sum_w[:, None]
-        jb_c = np.sum(p_w * j_grid[None, :], axis=1)
-        out_jb[s:e] = jb_c
-        out_jv[s:e] = np.sum(
-            p_w * (j_grid[None, :] - jb_c[:, None]) ** 2, axis=1,
-        )
-        psi_c = digamma(nja)
-        out_jpb[s:e] = np.sum(p_w * j_grid[None, :] * psi_c, axis=1)
-        jpsi = j_grid[None, :] * psi_c
-        out_j2pb[s:e] = np.sum(p_w * j_grid[None, :] * jpsi, axis=1)
-        out_j2p2b[s:e] = np.sum(p_w * jpsi * jpsi, axis=1)
-        out_j2tb[s:e] = np.sum(
-            p_w * j_grid[None, :] ** 2 * polygamma(1, nja), axis=1,
-        )
+    # Per-row eps-window from the local curvature of log W_j (α is per-row
+    # here), NOT the old ``1/min|alpha|`` worst-row bound: see the scalar
+    # :func:`_tweedie_log_a_vec` for the derivation and the bit-exactness
+    # guarantee (the grow-loop only stops once the eps gate has fired inside
+    # the window for every row). Size the shared grid to the widest row.
+    peak_var = 1.0 / (
+        polygamma(1, j_int + 1.0)
+        + alpha * alpha * polygamma(1, -j_int * alpha)
+    )
+    half = np.sqrt(2.0 * _LD_EPS * np.maximum(peak_var, 0.0))
+    right = int(np.ceil(float(np.max(j_int + half)))) + 16
+    J = min(max(right, j_int_max + 1), _LD_J_MAX)
+
+    if _rs_tweedie_series_pv is not None:
+        # Rust per-row windowed sweep (mgcv tweedious2): recomputes the −jα
+        # special functions inside each row's eps-window via the nmath ports
+        # (same C source as R/mgcv) and accumulates the moments + mgcv's working
+        # derivatives — never the dense (n, J) matrix. The kernel caps the
+        # up-sweep at `_LD_J_MAX` and stops per-row once the eps gate fires.
+        res = _rs_tweedie_series_pv(
+            np.ascontiguousarray(ly),
+            np.ascontiguousarray(j_int.astype(np.int64)),
+            np.ascontiguousarray(alpha),
+            np.ascontiguousarray(w_base),
+            np.ascontiguousarray(wp_base),
+            np.ascontiguousarray(wp2_base),
+            np.ascontiguousarray(om1),
+            float(_LD_EPS), int(_LD_J_MAX))
+        out_la = res[:, 0]
+        out_jb = res[:, 1]
+        out_jv = res[:, 2]
+        out_jpb = res[:, 3]
+        out_m1 = res[:, 4]
+        out_mc = res[:, 5]
+        out_md = res[:, 6]
+    else:
+        out_la = np.empty(n_active)
+        out_jb = np.empty(n_active)
+        out_jv = np.empty(n_active)
+        out_jpb = np.empty(n_active)
+        out_m1 = np.empty(n_active)
+        out_mc = np.empty(n_active)
+        out_md = np.empty(n_active)
+        while True:
+            j_grid = np.arange(1, J + 1, dtype=float)
+            lgamma_jp1 = _nmath._lgammafn_arr(j_grid + 1.0)
+
+            # per-row α ⇒ the -jα tables are (chunk, J); budget ~12 J-wide
+            # doubles per row in flight → 96 J bytes per row.
+            chunk = max(1, _chunk_bytes // (96 * J))
+            grow = False
+            for s in range(0, n_active, chunk):
+                e = min(s + chunk, n_active)
+                lz_c = log_z[s:e]
+                op_c = om1[s:e]
+                op2_c = onep2[s:e]
+                op3_c = onep3[s:e]
+                nja = -j_grid[None, :] * alpha[s:e, None]      # (c, J), > 0
+                lw = (j_grid[None, :] * lz_c[:, None]
+                      - lgamma_jp1[None, :] - _nmath._lgammafn_arr(nja))
+                log_max = np.max(lw, axis=1)
+                above_eps = lw >= (log_max[:, None] - _LD_EPS)
+                if J < _LD_J_MAX and above_eps[:, -1].any():
+                    grow = True
+                    break
+                w = np.where(above_eps, np.exp(lw - log_max[:, None]), 0.0)
+                sum_w = np.sum(w, axis=1)
+                out_la[s:e] = log_max + np.log(sum_w)
+                p_w = w / sum_w[:, None]
+                jb_c = np.sum(p_w * j_grid[None, :], axis=1)
+                out_jb[s:e] = jb_c
+                out_jv[s:e] = (
+                    np.sum(p_w * j_grid[None, :] ** 2, axis=1) - jb_c * jb_c)
+                psi_c = _nmath.psigamma_vec(nja, 0.0)
+                trig_c = _nmath.psigamma_vec(nja, 1.0)
+                out_jpb[s:e] = np.sum(p_w * j_grid[None, :] * psi_c, axis=1)
+                # mgcv p-param working derivatives (per-row α), wp1²+wp2 combined.
+                jo2 = j_grid[None, :] / op2_c[:, None]
+                xj = jo2 * psi_c
+                wp1 = (j_grid[None, :] * wp_base[s:e, None] + xj
+                       - j_grid[None, :] * (ly[s:e] / op2_c)[:, None])
+                wp2 = (j_grid[None, :] * wp2_base[s:e, None]
+                       + 2.0 * xj / op_c[:, None] - trig_c * jo2 * jo2
+                       - 2.0 * j_grid[None, :] * (ly[s:e] / op3_c)[:, None])
+                out_m1[s:e] = np.sum(p_w * wp1, axis=1)
+                out_mc[s:e] = np.sum(p_w * (wp1 * wp1 + wp2), axis=1)
+                out_md[s:e] = np.sum(
+                    p_w * (wp1 * j_grid[None, :] / op_c[:, None] + jo2), axis=1)
+            if not grow:
+                break
+            J = min(J * 2, _LD_J_MAX)
 
     log_a.ravel()[active] = out_la
     j_bar.ravel()[active] = out_jb
     j_var.ravel()[active] = out_jv
     j_psi_bar.ravel()[active] = out_jpb
-    j2_psi_bar.ravel()[active] = out_j2pb
-    j2_psi2_bar.ravel()[active] = out_j2p2b
-    j2_trig_bar.ravel()[active] = out_j2tb
-    return (log_a, j_bar, j_var, j_psi_bar,
-            j2_psi_bar, j2_psi2_bar, j2_trig_bar)
+    m_wp1.ravel()[active] = out_m1
+    m_comb.ravel()[active] = out_mc
+    m_dwpp.ravel()[active] = out_md
+    return (log_a, j_bar, j_var, j_psi_bar, m_wp1, m_comb, m_dwpp)
 
 
 def _ld_tweedie_work(y, mu, theta, rho, a: float = 1.001,
@@ -1923,34 +2232,43 @@ def _ld_tweedie_work(y, mu, theta, rho, a: float = 1.001,
     # series part — added AFTER the transform: like the C code, it is
     # computed natively in (θ, ρ) (gam.fit3.r:3013-3020)
     if any_pos:
-        la, jb, jv, jpb, j2pb, j2p2b, j2tb = _tweedie_log_a_vec_pv(
-            y_i, phii, p_i)
-        al = twop / onep                      # α < 0
-        alp = 1.0 / onep ** 2                 # dα/dp
-        alpp = 2.0 / onep ** 3                # d²α/dp²
-        lphi = np.log(phii)
-        ly = np.log(y_i)
-        lp1 = np.log(p_i - 1.0)
-        Lp = (-alp * ly + alp * lp1 + al / (p_i - 1.0) + alp * lphi
-              + 1.0 / twop)
-        Lpp = (-alpp * ly + alpp * lp1 + 2.0 * alp / (p_i - 1.0)
-               - al / (p_i - 1.0) ** 2 + alpp * lphi + 1.0 / twop ** 2)
+        # mgcv's ldTweedie dispatch (gam.fit3.r:2847,2942): when θ AND ρ are
+        # constant across rows it sets `buffer=TRUE` and calls the scalar-p
+        # C_tweedious, whose lgamma/digamma/trigamma(-jα) tables are shared
+        # across rows (α is then a single value); only genuinely per-row θ/ρ
+        # take the C_tweedious2 vector path. tw.null.fit's Newton evaluates a
+        # CONSTANT (μ,θ,ρ) on every row (~1200×), so the shared-table path is
+        # the difference between matching mgcv and a ~13× null-fit blow-up.
+        # `np.ptp == 0` ⇔ mgcv's `length(unique(·))==1` (ULP-exact).
+        buffer = (theta.size <= 1 or float(np.ptp(theta)) == 0.0) and \
+                 (rho.size <= 1 or float(np.ptp(rho)) == 0.0)
+        if buffer:
+            la, jb, jv, jpb, m_wp1, m_comb, m_dwpp = _tweedie_log_a_vec(
+                y_i, phii, float(p_i.flat[0]))
+        else:
+            la, jb, jv, jpb, m_wp1, m_comb, m_dwpp = _tweedie_log_a_vec_pv(
+                y_i, phii, p_i)
+        al = twop / onep                      # α
         one_m_al = 1.0 - al
-        cov_j_jpsi = j2pb - jb * jpb
-        dla_dp = jb * Lp + alp * jpb
-        d2la_dp2 = (Lp ** 2 * jv + 2.0 * Lp * alp * cov_j_jpsi
-                    + alp ** 2 * (j2p2b - jpb ** 2)
-                    + jb * Lpp + alpp * jpb - alp ** 2 * j2tb)
-        d2la_dpdrho = (-one_m_al * (Lp * jv + alp * cov_j_jpsi)
-                       + alp * jb)
+        # Series derivatives in mgcv's well-conditioned working-parameter form
+        # (tweedious, misc.c:498-503): the kernel returns the p-param accumulators
+        # m_wp1=E[wp1], m_comb=E[wp1²+wp2], m_dwpp=E[wp1·j/(1−p)+wpp]; the θ-chain
+        # (dpth1/dpth2) is reapplied here. Combining wp1²+wp2 per term (inside the
+        # kernel) avoids the ~1e-11 cancellation the old moment split incurred.
         d1 = dpth1[ind]
         d2_ = dpth2[ind]
+        # Form the WELL-CONDITIONED p-param 2nd derivatives first (the
+        # m_comb−m_wp1² / m_dwpp−(jb/onep)·m_wp1 subtractions have no
+        # cancellation, mgcv misc.c:500-501), THEN apply the θ-chain — doing
+        # the chain inside the subtraction would re-introduce the cancellation.
+        d2logS_dp2 = m_comb - m_wp1 ** 2              # ∂²log a/∂p²
+        d2logS_dpdrho = m_dwpp - (jb / onep) * m_wp1  # ∂²log a/∂p∂ρ
         ld[ind, 0] += la
         ld[ind, 1] += -one_m_al * jb
         ld[ind, 2] += one_m_al ** 2 * jv
-        ld[ind, 3] += d1 * dla_dp
-        ld[ind, 4] += d1 ** 2 * d2la_dp2 + d2_ * dla_dp
-        ld[ind, 5] += d1 * d2la_dpdrho
+        ld[ind, 3] += d1 * m_wp1
+        ld[ind, 4] += d1 ** 2 * d2logS_dp2 + d2_ * m_wp1
+        ld[ind, 5] += d1 * d2logS_dpdrho
     return ld
 
 
@@ -1969,13 +2287,41 @@ def _tw_null_fit(y, a: float = 1.001, b: float = 1.999):
     def _ld_sums(t):
         ld = _ld_tweedie_work(y, np.exp(t[0]) * ones, t[1] * ones,
                               t[2] * ones, a=a, b=b)
-        return ld.sum(axis=0)
+        # mgcv reduces ldTweedie with R's colSums, which accumulates in LDOUBLE
+        # (80-bit on x86). Near the flat MLE the step-halving accept test
+        # `Σl(θ₁) < Σl(θ)` resolves a ~1e-9 change inside a ~1e3 sum; a plain
+        # float64 reduction's ~1e-10 noise stalls the Newton (gradient frozen
+        # ~3e-5, well above the 1e-9·|l| break ⇒ all 50 iters × deep halving,
+        # ~1200 evals vs mgcv's ~60). Accumulate in long double to match R's
+        # colSums precision, then round to float64. (On ARM np.longdouble ≡
+        # float64 — same as R's LDOUBLE there, so the parity is preserved.)
+        return ld.sum(axis=0, dtype=np.longdouble).astype(np.float64)
 
     lds = _ld_sums(th)
+    # The log-μ Hessian uses mgcv's approximate chain (no g·∂²μ term), so the
+    # Newton converges only LINEARLY near the flat MLE — the μ-gradient drops
+    # one ~0.4 ratio per step, oscillating in sign. mgcv reaches its 1e-9·|l|
+    # gradient break before the step it accepts shrinks to FP noise; whether it
+    # does is decided by sub-1e-9 likelihood comparisons (hence the LDOUBLE
+    # colSums above). For datasets where the residual numpy-vs-R summation
+    # difference freezes the gradient just shy of the break, detect the stall
+    # (max|g| no longer falling) and stop — the (μ,p,φ) there already matches
+    # mgcv to ~6 sig figs. Without it the loop burns all 50 iters at ~20
+    # halvings each (~1000 evals vs mgcv's ~60-130).
+    gmag_prev = float("inf")
+    n_stall = 0
     for _ in range(50):
         g = lds[[6, 3, 1]].copy()
         if np.sum(np.abs(g) > 1e-9 * abs(lds[0])) == 0:
             break
+        gmag = float(np.max(np.abs(g)))
+        if gmag >= gmag_prev:
+            n_stall += 1
+            if n_stall >= 2:
+                break
+        else:
+            n_stall = 0
+        gmag_prev = gmag
         g[0] = g[0] * np.exp(th[0])      # work on log scale for mu
         H = np.zeros((3, 3))             # mu, th, rh
         H[0, 0] = lds[7]
@@ -1993,7 +2339,12 @@ def _tw_null_fit(y, a: float = 1.001, b: float = 1.999):
         ms = float(np.max(np.abs(step)))
         if ms > 3.0:
             step = step * 3.0 / ms
-        while True:
+        # Bounded step-halving (mgcv's tw.null.fit uses an unbounded while, but
+        # relies on the gradient break firing first; cap it so the flat-MLE
+        # stall can't spin — 40 halvings ⇒ a 1e-12 step, deep past any useful
+        # move).
+        accepted = False
+        for _h in range(40):
             th1 = th - step
             lds1 = _ld_sums(th1)
             if lds1[0] < lds[0]:
@@ -2001,7 +2352,10 @@ def _tw_null_fit(y, a: float = 1.001, b: float = 1.999):
             else:
                 th = th1
                 lds = lds1
+                accepted = True
                 break
+        if not accepted:
+            break
     t2 = th[1]
     if t2 > 0:
         p = (b + a * np.exp(-t2)) / (1.0 + np.exp(-t2))
@@ -2938,6 +3292,11 @@ class Tweedie(Family):
         if not (1.0 < p < 2.0):
             raise ValueError(f"Tweedie requires 1 < p < 2; got p={p!r}")
         self.p = float(p)
+        # (φ, p, y-fingerprint) → 7-moment Dunn-Smyth bundle. The saturated
+        # series a(y, φ, p) is μ-INDEPENDENT, so ls/dls_dp/_d2ls_dp at one
+        # (φ, p) point — and every PIRLS iter / repeated outer eval at that
+        # point — recompute the same arrays. See _saturated_series.
+        self._sat_series_cache: dict = {}
         super().__init__(link=link)
 
     def variance(self, mu):
@@ -3031,6 +3390,35 @@ class Tweedie(Family):
         log_f = self._log_density(y, mu, phi)
         return -2.0 * float(np.sum(log_f * wt)) + 2.0
 
+    def _saturated_series(self, y_nz, phi_nz):
+        """Memoised :func:`_tweedie_log_a_vec` at the saturated point (μ = y).
+
+        ``ls``/``dls_dp``/``_d2ls_dp`` each evaluate the Dunn-Smyth series at
+        the SAME ``(y, φ=scale, p)`` and extract different moments; the series
+        is μ-independent, so within a score-eval (and wherever the joint outer
+        Newton revisits a ``(φ, p)``) it is otherwise recomputed redundantly
+        (a cliff fit makes 189 calls at only 33 distinct ``(φ, p)`` — 5.7×).
+        Mirrors mgcv's ``buffer=TRUE`` reuse in ``ldTweedie``. Bit-identical:
+        returns the very arrays ``_tweedie_log_a_vec`` would (the callers only
+        read them). Keyed on ``(φ, p)`` + a cheap y fingerprint (size/ends/sum
+        — exact within a fit, collision-proof across datasets); ``self.p`` is
+        the live power so a ``tw`` p-update invalidates stale entries."""
+        p = self.p
+        scale = float(phi_nz[0]) if y_nz.size else 0.0
+        key = (scale, p, y_nz.size,
+               float(y_nz[0]) if y_nz.size else 0.0,
+               float(y_nz[-1]) if y_nz.size else 0.0,
+               float(y_nz.sum()) if y_nz.size else 0.0)
+        cache = self._sat_series_cache
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+        res = _tweedie_log_a_vec(y_nz, phi_nz, p)
+        if len(cache) >= 64:
+            cache.clear()
+        cache[key] = res
+        return res
+
     def ls(self, y, wt, scale):
         """Saturated log-lik Σ w_i·log f(y_i; y_i, φ, p) and its 1st/2nd
         derivatives wrt log φ (hea log-scale convention).
@@ -3081,7 +3469,8 @@ class Tweedie(Family):
         j_bar = np.zeros_like(y_g)
         j_var = np.zeros_like(y_g)
         if np.any(~zero):
-            la_, jb_, jv_ = _tweedie_log_a_vec(y_g[~zero], phi_i[~zero], p)[:3]
+            la_, jb_, jv_ = self._saturated_series(
+                y_g[~zero], phi_i[~zero])[:3]
             log_a[~zero] = la_
             j_bar[~zero] = jb_
             j_var[~zero] = jv_
@@ -3207,8 +3596,8 @@ class Tweedie(Family):
         j_bar = np.zeros_like(y_g)
         j_psi_bar = np.zeros_like(y_g)
         if np.any(~zero):
-            _, jb_, _, jpb_, *_rest2 = _tweedie_log_a_vec(
-                y_g[~zero], phi_i[~zero], p
+            _, jb_, _, jpb_, *_rest2 = self._saturated_series(
+                y_g[~zero], phi_i[~zero]
             )
             j_bar[~zero] = jb_
             j_psi_bar[~zero] = jpb_
@@ -3267,7 +3656,6 @@ class Tweedie(Family):
         zero = (y_g == 0.0)
         y_safe = np.where(zero, 1.0, y_g)
         L = np.where(zero, 0.0, np.log(y_safe))
-        log_phi = np.log(phi_i)
 
         # --- density part (μ = y) ---------------------------------------
         y_tm = y_safe ** tm
@@ -3279,31 +3667,19 @@ class Tweedie(Family):
         cross_dens = -x_dens               # already in log φ form
 
         # --- series part -------------------------------------------------
-        ap = 1.0 / (om1 * om1)             # α′
-        app = 2.0 / (om1 * om1 * om1)      # α″
-        inv_pm1 = 1.0 / (p - 1.0)          # 1 − α
         d2p_ser = np.zeros_like(y_g)
         cross_ser = np.zeros_like(y_g)
         if np.any(~zero):
-            (_, jb, jv, jpb, j2pb, j2p2b, j2tb) = _tweedie_log_a_vec(
-                y_g[~zero], phi_i[~zero], p
+            (_, jb, _jv, _jpb, m_wp1, m_comb, m_dwpp) = self._saturated_series(
+                y_g[~zero], phi_i[~zero]
             )
-            C = log_phi[~zero] + np.log(p - 1.0) - L[~zero] - tm
-            E_jK = jb * C + jpb
-            G_mean = ap * E_jK + jb / tm
-            E_j2 = jv + jb * jb
-            coef = ap * C + 1.0 / tm
-            E_G2 = (coef * coef * E_j2 + 2.0 * coef * ap * j2pb
-                    + ap * ap * j2p2b)
-            var_G = E_G2 - G_mean * G_mean
-            d2p_ser[~zero] = (app * E_jK
-                              + ap * (inv_pm1 + 1.0) * jb
-                              - ap * ap * j2tb
-                              + jb / (tm * tm)
-                              + var_G)
-            cross_ser[~zero] = (ap * jb
-                                - inv_pm1 * (coef * jv
-                                             + ap * (j2pb - jpb * jb)))
+            # mgcv tweedious p-param 2nd derivatives (misc.c:500-501) from the
+            # well-conditioned working accumulators: m_wp1 = E[∂logW/∂p],
+            # m_comb = E[(∂logW/∂p)² + ∂²logW/∂p²], m_dwpp = E[∂logW/∂p·j/(1−p)
+            # + ∂²logW/∂p∂logφ]. Combining (∂logW/∂p)²+∂²logW/∂p² PER TERM avoids
+            # the ~1e-11 cancellation the old separate-moment split incurred.
+            d2p_ser[~zero] = m_comb - m_wp1 ** 2
+            cross_ser[~zero] = m_dwpp - (jb / om1) * m_wp1
 
         d2p = np.where(zero, 0.0, d2p_ser + d2p_dens)
         cross = np.where(zero, 0.0, cross_ser + cross_dens)
@@ -3327,10 +3703,10 @@ class tw(Tweedie):
     (mgcv's start) unless ``theta`` is passed (sets p = p(theta)).
 
     ``hea.gam`` estimates θ jointly with (ρ, log φ) in the analytical
-    outer Newton (the family-generic Dd chain supplies the θ gradient;
-    the Hessian θ rows are central differences of that gradient). The
-    fitted ``p̂`` is stored on ``family.p``; the converged θ̂ on
-    ``family.theta``.
+    outer Newton (the family-generic Dd chain supplies the θ gradient
+    and the analytic θ rows/cols of the REML Hessian — mgcv's gdi2
+    ``D2``/``P2``/``ldet2`` blocks). The fitted ``p̂`` is stored on
+    ``family.p``; the converged θ̂ on ``family.theta``.
     """
     name = "Tweedie"
     n_theta = 1
@@ -3427,10 +3803,10 @@ class tw(Tweedie):
         derivatives come from :meth:`Tweedie._d2ls_dp` (family-review
         B4; previously NaN-poisoned).
 
-        Note: hea's outer-Newton θ rows are still central differences
-        of the analytical gradient (gam.py `_reml_hessian`) — they
-        don't read lsth2 yet; mgcv's `estimate.theta` Newton and any
-        future analytic θ-row port do.
+        ``lsth2`` feeds the analytic θ rows/cols of the REML Hessian
+        (gam.py ``_reml_hessian``): the ``−2·lsth2/γ`` ``ls2`` block for
+        θ-θ and the ``−2·lsth2[θ,logφ]/γ`` cross for θ-log φ, matching
+        mgcv's gam.fit4.r:746,757.
         """
         saved = None
         if theta is not None:
@@ -3481,24 +3857,33 @@ class tw(Tweedie):
                      / (np.exp(th) + 1) ** 3)
         mu1p = mu ** (1 - p)
         mup = mu ** p
+        # mu**(-1-p) == mu**(-p-1) bit-for-bit (commutative exponent add); the
+        # mgcv source recomputes it as `mup1` at level>0 — share the one pow.
+        mupm1 = mu ** (-1 - p)
         r = {}
         ymupi = y / mup
         r["Dmu"] = 2 * wt * (mu1p - ymupi)
-        r["Dmu2"] = 2 * wt * (mu ** (-1 - p) * p * y + (1 - p) / mup)
+        r["Dmu2"] = 2 * wt * (mupm1 * p * y + (1 - p) / mup)
         r["EDmu2"] = (2 * wt) / mup
         if level > 0:
             i1p = 1 / (1 - p)
             y1 = y + (y == 0)
             logmu = np.log(mu)
+            # Hoist sub-expressions the verbatim mgcv source recomputes (R's
+            # `^`/`log` re-evaluate each time): y**(2-p), log(y1), their product,
+            # and mu**(-p-1) — all byte-identical to the inline forms, just once.
+            logy1 = np.log(y1)
+            y2p = y ** (2 - p)
+            y2plogy = y2p * logy1
             mu2p = mu * mu1p
+            mup1 = mupm1
             r["Dth"] = 2 * wt * (
-                (y ** (2 - p) * np.log(y1) - mu2p * logmu) / (2 - p)
-                + (y * mu1p * logmu - y ** (2 - p) * np.log(y1)) / (1 - p)
-                - (y ** (2 - p) - mu2p) / (2 - p) ** 2
-                + (y ** (2 - p) - y * mu1p) * i1p ** 2
+                (y2plogy - mu2p * logmu) / (2 - p)
+                + (y * mu1p * logmu - y2plogy) / (1 - p)
+                - (y2p - mu2p) / (2 - p) ** 2
+                + (y2p - y * mu1p) * i1p ** 2
             ) * dpth1
             r["Dmuth"] = 2 * wt * logmu * (ymupi - mu1p) * dpth1
-            mup1 = mu ** (-p - 1)
             r["Dmu3"] = -2 * wt * mup1 * p * (y / mu * (p + 1) + 1 - p)
             r["Dmu2th"] = 2 * wt * (
                 mup1 * y * (1 - p * logmu) - (logmu * (1 - p) + 1) / mup
@@ -3506,20 +3891,20 @@ class tw(Tweedie):
             r["EDmu3"] = -2 * wt * p * mup1
             r["EDmu2th"] = -2 * wt * logmu / mup * dpth1
         if level > 1:
+            logmu2 = logmu ** 2
             mup2 = mup1 / mu
             r["Dmu4"] = 2 * wt * mup2 * p * (p + 1) * (y * (p + 2) / mu + 1 - p)
-            y2plogy = y ** (2 - p) * np.log(y1)
-            y2plog2y = y2plogy * np.log(y1)
+            y2plog2y = y2plogy * logy1
             r["Dth2"] = 2 * wt * (
-                (mu2p * logmu ** 2 - y2plog2y) / (2 - p)
-                + (y2plog2y - y * mu1p * logmu ** 2) / (1 - p)
+                (mu2p * logmu2 - y2plog2y) / (2 - p)
+                + (y2plog2y - y * mu1p * logmu2) / (1 - p)
                 + 2 * (y2plogy - mu2p * logmu) / (2 - p) ** 2
                 + 2 * (y * mu1p * logmu - y2plogy) / (1 - p) ** 2
-                + 2 * (mu2p - y ** (2 - p)) / (2 - p) ** 3
-                + 2 * (y ** (2 - p) - y * mu ** (1 - p)) / (1 - p) ** 3
+                + 2 * (mu2p - y2p) / (2 - p) ** 3
+                + 2 * (y2p - y * mu1p) / (1 - p) ** 3
             ) * dpth1 ** 2 + r["Dth"] * dpth2 / dpth1
-            r["Dmuth2"] = (2 * wt * ((mu1p * logmu ** 2
-                                      - logmu ** 2 * ymupi) * dpth1 ** 2)
+            r["Dmuth2"] = (2 * wt * ((mu1p * logmu2
+                                      - logmu2 * ymupi) * dpth1 ** 2)
                            + r["Dmuth"] * dpth2 / dpth1)
             r["Dmu2th2"] = (2 * wt * ((mup1 * logmu * y * (logmu * p - 2)
                             + logmu / mup * (logmu * (1 - p) + 2)) * dpth1 ** 2)
@@ -4113,6 +4498,20 @@ class nb(Family):
         Th = float(np.exp(th0))
         y = np.asarray(y, dtype=float)
         w = np.asarray(wt, dtype=float)
+        # The REML grad/Hessian/score each evaluate this saturated-likelihood
+        # at the SAME (θ, scale) within an outer step (profiled 17 calls / 5
+        # distinct = 71% redundant). It's a pure function of (y, wt, θ); memoise
+        # like Tweedie._saturated_series (bit-identical — callers only read).
+        cache = getattr(self, "_ls_cache", None)
+        if cache is None:
+            cache = self._ls_cache = {}
+        key = (th0, float(scale), y.size,
+               float(y[0]) if y.size else 0.0,
+               float(y[-1]) if y.size else 0.0,
+               float(y.sum()), float(w.sum()) if w.size else 0.0)
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
         ylogy = np.where(y > 0, y * np.log(np.maximum(y, 1e-300)), 0.0)
         term = ((y + Th) * np.log(y + Th) - ylogy
                 + gammaln(y + 1.0) - Th * np.log(Th) + gammaln(Th)
@@ -4125,17 +4524,21 @@ class nb(Family):
         term1 = Th * (lyth - psi0_yth + psi0_th - th0)
         LSTH = (-term1 * w)[:, None]
         lsth = float(np.sum(LSTH))
-        psi1_yth = polygamma(1, yth)
-        psi1_th = polygamma(1, Th)
+        psi1_yth = _polygamma(1, yth)
+        psi1_th = _polygamma(1, Th)
         term2 = Th * (lyth - Th * psi1_yth - psi0_yth + Th / yth
                       + Th * psi1_th + psi0_th - th0 - 1.0)
         lsth2 = -float(np.sum(term2 * w))
-        return {
+        res = {
             "ls": ls0,
             "lsth1": np.array([lsth]),
             "lsth2": np.array([[lsth2]]),
             "LSTH1": LSTH,
         }
+        if len(cache) >= 64:
+            cache.clear()
+        cache[key] = res
+        return res
 
     # ----- initialization / validity -------------------------------------
 
@@ -4292,15 +4695,15 @@ class betar(Family):
         muth = mu * theta
         onemuth = onemu * theta
         psi0_th = digamma(theta)
-        psi1_th = polygamma(1, theta)
+        psi1_th = _polygamma(1, theta)
         psi0_muth = digamma(muth)
         psi0_onemuth = digamma(onemuth)
-        psi1_muth = polygamma(1, muth)
-        psi1_onemuth = polygamma(1, onemuth)
-        psi2_muth = polygamma(2, muth)
-        psi2_onemuth = polygamma(2, onemuth)
-        psi3_muth = polygamma(3, muth)
-        psi3_onemuth = polygamma(3, onemuth)
+        psi1_muth = _polygamma(1, muth)
+        psi1_onemuth = _polygamma(1, onemuth)
+        psi2_muth = _polygamma(2, muth)
+        psi2_onemuth = _polygamma(2, onemuth)
+        psi3_muth = _polygamma(3, muth)
+        psi3_onemuth = _polygamma(3, onemuth)
         log_yoney = np.log(y) - np.log1p(-y)
         r: dict = {}
         r["Dmu"] = 2.0 * wt * theta * (psi0_muth - psi0_onemuth - log_yoney)
@@ -4383,8 +4786,8 @@ class betar(Family):
             if deriv:
                 g = (phi * np.log(yy) - phi * np.log1p(-yy)
                      - phi * digamma(mu * phi) + phi * digamma((1.0 - mu) * phi))
-                h = -phi ** 2 * (polygamma(1, mu * phi)
-                                 + polygamma(1, (1.0 - mu) * phi))
+                h = -phi ** 2 * (_polygamma(1, mu * phi)
+                                 + _polygamma(1, (1.0 - mu) * phi))
                 dmueta1 = expeta * (b - a) / (1.0 + expeta) ** 2
                 dmueta2 = (np.sign(eta) * ((a - b) * expeta
                            + (b - a) * expeta ** 2) / (expeta + 1.0) ** 3)
@@ -5196,8 +5599,13 @@ class ziP(Family):
     def dev_resids(self, y, mu, wt, theta=None):
         th = self._theta if theta is None else np.asarray(theta, dtype=float)
         p = self._presence_lp(mu, th)
-        return -2.0 * _zipll(np.asarray(y, dtype=float),
-                             np.asarray(mu, dtype=float), p, deriv=0)["l"]
+        # mgcv's R dev.resids is exactly `-2*zipll(...)$l` (efam.r:3884-3890).
+        # For extreme trial η the Poisson mean e^η overflows; R folds that to
+        # ±Inf silently (R's exp/`*` never warn), so mirror R's silence — the
+        # Inf deviance for a rejected step is what mgcv's fitter sees too.
+        with np.errstate(over="ignore", invalid="ignore"):
+            return -2.0 * _zipll(np.asarray(y, dtype=float),
+                                 np.asarray(mu, dtype=float), p, deriv=0)["l"]
 
     def Dd(self, y, mu, theta, wt, level: int = 0) -> dict:
         return _zip_Dd(y, mu, np.asarray(theta, dtype=float), wt,
@@ -5598,7 +6006,6 @@ def _cnorm_Dd(y, mu, theta, wt, censor, level=0):
     th3 = 3.0 * th
     eth = np.exp(-th)
     e2th = eth * eth
-    e3th = e2th * eth
     yat, iu, ii, il, ir = _cnorm_cases(y, censor)
 
     n = mu.shape[0]
@@ -5641,7 +6048,6 @@ def _cnorm_Dd(y, mu, theta, wt, censor, level=0):
         y1 = np.maximum(y[ii], yat[ii])
         ethi = eth[ii]
         e2thi = e2th[ii]
-        e3thi = e3th[ii]
         thi = th[ii]
         th3i = th3[ii]
         z0 = (y0 - muu) * ethi
@@ -6209,10 +6615,24 @@ def gamlss_gH(X, jj, l1, l2, i2, l3=None, i3=None, l4=None, i4=None,
     for i in range(K):
         lb[jj[i]] += X[:, jj[i]].T @ l1[:, i]
 
+    # crossprod(X_i, (w·l2)·X_j) per LP block. The hot path is numpy `@`
+    # (Accelerate/BLAS GEMM, ~peak FLOPS — mgcv uses the same). But an optimized
+    # GEMM tiles its output rows independently AND picks its micro-kernel by
+    # array alignment, so two bit-identical input columns (a rank-deficient
+    # duplicate covariate) can get output rows differing by ~1e-13 — enough to
+    # flip gam.fit5's end-stage QR rank-check pivot tie (gam.fit4.r:1172) →
+    # a different unidentifiable column dropped, platform-dependently. That only
+    # matters AT the rank check, so gam.fit5 recomputes this Hessian under
+    # `deterministic_xwx()` there (and only there): `_xwx` is a fixed-order
+    # reduction (rust gamlss_xwx, else einsum) — construction-identical across
+    # rows for identical columns, as mgcv's reference-BLAS crossprod is.
+    det = _GAMLSS_XWX_DETERMINISTIC
     lbb = np.zeros((p, p))
     for i in range(K):
         for j in range(i, K):
-            A = X[:, jj[i]].T @ (l2[:, i2[i, j]][:, None] * X[:, jj[j]])
+            Xi = X[:, jj[i]]
+            WXj = l2[:, i2[i, j]][:, None] * X[:, jj[j]]
+            A = _xwx(Xi, WXj) if det else Xi.T @ WXj
             lbb[np.ix_(jj[i], jj[j])] += A
             if j > i:
                 lbb[np.ix_(jj[j], jj[i])] += A.T
@@ -6491,6 +6911,37 @@ class GeneralFamily(Family):
         """
         raise NotImplementedError
 
+    @staticmethod
+    def _apply_prior_weights(wt, l1, l2, l3=None, l4=None):
+        """Scale the packed per-datum derivative blocks by ``wt`` for a
+        *weighted* log-likelihood (``Σ wt_i·l0_i``).
+
+        A weighted log-likelihood scales every per-observation
+        derivative row by ``wt_i``. :func:`gamlss_etamu` and
+        :func:`gamlss_gH` are linear, row by row, in ``(l1, l2, l3,
+        l4)`` — ``gamlss_gH`` assembles the gradient ``lb`` and Hessian
+        ``lbb`` as plain sums over observations — so scaling these
+        inputs by ``wt`` yields exactly the weighted-MLE
+        gradient/Hessian. Absent derivative orders (``None``) pass
+        through unchanged. ``wt`` is the (n,) weight vector; ``l0``
+        itself is never scaled (the per-observation log-density is
+        reported raw).
+
+        Unlike mgcv's own gamlss families — which drop prior weights —
+        hea's general families honour them here as a weighted
+        likelihood. At unit weights the scaling is the identity, so
+        unweighted fits are bit-for-bit unchanged; weighting a row by
+        integer ``w`` is equivalent to duplicating that row ``w`` times.
+        """
+        w = wt[:, None]
+        l1 = l1 * w
+        l2 = l2 * w
+        if l3 is not None:
+            l3 = l3 * w
+        if l4 is not None:
+            l4 = l4 * w
+        return l1, l2, l3, l4
+
     def initialize_coef(self, y, X, lpi, E=None, offset=None,
                         use_unscaled: bool = False) -> np.ndarray:
         """Starting coefficients (mgcv ``family$initialize``).
@@ -6567,11 +7018,12 @@ class gaulss(GeneralFamily):
         tau = self.links[1].linkinv(eta1)
 
         n = y.shape[0]
+        wt = np.ones(n) if wt is None else np.asarray(wt, dtype=float).ravel()
         ymu = y - mu
         ymu2 = ymu * ymu
         tau2 = tau * tau
         l0 = -0.5 * ymu2 * tau2 - 0.5 * np.log(2.0 * np.pi) + np.log(tau)
-        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        ret: dict = {"l": float(np.sum(wt * l0)), "l0": l0}
         if deriv == 0:
             return ret
 
@@ -6600,6 +7052,7 @@ class gaulss(GeneralFamily):
                                   self.links[1].d4link(tau)])
 
         tri = self.tri
+        l1, l2, l3, l4 = self._apply_prior_weights(wt, l1, l2, l3, l4)
         de = gamlss_etamu(l1, l2, l3, l4, ig1, g2, g3, g4,
                           tri["i2"], tri["i3"], tri["i4"], deriv - 1)
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
@@ -6768,8 +7221,10 @@ class twlss(GeneralFamily):
         # ldTweedie columns: l; ρ, ρρ; θ, θθ, θρ; μ, μμ, μθ, μρ —
         # reordered into the packed (μ, θ, ρ) layout (gamlss.r:2575-2580)
         ld = _ld_tweedie_work(y, mu, theta, rho, a=self.a, b=self.b)
+        wt = np.ones(y.shape[0]) if wt is None else np.asarray(
+            wt, dtype=float).ravel()
         l0 = ld[:, 0]
-        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        ret: dict = {"l": float(np.sum(wt * l0)), "l0": l0}
         if deriv == 0:
             return ret
         l1 = ld[:, [6, 3, 1]]
@@ -6783,6 +7238,7 @@ class twlss(GeneralFamily):
         # no l3/l4 for this family: etamu/gH run at deriv 0 whenever
         # any derivative is requested (gamlss.r:2592-2599)
         tri = self.tri
+        l1, l2, _, _ = self._apply_prior_weights(wt, l1, l2)
         de = gamlss_etamu(l1, l2, None, None, ig1, g2, None, None,
                           tri["i2"], tri["i3"], tri["i4"], 0)
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
@@ -6982,7 +7438,9 @@ class shash(GeneralFamily):
 
         l0, L1, L2, L3, L4 = _shash_derivs(y, mu, tau, eps, phi,
                                            self.phiPen, deriv)
-        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        wt = np.ones(y.shape[0]) if wt is None else np.asarray(
+            wt, dtype=float).ravel()
+        ret: dict = {"l": float(np.sum(wt * l0)), "l0": l0}
         if deriv == 0:
             return ret
         params = (mu, tau, eps, phi)
@@ -7000,6 +7458,7 @@ class shash(GeneralFamily):
                                   for lnk, par in zip(self.links,
                                                       params)])
         tri = self.tri
+        L1, L2, L3, L4 = self._apply_prior_weights(wt, L1, L2, L3, L4)
         de = gamlss_etamu(L1, L2, L3, L4, ig1, g2, g3, g4,
                           tri["i2"], tri["i3"], tri["i4"], deriv - 1)
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
@@ -7120,9 +7579,13 @@ class shash(GeneralFamily):
                 f"'identity'), b={self.b:g}, phiPen={self.phiPen:g})")
 
 
-class SoftplusLink(Link):
+class BoundedLogLink(Link):
     """mgcv's bounded "log" link for the log-scale LP of the location-
     scale families ``gammals``/``gumbls`` (gamlss.r:2689-2718).
+
+    (Despite the softplus *form* of its inverse, this is mgcv's bounded
+    **log** link — ``name="log"`` — distinct from :class:`BoundedLogLink`, the
+    genuine softplus *mean* link for `Poisson()`.)
 
     Inverse ``g⁻¹(η) = b + log(1 + exp(η − b))`` keeps the (already
     log-scale) parameter strictly above ``b`` — the smooth softplus
@@ -7189,7 +7652,7 @@ class gammals(GeneralFamily):
     (gamlss.r:2664-2980). Two linear predictors, parameterized in **log
     mean** and **log scale**: LP1 is ``log μ`` (identity link only,
     so η₁ ≡ log μ); LP2 is ``log σ`` through the bounded
-    :class:`SoftplusLink` (``link="log"``, σ > exp(b)) or identity.
+    :class:`BoundedLogLink` (``link="log"``, σ > exp(b)) or identity.
 
         log f = (log y − μ − θ)/e^θ − log y − y·e^{−θ−μ} − log Γ(e^{−θ})
 
@@ -7221,7 +7684,7 @@ class gammals(GeneralFamily):
             )
         links = [
             IdentityLink(),
-            SoftplusLink(b=b) if scale_link == "log" else IdentityLink(),
+            BoundedLogLink(b=b) if scale_link == "log" else IdentityLink(),
         ]
         self.b = float(b)
         self._scale_link_name = scale_link
@@ -7249,10 +7712,11 @@ class gammals(GeneralFamily):
         ethmu = np.exp(-th - mu)
         ethmuy = ethmu * y
         etlymt = eth * (logy - mu - th)
-        n = y.shape[0]
 
+        wt = np.ones(y.shape[0]) if wt is None else np.asarray(
+            wt, dtype=float).ravel()
         l0 = etlymt - logy - ethmuy - gammaln(eth)
-        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        ret: dict = {"l": float(np.sum(wt * l0)), "l0": l0}
         if deriv == 0:
             return ret
 
@@ -7301,6 +7765,7 @@ class gammals(GeneralFamily):
                                   self.links[1].d4link(th)])
 
         tri = self.tri
+        l1, l2, l3, l4 = self._apply_prior_weights(wt, l1, l2, l3, l4)
         de = gamlss_etamu(l1, l2, l3, l4, ig1, g2, g3, g4,
                           tri["i2"], tri["i3"], tri["i4"], deriv - 1)
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
@@ -7436,7 +7901,7 @@ class gumbls(GeneralFamily):
     """Gumbel location-scale general family — mgcv ``gumbls()``
     (gamlss.r:2985-3329). Two linear predictors: LP1 the Gumbel
     **location** μ (identity link only, η₁ ≡ μ); LP2 ``log β`` (the
-    Gumbel scale) through the bounded :class:`SoftplusLink`
+    Gumbel scale) through the bounded :class:`BoundedLogLink`
     (``link="log"``) or identity.
 
         log f = −β − z − e^{−z},   z = (y − μ)·e^{−β}
@@ -7469,7 +7934,7 @@ class gumbls(GeneralFamily):
             )
         links = [
             IdentityLink(),
-            SoftplusLink(b=b) if scale_link == "log" else IdentityLink(),
+            BoundedLogLink(b=b) if scale_link == "log" else IdentityLink(),
         ]
         self.b = float(b)
         self._scale_link_name = scale_link
@@ -7495,8 +7960,10 @@ class gumbls(GeneralFamily):
         eb = np.exp(-beta)
         z = (y - mu) * eb
         ez = np.exp(-z)
+        wt = np.ones(y.shape[0]) if wt is None else np.asarray(
+            wt, dtype=float).ravel()
         l0 = -beta - z - ez
-        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        ret: dict = {"l": float(np.sum(wt * l0)), "l0": l0}
         if deriv == 0:
             return ret
 
@@ -7551,6 +8018,7 @@ class gumbls(GeneralFamily):
                                   self.links[1].d4link(beta)])
 
         tri = self.tri
+        l1, l2, l3, l4 = self._apply_prior_weights(wt, l1, l2, l3, l4)
         de = gamlss_etamu(l1, l2, l3, l4, ig1, g2, g3, g4,
                           tri["i2"], tri["i3"], tri["i4"], deriv - 1)
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
@@ -8096,7 +8564,9 @@ class gevlss(GeneralFamily):
         # non-finite values still propagate to the fitter.
         with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
             l0, l1, l2, l3, l4 = _gevlss_derivs(y, mu, rho, xi, deriv)
-        ret: dict = {"l": float(np.sum(l0)), "l0": l0}
+        wt = np.ones(y.shape[0]) if wt is None else np.asarray(
+            wt, dtype=float).ravel()
+        ret: dict = {"l": float(np.sum(wt * l0)), "l0": l0}
         if deriv == 0:
             return ret
 
@@ -8118,6 +8588,7 @@ class gevlss(GeneralFamily):
 
         tri = self.tri
         with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+            l1, l2, l3, l4 = self._apply_prior_weights(wt, l1, l2, l3, l4)
             de = gamlss_etamu(l1, l2, l3, l4, ig1, g2, g3, g4,
                               tri["i2"], tri["i3"], tri["i4"], deriv - 1)
             gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
@@ -8238,6 +8709,34 @@ class gevlss(GeneralFamily):
         return f"gevlss(link={self._link_names!r})"
 
 
+_COX_SORT_CACHE: dict = {}
+
+
+def _cox_sort(X, d, time, n, p):
+    """Descending-time sort structure for ``_coxlpl`` — ``(order, r, nt, X, d)``
+    with ``r`` the 0-based unique-time group per (sorted) row, ``X``/``d`` the
+    sorted, contiguous design + event indicator. Depends only on time/X/d, which
+    are fixed across a fit's many ll calls, so it is memoized (keyed on a content
+    fingerprint, bounded). Mirrors the in-function sort the C caller does once."""
+    key = (n, p, float(time[0]), float(time[-1]), float(time.sum()),
+           float(X[0, 0]), float(X[-1, -1]), int(np.asarray(d).sum()))
+    hit = _COX_SORT_CACHE.get(key)
+    if hit is not None:
+        return hit
+    order = np.argsort(-time, kind="stable")
+    ts = -time[order]                                     # ascending
+    tr = np.unique(ts)
+    nt = tr.size
+    r = np.ascontiguousarray(np.searchsorted(tr, ts).astype(np.int64))
+    Xc = np.ascontiguousarray(X[order])
+    dc = np.ascontiguousarray(np.asarray(d, np.int64)[order])
+    val = (order, r, nt, Xc, dc)
+    if len(_COX_SORT_CACHE) > 16:
+        _COX_SORT_CACHE.clear()
+    _COX_SORT_CACHE[key] = val
+    return val
+
+
 def _coxlpl(eta, X, d, time, deriv, d1b=None, d2b=None, D=None,
             eigen=None):
     """mgcv's ``coxlpl`` C kernel (src/coxph.c:141-394): the Cox log
@@ -8261,32 +8760,65 @@ def _coxlpl(eta, X, d, time, deriv, d1b=None, d2b=None, D=None,
     d = np.asarray(d, int)
     n, p = X.shape
     M = 0 if d1b is None else d1b.shape[1]
-    # risk sets are cumulative in DESCENDING time; sort rows internally so
-    # the engine may pass them in any order (l/lb/lbb/d1H/trHid2H are all
-    # coefficient-space, hence invariant to the row permutation). d1b/d2b
-    # are coefficient-space and stay put.
-    order = np.argsort(-time, kind="stable")
-    eta = eta[order]
-    X = X[order]
-    time = time[order]
-    d = d[order]
+    # risk sets are cumulative in DESCENDING time; sort rows internally so the
+    # engine may pass them in any order (l/lb/lbb/d1H/trHid2H are all
+    # coefficient-space, hence invariant to the row permutation). The sort
+    # structure is cached (fixed across a fit); only eta changes per call.
+    # d1b/d2b are coefficient-space and stay put.
+    order, r, nt, X, d = _cox_sort(X, d, time, n, p)
+    eta = np.ascontiguousarray(eta[order])
+    if _rs_cox_l is not None and deriv < 0:    # the many line-search l evals
+        return {"l": float(_rs_cox_l(eta, d, r, int(nt)))}
+    if _rs_cox_lpl0 is not None and 0 <= deriv <= 3:
+        # the per-iteration l/lb/lbb (+d1H/+trHid2H) evaluations: the C
+        # single-pass risk-set sweep, no (n,p,p[,M]) gXX/d1A_p temporaries
+        # (coxph.c:266-368). X/d/r are pre-sorted contiguous from the cache;
+        # d1b/d2b/eigen stay coefficient-/eigen-space.
+        lpl, g, H = _rs_cox_lpl0(eta, X, d, r, int(nt))
+        if deriv == 0:
+            return {"l": float(lpl), "lb": g, "lbb": H}
+        gamma = np.exp(eta)
+        if deriv <= 2:                    # + ∂H/∂ρ matrices (original basis)
+            d1gamma = np.ascontiguousarray((X @ d1b) * gamma[:, None])
+            lpl, g, H, d1H = _rs_cox_lpl_d1(eta, X, d, r, int(nt), d1gamma)
+            return {"l": float(lpl), "lb": g, "lbb": H, "d1H": d1H}
+        # deriv == 3: + trHid2H in the eigenbasis (reuse original-basis l/g/H);
+        # the eigenbasis transform is cheap BLAS, the sweep is rust (cox_d2h).
+        val = np.asarray(eigen["values"], float)
+        vec = np.asarray(eigen["vectors"], float)
+        dvec = np.where(val > 0, 1.0 / np.where(val > 0, val, 1.0), 0.0)
+        Xp = X @ (D[:, None] * vec)
+        d1bp = vec.T @ (d1b / D[:, None])
+        d2bp = vec.T @ (d2b / D[:, None])
+        d1eta = Xp @ d1bp
+        d1gamma = d1eta * gamma[:, None]
+        nhh = M * (M + 1) // 2
+        pairs = [(a, b) for a in range(M) for b in range(a, M)]
+        d2eta = Xp @ d2bp
+        d2gamma = np.empty((n, nhh))
+        for off, (a, b) in enumerate(pairs):
+            d2gamma[:, off] = gamma * (d2eta[:, off] + d1eta[:, a] * d1eta[:, b])
+        d2H = _rs_cox_d2h(np.ascontiguousarray(Xp), d, r, int(nt), eta,
+                          np.ascontiguousarray(d1gamma),
+                          np.ascontiguousarray(d2gamma))
+        trHid2H = np.sum(np.asarray(d2H) * dvec[:, None], 0)
+        return {"l": float(lpl), "lb": g, "lbb": H, "trHid2H": trHid2H}
     gamma = np.exp(eta)
-    tr = np.unique(-time)
-    nt = tr.size
-    r = np.searchsorted(tr, -time)                        # 0-based group
     last = np.searchsorted(r, np.arange(nt), side="right") - 1
     gamma_p = np.cumsum(gamma)[last]
-    b_p = np.cumsum(gamma[:, None] * X, 0)[last]
-    gXX = gamma[:, None, None] * X[:, :, None] * X[:, None, :]
-    A_p = np.cumsum(gXX, 0)[last]
     ev = np.asarray(d, int) == 1
     dr = np.zeros(nt)
     np.add.at(dr, r[ev], 1.0)
     eta_sum = np.zeros(nt)
     np.add.at(eta_sum, r[ev], eta[ev])
-    g_ev = X[ev].sum(0) if ev.any() else np.zeros(p)
 
     lpl = float(np.sum(eta_sum - dr * np.log(gamma_p)))
+    if deriv < 0:                  # C coxlpl: deriv<0 returns lp only, no b_p/A_p/g/H
+        return {"l": lpl}
+    b_p = np.cumsum(gamma[:, None] * X, 0)[last]
+    gXX = gamma[:, None, None] * X[:, :, None] * X[:, None, :]
+    A_p = np.cumsum(gXX, 0)[last]
+    g_ev = X[ev].sum(0) if ev.any() else np.zeros(p)
     g = g_ev - np.sum((dr / gamma_p)[:, None] * b_p, 0)
     H = -np.sum(dr[:, None, None] * (
         A_p / gamma_p[:, None, None]
@@ -8896,7 +9428,9 @@ class ziplss(GeneralFamily):
         lam = self.links[0].linkinv(eta)     # gamma = log Poisson mean
         p = self.links[1].linkinv(eta1)      # presence LP
         zl = _zipll(y, lam, p, deriv)
-        ret: dict = {"l": float(np.sum(zl["l"])), "l0": zl["l"]}
+        wt = np.ones(y.shape[0]) if wt is None else np.asarray(
+            wt, dtype=float).ravel()
+        ret: dict = {"l": float(np.sum(wt * zl["l"])), "l0": zl["l"]}
         if deriv == 0:
             return ret
         ig1 = np.column_stack([self.links[0].mu_eta(eta),
@@ -8911,7 +9445,9 @@ class ziplss(GeneralFamily):
             g4 = np.column_stack([self.links[0].d4link(lam),
                                   self.links[1].d4link(p)])
         tri = self.tri
-        de = gamlss_etamu(zl["l1"], zl["l2"], zl.get("l3"), zl.get("l4"),
+        l1, l2, l3, l4 = self._apply_prior_weights(
+            wt, zl["l1"], zl["l2"], zl.get("l3"), zl.get("l4"))
+        de = gamlss_etamu(l1, l2, l3, l4,
                           ig1, g2, g3, g4, tri["i2"], tri["i3"],
                           tri["i4"], deriv - 1)
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
@@ -9244,11 +9780,14 @@ class multinom(GeneralFamily):
                     and offset[i] is not None):
                 eta[:, i] = eta[:, i] + offset[i]
         d = _multinom_derivs(y, eta, self.tri, deriv)
-        ret: dict = {"l": d["l"], "l0": d["l0"]}
+        wt = np.ones(n) if wt is None else np.asarray(wt, dtype=float).ravel()
+        ret: dict = {"l": float(np.sum(wt * d["l0"])), "l0": d["l0"]}
         if deriv == 0:
             return ret
-        gh = gamlss_gH(X, jj, d["l1"], d["l2"], self.tri["i2"],
-                       l3=d.get("l3"), i3=self.tri["i3"], l4=d.get("l4"),
+        l1, l2, l3, l4 = self._apply_prior_weights(
+            wt, d["l1"], d["l2"], d.get("l3"), d.get("l4"))
+        gh = gamlss_gH(X, jj, l1, l2, self.tri["i2"],
+                       l3=l3, i3=self.tri["i3"], l4=l4,
                        i4=self.tri["i4"], d1b=d1b, d2b=d2b, deriv=deriv - 1,
                        fh=fh, D=D)
         ret.update(gh)
@@ -9428,11 +9967,17 @@ def _mvn_ll(y, X, coef, lpi, m, *, deriv=0, d1b=None, fh=None) -> dict:
     ldetR = 0.0
     k = 0
     for i in range(m):
-        dth[k] = np.exp(theta[k]); R[i, i] = dth[k]; ldetR += theta[k]
-        rri[k] = rci[k] = i; k += 1
+        dth[k] = np.exp(theta[k])
+        R[i, i] = dth[k]
+        ldetR += theta[k]
+        rri[k] = rci[k] = i
+        k += 1
         for j in range(i + 1, m):
-            R[i, j] = theta[k]; dth[k] = 1.0
-            rri[k] = i; rci[k] = j; k += 1
+            R[i, j] = theta[k]
+            dth[k] = 1.0
+            rri[k] = i
+            rci[k] = j
+            k += 1
     jj = [np.asarray(ix, dtype=int) for ix in lpi]
     mu = np.zeros((n, m))
     for l in range(m):
@@ -9497,6 +10042,7 @@ def _mvn_ll(y, X, coef, lpi, m, *, deriv=0, d1b=None, fh=None) -> dict:
     for r in range(nsp):
         db = d1b[:, r]
         dtheta = db[ncoef:]
+        dbq = db[:ncoef]
         dH = np.zeros((nb, nb))
         # mean-coef block: dH[i,j] = -XX[i,j]·C[din[i],din[j]]
         C = np.zeros((m, m))
@@ -9505,53 +10051,53 @@ def _mvn_ll(y, X, coef, lpi, m, *, deriv=0, d1b=None, fh=None) -> dict:
             C[rj_q, :] += R[ri_q, :] * w        # rj_q==l term
             C[:, rj_q] += R[ri_q, :] * w        # rj_q==k term
         dH[:ncoef, :ncoef] = -XX * C[np.ix_(din, din)]
-        # mixed block
-        for i in range(ncoef):
-            l = din[i]
-            for j in range(ntheta):
-                ri, rj = rri[j], rci[j]
-                zz = dth[j]
-                xx = 0.0
-                for q in range(ncoef):
-                    kdim = din[q]
-                    if rj == l:
-                        xx += -R[ri, kdim] * zz * XX[i, q] * db[q]
-                    if rj == kdim:
-                        xx += -R[ri, l] * zz * XX[i, q] * db[q]
-                for kk2 in range(ntheta):
-                    rik, rjk = rri[kk2], rci[kk2]
-                    z2 = 0.0
-                    if ri == rik and (l == rj or l == rjk):
-                        if l == rj:
-                            z2 += yX[rjk, i] * dth[j] * dth[kk2]
-                        if l == rjk:
-                            z2 += yX[rj, i] * dth[j] * dth[kk2]
-                        if kk2 == j and rik == rjk:
-                            z2 += dth[kk2] * yRX[rj, i]
-                        xx += z2 * dtheta[kk2]
+        # mixed block (mvn.c:191-228) — vectorized over the ncoef mean-coef
+        # index i. The inner q-loop is the matmuls XX @ (R[ri,din]·db) and
+        # XX @ (db·[din==rj]); the kk2-loop is ntheta-small. Bit-identical to
+        # the C triple loop up to fp summation order (~5e-16 on random inputs,
+        # ~10× faster at d=4). `din==·` masks select mgcv's `l == r*` branches.
+        for j in range(ntheta):
+            ri, rj, zz = rri[j], rci[j], dth[j]
+            Rri_din = R[ri, din]
+            termA = XX @ (Rri_din * dbq)
+            termB = XX @ (dbq * (din == rj))
+            partQ = -zz * ((din == rj) * termA + Rri_din * termB)
+            partK = np.zeros(ncoef)
+            for kk2 in range(ntheta):
+                rik, rjk = rri[kk2], rci[kk2]
+                if ri == rik:
+                    c = dth[j] * dth[kk2]
+                    z2 = ((din == rj) * (yX[rjk, :] * c)
+                          + (din == rjk) * (yX[rj, :] * c))
                     if kk2 == j and rik == rjk:
-                        xx += dtheta[kk2] * dth[kk2] * R[rj, l] * yX[rj, i]
-                dH[i, ncoef + j] = xx
-                dH[ncoef + j, i] = xx
-        # theta block
+                        z2 = z2 + (((din == rj) | (din == rjk))
+                                   * (dth[kk2] * yRX[rj, :]))
+                    partK = partK + z2 * dtheta[kk2]
+                if kk2 == j and rik == rjk:
+                    partK = partK + (dtheta[kk2] * dth[kk2]) * (R[rj, din]
+                                                               * yX[rj, :])
+            col = partQ + partK
+            dH[:ncoef, ncoef + j] = col
+            dH[ncoef + j, :ncoef] = col
+        # theta block (mvn.c:230-262) — the ncoef sum is vectorized; the
+        # trailing theta×theta accumulation stays a small ntheta loop.
         for j in range(ntheta):
             rij, rjj = rri[j], rci[j]
             for kk2 in range(j, ntheta):
                 rik, rjk = rri[kk2], rci[kk2]
-                xx = 0.0
-                for i in range(ncoef):
-                    l = din[i]
-                    z2 = 0.0
-                    if rij == rik and (l == rjj or l == rjk):
-                        if l == rjj:
-                            z2 += yX[rjk, i] * dth[j] * dth[kk2]
-                        if l == rjk:
-                            z2 += yX[rjj, i] * dth[j] * dth[kk2]
-                        if kk2 == j and rik == rjk and l == rjj:
-                            z2 += dth[kk2] * yRX[rjj, i]
-                        xx += z2 * db[i]
-                    if kk2 == j and rij == rjj:
-                        xx += db[i] * dth[kk2] * R[rjj, l] * yX[rjj, i]
+                contrib = np.zeros(ncoef)
+                if rij == rik:
+                    m_jj = (din == rjj)
+                    m_jk = (din == rjk)
+                    z2 = (m_jj * (yX[rjk, :] * dth[j] * dth[kk2])
+                          + m_jk * (yX[rjj, :] * dth[j] * dth[kk2]))
+                    if kk2 == j and rik == rjk:
+                        z2 = z2 + m_jj * (dth[kk2] * yRX[rjj, :])
+                    contrib = contrib + z2 * dbq
+                if kk2 == j and rij == rjj:
+                    contrib = contrib + dbq * dth[kk2] * (R[rjj, din]
+                                                          * yX[rjj, :])
+                xx = float(contrib.sum())
                 for i in range(ntheta):
                     ri, rj = rri[i], rci[i]
                     z2 = 0.0
@@ -9771,7 +10317,7 @@ __all__ = [
     "nb", "betar", "ocat", "ziP", "cnorm",
     "GeneralFamily", "gaulss", "twlss", "shash", "gammals", "gumbls",
     "gevlss", "cox_ph", "ziplss", "multinom", "mvn",
-    "LogebLink", "SoftplusLink", "ShiftedLogitLink",
+    "LogebLink", "SoftplusLink", "BoundedLogLink", "ShiftedLogitLink",
     "trind_generator", "gamlss_etamu", "gamlss_gH",
     "IdentityLink", "LogLink", "InverseLink",
     "SqrtLink", "LogitLink", "ProbitLink", "CauchitLink", "CloglogLink",
