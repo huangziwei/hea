@@ -87,7 +87,9 @@ from .gam import (
     _block_s_scale,
     _row_frame,
     _sl_initial_repara,
+    _sl_mult,
     _sl_setup,
+    _sl_term_mult,
     _sym_rank,
     gam,
 )
@@ -203,56 +205,6 @@ def _rw_matrix(stop: np.ndarray, row: np.ndarray, weight: np.ndarray,
     return out.ravel() if not is_matrix else out
 
 
-def _sl_pi_slots(sl: _Sl) -> list:
-    """Per-penalty slot view consumed by :func:`_pi_fit_chol`, read off an
-    ``Sl`` object built by gam's :func:`_sl_setup` (mgcv ``Sl.setup``,
-    fast-REML.r:68-429).
-
-    ``_pi_fit_chol`` adds ``exp(rho_k)·slot.S`` at ``[col_start, col_end)``
-    of the already initial-repara'd gram, one slot per penalty in ρ order.
-    After ``Sl.setup`` each block carries its REPARAMETERISED penalty, which
-    is the (partial) identity / range-space projection of the original:
-
-      * diagonal singleton → partial identity ``diag(ind)`` over the full
-        block ``[start, stop)`` (penalised columns need not be leading);
-      * eigen singleton → ``I_rank`` over the leading ``[start, start+rank)``;
-      * multi-S block → the projected penalties ``blk.S[j]`` (rank×rank) over
-        ``[start, start+rank)``, one slot per penalty (a block split by
-        ``Sl.setup``'s no-overlap test arrives here already as singletons).
-
-    Slot order follows ``sl.blocks`` — i.e. ``self._slots`` order — so ρ
-    indexing is preserved exactly as the old ``_build_repara_slots`` did.
-    """
-    from types import SimpleNamespace
-    out: list = []
-    for blk in sl.blocks:
-        if blk.n_sp == 1:
-            if not blk.repara:
-                # No transform → original penalty over the whole block.
-                out.append(SimpleNamespace(
-                    col_start=int(blk.start), col_end=int(blk.stop),
-                    S=np.asarray(blk.S[0], dtype=float)))
-            elif blk.D.ndim == 1:
-                # Diagonal repara → partial identity over the full block.
-                out.append(SimpleNamespace(
-                    col_start=int(blk.start), col_end=int(blk.stop),
-                    S=np.diag(blk.ind.astype(float))))
-            else:
-                # Eigen repara → identity on the leading ``rank`` columns.
-                out.append(SimpleNamespace(
-                    col_start=int(blk.start),
-                    col_end=int(blk.start + blk.rank),
-                    S=np.eye(int(blk.rank))))
-        else:
-            # Multi-S → one projected penalty per slot, leading-rank block.
-            ce = int(blk.start + blk.rank)
-            for Sj in blk.S:
-                out.append(SimpleNamespace(
-                    col_start=int(blk.start), col_end=ce,
-                    S=np.asarray(Sj, dtype=float)))
-    return out
-
-
 def _sl_rsb(sl: _Sl, rho_full: np.ndarray, beta: np.ndarray) -> np.ndarray:
     """mgcv ``Sl.rSb`` (fast-REML.r:453-482): stack every penalty's ``rS·β``
     end to end. ``sum(a²)`` is the penalty ``βᵀSλβ`` — but as the per-block
@@ -266,7 +218,7 @@ def _sl_rsb(sl: _Sl, rho_full: np.ndarray, beta: np.ndarray) -> np.ndarray:
     ``beta`` is in the INITIAL-REPARA gauge (mgcv ``prop$beta``); ``rho_full``
     is the full per-penalty log-sp (``lsp.full``), ordered to match
     ``sl.blocks`` (so ``rho_full[k]`` is the k-th penalty's log-sp, exactly the
-    order :func:`_sl_pi_slots` / ``_build_S_lambda`` consume).
+    order :func:`_sl_sb` / ``_build_S_lambda`` consume).
     """
     parts: list[np.ndarray] = []
     k = 0
@@ -565,9 +517,164 @@ def _estimate_theta(
     return theta
 
 
+def _sl_add_s(sl: _Sl, A: np.ndarray, rho: np.ndarray) -> np.ndarray:
+    """mgcv ``Sl.addS`` (fast-REML.r:1016-1039): add the total penalty
+    ``Sλ`` to ``A``, returning a copy (mgcv forces ``A <- A*1``).
+
+    Operates in the INITIAL-REPARA gauge, so each block contributes its
+    reparameterised penalty, exactly as mgcv:
+
+      * singleton (``n_sp==1``) → a multiple of identity on its penalised
+        columns: ``diag(A)[ind] += exp(rho_k)`` (mgcv ``mgcv_madi`` with
+        ``diag=-1``), ``ind = (start:stop)[blk.ind]``;
+      * multi-S block → ``A[ind,ind] += Σ_j exp(rho_k) S_j`` added one
+        penalty at a time (mgcv loops ``mgcv_madi`` per ``S[[j]]``), over
+        the leading rank columns ``ind``.
+
+    ``rho`` is the per-penalty log-sp in ``sl.blocks`` order (the order
+    :func:`_sl_sb` / ``_build_S_lambda`` consume).
+    """
+    A = A * 1.0                                    # force copy (Sl.addS:1021)
+    sp = np.exp(np.asarray(rho, dtype=float))
+    k = 0
+    for blk in sl.blocks:
+        ind = blk.pen_cols()                       # (start:stop)[ind]
+        if blk.n_sp == 1:                          # singleton — multiple of I
+            A[ind, ind] += sp[k]
+            k += 1
+        else:                                      # multi-S block
+            for j in range(blk.n_sp):
+                A[np.ix_(ind, ind)] += sp[k] * blk.S[j]
+                k += 1
+    return A
+
+
+def _sl_chol_lambda(sl: _Sl, rho: np.ndarray) -> None:
+    """mgcv ``ldetS(repara=FALSE)`` λ/St update used by ``Sl.fitChol``
+    (fast-REML.r:1598): set each block's current smoothing parameters and,
+    for multi-S blocks, the block total ``St = Σ_i exp(ρ_i) S_i`` — in the
+    INITIAL-REPARA (Sl.setup-projected) gauge, WITHOUT the gam.reparam
+    stability transform that the QR-path ``_ldet_s`` applies. ``Sl.fitChol``
+    operates directly on the initial-repara'd gram, so the penalty must be
+    applied in that gauge.
+
+    Mutates ``sl`` in place (mgcv updates ``ldS$Sl``); the downstream
+    structured products :func:`_sl_mult` / :func:`_sl_term_mult` then read
+    ``blk.lam`` / ``blk.St``. ``blk.Srp`` is reset to ``None`` so
+    ``_sl_term_mult`` uses the un-transformed per-penalty form
+    ``lam_i·(S_i·A)``. ``rho`` is the per-penalty log-sp in ``sl.blocks``
+    order.
+    """
+    sp = np.exp(np.asarray(rho, dtype=float))
+    k = 0
+    for blk in sl.blocks:
+        if blk.n_sp == 1:                          # singleton — multiple of I
+            blk.lam = np.array([sp[k]])
+            k += 1
+        else:                                      # multi-S — pre-summed St
+            m = blk.n_sp
+            blk.lam = sp[k:k + m].copy()
+            St = sp[k] * blk.S[0]
+            for j in range(1, m):
+                St = St + sp[k + j] * blk.S[j]
+            blk.St = St
+            blk.Srp = None
+            k += m
+
+
+def _d_det_xxs(sl: _Sl, PP: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """mgcv ``d.detXXS`` (fast-REML.r:1329-1367): first/second ρ-derivatives
+    of ``log|X'X+Sλ|`` given the (unpivoted) inverse-Hessian ``PP = A⁻¹``.
+
+    With ``SPP[[k]] = Sl.termMult(PP)`` (stripped to ``ind`` rows):
+
+        d1[k]   =  Σ diag(SPP[[k]][, ind_k])                 (mgcv :1347)
+        d2[i,j] = -Σ (SPP[[i]][, ind_j])ᵀ · SPP[[j]][, ind_i] (mgcv :1354)
+        d2[i,i] += d1[i]     (linear-term correction, mgcv :1362)
+
+    All blocks bam builds are linear, so the non-linear ``AdS`` branch and
+    the sparse-``Matrix`` guard are omitted. Reads the current ``blk.lam`` /
+    ``blk.St`` set by :func:`_sl_chol_lambda`.
+    """
+    SA, inds = _sl_term_mult(sl, PP, full=False)
+    nd = len(SA)
+    d1 = np.zeros(nd)
+    d2 = np.zeros((nd, nd))
+    for i in range(nd):
+        indi = inds[i]
+        d1[i] = float(np.trace(SA[i][:, indi]))
+        for j in range(i, nd):
+            indj = inds[j]
+            v = -float(np.sum(SA[i][:, indj].T * SA[j][:, indi]))
+            d2[i, j] = d2[j, i] = v
+        d2[i, i] += d1[i]                          # nli[2,i]==0 (linear)
+    return d1, d2
+
+
+def _sl_ift_chol(sl: _Sl, XX: np.ndarray, R_pre: np.ndarray, d: np.ndarray,
+                 beta: np.ndarray, piv: np.ndarray, ipiv: np.ndarray,
+                 rank_A: int, p: int) -> dict:
+    """mgcv ``Sl.iftChol`` (fast-REML.r:1405-1488): derivatives of β̂ by
+    implicit differentiation, and from them ``b'Sb`` and RSS derivatives.
+
+    ``R_pre``/``d``/``piv``/``ipiv``/``rank_A`` are the diagonally
+    preconditioned pivoted Cholesky factor of the penalised Hessian and its
+    pivots (mgcv's ``R``, ``d``, ``piv``). The "all-in-one" mgcv path
+    (:1453-1487) is followed term for term:
+
+        D       = unlist(Sl.termMult(β, full=TRUE))   cols are dSλ/dρ_j · β
+        bSb1    = colSums(β·D)
+        db[piv] = -backsolve(R, forwardsolve(Rᵀ, (D/d)[piv])) / d
+        S.db    = Sl.mult(db)
+        bSb2    = diag(bSb1) + 2(dbᵀ(D+S.db) + Dᵀdb)
+        XX.db   = XX·db ;  rss2 = 2·dbᵀ·XX.db
+
+    The two triangular solves are mgcv ``mgcv_Rpforwardsolve`` /
+    ``mgcv_Rpbacksolve`` (``dtrsm`` wrappers); the cross products are mgcv
+    ``mgcv_pmmult2`` (``dgemm``) — so ``solve_triangular`` / ``@`` are the
+    faithful ports. Reads the current ``blk.lam`` / ``blk.St`` set by
+    :func:`_sl_chol_lambda`.
+    """
+    SA, _inds = _sl_term_mult(sl, beta, full=True)
+    nd = len(SA)
+    D = np.zeros((p, nd))
+    for kk in range(nd):
+        D[:, kk] = SA[kk]
+    bSb1 = np.einsum("i,ik->k", beta, D)           # colSums(beta*D)
+
+    db = np.zeros((p, nd))
+    if rank_A > 0 and nd > 0:
+        D_pre = (D / d[:, None])[piv, :]           # (D/d)[piv,]
+        w_top = -solve_triangular(
+            R_pre[:rank_A, :rank_A],
+            solve_triangular(
+                R_pre[:rank_A, :rank_A].T, D_pre[:rank_A, :], lower=True,
+            ),
+            lower=False,
+        )
+        db_piv = np.zeros((p, nd))
+        db_piv[:rank_A, :] = w_top
+        db = db_piv[ipiv, :] / d[:, None]
+
+    S_db = _sl_mult(sl, db)                         # Sl.mult(db, k=0)
+
+    if nd > 0:
+        bSb2 = np.diag(bSb1) + 2.0 * (db.T @ (D + S_db) + D.T @ db)
+        bSb2 = 0.5 * (bSb2 + bSb2.T)
+        XX_db = XX @ db                            # pmmult2(XX, db)
+        rss2 = 2.0 * (db.T @ XX_db)                # 2 pmmult2(db, XX.db)
+        rss2 = 0.5 * (rss2 + rss2.T)
+    else:
+        bSb2 = np.zeros((0, 0))
+        rss2 = np.zeros((0, 0))
+    rss1 = np.zeros(nd)
+    return {"db": db, "bSb1": bSb1, "bSb2": bSb2,
+            "rss1": rss1, "rss2": rss2}
+
+
 def _pi_fit_chol(
     XX: np.ndarray, Xy: np.ndarray, rho: np.ndarray,
-    slots: list, p: int, *, yy: float = 0.0,
+    sl: _Sl, p: int, *, yy: float = 0.0,
     log_phi: float = 0.0, n: int = 0, Mp: int = 0,
     gamma: float = 1.0, phi_fixed: bool = True,
     ldet_S: float = 0.0, ldet_S_grad: Optional[np.ndarray] = None,
@@ -603,7 +710,10 @@ def _pi_fit_chol(
         XX: (p, p) X'WX.
         Xy: (p,) X'Wy.
         rho: (n_sp,) log smoothing params.
-        slots: list of penalty slots, each with .col_start, .col_end, .S.
+        sl: the ``_Sl`` block-diagonal penalty (mgcv ``Sl.setup`` output),
+            consumed via the structured ``_sl_add_s`` / ``_sl_ift_chol`` /
+            ``_d_det_xxs`` ports — one ρ entry per penalty in ``sl.blocks``
+            order.
         p: total parameter count.
         yy: ‖√W·z‖² (only used when phi_fixed=False).
         log_phi: log φ.
@@ -623,14 +733,15 @@ def _pi_fit_chol(
         rank:        numerical rank of A.
         PP:          (p, p) ≈ A⁻¹ in original (un-pivoted) basis.
     """
-    n_sp = len(slots)
+    n_sp = sum(blk.n_sp for blk in sl.blocks)
 
-    # 1. Build A = XX + Σ exp(rho_k) S_k_padded.
-    A = XX.copy()
-    sp = np.exp(rho)
-    for k, slot in enumerate(slots):
-        cs, ce = int(slot.col_start), int(slot.col_end)
-        A[cs:ce, cs:ce] += sp[k] * slot.S
+    # 0. mgcv Sl.fitChol:1598 ``ldS <- ldetS(Sl, rho, repara=FALSE)`` — set
+    #    each block's current λ and total St in the initial-repara gauge, so
+    #    the structured penalty products below read the right λ.
+    _sl_chol_lambda(sl, rho)
+
+    # 1. Build A = XX + Sλ via mgcv Sl.addS (identity/block form).
+    A = _sl_add_s(sl, XX, rho)
     A = 0.5 * (A + A.T)
 
     # 2. Diagonal preconditioning: D = sqrt(diag(A)).
@@ -703,97 +814,20 @@ def _pi_fit_chol(
     PP = (PP / d) / d[:, None]
     PP = 0.5 * (PP + PP.T)
 
-    # 7. d_β/d_rho_k via IFT (mgcv ``Sl.iftChol``):
-    #     d_β/d_rho_k = -A⁻¹ · (sp_k · S_k_padded · β)
-    #    Using the pivoted/preconditioned chol structure:
-    #     v = sp_k · S_k_padded · β              (length p)
-    #     v_pp[piv] = (v / d)[piv]
-    #     w = -backsolve(R, forwardsolve(R', v_pp[:rank]))
-    #     d_β[piv][:rank] = w; d_β[piv][rank:] = 0
-    #     d_β = (d_β[ipiv]) / d
-    Skb = np.zeros((p, n_sp))
-    for k, slot in enumerate(slots):
-        cs, ce = int(slot.col_start), int(slot.col_end)
-        Skb[cs:ce, k] = sp[k] * (slot.S @ beta[cs:ce])
+    # 7-9. β̂ derivatives by IFT + b'Sb / RSS derivatives (mgcv Sl.iftChol,
+    #      fast-REML.r:1405). The penalty products (Skb=Sl.termMult,
+    #      S.db=Sl.mult) use the block identity/St form; the chol solves and
+    #      X'X cross products are dtrsm/dgemm (solve_triangular / @).
+    dift = _sl_ift_chol(sl, XX, R_pre, d, beta, piv, ipiv, rank_A, p)
+    bSb1 = dift["bSb1"]
+    bSb2 = dift["bSb2"]
+    rss1 = dift["rss1"]
+    rss2 = dift["rss2"]
 
-    db = np.zeros((p, n_sp))
-    if rank_A > 0:
-        Skb_over_d = Skb / d[:, None]
-        Skb_pre = Skb_over_d[piv, :]  # (p, n_sp), pivoted
-        w_top = -solve_triangular(
-            R_pre[:rank_A, :rank_A], solve_triangular(
-                R_pre[:rank_A, :rank_A].T, Skb_pre[:rank_A, :], lower=True,
-            ),
-            lower=False,
-        )
-        db_piv = np.zeros((p, n_sp))
-        db_piv[:rank_A, :] = w_top
-        db = db_piv[ipiv, :] / d[:, None]
-
-    # 8. b'Sb derivatives (Sl.iftChol):
-    #     bSb1[k] = β' · sp_k · S_k_padded · β = β' Skb[:, k]
-    bSb1 = np.einsum("i,ik->k", beta, Skb)
-    # bSb2[k, j] = δ_kj · β' Skb[:,k]
-    #            + 2·(db[:,k]' · (Skb[:,j] + S_db[:,j])
-    #                 + db[:,j]' · Skb[:,k])
-    # where S_db[:, k] = Σ_j sp_j S_j db[:, k] padded — but mgcv's Sl.mult
-    # uses the *current-lambda* S so this is equivalent to
-    # (A - XX) · db[:, k] (since A = XX + Σ sp_j S_j_padded).
-    if n_sp > 0:
-        S_db = np.zeros((p, n_sp))
-        for k_inner in range(n_sp):
-            for j, slot in enumerate(slots):
-                cs, ce = int(slot.col_start), int(slot.col_end)
-                S_db[cs:ce, k_inner] += (
-                    sp[j] * (slot.S @ db[cs:ce, k_inner])
-                )
-        bSb2 = np.diag(bSb1) + 2.0 * (
-            db.T @ (Skb + S_db) + Skb.T @ db
-        )
-        bSb2 = 0.5 * (bSb2 + bSb2.T)
-    else:
-        bSb2 = np.zeros((0, 0))
-
-    # 9. rss' is 0 to first order at converged β (IFT). At PIRLS-
-    #    converged β̂, the gradient w.r.t. rho_k of (½ rss) is just
-    #    ½·d_β/d_rho_k · X'(Xβ−y) = -½·d_β/d_rho_k · S_λ β = ½·bSb1[k]
-    #    via the score equation, so rss1 is rolled into bSb1.
-    #    Following mgcv's convention exactly, rss1[k] = 0.
-    rss1 = np.zeros(n_sp)
-    # rss2[k, j] = 2 · d_β[:,k]' · XX · d_β[:,j]
-    if n_sp > 0:
-        XX_db = XX @ db
-        rss2 = 2.0 * (db.T @ XX_db)
-        rss2 = 0.5 * (rss2 + rss2.T)
-    else:
-        rss2 = np.zeros((0, 0))
-
-    # 10. log|XX+S| derivatives via d.detXXS (fast-REML.r:1219-1237).
-    #     d1[k] = sp_k · tr(S_k · PP[block, block])  (= sp_k * tr(S_k_padded · PP))
-    #     d2[k, j] = -tr((sp_j · S_j · PP)[block_k, block_j]
-    #                  · (sp_k · S_k · PP)[block_j, block_k]) + δ_kj·d1[k]
-    SPP = np.zeros((p, p, n_sp))
-    for k, slot in enumerate(slots):
-        cs, ce = int(slot.col_start), int(slot.col_end)
-        SPP[cs:ce, :, k] = sp[k] * (slot.S @ PP[cs:ce, :])
-    dXXS_d1 = np.zeros(n_sp)
-    for k, slot in enumerate(slots):
-        cs, ce = int(slot.col_start), int(slot.col_end)
-        dXXS_d1[k] = float(np.trace(SPP[cs:ce, cs:ce, k]))
-    dXXS_d2 = np.zeros((n_sp, n_sp))
-    for i in range(n_sp):
-        cs_i, ce_i = int(slots[i].col_start), int(slots[i].col_end)
-        for j in range(i, n_sp):
-            cs_j, ce_j = int(slots[j].col_start), int(slots[j].col_end)
-            # sum over col_start_i:col_end_i (rows) and col_start_j:col_end_j (cols)
-            v = -float(
-                np.sum(
-                    SPP[cs_i:ce_i, cs_j:ce_j, i].T *
-                    SPP[cs_j:ce_j, cs_i:ce_i, j]
-                )
-            )
-            dXXS_d2[i, j] = dXXS_d2[j, i] = v
-        dXXS_d2[i, i] += dXXS_d1[i]
+    # 10. log|X'X+Sλ| derivatives (mgcv d.detXXS, fast-REML.r:1329):
+    #     d1[k] = Σ diag(S_k·PP[ind]) ; d2[i,j] = -Σ (S_i·PP)ᵀ·(S_j·PP) over
+    #     the cross blocks ; d2[i,i] += d1[i] for linear terms.
+    dXXS_d1, dXXS_d2 = _d_det_xxs(sl, PP)
 
     # 11. REML gradient and Hessian (rho-only; log φ added below if free).
     phi = float(np.exp(log_phi))
@@ -3601,7 +3635,6 @@ class bam(gam):
         # on the slot S matrices.
         if not hasattr(self, "_sl"):
             self._sl = _sl_setup(self._slots, self.p)
-            self._repara_slots = _sl_pi_slots(self._sl)
         XX_pre = _sl_initial_repara(self._sl, self._XtX, both_sides=True)
         Xy_pre = _sl_initial_repara(self._sl, self._Xty, both_sides=True)
         # ``log|Sλ|_+`` correction to the repara'd gauge: subtract the
@@ -3628,7 +3661,7 @@ class bam(gam):
                 rho, S_pinv=S_pinv, S_full=S_full)
             try:
                 out = _pi_fit_chol(
-                    XX_pre, Xy_pre, rho, self._repara_slots, self.p,
+                    XX_pre, Xy_pre, rho, self._sl, self.p,
                     yy=self._yty, log_phi=log_phi, n=n_int,
                     Mp=self._Mp, gamma=self._gamma,
                     phi_fixed=not include_log_phi,
@@ -3776,7 +3809,6 @@ class bam(gam):
         """
         if not hasattr(self, "_sl"):
             self._sl = _sl_setup(self._slots, self.p)
-            self._repara_slots = _sl_pi_slots(self._sl)
         b = _sl_initial_repara(self._sl, np.asarray(coef, dtype=float),
                                inverse=False, both_sides=False, cov=False)
         a = _sl_rsb(self._sl, rho_full, b)
@@ -3959,7 +3991,6 @@ class bam(gam):
                     # the coef AND the Sb vector linearly (bam.r:1181-1184).
                     if not hasattr(self, "_sl"):
                         self._sl = _sl_setup(self._slots, self.p)
-                        self._repara_slots = _sl_pi_slots(self._sl)
                     efam = family.is_extended
                     theta_now = family.get_theta() if efam else None
                     use_t0 = efam and theta0_snap is not None
@@ -4215,7 +4246,6 @@ class bam(gam):
                     # not on rho/W.
                     if not hasattr(self, "_sl"):
                         self._sl = _sl_setup(self._slots, self.p)
-                        self._repara_slots = _sl_pi_slots(self._sl)
                     if theta_sp_warm is None:
                         # Full-space initial.spg seed → working space by least
                         # squares (mgcv mgcv.r:4617-4618); identity when no id.
@@ -4296,7 +4326,7 @@ class bam(gam):
                             self._sl, self._Xty, both_sides=True)
                         out = _pi_fit_chol(
                             XX_pre, Xy_pre, rho_try,
-                            self._repara_slots, self.p,
+                            self._sl, self.p,
                             yy=self._yty, log_phi=log_phi_try, n=n,
                             Mp=self._Mp, gamma=self._gamma,
                             phi_fixed=not include_log_phi,
