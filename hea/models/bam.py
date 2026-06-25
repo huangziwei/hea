@@ -131,9 +131,17 @@ def _pmmult(a: np.ndarray, b: np.ndarray,
         return np.asarray(_rs_reml_pmmult(
             np.ascontiguousarray(a, dtype=float),
             np.ascontiguousarray(b, dtype=float), at, bt))
-    aa = a.T if at else a
-    bb = b.T if bt else b
-    return np.einsum("ik,kj->ij", aa, bb, optimize=False)
+    # Fallback: accumulate the SAME left-fold over k as the Rust kernel, via
+    # in-order rank-1 updates (C += a[:,k] ⊗ b[k,:]). Separate multiply/add, no
+    # BLAS reorder, k strictly ascending → bit-identical to the Rust path.
+    aa = np.ascontiguousarray(a.T if at else a, dtype=float)
+    bb = np.ascontiguousarray(b.T if bt else b, dtype=float)
+    m, k = aa.shape
+    n = bb.shape[1]
+    out = np.zeros((m, n), dtype=float)
+    for kk in range(k):
+        out += aa[:, kk, None] * bb[None, kk, :]
+    return out
 
 
 # ---------------------------------------------------------------------------
