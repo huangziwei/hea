@@ -108,6 +108,33 @@ _rs_xwx_smooth_block = rs_fn("xwx_smooth_block")
 # ``None`` when unavailable — :func:`_rw_matrix` then runs the numpy fallback.
 _rs_rw_matrix = rs_fn("rw_matrix")
 
+# Rust fixed-order dense matmul for the REML-Hessian cross products (mgcv
+# ``mgcv_pmmult2``→``dgemm``). numpy's ``@`` runs those through a threaded BLAS
+# whose reduction order is not pinned, so the fREML Hessian (hence the converged
+# ``rho``/fit) wobbles ~1 ULP per run — hea's ``discrete=FALSE`` run-to-run
+# nondeterminism (measured: mgcv on a single-thread BLAS is bit-stable, numpy is
+# not). The kernel sums each dot product strictly in index order → deterministic
+# and cross-platform. ``None`` when unavailable — the einsum fallback below is
+# also fixed-order (numpy's in-order C loop, no BLAS reorder).
+_rs_reml_pmmult = rs_fn("reml_pmmult")
+
+
+def _pmmult(a: np.ndarray, b: np.ndarray,
+            at: bool = False, bt: bool = False) -> np.ndarray:
+    """``op(a) @ op(b)`` (``op`` = transpose if the flag is set) with a FIXED
+    reduction order — mgcv ``mgcv_mmult`` (mat.c:431) semantics, but pinned so
+    the REML Hessian is deterministic. Routes to the Rust kernel
+    (:data:`_rs_reml_pmmult`); the fallback is ``einsum(optimize=False)`` —
+    numpy's own in-order loop, NOT the threaded-BLAS ``@`` — so the Python path
+    is deterministic too."""
+    if _rs_reml_pmmult is not None:
+        return np.asarray(_rs_reml_pmmult(
+            np.ascontiguousarray(a, dtype=float),
+            np.ascontiguousarray(b, dtype=float), at, bt))
+    aa = a.T if at else a
+    bb = b.T if bt else b
+    return np.einsum("ik,kj->ij", aa, bb, optimize=False)
+
 
 # ---------------------------------------------------------------------------
 # Utility ports — mgcv bam.r:1-200
@@ -659,10 +686,14 @@ def _sl_ift_chol(sl: _Sl, XX: np.ndarray, R_pre: np.ndarray, d: np.ndarray,
     S_db = _sl_mult(sl, db)                         # Sl.mult(db, k=0)
 
     if nd > 0:
-        bSb2 = np.diag(bSb1) + 2.0 * (db.T @ (D + S_db) + D.T @ db)
+        # mgcv pmmult2 cross products, via the fixed-order kernel so the REML
+        # Hessian is run/platform deterministic (numpy ``@`` is not — §D1).
+        bSb2 = np.diag(bSb1) + 2.0 * (
+            _pmmult(db, D + S_db, at=True) + _pmmult(D, db, at=True)
+        )
         bSb2 = 0.5 * (bSb2 + bSb2.T)
-        XX_db = XX @ db                            # pmmult2(XX, db)
-        rss2 = 2.0 * (db.T @ XX_db)                # 2 pmmult2(db, XX.db)
+        XX_db = _pmmult(XX, db)                     # pmmult2(XX, db)
+        rss2 = 2.0 * _pmmult(db, XX_db, at=True)    # 2 pmmult2(db, XX.db)
         rss2 = 0.5 * (rss2 + rss2.T)
     else:
         bSb2 = np.zeros((0, 0))
