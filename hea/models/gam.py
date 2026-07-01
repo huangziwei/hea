@@ -537,7 +537,11 @@ def _davies(lb: np.ndarray, nc: np.ndarray, n: np.ndarray, sigma: float,
 
 
 def _liu2(x: float, lb: np.ndarray, h: np.ndarray) -> float:
-    """mgcv:::liu2 (Liu-Tang-Zhang 2009) survival probability fallback."""
+    """mgcv:::liu2 (Liu-Tang-Zhang 2009) survival probability fallback.
+
+    mgcv anchor: ``liu2`` (mgcv.r:3500) — Liu et al. (2009) moment-matched
+    χ² approximation to the mixture tail.
+    """
     lh = lb * h
     muQ = float(lh.sum())
     lh = lh * lb
@@ -580,6 +584,9 @@ def psum_chisq(q: float, lb: np.ndarray, df: np.ndarray | None = None,
 
     Falls back on Liu-Tang-Zhang (2009) when Davies' algorithm fails to
     converge — same fallback strategy as mgcv.
+
+    mgcv anchor: ``psum.chisq`` (mgcv.r:3466) — the Davies (1980) /
+    Liu et al. (2009) mixture-of-χ² tail used for smooth-term p-values.
     """
     lb = np.ascontiguousarray(lb, dtype=float).ravel()
     r = lb.size
@@ -795,6 +802,10 @@ def _pls_qr(X: np.ndarray, lwork: dict, w: np.ndarray, z: np.ndarray,
 def _s_lambda(slots, p: int, rho: np.ndarray) -> np.ndarray:
     """Assemble the p×p total penalty Sλ = Σ exp(ρᵢ)·S_i (mgcv's total
     penalty at log-sp ρ). Free-function form; ``gam._build_S_lambda`` is a
+
+    mgcv anchor: the total penalty Σ λ_i S_i is assembled inside
+    ``gam.reparam`` (gam.fit3.r:9) and gam.fit3's setup; hea factors
+    that sum into this free helper.
     thin bind over the model's slots."""
     S = np.zeros((p, p))
     for rho_i, slot in zip(rho, slots):
@@ -1192,7 +1203,7 @@ def _gam_fit3(x, y, rho, *, slots, UrS, reparam_Y, keep_cols,
     # log|X'WX+S| = 2Σlog|R_ii| + log|I−2D²| exactly. The *indefinite*
     # corner (some 1−2d² ≤ 0, where gdi clamps to a pseudo-determinant
     # basis) is still not carried through the derivative chain — that
-    # rare corner falls back to Fisher weights (plan §2.1 residual).
+    # rare corner falls back to Fisher weights (a deliberate residual).
     is_fisher_fallback = False
     _b_fin, R_fin, log_det_A, ok = _pls_qr(X, pls_lwork, w, z, E_aug)
     if (not ok) and np.any(w < 0):
@@ -1234,6 +1245,10 @@ def _S_pinv(S_full, penalty_rank):
     same convention as ``_log_det_S_pos`` so derivatives stay
     consistent with the determinant. Used by ``_reml_grad`` to
     compute ``∂log|S|+/∂ρ_k = λ_k tr(S^+ S_k)``.
+
+    mgcv anchor: the penalty log-determinant and its ρ-derivatives are
+    returned by ``gam.reparam`` (gam.fit3.r:9) as ``det``/``det1``/``det2``;
+    hea recomputes them from the eigen-reduced Sλ here.
     """
     r = penalty_rank
     if r <= 0:
@@ -1289,6 +1304,11 @@ def _dbeta_drho(fit, rho, slots, p):
     (so X'WX = -∂²ℓ/∂β∂β' at β̂); for canonical links Newton ≡ Fisher
     and the formula reduces to the Gaussian case used implicitly in
     ``_reml_hessian``'s ``AinvSbeta``. Returns a (p, n_sp) array.
+
+    mgcv anchor: computed inside the single ``gdi1`` C call (gdi.c),
+    dispatched from ``gam.fit3`` at gam.fit3.r:550 (deriv=2 adds the
+    second-derivative block). hea splits that monolith into per-quantity
+    Python helpers.
     """
     n_sp = len(slots)
     if n_sp == 0:
@@ -1435,6 +1455,11 @@ def _dDp_drho(fit, rho, slots):
 
     Same closed form as the Gaussian special case (`g_k` in `_reml_grad`).
     Holds for any family with PIRLS-converged β̂.
+
+    mgcv anchor: computed inside the single ``gdi1`` C call (gdi.c),
+    dispatched from ``gam.fit3`` at gam.fit3.r:550 (deriv=2 adds the
+    second-derivative block). hea splits that monolith into per-quantity
+    Python helpers.
     """
     n_sp = len(slots)
     if n_sp == 0:
@@ -1469,6 +1494,11 @@ def _db_drho(rho, beta, A_chol, A_chol_lower, slots, p):
     Differentiate A(ρ) β = X'y wrt ρ_k: ∂A/∂ρ_k = exp(ρ_k) S_k since
     A = X'X + Σ_k exp(ρ_k) S_k. The k-th slot's S is k×k embedded at
     its block's column range, so the RHS is non-zero only there.
+
+    mgcv anchor: computed inside the single ``gdi1`` C call (gdi.c),
+    dispatched from ``gam.fit3`` at gam.fit3.r:550 (deriv=2 adds the
+    second-derivative block). hea splits that monolith into per-quantity
+    Python helpers.
     """
     n_sp = len(slots)
     db = np.zeros((p, n_sp))
@@ -1487,6 +1517,10 @@ def _dlog_det_S_drho(rho, S_pinv=None, S_full=None, *, slots, p, penalty_rank):
     S⁺ is the rank-stable pseudo-inverse from `_S_pinv` (top
     ``penalty_rank`` eigenpairs of Sλ). For exact-rank-stable
     scenarios this matches the existing term in `_reml_grad`.
+
+    mgcv anchor: the penalty log-determinant and its ρ-derivatives are
+    returned by ``gam.reparam`` (gam.fit3.r:9) as ``det``/``det1``/``det2``;
+    hea recomputes them from the eigen-reduced Sλ here.
     """
     n_sp = len(slots)
     if n_sp == 0:
@@ -1518,6 +1552,10 @@ def _d2log_det_S_drho_drho(rho, S_pinv=None, S_full=None, *, slots, p, penalty_r
     ``(p, slot_k_size)`` exactly mirroring the structure used in
     ``_reml_hessian`` so the einsum string ``"ab,ba->"`` indexes
     the right block sub-slices.
+
+    mgcv anchor: the penalty log-determinant and its ρ-derivatives are
+    returned by ``gam.reparam`` (gam.fit3.r:9) as ``det``/``det1``/``det2``;
+    hea recomputes them from the eigen-reduced Sλ here.
     """
     n_sp = len(slots)
     if n_sp == 0:
@@ -1658,6 +1696,9 @@ def _Dd(fit, level, *, family, y, wt):
     takes ``(y, mu, θ, wt)`` — note the order differs from ``dDeta``.)
     Keyed on the EXACT level (a higher level is NOT a safe substitute — e.g.
     ziP's ``Dd`` omits ``EDmu2th`` and has level-dependent keys), which still
+
+    mgcv anchor: the family's ``Dd``/``dDeta`` deviance-derivative
+    method (efam.r), consumed by ``gam.fit4``'s gdi block (gam.fit4.r).
     removes the dominant same-level repeats."""
     cache = fit._ddraw
     if cache is None:
@@ -1681,6 +1722,9 @@ def _dDeta(fit, level, *, family, y, wt):
     ``Dd`` feeds both the η-transform and raw-``Dd`` consumers. Pure
     function of the converged fit ⇒ 0-ulp; the gam.fit4 analog of the
     ``_dwdeta``/``_lderivs`` caches. Keyed on the EXACT level (see
+
+    mgcv anchor: the family's ``Dd``/``dDeta`` deviance-derivative
+    method (efam.r), consumed by ``gam.fit4``'s gdi block (gam.fit4.r).
     :meth:`_Dd` — a higher level is not a safe substitute)."""
     cache = fit._ddeta
     if cache is None:
@@ -1711,6 +1755,11 @@ def _dw_deta(fit, *, y, family_mgcv_extended, family, wt):
     terms survive — that's the Fisher derivative. For
     ``fit.is_fisher_fallback`` we explicitly drop the α'/α term to
     stay consistent with the α=1 override the PIRLS path applied.
+
+    mgcv anchor: computed inside the single ``gdi1`` C call (gdi.c),
+    dispatched from ``gam.fit3`` at gam.fit3.r:550 (deriv=2 adds the
+    second-derivative block). hea splits that monolith into per-quantity
+    Python helpers.
     """
     # ∂w/∂η depends only on the converged fit; the REML grad/Hessian +
     # db.drho/d2b.drho call this several times per fit (and the extended
@@ -1769,6 +1818,11 @@ def _d2beta_drho_drho(fit, rho, db_drho=None, dw_deta=None, *, slots, p, X, y, f
 
     For Gaussian-identity, h' ≡ 0 so the W-derivative term drops and
     the result reduces to the standard penalty-only IFT formula.
+
+    mgcv anchor: computed inside the single ``gdi1`` C call (gdi.c),
+    dispatched from ``gam.fit3`` at gam.fit3.r:550 (deriv=2 adds the
+    second-derivative block). hea splits that monolith into per-quantity
+    Python helpers.
     """
     n_sp = len(slots)
     if n_sp == 0:
@@ -1831,6 +1885,11 @@ def _d2w_deta2(fit, *, y, family_mgcv_extended, family, wt):
 
     For the Fisher fallback path (PIRLS forced α=1 because Newton-w<0),
     α'/α and α''/α are both dropped — same convention as ``_dw_deta``.
+
+    mgcv anchor: computed inside the single ``gdi1`` C call (gdi.c),
+    dispatched from ``gam.fit3`` at gam.fit3.r:550 (deriv=2 adds the
+    second-derivative block). hea splits that monolith into per-quantity
+    Python helpers.
     """
     if fit._d2wdeta2 is not None:
         return fit._d2wdeta2
@@ -1893,6 +1952,10 @@ def _log_det_S_pos(rho, *, penalty_rank, slots, p):
     ``eigenvalue > tol`` filter would silently drop them and remove
     the penalty — exactly the failure mode for tensor / by-factor
     smooths with multiple λ's.
+
+    mgcv anchor: the penalty log-determinant and its ρ-derivatives are
+    returned by ``gam.reparam`` (gam.fit3.r:9) as ``det``/``det1``/``det2``;
+    hea recomputes them from the eigen-reduced Sλ here.
     """
     r = penalty_rank
     if r <= 0:
@@ -1922,6 +1985,11 @@ def _dlog_det_H_drho(fit, rho, db_drho=None, *, X, slots, p, y, family_mgcv_exte
 
     For Gaussian-identity, ∂w/∂η ≡ 0, and the first term vanishes —
     recovering the existing `λ_k · tr(H⁻¹ S_k)` form in `_reml_grad`.
+
+    mgcv anchor: computed inside the single ``gdi1`` C call (gdi.c),
+    dispatched from ``gam.fit3`` at gam.fit3.r:550 (deriv=2 adds the
+    second-derivative block). hea splits that monolith into per-quantity
+    Python helpers.
     """
     n_sp = len(slots)
     if n_sp == 0:
@@ -2168,6 +2236,10 @@ def _gcv(rho, fit=None, *, gamma, n, scale_fixed_value, scale_known, X, XtX, p, 
     For canonical links Fisher ≡ Newton; for Gaussian-identity W = I
     and this collapses to D=rss, τ=tr(A⁻¹ X'X), bit-identical to the
     pre-Stage-2 closed form.
+
+    mgcv anchor: the GCV/UBRE score and its ρ-derivatives are assembled
+    in ``gam.fit3``'s score tail (gam.fit3.r:590-640) from the gdi1 trA
+    and deviance outputs.
     """
     edf_total = _fisher_edf(fit, X=X, XtX=XtX, p=p, family=family, family_mgcv_extended=family_mgcv_extended, y=y, wt=wt, pls_lwork=pls_lwork, n=n)
     # mgcv (gam.fit3.r): ``gamma`` inflates the apparent edf cost in
@@ -2669,6 +2741,10 @@ def _dbeta_dp_tw(fit, *, X, wt, y, family):
     Returns a length-p vector. Used by ``_dlog_det_H_dp_tw`` for the
     β-coupled chain in ∂log|H+S|/∂p; consumers should derive the chain
     to θ_tw via ``family.dp_dtheta()``.
+
+    mgcv anchor: the family-parameter (θ for nb/scat, p for tw)
+    derivatives of W and log|H+S| come from ``gam.fit4``'s gdi block
+    (gam.fit4.r) via the family's ``Dd`` θ-derivatives (Dth/Deta2th).
     """
     mu = fit.mu
     eta = fit.eta
@@ -2788,6 +2864,10 @@ def _dW_dtheta_total(fit, dd1=None, *, X, family, y, wt, family_mgcv_extended):
     shape (n, n_theta): the direct fixed-β̂ piece ½·Deta2th plus the
     β̂(θ)-coupled piece (∂w/∂η)·(X·∂β̂/∂θ). The Dd-table version of
     the old tw-only ``_dW_dp_tw_total`` (identical values for tw by
+
+    mgcv anchor: the family-parameter (θ for nb/scat, p for tw)
+    derivatives of W and log|H+S| come from ``gam.fit4``'s gdi block
+    (gam.fit4.r) via the family's ``Dd`` θ-derivatives (Dth/Deta2th).
     the exponential-family identity)."""
     if dd1 is None:
         dd1 = _dDeta(fit, 1, family=family, y=y, wt=wt)
@@ -2870,6 +2950,10 @@ def _dW_dp_tw_total(fit, db_dp=None, *, X, wt, y, family, family_mgcv_extended):
     """Total ∂W/∂p for Tweedie at the converged fit: the direct
     fixed-β̂ piece plus the β̂(p)-coupled piece (see
     ``_dlog_det_H_dp_tw``). Shared by the unprojected log|H+S| θ
+
+    mgcv anchor: the family-parameter (θ for nb/scat, p for tw)
+    derivatives of W and log|H+S| come from ``gam.fit4``'s gdi block
+    (gam.fit4.r) via the family's ``Dd`` θ-derivatives (Dth/Deta2th).
     derivative and the ML projected-Hessian correction."""
     mu = fit.mu
     eta = fit.eta
@@ -2898,6 +2982,10 @@ def _dlog_det_H_dtheta(fit, dd1=None, *, X, family, y, wt, family_mgcv_extended)
     """∂log|H+S|/∂θ for an extended family, shape (n_theta,):
     tr(A⁻¹·X'·diag(∂W/∂θ_j)·X) = Σᵢ dᵢ·(∂W/∂θ_j)ᵢ with
     dᵢ = (X·A⁻¹·X')ᵢᵢ — the family-generic version of the old
+
+    mgcv anchor: the family-parameter (θ for nb/scat, p for tw)
+    derivatives of W and log|H+S| come from ``gam.fit4``'s gdi block
+    (gam.fit4.r) via the family's ``Dd`` θ-derivatives (Dth/Deta2th).
     ``_dlog_det_H_dp_tw``."""
     dW_dth = _dW_dtheta_total(fit, dd1=dd1, X=X, family=family, y=y, wt=wt, family_mgcv_extended=family_mgcv_extended)        # (n, nt)
     Hinv_Xt = cho_solve((fit.A_chol, fit.A_chol_lower), X.T)
@@ -2918,6 +3006,10 @@ def _dlog_det_H_dp_tw(fit, db_dp=None, *, X, wt, y, family, family_mgcv_extended
     For Fisher-fallback fits (α≡1, no Newton corrections) the direct
     piece simplifies to ``-log(μ)·μ_η²/V`` since ∂α/∂p = (y-μ)/μ is
     zeroed out alongside the rest of the Newton α-machinery.
+
+    mgcv anchor: the family-parameter (θ for nb/scat, p for tw)
+    derivatives of W and log|H+S| come from ``gam.fit4``'s gdi block
+    (gam.fit4.r) via the family's ``Dd`` θ-derivatives (Dth/Deta2th).
     """
     dW_dp_total = _dW_dp_tw_total(fit, db_dp=db_dp, X=X, wt=wt, y=y, family=family, family_mgcv_extended=family_mgcv_extended)
 
@@ -3759,6 +3851,1185 @@ def _gam_fit3_score(rho, log_phi, fit, deriv, scoreType, *,
     return {"score": float(score), "grad": grad, "hess": hess}
 
 
+def _gam_fit4(x, y, rho, *, slots, UrS, reparam_Y, keep_cols,
+              reparam_cache, weights, start, etastart, mustart, offset,
+              family, control, null_coef, warm_eta, pls_lwork):
+    """Penalized IRLS for mgcv-extended families — gam.fit4's inner
+    loop (gam.fit4.r:340-548), line-by-line.
+
+    Weights and pseudodata come from the family's deviance-derivative
+    tables (``dDeta``):
+
+        w  = ½·Deta2                    (signed Newton weights)
+        z  = η_β − Deta/Deta2           (ratio form, can blow up at w≈0)
+        wz = w·η_β − ½·Deta             (finite even at w = 0)
+
+    Rows with non-finite z switch the solve to pls_fit1's ``use.wy``
+    mode (rhs from X'wz). An indefinite penalized Hessian (the
+    ``oo$n<0`` signal) retries the step with the negative-Deta2 rows
+    zeroed — gam.fit4.r:392-416's "positive weights" retry, NOT
+    gam.fit3's Fisher retry. Convergence is
+    ``|Δpdev|/(0.1+|pdev|) < ε`` confirmed by the penalized-deviance
+    gradient ``X'Deta + 2Sλβ`` (gam.fit4.r:523-537).
+    """
+    link = family.link
+    X = x
+    off = offset
+    n, p = x.shape
+    wt = weights
+    theta = family.get_theta()
+    Sλ = _s_lambda(slots, p, rho)
+    Sλ = 0.5 * (Sλ + Sλ.T)
+    E_aug = _penalty_root_of(slots, p, UrS, reparam_Y, keep_cols,
+                             reparam_cache, rho)
+
+    mu = family.gam_initialize(y, wt)
+    # User starting values — same glm precedence as the standard
+    # branch (gam.fit4 mirrors gam.fit3's block); the null baseline
+    # below stays user-independent.
+    mu_default = mu
+    if warm_eta is not None:
+        # Warm start from the previous score-eval's converged predictor.
+        # mgcv carries etastart<-b$linear.predictors across the outer
+        # Newton (gam.fit3.r:1366-1367) and passes it straight into
+        # gam.fit4 (gam.fit3.r:111-113), so each penalized IRLS starts near
+        # its solution. Takes precedence over the user seed (which only
+        # seeds the first fit); mu_default stays the ρ-independent null
+        # baseline. Mirrors _fit_given_rho's gam.fit3 warm start.
+        eta_warm = warm_eta
+        eta = eta_warm - off
+        mu = link.linkinv(eta_warm)
+    else:
+        if mustart is not None:
+            mu = np.asarray(mustart, dtype=float)
+        if etastart is not None:
+            eta_user = np.asarray(etastart, dtype=float)
+            eta = eta_user - off
+            mu = link.linkinv(eta_user)
+        elif start is not None:
+            eta = X @ start
+            mu = link.linkinv(eta + off)
+        else:
+            eta = link.link(mu) - off       # β-only η
+
+    # Null baseline coefficients (mgcv get.null.coef, passed in as
+    # null_coef); η_null/μ_null follow (gam.fit4.r:283-285). Same
+    # constant-η projection as gam.fit3 — a model is fit3 XOR fit4.
+    eta_null = X @ null_coef
+    mu_null = link.linkinv(eta_null + off)
+    if (mustart is not None
+            or etastart is not None
+            or start is not None):
+        ii = 0
+        while not (family.validmu(mu)
+                   and link.valideta(eta + off)
+                   and bool(np.all(np.isfinite(eta)))):
+            ii += 1
+            if ii > 20:
+                raise ValueError("Can't find valid starting values: "
+                                 "please specify some")
+            eta = 0.9 * eta + 0.1 * eta_null
+            mu = link.linkinv(eta + off)
+    beta = null_coef.copy()
+    beta_old = null_coef.copy()
+    eta_old = eta_null.copy()
+    old_pdev = (float(np.sum(family.dev_resids(y, mu_null, wt)))
+                + float(null_coef @ Sλ @ null_coef))
+
+    ctrl = control or _GAM_CONTROL_DEFAULTS
+    # control$epsilon under newton()'s conv.tol/100 cap (gam.fit3.r:1308)
+    eps = min(ctrl["epsilon"], ctrl["newton"]["conv_tol"] / 100.0)
+    max_it = ctrl["maxit"]
+    scale_abs = 1.0
+
+    def _work(mu_c, eta_c):
+        # weights/pseudodata at the current iterate (gam.fit4.r:367-371).
+        dd_c = family.dDeta(y, mu_c, wt, theta, level=0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            w_c = 0.5 * np.asarray(dd_c["Deta2"], dtype=float)
+            wz_c = w_c * eta_c - 0.5 * np.asarray(dd_c["Deta"],
+                                                  dtype=float)
+            z_c = eta_c - np.asarray(dd_c["Deta.Deta2"], dtype=float)
+        good_c = np.isfinite(z_c) & np.isfinite(w_c)
+        return dd_c, w_c, wz_c, z_c, good_c
+
+    dd, w, wz, z, good = _work(mu, eta)
+    conv = False
+    boundary = False
+    posdef = True
+    warn_msgs: list[str] = []
+    dev = float(np.sum(family.dev_resids(y, mu, wt)))
+
+    def _solve(w_c, wz_c, z_c, good_c):
+        # Masked pls_fit1 call: zero-weight rows drop out of X'WX and
+        # X'Wz identically to mgcv's x[good,] subsetting. use.wy
+        # whenever any z is non-finite (gam.fit4.r:377-381).
+        w_m = np.where(good_c, w_c, 0.0)
+        if np.all(good_c):
+            return _pls_qr(X, pls_lwork, w_m, z_c, E_aug)
+        good_w = np.isfinite(w_c) & np.isfinite(wz_c)
+        w_m = np.where(good_w, w_c, 0.0)
+        wz_m = np.where(good_w, wz_c, 0.0)
+        return _pls_qr(X, pls_lwork, w_m, np.zeros(n), E_aug, Xtwz=X.T @ wz_m)
+
+    for it in range(1, max_it + 1):
+        if not np.any(good):
+            warn_msgs.append(
+                f"PIRLS(extended): no good data at iteration {it}"
+            )
+            break
+        start, _R_it, _ld_it, ok = _solve(w, wz, z, good)
+        posdef = ok
+        if not ok:
+            # Indefinite penalized Hessian → positive-weights retry
+            # (gam.fit4.r:392-416).
+            pos = np.isfinite(np.asarray(dd["Deta2"], dtype=float))
+            pos &= np.where(pos, np.asarray(dd["Deta2"]) > 0.0, False)
+            w = np.where(pos, w, 0.0)
+            wz = w * eta - 0.5 * np.asarray(dd["Deta"], dtype=float)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                z = eta - np.asarray(dd["Deta.Deta2"], dtype=float)
+            good = np.isfinite(z) & np.isfinite(w)
+            start, _R_it, _ld_it, ok = _solve(w, wz, z, good)
+        if not ok:
+            # Last resort: legacy ridge on the normal equations.
+            w_m = np.where(good & (w > 0), w, 0.0)
+            A = (X.T * w_m) @ X + Sλ
+            A = 0.5 * (A + A.T)
+            ridge = 1e-8 * np.trace(A) / p
+            A_chol_r, lower_r = cho_factor(
+                A + ridge * np.eye(p), lower=True, overwrite_a=False,
+            )
+            wz_m = np.where(good, wz, 0.0)
+            start = cho_solve((A_chol_r, lower_r), X.T @ wz_m)
+        if np.any(~np.isfinite(start)):
+            warn_msgs.append(
+                f"PIRLS(extended): non-finite coefficients at "
+                f"iteration {it}"
+            )
+            break
+        eta_new = X @ start
+        mu_new = link.linkinv(eta_new + off)
+        dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
+        pen_new = float(start @ Sλ @ start)
+
+        # inner loop 1 (gam.fit4.r:433-458): non-finite deviance.
+        if not np.isfinite(dev_new):
+            boundary = True
+            ii = 0
+            while not np.isfinite(dev_new):
+                ii += 1
+                if ii > max_it:
+                    raise FloatingPointError(
+                        "inner loop 1; can't correct step size"
+                    )
+                start = 0.5 * (start + beta_old)
+                eta_new = 0.5 * (eta_new + eta_old)
+                mu_new = link.linkinv(eta_new + off)
+                dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
+            pen_new = float(start @ Sλ @ start)
+
+        # inner loop 2 (gam.fit4.r:461-477): invalid η/μ.
+        if not (link.valideta(eta_new + off) and family.validmu(mu_new)):
+            boundary = True
+            ii = 0
+            while not (link.valideta(eta_new + off)
+                       and family.validmu(mu_new)):
+                ii += 1
+                if ii > max_it:
+                    raise FloatingPointError(
+                        "inner loop 2; can't correct step size"
+                    )
+                start = 0.5 * (start + beta_old)
+                eta_new = 0.5 * (eta_new + eta_old)
+                mu_new = link.linkinv(eta_new + off)
+            dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
+            pen_new = float(start @ Sλ @ start)
+
+        pdev_new = dev_new + pen_new
+
+        # inner loop 3 (gam.fit4.r:486-505): pdev divergence.
+        div_thresh = (10.0 * (0.1 + abs(old_pdev))
+                      * (np.finfo(float).eps ** 0.5))
+        if pdev_new - old_pdev > div_thresh:
+            if it == 1:
+                beta_old = null_coef.copy()
+                eta_old = eta_null.copy()
+            ii = 0
+            while pdev_new - old_pdev > div_thresh:
+                ii += 1
+                if ii > 100:
+                    raise FloatingPointError(
+                        "inner loop 3; can't correct step size"
+                    )
+                start = 0.5 * (start + beta_old)
+                eta_new = 0.5 * (eta_new + eta_old)
+                mu_new = link.linkinv(eta_new + off)
+                if not (link.valideta(eta_new + off)
+                        and family.validmu(mu_new)):
+                    continue
+                dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
+                pen_new = float(start @ Sλ @ start)
+                pdev_cand = dev_new + pen_new
+                pdev_new = pdev_cand if np.isfinite(pdev_cand) else np.inf
+
+        beta = start
+        eta = eta_new
+        mu = mu_new
+        dev = dev_new
+
+        # Fresh weights/pseudodata at the accepted iterate — needed
+        # both for the gradient confirmation and the next step
+        # (gam.fit4.r:517-521).
+        dd, w, wz, z, good = _work(mu, eta)
+
+        # Convergence (gam.fit4.r:523-537): pdev change relative to
+        # (0.1 + |pdev|), then gradient confirmation. Note w·η − wz
+        # = ½·Deta on good rows, so the grad is X'Deta + 2Sλβ.
+        if posdef and (abs(pdev_new - old_pdev) / (0.1 + abs(pdev_new))
+                       < eps):
+            w_m = np.where(good, w, 0.0)
+            wz_m = np.where(good, wz, 0.0)
+            grad = (2.0 * (X.T @ (w_m * eta - wz_m))
+                    + 2.0 * (Sλ @ beta))
+            if float(np.max(np.abs(grad))) > eps * (abs(pdev_new)
+                                                    + scale_abs):
+                old_pdev = pdev_new
+                beta_old = beta.copy()
+                eta_old = eta.copy()
+            else:
+                conv = True
+                break
+        else:
+            old_pdev = pdev_new
+            beta_old = beta.copy()
+            eta_old = eta.copy()
+
+    if not conv:
+        warn_msgs.append("PIRLS algorithm did not converge")
+    if boundary:
+        warn_msgs.append("PIRLS algorithm stopped at boundary value")
+
+    # Final consistent state at converged β̂ (gam.fit4.r:561-572):
+    # signed w = ½Deta2, z with non-finite→0, wz finite everywhere.
+    is_fisher_fallback = False
+    good_f = np.isfinite(wz) & np.isfinite(w)
+    w_f = np.where(good_f, w, 0.0)
+    wz_f = np.where(good_f, wz, 0.0)
+    z_f = np.where(np.isfinite(z), z, 0.0)
+    use_wy = not np.all(np.isfinite(z) | ~good_f)
+    if use_wy:
+        _b_fin, R_fin, log_det_A, ok = _pls_qr(X, pls_lwork, 
+            w_f, np.zeros(n), E_aug, Xtwz=X.T @ wz_f,
+        )
+    else:
+        _b_fin, R_fin, log_det_A, ok = _pls_qr(X, pls_lwork, 
+            w_f, np.where(good_f, z_f, 0.0), E_aug,
+        )
+    if not ok:
+        # Indefinite at convergence — keep only the positive-weight
+        # rows for the stored factor (same deliberate residual as the
+        # standard path's Fisher fallback).
+        pos = w_f > 0.0
+        w_f = np.where(pos, w_f, 0.0)
+        wz_f = np.where(pos, wz_f, 0.0)
+        is_fisher_fallback = True
+        _b_fin, R_fin, log_det_A, ok = _pls_qr(X, pls_lwork, 
+            w_f, np.zeros(n), E_aug, Xtwz=X.T @ wz_f,
+        )
+    if ok:
+        A_chol, lower = R_fin, False
+    else:
+        A = (X.T * w_f) @ X + Sλ
+        A = 0.5 * (A + A.T)
+        ridge = 1e-8 * np.trace(A) / p
+        A_chol, lower = cho_factor(
+            A + ridge * np.eye(p), lower=True, overwrite_a=False,
+        )
+        log_det_A = 2.0 * float(np.log(np.abs(np.diag(A_chol))).sum())
+
+    # Full linear predictor for the return (caller sets warm start).
+    eta_full = eta + off
+    return _FitState(
+        beta=beta, dev=dev, pen=float(beta @ Sλ @ beta),
+        A_chol=A_chol, A_chol_lower=lower,
+        S_full=Sλ, log_det_A=log_det_A,
+        eta=eta_full, mu=mu, w=w_f, z=z_f, alpha=None,
+        is_fisher_fallback=is_fisher_fallback,
+        converged=conv, boundary=boundary, warn=warn_msgs,
+        E_aug=E_aug,
+    )
+
+
+def newton(theta0, *, include_log_phi, criterion="REML",
+           include_family_theta=False, max_iter=200, conv_tol=1e-6,
+           max_step=5.0, max_sd_step=2.0, max_half=30, qerror_thresh=0.8,
+           family, work_dim, X, y, wt, n, scale_fixed_value, control,
+           g5, edge_correct, fit_fn, score_fn, fisher_view_fn,
+           rho_full_fn, T_working_fn):
+    """Unified analytical Newton on V_R(ρ, log φ[, θ_fam]) or V_g/V_u(ρ)
+    — mgcv's gam.outer, extended with a family-θ slot for ``tw()``.
+
+    Direct port of mgcv's ``newton`` (gam.fit3.r:1290-1719). Each
+    outer iteration:
+
+    1. Eigendecompose H, flag ``pdef`` (no negative or floor-clamped
+       eigenvalues) and ``indef`` (any meaningfully negative one,
+       threshold ``|λ_max|·√eps``). Set ``d ← |λ|`` then floor at
+       ``max(d)·eps^0.7`` (Gill-Murray-Wright, gam.fit3.r:1447-1453).
+    2. Newton direction ``Nstep = −V·diag(1/d)·V'·grad`` (using
+       clamped d), capped to ``max_step``.
+    3. Accept Nstep at α=1 only if ``score_change < 0`` AND ``pdef``
+       AND quadratic-error gate ``qerror < qerror_thresh`` with
+       ``qerror = |pred − actual| / (max(|pred|,|actual|) + score_scale·conv_tol)``.
+       Otherwise step-halve: at the 4th halving (and ``it<10``)
+       switch to the steepest-descent direction at the same length;
+       after ``max_half/2`` halvings drop the qerror requirement
+       (gam.fit3.r:1518-1572).
+    4. If ``!pdef`` AND SD not yet tried, run a separate SD line
+       search (start at ``2·max_sd_step``, halve up to 40 times,
+       keep best descent that satisfies qerror) and replace the
+       accepted step with SD-best if it scored lower
+       (gam.fit3.r:1580-1641). This is what stops Newton from
+       sliding into UBRE/GCV saturation tails on flat smooths when
+       the seed Hessian is fully indefinite.
+
+    Convergence (gam.fit3.r:1646-1658) requires ``!indef``,
+    ``max(|grad|) ≤ score_scale·conv_tol·5``, AND
+    ``|Δscore| ≤ score_scale·conv_tol``, with
+    ``score_scale = |scale.est| + |score|`` (GCV/UBRE) or
+    ``|log(scale.est)| + |score|`` (REML).
+
+    ``theta`` layout: ρ first, then a single log φ column when
+    ``include_log_phi`` is set (unknown-scale REML), then
+    ``family.n_theta`` extra columns when ``include_family_theta`` is
+    set. For known-scale REML (Poisson, Binomial) log φ is fixed at 0;
+    for GCV.Cp log φ and family θ are always off the outer vector.
+
+    Each ``_eval`` calls ``family.set_theta(t[base:])`` so the family's
+    internal state (e.g. ``family.p`` for tw) tracks the current outer
+    iterate before PIRLS is run.
+
+    ``criterion`` selects the objective:
+    - ``"REML"``: minimizes V_R via ``_reml`` (returns 2·V_R, hence
+      the 0.5 scaling), ``_reml_grad``, ``_reml_hessian``.
+    - ``"GCV"``: minimizes V_g (scale-unknown) or V_u (scale-known)
+      via ``_gcv``, ``_gcv_grad``, ``_gcv_hessian``. ``include_log_phi``
+      and ``include_family_theta`` must both be False (GCV does not
+      put log φ or family θ in the outer vector — φ̂ is the Pearson
+      estimate post-fit, not optimized; family θ has no GCV path).
+    """
+    edge_theta1 = None
+    if criterion not in ("REML", "GCV", "REML5", "GACV", "PREML"):
+        raise ValueError(
+            "criterion must be 'REML', 'GCV', 'REML5', 'GACV' or "
+            f"'PREML', got {criterion!r}")
+    # GCV/GACV (performance-style) and PREML (Pearson-Laplace, φ profiled
+    # analytically at each ρ) are all ρ-only outer problems — no log φ or
+    # family θ in θ.
+    if criterion in ("GCV", "GACV", "PREML") and include_log_phi:
+        raise ValueError(
+            f"{criterion} path does not include log φ in outer θ.")
+    if criterion in ("GCV", "GACV", "PREML") and include_family_theta:
+        raise ValueError(
+            f"{criterion} path does not include family θ in outer θ.")
+    if criterion == "REML5" and (include_log_phi or include_family_theta):
+        # general families: scale.est ≡ 1, family θ never in outer θ
+        raise ValueError("REML5 (gam.fit5) outer θ is ρ-only.")
+
+    n_work = work_dim
+    n_theta_fam = family.n_theta if include_family_theta else 0
+    theta = np.asarray(theta0, dtype=float).copy()
+    # θ's sp-part is the *working* log-sp; criterion derivatives come
+    # back per-penalty (FULL space) and chain to working space through
+    # T = blockdiag(L, I_extra): g_θ = T'g, H_θ = T'HT. T is None ⇔
+    # identity (no id linkage) — zero-cost on the common path.
+    T_work = T_working_fn((1 if include_log_phi else 0) + n_theta_fam)
+
+    def _to_working(g):
+        return g if T_work is None else T_work.T @ g
+
+    def _to_working_hess(H):
+        return H if T_work is None else T_work.T @ H @ T_work
+
+    def _split(t):
+        # → (FULL per-penalty ρ, log φ) from a working-layout θ.
+        # ρ always occupies the first n_work slots; log φ (when
+        # present) sits right after; family θ trails — so plain
+        # ``t[:n_work]`` is correct for every layout, including the
+        # scale-known (ρ, θ_fam) one.
+        rho_t = rho_full_fn(t[:n_work])
+        # Known-scale layouts: log φ is the FIXED log(scale) — 0 on
+        # the poisson/binomial defaults, log(gam(scale=)) otherwise.
+        lp_t = (float(t[n_work]) if include_log_phi
+                else float(np.log(scale_fixed_value)))
+        return rho_t, lp_t
+
+    def _apply_family_theta(t):
+        if n_theta_fam > 0:
+            base = n_work + (1 if include_log_phi else 0)
+            family.set_theta(t[base:base + n_theta_fam])
+
+    # Non-REML5 criteria route score/grad/hess through the single free
+    # `_gam_fit3_score` (mgcv's gam.fit3 score tail, via `_score_all`);
+    # REML5 (gam.fit5) keeps its own monolithic REML/REML1/REML2 return.
+    def _mk_score_closures(sType):
+        def _eval(t, deriv=2):  # deriv: REML5-only hint, ignored here
+            rho_t, lp_t = _split(t)
+            _apply_family_theta(t)
+            try:
+                fit_t = fit_fn(rho_t)
+            except Exception:
+                return float("inf"), None
+            return score_fn(
+                rho_t, lp_t, fit_t, 0, sType,
+                include_log_phi=include_log_phi,
+                include_family_theta=include_family_theta,
+                T_work=T_work)["score"], fit_t
+
+        def _grad(rho, log_phi, fit):
+            return score_fn(
+                rho, log_phi, fit, 1, sType,
+                include_log_phi=include_log_phi,
+                include_family_theta=include_family_theta,
+                T_work=T_work)["grad"]
+
+        def _hess(rho, log_phi, fit):
+            return score_fn(
+                rho, log_phi, fit, 2, sType,
+                include_log_phi=include_log_phi,
+                include_family_theta=include_family_theta,
+                T_work=T_work)["hess"]
+        return _eval, _grad, _hess
+
+    if criterion == "REML":
+        _eval, _grad, _hess = _mk_score_closures("REML")
+    elif criterion == "REML5":
+        # general families: the criterion and its ρ-derivatives come
+        # straight from gam.fit5 (REML/REML1/REML2). mgcv's newton
+        # carries coefficient start values forward across EVERY
+        # evaluation (gam.fit3.r newton, "carries start values
+        # forward...", incl. rejected trials) — the carry lives in
+        # the pre-rp basis, exactly what _gam_fit5 returns/expects.
+        # mgcv evaluates the first Newton trial at deriv = pdef·2
+        # (gam.fit3.r:1486): when the Hessian is +def it gets the score
+        # AND grad/hess from ONE fit and reuses them on accept (no second
+        # fit per iterate); only step-halving / SD trials run deriv=0,
+        # with one deriv=2 refit on the accepted halving (gam.fit3.r:1531,
+        # 1544). The newton below passes that `deriv` hint through `_eval`;
+        # `_grad`/`_hess` reuse the fit's REML1/REML2 when present and only
+        # refit when the accepted point came from a deriv=0 trial. Inner
+        # epsilon: newton caps control$epsilon at conv.tol/100
+        # (gam.fit3.r:1308) → 1e-8 at gam defaults.
+        g5 = g5
+
+        def _fit5_at(rho_t, d):
+            fit_t = _gam_fit5(
+                g5["X"], g5["y"], rho_t, g5["sl"],
+                family=family, lpi=g5["lpi"],
+                weights=g5["weights"], offset=g5["offsets"],
+                Mp=g5["Mp"], deriv=d, start=g5["start"],
+                gamma=g5["gamma"], epsilon=1e-8,
+            )
+            g5["start"] = fit_t["coefficients"]
+            return fit_t
+
+        def _eval(t, deriv=2):
+            rho_t, _ = _split(t)
+            try:
+                fit_t = _fit5_at(rho_t, deriv)
+            except Exception:
+                return float("inf"), None
+            return float(fit_t["REML"]), fit_t
+
+        def _grad(rho, log_phi, fit):
+            # Reuse the deriv=2 data if the accepted fit already carries it
+            # (first-trial-pdef accept); else this point came from a deriv=0
+            # trial (halving/SD) and needs the one deriv=2 refit. NB a
+            # deriv=0 fit5 still has the "REML2" KEY (value None), so test
+            # the value, not key presence.
+            if fit.get("REML2") is None:
+                fit.update(_fit5_at(rho, 2))
+            # newton's b IS the last accepted deriv-2 fit — keep it
+            # so the caller never refits at the optimum (a refit
+            # re-enters Newton from the converged coefs and can
+            # only exit through the step-failure paths).
+            g5["fit"] = fit
+            return _to_working(np.asarray(fit["REML1"], dtype=float))
+
+        def _hess(rho, log_phi, fit):
+            return _to_working_hess(np.asarray(fit["REML2"],
+                                               dtype=float))
+    elif criterion == "GACV":
+        # GACV (gam.fit3.r:751): a GCV sibling for scale-unknown standard
+        # families. ρ-only; analytic gradient + Hessian.
+        _eval, _grad, _hess = _mk_score_closures("GACV")
+    elif criterion == "PREML":
+        # P-REML / P-ML (gam.fit3.r:640-665): the Laplace (RE)ML criterion
+        # with the Pearson-Laplace scale φ = P/(n−Mp) plugged in (γ≡1),
+        # ρ-only. `_gam_fit3_score` profiles φ_P internally for the value
+        # (via `_phi_pearson`) and uses `_preml_grad`/`_preml_hessian`.
+        _eval, _grad, _hess = _mk_score_closures("PREML")
+    else:  # GCV
+        _eval, _grad, _hess = _mk_score_closures("GCV")
+
+    # P-REML/P-ML are (RE)ML-type for the convergence score scale
+    # (|log scale.est| + |score|); GCV/GACV/UBRE use |scale.est| + |score|.
+    is_reml = criterion in ("REML", "REML5", "PREML")
+
+    def _score_scale(fit_, val):
+        # mgcv's score.scale: |scale.est| + |score| (GCV/UBRE) or
+        # |log(scale.est)| + |score| (REML). scale.est is gam.fit3's
+        # estimator — Pearson with the Fletcher (2012) correction
+        # (gam.fit3.r:596-603, mgcv's default scale.est); for
+        # known-scale families it is 1.
+        if family.scale_known:
+            scale_est = 1.0
+        else:
+            y_arr = y
+            mu_arr = fit_.mu
+            V_arr = family.variance(mu_arr)
+            # Weighted Pearson — gam.fit3.r:597 sum(weights*(y-mu)^2/V).
+            pearson = float(np.sum(wt * (y_arr - mu_arr) ** 2
+                                   / V_arr))
+            fit_F_ = fisher_view_fn(fit_)
+            w_F = fit_F_.w
+            if w_F is None or np.allclose(w_F, 1.0):
+                Xw_ = X
+            else:
+                Xw_ = X * np.sqrt(np.maximum(w_F, 0.0))[:, None]
+            # τ = tr(A⁻¹X'WX) = ‖√W·X·C⁻¹‖_F² with A = C'C — the
+            # factor route, not the κ²-squaring explicit product.
+            if fit_F_.A_chol_lower:
+                Kw_ = solve_triangular(fit_F_.A_chol, Xw_.T, lower=True)
+            else:
+                Kw_ = solve_triangular(fit_F_.A_chol, Xw_.T,
+                                       lower=False, trans="T")
+            tau_ = float(np.sum(Kw_ * Kw_))
+            df_resid_ = max(n - tau_, 1.0)
+            scale_est = pearson / df_resid_
+            se_kind = (control
+                       or _GAM_CONTROL_DEFAULTS)["scale_est"]
+            if se_kind == "deviance":
+                # gam.fit3.r:606 — deviance estimator replaces the
+                # Pearson one entirely.
+                scale_est = float(fit_.dev) / df_resid_
+            elif se_kind == "fletcher":
+                s_bar_ = max(-0.9, float(np.mean(
+                    family.dvar(mu_arr) * (y_arr - mu_arr)
+                    / V_arr
+                )))
+                if np.isfinite(s_bar_):
+                    scale_est = scale_est / (1.0 + s_bar_)
+            # "pearson": keep the uncorrected estimate.
+        if is_reml:
+            # log(scale.est); guard against scale_est ≤ 0
+            scale_est_safe = max(scale_est, 1e-300)
+            return abs(np.log(scale_est_safe)) + abs(val)
+        return abs(scale_est) + abs(val)
+
+    f_prev, fit = _eval(theta)
+    if fit is None:
+        outer_info = {
+            "conv": "initial fit failed", "iter": 0,
+            "grad": np.zeros_like(theta), "hess": np.zeros((theta.size, theta.size)),
+            "score": float(f_prev), "score_scale": float("nan"),
+        }
+        outer_fit = None
+        return {"theta": theta, "outer_info": outer_info, "outer_fit": outer_fit, "edge_theta1": edge_theta1}
+
+    # Initial grad/hess at θ₀ and starting active set
+    # (gam.fit3.r:1383-1385). Dimensions whose gradient is already
+    # below ``score_scale·conv_tol`` start out inactive (excluded
+    # from the Newton step). If everything is below threshold, mark
+    # all active so the iter has something to move.
+    rho0, log_phi0 = _split(theta)
+    grad = _grad(rho0, log_phi0, fit)
+    H = _hess(rho0, log_phi0, fit)
+    H = 0.5 * (H + H.T)
+    score_scale = _score_scale(fit, f_prev)
+    uconv_ind = np.abs(grad) > score_scale * conv_tol
+    if not np.any(uconv_ind):
+        uconv_ind = np.ones_like(uconv_ind, dtype=bool)
+
+    conv_text = "iteration limit reached"
+    last_grad = grad
+    last_hess = H
+    it_done = 0
+    for it in range(max_iter):
+        score_scale = _score_scale(fit, f_prev)
+
+        # Active-set masking (gam.fit3.r:1430-1436). Exclude
+        # apparently-converged dims from the Newton step. mgcv also
+        # computes a tighter ``uconv.ind1`` mask there but never
+        # uses it; we follow suit. Safety net: if everything is
+        # marked inactive, force the largest-|grad| dim active so
+        # the iter still has something to move.
+        if not np.any(uconv_ind):
+            j = int(np.argmax(np.abs(grad))) if grad.size > 0 else 0
+            uconv_ind = np.zeros_like(uconv_ind, dtype=bool)
+            if grad.size > 0:
+                uconv_ind[j] = True
+        if H.size > 0:
+            H1 = H[np.ix_(uconv_ind, uconv_ind)]
+            grad1 = grad[uconv_ind]
+        else:
+            H1 = H
+            grad1 = grad
+
+        # Eigen analysis on the active subblock with mgcv's
+        # pdef/indef flags (gam.fit3.r:1438-1455). ``indef``
+        # triggers the SD-fallback; ``pdef`` False blocks
+        # immediate-step acceptance.
+        if H1.size > 0:
+            w_eig, V_eig = np.linalg.eigh(H1)
+            sqrt_eps = float(np.finfo(float).eps ** 0.5)
+            # mgcv: sum(-d > abs(d[1])*sqrt(eps)) with R's eigen
+            # sorting descending — d[1] is the largest *algebraic*
+            # eigenvalue, not the largest magnitude.
+            d_top = float(w_eig[-1])
+            indef = bool(np.any(-w_eig > abs(d_top) * sqrt_eps))
+            # 1-D special case: a tiny single eigenvalue can register
+            # as indefinite at the |λ_max|·√eps threshold; require it
+            # be meaningfully negative on the score-scale instead.
+            if indef and w_eig.size == 1:
+                indef = bool(w_eig[0] < -score_scale * sqrt_eps)
+            d = np.abs(w_eig)
+            pdef = bool(np.all(w_eig > 0))
+            low_d = d.max() * (np.finfo(float).eps ** 0.7) if d.size else 0.0
+            clamp_mask = d < low_d
+            if np.any(clamp_mask):
+                pdef = False
+                d = np.where(clamp_mask, low_d, d)
+            d_inv = np.where(d > 0, 1.0 / d, 0.0)
+            Nstep_active = -V_eig @ (d_inv * (V_eig.T @ grad1))
+            Nstep = np.zeros_like(grad)
+            Nstep[uconv_ind] = Nstep_active
+        else:
+            Nstep = np.zeros_like(grad)
+            pdef = True
+            indef = False
+
+        # Cap Newton step length
+        ms = float(np.abs(Nstep).max()) if Nstep.size else 0.0
+        if ms > max_step:
+            Nstep = Nstep * (max_step / ms)
+
+        # Steepest descent direction (length-1 in max-norm).
+        gmax = float(np.abs(grad).max()) if grad.size else 0.0
+        Sstep = (-grad / gmax) if gmax > 0 else np.zeros_like(grad)
+
+        def _qerror(step, score_change):
+            if step.size == 0:
+                return 0.0
+            pred = float(grad @ step + 0.5 * step @ (H @ step))
+            denom = max(abs(pred), abs(score_change)) + score_scale * conv_tol
+            return abs(pred - score_change) / denom if denom > 0 else 0.0
+
+        # ----- step acceptance (gam.fit3.r:1492-1573) -----
+        accepted_step = None
+        accepted_f = float("inf")
+        accepted_fit = None
+        sd_unused = True
+
+        # mgcv evaluates the first trial at deriv = pdef·2 (gam.fit3.r:1486):
+        # +def ⇒ get grad/hess in this fit so an immediate accept needs no
+        # second fit (REML5); indefinite ⇒ deriv=0, defer to the SD trial.
+        f_try, fit_try = _eval(theta + Nstep, deriv=2 if pdef else 0)
+        score_change = f_try - f_prev
+        qerror = _qerror(Nstep, score_change)
+        if (
+            np.isfinite(f_try) and score_change < 0
+            and pdef and qerror < qerror_thresh
+        ):
+            accepted_step, accepted_f, accepted_fit = Nstep.copy(), f_try, fit_try
+        else:
+            step = Nstep.copy()
+            for ii in range(max_half):
+                if ii == 3 and it < 9:
+                    # Newton failing — switch to SD direction at the
+                    # current step length (gam.fit3.r:1521; mgcv's
+                    # i<10 with 1-based iterations = it<9 here).
+                    s_length = min(float(np.linalg.norm(step)), max_sd_step)
+                    sd_norm = float(np.linalg.norm(Sstep))
+                    if sd_norm > 0:
+                        step = Sstep * (s_length / sd_norm)
+                        sd_unused = False
+                else:
+                    step = step / 2
+                f_try, fit_try = _eval(theta + step, deriv=0)
+                score_change = f_try - f_prev
+                if ii > min(4, max_half // 2):
+                    qerror = qerror_thresh / 2  # drop qerror requirement
+                else:
+                    qerror = _qerror(step, score_change)
+                if (
+                    np.isfinite(f_try)
+                    and score_change < 0
+                    and qerror < qerror_thresh
+                ):
+                    accepted_step = step.copy()
+                    accepted_f, accepted_fit = f_try, fit_try
+                    break
+
+        # ----- indefinite SD fallback (gam.fit3.r:1580-1641) -----
+        # If the Hessian wasn't PD and we haven't already used the SD
+        # direction in step-halving, run an independent SD line
+        # search and pick whichever direction scored lower. This is
+        # what keeps Newton out of UBRE/GCV saturation tails when
+        # the seed lies near a local maximum (all-negative eig).
+        if (not pdef) and sd_unused and Sstep.size > 0:
+            sd_best_step = None
+            sd_best_f = float("inf")
+            sd_best_fit = None
+            # mgcv starts at 2·Sstep so the first halving gives
+            # Sstep itself (max-norm 1) — gam.fit3.r:1581.
+            sd_step = Sstep * 2
+            for kk in range(40):
+                sd_step = sd_step / 2
+                f_sd, fit_sd = _eval(theta + sd_step, deriv=0)
+                score_change_sd = f_sd - f_prev
+                qerror_sd = _qerror(sd_step, score_change_sd)
+                accept_sd = (
+                    np.isfinite(f_sd)
+                    and (
+                        sd_best_step is None
+                        or (f_sd <= sd_best_f and qerror_sd < qerror_thresh)
+                    )
+                )
+                if accept_sd:
+                    sd_best_step = sd_step.copy()
+                    sd_best_f, sd_best_fit = f_sd, fit_sd
+                # Stop once we've found descent and a shorter step
+                # makes things worse.
+                if (
+                    sd_best_step is not None and sd_best_f < f_prev
+                    and np.isfinite(f_sd) and f_sd > sd_best_f
+                ):
+                    break
+            if sd_best_step is not None and sd_best_f < accepted_f:
+                accepted_step = sd_best_step
+                accepted_f = sd_best_f
+                accepted_fit = sd_best_fit
+
+        if accepted_step is None:
+            conv_text = "step failed"
+            it_done = it + 1
+            break
+        theta = theta + accepted_step
+        df = abs(accepted_f - f_prev)
+        f_prev = accepted_f
+        fit = accepted_fit
+        it_done = it + 1
+
+        # Recompute grad/hess at the new θ (gam.fit3.r:1505-1508).
+        # The convergence test and active-set update use these
+        # post-step values, mirroring mgcv's gam.fit3 deriv=2 refit.
+        # The family θ state must be re-pinned to the ACCEPTED point:
+        # _eval mutates it at every trial candidate, and the accepted
+        # candidate is not necessarily the last one evaluated
+        # (step-halving / SD line searches probe past it).
+        _apply_family_theta(theta)
+        rho_n, log_phi_n = _split(theta)
+        grad = _grad(rho_n, log_phi_n, fit)
+        H = _hess(rho_n, log_phi_n, fit)
+        H = 0.5 * (H + H.T)
+        last_grad, last_hess = grad, H
+
+        # mgcv's outer convergence test (gam.fit3.r:1646-1658):
+        # require non-indefinite Hessian, max(|grad|) ≤ 5·score_scale·conv_tol,
+        # AND |Δscore| ≤ score_scale·conv_tol.
+        score_scale = _score_scale(fit, f_prev)
+        converged = not indef
+        # Refresh active set from new grad/hess (gam.fit3.r:1650-1651).
+        diag_H = np.diag(H) if H.size > 0 else np.array([])
+        uconv_ind = (
+            (np.abs(grad) > score_scale * conv_tol * 0.1)
+            | (np.abs(diag_H) > score_scale * conv_tol * 0.1)
+        )
+        if grad.size > 0 and float(np.abs(grad).max()) > score_scale * conv_tol * 5.0:
+            converged = False
+        if df > score_scale * conv_tol:
+            if converged:
+                # Otherwise can't progress (gam.fit3.r:1654).
+                uconv_ind = np.ones_like(uconv_ind, dtype=bool)
+            converged = False
+        if converged:
+            conv_text = "full convergence"
+            break
+
+    outer_info = {
+        "conv": conv_text,
+        "iter": it_done,
+        "grad": last_grad,
+        "hess": last_hess,
+        "score": float(f_prev),
+        "score_scale": float(_score_scale(fit, f_prev)),
+    }
+
+    # gam.control(edge.correct=) — mgcv newton(), gam.fit3.r:1670-1700:
+    # smoothing parameters at "working infinity" (Hessian-flat
+    # directions) get walked back toward the seed in unit log steps
+    # until the RE/ML criterion has risen by α (default 0.02) per
+    # parameter; derivative quantities recomputed there feed a better
+    # Vc (post.proc's k=2 pass). Only the corrected θ is stored here;
+    # the constructor recomputes the Vc pieces from it.
+    edge_theta1 = None
+    if edge_correct and is_reml and theta.size > 0:
+        # The k=2 Vc pass runs whether or not anything is flat (mgcv
+        # refits at lsp1 = lsp when `flat` is empty — the corrected
+        # Vc still differs through the weaker 1e-7 Vr prior).
+        grad2 = np.diag(last_hess) if last_hess.size else np.zeros(0)
+        flat = np.where(np.abs(grad2) < np.abs(last_grad) * 100.0)[0]
+        alpha_ec = (0.02 if edge_correct is True
+                    else float(abs(edge_correct)))
+        theta1 = theta.copy()
+        if flat.size:
+            step_dir = (np.asarray(theta0, dtype=float) > theta) * 2.0 - 1.0
+            f1 = f_prev
+            for i in flat:
+                target = f1 + alpha_ec
+                # mgcv walks unbounded; cap defensively (a unit log-sp
+                # step per iteration covers any practical surface
+                # within a few dozen steps).
+                for _ in range(100):
+                    if f1 >= target:
+                        break
+                    theta1[i] = theta1[i] + step_dir[i]
+                    f1_new, _fit1 = _eval(theta1, deriv=0)
+                    if not np.isfinite(f1_new):
+                        theta1[i] = theta1[i] - step_dir[i]
+                        break
+                    f1 = f1_new
+            # Restore family θ to the converged values (the walk's
+            # _eval calls mutate family state for tw).
+            _apply_family_theta(theta)
+        edge_theta1 = theta1
+    # Cache the accepted-step fit at the converged θ for the caller to
+    # reuse (mgcv's `object <- b$object`, no refit). `fit` is the last
+    # accepted deriv-0 `_fit_given_rho` at `_rho_full(theta[:n_work])` ==
+    # the ρ̂ the caller will build from; the edge-correct walk above leaves
+    # it untouched. REML5 caches its own deriv-2 fit on `_g5["fit"]`.
+    outer_fit = fit
+    return {"theta": theta, "outer_info": outer_info, "outer_fit": outer_fit, "edge_theta1": edge_theta1}
+
+
+def bfgs(theta0, *, conv_tol=1e-6, max_Nstep=3.0, max_step=200,
+         g5, family, L, rho_full_fn):
+    """mgcv ``bfgs`` (gam.fit3.r:1722-2141) for general families.
+
+    BFGS over the REML5 score using only ``gam.fit5`` at deriv ≤ 1
+    (score ``REML`` + gradient ``REML1`` + the ``dVkk`` curvature
+    matrix). This is the outer optimizer mgcv coerces to for
+    ``available.derivs == 1`` families (mgcv.r:1907) — ``mvn`` and any
+    custom family that supplies ll only to the dH/trace order
+    (gamlss_gH deriv ≤ 2), where Newton's REML2 (needing the ll's
+    ``trHid2H``, gamlss_gH deriv 3) is unavailable.
+
+    Step lengths meet the Wolfe conditions via Nocedal & Wright
+    (2006) Algorithms 3.5 (main loop) and 3.6 (``zoom`` bisection).
+    The initial inverse Hessian is seeded by finite-differencing the
+    gradient, then adjusted on the first accepted step (mgcv's p143
+    variant). ``score.scale = 1 + |score|`` (REML path; general
+    families have ``scale.est ≡ 1``). The working-infinite-sp
+    roll-back (gam.fit3.r:2065-2100) is ported for parity.
+
+    ``theta0`` is the *working* log-sp seed; the returned vector is
+    the converged working log-sp. ``outer_info`` is populated
+    with ``conv``/``iter``/``grad``/``hess``/``score.hist`` like
+    mgcv's ``object$outer.info``; the accepted deriv-1 fit is cached
+    on ``g5["fit"]`` so the caller never refits.
+    """
+
+    fam = family
+    L = L                      # working→full sp (None ⇔ I)
+    n_sp = int(np.asarray(theta0).size)
+    eps_mach = float(np.finfo(float).eps)
+
+    # mgcv caps the inner PIRLS tol at conv.tol/100 (gam.fit3.r:1797).
+    inner_eps = min(1e-7, conv_tol / 100.0)
+
+    def _to_working(g):
+        return g if L is None else L.T @ g
+
+    def _fit5(lsp_work, d):
+        rho = rho_full_fn(np.asarray(lsp_work, dtype=float))
+        fit = _gam_fit5(
+            g5["X"], g5["y"], rho, g5["sl"], family=fam,
+            lpi=g5["lpi"], weights=g5["weights"],
+            offset=g5["offsets"], Mp=g5["Mp"], deriv=d,
+            start=g5["start"], gamma=g5["gamma"], epsilon=inner_eps,
+        )
+        g5["start"] = fit["coefficients"]
+        return fit
+
+    def _dvkk_diag(fit):
+        dV = np.asarray(fit["dVkk"], dtype=float)
+        if L is None:
+            return np.diag(dV).copy()
+        return np.diag(L.T @ dV @ L)
+
+    def _grad(fit):
+        return _to_working(np.asarray(fit["REML1"], dtype=float))
+
+    # all sp slots carry curvature info for general families (mvn has
+    # no family$n.theta and gam.fit5's dVkk is n_sp×n_sp) — spind ≡
+    # every working sp (mgcv.r-bfgs: nind = ncol(L), spind = 1:nind).
+    spind = np.ones(n_sp, dtype=bool)
+
+    ilsp = np.asarray(theta0, dtype=float).copy()
+    initial_lsp = ilsp.copy()
+
+    # ---- initial fit + gradient -----------------------------------
+    b = _fit5(ilsp, 1)
+    score = float(b["REML"])
+    grad = _grad(b)
+    i_dvkk = _dvkk_diag(b)
+    start0 = g5["start"].copy()
+    i_score = score
+    i_grad = grad.copy()
+    score_scale = 1.0 + abs(i_score)
+
+    # ---- FD inverse-Hessian seed (gam.fit3.r:1852-1873) -----------
+    Bmat = np.eye(n_sp)
+    feps = 1e-4
+    for k in range(n_sp):
+        jlsp = ilsp.copy()
+        jlsp[k] += feps
+        g5["start"] = start0.copy()
+        bk = _fit5(jlsp, 1)
+        grad1 = _grad(bk)
+        Bmat[k, :] = (grad1 - grad) / feps
+    Bmat = (Bmat + Bmat.T) / 2.0
+    evals, evecs = np.linalg.eigh(Bmat)
+    evals = np.abs(evals)
+    thresh = float(np.max(evals)) * 1e-4 if evals.size else 0.0
+    evals[evals < thresh] = thresh
+    # B ← V diag(1/λ) V'  (the approximate INVERSE Hessian)
+    Bmat = evecs @ ((evecs / evals).T)
+    g5["start"] = start0.copy()
+
+    c1, c2 = 1e-4, 0.9          # Wolfe constants
+    score_hist = [i_score]
+    uconv = np.ones(n_sp, dtype=bool)
+    rolled_back = False
+    # the "initial" record for the current line search
+    cur = {"alpha": 0.0, "score": i_score, "grad": i_grad,
+           "dVkk": i_dvkk, "start": start0.copy()}
+    step = np.zeros(n_sp)
+    trial = None
+    ct = "iteration limit reached"
+    iters = 0
+
+    def zoom(lo, hi):
+        # N&W Alg 3.6: bisection for a Wolfe-satisfying step.
+        for _ in range(40):
+            al = (lo["alpha"] + hi["alpha"]) / 2.0
+            tr = {"alpha": al}
+            lspz = ilsp + step * al
+            g5["start"] = cur["start"].copy()
+            bz = _fit5(lspz, 0)
+            tr["score"] = float(bz["REML"])
+            tr["start"] = g5["start"].copy()
+            if (tr["score"] > cur["score"] + al * c1 * cur["dscore"]
+                    or tr["score"] >= lo["score"]):
+                hi = tr
+            else:
+                g5["start"] = cur["start"].copy()
+                bz = _fit5(lspz, 1)
+                tr["grad"] = _grad(bz)
+                tr["dVkk"] = _dvkk_diag(bz)
+                tr["start"] = g5["start"].copy()
+                tr["dscore"] = float(np.sum(step * tr["grad"]))
+                if abs(tr["dscore"]) <= -c2 * cur["dscore"]:
+                    return tr
+                if tr["dscore"] * (hi["alpha"] - lo["alpha"]) >= 0:
+                    hi = lo
+                lo = tr
+        return None
+
+    for it in range(1, max_step + 1):
+        iters = it
+        # trial step from the approximate inverse Hessian
+        step = np.zeros(n_sp)
+        step[uconv] = -(Bmat[np.ix_(uconv, uconv)] @ i_grad[uconv])
+        if float(np.sum(step * i_grad)) >= 0:    # not descending
+            step = -np.diag(Bmat) * i_grad
+            step[~uconv] = 0.0
+        ms = float(np.max(np.abs(step))) if step.size else 0.0
+        if ms > max_Nstep:
+            alpha = max_Nstep / ms
+            alpha_max = alpha * 1.05
+        else:
+            alpha = 1.0
+            alpha_max = min(2.0, max_Nstep / ms) if ms > 0 else 2.0
+        cur["dscore"] = float(np.sum(step * i_grad))
+        prev = dict(cur)
+        trial = {"alpha": alpha}
+        deriv = 1
+        while True:                       # N&W Alg 3.5
+            lsp = ilsp + trial["alpha"] * step
+            g5["start"] = prev["start"].copy()
+            b = _fit5(lsp, deriv)
+            trial["score"] = float(b["REML"])
+            if deriv > 0:
+                trial["grad"] = _grad(b)
+                trial["dVkk"] = _dvkk_diag(b)
+                trial["dscore"] = float(np.sum(trial["grad"] * step))
+                deriv = 0
+            else:
+                trial["grad"] = None
+                trial["dscore"] = None
+            trial["start"] = g5["start"].copy()
+            # Wolfe 1: sufficient decrease
+            if (trial["score"] > cur["score"]
+                    + c1 * trial["alpha"] * cur["dscore"]
+                    or (deriv == 0 and trial["score"] >= prev["score"])):
+                trial = zoom(prev, trial)
+                break
+            if trial["dscore"] is None:   # need gradient at trial
+                g5["start"] = trial["start"].copy()
+                b = _fit5(lsp, 1)
+                trial["grad"] = _grad(b)
+                trial["dscore"] = float(np.sum(trial["grad"] * step))
+                trial["dVkk"] = _dvkk_diag(b)
+                trial["start"] = g5["start"].copy()
+            if abs(trial["dscore"]) <= -c2 * cur["dscore"]:
+                break                     # Wolfe 2 met
+            if trial["dscore"] >= 0:      # increase at trial end
+                trial = zoom(trial, prev)
+                break
+            prev = dict(trial)
+            if trial["alpha"] == alpha_max:
+                break
+            trial["alpha"] = min(prev["alpha"] * 1.3, alpha_max)
+
+        if trial is None:                 # step failed
+            lsp = ilsp.copy()
+            if rolled_back:
+                break
+            uconv = np.abs(i_grad) > score_scale * conv_tol * 0.1
+            uconv[spind] = uconv[spind] | (
+                np.abs(i_dvkk)[spind] > score_scale * conv_tol * 0.1)
+            if np.sum(~uconv) == 0:
+                break
+            trial = dict(cur)
+            converged = True
+        else:                             # BFGS inverse-Hessian update
+            yg = trial["grad"] - i_grad
+            step_full = step * trial["alpha"]
+            rho_bfgs = float(np.sum(yg * step_full))
+            if rho_bfgs > 0:
+                if it == 1:
+                    Bmat = Bmat * trial["alpha"]
+                rinv = 1.0 / rho_bfgs
+                Bmat = Bmat - rinv * np.outer(step_full, yg @ Bmat)
+                Bmat = (Bmat - rinv * np.outer(Bmat @ yg, step_full)
+                        + rinv * np.outer(step_full, step_full))
+            score_hist.append(trial["score"])
+            ilsp = ilsp + step_full
+            lsp = ilsp.copy()
+            converged = True
+            score_scale = 1.0 + abs(trial["score"])
+            uconv = np.abs(trial["grad"]) > score_scale * conv_tol
+            if np.sum(uconv):
+                converged = False
+            uconv = np.abs(trial["grad"]) > score_scale * conv_tol * 0.1
+            uconv[spind] = uconv[spind] | (
+                np.abs(trial["dVkk"])[spind]
+                > score_scale * conv_tol * 0.1)
+            if abs(i_score - trial["score"]) > score_scale * conv_tol:
+                if not np.sum(uconv):
+                    uconv = np.ones(n_sp, dtype=bool)
+                converged = False
+
+        # roll back any "working infinite" sps (gam.fit3.r:2065-2100)
+        if converged:
+            if np.sum(~uconv) == 0 or rolled_back:
+                break
+            rolled_back = True
+            counter = 0
+            uconv0 = uconv.copy()
+            while np.sum(~uconv0) > 0 and counter < 5:
+                lsp[~uconv0] = (lsp[~uconv0] * 0.8
+                                + initial_lsp[~uconv0] * 0.2)
+                g5["start"] = trial["start"].copy()
+                b = _fit5(lsp, 1)
+                trial["score"] = float(b["REML"])
+                trial["grad"] = _grad(b)
+                trial["dscore"] = float(np.sum(trial["grad"] * step))
+                trial["dVkk"] = _dvkk_diag(b)
+                trial["start"] = g5["start"].copy()
+                counter += 1
+                uconv0 = np.abs(trial["grad"]) > score_scale * conv_tol * 20
+                uconv0[spind] = uconv0[spind] | (
+                    np.abs(trial["dVkk"])[spind]
+                    > score_scale * conv_tol * 20)
+                uconv0 = uconv0 | uconv
+            uconv = np.ones(n_sp, dtype=bool)
+            ilsp = lsp.copy()
+
+        cur = dict(trial)
+        cur["alpha"] = 0.0
+        i_score = trial["score"]
+        i_grad = np.asarray(trial["grad"], dtype=float).copy()
+        i_dvkk = np.asarray(trial["dVkk"], dtype=float).copy()
+
+    if trial is None:
+        ct = "step failed"
+        lsp = ilsp.copy()
+    elif iters == max_step:
+        ct = "iteration limit reached"
+    else:
+        ct = "full convergence"
+
+    # ---- final fit (gam.fit3.r:2116) ------------------------------
+    g5["start"] = (cur.get("start", start0)).copy()
+    bfin = _fit5(lsp, 1)
+    g5["fit"] = bfin
+    gfin = _grad(bfin)
+    # approximate Hessian (invert the inverse-Hessian B)
+    evals, evecs = np.linalg.eigh((Bmat + Bmat.T) / 2.0)
+    keep = evals > float(np.max(evals)) * eps_mach ** 0.9
+    inv = np.where(keep, 1.0 / np.where(keep, evals, 1.0), 0.0)
+    hess = evecs @ (inv[:, None] * evecs.T)
+    outer_info = {
+        "conv": ct, "iter": iters, "grad": gfin, "hess": hess,
+        "score.hist": np.asarray(score_hist, dtype=float),
+    }
+    return {"theta": ilsp, "outer_info": outer_info}
+
+
+def gam_outer(theta0, *, optimizer, criterion, control,
+              include_log_phi=False, include_family_theta=False,
+              newton_fn=None, bfgs_fn=None, magic_fn=None):
+    """mgcv ``gam.outer`` (mgcv.r:1634): dispatch the smoothing-parameter
+    optimization to the chosen outer optimizer and return the converged
+    working log-sp θ̂.
+
+    The seed θ₀ and the post-optimization fit unpacking are estimate.gam's
+    job (hea's constructor); the extended-Fellner-Schall (efs) path is
+    handled there too, as in mgcv. The optimizer machinery is threaded as
+    callables — `newton`/`bfgs` are the free module fns (via the class's
+    thin `_outer_*` shims, which source their many data/poly args from
+    ``self``); ``magic`` is the Gaussian-additive fast path — so the
+    standard, extended (bam) and general-family constructors all reuse this
+    one dispatch. Control knobs come from ``control["newton"]`` (mgcv's
+    ``G$control``): conv.tol, maxNstep, maxSstep, maxHalf."""
+    _nt = control["newton"]
+    if optimizer == "magic":
+        return magic_fn(theta0)
+    if optimizer == "bfgs":
+        return bfgs_fn(theta0, conv_tol=_nt["conv_tol"],
+                       max_Nstep=_nt["maxNstep"])
+    return newton_fn(
+        theta0, criterion=criterion, include_log_phi=include_log_phi,
+        include_family_theta=include_family_theta,
+        conv_tol=_nt["conv_tol"], max_step=_nt["maxNstep"],
+        max_sd_step=_nt["maxSstep"], max_half=_nt["maxHalf"],
+    )
+
+
 class gam:
     """Generalized additive model — mgcv's ``gam()``.
 
@@ -4129,7 +5400,7 @@ class gam:
         self.optimizer = opt
         if isinstance(formula, (list, tuple)):
             # Multiple linear predictors → general-family fitting via
-            # gam.fit5 (estimate.gam's general branch, plan §5.3).
+            # gam.fit5 (estimate.gam's general branch, mgcv.r:1894-1903).
             if family is None or not getattr(family, "is_general", False):
                 raise NotImplementedError(
                     "gam with a formula list (multiple linear "
@@ -4788,9 +6059,9 @@ class gam:
         # correction for the GCV/magic path.
         self._used_magic = False
         # mgcv get.null.coef (mgcv.r:1854) is ρ-independent and computed ONCE,
-        # passed into every gam.fit3 call; hea recomputed the lstsq per
-        # `_fit_given_rho`/`_fit_extended` score-eval. Cache the (null_coef,
-        # eta_null, mu_null) baseline here, computed lazily on the first fit.
+        # passed into every gam.fit3/gam.fit4 call; hea recomputed the lstsq
+        # per `_fit_given_rho` score-eval. Cache the (null_coef, eta_null,
+        # mu_null) baseline here, computed lazily on the first fit.
         self._null_baseline_cache: tuple | None = None
         # Cached LAPACK workspace sizes for the _pls_qr no-Q path (geqrf +
         # ormqr); shape-stable (driven by p, fixed per fit) → queried once.
@@ -4954,23 +6225,21 @@ class gam:
                 _criterion = "GACV"
             else:
                 _criterion = "GCV"
-            _nt = self._control["newton"]
             if self._use_magic(_criterion, include_log_phi,
                                include_family_theta):
                 # Gaussian-identity additive + GCV.Cp → mgcv's `magic` fast
                 # path (am.fit, mgcv.r:2001): QR once, optimize GCV on the
                 # reduced q×q system. theta == per-penalty ρ here (L is None).
                 self._used_magic = True
-                theta_hat = self._magic_optimize(theta0)
+                theta_hat = gam_outer(
+                    theta0, optimizer="magic", criterion=_criterion,
+                    control=self._control, magic_fn=self._magic_optimize)
             else:
-                theta_hat = self._outer_newton(
-                    theta0,
-                    criterion=_criterion,
-                    include_log_phi=include_log_phi,
+                theta_hat = gam_outer(
+                    theta0, optimizer="newton", criterion=_criterion,
+                    control=self._control, include_log_phi=include_log_phi,
                     include_family_theta=include_family_theta,
-                    conv_tol=_nt["conv_tol"], max_step=_nt["maxNstep"],
-                    max_sd_step=_nt["maxSstep"], max_half=_nt["maxHalf"],
-                )
+                    newton_fn=self._outer_newton)
 
             theta_sp = theta_hat[:n_work]
             base = n_work
@@ -5782,8 +7051,8 @@ class gam:
     def _resolve_null_coef(self) -> np.ndarray:
         """mgcv get.null.coef (mgcv.r:1863): ρ-independent null-model
         coefficients used as the PIRLS divergence baseline. Projects a
-        constant valid η onto colspan(X); cached per fit (shared with
-        `_fit_extended`, which reads the (nc, η_null, μ_null) triple)."""
+        constant valid η onto colspan(X); returns the coefficient vector
+        passed as ``null_coef`` to `_gam_fit3`/`_gam_fit4`."""
         if self._null_baseline_cache is None:
             family = self.family
             link = family.link
@@ -5834,10 +7103,19 @@ class gam:
         # run gam.fit4's inner loop; ordinary exponential families use the
         # free `_gam_fit3`. General (gamlss) families never reach here.
         if self._family_mgcv_extended:
-            Sλ = self._build_S_lambda(rho)
-            Sλ = 0.5 * (Sλ + Sλ.T)
-            E_aug = self._penalty_root(rho)
-            return self._fit_extended(rho, Sλ, E_aug, self._wt)
+            fit = _gam_fit4(
+                self._X_full, self._y_arr, rho,
+                slots=self._slots, UrS=self._UrS, reparam_Y=self._reparam_Y,
+                keep_cols=self._keep_cols, reparam_cache=self._reparam_cache,
+                weights=self._wt, start=self._pirls_start,
+                etastart=self._pirls_etastart, mustart=self._pirls_mustart,
+                offset=self._offset, family=self.family,
+                control=self._control, null_coef=self._resolve_null_coef(),
+                warm_eta=self._pirls_warm_eta, pls_lwork=self._pls_lwork,
+            )
+            if fit.converged and np.all(np.isfinite(fit.eta)):
+                self._pirls_warm_eta = fit.eta
+            return fit
         fit = _gam_fit3(
             self._X_full, self._y_arr, rho,
             slots=self._slots, UrS=self._UrS, reparam_Y=self._reparam_Y,
@@ -5855,316 +7133,6 @@ class gam:
         if fit.converged and np.all(np.isfinite(fit.eta)):
             self._pirls_warm_eta = fit.eta
         return fit
-
-    def _fit_extended(self, rho: np.ndarray, Sλ: np.ndarray,
-                      E_aug: np.ndarray, wt: np.ndarray) -> "_FitState":
-        """Penalized IRLS for mgcv-extended families — gam.fit4's inner
-        loop (gam.fit4.r:340-548), line-by-line.
-
-        Weights and pseudodata come from the family's deviance-derivative
-        tables (``dDeta``):
-
-            w  = ½·Deta2                    (signed Newton weights)
-            z  = η_β − Deta/Deta2           (ratio form, can blow up at w≈0)
-            wz = w·η_β − ½·Deta             (finite even at w = 0)
-
-        Rows with non-finite z switch the solve to pls_fit1's ``use.wy``
-        mode (rhs from X'wz). An indefinite penalized Hessian (the
-        ``oo$n<0`` signal) retries the step with the negative-Deta2 rows
-        zeroed — gam.fit4.r:392-416's "positive weights" retry, NOT
-        gam.fit3's Fisher retry. Convergence is
-        ``|Δpdev|/(0.1+|pdev|) < ε`` confirmed by the penalized-deviance
-        gradient ``X'Deta + 2Sλβ`` (gam.fit4.r:523-537).
-        """
-        family = self.family
-        link = family.link
-        X = self._X_full
-        y = self._y_arr
-        off = self._offset
-        n, p = self.n, self.p
-        theta = family.get_theta()
-
-        mu = family.gam_initialize(y, wt)
-        # User starting values — same glm precedence as the standard
-        # branch (gam.fit4 mirrors gam.fit3's block); the null baseline
-        # below stays user-independent.
-        mu_default = mu
-        if self._pirls_warm_eta is not None:
-            # Warm start from the previous score-eval's converged predictor.
-            # mgcv carries etastart<-b$linear.predictors across the outer
-            # Newton (gam.fit3.r:1366-1367) and passes it straight into
-            # gam.fit4 (gam.fit3.r:111-113), so each penalized IRLS starts near
-            # its solution. Takes precedence over the user seed (which only
-            # seeds the first fit); mu_default stays the ρ-independent null
-            # baseline. Mirrors _fit_given_rho's gam.fit3 warm start.
-            eta_warm = self._pirls_warm_eta
-            eta = eta_warm - off
-            mu = link.linkinv(eta_warm)
-        else:
-            if self._pirls_mustart is not None:
-                mu = np.asarray(self._pirls_mustart, dtype=float)
-            if self._pirls_etastart is not None:
-                eta_user = np.asarray(self._pirls_etastart, dtype=float)
-                eta = eta_user - off
-                mu = link.linkinv(eta_user)
-            elif self._pirls_start is not None:
-                eta = X @ self._pirls_start
-                mu = link.linkinv(eta + off)
-            else:
-                eta = link.link(mu) - off       # β-only η
-
-        # Null baseline — mgcv's get.null.coef projection of a constant valid
-        # η onto colspan(X). ρ-independent; identical to the standard branch's
-        # `_resolve_null_coef` construction (a model is fit3 XOR fit4), so the
-        # (nc, η_null, μ_null) triple is threaded in as ``null_baseline`` and
-        # the caller populates the cache once via `_resolve_null_coef`.
-        null_coef, eta_null, mu_null = null_baseline
-        if (self._pirls_mustart is not None
-                or self._pirls_etastart is not None
-                or self._pirls_start is not None):
-            ii = 0
-            while not (family.validmu(mu)
-                       and link.valideta(eta + off)
-                       and bool(np.all(np.isfinite(eta)))):
-                ii += 1
-                if ii > 20:
-                    raise ValueError("Can't find valid starting values: "
-                                     "please specify some")
-                eta = 0.9 * eta + 0.1 * eta_null
-                mu = link.linkinv(eta + off)
-        beta = null_coef.copy()
-        beta_old = null_coef.copy()
-        eta_old = eta_null.copy()
-        old_pdev = (float(np.sum(family.dev_resids(y, mu_null, wt)))
-                    + float(null_coef @ Sλ @ null_coef))
-
-        ctrl = self._control or _GAM_CONTROL_DEFAULTS
-        # control$epsilon under newton()'s conv.tol/100 cap (gam.fit3.r:1308)
-        eps = min(ctrl["epsilon"], ctrl["newton"]["conv_tol"] / 100.0)
-        max_it = ctrl["maxit"]
-        scale_abs = 1.0
-
-        def _work(mu_c, eta_c):
-            # weights/pseudodata at the current iterate (gam.fit4.r:367-371).
-            dd_c = family.dDeta(y, mu_c, wt, theta, level=0)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                w_c = 0.5 * np.asarray(dd_c["Deta2"], dtype=float)
-                wz_c = w_c * eta_c - 0.5 * np.asarray(dd_c["Deta"],
-                                                      dtype=float)
-                z_c = eta_c - np.asarray(dd_c["Deta.Deta2"], dtype=float)
-            good_c = np.isfinite(z_c) & np.isfinite(w_c)
-            return dd_c, w_c, wz_c, z_c, good_c
-
-        dd, w, wz, z, good = _work(mu, eta)
-        conv = False
-        boundary = False
-        posdef = True
-        warn_msgs: list[str] = []
-        dev = float(np.sum(family.dev_resids(y, mu, wt)))
-
-        def _solve(w_c, wz_c, z_c, good_c):
-            # Masked pls_fit1 call: zero-weight rows drop out of X'WX and
-            # X'Wz identically to mgcv's x[good,] subsetting. use.wy
-            # whenever any z is non-finite (gam.fit4.r:377-381).
-            w_m = np.where(good_c, w_c, 0.0)
-            if np.all(good_c):
-                return _pls_qr(self._X_full, self._pls_lwork, w_m, z_c, E_aug)
-            good_w = np.isfinite(w_c) & np.isfinite(wz_c)
-            w_m = np.where(good_w, w_c, 0.0)
-            wz_m = np.where(good_w, wz_c, 0.0)
-            return _pls_qr(self._X_full, self._pls_lwork, w_m, np.zeros(n), E_aug, Xtwz=X.T @ wz_m)
-
-        for it in range(1, max_it + 1):
-            if not np.any(good):
-                warn_msgs.append(
-                    f"PIRLS(extended): no good data at iteration {it}"
-                )
-                break
-            start, _R_it, _ld_it, ok = _solve(w, wz, z, good)
-            posdef = ok
-            if not ok:
-                # Indefinite penalized Hessian → positive-weights retry
-                # (gam.fit4.r:392-416).
-                pos = np.isfinite(np.asarray(dd["Deta2"], dtype=float))
-                pos &= np.where(pos, np.asarray(dd["Deta2"]) > 0.0, False)
-                w = np.where(pos, w, 0.0)
-                wz = w * eta - 0.5 * np.asarray(dd["Deta"], dtype=float)
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    z = eta - np.asarray(dd["Deta.Deta2"], dtype=float)
-                good = np.isfinite(z) & np.isfinite(w)
-                start, _R_it, _ld_it, ok = _solve(w, wz, z, good)
-            if not ok:
-                # Last resort: legacy ridge on the normal equations.
-                w_m = np.where(good & (w > 0), w, 0.0)
-                A = (X.T * w_m) @ X + Sλ
-                A = 0.5 * (A + A.T)
-                ridge = 1e-8 * np.trace(A) / p
-                A_chol_r, lower_r = cho_factor(
-                    A + ridge * np.eye(p), lower=True, overwrite_a=False,
-                )
-                wz_m = np.where(good, wz, 0.0)
-                start = cho_solve((A_chol_r, lower_r), X.T @ wz_m)
-            if np.any(~np.isfinite(start)):
-                warn_msgs.append(
-                    f"PIRLS(extended): non-finite coefficients at "
-                    f"iteration {it}"
-                )
-                break
-            eta_new = X @ start
-            mu_new = link.linkinv(eta_new + off)
-            dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
-            pen_new = float(start @ Sλ @ start)
-
-            # inner loop 1 (gam.fit4.r:433-458): non-finite deviance.
-            if not np.isfinite(dev_new):
-                boundary = True
-                ii = 0
-                while not np.isfinite(dev_new):
-                    ii += 1
-                    if ii > max_it:
-                        raise FloatingPointError(
-                            "inner loop 1; can't correct step size"
-                        )
-                    start = 0.5 * (start + beta_old)
-                    eta_new = 0.5 * (eta_new + eta_old)
-                    mu_new = link.linkinv(eta_new + off)
-                    dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
-                pen_new = float(start @ Sλ @ start)
-
-            # inner loop 2 (gam.fit4.r:461-477): invalid η/μ.
-            if not (link.valideta(eta_new + off) and family.validmu(mu_new)):
-                boundary = True
-                ii = 0
-                while not (link.valideta(eta_new + off)
-                           and family.validmu(mu_new)):
-                    ii += 1
-                    if ii > max_it:
-                        raise FloatingPointError(
-                            "inner loop 2; can't correct step size"
-                        )
-                    start = 0.5 * (start + beta_old)
-                    eta_new = 0.5 * (eta_new + eta_old)
-                    mu_new = link.linkinv(eta_new + off)
-                dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
-                pen_new = float(start @ Sλ @ start)
-
-            pdev_new = dev_new + pen_new
-
-            # inner loop 3 (gam.fit4.r:486-505): pdev divergence.
-            div_thresh = (10.0 * (0.1 + abs(old_pdev))
-                          * (np.finfo(float).eps ** 0.5))
-            if pdev_new - old_pdev > div_thresh:
-                if it == 1:
-                    beta_old = null_coef.copy()
-                    eta_old = eta_null.copy()
-                ii = 0
-                while pdev_new - old_pdev > div_thresh:
-                    ii += 1
-                    if ii > 100:
-                        raise FloatingPointError(
-                            "inner loop 3; can't correct step size"
-                        )
-                    start = 0.5 * (start + beta_old)
-                    eta_new = 0.5 * (eta_new + eta_old)
-                    mu_new = link.linkinv(eta_new + off)
-                    if not (link.valideta(eta_new + off)
-                            and family.validmu(mu_new)):
-                        continue
-                    dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
-                    pen_new = float(start @ Sλ @ start)
-                    pdev_cand = dev_new + pen_new
-                    pdev_new = pdev_cand if np.isfinite(pdev_cand) else np.inf
-
-            beta = start
-            eta = eta_new
-            mu = mu_new
-            dev = dev_new
-
-            # Fresh weights/pseudodata at the accepted iterate — needed
-            # both for the gradient confirmation and the next step
-            # (gam.fit4.r:517-521).
-            dd, w, wz, z, good = _work(mu, eta)
-
-            # Convergence (gam.fit4.r:523-537): pdev change relative to
-            # (0.1 + |pdev|), then gradient confirmation. Note w·η − wz
-            # = ½·Deta on good rows, so the grad is X'Deta + 2Sλβ.
-            if posdef and (abs(pdev_new - old_pdev) / (0.1 + abs(pdev_new))
-                           < eps):
-                w_m = np.where(good, w, 0.0)
-                wz_m = np.where(good, wz, 0.0)
-                grad = (2.0 * (X.T @ (w_m * eta - wz_m))
-                        + 2.0 * (Sλ @ beta))
-                if float(np.max(np.abs(grad))) > eps * (abs(pdev_new)
-                                                        + scale_abs):
-                    old_pdev = pdev_new
-                    beta_old = beta.copy()
-                    eta_old = eta.copy()
-                else:
-                    conv = True
-                    break
-            else:
-                old_pdev = pdev_new
-                beta_old = beta.copy()
-                eta_old = eta.copy()
-
-        if not conv:
-            warn_msgs.append("PIRLS algorithm did not converge")
-        if boundary:
-            warn_msgs.append("PIRLS algorithm stopped at boundary value")
-
-        # Final consistent state at converged β̂ (gam.fit4.r:561-572):
-        # signed w = ½Deta2, z with non-finite→0, wz finite everywhere.
-        is_fisher_fallback = False
-        good_f = np.isfinite(wz) & np.isfinite(w)
-        w_f = np.where(good_f, w, 0.0)
-        wz_f = np.where(good_f, wz, 0.0)
-        z_f = np.where(np.isfinite(z), z, 0.0)
-        use_wy = not np.all(np.isfinite(z) | ~good_f)
-        if use_wy:
-            _b_fin, R_fin, log_det_A, ok = _pls_qr(self._X_full, self._pls_lwork, 
-                w_f, np.zeros(n), E_aug, Xtwz=X.T @ wz_f,
-            )
-        else:
-            _b_fin, R_fin, log_det_A, ok = _pls_qr(self._X_full, self._pls_lwork, 
-                w_f, np.where(good_f, z_f, 0.0), E_aug,
-            )
-        if not ok:
-            # Indefinite at convergence — keep only the positive-weight
-            # rows for the stored factor (same deliberate residual as the
-            # standard path's Fisher fallback, plan §2.1).
-            pos = w_f > 0.0
-            w_f = np.where(pos, w_f, 0.0)
-            wz_f = np.where(pos, wz_f, 0.0)
-            is_fisher_fallback = True
-            _b_fin, R_fin, log_det_A, ok = _pls_qr(self._X_full, self._pls_lwork, 
-                w_f, np.zeros(n), E_aug, Xtwz=X.T @ wz_f,
-            )
-        if ok:
-            A_chol, lower = R_fin, False
-        else:
-            A = (X.T * w_f) @ X + Sλ
-            A = 0.5 * (A + A.T)
-            ridge = 1e-8 * np.trace(A) / p
-            A_chol, lower = cho_factor(
-                A + ridge * np.eye(p), lower=True, overwrite_a=False,
-            )
-            log_det_A = 2.0 * float(np.log(np.abs(np.diag(A_chol))).sum())
-
-        # Carry the converged predictor as the next score-eval's warm start
-        # (mgcv gam.fit3.r:1367, passed into gam.fit4). Only on a finite
-        # converged fit — a degenerate one must not poison the next start.
-        eta_full = eta + off
-        if conv and np.all(np.isfinite(eta_full)):
-            self._pirls_warm_eta = eta_full
-        return _FitState(
-            beta=beta, dev=dev, pen=float(beta @ Sλ @ beta),
-            A_chol=A_chol, A_chol_lower=lower,
-            S_full=Sλ, log_det_A=log_det_A,
-            eta=eta_full, mu=mu, w=w_f, z=z_f, alpha=None,
-            is_fisher_fallback=is_fisher_fallback,
-            converged=conv, boundary=boundary, warn=warn_msgs,
-            E_aug=E_aug,
-        )
 
     def _init_fisher_w(self, y: np.ndarray,
                        X: np.ndarray | None = None) -> np.ndarray:
@@ -6356,7 +7324,7 @@ class gam:
         if self._control["edge_correct"]:
             raise NotImplementedError(
                 "edge_correct for general families lands with "
-                "gam.fit5.post.proc (plan §5.3)."
+                "gam.fit5.post.proc; not ported for general families."
             )
         if offset is not None:
             raise NotImplementedError(
@@ -6542,18 +7510,16 @@ class gam:
             theta0 = _initial_sp_general(
                 X_irp, y, family, md.slots, md.lpi, weights=self._wt,
                 offsets=md.offsets, L=md.L)
-            _nt = self._control["newton"]
-            theta_hat = self._outer_bfgs(
-                theta0, conv_tol=_nt["conv_tol"], max_Nstep=_nt["maxNstep"])
+            theta_hat = gam_outer(
+                theta0, optimizer="bfgs", criterion="REML5",
+                control=self._control, bfgs_fn=self._outer_bfgs)
         else:
             theta0 = _initial_sp_general(
                 X_irp, y, family, md.slots, md.lpi, weights=self._wt,
                 offsets=md.offsets, L=md.L)
-            _nt = self._control["newton"]
-            theta_hat = self._outer_newton(
-                theta0, include_log_phi=False, criterion="REML5",
-                conv_tol=_nt["conv_tol"], max_step=_nt["maxNstep"],
-                max_sd_step=_nt["maxSstep"], max_half=_nt["maxHalf"])
+            theta_hat = gam_outer(
+                theta0, optimizer="newton", criterion="REML5",
+                control=self._control, newton_fn=self._outer_newton)
 
         rho_full = self._rho_full(theta_hat)
         self._rho_hat = rho_full
@@ -6574,7 +7540,7 @@ class gam:
         if fit is None:
             fit = _gam_fit5(
                 X_irp, y, rho_full, sl, family=family, lpi=md.lpi,
-                weights=self._wt, offsets=md.offsets, Mp=Mp,
+                weights=self._wt, offset=md.offsets, Mp=Mp,
                 deriv=2 if avail_derivs >= 2 else 0,
                 start=self._g5["start"], gamma=self._gamma,
                 epsilon=1e-8)
@@ -6894,837 +7860,46 @@ class gam:
         max_step: float = 5.0, max_sd_step: float = 2.0,
         max_half: int = 30, qerror_thresh: float = 0.8,
     ) -> np.ndarray:
-        """Unified analytical Newton on V_R(ρ, log φ[, θ_fam]) or V_g/V_u(ρ)
-        — mgcv's gam.outer, extended with a family-θ slot for ``tw()``.
-
-        Direct port of mgcv's ``newton`` (gam.fit3.r:1290-1719). Each
-        outer iteration:
-
-        1. Eigendecompose H, flag ``pdef`` (no negative or floor-clamped
-           eigenvalues) and ``indef`` (any meaningfully negative one,
-           threshold ``|λ_max|·√eps``). Set ``d ← |λ|`` then floor at
-           ``max(d)·eps^0.7`` (Gill-Murray-Wright, gam.fit3.r:1447-1453).
-        2. Newton direction ``Nstep = −V·diag(1/d)·V'·grad`` (using
-           clamped d), capped to ``max_step``.
-        3. Accept Nstep at α=1 only if ``score_change < 0`` AND ``pdef``
-           AND quadratic-error gate ``qerror < qerror_thresh`` with
-           ``qerror = |pred − actual| / (max(|pred|,|actual|) + score_scale·conv_tol)``.
-           Otherwise step-halve: at the 4th halving (and ``it<10``)
-           switch to the steepest-descent direction at the same length;
-           after ``max_half/2`` halvings drop the qerror requirement
-           (gam.fit3.r:1518-1572).
-        4. If ``!pdef`` AND SD not yet tried, run a separate SD line
-           search (start at ``2·max_sd_step``, halve up to 40 times,
-           keep best descent that satisfies qerror) and replace the
-           accepted step with SD-best if it scored lower
-           (gam.fit3.r:1580-1641). This is what stops Newton from
-           sliding into UBRE/GCV saturation tails on flat smooths when
-           the seed Hessian is fully indefinite.
-
-        Convergence (gam.fit3.r:1646-1658) requires ``!indef``,
-        ``max(|grad|) ≤ score_scale·conv_tol·5``, AND
-        ``|Δscore| ≤ score_scale·conv_tol``, with
-        ``score_scale = |scale.est| + |score|`` (GCV/UBRE) or
-        ``|log(scale.est)| + |score|`` (REML).
-
-        ``theta`` layout: ρ first, then a single log φ column when
-        ``include_log_phi`` is set (unknown-scale REML), then
-        ``family.n_theta`` extra columns when ``include_family_theta`` is
-        set. For known-scale REML (Poisson, Binomial) log φ is fixed at 0;
-        for GCV.Cp log φ and family θ are always off the outer vector.
-
-        Each ``_eval`` calls ``family.set_theta(t[base:])`` so the family's
-        internal state (e.g. ``self.p`` for tw) tracks the current outer
-        iterate before PIRLS is run.
-
-        ``criterion`` selects the objective:
-        - ``"REML"``: minimizes V_R via ``_reml`` (returns 2·V_R, hence
-          the 0.5 scaling), ``_reml_grad``, ``_reml_hessian``.
-        - ``"GCV"``: minimizes V_g (scale-unknown) or V_u (scale-known)
-          via ``_gcv``, ``_gcv_grad``, ``_gcv_hessian``. ``include_log_phi``
-          and ``include_family_theta`` must both be False (GCV does not
-          put log φ or family θ in the outer vector — φ̂ is the Pearson
-          estimate post-fit, not optimized; family θ has no GCV path).
-        """
-        if criterion not in ("REML", "GCV", "REML5", "GACV", "PREML"):
-            raise ValueError(
-                "criterion must be 'REML', 'GCV', 'REML5', 'GACV' or "
-                f"'PREML', got {criterion!r}")
-        # GCV/GACV (performance-style) and PREML (Pearson-Laplace, φ profiled
-        # analytically at each ρ) are all ρ-only outer problems — no log φ or
-        # family θ in θ.
-        if criterion in ("GCV", "GACV", "PREML") and include_log_phi:
-            raise ValueError(
-                f"{criterion} path does not include log φ in outer θ.")
-        if criterion in ("GCV", "GACV", "PREML") and include_family_theta:
-            raise ValueError(
-                f"{criterion} path does not include family θ in outer θ.")
-        if criterion == "REML5" and (include_log_phi or include_family_theta):
-            # general families: scale.est ≡ 1, family θ never in outer θ
-            raise ValueError("REML5 (gam.fit5) outer θ is ρ-only.")
-
-        n_work = self._work_dim
-        n_theta_fam = self.family.n_theta if include_family_theta else 0
-        theta = np.asarray(theta0, dtype=float).copy()
-        # θ's sp-part is the *working* log-sp; criterion derivatives come
-        # back per-penalty (FULL space) and chain to working space through
-        # T = blockdiag(L, I_extra): g_θ = T'g, H_θ = T'HT. T is None ⇔
-        # identity (no id linkage) — zero-cost on the common path.
-        T_work = self._T_working((1 if include_log_phi else 0) + n_theta_fam)
-
-        def _to_working(g):
-            return g if T_work is None else T_work.T @ g
-
-        def _to_working_hess(H):
-            return H if T_work is None else T_work.T @ H @ T_work
-
-        def _split(t):
-            # → (FULL per-penalty ρ, log φ) from a working-layout θ.
-            # ρ always occupies the first n_work slots; log φ (when
-            # present) sits right after; family θ trails — so plain
-            # ``t[:n_work]`` is correct for every layout, including the
-            # scale-known (ρ, θ_fam) one.
-            rho_t = self._rho_full(t[:n_work])
-            # Known-scale layouts: log φ is the FIXED log(scale) — 0 on
-            # the poisson/binomial defaults, log(gam(scale=)) otherwise.
-            lp_t = (float(t[n_work]) if include_log_phi
-                    else float(np.log(self._scale_fixed_value)))
-            return rho_t, lp_t
-
-        def _apply_family_theta(t):
-            if n_theta_fam > 0:
-                base = n_work + (1 if include_log_phi else 0)
-                self.family.set_theta(t[base:base + n_theta_fam])
-
-        # Non-REML5 criteria route score/grad/hess through the single free
-        # `_gam_fit3_score` (mgcv's gam.fit3 score tail, via `_score_all`);
-        # REML5 (gam.fit5) keeps its own monolithic REML/REML1/REML2 return.
-        def _mk_score_closures(sType):
-            def _eval(t, deriv=2):  # deriv: REML5-only hint, ignored here
-                rho_t, lp_t = _split(t)
-                _apply_family_theta(t)
-                try:
-                    fit_t = self._fit_given_rho(rho_t)
-                except Exception:
-                    return float("inf"), None
-                return self._score_all(
-                    rho_t, lp_t, fit_t, 0, sType,
-                    include_log_phi=include_log_phi,
-                    include_family_theta=include_family_theta,
-                    T_work=T_work)["score"], fit_t
-
-            def _grad(rho, log_phi, fit):
-                return self._score_all(
-                    rho, log_phi, fit, 1, sType,
-                    include_log_phi=include_log_phi,
-                    include_family_theta=include_family_theta,
-                    T_work=T_work)["grad"]
-
-            def _hess(rho, log_phi, fit):
-                return self._score_all(
-                    rho, log_phi, fit, 2, sType,
-                    include_log_phi=include_log_phi,
-                    include_family_theta=include_family_theta,
-                    T_work=T_work)["hess"]
-            return _eval, _grad, _hess
-
-        if criterion == "REML":
-            _eval, _grad, _hess = _mk_score_closures("REML")
-        elif criterion == "REML5":
-            # general families: the criterion and its ρ-derivatives come
-            # straight from gam.fit5 (REML/REML1/REML2). mgcv's newton
-            # carries coefficient start values forward across EVERY
-            # evaluation (gam.fit3.r newton, "carries start values
-            # forward...", incl. rejected trials) — the carry lives in
-            # the pre-rp basis, exactly what _gam_fit5 returns/expects.
-            # mgcv evaluates the first Newton trial at deriv = pdef·2
-            # (gam.fit3.r:1486): when the Hessian is +def it gets the score
-            # AND grad/hess from ONE fit and reuses them on accept (no second
-            # fit per iterate); only step-halving / SD trials run deriv=0,
-            # with one deriv=2 refit on the accepted halving (gam.fit3.r:1531,
-            # 1544). The newton below passes that `deriv` hint through `_eval`;
-            # `_grad`/`_hess` reuse the fit's REML1/REML2 when present and only
-            # refit when the accepted point came from a deriv=0 trial. Inner
-            # epsilon: newton caps control$epsilon at conv.tol/100
-            # (gam.fit3.r:1308) → 1e-8 at gam defaults.
-            g5 = self._g5
-
-            def _fit5_at(rho_t, d):
-                fit_t = _gam_fit5(
-                    g5["X"], g5["y"], rho_t, g5["sl"],
-                    family=self.family, lpi=g5["lpi"],
-                    weights=g5["weights"], offsets=g5["offsets"],
-                    Mp=g5["Mp"], deriv=d, start=g5["start"],
-                    gamma=g5["gamma"], epsilon=1e-8,
-                )
-                g5["start"] = fit_t["coefficients"]
-                return fit_t
-
-            def _eval(t, deriv=2):
-                rho_t, _ = _split(t)
-                try:
-                    fit_t = _fit5_at(rho_t, deriv)
-                except Exception:
-                    return float("inf"), None
-                return float(fit_t["REML"]), fit_t
-
-            def _grad(rho, log_phi, fit):
-                # Reuse the deriv=2 data if the accepted fit already carries it
-                # (first-trial-pdef accept); else this point came from a deriv=0
-                # trial (halving/SD) and needs the one deriv=2 refit. NB a
-                # deriv=0 fit5 still has the "REML2" KEY (value None), so test
-                # the value, not key presence.
-                if fit.get("REML2") is None:
-                    fit.update(_fit5_at(rho, 2))
-                # newton's b IS the last accepted deriv-2 fit — keep it
-                # so the caller never refits at the optimum (a refit
-                # re-enters Newton from the converged coefs and can
-                # only exit through the step-failure paths).
-                g5["fit"] = fit
-                return _to_working(np.asarray(fit["REML1"], dtype=float))
-
-            def _hess(rho, log_phi, fit):
-                return _to_working_hess(np.asarray(fit["REML2"],
-                                                   dtype=float))
-        elif criterion == "GACV":
-            # GACV (gam.fit3.r:751): a GCV sibling for scale-unknown standard
-            # families. ρ-only; analytic gradient + Hessian.
-            _eval, _grad, _hess = _mk_score_closures("GACV")
-        elif criterion == "PREML":
-            # P-REML / P-ML (gam.fit3.r:640-665): the Laplace (RE)ML criterion
-            # with the Pearson-Laplace scale φ = P/(n−Mp) plugged in (γ≡1),
-            # ρ-only. `_gam_fit3_score` profiles φ_P internally for the value
-            # (via `_phi_pearson`) and uses `_preml_grad`/`_preml_hessian`.
-            _eval, _grad, _hess = _mk_score_closures("PREML")
-        else:  # GCV
-            _eval, _grad, _hess = _mk_score_closures("GCV")
-
-        # P-REML/P-ML are (RE)ML-type for the convergence score scale
-        # (|log scale.est| + |score|); GCV/GACV/UBRE use |scale.est| + |score|.
-        is_reml = criterion in ("REML", "REML5", "PREML")
-
-        def _score_scale(fit_, val):
-            # mgcv's score.scale: |scale.est| + |score| (GCV/UBRE) or
-            # |log(scale.est)| + |score| (REML). scale.est is gam.fit3's
-            # estimator — Pearson with the Fletcher (2012) correction
-            # (gam.fit3.r:596-603, mgcv's default scale.est); for
-            # known-scale families it is 1.
-            if self.family.scale_known:
-                scale_est = 1.0
-            else:
-                y_arr = self._y_arr
-                mu_arr = fit_.mu
-                V_arr = self.family.variance(mu_arr)
-                # Weighted Pearson — gam.fit3.r:597 sum(weights*(y-mu)^2/V).
-                pearson = float(np.sum(self._wt * (y_arr - mu_arr) ** 2
-                                       / V_arr))
-                fit_F_ = self._fisher_view(fit_)
-                w_F = fit_F_.w
-                if w_F is None or np.allclose(w_F, 1.0):
-                    Xw_ = self._X_full
-                else:
-                    Xw_ = self._X_full * np.sqrt(np.maximum(w_F, 0.0))[:, None]
-                # τ = tr(A⁻¹X'WX) = ‖√W·X·C⁻¹‖_F² with A = C'C — the
-                # factor route, not the κ²-squaring explicit product.
-                if fit_F_.A_chol_lower:
-                    Kw_ = solve_triangular(fit_F_.A_chol, Xw_.T, lower=True)
-                else:
-                    Kw_ = solve_triangular(fit_F_.A_chol, Xw_.T,
-                                           lower=False, trans="T")
-                tau_ = float(np.sum(Kw_ * Kw_))
-                df_resid_ = max(self.n - tau_, 1.0)
-                scale_est = pearson / df_resid_
-                se_kind = (self._control
-                           or _GAM_CONTROL_DEFAULTS)["scale_est"]
-                if se_kind == "deviance":
-                    # gam.fit3.r:606 — deviance estimator replaces the
-                    # Pearson one entirely.
-                    scale_est = float(fit_.dev) / df_resid_
-                elif se_kind == "fletcher":
-                    s_bar_ = max(-0.9, float(np.mean(
-                        self.family.dvar(mu_arr) * (y_arr - mu_arr)
-                        / V_arr
-                    )))
-                    if np.isfinite(s_bar_):
-                        scale_est = scale_est / (1.0 + s_bar_)
-                # "pearson": keep the uncorrected estimate.
-            if is_reml:
-                # log(scale.est); guard against scale_est ≤ 0
-                scale_est_safe = max(scale_est, 1e-300)
-                return abs(np.log(scale_est_safe)) + abs(val)
-            return abs(scale_est) + abs(val)
-
-        f_prev, fit = _eval(theta)
-        if fit is None:
-            self._outer_info = {
-                "conv": "initial fit failed", "iter": 0,
-                "grad": np.zeros_like(theta), "hess": np.zeros((theta.size, theta.size)),
-                "score": float(f_prev), "score_scale": float("nan"),
-            }
-            self._outer_fit = None
-            return theta
-
-        # Initial grad/hess at θ₀ and starting active set
-        # (gam.fit3.r:1383-1385). Dimensions whose gradient is already
-        # below ``score_scale·conv_tol`` start out inactive (excluded
-        # from the Newton step). If everything is below threshold, mark
-        # all active so the iter has something to move.
-        rho0, log_phi0 = _split(theta)
-        grad = _grad(rho0, log_phi0, fit)
-        H = _hess(rho0, log_phi0, fit)
-        H = 0.5 * (H + H.T)
-        score_scale = _score_scale(fit, f_prev)
-        uconv_ind = np.abs(grad) > score_scale * conv_tol
-        if not np.any(uconv_ind):
-            uconv_ind = np.ones_like(uconv_ind, dtype=bool)
-
-        conv_text = "iteration limit reached"
-        last_grad = grad
-        last_hess = H
-        it_done = 0
-        for it in range(max_iter):
-            score_scale = _score_scale(fit, f_prev)
-
-            # Active-set masking (gam.fit3.r:1430-1436). Exclude
-            # apparently-converged dims from the Newton step. mgcv also
-            # computes a tighter ``uconv.ind1`` mask there but never
-            # uses it; we follow suit. Safety net: if everything is
-            # marked inactive, force the largest-|grad| dim active so
-            # the iter still has something to move.
-            if not np.any(uconv_ind):
-                j = int(np.argmax(np.abs(grad))) if grad.size > 0 else 0
-                uconv_ind = np.zeros_like(uconv_ind, dtype=bool)
-                if grad.size > 0:
-                    uconv_ind[j] = True
-            if H.size > 0:
-                H1 = H[np.ix_(uconv_ind, uconv_ind)]
-                grad1 = grad[uconv_ind]
-            else:
-                H1 = H
-                grad1 = grad
-
-            # Eigen analysis on the active subblock with mgcv's
-            # pdef/indef flags (gam.fit3.r:1438-1455). ``indef``
-            # triggers the SD-fallback; ``pdef`` False blocks
-            # immediate-step acceptance.
-            if H1.size > 0:
-                w_eig, V_eig = np.linalg.eigh(H1)
-                sqrt_eps = float(np.finfo(float).eps ** 0.5)
-                # mgcv: sum(-d > abs(d[1])*sqrt(eps)) with R's eigen
-                # sorting descending — d[1] is the largest *algebraic*
-                # eigenvalue, not the largest magnitude.
-                d_top = float(w_eig[-1])
-                indef = bool(np.any(-w_eig > abs(d_top) * sqrt_eps))
-                # 1-D special case: a tiny single eigenvalue can register
-                # as indefinite at the |λ_max|·√eps threshold; require it
-                # be meaningfully negative on the score-scale instead.
-                if indef and w_eig.size == 1:
-                    indef = bool(w_eig[0] < -score_scale * sqrt_eps)
-                d = np.abs(w_eig)
-                pdef = bool(np.all(w_eig > 0))
-                low_d = d.max() * (np.finfo(float).eps ** 0.7) if d.size else 0.0
-                clamp_mask = d < low_d
-                if np.any(clamp_mask):
-                    pdef = False
-                    d = np.where(clamp_mask, low_d, d)
-                d_inv = np.where(d > 0, 1.0 / d, 0.0)
-                Nstep_active = -V_eig @ (d_inv * (V_eig.T @ grad1))
-                Nstep = np.zeros_like(grad)
-                Nstep[uconv_ind] = Nstep_active
-            else:
-                Nstep = np.zeros_like(grad)
-                pdef = True
-                indef = False
-
-            # Cap Newton step length
-            ms = float(np.abs(Nstep).max()) if Nstep.size else 0.0
-            if ms > max_step:
-                Nstep = Nstep * (max_step / ms)
-
-            # Steepest descent direction (length-1 in max-norm).
-            gmax = float(np.abs(grad).max()) if grad.size else 0.0
-            Sstep = (-grad / gmax) if gmax > 0 else np.zeros_like(grad)
-
-            def _qerror(step, score_change):
-                if step.size == 0:
-                    return 0.0
-                pred = float(grad @ step + 0.5 * step @ (H @ step))
-                denom = max(abs(pred), abs(score_change)) + score_scale * conv_tol
-                return abs(pred - score_change) / denom if denom > 0 else 0.0
-
-            # ----- step acceptance (gam.fit3.r:1492-1573) -----
-            accepted_step = None
-            accepted_f = float("inf")
-            accepted_fit = None
-            sd_unused = True
-
-            # mgcv evaluates the first trial at deriv = pdef·2 (gam.fit3.r:1486):
-            # +def ⇒ get grad/hess in this fit so an immediate accept needs no
-            # second fit (REML5); indefinite ⇒ deriv=0, defer to the SD trial.
-            f_try, fit_try = _eval(theta + Nstep, deriv=2 if pdef else 0)
-            score_change = f_try - f_prev
-            qerror = _qerror(Nstep, score_change)
-            if (
-                np.isfinite(f_try) and score_change < 0
-                and pdef and qerror < qerror_thresh
-            ):
-                accepted_step, accepted_f, accepted_fit = Nstep.copy(), f_try, fit_try
-            else:
-                step = Nstep.copy()
-                for ii in range(max_half):
-                    if ii == 3 and it < 9:
-                        # Newton failing — switch to SD direction at the
-                        # current step length (gam.fit3.r:1521; mgcv's
-                        # i<10 with 1-based iterations = it<9 here).
-                        s_length = min(float(np.linalg.norm(step)), max_sd_step)
-                        sd_norm = float(np.linalg.norm(Sstep))
-                        if sd_norm > 0:
-                            step = Sstep * (s_length / sd_norm)
-                            sd_unused = False
-                    else:
-                        step = step / 2
-                    f_try, fit_try = _eval(theta + step, deriv=0)
-                    score_change = f_try - f_prev
-                    if ii > min(4, max_half // 2):
-                        qerror = qerror_thresh / 2  # drop qerror requirement
-                    else:
-                        qerror = _qerror(step, score_change)
-                    if (
-                        np.isfinite(f_try)
-                        and score_change < 0
-                        and qerror < qerror_thresh
-                    ):
-                        accepted_step = step.copy()
-                        accepted_f, accepted_fit = f_try, fit_try
-                        break
-
-            # ----- indefinite SD fallback (gam.fit3.r:1580-1641) -----
-            # If the Hessian wasn't PD and we haven't already used the SD
-            # direction in step-halving, run an independent SD line
-            # search and pick whichever direction scored lower. This is
-            # what keeps Newton out of UBRE/GCV saturation tails when
-            # the seed lies near a local maximum (all-negative eig).
-            if (not pdef) and sd_unused and Sstep.size > 0:
-                sd_best_step = None
-                sd_best_f = float("inf")
-                sd_best_fit = None
-                # mgcv starts at 2·Sstep so the first halving gives
-                # Sstep itself (max-norm 1) — gam.fit3.r:1581.
-                sd_step = Sstep * 2
-                for kk in range(40):
-                    sd_step = sd_step / 2
-                    f_sd, fit_sd = _eval(theta + sd_step, deriv=0)
-                    score_change_sd = f_sd - f_prev
-                    qerror_sd = _qerror(sd_step, score_change_sd)
-                    accept_sd = (
-                        np.isfinite(f_sd)
-                        and (
-                            sd_best_step is None
-                            or (f_sd <= sd_best_f and qerror_sd < qerror_thresh)
-                        )
-                    )
-                    if accept_sd:
-                        sd_best_step = sd_step.copy()
-                        sd_best_f, sd_best_fit = f_sd, fit_sd
-                    # Stop once we've found descent and a shorter step
-                    # makes things worse.
-                    if (
-                        sd_best_step is not None and sd_best_f < f_prev
-                        and np.isfinite(f_sd) and f_sd > sd_best_f
-                    ):
-                        break
-                if sd_best_step is not None and sd_best_f < accepted_f:
-                    accepted_step = sd_best_step
-                    accepted_f = sd_best_f
-                    accepted_fit = sd_best_fit
-
-            if accepted_step is None:
-                conv_text = "step failed"
-                it_done = it + 1
-                break
-            theta = theta + accepted_step
-            df = abs(accepted_f - f_prev)
-            f_prev = accepted_f
-            fit = accepted_fit
-            it_done = it + 1
-
-            # Recompute grad/hess at the new θ (gam.fit3.r:1505-1508).
-            # The convergence test and active-set update use these
-            # post-step values, mirroring mgcv's gam.fit3 deriv=2 refit.
-            # The family θ state must be re-pinned to the ACCEPTED point:
-            # _eval mutates it at every trial candidate, and the accepted
-            # candidate is not necessarily the last one evaluated
-            # (step-halving / SD line searches probe past it).
-            _apply_family_theta(theta)
-            rho_n, log_phi_n = _split(theta)
-            grad = _grad(rho_n, log_phi_n, fit)
-            H = _hess(rho_n, log_phi_n, fit)
-            H = 0.5 * (H + H.T)
-            last_grad, last_hess = grad, H
-
-            # mgcv's outer convergence test (gam.fit3.r:1646-1658):
-            # require non-indefinite Hessian, max(|grad|) ≤ 5·score_scale·conv_tol,
-            # AND |Δscore| ≤ score_scale·conv_tol.
-            score_scale = _score_scale(fit, f_prev)
-            converged = not indef
-            # Refresh active set from new grad/hess (gam.fit3.r:1650-1651).
-            diag_H = np.diag(H) if H.size > 0 else np.array([])
-            uconv_ind = (
-                (np.abs(grad) > score_scale * conv_tol * 0.1)
-                | (np.abs(diag_H) > score_scale * conv_tol * 0.1)
-            )
-            if grad.size > 0 and float(np.abs(grad).max()) > score_scale * conv_tol * 5.0:
-                converged = False
-            if df > score_scale * conv_tol:
-                if converged:
-                    # Otherwise can't progress (gam.fit3.r:1654).
-                    uconv_ind = np.ones_like(uconv_ind, dtype=bool)
-                converged = False
-            if converged:
-                conv_text = "full convergence"
-                break
-
-        self._outer_info = {
-            "conv": conv_text,
-            "iter": it_done,
-            "grad": last_grad,
-            "hess": last_hess,
-            "score": float(f_prev),
-            "score_scale": float(_score_scale(fit, f_prev)),
-        }
-
-        # gam.control(edge.correct=) — mgcv newton(), gam.fit3.r:1670-1700:
-        # smoothing parameters at "working infinity" (Hessian-flat
-        # directions) get walked back toward the seed in unit log steps
-        # until the RE/ML criterion has risen by α (default 0.02) per
-        # parameter; derivative quantities recomputed there feed a better
-        # Vc (post.proc's k=2 pass). Only the corrected θ is stored here;
-        # the constructor recomputes the Vc pieces from it.
-        self._edge_theta1 = None
-        if self._edge_correct and is_reml and theta.size > 0:
-            # The k=2 Vc pass runs whether or not anything is flat (mgcv
-            # refits at lsp1 = lsp when `flat` is empty — the corrected
-            # Vc still differs through the weaker 1e-7 Vr prior).
-            grad2 = np.diag(last_hess) if last_hess.size else np.zeros(0)
-            flat = np.where(np.abs(grad2) < np.abs(last_grad) * 100.0)[0]
-            alpha_ec = (0.02 if self._edge_correct is True
-                        else float(abs(self._edge_correct)))
-            theta1 = theta.copy()
-            if flat.size:
-                step_dir = (np.asarray(theta0, dtype=float) > theta) * 2.0 - 1.0
-                f1 = f_prev
-                for i in flat:
-                    target = f1 + alpha_ec
-                    # mgcv walks unbounded; cap defensively (a unit log-sp
-                    # step per iteration covers any practical surface
-                    # within a few dozen steps).
-                    for _ in range(100):
-                        if f1 >= target:
-                            break
-                        theta1[i] = theta1[i] + step_dir[i]
-                        f1_new, _fit1 = _eval(theta1, deriv=0)
-                        if not np.isfinite(f1_new):
-                            theta1[i] = theta1[i] - step_dir[i]
-                            break
-                        f1 = f1_new
-                # Restore family θ to the converged values (the walk's
-                # _eval calls mutate family state for tw).
-                _apply_family_theta(theta)
-            self._edge_theta1 = theta1
-        # Cache the accepted-step fit at the converged θ for the caller to
-        # reuse (mgcv's `object <- b$object`, no refit). `fit` is the last
-        # accepted deriv-0 `_fit_given_rho` at `_rho_full(theta[:n_work])` ==
-        # the ρ̂ the caller will build from; the edge-correct walk above leaves
-        # it untouched. REML5 caches its own deriv-2 fit on `_g5["fit"]`.
-        self._outer_fit = fit
-        return theta
+        """Shim → free `newton` (mgcv gam.fit3.r:1290). Sources data from
+        ``self`` and threads the polymorphic fit/score/view machinery as
+        callables (bam overrides `_fit_given_rho`/`_dw_deta`), then persists
+        the ``outer_info``/``outer_fit``/``edge_theta1`` writes mgcv's newton
+        returns in its result list."""
+        res = newton(
+            theta0, include_log_phi=include_log_phi, criterion=criterion,
+            include_family_theta=include_family_theta, max_iter=max_iter,
+            conv_tol=conv_tol, max_step=max_step, max_sd_step=max_sd_step,
+            max_half=max_half, qerror_thresh=qerror_thresh,
+            family=self.family, work_dim=self._work_dim,
+            X=getattr(self, "_X_full", None),
+            y=getattr(self, "_y_arr", None), wt=getattr(self, "_wt", None),
+            n=self.n,
+            scale_fixed_value=self._scale_fixed_value, control=self._control,
+            g5=getattr(self, "_g5", None), edge_correct=self._edge_correct,
+            fit_fn=self._fit_given_rho, score_fn=self._score_all,
+            fisher_view_fn=self._fisher_view, rho_full_fn=self._rho_full,
+            T_working_fn=self._T_working,
+        )
+        self._outer_info = res["outer_info"]
+        self._outer_fit = res["outer_fit"]
+        self._edge_theta1 = res["edge_theta1"]
+        return res["theta"]
 
     def _outer_bfgs(
         self, theta0: np.ndarray, *, conv_tol: float = 1e-6,
         max_Nstep: float = 3.0, max_step: int = 200,
     ) -> np.ndarray:
-        """mgcv ``bfgs`` (gam.fit3.r:1722-2141) for general families.
+        """Shim → free `bfgs` (mgcv gam.fit3.r:1722). REML5-only (general
+        families); sources `_g5`/family/L from ``self`` and persists the
+        ``outer_info`` write."""
+        res = bfgs(
+            theta0, conv_tol=conv_tol, max_Nstep=max_Nstep, max_step=max_step,
+            g5=self._g5, family=self.family, L=self._L,
+            rho_full_fn=self._rho_full,
+        )
+        self._outer_info = res["outer_info"]
+        return res["theta"]
 
-        BFGS over the REML5 score using only ``gam.fit5`` at deriv ≤ 1
-        (score ``REML`` + gradient ``REML1`` + the ``dVkk`` curvature
-        matrix). This is the outer optimizer mgcv coerces to for
-        ``available.derivs == 1`` families (mgcv.r:1907) — ``mvn`` and any
-        custom family that supplies ll only to the dH/trace order
-        (gamlss_gH deriv ≤ 2), where Newton's REML2 (needing the ll's
-        ``trHid2H``, gamlss_gH deriv 3) is unavailable.
-
-        Step lengths meet the Wolfe conditions via Nocedal & Wright
-        (2006) Algorithms 3.5 (main loop) and 3.6 (``zoom`` bisection).
-        The initial inverse Hessian is seeded by finite-differencing the
-        gradient, then adjusted on the first accepted step (mgcv's p143
-        variant). ``score.scale = 1 + |score|`` (REML path; general
-        families have ``scale.est ≡ 1``). The working-infinite-sp
-        roll-back (gam.fit3.r:2065-2100) is ported for parity.
-
-        ``theta0`` is the *working* log-sp seed; the returned vector is
-        the converged working log-sp. ``self._outer_info`` is populated
-        with ``conv``/``iter``/``grad``/``hess``/``score.hist`` like
-        mgcv's ``object$outer.info``; the accepted deriv-1 fit is cached
-        on ``self._g5["fit"]`` so the caller never refits.
-        """
-        g5 = self._g5
-        fam = self.family
-        L = self._L                      # working→full sp (None ⇔ I)
-        n_sp = int(np.asarray(theta0).size)
-        eps_mach = float(np.finfo(float).eps)
-
-        # mgcv caps the inner PIRLS tol at conv.tol/100 (gam.fit3.r:1797).
-        inner_eps = min(1e-7, conv_tol / 100.0)
-
-        def _to_working(g):
-            return g if L is None else L.T @ g
-
-        def _fit5(lsp_work, d):
-            rho = self._rho_full(np.asarray(lsp_work, dtype=float))
-            fit = _gam_fit5(
-                g5["X"], g5["y"], rho, g5["sl"], family=fam,
-                lpi=g5["lpi"], weights=g5["weights"],
-                offsets=g5["offsets"], Mp=g5["Mp"], deriv=d,
-                start=g5["start"], gamma=g5["gamma"], epsilon=inner_eps,
-            )
-            g5["start"] = fit["coefficients"]
-            return fit
-
-        def _dvkk_diag(fit):
-            dV = np.asarray(fit["dVkk"], dtype=float)
-            if L is None:
-                return np.diag(dV).copy()
-            return np.diag(L.T @ dV @ L)
-
-        def _grad(fit):
-            return _to_working(np.asarray(fit["REML1"], dtype=float))
-
-        # all sp slots carry curvature info for general families (mvn has
-        # no family$n.theta and gam.fit5's dVkk is n_sp×n_sp) — spind ≡
-        # every working sp (mgcv.r-bfgs: nind = ncol(L), spind = 1:nind).
-        spind = np.ones(n_sp, dtype=bool)
-
-        ilsp = np.asarray(theta0, dtype=float).copy()
-        initial_lsp = ilsp.copy()
-
-        # ---- initial fit + gradient -----------------------------------
-        b = _fit5(ilsp, 1)
-        score = float(b["REML"])
-        grad = _grad(b)
-        i_dvkk = _dvkk_diag(b)
-        start0 = g5["start"].copy()
-        i_score = score
-        i_grad = grad.copy()
-        score_scale = 1.0 + abs(i_score)
-
-        # ---- FD inverse-Hessian seed (gam.fit3.r:1852-1873) -----------
-        Bmat = np.eye(n_sp)
-        feps = 1e-4
-        for k in range(n_sp):
-            jlsp = ilsp.copy()
-            jlsp[k] += feps
-            g5["start"] = start0.copy()
-            bk = _fit5(jlsp, 1)
-            grad1 = _grad(bk)
-            Bmat[k, :] = (grad1 - grad) / feps
-        Bmat = (Bmat + Bmat.T) / 2.0
-        evals, evecs = np.linalg.eigh(Bmat)
-        evals = np.abs(evals)
-        thresh = float(np.max(evals)) * 1e-4 if evals.size else 0.0
-        evals[evals < thresh] = thresh
-        # B ← V diag(1/λ) V'  (the approximate INVERSE Hessian)
-        Bmat = evecs @ ((evecs / evals).T)
-        g5["start"] = start0.copy()
-
-        c1, c2 = 1e-4, 0.9          # Wolfe constants
-        score_hist = [i_score]
-        uconv = np.ones(n_sp, dtype=bool)
-        rolled_back = False
-        # the "initial" record for the current line search
-        cur = {"alpha": 0.0, "score": i_score, "grad": i_grad,
-               "dVkk": i_dvkk, "start": start0.copy()}
-        step = np.zeros(n_sp)
-        trial = None
-        ct = "iteration limit reached"
-        iters = 0
-
-        def zoom(lo, hi):
-            # N&W Alg 3.6: bisection for a Wolfe-satisfying step.
-            for _ in range(40):
-                al = (lo["alpha"] + hi["alpha"]) / 2.0
-                tr = {"alpha": al}
-                lspz = ilsp + step * al
-                g5["start"] = cur["start"].copy()
-                bz = _fit5(lspz, 0)
-                tr["score"] = float(bz["REML"])
-                tr["start"] = g5["start"].copy()
-                if (tr["score"] > cur["score"] + al * c1 * cur["dscore"]
-                        or tr["score"] >= lo["score"]):
-                    hi = tr
-                else:
-                    g5["start"] = cur["start"].copy()
-                    bz = _fit5(lspz, 1)
-                    tr["grad"] = _grad(bz)
-                    tr["dVkk"] = _dvkk_diag(bz)
-                    tr["start"] = g5["start"].copy()
-                    tr["dscore"] = float(np.sum(step * tr["grad"]))
-                    if abs(tr["dscore"]) <= -c2 * cur["dscore"]:
-                        return tr
-                    if tr["dscore"] * (hi["alpha"] - lo["alpha"]) >= 0:
-                        hi = lo
-                    lo = tr
-            return None
-
-        for it in range(1, max_step + 1):
-            iters = it
-            # trial step from the approximate inverse Hessian
-            step = np.zeros(n_sp)
-            step[uconv] = -(Bmat[np.ix_(uconv, uconv)] @ i_grad[uconv])
-            if float(np.sum(step * i_grad)) >= 0:    # not descending
-                step = -np.diag(Bmat) * i_grad
-                step[~uconv] = 0.0
-            ms = float(np.max(np.abs(step))) if step.size else 0.0
-            if ms > max_Nstep:
-                alpha = max_Nstep / ms
-                alpha_max = alpha * 1.05
-            else:
-                alpha = 1.0
-                alpha_max = min(2.0, max_Nstep / ms) if ms > 0 else 2.0
-            cur["dscore"] = float(np.sum(step * i_grad))
-            prev = dict(cur)
-            trial = {"alpha": alpha}
-            deriv = 1
-            while True:                       # N&W Alg 3.5
-                lsp = ilsp + trial["alpha"] * step
-                g5["start"] = prev["start"].copy()
-                b = _fit5(lsp, deriv)
-                trial["score"] = float(b["REML"])
-                if deriv > 0:
-                    trial["grad"] = _grad(b)
-                    trial["dVkk"] = _dvkk_diag(b)
-                    trial["dscore"] = float(np.sum(trial["grad"] * step))
-                    deriv = 0
-                else:
-                    trial["grad"] = None
-                    trial["dscore"] = None
-                trial["start"] = g5["start"].copy()
-                # Wolfe 1: sufficient decrease
-                if (trial["score"] > cur["score"]
-                        + c1 * trial["alpha"] * cur["dscore"]
-                        or (deriv == 0 and trial["score"] >= prev["score"])):
-                    trial = zoom(prev, trial)
-                    break
-                if trial["dscore"] is None:   # need gradient at trial
-                    g5["start"] = trial["start"].copy()
-                    b = _fit5(lsp, 1)
-                    trial["grad"] = _grad(b)
-                    trial["dscore"] = float(np.sum(trial["grad"] * step))
-                    trial["dVkk"] = _dvkk_diag(b)
-                    trial["start"] = g5["start"].copy()
-                if abs(trial["dscore"]) <= -c2 * cur["dscore"]:
-                    break                     # Wolfe 2 met
-                if trial["dscore"] >= 0:      # increase at trial end
-                    trial = zoom(trial, prev)
-                    break
-                prev = dict(trial)
-                if trial["alpha"] == alpha_max:
-                    break
-                trial["alpha"] = min(prev["alpha"] * 1.3, alpha_max)
-
-            if trial is None:                 # step failed
-                lsp = ilsp.copy()
-                if rolled_back:
-                    break
-                uconv = np.abs(i_grad) > score_scale * conv_tol * 0.1
-                uconv[spind] = uconv[spind] | (
-                    np.abs(i_dvkk)[spind] > score_scale * conv_tol * 0.1)
-                if np.sum(~uconv) == 0:
-                    break
-                trial = dict(cur)
-                converged = True
-            else:                             # BFGS inverse-Hessian update
-                yg = trial["grad"] - i_grad
-                step_full = step * trial["alpha"]
-                rho_bfgs = float(np.sum(yg * step_full))
-                if rho_bfgs > 0:
-                    if it == 1:
-                        Bmat = Bmat * trial["alpha"]
-                    rinv = 1.0 / rho_bfgs
-                    Bmat = Bmat - rinv * np.outer(step_full, yg @ Bmat)
-                    Bmat = (Bmat - rinv * np.outer(Bmat @ yg, step_full)
-                            + rinv * np.outer(step_full, step_full))
-                score_hist.append(trial["score"])
-                ilsp = ilsp + step_full
-                lsp = ilsp.copy()
-                converged = True
-                score_scale = 1.0 + abs(trial["score"])
-                uconv = np.abs(trial["grad"]) > score_scale * conv_tol
-                if np.sum(uconv):
-                    converged = False
-                uconv = np.abs(trial["grad"]) > score_scale * conv_tol * 0.1
-                uconv[spind] = uconv[spind] | (
-                    np.abs(trial["dVkk"])[spind]
-                    > score_scale * conv_tol * 0.1)
-                if abs(i_score - trial["score"]) > score_scale * conv_tol:
-                    if not np.sum(uconv):
-                        uconv = np.ones(n_sp, dtype=bool)
-                    converged = False
-
-            # roll back any "working infinite" sps (gam.fit3.r:2065-2100)
-            if converged:
-                if np.sum(~uconv) == 0 or rolled_back:
-                    break
-                rolled_back = True
-                counter = 0
-                uconv0 = uconv.copy()
-                while np.sum(~uconv0) > 0 and counter < 5:
-                    lsp[~uconv0] = (lsp[~uconv0] * 0.8
-                                    + initial_lsp[~uconv0] * 0.2)
-                    g5["start"] = trial["start"].copy()
-                    b = _fit5(lsp, 1)
-                    trial["score"] = float(b["REML"])
-                    trial["grad"] = _grad(b)
-                    trial["dscore"] = float(np.sum(trial["grad"] * step))
-                    trial["dVkk"] = _dvkk_diag(b)
-                    trial["start"] = g5["start"].copy()
-                    counter += 1
-                    uconv0 = np.abs(trial["grad"]) > score_scale * conv_tol * 20
-                    uconv0[spind] = uconv0[spind] | (
-                        np.abs(trial["dVkk"])[spind]
-                        > score_scale * conv_tol * 20)
-                    uconv0 = uconv0 | uconv
-                uconv = np.ones(n_sp, dtype=bool)
-                ilsp = lsp.copy()
-
-            cur = dict(trial)
-            cur["alpha"] = 0.0
-            i_score = trial["score"]
-            i_grad = np.asarray(trial["grad"], dtype=float).copy()
-            i_dvkk = np.asarray(trial["dVkk"], dtype=float).copy()
-
-        if trial is None:
-            ct = "step failed"
-            lsp = ilsp.copy()
-        elif iters == max_step:
-            ct = "iteration limit reached"
-        else:
-            ct = "full convergence"
-
-        # ---- final fit (gam.fit3.r:2116) ------------------------------
-        g5["start"] = (cur.get("start", start0)).copy()
-        bfin = _fit5(lsp, 1)
-        g5["fit"] = bfin
-        gfin = _grad(bfin)
-        # approximate Hessian (invert the inverse-Hessian B)
-        evals, evecs = np.linalg.eigh((Bmat + Bmat.T) / 2.0)
-        keep = evals > float(np.max(evals)) * eps_mach ** 0.9
-        inv = np.where(keep, 1.0 / np.where(keep, evals, 1.0), 0.0)
-        hess = evecs @ (inv[:, None] * evecs.T)
-        self._outer_info = {
-            "conv": ct, "iter": iters, "grad": gfin, "hess": hess,
-            "score.hist": np.asarray(score_hist, dtype=float),
-        }
-        return ilsp
 
     def _S_pinv(self, S_full):
         """Shim → free `_S_pinv` (mgcv gdi1/gdi2 derivative block)."""
@@ -13482,7 +13657,7 @@ def _prepare_multi_design(formulas: list[str], data,
                 "formulas after the first must be response-less "
                 f"('~ ...'); got lhs {lhs!r}. mgcv's numeric-label "
                 "shared-term syntax ('1 + 2 ~ s(x)') is not supported "
-                "yet (plan §5.3 — multi-formula front end, out-of-scope "
+                "yet (multi-formula shared-term front end, out-of-scope "
                 "list)."
             )
         full_formulas.append(f"{resp} {f.strip()}")
@@ -13686,7 +13861,7 @@ def _zero_terms_exclude(X, terms, exclude, plabels, pidx, icols, slabels,
 #             − log(γ)/2]
 # with exact first/second log-sp derivatives (gam.fit4.r:1409-1414).
 # scale.est ≡ 1: the scale never enters the outer problem. The NCV
-# branches are out of scope (plan §5.3).
+# branches (nei) are out of scope.
 # ---------------------------------------------------------------------------
 
 
@@ -13715,27 +13890,44 @@ def _fit5_solve(L: np.ndarray, piv: np.ndarray, ipiv: np.ndarray,
     return D[:, None] * out if v.ndim == 2 else D * out
 
 
-def _gam_fit5(X, y, lsp, sl: _Sl, *, family, lpi, weights=None,
-              offsets=None, Mp: int = -1, deriv: int = 2, start=None,
-              gamma: float = 1.0, epsilon: float = 1e-7,
-              maxit: int = 200) -> dict:
-    """mgcv ``gam.fit5`` (gam.fit4.r:941-1477) — see the section comment.
+def _gam_fit5(x, y, lsp, sl: _Sl, *, weights=None, offset=None,
+              deriv: int = 2, family, scoreType: str = "REML", Mp: int = -1,
+              start=None, gamma: float = 1.0, nei=None, lpi,
+              epsilon: float = 1e-7, maxit: int = 200) -> dict:
+    """mgcv ``gam.fit5`` (gam.fit4.r:941) — general penalized-likelihood
+    fitter for extended families with a formula list (gaulss, mvn, …).
 
-    ``X`` must already carry the Sl *initial* reparameterization
+    Signature mirrors mgcv's
+    ``gam.fit5(x, y, lsp, Sl, weights, offset, deriv, family, scoreType,
+    control, Mp, start, gamma, nei)`` in order and name, with three hea
+    deltas: ``lpi`` is threaded explicitly (mgcv's ``Sl``/``G`` carries the
+    per-LP column index arrays; hea's ``sl`` does not); ``epsilon``/``maxit``
+    stand in for mgcv's ``control`` list; and ``scoreType`` is fixed at
+    ``"REML"`` with ``nei`` (NCV neighbourhoods) unsupported — both accepted
+    for signature parity and validated below.
+
+    ``x`` must already carry the Sl *initial* reparameterization
     (estimate.gam applies ``Sl.initial.repara`` before fitting,
     mgcv.r:1899-1903); the ldetS (``rp``) reparameterization is applied
     and undone internally, exactly like mgcv. ``lpi``: per-LP 0-based
-    column index arrays. ``offsets``: per-LP offset arrays (entries may
+    column index arrays. ``offset``: per-LP offset arrays (entries may
     be ``None``). ``Mp``: the criterion's prior null-space dimension (a
     setup-time quantity). Returned dict mirrors mgcv's ret list —
     ``coefficients``/``db_drho`` have the rp-reparameterization undone
     (``Sl.repara(inverse)`` / ``Sl.repa(l=-1)``) but NOT the initial
     one; the caller undoes that, like estimate.gam.
     """
-    X = np.asarray(X, dtype=float)
+    if scoreType != "REML":
+        raise NotImplementedError(
+            "gam.fit5 general families use scoreType='REML' only "
+            f"(mgcv.r:1894-1898 coerces the method); got {scoreType!r}.")
+    if nei is not None:
+        raise NotImplementedError(
+            "gam.fit5 neighbourhood cross-validation (nei) is not ported.")
+    x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
     lsp = np.asarray(lsp, dtype=float).reshape(-1)
-    q = X.shape[1]
+    q = x.shape[1]
     nobs = y.shape[0]
     n_sp = int(lsp.size)
     penalized = len(sl) > 0
@@ -13745,15 +13937,15 @@ def _gam_fit5(X, y, lsp, sl: _Sl, *, family, lpi, weights=None,
     lpi = [np.asarray(ix, dtype=int) for ix in lpi]
     if weights is None:
         weights = np.ones(nobs)
-    if offsets is None:
-        offsets = [None] * len(lpi)
+    if offset is None:
+        offset = [None] * len(lpi)
 
     if penalized:
         # mgcv calls ldetS WITHOUT deriv → its default 2 (gam.fit4.r:969)
         # even for deriv=0 fits: S1 (= ldet1) must exist on every return
         # — efsud's update reads it from deriv-0 fits.
         rp = _ldet_s(sl, lsp, root=True, stot=True, deriv=2)
-        X = _sl_repara(rp["rp"], X)
+        x = _sl_repara(rp["rp"], x)
         Sb = _sl_repa(rp["rp"], sl.S, lt=-2, r=-1)   # balanced penalty
         St = np.asarray(rp["S"], dtype=float)
         E = rp["E"]
@@ -13770,13 +13962,13 @@ def _gam_fit5(X, y, lsp, sl: _Sl, *, family, lpi, weights=None,
     if start is None:
         # the ldetS root E carries mgcv's use.unscaled attribute here
         # (gam.fit4.r:974) — initializers use it as-is.
-        start = family.initialize_coef(y, X, lpi, E=E, offset=offsets,
+        start = family.initialize_coef(y, x, lpi, E=E, offset=offset,
                                        use_unscaled=True)
     coef = np.asarray(start, dtype=float).reshape(-1).copy()
     start = coef.copy()         # kept for the iconv first-step-fail path
 
     def llf(b, d, **kw):
-        return family.ll(y, X, b, weights, lpi=lpi, offset=offsets,
+        return family.ll(y, x, b, weights, lpi=lpi, offset=offset,
                          deriv=d, **kw)
 
     ll = llf(coef, 1)
@@ -13936,7 +14128,7 @@ def _gam_fit5(X, y, lsp, sl: _Sl, *, family, lpi, weights=None,
                             keep = ~bdrop
                             coef = coef[keep]
                             St = St[np.ix_(keep, keep)]
-                            X = X[:, keep]
+                            x = x[:, keep]
                             ij = np.full(q, -1, dtype=int)
                             ij[keep] = np.arange(int(keep.sum()))
                             lpi = [ij[ix[~np.isin(ix, drop)]]
@@ -14117,9 +14309,9 @@ def _gam_fit5(X, y, lsp, sl: _Sl, *, family, lpi, weights=None,
     linear_predictors = np.zeros((nobs, K))
     fitted_values = np.zeros((nobs, K))
     for j in range(K):
-        eta_j = X[:, lpi[j]] @ coef[lpi[j]]
-        if offsets[j] is not None:
-            eta_j = eta_j + offsets[j]
+        eta_j = x[:, lpi[j]] @ coef[lpi[j]]
+        if offset[j] is not None:
+            eta_j = eta_j + offset[j]
         linear_predictors[:, j] = eta_j
         fitted_values[:, j] = family.links[j].linkinv(eta_j)
 
@@ -14179,7 +14371,7 @@ def _efsud(X, y, lsp, sl: _Sl, sl_setup: _Sl, *, family, lpi,
 
     def fit_at(lsp_arg, st):
         return _gam_fit5(X, y, lsp_arg, sl, family=family, lpi=lpi,
-                         weights=weights, offsets=offsets, Mp=Mp,
+                         weights=weights, offset=offsets, Mp=Mp,
                          deriv=0, start=st, gamma=1.0, epsilon=epsilon)
 
     fit = fit_at(lsp, start)

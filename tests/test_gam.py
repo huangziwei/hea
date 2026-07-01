@@ -4649,7 +4649,7 @@ def _fit5_run(formulas, lsp, deriv=2):
         Mp += k - _sym_rank(np.sum(
             [np.asarray(s, dtype=float) for s in b.S], axis=0))
     fit = _gam_fit5(X, md.y, np.asarray(lsp, dtype=float), sl,
-                    family=gaulss(), lpi=md.lpi, offsets=md.offsets,
+                    family=gaulss(), lpi=md.lpi, offset=md.offsets,
                     Mp=Mp, deriv=deriv)
     return fit, Mp
 
