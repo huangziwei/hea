@@ -3634,6 +3634,131 @@ def _preml_hessian(rho, fit=None, *, slots, Mp, n, family, wt, y, X, p, gamma, p
     return 0.5 * (REML2_2V + REML2_2V.T) / 2.0
 
 
+def _gam_fit3_score(rho, log_phi, fit, deriv, scoreType, *,
+                    T_work, include_log_phi, include_family_theta,
+                    dw_deta, d2w_deta2,
+                    Mp, wt, y, binom_n, gamma, family, family_mgcv_extended,
+                    use_ml_proj, pearson_scale_criterion, reml_ind,
+                    penalty_rank, slots, p, UrS, reparam_cache,
+                    X, XtX, n, scale_fixed_value, scale_known, pls_lwork):
+    """mgcv ``gam.fit3`` score tail (gam.fit3.r:538-864) — assemble the
+    smoothness-selection criterion and its ρ-derivatives from a converged
+    PIRLS fit, dispatched on ``scoreType`` exactly as mgcv's ``scoreType``
+    branch. Returns ``{"score", "grad", "hess"}`` with grad/hess already in
+    WORKING coords (``T'g`` / ``T'HT``, ``T`` = blockdiag(L, I_extra)).
+
+    ``deriv`` mirrors mgcv's argument: 0 → score only, 1 → +grad, 2 →
+    +grad+hess (the caller passes 0 on rejected step-halving trials and 2
+    on accepted points, so grad/hess aren't wasted). The general
+    (gam.fit5/REML5) path is the fitter's own monolithic REML/REML1/REML2
+    return and is handled by the caller, not here.
+
+    ``dw_deta`` / ``d2w_deta2`` are the working-weight derivatives supplied
+    by the caller's shim (polymorphic — bam overrides them; see the SB1
+    fold); only the REML/P-REML derivative branches consume them."""
+    def _tw(g):
+        return g if T_work is None else T_work.T @ g
+
+    def _twh(H):
+        return H if T_work is None else T_work.T @ H @ T_work
+
+    grad = hess = None
+    if scoreType == "REML":
+        score = 0.5 * _reml(
+            rho, log_phi, fit, Mp=Mp, wt=wt, y=y, binom_n=binom_n,
+            gamma=gamma, family=family,
+            family_mgcv_extended=family_mgcv_extended, use_ml_proj=use_ml_proj,
+            pearson_scale_criterion=pearson_scale_criterion, reml_ind=reml_ind,
+            penalty_rank=penalty_rank, slots=slots, p=p, UrS=UrS,
+            reparam_cache=reparam_cache)
+        if deriv >= 1:
+            grad = _tw(0.5 * _reml_grad(
+                rho, log_phi, fit, include_log_phi, include_family_theta,
+                Mp=Mp, X=X, gamma=gamma, slots=slots, wt=wt, y=y, family=family,
+                pearson_scale_criterion=pearson_scale_criterion,
+                reml_ind=reml_ind, use_ml_proj=use_ml_proj, p=p,
+                family_mgcv_extended=family_mgcv_extended,
+                penalty_rank=penalty_rank, UrS=UrS, reparam_cache=reparam_cache,
+                dw_deta=dw_deta))
+        if deriv >= 2:
+            hess = _twh(0.5 * _reml_hessian(
+                rho, log_phi, fit, include_log_phi, include_family_theta,
+                X=X, gamma=gamma, slots=slots, wt=wt, y=y, family=family, p=p,
+                pearson_scale_criterion=pearson_scale_criterion,
+                use_ml_proj=use_ml_proj, penalty_rank=penalty_rank,
+                family_mgcv_extended=family_mgcv_extended, Mp=Mp, UrS=UrS,
+                reparam_cache=reparam_cache, dw_deta=dw_deta,
+                d2w_deta2=d2w_deta2))
+    elif scoreType == "GCV":
+        score = _gcv(
+            rho, fit, gamma=gamma, n=n, scale_fixed_value=scale_fixed_value,
+            scale_known=scale_known, X=X, XtX=XtX, p=p, family=family,
+            family_mgcv_extended=family_mgcv_extended, y=y, wt=wt,
+            pls_lwork=pls_lwork)
+        if deriv >= 1:
+            grad = _tw(_gcv_grad(
+                rho, fit, gamma=gamma, slots=slots, n=n,
+                scale_fixed_value=scale_fixed_value, scale_known=scale_known,
+                X=X, XtX=XtX, family=family, p=p, y=y,
+                family_mgcv_extended=family_mgcv_extended, wt=wt,
+                pls_lwork=pls_lwork))
+        if deriv >= 2:
+            hess = _twh(_gcv_hessian(
+                rho, fit, X=X, XtX=XtX, gamma=gamma, slots=slots, n=n, p=p,
+                scale_fixed_value=scale_fixed_value, scale_known=scale_known,
+                y=y, family_mgcv_extended=family_mgcv_extended, family=family,
+                wt=wt, pls_lwork=pls_lwork))
+    elif scoreType == "GACV":
+        score = _gacv(
+            rho, fit, gamma=gamma, n=n, X=X, XtX=XtX, p=p, family=family,
+            family_mgcv_extended=family_mgcv_extended, y=y, wt=wt,
+            pls_lwork=pls_lwork, slots=slots)
+        if deriv >= 1:
+            grad = _tw(_gacv_grad(
+                rho, fit, gamma=gamma, slots=slots, n=n, X=X, XtX=XtX,
+                family=family, p=p, y=y,
+                family_mgcv_extended=family_mgcv_extended, wt=wt,
+                pls_lwork=pls_lwork))
+        if deriv >= 2:
+            hess = _twh(_gacv_hessian(
+                rho, fit, gamma=gamma, slots=slots, n=n, X=X, XtX=XtX, p=p,
+                scale_fixed_value=scale_fixed_value, scale_known=scale_known,
+                y=y, family_mgcv_extended=family_mgcv_extended, family=family,
+                wt=wt, pls_lwork=pls_lwork))
+    elif scoreType == "PREML":
+        phi = _phi_pearson(fit, Mp=Mp, n=n, family=family, wt=wt, y=y,
+                           slots=slots, X=X, p=p)
+        score = 0.5 * _reml(
+            rho, float(np.log(max(phi, 1e-300))), fit, Mp=Mp, wt=wt, y=y,
+            binom_n=binom_n, gamma=gamma, family=family,
+            family_mgcv_extended=family_mgcv_extended, use_ml_proj=use_ml_proj,
+            pearson_scale_criterion=pearson_scale_criterion, reml_ind=reml_ind,
+            penalty_rank=penalty_rank, slots=slots, p=p, UrS=UrS,
+            reparam_cache=reparam_cache)
+        if deriv >= 1:
+            grad = _tw(0.5 * _preml_grad(
+                rho, fit, slots=slots, Mp=Mp, n=n, y=y, wt=wt, family=family,
+                reml_ind=reml_ind, X=X, p=p, gamma=gamma,
+                pearson_scale_criterion=pearson_scale_criterion,
+                use_ml_proj=use_ml_proj,
+                family_mgcv_extended=family_mgcv_extended,
+                penalty_rank=penalty_rank, UrS=UrS, reparam_cache=reparam_cache,
+                dw_deta=dw_deta))
+        if deriv >= 2:
+            hess = _twh(_preml_hessian(
+                rho, fit, slots=slots, Mp=Mp, n=n, family=family, wt=wt, y=y,
+                X=X, p=p, gamma=gamma,
+                pearson_scale_criterion=pearson_scale_criterion,
+                use_ml_proj=use_ml_proj, penalty_rank=penalty_rank,
+                family_mgcv_extended=family_mgcv_extended, UrS=UrS,
+                reparam_cache=reparam_cache, reml_ind=reml_ind, dw_deta=dw_deta,
+                d2w_deta2=d2w_deta2))
+    else:
+        raise ValueError(
+            f"_gam_fit3_score: unknown scoreType {scoreType!r}")
+    return {"score": float(score), "grad": grad, "hess": hess}
+
+
 class gam:
     """Generalized additive model — mgcv's ``gam()``.
 
@@ -5788,22 +5913,12 @@ class gam:
             else:
                 eta = link.link(mu) - off       # β-only η
 
-        # Null baseline — same construction as the standard branch (mgcv's
-        # get.null.coef projection of a constant valid η). ρ-independent, so the
-        # lstsq is computed once per fit and cached (shared with _fit_given_rho;
-        # a model is fit3 XOR fit4, so the attribute is never cross-used).
-        if self._null_baseline_cache is None:
-            mu_null_const = float(np.average(mu_default, weights=wt))
-            eta_null_full = link.link(np.full(n, mu_null_const))
-            nc, *_ = np.linalg.lstsq(X, eta_null_full - off, rcond=None)
-            en = X @ nc
-            mn = link.linkinv(en + off)
-            if not (link.valideta(en + off) and family.validmu(mn)):
-                nc = np.zeros(p)
-                en = np.zeros(n)
-                mn = link.linkinv(off)
-            self._null_baseline_cache = (nc, en, mn)
-        null_coef, eta_null, mu_null = self._null_baseline_cache
+        # Null baseline — mgcv's get.null.coef projection of a constant valid
+        # η onto colspan(X). ρ-independent; identical to the standard branch's
+        # `_resolve_null_coef` construction (a model is fit3 XOR fit4), so the
+        # (nc, η_null, μ_null) triple is threaded in as ``null_baseline`` and
+        # the caller populates the cache once via `_resolve_null_coef`.
+        null_coef, eta_null, mu_null = null_baseline
         if (self._pirls_mustart is not None
                 or self._pirls_etastart is not None
                 or self._pirls_start is not None):
@@ -6744,6 +6859,33 @@ class gam:
         return np.linalg.solve(np.asarray(H, dtype=float) + reg,
                                np.eye(H.shape[0]))
 
+    def _score_all(self, rho, log_phi, fit, deriv, scoreType, *,
+                   include_log_phi=False, include_family_theta=False,
+                   T_work=None):
+        """Shim → free `_gam_fit3_score` (mgcv's gam.fit3 score tail). Sources
+        the 23 fit-independent args from ``self`` and computes the
+        working-weight derivatives POLYMORPHICALLY (``self._dw_deta`` — bam
+        overrides to length-p; see SB1) only when a derivative is requested
+        for a W-dependent criterion (REML/P-REML)."""
+        need_w = scoreType in ("REML", "PREML")
+        dw_deta = self._dw_deta(fit) if (need_w and deriv >= 1) else None
+        d2w_deta2 = self._d2w_deta2(fit) if (need_w and deriv >= 2) else None
+        return _gam_fit3_score(
+            rho, log_phi, fit, deriv, scoreType, T_work=T_work,
+            include_log_phi=include_log_phi,
+            include_family_theta=include_family_theta,
+            dw_deta=dw_deta, d2w_deta2=d2w_deta2, Mp=self._Mp, wt=self._wt,
+            y=self._y_arr, binom_n=self._binom_n, gamma=self._gamma,
+            family=self.family,
+            family_mgcv_extended=self._family_mgcv_extended,
+            use_ml_proj=self._use_ml_proj,
+            pearson_scale_criterion=self._pearson_scale_criterion,
+            reml_ind=self._reml_ind, penalty_rank=self._penalty_rank,
+            slots=self._slots, p=self.p, UrS=self._UrS,
+            reparam_cache=self._reparam_cache, X=self._X_full, XtX=self._XtX,
+            n=self.n, scale_fixed_value=self._scale_fixed_value,
+            scale_known=self._scale_known_fit, pls_lwork=self._pls_lwork)
+
     def _outer_newton(
         self, theta0: np.ndarray, *, include_log_phi: bool,
         criterion: str = "REML",
@@ -6854,7 +6996,10 @@ class gam:
                 base = n_work + (1 if include_log_phi else 0)
                 self.family.set_theta(t[base:base + n_theta_fam])
 
-        if criterion == "REML":
+        # Non-REML5 criteria route score/grad/hess through the single free
+        # `_gam_fit3_score` (mgcv's gam.fit3 score tail, via `_score_all`);
+        # REML5 (gam.fit5) keeps its own monolithic REML/REML1/REML2 return.
+        def _mk_score_closures(sType):
             def _eval(t, deriv=2):  # deriv: REML5-only hint, ignored here
                 rho_t, lp_t = _split(t)
                 _apply_family_theta(t)
@@ -6862,20 +7007,29 @@ class gam:
                     fit_t = self._fit_given_rho(rho_t)
                 except Exception:
                     return float("inf"), None
-                val_2VR = float(self._reml(rho_t, lp_t, fit=fit_t))
-                return val_2VR / 2.0, fit_t
+                return self._score_all(
+                    rho_t, lp_t, fit_t, 0, sType,
+                    include_log_phi=include_log_phi,
+                    include_family_theta=include_family_theta,
+                    T_work=T_work)["score"], fit_t
+
             def _grad(rho, log_phi, fit):
-                return _to_working(0.5 * self._reml_grad(
-                    rho, log_phi, fit=fit,
+                return self._score_all(
+                    rho, log_phi, fit, 1, sType,
                     include_log_phi=include_log_phi,
                     include_family_theta=include_family_theta,
-                ))
+                    T_work=T_work)["grad"]
+
             def _hess(rho, log_phi, fit):
-                return _to_working_hess(0.5 * self._reml_hessian(
-                    rho, log_phi, fit=fit,
+                return self._score_all(
+                    rho, log_phi, fit, 2, sType,
                     include_log_phi=include_log_phi,
                     include_family_theta=include_family_theta,
-                ))
+                    T_work=T_work)["hess"]
+            return _eval, _grad, _hess
+
+        if criterion == "REML":
+            _eval, _grad, _hess = _mk_score_closures("REML")
         elif criterion == "REML5":
             # general families: the criterion and its ρ-derivatives come
             # straight from gam.fit5 (REML/REML1/REML2). mgcv's newton
@@ -6934,50 +7088,16 @@ class gam:
                                                    dtype=float))
         elif criterion == "GACV":
             # GACV (gam.fit3.r:751): a GCV sibling for scale-unknown standard
-            # families. ρ-only; analytic gradient, FD Hessian on it.
-            def _eval(t, deriv=2):  # deriv: REML5-only hint, ignored here
-                rho_t, _ = _split(t)
-                try:
-                    fit_t = self._fit_given_rho(rho_t)
-                except Exception:
-                    return float("inf"), None
-                return float(self._gacv(rho_t, fit=fit_t)), fit_t
-            def _grad(rho, log_phi, fit):
-                return _to_working(self._gacv_grad(rho, fit=fit))
-            def _hess(rho, log_phi, fit):
-                return _to_working_hess(self._gacv_hessian(rho, fit=fit))
+            # families. ρ-only; analytic gradient + Hessian.
+            _eval, _grad, _hess = _mk_score_closures("GACV")
         elif criterion == "PREML":
             # P-REML / P-ML (gam.fit3.r:640-665): the Laplace (RE)ML criterion
             # with the Pearson-Laplace scale φ = P/(n−Mp) plugged in (γ≡1),
-            # ρ-only. Value reuses `_reml` at log φ_P; gradient `_preml_grad`
-            # (= reused REML ρ-grad − φ(ρ) chain term); analytic `_preml_hessian`.
-            def _eval(t, deriv=2):  # deriv: REML5-only hint, ignored here
-                rho_t, _ = _split(t)
-                try:
-                    fit_t = self._fit_given_rho(rho_t)
-                except Exception:
-                    return float("inf"), None
-                phi = self._phi_pearson(fit_t)
-                val_2v = float(self._reml(
-                    rho_t, float(np.log(max(phi, 1e-300))), fit=fit_t))
-                return val_2v / 2.0, fit_t
-            def _grad(rho, log_phi, fit):
-                return _to_working(0.5 * self._preml_grad(rho, fit))
-            def _hess(rho, log_phi, fit):
-                return _to_working_hess(self._preml_hessian(rho, fit))
+            # ρ-only. `_gam_fit3_score` profiles φ_P internally for the value
+            # (via `_phi_pearson`) and uses `_preml_grad`/`_preml_hessian`.
+            _eval, _grad, _hess = _mk_score_closures("PREML")
         else:  # GCV
-            def _eval(t, deriv=2):  # deriv: REML5-only hint, ignored here
-                rho_t, _ = _split(t)
-                try:
-                    fit_t = self._fit_given_rho(rho_t)
-                except Exception:
-                    return float("inf"), None
-                val = float(self._gcv(rho_t, fit=fit_t))
-                return val, fit_t
-            def _grad(rho, log_phi, fit):
-                return _to_working(self._gcv_grad(rho, fit=fit))
-            def _hess(rho, log_phi, fit):
-                return _to_working_hess(self._gcv_hessian(rho, fit=fit))
+            _eval, _grad, _hess = _mk_score_closures("GCV")
 
         # P-REML/P-ML are (RE)ML-type for the convergence score scale
         # (|log scale.est| + |score|); GCV/GACV/UBRE use |scale.est| + |score|.
