@@ -2927,6 +2927,713 @@ def _dlog_det_H_dp_tw(fit, db_dp=None, *, X, wt, y, family, family_mgcv_extended
     return float(np.sum(d * dW_dp_total))
 
 
+def _reml_grad(rho, log_phi=0.0, fit=None, include_log_phi=False, include_family_theta=False, *, Mp, X, gamma, slots, wt, y, family, pearson_scale_criterion, reml_ind, use_ml_proj, p, family_mgcv_extended, penalty_rank, UrS, reparam_cache, dw_deta):
+    """Analytical gradient of `_reml` (2·V_R units).
+
+    Length depends on flags:
+      * n_sp                                  (defaults)
+      * n_sp + 1                              if ``include_log_phi``
+      * n_sp + n_lp + family.n_theta          if ``include_family_theta``,
+        with the family entries appended last; ``include_log_phi`` is
+        then required to be True for unknown-scale Tweedie/tw().
+
+    Wood 2011 §4 + mgcv gam.fit3.r:622, 630:
+
+        ∂(2·V_R)/∂ρ_k    = (∂Dp/∂ρ_k)/φ + ∂log|H|/∂ρ_k − ∂log|S|+/∂ρ_k
+        ∂(2·V_R)/∂log φ  = −Dp/φ − 2·ls'_hea − Mp
+
+    For each extra family parameter θ_f (only ``tw`` exercises this
+    today; θ_f ↦ Tweedie p via the sigmoid reparametrisation):
+
+        ∂(2·V_R)/∂θ_f =   (∂Dp/∂p · dp/dθ_f) / (φ·γ)
+                        − 2·(∂ls0/∂p · dp/dθ_f) / γ
+                        + ∂log|H+S|/∂p · dp/dθ_f
+
+    The Dp piece uses the envelope theorem at PIRLS-converged β̂; the
+    log|H+S| piece is fully analytical via :meth:`_dlog_det_H_dp_tw`
+    (direct ∂W/∂p|_β̂ + indirect via :meth:`_dbeta_dp_tw`); the ls0
+    piece comes from :meth:`Tweedie.dls_dp` using the Dunn-Smyth
+    ``j_psi_bar`` moment.
+
+    ls'_hea is the d/d(log φ) chain-rule output from `family.ls(y, wt, φ)[1]`
+    (hea convention, see family.py:338 docstring).
+    """
+    n_sp = len(slots)
+    phi = float(np.exp(log_phi))
+    if not (np.isfinite(phi) and phi > 0):
+        size = n_sp + (1 if include_log_phi else 0)
+        return np.full(size, 1e15)
+
+    # γ≡1 for the Pearson-Laplace criteria (see `_reml`); `_preml_grad`
+    # calls this with include_log_phi=False and adds the φ(ρ) chain term.
+    gamma = 1.0 if pearson_scale_criterion else gamma
+    if n_sp == 0:
+        grad_rho = np.zeros(0)
+    else:
+        dDp = _dDp_drho(fit, rho, slots)
+        dlog_H = _dlog_det_H_drho(fit, rho, X=X, slots=slots, p=p, y=y, family_mgcv_extended=family_mgcv_extended, family=family, wt=wt)
+        rp = _reparam_eval(UrS, reparam_cache, rho)
+        dlog_S = (rp["det1"].copy() if rp is not None
+                  else _dlog_det_S_drho(rho, S_full=fit.S_full, slots=slots, p=p, penalty_rank=penalty_rank))
+        # method="ML" uses the range-only Hessian log-det. With the
+        # block-determinant identity log|H_pp+S_pp| = log|H+S| + log|M|
+        # (M = U_nᵀ A⁻¹ U_n), the gradient picks up
+        #     ∂log|M|/∂ρ_k = −tr(M⁻¹ · B′(∂A/∂ρ_k)B)
+        # ∂A/∂ρ_k = X′·diag(∂w/∂ρ_k)·X + λ_k·S_k (the W-dep term is
+        # nonzero for non-canonical families like binomial), so the
+        # correction has two pieces. Mirrors mgcv's ``MLpenalty1`` →
+        # ``get_ddetXWXpS`` in gdi.c, which fills trA1 with the
+        # ML-version derivatives via the same projected-Hessian logic.
+        if use_ml_proj:
+            _, M_inv, B = _ml_logdet_adj(fit, Mp)
+            if M_inv is not None:
+                sp = np.exp(rho)
+                Y = X @ B                  # (n, Mp)
+                Y_Minv = Y @ M_inv                    # (n, Mp)
+                q = np.einsum("ij,ij->i", Y, Y_Minv)  # (n,) y_i' M⁻¹ y_i
+                db_drho = _dbeta_drho(fit, rho, slots, p)
+                deta_drho = X @ db_drho     # (n, n_sp)
+                dw_drho = dw_deta[:, None] * deta_drho # (n, n_sp)
+                for k, slot in enumerate(slots):
+                    a, b = slot.col_start, slot.col_end
+                    Bk = B[a:b, :]
+                    Pk = Bk.T @ slot.S @ Bk
+                    # −tr(M⁻¹ Y′ diag(dw/dρ_k) Y) − λ_k tr(M⁻¹ P_k)
+                    dlog_H[k] += (
+                        -float(np.sum(dw_drho[:, k] * q))
+                        - sp[k] * float(np.einsum("ij,ji->", M_inv, Pk))
+                    )
+        # ∂Dp/∂ρ comes from the data-fit term, so γ divides it; the
+        # log|H| / log|S|+ Jacobi pieces are γ-independent.
+        grad_rho = dDp / (phi * gamma) + dlog_H - dlog_S
+
+    if not include_log_phi and not include_family_theta:
+        return grad_rho
+
+    out = grad_rho
+    Dp = fit.dev + fit.pen
+    if include_log_phi:
+        Mp = float(Mp)
+        ls = np.asarray(family.ls(y, wt, phi),
+                        dtype=float)
+        ls1 = float(ls[1])    # d ls / d(log φ), already chain-ruled
+        # Data-fit pieces (-Dp/φ - 2·ls1) divide by γ; the -Mp piece
+        # comes from -Mp·log(2πφ) (γ-independent) and is REML-only —
+        # under method="ML" remlInd=0 drops it (gam.fit3.r:628).
+        d_logphi = (-Dp / phi - 2.0 * ls1) / gamma - reml_ind * Mp
+        out = np.concatenate([out, [d_logphi]])
+
+    if include_family_theta and family.n_theta > 0:
+        # Family-generic θ block (gam.fit4.r:744 in 2·V_R units):
+        #   ∂(2V_R)/∂θ_j = (Σᵢ Dthᵢⱼ)/(φγ) − 2·lsth1_j/γ
+        #                  + ∂log|H+S|/∂θ_j
+        # The Dp piece is the envelope theorem at PIRLS-converged β̂
+        # (∂(D+β'Sβ)/∂β = 0 kills the β-coupled chain); lsth1 comes
+        # from the family's extended ls; the log|H+S| piece is the
+        # Dd-based dW/dθ trace (direct ½·Deta2th + indirect via
+        # ∂β̂/∂θ). For tw this equals the old dD_dp/dls_dp/dp_dtheta
+        # chain exactly (tw.Dd's D*th already carry dp/dθ).
+        nt = family.n_theta
+        theta = family.get_theta()
+        dd1 = _dDeta(fit, 1, family=family, y=y, wt=wt)
+        Dth = np.asarray(dd1["Dth"], dtype=float)
+        if Dth.ndim == 1:
+            Dth = Dth[:, None]
+        dDp_dth = Dth.sum(axis=0)                       # (nt,)
+        ls_ext = family.ls_extended(y, wt, theta=theta,
+                                    scale=phi)
+        lsth1 = np.asarray(ls_ext["lsth1"], dtype=float).reshape(-1)[:nt]
+        dlogH_dth = _dlog_det_H_dtheta(fit, dd1=dd1, X=X, family=family, y=y, wt=wt, family_mgcv_extended=family_mgcv_extended)
+        if use_ml_proj:
+            # Projected-Hessian correction ∂log|M|/∂θ_j
+            # (M = U_n'A⁻¹U_n) — the penalty carries no θ, so only
+            # the ∂W/∂θ piece contributes:
+            #   ∂log|M|/∂θ_j = −Σ_i (∂W/∂θ_j)_i·q_i,
+            #   q_i = (XB)_i'M⁻¹(XB)_i.
+            _, M_inv, B = _ml_logdet_adj(fit, Mp)
+            if M_inv is not None:
+                Y = X @ B
+                q = np.einsum("ij,ij->i", Y, Y @ M_inv)
+                dW_dth = _dW_dtheta_total(fit, dd1=dd1, X=X, family=family, y=y, wt=wt, family_mgcv_extended=family_mgcv_extended)  # (n, nt)
+                dlogH_dth = dlogH_dth - dW_dth.T @ q
+        d_theta = (dDp_dth / (phi * gamma)
+                   - 2.0 * lsth1 / gamma
+                   + dlogH_dth)
+        out = np.concatenate([out, d_theta])
+
+    return out
+
+def _reml_hessian(rho, log_phi=0.0, fit=None, include_log_phi=False, include_family_theta=False, *, X, gamma, slots, wt, y, family, p, pearson_scale_criterion, use_ml_proj, penalty_rank, family_mgcv_extended, Mp, UrS, reparam_cache, dw_deta, d2w_deta2):
+    """Analytical Hessian of `_reml` (2·V_R units).
+
+    Returns ((n_sp+1) × (n_sp+1)) when ``include_log_phi=True``, else
+    (n_sp × n_sp). With ``include_family_theta``, the Hessian is
+    further augmented by ``family.n_theta`` rows/columns computed
+    **analytically** — the family-θ rows of mgcv's REML2
+    (``gam.fit4.r:748``: ``REML2 = ((D2+bSb2)/(2φ) − ls2)/γ + ldet2/2``
+    over the joint (θ,ρ) space, with the log φ row from
+    ``gam.fit4.r:756-762``). ``D2`` (the deviance Hessian, ``gdi.c``
+    ``gdi2``:2145-2166), ``bSb2``/``P2`` (the penalty Hessian, ``get_bSb``
+    gdi.c:159-188) and ``ldet2`` (the ``log|H|`` Hessian, ``get_ddetXWXpS``
+    gdi.c:911-940) are assembled from the per-obs ``family.dDeta(level=2)``
+    tables and the IFT β-derivatives (:meth:`_d2beta_theta`). hea works in
+    2·V_R units, so ``hea_H = (D2+bSb2)/(φγ) − 2·ls2/γ + ldet2``. Pinned to
+    mgcv's analytic REML2 to ~1e-13.
+
+    Wood 2011 §4 for non-Gaussian, with Newton-form W:
+
+      ∂²(2·V_R)/∂ρ_l∂ρ_k = (1/φ)·∂²Dp/∂ρ_l∂ρ_k
+                          + ∂²log|H|/∂ρ_l∂ρ_k
+                          − ∂²log|S|+/∂ρ_l∂ρ_k
+
+    Pieces:
+
+      ∂²Dp/∂ρ_l∂ρ_k    = δ_lk·g_k − 2·λ_l·λ_k·β̂' S_l A⁻¹ S_k β̂   (Gaussian form)
+
+      ∂²log|S|+/∂ρ_l∂ρ_k = δ_lk·λ_k·tr(S⁺ S_k)
+                          − λ_l·λ_k·tr(S⁺ S_l S⁺ S_k)         (Gaussian form)
+
+      ∂²log|H|/∂ρ_l∂ρ_k = −tr(H⁻¹·∂H/∂ρ_l·H⁻¹·∂H/∂ρ_k)
+                          + tr(H⁻¹·∂²H/∂ρ_l∂ρ_k)
+
+    with ∂H/∂ρ_l = X' diag(h'·v_l) X + λ_l S_l (v_l := X·dβ_l) and
+
+      ∂²H/∂ρ_l∂ρ_k = X' diag(h''·v_l·v_k + h'·X·d²β_lk) X
+                     + δ_lk·λ_l·S_l
+
+    Cross-derivatives wrt log φ:
+
+      ∂²(2·V_R)/∂ρ_k∂log φ = −g_k / φ
+      ∂²(2·V_R)/∂log φ²    = Dp/φ − 2·ls'_hea_2
+
+    where ``ls'_hea_2 = family.ls(y, wt, φ)[2]`` (chain-ruled to log φ).
+
+    Under ``method="ML"`` the log|H| log-det becomes the projected form
+    log|U_rᵀ(H+S)U_r|; the additional ∂²log|M_proj| Hessian correction
+    (with M_proj = U_nᵀA⁻¹U_n) is added in-loop. Mirrors the gradient
+    correction in ``_reml_grad`` and mgcv's ``MLpenalty1`` →
+    ``get_ddetXWXpS`` in gdi.c, which fills ``det2`` on the post-drop K,P.
+
+    For Gaussian-identity (h' ≡ h'' ≡ 0) only the SS Wood block and the
+    Gaussian Dp/log|S|+ pieces survive, so the result equals 2·`_reml_hessian`
+    in the unprofiled REML formulation (the existing `_reml_hessian`
+    operates on the φ-profiled Gaussian path and returns V_R-scale).
+    """
+    n_sp = len(slots)
+    phi = float(np.exp(log_phi))
+    size = n_sp + (1 if include_log_phi else 0)
+    if not (np.isfinite(phi) and phi > 0):
+        return np.full((size, size), 1e15)
+    gamma = 1.0 if pearson_scale_criterion else gamma
+    if n_sp == 0:
+        H = np.zeros((size, size))
+        if include_log_phi:
+            Dp0 = fit.dev + fit.pen
+            ls = np.asarray(family.ls(y,
+                                           wt, phi))
+            H[0, 0] = (Dp0 / phi - 2.0 * float(ls[2])) / gamma
+        return H
+
+    sp = np.exp(rho)
+    # ∂²log|S|+ via gam.reparam when available (stable under extreme
+    # λ ratios); the S⁺-based fallback otherwise.
+    rp = _reparam_eval(UrS, reparam_cache, rho)
+    S_pinv = None if rp is not None else _S_pinv(fit.S_full, penalty_rank)
+
+    # Common precomputations. The n × n hat matrix ``P = X H⁻¹ X'``
+    # and its elementwise square ``Rsq = P*P`` are NOT formed — at
+    # large n that's tens of GB. We mirror mgcv (gdi.c:952
+    # ``get_trA2``) and operate on ``K`` (n × p) with ``K K' = P``;
+    # the bilinear form ``hv_i' Rsq hv_j`` (the only Rsq consumer)
+    # equals ``Σ_{p,q} G_i[p,q]·G_j[p,q]`` with ``G_k = K' diag(hv_k) K``.
+    # ``M = H⁻¹ X'`` is also gated — it's only needed to feed
+    # ``diag_MtSM`` (the WS / SW trace pieces), and those vanish for
+    # families with ``dw/dη ≡ 0``. See the ``needs_w`` branch below.
+
+    db_drho = _dbeta_drho(fit, rho, slots, p)                   # (p, n_sp)
+    # dw_deta / d2w_deta2 supplied by the shim via the polymorphic
+    # self._dw_deta / self._d2w_deta2 (bam overrides to length-p zeros on its
+    # reduced Gaussian working model; gam computes the real length-n derivs).
+    d2b = _d2beta_drho_drho(fit, rho, db_drho=db_drho,
+                                 dw_deta=dw_deta, slots=slots, p=p, X=X, y=y, family_mgcv_extended=family_mgcv_extended, family=family, wt=wt)          # (p, n_sp, n_sp)
+    v = X @ db_drho                                        # (n, n_sp)
+    hv = dw_deta[:, None] * v                              # h'·v_l, shape (n, n_sp)
+
+    # Build K (n × p) and M (p × n) only when an n-side trace
+    # actually needs them. For families with ``dw/dη ≡ 0``
+    # (Gaussian-identity, Gamma+log, any canonical link satisfying
+    # B(μ) = V'/V + g''·μ_η = 0 and α'/α = 0) all of ``hv``,
+    # ``d2w_deta2`` are zero, the K-based traces collapse, and the
+    # ``diag_MtSM[k]`` consumers (tr_WS / tr_SW) are hv-weighted and
+    # vanish — so neither K nor M is needed. Both are O(p²·n) to
+    # build, which dominates at large n.
+    needs_w = bool(np.any(hv)) or bool(np.any(d2w_deta2))
+    if needs_w:
+        M = cho_solve((fit.A_chol, fit.A_chol_lower), X.T)   # (p, n) = H⁻¹ X'
+        K = _make_K(fit.A_chol, fit.A_chol_lower, X)       # (n, p)
+        d_diag = np.einsum("ij,ij->i", K, K)                  # (n,) diag(KK') = diag(P)
+        # G_k = K' diag(hv_k) K, p × p, n_sp of them. Symmetric.
+        G_arr = np.empty((n_sp, p, p))
+        for k in range(n_sp):
+            Khv = K * hv[:, k:k+1]                            # (n, p)
+            Gk = K.T @ Khv                                    # (p, p)
+            G_arr[k] = 0.5 * (Gk + Gk.T)                      # enforce symmetry
+    else:
+        M = None
+        d_diag = None
+        G_arr = None
+
+    # Per-slot blocks reused for ∂²Dp / log|S|+ / log|H| Gaussian-style traces.
+    AinvS_block: list[np.ndarray] = []
+    SpinvS_block: list[np.ndarray] = []
+    Sbeta_full = np.zeros((n_sp, p))
+    AinvSbeta = np.empty((n_sp, p))
+    diag_MtSM: list[np.ndarray] | None = (
+        [] if needs_w else None
+    )  # diag(M' S_k_full M) = (n,) per k; only needed for tr_WS / tr_SW.
+    g = np.zeros(n_sp)
+    tr_AinvS = np.zeros(n_sp)
+    tr_SpinvS = np.zeros(n_sp)
+    A_inv = cho_solve((fit.A_chol, fit.A_chol_lower), np.eye(p))
+    for k, slot in enumerate(slots):
+        a, b = slot.col_start, slot.col_end
+        beta_k = fit.beta[a:b]
+        Sb = slot.S @ beta_k
+        Sbeta_full[k, a:b] = Sb
+        AinvSbeta[k] = cho_solve(
+            (fit.A_chol, fit.A_chol_lower), Sbeta_full[k]
+        )
+        g[k] = sp[k] * float(beta_k @ Sb)
+        AinvS_block.append(A_inv[:, a:b] @ slot.S)
+        tr_AinvS[k] = float(np.einsum("ij,ji->", A_inv[a:b, a:b], slot.S))
+        if S_pinv is not None:
+            SpinvS_block.append(S_pinv[:, a:b] @ slot.S)
+            tr_SpinvS[k] = float(np.einsum(
+                "ij,ji->", S_pinv[a:b, a:b], slot.S
+            ))
+        if diag_MtSM is not None:
+            # diag(M' S_k_full M)_i = M[a:b, i]' · S_k · M[a:b, i]
+            SkM = slot.S @ M[a:b, :]                       # (m_k, n)
+            diag_MtSM.append(np.einsum("ji,ji->i", M[a:b, :], SkM))
+
+    # ML range-projection correction. Under method="ML" the Hessian
+    # log-det is log|U_rᵀ(H+S)U_r|, which by the block-determinant
+    # identity equals log|H+S| + log|M_proj| with M_proj = U_nᵀ A⁻¹ U_n
+    # (B_proj = A⁻¹ U_n; see ``_ml_logdet_adj``). The Hessian therefore
+    # gains the ∂²log|M_proj|/∂ρ_l∂ρ_k term:
+    #
+    #     ∂²log|M_proj|/∂ρ_l∂ρ_k = −tr(M_proj⁻¹·∂M_proj_l·M_proj⁻¹·∂M_proj_k)
+    #                             + tr(M_proj⁻¹·∂²M_proj_lk)
+    #
+    # with ∂M_proj_k = −B_projᵀ·(∂A/∂ρ_k)·B_proj and
+    #   ∂²M_proj_lk = B_projᵀ·(∂A/∂ρ_l)·A⁻¹·(∂A/∂ρ_k)·B_proj
+    #              + B_projᵀ·(∂A/∂ρ_k)·A⁻¹·(∂A/∂ρ_l)·B_proj
+    #              − B_projᵀ·(∂²A/∂ρ_l∂ρ_k)·B_proj
+    # ∂A/∂ρ_k = X'·diag(h'·v_k)·X + λ_k·S_k_full and ∂²A/∂ρ_l∂ρ_k as in
+    # the comment above. Mirrors mgcv's ``MLpenalty1`` → ``get_ddetXWXpS``
+    # in gdi.c, which fills ``det2`` from the projected K, P.
+    ml_active = False
+    if use_ml_proj:
+        _, M_proj_inv, B_proj = _ml_logdet_adj(fit, Mp)
+        if M_proj_inv is not None:
+            ml_active = True
+            Mp_dim = M_proj_inv.shape[0]
+            Y_proj = X @ B_proj                                 # (n, Mp)
+            Y_proj_Minv = Y_proj @ M_proj_inv                   # (n, Mp)
+            q_vec = np.einsum("ij,ij->i", Y_proj, Y_proj_Minv)  # (n,)
+            Yk_arr = np.zeros((n_sp, p, Mp_dim))
+            Zk_arr = np.zeros((n_sp, p, Mp_dim))
+            Pk_M_arr = np.zeros(n_sp)
+            Minv_dMk_arr = np.zeros((n_sp, Mp_dim, Mp_dim))
+            for kk, slot_kk in enumerate(slots):
+                a_k, b_k = slot_kk.col_start, slot_kk.col_end
+                Yk_ = X.T @ (hv[:, kk:kk + 1] * Y_proj)
+                Yk_[a_k:b_k, :] += sp[kk] * (slot_kk.S @ B_proj[a_k:b_k, :])
+                Yk_arr[kk] = Yk_
+                Zk_arr[kk] = cho_solve(
+                    (fit.A_chol, fit.A_chol_lower), Yk_
+                )
+                Minv_dMk_arr[kk] = M_proj_inv @ (-B_proj.T @ Yk_)
+                Bk_proj = B_proj[a_k:b_k, :]
+                Pk_M_arr[kk] = float(np.einsum(
+                    "ij,ji->", M_proj_inv, Bk_proj.T @ slot_kk.S @ Bk_proj
+                ))
+
+    # Hessian assembly — symmetric loop.
+    H2 = np.zeros((n_sp, n_sp))
+    for i in range(n_sp):
+        a_i, b_i = slots[i].col_start, slots[i].col_end
+        for j in range(i, n_sp):
+            a_j, b_j = slots[j].col_start, slots[j].col_end
+
+            # ∂²Dp/∂ρ_i∂ρ_j: same family-agnostic form as Gaussian.
+            bSiAinvSj_b = float(Sbeta_full[i] @ AinvSbeta[j])
+            d2Dp = -2.0 * sp[i] * sp[j] * bSiAinvSj_b
+
+            # tr(H⁻¹·∂H/∂ρ_i·H⁻¹·∂H/∂ρ_j) — four pieces.
+            # WW: (h'·v_i)' · Rsq · (h'·v_j) where Rsq = P⊙P, P = KK'.
+            # Identity: hv_i' (KK' ⊙ KK') hv_j = Σ_{p,q} G_i[p,q]·G_j[p,q]
+            # with G_k = K' diag(hv_k) K (Wood 2008 §4 + mgcv gdi.c:952).
+            # WS / SW: tr(H⁻¹·A_i·H⁻¹·S_j) = (h'·v_i)' · diag_MtSM[j].
+            # All three are zero when ``hv ≡ 0`` (Gaussian-identity etc.).
+            if G_arr is not None:
+                tr_WW = float(np.sum(G_arr[i] * G_arr[j]))
+                tr_WS = float(hv[:, i] @ diag_MtSM[j])
+                tr_SW = float(hv[:, j] @ diag_MtSM[i])
+            else:
+                tr_WW = 0.0
+                tr_WS = 0.0
+                tr_SW = 0.0
+            # SS: tr(H⁻¹·S_i·H⁻¹·S_j) — Gaussian block trick.
+            tr_SS = float(np.einsum(
+                "ab,ba->",
+                AinvS_block[i][a_j:b_j, :],
+                AinvS_block[j][a_i:b_i, :],
+            ))
+            tr_HinvHpHinvHp = (
+                tr_WW
+                + sp[j] * tr_WS
+                + sp[i] * tr_SW
+                + sp[i] * sp[j] * tr_SS
+            )
+
+            # tr(H⁻¹·∂²H/∂ρ_i∂ρ_j).
+            #   X'·diag(h''·v_i·v_j)·X contribution: Σ d_i·h''·v_i·v_j.
+            #   X'·diag(h'·X·d²β_ij)·X        contribution: Σ d_i·h'·(X·d²β_ij).
+            # Both are weighted by ``d_diag = diag(K K')``; if K wasn't
+            # built (W-derivs identically zero) both summands vanish.
+            Xd2b = X @ d2b[:, i, j]                       # (n,)
+            if d_diag is not None:
+                tr_d2H = (
+                    float(np.sum(d_diag * d2w_deta2 * v[:, i] * v[:, j]))
+                    + float(np.sum(d_diag * dw_deta * Xd2b))
+                )
+            else:
+                tr_d2H = 0.0
+            # δ_lk·λ_l·tr(H⁻¹·S_l) is the off-square diagonal term.
+            d2logH_ij = -tr_HinvHpHinvHp + tr_d2H
+
+            if ml_active:
+                # ∂²log|M_proj|/∂ρ_i∂ρ_j = T1 + T2_mixed − T2_d2A:
+                #   T1       = −tr(M_proj⁻¹·∂M_proj_i·M_proj⁻¹·∂M_proj_j)
+                #   T2_mixed = 2·tr(M_proj⁻¹·Y_iᵀ·Z_j)
+                #   T2_d2A   = tr(M_proj⁻¹·B_projᵀ·(∂²A_ij)·B_proj)
+                # T2_mixed uses Y_iᵀ Z_j = Y_iᵀ A⁻¹ Y_j (symmetric in i,j up
+                # to transpose of an inside Mp×Mp block; M_proj⁻¹ symmetric
+                # → both orders give the same trace, so the factor of 2
+                # absorbs the symmetric pair).
+                T1_ml = -float(np.einsum(
+                    "ab,ba->", Minv_dMk_arr[i], Minv_dMk_arr[j]
+                ))
+                T2_mixed = 2.0 * float(np.einsum(
+                    "ab,ba->", M_proj_inv, Yk_arr[i].T @ Zk_arr[j]
+                ))
+                D_ij_diag = (
+                    d2w_deta2 * v[:, i] * v[:, j]
+                    + dw_deta * Xd2b
+                )
+                T2_d2A = float(np.sum(D_ij_diag * q_vec))
+                if i == j:
+                    # δ_ij·λ_i·tr(M_proj⁻¹·B_projᵀ·S_i_full·B_proj) from
+                    # ∂²A's penalty piece.
+                    T2_d2A += sp[i] * Pk_M_arr[i]
+                d2logH_ij += T1_ml + T2_mixed - T2_d2A
+
+            # ∂²log|S|+/∂ρ_i∂ρ_j: gam.reparam's det2 carries the full
+            # matrix (off-diagonal −λλ·tr(S⁻¹S_iS⁻¹S_j), diagonal
+            # +det1); the S⁺ fallback assembles the same pieces.
+            if rp is not None:
+                cross_2VR = (d2Dp / (phi * gamma) + d2logH_ij
+                             - rp["det2"][i, j])
+                if i == j:
+                    H2[i, i] = (
+                        cross_2VR
+                        + g[i] / (phi * gamma)
+                        + sp[i] * tr_AinvS[i]
+                    )
+                else:
+                    H2[i, j] = H2[j, i] = cross_2VR
+            else:
+                tr_SpSiSpSj = float(np.einsum(
+                    "ab,ba->",
+                    SpinvS_block[i][a_j:b_j, :],
+                    SpinvS_block[j][a_i:b_i, :],
+                ))
+                d2logS_ij = -sp[i] * sp[j] * tr_SpSiSpSj
+
+                cross_2VR = d2Dp / (phi * gamma) + d2logH_ij - d2logS_ij
+                if i == j:
+                    # Diagonal also picks up the δ_lk·g_k from ∂²Dp,
+                    # δ_lk·λ_l·tr(H⁻¹·S_l) from ∂²H, and
+                    # δ_lk·λ_k·tr(S⁺ S_k) from ∂²log|S|+. Only the
+                    # ∂²Dp piece is γ-scaled.
+                    H2[i, i] = (
+                        cross_2VR
+                        + g[i] / (phi * gamma)
+                        + sp[i] * tr_AinvS[i]
+                        - sp[i] * tr_SpinvS[i]
+                    )
+                else:
+                    H2[i, j] = H2[j, i] = cross_2VR
+
+    if not include_log_phi and not include_family_theta:
+        return H2
+
+    if include_log_phi:
+        # Augment with log φ row/col. Cross / log φ² come from the
+        # data-fit term (Dp/φ − 2·ls0), so they scale by 1/γ.
+        H_aug = np.zeros((n_sp + 1, n_sp + 1))
+        H_aug[:n_sp, :n_sp] = H2
+        for k in range(n_sp):
+            cross = -g[k] / (phi * gamma)
+            H_aug[k, n_sp] = cross
+            H_aug[n_sp, k] = cross
+        Dp = fit.dev + fit.pen
+        ls = np.asarray(family.ls(y, wt, phi))
+        H_aug[n_sp, n_sp] = (Dp / phi - 2.0 * float(ls[2])) / gamma
+    else:
+        # Scale-known extended family (scat): θ-vector is (ρ, θ_fam)
+        # with no log φ slot — matches mgcv's gam.fit4 layout where
+        # the scale row only exists when scale < 0.
+        H_aug = H2
+
+    if not include_family_theta or family.n_theta == 0:
+        return H_aug
+
+    # Family-θ rows/cols — analytic port of mgcv's gam.fit4.r:748 REML2
+    # θ-rows: REML2 = ((D2+bSb2)/(2φ) − ls2)/γ + ldet2/2 over the joint
+    # (θ,ρ) space, with the log φ row/col bolted on (gam.fit4.r:756-762).
+    # D2 (gdi.c:2145-2166), bSb2/P2 (get_bSb gdi.c:159-188) and ldet2
+    # (get_ddetXWXpS gdi.c:911-940) are computed from the per-obs Dd
+    # tables + the IFT β-derivatives. hea works in 2·V_R units, so
+    # hea_H = (D2+bSb2)/(φγ) − 2·ls2/γ + ldet2. Replaces the former
+    # central-difference of _reml_grad (a non-mechanical FD shortcut).
+    n_extra = family.n_theta
+    base_size = n_sp + (1 if include_log_phi else 0)
+    new_size = base_size + n_extra
+    H_full = np.zeros((new_size, new_size))
+    H_full[:base_size, :base_size] = H_aug
+    nt = n_extra
+
+    # Per-obs deviance derivatives (η-space; mgcv Det*/Dth* names) and the
+    # θ first/second β-derivatives via the IFT.
+    dd2 = _dDeta(fit, 2, family=family, y=y, wt=wt)
+    Deta = np.asarray(dd2["Deta"], dtype=float)
+    Deta2 = np.asarray(dd2["Deta2"], dtype=float)
+    Deta3 = np.asarray(dd2["Deta3"], dtype=float)
+    Deta4 = np.asarray(dd2["Deta4"], dtype=float)
+    Detath = _as_n_nt(dd2["Detath"], nt)          # (n, nt)
+    Deta3th = _as_n_nt(dd2["Deta3th"], nt)        # (n, nt)
+    Dth = _as_n_nt(dd2["Dth"], nt)                # (n, nt)
+    Dth2 = _theta2_arr(dd2["Dth2"], nt, X.shape[0])       # (n,nt,nt)
+    Deta2th2 = _theta2_arr(dd2["Deta2th2"], nt, X.shape[0])
+
+    db_dtheta = _db_dtheta_fam(fit, X=X, family=family, y=y, wt=wt)               # (p, nt)
+    eta1_th = X @ db_dtheta                             # (n, nt) η₁_θ
+    dW_dth = _dW_dtheta_total(fit, X=X, family=family, y=y, wt=wt, family_mgcv_extended=family_mgcv_extended)                # (n, nt) ∂w/∂θ
+    d2b_thr, d2b_thth = _d2beta_theta(
+        fit, rho, db_drho=db_drho, db_dtheta=db_dtheta, dd2=dd2, X=X, slots=slots, family=family, p=p)
+    eta2_thr = np.einsum("ij,jab->iab", X, d2b_thr)    # (n, nt, n_sp)
+    eta2_thth = np.einsum("ij,jac->iac", X, d2b_thth)  # (n, nt, nt)
+
+    # Penalty pieces (get_bSb): Sβ_total and the embedded S·v.
+    S_beta = (sp[:, None] * Sbeta_full).sum(axis=0)    # Σ sp_k S_k β
+
+    def _S_total_dot(vec_full: np.ndarray) -> np.ndarray:
+        out = np.zeros(p)
+        for kk, slot_kk in enumerate(slots):
+            aa, bb = slot_kk.col_start, slot_kk.col_end
+            out[aa:bb] += sp[kk] * (slot_kk.S @ vec_full[aa:bb])
+        return out
+
+    # ldet2 traces reuse the ρρ K/M machinery; build any pieces the ρρ
+    # pass skipped (needs_w False ⇒ ∂w/∂ρ≡0 so G_arr≡0, but the θ rows
+    # still need diag(KK'), M and diag(M'S_kM)).
+    if K is None:
+        K = _make_K(fit.A_chol, fit.A_chol_lower, X)
+        d_diag = np.einsum("ij,ij->i", K, K)
+    if M is None:
+        M = cho_solve((fit.A_chol, fit.A_chol_lower), X.T)
+    if G_arr is None:
+        G_arr = np.zeros((n_sp, p, p))
+    if diag_MtSM is None:
+        diag_MtSM = []
+        for kk, slot_kk in enumerate(slots):
+            aa, bb = slot_kk.col_start, slot_kk.col_end
+            SkM = slot_kk.S @ M[aa:bb, :]
+            diag_MtSM.append(np.einsum("ji,ji->i", M[aa:bb, :], SkM))
+    # Gθ[a] = K' diag(∂w/∂θ_a) K — the θ analogue of G_arr.
+    Gth = np.empty((nt, p, p))
+    for a in range(nt):
+        G_a = K.T @ (K * dW_dth[:, a:a + 1])
+        Gth[a] = 0.5 * (G_a + G_a.T)
+
+    # ML range-projection θ-corrections (mirrors the ρρ ml block, with
+    # ∂A/∂θ_a = X'diag(∂w/∂θ_a)X — θ carries no penalty so the S term
+    # drops). Only built under method="ML".
+    if ml_active:
+        Mp_dim = M_proj_inv.shape[0]
+        Yth_arr = np.zeros((nt, p, Mp_dim))
+        Zth_arr = np.zeros((nt, p, Mp_dim))
+        Minv_dMth_arr = np.zeros((nt, Mp_dim, Mp_dim))
+        for a in range(nt):
+            Yth = X.T @ (dW_dth[:, a:a + 1] * Y_proj)
+            Yth_arr[a] = Yth
+            Zth_arr[a] = cho_solve((fit.A_chol, fit.A_chol_lower), Yth)
+            Minv_dMth_arr[a] = M_proj_inv @ (-B_proj.T @ Yth)
+
+    # Saturated-likelihood 2nd derivatives (θ,θ) and (θ,log φ): ls2.
+    ls_ext = family.ls_extended(y, wt,
+                                theta=family.get_theta(), scale=phi)
+    lsth2 = np.asarray(ls_ext["lsth2"], dtype=float)   # (nt+1, nt+1)
+
+    for a in range(nt):
+        col_idx = base_size + a
+        # θ_a × ρ_i rows.
+        for i in range(n_sp):
+            d2_dev = float(np.sum(
+                Deta2 * eta1_th[:, a] * v[:, i]
+                + Deta * eta2_thr[:, a, i]
+                + Detath[:, a] * v[:, i]))
+            d2_pen = (
+                2.0 * float(d2b_thr[:, a, i] @ S_beta)
+                + 2.0 * float(db_drho[:, i] @ _S_total_dot(db_dtheta[:, a]))
+                + 2.0 * float(db_dtheta[:, a] @ (sp[i] * Sbeta_full[i])))
+            d2w = 0.5 * (Deta4 * eta1_th[:, a] * v[:, i]
+                         + Deta3 * eta2_thr[:, a, i]
+                         + Deta3th[:, a] * v[:, i])
+            d2logH = (
+                -(float(np.sum(Gth[a] * G_arr[i]))
+                  + sp[i] * float(dW_dth[:, a] @ diag_MtSM[i]))
+                + float(np.sum(d_diag * d2w)))
+            if ml_active:
+                T1 = -float(np.einsum(
+                    "ab,ba->", Minv_dMth_arr[a], Minv_dMk_arr[i]))
+                T2 = 2.0 * float(np.einsum(
+                    "ab,ba->", M_proj_inv, Yth_arr[a].T @ Zk_arr[i]))
+                d2logH += T1 + T2 - float(np.sum(d2w * q_vec))
+            val = (d2_dev + d2_pen) / (phi * gamma) + d2logH
+            H_full[i, col_idx] = H_full[col_idx, i] = val
+        # θ_a × log φ row (gam.fit4.r:756-757, 2·V_R units).
+        if include_log_phi:
+            val = (-float(np.sum(Dth[:, a])) / (phi * gamma)
+                   - 2.0 * lsth2[a, nt] / gamma)
+            H_full[n_sp, col_idx] = H_full[col_idx, n_sp] = val
+        # θ_a × θ_c block.
+        for c in range(a, nt):
+            d2_dev = float(np.sum(
+                Deta2 * eta1_th[:, a] * eta1_th[:, c]
+                + Deta * eta2_thth[:, a, c]
+                + Dth2[:, a, c]
+                + Detath[:, a] * eta1_th[:, c]
+                + Detath[:, c] * eta1_th[:, a]))
+            # ∂²(β'Sβ)/∂θ_a∂θ_c = 2·(∂²β)'Sβ + 2·(∂β/∂θ_c)'S(∂β/∂θ_a)
+            # (get_bSb gdi.c:167-172). NO diagonal `+bSb1` term for θ:
+            # bSb1[θ]=0 during get_bSb's Hessian loop (gdi.c:156; the
+            # `2·b1'Sb` augmentation at gdi.c:194 runs *after*), and S
+            # carries no θ-dependence so there is no penalty-curvature term.
+            d2_pen = (
+                2.0 * float(d2b_thth[:, a, c] @ S_beta)
+                + 2.0 * float(db_dtheta[:, c]
+                              @ _S_total_dot(db_dtheta[:, a])))
+            d2w = 0.5 * (Deta4 * eta1_th[:, a] * eta1_th[:, c]
+                         + Deta3 * eta2_thth[:, a, c]
+                         + Deta3th[:, a] * eta1_th[:, c]
+                         + Deta3th[:, c] * eta1_th[:, a]
+                         + Deta2th2[:, a, c])
+            d2logH = (-float(np.sum(Gth[a] * Gth[c]))
+                      + float(np.sum(d_diag * d2w)))
+            if ml_active:
+                T1 = -float(np.einsum(
+                    "ab,ba->", Minv_dMth_arr[a], Minv_dMth_arr[c]))
+                T2 = 2.0 * float(np.einsum(
+                    "ab,ba->", M_proj_inv, Yth_arr[a].T @ Zth_arr[c]))
+                d2logH += T1 + T2 - float(np.sum(d2w * q_vec))
+            val = ((d2_dev + d2_pen) / (phi * gamma)
+                   - 2.0 * lsth2[a, c] / gamma + d2logH)
+            ci = base_size + c
+            H_full[col_idx, ci] = H_full[ci, col_idx] = val
+    return H_full
+
+
+def _preml_grad(rho, fit, *, slots, Mp, n, y, wt, family, reml_ind, X, p, gamma, pearson_scale_criterion, use_ml_proj, family_mgcv_extended, penalty_rank, UrS, reparam_cache, dw_deta):
+    """Gradient of the P-REML/P-ML criterion in hea's 2·V units
+    (length n_sp), mgcv gam.fit3.r:656 (×2).
+
+    φ = P/(n−Mp) is the Pearson-Laplace scale, a function of ρ, so the
+    criterion's ρ-gradient is the plain-(RE)ML ρ-block (reused from
+    `_reml_grad`, which runs at γ≡1 under `_pearson_scale`) minus the
+    φ(ρ) chain term:
+
+        2V1_k = [Dp1_k/φ + ∂log|H|_k − ∂log|S|₊_k]        (= `_reml_grad`)
+                − φ1_k·(Dp/φ² + Mp/φ·remlInd + 2·ls'(φ))
+
+    with φ1_k = P1_k/(n−Mp), ls'(φ) = family.ls[1]/φ (hea's ls is the
+    d/d(logφ) value, so dividing by φ recovers mgcv's dls/dφ = ls[2]).
+    The ∂log|H| block carries the ML range-projection for P-ML via the
+    `_use_ml_proj` predicate inside `_reml_grad`.
+    """
+    n_sp = len(slots)
+    if n_sp == 0:
+        return np.zeros(0)
+    phi = _phi_pearson(fit, Mp=Mp, n=n, family=family, wt=wt, y=y, slots=slots, X=X, p=p)
+    log_phi = float(np.log(max(phi, 1e-300)))
+    base = _reml_grad(rho, log_phi, fit=fit, include_log_phi=False, Mp=Mp, X=X, gamma=gamma, slots=slots, wt=wt, y=y, family=family, pearson_scale_criterion=pearson_scale_criterion, reml_ind=reml_ind, use_ml_proj=use_ml_proj, p=p, family_mgcv_extended=family_mgcv_extended, penalty_rank=penalty_rank, UrS=UrS, reparam_cache=reparam_cache, dw_deta=dw_deta)
+    Dp = float(fit.dev + fit.pen)
+    Mp = float(Mp)
+    denom = float(n - Mp)
+    _, P1 = _pearson_and_deriv(rho, fit, deriv=True, family=family, wt=wt, y=y, slots=slots, X=X, p=p)
+    phi1 = (P1 / denom) if denom > 0 else P1
+    ls1 = float(family.ls(y, wt, phi)[1])
+    ls_dphi = ls1 / phi                       # mgcv's ls[2] = dls/dφ
+    corr = phi1 * (Dp / (phi * phi) + Mp / phi * reml_ind + 2.0 * ls_dphi)
+    return base - corr
+
+def _preml_hessian(rho, fit=None, *, slots, Mp, n, family, wt, y, X, p, gamma, pearson_scale_criterion, use_ml_proj, penalty_rank, family_mgcv_extended, UrS, reparam_cache, reml_ind, dw_deta, d2w_deta2):
+    """Analytic P-REML / P-ML Hessian ``REML2`` (n_sp × n_sp, mgcv's
+    V-scale), equal to mgcv gam.fit3.r:658-664.
+
+    The P-REML/P-ML score is the Laplace (RE)ML score with the
+    Pearson-Laplace scale φ_P(ρ) = P(ρ)/(n−Mp) plugged in for the scale
+    (mgcv.r coerces only the *known*-scale case to REML; for unknown
+    scale this Pearson plug-in is what distinguishes P-REML from REML).
+    So V_P(ρ) = V_REML(ρ, log φ_P(ρ)) and the ρ-Hessian is the chain
+    rule over hea's analytic `_reml_hessian` (which supplies the
+    (ρ,ρ), (ρ,log φ) and (log φ,log φ) blocks and the log φ gradient):
+
+        ∂²V_P/∂ρ_i∂ρ_j = Hρρ[i,j] + Hρφ[i]·u_j + Hρφ[j]·u_i
+                        + Hφφ·u_i·u_j + g_φ·u_ij
+
+    with u = log φ_P, u_i = ∂log P/∂ρ_i = P1_i/P,
+    u_ij = ∂²log P/∂ρ_i∂ρ_j = P2_ij/P − P1_i·P1_j/P². hea's
+    `_reml_hessian`/`_reml_grad` are in 2·V units (and run at γ≡1 for
+    the Pearson criteria), so the assembled 2·V Hessian is halved to
+    mgcv's V-scale. Replaces the former FD Hessian on `_preml_grad`."""
+    n_sp = len(slots)
+    if n_sp == 0:
+        return np.zeros((0, 0))
+    phi = _phi_pearson(fit, Mp=Mp, n=n, family=family, wt=wt, y=y, slots=slots, X=X, p=p)
+    log_phi = float(np.log(max(phi, 1e-300)))
+    # 2·V REML grad/Hessian augmented with the log φ row/col.
+    H_full = _reml_hessian(rho, log_phi, fit=fit,
+                                include_log_phi=True, X=X, gamma=gamma, slots=slots, wt=wt, y=y, family=family, p=p, pearson_scale_criterion=pearson_scale_criterion, use_ml_proj=use_ml_proj, penalty_rank=penalty_rank, family_mgcv_extended=family_mgcv_extended, Mp=Mp, UrS=UrS, reparam_cache=reparam_cache, dw_deta=dw_deta, d2w_deta2=d2w_deta2)
+    g_full = _reml_grad(rho, log_phi, fit=fit, include_log_phi=True, Mp=Mp, X=X, gamma=gamma, slots=slots, wt=wt, y=y, family=family, pearson_scale_criterion=pearson_scale_criterion, reml_ind=reml_ind, use_ml_proj=use_ml_proj, p=p, family_mgcv_extended=family_mgcv_extended, penalty_rank=penalty_rank, UrS=UrS, reparam_cache=reparam_cache, dw_deta=dw_deta)
+    Hrr = H_full[:n_sp, :n_sp]
+    Hrf = H_full[:n_sp, n_sp]
+    Hff = float(H_full[n_sp, n_sp])
+    gf = float(g_full[n_sp])
+    # Pearson scale derivatives: u = log φ_P = log P − log(n−Mp).
+    P, P1 = _pearson_and_deriv(rho, fit, deriv=True, family=family, wt=wt, y=y, slots=slots, X=X, p=p)
+    P2 = _pearson_hess(fit, rho, X=X, slots=slots, wt=wt, y=y, family=family, p=p, family_mgcv_extended=family_mgcv_extended)
+    u1 = P1 / P                                       # ∂log φ_P/∂ρ
+    u2 = P2 / P - np.outer(P1, P1) / (P * P)          # ∂²log φ_P/∂ρ²
+    REML2_2V = (Hrr
+                + np.outer(Hrf, u1) + np.outer(u1, Hrf)
+                + Hff * np.outer(u1, u1)
+                + gf * u2)
+    return 0.5 * (REML2_2V + REML2_2V.T) / 2.0
+
+
 class gam:
     """Generalized additive model — mgcv's ``gam()``.
 
@@ -5490,150 +6197,12 @@ class gam:
         """Shim → free `_profile_log_phi_fixed_sp` (mgcv gdi1/gdi2 derivative block)."""
         return _profile_log_phi_fixed_sp(fit, log_phi0, self._Mp, self._gamma, self._wt, self._y_arr, self.family, self._reml_ind)
 
-    def _reml_grad(self, rho: np.ndarray, log_phi: float = 0.0,
-                           fit: "_FitState | None" = None,
-                           include_log_phi: bool = False,
-                           include_family_theta: bool = False) -> np.ndarray:
-        """Analytical gradient of `_reml` (2·V_R units).
-
-        Length depends on flags:
-          * n_sp                                  (defaults)
-          * n_sp + 1                              if ``include_log_phi``
-          * n_sp + n_lp + family.n_theta          if ``include_family_theta``,
-            with the family entries appended last; ``include_log_phi`` is
-            then required to be True for unknown-scale Tweedie/tw().
-
-        Wood 2011 §4 + mgcv gam.fit3.r:622, 630:
-
-            ∂(2·V_R)/∂ρ_k    = (∂Dp/∂ρ_k)/φ + ∂log|H|/∂ρ_k − ∂log|S|+/∂ρ_k
-            ∂(2·V_R)/∂log φ  = −Dp/φ − 2·ls'_hea − Mp
-
-        For each extra family parameter θ_f (only ``tw`` exercises this
-        today; θ_f ↦ Tweedie p via the sigmoid reparametrisation):
-
-            ∂(2·V_R)/∂θ_f =   (∂Dp/∂p · dp/dθ_f) / (φ·γ)
-                            − 2·(∂ls0/∂p · dp/dθ_f) / γ
-                            + ∂log|H+S|/∂p · dp/dθ_f
-
-        The Dp piece uses the envelope theorem at PIRLS-converged β̂; the
-        log|H+S| piece is fully analytical via :meth:`_dlog_det_H_dp_tw`
-        (direct ∂W/∂p|_β̂ + indirect via :meth:`_dbeta_dp_tw`); the ls0
-        piece comes from :meth:`Tweedie.dls_dp` using the Dunn-Smyth
-        ``j_psi_bar`` moment.
-
-        ls'_hea is the d/d(log φ) chain-rule output from `family.ls(y, wt, φ)[1]`
-        (hea convention, see family.py:338 docstring).
-        """
+    def _reml_grad(self, rho, log_phi=0.0, fit=None, include_log_phi=False, include_family_theta=False):
+        """Shim → free `_reml_grad`."""
         if fit is None:
             fit = self._fit_given_rho(rho)
-        n_sp = len(self._slots)
-        phi = float(np.exp(log_phi))
-        if not (np.isfinite(phi) and phi > 0):
-            size = n_sp + (1 if include_log_phi else 0)
-            return np.full(size, 1e15)
-
-        # γ≡1 for the Pearson-Laplace criteria (see `_reml`); `_preml_grad`
-        # calls this with include_log_phi=False and adds the φ(ρ) chain term.
-        gamma = 1.0 if self._pearson_scale_criterion else self._gamma
-        if n_sp == 0:
-            grad_rho = np.zeros(0)
-        else:
-            dDp = self._dDp_drho(fit, rho)
-            dlog_H = self._dlog_det_H_drho(fit, rho)
-            rp = self._reparam_at(rho)
-            dlog_S = (rp["det1"].copy() if rp is not None
-                      else self._dlog_det_S_drho(rho, S_full=fit.S_full))
-            # method="ML" uses the range-only Hessian log-det. With the
-            # block-determinant identity log|H_pp+S_pp| = log|H+S| + log|M|
-            # (M = U_nᵀ A⁻¹ U_n), the gradient picks up
-            #     ∂log|M|/∂ρ_k = −tr(M⁻¹ · B′(∂A/∂ρ_k)B)
-            # ∂A/∂ρ_k = X′·diag(∂w/∂ρ_k)·X + λ_k·S_k (the W-dep term is
-            # nonzero for non-canonical families like binomial), so the
-            # correction has two pieces. Mirrors mgcv's ``MLpenalty1`` →
-            # ``get_ddetXWXpS`` in gdi.c, which fills trA1 with the
-            # ML-version derivatives via the same projected-Hessian logic.
-            if self._use_ml_proj:
-                _, M_inv, B = self._ml_logdet_adj(fit)
-                if M_inv is not None:
-                    sp = np.exp(rho)
-                    Y = self._X_full @ B                  # (n, Mp)
-                    Y_Minv = Y @ M_inv                    # (n, Mp)
-                    q = np.einsum("ij,ij->i", Y, Y_Minv)  # (n,) y_i' M⁻¹ y_i
-                    dw_deta = self._dw_deta(fit)
-                    db_drho = self._dbeta_drho(fit, rho)
-                    deta_drho = self._X_full @ db_drho     # (n, n_sp)
-                    dw_drho = dw_deta[:, None] * deta_drho # (n, n_sp)
-                    for k, slot in enumerate(self._slots):
-                        a, b = slot.col_start, slot.col_end
-                        Bk = B[a:b, :]
-                        Pk = Bk.T @ slot.S @ Bk
-                        # −tr(M⁻¹ Y′ diag(dw/dρ_k) Y) − λ_k tr(M⁻¹ P_k)
-                        dlog_H[k] += (
-                            -float(np.sum(dw_drho[:, k] * q))
-                            - sp[k] * float(np.einsum("ij,ji->", M_inv, Pk))
-                        )
-            # ∂Dp/∂ρ comes from the data-fit term, so γ divides it; the
-            # log|H| / log|S|+ Jacobi pieces are γ-independent.
-            grad_rho = dDp / (phi * gamma) + dlog_H - dlog_S
-
-        if not include_log_phi and not include_family_theta:
-            return grad_rho
-
-        out = grad_rho
-        wt = self._wt
-        Dp = fit.dev + fit.pen
-        reml_ind = self._reml_ind
-        if include_log_phi:
-            Mp = float(self._Mp)
-            ls = np.asarray(self.family.ls(self._y_arr, wt, phi),
-                            dtype=float)
-            ls1 = float(ls[1])    # d ls / d(log φ), already chain-ruled
-            # Data-fit pieces (-Dp/φ - 2·ls1) divide by γ; the -Mp piece
-            # comes from -Mp·log(2πφ) (γ-independent) and is REML-only —
-            # under method="ML" remlInd=0 drops it (gam.fit3.r:628).
-            d_logphi = (-Dp / phi - 2.0 * ls1) / gamma - reml_ind * Mp
-            out = np.concatenate([out, [d_logphi]])
-
-        if include_family_theta and self.family.n_theta > 0:
-            # Family-generic θ block (gam.fit4.r:744 in 2·V_R units):
-            #   ∂(2V_R)/∂θ_j = (Σᵢ Dthᵢⱼ)/(φγ) − 2·lsth1_j/γ
-            #                  + ∂log|H+S|/∂θ_j
-            # The Dp piece is the envelope theorem at PIRLS-converged β̂
-            # (∂(D+β'Sβ)/∂β = 0 kills the β-coupled chain); lsth1 comes
-            # from the family's extended ls; the log|H+S| piece is the
-            # Dd-based dW/dθ trace (direct ½·Deta2th + indirect via
-            # ∂β̂/∂θ). For tw this equals the old dD_dp/dls_dp/dp_dtheta
-            # chain exactly (tw.Dd's D*th already carry dp/dθ).
-            family = self.family
-            nt = family.n_theta
-            theta = family.get_theta()
-            dd1 = self._dDeta(fit, 1)
-            Dth = np.asarray(dd1["Dth"], dtype=float)
-            if Dth.ndim == 1:
-                Dth = Dth[:, None]
-            dDp_dth = Dth.sum(axis=0)                       # (nt,)
-            ls_ext = family.ls_extended(self._y_arr, wt, theta=theta,
-                                        scale=phi)
-            lsth1 = np.asarray(ls_ext["lsth1"], dtype=float).reshape(-1)[:nt]
-            dlogH_dth = self._dlog_det_H_dtheta(fit, dd1=dd1)
-            if self._use_ml_proj:
-                # Projected-Hessian correction ∂log|M|/∂θ_j
-                # (M = U_n'A⁻¹U_n) — the penalty carries no θ, so only
-                # the ∂W/∂θ piece contributes:
-                #   ∂log|M|/∂θ_j = −Σ_i (∂W/∂θ_j)_i·q_i,
-                #   q_i = (XB)_i'M⁻¹(XB)_i.
-                _, M_inv, B = self._ml_logdet_adj(fit)
-                if M_inv is not None:
-                    Y = self._X_full @ B
-                    q = np.einsum("ij,ij->i", Y, Y @ M_inv)
-                    dW_dth = self._dW_dtheta_total(fit, dd1=dd1)  # (n, nt)
-                    dlogH_dth = dlogH_dth - dW_dth.T @ q
-            d_theta = (dDp_dth / (phi * gamma)
-                       - 2.0 * lsth1 / gamma
-                       + dlogH_dth)
-            out = np.concatenate([out, d_theta])
-
-        return out
+        dw_deta = self._dw_deta(fit)
+        return _reml_grad(rho, log_phi, fit, include_log_phi, include_family_theta, Mp=self._Mp, X=self._X_full, gamma=self._gamma, slots=self._slots, wt=self._wt, y=self._y_arr, family=self.family, pearson_scale_criterion=self._pearson_scale_criterion, reml_ind=self._reml_ind, use_ml_proj=self._use_ml_proj, p=self.p, family_mgcv_extended=self._family_mgcv_extended, penalty_rank=self._penalty_rank, UrS=self._UrS, reparam_cache=self._reparam_cache, dw_deta=dw_deta)
 
     def _dW_dtheta_total(self, fit, dd1=None):
         """Shim → free `_dW_dtheta_total`."""
@@ -5643,504 +6212,13 @@ class gam:
         """Shim → free `_dlog_det_H_dtheta`."""
         return _dlog_det_H_dtheta(fit, dd1, X=self._X_full, family=self.family, y=self._y_arr, wt=self._wt, family_mgcv_extended=self._family_mgcv_extended)
 
-    def _reml_hessian(self, rho: np.ndarray, log_phi: float = 0.0,
-                              fit: "_FitState | None" = None,
-                              include_log_phi: bool = False,
-                              include_family_theta: bool = False) -> np.ndarray:
-        """Analytical Hessian of `_reml` (2·V_R units).
-
-        Returns ((n_sp+1) × (n_sp+1)) when ``include_log_phi=True``, else
-        (n_sp × n_sp). With ``include_family_theta``, the Hessian is
-        further augmented by ``family.n_theta`` rows/columns computed
-        **analytically** — the family-θ rows of mgcv's REML2
-        (``gam.fit4.r:748``: ``REML2 = ((D2+bSb2)/(2φ) − ls2)/γ + ldet2/2``
-        over the joint (θ,ρ) space, with the log φ row from
-        ``gam.fit4.r:756-762``). ``D2`` (the deviance Hessian, ``gdi.c``
-        ``gdi2``:2145-2166), ``bSb2``/``P2`` (the penalty Hessian, ``get_bSb``
-        gdi.c:159-188) and ``ldet2`` (the ``log|H|`` Hessian, ``get_ddetXWXpS``
-        gdi.c:911-940) are assembled from the per-obs ``family.dDeta(level=2)``
-        tables and the IFT β-derivatives (:meth:`_d2beta_theta`). hea works in
-        2·V_R units, so ``hea_H = (D2+bSb2)/(φγ) − 2·ls2/γ + ldet2``. Pinned to
-        mgcv's analytic REML2 to ~1e-13.
-
-        Wood 2011 §4 for non-Gaussian, with Newton-form W:
-
-          ∂²(2·V_R)/∂ρ_l∂ρ_k = (1/φ)·∂²Dp/∂ρ_l∂ρ_k
-                              + ∂²log|H|/∂ρ_l∂ρ_k
-                              − ∂²log|S|+/∂ρ_l∂ρ_k
-
-        Pieces:
-
-          ∂²Dp/∂ρ_l∂ρ_k    = δ_lk·g_k − 2·λ_l·λ_k·β̂' S_l A⁻¹ S_k β̂   (Gaussian form)
-
-          ∂²log|S|+/∂ρ_l∂ρ_k = δ_lk·λ_k·tr(S⁺ S_k)
-                              − λ_l·λ_k·tr(S⁺ S_l S⁺ S_k)         (Gaussian form)
-
-          ∂²log|H|/∂ρ_l∂ρ_k = −tr(H⁻¹·∂H/∂ρ_l·H⁻¹·∂H/∂ρ_k)
-                              + tr(H⁻¹·∂²H/∂ρ_l∂ρ_k)
-
-        with ∂H/∂ρ_l = X' diag(h'·v_l) X + λ_l S_l (v_l := X·dβ_l) and
-
-          ∂²H/∂ρ_l∂ρ_k = X' diag(h''·v_l·v_k + h'·X·d²β_lk) X
-                         + δ_lk·λ_l·S_l
-
-        Cross-derivatives wrt log φ:
-
-          ∂²(2·V_R)/∂ρ_k∂log φ = −g_k / φ
-          ∂²(2·V_R)/∂log φ²    = Dp/φ − 2·ls'_hea_2
-
-        where ``ls'_hea_2 = family.ls(y, wt, φ)[2]`` (chain-ruled to log φ).
-
-        Under ``method="ML"`` the log|H| log-det becomes the projected form
-        log|U_rᵀ(H+S)U_r|; the additional ∂²log|M_proj| Hessian correction
-        (with M_proj = U_nᵀA⁻¹U_n) is added in-loop. Mirrors the gradient
-        correction in ``_reml_grad`` and mgcv's ``MLpenalty1`` →
-        ``get_ddetXWXpS`` in gdi.c, which fills ``det2`` on the post-drop K,P.
-
-        For Gaussian-identity (h' ≡ h'' ≡ 0) only the SS Wood block and the
-        Gaussian Dp/log|S|+ pieces survive, so the result equals 2·`_reml_hessian`
-        in the unprofiled REML formulation (the existing `_reml_hessian`
-        operates on the φ-profiled Gaussian path and returns V_R-scale).
-        """
+    def _reml_hessian(self, rho, log_phi=0.0, fit=None, include_log_phi=False, include_family_theta=False):
+        """Shim → free `_reml_hessian`."""
         if fit is None:
             fit = self._fit_given_rho(rho)
-        n_sp = len(self._slots)
-        phi = float(np.exp(log_phi))
-        size = n_sp + (1 if include_log_phi else 0)
-        if not (np.isfinite(phi) and phi > 0):
-            return np.full((size, size), 1e15)
-        gamma = 1.0 if self._pearson_scale_criterion else self._gamma
-        if n_sp == 0:
-            H = np.zeros((size, size))
-            if include_log_phi:
-                Dp0 = fit.dev + fit.pen
-                ls = np.asarray(self.family.ls(self._y_arr,
-                                               self._wt, phi))
-                H[0, 0] = (Dp0 / phi - 2.0 * float(ls[2])) / gamma
-            return H
-
-        p = self.p
-        sp = np.exp(rho)
-        X = self._X_full
-        # ∂²log|S|+ via gam.reparam when available (stable under extreme
-        # λ ratios); the S⁺-based fallback otherwise.
-        rp = self._reparam_at(rho)
-        S_pinv = None if rp is not None else self._S_pinv(fit.S_full)
-
-        # Common precomputations. The n × n hat matrix ``P = X H⁻¹ X'``
-        # and its elementwise square ``Rsq = P*P`` are NOT formed — at
-        # large n that's tens of GB. We mirror mgcv (gdi.c:952
-        # ``get_trA2``) and operate on ``K`` (n × p) with ``K K' = P``;
-        # the bilinear form ``hv_i' Rsq hv_j`` (the only Rsq consumer)
-        # equals ``Σ_{p,q} G_i[p,q]·G_j[p,q]`` with ``G_k = K' diag(hv_k) K``.
-        # ``M = H⁻¹ X'`` is also gated — it's only needed to feed
-        # ``diag_MtSM`` (the WS / SW trace pieces), and those vanish for
-        # families with ``dw/dη ≡ 0``. See the ``needs_w`` branch below.
-
-        db_drho = self._dbeta_drho(fit, rho)                   # (p, n_sp)
-        dw_deta = self._dw_deta(fit)                           # (n,)
-        d2w_deta2 = self._d2w_deta2(fit)                       # (n,)
-        d2b = self._d2beta_drho_drho(fit, rho, db_drho=db_drho,
-                                     dw_deta=dw_deta)          # (p, n_sp, n_sp)
-        v = X @ db_drho                                        # (n, n_sp)
-        hv = dw_deta[:, None] * v                              # h'·v_l, shape (n, n_sp)
-
-        # Build K (n × p) and M (p × n) only when an n-side trace
-        # actually needs them. For families with ``dw/dη ≡ 0``
-        # (Gaussian-identity, Gamma+log, any canonical link satisfying
-        # B(μ) = V'/V + g''·μ_η = 0 and α'/α = 0) all of ``hv``,
-        # ``d2w_deta2`` are zero, the K-based traces collapse, and the
-        # ``diag_MtSM[k]`` consumers (tr_WS / tr_SW) are hv-weighted and
-        # vanish — so neither K nor M is needed. Both are O(p²·n) to
-        # build, which dominates at large n.
-        needs_w = bool(np.any(hv)) or bool(np.any(d2w_deta2))
-        if needs_w:
-            M = cho_solve((fit.A_chol, fit.A_chol_lower), X.T)   # (p, n) = H⁻¹ X'
-            K = self._make_K(fit.A_chol, fit.A_chol_lower)       # (n, p)
-            d_diag = np.einsum("ij,ij->i", K, K)                  # (n,) diag(KK') = diag(P)
-            # G_k = K' diag(hv_k) K, p × p, n_sp of them. Symmetric.
-            G_arr = np.empty((n_sp, p, p))
-            for k in range(n_sp):
-                Khv = K * hv[:, k:k+1]                            # (n, p)
-                Gk = K.T @ Khv                                    # (p, p)
-                G_arr[k] = 0.5 * (Gk + Gk.T)                      # enforce symmetry
-        else:
-            M = None
-            d_diag = None
-            G_arr = None
-
-        # Per-slot blocks reused for ∂²Dp / log|S|+ / log|H| Gaussian-style traces.
-        AinvS_block: list[np.ndarray] = []
-        SpinvS_block: list[np.ndarray] = []
-        Sbeta_full = np.zeros((n_sp, p))
-        AinvSbeta = np.empty((n_sp, p))
-        diag_MtSM: list[np.ndarray] | None = (
-            [] if needs_w else None
-        )  # diag(M' S_k_full M) = (n,) per k; only needed for tr_WS / tr_SW.
-        g = np.zeros(n_sp)
-        tr_AinvS = np.zeros(n_sp)
-        tr_SpinvS = np.zeros(n_sp)
-        A_inv = cho_solve((fit.A_chol, fit.A_chol_lower), np.eye(p))
-        for k, slot in enumerate(self._slots):
-            a, b = slot.col_start, slot.col_end
-            beta_k = fit.beta[a:b]
-            Sb = slot.S @ beta_k
-            Sbeta_full[k, a:b] = Sb
-            AinvSbeta[k] = cho_solve(
-                (fit.A_chol, fit.A_chol_lower), Sbeta_full[k]
-            )
-            g[k] = sp[k] * float(beta_k @ Sb)
-            AinvS_block.append(A_inv[:, a:b] @ slot.S)
-            tr_AinvS[k] = float(np.einsum("ij,ji->", A_inv[a:b, a:b], slot.S))
-            if S_pinv is not None:
-                SpinvS_block.append(S_pinv[:, a:b] @ slot.S)
-                tr_SpinvS[k] = float(np.einsum(
-                    "ij,ji->", S_pinv[a:b, a:b], slot.S
-                ))
-            if diag_MtSM is not None:
-                # diag(M' S_k_full M)_i = M[a:b, i]' · S_k · M[a:b, i]
-                SkM = slot.S @ M[a:b, :]                       # (m_k, n)
-                diag_MtSM.append(np.einsum("ji,ji->i", M[a:b, :], SkM))
-
-        # ML range-projection correction. Under method="ML" the Hessian
-        # log-det is log|U_rᵀ(H+S)U_r|, which by the block-determinant
-        # identity equals log|H+S| + log|M_proj| with M_proj = U_nᵀ A⁻¹ U_n
-        # (B_proj = A⁻¹ U_n; see ``_ml_logdet_adj``). The Hessian therefore
-        # gains the ∂²log|M_proj|/∂ρ_l∂ρ_k term:
-        #
-        #     ∂²log|M_proj|/∂ρ_l∂ρ_k = −tr(M_proj⁻¹·∂M_proj_l·M_proj⁻¹·∂M_proj_k)
-        #                             + tr(M_proj⁻¹·∂²M_proj_lk)
-        #
-        # with ∂M_proj_k = −B_projᵀ·(∂A/∂ρ_k)·B_proj and
-        #   ∂²M_proj_lk = B_projᵀ·(∂A/∂ρ_l)·A⁻¹·(∂A/∂ρ_k)·B_proj
-        #              + B_projᵀ·(∂A/∂ρ_k)·A⁻¹·(∂A/∂ρ_l)·B_proj
-        #              − B_projᵀ·(∂²A/∂ρ_l∂ρ_k)·B_proj
-        # ∂A/∂ρ_k = X'·diag(h'·v_k)·X + λ_k·S_k_full and ∂²A/∂ρ_l∂ρ_k as in
-        # the comment above. Mirrors mgcv's ``MLpenalty1`` → ``get_ddetXWXpS``
-        # in gdi.c, which fills ``det2`` from the projected K, P.
-        ml_active = False
-        if self._use_ml_proj:
-            _, M_proj_inv, B_proj = self._ml_logdet_adj(fit)
-            if M_proj_inv is not None:
-                ml_active = True
-                Mp_dim = M_proj_inv.shape[0]
-                Y_proj = X @ B_proj                                 # (n, Mp)
-                Y_proj_Minv = Y_proj @ M_proj_inv                   # (n, Mp)
-                q_vec = np.einsum("ij,ij->i", Y_proj, Y_proj_Minv)  # (n,)
-                Yk_arr = np.zeros((n_sp, p, Mp_dim))
-                Zk_arr = np.zeros((n_sp, p, Mp_dim))
-                Pk_M_arr = np.zeros(n_sp)
-                Minv_dMk_arr = np.zeros((n_sp, Mp_dim, Mp_dim))
-                for kk, slot_kk in enumerate(self._slots):
-                    a_k, b_k = slot_kk.col_start, slot_kk.col_end
-                    Yk_ = X.T @ (hv[:, kk:kk + 1] * Y_proj)
-                    Yk_[a_k:b_k, :] += sp[kk] * (slot_kk.S @ B_proj[a_k:b_k, :])
-                    Yk_arr[kk] = Yk_
-                    Zk_arr[kk] = cho_solve(
-                        (fit.A_chol, fit.A_chol_lower), Yk_
-                    )
-                    Minv_dMk_arr[kk] = M_proj_inv @ (-B_proj.T @ Yk_)
-                    Bk_proj = B_proj[a_k:b_k, :]
-                    Pk_M_arr[kk] = float(np.einsum(
-                        "ij,ji->", M_proj_inv, Bk_proj.T @ slot_kk.S @ Bk_proj
-                    ))
-
-        # Hessian assembly — symmetric loop.
-        H2 = np.zeros((n_sp, n_sp))
-        for i in range(n_sp):
-            a_i, b_i = self._slots[i].col_start, self._slots[i].col_end
-            for j in range(i, n_sp):
-                a_j, b_j = self._slots[j].col_start, self._slots[j].col_end
-
-                # ∂²Dp/∂ρ_i∂ρ_j: same family-agnostic form as Gaussian.
-                bSiAinvSj_b = float(Sbeta_full[i] @ AinvSbeta[j])
-                d2Dp = -2.0 * sp[i] * sp[j] * bSiAinvSj_b
-
-                # tr(H⁻¹·∂H/∂ρ_i·H⁻¹·∂H/∂ρ_j) — four pieces.
-                # WW: (h'·v_i)' · Rsq · (h'·v_j) where Rsq = P⊙P, P = KK'.
-                # Identity: hv_i' (KK' ⊙ KK') hv_j = Σ_{p,q} G_i[p,q]·G_j[p,q]
-                # with G_k = K' diag(hv_k) K (Wood 2008 §4 + mgcv gdi.c:952).
-                # WS / SW: tr(H⁻¹·A_i·H⁻¹·S_j) = (h'·v_i)' · diag_MtSM[j].
-                # All three are zero when ``hv ≡ 0`` (Gaussian-identity etc.).
-                if G_arr is not None:
-                    tr_WW = float(np.sum(G_arr[i] * G_arr[j]))
-                    tr_WS = float(hv[:, i] @ diag_MtSM[j])
-                    tr_SW = float(hv[:, j] @ diag_MtSM[i])
-                else:
-                    tr_WW = 0.0
-                    tr_WS = 0.0
-                    tr_SW = 0.0
-                # SS: tr(H⁻¹·S_i·H⁻¹·S_j) — Gaussian block trick.
-                tr_SS = float(np.einsum(
-                    "ab,ba->",
-                    AinvS_block[i][a_j:b_j, :],
-                    AinvS_block[j][a_i:b_i, :],
-                ))
-                tr_HinvHpHinvHp = (
-                    tr_WW
-                    + sp[j] * tr_WS
-                    + sp[i] * tr_SW
-                    + sp[i] * sp[j] * tr_SS
-                )
-
-                # tr(H⁻¹·∂²H/∂ρ_i∂ρ_j).
-                #   X'·diag(h''·v_i·v_j)·X contribution: Σ d_i·h''·v_i·v_j.
-                #   X'·diag(h'·X·d²β_ij)·X        contribution: Σ d_i·h'·(X·d²β_ij).
-                # Both are weighted by ``d_diag = diag(K K')``; if K wasn't
-                # built (W-derivs identically zero) both summands vanish.
-                Xd2b = X @ d2b[:, i, j]                       # (n,)
-                if d_diag is not None:
-                    tr_d2H = (
-                        float(np.sum(d_diag * d2w_deta2 * v[:, i] * v[:, j]))
-                        + float(np.sum(d_diag * dw_deta * Xd2b))
-                    )
-                else:
-                    tr_d2H = 0.0
-                # δ_lk·λ_l·tr(H⁻¹·S_l) is the off-square diagonal term.
-                d2logH_ij = -tr_HinvHpHinvHp + tr_d2H
-
-                if ml_active:
-                    # ∂²log|M_proj|/∂ρ_i∂ρ_j = T1 + T2_mixed − T2_d2A:
-                    #   T1       = −tr(M_proj⁻¹·∂M_proj_i·M_proj⁻¹·∂M_proj_j)
-                    #   T2_mixed = 2·tr(M_proj⁻¹·Y_iᵀ·Z_j)
-                    #   T2_d2A   = tr(M_proj⁻¹·B_projᵀ·(∂²A_ij)·B_proj)
-                    # T2_mixed uses Y_iᵀ Z_j = Y_iᵀ A⁻¹ Y_j (symmetric in i,j up
-                    # to transpose of an inside Mp×Mp block; M_proj⁻¹ symmetric
-                    # → both orders give the same trace, so the factor of 2
-                    # absorbs the symmetric pair).
-                    T1_ml = -float(np.einsum(
-                        "ab,ba->", Minv_dMk_arr[i], Minv_dMk_arr[j]
-                    ))
-                    T2_mixed = 2.0 * float(np.einsum(
-                        "ab,ba->", M_proj_inv, Yk_arr[i].T @ Zk_arr[j]
-                    ))
-                    D_ij_diag = (
-                        d2w_deta2 * v[:, i] * v[:, j]
-                        + dw_deta * Xd2b
-                    )
-                    T2_d2A = float(np.sum(D_ij_diag * q_vec))
-                    if i == j:
-                        # δ_ij·λ_i·tr(M_proj⁻¹·B_projᵀ·S_i_full·B_proj) from
-                        # ∂²A's penalty piece.
-                        T2_d2A += sp[i] * Pk_M_arr[i]
-                    d2logH_ij += T1_ml + T2_mixed - T2_d2A
-
-                # ∂²log|S|+/∂ρ_i∂ρ_j: gam.reparam's det2 carries the full
-                # matrix (off-diagonal −λλ·tr(S⁻¹S_iS⁻¹S_j), diagonal
-                # +det1); the S⁺ fallback assembles the same pieces.
-                if rp is not None:
-                    cross_2VR = (d2Dp / (phi * gamma) + d2logH_ij
-                                 - rp["det2"][i, j])
-                    if i == j:
-                        H2[i, i] = (
-                            cross_2VR
-                            + g[i] / (phi * gamma)
-                            + sp[i] * tr_AinvS[i]
-                        )
-                    else:
-                        H2[i, j] = H2[j, i] = cross_2VR
-                else:
-                    tr_SpSiSpSj = float(np.einsum(
-                        "ab,ba->",
-                        SpinvS_block[i][a_j:b_j, :],
-                        SpinvS_block[j][a_i:b_i, :],
-                    ))
-                    d2logS_ij = -sp[i] * sp[j] * tr_SpSiSpSj
-
-                    cross_2VR = d2Dp / (phi * gamma) + d2logH_ij - d2logS_ij
-                    if i == j:
-                        # Diagonal also picks up the δ_lk·g_k from ∂²Dp,
-                        # δ_lk·λ_l·tr(H⁻¹·S_l) from ∂²H, and
-                        # δ_lk·λ_k·tr(S⁺ S_k) from ∂²log|S|+. Only the
-                        # ∂²Dp piece is γ-scaled.
-                        H2[i, i] = (
-                            cross_2VR
-                            + g[i] / (phi * gamma)
-                            + sp[i] * tr_AinvS[i]
-                            - sp[i] * tr_SpinvS[i]
-                        )
-                    else:
-                        H2[i, j] = H2[j, i] = cross_2VR
-
-        if not include_log_phi and not include_family_theta:
-            return H2
-
-        if include_log_phi:
-            # Augment with log φ row/col. Cross / log φ² come from the
-            # data-fit term (Dp/φ − 2·ls0), so they scale by 1/γ.
-            H_aug = np.zeros((n_sp + 1, n_sp + 1))
-            H_aug[:n_sp, :n_sp] = H2
-            for k in range(n_sp):
-                cross = -g[k] / (phi * gamma)
-                H_aug[k, n_sp] = cross
-                H_aug[n_sp, k] = cross
-            Dp = fit.dev + fit.pen
-            ls = np.asarray(self.family.ls(self._y_arr, self._wt, phi))
-            H_aug[n_sp, n_sp] = (Dp / phi - 2.0 * float(ls[2])) / gamma
-        else:
-            # Scale-known extended family (scat): θ-vector is (ρ, θ_fam)
-            # with no log φ slot — matches mgcv's gam.fit4 layout where
-            # the scale row only exists when scale < 0.
-            H_aug = H2
-
-        if not include_family_theta or self.family.n_theta == 0:
-            return H_aug
-
-        # Family-θ rows/cols — analytic port of mgcv's gam.fit4.r:748 REML2
-        # θ-rows: REML2 = ((D2+bSb2)/(2φ) − ls2)/γ + ldet2/2 over the joint
-        # (θ,ρ) space, with the log φ row/col bolted on (gam.fit4.r:756-762).
-        # D2 (gdi.c:2145-2166), bSb2/P2 (get_bSb gdi.c:159-188) and ldet2
-        # (get_ddetXWXpS gdi.c:911-940) are computed from the per-obs Dd
-        # tables + the IFT β-derivatives. hea works in 2·V_R units, so
-        # hea_H = (D2+bSb2)/(φγ) − 2·ls2/γ + ldet2. Replaces the former
-        # central-difference of _reml_grad (a non-mechanical FD shortcut).
-        family = self.family
-        n_extra = family.n_theta
-        base_size = n_sp + (1 if include_log_phi else 0)
-        new_size = base_size + n_extra
-        H_full = np.zeros((new_size, new_size))
-        H_full[:base_size, :base_size] = H_aug
-        nt = n_extra
-
-        # Per-obs deviance derivatives (η-space; mgcv Det*/Dth* names) and the
-        # θ first/second β-derivatives via the IFT.
-        dd2 = self._dDeta(fit, 2)
-        Deta = np.asarray(dd2["Deta"], dtype=float)
-        Deta2 = np.asarray(dd2["Deta2"], dtype=float)
-        Deta3 = np.asarray(dd2["Deta3"], dtype=float)
-        Deta4 = np.asarray(dd2["Deta4"], dtype=float)
-        Detath = self._as_n_nt(dd2["Detath"], nt)          # (n, nt)
-        Deta3th = self._as_n_nt(dd2["Deta3th"], nt)        # (n, nt)
-        Dth = self._as_n_nt(dd2["Dth"], nt)                # (n, nt)
-        Dth2 = self._theta2_arr(dd2["Dth2"], nt, X.shape[0])       # (n,nt,nt)
-        Deta2th2 = self._theta2_arr(dd2["Deta2th2"], nt, X.shape[0])
-
-        db_dtheta = self._db_dtheta_fam(fit)               # (p, nt)
-        eta1_th = X @ db_dtheta                             # (n, nt) η₁_θ
-        dW_dth = self._dW_dtheta_total(fit)                # (n, nt) ∂w/∂θ
-        d2b_thr, d2b_thth = self._d2beta_theta(
-            fit, rho, db_drho=db_drho, db_dtheta=db_dtheta, dd2=dd2)
-        eta2_thr = np.einsum("ij,jab->iab", X, d2b_thr)    # (n, nt, n_sp)
-        eta2_thth = np.einsum("ij,jac->iac", X, d2b_thth)  # (n, nt, nt)
-
-        # Penalty pieces (get_bSb): Sβ_total and the embedded S·v.
-        S_beta = (sp[:, None] * Sbeta_full).sum(axis=0)    # Σ sp_k S_k β
-
-        def _S_total_dot(vec_full: np.ndarray) -> np.ndarray:
-            out = np.zeros(p)
-            for kk, slot_kk in enumerate(self._slots):
-                aa, bb = slot_kk.col_start, slot_kk.col_end
-                out[aa:bb] += sp[kk] * (slot_kk.S @ vec_full[aa:bb])
-            return out
-
-        # ldet2 traces reuse the ρρ K/M machinery; build any pieces the ρρ
-        # pass skipped (needs_w False ⇒ ∂w/∂ρ≡0 so G_arr≡0, but the θ rows
-        # still need diag(KK'), M and diag(M'S_kM)).
-        if K is None:
-            K = self._make_K(fit.A_chol, fit.A_chol_lower)
-            d_diag = np.einsum("ij,ij->i", K, K)
-        if M is None:
-            M = cho_solve((fit.A_chol, fit.A_chol_lower), X.T)
-        if G_arr is None:
-            G_arr = np.zeros((n_sp, p, p))
-        if diag_MtSM is None:
-            diag_MtSM = []
-            for kk, slot_kk in enumerate(self._slots):
-                aa, bb = slot_kk.col_start, slot_kk.col_end
-                SkM = slot_kk.S @ M[aa:bb, :]
-                diag_MtSM.append(np.einsum("ji,ji->i", M[aa:bb, :], SkM))
-        # Gθ[a] = K' diag(∂w/∂θ_a) K — the θ analogue of G_arr.
-        Gth = np.empty((nt, p, p))
-        for a in range(nt):
-            G_a = K.T @ (K * dW_dth[:, a:a + 1])
-            Gth[a] = 0.5 * (G_a + G_a.T)
-
-        # ML range-projection θ-corrections (mirrors the ρρ ml block, with
-        # ∂A/∂θ_a = X'diag(∂w/∂θ_a)X — θ carries no penalty so the S term
-        # drops). Only built under method="ML".
-        if ml_active:
-            Mp_dim = M_proj_inv.shape[0]
-            Yth_arr = np.zeros((nt, p, Mp_dim))
-            Zth_arr = np.zeros((nt, p, Mp_dim))
-            Minv_dMth_arr = np.zeros((nt, Mp_dim, Mp_dim))
-            for a in range(nt):
-                Yth = X.T @ (dW_dth[:, a:a + 1] * Y_proj)
-                Yth_arr[a] = Yth
-                Zth_arr[a] = cho_solve((fit.A_chol, fit.A_chol_lower), Yth)
-                Minv_dMth_arr[a] = M_proj_inv @ (-B_proj.T @ Yth)
-
-        # Saturated-likelihood 2nd derivatives (θ,θ) and (θ,log φ): ls2.
-        ls_ext = family.ls_extended(self._y_arr, self._wt,
-                                    theta=family.get_theta(), scale=phi)
-        lsth2 = np.asarray(ls_ext["lsth2"], dtype=float)   # (nt+1, nt+1)
-
-        for a in range(nt):
-            col_idx = base_size + a
-            # θ_a × ρ_i rows.
-            for i in range(n_sp):
-                d2_dev = float(np.sum(
-                    Deta2 * eta1_th[:, a] * v[:, i]
-                    + Deta * eta2_thr[:, a, i]
-                    + Detath[:, a] * v[:, i]))
-                d2_pen = (
-                    2.0 * float(d2b_thr[:, a, i] @ S_beta)
-                    + 2.0 * float(db_drho[:, i] @ _S_total_dot(db_dtheta[:, a]))
-                    + 2.0 * float(db_dtheta[:, a] @ (sp[i] * Sbeta_full[i])))
-                d2w = 0.5 * (Deta4 * eta1_th[:, a] * v[:, i]
-                             + Deta3 * eta2_thr[:, a, i]
-                             + Deta3th[:, a] * v[:, i])
-                d2logH = (
-                    -(float(np.sum(Gth[a] * G_arr[i]))
-                      + sp[i] * float(dW_dth[:, a] @ diag_MtSM[i]))
-                    + float(np.sum(d_diag * d2w)))
-                if ml_active:
-                    T1 = -float(np.einsum(
-                        "ab,ba->", Minv_dMth_arr[a], Minv_dMk_arr[i]))
-                    T2 = 2.0 * float(np.einsum(
-                        "ab,ba->", M_proj_inv, Yth_arr[a].T @ Zk_arr[i]))
-                    d2logH += T1 + T2 - float(np.sum(d2w * q_vec))
-                val = (d2_dev + d2_pen) / (phi * gamma) + d2logH
-                H_full[i, col_idx] = H_full[col_idx, i] = val
-            # θ_a × log φ row (gam.fit4.r:756-757, 2·V_R units).
-            if include_log_phi:
-                val = (-float(np.sum(Dth[:, a])) / (phi * gamma)
-                       - 2.0 * lsth2[a, nt] / gamma)
-                H_full[n_sp, col_idx] = H_full[col_idx, n_sp] = val
-            # θ_a × θ_c block.
-            for c in range(a, nt):
-                d2_dev = float(np.sum(
-                    Deta2 * eta1_th[:, a] * eta1_th[:, c]
-                    + Deta * eta2_thth[:, a, c]
-                    + Dth2[:, a, c]
-                    + Detath[:, a] * eta1_th[:, c]
-                    + Detath[:, c] * eta1_th[:, a]))
-                # ∂²(β'Sβ)/∂θ_a∂θ_c = 2·(∂²β)'Sβ + 2·(∂β/∂θ_c)'S(∂β/∂θ_a)
-                # (get_bSb gdi.c:167-172). NO diagonal `+bSb1` term for θ:
-                # bSb1[θ]=0 during get_bSb's Hessian loop (gdi.c:156; the
-                # `2·b1'Sb` augmentation at gdi.c:194 runs *after*), and S
-                # carries no θ-dependence so there is no penalty-curvature term.
-                d2_pen = (
-                    2.0 * float(d2b_thth[:, a, c] @ S_beta)
-                    + 2.0 * float(db_dtheta[:, c]
-                                  @ _S_total_dot(db_dtheta[:, a])))
-                d2w = 0.5 * (Deta4 * eta1_th[:, a] * eta1_th[:, c]
-                             + Deta3 * eta2_thth[:, a, c]
-                             + Deta3th[:, a] * eta1_th[:, c]
-                             + Deta3th[:, c] * eta1_th[:, a]
-                             + Deta2th2[:, a, c])
-                d2logH = (-float(np.sum(Gth[a] * Gth[c]))
-                          + float(np.sum(d_diag * d2w)))
-                if ml_active:
-                    T1 = -float(np.einsum(
-                        "ab,ba->", Minv_dMth_arr[a], Minv_dMth_arr[c]))
-                    T2 = 2.0 * float(np.einsum(
-                        "ab,ba->", M_proj_inv, Yth_arr[a].T @ Zth_arr[c]))
-                    d2logH += T1 + T2 - float(np.sum(d2w * q_vec))
-                val = ((d2_dev + d2_pen) / (phi * gamma)
-                       - 2.0 * lsth2[a, c] / gamma + d2logH)
-                ci = base_size + c
-                H_full[col_idx, ci] = H_full[ci, col_idx] = val
-        return H_full
+        dw_deta = self._dw_deta(fit)
+        d2w_deta2 = self._d2w_deta2(fit)
+        return _reml_hessian(rho, log_phi, fit, include_log_phi, include_family_theta, X=self._X_full, gamma=self._gamma, slots=self._slots, wt=self._wt, y=self._y_arr, family=self.family, p=self.p, pearson_scale_criterion=self._pearson_scale_criterion, use_ml_proj=self._use_ml_proj, penalty_rank=self._penalty_rank, family_mgcv_extended=self._family_mgcv_extended, Mp=self._Mp, UrS=self._UrS, reparam_cache=self._reparam_cache, dw_deta=dw_deta, d2w_deta2=d2w_deta2)
 
     def _init_general(self, formulas, data, *, method, sp, family,
                       offset, weights, gamma, select, knots,
@@ -7963,40 +8041,10 @@ class gam:
             fit = self._fit_given_rho(rho)
         return _gacv_grad(rho, fit, gamma=self._gamma, slots=self._slots, n=self.n, X=self._X_full, XtX=self._XtX, family=self.family, p=self.p, y=self._y_arr, family_mgcv_extended=self._family_mgcv_extended, wt=self._wt, pls_lwork=self._pls_lwork)
 
-    def _preml_grad(self, rho: np.ndarray, fit: "_FitState") -> np.ndarray:
-        """Gradient of the P-REML/P-ML criterion in hea's 2·V units
-        (length n_sp), mgcv gam.fit3.r:656 (×2).
-
-        φ = P/(n−Mp) is the Pearson-Laplace scale, a function of ρ, so the
-        criterion's ρ-gradient is the plain-(RE)ML ρ-block (reused from
-        `_reml_grad`, which runs at γ≡1 under `_pearson_scale`) minus the
-        φ(ρ) chain term:
-
-            2V1_k = [Dp1_k/φ + ∂log|H|_k − ∂log|S|₊_k]        (= `_reml_grad`)
-                    − φ1_k·(Dp/φ² + Mp/φ·remlInd + 2·ls'(φ))
-
-        with φ1_k = P1_k/(n−Mp), ls'(φ) = family.ls[1]/φ (hea's ls is the
-        d/d(logφ) value, so dividing by φ recovers mgcv's dls/dφ = ls[2]).
-        The ∂log|H| block carries the ML range-projection for P-ML via the
-        `_use_ml_proj` predicate inside `_reml_grad`.
-        """
-        n_sp = len(self._slots)
-        if n_sp == 0:
-            return np.zeros(0)
-        phi = self._phi_pearson(fit)
-        log_phi = float(np.log(max(phi, 1e-300)))
-        base = self._reml_grad(rho, log_phi, fit=fit, include_log_phi=False)
-        Dp = float(fit.dev + fit.pen)
-        Mp = float(self._Mp)
-        denom = float(self.n - self._Mp)
-        _, P1 = self._pearson_and_deriv(rho, fit, deriv=True)
-        phi1 = (P1 / denom) if denom > 0 else P1
-        ls1 = float(self.family.ls(self._y_arr, self._wt, phi)[1])
-        ls_dphi = ls1 / phi                       # mgcv's ls[2] = dls/dφ
-        reml_ind = self._reml_ind
-        corr = phi1 * (Dp / (phi * phi) + Mp / phi * reml_ind + 2.0 * ls_dphi)
-        return base - corr
-
+    def _preml_grad(self, rho, fit):
+        """Shim → free `_preml_grad`."""
+        dw_deta = self._dw_deta(fit)
+        return _preml_grad(rho, fit, slots=self._slots, Mp=self._Mp, n=self.n, y=self._y_arr, wt=self._wt, family=self.family, reml_ind=self._reml_ind, X=self._X_full, p=self.p, gamma=self._gamma, pearson_scale_criterion=self._pearson_scale_criterion, use_ml_proj=self._use_ml_proj, family_mgcv_extended=self._family_mgcv_extended, penalty_rank=self._penalty_rank, UrS=self._UrS, reparam_cache=self._reparam_cache, dw_deta=dw_deta)
 
     def _gcv_grad(self, rho, fit=None):
         """Shim → free `_gcv_grad`."""
@@ -8020,52 +8068,13 @@ class gam:
             fit = self._fit_given_rho(rho)
         return _gacv_hessian(rho, fit, gamma=self._gamma, slots=self._slots, n=self.n, X=self._X_full, XtX=self._XtX, p=self.p, scale_fixed_value=self._scale_fixed_value, scale_known=self._scale_known_fit, y=self._y_arr, family_mgcv_extended=self._family_mgcv_extended, family=self.family, wt=self._wt, pls_lwork=self._pls_lwork)
 
-    def _preml_hessian(self, rho: np.ndarray,
-                       fit: "_FitState | None" = None) -> np.ndarray:
-        """Analytic P-REML / P-ML Hessian ``REML2`` (n_sp × n_sp, mgcv's
-        V-scale), equal to mgcv gam.fit3.r:658-664.
-
-        The P-REML/P-ML score is the Laplace (RE)ML score with the
-        Pearson-Laplace scale φ_P(ρ) = P(ρ)/(n−Mp) plugged in for the scale
-        (mgcv.r coerces only the *known*-scale case to REML; for unknown
-        scale this Pearson plug-in is what distinguishes P-REML from REML).
-        So V_P(ρ) = V_REML(ρ, log φ_P(ρ)) and the ρ-Hessian is the chain
-        rule over hea's analytic `_reml_hessian` (which supplies the
-        (ρ,ρ), (ρ,log φ) and (log φ,log φ) blocks and the log φ gradient):
-
-            ∂²V_P/∂ρ_i∂ρ_j = Hρρ[i,j] + Hρφ[i]·u_j + Hρφ[j]·u_i
-                            + Hφφ·u_i·u_j + g_φ·u_ij
-
-        with u = log φ_P, u_i = ∂log P/∂ρ_i = P1_i/P,
-        u_ij = ∂²log P/∂ρ_i∂ρ_j = P2_ij/P − P1_i·P1_j/P². hea's
-        `_reml_hessian`/`_reml_grad` are in 2·V units (and run at γ≡1 for
-        the Pearson criteria), so the assembled 2·V Hessian is halved to
-        mgcv's V-scale. Replaces the former FD Hessian on `_preml_grad`."""
+    def _preml_hessian(self, rho, fit=None):
+        """Shim → free `_preml_hessian`."""
         if fit is None:
             fit = self._fit_given_rho(rho)
-        n_sp = len(self._slots)
-        if n_sp == 0:
-            return np.zeros((0, 0))
-        phi = self._phi_pearson(fit)
-        log_phi = float(np.log(max(phi, 1e-300)))
-        # 2·V REML grad/Hessian augmented with the log φ row/col.
-        H_full = self._reml_hessian(rho, log_phi, fit=fit,
-                                    include_log_phi=True)
-        g_full = self._reml_grad(rho, log_phi, fit=fit, include_log_phi=True)
-        Hrr = H_full[:n_sp, :n_sp]
-        Hrf = H_full[:n_sp, n_sp]
-        Hff = float(H_full[n_sp, n_sp])
-        gf = float(g_full[n_sp])
-        # Pearson scale derivatives: u = log φ_P = log P − log(n−Mp).
-        P, P1 = self._pearson_and_deriv(rho, fit, deriv=True)
-        P2 = self._pearson_hess(fit, rho)
-        u1 = P1 / P                                       # ∂log φ_P/∂ρ
-        u2 = P2 / P - np.outer(P1, P1) / (P * P)          # ∂²log φ_P/∂ρ²
-        REML2_2V = (Hrr
-                    + np.outer(Hrf, u1) + np.outer(u1, Hrf)
-                    + Hff * np.outer(u1, u1)
-                    + gf * u2)
-        return 0.5 * (REML2_2V + REML2_2V.T) / 2.0
+        dw_deta = self._dw_deta(fit)
+        d2w_deta2 = self._d2w_deta2(fit)
+        return _preml_hessian(rho, fit, slots=self._slots, Mp=self._Mp, n=self.n, family=self.family, wt=self._wt, y=self._y_arr, X=self._X_full, p=self.p, gamma=self._gamma, pearson_scale_criterion=self._pearson_scale_criterion, use_ml_proj=self._use_ml_proj, penalty_rank=self._penalty_rank, family_mgcv_extended=self._family_mgcv_extended, UrS=self._UrS, reparam_cache=self._reparam_cache, reml_ind=self._reml_ind, dw_deta=dw_deta, d2w_deta2=d2w_deta2)
 
     def _db_drho(self, rho, beta, A_chol, A_chol_lower):
         """Shim → free `_db_drho` (mgcv gdi1/gdi2 derivative block)."""
