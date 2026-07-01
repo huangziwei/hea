@@ -2044,6 +2044,11 @@ class bam(gam):
         self._discrete_m = discrete_m
         self._discrete_design: Optional[DiscreteDesign] = None
         self._discrete_frame: Optional[DiscretizedFrame] = None
+        # PIRLS augmented-QR LAPACK workspace (mirror gam.__init__): bam's own
+        # discrete/QR fit path never uses it, but the inherited gam derivative
+        # helpers (``_fisher_view`` via ``_compute_edf12``) thread it through
+        # explicit args, so the attribute must exist.
+        self._pls_lwork: dict = {"g": None, "o": None}
 
         # ---- setup phase (mirror gam.__init__ lines 198-321) ---------------
         d = prepare_design(formula, data)

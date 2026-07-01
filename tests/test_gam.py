@@ -2781,11 +2781,8 @@ def test_pls_qr_negative_weight_correction_is_exact():
     w[:6] = -rng.uniform(0.01, 0.05, 6)     # mildly negative rows: A stays PD
     E = np.diag(rng.uniform(0.5, 2.0, p))   # S = E'E
 
-    df = pl.DataFrame({"x": rng.uniform(0, 1, 30),
-                       "y": rng.normal(size=30)})
-    m = gam("y ~ s(x, k=5)", df, method="REML")   # host for the method
-    m._X_full = X
-    beta, R, log_det, ok = m._pls_qr(w, z, E)
+    from hea.models.gam import _pls_qr
+    beta, R, log_det, ok = _pls_qr(X, {"g": None, "o": None}, w, z, E)
     assert ok
     A = X.T @ (w[:, None] * X) + E.T @ E
     np.testing.assert_allclose(R.T @ R, A, rtol=0, atol=1e-10)
@@ -2800,7 +2797,7 @@ def test_pls_qr_negative_weight_correction_is_exact():
     w_bad[:20] = -5.0
     A_bad = X.T @ (w_bad[:, None] * X) + E.T @ E
     assert np.linalg.eigvalsh(A_bad).min() < 0
-    *_, ok_bad = m._pls_qr(w_bad, z, E)
+    *_, ok_bad = _pls_qr(X, {"g": None, "o": None}, w_bad, z, E)
     assert not ok_bad
 
 
