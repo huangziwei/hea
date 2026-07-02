@@ -2,11 +2,18 @@
 optimizers (``nlm`` via ``src/appl/uncmin.c``, ``optim(method="L-BFGS-B")``
 via ``src/appl/lbfgsb.c``).
 
-What "R's BLAS" means here is what R actually *links*: the CRAN macOS
-build symlinks ``libRblas.dylib -> libRblas.vecLib.dylib``, a forwarder
-to Apple **Accelerate** — NOT the reference ``blas.f``. These kernels
-therefore emulate Accelerate's observed behavior (probed empirically on
-this arch via ``ctypes`` against ``libRblas.dylib``):
+What "R's BLAS" means here is what R actually *links*, which differs by
+platform. The CRAN macOS build symlinks ``libRblas.dylib ->
+libRblas.vecLib.dylib``, a forwarder to Apple **Accelerate** — NOT the
+reference ``blas.f``; on Linux, R binds a plain-ordered BLAS (Debian/
+Ubuntu's reference ``libblas3``, or R's own bundled ``blas.f``) whose
+``ddot`` is strictly sequential accumulation at *every* length (the
+netlib mod-5 unrolled loop preserves left-to-right order). These
+kernels therefore emulate Accelerate's observed behavior only on
+darwin/arm64 — where it was probed empirically via ``ctypes`` against
+``libRblas.dylib`` — and stay plain sequential elsewhere (the
+``_ACCEL_PAIR4`` gate below, the BLAS-ordering analogue of
+``_shared._rfma``'s per-arch contraction policy):
 
 * ``_ddot`` — Accelerate is plain sequential accumulation for n ≤ 3 and
   the pair tree ``(s0+s2) + (s1+s3)`` at n = 4 (verified bit-exact over
@@ -15,19 +22,25 @@ this arch via ``ctypes`` against ``libRblas.dylib``):
   over the rounded products (exhaustive 17M-tree search), nor an
   FMA-fold lane family, nor a compensated/correctly-rounded dot — it is
   behind several dyld-shared-cache dispatch hops and was left
-  unidentified. Here n ≥ 5 falls back to sequential order, so
-  trajectory bit-parity with R holds wherever every dot has length ≤ 4:
-  all of R's ``nlm``/uncmin (its solves stay n-sized; verified 72/72
-  bit-exact against R's compiled ``optif9`` for n ≤ 4) and L-BFGS-B
-  with ≤ 2 parameters (verified 48/48 against R's compiled ``lbfgsb``
-  driver); L-BFGS-B with 3-4 parameters hits length-5..7 dots inside
-  ``dtrsl`` on the ``2·col`` system and drifts ~1 ulp per such call.
+  unidentified. Here n ≥ 5 falls back to sequential order, so on
+  darwin/arm64 trajectory bit-parity with R holds wherever every dot
+  has length ≤ 4: all of R's ``nlm``/uncmin (its solves stay n-sized;
+  verified 72/72 bit-exact against R's compiled ``optif9`` for n ≤ 4)
+  and L-BFGS-B with ≤ 2 parameters (verified 48/48 against R's
+  compiled ``lbfgsb`` driver); L-BFGS-B with 3-4 parameters hits
+  length-5..7 dots inside ``dtrsl`` on the ``2·col`` system and drifts
+  ~1 ulp per such call. On reference-BLAS platforms (Linux CI) the
+  sequential order is exact at every length, so no such boundary
+  exists there.
 * ``_daxpy`` — Accelerate fuses ``y + a*x`` per element (probed: fma
   matches, plain does not); mirrored via ``_rfma`` (fused on arm64,
   plain on x86-64, matching R-as-built per arch).
 * ``_dnrm2`` — Accelerate matches ``sqrt(seq-dot)`` for n ≤ 2; n ≥ 3
   unidentified (used only inside secant-update *skip comparisons* on
-  R's nlm path, where a 1-ulp norm difference is measure-zero).
+  R's nlm path, where a 1-ulp norm difference is measure-zero). The
+  reference ``dnrm2`` (LAPACK ≥ 3.10's three-accumulator version) also
+  reduces to ``sqrt`` of the sequential self-dot for medium-magnitude
+  inputs, so the same code is exact on Linux.
 * ``_dtrsl`` / ``_dpofa`` — LINPACK sources compiled *into* libR by
   gfortran; their internal ``ddot``/``daxpy`` calls resolve to the same
   Accelerate BLAS (routed through ``_ddot``/``_daxpy`` here), and
@@ -43,16 +56,23 @@ dimension submatrix calls).
 from __future__ import annotations
 
 import math
+import platform
+import sys
 
 
 from ._shared import _rfma
 
+# Accelerate is R's BLAS only on macOS, and its n=4 pair tree was
+# probed on arm64; everywhere else R's ddot is plain sequential at
+# every n (reference BLAS), so the tree must not be applied there.
+_ACCEL_PAIR4 = sys.platform == "darwin" and platform.machine() == "arm64"
+
 
 def _ddot(n, dx, dy, ox=0, oy=0):
-    """R-linked (Accelerate) ``ddot`` over ``n`` entries of
-    ``dx[ox:]``/``dy[oy:]``: sequential for n ≤ 3, the probed pair tree
-    at n = 4, sequential fallback beyond (see module docstring)."""
-    if n == 4:
+    """R-linked ``ddot`` over ``n`` entries of ``dx[ox:]``/``dy[oy:]``:
+    sequential everywhere, except the probed Accelerate pair tree at
+    n = 4 on darwin/arm64 (see module docstring)."""
+    if n == 4 and _ACCEL_PAIR4:
         s0 = float(dx[ox]) * float(dy[oy])
         s1 = float(dx[ox + 1]) * float(dy[oy + 1])
         s2 = float(dx[ox + 2]) * float(dy[oy + 2])

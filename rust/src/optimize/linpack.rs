@@ -1,8 +1,9 @@
 //! BLAS level-1 / LINPACK kernels for the R-optimizer ports, mirroring
 //! `hea/R/_linpack.py` (the spec and test oracle) line by line — which in
-//! turn emulates the BLAS R actually links (Accelerate on macOS/arm64;
-//! see the Python module docstring for the probed n≤4 exactness boundary)
-//! and R's gfortran-compiled `dtrsl.f`/`dpofa.f`.
+//! turn emulates the BLAS R actually links per platform (Accelerate on
+//! macOS/arm64, plain-ordered reference BLAS elsewhere; see the Python
+//! module docstring for the probed n≤4 exactness boundary) and R's
+//! gfortran-compiled `dtrsl.f`/`dpofa.f`.
 //!
 //! Matrices are flat column-major with an explicit leading dimension
 //! (`a[i + j*lda]`), exactly like the f2c sources; the Python spec's
@@ -10,10 +11,15 @@
 
 use crate::nmath::util::rfma;
 
-/// `_ddot`: sequential for n ≤ 3, the probed Accelerate pair tree at
-/// n = 4, sequential fallback beyond.
+/// R links Accelerate only on macOS, and its n=4 ddot pair tree was
+/// probed on arm64; on reference-BLAS platforms ddot is sequential at
+/// every n. Mirrors `_linpack._ACCEL_PAIR4`.
+const ACCEL_PAIR4: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+
+/// `_ddot`: sequential everywhere, except the probed Accelerate pair
+/// tree at n = 4 on darwin/arm64.
 pub fn ddot(n: usize, dx: &[f64], ox: usize, incx: usize, dy: &[f64], oy: usize, incy: usize) -> f64 {
-    if n == 4 {
+    if ACCEL_PAIR4 && n == 4 {
         let s0 = dx[ox] * dy[oy];
         let s1 = dx[ox + incx] * dy[oy + incy];
         let s2 = dx[ox + 2 * incx] * dy[oy + 2 * incy];
@@ -142,7 +148,7 @@ pub fn dtrsl(
             for jj in 2..=n {
                 let j = n - jj + 1;
                 let mut dt = 0.0;
-                if jj - 1 == 4 {
+                if ACCEL_PAIR4 && jj - 1 == 4 {
                     let s0 = t[t0 + j + (j - 1) * lda] * b[bi(j)];
                     let s1 = t[t0 + j + 1 + (j - 1) * lda] * b[bi(j + 1)];
                     let s2 = t[t0 + j + 2 + (j - 1) * lda] * b[bi(j + 2)];
@@ -162,7 +168,7 @@ pub fn dtrsl(
             b[bi(0)] /= t[t0];
             for j in 2..=n {
                 let mut dt = 0.0;
-                if j - 1 == 4 {
+                if ACCEL_PAIR4 && j - 1 == 4 {
                     let s0 = t[t0 + (j - 1) * lda] * b[bi(0)];
                     let s1 = t[t0 + 1 + (j - 1) * lda] * b[bi(1)];
                     let s2 = t[t0 + 2 + (j - 1) * lda] * b[bi(2)];
@@ -183,7 +189,7 @@ pub fn dtrsl(
 
 /// `ddot` where both vectors live in one buffer (formk's wn columns).
 pub fn ddot_same(n: usize, buf: &[f64], ox: usize, oy: usize) -> f64 {
-    if n == 4 {
+    if ACCEL_PAIR4 && n == 4 {
         let s0 = buf[ox] * buf[oy];
         let s1 = buf[ox + 1] * buf[oy + 1];
         let s2 = buf[ox + 2] * buf[oy + 2];
@@ -246,7 +252,7 @@ pub fn dtrsl_same(buf: &mut [f64], t0: usize, lda: usize, n: usize, ob: usize, j
             for jj in 2..=n {
                 let j = n - jj + 1;
                 let mut dt = 0.0;
-                if jj - 1 == 4 {
+                if ACCEL_PAIR4 && jj - 1 == 4 {
                     let s0 = buf[t0 + j + (j - 1) * lda] * buf[ob + j];
                     let s1 = buf[t0 + j + 1 + (j - 1) * lda] * buf[ob + j + 1];
                     let s2 = buf[t0 + j + 2 + (j - 1) * lda] * buf[ob + j + 2];
@@ -265,7 +271,7 @@ pub fn dtrsl_same(buf: &mut [f64], t0: usize, lda: usize, n: usize, ob: usize, j
             buf[ob] /= buf[t0];
             for j in 2..=n {
                 let mut dt = 0.0;
-                if j - 1 == 4 {
+                if ACCEL_PAIR4 && j - 1 == 4 {
                     let s0 = buf[t0 + (j - 1) * lda] * buf[ob];
                     let s1 = buf[t0 + 1 + (j - 1) * lda] * buf[ob + 1];
                     let s2 = buf[t0 + 2 + (j - 1) * lda] * buf[ob + 2];
@@ -293,7 +299,7 @@ pub fn dpofa(a: &mut [f64], a0: usize, lda: usize, n: usize) -> i32 {
         let mut s = 0.0;
         for k in 1..=(j - 1) {
             let mut dt = 0.0;
-            if k - 1 == 4 {
+            if ACCEL_PAIR4 && k - 1 == 4 {
                 let s0 = a[a0 + (k - 1) * lda] * a[a0 + (j - 1) * lda];
                 let s1 = a[a0 + 1 + (k - 1) * lda] * a[a0 + 1 + (j - 1) * lda];
                 let s2 = a[a0 + 2 + (k - 1) * lda] * a[a0 + 2 + (j - 1) * lda];
