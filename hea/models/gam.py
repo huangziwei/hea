@@ -15196,11 +15196,23 @@ def _single_sp(X, S, target: float = 0.5, tol: float | None = None) -> float:
     (mgcv.r:4663), which the gam/bam fit path never sets; it is otherwise an
     exported utility (parity-tested against ``mgcv:::single.sp``)."""
     from scipy.optimize import brentq
+
+    from ..R.linalg import dqrdc2
     if tol is None:
         tol = float(np.finfo(float).eps) * 100.0
     X = np.asarray(X, dtype=float)
     S = np.asarray(S, dtype=float)
-    R = np.linalg.qr(X, mode="r")
+    # R <- qr.R(qr(X)): R's qr() is dqrdc2 (rank-revealing LINPACK QR,
+    # negligible columns cycled last), not LAPACK dgeqrf. The distinction
+    # is load-bearing: for rank-deficient X, dqrdc2 leaves an EXACT 0.0 on
+    # the trailing diagonal, which is precisely what backsolve's
+    # singularity error (bakslv.c checks `== 0`) — and hence the -1
+    # return — keys on; an unpivoted BLAS-dispatched dgeqrf leaves
+    # CPU-dependent ~1e-17 noise there instead, silently changing the
+    # answer. Like qr.R, the triangle is taken in PIVOTED column order and
+    # used against the unpivoted S (mgcv's own "### BUG? pivoting?").
+    qr_mat, _, _, _ = dqrdc2(X)
+    R = np.triu(qr_mat[:min(X.shape), :])
     try:
         RS = solve_triangular(R, S, lower=False, trans="T")
         RSR = solve_triangular(R, RS.T, lower=False, trans="T")
