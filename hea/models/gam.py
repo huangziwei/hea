@@ -102,6 +102,8 @@ def gam_control(
     irls_reg: float = 0.0,
     rank_tol: float | None = None,
     newton: dict | None = None,
+    nlm: dict | None = None,
+    optim: dict | None = None,
     scale_est: str = "fletcher",
     edge_correct: bool | float = False,
     efs_lspmax: float = 15.0,
@@ -196,12 +198,51 @@ def gam_control(
             f"unknown newton control entries: {sorted(nt)} (accepted: "
             "conv_tol, maxNstep, maxSstep, maxHalf)"
         )
+    # nlm defaults (gam.control, mgcv.r:2500-2517): ndigit from epsilon
+    # (capped at the IEEE 15), gradtol = 10*epsilon, stepmax 2 (nlm
+    # aborts after hitting stepmax 5 consecutive times, so not too
+    # small), steptol 1e-4, iterlim 200, no analytic-derivative checks.
+    nl = dict(nlm or {})
+    ndigit = nl.pop("ndigit", None)
+    if ndigit is None or ndigit < 2:
+        ndigit = max(2, int(np.ceil(-np.log10(epsilon))))
+    ndigit = int(round(ndigit))
+    ndigit_max = int(np.floor(-np.log10(np.finfo(float).eps)))
+    if ndigit > ndigit_max:
+        ndigit = ndigit_max
+    stepmax = abs(float(nl.pop("stepmax", 2.0)))
+    if stepmax == 0.0:
+        stepmax = 2.0
+    nlm_full = {
+        "ndigit": ndigit,
+        "gradtol": abs(float(nl.pop("gradtol", epsilon * 10))),
+        "stepmax": stepmax,
+        "steptol": abs(float(nl.pop("steptol", 1e-4))),
+        "iterlim": abs(int(nl.pop("iterlim", 200))),
+        "check_analyticals": bool(nl.pop("check_analyticals", False)),
+    }
+    if nl:
+        raise ValueError(
+            f"unknown nlm control entries: {sorted(nl)} (accepted: "
+            "ndigit, gradtol, stepmax, steptol, iterlim, "
+            "check_analyticals)"
+        )
+    # optim defaults (gam.control, mgcv.r:2526-2528)
+    om = dict(optim or {})
+    optim_full = {"factr": abs(float(om.pop("factr", 1e7)))}
+    if om:
+        raise ValueError(
+            f"unknown optim control entries: {sorted(om)} (accepted: "
+            "factr)"
+        )
     return {
         "epsilon": float(epsilon),
         "maxit": int(maxit),
         "irls_reg": float(irls_reg),
         "rank_tol": float(rank_tol),
         "newton": newton_full,
+        "nlm": nlm_full,
+        "optim": optim_full,
         "scale_est": scale_est,
         "edge_correct": edge_correct,
         "efs_lspmax": float(efs_lspmax),
@@ -5101,6 +5142,116 @@ def gam_outer(theta0, *, optimizer, criterion, control,
     )
 
 
+def gam_outer_nlm_optim(theta0, *, optimizer2, criterion, fscale, control,
+                        include_log_phi, include_family_theta, n_work,
+                        family, scale_fixed_value, fit_fn, score_fn,
+                        rho_full_fn, T_working_fn):
+    """mgcv ``gam.outer``'s nlm/optim branch (mgcv.r:1692-1717) with the
+    three gam.fit3 objective wrappers it drives — ``gam2objective``
+    (deriv-0 score), ``gam2derivative`` (deriv-1 gradient) and
+    ``gam4objective`` (score + gradient attribute for nlm), all from
+    gam.fit3.r:2145-2211.
+
+    The optimizer sees mgcv's lsp layout ``[θ_fam | ρ_work | log φ?]``
+    (estimate.gam prepends family θ, mgcv.r:2040-2057, and appends the
+    log-scale slot) so that every dot product and line-search decision
+    inside :func:`hea.R.optimize.nlm` / :func:`hea.R.optimize.optim`
+    accumulates in exactly R's coordinate order; hea's working layout
+    ``[ρ_work | log φ? | θ_fam]`` is recovered by an exact permutation
+    at the score boundary. ``L``/``lsp0`` (id-linked / partially fixed
+    sp) are supported exactly as in mgcv: the objectives map working →
+    full lsp via ``rho_full_fn`` and chain gradients back through
+    ``T_work`` (mgcv's ``t(L)%*%ret``).
+
+    nlm is called as mgcv does (mgcv.r:1697-1703): ``typsize = lsp``
+    (the *initial* iterate — negative entries are made positive by
+    UNCMIN's optchk), ``fscale = null.scale``, and the gam.control nlm
+    knobs; optim as mgcv.r:1706-1708: L-BFGS-B with ``fnscale =
+    null.scale``, ``factr`` from control and ``lmm = min(5,
+    length(lsp))``. When ``lsp`` is empty mgcv coerces the method to
+    ``"no.sps"`` (mgcv.r:1646-1648): no optimizer runs and the single
+    final ``gam2objective`` fit is returned (``outer_info`` None).
+
+    Like mgcv, the returned object is the FINAL ``gam2objective`` call's
+    deriv-0 fit (mgcv.r:1711-1716) — so no ``db.drho``-derived pieces
+    (Vc/edf2/sp-uncertainty CIs) exist on this path, exactly as for a
+    deriv-0 mgcv fit. Returns ``{"theta", "fit", "outer_info",
+    "score"}`` with ``theta`` in hea's working layout.
+    """
+    from ..R.optimize import nlm as _r_nlm
+    from ..R.optimize import optim as _r_optim
+
+    theta0 = np.asarray(theta0, dtype=float)
+    n_theta_fam = family.n_theta if include_family_theta else 0
+    n_extra = (1 if include_log_phi else 0) + n_theta_fam
+    T_work = T_working_fn(n_extra)
+
+    def _to_lsp(t):
+        # hea working [ρ | log φ? | θ_fam] → mgcv lsp [θ_fam | ρ | log φ?]
+        base = n_work + (1 if include_log_phi else 0)
+        return np.concatenate([t[base:base + n_theta_fam], t[:base]])
+
+    def _to_working(lsp):
+        return np.concatenate([lsp[n_theta_fam:],
+                               lsp[:n_theta_fam]])
+
+    def _eval(lsp, deriv):
+        t = _to_working(np.asarray(lsp, dtype=float))
+        rho_t = rho_full_fn(t[:n_work])
+        lp_t = (float(t[n_work]) if include_log_phi
+                else float(np.log(scale_fixed_value)))
+        if n_theta_fam > 0:
+            base = n_work + (1 if include_log_phi else 0)
+            family.set_theta(t[base:base + n_theta_fam])
+        fit_t = fit_fn(rho_t)
+        out = score_fn(rho_t, lp_t, fit_t, deriv, criterion,
+                       include_log_phi=include_log_phi,
+                       include_family_theta=include_family_theta,
+                       T_work=T_work)
+        return fit_t, out
+
+    fit_cell = [None]
+
+    def gam2objective(lsp):
+        fit_t, out = _eval(lsp, 0)
+        fit_cell[0] = fit_t
+        return float(out["score"])
+
+    def gam2derivative(lsp):
+        _, out = _eval(lsp, 1)
+        return _to_lsp(np.asarray(out["grad"], dtype=float))
+
+    def gam4objective(lsp):
+        fit_t, out = _eval(lsp, 1)
+        fit_cell[0] = fit_t
+        return (float(out["score"]),
+                _to_lsp(np.asarray(out["grad"], dtype=float)))
+
+    ctrl = control or _GAM_CONTROL_DEFAULTS
+    lsp = _to_lsp(theta0)
+    if lsp.size == 0:
+        b = None                       # mgcv's "no.sps"
+    elif optimizer2 == "nlm":
+        cn = ctrl["nlm"]
+        b = _r_nlm(gam4objective, lsp, typsize=lsp.copy(),
+                   fscale=fscale, stepmax=cn["stepmax"],
+                   ndigit=cn["ndigit"], gradtol=cn["gradtol"],
+                   steptol=cn["steptol"], iterlim=cn["iterlim"],
+                   check_analyticals=cn["check_analyticals"])
+        lsp = np.asarray(b["estimate"], dtype=float)
+    else:
+        b = _r_optim(lsp, gam2objective, gam2derivative,
+                     method="L-BFGS-B",
+                     control={"fnscale": fscale,
+                              "factr": ctrl["optim"]["factr"],
+                              "lmm": min(5, lsp.size)})
+        lsp = np.asarray(b["par"], dtype=float)
+    # final model fit, with warnings (mgcv.r:1711)
+    score = gam2objective(lsp)
+    return {"theta": _to_working(lsp), "fit": fit_cell[0],
+            "outer_info": b, "score": score}
+
+
 def efsudr(rho0, *, log_phi0, family, family_mgcv_extended, fit_fn,
            reml_fn, scale_est_fn, fisher_view_fn, UrS, reparam_Y,
            reparam_cache, p, n, control, scale_fixed_value):
@@ -5681,7 +5832,8 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
                  profile_log_phi_fixed_sp=None, magic_fit_state=None,
                  magic_optimize=None, get_outer_fit=None, general=None,
                  outer_bfgs=None, get_outer_info=None,
-                 optimizer=("outer", "newton"), outer_efsudr=None):
+                 optimizer=("outer", "newton"), outer_efsudr=None,
+                 outer_nlm_optim=None):
     """mgcv ``estimate.gam`` (mgcv.r:1872) — smoothness selection + final fit,
     for BOTH ordinary and general families (mgcv branches internally on the
     family class; hea takes the general slice via ``general=``). Ordinary
@@ -5797,6 +5949,7 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
     log_phi_hat = None
     tw_info = None
     used_magic = False
+    used_nlm_optim = False
     if n_sp == 0:
         # No smooths — degenerate to unpenalized least squares. Still go
         # through the fit so all mgcv post-fit attributes are populated.
@@ -5858,15 +6011,16 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
             cur_rho = rho0_full
         else:
             cur_rho, *_ = np.linalg.lstsq(G.L, rho0_full, rcond=None)
+        # mgcv's null.scale = Σ dev_resids(y, ȳ)/n from get.null.coef
+        # (mgcv.r:1854-1870): the log φ seed (mgcv.r:2027-2029) AND the
+        # fscale gam.outer hands nlm/optim (mgcv.r:2062, 1698, 1708).
+        # mum = mean(y) unweighted (mgcv.r:1863) but the dev.resids
+        # carry the prior weights (mgcv.r:1868).
+        mu_null0 = np.full(n, float(np.mean(G.y_arr)))
+        null_scale = float(np.sum(family.dev_resids(
+            G.y_arr, mu_null0, G.wt
+        ))) / n
         if include_log_phi:
-            # mgcv seeds log φ at log(null.scale/10), null.scale = Σ
-            # dev_resids(y, ȳ)/n from get.null.coef (mgcv.r:1854-1870,
-            # 2027-2029); mum = mean(y) unweighted (mgcv.r:1863) but the
-            # dev.resids carry the prior weights (mgcv.r:1868).
-            mu_null0 = np.full(n, float(np.mean(G.y_arr)))
-            null_scale = float(np.sum(family.dev_resids(
-                G.y_arr, mu_null0, G.wt
-            ))) / n
             cur_logphi = float(np.log(max(null_scale / 10.0, 1e-12)))
         else:
             cur_logphi = 0.0  # GCV does not put log φ in θ
@@ -5901,7 +6055,7 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
                 }
             return {"fit": fit, "rho_hat": rho_hat, "sp": sp_out,
                     "log_phi_hat": log_phi_hat, "used_magic": False,
-                    "tw_info": tw_info}
+                    "used_nlm_optim": False, "tw_info": tw_info}
 
         theta0_parts = [cur_rho]
         if include_log_phi:
@@ -5923,10 +6077,23 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
         if use_magic(_criterion, include_log_phi, include_family_theta):
             # Gaussian-identity additive + GCV.Cp → mgcv's `magic` fast path
             # (am.fit, mgcv.r:2001). theta == per-penalty ρ here (L is None).
+            # mgcv never reaches gam.outer on this path (outer.looping is
+            # FALSE, mgcv.r:1933), so optimizer[1] is ignored like mgcv.
             used_magic = True
             theta_hat = gam_outer(
                 theta0, optimizer="magic", criterion=_criterion,
                 control=G.control, magic_fn=magic_optimize)
+        elif optimizer[1] in ("nlm", "optim"):
+            # gam.outer's "methods calling gam.fit3" branch
+            # (mgcv.r:1692-1717): nlm on gam4objective / optim L-BFGS-B
+            # on gam2objective+gam2derivative, then one final deriv-0
+            # gam2objective fit.
+            used_nlm_optim = True
+            theta_hat = outer_nlm_optim(
+                theta0, optimizer2=optimizer[1], criterion=_criterion,
+                include_log_phi=include_log_phi,
+                include_family_theta=include_family_theta,
+                fscale=null_scale)
         else:
             theta_hat = gam_outer(
                 theta0, optimizer="newton", criterion=_criterion,
@@ -5971,7 +6138,7 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
             log_phi_hat = float(np.log(max(phi_pearson(fit), 1e-300)))
     return {"fit": fit, "rho_hat": rho_hat, "sp": sp_out,
             "log_phi_hat": log_phi_hat, "used_magic": used_magic,
-            "tw_info": tw_info}
+            "used_nlm_optim": used_nlm_optim, "tw_info": tw_info}
 
 
 class gam:
@@ -6009,9 +6176,15 @@ class gam:
         ``family.available_derivs == 0``. Like mgcv's, efs ignores
         ``gamma`` and computes no smoothing-parameter-uncertainty
         pieces (``Vc``/``edf2``/vcomp CIs). The second element picks
-        the outer method; only ``"newton"`` is ported
-        (``"bfgs"``/``"nlm"``/``"optim"`` raise, roadmap C9; bfgs is
-        available for general families).
+        the outer method: ``"newton"`` (mgcv's default analytic
+        Newton), or the derivative-driven quasi-Newton alternatives
+        ``"nlm"`` (Dennis-Schnabel UNCMIN on the score + exact
+        gradient, mgcv.r:1697) and ``"optim"`` (L-BFGS-B,
+        mgcv.r:1706) — both run R's own optimizer algorithms
+        (:mod:`hea.R.uncmin` / :mod:`hea.R.lbfgsb`) and, like mgcv,
+        finish on a derivative-free fit, so they also report no
+        ``Vc``/``edf2``/vcomp CIs. ``"bfgs"`` is available for
+        general families only (standard-family bfgs: roadmap C9).
     sp : None or array-like, optional
         Supplied smoothing parameters. Non-negative entries are fixed
         at that value; **negative entries are estimated** (mgcv's
@@ -6322,8 +6495,8 @@ class gam:
         # method defaulting to "newton" (gam.outer, mgcv.r:1643-1644).
         # hea validates both elements up front — mgcv's second-element
         # check sits in gam.outer and is skipped only by paths hea does
-        # not have (the magic additive-GCV route). Only newton and efs
-        # are ported; bfgs/nlm/optim raise honestly (roadmap C9).
+        # not have (the magic additive-GCV route). newton, efs, nlm and
+        # optim are ported; standard-family bfgs raises honestly.
         opt = ((optimizer,) if isinstance(optimizer, str)
                else tuple(str(o) for o in optimizer))
         if not 1 <= len(opt) <= 2:
@@ -6333,17 +6506,17 @@ class gam:
         opt = (opt[0], opt[1] if len(opt) == 2 else "newton")
         if opt[1] not in ("newton", "bfgs", "nlm", "optim"):
             raise ValueError("unknown outer optimization method.")
-        if opt[0] == "outer" and opt[1] != "newton":
+        if opt[0] == "outer" and opt[1] == "bfgs":
             # bfgs is ported for GENERAL families (item 7 — the gam.fit5
             # outer loop, mgcv's bfgs gam.fit3.r:1722); the standard
-            # gam.fit3 bfgs and nlm/optim remain unported (roadmap C9).
+            # gam.fit3 bfgs remains unported (roadmap C9).
             _gen = getattr(family, "is_general", False)
-            if not (opt[1] == "bfgs" and _gen):
+            if not _gen:
                 raise NotImplementedError(
-                    f"optimizer=('outer', '{opt[1]}') is not ported — only "
-                    "'newton' (and the 'efs' first element) are available "
-                    "for this model (bfgs is ported for general families; "
-                    "standard-family bfgs/nlm/optim: roadmap C9).")
+                    "optimizer=('outer', 'bfgs') is ported for general "
+                    "families only; the standard-family gam.fit3 bfgs "
+                    "(gam.fit3.r:1722) is not ported (roadmap C9). Use "
+                    "'newton', 'nlm', 'optim' or 'efs'.")
         self.optimizer = opt
         if isinstance(formula, (list, tuple)):
             # Multiple linear predictors → general-family fitting via
@@ -7050,7 +7223,8 @@ class gam:
             outer_newton=self._outer_newton,
             magic_optimize=self._magic_optimize,
             get_outer_fit=lambda: self._outer_fit,
-            optimizer=self.optimizer, outer_efsudr=self._outer_efsudr)
+            optimizer=self.optimizer, outer_efsudr=self._outer_efsudr,
+            outer_nlm_optim=self._outer_nlm_optim)
         fit = _res["fit"]
         rho_hat = _res["rho_hat"]
         self.sp = _res["sp"]
@@ -7062,9 +7236,13 @@ class gam:
         # fits are deriv-0: mgcv's gam.fit3.post.proc then has db.drho
         # NULL and computes NO sp-uncertainty pieces (edf2/Vc,
         # gam.fit3.r:978) and gam.vcomp has no outer.info$hess — the
-        # post-fit blocks below mirror that.
+        # post-fit blocks below mirror that. The nlm/optim outer path
+        # ends on a deriv-0 gam2objective fit too (mgcv.r:1711), so it
+        # shares every deriv-0 post-fit consequence.
         self._used_efs = (self.optimizer[0] == "efs" and sp is None
                           and n_sp > 0)
+        self._used_nlm_optim = _res.get("used_nlm_optim", False)
+        self._outer_deriv0 = self._used_efs or self._used_nlm_optim
 
         # Surface inner-loop warnings once, for the final fit only — mgcv
         # accumulates them in gam.fit3's warn list and intermediate newton()
@@ -7398,7 +7576,7 @@ class gam:
         if (
             method in ("REML", "ML", "P-REML", "P-ML")
             and n_sp > 0
-            and not self._used_efs
+            and not self._outer_deriv0
             and np.isfinite(sigma_squared)
             and sigma_squared > 0
         ):
@@ -7472,7 +7650,7 @@ class gam:
         # redundant `_compute_Vr` re-fits (it passes no `fit`, so the
         # `_reml_hessian` fallback at the GCV branch re-solves the PIRLS).
         compute_edf2 = (method in ("REML", "ML", "P-REML", "P-ML")
-                        and not self._used_efs)
+                        and not self._outer_deriv0)
         if n_sp > 0 and (self._used_magic or not compute_edf2):
             # mgcv's magic.post.proc (mgcv.r:4475-4501): edf1 = 2·edf − diag(FF)
             # only; NO edf2 / Vc. edf2 := edf so logLik.gam/AIC use edf.
@@ -8601,6 +8779,31 @@ class gam:
             rho_full_fn=self._rho_full,
         )
         self._outer_info = res["outer_info"]
+        return res["theta"]
+
+    def _outer_nlm_optim(self, theta0: np.ndarray, *, optimizer2: str,
+                         criterion: str, include_log_phi: bool,
+                         include_family_theta: bool,
+                         fscale: float) -> np.ndarray:
+        """Shim → free `gam_outer_nlm_optim` (mgcv gam.outer's nlm/optim
+        branch, mgcv.r:1692-1717). Sources the fit/score machinery from
+        ``self`` like `_outer_newton` and persists the final deriv-0
+        ``gam2objective`` fit + the optimizer return (``outer_info``:
+        nlm's minimum/estimate/gradient/code/iterations, optim's
+        par/value/counts/convergence/message)."""
+        res = gam_outer_nlm_optim(
+            theta0, optimizer2=optimizer2, criterion=criterion,
+            fscale=fscale, control=self._control,
+            include_log_phi=include_log_phi,
+            include_family_theta=include_family_theta,
+            n_work=self._work_dim, family=self.family,
+            scale_fixed_value=self._scale_fixed_value,
+            fit_fn=self._fit_given_rho, score_fn=self._score_all,
+            rho_full_fn=self._rho_full,
+            T_working_fn=self._T_working,
+        )
+        self._outer_info = res["outer_info"]
+        self._outer_fit = res["fit"]
         return res["theta"]
 
     def _outer_efsudr(self, rho0: np.ndarray,

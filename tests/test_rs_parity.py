@@ -1028,3 +1028,127 @@ def test_xwx_smooth_block_ar1_tri_parity():
           pl.DataFrame({"y": rng.standard_normal(nm),
                         "Lag": np.tile(np.linspace(0, 1, L), (nm, 1)),
                         "Xc": Xc, "Stim": rng.standard_normal((nm, L))}))
+
+
+# ---------------------------------------------------------------------------
+# R-optimizer ports (uncmin / L-BFGS-B): rs == python differential.
+# Unlike the d/p/q kernels, the Python optimizers involve no numpy
+# transcendentals — pure arithmetic + libm sqrt/hypot/pow — so the pure-
+# Python modules ARE the bit-exact oracle here (they are pinned to live R
+# both by tests/test_r_optimize.py and by the ctypes trajectory oracles
+# against libR's compiled optif9/lbfgsb documented in hea/R/uncmin.py).
+# The Rust port must reproduce them bit-for-bit including the evaluation
+# trajectory.
+
+
+def test_optif9_rs_python_parity():
+    from hea.R.uncmin import optif9 as py_optif9
+
+    def make(track):
+        def f_val(x):
+            track.append(np.array(x, dtype=float, copy=True))
+            v = 0.0
+            for i in range(len(x) - 1):
+                v += 100.0 * (x[i + 1] - x[i] * x[i]) ** 2 \
+                     + (1.0 - x[i]) ** 2
+            return float(v)
+
+        def f_grad(x):
+            n = len(x)
+            g = np.zeros(n)
+            for i in range(n - 1):
+                t = x[i + 1] - x[i] * x[i]
+                g[i] += -400.0 * x[i] * t - 2.0 * (1.0 - x[i])
+                g[i + 1] += 200.0 * t
+            return g
+        return f_val, f_grad
+
+    rng = np.random.default_rng(42)
+    for n in (2, 3, 4):
+        for rep in range(3):
+            x0 = rng.standard_normal(n) * (1.0 + rep)
+            ts = np.abs(rng.standard_normal(n)) + 0.1
+            for msg, ndig, smx, stol, ilim in (
+                    (9, 12, 1000.0, 1e-6, 100),
+                    (15, 7, 2.0, 1e-4, 200)):
+                tr_py, tr_rs = [], []
+                fv, fg = make(tr_py)
+                py = py_optif9(n, x0.copy(), fv, fg, lambda x, a: None,
+                               ts.copy(), 1.0, 1, 1, msg, ndig, ilim,
+                               1, 0, 1.0, 1e-6, smx, stol)
+                fv2, fg2 = make(tr_rs)
+                rs_out = rs.optif9(x0.copy(), fv2, fg2, None, ts.copy(),
+                                   1.0, 1, 1, msg, ndig, ilim, 1, 0,
+                                   1.0, 1e-6, smx, stol)
+                assert len(tr_py) == len(tr_rs)
+                for a, b in zip(tr_py, tr_rs):
+                    np.testing.assert_array_equal(a, b)
+                np.testing.assert_array_equal(py[0], rs_out[0])  # xpls
+                assert py[1] == rs_out[1]                        # fpls
+                np.testing.assert_array_equal(py[2], rs_out[2])  # gpls
+                assert py[3:] == tuple(rs_out[3:])   # itrmcd/itncnt/msg
+
+
+def test_lbfgsb_rs_python_parity():
+    import math
+
+    from hea.R.lbfgsb import lbfgsb as py_lbfgsb
+
+    def f_val(x):
+        v = 0.0
+        for i in range(len(x) - 1):
+            v += 100.0 * (x[i + 1] - x[i] * x[i]) ** 2 \
+                 + (1.0 - x[i]) ** 2
+        return float(v)
+
+    def f_grad(x):
+        n = len(x)
+        g = np.zeros(n)
+        for i in range(n - 1):
+            t = x[i + 1] - x[i] * x[i]
+            g[i] += -400.0 * x[i] * t - 2.0 * (1.0 - x[i])
+            g[i + 1] += 200.0 * t
+        return g
+
+    rng = np.random.default_rng(7)
+    for n in (2, 3, 4):
+        for rep in range(3):
+            x0 = rng.standard_normal(n) * (1 + rep)
+            for lo, up, nbd in (
+                    ([-math.inf] * n, [math.inf] * n, [0] * n),
+                    (list(x0 - 0.7), list(x0 + 0.9), [2] * n),
+                    ([-1.0] * n, [math.inf] * n,
+                     [1 if i % 2 == 0 else 0 for i in range(n)])):
+                m = min(5, n)
+                tr_py, tr_rs = [], []
+
+                def fminfn(x, tr=tr_py):
+                    tr.append(np.array(x, dtype=float, copy=True))
+                    return f_val(x)
+
+                def fmingr(x, g):
+                    g[:] = f_grad(x)
+
+                xp = np.array(x0, dtype=float)
+                py = py_lbfgsb(n, m, xp, np.array(lo), np.array(up),
+                               np.array(nbd, dtype=np.int64), fminfn,
+                               fmingr, 1e7, 0.0, 100, 0, 10)
+
+                def fminfn2(x, tr=tr_rs):
+                    tr.append(np.array(x, dtype=float, copy=True))
+                    return f_val(x)
+
+                def gr_ret(x):
+                    return f_grad(x)
+
+                xr, val, fail, fnc, grc, msg = rs.lbfgsb_drive(
+                    n, m, np.array(x0, dtype=float), np.array(lo),
+                    np.array(up), np.array(nbd, dtype=np.int64),
+                    fminfn2, gr_ret, 1e7, 0.0, 100)
+                assert len(tr_py) == len(tr_rs)
+                for a, b in zip(tr_py, tr_rs):
+                    np.testing.assert_array_equal(a, b)
+                np.testing.assert_array_equal(xp, xr)
+                assert py[0] == val and py[1] == fail
+                assert py[2] == fnc and py[3] == grc
+                assert py[4] == msg

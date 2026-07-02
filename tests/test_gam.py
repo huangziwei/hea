@@ -3889,8 +3889,17 @@ def test_gam_control_validation():
         gam_control(idLinksBases=False)
     with pytest.raises(ValueError, match="newton control"):
         gam_control(newton={"bogus": 1})
-    with pytest.raises(TypeError):
-        gam_control(nlm={})            # unported optimizer knob
+    with pytest.raises(ValueError, match="nlm control"):
+        gam_control(nlm={"bogus": 1})
+    with pytest.raises(ValueError, match="optim control"):
+        gam_control(optim={"bogus": 1})
+    # mgcv gam.control nlm defaults (mgcv.r:2500-2517): ndigit from
+    # epsilon, gradtol = 10*epsilon, stepmax 2, steptol 1e-4
+    c = gam_control()
+    assert c["nlm"] == {"ndigit": 7, "gradtol": 1e-6, "stepmax": 2.0,
+                        "steptol": 1e-4, "iterlim": 200,
+                        "check_analyticals": False}
+    assert c["optim"] == {"factr": 1e7}
     with pytest.raises(ValueError, match="epsilon"):
         gam_control(epsilon=0.0)
     # raw dicts revalidate through gam_control inside gam()
@@ -5199,8 +5208,8 @@ def test_optimizer_knob_efs_and_validation():
     # gam.outer's "unknown outer optimization method." (mgcv.r:
     # 1643-1644), efs forcing method="REML" (mgcv.r:1914), and the
     # available.derivs==1 coercion skipped when efs is requested
-    # (mgcv.r:1907). Only newton + efs are ported (C9: bfgs/nlm/optim;
-    # single-formula efs = the efsudr port, gam.fit4.r:822).
+    # (mgcv.r:1907). newton/efs/nlm/optim are ported (nlm/optim pins:
+    # test_nlm_optim_* below); standard-family bfgs raises (C9).
     from hea.family import gaulss
 
     df = _fit5_fixture()
@@ -5477,6 +5486,194 @@ def test_estimate_theta_tw_joint_scale_matches_mgcv():
                           tol=1e-7)
     np.testing.assert_allclose(out, [-0.949822462026, 0.475006868998],
                                rtol=1e-9)
+
+
+def test_nlm_optim_gaussian_matches_mgcv():
+    # gam.outer's nlm/optim branch (mgcv.r:1692-1717): R's own
+    # optimizers (uncmin/L-BFGS-B, ported bit-exact in hea.R.uncmin /
+    # hea.R.lbfgsb) driving gam2objective/gam2derivative/gam4objective.
+    # R ref (mgcv 1.9-4, R 4.6.0): set.seed(2); n=120; x0<-runif(n);
+    # x1<-runif(n); f<-0.2*x0^11*(10*(1-x0))^6+10*(10*x0)^3*(1-x0)^10;
+    # y<-f+2*sin(2*pi*x1)+rnorm(n)*2
+    #   optimizer=c("outer","nlm"):  sp .0210021359485741
+    #     .521377903996854, REML 269.93183136117, edf 9.88096324336631,
+    #     sig2 4.3917390183326, code 5 (stepmax hit 5x — mgcv's
+    #     gam.control stepmax=2 genuinely stalls nlm here), 23 iters
+    #   optimizer=c("outer","optim"): sp .015299488978041
+    #     .160238650281232, REML 269.356777836228, edf 11.2063972648132,
+    #     sig2 4.27630344586604, convergence 0, counts 20 20
+    from hea.R.rng import RGenerator
+    g = RGenerator(2)
+    n = 120
+    x0 = g.uniform(0.0, 1.0, n)
+    x1 = g.uniform(0.0, 1.0, n)
+    f = (0.2 * x0 ** 11 * (10 * (1 - x0)) ** 6
+         + 10 * (10 * x0) ** 3 * (1 - x0) ** 10)
+    y = f + 2.0 * np.sin(2 * np.pi * x1) + g.normal(0.0, 2.0, n)
+    df = pl.DataFrame({"y": y, "x0": x0, "x1": x1})
+
+    m = gam("y ~ s(x0) + s(x1)", df, method="REML",
+            optimizer=("outer", "nlm"))
+    np.testing.assert_allclose(
+        m.sp, [0.0210021359485741, 0.521377903996854], rtol=1e-8)
+    np.testing.assert_allclose(m.REML_criterion / 2, 269.93183136117,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(float(m.edf_total), 9.88096324336631,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sigma_squared, 4.3917390183326,
+                               rtol=1e-8)
+    assert m._outer_info["code"] == 5
+    assert m._outer_info["iterations"] == 23
+    # deriv-0 final fit (the closing gam2objective, mgcv.r:1711):
+    # edf2/Vc are NULL in mgcv → hea's magic-style fallbacks
+    np.testing.assert_allclose(m.edf2, m.edf)
+    np.testing.assert_allclose(m.Vc, m.Vp)
+    assert m.sp_vcov() is None
+
+    mo = gam("y ~ s(x0) + s(x1)", df, method="REML",
+             optimizer=("outer", "optim"))
+    np.testing.assert_allclose(
+        mo.sp, [0.015299488978041, 0.160238650281232], rtol=1e-8)
+    np.testing.assert_allclose(mo.REML_criterion / 2, 269.356777836228,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(float(mo.edf_total), 11.2063972648132,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(mo.sigma_squared, 4.27630344586604,
+                               rtol=1e-8)
+    info = mo._outer_info
+    assert info["convergence"] == 0
+    assert info["counts"] == {"function": 20, "gradient": 20}
+    assert info["message"].startswith(
+        "CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH")
+    np.testing.assert_allclose(mo.edf2, mo.edf)
+
+
+def test_nlm_optim_poisson_ubre_and_reml_matches_mgcv():
+    # scale-known family through both criteria. R refs (same stream as
+    # test_efsudr_gaussian_poisson: set.seed(2), n=200,
+    # y<-rpois(exp(0.6*sin(2*pi*x)))):
+    #   REML nlm:   sp 0.194798912292, REML 269.645140976,
+    #               edf 5.15260740165, code 1, 6 iters
+    #   REML optim: sp 0.194796680761, counts 7 7
+    #   GCV.Cp (UBRE) nlm:   sp 0.258259939929, UBRE 0.144185096525,
+    #               edf 4.89211534121, code 1, 7 iters
+    #   GCV.Cp (UBRE) optim: sp 0.258254628985, UBRE 0.144185096523,
+    #               counts 7 7
+    from hea.family import Poisson
+    from hea.R.rng import RGenerator
+    g = RGenerator(2)
+    n = 200
+    x = g.uniform(0, 1, n)
+    y = g.poisson(np.exp(0.6 * np.sin(2 * np.pi * x))).astype(float)
+    df = pl.DataFrame({"y": y, "x": x})
+
+    m = gam("y ~ s(x)", df, family=Poisson(), method="REML",
+            optimizer=("outer", "nlm"))
+    np.testing.assert_allclose(m.sp[0], 0.194798912292, rtol=1e-7)
+    np.testing.assert_allclose(m.REML_criterion / 2, 269.645140976,
+                               rtol=0, atol=1e-6)
+    assert m._outer_info["code"] == 1
+    assert m._outer_info["iterations"] == 6
+
+    mo = gam("y ~ s(x)", df, family=Poisson(), method="REML",
+             optimizer=("outer", "optim"))
+    np.testing.assert_allclose(mo.sp[0], 0.194796680761, rtol=1e-8)
+    np.testing.assert_allclose(mo.REML_criterion / 2, 269.645140976,
+                               rtol=0, atol=1e-6)
+    assert mo._outer_info["counts"] == {"function": 7, "gradient": 7}
+
+    mg = gam("y ~ s(x)", df, family=Poisson(), method="GCV.Cp",
+             optimizer=("outer", "nlm"))
+    np.testing.assert_allclose(mg.sp[0], 0.258259939929, rtol=1e-7)
+    np.testing.assert_allclose(mg.GCV_score, 0.144185096525,
+                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(float(mg.edf_total), 4.89211534121,
+                               rtol=0, atol=1e-6)
+    assert mg._outer_info["code"] == 1
+    assert mg._outer_info["iterations"] == 7
+
+    mgo = gam("y ~ s(x)", df, family=Poisson(), method="GCV.Cp",
+              optimizer=("outer", "optim"))
+    np.testing.assert_allclose(mgo.sp[0], 0.258254628985, rtol=1e-7)
+    np.testing.assert_allclose(mgo.GCV_score, 0.144185096523,
+                               rtol=0, atol=1e-9)
+    assert mgo._outer_info["convergence"] == 0
+    assert mgo._outer_info["counts"] == {"function": 7, "gradient": 7}
+
+
+def test_nlm_optim_nb_tw_matches_mgcv():
+    # Extended families through nlm/optim: the optimizer sees mgcv's
+    # lsp layout [θ_fam | ρ | log φ?] (gam_outer_nlm_optim permutes at
+    # the score boundary), gam.fit3 dispatches to gam.fit4 internally.
+    # R refs (mgcv 1.9-4) on the identical data (CSV round-trip):
+    #   nb  nlm:   sp 0.111885869757, REML 356.788022059, exp(θ̂)
+    #              2.33156810451, code 1, 10 iters
+    #   nb  optim: sp 0.111890801175, REML 356.788022061, conv 0
+    #   tw  nlm:   sp 0.220459770958, REML 570.55170345, p̂
+    #              1.2530740822, sig2 1.44666399882, code 1, 19 iters
+    #   tw  optim: sp 0.220459657052, REML 570.55170345, conv 0
+    # nlm trajectories reproduce R's exactly (same codes/iteration
+    # counts; hea.R.uncmin is bit-exact vs R's compiled optif9). optim
+    # at ≥3 optimization parameters crosses the Accelerate length-5+
+    # ddot boundary inside dtrsl (see hea/R/_linpack.py), so its
+    # iterate path can part from R's at ulp level and stop elsewhere
+    # inside the same factr band: assert same-basin agreement (REML to
+    # ~1e-6) with looser sp/θ pins, plus clean convergence.
+    from hea.family import nb, tw
+    from hea.R.rng import RGenerator
+    g = RGenerator(3)
+    n = 200
+    x = g.uniform(0, 1, n)
+    mu = np.exp(0.8 * np.sin(2 * np.pi * x) + 0.5)
+    y = g.mt.rnbinom_n(np.full(n, 3.0), mu).astype(float)
+    dfn = pl.DataFrame({"y": y, "x": x})
+
+    m = gam("y ~ s(x)", dfn, family=nb(), method="REML",
+            optimizer=("outer", "nlm"))
+    np.testing.assert_allclose(m.sp[0], 0.111885869757, rtol=1e-8)
+    np.testing.assert_allclose(m.REML_criterion / 2, 356.788022059,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(float(np.exp(m.family.get_theta()[0])),
+                               2.33156810451, rtol=1e-8)
+    assert m._outer_info["code"] == 1
+    assert m._outer_info["iterations"] == 10
+
+    mo = gam("y ~ s(x)", dfn, family=nb(), method="REML",
+             optimizer=("outer", "optim"))
+    np.testing.assert_allclose(mo.sp[0], 0.111890801175, rtol=2e-3)
+    np.testing.assert_allclose(mo.REML_criterion / 2, 356.788022061,
+                               rtol=0, atol=1e-5)
+    np.testing.assert_allclose(float(np.exp(mo.family.get_theta()[0])),
+                               2.3315789377, rtol=1e-3)
+    assert mo._outer_info["convergence"] == 0
+
+    g = RGenerator(5)
+    n = 300
+    x = g.uniform(0, 1, n)
+    lam = np.exp(0.5 * np.sin(2 * np.pi * x) + 0.4)
+    N = g.poisson(lam)
+    y = np.array([g.gamma(3.0, scale=0.4, size=int(k)).sum() if k > 0
+                  else 0.0 for k in N])
+    dft = pl.DataFrame({"y": y, "x": x})
+
+    mt = gam("y ~ s(x)", dft, family=tw(), method="REML",
+             optimizer=("outer", "nlm"))
+    np.testing.assert_allclose(mt.sp[0], 0.220459770958, rtol=5e-7)
+    np.testing.assert_allclose(mt.REML_criterion / 2, 570.55170345,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(mt.family.p, 1.2530740822, rtol=1e-8)
+    np.testing.assert_allclose(mt.sigma_squared, 1.44666399882,
+                               rtol=1e-8)
+    assert mt._outer_info["code"] == 1
+    assert mt._outer_info["iterations"] == 19
+
+    mto = gam("y ~ s(x)", dft, family=tw(), method="REML",
+              optimizer=("outer", "optim"))
+    np.testing.assert_allclose(mto.sp[0], 0.220459657052, rtol=2e-3)
+    np.testing.assert_allclose(mto.REML_criterion / 2, 570.55170345,
+                               rtol=0, atol=1e-5)
+    np.testing.assert_allclose(mto.family.p, 1.25307407149, rtol=1e-4)
+    assert mto._outer_info["convergence"] == 0
 
 
 def test_general_family_authoring_contract():
