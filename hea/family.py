@@ -3747,6 +3747,30 @@ class tw(Tweedie):
         s = float(expit(theta))
         return self.a * (1.0 - s) + self.b * s
 
+    def dev_resids(self, y, mu, wt, theta=None):
+        # mgcv tw dev.resids (efam.r tw:58-66): unlike the fixed-p
+        # parent, a passed working θ is honored by mapping it to p —
+        # estimate.theta probes the deviance at trial θ without
+        # touching the family state. theta=None reads the state
+        # (mgcv's get(".Theta")).
+        if theta is None:
+            p = self.p
+        else:
+            th = float(np.atleast_1d(np.asarray(theta, dtype=float))[0])
+            p = self._p_of_theta(th)
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        # y1 <- y + (y==0); theta/kappa algebra with the p==1/p==2
+        # branches structurally unreachable (1 < a ≤ p ≤ b < 2), and
+        # mgcv's pmax(…, 0) clamp on rounding negatives.
+        y1 = y + (y == 0.0)
+        om1 = 1.0 - p
+        tm = 2.0 - p
+        t_term = (y1 ** om1 - mu ** om1) / om1
+        kappa = (y ** tm - mu ** tm) / tm
+        return np.maximum(2.0 * (y * t_term - kappa) * wt, 0.0)
+
     def dp_dtheta(self) -> float:
         """``dp/dθ = (b - a)·σ(θ)·(1 - σ(θ))`` where σ is the logistic.
         Used by the outer Newton chain rule when joint-estimating θ_tw.
@@ -3811,7 +3835,13 @@ class tw(Tweedie):
         saved = None
         if theta is not None:
             th = np.asarray(theta, dtype=float).reshape(-1)
-            if not np.allclose(th, self.get_theta()):
+            # Skip the set/restore only on a bit-identical θ. An
+            # approximate (allclose) skip evaluated the chain rule at a
+            # θ up to ~1e-5 away from the one requested — Dd and
+            # dev_resids honor the passed θ exactly, and that
+            # g-vs-deviance inconsistency stalled estimate.theta's
+            # Newton endgame (step halved to nothing at the optimum).
+            if not np.array_equal(th, self.get_theta()):
                 saved = self.get_theta().copy()
                 self.set_theta(th)
         try:

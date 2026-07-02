@@ -54,7 +54,7 @@ from scipy.linalg.lapack import dpstrf
 from ..R import distributions as _dist
 from ..R._shared import _rfma_vec
 
-from ..family import Family, Gaussian, _coerce_response
+from ..family import Family, Gaussian, _coerce_response, tw as _tw_family
 from ..formula import (
     BasisSpec,
     SmoothBlock,
@@ -382,7 +382,11 @@ def _estimate_theta(
     Returns the converged θ (same shape as the family's internal θ when
     ``scale ≥ 0``; appended with ``log φ̂`` when ``scale < 0``).
     """
-    if not family.is_extended:
+    # mgcv efam.r:12 ``if (!inherits(family,"extended.family")) stop`` —
+    # mgcv's extended.family set is hea's ``is_extended`` families PLUS
+    # tw (hea's flag gates bam's bgam.fitd Newton branch only; tw is
+    # mgcv-extended but takes the fitd θ-in-outer route there).
+    if not (family.is_extended or isinstance(family, _tw_family)):
         raise ValueError(
             f"_estimate_theta called with non-extended family "
             f"{type(family).__name__}"
@@ -445,7 +449,13 @@ def _estimate_theta(
         nll = dev / 2.0 - float(ls["ls"])
 
         if deriv > 0:
-            Dth = np.atleast_2d(Dd["Dth"])
+            # mgcv efam.r:28 ``colSums(as.matrix(Dd$Dth))`` — R's
+            # as.matrix maps a length-n vector (1-θ families: nb, tw)
+            # to an n×1 COLUMN; np.atleast_2d would give the 1×n
+            # transpose and a length-n "gradient".
+            Dth = np.asarray(Dd["Dth"], dtype=float)
+            if Dth.ndim == 1:
+                Dth = Dth.reshape(-1, 1)
             g1 = Dth.sum(axis=0) / (2.0 * scale_eval)
             if get_scale:
                 g = np.concatenate([g1, [-dev / 2.0]])
@@ -457,7 +467,11 @@ def _estimate_theta(
             g = None
 
         if deriv > 1:
-            Dth2_packed = np.atleast_2d(Dd["Dth2"])
+            # mgcv efam.r:34 ``colSums(as.matrix(Dd$Dth2))`` — same
+            # as.matrix column semantics as Dth above.
+            Dth2_packed = np.asarray(Dd["Dth2"], dtype=float)
+            if Dth2_packed.ndim == 1:
+                Dth2_packed = Dth2_packed.reshape(-1, 1)
             xs = Dth2_packed.sum(axis=0) / (2.0 * scale_eval)
             Dth2 = np.zeros((nth, nth), dtype=float)
             iu, ju = np.triu_indices(nth)

@@ -2054,6 +2054,48 @@ def _phi_pearson(fit, *, Mp, n, family, wt, y, slots, X, p):
     denom = float(n - Mp)
     return P / denom if denom > 0 else P
 
+
+def _fit3_scale_est(fit, *, family, y, wt, n, X, control, fisher_view_fn):
+    """gam.fit3's ``scale.est`` for unknown-scale standard families
+    (gam.fit3.r:594-607): the weighted Pearson statistic over (n − τ)
+    with mgcv's default Fletcher (2012) correction, or the raw Pearson /
+    deviance estimators per ``gam.control(scale.est=)``. τ = tr(A⁻¹X'WX)
+    at the Fisher weights (gdi's ``oo$trA``), via the triangular factor.
+    Read by newton's score.scale and by efsudr's scale-slot refresh
+    (mgcv ``lsp[length(lsp)] <- log(fit$scale)``, gam.fit4.r:845)."""
+    mu_arr = fit.mu
+    V_arr = family.variance(mu_arr)
+    # Weighted Pearson — gam.fit3.r:597 sum(weights*(y-mu)^2/V).
+    pearson = float(np.sum(wt * (y - mu_arr) ** 2 / V_arr))
+    fit_F = fisher_view_fn(fit)
+    w_F = fit_F.w
+    if w_F is None or np.allclose(w_F, 1.0):
+        Xw = X
+    else:
+        Xw = X * np.sqrt(np.maximum(w_F, 0.0))[:, None]
+    # τ = tr(A⁻¹X'WX) = ‖√W·X·C⁻¹‖_F² with A = C'C — the factor route,
+    # not the κ²-squaring explicit product.
+    if fit_F.A_chol_lower:
+        Kw = solve_triangular(fit_F.A_chol, Xw.T, lower=True)
+    else:
+        Kw = solve_triangular(fit_F.A_chol, Xw.T, lower=False, trans="T")
+    tau = float(np.sum(Kw * Kw))
+    df_resid = max(n - tau, 1.0)
+    scale_est = pearson / df_resid
+    se_kind = (control or _GAM_CONTROL_DEFAULTS)["scale_est"]
+    if se_kind == "deviance":
+        # gam.fit3.r:606 — deviance estimator replaces the Pearson one
+        # entirely.
+        scale_est = float(fit.dev) / df_resid
+    elif se_kind == "fletcher":
+        s_bar = max(-0.9, float(np.mean(
+            family.dvar(mu_arr) * (y - mu_arr) / V_arr
+        )))
+        if np.isfinite(s_bar):
+            scale_est = scale_est / (1.0 + s_bar)
+    # "pearson": keep the uncorrected estimate.
+    return scale_est
+
 def _gcv_grad_pieces(rho, fit, *, X, XtX, slots, family, n, p, y, family_mgcv_extended, wt, pls_lwork):
     """Shared first-derivative ingredients for the GCV/UBRE *and* GACV
     gradients — ``(dev, trA, ∂D/∂ρ, ∂τ/∂ρ)`` at PIRLS-converged β̂.
@@ -3848,7 +3890,8 @@ def _gam_fit3_score(rho, log_phi, fit, deriv, scoreType, *,
 
 def _gam_fit4(x, y, rho, *, slots, UrS, reparam_Y, keep_cols,
               reparam_cache, weights, start, etastart, mustart, offset,
-              family, control, null_coef, warm_eta, pls_lwork):
+              family, control, null_coef, warm_eta, pls_lwork,
+              efs_scale=None):
     """Penalized IRLS for mgcv-extended families — gam.fit4's inner
     loop (gam.fit4.r:340-548), line-by-line.
 
@@ -3866,6 +3909,16 @@ def _gam_fit4(x, y, rho, *, slots, UrS, reparam_Y, keep_cols,
     gam.fit3's Fisher retry. Convergence is
     ``|Δpdev|/(0.1+|pdev|) < ε`` confirmed by the penalized-deviance
     gradient ``X'Deta + 2Sλβ`` (gam.fit4.r:523-537).
+
+    ``efs_scale`` (non-None ⇔ mgcv ``scoreType=="EFS"``) is the trial
+    scale efsudr threads through ``lsp``: each accepted iterate then
+    re-estimates θ — and, for scale-unknown families (mgcv
+    ``family$scale < 0``, i.e. free-θ tw), jointly log φ — by
+    ``estimate.theta`` at the current μ (gam.fit4.r:507-515), recomputes
+    pdev under the new θ so the next step control is consistent
+    (gam.fit4.r:543-546), and enters the ε-gradient test as mgcv's
+    ``scale`` (gam.fit4.r:527). The final local scale is returned as
+    ``scale_est`` (mgcv ``scale.est=scale``, gam.fit4.r:807).
     """
     link = family.link
     X = x
@@ -3873,6 +3926,12 @@ def _gam_fit4(x, y, rho, *, slots, UrS, reparam_Y, keep_cols,
     n, p = x.shape
     wt = weights
     theta = family.get_theta()
+    # mgcv's local ``scale`` in EFS mode (updated by estimate.theta for
+    # families with family$scale < 0); mgcv family$scale is -1 for tw,
+    # NULL for nb/scat — hea: extended & not scale_known ⇔ tw.
+    scale_cur = efs_scale
+    efs_family_scale = (-1.0 if (efs_scale is not None
+                                 and not family.scale_known) else None)
     Sλ = _s_lambda(slots, p, rho)
     Sλ = 0.5 * (Sλ + Sλ.T)
     E_aug = _penalty_root_of(slots, p, UrS, reparam_Y, keep_cols,
@@ -3934,7 +3993,10 @@ def _gam_fit4(x, y, rho, *, slots, UrS, reparam_Y, keep_cols,
     # control$epsilon under newton()'s conv.tol/100 cap (gam.fit3.r:1308)
     eps = min(ctrl["epsilon"], ctrl["newton"]["conv_tol"] / 100.0)
     max_it = ctrl["maxit"]
-    scale_abs = 1.0
+    # mgcv's grad test uses control$epsilon*(abs(pdev)+scale)
+    # (gam.fit4.r:527) — EFS threads the live trial scale; the newton
+    # path keeps hea's established 1.0 convention.
+    scale_abs = 1.0 if scale_cur is None else float(scale_cur)
 
     def _work(mu_c, eta_c):
         # weights/pseudodata at the current iterate (gam.fit4.r:367-371).
@@ -4072,6 +4134,22 @@ def _gam_fit4(x, y, rho, *, slots, UrS, reparam_Y, keep_cols,
         mu = mu_new
         dev = dev_new
 
+        if efs_scale is not None and family.n_theta > 0:
+            # EFS θ-estimation at the accepted μ (gam.fit4.r:507-515):
+            # estimate.theta at scale1 = family$scale (tw: -1 → joint
+            # (θ, log φ) Newton) or the current trial scale; for
+            # family$scale < 0 the trailing slot updates the local scale.
+            from .bam import _estimate_theta
+            scale1 = (efs_family_scale if efs_family_scale is not None
+                      else float(scale_cur))
+            theta = _estimate_theta(family, y, mu, scale=scale1, wt=wt,
+                                    tol=1e-7)
+            if efs_family_scale is not None and efs_family_scale < 0:
+                scale_cur = float(np.exp(theta[family.n_theta]))
+                scale_abs = scale_cur
+                theta = theta[:family.n_theta]
+            family.set_theta(theta)
+
         # Fresh weights/pseudodata at the accepted iterate — needed
         # both for the gradient confirmation and the next step
         # (gam.fit4.r:517-521).
@@ -4098,6 +4176,11 @@ def _gam_fit4(x, y, rho, *, slots, UrS, reparam_Y, keep_cols,
             old_pdev = pdev_new
             beta_old = beta.copy()
             eta_old = eta.copy()
+        if efs_scale is not None and family.n_theta > 0:
+            # gam.fit4.r:543-546: recompute pdev under the new θ so the
+            # next iteration's step control has a consistent baseline.
+            dev = float(np.sum(family.dev_resids(y, mu, wt)))
+            old_pdev = dev + pen_new
 
     if not conv:
         warn_msgs.append("PIRLS algorithm did not converge")
@@ -4152,6 +4235,7 @@ def _gam_fit4(x, y, rho, *, slots, UrS, reparam_Y, keep_cols,
         is_fisher_fallback=is_fisher_fallback,
         converged=conv, boundary=boundary, warn=warn_msgs,
         E_aug=E_aug,
+        scale_est=(float(scale_cur) if scale_cur is not None else None),
     )
 
 
@@ -4380,42 +4464,9 @@ def newton(theta0, *, include_log_phi, criterion="REML",
         if family.scale_known:
             scale_est = 1.0
         else:
-            y_arr = y
-            mu_arr = fit_.mu
-            V_arr = family.variance(mu_arr)
-            # Weighted Pearson — gam.fit3.r:597 sum(weights*(y-mu)^2/V).
-            pearson = float(np.sum(wt * (y_arr - mu_arr) ** 2
-                                   / V_arr))
-            fit_F_ = fisher_view_fn(fit_)
-            w_F = fit_F_.w
-            if w_F is None or np.allclose(w_F, 1.0):
-                Xw_ = X
-            else:
-                Xw_ = X * np.sqrt(np.maximum(w_F, 0.0))[:, None]
-            # τ = tr(A⁻¹X'WX) = ‖√W·X·C⁻¹‖_F² with A = C'C — the
-            # factor route, not the κ²-squaring explicit product.
-            if fit_F_.A_chol_lower:
-                Kw_ = solve_triangular(fit_F_.A_chol, Xw_.T, lower=True)
-            else:
-                Kw_ = solve_triangular(fit_F_.A_chol, Xw_.T,
-                                       lower=False, trans="T")
-            tau_ = float(np.sum(Kw_ * Kw_))
-            df_resid_ = max(n - tau_, 1.0)
-            scale_est = pearson / df_resid_
-            se_kind = (control
-                       or _GAM_CONTROL_DEFAULTS)["scale_est"]
-            if se_kind == "deviance":
-                # gam.fit3.r:606 — deviance estimator replaces the
-                # Pearson one entirely.
-                scale_est = float(fit_.dev) / df_resid_
-            elif se_kind == "fletcher":
-                s_bar_ = max(-0.9, float(np.mean(
-                    family.dvar(mu_arr) * (y_arr - mu_arr)
-                    / V_arr
-                )))
-                if np.isfinite(s_bar_):
-                    scale_est = scale_est / (1.0 + s_bar_)
-            # "pearson": keep the uncorrected estimate.
+            scale_est = _fit3_scale_est(
+                fit_, family=family, y=y, wt=wt, n=n, X=X,
+                control=control, fisher_view_fn=fisher_view_fn)
         if is_reml:
             # log(scale.est); guard against scale_est ≤ 0
             scale_est_safe = max(scale_est, 1e-300)
@@ -5050,6 +5101,218 @@ def gam_outer(theta0, *, optimizer, criterion, control,
     )
 
 
+def efsudr(rho0, *, log_phi0, family, family_mgcv_extended, fit_fn,
+           reml_fn, scale_est_fn, fisher_view_fn, UrS, reparam_Y,
+           reparam_cache, p, n, control, scale_fixed_value):
+    """mgcv ``efsudr`` (gam.fit4.r:822-938): the extended Fellner-Schall
+    outer loop for regular AND extended families, PIRLS by
+    gam.fit3/gam.fit4 at ``scoreType="EFS"`` (→ REML value at deriv 0,
+    plus ``ldetS1 = ∂log|Sλ|₊/∂ρ`` from gam.reparam).
+
+    mgcv threads one ``lsp = [θ_fam | ρ_sp | log φ?]`` vector through the
+    fits; hea's fitters read θ from the family state and φ never enters
+    PIRLS (regular) / enters as ``efs_scale`` (extended EFS), so this
+    port carries the (θ, log φ) slots as explicit state snapshots and
+    re-seeds ``family.set_theta`` before every fit — reproducing lsp
+    threading exactly, including the re-seed from the pre-trial state on
+    step contraction and on a rejected step extension, and mgcv's
+    scale-slot quirk on extension (``lsp2[len] <- log(fit$scale)`` reads
+    the lsp1-fit, not fit2, gam.fit4.r:900).
+
+    Per-fit REML (mgcv units = hea ``_reml``/2, evaluated by
+    ``reml_fn``): regular families at the lsp trial scale
+    (gam.fit3.r:121-124); extended families at the fit's own final scale
+    (``fit.scale_est`` — gam.fit4's local ``scale``, estimate.theta-
+    updated for scale-unknown tw, gam.fit4.r:735). ``gamma`` is 1
+    throughout — gam.outer's efs call drops it (mgcv.r:1665) and efsudr
+    hard-codes ``gamma=1`` (so a user gamma≠1 is ignored on this path,
+    exactly as in mgcv; hea's post-fit ``REML_criterion`` re-evaluates
+    with the user gamma and diverges from mgcv's ``gcv.ubre`` only in
+    that corner).
+
+    The EFS update per penalty (gam.fit4.r:870-878):
+
+        trVS_j = tr(UrSⱼ'Y'(V/φ)Y·UrSⱼ),  bSbⱼ = ‖β'Y·UrSⱼ‖²,
+        a = max(0, ldetS1·e^{−ρ} − trVS),  r = a/max(0,bSb)·φ,
+        ρ' = min(ρ + log(r)·mult, efs.lspmax)
+
+    with Y the total-penalty range basis (mgcv ``U1[,1:(p−Mp)]`` =
+    ``reparam_Y``), V/φ = (X'W_F·X+Sλ)⁻¹ — mgcv's ``rV`` is built from
+    the EXPECTED (Fisher) weights ``wf``, re-factoring when PIRLS ran
+    full Newton (gdi.c:2262 "get rV and K using E(W)"; hea's
+    ``fisher_view_fn``) — and φ the edf-corrected ``fit$scale·n/(n−edf)``
+    for scale-unknown extended families. Step control: ×2 extension when max|Δρ|<.05 improved,
+    halving while worse and mult>1; stop when the EFS step is small and
+    REML flat over 3 steps (``efs.tol``), or the deviance stalls
+    (``100·eps·|dev|`` — mgcv's ``control$eps`` partial-matches
+    ``epsilon``), or after ``efs_maxit`` (mgcv hard-codes 200).
+
+    mgcv's efsudr takes NO ``L``/``lsp0`` (gam.outer:1665 never passes
+    them) — id-linked or partially-fixed smoothing parameters are
+    unsupported upstream; ``estimate_gam`` raises before calling this.
+    """
+    ctrl = control or _GAM_CONTROL_DEFAULTS
+    epsilon = ctrl["epsilon"]
+    efs_lspmax = ctrl["efs_lspmax"]
+    efs_tol = ctrl["efs_tol"]
+    efs_maxit = ctrl["efs_maxit"]
+    if UrS is None or reparam_Y is None:
+        raise RuntimeError(
+            "optimizer='efs' needs the gam.reparam range-space basis "
+            "(UrS); this model fell back to the assembled-eigen path.")
+    estimate_scale = log_phi0 is not None
+    nsp = len(UrS)
+    rho = np.asarray(rho0, dtype=float) + 2.5   # lsp[spind] + 2.5
+    log_phi = log_phi0
+    mult = 1.0
+    n_theta = int(family.n_theta)
+
+    def _fit_and_score(rho_c, log_phi_c, theta_c):
+        # One gam.fit3/4 call at scoreType="EFS": seed θ from the lsp
+        # snapshot, thread the trial scale, evaluate REML (mgcv units)
+        # at the scale the R code would (trial for fit3, the fit's own
+        # local scale for fit4). Returns (fit, REML, log φ_REML,
+        # scale.est) — the last is mgcv's ``fit$scale`` (R $ partial-
+        # matches scale.est): gam.fit3's Fletcher/Pearson/deviance
+        # estimator, gam.fit4's local scale.
+        if theta_c is not None:
+            family.set_theta(theta_c)
+        if family_mgcv_extended:
+            trial = (float(np.exp(log_phi_c)) if estimate_scale
+                     else float(scale_fixed_value))
+            fit_c = fit_fn(rho_c, efs_scale=trial)
+            se_c = float(fit_c.scale_est)
+            lp_reml = float(np.log(se_c))
+        else:
+            fit_c = fit_fn(rho_c)
+            se_c = (float(scale_est_fn(fit_c)) if estimate_scale
+                    else None)
+            lp_reml = (float(log_phi_c) if estimate_scale
+                       else float(np.log(scale_fixed_value)))
+        reml_c = 0.5 * float(reml_fn(rho_c, lp_reml, fit_c))
+        return fit_c, reml_c, lp_reml, se_c
+
+    def _get_theta():
+        return family.get_theta().copy() if n_theta > 0 else None
+
+    def _refresh_log_phi(se_c):
+        # lsp[length(lsp)] <- log(fit$scale) (gam.fit4.r:845/887).
+        return float(np.log(se_c)) if estimate_scale else None
+
+    theta_state = _get_theta()
+    fit, fit_reml, fit_lp_reml, fit_se = _fit_and_score(rho, log_phi,
+                                                        theta_state)
+    theta_state = _get_theta()                # lsp[thind] <- getTheta()
+    log_phi = _refresh_log_phi(fit_se)
+
+    score_hist = np.zeros(efs_maxit)
+    bSb = np.zeros(nsp)
+    trVS = np.zeros(nsp)
+    Y = reparam_Y
+    old_dev = None
+    it = 0
+    for it in range(1, efs_maxit + 1):
+        beta = np.asarray(fit.beta, dtype=float)
+        Yb = Y.T @ beta                        # coefs in penalty range space
+        fit_F = fisher_view_fn(fit)            # rV is Fisher-weight (gdi2)
+        for i in range(nsp):
+            M_i = Y @ UrS[i]                   # p × k_i, S_i = M_i·M_i'
+            Z_i = cho_solve((fit_F.A_chol, fit_F.A_chol_lower), M_i)
+            trVS[i] = float(np.sum(M_i * Z_i))  # tr(M_i'(V/φ)M_i)
+            xx = Yb @ UrS[i]
+            bSb[i] = float(np.sum(xx * xx))     # β'S_iβ
+        # φ for the update: mgcv's ``phi <- fit$scale`` — the ACCEPTED
+        # fit's scale.est, edf-corrected for scale-unknown extended
+        # families (gam.fit4.r:866-871) — or the fixed scale.
+        if estimate_scale:
+            phi = float(fit_se)
+            if family_mgcv_extended:
+                edf = float(p) - float(np.sum(trVS * np.exp(rho)))
+                phi = phi * n / (n - edf)
+        else:
+            phi = float(scale_fixed_value)
+        det1 = np.asarray(
+            _reparam_eval(UrS, reparam_cache, rho)["det1"], dtype=float)
+        a = np.maximum(0.0, det1 * np.exp(-rho) - trVS)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            r = a / np.maximum(0.0, bSb) * phi
+        r[(a == 0.0) & (bSb == 0.0)] = 1.0
+        r[~np.isfinite(r)] = 1e6
+        with np.errstate(divide="ignore"):
+            log_r = np.log(r)
+        rho1 = np.minimum(rho + log_r * mult, efs_lspmax)
+        max_step = float(np.max(np.abs(rho1 - rho)))
+        old_reml = fit_reml
+        fit, fit_reml, fit_lp_reml, fit_se = _fit_and_score(
+            rho1, log_phi, theta_state)
+        theta1 = _get_theta()
+        log_phi1 = _refresh_log_phi(fit_se)
+
+        if fit_reml <= old_reml:                # improvement
+            if max_step < 0.05:                 # near optimum: try ×2 step
+                rho2 = np.minimum(rho + log_r * mult * 2.0, efs_lspmax)
+                fit2, fit2_reml, fit2_lp_reml, fit2_se = _fit_and_score(
+                    rho2, log_phi, theta_state)
+                theta2 = _get_theta()
+                log_phi2 = log_phi1  # mgcv quirk: log(fit$scale), not fit2's
+                if fit2_reml < fit_reml:        # accept extension
+                    fit, fit_reml, fit_lp_reml, fit_se = (
+                        fit2, fit2_reml, fit2_lp_reml, fit2_se)
+                    rho, theta_state, log_phi = rho2, theta2, log_phi2
+                    mult = mult * 2.0
+                else:                           # keep the ×1 step; the next
+                    # fit re-seeds θ from lsp1's slots (θ of the ×1 fit),
+                    # discarding fit2's family-state θ — as mgcv's lsp does.
+                    rho, theta_state, log_phi = rho1, theta1, log_phi1
+            else:
+                rho, theta_state, log_phi = rho1, theta1, log_phi1
+        else:                                   # no improvement: contract,
+            # never below mult=1 (the update needn't improve REML)
+            while fit_reml > old_reml and mult > 1.0:
+                mult = mult / 2.0
+                rho1 = np.minimum(rho + log_r * mult, efs_lspmax)
+                # lsp1 <- lsp: θ/scale re-seed from the pre-trial state
+                fit, fit_reml, fit_lp_reml, fit_se = _fit_and_score(
+                    rho1, log_phi, theta_state)
+                theta1 = _get_theta()
+                log_phi1 = _refresh_log_phi(fit_se)
+            rho, theta_state, log_phi = rho1, theta1, log_phi1
+            if mult < 1.0:
+                mult = 1.0
+        score_hist[it - 1] = fit_reml
+        # break if the EFS step is small and REML flat over 3 steps...
+        if (it > 3 and max_step < 0.05
+                and float(np.max(np.abs(np.diff(
+                    score_hist[it - 4:it])))) < efs_tol):
+            break
+        # ...or if the deviance has stopped changing
+        if it == 1:
+            old_dev = float(fit.dev)
+        else:
+            if abs(old_dev - float(fit.dev)) < 100.0 * epsilon * abs(
+                    float(fit.dev)):
+                break
+            old_dev = float(fit.dev)
+
+    # Leave the family at the ACCEPTED fit's θ (the lsp state): a
+    # rejected extension/contraction trial leaves its own θ in the
+    # family env — in mgcv that leak reaches only the getTheta()
+    # display string, while the returned object (rV/K/REML → edf/Vp)
+    # is entirely the accepted fit's; hea recomputes those post-fit
+    # from (fit, family state), so the state must be the accepted θ.
+    if n_theta > 0:
+        family.set_theta(theta_state)
+    outer_info = {
+        "conv": ("iteration limit reached" if it == efs_maxit
+                 else "full convergence"),
+        "iter": it,
+        "score_hist": score_hist[:it].copy(),
+    }
+    return {"fit": fit, "rho": rho,
+            "log_phi_reml": (fit_lp_reml if estimate_scale else None),
+            "outer_info": outer_info}
+
+
 # ---------------------------------------------------------------------------
 # magic — GCV/UBRE fast path for the Gaussian-additive model. Ports mgcv's C
 # engine (src/magic.c) + the R wrapper (mgcv.r:4678): QR the √w·X design once,
@@ -5417,7 +5680,8 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
                  initial_sp_rho=None, use_magic=None, phi_pearson=None,
                  profile_log_phi_fixed_sp=None, magic_fit_state=None,
                  magic_optimize=None, get_outer_fit=None, general=None,
-                 outer_bfgs=None, get_outer_info=None):
+                 outer_bfgs=None, get_outer_info=None,
+                 optimizer=("outer", "newton"), outer_efsudr=None):
     """mgcv ``estimate.gam`` (mgcv.r:1872) — smoothness selection + final fit,
     for BOTH ordinary and general families (mgcv branches internally on the
     family class; hea takes the general slice via ``general=``). Ordinary
@@ -5607,6 +5871,38 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
         else:
             cur_logphi = 0.0  # GCV does not put log φ in θ
 
+        if optimizer[0] == "efs":
+            # mgcv gam.outer:1658-1668: optimizer "efs" (non-general) →
+            # efsudr. mgcv's efsudr takes NO L/lsp0 (gam.outer never
+            # passes them), so id-linked or partially-fixed smoothing
+            # parameters are unsupported on this path.
+            if G.L is not None or (G.lsp0 is not None
+                                   and np.any(np.asarray(G.lsp0) != 0.0)):
+                raise NotImplementedError(
+                    "optimizer='efs' with id-linked or partially-fixed "
+                    "smoothing parameters is not supported — mgcv's "
+                    "efsudr has no L/lsp0 arguments (gam.outer, "
+                    "mgcv.r:1665).")
+            res_efs = outer_efsudr(
+                cur_rho, cur_logphi if include_log_phi else None)
+            fit = res_efs["fit"]
+            theta_sp = np.asarray(res_efs["rho"], dtype=float)
+            # log φ at which the final fit's REML was evaluated: the
+            # extended fit's own scale (mgcv object$scale <- scale.est,
+            # mgcv.r:1722) / the regular trial slot; None ⇔ scale known.
+            log_phi_hat = res_efs["log_phi_reml"]
+            sp_out = np.exp(theta_sp)
+            rho_hat = rho_full(theta_sp)
+            if include_family_theta and isinstance(family, _tw_family):
+                tw_info = {
+                    "theta_hat": float(family.get_theta()[0]),
+                    "p_hat": float(family.p),
+                    "log_phi_hat": log_phi_hat,
+                }
+            return {"fit": fit, "rho_hat": rho_hat, "sp": sp_out,
+                    "log_phi_hat": log_phi_hat, "used_magic": False,
+                    "tw_info": tw_info}
+
         theta0_parts = [cur_rho]
         if include_log_phi:
             theta0_parts.append(np.array([cur_logphi]))
@@ -5705,14 +6001,17 @@ class gam:
         ``"QNCV"`` (neighbourhood cross-validation) are not yet ported
         and raise ``NotImplementedError``.
     optimizer : str or (str, str), default ("outer", "newton")
-        mgcv's ``gam(optimizer=)``. ``"efs"`` forces the extended
-        Fellner-Schall loop for general (formula-list) families —
-        ``method`` is then coerced to REML like mgcv (mgcv.r:1914) —
-        and is the automatic choice when ``family.available_derivs ==
-        0``. The second element picks the outer method; only
-        ``"newton"`` is ported (``"bfgs"``/``"nlm"``/``"optim"`` raise,
-        roadmap C9), and single-formula ``"efs"`` awaits the efsudr
-        port (gam.fit4.r:822).
+        mgcv's ``gam(optimizer=)``. ``"efs"`` selects the extended
+        Fellner-Schall loop — ``efsudr`` (gam.fit4.r:822) on the
+        single-formula path, ``efsud`` for general (formula-list)
+        families — coercing ``method`` to REML like mgcv (mgcv.r:1914);
+        it is also the automatic choice when
+        ``family.available_derivs == 0``. Like mgcv's, efs ignores
+        ``gamma`` and computes no smoothing-parameter-uncertainty
+        pieces (``Vc``/``edf2``/vcomp CIs). The second element picks
+        the outer method; only ``"newton"`` is ported
+        (``"bfgs"``/``"nlm"``/``"optim"`` raise, roadmap C9; bfgs is
+        available for general families).
     sp : None or array-like, optional
         Supplied smoothing parameters. Non-negative entries are fixed
         at that value; **negative entries are estimated** (mgcv's
@@ -6088,10 +6387,9 @@ class gam:
                 " — pass a list of formulas, one per linear predictor."
             )
         if opt[0] == "efs":
-            raise NotImplementedError(
-                "optimizer='efs' on the single-formula path needs the "
-                "efsudr port (gam.fit4.r:822) — efs is available for "
-                "general families (formula lists) only.")
+            # Single-formula efs → efsudr (gam.fit4.r:822); mgcv coerces
+            # the method to REML first (mgcv.r:1914).
+            method = "REML"
         if method in ("NCV", "QNCV"):
             raise NotImplementedError(
                 "method='NCV'/'QNCV' (neighbourhood cross validation, "
@@ -6751,13 +7049,22 @@ class gam:
             magic_fit_state=self._magic_fit_state,
             outer_newton=self._outer_newton,
             magic_optimize=self._magic_optimize,
-            get_outer_fit=lambda: self._outer_fit)
+            get_outer_fit=lambda: self._outer_fit,
+            optimizer=self.optimizer, outer_efsudr=self._outer_efsudr)
         fit = _res["fit"]
         rho_hat = _res["rho_hat"]
         self.sp = _res["sp"]
         self._log_phi_hat = _res["log_phi_hat"]
         self._used_magic = _res["used_magic"]
         self._tw_info = _res["tw_info"]
+        # True iff the efsudr loop actually ran (fixed-sp / no-smooth efs
+        # requests degenerate to plain fits before the optimizer). efs
+        # fits are deriv-0: mgcv's gam.fit3.post.proc then has db.drho
+        # NULL and computes NO sp-uncertainty pieces (edf2/Vc,
+        # gam.fit3.r:978) and gam.vcomp has no outer.info$hess — the
+        # post-fit blocks below mirror that.
+        self._used_efs = (self.optimizer[0] == "efs" and sp is None
+                          and n_sp > 0)
 
         # Surface inner-loop warnings once, for the final fit only — mgcv
         # accumulates them in gam.fit3's warn list and intermediate newton()
@@ -7091,6 +7398,7 @@ class gam:
         if (
             method in ("REML", "ML", "P-REML", "P-ML")
             and n_sp > 0
+            and not self._used_efs
             and np.isfinite(sigma_squared)
             and sigma_squared > 0
         ):
@@ -7163,7 +7471,8 @@ class gam:
         # binom, …) neither reports an edf2 mgcv doesn't nor pays for the ~2
         # redundant `_compute_Vr` re-fits (it passes no `fit`, so the
         # `_reml_hessian` fallback at the GCV branch re-solves the PIRLS).
-        compute_edf2 = method in ("REML", "ML", "P-REML", "P-ML")
+        compute_edf2 = (method in ("REML", "ML", "P-REML", "P-ML")
+                        and not self._used_efs)
         if n_sp > 0 and (self._used_magic or not compute_edf2):
             # mgcv's magic.post.proc (mgcv.r:4475-4501): edf1 = 2·edf − diag(FF)
             # only; NO edf2 / Vc. edf2 := edf so logLik.gam/AIC use edf.
@@ -7551,7 +7860,8 @@ class gam:
             self._null_baseline_cache = (nc, en, mn)
         return self._null_baseline_cache[0]
 
-    def _fit_given_rho(self, rho: np.ndarray) -> "_FitState":
+    def _fit_given_rho(self, rho: np.ndarray,
+                       efs_scale: float | None = None) -> "_FitState":
         """Penalized IRLS at log-smoothing-params ρ.
 
         Iterate Newton-form working weights/responses
@@ -7577,6 +7887,9 @@ class gam:
         # Dispatch (gam.fit3.r:106-116): extended families (nb/tw/scat)
         # run gam.fit4's inner loop; ordinary exponential families use the
         # free `_gam_fit3`. General (gamlss) families never reach here.
+        # ``efs_scale`` (efsudr only) puts gam.fit4 in EFS mode; gam.fit3's
+        # EFS differs from REML only in the score tail, which efsudr
+        # evaluates itself, so the flag is extended-family-only.
         if self._family_mgcv_extended:
             fit = _gam_fit4(
                 self._X_full, self._y_arr, rho,
@@ -7587,6 +7900,7 @@ class gam:
                 offset=self._offset, family=self.family,
                 control=self._control, null_coef=self._resolve_null_coef(),
                 warm_eta=self._pirls_warm_eta, pls_lwork=self._pls_lwork,
+                efs_scale=efs_scale,
             )
             if fit.converged and np.all(np.isfinite(fit.eta)):
                 self._pirls_warm_eta = fit.eta
@@ -8288,6 +8602,48 @@ class gam:
         )
         self._outer_info = res["outer_info"]
         return res["theta"]
+
+    def _outer_efsudr(self, rho0: np.ndarray,
+                      log_phi0: float | None) -> dict:
+        """Shim → free `efsudr` (mgcv gam.fit4.r:822): sources the data
+        args from ``self``, forces ``gamma=1`` in the REML evaluations
+        (gam.outer never forwards gamma to efsudr, mgcv.r:1665, and
+        efsudr hard-codes ``gamma=1`` in its gam.fit3 calls), and
+        persists the ``outer_info``/``outer_fit`` writes like
+        `_outer_newton` does."""
+        def _reml1(rho_c, lp_c, fit_c):
+            return _reml(
+                rho_c, lp_c, fit_c, Mp=self._Mp, wt=self._wt,
+                y=self._y_arr, binom_n=self._binom_n, gamma=1.0,
+                family=self.family,
+                family_mgcv_extended=self._family_mgcv_extended,
+                use_ml_proj=self._use_ml_proj,
+                pearson_scale_criterion=self._pearson_scale_criterion,
+                reml_ind=self._reml_ind,
+                penalty_rank=self._penalty_rank, slots=self._slots,
+                p=self.p, UrS=self._UrS,
+                reparam_cache=self._reparam_cache)
+
+        def _scale_est1(fit_c):
+            return _fit3_scale_est(
+                fit_c, family=self.family, y=self._y_arr, wt=self._wt,
+                n=self.n, X=self._X_full, control=self._control,
+                fisher_view_fn=self._fisher_view)
+
+        res = efsudr(
+            rho0, log_phi0=log_phi0, family=self.family,
+            family_mgcv_extended=self._family_mgcv_extended,
+            fit_fn=self._fit_given_rho, reml_fn=_reml1,
+            scale_est_fn=_scale_est1, fisher_view_fn=self._fisher_view,
+            UrS=self._UrS,
+            reparam_Y=getattr(self, "_reparam_Y", None),
+            reparam_cache=self._reparam_cache, p=self.p, n=self.n,
+            control=self._control,
+            scale_fixed_value=self._scale_fixed_value,
+        )
+        self._outer_info = res["outer_info"]
+        self._outer_fit = res["fit"]
+        return res
 
 
     def _S_pinv(self, S_full):
@@ -14793,6 +15149,7 @@ class _FitState:
         "S_full", "log_det_A", "E_aug",
         "is_fisher_fallback",
         "converged", "boundary", "warn",
+        "scale_est",
         "_lderivs", "_dwdeta", "_d2wdeta2", "_ddeta", "_ddraw",
     )
 
@@ -14801,7 +15158,7 @@ class _FitState:
                  eta=None, mu=None, w=None, z=None, alpha=None,
                  is_fisher_fallback=False,
                  converged=True, boundary=False, warn=None,
-                 E_aug=None, A_inv=None):
+                 E_aug=None, A_inv=None, scale_est=None):
         self.beta = beta
         self.dev = dev
         self.rss = dev               # back-compat alias for Gaussian path
@@ -14832,6 +15189,11 @@ class _FitState:
         # (consumers that refactor with other weights — _fisher_view —
         # reuse it).
         self.E_aug = E_aug
+        # gam.fit4's ``scale.est`` (gam.fit4.r:807 — the local scale, i.e.
+        # the estimate.theta-updated φ for scale-unknown extended families).
+        # Set only by `_gam_fit4` in EFS mode; `efsudr` reads it as mgcv's
+        # ``fit$scale`` (R's $ partial-matches scale → scale.est).
+        self.scale_est = scale_est
         # True iff PIRLS forced α=1 at convergence because Newton's
         # α formula produced a w<0. In that case dα/dμ is taken as 0
         # for derivative purposes (the analytical α'(μ) is not

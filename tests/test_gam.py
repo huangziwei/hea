@@ -5267,8 +5267,16 @@ def test_optimizer_knob_efs_and_validation():
     # standard-family bfgs is still unported (gam.fit3 outer loop, C9).
     with pytest.raises(NotImplementedError, match="C9"):
         gam("y ~ s(x)", df, method="REML", optimizer=("outer", "bfgs"))
-    with pytest.raises(NotImplementedError, match="efsudr"):
-        gam("y ~ s(x)", df, method="REML", optimizer="efs")
+    # single-formula efs → efsudr (gam.fit4.r:822): method coerced to
+    # REML, and the Fellner-Schall optimum agrees with newton's to the
+    # EFS stopping tolerance (exact mgcv pins live in
+    # test_efsudr_*_matches_mgcv below).
+    m_efs1 = gam("y ~ s(x)", df, method="GCV.Cp", optimizer="efs")
+    assert m_efs1.optimizer == ("efs", "newton")
+    assert m_efs1.method == "REML"
+    m_n1 = gam("y ~ s(x)", df, method="REML")
+    np.testing.assert_allclose(m_efs1.REML_criterion,
+                               m_n1.REML_criterion, rtol=0, atol=2e-2)
 
     # the default knob is inert on the single-formula path
     m_def = gam("y ~ s(x)", df, method="REML")
@@ -5322,6 +5330,153 @@ def test_efs_maxit_control_caps_outer_loop():
     with pytest.raises(ValueError, match="efs_maxit"):
         gam(forms, df, family=gaulss(), method="REML",
             optimizer="efs", control={"efs_maxit": -1})
+
+
+def test_efsudr_gaussian_poisson_matches_mgcv():
+    # Single-formula optimizer="efs" → efsudr (gam.fit4.r:822-938), the
+    # gam.fit3 (regular-family) branch. R refs (mgcv 1.9-4), data
+    # reproduced bit-for-bit by hea.R.rng:
+    #   set.seed(2); x<-runif(200); y<-sin(2*pi*x)+.5*x+rnorm(200,0,.3)
+    #   gam(y~s(x), method="REML", optimizer="efs")
+    #     sp 0.01527936133  Σedf 7.951206296  sig2 0.0950333223
+    #     REML 62.74910762, 5 iters, score.hist 120.42429 65.804633
+    #     62.75026 62.74912 62.749108 (full convergence)
+    #   poisson (same x stream): y<-rpois(200, exp(0.6*sin(2*pi*x)))
+    #     sp 0.199587407  Σedf 5.129674639  REML 269.6455238, 7 iters
+    from hea.family import Poisson
+    from hea.R.rng import RGenerator
+    g = RGenerator(2)
+    n = 200
+    x = g.uniform(0, 1, n)
+    y = np.sin(2 * np.pi * x) + 0.5 * x + g.normal(0, 0.3, n)
+    m = gam("y ~ s(x)", pl.DataFrame({"y": y, "x": x}), method="REML",
+            optimizer="efs")
+    np.testing.assert_allclose(m.sp[0], 0.01527936133, rtol=1e-8)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 7.951206296,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sigma_squared, 0.0950333223,
+                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(m.REML_criterion / 2, 62.74910762,
+                               rtol=0, atol=1e-6)
+    info = m._outer_info
+    assert info["conv"] == "full convergence" and info["iter"] == 5
+    np.testing.assert_allclose(
+        info["score_hist"],
+        [120.42429, 65.804633, 62.75026, 62.74912, 62.749108],
+        rtol=1e-6)
+    # scale-known regular family (poisson): no scale slot in the loop.
+    g = RGenerator(2)
+    x = g.uniform(0, 1, n)
+    yp = g.poisson(np.exp(0.6 * np.sin(2 * np.pi * x))).astype(float)
+    mp = gam("y ~ s(x)", pl.DataFrame({"y": yp, "x": x}),
+             family=Poisson(), method="REML", optimizer="efs")
+    np.testing.assert_allclose(mp.sp[0], 0.199587407, rtol=1e-8)
+    np.testing.assert_allclose(float(np.sum(mp.edf)), 5.129674639,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(mp.REML_criterion / 2, 269.6455238,
+                               rtol=0, atol=1e-6)
+    assert mp._outer_info["iter"] == 7
+    # mgcv computes NO sp-uncertainty pieces for efs fits (deriv-0
+    # object → gam.fit3.post.proc skips edf2/Vc, gam.fit3.r:978).
+    np.testing.assert_allclose(m.edf2, m.edf)
+    np.testing.assert_allclose(m.Vc, m.Vp)
+
+
+def test_efsudr_nb_matches_mgcv():
+    # efsudr's gam.fit4 (extended-family) branch: nb θ estimated
+    # in-PIRLS by estimate.theta at each accepted iterate
+    # (gam.fit4.r:507-515). R ref (mgcv 1.9-4): set.seed(3);
+    # x<-runif(200); y<-rnbinom(200, size=3, mu=exp(.8*sin(2*pi*x)+.5));
+    # gam(y~s(x), family=nb(), method="REML", optimizer="efs") →
+    # sp 0.1130010588, Σedf 5.430232799, REML 356.8301594, 5 iters,
+    # score.hist 360.6389944 357.3592854 356.8369431 356.8301811
+    # 356.8301594. (mgcv's summary Theta 2.5148 comes from a REJECTED
+    # step-extension trial's θ leaked into the family env; the returned
+    # object — sp/edf/REML/Vp — is the accepted fit's, whose θ hea
+    # keeps: exp(θ̂) 2.5146138.)
+    from hea.family import nb
+    from hea.R.rng import RGenerator
+    g = RGenerator(3)
+    n = 200
+    x = g.uniform(0, 1, n)
+    mu = np.exp(0.8 * np.sin(2 * np.pi * x) + 0.5)
+    y = g.mt.rnbinom_n(np.full(n, 3.0), mu).astype(float)
+    m = gam("y ~ s(x)", pl.DataFrame({"y": y, "x": x}), family=nb(),
+            method="REML", optimizer="efs")
+    np.testing.assert_allclose(m.sp[0], 0.1130010588, rtol=1e-8)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 5.430232799,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.REML_criterion / 2, 356.8301594,
+                               rtol=0, atol=1e-6)
+    info = m._outer_info
+    assert info["conv"] == "full convergence" and info["iter"] == 5
+    np.testing.assert_allclose(
+        info["score_hist"],
+        [360.6389944, 357.3592854, 356.8369431, 356.8301811,
+         356.8301594], rtol=1e-8)
+    np.testing.assert_allclose(float(np.exp(m.family.get_theta()[0])),
+                               2.514613816, rtol=1e-6)
+
+
+def test_efsudr_tw_matches_mgcv():
+    # efsudr's hardest path: tw — scale-unknown extended family, so
+    # estimate.theta jointly updates (θ_p, log φ) inside PIRLS
+    # (family$scale<0 branch, gam.fit4.r:509-513) and efsudr edf-
+    # corrects φ for the update (gam.fit4.r:866-871). Poisson-gamma
+    # compound data; R ref (mgcv 1.9-4) fit on the identical CSV:
+    # sp 0.2209121294, Σedf 5.606763574, θ̂ -1.128564843
+    # (p̂ 1.24953753), sig2 1.42810311, REML 570.5731462, 7 iters.
+    from hea.family import tw
+    from hea.R.rng import RGenerator
+    g = RGenerator(5)
+    n = 300
+    x = g.uniform(0, 1, n)
+    lam = np.exp(0.5 * np.sin(2 * np.pi * x) + 0.4)
+    N = g.poisson(lam)
+    y = np.array([g.gamma(3.0, scale=0.4, size=int(k)).sum() if k > 0
+                  else 0.0 for k in N])
+    m = gam("y ~ s(x)", pl.DataFrame({"y": y, "x": x}), family=tw(),
+            method="REML", optimizer="efs")
+    np.testing.assert_allclose(m.sp[0], 0.2209121294, rtol=1e-7)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 5.606763574,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(float(m.family.get_theta()[0]),
+                               -1.128564843, rtol=1e-8)
+    np.testing.assert_allclose(m.family.p, 1.24953753, rtol=1e-8)
+    np.testing.assert_allclose(m.sigma_squared, 1.42810311,
+                               rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.REML_criterion / 2, 570.5731462,
+                               rtol=0, atol=1e-6)
+    assert m._outer_info["iter"] == 7
+
+
+def test_estimate_theta_tw_joint_scale_matches_mgcv():
+    # bam._estimate_theta's scale<0 branch (efam.r:5-96) — dormant
+    # until efsudr: joint (θ, log φ) Newton for tw. Two bugs surfaced:
+    # colSums(as.matrix(Dth)) needs the n×1 COLUMN reading for 1-θ
+    # families, and tw.dev_resids/ls_extended must honor the PASSED θ
+    # exactly (ls_extended's old allclose skip evaluated the chain rule
+    # up to ~1e-5 off, stalling the Newton at the optimum). R ref:
+    # mgcv:::estimate.theta(0, tw-family, y, mu=mean(y), scale=-1,
+    # tol=1e-7) → θ -0.949822462026, log φ 0.475006868998 (data as in
+    # test_efsudr_tw_matches_mgcv).
+    from hea.family import tw as _tw
+    from hea.models.bam import _estimate_theta
+    from hea.R.rng import RGenerator
+    g = RGenerator(5)
+    n = 300
+    x = g.uniform(0, 1, n)
+    lam = np.exp(0.5 * np.sin(2 * np.pi * x) + 0.4)
+    N = g.poisson(lam)
+    y = np.array([g.gamma(3.0, scale=0.4, size=int(k)).sum() if k > 0
+                  else 0.0 for k in N])
+    fam = _tw()
+    fam.set_theta([0.0])
+    mu = np.full(n, float(np.mean(y)))
+    out = _estimate_theta(fam, y, mu, scale=-1.0, wt=np.ones(n),
+                          tol=1e-7)
+    np.testing.assert_allclose(out, [-0.949822462026, 0.475006868998],
+                               rtol=1e-9)
 
 
 def test_general_family_authoring_contract():
