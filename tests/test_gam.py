@@ -868,6 +868,11 @@ def test_lhs_unknown_column_raises():
         gam("log(nope) ~ s(Height)", d, method="REML")
 
 
+@pytest.mark.filterwarnings(
+    # sqrt(a) equals x exactly here (perfectly linear) → the smooth's sp runs
+    # to the ∞ boundary, a genuine step failure mgcv also hits; the test only
+    # checks NA-row dropping, so tolerate the faithful warning.
+    "ignore:Fitting terminated with step failure:UserWarning")
 def test_lhs_na_omit_drops_lhs_referenced_columns():
     """If the LHS expression touches a column that has NAs, those rows
     must be dropped before evaluating the response — otherwise polars
@@ -2801,6 +2806,79 @@ def test_pls_qr_negative_weight_correction_is_exact():
     assert not ok_bad
 
 
+def test_single_sp_matches_mgcv():
+    # mgcv:::single.sp(X, S, target) — the target-edf single-penalty sp
+    # utility (mgcv.r:4504). Reference values from mgcv on a fixed cubic
+    # design; hea matches to machine precision.
+    from hea.models.gam import _single_sp
+    x = np.arange(10) / 10.0
+    X = np.column_stack([np.ones(10), x, x ** 2, x ** 3])
+    S = np.diag([0.0, 1.0, 4.0, 9.0])
+    ref = {0.3: 0.227845055132977,
+           0.5: 0.0186045610868318,
+           0.7: 0.0010350029849568}
+    for target, r in ref.items():
+        assert _single_sp(X, S, target=target) == pytest.approx(r, rel=1e-10)
+    # rank-deficient X → -1 (mgcv's backsolve try-error return).
+    Xd = np.column_stack([np.ones(4), np.ones(4), np.arange(4.0)])
+    assert _single_sp(Xd, np.eye(3)) == -1.0
+
+
+def test_vcov_and_sandwich_match_mgcv():
+    # mgcv vcov.gam / gam.sandwich (mgcv.r:4396 / 4374) — R set.seed(2);
+    # x<-runif(200); y<-rpois(200, exp(0.6*sin(2*pi*x))), reproduced
+    # bit-for-bit by hea.R.rng (edf 5.1526182 matched). hea's vcov()/sandwich
+    # accessors match mgcv to ~1e-6.
+    from hea.family import Poisson, Tweedie, nb
+    from hea.R.rng import RGenerator
+    g = RGenerator(2)
+    n = 200
+    x = g.uniform(0, 1, n)
+    mu = np.exp(0.6 * np.sin(2 * np.pi * x))
+    y = g.poisson(mu).astype(float)
+    m = gam("y ~ s(x)", pl.DataFrame({"y": y, "x": x}),
+            family=Poisson(), method="REML")
+    np.testing.assert_allclose(np.diag(m.vcov())[:3],
+        [0.005480767622, 0.1999983528, 0.9787285692], rtol=1e-6)
+    np.testing.assert_allclose(np.diag(m.vcov(freq=True))[:3],
+        [0.005435521101, 0.127677218, 0.3855910047], rtol=1e-6)
+    np.testing.assert_allclose(np.diag(m.vcov(sandwich=True))[:3],
+        [0.005526626483, 0.1927452693, 1.006391415], rtol=1e-6)
+    # accessor dispatch: default==Vp, unconditional→Vc, dispersion rescales.
+    np.testing.assert_allclose(m.vcov(), m.Vp)
+    np.testing.assert_allclose(m.vcov(unconditional=True), m.Vc)
+    np.testing.assert_allclose(m.vcov(dispersion=float(m.scale)), m.vcov())
+    # Fixed-p Tweedie is a regular family (mgcv's `family`, not extended) so
+    # the exponential-branch sandwich handles it; the accessor runs.
+    mtw = gam("y ~ s(x)", pl.DataFrame({"y": y + 0.1, "x": x}),
+              family=Tweedie(p=1.5), method="REML")
+    assert np.all(np.isfinite(np.diag(mtw.vcov(sandwich=True))))
+    # Extended families (nb/scat) use the dDeta-based meat (mgcv.r:4384) —
+    # scat matches mgcv's gam.sandwich to ~1e-6 (see the scat parity below);
+    # here just confirm nb's accessor produces a finite symmetric matrix.
+    mnb = gam("y ~ s(x)", pl.DataFrame({"y": y, "x": x}),
+              family=nb(), method="REML")
+    Vs = mnb.vcov(sandwich=True)
+    assert np.all(np.isfinite(Vs))
+    np.testing.assert_allclose(Vs, Vs.T, atol=1e-12)
+
+
+def test_sandwich_extended_matches_mgcv():
+    # mgcv gam.sandwich extended-family branch (mgcv.r:4384) — R set.seed(4);
+    # x<-runif(200); y<-2*sin(2*pi*x)+rt(200,4)*0.5; scat() fit, reproduced
+    # by hea.R.rng (edf 8.0668295 matched).
+    from hea.family import Scat
+    from hea.R.rng import RGenerator
+    g = RGenerator(4)
+    n = 200
+    x = g.uniform(0, 1, n)
+    y = 2 * np.sin(2 * np.pi * x) + g.standard_t(4, n) * 0.5
+    m = gam("y ~ s(x)", pl.DataFrame({"y": y, "x": x}),
+            family=Scat(), method="REML")
+    np.testing.assert_allclose(np.diag(m.vcov(sandwich=True))[:3],
+        [0.001718046487, 0.1746792536, 1.240544125], rtol=1e-4)
+
+
 def test_ill_conditioned_design_matches_mgcv():
     # κ(X) ≈ 6e10 polynomial block (κ(X'X) ≈ 3e21 — beyond double
     # precision for the normal-equations route, which previously produced
@@ -3894,10 +3972,12 @@ def test_scale_negative_forces_estimation_matches_mgcv():
     p0 = gam("ycnt ~ s(x) + s(z)", df, family=Poisson(), method="REML")
     _assert_fp_equiv(p2.REML_criterion, p0.REML_criterion)
     assert p2.sigma_squared == 1.0 and p2.scale_estimated is False
-    # Extended families: scale handling is family-driven — honest raise.
+    # Extended families: a user scale>0 fixes φ (mgcv.r:1948-1949). nb scale=2
+    # matches mgcv exactly (sp/edf/theta/reml — verified vs R); here confirm tw
+    # accepts scale=2 and fixes φ=2 rather than raising.
     from hea.family import tw
-    with pytest.raises(NotImplementedError, match="scale="):
-        gam("ytw2 ~ s(x)", df, family=tw(), method="REML", scale=2.0)
+    mtw = gam("ytw2 ~ s(x)", df, family=tw(), method="REML", scale=2.0)
+    assert float(mtw.scale) == 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -7405,6 +7485,11 @@ def _betar_fixture():
     return pl.DataFrame({"y": y, "x": x})
 
 
+@pytest.mark.filterwarnings(
+    # The cauchit link step-fails at the optimum — mgcv does too (outer.info
+    # conv "step failed", identical "check results carefully" warning, sp
+    # 0.2592 matched); tolerate the faithful warning here.
+    "ignore:Fitting terminated with step failure:UserWarning")
 def test_betar_through_gam_matches_mgcv():
     # R: gam(y ~ s(x), family=betar(), method="REML") — the first D1b
     # extended family end-to-end: the −2logLik-as-deviance criterion (Dp<0

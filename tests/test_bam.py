@@ -1362,14 +1362,19 @@ def test_bam_scale_semantics():
         m_neg.fitted_values, m_def.fitted_values, rtol=1e-10, atol=1e-12
     )
     assert m_neg.scale_estimated
-    # scale-known family: only scale=0 supported; nonzero raises.
+    # scale-known family (bam.r): scale=0 → φ=1; scale>0 fixes φ; scale<0 keeps
+    # φ=1 (mgcv-bam does NOT estimate a quasi-dispersion here). All vs mgcv-bam.
     dp = pl.read_csv(str(_BAM_SUMMARY / "pois" / "data.csv"))
     assert (
         hea.models.bam("y ~ z + s(x, k=10)", dp, family=Poisson(), scale=0).scale == 1.0
     )
-    for bad in (-1.0, 2.5):
-        with pytest.raises(NotImplementedError, match="scale-known"):
-            hea.models.bam("y ~ z + s(x, k=10)", dp, family=Poisson(), scale=bad)
+    m25 = hea.models.bam("y ~ z + s(x, k=10)", dp, family=Poisson(), scale=2.5)
+    assert m25.scale == 2.5
+    np.testing.assert_allclose(float(np.asarray(m25.sp)[0]), 0.270216, rtol=1e-4)
+    # scale<0 selects mgcv-bam's GCV-style overdispersion criterion (φ=1 but a
+    # distinct sp) — not yet ported, so it raises narrowly.
+    with pytest.raises(NotImplementedError, match="scale<0"):
+        hea.models.bam("y ~ z + s(x, k=10)", dp, family=Poisson(), scale=-1.0)
     # non-finite scale rejected.
     with pytest.raises(ValueError, match="finite"):
         hea.models.bam("y ~ z + s(x, k=10)", dg, scale=float("inf"))

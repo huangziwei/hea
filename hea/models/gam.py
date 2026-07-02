@@ -117,7 +117,7 @@ def gam_control(
 
     Names follow the dots→underscores convention (``scale.est`` →
     ``scale_est``; the ``newton`` sublist keys are ``conv_tol``,
-    ``maxNstep``, ``maxSstep``, ``maxHalf``, ``use_svd``). A plain dict
+    ``maxNstep``, ``maxSstep``, ``maxHalf``). A plain dict
     with these keys works too — ``gam()`` revalidates through here.
 
     Wired knobs: ``epsilon``/``maxit`` (inner PIRLS — newton caps the
@@ -137,9 +137,8 @@ def gam_control(
     the unported magic path); ``nthreads``/``keepData``/``trace`` are
     accepted no-ops. Unported knobs raise (never silent): non-zero
     ``irls_reg`` (performance-iteration only), ``idLinksBases=False``,
-    ``scalePenalty=False``, ``use_svd=True``; mgcv's ``nlm``/``optim``/
-    ``mgcv.tol``/``mgcv.half``/``ncv.threads`` optimizer knobs are not
-    accepted at all (those optimizers aren't ported).
+    ``scalePenalty=False``; mgcv's ``mgcv.tol``/``mgcv.half`` govern the
+    performance-iteration path and are not accepted here.
     """
     if scale_est not in ("fletcher", "pearson", "deviance"):
         raise ValueError(
@@ -191,16 +190,12 @@ def gam_control(
         "maxNstep": float(nt.pop("maxNstep", 5.0)),
         "maxSstep": float(nt.pop("maxSstep", 2.0)),
         "maxHalf": int(nt.pop("maxHalf", 30)),
-        "use_svd": bool(nt.pop("use_svd", False)),
     }
     if nt:
         raise ValueError(
             f"unknown newton control entries: {sorted(nt)} (accepted: "
-            "conv_tol, maxNstep, maxSstep, maxHalf, use_svd)"
+            "conv_tol, maxNstep, maxSstep, maxHalf)"
         )
-    if newton_full["use_svd"]:
-        raise NotImplementedError("newton use_svd=True is not ported "
-                                  "(unused by mgcv's newton too)")
     return {
         "epsilon": float(epsilon),
         "maxit": int(maxit),
@@ -899,8 +894,8 @@ def _gam_fit3(x, y, rho, *, slots, UrS, reparam_Y, keep_cols,
     if warm_eta is not None:
         # Warm start from the previous score-eval's converged predictor
         # (mgcv gam.fit3.r:1366) — takes precedence over the user seed,
-        # which only seeds the first fit. ``mu_default`` (gam_initialize)
-        # is kept above for the ρ-independent null baseline.
+        # which only seeds the first fit. The null baseline below stays
+        # ρ-independent (from null_coef, mgcv get.null.coef).
         eta_warm = warm_eta
         eta = eta_warm - off            # β-only η
         mu = link.linkinv(eta_warm)
@@ -3887,15 +3882,14 @@ def _gam_fit4(x, y, rho, *, slots, UrS, reparam_Y, keep_cols,
     # User starting values — same glm precedence as the standard
     # branch (gam.fit4 mirrors gam.fit3's block); the null baseline
     # below stays user-independent.
-    mu_default = mu
     if warm_eta is not None:
         # Warm start from the previous score-eval's converged predictor.
         # mgcv carries etastart<-b$linear.predictors across the outer
         # Newton (gam.fit3.r:1366-1367) and passes it straight into
         # gam.fit4 (gam.fit3.r:111-113), so each penalized IRLS starts near
         # its solution. Takes precedence over the user seed (which only
-        # seeds the first fit); mu_default stays the ρ-independent null
-        # baseline. Mirrors _fit_given_rho's gam.fit3 warm start.
+        # seeds the first fit); the null baseline below stays ρ-independent
+        # (from null_coef). Mirrors _fit_given_rho's gam.fit3 warm start.
         eta_warm = warm_eta
         eta = eta_warm - off
         mu = link.linkinv(eta_warm)
@@ -4613,7 +4607,17 @@ def newton(theta0, *, include_log_phi, criterion="REML",
                 accepted_fit = sd_best_fit
 
         if accepted_step is None:
-            conv_text = "step failed"
+            # No improving step. mgcv checks the gradient convergence test
+            # BEFORE declaring step failure (gam.fit3.r:1646-1657): if the
+            # current point already satisfies max|grad| ≤ score_scale·conv_tol·5
+            # this is convergence AT the optimum (the Newton step just can't
+            # improve on it), reported "full convergence" — NOT a step failure.
+            # Only a still-large residual gradient is a genuine step failure
+            # (the ill-posed corner where mgcv warns "check results carefully").
+            _ss = _score_scale(fit, f_prev)
+            gmax = float(np.abs(grad).max()) if grad.size > 0 else 0.0
+            conv_text = ("full convergence"
+                         if gmax <= _ss * conv_tol * 5.0 else "step failed")
             it_done = it + 1
             break
         theta = theta + accepted_step
@@ -4657,6 +4661,22 @@ def newton(theta0, *, include_log_phi, criterion="REML",
         if converged:
             conv_text = "full convergence"
             break
+
+    # mgcv's newton warns the user when the outer optimizer terminates on a
+    # step failure or the iteration cap rather than full convergence
+    # (gam.fit3.r:1660-1666) — surface the same "check results carefully" so an
+    # unreliable fit is never silent (the indefinite-Hessian / Fisher-fallback
+    # corner reaches this exactly when mgcv itself does).
+    if conv_text == "step failed":
+        import warnings as _warnings
+        _warnings.warn(
+            "Fitting terminated with step failure - check results carefully",
+            stacklevel=2)
+    elif conv_text == "iteration limit reached":
+        import warnings as _warnings
+        _warnings.warn(
+            "Iteration limit reached without full convergence - check "
+            "carefully", stacklevel=2)
 
     outer_info = {
         "conv": conv_text,
@@ -5028,6 +5048,634 @@ def gam_outer(theta0, *, optimizer, criterion, control,
         conv_tol=_nt["conv_tol"], max_step=_nt["maxNstep"],
         max_sd_step=_nt["maxSstep"], max_half=_nt["maxHalf"],
     )
+
+
+# ---------------------------------------------------------------------------
+# magic — GCV/UBRE fast path for the Gaussian-additive model. Ports mgcv's C
+# engine (src/magic.c) + the R wrapper (mgcv.r:4678): QR the √w·X design once,
+# then Newton over log-sp on the reduced (q+rank_S)×q system. Free fns 1:1 with
+# magic.c's fit_magic (c:62) / magic_gH (c:193) / magic driver (c:286). The
+# dispatch predicate `_use_magic` stays a `gam` method (it is estimate.gam-level,
+# not part of magic itself — mgcv.r:2001 chooses am.fit → magic there).
+# ---------------------------------------------------------------------------
+
+
+def _magic_setup(*, wt, y, offset, struct_R, keep_cols, X):
+    """magic's ``getRpqr`` (magic.c:451): QR the n×q √w-weighted design
+    ONCE → R (q×q), y0 = Q₁'(√w·y), yy = ‖√w·y‖². Reused for every
+    reduced score-eval — this is the work the Newton path repeats n times."""
+    sqw = np.sqrt(wt)
+    yv = y - offset
+    b = sqw * yv
+    if struct_R is not None and keep_cols is None:
+        # Reuse the structural-drop QR (same √w·X under gaussian-identity,
+        # no drop): R is bit-identical to qr(√wt·X).R, and the getRpqr
+        # projection y0 = Q₁'b = R⁻ᵀ(Xw'b) needs no second QR (Xw = √w·X,
+        # so Xw'b = X'(wt·yv)). Matches the explicit-Q route to ~1e-15.
+        R = struct_R
+        y0 = solve_triangular(
+            R, X.T @ (wt * yv), lower=False, trans="T")
+    else:
+        Q, R = np.linalg.qr(sqw[:, None] * X)
+        y0 = Q.T @ b
+    yy = float(b @ b)
+    return R, y0, yy
+
+
+def _magic_penalty_roots(*, p, slots) -> list[np.ndarray]:
+    """Per-penalty full p×cS_i roots rS_i (rS_i rS_iᵀ = S_i), one per
+    ``slots`` entry (== the ρ order). cS_i = rank(S_i)."""
+    roots = []
+    for slot in slots:
+        a, b = slot.col_start, slot.col_end
+        ev, V = np.linalg.eigh(0.5 * (slot.S + slot.S.T))
+        pos = ev > ev.max() * 1e-12 if ev.max() > 0 else np.zeros_like(ev, bool)
+        rb = V[:, pos] * np.sqrt(ev[pos])           # k × cS_i
+        full = np.zeros((p, rb.shape[1]))
+        full[a:b, :] = rb
+        roots.append(full)
+    return roots
+
+
+def _magic_fit_reduced(rho, R, y0, yy, *, wt, gamma, slots, p):
+    """Port of magic.c ``fit_magic`` (Gaussian/GCV): GCV score from the
+    SVD of the reduced ``[R; St^½]`` ((q+rank_S)×q). St = Σ exp(ρ_k) S_k.
+    Returns score, scale, rss, trA, rank, β, plus the SVD pieces
+    (U1, V, d, y1, delta) the derivative routine reuses."""
+    q = R.shape[1]
+    n_score = float(np.sum(wt != 0.0))
+    rank_tol = np.sqrt(np.finfo(float).eps)
+    St = _s_lambda(slots, p, rho)
+    St = 0.5 * (St + St.T)
+    ev, Vev = np.linalg.eigh(St)
+    pos = ev > ev.max() * 1e-14 if ev.max() > 0 else np.zeros_like(ev, bool)
+    root = (Vev[:, pos] * np.sqrt(ev[pos])).T       # rank_S × q, rootᵀroot = St
+    R_aug = np.vstack([R, root])
+    U, d, Vt = np.linalg.svd(R_aug, full_matrices=False)
+    rank = q
+    thresh = d[0] * rank_tol
+    while d[rank - 1] < thresh:
+        rank -= 1
+    Vr = Vt[:rank].T                                # q × rank
+    U1 = U[:q, :rank]                               # q × rank (top q rows)
+    y1 = U1.T @ y0
+    yAy = float(y1 @ y1)
+    b_proj = U1 @ y1
+    yAAy = float(b_proj @ b_proj)
+    norm = yy - 2 * yAy + yAAy
+    if norm < 0.0:
+        norm = 0.0
+    trA = float(np.sum(U1 * U1))
+    delta = n_score - gamma * trA
+    score = n_score * norm / (delta * delta)
+    scale = norm / (n_score - trA)
+    beta = Vr @ (y1 / d[:rank])
+    return dict(score=score, scale=scale, norm=norm, trA=trA, rank=rank,
+                beta=beta, U1=U1, V=Vr, d=d[:rank], y1=y1, delta=delta,
+                n_score=n_score, gamma=gamma)
+
+
+def _magic_gH(mg, rho, roots):
+    """Port of magic.c ``magic_gH``: gradient (exact) and Hessian of the
+    GCV score wrt ρ, from the reduced SVD in ``mg`` — O(m·rank²), no
+    re-fit. The Hessian is magic's frozen-basis *search-direction* approx
+    (it differentiates the explicit sp-dependence, not the SVD basis); the
+    driver converges on the exact gradient with an SD fallback."""
+    U1, V, d, y1 = mg["U1"], mg["V"], mg["d"], mg["y1"]
+    gamma, n = mg["gamma"], mg["n_score"]
+    norm, delta = mg["norm"], mg["delta"]
+    m = len(roots)
+    Dinv = 1.0 / d
+    U1U1 = U1.T @ U1
+    esp = np.exp(np.asarray(rho, float))
+    M = [None] * m
+    K = [None] * m
+    My = [None] * m
+    yK = [None] * m
+    Ky = [None] * m
+    for i in range(m):
+        VSi = (V.T @ roots[i]) * Dinv[:, None]      # D⁻¹V'rS_i (rank×cS_i)
+        Mi = VSi @ VSi.T                            # D⁻¹V'S_iVD⁻¹
+        Ki = Mi @ U1U1
+        M[i], K[i] = Mi, Ki
+        My[i] = Mi @ y1
+        yK[i] = Ki.T @ y1
+        Ky[i] = Ki @ y1
+    ddelta = np.zeros(m)
+    dnorm = np.zeros(m)
+    d2delta = np.zeros((m, m))
+    d2norm = np.zeros((m, m))
+    for i in range(m):
+        ddelta[i] = gamma * np.trace(K[i]) * esp[i]
+        for j in range(i + 1):
+            v = float(np.sum(M[j] * K[i]))
+            d2delta[i, j] = d2delta[j, i] = -gamma * 2 * esp[i] * esp[j] * v
+        d2delta[i, i] += ddelta[i]
+        dnorm[i] = 2 * esp[i] * float(y1 @ (My[i] - Ky[i]))
+        for j in range(i + 1):
+            v = float(np.sum(My[i] * Ky[j] + My[j] * Ky[i]
+                             - 2 * My[i] * My[j] + yK[i] * My[j]))
+            d2norm[i, j] = d2norm[j, i] = v * 2 * esp[i] * esp[j]
+        d2norm[i, i] += dnorm[i]
+    grad = np.zeros(m)
+    hess = np.zeros((m, m))
+    # GCV (control[0]==1) — magic.c:263-273.
+    xx = n / (delta * delta)
+    xx1 = xx * 2 * norm / delta
+    x1 = -2 * xx / delta
+    x2 = 3 * xx1 / delta
+    for i in range(m):
+        grad[i] = xx * dnorm[i] - xx1 * ddelta[i]
+        for j in range(i + 1):
+            hess[i, j] = hess[j, i] = (
+                x1 * (ddelta[j] * dnorm[i] + ddelta[i] * dnorm[j])
+                + xx * d2norm[i, j] + x2 * ddelta[i] * ddelta[j]
+                - xx1 * d2delta[i, j])
+    return grad, hess
+
+
+def _magic_optimize(rho0, *, tol=1e-7, max_half=15, wt, y, offset, struct_R,
+                    keep_cols, X, gamma, slots, p):
+    """Port of magic.c ``magic`` (the driver, magic.c:286-707): Newton
+    over log-sp backed by steepest descent with step halving, plus the
+    infinite-sp check, on the reduced GCV system. Returns ρ̂, the once-
+    computed QR (``magic_R``/``magic_y0``) the final fit reuses, and the
+    outer_info. (Flat-deriv reset + exact initial.sp deferred — the seed is
+    initial.spg, which magic converges from.)"""
+    R, y0, yy = _magic_setup(wt=wt, y=y, offset=offset, struct_R=struct_R,
+                             keep_cols=keep_cols, X=X)
+    roots = _magic_penalty_roots(p=p, slots=slots)
+    mp = len(rho0)
+    sp0 = np.asarray(rho0, float).copy()
+
+    def feval(sp):
+        return _magic_fit_reduced(sp, R, y0, yy, wt=wt, gamma=gamma,
+                                  slots=slots, p=p)
+
+    mg = feval(sp0)
+    min_score = mg["score"]
+    n_step = np.zeros(mp)
+    sd_step = np.zeros(mp)
+    use_sd = True
+    d_score = np.inf
+    grad = np.zeros(mp)
+    converged = False
+    it = 0
+    fit_calls = 1
+    while not converged:
+        it += 1
+        if it > 400:
+            converged = True
+            break
+        if it > 1:
+            step = sd_step if use_sd else n_step
+            try_i = 0
+            ok = True
+            while ok:
+                try_i += 1
+                if try_i == 4 and not use_sd:
+                    use_sd = True
+                    step = sd_step
+                nsp = sp0 + step
+                mg = feval(nsp)
+                fit_calls += 1
+                if mg["score"] < min_score:
+                    d_score = min_score - mg["score"]
+                    min_score = mg["score"]
+                    sp0 = nsp.copy()
+                    ok = False
+                else:
+                    step = step / 2
+                if try_i == max_half - 1 and ok:
+                    step = step * 0.0
+                if try_i == max_half:
+                    ok = False
+        if it > 3:
+            converged = True
+            if d_score > tol * (1 + min_score):
+                converged = False
+            gnorm = np.sqrt(float(grad @ grad))
+            if gnorm > tol ** (1 / 3) * (1 + abs(min_score)):
+                converged = False
+        # mgcv's magic builds the gradient/Hessian from the fit it
+        # already has in hand — magic.c:611 calls magic_gH on the U1/V/d
+        # left by the last fit_magic, with NO re-fit at sp0. `mg` already
+        # holds the fit at the current sp0 in every branch (the it==1
+        # seed; the accepted step, which sets sp0=nsp; or the step-failure
+        # path, whose last try evaluates sp0+0), and the reduced SVD is
+        # deterministic, so reusing it is bit-identical to re-evaluating
+        # — and saves one (q+e)×q SVD per outer iteration.
+        grad, hess = _magic_gH(mg, sp0, roots)
+        ev, U = np.linalg.eigh(0.5 * (hess + hess.T))
+        use_sd = bool(np.any(ev <= 0.0))
+        if not use_sd:
+            gtil = U.T @ grad
+            n_step = -(U @ (gtil / ev))
+            mx = np.max(np.abs(n_step))
+            if mx > 5.0:
+                n_step *= 5.0 / mx
+        gmx = np.max(np.abs(grad))
+        sd_step = -grad / gmx if gmx > 0 else grad * 0.0
+    # infinite-sp check (magic.c:638-656): push each sp in its descent
+    # direction by ±2 in log-sp (≤5 steps) while the score keeps improving.
+    for k in range(mp):
+        steps_left = 5
+        sign = 1.0 if grad[k] < 0.0 else -1.0
+        while steps_left:
+            sp0[k] += sign * 2.0
+            steps_left -= 1
+            sc = feval(sp0)["score"]
+            fit_calls += 1
+            if sc < min_score:
+                min_score = sc
+            else:
+                sp0[k] -= sign * 2.0
+                steps_left = 0
+    outer_info = {
+        "iter": it,
+        "conv": "full convergence" if converged else "iteration limit reached",
+        "grad": grad,
+        "score": min_score,
+        "optimizer": "magic",
+    }
+    return {"sp": sp0, "magic_R": R, "magic_y0": y0, "outer_info": outer_info}
+
+
+def _magic_fit_state(rho, *, magic_R, magic_y0, fit_given_rho_fn, family, X,
+                     offset, y, wt, slots, p, UrS, reparam_Y, keep_cols,
+                     reparam_cache):
+    """Build the Gaussian-identity ``_FitState`` at ρ̂ from magic's cached
+    QR, WITHOUT the full (n+e)×q re-fit. The reduced augmented system
+    ``[R_mag; E]`` (R_mag = QR factor of √w·X, cached by `_magic_optimize`)
+    has ``R_fin'R_fin = R_mag'R_mag + Sλ = X'WX + Sλ`` and RHS reduces to
+    ``[y0; 0]`` (y0 = Q_mag'(√w·z), z = y−off) — so β, A_chol, log|A| are
+    the same as `_pls_qr`'s full solve at (q+e)×q cost. Mirrors the
+    Gaussian branch of `_fit_given_rho` field-for-field. Falls back to the
+    full fit if anything is degenerate (rank deficiency / non-finite)."""
+    R_mag = magic_R
+    y0 = magic_y0
+    if R_mag is None:
+        return fit_given_rho_fn(rho)
+    link = family.link
+    off = offset
+    q = R_mag.shape[1]
+    Sλ = _s_lambda(slots, p, rho)
+    Sλ = 0.5 * (Sλ + Sλ.T)
+    E_aug = _penalty_root_of(slots, p, UrS, reparam_Y, keep_cols,
+                             reparam_cache, rho)
+    # reduced augmented QR (mirrors _pls_qr's no-negative-weight branch)
+    aug = np.vstack([R_mag, E_aug])
+    Q, R_fin = np.linalg.qr(aug)
+    diag_R = np.diag(R_fin)
+    if (not np.all(np.isfinite(R_fin))) or np.any(diag_R == 0.0):
+        return fit_given_rho_fn(rho)
+    c = Q[:q].T @ y0
+    beta = solve_triangular(R_fin, c, lower=False)
+    if not np.all(np.isfinite(beta)):
+        return fit_given_rho_fn(rho)
+    log_det_A = 2.0 * float(np.sum(np.log(np.abs(diag_R))))
+    sgn = np.where(diag_R < 0, -1.0, 1.0)
+    A_chol = R_fin * sgn[:, None]
+    # Gaussian-identity fit fields — identical to _fit_given_rho's tail.
+    eta = X @ beta                       # offset-stripped
+    eta_full = eta + off
+    mu = link.linkinv(eta_full)
+    dev = float(np.sum(family.dev_resids(y, mu, wt)))
+    pen = float(beta @ Sλ @ beta)
+    mu_eta_v = link.mu_eta(eta_full)
+    V = family.variance(mu)
+    d2g = link.d2link(mu)
+    good = (wt > 0.0) & (mu_eta_v != 0.0)
+    safe_mu_eta = np.where(good, mu_eta_v, 1.0)
+    alpha = 1.0 + (y - mu) * (family.dvar(mu) / V + d2g * mu_eta_v)
+    alpha = np.where(alpha == 0.0, np.finfo(float).eps, alpha)
+    z = np.where(good, eta + (y - mu) / (safe_mu_eta * alpha), 0.0)
+    w = np.where(good, wt * alpha * mu_eta_v ** 2 / V, 0.0)
+    return _FitState(
+        beta=beta, dev=dev, pen=pen,
+        A_chol=A_chol, A_chol_lower=False,
+        S_full=Sλ, log_det_A=log_det_A,
+        eta=eta_full, mu=mu, w=w, z=z, alpha=alpha,
+        is_fisher_fallback=False,
+        converged=True, boundary=False, warn=[],
+        E_aug=E_aug,
+    )
+
+
+class _G:
+    """mgcv's ``G`` setup bundle (``gam.setup`` output, mgcv.r:1096) — the
+    subset ``estimate_gam`` reads for the ordinary-family path. mgcv threads
+    the full G (design/penalties/…) and calls ``gam.fit3`` BY NAME; hea threads
+    this data plus the fitter callables (the same C1 poly seam newton/bfgs
+    already use). Extensible to the general-family / bam paths later."""
+
+    def __init__(self, *, n, n_sp, n_work, Mp, L, lsp0, wt, y_arr, family,
+                 scale_known_fit, pearson_scale_criterion, control):
+        self.n = n
+        self.n_sp = n_sp
+        self.n_work = n_work
+        self.Mp = Mp
+        self.L = L
+        self.lsp0 = lsp0
+        self.wt = wt
+        self.y_arr = y_arr
+        self.family = family
+        self.scale_known_fit = scale_known_fit
+        self.pearson_scale_criterion = pearson_scale_criterion
+        self.control = control
+
+
+class _GGeneral:
+    """The general-family (``gam.fit5``) slice of ``G`` — present when the
+    family is a general.family (Cox/gamlss/multinom/…). mgcv's ``estimate.gam``
+    branches internally on ``inherits(G$family,"general.family")`` (mgcv.r:1893/
+    1984/2021/2041); hea mirrors that with ``estimate_gam(..., general=...)``.
+    Carries the general-path data (reparameterized design ``X``, penalty ``sl``,
+    ``lpi``, ``g5`` warm-fit cache) + the shared bits the general branch reads."""
+
+    def __init__(self, *, n_work, Mp, wt, family, control, gamma, X, y, sl,
+                 md_L, lpi, offsets, p, slots, g5, optimizer):
+        self.n_work = n_work
+        self.Mp = Mp
+        self.wt = wt
+        self.family = family
+        self.control = control
+        self.gamma = gamma
+        self.X = X
+        self.y = y
+        self.sl = sl
+        self.md_L = md_L
+        self.lpi = lpi
+        self.offsets = offsets
+        self.p = p
+        self.slots = slots
+        self.g5 = g5
+        self.optimizer = optimizer
+
+
+def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
+                 initial_sp_rho=None, use_magic=None, phi_pearson=None,
+                 profile_log_phi_fixed_sp=None, magic_fit_state=None,
+                 magic_optimize=None, get_outer_fit=None, general=None,
+                 outer_bfgs=None, get_outer_info=None):
+    """mgcv ``estimate.gam`` (mgcv.r:1872) — smoothness selection + final fit,
+    for BOTH ordinary and general families (mgcv branches internally on the
+    family class; hea takes the general slice via ``general=``). Ordinary
+    returns ``{fit, rho_hat, sp, log_phi_hat, used_magic, tw_info}``; general
+    returns ``{fit, rho_hat, sp, outer_info, REML_criterion, converged}``. The
+    caller (``gam.__init__`` / ``gam._init_general``) assigns these onto ``self``.
+
+    mgcv threads the setup bundle ``G`` (data) and calls ``gam.fit3`` by name
+    (it dispatches to fit4/fit5 internally). hea threads ``G`` plus the fitter
+    callables — ``fit_given_rho`` (= gam.fit3/gam.fit4 dispatch), ``outer_newton``
+    (= newton), ``magic_optimize`` (= magic driver), etc. This is the same C1
+    seam newton/bfgs use one level down; ``fit_given_rho``/``initial_sp_rho`` are
+    bam-polymorphic, but ``estimate_gam`` is only ever called on a plain ``gam``
+    (bam has its own ``__init__``), so the callables always resolve to gam's.
+    ``get_outer_fit`` reads the fit ``outer_newton`` cached as a side effect
+    (mgcv reuses newton's last accepted gam.fit3, mgcv.r:1684 / gam.fit3.r:1718).
+    """
+    if general is not None:
+        # ---- general.family branch (gam.fit5 pipeline, mgcv.r:1984+) --------
+        gg = general
+        n_work = gg.n_work
+        family = gg.family
+        avail_derivs = int(getattr(family, "available_derivs", 2) or 0)
+        efs_forced = gg.optimizer[0] == "efs"
+        # mgcv coerces available.derivs==1 → bfgs unless efs requested
+        # (mgcv.r:1907): the ll supplies ≤ dH/trace order, so Newton's REML2
+        # (needing trHid2H) is unavailable. optimizer=("outer","bfgs") forces
+        # bfgs on any general family.
+        bfgs_forced = len(gg.optimizer) > 1 and gg.optimizer[1] == "bfgs"
+        use_efs = avail_derivs == 0 or efs_forced
+        use_bfgs = (avail_derivs == 1 or bfgs_forced) and not efs_forced
+        outer_info = None
+        if sp is not None:
+            sp_arr = np.asarray(sp, dtype=float).flatten()
+            if sp_arr.shape != (n_work,):
+                raise ValueError(
+                    f"sp must have length {n_work} (working smoothing "
+                    f"parameters), got {sp_arr.shape}")
+            if np.any(sp_arr <= 0) or not np.all(np.isfinite(sp_arr)):
+                raise ValueError("sp entries must be positive and finite")
+            theta_hat = np.log(sp_arr)
+            outer_info = {"conv": "fixed sp", "iter": 0}
+        elif n_work == 0:
+            theta_hat = np.zeros(0)
+            outer_info = {"conv": "no smoothing parameters", "iter": 0}
+        elif use_efs:
+            # available_derivs == 0 → extended Fellner-Schall (mgcv.r:1907-1908).
+            if gg.md_L is not None:
+                raise NotImplementedError(
+                    "efs (available_derivs=0) with id-linked smoothing "
+                    "parameters is not supported.")
+            sl_setup = _sl_setup(gg.slots, gg.p)
+            theta0 = _initial_sp_general(
+                gg.X, gg.y, family, gg.slots, gg.lpi, weights=gg.wt,
+                offsets=gg.offsets, L=None)
+            fit_efs, theta_hat, it_efs = _efsud(
+                gg.X, gg.y, theta0, gg.sl, sl_setup, family=family,
+                lpi=gg.lpi, weights=gg.wt, offset=gg.offsets,
+                Mp=gg.Mp, start=gg.g5["start"], control=gg.control)
+            gg.g5["fit"] = fit_efs
+            gg.g5["start"] = fit_efs["coefficients"]
+            outer_info = {
+                "conv": ("iteration limit reached"
+                         if it_efs == gg.control["efs_maxit"]
+                         else "full convergence"),
+                "iter": it_efs,
+            }
+        elif use_bfgs:
+            # available_derivs == 1 → BFGS over the REML5 score (mgcv.r:1722).
+            theta0 = _initial_sp_general(
+                gg.X, gg.y, family, gg.slots, gg.lpi, weights=gg.wt,
+                offsets=gg.offsets, L=gg.md_L)
+            theta_hat = gam_outer(
+                theta0, optimizer="bfgs", criterion="REML5",
+                control=gg.control, bfgs_fn=outer_bfgs)
+            # gam_outer's shim set self._outer_info as a side effect.
+            outer_info = get_outer_info()
+        else:
+            theta0 = _initial_sp_general(
+                gg.X, gg.y, family, gg.slots, gg.lpi, weights=gg.wt,
+                offsets=gg.offsets, L=gg.md_L)
+            theta_hat = gam_outer(
+                theta0, optimizer="newton", criterion="REML5",
+                control=gg.control, newton_fn=outer_newton)
+            outer_info = get_outer_info()
+
+        rho_hat = rho_full(theta_hat)
+        sp_out = np.exp(theta_hat)
+        # The converged deriv-2 fit: newton's/efs's last accepted iterate
+        # (cached in g5 — mgcv's b; estimate.gam never refits). Fixed-sp/no-sp
+        # paths fit directly, deriv 0 for derivs-0 families (mgcv.r:1479+).
+        fit = gg.g5.get("fit")
+        if fit is None:
+            fit = _gam_fit5(
+                gg.X, gg.y, rho_hat, gg.sl, family=family, lpi=gg.lpi,
+                weights=gg.wt, offset=gg.offsets, Mp=gg.Mp,
+                deriv=2 if avail_derivs >= 2 else 0,
+                start=gg.g5["start"], gamma=gg.gamma, epsilon=1e-8)
+        if fit["warn"]:
+            import warnings as _warnings
+            for w_msg in fit["warn"]:
+                _warnings.warn(w_msg, stacklevel=2)
+        # hea stores 2·V_R (single-formula convention: mgcv's printed REML is
+        # REML_criterion/2).
+        return {"fit": fit, "rho_hat": rho_hat, "sp": sp_out,
+                "outer_info": outer_info,
+                "REML_criterion": 2.0 * fit["REML"],
+                "converged": bool(fit["converged"])}
+
+    # ---- ordinary-family branch ---------------------------------------------
+    n, n_sp, n_work = G.n, G.n_sp, G.n_work
+    family = G.family
+    log_phi_hat = None
+    tw_info = None
+    used_magic = False
+    if n_sp == 0:
+        # No smooths — degenerate to unpenalized least squares. Still go
+        # through the fit so all mgcv post-fit attributes are populated.
+        sp_out = np.zeros(0)
+        rho_hat = np.zeros(0)
+        fit = fit_given_rho(rho_hat)
+    elif sp is not None:
+        sp_arr = np.asarray(sp, dtype=float)
+        # mgcv semantics: ``sp`` supplies the *working* smoothing parameters —
+        # one per column of L (== one per penalty when no id linkage).
+        if sp_arr.shape != (n_work,):
+            raise ValueError(
+                f"sp must have length {n_work} (one per estimated "
+                f"smoothing parameter; id-linked penalties share one), "
+                f"got {sp_arr.shape}"
+            )
+        if np.any(sp_arr < 0):
+            raise ValueError("sp entries must be non-negative")
+        # guard log(0) — a hard zero sp means "no penalty".
+        rho_hat = rho_full(np.log(np.maximum(sp_arr, 1e-10)))
+        sp_out = sp_arr
+        fit = fit_given_rho(rho_hat)
+        # Unknown-scale (RE)ML at fixed sp: set log φ̂ to the criterion
+        # minimizer over log φ at this ρ (gam.fit3.r:121-123 appends log scale;
+        # φ-row grad/Hess gam.fit3.r:629-631). β̂/PIRLS are φ-independent.
+        if (not G.scale_known_fit) and G.pearson_scale_criterion:
+            # P-REML/P-ML: φ̂ = Pearson-Laplace plug-in P/(n−Mp) (gam.fit3.r:641).
+            log_phi_hat = float(np.log(max(phi_pearson(fit), 1e-300)))
+        elif (not G.scale_known_fit) and method in ("REML", "ML"):
+            Dp = float(fit.dev + fit.pen)
+            denom = (max(float(n - G.Mp), 1.0) if method == "REML"
+                     else max(float(n), 1.0))
+            log_phi = float(np.log(max(Dp / denom, 1e-300)))
+            if not isinstance(family, (Gaussian, Quasi)):
+                log_phi = profile_log_phi_fixed_sp(fit, log_phi)
+            log_phi_hat = log_phi
+    else:
+        # Unified outer optimization (mgcv gam.outer). ``include_log_phi`` is
+        # True for unknown-scale families (θ ⊇ (ρ, log φ)); ``include_family_theta``
+        # is True for tw() (appends the reparametrised Tweedie power).
+        include_log_phi = ((not G.scale_known_fit)
+                           and method in ("REML", "ML"))
+        include_family_theta = (
+            family.n_theta > 0 and method in ("REML", "ML")
+        )
+        if family.n_theta > 0 and method == "GCV.Cp":
+            raise ValueError(
+                f"family={family!r} (n_theta={family.n_theta}) requires "
+                "method='REML' or 'ML'; got method='GCV.Cp'"
+            )
+        # Seed at mgcv's ``initial.spg`` balance (estimate.gam mgcv.r:1998:
+        # ``lsp <- lsp2`` for REML/ML/GCV alike); id linkage / fixed entries
+        # map the full-space seed to working space by least squares
+        # (mgcv's ``coef(lm(lsp ~ L - 1 + offset(lsp0)))``, mgcv.r:4617-4618).
+        rho0_full = initial_sp_rho()
+        if G.lsp0 is not None:
+            rho0_full = rho0_full - G.lsp0
+        if G.L is None:
+            cur_rho = rho0_full
+        else:
+            cur_rho, *_ = np.linalg.lstsq(G.L, rho0_full, rcond=None)
+        if include_log_phi:
+            # mgcv seeds log φ at log(null.scale/10), null.scale = Σ
+            # dev_resids(y, ȳ)/n from get.null.coef (mgcv.r:1854-1870,
+            # 2027-2029); mum = mean(y) unweighted (mgcv.r:1863) but the
+            # dev.resids carry the prior weights (mgcv.r:1868).
+            mu_null0 = np.full(n, float(np.mean(G.y_arr)))
+            null_scale = float(np.sum(family.dev_resids(
+                G.y_arr, mu_null0, G.wt
+            ))) / n
+            cur_logphi = float(np.log(max(null_scale / 10.0, 1e-12)))
+        else:
+            cur_logphi = 0.0  # GCV does not put log φ in θ
+
+        theta0_parts = [cur_rho]
+        if include_log_phi:
+            theta0_parts.append(np.array([cur_logphi]))
+        if include_family_theta:
+            theta0_parts.append(np.asarray(family.get_theta(), dtype=float))
+        theta0 = np.concatenate(theta0_parts)
+
+        # Map the resolved method onto the outer-Newton criterion (mgcv's
+        # scoreType, mgcv.r:1945-1959).
+        if method in ("REML", "ML"):
+            _criterion = "REML"
+        elif method in ("P-REML", "P-ML"):
+            _criterion = "PREML"
+        elif method == "GACV.Cp" and not G.scale_known_fit:
+            _criterion = "GACV"
+        else:
+            _criterion = "GCV"
+        if use_magic(_criterion, include_log_phi, include_family_theta):
+            # Gaussian-identity additive + GCV.Cp → mgcv's `magic` fast path
+            # (am.fit, mgcv.r:2001). theta == per-penalty ρ here (L is None).
+            used_magic = True
+            theta_hat = gam_outer(
+                theta0, optimizer="magic", criterion=_criterion,
+                control=G.control, magic_fn=magic_optimize)
+        else:
+            theta_hat = gam_outer(
+                theta0, optimizer="newton", criterion=_criterion,
+                control=G.control, include_log_phi=include_log_phi,
+                include_family_theta=include_family_theta,
+                newton_fn=outer_newton)
+
+        theta_sp = theta_hat[:n_work]
+        base = n_work
+        if include_log_phi:
+            log_phi_hat = float(theta_hat[base])
+            base += 1
+        else:
+            log_phi_hat = None
+        if include_family_theta:
+            family.set_theta(theta_hat[base:base + family.n_theta])
+            if isinstance(family, _tw_family):
+                tw_info = {
+                    "theta_hat": float(theta_hat[base]),
+                    "p_hat": float(family.p),
+                    "log_phi_hat": log_phi_hat,
+                }
+        # ``m$sp`` is the *working* sp vector; ``m$full.sp`` is derived below
+        # for every path via ``rho_full``.
+        sp_out = np.exp(theta_sp)
+        rho_hat = rho_full(theta_sp)
+        # Build the final fit WITHOUT re-solving PIRLS at ρ̂: mgcv's gam.outer
+        # reuses newton's accepted-step fit (object <- b$object, mgcv.r:1684).
+        # magic builds from its cached QR; else use newton's cached fit; fall
+        # back to a solve only if the optimizer produced none (init failure).
+        if used_magic:
+            fit = magic_fit_state(rho_hat)
+        else:
+            outer_fit = get_outer_fit()
+            if outer_fit is not None:
+                fit = outer_fit
+            else:
+                fit = fit_given_rho(rho_hat)
+        # P-REML/P-ML carry no log φ in θ — the scale is the analytic
+        # Pearson-Laplace plug-in at ρ̂ (φ = P/(n−Mp)).
+        if G.pearson_scale_criterion:
+            log_phi_hat = float(np.log(max(phi_pearson(fit), 1e-300)))
+    return {"fit": fit, "rho_hat": rho_hat, "sp": sp_out,
+            "log_phi_hat": log_phi_hat, "used_magic": used_magic,
+            "tw_info": tw_info}
 
 
 class gam:
@@ -5516,13 +6164,13 @@ class gam:
             raise ValueError(f"scale must be a finite number, got {scale!r}")
         scale = float(scale)
         if self._family_mgcv_extended:
-            if scale != 0.0:
-                raise NotImplementedError(
-                    "scale= for mgcv-extended families (tw, scat, nb) is "
-                    "not ported — their scale handling is family-driven "
-                    "(mgcv.r:1948-1949)."
-                )
-            self._scale_resolved = 1.0 if self.family.scale_known else -1.0
+            # mgcv.r:1948-1949: extended families resolve scale from the
+            # family when scale≤0 (φ=1 for the tw/nb/scat deviance); a user
+            # scale>0 fixes φ at that value (verified: nb scale=2 → φ=2).
+            if scale > 0.0:
+                self._scale_resolved = scale
+            else:
+                self._scale_resolved = 1.0 if self.family.scale_known else -1.0
         elif method in ("REML", "ML", "P-REML", "P-ML"):
             if self.family.scale_known:
                 self._scale_resolved = 1.0          # mgcv.r:1947
@@ -6085,204 +6733,31 @@ class gam:
                 "in the constructor instead (e.g. Tweedie(p=...), "
                 "scat(theta=(nu, sigma)))."
             )
-        if n_sp == 0:
-            # No smooths — degenerate to unpenalized least squares. This is
-            # the lm path; we still go through it so all the mgcv-style
-            # post-fit attributes are populated.
-            self.sp = np.zeros(0)
-            rho_hat = np.zeros(0)
-            fit = self._fit_given_rho(rho_hat)
-        elif sp is not None:
-            sp_arr = np.asarray(sp, dtype=float)
-            # mgcv semantics: ``sp`` supplies the *working* smoothing
-            # parameters — one per column of L (= one per penalty when
-            # there is no id linkage; fewer when smooths share an id).
-            if sp_arr.shape != (n_work,):
-                raise ValueError(
-                    f"sp must have length {n_work} (one per estimated "
-                    f"smoothing parameter; id-linked penalties share one), "
-                    f"got {sp_arr.shape}"
-                )
-            if np.any(sp_arr < 0):
-                raise ValueError("sp entries must be non-negative")
-            # guard log(0) — a hard zero sp means "no penalty," which we
-            # represent as exp(-large) instead, matching mgcv's handling.
-            rho_hat = self._rho_full(np.log(np.maximum(sp_arr, 1e-10)))
-            self.sp = sp_arr
-            fit = self._fit_given_rho(rho_hat)
-            # For unknown-scale families fit by (RE)ML, set log φ̂ to the
-            # criterion minimizer over log φ at this fixed ρ — the value
-            # mgcv's outer newton() converges to when the free lsp vector
-            # is just [log φ] (gam.fit3.r:121-123 appends log scale; the
-            # φ-row gradient/Hessian are gam.fit3.r:629-631). β̂/PIRLS
-            # don't depend on φ, so this is a 1-D problem in the score.
-            #
-            # Closed form when ∂ls/∂log φ = −n_obs/2 exactly (Gaussian's
-            # −n/(2φ) and the quasi trio's EQL ls):
-            #   REML: φ̂ = Dp/(n−Mp)  (Mp·log φ in score; profiles out fixed effects)
-            #   ML:   φ̂ = Dp/n      (no Mp·log φ; treats β as deterministic)
-            # For Gamma/IG/Tweedie ls the closed form is NOT the
-            # minimizer (it seeds the Newton below instead) — using it
-            # was a value-level REML bug at fixed sp (family-review A1).
-            # A gam(scale=)-fixed φ skips the profile-out (φ is not
-            # estimated; the criterion runs at log(scale) via _split).
-            if (not self._scale_known_fit) and self._pearson_scale_criterion:
-                # P-REML/P-ML: φ̂ is the Pearson-Laplace plug-in φ = P/(n−Mp)
-                # (gam.fit3.r:641), not the deviance profile — there is no
-                # 1-D φ minimization, the scale is analytic at this ρ.
-                self._log_phi_hat = float(np.log(
-                    max(self._phi_pearson(fit), 1e-300)))
-            elif (not self._scale_known_fit) and method in ("REML", "ML"):
-                Dp = float(fit.dev + fit.pen)
-                denom = max(float(n - self._Mp), 1.0) if method == "REML" else max(float(n), 1.0)
-                log_phi = float(np.log(max(Dp / denom, 1e-300)))
-                if not isinstance(self.family, (Gaussian, Quasi)):
-                    log_phi = self._profile_log_phi_fixed_sp(
-                        fit, log_phi,
-                    )
-                self._log_phi_hat = log_phi
-        else:
-            # Unified outer optimization. PIRLS inner solve + general
-            # `_reml(ρ, log φ[, θ_fam])` + analytical Newton, family-agnostic.
-            #
-            # ``include_log_phi`` is True for unknown-scale (Gaussian,
-            # Gamma, IG, Tweedie, tw): θ ⊇ (ρ, log φ). False for
-            # known-scale (Poisson, Binomial): θ = ρ with log φ ≡ 0.
-            #
-            # ``include_family_theta`` is True for ``tw()``: appends
-            # ``family.n_theta=1`` extra slot for the reparametrised
-            # Tweedie power. The outer Newton then jointly estimates
-            # (ρ, log φ, θ_tw); ``_reml_grad(... include_family_theta=True)``
-            # supplies the analytical gradient (Dp, ls0, log|H+S|), and
-            # ``_reml_hessian`` augments the (ρ, log φ) analytical block
-            # with FD on the analytical gradient for the new rows/cols
-            # (truncation ~ 1e-8, well below the optimiser's tol).
-            family = self.family
-            include_log_phi = ((not self._scale_known_fit)
-                               and method in ("REML", "ML"))
-            include_family_theta = (
-                family.n_theta > 0 and method in ("REML", "ML")
-            )
-            if family.n_theta > 0 and method == "GCV.Cp":
-                # tw() (today's only n_theta>0 family) has no GCV path —
-                # GCV doesn't expose a usable derivative wrt the family
-                # power, and mgcv likewise rejects this combo.
-                raise ValueError(
-                    f"family={family!r} (n_theta={family.n_theta}) requires "
-                    "method='REML' or 'ML'; got method='GCV.Cp'"
-                )
-
-            # Initial seed for the (working) smoothing parameters and log φ.
-            #
-            # Every outer method seeds at mgcv's ``initial.spg`` balance
-            # (estimate.gam mgcv.r:1998: ``lsp <- lsp2`` — REML, ML and
-            # GCV alike); with id linkage or fixed entries the full-space
-            # seed maps to working space by least squares — mgcv's
-            # ``coef(lm(lsp ~ L - 1 + offset(lsp0)))`` (mgcv.r:4617-4618).
-            rho0_full = self._initial_sp_rho()
-            if self._lsp0 is not None:
-                rho0_full = rho0_full - self._lsp0
-            if self._L is None:
-                cur_rho = rho0_full
-            else:
-                cur_rho, *_ = np.linalg.lstsq(self._L, rho0_full,
-                                              rcond=None)
-            if include_log_phi:
-                # mgcv seeds log φ at log(null.scale/10), where
-                # null.scale = Σ dev_resids(y, ȳ)/n from get.null.coef
-                # (mgcv.r:1854-1870, 2027-2029) — the deviance of the
-                # constant-mean fit, not a Pearson estimate (and no extra
-                # PIRLS fit).
-                # mum = mean(y) is *unweighted* (mgcv.r:1863) but the
-                # dev.resids carry the prior weights (mgcv.r:1868).
-                mu_null0 = np.full(n, float(np.mean(self._y_arr)))
-                null_scale = float(np.sum(family.dev_resids(
-                    self._y_arr, mu_null0, self._wt
-                ))) / n
-                cur_logphi = float(np.log(max(null_scale / 10.0, 1e-12)))
-            else:
-                cur_logphi = 0.0  # GCV does not put log φ in θ
-
-            theta0_parts = [cur_rho]
-            if include_log_phi:
-                theta0_parts.append(np.array([cur_logphi]))
-            if include_family_theta:
-                # Seed θ_fam at the family's current value (e.g. tw()'s
-                # default θ=0 ⇒ p=1.5). User-set tw(theta=...) is honoured.
-                theta0_parts.append(np.asarray(family.get_theta(), dtype=float))
-            theta0 = np.concatenate(theta0_parts)
-
-            # Map the resolved user method onto the outer-Newton criterion
-            # (mgcv's scoreType, mgcv.r:1945-1959): REML/ML → "REML";
-            # P-REML/P-ML → "PREML" (ρ-only Pearson-Laplace); GACV.Cp →
-            # "GACV" when the scale is estimated, else UBRE via "GCV"; plain
-            # GCV.Cp → "GCV" (which itself picks GCV vs UBRE on scale).
-            if method in ("REML", "ML"):
-                _criterion = "REML"
-            elif method in ("P-REML", "P-ML"):
-                _criterion = "PREML"
-            elif method == "GACV.Cp" and not self._scale_known_fit:
-                _criterion = "GACV"
-            else:
-                _criterion = "GCV"
-            if self._use_magic(_criterion, include_log_phi,
-                               include_family_theta):
-                # Gaussian-identity additive + GCV.Cp → mgcv's `magic` fast
-                # path (am.fit, mgcv.r:2001): QR once, optimize GCV on the
-                # reduced q×q system. theta == per-penalty ρ here (L is None).
-                self._used_magic = True
-                theta_hat = gam_outer(
-                    theta0, optimizer="magic", criterion=_criterion,
-                    control=self._control, magic_fn=self._magic_optimize)
-            else:
-                theta_hat = gam_outer(
-                    theta0, optimizer="newton", criterion=_criterion,
-                    control=self._control, include_log_phi=include_log_phi,
-                    include_family_theta=include_family_theta,
-                    newton_fn=self._outer_newton)
-
-            theta_sp = theta_hat[:n_work]
-            base = n_work
-            if include_log_phi:
-                log_phi_hat = float(theta_hat[base])
-                base += 1
-            else:
-                log_phi_hat = None
-            if include_family_theta:
-                family.set_theta(theta_hat[base:base + family.n_theta])
-                if isinstance(family, _tw_family):
-                    self._tw_info = {
-                        "theta_hat": float(theta_hat[base]),
-                        "p_hat": float(family.p),
-                        "log_phi_hat": log_phi_hat,
-                    }
-            self._log_phi_hat = log_phi_hat
-            # mgcv exposure: ``m$sp`` is the *working* sp vector; the
-            # per-penalty expansion (mgcv's ``m$full.sp``) is derived
-            # below for every path via ``_rho_full``.
-            self.sp = np.exp(theta_sp)
-            rho_hat = self._rho_full(theta_sp)
-            # Build the final fit WITHOUT re-solving PIRLS at ρ̂. mgcv's
-            # gam.outer reuses newton's accepted-step fit as the final model
-            # fit (object <- b$object, mgcv.r:1684; newton returns object=b,
-            # the last accepted gam.fit3 at the converged lsp, gam.fit3.r:1718)
-            # — only the nlm/optim path refits (mgcv.r:1711), which hea never
-            # takes. magic builds from its cached QR (bit-identical β/A_chol at
-            # (q+e)×q cost). `_outer_newton` caches its accepted fit on
-            # `_outer_fit`; fall back to a solve only if the optimizer never
-            # produced one (initial-fit failure).
-            if self._used_magic:
-                fit = self._magic_fit_state(rho_hat)
-            elif self._outer_fit is not None:
-                fit = self._outer_fit
-            else:
-                fit = self._fit_given_rho(rho_hat)
-            # P-REML/P-ML carry no log φ in the outer θ — their scale is the
-            # analytic Pearson-Laplace plug-in at the converged ρ̂. Record it
-            # so the criterion/scale/AIC consumers read φ = P/(n−Mp).
-            if self._pearson_scale_criterion:
-                self._log_phi_hat = float(np.log(
-                    max(self._phi_pearson(fit), 1e-300)))
+        # mgcv's estimate.gam (mgcv.r:1872): smoothness selection + final
+        # fit. Bundle the setup outputs into G and thread the fitter callables
+        # (the C1 poly seam newton/bfgs already use), then assign the returned
+        # state onto self and continue to the shared post-fit assembly below.
+        G = _G(n=n, n_sp=n_sp, n_work=n_work, Mp=self._Mp, L=self._L,
+               lsp0=self._lsp0, wt=self._wt, y_arr=self._y_arr,
+               family=self.family, scale_known_fit=self._scale_known_fit,
+               pearson_scale_criterion=self._pearson_scale_criterion,
+               control=self._control)
+        _res = estimate_gam(
+            G, sp, method,
+            fit_given_rho=self._fit_given_rho, rho_full=self._rho_full,
+            initial_sp_rho=self._initial_sp_rho, use_magic=self._use_magic,
+            phi_pearson=self._phi_pearson,
+            profile_log_phi_fixed_sp=self._profile_log_phi_fixed_sp,
+            magic_fit_state=self._magic_fit_state,
+            outer_newton=self._outer_newton,
+            magic_optimize=self._magic_optimize,
+            get_outer_fit=lambda: self._outer_fit)
+        fit = _res["fit"]
+        rho_hat = _res["rho_hat"]
+        self.sp = _res["sp"]
+        self._log_phi_hat = _res["log_phi_hat"]
+        self._used_magic = _res["used_magic"]
+        self._tw_info = _res["tw_info"]
 
         # Surface inner-loop warnings once, for the final fit only — mgcv
         # accumulates them in gam.fit3's warn list and intermediate newton()
@@ -7448,113 +7923,27 @@ class gam:
             "start": start_irp, "gamma": self._gamma,
         }
 
-        n_work = self._work_dim
-        avail_derivs = int(getattr(family, "available_derivs", 2) or 0)
-        efs_forced = optimizer[0] == "efs"
-        # mgcv coerces available.derivs==1 families to the bfgs outer
-        # optimizer unless efs was requested (mgcv.r:1907): the ll only
-        # supplies up to the dH/trace order (gamlss_gH deriv ≤ 2), so
-        # Newton's REML2 — needing the ll's trHid2H — is unavailable. The
-        # public knob optimizer=("outer","bfgs") forces bfgs on any general
-        # family (even a derivs-2 one, exactly like mgcv).
-        bfgs_forced = len(optimizer) > 1 and optimizer[1] == "bfgs"
-        use_efs = avail_derivs == 0 or efs_forced
-        use_bfgs = (avail_derivs == 1 or bfgs_forced) and not efs_forced
-        if sp is not None:
-            sp_arr = np.asarray(sp, dtype=float).flatten()
-            if sp_arr.shape != (n_work,):
-                raise ValueError(
-                    f"sp must have length {n_work} (working smoothing "
-                    f"parameters), got {sp_arr.shape}")
-            if np.any(sp_arr <= 0) or not np.all(np.isfinite(sp_arr)):
-                raise ValueError("sp entries must be positive and finite")
-            theta_hat = np.log(sp_arr)
-            self._outer_info = {"conv": "fixed sp", "iter": 0}
-        elif n_work == 0:
-            theta_hat = np.zeros(0)
-            self._outer_info = {"conv": "no smoothing parameters",
-                                "iter": 0}
-        elif use_efs:
-            # available_derivs == 0 → extended Fellner-Schall (mgcv's
-            # automatic optimizer switch, mgcv.r:1907-1908): the family
-            # only ever supplies ll at deriv ≤ 1. Inner ε stays at
-            # gam.control's 1e-7 (no newton cap on this path).
-            if md.L is not None:
-                raise NotImplementedError(
-                    "efs (available_derivs=0) with id-linked smoothing "
-                    "parameters is not supported.")
-            sl_setup = _sl_setup(md.slots, md.p)
-            theta0 = _initial_sp_general(
-                X_irp, y, family, md.slots, md.lpi, weights=self._wt,
-                offsets=md.offsets, L=None)
-            fit_efs, theta_hat, it_efs = _efsud(
-                X_irp, y, theta0, sl, sl_setup, family=family,
-                lpi=md.lpi, weights=self._wt, offsets=md.offsets,
-                Mp=Mp, start=self._g5["start"],
-                epsilon=self._control["epsilon"],
-                efs_lspmax=self._control["efs_lspmax"],
-                efs_tol=self._control["efs_tol"],
-                efs_maxit=self._control["efs_maxit"])
-            self._g5["fit"] = fit_efs
-            self._g5["start"] = fit_efs["coefficients"]
-            self._outer_info = {
-                "conv": ("iteration limit reached"
-                         if it_efs == self._control["efs_maxit"]
-                         else "full convergence"),
-                "iter": it_efs,
-            }
-        elif use_bfgs:
-            # available_derivs == 1 → BFGS over the REML5 score (mgcv's
-            # bfgs, gam.fit3.r:1722): only gam.fit5 deriv ≤ 1 (score +
-            # gradient) is ever asked of the family.
-            theta0 = _initial_sp_general(
-                X_irp, y, family, md.slots, md.lpi, weights=self._wt,
-                offsets=md.offsets, L=md.L)
-            theta_hat = gam_outer(
-                theta0, optimizer="bfgs", criterion="REML5",
-                control=self._control, bfgs_fn=self._outer_bfgs)
-        else:
-            theta0 = _initial_sp_general(
-                X_irp, y, family, md.slots, md.lpi, weights=self._wt,
-                offsets=md.offsets, L=md.L)
-            theta_hat = gam_outer(
-                theta0, optimizer="newton", criterion="REML5",
-                control=self._control, newton_fn=self._outer_newton)
-
-        rho_full = self._rho_full(theta_hat)
-        self._rho_hat = rho_full
-        self.sp = np.exp(theta_hat)
-        # mgcv's ``m$full.sp`` — per-penalty expansion (≡ sp when L is
-        # the identity; the general path has no fixed-sp fold yet).
-        self.full_sp = np.exp(np.asarray(rho_full, dtype=float))
-
-        # The converged deriv-2 fit: newton's last accepted iterate
-        # (cached by the REML5 closure — mgcv's b; estimate.gam never
-        # refits). Fixed-sp / no-sp paths fit directly here, with the
-        # newton-capped inner epsilon (1e-8, gam.fit3.r:1308) — at
-        # deriv 0 for derivs-0 families, whose ll has nothing above
-        # order 2: mgcv only ever fits those through efsudr's deriv=0
-        # calls (gam.fit4.r:1479+), and post-proc then takes the same
-        # Vc ≡ Vp path as efs fits (no db_drho on the fit).
-        fit = self._g5.get("fit")
-        if fit is None:
-            fit = _gam_fit5(
-                X_irp, y, rho_full, sl, family=family, lpi=md.lpi,
-                weights=self._wt, offset=md.offsets, Mp=Mp,
-                deriv=2 if avail_derivs >= 2 else 0,
-                start=self._g5["start"], gamma=self._gamma,
-                epsilon=1e-8)
+        # mgcv's estimate.gam general-family branch (mgcv.r:1984+): bundle
+        # the general slice of G and run smoothness selection + the final
+        # gam.fit5, then assign the returned state onto self.
+        gg = _GGeneral(
+            n_work=self._work_dim, Mp=Mp, wt=self._wt, family=family,
+            control=self._control, gamma=self._gamma, X=X_irp, y=y, sl=sl,
+            md_L=md.L, lpi=md.lpi, offsets=md.offsets, p=md.p, slots=md.slots,
+            g5=self._g5, optimizer=optimizer)
+        _res = estimate_gam(
+            None, sp, method, rho_full=self._rho_full,
+            outer_newton=self._outer_newton, outer_bfgs=self._outer_bfgs,
+            general=gg, get_outer_info=lambda: self._outer_info)
+        fit = _res["fit"]
         self._fit5 = fit
-        if fit["warn"]:
-            import warnings as _warnings
-            for w_msg in fit["warn"]:
-                _warnings.warn(w_msg, stacklevel=2)
-
-        # hea stores 2·V_R (single-formula convention: mgcv's printed
-        # REML is REML_criterion/2).
-        self.REML_criterion = 2.0 * fit["REML"]
-        self.converged = bool(fit["converged"])
-        self.outer_info = self._outer_info
+        self._rho_hat = _res["rho_hat"]
+        self.sp = _res["sp"]
+        self.full_sp = np.exp(np.asarray(_res["rho_hat"], dtype=float))
+        self._outer_info = _res["outer_info"]
+        self.outer_info = _res["outer_info"]
+        self.REML_criterion = _res["REML_criterion"]
+        self.converged = _res["converged"]
 
         from ..R import NamedVector
         coefs = _sl_initial_repara(sl, fit["coefficients"], inverse=True)
@@ -8012,305 +8401,27 @@ class gam:
             and len(self._slots) > 0
         )
 
-    def _magic_setup(self):
-        """magic's ``getRpqr`` (magic.c:451): QR the n×q √w-weighted design
-        ONCE → R (q×q), y0 = Q₁'(√w·y), yy = ‖√w·y‖². Reused for every
-        reduced score-eval — this is the work the Newton path repeats n times."""
-        sqw = np.sqrt(self._wt)
-        yv = self._y_arr - self._offset
-        b = sqw * yv
-        if self._struct_R is not None and self._keep_cols is None:
-            # Reuse the structural-drop QR (same √w·X under gaussian-identity,
-            # no drop): R is bit-identical to qr(√wt·X).R, and the getRpqr
-            # projection y0 = Q₁'b = R⁻ᵀ(Xw'b) needs no second QR (Xw = √w·X,
-            # so Xw'b = X'(wt·yv)). Matches the explicit-Q route to ~1e-15.
-            R = self._struct_R
-            y0 = solve_triangular(
-                R, self._X_full.T @ (self._wt * yv), lower=False, trans="T")
-        else:
-            Q, R = np.linalg.qr(sqw[:, None] * self._X_full)
-            y0 = Q.T @ b
-        yy = float(b @ b)
-        return R, y0, yy
-
-    def _magic_penalty_roots(self) -> list[np.ndarray]:
-        """Per-penalty full p×cS_i roots rS_i (rS_i rS_iᵀ = S_i), one per
-        ``self._slots`` entry (== the ρ order). cS_i = rank(S_i)."""
-        p = self.p
-        roots = []
-        for slot in self._slots:
-            a, b = slot.col_start, slot.col_end
-            ev, V = np.linalg.eigh(0.5 * (slot.S + slot.S.T))
-            pos = ev > ev.max() * 1e-12 if ev.max() > 0 else np.zeros_like(ev, bool)
-            rb = V[:, pos] * np.sqrt(ev[pos])           # k × cS_i
-            full = np.zeros((p, rb.shape[1]))
-            full[a:b, :] = rb
-            roots.append(full)
-        return roots
-
-    def _magic_fit_reduced(self, rho, R, y0, yy):
-        """Port of magic.c ``fit_magic`` (Gaussian/GCV): GCV score from the
-        SVD of the reduced ``[R; St^½]`` ((q+rank_S)×q). St = Σ exp(ρ_k) S_k.
-        Returns score, scale, rss, trA, rank, β, plus the SVD pieces
-        (U1, V, d, y1, delta) the derivative routine reuses."""
-        q = R.shape[1]
-        n_score = float(np.sum(self._wt != 0.0))
-        gamma = self._gamma
-        rank_tol = np.sqrt(np.finfo(float).eps)
-        St = self._build_S_lambda(rho)
-        St = 0.5 * (St + St.T)
-        ev, Vev = np.linalg.eigh(St)
-        pos = ev > ev.max() * 1e-14 if ev.max() > 0 else np.zeros_like(ev, bool)
-        root = (Vev[:, pos] * np.sqrt(ev[pos])).T       # rank_S × q, rootᵀroot = St
-        R_aug = np.vstack([R, root])
-        U, d, Vt = np.linalg.svd(R_aug, full_matrices=False)
-        rank = q
-        thresh = d[0] * rank_tol
-        while d[rank - 1] < thresh:
-            rank -= 1
-        Vr = Vt[:rank].T                                # q × rank
-        U1 = U[:q, :rank]                               # q × rank (top q rows)
-        y1 = U1.T @ y0
-        yAy = float(y1 @ y1)
-        b_proj = U1 @ y1
-        yAAy = float(b_proj @ b_proj)
-        norm = yy - 2 * yAy + yAAy
-        if norm < 0.0:
-            norm = 0.0
-        trA = float(np.sum(U1 * U1))
-        delta = n_score - gamma * trA
-        score = n_score * norm / (delta * delta)
-        scale = norm / (n_score - trA)
-        beta = Vr @ (y1 / d[:rank])
-        return dict(score=score, scale=scale, norm=norm, trA=trA, rank=rank,
-                    beta=beta, U1=U1, V=Vr, d=d[:rank], y1=y1, delta=delta,
-                    n_score=n_score, gamma=gamma)
-
-    def _magic_gH(self, mg, rho, roots):
-        """Port of magic.c ``magic_gH``: gradient (exact) and Hessian of the
-        GCV score wrt ρ, from the reduced SVD in ``mg`` — O(m·rank²), no
-        re-fit. The Hessian is magic's frozen-basis *search-direction* approx
-        (it differentiates the explicit sp-dependence, not the SVD basis); the
-        driver converges on the exact gradient with an SD fallback."""
-        U1, V, d, y1 = mg["U1"], mg["V"], mg["d"], mg["y1"]
-        gamma, n = mg["gamma"], mg["n_score"]
-        norm, delta = mg["norm"], mg["delta"]
-        m = len(roots)
-        Dinv = 1.0 / d
-        U1U1 = U1.T @ U1
-        esp = np.exp(np.asarray(rho, float))
-        M = [None] * m
-        K = [None] * m
-        My = [None] * m
-        yK = [None] * m
-        Ky = [None] * m
-        for i in range(m):
-            VSi = (V.T @ roots[i]) * Dinv[:, None]      # D⁻¹V'rS_i (rank×cS_i)
-            Mi = VSi @ VSi.T                            # D⁻¹V'S_iVD⁻¹
-            Ki = Mi @ U1U1
-            M[i], K[i] = Mi, Ki
-            My[i] = Mi @ y1
-            yK[i] = Ki.T @ y1
-            Ky[i] = Ki @ y1
-        ddelta = np.zeros(m)
-        dnorm = np.zeros(m)
-        d2delta = np.zeros((m, m))
-        d2norm = np.zeros((m, m))
-        for i in range(m):
-            ddelta[i] = gamma * np.trace(K[i]) * esp[i]
-            for j in range(i + 1):
-                v = float(np.sum(M[j] * K[i]))
-                d2delta[i, j] = d2delta[j, i] = -gamma * 2 * esp[i] * esp[j] * v
-            d2delta[i, i] += ddelta[i]
-            dnorm[i] = 2 * esp[i] * float(y1 @ (My[i] - Ky[i]))
-            for j in range(i + 1):
-                v = float(np.sum(My[i] * Ky[j] + My[j] * Ky[i]
-                                 - 2 * My[i] * My[j] + yK[i] * My[j]))
-                d2norm[i, j] = d2norm[j, i] = v * 2 * esp[i] * esp[j]
-            d2norm[i, i] += dnorm[i]
-        grad = np.zeros(m)
-        hess = np.zeros((m, m))
-        # GCV (control[0]==1) — magic.c:263-273.
-        xx = n / (delta * delta)
-        xx1 = xx * 2 * norm / delta
-        x1 = -2 * xx / delta
-        x2 = 3 * xx1 / delta
-        for i in range(m):
-            grad[i] = xx * dnorm[i] - xx1 * ddelta[i]
-            for j in range(i + 1):
-                hess[i, j] = hess[j, i] = (
-                    x1 * (ddelta[j] * dnorm[i] + ddelta[i] * dnorm[j])
-                    + xx * d2norm[i, j] + x2 * ddelta[i] * ddelta[j]
-                    - xx1 * d2delta[i, j])
-        return grad, hess
-
     def _magic_optimize(self, rho0, tol: float = 1e-7, max_half: int = 15):
-        """Port of magic.c ``magic`` (the driver, magic.c:286-707): Newton
-        over log-sp backed by steepest descent with step halving, plus the
-        infinite-sp check, on the reduced GCV system. Returns ρ̂ and records
-        ``self._outer_info``. (Flat-deriv reset + exact initial.sp deferred —
-        the seed is initial.spg, which magic converges from.)"""
-        R, y0, yy = self._magic_setup()
-        # Stash the once-computed QR so the final fit reuses it (the reduced
-        # [R; E] system gives β/A_chol bit-identical to the full (n+e)×q QR
-        # — same R'R = X'WX+Sλ — at (q+e)×q cost). See _magic_fit_state.
-        self._magic_R = R
-        self._magic_y0 = y0
-        roots = self._magic_penalty_roots()
-        mp = len(rho0)
-        sp0 = np.asarray(rho0, float).copy()
-
-        def feval(sp):
-            return self._magic_fit_reduced(sp, R, y0, yy)
-
-        mg = feval(sp0)
-        min_score = mg["score"]
-        n_step = np.zeros(mp)
-        sd_step = np.zeros(mp)
-        use_sd = True
-        d_score = np.inf
-        grad = np.zeros(mp)
-        converged = False
-        it = 0
-        fit_calls = 1
-        while not converged:
-            it += 1
-            if it > 400:
-                converged = True
-                break
-            if it > 1:
-                step = sd_step if use_sd else n_step
-                try_i = 0
-                ok = True
-                while ok:
-                    try_i += 1
-                    if try_i == 4 and not use_sd:
-                        use_sd = True
-                        step = sd_step
-                    nsp = sp0 + step
-                    mg = feval(nsp)
-                    fit_calls += 1
-                    if mg["score"] < min_score:
-                        d_score = min_score - mg["score"]
-                        min_score = mg["score"]
-                        sp0 = nsp.copy()
-                        ok = False
-                    else:
-                        step = step / 2
-                    if try_i == max_half - 1 and ok:
-                        step = step * 0.0
-                    if try_i == max_half:
-                        ok = False
-            if it > 3:
-                converged = True
-                if d_score > tol * (1 + min_score):
-                    converged = False
-                gnorm = np.sqrt(float(grad @ grad))
-                if gnorm > tol ** (1 / 3) * (1 + abs(min_score)):
-                    converged = False
-            # mgcv's magic builds the gradient/Hessian from the fit it
-            # already has in hand — magic.c:611 calls magic_gH on the U1/V/d
-            # left by the last fit_magic, with NO re-fit at sp0. `mg` already
-            # holds the fit at the current sp0 in every branch (the it==1
-            # seed; the accepted step, which sets sp0=nsp; or the step-failure
-            # path, whose last try evaluates sp0+0), and the reduced SVD is
-            # deterministic, so reusing it is bit-identical to re-evaluating
-            # — and saves one (q+e)×q SVD per outer iteration.
-            grad, hess = self._magic_gH(mg, sp0, roots)
-            ev, U = np.linalg.eigh(0.5 * (hess + hess.T))
-            use_sd = bool(np.any(ev <= 0.0))
-            if not use_sd:
-                gtil = U.T @ grad
-                n_step = -(U @ (gtil / ev))
-                mx = np.max(np.abs(n_step))
-                if mx > 5.0:
-                    n_step *= 5.0 / mx
-            gmx = np.max(np.abs(grad))
-            sd_step = -grad / gmx if gmx > 0 else grad * 0.0
-        # infinite-sp check (magic.c:638-656): push each sp in its descent
-        # direction by ±2 in log-sp (≤5 steps) while the score keeps improving.
-        for k in range(mp):
-            steps_left = 5
-            sign = 1.0 if grad[k] < 0.0 else -1.0
-            while steps_left:
-                sp0[k] += sign * 2.0
-                steps_left -= 1
-                sc = feval(sp0)["score"]
-                fit_calls += 1
-                if sc < min_score:
-                    min_score = sc
-                else:
-                    sp0[k] -= sign * 2.0
-                    steps_left = 0
-        self._outer_info = {
-            "iter": it,
-            "conv": "full convergence" if converged else "iteration limit reached",
-            "grad": grad,
-            "score": min_score,
-            "optimizer": "magic",
-        }
-        return sp0
+        """Shim → free `_magic_optimize`; persists the cached QR + outer_info."""
+        res = _magic_optimize(
+            rho0, tol=tol, max_half=max_half, wt=self._wt, y=self._y_arr,
+            offset=self._offset, struct_R=self._struct_R,
+            keep_cols=self._keep_cols, X=self._X_full, gamma=self._gamma,
+            slots=self._slots, p=self.p)
+        self._magic_R = res["magic_R"]
+        self._magic_y0 = res["magic_y0"]
+        self._outer_info = res["outer_info"]
+        return res["sp"]
 
     def _magic_fit_state(self, rho):
-        """Build the Gaussian-identity ``_FitState`` at ρ̂ from magic's cached
-        QR, WITHOUT the full (n+e)×q re-fit. The reduced augmented system
-        ``[R_mag; E]`` (R_mag = QR factor of √w·X, cached by `_magic_setup`)
-        has ``R_fin'R_fin = R_mag'R_mag + Sλ = X'WX + Sλ`` and RHS reduces to
-        ``[y0; 0]`` (y0 = Q_mag'(√w·z), z = y−off) — so β, A_chol, log|A| are
-        the same as `_pls_qr`'s full solve at (q+e)×q cost. Mirrors the
-        Gaussian branch of `_fit_given_rho` field-for-field. Falls back to the
-        full fit if anything is degenerate (rank deficiency / non-finite)."""
-        R_mag = self._magic_R
-        y0 = self._magic_y0
-        if R_mag is None:
-            return self._fit_given_rho(rho)
-        family = self.family
-        link = family.link
-        X = self._X_full
-        off = self._offset
-        y = self._y_arr
-        wt = self._wt
-        q = R_mag.shape[1]
-        Sλ = self._build_S_lambda(rho)
-        Sλ = 0.5 * (Sλ + Sλ.T)
-        E_aug = self._penalty_root(rho)
-        # reduced augmented QR (mirrors _pls_qr's no-negative-weight branch)
-        aug = np.vstack([R_mag, E_aug])
-        Q, R_fin = np.linalg.qr(aug)
-        diag_R = np.diag(R_fin)
-        if (not np.all(np.isfinite(R_fin))) or np.any(diag_R == 0.0):
-            return self._fit_given_rho(rho)
-        c = Q[:q].T @ y0
-        beta = solve_triangular(R_fin, c, lower=False)
-        if not np.all(np.isfinite(beta)):
-            return self._fit_given_rho(rho)
-        log_det_A = 2.0 * float(np.sum(np.log(np.abs(diag_R))))
-        sgn = np.where(diag_R < 0, -1.0, 1.0)
-        A_chol = R_fin * sgn[:, None]
-        # Gaussian-identity fit fields — identical to _fit_given_rho's tail.
-        eta = X @ beta                       # offset-stripped
-        eta_full = eta + off
-        mu = link.linkinv(eta_full)
-        dev = float(np.sum(family.dev_resids(y, mu, wt)))
-        pen = float(beta @ Sλ @ beta)
-        mu_eta_v = link.mu_eta(eta_full)
-        V = family.variance(mu)
-        d2g = link.d2link(mu)
-        good = (wt > 0.0) & (mu_eta_v != 0.0)
-        safe_mu_eta = np.where(good, mu_eta_v, 1.0)
-        alpha = 1.0 + (y - mu) * (family.dvar(mu) / V + d2g * mu_eta_v)
-        alpha = np.where(alpha == 0.0, np.finfo(float).eps, alpha)
-        z = np.where(good, eta + (y - mu) / (safe_mu_eta * alpha), 0.0)
-        w = np.where(good, wt * alpha * mu_eta_v ** 2 / V, 0.0)
-        return _FitState(
-            beta=beta, dev=dev, pen=pen,
-            A_chol=A_chol, A_chol_lower=False,
-            S_full=Sλ, log_det_A=log_det_A,
-            eta=eta_full, mu=mu, w=w, z=z, alpha=alpha,
-            is_fisher_fallback=False,
-            converged=True, boundary=False, warn=[],
-            E_aug=E_aug,
-        )
+        """Shim → free `_magic_fit_state`."""
+        return _magic_fit_state(
+            rho, magic_R=self._magic_R, magic_y0=self._magic_y0,
+            fit_given_rho_fn=self._fit_given_rho, family=self.family,
+            X=self._X_full, offset=self._offset, y=self._y_arr, wt=self._wt,
+            slots=self._slots, p=self.p, UrS=self._UrS,
+            reparam_Y=self._reparam_Y, keep_cols=self._keep_cols,
+            reparam_cache=self._reparam_cache)
 
     def _pearson_and_deriv(self, rho, fit, deriv=True):
         """Shim → free `_pearson_and_deriv`."""
@@ -11407,6 +11518,63 @@ class gam:
         return ((res / (1.0 - hat)) ** 2 * hat
                 / (float(self.sigma_squared) * p_edf))
 
+    def vcov(self, sandwich: bool = False, freq: bool = False,
+             dispersion: "float | None" = None,
+             unconditional: bool = False) -> np.ndarray:
+        """mgcv's ``vcov.gam`` (mgcv.r:4396): the fitted-coefficient
+        covariance matrix. Default ``Vp`` (Bayesian, smoothing-parameter
+        conditional); ``freq=True`` → ``Ve`` (frequentist); ``unconditional=
+        True`` → ``Vc`` (adds smoothing-parameter uncertainty); ``sandwich=
+        True`` → the robust sandwich estimator. ``dispersion`` rescales by
+        ``dispersion / sig2``. (Vp/Ve/Vc are already exposed as attributes;
+        this is the mgcv-parity accessor.)"""
+        if sandwich:
+            vc = self._gam_sandwich(freq)
+        elif freq:
+            vc = np.asarray(self.Ve, dtype=float)
+        else:
+            vc = (np.asarray(self.Vc, dtype=float)
+                  if unconditional and getattr(self, "Vc", None) is not None
+                  else np.asarray(self.Vp, dtype=float))
+        if dispersion is not None:
+            vc = dispersion * vc / float(self.scale)
+        return vc
+
+    def _gam_sandwich(self, freq: bool = False) -> np.ndarray:
+        """mgcv's ``gam.sandwich`` (mgcv.r:4374): sandwich/robust covariance
+        ``Vs = m·Vp·(Σ wᵢ² XᵢXᵢᵀ)·Vp + B2``, with ``m = n/(n−Σedf)``,
+        ``B2 = Vp−Ve`` (the Bayes squared-bias term, 0 when ``freq``) and, for
+        an exponential family, ``wᵢ = μ'(ηᵢ)(yᵢ−μᵢ)/(φ̂·V(μᵢ))``. Extended /
+        general families use a family-specific meat mgcv builds from ``dDeta``
+        / ``family$sandwich`` (mgcv.r:4379-4386) — not retained post-fit here
+        (mgcv itself ``stop()``s for general families lacking ``$sandwich``)."""
+        Vp = np.asarray(self.Vp, dtype=float)
+        B2 = 0.0 if freq else (Vp - np.asarray(self.Ve, dtype=float))
+        X = self._X_full
+        n = X.shape[0]
+        m = n / (n - float(self.edf_total))
+        fam = self.family
+        sig2 = float(self.scale)
+        mu = np.asarray(self.fitted_values, dtype=float)
+        if getattr(fam, "is_general", False):
+            # general families need a bespoke meat via family$sandwich, which
+            # most lack — mgcv itself stop()s here (mgcv.r:4381).
+            raise NotImplementedError(
+                "no sandwich estimate available for general families "
+                "(mgcv gam.sandwich: family$sandwich is NULL, mgcv.r:4381).")
+        if self._family_mgcv_extended:
+            # extended family: meat from the deviance η-derivative
+            # ``crossprod(0.5/φ·Deta·X)`` (mgcv.r:4384-4385).
+            dd = fam.dDeta(self._y_arr, mu, self._wt, fam.get_theta(), 0)
+            Wx = (0.5 / sig2) * dd["Deta"][:, None] * X
+            return m * Vp @ (Wx.T @ Wx) @ Vp + B2
+        # exponential family: ``wᵢ = μ'(ηᵢ)(yᵢ−μᵢ)/(φ·V(μᵢ))`` (mgcv.r:4388-4390).
+        eta = np.asarray(self.linear_predictors, dtype=float)
+        w = (fam.link.mu_eta(eta) * (self._y_arr - mu)
+             / (sig2 * fam.variance(mu)))
+        Wx = w[:, None] * X
+        return m * Vp @ (Wx.T @ Wx) @ Vp + B2
+
     # ----- diagnostic plots -----------------------------------------------
     #
     # Match the graphical half of mgcv's gam.check + R's plot.glm:
@@ -14338,11 +14506,9 @@ def _gam_fit5(x, y, lsp, sl: _Sl, *, weights=None, offset=None,
     }
 
 
-def _efsud(X, y, lsp, sl: _Sl, sl_setup: _Sl, *, family, lpi,
-           weights=None, offsets=None, Mp: int = -1, start=None,
-           epsilon: float = 1e-7, efs_lspmax: float = 15.0,
-           efs_tol: float = 0.1,
-           efs_maxit: int = 200) -> tuple[dict, np.ndarray, int]:
+def _efsud(x, y, lsp, sl: _Sl, sl_setup: _Sl, *, family, lpi,
+           weights=None, offset=None, control=None, Mp: int = -1,
+           start=None) -> tuple[dict, np.ndarray, int]:
     """mgcv ``efsud`` (gam.fit4.r:1479-1569): the extended
     Fellner-Schall outer loop for general families. Every gam.fit5
     call runs at deriv=0, so the family only ever needs ``ll`` with
@@ -14364,14 +14530,26 @@ def _efsud(X, y, lsp, sl: _Sl, sl_setup: _Sl, *, family, lpi,
     for the termMult traces — mgcv's G$Sl stays at setup state by R
     copy semantics, and Vb here is only rp-undone (still in the
     initial-repara basis sl_setup's penalties live in).
+
+    ``control`` is mgcv's ``gam.control()`` bundle (mgcv threads it into
+    efsud, gam.fit4.r:1480); the loop reads ``epsilon`` (inner PIRLS tol +
+    the ``100·eps·|l|`` log-lik stop — mgcv's ``control$eps`` partial-matches
+    ``epsilon``), ``efs_lspmax``/``efs_tol``, and the ``efs_maxit`` cap
+    (mgcv hard-codes ``for iter in 1:200``; hea exposes it — keep at 200
+    for cross-engine parity).
     """
+    ctrl = control or _GAM_CONTROL_DEFAULTS
+    epsilon = ctrl["epsilon"]
+    efs_lspmax = ctrl["efs_lspmax"]
+    efs_tol = ctrl["efs_tol"]
+    efs_maxit = ctrl["efs_maxit"]
     lsp = np.asarray(lsp, dtype=float) + 2.5
     mult = 1.0
     tiny = float(np.finfo(float).eps) ** 0.5
 
     def fit_at(lsp_arg, st):
-        return _gam_fit5(X, y, lsp_arg, sl, family=family, lpi=lpi,
-                         weights=weights, offset=offsets, Mp=Mp,
+        return _gam_fit5(x, y, lsp_arg, sl, family=family, lpi=lpi,
+                         weights=weights, offset=offset, Mp=Mp,
                          deriv=0, start=st, gamma=1.0, epsilon=epsilon)
 
     fit = fit_at(lsp, start)
@@ -14444,6 +14622,46 @@ def _efsud(X, y, lsp, sl: _Sl, sl_setup: _Sl, *, family, lpi,
                 break
             old_ll = fit["l"]
     return fit, lsp, it
+
+
+def _single_sp(X, S, target: float = 0.5, tol: float | None = None) -> float:
+    """mgcv ``single.sp`` (mgcv.r:4504): the smoothing parameter giving a
+    target average e.d.f. per penalized term for a SINGLE-penalty problem —
+    ``X`` the model matrix, ``S`` the penalty. Returns ``exp(λ̂)``, or ``-1.0``
+    on a backsolve failure (rank-deficient ``X``).
+
+    ``RSR = R⁻ᵀ S R⁻¹`` (R = qr(X).R) has the generalized eigenvalues of
+    ``(S, XᵀX)``; ``λ̂`` solves ``mean(1/(1+e^λ·dᵢ)) = target`` by Brent
+    root-finding on the bracket mgcv walks out (mgcv's ``uniroot``). mgcv's
+    fitter reaches this only through ``initial.sp(expensive=TRUE)``
+    (mgcv.r:4663), which the gam/bam fit path never sets; it is otherwise an
+    exported utility (parity-tested against ``mgcv:::single.sp``)."""
+    from scipy.optimize import brentq
+    if tol is None:
+        tol = float(np.finfo(float).eps) * 100.0
+    X = np.asarray(X, dtype=float)
+    S = np.asarray(S, dtype=float)
+    R = np.linalg.qr(X, mode="r")
+    try:
+        RS = solve_triangular(R, S, lower=False, trans="T")
+        RSR = solve_triangular(R, RS.T, lower=False, trans="T")
+    except (np.linalg.LinAlgError, ValueError):
+        return -1.0
+    RSR = 0.5 * (RSR + RSR.T)
+    d = np.linalg.eigvalsh(RSR)
+    d = d[d > d.max() * tol]
+
+    def ff(lam):
+        return float(np.mean(1.0 / (1.0 + np.exp(lam) * d)) - target)
+
+    lower = 0.0
+    while ff(lower) <= 0.0:
+        lower -= 1.0
+    upper = lower
+    while ff(upper) > 0.0:
+        upper += 1.0
+    root = brentq(ff, lower, upper, xtol=float(np.finfo(float).eps) ** 0.25)
+    return float(np.exp(root))
 
 
 def _initial_sp_general(X, y, family, slots: list["_PenaltySlot"], lpi,
