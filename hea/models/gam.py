@@ -5582,13 +5582,23 @@ def _magic_penalty_roots(*, p, slots) -> list[np.ndarray]:
     return roots
 
 
-def _magic_fit_reduced(rho, R, y0, yy, *, wt, gamma, slots, p):
-    """Port of magic.c ``fit_magic`` (Gaussian/GCV): GCV score from the
-    SVD of the reduced ``[R; St^½]`` ((q+rank_S)×q). St = Σ exp(ρ_k) S_k.
+def _magic_fit_reduced(rho, R, y0, yy, *, wt, gamma, slots, p,
+                       norm_const=0.0, n_score=None, scale=None, gcv=True):
+    """Port of magic.c ``fit_magic``: GCV/UBRE score from the SVD of the
+    reduced ``[R; St^½]`` ((q+rank_S)×q). St = Σ exp(ρ_k) S_k.
     Returns score, scale, rss, trA, rank, β, plus the SVD pieces
-    (U1, V, d, y1, delta) the derivative routine reuses."""
+    (U1, V, d, y1, delta) the derivative routine reuses.
+
+    ``norm_const`` is magic's additive RSS constant (``extra.rss`` — the
+    part of ‖y‖² orthogonal to the reduced design, bam.r:1675/1146);
+    ``n_score`` overrides the score-n (magic.c:148 ``n = *n_score``);
+    ``gcv=False`` selects the UBRE score at the supplied ``scale``
+    (magic.c:151)."""
     q = R.shape[1]
-    n_score = float(np.sum(wt != 0.0))
+    if n_score is None:
+        n_score = float(np.sum(wt != 0.0))
+    else:
+        n_score = float(n_score)
     rank_tol = np.sqrt(np.finfo(float).eps)
     St = _s_lambda(slots, p, rho)
     St = 0.5 * (St + St.T)
@@ -5612,12 +5622,20 @@ def _magic_fit_reduced(rho, R, y0, yy, *, wt, gamma, slots, p):
         norm = 0.0
     trA = float(np.sum(U1 * U1))
     delta = n_score - gamma * trA
-    score = n_score * norm / (delta * delta)
-    scale = norm / (n_score - trA)
+    if gcv:
+        # magic.c:150 — scale estimated alongside the GCV score.
+        score = n_score * (norm + norm_const) / (delta * delta)
+        scale_out = (norm + norm_const) / (n_score - trA)
+    else:
+        # magic.c:151 — UBRE/approximate AIC at the known scale.
+        score = ((norm + norm_const) / n_score
+                 - 2.0 * scale / n_score * delta + scale)
+        scale_out = scale
     beta = Vr @ (y1 / d[:rank])
-    return dict(score=score, scale=scale, norm=norm, trA=trA, rank=rank,
+    return dict(score=score, scale=scale_out, norm=norm, trA=trA, rank=rank,
                 beta=beta, U1=U1, V=Vr, d=d[:rank], y1=y1, delta=delta,
-                n_score=n_score, gamma=gamma)
+                n_score=n_score, gamma=gamma, gcv=gcv, norm_const=norm_const,
+                ubre_scale=scale)
 
 
 def _magic_gH(mg, rho, roots):
@@ -5664,38 +5682,65 @@ def _magic_gH(mg, rho, roots):
         d2norm[i, i] += dnorm[i]
     grad = np.zeros(m)
     hess = np.zeros((m, m))
-    # GCV (control[0]==1) — magic.c:263-273.
-    xx = n / (delta * delta)
-    xx1 = xx * 2 * norm / delta
-    x1 = -2 * xx / delta
-    x2 = 3 * xx1 / delta
-    for i in range(m):
-        grad[i] = xx * dnorm[i] - xx1 * ddelta[i]
-        for j in range(i + 1):
-            hess[i, j] = hess[j, i] = (
-                x1 * (ddelta[j] * dnorm[i] + ddelta[i] * dnorm[j])
-                + xx * d2norm[i, j] + x2 * ddelta[i] * ddelta[j]
-                - xx1 * d2delta[i, j])
+    if mg.get("gcv", True):
+        # GCV (control[0]==1) — magic.c:263-273; the RSS is inflated by
+        # norm_const (``norm += *norm_const``) before the score algebra.
+        norm = norm + mg.get("norm_const", 0.0)
+        xx = n / (delta * delta)
+        xx1 = xx * 2 * norm / delta
+        x1 = -2 * xx / delta
+        x2 = 3 * xx1 / delta
+        for i in range(m):
+            grad[i] = xx * dnorm[i] - xx1 * ddelta[i]
+            for j in range(i + 1):
+                hess[i, j] = hess[j, i] = (
+                    x1 * (ddelta[j] * dnorm[i] + ddelta[i] * dnorm[j])
+                    + xx * d2norm[i, j] + x2 * ddelta[i] * ddelta[j]
+                    - xx1 * d2delta[i, j])
+    else:
+        # UBRE — magic.c:275-279 (norm_const drops out of derivatives).
+        scale = mg["ubre_scale"]
+        for i in range(m):
+            grad[i] = (dnorm[i] - 2.0 * scale * ddelta[i]) / n
+            for j in range(i + 1):
+                hess[i, j] = hess[j, i] = (
+                    d2norm[i, j] - 2.0 * scale * d2delta[i, j]) / n
     return grad, hess
 
 
 def _magic_optimize(rho0, *, tol=1e-7, max_half=15, wt, y, offset, struct_R,
-                    keep_cols, X, gamma, slots, p):
+                    keep_cols, X, gamma, slots, p, norm_const=0.0,
+                    n_score=None, scale=None, gcv=True, L=None, lsp0=None):
     """Port of magic.c ``magic`` (the driver, magic.c:286-707): Newton
     over log-sp backed by steepest descent with step halving, plus the
-    infinite-sp check, on the reduced GCV system. Returns ρ̂, the once-
-    computed QR (``magic_R``/``magic_y0``) the final fit reuses, and the
-    outer_info. (Flat-deriv reset + exact initial.sp deferred — the seed is
-    initial.spg, which magic converges from.)"""
+    infinite-sp check, on the reduced GCV/UBRE system. Returns ρ̂, the
+    once-computed QR (``magic_R``/``magic_y0``) the final fit reuses, and
+    the outer_info. (Flat-deriv reset deferred — bam's call is always
+    autoinit, magic.c:510, where the reset block is skipped.)
+
+    ``L``/``lsp0`` mirror the C driver's working→penalty map: score
+    evaluations run at ``ρ_full = L·ρ + lsp0`` and the gradient/Hessian
+    transform as ``L'g`` / ``L'HL`` (magic.c:606-621); ``None`` ≡
+    identity. ``norm_const``/``n_score``/``scale``/``gcv`` thread the
+    score flavor through to ``_magic_fit_reduced``."""
     R, y0, yy = _magic_setup(wt=wt, y=y, offset=offset, struct_R=struct_R,
                              keep_cols=keep_cols, X=X)
     roots = _magic_penalty_roots(p=p, slots=slots)
     mp = len(rho0)
     sp0 = np.asarray(rho0, float).copy()
+    Lm = None if L is None else np.asarray(L, dtype=float)
+    l0 = None
+    if Lm is not None:
+        l0 = (np.zeros(Lm.shape[0]) if lsp0 is None
+              else np.asarray(lsp0, dtype=float))
+
+    def sp_full(sp):
+        return sp if Lm is None else Lm @ sp + l0
 
     def feval(sp):
-        return _magic_fit_reduced(sp, R, y0, yy, wt=wt, gamma=gamma,
-                                  slots=slots, p=p)
+        return _magic_fit_reduced(sp_full(sp), R, y0, yy, wt=wt, gamma=gamma,
+                                  slots=slots, p=p, norm_const=norm_const,
+                                  n_score=n_score, scale=scale, gcv=gcv)
 
     mg = feval(sp0)
     min_score = mg["score"]
@@ -5707,11 +5752,13 @@ def _magic_optimize(rho0, *, tol=1e-7, max_half=15, wt, y, offset, struct_R,
     converged = False
     it = 0
     fit_calls = 1
+    step_fail = False
     while not converged:
         it += 1
         if it > 400:
             converged = True
             break
+        last_try = 0
         if it > 1:
             step = sd_step if use_sd else n_step
             try_i = 0
@@ -5735,6 +5782,7 @@ def _magic_optimize(rho0, *, tol=1e-7, max_half=15, wt, y, offset, struct_R,
                     step = step * 0.0
                 if try_i == max_half:
                     ok = False
+            last_try = try_i
         if it > 3:
             converged = True
             if d_score > tol * (1 + min_score):
@@ -5742,6 +5790,11 @@ def _magic_optimize(rho0, *, tol=1e-7, max_half=15, wt, y, offset, struct_R,
             gnorm = np.sqrt(float(grad @ grad))
             if gnorm > tol ** (1 / 3) * (1 + abs(min_score)):
                 converged = False
+            if last_try == max_half:
+                # magic.c:599 — a fully-halved (failed) step means the
+                # score can't be improved: force convergence.
+                converged = True
+                step_fail = True
         # mgcv's magic builds the gradient/Hessian from the fit it
         # already has in hand — magic.c:611 calls magic_gH on the U1/V/d
         # left by the last fit_magic, with NO re-fit at sp0. `mg` already
@@ -5750,7 +5803,11 @@ def _magic_optimize(rho0, *, tol=1e-7, max_half=15, wt, y, offset, struct_R,
         # path, whose last try evaluates sp0+0), and the reduced SVD is
         # deterministic, so reusing it is bit-identical to re-evaluating
         # — and saves one (q+e)×q SVD per outer iteration.
-        grad, hess = _magic_gH(mg, sp0, roots)
+        grad, hess = _magic_gH(mg, sp_full(sp0), roots)
+        if Lm is not None:
+            # magic.c:617-620 — grad/Hess w.r.t. the working parameters.
+            grad = Lm.T @ grad
+            hess = Lm.T @ hess @ Lm
         ev, U = np.linalg.eigh(0.5 * (hess + hess.T))
         use_sd = bool(np.any(ev <= 0.0))
         if not use_sd:
@@ -5776,11 +5833,17 @@ def _magic_optimize(rho0, *, tol=1e-7, max_half=15, wt, y, offset, struct_R,
             else:
                 sp0[k] -= sign * 2.0
                 steps_left = 0
+    # magic.c:664 — one FINAL fit_magic at the converged sp; ITS score and
+    # scale are what magic returns (``*gamma = score``; scale in-place).
+    mg = feval(sp0)
+    fit_calls += 1
     outer_info = {
         "iter": it,
         "conv": "full convergence" if converged else "iteration limit reached",
         "grad": grad,
-        "score": min_score,
+        "score": mg["score"],
+        "scale": mg["scale"],
+        "step_fail": step_fail,
         "optimizer": "magic",
     }
     return {"sp": sp0, "magic_R": R, "magic_y0": y0, "outer_info": outer_info}

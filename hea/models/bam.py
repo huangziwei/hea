@@ -87,7 +87,9 @@ from .gam import (
     _apply_gam_side,
     _block_s_scale,
     _gam_fit3_score,
+    _initial_sp,
     _ldet_s,
+    _magic_optimize,
     _preml_hessian,
     _SlBlock,
     _row_frame,
@@ -2413,6 +2415,11 @@ class bam(gam):
         method_in = method
         if method == "fREML":
             method = "REML"
+        # Keep the pre-alias string: mgcv's REPORTED criterion differs
+        # between fREML (raw fit$reml, bam.r:1696 — no ml.pen) and explicit
+        # REML (gam(G=G)'s aic-replaced gcv.ubre, bam.r:2784-2787) on the
+        # gaussian-identity rail, even though the optimum is shared.
+        self._method_in = method_in
         if method == "NCV":
             raise NotImplementedError(
                 "method='NCV' (neighbourhood cross validation, bam.r:448 + "
@@ -3064,11 +3071,15 @@ class bam(gam):
                     theta_hat = self._fast_reml_fit(
                         theta0, include_log_phi=include_log_phi,
                     )
+                elif method == "GCV.Cp":
+                    # magic on (qrx$R, qrx$f) — bam.r:1678, seeded fresh
+                    # from initial.sp(qrx$R) by the wrapper.
+                    self._reml_beta = self._reml_A_inv = None
+                    theta_hat = self._bam_magic_sp()
                 else:
-                    # ML / GCV.Cp / GACV.Cp / P-REML / P-ML → outer-Newton
-                    # on the criterion mgcv's compressed refit runs: magic
-                    # for GCV.Cp (bam.r:1677, same objective) and
-                    # gam(G=G, method=method) for the rest (bam.r:1722-1733).
+                    # ML / GACV.Cp / P-REML / P-ML → outer-Newton on the
+                    # criterion mgcv's compressed refit runs via
+                    # gam(G=G, method=method) (bam.r:1722-1733).
                     # ML canNOT ride fast.REML.fit — its criterion drops the
                     # Mp prior terms (remlInd=0) and range-projects log|H|
                     # (MLpenalty1), which the ``self.method`` predicates
@@ -3761,6 +3772,57 @@ class bam(gam):
             rho0[k] = float(np.log(sizeXX / sizeS))
         return rho0
 
+    def _bam_magic_sp(self) -> np.ndarray:
+        """mgcv-bam ``GCV.Cp`` sp estimation: ``magic(qrx$f, qrx$R, G$sp,
+        ...)`` — bam.r:1678 (gaussian) / bam.r:1220 (generalized, per
+        PIRLS iteration). The magic driver runs on the reduced (R, f)
+        with ``extra.rss = ‖z̃‖² − ‖f‖²`` and ``n.score = n``; known
+        scale → UBRE at that scale, else GCV (``gcv=(scale<=0)``).
+
+        ``G$sp`` stays at −1 whenever sp isn't user-fixed, so magic
+        AUTOINITS from ``initial.sp(qrx$R, S, off)`` (computed by the R
+        wrapper, mgcv.r:4712) on EVERY call — no warm-start across PIRLS
+        iterations — with mgcv's default control (tol=1e-6,
+        step.half=25). The returned log-sp is working-space; the driver
+        applies ``L``/``lsp0`` internally like the C code."""
+        if self._work_dim == 0:
+            # magic.c:561 — the estimation loop is gated on mp>0.
+            return np.zeros(0)
+        qrx = self._bam_qr
+        R = qrx.R
+        f = qrx.f
+        rss_extra = float(qrx.y_norm2 - f @ f)
+        def_sp = np.maximum(_initial_sp(R, self._slots), 1e-300)
+        rho0_full = np.log(def_sp)
+        if self._lsp0 is not None:
+            rho0_full = rho0_full - self._lsp0
+        if self._L is None:
+            rho0 = rho0_full
+        else:
+            # mgcv.r:4721 — project def.sp into working space by least
+            # squares (coef(lm(log(def.sp) ~ L - 1 + offset(lsp0)))).
+            rho0, *_ = np.linalg.lstsq(self._L, rho0_full, rcond=None)
+        q = R.shape[0]
+        res = _magic_optimize(
+            rho0, tol=1e-6, max_half=25,
+            wt=np.ones(q), y=f, offset=np.zeros(q),
+            struct_R=None, keep_cols=None, X=R,
+            gamma=self._gamma, slots=self._slots, p=self.p,
+            norm_const=rss_extra, n_score=float(self.n),
+            scale=(float(self._scale_fixed_value) if self._scale_known_fit
+                   else None),
+            gcv=not self._scale_known_fit,
+            L=self._L, lsp0=self._lsp0,
+        )
+        self._outer_info = res["outer_info"]
+        # mgcv reports magic's own final-fit score/scale (bam.r:1287-1295
+        # ``object$gcv.ubre <- fit$score``, ``object$sig2 <- fit$scale``).
+        self._magic_report = {
+            "score": float(res["outer_info"]["score"]),
+            "scale": float(res["outer_info"]["scale"]),
+        }
+        return np.asarray(res["sp"], dtype=float)
+
     # -----------------------------------------------------------------------
     # Post-fit — chunked walks for full-n quantities (eta, mu, leverage)
     # -----------------------------------------------------------------------
@@ -3928,9 +3990,16 @@ class bam(gam):
             pearson_scale = float("nan")
         self._pearson_scale = pearson_scale
         # A user scale=φ fixes the Gaussian scale; otherwise the REML/Pearson
-        # estimate (mgcv G$sig2 <- scale when known, mgcv.r:1942).
-        sigma_squared = (self._scale_fixed_value if self._scale_known_fit
-                         else pearson_scale)
+        # estimate (mgcv G$sig2 <- scale when known, mgcv.r:1942). GCV.Cp
+        # reports magic's final-fit scale (bam.r:1294 ``object$sig2 <-
+        # object$scale <- fit$scale``).
+        _rep = getattr(self, "_magic_report", None)
+        if self._scale_known_fit:
+            sigma_squared = self._scale_fixed_value
+        elif _rep is not None:
+            sigma_squared = _rep["scale"]
+        else:
+            sigma_squared = pearson_scale
         sigma = (float(np.sqrt(sigma_squared))
                  if np.isfinite(sigma_squared) and sigma_squared >= 0
                  else float("nan"))
@@ -4172,15 +4241,21 @@ class bam(gam):
                 )
                 # ``self._reml`` with the real family's ls; the ML flavor
                 # (remlInd=0, range-projected log|H|) comes from the
-                # ``self.method`` predicates. mgcv's final bam ML report
-                # additionally swaps the log-lik to the family $aic flavor
-                # (bam.r:2784-2787) — REML keeps hea's fREML-flavored
-                # report (mgcv's fREML sets no such attr on the
-                # gaussian-identity bam.fit route).
+                # ``self.method`` predicates. mgcv's final bam report swaps
+                # the log-lik to the family $aic flavor (bam.r:2784-2787)
+                # whenever the compressed refit set ml.pen — gam(G=G) does
+                # for BOTH explicit REML and ML (gam.fit3.r:620); bam.fit's
+                # own fREML rail sets none (bam.r:1696), so the fREML alias
+                # keeps the raw fit$reml flavor (= mgcv fREML bit-for-bit).
                 score = float(self._reml(rho_hat, log_phi_hat, fit=fit))
-                if method == "ML" and np.isfinite(score):
+                if ((method == "ML" or self._method_in == "REML")
+                        and np.isfinite(score)):
+                    log_phi_swap = (
+                        float(np.log(self._scale_fixed_value))
+                        if self._scale_known_fit else log_phi_hat
+                    )
                     score = score + self._ml_flavor_swap(
-                        family_aic, log_phi_hat)
+                        family_aic, log_phi_swap)
             else:
                 score = float("nan")
             # AR1 correction (mgcv bam.r:1715, 1737). The AR1 transform
@@ -4249,7 +4324,11 @@ class bam(gam):
                 self.GCV_score = float("nan")
         else:
             if n_sp > 0:
-                self.GCV_score = float(self._gcv(rho_hat))
+                # GCV.Cp reports magic's final-fit score (bam.r:1287
+                # ``object$gcv.ubre <- fit$score``).
+                rep = getattr(self, "_magic_report", None)
+                self.GCV_score = (float(rep["score"]) if rep is not None
+                                  else float(self._gcv(rho_hat)))
             else:
                 self.GCV_score = float("nan")
 
@@ -5011,28 +5090,39 @@ class bam(gam):
                     if self._reml_beta is not None:
                         fit.beta = self._reml_beta
                         fit.A_inv = self._reml_A_inv
+                elif method == "GCV.Cp":
+                    # magic on the current working (qrx$R, qrx$f) —
+                    # bam.r:1220 — per PIRLS iteration. G$sp stays −1, so
+                    # magic re-seeds itself from initial.sp(qrx$R) every
+                    # iteration (no warm-start).
+                    theta_hat = self._bam_magic_sp()
+                    theta_sp_warm = theta_hat[:n_work]
+                    log_phi_hat = None
+                    self.sp = np.exp(theta_sp_warm)
+                    rho_hat = self._rho_full(theta_sp_warm)
+                    fit = self._fit_given_rho(rho_hat)
                 else:
-                    # ML / GCV.Cp / GACV.Cp / P-REML / P-ML: the
-                    # converge-fully outer-Newton on the mapped criterion —
-                    # mgcv's compressed refit for these methods (magic for
-                    # GCV.Cp, bam.r:1223; gam(G=G, method=method) for the
-                    # rest, bam.r:1273) — per PIRLS iteration. ML keeps
+                    # ML / GACV.Cp / P-REML / P-ML: the converge-fully
+                    # outer-Newton on the mapped criterion — mgcv's
+                    # compressed refit for these methods is
+                    # gam(G=G, method=method) (bam.r:1273) — per PIRLS
+                    # iteration. ML keeps
                     # log φ in θ when the scale is estimated (its remlInd=0
                     # + range-projected log|H| come from the ``self.method``
                     # predicates through the REML scoreType); the others are
                     # ρ-only. L-aware — it optimises in working space and
-                    # maps via ``_rho_full``.
-                    if theta_sp_warm is None:
-                        rho0_full = self._initial_sp_rho()
-                        if self._lsp0 is not None:
-                            rho0_full = rho0_full - self._lsp0
-                        if self._L is None:
-                            rho0 = rho0_full
-                        else:
-                            rho0, *_ = np.linalg.lstsq(
-                                self._L, rho0_full, rcond=None)
+                    # maps via ``_rho_full``. Re-seeded from initial.sp on
+                    # the CURRENT working (R, f) every PIRLS iteration —
+                    # gam(G=G) derives its own seed per call (bam.r:1273);
+                    # nothing is warm-started across iterations.
+                    rho0_full = self._initial_sp_rho()
+                    if self._lsp0 is not None:
+                        rho0_full = rho0_full - self._lsp0
+                    if self._L is None:
+                        rho0 = rho0_full
                     else:
-                        rho0 = theta_sp_warm.copy()
+                        rho0, *_ = np.linalg.lstsq(
+                            self._L, rho0_full, rcond=None)
                     if include_log_phi:      # ML with estimated scale
                         if log_phi_hat is None:
                             # Same iter-1 seed as the (f)REML branch
@@ -5191,9 +5281,14 @@ class bam(gam):
         #     carries it from the fit loop (None ⇔ GCV.Cp or no joint log φ).
         #   * GCV.Cp → magic's Pearson-type ``fit$scale`` (bam.r:1291): the raw
         #     Pearson statistic over (n−edf).
+        _rep = getattr(self, "_magic_report", None)
         if df_resid > 0 and not self._scale_known_fit:
             if self._log_phi_hat is not None and method == "REML":
                 pearson_scale = float(np.exp(self._log_phi_hat))
+            elif _rep is not None:
+                # GCV.Cp — magic's final-fit ``fit$scale`` (bam.r:1294),
+                # (‖f−Rβ̂‖² + extra.rss)/(n − trA) on the last working set.
+                pearson_scale = float(_rep["scale"])
             else:
                 # Response-scale Pearson/(n − edf) — the compressed refit's
                 # scale.est (gam.fit3.r:598 with the extras; the converged
@@ -5493,7 +5588,11 @@ class bam(gam):
                 self.GCV_score = float("nan")
         else:
             if n_sp > 0:
-                self.GCV_score = float(self._gcv(rho_hat))
+                # GCV.Cp reports the LAST PIRLS iteration's magic score
+                # (bam.r:1287 ``object$gcv.ubre <- fit$score``).
+                rep = getattr(self, "_magic_report", None)
+                self.GCV_score = (float(rep["score"]) if rep is not None
+                                  else float(self._gcv(rho_hat)))
             else:
                 self.GCV_score = float("nan")
 
