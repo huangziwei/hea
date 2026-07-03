@@ -4141,6 +4141,9 @@ class bam(gam):
                 r_squared_adjusted = float("nan")
         else:
             r_squared_adjusted = float("nan")
+        # mgcv summary.gam: r.sq NULL for no.r.sq families (mgcv.r:4055).
+        if getattr(self.family, "no_r_sq", False):
+            r_squared = r_squared_adjusted = float("nan")
         self.r_squared = float(r_squared)
         self.r_squared_adjusted = float(r_squared_adjusted)
         if self.null_deviance > 0:
@@ -5443,6 +5446,9 @@ class bam(gam):
                 r_squared_adjusted = float("nan")
         else:
             r_squared_adjusted = float("nan")
+        # mgcv summary.gam: r.sq NULL for no.r.sq families (mgcv.r:4055).
+        if getattr(self.family, "no_r_sq", False):
+            r_squared = r_squared_adjusted = float("nan")
         self.r_squared = float(r_squared)
         self.r_squared_adjusted = float(r_squared_adjusted)
         if self.null_deviance > 0:

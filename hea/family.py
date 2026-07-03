@@ -5247,6 +5247,7 @@ class ocat(Family):
     _newton_canonical = "none"
     scale_known = True
     is_extended = True
+    no_r_sq = True          # mgcv ocat sets no.r.sq=TRUE (efam.r:3080)
     _OK_LINKS = ("identity",)
 
     def __init__(self, theta=None, R: int | None = None,
@@ -5589,6 +5590,7 @@ class ziP(Family):
     scale_known = True
     is_extended = True
     n_theta = 2
+    no_r_sq = True          # mgcv ziP sets no.r.sq=TRUE (efam.r:4142)
     _OK_LINKS = ("identity",)
 
     def __init__(self, theta=None, link: str = "identity", b: float = 0.0):
@@ -6430,36 +6432,88 @@ class cnorm(Family):
 # ---------------------------------------------------------------------------
 
 
-def trind_generator(K: int = 2) -> dict:
-    """mgcv ``trind.generator`` (gamlss.r:20-112): index arrays for
+def trind_generator(K: int = 2, ifunc: bool = False,
+                    reverse: bool | None = None) -> dict:
+    """mgcv ``trind.generator`` (gamlss.r:20-112): index lookups for
     upper-triangular packed storage of symmetric derivative arrays up to
     order 4. ``i4[i,j,k,l]`` (0-based everywhere) gives the packed column
     holding the derivative w.r.t. parameters i,j,k,l in any order;
-    ``i3``/``i2`` likewise."""
-    i4 = np.zeros((K, K, K, K), dtype=int)
-    m = 0
-    for i in range(K):
-        for j in range(i, K):
+    ``i3``/``i2`` likewise.
+
+    ``ifunc=True`` returns closed-form index *functions* instead of
+    arrays (mgcv's storage saver for large K) — same 0-based in/out
+    convention, mgcv's exact 1-based algebra inside. ``reverse``
+    (default ``not ifunc``, mgcv's coupling) adds ``i2r``/``i3r``/
+    ``i4r``: flat indices extracting the unique elements of a full
+    symmetric K^d array in packing order. Values are exactly mgcv's
+    minus one: mgcv's 1-based column-major ``l + (k-1)*K + …`` of the
+    reversed tuple equals the 0-based C-order offset of ``[i,j,k,l]``
+    (the digit sum commutes), so ``arr.ravel()[i4r]`` reads the same
+    cells R does."""
+    if reverse is None:
+        reverse = not ifunc
+    if ifunc:
+        # mgcv's closed forms (1-based); wrap for 0-based i/o.
+        def i2(i: int, j: int) -> int:
+            i, j = sorted((i + 1, j + 1))
+            return int(round((i - 1) * (2 * K + 2 - i) / 2 + j - i + 1)) - 1
+
+        def i3(i: int, j: int, k: int) -> int:
+            i, j, k = sorted((i + 1, j + 1, k + 1))
+            return int(round(
+                (i - 1) * (3 * K * (K + 1) + (i - 2) * (i - 3 * (K + 1))) / 6
+                + (j - i) * (2 * K + 3 - i - j) / 2 + k - j + 1
+            )) - 1
+
+        def i4(i: int, j: int, k: int, ll_: int) -> int:
+            i, j, k, ll_ = sorted((i + 1, j + 1, k + 1, ll_ + 1))
+            i1 = i - 1
+            i1i2 = i1 * (i - 2) / 2
+            return int(round(
+                ll_ - k + 1 + (k - j) * (2 * K + 3 - j - k) / 2
+                + (j - i) * (3 * (K + 1 - i) ** 2 + 3 * (K + 1 - i)
+                             + (j - i - 1) * (j + 2 * i - 3 * K - 5)) / 6
+                + (i1 * (K ** 3 + 3 * K ** 2 + 2 * K)
+                   + i1i2 * ((K + 1) * (2 * i - 3) - (3 * K ** 2 + 6 * K + 2)
+                             - i1i2)) / 6
+            )) - 1
+    else:
+        i4 = np.zeros((K, K, K, K), dtype=int)
+        m = 0
+        for i in range(K):
+            for j in range(i, K):
+                for k in range(j, K):
+                    for ll_ in range(k, K):
+                        for perm in itertools.permutations((i, j, k, ll_)):
+                            i4[perm] = m
+                        m += 1
+        i3 = np.zeros((K, K, K), dtype=int)
+        m = 0
+        for j in range(K):
             for k in range(j, K):
                 for ll_ in range(k, K):
-                    for perm in itertools.permutations((i, j, k, ll_)):
-                        i4[perm] = m
+                    for perm in itertools.permutations((j, k, ll_)):
+                        i3[perm] = m
                     m += 1
-    i3 = np.zeros((K, K, K), dtype=int)
-    m = 0
-    for j in range(K):
-        for k in range(j, K):
+        i2 = np.zeros((K, K), dtype=int)
+        m = 0
+        for k in range(K):
             for ll_ in range(k, K):
-                for perm in itertools.permutations((j, k, ll_)):
-                    i3[perm] = m
+                i2[k, ll_] = i2[ll_, k] = m
                 m += 1
-    i2 = np.zeros((K, K), dtype=int)
-    m = 0
-    for k in range(K):
-        for ll_ in range(k, K):
-            i2[k, ll_] = i2[ll_, k] = m
-            m += 1
-    return {"i2": i2, "i3": i3, "i4": i4}
+    i2r = i3r = i4r = None
+    if reverse:
+        i4r = np.array(
+            [((i * K + j) * K + k) * K + ll_
+             for i in range(K) for j in range(i, K)
+             for k in range(j, K) for ll_ in range(k, K)], dtype=int)
+        i3r = np.array(
+            [(j * K + k) * K + ll_
+             for j in range(K) for k in range(j, K) for ll_ in range(k, K)],
+            dtype=int)
+        i2r = np.array(
+            [k * K + ll_ for k in range(K) for ll_ in range(k, K)], dtype=int)
+    return {"i2": i2, "i3": i3, "i4": i4, "i2r": i2r, "i3r": i3r, "i4r": i4r}
 
 
 def _deriv_orders(idx: tuple[int, ...]) -> np.ndarray:

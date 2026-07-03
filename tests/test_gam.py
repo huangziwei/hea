@@ -5185,6 +5185,47 @@ def test_gaulss_fixed_sp_through_gam_matches_mgcv():
     np.testing.assert_allclose(m.sp, [2.0, 0.5])
 
 
+def test_multilp_parametric_collinearity_matches_mgcv_olid():
+    # mgcv's `olid` (mgcv.r:863-919, called from gam.setup.list) drops
+    # unidentifiable UNPENALIZED columns across a multi-formula design,
+    # then zero-pads coef on output. Its only trigger reachable through
+    # hea's front end is within-formula parametric collinearity (the
+    # shared-block trigger needs the '1+2~s(x)' common-term syntax, which
+    # hea rejects with NotImplementedError); hea handles the reachable
+    # case through the structural rank-drop (pivoted-QR detect + drop +
+    # zero-fill — the same surgery mgcv's pls_fit1/gdi.c does at fit
+    # level). Receipt vs mgcv 1.9-4 on gaulss with xdup = 2·x in LP1:
+    # same coef count, xdup coefficient EXACTLY 0, REML to all printed
+    # digits (311.964723261).
+    from hea.R.rng import RGenerator
+    from hea.family import gaulss
+
+    g = RGenerator(3)
+    n = 200
+    x = g.uniform(0.0, 1.0, n)
+    z = g.uniform(0.0, 1.0, n)
+    w = g.uniform(0.0, 1.0, n)
+    rn = g.normal(0.0, 1.0, n)
+    df = pl.DataFrame({
+        "y": 1 + x + np.sin(2 * np.pi * z)
+             + rn * np.exp(0.3 * np.cos(2 * np.pi * w)),
+        "x": x, "xdup": x * 2.0, "z": z, "w": w,
+    })
+    m = gam(["y ~ x + xdup + s(z)", "~ s(w)"], df, family=gaulss(),
+            method="REML")
+    beta = np.asarray(m._beta)
+    assert beta.shape[0] == 22                    # mgcv ncoef
+    assert beta[2] == 0.0                         # xdup dropped → exact 0
+    np.testing.assert_allclose(beta[:2], [1.11538940632, 0.996736549025],
+                               rtol=0, atol=2e-6)
+    np.testing.assert_allclose(m.REML_criterion / 2, 311.964723261,
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(m.edf_total, 11.6260398718, rtol=0,
+                               atol=1e-4)
+    np.testing.assert_allclose(
+        m.sp, [0.0681246465194, 0.431317034396], rtol=5e-5)
+
+
 def test_general_family_derivs_dispatch_guards():
     # mgcv's optimizer dispatch on available.derivs (mgcv.r:1906-1908):
     # ==1 → c("outer","bfgs") — the BFGS outer optimizer (item 7): a
@@ -7706,6 +7747,23 @@ def test_summary_dispersion_re_test_matches_mgcv():
                                rtol=1e-10)
 
 
+def test_summary_re_test_false_drops_re_rows(capsys):
+    # summary.gam(re.test=FALSE) (mgcv.r:3858 formal, 4024 gate): the
+    # reTest-path smooths get res <- NULL and their rows are DROPPED —
+    # not rerouted to testStat. mgcv receipt (1.9-4): s.table goes 2
+    # rows -> 1, and the surviving s(x) row is all.equal-identical.
+    m = gam("ygau ~ f4 + z + s(x) + s(g5, bs='re')", _pterms_fixture(),
+            method="REML")
+    r1 = m._smooth_significance_rows()
+    r0 = m._smooth_significance_rows(re_test=False)
+    assert [r[0] for r in r1] == ["s(x)", "s(g5)"]
+    assert [r[0] for r in r0] == ["s(x)"]
+    assert r0[0] == r1[0]                 # surviving row bit-identical
+    m.summary(re_test=False)
+    out = capsys.readouterr().out
+    assert "s(g5)" not in out and "s(x)" in out
+
+
 def test_summary_freq_dispersion_gaulss_and_print(capsys):
     from hea.family import gaulss
     mg = gam(["y ~ s(x) + w", "~ s(z)"], _fit5_fixture(), family=gaulss(),
@@ -8139,6 +8197,61 @@ def test_ziP_through_gam_matches_mgcv():
         rres[:4], [-0.3688958956021644, 0.97031232323179584,
                    1.7883819521639648, -1.9008466174667389],
         rtol=0, atol=2e-3)
+
+    # no.r.sq (efam.r:4142; ocat too, efam.r:3080): summary.gam sets
+    # r.sq NULL (mgcv.r:4055) and the print shows Deviance explained
+    # without an R-sq.(adj) — hea mirrors via NaN r² at fit time.
+    from hea.family import ocat
+    assert ocat(R=4).no_r_sq is True
+    assert np.isnan(m.r_squared) and np.isnan(m.r_squared_adjusted)
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        m.summary()
+    out_txt = buf.getvalue()
+    assert "R-sq" not in out_txt and "Deviance explained" in out_txt
+
+
+def test_ziP_b_nonzero_through_gam_matches_mgcv():
+    # R: gam(y ~ s(x), family=ziP(b=0.3), method="REML") on the same
+    # fixture — the b>0 presence-slope floor end to end. b re-gauges θ₂
+    # (slope = b + e^θ₂: θ̂₂ = 1.13364 here vs 1.22581 at b=0, identical
+    # total slope 3.40695), so the θ pins are b-differentiating even
+    # though the optimum coincides with b=0. mgcv 1.9-4 pins; tolerances
+    # follow the b=0 test (flat-optimum sp stopping noise ~2.6e-5).
+    from hea.family import ziP
+
+    df = _ziP_fixture()
+    m = gam("y ~ s(x)", df, family=ziP(b=0.3), method="REML")
+    np.testing.assert_allclose(m.REML_criterion / 2, 422.72061702752336,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.sp, [0.083621695803168888], rtol=2e-3)
+    np.testing.assert_allclose(
+        m.family.get_theta(), [-3.2949850446340050, 1.1336412686440676],
+        rtol=0, atol=1e-3)
+    np.testing.assert_allclose(
+        m.family.get_theta(trans=True),
+        [-3.2949850446340050, 3.4069491644063006], rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.edf_total, 6.936220446801042,
+                               rtol=0, atol=1e-3)
+    np.testing.assert_allclose(m.deviance, 236.97051074207116,
+                               rtol=0, atol=5e-3)
+    np.testing.assert_allclose(m.null_deviance, 761.4387750977171,
+                               rtol=0, atol=5e-3)
+    np.testing.assert_allclose(np.asarray(m.Vp)[0, 0],
+                               0.0035211998176852485, rtol=0, atol=1e-5)
+    assert m._postproc["family_name"] == "Zero inflated Poisson(-3.295,3.407)"
+    pr = m.predict(pl.DataFrame({"x": [0.2, 0.5, 0.8]}), type="response",
+                   se_fit=True)
+    np.testing.assert_allclose(
+        pr["fit"].to_numpy(),
+        [4.74691676164069154, 0.43993115801732319, 0.03157427031317666],
+        rtol=0, atol=1e-3)
+    np.testing.assert_allclose(
+        pr["se.fit"].to_numpy(),
+        [0.278155043412824876, 0.126126458821157666, 0.020997829842324959],
+        rtol=0, atol=1e-3)
 
 
 def _cnorm_fixture():
@@ -8848,6 +8961,59 @@ def test_preml_pml_gacv_gamma_match_mgcv():
         assert float(b.edf_total) == pytest.approx(edf_t, rel=1e-5)
         assert float(b.sigma_squared) == pytest.approx(sc_t, rel=1e-5)
         assert _score_of(b) == pytest.approx(score_t, rel=1e-6)
+
+
+def test_sp_vcov_preml_pml_matches_mgcv():
+    """sp.vcov (mgcv.r:4221-4234) on the P-REML/P-ML rails — the method
+    gate is mgcv's {ML, P-ML, REML, P-REML, fREML} list, so the Pearson
+    criteria must return solve(hess+reg), not None. Pinned to mgcv 1.9-4
+    on trees/Gamma at both the default and (edge.correct=FALSE, reg=1e-2)
+    signatures (edge_correct falls through on any fit without an
+    edge-corrected Hessian — mgcv's own behavior); GCV fits return NULL."""
+    d = load_dataset("datasets", "trees")
+    pins = {
+        "P-REML": ([[981.216889066, -1.417975141],
+                    [-1.417975141, 1.431754248]],
+                   [[101.223338570, -1.430350665],
+                    [-1.430350665, 1.431754074]]),
+        "P-ML":   ([[977.442749011, -1.399349379],
+                    [-1.399349379, 1.430640697]],
+                   [[101.179725562, -1.427441803],
+                    [-1.427441803, 1.430639797]]),
+    }
+    for method, (V_t, V2_t) in pins.items():
+        b = gam("Volume ~ s(Height) + s(Girth)", d,
+                family=Gamma(link="log"), method=method)
+        np.testing.assert_allclose(b.sp_vcov(), V_t, rtol=1e-6)
+        np.testing.assert_allclose(
+            b.sp_vcov(edge_correct=False, reg=1e-2), V2_t, rtol=1e-6)
+    bg = gam("Volume ~ s(Height) + s(Girth)", d,
+             family=Gamma(link="log"), method="GCV.Cp")
+    assert bg.sp_vcov() is None
+
+
+def test_mroot_svd_matches_mgcv():
+    """mroot(method=) (mgcv.r:4444-4470): the "svd" branch (symmetric
+    eigen, rank from values > max·eps), the non-symmetric stop, and the
+    unknown-method stop. Factor pinned to mgcv 1.9-4 (set.seed(1),
+    A = B0 B0' with B0 = matrix(rnorm(28), 7, 4) — LAPACK eigenvector
+    signs agree)."""
+    from hea.models.gam import _mroot
+    from hea.R.rng import RGenerator
+    g = RGenerator(1)
+    B0 = g.normal(0.0, 1.0, 28).reshape(4, 7).T   # R's col-major fill
+    A = B0 @ B0.T
+    Bs = _mroot(A, method="svd")
+    assert Bs.shape == (7, 4)                     # rank detected = 4
+    np.testing.assert_allclose(Bs @ Bs.T, A, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(
+        Bs[:3, 0], [-0.9172445, -0.5126732, 1.695191], rtol=1e-6)
+    Bc = _mroot(A, method="chol")
+    np.testing.assert_allclose(Bc @ Bc.T, A, rtol=0, atol=1e-12)
+    with pytest.raises(ValueError, match="not symmetric"):
+        _mroot(B0[:4, :4])
+    with pytest.raises(ValueError, match="not recognised"):
+        _mroot(A, method="qr")
 
 
 def test_preml_pml_gacv_fixed_tweedie_match_mgcv():

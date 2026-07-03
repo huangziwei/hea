@@ -7777,6 +7777,11 @@ class gam:
                 r_squared_adjusted = float("nan")
         else:
             r_squared_adjusted = float("nan")
+        # mgcv summary.gam sets r.sq NULL for families flagging no.r.sq
+        # (ocat/ziP — mgcv.r:4055); print then shows Deviance explained
+        # alone. NaN here drives the same suppression in hea's summary.
+        if getattr(self.family, "no_r_sq", False):
+            r_squared = r_squared_adjusted = float("nan")
         self.r_squared = float(r_squared)
         self.r_squared_adjusted = float(r_squared_adjusted)
         # Deviance explained — mgcv: (null.deviance - deviance) / null.deviance.
@@ -8880,15 +8885,23 @@ class gam:
         duck = types.SimpleNamespace(A_chol=C, A_chol_lower=True)
         return self._compute_Vc2(self._rho_hat, duck, Vr, 1.0)
 
-    def sp_vcov(self, reg: float = 1e-3):
+    def sp_vcov(self, edge_correct: bool = True, reg: float = 1e-3):
         """mgcv ``sp.vcov`` (mgcv.r:4221-4234): covariance of the
         (working) log smoothing parameters from the outer optimizer's
         Hessian — ``solve(hess + reg)``, mgcv's literal elementwise
-        regularizer. ``None`` when no Hessian is available (GCV fits,
-        fixed sp). The edge-corrected branch lands with edge_correct
-        support for general families."""
+        regularizer. ``None`` when no Hessian is available (GCV/GACV
+        fits, fixed sp) — mgcv gates on method ∈ {ML, P-ML, REML,
+        P-REML, fREML}; hea's fREML fits carry ``method == "REML"``
+        (the bam alias), so the same set is covered by the four
+        strings below. ``edge_correct`` mirrors mgcv's formal: its
+        branch fires only when the fit stored an edge-corrected
+        Hessian (``attr(hess, "hess1")``, written by
+        ``gam.control(edge.correct=TRUE)`` fits); hea has no
+        edge-corrected fitting, so — exactly like mgcv on a
+        non-edge-corrected fit — the argument falls through to
+        ``solve(hess + reg)``."""
         H = getattr(self, "_H_aug", None)
-        if H is None or self.method not in ("REML", "ML"):
+        if H is None or self.method not in ("REML", "ML", "P-REML", "P-ML"):
             return None
         return np.linalg.solve(np.asarray(H, dtype=float) + reg,
                                np.eye(H.shape[0]))
@@ -9589,7 +9602,7 @@ class gam:
         return stat, float(pval), float(rank)
 
     def _smooth_significance_rows(
-        self, dispersion: float | None = None,
+        self, dispersion: float | None = None, re_test: bool = True,
     ) -> list[tuple[str, float, float, float, float]]:
         """Per-smooth test rows ``(label, edf, Ref.df, stat_col, p-value)``
         — the smooth half of mgcv's ``summary.gam`` (mgcv.r:4008-4040),
@@ -9611,6 +9624,11 @@ class gam:
         smooth tests always use ``Vp`` (freq= never reaches them), but a
         supplied dispersion rescales it by ``dispersion/sig2`` and forces
         ``est.disp = FALSE`` (χ² references; testStat ``res.df = -1``).
+
+        ``re_test=False`` (summary.gam's ``re.test`` formal, mgcv.r:3858)
+        drops the reTest-path smooths from the table entirely — mgcv sets
+        ``res <- NULL`` and skips the row (mgcv.r:4024-4030); it does NOT
+        reroute them to testStat.
         """
         scale_known = bool(self._scale_known_fit)
         est_disp = (not scale_known) and dispersion is None
@@ -9654,6 +9672,8 @@ class gam:
                 null_dim = p_b
             if null_dim == 0:
                 # reTest path — penalty is full-rank on the smooth's block.
+                if not re_test:
+                    continue
                 stat, p_val, ref_df = self._re_test(m_idx, beta_b, Vp_b,
                                                     v_scale=v_scale)
             else:
@@ -11684,7 +11704,8 @@ class gam:
         return se
 
     def summary(self, digits: int = 4, freq: bool = False,
-                dispersion: float | None = None) -> None:
+                dispersion: float | None = None,
+                re_test: bool = True) -> None:
         """mgcv-style summary: parametric table + smooth-edf table + fit stats.
 
         ``freq=True`` uses the frequentist ``Ve`` instead of the Bayesian
@@ -11693,7 +11714,10 @@ class gam:
         scale: every covariance is rescaled by ``dispersion/sig2``, the
         tests switch to their known-scale forms (z / Chi.sq), and the
         printed ``Scale est.`` shows the supplied value — exactly
-        ``summary.gam(..., dispersion=)``.
+        ``summary.gam(..., dispersion=)``. ``re_test=False`` omits the
+        random-effect/fully-penalized smooths from the significance
+        table (summary.gam's ``re.test``; mgcv.r:4024 skips those rows
+        rather than rerouting them).
         """
         # multi-LP (general-family) fits: all link names, one formula
         # per line — mgcv's print.summary.gam layout.
@@ -11779,9 +11803,13 @@ class gam:
         # Rows from ``_smooth_significance_rows`` — reTest / testStat
         # dispatch on null.space.dim, mixture p-values, Chi.sq↔F column by
         # ``family.scale_known``. Ref.df reports the rank used in the test.
+        # mgcv's print gates the section on m>0 only (mgcv.r:4084) — with
+        # every row skipped (re_test=False, all-re model) R still prints
+        # the header over an empty printCoefmat; mirror that.
         if self._blocks:
             out.append("Approximate significance of smooth terms:")
-            sm_rows = self._smooth_significance_rows(dispersion=dispersion)
+            sm_rows = self._smooth_significance_rows(dispersion=dispersion,
+                                                     re_test=re_test)
             rows_label = [r[0] for r in sm_rows]
             rows_edf   = [r[1] for r in sm_rows]
             rows_refdf = [r[2] for r in sm_rows]
@@ -13613,23 +13641,48 @@ def _pls_rank_drop(Xw: np.ndarray, slots: list["_PenaltySlot"],
     return rank, drop, R1
 
 
-def _mroot(A: np.ndarray, rank: int | None = None) -> np.ndarray:
-    """mgcv ``mroot(A, rank, method="chol")``: B with ``B @ B.T = A`` and
-    ``rank`` columns, via pivoted Cholesky (LAPACK dpstrf — R's
-    ``chol(pivot=TRUE)``)."""
-    from scipy.linalg.lapack import dpstrf
+def _mroot(A: np.ndarray, rank: int | None = None,
+           method: str = "chol") -> np.ndarray:
+    """mgcv ``mroot(A, rank, method)`` (mgcv.r:4444-4470): B with
+    ``B @ B.T = A`` and ``rank`` columns. ``method="chol"`` uses pivoted
+    Cholesky (LAPACK dpstrf — R's ``chol(pivot=TRUE)``); ``method="svd"``
+    uses the symmetric eigendecomposition (mgcv's own shortcut: "same as
+    svd for +ve semi def, but faster"), detecting rank from
+    ``values > max(values)·eps`` when not supplied. Non-symmetric input
+    stops, per mgcv's ``isTRUE(all.equal(A, t(A)))`` guard (mean relative
+    difference < 1.5e-8, ``all.equal.numeric`` semantics)."""
     q = A.shape[0]
     if q == 0:
         return np.zeros((0, 0))
-    c, piv, r_eff, _info = dpstrf(A, lower=0)
-    U = np.triu(c)
-    if r_eff < q:
-        U[r_eff:, :] = 0.0
-    if rank is None or rank < 1:
-        rank = int(r_eff)
-    inv_piv = np.empty(q, dtype=int)
-    inv_piv[piv - 1] = np.arange(q)
-    return U[:rank, inv_piv].T
+    # isTRUE(all.equal(A, t(A))): relative when mean|A| > tol, else absolute.
+    asym = float(np.mean(np.abs(A - A.T)))
+    a_scale = float(np.mean(np.abs(A)))
+    tol = 1.5e-8
+    if (asym / a_scale if a_scale > tol else asym) >= tol:
+        raise ValueError("Supplied matrix not symmetric")
+    if method == "svd":
+        vals, vecs = np.linalg.eigh(A)
+        vals = vals[::-1]           # R's eigen(): descending order
+        vecs = vecs[:, ::-1]
+        if rank is None or rank < 1:
+            rank = int(np.sum(vals > vals.max() * np.finfo(float).eps))
+        if rank == 0:
+            raise ValueError(
+                "Something wrong - matrix probably not +ve semi definite"
+            )
+        return vecs[:, :rank] * np.sqrt(vals[:rank])
+    elif method == "chol":
+        from scipy.linalg.lapack import dpstrf
+        c, piv, r_eff, _info = dpstrf(A, lower=0)
+        U = np.triu(c)
+        if r_eff < q:
+            U[r_eff:, :] = 0.0
+        if rank is None or rank < 1:
+            rank = int(r_eff)
+        inv_piv = np.empty(q, dtype=int)
+        inv_piv[piv - 1] = np.arange(q)
+        return U[:rank, inv_piv].T
+    raise ValueError("method not recognised.")
 
 
 def _qr_ldet_inv(X: np.ndarray, get_inv: bool) -> tuple[float, np.ndarray | None]:

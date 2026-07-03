@@ -1229,6 +1229,55 @@ def test_trind_generator_matches_mgcv():
     assert tri["i4"][0, 2, 1, 2] == tri["i4"][2, 2, 1, 0]
 
 
+def test_trind_generator_ifunc_reverse_match_mgcv():
+    # trind.generator(K, ifunc=, reverse=) formals (gamlss.r:20-112).
+    # Pins: mgcv 1.9-4 trind.generator(4) — i2r/i3r/i4r (1-based), and
+    # ifunc spot values i4(3,1,4,2)=15, i3(2,4,1)=7, i2(4,2)=7.
+    from hea.family import trind_generator
+    ta = trind_generator(4)                    # reverse defaults TRUE
+    tf = trind_generator(4, ifunc=True)        # reverse defaults FALSE
+    assert tf["i2r"] is None and tf["i3r"] is None and tf["i4r"] is None
+    np.testing.assert_array_equal(
+        ta["i2r"] + 1, [1, 2, 3, 4, 6, 7, 8, 11, 12, 16])
+    np.testing.assert_array_equal(
+        ta["i3r"] + 1,
+        [1, 2, 3, 4, 6, 7, 8, 11, 12, 16, 22, 23, 24, 27, 28, 32, 43, 44,
+         48, 64])
+    np.testing.assert_array_equal(
+        ta["i4r"] + 1,
+        [1, 2, 3, 4, 6, 7, 8, 11, 12, 16, 22, 23, 24, 27, 28, 32, 43, 44,
+         48, 64, 86, 87, 88, 91, 92, 96, 107, 108, 112, 128, 171, 172,
+         176, 192, 256])
+    # 0-based hea args ≡ mgcv's 1-based spot pins
+    assert tf["i4"](2, 0, 3, 1) + 1 == 15
+    assert tf["i3"](1, 3, 0) + 1 == 7
+    assert tf["i2"](3, 1) + 1 == 7
+    # closures ≡ arrays over every index tuple, K = 2..5
+    for K in range(2, 6):
+        a = trind_generator(K)
+        f = trind_generator(K, ifunc=True, reverse=True)
+        np.testing.assert_array_equal(f["i4r"], a["i4r"])
+        for i in range(K):
+            for j in range(K):
+                assert f["i2"](i, j) == a["i2"][i, j]
+                for k in range(K):
+                    assert f["i3"](i, j, k) == a["i3"][i, j, k]
+                    for l_ in range(K):
+                        assert f["i4"](i, j, k, l_) == a["i4"][i, j, k, l_]
+        # reverse extraction: ravel()[ixr] recovers packing order from a
+        # symmetric array (same cells R reads column-major — digit sum
+        # of the reversed tuple commutes).
+        packed = np.arange(a["i4"].max() + 1, dtype=float)
+        np.testing.assert_array_equal(
+            packed[a["i4"]].ravel()[a["i4r"]], packed)
+        packed3 = np.arange(a["i3"].max() + 1, dtype=float)
+        np.testing.assert_array_equal(
+            packed3[a["i3"]].ravel()[a["i3r"]], packed3)
+        packed2 = np.arange(a["i2"].max() + 1, dtype=float)
+        np.testing.assert_array_equal(
+            packed2[a["i2"]].ravel()[a["i2r"]], packed2)
+
+
 def _gaulss_oracle_inputs():
     from hea.R.rng import RGenerator
     gen = RGenerator(17)        # column-major reshape == R matrix(rnorm())
@@ -3416,6 +3465,91 @@ def test_ziP_components_match_mgcv():
     # ls ≡ 0.
     le = fam.ls_extended(y, wt)
     assert le["ls"] == 0.0 and float(np.sum(np.abs(le["LSTH1"]))) == 0.0
+
+
+def test_ziP_b_nonzero_components_match_mgcv():
+    # ziP(b=0.3): the b>0 presence-slope floor (slope = b + e^θ₂ > b,
+    # efam.r:3869 `.b`, threaded into `lind(k=b)` at efam.r:3900 and the
+    # presence LP of dev.resids/aic). Oracle: live ziP(b=0.3)$Dd /
+    # dev.resids / aic / getTheta(TRUE) (Rscript, mgcv 1.9-4) on the same
+    # component table as the b=0 test — every output shifts with b, so
+    # these pins are b-differentiating. (mgcv's `logid` alternative map
+    # is dead code — zero call sites in the package — so `lind` is the
+    # whole b surface; see the divergence-audit plan.)
+    from hea.family import ziP
+    y, mu, th, wt = _zip_dd_inputs()
+    fam = ziP(b=0.3)
+    fam.set_theta(th)
+    D = fam.Dd(y, mu, th, wt, level=2)
+    np.testing.assert_allclose(
+        D["Dmu"], [1.08976267596958154, -0.22004623489546793,
+                   0.57215865967827506, 7.01702884537704197,
+                   0.87542275833633465, 1.95536392161329253,
+                   -0.93410281687360253, 0.57445371903023101],
+        rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        D["Dmu2"], [2.1236437066770151, 4.8577163632621687,
+                    5.7862868392389384, 13.6742333681026036,
+                    6.2117657841435481, 3.8104592660074412,
+                    8.6023719446642435, 10.5532768670240706],
+        rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        D["EDmu2"], [2.0180607160596753, 6.2440825914745579,
+                     6.4056243610448726, 10.2069022340631523,
+                     6.2358673592575826, 3.3434058534384645,
+                     8.6024716464923259, 13.3335630486959023],
+        rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        D["Dmu3"], [4.1383896625899634, 4.4868711592001551,
+                    -1.1538055877588214, 26.6472694249389974,
+                    5.4317245891259009, 7.4255230228050992,
+                    9.7709378844557797, 7.6392877628959575],
+        rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        D["Dmu4"], [8.0645679619345891, -4.5612557172249000,
+                    -4.9240133146708649, 51.9281007344558034,
+                    23.2449206230913035, 14.4702746606138106,
+                    9.2611868607395618, -17.7249681840395397],
+        rtol=0, atol=1e-8)
+    np.testing.assert_allclose(D["Dth"], np.column_stack([
+        [0.55921936726130994, -0.95691039796727217, -0.21444505775023529,
+         3.6008376112485259, -0.0071065252647155115, 1.0034087229472164,
+         -2.8606088762550079e-05, -1.6035680088371769],
+        [-0.46099843289559428, -0.47330355818482989, -0.28284810248746428,
+         0.59367775620024843, -0.014060015237645187, -0.33086826094582555,
+         -7.0745200521528338e-05, -1.0575346740736420]]), rtol=0, atol=1e-9)
+    np.testing.assert_allclose(D["Dmuth"], np.column_stack([
+        [1.08976267596958154, 1.50617333726872316, 1.09865886407181312,
+         7.01702884537704197, 0.09254172245864013, 1.95536392161329253,
+         0.00071232090990356114, 3.17534311039586292],
+        [0.0236394138481182958, -0.8327005217278636851, 1.0955456626414211,
+         7.09369003345143323, 0.1713739281290409533, 1.0095712868244369,
+         0.0017144644865693542, -0.5497343940317986899]]),
+        rtol=0, atol=1e-9)
+    np.testing.assert_allclose(D["Dth2"][:, 2], [
+        -0.0809694718583982564, -0.2842163189121490463,
+        0.6979680159088302860, 0.6915586706591358990,
+        0.1718251907663267686, -0.2217663530216369416,
+        0.0021649004419334612, -0.3488461525583514966], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(D["Dmuth2"][:, 2], [
+        -0.755905910445411555, 0.560366653477998300, 0.878061772576305133,
+        9.242050942630795518, -1.524462157900505987, 0.131161416228383843,
+        -0.046277012289079662, 3.232019812313918106], rtol=0, atol=1e-8)
+    np.testing.assert_allclose(D["Dmu2th2"][:, 2], [
+        0.40161458642977266, 10.95259405800349484, -15.51518510456715916,
+        52.97034126309804947, 8.03760319065614226, 6.80845044097395746,
+        0.87271760716416480, 19.53488770370943328], rtol=0, atol=1e-8)
+    np.testing.assert_allclose(
+        fam.dev_resids(y, mu, wt, theta=th),
+        [0.55921936726130994, 2.11434673657913752, 2.46875973990692454,
+         1.80041880562426293, 2.95104173975606976, 1.00340872294721639,
+         3.51560614274561978, 2.11735606584551572], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(fam.aic(y, mu, 0, wt, 0, theta=th),
+                               20.447932192135838, rtol=0, atol=1e-9)
+    # getTheta(trans): θ₂ ↦ b + e^θ₂ (the slope floor).
+    np.testing.assert_allclose(fam.get_theta(trans=True),
+                               [-0.3, 1.94872127070012824],
+                               rtol=0, atol=1e-12)
 
 
 def test_ziP_Dd_matches_fd():
