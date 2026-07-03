@@ -50,7 +50,7 @@ from typing import Optional, Sequence
 import numpy as np
 import polars as pl
 from scipy.linalg import cho_factor, cho_solve, qr as scipy_qr, solve_triangular
-from scipy.linalg.lapack import dpstrf
+from scipy.linalg.lapack import dgeqp3, dormqr, dpstrf
 from ..R import distributions as _dist
 from ..R._shared import _rfma_vec
 
@@ -86,9 +86,11 @@ from .gam import (
     _apply_gam_side,
     _block_s_scale,
     _ldet_s,
+    _SlBlock,
     _row_frame,
     _sl_initial_repara,
     _sl_mult,
+    _sl_repara,
     _sl_setup,
     _sl_term_mult,
     _sym_rank,
@@ -893,6 +895,273 @@ def _pi_fit_chol(
         "piv": piv,
         "ipiv": ipiv,
     }
+
+
+def _sl_ift(sl: _Sl, R: np.ndarray, X: np.ndarray, y: np.ndarray,
+            beta_piv: np.ndarray, piv: np.ndarray, rp: np.ndarray) -> dict:
+    """mgcv ``Sl.ift`` (fast-REML.r:1369-1403): derivatives of β̂ by
+    implicit differentiation on the QR factor, used directly for the
+    ``b'Sb`` and RSS derivatives. ``R``/``piv``/``rp`` are the pivoted-QR
+    factor of the augmented ``rbind(X, E)`` and its pivots / reverse
+    pivots; ``X`` is the ldetS-repara'd model matrix; ``beta_piv`` the
+    pivoted β̂.
+
+    ``rss1`` is identically zero and ``bSb1[i] = β'S_iβ`` — mgcv keeps
+    only the terms that do not cancel in ``rss + b'Sb`` (its :1373 note).
+    The big cross products (``X·db``, ``X'(X·db)``) go through
+    :func:`_pmmult` so the REML Hessian stays run/platform deterministic,
+    matching :func:`_sl_ift_chol`'s treatment of mgcv's ``pmmult2``
+    (Sl.ift itself uses plain ``%*%`` — R's reference-BLAS ``dgemm``).
+    Reads the current ``blk.lam``/``St``/``Srp`` set by ``_ldet_s``.
+    """
+    beta = beta_piv[rp]                              # unpivot (:1374)
+    Sb = _sl_mult(sl, beta)                          # Sl.mult(β, k=0)
+    Skb, _inds = _sl_term_mult(sl, beta, full=True)  # dSλ/dρ_i · β
+    rsd = X @ beta - y
+    nd = len(Skb)
+    p = beta.size
+    db = np.zeros((p, nd))
+    rss1 = np.zeros(nd)
+    bSb1 = np.zeros(nd)
+    for i in range(nd):
+        # db[,i] = -backsolve(R, forwardsolve(t(R), Skb[[i]][piv]))[rp]
+        w = solve_triangular(R.T, Skb[i][piv], lower=True)
+        db[:, i] = -solve_triangular(R, w, lower=False)[rp]
+        bSb1[i] = float(np.dot(beta, Skb[i]))        # β'S_iβ (:1387)
+    X_db = _pmmult(X, db)
+    XX_db = _pmmult(X, X_db, at=True)                # t(X)%*%(X%*%db)
+    S_db = _sl_mult(sl, db)                          # Sl.mult(db, k=0)
+    rss2 = np.zeros((nd, nd))
+    bSb2 = np.zeros((nd, nd))
+    for k in range(nd):
+        for j in range(k, nd):
+            rss2[j, k] = rss2[k, j] = (
+                2.0 * float(np.dot(db[:, j], XX_db[:, k]))
+            )
+            v = ((bSb1[k] if k == j else 0.0)
+                 + 2.0 * (float(np.dot(db[:, k], Skb[j] + S_db[:, j]))
+                          + float(np.dot(db[:, j], Skb[k]))))
+            bSb2[j, k] = bSb2[k, j] = v
+    return {"bSb": float(np.dot(beta, Sb)), "bSb1": bSb1, "bSb2": bSb2,
+            "d1b": db, "rss": float(np.dot(rsd, rsd)),
+            "rss1": rss1, "rss2": rss2}
+
+
+def _sl_fit(sl: _Sl, X: np.ndarray, y: np.ndarray, rho: np.ndarray, *,
+            fixed: np.ndarray | None = None, log_phi: float = 0.0,
+            phi_fixed: bool = True, rss_extra: float = 0.0,
+            nobs: float | None = None, Mp: int = 0,
+            gamma: float = 1.0) -> dict:
+    """mgcv ``Sl.fit`` (fast-REML.r:1682-1738): penalised regression via
+    pivoted QR of the AUGMENTED model matrix ``rbind(X, E)`` at fixed ρ,
+    returning β̂ plus the Gaussian working-model REML value, gradient and
+    Hessian — the per-evaluation oracle of ``fast.REML.fit`` (the
+    non-discrete bam cadence). The discrete POI keeps
+    :func:`_pi_fit_chol` (= ``Sl.fitChol``, mgcv's discrete oracle).
+
+    Line-for-line: ``ldetS(root=TRUE)`` (repara=TRUE — gam.reparam per
+    multi-S block) → ``Sl.repara`` of X into the stable gauge → LAPACK
+    pivoted QR of ``rbind(X, E)`` (``qr(LAPACK=TRUE)`` = dgeqp3) → β̂ from
+    ``backsolve(R, qr.qty(...))`` with ``rss+b'Sb = Σ tail(Q'[y;0])² +
+    rss.extra`` → :func:`_sl_ift` IFT derivatives → ``PP = PP'`` from the
+    inverted R → :func:`_d_det_xxs` → REML assembly (same formulas as
+    ``Sl.fitChol``; the log φ row uses the rss.extra-inclusive
+    ``rss.bSb``, Sl.fit:1726-1728).
+
+    ``X`` must already be initial-repara'd — mgcv applies ``Sl.Xprep``
+    before ``fast.REML.fit`` (bam.r:1228/1686). β̂ (unpivoted) and PP come
+    back in the ldetS-repara'd + initial-repara'd gauge, with the ldetS
+    ``rp`` list under ``"rp"`` for the caller's inverse unwind
+    (``Sl.postproc``, fast-REML.r:1983/1993).
+    """
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=float)
+    p = X.shape[1]
+    n_sp = sum(blk.n_sp for blk in sl.blocks)
+    if fixed is None:
+        fixed = np.zeros(n_sp, dtype=bool)           # fast.REML.fit:1771
+    free = ~fixed
+    phi = float(np.exp(log_phi))
+    if nobs is None:
+        nobs = float(X.shape[0])
+
+    # 1. log|Sλ|_+ stably + total penalty root (Sl.fit:1692).
+    ldS = _ldet_s(sl, rho, fixed=fixed, root=True, deriv=2)
+    # 2. Stable re-parameterization applied to X (Sl.fit:1694).
+    X = _sl_repara(ldS["rp"], X)
+    # 3. Pivoted QR of the augmented matrix (Sl.fit:1696-1700) and
+    #    Qty0 = qr.qty(qrx, c(y, 0)) via dormqr — the FULL-length Q'v, so
+    #    the rss+b'Sb tail sum is mgcv's, not a cancellation-prone
+    #    ‖v‖²−‖head‖² shortcut.
+    E = ldS["E"]
+    aug = np.concatenate([X, E], axis=0)
+    qr_a, jpvt, tau, _work, info = dgeqp3(aug)
+    if info != 0:
+        raise np.linalg.LinAlgError(f"dgeqp3 failed with info={info}")
+    piv = np.asarray(jpvt, dtype=int) - 1
+    rp = np.empty(p, dtype=int)                      # reverse pivot (:1697)
+    rp[piv] = np.arange(p)
+    R = np.triu(qr_a[:p, :p])
+    v = np.concatenate([y, np.zeros(E.shape[0])]).reshape(-1, 1)
+    v = np.asfortranarray(v)
+    Qty0, _work2, info2 = dormqr("L", "T", qr_a, tau, v,
+                                 lwork=max(1, 64 * v.shape[1]))
+    if info2 != 0:
+        raise np.linalg.LinAlgError(f"dormqr failed with info={info2}")
+    Qty0 = Qty0[:, 0]
+    # β̂ (pivoted) and rss + b'Sb from the projection tail (:1701-1702).
+    beta_piv = solve_triangular(R, Qty0[:p], lower=False)
+    rss_bSb = float(np.dot(Qty0[p:], Qty0[p:])) + rss_extra
+
+    # 4. IFT derivatives of β̂ → rss/b'Sb derivatives (Sl.fit:1704).
+    dift = _sl_ift(sl, R, X, y, beta_piv, piv, rp)
+
+    # 5. log|X'X+S| + its derivatives via PP = PP' unpivoted (:1706-1711).
+    P = solve_triangular(R, np.eye(p), lower=False)  # invert R
+    PP = _pmmult(P, P, bt=True)[np.ix_(rp, rp)]      # tcrossprod, unpivot
+    ldetXXS = 2.0 * float(np.sum(np.log(np.abs(np.diag(R)))))
+    dXXS_d1, dXXS_d2 = _d_det_xxs(sl, PP)
+
+    # 6. REML value / gradient / Hessian (Sl.fit:1714-1730).
+    reml = (rss_bSb / (phi * gamma)
+            + (nobs / gamma - Mp) * float(np.log(2.0 * np.pi * phi))
+            + Mp * float(np.log(gamma))
+            + ldetXXS - ldS["ldetS"]) / 2.0
+    reml_pen = (dift["bSb"] / (phi * gamma)
+                - Mp * float(np.log(2.0 * np.pi * phi))
+                + Mp * float(np.log(gamma))
+                + ldetXXS - ldS["ldetS"]) / 2.0
+    grad = (dXXS_d1[free] - ldS["ldet1"]
+            + (dift["rss1"][free] + dift["bSb1"][free]) / (phi * gamma)) / 2.0
+    hess = (dXXS_d2[np.ix_(free, free)] - ldS["ldet2"]
+            + (dift["rss2"][np.ix_(free, free)]
+               + dift["bSb2"][np.ix_(free, free)]) / (phi * gamma)) / 2.0
+
+    if not phi_fixed:                                # (:1724-1730)
+        grad_phi = (-rss_bSb / (phi * gamma) + nobs / gamma - Mp) / 2.0
+        grad = np.concatenate([grad, [grad_phi]])
+        d_phi = np.concatenate([
+            -(dift["rss1"][free] + dift["bSb1"][free]), [rss_bSb],
+        ]) / (2.0 * phi * gamma)
+        n_old = hess.shape[0]
+        hess_new = np.zeros((n_old + 1, n_old + 1))
+        hess_new[:n_old, :n_old] = hess
+        hess_new[:n_old, n_old] = d_phi[:n_old]
+        hess_new[n_old, :n_old] = d_phi[:n_old]
+        hess_new[n_old, n_old] = d_phi[n_old]
+        hess = hess_new
+
+    return {
+        "beta": beta_piv[rp],                        # unpivoted (:1736)
+        "grad": grad,
+        "hess": hess,
+        "reml": float(reml),
+        "reml_pen": float(reml_pen),
+        "rss": float(dift["rss"] + rss_extra),       # (:1737)
+        "nobs": float(nobs),
+        "d1b": dift["d1b"],
+        "PP": PP,
+        "rp": ldS["rp"],
+        "ldetS": float(ldS["ldetS"]),
+        "ldetXXS": ldetXXS,
+    }
+
+
+def _ident_test(X: np.ndarray, E: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """mgcv ``ident.test`` (fast-REML.r:1877-1895): structurally
+    un-identifiable coefficients of the model with (initial-repara'd)
+    model matrix ``X`` and balanced penalty root ``E`` (``attr(Sl,"E")``).
+    Pivoted QR of ``rbind(X/‖X‖_F, E)``; rank by mgcv's Cline-condition
+    ``Rrank(qr.R, tol=eps^.75)``; the trailing pivots are dropped.
+    Returns 0-based ``(drop, undrop)``.
+    """
+    p = X.shape[1]
+    Xnorm = float(np.linalg.norm(X))                 # Frobenius (:1888)
+    aug = np.concatenate([X / Xnorm, E], axis=0)
+    R, piv = scipy_qr(aug, mode="r", pivoting=True)  # qr(LAPACK=TRUE)
+    rank = _R_rank(np.triu(R[:p, :p]),
+                   tol=float(np.finfo(float).eps) ** 0.75)
+    drop = np.asarray(piv[rank:], dtype=int)         # (:1891)
+    undrop = np.arange(p)
+    if drop.size:
+        undrop = np.setdiff1d(undrop, drop)          # (1:np)[-drop]
+    return drop, undrop
+
+
+def _sl_drop(sl: _Sl, drop: np.ndarray, np_total: int) -> _Sl:
+    """mgcv ``Sl.drop`` (fast-REML.r:1899-1955): remove the coefficients
+    in ``drop`` from the block-diagonal penalty. Returns a NEW ``_Sl``
+    (mgcv is copy-on-modify; the caller's original must stay intact for
+    the post-fit unwind, which uses the pre-drop blocks).
+
+    Per block: the ``ind`` mask entries at dropped positions are removed,
+    ``rank`` shrinks by the number of *penalized* dropped coefs,
+    ``start``/``stop`` are remapped through ``new.loc = cumsum(keep)``
+    (mgcv's convention — including its behaviour when a block's first
+    coef is dropped), and multi-S blocks lose the matching rows/cols of
+    ``S`` (rows of ``rS``, non-Cholesky path). ``D``/``Di`` are NOT
+    touched — mgcv leaves them alone because dropping happens after
+    ``Sl.initial.repara`` and the fit path never reads them; the unwind
+    runs on the full-size vector with the ORIGINAL Sl.
+    """
+    if drop.size == 0:
+        return sl
+    keep_full = np.ones(np_total, dtype=bool)
+    keep_full[drop] = False
+    ncum = np.cumsum(keep_full)                      # new.loc (1-based count)
+    drop_set = set(int(i) for i in drop)
+    new_blocks: list[_SlBlock] = []
+    for blk in sl.blocks:
+        cols = np.arange(blk.start, blk.stop)
+        bdrop = np.array([int(c) in drop_set for c in cols], dtype=bool)
+        new_start = int(ncum[blk.start]) - 1         # new.loc[start] (:1926)
+        new_stop = int(ncum[blk.stop - 1])           # new.loc[stop], excl.
+        if blk.n_sp == 1:                            # singleton (:1918-1927)
+            npd = int(np.sum(bdrop[blk.ind]))
+            new_ind = blk.ind[~bdrop]
+            new_rank = blk.rank - npd
+            nb = _SlBlock(start=new_start, stop=new_stop,
+                          S=blk.S, rank=new_rank, repara=blk.repara,
+                          lam=np.array(blk.lam, copy=True), D=blk.D,
+                          Di=blk.Di, ind=new_ind, ldet=blk.ldet,
+                          rS=blk.rS)
+        else:                                        # multi-S (:1928-1942)
+            keep_pen = ~bdrop[blk.ind]
+            npd = int(np.sum(~keep_pen))
+            new_ind = blk.ind[~bdrop]
+            new_rank = blk.rank - npd
+            new_S = [Sj[np.ix_(keep_pen, keep_pen)] for Sj in blk.S]
+            new_rS = ([rSj[keep_pen, :] for rSj in blk.rS]
+                      if blk.rS is not None else None)
+            nb = _SlBlock(start=new_start, stop=new_stop,
+                          S=new_S, rank=new_rank, repara=blk.repara,
+                          lam=np.array(blk.lam, copy=True), D=blk.D,
+                          Di=blk.Di, ind=new_ind, ldet=blk.ldet,
+                          rS=new_rS)
+        if nb.rank > 0:                              # (:1944-1952)
+            new_blocks.append(nb)
+    keep_ix = np.where(keep_full)[0]
+    p_new = int(keep_ix.size)
+    return _Sl(new_blocks, sl.E[np.ix_(keep_ix, keep_ix)],
+               sl.S[np.ix_(keep_ix, keep_ix)], sl.lam0, p_new)
+
+
+def _sl_xprep(sl: _Sl, X: np.ndarray) -> dict:
+    """mgcv ``Sl.Xprep`` (fast-REML.r:1957-1973): apply the Sl.setup
+    initial reparameterization to ``X`` (columns only), test structural
+    identifiability against the balanced penalty root, drop
+    un-identifiable coefficients from both ``X`` and (a copy of) ``Sl``,
+    and return the post-drop penalty rank and null-space dimension
+    ``Mp = ncol(X) − rank``.
+    """
+    X = _sl_initial_repara(sl, X, both_sides=False, cov=False)   # (:1962)
+    drop, undrop = _ident_test(X, sl.E)                          # (:1963)
+    if drop.size:
+        sl = _sl_drop(sl, drop, X.shape[1])                      # (:1966)
+        X = np.delete(X, drop, axis=1)                           # (:1967)
+    rank = int(sum(blk.rank for blk in sl.blocks))               # (:1970)
+    return {"X": X, "sl": sl, "undrop": undrop, "rank": rank,
+            "Mp": int(X.shape[1] - rank)}                        # (:1972)
 
 
 def _reg_newton_step(grad: np.ndarray, hess: np.ndarray,
@@ -1829,28 +2098,36 @@ def _is_identity_link(family: Family) -> bool:
 
 def _fast_reml_fit(theta0: np.ndarray, *, include_log_phi: bool,
                    max_iter: int = 200, work_dim: int, L, lsp0, p: int,
-                   sl: _Sl, XtX: np.ndarray, Xty: np.ndarray,
-                   yty: float, Mp: int, gamma: float, n: int,
+                   sl: _Sl, X: np.ndarray, f: np.ndarray,
+                   rss_extra: float, gamma: float, n: int,
                    scale_fixed_value: float) -> dict:
     """mgcv ``fast.REML.fit`` (fast-REML.r:1740-1875) — Newton optimiser
     for the working log-sp (and log φ when the scale is free) on the
     reduced ``(R, f)`` data, run to FULL convergence.
 
-    This is the optimiser mgcv's *non-discrete* ``bgam.fit`` (bam.r:1240)
-    calls once per PIRLS iter, via ``Sl.fit``. ``Sl.fit`` and ``Sl.fitChol``
-    compute the SAME REML score/grad/Hessian (QR vs Cholesky numerics), so
-    this drives :func:`_pi_fit_chol` (hea's ``Sl.fitChol`` port) as the
-    per-evaluation oracle — the very same routine the *discrete*
-    ``bgam.fitd`` (bam.r:733) one-step POI uses. The two paths differ only
-    in CADENCE: ``bgam.fitd`` takes ONE step per PIRLS iter with
-    gradient-based halving; this runs the step to FULL convergence with
-    reml-VALUE halving.
+    This is the optimiser mgcv's *non-discrete* ``bgam.fit``/``bam.fit``
+    (bam.r:1240/1690) call once per PIRLS iter. The per-evaluation oracle
+    is :func:`_sl_fit` (mgcv ``Sl.fit`` — QR of the augmented
+    ``rbind(X, E)``), exactly as in mgcv; the *discrete* ``bgam.fitd``
+    POI uses :func:`_pi_fit_chol` (``Sl.fitChol``) instead. The two
+    oracles compute the same REML score/grad/Hessian (QR vs Cholesky
+    numerics); the two cadences differ in that ``bgam.fitd`` takes ONE
+    gradient-halved step per PIRLS iter while this runs Newton to FULL
+    convergence with reml-VALUE halving.
+
+    ``X`` is the reduced p×p QR factor ``qrx$R`` in the ORIGINAL gauge;
+    mgcv's ``Sl.Xprep`` (initial repara + ``ident.test`` structural drop,
+    bam.r:1228/1686) is applied here, and ``Mp`` is the POST-drop
+    ``ncol(X) − rank`` (``um$Mp``, bam.r:1242). ``f`` is the projected
+    response ``qrx$f``; ``rss_extra = ‖z̃‖² − ‖f‖²`` (bam.r:1146/1675).
+    Dropped coefficients come back as exact zeros in ``reml_beta`` (mgcv
+    ``Sl.postproc``'s ``beta[undrop] <-``, fast-REML.r:1982-1983).
 
     CRITICAL: the REML here is the **Gaussian working-model** REML on the
     reduced ``(R, f)`` — ``(nobs/γ−Mp)·log(2πφ)`` normalisation, NO
     non-Gaussian ``ls`` term (``Sl.fit``/``Sl.fitChol`` treat the linearised
     ``(R, f)`` as Gaussian; the family lives only in the OUTER PIRLS loop's
-    W, z build). This is why it must come from ``_pi_fit_chol`` and NOT from
+    W, z build). This is why it must come from ``_sl_fit`` and NOT from
     ``_reml`` (the full non-Gaussian Tweedie/Gamma REML, which gam uses):
     on a scale-unknown Tweedie bam, mgcv-bam reaches sp 0.259 (Gaussian
     working REML); ``_reml`` on the same reduced data minimises a different
@@ -1889,7 +2166,6 @@ def _fast_reml_fit(theta0: np.ndarray, *, include_log_phi: bool,
     conv_tol = float(np.finfo(float).eps) ** 0.5     # mgcv conv.tol
     max_step = 5.0                                   # mgcv maxNstep
     nobs = float(n)
-    n_int = int(n)
 
     def _rho_full(theta_sp):
         # Working log-sp θ → per-penalty log-sp ρ = L·θ + lsp0 (mgcv's
@@ -1899,35 +2175,30 @@ def _fast_reml_fit(theta0: np.ndarray, *, include_log_phi: bool,
             rho = rho + lsp0
         return rho
 
-    # ``Sl.setup`` + ``Sl.initial.repara`` (fast-REML.r:68-429, 517-588):
-    # reparameterize every penalty block into mgcv's well-scaled gauge, so
-    # _pi_fit_chol's pivoted Cholesky factorizes the same conditioned matrix
-    # mgcv does (bam.r:541/664). ``both_sides=True`` realises the two-sided
-    # gram transform ``D'(X'WX)D`` / ``D'(X'Wz)``. Singleton transforms are
-    # non-orthogonal (eigen ``U·diag(1/√λ)``), so the reml VALUE's ``ldetXXS``
-    # shifts by ``ldet_const``; the grad/Hess are congruence-invariant. β is
-    # recovered by the caller (not used here).
-    XX_pre = _sl_initial_repara(sl, XtX, both_sides=True)
-    Xy_pre = _sl_initial_repara(sl, Xty, both_sides=True)
+    # mgcv ``Sl.Xprep`` (fast-REML.r:1957-1973, called at bam.r:1228/1686):
+    # initial repara of qrx$R (columns only — X rows are obs-space),
+    # ident.test structural-identifiability drop, post-drop Mp.
+    um = _sl_xprep(sl, np.asarray(X, dtype=float))
+    X_pre = um["X"]
+    sl_fit = um["sl"]
+    undrop = um["undrop"]
+    Mp = um["Mp"]
+    f_arr = np.asarray(f, dtype=float)
 
     def _eval(t):
-        # One Sl.fit / Sl.fitChol evaluation at working θ → dict with the
-        # Gaussian working-model REML VALUE, the t(L)-contracted working
-        # grad/Hess, and the unpenalised working RSS (for reml.scale).
-        # log|Sλ|_+ + ρ-derivatives come from _pi_fit_chol's internal
-        # ``ldetS(repara=FALSE)`` (Sl.fitChol:1598) — per-block, in the same
-        # initial-repara gauge as its ``ldetXXS``, so the REML difference
-        # needs no gauge correction.
+        # One Sl.fit evaluation at working θ → dict with the Gaussian
+        # working-model REML VALUE, the t(L)-contracted working grad/Hess
+        # (fast-REML.r:1784-1785), and the unpenalised working RSS (for
+        # reml.scale).
         theta_sp = t[:n_work]
         rho = _rho_full(theta_sp)
         log_phi = (float(t[n_work]) if include_log_phi
                    else float(np.log(scale_fixed_value)))
         try:
-            out = _pi_fit_chol(
-                XX_pre, Xy_pre, rho, sl, p,
-                yy=yty, log_phi=log_phi, n=n_int,
-                Mp=Mp, gamma=gamma,
-                phi_fixed=not include_log_phi,
+            out = _sl_fit(
+                sl_fit, X_pre, f_arr, rho,
+                log_phi=log_phi, phi_fixed=not include_log_phi,
+                rss_extra=rss_extra, nobs=nobs, Mp=Mp, gamma=gamma,
             )
         except (np.linalg.LinAlgError, FloatingPointError, ValueError):
             return None
@@ -1940,15 +2211,17 @@ def _fast_reml_fit(theta0: np.ndarray, *, include_log_phi: bool,
             g = T_work.T @ g
             H = T_work.T @ H @ T_work
         H = 0.5 * (H + H.T)
-        # Keep ``out`` (β/PP in the repara'd gauge) so the converged fit
-        # reuses Sl.fitChol's solution instead of re-solving — F5/F9, mgcv
-        # bgam.fit:1310 Sl.postproc. Carrying the reference is free.
+        # Keep ``out`` (β/PP in the ldetS+initial repara'd gauge) so the
+        # converged fit reuses Sl.fit's solution instead of re-solving —
+        # F5/F9, mgcv bgam.fit:1243/1310 Sl.postproc. Carrying the
+        # reference is free.
         return {"reml": reml_val, "grad": g, "hess": H,
                 "rss": float(out["rss"]), "out": out}
 
-    # F5/F9 reuse slots: the converged β̂ / A⁻¹ from Sl.fitChol, un-repara'd
-    # to the original basis (bgam.fitd:759/823). ``None`` until the fit
-    # succeeds, so a failed initial eval falls back to ``_fit_given_rho``.
+    # F5/F9 reuse slots: the converged β̂ / A⁻¹ from Sl.fit, un-repara'd
+    # to the original basis (Sl.postproc, fast-REML.r:1983/1993). ``None``
+    # until the fit succeeds, so a failed initial eval falls back to
+    # ``_fit_given_rho``.
     reml_beta = None
     reml_A_inv = None
 
@@ -2042,19 +2315,28 @@ def _fast_reml_fit(theta0: np.ndarray, *, include_log_phi: bool,
         "grad": grad, "hess": hess,
         "score": float(best["reml"]), "score_scale": float(reml_scale),
     }
-    # F5/F9: reuse Sl.fitChol's converged β̂ / A⁻¹ (mgcv bgam.fit:1310's
-    # Sl.postproc does NOT re-solve). ``best["out"]`` is the _pi_fit_chol
-    # result at the accepted θ; un-repara β (both_sides=False) per
-    # bgam.fitd:759 and PP (both_sides=True, cov=True) per bgam.fitd:823.
-    # Full-rank: identical to _fit_given_rho's solve (~1e-12); rank-
-    # deficient: mgcv's pivoted-Cholesky null-space gauge.
+    # F5/F9: reuse Sl.fit's converged β̂ / A⁻¹ (mgcv bgam.fit:1243/1310's
+    # Sl.postproc does NOT re-solve). ``best["out"]`` is the _sl_fit result
+    # at the accepted θ. The unwind is Sl.postproc's (fast-REML.r:1982-1994):
+    # the ldetS multi-S reparameterization (``Sl.repara(fit$rp, .,
+    # inverse=TRUE)``, dropped-space), zero-padded scatter into the
+    # ``undrop`` positions, then the Sl.setup initial repara with the
+    # ORIGINAL (pre-drop) Sl (β: both.sides irrelevant for vectors; PP:
+    # both_sides=True, cov=True). Full-rank: identical to
+    # _fit_given_rho's solve (~1e-12).
     best_out = best.get("out")
     if best_out is not None:
+        beta_full = np.zeros(p)
+        beta_full[undrop] = _sl_repara(best_out["rp"], best_out["beta"],
+                                       inverse=True)
         reml_beta = _sl_initial_repara(
-            sl, best_out["beta"], inverse=True,
+            sl, beta_full, inverse=True,
             both_sides=False, cov=False)
+        PP_full = np.zeros((p, p))
+        PP_full[np.ix_(undrop, undrop)] = _sl_repara(
+            best_out["rp"], best_out["PP"], inverse=True)
         reml_A_inv = _sl_initial_repara(
-            sl, best_out["PP"], inverse=True,
+            sl, PP_full, inverse=True,
             both_sides=True, cov=True)
     return {"theta": theta, "reml_beta": reml_beta,
             "reml_A_inv": reml_A_inv, "outer_info": outer_info}
@@ -3806,14 +4088,18 @@ class bam(gam):
         max_iter: int = 200,
     ) -> np.ndarray:
         """Shim → free `_fast_reml_fit` (mgcv fast.REML.fit). Builds/caches the
-        Sl setup, then persists the F5/F9 β̂/A⁻¹ reuse slots + outer_info."""
+        Sl setup, then persists the F5/F9 β̂/A⁻¹ reuse slots + outer_info.
+        Feeds the reduced ``(R, f)`` from the current chunked QR build plus
+        ``rss.extra = ‖z̃‖² − ‖f‖²`` (bam.r:1146/1675)."""
         if not hasattr(self, "_sl"):
             self._sl = _sl_setup(self._slots, self.p)
+        qrx = self._bam_qr
+        rss_extra = float(qrx.y_norm2 - qrx.f @ qrx.f)
         res = _fast_reml_fit(
             theta0, include_log_phi=include_log_phi, max_iter=max_iter,
             work_dim=self._work_dim, L=self._L, lsp0=self._lsp0, p=self.p,
-            sl=self._sl, XtX=self._XtX, Xty=self._Xty, yty=self._yty,
-            Mp=self._Mp, gamma=self._gamma, n=self.n,
+            sl=self._sl, X=qrx.R, f=qrx.f, rss_extra=rss_extra,
+            gamma=self._gamma, n=self.n,
             scale_fixed_value=self._scale_fixed_value)
         self._reml_beta = res["reml_beta"]
         self._reml_A_inv = res["reml_A_inv"]

@@ -5715,6 +5715,90 @@ def _magic_optimize(rho0, *, tol=1e-7, max_half=15, wt, y, offset, struct_R,
     return {"sp": sp0, "magic_R": R, "magic_y0": y0, "outer_info": outer_info}
 
 
+def _initial_sp(Xw: np.ndarray, slots) -> np.ndarray:
+    """mgcv ``initial.sp(X, S, off)`` (mgcv.r:4626-4673) on an (already
+    weighted, if applicable) design: per penalty
+
+        def.sp[k] = mean(diag(X'X)[ind]) / mean(diag(S_k)[ind])
+
+    with ``ind`` filtering S_k to its penalised rows/cols (``thresh =
+    eps^0.8·max|S_k|`` on row-mean, col-mean and diagonal simultaneously),
+    then the global ×10 rebalance pushing ``mean(ldxx/(ldxx+ldss))``
+    across 0.4 (mgcv.r:4666-4670). Returns def.sp (not logged).
+    ``initial.spg`` calls this on ``√w·X`` (mgcv.r:4605); plain ``magic``
+    calls it on the raw X (mgcv.r:4712)."""
+    ldxx = np.einsum("ij,ij->j", Xw, Xw)  # diag(X'X)
+    ldss = np.zeros_like(ldxx)
+    pen = np.zeros(ldxx.size, dtype=bool)
+    n_sp = len(slots)
+    def_sp = np.ones(n_sp)
+    for k, slot in enumerate(slots):
+        S_k = slot.S
+        absS = np.abs(S_k)
+        maS = float(absS.max()) if absS.size else 0.0
+        if maS <= 0.0:
+            continue  # mgcv would stop(); a free penalty seeds at ρ=0
+        thresh = float(np.finfo(float).eps ** 0.8) * maS
+        rsS = absS.mean(axis=1)
+        csS = absS.mean(axis=0)
+        dS = np.abs(np.diag(S_k))
+        ind = (rsS > thresh) & (csS > thresh) & (dS > thresh)
+        if not np.any(ind):
+            continue
+        ss = np.diag(S_k)[ind]
+        sl = slice(slot.col_start, slot.col_end)
+        xx = ldxx[sl][ind]
+        pen[sl] |= ind
+        sizeXX = float(np.mean(xx))
+        sizeS = float(np.mean(ss))
+        if sizeS <= 0.0 or sizeXX <= 0.0:
+            continue
+        def_sp[k] = sizeXX / sizeS
+        ldss[sl] += def_sp[k] * np.diag(S_k)
+
+    bind = (ldss > 0) & pen & (ldxx > 0)
+    if np.any(bind):
+        lx = ldxx[bind]
+        ls = ldss[bind].copy()
+        while float(np.mean(lx / (lx + ls))) > 0.4:
+            def_sp *= 10.0
+            ls *= 10.0
+        while float(np.mean(lx / (lx + ls))) < 0.4:
+            def_sp /= 10.0
+            ls /= 10.0
+    return def_sp
+
+
+def _magic_gcv(y: np.ndarray, X: np.ndarray, slots, *,
+               gamma: float = 1.0) -> dict:
+    """mgcv ``magic(y, X, sp=rep(-1,m), S, off)`` (mgcv.r:4678) essentials
+    as consumed by mvn's preinitialize (mvam.r:119): every sp estimated by
+    GCV from the ``initial.sp`` seed (mgcv.r:4712 ``def.sp``), unit
+    weights, no offset/L/H/C, magic's own control defaults (tol=1e-6,
+    step.half=25 — NOT gam.control's 1e-7/15). Returns ``{"b", "scale",
+    "sp"}`` — mgcv's ``um$b`` / ``um$scale = norm/(n−trA)``."""
+    y = np.asarray(y, dtype=float)
+    X = np.asarray(X, dtype=float)
+    n, p = X.shape
+    wt = np.ones(n)
+    if len(slots) == 0:
+        b, *_ = np.linalg.lstsq(X, y, rcond=None)
+        rsd = y - X @ b
+        scale = float(rsd @ rsd) / max(n - p, 1)
+        return {"b": b, "scale": scale, "sp": np.zeros(0)}
+    def_sp = _initial_sp(X, slots)
+    rho0 = np.log(np.maximum(def_sp, 1e-300))
+    res = _magic_optimize(rho0, tol=1e-6, max_half=25, wt=wt, y=y,
+                          offset=np.zeros(n), struct_R=None,
+                          keep_cols=None, X=X, gamma=gamma,
+                          slots=slots, p=p)
+    mg = _magic_fit_reduced(res["sp"], res["magic_R"], res["magic_y0"],
+                            float(y @ y), wt=wt, gamma=gamma,
+                            slots=slots, p=p)
+    return {"b": mg["beta"], "scale": float(mg["scale"]),
+            "sp": np.exp(np.asarray(res["sp"], dtype=float))}
+
+
 def _magic_fit_state(rho, *, magic_R, magic_y0, fit_given_rho_fn, family, X,
                      offset, y, wt, slots, p, UrS, reparam_Y, keep_cols,
                      reparam_cache):
@@ -7935,49 +8019,7 @@ class gam:
         """
         w = self._init_fisher_w(self._y_arr, X=self._X_full)
         Xw = self._X_full * np.sqrt(np.maximum(w, 0.0))[:, None]
-
-        ldxx = np.einsum("ij,ij->j", Xw, Xw)  # diag(X'WX)
-        ldss = np.zeros_like(ldxx)
-        pen = np.zeros(ldxx.size, dtype=bool)
-        n_sp = len(self._slots)
-        def_sp = np.ones(n_sp)
-        for k, slot in enumerate(self._slots):
-            S_k = slot.S
-            absS = np.abs(S_k)
-            maS = float(absS.max()) if absS.size else 0.0
-            if maS <= 0.0:
-                continue  # mgcv would stop(); a free penalty seeds at ρ=0
-            thresh = float(np.finfo(float).eps ** 0.8) * maS
-            rsS = absS.mean(axis=1)
-            csS = absS.mean(axis=0)
-            dS = np.abs(np.diag(S_k))
-            ind = (rsS > thresh) & (csS > thresh) & (dS > thresh)
-            if not np.any(ind):
-                continue
-            ss = np.diag(S_k)[ind]
-            sl = slice(slot.col_start, slot.col_end)
-            xx = ldxx[sl][ind]
-            pen[sl] |= ind
-            sizeXX = float(np.mean(xx))
-            sizeS = float(np.mean(ss))
-            if sizeS <= 0.0 or sizeXX <= 0.0:
-                continue
-            def_sp[k] = sizeXX / sizeS
-            ldss[sl] += def_sp[k] * np.diag(S_k)
-
-        # Global rebalance (initial.sp, mgcv.r:4666-4670): scale all sp's
-        # by powers of 10 until the penalized columns' apparent edf share
-        # mean(ldxx/(ldxx+ldss)) crosses 0.4.
-        bind = (ldss > 0) & pen & (ldxx > 0)
-        if np.any(bind):
-            lx = ldxx[bind]
-            ls = ldss[bind].copy()
-            while float(np.mean(lx / (lx + ls))) > 0.4:
-                def_sp *= 10.0
-                ls *= 10.0
-            while float(np.mean(lx / (lx + ls))) < 0.4:
-                def_sp /= 10.0
-                ls /= 10.0
+        def_sp = _initial_sp(Xw, self._slots)
         return np.log(np.maximum(def_sp, 1e-300))
 
     def _offset_only_null_deviance(self, y: np.ndarray, wt: np.ndarray) -> float:
@@ -8377,6 +8419,17 @@ class gam:
         sl = _sl_setup(md.slots, md.p)
         self._sl = sl
         X_irp = _sl_initial_repara(sl, md.X, both_sides=False)
+        # mgcv mvn preinitialize's coefficient seeding (mvam.r:115-125):
+        # per-LP magic GCV fits store family$ibeta once; initialize_coef
+        # then returns it on every later call (gam.fit5 and initial.spg
+        # alike — mgcv's initialize expression, mvam.r:152-155). mgcv
+        # reparas G$X (mgcv.r:1902) BEFORE preinitialize runs (:1985), so
+        # the seed fit pairs the INITIAL-REPARA'D X with the ORIGINAL
+        # G$S penalties — mgcv's own mixed gauge, mirrored exactly; the
+        # resulting ibeta is in the irp gauge gam.fit5 consumes.
+        pre_g = getattr(family, "preinitialize_general", None)
+        if pre_g is not None:
+            pre_g(y=y, X=X_irp, lpi=md.lpi, slots=md.slots)
 
         # G$Mp: total-penalty null-space dimension (mgcv.r:1924) —
         # computed structurally (≡ ncol(totalPenaltySpace$Z), verified).
@@ -12109,18 +12162,25 @@ class gam:
         (mgcv itself ``stop()``s for general families lacking ``$sandwich``)."""
         Vp = np.asarray(self.Vp, dtype=float)
         B2 = 0.0 if freq else (Vp - np.asarray(self.Ve, dtype=float))
-        X = self._X_full
+        fam = self.family
+        # mgcv uses model.matrix(b) — the ORIGINAL design (mgcv.r:4377):
+        # the stacked multi-LP X for general fits, _X_full otherwise.
+        X = (self._md.X if getattr(fam, "is_general", False)
+             else self._X_full)
         n = X.shape[0]
         m = n / (n - float(self.edf_total))
-        fam = self.family
         sig2 = float(self.scale)
         mu = np.asarray(self.fitted_values, dtype=float)
         if getattr(fam, "is_general", False):
-            # general families need a bespoke meat via family$sandwich, which
-            # most lack — mgcv itself stop()s here (mgcv.r:4381).
-            raise NotImplementedError(
-                "no sandwich estimate available for general families "
-                "(mgcv gam.sandwich: family$sandwich is NULL, mgcv.r:4381).")
+            # general family: meat from ``family$sandwich`` (mgcv.r:4380-4382)
+            # — the per-observation gradient outer-product sum, ll(deriv=1,
+            # sandwich=TRUE)$lbb. Families without the slot (cox_ph, mvn,
+            # third-party) raise mgcv's "no sandwich estimate available for
+            # this model" stop inside :meth:`GeneralFamily.sandwich`.
+            meat = fam.sandwich(self._y_arr, X,
+                                np.asarray(self.coef.values, dtype=float),
+                                self._wt, lpi=self.lpi)
+            return m * Vp @ meat @ Vp + B2
         if self._family_mgcv_extended:
             # extended family: meat from the deviance η-derivative
             # ``crossprod(0.5/φ·Deta·X)`` (mgcv.r:4384-4385).

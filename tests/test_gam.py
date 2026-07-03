@@ -2879,6 +2879,70 @@ def test_sandwich_extended_matches_mgcv():
         [0.001718046487, 0.1746792536, 1.240544125], rtol=1e-4)
 
 
+def test_sandwich_general_family():
+    # mgcv gam.sandwich general-family branch (mgcv.r:4380-4382):
+    # Vs = m·Vp·family$sandwich(...)·Vp + (Vp−Ve), where the meat is
+    # ll(deriv=1, sandwich=TRUE)$lbb — gamlss.gH's l2 ← l1_i·l1_j reset
+    # (gamlss.r:643-649), i.e. the per-observation coefficient-space
+    # gradient outer-product sum. The meat is pinned against an
+    # independent oracle: Σ_i g_i g_iᵀ with g_i the lb of a single-row ll
+    # call (the standard gradient assembly, no sandwich path involved).
+    from hea.family import gaulss, cox_ph
+    from hea.R.rng import RGenerator
+    g = RGenerator(6)
+    n = 120
+    x = g.uniform(0, 1, n)
+    z = g.uniform(0, 1, n)
+    y = 2 * np.sin(2 * np.pi * x) + g.normal(0.0, 1.0, n) * np.exp(
+        0.5 * (z - 0.5))
+    df = pl.DataFrame({"y": y, "x": x, "z": z})
+    m = gam(["y ~ s(x)", "~ s(z)"], df, family=gaulss(), method="REML")
+
+    fam = m.family
+    X = m._md.X
+    coef = np.asarray(m.coef.values, dtype=float)
+    wt = m._wt
+    meat = fam.sandwich(m._y_arr, X, coef, wt, lpi=m.lpi)
+    # independent oracle: per-observation gradients via single-row ll
+    meat_oracle = np.zeros_like(meat)
+    for i in range(n):
+        gi = fam.ll(m._y_arr[i:i + 1], X[i:i + 1, :], coef, wt[i:i + 1],
+                    lpi=m.lpi, deriv=1)["lb"]
+        meat_oracle += np.outer(gi, gi)
+    np.testing.assert_allclose(meat, meat_oracle, rtol=1e-10, atol=1e-10)
+
+    # the vcov surface assembles mgcv.r:4378/4382 exactly
+    Vs = m.vcov(sandwich=True)
+    Vp = np.asarray(m.Vp, dtype=float)
+    Ve = np.asarray(m.Ve, dtype=float)
+    mm = n / (n - float(m.edf_total))
+    np.testing.assert_allclose(Vs, mm * Vp @ meat @ Vp + (Vp - Ve),
+                               rtol=1e-12, atol=1e-12)
+    assert np.all(np.isfinite(Vs))
+    np.testing.assert_allclose(Vs, Vs.T, atol=1e-12)
+    # mgcv 1.9-4 parity: R set.seed(6); runif; runif; rnorm — the same
+    # stream via hea.R.rng — then gam(list(y~s(x),~s(z)), gaulss(),
+    # method="REML"); vcov(m, sandwich=TRUE).
+    np.testing.assert_allclose(np.asarray(m.sp),
+                               [0.028233682, 10.41574], rtol=2e-4)
+    np.testing.assert_allclose(float(m.edf_total), 9.87411766, rtol=1e-5)
+    np.testing.assert_allclose(
+        np.diag(Vs)[:4],
+        [0.007162196223, 0.5282123533, 4.220706003, 0.4287573174],
+        rtol=1e-4)
+
+    # families without the slot raise mgcv's stop (mgcv.r:4381) — cox_ph
+    # defines NO $sandwich in mgcv (coxph.r has none).
+    assert not cox_ph.has_sandwich
+    with pytest.raises(NotImplementedError, match="no sandwich estimate"):
+        t = np.sort(g.uniform(0, 10, 60))
+        d = (g.uniform(0, 1, 60) > 0.4).astype(float)
+        xc = g.uniform(0, 1, 60)
+        mc = gam("t ~ s(xc)", pl.DataFrame({"t": t, "d": d, "xc": xc}),
+                 family=cox_ph(), weights=d, method="REML")
+        mc.vcov(sandwich=True)
+
+
 def test_ill_conditioned_design_matches_mgcv():
     # κ(X) ≈ 6e10 polynomial block (κ(X'X) ≈ 3e21 — beyond double
     # precision for the normal-equations route, which previously produced

@@ -1858,6 +1858,43 @@ def test_cox_ph_hazard_matches_mgcv_oracle():
         rtol=0, atol=1e-9)
 
 
+def test_cox_ph_predict_se_matches_mgcv():
+    # End-to-end hazard-GAUGE pin (mgcv 1.9-4, deterministic data — no RNG
+    # stream): the predict-with-se survivor pieces consume the X-weighted
+    # baseline-hazard `a` vectors, which mgcv builds from the ORIGINAL-gauge
+    # X (coxph.r:52 un-reparas G$X before family$hazard). hea's engine sets
+    # cox_ph's fit context with the never-repara'd md.X + un-repara'd coefs
+    # (gam.py `set_fit_context` call) — same gauge by construction. A wrong
+    # (initial-repara'd) X here would corrupt the `a`-vector quadratic
+    # forms at O(1); the observed agreement is ~1e-5 (the sp endpoint).
+    from hea.family import cox_ph
+    n = 150
+    i = np.arange(n)
+    x = (i + 0.5) / n
+    z = ((7 * i) % 11) / 10
+    u = (((3 * i + 1) % 17) + 0.5) / 17.5
+    h0 = np.exp(0.7 * np.sin(2 * np.pi * x) + 0.3 * z)
+    t0 = -np.log(1 - u) / h0
+    d = ((i % 4) != 0).astype(float)
+    time = np.where(d > 0, t0, t0 * 0.7)
+    df = pl.DataFrame({"time": time, "x": x, "z": z, "d": d})
+    m = hea.models.gam("time ~ s(x) + z", df, family=cox_ph(), weights=d,
+                       method="REML")
+    np.testing.assert_allclose(m.sp, [0.2031654074], rtol=2e-4)
+    np.testing.assert_allclose(float(m.edf_total), 4.4506640787, rtol=1e-4)
+    np.testing.assert_allclose(m.deviance, 175.0787132143, rtol=1e-5)
+    pr = m.predict(se_fit=True, type="response")
+    fit = pr["fit"].to_numpy()
+    se = pr["se.fit"].to_numpy()
+    ix = [0, 1, 2, 73, 148]
+    np.testing.assert_allclose(
+        fit[ix], [0.9419122191, 0.7060079479, 0.5640457392,
+                  0.07442545795, 0.9253112995], rtol=1e-4)
+    np.testing.assert_allclose(
+        se[ix], [0.02707868482, 0.08956395605, 0.1063837158,
+                 0.04154851196, 0.03308801276], rtol=1e-4)
+
+
 def test_cox_ph_validation():
     from hea.family import cox_ph
     with pytest.raises(ValueError, match="link not available"):

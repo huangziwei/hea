@@ -6623,7 +6623,7 @@ def gamlss_etamu(l1, l2, l3=None, l4=None, ig1=None, g2=None, g3=None,
 
 def gamlss_gH(X, jj, l1, l2, i2, l3=None, i3=None, l4=None, i4=None,
               d1b=None, d2b=None, deriv: int = 0, fh=None,
-              D=None) -> dict:
+              D=None, sandwich: bool = False) -> dict:
     """mgcv ``gamlss.gH`` (gamlss.r:587-857), dense complete-array paths:
     coefficient-space quantities from η-space derivative arrays.
 
@@ -6635,6 +6635,10 @@ def gamlss_gH(X, jj, l1, l2, i2, l3=None, i3=None, l4=None, i4=None,
       3 — + ``trHid2H`` (``fh`` the pivoted Cholesky of the diagonally
           preconditioned Hp, ``D`` the preconditioner — gam.fit5's
           convention; or an eigendecomposition dict {values, vectors}).
+
+    ``sandwich=True`` (gamlss.r:643-649) replaces ``l2`` so the assembled
+    ``lbb`` becomes the per-observation gradient outer-product sum — the
+    "filling" of the robust sandwich covariance — instead of the Hessian.
     """
     X = np.asarray(X, dtype=float)
     n, p = X.shape
@@ -6644,6 +6648,20 @@ def gamlss_gH(X, jj, l1, l2, i2, l3=None, i3=None, l4=None, i4=None,
     lb = np.zeros(p)
     for i in range(K):
         lb[jj[i]] += X[:, jj[i]].T @ l1[:, i]
+
+    if sandwich:
+        # mgcv gamlss.r:643-649: reset l2 so the "Hessian" becomes the
+        # sandwich filling, l2[, i2[i,j]] = l1[,i]·l1[,j]. mgcv writes the
+        # pair-counter column k, which equals i2[i,j] in trind's (i, j≥i)
+        # packing — indexed here explicitly.
+        if deriv > 0:
+            import warnings
+            warnings.warn("sandwich requested with higher derivatives",
+                          stacklevel=2)
+        l2 = l2.copy()
+        for i in range(K):
+            for j in range(i, K):
+                l2[:, i2[i, j]] = l1[:, i] * l1[:, j]
 
     # crossprod(X_i, (w·l2)·X_j) per LP block. The hot path is numpy `@`
     # (Accelerate/BLAS GEMM, ~peak FLOPS — mgcv uses the same). But an optimized
@@ -6923,6 +6941,13 @@ class GeneralFamily(Family):
     n_lp: int = 2
     available_derivs: int = 2
     canonical_link_name = "none"
+    # mgcv ``family$sandwich`` availability: True on the families whose
+    # constructors define the slot (gaulss/gammals/gumbls/shash/gevlss/
+    # twlss/multinom/ziplss); False ⇒ vcov(sandwich=True) raises exactly
+    # like mgcv's ``is.null(family$sandwich)`` stop (mgcv.r:4381 — e.g.
+    # cox.ph, mvn). Subclasses setting True must accept ``sandwich=`` in
+    # their ``ll`` and thread it to :func:`gamlss_gH`.
+    has_sandwich: bool = False
 
     def __init__(self, links: list[Link]):
         self.links = links
@@ -6940,6 +6965,21 @@ class GeneralFamily(Family):
         ``l`` (+ ``lb``, ``lbb``, ``d1H``, ``trHid2H`` as available).
         """
         raise NotImplementedError
+
+    def sandwich(self, y, X, coef, wt, *, lpi, offset=None):
+        """mgcv ``family$sandwich`` (e.g. gaulss, gamlss.r:1011-1014): the
+        filling of the robust sandwich covariance — ``ll(deriv=1,
+        sandwich=TRUE)$lbb``, the per-observation gradient outer-product
+        sum in coefficient space. mgcv defines the slot with an identical
+        body on each of the 8 ``has_sandwich`` families; its slot passes
+        ``offset=NULL`` to ll regardless of the offset argument (quirk
+        mirrored)."""
+        if not self.has_sandwich:
+            # mgcv gam.sandwich: is.null(family$sandwich) → stop (mgcv.r:4381).
+            raise NotImplementedError(
+                "no sandwich estimate available for this model")
+        return self.ll(y, X, coef, wt, lpi=lpi, offset=None,
+                       deriv=1, sandwich=True)["lbb"]
 
     @staticmethod
     def _apply_prior_weights(wt, l1, l2, l3=None, l4=None):
@@ -7002,6 +7042,7 @@ class gaulss(GeneralFamily):
         log f = −½(y−μ)²τ² − ½log(2π) + log τ
     """
     name = "gaulss"
+    has_sandwich = True
     scale_known = True
     n_theta = 0
     n_lp = 2
@@ -7032,7 +7073,8 @@ class gaulss(GeneralFamily):
         super().__init__(links)
 
     def ll(self, y, X, coef, wt=None, *, lpi, offset=None, deriv: int = 0,
-           d1b=None, d2b=None, fh=None, D=None) -> dict:
+           d1b=None, d2b=None, fh=None, D=None,
+           sandwich: bool = False) -> dict:
         y = np.asarray(y, dtype=float)
         X = np.asarray(X, dtype=float)
         coef = np.asarray(coef, dtype=float)
@@ -7088,7 +7130,7 @@ class gaulss(GeneralFamily):
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
                        l3=de["l3"], i3=tri["i3"], l4=de["l4"],
                        i4=tri["i4"], d1b=d1b, d2b=d2b, deriv=deriv - 1,
-                       fh=fh, D=D)
+                       fh=fh, D=D, sandwich=sandwich)
         ret.update(gh)
         return ret
 
@@ -7189,6 +7231,7 @@ class twlss(GeneralFamily):
     deviance residuals and null deviance only.
     """
     name = "twlss"
+    has_sandwich = True
     scale_known = True
     n_theta = 0
     n_lp = 3
@@ -7231,7 +7274,8 @@ class twlss(GeneralFamily):
                         (self.b * eth + self.a) / (eth + 1.0))
 
     def ll(self, y, X, coef, wt=None, *, lpi, offset=None,
-           deriv: int = 0, d1b=None, d2b=None, fh=None, D=None) -> dict:
+           deriv: int = 0, d1b=None, d2b=None, fh=None, D=None,
+           sandwich: bool = False) -> dict:
         y = np.asarray(y, dtype=float)
         X = np.asarray(X, dtype=float)
         coef = np.asarray(coef, dtype=float)
@@ -7274,7 +7318,7 @@ class twlss(GeneralFamily):
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
                        l3=de["l3"], i3=tri["i3"], l4=de["l4"],
                        i4=tri["i4"], d1b=d1b, d2b=d2b, deriv=0,
-                       fh=fh, D=D)
+                       fh=fh, D=D, sandwich=sandwich)
         ret.update(gh)
         return ret
 
@@ -7421,6 +7465,7 @@ class shash(GeneralFamily):
     parity (mgcv consumes it only in unported NCV machinery).
     """
     name = "shash"
+    has_sandwich = True
     scale_known = True
     n_theta = 0
     n_lp = 4
@@ -7448,7 +7493,8 @@ class shash(GeneralFamily):
         self.tri = trind_generator(4)
 
     def ll(self, y, X, coef, wt=None, *, lpi, offset=None,
-           deriv: int = 0, d1b=None, d2b=None, fh=None, D=None) -> dict:
+           deriv: int = 0, d1b=None, d2b=None, fh=None, D=None,
+           sandwich: bool = False) -> dict:
         # mgcv's shash ll rejects offsets outright (gamlss.r:3470)
         if offset is not None and any(
                 o is not None and np.any(np.asarray(o) != 0.0)
@@ -7494,7 +7540,7 @@ class shash(GeneralFamily):
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
                        l3=de["l3"], i3=tri["i3"], l4=de["l4"],
                        i4=tri["i4"], d1b=d1b, d2b=d2b, deriv=deriv - 1,
-                       fh=fh, D=D)
+                       fh=fh, D=D, sandwich=sandwich)
         ret.update(gh)
         return ret
 
@@ -7693,6 +7739,7 @@ class gammals(GeneralFamily):
     in-place ``fitted.values[,1] <- exp(...)``.
     """
     name = "gammals"
+    has_sandwich = True
     scale_known = True
     n_theta = 0
     n_lp = 2
@@ -7722,7 +7769,8 @@ class gammals(GeneralFamily):
         super().__init__(links)
 
     def ll(self, y, X, coef, wt=None, *, lpi, offset=None, deriv: int = 0,
-           d1b=None, d2b=None, fh=None, D=None) -> dict:
+           d1b=None, d2b=None, fh=None, D=None,
+           sandwich: bool = False) -> dict:
         y = np.asarray(y, dtype=float)
         X = np.asarray(X, dtype=float)
         coef = np.asarray(coef, dtype=float)
@@ -7801,7 +7849,7 @@ class gammals(GeneralFamily):
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
                        l3=de["l3"], i3=tri["i3"], l4=de["l4"],
                        i4=tri["i4"], d1b=d1b, d2b=d2b, deriv=deriv - 1,
-                       fh=fh, D=D)
+                       fh=fh, D=D, sandwich=sandwich)
         ret.update(gh)
         return ret
 
@@ -7943,6 +7991,7 @@ class gumbls(GeneralFamily):
     (mgcv leaves it undefined for gumbls).
     """
     name = "gumbls"
+    has_sandwich = True
     scale_known = True
     n_theta = 0
     n_lp = 2
@@ -7972,7 +8021,8 @@ class gumbls(GeneralFamily):
         super().__init__(links)
 
     def ll(self, y, X, coef, wt=None, *, lpi, offset=None, deriv: int = 0,
-           d1b=None, d2b=None, fh=None, D=None) -> dict:
+           d1b=None, d2b=None, fh=None, D=None,
+           sandwich: bool = False) -> dict:
         y = np.asarray(y, dtype=float)
         X = np.asarray(X, dtype=float)
         coef = np.asarray(coef, dtype=float)
@@ -8054,7 +8104,7 @@ class gumbls(GeneralFamily):
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
                        l3=de["l3"], i3=tri["i3"], l4=de["l4"],
                        i4=tri["i4"], d1b=d1b, d2b=d2b, deriv=deriv - 1,
-                       fh=fh, D=D)
+                       fh=fh, D=D, sandwich=sandwich)
         ret.update(gh)
         return ret
 
@@ -8535,6 +8585,7 @@ class gevlss(GeneralFamily):
     null deviance is NA.
     """
     name = "gevlss"
+    has_sandwich = True
     scale_known = True
     n_theta = 0
     n_lp = 3
@@ -8568,7 +8619,8 @@ class gevlss(GeneralFamily):
         return xi
 
     def ll(self, y, X, coef, wt=None, *, lpi, offset=None, deriv: int = 0,
-           d1b=None, d2b=None, fh=None, D=None) -> dict:
+           d1b=None, d2b=None, fh=None, D=None,
+           sandwich: bool = False) -> dict:
         y = np.asarray(y, dtype=float)
         X = np.asarray(X, dtype=float)
         coef = np.asarray(coef, dtype=float)
@@ -8624,7 +8676,7 @@ class gevlss(GeneralFamily):
             gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
                            l3=de["l3"], i3=tri["i3"], l4=de["l4"],
                            i4=tri["i4"], d1b=d1b, d2b=d2b, deriv=deriv - 1,
-                           fh=fh, D=D)
+                           fh=fh, D=D, sandwich=sandwich)
         ret.update(gh)
         return ret
 
@@ -9428,6 +9480,7 @@ class ziplss(GeneralFamily):
     it in :meth:`postproc`.
     """
     name = "ziplss"
+    has_sandwich = True
     scale_known = True
     n_theta = 0
     n_lp = 2
@@ -9443,7 +9496,8 @@ class ziplss(GeneralFamily):
         super().__init__([IdentityLink(), IdentityLink()])
 
     def ll(self, y, X, coef, wt=None, *, lpi, offset=None, deriv: int = 0,
-           d1b=None, d2b=None, fh=None, D=None) -> dict:
+           d1b=None, d2b=None, fh=None, D=None,
+           sandwich: bool = False) -> dict:
         y = np.asarray(y, dtype=float)
         X = np.asarray(X, dtype=float)
         coef = np.asarray(coef, dtype=float)
@@ -9483,7 +9537,7 @@ class ziplss(GeneralFamily):
         gh = gamlss_gH(X, jj, de["l1"], de["l2"], tri["i2"],
                        l3=de["l3"], i3=tri["i3"], l4=de["l4"],
                        i4=tri["i4"], d1b=d1b, d2b=d2b, deriv=deriv - 1,
-                       fh=fh, D=D)
+                       fh=fh, D=D, sandwich=sandwich)
         ret.update(gh)
         return ret
 
@@ -9783,6 +9837,7 @@ class multinom(GeneralFamily):
     sparsity — dormant in shipped mgcv) and passed straight to
     :func:`gamlss_gH` (identity links ⇒ no :func:`gamlss_etamu` step)."""
     name = "multinom"
+    has_sandwich = True
     scale_known = True
     n_theta = 0
     available_derivs = 2
@@ -9796,7 +9851,8 @@ class multinom(GeneralFamily):
         super().__init__([IdentityLink() for _ in range(int(K))])
 
     def ll(self, y, X, coef, wt=None, *, lpi, offset=None, deriv: int = 0,
-           d1b=None, d2b=None, fh=None, D=None) -> dict:
+           d1b=None, d2b=None, fh=None, D=None,
+           sandwich: bool = False) -> dict:
         y = np.asarray(y, dtype=float)
         X = np.asarray(X, dtype=float)
         coef = np.asarray(coef, dtype=float)
@@ -9819,7 +9875,7 @@ class multinom(GeneralFamily):
         gh = gamlss_gH(X, jj, l1, l2, self.tri["i2"],
                        l3=l3, i3=self.tri["i3"], l4=l4,
                        i4=self.tri["i4"], d1b=d1b, d2b=d2b, deriv=deriv - 1,
-                       fh=fh, D=D)
+                       fh=fh, D=D, sandwich=sandwich)
         ret.update(gh)
         return ret
 
@@ -10179,7 +10235,60 @@ class mvn(GeneralFamily):
         self.n_lp = int(d)
         self.n_extra_coef = int(d) * (int(d) + 1) // 2
         self._R = None
+        self._ibeta = None
         super().__init__([IdentityLink() for _ in range(int(d))])
+
+    def preinitialize_general(self, *, y, X, lpi, slots) -> None:
+        """mgcv mvn ``preinitialize`` coefficient seeding (mvam.r:115-125):
+        per response dimension k, ``magic(y[,k], X[,lpi[[k]]], rep(-1,·),
+        S_k, off_k)`` — a GCV fit of LP k's columns with LP k's own
+        penalties, all sp estimated — seeds the mean coefficients
+        (``um$b``) and the k-th DIAGONAL θ at ``−½·log(um$scale)`` (the
+        initial log root precision); off-diagonal θ start at 0. Stored as
+        ``family$ibeta``; mgcv's ``initialize`` expression (mvam.r:152-155,
+        run in gam.fit5 AND initial.spg) returns it as-is —
+        :meth:`initialize_coef` mirrors that. The engine calls this hook
+        once with the INITIAL-REPARA'D design and the ORIGINAL-gauge
+        penalties: mgcv reparas ``G$X`` (mgcv.r:1902) before
+        preinitialize runs (mgcv.r:1985), so the seed fit's gauge mix is
+        mgcv's own, and the stored ibeta is in the irp gauge gam.fit5
+        consumes. NOTE on parity: the magic port itself matches mgcv's
+        ``magic`` to 8+ digits on identical inputs; the MIXED-gauge seed
+        value additionally depends on the Sl.setup eigenvector sign/
+        rotation convention (R ``eigen``/dsyevr vs numpy ``eigh``/dsyevd),
+        which no consistent-gauge quantity ever sees — so the seed can
+        differ from mgcv's while every fitted quantity still pins."""
+        # local import: hea.models.gam imports this module at load time,
+        # so the reverse import must be deferred to call time.
+        from .models.gam import _magic_gcv
+        from types import SimpleNamespace
+        y = np.asarray(y, dtype=float)
+        X = np.asarray(X, dtype=float)
+        jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        p = X.shape[1]
+        m = self.d
+        ncoef = p - self.n_extra_coef
+        ibeta = np.zeros(p)
+        kdiag = 0
+        for kdim in range(m):
+            cols = jj[kdim]
+            pos = {int(c): i for i, c in enumerate(cols)}
+            # penalties belonging to LP k: mgcv ``sin <- G$off %in%
+            # lpi[[k]]`` with local offsets ``match(G$off[sin], lpi[[k]])``
+            # (mvam.r:117-120).
+            sub = []
+            for sl_ in slots:
+                if int(sl_.col_start) in pos:
+                    a = pos[int(sl_.col_start)]
+                    sub.append(SimpleNamespace(
+                        col_start=a,
+                        col_end=a + (sl_.col_end - sl_.col_start),
+                        S=np.asarray(sl_.S, dtype=float)))
+            um = _magic_gcv(y[:, kdim], X[:, cols], sub)
+            ibeta[cols] = um["b"]
+            ibeta[ncoef + kdiag] = -0.5 * np.log(um["scale"])
+            kdiag += m - kdim          # next diagonal θ slot (mvam.r:124)
+        self._ibeta = ibeta
 
     def ll(self, y, X, coef, wt=None, *, lpi, offset=None, deriv: int = 0,
            d1b=None, d2b=None, fh=None, D=None) -> dict:
@@ -10214,10 +10323,15 @@ class mvn(GeneralFamily):
 
     def initialize_coef(self, y, X, lpi, E=None, offset=None,
                         use_unscaled: bool = False) -> np.ndarray:
-        """mvn ``preinitialize`` init (mvam.r:116-125): per dimension k,
-        penalized-regress ``y[:,k]`` on LP k's columns for the mean coefs,
-        seed the diagonal θ at ``−½ log(residual scale)`` (the initial log
-        root precision), all off-diagonals at 0."""
+        """mvn ``initialize`` (mvam.r:152-155): ``start <- family$ibeta``
+        — the magic-GCV seed stored by :meth:`preinitialize_general`,
+        returned as-is on every call (gam.fit5 and initial.spg alike;
+        mgcv does not re-parameterize it). The no-preinit fallback (a
+        direct family use outside the gam engine) penalized-regresses
+        each LP with ``E`` and seeds the diagonal θ from the residual
+        scale."""
+        if self._ibeta is not None:
+            return self._ibeta.copy()
         y = np.asarray(y, dtype=float)
         X = np.asarray(X, dtype=float)
         jj = [np.asarray(ix, dtype=int) for ix in lpi]
