@@ -42,6 +42,7 @@ mgcv source: ``ref/mgcv/R/bam.r`` (1.9-4).
 
 from __future__ import annotations
 
+import copy as _copy
 import warnings
 from dataclasses import dataclass
 from functools import cached_property
@@ -85,7 +86,9 @@ from .gam import (
     _add_null_space_penalties,
     _apply_gam_side,
     _block_s_scale,
+    _gam_fit3_score,
     _ldet_s,
+    _preml_hessian,
     _SlBlock,
     _row_frame,
     _sl_initial_repara,
@@ -2399,18 +2402,38 @@ class bam(gam):
         # summation convention (Wood §7.4.1 distributed-lag models).
         # ``prepare_design`` normalizes via ``normalize_data``.
         # ---- method aliasing ------------------------------------------------
-        # mgcv's bam adds "fREML" on top of gam's {REML, ML, GCV.Cp}. fREML is
-        # algorithmically identical to REML on the (R, f, rss_extra) reduced
-        # problem — the "fast" comes from the QR-factor reduction, not a
-        # different criterion. Map fREML → REML internally.
+        # mgcv's bam accepts {fREML, GACV.Cp, GCV.Cp, REML, ML, P-REML,
+        # P-ML, NCV} (bam.r:2207). fREML is algorithmically identical to
+        # REML on the (R, f, rss_extra) reduced problem — the "fast" comes
+        # from the QR-factor reduction, not a different criterion. Map
+        # fREML → REML internally. The non-(f)REML/ML/GCV methods run mgcv's
+        # compressed-refit route: gam(G=G, method=method) on the Gaussian
+        # working (R, f) (bam.r:1263-1276/1722-1733) — hea's inherited
+        # criterion machinery on the same reduced statistics.
         method_in = method
         if method == "fREML":
             method = "REML"
-        if method not in ("REML", "ML", "GCV.Cp"):
-            raise ValueError(
-                f"method must be 'fREML', 'REML', 'ML', or 'GCV.Cp', "
-                f"got {method_in!r}"
+        if method == "NCV":
+            raise NotImplementedError(
+                "method='NCV' (neighbourhood cross validation, bam.r:448 + "
+                "ncv.c) is not yet ported. Use 'fREML', 'REML', 'ML', "
+                "'GCV.Cp', 'GACV.Cp', 'P-REML' or 'P-ML'."
             )
+        if method not in ("REML", "ML", "GCV.Cp", "GACV.Cp",
+                          "P-REML", "P-ML"):
+            raise ValueError(
+                f"method must be one of 'fREML', 'REML', 'ML', 'GCV.Cp', "
+                f"'GACV.Cp', 'P-REML', 'P-ML', got {method_in!r}"
+            )
+        # mgcv bam.r:2226-2228: discretization is only wired for the fREML
+        # criterion (hea has no NCV) — any other method warns and falls
+        # back to the non-discrete path. hea aliases method="REML" to
+        # fREML (same criterion on the reduced data), so explicit REML
+        # keeps the discrete rail; the genuinely different criteria
+        # (ML, GCV.Cp, GACV.Cp, P-REML, P-ML) fall back like mgcv.
+        if discrete and method != "REML":
+            warnings.warn("discretization only available with fREML")
+            discrete = False
         if not (np.isfinite(gamma) and gamma > 0):
             raise ValueError(f"gamma must be a positive finite number, got {gamma!r}")
         if knots is not None and not isinstance(knots, dict):
@@ -2503,13 +2526,22 @@ class bam(gam):
                     "scale>0 (fixed φ) and scale=0 (φ=1) work. Tracked in "
                     "mgcv-notimplemented-ports.md.")
             self._scale_resolved = scale if scale > 0 else 1.0
-        elif method in ("REML", "ML"):
+        elif method in ("REML", "ML", "P-REML", "P-ML"):
             # scale-unknown family (gaussian/Gamma/inverse.gaussian): scale>0
             # fixes φ (REML/ML drop the log-φ slot); scale≤0 estimates it.
             self._scale_resolved = scale if scale > 0 else -1.0
-        else:  # GCV.Cp
+        else:  # GCV.Cp / GACV.Cp
             self._scale_resolved = scale if scale != 0.0 else -1.0
         self.scale_estimated = not self._scale_known_fit
+        # Known scale collapses the Pearson-Laplace criteria onto their
+        # plain Laplace siblings (mgcv.r:1968-1970, reached by the
+        # compressed gam(G=G, scale=scale) refit): with φ fixed there is
+        # no Pearson plug-in to make, so P-REML ≡ REML and P-ML ≡ ML.
+        # Verified against mgcv 1.9-4: bam(poisson, "P-REML") returns
+        # sp/edf/criterion identical to bam(poisson, "REML").
+        if method in ("P-REML", "P-ML") and self._scale_known_fit:
+            method = method[2:]
+        self.method = method
 
         self._chunk_size = int(chunk_size)
         self._use_chol = bool(use_chol)
@@ -2887,6 +2919,18 @@ class bam(gam):
         self._Mp = Mp
         self._penalty_rank = p - Mp
 
+        # Working-Gaussian view for the criterion tail (`_score_all`
+        # override): mgcv's compressed refits run with G$family <-
+        # gaussian() and G$w <- 1 (bam.r:932/1266-1267) — the prior
+        # weights are already absorbed into the √W·X chunks the QR sees.
+        self._crit_family = Gaussian()
+        self._crit_wt = np.ones(n)
+        # gam.reparam basis (totalPenaltySpace + mini.roots) for the
+        # stable log|Sλ|+ evaluation inside the (P-RE)ML criterion tail —
+        # mgcv's compressed gam(G=G) refit builds the same basis from the
+        # same penalties (gam.fit3.r:2661).
+        self._setup_reparam(slots, p)
+
         self._log_phi_hat: float | None = None
         self._outer_info: dict | None = None
         self._tw_info: dict | None = None
@@ -2995,35 +3039,50 @@ class bam(gam):
                     cur_rho, *_ = np.linalg.lstsq(self._L, rho0_full,
                                                   rcond=None)
 
-                if method in ("REML", "ML"):
-                    # Non-discrete Gaussian REML/ML → ``fast.REML.fit``
+                if include_log_phi:
+                    # mgcv bam.fit:1689 — the Gaussian path has NO PIRLS
+                    # loop, so the log φ seed is unconditionally
+                    # ``log(var(y)·0.05)`` (scale<=0, in.out NULL). ``var``
+                    # uses R's n−1 denominator. Both optimizers converge fully
+                    # so the seed only sets the Newton start; mirror it for
+                    # source fidelity (and to share the discrete + non-
+                    # discrete-generalized seed, bam.py:4134/4302).
+                    cur_logphi = float(np.log(
+                        max(float(np.var(y_full, ddof=1)) * 0.05, 1e-300)
+                    ))
+                    theta0 = np.concatenate([cur_rho, [cur_logphi]])
+                else:
+                    theta0 = cur_rho
+                if method == "REML":
+                    # Non-discrete Gaussian (f)REML → ``fast.REML.fit``
                     # (bam.r:1240), converge-fully on the fixed (R, f).
-                    if include_log_phi:
-                        # mgcv bam.fit:1689 — the Gaussian path has NO PIRLS
-                        # loop, so the log φ seed is unconditionally
-                        # ``log(var(y)·0.05)`` (scale<=0, in.out NULL). ``var``
-                        # uses R's n−1 denominator. fast.REML.fit converges fully
-                        # so the seed only sets the Newton start; mirror it for
-                        # source fidelity (and to share the discrete + non-
-                        # discrete-generalized seed, bam.py:4134/4302).
-                        cur_logphi = float(np.log(
-                            max(float(np.var(y_full, ddof=1)) * 0.05, 1e-300)
-                        ))
-                        theta0 = np.concatenate([cur_rho, [cur_logphi]])
-                    else:
-                        theta0 = cur_rho
+                    # fast.REML.fit implements ONLY the REML criterion —
+                    # mgcv's explicit method="REML" runs gam(G=G) instead
+                    # (bam.r:1722-1733), but on the Gaussian working data
+                    # the two objectives coincide, so hea unifies them on
+                    # the fast rail.
                     theta_hat = self._fast_reml_fit(
                         theta0, include_log_phi=include_log_phi,
                     )
                 else:
-                    # GCV.Cp → outer-Newton on V_g/V_u (no log φ in outer θ).
-                    # mgcv uses ``magic`` here, which has no Sl.fitChol β/PP to
-                    # reuse — null the F9 slots so the fit re-solves.
+                    # ML / GCV.Cp / GACV.Cp / P-REML / P-ML → outer-Newton
+                    # on the criterion mgcv's compressed refit runs: magic
+                    # for GCV.Cp (bam.r:1677, same objective) and
+                    # gam(G=G, method=method) for the rest (bam.r:1722-1733).
+                    # ML canNOT ride fast.REML.fit — its criterion drops the
+                    # Mp prior terms (remlInd=0) and range-projects log|H|
+                    # (MLpenalty1), which the ``self.method`` predicates
+                    # supply through the REML scoreType closures; it keeps
+                    # log φ in θ when the scale is estimated. None of these
+                    # produce Sl.fitChol β/PP — null the F9 slots so the fit
+                    # re-solves.
                     self._reml_beta = self._reml_A_inv = None
+                    crit = ("REML" if method == "ML"
+                            else self._bam_outer_criterion())
                     theta_hat = self._outer_newton(
-                        cur_rho,
-                        criterion="GCV",
-                        include_log_phi=False,
+                        theta0,
+                        criterion=crit,
+                        include_log_phi=include_log_phi,
                         include_family_theta=False,
                     )
 
@@ -3517,6 +3576,11 @@ class bam(gam):
             eta=eta, mu=mu, w=np.ones(n),
             z=z_full, alpha=np.ones(n),
             is_fisher_fallback=True,
+            # Reduced Gaussian working fit (mgcv swaps G$family <-
+            # gaussian() / G$w <- 1 before its compressed refits,
+            # bam.r:932/1266-1267): criterion-tail readers take the
+            # working-gaussian view (P ≡ dev, dW/dη ≡ 0, p-space).
+            is_working_gaussian=True,
         )
 
     # -----------------------------------------------------------------------
@@ -3548,6 +3612,122 @@ class bam(gam):
         ``np.any(d2w_deta2)`` evaluates against the right-shape array
         and ``_reml_hessian``'s ``needs_w`` gate stays correct."""
         return np.zeros(self.p)
+
+    # -----------------------------------------------------------------------
+    # Criterion tail — working-Gaussian view (mgcv's compressed refit)
+    # -----------------------------------------------------------------------
+
+    def _bam_outer_criterion(self) -> str:
+        """Outer-Newton criterion for the non-(f)REML/ML methods — the same
+        scoreType mapping mgcv's compressed ``gam(G=G, method=method)``
+        refit resolves to (mgcv.r:1945-1959): P-REML/P-ML → the
+        Pearson-Laplace score (known-scale cases already collapsed to
+        REML/ML in ``__init__``); GACV.Cp → GACV when φ is estimated,
+        UBRE (via the GCV closures) when φ is known; GCV.Cp → GCV/UBRE."""
+        if self.method in ("P-REML", "P-ML"):
+            return "PREML"
+        if self.method == "GACV.Cp" and not self._scale_known_fit:
+            return "GACV"
+        return "GCV"
+
+    def _score_all(self, rho, log_phi, fit, deriv, scoreType, *,
+                   include_log_phi=False, include_family_theta=False,
+                   T_work=None):
+        """gam's `_score_all` on the working-Gaussian view of the reduced
+        problem. mgcv swaps ``G$family <- gaussian()`` and ``G$w <- 1``
+        before every compressed refit (bam.r:932; bam.r:1265-1267 sets
+        ``G$y <- qrx$f``, ``G$w <- 1``), so the criterion tail there reads
+        gaussian ``ls``/variance/link quantities and unit prior weights —
+        the response family lives only in the outer PIRLS loop that
+        rebuilds (R, f). Bind the same view here.
+
+        ``GACV.Cp`` additionally evaluates on mgcv's compressed rows:
+        gam.fit3's GCV/GACV/UBRE assembly uses the *raw* ``dev`` and
+        ``nobs`` (gam.fit3.r:744-752) — the ``dev.extra``/``n.true``
+        threading feeds only scale.est, the (RE)ML ``Dp`` and the
+        Pearson-φ. So the criterion sees ``dev − rss_extra`` at
+        ``nobs = ncol(R)``. For known scale that UBRE is an affine map of
+        the full-data one (identical sp optimum — verified against mgcv:
+        poisson GACV.Cp ≡ GCV.Cp sp to 10 digits); for unknown scale it
+        reproduces mgcv-bam's degenerate GACV optimum (sp → 0, edf →
+        full rank — mgcv 1.9-4 does exactly this; prefer fREML/REML).
+        P-REML/P-ML need no view: the extras enter their ``Dp`` and
+        Pearson-φ (gam.fit3.r:641/648), which the full-data statistics
+        (``fit.dev`` = working RSS with rss_extra absorbed, n = full n)
+        carry by construction."""
+        need_w = scoreType in ("REML", "PREML")
+        dw_deta = self._dw_deta(fit) if (need_w and deriv >= 1) else None
+        d2w_deta2 = self._d2w_deta2(fit) if (need_w and deriv >= 2) else None
+        n_score = self.n
+        fit_view = fit
+        if self.method == "GACV.Cp" and scoreType in ("GACV", "GCV"):
+            qrx = getattr(self, "_bam_qr", None)
+            if qrx is not None:
+                rss_extra = float(qrx.y_norm2 - qrx.f @ qrx.f)
+                fit_view = _copy.copy(fit)
+                fit_view.dev = max(float(fit.dev) - rss_extra, 0.0)
+                fit_view.rss = fit_view.dev
+                n_score = self.p
+        return _gam_fit3_score(
+            rho, log_phi, fit_view, deriv, scoreType, T_work=T_work,
+            include_log_phi=include_log_phi,
+            include_family_theta=include_family_theta,
+            dw_deta=dw_deta, d2w_deta2=d2w_deta2, Mp=self._Mp,
+            wt=self._crit_wt, y=self._y_arr, binom_n=None,
+            gamma=self._gamma, family=self._crit_family,
+            family_mgcv_extended=False,
+            use_ml_proj=self._use_ml_proj,
+            pearson_scale_criterion=self._pearson_scale_criterion,
+            reml_ind=self._reml_ind, penalty_rank=self._penalty_rank,
+            slots=self._slots, p=self.p, UrS=self._UrS,
+            reparam_cache=self._reparam_cache, X=self._X_full,
+            XtX=self._XtX, n=n_score,
+            scale_fixed_value=self._scale_fixed_value,
+            scale_known=self._scale_known_fit, pls_lwork=self._pls_lwork)
+
+    def _ml_flavor_swap(self, family_aic: float, log_phi_hat: float) -> float:
+        """The log-lik flavor difference in mgcv's final bam ML report.
+
+        mgcv replaces the working criterion's log-lik by the family's
+        ``$aic`` value — ``gcv.ubre <- aic/(2·γ) + ml.pen``
+        (bam.r:2784-2787) — while hea's ``self._reml`` carries the
+        ``dev/φ̂ − 2·ls(φ̂)`` form. The two coincide identically for
+        poisson/binomial/Tweedie (deviance–saturated-loglik identity) but
+        differ for gaussian ($aic$ at the MLE scale, ``+2``, ``−Σlog w``)
+        and Gamma (``+2``, dispersion plug-in). Returns the additive
+        correction in hea's 2V units."""
+        phi = float(np.exp(log_phi_hat))
+        if self._family_mgcv_extended:
+            ls0 = float(self.family.ls_extended(
+                self._y_arr, self._wt, theta=self.family.get_theta(),
+                scale=phi)["ls"])
+        elif self._binom_n is not None:
+            ls0 = float(self.family.ls(self._y_arr, self._wt, phi,
+                                       n=self._binom_n)[0])
+        else:
+            ls0 = float(self.family.ls(self._y_arr, self._wt, phi)[0])
+        return (family_aic
+                - (self.deviance / phi - 2.0 * ls0)) / self._gamma
+
+    def _preml_hessian(self, rho, fit=None):
+        """Working-Gaussian view of gam's `_preml_hessian` shim (the
+        P-REML/P-ML H_aug for Vc/edf2) — same family/weight swap as
+        `_score_all`, so the φ-row pieces inside the chain rule read the
+        gaussian ``ls`` mgcv's compressed refit uses."""
+        if fit is None:
+            fit = self._fit_given_rho(rho)
+        dw_deta = self._dw_deta(fit)
+        d2w_deta2 = self._d2w_deta2(fit)
+        return _preml_hessian(
+            rho, fit, slots=self._slots, Mp=self._Mp, n=self.n,
+            family=self._crit_family, wt=self._crit_wt, y=self._y_arr,
+            X=self._X_full, p=self.p, gamma=self._gamma,
+            pearson_scale_criterion=self._pearson_scale_criterion,
+            use_ml_proj=self._use_ml_proj,
+            penalty_rank=self._penalty_rank,
+            family_mgcv_extended=False, UrS=self._UrS,
+            reparam_cache=self._reparam_cache, reml_ind=self._reml_ind,
+            dw_deta=dw_deta, d2w_deta2=d2w_deta2)
 
     # -----------------------------------------------------------------------
     # initial sp seed — uses cached XtX diag, no full design
@@ -3915,27 +4095,38 @@ class bam(gam):
         # √W·X path (same Gram, same column space, same Frobenius scaling).
         self.rank = self._estimate_rank()
 
-        # Augmented REML Hessian (only built if (R)EML and finite σ²).
+        # Augmented (RE)ML Hessian (only built on the Laplace-criterion
+        # methods with finite σ²).
         if (
-            method in ("REML", "ML")
+            method in ("REML", "ML", "P-REML", "P-ML")
             and n_sp > 0
             and np.isfinite(sigma_squared)
             and sigma_squared > 0
         ):
-            log_phi_hat_for_aug = (
-                self._log_phi_hat
-                if self._log_phi_hat is not None
-                else float(np.log(sigma_squared))
-            )
-            H_aug = 0.5 * self._reml_hessian(
-                rho_hat, log_phi_hat_for_aug, fit=fit, include_log_phi=True,
-            )
-            # Working-space view (id linkage): the criterion is optimised over
-            # θ (ρ = L·θ), so H_aug — and every CI built on it (vcomp, edf2,
-            # Vc) — lives in working coordinates H_θ = T'·H_ρ·T,
-            # T = blockdiag(L, I_logφ). ``None`` ⇔ identity (no id linkage)
-            # → byte-identical to the pre-L path (gam.py:2032-2035).
-            T_aug = self._T_working(1)
+            if self._pearson_scale_criterion:
+                # P-REML / P-ML: the Vc sp-uncertainty correction uses the
+                # criterion's OWN ρ-only Hessian at the Pearson plug-in
+                # scale (gam.fit3.r:979) — no free log φ row. Mirrors
+                # gam's post-fit gate.
+                H_aug = self._preml_hessian(rho_hat, fit=fit)
+                T_aug = self._T_working(0)
+            else:
+                log_phi_hat_for_aug = (
+                    self._log_phi_hat
+                    if self._log_phi_hat is not None
+                    else float(np.log(sigma_squared))
+                )
+                H_aug = 0.5 * self._reml_hessian(
+                    rho_hat, log_phi_hat_for_aug, fit=fit,
+                    include_log_phi=True,
+                )
+                # Working-space view (id linkage): the criterion is
+                # optimised over θ (ρ = L·θ), so H_aug — and every CI
+                # built on it (vcomp, edf2, Vc) — lives in working
+                # coordinates H_θ = T'·H_ρ·T, T = blockdiag(L, I_logφ).
+                # ``None`` ⇔ identity (no id linkage) → byte-identical to
+                # the pre-L path (gam.py:2032-2035).
+                T_aug = self._T_working(1)
             if T_aug is not None:
                 H_aug = T_aug.T @ H_aug @ T_aug
             H_aug = 0.5 * (H_aug + H_aug.T)
@@ -3973,13 +4164,23 @@ class bam(gam):
         self.BIC = -2.0 * logLik + float(np.log(n)) * df_for_aic
         self._mgcv_aic = float(mgcv_aic)
 
-        # Score (REML / ML / GCV).
+        # Score (REML / ML / P-REML / P-ML / GCV / GACV).
         if method in ("REML", "ML"):
             if n_sp > 0:
                 log_phi_hat = (
                     self._log_phi_hat if self._log_phi_hat is not None else 0.0
                 )
+                # ``self._reml`` with the real family's ls; the ML flavor
+                # (remlInd=0, range-projected log|H|) comes from the
+                # ``self.method`` predicates. mgcv's final bam ML report
+                # additionally swaps the log-lik to the family $aic flavor
+                # (bam.r:2784-2787) — REML keeps hea's fREML-flavored
+                # report (mgcv's fREML sets no such attr on the
+                # gaussian-identity bam.fit route).
                 score = float(self._reml(rho_hat, log_phi_hat, fit=fit))
+                if method == "ML" and np.isfinite(score):
+                    score = score + self._ml_flavor_swap(
+                        family_aic, log_phi_hat)
             else:
                 score = float("nan")
             # AR1 correction (mgcv bam.r:1715, 1737). The AR1 transform
@@ -4002,6 +4203,50 @@ class bam(gam):
                 self.REML_criterion = score
             else:
                 self.ML_criterion = score
+        elif method in ("P-REML", "P-ML"):
+            # The compressed-refit Pearson-Laplace criterion at the
+            # optimum (mgcv's object$gcv.ubre from gam(G=G), V units;
+            # hea's *_criterion convention is 2V). `_score_all` profiles
+            # φ_P internally, so the log φ argument is unused.
+            if n_sp > 0:
+                score = 2.0 * float(self._score_all(
+                    rho_hat, 0.0, fit, 0, "PREML")["score"])
+            else:
+                score = float("nan")
+            # AR1 correction — mgcv applies it to the compressed-refit
+            # gcv.ubre too (bam.r:1734-1738); doubled for the 2V units.
+            if self._rho != 0.0 and np.isfinite(score):
+                ld = 1.0 / np.sqrt(1.0 - self._rho ** 2)
+                df_ar = (
+                    int(self._ar_start.sum())
+                    if self._ar_start is not None else 1
+                )
+                score = score - 2.0 * (n - df_ar) * float(np.log(ld))
+            if method == "P-REML":
+                self.REML_criterion = score
+            else:
+                self.ML_criterion = score
+        elif method == "GACV.Cp":
+            # mgcv's reported gcv.ubre for GACV.Cp is the COMPRESSED-view
+            # criterion (raw reduced-rows dev at nobs = ncol(R)) — the
+            # `_score_all` override applies that view.
+            if n_sp > 0:
+                score = float(self._score_all(
+                    rho_hat, 0.0, fit, 0, self._bam_outer_criterion(),
+                )["score"])
+                # AR1 correction — the gam(G=G) branch corrects gcv.ubre
+                # (bam.r:1734-1738; V units, single). mgcv's GCV.Cp rides
+                # magic, which is NOT corrected (bam.r:1740-1760).
+                if self._rho != 0.0 and np.isfinite(score):
+                    ld = 1.0 / np.sqrt(1.0 - self._rho ** 2)
+                    df_ar = (
+                        int(self._ar_start.sum())
+                        if self._ar_start is not None else 1
+                    )
+                    score = score - (n - df_ar) * float(np.log(ld))
+                self.GCV_score = score
+            else:
+                self.GCV_score = float("nan")
         else:
             if n_sp > 0:
                 self.GCV_score = float(self._gcv(rho_hat))
@@ -4708,10 +4953,15 @@ class bam(gam):
                             self._sl, out["PP"], inverse=True,
                             both_sides=True, cov=True,
                         )
-                elif method in ("REML", "ML"):
-                    # Non-discrete REML/ML → mgcv ``bgam.fit`` (bam.r:1226-1261):
+                elif method == "REML":
+                    # Non-discrete (f)REML → mgcv ``bgam.fit`` (bam.r:1226-1261):
                     # ``fast.REML.fit`` to FULL convergence on the current
-                    # reduced (R, f). The sp is RE-SEEDED from ``initial.sp(R)``
+                    # reduced (R, f). fast.REML.fit implements ONLY the REML
+                    # criterion (mgcv's explicit method="REML" runs the
+                    # gam(G=G) route, bam.r:1273 — same objective on the
+                    # Gaussian working data, so hea unifies them here; ML
+                    # canNOT ride this rail and takes the else below).
+                    # The sp is RE-SEEDED from ``initial.sp(R)``
                     # every PIRLS iter (bam.r:1229 — NOT warm-started; the
                     # converge-fully Newton makes the seed immaterial to the
                     # result), while log φ is carried forward from the previous
@@ -4762,9 +5012,16 @@ class bam(gam):
                         fit.beta = self._reml_beta
                         fit.A_inv = self._reml_A_inv
                 else:
-                    # GCV.Cp only (no log φ in the outer vector): the
-                    # converge-fully outer-Newton on V_g/V_u. L-aware — it
-                    # optimises in working space and maps via ``_rho_full``.
+                    # ML / GCV.Cp / GACV.Cp / P-REML / P-ML: the
+                    # converge-fully outer-Newton on the mapped criterion —
+                    # mgcv's compressed refit for these methods (magic for
+                    # GCV.Cp, bam.r:1223; gam(G=G, method=method) for the
+                    # rest, bam.r:1273) — per PIRLS iteration. ML keeps
+                    # log φ in θ when the scale is estimated (its remlInd=0
+                    # + range-projected log|H| come from the ``self.method``
+                    # predicates through the REML scoreType); the others are
+                    # ρ-only. L-aware — it optimises in working space and
+                    # maps via ``_rho_full``.
                     if theta_sp_warm is None:
                         rho0_full = self._initial_sp_rho()
                         if self._lsp0 is not None:
@@ -4776,15 +5033,29 @@ class bam(gam):
                                 self._L, rho0_full, rcond=None)
                     else:
                         rho0 = theta_sp_warm.copy()
-
+                    if include_log_phi:      # ML with estimated scale
+                        if log_phi_hat is None:
+                            # Same iter-1 seed as the (f)REML branch
+                            # (mgcv bgam.fit:1232-1238).
+                            log_phi0 = float(np.log(
+                                max(float(np.var(y, ddof=1)) * 0.05, 1e-300)
+                            ))
+                        else:                # iter > 1 — carry forward
+                            log_phi0 = log_phi_hat
+                        theta0 = np.concatenate([rho0, [log_phi0]])
+                    else:
+                        theta0 = rho0
+                    crit = ("REML" if method == "ML"
+                            else self._bam_outer_criterion())
                     theta_hat = self._outer_newton(
-                        rho0,
-                        criterion="GCV",
-                        include_log_phi=False,
+                        theta0,
+                        criterion=crit,
+                        include_log_phi=include_log_phi,
                         include_family_theta=False,
                     )
                     theta_sp_warm = theta_hat[:n_work]
-                    log_phi_hat = None
+                    log_phi_hat = (float(theta_hat[n_work])
+                                   if include_log_phi else None)
                     self.sp = np.exp(theta_sp_warm)
                     rho_hat = self._rho_full(theta_sp_warm)
                     fit = self._fit_given_rho(rho_hat)
@@ -4921,9 +5192,14 @@ class bam(gam):
         #   * GCV.Cp → magic's Pearson-type ``fit$scale`` (bam.r:1291): the raw
         #     Pearson statistic over (n−edf).
         if df_resid > 0 and not self._scale_known_fit:
-            if self._log_phi_hat is not None:
+            if self._log_phi_hat is not None and method == "REML":
                 pearson_scale = float(np.exp(self._log_phi_hat))
             else:
+                # Response-scale Pearson/(n − edf) — the compressed refit's
+                # scale.est (gam.fit3.r:598 with the extras; the converged
+                # PIRLS working RSS ≡ the Pearson statistic identically).
+                # mgcv's non-fREML bam methods (incl. ML) report this, not
+                # the optimizer's exp(log φ̂).
                 V = family.variance(fit.mu)
                 pearson_scale = float(
                     np.sum(wt * (y - fit.mu) ** 2 / V)
@@ -5093,21 +5369,30 @@ class bam(gam):
         self.rank = self._estimate_rank()
 
         if (
-            method in ("REML", "ML")
+            method in ("REML", "ML", "P-REML", "P-ML")
             and n_sp > 0
             and np.isfinite(sigma_squared)
             and sigma_squared > 0
         ):
-            log_phi_hat_for_aug = (
-                self._log_phi_hat
-                if self._log_phi_hat is not None
-                else float(np.log(sigma_squared))
-            )
-            H_aug = 0.5 * self._reml_hessian(
-                rho_hat, log_phi_hat_for_aug, fit=fit, include_log_phi=True,
-            )
-            # Working-space view under id linkage (see _post_fit_gaussian).
-            T_aug = self._T_working(1)
+            if self._pearson_scale_criterion:
+                # P-REML / P-ML: the criterion's own ρ-only Hessian at the
+                # Pearson plug-in scale (gam.fit3.r:979) — see
+                # _post_fit_gaussian.
+                H_aug = self._preml_hessian(rho_hat, fit=fit)
+                T_aug = self._T_working(0)
+            else:
+                log_phi_hat_for_aug = (
+                    self._log_phi_hat
+                    if self._log_phi_hat is not None
+                    else float(np.log(sigma_squared))
+                )
+                H_aug = 0.5 * self._reml_hessian(
+                    rho_hat, log_phi_hat_for_aug, fit=fit,
+                    include_log_phi=True,
+                )
+                # Working-space view under id linkage (see
+                # _post_fit_gaussian).
+                T_aug = self._T_working(1)
             if T_aug is not None:
                 H_aug = T_aug.T @ H_aug @ T_aug
             H_aug = 0.5 * (H_aug + H_aug.T)
@@ -5153,23 +5438,59 @@ class bam(gam):
                 )
                 score = float(self._reml(rho_hat, log_phi_hat, fit=fit))
                 # bam's _fit_given_rho returns fit.dev = the working-data RSS
-                # (the reduced Gaussian-on-(R,f) problem). mgcv's fREML reports
-                # the criterion on the RESPONSE deviance (bgam.fit recomputes
-                # dev each PIRLS iter, bam.r:1084). _reml enters dev ONLY as
-                # Dp/φ, so swap the working RSS for the response deviance
-                # (self.deviance) — matches mgcv-bam's sp.criterion to ~5e-9
-                # (P16). Non-Gaussian only; for Gaussian-identity the two
-                # coincide so the correction is 0. The argmin is unchanged
-                # (the fit is already pinned to mgcv).
+                # (the reduced Gaussian-on-(R,f) problem). mgcv's final bam
+                # gcv.ubre for the (RE)ML-type methods replaces the working
+                # log-lik by the ACTUAL family one — ``aic/(2γ) + ml.pen``
+                # (bam.r:2784-2787; ml.pen is set by both fast.REML.fit and
+                # gam.fit3's REML/ML branch, but NOT by P-REML/P-ML, which
+                # therefore report the working value). ``self._reml`` with
+                # the real family's ls plus this response-deviance swap is
+                # exactly that replacement — matches mgcv-bam's
+                # sp.criterion to ~5e-9 (P16). Non-Gaussian only; for
+                # Gaussian-identity the two coincide so the correction is 0.
+                # The argmin is unchanged (the fit is already pinned).
                 phi = float(np.exp(log_phi_hat))
                 if np.isfinite(phi) and phi > 0 and np.isfinite(score):
                     score = score + (self.deviance - float(fit.dev)) / phi
+                # bgam.fit sets ml.pen on BOTH its fREML and gam(G=G)
+                # (RE)ML fits (bam.r:1244/gam.fit3.r:620), so the final
+                # report swaps the ``dev/φ̂ − 2·ls`` log-lik form to the
+                # family $aic flavor for REML and ML alike (see
+                # _ml_flavor_swap) — zero for poisson/binomial/Tweedie,
+                # the mgcv-exact constant for Gamma (its $aic carries the
+                # ``+2`` shape-parameter term). The gaussian-identity
+                # branch mirrors bam.fit, which sets no ml.pen for fREML.
+                if np.isfinite(score):
+                    score = score + self._ml_flavor_swap(
+                        family_aic, log_phi_hat)
             else:
                 score = float("nan")
             if method == "REML":
                 self.REML_criterion = score
             else:
                 self.ML_criterion = score
+        elif method in ("P-REML", "P-ML"):
+            # mgcv's non-fREML methods report the COMPRESSED gam(G=G)
+            # refit's criterion — evaluated on the working statistics, no
+            # response-deviance swap (that swap mirrors fREML's bam.r:1084
+            # dev recompute, which this route never does). 2V units.
+            if n_sp > 0:
+                score = 2.0 * float(self._score_all(
+                    rho_hat, 0.0, fit, 0, "PREML")["score"])
+            else:
+                score = float("nan")
+            if method == "P-REML":
+                self.REML_criterion = score
+            else:
+                self.ML_criterion = score
+        elif method == "GACV.Cp":
+            # Compressed-view criterion value (see the Gaussian branch).
+            if n_sp > 0:
+                self.GCV_score = float(self._score_all(
+                    rho_hat, 0.0, fit, 0, self._bam_outer_criterion(),
+                )["score"])
+            else:
+                self.GCV_score = float("nan")
         else:
             if n_sp > 0:
                 self.GCV_score = float(self._gcv(rho_hat))

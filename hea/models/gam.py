@@ -1642,11 +1642,26 @@ def _pearson_and_deriv(rho, fit, deriv=True, *, family, wt, y, slots, X, p):
     β̂'s ρ-dependence uses the Newton IFT (`_dbeta_drho`), as in the
     deviance derivative `_gcv_grad_pieces` builds.
     """
+    n_sp = len(slots)
+    if fit.is_working_gaussian:
+        # bam reduced fit: on the gaussian working problem (V ≡ 1, prior
+        # w absorbed into R) the Pearson statistic IS the working RSS —
+        # gam.fit3's gaussian pearson ≡ dev, and bam threads the same
+        # rss.extra into both (bam.r:1270-1271), so P = fit.dev exactly.
+        # Its ρ-derivative is the deviance derivative: at the normal
+        # equations R'(f−Rβ̂) = Sλβ̂, so ∂P/∂ρ_k = −2·(Sλβ̂)'·∂β̂/∂ρ_k —
+        # all p-space (the length-n response quantities do not exist on
+        # the reduced problem).
+        P = float(fit.dev)
+        if not deriv or n_sp == 0:
+            return P, (np.zeros(n_sp) if deriv else None)
+        db_drho = _dbeta_drho(fit, rho, slots, p)          # (p, n_sp)
+        Slb = fit.S_full @ fit.beta                        # (p,)
+        return P, -2.0 * (Slb @ db_drho)                   # (n_sp,)
     mu = fit.mu
     V = family.variance(mu)
     r = y - mu
     P = float(np.sum(wt * r * r / V))
-    n_sp = len(slots)
     if not deriv or n_sp == 0:
         return P, (np.zeros(n_sp) if deriv else None)
     Vp = family.dvar(mu)
@@ -1803,6 +1818,15 @@ def _dw_deta(fit, *, y, family_mgcv_extended, family, wt):
     # the fit, like _fit_link_derivs (W3.3d part 2, here for gam.fit4).
     if fit._dwdeta is not None:
         return fit._dwdeta
+    if fit.is_working_gaussian:
+        # bam reduced fit: the working family is gaussian-identity
+        # (bam.r:932), so dW/dη ≡ 0 exactly. Length-p (= len(beta), the
+        # compressed row count) so consumers broadcasting against the
+        # p×p reduced design line up — same rationale as bam's
+        # `_dw_deta` method override.
+        res = np.zeros(len(fit.beta))
+        fit._dwdeta = res
+        return res
     mu = fit.mu
     w = fit.w
     alpha = fit.alpha
@@ -1929,6 +1953,12 @@ def _d2w_deta2(fit, *, y, family_mgcv_extended, family, wt):
     """
     if fit._d2wdeta2 is not None:
         return fit._d2wdeta2
+    if fit.is_working_gaussian:
+        # bam reduced fit — gaussian working family: ∂²w/∂η² ≡ 0,
+        # length-p (see `_dw_deta`).
+        res = np.zeros(len(fit.beta))
+        fit._d2wdeta2 = res
+        return res
     mu = fit.mu
     w = fit.w
     alpha = fit.alpha
@@ -2104,6 +2134,25 @@ def _fit3_scale_est(fit, *, family, y, wt, n, X, control, fisher_view_fn):
     at the Fisher weights (gdi's ``oo$trA``), via the triangular factor.
     Read by newton's score.scale and by efsudr's scale-slot refresh
     (mgcv ``lsp[length(lsp)] <- log(fit$scale)``, gam.fit4.r:845)."""
+    if fit.is_working_gaussian:
+        # bam reduced fit: the working-gaussian Pearson ≡ dev (the full
+        # working RSS with rss.extra absorbed — mgcv's
+        # (pearson+pearson.extra) at gam.fit3.r:598), and the Fletcher
+        # s̄-correction is identically zero (gaussian V' ≡ 0), so all
+        # three scale.est kinds coincide at dev/(n − τ).
+        fit_F = fisher_view_fn(fit)
+        w_F = fit_F.w
+        if w_F is None or np.allclose(w_F, 1.0):
+            Xw = X
+        else:
+            Xw = X * np.sqrt(np.maximum(w_F, 0.0))[:, None]
+        if fit_F.A_chol_lower:
+            Kw = solve_triangular(fit_F.A_chol, Xw.T, lower=True)
+        else:
+            Kw = solve_triangular(fit_F.A_chol, Xw.T, lower=False,
+                                  trans="T")
+        tau = float(np.sum(Kw * Kw))
+        return float(fit.dev) / max(n - tau, 1.0)
     mu_arr = fit.mu
     V_arr = family.variance(mu_arr)
     # Weighted Pearson — gam.fit3.r:597 sum(weights*(y-mu)^2/V).
@@ -2186,7 +2235,10 @@ def _gcv_grad_pieces(rho, fit, *, X, XtX, slots, family, n, p, y, family_mgcv_ex
 
     # W_F-deriv piece: (d − s)' hv_F,k. dW_F/dη = 0 for Gaussian-identity
     # and for Gamma+log (W_F ≡ 1). When zero we skip building K_F entirely.
-    if family.name == "gaussian" and family.link.name == "identity":
+    # bam's reduced working fits are gaussian-identity by construction
+    # (bam.r:932) whatever the response family — same skip.
+    if ((family.name == "gaussian" and family.link.name == "identity")
+            or fit.is_working_gaussian):
         w_piece = np.zeros(n_sp)
     else:
         dw_deta = _dw_deta(fit_F, y=y, family_mgcv_extended=family_mgcv_extended, family=family, wt=wt)                 # (n,) — Fisher form
@@ -2372,6 +2424,25 @@ def _pearson_hess(fit, rho, *, db_drho=None, d2b=None, X, slots, wt, y, family, 
     n_sp = len(slots)
     if n_sp == 0:
         return np.zeros((0, 0))
+    if fit.is_working_gaussian:
+        # bam reduced fit: P ≡ D on the gaussian working problem (see
+        # `_pearson_and_deriv`), so P2 ≡ the deviance ρ-Hessian. With
+        # Pe1 = −2·(working residual), Pe2 = 2 and R'(f−Rβ̂) = Sλβ̂:
+        #   P2[m,k] = −2·(Sλβ̂)'·∂²β̂/∂ρ_m∂ρ_k + 2·(R·∂β̂_m)'(R·∂β̂_k)
+        # — all p-space (X here IS the reduced R).
+        if db_drho is None:
+            db_drho = _dbeta_drho(fit, rho, slots, p)
+        if d2b is None:
+            d2b = _d2beta_drho_drho(fit, rho, db_drho=db_drho, slots=slots, p=p, X=X, y=y, family_mgcv_extended=family_mgcv_extended, family=family, wt=wt)
+        v = X @ db_drho                                    # (p, n_sp)
+        Slb = fit.S_full @ fit.beta                        # (p,)
+        P2 = np.empty((n_sp, n_sp))
+        for m in range(n_sp):
+            for k in range(m, n_sp):
+                val = float(-2.0 * (Slb @ d2b[:, m, k])
+                            + 2.0 * (v[:, m] @ v[:, k]))
+                P2[m, k] = P2[k, m] = val
+        return P2
     mu = fit.mu
     V = family.variance(mu)
     Vp = family.dvar(mu)
@@ -15506,7 +15577,7 @@ class _FitState:
         "dev", "pen", "rss",
         "A_chol", "A_chol_lower", "A_inv",
         "S_full", "log_det_A", "E_aug",
-        "is_fisher_fallback",
+        "is_fisher_fallback", "is_working_gaussian",
         "converged", "boundary", "warn",
         "scale_est",
         "_lderivs", "_dwdeta", "_d2wdeta2", "_ddeta", "_ddraw",
@@ -15515,7 +15586,7 @@ class _FitState:
     def __init__(self, *, beta, dev, pen, A_chol, A_chol_lower,
                  S_full, log_det_A,
                  eta=None, mu=None, w=None, z=None, alpha=None,
-                 is_fisher_fallback=False,
+                 is_fisher_fallback=False, is_working_gaussian=False,
                  converged=True, boundary=False, warn=None,
                  E_aug=None, A_inv=None, scale_est=None):
         self.beta = beta
@@ -15558,6 +15629,18 @@ class _FitState:
         # for derivative purposes (the analytical α'(μ) is not
         # consistent with the override).
         self.is_fisher_fallback = is_fisher_fallback
+        # True for bam's reduced Gaussian working fits (β̂ solved on the
+        # compressed (R, f) with the IRLS weights already absorbed into
+        # R). mgcv swaps ``G$family <- gaussian()`` / ``G$w <- 1`` before
+        # its compressed refits (bam.r:932, 1266-1267), so every
+        # criterion-tail quantity is the *working-Gaussian* one there:
+        # dW/dη ≡ 0, Pearson ≡ deviance ≡ the working RSS, V ≡ 1. The
+        # n-side readers (`_dw_deta`, `_pearson_and_deriv`,
+        # `_fit3_scale_est`, ...) consult this flag to read those
+        # quantities from the p-space fit instead of recomputing
+        # response-scale statistics that don't exist on the reduced
+        # problem.
+        self.is_working_gaussian = is_working_gaussian
         # Lazily-cached link/variance derivative bundle for the REML weight-
         # derivative chain (set by gam._fit_link_derivs) — the same converged
         # (μ, η) feed _dw_deta, _d2w_deta2 and the gradient, which recomputed

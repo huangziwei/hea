@@ -1789,3 +1789,208 @@ def test_matrix_arg_te_predict_accepts_vector_newdata():
         assert pv.shape == (m,), tag
         # vector and (m,1) predict identically (mgcv: max|vec - mat| == 0)
         assert np.max(np.abs(pv - pm)) < 1e-12, tag
+
+
+# ===========================================================================
+# method= extensions: GACV.Cp / P-REML / P-ML, and the ML criterion route
+# ---------------------------------------------------------------------------
+# mgcv-bam routes every non-fREML/GCV.Cp method through the compressed
+# Gaussian refit ``gam(G=G, method=method)`` (bam.r:1263-1276/1722-1733) with
+# ``G$family <- gaussian()``/``G$w <- 1`` (bam.r:932). fast.REML.fit is
+# REML-only, so plain ML must ride the same route (remlInd=0 + the
+# range-projected log|H|). Pins: mgcv 1.9-4, deterministic data (no RNG).
+# ===========================================================================
+
+
+def _method_probe_frame(n: int = 300) -> pl.DataFrame:
+    i = np.arange(n)
+    x0 = (i + 0.5) / n
+    x1 = ((7 * i) % 11) / 10.0
+    x2 = ((3 * i + 1) % 17) / 16.0
+    f = np.sin(2 * np.pi * x0) * 0.7 + (x1 - 0.5) ** 2 * 2 + 0.3 * x2
+    e = 0.2 * np.sin(31 * x0 + 7 * x1 + 3 * x2)
+    return pl.DataFrame({
+        "x0": x0, "x1": x1, "x2": x2,
+        "yg": f + e,
+        "ygam": np.exp(f * 0.5 + e * 0.5) + 0.2,
+        "yp": (np.floor(np.exp(f) * 3) + (i % 3)).astype(float),
+    })
+
+
+def _bam_score(m):
+    """The optimized criterion on mgcv's gcv.ubre scale (V units)."""
+    if m.method in ("REML", "P-REML"):
+        return m.REML_criterion / 2.0
+    if m.method in ("ML", "P-ML"):
+        return m.ML_criterion / 2.0
+    return m.GCV_score
+
+
+def test_bam_method_gaussian_preml_pml_ml_match_mgcv():
+    """gaussian-identity bam, methods P-REML / P-ML / ML pinned to mgcv
+    1.9-4. The x2 smooth is essentially linear (sp3 runs into the flat
+    +inf direction), so only sp[0:2] are pinned."""
+    df = _method_probe_frame()
+    # method -> (sp0, sp1, edf, scale, crit)
+    pins = {
+        "P-REML": (0.006890692311, 0.2967015225, 15.37578402,
+                   0.02000184299, -128.6247221),
+        "P-ML":   (0.007104469448, 0.3264701247, 15.24281786,
+                   0.01999950109, -139.0756769),
+        "ML":     (0.0072842282, 0.33349454, 15.20029922,
+                   0.01999834091, -138.2506094),
+    }
+    for method, (sp0, sp1, edf_t, sc_t, crit_t) in pins.items():
+        m = hea.models.bam("yg ~ s(x0) + s(x1) + s(x2)", df, method=method)
+        assert float(m.sp[0]) == pytest.approx(sp0, rel=2e-4), method
+        assert float(m.sp[1]) == pytest.approx(sp1, rel=2e-4), method
+        assert float(np.sum(m.edf)) == pytest.approx(edf_t, rel=1e-5), method
+        assert float(m.sigma_squared) == pytest.approx(sc_t, rel=1e-6), method
+        # 1e-6: the criterion still drifts ~2e-7 along sp3's flat +inf
+        # direction (hea/mgcv park at different huge sp3 endpoints).
+        assert _bam_score(m) == pytest.approx(crit_t, rel=1e-6), method
+
+
+def test_bam_method_gamma_preml_pml_ml_reml_match_mgcv():
+    """Gamma(log) bam (scale unknown, PIRLS outer loop): the new methods
+    plus the REML criterion-value flavor (mgcv replaces the working
+    log-lik by the family $aic — bam.r:2784-2787 — whose Gamma '+2'
+    constant this pins)."""
+    df = _method_probe_frame()
+    pins = {
+        "REML":   (0.00951471395, 0.3779363763, 13.85003003,
+                   0.005257888727, -230.5911984),
+        "P-REML": (0.009205064319, 0.3682646344, 13.90657806,
+                   0.005257978378, -331.8541208),
+        "P-ML":   (0.009555474425, 0.4160974042, 13.74031027,
+                   0.005258471341, -340.4945612),
+        "ML":     (0.0098095872, 0.42518755, 13.69432947,
+                   0.005258406802, -239.1395056),
+    }
+    for method, (sp0, sp1, edf_t, sc_t, crit_t) in pins.items():
+        m = hea.models.bam("ygam ~ s(x0) + s(x1)", df,
+                           family=Gamma(link=hea.family.LogLink()),
+                           method=method)
+        assert float(m.sp[0]) == pytest.approx(sp0, rel=2e-3), method
+        assert float(m.sp[1]) == pytest.approx(sp1, rel=2e-3), method
+        assert float(np.sum(m.edf)) == pytest.approx(edf_t, rel=1e-4), method
+        assert float(m.sigma_squared) == pytest.approx(sc_t, rel=1e-6), method
+        assert _bam_score(m) == pytest.approx(crit_t, rel=1e-7), method
+
+
+def test_bam_method_poisson_collapse_and_ml():
+    """Known scale: P-REML collapses onto REML and P-ML onto ML EXACTLY
+    (mgcv.r:1968-1970 via the compressed refit; verified against mgcv —
+    bam(poisson, 'P-ML') ≡ bam(poisson, 'ML') to all printed digits),
+    and the ML criterion route is pinned to mgcv (remlInd=0 + the
+    range-projected log|H| — the old fast.REML.fit routing converged to
+    the REML optimum instead)."""
+    df = _method_probe_frame()
+    m_r = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
+                         method="REML")
+    m_pr = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
+                          method="P-REML")
+    assert m_pr.method == "REML"
+    assert np.array_equal(m_pr.sp, m_r.sp)
+    assert m_pr.REML_criterion == m_r.REML_criterion
+
+    m_ml = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
+                          method="ML")
+    m_pml = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
+                           method="P-ML")
+    assert m_pml.method == "ML"
+    assert np.array_equal(m_pml.sp, m_ml.sp)
+    # mgcv 1.9-4: bam(poisson, ML) — distinct optimum from REML.
+    assert float(m_ml.sp[0]) == pytest.approx(0.36049167, rel=2e-4)
+    assert float(m_ml.sp[1]) == pytest.approx(15.470928, rel=2e-4)
+    assert float(np.sum(m_ml.edf)) == pytest.approx(9.75302302, rel=1e-5)
+    assert _bam_score(m_ml) == pytest.approx(562.9023709, rel=1e-9)
+    # REML anchor (unchanged by the ML routing split).
+    assert float(m_r.sp[0]) == pytest.approx(0.3272159006, rel=2e-4)
+    assert _bam_score(m_r) == pytest.approx(566.9480705, rel=1e-8)
+
+
+def test_bam_method_gacv_known_scale_equals_gcv_optimum():
+    """Known-scale GACV.Cp: the compressed-rows UBRE is an affine map of
+    the full-data one, so the sp optimum is IDENTICAL to GCV.Cp (mgcv:
+    same sp to 10 digits); the reported criterion is the compressed-view
+    value (raw reduced-rows deviance at nobs = ncol(R))."""
+    df = _method_probe_frame()
+    m_ga = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
+                          method="GACV.Cp")
+    m_g = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
+                         method="GCV.Cp")
+    assert np.allclose(m_ga.sp, m_g.sp, rtol=1e-6)
+    # mgcv 1.9-4 pins.
+    assert float(m_ga.sp[0]) == pytest.approx(0.7973231744, rel=1e-5)
+    assert float(m_ga.sp[1]) == pytest.approx(31.91346568, rel=1e-5)
+    assert float(m_ga.GCV_score) == pytest.approx(0.005380549176, rel=1e-5)
+    assert float(m_g.GCV_score) == pytest.approx(-0.7311817424, rel=1e-6)
+
+
+def test_bam_method_gacv_scale_unknown_degenerate_matches_mgcv():
+    """Scale-unknown GACV.Cp under bam is DEGENERATE in mgcv itself: the
+    compressed refit's GACV uses the raw reduced-rows deviance and
+    nobs = ncol(R) (gam.fit3.r:744-752 — the dev.extra/n.true threading
+    feeds only scale.est/Dp/Pearson-φ), so the criterion is minimised by
+    interpolation (sp → 0, edf → full rank, GACV → 0). mgcv 1.9-4:
+    gaussian edf 27.99999545 of 28, Gamma edf 18.9999991 of 19. hea
+    mirrors the behavior exactly — prefer fREML/REML."""
+    df = _method_probe_frame()
+    m = hea.models.bam("yg ~ s(x0) + s(x1) + s(x2)", df, method="GACV.Cp")
+    assert float(np.sum(m.edf)) == pytest.approx(28.0, abs=1e-3)
+    assert np.all(m.sp < 1e-6)
+    assert 0.0 <= float(m.GCV_score) < 1e-6
+    m2 = hea.models.bam("ygam ~ s(x0) + s(x1)", df,
+                        family=Gamma(link=hea.family.LogLink()),
+                        method="GACV.Cp")
+    assert float(np.sum(m2.edf)) == pytest.approx(19.0, abs=1e-3)
+    assert np.all(m2.sp < 1e-6)
+    assert 0.0 <= float(m2.GCV_score) < 1e-4
+
+
+def test_bam_gcv_nongaussian_regression():
+    """Regression: bam(non-Gaussian, method='GCV.Cp') used to crash with a
+    broadcast error — `_gcv_grad_pieces` read the response family's
+    length-n dW/dη against the p×p reduced design. The working-Gaussian
+    view (is_working_gaussian) fixes it; poisson values pin to mgcv."""
+    df = _method_probe_frame()
+    m = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
+                       method="GCV.Cp")
+    assert float(m.sp[0]) == pytest.approx(0.7973231744, rel=1e-5)
+    assert float(m.sp[1]) == pytest.approx(31.91346568, rel=1e-5)
+    assert float(np.sum(m.edf)) == pytest.approx(8.378427942, rel=1e-5)
+    assert float(m.GCV_score) == pytest.approx(-0.7311817424, rel=1e-6)
+    # Gamma+log: exercises the same path with a non-canonical W ≡ 1 family.
+    m2 = hea.models.bam("ygam ~ s(x0) + s(x1)", df,
+                        family=Gamma(link=hea.family.LogLink()),
+                        method="GCV.Cp")
+    assert np.all(np.isfinite(m2.sp)) and np.isfinite(m2.GCV_score)
+
+
+def test_bam_method_validation_and_discrete_fallback():
+    """Surface parity: mgcv's method strings accepted/rejected, and
+    discrete=TRUE with a non-fREML criterion warns + falls back
+    (bam.r:2226-2228). hea aliases method='REML' ≡ fREML, so explicit
+    REML keeps the discrete rail silently."""
+    df = _method_probe_frame(120)
+    with pytest.raises(NotImplementedError, match="NCV"):
+        hea.models.bam("yg ~ s(x0)", df, method="NCV")
+    with pytest.raises(ValueError, match="method must be one of"):
+        hea.models.bam("yg ~ s(x0)", df, method="QNCV")
+    with pytest.warns(UserWarning,
+                      match="discretization only available with fREML"):
+        m = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
+                           method="GCV.Cp", discrete=True)
+    assert m._discrete_design is None      # fell back to non-discrete
+    with pytest.warns(UserWarning,
+                      match="discretization only available with fREML"):
+        hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
+                       method="P-REML", discrete=True)
+    # REML ≡ fREML: discrete kept, no warning.
+    import warnings as _warnings
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error")
+        m_d = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
+                             method="REML", discrete=True)
+    assert m_d._discrete_design is not None
