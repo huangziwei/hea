@@ -1798,22 +1798,46 @@ def test_matrix_arg_te_predict_accepts_vector_newdata():
 # Gaussian refit ``gam(G=G, method=method)`` (bam.r:1263-1276/1722-1733) with
 # ``G$family <- gaussian()``/``G$w <- 1`` (bam.r:932). fast.REML.fit is
 # REML-only, so plain ML must ride the same route (remlInd=0 + the
-# range-projected log|H|). Pins: mgcv 1.9-4, deterministic data (no RNG).
+# range-projected log|H|). Pins: mgcv 1.9-4 on RGenerator(66) data (see
+# ``_method_probe_frame`` for the bit-identical R recipe).
 # ===========================================================================
 
 
 def _method_probe_frame(n: int = 300) -> pl.DataFrame:
-    i = np.arange(n)
-    x0 = (i + 0.5) / n
-    x1 = ((7 * i) % 11) / 10.0
-    x2 = ((3 * i + 1) % 17) / 16.0
-    f = np.sin(2 * np.pi * x0) * 0.7 + (x1 - 0.5) ** 2 * 2 + 0.3 * x2
-    e = 0.2 * np.sin(31 * x0 + 7 * x1 + 3 * x2)
+    """RGenerator(66) data — bit-matches the R recipe below (R-native
+    runif/rnorm/rpois via hea.R.rng), so mgcv pins can be regenerated with::
+
+        set.seed(66)
+        x0 <- runif(n); x1 <- runif(n); x2 <- runif(n)
+        e <- rnorm(n, 0, 0.2)
+        f <- sin(2*pi*x0)*0.7 + (x1-0.5)^2*2 + 0.3*sin(pi*x2)
+        mu <- 2 + 6*(x0-0.5)^2 + 4*(x1-0.25)^2   # dyadic-exact ops only
+        yp <- rpois(n, mu)
+        yg <- f + e; ygam <- exp(f*0.5 + e*0.5) + 0.2
+
+    Continuous covariates (n unique values each) keep the tp construction
+    well-conditioned: an earlier deterministic frame with only 11 unique
+    x1 values sat on a Lanczos-truncation knife edge where sub-1e-11 input
+    noise rotated the basis and shifted every reported sp1 by a constant
+    ×1.00387 (fit/edf/criterion invariant) — which is exactly what
+    happened between macOS and Linux libm/BLAS. mu stays transcendental-
+    free so the rpois stream is bit-identical to R's."""
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(66)
+    x0 = g.uniform(0.0, 1.0, n)
+    x1 = g.uniform(0.0, 1.0, n)
+    x2 = g.uniform(0.0, 1.0, n)
+    e = g.normal(0.0, 0.2, n)
+    f = np.sin(2 * np.pi * x0) * 0.7 + (x1 - 0.5) ** 2 * 2 \
+        + 0.3 * np.sin(np.pi * x2)
+    mu = 2 + 6 * (x0 - 0.5) ** 2 + 4 * (x1 - 0.25) ** 2
+    yp = g.poisson(mu)
     return pl.DataFrame({
         "x0": x0, "x1": x1, "x2": x2,
         "yg": f + e,
         "ygam": np.exp(f * 0.5 + e * 0.5) + 0.2,
-        "yp": (np.floor(np.exp(f) * 3) + (i % 3)).astype(float),
+        "yp": np.asarray(yp, dtype=float),
     })
 
 
@@ -1828,27 +1852,23 @@ def _bam_score(m):
 
 def test_bam_method_gaussian_preml_pml_ml_match_mgcv():
     """gaussian-identity bam, methods P-REML / P-ML / ML pinned to mgcv
-    1.9-4. The x2 smooth is essentially linear (sp3 runs into the flat
-    +inf direction), so only sp[0:2] are pinned."""
+    1.9-4 (all three sps finite and well-determined)."""
     df = _method_probe_frame()
-    # method -> (sp0, sp1, edf, scale, crit)
+    # method -> (sp, edf, scale, crit)
     pins = {
-        "P-REML": (0.006890692311, 0.2967015225, 15.37578402,
-                   0.02000184299, -128.6247221),
-        "P-ML":   (0.007104469448, 0.3264701247, 15.24281786,
-                   0.01999950109, -139.0756769),
-        "ML":     (0.0072842282, 0.33349454, 15.20029922,
-                   0.01999834091, -138.2506094),
+        "P-REML": ((0.01026474145, 0.1242113542, 0.3508758414),
+                   17.20716969, 0.03630830763, -39.84493875),
+        "P-ML":   ((0.01070543044, 0.1439456178, 0.4410389761),
+                   16.81569238, 0.03631299266, -47.27724565),
+        "ML":     ((0.01105216598, 0.1478843726, 0.4523599341),
+                   16.73782917, 0.03631213256, -46.54392219),
     }
-    for method, (sp0, sp1, edf_t, sc_t, crit_t) in pins.items():
+    for method, (sp_t, edf_t, sc_t, crit_t) in pins.items():
         m = hea.models.bam("yg ~ s(x0) + s(x1) + s(x2)", df, method=method)
-        assert float(m.sp[0]) == pytest.approx(sp0, rel=2e-4), method
-        assert float(m.sp[1]) == pytest.approx(sp1, rel=2e-4), method
+        assert np.asarray(m.sp) == pytest.approx(sp_t, rel=2e-4), method
         assert float(np.sum(m.edf)) == pytest.approx(edf_t, rel=1e-5), method
         assert float(m.sigma_squared) == pytest.approx(sc_t, rel=1e-6), method
-        # 1e-6: the criterion still drifts ~2e-7 along sp3's flat +inf
-        # direction (hea/mgcv park at different huge sp3 endpoints).
-        assert _bam_score(m) == pytest.approx(crit_t, rel=1e-6), method
+        assert _bam_score(m) == pytest.approx(crit_t, rel=1e-7), method
 
 
 def test_bam_method_gamma_preml_pml_ml_reml_match_mgcv():
@@ -1858,14 +1878,14 @@ def test_bam_method_gamma_preml_pml_ml_reml_match_mgcv():
     constant this pins)."""
     df = _method_probe_frame()
     pins = {
-        "REML":   (0.00951471395, 0.3779363763, 13.85003003,
-                   0.005257888727, -230.5911984),
-        "P-REML": (0.009205064319, 0.3682646344, 13.90657806,
-                   0.005257978378, -331.8541208),
-        "P-ML":   (0.009555474425, 0.4160974042, 13.74031027,
-                   0.005258471341, -340.4945612),
-        "ML":     (0.0098095872, 0.42518755, 13.69432947,
-                   0.005258406802, -239.1395056),
+        "REML":   (0.01299407061, 0.1639959992, 12.96102743,
+                   0.008104676416, -164.3326564),
+        "P-REML": (0.01261437309, 0.1601504955, 13.01310613,
+                   0.008104912646, -269.754573),
+        "P-ML":   (0.01321795628, 0.1888532273, 12.80235962,
+                   0.008104827756, -277.8624566),
+        "ML":     (0.01353009775, 0.1926018169, 12.76057798,
+                   0.008104651095, -172.360796),
     }
     for method, (sp0, sp1, edf_t, sc_t, crit_t) in pins.items():
         m = hea.models.bam("ygam ~ s(x0) + s(x1)", df,
@@ -1901,31 +1921,32 @@ def test_bam_method_poisson_collapse_and_ml():
     assert m_pml.method == "ML"
     assert np.array_equal(m_pml.sp, m_ml.sp)
     # mgcv 1.9-4: bam(poisson, ML) — distinct optimum from REML.
-    assert float(m_ml.sp[0]) == pytest.approx(0.36049167, rel=2e-4)
-    assert float(m_ml.sp[1]) == pytest.approx(15.470928, rel=2e-4)
-    assert float(np.sum(m_ml.edf)) == pytest.approx(9.75302302, rel=1e-5)
-    assert _bam_score(m_ml) == pytest.approx(562.9023709, rel=1e-9)
+    assert float(m_ml.sp[0]) == pytest.approx(3.487136668, rel=2e-4)
+    assert float(m_ml.sp[1]) == pytest.approx(8.65489401, rel=2e-4)
+    assert float(np.sum(m_ml.edf)) == pytest.approx(6.275150642, rel=1e-5)
+    assert _bam_score(m_ml) == pytest.approx(595.7609693, rel=1e-9)
     # REML anchor (unchanged by the ML routing split).
-    assert float(m_r.sp[0]) == pytest.approx(0.3272159006, rel=2e-4)
-    assert _bam_score(m_r) == pytest.approx(566.9480705, rel=1e-8)
+    assert float(m_r.sp[0]) == pytest.approx(2.193514565, rel=2e-4)
+    assert _bam_score(m_r) == pytest.approx(600.1910441, rel=1e-8)
 
 
 def test_bam_method_gacv_known_scale_equals_gcv_optimum():
     """Known-scale GACV.Cp: the compressed-rows UBRE is an affine map of
-    the full-data one, so the sp optimum is IDENTICAL to GCV.Cp (mgcv:
-    same sp to 10 digits); the reported criterion is the compressed-view
-    value (raw reduced-rows deviance at nobs = ncol(R))."""
+    the full-data one, so the sp optimum coincides with GCV.Cp's (mgcv
+    1.9-4 agrees to 1.6e-6 — optimizer stopping noise around the shared
+    optimum); the reported criterion is the compressed-view value (raw
+    reduced-rows deviance at nobs = ncol(R))."""
     df = _method_probe_frame()
     m_ga = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
                           method="GACV.Cp")
     m_g = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
                          method="GCV.Cp")
-    assert np.allclose(m_ga.sp, m_g.sp, rtol=1e-6)
+    assert np.allclose(m_ga.sp, m_g.sp, rtol=1e-4)
     # mgcv 1.9-4 pins.
-    assert float(m_ga.sp[0]) == pytest.approx(0.7973231744, rel=1e-5)
-    assert float(m_ga.sp[1]) == pytest.approx(31.91346568, rel=1e-5)
-    assert float(m_ga.GCV_score) == pytest.approx(0.005380549176, rel=1e-5)
-    assert float(m_g.GCV_score) == pytest.approx(-0.7311817424, rel=1e-6)
+    assert float(m_ga.sp[0]) == pytest.approx(0.4461550214, rel=1e-4)
+    assert float(m_ga.sp[1]) == pytest.approx(0.4261116698, rel=1e-4)
+    assert float(m_ga.GCV_score) == pytest.approx(0.5474525578, rel=1e-5)
+    assert float(m_g.GCV_score) == pytest.approx(0.06400202961, rel=1e-6)
 
 
 def test_bam_method_gacv_scale_unknown_degenerate_matches_mgcv():
@@ -1934,7 +1955,7 @@ def test_bam_method_gacv_scale_unknown_degenerate_matches_mgcv():
     nobs = ncol(R) (gam.fit3.r:744-752 — the dev.extra/n.true threading
     feeds only scale.est/Dp/Pearson-φ), so the criterion is minimised by
     interpolation (sp → 0, edf → full rank, GACV → 0). mgcv 1.9-4:
-    gaussian edf 27.99999545 of 28, Gamma edf 18.9999991 of 19. hea
+    gaussian edf 27.99999883 of 28, Gamma edf 18.99999832 of 19. hea
     mirrors the behavior exactly — prefer fREML/REML."""
     df = _method_probe_frame()
     m = hea.models.bam("yg ~ s(x0) + s(x1) + s(x2)", df, method="GACV.Cp")
@@ -1957,15 +1978,21 @@ def test_bam_gcv_nongaussian_regression():
     df = _method_probe_frame()
     m = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
                        method="GCV.Cp")
-    assert float(m.sp[0]) == pytest.approx(0.7973231744, rel=1e-5)
-    assert float(m.sp[1]) == pytest.approx(31.91346568, rel=1e-5)
-    assert float(np.sum(m.edf)) == pytest.approx(8.378427942, rel=1e-5)
-    assert float(m.GCV_score) == pytest.approx(-0.7311817424, rel=1e-6)
+    assert float(m.sp[0]) == pytest.approx(0.4461542947, rel=1e-5)
+    assert float(m.sp[1]) == pytest.approx(0.4261116581, rel=1e-5)
+    assert float(np.sum(m.edf)) == pytest.approx(10.52516462, rel=1e-5)
+    assert float(m.GCV_score) == pytest.approx(0.06400202961, rel=1e-6)
     # Gamma+log: exercises the same path with a non-canonical W ≡ 1 family.
+    # The GCV valley bottom is flat in sp0: hea converges to a marginally
+    # LOWER criterion (rel 1e-6) with sp0 2.7e-3 along the plateau, so
+    # these pins carry plateau-honest tolerances.
     m2 = hea.models.bam("ygam ~ s(x0) + s(x1)", df,
                         family=Gamma(link=hea.family.LogLink()),
                         method="GCV.Cp")
-    assert np.all(np.isfinite(m2.sp)) and np.isfinite(m2.GCV_score)
+    assert float(m2.sp[0]) == pytest.approx(0.04294363551, rel=5e-3)
+    assert float(m2.sp[1]) == pytest.approx(0.5657492901, rel=2e-3)
+    assert float(np.sum(m2.edf)) == pytest.approx(10.54451858, rel=1e-3)
+    assert float(m2.GCV_score) == pytest.approx(0.008416574651, rel=1e-5)
 
 
 def test_bam_method_validation_and_discrete_fallback():
