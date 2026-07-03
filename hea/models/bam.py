@@ -80,17 +80,13 @@ from .gam import (
     _FitState,
     _PenaltySlot,
     _R_rank,
-    _S_pinv,
     _Sl,
     _add_factor_stub_rows,
     _add_null_space_penalties,
     _apply_gam_side,
     _block_s_scale,
-    _d2log_det_S_drho_drho,
-    _dlog_det_S_drho,
-    _log_det_S_pos,
+    _ldet_s,
     _row_frame,
-    _s_lambda,
     _sl_initial_repara,
     _sl_mult,
     _sl_setup,
@@ -301,41 +297,6 @@ def _sl_sb(sl: _Sl, rho_full: np.ndarray, beta: np.ndarray) -> np.ndarray:
                 a[ind] = a[ind] + np.exp(rho_full[k]) * (blk.S[j] @ beta[ind])
                 k += 1
     return a
-
-
-def _sl_initial_repara_ldet_const(sl: _Sl) -> float:
-    """``Σ_pen log λ`` — the ρ-independent gauge shift the non-orthogonal
-    ``Sl.setup`` transforms fold into ``log|Sλ|_+``.
-
-    bam evaluates ``log|Sλ|_+`` in the ORIGINAL gauge (``_log_det_S_pos``)
-    but :func:`_pi_fit_chol` returns ``ldetXXS`` in the reparameterised gauge
-    (its gram is ``D'(X'WX)D`` and its penalties are the repara'd
-    identities/projections). The REML score is ``ldetXXS − ldetS``; under the
-    block transform ``X→XD`` both terms pick up the SAME ρ-independent
-    ``2·log|D|_pen``, so subtracting this constant from the original-gauge
-    ``ldetS`` realigns the score VALUE while leaving the
-    congruence-invariant ρ-grad/Hessian untouched.
-
-    Per repara block the shift is ``−2·Σ_j log‖D[:,j]‖``: a diagonal/eigen
-    singleton has ``‖D[:,j]‖ = 1/√λ_j`` on penalised columns (and 1
-    elsewhere, contributing 0), so it sums to ``Σ log λ_j``; an orthogonal
-    multi-S ``D`` has unit columns → 0. This recovers exactly the value the
-    old ``_repara_ldet_const`` computed, read off gam's ``Sl`` blocks (so a
-    block ``Sl.setup`` split into singletons is accounted for correctly —
-    its now-nonzero shift cancels the matching shift in ``_pi_fit_chol``'s
-    ``ldetXXS``).
-    """
-    total = 0.0
-    for blk in sl.blocks:
-        if not blk.repara:
-            continue
-        D = blk.D
-        if D.ndim == 1:
-            colnorm = np.abs(D)
-        else:
-            colnorm = np.sqrt(np.einsum("ij,ij->j", D, D))
-        total += -2.0 * float(np.sum(np.log(colnorm)))
-    return total
 
 
 def _estimate_theta(
@@ -603,39 +564,6 @@ def _sl_add_s(sl: _Sl, A: np.ndarray, rho: np.ndarray) -> np.ndarray:
     return A
 
 
-def _sl_chol_lambda(sl: _Sl, rho: np.ndarray) -> None:
-    """mgcv ``ldetS(repara=FALSE)`` λ/St update used by ``Sl.fitChol``
-    (fast-REML.r:1598): set each block's current smoothing parameters and,
-    for multi-S blocks, the block total ``St = Σ_i exp(ρ_i) S_i`` — in the
-    INITIAL-REPARA (Sl.setup-projected) gauge, WITHOUT the gam.reparam
-    stability transform that the QR-path ``_ldet_s`` applies. ``Sl.fitChol``
-    operates directly on the initial-repara'd gram, so the penalty must be
-    applied in that gauge.
-
-    Mutates ``sl`` in place (mgcv updates ``ldS$Sl``); the downstream
-    structured products :func:`_sl_mult` / :func:`_sl_term_mult` then read
-    ``blk.lam`` / ``blk.St``. ``blk.Srp`` is reset to ``None`` so
-    ``_sl_term_mult`` uses the un-transformed per-penalty form
-    ``lam_i·(S_i·A)``. ``rho`` is the per-penalty log-sp in ``sl.blocks``
-    order.
-    """
-    sp = np.exp(np.asarray(rho, dtype=float))
-    k = 0
-    for blk in sl.blocks:
-        if blk.n_sp == 1:                          # singleton — multiple of I
-            blk.lam = np.array([sp[k]])
-            k += 1
-        else:                                      # multi-S — pre-summed St
-            m = blk.n_sp
-            blk.lam = sp[k:k + m].copy()
-            St = sp[k] * blk.S[0]
-            for j in range(1, m):
-                St = St + sp[k + j] * blk.S[j]
-            blk.St = St
-            blk.Srp = None
-            k += m
-
-
 def _d_det_xxs(sl: _Sl, PP: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """mgcv ``d.detXXS`` (fast-REML.r:1329-1367): first/second ρ-derivatives
     of ``log|X'X+Sλ|`` given the (unpivoted) inverse-Hessian ``PP = A⁻¹``.
@@ -648,7 +576,7 @@ def _d_det_xxs(sl: _Sl, PP: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
     All blocks bam builds are linear, so the non-linear ``AdS`` branch and
     the sparse-``Matrix`` guard are omitted. Reads the current ``blk.lam`` /
-    ``blk.St`` set by :func:`_sl_chol_lambda`.
+    ``blk.St`` set by ``_ldet_s(repara=False)``.
     """
     SA, inds = _sl_term_mult(sl, PP, full=False)
     nd = len(SA)
@@ -687,7 +615,7 @@ def _sl_ift_chol(sl: _Sl, XX: np.ndarray, R_pre: np.ndarray, d: np.ndarray,
     ``mgcv_Rpbacksolve`` (``dtrsm`` wrappers); the cross products are mgcv
     ``mgcv_pmmult2`` (``dgemm``) — so ``solve_triangular`` / ``@`` are the
     faithful ports. Reads the current ``blk.lam`` / ``blk.St`` set by
-    :func:`_sl_chol_lambda`.
+    ``_ldet_s(repara=False)``.
     """
     SA, _inds = _sl_term_mult(sl, beta, full=True)
     nd = len(SA)
@@ -735,8 +663,6 @@ def _pi_fit_chol(
     sl: _Sl, p: int, *, yy: float = 0.0,
     log_phi: float = 0.0, n: int = 0, Mp: int = 0,
     gamma: float = 1.0, phi_fixed: bool = True,
-    ldet_S: float = 0.0, ldet_S_grad: Optional[np.ndarray] = None,
-    ldet_S_hess: Optional[np.ndarray] = None,
 ) -> dict:
     """mgcv ``Sl.fitChol`` (fast-REML.r:1348-1444) port — given ``XX =
     X'WX`` and ``Xy = X'Wy``, solve the penalised LS problem at fixed
@@ -779,8 +705,6 @@ def _pi_fit_chol(
         Mp: null-space dimension.
         gamma: γ inflation factor.
         phi_fixed: True for canonical-link families (Poisson, Binomial).
-        ldet_S, ldet_S_grad, ldet_S_hess: log|S|_+ and its derivatives,
-            computed externally and passed in (they don't depend on XX).
 
     Returns dict with:
         beta:        (p,) coefficients.
@@ -791,12 +715,17 @@ def _pi_fit_chol(
         rank:        numerical rank of A.
         PP:          (p, p) ≈ A⁻¹ in original (un-pivoted) basis.
     """
-    n_sp = sum(blk.n_sp for blk in sl.blocks)
-
-    # 0. mgcv Sl.fitChol:1598 ``ldS <- ldetS(Sl, rho, repara=FALSE)`` — set
-    #    each block's current λ and total St in the initial-repara gauge, so
-    #    the structured penalty products below read the right λ.
-    _sl_chol_lambda(sl, rho)
+    # 0. mgcv Sl.fitChol:1596-1598 ``fixed <- rep(FALSE,...); ldS <- ldetS(Sl,
+    #    rho, fixed, np=ncol(XX), root=FALSE, repara=FALSE)`` — per-block
+    #    log|Sλ|_+ VALUE + ρ-derivatives (ldetSblock per multi-S block, the
+    #    analytic ``rank·ρ`` form per singleton), updating each block's λ/St
+    #    in the initial-repara gauge for the structured penalty products
+    #    below. Computed here, in the same gauge as ``ldetXXS``, so the REML
+    #    difference needs no gauge correction.
+    ldS = _ldet_s(sl, rho, repara=False, deriv=2)
+    ldet_S = float(ldS["ldetS"])
+    ldet_S_grad = ldS["ldet1"]
+    ldet_S_hess = ldS["ldet2"]
 
     # 1. Build A = XX + Sλ via mgcv Sl.addS (identity/block form).
     A = _sl_add_s(sl, XX, rho)
@@ -889,10 +818,6 @@ def _pi_fit_chol(
 
     # 11. REML gradient and Hessian (rho-only; log φ added below if free).
     phi = float(np.exp(log_phi))
-    if ldet_S_grad is None:
-        ldet_S_grad = np.zeros(n_sp)
-    if ldet_S_hess is None:
-        ldet_S_hess = np.zeros((n_sp, n_sp))
     grad = (
         dXXS_d1 - ldet_S_grad
         + (rss1 + bSb1) / (phi * gamma)
@@ -921,9 +846,8 @@ def _pi_fit_chol(
         hess = hess_new
 
     # 12b. REML VALUE + unpenalised working RSS (Sl.fit:1714, 1736) for
-    #      fast.REML.fit's step-halving + reml.scale. The discrete POI never
-    #      needs the value (it step-halves on the gradient), so it's only
-    #      meaningful when the caller passes the log|S|_+ VALUE in ``ldet_S``.
+    #      fast.REML.fit's step-halving + reml.scale (the discrete POI
+    #      step-halves on the gradient and ignores the value).
     #      This is the Gaussian working-model REML on the reduced (R, f) —
     #      ``(nobs/γ-Mp)·log(2πφ)`` normalisation, NOT any non-Gaussian ls:
     #      ``fast.REML.fit``/``Sl.fit`` treat the linearised (R, f) as Gaussian
@@ -960,6 +884,7 @@ def _pi_fit_chol(
         "step": step,
         "reml": reml_value,
         "rss": rss_unpen,
+        "ldetS": ldet_S,
         "ldetXXS": ldetXXS,
         "rank": rank_A,
         "PP": PP,
@@ -1903,8 +1828,8 @@ def _is_identity_link(family: Family) -> bool:
 
 
 def _fast_reml_fit(theta0: np.ndarray, *, include_log_phi: bool,
-                   max_iter: int = 200, work_dim: int, L, lsp0, slots, p: int,
-                   penalty_rank, sl: _Sl, XtX: np.ndarray, Xty: np.ndarray,
+                   max_iter: int = 200, work_dim: int, L, lsp0, p: int,
+                   sl: _Sl, XtX: np.ndarray, Xty: np.ndarray,
                    yty: float, Mp: int, gamma: float, n: int,
                    scale_fixed_value: float) -> dict:
     """mgcv ``fast.REML.fit`` (fast-REML.r:1740-1875) — Newton optimiser
@@ -1984,36 +1909,25 @@ def _fast_reml_fit(theta0: np.ndarray, *, include_log_phi: bool,
     # recovered by the caller (not used here).
     XX_pre = _sl_initial_repara(sl, XtX, both_sides=True)
     Xy_pre = _sl_initial_repara(sl, Xty, both_sides=True)
-    # ``log|Sλ|_+`` correction to the repara'd gauge: subtract the
-    # rho-independent ``Σ_pen log λ`` so ``ldetXXS − ldet_S`` (computed in
-    # _pi_fit_chol's repara'd gauge) matches mgcv's invariant difference.
-    ldS_const = _sl_initial_repara_ldet_const(sl)
 
     def _eval(t):
         # One Sl.fit / Sl.fitChol evaluation at working θ → dict with the
         # Gaussian working-model REML VALUE, the t(L)-contracted working
         # grad/Hess, and the unpenalised working RSS (for reml.scale).
+        # log|Sλ|_+ + ρ-derivatives come from _pi_fit_chol's internal
+        # ``ldetS(repara=FALSE)`` (Sl.fitChol:1598) — per-block, in the same
+        # initial-repara gauge as its ``ldetXXS``, so the REML difference
+        # needs no gauge correction.
         theta_sp = t[:n_work]
         rho = _rho_full(theta_sp)
         log_phi = (float(t[n_work]) if include_log_phi
                    else float(np.log(scale_fixed_value)))
-        # log|S|_+ value + ρ-derivatives — the XX-independent pieces.
-        S_full = _s_lambda(slots, p, rho)
-        S_full = 0.5 * (S_full + S_full.T)
-        S_pinv = _S_pinv(S_full, penalty_rank)
-        ldS_val = float(_log_det_S_pos(
-            rho, penalty_rank=penalty_rank, slots=slots, p=p)) - ldS_const
-        ldS_grad = _dlog_det_S_drho(
-            rho, S_pinv, S_full, slots=slots, p=p, penalty_rank=penalty_rank)
-        ldS_hess = _d2log_det_S_drho_drho(
-            rho, S_pinv, S_full, slots=slots, p=p, penalty_rank=penalty_rank)
         try:
             out = _pi_fit_chol(
                 XX_pre, Xy_pre, rho, sl, p,
                 yy=yty, log_phi=log_phi, n=n_int,
                 Mp=Mp, gamma=gamma,
                 phi_fixed=not include_log_phi,
-                ldet_S=ldS_val, ldet_S_grad=ldS_grad, ldet_S_hess=ldS_hess,
             )
         except (np.linalg.LinAlgError, FloatingPointError, ValueError):
             return None
@@ -3897,8 +3811,7 @@ class bam(gam):
             self._sl = _sl_setup(self._slots, self.p)
         res = _fast_reml_fit(
             theta0, include_log_phi=include_log_phi, max_iter=max_iter,
-            work_dim=self._work_dim, L=self._L, lsp0=self._lsp0,
-            slots=self._slots, p=self.p, penalty_rank=self._penalty_rank,
+            work_dim=self._work_dim, L=self._L, lsp0=self._lsp0, p=self.p,
             sl=self._sl, XtX=self._XtX, Xty=self._Xty, yty=self._yty,
             Mp=self._Mp, gamma=self._gamma, n=self.n,
             scale_fixed_value=self._scale_fixed_value)
@@ -4413,25 +4326,15 @@ class bam(gam):
                             log_phi_try = float(theta_try[n_work])
                         else:
                             log_phi_try = 0.0
-                        S_full_try = self._build_S_lambda(rho_try)
-                        S_full_try = 0.5 * (S_full_try + S_full_try.T)
-                        S_pinv_try = self._S_pinv(S_full_try)
-                        ldS_grad = self._dlog_det_S_drho(
-                            rho_try, S_pinv=S_pinv_try, S_full=S_full_try,
-                        )
-                        ldS_hess = self._d2log_det_S_drho_drho(
-                            rho_try, S_pinv=S_pinv_try, S_full=S_full_try,
-                        )
                         # ``Sl.initial.repara`` (fast-REML.r:517-588,
                         # bam.r:664-665) — reparameterize XX, Xy into mgcv's
                         # well-scaled gauge (every penalty block, two-sided)
                         # so the pivoted Cholesky in ``_pi_fit_chol``
                         # factorizes the same conditioned matrix mgcv does. β
                         # comes back in the repara'd basis and gets un-rotated
-                        # below. The POI step-halves on the
-                        # (congruence-invariant) gradient and passes no
-                        # ``ldet_S`` value, so no value correction is needed
-                        # here.
+                        # below. log|Sλ|_+ + its ρ-derivatives come from
+                        # ``_pi_fit_chol``'s internal ``ldetS(repara=FALSE)``
+                        # (Sl.fitChol:1598), in the same gauge.
                         XX_pre = _sl_initial_repara(
                             self._sl, self._XtX, both_sides=True)
                         Xy_pre = _sl_initial_repara(
@@ -4442,7 +4345,6 @@ class bam(gam):
                             yy=self._yty, log_phi=log_phi_try, n=n,
                             Mp=self._Mp, gamma=self._gamma,
                             phi_fixed=not include_log_phi,
-                            ldet_S_grad=ldS_grad, ldet_S_hess=ldS_hess,
                         )
                         # Undo the initial-repara on β (bam.r:759,
                         # inverse=TRUE) — the rest of the PIRLS / post-fit

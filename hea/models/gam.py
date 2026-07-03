@@ -13896,20 +13896,89 @@ def _sl_initial_repara(sl: _Sl, X: np.ndarray, inverse: bool = False,
     return X
 
 
+def _ldet_s_block(rS_list: list[np.ndarray], rho: np.ndarray,
+                  deriv: int = 2, root: bool = False) -> dict:
+    """mgcv ``ldetSblock`` (fast-REML.r:593-635): derivatives w.r.t. ρ of
+    ``log|S|`` where ``S = Σ_i tcrossprod(rS_i)·exp(ρ_i)``, when S is full
+    rank +ve def and no reparameterization is required — the per-block
+    engine of ``ldetS(repara=FALSE)`` (Sl.fitChol's log|Sλ|₊ oracle).
+
+    Diagonally pre-conditioned pivoted Cholesky of the summed penalty
+    (R's ``chol(pivot=TRUE)`` = dpstrf with its default rank tolerance),
+    then per term ``d1[i] = λ_i‖R'⁻¹(rS_i[piv,]/d[piv])‖²_F`` and
+    ``d2[i,j] = −λ_iλ_j Σ(M_i∘M_j)`` with ``M_i = tcrossprod(R'⁻¹·)``,
+    ``d2[i,i] += d1[i]``. Serial (nt=1) path. ``E`` is the summed penalty
+    when ``root=False``, its unpivoted Cholesky root otherwise.
+    """
+    from scipy.linalg.lapack import dpstrf
+    rho = np.asarray(rho, dtype=float)
+    lam = np.exp(rho)
+    m = len(rS_list)
+    S = (rS_list[0] @ rS_list[0].T) * lam[0]
+    p = S.shape[1]
+    for i in range(1, m):
+        S = S + (rS_list[i] @ rS_list[i].T) * lam[i]
+    E = None if root else S.copy()
+    d = np.diag(S).copy()
+    d[d <= 0.0] = 1.0
+    d = np.sqrt(d)
+    S_pre = (S / d).T / d                          # t(S/d)/d
+    c, piv_1based, r, _info = dpstrf(S_pre, lower=0)
+    R = np.triu(c)
+    piv = np.asarray(piv_1based, dtype=int) - 1
+    if r < p:
+        R[r:, r:] = 0.0                            # fix chol bug (:611)
+    if root:
+        rp = np.empty(p, dtype=int)                # reverse pivot (:613)
+        rp[piv] = np.arange(p)
+        E = R[:, rp] * d[None, :]                  # t(t(R[,rp])*d)
+    if r < p:                                      # rank deficiency (:616)
+        R = R[:r, :r]
+        piv = piv[:r]
+    dS1 = np.zeros(m)
+    dS2 = np.zeros((m, m))
+    RrS: list[np.ndarray] = []
+    # dlog|S|/drho_i = lam_i tr(S⁻¹S_i) = tr(R⁻ᵀrS_i rS_i'R⁻¹) etc. (:621)
+    for i in range(m):
+        # pforwardsolve: R transposed internally — solves R'x = b (:623).
+        Xi = solve_triangular(R.T, rS_list[i][piv, :] / d[piv, None],
+                              lower=True)
+        dS1[i] = float(np.sum(Xi * Xi)) * lam[i]
+        if deriv == 2:
+            Mi = Xi @ Xi.T                         # tcrossprod (:626)
+            RrS.append(Mi)
+            for j in range(i + 1):
+                v = -float(np.sum(RrS[i] * RrS[j])) * lam[i] * lam[j]
+                dS2[i, j] = dS2[j, i] = v
+            dS2[i, i] += dS1[i]
+    det = 2.0 * float(np.sum(np.log(np.diag(R)) + np.log(d[piv])))
+    return {"det": det, "det1": dS1, "det2": dS2, "E": E}
+
+
 def _ldet_s(sl: _Sl, rho: np.ndarray, fixed: np.ndarray | None = None,
             root: bool = False, stot: bool = False,
-            deriv: int = 2) -> dict:
-    """mgcv ``ldetS`` (fast-REML.r:762-1013), default path
-    (cholesky=FALSE, repara=TRUE, dense): log|Sλ|₊ with first/second
-    ρ-derivatives, the per-block multi-S reparameterization list ``rp``,
-    the total-penalty root ``E`` (zero rows dropped) and total ``S``.
+            deriv: int = 2, repara: bool = True) -> dict:
+    """mgcv ``ldetS`` (fast-REML.r:762-1013), default dense non-Cholesky
+    path: log|Sλ|₊ with first/second ρ-derivatives, the per-block multi-S
+    reparameterization list ``rp``, the total-penalty root ``E`` (zero
+    rows dropped) and total ``S``.
 
     Singleton blocks contribute ``rank·ρ_k`` analytically (their penalty
     is a partial identity after Sl.setup); multi-S blocks go through
-    ``_gam_reparam`` — the gam.fit3 ``gam.reparam`` similarity transform
-    already pinned against mgcv (§2.2). Updates each block's ``lam``,
-    ``St`` and ``Srp`` in place, mirroring the returned ``Sl``.
+    ``_gam_reparam`` when ``repara=True`` — the gam.fit3 ``gam.reparam``
+    similarity transform already pinned against mgcv (§2.2) — or
+    :func:`_ldet_s_block` when ``repara=False`` (fast-REML.r:909-910),
+    the un-transformed pivoted-Cholesky form ``Sl.fitChol`` uses on the
+    initial-repara'd gauge. Updates each block's ``lam``, ``St`` and
+    ``Srp`` in place, mirroring the returned ``Sl`` (``repara=False``
+    resets ``Srp`` to None and stores ``St = Σ λ_i·rS_i rS_i'``, mgcv's
+    ``grp$St <- grp$E``, fast-REML.r:911).
     """
+    if root and not repara:
+        # fast-REML.r:911/961 would store the ldetSblock ROOT in St for this
+        # combination — no live mgcv caller reaches it (Sl.fitChol passes
+        # root=FALSE); out of scope: raise, never silent.
+        raise NotImplementedError("ldetS root=TRUE with repara=FALSE")
     rho = np.asarray(rho, dtype=float)
     n_sp_total = sum(blk.n_sp for blk in sl.blocks)
     if fixed is None:
@@ -13938,11 +14007,16 @@ def _ldet_s(sl: _Sl, rho: np.ndarray, fixed: np.ndarray | None = None,
             blk.lam = np.array([np.exp(rho[k_sp])])
             k_sp += 1
         else:
-            # Linear multi-S block (fast-REML.r:899-1007): gam.reparam.
+            # Linear multi-S block (fast-REML.r:899-1007): gam.reparam
+            # (repara=TRUE) or ldetSblock (repara=FALSE), fast-REML.r:909-910.
             m = blk.n_sp
             ind_sp = slice(k_sp, k_sp + m)
             ldS += blk.ldet
-            grp = _gam_reparam(blk.rS, rho[ind_sp], deriv)
+            if repara:
+                grp = _gam_reparam(blk.rS, rho[ind_sp], deriv)
+            else:
+                grp = _ldet_s_block(blk.rS, rho[ind_sp], deriv=deriv,
+                                    root=False)
             blk.lam = np.exp(rho[ind_sp])
             ldS += grp["det"]
             free = ~fixed[ind_sp]
@@ -13958,23 +14032,33 @@ def _ldet_s(sl: _Sl, rho: np.ndarray, fixed: np.ndarray | None = None,
                     k_deriv += nd
             else:
                 k_deriv += int(np.sum(free))
-            rp.append({
-                "ind": blk.pen_cols(),
-                "Qs": grp["Qs"],
-                "repara": blk.repara,
-            })
-            blk.Srp = [
-                blk.lam[i] * (grp["rS"][i] @ grp["rS"][i].T)
-                for i in range(m)
-            ]
-            blk.St = grp["S"]
+            if repara:
+                # Reparameterization info + Srp only when the stabilising
+                # transform is applied (fast-REML.r:929-939).
+                rp.append({
+                    "ind": blk.pen_cols(),
+                    "Qs": grp["Qs"],
+                    "repara": blk.repara,
+                })
+                blk.Srp = [
+                    blk.lam[i] * (grp["rS"][i] @ grp["rS"][i].T)
+                    for i in range(m)
+                ]
+                blk.St = grp["S"]
+            else:
+                # ldetSblock returns the summed penalty in E when root==FALSE
+                # (fast-REML.r:911 ``grp$St <- grp$E``); no rp entry, and Srp
+                # reset so Sl.mult/Sl.termMult use the un-transformed
+                # ``lam_i·(S_i·A)`` form.
+                blk.Srp = None
+                blk.St = grp["E"]
             k_sp += m
             if root:
                 Eb = grp["E"]
                 E[blk.start:blk.start + Eb.shape[0],
                   blk.start:blk.start + Eb.shape[1]] = Eb
             if stot:
-                Stb = grp["S"]
+                Stb = blk.St
                 S[blk.start:blk.start + Stb.shape[0],
                   blk.start:blk.start + Stb.shape[1]] = Stb
     if root:
