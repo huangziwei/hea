@@ -9,8 +9,18 @@ use pyo3::prelude::*;
 use super::bd0_scale::BD0_SCALE;
 use super::coeffs::{S, STIRLERR_HALVES};
 use super::consts::{DBL_MIN, M_2PI, M_LN2, M_LN_2PI, M_LN_SQRT_2PI, M_SQRT_2PI, X_LRG};
+use super::gamma::lgamma1p;
 use super::lgamma::lgammafn;
 use super::util::{frexp, ldexp, rfma};
+
+/// Platform libm `lgamma` — stirlerr.c:120 / lbeta.c:76 call it directly
+/// (NOT R's `lgammafn`); mirror the exact symbol R links.
+pub(crate) fn libm_lgamma(x: f64) -> f64 {
+    extern "C" {
+        fn lgamma(x: f64) -> f64;
+    }
+    unsafe { lgamma(x) }
+}
 
 /// R's `stirlerr(n) = log(n!) - log(sqrt(2*pi*n)*(n/e)^n)`.
 pub fn stirlerr(n: f64) -> f64 {
@@ -21,11 +31,13 @@ pub fn stirlerr(n: f64) -> f64 {
         }
         if n >= 1.0 && n <= 5.25 {
             let l_n = n.ln();
-            // C: lgamma(n) + n*(1 - l_n) + ldexp(..); only the n*(..)+lgamma fuses.
-            return rfma(n, 1.0 - l_n, lgammafn(n)) + (l_n - M_LN_2PI) * 0.5;
+            // C: lgamma(n) + n*(1 - l_n) + ldexp(..) — LIBM lgamma
+            // (stirlerr.c:120); only the n*(..)+lgamma fuses.
+            return rfma(n, 1.0 - l_n, libm_lgamma(n)) + (l_n - M_LN_2PI) * 0.5;
         }
         if n < 1.0 {
-            return rfma(-(n + 0.5), n.ln(), lgammafn(1.0 + n)) + n - M_LN_SQRT_2PI;
+            // C: lgamma1p(n) - (n + 0.5)*log(n) + n - M_LN_SQRT_2PI
+            return rfma(-(n + 0.5), n.ln(), lgamma1p(n)) + n - M_LN_SQRT_2PI;
         }
         // 5.25 < n <= 23.5 — asymptotic series, length by threshold
         let nn = n * n;

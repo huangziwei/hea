@@ -130,7 +130,7 @@ pub(crate) fn log1pmx(x: f64) -> f64 {
     r * rfma(2.0 * y, logcf(y, 3.0, 2.0, tol_logcf), -x)
 }
 
-fn lgamma1p(a: f64) -> f64 {
+pub(crate) fn lgamma1p(a: f64) -> f64 {
     if a.abs() >= 0.5 {
         return lgammafn(a + 1.0);
     }
@@ -294,7 +294,8 @@ fn pd_lower_series(lambda: f64, mut y: f64) -> f64 {
     }
     if y != y.floor() {
         let f = pd_lower_cf(y, lambda + 1.0 - y);
-        sum += term * f;
+        // C `sum += term * f` — compound add with RHS mul; clang fuses.
+        sum = rfma(term, f, sum);
     }
     sum
 }

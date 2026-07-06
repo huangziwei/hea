@@ -13,6 +13,7 @@ use super::loader::{bd0, stirlerr};
 use super::norm::{dnorm5_scalar, dt0, dt1, pnorm5_scalar, qnorm5_scalar};
 use super::qbeta::qbeta_scalar;
 use super::toms708::{lbeta_scalar, pbeta_scalar};
+use super::util::rfma;
 
 const M_1_SQRT_2PI: f64 = 0.398942280401432677939946059934;
 const M_1_PI: f64 = 0.318309886183790671537767526745;
@@ -36,15 +37,18 @@ pub(crate) fn pt_scalar(x: f64, n: f64, mut lower_tail: bool, log_p: bool) -> f6
     if !n.is_finite() {
         return pnorm5_scalar(x, 0.0, 1.0, lower_tail, log_p);
     }
-    let nx = 1.0 + (x / n) * x;
+    let nx = rfma(x / n, x, 1.0);
     let mut val;
     if nx > 1e100 {
-        let lval = -0.5 * n * (2.0 * x.abs().ln() - n.ln()) - lbeta_scalar(0.5 * n, 0.5)
-            - (0.5 * n).ln();
+        let lval = rfma(
+            -0.5 * n,
+            2.0 * x.abs().ln() - n.ln(),
+            -lbeta_scalar(0.5 * n, 0.5),
+        ) - (0.5 * n).ln();
         val = if log_p { lval } else { lval.exp() };
     } else {
         val = if n > x * x {
-            pbeta_scalar(x * x / (n + x * x), 0.5, n / 2.0, false, log_p)
+            pbeta_scalar(x * x / rfma(x, x, n), 0.5, n / 2.0, false, log_p)
         } else {
             pbeta_scalar(1.0 / nx, n / 2.0, 0.5, true, log_p)
         };
@@ -95,9 +99,9 @@ pub(crate) fn pf_scalar(x: f64, df1: f64, df2: f64, lower_tail: bool, log_p: boo
         return pgamma_scalar(df2 / x, df2 / 2.0, 2.0, !lower_tail, log_p);
     }
     let x2 = if df1 * x > df2 {
-        pbeta_scalar(df2 / (df2 + df1 * x), df2 / 2.0, df1 / 2.0, !lower_tail, log_p)
+        pbeta_scalar(df2 / rfma(df1, x, df2), df2 / 2.0, df1 / 2.0, !lower_tail, log_p)
     } else {
-        pbeta_scalar(df1 * x / (df2 + df1 * x), df1 / 2.0, df2 / 2.0, lower_tail, log_p)
+        pbeta_scalar(df1 * x / rfma(df1, x, df2), df1 / 2.0, df2 / 2.0, lower_tail, log_p)
     };
     if !x2.is_nan() {
         x2
@@ -135,7 +139,7 @@ pub(crate) fn dt_scalar(x: f64, n: f64, give_log: bool) -> f64 {
         u = n * l_x2n;
     } else {
         l_x2n = x2n.ln_1p() / 2.0;
-        u = -bd0(n / 2.0, (n + x * x) / 2.0) + x * x / 2.0;
+        u = -bd0(n / 2.0, rfma(x, x, n) / 2.0) + x * x / 2.0;
     }
     if give_log {
         return t - u - (M_LN_SQRT_2PI + l_x2n);
@@ -144,6 +148,17 @@ pub(crate) fn dt_scalar(x: f64, n: f64, give_log: bool) -> f64 {
     (t - u).exp() * M_1_SQRT_2PI * i_sqrt
 }
 
+/// R's `tanpi(x) = tan(pi*x)` (cospi.c): libm `__tanpi` on darwin (R's
+/// HAVE___TANPI branch), the `Rtanpi` fallback elsewhere.
+#[cfg(target_os = "macos")]
+pub(crate) fn tanpi(x: f64) -> f64 {
+    extern "C" {
+        fn __tanpi(x: f64) -> f64;
+    }
+    unsafe { __tanpi(x) }
+}
+
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn tanpi(x: f64) -> f64 {
     if x.is_nan() {
         return x;
@@ -161,6 +176,10 @@ pub(crate) fn tanpi(x: f64) -> f64 {
         0.0
     } else if x == 0.5 {
         f64::NAN
+    } else if x == 0.25 {
+        1.0
+    } else if x == -0.25 {
+        -1.0
     } else {
         (PI * x).tan()
     }

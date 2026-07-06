@@ -280,6 +280,78 @@ def _build_cases():
         add(f"pexp_{lt}", "pexp", [xe, se], (lt, False))
         add(f"qexp_{lt}", "qexp", [qpe, se], (lt, False))
 
+    # --- FMA-contraction / platform-libm materialization points --------------
+    # R's CRAN build (clang, default -ffp-contract=on) fuses `a*b + c` written
+    # in one C expression to fmadd on arm64, and links platform-libm
+    # __sinpi/__tanpi/lgamma in cospi.c / stirlerr.c:120 / lbeta.c:76. Each
+    # point below materialized a last-ulp divergence until the port mirrored
+    # the exact contraction/symbol; keep them pinned against live R.
+    # bpser `z = a*log(x) - betaln(a,b)` — the original traced point, plus
+    # bfrac/basym/bgrat census hits at large shapes.
+    add("fma_pbeta_log_upper", "pbeta",
+        [np.array([0.9852216748768474, 0.08636146016681467,
+                   0.2903716807336236]),
+         np.array([2.0, 9.589203880616369, 2855.5232943161823]),
+         np.array([100001.0, 7819.912855463742, 13825.861560595382])],
+        (False, True))
+    add("fma_pbeta_plain", "pbeta",
+        [np.array([0.3678134730867635, 0.6511511075950023]),
+         np.array([8739.554082286646, 1124.8701718194927]),
+         np.array([8682.928425324666, 3.230859039365317])],
+        (True, False))
+    # pd_lower_series `sum += term * f` (pgamma.c:498) via the qgamma Newton.
+    add("fma_qgamma_upper", "qgamma",
+        [np.array([0.4355139643795751, 0.39636761591153125,
+                   0.13513636327126444]),
+         np.array([2.6669191376302344, 2.536168158840434,
+                   2.502400760154327]),
+         np.ones(3)], (False, False))
+    # gammafn/lgammafn negative x — platform __sinpi (cospi.c HAVE___SINPI).
+    add("fma_gammafn_sinpi", "gammafn",
+        [np.array([-77.24812758594393, -22.139344079349083,
+                   -30.668781877071297, -11.047609531649897])])
+    add("fma_lgammafn_sinpi", "lgammafn",
+        [np.array([-77.24812758594393, -22.139344079349083,
+                   -30.668781877071297, -11.047609531649897])])
+    # stirlerr.c:120 libm lgamma (MM2, 1<=n<=5.25) + lgamma1p (n<1), through
+    # dgamma's dpois_raw at non-integer shape.
+    add("fma_dgamma_stirlerr", "dgamma",
+        [np.array([0.0160354563943336, 0.13706135587904972]),
+         np.array([2.035706520012819, 0.07697169460569216]),
+         np.ones(2)], (True,))
+    # lbeta.c:76 libm lgamma (p < 1e-306).
+    add("fma_lbeta_tiny", "lbeta",
+        [np.array([1e-307, 5e-307]), np.array([5.0, 2.5])])
+    # pt.c `1 + (x/n)*x` / `n + x*x`; pf.c `df2 + df1*x`; dbeta.c lval.
+    add("fma_pt_log_upper", "pt",
+        [np.array([32.590139391805508, 117.24654876041654]),
+         np.array([2088.0050570848925, 1496.6629770688498])],
+        (False, True))
+    add("fma_pf_log_upper", "pf",
+        [np.array([422.04704175918579, 1.306547315051616,
+                   2.4685076649519151]),
+         np.array([4.8002726733580481, 305.1263899607892,
+                   918.50946023950348]),
+         np.array([306.96100608680996, 3.3554946569535344,
+                   0.86639519425105682])],
+        (False, True))
+    add("fma_dbeta_lval", "dbeta",
+        [np.array([0.62571187908681525, 0.13513636327126444]),
+         np.array([0.4617840216011842, 1.9180888552809936]),
+         np.array([0.12184792400934256, 0.74393942619217313])],
+        (False,))
+    # qbeta swapped-tail u = R_Log1_Exp(0) — C99 log(±0) = -Inf, no exception.
+    add("fma_qbeta_log1exp_edge", "qbeta",
+        [np.array([0.23074964248420893, 0.5373735010591706]),
+         np.array([0.4617840216011842, 0.18892481378342565]),
+         np.array([0.12184792400934256, 0.11337311528534429])],
+        (True, False))
+    # qt df<1: bisection `(ux-lx)/fabs(nx)` at nx == 0 (C99 Inf, no raise) and
+    # the pt overflow lane `fma(x/n, x, 1)` -> Inf during bracket doubling.
+    add("fma_qt_df_lt_1", "qt",
+        [np.array([0.5, 0.9999, 0.13513636327126444]),
+         np.array([0.4, 0.4, 0.9])], (True, False))
+
     return C
 
 
@@ -298,6 +370,35 @@ def test_rs_matches_r(case, r_oracle):
     name, fn, arrays, flags = case
     got = getattr(rs, fn)(*arrays, *flags)
     _assert_bit_exact(got, r_oracle[name])
+
+
+_FMA_CASES = [c for c in CASES if c[0].startswith("fma_")]
+
+
+@pytest.mark.parametrize("case", _FMA_CASES, ids=[c[0] for c in _FMA_CASES])
+def test_fma_cases_python_matches_rs(case):
+    """Pure-Python nmath scalars ≡ rust 0-ulp at the FMA-materialization
+    points. Both sides share the per-arch ``_rfma``/``rfma`` contraction and
+    platform-libm (``__sinpi``/``lgamma``) decisions, so unlike the live-R
+    gate this holds bit-for-bit on every platform; it pins the Python twins
+    of every contraction site the ``fma_*`` R cases pin for rust."""
+    from hea.R import nmath as nm
+    py_fn = {
+        "pbeta": nm.pbeta, "qbeta": nm.qbeta, "qgamma": nm.qgamma,
+        "dgamma": nm.dgamma, "gammafn": nm.gammafn,
+        "lgammafn": nm._lgammafn, "lbeta": nm.lbeta, "pt": nm.pt,
+        "pf": nm.pf, "dbeta": nm.dbeta, "qt": nm.qt,
+    }
+    name, fn, arrays, flags = case
+    got_rs = np.asarray(getattr(rs, fn)(*arrays, *flags))
+    got_py = np.array([py_fn[fn](*(float(v) for v in args), *flags)
+                       for args in zip(*arrays)])
+    assert got_py.shape == got_rs.shape
+    for g, e in zip(got_py, got_rs):
+        if np.isnan(e):
+            assert np.isnan(g)
+        else:
+            assert _bits(g) == _bits(e), f"py={g!r} rs={e!r}"
 
 
 # ---------------------------------------------------------------------------

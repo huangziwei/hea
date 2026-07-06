@@ -35,9 +35,16 @@ import polars as pl
 _R_FMA = platform.machine().lower() in ("arm64", "aarch64") and hasattr(math, "fma")
 if _R_FMA:
     def _rfma(a, b, c):
-        return math.fma(a, b, c)
+        # C99 fma never raises: overflow -> +-Inf, invalid (Inf*0) -> NaN.
+        # math.fma raises OverflowError/ValueError there instead; the plain
+        # expression reproduces C's Inf/NaN results exactly (fused vs unfused
+        # rounding only differs for finite results).
+        try:
+            return math.fma(a, b, c)
+        except (OverflowError, ValueError):
+            return a * b + c
 
-    _rfma_ufunc = np.frompyfunc(math.fma, 3, 1)
+    _rfma_ufunc = np.frompyfunc(_rfma, 3, 1)
 
     def _rfma_vec(a, b, c):
         return _rfma_ufunc(a, b, c).astype(np.float64)

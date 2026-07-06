@@ -19,7 +19,9 @@ duplicated.
 """
 from __future__ import annotations
 
+import ctypes
 import math
+import sys
 
 import numpy as np
 
@@ -168,7 +170,7 @@ def qnorm5(p: float, mu: float = 0.0, sigma: float = 1.0,
     q = p_ - 0.5
 
     if abs(q) <= 0.425:
-        r = 0.180625 - q * q
+        r = _rfma(-q, q, 0.180625)
         val = q * _qn_horner(r, _QN_A) / _qn_horner(r, _QN_B)
         return mu + sigma * val
 
@@ -476,7 +478,7 @@ def qnorm5_vec(p, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
     res = np.full(pr.shape, np.nan, dtype=float)
     central = np.abs(q) <= 0.425
     qc = q[central]
-    rc = 0.180625 - qc * qc
+    rc = _rfma_vec(-qc, qc, 0.180625)
     # vector path: pass the per-arch ARRAY fma (`_rfma_vec`); the default scalar
     # `_rfma` is `math.fma` on arm64, which rejects array args (rng.py qnorm does
     # the same). x86's default `_rfma` is `a*b+c` so this was latent there.
@@ -713,14 +715,16 @@ def _stirlerr(n):
     if np.any(mm2_mask):
         nm = n[mm2_mask]
         l_n = np.log(nm)
-        out[mm2_mask] = (_lgammafn_arr(nm) + nm * (1.0 - l_n)
+        lg = np.array([_c_lgamma(float(v)) for v in nm])
+        out[mm2_mask] = (_rfma_vec(nm, 1.0 - l_n, lg)
                          + (l_n - _M_LN_2PI) * 0.5)
 
     # n < 1, not in table
     lt1_mask = le_235 & ~table_mask & ~mm2_mask & (n < 1.0)
     if np.any(lt1_mask):
         nm = n[lt1_mask]
-        out[lt1_mask] = (_lgammafn_arr(1.0 + nm) - (nm + 0.5) * np.log(nm)
+        out[lt1_mask] = (_rfma_vec(-(nm + 0.5), np.log(nm),
+                                   _lgamma1p_vec(nm))
                          + nm - _M_LN_SQRT_2PI)
 
     # 5.25 < n <= 23.5 — asymptotic series, branches by n threshold.
@@ -798,8 +802,8 @@ def _bd0(x, np_):
                               np.log(np.where(np.isfinite(xnp), xnp, 1.0)),
                               np.log(xf) - np.log(nf))
         out[far] = np.where(xf > nf,
-                            xf * (lg_x_n - 1.0) + nf,
-                            xf * lg_x_n + nf - xf)
+                            _rfma_vec(xf, lg_x_n - 1.0, nf),
+                            _rfma_vec(xf, lg_x_n, nf) - xf)
 
     # Close branch: Taylor series with per-element early exit.
     if np.any(close):
@@ -902,7 +906,7 @@ def _chebyshev_eval(x, a, n):
     for i in range(1, n + 1):
         b2 = b1
         b1 = b0
-        b0 = twox * b1 - b2 + a[n - i]
+        b0 = _rfma(twox, b1, -b2) + a[n - i]
     return (b0 - b2) * 0.5
 
 
@@ -912,12 +916,40 @@ def _lgammacor(x):
         return _NAN
     if x < _LGC_XBIG:
         tmp = 10 / x
-        return _chebyshev_eval(tmp * tmp * 2 - 1, _ALGMCS, _NALGM) / x
+        return _chebyshev_eval(_rfma(tmp * tmp, 2., -1.), _ALGMCS, _NALGM) / x
     return 1 / (x * 12)
 
 
+# --- platform libm symbols R links directly ----------------------------------
+# R's C occasionally calls the PLATFORM libm instead of its own kernels:
+# `lgamma(n)` in stirlerr.c:120 and lbeta.c:76 (libm lgamma — NOT R's
+# lgammafn, and NOT CPython's math.lgamma, which is CPython's own
+# implementation), and `__sinpi`/`__tanpi` from the BSD/macOS libm when
+# configure finds them (HAVE___SINPI/HAVE___TANPI; cospi.c's portable
+# fmod+sin fallbacks are only compiled elsewhere). Bind the very same
+# symbols, like `_rfma` mirrors the per-arch FMA-contraction decision.
+if sys.platform == "darwin":
+    _libm_c = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+    _c_sinpi = _libm_c["__sinpi"]
+    _c_sinpi.argtypes = [ctypes.c_double]
+    _c_sinpi.restype = ctypes.c_double
+    _c_tanpi = _libm_c["__tanpi"]
+    _c_tanpi.argtypes = [ctypes.c_double]
+    _c_tanpi.restype = ctypes.c_double
+else:
+    import ctypes.util as _ctypes_util
+    _libm_c = ctypes.CDLL(_ctypes_util.find_library("m") or "libm.so.6")
+    _c_sinpi = _c_tanpi = None
+_c_lgamma = _libm_c["lgamma"]
+_c_lgamma.argtypes = [ctypes.c_double]
+_c_lgamma.restype = ctypes.c_double
+
+
 def _sinpi(x):
-    """R's portable ``sinpi(x) = sin(pi*x)`` (cospi.c fallback branch)."""
+    """R's ``sinpi(x) = sin(pi*x)`` (cospi.c): libm ``__sinpi`` on darwin
+    (R's HAVE___SINPI branch), the portable fallback elsewhere."""
+    if _c_sinpi is not None:
+        return _c_sinpi(x)
     if math.isnan(x):
         return x
     if not math.isfinite(x):
@@ -1190,7 +1222,7 @@ def gammafn(x):
             n -= 1
         y = x - n
         n -= 1
-        value = _chebyshev_eval(y * 2 - 1, _GAMCS, _NGAM) + .9375
+        value = _chebyshev_eval(_rfma(y, 2., -1.), _GAMCS, _NGAM) + .9375
         if n == 0:
             return value
         if n < 0:
@@ -1214,7 +1246,8 @@ def gammafn(x):
             value *= i
     else:
         corr = _stirlerr(y) if (2 * y == int(2 * y)) else _lgammacor(y)
-        value = math.exp((y - 0.5) * math.log(y) - y + _M_LN_SQRT_2PI + corr)
+        value = math.exp(_rfma(y - 0.5, math.log(y), -y)
+                         + _M_LN_SQRT_2PI + corr)
     if x > 0:
         return value
     sinpiy = _sinpi(y)
@@ -1240,10 +1273,10 @@ def _lgammafn(x):
         if x > 1e17:
             return x * (math.log(x) - 1.0)
         elif x > 4934720.0:
-            return _M_LN_SQRT_2PI + (x - 0.5) * math.log(x) - x
-        return _M_LN_SQRT_2PI + (x - 0.5) * math.log(x) - x + _lgammacor(x)
+            return _rfma(x - 0.5, math.log(x), _M_LN_SQRT_2PI) - x
+        return _rfma(x - 0.5, math.log(x), _M_LN_SQRT_2PI) - x + _lgammacor(x)
     sinpiy = abs(_sinpi(y))
-    return (_M_LN_SQRT_PId2 + (x - 0.5) * math.log(y) - x
+    return (_rfma(x - 0.5, math.log(y), _M_LN_SQRT_PId2) - x
             - math.log(sinpiy) - _lgammacor(y))
 
 
@@ -1272,22 +1305,23 @@ def _logcf(x, i, d, eps):
     c2 = i + d
     c4 = c2 + d
     a1 = c2
-    b1 = i * (c2 - i * x)
+    # C: `a*b - c*d` fuses the first product (clang fmadd/fnmul), `a - c` → fmsub.
+    b1 = i * _rfma(-i, x, c2)           # i*(c2 - i*x)
     b2 = d * d * x
-    a2 = c4 * c2 - b2
-    b2 = c4 * b1 - i * b2
+    a2 = _rfma(c4, c2, -b2)             # c4*c2 - b2
+    b2 = _rfma(c4, b1, -(i * b2))       # c4*b1 - i*b2
     sf = _PG_SCALEFACTOR
-    while abs(a2 * b1 - a1 * b2) > abs(eps * b1 * b2):
+    while abs(_rfma(a2, b1, -(a1 * b2))) > abs(eps * b1 * b2):
         c3 = c2 * c2 * x
         c2 += d
         c4 += d
-        a1 = c4 * a2 - c3 * a1
-        b1 = c4 * b2 - c3 * b1
+        a1 = _rfma(c4, a2, -(c3 * a1))
+        b1 = _rfma(c4, b2, -(c3 * b1))
         c3 = c1 * c1 * x
         c1 += d
         c4 += d
-        a2 = c4 * a1 - c3 * a2
-        b2 = c4 * b1 - c3 * b2
+        a2 = _rfma(c4, a1, -(c3 * a2))
+        b2 = _rfma(c4, b1, -(c3 * b2))
         if abs(b2) > sf:
             a1 /= sf
             b1 /= sf
@@ -1310,10 +1344,11 @@ def _log1pmx(x):
     y = r * r
     if abs(x) < 1e-2:
         two = 2.0
-        return r * ((((two / 9 * y + two / 7) * y + two / 5) * y
-                     + two / 3) * y - x)
+        return r * _rfma(
+            _rfma(_rfma(_rfma(two / 9, y, two / 7), y, two / 5), y, two / 3),
+            y, -x)
     tol_logcf = 1e-14
-    return r * (2 * y * _logcf(y, 3, 2, tol_logcf) - x)
+    return r * _rfma(2 * y, _logcf(y, 3, 2, tol_logcf), -x)
 
 
 # coeffs[i] = (zeta(i+2)-1)/(i+2), i=0..39  (pgamma.c lgamma1p)
@@ -1371,13 +1406,24 @@ def _lgamma1p(a):
     tol_logcf = 1e-14
     lgam = c * _logcf(-a / 2, N + 2, 1, tol_logcf)
     for i in range(N - 1, -1, -1):
-        lgam = _LGAMMA1P_COEFFS[i] - a * lgam
-    return (a * lgam - eulers_const) * a - _log1pmx(a)
+        lgam = _rfma(-a, lgam, _LGAMMA1P_COEFFS[i])
+    return _rfma(_rfma(a, lgam, -eulers_const), a, -_log1pmx(a))
 
 
 def _R_Log1_Exp(x):
-    """R's ``R_Log1_Exp(x) = log(1 - exp(x))`` (dpq.h), stable form."""
-    return math.log(-math.expm1(x)) if x > -_M_LN2 else math.log1p(-math.exp(x))
+    """R's ``R_Log1_Exp(x) = log(1 - exp(x))`` (dpq.h), stable form.
+
+    C99 ``log`` edge semantics spelled out: ``log(±0) = -Inf`` and
+    ``log(negative) = NaN`` without raising — Python's ``math.log``
+    raises on both. Reachable: qbeta.c's swapped-tail ``u = R_Log1_Exp(u)``
+    with ``u == 0`` (xinbta pinned at 1) must yield ``-Inf`` like C.
+    """
+    if x > -_M_LN2:
+        v = -math.expm1(x)
+        if v > 0.:
+            return math.log(v)
+        return _NEGINF if v == 0. else _NAN
+    return math.log1p(-math.exp(x))
 
 
 def _logspace_add(logx, logy):
@@ -1597,7 +1643,7 @@ def _ebd0(x, M):
     if xa.size == 0:
         return (float(yh[0]), float(yl[0])) if scalar else (yh, yl)
 
-    i = np.floor((r - 0.5) * (2 * N) + 0.5).astype(np.int64)
+    i = np.floor(_rfma_vec(r - 0.5, float(2 * N), 0.5)).astype(np.int64)
     f = np.floor(S / (0.5 + i / (2.0 * N)) + 0.5)
     fg = np.ldexp(f, -(e + Sb))
 
@@ -1626,7 +1672,7 @@ def _ebd0(x, M):
         np.add(ll, d2, out=ll)
 
     # ADD1(-x * log1pmx((M*fg - x) / x))
-    arg = (Ma * fg - xa) / xa
+    arg = _rfma_vec(Ma, fg, -xa) / xa
     log1pmx_val = _log1pmx_vec(arg)  # R's ebd0 uses the accurate log1pmx, not log1p(arg)-arg
     add1(-xa * log1pmx_val)
 
@@ -1687,9 +1733,11 @@ def _pow1p(x, y):
     for k, poly in enumerate((
             lambda xx: np.ones_like(xx),
             lambda xx: xx + 1.0,
-            lambda xx: xx * (xx + 2.0) + 1.0,
-            lambda xx: xx * (xx * (xx + 3.0) + 3.0) + 1.0,
-            lambda xx: xx * (xx * (xx * (xx + 4.0) + 6.0) + 4.0) + 1.0)):
+            lambda xx: _rfma_vec(xx, xx + 2.0, 1.0),
+            lambda xx: _rfma_vec(xx, _rfma_vec(xx, xx + 3.0, 3.0), 1.0),
+            lambda xx: _rfma_vec(xx, _rfma_vec(xx, _rfma_vec(xx, xx + 4.0,
+                                                             6.0), 4.0),
+                                 1.0))):
         m = is_int & (y == k) & ~done
         if m.any():
             out[m] = poly(x[m])
@@ -1749,7 +1797,8 @@ def _dpois_raw(x, lambda_, give_log: bool = True):
         ln = lam[sub]
         out[sub] = np.where(~np.isfinite(xn),
                             NEG_INF,
-                            -ln + xn * np.log(ln) - _lgammafn_arr(xn + 1.0))
+                            _rfma_vec(xn, np.log(ln), -ln)
+                            - _lgammafn_arr(xn + 1.0))
 
     # Common (saddlepoint) path.
     m_yl = m_yh = m_r = m_Lrg = None
@@ -1851,7 +1900,7 @@ def _dbinom_raw(x, n, p, q, give_log: bool = True):
         lc = (_stirlerr(nm) - _stirlerr(xm) - _stirlerr(nm - xm)
               - _bd0(xm, nm * pm) - _bd0(nm - xm, nm * qm))
         lf = _M_LN_2PI + np.log(xm) + np.log1p(-xm / nm)
-        out[main] = lc - 0.5 * lf
+        out[main] = _rfma_vec(-0.5, lf, lc)
 
     if not give_log:
         # main + {p,q}==0 + oob edges are R_D_exp(log-value); only the x==0 /
@@ -1902,17 +1951,17 @@ def _pgamma_smallx(x, alph, lower_tail, log_p):
             f2 = _dpois_raw(alph, x, log_p)
             f2 = f2 + x if log_p else f2 * math.exp(x)
         elif log_p:
-            f2 = alph * math.log(x) - _lgamma1p(alph)
+            f2 = _rfma(alph, math.log(x), -_lgamma1p(alph))
         else:
             f2 = math.pow(x, alph) / math.exp(_lgamma1p(alph))
         return f1 + f2 if log_p else f1 * f2
     else:
-        lf2 = alph * math.log(x) - _lgamma1p(alph)
+        lf2 = _rfma(alph, math.log(x), -_lgamma1p(alph))
         if log_p:
             return _R_Log1_Exp(math.log1p(sum_) + lf2)
         f1m1 = sum_
         f2m1 = math.expm1(lf2)
-        return -(f1m1 + f2m1 + f1m1 * f2m1)
+        return -_rfma(f1m1, f2m1, f1m1 + f2m1)
 
 
 def _pd_upper_series(x, y, log_p):
@@ -1987,7 +2036,7 @@ def _pd_lower_series(lambda_, y):
         y -= 1
     if y != math.floor(y):
         f = _pd_lower_cf(y, lambda_ + 1 - y)
-        sum_ += term * f
+        sum_ = _rfma(term, f, sum_)
     return sum_
 
 
@@ -2028,8 +2077,8 @@ def _ppois_asymp(x, lambda_, lower_tail, log_p):
     res1_ig = res1_term = math.sqrt(x)
     res2_ig = res2_term = s2pt
     for i in range(1, 8):
-        res12 += res1_ig * _PPA_COEFS_A[i]
-        res12 += res2_ig * _PPA_COEFS_B[i]
+        res12 = _rfma(res1_ig, _PPA_COEFS_A[i], res12)
+        res12 = _rfma(res2_ig, _PPA_COEFS_B[i], res12)
         res1_term *= pt_ / i
         res2_term *= 2 * pt_ / (2 * i + 1)
         res1_ig = res1_ig / x + res1_term
@@ -2037,7 +2086,7 @@ def _ppois_asymp(x, lambda_, lower_tail, log_p):
     elfb = x
     elfb_term = 1.0
     for i in range(1, 8):
-        elfb += elfb_term * _PPA_COEFS_B[i]
+        elfb = _rfma(elfb_term, _PPA_COEFS_B[i], elfb)
         elfb_term /= x
     if not lower_tail:
         elfb = -elfb
@@ -2047,7 +2096,7 @@ def _ppois_asymp(x, lambda_, lower_tail, log_p):
         n_d_over_p = _dpnorm(s2pt, not lower_tail, np_)
         return np_ + math.log1p(f * n_d_over_p)
     nd = dnorm5(s2pt, 0.0, 1.0, False)
-    return np_ + f * nd
+    return _rfma(f, nd, np_)
 
 
 def pgamma_raw(x, alph, lower_tail, log_p):
@@ -2062,7 +2111,7 @@ def pgamma_raw(x, alph, lower_tail, log_p):
         sum_ = _pd_upper_series(x, alph, log_p)
         d = _dpois_wrap(alph, x, log_p)
         if not lower_tail:
-            res = _R_Log1_Exp(d + sum_) if log_p else 1 - d * sum_
+            res = _R_Log1_Exp(d + sum_) if log_p else _rfma(-d, sum_, 1.)
         else:
             res = (sum_ + d) if log_p else sum_ * d
     elif alph - 1 < x and alph < 0.8 * (x + 50):
@@ -2079,7 +2128,7 @@ def pgamma_raw(x, alph, lower_tail, log_p):
         if not lower_tail:
             res = (sum_ + d) if log_p else sum_ * d
         else:
-            res = _R_Log1_Exp(d + sum_) if log_p else 1 - d * sum_
+            res = _R_Log1_Exp(d + sum_) if log_p else _rfma(-d, sum_, 1.)
     else:
         res = _ppois_asymp(alph - 1, x, not lower_tail, log_p)
     if (not log_p) and res < _DBL_MIN / _DBL_EPSILON:
@@ -2170,19 +2219,20 @@ def _qchisq_appr(p, nu, g, lower_tail, log_p, tol):
     elif nu > 0.32:
         x = qnorm5(p, 0, 1, lower_tail, log_p)
         p1 = 2. / (9 * nu)
-        ch = nu * math.pow(x * math.sqrt(p1) + 1 - p1, 3)
-        if ch > 2.2 * nu + 6:
-            ch = -2 * (_R_DT_Clog(p, lower_tail, log_p)
-                       - c * math.log(0.5 * ch) + g)
+        ch = nu * math.pow(_rfma(x, math.sqrt(p1), 1.) - p1, 3)
+        if ch > _rfma(2.2, nu, 6.):
+            ch = -2 * (_rfma(-c, math.log(0.5 * ch),
+                             _R_DT_Clog(p, lower_tail, log_p)) + g)
     else:
         ch = 0.4
-        a = _R_DT_Clog(p, lower_tail, log_p) + g + c * _M_LN2
+        a = _rfma(c, _M_LN2, _R_DT_Clog(p, lower_tail, log_p) + g)
         while True:
             q = ch
-            p1 = 1. / (1 + ch * (C7 + ch))
-            p2 = ch * (C9 + ch * (C8 + ch))
-            t = -0.5 + (C7 + 2 * ch) * p1 - (C9 + ch * (C10 + 3 * ch)) / p2
-            ch -= (1 - math.exp(a + 0.5 * ch) * p2 * p1) / t
+            p1 = 1. / _rfma(ch, C7 + ch, 1.)
+            p2 = ch * _rfma(ch, C8 + ch, C9)
+            t = (_rfma(_rfma(2., ch, C7), p1, -0.5)
+                 - _rfma(ch, _rfma(3., ch, C10), C9) / p2)
+            ch -= _rfma(-(math.exp(_rfma(0.5, ch, a)) * p2), p1, 1.) / t
             if not (abs(q - ch) > tol * abs(ch)):
                 break
     return ch
@@ -2236,7 +2286,7 @@ def qgamma(p, alpha, scale, lower_tail=True, log_p=False):
         at_end = True
     if not at_end:
         c = alpha - 1
-        s6 = (120 + c * (346 + 127 * c)) * i5040
+        s6 = _rfma(c, _rfma(127., c, 346.), 120.) * i5040
         ch0 = ch
         for i in range(1, MAXIT + 1):
             q = ch
@@ -2246,17 +2296,25 @@ def qgamma(p, alpha, scale, lower_tail=True, log_p=False):
                 ch = ch0
                 max_it_Newton = 27
                 break
-            t = p2 * math.exp(alpha * _M_LN2 + g + p1 - c * math.log(ch))
+            t = p2 * math.exp(_rfma(-c, math.log(ch),
+                                    _rfma(alpha, _M_LN2, g) + p1))
             b = t / ch
-            a = 0.5 * t - b * c
-            s1 = (210 + a * (140 + a * (105 + a * (84 + a * (70 + 60 * a))))) * i420
-            s2 = (420 + a * (735 + a * (966 + a * (1141 + 1278 * a)))) * i2520
-            s3 = (210 + a * (462 + a * (707 + 932 * a))) * i2520
-            s4 = (252 + a * (672 + 1182 * a)
-                  + c * (294 + a * (889 + 1740 * a))) * i5040
-            s5 = (84 + 2264 * a + c * (1175 + 606 * a)) * i2520
-            ch += t * (1 + 0.5 * t * s1 - b * c
-                       * (s1 - b * (s2 - b * (s3 - b * (s4 - b * (s5 - b * s6))))))
+            a = _rfma(0.5, t, -(b * c))
+            # Nested Horners; clang fuses every `acc*a + C` within the
+            # expression.
+            s1 = _rfma(a, _rfma(a, _rfma(a, _rfma(a, _rfma(60., a, 70.),
+                                                  84.), 105.), 140.),
+                       210.) * i420
+            s2 = _rfma(a, _rfma(a, _rfma(a, _rfma(1278., a, 1141.), 966.),
+                                735.), 420.) * i2520
+            s3 = _rfma(a, _rfma(a, _rfma(932., a, 707.), 462.), 210.) * i2520
+            s4 = _rfma(c, _rfma(a, _rfma(1740., a, 889.), 294.),
+                       _rfma(a, _rfma(1182., a, 672.), 252.)) * i5040
+            s5 = _rfma(c, _rfma(606., a, 1175.),
+                       _rfma(2264., a, 84.)) * i2520
+            poly = _rfma(-b, _rfma(-b, _rfma(-b, _rfma(-b, _rfma(-b, s6, s5),
+                                                       s4), s3), s2), s1)
+            ch = _rfma(t, _rfma(-(b * c), poly, _rfma(0.5 * t, s1, 1.)), ch)
             if abs(q - ch) < EPS2 * ch:
                 break
             if abs(q - ch) > 0.1 * ch:
@@ -2304,6 +2362,19 @@ _TOMS_EPS = 2.220446049250313e-16   # = 2 * d1mach(3) = DBL_EPSILON
 _M_SQRT_PI = 1.772453850905516027298167483341
 
 
+def _horner(x, c):
+    """Horner with R-parity FMA: ``((c[0]*x + c[1])*x + ...)``. Each
+    ``*x + k`` step is a single-expression ``a*b + c`` that R's clang
+    fuses to fmadd on arm64; ``_rfma`` is per-arch (plain ``a*b + c`` on
+    x86-64, so a no-op there). Use for any C polynomial written
+    ``(((c0*t + c1)*t + c2)...)`` — append a trailing ``1.`` for the
+    ``... + 1.`` forms. Mirrors rust ``nmath::toms708::horner``."""
+    v = c[0]
+    for k in c[1:]:
+        v = _rfma(v, x, k)
+    return v
+
+
 def _exparg(which):
     lnb = .69314718055995
     m = 1024 if which == 0 else (-1021 - 1)
@@ -2336,8 +2407,8 @@ def _rexpm1(x):
     q3 = -.0119041179760821
     q4 = 5.95130811860248e-4
     if abs(x) <= 0.15:
-        return x * (((p2 * x + p1) * x + 1.)
-                    / ((((q4 * x + q3) * x + q2) * x + q1) * x + 1.))
+        return x * (_horner(x, (p2, p1, 1.))
+                    / _horner(x, (q4, q3, q2, q1, 1.)))
     w = math.exp(x)
     if x > 0.:
         return w * (0.5 - 1. / w + 0.5)
@@ -2355,8 +2426,8 @@ def _alnrel(a):
     q3 = -.0845104217945565
     t = a / (a + 2.)
     t2 = t * t
-    w = ((((p3 * t2 + p2) * t2 + p1) * t2 + 1.)
-         / (((q3 * t2 + q2) * t2 + q1) * t2 + 1.))
+    w = (_horner(t2, (p3, p2, p1, 1.))
+         / _horner(t2, (q3, q2, q1, 1.)))
     return t * 2. * w
 
 
@@ -2373,17 +2444,17 @@ def _rlog1(x):
         return x - math.log(w)
     if x < -0.18:
         h = (x + .3) / .7
-        w1 = a - h * .3
+        w1 = _rfma(-h, .3, a)
     elif x > 0.18:
-        h = x * .75 - .25
+        h = _rfma(x, .75, -.25)
         w1 = b + h / 3.
     else:
         h = x
         w1 = 0.
     r = h / (h + 2.)
     t = r * r
-    w = ((p2 * t + p1) * t + p0) / ((q2 * t + q1) * t + 1.)
-    return t * 2. * (1. / (1. - r) - r * w) + w1
+    w = _horner(t, (p2, p1, p0)) / _horner(t, (q2, q1, 1.))
+    return _rfma(t * 2., _rfma(-r, w, 1. / (1. - r)), w1)
 
 
 _ERF_A = (7.7105849500132e-5, -.00133733772997339, .0323076579225834,
@@ -2406,24 +2477,22 @@ def _erf__(x):
     ax = abs(x)
     if ax <= 0.5:
         t = x * x
-        top = (((a[0] * t + a[1]) * t + a[2]) * t + a[3]) * t + a[4] + 1.
-        bot = ((b[0] * t + b[1]) * t + b[2]) * t + 1.
+        top = _horner(t, a) + 1.
+        bot = _horner(t, (b[0], b[1], b[2], 1.))
         return x * (top / bot)
     if ax <= 4.:
-        top = ((((((p[0] * ax + p[1]) * ax + p[2]) * ax + p[3]) * ax + p[4])
-                * ax + p[5]) * ax + p[6]) * ax + p[7]
-        bot = ((((((q[0] * ax + q[1]) * ax + q[2]) * ax + q[3]) * ax + q[4])
-                * ax + q[5]) * ax + q[6]) * ax + q[7]
+        top = _horner(ax, p)
+        bot = _horner(ax, q)
         R = 0.5 - math.exp(-x * x) * top / bot + 0.5
         return -R if x < 0 else R
     if ax >= 5.8:
         return 1. if x > 0 else -1.
     x2 = x * x
     t = 1. / x2
-    top = (((r[0] * t + r[1]) * t + r[2]) * t + r[3]) * t + r[4]
-    bot = (((s[0] * t + s[1]) * t + s[2]) * t + s[3]) * t + 1.
+    top = _horner(t, r)
+    bot = _horner(t, (s[0], s[1], s[2], s[3], 1.))
     t = (_ERF_C - top / (x2 * bot)) / ax
-    R = 0.5 - math.exp(-x2) * t + 0.5
+    R = _rfma(-math.exp(-x2), t, 0.5) + 0.5
     return -R if x < 0 else R
 
 
@@ -2432,17 +2501,15 @@ def _erfc1(ind, x):
     ax = abs(x)
     if ax <= 0.5:
         t = x * x
-        top = (((a[0] * t + a[1]) * t + a[2]) * t + a[3]) * t + a[4] + 1.
-        bot = ((b[0] * t + b[1]) * t + b[2]) * t + 1.
-        ret = 0.5 - x * (top / bot) + 0.5
+        top = _horner(t, a) + 1.
+        bot = _horner(t, (b[0], b[1], b[2], 1.))
+        ret = _rfma(-x, top / bot, 0.5) + 0.5
         if ind != 0:
             ret = math.exp(t) * ret
         return ret
     if ax <= 4.:
-        top = ((((((p[0] * ax + p[1]) * ax + p[2]) * ax + p[3]) * ax + p[4])
-                * ax + p[5]) * ax + p[6]) * ax + p[7]
-        bot = ((((((q[0] * ax + q[1]) * ax + q[2]) * ax + q[3]) * ax + q[4])
-                * ax + q[5]) * ax + q[6]) * ax + q[7]
+        top = _horner(ax, p)
+        bot = _horner(ax, q)
         ret = top / bot
     else:
         if x <= -5.6:
@@ -2453,8 +2520,8 @@ def _erfc1(ind, x):
         if ind == 0 and (x > 100. or x * x > -_exparg(1)):
             return 0.
         t = 1. / (x * x)
-        top = (((r[0] * t + r[1]) * t + r[2]) * t + r[3]) * t + r[4]
-        bot = (((s[0] * t + s[1]) * t + s[2]) * t + s[3]) * t + 1.
+        top = _horner(t, r)
+        bot = _horner(t, (s[0], s[1], s[2], s[3], 1.))
         ret = (_ERF_C - t * top / bot) / ax
     if ind != 0:
         if x < 0.:
@@ -2478,9 +2545,9 @@ def _gam1(a):
              .00223047661158249, 2.66505979058923e-4, -1.32674909766242e-4)
         s1 = .273076135303957
         s2 = .0559398236957378
-        top = (((((((r[8] * t + r[7]) * t + r[6]) * t + r[5]) * t + r[4]) * t
-                 + r[3]) * t + r[2]) * t + r[1]) * t + r[0]
-        bot = (s2 * t + s1) * t + 1.
+        top = _horner(t, (r[8], r[7], r[6], r[5], r[4], r[3], r[2], r[1],
+                          r[0]))
+        bot = _horner(t, (s2, s1, 1.))
         w = top / bot
         return (t * w / a) if d > 0. else (a * (w + 0.5 + 0.5))
     elif t == 0:
@@ -2491,9 +2558,8 @@ def _gam1(a):
              5.89597428611429e-4)
         q = (1., .427569613095214, .158451672430138, .0261132021441447,
              .00423244297896961)
-        top = (((((p[6] * t + p[5]) * t + p[4]) * t + p[3]) * t + p[2]) * t
-               + p[1]) * t + p[0]
-        bot = (((q[4] * t + q[3]) * t + q[2]) * t + q[1]) * t + 1.
+        top = _horner(t, (p[6], p[5], p[4], p[3], p[2], p[1], p[0]))
+        bot = _horner(t, (q[4], q[3], q[2], q[1], 1.))
         w = top / bot
         return (t / a * (w - 0.5 - 0.5)) if d > 0. else (a * w)
 
@@ -2513,9 +2579,8 @@ def _gamln1(a):
         q4 = .361951990101499
         q5 = .0325038868253937
         q6 = 6.67465618796164e-4
-        w = (((((((p6 * a + p5) * a + p4) * a + p3) * a + p2) * a + p1) * a + p0)
-             / ((((((q6 * a + q5) * a + q4) * a + q3) * a + q2) * a + q1) * a
-                + 1.))
+        w = (_horner(a, (p6, p5, p4, p3, p2, p1, p0))
+             / _horner(a, (q6, q5, q4, q3, q2, q1, 1.)))
         return -a * w
     r0 = .422784335098467
     r1 = .848044614534529
@@ -2529,8 +2594,8 @@ def _gamln1(a):
     s4 = .00713309612391
     s5 = 1.16165475989616e-4
     x = a - 0.5 - 0.5
-    w = ((((((r5 * x + r4) * x + r3) * x + r2) * x + r1) * x + r0)
-         / (((((s5 * x + s4) * x + s3) * x + s2) * x + s1) * x + 1.))
+    w = (_horner(x, (r5, r4, r3, r2, r1, r0))
+         / _horner(x, (s5, s4, s3, s2, s1, 1.)))
     return x * w
 
 
@@ -2571,7 +2636,7 @@ def _psi(x):
             nq = int(w)
             w -= nq
             nq = int(w * 4.)
-            w = (w - nq * 0.25) * 4.
+            w = _rfma(-float(nq), 0.25, w) * 4.
             n = nq // 2
             if n + n != nq:
                 w = 1. - w
@@ -2597,7 +2662,7 @@ def _psi(x):
             upper = (upper + p1[i]) * x
         den = (upper + p1[6]) / (den + q1[5])
         xmx0 = x - dx0
-        return den * xmx0 + aug
+        return _rfma(den, xmx0, aug)
     if x < xmax1:
         w = 1. / (x * x)
         den = w
@@ -2622,18 +2687,18 @@ def _bcorr(a0, b0):
     x = 1. / (h + 1.)
     x2 = x * x
     s3 = x + x2 + 1.
-    s5 = x + x2 * s3 + 1.
-    s7 = x + x2 * s5 + 1.
-    s9 = x + x2 * s7 + 1.
-    s11 = x + x2 * s9 + 1.
+    s5 = _rfma(x2, s3, x) + 1.
+    s7 = _rfma(x2, s5, x) + 1.
+    s9 = _rfma(x2, s7, x) + 1.
+    s11 = _rfma(x2, s9, x) + 1.
     t = 1. / b
     t *= t
-    w = ((((c5 * s11 * t + c4 * s9) * t + c3 * s7) * t + c2 * s5) * t
-         + c1 * s3) * t + c0
+    w = _rfma(_rfma(_rfma(_rfma(_rfma(c5 * s11, t, c4 * s9), t, c3 * s7),
+                          t, c2 * s5), t, c1 * s3), t, c0)
     w *= c / b
     t = 1. / a
     t *= t
-    return (((((c5 * t + c4) * t + c3) * t + c2) * t + c1) * t + c0) / a + w
+    return _horner(t, (c5, c4, c3, c2, c1, c0)) / a + w
 
 
 def _algdiv(a, b):
@@ -2650,13 +2715,13 @@ def _algdiv(a, b):
         d = b + (a - 0.5)
     x2 = x * x
     s3 = x + x2 + 1.
-    s5 = x + x2 * s3 + 1.
-    s7 = x + x2 * s5 + 1.
-    s9 = x + x2 * s7 + 1.
-    s11 = x + x2 * s9 + 1.
+    s5 = _rfma(x2, s3, x) + 1.
+    s7 = _rfma(x2, s5, x) + 1.
+    s9 = _rfma(x2, s7, x) + 1.
+    s11 = _rfma(x2, s9, x) + 1.
     t = 1. / (b * b)
-    w = ((((c5 * s11 * t + c4 * s9) * t + c3 * s7) * t + c2 * s5) * t
-         + c1 * s3) * t + c0
+    w = _rfma(_rfma(_rfma(_rfma(_rfma(c5 * s11, t, c4 * s9), t, c3 * s7),
+                          t, c2 * s5), t, c1 * s3), t, c0)
     w *= c / b
     u = d * _alnrel(a / b)
     v = a * (math.log(b) - 1.)
@@ -2679,8 +2744,8 @@ def _gamln(a):
             w *= t
         return _gamln1(t - 1.) + math.log(w)
     t = 1. / (a * a)
-    w = (((((c5 * t + c4) * t + c3) * t + c2) * t + c1) * t + c0) / a
-    return d + w + (a - 0.5) * (math.log(a) - 1.)
+    w = _horner(t, (c5, c4, c3, c2, c1, c0)) / a
+    return _rfma(a - 0.5, math.log(a) - 1., d + w)
 
 
 def _gsumln(a, b):
@@ -2728,8 +2793,8 @@ def _betaln(a0, b0):
                 for _i in range(1, n + 1):
                     a += -1.
                     w *= a / (a / b + 1.)
-                return math.log(w) - n * math.log(b) + (_gamln(a)
-                                                        + _algdiv(a, b))
+                return _rfma(-float(n), math.log(b), math.log(w)) + (
+                    _gamln(a) + _algdiv(a, b))
         # L40: 1 < A <= B < 8 reduction of B
         n = int(b - 1.)
         z = 1.
@@ -2743,8 +2808,8 @@ def _betaln(a0, b0):
     u = -(a - 0.5) * math.log(h / (h + 1.))
     v = b * _alnrel(h)
     if u > v:
-        return math.log(b) * -0.5 + e + w - v - u
-    return math.log(b) * -0.5 + e + w - u - v
+        return _rfma(math.log(b), -0.5, e) + w - v - u
+    return _rfma(math.log(b), -0.5, e) + w - u - v
 
 
 def _fpser(a, b, x, eps, log_p):
@@ -2775,7 +2840,7 @@ def _fpser(a, b, x, eps, log_p):
     if log_p:
         ans += math.log1p(a * s)
     else:
-        ans *= a * s + 1.
+        ans *= _rfma(a, s, 1.)
     return ans
 
 
@@ -2806,7 +2871,7 @@ def _bpser(a, b, x, eps, log_p):
         return rd0
     a0 = min(a, b)
     if a0 >= 1.:
-        z = a * math.log(x) - _betaln(a, b)
+        z = _rfma(a, math.log(x), -_betaln(a, b))
         ans = (z - math.log(a)) if log_p else (math.exp(z) / a)
     else:
         b0 = max(a, b)
@@ -2838,7 +2903,7 @@ def _bpser(a, b, x, eps, log_p):
                         b0 += -1.
                         c *= b0 / (a0 + b0)
                     u += math.log(c)
-                z = a * math.log(x) - u
+                z = _rfma(a, math.log(x), -u)
                 b0 += -1.
                 apb = a0 + b0
                 if apb > 1.:
@@ -2852,7 +2917,7 @@ def _bpser(a, b, x, eps, log_p):
                     ans = math.exp(z) * (a0 / a) * (_gam1(b0) + 1.) / t
         else:
             u = _gamln1(a0) + _algdiv(a0, b0)
-            z = a * math.log(x) - u
+            z = _rfma(a, math.log(x), -u)
             ans = (z + math.log(a0 / a)) if log_p else (a0 / a * math.exp(z))
     if ans == rd0 or ((not log_p) and a <= eps * 0.1):
         return ans
@@ -2874,7 +2939,7 @@ def _bpser(a, b, x, eps, log_p):
         else:
             ans = _NEGINF
     elif a * sum_ > -1.:
-        ans *= (a * sum_ + 1.)
+        ans *= _rfma(a, sum_, 1.)
     else:
         ans = 0.
     return ans
@@ -2955,14 +3020,14 @@ def _bfrac(a, b, x, y, lambda_, eps, log_p):
         e = a / s
         alpha = p * (p + c0) * e * e * (w * x)
         e = (t + 1.) / (c1 + t + t)
-        beta = w / s + (math.ldexp(n + e * (c + n * yp1), -20) if rescale
-                        else (n + e * (c + n * yp1)))
+        beta = w / s + (math.ldexp(_rfma(e, _rfma(n, yp1, c), n), -20)
+                        if rescale else _rfma(e, _rfma(n, yp1, c), n))
         p = t + 1.
         s += 2.
-        t = alpha * an + beta * anp1
+        t = _rfma(alpha, an, beta * anp1)
         an = anp1
         anp1 = t
-        t = alpha * bn + beta * bnp1
+        t = _rfma(alpha, bn, beta * bnp1)
         bn = bnp1
         bnp1 = t
         r0 = r
@@ -2991,7 +3056,7 @@ def _brcomp(a, b, x, y, log_p):
         else:
             lnx = _alnrel(-y)
             lny = math.log(y)
-        z = a * lnx + b * lny
+        z = _rfma(a, lnx, b * lny)
         if a0 >= 1.:
             z -= _betaln(a, b)
             return z if log_p else math.exp(z)
@@ -3032,8 +3097,8 @@ def _brcomp(a, b, x, y, log_p):
     else:
         const__ = .398942280401433
         apb = a + b
-        lambda_ = (((a - apb * x) if a <= b else (apb * y - b))
-                   if math.isfinite(apb) else (a * y - b * x))
+        lambda_ = ((_rfma(-apb, x, a) if a <= b else _rfma(apb, y, -b))
+                   if math.isfinite(apb) else _rfma(a, y, -(b * x)))
         if a <= b:
             h = a / b
             x0 = h / (h + 1.)
@@ -3046,8 +3111,9 @@ def _brcomp(a, b, x, y, log_p):
         u = (e - math.log(x / x0)) if abs(e) > .6 else _rlog1(e)
         e = lambda_ / b
         v = _rlog1(e) if abs(e) <= .6 else (e - math.log(y / y0))
-        z = -(a * u + b * v) if log_p else math.exp(-(a * u + b * v))
-        return (-_M_LN_SQRT_2PI + .5 * math.log(b * x0) + z - _bcorr(a, b)) \
+        z = -_rfma(a, u, b * v) if log_p else math.exp(-_rfma(a, u, b * v))
+        return (_rfma(0.5, math.log(b * x0), -_M_LN_SQRT_2PI) + z
+                - _bcorr(a, b)) \
             if log_p else (const__ * math.sqrt(b * x0) * z * math.exp(-_bcorr(a, b)))
 
 
@@ -3063,7 +3129,7 @@ def _brcmp1(mu, a, b, x, y, give_log):
         else:
             lnx = _alnrel(-y)
             lny = math.log(y)
-        z = a * lnx + b * lny
+        z = _rfma(a, lnx, b * lny)
         if a0 >= 1.:
             z -= _betaln(a, b)
             return _esum(mu, z, give_log)
@@ -3106,8 +3172,8 @@ def _brcmp1(mu, a, b, x, y, give_log):
     else:
         const__ = .398942280401433
         apb = a + b
-        lambda_ = (((a - apb * x) if a <= b else (apb * y - b))
-                   if math.isfinite(apb) else (a * y - b * x))
+        lambda_ = ((_rfma(-apb, x, a) if a <= b else _rfma(apb, y, -b))
+                   if math.isfinite(apb) else _rfma(a, y, -(b * x)))
         if a > b:
             h = b / a
             x0 = 1. / (h + 1.)
@@ -3121,7 +3187,7 @@ def _brcmp1(mu, a, b, x, y, give_log):
         u = (e - math.log(x / x0)) if abs(e) > 0.6 else _rlog1(e)
         e = lambda_ / b
         v = (e - math.log(y / y0)) if abs(e) > 0.6 else _rlog1(e)
-        z = _esum(mu, -(a * u + b * v), give_log)
+        z = _esum(mu, -_rfma(a, u, b * v), give_log)
         return (math.log(const__) + (math.log(b) + lx0) / 2. + z - _bcorr(a, b)) \
             if give_log \
             else (const__ * math.sqrt(b * x0) * z * math.exp(-_bcorr(a, b)))
@@ -3148,13 +3214,13 @@ def _grat_r(a, x, log_r, eps):
             sum_ += t
             if not (abs(t) > tol):
                 break
-        j = a * x * ((sum_ / 6. - 0.5 / (a + 2.)) * x + 1. / (a + 1.))
+        j = a * x * _rfma(sum_ / 6. - 0.5 / (a + 2.), x, 1. / (a + 1.))
         z = a * math.log(x)
         h = _gam1(a)
         g = h + 1.
         if (x >= 0.25 and (a < x / 2.59)) or (z > -0.13394):
             ll = _rexpm1(z)
-            q = ((ll + 0.5 + 0.5) * j - ll) * g - h
+            q = _rfma(_rfma(ll + 0.5 + 0.5, j, -ll), g, -h)
             return 0. if q <= 0. else q * math.exp(-log_r)
         else:
             p = math.exp(z) * g * (0.5 - j + 0.5)
@@ -3166,13 +3232,13 @@ def _grat_r(a, x, log_r, eps):
         b2n = x + (1. - a)
         c = 1.
         while True:
-            a2n_1 = x * a2n + c * a2n_1
-            b2n_1 = x * b2n + c * b2n_1
+            a2n_1 = _rfma(x, a2n, c * a2n_1)
+            b2n_1 = _rfma(x, b2n, c * b2n_1)
             am0 = a2n_1 / b2n_1
             c += 1.
             c_a = c - a
-            a2n = a2n_1 + c_a * a2n
-            b2n = b2n_1 + c_a * b2n
+            a2n = _rfma(c_a, a2n, a2n_1)
+            b2n = _rfma(c_a, b2n, b2n_1)
             an0 = a2n / b2n
             if not (abs(an0 - am0) >= eps * an0):
                 break
@@ -3190,8 +3256,9 @@ def _bgrat(a, b, x, y, w, eps, log_w):
     z = -nu * lnx
     if b * z == 0.:
         return w, 1
-    log_r = math.log(b) + math.log1p(_gam1(b)) + b * math.log(z) + nu * lnx
-    log_u = log_r - (_algdiv(b, a) + b * math.log(nu))
+    log_r = _rfma(nu, lnx,
+                  _rfma(b, math.log(z), math.log(b) + math.log1p(_gam1(b))))
+    log_u = log_r - _rfma(b, math.log(nu), _algdiv(b, a))
     u = math.exp(log_u)
     if log_u == _NEGINF:
         return w, 2
@@ -3211,7 +3278,7 @@ def _bgrat(a, b, x, y, w, eps, log_w):
     ierr = 0
     for n in range(1, n_terms + 1):
         bp2n = b + n2
-        j = (bp2n * (bp2n + 1.) * j + (z + bp2n + 1.) * t) * v
+        j = _rfma(bp2n * (bp2n + 1.), j, (z + bp2n + 1.) * t) * v
         n2 += 2.
         t *= t2
         cn /= n2 * (n2 + 1.)
@@ -3221,9 +3288,9 @@ def _bgrat(a, b, x, y, w, eps, log_w):
         if n > 1:
             coef = b - n
             for i in range(1, nm1 + 1):
-                s += coef * c[i - 1] * d[nm1 - i]
+                s = _rfma(coef * c[i - 1], d[nm1 - i], s)
                 coef += b
-        d[nm1] = bm1 * cn + s / n
+        d[nm1] = _rfma(bm1, cn, s / n)
         dj = d[nm1] * j
         sum_ += dj
         if sum_ <= 0.:
@@ -3249,7 +3316,7 @@ def _basym(a, b, lambda_, eps, log_p):
     b0 = [0.0] * (num_IT + 1)
     c = [0.0] * (num_IT + 1)
     d = [0.0] * (num_IT + 1)
-    f = a * _rlog1(-lambda_ / a) + b * _rlog1(lambda_ / b)
+    f = _rfma(a, _rlog1(-lambda_ / a), b * _rlog1(lambda_ / b))
     if log_p:
         t = -f
     else:
@@ -3274,7 +3341,7 @@ def _basym(a, b, lambda_, eps, log_p):
     d[0] = -c[0]
     j0 = 0.5 / e0 * _erfc1(1, z0)
     j1 = e1
-    sum_ = j0 + d[0] * w0 * j1
+    sum_ = _rfma(d[0] * w0, j1, j0)
     s = 1.
     h2 = h * h
     hn = 1.
@@ -3283,7 +3350,7 @@ def _basym(a, b, lambda_, eps, log_p):
     zn = z2
     for n in range(2, num_IT + 1, 2):
         hn *= h2
-        a0[n - 1] = r0 * 2. * (h * hn + 1.) / (n + 2.)
+        a0[n - 1] = r0 * 2. * _rfma(h, hn, 1.) / (n + 2.)
         np1 = n + 1
         s += hn
         a0[np1 - 1] = r1 * 2. * s / (n + 3.)
@@ -3294,15 +3361,16 @@ def _basym(a, b, lambda_, eps, log_p):
                 bsum = 0.
                 for jj in range(1, m):
                     mmj = m - jj
-                    bsum += (jj * r - mmj) * a0[jj - 1] * b0[mmj - 1]
-                b0[m - 1] = r * a0[m - 1] + bsum / m
+                    bsum = _rfma(_rfma(jj, r, -float(mmj)) * a0[jj - 1],
+                                 b0[mmj - 1], bsum)
+                b0[m - 1] = _rfma(r, a0[m - 1], bsum / m)
             c[i - 1] = b0[i - 1] / (i + 1.)
             dsum = 0.
             for jj in range(1, i):
-                dsum += d[i - jj - 1] * c[jj - 1]
+                dsum = _rfma(d[i - jj - 1], c[jj - 1], dsum)
             d[i - 1] = -(dsum + c[i - 1])
-        j0 = e1 * znm1 + (n - 1.) * j0
-        j1 = e1 * zn + n * j1
+        j0 = _rfma(e1, znm1, (n - 1.) * j0)
+        j1 = _rfma(e1, zn, n * j1)
         znm1 = z2 * znm1
         zn = z2 * zn
         w *= w0
@@ -3323,8 +3391,17 @@ def _R_Log1_Exp_toms(x):
     the dpq.h macro and re-``#define`` it to use the file-local ``rexpm1`` in
     place of libm ``expm1``). Every ``R_Log1_Exp`` reached from :func:`_bratio`
     is this variant — it differs from the stock macro by ~1 ulp on the
-    ``x > -M_LN2`` branch, which the ``log_p`` beta tails expose."""
-    return math.log(-_rexpm1(x)) if x > -_M_LN2 else math.log1p(-math.exp(x))
+    ``x > -M_LN2`` branch, which the ``log_p`` beta tails expose.
+
+    Same C99 ``log`` edge semantics as :func:`_R_Log1_Exp`: ``log(±0)``
+    is ``-Inf`` (no exception), ``log(negative)`` is ``NaN``.
+    """
+    if x > -_M_LN2:
+        v = -_rexpm1(x)
+        if v > 0.:
+            return math.log(v)
+        return _NEGINF if v == 0. else _NAN
+    return math.log1p(-math.exp(x))
 
 
 def _bratio(a, b, x, y, log_p):
@@ -3462,9 +3539,9 @@ def _bratio(a, b, x, y, log_p):
         return end_from_w1(w1)
     else:
         if math.isfinite(a + b):
-            lambda_ = ((a + b) * y - b) if a > b else (a - (a + b) * x)
+            lambda_ = _rfma(a + b, y, -b) if a > b else _rfma(-(a + b), x, a)
         else:
-            lambda_ = a * y - b * x
+            lambda_ = _rfma(a, y, -(b * x))
         do_swap = (lambda_ < 0.)
         if do_swap:
             lambda_ = -lambda_
@@ -3566,14 +3643,17 @@ def lbeta(a, b):
         return _NEGINF
     if p >= 10:
         corr = _lgammacor(p) + _lgammacor(q) - _lgammacor(p + q)
-        return (math.log(q) * -0.5 + _M_LN_SQRT_2PI + corr
-                + (p - 0.5) * math.log(p / (p + q)) + q * math.log1p(-p / (p + q)))
+        # C one-liner; clang fuses each `mul (+/-) acc` left-to-right on arm64.
+        s = _rfma(math.log(q), -0.5, _M_LN_SQRT_2PI) + corr
+        s = _rfma(p - 0.5, math.log(p / (p + q)), s)
+        return _rfma(q, math.log1p(-p / (p + q)), s)
     elif q >= 10:
         corr = _lgammacor(q) - _lgammacor(p + q)
-        return (_lgammafn(p) + corr + p - p * math.log(p + q)
-                + (q - 0.5) * math.log1p(-p / (p + q)))
+        s = _lgammafn(p) + corr + p
+        s = _rfma(-p, math.log(p + q), s)
+        return _rfma(q - 0.5, math.log1p(-p / (p + q)), s)
     if p < 1e-306:
-        return _lgammafn(p) + (_lgammafn(q) - _lgammafn(p + q))
+        return _c_lgamma(p) + (_c_lgamma(q) - _c_lgamma(p + q))
     return math.log(gammafn(p) * (gammafn(q) / gammafn(p + q)))
 
 
@@ -3587,13 +3667,13 @@ def pt(x, n, lower_tail=True, log_p=False):
         return _dt0(lower_tail, log_p) if x < 0 else _dt1(lower_tail, log_p)
     if not math.isfinite(n):
         return pnorm5(x, 0.0, 1.0, lower_tail, log_p)
-    nx = 1 + (x / n) * x
+    nx = _rfma(x / n, x, 1.)
     if nx > 1e100:
-        lval = (-0.5 * n * (2 * math.log(abs(x)) - math.log(n))
-                - lbeta(0.5 * n, 0.5) - math.log(0.5 * n))
+        lval = (_rfma(-0.5 * n, 2 * math.log(abs(x)) - math.log(n),
+                      -lbeta(0.5 * n, 0.5)) - math.log(0.5 * n))
         val = lval if log_p else math.exp(lval)
     else:
-        val = (pbeta(x * x / (n + x * x), 0.5, n / 2., False, log_p)
+        val = (pbeta(x * x / _rfma(x, x, n), 0.5, n / 2., False, log_p)
                if n > x * x else
                pbeta(1. / nx, n / 2., 0.5, True, log_p))
     if x <= 0.:
@@ -3627,10 +3707,10 @@ def pf(x, df1, df2, lower_tail=True, log_p=False):
     if df1 == _INF:
         return pgamma(df2 / x, df2 / 2.0, 2.0, not lower_tail, log_p)
     if df1 * x > df2:
-        x = pbeta(df2 / (df2 + df1 * x), df2 / 2., df1 / 2.,
+        x = pbeta(df2 / _rfma(df1, x, df2), df2 / 2., df1 / 2.,
                   not lower_tail, log_p)
     else:
-        x = pbeta(df1 * x / (df2 + df1 * x), df1 / 2., df2 / 2.,
+        x = pbeta(df1 * x / _rfma(df1, x, df2), df1 / 2., df2 / 2.,
                   lower_tail, log_p)
     return x if not math.isnan(x) else _NAN
 
@@ -3789,7 +3869,7 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
         u0_maybe = (_M_LN2 * (-1021) < u0 < -0.01)
         u_n = 1.0
         skip_init = False
-        if (u0_maybe and u0 < (t * log_eps_c - _clog(
+        if (u0_maybe and u0 < _rfma(t, log_eps_c, -_clog(
                 abs(pp * (1. - qq) * (2. - qq) / (2. * (pp + 2.))))) / 2.):
             rp = rp * math.exp(u0)
             u = (u0 - math.log1p(rp) / pp) if rp > -1. else u0
@@ -3799,25 +3879,27 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
 
         if not skip_init:
             r = math.sqrt(-2 * la)
-            y = r - (const1 + const2 * r) / (1. + (const3 + const4 * r) * r)
+            y = r - _rfma(const2, r, const1) / _rfma(
+                _rfma(const4, r, const3), r, 1.)
             if pp > 1 and qq > 1:
-                r = (y * y - 3.) / 6.
+                r = _rfma(y, y, -3.) / 6.
                 s = 1. / (pp + pp - 1.)
                 t = 1. / (qq + qq - 1.)
                 h = 2. / (s + t)
-                w = y * math.sqrt(h + r) / h - (t - s) * (r + 5. / 6. - 2. / (3. * h))
+                w = _rfma(-(t - s), r + 5. / 6. - 2. / (3. * h),
+                          y * math.sqrt(h + r) / h)
                 if w > 300:
                     t = w + w + math.log(qq) - math.log(pp)
                     u = (-math.log1p(math.exp(t))) if t <= 18 else (-t - math.exp(-t))
                     xinbta = math.exp(u)
                 else:
-                    xinbta = pp / (pp + qq * math.exp(w + w))
+                    xinbta = pp / _rfma(qq, math.exp(w + w), pp)
                     u = -math.log1p(qq / pp * math.exp(w + w))
             else:
                 r = qq + qq
                 t = 1. / (3. * math.sqrt(qq))
-                t = r * _R_pow_di3(1. + t * (-t + y))
-                s = 4. * pp + r - 2.
+                t = r * _R_pow_di3(_rfma(t, -t + y, 1.))
+                s = _rfma(4., pp, r) - 2.
                 if t == 0 or (t < 0. and s >= t):
                     l1ma = (_R_DT_log(alpha, lower_tail, log_p) if swap_tail
                             else _R_DT_Clog(alpha, lower_tail, log_p))
@@ -3898,8 +3980,8 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
             for i_pb in range(1000):
                 y = pbeta_raw(xinbta, pp, qq, True, True)
                 w = 0. if y == _NEGINF else \
-                    (y - la) * math.exp(y - u + logbeta + r * u
-                                        + t * _R_Log1_Exp(u))
+                    (y - la) * math.exp(_rfma(t, _R_Log1_Exp(u),
+                                              _rfma(r, u, y - u + logbeta)))
                 if not math.isfinite(w):
                     if n_maybe_swaps <= 1:
                         jump_swap = True
@@ -3929,10 +4011,12 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
         else:
             for i_pb in range(1000):
                 y = pbeta_raw(xinbta, pp, qq, True, log_p)
-                w = ((y - la) * math.exp(y + logbeta + r * math.log(xinbta)
-                                         + t * math.log1p(-xinbta)) if log_p
-                     else (y - a) * math.exp(logbeta + r * math.log(xinbta)
-                                             + t * math.log1p(-xinbta)))
+                w = ((y - la) * math.exp(_rfma(t, math.log1p(-xinbta),
+                                               _rfma(r, math.log(xinbta),
+                                                     y + logbeta))) if log_p
+                     else (y - a) * math.exp(_rfma(t, math.log1p(-xinbta),
+                                                   _rfma(r, math.log(xinbta),
+                                                         logbeta))))
                 if not math.isfinite(w):
                     if n_maybe_swaps <= 2:
                         if (not log_p) and n_maybe_swaps == 2:
@@ -3986,10 +4070,12 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
             if u_n != 1.:
                 xinbta = math.exp(u_n)
             y = pbeta_raw(xinbta, pp, qq, True, log_p)
-            w = ((y - la) * math.exp(y + logbeta + r * math.log(xinbta)
-                                     + t * math.log1p(-xinbta)) if log_p
-                 else (y - a) * math.exp(logbeta + r * math.log(xinbta)
-                                         + t * math.log1p(-xinbta)))
+            w = ((y - la) * math.exp(_rfma(t, math.log1p(-xinbta),
+                                           _rfma(r, math.log(xinbta),
+                                                 y + logbeta))) if log_p
+                 else (y - a) * math.exp(_rfma(t, math.log1p(-xinbta),
+                                               _rfma(r, math.log(xinbta),
+                                                     logbeta))))
             tx = (xinbta - w) if math.isfinite(w) else xinbta
         else:
             if swap_tail:
@@ -4034,7 +4120,7 @@ def dt(x, n, give_log=False):
         u = n * l_x2n
     else:
         l_x2n = math.log1p(x2n) / 2.
-        u = -_bd0(n / 2., (n + x * x) / 2.) + x * x / 2.
+        u = -_bd0(n / 2., _rfma(x, x, n) / 2.) + x * x / 2.
     if give_log:
         return t - u - (_M_LN_SQRT_2PI + l_x2n)
     i_sqrt = (math.sqrt(n) / ax) if lrg_x2n else math.exp(-l_x2n)
@@ -4042,7 +4128,10 @@ def dt(x, n, give_log=False):
 
 
 def tanpi(x):
-    """R's portable ``tanpi(x) = tan(pi*x)`` (cospi.c fallback)."""
+    """R's ``tanpi(x) = tan(pi*x)`` (cospi.c): libm ``__tanpi`` on darwin
+    (R's HAVE___TANPI branch), the ``Rtanpi`` fallback elsewhere."""
+    if _c_tanpi is not None:
+        return _c_tanpi(x)
     if math.isnan(x):
         return x
     if not math.isfinite(x):
@@ -4052,7 +4141,15 @@ def tanpi(x):
         x += 1
     elif x > 0.5:
         x -= 1
-    return 0. if x == 0. else (_NAN if x == 0.5 else math.tan(math.pi * x))
+    if x == 0.:
+        return 0.
+    if x == 0.5:
+        return _NAN
+    if x == 0.25:
+        return 1.
+    if x == -0.25:
+        return -1.
+    return math.tan(math.pi * x)
 
 
 _M_1_PI = 0.318309886183790671537767526745
@@ -4104,7 +4201,14 @@ def qt(p, ndf, lower_tail=True, log_p=False):
             else:
                 lx = nx
             it += 1
-            if not ((ux - lx) / abs(nx) > accu and it < 1000):
+            # C99 `(ux-lx)/fabs(nx)` at nx == 0: ±Inf (or NaN for 0/0),
+            # never an exception — Python's `/` raises, so spell it out.
+            d_ = ux - lx
+            if nx != 0.:
+                rel = d_ / abs(nx)
+            else:
+                rel = _NAN if d_ == 0. else math.copysign(_INF, d_)
+            if not (rel > accu and it < 1000):
                 break
         return 0.5 * (lx + ux)
     if ndf > 1e20:
@@ -4299,7 +4403,8 @@ def dbeta(x, a, b, give_log=False):
         if b < 1:
             return _INF
     if a <= 2 or b <= 2:
-        lval = (a - 1) * math.log(x) + (b - 1) * math.log1p(-x) - lbeta(a, b)
+        lval = _rfma(a - 1, math.log(x),
+                     (b - 1) * math.log1p(-x)) - lbeta(a, b)
     else:
         lval = math.log(a + b - 1) + _dbinom_raw(a - 1, a + b - 2, x, 1 - x, True)
     return lval if give_log else math.exp(lval)
@@ -4578,25 +4683,25 @@ def _logcf_vec(x, i, d, eps):
     c2 = np.full(shp, i + d)
     c4 = np.full(shp, (i + d) + d)
     a1 = np.full(shp, i + d)
-    b1 = i * ((i + d) - i * x)
+    b1 = i * _rfma_vec(-i, x, i + d)
     b2 = d * d * x
-    a2 = c4 * c2 - b2
-    b2 = c4 * b1 - i * b2
+    a2 = _rfma_vec(c4, c2, -b2)
+    b2 = _rfma_vec(c4, b1, -(i * b2))
     sf = _PG_SCALEFACTOR
     for _ in range(100000):
-        m = np.abs(a2 * b1 - a1 * b2) > np.abs(eps * b1 * b2)
+        m = np.abs(_rfma_vec(a2, b1, -(a1 * b2))) > np.abs(eps * b1 * b2)
         if not m.any():
             break
         c3 = c2 * c2 * x
         c2 = np.where(m, c2 + d, c2)
         c4 = np.where(m, c4 + d, c4)
-        a1 = np.where(m, c4 * a2 - c3 * a1, a1)
-        b1 = np.where(m, c4 * b2 - c3 * b1, b1)
+        a1 = np.where(m, _rfma_vec(c4, a2, -(c3 * a1)), a1)
+        b1 = np.where(m, _rfma_vec(c4, b2, -(c3 * b1)), b1)
         c3 = c1 * c1 * x
         c1 = np.where(m, c1 + d, c1)
         c4 = np.where(m, c4 + d, c4)
-        a2 = np.where(m, c4 * a1 - c3 * a2, a2)
-        b2 = np.where(m, c4 * b1 - c3 * b2, b2)
+        a2 = np.where(m, _rfma_vec(c4, a1, -(c3 * a2)), a2)
+        b2 = np.where(m, _rfma_vec(c4, b1, -(c3 * b2)), b2)
         big = m & (np.abs(b2) > sf)
         sml = m & (np.abs(b2) < 1.0 / sf)
         if big.any():
@@ -4627,11 +4732,13 @@ def _log1pmx_vec(x):
         if small.any():
             two = 2.0
             ys, xs, rs = y[small], xr[small], r[small]
-            res[small] = rs * ((((two / 9 * ys + two / 7) * ys + two / 5) * ys
-                                + two / 3) * ys - xs)
+            res[small] = rs * _rfma_vec(
+                _rfma_vec(_rfma_vec(_rfma_vec(two / 9, ys, two / 7), ys,
+                                    two / 5), ys, two / 3), ys, -xs)
         big = ~small
         if big.any():
-            res[big] = r[big] * (2 * y[big] * _logcf_vec(y[big], 3, 2, 1e-14) - xr[big])
+            res[big] = r[big] * _rfma_vec(
+                2 * y[big], _logcf_vec(y[big], 3, 2, 1e-14), -xr[big])
         out[near] = res
     return out
 
@@ -4648,8 +4755,9 @@ def _lgamma1p_vec(a):
         c = 0.2273736845824652515226821577978691e-12
         lgam = c * _logcf_vec(-am / 2, 42, 1, 1e-14)
         for i in range(39, -1, -1):
-            lgam = _LGAMMA1P_COEFFS[i] - am * lgam
-        out[sm] = (am * lgam - eulers) * am - _log1pmx_vec(am)
+            lgam = _rfma_vec(-am, lgam, _LGAMMA1P_COEFFS[i])
+        out[sm] = _rfma_vec(_rfma_vec(am, lgam, -eulers), am,
+                            -_log1pmx_vec(am))
     return out
 
 
@@ -4699,16 +4807,17 @@ def _pgamma_smallx_vec(x, alph, lower_tail, log_p):
         rest = ~a_gt1
         if rest.any():
             if log_p:
-                f2[rest] = alph[rest] * np.log(x[rest]) - _lgamma1p_vec(alph[rest])
+                f2[rest] = _rfma_vec(alph[rest], np.log(x[rest]),
+                                     -_lgamma1p_vec(alph[rest]))
             else:
                 f2[rest] = np.power(x[rest], alph[rest]) / np.exp(_lgamma1p_vec(alph[rest]))
         return (f1 + f2) if log_p else (f1 * f2)
-    lf2 = alph * np.log(x) - _lgamma1p_vec(alph)
+    lf2 = _rfma_vec(alph, np.log(x), -_lgamma1p_vec(alph))
     if log_p:
         return _R_Log1_Exp_vec(np.log1p(sm) + lf2)
     f1m1 = sm
     f2m1 = np.expm1(lf2)
-    return -(f1m1 + f2m1 + f1m1 * f2m1)
+    return -_rfma_vec(f1m1, f2m1, f1m1 + f2m1)
 
 
 def _pd_upper_series_vec(x, y, log_p):
@@ -4805,7 +4914,7 @@ def _pd_lower_series_vec(lam, y):
     nf = y != np.floor(y)
     if nf.any():
         f = _pd_lower_cf_vec(y[nf], lam[nf] + 1 - y[nf])
-        sm[nf] = sm[nf] + term[nf] * f
+        sm[nf] = _rfma_vec(term[nf], f, sm[nf])
     return sm
 
 
@@ -4852,8 +4961,8 @@ def _ppois_asymp_vec(x, lam, lower_tail, log_p):
     res2_ig = s2pt.copy()
     res2_term = s2pt.copy()
     for i in range(1, 8):
-        res12 = res12 + res1_ig * _PPA_COEFS_A[i]
-        res12 = res12 + res2_ig * _PPA_COEFS_B[i]
+        res12 = _rfma_vec(res1_ig, _PPA_COEFS_A[i], res12)
+        res12 = _rfma_vec(res2_ig, _PPA_COEFS_B[i], res12)
         res1_term = res1_term * (pt_ / i)
         res2_term = res2_term * (2 * pt_ / (2 * i + 1))
         res1_ig = res1_ig / x + res1_term
@@ -4861,7 +4970,7 @@ def _ppois_asymp_vec(x, lam, lower_tail, log_p):
     elfb = x.copy()
     elfb_term = np.ones(x.shape)
     for i in range(1, 8):
-        elfb = elfb + elfb_term * _PPA_COEFS_B[i]
+        elfb = _rfma_vec(elfb_term, _PPA_COEFS_B[i], elfb)
         elfb_term = elfb_term / x
     if not lower_tail:
         elfb = -elfb
@@ -4871,7 +4980,7 @@ def _ppois_asymp_vec(x, lam, lower_tail, log_p):
         n_d_over_p = _dpnorm_vec(s2pt, not lower_tail, np_)
         return np_ + np.log1p(f * n_d_over_p)
     nd = dnorm5_vec(s2pt, 0.0, 1.0, False)
-    return np_ + f * nd
+    return _rfma_vec(f, nd, np_)
 
 
 def pgamma_raw_vec(x, alph, lower_tail, log_p):
@@ -4893,7 +5002,7 @@ def pgamma_raw_vec(x, alph, lower_tail, log_p):
         sm = _pd_upper_series_vec(xs, al, log_p)
         dd = _dpois_wrap_vec(al, xs, log_p)
         if not lower_tail:
-            out[b_upper] = _R_Log1_Exp_vec(dd + sm) if log_p else 1 - dd * sm
+            out[b_upper] = _R_Log1_Exp_vec(dd + sm) if log_p else _rfma_vec(-dd, sm, 1.)
         else:
             out[b_upper] = (sm + dd) if log_p else sm * dd
     if b_lower.any():
@@ -4919,7 +5028,7 @@ def pgamma_raw_vec(x, alph, lower_tail, log_p):
         if not lower_tail:
             out[b_lower] = (sm + dd) if log_p else sm * dd
         else:
-            out[b_lower] = _R_Log1_Exp_vec(dd + sm) if log_p else 1 - dd * sm
+            out[b_lower] = _R_Log1_Exp_vec(dd + sm) if log_p else _rfma_vec(-dd, sm, 1.)
     if b_asymp.any():
         out[b_asymp] = _ppois_asymp_vec(alph[b_asymp] - 1, x[b_asymp], not lower_tail, log_p)
     if not log_p:
@@ -4989,7 +5098,7 @@ def _chebyshev_eval_vec(x, a, n):
     for i in range(1, n + 1):
         b2 = b1
         b1 = b0
-        b0 = twox * b1 - b2 + a[n - i]
+        b0 = _rfma_vec(twox, b1, -b2) + a[n - i]
     out = (b0 - b2) * 0.5
     return np.where((x < -1.1) | (x > 1.1), np.nan, out)
 
@@ -5000,7 +5109,8 @@ def _lgammacor_vec(x):
     small = (x >= 10) & (x < _LGC_XBIG)
     if small.any():
         tmp = 10 / x[small]
-        out[small] = _chebyshev_eval_vec(tmp * tmp * 2 - 1, _ALGMCS, _NALGM) / x[small]
+        out[small] = _chebyshev_eval_vec(
+            _rfma_vec(tmp * tmp, 2., -1.), _ALGMCS, _NALGM) / x[small]
     return out
 
 
@@ -5022,7 +5132,8 @@ def gammafn_vec(x):
             n = np.trunc(xl).astype(np.int64)
             frac = xl - n
             n = n - 1
-            r = _chebyshev_eval_vec(frac * 2 - 1, _GAMCS, _NGAM) + 0.9375
+            r = _chebyshev_eval_vec(_rfma_vec(frac, 2., -1.), _GAMCS,
+                                    _NGAM) + 0.9375
             npos = n[n > 0]
             maxn = int(npos.max()) if npos.size else 0
             for i in range(1, maxn + 1):
@@ -5057,7 +5168,8 @@ def gammafn_vec(x):
                     ye = ym[els]
                     half = (2 * ye) == np.trunc(2 * ye)
                     corr = np.where(half, _stirlerr(ye), _lgammacor_vec(ye))
-                    vv[els] = np.exp((ye - 0.5) * np.log(ye) - ye + _M_LN_SQRT_2PI + corr)
+                    vv[els] = np.exp(_rfma_vec(ye - 0.5, np.log(ye), -ye)
+                                     + _M_LN_SQRT_2PI + corr)
                 v[main] = vv
             res[gt10] = v
         out[pos] = res
@@ -5083,18 +5195,21 @@ def lbeta_vec(a, b):
         if b1.any():
             pv, qv = pp[b1], qq[b1]
             corr = _lgammacor_vec(pv) + _lgammacor_vec(qv) - _lgammacor_vec(pv + qv)
-            r[b1] = (np.log(qv) * -0.5 + _M_LN_SQRT_2PI + corr
-                     + (pv - 0.5) * np.log(pv / (pv + qv)) + qv * np.log1p(-pv / (pv + qv)))
+            s = _rfma_vec(np.log(qv), -0.5, _M_LN_SQRT_2PI) + corr
+            s = _rfma_vec(pv - 0.5, np.log(pv / (pv + qv)), s)
+            r[b1] = _rfma_vec(qv, np.log1p(-pv / (pv + qv)), s)
         b2 = (~b1) & (qq >= 10)
         if b2.any():
             pv, qv = pp[b2], qq[b2]
             corr = _lgammacor_vec(qv) - _lgammacor_vec(pv + qv)
-            r[b2] = (_lgammafn_arr(pv) + corr + pv - pv * np.log(pv + qv)
-                     + (qv - 0.5) * np.log1p(-pv / (pv + qv)))
+            s = _lgammafn_arr(pv) + corr + pv
+            s = _rfma_vec(-pv, np.log(pv + qv), s)
+            r[b2] = _rfma_vec(qv - 0.5, np.log1p(-pv / (pv + qv)), s)
         b3 = (~b1) & (~b2) & (pp < 1e-306)
         if b3.any():
             pv, qv = pp[b3], qq[b3]
-            r[b3] = _lgammafn_arr(pv) + (_lgammafn_arr(qv) - _lgammafn_arr(pv + qv))
+            lgv = np.frompyfunc(_c_lgamma, 1, 1)
+            r[b3] = (lgv(pv) + (lgv(qv) - lgv(pv + qv))).astype(float)
         b4 = (~b1) & (~b2) & (pp >= 1e-306)
         if b4.any():
             pv, qv = pp[b4], qq[b4]

@@ -11,7 +11,7 @@ use super::gamma::pgamma_scalar;
 use super::loader::{dbinom_raw, dpois_raw};
 use super::norm::{dt0, dt1, qnorm5_scalar};
 use super::toms708::{bratio, lbeta_scalar, pbeta_scalar};
-use super::util::round_half_even;
+use super::util::{rfma, round_half_even};
 
 // === CDFs ====================================================================
 pub(crate) fn ppois_scalar(x: f64, lambda: f64, lower_tail: bool, log_p: bool) -> f64 {
@@ -182,7 +182,7 @@ pub(crate) fn dbeta_scalar(x: f64, a: f64, b: f64, give_log: bool) -> f64 {
         }
     }
     let lval = if a <= 2.0 || b <= 2.0 {
-        (a - 1.0) * x.ln() + (b - 1.0) * (-x).ln_1p() - lbeta_scalar(a, b)
+        rfma(a - 1.0, x.ln(), (b - 1.0) * (-x).ln_1p()) - lbeta_scalar(a, b)
     } else {
         (a + b - 1.0).ln() + dbinom_raw(a - 1.0, a + b - 2.0, x, 1.0 - x, true)
     };
