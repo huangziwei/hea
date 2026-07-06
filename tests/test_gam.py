@@ -9242,3 +9242,346 @@ def test_negbin_through_gam_matches_mgcv():
     with pytest.raises(ValueError,
                        match="single value for theta or use nb"):
         gam("yp ~ s(x0)", df, family=negbin([2, 9]), method="REML")
+
+
+# ===========================================================================
+# cpois — censored Poisson through gam (audit-2 B11; mgcv cpois(),
+# efam.r:344-537 + dppois:312-339). Pins: mgcv 1.9-4 on the RGenerator(66)
+# recipe with deterministic yp%%7 censoring. The free-fit sp pins carry the
+# outer-Newton ENDPOINT scatter (both sides stop at "full convergence" with
+# |grad| ~1e-5 on a flat criterion); the criterion SURFACE is pinned tight
+# through fixed-sp refits (receipts: hea at R's sp 451.70535520573 ≡ R to
+# 2e-13, R at hea's sp 451.70535520700747 ≡ hea to 4e-12; ML likewise).
+# ===========================================================================
+
+
+def _cpois_probe_frame(n: int = 300) -> pl.DataFrame:
+    """RGenerator(66) censored counts — bit-matches ``set.seed(66)`` +
+    the ``_negbin_probe_frame`` stream, then deterministic censoring:
+    ``m7 <- yp %% 7``; m7==1 → interval ``[yp, yp+3]``, m7==2 → left
+    (−∞), m7==3 → right (+∞), else uncensored. 127 unc (incl. 20 zero
+    counts — the mustart-0 quirk rows), 44 int, 73 left, 56 right."""
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(66)
+    x0 = g.uniform(0.0, 1.0, n)
+    x1 = g.uniform(0.0, 1.0, n)
+    g.uniform(0.0, 1.0, n)      # x2 — drawn to keep the stream aligned
+    g.normal(0.0, 0.2, n)       # e
+    mu = 2 + 6 * (x0 - 0.5) ** 2 + 4 * (x1 - 0.25) ** 2
+    yp = np.asarray(g.poisson(mu), dtype=float)
+    m7 = yp % 7
+    yat = yp.copy()
+    yat[m7 == 1] = yp[m7 == 1] + 3
+    yat[m7 == 2] = -np.inf
+    yat[m7 == 3] = np.inf
+    return pl.DataFrame({"x0": x0, "x1": x1, "yp": yp, "yat": yat})
+
+
+def test_cpois_through_gam_matches_mgcv():
+    """gam(cbind(y,yat), cpois()) vs mgcv 1.9-4: REML/ML free fits +
+    fixed-sp criterion-surface pins, the extended-family method coercion,
+    sqrt link, and predict(se)."""
+    from hea.family import cpois
+
+    df = _cpois_probe_frame()
+    m = gam("cbind(yp, yat) ~ s(x0) + s(x1)", df, family=cpois(),
+            method="REML")
+    # Free-fit endpoints (see section note): sp at endpoint scatter,
+    # value-level quantities at their propagated precision.
+    np.testing.assert_allclose(
+        m.sp, [0.334933439083, 0.471071335086], rtol=5e-5)
+    assert float(np.sum(m.edf)) == pytest.approx(10.680586348, rel=1e-5)
+    assert m.REML_criterion / 2 == pytest.approx(451.705355206, rel=1e-9)
+    assert m.deviance == pytest.approx(443.753510916, rel=1e-6)
+    assert m.null_deviance == pytest.approx(517.252889711, rel=1e-9)
+    assert m.AIC == pytest.approx(886.522280925, rel=1e-6)
+    assert float(np.asarray(m.coefficients)[0]) == pytest.approx(
+        1.27449709949, rel=1e-6)
+    assert float(m.Vp[0, 0]) == pytest.approx(0.00116059616683, rel=1e-5)
+    np.testing.assert_allclose(
+        m.fitted_values[:3],
+        [3.42613761818, 4.58566853818, 2.32324213843], rtol=1e-5)
+    assert m.family.name == "cpois"
+    assert m.scale_estimated is False and m.sigma_squared == 1.0
+    # Criterion SURFACE at mgcv's exact optimum — the tight parity pin.
+    m_fix = gam("cbind(yp, yat) ~ s(x0) + s(x1)", df, family=cpois(),
+                method="REML", sp=[0.33493343908293738, 0.4710713350860859])
+    assert m_fix.REML_criterion / 2 == pytest.approx(
+        451.70535520573532, rel=1e-12)
+
+    # predict + se on new data (η scale).
+    nd = pl.DataFrame({"x0": [0.25, 0.75], "x1": [0.4, 0.1]})
+    pr = m.predict(nd, type="link", se_fit=True)
+    np.testing.assert_allclose(pr["fit"].to_numpy(),
+                               [1.1551725162, 1.19871334477], rtol=1e-5)
+    np.testing.assert_allclose(pr["se.fit"].to_numpy(),
+                               [0.0997157367767, 0.113985014911], rtol=1e-4)
+
+    # Extended families silently coerce non-REML/ML/NCV methods to REML
+    # (mgcv.r:1892) — same optimum as the REML fit, method relabeled.
+    m_g = gam("cbind(yp, yat) ~ s(x0) + s(x1)", df, family=cpois(),
+              method="GCV.Cp")
+    assert m_g.method == "REML"
+    np.testing.assert_allclose(m_g.sp, m.sp, rtol=0)
+
+    # ML: sp2 rides a flat +∞ shelf (mgcv 2.95e5, hea 2.5e5 — criterion
+    # differs by ~4e-8 across the whole stretch); pin sp1 + the surface.
+    m_ml = gam("cbind(yp, yat) ~ s(x0) + s(x1)", df, family=cpois(),
+               method="ML")
+    assert float(m_ml.sp[0]) == pytest.approx(0.753071814931, rel=1e-6)
+    assert float(m_ml.sp[1]) > 1e4
+    assert m_ml.ML_criterion / 2 == pytest.approx(447.311345431, rel=1e-7)
+    m_mlfix = gam("cbind(yp, yat) ~ s(x0) + s(x1)", df, family=cpois(),
+                  method="ML", sp=[0.753071814931, 295490.938456])
+    assert m_mlfix.ML_criterion / 2 == pytest.approx(
+        447.311345431, rel=1e-11)
+
+    # sqrt link (identity is also an okLink; logit raises — covered in
+    # test_family). μ=0 rows exercise R's silent Inf link-curvature path.
+    m_sq = gam("cbind(yp, yat) ~ s(x0) + s(x1)", df,
+               family=cpois(link="sqrt"), method="REML")
+    np.testing.assert_allclose(
+        m_sq.sp, [0.419650906293, 0.590390103814], rtol=3e-4)
+    assert m_sq.REML_criterion / 2 == pytest.approx(451.786394307, rel=1e-9)
+    assert m_sq.deviance == pytest.approx(445.244665235, rel=1e-5)
+    assert m_sq.AIC == pytest.approx(887.363214464, rel=1e-6)
+    assert float(np.asarray(m_sq.coefficients)[0]) == pytest.approx(
+        1.90180298416, rel=1e-6)
+
+
+def test_cpois_uncensored_matches_mgcv_and_poisson():
+    """1-column response ⇒ all-uncensored: the cpois likelihood is the
+    plain Poisson one, and the REML criterion lands on gam(poisson())'s
+    to all printed digits (mgcv receipt: 600.190785786 both ways). The
+    well-conditioned surface also pins sp at 1e-6 here."""
+    from hea.family import cpois
+
+    df = _cpois_probe_frame()
+    m = gam("yp ~ s(x0) + s(x1)", df, family=cpois(), method="REML")
+    np.testing.assert_allclose(m.sp, [2.18314684842, 3.233362839],
+                               rtol=1e-6)
+    assert m.REML_criterion / 2 == pytest.approx(600.190785786, rel=1e-10)
+    assert m.deviance == pytest.approx(343.739701203, rel=1e-10)
+    assert m.null_deviance == pytest.approx(411.270336126, rel=1e-9)
+    assert m.AIC == pytest.approx(1189.8806843, rel=1e-9)
+    assert float(np.asarray(m.coefficients)[0]) == pytest.approx(
+        1.11582317903, rel=1e-8)
+    # poisson cross-receipt (same data, standard family, fit3 rail):
+    # crit 600.190785786, sp [2.18314754007, 3.2333632246] — the two
+    # rails agree on the criterion to 12 digits.
+    from hea.family import Poisson
+    mp = gam("yp ~ s(x0) + s(x1)", df, family=Poisson(), method="REML")
+    assert m.REML_criterion / 2 == pytest.approx(
+        mp.REML_criterion / 2, rel=1e-10)
+
+
+# ===========================================================================
+# clog — censored logistic through gam (audit-2 B12; mgcv clog(),
+# efam.r:2192-2612). Pins: mgcv 1.9-4 on the RGenerator(66) recipe with
+# deterministic floor(y*10)%%7 censoring; identity link (the default), the
+# log-scale θ estimated jointly (free-fit values matched R at ~1e-11 at pin
+# time — well-conditioned surface, unlike cpois' flat one).
+# ===========================================================================
+
+
+def _clog_probe_frame(n: int = 300) -> pl.DataFrame:
+    """RGenerator(66) censored continuous response — bit-matches
+    ``set.seed(66); x0,x1,x2 <- runif; e <- rnorm(n,0,.2);
+    y <- f + 2.5*e`` then m7 = floor(y*10) %% 7: m7==1 → interval
+    [y, y+1.5], m7==2 → left (−∞), m7==3 → right (+∞). 164 unc / 46
+    int / 36 left / 54 right."""
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(66)
+    x0 = g.uniform(0.0, 1.0, n)
+    x1 = g.uniform(0.0, 1.0, n)
+    g.uniform(0.0, 1.0, n)      # x2 — stream alignment
+    e = g.normal(0.0, 0.2, n)
+    f = 2 + 6 * (x0 - 0.5) ** 2 + 4 * (x1 - 0.25) ** 2
+    y = f + 2.5 * e
+    m7 = np.floor(y * 10) % 7
+    yat = y.copy()
+    yat[m7 == 1] = y[m7 == 1] + 1.5
+    yat[m7 == 2] = -np.inf
+    yat[m7 == 3] = np.inf
+    return pl.DataFrame({"x0": x0, "x1": x1, "y": y, "yat": yat})
+
+
+def test_clog_through_gam_matches_mgcv():
+    """gam(cbind(y,yat), clog()) vs mgcv 1.9-4: REML/ML with the
+    log-scale θ estimated jointly, fixed-θ, and predict(se). Note the
+    NEGATIVE AICs — clog's aic slot carries only the saturated pieces
+    (mgcv reports it verbatim; replicated bug-for-bug)."""
+    from hea.family import clog
+
+    df = _clog_probe_frame()
+    m = gam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=clog(),
+            method="REML")
+    np.testing.assert_allclose(
+        m.sp, [0.503914238939, 0.820442672981], rtol=1e-6)
+    assert float(np.sum(m.edf)) == pytest.approx(9.30196740092, rel=1e-8)
+    assert m.REML_criterion / 2 == pytest.approx(252.18910703663536,
+                                                 rel=1e-10)
+    assert m.deviance == pytest.approx(353.679863947, rel=1e-9)
+    assert m.null_deviance == pytest.approx(718.82482886, rel=1e-9)
+    assert m.AIC == pytest.approx(-519.601936491, rel=1e-9)
+    assert float(np.asarray(m.coefficients)[0]) == pytest.approx(
+        3.1725799995, rel=1e-9)
+    assert float(m.Vp[0, 0]) == pytest.approx(0.00132715696638, rel=1e-8)
+    np.testing.assert_allclose(
+        m.fitted_values[:3],
+        [3.61104181178, 3.05193246991, 2.1926353359], rtol=1e-9)
+    # σ̂ = e^θ̂ and the postproc relabel mgcv prints.
+    np.testing.assert_allclose(m.family.get_theta(True),
+                               [0.334666712875], rtol=1e-8)
+    assert m._family_display_name() == "clog(0.335)"
+    assert m.scale_estimated is False and m.sigma_squared == 1.0
+
+    nd = pl.DataFrame({"x0": [0.25, 0.75], "x1": [0.4, 0.1]})
+    pr = m.predict(nd, type="link", se_fit=True)
+    np.testing.assert_allclose(pr["fit"].to_numpy(),
+                               [2.55649773675, 2.66064951599], rtol=1e-9)
+    np.testing.assert_allclose(pr["se.fit"].to_numpy(),
+                               [0.0948692128224, 0.110975005354], rtol=1e-8)
+
+    m_ml = gam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=clog(),
+               method="ML")
+    np.testing.assert_allclose(
+        m_ml.sp, [0.627031555174, 0.99948304632], rtol=1e-6)
+    assert m_ml.ML_criterion / 2 == pytest.approx(249.069524633, rel=1e-10)
+    assert m_ml.AIC == pytest.approx(-525.157185499, rel=1e-9)
+    np.testing.assert_allclose(m_ml.family.get_theta(True),
+                               [0.333061106696], rtol=1e-8)
+
+    # Fixed θ (σ = 0.6): n_theta drops to 0, σ stays put.
+    m_f = gam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=clog(theta=0.6),
+              method="REML")
+    assert m_f.family.n_theta == 0
+    np.testing.assert_allclose(
+        m_f.sp, [0.530146384137, 0.857154330129], rtol=1e-6)
+    assert m_f.REML_criterion / 2 == pytest.approx(289.556661799, rel=1e-10)
+    assert m_f.deviance == pytest.approx(212.387856373, rel=1e-9)
+    assert m_f.AIC == pytest.approx(51.1549557883, rel=1e-9)
+    np.testing.assert_allclose(m_f.family.get_theta(True), [0.6], rtol=0)
+
+
+def test_clog_uncensored_matches_mgcv():
+    """1-column response ⇒ all-uncensored logistic regression with σ
+    estimated (mgcv receipt: σ̂ 0.269056124913, crit 218.917036874)."""
+    from hea.family import clog
+
+    df = _clog_probe_frame()
+    m = gam("y ~ s(x0) + s(x1)", df, family=clog(), method="REML")
+    np.testing.assert_allclose(m.sp, [0.673977297993, 0.8092702128],
+                               rtol=1e-6)
+    assert m.REML_criterion / 2 == pytest.approx(218.917036874, rel=1e-10)
+    assert m.deviance == pytest.approx(352.523701203, rel=1e-9)
+    assert m.null_deviance == pytest.approx(1019.77530518, rel=1e-9)
+    assert m.AIC == pytest.approx(-720.518600427, rel=1e-9)
+    np.testing.assert_allclose(m.family.get_theta(True),
+                               [0.269056124913], rtol=1e-8)
+
+
+# ===========================================================================
+# bcg — censored Box-Cox Gaussian through gam (audit-2 B13; mgcv bcg(),
+# efam.r:1477-2170). Pins: mgcv 1.9-4 on the RGenerator(66) recipe with a
+# positive lognormal-ish response and deterministic floor(y*10)%%7
+# censoring under bcg's conventions (left = yat≤0). Both θ = (λ, log σ)
+# estimated jointly — the first 2-θ censored family through the outer
+# Newton. NOTE mgcv's own bcg(theta=c(λ,σ>0)) FIXED-θ fit crashes inside
+# gam.fit4 ("subscript out of bounds": the length-3 .Theta quirk breaks
+# its nt bookkeeping), so only free-θ fits are pinnable.
+# ===========================================================================
+
+
+def _bcg_probe_frame(n: int = 300) -> pl.DataFrame:
+    """RGenerator(66) censored positive response — bit-matches
+    ``set.seed(66)``: ``y <- exp(f/3 + e)``, then m7 = floor(y*10)%%7:
+    m7==1 → interval [y, 1.5y], m7==2 → LEFT (yat=0), m7==3 → right
+    (+∞). 154 unc / 46 int / 49 left / 51 right."""
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(66)
+    x0 = g.uniform(0.0, 1.0, n)
+    x1 = g.uniform(0.0, 1.0, n)
+    g.uniform(0.0, 1.0, n)      # x2 — stream alignment
+    e = g.normal(0.0, 0.2, n)
+    f = 2 + 6 * (x0 - 0.5) ** 2 + 4 * (x1 - 0.25) ** 2
+    y = np.exp(f / 3 + e)
+    m7 = np.floor(y * 10) % 7
+    yat = y.copy()
+    yat[m7 == 1] = y[m7 == 1] * 1.5
+    yat[m7 == 2] = 0.0
+    yat[m7 == 3] = np.inf
+    return pl.DataFrame({"x0": x0, "x1": x1, "y": y, "yat": yat})
+
+
+def test_bcg_through_gam_matches_mgcv():
+    """gam(cbind(y,yat), bcg()) vs mgcv 1.9-4: REML/ML with (λ, log σ)
+    estimated jointly, predict(se), and the bc-scale deviance-residual
+    sign (mgcv's attr(d,"sign") through residuals_extended)."""
+    from hea.family import bcg
+
+    df = _bcg_probe_frame()
+    m = gam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=bcg(),
+            method="REML")
+    np.testing.assert_allclose(
+        m.sp, [2.87916620956, 2.31564146682], rtol=1e-6)
+    assert float(np.sum(m.edf)) == pytest.approx(9.77314629757, rel=1e-8)
+    assert m.REML_criterion / 2 == pytest.approx(264.60403262326531,
+                                                 rel=1e-10)
+    assert m.deviance == pytest.approx(323.212958908, rel=1e-9)
+    assert m.null_deviance == pytest.approx(711.364321966, rel=1e-9)
+    assert m.AIC == pytest.approx(672.225593252, rel=1e-9)
+    assert float(np.asarray(m.coefficients)[0]) == pytest.approx(
+        1.13843516264, rel=1e-8)
+    assert float(m.Vp[0, 0]) == pytest.approx(0.000257925642007, rel=1e-8)
+    np.testing.assert_allclose(
+        m.fitted_values[:3],
+        [1.31740169455, 1.05356113639, 0.720764722064], rtol=1e-9)
+    # θ̂ = (λ̂, σ̂) and the postproc relabel.
+    np.testing.assert_allclose(m.family.get_theta(True),
+                               [0.14167620229, 0.252280924883], rtol=1e-8)
+    assert m._family_display_name() == "bcg(0.142,0.252)"
+
+    nd = pl.DataFrame({"x0": [0.25, 0.75], "x1": [0.4, 0.1]})
+    pr = m.predict(nd, type="link", se_fit=True)
+    np.testing.assert_allclose(pr["fit"].to_numpy(),
+                               [0.898999603746, 0.917437138588], rtol=1e-9)
+    np.testing.assert_allclose(pr["se.fit"].to_numpy(),
+                               [0.0435961564601, 0.0497767557132],
+                               rtol=1e-8)
+    # deviance residuals: sign lives on the bc scale (sign(bc(y,λ)−μ)).
+    np.testing.assert_allclose(
+        m.residuals_of("deviance")[:5],
+        [-1.46108218233, 0.0254703400613, -0.761915784925,
+         1.05636224341, -1.27588758661], rtol=1e-9)
+
+    m_ml = gam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=bcg(),
+               method="ML")
+    np.testing.assert_allclose(
+        m_ml.sp, [4.03433822373, 3.60488363604], rtol=1e-6)
+    assert m_ml.ML_criterion / 2 == pytest.approx(259.058763248, rel=1e-10)
+    assert m_ml.AIC == pytest.approx(673.705114094, rel=1e-9)
+    np.testing.assert_allclose(m_ml.family.get_theta(True),
+                               [0.0719738141189, 0.233744887195], rtol=1e-7)
+
+
+def test_bcg_uncensored_matches_mgcv():
+    """1-column response ⇒ all-uncensored Box-Cox regression. This path
+    has Deta3 ≡ 0 (gaussian-like uncensored case) with free θ — the
+    needs_w=False + θ-rows corner that used to crash `_reml_hessian`
+    (unbound K)."""
+    from hea.family import bcg
+
+    df = _bcg_probe_frame()
+    m = gam("y ~ s(x0) + s(x1)", df, family=bcg(), method="REML")
+    np.testing.assert_allclose(m.sp, [4.16011737382, 4.75457719152],
+                               rtol=1e-6)
+    assert m.REML_criterion / 2 == pytest.approx(248.098356183, rel=1e-10)
+    assert m.deviance == pytest.approx(290.271254572, rel=1e-9)
+    assert m.null_deviance == pytest.approx(887.11924597, rel=1e-9)
+    assert m.AIC == pytest.approx(869.100294135, rel=1e-9)
+    np.testing.assert_allclose(m.family.get_theta(True),
+                               [0.123209217613, 0.214649223507], rtol=1e-8)

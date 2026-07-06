@@ -3753,6 +3753,457 @@ def test_cnorm_construction_and_validation():
     np.testing.assert_array_equal(fam.initialize(y, np.ones(3)), y)
     assert cnorm(link="log").validmu(np.array([0.1, 1.0]))
     assert not cnorm(link="log").validmu(np.array([-0.1, 1.0]))
+    # mustart floor is min(y>0) — the LOGICAL min (efam.r:1123): 1 when
+    # every y is positive, 0 as soon as any y ≤ 0.
+    np.testing.assert_array_equal(
+        cnorm(link="log").initialize(np.array([0.3, 2.0]), np.ones(2)),
+        [1.0, 2.0])
+    np.testing.assert_array_equal(
+        cnorm(link="log").initialize(np.array([0.0, 0.3, 2.0]), np.ones(3)),
+        [0.0, 0.3, 2.0])
+
+
+# ---------------------------------------------------------------------------
+# cpois (censored Poisson) — mgcv ``cpois()`` (efam.r:344-537) + ``dppois``
+# (efam.r:312-339). Slot oracle pinned to live mgcv 1.9-4 via hex-float
+# transfer (values reproduced bit-identically on arm64 at pin time; the
+# randomized 200-row × level-2 census was 0 DIFF / 1002 values).
+# ---------------------------------------------------------------------------
+
+
+def _cpois_dd_inputs():
+    # 6 obs covering all cases: i0 uncensored, i1 interval [2,6], i2 left
+    # (−∞), i3 right (+∞), i4 uncensored ZERO count (the mustart quirk
+    # row), i5 interval given as yat < y (pmin/pmax swap).
+    y = np.array([3.0, 2.0, 4.0, 1.0, 0.0, 5.0])
+    yat = np.array([3.0, 6.0, -np.inf, np.inf, 0.0, 2.0])
+    mu = np.array([2.5, 3.1, 1.7, 2.2, 0.9, 4.4])
+    wt = np.ones(6)
+    return y, yat, mu, wt
+
+
+def test_cpois_components_match_mgcv():
+    from hea.family import cpois
+    y, yat, mu, wt = _cpois_dd_inputs()
+    fam = cpois()
+    fam.set_censor(yat)
+
+    # dev.resids: the PROPER deviance (≥ 0), saturated reference included
+    # (interval rows maximize over μ via the analytic lgamma mean).
+    dr = fam.dev_resids(y, mu, wt)
+    np.testing.assert_allclose(
+        dr, [0.093929340763727609, 0.32427618396314406,
+             0.060124358816485542, 0.87567736610300229, 1.8,
+             0.046856172595730383], rtol=1e-14, atol=0)
+    assert np.all(dr >= 0.0)
+
+    # Dd level 2: μ-derivatives ONLY — no θ keys at any level (mgcv's
+    # returned names are exactly these five; getTheta() is NULL).
+    D = fam.Dd(y, mu, np.zeros(0), wt, level=2)
+    assert set(D.keys()) == {"Dmu", "Dmu2", "EDmu2", "Dmu3", "Dmu4"}
+    np.testing.assert_allclose(
+        D["Dmu"], [-0.39999999999999991, -0.57472288165500895,
+                   0.1310296735043821, -0.75536305631350764, 2.0,
+                   0.1865592035083572], rtol=1e-14, atol=0)
+    np.testing.assert_allclose(
+        D["Dmu2"], [0.95999999999999974, 0.62496911183805759,
+                    0.18585982829290848, 0.6973028859562822, 0.0,
+                    0.34589032104013429], rtol=1e-14, atol=1e-300)
+    assert D["EDmu2"] is D["Dmu2"]     # mgcv: r$EDmu2 = r$Dmu2 (alias)
+    np.testing.assert_allclose(
+        D["Dmu3"], [-0.76799999999999979, -0.37803766150915585,
+                    0.094454617880994629, -0.75099712064338142, 0.0,
+                    -0.14239116315360656], rtol=1e-13, atol=1e-300)
+    np.testing.assert_allclose(
+        D["Dmu4"], [0.92159999999999442, 0.37863924185178632,
+                    -0.12641915824024608, 1.0331210386956542, 0.0,
+                    0.093556511921981667], rtol=1e-13, atol=1e-300)
+
+    # dDeta must survive the θ-free Dd (R's NULL list reads): θ entries
+    # come back as None, the μ-chain as usual.
+    dd = fam.dDeta(y, mu, wt, np.zeros(0), level=2, dd=D)
+    assert dd["Dth"] is None and dd["Detath"] is None
+    assert dd["Dth2"] is None and dd["Deta3th"] is None
+    assert np.all(np.isfinite(dd["Deta3"])) and np.all(np.isfinite(dd["Deta4"]))
+
+    # aic = −2·Σ logLik; ls the genuinely NONZERO saturated log-lik with
+    # all derivatives zero (left/right rows contribute exactly 0).
+    np.testing.assert_allclose(fam.aic(y, mu, 0.0, wt, 0),
+                               8.2329365948746229, rtol=1e-14)
+    le = fam.ls_extended(y, wt)
+    np.testing.assert_allclose(le["ls"], -2.5160365863162668, rtol=1e-14)
+    assert float(np.sum(np.abs(le["lsth1"]))) == 0.0
+    assert float(np.sum(np.abs(le["LSTH1"]))) == 0.0
+    np.testing.assert_allclose(fam.ls(y, wt, 1.0),
+                               [-2.5160365863162668, 0.0, 0.0], rtol=1e-14)
+
+    # dppois on probe triples: negative bounds (the Dd shift probes),
+    # y1 < 0 (both probs 0 → −Inf), opposite tails, and a far tail.
+    from hea.family import _dppois
+    y0p = np.array([1.0, -1.0, 0.0, -2.0, 3.0, 40.0])
+    y1p = np.array([4.0, 2.0, 9.0, -1.0, 5.0, 60.0])
+    mup = np.array([3.0, 5.0, 2.0, 3.0, 4.0, 50.0])
+    np.testing.assert_allclose(
+        _dppois(y0p, y1p, mup),
+        [-0.48432169154524585, -2.0822292679157206, -0.14546723515894291,
+         -np.inf, -1.0450897209662637, -0.17224867495290261],
+        rtol=1e-14)
+    np.testing.assert_allclose(
+        _dppois(y0p, y1p, mup, log_p=False),
+        [0.61611497105231638, 0.12465201948308118, 0.86461821868837008,
+         0.0, 0.35166026666369643, 0.8417698200687822], rtol=1e-14)
+
+    # mustart (log link): pmax(y, min(y>0)) with a zero present keeps the
+    # exact zero (mgcv-verified: mustart = 3 2 4 1 0 5).
+    np.testing.assert_array_equal(fam.initialize(y, wt), y)
+
+
+def test_cpois_Dd_matches_fd():
+    from hea.family import cpois, _cpois_dev_resids
+    y, yat, mu, wt = _cpois_dd_inputs()
+    fam = cpois()
+    fam.set_censor(yat)
+    D = fam.Dd(y, mu, np.zeros(0), wt, level=2)
+
+    def m2ll(mu_):
+        # Dd differentiates −2logLik; dev_resids = −2logLik + 2·l_sat and
+        # the saturated part is μ-free, so FD in μ sees the same thing.
+        return _cpois_dev_resids(y, mu_, yat)
+
+    h = 1e-5
+    fd_mu = (m2ll(mu + h) - m2ll(mu - h)) / (2 * h)
+    np.testing.assert_allclose(D["Dmu"], fd_mu, rtol=2e-5, atol=1e-6)
+    fd_mu2 = (m2ll(mu + h) - 2 * m2ll(mu) + m2ll(mu - h)) / h ** 2
+    np.testing.assert_allclose(D["Dmu2"], fd_mu2, rtol=1e-4, atol=1e-4)
+    # Dmu3/Dmu4 via FD of Dmu (analytic first derivative — steadier).
+    def dmu_at(mu_):
+        return fam.Dd(y, mu_, np.zeros(0), wt, level=0)["Dmu"]
+    fd_mu3 = ((dmu_at(mu + h) - 2 * dmu_at(mu) + dmu_at(mu - h)) / h ** 2)
+    np.testing.assert_allclose(D["Dmu3"], fd_mu3, rtol=1e-4, atol=1e-4)
+
+
+def test_cpois_construction_and_validation():
+    from hea.family import cpois
+    fam = cpois()
+    assert fam.n_theta == 0
+    assert fam.is_extended and fam.scale_known
+    assert fam.get_theta().size == 0
+    assert fam.get_theta(trans=True).size == 0
+    fam.set_theta([1.0])           # mgcv putTheta: silently ignored
+    assert fam.get_theta().size == 0
+    for lk in ("log", "identity", "sqrt"):
+        assert cpois(link=lk).link.name == lk
+    with pytest.raises(ValueError, match="not available"):
+        cpois(link="logit")
+    # validmu (efam.r:359-360): identity → finite; log → μ>0; sqrt → μ≥0.
+    assert cpois(link="identity").validmu(np.array([-1.0, 0.0]))
+    assert not cpois(link="log").validmu(np.array([0.0, 1.0]))
+    assert cpois(link="sqrt").validmu(np.array([0.0, 1.0]))
+    assert not cpois(link="sqrt").validmu(np.array([-0.1, 1.0]))
+    # identity mustart = y; log/sqrt floor = min(y>0) as a LOGICAL min
+    # (1 when all y positive, 0 otherwise — efam.r:500).
+    y = np.array([0.5, 2.0])
+    np.testing.assert_array_equal(
+        cpois(link="identity").initialize(y, np.ones(2)), y)
+    np.testing.assert_array_equal(
+        cpois(link="log").initialize(y, np.ones(2)), [1.0, 2.0])
+    # No censor ⇒ all uncensored: dev reduces to the plain Poisson
+    # deviance 2·(dpois(y,y) − dpois(y,μ)).
+    fam = cpois()
+    y = np.array([2.0, 0.0, 5.0])
+    mu = np.array([1.5, 0.8, 4.0])
+    dev = fam.dev_resids(y, mu, np.ones(3))
+    ylogy = np.where(y > 0, y * np.log(np.where(y > 0, y, 1.0) / mu), 0.0)
+    np.testing.assert_allclose(dev, 2.0 * (ylogy - (y - mu)),
+                               rtol=1e-12, atol=1e-12)
+    assert repr(fam) == "cpois(link=log)"
+
+
+# ---------------------------------------------------------------------------
+# clog (censored logistic) — mgcv ``clog()`` (efam.r:2192-2612). Slot oracle
+# pinned to live mgcv 1.9-4 via hex-float transfer (bit-identical on arm64
+# at pin time; randomized 200-row level-2 census incl. mixed weights and
+# every log1pexp band was 0 DIFF / 2804 values).
+# ---------------------------------------------------------------------------
+
+
+def _clog_dd_inputs():
+    # 6 obs: i0/i2 uncensored, i1 interval [-0.5, 0.8], i3 left (−∞, wt 2),
+    # i4 right (+∞), i5 an uncensored row placed in log1pexp's QUIRK band
+    # (−(y−μ)/s = 34.5 ∈ (33.3, 37] → mgcv's exp(x) branch — dev blows up
+    # to 3.8e15, faithfully).
+    y = np.array([1.2, -0.5, 2.0, 0.7, -1.0,
+                  float.fromhex("-0x1.6c8f9fb870caap+5")])
+    yat = np.array([1.2, 0.8, 2.0, -np.inf, np.inf,
+                    float.fromhex("-0x1.6c8f9fb870caap+5")])
+    mu = np.array([0.5, 0.1, 1.7, 0.3, -0.4, 1.0])
+    wt = np.array([1.0, 1.0, 1.0, 2.0, 1.0, 1.0])
+    return y, yat, mu, wt
+
+
+def test_clog_components_match_mgcv():
+    from hea.family import clog
+    y, yat, mu, wt = _clog_dd_inputs()
+    fam = clog()
+    fam.set_theta([0.3])
+    fam.set_censor(yat)
+
+    np.testing.assert_allclose(
+        fam.dev_resids(y, mu, wt),
+        [0.13297872286444656, 0.00064770448452167173, 0.024645863841215476,
+         1.010811660242168, 0.9907951404171742, 3847863142179033.5],
+        rtol=1e-14, atol=0)
+
+    D = fam.Dd(y, mu, np.array([0.3]), wt, level=2)
+    exp = {
+        "Dmu": [-0.37578439269408498, -0.025906946306693591,
+                -0.16396913450701819, 0.83130782189432806,
+                -0.57883297064136885, 1.4816364413634331],
+        "Dmu2": [0.51350815864591082, 0.51804028675465141,
+                 0.54209016682628131, 0.52540422036177381,
+                 0.261286207431696, 1.9497706066361287e-15],
+        "Dth": [-0.26304907488585949, -0.0012216848009996006,
+                -0.049190740352105466, 0.33252312875773121,
+                0.34729978238482129, -68.999999999999886],
+        "Dmuth": [0.73524010374622251, 0.04886307737374479,
+                  0.32659618455490258, -0.62114613374961858,
+                  0.42206124618235125, -1.4816364413635239],
+        "Dmu3": [0.096484175770105721, 0.0079878924099485715,
+                 0.044443027739635224, 0.11368032043932709,
+                 -0.04232451164291777, -1.4444255915456878e-15],
+        "Dmu2th": [-0.95947739425274758, -0.97691640500401522,
+                   -1.0708474253306721, -1.0053363125478167,
+                   -0.49717770787764137, 6.3367544715674075e-14],
+        "Dmu4": [-0.11371669079977768, -0.16172200627308253,
+                 -0.14328723208820304, -0.25145288474698707,
+                 -0.061414535592725583, 1.0700567966360104e-15],
+        "Dth2": [0.5146680726223557, 0.0021596824071976606,
+                 0.097978855366470788, -0.24845845349984741,
+                 -0.25323674770941074, 69.000000000004107],
+        "Dmuth2": [-1.4068742797231457, -0.086373540635621679,
+                   -0.64785041215410422, 0.21901160873049191,
+                   -0.12375462145576643, 1.4816364413605729],
+        "Dmu2th2": [1.6606168408963822, 1.7263704824328405,
+                    2.0888002748077343, 1.8340237790089229,
+                    0.89606206198464955, 1.9921781173304531e-12],
+        "Dmu3th": [-0.36905421087016155, -0.019960730575645763,
+                   -0.17631525284536659, -0.44162211521677608,
+                   0.16382225628438868, -4.5499406133689004e-14],
+    }
+    for k, v in exp.items():
+        np.testing.assert_allclose(D[k], v, rtol=1e-13, atol=0,
+                                   err_msg=k)
+    # EDmu2 zeroes NEGATIVE Dmu2 rows (none here — all Dmu2 ≥ 0); EDmu2th
+    # is Dmu2th itself (mgcv aliases them).
+    np.testing.assert_array_equal(D["EDmu2"], D["Dmu2"])
+    assert D["EDmu2th"] is D["Dmu2th"]
+
+    # aic (SATURATED pieces only — the slot never sees μ; gam.fit4.r:794
+    # reports it verbatim), and ls with NONZERO θ-derivatives.
+    np.testing.assert_allclose(fam.aic(y, mu, 0.0, wt, 0),
+                               15.910610320785761, rtol=1e-14)
+    le = fam.ls_extended(y, wt)
+    np.testing.assert_allclose(le["ls"], -6.5018787506728541, rtol=1e-14)
+    np.testing.assert_allclose(le["lsth1"], [-3.9623749785560696],
+                               rtol=1e-14)
+    np.testing.assert_allclose(le["lsth2"], [[-0.073257888763456291]],
+                               rtol=1e-13)
+    np.testing.assert_allclose(
+        le["LSTH1"].ravel(),
+        [-1.0, -0.96237497855606957, -1.0, 0.0, 0.0, -1.0], rtol=1e-14)
+
+
+def test_clog_construction_and_validation():
+    from hea.family import clog
+    # θ intake (efam.r:2213-2221): None/0 → working 0; θ>0 fixed (log θ,
+    # n_theta=0); θ<0 an initial value (log|θ|, still estimated).
+    assert clog().n_theta == 1
+    np.testing.assert_allclose(clog().get_theta(), [0.0])
+    assert clog(theta=2.0).n_theta == 0
+    np.testing.assert_allclose(clog(theta=2.0).get_theta(), [np.log(2.0)])
+    np.testing.assert_allclose(clog(theta=2.0).get_theta(True), [2.0])
+    assert clog(theta=-0.5).n_theta == 1
+    np.testing.assert_allclose(clog(theta=-0.5).get_theta(), [np.log(0.5)])
+    assert clog(theta=0.0).n_theta == 1
+    np.testing.assert_allclose(clog(theta=0.0).get_theta(), [0.0])
+    for lk in ("identity", "log", "sqrt"):
+        assert clog(link=lk).link.name == lk
+    with pytest.raises(ValueError, match="not available"):
+        clog(link="logit")
+    with pytest.raises(ValueError, match="1 param"):
+        clog().set_theta([0.1, 0.2])
+    # identity validmu = finite; log/sqrt require μ > 0 (2-way, unlike
+    # cpois' 3-way — efam.r:2229).
+    assert clog(link="identity").validmu(np.array([-1.0, 0.0]))
+    assert not clog(link="log").validmu(np.array([0.0, 1.0]))
+    assert not clog(link="sqrt").validmu(np.array([0.0, 1.0]))
+    # log1pexp quirk band receipt: 33.3 < x ≤ 37 returns exp(x) — mgcv's
+    # own typo (first mask is x<=37, efam.r:2237), replicated bit-for-bit.
+    from hea.family import _clog_log1pexp
+    np.testing.assert_array_equal(
+        _clog_log1pexp(np.array([35.0])), np.exp(35.0))
+    np.testing.assert_allclose(
+        _clog_log1pexp(np.array([-40.0, 0.0, 20.0, 38.0])),
+        [np.exp(-40.0), np.log(2.0), 20.0 + np.exp(-20.0), 38.0],
+        rtol=1e-15)
+
+
+# ---------------------------------------------------------------------------
+# bcg (censored Box-Cox Gaussian) — mgcv ``bcg()`` (efam.r:1477-2170). Slot
+# oracle pinned to live mgcv 1.9-4 via hex transfer (bit-identical on arm64
+# at pin time; the randomized 200-row level-2 census — 4 cases, mixed wt,
+# y∈{0,1} edges, full (λ,t) derivative matrices — was 0 DIFF / 4602 values
+# after the dnorm.c FMA-contraction fix it exposed in nmath).
+# ---------------------------------------------------------------------------
+
+
+def _bcg_dd_inputs():
+    # 6 obs: i0 uncensored, i1 interval [1.5, 2.6], i2 LEFT censored
+    # (bcg: yat ≤ 0, wt 2), i3 right (+∞), i4 left at y=1 (bc λ-deriv
+    # bly = 0 → sign(0) rows), i5 uncensored ZERO (in iu AND il — the
+    # later left block overwrites, and ls → +Inf via (λ−1)·log 0).
+    y = np.array([3.0, 1.5, 0.9, 2.2, 1.0, 0.0])
+    yat = np.array([3.0, 2.6, 0.0, np.inf, 0.0, 0.0])
+    mu = np.array([1.1, 0.4, 0.8, 1.9, 0.2, 0.5])
+    wt = np.array([1.0, 1.0, 2.0, 1.0, 1.0, 1.0])
+    return y, yat, mu, wt
+
+
+def test_bcg_components_match_mgcv():
+    from hea.family import bcg
+    y, yat, mu, wt = _bcg_dd_inputs()
+    th = np.array([0.4, -0.35])
+    fam = bcg()
+    fam.set_theta(th)
+    fam.set_censor(yat)
+
+    d = fam.dev_resids(y, mu, wt)
+    np.testing.assert_allclose(
+        d, [0.15744314608370377, 0.29788622636774864, 6.7076037221149409,
+            0.17475492756973865, 1.8920743538362341, 22.957041212134278],
+        rtol=1e-14, atol=0)
+    # mgcv's attr(d,"sign") = sign(bc(y,λ) − μ), stashed for residuals.
+    np.testing.assert_array_equal(fam._dev_sign, [1, 1, -1, -1, -1, -1])
+
+    D = fam.Dd(y, mu, th, wt, level=2)
+    np.testing.assert_allclose(
+        D["Dmu"], [-1.1261466364532253, -1.4824267405144576,
+                   8.8633898309156631, -0.47628893494170177,
+                   2.8009839610885905, 12.69035263562167],
+        rtol=1e-13, atol=0)
+    np.testing.assert_allclose(
+        D["Dmu2"], [4.0275054149409524, 3.691333997409322,
+                    7.0390203241607736, 1.0466952667846496,
+                    2.7946577680930598, 3.8568290720002807],
+        rtol=1e-13, atol=0)
+    assert D["EDmu2"] is D["Dmu2"] and D["EDmu2th"] is D["Dmu2th"]
+    # θ blocks: (n,2) matrices, columns [λ, log σ]; θ² blocks (n,3)
+    # [λλ, λt, tt] — mgcv's own packing.
+    np.testing.assert_allclose(
+        D["Dth"].ravel(order="F"),
+        [-1.2814908867536796, -0.79432629876290561, -0.047834925246138082,
+         0.18318606765722237, 0.0, -79.314703972635471,
+         1.6851137078325924, 1.287417003734145, -8.005158529054766,
+         0.46344801352644838, -0.56019679221771812, -38.071057906864986],
+        rtol=1e-13, atol=0)
+    np.testing.assert_allclose(
+        D["Dmuth"].ravel(order="F"),
+        [-3.2749930409424346, -1.0795509097014206, -0.037988965557830073,
+         -0.40257074202485166, 0.0, -24.105181700001765,
+         2.2522932729064506, 2.7041718209509069, -15.220830342851738,
+         -0.5421870500573136, -3.3599155147072026, -24.260839851622222],
+        rtol=1e-13, atol=0)
+    np.testing.assert_allclose(
+        D["Dmu3"], [0.0, -0.026598900024447758, 1.0876045350424164,
+                    -1.590360013833727, 1.0617526205466099,
+                    0.08918904228937663], rtol=1e-12, atol=0)
+    np.testing.assert_allclose(
+        D["Dmu2th"].ravel(order="F"),
+        [0.0, -0.43185598108667644, -0.0058697047770180366,
+         0.61167030287853608, 0.0, -0.55743151430601756,
+         -8.0550108298819048, -6.754840935851564, -15.060333753558169,
+         -0.5459071991236828, -5.8016660602954424, -7.9812252708657638],
+        rtol=1e-13, atol=0)
+    np.testing.assert_allclose(
+        D["Dmu4"], [0.0, 0.062798377990909593, -1.4679056433719779,
+                    0.75371975840918415, -0.89905663520180124,
+                    -0.065243109622599604], rtol=1e-12, atol=0)
+    np.testing.assert_allclose(
+        D["Dth2"].ravel(order="F"),
+        [3.3575912323843515, 0.67538398720085868, 0.0035531314471942497,
+         0.25359899816612091, 0.0, 547.23090548819118,
+         -1.8314673811650801, -1.0091661750898306, 0.082145465281791286,
+         0.2085312220130115, 0.0, 151.63024907263957,
+         0.62977258433481509, 1.2111589607056146, 13.747015776444481,
+         0.52756949169852851, 0.67198310294144048, 72.782519554865985],
+        rtol=1e-12, atol=0)
+    np.testing.assert_allclose(
+        D["Dmuth2"].ravel(order="F"),
+        [-2.4838128187057316, -0.22899659577570419, 0.0026906387185074328,
+         -0.45230348721151326, 0.0, 124.00985546440461,
+         6.5499860818848692, 1.6161446669546113, 0.081279279488592815,
+         0.20996203307867312, 0.0, 49.882657942915102,
+         -4.5045865458129013, -4.4195013256452702, 28.822890220348171,
+         1.0733763942620562, 4.5202487267662903, 48.204515664210703],
+        rtol=1e-12, atol=0)
+    np.testing.assert_allclose(
+        D["Dmu2th2"].ravel(order="F"),
+        [0.0, -0.50356411446106319, 0.00036808288773070713,
+         0.44127999364757825, 0.0, 0.23859860125821797,
+         0.0, 1.5768937572121571, 0.010454051122515517,
+         -1.5529373478733481, 0.0, 0.44898623742756172,
+         16.11002165976381, 11.207258313087056, 31.870149419673965,
+         -2.8370091100428398, 12.204421427510779, 16.177963935588195],
+        rtol=1e-12, atol=1e-15)
+    np.testing.assert_allclose(
+        D["Dmu3th"].ravel(order="F"),
+        [0.0, -0.090272421757199517, 0.0079221559762974181,
+         -0.28988907473869796, 0.0, 0.40776943518903863,
+         0.0, 0.20470879674238507, -1.9370434872535611,
+         4.037680839537507, -3.0054465345994732, -0.071837797964690253],
+        rtol=1e-12, atol=0)
+
+    np.testing.assert_allclose(fam.aic(y, mu, 0.0, wt, 0),
+                               35.895971253414217, rtol=1e-14)
+    # ls: the uncensored y=0 row's (λ−1)·log(0) term makes it +Inf —
+    # exactly mgcv's value on this frame.
+    assert fam.ls(y, wt, 1.0)[0] == np.inf
+    le = fam.ls_extended(y, wt)
+    assert float(np.sum(np.abs(le["lsth1"]))) == 0.0
+    assert le["LSTH1"].shape == (6, 2) and le["lsth2"].shape == (2, 2)
+
+
+def test_bcg_construction_and_validation():
+    from hea.family import bcg
+    # θ intake quirks (efam.r:1489-1497, live-R verified 2026-07-06):
+    # default (1, 0); fixed θ₂>0 stores LENGTH-3 c(λ, log λ, log σ) with
+    # n_theta=0 (the working "log σ" is log λ!); θ₂<0 keeps the RAW pair
+    # (the log(-θ₂) line runs after iniTheta was taken — dead).
+    assert bcg().n_theta == 2
+    np.testing.assert_allclose(bcg().get_theta(), [1.0, 0.0])
+    f = bcg(theta=(2.0, 0.5))
+    assert f.n_theta == 0
+    np.testing.assert_allclose(f.get_theta(),
+                               [2.0, np.log(2.0), np.log(0.5)])
+    np.testing.assert_allclose(f.get_theta(True),
+                               [2.0, 2.0, np.log(0.5)])
+    f = bcg(theta=(1.3, -0.5))
+    assert f.n_theta == 2
+    np.testing.assert_allclose(f.get_theta(), [1.3, -0.5])
+    np.testing.assert_allclose(f.get_theta(True), [1.3, np.exp(-0.5)])
+    f = bcg(theta=(1.3, 0.0))
+    assert f.n_theta == 2
+    np.testing.assert_allclose(f.get_theta(), [1.3, 0.0])
+    with pytest.raises(ValueError, match="length 2"):
+        bcg(theta=[1.0])
+    with pytest.raises(ValueError, match="not available"):
+        bcg(link="logit")
+    # non-negative response required (efam.r:2132).
+    with pytest.raises(ValueError, match="non-negative"):
+        bcg().initialize(np.array([-0.1, 1.0]), np.ones(2))
+    # identity validmu = finite; log/sqrt μ>0 (2-way).
+    assert bcg(link="identity").validmu(np.array([-1.0, 0.0]))
+    assert not bcg(link="log").validmu(np.array([0.0, 1.0]))
 
 
 # ---------------------------------------------------------------------------

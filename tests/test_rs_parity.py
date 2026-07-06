@@ -351,6 +351,19 @@ def _build_cases():
     add("fma_qt_df_lt_1", "qt",
         [np.array([0.5, 0.9999, 0.13513636327126444]),
          np.array([0.4, 0.4, 0.9])], (True, False))
+    # dnorm.c:52 log path `M_LN_SQRT_2PI + 0.5*x*x + log(sigma)` — the outer
+    # mul of 0.5*x*x fuses into the add (materialized by the bcg family
+    # census; dnorm was not in the original 26-config referee sweep). First
+    # point is the traced bcg drift z.
+    add("fma_dnorm_log", "dnorm",
+        [np.array([1.0034637489050912, 0.6294080605981774,
+                   2.3306046596904781, 31.415092653589793]),
+         np.zeros(4), np.ones(4)], (True,))
+    # dnorm.c:85 big-x split `(-0.5*x2 - x1)*x2` — fma(-0.5, x2, -x1).
+    add("fma_dnorm_bigx", "dnorm",
+        [np.array([5.7183098861837907, 12.566370614359172,
+                   26.535897932384626]),
+         np.zeros(3), np.ones(3)], (False,))
 
     return C
 
@@ -387,7 +400,7 @@ def test_fma_cases_python_matches_rs(case):
         "pbeta": nm.pbeta, "qbeta": nm.qbeta, "qgamma": nm.qgamma,
         "dgamma": nm.dgamma, "gammafn": nm.gammafn,
         "lgammafn": nm._lgammafn, "lbeta": nm.lbeta, "pt": nm.pt,
-        "pf": nm.pf, "dbeta": nm.dbeta, "qt": nm.qt,
+        "pf": nm.pf, "dbeta": nm.dbeta, "qt": nm.qt, "dnorm": nm.dnorm5,
     }
     name, fn, arrays, flags = case
     got_rs = np.asarray(getattr(rs, fn)(*arrays, *flags))

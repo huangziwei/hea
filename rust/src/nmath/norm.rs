@@ -454,7 +454,9 @@ pub fn dnorm5_scalar(x: f64, mu: f64, sigma: f64, give_log: bool) -> f64 {
         return rd0;
     }
     if give_log {
-        return -(M_LN_SQRT_2PI + 0.5 * x * x + sigma.ln());
+        // dnorm.c:52 `M_LN_SQRT_2PI + 0.5*x*x + log(sigma)`: the outer mul
+        // of 0.5*x*x fuses into the first add on arm64.
+        return -(rfma(0.5 * x, x, M_LN_SQRT_2PI) + sigma.ln());
     }
     if x < 5.0 {
         return M_1_SQRT_2PI * (-0.5 * x * x).exp() / sigma;
@@ -466,7 +468,8 @@ pub fn dnorm5_scalar(x: f64, mu: f64, sigma: f64, give_log: bool) -> f64 {
     }
     let x1 = ldexp(round_half_even(ldexp(x, 16)), -16);
     let x2 = x - x1;
-    M_1_SQRT_2PI / sigma * ((-0.5 * x1 * x1).exp() * ((-0.5 * x2 - x1) * x2).exp())
+    // dnorm.c:85 `(-0.5*x2 - x1)*x2`: fma(-0.5, x2, -x1); outer mul plain.
+    M_1_SQRT_2PI / sigma * ((-0.5 * x1 * x1).exp() * (rfma(-0.5, x2, -x1) * x2).exp())
 }
 
 #[pyfunction]

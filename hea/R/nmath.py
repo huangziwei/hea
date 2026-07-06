@@ -246,15 +246,18 @@ def dnorm5(x: float, mu: float = 0.0, sigma: float = 1.0,
     if x >= _TWO_SQRT_DBL_MAX:
         return rd0
     if give_log:
-        return -(_M_LN_SQRT_2PI + 0.5 * x * x + math.log(sigma))
+        # dnorm.c:52 `M_LN_SQRT_2PI + 0.5*x*x + log(sigma)`: the outer
+        # mul of 0.5*x*x fuses into the first add on arm64.
+        return -(_rfma(0.5 * x, x, _M_LN_SQRT_2PI) + math.log(sigma))
     if x < 5.0:
         return _M_1_SQRT_2PI * math.exp(-0.5 * x * x) / sigma
     if x > _DNORM_BIG:
         return 0.0
     x1 = math.ldexp(round(math.ldexp(x, 16)), -16)
     x2 = x - x1
+    # dnorm.c:85 `(-0.5*x2 - x1)*x2`: fma(-0.5, x2, -x1), outer mul plain.
     return _M_1_SQRT_2PI / sigma * (math.exp(-0.5 * x1 * x1)
-                                    * math.exp((-0.5 * x2 - x1) * x2))
+                                    * math.exp(_rfma(-0.5, x2, -x1) * x2))
 
 
 def dnorm5_vec(x, mu=0.0, sigma=1.0, give_log=False):
@@ -273,7 +276,8 @@ def dnorm5_vec(x, mu=0.0, sigma=1.0, give_log=False):
         return out
     z = np.abs((x - mu) / sigma)
     if give_log:
-        out = -(_M_LN_SQRT_2PI + 0.5 * z * z + math.log(sigma))
+        # dnorm.c:52 — fused 0.5*z*z into the add (see scalar).
+        out = -(_rfma_vec(0.5 * z, z, _M_LN_SQRT_2PI) + math.log(sigma))
         out = np.where(np.isnan(x), x, out)
         out = np.where(np.isinf(z), rd0, out)
         return out
@@ -285,8 +289,9 @@ def dnorm5_vec(x, mu=0.0, sigma=1.0, give_log=False):
         xb = z[big]
         x1 = np.ldexp(np.rint(np.ldexp(xb, 16)), -16)
         x2 = xb - x1
-        out[big] = _M_1_SQRT_2PI / sigma * (np.exp(-0.5 * x1 * x1)
-                                            * np.exp((-0.5 * x2 - x1) * x2))
+        out[big] = _M_1_SQRT_2PI / sigma * (
+            np.exp(-0.5 * x1 * x1)
+            * np.exp(_rfma_vec(-0.5, x2, -x1) * x2))
     out = np.where((~small) & (z > _DNORM_BIG) & np.isfinite(z), 0.0, out)
     out = np.where(np.isinf(z), rd0, out)
     out = np.where(np.isnan(x), x, out)

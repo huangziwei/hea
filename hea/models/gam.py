@@ -55,7 +55,10 @@ from ..family import (
     Quasi,
     QuasiBinomial,
     _coerce_response,
+    bcg as _bcg_family,
+    clog as _clog_family,
     cnorm as _cnorm_family,
+    cpois as _cpois_family,
     deterministic_xwx as _deterministic_xwx,
     negbin as _negbin_family,
     tw as _tw_family,
@@ -3421,7 +3424,8 @@ def _reml_hessian(rho, log_phi=0.0, fit=None, include_log_phi=False, include_fam
             Gk = K.T @ Khv                                    # (p, p)
             G_arr[k] = 0.5 * (Gk + Gk.T)                      # enforce symmetry
     else:
-        M = None
+        K = None    # θ-rows below rebuild K/d_diag when a family with
+        M = None    # dw/dη ≡ 0 still carries free θ (uncensored bcg).
         d_diag = None
         G_arr = None
 
@@ -6922,9 +6926,10 @@ class gam:
         if _cbind:
             lhs = parse(formula).lhs
             _cbind = isinstance(lhs, Call) and lhs.fn == "cbind"
-        # cnorm's censored response is also a two-column ``cbind(y, yat)``
-        # (col 0 the observed value, col 1 the censoring bound) — routed to
-        # its own matrix intake below, NOT the binomial proportion rewrite.
+        # The censored families' response (cnorm, cpois, clog, bcg) is also a
+        # two-column ``cbind(y, yat)`` (col 0 the observed value, col 1 the
+        # censoring bound) — routed to its own matrix intake below, NOT the
+        # binomial proportion rewrite.
         _cnorm_cbind = False
         if _cbind:
             if len(lhs.args) != 2 or lhs.kwargs:
@@ -6932,7 +6937,9 @@ class gam:
                     "cbind() response must have exactly two columns: "
                     "cbind(successes, failures)"
                 )
-            if isinstance(self.family, _cnorm_family):
+            if isinstance(self.family,
+                          (_cnorm_family, _cpois_family, _clog_family,
+                           _bcg_family)):
                 _cbind = False          # not the binomial cbind path
                 _cnorm_cbind = True
                 data = normalize_data(data)
@@ -7001,9 +7008,10 @@ class gam:
         # R's binomial initialize accepts a 2-level factor / boolean
         # response (level 1 = failure); same coercion as glm's intake.
         y = _coerce_response(d.y, self.family)
-        # cnorm censored response: re-read the (NA-aligned) censoring bound
-        # and hand it to the family, which carries it through dev_resids /
-        # Dd / aic / ls the way mgcv's ``attr(y,"censor")`` rides along.
+        # Censored response (cnorm/cpois/clog/bcg): re-read the (NA-aligned)
+        # censoring bound and hand it to the family, which carries it
+        # through dev_resids / Dd / aic / ls the way mgcv's
+        # ``attr(y,"censor")`` rides along.
         if _cnorm_cbind:
             self.family.set_censor(
                 d.data["_hea_cnorm_yat"].to_numpy().astype(float))
