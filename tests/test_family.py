@@ -4213,6 +4213,210 @@ def test_bcg_construction_and_validation():
 
 
 # ---------------------------------------------------------------------------
+# gfam (grouped families) — mgcv ``gfam()`` (gfam.r:3-604). Assembly pinned
+# to live mgcv 1.9-4 via hex transfer: a randomized 120-row 5-member
+# (binomial, Gamma, nb, tw, gaussian) level-2 census of 10,597 values had
+# gfam's own arithmetic bit-identical — every binomial/Gamma/gaussian slot
+# 0 DIFF incl. the free-scale chain, the θ² row-major upper-triangle
+# packing (filth/filsc) and the raw fix.family.ls → log-scale chain rule.
+# Residual last-ulp drift is confined to the nb (≤1e-15) and tw (≤4.3e-13)
+# MEMBER internals (receipted standalone: R tw()$dev.resids vs hea tw
+# shows the identical drift — numpy-pow vs libm-pow class, pre-existing) —
+# hence the 1e-11 pin tolerances below, member-inherited not gfam-born.
+# ---------------------------------------------------------------------------
+
+
+def _gfam_slot_inputs():
+    # 8 obs over binomial (rows 0,1,7), tw (2,3,4), gaussian (5,6);
+    # θ = (twθ, tw log φ, gauss log σ²) = (0.1, −0.2, 0.3).
+    y = np.array([1.0, 0.0, 2.2, 0.4, 1.5, -0.2, 0.7, 1.0])
+    fi = np.array([1.0, 1, 2, 2, 2, 3, 3, 1])
+    mu = np.array([0.6, 0.3, 1.8, 0.5, 1.2, 0.1, 0.4, 0.7])
+    wt = np.ones(8)
+    th = np.array([0.1, -0.2, 0.3])
+    return y, fi, mu, wt, th
+
+
+def test_gfam_components_match_mgcv():
+    from hea.family import Binomial, Gaussian, gfam, tw
+    y, fi, mu, wt, th = _gfam_slot_inputs()
+    g = gfam([Binomial(), tw(), Gaussian()])
+    assert g.name == "gfam{binomial,Tweedie,gaussian}"
+    assert g.link.name == "{logit,log,identity}"
+    assert g.n_theta == 3
+    g.set_fi(fi)
+    pre = g.preinitialize(y)
+    assert pre.get("Theta") is None      # no member preinitialize ⇒ no mod
+    np.testing.assert_array_equal(pre["y"], y)
+
+    # deviance: member deviances, tw's divided by exp(tw log φ)
+    # (gfam.r:103-106).
+    np.testing.assert_allclose(
+        g.dev_resids(y, mu, wt, th),
+        [1.0216512475319814, 0.7133498878774648, 0.07185266607650018,
+         0.03923448388024454, 0.07409608592118926, 0.06667363986135462,
+         0.06667363986135456, 0.7133498878774648],
+        rtol=1e-11, atol=0)
+
+    D = g.Dd(y, mu, th, wt, level=2)
+    # θ matrices are (8, 3): off-member columns EXACT zeros; the tw
+    # log-scale column is −(scaled member table) (gfam.r:172-178);
+    # pins column-major raveled like R writes them.
+    exp = {
+        "Dmu": [-3.3333333333333335, 2.857142857142857, -0.39883306491867987,
+                0.7027534406074493, -0.5550089060549714, 0.44449093240903076,
+                -0.4444909324090306, -2.857142857142857],
+        "Dmu2": [5.555555555555556, 4.081632653061225, 1.334867591608585,
+                 4.884867832761118, 2.5551128178240297, 1.4816364413634358,
+                 1.4816364413634358, 4.081632653061225],
+        "Dmu3": [-18.518518518518526, 11.661807580174923, -2.1626641823899977,
+                 -32.03509534242298, -6.183860859059008, -0.0, 0.0,
+                 -11.661807580174932],
+        "Dmu4": [92.59259259259262, 49.97917534360683, 4.480649480682058,
+                 248.2897785817015, 19.18963656151585, 0.0, 0.0,
+                 49.9791753436068],
+        "Dth": [0.0, 0.0, -0.011494749284079071, 0.007359766645563358,
+                -0.004646648785357787, 0.0, 0.0, 0.0,
+                0.0, 0.0, -0.07185266607650018, -0.03923448388024454,
+                -0.07409608592118926, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, -0.06667363986135462,
+                -0.06667363986135456, 0.0],
+        "Dmuth": [0.0, 0.0, 0.057291696845296086, 0.11904447438855675,
+                  0.02472969573097741, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.39883306491867987, -0.7027534406074493,
+                  0.5550089060549714, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0, -0.44449093240903076,
+                  0.4444909324090306, 0.0],
+        "Dmu2th": [0.0, 0.0, -0.13760135382703625, 0.4839932519102857,
+                   -0.0008174123947630714, 0.0, 0.0, 0.0,
+                   0.0, 0.0, -1.334867591608585, -4.884867832761118,
+                   -2.5551128178240297, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, 0.0, 0.0, -1.4816364413634358,
+                   -1.4816364413634358, 0.0],
+    }
+    for k, v in exp.items():
+        got = np.asarray(D[k], dtype=float)
+        if got.ndim == 2:
+            got = got.ravel(order="F")
+        np.testing.assert_allclose(got, v, rtol=1e-11, atol=0, err_msg=k)
+    # Dth2 (8, 6) row-major-upper packed pairs (θθ, θρ_tw, ρρ_tw, …):
+    # in-family blocks via filth, the tw scale pairs = −Dth columns
+    # (gfam.r:189-196).
+    np.testing.assert_allclose(
+        np.asarray(D["Dth2"]).ravel(order="F"),
+        [0.0, 0.0, 0.002422743278417013, 0.0010193790896375246,
+         0.0005357661343759946, 0.0, 0.0, 0.0,
+         0.0, 0.0, 0.011494749284079071, -0.007359766645563358,
+         0.004646648785357787, 0.0, 0.0, 0.0,
+         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+         0.0, 0.0, 0.07185266607650018, 0.03923448388024454,
+         0.07409608592118926, 0.0, 0.0, 0.0,
+         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+         0.0, 0.0, 0.0, 0.0, 0.0, 0.06667363986135462,
+         0.06667363986135456, 0.0],
+        rtol=1e-11, atol=0)
+
+    # ls: member saturated lls; exponential free-scale entries via the
+    # raw fix.family.ls values chain-ruled in gfam (gfam.r:341-351) —
+    # gaussian lsth1 = −nobs/(2φ)·φ = −1 here, LSTH1 rows −0.5.
+    le = g.ls_extended(y, wt, theta=th, scale=1.0)
+    np.testing.assert_allclose(le["ls"], -5.078841267754759, rtol=1e-12)
+    np.testing.assert_allclose(
+        le["lsth1"],
+        [0.0016670861446814733, -1.8222480844147504, -1.0],
+        rtol=1e-11, atol=0)
+    np.testing.assert_allclose(
+        np.asarray(le["lsth2"]).ravel(order="F"),
+        [0.0009962090903217202, 0.0938659100200604, 0.0,
+         0.0938659100200604, -0.4354457278967834, 0.0,
+         0.0, 0.0, 0.0],
+        rtol=5e-11, atol=0)
+    np.testing.assert_allclose(
+        np.asarray(le["LSTH1"]).ravel(order="F"),
+        [0.0, 0.0, -0.10764741499602315, 0.1655207146761607,
+         -0.05620621353545607, 0.0, 0.0, 0.0,
+         0.0, 0.0, -0.5619928544092048, -0.6828579090037183,
+         -0.5773973210018273, 0.0, 0.0, 0.0,
+         0.0, 0.0, 0.0, 0.0, 0.0, -0.5, -0.5, 0.0],
+        rtol=1e-11, atol=0)
+
+    # aic recomputes member deviances internally (the dev argument is
+    # dead, gfam.r:359) — tw's power comes from the θ ARGUMENT
+    # (efam.r:3213, the tw.aic override this exposed).
+    np.testing.assert_allclose(g.aic(y, mu, 0.0, wt, None, theta=th),
+                               7.319208537355566, rtol=1e-11)
+
+    # per-row link dispatch (logit rows 0,1,7 now stats-C exact).
+    np.testing.assert_allclose(
+        g.link.link(mu),
+        [0.4054651081081642, -0.8472978603872036, 0.5877866649021191,
+         -0.6931471805599453, 0.1823215567939546, 0.1, 0.4,
+         0.8472978603872034],
+        rtol=1e-13, atol=0)
+    np.testing.assert_allclose(
+        g.link.g2g(mu),
+        [0.19999999999999996, -0.3999999999999999, -1.0, -1.0, -1.0,
+         0.0, 0.0, 0.3999999999999999],
+        rtol=1e-14, atol=0)
+
+    # member mustarts on their subsets — binomial (w·y+.5)/(w+1),
+    # tw y+(y==0)·0.1, gaussian y (stock forms; fix.family's gam patches
+    # never match "gfam{…}", mgcv.r:1916).
+    np.testing.assert_allclose(
+        g.initialize(y, wt),
+        [0.75, 0.25, 2.2, 0.4, 1.5, -0.2, 0.7, 0.75],
+        rtol=0, atol=0)
+
+
+def test_gfam_construction_and_validation():
+    from hea.family import (
+        Binomial, Gamma, Gaussian, Poisson, Tweedie, gaulss, gfam, nb,
+        negbin, tw,
+    )
+    # n_theta accounting (gfam.r:36-49): exponential poisson/binomial
+    # scale fixed 1 (no slot); other exponentials a free log-scale slot;
+    # extended members their n_theta, +1 for tw (scale = -1, efam.r:3263).
+    assert gfam([Poisson(), Gaussian()]).n_theta == 1
+    assert gfam([Binomial(), tw(), Gaussian()]).n_theta == 3
+    assert gfam([Gamma(), nb()]).n_theta == 2
+    np.testing.assert_array_equal(
+        gfam([Binomial(), tw(), Gaussian()]).get_theta(), np.zeros(3))
+    # R-style string / constructor-class intake (gfam.r:23-24).
+    g = gfam(["poisson", Gaussian])
+    assert g.name == "gfam{poisson,gaussian}"
+    with pytest.raises(ValueError, match="family not recognized"):
+        gfam(["nope"])
+    with pytest.raises(ValueError, match="family not recognized"):
+        gfam([])
+    # fix.family.ls has no Tweedie/negbin rows — a fixed-p Tweedie()
+    # or negbin() member dies exactly like mgcv (gam.fit3.r:2546).
+    with pytest.raises(ValueError, match="family not recognised"):
+        gfam([Tweedie(p=1.5), Gaussian()])
+    with pytest.raises(ValueError, match="family not recognised"):
+        gfam([negbin(theta=2.0), Gaussian()])
+    # general (multi-LP) members: mgcv's stop, message verbatim
+    # (gfam.r:55).
+    with pytest.raises(NotImplementedError, match="general familes"):
+        gfam([gaulss(), Gaussian()])
+    # fixed-θ extended members leave mgcv's .Theta walk inconsistent
+    # (getTheta() entries with no n.theta slots, gfam.r:36-50) — refused.
+    with pytest.raises(NotImplementedError, match="fixed-theta"):
+        gfam([nb(theta=2.0), Gaussian()])
+    # the family index must cover 1..nf exactly (gfam.r:389-390).
+    g = gfam([Poisson(), Gaussian()])
+    g.set_fi(np.array([1.0, 1.0, 1.0]))
+    with pytest.raises(ValueError, match="does not match family list"):
+        g.preinitialize(np.array([1.0, 2.0, 3.0]))
+    with pytest.raises(ValueError, match="expects 1 params"):
+        g.set_theta([0.1, 0.2])
+    # no fi set → any consumer refuses (the two-column response is the
+    # only intake).
+    g2 = gfam([Poisson(), Gaussian()])
+    with pytest.raises(ValueError, match="two-column response"):
+        g2.initialize(np.array([1.0, 2.0]), np.ones(2))
+
+
+# ---------------------------------------------------------------------------
 # SoftplusLink (Thread A) — the genuine softplus *mean* link μ = log(1+e^η)
 # for Poisson RF/point-process GLMs (comp-neuro soft-rectifier; Paninski 2004).
 # NOT an mgcv built-in, so the link math is checked against closed forms +

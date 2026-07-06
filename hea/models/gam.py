@@ -60,6 +60,7 @@ from ..family import (
     cnorm as _cnorm_family,
     cpois as _cpois_family,
     deterministic_xwx as _deterministic_xwx,
+    gfam as _gfam_family,
     negbin as _negbin_family,
     tw as _tw_family,
 )
@@ -6929,8 +6930,10 @@ class gam:
         # The censored families' response (cnorm, cpois, clog, bcg) is also a
         # two-column ``cbind(y, yat)`` (col 0 the observed value, col 1 the
         # censoring bound) — routed to its own matrix intake below, NOT the
-        # binomial proportion rewrite.
+        # binomial proportion rewrite. gfam's ``cbind(y, index)`` (col 1 the
+        # 1-based family index, gfam.r:5-8) rides the same pattern.
         _cnorm_cbind = False
+        _gfam_cbind = False
         if _cbind:
             if len(lhs.args) != 2 or lhs.kwargs:
                 raise ValueError(
@@ -6958,6 +6961,25 @@ class gam:
                     pl.Series("_hea_cnorm_yat", yat),
                 )
                 formula = "_hea_cnorm_y ~" + formula.split("~", 1)[1]
+            elif isinstance(self.family, _gfam_family):
+                _cbind = False
+                _gfam_cbind = True
+                data = normalize_data(data)
+                cols = set(data.columns)
+                yobs, yfi = (
+                    data.select(_eval_lhs_expr(a, cols).alias("_v"))["_v"]
+                    .to_numpy().astype(float)
+                    for a in lhs.args
+                )
+                data = data.with_columns(
+                    pl.Series("_hea_gfam_y", yobs),
+                    pl.Series("_hea_gfam_fi", yfi),
+                )
+                # Keep the index expression: predict evaluates it on
+                # newdata to recover the family index (mgcv reads the
+                # response from newdata, mgcv.r:2819/3174).
+                self._gfam_fi_expr = lhs.args[1]
+                formula = "_hea_gfam_y ~" + formula.split("~", 1)[1]
             elif not isinstance(self.family, (Binomial, QuasiBinomial)):
                 # mgcv dies obscurely here ("logical subscript too
                 # long") — only (quasi)binomial's initialize understands
@@ -7015,6 +7037,13 @@ class gam:
         if _cnorm_cbind:
             self.family.set_censor(
                 d.data["_hea_cnorm_yat"].to_numpy().astype(float))
+        # gfam: the (NA-aligned) family index goes to the family before
+        # its preinitialize runs — the ``attr(fl,"fi")`` stash of
+        # gfam.r:384-392, split off because hea's NA-omit needs the two
+        # columns as frame columns first.
+        if _gfam_cbind:
+            self.family.set_fi(
+                d.data["_hea_gfam_fi"].to_numpy().astype(float))
         X_param = X_param_df.to_numpy().astype(float)
         if X_param.shape[1] == 0:
             # 0-column polars frame → to_numpy() collapses to (0, 0); keep
@@ -8229,6 +8258,15 @@ class gam:
             wt = self._wt
             off = self._offset
             n, p = self.n, self.p
+            fam_hook = getattr(family, "get_null_coef", None)
+            if fam_hook is not None:
+                # Family-supplied null model (mgcv.r:2022 — gfam's
+                # per-member means, gfam.r:569-587).
+                nc, _null_scale = fam_hook(X, y, wt, off)
+                en = X @ nc
+                mn = link.linkinv(en + off)
+                self._null_baseline_cache = (nc, en, mn)
+                return nc
             mu = (family.gam_initialize(y, wt, n=self._binom_n)
                   if self._binom_n is not None
                   else family.gam_initialize(y, wt))
@@ -10090,8 +10128,10 @@ class gam:
             return y - mu
         if type == "deviance":
             return self._deviance_residuals(y, mu, wt)
-        V = self.family.variance(mu)
         if type in ("pearson", "scaled.pearson"):
+            # Variance-less families (gfam defines none, as in mgcv)
+            # fail here — mgcv's pearson path errors the same way.
+            V = self.family.variance(mu)
             res = (y - mu) * np.sqrt(wt / np.maximum(V, 0.0))
             if type == "scaled.pearson":
                 res = res / np.sqrt(self.sigma_squared)
@@ -10278,7 +10318,7 @@ class gam:
             Vb = self._predict_V(unconditional) if se_fit else None
             ffv = fam_predict(se=se_fit, X=X_new, beta=self._beta,
                               off=off_new, Vb=Vb, eta=None,
-                              y=None, lpi=None)
+                              y=self._gfam_predict_y(newdata), lpi=None)
             return self._general_response_frame(
                 ffv["fit"], ffv.get("se_fit") if se_fit else None)
 
@@ -10296,6 +10336,27 @@ class gam:
         # Delta method: Var(μ̂) ≈ (dμ/dη)² · Var(η̂).
         mu_eta_v = self.family.link.mu_eta(eta)
         return pl.DataFrame({"fit": fit, "se.fit": np.abs(mu_eta_v) * se_link})
+
+    def _gfam_predict_y(self, newdata) -> np.ndarray | None:
+        """The ``y`` mgcv's predict.gam hands a family ``predict`` hook
+        (mgcv.r:3174/3226): for gfam, the family-index vector — the
+        second ``cbind`` arg evaluated on newdata (mgcv extracts the
+        response from newdata by name, mgcv.r:2819), or the training
+        index when predicting on the fit frame. ``None`` when
+        unavailable — gfam then requires its stored fi to match the
+        prediction length (gfam.r:490-492). Non-gfam families get
+        ``None`` (ocat/ziP ignore y)."""
+        if not isinstance(self.family, _gfam_family):
+            return None
+        if newdata is None:
+            return self.data["_hea_gfam_fi"].to_numpy().astype(float)
+        try:
+            cols = set(newdata.columns)
+            return (newdata.select(
+                _eval_lhs_expr(self._gfam_fi_expr, cols).alias("_v"))
+                ["_v"].to_numpy().astype(float))
+        except Exception:
+            return None
 
     def _predict_V(self, unconditional: bool) -> np.ndarray:
         """Covariance for prediction SEs: Vp, or Vc when unconditional

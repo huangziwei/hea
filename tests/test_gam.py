@@ -9585,3 +9585,177 @@ def test_bcg_uncensored_matches_mgcv():
     assert m.AIC == pytest.approx(869.100294135, rel=1e-9)
     np.testing.assert_allclose(m.family.get_theta(True),
                                [0.123209217613, 0.214649223507], rtol=1e-8)
+
+
+# ===========================================================================
+# gfam (grouped families) — mgcv gfam() (gfam.r:3-604) through gam. The
+# response is cbind(y, index); component scale parameters join θ as
+# log-scales. Pins: live mgcv 1.9-4 on the RGenerator(66)-matched frame
+# below (runif/rnorm/rpois streams bit-identical; index and tw/binomial
+# responses dyadic-exact transforms of the shared rpois stream).
+# ===========================================================================
+
+
+def _gfam_probe_frame(n: int = 210):
+    """Bit-matches the R recipe (set.seed(66)):
+
+        x0 <- runif(n); x1 <- runif(n); x2 <- runif(n)
+        e <- rnorm(n, 0, 0.2)
+        f <- sin(2*pi*x0)*0.7 + (x1-0.5)^2*2 + 0.3*sin(pi*x2)
+        mu <- 2 + 6*(x0-0.5)^2 + 4*(x1-0.25)^2   # dyadic-exact
+        yp <- rpois(n, mu)
+        fin <- yp %% 3 + 1
+        y[fin==1] <- as.numeric(yp > 2)                       # binomial
+        y[fin==2] <- (yp/4 + round(x2*128)/128)*(yp != 3)     # tw (zeros)
+        y[fin==3] <- f + e                                    # gaussian
+    """
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(66)
+    x0 = g.uniform(0.0, 1.0, n)
+    x1 = g.uniform(0.0, 1.0, n)
+    x2 = g.uniform(0.0, 1.0, n)
+    e = g.normal(0.0, 0.2, n)
+    f = np.sin(2 * np.pi * x0) * 0.7 + (x1 - 0.5) ** 2 * 2 \
+        + 0.3 * np.sin(np.pi * x2)
+    mu = 2 + 6 * (x0 - 0.5) ** 2 + 4 * (x1 - 0.25) ** 2
+    yp = np.asarray(g.poisson(mu), dtype=float)
+    fin = yp % 3 + 1
+    y = np.zeros(n)
+    i1, i2, i3 = fin == 1, fin == 2, fin == 3
+    y[i1] = (yp[i1] > 2).astype(float)
+    y[i2] = (yp[i2] / 4 + np.round(x2[i2] * 128) / 128) * (yp[i2] != 3)
+    y[i3] = (f + e)[i3]
+    return pl.DataFrame({"y": y, "fin": fin, "x0": x0, "x1": x1, "x2": x2,
+                         "yp": yp, "f": f, "e": e})
+
+
+def test_gfam_through_gam_matches_mgcv():
+    """binomial + tw + gaussian (the ?gfam example combo): REML and ML,
+    prediction with the family index supplied in newdata. The tw power
+    runs into its p→b boundary here (p̂ ≈ 1.99), where the criterion is
+    flat in twθ: R itself parks at twθ = 12.594 (free) vs 12.785 (its
+    own fixed-sp refit, Δcrit 4.6e-8 rel) — hea's endpoint (12.17,
+    Δcrit 1.5e-7) sits in the same flat tail, so twθ is pinned in
+    p-space and the fit-level pins carry flat-direction tolerances.
+    The exponential-pair and gaussian+tw tests below pin the same
+    machinery at 1e-11..1e-14 where no flat direction exists."""
+    from hea.family import Binomial, Gaussian, gfam, tw
+
+    df = _gfam_probe_frame()
+    m = gam("cbind(y, fin) ~ s(x0) + s(x1) + s(x2)", df,
+            family=gfam([Binomial(), tw(), Gaussian()]), method="REML")
+    np.testing.assert_allclose(
+        m.sp, [0.36453856569, 3.55925798119, 6.79134855377], rtol=1e-8)
+    th = m.family.get_theta()
+    # tw log φ and gaussian log σ² are well-determined:
+    np.testing.assert_allclose(
+        th[1:], [-0.934387658144, -3.156660593], rtol=1e-8)
+    # twθ: boundary regime — pin in p-space (R: θ̂ = 12.5938582063 →
+    # p = 1.98999735…; both sides are within 5e-5 of each other's p).
+    p_hat = m.family.get_fl()[1]._p_of_theta(th[0])
+    assert th[0] > 8.0
+    assert p_hat == pytest.approx(1.9899973520, abs=5e-5)
+    assert m.REML_criterion / 2 == pytest.approx(139.128461856, rel=2e-6)
+    assert float(np.sum(m.edf)) == pytest.approx(12.9027518681, rel=1e-6)
+    assert m.deviance == pytest.approx(217.86886093, rel=5e-6)
+    assert m.null_deviance == pytest.approx(98.9895272305, rel=1e-6)
+    assert m.AIC == pytest.approx(263.478873347, rel=5e-6)
+    assert m._family_display_name() == "gfam{binomial,Tweedie(p=1.99),gaussian}"
+    np.testing.assert_allclose(
+        m.fitted_values[:5],
+        [0.645263508154, -0.181620539483, 0.572424567087,
+         2.06991168691, -0.227087476246], rtol=5e-6)
+    np.testing.assert_allclose(
+        m.residuals_of("deviance")[:5],
+        [0.936051821046, -0.888627642797, 1.05629002909,
+         0.169576783767, -0.227785060989], rtol=5e-5)
+
+    # response-scale prediction: the family index rides newdata under
+    # the second cbind arg (mgcv reads it off the newdata response,
+    # mgcv.r:2819 → gfam.r:493-498).
+    nd = pl.DataFrame({"fin": [1.0, 2, 3, 2],
+                       "x0": [.2, .5, .8, .35], "x1": [.3, .6, .4, .7],
+                       "x2": [.25, .45, .85, .15]})
+    pr = m.predict(nd, se_fit=True)
+    np.testing.assert_allclose(
+        pr["fit"].to_numpy(),
+        [0.696213221734, 1.43883576842, -0.372387039487, 2.01534813817],
+        rtol=5e-6)
+    np.testing.assert_allclose(
+        pr["se.fit"].to_numpy(),
+        [0.0152952979359, 0.111422504552, 0.0836168410102, 0.145180900319],
+        rtol=5e-6)
+    np.testing.assert_allclose(
+        m.predict(nd, type="link")["fit"].to_numpy(),
+        [0.829329898447, 0.363834292425, -0.372387039487, 0.700791953759],
+        rtol=5e-6)
+    # no family index anywhere → gfam's own error (gfam.r:492).
+    with pytest.raises(ValueError, match="no family index"):
+        m.predict(nd.drop("fin"))
+    # variance-less family: pearson residuals fail as in mgcv.
+    with pytest.raises(NotImplementedError):
+        m.residuals_of("pearson")
+
+    m2 = gam("cbind(y, fin) ~ s(x0) + s(x1) + s(x2)", df,
+             family=gfam([Binomial(), tw(), Gaussian()]), method="ML")
+    np.testing.assert_allclose(
+        m2.sp, [0.406760049566, 4.67356472978, 11.4456735007], rtol=1e-7)
+    np.testing.assert_allclose(
+        m2.family.get_theta()[1:], [-0.933804586328, -3.18907237988],
+        rtol=1e-8)
+    assert m2.ML_criterion / 2 == pytest.approx(133.735499889, rel=2e-6)
+    assert m2._family_display_name() == \
+        "gfam{binomial,Tweedie(p=1.99),gaussian}"
+
+
+def test_gfam_exponential_pair_matches_mgcv():
+    """poisson + gaussian — exponential members only, so the single θ
+    is the gaussian free log-scale. No flat direction: everything is
+    pinned at the levels measured (θ 9e-14, criterion 6e-14)."""
+    from hea.family import Gaussian, Poisson, gfam
+
+    df = _gfam_probe_frame()
+    i1 = df["fin"].to_numpy() == 1.0
+    y2 = np.where(i1, df["yp"].to_numpy(),
+                  df["f"].to_numpy() + df["e"].to_numpy())
+    df2 = df.with_columns(pl.Series("y", y2),
+                          pl.Series("fin", np.where(i1, 1.0, 2.0)))
+    m = gam("cbind(y, fin) ~ s(x0) + s(x1) + s(x2)", df2,
+            family=gfam([Poisson(), Gaussian()]), method="REML")
+    np.testing.assert_allclose(
+        m.sp, [0.362319563763, 5.72221508129, 6.29915779122], rtol=1e-8)
+    np.testing.assert_allclose(
+        m.family.get_theta(), [-3.35392636346], rtol=1e-10)
+    assert m.REML_criterion / 2 == pytest.approx(188.374808536, rel=1e-11)
+    assert float(np.sum(m.edf)) == pytest.approx(15.1278425247, rel=1e-10)
+    assert m.deviance == pytest.approx(364.685364739, rel=1e-11)
+    assert m._family_display_name() == "gfam{poisson,gaussian}"
+
+
+def test_gfam_gaussian_tw_theta_walk_quirk_matches_mgcv():
+    """gaussian + tw with the tw power INTERIOR (p̂ = 1.242): tight pins
+    throughout. Also the putTheta-walk quirk receipt (gfam.r:66-74): the
+    R loop advances i0 only for extended members, so with the gaussian
+    free-scale slot FIRST, tw's stored θ is set from the wrong positions
+    — the display label's p comes from p(gauss log σ̂²), identically in
+    mgcv and hea ("Tweedie(p=1.242)" instead of p(θ̂_tw) = 1.278)."""
+    from hea.family import Gaussian, gfam, tw
+
+    df = _gfam_probe_frame()
+    i3 = df["fin"].to_numpy() == 3.0
+    yp = df["yp"].to_numpy()
+    x2 = df["x2"].to_numpy()
+    y3 = np.where(i3, df["f"].to_numpy() + df["e"].to_numpy(),
+                  yp / 4 + np.round(x2 * 128) / 128)
+    df3 = df.with_columns(pl.Series("y", y3),
+                          pl.Series("fin", np.where(i3, 1.0, 2.0)))
+    m = gam("cbind(y, fin) ~ s(x0) + s(x1) + s(x2)", df3,
+            family=gfam([Gaussian(), tw()]), method="REML")
+    np.testing.assert_allclose(
+        m.sp, [6.05489847015, 7.62000140649, 260.164562235], rtol=1e-8)
+    np.testing.assert_allclose(
+        m.family.get_theta(),
+        [-1.17033174973, -1.10577520975, -1.77109552965], rtol=1e-9)
+    assert m.REML_criterion / 2 == pytest.approx(160.741637692, rel=1e-11)
+    assert m._family_display_name() == "gfam{gaussian,Tweedie(p=1.242)}"
