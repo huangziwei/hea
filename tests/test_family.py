@@ -3948,11 +3948,17 @@ def test_clog_components_match_mgcv():
     fam.set_theta([0.3])
     fam.set_censor(yat)
 
+    # rtol 1e-13, not 1e-14: the pins are arm64 R values, and the
+    # uncensored deviance 2·(z + 2·log1pexp(−z) − 2log2) cancels
+    # ~1.4-magnitude terms down to 0.025 (row 2), amplifying the 1-2 ulp
+    # glibc↔Apple libm exp/log scatter ~57× (measured 1.8e-14 rel on
+    # linux CI, where hea ≡ linux R holds separately via the live-R
+    # oracle gates). Same-platform parity stays bit-level (census).
     np.testing.assert_allclose(
         fam.dev_resids(y, mu, wt),
         [0.13297872286444656, 0.00064770448452167173, 0.024645863841215476,
          1.010811660242168, 0.9907951404171742, 3847863142179033.5],
-        rtol=1e-14, atol=0)
+        rtol=1e-13, atol=0)
 
     D = fam.Dd(y, mu, np.array([0.3]), wt, level=2)
     exp = {
