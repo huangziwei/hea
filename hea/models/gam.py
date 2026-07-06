@@ -57,6 +57,7 @@ from ..family import (
     _coerce_response,
     cnorm as _cnorm_family,
     deterministic_xwx as _deterministic_xwx,
+    negbin as _negbin_family,
     tw as _tw_family,
 )
 from ..formula import (
@@ -6164,6 +6165,14 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
     # ---- ordinary-family branch ---------------------------------------------
     n, n_sp, n_work = G.n, G.n_sp, G.n_work
     family = G.family
+    # gam.outer's nbGetTheta stop (mgcv.r:1649-1650): a θ-vector negbin's
+    # range search only ever lived in the deprecated performance
+    # iteration, so every live path errors here.
+    if (family.name.startswith("Negative Binomial")
+            and np.asarray(family.get_theta()).size > 1):
+        raise ValueError(
+            "Please provide a single value for theta or use nb to "
+            "estimate it")
     log_phi_hat = None
     tw_info = None
     used_magic = False
@@ -6880,6 +6889,14 @@ class gam:
                                         else -1.0)
             else:
                 self._scale_resolved = scale  # >0 → UBRE at φ; <0 → GCV/GACV
+        if isinstance(self.family, _negbin_family):
+            # Fixed-θ negbin: "scale <- 1; ## no choice" — estimate.gam
+            # overrides whatever scale= said AFTER the branches above
+            # (mgcv.r:1963-1966, re-set with G$sig2 at 1975-1979), and
+            # GCV.Cp/GACV.Cp become UBRE — delivered by the scale-known
+            # criterion dispatch below. (Verified live: scale=-1 and
+            # scale=5 fits are identical to the default.)
+            self._scale_resolved = 1.0
         # mgcv's object$scale.estimated.
         self.scale_estimated = not self._scale_known_fit
         # GCV.Cp dispatches by family.scale_known: scale-unknown (Gaussian,

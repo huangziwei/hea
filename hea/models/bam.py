@@ -55,7 +55,13 @@ from scipy.linalg.lapack import dgeqp3, dormqr, dpstrf
 from ..R import distributions as _dist
 from ..R._shared import _rfma_vec
 
-from ..family import Family, Gaussian, _coerce_response, tw as _tw_family
+from ..family import (
+    Family,
+    Gaussian,
+    _coerce_response,
+    negbin as _negbin_family,
+    tw as _tw_family,
+)
 from ..formula import (
     BasisSpec,
     SmoothBlock,
@@ -2495,6 +2501,15 @@ class bam(gam):
         self._select = bool(select)
         self._gamma = float(gamma)
         self.family = family
+        if (isinstance(family, _negbin_family)
+                and family.get_theta().size > 1):
+            # mgcv bam dies on a θ-vector negbin too, just unhelpfully —
+            # bam.r:2206's famname test becomes a length-2 if() condition
+            # ("'length = 2' in coercion to 'logical(1)'", R ≥ 4.2).
+            # Raise gam.outer's meaningful message (mgcv.r:1650) instead.
+            raise ValueError(
+                "Please provide a single value for theta or use nb to "
+                "estimate it")
 
         # bam(scale=) resolution — identical to gam (estimate.gam,
         # mgcv.r:1936-1971). scale=0 → family default (the historical bam
@@ -2521,11 +2536,17 @@ class bam(gam):
                 self._scale_resolved = scale
             else:
                 self._scale_resolved = 1.0 if self.family.scale_known else -1.0
-        elif self.family.scale_known:
+        elif (self.family.scale_known
+              and not isinstance(self.family, _negbin_family)):
             # poisson/binomial under bam: scale>0 fixes φ (bam.r keeps scale>0,
             # verified scale=2.5 → φ=2.5; NOT reset to 1 like estimate.gam);
             # scale=0 → φ=1. scale<0 selects a GCV-style overdispersion
             # criterion (mgcv-bam: φ=1 but a distinct sp) — still to port.
+            # Fixed-θ negbin is excluded: bam.r:2206 keys its known-scale
+            # list on famname ∈ {"poisson","binomial"} only, so under bam
+            # the negbin scale is ESTIMATED like gaussian/Gamma (verified
+            # live: bam(negbin(2)) → scale.estimated=TRUE) — unlike gam's
+            # forced φ=1 (mgcv.r:1963-1966).
             if scale < 0.0:
                 raise NotImplementedError(
                     "scale<0 for scale-known families under bam selects a "
@@ -3720,6 +3741,75 @@ class bam(gam):
         return (family_aic
                 - (self.deviance / phi - 2.0 * ls0)) / self._gamma
 
+    def _compute_edf12(self, rho, fit, sigma_squared, A_inv, A_inv_XtWX,
+                       edf, H_aug):
+        """mgcv-bam's fREML edf1/edf2/Vc — ``Sl.postproc`` (fast-REML.r:
+        1997-2018) and ``bgam.fitd`` (bam.r:824-881) share the recipe::
+
+            edf1 = 2·edf − rowSums(Fᵀ∘F)               (F = A⁻¹·X'WX)
+            rV   = (Λ₊^{-1/2}·Vᵀ)[, 1:M]   from eigen(outer hess)
+            Vc   = Vp + d1b·(rVᵀ·rV)·d1bᵀ
+            edf2 = rowSums(Vc ∘ X'WX)/φ,  Σedf2 capped at Σedf1
+                                                        (bam.r:2789)
+
+        The column truncation keeps the ρ coordinates of every
+        eigenvector — the ρρ block of the positive-eigenspace
+        pseudo-inverse with the log-φ coupling marginalised. There is NO
+        Vc2 Cholesky-derivative term and NO 0.1-prior regularisation —
+        those belong to gam.fit3.post.proc, which mgcv-bam reaches only
+        through the explicit REML/ML/P-REML/P-ML ``gam(G=G)`` route
+        (bam.r:1263-1273): those methods dispatch to the inherited gam
+        machinery (verified: mgcv bam(REML) edf2 ≡ hea's inherited value
+        to 3e-7, while fREML's Sl.postproc value differs at the 5%
+        level). GCV.Cp/GACV.Cp also ride super() — mgcv leaves edf2 NULL
+        there and the AIC df below never reads it.
+
+        The outer Hessian: the discrete POI's last accepted
+        ``Sl.fitChol`` proposal (mgcv ``prop$hess``, bam.r:869) or
+        ``fast.REML.fit``'s final Newton Hessian (mgcv
+        ``fit$outer.info$hess``, fast-REML.r:2010) — both stashed by the
+        fit loops; the ``_reml_hessian``-based ``H_aug`` argument is the
+        fallback. d1b: ``_db_drho`` at the converged fit ≡ mgcv's
+        unwound ``fit$d1b``/``prop$db`` (same ∂β̂/∂ρ in original
+        coordinates)."""
+        if self._method_in != "fREML":
+            return super()._compute_edf12(rho, fit, sigma_squared, A_inv,
+                                          A_inv_XtWX, edf, H_aug)
+        F = A_inv_XtWX
+        edf1 = 2.0 * np.diag(F) - np.einsum("ij,ji->i", F, F)
+        p = F.shape[0]
+        n_sp = len(self._slots)
+        # The optimizer's own (ρ[, log φ]) Hessian, working space.
+        pi_out = getattr(self, "_pi_last_out", None)
+        oi = getattr(self, "_outer_info", None)
+        if pi_out is not None:
+            H = np.asarray(pi_out["hess"], dtype=float)
+            T_pi = self._T_working(1 if not self._scale_known_fit else 0)
+            if T_pi is not None:
+                H = T_pi.T @ H @ T_pi
+        elif oi is not None and oi.get("hess") is not None \
+                and np.asarray(oi["hess"]).size > 0:
+            H = np.asarray(oi["hess"], dtype=float)
+        else:
+            H = H_aug
+        if (n_sp == 0 or H is None or H.size == 0
+                or not (np.isfinite(sigma_squared) and sigma_squared > 0)):
+            return edf.copy(), edf1, np.zeros((p, p))
+        db = self._db_drho(rho, fit.beta, fit.A_chol, fit.A_chol_lower)
+        if self._L is not None:
+            db = db @ self._L          # d1b <- d1b %*% L (fast-REML.r:2008)
+        M = db.shape[1]
+        vals, vecs = np.linalg.eigh(0.5 * (H + H.T))
+        pos = vals > 0.0
+        inv = np.zeros_like(vals)
+        inv[pos] = 1.0 / vals[pos]
+        Vr = (vecs[:M, :] * inv) @ vecs[:M, :].T
+        Vc_corr = db @ Vr @ db.T
+        edf2 = edf + np.einsum("ij,ij->i", Vc_corr, self._XtX) / sigma_squared
+        if edf2.sum() > edf1.sum():    # bam.r:2789 (sum cap, not element-wise)
+            edf2 = edf1.copy()
+        return edf2, edf1, Vc_corr
+
     def _preml_hessian(self, rho, fit=None):
         """Working-Gaussian view of gam's `_preml_hessian` shim (the
         P-REML/P-ML H_aug for Vc/edf2) — same family/weight swap as
@@ -4228,7 +4318,14 @@ class bam(gam):
         family_aic = float(self.family.aic(y, fit.mu, dev1, wt, n))
         mgcv_aic = family_aic + 2.0 * edf_total
         logLik = sc_p + edf_total - 0.5 * mgcv_aic
-        df_for_aic = min(self.edf2_total + sc_p, float(p) + sc_p)
+        # mgcv's magic (GCV.Cp/GACV.Cp) rail leaves object$edf2 NULL
+        # (bam.r:1278-1295), so logLik.gam's df falls back to edf there
+        # (mgcv.r:4431); hea's GCV edf2 attribute stays a best-effort
+        # extra but must not leak into AIC/BIC (same rule as gam).
+        df_base = (self.edf2_total
+                   if method in ("REML", "ML", "P-REML", "P-ML")
+                   else edf_total)
+        df_for_aic = min(df_base + sc_p, float(p) + sc_p)
         self.loglike = float(logLik)
         self.logLik = self.loglike
         self.npar = float(df_for_aic)
@@ -5180,6 +5277,14 @@ class bam(gam):
                 self._sl, last_out["PP"], inverse=True,
                 both_sides=True, cov=True,
             )
+        # Retain bgam.fitd's final accepted proposal (mgcv ``prop``): its
+        # ldetS/ldetXXS feed the reported discrete criterion (bam.r:792)
+        # and its hess is Sl.postproc-flavor edf2's Vr input (bam.r:869).
+        # None on the non-discrete paths. ``dev`` is the loop's PENALISED
+        # deviance (dev + Σ(rSb)², bgam.fitd:611/669) — the value mgcv's
+        # final crit statement reads, NOT the response deviance.
+        self._pi_last_out = last_out
+        self._pi_last_dev = float(dev) if last_out is not None else None
 
         if not conv:
             warnings.warn("PIRLS algorithm did not converge", stacklevel=2)
@@ -5523,7 +5628,12 @@ class bam(gam):
         family_aic = float(family.aic(y, fit.mu, dev1, wt, n))
         mgcv_aic = family_aic + 2.0 * edf_total
         logLik = sc_p + edf_total - 0.5 * mgcv_aic
-        df_for_aic = min(self.edf2_total + sc_p, float(p) + sc_p)
+        # GCV.Cp/GACV.Cp: mgcv-bam's magic rail sets no edf2 (bam.r:
+        # 1278-1295) → logLik.gam df falls back to edf (mgcv.r:4431).
+        df_base = (self.edf2_total
+                   if method in ("REML", "ML", "P-REML", "P-ML")
+                   else edf_total)
+        df_for_aic = min(df_base + sc_p, float(p) + sc_p)
         self.loglike = float(logLik)
         self.logLik = self.loglike
         self.npar = float(df_for_aic)
@@ -5532,7 +5642,43 @@ class bam(gam):
         self._mgcv_aic = float(mgcv_aic)
 
         if method in ("REML", "ML"):
-            if n_sp > 0:
+            pi_out = getattr(self, "_pi_last_out", None)
+            if n_sp > 0 and pi_out is not None:
+                # DISCRETE rail: bgam.fitd's own reported criterion — the
+                # `crit <-` statement ends at `)/2` (bam.r:792); the
+                # trailing `(length(y)/gamma-Mp)*log(2*pi*scale)` line
+                # (bam.r:794) is a bare DISCARDED expression, confirmed
+                # by R's own parse of the body. `dev` there is the loop's
+                # PENALISED deviance (bgam.fitd:611/669), `lsat` the
+                # family saturated log-lik at φ̂, ldetS/ldetXXS the final
+                # proposal's. bgam.fitd attaches no "ml.pen" attr to
+                # gcv.ubre, so the bam.r:2784 aic-replacement never fires
+                # here — no _ml_flavor_swap, no dev-swap.
+                phi = (float(self._scale_fixed_value)
+                       if self._scale_known_fit
+                       else float(np.exp(self._log_phi_hat)))
+                if self._family_mgcv_extended:
+                    lsat = float(self.family.ls_extended(
+                        y, wt, theta=self.family.get_theta(),
+                        scale=phi)["ls"])
+                elif self._binom_n is not None:
+                    lsat = float(self.family.ls(y, wt, phi,
+                                                n=self._binom_n)[0])
+                else:
+                    lsat = float(self.family.ls(y, wt, phi)[0])
+                gam_ = self._gamma
+                dev_pen = float(self._pi_last_dev)
+                crit = ((dev_pen - 2.0 * lsat * phi) / (phi * gam_)
+                        - float(pi_out["ldetS"])
+                        + float(pi_out["ldetXXS"])) / 2.0
+                if self._rho != 0.0:
+                    # AR1 correction (bam.r:795-798).
+                    ld = 1.0 / np.sqrt(1.0 - self._rho ** 2)
+                    df_ar = (int(self._ar_start.sum())
+                             if self._ar_start is not None else 1)
+                    crit -= (n / gam_ - df_ar) * float(np.log(ld))
+                score = 2.0 * float(crit)      # hea stores 2V
+            elif n_sp > 0:
                 log_phi_hat = (
                     self._log_phi_hat
                     if self._log_phi_hat is not None else 0.0

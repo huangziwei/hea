@@ -53,6 +53,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(discrete::pbinom, m)?)?;
     m.add_function(wrap_pyfunction!(discrete::dbinom, m)?)?;
     m.add_function(wrap_pyfunction!(discrete::qbinom, m)?)?;
+    m.add_function(wrap_pyfunction!(discrete::pnbinom_mu, m)?)?;
+    m.add_function(wrap_pyfunction!(discrete::qnbinom_mu, m)?)?;
     m.add_function(wrap_pyfunction!(discrete::dbeta, m)?)?;
     // t / F
     m.add_function(wrap_pyfunction!(tf::pt, m)?)?;

@@ -1321,7 +1321,7 @@ fn br_end_from_w1_log(w1v: f64, do_swap: bool, log_p: bool, ierr: i32) -> (f64, 
     br_end(w, w1, do_swap, ierr)
 }
 
-fn bratio(a: f64, b: f64, x: f64, y: f64, log_p: bool) -> (f64, f64, i32) {
+pub(crate) fn bratio(a: f64, b: f64, x: f64, y: f64, log_p: bool) -> (f64, f64, i32) {
     let rd0 = if log_p { f64::NEG_INFINITY } else { 0.0 };
     let rd1 = if log_p { 0.0 } else { 1.0 };
     let mut eps = TOMS_EPS;

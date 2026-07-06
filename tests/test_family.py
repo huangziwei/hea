@@ -3832,3 +3832,141 @@ def test_softplus_poisson_glm_matches_mgcv():
     m2 = glm("y ~ x + z", d, family=Poisson(link="softplus"))
     np.testing.assert_allclose(np.asarray(m2.bhat.to_numpy()).ravel(),
                                np.asarray(m.bhat.to_numpy()).ravel(), atol=0)
+
+
+# ===========================================================================
+# negbin — fixed-θ negative binomial (mgcv negbin(), gam.fit3.r:2564-2642)
+# ===========================================================================
+
+
+def test_negbin_components_match_mgcv():
+    """Slot-level bit-pins vs mgcv 1.9-4 ``negbin(2)`` at fixed (y, μ, w):
+    dev.resids / aic / ls / variance / initialize, plus the constructor
+    surface (famname θ-format, natural-scale getTheta, link intake,
+    validation errors)."""
+    from hea.family import negbin
+
+    f = negbin(2)
+    y = np.array([0.0, 1.0, 3.0, 7.0])
+    mu = np.array([1.5, 2.0, 2.5, 6.0])
+    w = np.ones(4)
+    # mgcv: fam$dev.resids(y, mu, w) — bit-identical.
+    np.testing.assert_array_equal(
+        f.dev_resids(y, mu, w),
+        [2.2384631517416911, 0.33979807359079484,
+         0.040324184185464018, 0.038014875766715139])
+    # mgcv: fam$aic(y, 1, mu, w, 0) (dev unused — Θ-form direct).
+    assert f.aic(y, mu, None, w, None) == 14.422747381464536
+    # mgcv: fam$ls(y, w, 4, 1) = c(-sum(term·w), 0, 0).
+    np.testing.assert_array_equal(
+        f.ls(y, w, 1.0), [-5.8830735480899392, 0.0, 0.0])
+    np.testing.assert_array_equal(f.variance(mu), [2.625, 4.0, 5.625, 24.0])
+    np.testing.assert_array_equal(f.dvar(mu), [2.5, 3.0, 3.5, 7.0])
+    np.testing.assert_array_equal(f.d2var(mu), [1.0, 1.0, 1.0, 1.0])
+    np.testing.assert_array_equal(f.d3var(mu), [0.0, 0.0, 0.0, 0.0])
+    # initialize: mustart <- y + (y == 0)/6.
+    np.testing.assert_allclose(
+        f.initialize(y, w), [1.0 / 6.0, 1.0, 3.0, 7.0], rtol=0)
+    with pytest.raises(ValueError, match="negative values not allowed"):
+        f.initialize(np.array([-1.0, 2.0]), np.ones(2))
+    # qf = qnbinom(p, size=Θ, mu) — R oracle.
+    np.testing.assert_array_equal(
+        f.qf(np.array([0.1, 0.5, 0.9]), np.full(3, 7.3), None, None),
+        [1.0, 6.0, 15.0])
+    # famname: paste("Negative Binomial(", format(round(theta, 3)), ")").
+    assert f.name == "Negative Binomial(2)"
+    assert negbin(2.3456).name == "Negative Binomial(2.346)"
+    assert negbin(3.7).name == "Negative Binomial(3.7)"
+    # getTheta: the θ vector on the NATURAL scale (mgcv negbin$getTheta()).
+    np.testing.assert_array_equal(negbin([2, 9]).get_theta(), [2.0, 9.0])
+    # canonical="" (gam.fit3.r:2641) → never the Fisher shortcut.
+    assert not f.is_canonical
+    assert f.scale_known and not f.is_extended and f.n_theta == 0
+    # link intake: mgcv falls through to make.link(link) for ANY character
+    # link (gam.fit3.r:2577-2579) — "inverse" is accepted despite the
+    # nominal okLinks (verified live); unknown names error like make.link.
+    assert negbin(2, link="inverse").link.name == "inverse"
+    assert negbin(2, link="sqrt").link.name == "sqrt"
+    with pytest.raises(ValueError, match="banana"):
+        negbin(2, link="banana")
+    # theta = stop("'theta' must be specified") — the lazy default fires
+    # on first access; hea validates eagerly with the same message.
+    with pytest.raises(ValueError, match="'theta' must be specified"):
+        negbin()
+    with pytest.raises(ValueError, match="positive and finite"):
+        negbin(-1)
+
+
+def test_qnbinom_pnbinom_mu_match_r():
+    """``qnbinom_mu``/``pnbinom_mu`` (nmath qnbinom_mu.c / pnbinom.c)
+    bit-exact vs R across parametrizations, tails and the log scale, and
+    the rust kernels 0-ulp against the Python port."""
+    from hea.R import nmath as nm
+
+    ps = [1e-4, .001, .01, .1, .3, .5, .77, .9, .99, .9999]
+    grids = {
+        (2.5, 7.3): [0, 0, 0, 2, 4, 6, 10, 14, 24, 42],
+        (2.0, 0.03): [0, 0, 0, 0, 0, 0, 0, 0, 1, 2],
+        (37.5, 4200.0): [2103, 2386, 2764, 3345, 3813, 4163,
+                         4690, 5103, 5966, 7254],
+        (0.07, 123456.7): [0, 0, 0, 0, 0, 52, 25362, 266391,
+                           2326395, 8729299],
+    }
+    for (size, mu), expect in grids.items():
+        got = [nm.qnbinom_mu(p, size, mu) for p in ps]
+        np.testing.assert_array_equal(got, expect, err_msg=f"{size},{mu}")
+    # upper tail + log scale (size=2.5, mu=7.3).
+    np.testing.assert_array_equal(
+        [nm.qnbinom_mu(p, 2.5, 7.3, False) for p in ps],
+        [42, 34, 24, 14, 9, 6, 3, 2, 0, 0])
+    np.testing.assert_array_equal(
+        [nm.qnbinom_mu(np.log(p), 2.5, 7.3, True, True) for p in ps],
+        [0, 0, 0, 2, 4, 6, 10, 14, 24, 42])
+    # boundaries: R_Q_P01_boundaries + the size/mu special cases.
+    assert nm.qnbinom_mu(0.0, 2.5, 7.3) == 0.0
+    assert nm.qnbinom_mu(1.0, 2.5, 7.3) == np.inf
+    assert nm.qnbinom_mu(0.5, 0.0, 3.0) == 0.0
+    assert nm.qnbinom_mu(0.5, 2.0, 0.0) == 0.0
+    assert nm.qnbinom_mu(0.5, np.inf, 3.0) == 3.0     # Poisson limit
+    # pnbinom_mu: bratio on BOTH tail ratios (pnbinom.c:83).
+    np.testing.assert_array_equal(
+        [nm.pnbinom_mu(x, 2.5, 7.3) for x in [0, 1, 3, 7, 20, -1, 1e18]],
+        [0.032868874445290082, 0.094078768182692535, 0.26302499000982504,
+         0.59957811374520131, 0.9746158998054657, 0.0, 1.0])
+    np.testing.assert_array_equal(
+        [nm.pnbinom_mu(x, 2.5, 7.3, True, True) for x in [0, 1, 3, 7, 20]],
+        [-3.4152291345059278, -2.3636228882137487, -1.3355062322696321,
+         -0.51152901484550251, -0.025711834520021577])
+    np.testing.assert_array_equal(
+        [nm.pnbinom_mu(x, 2.5, 7.3, False) for x in [0, 1, 3, 7, 20]],
+        [0.96713112555470993, 0.90592123181730744, 0.73697500999017496,
+         0.40042188625479869, 0.025384100194534378])
+    np.testing.assert_array_equal(
+        [nm.pnbinom_mu(x, 0.0, 0.0) for x in [-1, 0, 3]], [0.0, 1.0, 1.0])
+    np.testing.assert_array_equal(
+        [nm.pnbinom_mu(x, np.inf, 7.3) for x in [0, 3, 7]],
+        [0.00067553877519384439, 0.067406047117412868, 0.55410661183907739])
+    # x + 1e-7 left-fuzz (pnbinom.c floor(x + 1e-7)).
+    assert nm.pnbinom_mu(2.9999999, 2.5, 7.3) == 0.26302499000982504
+    # rust kernels 0-ulp vs the Python port (skips cleanly if the
+    # extension is absent — _disp then runs the Python scalars anyway).
+    rs_q = nm.rs_fn("qnbinom_mu")
+    rs_p = nm.rs_fn("pnbinom_mu")
+    if rs_q is not None:
+        for (size, mu) in grids:
+            for lt in (True, False):
+                for lg in (True, False):
+                    p_in = np.log(np.asarray(ps)) if lg else np.asarray(ps)
+                    got_rs = rs_q(p_in, np.full(10, size), np.full(10, mu),
+                                  lt, lg)
+                    got_py = [nm.qnbinom_mu(p, size, mu, lt, lg)
+                              for p in p_in]
+                    np.testing.assert_array_equal(got_rs, got_py)
+        xs = np.array([0.0, 1, 3, 7, 20, 1e3])
+        for (size, mu) in grids:
+            for lt in (True, False):
+                for lg in (True, False):
+                    got_rs = rs_p(xs, np.full(6, size), np.full(6, mu),
+                                  lt, lg)
+                    got_py = [nm.pnbinom_mu(x, size, mu, lt, lg) for x in xs]
+                    np.testing.assert_array_equal(got_rs, got_py)

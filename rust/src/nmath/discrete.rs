@@ -10,7 +10,7 @@ use pyo3::prelude::*;
 use super::gamma::pgamma_scalar;
 use super::loader::{dbinom_raw, dpois_raw};
 use super::norm::{dt0, dt1, qnorm5_scalar};
-use super::toms708::{lbeta_scalar, pbeta_scalar};
+use super::toms708::{bratio, lbeta_scalar, pbeta_scalar};
 use super::util::round_half_even;
 
 // === CDFs ====================================================================
@@ -53,6 +53,51 @@ pub(crate) fn pbinom_scalar(x: f64, n: f64, p: f64, lower_tail: bool, log_p: boo
         return dt1(lower_tail, log_p);
     }
     pbeta_scalar(p, x + 1.0, n - x, !lower_tail, log_p)
+}
+
+pub(crate) fn pnbinom_mu_scalar(
+    x: f64,
+    size: f64,
+    mu: f64,
+    lower_tail: bool,
+    log_p: bool,
+) -> f64 {
+    if x.is_nan() || size.is_nan() || mu.is_nan() {
+        return x + size + mu;
+    }
+    if !mu.is_finite() {
+        return f64::NAN;
+    }
+    if size < 0.0 || mu < 0.0 {
+        return f64::NAN;
+    }
+    if size == 0.0 {
+        // limiting case: point mass at zero
+        return if x >= 0.0 {
+            dt1(lower_tail, log_p)
+        } else {
+            dt0(lower_tail, log_p)
+        };
+    }
+    if x < 0.0 {
+        return dt0(lower_tail, log_p);
+    }
+    if !x.is_finite() {
+        return dt1(lower_tail, log_p);
+    }
+    if !size.is_finite() {
+        // limit case: Poisson
+        return ppois_scalar(x, mu, lower_tail, log_p);
+    }
+    let x = (x + 1e-7).floor();
+    // bratio on the two separately-computed tail ratios (pnbinom.c:83) —
+    // NOT pbeta's `0.5 - x + 0.5` complement; they can differ in ulps.
+    let (w, wc, _ierr) = bratio(size, x + 1.0, size / (size + mu), mu / (size + mu), log_p);
+    if lower_tail {
+        w
+    } else {
+        wc
+    }
 }
 
 // === densities ===============================================================
@@ -339,6 +384,56 @@ pub(crate) fn qbinom_scalar(p: f64, n: f64, pr: f64, lower_tail: bool, log_p: bo
     q_discrete(p, lower_tail, log_p, mu, sigma, gamma, &cdf, Some(n))
 }
 
+pub(crate) fn qnbinom_mu_scalar(
+    p: f64,
+    size: f64,
+    mu: f64,
+    lower_tail: bool,
+    log_p: bool,
+) -> f64 {
+    if size == f64::INFINITY {
+        // limit case: Poisson
+        return qpois_scalar(p, mu, lower_tail, log_p);
+    }
+    if p.is_nan() || size.is_nan() || mu.is_nan() {
+        return p + size + mu;
+    }
+    if mu == 0.0 || size == 0.0 {
+        return 0.0;
+    }
+    if mu < 0.0 || size < 0.0 {
+        return f64::NAN;
+    }
+    // R_Q_P01_boundaries(p, 0, ML_POSINF)
+    if log_p {
+        if p > 0.0 {
+            return f64::NAN;
+        }
+        if p == 0.0 {
+            return if lower_tail { f64::INFINITY } else { 0.0 };
+        }
+        if p == f64::NEG_INFINITY {
+            return if lower_tail { 0.0 } else { f64::INFINITY };
+        }
+    } else {
+        if p < 0.0 || p > 1.0 {
+            return f64::NAN;
+        }
+        if p == 0.0 {
+            return if lower_tail { 0.0 } else { f64::INFINITY };
+        }
+        if p == 1.0 {
+            return if lower_tail { f64::INFINITY } else { 0.0 };
+        }
+    }
+    let q = 1.0 + mu / size; // = 1/prob
+    let pp = mu / size; // = (1 - prob)/prob = q - 1
+    let sigma = (size * pp * q).sqrt();
+    let gamma = (q + pp) / sigma;
+    let cdf = |y: f64, lt: bool, lg: bool| pnbinom_mu_scalar(y, size, mu, lt, lg);
+    q_discrete(p, lower_tail, log_p, mu, sigma, gamma, &cdf, None)
+}
+
 // === PyO3 wrappers ===========================================================
 macro_rules! wrap2 {
     ($name:literal, $fn:ident, $sc:path, ($p2:ident=$d2:literal), ($p3:ident=$d3:literal)) => {
@@ -431,6 +526,46 @@ pub fn qbinom<'py>(
         n.as_slice().unwrap(),
         pr.as_slice().unwrap(),
         |p, n, pr| qbinom_scalar(p, n, pr, lower_tail, log_p),
+    );
+    v.into_pyarray(py)
+}
+
+#[pyfunction]
+#[pyo3(name = "pnbinom_mu", signature = (x, size, mu, lower_tail=true, log_p=false))]
+pub fn pnbinom_mu<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<'py, f64>,
+    size: PyReadonlyArray1<'py, f64>,
+    mu: PyReadonlyArray1<'py, f64>,
+    lower_tail: bool,
+    log_p: bool,
+) -> Bound<'py, PyArray1<f64>> {
+    let v = crate::par::map3(
+        py,
+        x.as_slice().unwrap(),
+        size.as_slice().unwrap(),
+        mu.as_slice().unwrap(),
+        |x, s, m| pnbinom_mu_scalar(x, s, m, lower_tail, log_p),
+    );
+    v.into_pyarray(py)
+}
+
+#[pyfunction]
+#[pyo3(name = "qnbinom_mu", signature = (p, size, mu, lower_tail=true, log_p=false))]
+pub fn qnbinom_mu<'py>(
+    py: Python<'py>,
+    p: PyReadonlyArray1<'py, f64>,
+    size: PyReadonlyArray1<'py, f64>,
+    mu: PyReadonlyArray1<'py, f64>,
+    lower_tail: bool,
+    log_p: bool,
+) -> Bound<'py, PyArray1<f64>> {
+    let v = crate::par::map3(
+        py,
+        p.as_slice().unwrap(),
+        size.as_slice().unwrap(),
+        mu.as_slice().unwrap(),
+        |p, s, m| qnbinom_mu_scalar(p, s, m, lower_tail, log_p),
     );
     v.into_pyarray(py)
 }

@@ -4615,6 +4615,160 @@ class nb(Family):
         return f"nb(theta={Th:.4g}, link={self.link.name})"
 
 
+class negbin(Family):
+    """Fixed-θ negative binomial — direct port of mgcv ``negbin()``
+    (gam.fit3.r:2564-2642, "modified from Venables and Ripley's MASS
+    library to work with gam.fit3").
+
+    Unlike :class:`nb` (mgcv's extended family, θ estimated jointly with
+    the smoothing parameters), ``negbin`` is a PLAIN exponential family:
+    ``Var(y) = μ + μ²/θ`` at a fixed, user-supplied θ. Under ``gam``,
+    estimate.gam forces φ = 1 whatever ``scale=`` says and turns
+    GCV.Cp/GACV.Cp into UBRE (mgcv.r:1963-1966 + 1975-1979); under
+    ``bam`` the scale is ESTIMATED (bam.r:2206 keys its known-scale
+    list on famname ∈ {poisson, binomial} only — verified live:
+    ``bam(negbin(2))`` reports ``scale.estimated=TRUE``).
+
+    ``theta`` may be a vector (the legacy θ-range/θ-set search
+    interface), but the only live mgcv path for ``len(θ) > 1`` is
+    gam.outer's stop "Please provide a single value for theta or use nb
+    to estimate it" (mgcv.r:1649-1650) — the search itself is
+    deprecated.r-only (dead performance iteration). Every computation
+    uses θ[0], mirroring mgcv's ``get(".Theta")[1]``.
+
+    Links: any standard link name resolves — mgcv's ``negbin`` falls
+    through to ``make.link(link)`` for character input
+    (gam.fit3.r:2577-2579), so e.g. ``"inverse"`` is accepted despite
+    the nominal okLinks of log/identity/sqrt (verified live).
+    """
+    name = "Negative Binomial"      # __init__ overrides with the θ-form
+    canonical_link_name = "log"
+    # canonical="" (gam.fit3.r:2641): never equal to the link name, so
+    # PIRLS always takes the full-Newton branch (gam.fit3.r:118).
+    _newton_canonical = "none"
+    scale_known = True
+
+    def __init__(self, theta=None, link: str = "log"):
+        if theta is None:
+            # mgcv: theta = stop("'theta' must be specified") — the lazy
+            # default fires on first access (assign(".Theta", theta, env)).
+            raise ValueError("'theta' must be specified")
+        th = np.asarray(theta, dtype=float).reshape(-1)
+        if th.size < 1 or not np.all(np.isfinite(th)) or np.any(th <= 0):
+            raise ValueError(
+                "negbin theta must be positive and finite; use nb() to "
+                "estimate theta"
+            )
+        self._theta_all = th.copy()
+        # famname: paste("Negative Binomial(", format(round(theta,3)), ")")
+        # — a VECTOR in R for multi-θ; mgcv only ever reads family[1].
+        self.name = f"Negative Binomial({np.round(th[0], 3):g})"
+        super().__init__(link=link)
+
+    @property
+    def _th(self) -> float:
+        """``get(".Theta")[1]`` — all computations use the first θ."""
+        return float(self._theta_all[0])
+
+    def get_theta(self) -> np.ndarray:
+        """mgcv ``negbin()$getTheta()`` — the full θ vector on the
+        NATURAL scale (unlike :class:`nb`, whose getTheta is log-scale)."""
+        return self._theta_all.copy()
+
+    # ----- variance (gam.fit3.r:2590-2595) -------------------------------
+
+    def variance(self, mu):
+        mu = np.asarray(mu, dtype=float)
+        return mu + mu * mu / self._th
+
+    def dvar(self, mu):
+        return 1.0 + 2.0 * np.asarray(mu, dtype=float) / self._th
+
+    def d2var(self, mu):
+        return np.full_like(np.asarray(mu, dtype=float), 2.0 / self._th)
+
+    def d3var(self, mu):
+        return np.zeros_like(np.asarray(mu, dtype=float))
+
+    # ----- deviance / likelihood (gam.fit3.r:2599-2617) ------------------
+
+    def dev_resids(self, y, mu, wt, theta=None):
+        # 2·wt·[y·log(pmax(1,y)/μ) − (y+Θ)·log((y+Θ)/(μ+Θ))]
+        Th = self._th
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        return 2.0 * wt * (
+            y * np.log(np.maximum(1.0, y) / mu)
+            - (y + Th) * np.log((y + Th) / (mu + Th))
+        )
+
+    def aic(self, y, mu, dev, wt, n, theta=None):
+        # (y+Θ)·log(μ+Θ) − y·log(μ) + lΓ(y+1) − Θ·log(Θ) + lΓ(Θ) − lΓ(Θ+y);
+        # 2·Σ term·wt. ``dev`` is unused (Θ-form direct).
+        Th = self._th
+        y = np.asarray(y, dtype=float)
+        mu = np.asarray(mu, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        term = ((y + Th) * np.log(mu + Th) - y * np.log(mu)
+                + gammaln(y + 1.0) - Th * np.log(Th) + gammaln(Th)
+                - gammaln(Th + y))
+        return 2.0 * float(np.sum(term * wt))
+
+    def ls(self, y, wt, scale):
+        # Saturated log-lik at μ=y; scale plays no role (φ ≡ 1), so both
+        # log-φ derivatives are 0 — mgcv returns c(-sum(term*w), 0, 0).
+        Th = self._th
+        y = np.asarray(y, dtype=float)
+        wt = np.asarray(wt, dtype=float)
+        # ylogy <- y; ylogy[y>0] <- y·log(y)  (y=0 row keeps 0).
+        ylogy = np.where(y > 0, y * np.log(np.maximum(y, 1e-300)), y)
+        term = ((y + Th) * np.log(y + Th) - ylogy
+                + gammaln(y + 1.0) - Th * np.log(Th) + gammaln(Th)
+                - gammaln(Th + y))
+        return np.array([-float(np.sum(term * wt)), 0.0, 0.0])
+
+    # ----- initialization / validity (gam.fit3.r:2597, 2618-2622) --------
+
+    def initialize(self, y, wt):
+        y = np.asarray(y, dtype=float)
+        if np.any(y < 0):
+            raise ValueError(
+                "negative values not allowed for the negative binomial "
+                "family"
+            )
+        # mustart <- y + (y == 0)/6
+        return y + (y == 0.0) / 6.0
+
+    def validmu(self, mu) -> bool:
+        mu = np.asarray(mu)
+        return bool(np.all(np.isfinite(mu)) and np.all(mu > 0))
+
+    # ----- qq hooks (gam.fit3.r:2624-2632) --------------------------------
+
+    def qf(self, p, mu, wt, scale):
+        # qnbinom(p, size=Θ, mu=μ) — R dispatches the mu-parametrization.
+        return _nmath._disp(
+            "qnbinom_mu", _nmath.qnbinom_mu,
+            [p, self._th, np.asarray(mu, dtype=float)], (True, False))
+
+    def rd(self, rng, mu, wt, scale):
+        # rnbinom(n=length(mu), size=Θ, mu=μ): per-element
+        # rpois(rgamma(Θ, μ/Θ)), interleaved to match R's stream order.
+        Th = self._th
+        mu = np.asarray(mu, dtype=float)
+        out = np.empty(mu.shape[0])
+        for i in range(mu.shape[0]):
+            out[i] = rng.poisson(rng.gamma(shape=Th, scale=mu[i] / Th))
+        return out
+
+    def __repr__(self):
+        th = self._theta_all
+        inner = (f"{th[0]:.4g}" if th.size == 1
+                 else "[" + ", ".join(f"{t:.4g}" for t in th) + "]")
+        return f"negbin(theta={inner}, link={self.link.name})"
+
+
 class betar(Family):
     """Beta regression extended family — direct port of mgcv ``betar()``
     (efam.r:3269-3546).

@@ -3668,6 +3668,32 @@ def pbinom(x, n, p, lower_tail=True, log_p=False):
     return pbeta(p, x + 1, n - x, not lower_tail, log_p)
 
 
+def pnbinom_mu(x, size, mu, lower_tail=True, log_p=False):
+    """R's ``pnbinom(x, size, mu=)`` (nmath/pnbinom.c ``pnbinom_mu``) — the
+    negative-binomial CDF in the (size, mu) parametrization, bit-exact."""
+    if math.isnan(x) or math.isnan(size) or math.isnan(mu):
+        return x + size + mu
+    if not math.isfinite(mu):
+        return _NAN
+    if size < 0 or mu < 0:
+        return _NAN
+    if size == 0:            # limiting case: point mass at zero
+        return _dt1(lower_tail, log_p) if x >= 0 else _dt0(lower_tail, log_p)
+    if x < 0:
+        return _dt0(lower_tail, log_p)
+    if not math.isfinite(x):
+        return _dt1(lower_tail, log_p)
+    if not math.isfinite(size):     # limit case: Poisson
+        return ppois(x, mu, lower_tail, log_p)
+    x = math.floor(x + 1e-7)
+    # bratio on the two separately-computed tail ratios — NOT pbeta's
+    # ``0.5 - x + 0.5`` complement (pnbinom.c:83 passes size/(size+mu)
+    # AND mu/(size+mu) explicitly; they can differ from 1−pr in ulps).
+    w, wc, _ierr = _bratio(size, x + 1.0, size / (size + mu),
+                           mu / (size + mu), log_p)
+    return w if lower_tail else wc
+
+
 # === qbeta — beta quantile (nmath/qbeta.c, AS 109 + Newton) ==================
 _DBL_very_MIN = 2.2250738585072014e-308 / 4.
 _DBL_log_v_MIN = _M_LN2 * (-1021 - 2)
@@ -4415,6 +4441,42 @@ def qbinom(p, n, pr, lower_tail=True, log_p=False):
     def _cdf(y, lt, lg):
         return pbinom(y, n, pr, lt, lg)
     return _q_discrete(p, lower_tail, log_p, mu, sigma, gamma, _cdf, n)
+
+
+def qnbinom_mu(p, size, mu, lower_tail=True, log_p=False):
+    """R's ``qnbinom(p, size, mu=)`` (nmath/qnbinom_mu.c) — discrete search,
+    bit-exact."""
+    if size == _INF:                # limit case: Poisson
+        return qpois(p, mu, lower_tail, log_p)
+    if math.isnan(p) or math.isnan(size) or math.isnan(mu):
+        return p + size + mu
+    if mu == 0 or size == 0:
+        return 0.
+    if mu < 0 or size < 0:
+        return _NAN
+    # R_Q_P01_boundaries(p, 0, ML_POSINF)
+    if log_p:
+        if p > 0:
+            return _NAN
+        if p == 0:
+            return _INF if lower_tail else 0.
+        if p == _NEGINF:
+            return 0. if lower_tail else _INF
+    else:
+        if p < 0 or p > 1:
+            return _NAN
+        if p == 0:
+            return 0. if lower_tail else _INF
+        if p == 1:
+            return _INF if lower_tail else 0.
+    Q = 1 + mu / size            # = 1/prob
+    P = mu / size                # = (1-prob)/prob = Q - 1
+    sigma = math.sqrt(size * P * Q)
+    gamma = (Q + P) / sigma
+
+    def _cdf(y, lt, lg):
+        return pnbinom_mu(y, size, mu, lt, lg)
+    return _q_discrete(p, lower_tail, log_p, mu, sigma, gamma, _cdf, None)
 
 
 # === dexp / pexp / qexp (nmath dexp.c / pexp.c / qexp.c) =====================

@@ -9143,3 +9143,102 @@ def test_te_ad_multi_penalty_margin():
             d, method="REML", sp=[1.0] * 10)
     assert np.asarray(m.sp).size == 10
     assert np.isfinite(np.asarray(m.coef)).all()
+
+
+# ===========================================================================
+# negbin — fixed-θ NB through gam (audit-2 B10; mgcv negbin(),
+# gam.fit3.r:2564-2642 + estimate.gam mgcv.r:1963-1979 + gam.outer:1649).
+# Pins: mgcv 1.9-4 on the RGenerator(66) recipe (see test_bam.py
+# ``_method_probe_frame`` for the bit-identical R data).
+# ===========================================================================
+
+
+def _negbin_probe_frame(n: int = 300) -> pl.DataFrame:
+    """RGenerator(66) counts — bit-matches ``set.seed(66); x* <- runif(n);
+    e <- rnorm(n,0,.2); mu <- 2+6*(x0-.5)^2+4*(x1-.25)^2; yp <- rpois(n,mu)``
+    (same recipe as test_bam._method_probe_frame; mu dyadic-exact so the
+    rpois stream is bit-identical to R's)."""
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(66)
+    x0 = g.uniform(0.0, 1.0, n)
+    x1 = g.uniform(0.0, 1.0, n)
+    g.uniform(0.0, 1.0, n)      # x2 — drawn to keep the stream aligned
+    g.normal(0.0, 0.2, n)       # e
+    mu = 2 + 6 * (x0 - 0.5) ** 2 + 4 * (x1 - 0.25) ** 2
+    yp = np.asarray(g.poisson(mu), dtype=float)
+    return pl.DataFrame({"x0": x0, "x1": x1, "yp": yp})
+
+
+def test_negbin_through_gam_matches_mgcv():
+    """gam(negbin(2)) across methods vs mgcv 1.9-4. estimate.gam forces
+    φ = 1 whatever scale= says ("scale <- 1; ## no choice", mgcv.r:1963-1966
+    + 1975-1979) and GCV.Cp/GACV.Cp become UBRE; P-REML collapses to REML
+    (known scale). The θ-vector form errors at fit time with gam.outer's
+    message (mgcv.r:1649-1650) — the range search is deprecated.r-only."""
+    from hea.family import negbin
+
+    df = _negbin_probe_frame()
+    m = gam("yp ~ s(x0) + s(x1)", df, family=negbin(2), method="REML")
+    np.testing.assert_allclose(
+        m.sp, [2.674656889, 7.421293859], rtol=1e-6)
+    assert float(np.sum(m.edf)) == pytest.approx(5.382552732, rel=1e-7)
+    assert m.REML_criterion / 2 == pytest.approx(640.428625352, rel=1e-9)
+    assert m.deviance == pytest.approx(159.8165023, rel=1e-8)
+    assert m.null_deviance == pytest.approx(184.3636025, rel=1e-8)
+    assert m.AIC == pytest.approx(1275.357879, rel=1e-8)
+    assert m.scale_estimated is False and m.sigma_squared == 1.0
+    assert float(np.asarray(m.coefficients)[0]) == pytest.approx(
+        1.11546079869, rel=1e-7)
+    assert float(m.Vp[0, 0]) == pytest.approx(0.00278642638887, rel=1e-6)
+    np.testing.assert_allclose(
+        m.fitted_values[:3],
+        [3.47125220165, 3.15303269855, 2.27727871824], rtol=1e-8)
+    assert m.family.name == "Negative Binomial(2)"
+
+    # GCV.Cp → UBRE at φ=1 (criterion + optimum), and the scale= override:
+    # scale=-1 / scale=5 / GACV.Cp are all IDENTICAL to the default.
+    m_u = gam("yp ~ s(x0) + s(x1)", df, family=negbin(2), method="GCV.Cp")
+    np.testing.assert_allclose(m_u.sp, [4.34280477, 9.294872256], rtol=1e-6)
+    assert float(np.sum(m_u.edf)) == pytest.approx(4.995203191, rel=1e-7)
+    assert m_u.GCV_score == pytest.approx(-0.431835854591, rel=1e-9)
+    assert m_u.AIC == pytest.approx(1273.055941, rel=1e-8)
+    for kw in ({"scale": -1.0}, {"scale": 5.0}):
+        m_s = gam("yp ~ s(x0) + s(x1)", df, family=negbin(2),
+                  method="GCV.Cp", **kw)
+        np.testing.assert_allclose(m_s.sp, m_u.sp, rtol=0)
+        assert m_s.GCV_score == m_u.GCV_score
+        assert m_s.sigma_squared == 1.0
+    m_ga = gam("yp ~ s(x0) + s(x1)", df, family=negbin(2), method="GACV.Cp")
+    np.testing.assert_allclose(m_ga.sp, m_u.sp, rtol=0)
+    assert m_ga.GCV_score == m_u.GCV_score
+
+    # ML (sp2 hits the flat ~3.7e4 shelf — pin it loosely, the criterion
+    # tightly) + the P-REML → REML known-scale collapse.
+    m_ml = gam("yp ~ s(x0) + s(x1)", df, family=negbin(2), method="ML")
+    assert float(m_ml.sp[0]) == pytest.approx(4.765964897, rel=1e-5)
+    assert float(m_ml.sp[1]) == pytest.approx(36896.5181, rel=1e-3)
+    assert m_ml.ML_criterion / 2 == pytest.approx(636.030243645, rel=1e-9)
+    m_pr = gam("yp ~ s(x0) + s(x1)", df, family=negbin(2), method="P-REML")
+    assert m_pr.method == "REML"
+    np.testing.assert_allclose(m_pr.sp, m.sp, rtol=0)
+
+    # non-default links ride the same rails (sqrt is an okLink; inverse is
+    # the make.link fallthrough mgcv also accepts).
+    m_sq = gam("yp ~ s(x0) + s(x1)", df, family=negbin(3.7, link="sqrt"),
+               method="REML")
+    np.testing.assert_allclose(m_sq.sp, [3.11556099, 6.800298143], rtol=1e-6)
+    assert m_sq.REML_criterion / 2 == pytest.approx(617.091489985, rel=1e-9)
+    assert m_sq.deviance == pytest.approx(205.8400679, rel=1e-8)
+    assert m_sq.AIC == pytest.approx(1226.504486, rel=1e-8)
+    assert m_sq.family.name == "Negative Binomial(3.7)"
+    m_iv = gam("yp ~ s(x0) + s(x1)", df, family=negbin(2, link="inverse"),
+               method="REML")
+    np.testing.assert_allclose(m_iv.sp, [44.36693182, 196.9028291],
+                               rtol=1e-6)
+    assert m_iv.REML_criterion / 2 == pytest.approx(644.704911279, rel=1e-9)
+
+    # θ-vector: every live mgcv path stops in gam.outer.
+    with pytest.raises(ValueError,
+                       match="single value for theta or use nb"):
+        gam("yp ~ s(x0)", df, family=negbin([2, 9]), method="REML")

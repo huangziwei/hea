@@ -2047,3 +2047,105 @@ def test_bam_method_validation_and_discrete_fallback():
         m_d = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
                              method="REML", discrete=True)
     assert m_d._discrete_design is not None
+
+
+def test_bam_negbin_matches_mgcv():
+    """bam(negbin(2)) — audit-2 B10. Unlike gam's forced φ=1, bam ESTIMATES
+    the negbin scale (bam.r:2206 keys its known-scale list on famname ∈
+    {poisson, binomial} only; verified live: scale.estimated=TRUE,
+    φ̂=0.409). Pins: mgcv 1.9-4 on the RGenerator(66) probe data, all four
+    rails; the θ-vector form errors like gam (mgcv bam dies on the same
+    input with R's length-2-condition error at bam.r:2206)."""
+    from hea.family import negbin
+
+    df = _method_probe_frame()
+    b = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=negbin(2))
+    np.testing.assert_allclose(
+        b.sp, [0.8940741769, 1.528517329], rtol=1e-7)
+    assert float(np.sum(b.edf)) == pytest.approx(7.046360153, rel=1e-8)
+    assert b.scale_estimated is True
+    assert b.sigma_squared == pytest.approx(0.4089173384, rel=1e-8)
+    assert b.REML_criterion / 2 == pytest.approx(643.740870971, rel=1e-10)
+    assert b.deviance == pytest.approx(157.9984818, rel=1e-8)
+    assert b.null_deviance == pytest.approx(184.3636025, rel=1e-8)
+    assert b.AIC == pytest.approx(1276.651619, rel=1e-8)
+    assert b.edf2_total == pytest.approx(8.023219702, rel=1e-7)
+    assert float(np.asarray(b.coefficients)[0]) == pytest.approx(
+        1.1122390542, rel=1e-7)
+    assert float(b.Vp[0, 0]) == pytest.approx(0.00114299957085, rel=1e-6)
+
+    # discrete rail: same optimum, bgam.fitd's own reported criterion.
+    bd = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=negbin(2),
+                        discrete=True)
+    np.testing.assert_allclose(
+        bd.sp, [0.8940726045, 1.528515831], rtol=1e-7)
+    assert bd.sigma_squared == pytest.approx(0.4089173087, rel=1e-8)
+    assert bd.REML_criterion / 2 == pytest.approx(759.348319953, rel=1e-10)
+    assert bd.AIC == pytest.approx(1276.651622, rel=1e-8)
+    assert bd.edf2_total == pytest.approx(8.023222164, rel=1e-7)
+
+    # GCV.Cp (magic rail, scale estimated → GCV mode).
+    bg = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=negbin(2),
+                        method="GCV.Cp")
+    np.testing.assert_allclose(
+        bg.sp, [0.5379616717, 0.1909526192], rtol=1e-6)
+    assert bg.GCV_score == pytest.approx(0.421121198392, rel=1e-9)
+    assert bg.sigma_squared == pytest.approx(0.4081480369, rel=1e-8)
+    assert bg.AIC == pytest.approx(1276.994775, rel=1e-8)
+
+    # explicit REML / ML (gam(G=G) flavors — edf2 via gam.fit3.post.proc).
+    br = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=negbin(2),
+                        method="REML")
+    assert br.AIC == pytest.approx(1277.542504, rel=1e-8)
+    assert br.edf2_total == pytest.approx(8.468662921, rel=1e-6)
+    # hea's REML alias shares fREML's optimizer endpoint; mgcv's separate
+    # gam(G=G) Newton stops 1e-6 away in sp, shifting the criterion 1.2e-9.
+    assert br.REML_criterion / 2 == pytest.approx(643.740871739, rel=3e-9)
+    bm = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=negbin(2),
+                        method="ML")
+    np.testing.assert_allclose(bm.sp, [1.3215849, 3.8813079], rtol=1e-6)
+    assert bm.ML_criterion / 2 == pytest.approx(638.728786587, rel=1e-9)
+    assert bm.AIC == pytest.approx(1276.385289, rel=1e-8)
+    assert bm.edf2_total == pytest.approx(7.456505468, rel=1e-6)
+
+    with pytest.raises(ValueError, match="single value for theta or use nb"):
+        hea.models.bam("yp ~ s(x0)", df, family=negbin([2, 9]))
+
+
+def test_bam_report_layer_flavors_match_mgcv():
+    """The bam report-layer flavor fixes (found via the negbin port, but
+    poisson/gaussian were equally affected):
+
+    * fREML edf2/Vc = Sl.postproc's Vc1-only recipe (fast-REML.r:2007-2018)
+      — NOT gam.fit3.post.proc's Vc1+Vc2 (that belongs to the explicit
+      REML/ML/P-* gam(G=G) route);
+    * GCV.Cp AIC df uses edf (mgcv's magic rail sets edf2 NULL);
+    * the DISCRETE rail reports bgam.fitd's own criterion (bam.r:792):
+      penalised deviance + family saturated log-lik with prop's
+      ldetS/ldetXXS — the `crit <-` statement ends at `)/2`; the trailing
+      log(2πφ) line (bam.r:794) is a discarded bare expression.
+
+    All values pinned from mgcv 1.9-4 on the probe frame."""
+    df = _method_probe_frame()
+    p1 = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson())
+    assert p1.AIC == pytest.approx(1189.445385, rel=1e-8)
+    assert p1.edf2_total == pytest.approx(8.569979081, rel=1e-7)
+    assert p1.REML_criterion / 2 == pytest.approx(600.191044065, rel=1e-10)
+    p2 = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
+                        discrete=True)
+    assert p2.REML_criterion / 2 == pytest.approx(602.94785963, rel=1e-10)
+    assert p2.AIC == pytest.approx(1189.445385, rel=1e-7)
+    # explicit REML rides the gam(G=G) machinery: edf2 caps at edf1.
+    p3 = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
+                        method="REML")
+    assert p3.AIC == pytest.approx(1189.90191, rel=1e-8)
+    assert p3.edf2_total == pytest.approx(8.798235556, rel=1e-6)
+    # gaussian-identity: both rails, both flavors.
+    g1 = hea.models.bam("yg ~ s(x0) + s(x1)", df)
+    assert g1.REML_criterion / 2 == pytest.approx(-19.3495404204, rel=1e-9)
+    assert g1.AIC == pytest.approx(-72.31850014, rel=1e-8)
+    assert g1.edf2_total == pytest.approx(13.13719777, rel=1e-7)
+    g2 = hea.models.bam("yg ~ s(x0) + s(x1)", df, discrete=True)
+    assert g2.REML_criterion / 2 == pytest.approx(-21.2861022079, rel=1e-9)
+    assert g2.AIC == pytest.approx(-72.31850011, rel=1e-8)
+    assert g2.edf2_total == pytest.approx(13.13719779, rel=1e-7)
