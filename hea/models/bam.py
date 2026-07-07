@@ -59,6 +59,7 @@ from ..family import (
     Family,
     Gaussian,
     _coerce_response,
+    gfam as _gfam_family,
     negbin as _negbin_family,
     tw as _tw_family,
 )
@@ -92,6 +93,8 @@ from .gam import (
     _add_null_space_penalties,
     _apply_gam_side,
     _block_s_scale,
+    _cbind_family_stash,
+    _cbind_response_intake,
     _gam_fit3_score,
     _initial_sp,
     _ldet_s,
@@ -1849,79 +1852,99 @@ def _build_qr_chunked_pirls(
     z_full = np.zeros(n, dtype=float)
     dev_total = 0.0
 
-    for start, end in _chunk_indices(n, chunk_size):
-        chunk_data = data[start:end]
-        X_param_chunk = X_param_full[start:end]
-        X_chunk = _materialize_chunk(blocks, chunk_data, X_param_chunk)
-        off_chunk = offset[start:end]
-        y_chunk = y[start:end]
-        wp_chunk = prior_w[start:end]
+    try:
+        for start, end in _chunk_indices(n, chunk_size):
+            # mgcv bam.r:1063/1068: window per-row family state to the
+            # chunk BEFORE the X build — ``family$setInd(ind)`` (gfam's
+            # fi index, read by its per-row linkinv/dev.resids/dDeta)
+            # and ``subsety(y, ind)`` (the censored families' censor
+            # bound, stashed on the family in hea). No-op default.
+            family.set_ind(np.arange(start, end))
+            chunk_data = data[start:end]
+            X_param_chunk = X_param_full[start:end]
+            X_chunk = _materialize_chunk(blocks, chunk_data, X_param_chunk)
+            off_chunk = offset[start:end]
+            y_chunk = y[start:end]
+            wp_chunk = prior_w[start:end]
 
-        # mgcv bam.r:1066: ``if (is.null(coef)) eta1 <- eta[ind] else
-        # eta[ind] <- eta1 <- drop(X %*% coef) + offset[ind]``.
-        if coef is None:
-            eta_chunk = eta_init[start:end]
-        else:
-            eta_chunk = X_chunk @ coef + off_chunk
+            # mgcv bam.r:1066: ``if (is.null(coef)) eta1 <- eta[ind] else
+            # eta[ind] <- eta1 <- drop(X %*% coef) + offset[ind]``.
+            if coef is None:
+                eta_chunk = eta_init[start:end]
+            else:
+                eta_chunk = X_chunk @ coef + off_chunk
 
-        mu_chunk = link.linkinv(eta_chunk)
+            mu_chunk = link.linkinv(eta_chunk)
 
-        if family.is_extended:
-            # Extended-family Fisher-scoring branch — the NON-discrete
-            # serial chunked path mirrors mgcv ``bgam.fit`` (bam.r:1070-1076),
-            # which uses the EXPECTED (Fisher) Hessian unconditionally:
-            #     w <- dd$EDeta2 * .5
-            #     z <- (eta1-offset) - dd$Deta.EDeta2
-            #     good <- is.finite(z) & is.finite(w)
-            # (Contrast the DISCRETE path ``_build_qr_discrete_pirls``, which
-            # ports ``bgam.fitd``'s rho==0 OBSERVED-Hessian ``Deta2`` branch.)
-            theta = family.get_theta()
-            deta = family.dDeta(y_chunk, mu_chunk, wp_chunk, theta, level=0)
-            EDeta2 = deta["EDeta2"]
-            w_chunk = EDeta2 * 0.5
-            z_chunk = (eta_chunk - off_chunk) - deta["Deta.EDeta2"]
-            good = np.isfinite(z_chunk) & np.isfinite(w_chunk)
-            w_chunk = np.where(good, w_chunk, 0.0)
-            z_chunk = np.where(good, z_chunk, 0.0)
-            dev_total += float(np.sum(
-                family.dev_resids(y_chunk, mu_chunk, wp_chunk, theta=theta)
-            ))
-        else:
-            mu_eta_chunk = link.mu_eta(eta_chunk)
-            V_chunk = family.variance(mu_chunk)
+            if family.is_extended:
+                # Extended-family Fisher-scoring branch — the NON-discrete
+                # serial chunked path mirrors mgcv ``bgam.fit`` (bam.r:1070-1076),
+                # which uses the EXPECTED (Fisher) Hessian unconditionally:
+                #     w <- dd$EDeta2 * .5
+                #     z <- (eta1-offset) - dd$Deta.EDeta2
+                #     good <- is.finite(z) & is.finite(w)
+                # (Contrast the DISCRETE path ``_build_qr_discrete_pirls``, which
+                # ports ``bgam.fitd``'s rho==0 OBSERVED-Hessian ``Deta2`` branch.)
+                theta = family.get_theta()
+                deta = family.dDeta(y_chunk, mu_chunk, wp_chunk, theta, level=0)
+                EDeta2 = deta["EDeta2"]
+                w_chunk = EDeta2 * 0.5
+                z_chunk = (eta_chunk - off_chunk) - deta["Deta.EDeta2"]
+                good = np.isfinite(z_chunk) & np.isfinite(w_chunk)
+                w_chunk = np.where(good, w_chunk, 0.0)
+                z_chunk = np.where(good, z_chunk, 0.0)
+                dev_total += float(np.sum(
+                    family.dev_resids(y_chunk, mu_chunk, wp_chunk, theta=theta)
+                ))
+            else:
+                mu_eta_chunk = link.mu_eta(eta_chunk)
+                V_chunk = family.variance(mu_chunk)
 
-            # ``good`` mask (mgcv bam.r:1080).
-            good = (wp_chunk > 0) & (mu_eta_chunk != 0)
-            # Avoid div-by-zero in the score computation; ``!good`` rows are
-            # dropped before the QR update so the placeholder values don't
-            # leak into (R, f).
-            safe_mu_eta = np.where(mu_eta_chunk != 0, mu_eta_chunk, 1.0)
-            safe_V = np.where(V_chunk != 0, V_chunk, 1.0)
+                # ``good`` mask (mgcv bam.r:1080).
+                good = (wp_chunk > 0) & (mu_eta_chunk != 0)
+                # Avoid div-by-zero in the score computation; ``!good`` rows are
+                # dropped before the QR update so the placeholder values don't
+                # leak into (R, f).
+                safe_mu_eta = np.where(mu_eta_chunk != 0, mu_eta_chunk, 1.0)
+                safe_V = np.where(V_chunk != 0, V_chunk, 1.0)
 
-            z_chunk = (eta_chunk - off_chunk) + (y_chunk - mu_chunk) / safe_mu_eta
-            w_chunk = wp_chunk * mu_eta_chunk * mu_eta_chunk / safe_V
-            # mgcv bam.r:1085: ``w[!good] <- 0``.
-            w_chunk = np.where(good, w_chunk, 0.0)
+                z_chunk = (eta_chunk - off_chunk) + (y_chunk - mu_chunk) / safe_mu_eta
+                w_chunk = wp_chunk * mu_eta_chunk * mu_eta_chunk / safe_V
+                # mgcv bam.r:1085: ``w[!good] <- 0``.
+                w_chunk = np.where(good, w_chunk, 0.0)
 
-            dev_total += float(np.sum(
-                family.dev_resids(y_chunk, mu_chunk, wp_chunk)
-            ))
+                dev_total += float(np.sum(
+                    family.dev_resids(y_chunk, mu_chunk, wp_chunk)
+                ))
 
-        eta_full[start:end] = eta_chunk
-        mu_full[start:end] = mu_chunk
-        wt_full[start:end] = w_chunk
-        z_full[start:end] = z_chunk
+            eta_full[start:end] = eta_chunk
+            mu_full[start:end] = mu_chunk
+            wt_full[start:end] = w_chunk
+            z_full[start:end] = z_chunk
 
-        if not np.any(good):
-            # All rows dropped — skip the QR update for this chunk.
-            continue
-        sqrt_w = np.sqrt(w_chunk[good])
-        Xg = sqrt_w[:, None] * X_chunk[good]
-        zg = sqrt_w * z_chunk[good]
-        upd = _qr_update(Xg, zg, R, f, y_norm2, use_chol=use_chol)
-        R = upd["R"]
-        f = upd["f"]
-        y_norm2 = upd["y_norm2"]
+            if not np.any(good):
+                # All rows dropped — skip the QR update for this chunk.
+                continue
+            sqrt_w = np.sqrt(w_chunk[good])
+            Xg = sqrt_w[:, None] * X_chunk[good]
+            zg = sqrt_w * z_chunk[good]
+            upd = _qr_update(Xg, zg, R, f, y_norm2, use_chol=use_chol)
+            R = upd["R"]
+            f = upd["f"]
+            y_norm2 = upd["y_norm2"]
+    finally:
+        # Restore the full per-row view. mgcv resets only at fit end
+        # (``family$setInd(NULL)``, bam.r:1307), leaving the LAST chunk's
+        # window active for the full-length dev / estimate.theta calls at
+        # bam.r:1166/1186/1204 — live mgcv 1.9-4 receipt: bam(gfam(...),
+        # chunk.size=299) on n=300 returns garbage (dev 255.6 vs 388.7
+        # unchunked, θ collapses to 0, poisson "non-integer x" warnings
+        # from gaussian rows leaking through the 1-row fi window). hea
+        # restores here so every full-data evaluation sees the full
+        # state — a deliberate correctness divergence, identical whenever
+        # chunk_size ≥ n (the window is then the identity; that is the
+        # regime the mgcv pins run in).
+        family.set_ind(None)
 
     if R is None:
         raise FloatingPointError(
@@ -2584,6 +2607,19 @@ class bam(gam):
         self._pls_lwork: dict = {"g": None, "o": None}
 
         # ---- setup phase (mirror gam.__init__ lines 198-321) ---------------
+        # cbind(a, b) ~ ... two-column response intake (binomial counts /
+        # censored bound / gfam index) — the shared gam helper; mgcv's
+        # bgam.fit reaches the same states through family$initialize
+        # (binomial, bam.r:951), the censored families' initialize
+        # matrix→vector+attr conversion (efam.r:1117 and twins) and
+        # gfam's preinitialize (bam.r:922). ``self.formula`` (set above)
+        # keeps the original text.
+        formula, data, _cbind_kind, _gfam_expr = _cbind_response_intake(
+            formula, data, self.family)
+        if _gfam_expr is not None:
+            # predict-on-newdata re-derives the family index from this
+            # expression (mgcv.r:2819/3174) — same hook as gam.
+            self._gfam_fi_expr = _gfam_expr
         d = prepare_design(formula, data)
         self._expanded = d.expanded
         # R model.matrix's ``assign`` for the parametric block (0 = intercept,
@@ -2599,6 +2635,10 @@ class bam(gam):
         X_param_df = d.X
         # Same factor/boolean binomial-response coercion as glm/gam.
         y_full = _coerce_response(d.y, self.family)
+        # Censored bound → family.set_censor / gfam index → family.set_fi
+        # (before any family hook runs); binomial trials held for the
+        # weights fold below.
+        _binom_trials = _cbind_family_stash(_cbind_kind, d, self.family)
         X_param_full = X_param_df.to_numpy().astype(float)
         n, p_param = X_param_full.shape
 
@@ -2662,6 +2702,25 @@ class bam(gam):
                     data_for_discrete = self.data.with_columns(
                         pl.Series(name=d.response, values=y_full)
                     )
+                if _cbind_kind in ("censor", "gfam"):
+                    # Matrix response: mgcv's pmf compress loop sees the
+                    # cbind(y, yat|index) response as ONE two-column
+                    # entry — compress.df on the bare matrix, i.e. unique
+                    # PAIRS (bam.r:329-333 workaround; d=2 → m=100
+                    # default). Rebuild that shape under the response
+                    # label so the compress/pad RNG stream matches mgcv's
+                    # exactly; the scalar stash column stays for the rest
+                    # of the pipeline.
+                    second = ("_hea_cnorm_yat" if _cbind_kind == "censor"
+                              else "_hea_gfam_fi")
+                    pair = np.column_stack([
+                        y_full,
+                        d.data[second].to_numpy().astype(float),
+                    ])
+                    data_for_discrete = data_for_discrete.with_columns(
+                        pl.Series(d.response, pair,
+                                  dtype=pl.Array(pl.Float64, 2))
+                    )
                 self._discrete_frame = discrete_mf(
                     smooth_specs_pre, data_for_discrete,
                     names_pmf=names_pmf,
@@ -2670,6 +2729,11 @@ class bam(gam):
                 mf_dict = {
                     nm: arr for nm, arr in self._discrete_frame.mf.items()
                     if nm != "(Intercept)"
+                    and np.asarray(arr).ndim == 1
+                    # 2-D entries (the censored/gfam matrix response) are
+                    # basis-irrelevant — smooths never reference the
+                    # response — and a plain 2-D array has no scalar
+                    # polars column form.
                 }
                 mf0 = pl.DataFrame(mf_dict) if mf_dict else pl.DataFrame()
                 sb_lists = materialize_smooths(
@@ -2896,6 +2960,15 @@ class bam(gam):
                     "weights must be finite and non-negative"
                 )
             self._wt = w_arr
+            self._has_prior_weights = True
+        if _binom_trials is not None:
+            # weights ← weights·n (R binomial initialize, run by bgam.fit
+            # at bam.r:951 — "need to reset response and weights to post
+            # initialization values ... to deal with binomial properly",
+            # bam.r:975-978). Trials re-read from the design frame, which
+            # prepare_design may have NA-filtered — keeps rows aligned.
+            self._binom_n = _binom_trials
+            self._wt = self._wt * self._binom_n
             self._has_prior_weights = True
         self.prior_weights = self._wt
         self.p = p
@@ -3215,9 +3288,18 @@ class bam(gam):
         # exact-eval parent (the per-term discrete decomposition with
         # mgcv's parametric-term grouping is not ported — see
         # :meth:`_predict_bamd`).
+        # gfam stays OFF the discrete surface: mgcv's predict.bamd routes
+        # hooked families to ``family$predict`` with the DISCRETE-kernel
+        # X list and never calls ``setInd`` (bam.r:1995-2004, contrast
+        # predict.gam's setInd at mgcv.r:3133) — a discrete gfam predict
+        # errors in mgcv itself ("NA/NaN argument", live 1.9-4 receipt,
+        # for type="link" too). hea routes it through the exact-eval
+        # parent instead, where the family predict hook re-derives the
+        # index from newdata.
         if (self._discrete_design is not None
                 and type in ("link", "response", "lpmatrix")
-                and terms is None and exclude is None):
+                and terms is None and exclude is None
+                and not isinstance(self.family, _gfam_family)):
             return self._predict_bamd(
                 newdata, type=type, se_fit=se_fit, offset=offset,
                 unconditional=unconditional,
@@ -4315,7 +4397,10 @@ class bam(gam):
         # AIC / BIC.
         sc_p = 0.0 if self._scale_known_fit else 1.0
         dev1 = self.family._aic_dev1(self.deviance, sigma_squared, wt)
-        family_aic = float(self.family.aic(y, fit.mu, dev1, wt, n))
+        # cbind responses: family$aic gets the trials vector as ``n``
+        # (same as gam, gam.fit3.r:850).
+        n_aic = self._binom_n if self._binom_n is not None else n
+        family_aic = float(self.family.aic(y, fit.mu, dev1, wt, n_aic))
         mgcv_aic = family_aic + 2.0 * edf_total
         logLik = sc_p + edf_total - 0.5 * mgcv_aic
         # mgcv's magic (GCV.Cp/GACV.Cp) rail leaves object$edf2 NULL
@@ -4326,6 +4411,10 @@ class bam(gam):
                    if method in ("REML", "ML", "P-REML", "P-ML")
                    else edf_total)
         df_for_aic = min(df_base + sc_p, float(p) + sc_p)
+        # logLik.gam (mgcv.r:4434): extended families add n.theta to the
+        # df AFTER the np cap (clog/cnorm: +1, bcg: +2, gfam: composite).
+        if self._family_mgcv_extended:
+            df_for_aic += float(getattr(self.family, "n_theta", 0) or 0)
         self.loglike = float(logLik)
         self.logLik = self.loglike
         self.npar = float(df_for_aic)
@@ -4616,8 +4705,14 @@ class bam(gam):
                 family.set_theta(pini["Theta"])
 
         # ---- Initialize μ̂, η̂, dev for iter 0 (mgcv bam.r:950-969) -----
+        # mgcv order (bam.r:961-966): η = linkfun(mustart), then μ =
+        # linkinv(η), then validmu(μ) — the validity check sees the
+        # ROUND-TRIPPED μ, so e.g. a log link's eps floor rescues the
+        # zero-count mustart rows of the censored count families
+        # (mustart 0 → η = −Inf → μ = eps > 0, valid in mgcv and here).
         mu = family.gam_initialize(y, prior_w)
         eta = link.link(mu)
+        mu = link.linkinv(eta)
         if not (link.valideta(eta) and family.validmu(mu)):
             raise FloatingPointError(
                 "PIRLS init: cannot find valid starting μ̂ from family.initialize"
@@ -5625,7 +5720,9 @@ class bam(gam):
         # AIC / BIC.
         sc_p = 0.0 if self._scale_known_fit else 1.0
         dev1 = family._aic_dev1(self.deviance, sigma_squared, wt)
-        family_aic = float(family.aic(y, fit.mu, dev1, wt, n))
+        # cbind responses: family$aic gets the trials vector as ``n``.
+        n_aic = self._binom_n if self._binom_n is not None else n
+        family_aic = float(family.aic(y, fit.mu, dev1, wt, n_aic))
         mgcv_aic = family_aic + 2.0 * edf_total
         logLik = sc_p + edf_total - 0.5 * mgcv_aic
         # GCV.Cp/GACV.Cp: mgcv-bam's magic rail sets no edf2 (bam.r:
@@ -5634,6 +5731,10 @@ class bam(gam):
                    if method in ("REML", "ML", "P-REML", "P-ML")
                    else edf_total)
         df_for_aic = min(df_base + sc_p, float(p) + sc_p)
+        # logLik.gam (mgcv.r:4434): extended families add n.theta AFTER
+        # the np cap.
+        if self._family_mgcv_extended:
+            df_for_aic += float(getattr(self.family, "n_theta", 0) or 0)
         self.loglike = float(logLik)
         self.logLik = self.loglike
         self.npar = float(df_for_aic)
@@ -6313,11 +6414,24 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
         ik += 1
         s = mf[nm]
         if is_matrix_col(s):
+            # mgcv's parametric-matrix workaround (bam.r:329-333):
+            # ``compress.df(mfp[[i]], m=mi)`` on the BARE matrix — each
+            # matrix column is a separate variable (d = ncol, unique
+            # ROWS), NOT the smooth summation-convention vectorisation
+            # (compress.df's ``is.matrix(dat[[1]])`` branch never fires
+            # on a bare matrix). Reached by the censored/gfam families'
+            # cbind(y, yat|index) response and by matrix parametric
+            # covariates. One shared k column, like mgcv.
             arr = matrix_to_2d(s)
-            cr = compress_df({nm: arr}, m=m, rng=rng)
-            mf_entry = cr.xu[nm]
-            ki = cr.k.ravel()  # parametric matrix is dropped to vector
-            nr[ik] = mf_entry.size
+            dcols = {f"{nm}[,{j}]": arr[:, j]
+                     for j in range(arr.shape[1])}
+            cr = compress_df(dcols, m=m, rng=rng)
+            mf_entry = np.column_stack([cr.xu[c] for c in dcols])
+            if mf_entry.shape[1] == 1:
+                # mgcv: if (is.matrix(mfd) && ncol(mfd)==1) drop(mfd)
+                mf_entry = mf_entry[:, 0]
+            ki = cr.k
+            nr[ik] = mf_entry.shape[0]
         else:
             arr = s.to_numpy()
             cr = compress_df({nm: arr}, m=m, rng=rng)
@@ -6343,14 +6457,28 @@ def discrete_mf(smooth_specs: list[dict], mf: pl.DataFrame,
 
     # --- pad mf0 to common length ---
     if full and mf0:
-        maxr = max(arr.size for arr in mf0.values())
+        maxr = max(arr.shape[0] for arr in mf0.values())
         for nm, arr in list(mf0.items()):
-            if arr.size < maxr:
+            me = arr.shape[0]
+            if me >= maxr:
+                continue
+            if arr.ndim == 2:
+                # mgcv (bam.r:354-356): rbind(mf0[[i]], matrix(sample(
+                # mf0[[i]], (maxr-me)*ncol, TRUE), maxr-me, ncol)) —
+                # sample() flattens the matrix COLUMN-MAJOR and matrix()
+                # refills column-major.
+                pool = arr.ravel(order="F")
+                draw = pool[rng.sample_replace(
+                    pool.size, (maxr - me) * arr.shape[1])]
+                pad = np.reshape(draw, (maxr - me, arr.shape[1]),
+                                 order="F")
+                mf0[nm] = np.concatenate([arr, pad], axis=0)
+            else:
                 # mgcv: ``mf0[[i]][(me+1):maxr] <- sample(mf0[[i]], maxr-me, replace=TRUE)``
-                pad = arr[rng.sample_replace(arr.size, maxr - arr.size)]
+                pad = arr[rng.sample_replace(me, maxr - me)]
                 mf0[nm] = np.concatenate([arr, pad])
     else:
-        maxr = max((arr.size for arr in mf0.values()), default=0)
+        maxr = max((arr.shape[0] for arr in mf0.values()), default=0)
 
     # --- intercept ---
     ik += 1

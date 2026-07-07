@@ -1038,6 +1038,19 @@ class Family:
         """
         return {}
 
+    def set_ind(self, ind) -> None:
+        """Per-chunk row-subset hook for bam's chunked evaluation.
+
+        mgcv's bgam.fit windows two kinds of per-row family state to the
+        chunk rows: ``family$setInd(ind)`` (bam.r:1063, NULL-guarded —
+        gfam's ``fi`` index) and ``subsety(y, ind)`` (bam.r:1068 — the
+        censored families' ``attr(y,"censor")``, which rides the y being
+        passed in mgcv but lives on the family in hea). Families carrying
+        such state override; ``ind=None`` restores the full view. Default:
+        no per-row state — no-op (mgcv's ``is.null(family$setInd)``).
+        """
+        return None
+
     # ----- qq.gam hooks (mgcv fix.family.qf / fix.family.rd,
     # plots.r:31-91). ``None`` means unavailable: the qq machinery then
     # tries simulation (rd) and finally falls back to a normal QQ plot.
@@ -2228,11 +2241,17 @@ def _ld_tweedie_work(y, mu, theta, rho, a: float = 1.001,
     eth = np.exp(-np.abs(theta))
     p = np.where(pos, (b + a * eth) / (1.0 + eth),
                  (b * eth + a) / (eth + 1.0))
-    dpth1 = eth * (b - a) / (1.0 + eth) ** 2
+    # R-level ^ is R_pow per element: ^2 → x·x (numpy's **2 square fast
+    # path matches) but ^3 → SEQUENTIAL x·x·x for |x|≤11 — numpy **3
+    # takes the libm-pow loop and drifts the last ulp (receipt:
+    # 26k/100k elements differ on the (1,2] range).
+    d1eth = 1.0 + eth
+    d3 = d1eth * d1eth * d1eth
+    dpth1 = eth * (b - a) / (d1eth * d1eth)
     dpth2 = np.where(
         pos,
-        ((a - b) * eth + (b - a) * eth * eth) / (eth + 1.0) ** 3,
-        ((a - b) * eth * eth + (b - a) * eth) / (eth + 1.0) ** 3,
+        ((a - b) * eth + (b - a) * eth * eth) / d3,
+        ((a - b) * eth * eth + (b - a) * eth) / d3,
     )
     phi = np.exp(rho)
 
@@ -3825,9 +3844,23 @@ class tw(Tweedie):
             )
 
     def _p_of_theta(self, theta: float) -> float:
-        # p(θ) = (a + b·e^θ)/(1 + e^θ); use sigmoid form for stability.
-        s = float(expit(theta))
-        return self.a * (1.0 - s) + self.b * s
+        # mgcv's literal branch expressions (tw dev.resids/variance/Dd,
+        # efam.r:3141-3149):
+        #   p <- if (th>0) (b+a*exp(-th))/(1+exp(-th))
+        #        else      (b*exp(th)+a)/(exp(th)+1)
+        # An earlier expit-based rewrite ("sigmoid form for stability")
+        # drifted p by an ulp, which the cancelling y^(2-p) − mu^(2-p)
+        # deviance pieces amplified to ~4e-13 vs live R — the audit-2
+        # B14 open follow-up. (The numpy-**-vs-libm-pow hypothesis
+        # recorded there was WRONG: numpy ** ≡ math.pow ≡ libm pow,
+        # 0/80k receipt.)
+        th = float(theta)
+        a, b = self.a, self.b
+        if th > 0:
+            e = math.exp(-th)
+            return (b + a * e) / (1.0 + e)
+        e = math.exp(th)
+        return (b * e + a) / (e + 1.0)
 
     def dev_resids(self, y, mu, wt, theta=None):
         # mgcv tw dev.resids (efam.r tw:58-66): unlike the fixed-p
@@ -3854,16 +3887,31 @@ class tw(Tweedie):
         return np.maximum(2.0 * (y * t_term - kappa) * wt, 0.0)
 
     def dp_dtheta(self) -> float:
-        """``dp/dθ = (b - a)·σ(θ)·(1 - σ(θ))`` where σ is the logistic.
-        Used by the outer Newton chain rule when joint-estimating θ_tw.
-        """
-        s = float(expit(self.theta))
-        return (self.b - self.a) * s * (1.0 - s)
+        """``dp/dθ`` — mgcv's ``dpth1`` literal branches (tw Dd,
+        efam.r:3158-3159). Used by the outer Newton chain rule when
+        joint-estimating θ_tw. R's ``^2`` is R_pow's ``x·x``."""
+        th = float(self.theta)
+        a, b = self.a, self.b
+        if th > 0:
+            e = math.exp(-th)
+            d = 1.0 + e
+            return e * (b - a) / (d * d)
+        e = math.exp(th)
+        d = e + 1.0
+        return e * (b - a) / (d * d)
 
     def d2p_dtheta2(self) -> float:
-        """``d²p/dθ² = (b-a)·σ·(1-σ)·(1 - 2σ)``."""
-        s = float(expit(self.theta))
-        return (self.b - self.a) * s * (1.0 - s) * (1.0 - 2.0 * s)
+        """``d²p/dθ²`` — mgcv's ``dpth2`` literal branches
+        (efam.r:3160-3161); ``^3`` is R_pow's sequential ``x·x·x``."""
+        th = float(self.theta)
+        a, b = self.a, self.b
+        if th > 0:
+            e = math.exp(-th)
+            d = e + 1.0
+            return ((a - b) * e + (b - a) * math.exp(-2.0 * th)) / (d * d * d)
+        e = math.exp(th)
+        d = e + 1.0
+        return ((a - b) * math.exp(2.0 * th) + (b - a) * e) / (d * d * d)
 
     def set_theta(self, theta) -> None:
         """Update θ (and the implied ``p``). Accepts a scalar or a 1-element
@@ -3947,33 +3995,28 @@ class tw(Tweedie):
                 saved = self.get_theta().copy()
                 self.set_theta(th)
         try:
-            ls3 = np.asarray(self.ls(y, wt, scale), dtype=float)
-            dp1 = float(self.dp_dtheta())
-            dp2 = float(self.d2p_dtheta2())
-            dls_dp = float(self.dls_dp(y, wt, scale))
-            dls_dth = dls_dp * dp1
-            d2ls_dp2, d2ls_dpdlphi = self._d2ls_dp(y, wt, scale)
-            lsth2 = np.empty((2, 2))
-            lsth2[0, 0] = d2ls_dp2 * dp1 * dp1 + dls_dp * dp2
-            lsth2[0, 1] = lsth2[1, 0] = d2ls_dpdlphi * dp1
-            lsth2[1, 1] = float(ls3[2])
-            # Per-observation first derivatives — mgcv's
-            # ``LSTH1 = Ls[, c(4, 2)]`` with ``Ls = w·ldTweedie(y, y,
-            # rho=log(scale), theta=θ, a=a, b=b)`` (efam.r:3226-3228):
-            # the working-parameter (θ, log φ) columns of the saturated
-            # density derivatives. Consumed by gfam's grouped ls
-            # assembly (gfam.r:339) and, eventually, NCV.
+            # Mechanical form (efam.r:3224-3229): ONE ldTweedie(y, y,
+            # rho=log φ, theta=θ) evaluation, weighted, column-summed —
+            # ls = ΣLs₁, lsth1 = (ΣLs₄, ΣLs₂), lsth2 = [[ΣLs₅, ΣLs₆],
+            # [ΣLs₆, ΣLs₃]], LSTH1 = Ls[, c(4, 2)]. (An earlier detour
+            # assembled the θ-blocks through dls_dp/_d2ls_dp — different
+            # algebra, drifting lsth1/lsth2 up to ~1.5e-13 from R.)
+            # R colSums accumulates left-to-right in double on arm64 —
+            # `_rsum`, not pairwise np.sum.
             yv = np.asarray(y, dtype=float)
             wv = np.asarray(wt, dtype=float)
             ld = _ld_tweedie_work(
                 yv, yv, np.full(yv.shape, self.theta),
                 np.full(yv.shape, math.log(scale)), self.a, self.b)
-            LSTH1 = wv[:, None] * ld[:, [3, 1]]
+            Ls = wv[:, None] * ld
+            LS = np.array([_rsum(Ls[:, j]) for j in range(6)])
+            lsth2 = np.array([[LS[4], LS[5]],
+                              [LS[5], LS[2]]])
             return {
-                "ls": float(ls3[0]),
-                "lsth1": np.array([dls_dth, float(ls3[1])]),
+                "ls": float(LS[0]),
+                "lsth1": np.array([LS[3], LS[1]]),
                 "lsth2": lsth2,
-                "LSTH1": LSTH1,
+                "LSTH1": Ls[:, [3, 1]],
             }
         finally:
             if saved is not None:
@@ -3989,16 +4032,23 @@ class tw(Tweedie):
         wt = np.asarray(wt, dtype=float)
         th = float(np.asarray(theta, dtype=float).ravel()[0])
         a, b = self.a, self.b
+        # R-level ^2/^3 on these scalars is R_pow's sequential multiply
+        # (|x| ≤ 11), NOT libm pow — pow(x,3.0) drifted dpth2 by an ulp
+        # at θ>0, which every level-2 θ² row inherits.
         if th > 0:
             p = (b + a * np.exp(-th)) / (1 + np.exp(-th))
-            dpth1 = np.exp(-th) * (b - a) / (1 + np.exp(-th)) ** 2
+            d1 = 1 + np.exp(-th)
+            dpth1 = np.exp(-th) * (b - a) / (d1 * d1)
+            d2 = np.exp(-th) + 1
             dpth2 = (((a - b) * np.exp(-th) + (b - a) * np.exp(-2 * th))
-                     / (np.exp(-th) + 1) ** 3)
+                     / (d2 * d2 * d2))
         else:
             p = (b * np.exp(th) + a) / (np.exp(th) + 1)
-            dpth1 = np.exp(th) * (b - a) / (np.exp(th) + 1) ** 2
+            d1 = np.exp(th) + 1
+            dpth1 = np.exp(th) * (b - a) / (d1 * d1)
+            d2 = np.exp(th) + 1
             dpth2 = (((a - b) * np.exp(2 * th) + (b - a) * np.exp(th))
-                     / (np.exp(th) + 1) ** 3)
+                     / (d2 * d2 * d2))
         mu1p = mu ** (1 - p)
         mup = mu ** p
         # mu**(-1-p) == mu**(-p-1) bit-for-bit (commutative exponent add); the
@@ -4021,11 +4071,14 @@ class tw(Tweedie):
             y2plogy = y2p * logy1
             mu2p = mu * mu1p
             mup1 = mupm1
+            # (2-p)^2 / i1p^2: R_pow x·x on the scalar (arithmetic.c:204).
+            tmp2 = (2 - p) * (2 - p)
+            i1p2 = i1p * i1p
             r["Dth"] = 2 * wt * (
                 (y2plogy - mu2p * logmu) / (2 - p)
                 + (y * mu1p * logmu - y2plogy) / (1 - p)
-                - (y2p - mu2p) / (2 - p) ** 2
-                + (y2p - y * mu1p) * i1p ** 2
+                - (y2p - mu2p) / tmp2
+                + (y2p - y * mu1p) * i1p2
             ) * dpth1
             r["Dmuth"] = 2 * wt * logmu * (ymupi - mu1p) * dpth1
             r["Dmu3"] = -2 * wt * mup1 * p * (y / mu * (p + 1) + 1 - p)
@@ -4039,19 +4092,29 @@ class tw(Tweedie):
             mup2 = mup1 / mu
             r["Dmu4"] = 2 * wt * mup2 * p * (p + 1) * (y * (p + 2) / mu + 1 - p)
             y2plog2y = y2plogy * logy1
-            r["Dth2"] = 2 * wt * (
+            # R_pow scalars: (2-p)^2/^3, (1-p)^2/^3, dpth1^2 are all
+            # sequential multiplies in R; and mgcv's parenthesization
+            # multiplies the 6-term sum by dpth1² BEFORE 2·wt —
+            # `2*wt*((…)*dpth1^2)` — the association order matters at
+            # the last ulp.
+            tm2 = (2 - p) * (2 - p)
+            tm3 = tm2 * (2 - p)
+            om2 = (1 - p) * (1 - p)
+            om3 = om2 * (1 - p)
+            dpth1_2 = dpth1 * dpth1
+            r["Dth2"] = 2 * wt * ((
                 (mu2p * logmu2 - y2plog2y) / (2 - p)
                 + (y2plog2y - y * mu1p * logmu2) / (1 - p)
-                + 2 * (y2plogy - mu2p * logmu) / (2 - p) ** 2
-                + 2 * (y * mu1p * logmu - y2plogy) / (1 - p) ** 2
-                + 2 * (mu2p - y2p) / (2 - p) ** 3
-                + 2 * (y2p - y * mu1p) / (1 - p) ** 3
-            ) * dpth1 ** 2 + r["Dth"] * dpth2 / dpth1
+                + 2 * (y2plogy - mu2p * logmu) / tm2
+                + 2 * (y * mu1p * logmu - y2plogy) / om2
+                + 2 * (mu2p - y2p) / tm3
+                + 2 * (y2p - y * mu1p) / om3
+            ) * dpth1_2) + r["Dth"] * dpth2 / dpth1
             r["Dmuth2"] = (2 * wt * ((mu1p * logmu2
-                                      - logmu2 * ymupi) * dpth1 ** 2)
+                                      - logmu2 * ymupi) * dpth1_2)
                            + r["Dmuth"] * dpth2 / dpth1)
             r["Dmu2th2"] = (2 * wt * ((mup1 * logmu * y * (logmu * p - 2)
-                            + logmu / mup * (logmu * (1 - p) + 2)) * dpth1 ** 2)
+                            + logmu / mup * (logmu * (1 - p) + 2)) * dpth1_2)
                             + r["Dmu2th"] * dpth2 / dpth1)
             r["Dmu3th"] = 2 * wt * mup1 * (
                 y / mu * (logmu * (1 + p) * p - p - p - 1)
@@ -4599,12 +4662,16 @@ class nb(Family):
             r["Dth"] = -2.0 * wt * Th * (np.log(yth / muth)
                                          + (1.0 - yth / muth))
             r["Dmuth"] = 2.0 * wt * Th * (1.0 - yth / muth) / muth
-            r["Dmu3"] = 4.0 * wt * (yth / muth ** 3 - y / mu ** 3)
+            # mu^3/mu^4 are R_pow: sequential multiplies for |x|≤11,
+            # libm pow above — numpy ** takes the pow loop everywhere
+            # and drifts the last ulp (`_rpow_int` is the port).
+            r["Dmu3"] = 4.0 * wt * (yth / _rpow_int(muth, 3)
+                                    - y / _rpow_int(mu, 3))
             r["Dmu2th"] = 2.0 * wt * Th * (2.0 * yth / muth - 1.0) / muth ** 2
             r["EDmu2th"] = 2.0 * wt / muth ** 2
         if level > 1:
-            r["Dmu4"] = 2.0 * wt * (6.0 * y / mu ** 4
-                                    - 6.0 * yth / muth ** 4)
+            r["Dmu4"] = 2.0 * wt * (6.0 * y / _rpow_int(mu, 4)
+                                    - 6.0 * yth / _rpow_int(muth, 4))
             r["Dth2"] = -2.0 * wt * Th * (
                 np.log(yth / muth) + Th * yth / muth ** 2 - yth / muth
                 - 2.0 * Th / muth + 1.0 + Th / yth
@@ -4617,11 +4684,13 @@ class nb(Family):
                 -6.0 * yth * Th / muth ** 2 + 2.0 * yth / muth
                 + 4.0 * Th / muth - 1.0
             ) / muth ** 2
-            r["Dmu3th"] = 4.0 * wt * Th * (1.0 - 3.0 * yth / muth) / muth ** 3
+            r["Dmu3th"] = (4.0 * wt * Th * (1.0 - 3.0 * yth / muth)
+                           / _rpow_int(muth, 3))
         return r
 
     def aic(self, y, mu, dev, wt, n, theta=None):
         # mgcv nb()$aic (efam.r:239-246); `dev` is unused (Θ-form direct).
+        # R-level lgamma is nmath lgammafn (see ls_extended note).
         th = self._theta if theta is None else np.asarray(theta,
                                                           dtype=float)
         Th = float(np.exp(np.asarray(th).reshape(-1)[0]))
@@ -4629,8 +4698,9 @@ class nb(Family):
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         term = ((y + Th) * np.log(mu + Th) - y * np.log(mu)
-                + gammaln(y + 1.0) - Th * np.log(Th) + gammaln(Th)
-                - gammaln(Th + y))
+                + _lgammafn_arr(y + 1.0) - Th * np.log(Th)
+                + _nmath._lgammafn(Th)
+                - _lgammafn_arr(Th + y))
         return 2.0 * float(np.sum(term * wt))
 
     def ls_extended(self, y, wt, theta=None, scale: float = 1.0) -> dict:
@@ -4656,23 +4726,28 @@ class nb(Family):
         hit = cache.get(key)
         if hit is not None:
             return hit
+        # R-level lgamma/digamma are nmath lgammafn/dpsifn — scipy's
+        # gammaln/digamma drift the last ulp (the nb rows of the audit-2
+        # B14 census residue).
         ylogy = np.where(y > 0, y * np.log(np.maximum(y, 1e-300)), 0.0)
         term = ((y + Th) * np.log(y + Th) - ylogy
-                + gammaln(y + 1.0) - Th * np.log(Th) + gammaln(Th)
-                - gammaln(Th + y))
-        ls0 = -float(np.sum(term * w))
+                + _lgammafn_arr(y + 1.0) - Th * np.log(Th)
+                + _nmath._lgammafn(Th)
+                - _lgammafn_arr(Th + y))
+        # R sum() accumulates left-to-right in double on arm64 — _rsum.
+        ls0 = -float(_rsum(term * w))
         yth = y + Th
         lyth = np.log(yth)
-        psi0_yth = digamma(yth)
-        psi0_th = digamma(Th)
+        psi0_yth = _nmath.psigamma_vec(yth, 0.0)
+        psi0_th = _nmath.psigamma5(Th, 0.0)
         term1 = Th * (lyth - psi0_yth + psi0_th - th0)
         LSTH = (-term1 * w)[:, None]
-        lsth = float(np.sum(LSTH))
+        lsth = float(_rsum(LSTH.ravel()))
         psi1_yth = _polygamma(1, yth)
         psi1_th = _polygamma(1, Th)
         term2 = Th * (lyth - Th * psi1_yth - psi0_yth + Th / yth
                       + Th * psi1_th + psi0_th - th0 - 1.0)
-        lsth2 = -float(np.sum(term2 * w))
+        lsth2 = -float(_rsum(term2 * w))
         res = {
             "ls": ls0,
             "lsth1": np.array([lsth]),
@@ -6596,7 +6671,14 @@ class cnorm(Family):
         else:
             ini = 0.0
         self._theta = np.array([ini], dtype=float)
+        # bam's bgam.fit θ-update gate (bam.r:1204-1206): estimate.theta
+        # runs between PIRLS iters whenever the extended family has free
+        # θ (``family$n.theta>0``; the ``scale<0`` leg never fires here —
+        # the censored families carry no ``scale`` slot, so bgam.fit's
+        # scale resolves to 1, bam.r:924).
+        self.estimate_theta_callback = self.n_theta > 0
         self._censor = None
+        self._censorfull = None
         super().__init__(link=link)
 
     # ----- θ accessors / censoring bound ---------------------------------
@@ -6618,6 +6700,21 @@ class cnorm(Family):
         uncensored (mgcv's ``attr(y,"censor")`` being NULL)."""
         self._censor = (None if censor is None
                         else np.asarray(censor, dtype=float))
+        self._censorfull = None
+
+    def set_ind(self, ind) -> None:
+        """mgcv ``subsety`` (efam.r — identical body on all censored
+        families): bam's chunk loop subsets the response *and its censor
+        attribute* per chunk. hea carries ``attr(y,"censor")`` on the
+        family, so the windowing lands here: stash the full bound on
+        first use, window to ``ind``, restore with ``ind=None``
+        (mirrors gfam's ``setInd``, gfam.r:78-86)."""
+        if self._censorfull is None:
+            if ind is None or self._censor is None:
+                return          # never windowed / uncensored: nothing to do
+            self._censorfull = self._censor
+        self._censor = (self._censorfull if ind is None
+                        else self._censorfull[np.asarray(ind, dtype=int)])
 
     # ----- deviance / Dd / aic -------------------------------------------
 
@@ -6975,7 +7072,14 @@ class cpois(Family):
             raise ValueError(
                 f'link "{link}" not available for cpois family; available '
                 f'links are {self._OK_LINKS}')
+        # bam's bgam.fit θ-update gate (bam.r:1204-1206): estimate.theta
+        # runs between PIRLS iters whenever the extended family has free
+        # θ (``family$n.theta>0``; the ``scale<0`` leg never fires here —
+        # the censored families carry no ``scale`` slot, so bgam.fit's
+        # scale resolves to 1, bam.r:924).
+        self.estimate_theta_callback = self.n_theta > 0
         self._censor = None
+        self._censorfull = None
         super().__init__(link=link)
 
     # ----- θ accessors / censoring bound ---------------------------------
@@ -6994,6 +7098,21 @@ class cpois(Family):
         uncensored (mgcv's ``attr(y,"censor")`` being NULL)."""
         self._censor = (None if censor is None
                         else np.asarray(censor, dtype=float))
+        self._censorfull = None
+
+    def set_ind(self, ind) -> None:
+        """mgcv ``subsety`` (efam.r — identical body on all censored
+        families): bam's chunk loop subsets the response *and its censor
+        attribute* per chunk. hea carries ``attr(y,"censor")`` on the
+        family, so the windowing lands here: stash the full bound on
+        first use, window to ``ind``, restore with ``ind=None``
+        (mirrors gfam's ``setInd``, gfam.r:78-86)."""
+        if self._censorfull is None:
+            if ind is None or self._censor is None:
+                return          # never windowed / uncensored: nothing to do
+            self._censorfull = self._censor
+        self._censor = (self._censorfull if ind is None
+                        else self._censorfull[np.asarray(ind, dtype=int)])
 
     # ----- deviance / Dd / aic -------------------------------------------
 
@@ -7492,7 +7611,14 @@ class clog(Family):
         else:
             ini = 0.0
         self._theta = np.array([ini], dtype=float)
+        # bam's bgam.fit θ-update gate (bam.r:1204-1206): estimate.theta
+        # runs between PIRLS iters whenever the extended family has free
+        # θ (``family$n.theta>0``; the ``scale<0`` leg never fires here —
+        # the censored families carry no ``scale`` slot, so bgam.fit's
+        # scale resolves to 1, bam.r:924).
+        self.estimate_theta_callback = self.n_theta > 0
         self._censor = None
+        self._censorfull = None
         super().__init__(link=link)
 
     # ----- θ accessors / censoring bound ---------------------------------
@@ -7513,6 +7639,17 @@ class clog(Family):
         response). ``None`` ⇒ all uncensored."""
         self._censor = (None if censor is None
                         else np.asarray(censor, dtype=float))
+        self._censorfull = None
+
+    def set_ind(self, ind) -> None:
+        """mgcv ``subsety`` (efam.r:2595): window the censor bound to the
+        bam chunk rows; ``ind=None`` restores (see cnorm.set_ind)."""
+        if self._censorfull is None:
+            if ind is None or self._censor is None:
+                return
+            self._censorfull = self._censor
+        self._censor = (self._censorfull if ind is None
+                        else self._censorfull[np.asarray(ind, dtype=int)])
 
     # ----- deviance / Dd / aic -------------------------------------------
 
@@ -8452,7 +8589,14 @@ class bcg(Family):
         else:
             ini = np.array([1.0, 0.0])
         self._theta = np.asarray(ini, dtype=float)
+        # bam's bgam.fit θ-update gate (bam.r:1204-1206): estimate.theta
+        # runs between PIRLS iters whenever the extended family has free
+        # θ (``family$n.theta>0``; the ``scale<0`` leg never fires here —
+        # the censored families carry no ``scale`` slot, so bgam.fit's
+        # scale resolves to 1, bam.r:924).
+        self.estimate_theta_callback = self.n_theta > 0
         self._censor = None
+        self._censorfull = None
         super().__init__(link=link)
 
     # ----- θ accessors / censoring bound ---------------------------------
@@ -8471,6 +8615,17 @@ class bcg(Family):
         """Stash the censoring bound (column 1 of ``cbind(y, yat)``)."""
         self._censor = (None if censor is None
                         else np.asarray(censor, dtype=float))
+        self._censorfull = None
+
+    def set_ind(self, ind) -> None:
+        """mgcv ``subsety`` (efam.r:2154): window the censor bound to the
+        bam chunk rows; ``ind=None`` restores (see cnorm.set_ind)."""
+        if self._censorfull is None:
+            if ind is None or self._censor is None:
+                return
+            self._censorfull = self._censor
+        self._censor = (self._censorfull if ind is None
+                        else self._censorfull[np.asarray(ind, dtype=int)])
 
     # ----- deviance / Dd / aic -------------------------------------------
 
@@ -8799,6 +8954,10 @@ class gfam(Family):
         self._fl = fl
         self.name = "gfam{" + ",".join(names) + "}"
         self.n_theta = int(n_theta)
+        # bam bgam.fit θ-update gate (bam.r:1204-1206): gfam's composite
+        # θ (member θs + exponential-member log scales) is free whenever
+        # any slot exists.
+        self.estimate_theta_callback = self.n_theta > 0
         self._theta = (np.concatenate(theta_parts) if theta_parts
                        else np.zeros(0))
         if self._theta.shape[0] != self.n_theta:

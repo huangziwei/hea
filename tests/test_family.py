@@ -4631,3 +4631,72 @@ def test_qnbinom_pnbinom_mu_match_r():
                                   lt, lg)
                     got_py = [nm.pnbinom_mu(x, size, mu, lt, lg) for x in xs]
                     np.testing.assert_array_equal(got_rs, got_py)
+
+
+# ===========================================================================
+# tw/nb θ-chain + R_pow/lgamma/digamma parity census pins (audit-2 B14
+# follow-up closure). Values: live mgcv 1.9-4 hex-float census on the
+# default_rng(42) frame below (bit-exact on arm64; rel tolerances carry
+# ~100x headroom for glibc↔Apple libm exp/log last-ulp scatter, the
+# 2026-07-06(f) CI lesson). The fixes these pin: p(θ) as mgcv's literal
+# branch expressions (not expit algebra), R_pow sequential ^2/^3
+# scalars + mgcv's Dth2 parenthesization in tw$Dd, _rpow_int for nb's
+# mu^3/mu^4, nmath lgammafn/dpsifn (not scipy) + _rsum in nb$ls/aic,
+# and tw$ls as the mechanical colSums(w·ldTweedie(y,y,…)) port.
+# ===========================================================================
+
+
+def _census_frame_42():
+    rng = np.random.default_rng(42)
+    n = 200
+    mu = np.abs(rng.normal(2.0, 1.5, n)) + 0.05
+    y = np.abs(mu * np.exp(rng.normal(0.0, 0.5, n)))
+    y[:10] = 0.0
+    wt = np.where(rng.uniform(size=n) < 0.3,
+                  rng.integers(1, 5, n).astype(float), 1.0)
+    ynb = np.floor(y * 3).astype(float)
+    return y, mu, wt, ynb
+
+
+def test_tw_nb_theta_chain_census_matches_mgcv():
+    from hea.family import nb, tw
+
+    y, mu, wt, ynb = _census_frame_42()
+
+    fam = tw(a=1.01, b=1.99)
+    dev = fam.dev_resids(y, mu, wt, theta=0.9)
+    assert float(dev[0]) == pytest.approx(35.71796731366923, rel=1e-13)
+    assert float(dev[10]) == pytest.approx(1.4661145459181908, rel=1e-13)
+    fam.set_theta(0.9)
+    assert float(fam.variance(mu)[0]) == pytest.approx(
+        4.8003315958745265, rel=1e-13)
+    dd = fam.Dd(y, mu, 0.9, wt, level=2)
+    assert float(dd["Dth"][10]) == pytest.approx(
+        -0.40292464474908973, rel=1e-13)
+    assert float(dd["Dth2"][0]) == pytest.approx(
+        18.27147175320773, rel=1e-13)
+    assert float(dd["Dmuth2"][1]) == pytest.approx(
+        -0.13234424141561646, rel=1e-13)
+    assert float(dd["Dmu2th2"][1]) == pytest.approx(
+        0.3740245563340534, rel=1e-13)
+    dd_neg = fam.Dd(y, mu, -0.7, wt, level=2)
+    assert float(dd_neg["Dth2"][10]) == pytest.approx(
+        -0.026858465349980126, rel=1e-13)
+
+    fam_nb = nb()
+    th = float(np.log(1.7))
+    ddn = fam_nb.Dd(ynb, mu, th, wt, level=2)
+    assert float(ddn["Dmu3"][5]) == pytest.approx(
+        1.172357101442247, rel=1e-13)
+    assert float(ddn["Dmu4"][3]) == pytest.approx(
+        -0.028757174064230596, rel=1e-13)
+    assert float(ddn["Dmu3th"][5]) == pytest.approx(
+        -2.1553653475720496, rel=1e-13)
+    ls3 = fam_nb.ls_extended(ynb, wt, theta=th, scale=1.0)
+    assert float(ls3["LSTH1"][11, 0]) == pytest.approx(
+        0.3940667463254954, rel=1e-13)
+    assert float(ls3["ls"]) == pytest.approx(-603.812776094261, rel=1e-12)
+    assert float(np.asarray(ls3["lsth1"]).ravel()[0]) == pytest.approx(
+        96.4119849078045, rel=1e-12)
+    assert float(np.asarray(ls3["lsth2"]).ravel()[0]) == pytest.approx(
+        -32.24760362160137, rel=1e-12)

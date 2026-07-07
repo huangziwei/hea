@@ -3373,10 +3373,13 @@ def test_cbind_intake_validation():
             method="REML")
     np.testing.assert_allclose(m.REML_criterion / 2, 263.5369484800,
                                rtol=0, atol=1e-6)
-    # bam has no cbind support yet (bam-mgcv-parity plan) — still raises.
+    # bam shares the same intake (audit-2 C16) — same validation errors;
+    # positive-path bam cbind pins live in test_bam.py.
     from hea.models.bam import bam
-    with pytest.raises(NotImplementedError, match="cbind"):
-        bam("cbind(succ, fail) ~ s(x)", d, family=Binomial())
+    with pytest.raises(ValueError, match="family=Binomial"):
+        bam("cbind(succ, fail) ~ s(x)", d, family=Poisson())
+    with pytest.raises(ValueError, match="negative counts"):
+        bam("cbind(succ_n, fail) ~ s(x)", neg, family=Binomial())
 
 
 # ---------------------------------------------------------------------------

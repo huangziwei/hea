@@ -6373,6 +6373,132 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
             "used_nlm_optim": used_nlm_optim, "tw_info": tw_info}
 
 
+def _cbind_response_intake(formula, data, family):
+    """Two-column ``cbind(a, b) ~ ...`` response intake — shared by gam
+    and bam. mgcv converts the matrix response inside each family's
+    ``initialize`` (binomial: proportion + n-weights, gam.fit3.r:219;
+    censored families: vector + ``attr(y,"censor")``, efam.r:1117 and
+    twins; gfam: ``preinitialize`` index stash, gfam.r:384-392). hea
+    rewrites up front instead, stashing both columns as frame columns so
+    ``prepare_design``'s NA-omit keeps them row-aligned; the second
+    column is re-read post-design by :func:`_cbind_family_stash`.
+
+    Routing (parse the LHS and let the AST decide — a substring test
+    would miss the ``[a, b]`` bracket alias, which lowers to a cbind
+    Call):
+
+    * cnorm/cpois/clog/bcg — censored ``cbind(y, yat)`` (col 0 the
+      observed value, col 1 the censoring bound) → ``kind="censor"``.
+    * gfam — ``cbind(y, index)`` (col 1 the 1-based family index,
+      gfam.r:5-8) → ``kind="gfam"``; ``fi_expr`` carries the index
+      expression for predict-on-newdata (mgcv re-reads the response from
+      newdata, mgcv.r:2819).
+    * (Quasi)Binomial — R's two-column counts response →
+      ``kind="binom"`` (proportion/trials rewrite).
+    * anything else — raise (mgcv dies obscurely here: "logical
+      subscript too long").
+
+    Returns ``(formula, data, kind, fi_expr)``; ``kind=None`` when the
+    response is not a two-column cbind (formula/data returned unchanged
+    — a non-cbind LHS is never touched).
+    """
+    _cbind = isinstance(formula, str)
+    if _cbind:
+        lhs = parse(formula).lhs
+        _cbind = isinstance(lhs, Call) and lhs.fn == "cbind"
+    if not _cbind:
+        return formula, data, None, None
+    if len(lhs.args) != 2 or lhs.kwargs:
+        raise ValueError(
+            "cbind() response must have exactly two columns: "
+            "cbind(successes, failures)"
+        )
+    if isinstance(family,
+                  (_cnorm_family, _cpois_family, _clog_family,
+                   _bcg_family)):
+        data = normalize_data(data)
+        cols = set(data.columns)
+        yobs, yat = (
+            data.select(_eval_lhs_expr(a, cols).alias("_v"))["_v"]
+            .to_numpy().astype(float)
+            for a in lhs.args
+        )
+        # The observed column becomes the response; the censoring bound
+        # is re-read after prepare_design and handed to the family.
+        data = data.with_columns(
+            pl.Series("_hea_cnorm_y", yobs),
+            pl.Series("_hea_cnorm_yat", yat),
+        )
+        formula = "_hea_cnorm_y ~" + formula.split("~", 1)[1]
+        return formula, data, "censor", None
+    if isinstance(family, _gfam_family):
+        data = normalize_data(data)
+        cols = set(data.columns)
+        yobs, yfi = (
+            data.select(_eval_lhs_expr(a, cols).alias("_v"))["_v"]
+            .to_numpy().astype(float)
+            for a in lhs.args
+        )
+        data = data.with_columns(
+            pl.Series("_hea_gfam_y", yobs),
+            pl.Series("_hea_gfam_fi", yfi),
+        )
+        formula = "_hea_gfam_y ~" + formula.split("~", 1)[1]
+        return formula, data, "gfam", lhs.args[1]
+    if not isinstance(family, (Binomial, QuasiBinomial)):
+        raise ValueError(
+            "cbind(successes, failures) ~ ... requires "
+            "family=Binomial() or QuasiBinomial(); got "
+            f"{family.name!r}"
+        )
+    data = normalize_data(data)
+    cols = set(data.columns)
+    succ, fail = (
+        data.select(_eval_lhs_expr(a, cols).alias("_v"))["_v"]
+        .to_numpy().astype(float)
+        for a in lhs.args
+    )
+    if np.any(succ < 0) or np.any(fail < 0):
+        raise ValueError("negative counts in cbind() response")
+    if (np.any(np.abs(succ - np.rint(succ)) > 0.001)
+            or np.any(np.abs(fail - np.rint(fail)) > 0.001)):
+        import warnings
+        warnings.warn("non-integer counts in a binomial glm!",
+                      stacklevel=3)
+    tot = succ + fail
+    pos = tot > 0
+    prop = np.where(pos, succ / np.where(pos, tot, 1.0), 0.0)
+    # NaN counts → NaN proportion so the standard NA-omit drops the row
+    # (R's model.frame does the same before initialize).
+    prop = np.where(np.isnan(tot), np.nan, prop)
+    data = data.with_columns(
+        pl.Series("_hea_cbind_p", prop),
+        pl.Series("_hea_cbind_n", tot),
+    )
+    formula = "_hea_cbind_p ~" + formula.split("~", 1)[1]
+    return formula, data, "binom", None
+
+
+def _cbind_family_stash(kind, d, family):
+    """Post-``prepare_design`` half of the cbind intake: re-read the
+    (NA-aligned) stash columns from the design frame and hand them to
+    the family — the censoring bound rides ``family.set_censor`` (the
+    ``attr(y,"censor")`` of efam.r), the gfam index rides
+    ``family.set_fi`` (the ``attr(fl,"fi")`` stash of gfam.r:384-392).
+    Returns the binomial trials vector for ``kind="binom"`` (caller
+    folds it into the prior weights: weights ← weights·n, R binomial
+    initialize), else None."""
+    if kind == "censor":
+        family.set_censor(
+            d.data["_hea_cnorm_yat"].to_numpy().astype(float))
+    elif kind == "gfam":
+        family.set_fi(
+            d.data["_hea_gfam_fi"].to_numpy().astype(float))
+    elif kind == "binom":
+        return d.data["_hea_cbind_n"].to_numpy().astype(float)
+    return None
+
+
 class gam:
     """Generalized additive model — mgcv's ``gam()``.
 
@@ -6909,112 +7035,18 @@ class gam:
         # UBRE `D/n + 2·τ/n − 1`. mgcv's `gam.outer` does the same dispatch
         # under method="GCV.Cp".
 
-        # cbind(succ, fail) ~ ... — R's two-column binomial response.
-        # R's binomial initialize (run inside gam.fit3, gam.fit3.r:219)
-        # rewrites y ← succ/n with weights ← weights·n (n = succ + fail)
-        # and keeps the trials vector n aside for family$aic / $ls /
-        # mustart (gam.fit3.r:614,850). hea rewrites up front: the
-        # proportion and trials become frame columns (so prepare_design's
-        # NA-omit keeps them row-aligned) and the rest of the pipeline
-        # runs on the proportion form; ``self._binom_n`` carries the
-        # trials to the aic/ls/mustart consumers. ``self.formula`` keeps
-        # the original text.
-        # Parse any string formula and let the AST decide — a substring
-        # `"cbind" in formula` test would miss the `[succ, fail]` bracket
-        # alias (which lowers to a cbind Call). Parse cost is negligible
-        # against a gam fit.
-        _cbind = isinstance(formula, str)
-        if _cbind:
-            lhs = parse(formula).lhs
-            _cbind = isinstance(lhs, Call) and lhs.fn == "cbind"
-        # The censored families' response (cnorm, cpois, clog, bcg) is also a
-        # two-column ``cbind(y, yat)`` (col 0 the observed value, col 1 the
-        # censoring bound) — routed to its own matrix intake below, NOT the
-        # binomial proportion rewrite. gfam's ``cbind(y, index)`` (col 1 the
-        # 1-based family index, gfam.r:5-8) rides the same pattern.
-        _cnorm_cbind = False
-        _gfam_cbind = False
-        if _cbind:
-            if len(lhs.args) != 2 or lhs.kwargs:
-                raise ValueError(
-                    "cbind() response must have exactly two columns: "
-                    "cbind(successes, failures)"
-                )
-            if isinstance(self.family,
-                          (_cnorm_family, _cpois_family, _clog_family,
-                           _bcg_family)):
-                _cbind = False          # not the binomial cbind path
-                _cnorm_cbind = True
-                data = normalize_data(data)
-                cols = set(data.columns)
-                yobs, yat = (
-                    data.select(_eval_lhs_expr(a, cols).alias("_v"))["_v"]
-                    .to_numpy().astype(float)
-                    for a in lhs.args
-                )
-                # Stash both columns as frame columns so prepare_design's
-                # NA-omit keeps them row-aligned; the observed column
-                # becomes the response, the censoring bound is re-read after
-                # prepare_design (below) and handed to the family.
-                data = data.with_columns(
-                    pl.Series("_hea_cnorm_y", yobs),
-                    pl.Series("_hea_cnorm_yat", yat),
-                )
-                formula = "_hea_cnorm_y ~" + formula.split("~", 1)[1]
-            elif isinstance(self.family, _gfam_family):
-                _cbind = False
-                _gfam_cbind = True
-                data = normalize_data(data)
-                cols = set(data.columns)
-                yobs, yfi = (
-                    data.select(_eval_lhs_expr(a, cols).alias("_v"))["_v"]
-                    .to_numpy().astype(float)
-                    for a in lhs.args
-                )
-                data = data.with_columns(
-                    pl.Series("_hea_gfam_y", yobs),
-                    pl.Series("_hea_gfam_fi", yfi),
-                )
-                # Keep the index expression: predict evaluates it on
-                # newdata to recover the family index (mgcv reads the
-                # response from newdata, mgcv.r:2819/3174).
-                self._gfam_fi_expr = lhs.args[1]
-                formula = "_hea_gfam_y ~" + formula.split("~", 1)[1]
-            elif not isinstance(self.family, (Binomial, QuasiBinomial)):
-                # mgcv dies obscurely here ("logical subscript too
-                # long") — only (quasi)binomial's initialize understands
-                # a two-column y.
-                raise ValueError(
-                    "cbind(successes, failures) ~ ... requires "
-                    "family=Binomial() or QuasiBinomial(); got "
-                    f"{self.family.name!r}"
-                )
-        if _cbind:
-            data = normalize_data(data)
-            cols = set(data.columns)
-            succ, fail = (
-                data.select(_eval_lhs_expr(a, cols).alias("_v"))["_v"]
-                .to_numpy().astype(float)
-                for a in lhs.args
-            )
-            if np.any(succ < 0) or np.any(fail < 0):
-                raise ValueError("negative counts in cbind() response")
-            if (np.any(np.abs(succ - np.rint(succ)) > 0.001)
-                    or np.any(np.abs(fail - np.rint(fail)) > 0.001)):
-                import warnings
-                warnings.warn("non-integer counts in a binomial glm!",
-                              stacklevel=2)
-            tot = succ + fail
-            pos = tot > 0
-            prop = np.where(pos, succ / np.where(pos, tot, 1.0), 0.0)
-            # NaN counts → NaN proportion so the standard NA-omit drops
-            # the row (R's model.frame does the same before initialize).
-            prop = np.where(np.isnan(tot), np.nan, prop)
-            data = data.with_columns(
-                pl.Series("_hea_cbind_p", prop),
-                pl.Series("_hea_cbind_n", tot),
-            )
-            formula = "_hea_cbind_p ~" + formula.split("~", 1)[1]
+        # cbind(a, b) ~ ... two-column response intake (binomial counts /
+        # censored bound / gfam index) — shared with bam, see
+        # :func:`_cbind_response_intake`. ``self.formula`` keeps the
+        # original text; the trials vector for the binomial rewrite is
+        # picked up below once ``self._wt`` exists.
+        formula, data, _cbind_kind, _gfam_expr = _cbind_response_intake(
+            formula, data, self.family)
+        if _gfam_expr is not None:
+            # Keep the index expression: predict evaluates it on newdata
+            # to recover the family index (mgcv reads the response from
+            # newdata, mgcv.r:2819/3174).
+            self._gfam_fi_expr = _gfam_expr
         d = prepare_design(formula, data)
         self._expanded = d.expanded
         # Materialise smooth-arg expressions once into ``self.data`` so the
@@ -7030,20 +7062,10 @@ class gam:
         # R's binomial initialize accepts a 2-level factor / boolean
         # response (level 1 = failure); same coercion as glm's intake.
         y = _coerce_response(d.y, self.family)
-        # Censored response (cnorm/cpois/clog/bcg): re-read the (NA-aligned)
-        # censoring bound and hand it to the family, which carries it
-        # through dev_resids / Dd / aic / ls the way mgcv's
-        # ``attr(y,"censor")`` rides along.
-        if _cnorm_cbind:
-            self.family.set_censor(
-                d.data["_hea_cnorm_yat"].to_numpy().astype(float))
-        # gfam: the (NA-aligned) family index goes to the family before
-        # its preinitialize runs — the ``attr(fl,"fi")`` stash of
-        # gfam.r:384-392, split off because hea's NA-omit needs the two
-        # columns as frame columns first.
-        if _gfam_cbind:
-            self.family.set_fi(
-                d.data["_hea_gfam_fi"].to_numpy().astype(float))
+        # Censored bound → family.set_censor / gfam index → family.set_fi
+        # (before the family's preinitialize runs); binomial trials held
+        # for the weights fold below.
+        _binom_trials = _cbind_family_stash(_cbind_kind, d, self.family)
         X_param = X_param_df.to_numpy().astype(float)
         if X_param.shape[1] == 0:
             # 0-column polars frame → to_numpy() collapses to (0, 0); keep
@@ -7083,13 +7105,13 @@ class gam:
             if np.any(wt_prior < 0):
                 raise ValueError("negative weights not allowed")
             self._wt = wt_prior
-        if _cbind:
+        if _binom_trials is not None:
             # weights ← weights·n (R binomial initialize). Trials re-read
             # from the design frame, which prepare_design may have
             # NA-filtered — keeps rows aligned. A zero-trials row gets
             # weight 0: excluded from the fit via the `good` mask but
             # still predicted, like R.
-            self._binom_n = d.data["_hea_cbind_n"].to_numpy().astype(float)
+            self._binom_n = _binom_trials
             self._wt = self._wt * self._binom_n
         self.prior_weights = self._wt
 

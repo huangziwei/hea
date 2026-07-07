@@ -2149,3 +2149,379 @@ def test_bam_report_layer_flavors_match_mgcv():
     assert g2.REML_criterion / 2 == pytest.approx(-21.2861022079, rel=1e-9)
     assert g2.AIC == pytest.approx(-72.31850011, rel=1e-8)
     assert g2.edf2_total == pytest.approx(13.13719779, rel=1e-7)
+
+
+# ===========================================================================
+# bam matrix-y intake (audit-2 C16): censored cbind(y, yat) for cnorm/
+# cpois/clog/bcg, gfam cbind(y, index), binomial cbind(succ, fail) —
+# mgcv's subsety (efam.r) / setInd (gfam.r:78, bam.r:1063) chunk
+# semantics via family.set_ind. Oracles: live mgcv 1.9-4 on the
+# RGenerator(66) recipes below (same base stream as
+# ``_method_probe_frame``; regenerate with the documented R snippets).
+# Non-discrete fREML pins are 10-12 digits (measured drift ≤1e-10);
+# discrete-rail sp carries the one-POI-step-per-iter endpoint scatter
+# (measured ≤5e-7) whenever a θ update interleaves — negbin (fixed θ)
+# stays bit-tight, θ-estimating families get rtol 1e-5.
+# ===========================================================================
+
+
+def _censored_frames(n: int = 300):
+    """The cpois / clog / bcg probe frames of test_gam.py, from one
+    RGenerator(66) stream (R: set.seed(66); x0,x1,x2 <- runif; e <-
+    rnorm(n,0,.2); mu <- 2+6*(x0-.5)^2+4*(x1-.25)^2; yp <- rpois(n,mu))."""
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(66)
+    x0 = g.uniform(0.0, 1.0, n)
+    x1 = g.uniform(0.0, 1.0, n)
+    g.uniform(0.0, 1.0, n)      # x2 — stream alignment
+    e = g.normal(0.0, 0.2, n)
+    mu = 2 + 6 * (x0 - 0.5) ** 2 + 4 * (x1 - 0.25) ** 2
+    yp = np.asarray(g.poisson(mu), dtype=float)
+
+    m7 = yp % 7
+    yat_p = yp.copy()
+    yat_p[m7 == 1] = yp[m7 == 1] + 3
+    yat_p[m7 == 2] = -np.inf
+    yat_p[m7 == 3] = np.inf
+    cpois_df = pl.DataFrame({"x0": x0, "x1": x1, "yp": yp, "yat": yat_p})
+
+    f = mu                       # same quadratic surface
+    y = f + 2.5 * e
+    m7 = np.floor(y * 10) % 7
+    yat_c = y.copy()
+    yat_c[m7 == 1] = y[m7 == 1] + 1.5
+    yat_c[m7 == 2] = -np.inf
+    yat_c[m7 == 3] = np.inf
+    cont_df = pl.DataFrame({"x0": x0, "x1": x1, "y": y, "yat": yat_c})
+
+    yb = np.exp(f / 3 + e)
+    m7 = np.floor(yb * 10) % 7
+    yat_b = yb.copy()
+    yat_b[m7 == 1] = yb[m7 == 1] * 1.5
+    yat_b[m7 == 2] = 0.0
+    yat_b[m7 == 3] = np.inf
+    bcg_df = pl.DataFrame({"x0": x0, "x1": x1, "y": yb, "yat": yat_b})
+    return cpois_df, cont_df, bcg_df
+
+
+def test_bam_cnorm_matches_mgcv():
+    """bam(cbind(y,yat), cnorm()) — fREML non-discrete pins to 10+ digits;
+    the discrete rail matches at the θ-interleaved POI endpoint scatter."""
+    from hea.family import cnorm
+
+    _, df, _ = _censored_frames()
+    b = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=cnorm(),
+                       method="fREML")
+    np.testing.assert_allclose(
+        b.sp, [0.472989444525, 0.807894785622], rtol=1e-7)
+    assert b.REML_criterion / 2 == pytest.approx(345.36313895, rel=1e-10)
+    assert b.deviance == pytest.approx(334.843894949, rel=1e-9)
+    assert float(np.sum(b.edf)) == pytest.approx(9.46761842841, rel=1e-8)
+    np.testing.assert_allclose(
+        b.family.get_theta(), [-0.580714624599], rtol=1e-8)
+    assert b.AIC == pytest.approx(676.232938084, rel=1e-9)
+    assert float(np.asarray(b.coefficients)[0]) == pytest.approx(
+        3.17440057267, rel=1e-8)
+    assert float(b.Vp[0, 0]) == pytest.approx(0.00126434623522, rel=1e-7)
+    np.testing.assert_allclose(
+        np.asarray(b.fitted_values)[:3],
+        [3.63413072566, 3.05157121757, 2.18607995768], rtol=1e-8)
+    assert b.null_deviance == pytest.approx(773.566867937, rel=1e-9)
+    assert b.edf2_total == pytest.approx(9.85496390801, rel=1e-7)
+
+    bd = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=cnorm(),
+                        method="fREML", discrete=True)
+    np.testing.assert_allclose(
+        bd.sp, [0.472989443964, 0.807894787124], rtol=1e-5)
+    assert bd.REML_criterion / 2 == pytest.approx(252.882756095, rel=1e-8)
+    np.testing.assert_allclose(
+        bd.family.get_theta(), [-0.580714619898], rtol=1e-8)
+    assert bd.AIC == pytest.approx(676.232936453, rel=1e-7)
+
+
+def test_bam_clog_matches_mgcv():
+    """bam(cbind(y,yat), clog()) — the log-scale θ estimated between
+    PIRLS iters (estimate.theta, bam.r:1204). AIC carries logLik.gam's
+    +n.theta df (mgcv.r:4434) on top of clog's saturated-only aic slot
+    (negative AICs, as in gam)."""
+    from hea.family import clog
+
+    _, df, _ = _censored_frames()
+    b = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=clog(),
+                       method="fREML")
+    np.testing.assert_allclose(
+        b.sp, [0.49964459171, 0.820313585973], rtol=1e-7)
+    assert b.REML_criterion / 2 == pytest.approx(-265.549835987, rel=1e-10)
+    assert b.deviance == pytest.approx(363.14148195, rel=1e-9)
+    assert float(np.sum(b.edf)) == pytest.approx(9.38824078638, rel=1e-8)
+    np.testing.assert_allclose(
+        b.family.get_theta(), [-1.1208724322], rtol=1e-8)
+    assert b.AIC == pytest.approx(-545.481203225, rel=1e-9)
+    assert float(np.asarray(b.coefficients)[0]) == pytest.approx(
+        3.17114262546, rel=1e-8)
+    assert b.null_deviance == pytest.approx(742.208643476, rel=1e-9)
+
+    bd = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=clog(),
+                        method="fREML", discrete=True)
+    np.testing.assert_allclose(
+        bd.sp, [0.499644591989, 0.820313601015], rtol=1e-5)
+    assert bd.REML_criterion / 2 == pytest.approx(255.039450754, rel=1e-7)
+    np.testing.assert_allclose(
+        bd.family.get_theta(), [-1.12087249736], rtol=1e-8)
+    assert bd.AIC == pytest.approx(-545.481266237, rel=1e-7)
+
+
+def test_bam_cpois_matches_mgcv():
+    """bam(cbind(y,yat), cpois()) — n_theta=0, so no θ update fires.
+    mgcv's own NON-discrete bgam.fit does NOT converge on this frame
+    (iter=120, "algorithm did not converge" — the Fisher EDeta2 working
+    weights oscillate; its bgam.fitd observed-Hessian rail converges in
+    12 iters), and the same holds with milder censoring, so the
+    non-discrete endpoint is pinned loosely and the converged discrete
+    rail tightly."""
+    from hea.family import cpois
+
+    df, _, _ = _censored_frames()
+    b = hea.models.bam("cbind(yp, yat) ~ s(x0) + s(x1)", df, family=cpois(),
+                       method="fREML")
+    # mgcv: crit 457.411964015, dev 472.764710739 at ITS oscillation
+    # endpoint; hea stops within 1e-5 of it.
+    assert b.REML_criterion / 2 == pytest.approx(457.411964015, rel=5e-5)
+    assert b.deviance == pytest.approx(472.764710739, rel=5e-5)
+
+    bd = hea.models.bam("cbind(yp, yat) ~ s(x0) + s(x1)", df, family=cpois(),
+                        method="fREML", discrete=True)
+    np.testing.assert_allclose(
+        bd.sp, [0.345695451764, 0.46468963319], rtol=1e-6)
+    assert bd.REML_criterion / 2 == pytest.approx(454.462724912, rel=1e-10)
+    assert bd.deviance == pytest.approx(443.812595655, rel=1e-9)
+    assert float(np.sum(bd.edf)) == pytest.approx(10.6774784266, rel=1e-8)
+    assert bd.AIC == pytest.approx(886.591281199, rel=1e-8)
+    assert float(np.asarray(bd.coefficients)[0]) == pytest.approx(
+        1.27452241567, rel=1e-8)
+    assert float(bd.Vp[0, 0]) == pytest.approx(0.00114878616449, rel=1e-7)
+    np.testing.assert_allclose(
+        np.asarray(bd.fitted_values)[:3],
+        [3.43210405172, 4.58045563835, 2.3245973422], rtol=1e-8)
+    assert bd.null_deviance == pytest.approx(517.252889712, rel=1e-9)
+    assert bd.edf2_total == pytest.approx(12.7951400965, rel=1e-7)
+
+
+def test_bam_bcg_matches_mgcv():
+    """bam(cbind(y,yat), bcg()) — mgcv's bam does NOT converge with bcg
+    on EITHER rail (iter=200=maxit on this frame, on milder censoring,
+    and even uncensored: the λ update rescales the working response
+    bc(y,λ) every iter, so |dev−devold| never settles). The whole
+    200-iter non-discrete trajectory is nevertheless bit-stable — hea
+    lands on mgcv's exact endpoint. The discrete endpoint's REPORTED
+    criterion pairs the last POI step with a different loop phase at
+    maxit (mgcv 268.3931 vs hea 268.3897); β̂/θ̂/sp/dev there still
+    agree to 1e-10, so the state is pinned and the crit is not."""
+    from hea.family import bcg
+
+    _, _, df = _censored_frames()
+    b = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=bcg(),
+                       method="fREML")
+    np.testing.assert_allclose(
+        b.sp, [3.45358690639, 2.74235966428], rtol=1e-7)
+    assert b.REML_criterion / 2 == pytest.approx(348.187083252, rel=1e-9)
+    assert b.deviance == pytest.approx(332.271073195, rel=1e-9)
+    assert float(np.sum(b.edf)) == pytest.approx(9.88923769693, rel=1e-8)
+    np.testing.assert_allclose(
+        b.family.get_theta(), [0.0503296085834, -1.49816913969], rtol=1e-7)
+    assert b.AIC == pytest.approx(677.968417239, rel=1e-9)
+    assert float(np.asarray(b.coefficients)[0]) == pytest.approx(
+        1.0808831257, rel=1e-8)
+    assert float(b.Vp[0, 0]) == pytest.approx(0.000204369237812, rel=1e-7)
+    assert b.null_deviance == pytest.approx(737.398170441, rel=1e-9)
+
+    bd = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=bcg(),
+                        method="fREML", discrete=True)
+    np.testing.assert_allclose(
+        bd.sp, [4.3709425801, 3.44589976783], rtol=1e-6)
+    assert bd.deviance == pytest.approx(331.734883193, rel=1e-9)
+    np.testing.assert_allclose(
+        bd.family.get_theta(), [-0.0597513884923, -1.60930140229], rtol=1e-7)
+    assert bd.AIC == pytest.approx(678.813982896, rel=1e-8)
+
+
+def test_bam_gfam_matches_mgcv():
+    """bam(cbind(y, index), gfam(poisson, gaussian)) — the composite θ
+    (gaussian log scale) via estimate.theta; predict+se with the index
+    re-derived from newdata on BOTH rails (the discrete rail routes
+    through the exact-eval parent: mgcv's own predict.bamd errors on a
+    discrete gfam — no setInd, bam.r:1995-2004)."""
+    from hea.family import Gaussian, Poisson, gfam
+
+    n2 = 210
+    from hea.R.rng import RGenerator
+    g = RGenerator(66)
+    x0 = g.uniform(0.0, 1.0, n2)
+    x1 = g.uniform(0.0, 1.0, n2)
+    x2 = g.uniform(0.0, 1.0, n2)
+    e = g.normal(0.0, 0.2, n2)
+    fg = np.sin(2 * np.pi * x0) * 0.7 + (x1 - 0.5) ** 2 * 2 \
+        + 0.3 * np.sin(np.pi * x2)
+    mu = 2 + 6 * (x0 - 0.5) ** 2 + 4 * (x1 - 0.25) ** 2
+    yp = np.asarray(g.poisson(mu), dtype=float)
+    i1 = (yp % 3 + 1) == 1
+    y2 = np.where(i1, yp, fg + e)
+    fin = np.where(i1, 1.0, 2.0)
+    df = pl.DataFrame({"y": y2, "fin": fin, "x0": x0, "x1": x1, "x2": x2})
+
+    b = hea.models.bam("cbind(y, fin) ~ s(x0) + s(x1) + s(x2)", df,
+                       family=gfam([Poisson(), Gaussian()]), method="fREML")
+    np.testing.assert_allclose(
+        b.sp, [0.355742032722, 5.7371454329, 6.34382974108], rtol=1e-7)
+    assert b.REML_criterion / 2 == pytest.approx(189.81314452, rel=1e-10)
+    assert b.deviance == pytest.approx(380.686812267, rel=1e-9)
+    assert float(np.sum(b.edf)) == pytest.approx(15.4578878443, rel=1e-8)
+    np.testing.assert_allclose(
+        b.family.get_theta(), [-3.47246138058], rtol=1e-9)
+    assert b.AIC == pytest.approx(343.772994781, rel=1e-9)
+    assert b.null_deviance == pytest.approx(150.382746714, rel=1e-9)
+    assert b.edf2_total == pytest.approx(15.8900820355, rel=1e-7)
+
+    nd = pl.DataFrame({"x0": [.25, .75], "x1": [.4, .1], "x2": [.3, .6],
+                       "y": [0.0, 0.0], "fin": [1.0, 2.0]})
+    pr = b.predict(nd, type="response", se_fit=True)
+    np.testing.assert_allclose(
+        pr["fit"].to_numpy(), [2.58115797333, -0.0254589240207], rtol=1e-8)
+    np.testing.assert_allclose(
+        pr["se.fit"].to_numpy(), [0.126849011371, 0.0587882906019],
+        rtol=1e-7)
+
+    bd = hea.models.bam("cbind(y, fin) ~ s(x0) + s(x1) + s(x2)", df,
+                        family=gfam([Poisson(), Gaussian()]),
+                        method="fREML", discrete=True)
+    np.testing.assert_allclose(
+        bd.sp, [0.355742027064, 5.73714513127, 6.34382977167], rtol=1e-5)
+    assert bd.REML_criterion / 2 == pytest.approx(192.488901014, rel=1e-7)
+    np.testing.assert_allclose(
+        bd.family.get_theta(), [-3.47246143822], rtol=1e-8)
+    assert bd.AIC == pytest.approx(343.77298757, rel=1e-7)
+    # discrete gfam predict rides the exact-eval parent (see docstring).
+    prd = bd.predict(nd, type="response", se_fit=True)
+    np.testing.assert_allclose(
+        prd["fit"].to_numpy(), [2.58115797333, -0.0254589240207], rtol=1e-6)
+
+
+def test_bam_binomial_cbind_matches_mgcv():
+    """bam(cbind(succ, fail), binomial()) — the two-column counts intake
+    (proportion response + trials-folded weights, R binomial initialize
+    run by bgam.fit at bam.r:951). Counts are a deterministic transform
+    of the shared rpois stream (succ = pmin(yp, 8), 8 trials)."""
+    from hea.R.rng import RGenerator
+
+    n = 300
+    g = RGenerator(66)
+    x0 = g.uniform(0.0, 1.0, n)
+    x1 = g.uniform(0.0, 1.0, n)
+    g.uniform(0.0, 1.0, n)
+    g.normal(0.0, 0.2, n)
+    mu = 2 + 6 * (x0 - 0.5) ** 2 + 4 * (x1 - 0.25) ** 2
+    yp = np.asarray(g.poisson(mu), dtype=float)
+    succ = np.minimum(yp, 8.0)
+    df = pl.DataFrame({"x0": x0, "x1": x1, "succ": succ,
+                       "fail": 8.0 - succ})
+
+    b = hea.models.bam("cbind(succ, fail) ~ s(x0) + s(x1)", df,
+                       family=Binomial(), method="fREML")
+    np.testing.assert_allclose(
+        b.sp, [0.419041396045, 0.144786367145], rtol=1e-7)
+    assert b.REML_criterion / 2 == pytest.approx(625.071989454, rel=1e-10)
+    assert b.deviance == pytest.approx(570.636154793, rel=1e-9)
+    assert float(np.sum(b.edf)) == pytest.approx(10.594201809, rel=1e-8)
+    assert b.AIC == pytest.approx(1234.92118621, rel=1e-9)
+    assert float(np.asarray(b.coefficients)[0]) == pytest.approx(
+        -0.458591380509, rel=1e-8)
+    assert float(b.Vp[0, 0]) == pytest.approx(0.00184652289111, rel=1e-7)
+    assert b.null_deviance == pytest.approx(697.433406288, rel=1e-9)
+
+    bd = hea.models.bam("cbind(succ, fail) ~ s(x0) + s(x1)", df,
+                        family=Binomial(), method="fREML", discrete=True)
+    np.testing.assert_allclose(
+        bd.sp, [0.419041364372, 0.144786368908], rtol=1e-6)
+    assert bd.REML_criterion / 2 == pytest.approx(627.828804957, rel=1e-9)
+    assert bd.AIC == pytest.approx(1234.92118678, rel=1e-9)
+
+
+def test_bam_censored_chunked_subsety():
+    """chunk_size < n exercises the per-chunk family-state window
+    (family.set_ind — mgcv's subsety, bam.r:1068). Receipts:
+
+    * family-level: chunk-accumulated dev_resids / dDeta over windowed
+      state exactly reproduce the full-data evaluation slice-for-slice;
+    * e2e: bam(cnorm, chunk_size=50) lands next to the unchunked fit
+      (basis differs via mini.mf subsampling — mgcv's own chunk50-vs-
+      full cnorm shift is the same order), and the stash is RESTORED
+      full-length after the fit;
+    * gfam windowing is CORRECT where mgcv's is broken: mgcv leaves
+      setInd at the last chunk for the full-data dev/estimate.theta
+      calls (bam.r:1166/1186/1204, reset only at :1307) — live receipt:
+      bam(gfam, chunk.size=299) on n=300 returns dev 255.6 vs 388.7
+      unchunked with θ collapsed to 0. hea restores per build; its
+      chunked θ̂ stays next to the unchunked one.
+    """
+    from hea.family import cnorm, Gaussian, Poisson, gfam
+
+    _, df, _ = _censored_frames()
+    fam = cnorm()
+    y = df["y"].to_numpy()
+    yat = df["yat"].to_numpy()
+    fam.set_censor(yat)
+    mu = np.full_like(y, float(np.mean(y)))
+    full_dev = fam.dev_resids(y, mu, np.ones_like(y))
+    full_dd = fam.dDeta(y, mu, np.ones_like(y), fam.get_theta(), level=0)
+    for start in range(0, y.size, 50):
+        end = min(start + 50, y.size)
+        fam.set_ind(np.arange(start, end))
+        np.testing.assert_array_equal(
+            fam.dev_resids(y[start:end], mu[start:end],
+                           np.ones(end - start)),
+            full_dev[start:end])
+        dd = fam.dDeta(y[start:end], mu[start:end], np.ones(end - start),
+                       fam.get_theta(), level=0)
+        np.testing.assert_array_equal(dd["Deta"], full_dd["Deta"][start:end])
+        fam.set_ind(None)
+
+    b_full = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df,
+                            family=cnorm(), method="fREML")
+    b_chunk = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df,
+                             family=cnorm(), method="fREML", chunk_size=50)
+    # mini.mf-level shift only (mgcv's own cnorm chunk50 moves θ by 2e-4).
+    assert float(b_chunk.family.get_theta()[0]) == pytest.approx(
+        float(b_full.family.get_theta()[0]), abs=5e-3)
+    assert b_chunk.deviance == pytest.approx(b_full.deviance, rel=5e-3)
+    # Stash restored full-length after the fit (window cleaned up).
+    assert b_chunk.family._censor is not None
+    assert b_chunk.family._censor.shape[0] == df.height
+
+    # gfam: chunked fit stays sane (contrast mgcv's stale-window garbage).
+    n2 = 210
+    from hea.R.rng import RGenerator
+    g = RGenerator(66)
+    x0 = g.uniform(0.0, 1.0, n2)
+    x1 = g.uniform(0.0, 1.0, n2)
+    x2 = g.uniform(0.0, 1.0, n2)
+    e = g.normal(0.0, 0.2, n2)
+    fg = np.sin(2 * np.pi * x0) * 0.7 + (x1 - 0.5) ** 2 * 2 \
+        + 0.3 * np.sin(np.pi * x2)
+    mu2 = 2 + 6 * (x0 - 0.5) ** 2 + 4 * (x1 - 0.25) ** 2
+    yp = np.asarray(g.poisson(mu2), dtype=float)
+    i1 = (yp % 3 + 1) == 1
+    dfg = pl.DataFrame({"y": np.where(i1, yp, fg + e),
+                        "fin": np.where(i1, 1.0, 2.0),
+                        "x0": x0, "x1": x1, "x2": x2})
+    gf_full = hea.models.bam("cbind(y, fin) ~ s(x0) + s(x1) + s(x2)", dfg,
+                             family=gfam([Poisson(), Gaussian()]),
+                             method="fREML")
+    gf_chunk = hea.models.bam("cbind(y, fin) ~ s(x0) + s(x1) + s(x2)", dfg,
+                              family=gfam([Poisson(), Gaussian()]),
+                              method="fREML", chunk_size=100)
+    assert float(gf_chunk.family.get_theta()[0]) == pytest.approx(
+        float(gf_full.family.get_theta()[0]), abs=5e-2)
+    assert gf_chunk.deviance == pytest.approx(gf_full.deviance, rel=5e-2)
+    assert gf_chunk.family._fi is not None
+    assert gf_chunk.family._fi.shape[0] == dfg.height
