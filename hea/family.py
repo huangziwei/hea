@@ -9828,6 +9828,48 @@ def _discrete_kernels():
     return Xbd, XWXd, XWyd
 
 
+class _DiscreteLPSolve:
+    """The gamlss discrete-``initialize`` solve, repeated verbatim per
+    family/LP in mgcv (gamlss.r:1035-1046 and its twins :1368-1378,
+    :2323-2331, :2872-2882, :3201-3211): factor ``mchol(XWXd(…, lt) +
+    crossprod(E_cols))`` once — pivoted Cholesky with mgcv's rank
+    truncation — then pivot-backsolve right-hand sides against it.
+    Kept as factor + :meth:`solve` because gumbls' mean pass 2 (:3233)
+    and gevlss' ξ line-search (:2359) re-solve the SAME factor with
+    fresh rhs vectors (``Xty*m`` scaled AFTER assembly there, so
+    :meth:`xty` is exposed separately too)."""
+
+    def __init__(self, design, lt, E_cols, ones_n):
+        from .models.gam import _pivoted_chol
+        _, _XWXd, self._XWyd = _discrete_kernels()
+        self._design = design
+        self._lt = lt
+        self._ones_n = ones_n
+        A = _XWXd(design, ones_n, lt=lt) + E_cols.T @ E_cols
+        U, piv, rrank = _pivoted_chol(A)
+        self._p = A.shape[0]
+        self._U = U[:rrank, :rrank]
+        self._piv = piv[:rrank]
+
+    def xty(self, target):
+        """``XWyd(Xd, 1, target, lt)`` — the rhs assembly (:1039)."""
+        return self._XWyd(self._design, self._ones_n, target, lt=self._lt)
+
+    def solve(self, Xty):
+        """``startji[piv] <- backsolve(R, forwardsolve(t(R), Xty[piv]))``
+        on the truncated factor (:1041-1045); the caller applies (or,
+        where mgcv omits it, skips) the non-finite→0 guard."""
+        from scipy.linalg import solve_triangular
+        startji = np.zeros(self._p)
+        z = solve_triangular(self._U, Xty[self._piv], lower=False,
+                             trans="T")
+        startji[self._piv] = solve_triangular(self._U, z, lower=False)
+        return startji
+
+    def solve_target(self, target):
+        return self.solve(self.xty(target))
+
+
 def gamlss_gH(X, jj, l1, l2, i2, l3=None, i3=None, l4=None, i4=None,
               d1b=None, d2b=None, deriv: int = 0, fh=None,
               D=None, sandwich: bool = False) -> dict:
@@ -10158,6 +10200,12 @@ class GeneralFamily(Family):
       path (free, fixed and absent sp). 1: reserved for the unported
       bfgs route — fitting refuses unless ``optimizer="efs"`` is
       passed (mgcv.r:1907).
+    - ``discrete_ok`` — mgcv's ``discrete.ok``: declare ``True`` only
+      when :meth:`ll` and :meth:`initialize_coef` dispatch on a
+      :class:`DiscreteX` design (per-LP ``Xbd`` linear predictors and
+      the ``mchol``-solve initializer, gamlss.r:936/1033 pattern);
+      ``bam(list-of-formulas, discrete=True)`` refuses families
+      without it.
     - conventional flags, as on :class:`gaulss`: ``scale_known =
       True``, ``n_theta = 0``; ``name`` is what summaries print.
 
@@ -10202,6 +10250,15 @@ class GeneralFamily(Family):
     n_lp: int = 2
     available_derivs: int = 2
     canonical_link_name = "none"
+    # mgcv ``family$discrete.ok`` (gamlss.r:1102/1409/2444/2978/3327 —
+    # set on gaulss/multinom/gevlss/gammals/gumbls and consumed nowhere
+    # in mgcv itself; hea's discrete general-family bam is the first
+    # consumer). True declares that :meth:`ll` and
+    # :meth:`initialize_coef` accept a :class:`DiscreteX` design, i.e.
+    # the family carries the per-LP ``Xbd``/``mchol`` discrete branches
+    # (gamlss.r:936/1033 pattern). ``bam(list-of-formulas,
+    # discrete=True)`` refuses families without it.
+    discrete_ok: bool = False
     # mgcv ``family$sandwich`` availability: True on the families whose
     # constructors define the slot (gaulss/gammals/gumbls/shash/gevlss/
     # twlss/multinom/ziplss); False ⇒ vcov(sandwich=True) raises exactly
@@ -10308,6 +10365,7 @@ class gaulss(GeneralFamily):
     n_theta = 0
     n_lp = 2
     available_derivs = 2
+    discrete_ok = True          # gamlss.r:1102
 
     _OK_MU_LINKS = ("identity", "log", "inverse", "sqrt")
 
@@ -10453,14 +10511,10 @@ class gaulss(GeneralFamily):
     def _initialize_coef_discrete(self, y, X: DiscreteX, jj, E,
                                   offset) -> np.ndarray:
         """gaulss ``initialize``'s discrete branch (gamlss.r:1033-1062):
-        ``R <- mchol(XWXd(…, lt=lpid[i]) + crossprod(E[, jj[i]]))``,
-        ``startji[piv] <- backsolve(R, forwardsolve(t(R), Xty[piv]))``
-        with the rank truncation of :1041-1044, non-finite entries
-        zeroed; LP1's residuals via ``Xbd(…, lt=lpid[0])`` (:1048)."""
-        from scipy.linalg import solve_triangular
-
-        from .models.gam import _pivoted_chol
-        _Xbd, _XWXd, _XWyd = _discrete_kernels()
+        per LP the :class:`_DiscreteLPSolve` factor-and-backsolve with
+        non-finite entries zeroed; LP1's residuals via
+        ``Xbd(…, lt=lpid[0])`` (:1048)."""
+        _Xbd, _, _ = _discrete_kernels()
         design = X.design
         lpid = X.lpid
         n = y.shape[0]
@@ -10471,15 +10525,8 @@ class gaulss(GeneralFamily):
         ones_n = np.ones(n)
 
         def _solve_lp(i: int, target: np.ndarray) -> np.ndarray:
-            Ei = E[:, jj[i]]
-            A = _XWXd(design, ones_n, lt=lpid[i]) + Ei.T @ Ei
-            Xty = _XWyd(design, ones_n, target, lt=lpid[i])
-            U, piv, rrank = _pivoted_chol(A)
-            startji = np.zeros(A.shape[0])
-            Uu = U[:rrank, :rrank]
-            pv = piv[:rrank]
-            z = solve_triangular(Uu, Xty[pv], lower=False, trans="T")
-            startji[pv] = solve_triangular(Uu, z, lower=False)
+            lp = _DiscreteLPSolve(design, lpid[i], E[:, jj[i]], ones_n)
+            startji = lp.solve_target(target)
             startji[~np.isfinite(startji)] = 0.0
             return startji
 
@@ -11066,6 +11113,7 @@ class gammals(GeneralFamily):
     n_theta = 0
     n_lp = 2
     available_derivs = 2
+    discrete_ok = True          # gamlss.r:2978
 
     def __init__(self, link: tuple[str, str] = ("identity", "log"),
                  b: float = -7.0):
@@ -11094,11 +11142,17 @@ class gammals(GeneralFamily):
            d1b=None, d2b=None, fh=None, D=None,
            sandwich: bool = False) -> dict:
         y = np.asarray(y, dtype=float)
-        X = np.asarray(X, dtype=float)
         coef = np.asarray(coef, dtype=float)
         jj = [np.asarray(ix, dtype=int) for ix in lpi]
-        eta = X[:, jj[0]] @ coef[jj[0]]
-        etat = X[:, jj[1]] @ coef[jj[1]]
+        if isinstance(X, DiscreteX):
+            # gamlss.r:2761-2764: per-LP η off the compressed design.
+            _Xbd, _, _ = _discrete_kernels()
+            eta = _Xbd(X.design, coef, lt=X.lpid[0])
+            etat = _Xbd(X.design, coef, lt=X.lpid[1])
+        else:
+            X = np.asarray(X, dtype=float)
+            eta = X[:, jj[0]] @ coef[jj[0]]
+            etat = X[:, jj[1]] @ coef[jj[1]]
         if offset is not None:
             if offset[0] is not None:
                 eta = eta + offset[0]
@@ -11177,13 +11231,18 @@ class gammals(GeneralFamily):
 
     def initialize_coef(self, y, X, lpi, E=None, offset=None,
                         use_unscaled: bool = False) -> np.ndarray:
-        """gammals ``initialize`` (gamlss.r:2855-2920, dense branch):
-        regress ``log(y + max(y)·eps^0.75)`` on LP1's columns, then the
+        """gammals ``initialize`` (gamlss.r:2855-2920): regress
+        ``log(y + max(y)·eps^0.75)`` on LP1's columns, then the
         link-transformed log absolute residuals on LP2's, with ``E`` as
-        regularizer (``use_unscaled`` ⇒ stacked LS, else ``pen.reg``)."""
+        regularizer (``use_unscaled`` ⇒ stacked LS, else ``pen.reg``).
+        A :class:`DiscreteX` design takes the discrete branch
+        (:2870-2897): the per-LP ``mchol`` solve, E as a plain
+        crossprod regularizer regardless of ``use_unscaled``."""
         y = np.asarray(y, dtype=float)
-        X = np.asarray(X, dtype=float)
         jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        if isinstance(X, DiscreteX):
+            return self._initialize_coef_discrete(y, X, jj, E, offset)
+        X = np.asarray(X, dtype=float)
         p = X.shape[1]
         if E is None:
             E = np.zeros((0, p))
@@ -11209,6 +11268,39 @@ class gammals(GeneralFamily):
         if offset is not None and len(offset) > 1 and offset[1] is not None:
             lres1 = lres1 - offset[1]
         start[jj[1]] = _reg(jj[1], lres1)
+        return start
+
+    def _initialize_coef_discrete(self, y, X: DiscreteX, jj, E,
+                                  offset) -> np.ndarray:
+        """gammals ``initialize``'s discrete branch (gamlss.r:2870-2897):
+        the per-LP ``mchol`` solves; LP1's fitted mean via
+        ``Xbd(…, lt=lpid[0])`` (:2885). mgcv guards LP1's solution
+        against non-finite entries (:2883) but NOT LP2's (:2896-2897)
+        — asymmetry mirrored."""
+        _Xbd, _, _ = _discrete_kernels()
+        design = X.design
+        lpid = X.lpid
+        p = design.p
+        if E is None:
+            E = np.zeros((0, p))
+        E = np.asarray(E, dtype=float)
+        ones_n = np.ones(y.shape[0])
+
+        start = np.zeros(p)
+        yt1 = np.log(y + float(np.max(y)) * np.finfo(float).eps ** 0.75)
+        if offset is not None and offset[0] is not None:
+            yt1 = yt1 - offset[0]
+        startji = _DiscreteLPSolve(design, lpid[0], E[:, jj[0]],
+                                   ones_n).solve_target(yt1)
+        startji[~np.isfinite(startji)] = 0.0
+        start[jj[0]] = startji
+        eta1 = _Xbd(design, start, lt=lpid[0])
+        lres1 = self.links[1].link(np.log(np.abs(
+            y - self.links[0].linkinv(eta1))))
+        if offset is not None and len(offset) > 1 and offset[1] is not None:
+            lres1 = lres1 - offset[1]
+        start[jj[1]] = _DiscreteLPSolve(design, lpid[1], E[:, jj[1]],
+                                        ones_n).solve_target(lres1)
         return start
 
     def postproc(self, y, prior_weights, fitted, linear_predictors,
@@ -11318,6 +11410,7 @@ class gumbls(GeneralFamily):
     n_theta = 0
     n_lp = 2
     available_derivs = 2
+    discrete_ok = True          # gamlss.r:3327
 
     def __init__(self, link: tuple[str, str] = ("identity", "log"),
                  b: float = -7.0):
@@ -11346,11 +11439,17 @@ class gumbls(GeneralFamily):
            d1b=None, d2b=None, fh=None, D=None,
            sandwich: bool = False) -> dict:
         y = np.asarray(y, dtype=float)
-        X = np.asarray(X, dtype=float)
         coef = np.asarray(coef, dtype=float)
         jj = [np.asarray(ix, dtype=int) for ix in lpi]
-        eta = X[:, jj[0]] @ coef[jj[0]]
-        etab = X[:, jj[1]] @ coef[jj[1]]
+        if isinstance(X, DiscreteX):
+            # gamlss.r:3092-3096: per-LP η off the compressed design.
+            _Xbd, _, _ = _discrete_kernels()
+            eta = _Xbd(X.design, coef, lt=X.lpid[0])
+            etab = _Xbd(X.design, coef, lt=X.lpid[1])
+        else:
+            X = np.asarray(X, dtype=float)
+            eta = X[:, jj[0]] @ coef[jj[0]]
+            etab = X[:, jj[1]] @ coef[jj[1]]
         if offset is not None:
             if offset[0] is not None:
                 eta = eta + offset[0]
@@ -11432,12 +11531,16 @@ class gumbls(GeneralFamily):
 
     def initialize_coef(self, y, X, lpi, E=None, offset=None,
                         use_unscaled: bool = False) -> np.ndarray:
-        """gumbls ``initialize`` (gamlss.r:3236-3264, dense branch): two
-        passes — regress y on LP1, then ``g₂(½log((y−μ̂)²) − ¼)`` on LP2,
-        then re-regress ``y − 0.57721·e^{η₂}`` on LP1."""
+        """gumbls ``initialize`` (gamlss.r:3184-3264): two passes —
+        regress y on LP1, then ``g₂(½log((y−μ̂)²) − ¼)`` on LP2, then
+        re-regress ``y − 0.57721·e^{η₂}`` on LP1. A :class:`DiscreteX`
+        design takes the discrete branch (:3199-3235): the per-LP
+        ``mchol`` solves, pass 2 re-solving LP1's factor."""
         y = np.asarray(y, dtype=float)
-        X = np.asarray(X, dtype=float)
         jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        if isinstance(X, DiscreteX):
+            return self._initialize_coef_discrete(y, X, jj, E, offset)
+        X = np.asarray(X, dtype=float)
         p = X.shape[1]
         if E is None:
             E = np.zeros((0, p))
@@ -11468,6 +11571,51 @@ class gumbls(GeneralFamily):
             eta2 = eta2 + offset[1]
         yt1 = yt1 - 0.57721 * np.exp(self.links[1].linkinv(eta2))
         start[jj[0]] = _reg(jj[0], yt1)
+        return start
+
+    def _initialize_coef_discrete(self, y, X: DiscreteX, jj, E,
+                                  offset) -> np.ndarray:
+        """gumbls ``initialize``'s discrete branch (gamlss.r:3199-3235):
+        the per-LP ``mchol`` solves with the mean pass 2 (:3228-3235)
+        re-solving LP1's factor on ``yt1 − 0.57721·e^{η₂}``. mgcv
+        guards LP1's solutions against non-finite entries (:3212,
+        :3234) but NOT LP2's (:3226-3227) — asymmetry mirrored. (mgcv
+        recycles LP2's ``startji`` vector into pass 2, relying on R's
+        assignment-extension; in the full-rank regime every LP1
+        position is overwritten, which is the fresh-vector semantics
+        used here.)"""
+        _Xbd, _, _ = _discrete_kernels()
+        design = X.design
+        lpid = X.lpid
+        p = design.p
+        if E is None:
+            E = np.zeros((0, p))
+        E = np.asarray(E, dtype=float)
+        ones_n = np.ones(y.shape[0])
+
+        start = np.zeros(p)
+        yt1 = y.copy()
+        if offset is not None and offset[0] is not None:
+            yt1 = yt1 - offset[0]
+        lp1 = _DiscreteLPSolve(design, lpid[0], E[:, jj[0]], ones_n)
+        startji = lp1.solve_target(yt1)
+        startji[~np.isfinite(startji)] = 0.0
+        start[jj[0]] = startji
+        eta1 = _Xbd(design, start, lt=lpid[0])
+        lres1 = self.links[1].link(
+            np.log((y - self.links[0].linkinv(eta1)) ** 2) / 2.0 - 0.25)
+        if offset is not None and len(offset) > 1 and offset[1] is not None:
+            lres1 = lres1 - offset[1]
+        start[jj[1]] = _DiscreteLPSolve(design, lpid[1], E[:, jj[1]],
+                                        ones_n).solve_target(lres1)
+        # pass 2 at the mean parameter (:3228-3235)
+        eta2 = _Xbd(design, start, lt=lpid[1])
+        if offset is not None and len(offset) > 1 and offset[1] is not None:
+            eta2 = eta2 + offset[1]
+        yt1 = yt1 - 0.57721 * np.exp(self.links[1].linkinv(eta2))
+        startji = lp1.solve_target(yt1)
+        startji[~np.isfinite(startji)] = 0.0
+        start[jj[0]] = startji
         return start
 
     def postproc(self, y, prior_weights, fitted, linear_predictors,
@@ -11912,6 +12060,7 @@ class gevlss(GeneralFamily):
     n_theta = 0
     n_lp = 3
     available_derivs = 2
+    discrete_ok = True          # gamlss.r:2444
 
     def __init__(self, link: tuple[str, str, str]
                  = ("identity", "identity", "logit")):
@@ -11944,12 +12093,19 @@ class gevlss(GeneralFamily):
            d1b=None, d2b=None, fh=None, D=None,
            sandwich: bool = False) -> dict:
         y = np.asarray(y, dtype=float)
-        X = np.asarray(X, dtype=float)
         coef = np.asarray(coef, dtype=float)
         jj = [np.asarray(ix, dtype=int) for ix in lpi]
-        eta = X[:, jj[0]] @ coef[jj[0]]
-        etar = X[:, jj[1]] @ coef[jj[1]]
-        etax = X[:, jj[2]] @ coef[jj[2]]
+        if isinstance(X, DiscreteX):
+            # gamlss.r:2026-2030: per-LP η off the compressed design.
+            _Xbd, _, _ = _discrete_kernels()
+            eta = _Xbd(X.design, coef, lt=X.lpid[0])
+            etar = _Xbd(X.design, coef, lt=X.lpid[1])
+            etax = _Xbd(X.design, coef, lt=X.lpid[2])
+        else:
+            X = np.asarray(X, dtype=float)
+            eta = X[:, jj[0]] @ coef[jj[0]]
+            etar = X[:, jj[1]] @ coef[jj[1]]
+            etax = X[:, jj[2]] @ coef[jj[2]]
         if offset is not None:
             if offset[0] is not None:
                 eta = eta + offset[0]
@@ -12004,13 +12160,20 @@ class gevlss(GeneralFamily):
 
     def initialize_coef(self, y, X, lpi, E=None, offset=None,
                         use_unscaled: bool = False) -> np.ndarray:
-        """gevlss ``initialize`` (gamlss.r:2378-2423, dense branch):
-        regress g₁(y) on LP1, log|residuals| on LP2, then seed ξ near 0
-        (``g₃(1e-3)``) and run mgcv's crude ll line-search over a
-        scaling ``m`` of the ξ-start to escape the non-finite regime."""
+        """gevlss ``initialize`` (gamlss.r:2301-2425): regress g₁(y) on
+        LP1, log|residuals| on LP2, then seed ξ near 0 (``g₃(1e-3)``)
+        and run mgcv's crude ll line-search over a scaling ``m`` of the
+        ξ-start to escape the non-finite regime. A :class:`DiscreteX`
+        design takes the discrete branch (:2318-2377): the per-LP
+        ``mchol`` solves, the line-search re-solving LP3's factor on
+        ``Xty·m`` and evaluating ``ll`` through the compressed design
+        (unlike the dense branch's plain-LS ξ seed, the discrete LP3
+        solve is E-regularized — mgcv's own asymmetry, :2350)."""
         y = np.asarray(y, dtype=float)
-        X = np.asarray(X, dtype=float)
         jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        if isinstance(X, DiscreteX):
+            return self._initialize_coef_discrete(y, X, jj, E, offset)
+        X = np.asarray(X, dtype=float)
         p = X.shape[1]
         if E is None:
             E = np.zeros((0, p))
@@ -12045,6 +12208,75 @@ class gevlss(GeneralFamily):
             st = start.copy()
             st[jj[2]] = bji
             return self.ll(y, X, st, lpi=lpi, offset=offset)["l"], st
+
+        f0l, f0s = fob()
+        dm = 0.2
+        mm = 1.0
+        up = False
+        f1l = f0l
+        while -4.2 < mm < 4.2:
+            f1l, f1s = fob(mm + dm)
+            if np.isfinite(f1l) and f1l > f0l:
+                up = True
+                f0l, f0s = f1l, f1s
+                mm = mm + dm
+            elif up:
+                break
+            elif dm > 0:
+                dm = -dm
+            else:
+                break
+        if not np.isfinite(f1l):
+            f1l, f1s = fob(mm - dm)
+            if np.isfinite(f1l):
+                f0l, f0s = f1l, f1s
+        return f0s
+
+    def _initialize_coef_discrete(self, y, X: DiscreteX, jj, E,
+                                  offset) -> np.ndarray:
+        """gevlss ``initialize``'s discrete branch (gamlss.r:2318-2377):
+        ``mchol`` solves for LP1 (g₁(y) target) and LP2
+        (log|residuals| via ``Xbd``), then the ξ line-search re-solves
+        LP3's factor on the once-assembled ``Xty`` scaled by ``m``
+        (:2358-2363), scoring ``ll`` through the compressed design."""
+        _Xbd, _, _ = _discrete_kernels()
+        design = X.design
+        lpid = X.lpid
+        p = design.p
+        if E is None:
+            E = np.zeros((0, p))
+        E = np.asarray(E, dtype=float)
+        ones_n = np.ones(y.shape[0])
+
+        def _guarded(lp, target):
+            startji = lp.solve_target(target)
+            startji[~np.isfinite(startji)] = 0.0
+            return startji
+
+        start = np.zeros(p)
+        if self._link_names[0] == "identity":
+            yt1 = y.copy()
+        else:
+            yt1 = self.links[0].link(np.abs(y) + float(np.max(y)) * 1e-7)
+        start[jj[0]] = _guarded(
+            _DiscreteLPSolve(design, lpid[0], E[:, jj[0]], ones_n), yt1)
+        lres1 = _Xbd(design, start, lt=lpid[0])
+        lres1 = np.log(np.abs(y - self.links[0].linkinv(lres1)))
+        start[jj[1]] = _guarded(
+            _DiscreteLPSolve(design, lpid[1], E[:, jj[1]], ones_n), lres1)
+
+        # LP3 (:2348-2363): constant g₃(1e-3) target, factor kept for
+        # the line-search's re-solves on Xty·m.
+        yt3 = np.full(y.shape[0], self.links[2].link(np.array(1e-3)))
+        lp3 = _DiscreteLPSolve(design, lpid[2], E[:, jj[2]], ones_n)
+        Xty3 = lp3.xty(yt3)
+
+        def fob(m=1.0):
+            bji = lp3.solve(Xty3 * m)
+            bji[~np.isfinite(bji)] = 0.0
+            st = start.copy()
+            st[jj[2]] = bji
+            return self.ll(y, X, st, lpi=jj, offset=offset)["l"], st
 
         f0l, f0s = fob()
         dm = 0.2
@@ -13163,6 +13395,7 @@ class multinom(GeneralFamily):
     scale_known = True
     n_theta = 0
     available_derivs = 2
+    discrete_ok = True          # gamlss.r:1409
 
     def __init__(self, K: int = 1):
         if K < 1:
@@ -13176,14 +13409,20 @@ class multinom(GeneralFamily):
            d1b=None, d2b=None, fh=None, D=None,
            sandwich: bool = False) -> dict:
         y = np.asarray(y, dtype=float)
-        X = np.asarray(X, dtype=float)
         coef = np.asarray(coef, dtype=float)
         jj = [np.asarray(ix, dtype=int) for ix in lpi]
         K = len(jj)
         n = y.shape[0]
+        discrete = isinstance(X, DiscreteX)
+        if discrete:
+            _Xbd, _, _ = _discrete_kernels()
+        else:
+            X = np.asarray(X, dtype=float)
         eta = np.zeros((n, K))
         for i in range(K):
-            eta[:, i] = X[:, jj[i]] @ coef[jj[i]]
+            # gamlss.r:1256: per-LP η off the compressed design.
+            eta[:, i] = (_Xbd(X.design, coef, lt=X.lpid[i]) if discrete
+                         else X[:, jj[i]] @ coef[jj[i]])
             if (offset is not None and i < len(offset)
                     and offset[i] is not None):
                 eta[:, i] = eta[:, i] + offset[i]
@@ -13207,7 +13446,8 @@ class multinom(GeneralFamily):
         regress the binarized signal ``6·(y==k) − 3`` on that LP's columns
         with the penalty root ``E`` as a regularizer. Validates the integer
         class coding 0..K. mgcv's multinom initialize ignores ``offset`` —
-        so does this."""
+        so does this. A :class:`DiscreteX` design takes the discrete
+        branch (:1364-1382): the per-LP ``mchol`` solve."""
         y = np.round(np.asarray(y, dtype=float)).astype(int)
         K = len(lpi)
         if y.min() < 0 or y.max() > K:
@@ -13215,8 +13455,10 @@ class multinom(GeneralFamily):
                 f"multinom response must be integer classes in 0..{K} "
                 f"(K={K} linear predictors); got range "
                 f"{int(y.min())}..{int(y.max())}")
-        X = np.asarray(X, dtype=float)
         jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        if isinstance(X, DiscreteX):
+            return self._initialize_coef_discrete(y, X, jj, E, offset)
+        X = np.asarray(X, dtype=float)
         p = X.shape[1]
         if E is None:
             E = np.zeros((0, p))
@@ -13235,6 +13477,27 @@ class multinom(GeneralFamily):
         for k in range(K):
             yt = 6.0 * (y == k + 1).astype(float) - 3.0
             start[jj[k]] = _reg(jj[k], yt)
+        return start
+
+    def _initialize_coef_discrete(self, y, X: DiscreteX, jj, E,
+                                  offset) -> np.ndarray:
+        """multinom ``initialize``'s discrete branch (gamlss.r:
+        1364-1382): per category k the ``mchol`` solve on the
+        binarized ``6·(y==k) − 3`` target."""
+        design = X.design
+        lpid = X.lpid
+        p = design.p
+        if E is None:
+            E = np.zeros((0, p))
+        E = np.asarray(E, dtype=float)
+        ones_n = np.ones(y.shape[0])
+        start = np.zeros(p)
+        for k in range(len(jj)):
+            yt = 6.0 * (y == k + 1).astype(float) - 3.0
+            startji = _DiscreteLPSolve(design, lpid[k], E[:, jj[k]],
+                                       ones_n).solve_target(yt)
+            startji[~np.isfinite(startji)] = 0.0
+            start[jj[k]] = startji
         return start
 
     def postproc(self, y, prior_weights, fitted, linear_predictors,

@@ -61,7 +61,6 @@ from ..family import (
     Gaussian,
     GeneralFamily,
     _coerce_response,
-    gaulss as _gaulss_family,
     gfam as _gfam_family,
     negbin as _negbin_family,
     tw as _tw_family,
@@ -2433,6 +2432,7 @@ class bam(gam):
         discrete: bool = False,
         discrete_m: int | None = None,
         knots: dict | None = None,
+        optimizer: tuple | str | None = None,
     ):
         # ``data`` may be a polars DataFrame OR a mapping of name → 1-D /
         # 2-D ndarray. 2-D entries become matrix columns for mgcv's
@@ -2447,8 +2447,13 @@ class bam(gam):
                 [str(f) for f in formula], data, method=method, sp=sp,
                 family=family, offset=offset, weights=weights, gamma=gamma,
                 select=select, rho=rho, discrete=discrete,
-                discrete_m=discrete_m, knots=knots)
+                discrete_m=discrete_m, knots=knots, optimizer=optimizer)
             return
+        if optimizer is not None:
+            raise ValueError(
+                "optimizer= applies to the general-family (formula-list) "
+                "rail only; single-formula bam chooses its optimizer from "
+                "method= like mgcv (bam.r has no optimizer argument).")
         # ---- method aliasing ------------------------------------------------
         # mgcv's bam accepts {fREML, GACV.Cp, GCV.Cp, REML, ML, P-REML,
         # P-ML, NCV} (bam.r:2207). fREML is algorithmically identical to
@@ -3242,7 +3247,7 @@ class bam(gam):
 
     def _init_general_discrete(self, formulas, data, *, method, sp, family,
                                offset, weights, gamma, select, rho,
-                               discrete, discrete_m, knots):
+                               discrete, discrete_m, knots, optimizer=None):
         """bam for GENERAL (multi-LP) families on the discrete rail — the
         driver mgcv never wired: ``bam.r:2653`` stops with "general
         families not supported by bam" while ``gamlss.gH``'s complete
@@ -3253,13 +3258,15 @@ class bam(gam):
         n-dependent assembly flows through the XWXd/XWyd/Xbd kernels via
         the family's DiscreteX dispatch inside gam.fit5.
 
-        Smoothness selection runs EFS (deriv-0 fits): the discrete
-        ``gamlss.gH`` tops out at the deriv-1 trace (gamlss.r:777), so
-        full-Newton REML (needing REML2/trHid2H) is structurally
-        unavailable on this rail; EFS is mgcv's own route whenever the
-        ll's derivatives are short (mgcv.r:1907-1908). AR1 (``rho``) and
-        NCV stay off the discrete general path, mirroring mgcv's
-        discrete limits.
+        Smoothness selection defaults to BFGS over the deriv-1 REML
+        trace: the discrete ``gamlss.gH`` tops out at that trace
+        (gamlss.r:777), so full-Newton REML (needing REML2/trHid2H) is
+        structurally unavailable and estimate_gam caps the effective
+        ll order at 1 — mgcv.r:1907's coercion to the bfgs outer
+        optimizer (gam.fit3.r:1722). ``optimizer=("efs",)`` selects
+        extended Fellner-Schall (deriv-0 fits) instead, mgcv's other
+        short-derivative route. AR1 (``rho``) and NCV stay off the
+        discrete general path, mirroring mgcv's discrete limits.
         """
         family = Gaussian() if family is None else family
         if not isinstance(family, GeneralFamily):
@@ -3272,11 +3279,13 @@ class bam(gam):
                 "only — pass discrete=True. (mgcv's bam stops outright, "
                 "bam.r:2653; hea's dense chunked path is not wired for "
                 "multi-LP likelihoods.)")
-        if not isinstance(family, _gaulss_family):
+        if not getattr(family, "discrete_ok", False):
             raise NotImplementedError(
-                "discrete general-family bam supports gaulss for now; "
-                "the remaining gamlss families follow the same "
-                "DiscreteX dispatch.")
+                f"family {getattr(family, 'name', family)!r} is not "
+                "flagged discrete-capable (discrete_ok — mgcv's "
+                "family$discrete.ok, set on gaulss/multinom/gevlss/"
+                "gammals/gumbls): its ll/initialize_coef carry no "
+                "DiscreteX branches.")
         if rho != 0.0:
             raise NotImplementedError(
                 "AR1 (rho) is not available with general families on "
@@ -3300,6 +3309,18 @@ class bam(gam):
             raise ValueError(
                 f"family {family!r} expects {family.n_lp} linear "
                 f"predictors; got {len(formulas)} formulas.")
+        if optimizer is None:
+            optimizer = ("outer", "newton")   # → bfgs via the derivs cap
+        elif isinstance(optimizer, str):
+            optimizer = (optimizer,)
+        else:
+            optimizer = tuple(optimizer)
+        if optimizer not in (("outer", "newton"), ("outer", "bfgs"),
+                             ("efs",)):
+            raise ValueError(
+                "optimizer must be ('outer','newton'), ('outer','bfgs') "
+                "or ('efs',) — newton is coerced to bfgs on the discrete "
+                f"rail (mgcv.r:1907); got {optimizer!r}")
         self._method_in = method
         self.method = "REML"
         self.family = family
@@ -3323,7 +3344,7 @@ class bam(gam):
         # a polars frame regardless of the caller's data type.
         self._init_general_from_md(md, self.data, family=family, sp=sp,
                                    method="REML", weights=weights,
-                                   start=None, optimizer=("efs",))
+                                   start=None, optimizer=optimizer)
 
     def _build_discrete_general_md(self, formulas, data, knots, select,
                                    discrete_m) -> _MultiDesign:

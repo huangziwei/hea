@@ -6082,6 +6082,13 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
         n_work = gg.n_work
         family = gg.family
         avail_derivs = int(getattr(family, "available_derivs", 2) or 0)
+        if isinstance(gg.X, _DiscreteX) and avail_derivs > 1:
+            # discrete rail: gamlss.gH tops out at the deriv-1 trace
+            # (gamlss.r:777), so the EFFECTIVE ll order is 1 whatever
+            # the family declares — mgcv.r:1907 then coerces the outer
+            # optimizer to bfgs (and the fixed-sp refit below to
+            # deriv 0) exactly as for a declared available.derivs==1.
+            avail_derivs = 1
         efs_forced = gg.optimizer[0] == "efs"
         # mgcv coerces available.derivs==1 → bfgs unless efs requested
         # (mgcv.r:1907): the ll supplies ≤ dH/trace order, so Newton's REML2
