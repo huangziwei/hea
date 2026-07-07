@@ -227,7 +227,8 @@ def test_gamSim_eg1_overlap_gamSide_REML():
     The te(x1, x2) marginals overlap the main-effect smooths s(x1) and s(x2).
     Without identifiability constraints the joint design would be rank-deficient
     along the te marginals. mgcv handles this in `gam.side`: it builds X1 from
-    the intercept + every strict-subset smooth (here s(x1) and s(x2)), then
+    the intercept + every EARLIER smooth sharing a variable (here s(x1) and
+    s(x2)), augmented with scaled √penalty blocks (augment.smX), then
     QR-with-pivoting picks the te columns that are linearly dependent on X1
     and deletes them (along with the matching rows/cols of each marginal S).
 
@@ -263,6 +264,77 @@ def test_gamSim_eg1_overlap_gamSide_REML():
     _allclose(m.edf_by_smooth["s(x1)"], 2.790683, atol=2e-1, name="edf[s(x1)]")
     _allclose(m.edf_by_smooth["s(x2)"], 8.044964, atol=5e-2, name="edf[s(x2)]")
     _allclose(m.edf_by_smooth["te(x1,x2)"], 1.001181, atol=5e-1, name="edf[te]")
+
+
+def test_gam_side_repeated_and_partial_overlap_matches_mgcv():
+    """gam.side beyond strict nesting (mgcv.r:565-720, with.pen=TRUE):
+    X1 collects EVERY earlier smooth sharing ANY variable — repeated
+    same-variable smooths and partial tensor overlaps included — with
+    each design augmented by a scaled √total-penalty block
+    (augment.smX) so fixDependence mostly sees null-space dependencies;
+    dropped-column penalties get their rank recomputed (R's dqrdc2 QR)
+    and rank-0 penalties are deleted. mgcv 1.9-4 pins; set.seed(21)
+    replicated via hea.R.rng. Working-infinity sp directions carry the
+    usual optimizer endpoint scatter (REML agrees to ~5e-8), so those
+    entries are asserted as >1e4 rather than pinned.
+    """
+    import warnings as _warnings
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(21)
+    n = 200
+    x = g.uniform(0, 1, n)
+    z = g.uniform(0, 1, n)
+    w = g.uniform(0, 1, n)
+    y = (np.sin(2 * np.pi * x) + np.cos(np.pi * z) + 0.5 * z * w
+         + g.normal(0, 1, n) * 0.3)
+    df = pl.DataFrame({"x": x, "z": z, "w": w, "y": y})
+
+    # repeated 1-d smooths of the same variable: mgcv warns and drops
+    # ONE dependent cr column (1 + 9 + 6 = 16 coefficients).
+    with _warnings.catch_warnings(record=True) as rec:
+        _warnings.simplefilter("always")
+        m1 = gam("y ~ s(x) + s(x, bs='cr', k=8)", df, method="REML")
+    assert any("repeated 1-d" in str(r.message) for r in rec)
+    assert m1.p == 16
+    np.testing.assert_allclose(m1.sp[1], 13.2410824, rtol=1e-4)
+    assert m1.sp[0] > 1e2          # ~1-edf smooth at working infinity
+    np.testing.assert_allclose(m1.REML_criterion / 2, 224.7937630575,
+                               rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m1.edf_total, 6.26987813, rtol=0, atol=1e-3)
+    np.testing.assert_allclose(
+        np.asarray(m1.fitted_values)[:3],
+        [-0.9281402580, 1.0988953071, -0.7586534549], rtol=0, atol=1e-5)
+
+    # partial overlap te(x,z) + te(z,w): the shared z marginal makes one
+    # column of te(z,w) dependent (1 + 15 + 14 = 30 coefficients).
+    m2 = gam("y ~ te(x, z, k=c(4,4)) + te(z, w, k=c(4,4))", df,
+             method="REML")
+    assert m2.p == 30
+    np.testing.assert_allclose(
+        m2.sp[:3], [0.02893250712, 88.64266152, 0.567903102], rtol=1e-4)
+    assert m2.sp[3] > 1e4
+    np.testing.assert_allclose(m2.REML_criterion / 2, 71.2556613189,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m2.edf_total, 13.83053789, rtol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(m2.fitted_values)[:3],
+        [-0.0788588401, 1.0766835318, 0.0468759735], rtol=0, atol=1e-6)
+
+    # standard nestings keep working (te and tp variants; 2 drops each).
+    m3 = gam("y ~ s(x) + s(z) + te(x, z, k=c(5,5))", df, method="REML")
+    assert m3.p == 41
+    np.testing.assert_allclose(m3.sp[:2], [0.0125571115, 0.1251747408],
+                               rtol=1e-4)
+    np.testing.assert_allclose(m3.REML_criterion / 2, 72.8001350418,
+                               rtol=0, atol=1e-5)
+    m4 = gam("y ~ s(x) + s(z) + s(x, z, k=20)", df, method="REML")
+    assert m4.p == 36
+    np.testing.assert_allclose(m4.sp[:2], [0.01251179556, 0.123522571],
+                               rtol=1e-4)
+    np.testing.assert_allclose(m4.REML_criterion / 2, 72.5576488704,
+                               rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m4.edf_total, 12.31004124, rtol=1e-5)
 
 
 # ---------------------------------------------------------------------------
@@ -2689,6 +2761,102 @@ def test_edge_correct_vc_matches_mgcv():
     with pytest.raises(ValueError, match="edge_correct"):
         gam("y ~ s(x1)", df2, method="REML",
             control={"edge_correct": -1.0})
+
+
+def test_edge_correct_general_family_matches_mgcv():
+    # gam.control(edge.correct=) on the gam.fit5 rail: newton's
+    # post-convergence walk (gam.fit3.r:1669-1713, dispatching to
+    # gam.fit5 at deriv 0) + the post.proc K=2 loop (gam.fit4.r:
+    # 1650-1663) — reported Vc/V.sp from the edge-corrected deriv-2
+    # refit at lsp1, edf2 from the un-shifted k=1 quantities with the
+    # extra repara pair (gam.fit4.r:1691-1694), and sp.vcov's hess1
+    # branch with mgcv's DIAGONAL regularizer (mgcv.r:4227-4229).
+    # mgcv 1.9-4: gam(list(y~s(x)+s(w), ~s(z)), gaulss(), REML,
+    # control=gam.control(edge.correct=TRUE)) — s(w) has linear truth,
+    # its sp sits at working infinity (~2.1e5) and the walk moves it
+    # back exactly 6 unit log steps (lsp 12.2703 → lsp1 6.2703).
+    # Flat-direction quantities carry the optimizer's endpoint scatter
+    # (sp_flat agrees ~4e-4 while REML agrees 4e-9), so those entries
+    # get rtol 2e-3; everything else pins at 1e-4 or tighter.
+    from hea.family import gaulss
+    df = _fit5_fixture()
+    m = gam(["y ~ s(x) + s(w)", "~ s(z)"], df, family=gaulss(),
+            method="REML", control={"edge_correct": True})
+    np.testing.assert_allclose(m.sp[[0, 2]], [0.1441987021, 0.2282998535],
+                               rtol=1e-4)
+    assert m.sp[1] > 1e5              # working infinity
+    np.testing.assert_allclose(m.REML_criterion / 2, 218.1333837242,
+                               rtol=0, atol=1e-5)
+    # the walk moved the flat sp back 6 unit steps; the others stayed
+    np.testing.assert_allclose(
+        m._lsp1_ec, [-1.936563055, 6.270342521, -1.477095367], rtol=2e-3)
+    np.testing.assert_allclose(np.log(m.sp) - m._lsp1_ec, [0.0, 6.0, 0.0],
+                               rtol=0, atol=1e-8)
+    np.testing.assert_allclose(
+        np.diag(m.Vc)[[0, 1, 2, 9, 19]],
+        [0.0008154561995, 0.06446281033, 0.4595239323, 0.1837733338,
+         0.002468328152], rtol=1e-4)
+    np.testing.assert_allclose(np.diag(m.Vc)[11], 0.003206806604,
+                               rtol=2e-3)  # flat smooth's entry
+    # edf2 keeps the fitted-model k=1 pieces — but differs from the
+    # plain fit through mgcv's repara pair on Vc1 (gam.fit4.r:1691).
+    np.testing.assert_allclose(m.edf2_total, 16.1095862277, rtol=1e-5)
+    np.testing.assert_allclose(m.edf_total, 13.9708235675, rtol=1e-6)
+    # sp.vcov: edge branch = solve(hess1 + diag·reg); plain branch =
+    # solve(hess + reg) elementwise (mgcv.r:4227-4231).
+    V1 = m.sp_vcov()
+    np.testing.assert_allclose(
+        [V1[0, 0], V1[0, 1], V1[0, 2], V1[2, 2]],
+        [0.3653756883, -0.004164655708, 0.009384734478, 0.8330026212],
+        rtol=1e-4)
+    np.testing.assert_allclose(V1[1, 1], 25.24069682, rtol=2e-3)
+    V0 = m.sp_vcov(edge_correct=False)
+    np.testing.assert_allclose(
+        [V0[0, 0], V0[0, 1], V0[2, 2]],
+        [0.365438595, -0.3386173704, 0.8330972547], rtol=1e-3)
+    np.testing.assert_allclose(V0[1, 1], 903.3229983, rtol=1e-3)
+    # V.sp becomes the k=2 Vr (1e-7 prior) under edge.correct
+    Vsp = np.asarray(m._V_sp)
+    np.testing.assert_allclose(
+        [Vsp[0, 0], Vsp[2, 2]], [0.3655093291, 0.8337004788], rtol=1e-4)
+    np.testing.assert_allclose(Vsp[1, 1], 25.89422307, rtol=2e-3)
+
+    # plain fit (no edge.correct): the k=2 machinery must stay cold
+    m0 = gam(["y ~ s(x) + s(w)", "~ s(z)"], df, family=gaulss(),
+             method="REML")
+    assert m0._lsp1_ec is None and m0._hess1_ec is None
+    np.testing.assert_allclose(
+        np.diag(m0.Vc)[[0, 1, 2, 9, 19]],
+        [0.0008127134141, 0.06429968272, 0.4544038077, 0.1834664554,
+         0.002468231747], rtol=1e-4)
+    np.testing.assert_allclose(np.diag(m0.Vc)[11], 1.672278335e-05,
+                               rtol=2e-3)
+    np.testing.assert_allclose(m0.edf2_total, 14.7125330455, rtol=1e-5)
+    # sp.vcov(edge_correct=True) falls through to the plain branch on a
+    # non-edge-corrected fit, exactly like mgcv.
+    np.testing.assert_allclose(m0.sp_vcov(), m0.sp_vcov(edge_correct=False),
+                               rtol=0, atol=0)
+
+    # flat-empty shape (lsp1 == lsp): the corrected Vc still differs
+    # through the weaker k=2 1e-7 Vr prior and the Vc1 repara pair.
+    m2 = gam(["y ~ s(x) + w", "~ s(z)"], df, family=gaulss(),
+             method="REML", control={"edge_correct": True})
+    np.testing.assert_allclose(m2.REML_criterion / 2, 216.8833933834,
+                               rtol=0, atol=1e-5)
+    np.testing.assert_allclose(m2._lsp1_ec, np.log(m2.sp), rtol=0, atol=0)
+    np.testing.assert_allclose(
+        np.diag(m2.Vc)[[0, 1, 2, 9, 11, 19]],
+        [0.003195481437, 0.009735812132, 0.06430404532, 1.044650124,
+         0.002468292745, 1.610887396], rtol=1e-4)
+    np.testing.assert_allclose(m2.edf2_total, 16.1091522577, rtol=1e-5)
+    V1 = m2.sp_vcov()
+    np.testing.assert_allclose(
+        [V1[0, 0], V1[0, 1], V1[1, 1]],
+        [0.3653182258, 0.009403836416, 0.8324621223], rtol=1e-5)
+    V0 = m2.sp_vcov(edge_correct=False)
+    np.testing.assert_allclose(
+        [V0[0, 0], V0[0, 1], V0[1, 1]],
+        [0.3653114662, 0.009099642886, 0.832446719], rtol=1e-5)
 
 
 # ---------------------------------------------------------------------------
@@ -7493,6 +7661,156 @@ def test_predict_terms_multi_lp_gaulss_matches_mgcv():
                                [0.02961727, 0.02850520], atol=1e-6)
     np.testing.assert_allclose(r4["se.fit.1"].to_numpy()[:2],
                                [0.21529159, 0.17505347], atol=1e-6)
+
+
+def test_predict_na_action_block_size_matches_mgcv():
+    """predict(na_action=, block_size=, newdata_guaranteed=) — the
+    predict.gam newdata-stage args (mgcv.r:2692-2830 + the napredict
+    round trip). na.pass (default) evaluates complete rows and returns
+    NaN rows at NA positions — including NaN lpmatrix rows
+    (mgcv.r:3303); na.omit/na.exclude drop the rows; na.fail raises;
+    None skips NA processing. Response-column NAs are tolerated (mgcv's
+    naresp dance). block.size chunks the design build (results equal to
+    BLAS rounding, as in R); newdata.guaranteed skips the processing.
+    mgcv 1.9-4 pins on the seed-8 recipe.
+    """
+    from hea.R.rng import RGenerator
+    from hea.models.bam import bam as _bam
+
+    g = RGenerator(8)
+    n = 120
+    x = g.uniform(0, 1, n)
+    z = g.uniform(0, 1, n)
+    y = np.sin(2 * np.pi * x) + 0.5 * z + g.normal(0, 1, n) * 0.3
+    df = pl.DataFrame({"x": x, "z": z, "y": y})
+    m = gam("y ~ s(x) + z", df, method="REML")
+
+    nd = pl.DataFrame({"x": [0.1, None, 0.5, 0.9],
+                       "z": [0.2, 0.3, None, 0.6]})
+    p1 = m.predict(nd, type="link", se_fit=True)          # na.pass
+    np.testing.assert_allclose(
+        p1["fit"].to_numpy()[[0, 3]], [0.6967545055, -0.2952746326],
+        rtol=0, atol=1e-8)
+    np.testing.assert_allclose(
+        p1["se.fit"].to_numpy()[[0, 3]], [0.0848671384, 0.0713200030],
+        rtol=0, atol=1e-8)
+    assert np.isnan(p1["fit"].to_numpy()[[1, 2]]).all()
+    assert np.isnan(p1["se.fit"].to_numpy()[[1, 2]]).all()
+    p2 = m.predict(nd, type="link", na_action="na.omit")
+    assert p2.height == 2
+    np.testing.assert_allclose(
+        p2["fit"].to_numpy(), [0.6967545055, -0.2952746326],
+        rtol=0, atol=1e-8)
+    with pytest.raises(ValueError, match="na_action='na.fail'"):
+        m.predict(nd, type="link", na_action="na.fail")
+    with pytest.raises(ValueError, match="unrecognised na.action"):
+        m.predict(nd, type="link", na_action="bogus")
+    # lpmatrix gets NaN rows too (mgcv napredicts H, mgcv.r:3303)
+    H = m.predict(nd, type="lpmatrix")
+    assert H.shape == (4, 11)
+    assert np.isnan(H[[1, 2]]).all() and not np.isnan(H[[0, 3]]).any()
+    # terms frame NaN rows
+    t1 = m.predict(nd, type="terms")
+    assert np.isnan(t1.to_numpy()[[1, 2]]).all()
+    assert not np.isnan(t1.to_numpy()[[0, 3]]).any()
+
+    # block.size ≡ single pass to BLAS rounding (mgcv all.equal too)
+    nd2 = pl.DataFrame({"x": g.uniform(0, 1, 50), "z": g.uniform(0, 1, 50)})
+    a = m.predict(nd2, type="link", se_fit=True)
+    b = m.predict(nd2, type="link", se_fit=True, block_size=7)
+    np.testing.assert_allclose(a["fit"].to_numpy(), b["fit"].to_numpy(),
+                               rtol=1e-12)
+    np.testing.assert_allclose(a["se.fit"].to_numpy(),
+                               b["se.fit"].to_numpy(), rtol=1e-10)
+    # newdata.guaranteed skips processing; complete frames are unchanged
+    c = m.predict(nd2, type="link", newdata_guaranteed=True)
+    np.testing.assert_allclose(a["fit"].to_numpy(), c["fit"].to_numpy(),
+                               rtol=0, atol=0)
+    # na_action=None (mgcv na.action=NULL): no NA processing on a
+    # complete frame — identical output
+    d = m.predict(nd2, type="link", na_action=None)
+    np.testing.assert_allclose(a["fit"].to_numpy(), d["fit"].to_numpy(),
+                               rtol=0, atol=0)
+
+    # bam routes the same stage (predict.bamd → predict.gam type=
+    # "newdata"); the discrete kernel surface NA-expands identically.
+    mb = _bam("y ~ s(x) + z", df, discrete=True)
+    pb = mb.predict(nd, type="link")
+    assert np.isnan(pb["fit"].to_numpy()[[1, 2]]).all()
+    pb2 = mb.predict(nd, type="response", na_action="na.omit")
+    assert pb2.height == 2
+
+
+def test_gam_in_out_and_drop_intercept_match_mgcv():
+    """gam(in.out=) — the estimate.gam warm start (mgcv.r:2005-2010,
+    2028-2032): lsp seeds at log(in.out$sp) (WORKING length, no
+    projection) and log scale at log(in.out$scale); both entries are
+    validated unconditionally with mgcv's stop. gam(drop.intercept=) —
+    mgcv.r:1163-1171: the parametric matrix keeps its factor contrast
+    coding but the assign==0 column is deleted. mgcv 1.9-4 pins.
+    """
+    from hea.R.rng import RGenerator
+    from hea.family import gaulss
+
+    g = RGenerator(8)
+    n = 120
+    x = g.uniform(0, 1, n)
+    z = g.uniform(0, 1, n)
+    y = np.sin(2 * np.pi * x) + 0.5 * z + g.normal(0, 1, n) * 0.3
+    df = pl.DataFrame({"x": x, "z": z, "y": y})
+
+    g1 = gam("y ~ s(x) + z", df, method="REML")
+    g2 = gam("y ~ s(x) + z", df, method="REML",
+             in_out={"sp": g1.sp * 4, "scale": g1.sigma_squared * 2})
+    # converge-fully: the warm start lands the same optimum (mgcv:
+    # base 0.008239710144, in.out 0.008239707297, REML identical)
+    np.testing.assert_allclose(g2.sp, g1.sp, rtol=1e-5)
+    np.testing.assert_allclose(g2.REML_criterion, g1.REML_criterion,
+                               rtol=0, atol=1e-7)
+    np.testing.assert_allclose(g1.sp, [0.008239710144], rtol=1e-4)
+    for bad in ({"sp": [1.0]},                       # no scale
+                {"sp": [1.0, 2.0], "scale": 1.0}):   # wrong length
+        with pytest.raises(ValueError, match="in.out incorrect"):
+            gam("y ~ s(x) + z", df, method="REML", in_out=bad)
+
+    # general families take the same seed replacement (mgcv includes
+    # them in the shared estimate.gam block).
+    df5 = _fit5_fixture()
+    m0 = gam(["y ~ s(x) + w", "~ s(z)"], df5, family=gaulss(),
+             method="REML")
+    m1 = gam(["y ~ s(x) + w", "~ s(z)"], df5, family=gaulss(),
+             method="REML", in_out={"sp": m0.sp * 3, "scale": 1.0})
+    np.testing.assert_allclose(m1.sp, m0.sp, rtol=1e-5)
+    np.testing.assert_allclose(m1.REML_criterion, m0.REML_criterion,
+                               rtol=0, atol=1e-6)
+
+    # drop.intercept with a factor: contrasts stay treatment-coded
+    # (fb, fc), the intercept column is deleted (12 → 11 coefficients).
+    g2 = RGenerator(8)
+    x2 = g2.uniform(0, 1, n)
+    f2 = pl.Series("f", ["a", "b", "c"] * 40, dtype=pl.Enum(["a", "b", "c"]))
+    eff = np.array([0.0, 0.5, -0.3])[np.tile([0, 1, 2], 40)]
+    y2 = np.sin(2 * np.pi * x2) + eff + g2.normal(0, 1, n) * 0.3
+    df2 = pl.DataFrame({"x": x2, "f": f2, "y": y2})
+    m = gam("y ~ f + s(x)", df2, method="REML", drop_intercept=True)
+    assert m.p == 11 and m.column_names[:2] == ["fb", "fc"]
+    np.testing.assert_allclose(m.sp, [0.006473414299], rtol=1e-4)
+    np.testing.assert_allclose(m.REML_criterion / 2, 50.3073755956,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(m.bhat).reshape(-1)[:2], [0.4613980081, -0.3049279011],
+        rtol=0, atol=1e-7)
+    np.testing.assert_allclose(m.edf_total, 9.01308391, rtol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(m.fitted_values)[:2], [0.14532835, 1.47009894],
+        rtol=0, atol=1e-6)
+    # predict rebuilds the design without the intercept column
+    p = m.predict(df2.head(3), type="link")
+    np.testing.assert_allclose(
+        p["fit"].to_numpy(), [0.14532835, 1.47009894, -1.45408158],
+        rtol=0, atol=1e-6)
+    m_base = gam("y ~ f + s(x)", df2, method="REML")
+    assert m_base.p == 12
 
 
 # ---------------------------------------------------------------------------

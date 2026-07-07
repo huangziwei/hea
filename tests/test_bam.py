@@ -1362,8 +1362,9 @@ def test_bam_scale_semantics():
         m_neg.fitted_values, m_def.fitted_values, rtol=1e-10, atol=1e-12
     )
     assert m_neg.scale_estimated
-    # scale-known family (bam.r): scale=0 → φ=1; scale>0 fixes φ; scale<0 keeps
-    # φ=1 (mgcv-bam does NOT estimate a quasi-dispersion here). All vs mgcv-bam.
+    # scale-known family (bam.r:2206 rewrites ONLY scale==0): scale=0 → φ=1;
+    # scale>0 fixes φ; scale<0 ESTIMATES φ (quasi-style fREML — the discrete
+    # pin lives in test_bam_scale_extended_matches_mgcv). All vs mgcv-bam.
     dp = pl.read_csv(str(_BAM_SUMMARY / "pois" / "data.csv"))
     assert (
         hea.models.bam("y ~ z + s(x, k=10)", dp, family=Poisson(), scale=0).scale == 1.0
@@ -1371,13 +1372,172 @@ def test_bam_scale_semantics():
     m25 = hea.models.bam("y ~ z + s(x, k=10)", dp, family=Poisson(), scale=2.5)
     assert m25.scale == 2.5
     np.testing.assert_allclose(float(np.asarray(m25.sp)[0]), 0.270216, rtol=1e-4)
-    # scale<0 selects mgcv-bam's GCV-style overdispersion criterion (φ=1 but a
-    # distinct sp) — not yet ported, so it raises narrowly.
-    with pytest.raises(NotImplementedError, match="scale<0"):
-        hea.models.bam("y ~ z + s(x, k=10)", dp, family=Poisson(), scale=-1.0)
+    m_q = hea.models.bam("y ~ z + s(x, k=10)", dp, family=Poisson(), scale=-1.0)
+    assert m_q.scale_estimated and m_q.scale != 1.0
+    assert float(np.asarray(m_q.sp)[0]) != float(np.asarray(m25.sp)[0])
     # non-finite scale rejected.
     with pytest.raises(ValueError, match="finite"):
         hea.models.bam("y ~ z + s(x, k=10)", dg, scale=float("inf"))
+
+
+def test_bam_scale_extended_matches_mgcv():
+    """bam scale= resolution + the tw() free-p rail, vs mgcv 1.9-4.
+
+    bam.r:472/925: extended families with a NULL scale slot (nb/scat/
+    censored — hea scale_known=True) pin φ ≡ 1 and silently IGNORE a
+    user scale=; tw (slot −1) keeps it — scale>0 fixes φ, scale≤0
+    estimates φ jointly with p through the PIRLS θ-updates
+    (bgam.fitd:616-630: three joint estimate.theta passes at scale<0
+    for iters 2-4, whose log φ overwrites the sp-iterate's slot with a
+    zeroed Newton step, then fixed-scale updates at exp(log φ)).
+    Scale-known exponential families (bam.r:2206 rewrites ONLY
+    scale==0): scale>0 fixes φ IN THE CRITERION (bgam.fitd:696
+    log.phi = log(scale) — a fixed φ≠1 shifts the sp optimum),
+    scale<0 estimates φ quasi-style.
+
+    The tw discrete pin is basin-sensitive: bgam.fitd builds the
+    working model with OBSERVED-Hessian weights (Deta2, bam.r:637)
+    while bgam.fit uses Fisher (EDeta2, bam.r:1074) — for non-canonical
+    tw the two mgcv rails converge to DIFFERENT self-consistent
+    (p, φ, sp) fixed points, so each hea rail must reproduce its own.
+    """
+    from hea.R.rng import RGenerator
+    from hea.family import tw, nb, Poisson, Gaussian
+
+    def _p_of(m):
+        th = float(np.asarray(m.family.get_theta())[0])
+        a, b = m.family.a, m.family.b
+        return (a + b * np.exp(th)) / (1.0 + np.exp(th))
+
+    g = RGenerator(11)
+    n = 300
+    x = g.uniform(0, 1, n)
+    u = g.uniform(0, 1, n)
+    e = g.uniform(0, 1, n)
+    y = np.where(u < 0.3, 0.0, np.exp(0.6 + np.sin(2 * np.pi * x)) * (0.5 + e))
+    df = pl.DataFrame({"x": x, "y": y})
+
+    m1 = hea.models.bam("y ~ s(x)", df, family=tw(), discrete=True)
+    np.testing.assert_allclose(m1.sp, [0.1106650922], rtol=1e-4)
+    np.testing.assert_allclose(m1.sigma_squared, 0.9833106126, rtol=1e-5)
+    np.testing.assert_allclose(_p_of(m1), 1.112649448, rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m1.REML_criterion / 2, 508.5846309308,
+                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m1.edf_total, 6.24722775, rtol=1e-4)
+    np.testing.assert_allclose(m1.deviance, 434.23818021, rtol=1e-6)
+
+    m2 = hea.models.bam("y ~ s(x)", df, family=tw(), discrete=True, scale=1.5)
+    assert m2.sigma_squared == 1.5 and not m2.scale_estimated
+    np.testing.assert_allclose(m2.sp, [0.179020433], rtol=1e-4)
+    np.testing.assert_allclose(_p_of(m2), 1.227579735, rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m2.REML_criterion / 2, 509.4023694243,
+                               rtol=0, atol=1e-4)
+
+    m3 = hea.models.bam("y ~ s(x)", df, family=tw(), discrete=False)
+    np.testing.assert_allclose(m3.sp, [0.1085864303], rtol=1e-4)
+    np.testing.assert_allclose(m3.sigma_squared, 0.9670077775, rtol=1e-5)
+    np.testing.assert_allclose(_p_of(m3), 1.109425155, rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m3.REML_criterion / 2, 508.8014334802,
+                               rtol=0, atol=1e-4)
+
+    # nb: family scale slot NULL — user scale= silently ignored, φ ≡ 1.
+    g2 = RGenerator(12)
+    x2 = g2.uniform(0, 1, n)
+    yq = np.floor(np.exp(0.8 + np.sin(2 * np.pi * x2))
+                  * (0.5 + g2.uniform(0, 1, n)) * 2)
+    df2 = pl.DataFrame({"x": x2, "y": yq})
+    c0 = hea.models.bam("y ~ s(x)", df2, family=nb(theta=2), discrete=True)
+    c1 = hea.models.bam("y ~ s(x)", df2, family=nb(theta=2), discrete=True,
+                        scale=3.0)
+    for c in (c0, c1):
+        np.testing.assert_allclose(c.sp, [0.1278109034], rtol=1e-4)
+        assert c.sigma_squared == 1.0
+        np.testing.assert_allclose(c.REML_criterion / 2, 690.5789612317,
+                                   rtol=0, atol=1e-4)
+
+    # poisson discrete: fixed φ≠1 shifts the criterion; scale<0 estimates.
+    p1 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=True,
+                        scale=2.5)
+    np.testing.assert_allclose(p1.sp, [0.3361340333], rtol=1e-4)
+    assert p1.sigma_squared == 2.5
+    p2 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=True,
+                        scale=-1.0)
+    np.testing.assert_allclose(p2.sp, [0.08140612721], rtol=1e-4)
+    np.testing.assert_allclose(p2.sigma_squared, 0.5493602061, rtol=1e-5)
+    assert p2.scale_estimated
+
+    # gaussian discrete: fixed φ enters Sl.fitChol (bgam.fitd:696).
+    g3 = RGenerator(13)
+    x3 = g3.uniform(0, 1, n)
+    y3 = np.sin(2 * np.pi * x3) + (g3.uniform(0, 1, n) - 0.5)
+    df3 = pl.DataFrame({"x": x3, "y": y3})
+    g1 = hea.models.bam("y ~ s(x)", df3, family=Gaussian(), discrete=True,
+                        scale=0.2)
+    np.testing.assert_allclose(g1.sp, [0.03364092463], rtol=1e-4)
+    assert g1.sigma_squared == 0.2
+    g0 = hea.models.bam("y ~ s(x)", df3, family=Gaussian(), discrete=True)
+    np.testing.assert_allclose(g0.sp, [0.01336395577], rtol=1e-4)
+    np.testing.assert_allclose(g0.sigma_squared, 0.08579144546, rtol=1e-5)
+
+
+def test_bam_in_out_coef_samfrac():
+    """bam's warm-start args. in.out: λ replaces ``initial.sp`` in FULL
+    per-penalty space (bam.r:687/1229/1687 — re-read every PIRLS iter
+    on the non-discrete rail) and scale replaces the log φ seed
+    (bam.r:701/1237); both converge-fully rails land the base optimum
+    (mgcv receipt: sp 0.008239709431 identical with/without in.out).
+    coef=: the PIRLS warm start (bgam.fitd:548-560 dev=2·dev0 + armed
+    halving refs; bgam.fit:1066 η = X·coef) — same optimum, both
+    rails. samfrac: loose (ε=1e-2) subsample pre-fit whose
+    coefficients warm-start the full fit (bam.r:2680-2691;
+    non-discrete rail only; the too-small guard warns and ignores).
+    """
+    import warnings as _warnings
+    from hea.R.rng import RGenerator
+    from hea.family import Poisson
+
+    g = RGenerator(8)
+    n = 120
+    x = g.uniform(0, 1, n)
+    z = g.uniform(0, 1, n)
+    y = np.sin(2 * np.pi * x) + 0.5 * z + g.normal(0, 1, n) * 0.3
+    df = pl.DataFrame({"x": x, "z": z, "y": y})
+    for disc in (True, False):
+        b0 = hea.models.bam("y ~ s(x) + z", df, discrete=disc)
+        b1 = hea.models.bam("y ~ s(x) + z", df, discrete=disc,
+                            in_out={"sp": [5.0], "scale": 0.5})
+        np.testing.assert_allclose(b0.sp, [0.008239709431], rtol=1e-4)
+        np.testing.assert_allclose(b1.sp, b0.sp, rtol=1e-6)
+        np.testing.assert_allclose(b1.sigma_squared, b0.sigma_squared,
+                                   rtol=1e-6)
+
+    g2 = RGenerator(6)
+    n2 = 400
+    x2 = g2.uniform(0, 1, n2)
+    lam = np.exp(0.5 + np.sin(2 * np.pi * x2))
+    y2 = np.floor(lam * (0.5 + g2.uniform(0, 1, n2)))
+    df2 = pl.DataFrame({"x": x2, "y": y2})
+    p0 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=False)
+    beta0 = np.asarray(p0.bhat, dtype=float).reshape(-1)
+    p1 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=False,
+                        coef=beta0)
+    np.testing.assert_allclose(p1.sp, p0.sp, rtol=1e-6)
+    p2 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=False,
+                        samfrac=0.5)
+    np.testing.assert_allclose(p2.sp, p0.sp, rtol=1e-6)
+    d0 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=True)
+    d1 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=True,
+                        coef=np.asarray(d0.bhat, dtype=float).reshape(-1))
+    np.testing.assert_allclose(d1.sp, d0.sp, rtol=1e-5)
+    with _warnings.catch_warnings(record=True) as rec:
+        _warnings.simplefilter("always")
+        p3 = hea.models.bam("y ~ s(x)", df2, family=Poisson(),
+                            discrete=False, samfrac=0.01)
+    assert any("samfrac too small" in str(r.message) for r in rec)
+    np.testing.assert_allclose(p3.sp, p0.sp, rtol=1e-10)
+    with pytest.raises(ValueError, match="coef must have length"):
+        hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=True,
+                       coef=[1.0, 2.0])
 
 
 # =============================================================================

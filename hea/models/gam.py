@@ -4874,6 +4874,14 @@ def newton(theta0, *, include_log_phi, criterion="REML",
         alpha_ec = (0.02 if edge_correct is True
                     else float(abs(edge_correct)))
         theta1 = theta.copy()
+        # mgcv passes the SAME carried `start` (the converged fit's
+        # coefficients) to every walk refit and to the final deriv-2
+        # b1 refit (gam.fit3.r:1676-1692 — `start` is never
+        # reassigned inside the edge block). The REML5 _eval chains
+        # its warm start through g5["start"]; pin it so each walk
+        # fit — and the caller's k=2 refit — starts from the
+        # converged coefficients like mgcv's.
+        start_ec = g5["start"] if g5 is not None else None
         if flat.size:
             step_dir = (np.asarray(theta0, dtype=float) > theta) * 2.0 - 1.0
             f1 = f_prev
@@ -4886,6 +4894,8 @@ def newton(theta0, *, include_log_phi, criterion="REML",
                     if f1 >= target:
                         break
                     theta1[i] = theta1[i] + step_dir[i]
+                    if g5 is not None:
+                        g5["start"] = start_ec
                     f1_new, _fit1 = _eval(theta1, deriv=0)
                     if not np.isfinite(f1_new):
                         theta1[i] = theta1[i] - step_dir[i]
@@ -4894,6 +4904,8 @@ def newton(theta0, *, include_log_phi, criterion="REML",
             # Restore family θ to the converged values (the walk's
             # _eval calls mutate family state for tw).
             _apply_family_theta(theta)
+        if g5 is not None:
+            g5["start"] = start_ec
         edge_theta1 = theta1
     # Cache the accepted-step fit at the converged θ for the caller to
     # reuse (mgcv's `object <- b$object`, no refit). `fit` is the last
@@ -6063,7 +6075,7 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
                  magic_optimize=None, get_outer_fit=None, general=None,
                  outer_bfgs=None, get_outer_info=None,
                  optimizer=("outer", "newton"), outer_efsudr=None,
-                 outer_nlm_optim=None):
+                 outer_nlm_optim=None, in_out=None):
     """mgcv ``estimate.gam`` (mgcv.r:1872) — smoothness selection + final fit,
     for BOTH ordinary and general families (mgcv branches internally on the
     family class; hea takes the general slice via ``general=``). Ordinary
@@ -6123,9 +6135,10 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
                     "efs (available_derivs=0) with id-linked smoothing "
                     "parameters is not supported.")
             sl_setup = _sl_setup(gg.slots, gg.p)
-            theta0 = _initial_sp_general(
+            theta0 = (np.log(_check_in_out(in_out, n_work)[0])
+                      if in_out is not None else _initial_sp_general(
                 gg.X, gg.y, family, gg.slots, gg.lpi, weights=gg.wt,
-                offsets=gg.offsets, L=None, start=gg.seed_start)
+                offsets=gg.offsets, L=None, start=gg.seed_start))
             fit_efs, theta_hat, it_efs = _efsud(
                 gg.X, gg.y, theta0, gg.sl, sl_setup, family=family,
                 lpi=gg.lpi, weights=gg.wt, offset=gg.offsets,
@@ -6140,18 +6153,22 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
             }
         elif use_bfgs:
             # available_derivs == 1 → BFGS over the REML5 score (mgcv.r:1722).
-            theta0 = _initial_sp_general(
+            # in.out replaces the initial.spg seed (lsp = log(in.out$sp),
+            # mgcv.r:2005-2010 — general families included).
+            theta0 = (np.log(_check_in_out(in_out, n_work)[0])
+                      if in_out is not None else _initial_sp_general(
                 gg.X, gg.y, family, gg.slots, gg.lpi, weights=gg.wt,
-                offsets=gg.offsets, L=gg.md_L, start=gg.seed_start)
+                offsets=gg.offsets, L=gg.md_L, start=gg.seed_start))
             theta_hat = gam_outer(
                 theta0, optimizer="bfgs", criterion="REML5",
                 control=gg.control, bfgs_fn=outer_bfgs)
             # gam_outer's shim set self._outer_info as a side effect.
             outer_info = get_outer_info()
         else:
-            theta0 = _initial_sp_general(
+            theta0 = (np.log(_check_in_out(in_out, n_work)[0])
+                      if in_out is not None else _initial_sp_general(
                 gg.X, gg.y, family, gg.slots, gg.lpi, weights=gg.wt,
-                offsets=gg.offsets, L=gg.md_L, start=gg.seed_start)
+                offsets=gg.offsets, L=gg.md_L, start=gg.seed_start))
             theta_hat = gam_outer(
                 theta0, optimizer="newton", criterion="REML5",
                 control=gg.control, newton_fn=outer_newton)
@@ -6260,13 +6277,20 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
         # ``lsp <- lsp2`` for REML/ML/GCV alike); id linkage / fixed entries
         # map the full-space seed to working space by least squares
         # (mgcv's ``coef(lm(lsp ~ L - 1 + offset(lsp0)))``, mgcv.r:4617-4618).
-        rho0_full = initial_sp_rho()
-        if G.lsp0 is not None:
-            rho0_full = rho0_full - G.lsp0
-        if G.L is None:
-            cur_rho = rho0_full
+        # in.out replaces the seed with the user's WORKING-length sp
+        # directly (lsp = log(in.out$sp), mgcv.r:2005-2010 — no lstsq
+        # projection; the scale entry is validated even when unused).
+        io = _check_in_out(in_out, n_work) if in_out is not None else None
+        if io is not None:
+            cur_rho = np.log(io[0])
         else:
-            cur_rho, *_ = np.linalg.lstsq(G.L, rho0_full, rcond=None)
+            rho0_full = initial_sp_rho()
+            if G.lsp0 is not None:
+                rho0_full = rho0_full - G.lsp0
+            if G.L is None:
+                cur_rho = rho0_full
+            else:
+                cur_rho, *_ = np.linalg.lstsq(G.L, rho0_full, rcond=None)
         # mgcv's null.scale = Σ dev_resids(y, ȳ)/n from get.null.coef
         # (mgcv.r:1854-1870): the log φ seed (mgcv.r:2027-2029) AND the
         # fscale gam.outer hands nlm/optim (mgcv.r:2062, 1698, 1708).
@@ -6277,7 +6301,9 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
             G.y_arr, mu_null0, G.wt
         ))) / n
         if include_log_phi:
-            cur_logphi = float(np.log(max(null_scale / 10.0, 1e-12)))
+            # in.out$scale replaces the null.scale/10 seed (mgcv.r:2028-2032)
+            cur_logphi = (float(np.log(io[1])) if io is not None
+                          else float(np.log(max(null_scale / 10.0, 1e-12))))
         else:
             cur_logphi = 0.0  # GCV does not put log φ in θ
 
@@ -6806,6 +6832,11 @@ class gam:
     # criterion machinery is its own; it keeps the legacy log|S|+ path).
     _edge_correct: bool | float = False
     _edge_theta1: np.ndarray | None = None
+    # mgcv's attr(hess,"hess1")/attr(hess,"lsp1") (gam.fit3.r:1708-1711):
+    # the deriv-2 Hessian and working log-sp at the walked-back θ1 —
+    # sp_vcov's edge branch reads them.
+    _hess1_ec: np.ndarray | None = None
+    _lsp1_ec: np.ndarray | None = None
     _n_theta_aug: int = 0
     _UrS: list[np.ndarray] | None = None
     _reparam_cache: dict = {}
@@ -6861,12 +6892,20 @@ class gam:
         start: np.ndarray | list | None = None,
         etastart: np.ndarray | list | None = None,
         mustart: np.ndarray | list | None = None,
+        in_out: dict | None = None,
+        drop_intercept: bool | None = None,
     ):
         # ``data`` may be a polars DataFrame OR a mapping of name → 1-D /
         # 2-D ndarray. 2-D entries become matrix columns
         # (``Array(Float64, m)``) for mgcv's summation-convention smooths
         # (Wood §7.4.1). ``prepare_design`` calls ``normalize_data``
         # internally; we keep the parameter untyped for flexibility.
+        #
+        # ``in_out``: mgcv's warm start — ``{"sp": <working-length sp>,
+        # "scale": <scale>}`` replaces the initial.spg seed (lsp =
+        # log(in.out$sp), estimate.gam mgcv.r:2005-2010) and the log
+        # scale seed (mgcv.r:2028-2032). Both entries are required and
+        # sp must have the working length, like mgcv's checks.
         if isinstance(family, type) and issubclass(family, Family):
             # R: gam(family=quasipoisson) passes the constructor itself;
             # mgcv calls it (`if (is.function(family)) family <- family()`,
@@ -6886,6 +6925,7 @@ class gam:
         if opt[0] not in ("outer", "efs"):
             raise ValueError("unknown optimizer")
         opt = (opt[0], opt[1] if len(opt) == 2 else "newton")
+        self._in_out = in_out
         if opt[1] not in ("newton", "bfgs", "nlm", "optim"):
             raise ValueError("unknown outer optimization method.")
         if opt[0] == "outer" and opt[1] == "bfgs":
@@ -6919,6 +6959,7 @@ class gam:
                 family=family, offset=offset, weights=weights,
                 gamma=gamma, select=select, knots=knots,
                 control=control, start=start, optimizer=opt,
+                in_out=in_out,
             )
             return
         if getattr(family, "is_general", False):
@@ -6935,6 +6976,7 @@ class gam:
                     family=family, offset=offset, weights=weights,
                     gamma=gamma, select=select, knots=knots,
                     control=control, start=start, optimizer=opt,
+                    in_out=in_out,
                 )
                 return
             raise ValueError(
@@ -7083,6 +7125,23 @@ class gam:
         _expr_map = _smooth_arg_expr_map(self._expanded)
         self.data = _apply_smooth_arg_exprs(d.data, _expr_map) if _expr_map else d.data
         X_param_df = d.X
+        # gam(drop.intercept=) — mgcv.r:1163-1171: the parametric matrix
+        # is built WITH its intercept (factor contrast coding unchanged),
+        # then the assign==0 column is DELETED and G$intercept turns
+        # FALSE. None resolves to the family's slot (mgcv.r:2333 —
+        # FALSE for every ordinary family; cox.ph routes through the
+        # general path which handles its own drop).
+        self._drop_intercept_param: int | None = None
+        _di = (bool(getattr(self.family, "drop_intercept", False))
+               if drop_intercept is None else bool(drop_intercept))
+        if _di and "(Intercept)" in X_param_df.columns:
+            _ic = X_param_df.columns.index("(Intercept)")
+            self._drop_intercept_param = _ic
+            X_param_df = X_param_df.drop("(Intercept)")
+            if d.param_assign:
+                pa = list(d.param_assign)
+                del pa[_ic]
+                d.param_assign = pa
         # R's binomial initialize accepts a 2-level factor / boolean
         # response (level 1 = failure); same coercion as glm's intake.
         y = _coerce_response(d.y, self.family)
@@ -7175,16 +7234,14 @@ class gam:
         # subspace exactly the way mgcv does.
         if self._select:
             blocks = _add_null_space_penalties(blocks)
-        # mgcv's gam.side: when one smooth's variable set is a strict subset
-        # of another's (e.g. `s(x1) + te(x1, x2)`), the wider smooth's basis
-        # contains a copy of the narrower's main effect, which makes the
-        # combined design rank-deficient and the REML/GCV optimum drift away
-        # from mgcv's. Apply orthogonality constraints (column-rotate the
-        # wider smooth so its columns are orthogonal in the data space to
-        # the narrower's). This typically drops one column per overlap, so
-        # `te(x1, x2)` next to `s(x1) + s(x2)` shrinks 24 → 22 cols, matching
-        # mgcv's `model.matrix` exactly.
-        blocks = _apply_gam_side(blocks)
+        # mgcv's gam.side (mgcv.r:1266, after smoothCon): nested or
+        # partially-nested smooths (e.g. `s(x1) + te(x1, x2)`) make the
+        # design rank-deficient; fixDependence on the AUGMENTED designs
+        # (X over a scaled √penalty block) names the dependent columns
+        # of each wider smooth and deletes them — `te(x1, x2)` next to
+        # `s(x1) + s(x2)` shrinks 24 → 22 cols, matching mgcv's
+        # `model.matrix` exactly. X_param supplies mgcv's intercept test.
+        blocks = _apply_gam_side(blocks, X_param)
 
         # Build full design X = [X_param | X_block_1 | X_block_2 | …] and the
         # parallel list of penalty "slots" (one per (block, S_j) pair). Each
@@ -7542,7 +7599,8 @@ class gam:
             magic_optimize=self._magic_optimize,
             get_outer_fit=lambda: self._outer_fit,
             optimizer=self.optimizer, outer_efsudr=self._outer_efsudr,
-            outer_nlm_optim=self._outer_nlm_optim)
+            outer_nlm_optim=self._outer_nlm_optim,
+            in_out=self._in_out)
         fit = _res["fit"]
         rho_hat = _res["rho_hat"]
         self.sp = _res["sp"]
@@ -8037,6 +8095,10 @@ class gam:
                 if T_aug1 is not None:
                     H_aug1 = T_aug1.T @ H_aug1 @ T_aug1
                 H_aug1 = 0.5 * (H_aug1 + H_aug1.T)
+                # mgcv's attr(hess,"hess1")/"lsp1" (gam.fit3.r:1708-1710)
+                # — sp_vcov's edge branch solves against these.
+                self._hess1_ec = H_aug1
+                self._lsp1_ec = th1.copy()
                 db1 = self._db_drho(rho1, fit1.beta, fit1.A_chol,
                                     fit1.A_chol_lower)
                 if self._L is not None:
@@ -8563,7 +8625,7 @@ class gam:
     def _init_general(self, formulas, data, *, method, sp, family,
                       offset, weights, gamma, select, knots,
                       control=None, start=None,
-                      optimizer=("outer", "newton")):
+                      optimizer=("outer", "newton"), in_out=None):
         """estimate.gam's general-family glue (mgcv.r:1893-1924,
         1984-2005, 2060-2092): multi-formula design → Sl.setup +
         initial repara → initial.spg seed → outer Newton over the
@@ -8575,14 +8637,12 @@ class gam:
         silently); ``sp=`` takes the working-length vector and fixes
         every sp (all-or-nothing — the single-formula mixed-sp fold
         hasn't been extended here); ``control=`` supplies the efs and
-        newton knobs (edge_correct still raises).
+        newton knobs. ``edge_correct`` runs mgcv's newton walk
+        (gam.fit3.r:1669) plus gam.fit5.post.proc's k=2 Vc pass
+        (gam.fit4.r:1650-1663) — newton-optimizer fits only, exactly
+        like mgcv (bfgs/efs never receive edge.correct).
         """
         self._control = gam_control(**(control or {}))
-        if self._control["edge_correct"]:
-            raise NotImplementedError(
-                "edge_correct for general families lands with "
-                "gam.fit5.post.proc; not ported for general families."
-            )
         if offset is not None:
             raise NotImplementedError(
                 "constructor offset= is not supported for formula-list "
@@ -8606,7 +8666,9 @@ class gam:
         self.knots = knots
         self._select = bool(select)
         self._gamma = float(gamma)
-        self._edge_correct = False
+        # threads into the outer newton like mgcv's gam.outer
+        # (mgcv.r:1682) — the bfgs/efs branches never see it.
+        self._edge_correct = self._control["edge_correct"]
         self._edge_theta1 = None
 
         md = _prepare_multi_design(
@@ -8623,11 +8685,12 @@ class gam:
             md = _append_extra_params(md, self._n_extra_coef)
         self._init_general_from_md(md, data, family=family, sp=sp,
                                    method=method, weights=weights,
-                                   start=start, optimizer=optimizer)
+                                   start=start, optimizer=optimizer,
+                                   in_out=in_out)
 
     def _init_general_from_md(self, md, data, *, family, sp, method,
                               weights, start,
-                              optimizer=("outer", "newton")):
+                              optimizer=("outer", "newton"), in_out=None):
         """The design-agnostic remainder of :meth:`_init_general`: from a
         built multi-LP design bundle ``md`` (dense ``_MultiDesign``, or
         bam's compressed variant whose ``X`` is a ``family.DiscreteX``)
@@ -8756,7 +8819,8 @@ class gam:
         _res = estimate_gam(
             None, sp, method, rho_full=self._rho_full,
             outer_newton=self._outer_newton, outer_bfgs=self._outer_bfgs,
-            general=gg, get_outer_info=lambda: self._outer_info)
+            general=gg, get_outer_info=lambda: self._outer_info,
+            in_out=in_out)
         fit = _res["fit"]
         self._fit5 = fit
         self._rho_hat = _res["rho_hat"]
@@ -8962,28 +9026,68 @@ class gam:
         V_sp = None
         Vr = None
         Vc_corr = 0.0
+        # gam.control(edge.correct=): newton stored the walked-back θ1;
+        # a deriv-2 refit there supplies hess1/db.drho1 for a k=2 pass
+        # (gam.fit4.r:1650-1663). The REPORTED Vc and V.sp come from
+        # the edge-corrected model (k=2, 1e-7 Vr prior); edf2 keeps the
+        # un-shifted k=1 quantities (gam.fit4.r:1714).
+        edge_correct = have_corr and self._edge_theta1 is not None
+        Vc1_corr = None
+        Vr1 = None
+        rho1_full = None
         if have_corr:
-            hess = np.asarray(hess, dtype=float)
-            db = np.asarray(fit["db_drho"], dtype=float)
-            if self._L is not None:              # derivs w.r.t. working
-                db = db @ self._L
-            ev_h, V_h = np.linalg.eigh(hess)
-            nonpos = ev_h <= 0
-            d = ev_h.copy()
-            d[nonpos] = 0.0
-            d[~nonpos] = 1.0 / np.sqrt(d[~nonpos])
-            db = _sl_inirep(sl, db, lt=1, r=0)    # undo initial repara
-            tmp = (d[:, None] * V_h.T) @ db.T
-            Vc_corr = tmp.T @ tmp                # first correction
-            d2 = ev_h.copy()
-            d2[nonpos] = 0.0
-            d2 = 1.0 / np.sqrt(d2 + 1.0 / 50.0)  # k=1 prior (1671)
-            Vr = (V_h * (d2 * d2)) @ V_h.T
+            hess_k = np.asarray(hess, dtype=float)
+            db_k = np.asarray(fit["db_drho"], dtype=float)
+            for k in (1, 2) if edge_correct else (1,):
+                if k == 2:
+                    # mgcv's b1: gam.fit5 deriv=2 at lsp1, warm-started
+                    # at the converged coefficients (newton pinned
+                    # g5["start"] back after the walk); hess1 in the
+                    # working space (gam.fit3.r:1696-1711).
+                    th1 = np.asarray(self._edge_theta1, dtype=float)
+                    rho1_full = self._rho_full(th1)
+                    g5 = self._g5
+                    fit1 = _gam_fit5(
+                        g5["X"], g5["y"], rho1_full, g5["sl"],
+                        family=self.family, lpi=g5["lpi"],
+                        weights=g5["weights"], offset=g5["offsets"],
+                        Mp=g5["Mp"], deriv=2, start=g5["start"],
+                        gamma=g5["gamma"], epsilon=1e-8)
+                    hess_k = np.asarray(fit1["REML2"], dtype=float)
+                    if self._L is not None:
+                        hess_k = self._L.T @ hess_k @ self._L
+                    db_k = np.asarray(fit1["db_drho"], dtype=float)
+                    self._hess1_ec = hess_k      # sp.vcov's hess1 attr
+                    self._lsp1_ec = th1.copy()
+                db = db_k @ self._L if self._L is not None else db_k
+                ev_h, V_h = np.linalg.eigh(hess_k)
+                nonpos = ev_h <= 0
+                d = ev_h.copy()
+                d[nonpos] = 0.0
+                d[~nonpos] = 1.0 / np.sqrt(d[~nonpos])
+                db = _sl_inirep(sl, db, lt=1, r=0)  # undo initial repara
+                tmp = (d[:, None] * V_h.T) @ db.T
+                Vc_corr = tmp.T @ tmp            # first correction
+                d2 = ev_h.copy()
+                d2[nonpos] = 0.0
+                # k=1 prior 1/50 (1671); k=2 the weaker 1e-7 (1672)
+                d2 = (1.0 / np.sqrt(d2 + 1.0 / 50.0) if k == 1
+                      else 1.0 / np.sqrt(d2 + 1e-7))
+                Vr = (V_h * (d2 * d2)) @ V_h.T
+                if k == 1:
+                    Vc1_corr = Vc_corr           # un-shifted, for edf2
+                    Vr1 = Vr
             V_sp = Vr
 
         Vb = _sl_repara(fit["rp"], Vb, inverse=True)
         Vb = _sl_initial_repara(sl, Vb, inverse=True)
         Vc = Vb + Vc_corr
+        if edge_correct:
+            # mgcv applies the repara pair to the k=1 correction here
+            # (gam.fit4.r:1691-1694) — and only to it; mirrored as-is.
+            Vc1 = _sl_repara(fit["rp"], Vc1_corr, inverse=True)
+            Vc1 = _sl_initial_repara(sl, Vc1, inverse=True)
+            Vc1 = Vb + Vc1
         R_f = _sl_repa(fit["rp"], R_f, r=1)
         R_f = _sl_initial_repara(sl, R_f, inverse=True,
                                  both_sides=False, cov=False)
@@ -8994,24 +9098,34 @@ class gam:
         if have_corr:
             # second correction in the original parameterization —
             # Vb.corr(R, L, lsp0, S, off, w=NULL, lsp, Vr) ≡ the
-            # _compute_Vc2 chain at σ² = 1 (1709).
-            Vc = Vc + self._vb_corr_fit5(RtR, Vr)
+            # _compute_Vc2 chain at σ² = 1 (1709); with edge.correct
+            # the reported Vc uses (lsp1, Vr_k2), edf2's Vc1 the
+            # fitted-model (lsp, Vr1) pair (gam.fit4.r:1709-1712).
+            Vc = Vc + self._vb_corr_fit5(
+                RtR, Vr, rho=rho1_full if edge_correct else None)
+            if edge_correct:
+                Vc1 = Vc1 + self._vb_corr_fit5(RtR, Vr1)
         edf1 = 2.0 * edf - np.einsum("ij,ji->i", F, F)
-        edf2 = np.sum(Vc * RtR, axis=1)
+        edf2 = np.sum((Vc1 if edge_correct else Vc) * RtR, axis=1)
         if float(np.sum(edf2)) > float(np.sum(edf1)):
             edf2 = edf1.copy()
         return {"Vc": Vc, "Vp": Vb, "Ve": Ve, "V_sp": V_sp, "edf": edf,
                 "edf1": edf1, "edf2": edf2, "R": R_f}
 
-    def _vb_corr_fit5(self, RtR: np.ndarray, Vr: np.ndarray) -> np.ndarray:
+    def _vb_corr_fit5(self, RtR: np.ndarray, Vr: np.ndarray,
+                      rho: np.ndarray | None = None) -> np.ndarray:
         """gam.fit5.post.proc's ``Vb.corr`` call (gam.fit3.r:869-952
         with w=NULL): rebuild H = R'R + Σλ_k S_k in MODEL coordinates,
         Cholesky it (bail to 0 like mgcv when that fails), and reuse
         the `_compute_Vc2` factor-derivative chain (≡ vcorr) — with
-        penalty-only dH and NO σ² scaling ("NOTE: unscaled!!")."""
+        penalty-only dH and NO σ² scaling ("NOTE: unscaled!!").
+        ``rho`` overrides the fitted full-space log-sp (edge.correct's
+        k=2 call evaluates at the walked-back lsp1, gam.fit4.r:1709)."""
         p = self.p
         A = RtR.copy()
-        lam = np.exp(np.asarray(self._rho_hat, dtype=float))
+        rho_use = np.asarray(self._rho_hat if rho is None else rho,
+                             dtype=float)
+        lam = np.exp(rho_use)
         for k, slot in enumerate(self._slots):
             a, b = slot.col_start, slot.col_end
             A[a:b, a:b] += lam[k] * slot.S
@@ -9021,7 +9135,7 @@ class gam:
             return np.zeros((p, p))
         import types
         duck = types.SimpleNamespace(A_chol=C, A_chol_lower=True)
-        return self._compute_Vc2(self._rho_hat, duck, Vr, 1.0)
+        return self._compute_Vc2(rho_use, duck, Vr, 1.0)
 
     def sp_vcov(self, edge_correct: bool = True, reg: float = 1e-3):
         """mgcv ``sp.vcov`` (mgcv.r:4221-4234): covariance of the
@@ -9033,14 +9147,20 @@ class gam:
         (the bam alias), so the same set is covered by the four
         strings below. ``edge_correct`` mirrors mgcv's formal: its
         branch fires only when the fit stored an edge-corrected
-        Hessian (``attr(hess, "hess1")``, written by
-        ``gam.control(edge.correct=TRUE)`` fits); hea has no
-        edge-corrected fitting, so — exactly like mgcv on a
-        non-edge-corrected fit — the argument falls through to
-        ``solve(hess + reg)``."""
+        Hessian (``attr(hess, "hess1")``, hea's ``_hess1_ec`` —
+        written by ``gam.control(edge_correct=True)`` newton fits)
+        and then solves against hess1 with mgcv's DIAGONAL
+        regularizer (mgcv.r:4228); otherwise — exactly like mgcv on
+        a non-edge-corrected fit — the argument falls through to
+        the elementwise ``solve(hess + reg)``."""
         H = getattr(self, "_H_aug", None)
         if H is None or self.method not in ("REML", "ML", "P-REML", "P-ML"):
             return None
+        H1 = getattr(self, "_hess1_ec", None)
+        if edge_correct and H1 is not None:
+            H1 = np.asarray(H1, dtype=float)
+            return np.linalg.solve(
+                H1 + np.eye(H1.shape[0]) * reg, np.eye(H1.shape[0]))
         return np.linalg.solve(np.asarray(H, dtype=float) + reg,
                                np.eye(H.shape[0]))
 
@@ -10226,6 +10346,9 @@ class gam:
         terms: str | list[str] | None = None,
         exclude: str | list[str] | None = None,
         iterms_type: int | None = None,
+        block_size: int | None = None,
+        newdata_guaranteed: bool = False,
+        na_action: str | None = "na.pass",
     ):
         """Predict from the fitted GAM — :func:`predict.gam` parity.
 
@@ -10277,6 +10400,21 @@ class gam:
         With ``newdata`` and a formula offset, the offset is re-evaluated
         against ``newdata`` (mirrors ``predict.gam``). Pass ``offset=`` to
         override or to add an offset on top of the formula offset.
+
+        ``na_action`` handles missing values in newdata's REQUIRED
+        predictor columns (response NAs are tolerated, mgcv's naresp
+        dance): ``"na.pass"`` (default) evaluates the complete rows and
+        returns NaN rows at the NA positions (mgcv's na.pass →
+        model.frame(na.exclude) → napredict round trip, incl. NaN rows
+        in the lpmatrix); ``"na.omit"``/``"na.exclude"`` drop those rows
+        from the output; ``"na.fail"`` raises; ``None`` skips NA
+        processing (mgcv's na.action=NULL). ``newdata_guaranteed=True``
+        skips the newdata processing entirely (expression re-evaluation
+        + NA handling — predict.gam's model.frame stage, mgcv.r:2822).
+        ``block_size`` evaluates the design in row chunks like
+        predict.gam (default 1000; ``< 1`` means all rows) — a memory
+        knob; results agree across block sizes to BLAS rounding
+        (last-ulp matmul differences, exactly as in R).
         """
         if type not in ("link", "response", "lpmatrix", "terms", "iterms"):
             raise ValueError(
@@ -10291,75 +10429,40 @@ class gam:
             terms = [terms]
         if isinstance(exclude, str):
             exclude = [exclude]
+        na_mask = None
+        if newdata is not None:
+            newdata, na_mask = self._process_predict_newdata(
+                newdata, newdata_guaranteed, na_action)
         if getattr(self, "_md", None) is not None:
-            return self._predict_general(newdata, type, se_fit, offset,
-                                         unconditional, terms, exclude)
+            out = self._predict_general(newdata, type, se_fit, offset,
+                                        unconditional, terms, exclude,
+                                        preprocessed=True)
+            return _na_pass_expand(out, na_mask)
 
         if newdata is None:
             X_new = self._X_full
             off_new = self._offset
         else:
-            from ..formula import (        # local to avoid cycle
-                _apply_smooth_arg_exprs,
-                _smooth_arg_expr_map,
-                materialize,
-                normalize_data,
-            )
-
-            # Accept the same dict / DataFrame input as the constructor
-            # so matrix-arg smooths can replay on a {name: 2-D ndarray}.
-            newdata = normalize_data(newdata)
-
-            # Re-evaluate any smooth-arg expressions on newdata. e.g. if
-            # the fit used ``s(I(b.depth^.5))``, the synthesised column
-            # ``"I(b.depth^0.5)"`` must be present before the basis
-            # evaluator asks for it. ``_smooth_arg_expr_map`` is
-            # deterministic in ``self._expanded`` so we rebuild it here
-            # rather than caching a copy on the model.
-            expr_map = _smooth_arg_expr_map(self._expanded)
-            if expr_map:
-                newdata = _apply_smooth_arg_exprs(newdata, expr_map)
-
-            # Append stub rows for any fit-time factor level that's
-            # missing from ``newdata``. ``materialize``'s droplevels
-            # semantics (formula.py:1059-1069) would otherwise collapse
-            # the contrast to only the levels present in newdata,
-            # returning a design with fewer columns than ``self._beta``.
-            # This mirrors mgcv's ``xlevels`` mechanism, which carries
-            # the fit-time levels through ``predict.gam`` so the
-            # contrast expansion stays consistent. Stubs are appended
-            # at the end; we slice them off after building ``X_new``.
-            n_user = newdata.height
-            newdata, n_stubs = _add_factor_stub_rows(newdata, self.data)
-
-            X_param = materialize(self._expanded, newdata).to_numpy().astype(float)
-            cols = [X_param]
-            for b in self._blocks:
-                if b.spec is None:
-                    raise RuntimeError(
-                        f"smooth block {b.label!r} (cls={b.cls!r}) has no "
-                        "BasisSpec; predict(newdata=...) requires every smooth "
-                        "to carry one."
-                    )
-                cols.append(np.asarray(b.spec.predict_mat(newdata), dtype=float))
-            X_new = np.concatenate(cols, axis=1) if len(cols) > 1 else X_param
-            if self._keep_cols is not None:
-                # predict-time bases rebuild the full columns; apply the
-                # identifiability drop so X_new matches the reduced β.
-                X_new = X_new[:, self._keep_cols]
-            if n_stubs > 0:
-                X_new = X_new[:n_user]
-            n_new = X_new.shape[0]
-            # Re-evaluate any formula offset(...) atoms against newdata
-            # — predict.gam does the same. Slice off the stubs so the
-            # offset matches the user's row count.
-            off_new = np.zeros(n_new)
-            for off_node in self._expanded.offsets:
-                blk = _eval_atom(off_node, newdata)
-                off_full = blk.values.flatten().astype(float)
-                if n_stubs > 0:
-                    off_full = off_full[:n_user]
-                off_new = off_new + off_full
+            # predict.gam's block loop (mgcv.r:2884-2911): the design is
+            # built in row chunks of block.size (default 1000; <1 means
+            # all rows) purely for memory control — every build is
+            # row-independent so the stacked result is bit-identical.
+            nrows = newdata.height
+            bs = 1000 if block_size is None else int(block_size)
+            if bs < 1:
+                bs = max(nrows, 1)
+            if nrows > bs:
+                X_parts = []
+                off_parts = []
+                for s0 in range(0, nrows, bs):
+                    Xc, offc = self._predict_design_rows(
+                        newdata.slice(s0, min(bs, nrows - s0)))
+                    X_parts.append(Xc)
+                    off_parts.append(offc)
+                X_new = np.vstack(X_parts)
+                off_new = np.concatenate(off_parts)
+            else:
+                X_new, off_new = self._predict_design_rows(newdata)
         if offset is not None:
             extra = np.asarray(offset, dtype=float).flatten()
             if extra.shape != off_new.shape:
@@ -10375,12 +10478,13 @@ class gam:
             # every type (mgcv.r:2993-3026) — partial linear predictors.
             X_new = _zero_terms_exclude(X_new, terms, exclude, *groups)
         if type in ("terms", "iterms"):
-            return self._terms_frame(
+            return _na_pass_expand(self._terms_frame(
                 X_new, self._beta, se_fit,
                 self._predict_V(unconditional) if se_fit else None,
-                type, iterms_type, terms, exclude, *groups)
+                type, iterms_type, terms, exclude, *groups), na_mask)
         if type == "lpmatrix":
-            return X_new
+            # mgcv napredicts the lpmatrix too (NaN rows, mgcv.r:3303)
+            return _na_pass_expand(X_new, na_mask)
         eta = X_new @ self._beta + off_new
 
         # Extended-family `predict` hook (mgcv predict.gam, mgcv.r:3171-3198):
@@ -10394,23 +10498,155 @@ class gam:
             ffv = fam_predict(se=se_fit, X=X_new, beta=self._beta,
                               off=off_new, Vb=Vb, eta=None,
                               y=self._gfam_predict_y(newdata), lpi=None)
-            return self._general_response_frame(
-                ffv["fit"], ffv.get("se_fit") if se_fit else None)
+            return _na_pass_expand(self._general_response_frame(
+                ffv["fit"], ffv.get("se_fit") if se_fit else None), na_mask)
 
         fit = eta if type == "link" else self.family.link.linkinv(eta)
 
         if not se_fit:
-            return pl.DataFrame({"fit": fit})
+            return _na_pass_expand(pl.DataFrame({"fit": fit}), na_mask)
 
         # Var(η̂_i) = X_i · V · X_iᵀ; rowwise via einsum.
         V = self._predict_V(unconditional)
         var_eta = np.einsum("ij,jk,ik->i", X_new, V, X_new)
         se_link = np.sqrt(np.maximum(var_eta, 0.0))
         if type == "link":
-            return pl.DataFrame({"fit": fit, "se.fit": se_link})
+            return _na_pass_expand(
+                pl.DataFrame({"fit": fit, "se.fit": se_link}), na_mask)
         # Delta method: Var(μ̂) ≈ (dμ/dη)² · Var(η̂).
         mu_eta_v = self.family.link.mu_eta(eta)
-        return pl.DataFrame({"fit": fit, "se.fit": np.abs(mu_eta_v) * se_link})
+        return _na_pass_expand(
+            pl.DataFrame({"fit": fit, "se.fit": np.abs(mu_eta_v) * se_link}),
+            na_mask)
+
+    def _process_predict_newdata(self, newdata, newdata_guaranteed: bool,
+                                 na_action: str | None):
+        """predict.gam's newdata stage (mgcv.r:2740-2830): intake
+        normalization, smooth-arg expression re-evaluation and the
+        na.action handling — shared by the single- and multi-formula
+        rails (predict.bamd routes through the same stage via
+        ``predict.gam(type="newdata")``).
+
+        Returns ``(processed_newdata, na_mask)`` where ``na_mask`` is
+        the boolean drop mask over the ORIGINAL rows when
+        ``na_action="na.pass"`` filtered incomplete rows (the outputs
+        are later re-expanded with NaN rows at those positions —
+        mgcv's na.pass → model.frame(na.exclude) → napredict round
+        trip), or None. Response-column NAs are tolerated like mgcv
+        (the naresp thresh dance exists exactly so model.frame keeps
+        those rows). ``newdata_guaranteed=True`` skips everything but
+        the dict→frame intake (mgcv.r:2822: "it's guaranteed!")."""
+        from ..formula import (            # local to avoid cycle
+            _apply_smooth_arg_exprs,
+            _smooth_arg_expr_map,
+            normalize_data,
+            referenced_columns,
+        )
+        # Accept the same dict / DataFrame input as the constructor
+        # so matrix-arg smooths can replay on a {name: 2-D ndarray}.
+        newdata = normalize_data(newdata)
+        if newdata_guaranteed:
+            return newdata, None
+
+        # Re-evaluate any smooth-arg expressions on newdata. e.g. if
+        # the fit used ``s(I(b.depth^.5))``, the synthesised column
+        # ``"I(b.depth^0.5)"`` must be present before the basis
+        # evaluator asks for it. ``_smooth_arg_expr_map`` is
+        # deterministic in the expanded formula(s) so we rebuild it
+        # here rather than caching a copy on the model.
+        md = getattr(self, "_md", None)
+        if md is not None:
+            expr_map = {}
+            for lp in md.lps:
+                expr_map.update(_smooth_arg_expr_map(lp.expanded))
+        else:
+            expr_map = _smooth_arg_expr_map(self._expanded)
+        if expr_map:
+            newdata = _apply_smooth_arg_exprs(newdata, expr_map)
+
+        if na_action is None:              # mgcv na.action=NULL
+            return newdata, None
+        act = _get_na_action(na_action)
+        # required predictor columns = mgcv's allNames (all.vars of the
+        # prediction terms — response excluded, offset vars included)
+        if md is not None:
+            need = set()
+            for lp in md.lps:
+                need |= referenced_columns(lp.expanded)
+        else:
+            need = referenced_columns(self._expanded)
+        need = [c for c in newdata.columns if c in need]
+        if not need:
+            return newdata, None
+        bad = np.zeros(newdata.height, dtype=bool)
+        for c in need:
+            s = newdata[c]
+            b = s.is_null().to_numpy()
+            if s.dtype.is_float():
+                b = b | s.is_nan().fill_null(True).to_numpy()
+            bad |= np.asarray(b, dtype=bool).reshape(newdata.height, -1) \
+                .any(axis=1)
+        if not bad.any():
+            return newdata, None
+        if act == "na.fail":
+            raise ValueError(
+                "missing values in newdata (na_action='na.fail')")
+        keep = ~bad
+        newdata = newdata.filter(pl.Series(keep))
+        # na.pass re-expands the outputs; omit/exclude drop the rows
+        # (mgcv.r:2750-2753's predict.lm-mimicking relabel: user
+        # na.pass → na.exclude at model.frame + napredict re-insert;
+        # user na.exclude → na.omit — dropped, no re-insert).
+        return newdata, (bad if act == "na.pass" else None)
+
+    def _predict_design_rows(self, newdata):
+        """One block of predict.gam's design build: factor-level stub
+        rows (mgcv's xlevels mechanism — ``materialize``'s droplevels
+        would otherwise collapse contrasts), the parametric columns +
+        every smooth's ``predict_mat``, the identifiability-drop
+        column selection, and the formula ``offset(...)`` re-eval.
+        Returns ``(X_new, off_new)`` for exactly ``newdata.height``
+        rows."""
+        from ..formula import materialize   # local to avoid cycle
+
+        n_user = newdata.height
+        newdata, n_stubs = _add_factor_stub_rows(newdata, self.data)
+
+        X_param = materialize(self._expanded,
+                              newdata).to_numpy().astype(float)
+        if getattr(self, "_drop_intercept_param", None) is not None:
+            # drop.intercept fits: materialize rebuilds the intercept
+            # column; delete it like the fit did (mgcv.r:1165-1171).
+            X_param = np.delete(X_param, self._drop_intercept_param,
+                                axis=1)
+        cols = [X_param]
+        for b in self._blocks:
+            if b.spec is None:
+                raise RuntimeError(
+                    f"smooth block {b.label!r} (cls={b.cls!r}) has no "
+                    "BasisSpec; predict(newdata=...) requires every smooth "
+                    "to carry one."
+                )
+            cols.append(np.asarray(b.spec.predict_mat(newdata), dtype=float))
+        X_new = np.concatenate(cols, axis=1) if len(cols) > 1 else X_param
+        if self._keep_cols is not None:
+            # predict-time bases rebuild the full columns; apply the
+            # identifiability drop so X_new matches the reduced β.
+            X_new = X_new[:, self._keep_cols]
+        if n_stubs > 0:
+            X_new = X_new[:n_user]
+        n_new = X_new.shape[0]
+        # Re-evaluate any formula offset(...) atoms against newdata
+        # — predict.gam does the same. Slice off the stubs so the
+        # offset matches the user's row count.
+        off_new = np.zeros(n_new)
+        for off_node in self._expanded.offsets:
+            blk = _eval_atom(off_node, newdata)
+            off_full = blk.values.flatten().astype(float)
+            if n_stubs > 0:
+                off_full = off_full[:n_user]
+            off_new = off_new + off_full
+        return X_new, off_new
 
     def _gfam_predict_y(self, newdata) -> np.ndarray | None:
         """The ``y`` mgcv's predict.gam hands a family ``predict`` hook
@@ -10558,7 +10794,8 @@ class gam:
         return pl.DataFrame(out)
 
     def _predict_general(self, newdata, type, se_fit, offset,
-                         unconditional, terms=None, exclude=None):
+                         unconditional, terms=None, exclude=None,
+                         preprocessed=False):
         """Multi-LP predict (general families): mgcv's predict.gam
         returns an (n, n_lp) matrix per type — hea returns a DataFrame
         with one column per linear predictor, named ``fit``,
@@ -10568,7 +10805,9 @@ class gam:
         ``type='lpmatrix'`` returns the stacked design (lpi available
         as ``m.lpi``). Per-LP formula ``offset(...)`` atoms are
         re-evaluated against newdata; the constructor-style ``offset=``
-        override is not supported on this path.
+        override is not supported on this path. ``preprocessed=True``
+        means the caller already ran ``_process_predict_newdata``
+        (intake normalization + na.action).
         """
         if offset is not None:
             raise NotImplementedError(
@@ -10581,7 +10820,8 @@ class gam:
             offs = list(md.offsets)
         else:
             from ..formula import _eval_atom, normalize_data
-            newdata_n = normalize_data(newdata)
+            newdata_n = (newdata if preprocessed
+                         else normalize_data(newdata))
             X_new, _ = _multi_lpmatrix(md, newdata_n)
             # drop_intercept families (cox.ph) rebuild the newdata design
             # with the intercept; remove the same column the fit dropped.
@@ -13542,118 +13782,291 @@ def _add_null_space_penalties(blocks: list[SmoothBlock]) -> list[SmoothBlock]:
     return out
 
 
-def _apply_gam_side(blocks: list[SmoothBlock]) -> list[SmoothBlock]:
-    """Apply mgcv's ``gam.side`` identifiability surgery.
+def _augment_smX(b: SmoothBlock, p_ind: np.ndarray, nobs: int,
+                 np_tot: int, nc: int) -> np.ndarray:
+    """mgcv ``augment.smX`` (mgcv.r:538-562): the smooth's model matrix
+    stacked over a scaled √total-penalty block laid into the smooth's
+    parameter rows of the shared (nobs+np+nc)-row frame, so
+    ``fixDependence`` mostly only sees NULL-space dependencies.
 
-    For each block ``b`` whose variable set strictly contains another
-    block's (e.g. ``te(x1, x2)`` over ``s(x1) + s(x2)``), some columns of
-    ``X_b`` are linearly dependent on the union of the smaller smooths'
-    designs plus the intercept. mgcv finds those columns via
-    ``fixDependence`` (a QR with column pivoting on the residual after
-    projecting out the smaller smooths) and **deletes** them — both from
-    ``X_b`` and from the rows/cols of each ``S_b[j]``. For a default
-    ``te(x1, x2)`` with ``s(x1) + s(x2)`` marginals, this drops exactly 2
-    columns (24 → 22), matching ``ncol(model.matrix(m))``.
+    Each penalty enters the total St with weight
+    ``α_i = mean(|X[,ind₁]|)² / mean(|S_i[ind_i,ind_i]|)`` — note mgcv
+    computes the X-scale ``sqrmaX`` from S[[1]]'s nonzero columns ONLY
+    and reuses it for every i. ``rS = mroot(St, rank=ncol(St))``
+    (pivoted Cholesky, full column count). hea's constraints are
+    absorbed before gam.side exactly like mgcv's live call
+    (mgcv.r:1266 runs after smoothCon absorb.cons=TRUE), so there are
+    no ``C`` blocks and ``nc = 0`` — the ``C/norm(C)`` rows never
+    materialize."""
+    X = np.asarray(b.X, dtype=float)
+    ns = len(b.S)
+    if ns == 0 and nc == 0:
+        # mgcv returns nobs+np rows here (no nc block) — consistent
+        # with the other frames only because nc==0, which always holds.
+        return np.vstack([X, np.zeros((np_tot, X.shape[1]))])
+    S0 = np.asarray(b.S[0], dtype=float)
+    ind = np.mean(np.abs(S0), axis=0) != 0
+    sqrmaX = float(np.mean(np.abs(X[:, ind]))) ** 2
+    alpha = sqrmaX / float(np.mean(np.abs(S0[np.ix_(ind, ind)])))
+    St = S0 * alpha
+    for Sj in b.S[1:]:
+        Sj = np.asarray(Sj, dtype=float)
+        indj = np.mean(np.abs(Sj), axis=0) != 0
+        alpha = sqrmaX / float(np.mean(np.abs(Sj[np.ix_(indj, indj)])))
+        St = St + Sj * alpha
+    rS = _mroot(St, rank=St.shape[1])           # chol root, k columns
+    Xa = np.vstack([X, np.zeros((np_tot + nc, X.shape[1]))])
+    Xa[nobs + np.asarray(p_ind, dtype=np.intp), :] = rS.T
+    return Xa
 
-    Random-effect smooths (``bs='re'``) carry ``side.constrain=FALSE`` in
-    mgcv: their identity penalty already identifies the fit even with a
-    rank-deficient X, so gam.side neither constrains them nor includes
-    them in X1 when constraining other blocks. Replicating that here
-    matters for `s(Worker, bs='re') + s(Machine, Worker, bs='re')` style
-    nestings — dropping the 6 dependent interaction columns shifts the
-    REML surface (different log|A|, log|S|+) and lands at a different
-    optimum than mgcv. Skipping the surgery keeps the design at p=27
-    (matching mgcv) at the cost of a rank-deficient X that's still PD
-    once Sλ = λ·I is added in the re block.
+
+def _r_qr_rank(S: np.ndarray, tol: float) -> int:
+    """R ``qr(S, tol=tol, LAPACK=FALSE)$rank`` — dqrdc2's rank-revealing
+    count (gam.side's post-drop penalty-rank recompute, mgcv.r:674)."""
+    S = np.asarray(S, dtype=float)
+    if S.size == 0:
+        return 0
+    from ..R.linalg import dqrdc2
+    return int(dqrdc2(S, tol=tol)[3])
+
+
+def _apply_gam_side(blocks: list[SmoothBlock],
+                    X_param: np.ndarray | None = None,
+                    tol: float = float(np.finfo(float).eps) ** 0.5,
+                    with_pen: bool = True) -> list[SmoothBlock]:
+    """mgcv ``gam.side`` (mgcv.r:565-720) — identifiability constraints
+    for nested/partially-nested smooths, mechanical port of the live
+    ``with.pen=TRUE`` call (mgcv.r:1266).
+
+    Per smooth (ascending dimension, then model order), X1 collects the
+    intercept (when the parametric matrix ``X_param`` has one, directly
+    or in span) plus the AUGMENTED design (``_augment_smX``) of every
+    EARLIER smooth sharing ANY variable — including repeated same-dim
+    smooths and partial overlaps like ``te(x,z)`` vs ``te(z,w)``, not
+    just strict-subset variable sets. ``fixDependence(X1, Xa_i)`` names
+    the columns to delete; the penalties are row/col-sliced, each
+    surviving penalty's rank is recomputed via R's rank-revealing QR
+    (dqrdc2) and rank-0 penalties are DELETED (with their S.scale
+    entries). mgcv caches each smooth's ``Xa`` on first use and never
+    invalidates it — a later collection of an already-constrained
+    smooth reuses its pre-drop augmented matrix, and the parameter
+    frame (``p.ind``/``np``) is sized on the pre-surgery column counts;
+    both quirks are mirrored. Per-smooth ``C``/``Ain``/``Xp``/``L``
+    slots have no hea counterpart (constraints absorbed, no per-smooth
+    sp linkage), and ``null.space.dim`` is not stored on hea blocks, so
+    those mgcv lines have nothing to act on.
+
+    Random-effect smooths (``bs='re'``) carry ``side.constrain=FALSE``:
+    they are neither constrained nor collected into X1 — their identity
+    penalty keeps a rank-deficient X estimable, and mgcv relies on that
+    (e.g. ``s(Worker, bs='re') + s(Machine, Worker, bs='re')``).
     """
-    if len(blocks) < 2:
+    m = len(blocks)
+    if m == 0:
         return blocks
-    var_sets = [frozenset(b.term) for b in blocks]
-    n = int(np.asarray(blocks[0].X).shape[0])
-    out: list[SmoothBlock] = []
-    for i, b in enumerate(blocks):
-        if not _side_constrain(b):
-            out.append(b)
-            continue
-        my_vars = var_sets[i]
-        Xb = np.asarray(b.X, dtype=float)
-        # X1 = intercept + every strict-subset, side-constrained block's
-        # design — exactly what `gam.side` builds before `fixDependence`.
-        cols_X1 = [np.ones((n, 1))]
-        for j, other in enumerate(blocks):
-            if i == j or not _side_constrain(other):
-                continue
-            if var_sets[j] and var_sets[j] < my_vars:
-                cols_X1.append(np.asarray(other.X, dtype=float))
-        if len(cols_X1) == 1:
-            out.append(b)
-            continue
-        X1 = np.concatenate(cols_X1, axis=1)
-        ind = _fix_dependence(X1, Xb)
-        if not ind:
-            out.append(b)
-            continue
-        keep = [c for c in range(Xb.shape[1]) if c not in ind]
-        new_X = Xb[:, keep]
-        new_S = []
-        for Sj in b.S:
-            Sj = np.asarray(Sj, dtype=float)
-            new_S.append(Sj[np.ix_(keep, keep)])
-        if b.spec is None:
-            new_spec = None
+    nobs = int(np.asarray(blocks[0].X).shape[0])
+    ncol_xp = 0 if X_param is None else int(X_param.shape[1])
+    if not with_pen:
+        # mgcv.r:574-576: with.pen=FALSE is only possible when the
+        # problem is not over-parameterized; reset if it is.
+        with_pen = nobs < ncol_xp + sum(
+            int(np.asarray(b.X).shape[1]) for b in blocks)
+
+    # vn: per-variable names with by/by-level appended (mgcv.r:580-587)
+    vns: list[list[str]] = []
+    max_dim = 1
+    for b in blocks:
+        by_suffix = ""
+        bm = getattr(b.spec, "by", None) if b.spec is not None else None
+        if bm is not None:
+            by_suffix = str(getattr(bm, "expr", ""))
+            lev = getattr(bm, "level", None)
+            if lev is not None:
+                by_suffix += str(lev)
+        vns.append([t + by_suffix for t in b.term])
+        if len(b.term) > max_dim:
+            max_dim = len(b.term)
+    all_names = [nm for vn in vns for nm in vn]
+    if len(all_names) == len(set(all_names)):
+        return blocks                       # no repeats => no nesting
+
+    # intercept present in X_param, directly or in span (mgcv.r:597-604)
+    intercept = False
+    if ncol_xp:
+        Xp = np.asarray(X_param, dtype=float)
+        if np.any(np.std(Xp, axis=0, ddof=1)
+                  < float(np.finfo(float).eps) ** 0.75):
+            intercept = True
         else:
-            # Compose with any prior keep_cols so re-running gam.side is idempotent.
-            keep_arr = np.asarray(keep, dtype=np.intp)
-            prior = b.spec.keep_cols
-            new_keep = keep_arr if prior is None else prior[keep_arr]
-            new_spec = BasisSpec(
-                raw=b.spec.raw, by=b.spec.by, absorb=b.spec.absorb,
-                keep_cols=new_keep,
+            # qr.fitted(qr(Xp), 1) — R's rank-revealing dqrdc2 LS
+            from ..R.linalg import dqrls
+            f = np.ones(nobs)
+            rsd = dqrls(Xp, f)[2]
+            if float(np.max(np.abs(rsd))) \
+                    < float(np.finfo(float).eps) ** 0.75:
+                intercept = True
+
+    # sm.id: per variable name, the side-constrained smooths that use it,
+    # ascending dim then model order (mgcv.r:606-620)
+    sm_id: dict[str, list[int]] = {}
+    for d in range(1, max_dim + 1):
+        for i, b in enumerate(blocks):
+            if len(b.term) == d and _side_constrain(b):
+                for nm in vns[i]:
+                    sm_id.setdefault(nm, []).append(i)
+    if max_dim == 1:
+        import warnings as _warnings
+        _warnings.warn("model has repeated 1-d smooths of same variable.",
+                       stacklevel=2)
+
+    nc = 0        # largest per-smooth C block — always 0 (absorbed cons)
+    p_inds: list[np.ndarray] = []
+    np_tot = 0
+    if with_pen:
+        # parameter indices over ALL smooths, model order, sized on the
+        # PRE-surgery column counts (mgcv.r:629-637)
+        k = 0
+        for b in blocks:
+            k1 = k + int(np.asarray(b.X).shape[1])
+            p_inds.append(np.arange(k, k1))
+            k = k1
+        np_tot = k
+
+    out = list(blocks)
+    xa_cache: dict[int, np.ndarray] = {}
+
+    def _xa(idx: int) -> np.ndarray:
+        # mgcv builds sm[[i]]$Xa lazily and NEVER invalidates it.
+        got = xa_cache.get(idx)
+        if got is None:
+            got = xa_cache[idx] = _augment_smX(
+                out[idx], p_inds[idx], nobs, np_tot, nc)
+        return got
+
+    for d in range(1, max_dim + 1):
+        for i in range(m):
+            b = out[i]
+            if len(b.term) != d or not _side_constrain(b):
+                continue
+            if with_pen:
+                if intercept:
+                    X1 = np.zeros((nobs + np_tot + nc, 1))
+                    X1[:nobs, 0] = 1.0
+                else:
+                    X1 = np.zeros((nobs + np_tot + nc, 0))
+            else:
+                X1 = np.ones((nobs, 1 if intercept else 0))
+            x1comp: list[int] = []
+            for nm in vns[i]:
+                blist = sm_id[nm]
+                k_pos = blist.index(i)
+                for ell in blist[:k_pos]:
+                    if ell in x1comp:
+                        continue
+                    x1comp.append(ell)
+                    if with_pen:
+                        X1 = np.hstack([X1, _xa(ell)])
+                    else:
+                        X1 = np.hstack(
+                            [X1, np.asarray(out[ell].X, dtype=float)])
+            if X1.shape[1] == int(intercept):
+                ind = None
+            elif with_pen:
+                ind = _fix_dependence(X1, _xa(i), tol=tol)
+            else:
+                ind = _fix_dependence(
+                    X1, np.asarray(b.X, dtype=float), tol=tol)
+            if not ind:
+                continue
+
+            Xb = np.asarray(b.X, dtype=float)
+            drop = set(ind)
+            keep = [c for c in range(Xb.shape[1]) if c not in drop]
+            new_X = Xb[:, keep]
+            # penalties: slice, recompute rank (R's dqrdc2 qr at this
+            # tol, mgcv.r:672-675), delete rank-0 penalties together
+            # with their S.scale entries (mgcv.r:676-681)
+            new_S: list[np.ndarray] = []
+            new_scale: list[float] | None = (
+                [] if b.S_scale is not None else None)
+            for j, Sj in enumerate(b.S):
+                Sj = np.asarray(Sj, dtype=float)[np.ix_(keep, keep)]
+                if not np.any(Sj != 0):
+                    rank = 0
+                else:
+                    rank = _r_qr_rank(Sj, tol)
+                if rank == 0:
+                    continue
+                new_S.append(Sj)
+                if new_scale is not None:
+                    new_scale.append(_block_s_scale(b, j))
+            if b.spec is None:
+                new_spec = None
+            else:
+                # compose with any prior keep_cols (idempotent re-runs)
+                keep_arr = np.asarray(keep, dtype=np.intp)
+                prior = b.spec.keep_cols
+                new_keep = keep_arr if prior is None else prior[keep_arr]
+                new_spec = BasisSpec(
+                    raw=b.spec.raw, by=b.spec.by, absorb=b.spec.absorb,
+                    keep_cols=new_keep,
+                )
+            out[i] = SmoothBlock(
+                label=b.label, term=b.term, cls=b.cls, X=new_X, S=new_S,
+                spec=new_spec, S_scale=new_scale,
             )
-        out.append(SmoothBlock(
-            label=b.label, term=b.term, cls=b.cls, X=new_X, S=new_S,
-            spec=new_spec,
-        ))
     return out
 
 
 def _side_constrain(b: SmoothBlock) -> bool:
-    """Mirrors mgcv's ``smooth$side.constrain``. Random-effect smooths
-    (``re.smooth.spec``) opt out — their identity penalty handles ID."""
-    return b.cls != "re.smooth.spec"
+    """Mirrors mgcv's ``smooth$side.constrain``: TRUE unless the
+    constructor opts out — re (smooth.r:2633), fs (smooth.r:2121) and
+    sz (smooth.r:2305), all "really random effects" whose penalties
+    keep a rank-deficient X estimable."""
+    return b.cls not in ("re.smooth.spec", "fs.interaction",
+                         "sz.interaction")
 
 
 def _fix_dependence(X1: np.ndarray, X2: np.ndarray,
-                    tol: float = float(np.finfo(float).eps) ** 0.5) -> list[int]:
+                    tol: float = float(np.finfo(float).eps) ** 0.5,
+                    rank_def: int = 0) -> list[int]:
     """Find columns of ``X2`` that are linearly dependent on ``X1``.
 
-    Mirrors mgcv's ``fixDependence(X1, X2, tol)`` (non-strict mode):
+    Mirrors mgcv's ``fixDependence(X1, X2, tol, rank.def)`` (non-strict
+    mode):
 
-    1. ``Q1 R1 = X1`` (QR of X1).
+    1. ``Q1 R1 = X1[:, piv]`` — column-pivoted QR (mgcv uses
+       ``qr(X1, LAPACK=TRUE)``, so ``R11 = |R1[0,0]|`` is the pivoted
+       leading element, i.e. the largest column norm — the tolerance
+       scale).
     2. Project X2 onto the orthogonal complement of X1's column space
        and take the bottom block of ``Q1ᵀ X2`` (rows ``r+1..n``).
     3. QR of that residual *with column pivoting*. Trailing columns
        whose mean abs over the diagonal block falls below
-       ``|R1[0,0]| · tol`` are the dependent ones — return their pivot
-       indices in X2.
+       ``R11 · tol`` are the dependent ones — return their pivot
+       indices in X2. ``rank_def > 0`` supplies the known degree of
+       dependence instead (tol ignored), mgcv's Xp path.
     """
     n, r = X1.shape
-    Q1, R1 = np.linalg.qr(X1, mode="complete")
-    if R1.size == 0 or n <= r:
+    from scipy.linalg import qr as scipy_qr
+    if r == 0 or n <= r:
         return []
-    R11 = abs(R1[0, 0]) if R1.shape[0] > 0 else 1.0
+    Q1, R1, _piv1 = scipy_qr(X1, pivoting=True)
+    R11 = abs(R1[0, 0]) if R1.size else 1.0
     QtX2 = Q1.T @ X2
     residual = QtX2[r:, :]
     if residual.shape[0] == 0:
         return []
-    # column-pivoted QR via scipy (numpy's qr lacks pivoting)
-    from scipy.linalg import qr as scipy_qr
     Q2, R2, piv = scipy_qr(residual, mode="economic", pivoting=True)
     nrows = R2.shape[0]
     r_full = nrows
     r0 = r_full
-    while r0 > 0 and float(np.mean(np.abs(R2[r0 - 1: r_full, r0 - 1: r_full]))) < R11 * tol:
-        r0 -= 1
+    if 0 < rank_def <= nrows:
+        r0 = r_full - rank_def
+    else:
+        while r0 > 0 and float(np.mean(
+                np.abs(R2[r0 - 1: r_full, r0 - 1: r_full]))) < R11 * tol:
+            r0 -= 1
     r0 += 1
     if r0 > r_full:
         return []
@@ -14758,7 +15171,7 @@ def _build_lp_design(formula: str, data, knots: dict | None,
         block_ids.extend([_smooth_id_value(call_node)] * len(group_blocks))
     if select:
         blocks = _add_null_space_penalties(blocks)
-    blocks = _apply_gam_side(blocks)
+    blocks = _apply_gam_side(blocks, X_param)
 
     if label_suffix:
         for b in blocks:
@@ -15025,6 +15438,62 @@ def _multi_lpmatrix(md: _MultiDesign, newdata) -> tuple[np.ndarray,
             X_lp = X_lp[:n_user]
         cols.append(X_lp)
     return np.concatenate(cols, axis=1), md.lpi
+
+
+def _check_in_out(in_out, n_sp: int) -> tuple[np.ndarray, float]:
+    """estimate.gam's in.out validation (mgcv.r:2005-2009): both ``sp``
+    and ``scale`` present and ``sp`` of the expected length, else
+    mgcv's exact stop. ``scale`` is required even when the fit doesn't
+    estimate one (mgcv's check is unconditional). Returns the
+    validated ``(sp, scale)``."""
+    ok = isinstance(in_out, dict)
+    sp = None
+    if ok:
+        ok = (in_out.get("sp") is not None
+              and in_out.get("scale") is not None)
+    if ok:
+        sp = np.asarray(in_out["sp"], dtype=float).reshape(-1)
+        ok = sp.size == n_sp
+    if not ok:
+        raise ValueError("in.out incorrect: see documentation")
+    return sp, float(in_out["scale"])
+
+
+def _get_na_action(na_action) -> str:
+    """mgcv ``get.na.action`` (mgcv.r:2675-2689) — normalize the
+    na.action to one of the four recognized names. hea takes the string
+    forms directly (R's function objects have no Python counterpart —
+    get.na.action existed precisely to map them back to these
+    strings)."""
+    if isinstance(na_action, str):
+        if na_action in ("na.omit", "na.exclude", "na.pass", "na.fail"):
+            return na_action
+        raise ValueError("unrecognised na.action")
+    raise ValueError("na.action not character")
+
+
+def _na_pass_expand(out, na_mask):
+    """predict.gam's ``napredict`` re-expansion (mgcv.r:3295-3313):
+    scatter the computed rows back over the original row count, NaN at
+    the dropped (incomplete) positions. Applies to every output shape —
+    fit/se frames, terms frames, and the lpmatrix (mgcv NaN-pads H
+    too)."""
+    if na_mask is None:
+        return out
+    n = int(na_mask.size)
+    keep = np.flatnonzero(~na_mask)
+    if isinstance(out, np.ndarray):
+        full = np.full((n,) + out.shape[1:], np.nan)
+        full[keep] = out
+        return full
+    if isinstance(out, pl.DataFrame):
+        data = {}
+        for c in out.columns:
+            col = np.full(n, np.nan)
+            col[keep] = out[c].to_numpy().astype(float)
+            data[c] = col
+        return pl.DataFrame(data)
+    return out
 
 
 def _zero_terms_exclude(X, terms, exclude, plabels, pidx, icols, slabels,

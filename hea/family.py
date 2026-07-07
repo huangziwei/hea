@@ -4759,6 +4759,15 @@ class nb(Family):
         cache[key] = res
         return res
 
+    def ls(self, y, wt, scale):
+        # Standard 3-slot saturated log-lik (the shared REML criterion /
+        # Hessian tail's signature): value from the extended ls at the
+        # family's current θ; nb's φ is fixed at 1 (mgcv nb()$scale is
+        # NULL), so the log φ derivative slots are 0 — the same adapter
+        # shape as the other scale-known extended families (cnorm etc.).
+        ls0 = float(self.ls_extended(y, wt, scale=scale)["ls"])
+        return np.array([ls0, 0.0, 0.0], dtype=float)
+
     # ----- initialization / validity -------------------------------------
 
     def initialize(self, y, wt):

@@ -102,6 +102,7 @@ from .gam import (
     _initial_sp,
     _ldet_s,
     _magic_optimize,
+    _na_pass_expand,
     _preml_hessian,
     _SlBlock,
     _row_frame,
@@ -1881,7 +1882,7 @@ def _build_qr_chunked_pirls(
 
             mu_chunk = link.linkinv(eta_chunk)
 
-            if family.is_extended:
+            if family.is_extended or isinstance(family, _tw_family):
                 # Extended-family Fisher-scoring branch — the NON-discrete
                 # serial chunked path mirrors mgcv ``bgam.fit`` (bam.r:1070-1076),
                 # which uses the EXPECTED (Fisher) Hessian unconditionally:
@@ -1890,6 +1891,9 @@ def _build_qr_chunked_pirls(
                 #     good <- is.finite(z) & is.finite(w)
                 # (Contrast the DISCRETE path ``_build_qr_discrete_pirls``, which
                 # ports ``bgam.fitd``'s rho==0 OBSERVED-Hessian ``Deta2`` branch.)
+                # mgcv's efam set includes tw() (free p); its EDeta2/Deta.EDeta2
+                # reduce analytically to the standard IRLS (W, z), so this is a
+                # branch relabel, not a numeric change, for tw.
                 theta = family.get_theta()
                 deta = family.dDeta(y_chunk, mu_chunk, wp_chunk, theta, level=0)
                 EDeta2 = deta["EDeta2"]
@@ -2039,7 +2043,7 @@ def _build_qr_discrete_pirls(
 
     mu_full = link.linkinv(eta_full)
 
-    if family.is_extended:
+    if family.is_extended or isinstance(family, _tw_family):
         # Extended-family Newton branch (mgcv bgam.fitd, bam.r:577-591).
         # ``dDeta`` returns η-space derivatives of ``-logL`` at fixed θ;
         # the IRLS-equivalent Newton step is
@@ -2053,7 +2057,13 @@ def _build_qr_discrete_pirls(
         # extended families have no μ_η==0 boundary the way the
         # standard Fisher branch does. mgcv's ``rho != 0`` AR1 branch
         # uses the EXPECTED (Fisher) Hessian ``EDeta2`` / ``Deta.EDeta2``
-        # instead of the observed ``Deta2`` (bam.r:638-641).
+        # instead of the observed ``Deta2`` (bam.r:638-641). tw() rides
+        # this branch too (mgcv efam) — for it, observed ≠ Fisher, and
+        # the choice SELECTS THE BASIN: mgcv's two bam rails genuinely
+        # converge to different (p, φ, sp) fixed points (live receipt:
+        # disc sp 0.2327/φ 1.104 vs non-disc sp 0.2713/φ 1.251 on the
+        # same data), so the discrete rail must use Deta2 to land on
+        # mgcv-discrete's answer.
         theta = family.get_theta()
         deta = family.dDeta(y, mu_full, prior_w, theta, level=0)
         if ar1:
@@ -2434,22 +2444,43 @@ class bam(gam):
         knots: dict | None = None,
         optimizer: tuple | str | None = None,
         start: np.ndarray | list | None = None,
+        in_out: dict | None = None,
+        coef: np.ndarray | list | None = None,
+        samfrac: float = 1.0,
     ):
         # ``data`` may be a polars DataFrame OR a mapping of name → 1-D /
         # 2-D ndarray. 2-D entries become matrix columns for mgcv's
         # summation convention (Wood §7.4.1 distributed-lag models).
+        #
+        # ``in_out``: mgcv bam's warm start — ``{"sp": <FULL per-penalty
+        # λ>, "scale": <scale>}``. Unlike gam's (working-length, checked
+        # up front), bam reads it lazily where the seeds live: λ
+        # replaces ``initial.sp`` (bam.r:687/1229/1687, re-read EVERY
+        # PIRLS iter on the non-discrete rail) and scale replaces the
+        # ``log(var(y)·0.05)`` log φ seed (bam.r:701/1237).
         # ``prepare_design`` normalizes via ``normalize_data``.
         # ---- general (multi-LP) families: the discrete general rail --------
         # mgcv::bam stops here ("general families not supported by bam",
         # bam.r:2653); hea routes formula LISTS to the discrete general
         # driver it completed from mgcv's dormant gamlss.gH branch.
+        self._in_out = in_out
+        # mgcv bam(coef=): warm-start coefficients for the PIRLS
+        # (bgam.fitd:548 / bgam.fit:1066). bam(samfrac=): loose
+        # pre-fit on a random subsample whose coefficients warm-start
+        # the full fit (bam.r:2680-2691, non-discrete generalized rail
+        # only — mgcv's other rails never read it). The Gaussian-
+        # identity rail solves directly, so coef= is a no-op there
+        # (mgcv's direct solve likewise takes no warm start).
+        self._coef_start = (None if coef is None
+                            else np.asarray(coef, dtype=float).reshape(-1))
+        self._samfrac = float(samfrac)
         if isinstance(formula, (list, tuple)):
             self._init_general_discrete(
                 [str(f) for f in formula], data, method=method, sp=sp,
                 family=family, offset=offset, weights=weights, gamma=gamma,
                 select=select, rho=rho, discrete=discrete,
                 discrete_m=discrete_m, knots=knots, optimizer=optimizer,
-                start=start)
+                start=start, in_out=in_out)
             return
         if optimizer is not None:
             raise ValueError(
@@ -2460,8 +2491,7 @@ class bam(gam):
             raise ValueError(
                 "start= applies to the general-family (formula-list) rail "
                 "only (gam.fit5's start, gam.fit4.r:941); mgcv's bam warm-"
-                "starts single-formula fits through coef=, which is not "
-                "ported (roadmap D23).")
+                "starts single-formula fits through coef= — use that.")
         # ---- method aliasing ------------------------------------------------
         # mgcv's bam accepts {fREML, GACV.Cp, GCV.Cp, REML, ML, P-REML,
         # P-ML, NCV} (bam.r:2207). fREML is algorithmically identical to
@@ -2576,37 +2606,38 @@ class bam(gam):
             raise ValueError(f"scale must be a finite number, got {scale!r}")
         scale = float(scale)
         if self._family_mgcv_extended:
-            # mgcv.r:1948-1949 / bam.r:472: extended families resolve scale
-            # from the family when scale≤0 (φ=1); a user scale>0 fixes φ. The
-            # bam-extended REML tail still needs the family `ls` saturated
-            # log-lik (nb/tw/scat) — ported separately.
-            if scale != 0.0 and not self.family.scale_known:
-                raise NotImplementedError(
-                    "scale= for scale-estimating extended families is still "
-                    "wired (needs family.ls); tracked in "
-                    "mgcv-notimplemented-ports.md.")
-            if scale > 0.0:
-                self._scale_resolved = scale
+            # bam.r:472/925 (both fitters): `if (is.null(G$family$scale))
+            # scale <- 1 else scale <- if (G$family$scale<0) scale else
+            # G$family$scale`. NULL-slot families (hea scale_known=True:
+            # nb/scat/ocat/ziP/betar/censored/gfam) pin φ ≡ 1 and SILENTLY
+            # IGNORE a user scale= — unlike gam, whose mgcv.r:1948 rewrite
+            # only fires at scale ≤ 0 (live receipt: bam(nb(2), scale=2.5)
+            # ≡ scale unset, sig2 1). tw (slot −1, hea scale_known=False):
+            # the user scale is kept — scale>0 fixes φ (live receipt:
+            # bam(tw(), scale=2) → sig2 2), scale≤0 estimates it jointly
+            # with the Tweedie p in the PIRLS θ-updates (bam.r:616-630).
+            if self.family.scale_known:
+                self._scale_resolved = 1.0
             else:
-                self._scale_resolved = 1.0 if self.family.scale_known else -1.0
+                self._scale_resolved = scale if scale > 0.0 else -1.0
         elif (self.family.scale_known
               and not isinstance(self.family, _negbin_family)):
-            # poisson/binomial under bam: scale>0 fixes φ (bam.r keeps scale>0,
-            # verified scale=2.5 → φ=2.5; NOT reset to 1 like estimate.gam);
-            # scale=0 → φ=1. scale<0 selects a GCV-style overdispersion
-            # criterion (mgcv-bam: φ=1 but a distinct sp) — still to port.
-            # Fixed-θ negbin is excluded: bam.r:2206 keys its known-scale
-            # list on famname ∈ {"poisson","binomial"} only, so under bam
-            # the negbin scale is ESTIMATED like gaussian/Gamma (verified
-            # live: bam(negbin(2)) → scale.estimated=TRUE) — unlike gam's
+            # poisson/binomial under bam — bam.r:2206 rewrites ONLY
+            # scale==0 (→ 1); everything else passes through: scale>0
+            # fixes φ (verified scale=2.5 → φ=2.5; NOT reset to 1 like
+            # estimate.gam), scale<0 ESTIMATES φ — a quasi-style fREML
+            # fit (live receipt: bam(poisson, scale=-1) →
+            # scale.estimated TRUE, φ̂ 0.9508, sp 0.080715 vs scale=0's
+            # 0.085148, both rails). Fixed-θ negbin is excluded:
+            # bam.r:2206 keys its known-scale list on famname ∈
+            # {"poisson","binomial"} only, so under bam the negbin
+            # scale is ESTIMATED like gaussian/Gamma (verified live:
+            # bam(negbin(2)) → scale.estimated=TRUE) — unlike gam's
             # forced φ=1 (mgcv.r:1963-1966).
             if scale < 0.0:
-                raise NotImplementedError(
-                    "scale<0 for scale-known families under bam selects a "
-                    "GCV-style overdispersion criterion not yet ported; "
-                    "scale>0 (fixed φ) and scale=0 (φ=1) work. Tracked in "
-                    "mgcv-notimplemented-ports.md.")
-            self._scale_resolved = scale if scale > 0 else 1.0
+                self._scale_resolved = -1.0
+            else:
+                self._scale_resolved = scale if scale > 0 else 1.0
         elif method in ("REML", "ML", "P-REML", "P-ML"):
             # scale-unknown family (gaussian/Gamma/inverse.gaussian): scale>0
             # fixes φ (REML/ML drop the log-φ slot); scale≤0 estimates it.
@@ -2826,7 +2857,7 @@ class bam(gam):
             block_sps = []
         if self._select:
             blocks = _add_null_space_penalties(blocks)
-        blocks = _apply_gam_side(blocks)
+        blocks = _apply_gam_side(blocks, X_param_full)
 
         # Slot bookkeeping (column ranges + S matrices) and column count.
         slots: list[_PenaltySlot] = []
@@ -3161,7 +3192,10 @@ class bam(gam):
                 # (bam.r:1229) — there is no PIRLS outer loop for Gaussian
                 # identity (W=I, z=y), so the seed feeds the one and only
                 # converge-fully REML solve.
-                rho0_full = self._initial_sp_rho()
+                # in.out replaces the initial.sp λ seed (bam.r:1687)
+                io_rho0 = self._in_out_rho0()
+                rho0_full = (io_rho0 if io_rho0 is not None
+                             else self._initial_sp_rho())
                 if self._lsp0 is not None:
                     rho0_full = rho0_full - self._lsp0
                 if self._L is None:
@@ -3178,9 +3212,14 @@ class bam(gam):
                     # so the seed only sets the Newton start; mirror it for
                     # source fidelity (and to share the discrete + non-
                     # discrete-generalized seed, bam.py:4134/4302).
-                    cur_logphi = float(np.log(
-                        max(float(np.var(y_full, ddof=1)) * 0.05, 1e-300)
-                    ))
+                    # in.out$scale replaces it (bam.r:1701).
+                    if io_rho0 is not None:
+                        cur_logphi = self._in_out_log_scale()
+                    else:
+                        cur_logphi = float(np.log(
+                            max(float(np.var(y_full, ddof=1)) * 0.05,
+                                1e-300)
+                        ))
                     theta0 = np.concatenate([cur_rho, [cur_logphi]])
                 else:
                     theta0 = cur_rho
@@ -3246,8 +3285,52 @@ class bam(gam):
             self._post_fit_gaussian(fit, rho_hat, X_param_df)
         else:
             # ---- non-Gaussian PIRLS chunked path (mgcv bgam.fit) ------------
-            fit, rho_hat = self._bgam_fit_loop(sp_user=sp)
+            coef_ws = self._coef_start
+            if 0.0 < self._samfrac < 1.0 and self._discrete_design is None:
+                # bam(samfrac=): loose pre-fit on a subsample, then the
+                # full fit warm-starts at its coefficients
+                # (bam.r:2680-2691; the discrete branch never reads
+                # samfrac).
+                coef_ws = self._samfrac_prefit(coef_ws, sp)
+            fit, rho_hat = self._bgam_fit_loop(sp_user=sp,
+                                               coef_start=coef_ws)
             self._post_fit_pirls(fit, rho_hat, X_param_df)
+
+    def _samfrac_prefit(self, coef_ws, sp):
+        """bam(samfrac=)'s subsample pre-fit (bam.r:2680-2691): draw
+        ceiling(n·samfrac) rows, fit with control$epsilon loosened to
+        1e-2 sharing the FULL-data bases/penalties (mgcv subsets mf,
+        never rebuilds G), and return the coefficients as the full
+        fit's ``coef=`` warm start. mgcv draws from the ambient R RNG
+        (irreproducible from the call alone); hea uses a fixed
+        ``hea.R.rng`` stream — the subsample only picks the warm
+        start, and the full fit converges to the same optimum either
+        way. mgcv's too-small guard warns and skips."""
+        from ..R.rng import RGenerator
+        n = self.n
+        k = int(np.ceil(n * float(self._samfrac)))
+        if k < 2 * self.p:
+            import warnings as _w
+            _w.warn("samfrac too small - ignored", stacklevel=2)
+            return coef_ws
+        ind = RGenerator(1).mt.sample_int(n, k)
+        saved = (self._y_arr, self._offset, self._wt, self.data,
+                 self._X_param_full, self.n, self._binom_n)
+        try:
+            self._y_arr = self._y_arr[ind]
+            self._offset = self._offset[ind]
+            self._wt = self._wt[ind]
+            self.data = self.data[ind]
+            self._X_param_full = self._X_param_full[ind]
+            self.n = int(k)
+            if self._binom_n is not None:
+                self._binom_n = self._binom_n[ind]
+            fit_s, _rho_s = self._bgam_fit_loop(
+                sp_user=sp, coef_start=coef_ws, eps=1e-2)
+            return np.asarray(fit_s.beta, dtype=float).copy()
+        finally:
+            (self._y_arr, self._offset, self._wt, self.data,
+             self._X_param_full, self.n, self._binom_n) = saved
 
     # -----------------------------------------------------------------------
     # general (multi-LP) families on the discrete rail
@@ -3256,7 +3339,7 @@ class bam(gam):
     def _init_general_discrete(self, formulas, data, *, method, sp, family,
                                offset, weights, gamma, select, rho,
                                discrete, discrete_m, knots, optimizer=None,
-                               start=None):
+                               start=None, in_out=None):
         """bam for GENERAL (multi-LP) families on the discrete rail — the
         driver mgcv never wired: ``bam.r:2653`` stops with "general
         families not supported by bam" while ``gamlss.gH``'s complete
@@ -3363,7 +3446,8 @@ class bam(gam):
         # a polars frame regardless of the caller's data type.
         self._init_general_from_md(md, self.data, family=family, sp=sp,
                                    method="REML", weights=weights,
-                                   start=start, optimizer=optimizer)
+                                   start=start, optimizer=optimizer,
+                                   in_out=in_out)
 
     def _build_discrete_general_md(self, formulas, data, knots, select,
                                    discrete_m) -> _MultiDesign:
@@ -3458,16 +3542,15 @@ class bam(gam):
             block_ids: list[str | None] = []
             for call_node, grp in zip(d.expanded.smooths, sb_lists):
                 block_ids.extend([_smooth_id_value(call_node)] * len(grp))
-            if select:
-                blocks = _add_null_space_penalties(blocks)
-            blocks = _apply_gam_side(blocks)
-            if j > 0:
-                for b in blocks:
-                    b.label = _suffix_smooth_label(b.label, f".{j}")
-
             Xp = d.X.to_numpy().astype(float)
             if Xp.shape[1] == 0:
                 Xp = np.zeros((n, 0))
+            if select:
+                blocks = _add_null_space_penalties(blocks)
+            blocks = _apply_gam_side(blocks, Xp)
+            if j > 0:
+                for b in blocks:
+                    b.label = _suffix_smooth_label(b.label, f".{j}")
             lp_parts.append((Xp, blocks))
             p_par = Xp.shape[1]
             pstart.append(pof)
@@ -3582,6 +3665,9 @@ class bam(gam):
         terms: str | list[str] | None = None,
         exclude: str | list[str] | None = None,
         iterms_type: int | None = None,
+        block_size: int | None = None,
+        newdata_guaranteed: bool = False,
+        na_action: str | None = "na.pass",
     ):
         """Predict from the fitted bam — :func:`predict.bam` parity.
 
@@ -3634,6 +3720,20 @@ class bam(gam):
             raise ValueError(
                 "se_fit=True is not allowed with type='lpmatrix'"
             )
+        # predict.bam's newdata stage: run predict.gam's shared
+        # processing ONCE here (mgcv's predict.bamd does the same via
+        # predict.gam(type="newdata"), bam.r:1806), then hand the
+        # processed frame down with newdata_guaranteed so the parent
+        # doesn't reprocess; NA-expand every output at this level.
+        # predict.bam's block.size default is 50000 (bam.r:1416), not
+        # predict.gam's 1000 — resolve before forwarding.
+        na_mask = None
+        if newdata is not None:
+            newdata, na_mask = self._process_predict_newdata(
+                newdata, newdata_guaranteed, na_action)
+            newdata_guaranteed = True
+        if block_size is None:
+            block_size = 50000
         # Discrete GENERAL fit (formula list): whole-model link/response/
         # lpmatrix ride the binned per-LP kernel surface; terms/iterms,
         # terms=/exclude= selection and family-`predict`-hooked response
@@ -3654,15 +3754,16 @@ class bam(gam):
             if (type in ("link", "response", "lpmatrix")
                     and terms is None and exclude is None
                     and not (type == "response" and fam_predict is not None)):
-                return self._predict_bamd_general(
+                return _na_pass_expand(self._predict_bamd_general(
                     newdata, type=type, se_fit=se_fit,
-                    unconditional=unconditional)
-            return super().predict(
+                    unconditional=unconditional), na_mask)
+            return _na_pass_expand(super().predict(
                 newdata=self.data if newdata is None else newdata,
                 type=type, se_fit=se_fit, offset=offset,
                 unconditional=unconditional, terms=terms, exclude=exclude,
-                iterms_type=iterms_type,
-            )
+                iterms_type=iterms_type, block_size=block_size,
+                newdata_guaranteed=newdata_guaranteed, na_action=na_action,
+            ), na_mask)
 
         # predict.bam routes a DISCRETE fit (``object$dinfo`` set) to
         # predict.bamd (bam.r:1421) — bin newdata's covariates to the
@@ -3684,10 +3785,10 @@ class bam(gam):
                 and type in ("link", "response", "lpmatrix")
                 and terms is None and exclude is None
                 and not isinstance(self.family, _gfam_family)):
-            return self._predict_bamd(
+            return _na_pass_expand(self._predict_bamd(
                 newdata, type=type, se_fit=se_fit, offset=offset,
                 unconditional=unconditional,
-            )
+            ), na_mask)
 
         # predict.bam delegates the non-discrete case to predict.gam, so the
         # whole gam.predict surface (terms/iterms decomposition, terms=/
@@ -3695,11 +3796,12 @@ class bam(gam):
         # *overrides* the cached/chunked fast paths for whole-model
         # link/response/lpmatrix; everything else routes to the parent.
         if newdata is not None:
-            return super().predict(
+            return _na_pass_expand(super().predict(
                 newdata=newdata, type=type, se_fit=se_fit, offset=offset,
                 unconditional=unconditional, terms=terms, exclude=exclude,
-                iterms_type=iterms_type,
-            )
+                iterms_type=iterms_type, block_size=block_size,
+                newdata_guaranteed=newdata_guaranteed, na_action=na_action,
+            ), na_mask)
 
         # ---- newdata=None branch -------------------------------------------
         # Per-term decomposition, term selection, or the sp-uncertainty
@@ -3712,7 +3814,7 @@ class bam(gam):
             return super().predict(
                 newdata=self.data, type=type, se_fit=se_fit, offset=offset,
                 unconditional=unconditional, terms=terms, exclude=exclude,
-                iterms_type=iterms_type,
+                iterms_type=iterms_type, block_size=block_size,
             )
 
         extra: Optional[np.ndarray] = None
@@ -4437,6 +4539,31 @@ class bam(gam):
     # initial sp seed — uses cached XtX diag, no full design
     # -----------------------------------------------------------------------
 
+    def _in_out_rho0(self) -> np.ndarray | None:
+        """bam's ``in.out$sp`` λ seed: ``log(in.out$sp)`` in FULL
+        per-penalty space, replacing ``initial.sp`` (bam.r:687/1229/
+        1687 — the non-discrete rail re-reads it every PIRLS iter).
+        None when ``in_out`` is unset."""
+        if getattr(self, "_in_out", None) is None:
+            return None
+        sp = self._in_out.get("sp") if isinstance(self._in_out, dict) \
+            else None
+        if sp is None:
+            raise ValueError("in.out incorrect: see documentation")
+        sp = np.asarray(sp, dtype=float).reshape(-1)
+        if sp.size != len(self._slots):
+            raise ValueError("in.out incorrect: see documentation")
+        return np.log(sp)
+
+    def _in_out_log_scale(self) -> float:
+        """``log(in.out$scale)`` — the log φ seed replacement
+        (bam.r:701/1237); mgcv errors on a missing scale entry."""
+        scale = (self._in_out.get("scale")
+                 if isinstance(self._in_out, dict) else None)
+        if scale is None:
+            raise ValueError("in.out incorrect: see documentation")
+        return float(np.log(float(scale)))
+
     def _initial_sp_rho(self) -> np.ndarray:
         """``initial.sp`` seed using ``diag(R'R)`` for the column sums of
         squares (= ``diag(X'X) = Σ_i X[i,j]²``) — no full design needed."""
@@ -5159,8 +5286,16 @@ class bam(gam):
         a = _sl_rsb(self._sl, rho_full, b)
         return float(np.dot(a, a))
 
-    def _bgam_fit_loop(self, *, sp_user) -> tuple["_FitState", np.ndarray]:
+    def _bgam_fit_loop(self, *, sp_user, coef_start=None,
+                       eps: float = 1e-7) -> tuple["_FitState", np.ndarray]:
         """Outer PIRLS loop with chunked QR rebuild per iter.
+
+        ``coef_start`` is mgcv's ``coef=`` warm start (bgam.fitd:548-560
+        / bgam.fit:1066): iteration 0 builds the working model at
+        η = X·coef + offset instead of the family-initialize η, with
+        dev seeded at 2·dev(coef) and the step-halving reference
+        snapshots armed from the start. ``eps`` is control$epsilon —
+        the samfrac pre-fit loosens it to 1e-2 (bam.r:2685).
 
         Direct port of mgcv ``bgam.fit`` (bam.r:909-1353). Each iteration:
 
@@ -5219,8 +5354,9 @@ class bam(gam):
         # ``family.preinitialize(y)`` may return ``{"Theta": ...}`` to
         # override the family's internal θ from data (Scat: c(1.5,
         # log(0.8·sd(y)))). Standard families return None. Fires once,
-        # before the first PIRLS iter.
-        if family.is_extended:
+        # before the first PIRLS iter. tw is mgcv-extended (its
+        # preinitialize is a no-op, like mgcv's NULL slot).
+        if self._family_mgcv_extended:
             pini = family.preinitialize(y)
             if pini is not None and "Theta" in pini:
                 family.set_theta(pini["Theta"])
@@ -5249,7 +5385,28 @@ class bam(gam):
         # mgcv:969 — dev = sum(dev_resids) * 2 to avoid spurious convergence at iter 1.
         dev = 2.0 * float(np.sum(family.dev_resids(y, mu, prior_w)))
 
-        eps = 1e-7
+        if coef_start is not None:
+            # mgcv coef= warm start. DISCRETE (bgam.fitd:548-560,
+            # "including for step halving (Matteo Fasiolo)"): iteration
+            # 0 evaluates the working model at the supplied
+            # coefficients — η/μ/dev from them, dev seeded 2·dev0 to
+            # dodge the iter-1 convergence test, the halving reference
+            # (coef0/eta0) armed immediately. NON-DISCRETE (bgam.fit:
+            # 1066): coef only replaces the iter-1 η inside the chunk
+            # builder (η = X·coef + offset); dev keeps the initialize
+            # seed.
+            coef = np.asarray(coef_start, dtype=float).reshape(-1)
+            if coef.shape != (self.p,):
+                raise ValueError(
+                    f"coef must have length {self.p}, got {coef.shape}")
+            if self._discrete_design is not None:
+                eta = Xbd(self._discrete_design, coef) + off
+                mu = link.linkinv(eta)
+                dev0 = float(np.sum(family.dev_resids(y, mu, prior_w)))
+                dev = 2.0 * dev0
+                coef0 = coef.copy()
+                eta0 = eta.copy()
+
         maxit = 200          # mgcv default control$maxit
         conv = False
 
@@ -5342,7 +5499,9 @@ class bam(gam):
                     # the coef AND the Sb vector linearly (bam.r:1181-1184).
                     if not hasattr(self, "_sl"):
                         self._sl = _sl_setup(self._slots, self.p)
-                    efam = family.is_extended
+                    # mgcv's efam = inherits(family,"extended.family") —
+                    # includes tw (bam.r:1163+ θ-swap runs for it).
+                    efam = self._family_mgcv_extended
                     theta_now = family.get_theta() if efam else None
                     use_t0 = efam and theta0_snap is not None
                     if use_t0:
@@ -5379,16 +5538,38 @@ class bam(gam):
             # ---- DISCRETE extended-family θ update at the (halved) μ --------
             # mgcv bgam.fitd:614-630 — estimate θ MID-iter (before the build), so
             # this iter's build sees this-iter θ. The NON-discrete path estimates
-            # θ at the END of the iter instead (bam.r:1204; see below). Only fires
-            # for families whose θ is free (Scat with both θ locked has
-            # ``n_theta = 0`` and stays put).
+            # θ at the END of the iter instead (bam.r:1204; see below). Gate =
+            # mgcv's `family$n.theta>0 || (scale<0 && iter<5)` (bgam.fitd:617;
+            # mgcv iter is 1-based, hea it = iter−1): families whose θ is free
+            # (Scat with both θ locked has ``n_theta = 0`` and stays put) — plus
+            # tw's early joint (θ, log φ) passes when the scale is estimated.
+            scale_joint = (self._scale_resolved is not None
+                           and self._scale_resolved < 0 and it < 4)
             if (it >= 1 and discrete
-                    and family.is_extended
-                    and family.estimate_theta_callback):
+                    and self._family_mgcv_extended
+                    and (family.n_theta > 0 or scale_joint)):
+                if scale_joint:
+                    # bgam.fitd:619 — iters 2-4 pass scale<0 straight
+                    # through: estimate.theta appends a log φ slot and
+                    # optimizes the log-lik over (θ, log φ) jointly.
+                    scale1 = float(self._scale_resolved)
+                elif include_log_phi and log_phi_hat is not None:
+                    scale1 = float(np.exp(log_phi_hat))  # exp(log.phi)
+                else:
+                    scale1 = self._scale_fixed_value     # log.phi=log(scale)
                 theta_new = _estimate_theta(
-                    family, y, mu, scale=1.0,
+                    family, y, mu, scale=scale1,
                     wt=prior_w, tol=1e-7,
                 )
+                if scale_joint:
+                    # bgam.fitd:623-628: the jointly-estimated log φ
+                    # OVERWRITES the sp-iterate's φ slot (lsp0[n.sp+1])
+                    # and its Newton step is zeroed for this iter.
+                    log_phi_hat = float(theta_new[-1])
+                    theta_new = theta_new[:-1]
+                    if (include_log_phi and Nstep is not None
+                            and Nstep.size):
+                        Nstep[-1] = 0.0
                 family.set_theta(theta_new)
 
             # ---- Build the working model (mgcv bgam.fitd:567 ``if (iter==1 ||
@@ -5508,7 +5689,7 @@ class bam(gam):
             if it > 0 and coef is not None:
                 coef0 = coef.copy()
                 eta0 = eta.copy()
-                if (not discrete) and family.is_extended:
+                if (not discrete) and self._family_mgcv_extended:
                     theta0_snap = np.asarray(family.get_theta(),
                                              dtype=float).copy()
 
@@ -5518,14 +5699,33 @@ class bam(gam):
             # uses THIS θ — i.e. each build sees the PREVIOUS iter's θ. (The
             # discrete path estimated θ mid-iter, above.) θ is fit at the current
             # μ = linkinv(eta), the post-build/post-halving μ (== bam.r:1209's
-            # ``linkinv(eta)``).
+            # ``linkinv(eta)``). Gate = mgcv's `family$n.theta>0 || (scale<0 &&
+            # iter<5)` (bam.r:1206) — free-θ families plus tw's early joint
+            # (θ, log φ) passes when the scale is estimated.
+            scale_joint_nd = ((not discrete)
+                              and self._scale_resolved is not None
+                              and self._scale_resolved < 0 and it < 4)
             if (it >= 1 and (not discrete)
-                    and family.is_extended
-                    and family.estimate_theta_callback):
+                    and self._family_mgcv_extended
+                    and (family.n_theta > 0 or scale_joint_nd)):
+                if scale_joint_nd:
+                    # bam.r:1208 — iters 2-4 pass scale<0 through:
+                    # estimate.theta optimizes (θ, log φ) jointly.
+                    scale1 = float(self._scale_resolved)
+                elif include_log_phi and log_phi_hat is not None:
+                    # object$scale — the previous fast.REML iterate's φ̂.
+                    scale1 = float(np.exp(log_phi_hat))
+                else:
+                    scale1 = self._scale_fixed_value
                 theta_new = _estimate_theta(
-                    family, y, mu, scale=1.0,
+                    family, y, mu, scale=scale1,
                     wt=prior_w, tol=1e-7,
                 )
+                if scale_joint_nd:
+                    # bam.r:1212-1215: object$scale <- exp(θ_φ); the next
+                    # iter's fast.REML log φ seed reads it (bam.r:1233).
+                    log_phi_hat = float(theta_new[-1])
+                    theta_new = theta_new[:-1]
                 family.set_theta(theta_new)
 
             # ---- sp optimisation on the current (R, f, rss_extra) -----------
@@ -5600,7 +5800,10 @@ class bam(gam):
                     if theta_sp_warm is None:
                         # Full-space initial.spg seed → working space by least
                         # squares (mgcv mgcv.r:4617-4618); identity when no id.
-                        rho0_full = self._initial_sp_rho()
+                        # in.out replaces the λ seed (bgam.fitd:687).
+                        io_rho0 = self._in_out_rho0()
+                        rho0_full = (io_rho0 if io_rho0 is not None
+                                     else self._initial_sp_rho())
                         if self._lsp0 is not None:
                             rho0_full = rho0_full - self._lsp0
                         if self._L is None:
@@ -5625,9 +5828,14 @@ class bam(gam):
                             # a different basin (sp/log φ off ~0.7%/2%). ``var``
                             # uses R's n−1 denominator. The ``coef``-supplied /
                             # ``y.norm2==0`` branches don't arise here.
-                            log_phi_cur = float(np.log(
-                                max(float(np.var(y, ddof=1)) * 0.05, 1e-300)
-                            ))
+                            # in.out$scale replaces it (bgam.fitd:701).
+                            if getattr(self, "_in_out", None) is not None:
+                                log_phi_cur = self._in_out_log_scale()
+                            else:
+                                log_phi_cur = float(np.log(
+                                    max(float(np.var(y, ddof=1)) * 0.05,
+                                        1e-300)
+                                ))
                         else:
                             log_phi_cur = log_phi_hat
                         theta_cur = np.concatenate(
@@ -5651,7 +5859,12 @@ class bam(gam):
                         if include_log_phi:
                             log_phi_try = float(theta_try[n_work])
                         else:
-                            log_phi_try = 0.0
+                            # bgam.fitd:696 `if (scale>0) log.phi <-
+                            # log(scale)` — a FIXED φ ≠ 1 (bam(scale=))
+                            # enters Sl.fitChol's criterion; φ=1 paths
+                            # give the old 0.
+                            log_phi_try = float(
+                                np.log(self._scale_fixed_value))
                         # ``Sl.initial.repara`` (fast-REML.r:517-588,
                         # bam.r:664-665) — reparameterize XX, Xy into mgcv's
                         # well-scaled gauge (every penalty block, two-sided)
@@ -5763,8 +5976,11 @@ class bam(gam):
                     # iter's scale estimate (bam.r:1233). ``_initial_sp_rho``
                     # gives the full-space seed; ``coef(lm(lsp ~ L-1+offset))``
                     # (the lstsq) projects it to working space, identity when
-                    # no smooths share an id (fast-REML.r:1768).
-                    rho0_full = self._initial_sp_rho()
+                    # no smooths share an id (fast-REML.r:1768). in.out's λ
+                    # replaces the seed — every iter, like mgcv (bam.r:1229).
+                    io_rho0 = self._in_out_rho0()
+                    rho0_full = (io_rho0 if io_rho0 is not None
+                                 else self._initial_sp_rho())
                     if self._lsp0 is not None:
                         rho0_full = rho0_full - self._lsp0
                     if self._L is None:
@@ -5782,9 +5998,14 @@ class bam(gam):
                             # converges fully each iter so the seed only sets the
                             # Newton start, but mirror it for source fidelity (and
                             # to share the discrete path's seed, bam.py:4134).
-                            log_phi0 = float(np.log(
-                                max(float(np.var(y, ddof=1)) * 0.05, 1e-300)
-                            ))
+                            # in.out$scale replaces it (bam.r:1237).
+                            if getattr(self, "_in_out", None) is not None:
+                                log_phi0 = self._in_out_log_scale()
+                            else:
+                                log_phi0 = float(np.log(
+                                    max(float(np.var(y, ddof=1)) * 0.05,
+                                        1e-300)
+                                ))
                         else:                       # iter > 1 — carry forward
                             log_phi0 = log_phi_hat
                         theta0 = np.concatenate([rho0, [log_phi0]])
@@ -6124,9 +6345,10 @@ class bam(gam):
         )
         self.df_null = float(n - 1) if self._has_intercept else float(n)
         # Extended-family postproc (bam.r:1322-1331): find.null.dev
-        # null deviance + θ-embedding family relabel.
+        # null deviance + θ-embedding family relabel (tw included —
+        # mgcv's efam set).
         self._postproc = {}
-        if family.is_extended:
+        if self._family_mgcv_extended:
             pp = family.postproc(
                 y, prior_weights=wt, fitted=mu,
                 linear_predictors=eta, offset=self._offset,
