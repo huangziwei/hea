@@ -9803,11 +9803,43 @@ def gamlss_etamu(l1, l2, l3=None, l4=None, ig1=None, g2=None, g3=None,
     return {"l1": d1, "l2": d2, "l3": d3, "l4": d4}
 
 
+class DiscreteX:
+    """The list-form design mgcv's general-family ``ll``/``gamlss.gH``
+    consume on the discrete path — hea's analog of the bundle
+    ``list(Xd=..., kd=..., ks=..., ts=..., dt=..., v=..., qc=...,
+    drop=..., lpid=...)`` (bam.r:1996). ``design`` is the compressed
+    :class:`hea.models.bam.DiscreteDesign` (≡ Xd/kd/ks/ts/dt/v/qc —
+    hea's terms carry constraints and coefficient slices themselves);
+    ``lpid[j]`` lists LP j's 0-based term indices in ascending
+    coefficient order (≡ ``X$lpid``, bam.r:2550-2553). The per-LP
+    coefficient index arrays (mgcv's ``attr(X, "lpi")``) stay the
+    explicit ``lpi`` argument hea families already take."""
+    __slots__ = ("design", "lpid")
+
+    def __init__(self, design, lpid):
+        self.design = design
+        self.lpid = [list(ix) for ix in lpid]
+
+
+def _discrete_kernels():
+    """Deferred import of the compressed-design kernels (family.py loads
+    before hea.models.bam; call-time import mirrors ``_pen_reg``)."""
+    from .models.bam import Xbd, XWXd, XWyd
+    return Xbd, XWXd, XWyd
+
+
 def gamlss_gH(X, jj, l1, l2, i2, l3=None, i3=None, l4=None, i4=None,
               d1b=None, d2b=None, deriv: int = 0, fh=None,
               D=None, sandwich: bool = False) -> dict:
-    """mgcv ``gamlss.gH`` (gamlss.r:587-857), dense complete-array paths:
-    coefficient-space quantities from η-space derivative arrays.
+    """mgcv ``gamlss.gH`` (gamlss.r:587-857): coefficient-space
+    quantities from η-space derivative arrays — dense complete-array
+    paths, plus the discrete branch (mgcv's ``is.list(X)``,
+    gamlss.r:604-711) when ``X`` is a :class:`DiscreteX`: gradient
+    blocks via ``XWyd(…, lt=lpid[i])`` (:625), Hessian LP-block pairs
+    via ``XWXd(…, lt=lpid[i], rt=lpid[j])`` (:656), ``d1eta`` via
+    ``Xbd(…, lt=lpid[i])`` (:683) and the ``deriv==1`` trace
+    accumulation (:700-734); ``deriv>1`` stops exactly like mgcv
+    (:777) — the n×p design is never materialised.
 
     ``jj[i]`` = LP i's column indices into X (0-based). ``deriv``:
       0 — ``lb`` (gradient) and ``lbb`` (Hessian) only;
@@ -9822,14 +9854,27 @@ def gamlss_gH(X, jj, l1, l2, i2, l3=None, i3=None, l4=None, i4=None,
     ``lbb`` becomes the per-observation gradient outer-product sum — the
     "filling" of the robust sandwich covariance — instead of the Hessian.
     """
-    X = np.asarray(X, dtype=float)
-    n, p = X.shape
+    discrete = isinstance(X, DiscreteX)
+    if discrete:
+        _Xbd, _XWXd, _XWyd = _discrete_kernels()
+        design = X.design
+        lpid = X.lpid
+        n = design.n
+        p = design.p
+    else:
+        X = np.asarray(X, dtype=float)
+        n, p = X.shape
     K = len(jj)
     l1 = np.asarray(l1, dtype=float)
     l2 = np.asarray(l2, dtype=float)
     lb = np.zeros(p)
-    for i in range(K):
-        lb[jj[i]] += X[:, jj[i]].T @ l1[:, i]
+    if discrete:
+        ones_n = np.ones(n)
+        for i in range(K):
+            lb[jj[i]] += _XWyd(design, ones_n, l1[:, i], lt=lpid[i])
+    else:
+        for i in range(K):
+            lb[jj[i]] += X[:, jj[i]].T @ l1[:, i]
 
     if sandwich:
         # mgcv gamlss.r:643-649: reset l2 so the "Hessian" becomes the
@@ -9860,9 +9905,16 @@ def gamlss_gH(X, jj, l1, l2, i2, l3=None, i3=None, l4=None, i4=None,
     lbb = np.zeros((p, p))
     for i in range(K):
         for j in range(i, K):
-            Xi = X[:, jj[i]]
-            WXj = l2[:, i2[i, j]][:, None] * X[:, jj[j]]
-            A = _xwx(Xi, WXj) if det else Xi.T @ WXj
+            if discrete:
+                # gamlss.r:656-659: the (i,j) LP block straight off the
+                # compressed design; XWXd's lt/rt returns exactly the
+                # |jj[i]| × |jj[j]| block in coefficient order.
+                A = _XWXd(design, l2[:, i2[i, j]], lt=lpid[i],
+                          rt=lpid[j])
+            else:
+                Xi = X[:, jj[i]]
+                WXj = l2[:, i2[i, j]][:, None] * X[:, jj[j]]
+                A = _xwx(Xi, WXj) if det else Xi.T @ WXj
             lbb[np.ix_(jj[i], jj[j])] += A
             if j > i:
                 lbb[np.ix_(jj[j], jj[i])] += A.T
@@ -9873,27 +9925,54 @@ def gamlss_gH(X, jj, l1, l2, i2, l3=None, i3=None, l4=None, i4=None,
         l3 = np.asarray(l3, dtype=float)
         d1b = np.asarray(d1b, dtype=float)
         m = d1b.shape[1]
-        # Stacked per-LP derivative of η w.r.t. each ρ (gamlss.r:680-686).
+        # Stacked per-LP derivative of η w.r.t. each ρ (gamlss.r:680-686);
+        # discrete: Xbd of the FULL d1b restricted to LP i's terms (:683).
         d1eta = np.zeros((n * K, m))
         for i in range(K):
-            d1eta[i * n:(i + 1) * n, :] = X[:, jj[i]] @ d1b[jj[i], :]
+            d1eta[i * n:(i + 1) * n, :] = (
+                _Xbd(design, d1b, lt=lpid[i]) if discrete
+                else X[:, jj[i]] @ d1b[jj[i], :])
 
     if deriv == 1:
-        # tr(Hp⁻¹ ∂H/∂ρ_l) accumulation (gamlss.r:735-773, dense branch);
-        # fh is the inverse penalized Hessian.
+        # tr(Hp⁻¹ ∂H/∂ρ_l) accumulation; fh is the inverse penalized
+        # Hessian. Discrete: gamlss.r:700-734 — form the (i,j) block of
+        # ∂H/∂ρ_l as XWXd(v) and trace against the matching fh block
+        # (Wood's :701 note confirms jj, not lpi, indexes fh here).
+        # Dense: gamlss.r:735-773.
         fh = np.asarray(fh, dtype=float)
         d1H = np.zeros(m)
-        for i in range(K):
-            for j in range(i, K):
-                Hpi = fh[np.ix_(jj[i], jj[j])]
-                a = np.einsum("ij,ij->i", X[:, jj[i]] @ Hpi, X[:, jj[j]])
-                mult = 1.0 if i == j else 2.0
-                for ll_ in range(m):
-                    v = np.zeros(n)
-                    for q in range(K):
-                        v += l3[:, i3[i, j, q]] * d1eta[q * n:(q + 1) * n,
-                                                        ll_]
-                    d1H[ll_] += mult * float(np.sum(a * v))
+        if discrete:
+            for i in range(K):
+                for j in range(i, K):
+                    mult = 1.0 if i == j else 2.0
+                    for ll_ in range(m):
+                        v = np.zeros(n)
+                        for q in range(K):
+                            v += (l3[:, i3[i, j, q]]
+                                  * d1eta[q * n:(q + 1) * n, ll_])
+                        XVX = _XWXd(design, v, lt=lpid[i], rt=lpid[j])
+                        d1H[ll_] += mult * float(
+                            np.sum(XVX * fh[np.ix_(jj[i], jj[j])]))
+        else:
+            for i in range(K):
+                for j in range(i, K):
+                    Hpi = fh[np.ix_(jj[i], jj[j])]
+                    a = np.einsum("ij,ij->i", X[:, jj[i]] @ Hpi,
+                                  X[:, jj[j]])
+                    mult = 1.0 if i == j else 2.0
+                    for ll_ in range(m):
+                        v = np.zeros(n)
+                        for q in range(K):
+                            v += l3[:, i3[i, j, q]] * d1eta[q * n:(q + 1)
+                                                            * n, ll_]
+                        d1H[ll_] += mult * float(np.sum(a * v))
+
+    if deriv > 1 and discrete:
+        # mgcv gamlss.r:777 stops the discrete path at first-order Hessian
+        # derivatives; the trace form above is all the discrete REML
+        # machinery gets (sp selection runs EFS/BFGS, never full Newton).
+        raise NotImplementedError(
+            "er... no discrete methods for higher derivatives")
 
     if deriv > 1:
         # Full ∂H/∂ρ_l matrices (gamlss.r:776-796).
@@ -10258,11 +10337,18 @@ class gaulss(GeneralFamily):
            d1b=None, d2b=None, fh=None, D=None,
            sandwich: bool = False) -> dict:
         y = np.asarray(y, dtype=float)
-        X = np.asarray(X, dtype=float)
         coef = np.asarray(coef, dtype=float)
         jj = [np.asarray(ix, dtype=int) for ix in lpi]
-        eta = X[:, jj[0]] @ coef[jj[0]]
-        eta1 = X[:, jj[1]] @ coef[jj[1]]
+        if isinstance(X, DiscreteX):
+            # gamlss.r:936-938: per-LP η off the compressed design —
+            # Xbd of the FULL coef restricted to the LP's terms.
+            _Xbd, _, _ = _discrete_kernels()
+            eta = _Xbd(X.design, coef, lt=X.lpid[0])
+            eta1 = _Xbd(X.design, coef, lt=X.lpid[1])
+        else:
+            X = np.asarray(X, dtype=float)
+            eta = X[:, jj[0]] @ coef[jj[0]]
+            eta1 = X[:, jj[1]] @ coef[jj[1]]
         if offset is not None:
             if offset[0] is not None:
                 eta = eta + offset[0]
@@ -10318,16 +10404,22 @@ class gaulss(GeneralFamily):
 
     def initialize_coef(self, y, X, lpi, E=None, offset=None,
                         use_unscaled: bool = False) -> np.ndarray:
-        """gaulss ``initialize`` (gamlss.r:1016-1086, dense branch):
-        regress g(y) on LP1's columns, then the log absolute residuals
-        on LP2's, with the penalty root ``E`` as a regularizer.
+        """gaulss ``initialize`` (gamlss.r:1016-1086): regress g(y) on
+        LP1's columns, then the log absolute residuals on LP2's, with
+        the penalty root ``E`` as a regularizer.
         ``use_unscaled`` (mgcv's ``attr(E,"use.unscaled")``, set by
         gam.fit5 on its ldetS root): stacked least squares with E
         as-is; otherwise (initial.spg's balanced root) ``pen.reg``
-        adjusts the penalty weight to an edf target."""
+        adjusts the penalty weight to an edf target. A :class:`DiscreteX`
+        design takes the discrete branch (gamlss.r:1033-1062): per LP
+        solve ``(X'X + E'E)β = X'target`` through the pivoted Cholesky
+        (``mchol``, rank-truncated) — E enters as a plain crossprod
+        regularizer regardless of ``use_unscaled`` there."""
         y = np.asarray(y, dtype=float)
-        X = np.asarray(X, dtype=float)
         jj = [np.asarray(ix, dtype=int) for ix in lpi]
+        if isinstance(X, DiscreteX):
+            return self._initialize_coef_discrete(y, X, jj, E, offset)
+        X = np.asarray(X, dtype=float)
         p = X.shape[1]
         if E is None:
             E = np.zeros((0, p))
@@ -10356,6 +10448,54 @@ class gaulss(GeneralFamily):
         if offset is not None and len(offset) > 1 and offset[1] is not None:
             lres1 = lres1 - offset[1]
         start[jj[1]] = _reg(jj[1], lres1)
+        return start
+
+    def _initialize_coef_discrete(self, y, X: DiscreteX, jj, E,
+                                  offset) -> np.ndarray:
+        """gaulss ``initialize``'s discrete branch (gamlss.r:1033-1062):
+        ``R <- mchol(XWXd(…, lt=lpid[i]) + crossprod(E[, jj[i]]))``,
+        ``startji[piv] <- backsolve(R, forwardsolve(t(R), Xty[piv]))``
+        with the rank truncation of :1041-1044, non-finite entries
+        zeroed; LP1's residuals via ``Xbd(…, lt=lpid[0])`` (:1048)."""
+        from scipy.linalg import solve_triangular
+
+        from .models.gam import _pivoted_chol
+        _Xbd, _XWXd, _XWyd = _discrete_kernels()
+        design = X.design
+        lpid = X.lpid
+        n = y.shape[0]
+        p = design.p
+        if E is None:
+            E = np.zeros((0, p))
+        E = np.asarray(E, dtype=float)
+        ones_n = np.ones(n)
+
+        def _solve_lp(i: int, target: np.ndarray) -> np.ndarray:
+            Ei = E[:, jj[i]]
+            A = _XWXd(design, ones_n, lt=lpid[i]) + Ei.T @ Ei
+            Xty = _XWyd(design, ones_n, target, lt=lpid[i])
+            U, piv, rrank = _pivoted_chol(A)
+            startji = np.zeros(A.shape[0])
+            Uu = U[:rrank, :rrank]
+            pv = piv[:rrank]
+            z = solve_triangular(Uu, Xty[pv], lower=False, trans="T")
+            startji[pv] = solve_triangular(Uu, z, lower=False)
+            startji[~np.isfinite(startji)] = 0.0
+            return startji
+
+        start = np.zeros(p)
+        if self.links[0].name == "identity":
+            yt1 = y.copy()
+        else:
+            yt1 = self.links[0].link(np.abs(y) + float(np.max(y)) * 1e-7)
+        if offset is not None and offset[0] is not None:
+            yt1 = yt1 - offset[0]
+        start[jj[0]] = _solve_lp(0, yt1)
+        eta1 = _Xbd(design, start, lt=lpid[0])
+        lres1 = np.log(np.abs(y - self.links[0].linkinv(eta1)))
+        if offset is not None and len(offset) > 1 and offset[1] is not None:
+            lres1 = lres1 - offset[1]
+        start[jj[1]] = _solve_lp(1, lres1)
         return start
 
     def postproc(self, y, prior_weights, fitted, linear_predictors,
@@ -13644,7 +13784,7 @@ __all__ = [
     "GeneralFamily", "gaulss", "twlss", "shash", "gammals", "gumbls",
     "gevlss", "cox_ph", "ziplss", "multinom", "mvn",
     "LogebLink", "SoftplusLink", "BoundedLogLink", "ShiftedLogitLink",
-    "trind_generator", "gamlss_etamu", "gamlss_gH",
+    "trind_generator", "gamlss_etamu", "gamlss_gH", "DiscreteX",
     "IdentityLink", "LogLink", "InverseLink",
     "SqrtLink", "LogitLink", "ProbitLink", "CauchitLink", "CloglogLink",
     "InverseSquareLink", "PowerLink", "power",

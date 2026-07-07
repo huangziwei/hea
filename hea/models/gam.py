@@ -49,6 +49,7 @@ from ..R import distributions as _dist
 from ..R import nmath as _nmath
 from ..family import (
     Binomial,
+    DiscreteX as _DiscreteX,
     Family,
     Gaussian,
     GeneralFamily,
@@ -8597,6 +8598,24 @@ class gam:
         self._n_extra_coef = int(getattr(family, "n_extra_coef", 0) or 0)
         if self._n_extra_coef:
             md = _append_extra_params(md, self._n_extra_coef)
+        self._init_general_from_md(md, data, family=family, sp=sp,
+                                   method=method, weights=weights,
+                                   start=start, optimizer=optimizer)
+
+    def _init_general_from_md(self, md, data, *, family, sp, method,
+                              weights, start,
+                              optimizer=("outer", "newton")):
+        """The design-agnostic remainder of :meth:`_init_general`: from a
+        built multi-LP design bundle ``md`` (dense ``_MultiDesign``, or
+        bam's compressed variant whose ``X`` is a ``family.DiscreteX``)
+        through Sl.setup/initial-repara, smoothness selection, the final
+        gam.fit5 and the whole post-fit surface. Every step below is
+        p-space or reaches the design through ``family.ll``/
+        ``initialize_coef``/``_gam_fit5``, which dispatch on DiscreteX —
+        the one dense-only step (the initial repara of X's columns) is
+        deferred to gam.fit5's boundary transforms on the discrete rail.
+        Callers must have set ``self.family``/``formula``/``knots``/
+        ``_select``/``_gamma``/``_control``/``_n_extra_coef`` first."""
         self._drop_intercept_col = None
         if getattr(family, "drop_intercept", False):
             # cox.ph drops the intercept (drop.intercept=TRUE, coxph.r:355):
@@ -8642,7 +8661,12 @@ class gam:
         self._L = md.L
         sl = _sl_setup(md.slots, md.p)
         self._sl = sl
-        X_irp = _sl_initial_repara(sl, md.X, both_sides=False)
+        # Discrete rail: the compressed design has no column form to
+        # transform — gam.fit5 applies the same block transforms in
+        # p-space around family.ll instead (see _gam_fit5's discrete
+        # seam), so X passes through untouched.
+        X_irp = (md.X if isinstance(md.X, _DiscreteX)
+                 else _sl_initial_repara(sl, md.X, both_sides=False))
         # mgcv mvn preinitialize's coefficient seeding (mvam.r:115-125):
         # per-LP magic GCV fits store family$ibeta once; initialize_coef
         # then returns it on every later call (gam.fit5 and initial.spg
@@ -15090,10 +15114,26 @@ def _gam_fit5(x, y, lsp, sl: _Sl, *, weights=None, offset=None,
     if nei is not None:
         raise NotImplementedError(
             "gam.fit5 neighbourhood cross-validation (nei) is not ported.")
-    x = np.asarray(x, dtype=float)
+    # ``x`` may be the compressed multi-LP design (family.DiscreteX) —
+    # the discrete general-family driver mgcv never wired (bam.r:2653
+    # stops; gamlss.gH's discrete branch was left dormant). The fit's
+    # p-space algebra is unchanged; only the n-dependent seams differ
+    # (family.ll assembles through the discrete kernels, and the two
+    # column reparameterizations become p-space boundary transforms).
+    discrete = isinstance(x, _DiscreteX)
+    if discrete:
+        if deriv > 1:
+            raise NotImplementedError(
+                "discrete general-family fits carry first-order REML "
+                "derivatives only (mgcv gamlss.gH stops at deriv>1, "
+                "gamlss.r:777) — sp selection must run EFS or BFGS, "
+                "not full Newton.")
+        q = x.design.p
+    else:
+        x = np.asarray(x, dtype=float)
+        q = x.shape[1]
     y = np.asarray(y, dtype=float)
     lsp = np.asarray(lsp, dtype=float).reshape(-1)
-    q = x.shape[1]
     nobs = y.shape[0]
     n_sp = int(lsp.size)
     penalized = len(sl) > 0
@@ -15111,7 +15151,8 @@ def _gam_fit5(x, y, lsp, sl: _Sl, *, weights=None, offset=None,
         # even for deriv=0 fits: S1 (= ldet1) must exist on every return
         # — efsud's update reads it from deriv-0 fits.
         rp = _ldet_s(sl, lsp, root=True, stot=True, deriv=2)
-        x = _sl_repara(rp["rp"], x)
+        if not discrete:
+            x = _sl_repara(rp["rp"], x)
         Sb = _sl_repa(rp["rp"], sl.S, lt=-2, r=-1)   # balanced penalty
         St = np.asarray(rp["S"], dtype=float)
         E = rp["E"]
@@ -15125,17 +15166,75 @@ def _gam_fit5(x, y, lsp, sl: _Sl, *, weights=None, offset=None,
         E = np.zeros((0, q))
         Sb = np.zeros((q, q))
 
+    if discrete:
+        # hea seam (mgcv has no discrete gam.fit5 to port): the dense
+        # driver reparameterizes X's COLUMNS twice — Sl.initial.repara at
+        # the estimate.gam boundary (X·D per block) and Sl.repara(rp)
+        # above (X·Qs) — so coef/grad/Hess live in the transformed basis.
+        # A compressed design has no column form; the same two block
+        # transforms are applied in p-space around family.ll instead
+        # (the pattern mgcv's own discrete fitters use on assembled
+        # X'WX — never on Xd). With M = D·Qs (fit-basis coef b maps to
+        # the model basis as b_x = M·b):
+        #   coef/d1b in : b_x = D·(Qs·b)          — Qs then D on rows
+        #   fh in       : fh_x = M·fh·M'
+        #   lb out      : Qs'·(D'·lb_x)
+        #   lbb out     : Qs'·D'·lbb_x·D·Qs
+        # The deriv-1 d1H is tr(Hp⁻¹·∂H/∂ρ) — basis-invariant once fh
+        # is supplied in the same (model) basis, so it passes through.
+        def _to_x(v):
+            return _sl_inirep(sl, _sl_repa(rp["rp"], v, lt=-1), lt=1)
+
+        def _from_x_grad(g):
+            return _sl_repa(rp["rp"], _sl_inirep(sl, g, lt=2), lt=1)
+
+        def _from_x_hess(h):
+            return _sl_repa(rp["rp"], _sl_inirep(sl, h, lt=2, r=1),
+                            lt=1, r=2)
+
+        def _fh_x(f):
+            return _sl_inirep(sl, _sl_repa(rp["rp"], f, lt=-1, r=-2),
+                              lt=1, r=2)
+
     if start is None:
         # the ldetS root E carries mgcv's use.unscaled attribute here
         # (gam.fit4.r:974) — initializers use it as-is.
-        start = family.initialize_coef(y, x, lpi, E=E, offset=offset,
-                                       use_unscaled=True)
+        if discrete:
+            # E is the St root in the fit basis; the family's discrete
+            # initializer (gamlss.r:1035/1051) crossprods it against the
+            # model-basis XWXd, so hand it over as E_x = E·M⁻¹ = E·Qs'·Di
+            # and map the returned start forward through the same chain
+            # the dense flow applies to user starts (Di then Qs').
+            E_x = _sl_inirep(sl, _sl_repa(rp["rp"], E, r=-2), r=-1)
+            start_x = family.initialize_coef(y, x, lpi, E=E_x,
+                                             offset=offset,
+                                             use_unscaled=True)
+            start = _sl_repara(rp["rp"], _sl_initial_repara(
+                sl, np.asarray(start_x, dtype=float), both_sides=False))
+        else:
+            start = family.initialize_coef(y, x, lpi, E=E, offset=offset,
+                                           use_unscaled=True)
     coef = np.asarray(start, dtype=float).reshape(-1).copy()
     start = coef.copy()         # kept for the iconv first-step-fail path
 
-    def llf(b, d, **kw):
-        return family.ll(y, x, b, weights, lpi=lpi, offset=offset,
-                         deriv=d, **kw)
+    if discrete:
+        def llf(b, d, d1b=None, fh=None, **kw):
+            ret = family.ll(
+                y, x, _to_x(np.asarray(b, dtype=float)), weights,
+                lpi=lpi, offset=offset, deriv=d,
+                d1b=None if d1b is None else _to_x(
+                    np.asarray(d1b, dtype=float)),
+                fh=None if fh is None else _fh_x(
+                    np.asarray(fh, dtype=float)), **kw)
+            if ret.get("lb") is not None:
+                ret["lb"] = _from_x_grad(ret["lb"])
+            if ret.get("lbb") is not None:
+                ret["lbb"] = _from_x_hess(ret["lbb"])
+            return ret
+    else:
+        def llf(b, d, **kw):
+            return family.ll(y, x, b, weights, lpi=lpi, offset=offset,
+                             deriv=d, **kw)
 
     ll = llf(coef, 1)
     ll0 = ll["l"] - float(coef @ St @ coef) / 2.0
@@ -15287,6 +15386,16 @@ def _gam_fit5(x, y, lsp, sl: _Sl, *, weights=None, offset=None,
                         Rq, piv_q = _scipy_qr(Hb, mode="r",
                                               pivoting=True)
                         rank = _R_rank(Rq, tol=eps_mach ** 0.9)
+                        if rank < q and discrete:
+                            # mgcv's kernels carry a ``drop`` argument for
+                            # exactly this (misc.r:203); hea's compressed
+                            # design does not yet — no discrete model has
+                            # reached this branch. Surface it rather than
+                            # silently mis-fit.
+                            raise NotImplementedError(
+                                "unidentifiable coefficients in a discrete "
+                                "general-family fit: the kernel-level "
+                                "'drop' protocol is not ported yet.")
                         if rank < q:
                             # drop unidentifiable params and continue
                             drop = np.sort(piv_q[rank:q])
@@ -15474,8 +15583,12 @@ def _gam_fit5(x, y, lsp, sl: _Sl, *, weights=None, offset=None,
     K = len(lpi)
     linear_predictors = np.zeros((nobs, K))
     fitted_values = np.zeros((nobs, K))
+    if discrete:
+        from .bam import Xbd as _Xbd_kernel
+        coef_x = _to_x(fcoef)
     for j in range(K):
-        eta_j = x[:, lpi[j]] @ coef[lpi[j]]
+        eta_j = (_Xbd_kernel(x.design, coef_x, lt=x.lpid[j]) if discrete
+                 else x[:, lpi[j]] @ coef[lpi[j]])
         if offset[j] is not None:
             eta_j = eta_j + offset[j]
         linear_predictors[:, j] = eta_j
@@ -15692,11 +15805,16 @@ def _initial_sp_general(X, y, family, slots: list["_PenaltySlot"], lpi,
     WORKING log-sp vector: with an id-linkage ``L``, mgcv's
     ``lm(lsp ~ L − 1)`` least-squares collapse.
     """
-    X = np.asarray(X, dtype=float)
+    if isinstance(X, _DiscreteX):
+        # compressed design: everything below reaches X only through the
+        # family (initialize_coef / ll), which dispatch on DiscreteX.
+        p = X.design.p
+    else:
+        X = np.asarray(X, dtype=float)
+        p = X.shape[1]
     y = np.asarray(y, dtype=float)
     if weights is None:
         weights = np.ones(y.shape[0])
-    p = X.shape[1]
     eps = float(np.finfo(float).eps)
 
     St = np.zeros((p, p))

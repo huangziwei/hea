@@ -56,9 +56,12 @@ from ..R import distributions as _dist
 from ..R._shared import _rfma_vec
 
 from ..family import (
+    DiscreteX,
     Family,
     Gaussian,
+    GeneralFamily,
     _coerce_response,
+    gaulss as _gaulss_family,
     gfam as _gfam_family,
     negbin as _negbin_family,
     tw as _tw_family,
@@ -86,6 +89,7 @@ from ..formula import (
 )
 from .gam import (
     _FitState,
+    _MultiDesign,
     _PenaltySlot,
     _R_rank,
     _Sl,
@@ -107,8 +111,10 @@ from .gam import (
     _sl_repara,
     _sl_setup,
     _sl_term_mult,
+    _suffix_smooth_label,
     _sym_rank,
     gam,
+    gam_control,
 )
 # Safe at module level: nothing on the hea.R.__init__ chain
 # (model_selection → models.gam → formula) imports this module.
@@ -2409,7 +2415,7 @@ class bam(gam):
 
     def __init__(
         self,
-        formula: str,
+        formula: str | list[str],
         data,
         *,
         method: str = "fREML",
@@ -2432,6 +2438,17 @@ class bam(gam):
         # 2-D ndarray. 2-D entries become matrix columns for mgcv's
         # summation convention (Wood §7.4.1 distributed-lag models).
         # ``prepare_design`` normalizes via ``normalize_data``.
+        # ---- general (multi-LP) families: the discrete general rail --------
+        # mgcv::bam stops here ("general families not supported by bam",
+        # bam.r:2653); hea routes formula LISTS to the discrete general
+        # driver it completed from mgcv's dormant gamlss.gH branch.
+        if isinstance(formula, (list, tuple)):
+            self._init_general_discrete(
+                [str(f) for f in formula], data, method=method, sp=sp,
+                family=family, offset=offset, weights=weights, gamma=gamma,
+                select=select, rho=rho, discrete=discrete,
+                discrete_m=discrete_m, knots=knots)
+            return
         # ---- method aliasing ------------------------------------------------
         # mgcv's bam accepts {fREML, GACV.Cp, GCV.Cp, REML, ML, P-REML,
         # P-ML, NCV} (bam.r:2207). fREML is algorithmically identical to
@@ -3220,6 +3237,289 @@ class bam(gam):
             self._post_fit_pirls(fit, rho_hat, X_param_df)
 
     # -----------------------------------------------------------------------
+    # general (multi-LP) families on the discrete rail
+    # -----------------------------------------------------------------------
+
+    def _init_general_discrete(self, formulas, data, *, method, sp, family,
+                               offset, weights, gamma, select, rho,
+                               discrete, discrete_m, knots):
+        """bam for GENERAL (multi-LP) families on the discrete rail — the
+        driver mgcv never wired: ``bam.r:2653`` stops with "general
+        families not supported by bam" while ``gamlss.gH``'s complete
+        discrete branch (gamlss.r:604-711) sat dormant. hea completes
+        it: the multi-formula design is discretized once (discrete.mf →
+        per-margin Xd tables + ``lpid``, bam.r:2382/2310-2553), the
+        penalties/Sl/REML machinery runs in p-space, and every
+        n-dependent assembly flows through the XWXd/XWyd/Xbd kernels via
+        the family's DiscreteX dispatch inside gam.fit5.
+
+        Smoothness selection runs EFS (deriv-0 fits): the discrete
+        ``gamlss.gH`` tops out at the deriv-1 trace (gamlss.r:777), so
+        full-Newton REML (needing REML2/trHid2H) is structurally
+        unavailable on this rail; EFS is mgcv's own route whenever the
+        ll's derivatives are short (mgcv.r:1907-1908). AR1 (``rho``) and
+        NCV stay off the discrete general path, mirroring mgcv's
+        discrete limits.
+        """
+        family = Gaussian() if family is None else family
+        if not isinstance(family, GeneralFamily):
+            raise ValueError(
+                "a formula list requires a general (multi-LP) family; "
+                f"got {family!r}")
+        if not discrete:
+            raise NotImplementedError(
+                "bam with a general family runs on the discrete rail "
+                "only — pass discrete=True. (mgcv's bam stops outright, "
+                "bam.r:2653; hea's dense chunked path is not wired for "
+                "multi-LP likelihoods.)")
+        if not isinstance(family, _gaulss_family):
+            raise NotImplementedError(
+                "discrete general-family bam supports gaulss for now; "
+                "the remaining gamlss families follow the same "
+                "DiscreteX dispatch.")
+        if rho != 0.0:
+            raise NotImplementedError(
+                "AR1 (rho) is not available with general families on "
+                "the discrete rail (mirrors mgcv's discrete limits).")
+        if offset is not None:
+            raise NotImplementedError(
+                "constructor offset= is not supported for formula-list "
+                "bam; put offset(...) atoms in the per-LP formulas.")
+        if method not in ("fREML", "REML"):
+            raise ValueError(
+                "general families use (f)REML smoothness selection "
+                f"(mgcv.r:1894-1898 coerces the method); got {method!r}")
+        if not (np.isfinite(gamma) and gamma > 0):
+            raise ValueError(
+                f"gamma must be a positive finite number, got {gamma!r}")
+        if knots is not None and not isinstance(knots, dict):
+            raise TypeError(
+                "knots must be a dict mapping covariate name -> knot "
+                "sequence (mgcv's knots=list(...)), or None")
+        if len(formulas) != family.n_lp:
+            raise ValueError(
+                f"family {family!r} expects {family.n_lp} linear "
+                f"predictors; got {len(formulas)} formulas.")
+        self._method_in = method
+        self.method = "REML"
+        self.family = family
+        self.formula = list(formulas)
+        self.knots = knots
+        self._select = bool(select)
+        self._gamma = float(gamma)
+        self._edge_correct = False
+        self._edge_theta1 = None
+        self._control = gam_control()
+        self._n_extra_coef = 0
+        self._discrete = True
+        self._discrete_m = discrete_m
+        self._general_discrete = True
+        self._pls_lwork = {"g": None, "o": None}
+
+        md = self._build_discrete_general_md(formulas, data, knots,
+                                             select, discrete_m)
+        # self.data (the normalized frame) was stashed by the builder;
+        # hand that to the shared tail so its expr-map application sees
+        # a polars frame regardless of the caller's data type.
+        self._init_general_from_md(md, self.data, family=family, sp=sp,
+                                   method="REML", weights=weights,
+                                   start=None, optimizer=("efs",))
+
+    def _build_discrete_general_md(self, formulas, data, knots, select,
+                                   discrete_m) -> _MultiDesign:
+        """Discretized multi-LP design bundle: the discrete analog of
+        ``_prepare_multi_design`` (gam.setup.list). One shared
+        ``discrete.mf`` pass over ALL formulas' smooth terms + parametric
+        covariates (mgcv accumulates ``pmf.names`` across formulas,
+        bam.r:2296-2307, and dk covers every term); per LP the smooths
+        are materialized on the padded scalar ``mf0`` (bam.r:2206-2232
+        flow, ``sparse_cons=0``/tero like the single-formula rail),
+        labels of later formulas suffixed ``.j`` (mgcv's textra); terms
+        assemble LP-contiguously into one :class:`DiscreteDesign` with
+        ``lpid`` (bam.r:2310-2553). ``md.X`` is the
+        :class:`hea.family.DiscreteX` bundle the general fit consumes.
+        """
+        import types
+
+        from ..formula import prepare_design
+
+        first = formulas[0]
+        if "~" not in first:
+            raise ValueError(f"first formula must contain '~': {first!r}")
+        resp = first.split("~", 1)[0].strip()
+        if not resp:
+            raise ValueError("first formula must have a response on the "
+                             "lhs")
+        full_formulas = [first]
+        for j, f in enumerate(formulas[1:], start=1):
+            if "~" not in f:
+                raise ValueError(f"formula {j} must contain '~': {f!r}")
+            lhs = f.split("~", 1)[0].strip()
+            if lhs:
+                raise NotImplementedError(
+                    "formulas after the first must be response-less "
+                    f"('~ ...'); got lhs {lhs!r}.")
+            full_formulas.append(f"{resp} ~ {f.split('~', 1)[1].strip()}")
+
+        ds = [prepare_design(f, data) for f in full_formulas]
+        y = ds[0].y.to_numpy().astype(float)
+        n = int(y.shape[0])
+
+        # Smooth-arg expressions (s(sqrt(z)) etc.) materialized once on
+        # the shared frame — same map union as the dense multi path.
+        _expr_map: dict = {}
+        for d in ds:
+            _expr_map.update(_smooth_arg_expr_map(d.expanded))
+        data_m = (_apply_smooth_arg_exprs(ds[0].data, _expr_map)
+                  if _expr_map else ds[0].data)
+
+        # discrete.mf over the union of smooth specs; pmf.names =
+        # response first (mgcv's model.frame evaluates the LHS into a
+        # column) then the parametric covariates of every formula.
+        specs: list[dict] = []
+        for d in ds:
+            specs.extend(_smooth_specs_from_expanded(d.expanded, data_m))
+        names_pmf: list[str] = []
+        if ds[0].response:
+            names_pmf.append(ds[0].response)
+        for d in ds:
+            for col in d.X.columns:
+                if (col != "(Intercept)" and col in data_m.columns
+                        and col not in names_pmf):
+                    names_pmf.append(col)
+        data_for_discrete = data_m
+        if ds[0].response and ds[0].response not in data_m.columns:
+            data_for_discrete = data_m.with_columns(
+                pl.Series(name=ds[0].response, values=y))
+        dframe = discrete_mf(specs, data_for_discrete,
+                             names_pmf=names_pmf, m=discrete_m)
+        mf_dict = {nm: arr for nm, arr in dframe.mf.items()
+                   if nm != "(Intercept)"
+                   and np.asarray(arr).ndim == 1}
+        mf0 = pl.DataFrame(mf_dict) if mf_dict else pl.DataFrame()
+
+        lp_parts: list[tuple[np.ndarray, list[SmoothBlock]]] = []
+        lpi: list[np.ndarray] = []
+        blocks_all: list[SmoothBlock] = []
+        ranges_all: list[tuple[int, int]] = []
+        slots: list[_PenaltySlot] = []
+        names: list[str] = []
+        nsdf: list[int] = []
+        pstart: list[int] = []
+        offsets: list[np.ndarray | None] = []
+        L_parts: list[tuple[int, int, np.ndarray | None]] = []
+        pof = 0
+        for j, d in enumerate(ds):
+            sb_lists = (materialize_smooths(d.expanded, mf0,
+                                            sparse_cons=0, tero=True,
+                                            knots=knots)
+                        if d.expanded.smooths else [])
+            blocks = [b for grp in sb_lists for b in grp]
+            block_ids: list[str | None] = []
+            for call_node, grp in zip(d.expanded.smooths, sb_lists):
+                block_ids.extend([_smooth_id_value(call_node)] * len(grp))
+            if select:
+                blocks = _add_null_space_penalties(blocks)
+            blocks = _apply_gam_side(blocks)
+            if j > 0:
+                for b in blocks:
+                    b.label = _suffix_smooth_label(b.label, f".{j}")
+
+            Xp = d.X.to_numpy().astype(float)
+            if Xp.shape[1] == 0:
+                Xp = np.zeros((n, 0))
+            lp_parts.append((Xp, blocks))
+            p_par = Xp.shape[1]
+            pstart.append(pof)
+            nsdf.append(p_par)
+            pnames = list(d.X.columns)
+            if j > 0:
+                pnames = [f"{nm}.{j}" for nm in pnames]
+            names.extend(pnames)
+
+            off = np.zeros(n)
+            has_off = False
+            for off_node in d.expanded.offsets:
+                blk = _eval_atom(off_node, d.data)
+                off = off + blk.values.flatten().astype(float)
+                has_off = True
+            offsets.append(off if has_off else None)
+
+            col_cursor = pof + p_par
+            n_slots_lp = 0
+            slot_work_col: list[int] = []
+            n_work_lp = 0
+            id_first: dict[str, tuple[int, int]] = {}
+            for b, bid in zip(blocks, block_ids):
+                k = int(np.asarray(b.X).shape[1])
+                a, bcol = col_cursor, col_cursor + k
+                ranges_all.append((a, bcol))
+                blocks_all.append(b)
+                for i in range(1, k + 1):
+                    names.append(f"{b.label}.{i}")
+                for jS, S_j in enumerate(b.S):
+                    slots.append(_PenaltySlot(
+                        block=b, col_start=a, col_end=bcol,
+                        S=np.asarray(S_j, dtype=float),
+                        S_scale=_block_s_scale(b, jS)))
+                col_cursor = bcol
+                nS = len(b.S)
+                n_slots_lp += nS
+                if nS == 0:
+                    continue
+                if bid is None or bid not in id_first:
+                    w0 = n_work_lp
+                    n_work_lp += nS
+                    if bid is not None:
+                        id_first[bid] = (w0, nS)
+                else:
+                    w0, nc = id_first[bid]
+                    if nS > nc:
+                        raise ValueError(
+                            "Later terms sharing an `id' can not have "
+                            "more smoothing parameters than the first "
+                            "such term")
+                slot_work_col.extend(range(w0, w0 + nS))
+            if n_work_lp == n_slots_lp:
+                L_parts.append((n_slots_lp, n_work_lp, None))
+            else:
+                L_j = np.zeros((n_slots_lp, n_work_lp))
+                L_j[np.arange(n_slots_lp), slot_work_col] = 1.0
+                L_parts.append((n_slots_lp, n_work_lp, L_j))
+            lpi.append(np.arange(pof, col_cursor))
+            pof = col_cursor
+        p = pof
+
+        # Block-diagonal id L across formulas; None ⇔ identity everywhere
+        # (same fold as _prepare_multi_design).
+        if all(Lj is None for _, _, Lj in L_parts):
+            L = None
+            n_work = len(slots)
+        else:
+            n_work = sum(w for _, w, _ in L_parts)
+            L = np.zeros((len(slots), n_work))
+            r0 = c0 = 0
+            for nr_j, nc_j, Lj in L_parts:
+                if nr_j:
+                    L[r0:r0 + nr_j, c0:c0 + nc_j] = (
+                        Lj if Lj is not None else np.eye(nr_j))
+                r0 += nr_j
+                c0 += nc_j
+
+        design, lpid = build_discrete_design_lps(lp_parts, dframe)
+        assert design.p == p, (design.p, p)
+        self._discrete_frame = dframe
+        self._discrete_design = design
+        self.data = data_m           # normalized frame for the shared tail
+
+        lps = [types.SimpleNamespace(expanded=d.expanded) for d in ds]
+        return _MultiDesign(
+            lps=lps, X=DiscreteX(design, lpid), lpi=lpi, y=y,
+            blocks=blocks_all, block_col_ranges=ranges_all, slots=slots,
+            column_names=names, nsdf=nsdf, pstart=pstart, offsets=offsets,
+            n_lp=len(ds), L=L, n_work=n_work, p=p, n=n)
+
+    # -----------------------------------------------------------------------
     # predict — override of gam.predict (newdata=None case)
     # -----------------------------------------------------------------------
 
@@ -3254,6 +3554,10 @@ class bam(gam):
         Behaviour for each (newdata, type, se_fit) combination (non-discrete
         fit, or the discrete decomposition surface):
 
+        A general-family discrete fit (formula list) raises: its per-LP
+        prediction surface is a follow-up slice of the discrete general
+        driver.
+
         * ``newdata`` not None → delegate to ``super().predict(...)`` —
           parent rebuilds the design via per-block ``spec.predict_mat``
           the same way it does for gam fits.
@@ -3270,6 +3574,12 @@ class bam(gam):
           per-row link-scale variance; delta-method
           ``|μ_η|`` multiplier for response-scale SE.
         """
+        if getattr(self, "_general_discrete", False):
+            raise NotImplementedError(
+                "predict on a discrete general-family bam fit is a "
+                "follow-up slice of the discrete general driver "
+                "(per-LP prediction surface); fitted_values / "
+                "linear_predictors carry the training-data surface.")
         if type not in ("link", "response", "terms", "iterms", "lpmatrix"):
             raise ValueError(
                 "type must be 'link', 'response', 'terms', 'iterms', or "
@@ -6596,119 +6906,172 @@ def build_discrete_design(blocks: list[SmoothBlock],
     column transform on the materialised row-tensor. A future
     optimisation can switch to Householder for ``te`` smooths.
     """
+    design, _lpid = _build_discrete_design_parts(
+        [(X_param_full, blocks)], dframe)
+    return design
+
+
+def build_discrete_design_lps(
+        lp_parts: list[tuple[Optional[np.ndarray], list[SmoothBlock]]],
+        dframe: DiscretizedFrame,
+) -> tuple[DiscreteDesign, list[list[int]]]:
+    """Multi-linear-predictor :class:`DiscreteDesign` + mgcv's ``lpid``.
+
+    ``lp_parts[j] = (X_param_full_j, blocks_j)`` is LP j's parametric
+    matrix and smooth blocks; terms append LP by LP (each LP: param term
+    first, then its smooths), so coefficient slices are LP-contiguous —
+    hea's stacked multi-formula layout (the dense multi-design puts LP
+    j's columns at ``lpi[j] = pof + arange(p_j)``; mgcv instead orders
+    discrete terms all-parametric-first and compensates with ``lpip``
+    coefficient reordering inside the kernels, bam.r:2422-2453 +
+    misc.r:403-409 — hea's per-term ``coef_slice`` makes the two
+    equivalent). Returns ``(design, lpid)`` where ``lpid[j]`` lists LP
+    j's term indices in ascending coefficient order (mgcv sorts lpid the
+    same way, bam.r:2550-2553).
+    """
+    return _build_discrete_design_parts(lp_parts, dframe)
+
+
+def _build_discrete_design_parts(
+        lp_parts: list[tuple[Optional[np.ndarray], list[SmoothBlock]]],
+        dframe: DiscretizedFrame,
+) -> tuple[DiscreteDesign, list[list[int]]]:
     var_index = {nm: j for j, nm in enumerate(dframe.names)}
     terms: list[_DiscreteTerm] = []
+    lpid: list[list[int]] = []
     p_total = 0
 
-    # Parametric columns: treat each parametric column-group as a single
-    # "term". For now we keep them as one big block — index into
-    # X_param_full via a synthetic identity ``k`` column. The simplest
-    # representation just stores the full param matrix as a single Xd
-    # with k-col = -1 (signal: identity gather). The kernels handle this
-    # via a special-case branch.
-    if X_param_full is not None and X_param_full.shape[1] > 0:
-        p_par = X_param_full.shape[1]
-        terms.append(_DiscreteTerm(
-            kind="param",
-            Xd_list=[np.asarray(X_param_full, dtype=float)],
-            k_cols=[(-1, -1)],     # sentinel: gather is identity
-            coef_slice=slice(p_total, p_total + p_par),
-            label="(parametric)",
-        ))
-        p_total += p_par
+    for j_lp, (X_param_full, blocks) in enumerate(lp_parts):
+        lp_terms: list[int] = []
+        # Parametric columns: treat each parametric column-group as a single
+        # "term". For now we keep them as one big block — index into
+        # X_param_full via a synthetic identity ``k`` column. The simplest
+        # representation just stores the full param matrix as a single Xd
+        # with k-col = -1 (signal: identity gather). The kernels handle this
+        # via a special-case branch.
+        if X_param_full is not None and X_param_full.shape[1] > 0:
+            p_par = X_param_full.shape[1]
+            # Multi-LP labels get mgcv's ".j" suffix (bam.r:2304/2429
+            # appends ".", j-1 to later formulae's term labels).
+            plabel = ("(parametric)" if j_lp == 0
+                      else f"(parametric).{j_lp}")
+            lp_terms.append(len(terms))
+            terms.append(_DiscreteTerm(
+                kind="param",
+                Xd_list=[np.asarray(X_param_full, dtype=float)],
+                k_cols=[(-1, -1)],     # sentinel: gather is identity
+                coef_slice=slice(p_total, p_total + p_par),
+                label=plabel,
+            ))
+            p_total += p_par
 
-    # Discretised model frame as a polars DataFrame with each column
-    # length = nr[var] (no padding here — we feed only the unique values
-    # so basis evaluators see the right domain).
-    for block in blocks:
-        spec = block.spec
-        if spec is None:
-            raise ValueError(
-                f"SmoothBlock {block.label!r} has no spec — predict_mat "
-                "replay is required for the discrete fitter"
-            )
-        term_vars = list(block.term)
-        # Identify margins: tensor smooths have ``raw`` of type
-        # ``_TensorRawBasis`` / ``_T2RawBasis`` / ``_T2PredictRawBasis``;
-        # everything else is single-margin. Each margin variable list comes
-        # from the raw basis itself (``_raw_basis_vars``) — that's the only
-        # source that survives mgcv's ``tero`` reorder, where the block's
-        # declaration order (``block.term``) no longer matches the post-
-        # tero margin order.
-        raw = spec.predict_raw if spec.predict_raw is not None else spec.raw
-        if isinstance(raw, _TensorRawBasis):
-            margin_raws = list(raw.margins)
-            margin_vars = [_raw_basis_vars(m) or term_vars for m in margin_raws]
-        elif isinstance(raw, (_T2RawBasis, _T2PredictRawBasis)):
-            margin_raws = list(raw.margins)
-            margin_vars = [_raw_basis_vars(m) or term_vars for m in margin_raws]
-        else:
-            margin_raws = [raw]
-            margin_vars = [_raw_basis_vars(raw) or term_vars]
+        # Discretised model frame as a polars DataFrame with each column
+        # length = nr[var] (no padding here — we feed only the unique values
+        # so basis evaluators see the right domain).
+        for block in blocks:
+            lp_terms.append(len(terms))
+            p_total = _append_smooth_discrete_term(
+                terms, block, dframe, var_index, p_total)
+        lpid.append(lp_terms)
 
-        # Evaluate each marginal raw basis on the discretised unique
-        # values for its variables. The frame for marginal j is built
-        # from ``dframe.mf`` taking exactly the variables in
-        # ``margin_vars[j]``, length ``nr[var0]``.
-        Xd_list: list[np.ndarray] = []
-        k_cols: list[tuple[int, int]] = []
-        for mvars, mraw in zip(margin_vars, margin_raws):
-            v0 = mvars[0]
-            j_var = var_index[v0]
-            length_j = int(dframe.nr[j_var])
-            sub = {nm: dframe.mf[nm][:length_j] for nm in mvars}
-            sub_df = pl.DataFrame(sub)
-            Xd = mraw.eval(sub_df)
-            Xd_list.append(np.asarray(Xd, dtype=float))
-            k_cols.append((int(dframe.ks[j_var, 0]), int(dframe.ks[j_var, 1])))
-
-        # Term column count after by/absorb/keep_cols. Use block.X.shape[1]
-        # as the authoritative post-transform width.
-        p_term = block.X.shape[1]
-
-        # by= is the FIRST marginal of the term (mgcv discrete.mf:261-269 +
-        # fit-side bam.r:2469-2483): an ``m_by × 1`` basis — the discretised
-        # unique by-values (numeric) or a factor-level indicator
-        # (``as.numeric(by.var==by.level)``). Gathering it at the by index
-        # columns reproduces the per-row by weight (summed over the matrix
-        # columns for a matrix-argument by=, the signal-regression convention);
-        # the smooth's own marginals follow, so the term becomes a tensor. The
-        # constraint (``absorb``) still acts on the smooth's raw column space:
-        # the by-marginal has ``p=1`` so it changes neither the term dimension
-        # nor the column order, and ``by·(X_raw @ T) == absorb.apply(by·X_raw)``
-        # for the linear ``T = absorb.apply(I)`` (mgcv ``apply.by=FALSE``).
-        if spec.by is not None:
-            by_name = spec.by.expr
-            j_by = var_index[by_name]
-            ks_by = (int(dframe.ks[j_by, 0]), int(dframe.ks[j_by, 1]))
-            nr_by = int(dframe.nr[j_by])
-            by_vals = np.asarray(dframe.mf[by_name][:nr_by])
-            if spec.by.kind == "factor":
-                by_col = (by_vals == spec.by.level).astype(float)
-            else:
-                by_col = by_vals.astype(float)
-            Xd_list = [by_col.reshape(nr_by, 1)] + Xd_list
-            k_cols = [ks_by] + k_cols
-
-        kind = "single" if len(Xd_list) == 1 else "tensor"
-
-        terms.append(_DiscreteTerm(
-            kind=kind,
-            Xd_list=Xd_list,
-            k_cols=k_cols,
-            coef_slice=slice(p_total, p_total + p_term),
-            absorb=spec.absorb,
-            by=spec.by,
-            keep_cols=spec.keep_cols,
-            spec=spec,
-            label=block.label,
-        ))
-        p_total += p_term
-
-    return DiscreteDesign(
+    design = DiscreteDesign(
         terms=terms, k=dframe.k, ks=dframe.ks, nr=dframe.nr,
         n=dframe.n, p=p_total, var_index=var_index,
     )
+    return design, lpid
+
+
+def _append_smooth_discrete_term(
+        terms: list["_DiscreteTerm"], block: SmoothBlock,
+        dframe: DiscretizedFrame, var_index: dict[str, int],
+        p_total: int) -> int:
+    """Append ``block``'s :class:`_DiscreteTerm` to ``terms``; return the
+    updated coefficient counter. The per-smooth body of the design build
+    (see :func:`build_discrete_design` for the conventions)."""
+    spec = block.spec
+    if spec is None:
+        raise ValueError(
+            f"SmoothBlock {block.label!r} has no spec — predict_mat "
+            "replay is required for the discrete fitter"
+        )
+    term_vars = list(block.term)
+    # Identify margins: tensor smooths have ``raw`` of type
+    # ``_TensorRawBasis`` / ``_T2RawBasis`` / ``_T2PredictRawBasis``;
+    # everything else is single-margin. Each margin variable list comes
+    # from the raw basis itself (``_raw_basis_vars``) — that's the only
+    # source that survives mgcv's ``tero`` reorder, where the block's
+    # declaration order (``block.term``) no longer matches the post-
+    # tero margin order.
+    raw = spec.predict_raw if spec.predict_raw is not None else spec.raw
+    if isinstance(raw, _TensorRawBasis):
+        margin_raws = list(raw.margins)
+        margin_vars = [_raw_basis_vars(m) or term_vars for m in margin_raws]
+    elif isinstance(raw, (_T2RawBasis, _T2PredictRawBasis)):
+        margin_raws = list(raw.margins)
+        margin_vars = [_raw_basis_vars(m) or term_vars for m in margin_raws]
+    else:
+        margin_raws = [raw]
+        margin_vars = [_raw_basis_vars(raw) or term_vars]
+
+    # Evaluate each marginal raw basis on the discretised unique
+    # values for its variables. The frame for marginal j is built
+    # from ``dframe.mf`` taking exactly the variables in
+    # ``margin_vars[j]``, length ``nr[var0]``.
+    Xd_list: list[np.ndarray] = []
+    k_cols: list[tuple[int, int]] = []
+    for mvars, mraw in zip(margin_vars, margin_raws):
+        v0 = mvars[0]
+        j_var = var_index[v0]
+        length_j = int(dframe.nr[j_var])
+        sub = {nm: dframe.mf[nm][:length_j] for nm in mvars}
+        sub_df = pl.DataFrame(sub)
+        Xd = mraw.eval(sub_df)
+        Xd_list.append(np.asarray(Xd, dtype=float))
+        k_cols.append((int(dframe.ks[j_var, 0]), int(dframe.ks[j_var, 1])))
+
+    # Term column count after by/absorb/keep_cols. Use block.X.shape[1]
+    # as the authoritative post-transform width.
+    p_term = block.X.shape[1]
+
+    # by= is the FIRST marginal of the term (mgcv discrete.mf:261-269 +
+    # fit-side bam.r:2469-2483): an ``m_by × 1`` basis — the discretised
+    # unique by-values (numeric) or a factor-level indicator
+    # (``as.numeric(by.var==by.level)``). Gathering it at the by index
+    # columns reproduces the per-row by weight (summed over the matrix
+    # columns for a matrix-argument by=, the signal-regression convention);
+    # the smooth's own marginals follow, so the term becomes a tensor. The
+    # constraint (``absorb``) still acts on the smooth's raw column space:
+    # the by-marginal has ``p=1`` so it changes neither the term dimension
+    # nor the column order, and ``by·(X_raw @ T) == absorb.apply(by·X_raw)``
+    # for the linear ``T = absorb.apply(I)`` (mgcv ``apply.by=FALSE``).
+    if spec.by is not None:
+        by_name = spec.by.expr
+        j_by = var_index[by_name]
+        ks_by = (int(dframe.ks[j_by, 0]), int(dframe.ks[j_by, 1]))
+        nr_by = int(dframe.nr[j_by])
+        by_vals = np.asarray(dframe.mf[by_name][:nr_by])
+        if spec.by.kind == "factor":
+            by_col = (by_vals == spec.by.level).astype(float)
+        else:
+            by_col = by_vals.astype(float)
+        Xd_list = [by_col.reshape(nr_by, 1)] + Xd_list
+        k_cols = [ks_by] + k_cols
+
+    kind = "single" if len(Xd_list) == 1 else "tensor"
+
+    terms.append(_DiscreteTerm(
+        kind=kind,
+        Xd_list=Xd_list,
+        k_cols=k_cols,
+        coef_slice=slice(p_total, p_total + p_term),
+        absorb=spec.absorb,
+        by=spec.by,
+        keep_cols=spec.keep_cols,
+        spec=spec,
+        label=block.label,
+    ))
+    p_total += p_term
+    return p_total
 
 
 def _raw_basis_vars(raw: _RawBasis) -> list[str]:
@@ -7219,19 +7582,36 @@ def _term_pair_XWX_raw(ti: _DiscreteTerm, tj: _DiscreteTerm,
 # ---------------------------------------------------------------------------
 
 
-def Xbd(design: DiscreteDesign, beta: np.ndarray) -> np.ndarray:
+def Xbd(design: DiscreteDesign, beta: np.ndarray,
+        lt: Optional[Sequence[int]] = None) -> np.ndarray:
     """Compute ``X β`` on the compressed design — per-term scatter-add only.
 
-    Direct port of mgcv ``Xbd`` (src/discrete.c:502-572): lift each term's
-    post-constraint β to raw space (``β_raw = T·β_post``) and accumulate
-    ``_term_Xb_raw`` into the n-vector η. The ``n×p`` design is never formed
-    (mgcv ``discrete=TRUE`` scatter-adds on the compressed Xd/k grid).
+    Direct port of mgcv ``Xbd`` (src/discrete.c:502-572 + the R wrapper
+    misc.r:385-436): lift each term's post-constraint β to raw space
+    (``β_raw = T·β_post``) and accumulate ``_term_Xb_raw`` into the
+    n-vector η. The ``n×p`` design is never formed (mgcv ``discrete=TRUE``
+    scatter-adds on the compressed Xd/k grid).
+
+    ``lt`` selects a term subset (mgcv's ``lt``, misc.r:388): only the
+    listed terms contribute — the per-linear-predictor η of a general
+    family (``lt = lpid[j]``, gamlss.r:936-938). ``beta`` stays FULL-p:
+    mgcv reorders/truncates it to the selected terms via ``lpip``
+    (misc.r:403-409); hea's terms carry their own ``coef_slice``, so the
+    same rows are read in place. A matrix ``beta`` (p × bc) maps to an
+    ``(n, bc)`` result, one column at a time (mgcv's ``bc`` loop,
+    misc.r:402/430).
     """
     beta = np.asarray(beta, dtype=float)
+    if beta.ndim == 2:
+        return np.column_stack([Xbd(design, beta[:, j], lt=lt)
+                                for j in range(beta.shape[1])])
     n = design.n
     eta = np.zeros(n, dtype=float)
     Ts = _design_constraint_Ts(design)
-    for term, T in zip(design.terms, Ts):
+    sel = range(len(design.terms)) if lt is None else lt
+    for it in sel:
+        term = design.terms[it]
+        T = Ts[it]
         b_post = beta[term.coef_slice]
         b_raw = b_post if T is None else (T @ b_post)
         eta += _term_Xb_raw(term, b_raw, design.k, n)
@@ -7239,7 +7619,9 @@ def Xbd(design: DiscreteDesign, beta: np.ndarray) -> np.ndarray:
 
 
 def XWXd(design: DiscreteDesign, w: np.ndarray,
-        ar_weights: Optional[np.ndarray] = None) -> np.ndarray:
+        ar_weights: Optional[np.ndarray] = None,
+        lt: Optional[Sequence[int]] = None,
+        rt: Optional[Sequence[int]] = None) -> np.ndarray:
     """Compute ``X' W X`` (``p × p``, post-constraint) on the compressed design.
 
     Direct port of mgcv ``XWXd0``/``XWXijs`` (src/discrete.c:1672-2273): for
@@ -7256,6 +7638,13 @@ def XWXd(design: DiscreteDesign, w: np.ndarray,
     :func:`_ar1_tri_weight` (discrete.c:2143-2156), and the ``tri`` super/sub
     couplings are scattered alongside the diagonal in the block kernels
     (XWXijs ``tri`` branches). ``ar_weights=None`` is the plain ``diag(w)``.
+
+    ``lt``/``rt`` select left/right term subsets (mgcv's ``lt``/``rt``,
+    misc.r:204-206/274-300): the result is then ONLY the selected block —
+    shape (Σ selected-left coef widths) × (Σ right widths), rows/cols in
+    selection order — the cross-LP Hessian block ``X_i' diag(l2) X_j`` of
+    a general family (``lt = lpid[i]``, ``rt = lpid[j]``, gamlss.r:656).
+    One-sided selection uses the given side for both (misc.r:206).
     """
     w = np.asarray(w, dtype=float)
     n = design.n
@@ -7264,10 +7653,43 @@ def XWXd(design: DiscreteDesign, w: np.ndarray,
         w_off = None
     else:
         w, w_off = _ar1_tri_weight(w, ar_weights)
-    XWX = np.zeros((p, p), dtype=float)
     Ts = _design_constraint_Ts(design)
     terms = design.terms
+    if lt is not None or rt is not None:
+        # mgcv misc.r:278-288: NULL side mirrors the other.
+        if lt is None:
+            lt = rt
+        elif rt is None:
+            rt = lt
+        lt = list(lt)
+        rt = list(rt)
+
+        def _width(idx: int) -> int:
+            csl = terms[idx].coef_slice
+            return csl.stop - csl.start
+
+        r_off = np.cumsum([0] + [_width(i) for i in lt])
+        c_off = np.cumsum([0] + [_width(j) for j in rt])
+        out = np.zeros((int(r_off[-1]), int(c_off[-1])), dtype=float)
+        same = lt == rt
+        for a, ia in enumerate(lt):
+            Ti = Ts[ia]
+            for b, ib in enumerate(rt):
+                if same and b < a:
+                    # symmetric selection: mirror the (b, a) block
+                    out[r_off[a]:r_off[a + 1], c_off[b]:c_off[b + 1]] = \
+                        out[r_off[b]:r_off[b + 1], c_off[a]:c_off[a + 1]].T
+                    continue
+                raw = _term_pair_XWX_raw(terms[ia], terms[ib], w, design.k,
+                                         n, w_off=w_off)
+                blk = raw if Ti is None else (Ti.T @ raw)
+                Tj = Ts[ib]
+                if Tj is not None:
+                    blk = blk @ Tj
+                out[r_off[a]:r_off[a + 1], c_off[b]:c_off[b + 1]] = blk
+        return out
     nt = len(terms)
+    XWX = np.zeros((p, p), dtype=float)
     for i in range(nt):
         sl_i = terms[i].coef_slice
         Ti = Ts[i]
@@ -7287,7 +7709,7 @@ def XWXd(design: DiscreteDesign, w: np.ndarray,
 
 def XWyd(design: DiscreteDesign, w: np.ndarray, y: np.ndarray,
         ar: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None,
-        ) -> np.ndarray:
+        lt: Optional[Sequence[int]] = None) -> np.ndarray:
     """Compute ``X' (W · y)`` on the compressed design — scatter-add only.
 
     Direct port of mgcv ``XWyd``/``singleXty``/``tensorXty`` (src/discrete.c:
@@ -7302,11 +7724,15 @@ def XWyd(design: DiscreteDesign, w: np.ndarray, y: np.ndarray,
     ``Wy = D·Tᵀ·T·D·y`` as a dense n-vector via two :func:`_rw_matrix`
     passes (forward then transpose) bracketed by ``√w``, then scatters
     ``X'·Wy``. ``ar=None`` is the plain ``X'(w·y)`` diagonal path.
+
+    ``lt`` selects a term subset (mgcv's ``lt``, misc.r:335-349): the
+    returned vector holds ONLY the selected terms' rows, in selection
+    order — the per-LP gradient block of a general family
+    (``lt = lpid[i]``, gamlss.r:625).
     """
     w_arr = np.asarray(w, dtype=float)
     y_arr = np.asarray(y, dtype=float)
     n = design.n
-    p = design.p
     if ar is None:
         wy = w_arr * y_arr
     else:
@@ -7317,8 +7743,17 @@ def XWyd(design: DiscreteDesign, w: np.ndarray, y: np.ndarray,
         wy = _rw_matrix(stop, row, weight, wy, trans=False)
         wy = _rw_matrix(stop, row, weight, wy, trans=True)
         wy = sw * wy
-    Xy = np.zeros(p, dtype=float)
     Ts = _design_constraint_Ts(design)
+    if lt is not None:
+        parts = []
+        for it in lt:
+            term = design.terms[it]
+            T = Ts[it]
+            Xty_raw = _term_Xty_raw(term, wy, design.k, n)
+            parts.append(Xty_raw if T is None else T.T @ Xty_raw)
+        return (np.concatenate(parts) if parts
+                else np.zeros(0, dtype=float))
+    Xy = np.zeros(design.p, dtype=float)
     for term, T in zip(design.terms, Ts):
         Xty_raw = _term_Xty_raw(term, wy, design.k, n)
         if T is None:
@@ -7326,6 +7761,26 @@ def XWyd(design: DiscreteDesign, w: np.ndarray, y: np.ndarray,
         else:
             Xy[term.coef_slice] = T.T @ Xty_raw
     return Xy
+
+
+def design_full_X(design: DiscreteDesign) -> np.ndarray:
+    """Materialise the dense ``n × p`` design — column k is
+    ``Xbd(design, e_k)``, the de-materialisation identity mgcv's
+    ``diagXVXt`` uses per column (discrete.c:743-749). Reference /
+    test comparator only (the fit path never forms it); cached on
+    the design (weight- and coef-independent)."""
+    if design._full_X_cache is not None:
+        return design._full_X_cache
+    p = design.p
+    e = np.zeros(p)
+    cols = []
+    for k_ in range(p):
+        e[k_] = 1.0
+        cols.append(Xbd(design, e))
+        e[k_] = 0.0
+    X = np.column_stack(cols)
+    design._full_X_cache = X
+    return X
 
 
 def diagXVXd(design: DiscreteDesign, V: np.ndarray) -> np.ndarray:

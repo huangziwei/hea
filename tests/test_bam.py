@@ -2525,3 +2525,204 @@ def test_bam_censored_chunked_subsety():
     assert gf_chunk.deviance == pytest.approx(gf_full.deviance, rel=5e-2)
     assert gf_chunk.family._fi is not None
     assert gf_chunk.family._fi.shape[0] == dfg.height
+
+
+# =============================================================================
+# 7. discrete general families (audit-2 C17 / bam-general-family G0-G4):
+#    the driver mgcv never wired — bam.r:2653 stops with "general families
+#    not supported by bam" (live 1.9-4 receipt) while gamlss.gH's complete
+#    discrete branch (gamlss.r:604-711) sat dormant. hea completes it.
+# =============================================================================
+
+
+def _gaulss_frame(n: int = 400) -> pl.DataFrame:
+    """RGenerator(66) heteroskedastic frame — bit-matches the R recipe
+    set.seed(66); x0,x1,x2 <- runif(n) (in order); e <- rnorm(n);
+    y <- 2*sin(2*pi*x0) + 1.5*x1 + exp(-0.7 + 4.8*(x2-.5)^2)*.5*e."""
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(66)
+    x0 = g.uniform(0.0, 1.0, n)
+    x1 = g.uniform(0.0, 1.0, n)
+    x2 = g.uniform(0.0, 1.0, n)
+    e = g.normal(0.0, 1.0, n)
+    y = (2.0 * np.sin(2.0 * np.pi * x0) + 1.5 * x1
+         + np.exp(-0.7 + 4.8 * (x2 - 0.5) ** 2) * 0.5 * e)
+    return pl.DataFrame({"y": y, "x0": x0, "x1": x1, "x2": x2})
+
+
+_GAULSS_BAM_CACHE: dict = {}
+
+
+def _gaulss_bam_fit():
+    """One shared bam(list, gaulss, discrete=True) fit for section 7."""
+    if "m" not in _GAULSS_BAM_CACHE:
+        from hea.family import gaulss
+
+        _GAULSS_BAM_CACHE["m"] = hea.models.bam(
+            ["y ~ s(x0) + x1", "~ s(x2)"], _gaulss_frame(),
+            family=gaulss(), discrete=True)
+    return _GAULSS_BAM_CACHE["m"]
+
+
+def test_bam_general_discrete_kernels_match_dense():
+    """lt/rt term selection on XWXd/XWyd/Xbd ≡ dense sub-crossprods on
+    the materialised design (the discrete.c:700-703 selection self-tests,
+    hea-side), and the family ll/gamlss_gH discrete branch ≡ the dense
+    branch on the SAME design (gamlss.r:604-711 vs the complete-array
+    paths) — including the deriv-1 d1H trace with d1b/fh supplied and
+    mgcv's deriv>1 stop (gamlss.r:777)."""
+    from hea.family import gaulss
+    from hea.models.bam import Xbd, XWXd, XWyd, design_full_X
+
+    m = _gaulss_bam_fit()
+    design = m._discrete_design
+    X = m._md.X                      # the DiscreteX bundle
+    lpid = X.lpid
+    lpi = m.lpi
+    Xf = design_full_X(design)
+    p = design.p
+    n = design.n
+    rng = np.random.default_rng(3)
+    w = rng.uniform(0.5, 2.0, n)
+    yy = rng.normal(0.0, 1.0, n)
+    assert np.allclose(XWXd(design, w), Xf.T @ (w[:, None] * Xf),
+                       atol=1e-9)
+    for i in range(2):
+        for j in range(2):
+            blk = XWXd(design, w, lt=lpid[i], rt=lpid[j])
+            ref = Xf[:, lpi[i]].T @ (w[:, None] * Xf[:, lpi[j]])
+            assert blk.shape == (len(lpi[i]), len(lpi[j]))
+            assert np.allclose(blk, ref, atol=1e-9), (i, j)
+    # one-sided selection defaults the other side (misc.r:206)
+    assert np.allclose(XWXd(design, w, lt=lpid[0]),
+                       XWXd(design, w, lt=lpid[0], rt=lpid[0]))
+    for i in range(2):
+        assert np.allclose(XWyd(design, w, yy, lt=lpid[i]),
+                           Xf[:, lpi[i]].T @ (w * yy), atol=1e-9)
+    beta = rng.normal(0.0, 1.0, p)
+    for i in range(2):
+        assert np.allclose(Xbd(design, beta, lt=lpid[i]),
+                           Xf[:, lpi[i]] @ beta[lpi[i]], atol=1e-10)
+    B2 = rng.normal(0.0, 1.0, (p, 2))
+    assert np.allclose(Xbd(design, B2, lt=lpid[1]),
+                       Xf[:, lpi[1]] @ B2[lpi[1], :], atol=1e-10)
+
+    fam = gaulss()
+    yv = m._y_arr
+    coef0 = beta * 0.05
+    rd = fam.ll(yv, Xf, coef0, None, lpi=lpi, deriv=1)
+    rc = fam.ll(yv, X, coef0, None, lpi=lpi, deriv=1)
+    assert rc["l"] == pytest.approx(rd["l"], rel=1e-12)
+    assert np.allclose(rc["lb"], rd["lb"], rtol=1e-9, atol=1e-9)
+    assert np.allclose(rc["lbb"], rd["lbb"], rtol=1e-9, atol=1e-8)
+    m_sp = len(m._slots)
+    d1b = rng.normal(0.0, 0.1, (p, m_sp))
+    A0 = rng.normal(0.0, 1.0, (p, p))
+    fh = A0 @ A0.T / p + np.eye(p)
+    rd = fam.ll(yv, Xf, coef0, None, lpi=lpi, deriv=2, d1b=d1b, fh=fh)
+    rc = fam.ll(yv, X, coef0, None, lpi=lpi, deriv=2, d1b=d1b, fh=fh)
+    assert np.allclose(rc["d1H"], rd["d1H"], rtol=1e-9)
+    with pytest.raises(NotImplementedError, match="no discrete methods"):
+        fam.ll(yv, X, coef0, None, lpi=lpi, deriv=3, d1b=d1b, fh=fh)
+
+
+def test_bam_general_discrete_fit5_matches_dense_rail():
+    """_gam_fit5 through the compressed design (the p-space
+    boundary-transform seam replacing the two column reparas) ≡ the dense
+    driver on the materialised design at fixed lsp: REML/coef/η at
+    deriv=0, plus the REML1 trace path at deriv=1 (what BFGS sp
+    selection will consume)."""
+    from hea.models.bam import design_full_X
+    from hea.models.gam import _gam_fit5, _sl_initial_repara, _sl_setup
+
+    m = _gaulss_bam_fit()
+    X = m._md.X
+    lpi, slots, p, Mp = m.lpi, m._slots, m.p, m._Mp
+    fam = m.family
+    yv = m._y_arr
+    Xf = design_full_X(m._discrete_design)
+    lsp = np.array([1.0, 0.5])
+    for dv in (0, 1):
+        sl_d = _sl_setup(slots, p)
+        fit_d = _gam_fit5(_sl_initial_repara(sl_d, Xf, both_sides=False),
+                          yv, lsp, sl_d, family=fam, lpi=lpi,
+                          weights=None, offset=None, Mp=Mp, deriv=dv)
+        sl_c = _sl_setup(slots, p)
+        fit_c = _gam_fit5(X, yv, lsp, sl_c, family=fam, lpi=lpi,
+                          weights=None, offset=None, Mp=Mp, deriv=dv)
+        assert fit_d["converged"] and fit_c["converged"]
+        assert fit_c["REML"] == pytest.approx(fit_d["REML"], rel=1e-11)
+        assert np.allclose(fit_c["coefficients"], fit_d["coefficients"],
+                           atol=1e-9)
+        assert np.allclose(fit_c["linear_predictors"],
+                           fit_d["linear_predictors"], atol=1e-9)
+        if dv == 1:
+            assert np.allclose(fit_c["REML1"], fit_d["REML1"],
+                               rtol=1e-7, atol=1e-8)
+
+
+def test_bam_gaulss_discrete_matches_mgcv():
+    """bam(list, gaulss, discrete=True) end to end — the fit mgcv REFUSES
+    — against dense mgcv::gam(gaulss) oracles on the same frame (live
+    mgcv 1.9-4, the _gaulss_frame recipe):
+
+      b  <- gam(list(y~s(x0)+x1, ~s(x2)), family=gaulss(), data=d,
+                method="REML")   # REML 191.7194511707, sp .04369801 .67410720
+      be <- gam(..., optimizer="efs")
+                                 # REML 191.7194536659, sp .04370736 .67283664
+      fitted[1:3,1]  0.63365452 -1.66060571 -0.46139888
+      fitted[1:3,2]  1.44075881  2.68427594  1.61579331
+
+    The comparison crosses rails (mgcv: full-data dense basis + its
+    optimizer; hea: discrete.mf-binned basis + EFS — the discrete
+    gamlss.gH tops out at deriv 1, so full Newton is structurally off),
+    so the gates are discretization/EFS-endpoint scale; the bit-scale
+    receipts live in the two rail-parity tests above."""
+    from hea.family import gaulss
+
+    m = _gaulss_bam_fit()
+    assert m.converged
+    # hea stores 2·V_R; mgcv prints V_R (the summary line shows /2)
+    assert m.REML_criterion / 2.0 == pytest.approx(191.7194536659,
+                                                   abs=1e-4)
+    assert np.allclose(m.sp, [0.04370736, 0.67283664], rtol=5e-3)
+    assert np.allclose(m.fitted_values[:3, 0],
+                       [0.63365452, -1.66060571, -0.46139888], atol=5e-3)
+    assert np.allclose(m.fitted_values[:3, 1],
+                       [1.44075881, 2.68427594, 1.61579331], atol=5e-3)
+    # per-machine endpoint pin (EFS on the binned basis; regression guard)
+    assert m.REML_criterion / 2.0 == pytest.approx(191.7194542235,
+                                                   rel=1e-7)
+    assert m.edf_total == pytest.approx(15.548, abs=0.25)
+    s = m.summary()  # renders the z-table + smooth table (smoke)
+    assert s is None or s  # summary prints; no crash is the assertion
+
+    # same-engine cross-check: hea's DENSE gam (full-data basis, Newton
+    # REML — mgcv newton REML 191.7194511707) on the same frame.
+    gd = hea.models.gam(["y ~ s(x0) + x1", "~ s(x2)"], _gaulss_frame(),
+                        family=gaulss())
+    assert gd.REML_criterion / 2.0 == pytest.approx(191.7194511707,
+                                                    abs=1e-6)
+    assert m.REML_criterion == pytest.approx(gd.REML_criterion, abs=1e-3)
+    assert np.allclose(m.fitted_values, gd.fitted_values, atol=2e-2)
+
+
+def test_bam_general_discrete_guards():
+    """The entry's contract: general families need discrete=True (the
+    dense chunked path mirrors mgcv's bam.r:2653 stop), formula lists
+    need a general family, and predict on the discrete general fit is a
+    follow-up slice."""
+    from hea.family import gaulss
+
+    d = _gaulss_frame(120)
+    with pytest.raises(NotImplementedError, match="discrete rail"):
+        hea.models.bam(["y ~ s(x0)", "~ s(x2)"], d, family=gaulss())
+    with pytest.raises(ValueError, match="general"):
+        hea.models.bam(["y ~ s(x0)", "~ s(x2)"], d, family=Gaussian(),
+                       discrete=True)
+    with pytest.raises(ValueError, match="linear"):
+        hea.models.bam(["y ~ s(x0)"], d, family=gaulss(), discrete=True)
+    m = _gaulss_bam_fit()
+    with pytest.raises(NotImplementedError, match="predict"):
+        m.predict()
