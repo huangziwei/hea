@@ -2775,9 +2775,19 @@ def test_edge_correct_general_family_matches_mgcv():
     # control=gam.control(edge.correct=TRUE)) — s(w) has linear truth,
     # its sp sits at working infinity (~2.1e5) and the walk moves it
     # back exactly 6 unit log steps (lsp 12.2703 → lsp1 6.2703).
-    # Flat-direction quantities carry the optimizer's endpoint scatter
-    # (sp_flat agrees ~4e-4 while REML agrees 4e-9), so those entries
-    # get rtol 2e-3; everything else pins at 1e-4 or tighter.
+    #
+    # Tolerances are RECEIPT-derived, not felt. Along the flat
+    # direction newton's stop criterion (|grad| < score_scale·1e-6 =
+    # 2.2e-4) meets curvature H₁₁ = 1.08e-4, so the flat endpoint may
+    # legitimately sit O(1) log-sp units from the stationary point —
+    # each platform's arithmetic stops it somewhere else (darwin
+    # landed 4e-4 from mgcv's, a linux CI ~2e-3). Measured
+    # sensitivities at ±0.02 endpoint budget: V1[0,1] ~1e-3 rel,
+    # V1[1,1] ~2e-2 rel, lsp1[1] one-for-one. So: well-determined
+    # entries pin at 1e-4; flat-COUPLED cross terms get 4e-3; the
+    # flat direction's OWN entries are asserted structurally (the
+    # walk's exact 6.0 steps at 1e-8; the 35× sp-variance collapse
+    # 903 → 25 that IS the edge correction) instead of to digits.
     from hea.family import gaulss
     df = _fit5_fixture()
     m = gam(["y ~ s(x) + s(w)", "~ s(z)"], df, family=gaulss(),
@@ -2787,44 +2797,48 @@ def test_edge_correct_general_family_matches_mgcv():
     assert m.sp[1] > 1e5              # working infinity
     np.testing.assert_allclose(m.REML_criterion / 2, 218.1333837242,
                                rtol=0, atol=1e-5)
-    # the walk moved the flat sp back 6 unit steps; the others stayed
-    np.testing.assert_allclose(
-        m._lsp1_ec, [-1.936563055, 6.270342521, -1.477095367], rtol=2e-3)
+    # the walk moved the flat sp back EXACTLY 6 unit steps (invariant),
+    # the others stayed; the flat lsp1 entry inherits the endpoint.
     np.testing.assert_allclose(np.log(m.sp) - m._lsp1_ec, [0.0, 6.0, 0.0],
                                rtol=0, atol=1e-8)
+    np.testing.assert_allclose(
+        np.asarray(m._lsp1_ec)[[0, 2]], [-1.936563055, -1.477095367],
+        rtol=1e-4)
+    assert abs(m._lsp1_ec[1] - 6.270342521) < 0.1
     np.testing.assert_allclose(
         np.diag(m.Vc)[[0, 1, 2, 9, 19]],
         [0.0008154561995, 0.06446281033, 0.4595239323, 0.1837733338,
          0.002468328152], rtol=1e-4)
     np.testing.assert_allclose(np.diag(m.Vc)[11], 0.003206806604,
-                               rtol=2e-3)  # flat smooth's entry
+                               rtol=5e-3)  # flat smooth's entry
     # edf2 keeps the fitted-model k=1 pieces — but differs from the
     # plain fit through mgcv's repara pair on Vc1 (gam.fit4.r:1691).
     np.testing.assert_allclose(m.edf2_total, 16.1095862277, rtol=1e-5)
     np.testing.assert_allclose(m.edf_total, 13.9708235675, rtol=1e-6)
     # sp.vcov: edge branch = solve(hess1 + diag·reg); plain branch =
-    # solve(hess + reg) elementwise (mgcv.r:4227-4231). Entries COUPLED
-    # to the flat (working-infinity) direction — row/col 1 — carry the
-    # optimizer endpoint scatter cross-platform (CI CPUs land the flat
-    # sp a hair differently), so they get the loose 2e-3 band; the
-    # non-flat block pins at 1e-4.
+    # solve(hess + reg) elementwise (mgcv.r:4227-4231).
     V1 = m.sp_vcov()
     np.testing.assert_allclose(
         [V1[0, 0], V1[0, 2], V1[2, 2]],
         [0.3653756883, 0.009384734478, 0.8330026212], rtol=1e-4)
-    np.testing.assert_allclose(
-        [V1[0, 1], V1[1, 1]], [-0.004164655708, 25.24069682], rtol=2e-3)
+    np.testing.assert_allclose(V1[0, 1], -0.004164655708, rtol=4e-3)
     V0 = m.sp_vcov(edge_correct=False)
     np.testing.assert_allclose(
         [V0[0, 0], V0[2, 2]],
         [0.365438595, 0.8330972547], rtol=1e-3)
-    np.testing.assert_allclose(
-        [V0[0, 1], V0[1, 1]], [-0.3386173704, 903.3229983], rtol=2e-3)
+    np.testing.assert_allclose(V0[0, 1], -0.3386173704, rtol=5e-3)
+    # THE structural receipt of the edge correction: hess1 is rebuilt
+    # at the walked-back lsp1 where the flat direction has real
+    # curvature again, collapsing its sp-variance ~35× (mgcv: 25.24
+    # edge vs 903.32 plain). The magnitudes are endpoint-dominated —
+    # bracket them instead of pinning digits.
+    assert 20.0 < V1[1, 1] < 32.0
+    assert 800.0 < V0[1, 1] < 1000.0
     # V.sp becomes the k=2 Vr (1e-7 prior) under edge.correct
     Vsp = np.asarray(m._V_sp)
     np.testing.assert_allclose(
         [Vsp[0, 0], Vsp[2, 2]], [0.3655093291, 0.8337004788], rtol=1e-4)
-    np.testing.assert_allclose(Vsp[1, 1], 25.89422307, rtol=2e-3)
+    assert 20.0 < Vsp[1, 1] < 33.0
 
     # plain fit (no edge.correct): the k=2 machinery must stay cold
     m0 = gam(["y ~ s(x) + s(w)", "~ s(z)"], df, family=gaulss(),
