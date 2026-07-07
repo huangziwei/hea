@@ -3305,3 +3305,63 @@ def test_bam_general_discrete_start():
                        family=gaulss(), discrete=True, start=np.zeros(3))
     with pytest.raises(ValueError, match="formula-list"):
         hea.models.bam("y ~ s(x0)", d, discrete=True, start=np.zeros(5))
+
+
+def test_bam_general_discrete_drop_protocol():
+    """The kernel-level 'drop' protocol (C17/G3, the last parity piece
+    of the discrete general driver): gam.fit5's fundamental rank check
+    (gam.fit4.r:1160-1199) drops unidentifiable coefficients and
+    continues iterating. On the discrete rail the reduction lives in
+    the p-space boundary transform (M → M[:, keep] via llf's
+    embed/restrict — a compressed design has no columns to cut, and
+    lpi/X.lpid stay full so the family keeps assembling in the full
+    model basis; tr(M·fh·M'·A) = tr(fh·M'AM) makes that exactly the
+    reduced dense computation). Recipe = the olid receipt
+    (test_multilp_parametric_collinearity_matches_mgcv_olid): gaulss
+    with xdup = 2·x in LP1. mgcv 1.9-4 dense pins: ncoef 22, xdup
+    coefficient EXACTLY 0, REML 311.964723261, sp [.0681246, .4313170]
+    — the z/w smooths bin nearly losslessly at n=200, so the discrete
+    endpoint lands ~2.5e-8 from the dense one (measured)."""
+    from hea.family import gaulss
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(3)
+    n = 200
+    x = g.uniform(0.0, 1.0, n)
+    z = g.uniform(0.0, 1.0, n)
+    w = g.uniform(0.0, 1.0, n)
+    rn = g.normal(0.0, 1.0, n)
+    df = pl.DataFrame({
+        "y": 1 + x + np.sin(2 * np.pi * z)
+             + rn * np.exp(0.3 * np.cos(2 * np.pi * w)),
+        "x": x, "xdup": x * 2.0, "z": z, "w": w,
+    })
+    forms = ["y ~ x + xdup + s(z)", "~ s(w)"]
+    m = hea.models.bam(forms, df, family=gaulss(), discrete=True)
+    assert m.converged
+    beta = np.asarray(m._beta)
+    assert beta.shape[0] == 22                    # mgcv ncoef
+    assert beta[2] == 0.0                         # xdup dropped → exact 0
+    np.testing.assert_allclose(beta[:2], [1.11538940632, 0.996736549025],
+                               rtol=0, atol=2e-5)
+    np.testing.assert_allclose(m.REML_criterion / 2, 311.964723261,
+                               rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp, [0.0681246465194, 0.431317034396],
+                               rtol=5e-4)
+
+    # dense-rail referee on the same frame: same drop, same optimum
+    # (BFGS ran its deriv-1 REML trials in the REDUCED space post-drop,
+    # so the whole d1b/dVkk/d1H seam is exercised by convergence).
+    md = hea.models.gam(forms, df, family=gaulss(), method="REML")
+    assert np.asarray(md._beta)[2] == 0.0
+    assert abs(m.REML_criterion - md.REML_criterion) / 2.0 < 1e-6
+    assert float(np.max(np.abs(np.asarray(m.fitted_values)
+                               - np.asarray(md.fitted_values)))) < 1e-4
+
+    # the post-fit surface survives the drop
+    nd = pl.DataFrame({"x": np.linspace(0, 1, 9),
+                       "xdup": 2 * np.linspace(0, 1, 9),
+                       "z": np.linspace(0.1, 0.9, 9),
+                       "w": np.linspace(0.1, 0.9, 9)})
+    pr = m.predict(nd, type="link", se_fit=True)
+    assert np.all(np.isfinite(pr.to_numpy()))

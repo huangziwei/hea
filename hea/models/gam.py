@@ -15246,19 +15246,46 @@ def _gam_fit5(x, y, lsp, sl: _Sl, *, weights=None, offset=None,
     coef = np.asarray(start, dtype=float).reshape(-1).copy()
     start = coef.copy()         # kept for the iconv first-step-fail path
 
+    # the drop protocol's coordinate subset on the discrete rail (set by
+    # the fundamental rank check below; None ⇔ full basis). The dense
+    # rail cuts x's columns instead — here the SAME reduction lives in
+    # the p-space boundary transform: M → M[:, keep], spelled as
+    # embed-with-zeros on the way in and restrict on the way out, so the
+    # model basis, lpi and X.lpid stay full-q and the family's assembly
+    # is exactly mgcv's reduced dense one (tr(M·fh·M'·A) = tr(fh·M'AM)).
+    _keep_x: dict = {"keep": None}
+
     if discrete:
         def llf(b, d, d1b=None, fh=None, **kw):
+            k = _keep_x["keep"]
+            b = np.asarray(b, dtype=float)
+            if d1b is not None:
+                d1b = np.asarray(d1b, dtype=float)
+            if fh is not None:
+                fh = np.asarray(fh, dtype=float)
+            if k is not None:
+                bf = np.zeros(q)
+                bf[k] = b
+                b = bf
+                if d1b is not None:
+                    d1bf = np.zeros((q, d1b.shape[1]))
+                    d1bf[k, :] = d1b
+                    d1b = d1bf
+                if fh is not None:
+                    fhf = np.zeros((q, q))
+                    fhf[np.ix_(k, k)] = fh
+                    fh = fhf
             ret = family.ll(
-                y, x, _to_x(np.asarray(b, dtype=float)), weights,
+                y, x, _to_x(b), weights,
                 lpi=lpi, offset=offset, deriv=d,
-                d1b=None if d1b is None else _to_x(
-                    np.asarray(d1b, dtype=float)),
-                fh=None if fh is None else _fh_x(
-                    np.asarray(fh, dtype=float)), **kw)
+                d1b=None if d1b is None else _to_x(d1b),
+                fh=None if fh is None else _fh_x(fh), **kw)
             if ret.get("lb") is not None:
-                ret["lb"] = _from_x_grad(ret["lb"])
+                lb = _from_x_grad(ret["lb"])
+                ret["lb"] = lb if k is None else lb[k]
             if ret.get("lbb") is not None:
-                ret["lbb"] = _from_x_hess(ret["lbb"])
+                lbb = _from_x_hess(ret["lbb"])
+                ret["lbb"] = lbb if k is None else lbb[np.ix_(k, k)]
             return ret
     else:
         def llf(b, d, **kw):
@@ -15415,28 +15442,28 @@ def _gam_fit5(x, y, lsp, sl: _Sl, *, weights=None, offset=None,
                         Rq, piv_q = _scipy_qr(Hb, mode="r",
                                               pivoting=True)
                         rank = _R_rank(Rq, tol=eps_mach ** 0.9)
-                        if rank < q and discrete:
-                            # mgcv's kernels carry a ``drop`` argument for
-                            # exactly this (misc.r:203); hea's compressed
-                            # design does not yet — no discrete model has
-                            # reached this branch. Surface it rather than
-                            # silently mis-fit.
-                            raise NotImplementedError(
-                                "unidentifiable coefficients in a discrete "
-                                "general-family fit: the kernel-level "
-                                "'drop' protocol is not ported yet.")
                         if rank < q:
                             # drop unidentifiable params and continue
+                            # (gam.fit4.r:1170-1199)
                             drop = np.sort(piv_q[rank:q])
                             bdrop = np.isin(np.arange(q), drop)
                             keep = ~bdrop
                             coef = coef[keep]
                             St = St[np.ix_(keep, keep)]
-                            x = x[:, keep]
-                            ij = np.full(q, -1, dtype=int)
-                            ij[keep] = np.arange(int(keep.sum()))
-                            lpi = [ij[ix[~np.isin(ix, drop)]]
-                                   for ix in lpi]
+                            if discrete:
+                                # no x columns to cut on a compressed
+                                # design: shrink the boundary transform
+                                # instead (M → M[:, keep] via llf's
+                                # embed/restrict). lpi and X.lpid stay
+                                # full — the family keeps assembling in
+                                # the full model basis.
+                                _keep_x["keep"] = np.flatnonzero(keep)
+                            else:
+                                x = x[:, keep]
+                                ij = np.full(q, -1, dtype=int)
+                                ij[keep] = np.arange(int(keep.sum()))
+                                lpi = [ij[ix[~np.isin(ix, drop)]]
+                                       for ix in lpi]
                             ll = llf(coef, 1)
                             ll0 = (ll["l"]
                                    - float(coef @ St @ coef) / 2.0)
