@@ -1898,7 +1898,11 @@ def _build_qr_chunked_pirls(
                 deta = family.dDeta(y_chunk, mu_chunk, wp_chunk, theta, level=0)
                 EDeta2 = deta["EDeta2"]
                 w_chunk = EDeta2 * 0.5
-                z_chunk = (eta_chunk - off_chunk) - deta["Deta.EDeta2"]
+                # R computes z with non-finite dDeta entries SILENTLY and
+                # masks them via `good` right after (bam.r:1075-1076);
+                # numpy's invalid-op warning is noise mgcv doesn't emit.
+                with np.errstate(invalid="ignore"):
+                    z_chunk = (eta_chunk - off_chunk) - deta["Deta.EDeta2"]
                 good = np.isfinite(z_chunk) & np.isfinite(w_chunk)
                 w_chunk = np.where(good, w_chunk, 0.0)
                 z_chunk = np.where(good, z_chunk, 0.0)
@@ -2066,12 +2070,16 @@ def _build_qr_discrete_pirls(
         # mgcv-discrete's answer.
         theta = family.get_theta()
         deta = family.dDeta(y, mu_full, prior_w, theta, level=0)
-        if ar1:
-            w_full = deta["EDeta2"] * 0.5
-            z_full = (eta_full - offset) - deta["Deta.EDeta2"]
-        else:
-            w_full = deta["Deta2"] * 0.5
-            z_full = (eta_full - offset) - deta["Deta.Deta2"]
+        # R computes z with non-finite dDeta entries SILENTLY and masks
+        # them via `good` (bam.r:640-642); numpy's invalid-op warning
+        # is noise mgcv doesn't emit.
+        with np.errstate(invalid="ignore"):
+            if ar1:
+                w_full = deta["EDeta2"] * 0.5
+                z_full = (eta_full - offset) - deta["Deta.EDeta2"]
+            else:
+                w_full = deta["Deta2"] * 0.5
+                z_full = (eta_full - offset) - deta["Deta.Deta2"]
         good = np.isfinite(z_full) & np.isfinite(w_full)
         w_full = np.where(good, w_full, 0.0)
         z_full = np.where(good, z_full, 0.0)

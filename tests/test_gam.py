@@ -2803,18 +2803,23 @@ def test_edge_correct_general_family_matches_mgcv():
     np.testing.assert_allclose(m.edf2_total, 16.1095862277, rtol=1e-5)
     np.testing.assert_allclose(m.edf_total, 13.9708235675, rtol=1e-6)
     # sp.vcov: edge branch = solve(hess1 + diag·reg); plain branch =
-    # solve(hess + reg) elementwise (mgcv.r:4227-4231).
+    # solve(hess + reg) elementwise (mgcv.r:4227-4231). Entries COUPLED
+    # to the flat (working-infinity) direction — row/col 1 — carry the
+    # optimizer endpoint scatter cross-platform (CI CPUs land the flat
+    # sp a hair differently), so they get the loose 2e-3 band; the
+    # non-flat block pins at 1e-4.
     V1 = m.sp_vcov()
     np.testing.assert_allclose(
-        [V1[0, 0], V1[0, 1], V1[0, 2], V1[2, 2]],
-        [0.3653756883, -0.004164655708, 0.009384734478, 0.8330026212],
-        rtol=1e-4)
-    np.testing.assert_allclose(V1[1, 1], 25.24069682, rtol=2e-3)
+        [V1[0, 0], V1[0, 2], V1[2, 2]],
+        [0.3653756883, 0.009384734478, 0.8330026212], rtol=1e-4)
+    np.testing.assert_allclose(
+        [V1[0, 1], V1[1, 1]], [-0.004164655708, 25.24069682], rtol=2e-3)
     V0 = m.sp_vcov(edge_correct=False)
     np.testing.assert_allclose(
-        [V0[0, 0], V0[0, 1], V0[2, 2]],
-        [0.365438595, -0.3386173704, 0.8330972547], rtol=1e-3)
-    np.testing.assert_allclose(V0[1, 1], 903.3229983, rtol=1e-3)
+        [V0[0, 0], V0[2, 2]],
+        [0.365438595, 0.8330972547], rtol=1e-3)
+    np.testing.assert_allclose(
+        [V0[0, 1], V0[1, 1]], [-0.3386173704, 903.3229983], rtol=2e-3)
     # V.sp becomes the k=2 Vr (1e-7 prior) under edge.correct
     Vsp = np.asarray(m._V_sp)
     np.testing.assert_allclose(

@@ -2481,8 +2481,13 @@ def test_bam_bcg_matches_mgcv():
     from hea.family import bcg
 
     _, _, df = _censored_frames()
-    b = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=bcg(),
-                       method="fREML")
+    # mgcv warns "algorithm did not converge" at maxit here — hea's
+    # warning is the same receipt, asserted so it can't silently vanish
+    # (a converging bcg would mean the loop no longer walks mgcv's
+    # trajectory).
+    with pytest.warns(UserWarning, match="PIRLS algorithm did not converge"):
+        b = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=bcg(),
+                           method="fREML")
     np.testing.assert_allclose(
         b.sp, [3.45358690639, 2.74235966428], rtol=1e-7)
     assert b.REML_criterion / 2 == pytest.approx(348.187083252, rel=1e-9)
@@ -2496,8 +2501,9 @@ def test_bam_bcg_matches_mgcv():
     assert float(b.Vp[0, 0]) == pytest.approx(0.000204369237812, rel=1e-7)
     assert b.null_deviance == pytest.approx(737.398170441, rel=1e-9)
 
-    bd = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=bcg(),
-                        method="fREML", discrete=True)
+    with pytest.warns(UserWarning, match="PIRLS algorithm did not converge"):
+        bd = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df,
+                            family=bcg(), method="fREML", discrete=True)
     np.testing.assert_allclose(
         bd.sp, [4.3709425801, 3.44589976783], rtol=1e-6)
     assert bd.deviance == pytest.approx(331.734883193, rel=1e-9)
@@ -3433,12 +3439,22 @@ def test_bam_general_discrete_start():
     """
     from hea.family import gaulss
 
+    import warnings as _warnings
+
     d = _gaulss_frame()
     m1 = _gaulss_bam_fit()
     coef1 = np.asarray(m1.coefficients, dtype=float)
 
-    m2 = hea.models.bam(["y ~ s(x0) + x1", "~ s(x2)"], d,
-                        family=gaulss(), discrete=True, start=coef1)
+    # Warm-starting AT the converged coefficients legitimately ends the
+    # last inner refit on gam.fit4.r:1206's step-fail endgame; mgcv
+    # warns there whenever the relative grad exceeds 2·ε (its bfgs
+    # tightens ε to conv.tol/100 = 1e-8, gam.fit3.r:1797). Capture and
+    # ASSERT the warning — it is the mgcv-parity receipt, not noise.
+    with _warnings.catch_warnings(record=True) as rec:
+        _warnings.simplefilter("always")
+        m2 = hea.models.bam(["y ~ s(x0) + x1", "~ s(x2)"], d,
+                            family=gaulss(), discrete=True, start=coef1)
+    assert any("gam.fit5 step failed" in str(r.message) for r in rec)
     assert m2.converged
     # BFGS endpoint scatter: the user-start-seeded initial sp differs
     # from the pilot-seeded one, so the line-search path (not the
@@ -3451,8 +3467,10 @@ def test_bam_general_discrete_start():
             raise AssertionError(
                 "initializer must not run when start= is supplied")
 
-    m3 = hea.models.bam(["y ~ s(x0) + x1", "~ s(x2)"], d,
-                        family=_NoInit(), discrete=True, start=coef1)
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore", UserWarning)
+        m3 = hea.models.bam(["y ~ s(x0) + x1", "~ s(x2)"], d,
+                            family=_NoInit(), discrete=True, start=coef1)
     assert m3.converged
     assert m3.REML_criterion / 2.0 == pytest.approx(
         m1.REML_criterion / 2.0, abs=5e-7)
