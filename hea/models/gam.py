@@ -6033,7 +6033,8 @@ class _GGeneral:
     ``lpi``, ``g5`` warm-fit cache) + the shared bits the general branch reads."""
 
     def __init__(self, *, n_work, Mp, wt, family, control, gamma, X, y, sl,
-                 md_L, lpi, offsets, p, slots, g5, optimizer):
+                 md_L, lpi, offsets, p, slots, g5, optimizer,
+                 seed_start=None):
         self.n_work = n_work
         self.Mp = Mp
         self.wt = wt
@@ -6050,6 +6051,10 @@ class _GGeneral:
         self.slots = slots
         self.g5 = g5
         self.optimizer = optimizer
+        # user start= in the basis initial.spg's family calls expect:
+        # irp'd beside the irp'd dense X (mgcv.r:1903 → :1998 ordering),
+        # MODEL-basis on the discrete rail.
+        self.seed_start = seed_start
 
 
 def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
@@ -6120,7 +6125,7 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
             sl_setup = _sl_setup(gg.slots, gg.p)
             theta0 = _initial_sp_general(
                 gg.X, gg.y, family, gg.slots, gg.lpi, weights=gg.wt,
-                offsets=gg.offsets, L=None)
+                offsets=gg.offsets, L=None, start=gg.seed_start)
             fit_efs, theta_hat, it_efs = _efsud(
                 gg.X, gg.y, theta0, gg.sl, sl_setup, family=family,
                 lpi=gg.lpi, weights=gg.wt, offset=gg.offsets,
@@ -6137,7 +6142,7 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
             # available_derivs == 1 → BFGS over the REML5 score (mgcv.r:1722).
             theta0 = _initial_sp_general(
                 gg.X, gg.y, family, gg.slots, gg.lpi, weights=gg.wt,
-                offsets=gg.offsets, L=gg.md_L)
+                offsets=gg.offsets, L=gg.md_L, start=gg.seed_start)
             theta_hat = gam_outer(
                 theta0, optimizer="bfgs", criterion="REML5",
                 control=gg.control, bfgs_fn=outer_bfgs)
@@ -6146,7 +6151,7 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
         else:
             theta0 = _initial_sp_general(
                 gg.X, gg.y, family, gg.slots, gg.lpi, weights=gg.wt,
-                offsets=gg.offsets, L=gg.md_L)
+                offsets=gg.offsets, L=gg.md_L, start=gg.seed_start)
             theta_hat = gam_outer(
                 theta0, optimizer="newton", criterion="REML5",
                 control=gg.control, newton_fn=outer_newton)
@@ -6170,10 +6175,21 @@ def estimate_gam(G, sp, method, *, rho_full, outer_newton, fit_given_rho=None,
                 _warnings.warn(w_msg, stacklevel=2)
         # hea stores 2·V_R (single-formula convention: mgcv's printed REML is
         # REML_criterion/2).
+        # mgcv never sets $converged on a general-family gam (live 1.9-4
+        # receipt: NULL; the user-facing signal is outer.info$conv), so
+        # the flag is hea's contract: the inner fit's flag, rescued by a
+        # fully-converged outer trajectory — the last accepted refit may
+        # legitimately end on gam.fit4.r:1206's step-fail endgame when
+        # warm-started at a neighbouring trial's optimum (e.g. a user
+        # start= at the converged coefficients).
+        conv_flag = bool(fit["converged"])
+        if (not conv_flag and outer_info is not None
+                and outer_info.get("conv") == "full convergence"):
+            conv_flag = True
         return {"fit": fit, "rho_hat": rho_hat, "sp": sp_out,
                 "outer_info": outer_info,
                 "REML_criterion": 2.0 * fit["REML"],
-                "converged": bool(fit["converged"])}
+                "converged": conv_flag}
 
     # ---- ordinary-family branch ---------------------------------------------
     n, n_sp, n_work = G.n, G.n_sp, G.n_work
@@ -8726,11 +8742,17 @@ class gam:
         # mgcv's estimate.gam general-family branch (mgcv.r:1984+): bundle
         # the general slice of G and run smoothness selection + the final
         # gam.fit5, then assign the returned state onto self.
+        seed_start = start_irp
+        if start is not None and isinstance(md.X, _DiscreteX):
+            # initial.spg reaches the design only through family.ll,
+            # which consumes MODEL-basis coefficients on the discrete
+            # rail (the irp transform is gam.fit5's boundary seam).
+            seed_start = np.asarray(start, dtype=float).reshape(-1)
         gg = _GGeneral(
             n_work=self._work_dim, Mp=Mp, wt=self._wt, family=family,
             control=self._control, gamma=self._gamma, X=X_irp, y=y, sl=sl,
             md_L=md.L, lpi=md.lpi, offsets=md.offsets, p=md.p, slots=md.slots,
-            g5=self._g5, optimizer=optimizer)
+            g5=self._g5, optimizer=optimizer, seed_start=seed_start)
         _res = estimate_gam(
             None, sp, method, rho_full=self._rho_full,
             outer_newton=self._outer_newton, outer_bfgs=self._outer_bfgs,
@@ -15796,7 +15818,7 @@ def _single_sp(X, S, target: float = 0.5, tol: float | None = None) -> float:
 
 def _initial_sp_general(X, y, family, slots: list["_PenaltySlot"], lpi,
                         *, weights=None, offsets=None,
-                        L=None) -> np.ndarray:
+                        L=None, start=None) -> np.ndarray:
     """mgcv ``initial.spg``'s general-family branch (mgcv.r:4541-4557
     plus the L-regression tail at :4615-4620): per penalty,
     λᵢ = 0.3·‖Z'H₀Z‖_M / ‖Z'SᵢZ‖_M with H₀ = −lbb at the family's
@@ -15837,7 +15859,17 @@ def _initial_sp_general(X, y, family, slots: list["_PenaltySlot"], lpi,
     else:
         Eb = np.zeros((0, p))
 
-    start = family.initialize_coef(y, X, lpi, E=Eb, offset=offsets)
+    # mgcv evals family$initialize unconditionally here (mgcv.r:4540),
+    # but every general family's initialize expression guards on
+    # ``is.null(start)`` — so a user start= (already irp-mapped by
+    # estimate.gam, mgcv.r:1903, and reaching initial.spg through
+    # ``...``) skips the pilot solve and seeds the Hessian directly.
+    # hea mirrors: initialize_coef IS the inside of that guard. On the
+    # discrete rail the caller passes the MODEL-basis vector instead
+    # (family.ll dispatches on DiscreteX in model coordinates; the irp
+    # transform is gam.fit5's boundary seam there).
+    if start is None:
+        start = family.initialize_coef(y, X, lpi, E=Eb, offset=offsets)
     lbb = family.ll(y, X, start, weights, lpi=lpi, offset=offsets,
                     deriv=1)["lbb"]
 

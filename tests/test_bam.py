@@ -2712,8 +2712,8 @@ def test_bam_gaulss_discrete_matches_mgcv():
 def test_bam_general_discrete_guards():
     """The entry's contract: general families need discrete=True (the
     dense chunked path mirrors mgcv's bam.r:2653 stop), formula lists
-    need a general family, and predict on the discrete general fit is a
-    follow-up slice."""
+    need a general family with the right LP count. (predict — once a
+    guarded follow-up — is live: test_bam_general_discrete_predict.)"""
     from hea.family import gaulss
 
     d = _gaulss_frame(120)
@@ -2724,9 +2724,6 @@ def test_bam_general_discrete_guards():
                        discrete=True)
     with pytest.raises(ValueError, match="linear"):
         hea.models.bam(["y ~ s(x0)"], d, family=gaulss(), discrete=True)
-    m = _gaulss_bam_fit()
-    with pytest.raises(NotImplementedError, match="predict"):
-        m.predict()
 
 
 # ---- the remaining discrete.ok families (G2 completion): gammals /
@@ -3089,6 +3086,16 @@ def test_bam_cc_discrete_matches_mgcv():
     assert m3.REML_criterion / 2.0 == pytest.approx(75.7573257868,
                                                     rel=1e-7)
 
+    # predict wraps the circle: the binned cc basis evaluated at 0 and
+    # 2π (the explicit knot pair) must agree to machine precision —
+    # value AND se (a circular prediction grid always hits both ends).
+    grid = pl.DataFrame({"x0": np.linspace(0.0, 2.0 * np.pi, 50),
+                         "x1": np.full(50, 0.5)})
+    p3 = m3.predict(grid, type="link", se_fit=True)
+    assert np.all(np.isfinite(p3.to_numpy()))
+    assert abs(float(p3["fit"][0]) - float(p3["fit"][-1])) < 1e-10
+    assert abs(float(p3["se.fit"][0]) - float(p3["se.fit"][-1])) < 1e-10
+
 
 def test_bam_general_discrete_efs_and_fixed_sp():
     """The non-default optimizer surfaces of the discrete general rail:
@@ -3123,3 +3130,178 @@ def test_bam_general_discrete_efs_and_fixed_sp():
     with pytest.raises(ValueError, match="formula-list"):
         hea.models.bam("y ~ s(x0)", d, discrete=True,
                        optimizer=("efs",))
+
+
+def test_bam_general_discrete_predict():
+    """predict on the discrete GENERAL fit (v0.1.7 gate slice) —
+    predict.bamd's binned protocol (bam.r:1843-1921) applied per LP with
+    ``lt=lpid[j]`` kernel selection, plus predict.gam's multi-LP output
+    semantics. mgcv has no comparator (bam.r:2653 stops before fitting
+    any general family); the referees are internal-consistency
+    identities, the dense exact-eval machinery on the SAME materialised
+    predict design, and hea's dense gam rail:
+
+      * newdata=None (default m): cached surface, bit-identical;
+      * lpmatrix ≡ the materialised predict design; lpmatrix @ β ==
+        link per LP (the F1 identity, machine);
+      * link SE ≡ dense ``einsum(X_j V_jj X_j')`` on the same design —
+        the diagXVXd ``lt`` parity receipt (misc.r:438/workXVXd: V
+        arrives as the selected block in selection order);
+      * response = per-LP linkinv, SE = |dμ/dη|·se (delta, exact);
+      * terms fall-through rides the exact-eval parent: Σ term columns
+        + intercepts == exact-eval per-LP η sums (machine);
+      * cross-rail: hea dense gam(list, gaulss) predictions agree at
+        the basis/endpoint band;
+      * gammals (family ``predict`` hook) response routes exact-eval
+        (the gfam precedent), its link stays on the kernel path;
+        gevlss exercises the 3-LP surface; offset= is rejected like
+        the dense multi-formula path.
+    """
+    from hea.family import gaulss
+    from hea.models.bam import design_full_X
+    from hea.models.gam import _multi_lpmatrix
+
+    m = _gaulss_bam_fit()
+    lp = np.asarray(m.linear_predictors, dtype=float)
+    fv = np.asarray(m.fitted_values, dtype=float)
+    beta = np.asarray(m.coefficients, dtype=float)
+    lpi = m._md.lpi
+
+    # -- newdata=None: cache reuse, bit-identical ------------------------
+    pr = m.predict(type="link")
+    assert np.array_equal(pr["fit"].to_numpy(), lp[:, 0])
+    assert np.array_equal(pr["fit.1"].to_numpy(), lp[:, 1])
+    prr = m.predict(type="response")
+    assert np.allclose(prr["fit"].to_numpy(), fv[:, 0], atol=1e-12, rtol=0)
+    assert np.allclose(prr["fit.1"].to_numpy(), fv[:, 1], atol=1e-12,
+                       rtol=0)
+
+    # -- newdata: lpmatrix / link / SE machine identities ----------------
+    rng = np.random.default_rng(3)
+    nd = pl.DataFrame({"x0": rng.uniform(0, 1, 37),
+                       "x1": rng.uniform(0, 1, 37),
+                       "x2": rng.uniform(0, 1, 37)})
+    Xf = m.predict(nd, type="lpmatrix")
+    prl = m.predict(nd, type="link")
+    prs = m.predict(nd, type="link", se_fit=True)
+    pd_design, n_user, _offs = m._build_predict_discrete_design_general(nd)
+    Xd = design_full_X(pd_design)[:n_user]
+    assert np.max(np.abs(Xf - Xd)) < 1e-12
+    V = m.Vp
+    for j, (fk, sk) in enumerate((("fit", "se.fit"),
+                                  ("fit.1", "se.fit.1"))):
+        cols = np.asarray(lpi[j], dtype=int)
+        eta_ref = Xf[:, cols] @ beta[cols]
+        assert np.max(np.abs(eta_ref - prl[fk].to_numpy())) < 1e-12
+        var_ref = np.einsum("ij,jk,ik->i", Xd[:, cols],
+                            V[np.ix_(cols, cols)], Xd[:, cols])
+        assert np.max(np.abs(prs[sk].to_numpy()
+                             - np.sqrt(np.maximum(var_ref, 0.0)))) < 1e-12
+
+    # -- response: linkinv + delta-method SE, exact from link outputs ---
+    prsr = m.predict(nd, type="response", se_fit=True)
+    for j, (fk, sk) in enumerate((("fit", "se.fit"),
+                                  ("fit.1", "se.fit.1"))):
+        eta_j = prl[fk].to_numpy()
+        assert np.array_equal(prsr[fk].to_numpy(),
+                              m.family.links[j].linkinv(eta_j))
+        assert np.max(np.abs(
+            prsr[sk].to_numpy()
+            - np.abs(m.family.links[j].mu_eta(eta_j))
+            * prs[sk].to_numpy())) < 1e-14
+
+    # -- terms fall-through (exact-eval parent path) ---------------------
+    tt = m.predict(nd, type="terms")
+    assert set(tt.columns) == {"x1", "s(x0)", "s.1(x2)"}
+    Xex, _ = _multi_lpmatrix(m._md, nd)
+    tot = sum(tt[c].to_numpy() for c in tt.columns)
+    icpt = beta[lpi[0][0]] + beta[lpi[1][0]]
+    eta_sum_ref = (Xex[:, lpi[0]] @ beta[lpi[0]]
+                   + Xex[:, lpi[1]] @ beta[lpi[1]])
+    assert np.max(np.abs(tot + icpt - eta_sum_ref)) < 1e-12
+    assert m.predict(type="terms").height == m._md.n
+
+    # -- cross-rail referee: hea dense gam on the same formulas ---------
+    gd = hea.models.gam(["y ~ s(x0) + x1", "~ s(x2)"], _gaulss_frame(),
+                        family=gaulss())
+    pg = gd.predict(nd, type="link", se_fit=True)
+    for k in ("fit", "fit.1", "se.fit", "se.fit.1"):
+        assert np.max(np.abs(prs[k].to_numpy() - pg[k].to_numpy())) < 1e-4
+
+    # -- hook routing, 3-LP surface, unconditional, offset guard --------
+    mg = _dgf_fit("gammals")
+    ndg = pl.DataFrame({"x0": rng.uniform(0, 1, 11),
+                        "x1": rng.uniform(0, 1, 11)})
+    rr = mg.predict(ndg, type="response")
+    assert rr.columns == ["fit", "fit.1"] and rr.height == 11
+    assert np.all(np.isfinite(rr.to_numpy()))
+    rlg = mg.predict(ndg, type="link")
+    Xfg = mg.predict(ndg, type="lpmatrix")
+    bg = np.asarray(mg.coefficients, dtype=float)
+    for j, k in enumerate(("fit", "fit.1")):
+        cols = np.asarray(mg._md.lpi[j], dtype=int)
+        assert np.max(np.abs(Xfg[:, cols] @ bg[cols]
+                             - rlg[k].to_numpy())) < 1e-12
+
+    me = _dgf_fit("gevlss")
+    nde = pl.DataFrame({"x0": rng.uniform(0, 1, 13),
+                        "x1": rng.uniform(0, 1, 13)})
+    pe = me.predict(nde, type="link", se_fit=True)
+    assert pe.columns == ["fit", "fit.1", "fit.2",
+                          "se.fit", "se.fit.1", "se.fit.2"]
+    assert np.all(np.isfinite(pe.to_numpy()))
+
+    ru = m.predict(nd, type="link", se_fit=True, unconditional=True)
+    assert np.all(np.isfinite(ru.to_numpy()))
+    with pytest.raises(NotImplementedError, match="offset"):
+        m.predict(nd, type="link", offset=np.zeros(37))
+
+
+def test_bam_general_discrete_start():
+    """bam(list, …, start=) — gam.fit5's coefficient seed on the
+    discrete rail (v0.1.7 gate slice; the basin-control / warm-start
+    lever). Receipts:
+
+      * a user start REPLACES the family initializer — mgcv's start0
+        protection (gam.fit4.r:995-998): a family whose initialize_coef
+        raises fits fine WITH start= and raises without;
+      * warm-starting from the converged coefficients reproduces the
+        optimum;
+      * wrong length raises naming the stacked p; the single-formula
+        rail rejects start= (mgcv bam's warm start is coef=, roadmap
+        D23).
+    """
+    from hea.family import gaulss
+
+    d = _gaulss_frame()
+    m1 = _gaulss_bam_fit()
+    coef1 = np.asarray(m1.coefficients, dtype=float)
+
+    m2 = hea.models.bam(["y ~ s(x0) + x1", "~ s(x2)"], d,
+                        family=gaulss(), discrete=True, start=coef1)
+    assert m2.converged
+    # BFGS endpoint scatter: the user-start-seeded initial sp differs
+    # from the pilot-seeded one, so the line-search path (not the
+    # optimum) differs — same 1e-7-grade band as the EFS-vs-EFS pins.
+    assert m2.REML_criterion / 2.0 == pytest.approx(
+        m1.REML_criterion / 2.0, abs=5e-7)
+
+    class _NoInit(gaulss):
+        def initialize_coef(self, *a, **k):
+            raise AssertionError(
+                "initializer must not run when start= is supplied")
+
+    m3 = hea.models.bam(["y ~ s(x0) + x1", "~ s(x2)"], d,
+                        family=_NoInit(), discrete=True, start=coef1)
+    assert m3.converged
+    assert m3.REML_criterion / 2.0 == pytest.approx(
+        m1.REML_criterion / 2.0, abs=5e-7)
+    with pytest.raises(AssertionError, match="initializer"):
+        hea.models.bam(["y ~ s(x0) + x1", "~ s(x2)"], d,
+                       family=_NoInit(), discrete=True)
+
+    with pytest.raises(ValueError, match="start must have length"):
+        hea.models.bam(["y ~ s(x0) + x1", "~ s(x2)"], d,
+                       family=gaulss(), discrete=True, start=np.zeros(3))
+    with pytest.raises(ValueError, match="formula-list"):
+        hea.models.bam("y ~ s(x0)", d, discrete=True, start=np.zeros(5))

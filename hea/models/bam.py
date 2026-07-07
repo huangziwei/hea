@@ -2433,6 +2433,7 @@ class bam(gam):
         discrete_m: int | None = None,
         knots: dict | None = None,
         optimizer: tuple | str | None = None,
+        start: np.ndarray | list | None = None,
     ):
         # ``data`` may be a polars DataFrame OR a mapping of name → 1-D /
         # 2-D ndarray. 2-D entries become matrix columns for mgcv's
@@ -2447,13 +2448,20 @@ class bam(gam):
                 [str(f) for f in formula], data, method=method, sp=sp,
                 family=family, offset=offset, weights=weights, gamma=gamma,
                 select=select, rho=rho, discrete=discrete,
-                discrete_m=discrete_m, knots=knots, optimizer=optimizer)
+                discrete_m=discrete_m, knots=knots, optimizer=optimizer,
+                start=start)
             return
         if optimizer is not None:
             raise ValueError(
                 "optimizer= applies to the general-family (formula-list) "
                 "rail only; single-formula bam chooses its optimizer from "
                 "method= like mgcv (bam.r has no optimizer argument).")
+        if start is not None:
+            raise ValueError(
+                "start= applies to the general-family (formula-list) rail "
+                "only (gam.fit5's start, gam.fit4.r:941); mgcv's bam warm-"
+                "starts single-formula fits through coef=, which is not "
+                "ported (roadmap D23).")
         # ---- method aliasing ------------------------------------------------
         # mgcv's bam accepts {fREML, GACV.Cp, GCV.Cp, REML, ML, P-REML,
         # P-ML, NCV} (bam.r:2207). fREML is algorithmically identical to
@@ -3247,7 +3255,8 @@ class bam(gam):
 
     def _init_general_discrete(self, formulas, data, *, method, sp, family,
                                offset, weights, gamma, select, rho,
-                               discrete, discrete_m, knots, optimizer=None):
+                               discrete, discrete_m, knots, optimizer=None,
+                               start=None):
         """bam for GENERAL (multi-LP) families on the discrete rail — the
         driver mgcv never wired: ``bam.r:2653`` stops with "general
         families not supported by bam" while ``gamlss.gH``'s complete
@@ -3267,6 +3276,16 @@ class bam(gam):
         extended Fellner-Schall (deriv-0 fits) instead, mgcv's other
         short-derivative route. AR1 (``rho``) and NCV stay off the
         discrete general path, mirroring mgcv's discrete limits.
+
+        ``start=`` seeds the coefficient vector exactly like
+        ``gam(start=)`` on the dense general path: gam.fit5 maps it into
+        the fitting basis and PROTECTS it from the family initializer
+        (gam.fit4.r:995-998 — ``start0 <- start; eval(family$initialize);
+        start <- start0``), so a user start replaces the pilot solve
+        entirely. That makes it both the warm-start lever (each outer
+        BFGS/EFS trial already re-seeds from the previous inner fit) and
+        the basin selector for multimodal likelihoods — e.g. seeding a
+        discrete fit from a dense pilot fit's coefficients.
         """
         family = Gaussian() if family is None else family
         if not isinstance(family, GeneralFamily):
@@ -3344,7 +3363,7 @@ class bam(gam):
         # a polars frame regardless of the caller's data type.
         self._init_general_from_md(md, self.data, family=family, sp=sp,
                                    method="REML", weights=weights,
-                                   start=None, optimizer=optimizer)
+                                   start=start, optimizer=optimizer)
 
     def _build_discrete_general_md(self, formulas, data, knots, select,
                                    discrete_m) -> _MultiDesign:
@@ -3533,7 +3552,16 @@ class bam(gam):
         self._discrete_design = design
         self.data = data_m           # normalized frame for the shared tail
 
-        lps = [types.SimpleNamespace(expanded=d.expanded) for d in ds]
+        # ``lps`` carries what the exact-eval predict surface reads off a
+        # multi-LP fit (gam._predict_general / _multi_lpmatrix): the
+        # per-LP expanded formula, the normalized frame (factor-stub
+        # levels) and the FROZEN smooth blocks — ``spec.predict_mat``
+        # re-evaluates each basis exactly on newdata, so terms-type and
+        # family-hook predictions ride the parent path unchanged.
+        lps = [types.SimpleNamespace(expanded=d.expanded, data=d.data,
+                                     blocks=parts[1],
+                                     param_assign=d.param_assign)
+               for d, parts in zip(ds, lp_parts)]
         return _MultiDesign(
             lps=lps, X=DiscreteX(design, lpid), lpi=lpi, y=y,
             blocks=blocks_all, block_col_ranges=ranges_all, slots=slots,
@@ -3575,9 +3603,11 @@ class bam(gam):
         Behaviour for each (newdata, type, se_fit) combination (non-discrete
         fit, or the discrete decomposition surface):
 
-        A general-family discrete fit (formula list) raises: its per-LP
-        prediction surface is a follow-up slice of the discrete general
-        driver.
+        A general-family discrete fit (formula list) routes whole-model
+        link/response/lpmatrix to :meth:`_predict_bamd_general` (the
+        per-LP binned kernel surface) and everything else — terms/iterms,
+        term selection, family-``predict``-hooked response — to the
+        exact-eval parent (:meth:`hea.gam._predict_general`).
 
         * ``newdata`` not None → delegate to ``super().predict(...)`` —
           parent rebuilds the design via per-block ``spec.predict_mat``
@@ -3595,12 +3625,6 @@ class bam(gam):
           per-row link-scale variance; delta-method
           ``|μ_η|`` multiplier for response-scale SE.
         """
-        if getattr(self, "_general_discrete", False):
-            raise NotImplementedError(
-                "predict on a discrete general-family bam fit is a "
-                "follow-up slice of the discrete general driver "
-                "(per-LP prediction surface); fitted_values / "
-                "linear_predictors carry the training-data surface.")
         if type not in ("link", "response", "terms", "iterms", "lpmatrix"):
             raise ValueError(
                 "type must be 'link', 'response', 'terms', 'iterms', or "
@@ -3609,6 +3633,35 @@ class bam(gam):
         if type == "lpmatrix" and se_fit:
             raise ValueError(
                 "se_fit=True is not allowed with type='lpmatrix'"
+            )
+        # Discrete GENERAL fit (formula list): whole-model link/response/
+        # lpmatrix ride the binned per-LP kernel surface; terms/iterms,
+        # terms=/exclude= selection and family-`predict`-hooked response
+        # (gammals/gumbls/multinom) fall through to the exact-eval parent
+        # (gam._predict_general via each block's spec.predict_mat) — the
+        # same split as the single-LP discrete fit below, with the gfam
+        # precedent for hooked families (mgcv's own hooked discrete
+        # predict errors, bam.r:1995-2004 live receipt). newdata=None on
+        # the parent path routes the training frame explicitly: md.X is
+        # a DiscreteX the parent cannot np.asarray.
+        if getattr(self, "_general_discrete", False):
+            if offset is not None:
+                raise NotImplementedError(
+                    "offset= is not supported for multi-formula bam "
+                    "predict; put offset(...) atoms in the per-LP "
+                    "formulas.")
+            fam_predict = getattr(self.family, "predict", None)
+            if (type in ("link", "response", "lpmatrix")
+                    and terms is None and exclude is None
+                    and not (type == "response" and fam_predict is not None)):
+                return self._predict_bamd_general(
+                    newdata, type=type, se_fit=se_fit,
+                    unconditional=unconditional)
+            return super().predict(
+                newdata=self.data if newdata is None else newdata,
+                type=type, se_fit=se_fit, offset=offset,
+                unconditional=unconditional, terms=terms, exclude=exclude,
+                iterms_type=iterms_type,
             )
 
         # predict.bam routes a DISCRETE fit (``object$dinfo`` set) to
@@ -3843,6 +3896,143 @@ class bam(gam):
             mu = self.family.link.linkinv(eta)
         mu_eta = self.family.link.mu_eta(eta)
         return pl.DataFrame({"fit": mu, "se.fit": se_link * np.abs(mu_eta)})
+
+    def _build_predict_discrete_design_general(self, newdata):
+        """Re-discretise ``newdata`` for a multi-LP (general-family) fit —
+        the formula-list twin of :meth:`_build_predict_discrete_design`
+        (mgcv ``predict.bamd``'s setup, bam.r:1843-1921, which mgcv can
+        never reach for a general family): one shared ``discrete.mf``
+        pass at the DEFAULT resolution over every LP's smooth terms and
+        parametric covariates (no response column — prediction is
+        response-free), each LP's FROZEN smooth blocks re-evaluated on
+        the new grid, terms assembled LP-contiguously exactly like the
+        fit build. Returns ``(design, n_user, offs)`` where ``offs`` are
+        the per-LP formula offsets on ``newdata`` (stub-trimmed).
+        """
+        md = self._md
+        newdata = normalize_data(newdata)
+        expr_map: dict = {}
+        for lp in md.lps:
+            expr_map.update(_smooth_arg_expr_map(lp.expanded))
+        if expr_map:
+            newdata = _apply_smooth_arg_exprs(newdata, expr_map)
+        n_user = newdata.height
+        newdata, n_stubs = _add_factor_stub_rows(newdata, self.data)
+
+        specs: list[dict] = []
+        names_pmf: list[str] = []
+        lp_parts: list[tuple[np.ndarray, list]] = []
+        for lp in md.lps:
+            Xp_df = materialize(lp.expanded, newdata)
+            X_param = Xp_df.to_numpy().astype(float)
+            if X_param.shape[1] == 0:
+                X_param = np.zeros((newdata.height, 0))
+            lp_parts.append((X_param, lp.blocks))
+            specs.extend(_smooth_specs_from_expanded(lp.expanded, newdata))
+            for col in Xp_df.columns:
+                if (col != "(Intercept)" and col in newdata.columns
+                        and col not in names_pmf):
+                    names_pmf.append(col)
+        dframe = discrete_mf(specs, newdata, names_pmf=names_pmf, m=None)
+        design, lpid_new = build_discrete_design_lps(lp_parts, dframe)
+        # Same blocks, same LP order ⇒ the term→LP map must reproduce the
+        # fit's lpid (build_discrete_design_lps is deterministic in the
+        # lp_parts structure); guard against silent drift.
+        assert lpid_new == md.X.lpid, (lpid_new, md.X.lpid)
+
+        offs: list[np.ndarray | None] = []
+        for lp in md.lps:
+            if lp.expanded.offsets:
+                off_j = np.zeros(newdata.height)
+                for off_node in lp.expanded.offsets:
+                    blk = _eval_atom(off_node, newdata)
+                    off_j = off_j + blk.values.flatten().astype(float)
+                offs.append(off_j[:n_user] if n_stubs > 0 else off_j)
+            else:
+                offs.append(None)
+        return design, n_user, offs
+
+    def _predict_bamd_general(self, newdata, *, type, se_fit,
+                              unconditional):
+        """``predict.bamd`` for the discrete GENERAL fit — the per-LP
+        value / SE / lpmatrix surface via the discrete kernels. mgcv has
+        no comparator (``bam.r:2653`` stops before any general family is
+        fitted); the protocol composes hea's two existing ports:
+        predict.bamd's binned re-discretisation (:meth:`_predict_bamd` —
+        newdata re-gridded at ``compress.df``'s default resolution,
+        values gathered by ``Xbd``, link-scale variance by ``diagXVXd``)
+        applied per linear predictor with ``lt=lpid[j]`` term selection
+        (the ``gamlss.gH`` convention, gamlss.r:625-665), and
+        predict.gam's multi-LP output semantics (one ``fit``/``fit.{j}``
+        column per LP, per-LP linkinv + delta-method response SE —
+        :meth:`hea.gam._predict_general`, the same-design dense referee).
+
+        ``newdata=None`` at the default discretisation reuses the fit
+        grid and the cached per-LP η (bit-identical to
+        ``linear_predictors``, offsets included), exactly like the
+        single-LP path. Families with a ``predict`` hook never reach
+        this method for ``type='response'`` — the caller routes them to
+        the exact-eval parent (the gfam precedent: mgcv's own hooked
+        discrete predict is broken, bam.r:1995-2004 live receipt).
+        """
+        md = self._md
+        lpid = md.X.lpid
+        beta = np.asarray(self.coefficients, dtype=float).reshape(-1)
+
+        reuse = newdata is None and self._discrete_m is None
+        if reuse:
+            design = self._discrete_design
+            n_pred = int(md.n)
+            offs = list(md.offsets)
+        else:
+            design, n_pred, offs = (
+                self._build_predict_discrete_design_general(
+                    self.data if newdata is None else newdata))
+
+        if type == "lpmatrix":
+            p = design.p
+            Xf = np.empty((n_pred, p), dtype=float)
+            ek = np.zeros(p, dtype=float)
+            for kk in range(p):
+                ek[kk] = 1.0
+                Xf[:, kk] = Xbd(design, ek)[:n_pred]
+                ek[kk] = 0.0
+            return Xf
+
+        V = None
+        if se_fit:
+            V = self.Vp
+            if unconditional:
+                Vc = getattr(self, "Vc", None)
+                if Vc is not None:
+                    V = Vc
+        fits: list[np.ndarray] = []
+        ses: list[np.ndarray] = []
+        for j in range(len(md.lpi)):
+            if reuse:
+                eta_j = np.asarray(self.linear_predictors,
+                                   dtype=float)[:, j].copy()
+            else:
+                eta_j = Xbd(design, beta, lt=lpid[j])[:n_pred]
+                if offs[j] is not None:
+                    eta_j = eta_j + offs[j]
+            if se_fit:
+                cols = np.asarray(md.lpi[j], dtype=int)
+                var_j = diagXVXd(design, V[np.ix_(cols, cols)],
+                                 lt=lpid[j])[:n_pred]
+                se_j = np.sqrt(np.maximum(var_j, 0.0))
+            if type == "response":
+                link_j = self.family.links[j]
+                fits.append(link_j.linkinv(eta_j))
+                if se_fit:
+                    ses.append(np.abs(link_j.mu_eta(eta_j)) * se_j)
+            else:
+                fits.append(eta_j)
+                if se_fit:
+                    ses.append(se_j)
+        return self._general_response_frame(
+            np.column_stack(fits),
+            np.column_stack(ses) if se_fit else None)
 
     # -----------------------------------------------------------------------
     # _fit_given_rho override — uses (R, f, y_norm2, rss_extra)
@@ -7804,7 +7994,8 @@ def design_full_X(design: DiscreteDesign) -> np.ndarray:
     return X
 
 
-def diagXVXd(design: DiscreteDesign, V: np.ndarray) -> np.ndarray:
+def diagXVXd(design: DiscreteDesign, V: np.ndarray,
+             lt: Optional[Sequence[int]] = None) -> np.ndarray:
     """Compute ``diag(X V X')`` (length ``n``) on the compressed design.
 
     Direct port of mgcv ``diagXVXt`` (src/discrete.c:629-756), the kernel
@@ -7822,12 +8013,43 @@ def diagXVXd(design: DiscreteDesign, V: np.ndarray) -> np.ndarray:
     ``diag(X Vp X')``). The kernels apply the term constraint (``T``), so the
     columns are post-constraint, exactly as mgcv's ``Xbd`` with ``v``/``qc``.
 
-    Term-subset selection (mgcv ``rs``/``cs`` for ``predict`` terms/iterms) is
-    not yet wired — callers needing it stay on the full design for now.
+    ``lt`` selects a term subset (mgcv's ``lt``, misc.r:438 →
+    ``workXVXd``): the result is ``diag(X_lt V X_lt')`` where, per mgcv's
+    contract ("V is re-ordered and truncated to relate only to the
+    selected terms, in the order they are selected", misc.r:481-486),
+    ``V`` must arrive as the (Σ selected widths)² block in SELECTION
+    order — the same convention as :func:`XWXd`'s ``lt``/``rt``. The
+    general-family prediction SE uses ``lt = lpid[j]`` with
+    ``V = Vp[lpi[j], lpi[j]]``. mgcv's asymmetric ``rt`` (scattered
+    ``ijXVXd`` elements) has no hea caller and is not ported.
+
+    ``type='terms'``/``iterms`` per-term selection (mgcv ``rs``/``cs``)
+    is not wired — those callers stay on the exact-eval parent path.
     """
     n, p = design.n, design.p
     V = np.asarray(V, dtype=float)
     diag = np.zeros(n, dtype=float)
+    if lt is not None:
+        # Absolute coefficient columns of the selected terms, in
+        # selection order (matches the row/col order V arrives in).
+        cols = np.concatenate([
+            np.arange(design.terms[it].coef_slice.start,
+                      design.terms[it].coef_slice.stop)
+            for it in lt])
+        if V.shape != (cols.size, cols.size):
+            raise ValueError(
+                f"V must be ({cols.size}, {cols.size}) — the selected "
+                f"block in selection order; got {V.shape}")
+        e = np.zeros(p, dtype=float)
+        vfull = np.zeros(p, dtype=float)
+        for kk in range(cols.size):
+            vfull[cols] = V[:, kk]
+            xv = Xbd(design, vfull, lt=lt)   # (X_lt·V)[:, kk]
+            e[cols[kk]] = 1.0
+            xi = Xbd(design, e, lt=lt)       # X_lt[:, kk]
+            e[cols[kk]] = 0.0
+            diag += xv * xi
+        return diag
     e = np.zeros(p, dtype=float)
     for kk in range(p):
         xv = Xbd(design, V[:, kk])   # (X·V)[:, kk]
