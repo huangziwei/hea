@@ -50,7 +50,20 @@ pub fn lgammacor(x: f64) -> f64 {
     1.0 / (x * 12.0)
 }
 
-/// R's portable `sinpi(x) = sin(pi*x)` (cospi.c fallback branch).
+/// R's `sinpi(x) = sin(pi*x)` (cospi.c). R's configure finds the BSD/macOS
+/// libm `__sinpi` (HAVE___SINPI) and defines `sinpi(x) = __sinpi(x)` verbatim;
+/// the portable fmod+sin fallback is only compiled elsewhere (Linux). Mirror
+/// that per-platform, like `rfma` mirrors the FMA-contraction decision.
+#[cfg(target_os = "macos")]
+pub fn sinpi(x: f64) -> f64 {
+    extern "C" {
+        fn __sinpi(x: f64) -> f64;
+    }
+    unsafe { __sinpi(x) }
+}
+
+/// R's portable `sinpi(x)` fallback (cospi.c non-darwin branch).
+#[cfg(not(target_os = "macos"))]
 pub fn sinpi(x: f64) -> f64 {
     if x.is_nan() {
         return x;

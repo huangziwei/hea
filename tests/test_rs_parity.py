@@ -280,6 +280,91 @@ def _build_cases():
         add(f"pexp_{lt}", "pexp", [xe, se], (lt, False))
         add(f"qexp_{lt}", "qexp", [qpe, se], (lt, False))
 
+    # --- FMA-contraction / platform-libm materialization points --------------
+    # R's CRAN build (clang, default -ffp-contract=on) fuses `a*b + c` written
+    # in one C expression to fmadd on arm64, and links platform-libm
+    # __sinpi/__tanpi/lgamma in cospi.c / stirlerr.c:120 / lbeta.c:76. Each
+    # point below materialized a last-ulp divergence until the port mirrored
+    # the exact contraction/symbol; keep them pinned against live R.
+    # bpser `z = a*log(x) - betaln(a,b)` — the original traced point, plus
+    # bfrac/basym/bgrat census hits at large shapes.
+    add("fma_pbeta_log_upper", "pbeta",
+        [np.array([0.9852216748768474, 0.08636146016681467,
+                   0.2903716807336236]),
+         np.array([2.0, 9.589203880616369, 2855.5232943161823]),
+         np.array([100001.0, 7819.912855463742, 13825.861560595382])],
+        (False, True))
+    add("fma_pbeta_plain", "pbeta",
+        [np.array([0.3678134730867635, 0.6511511075950023]),
+         np.array([8739.554082286646, 1124.8701718194927]),
+         np.array([8682.928425324666, 3.230859039365317])],
+        (True, False))
+    # pd_lower_series `sum += term * f` (pgamma.c:498) via the qgamma Newton.
+    add("fma_qgamma_upper", "qgamma",
+        [np.array([0.4355139643795751, 0.39636761591153125,
+                   0.13513636327126444]),
+         np.array([2.6669191376302344, 2.536168158840434,
+                   2.502400760154327]),
+         np.ones(3)], (False, False))
+    # gammafn/lgammafn negative x — platform __sinpi (cospi.c HAVE___SINPI).
+    add("fma_gammafn_sinpi", "gammafn",
+        [np.array([-77.24812758594393, -22.139344079349083,
+                   -30.668781877071297, -11.047609531649897])])
+    add("fma_lgammafn_sinpi", "lgammafn",
+        [np.array([-77.24812758594393, -22.139344079349083,
+                   -30.668781877071297, -11.047609531649897])])
+    # stirlerr.c:120 libm lgamma (MM2, 1<=n<=5.25) + lgamma1p (n<1), through
+    # dgamma's dpois_raw at non-integer shape.
+    add("fma_dgamma_stirlerr", "dgamma",
+        [np.array([0.0160354563943336, 0.13706135587904972]),
+         np.array([2.035706520012819, 0.07697169460569216]),
+         np.ones(2)], (True,))
+    # lbeta.c:76 libm lgamma (p < 1e-306).
+    add("fma_lbeta_tiny", "lbeta",
+        [np.array([1e-307, 5e-307]), np.array([5.0, 2.5])])
+    # pt.c `1 + (x/n)*x` / `n + x*x`; pf.c `df2 + df1*x`; dbeta.c lval.
+    add("fma_pt_log_upper", "pt",
+        [np.array([32.590139391805508, 117.24654876041654]),
+         np.array([2088.0050570848925, 1496.6629770688498])],
+        (False, True))
+    add("fma_pf_log_upper", "pf",
+        [np.array([422.04704175918579, 1.306547315051616,
+                   2.4685076649519151]),
+         np.array([4.8002726733580481, 305.1263899607892,
+                   918.50946023950348]),
+         np.array([306.96100608680996, 3.3554946569535344,
+                   0.86639519425105682])],
+        (False, True))
+    add("fma_dbeta_lval", "dbeta",
+        [np.array([0.62571187908681525, 0.13513636327126444]),
+         np.array([0.4617840216011842, 1.9180888552809936]),
+         np.array([0.12184792400934256, 0.74393942619217313])],
+        (False,))
+    # qbeta swapped-tail u = R_Log1_Exp(0) — C99 log(±0) = -Inf, no exception.
+    add("fma_qbeta_log1exp_edge", "qbeta",
+        [np.array([0.23074964248420893, 0.5373735010591706]),
+         np.array([0.4617840216011842, 0.18892481378342565]),
+         np.array([0.12184792400934256, 0.11337311528534429])],
+        (True, False))
+    # qt df<1: bisection `(ux-lx)/fabs(nx)` at nx == 0 (C99 Inf, no raise) and
+    # the pt overflow lane `fma(x/n, x, 1)` -> Inf during bracket doubling.
+    add("fma_qt_df_lt_1", "qt",
+        [np.array([0.5, 0.9999, 0.13513636327126444]),
+         np.array([0.4, 0.4, 0.9])], (True, False))
+    # dnorm.c:52 log path `M_LN_SQRT_2PI + 0.5*x*x + log(sigma)` — the outer
+    # mul of 0.5*x*x fuses into the add (materialized by the bcg family
+    # census; dnorm was not in the original 26-config referee sweep). First
+    # point is the traced bcg drift z.
+    add("fma_dnorm_log", "dnorm",
+        [np.array([1.0034637489050912, 0.6294080605981774,
+                   2.3306046596904781, 31.415092653589793]),
+         np.zeros(4), np.ones(4)], (True,))
+    # dnorm.c:85 big-x split `(-0.5*x2 - x1)*x2` — fma(-0.5, x2, -x1).
+    add("fma_dnorm_bigx", "dnorm",
+        [np.array([5.7183098861837907, 12.566370614359172,
+                   26.535897932384626]),
+         np.zeros(3), np.ones(3)], (False,))
+
     return C
 
 
@@ -298,6 +383,35 @@ def test_rs_matches_r(case, r_oracle):
     name, fn, arrays, flags = case
     got = getattr(rs, fn)(*arrays, *flags)
     _assert_bit_exact(got, r_oracle[name])
+
+
+_FMA_CASES = [c for c in CASES if c[0].startswith("fma_")]
+
+
+@pytest.mark.parametrize("case", _FMA_CASES, ids=[c[0] for c in _FMA_CASES])
+def test_fma_cases_python_matches_rs(case):
+    """Pure-Python nmath scalars ≡ rust 0-ulp at the FMA-materialization
+    points. Both sides share the per-arch ``_rfma``/``rfma`` contraction and
+    platform-libm (``__sinpi``/``lgamma``) decisions, so unlike the live-R
+    gate this holds bit-for-bit on every platform; it pins the Python twins
+    of every contraction site the ``fma_*`` R cases pin for rust."""
+    from hea.R import nmath as nm
+    py_fn = {
+        "pbeta": nm.pbeta, "qbeta": nm.qbeta, "qgamma": nm.qgamma,
+        "dgamma": nm.dgamma, "gammafn": nm.gammafn,
+        "lgammafn": nm._lgammafn, "lbeta": nm.lbeta, "pt": nm.pt,
+        "pf": nm.pf, "dbeta": nm.dbeta, "qt": nm.qt, "dnorm": nm.dnorm5,
+    }
+    name, fn, arrays, flags = case
+    got_rs = np.asarray(getattr(rs, fn)(*arrays, *flags))
+    got_py = np.array([py_fn[fn](*(float(v) for v in args), *flags)
+                       for args in zip(*arrays)])
+    assert got_py.shape == got_rs.shape
+    for g, e in zip(got_py, got_rs):
+        if np.isnan(e):
+            assert np.isnan(g)
+        else:
+            assert _bits(g) == _bits(e), f"py={g!r} rs={e!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -800,6 +914,39 @@ def test_tweedie_series_parity(p, phi):
         np.testing.assert_allclose(a, b, rtol=1e-8, atol=1e-9)
 
 
+@pytest.mark.parametrize("p", [1.05, 1.1, 1.5, 1.93, 1.99])
+@pytest.mark.parametrize("phi", [0.3, 1.0, 5.0])
+def test_tweedious_work_rs_matches_py(p, phi):
+    """The faithful tweedious/tweedious2 twins: rust ``tweedious_work`` /
+    ``tweedious_work_pv`` vs the pure-Python reference ports. Both use plain
+    ops (no fma) and the same nmath scalars, so they are BIT-IDENTICAL (0 ulp) —
+    unlike the moment kernels' `rfma` combine, which forces the 1e-8 gate."""
+    if _fam._rs_tweedious_work is None:
+        pytest.skip("hea._rs.tweedious_work unavailable")
+    rng = np.random.default_rng(int(p * 100) + int(phi * 10))
+    y = rng.uniform(0.01, 500.0, 800)
+    rho = float(np.log(phi))
+    eth = np.exp(-abs(0.3))       # θ = 0.3 (scalar buffer path)
+    a, b = 1.001, 1.999
+    dpth1 = eth * (b - a) / (1 + eth) ** 2
+    dpth2 = ((a - b) * eth + (b - a) * eth * eth) / (1 + eth) ** 3
+    # scalar path
+    sr = _fam._tweedious_work_scalar(y, rho, p, dpth1, dpth2)
+    sp = _fam._tweedious_work_scalar_py(y, rho, p, dpth1, dpth2)
+    np.testing.assert_array_equal(sr, sp)
+    # vector path: per-row θ/ρ derived from a jittered p/φ
+    thv = rng.uniform(-1.0, 1.2, y.size)
+    rhv = rng.uniform(-0.6, 0.5, y.size)
+    ev = np.exp(-np.abs(thv))
+    pv = np.where(thv > 0, (b + a * ev) / (1 + ev), (b * ev + a) / (ev + 1))
+    d1v = ev * (b - a) / (1 + ev) ** 2
+    d2v = np.where(thv > 0, ((a - b) * ev + (b - a) * ev * ev) / (1 + ev) ** 3,
+                   ((a - b) * ev * ev + (b - a) * ev) / (1 + ev) ** 3)
+    pr = _fam._tweedious_work_pv(y, rhv, pv, d1v, d2v)
+    pp = _fam._tweedious_work_pv_py(y, rhv, pv, d1v, d2v)
+    np.testing.assert_array_equal(pr, pp)
+
+
 @pytest.mark.parametrize("theta,rho", [(-0.5, 0.3), (0.0, -0.4), (0.7, 0.8)])
 def test_tweedie_ldwork_matches_r(theta, rho):
     """R arm: hea ``_ld_tweedie_work`` vs live mgcv ``ldTweedie`` in the
@@ -1028,3 +1175,127 @@ def test_xwx_smooth_block_ar1_tri_parity():
           pl.DataFrame({"y": rng.standard_normal(nm),
                         "Lag": np.tile(np.linspace(0, 1, L), (nm, 1)),
                         "Xc": Xc, "Stim": rng.standard_normal((nm, L))}))
+
+
+# ---------------------------------------------------------------------------
+# R-optimizer ports (uncmin / L-BFGS-B): rs == python differential.
+# Unlike the d/p/q kernels, the Python optimizers involve no numpy
+# transcendentals — pure arithmetic + libm sqrt/hypot/pow — so the pure-
+# Python modules ARE the bit-exact oracle here (they are pinned to live R
+# both by tests/test_r_optimize.py and by the ctypes trajectory oracles
+# against libR's compiled optif9/lbfgsb documented in hea/R/uncmin.py).
+# The Rust port must reproduce them bit-for-bit including the evaluation
+# trajectory.
+
+
+def test_optif9_rs_python_parity():
+    from hea.R.uncmin import optif9 as py_optif9
+
+    def make(track):
+        def f_val(x):
+            track.append(np.array(x, dtype=float, copy=True))
+            v = 0.0
+            for i in range(len(x) - 1):
+                v += 100.0 * (x[i + 1] - x[i] * x[i]) ** 2 \
+                     + (1.0 - x[i]) ** 2
+            return float(v)
+
+        def f_grad(x):
+            n = len(x)
+            g = np.zeros(n)
+            for i in range(n - 1):
+                t = x[i + 1] - x[i] * x[i]
+                g[i] += -400.0 * x[i] * t - 2.0 * (1.0 - x[i])
+                g[i + 1] += 200.0 * t
+            return g
+        return f_val, f_grad
+
+    rng = np.random.default_rng(42)
+    for n in (2, 3, 4):
+        for rep in range(3):
+            x0 = rng.standard_normal(n) * (1.0 + rep)
+            ts = np.abs(rng.standard_normal(n)) + 0.1
+            for msg, ndig, smx, stol, ilim in (
+                    (9, 12, 1000.0, 1e-6, 100),
+                    (15, 7, 2.0, 1e-4, 200)):
+                tr_py, tr_rs = [], []
+                fv, fg = make(tr_py)
+                py = py_optif9(n, x0.copy(), fv, fg, lambda x, a: None,
+                               ts.copy(), 1.0, 1, 1, msg, ndig, ilim,
+                               1, 0, 1.0, 1e-6, smx, stol)
+                fv2, fg2 = make(tr_rs)
+                rs_out = rs.optif9(x0.copy(), fv2, fg2, None, ts.copy(),
+                                   1.0, 1, 1, msg, ndig, ilim, 1, 0,
+                                   1.0, 1e-6, smx, stol)
+                assert len(tr_py) == len(tr_rs)
+                for a, b in zip(tr_py, tr_rs):
+                    np.testing.assert_array_equal(a, b)
+                np.testing.assert_array_equal(py[0], rs_out[0])  # xpls
+                assert py[1] == rs_out[1]                        # fpls
+                np.testing.assert_array_equal(py[2], rs_out[2])  # gpls
+                assert py[3:] == tuple(rs_out[3:])   # itrmcd/itncnt/msg
+
+
+def test_lbfgsb_rs_python_parity():
+    import math
+
+    from hea.R.lbfgsb import lbfgsb as py_lbfgsb
+
+    def f_val(x):
+        v = 0.0
+        for i in range(len(x) - 1):
+            v += 100.0 * (x[i + 1] - x[i] * x[i]) ** 2 \
+                 + (1.0 - x[i]) ** 2
+        return float(v)
+
+    def f_grad(x):
+        n = len(x)
+        g = np.zeros(n)
+        for i in range(n - 1):
+            t = x[i + 1] - x[i] * x[i]
+            g[i] += -400.0 * x[i] * t - 2.0 * (1.0 - x[i])
+            g[i + 1] += 200.0 * t
+        return g
+
+    rng = np.random.default_rng(7)
+    for n in (2, 3, 4):
+        for rep in range(3):
+            x0 = rng.standard_normal(n) * (1 + rep)
+            for lo, up, nbd in (
+                    ([-math.inf] * n, [math.inf] * n, [0] * n),
+                    (list(x0 - 0.7), list(x0 + 0.9), [2] * n),
+                    ([-1.0] * n, [math.inf] * n,
+                     [1 if i % 2 == 0 else 0 for i in range(n)])):
+                m = min(5, n)
+                tr_py, tr_rs = [], []
+
+                def fminfn(x, tr=tr_py):
+                    tr.append(np.array(x, dtype=float, copy=True))
+                    return f_val(x)
+
+                def fmingr(x, g):
+                    g[:] = f_grad(x)
+
+                xp = np.array(x0, dtype=float)
+                py = py_lbfgsb(n, m, xp, np.array(lo), np.array(up),
+                               np.array(nbd, dtype=np.int64), fminfn,
+                               fmingr, 1e7, 0.0, 100, 0, 10)
+
+                def fminfn2(x, tr=tr_rs):
+                    tr.append(np.array(x, dtype=float, copy=True))
+                    return f_val(x)
+
+                def gr_ret(x):
+                    return f_grad(x)
+
+                xr, val, fail, fnc, grc, msg = rs.lbfgsb_drive(
+                    n, m, np.array(x0, dtype=float), np.array(lo),
+                    np.array(up), np.array(nbd, dtype=np.int64),
+                    fminfn2, gr_ret, 1e7, 0.0, 100)
+                assert len(tr_py) == len(tr_rs)
+                for a, b in zip(tr_py, tr_rs):
+                    np.testing.assert_array_equal(a, b)
+                np.testing.assert_array_equal(xp, xr)
+                assert py[0] == val and py[1] == fail
+                assert py[2] == fnc and py[3] == grc
+                assert py[4] == msg

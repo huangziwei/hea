@@ -1229,6 +1229,55 @@ def test_trind_generator_matches_mgcv():
     assert tri["i4"][0, 2, 1, 2] == tri["i4"][2, 2, 1, 0]
 
 
+def test_trind_generator_ifunc_reverse_match_mgcv():
+    # trind.generator(K, ifunc=, reverse=) formals (gamlss.r:20-112).
+    # Pins: mgcv 1.9-4 trind.generator(4) — i2r/i3r/i4r (1-based), and
+    # ifunc spot values i4(3,1,4,2)=15, i3(2,4,1)=7, i2(4,2)=7.
+    from hea.family import trind_generator
+    ta = trind_generator(4)                    # reverse defaults TRUE
+    tf = trind_generator(4, ifunc=True)        # reverse defaults FALSE
+    assert tf["i2r"] is None and tf["i3r"] is None and tf["i4r"] is None
+    np.testing.assert_array_equal(
+        ta["i2r"] + 1, [1, 2, 3, 4, 6, 7, 8, 11, 12, 16])
+    np.testing.assert_array_equal(
+        ta["i3r"] + 1,
+        [1, 2, 3, 4, 6, 7, 8, 11, 12, 16, 22, 23, 24, 27, 28, 32, 43, 44,
+         48, 64])
+    np.testing.assert_array_equal(
+        ta["i4r"] + 1,
+        [1, 2, 3, 4, 6, 7, 8, 11, 12, 16, 22, 23, 24, 27, 28, 32, 43, 44,
+         48, 64, 86, 87, 88, 91, 92, 96, 107, 108, 112, 128, 171, 172,
+         176, 192, 256])
+    # 0-based hea args ≡ mgcv's 1-based spot pins
+    assert tf["i4"](2, 0, 3, 1) + 1 == 15
+    assert tf["i3"](1, 3, 0) + 1 == 7
+    assert tf["i2"](3, 1) + 1 == 7
+    # closures ≡ arrays over every index tuple, K = 2..5
+    for K in range(2, 6):
+        a = trind_generator(K)
+        f = trind_generator(K, ifunc=True, reverse=True)
+        np.testing.assert_array_equal(f["i4r"], a["i4r"])
+        for i in range(K):
+            for j in range(K):
+                assert f["i2"](i, j) == a["i2"][i, j]
+                for k in range(K):
+                    assert f["i3"](i, j, k) == a["i3"][i, j, k]
+                    for l_ in range(K):
+                        assert f["i4"](i, j, k, l_) == a["i4"][i, j, k, l_]
+        # reverse extraction: ravel()[ixr] recovers packing order from a
+        # symmetric array (same cells R reads column-major — digit sum
+        # of the reversed tuple commutes).
+        packed = np.arange(a["i4"].max() + 1, dtype=float)
+        np.testing.assert_array_equal(
+            packed[a["i4"]].ravel()[a["i4r"]], packed)
+        packed3 = np.arange(a["i3"].max() + 1, dtype=float)
+        np.testing.assert_array_equal(
+            packed3[a["i3"]].ravel()[a["i3r"]], packed3)
+        packed2 = np.arange(a["i2"].max() + 1, dtype=float)
+        np.testing.assert_array_equal(
+            packed2[a["i2"]].ravel()[a["i2r"]], packed2)
+
+
 def _gaulss_oracle_inputs():
     from hea.R.rng import RGenerator
     gen = RGenerator(17)        # column-major reshape == R matrix(rnorm())
@@ -1858,6 +1907,43 @@ def test_cox_ph_hazard_matches_mgcv_oracle():
         rtol=0, atol=1e-9)
 
 
+def test_cox_ph_predict_se_matches_mgcv():
+    # End-to-end hazard-GAUGE pin (mgcv 1.9-4, deterministic data — no RNG
+    # stream): the predict-with-se survivor pieces consume the X-weighted
+    # baseline-hazard `a` vectors, which mgcv builds from the ORIGINAL-gauge
+    # X (coxph.r:52 un-reparas G$X before family$hazard). hea's engine sets
+    # cox_ph's fit context with the never-repara'd md.X + un-repara'd coefs
+    # (gam.py `set_fit_context` call) — same gauge by construction. A wrong
+    # (initial-repara'd) X here would corrupt the `a`-vector quadratic
+    # forms at O(1); the observed agreement is ~1e-5 (the sp endpoint).
+    from hea.family import cox_ph
+    n = 150
+    i = np.arange(n)
+    x = (i + 0.5) / n
+    z = ((7 * i) % 11) / 10
+    u = (((3 * i + 1) % 17) + 0.5) / 17.5
+    h0 = np.exp(0.7 * np.sin(2 * np.pi * x) + 0.3 * z)
+    t0 = -np.log(1 - u) / h0
+    d = ((i % 4) != 0).astype(float)
+    time = np.where(d > 0, t0, t0 * 0.7)
+    df = pl.DataFrame({"time": time, "x": x, "z": z, "d": d})
+    m = hea.models.gam("time ~ s(x) + z", df, family=cox_ph(), weights=d,
+                       method="REML")
+    np.testing.assert_allclose(m.sp, [0.2031654074], rtol=2e-4)
+    np.testing.assert_allclose(float(m.edf_total), 4.4506640787, rtol=1e-4)
+    np.testing.assert_allclose(m.deviance, 175.0787132143, rtol=1e-5)
+    pr = m.predict(se_fit=True, type="response")
+    fit = pr["fit"].to_numpy()
+    se = pr["se.fit"].to_numpy()
+    ix = [0, 1, 2, 73, 148]
+    np.testing.assert_allclose(
+        fit[ix], [0.9419122191, 0.7060079479, 0.5640457392,
+                  0.07442545795, 0.9253112995], rtol=1e-4)
+    np.testing.assert_allclose(
+        se[ix], [0.02707868482, 0.08956395605, 0.1063837158,
+                 0.04154851196, 0.03308801276], rtol=1e-4)
+
+
 def test_cox_ph_validation():
     from hea.family import cox_ph
     with pytest.raises(ValueError, match="link not available"):
@@ -2354,6 +2440,91 @@ def test_ld_tweedie_work_matches_mgcv():
 
     with pytest.raises(ValueError, match="1<a<b<2"):
         _ld_tweedie_work(y, mu, theta, rho, a=1.0, b=1.99)
+
+
+def test_tweedious_work_census_matches_mgcv():
+    """Census gate for the faithful tweedious/tweedious2 port (per-term θ-chain,
+    up-then-down sweep from the located peak, ``eps = double.eps²``) vs live
+    mgcv ldTweedie(all.derivs=TRUE). Block A: constant θ/ρ (buffer=TRUE scalar
+    C_tweedious). Block B: per-row θ/ρ (vector C_tweedious2 with the lgamma(j+1)
+    recursion). ``y[0]=0`` exercises the closed-form point mass.
+
+    Pins: 1e-13 on the density + FIRST-derivative columns (l, ρ, θ — LSTH1's
+    columns — and the μ columns, which are exact closed forms) and 1e-12 on the
+    SECOND derivatives (ρρ, θθ, θρ). The 2nd-derivative floor is intrinsic: the
+    ``w2i/wi − (w1i/wi)²`` cancellation (mgcv misc.c:499-500) amplifies the
+    ~1-ulp exp/accumulation floor ~150×; an FMA audit (accumulation- and
+    base-site fusion) and R-oracle special functions were both shown NOT to
+    reduce it, so the residual is the reference's own last-ulp imprecision, not
+    a porting gap. 17-digit refs from mgcv 1.9-4; the pins carry cross-platform
+    headroom over the measured drift (≤2.1e-14 / ≤1.5e-13).
+    """
+    from hea.family import _ld_tweedie_work
+    a, b = 1.001, 1.999
+    y = np.array([0.0, 0.260876, 5.494473, 1.292911, 7.045937, 6.365127,
+                  9.920183, 4.274371, 8.754516, 7.918497, 1.394391,
+                  0.273828, 5.444585, 12.572887, 0.550657])
+    mu = np.array([3.092199, 2.486576, 2.42595, 0.914386, 2.04399, 2.405801,
+                   2.945419, 0.515313, 0.685186, 3.115468, 2.629075,
+                   1.404792, 0.777984, 2.211337, 2.981747])
+    # column tolerances: 1st derivs + μ closed forms 1e-13; 2nd derivs 1e-12
+    tol = np.array([1e-13, 1e-13, 1e-12, 1e-13, 1e-12, 1e-12,
+                    1e-13, 1e-13, 1e-13, 1e-13])
+
+    # ---- Block A: constant theta=0.42, rho=-0.18 (buffer path) ----
+    ref_a = np.array([
+        [-4.7226478375437413, 4.7226478375437413, -4.7226478375437413, -1.5696696786364239, -1.9081340122507715, 1.5696696786364239, -0.60590744724664036, 0.11821024223800798, 0.16334743766531182, 0.60590744724664036],
+        [-1.6083521475249245, 1.0031510966457988, -1.9332577242326785, 0.31263051728590119, -0.15288898813956719, 0.081796435719003302, -0.61855845699358936, 0.12091323045959126, 0.13455874500358009, 0.61855845699358925],
+        [-3.0805284683816794, 0.2997152403503307, -0.89344764873526117, 0.012569889185853445, -0.07109672986904858, -0.25009791535954307, 0.88721822553969831, -0.87548533439914056, -0.18777201620892311, -0.8872182255396982],
+        [-1.1943640066601118, -0.50475471006910233, -0.18716727544502287, -0.030795792745489936, 0.016107960352173212, 0.003979707263191079, 0.52310348883908286, -2.2991572922796197, 0.011180982609209232, -0.52310348883908275],
+        [-4.6700608899589611, 1.6986055417553931, -2.2820969568054235, 0.34492569663210126, -0.24493061597152632, -0.61362686556897073, 1.9033946717838528, -1.8735260908604032, -0.32496287050031308, -1.9033946717838524],
+        [-3.6404986874353042, 0.74705717105487324, -1.3345699452067112, 0.12957589824902094, -0.13930618447627818, -0.38563525544368238, 1.1601913736793128, -1.0662033769393515, -0.24323357527346059, -1.1601913736793126],
+        [-5.1624028963438509, 1.9271793916362547, -2.4985954695511765, 0.57347897344356991, -0.44101105227858817, -0.88394963508852786, 1.4775089859163844, -1.0160870527228745, -0.38116423234311447, -1.4775089859163841],
+        [-8.1125799672282142, 5.5231492262063639, -6.1287129375144076, -0.20016137880103146, -0.040811505725868003, -0.0049773355173690081, 13.028115860440705, -43.999738452679857, 2.0627180103847307, -13.028115860440701],
+        [-15.194696655116093, 12.056035436848612, -12.631618739961366, 0.90318089736445373, -0.54482151494454101, -1.1985171736598259, 17.711479961790225, -43.638252458918515, 1.5991108208270199, -17.711479961790232],
+        [-3.8095365766900695, 0.74825480714088322, -1.3273831921118973, 0.17779526120444133, -0.19789010229188886, -0.46087789609765695, 0.92989523374557403, -0.6721469367190952, -0.2523565995824707, -0.92989523374557392],
+        [-1.4359069613920497, -0.31814283393871179, -0.36640220138995261, 0.005789360321502901, -0.00076539691664390119, -0.045754563728800823, -0.31381136846395641, -0.062793214982665616, 0.072441456503184301, 0.31381136846395652],
+        [-0.85239951038377426, 0.21653302534779506, -1.1372796873809765, 0.19177051882674068, -0.10136484039091109, 0.18429203604440225, -0.7851613776536438, 0.2018566889552042, 0.063731428927854633, 0.78516137765364424],
+        [-7.7347354612309367, 4.9608941833769951, -5.5550286694949964, 0.25015209973035502, -0.15736221196821631, -0.486521137656029, 8.3556034950366627, -19.009812976550318, 0.50094976011764902, -8.3556034950366627],
+        [-8.8244727672649521, 5.4056522822948594, -5.9698564201380417, 1.5823365279373149, -1.0001507218475414, -1.9211672351134155, 3.4755269016836201, -2.8552719097331773, -0.65868555768432835, -3.4755269016836197],
+        [-1.737228249377277, 0.64047107760248334, -1.43974297841309, 0.26110063952984586, -0.084559943229046031, -0.10526036319805643, -0.50497081351605611, 0.063807521808889489, 0.13174943081423771, 0.50497081351605611],
+    ])
+    ha = _ld_tweedie_work(y, mu, np.full(y.size, 0.42),
+                          np.full(y.size, -0.18), a=a, b=b)
+    da = np.abs(ha - ref_a)
+    assert np.all(da <= tol), (
+        "block A over tol at cols "
+        f"{np.where((da > tol).any(axis=0))[0]}, max/col {da.max(axis=0)}")
+
+    # ---- Block B: per-row theta/rho (tweedious2 path) ----
+    th_b = np.array([-0.619448, 0.572273, -0.6759, 0.564558, -0.778581,
+                     1.180143, -0.987644, -0.277671, 0.374675, 0.328789,
+                     -0.70749, -0.87141, -0.401739, -0.593529, 0.595368])
+    rho_b = np.array([-0.225026, 0.15186, 0.470401, 0.161344, -0.210919,
+                      0.16348, 0.378983, -0.081667, 0.033346, -0.286301,
+                      0.136659, -0.374453, 0.198765, 0.441105, 0.208678])
+    ref_b = np.array([
+        [-4.0135151190716618, 4.0135151190716618, -4.01351511907166, -0.37362948718044275, -0.63682363573120992, 0.37362948718044275, -0.84339761469370589, 0.095519049727411029, 0.21614230048805883, 0.84339761469370589],
+        [-1.3218367597016942, 0.45912279248925847, -1.4798146257634057, 0.32504032145587169, -0.213769814212454, 0.15708628769562827, -0.42965501973369941, 0.090161408870314361, 0.090070322911922643, 0.42965501973369924],
+        [-2.9436597498570594, 0.045020071116603333, -0.65963055362297851, -0.058145984291012809, -0.069244179728089605, -0.18321781352929989, 0.58594430812455112, -0.51400275838100984, -0.11582051842018701, -0.58594430812455112],
+        [-1.3818582804398387, -0.57124891011751711, -0.21496671026132308, -0.024118068459787256, 0.020153990710539027, 0.021942680870590259, 0.37296120126773802, -1.6530979336228049, 0.0076986412837158945, -0.37296120126773802],
+        [-5.3108844809731011, 2.6730170573613208, -3.2151185728770777, 0.56254497224675859, 0.00035884233298233426, -0.79240495247722009, 2.4124678750880859, -2.0343617504834608, -0.37116050210226303, -2.4124678750880859],
+        [-3.4616369204151454, 0.17679190184085236, -0.83808098594142155, -0.024163778105698919, -0.020590476926250822, -0.17585840444955902, 0.71435086150006677, -0.70433590658080458, -0.11252315767455587, -0.71435086150006688],
+        [-4.8959740898809159, 1.7759618522856471, -2.33051005318816, 0.44125270133862671, -0.013593173962206606, -0.69571212909791313, 1.2085417112207109, -0.69512303476895543, -0.25762825655984345, -1.2085417112207111],
+        [-7.4734646538016687, 4.9740798887143356, -5.563078231917558, -0.14792978785575528, -0.10664279003415178, -0.064024711562353787, 10.534639727549195, -32.059996002483103, 1.7094121524984058, -10.534639727549195],
+        [-12.921708124840512, 9.6719502054395079, -10.266577324515245, 0.69147447286055019, -0.42880500162274782, -0.99860216365577914, 14.249989831796757, -34.883559417337068, 1.2980700485288366, -14.249989831796755],
+        [-3.9186892428581377, 0.94411884783507993, -1.5109813872349864, 0.25010592696137479, -0.23109001414197117, -0.53306701743110807, 1.0603393945235318, -0.75895563760381268, -0.29265384411973938, -1.060339394523532],
+        [-1.5394029791190369, -0.36431170636571952, -0.39848942525833841, -0.022184841297629987, 0.0085420708319730032, -0.12530324298298434, -0.29761888650271917, -0.090432933969829529, 0.063495589333968275, 0.29761888650271912],
+        [-1.1724235641680947, -0.0099735379975003369, -2.4047859812912211, 0.25559082276264228, -0.2574656548431713, 0.9282376959228793, -1.0589106224895881, 0.040140509529614565, 0.074697317856199333, 1.0589106224895881],
+        [-6.3175419733565654, 3.5220775128515918, -4.120467455282494, 0.16507344746249863, -0.061081495066402702, -0.41235831397188516, 5.4379892380685977, -10.958724371078796, 0.32723622596535146, -5.4379892380685977],
+        [-7.3522537632620502, 3.9364813409109285, -4.4996225711672331, 1.1047418931119566, -0.17962916067186896, -1.4338262124096488, 2.272290829990594, -1.6127944310930862, -0.41251074723493852, -2.2722908299905935],
+        [-1.5468639531825241, 0.1494990857190186, -1.068244375687124, 0.22575174229707606, -0.10292788676574682, 0.0035353533352247002, -0.32733907104087095, 0.045866538242877397, 0.081764267342503374, 0.32733907104087118],
+    ])
+    hb = _ld_tweedie_work(y, mu, th_b, rho_b, a=a, b=b)
+    db = np.abs(hb - ref_b)
+    assert np.all(db <= tol), (
+        "block B over tol at cols "
+        f"{np.where((db > tol).any(axis=0))[0]}, max/col {db.max(axis=0)}")
 
 
 def _twlss_oracle_y():
@@ -3381,6 +3552,91 @@ def test_ziP_components_match_mgcv():
     assert le["ls"] == 0.0 and float(np.sum(np.abs(le["LSTH1"]))) == 0.0
 
 
+def test_ziP_b_nonzero_components_match_mgcv():
+    # ziP(b=0.3): the b>0 presence-slope floor (slope = b + e^θ₂ > b,
+    # efam.r:3869 `.b`, threaded into `lind(k=b)` at efam.r:3900 and the
+    # presence LP of dev.resids/aic). Oracle: live ziP(b=0.3)$Dd /
+    # dev.resids / aic / getTheta(TRUE) (Rscript, mgcv 1.9-4) on the same
+    # component table as the b=0 test — every output shifts with b, so
+    # these pins are b-differentiating. (mgcv's `logid` alternative map
+    # is dead code — zero call sites in the package — so `lind` is the
+    # whole b surface; see the divergence-audit plan.)
+    from hea.family import ziP
+    y, mu, th, wt = _zip_dd_inputs()
+    fam = ziP(b=0.3)
+    fam.set_theta(th)
+    D = fam.Dd(y, mu, th, wt, level=2)
+    np.testing.assert_allclose(
+        D["Dmu"], [1.08976267596958154, -0.22004623489546793,
+                   0.57215865967827506, 7.01702884537704197,
+                   0.87542275833633465, 1.95536392161329253,
+                   -0.93410281687360253, 0.57445371903023101],
+        rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        D["Dmu2"], [2.1236437066770151, 4.8577163632621687,
+                    5.7862868392389384, 13.6742333681026036,
+                    6.2117657841435481, 3.8104592660074412,
+                    8.6023719446642435, 10.5532768670240706],
+        rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        D["EDmu2"], [2.0180607160596753, 6.2440825914745579,
+                     6.4056243610448726, 10.2069022340631523,
+                     6.2358673592575826, 3.3434058534384645,
+                     8.6024716464923259, 13.3335630486959023],
+        rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        D["Dmu3"], [4.1383896625899634, 4.4868711592001551,
+                    -1.1538055877588214, 26.6472694249389974,
+                    5.4317245891259009, 7.4255230228050992,
+                    9.7709378844557797, 7.6392877628959575],
+        rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        D["Dmu4"], [8.0645679619345891, -4.5612557172249000,
+                    -4.9240133146708649, 51.9281007344558034,
+                    23.2449206230913035, 14.4702746606138106,
+                    9.2611868607395618, -17.7249681840395397],
+        rtol=0, atol=1e-8)
+    np.testing.assert_allclose(D["Dth"], np.column_stack([
+        [0.55921936726130994, -0.95691039796727217, -0.21444505775023529,
+         3.6008376112485259, -0.0071065252647155115, 1.0034087229472164,
+         -2.8606088762550079e-05, -1.6035680088371769],
+        [-0.46099843289559428, -0.47330355818482989, -0.28284810248746428,
+         0.59367775620024843, -0.014060015237645187, -0.33086826094582555,
+         -7.0745200521528338e-05, -1.0575346740736420]]), rtol=0, atol=1e-9)
+    np.testing.assert_allclose(D["Dmuth"], np.column_stack([
+        [1.08976267596958154, 1.50617333726872316, 1.09865886407181312,
+         7.01702884537704197, 0.09254172245864013, 1.95536392161329253,
+         0.00071232090990356114, 3.17534311039586292],
+        [0.0236394138481182958, -0.8327005217278636851, 1.0955456626414211,
+         7.09369003345143323, 0.1713739281290409533, 1.0095712868244369,
+         0.0017144644865693542, -0.5497343940317986899]]),
+        rtol=0, atol=1e-9)
+    np.testing.assert_allclose(D["Dth2"][:, 2], [
+        -0.0809694718583982564, -0.2842163189121490463,
+        0.6979680159088302860, 0.6915586706591358990,
+        0.1718251907663267686, -0.2217663530216369416,
+        0.0021649004419334612, -0.3488461525583514966], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(D["Dmuth2"][:, 2], [
+        -0.755905910445411555, 0.560366653477998300, 0.878061772576305133,
+        9.242050942630795518, -1.524462157900505987, 0.131161416228383843,
+        -0.046277012289079662, 3.232019812313918106], rtol=0, atol=1e-8)
+    np.testing.assert_allclose(D["Dmu2th2"][:, 2], [
+        0.40161458642977266, 10.95259405800349484, -15.51518510456715916,
+        52.97034126309804947, 8.03760319065614226, 6.80845044097395746,
+        0.87271760716416480, 19.53488770370943328], rtol=0, atol=1e-8)
+    np.testing.assert_allclose(
+        fam.dev_resids(y, mu, wt, theta=th),
+        [0.55921936726130994, 2.11434673657913752, 2.46875973990692454,
+         1.80041880562426293, 2.95104173975606976, 1.00340872294721639,
+         3.51560614274561978, 2.11735606584551572], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(fam.aic(y, mu, 0, wt, 0, theta=th),
+                               20.447932192135838, rtol=0, atol=1e-9)
+    # getTheta(trans): θ₂ ↦ b + e^θ₂ (the slope floor).
+    np.testing.assert_allclose(fam.get_theta(trans=True),
+                               [-0.3, 1.94872127070012824],
+                               rtol=0, atol=1e-12)
+
+
 def test_ziP_Dd_matches_fd():
     from hea.family import ziP
     y, mu, th, wt = _zip_dd_inputs()
@@ -3582,6 +3838,667 @@ def test_cnorm_construction_and_validation():
     np.testing.assert_array_equal(fam.initialize(y, np.ones(3)), y)
     assert cnorm(link="log").validmu(np.array([0.1, 1.0]))
     assert not cnorm(link="log").validmu(np.array([-0.1, 1.0]))
+    # mustart floor is min(y>0) — the LOGICAL min (efam.r:1123): 1 when
+    # every y is positive, 0 as soon as any y ≤ 0.
+    np.testing.assert_array_equal(
+        cnorm(link="log").initialize(np.array([0.3, 2.0]), np.ones(2)),
+        [1.0, 2.0])
+    np.testing.assert_array_equal(
+        cnorm(link="log").initialize(np.array([0.0, 0.3, 2.0]), np.ones(3)),
+        [0.0, 0.3, 2.0])
+
+
+# ---------------------------------------------------------------------------
+# cpois (censored Poisson) — mgcv ``cpois()`` (efam.r:344-537) + ``dppois``
+# (efam.r:312-339). Slot oracle pinned to live mgcv 1.9-4 via hex-float
+# transfer (values reproduced bit-identically on arm64 at pin time; the
+# randomized 200-row × level-2 census was 0 DIFF / 1002 values).
+# ---------------------------------------------------------------------------
+
+
+def _cpois_dd_inputs():
+    # 6 obs covering all cases: i0 uncensored, i1 interval [2,6], i2 left
+    # (−∞), i3 right (+∞), i4 uncensored ZERO count (the mustart quirk
+    # row), i5 interval given as yat < y (pmin/pmax swap).
+    y = np.array([3.0, 2.0, 4.0, 1.0, 0.0, 5.0])
+    yat = np.array([3.0, 6.0, -np.inf, np.inf, 0.0, 2.0])
+    mu = np.array([2.5, 3.1, 1.7, 2.2, 0.9, 4.4])
+    wt = np.ones(6)
+    return y, yat, mu, wt
+
+
+def test_cpois_components_match_mgcv():
+    from hea.family import cpois
+    y, yat, mu, wt = _cpois_dd_inputs()
+    fam = cpois()
+    fam.set_censor(yat)
+
+    # dev.resids: the PROPER deviance (≥ 0), saturated reference included
+    # (interval rows maximize over μ via the analytic lgamma mean).
+    dr = fam.dev_resids(y, mu, wt)
+    np.testing.assert_allclose(
+        dr, [0.093929340763727609, 0.32427618396314406,
+             0.060124358816485542, 0.87567736610300229, 1.8,
+             0.046856172595730383], rtol=1e-14, atol=0)
+    assert np.all(dr >= 0.0)
+
+    # Dd level 2: μ-derivatives ONLY — no θ keys at any level (mgcv's
+    # returned names are exactly these five; getTheta() is NULL).
+    D = fam.Dd(y, mu, np.zeros(0), wt, level=2)
+    assert set(D.keys()) == {"Dmu", "Dmu2", "EDmu2", "Dmu3", "Dmu4"}
+    np.testing.assert_allclose(
+        D["Dmu"], [-0.39999999999999991, -0.57472288165500895,
+                   0.1310296735043821, -0.75536305631350764, 2.0,
+                   0.1865592035083572], rtol=1e-14, atol=0)
+    np.testing.assert_allclose(
+        D["Dmu2"], [0.95999999999999974, 0.62496911183805759,
+                    0.18585982829290848, 0.6973028859562822, 0.0,
+                    0.34589032104013429], rtol=1e-14, atol=1e-300)
+    assert D["EDmu2"] is D["Dmu2"]     # mgcv: r$EDmu2 = r$Dmu2 (alias)
+    np.testing.assert_allclose(
+        D["Dmu3"], [-0.76799999999999979, -0.37803766150915585,
+                    0.094454617880994629, -0.75099712064338142, 0.0,
+                    -0.14239116315360656], rtol=1e-13, atol=1e-300)
+    np.testing.assert_allclose(
+        D["Dmu4"], [0.92159999999999442, 0.37863924185178632,
+                    -0.12641915824024608, 1.0331210386956542, 0.0,
+                    0.093556511921981667], rtol=1e-13, atol=1e-300)
+
+    # dDeta must survive the θ-free Dd (R's NULL list reads): θ entries
+    # come back as None, the μ-chain as usual.
+    dd = fam.dDeta(y, mu, wt, np.zeros(0), level=2, dd=D)
+    assert dd["Dth"] is None and dd["Detath"] is None
+    assert dd["Dth2"] is None and dd["Deta3th"] is None
+    assert np.all(np.isfinite(dd["Deta3"])) and np.all(np.isfinite(dd["Deta4"]))
+
+    # aic = −2·Σ logLik; ls the genuinely NONZERO saturated log-lik with
+    # all derivatives zero (left/right rows contribute exactly 0).
+    np.testing.assert_allclose(fam.aic(y, mu, 0.0, wt, 0),
+                               8.2329365948746229, rtol=1e-14)
+    le = fam.ls_extended(y, wt)
+    np.testing.assert_allclose(le["ls"], -2.5160365863162668, rtol=1e-14)
+    assert float(np.sum(np.abs(le["lsth1"]))) == 0.0
+    assert float(np.sum(np.abs(le["LSTH1"]))) == 0.0
+    np.testing.assert_allclose(fam.ls(y, wt, 1.0),
+                               [-2.5160365863162668, 0.0, 0.0], rtol=1e-14)
+
+    # dppois on probe triples: negative bounds (the Dd shift probes),
+    # y1 < 0 (both probs 0 → −Inf), opposite tails, and a far tail.
+    from hea.family import _dppois
+    y0p = np.array([1.0, -1.0, 0.0, -2.0, 3.0, 40.0])
+    y1p = np.array([4.0, 2.0, 9.0, -1.0, 5.0, 60.0])
+    mup = np.array([3.0, 5.0, 2.0, 3.0, 4.0, 50.0])
+    np.testing.assert_allclose(
+        _dppois(y0p, y1p, mup),
+        [-0.48432169154524585, -2.0822292679157206, -0.14546723515894291,
+         -np.inf, -1.0450897209662637, -0.17224867495290261],
+        rtol=1e-14)
+    np.testing.assert_allclose(
+        _dppois(y0p, y1p, mup, log_p=False),
+        [0.61611497105231638, 0.12465201948308118, 0.86461821868837008,
+         0.0, 0.35166026666369643, 0.8417698200687822], rtol=1e-14)
+
+    # mustart (log link): pmax(y, min(y>0)) with a zero present keeps the
+    # exact zero (mgcv-verified: mustart = 3 2 4 1 0 5).
+    np.testing.assert_array_equal(fam.initialize(y, wt), y)
+
+
+def test_cpois_Dd_matches_fd():
+    from hea.family import cpois, _cpois_dev_resids
+    y, yat, mu, wt = _cpois_dd_inputs()
+    fam = cpois()
+    fam.set_censor(yat)
+    D = fam.Dd(y, mu, np.zeros(0), wt, level=2)
+
+    def m2ll(mu_):
+        # Dd differentiates −2logLik; dev_resids = −2logLik + 2·l_sat and
+        # the saturated part is μ-free, so FD in μ sees the same thing.
+        return _cpois_dev_resids(y, mu_, yat)
+
+    h = 1e-5
+    fd_mu = (m2ll(mu + h) - m2ll(mu - h)) / (2 * h)
+    np.testing.assert_allclose(D["Dmu"], fd_mu, rtol=2e-5, atol=1e-6)
+    fd_mu2 = (m2ll(mu + h) - 2 * m2ll(mu) + m2ll(mu - h)) / h ** 2
+    np.testing.assert_allclose(D["Dmu2"], fd_mu2, rtol=1e-4, atol=1e-4)
+    # Dmu3/Dmu4 via FD of Dmu (analytic first derivative — steadier).
+    def dmu_at(mu_):
+        return fam.Dd(y, mu_, np.zeros(0), wt, level=0)["Dmu"]
+    fd_mu3 = ((dmu_at(mu + h) - 2 * dmu_at(mu) + dmu_at(mu - h)) / h ** 2)
+    np.testing.assert_allclose(D["Dmu3"], fd_mu3, rtol=1e-4, atol=1e-4)
+
+
+def test_cpois_construction_and_validation():
+    from hea.family import cpois
+    fam = cpois()
+    assert fam.n_theta == 0
+    assert fam.is_extended and fam.scale_known
+    assert fam.get_theta().size == 0
+    assert fam.get_theta(trans=True).size == 0
+    fam.set_theta([1.0])           # mgcv putTheta: silently ignored
+    assert fam.get_theta().size == 0
+    for lk in ("log", "identity", "sqrt"):
+        assert cpois(link=lk).link.name == lk
+    with pytest.raises(ValueError, match="not available"):
+        cpois(link="logit")
+    # validmu (efam.r:359-360): identity → finite; log → μ>0; sqrt → μ≥0.
+    assert cpois(link="identity").validmu(np.array([-1.0, 0.0]))
+    assert not cpois(link="log").validmu(np.array([0.0, 1.0]))
+    assert cpois(link="sqrt").validmu(np.array([0.0, 1.0]))
+    assert not cpois(link="sqrt").validmu(np.array([-0.1, 1.0]))
+    # identity mustart = y; log/sqrt floor = min(y>0) as a LOGICAL min
+    # (1 when all y positive, 0 otherwise — efam.r:500).
+    y = np.array([0.5, 2.0])
+    np.testing.assert_array_equal(
+        cpois(link="identity").initialize(y, np.ones(2)), y)
+    np.testing.assert_array_equal(
+        cpois(link="log").initialize(y, np.ones(2)), [1.0, 2.0])
+    # No censor ⇒ all uncensored: dev reduces to the plain Poisson
+    # deviance 2·(dpois(y,y) − dpois(y,μ)).
+    fam = cpois()
+    y = np.array([2.0, 0.0, 5.0])
+    mu = np.array([1.5, 0.8, 4.0])
+    dev = fam.dev_resids(y, mu, np.ones(3))
+    ylogy = np.where(y > 0, y * np.log(np.where(y > 0, y, 1.0) / mu), 0.0)
+    np.testing.assert_allclose(dev, 2.0 * (ylogy - (y - mu)),
+                               rtol=1e-12, atol=1e-12)
+    assert repr(fam) == "cpois(link=log)"
+
+
+# ---------------------------------------------------------------------------
+# clog (censored logistic) — mgcv ``clog()`` (efam.r:2192-2612). Slot oracle
+# pinned to live mgcv 1.9-4 via hex-float transfer (bit-identical on arm64
+# at pin time; randomized 200-row level-2 census incl. mixed weights and
+# every log1pexp band was 0 DIFF / 2804 values).
+# ---------------------------------------------------------------------------
+
+
+def _clog_dd_inputs():
+    # 6 obs: i0/i2 uncensored, i1 interval [-0.5, 0.8], i3 left (−∞, wt 2),
+    # i4 right (+∞), i5 an uncensored row placed in log1pexp's QUIRK band
+    # (−(y−μ)/s = 34.5 ∈ (33.3, 37] → mgcv's exp(x) branch — dev blows up
+    # to 3.8e15, faithfully).
+    y = np.array([1.2, -0.5, 2.0, 0.7, -1.0,
+                  float.fromhex("-0x1.6c8f9fb870caap+5")])
+    yat = np.array([1.2, 0.8, 2.0, -np.inf, np.inf,
+                    float.fromhex("-0x1.6c8f9fb870caap+5")])
+    mu = np.array([0.5, 0.1, 1.7, 0.3, -0.4, 1.0])
+    wt = np.array([1.0, 1.0, 1.0, 2.0, 1.0, 1.0])
+    return y, yat, mu, wt
+
+
+def test_clog_components_match_mgcv():
+    from hea.family import clog
+    y, yat, mu, wt = _clog_dd_inputs()
+    fam = clog()
+    fam.set_theta([0.3])
+    fam.set_censor(yat)
+
+    # rtol 1e-13, not 1e-14: the pins are arm64 R values, and the
+    # uncensored deviance 2·(z + 2·log1pexp(−z) − 2log2) cancels
+    # ~1.4-magnitude terms down to 0.025 (row 2), amplifying the 1-2 ulp
+    # glibc↔Apple libm exp/log scatter ~57× (measured 1.8e-14 rel on
+    # linux CI, where hea ≡ linux R holds separately via the live-R
+    # oracle gates). Same-platform parity stays bit-level (census).
+    np.testing.assert_allclose(
+        fam.dev_resids(y, mu, wt),
+        [0.13297872286444656, 0.00064770448452167173, 0.024645863841215476,
+         1.010811660242168, 0.9907951404171742, 3847863142179033.5],
+        rtol=1e-13, atol=0)
+
+    D = fam.Dd(y, mu, np.array([0.3]), wt, level=2)
+    exp = {
+        "Dmu": [-0.37578439269408498, -0.025906946306693591,
+                -0.16396913450701819, 0.83130782189432806,
+                -0.57883297064136885, 1.4816364413634331],
+        "Dmu2": [0.51350815864591082, 0.51804028675465141,
+                 0.54209016682628131, 0.52540422036177381,
+                 0.261286207431696, 1.9497706066361287e-15],
+        "Dth": [-0.26304907488585949, -0.0012216848009996006,
+                -0.049190740352105466, 0.33252312875773121,
+                0.34729978238482129, -68.999999999999886],
+        "Dmuth": [0.73524010374622251, 0.04886307737374479,
+                  0.32659618455490258, -0.62114613374961858,
+                  0.42206124618235125, -1.4816364413635239],
+        "Dmu3": [0.096484175770105721, 0.0079878924099485715,
+                 0.044443027739635224, 0.11368032043932709,
+                 -0.04232451164291777, -1.4444255915456878e-15],
+        "Dmu2th": [-0.95947739425274758, -0.97691640500401522,
+                   -1.0708474253306721, -1.0053363125478167,
+                   -0.49717770787764137, 6.3367544715674075e-14],
+        "Dmu4": [-0.11371669079977768, -0.16172200627308253,
+                 -0.14328723208820304, -0.25145288474698707,
+                 -0.061414535592725583, 1.0700567966360104e-15],
+        "Dth2": [0.5146680726223557, 0.0021596824071976606,
+                 0.097978855366470788, -0.24845845349984741,
+                 -0.25323674770941074, 69.000000000004107],
+        "Dmuth2": [-1.4068742797231457, -0.086373540635621679,
+                   -0.64785041215410422, 0.21901160873049191,
+                   -0.12375462145576643, 1.4816364413605729],
+        "Dmu2th2": [1.6606168408963822, 1.7263704824328405,
+                    2.0888002748077343, 1.8340237790089229,
+                    0.89606206198464955, 1.9921781173304531e-12],
+        "Dmu3th": [-0.36905421087016155, -0.019960730575645763,
+                   -0.17631525284536659, -0.44162211521677608,
+                   0.16382225628438868, -4.5499406133689004e-14],
+    }
+    for k, v in exp.items():
+        np.testing.assert_allclose(D[k], v, rtol=1e-13, atol=0,
+                                   err_msg=k)
+    # EDmu2 zeroes NEGATIVE Dmu2 rows (none here — all Dmu2 ≥ 0); EDmu2th
+    # is Dmu2th itself (mgcv aliases them).
+    np.testing.assert_array_equal(D["EDmu2"], D["Dmu2"])
+    assert D["EDmu2th"] is D["Dmu2th"]
+
+    # aic (SATURATED pieces only — the slot never sees μ; gam.fit4.r:794
+    # reports it verbatim), and ls with NONZERO θ-derivatives.
+    np.testing.assert_allclose(fam.aic(y, mu, 0.0, wt, 0),
+                               15.910610320785761, rtol=1e-14)
+    le = fam.ls_extended(y, wt)
+    np.testing.assert_allclose(le["ls"], -6.5018787506728541, rtol=1e-14)
+    np.testing.assert_allclose(le["lsth1"], [-3.9623749785560696],
+                               rtol=1e-14)
+    np.testing.assert_allclose(le["lsth2"], [[-0.073257888763456291]],
+                               rtol=1e-13)
+    np.testing.assert_allclose(
+        le["LSTH1"].ravel(),
+        [-1.0, -0.96237497855606957, -1.0, 0.0, 0.0, -1.0], rtol=1e-14)
+
+
+def test_clog_construction_and_validation():
+    from hea.family import clog
+    # θ intake (efam.r:2213-2221): None/0 → working 0; θ>0 fixed (log θ,
+    # n_theta=0); θ<0 an initial value (log|θ|, still estimated).
+    assert clog().n_theta == 1
+    np.testing.assert_allclose(clog().get_theta(), [0.0])
+    assert clog(theta=2.0).n_theta == 0
+    np.testing.assert_allclose(clog(theta=2.0).get_theta(), [np.log(2.0)])
+    np.testing.assert_allclose(clog(theta=2.0).get_theta(True), [2.0])
+    assert clog(theta=-0.5).n_theta == 1
+    np.testing.assert_allclose(clog(theta=-0.5).get_theta(), [np.log(0.5)])
+    assert clog(theta=0.0).n_theta == 1
+    np.testing.assert_allclose(clog(theta=0.0).get_theta(), [0.0])
+    for lk in ("identity", "log", "sqrt"):
+        assert clog(link=lk).link.name == lk
+    with pytest.raises(ValueError, match="not available"):
+        clog(link="logit")
+    with pytest.raises(ValueError, match="1 param"):
+        clog().set_theta([0.1, 0.2])
+    # identity validmu = finite; log/sqrt require μ > 0 (2-way, unlike
+    # cpois' 3-way — efam.r:2229).
+    assert clog(link="identity").validmu(np.array([-1.0, 0.0]))
+    assert not clog(link="log").validmu(np.array([0.0, 1.0]))
+    assert not clog(link="sqrt").validmu(np.array([0.0, 1.0]))
+    # log1pexp quirk band receipt: 33.3 < x ≤ 37 returns exp(x) — mgcv's
+    # own typo (first mask is x<=37, efam.r:2237), replicated bit-for-bit.
+    from hea.family import _clog_log1pexp
+    np.testing.assert_array_equal(
+        _clog_log1pexp(np.array([35.0])), np.exp(35.0))
+    np.testing.assert_allclose(
+        _clog_log1pexp(np.array([-40.0, 0.0, 20.0, 38.0])),
+        [np.exp(-40.0), np.log(2.0), 20.0 + np.exp(-20.0), 38.0],
+        rtol=1e-15)
+
+
+# ---------------------------------------------------------------------------
+# bcg (censored Box-Cox Gaussian) — mgcv ``bcg()`` (efam.r:1477-2170). Slot
+# oracle pinned to live mgcv 1.9-4 via hex transfer (bit-identical on arm64
+# at pin time; the randomized 200-row level-2 census — 4 cases, mixed wt,
+# y∈{0,1} edges, full (λ,t) derivative matrices — was 0 DIFF / 4602 values
+# after the dnorm.c FMA-contraction fix it exposed in nmath).
+# ---------------------------------------------------------------------------
+
+
+def _bcg_dd_inputs():
+    # 6 obs: i0 uncensored, i1 interval [1.5, 2.6], i2 LEFT censored
+    # (bcg: yat ≤ 0, wt 2), i3 right (+∞), i4 left at y=1 (bc λ-deriv
+    # bly = 0 → sign(0) rows), i5 uncensored ZERO (in iu AND il — the
+    # later left block overwrites, and ls → +Inf via (λ−1)·log 0).
+    y = np.array([3.0, 1.5, 0.9, 2.2, 1.0, 0.0])
+    yat = np.array([3.0, 2.6, 0.0, np.inf, 0.0, 0.0])
+    mu = np.array([1.1, 0.4, 0.8, 1.9, 0.2, 0.5])
+    wt = np.array([1.0, 1.0, 2.0, 1.0, 1.0, 1.0])
+    return y, yat, mu, wt
+
+
+def test_bcg_components_match_mgcv():
+    from hea.family import bcg
+    y, yat, mu, wt = _bcg_dd_inputs()
+    th = np.array([0.4, -0.35])
+    fam = bcg()
+    fam.set_theta(th)
+    fam.set_censor(yat)
+
+    d = fam.dev_resids(y, mu, wt)
+    np.testing.assert_allclose(
+        d, [0.15744314608370377, 0.29788622636774864, 6.7076037221149409,
+            0.17475492756973865, 1.8920743538362341, 22.957041212134278],
+        rtol=1e-14, atol=0)
+    # mgcv's attr(d,"sign") = sign(bc(y,λ) − μ), stashed for residuals.
+    np.testing.assert_array_equal(fam._dev_sign, [1, 1, -1, -1, -1, -1])
+
+    D = fam.Dd(y, mu, th, wt, level=2)
+    np.testing.assert_allclose(
+        D["Dmu"], [-1.1261466364532253, -1.4824267405144576,
+                   8.8633898309156631, -0.47628893494170177,
+                   2.8009839610885905, 12.69035263562167],
+        rtol=1e-13, atol=0)
+    np.testing.assert_allclose(
+        D["Dmu2"], [4.0275054149409524, 3.691333997409322,
+                    7.0390203241607736, 1.0466952667846496,
+                    2.7946577680930598, 3.8568290720002807],
+        rtol=1e-13, atol=0)
+    assert D["EDmu2"] is D["Dmu2"] and D["EDmu2th"] is D["Dmu2th"]
+    # θ blocks: (n,2) matrices, columns [λ, log σ]; θ² blocks (n,3)
+    # [λλ, λt, tt] — mgcv's own packing.
+    np.testing.assert_allclose(
+        D["Dth"].ravel(order="F"),
+        [-1.2814908867536796, -0.79432629876290561, -0.047834925246138082,
+         0.18318606765722237, 0.0, -79.314703972635471,
+         1.6851137078325924, 1.287417003734145, -8.005158529054766,
+         0.46344801352644838, -0.56019679221771812, -38.071057906864986],
+        rtol=1e-13, atol=0)
+    np.testing.assert_allclose(
+        D["Dmuth"].ravel(order="F"),
+        [-3.2749930409424346, -1.0795509097014206, -0.037988965557830073,
+         -0.40257074202485166, 0.0, -24.105181700001765,
+         2.2522932729064506, 2.7041718209509069, -15.220830342851738,
+         -0.5421870500573136, -3.3599155147072026, -24.260839851622222],
+        rtol=1e-13, atol=0)
+    np.testing.assert_allclose(
+        D["Dmu3"], [0.0, -0.026598900024447758, 1.0876045350424164,
+                    -1.590360013833727, 1.0617526205466099,
+                    0.08918904228937663], rtol=1e-12, atol=0)
+    np.testing.assert_allclose(
+        D["Dmu2th"].ravel(order="F"),
+        [0.0, -0.43185598108667644, -0.0058697047770180366,
+         0.61167030287853608, 0.0, -0.55743151430601756,
+         -8.0550108298819048, -6.754840935851564, -15.060333753558169,
+         -0.5459071991236828, -5.8016660602954424, -7.9812252708657638],
+        rtol=1e-13, atol=0)
+    np.testing.assert_allclose(
+        D["Dmu4"], [0.0, 0.062798377990909593, -1.4679056433719779,
+                    0.75371975840918415, -0.89905663520180124,
+                    -0.065243109622599604], rtol=1e-12, atol=0)
+    np.testing.assert_allclose(
+        D["Dth2"].ravel(order="F"),
+        [3.3575912323843515, 0.67538398720085868, 0.0035531314471942497,
+         0.25359899816612091, 0.0, 547.23090548819118,
+         -1.8314673811650801, -1.0091661750898306, 0.082145465281791286,
+         0.2085312220130115, 0.0, 151.63024907263957,
+         0.62977258433481509, 1.2111589607056146, 13.747015776444481,
+         0.52756949169852851, 0.67198310294144048, 72.782519554865985],
+        rtol=1e-12, atol=0)
+    np.testing.assert_allclose(
+        D["Dmuth2"].ravel(order="F"),
+        [-2.4838128187057316, -0.22899659577570419, 0.0026906387185074328,
+         -0.45230348721151326, 0.0, 124.00985546440461,
+         6.5499860818848692, 1.6161446669546113, 0.081279279488592815,
+         0.20996203307867312, 0.0, 49.882657942915102,
+         -4.5045865458129013, -4.4195013256452702, 28.822890220348171,
+         1.0733763942620562, 4.5202487267662903, 48.204515664210703],
+        rtol=1e-12, atol=0)
+    np.testing.assert_allclose(
+        D["Dmu2th2"].ravel(order="F"),
+        [0.0, -0.50356411446106319, 0.00036808288773070713,
+         0.44127999364757825, 0.0, 0.23859860125821797,
+         0.0, 1.5768937572121571, 0.010454051122515517,
+         -1.5529373478733481, 0.0, 0.44898623742756172,
+         16.11002165976381, 11.207258313087056, 31.870149419673965,
+         -2.8370091100428398, 12.204421427510779, 16.177963935588195],
+        rtol=1e-12, atol=1e-15)
+    np.testing.assert_allclose(
+        D["Dmu3th"].ravel(order="F"),
+        [0.0, -0.090272421757199517, 0.0079221559762974181,
+         -0.28988907473869796, 0.0, 0.40776943518903863,
+         0.0, 0.20470879674238507, -1.9370434872535611,
+         4.037680839537507, -3.0054465345994732, -0.071837797964690253],
+        rtol=1e-12, atol=0)
+
+    np.testing.assert_allclose(fam.aic(y, mu, 0.0, wt, 0),
+                               35.895971253414217, rtol=1e-14)
+    # ls: the uncensored y=0 row's (λ−1)·log(0) term makes it +Inf —
+    # exactly mgcv's value on this frame.
+    assert fam.ls(y, wt, 1.0)[0] == np.inf
+    le = fam.ls_extended(y, wt)
+    assert float(np.sum(np.abs(le["lsth1"]))) == 0.0
+    assert le["LSTH1"].shape == (6, 2) and le["lsth2"].shape == (2, 2)
+
+
+def test_bcg_construction_and_validation():
+    from hea.family import bcg
+    # θ intake quirks (efam.r:1489-1497, live-R verified 2026-07-06):
+    # default (1, 0); fixed θ₂>0 stores LENGTH-3 c(λ, log λ, log σ) with
+    # n_theta=0 (the working "log σ" is log λ!); θ₂<0 keeps the RAW pair
+    # (the log(-θ₂) line runs after iniTheta was taken — dead).
+    assert bcg().n_theta == 2
+    np.testing.assert_allclose(bcg().get_theta(), [1.0, 0.0])
+    f = bcg(theta=(2.0, 0.5))
+    assert f.n_theta == 0
+    np.testing.assert_allclose(f.get_theta(),
+                               [2.0, np.log(2.0), np.log(0.5)])
+    np.testing.assert_allclose(f.get_theta(True),
+                               [2.0, 2.0, np.log(0.5)])
+    f = bcg(theta=(1.3, -0.5))
+    assert f.n_theta == 2
+    np.testing.assert_allclose(f.get_theta(), [1.3, -0.5])
+    np.testing.assert_allclose(f.get_theta(True), [1.3, np.exp(-0.5)])
+    f = bcg(theta=(1.3, 0.0))
+    assert f.n_theta == 2
+    np.testing.assert_allclose(f.get_theta(), [1.3, 0.0])
+    with pytest.raises(ValueError, match="length 2"):
+        bcg(theta=[1.0])
+    with pytest.raises(ValueError, match="not available"):
+        bcg(link="logit")
+    # non-negative response required (efam.r:2132).
+    with pytest.raises(ValueError, match="non-negative"):
+        bcg().initialize(np.array([-0.1, 1.0]), np.ones(2))
+    # identity validmu = finite; log/sqrt μ>0 (2-way).
+    assert bcg(link="identity").validmu(np.array([-1.0, 0.0]))
+    assert not bcg(link="log").validmu(np.array([0.0, 1.0]))
+
+
+# ---------------------------------------------------------------------------
+# gfam (grouped families) — mgcv ``gfam()`` (gfam.r:3-604). Assembly pinned
+# to live mgcv 1.9-4 via hex transfer: a randomized 120-row 5-member
+# (binomial, Gamma, nb, tw, gaussian) level-2 census of 10,597 values had
+# gfam's own arithmetic bit-identical — every binomial/Gamma/gaussian slot
+# 0 DIFF incl. the free-scale chain, the θ² row-major upper-triangle
+# packing (filth/filsc) and the raw fix.family.ls → log-scale chain rule.
+# Residual last-ulp drift is confined to the nb (≤1e-15) and tw (≤4.3e-13)
+# MEMBER internals (receipted standalone: R tw()$dev.resids vs hea tw
+# shows the identical drift — numpy-pow vs libm-pow class, pre-existing) —
+# hence the 1e-11 pin tolerances below, member-inherited not gfam-born.
+# ---------------------------------------------------------------------------
+
+
+def _gfam_slot_inputs():
+    # 8 obs over binomial (rows 0,1,7), tw (2,3,4), gaussian (5,6);
+    # θ = (twθ, tw log φ, gauss log σ²) = (0.1, −0.2, 0.3).
+    y = np.array([1.0, 0.0, 2.2, 0.4, 1.5, -0.2, 0.7, 1.0])
+    fi = np.array([1.0, 1, 2, 2, 2, 3, 3, 1])
+    mu = np.array([0.6, 0.3, 1.8, 0.5, 1.2, 0.1, 0.4, 0.7])
+    wt = np.ones(8)
+    th = np.array([0.1, -0.2, 0.3])
+    return y, fi, mu, wt, th
+
+
+def test_gfam_components_match_mgcv():
+    from hea.family import Binomial, Gaussian, gfam, tw
+    y, fi, mu, wt, th = _gfam_slot_inputs()
+    g = gfam([Binomial(), tw(), Gaussian()])
+    assert g.name == "gfam{binomial,Tweedie,gaussian}"
+    assert g.link.name == "{logit,log,identity}"
+    assert g.n_theta == 3
+    g.set_fi(fi)
+    pre = g.preinitialize(y)
+    assert pre.get("Theta") is None      # no member preinitialize ⇒ no mod
+    np.testing.assert_array_equal(pre["y"], y)
+
+    # deviance: member deviances, tw's divided by exp(tw log φ)
+    # (gfam.r:103-106).
+    np.testing.assert_allclose(
+        g.dev_resids(y, mu, wt, th),
+        [1.0216512475319814, 0.7133498878774648, 0.07185266607650018,
+         0.03923448388024454, 0.07409608592118926, 0.06667363986135462,
+         0.06667363986135456, 0.7133498878774648],
+        rtol=1e-11, atol=0)
+
+    D = g.Dd(y, mu, th, wt, level=2)
+    # θ matrices are (8, 3): off-member columns EXACT zeros; the tw
+    # log-scale column is −(scaled member table) (gfam.r:172-178);
+    # pins column-major raveled like R writes them.
+    exp = {
+        "Dmu": [-3.3333333333333335, 2.857142857142857, -0.39883306491867987,
+                0.7027534406074493, -0.5550089060549714, 0.44449093240903076,
+                -0.4444909324090306, -2.857142857142857],
+        "Dmu2": [5.555555555555556, 4.081632653061225, 1.334867591608585,
+                 4.884867832761118, 2.5551128178240297, 1.4816364413634358,
+                 1.4816364413634358, 4.081632653061225],
+        "Dmu3": [-18.518518518518526, 11.661807580174923, -2.1626641823899977,
+                 -32.03509534242298, -6.183860859059008, -0.0, 0.0,
+                 -11.661807580174932],
+        "Dmu4": [92.59259259259262, 49.97917534360683, 4.480649480682058,
+                 248.2897785817015, 19.18963656151585, 0.0, 0.0,
+                 49.9791753436068],
+        "Dth": [0.0, 0.0, -0.011494749284079071, 0.007359766645563358,
+                -0.004646648785357787, 0.0, 0.0, 0.0,
+                0.0, 0.0, -0.07185266607650018, -0.03923448388024454,
+                -0.07409608592118926, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, -0.06667363986135462,
+                -0.06667363986135456, 0.0],
+        "Dmuth": [0.0, 0.0, 0.057291696845296086, 0.11904447438855675,
+                  0.02472969573097741, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.39883306491867987, -0.7027534406074493,
+                  0.5550089060549714, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0, -0.44449093240903076,
+                  0.4444909324090306, 0.0],
+        "Dmu2th": [0.0, 0.0, -0.13760135382703625, 0.4839932519102857,
+                   -0.0008174123947630714, 0.0, 0.0, 0.0,
+                   0.0, 0.0, -1.334867591608585, -4.884867832761118,
+                   -2.5551128178240297, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, 0.0, 0.0, -1.4816364413634358,
+                   -1.4816364413634358, 0.0],
+    }
+    for k, v in exp.items():
+        got = np.asarray(D[k], dtype=float)
+        if got.ndim == 2:
+            got = got.ravel(order="F")
+        np.testing.assert_allclose(got, v, rtol=1e-11, atol=0, err_msg=k)
+    # Dth2 (8, 6) row-major-upper packed pairs (θθ, θρ_tw, ρρ_tw, …):
+    # in-family blocks via filth, the tw scale pairs = −Dth columns
+    # (gfam.r:189-196).
+    np.testing.assert_allclose(
+        np.asarray(D["Dth2"]).ravel(order="F"),
+        [0.0, 0.0, 0.002422743278417013, 0.0010193790896375246,
+         0.0005357661343759946, 0.0, 0.0, 0.0,
+         0.0, 0.0, 0.011494749284079071, -0.007359766645563358,
+         0.004646648785357787, 0.0, 0.0, 0.0,
+         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+         0.0, 0.0, 0.07185266607650018, 0.03923448388024454,
+         0.07409608592118926, 0.0, 0.0, 0.0,
+         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+         0.0, 0.0, 0.0, 0.0, 0.0, 0.06667363986135462,
+         0.06667363986135456, 0.0],
+        rtol=1e-11, atol=0)
+
+    # ls: member saturated lls; exponential free-scale entries via the
+    # raw fix.family.ls values chain-ruled in gfam (gfam.r:341-351) —
+    # gaussian lsth1 = −nobs/(2φ)·φ = −1 here, LSTH1 rows −0.5.
+    le = g.ls_extended(y, wt, theta=th, scale=1.0)
+    np.testing.assert_allclose(le["ls"], -5.078841267754759, rtol=1e-12)
+    np.testing.assert_allclose(
+        le["lsth1"],
+        [0.0016670861446814733, -1.8222480844147504, -1.0],
+        rtol=1e-11, atol=0)
+    np.testing.assert_allclose(
+        np.asarray(le["lsth2"]).ravel(order="F"),
+        [0.0009962090903217202, 0.0938659100200604, 0.0,
+         0.0938659100200604, -0.4354457278967834, 0.0,
+         0.0, 0.0, 0.0],
+        rtol=5e-11, atol=0)
+    np.testing.assert_allclose(
+        np.asarray(le["LSTH1"]).ravel(order="F"),
+        [0.0, 0.0, -0.10764741499602315, 0.1655207146761607,
+         -0.05620621353545607, 0.0, 0.0, 0.0,
+         0.0, 0.0, -0.5619928544092048, -0.6828579090037183,
+         -0.5773973210018273, 0.0, 0.0, 0.0,
+         0.0, 0.0, 0.0, 0.0, 0.0, -0.5, -0.5, 0.0],
+        rtol=1e-11, atol=0)
+
+    # aic recomputes member deviances internally (the dev argument is
+    # dead, gfam.r:359) — tw's power comes from the θ ARGUMENT
+    # (efam.r:3213, the tw.aic override this exposed).
+    np.testing.assert_allclose(g.aic(y, mu, 0.0, wt, None, theta=th),
+                               7.319208537355566, rtol=1e-11)
+
+    # per-row link dispatch (logit rows 0,1,7 now stats-C exact).
+    np.testing.assert_allclose(
+        g.link.link(mu),
+        [0.4054651081081642, -0.8472978603872036, 0.5877866649021191,
+         -0.6931471805599453, 0.1823215567939546, 0.1, 0.4,
+         0.8472978603872034],
+        rtol=1e-13, atol=0)
+    np.testing.assert_allclose(
+        g.link.g2g(mu),
+        [0.19999999999999996, -0.3999999999999999, -1.0, -1.0, -1.0,
+         0.0, 0.0, 0.3999999999999999],
+        rtol=1e-14, atol=0)
+
+    # member mustarts on their subsets — binomial (w·y+.5)/(w+1),
+    # tw y+(y==0)·0.1, gaussian y (stock forms; fix.family's gam patches
+    # never match "gfam{…}", mgcv.r:1916).
+    np.testing.assert_allclose(
+        g.initialize(y, wt),
+        [0.75, 0.25, 2.2, 0.4, 1.5, -0.2, 0.7, 0.75],
+        rtol=0, atol=0)
+
+
+def test_gfam_construction_and_validation():
+    from hea.family import (
+        Binomial, Gamma, Gaussian, Poisson, Tweedie, gaulss, gfam, nb,
+        negbin, tw,
+    )
+    # n_theta accounting (gfam.r:36-49): exponential poisson/binomial
+    # scale fixed 1 (no slot); other exponentials a free log-scale slot;
+    # extended members their n_theta, +1 for tw (scale = -1, efam.r:3263).
+    assert gfam([Poisson(), Gaussian()]).n_theta == 1
+    assert gfam([Binomial(), tw(), Gaussian()]).n_theta == 3
+    assert gfam([Gamma(), nb()]).n_theta == 2
+    np.testing.assert_array_equal(
+        gfam([Binomial(), tw(), Gaussian()]).get_theta(), np.zeros(3))
+    # R-style string / constructor-class intake (gfam.r:23-24).
+    g = gfam(["poisson", Gaussian])
+    assert g.name == "gfam{poisson,gaussian}"
+    with pytest.raises(ValueError, match="family not recognized"):
+        gfam(["nope"])
+    with pytest.raises(ValueError, match="family not recognized"):
+        gfam([])
+    # fix.family.ls has no Tweedie/negbin rows — a fixed-p Tweedie()
+    # or negbin() member dies exactly like mgcv (gam.fit3.r:2546).
+    with pytest.raises(ValueError, match="family not recognised"):
+        gfam([Tweedie(p=1.5), Gaussian()])
+    with pytest.raises(ValueError, match="family not recognised"):
+        gfam([negbin(theta=2.0), Gaussian()])
+    # general (multi-LP) members: mgcv's stop, message verbatim
+    # (gfam.r:55).
+    with pytest.raises(NotImplementedError, match="general familes"):
+        gfam([gaulss(), Gaussian()])
+    # fixed-θ extended members leave mgcv's .Theta walk inconsistent
+    # (getTheta() entries with no n.theta slots, gfam.r:36-50) — refused.
+    with pytest.raises(NotImplementedError, match="fixed-theta"):
+        gfam([nb(theta=2.0), Gaussian()])
+    # the family index must cover 1..nf exactly (gfam.r:389-390).
+    g = gfam([Poisson(), Gaussian()])
+    g.set_fi(np.array([1.0, 1.0, 1.0]))
+    with pytest.raises(ValueError, match="does not match family list"):
+        g.preinitialize(np.array([1.0, 2.0, 3.0]))
+    with pytest.raises(ValueError, match="expects 1 params"):
+        g.set_theta([0.1, 0.2])
+    # no fi set → any consumer refuses (the two-column response is the
+    # only intake).
+    g2 = gfam([Poisson(), Gaussian()])
+    with pytest.raises(ValueError, match="two-column response"):
+        g2.initialize(np.array([1.0, 2.0]), np.ones(2))
 
 
 # ---------------------------------------------------------------------------
@@ -3661,3 +4578,210 @@ def test_softplus_poisson_glm_matches_mgcv():
     m2 = glm("y ~ x + z", d, family=Poisson(link="softplus"))
     np.testing.assert_allclose(np.asarray(m2.bhat.to_numpy()).ravel(),
                                np.asarray(m.bhat.to_numpy()).ravel(), atol=0)
+
+
+# ===========================================================================
+# negbin — fixed-θ negative binomial (mgcv negbin(), gam.fit3.r:2564-2642)
+# ===========================================================================
+
+
+def test_negbin_components_match_mgcv():
+    """Slot-level bit-pins vs mgcv 1.9-4 ``negbin(2)`` at fixed (y, μ, w):
+    dev.resids / aic / ls / variance / initialize, plus the constructor
+    surface (famname θ-format, natural-scale getTheta, link intake,
+    validation errors)."""
+    from hea.family import negbin
+
+    f = negbin(2)
+    y = np.array([0.0, 1.0, 3.0, 7.0])
+    mu = np.array([1.5, 2.0, 2.5, 6.0])
+    w = np.ones(4)
+    # mgcv: fam$dev.resids(y, mu, w) — bit-identical.
+    np.testing.assert_array_equal(
+        f.dev_resids(y, mu, w),
+        [2.2384631517416911, 0.33979807359079484,
+         0.040324184185464018, 0.038014875766715139])
+    # mgcv: fam$aic(y, 1, mu, w, 0) (dev unused — Θ-form direct).
+    assert f.aic(y, mu, None, w, None) == 14.422747381464536
+    # mgcv: fam$ls(y, w, 4, 1) = c(-sum(term·w), 0, 0).
+    np.testing.assert_array_equal(
+        f.ls(y, w, 1.0), [-5.8830735480899392, 0.0, 0.0])
+    np.testing.assert_array_equal(f.variance(mu), [2.625, 4.0, 5.625, 24.0])
+    np.testing.assert_array_equal(f.dvar(mu), [2.5, 3.0, 3.5, 7.0])
+    np.testing.assert_array_equal(f.d2var(mu), [1.0, 1.0, 1.0, 1.0])
+    np.testing.assert_array_equal(f.d3var(mu), [0.0, 0.0, 0.0, 0.0])
+    # initialize: mustart <- y + (y == 0)/6.
+    np.testing.assert_allclose(
+        f.initialize(y, w), [1.0 / 6.0, 1.0, 3.0, 7.0], rtol=0)
+    with pytest.raises(ValueError, match="negative values not allowed"):
+        f.initialize(np.array([-1.0, 2.0]), np.ones(2))
+    # qf = qnbinom(p, size=Θ, mu) — R oracle.
+    np.testing.assert_array_equal(
+        f.qf(np.array([0.1, 0.5, 0.9]), np.full(3, 7.3), None, None),
+        [1.0, 6.0, 15.0])
+    # famname: paste("Negative Binomial(", format(round(theta, 3)), ")").
+    assert f.name == "Negative Binomial(2)"
+    assert negbin(2.3456).name == "Negative Binomial(2.346)"
+    assert negbin(3.7).name == "Negative Binomial(3.7)"
+    # getTheta: the θ vector on the NATURAL scale (mgcv negbin$getTheta()).
+    np.testing.assert_array_equal(negbin([2, 9]).get_theta(), [2.0, 9.0])
+    # canonical="" (gam.fit3.r:2641) → never the Fisher shortcut.
+    assert not f.is_canonical
+    assert f.scale_known and not f.is_extended and f.n_theta == 0
+    # link intake: mgcv falls through to make.link(link) for ANY character
+    # link (gam.fit3.r:2577-2579) — "inverse" is accepted despite the
+    # nominal okLinks (verified live); unknown names error like make.link.
+    assert negbin(2, link="inverse").link.name == "inverse"
+    assert negbin(2, link="sqrt").link.name == "sqrt"
+    with pytest.raises(ValueError, match="banana"):
+        negbin(2, link="banana")
+    # theta = stop("'theta' must be specified") — the lazy default fires
+    # on first access; hea validates eagerly with the same message.
+    with pytest.raises(ValueError, match="'theta' must be specified"):
+        negbin()
+    with pytest.raises(ValueError, match="positive and finite"):
+        negbin(-1)
+
+
+def test_qnbinom_pnbinom_mu_match_r():
+    """``qnbinom_mu``/``pnbinom_mu`` (nmath qnbinom_mu.c / pnbinom.c)
+    bit-exact vs R across parametrizations, tails and the log scale, and
+    the rust kernels 0-ulp against the Python port."""
+    from hea.R import nmath as nm
+
+    ps = [1e-4, .001, .01, .1, .3, .5, .77, .9, .99, .9999]
+    grids = {
+        (2.5, 7.3): [0, 0, 0, 2, 4, 6, 10, 14, 24, 42],
+        (2.0, 0.03): [0, 0, 0, 0, 0, 0, 0, 0, 1, 2],
+        (37.5, 4200.0): [2103, 2386, 2764, 3345, 3813, 4163,
+                         4690, 5103, 5966, 7254],
+        (0.07, 123456.7): [0, 0, 0, 0, 0, 52, 25362, 266391,
+                           2326395, 8729299],
+    }
+    for (size, mu), expect in grids.items():
+        got = [nm.qnbinom_mu(p, size, mu) for p in ps]
+        np.testing.assert_array_equal(got, expect, err_msg=f"{size},{mu}")
+    # upper tail + log scale (size=2.5, mu=7.3).
+    np.testing.assert_array_equal(
+        [nm.qnbinom_mu(p, 2.5, 7.3, False) for p in ps],
+        [42, 34, 24, 14, 9, 6, 3, 2, 0, 0])
+    np.testing.assert_array_equal(
+        [nm.qnbinom_mu(np.log(p), 2.5, 7.3, True, True) for p in ps],
+        [0, 0, 0, 2, 4, 6, 10, 14, 24, 42])
+    # boundaries: R_Q_P01_boundaries + the size/mu special cases.
+    assert nm.qnbinom_mu(0.0, 2.5, 7.3) == 0.0
+    assert nm.qnbinom_mu(1.0, 2.5, 7.3) == np.inf
+    assert nm.qnbinom_mu(0.5, 0.0, 3.0) == 0.0
+    assert nm.qnbinom_mu(0.5, 2.0, 0.0) == 0.0
+    assert nm.qnbinom_mu(0.5, np.inf, 3.0) == 3.0     # Poisson limit
+    # pnbinom_mu: bratio on BOTH tail ratios (pnbinom.c:83).
+    np.testing.assert_array_equal(
+        [nm.pnbinom_mu(x, 2.5, 7.3) for x in [0, 1, 3, 7, 20, -1, 1e18]],
+        [0.032868874445290082, 0.094078768182692535, 0.26302499000982504,
+         0.59957811374520131, 0.9746158998054657, 0.0, 1.0])
+    np.testing.assert_array_equal(
+        [nm.pnbinom_mu(x, 2.5, 7.3, True, True) for x in [0, 1, 3, 7, 20]],
+        [-3.4152291345059278, -2.3636228882137487, -1.3355062322696321,
+         -0.51152901484550251, -0.025711834520021577])
+    np.testing.assert_array_equal(
+        [nm.pnbinom_mu(x, 2.5, 7.3, False) for x in [0, 1, 3, 7, 20]],
+        [0.96713112555470993, 0.90592123181730744, 0.73697500999017496,
+         0.40042188625479869, 0.025384100194534378])
+    np.testing.assert_array_equal(
+        [nm.pnbinom_mu(x, 0.0, 0.0) for x in [-1, 0, 3]], [0.0, 1.0, 1.0])
+    np.testing.assert_array_equal(
+        [nm.pnbinom_mu(x, np.inf, 7.3) for x in [0, 3, 7]],
+        [0.00067553877519384439, 0.067406047117412868, 0.55410661183907739])
+    # x + 1e-7 left-fuzz (pnbinom.c floor(x + 1e-7)).
+    assert nm.pnbinom_mu(2.9999999, 2.5, 7.3) == 0.26302499000982504
+    # rust kernels 0-ulp vs the Python port (skips cleanly if the
+    # extension is absent — _disp then runs the Python scalars anyway).
+    rs_q = nm.rs_fn("qnbinom_mu")
+    rs_p = nm.rs_fn("pnbinom_mu")
+    if rs_q is not None:
+        for (size, mu) in grids:
+            for lt in (True, False):
+                for lg in (True, False):
+                    p_in = np.log(np.asarray(ps)) if lg else np.asarray(ps)
+                    got_rs = rs_q(p_in, np.full(10, size), np.full(10, mu),
+                                  lt, lg)
+                    got_py = [nm.qnbinom_mu(p, size, mu, lt, lg)
+                              for p in p_in]
+                    np.testing.assert_array_equal(got_rs, got_py)
+        xs = np.array([0.0, 1, 3, 7, 20, 1e3])
+        for (size, mu) in grids:
+            for lt in (True, False):
+                for lg in (True, False):
+                    got_rs = rs_p(xs, np.full(6, size), np.full(6, mu),
+                                  lt, lg)
+                    got_py = [nm.pnbinom_mu(x, size, mu, lt, lg) for x in xs]
+                    np.testing.assert_array_equal(got_rs, got_py)
+
+
+# ===========================================================================
+# tw/nb θ-chain + R_pow/lgamma/digamma parity census pins (audit-2 B14
+# follow-up closure). Values: live mgcv 1.9-4 hex-float census on the
+# default_rng(42) frame below (bit-exact on arm64; rel tolerances carry
+# ~100x headroom for glibc↔Apple libm exp/log last-ulp scatter, the
+# 2026-07-06(f) CI lesson). The fixes these pin: p(θ) as mgcv's literal
+# branch expressions (not expit algebra), R_pow sequential ^2/^3
+# scalars + mgcv's Dth2 parenthesization in tw$Dd, _rpow_int for nb's
+# mu^3/mu^4, nmath lgammafn/dpsifn (not scipy) + _rsum in nb$ls/aic,
+# and tw$ls as the mechanical colSums(w·ldTweedie(y,y,…)) port.
+# ===========================================================================
+
+
+def _census_frame_42():
+    rng = np.random.default_rng(42)
+    n = 200
+    mu = np.abs(rng.normal(2.0, 1.5, n)) + 0.05
+    y = np.abs(mu * np.exp(rng.normal(0.0, 0.5, n)))
+    y[:10] = 0.0
+    wt = np.where(rng.uniform(size=n) < 0.3,
+                  rng.integers(1, 5, n).astype(float), 1.0)
+    ynb = np.floor(y * 3).astype(float)
+    return y, mu, wt, ynb
+
+
+def test_tw_nb_theta_chain_census_matches_mgcv():
+    from hea.family import nb, tw
+
+    y, mu, wt, ynb = _census_frame_42()
+
+    fam = tw(a=1.01, b=1.99)
+    dev = fam.dev_resids(y, mu, wt, theta=0.9)
+    assert float(dev[0]) == pytest.approx(35.71796731366923, rel=1e-13)
+    assert float(dev[10]) == pytest.approx(1.4661145459181908, rel=1e-13)
+    fam.set_theta(0.9)
+    assert float(fam.variance(mu)[0]) == pytest.approx(
+        4.8003315958745265, rel=1e-13)
+    dd = fam.Dd(y, mu, 0.9, wt, level=2)
+    assert float(dd["Dth"][10]) == pytest.approx(
+        -0.40292464474908973, rel=1e-13)
+    assert float(dd["Dth2"][0]) == pytest.approx(
+        18.27147175320773, rel=1e-13)
+    assert float(dd["Dmuth2"][1]) == pytest.approx(
+        -0.13234424141561646, rel=1e-13)
+    assert float(dd["Dmu2th2"][1]) == pytest.approx(
+        0.3740245563340534, rel=1e-13)
+    dd_neg = fam.Dd(y, mu, -0.7, wt, level=2)
+    assert float(dd_neg["Dth2"][10]) == pytest.approx(
+        -0.026858465349980126, rel=1e-13)
+
+    fam_nb = nb()
+    th = float(np.log(1.7))
+    ddn = fam_nb.Dd(ynb, mu, th, wt, level=2)
+    assert float(ddn["Dmu3"][5]) == pytest.approx(
+        1.172357101442247, rel=1e-13)
+    assert float(ddn["Dmu4"][3]) == pytest.approx(
+        -0.028757174064230596, rel=1e-13)
+    assert float(ddn["Dmu3th"][5]) == pytest.approx(
+        -2.1553653475720496, rel=1e-13)
+    ls3 = fam_nb.ls_extended(ynb, wt, theta=th, scale=1.0)
+    assert float(ls3["LSTH1"][11, 0]) == pytest.approx(
+        0.3940667463254954, rel=1e-13)
+    assert float(ls3["ls"]) == pytest.approx(-603.812776094261, rel=1e-12)
+    assert float(np.asarray(ls3["lsth1"]).ravel()[0]) == pytest.approx(
+        96.4119849078045, rel=1e-12)
+    assert float(np.asarray(ls3["lsth2"]).ravel()[0]) == pytest.approx(
+        -32.24760362160137, rel=1e-12)

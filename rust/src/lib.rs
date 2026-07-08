@@ -21,10 +21,16 @@
 //     (neg_cmp_op_on_partial_ord, needless_range_loop, manual_memcpy,
 //     assign_op_pattern, needless_late_init, manual_range_contains,
 //     mut_range_bound, if_same_then_else, needless_return, redundant_closure,
-//     type_complexity, too_many_arguments).
+//     type_complexity, too_many_arguments; the optimizer ports add
+//     int_plus_one and nonminimal_bool for uncmin.c/lbfgsb.c's literal
+//     `j <= n-1` / double-`brackt` tests, and rustc unused_assignments for
+//     the C's dead stores, e.g. cauchy's bnded branch `f1 = 0.; f2 = 0.;`).
 // Correctness is gated by the 0-ulp parity tests (tests/test_rs_parity.py), not
 // by idiom. New, non-port code should still be written clippy-clean.
+#![allow(unused_assignments)]
 #![allow(
+    clippy::int_plus_one,
+    clippy::nonminimal_bool,
     clippy::excessive_precision,
     clippy::approx_constant,
     clippy::neg_cmp_op_on_partial_ord,
@@ -49,6 +55,7 @@ mod family;
 mod linalg;
 mod loess;
 mod nmath;
+mod optimize;
 mod par;
 mod rng;
 mod tprs;
@@ -63,5 +70,6 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     tprs::register(m)?;
     family::register(m)?;
     discrete::register(m)?;
+    optimize::register(m)?;
     Ok(())
 }
