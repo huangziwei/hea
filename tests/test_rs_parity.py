@@ -914,6 +914,39 @@ def test_tweedie_series_parity(p, phi):
         np.testing.assert_allclose(a, b, rtol=1e-8, atol=1e-9)
 
 
+@pytest.mark.parametrize("p", [1.05, 1.1, 1.5, 1.93, 1.99])
+@pytest.mark.parametrize("phi", [0.3, 1.0, 5.0])
+def test_tweedious_work_rs_matches_py(p, phi):
+    """The faithful tweedious/tweedious2 twins: rust ``tweedious_work`` /
+    ``tweedious_work_pv`` vs the pure-Python reference ports. Both use plain
+    ops (no fma) and the same nmath scalars, so they are BIT-IDENTICAL (0 ulp) —
+    unlike the moment kernels' `rfma` combine, which forces the 1e-8 gate."""
+    if _fam._rs_tweedious_work is None:
+        pytest.skip("hea._rs.tweedious_work unavailable")
+    rng = np.random.default_rng(int(p * 100) + int(phi * 10))
+    y = rng.uniform(0.01, 500.0, 800)
+    rho = float(np.log(phi))
+    eth = np.exp(-abs(0.3))       # θ = 0.3 (scalar buffer path)
+    a, b = 1.001, 1.999
+    dpth1 = eth * (b - a) / (1 + eth) ** 2
+    dpth2 = ((a - b) * eth + (b - a) * eth * eth) / (1 + eth) ** 3
+    # scalar path
+    sr = _fam._tweedious_work_scalar(y, rho, p, dpth1, dpth2)
+    sp = _fam._tweedious_work_scalar_py(y, rho, p, dpth1, dpth2)
+    np.testing.assert_array_equal(sr, sp)
+    # vector path: per-row θ/ρ derived from a jittered p/φ
+    thv = rng.uniform(-1.0, 1.2, y.size)
+    rhv = rng.uniform(-0.6, 0.5, y.size)
+    ev = np.exp(-np.abs(thv))
+    pv = np.where(thv > 0, (b + a * ev) / (1 + ev), (b * ev + a) / (ev + 1))
+    d1v = ev * (b - a) / (1 + ev) ** 2
+    d2v = np.where(thv > 0, ((a - b) * ev + (b - a) * ev * ev) / (1 + ev) ** 3,
+                   ((a - b) * ev * ev + (b - a) * ev) / (1 + ev) ** 3)
+    pr = _fam._tweedious_work_pv(y, rhv, pv, d1v, d2v)
+    pp = _fam._tweedious_work_pv_py(y, rhv, pv, d1v, d2v)
+    np.testing.assert_array_equal(pr, pp)
+
+
 @pytest.mark.parametrize("theta,rho", [(-0.5, 0.3), (0.0, -0.4), (0.7, 0.8)])
 def test_tweedie_ldwork_matches_r(theta, rho):
     """R arm: hea ``_ld_tweedie_work`` vs live mgcv ``ldTweedie`` in the

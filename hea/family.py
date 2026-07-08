@@ -74,11 +74,6 @@ _rs_cox_d2h = _rs_fn("cox_d2h")
 # saturated-likelihood moments; the dense-matrix `_tweedie_log_a_vec` below is
 # the numpy oracle + HEA_NO_RS fallback. None when the extension is absent.
 _rs_tweedie_series = _rs_fn("tweedie_series")
-# mgcv tweedious2 (misc.c:513) per-row sweep for the VECTOR-p Tweedie moments
-# (α per row ⇒ no shared tables); the dense-matrix `_tweedie_log_a_vec_pv`
-# below is the numpy oracle + HEA_NO_RS fallback. None when the extension is
-# absent.
-_rs_tweedie_series_pv = _rs_fn("tweedie_series_pv")
 # gamlss.gH Hessian block crossprod (gamlss.r:653-660), the deterministic,
 # row/col-consistent `crossprod(X_i, WX_j)` used only under `deterministic_xwx()`
 # (gam.fit5's rank check) — where numpy `@`'s BLAS GEMM can give a rank-deficient
@@ -2052,157 +2047,271 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     return (log_a, j_bar, j_var, j_psi_bar, m_wp1, m_comb, m_dwpp)
 
 
-def _tweedie_log_a_vec_pv(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
-    """Per-observation-``p`` variant of :func:`_tweedie_log_a_vec`
-    (mgcv's ``C_tweedious2`` case — ldTweedie called with vector
-    ``theta``/``rho``, gam.fit3.r:2952-2956). Same seven return arrays;
-    the special-function tables become (rows, J) matrices because α
-    varies by row. Kept separate from the scalar-``p`` function so its
-    existing consumers stay byte-identical."""
-    y = np.asarray(y, dtype=float)
-    phi_arr = np.broadcast_to(
-        np.asarray(phi, dtype=float), y.shape).astype(float, copy=True)
-    p_arr = np.broadcast_to(
-        np.asarray(p, dtype=float), y.shape).astype(float, copy=True)
-    log_a = np.zeros_like(y)
-    j_bar = np.zeros_like(y)
-    j_var = np.zeros_like(y)
-    j_psi_bar = np.zeros_like(y)
-    m_wp1 = np.zeros_like(y)
-    m_comb = np.zeros_like(y)
-    m_dwpp = np.zeros_like(y)
-    flat_y = y.ravel()
-    active = flat_y > 0.0
-    if not np.any(active):
-        return (log_a, j_bar, j_var, j_psi_bar, m_wp1, m_comb, m_dwpp)
-    ya = flat_y[active]
-    pha = phi_arr.ravel()[active]
-    pa = p_arr.ravel()[active]
+# mgcv passes eps = .Machine$double.eps^2 to C_tweedious (gam.fit3.r:2944),
+# so the series break log-tolerance is log(double.eps^2) = 2·log(double.eps).
+_TWEEDIOUS_EPS = float(np.finfo(float).eps) ** 2
+_TWEEDIOUS_LOG_EPS = math.log(_TWEEDIOUS_EPS)
 
-    om1 = 1.0 - pa
-    tm = 2.0 - pa
-    alpha = tm / om1
-    one_minus_alpha = 1.0 - alpha
-    onep2 = om1 * om1
-    onep3 = onep2 * om1
 
-    ly = np.log(ya)
-    rho = np.log(pha)
-    log_z = (-alpha * ly + alpha * np.log(pa - 1.0)
-             - one_minus_alpha * rho - np.log(tm))
-    # Per-row p-bases (mgcv tweedious2, misc.c:230-232 per observation).
-    w_base = alpha * np.log(pa - 1.0) + rho / om1 - np.log(tm)
-    log_neg = np.log(-om1) + rho
-    wp_base = log_neg / onep2 - alpha / om1 + 1.0 / tm
-    wp2_base = (2.0 * log_neg / onep3 - (3.0 * alpha - 2.0) / onep2
-                + 1.0 / (tm * tm))
-    j_star = np.maximum(
-        np.exp((log_z + alpha * np.log(-alpha)) / one_minus_alpha), 1.0,
-    )
-    j_int = np.maximum(1, np.round(j_star).astype(int))
-    j_int_max = int(j_int.max())
-    n_active = ya.size
+def _tweedious_work_scalar_py(y, rho, p, dpth1, dpth2):
+    """Faithful port of mgcv's C ``tweedious`` (misc.c:170-510), scalar-p
+    (``buffer=TRUE``) path — the reference twin of the rust kernel.
 
-    # Per-row eps-window from the local curvature of log W_j (α is per-row
-    # here), NOT the old ``1/min|alpha|`` worst-row bound: see the scalar
-    # :func:`_tweedie_log_a_vec` for the derivation and the bit-exactness
-    # guarantee (the grow-loop only stops once the eps gate has fired inside
-    # the window for every row). Size the shared grid to the widest row.
-    peak_var = 1.0 / (
-        polygamma(1, j_int + 1.0)
-        + alpha * alpha * polygamma(1, -j_int * alpha)
-    )
-    half = np.sqrt(2.0 * _LD_EPS * np.maximum(peak_var, 0.0))
-    right = int(np.ceil(float(np.max(j_int + half)))) + 16
-    J = min(max(right, j_int_max + 1), _LD_J_MAX)
+    For each ``y > 0`` it locates the Dunn-Smyth series peak ``j_max``, sweeps
+    UP from it to convergence then DOWN, applying the θ-chain PER TERM and
+    accumulating ``wi/w1i/w2i/wdlogwdp/wdW2d2W/dWpp`` in that exact order with
+    the ``wj < wmax + log(eps)`` break (``eps = double.eps²``, ``wmax`` fixed at
+    ``j_max`` — not a running max). Returns the ``(n, 6)`` array of working-
+    parameter log-density derivatives ``[w, w1, w2, w1p, w2p, w2pp]`` =
+    ``[logW, dρ, dρρ, dθ, dθθ, dθρ]`` (the C's outputs), which
+    :func:`_ld_tweedie_work` adds to the saddle part.
 
-    if _rs_tweedie_series_pv is not None:
-        # Rust per-row windowed sweep (mgcv tweedious2): recomputes the −jα
-        # special functions inside each row's eps-window via the nmath ports
-        # (same C source as R/mgcv) and accumulates the moments + mgcv's working
-        # derivatives — never the dense (n, J) matrix. The kernel caps the
-        # up-sweep at `_LD_J_MAX` and stops per-row once the eps gate fires.
-        res = _rs_tweedie_series_pv(
-            np.ascontiguousarray(ly),
-            np.ascontiguousarray(j_int.astype(np.int64)),
-            np.ascontiguousarray(alpha),
-            np.ascontiguousarray(w_base),
-            np.ascontiguousarray(wp_base),
-            np.ascontiguousarray(wp2_base),
-            np.ascontiguousarray(om1),
-            float(_LD_EPS), int(_LD_J_MAX))
-        out_la = res[:, 0]
-        out_jb = res[:, 1]
-        out_jv = res[:, 2]
-        out_jpb = res[:, 3]
-        out_m1 = res[:, 4]
-        out_mc = res[:, 5]
-        out_md = res[:, 6]
-    else:
-        out_la = np.empty(n_active)
-        out_jb = np.empty(n_active)
-        out_jv = np.empty(n_active)
-        out_jpb = np.empty(n_active)
-        out_m1 = np.empty(n_active)
-        out_mc = np.empty(n_active)
-        out_md = np.empty(n_active)
+    ``rho`` is scalar (single φ, as the C dereferences ``*rho``); ``p`` and its
+    θ-derivatives ``dpth1``/``dpth2`` are scalars computed identically upstream.
+    Terms are computed per-``j`` rather than from a shared buffer — bit-identical
+    to the C's buffered ``wb[j]`` values (same expressions), just recomputed.
+    """
+    y = np.ascontiguousarray(np.asarray(y, dtype=float))
+    n = y.size
+    phi = math.exp(rho)
+    onep = 1.0 - p                       # 1 − p  (negative)
+    onep2 = onep * onep
+    twop = 2.0 - p
+    alpha = twop / onep                  # (2−p)/(1−p)  (negative)
+    log_eps = _TWEEDIOUS_LOG_EPS
+    # repeated-per-j bases (misc.c:230-232)
+    w_base = alpha * math.log(p - 1.0) + rho / onep - math.log(twop)
+    log_neg = math.log(-onep) + rho
+    wp_base = log_neg / onep2 - alpha / onep + 1.0 / twop
+    wp2_base = (2.0 * log_neg / (onep2 * onep) - (3.0 * alpha - 2.0) / onep2
+                + 1.0 / (twop * twop))
+    # per-row precompute (misc.c:242-250)
+    ly = np.log(y)
+    alogy = alpha * ly
+    logy1p2 = ly / onep2
+    logy1p3 = logy1p2 / onep
+    lg = _nmath._lgammafn
+    psi = _nmath.psigamma5
+
+    out = np.zeros((n, 6))
+    for i in range(n):
+        # locate the series maximum (misc.c:303-305)
+        x = math.pow(y[i], twop) / (phi * twop)
+        j_max = math.floor(x)
+        if x - j_max > 0.5 or j_max < 1:
+            j_max += 1
+        j_max = int(j_max)
+        alogy_i = alogy[i]
+        logy1p2_i = logy1p2[i]
+        logy1p3_i = logy1p3[i]
+
+        wmax = (j_max * w_base - lg(j_max + 1.0) - lg(-j_max * alpha)
+                - j_max * alogy_i)
+        wmin = wmax + log_eps
+        wi = 0.0
+        w1i = 0.0
+        w2i = 0.0
+        wdlogwdp = 0.0
+        wdW2d2W = 0.0
+        dWpp = 0.0
+
+        # upsweep from the peak (inclusive), then downsweep — mgcv accumulates
+        # each term THEN breaks once it drops below wmin (misc.c:329-441)
+        j = j_max
         while True:
-            j_grid = np.arange(1, J + 1, dtype=float)
-            lgamma_jp1 = _nmath._lgammafn_arr(j_grid + 1.0)
-
-            # per-row α ⇒ the -jα tables are (chunk, J); budget ~12 J-wide
-            # doubles per row in flight → 96 J bytes per row.
-            chunk = max(1, _chunk_bytes // (96 * J))
-            grow = False
-            for s in range(0, n_active, chunk):
-                e = min(s + chunk, n_active)
-                lz_c = log_z[s:e]
-                op_c = om1[s:e]
-                op2_c = onep2[s:e]
-                op3_c = onep3[s:e]
-                nja = -j_grid[None, :] * alpha[s:e, None]      # (c, J), > 0
-                lw = (j_grid[None, :] * lz_c[:, None]
-                      - lgamma_jp1[None, :] - _nmath._lgammafn_arr(nja))
-                log_max = np.max(lw, axis=1)
-                above_eps = lw >= (log_max[:, None] - _LD_EPS)
-                if J < _LD_J_MAX and above_eps[:, -1].any():
-                    grow = True
-                    break
-                w = np.where(above_eps, np.exp(lw - log_max[:, None]), 0.0)
-                sum_w = np.sum(w, axis=1)
-                out_la[s:e] = log_max + np.log(sum_w)
-                p_w = w / sum_w[:, None]
-                jb_c = np.sum(p_w * j_grid[None, :], axis=1)
-                out_jb[s:e] = jb_c
-                out_jv[s:e] = (
-                    np.sum(p_w * j_grid[None, :] ** 2, axis=1) - jb_c * jb_c)
-                psi_c = _nmath.psigamma_vec(nja, 0.0)
-                trig_c = _nmath.psigamma_vec(nja, 1.0)
-                out_jpb[s:e] = np.sum(p_w * j_grid[None, :] * psi_c, axis=1)
-                # mgcv p-param working derivatives (per-row α), wp1²+wp2 combined.
-                jo2 = j_grid[None, :] / op2_c[:, None]
-                xj = jo2 * psi_c
-                wp1 = (j_grid[None, :] * wp_base[s:e, None] + xj
-                       - j_grid[None, :] * (ly[s:e] / op2_c)[:, None])
-                wp2 = (j_grid[None, :] * wp2_base[s:e, None]
-                       + 2.0 * xj / op_c[:, None] - trig_c * jo2 * jo2
-                       - 2.0 * j_grid[None, :] * (ly[s:e] / op3_c)[:, None])
-                out_m1[s:e] = np.sum(p_w * wp1, axis=1)
-                out_mc[s:e] = np.sum(p_w * (wp1 * wp1 + wp2), axis=1)
-                out_md[s:e] = np.sum(
-                    p_w * (wp1 * j_grid[None, :] / op_c[:, None] + jo2), axis=1)
-            if not grow:
+            wj = (j * w_base - lg(j + 1.0) - lg(-j * alpha) - j * alogy_i)
+            w1j = -j / onep
+            neg_ja = -j * alpha
+            dig = psi(neg_ja, 0)
+            trig = psi(neg_ja, 1)
+            xx = j / onep2
+            xdig = xx * dig
+            wp1j = (j * wp_base + xdig) - j * logy1p2_i         # d logW / dp
+            wp2j = ((j * wp2_base + 2.0 * xdig / onep - trig * xx * xx)
+                    - 2.0 * j * logy1p3_i)                      # d² logW / dp²
+            # transform to working parameterization (misc.c:336-338)
+            wp2j = wp1j * dpth2 + wp2j * dpth1 * dpth1          # d² logW / dθ²
+            wp1j = wp1j * dpth1                                  # d logW / dθ
+            wppj = xx * dpth1
+            ws = math.exp(wj - wmax)
+            wi += ws
+            w1i += ws * w1j
+            w2i += ws * w1j * w1j
+            wdlogwdp += ws * wp1j
+            wdW2d2W += ws * (wp1j * wp1j + wp2j)
+            dWpp += ws * (wp1j * j / onep + wppj)
+            if wj < wmin:
                 break
-            J = min(J * 2, _LD_J_MAX)
+            j += 1
+            if j - j_max > _LD_J_MAX:
+                break
+        j = j_max - 1
+        while j >= 1:
+            wj = (j * w_base - lg(j + 1.0) - lg(-j * alpha) - j * alogy_i)
+            w1j = -j / onep
+            neg_ja = -j * alpha
+            dig = psi(neg_ja, 0)
+            trig = psi(neg_ja, 1)
+            xx = j / onep2
+            xdig = xx * dig
+            wp1j = (j * wp_base + xdig) - j * logy1p2_i
+            wp2j = ((j * wp2_base + 2.0 * xdig / onep - trig * xx * xx)
+                    - 2.0 * j * logy1p3_i)
+            wp2j = wp1j * dpth2 + wp2j * dpth1 * dpth1
+            wp1j = wp1j * dpth1
+            wppj = xx * dpth1
+            ws = math.exp(wj - wmax)
+            wi += ws
+            w1i += ws * w1j
+            w2i += ws * w1j * w1j
+            wdlogwdp += ws * wp1j
+            wdW2d2W += ws * (wp1j * wp1j + wp2j)
+            dWpp += ws * (wp1j * j / onep + wppj)
+            if wj < wmin:
+                break
+            j -= 1
 
-    log_a.ravel()[active] = out_la
-    j_bar.ravel()[active] = out_jb
-    j_var.ravel()[active] = out_jv
-    j_psi_bar.ravel()[active] = out_jpb
-    m_wp1.ravel()[active] = out_m1
-    m_comb.ravel()[active] = out_mc
-    m_dwpp.ravel()[active] = out_md
-    return (log_a, j_bar, j_var, j_psi_bar, m_wp1, m_comb, m_dwpp)
+        # final transforms (misc.c:498-503)
+        out[i, 0] = wmax + math.log(wi)                          # log W
+        out[i, 1] = -w1i / wi                                    # dρ
+        out[i, 2] = w2i / wi - (w1i / wi) * (w1i / wi)           # dρρ
+        out[i, 3] = wdlogwdp / wi                                # dθ
+        out[i, 4] = wdW2d2W / wi - (wdlogwdp / wi) * (wdlogwdp / wi)  # dθθ
+        out[i, 5] = (w1i / wi) * (wdlogwdp / wi) + dWpp / wi     # dθρ
+    return out
+
+
+def _tweedious_work_pv_py(y, rho, p, dpth1, dpth2):
+    """Faithful port of mgcv's C ``tweedious2`` (misc.c:513-661), vector-p
+    (``buffer=FALSE``) path — the reference twin of the rust kernel.
+
+    Same per-row up/down sweep and per-term θ-chain as
+    :func:`_tweedious_work_scalar_py`, but ``rho``/``p``/``dpth1``/``dpth2`` vary
+    by row (recomputed per row), so no shared table. ``lgamma(j+1)`` is built by
+    RECURSION along the sweep (``+= log(j)`` up, ``-= log(j+1)`` down) from a
+    fresh ``lgamma`` at each sweep's start — exactly mgcv's ``lgammaj1`` recursion
+    (misc.c:596-644), which drifts from a fresh per-term ``lgamma`` at the last
+    ulp. Returns ``(n, 6)`` = ``[logW, dρ, dρρ, dθ, dθθ, dθρ]``.
+    """
+    y = np.ascontiguousarray(np.asarray(y, dtype=float))
+    n = y.size
+    rho = np.broadcast_to(np.asarray(rho, dtype=float), y.shape)
+    p = np.broadcast_to(np.asarray(p, dtype=float), y.shape)
+    dpth1 = np.broadcast_to(np.asarray(dpth1, dtype=float), y.shape)
+    dpth2 = np.broadcast_to(np.asarray(dpth2, dtype=float), y.shape)
+    log_eps = _TWEEDIOUS_LOG_EPS
+    lg = _nmath._lgammafn
+    psi = _nmath.psigamma5
+    out = np.zeros((n, 6))
+    for i in range(n):
+        pi = float(p[i])
+        d1 = float(dpth1[i])
+        d2 = float(dpth2[i])
+        phi = math.exp(float(rho[i]))
+        onep = 1.0 - pi
+        onep2 = onep * onep
+        twop = 2.0 - pi
+        alpha = twop / onep
+        alogy_raw = math.log(y[i])
+        logy1p2 = alogy_raw / onep2
+        logy1p3 = logy1p2 / onep
+        alogy = alogy_raw * alpha
+        w_base = alpha * math.log(-onep) + float(rho[i]) / onep - math.log(twop)
+        log_neg = math.log(-onep) + float(rho[i])
+        wp_base = log_neg / onep2 - alpha / onep + 1.0 / twop
+        wp2_base = (2.0 * log_neg / (onep2 * onep) - (3.0 * alpha - 2.0) / onep2
+                    + 1.0 / (twop * twop))
+        # locate the series maximum (misc.c:564-566)
+        x = math.pow(y[i], twop) / (phi * twop)
+        j_max = math.floor(x)
+        if x - j_max > 0.5 or j_max < 1:
+            j_max += 1
+        j_max = int(j_max)
+
+        wmax = (j_max * w_base - lg(j_max + 1.0) - lg(-j_max * alpha)
+                - j_max * alogy)
+        wmin = wmax + log_eps
+        wi = w1i = w2i = 0.0
+        wdlogwdp = wdW2d2W = dWpp = 0.0
+        # single toggling sweep with the lgamma(j+1) recursion (misc.c:595-648)
+        j = j_max
+        incr = 1
+        lgammaj1 = lg(j + 1.0)
+        ok = False
+        while not ok:
+            wbj = j * w_base - lgammaj1 - lg(-j * alpha)
+            w1j = -j / onep
+            neg_ja = -j * alpha
+            xx = j / onep2
+            xdig = xx * psi(neg_ja, 0)
+            wp1jb = j * wp_base + xdig
+            wp2jb = j * wp2_base + 2.0 * xdig / onep - psi(neg_ja, 1) * xx * xx
+            wppjb = xx
+            jalogy = j * alogy
+            wj = wbj - jalogy
+            wp1j = wp1jb - j * logy1p2
+            wp2j = wp2jb - 2.0 * j * logy1p3
+            wp2j = wp1j * d2 + wp2j * d1 * d1
+            wp1j = wp1j * d1
+            wppj = wppjb * d1
+            ws = math.exp(wj - wmax)
+            wi += ws
+            w1i += ws * w1j
+            w2i += ws * w1j * w1j
+            wdlogwdp += ws * wp1j
+            wdW2d2W += ws * (wp1j * wp1j + wp2j)
+            dWpp += ws * (wp1j * j / onep + wppj)
+            j += incr
+            if incr > 0:
+                lgammaj1 += math.log(j)
+                if wj < wmin:
+                    j = j_max - 1
+                    incr = -1
+                    if j == 0:
+                        ok = True
+                    lgammaj1 = lg(j + 1.0)
+            else:
+                lgammaj1 += -math.log(j + 1.0)
+                if wj < wmin or j < 1:
+                    ok = True
+        out[i, 0] = wmax + math.log(wi)
+        out[i, 1] = -w1i / wi
+        out[i, 2] = w2i / wi - (w1i / wi) * (w1i / wi)
+        out[i, 3] = wdlogwdp / wi
+        out[i, 4] = wdW2d2W / wi - (wdlogwdp / wi) * (wdlogwdp / wi)
+        out[i, 5] = (w1i / wi) * (wdlogwdp / wi) + dWpp / wi
+    return out
+
+
+# Rust twins of the tweedious series kernels (fast path); fall back to the
+# faithful Python ports above when the extension is unbuilt.
+_rs_tweedious_work = _rs_fn("tweedious_work")
+_rs_tweedious_work_pv = _rs_fn("tweedious_work_pv")
+
+
+def _tweedious_work_scalar(y, rho, p, dpth1, dpth2):
+    if _rs_tweedious_work is not None:
+        return _rs_tweedious_work(
+            np.ascontiguousarray(np.asarray(y, dtype=float)),
+            float(rho), float(p), float(dpth1), float(dpth2),
+            _TWEEDIOUS_LOG_EPS, int(_LD_J_MAX))
+    return _tweedious_work_scalar_py(y, rho, p, dpth1, dpth2)
+
+
+def _tweedious_work_pv(y, rho, p, dpth1, dpth2):
+    if _rs_tweedious_work_pv is not None:
+        return _rs_tweedious_work_pv(
+            np.ascontiguousarray(np.asarray(y, dtype=float)),
+            np.ascontiguousarray(np.broadcast_to(
+                np.asarray(rho, dtype=float), np.shape(y)).astype(float)),
+            np.ascontiguousarray(np.broadcast_to(
+                np.asarray(p, dtype=float), np.shape(y)).astype(float)),
+            np.ascontiguousarray(np.broadcast_to(
+                np.asarray(dpth1, dtype=float), np.shape(y)).astype(float)),
+            np.ascontiguousarray(np.broadcast_to(
+                np.asarray(dpth2, dtype=float), np.shape(y)).astype(float)),
+            _TWEEDIOUS_LOG_EPS, int(_LD_J_MAX))
+    return _tweedious_work_pv_py(y, rho, p, dpth1, dpth2)
 
 
 def _ld_tweedie_work(y, mu, theta, rho, a: float = 1.001,
@@ -2216,13 +2325,12 @@ def _ld_tweedie_work(y, mu, theta, rho, a: float = 1.001,
     ``[l, ρ, ρρ, θ, θθ, θρ, μ, μμ, μθ, μρ]`` — exactly what twlss's ll
     consumes (gamlss.r:2575-2580). The closed-form saddle/zero parts
     and the (p, φ) → (θ, ρ) chain are line-by-line ports; the series
-    part (the C ``tweedious2`` call) runs the Dunn-Smyth moment
-    machinery (:func:`_tweedie_log_a_vec_pv`) with the same eps gate,
-    converted to working-parameter derivatives via
-
-        ∂log W_j/∂ρ = −(1−α)·j,   ∂log W_j/∂p = j·L′ + α′·j·ψ(−jα),
-
-    L = log z, α = (2−p)/(1−p), and the chain p(θ).
+    part is a faithful port of the C ``tweedious``/``tweedious2``
+    (:func:`_tweedious_work_scalar`/:func:`_tweedious_work_pv`) — the
+    per-row up-then-down sweep from the located peak with the θ-chain
+    applied PER TERM, returning the six working-parameter derivatives
+    ``[logW, dρ, dρρ, dθ, dθθ, dθρ]`` directly, which are ADDED to the
+    saddle columns (gam.fit3.r:3013-3020).
     """
     y = np.asarray(y, dtype=float)
     n = y.shape[0]
@@ -2340,33 +2448,25 @@ def _ld_tweedie_work(y, mu, theta, rho, a: float = 1.001,
         # `np.ptp == 0` ⇔ mgcv's `length(unique(·))==1` (ULP-exact).
         buffer = (theta.size <= 1 or float(np.ptp(theta)) == 0.0) and \
                  (rho.size <= 1 or float(np.ptp(rho)) == 0.0)
+        # Series part: a faithful port of mgcv's C_tweedious / C_tweedious2
+        # (misc.c:170-661) — the per-row up-then-down sweep with the θ-chain
+        # applied PER TERM, returning the six working-parameter log-density
+        # derivatives [w, w1, w2, w1p, w2p, w2pp] = [logW, dρ, dρρ, dθ, dθθ,
+        # dθρ] directly (the C's outputs). Added to the saddle part below,
+        # exactly as ldTweedie does (gam.fit3.r:3013-3020).
         if buffer:
-            la, jb, jv, jpb, m_wp1, m_comb, m_dwpp = _tweedie_log_a_vec(
-                y_i, phii, float(p_i.flat[0]))
+            sw = _tweedious_work_scalar(
+                y_i, float(rho[ind].flat[0]), float(p_i.flat[0]),
+                float(dpth1[ind].flat[0]), float(dpth2[ind].flat[0]))
         else:
-            la, jb, jv, jpb, m_wp1, m_comb, m_dwpp = _tweedie_log_a_vec_pv(
-                y_i, phii, p_i)
-        al = twop / onep                      # α
-        one_m_al = 1.0 - al
-        # Series derivatives in mgcv's well-conditioned working-parameter form
-        # (tweedious, misc.c:498-503): the kernel returns the p-param accumulators
-        # m_wp1=E[wp1], m_comb=E[wp1²+wp2], m_dwpp=E[wp1·j/(1−p)+wpp]; the θ-chain
-        # (dpth1/dpth2) is reapplied here. Combining wp1²+wp2 per term (inside the
-        # kernel) avoids the ~1e-11 cancellation the old moment split incurred.
-        d1 = dpth1[ind]
-        d2_ = dpth2[ind]
-        # Form the WELL-CONDITIONED p-param 2nd derivatives first (the
-        # m_comb−m_wp1² / m_dwpp−(jb/onep)·m_wp1 subtractions have no
-        # cancellation, mgcv misc.c:500-501), THEN apply the θ-chain — doing
-        # the chain inside the subtraction would re-introduce the cancellation.
-        d2logS_dp2 = m_comb - m_wp1 ** 2              # ∂²log a/∂p²
-        d2logS_dpdrho = m_dwpp - (jb / onep) * m_wp1  # ∂²log a/∂p∂ρ
-        ld[ind, 0] += la
-        ld[ind, 1] += -one_m_al * jb
-        ld[ind, 2] += one_m_al ** 2 * jv
-        ld[ind, 3] += d1 * m_wp1
-        ld[ind, 4] += d1 ** 2 * d2logS_dp2 + d2_ * m_wp1
-        ld[ind, 5] += d1 * d2logS_dpdrho
+            sw = _tweedious_work_pv(y_i, rho[ind], p_i,
+                                    dpth1[ind], dpth2[ind])
+        ld[ind, 0] += sw[:, 0]
+        ld[ind, 1] += sw[:, 1]
+        ld[ind, 2] += sw[:, 2]
+        ld[ind, 3] += sw[:, 3]
+        ld[ind, 4] += sw[:, 4]
+        ld[ind, 5] += sw[:, 5]
     return ld
 
 
