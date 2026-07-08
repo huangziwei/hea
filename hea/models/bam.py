@@ -2455,6 +2455,7 @@ class bam(gam):
         in_out: dict | None = None,
         coef: np.ndarray | list | None = None,
         samfrac: float = 1.0,
+        min_sp: np.ndarray | list | None = None,
     ):
         # ``data`` may be a polars DataFrame OR a mapping of name → 1-D /
         # 2-D ndarray. 2-D entries become matrix columns for mgcv's
@@ -2482,6 +2483,17 @@ class bam(gam):
         self._coef_start = (None if coef is None
                             else np.asarray(coef, dtype=float).reshape(-1))
         self._samfrac = float(samfrac)
+        # bam(min.sp=): the fixed lower-bound penalty is NOT supported by
+        # fast REML / NCV (fast-REML.r:2041), which is every rail hea's bam
+        # uses (REML≡fREML alias). mgcv drops it with this exact warning
+        # (bam.r:2238-2240); gam(min.sp=) is the supported route.
+        if min_sp is not None:
+            import warnings as _warnings
+            _warnings.warn(
+                "min.sp not supported with fast REML and NCV computation, "
+                "and ignored.",
+                stacklevel=2,
+            )
         if isinstance(formula, (list, tuple)):
             self._init_general_discrete(
                 [str(f) for f in formula], data, method=method, sp=sp,

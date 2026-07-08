@@ -2848,8 +2848,15 @@ def test_edge_correct_general_family_matches_mgcv():
         np.diag(m0.Vc)[[0, 1, 2, 9, 19]],
         [0.0008127134141, 0.06429968272, 0.4544038077, 0.1834664554,
          0.002468231747], rtol=1e-4)
+    # index 11 = s(w)'s coefficient region; s(w)'s sp sits at working
+    # infinity so its penalized-Hessian block is ill-conditioned and this
+    # near-zero (~1.7e-5) Vb.corr variance is the single most eigensolver-
+    # sensitive entry of the whole Vc — the ONLY one that drifts across
+    # BLAS backends (darwin 1.6723e-5, every linux CI runner a bit-
+    # identical 1.6758e-5, abs Δ 3.5e-8). Irreducible cross-backend LAPACK
+    # noise on an ill-conditioned quantity; pin by atol, not tight rtol.
     np.testing.assert_allclose(np.diag(m0.Vc)[11], 1.672278335e-05,
-                               rtol=2e-3)
+                               rtol=5e-3, atol=1e-7)
     np.testing.assert_allclose(m0.edf2_total, 14.7125330455, rtol=1e-5)
     # sp.vcov(edge_correct=True) falls through to the plain branch on a
     # non-edge-corrected fit, exactly like mgcv.
@@ -7758,6 +7765,81 @@ def test_predict_na_action_block_size_matches_mgcv():
     assert np.isnan(pb["fit"].to_numpy()[[1, 2]]).all()
     pb2 = mb.predict(nd, type="response", na_action="na.omit")
     assert pb2.height == 2
+
+
+def test_gam_min_sp_matches_mgcv():
+    """gam(min.sp=)/gam(H=) — the fixed additive penalty (mgcv.r:1465-
+    1508). min.sp[k] folds a FIXED block min.sp[k]·S_k into H, lower-
+    bounding smooth k's EFFECTIVE penalty; the estimated sp stays free so
+    the reported sp is only the estimated part (it can fall below min.sp).
+    The fixed penalty enters the fit AND — as an extra un-parameterised
+    square root — the (RE)ML log|Sλ|₊ (reparam fixed_penalty root) / the
+    magic GCV St (mgcv passes G$H to magic, mgcv.r:2620). Since
+    Σ min.sp[k]·S_k has range ⊆ span{S_k}, Mp is unchanged. mgcv 1.9-4
+    pins (set.seed(7) frame; min.sp=c(0.05, 0.5)).
+    """
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(7)
+    n = 120
+    x = g.uniform(0, 1, n)
+    z = g.uniform(0, 1, n)
+    y = np.sin(2 * np.pi * x) + 0.5 * z ** 2 + g.normal(0, 0.3, n)
+    d = {"x": x, "z": z, "y": y}
+
+    # ---- REML rail (newton + reparam fixed_penalty root) ---------------
+    m0 = gam("y ~ s(x,k=10) + s(z,k=10)", d, method="REML")
+    m1 = gam("y ~ s(x,k=10) + s(z,k=10)", d, method="REML",
+             min_sp=[0.05, 0.5])
+    # min.sp's H = Σ min.sp[k]·S_k has range ⊆ span{S_k} ⇒ Mp invariant.
+    assert m1._Mp == m0._Mp
+    assert m1._UrS is not None and len(m1._UrS) == 3  # 2 S-roots + 1 H-root
+    # block 1 (s(x)) wants an effective penalty below the 0.05 floor, so
+    # its ESTIMATED sp collapses to a working zero (the floor supplies the
+    # rest); block 2's estimated sp is well determined.
+    assert m1.sp[0] < 1e-5
+    np.testing.assert_allclose(m1.sp[1], 1.298407176, rtol=1e-4)
+    np.testing.assert_allclose(m1.REML_criterion / 2.0, 40.7634154362,
+                               rtol=1e-4)
+    np.testing.assert_allclose(m1.edf_total, 8.138304573, rtol=1e-5)
+    np.testing.assert_allclose(m1.scale, 0.08287281392, rtol=1e-5)
+    np.testing.assert_allclose(m1.Vp[0, 0], 0.0006906067827, rtol=1e-4)
+    np.testing.assert_allclose(np.asarray(m1.fitted_values)[:3],
+                               [-0.04136038139, 0.732504374, 0.753032283],
+                               rtol=1e-4)
+    # intercept (basis-sign-invariant, unlike the spline coefficients)
+    np.testing.assert_allclose(np.asarray(m1.bhat).reshape(-1)[0],
+                               0.2152093634, rtol=1e-4)
+
+    # ---- GCV.Cp rail (magic fast path; St carries H) -------------------
+    mg = gam("y ~ s(x,k=10) + s(z,k=10)", d, method="GCV.Cp",
+             min_sp=[0.05, 0.5])
+    assert mg.sp[0] < 1e-6                              # floored to ~0
+    np.testing.assert_allclose(mg.sp[1], 1.8661594, rtol=1e-4)
+    np.testing.assert_allclose(mg.edf_total, 8.0031678, rtol=1e-5)
+    np.testing.assert_allclose(mg.scale, 0.0829456439, rtol=1e-5)
+
+    # ---- H= (direct fixed penalty) ≡ the min.sp it encodes -------------
+    # min.sp builds H = Σ min.sp[k]·S_k; passing that matrix as H= must
+    # reproduce the min.sp fit exactly (same machinery, different intake).
+    Hmat = np.asarray(m1._H_fixed)
+    mh = gam("y ~ s(x,k=10) + s(z,k=10)", d, method="REML", H=Hmat)
+    np.testing.assert_allclose(mh.REML_criterion, m1.REML_criterion,
+                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(mh.edf_total, m1.edf_total, rtol=0, atol=1e-9)
+
+    # ---- validation (mgcv.r:1466-1469) --------------------------------
+    with pytest.raises(ValueError, match="length of min.sp is wrong"):
+        gam("y ~ s(x,k=10) + s(z,k=10)", d, method="REML", min_sp=[0.05])
+    with pytest.raises(ValueError, match="must be non negative"):
+        gam("y ~ s(x,k=10) + s(z,k=10)", d, method="REML",
+            min_sp=[0.1, -0.2])
+    with pytest.raises(ValueError, match="NA's in min.sp"):
+        gam("y ~ s(x,k=10) + s(z,k=10)", d, method="REML",
+            min_sp=[np.nan, 0.1])
+    with pytest.raises(ValueError, match="H has wrong dimension"):
+        gam("y ~ s(x,k=10) + s(z,k=10)", d, method="REML",
+            H=np.eye(5))
 
 
 def test_gam_in_out_and_drop_intercept_match_mgcv():

@@ -841,19 +841,27 @@ def _pls_qr(X: np.ndarray, lwork: dict, w: np.ndarray, z: np.ndarray,
     return beta, R_corr, log_det, True
 
 
-def _s_lambda(slots, p: int, rho: np.ndarray) -> np.ndarray:
-    """Assemble the p×p total penalty Sλ = Σ exp(ρᵢ)·S_i (mgcv's total
-    penalty at log-sp ρ). Free-function form; ``gam._build_S_lambda`` is a
+def _s_lambda(slots, p: int, rho: np.ndarray,
+              H_fixed: np.ndarray | None = None) -> np.ndarray:
+    """Assemble the p×p total penalty Sλ = Σ exp(ρᵢ)·S_i (+ the fixed
+    penalty ``H_fixed`` when supplied — mgcv's ``totalPenalty``,
+    gam.fit3.r:2646, ``St = H + Σ exp(θ_i) S_i``). ``H_fixed`` carries
+    the ``min.sp``/``H=`` lower-bound block (mgcv.r:1483-1508); it has no
+    smoothing parameter, so it enters the penalty matrix but not its
+    ρ-derivatives (those ride the reparam's fixed_penalty root instead).
+    Free-function form; ``gam._build_S_lambda`` is a thin bind over the
+    model's slots.
 
     mgcv anchor: the total penalty Σ λ_i S_i is assembled inside
     ``gam.reparam`` (gam.fit3.r:9) and gam.fit3's setup; hea factors
-    that sum into this free helper.
-    thin bind over the model's slots."""
+    that sum into this free helper."""
     S = np.zeros((p, p))
     for rho_i, slot in zip(rho, slots):
         lam = float(np.exp(rho_i))
         a, b = slot.col_start, slot.col_end
         S[a:b, a:b] += lam * slot.S
+    if H_fixed is not None:
+        S += H_fixed
     return S
 
 
@@ -867,18 +875,24 @@ def _reparam_eval(UrS, cache: dict, rho: np.ndarray):
     key = rho.tobytes()
     if cache.get("key") == key:
         return cache["val"]
-    out = _gam_reparam(UrS, rho, deriv=2)
+    # ``fixed_penalty`` (min.sp/H=): the LAST UrS entry is the fixed
+    # penalty's root (mgcv.r:1928), carried with sp≡1 and no ρ-derivative
+    # (get_stableS's M excludes it). Flag stored on the cache at setup.
+    out = _gam_reparam(UrS, rho, deriv=2,
+                       fixed_penalty=cache.get("fixed_penalty", False))
     cache["key"] = key
     cache["val"] = out
     return out
 
 
 def _penalty_root_of(slots, p: int, UrS, reparam_Y, keep_cols,
-                     cache: dict, rho: np.ndarray) -> np.ndarray:
+                     cache: dict, rho: np.ndarray,
+                     H_fixed: np.ndarray | None = None) -> np.ndarray:
     """Square root E (e×p) of Sλ, ``E'E = Sλ`` (mgcv's ``Sr``). Primary
     source is gam.reparam's leakage-free root mapped back to the original
-    basis; falls back to an eigen root of the assembled Sλ."""
-    if not slots:
+    basis (which already carries the fixed penalty via its last UrS root);
+    falls back to an eigen root of the assembled Sλ (+ ``H_fixed``)."""
+    if not slots and H_fixed is None:
         return np.zeros((0, p))
     rp = _reparam_eval(UrS, cache, rho)
     if rp is not None and reparam_Y is not None:
@@ -889,7 +903,7 @@ def _penalty_root_of(slots, p: int, UrS, reparam_Y, keep_cols,
                 E_full = E_full[:, keep_cols]
             rp["E_orig"] = E_full
         return E_full
-    Sλ = _s_lambda(slots, p, rho)
+    Sλ = _s_lambda(slots, p, rho, H_fixed=H_fixed)
     Sλ = 0.5 * (Sλ + Sλ.T)
     wv, V = np.linalg.eigh(Sλ)
     w_max = float(wv.max()) if wv.size else 0.0
@@ -902,22 +916,23 @@ def _penalty_root_of(slots, p: int, UrS, reparam_Y, keep_cols,
 def _gam_fit3(x, y, rho, *, slots, UrS, reparam_Y, keep_cols,
               reparam_cache, weights, start, etastart, mustart, offset,
               family, control, null_coef, binom_n, warm_eta,
-              scale_fixed_value, scale_known, pls_lwork):
+              scale_fixed_value, scale_known, pls_lwork, H_fixed=None):
     """mgcv ``gam.fit3`` (gam.fit3.r:67) — penalized IRLS at log-sp ρ for
     ordinary exponential families. Free monolithic fitter; the extended
     (gam.fit4) and general (gam.fit5) dispatch lives in the caller until
     those fold in. ``null_coef`` is mgcv's get.null.coef baseline; the
     converged predictor is returned in ``eta`` for the caller's warm
-    start (gam.fit3.r:1366)."""
+    start (gam.fit3.r:1366). ``H_fixed`` is the min.sp/H= fixed penalty
+    (already reduced to the kept columns)."""
     link = family.link
     X = x
     off = offset
     n, p = x.shape
     wt = weights
-    Sλ = _s_lambda(slots, p, rho)
+    Sλ = _s_lambda(slots, p, rho, H_fixed=H_fixed)
     Sλ = 0.5 * (Sλ + Sλ.T)
     E_aug = _penalty_root_of(slots, p, UrS, reparam_Y, keep_cols,
-                             reparam_cache, rho)
+                             reparam_cache, rho, H_fixed=H_fixed)
     # ``eta`` here is the *offset-stripped* β-only predictor X·β; the
     # full linear predictor is ``eta + off``. Mirrors glm._irls. We
     # solve weighted LS on (z - off) ~ X to recover β each step.
@@ -4010,7 +4025,7 @@ def _gam_fit3_score(rho, log_phi, fit, deriv, scoreType, *,
 def _gam_fit4(x, y, rho, *, slots, UrS, reparam_Y, keep_cols,
               reparam_cache, weights, start, etastart, mustart, offset,
               family, control, null_coef, warm_eta, pls_lwork,
-              efs_scale=None):
+              efs_scale=None, H_fixed=None):
     """Penalized IRLS for mgcv-extended families — gam.fit4's inner
     loop (gam.fit4.r:340-548), line-by-line.
 
@@ -4051,10 +4066,10 @@ def _gam_fit4(x, y, rho, *, slots, UrS, reparam_Y, keep_cols,
     scale_cur = efs_scale
     efs_family_scale = (-1.0 if (efs_scale is not None
                                  and not family.scale_known) else None)
-    Sλ = _s_lambda(slots, p, rho)
+    Sλ = _s_lambda(slots, p, rho, H_fixed=H_fixed)
     Sλ = 0.5 * (Sλ + Sλ.T)
     E_aug = _penalty_root_of(slots, p, UrS, reparam_Y, keep_cols,
-                             reparam_cache, rho)
+                             reparam_cache, rho, H_fixed=H_fixed)
 
     mu = family.gam_initialize(y, wt)
     # User starting values — same glm precedence as the standard
@@ -5602,9 +5617,12 @@ def _magic_penalty_roots(*, p, slots) -> list[np.ndarray]:
 
 
 def _magic_fit_reduced(rho, R, y0, yy, *, wt, gamma, slots, p,
-                       norm_const=0.0, n_score=None, scale=None, gcv=True):
+                       norm_const=0.0, n_score=None, scale=None, gcv=True,
+                       H_fixed=None):
     """Port of magic.c ``fit_magic``: GCV/UBRE score from the SVD of the
-    reduced ``[R; St^½]`` ((q+rank_S)×q). St = Σ exp(ρ_k) S_k.
+    reduced ``[R; St^½]`` ((q+rank_S)×q). St = Σ exp(ρ_k) S_k (+ the fixed
+    penalty ``H_fixed`` — mgcv passes ``G$H`` to magic, mgcv.r:2620; it
+    enters St but, being sp-free, not the ``magic_gH`` gradient).
     Returns score, scale, rss, trA, rank, β, plus the SVD pieces
     (U1, V, d, y1, delta) the derivative routine reuses.
 
@@ -5619,7 +5637,7 @@ def _magic_fit_reduced(rho, R, y0, yy, *, wt, gamma, slots, p,
     else:
         n_score = float(n_score)
     rank_tol = np.sqrt(np.finfo(float).eps)
-    St = _s_lambda(slots, p, rho)
+    St = _s_lambda(slots, p, rho, H_fixed=H_fixed)
     St = 0.5 * (St + St.T)
     ev, Vev = np.linalg.eigh(St)
     pos = ev > ev.max() * 1e-14 if ev.max() > 0 else np.zeros_like(ev, bool)
@@ -5729,7 +5747,8 @@ def _magic_gH(mg, rho, roots):
 
 def _magic_optimize(rho0, *, tol=1e-7, max_half=15, wt, y, offset, struct_R,
                     keep_cols, X, gamma, slots, p, norm_const=0.0,
-                    n_score=None, scale=None, gcv=True, L=None, lsp0=None):
+                    n_score=None, scale=None, gcv=True, L=None, lsp0=None,
+                    H_fixed=None):
     """Port of magic.c ``magic`` (the driver, magic.c:286-707): Newton
     over log-sp backed by steepest descent with step halving, plus the
     infinite-sp check, on the reduced GCV/UBRE system. Returns ρ̂, the
@@ -5759,7 +5778,8 @@ def _magic_optimize(rho0, *, tol=1e-7, max_half=15, wt, y, offset, struct_R,
     def feval(sp):
         return _magic_fit_reduced(sp_full(sp), R, y0, yy, wt=wt, gamma=gamma,
                                   slots=slots, p=p, norm_const=norm_const,
-                                  n_score=n_score, scale=scale, gcv=gcv)
+                                  n_score=n_score, scale=scale, gcv=gcv,
+                                  H_fixed=H_fixed)
 
     mg = feval(sp0)
     min_score = mg["score"]
@@ -5954,7 +5974,7 @@ def _magic_gcv(y: np.ndarray, X: np.ndarray, slots, *,
 
 def _magic_fit_state(rho, *, magic_R, magic_y0, fit_given_rho_fn, family, X,
                      offset, y, wt, slots, p, UrS, reparam_Y, keep_cols,
-                     reparam_cache):
+                     reparam_cache, H_fixed=None):
     """Build the Gaussian-identity ``_FitState`` at ρ̂ from magic's cached
     QR, WITHOUT the full (n+e)×q re-fit. The reduced augmented system
     ``[R_mag; E]`` (R_mag = QR factor of √w·X, cached by `_magic_optimize`)
@@ -5970,10 +5990,10 @@ def _magic_fit_state(rho, *, magic_R, magic_y0, fit_given_rho_fn, family, X,
     link = family.link
     off = offset
     q = R_mag.shape[1]
-    Sλ = _s_lambda(slots, p, rho)
+    Sλ = _s_lambda(slots, p, rho, H_fixed=H_fixed)
     Sλ = 0.5 * (Sλ + Sλ.T)
     E_aug = _penalty_root_of(slots, p, UrS, reparam_Y, keep_cols,
-                             reparam_cache, rho)
+                             reparam_cache, rho, H_fixed=H_fixed)
     # reduced augmented QR (mirrors _pls_qr's no-negative-weight branch)
     aug = np.vstack([R_mag, E_aug])
     Q, R_fin = np.linalg.qr(aug)
@@ -6840,6 +6860,12 @@ class gam:
     _n_theta_aug: int = 0
     _UrS: list[np.ndarray] | None = None
     _reparam_cache: dict = {}
+    # min.sp/H= fixed additive penalty (mgcv.r:1465-1508). None ⇔ absent;
+    # class default lets shared machinery (bam's rails, _setup_reparam)
+    # read it without every __init__ setting it.
+    _H_fixed: np.ndarray | None = None
+    _min_sp: np.ndarray | None = None
+    _H_fixed_fit_cache = False
     # Rank-deficiency drop (mgcv pls_fit1's column dropping): None ⇔ full
     # rank. ``_keep_cols`` is the original-p boolean mask; ``_block_keep``
     # the per-block local masks (for predict-time bases, which rebuild
@@ -6894,6 +6920,8 @@ class gam:
         mustart: np.ndarray | list | None = None,
         in_out: dict | None = None,
         drop_intercept: bool | None = None,
+        min_sp: np.ndarray | list | None = None,
+        H: np.ndarray | None = None,
     ):
         # ``data`` may be a polars DataFrame OR a mapping of name → 1-D /
         # 2-D ndarray. 2-D entries become matrix columns
@@ -7417,6 +7445,47 @@ class gam:
             Mp += k - rank_b
         self._Mp = Mp
         self._penalty_rank = p - Mp
+        # gam(min.sp=)/gam(H=) — the fixed additive penalty (mgcv.r:1465-
+        # 1508). min.sp[k] lower-bounds smooth k's EFFECTIVE penalty by
+        # folding a FIXED block min.sp[k]·S_k into H; the estimated sp
+        # stays free, so the REPORTED sp is only the estimated part and may
+        # fall below min.sp (the effective penalty is estimated + min.sp).
+        # H (if supplied) is a p×p fixed penalty added on top. Both enter
+        # the fit's total penalty and — as an extra un-parameterised square
+        # root — the (RE)ML log|Sλ|₊ (the reparam fixed_penalty root,
+        # mgcv.r:1927-1929). Built here on the pre-drop slots at p_orig;
+        # the fit reduces it to the kept columns exactly like S. Since
+        # min.sp's H = Σ min.sp[k]·S_k has range ⊆ span{S_k}, it adds NO
+        # new penalty-range directions ⇒ Mp/penalty_rank are unchanged
+        # (asserted in _setup_reparam's rank check).
+        self._H_fixed = None
+        self._min_sp = None
+        if min_sp is not None or H is not None:
+            Hf = np.zeros((p, p))
+            if H is not None:
+                Hm = np.asarray(H, dtype=float)
+                if Hm.shape != (p, p):
+                    raise ValueError(
+                        f"H has wrong dimension (expected {p}x{p}, got "
+                        f"{Hm.shape})")
+                Hf = Hf + Hm
+            if min_sp is not None:
+                msp = np.asarray(min_sp, dtype=float).flatten()
+                # mgcv.r:1466-1469 (nrow(L) == number of penalty blocks).
+                if msp.shape[0] < len(slots):
+                    raise ValueError("length of min.sp is wrong.")
+                msp = msp[:len(slots)]
+                if np.any(np.isnan(msp)):
+                    raise ValueError("NA's in min.sp.")
+                if np.any(msp < 0):
+                    raise ValueError(
+                        "elements of min.sp must be non negative.")
+                for msp_k, slot in zip(msp, slots):
+                    if msp_k != 0.0:
+                        a, b = slot.col_start, slot.col_end
+                        Hf[a:b, a:b] += msp_k * slot.S
+                self._min_sp = msp
+            self._H_fixed = Hf
         slots_full = list(slots)
         # gam(start=/etastart=/mustart=) — glm-style PIRLS starting
         # values (gam.fit3.r:259-292). hea seeds every inner PIRLS with
@@ -8268,8 +8337,10 @@ class gam:
         Each slot's k×k S_j is placed at its block's column range and
         multiplied by λ = exp(ρᵢ). Slots within the same block overlap
         (same col range) and are summed there — that's how tensor smooths
-        get multiple penalties per block."""
-        return _s_lambda(self._slots, self.p, rho)
+        get multiple penalties per block. Includes the min.sp/H= fixed
+        penalty (mgcv's ``totalPenalty`` H term) when present."""
+        return _s_lambda(self._slots, self.p, rho,
+                         H_fixed=self._h_fixed_fit())
 
     def _rho_full(self, theta_sp: np.ndarray) -> np.ndarray:
         """Working log-sp θ → per-penalty log-sp ρ = L·θ + lsp0 (mgcv's
@@ -8390,6 +8461,23 @@ class gam:
             self._null_baseline_cache = (nc, en, mn)
         return self._null_baseline_cache[0]
 
+    def _h_fixed_fit(self) -> np.ndarray | None:
+        """The min.sp/H= fixed penalty reduced to the fit's kept columns
+        (self._H_fixed is built pre-drop at p_orig; the identifiability
+        drop removes the same rows/cols as it does from S). Cached."""
+        if self._H_fixed is None:
+            return None
+        cached = getattr(self, "_H_fixed_fit_cache", False)
+        if cached is not False:
+            return cached
+        if self._keep_cols is None:
+            Hf = self._H_fixed
+        else:
+            kc = np.flatnonzero(self._keep_cols)
+            Hf = self._H_fixed[np.ix_(kc, kc)]
+        self._H_fixed_fit_cache = Hf
+        return Hf
+
     def _fit_given_rho(self, rho: np.ndarray,
                        efs_scale: float | None = None) -> "_FitState":
         """Penalized IRLS at log-smoothing-params ρ.
@@ -8430,7 +8518,7 @@ class gam:
                 offset=self._offset, family=self.family,
                 control=self._control, null_coef=self._resolve_null_coef(),
                 warm_eta=self._pirls_warm_eta, pls_lwork=self._pls_lwork,
-                efs_scale=efs_scale,
+                efs_scale=efs_scale, H_fixed=self._h_fixed_fit(),
             )
             if fit.converged and np.all(np.isfinite(fit.eta)):
                 self._pirls_warm_eta = fit.eta
@@ -8446,6 +8534,7 @@ class gam:
             warm_eta=self._pirls_warm_eta,
             scale_fixed_value=self._scale_fixed_value,
             scale_known=self._scale_known_fit, pls_lwork=self._pls_lwork,
+            H_fixed=self._h_fixed_fit(),
         )
         # Carry the converged predictor as the next score-eval's warm start
         # (mgcv gam.fit3.r:1366) — only on a finite converged fit.
@@ -8521,16 +8610,28 @@ class gam:
             slots = self._slots
         if p is None:
             p = self.p
+        H_fixed = self._H_fixed
+        has_H = H_fixed is not None
         self._UrS = None
-        self._reparam_cache = {}
-        if not slots:
+        # ``fixed_penalty`` flag rides the reparam cache to every consumer
+        # (_reparam_eval reads it) — set even when UrS stays None so the
+        # fallback stays consistent.
+        self._reparam_cache = {"fixed_penalty": has_H}
+        if not slots and not has_H:
             return
+        # totalPenaltySpace's balanced St INCLUDES the fixed penalty
+        # H/‖H‖ (mgcv.r:2666-2677), so the range basis Y matches mgcv even
+        # though min.sp's H adds no new range directions.
         St = np.zeros((p, p))
         for slot in slots:
             a, b = slot.col_start, slot.col_end
             nrm = float(np.linalg.norm(slot.S, "fro"))
             if nrm > 0:
                 St[a:b, a:b] += slot.S / nrm
+        if has_H:
+            Hnrm = float(np.linalg.norm(H_fixed, "fro"))
+            if Hnrm > 0:
+                St += H_fixed / Hnrm
         w, V = np.linalg.eigh(St)
         w_max = float(w.max()) if w.size else 0.0
         if w_max <= 0:
@@ -8545,6 +8646,7 @@ class gam:
                 f"log|S|+ path",
                 stacklevel=2,
             )
+            self._reparam_cache = {}
             return
         Y = V[:, ind]
         UrS = []
@@ -8554,6 +8656,10 @@ class gam:
             full = np.zeros((p, b_root.shape[1]))
             full[a:b, :] = b_root
             UrS.append(Y.T @ full)
+        if has_H:
+            # the fixed penalty's root goes LAST (mgcv.r:1928); get_stableS
+            # treats the last root as sp≡1 with no derivative.
+            UrS.append(Y.T @ _mroot(H_fixed))
         self._UrS = UrS
         self._reparam_Y = Y
 
@@ -9424,7 +9530,7 @@ class gam:
             rho0, tol=tol, max_half=max_half, wt=self._wt, y=self._y_arr,
             offset=self._offset, struct_R=self._struct_R,
             keep_cols=self._keep_cols, X=self._X_full, gamma=self._gamma,
-            slots=self._slots, p=self.p)
+            slots=self._slots, p=self.p, H_fixed=self._h_fixed_fit())
         self._magic_R = res["magic_R"]
         self._magic_y0 = res["magic_y0"]
         self._outer_info = res["outer_info"]
@@ -9438,7 +9544,7 @@ class gam:
             X=self._X_full, offset=self._offset, y=self._y_arr, wt=self._wt,
             slots=self._slots, p=self.p, UrS=self._UrS,
             reparam_Y=self._reparam_Y, keep_cols=self._keep_cols,
-            reparam_cache=self._reparam_cache)
+            reparam_cache=self._reparam_cache, H_fixed=self._h_fixed_fit())
 
     def _pearson_and_deriv(self, rho, fit, deriv=True):
         """Shim → free `_pearson_and_deriv`."""

@@ -1480,6 +1480,32 @@ def test_bam_scale_extended_matches_mgcv():
     np.testing.assert_allclose(g0.sigma_squared, 0.08579144546, rtol=1e-5)
 
 
+def test_bam_min_sp_warns_ignored():
+    """bam(min.sp=) — fast REML / NCV (every rail hea's bam uses, via the
+    REML≡fREML alias) does NOT support the fixed lower-bound penalty
+    (fast-REML.r:2041); mgcv drops it with an exact warning
+    (bam.r:2238-2240). Verify the warning fires and the fit equals the
+    plain (no-min.sp) fit — the argument is inert, not silently applied.
+    """
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(8)
+    n = 120
+    x = g.uniform(0, 1, n)
+    z = g.uniform(0, 1, n)
+    y = np.sin(2 * np.pi * x) + 0.5 * z + g.normal(0, 1, n) * 0.3
+    d = {"x": x, "z": z, "y": y}
+
+    m_plain = hea.models.bam("y ~ s(x, k=10) + s(z, k=10)", d)
+    with pytest.warns(UserWarning, match="min.sp not supported with fast"):
+        m_msp = hea.models.bam("y ~ s(x, k=10) + s(z, k=10)", d,
+                               min_sp=[0.05, 0.5])
+    # min.sp was ignored ⇒ identical optimum.
+    np.testing.assert_allclose(m_msp.sp, m_plain.sp, rtol=1e-10)
+    np.testing.assert_allclose(m_msp.edf_total, m_plain.edf_total,
+                               rtol=1e-10)
+
+
 def test_bam_in_out_coef_samfrac():
     """bam's warm-start args. in.out: λ replaces ``initial.sp`` in FULL
     per-penalty space (bam.r:687/1229/1687 — re-read every PIRLS iter
@@ -3445,16 +3471,18 @@ def test_bam_general_discrete_start():
     m1 = _gaulss_bam_fit()
     coef1 = np.asarray(m1.coefficients, dtype=float)
 
-    # Warm-starting AT the converged coefficients legitimately ends the
-    # last inner refit on gam.fit4.r:1206's step-fail endgame; mgcv
-    # warns there whenever the relative grad exceeds 2·ε (its bfgs
-    # tightens ε to conv.tol/100 = 1e-8, gam.fit3.r:1797). Capture and
-    # ASSERT the warning — it is the mgcv-parity receipt, not noise.
-    with _warnings.catch_warnings(record=True) as rec:
-        _warnings.simplefilter("always")
+    # Warm-starting AT the converged coefficients can end the last inner
+    # refit on gam.fit4.r:1206's step-fail endgame; hea's gam.fit5 emits a
+    # benign "step failed" warning whenever the relative grad exceeds 2·ε
+    # (bfgs tightens ε to conv.tol/100 = 1e-8, gam.fit3.r:1797) — the
+    # coefficients are already at the optimum. WHETHER it fires is
+    # platform-arithmetic-dependent and deterministic per platform (darwin
+    # emits it, linux CI does not): it is near-convergence noise, not an
+    # mgcv-parity receipt, so suppress it and pin the recovered optimum.
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore", UserWarning)
         m2 = hea.models.bam(["y ~ s(x0) + x1", "~ s(x2)"], d,
                             family=gaulss(), discrete=True, start=coef1)
-    assert any("gam.fit5 step failed" in str(r.message) for r in rec)
     assert m2.converged
     # BFGS endpoint scatter: the user-start-seeded initial sp differs
     # from the pilot-seeded one, so the line-search path (not the
