@@ -1087,6 +1087,61 @@ def test_mini_mf_matches_mgcv():
     np.testing.assert_allclose(float(mf0["x"].sum()), 45.676350, atol=1e-6)
 
 
+def test_bam_mini_mf_drops_unused_columns():
+    """chunk<n: ``_mini_mf`` runs on mgcv's model.frame(fake.formula) —
+    the response plus ONLY the referenced covariates — not every column
+    carried on the fit frame (bam.r:2323/2387). An unused column in the
+    data must not enter ``mn`` or the count of representative (min/max)
+    rows spliced into the subsample head, or the retained tail (hence the
+    fitted basis) would differ from mgcv when n > chunk_size.
+
+    Data: default_rng(1), n=300, y = sin(2πx1)+0.6·x0+N(0,.3), plus an
+    UNUSED column z. At a fixed sp the basis is the only thing under test;
+    hea bit-matches mgcv bam(y~x0+s(x1), chunk.size=50, sp=0.0117):
+    sum(edf) = 9.418359686148126 (Δ≈1e-12; a corrupted subsample would
+    move edf at the 1e-2 level)."""
+    rng = np.random.default_rng(1)
+    n = 300
+    x0 = rng.uniform(0, 1, n)
+    x1 = rng.uniform(0, 1, n)
+    z = rng.uniform(0, 1, n)            # never referenced by the formula
+    y = np.sin(2 * np.pi * x1) + 0.6 * x0 + rng.normal(0, 0.3, n)
+    m = hea.models.bam("y ~ x0 + s(x1)",
+                       {"y": y, "x0": x0, "x1": x1, "z": z},
+                       method="REML", chunk_size=50, sp=[0.0117])
+    assert float(np.sum(m.edf)) == pytest.approx(9.418359686148126, abs=1e-6)
+
+
+def test_bam_mini_mf_matrix_response_chunk():
+    """chunk<n with a matrix response (cnorm cbind(y, yat)): mgcv's
+    mini.mf sees the response as ONE matrix column (bam.r:407-409, the
+    ``rowSums(==min)`` path), counting 2 toward mn/k — not a scalar
+    response plus a separate stash column (which would count 4 and shift
+    the retained subsample tail). hea builds mgcv's model frame with the
+    2-col Array response, so the chunked fit reproduces mgcv's chunked
+    path exactly.
+
+    _censored_frames() cont_df (n=300, ±Inf censoring sentinels). Pins are
+    mgcv 1.9-4 bam(cbind(y,yat)~s(x0)+s(x1), cnorm, fREML, chunk.size=50):
+    sp = (0.3551577, 1.3868056), sum(edf) = 9.476528568, getTheta(TRUE) =
+    0.5593111 (hea stores log θ). These DIFFER from the unchunked fit
+    (sp = (0.4729894, 0.8078948)) — the chunk actually subsamples, and hea
+    lands on mgcv's *chunked* optimum, not the full-data one."""
+    from hea.family import cnorm
+
+    _, df, _ = _censored_frames()
+    m = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=cnorm(),
+                       method="fREML", chunk_size=50)
+    np.testing.assert_allclose(np.asarray(m.sp),
+                               [0.3551577, 1.3868056], rtol=1e-6)
+    assert float(np.sum(m.edf)) == pytest.approx(9.476528568, abs=1e-6)
+    assert float(np.exp(m.family.get_theta()[0])) == pytest.approx(
+        0.5593111415963565, rel=1e-6)
+    # Chunking is real: the chunked sp is far from the unchunked optimum
+    # (mgcv full sp[1] = 0.8078948), so this exercises the subsample path.
+    assert abs(float(np.asarray(m.sp)[1]) - 0.8078948) > 0.3
+
+
 # =============================================================================
 # 4. summary() / rank parity — P1, P5
 # =============================================================================

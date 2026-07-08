@@ -69,13 +69,16 @@ from ..formula import (
     BasisSpec,
     SmoothBlock,
     _apply_smooth_arg_exprs,
+    _collect_name_idents,
     _eval_atom,
     _factor_levels,
     _LinearTransformRawBasis,
     _RawBasis,
     _smooth_arg_expr_map,
+    _smooth_by_expr,
     _smooth_id_value,
     _smooth_sp_value,
+    _smooth_term_vars,
     _T2PredictRawBasis,
     _T2RawBasis,
     _TensorRawBasis,
@@ -1353,14 +1356,14 @@ def _mini_mf(data: pl.DataFrame, chunk_size: int,
     """
     n = data.height
     cols = data.columns
-    # Count minimum representative rows: 2 per numeric, |levels| per factor.
+    # Count minimum representative rows: |levels| per factor, 2 otherwise
+    # (numeric scalar OR matrix column) — bam.r:389 ``if is.factor()
+    # nlevels else 2``.
     mn = 0
     for c in cols:
         s = data[c]
         if _is_factor_col(s):
             mn += int(s.unique().len())
-        elif s.dtype.is_numeric():
-            mn += 2
         else:
             mn += 2
     if chunk_size < mn:
@@ -1389,6 +1392,15 @@ def _mini_mf(data: pl.DataFrame, chunk_size: int,
                 where = np.flatnonzero(arr_perm == lvl)
                 if where.size:
                     rows.append(int(ind_full[where[0]]))
+        elif is_matrix_col(s):
+            # Matrix column (bam.r:407-409): global min/max over ALL
+            # entries, first ROW containing it (the ``rowSums(==min)``
+            # trick). A censored/gfam matrix response reaches this path.
+            arr2 = matrix_to_2d(s)
+            gmin = arr2.min()
+            gmax = arr2.max()
+            rows.append(int(np.flatnonzero((arr2 == gmin).any(axis=1))[0]))
+            rows.append(int(np.flatnonzero((arr2 == gmax).any(axis=1))[0]))
         elif s.dtype.is_numeric():
             arr = s.to_numpy()
             j_min = int(np.argmin(arr))
@@ -1411,6 +1423,63 @@ def _is_factor_col(s: pl.Series) -> bool:
     return s.dtype in (pl.Categorical, pl.Enum, pl.Utf8) or (
         hasattr(pl, "String") and s.dtype == pl.String
     )
+
+
+def _mini_mf_vars(expanded) -> list[str]:
+    """Covariate column names the formula references, for building the
+    frame fed to :func:`_mini_mf`.
+
+    Mirrors mgcv's ``fake.names`` — the RHS columns of
+    ``model.frame(gp$fake.formula)`` that ``mini.mf`` iterates over
+    (mgcv.r:392-419): parametric-term variables, then each smooth's
+    term/by variables, then offset variables. The response is excluded
+    (it is added separately, as ONE column). Smooth term variables use
+    their deparsed text (``s(log(x))`` → ``"log(x)"``), matching the
+    synthesised columns basis construction reads; parametric transformed
+    terms fall back to their raw underlying variables. Only these
+    variables — not every column carried on the fit frame — must reach
+    ``_mini_mf`` so that ``mn`` and the representative-row count track
+    mgcv's model frame when ``n > chunk_size``.
+
+    Order is result-irrelevant (``_mini_mf`` splices a *set* of min/max/
+    level rows whose count, not order, drives the retained tail), so the
+    per-term raw names are emitted sorted for determinism.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(name: str) -> None:
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+
+    for t in expanded.terms:
+        names: set[str] = set()
+        for a in t.atoms:
+            _collect_name_idents(a, names)
+        for nm in sorted(names):
+            add(nm)
+    for call in expanded.smooths:
+        for v in _smooth_term_vars(call):
+            add(v)
+        by = _smooth_by_expr(call)
+        if by is not None:
+            # The by= column: its deparse (a plain-name or synthesised
+            # column) AND its raw underlying variables, because
+            # ``_eval_by_col`` resolves ``as.numeric(g)`` / ``g == 1``
+            # back to the raw column ``g`` — which must be present for
+            # basis construction on the trimmed frame.
+            add(by)
+            by_names: set[str] = set()
+            _collect_name_idents(call.kwargs.get("by"), by_names)
+            for nm in sorted(by_names):
+                add(nm)
+    for off in expanded.offsets:
+        names = set()
+        _collect_name_idents(off, names)
+        for nm in sorted(names):
+            add(nm)
+    return out
 
 
 def _smooth_specs_from_expanded(expanded, data: pl.DataFrame) -> list[dict]:
@@ -2831,11 +2900,48 @@ class bam(gam):
                 )
             else:
                 # discrete=FALSE: basis setup on a representative subsample
-                # of the original (possibly matrix-arg) data; sparse.cons=-1
-                # (sweep-drop absorb on row-summed colMeans).
-                mf0 = _mini_mf(self.data, chunk_size)
+                # of the MODEL FRAME (mgcv's mini.mf(mf, chunk.size),
+                # bam.r:2387); sparse.cons=-1 (sweep-drop absorb on
+                # row-summed colMeans). mgcv's ``mf`` is
+                # model.frame(gp$fake.formula): the response FIRST, then
+                # ONLY the covariates the formula references — not raw
+                # ``self.data``, which may carry unused columns and, for
+                # matrix-y families, the scalar response stash. A wrong
+                # column set changes ``mn`` and the number of
+                # representative (min/max/level) rows spliced into the
+                # subsample head — hence the retained tail and the fitted
+                # basis when n > chunk_size. Build mgcv's model frame: the
+                # response as ONE column (a 2-col matrix for censored/gfam,
+                # so it counts as a single numeric entry, not
+                # scalar-plus-stash), then the referenced covariates.
+                mf_cols: dict[str, pl.Series] = {}
+                resp_name = d.response or "_hea_y"
+                if _cbind_kind in ("censor", "gfam"):
+                    second = ("_hea_cnorm_yat" if _cbind_kind == "censor"
+                              else "_hea_gfam_fi")
+                    pair = np.column_stack([
+                        np.asarray(y_full, dtype=float),
+                        d.data[second].to_numpy().astype(float),
+                    ])
+                    mf_cols[resp_name] = pl.Series(
+                        resp_name, pair, dtype=pl.Array(pl.Float64, 2))
+                else:
+                    mf_cols[resp_name] = pl.Series(
+                        resp_name, np.asarray(y_full, dtype=float))
+                for nm in _mini_mf_vars(d.expanded):
+                    if nm in mf_cols or nm not in self.data.columns:
+                        continue
+                    mf_cols[nm] = self.data[nm]
+                mf0 = _mini_mf(pl.DataFrame(mf_cols), chunk_size)
+                # The response rode along only to size mn/k like mgcv;
+                # smooth bases never reference it and a matrix response
+                # has no scalar column form. Drop ONLY the response —
+                # matrix-argument COVARIATES (te(Lag, Xc, ...)) are
+                # genuine smooth variables materialize_smooths needs.
+                basis_cols = [c for c in mf0.columns if c != resp_name]
                 sb_lists = materialize_smooths(
-                    d.expanded, mf0, sparse_cons=-1, knots=self.knots,
+                    d.expanded, mf0.select(basis_cols),
+                    sparse_cons=-1, knots=self.knots,
                 )
             blocks: list[SmoothBlock] = [b for group in sb_lists for b in group]
             if discrete:
