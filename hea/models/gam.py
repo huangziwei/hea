@@ -6866,6 +6866,15 @@ class gam:
     _H_fixed: np.ndarray | None = None
     _min_sp: np.ndarray | None = None
     _H_fixed_fit_cache = False
+    # paraPen (mgcv parametricPenalty) result dict, or None. Class default
+    # lets multi-LP / general-discrete rails (which never accept paraPen)
+    # and shared reporting read it without setting it.
+    _pp: dict | None = None
+    # gam(fit=FALSE)/gam(G=) — the setup/fit split (mgcv.r:2384-2387). A
+    # prefit stops __init__ after setup with _is_prefit True; the folded
+    # working sp is stashed for a later gam(G=<prefit>) fit.
+    _is_prefit: bool = False
+    _prefit_sp: np.ndarray | None = None
     # Rank-deficiency drop (mgcv pls_fit1's column dropping): None ⇔ full
     # rank. ``_keep_cols`` is the original-p boolean mask; ``_block_keep``
     # the per-block local masks (for predict-time bases, which rebuild
@@ -6922,6 +6931,9 @@ class gam:
         drop_intercept: bool | None = None,
         min_sp: np.ndarray | list | None = None,
         H: np.ndarray | None = None,
+        paraPen: dict | None = None,
+        fit: bool = True,
+        G: "gam | None" = None,
     ):
         # ``data`` may be a polars DataFrame OR a mapping of name → 1-D /
         # 2-D ndarray. 2-D entries become matrix columns
@@ -6934,6 +6946,27 @@ class gam:
         # log(in.out$sp), estimate.gam mgcv.r:2005-2010) and the log
         # scale seed (mgcv.r:2028-2032). Both entries are required and
         # sp must have the working length, like mgcv's checks.
+        #
+        # gam(G=<prefit>) — reuse a fit=FALSE setup, skipping the whole
+        # basis/penalty construction and going straight to estimate.gam
+        # (mgcv.r:2267 skips setup when G is supplied; mgcv.r:2384-2387
+        # returns the "gam.prefit" G). hea's prefit is a gam instance whose
+        # __init__ stopped right after setup; adopt its state and run only
+        # the fit. Single-LP dense only, and the prefit's own method/scale
+        # config is reused (rebuild the prefit to change method — hea bakes
+        # the method-dependent seeds into setup, unlike mgcv's method-free
+        # gam.setup).
+        if G is not None:
+            if not getattr(G, "_is_prefit", False):
+                raise ValueError(
+                    "G= must be a prefit from gam(..., fit=False)")
+            self.__dict__.update(G.__dict__)
+            self._is_prefit = False
+            if not fit:
+                self._is_prefit = True
+                return
+            self._estimate_and_assemble(self._prefit_sp, self.method)
+            return
         if isinstance(family, type) and issubclass(family, Family):
             # R: gam(family=quasipoisson) passes the constructor itself;
             # mgcv calls it (`if (is.function(family)) family <- family()`,
@@ -6971,6 +7004,10 @@ class gam:
         if isinstance(formula, (list, tuple)):
             # Multiple linear predictors → general-family fitting via
             # gam.fit5 (estimate.gam's general branch, mgcv.r:1894-1903).
+            if not fit:
+                raise NotImplementedError(
+                    "fit=False is supported for single-formula dense gam "
+                    "only (multi-LP / general-family setup is not split).")
             if family is None or not getattr(family, "is_general", False):
                 raise NotImplementedError(
                     "gam with a formula list (multiple linear "
@@ -7294,6 +7331,29 @@ class gam:
         X = np.concatenate(Xs, axis=1) if len(Xs) > 1 else X_param
         p = X.shape[1]
 
+        # ------------- paraPen: estimated penalties on parametric terms -----
+        # mgcv's parametricPenalty (mgcv.r:767-836), merged at mgcv.r:1180-
+        # 1509. Single-LP only (mgcv.r:930 stops multi-formula models). Each
+        # paraPen penalty becomes a slot on *existing* parametric columns and
+        # is PREPENDED to the smooth penalties (G$S <- c(PP$S, G$S)), with its
+        # own working sp; the reported sp is therefore paraPen-first, matching
+        # mgcv. Unlike min.sp these are ESTIMATED, so they enter Mp (the total
+        # null space shrinks by their rank) and the reparam UrS like a smooth.
+        self._pp = None
+        pp = None
+        pp_slots: list[_PenaltySlot] = []
+        if paraPen is not None:
+            pp = _parametric_penalty(self._expanded.terms,
+                                     d.param_assign, paraPen, sp)
+            if pp is not None:
+                self._pp = pp
+                for Si, offi, nm in zip(pp["S"], pp["off"],
+                                        pp["full_sp_names"]):
+                    ncol = Si.shape[0]
+                    pp_slots.append(_PenaltySlot(
+                        block=_ParaPenBlock(nm), col_start=offi,
+                        col_end=offi + ncol, S=Si, S_scale=1.0))
+
         # ------------- L matrix: working → per-penalty log-sp ---------------
         # mgcv's gam.setup (mgcv.r:1280-1320): ``ρ_full = L·θ`` maps the
         # *working* (estimated) log smoothing parameters θ to the log-sp
@@ -7304,8 +7364,15 @@ class gam:
         # is the identity and every code path below stays byte-identical
         # to the pre-L behavior. (mgcv's lsp0 offset enters just below,
         # when sp= / s(..., sp=) fixes a subset of the parameters.)
+        #
+        # paraPen columns come FIRST: mgcv block-diagonal-stacks PP$L with the
+        # smooth L and prepends PP to G$S/G$sp, so working space is [paraPen
+        # sps | smooth sps]. Seeding n_work with the paraPen count keeps the
+        # smooth 1-hot columns shifted past the PP block.
+        n_work_pp = pp["L"].shape[1] if pp is not None else 0
+        n_pp = len(pp_slots)
         slot_work_col: list[int] = []
-        n_work = 0
+        n_work = n_work_pp
         id_first_cols: dict[str, tuple[int, int]] = {}
         slot_cursor = 0
         # Per-block working-column range + whether this block *defines*
@@ -7335,11 +7402,22 @@ class gam:
             block_work_info.append((wstart, nS, defining))
             slot_work_col.extend(range(wstart, wstart + nS))
             slot_cursor += nS
-        if n_work == len(slots):
+        # Prepend the paraPen slots (paraPen-first ordering, matching G$S).
+        if n_pp:
+            slots = pp_slots + slots
+        self._n_work = n_work
+        pp_is_identity = (pp is None
+                          or (n_work_pp == n_pp
+                              and np.array_equal(pp["L"], np.eye(n_pp))))
+        if pp_is_identity and n_work == len(slots):
             self._L = None                       # identity — no id linkage
         else:
             L = np.zeros((len(slots), n_work))
-            L[np.arange(len(slots)), slot_work_col] = 1.0
+            if n_pp:
+                L[:n_pp, :n_work_pp] = pp["L"]
+            if slot_work_col:
+                L[n_pp + np.arange(len(slot_work_col)),
+                  np.asarray(slot_work_col)] = 1.0
             self._L = L
         self._n_work = n_work
 
@@ -7355,6 +7433,11 @@ class gam:
         # mgcv's "estimate everything" (≡ sp=None).
         if n_work > 0:
             sp_work = np.full(n_work, -1.0)
+            if pp is not None:
+                # paraPen working sps sit first; _parametric_penalty already
+                # merged any explicit P$sp with the gam(sp=) auto-fill (its
+                # sp0 arg), mgcv.r:827-830 + the strip at mgcv.r:1181-1183.
+                sp_work[:n_work_pp] = pp["sp"]
             if sp is not None:
                 sp_arr = np.asarray(sp, dtype=float).flatten()
                 if sp_arr.shape != (n_work,):
@@ -7363,7 +7446,9 @@ class gam:
                         f"smoothing parameter; id-linked penalties share "
                         f"one), got {sp_arr.shape}"
                     )
-                sp_work = sp_arr.copy()
+                # paraPen already consumed sp_arr[:n_work_pp]; the remainder
+                # sets the smooth working sps.
+                sp_work[n_work_pp:] = sp_arr[n_work_pp:]
             for (wstart, nS, defining), bsp in zip(block_work_info,
                                                    block_sps):
                 if bsp is None or not defining or nS == 0:
@@ -7443,6 +7528,19 @@ class gam:
             S_sum = np.sum([np.asarray(s, dtype=float) for s in b.S], axis=0)
             rank_b = _sym_rank(S_sum)
             Mp += k - rank_b
+        # paraPen penalizes formerly-unpenalized parametric columns (disjoint
+        # from the smooth columns): each penalized group shrinks the total
+        # null space by the rank of its summed penalty (mgcv's Mp =
+        # ncol(totalPenaltySpace$Z), mgcv.r:1921-1924). Rank the summed
+        # penalty per column-range, exactly like the smooth blocks above.
+        if pp is not None:
+            pp_groups: dict[tuple[int, int], np.ndarray] = {}
+            for s in pp_slots:
+                key = (s.col_start, s.col_end)
+                pp_groups[key] = (pp_groups[key] + s.S if key in pp_groups
+                                  else s.S.copy())
+            for S_sum in pp_groups.values():
+                Mp -= _sym_rank(S_sum)
         self._Mp = Mp
         self._penalty_rank = p - Mp
         # gam(min.sp=)/gam(H=) — the fixed additive penalty (mgcv.r:1465-
@@ -7604,6 +7702,40 @@ class gam:
         # mgcv, the basis is built from the *pre-drop* penalties (UrS is
         # constructed before pls_fit1 drops anything).
         self._setup_reparam(slots_full, self._p_orig)
+
+        # gam(fit=FALSE) — stop after setup and return the "prefit" (mgcv.r:
+        # 2384-2387: class "gam.prefit", the G object returned unfitted). All
+        # setup state (design, penalties, L, Mp, reparam basis) already lives
+        # on self; the fit is deferred to gam(G=<prefit>).
+        self._prefit_sp = sp
+        if not fit:
+            self._is_prefit = True
+            return
+        self._estimate_and_assemble(sp, method)
+
+    def _estimate_and_assemble(self, sp, method):
+        """mgcv's estimate.gam + gam post-processing (mgcv.r:2395 onward):
+        the smoothing-parameter optimization and every post-fit assembly
+        step, factored out of __init__ so gam(fit=FALSE) can stop before it
+        and gam(G=<prefit>) can run it on a prebuilt setup. Reads all setup
+        state from self; the block below refers to the setup locals by their
+        bare names, so rebind them here from the stored attributes."""
+        X = self._X_full
+        y = self._y_arr
+        n = self.n
+        p = self.p
+        blocks = self._blocks
+        block_col_ranges = self._block_col_ranges
+        slots = self._slots
+        column_names = self.column_names
+        tss = self._tss
+        yty = self._yty
+        has_intercept = self._has_intercept
+        n_work = self._n_work
+        # Initial Fisher weights (setup's ``w0``) — deterministic in the
+        # family's starting μ̂, so recomputing matches the setup value the
+        # magic-path factorization reuse below compares against.
+        w0 = self._init_fisher_w(y, X=X)
 
         # ------------- smoothing-param optimization ------------------------
         n_sp = len(slots)
@@ -9877,7 +10009,9 @@ class gam:
             a, b = slot.col_start, slot.col_end
             s0 = int(map_idx[a])
             s1 = s0 + (b - a)
-            if block_pos[id(slot.block)] in re_idx:
+            # paraPen slots carry a synthetic block absent from self._blocks;
+            # they are never random effects, so route them to the fixed part.
+            if block_pos.get(id(slot.block), -1) in re_idx:
                 S2[s0:s1, s0:s1] += sp[k] * slot.S
             else:
                 S1[s0:s1, s0:s1] += sp[k] * slot.S
@@ -10291,12 +10425,21 @@ class gam:
         log_sd = 0.5 * np.log(np.clip(sd2, 1e-300, None))
         sd = np.exp(log_sd)
 
+        # paraPen sps are NOT variance components (mgcv's gam.vcomp starts the
+        # smooth loop past them, mgcv.r:4245-4249). They are the prepended
+        # leading slots — drop their rows from the reported table, keep the
+        # smooth rows and the trailing scale row.
+        row_keep = np.array(
+            [not isinstance(s.block, _ParaPenBlock) for s in self._slots]
+            + [True], dtype=bool)
+
         # GCV / point-estimate-only path: no Hessian-derived CIs.
         H = self._H_aug
         if H is None or self.method not in ("REML", "ML") or not np.isfinite(self.sigma_squared):
-            nan_col = [float("nan")] * len(sd)
+            nan_col = [float("nan")] * int(row_keep.sum())
             return pl.DataFrame({
-                "name": names, "std_dev": sd.tolist(),
+                "name": [nm for nm, k in zip(names, row_keep) if k],
+                "std_dev": sd[row_keep].tolist(),
                 "lower": nan_col, "upper": nan_col,
             })
 
@@ -10335,15 +10478,42 @@ class gam:
         lower = np.exp(log_sd - z * se)
         upper = np.exp(log_sd + z * se)
         return pl.DataFrame({
-            "name": names,
-            "std_dev": sd.tolist(),
-            "lower": lower.tolist(),
-            "upper": upper.tolist(),
+            "name": [nm for nm, k in zip(names, row_keep) if k],
+            "std_dev": sd[row_keep].tolist(),
+            "lower": lower[row_keep].tolist(),
+            "upper": upper[row_keep].tolist(),
         })
 
     # -----------------------------------------------------------------------
     # Public post-fit API
     # -----------------------------------------------------------------------
+
+    def pen_edf(self) -> pl.DataFrame | None:
+        """Port of mgcv's ``pen.edf`` (mgcv.r:4181-4208): the effective
+        degrees of freedom associated with each *smooth* penalty — the
+        summed edf of the coefficients that penalty penalizes. Brilliant for
+        ``t2`` smooths; hard to interpret for overlapping penalties. paraPen
+        penalties are intentionally excluded (mgcv iterates ``x$smooth``
+        only). Returns a ``(name, edf)`` frame, or ``None`` if the model has
+        no smooths (mgcv returns ``NULL``)."""
+        if not self._blocks:
+            return None
+        names: list[str] = []
+        vals: list[float] = []
+        for b, (a, bcol) in zip(self._blocks, self._block_col_ranges):
+            if not b.S:
+                continue
+            multi = len(b.S) > 1
+            edf_blk = self.edf[a:bcol]
+            for j, S_j in enumerate(b.S):
+                Sarr = np.asarray(S_j, dtype=float)
+                # rowSums(S != 0) != 0 — coefficients this penalty touches.
+                ind = (Sarr != 0.0).any(axis=1)
+                vals.append(float(edf_blk[ind].sum()))
+                names.append(f"{b.label}{j + 1}" if multi else b.label)
+        if not names:
+            return None
+        return pl.DataFrame({"name": names, "edf": vals})
 
     def _deviance_residuals(self, y, mu, wt) -> np.ndarray:
         """``sign(y - μ)·√(per-obs deviance)`` — mgcv's default residual.
@@ -16500,6 +16670,140 @@ def _initial_sp_general(X, y, family, slots: list["_PenaltySlot"], lpi,
         lsp = np.linalg.lstsq(np.asarray(L, dtype=float), lsp,
                               rcond=None)[0]
     return lsp
+
+
+class _ParaPenBlock:
+    """Synthetic 'block' for a paraPen penalty slot — carries only the
+    reporting label. A paraPen penalty sits on *existing* parametric
+    columns (it has no basis of its own), so unlike a ``SmoothBlock`` it
+    contributes no design columns and never appears in ``self._blocks`` —
+    only in ``self._slots``. The vcomp / summary sp-naming path reads
+    ``slot.block.label``; the random-effect split routes by block identity
+    and treats an unknown (paraPen) block as fixed (never a random effect).
+    """
+    __slots__ = ("label", "cls", "S_scale")
+
+    def __init__(self, label: str):
+        self.label = label
+        self.cls = "paraPen"
+        self.S_scale = None
+
+
+def _parametric_penalty(terms, assign, paraPen, sp0):
+    """Port of mgcv's ``parametricPenalty`` (mgcv.r:767-836).
+
+    Processes user-supplied penalties on the parametric part of the model.
+    ``paraPen`` is a dict keyed by parametric-term label; each value is a
+    penalty spec — a dict with key ``"S"`` (a penalty matrix, or a list of
+    them, on that term's coefficient columns) plus optional ``"L"`` (the
+    np→working-sp map, default ``I_np``), ``"rank"`` (one per S, else
+    estimated by eigen), and ``"sp"`` (one per working sp; negative ⇒
+    estimate). A bare matrix or list of matrices is accepted as shorthand
+    for ``{"S": ...}``.
+
+    ``terms`` is the parametric term list (``expanded.terms``); ``assign``
+    is R's ``model.matrix`` assign vector (0 = intercept, i → ``terms[i-1]``);
+    ``sp0`` is the gam-level ``sp=`` vector (or None) whose entries fill any
+    auto (negative) paraPen sp (mgcv.r:827-830).
+
+    Returns ``dict(S, off, sp, L, rank, full_sp_names)`` with penalties in
+    term order, or ``None`` if no parametric term carried a penalty. ``off``
+    holds the 0-based index of each penalty's first coefficient; ``L`` is the
+    block-diagonal stack of the per-term ``Li`` maps.
+    """
+    assign = np.asarray(assign, dtype=int)
+    eps = np.finfo(float).eps
+    S: list[np.ndarray] = []
+    off: list[int] = []
+    rank: list[int] = []
+    sp: list[float] = []
+    full_sp_names: list[str] = []
+    L_blocks: list[np.ndarray] = []
+    matched: set[str] = set()
+    # tind <- unique(assign): unique term indices in first-occurrence order.
+    for j in dict.fromkeys(assign.tolist()):
+        if j <= 0:
+            continue
+        term_label = terms[j - 1].label
+        P = paraPen.get(term_label)
+        if P is None:
+            continue
+        matched.add(term_label)
+        if isinstance(P, dict):
+            Smats = P.get("S")
+            Li = P.get("L")
+            spi = P.get("sp")
+            ranki = P.get("rank")
+        else:                              # bare matrix / list-of-matrices
+            Smats, Li, spi, ranki = P, None, None, None
+        arr = np.asarray(Smats, dtype=float)
+        Slist = [arr] if arr.ndim == 2 else [np.asarray(s, dtype=float)
+                                             for s in Smats]
+        ind = np.flatnonzero(assign == j)  # 0-based coefs for this term
+        np_ = len(Slist)
+        if ranki is not None and len(np.atleast_1d(ranki)) != np_:
+            raise ValueError("`rank' has wrong length in `paraPen'")
+        for i in range(np_):               # unpack penalties, offsets, ranks
+            Si = Slist[i]
+            S.append(Si)
+            off.append(int(ind.min()))     # index of first coef penalized
+            if (Si.shape[0] != Si.shape[1]
+                    or Si.shape[0] != len(ind)):
+                raise ValueError(" a parametric penalty has wrong dimension")
+            if ranki is None:
+                ev = np.linalg.eigvalsh(0.5 * (Si + Si.T))
+                rank.append(int(np.sum(ev > ev.max() * eps * 10)))
+            else:
+                rank.append(int(np.atleast_1d(ranki)[i]))
+        if np_:                            # only if this term has penalties
+            if Li is None:
+                Li = np.eye(np_)
+            Li = np.asarray(Li, dtype=float)
+            if Li.shape[0] != np_:
+                raise ValueError("L has wrong dimension in `paraPen'")
+            L_blocks.append(Li)
+            ncol, nrow = Li.shape[1], Li.shape[0]
+            if spi is None:
+                sp.extend([-1.0] * ncol)   # auto-initialize
+            else:
+                spi = np.atleast_1d(np.asarray(spi, dtype=float))
+                if spi.shape[0] != ncol:
+                    raise ValueError("`sp' dimension wrong in `paraPen'")
+                sp.extend(spi.tolist())
+            # per-penalty (full.sp) names — nrow(Li) of them.
+            if nrow > 1:
+                full_sp_names.extend(f"{term_label}{i + 1}"
+                                     for i in range(nrow))
+            else:
+                full_sp_names.append(term_label)
+    # hea nicety (mgcv silently ignores stray keys): flag a paraPen entry
+    # whose label matches no parametric term — almost always a typo. Checked
+    # before the empty-return so an all-stray paraPen is caught, not dropped.
+    stray = set(paraPen) - matched
+    if stray:
+        raise ValueError(
+            f"paraPen names not matched to parametric terms: {sorted(stray)}")
+    if len(S) == 0:
+        return None
+    sp_arr = np.asarray(sp, dtype=float)
+    if sp0 is not None:                    # fill auto sp's from gam(sp=)
+        sp0 = np.asarray(sp0, dtype=float).flatten()
+        if sp0.shape[0] < sp_arr.shape[0]:
+            raise ValueError("`sp' too short")
+        sp0 = sp0[:sp_arr.shape[0]]
+        neg = sp_arr < 0
+        sp_arr[neg] = sp0[neg]
+    # L <- block-diagonal stack of the per-term Li maps.
+    nr = sum(b.shape[0] for b in L_blocks)
+    nc = sum(b.shape[1] for b in L_blocks)
+    L = np.zeros((nr, nc))
+    r0 = c0 = 0
+    for b in L_blocks:
+        L[r0:r0 + b.shape[0], c0:c0 + b.shape[1]] = b
+        r0 += b.shape[0]
+        c0 += b.shape[1]
+    return dict(S=S, off=off, sp=sp_arr, L=L, rank=rank,
+                full_sp_names=full_sp_names)
 
 
 class _PenaltySlot:

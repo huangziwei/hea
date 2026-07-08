@@ -7842,6 +7842,149 @@ def test_gam_min_sp_matches_mgcv():
             H=np.eye(5))
 
 
+def test_gam_parapen_matches_mgcv():
+    """gam(paraPen=) — estimated penalties on parametric terms (mgcv's
+    parametricPenalty, mgcv.r:767-836, merged mgcv.r:1180-1509). Each
+    penalty is PREPENDED to the smooth penalties with its own working sp
+    (reported sp is paraPen-first, matching mgcv), is ESTIMATED (so it
+    enters Mp — the null space shrinks by its rank — and the reparam UrS
+    like a smooth), and folds through every rail. Pins: mgcv 1.9-4,
+    set.seed(11) frame.
+    """
+    import polars as pl
+
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(11)
+    n = 200
+    x0 = g.uniform(0, 1, n)
+    x1 = g.uniform(0, 1, n)
+    x2 = g.uniform(0, 1, n)
+    y = (2 * np.sin(np.pi * x0) + 0.5 * x1 + 0.3 * x2
+         - 0.4 * x1 * x2 + g.normal(0, 1, n) * 0.5)
+    d = {"y": y, "x0": x0, "x1": x1, "x2": x2}
+
+    # ---- CASE A: a single 1×1 ridge on the x1 slope --------------------
+    mA = gam("y ~ s(x0) + x1 + x2", d, method="REML",
+             paraPen={"x1": {"S": np.array([[1.0]])}})
+    # paraPen-first sp: [x1, s(x0)]. x1 leaves the null space (rank 1), so
+    # Mp drops to intercept + x2 + s(x0)-linear = 3.
+    assert mA._Mp == 3
+    assert len(mA._slots) == 2
+    assert [s.block.label for s in mA._slots] == ["x1", "s(x0)"]
+    np.testing.assert_allclose(np.asarray(mA.sp),
+                               [1.686864106, 0.06781100753], rtol=1e-4)
+    np.testing.assert_allclose(mA.edf_total, 7.873517, rtol=1e-5)
+    np.testing.assert_allclose(mA.scale, 0.274444, rtol=1e-5)
+    np.testing.assert_allclose(mA.REML_criterion / 2.0, 165.024291013,
+                               rtol=1e-6)
+    np.testing.assert_allclose(np.diag(np.asarray(mA.Vp))[:3],
+                               [0.009836403186, 0.01655395247,
+                                0.01721800529], rtol=1e-4)
+    # parametric coefs are basis-sign-invariant (unlike the spline coefs).
+    np.testing.assert_allclose(np.asarray(mA.coefficients)[:3],
+                               [1.3446392, 0.38228369, 0.24055995],
+                               rtol=1e-4)
+    # pen.edf is smooths-only (mgcv iterates x$smooth): just s(x0).
+    pe = mA.pen_edf()
+    assert list(pe["name"]) == ["s(x0)"]
+    np.testing.assert_allclose(pe["edf"][0], 4.97526516, rtol=1e-4)
+
+    # ---- multi-column (2×2) penalty via a deterministic factor ---------
+    fac = np.array([str(1 + (i % 3)) for i in range(n)])
+    df = pl.DataFrame({"y": y, "x0": x0, "fac": fac})
+    mF = gam("y ~ s(x0) + fac", df, method="REML",
+             paraPen={"fac": {"S": np.eye(2)}})
+    assert mF._Mp == 2                     # both fac dummies penalized
+    np.testing.assert_allclose(np.asarray(mF.sp),
+                               [534210.5834, 0.07204428643], rtol=1e-3)
+    np.testing.assert_allclose(mF.edf_total, 5.924066791, rtol=1e-5)
+    np.testing.assert_allclose(mF.scale, 0.2906750491, rtol=1e-5)
+    np.testing.assert_allclose(mF.REML_criterion / 2.0, 168.837993008,
+                               rtol=1e-6)
+
+    # ---- CASE C: a FIXED paraPen sp folds out of the estimated vector --
+    # paraPen sp=5 is folded into lsp0 (= log 5) and excluded from the
+    # reported sp; full.sp still carries it (mgcv.r:1515-1531).
+    mC = gam("y ~ s(x0) + x1 + x2", d, method="REML",
+             paraPen={"x1": {"S": np.array([[1.0]]), "sp": 5.0}})
+    assert mC._n_work == 1                          # only s(x0) is estimated
+    np.testing.assert_allclose(np.asarray(mC._lsp0)[0], np.log(5.0),
+                               rtol=0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(mC.sp), [0.06917407842], rtol=1e-4)
+    np.testing.assert_allclose(np.asarray(mC.full_sp),
+                               [5.0, 0.06917407842], rtol=1e-4)
+    np.testing.assert_allclose(mC.edf_total, 7.703656498, rtol=1e-5)
+
+    # ---- validation (mgcv's parametricPenalty stops) ------------------
+    with pytest.raises(ValueError, match="wrong dimension"):
+        gam("y ~ s(x0) + x1", d, method="REML",
+            paraPen={"x1": {"S": np.eye(2)}})       # 2×2 on a 1-col term
+    with pytest.raises(ValueError, match="rank' has wrong length"):
+        gam("y ~ s(x0) + x1", d, method="REML",
+            paraPen={"x1": {"S": np.array([[1.0]]), "rank": [1, 2]}})
+    with pytest.raises(ValueError, match="sp' dimension wrong"):
+        gam("y ~ s(x0) + x1", d, method="REML",
+            paraPen={"x1": {"S": np.array([[1.0]]), "sp": [1.0, 2.0]}})
+    with pytest.raises(ValueError, match="not matched to parametric"):
+        gam("y ~ s(x0) + x1", d, method="REML",
+            paraPen={"zzz": {"S": np.array([[1.0]])}})
+
+
+def test_gam_fit_false_and_G_reuse():
+    """gam(fit=FALSE) returns an unfitted 'prefit' carrying the full setup
+    (mgcv.r:2384-2387, class gam.prefit); gam(G=prefit) skips the whole
+    basis/penalty construction and runs only estimate.gam on it
+    (mgcv.r:2267). Since setup is fit-independent, the G= refit must be
+    bit-identical to the direct fit. Single-LP dense only.
+    """
+    from hea.family import gaulss
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(7)
+    n = 120
+    x = g.uniform(0, 1, n)
+    z = g.uniform(0, 1, n)
+    y = np.sin(2 * np.pi * x) + 0.5 * z ** 2 + g.normal(0, 0.3, n)
+    d = {"x": x, "z": z, "y": y}
+
+    m = gam("y ~ s(x,k=10) + s(z,k=10)", d, method="REML")
+    # fit=FALSE → a prefit exposing the setup, with no fit results.
+    G = gam("y ~ s(x,k=10) + s(z,k=10)", d, method="REML", fit=False)
+    assert G._is_prefit
+    assert G._Mp == m._Mp and len(G._slots) == len(m._slots)
+    assert G._X_full.shape == m._X_full.shape
+    # G= → estimate on the prebuilt setup; bit-identical to the direct fit.
+    m2 = gam(None, None, G=G)
+    assert not m2._is_prefit
+    np.testing.assert_allclose(m2.sp, m.sp, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(m2.coefficients, m.coefficients,
+                               rtol=0, atol=1e-12)
+    np.testing.assert_allclose(m2.Vp, m.Vp, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(m2.edf_total, m.edf_total, rtol=0, atol=1e-12)
+
+    # composes with paraPen and threads the GCV.Cp magic path too.
+    a1 = gam("y ~ s(x,k=10) + z", d, method="REML",
+             paraPen={"z": {"S": np.array([[1.0]])}})
+    b1 = gam(None, None, G=gam("y ~ s(x,k=10) + z", d, method="REML",
+                               paraPen={"z": {"S": np.array([[1.0]])}},
+                               fit=False))
+    np.testing.assert_allclose(b1.coefficients, a1.coefficients,
+                               rtol=0, atol=1e-12)
+    np.testing.assert_allclose(b1.sp, a1.sp, rtol=0, atol=1e-12)
+    a2 = gam("y ~ s(x,k=10) + s(z,k=10)", d, method="GCV.Cp")
+    b2 = gam(None, None, G=gam("y ~ s(x,k=10) + s(z,k=10)", d,
+                               method="GCV.Cp", fit=False))
+    np.testing.assert_allclose(b2.coefficients, a2.coefficients,
+                               rtol=0, atol=1e-12)
+
+    # guards: multi-LP fit=FALSE is unsupported, and G= needs a prefit.
+    with pytest.raises(NotImplementedError, match="single-formula dense"):
+        gam(["y ~ s(x)", "~ s(z)"], d, family=gaulss(), fit=False)
+    with pytest.raises(ValueError, match="prefit"):
+        gam(None, None, G=m)             # m is fitted, not a prefit
+
+
 def test_gam_in_out_and_drop_intercept_match_mgcv():
     """gam(in.out=) — the estimate.gam warm start (mgcv.r:2005-2010,
     2028-2032): lsp seeds at log(in.out$sp) (WORKING length, no

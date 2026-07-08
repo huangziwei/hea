@@ -103,6 +103,8 @@ from .gam import (
     _ldet_s,
     _magic_optimize,
     _na_pass_expand,
+    _ParaPenBlock,
+    _parametric_penalty,
     _preml_hessian,
     _SlBlock,
     _row_frame,
@@ -2456,6 +2458,7 @@ class bam(gam):
         coef: np.ndarray | list | None = None,
         samfrac: float = 1.0,
         min_sp: np.ndarray | list | None = None,
+        paraPen: dict | None = None,
     ):
         # ``data`` may be a polars DataFrame OR a mapping of name → 1-D /
         # 2-D ndarray. 2-D entries become matrix columns for mgcv's
@@ -2494,6 +2497,12 @@ class bam(gam):
                 "and ignored.",
                 stacklevel=2,
             )
+        # bam(paraPen=): estimated penalties on parametric terms (mgcv's
+        # parametricPenalty, passed to gam.setup at bam.r:2403). Single-LP
+        # only — mgcv.r:930 stops multi-formula models.
+        self._paraPen = paraPen
+        if paraPen is not None and isinstance(formula, (list, tuple)):
+            raise ValueError("paraPen not supported for multi-formula models")
         if isinstance(formula, (list, tuple)):
             self._init_general_discrete(
                 [str(f) for f in formula], data, method=method, sp=sp,
@@ -2894,6 +2903,28 @@ class bam(gam):
             col_cursor = bcol
         p = col_cursor
 
+        # ------------- paraPen: estimated penalties on parametric terms -----
+        # Direct port of gam.__init__: parametricPenalty (mgcv.r:767-836)
+        # merged at mgcv.r:1180-1509, passed to gam.setup by bam (bam.r:2403).
+        # Penalties are PREPENDED to the smooth slots (paraPen-first), enter
+        # Mp (null space shrinks by their rank), and — since hea's bam is the
+        # fast-REML rail throughout — thread through _sl_setup as their own
+        # front block on the parametric columns.
+        self._pp = None
+        pp = None
+        pp_slots: list[_PenaltySlot] = []
+        if self._paraPen is not None:
+            pp = _parametric_penalty(self._expanded.terms,
+                                     d.param_assign, self._paraPen, sp)
+            if pp is not None:
+                self._pp = pp
+                for Si, offi, nm in zip(pp["S"], pp["off"],
+                                        pp["full_sp_names"]):
+                    ncol = Si.shape[0]
+                    pp_slots.append(_PenaltySlot(
+                        block=_ParaPenBlock(nm), col_start=offi,
+                        col_end=offi + ncol, S=Si, S_scale=1.0))
+
         # ------------- L matrix: working → per-penalty log-sp ---------------
         # mgcv's gam.setup (mgcv.r:1280-1320): ``ρ_full = L·θ`` maps the
         # *working* (estimated) log smoothing parameters θ to the log-sp
@@ -2904,9 +2935,13 @@ class bam(gam):
         # identity and every code path below stays byte-identical to the
         # pre-L behaviour. Direct port of gam.__init__ (gam.py:1242-1343);
         # the inherited ``_work_dim``/``_rho_full``/``_T_working`` then drive
-        # the optimizers/post-fit in working space exactly as for gam.
+        # the optimizers/post-fit in working space exactly as for gam. paraPen
+        # working sps come FIRST (matching G$S = c(PP$S, G$S)); seeding n_work
+        # with the paraPen count shifts the smooth 1-hot columns past them.
+        n_work_pp = pp["L"].shape[1] if pp is not None else 0
+        n_pp = len(pp_slots)
         slot_work_col: list[int] = []
-        n_work = 0
+        n_work = n_work_pp
         id_first_cols: dict[str, tuple[int, int]] = {}
         # Per-block working-column range + whether this block *defines* its
         # id group (mgcv's idx[[id]]$sp.done: only the defining term's sp= is
@@ -2934,11 +2969,21 @@ class bam(gam):
                     )
             block_work_info.append((wstart, nS, defining))
             slot_work_col.extend(range(wstart, wstart + nS))
-        if n_work == len(slots):
+        # Prepend the paraPen slots (paraPen-first ordering, matching G$S).
+        if n_pp:
+            slots = pp_slots + slots
+        pp_is_identity = (pp is None
+                          or (n_work_pp == n_pp
+                              and np.array_equal(pp["L"], np.eye(n_pp))))
+        if pp_is_identity and n_work == len(slots):
             self._L = None                       # identity — no id linkage
         else:
             L = np.zeros((len(slots), n_work))
-            L[np.arange(len(slots)), slot_work_col] = 1.0
+            if n_pp:
+                L[:n_pp, :n_work_pp] = pp["L"]
+            if slot_work_col:
+                L[n_pp + np.arange(len(slot_work_col)),
+                  np.asarray(slot_work_col)] = 1.0
             self._L = L
         self._n_work = n_work
 
@@ -2951,6 +2996,11 @@ class bam(gam):
         # free]. Mirrors gam.__init__ (gam.py:1281-1343).
         if n_work > 0:
             sp_work = np.full(n_work, -1.0)
+            if pp is not None:
+                # paraPen working sps sit first; _parametric_penalty already
+                # merged any explicit P$sp with the bam(sp=) auto-fill (sp0),
+                # mgcv.r:827-830 + the strip at mgcv.r:1181-1183.
+                sp_work[:n_work_pp] = pp["sp"]
             if sp is not None:
                 sp_arr = np.asarray(sp, dtype=float).flatten()
                 if sp_arr.shape != (n_work,):
@@ -2959,7 +3009,9 @@ class bam(gam):
                         f"smoothing parameter; id-linked penalties share "
                         f"one), got {sp_arr.shape}"
                     )
-                sp_work = sp_arr.copy()
+                # paraPen already consumed sp_arr[:n_work_pp]; the remainder
+                # sets the smooth working sps.
+                sp_work[n_work_pp:] = sp_arr[n_work_pp:]
             for (wstart, nS, defining), bsp in zip(block_work_info, block_sps):
                 if bsp is None or not defining or nS == 0:
                     continue
@@ -3098,6 +3150,18 @@ class bam(gam):
             S_sum = np.sum([np.asarray(s, dtype=float) for s in b.S], axis=0)
             rank = _sym_rank(S_sum)
             Mp += k - rank
+        # paraPen shrinks the null space by the rank of each penalized
+        # column-group's summed penalty (mgcv Mp = ncol(totalPenaltySpace$Z),
+        # mgcv.r:1921-1924); the smooth loop above ranks summed penalties the
+        # same way.
+        if pp is not None:
+            pp_groups: dict[tuple[int, int], np.ndarray] = {}
+            for s in pp_slots:
+                key = (s.col_start, s.col_end)
+                pp_groups[key] = (pp_groups[key] + s.S if key in pp_groups
+                                  else s.S.copy())
+            for S_sum in pp_groups.values():
+                Mp -= _sym_rank(S_sum)
         self._Mp = Mp
         self._penalty_rank = p - Mp
 

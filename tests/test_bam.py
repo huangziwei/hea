@@ -1506,6 +1506,43 @@ def test_bam_min_sp_warns_ignored():
                                rtol=1e-10)
 
 
+def test_bam_parapen_matches_mgcv():
+    """bam(paraPen=) — estimated penalties on parametric terms, passed to
+    gam.setup at bam.r:2403 and fit through the fast-REML rail. The penalty
+    is PREPENDED to the smooth penalties (paraPen-first sp), enters Mp, and
+    threads _sl_setup as its own front block on the parametric columns.
+    Pins: mgcv 1.9-4 bam(method="fREML"), set.seed(11) frame, n=400.
+    """
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(11)
+    n = 400
+    x0 = g.uniform(0, 1, n)
+    x1 = g.uniform(0, 1, n)
+    x2 = g.uniform(0, 1, n)
+    y = (2 * np.sin(np.pi * x0) + 0.5 * x1 + 0.3 * x2
+         - 0.4 * x1 * x2 + g.normal(0, 1, n) * 0.5)
+    d = {"y": y, "x0": x0, "x1": x1, "x2": x2}
+
+    m = hea.models.bam("y ~ s(x0) + x1 + x2", d, method="fREML",
+                       paraPen={"x1": {"S": np.array([[1.0]])}})
+    assert m._Mp == 3                                # x1 leaves the null space
+    assert [s.block.label for s in m._slots] == ["x1", "s(x0)"]
+    np.testing.assert_allclose(np.asarray(m.sp),
+                               [3.784527815, 0.08479036464], rtol=1e-4)
+    np.testing.assert_allclose(m.edf_total, 8.565536333, rtol=1e-5)
+    np.testing.assert_allclose(m.REML_criterion / 2.0, 301.940072244,
+                               rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(m.coefficients)[:3],
+                               [1.4431799, 0.24269495, 0.12788868],
+                               rtol=1e-4)
+    # single-LP only (mgcv.r:930 stops multi-formula).
+    from hea.family import gaulss
+    with pytest.raises(ValueError, match="multi-formula"):
+        hea.models.bam(["y ~ s(x0) + x1", "~ 1"], d, family=gaulss(),
+                       paraPen={"x1": {"S": np.array([[1.0]])}})
+
+
 def test_bam_in_out_coef_samfrac():
     """bam's warm-start args. in.out: λ replaces ``initial.sp`` in FULL
     per-penalty space (bam.r:687/1229/1687 — re-read every PIRLS iter
