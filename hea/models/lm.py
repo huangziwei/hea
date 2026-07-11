@@ -162,7 +162,7 @@ def _drop_aliased_cols(X_df: pl.DataFrame, tol: float = 1e-7, *,
     """Identify linearly-dependent columns in a design matrix.
 
     With the Rust kernel present, use R's **exact** ``dqrdc2`` pivot/rank
-    (``hea._rs`` ``dqrls``, ``ref/r-stats/src/dqrdc2.f``): the columns deferred
+    (``hea._rs`` ``dqrls``, ``dqrdc2.f``): the columns deferred
     to pivot positions ``rank+1..p`` are precisely the ones R's ``lm`` aliases,
     so hea drops bit-identically what R drops and the rank decision is
     *deterministic* (immune to BLAS-bistable rank flakes). ``tol=1e-7`` is R's

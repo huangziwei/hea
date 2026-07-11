@@ -1125,7 +1125,7 @@ def _anova_lm(*models, labels: list[str]):
 def _anova_lm_single(m: lm):
     """Sequential (Type I) ANOVA — R's ``anova.lm(m)`` for a single fit.
 
-    Mechanical port of ``stats:::anova.lm`` (``ref/r-stats/lm.R``): the
+    Mechanical port of ``stats:::anova.lm`` (``stats/R/lm.R``): the
     per-term sum of squares is ``split(effects[1:rank]^2, assign[pivot][1:rank])``
     — read off the fit's QR in **one** decomposition, no refits. R drops
     aliased columns to the right of the pivot; hea drops them from the design

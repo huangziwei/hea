@@ -17,6 +17,7 @@ import numpy as np
 import polars as pl
 from scipy import stats as _sps
 from . import distributions as _dist
+from . import nmath as _nm
 
 from ._shared import _as_array, _fmt, _fmt_pval
 from ..models.lm import lm
@@ -285,7 +286,7 @@ def wilcox_test(
     PARITY DEBT (blocked): R's *default* uses **exact** p-values for small
     n via the signed-rank / rank-sum distributions (``nmath/signrank.c`` +
     ``nmath/wilcox.c``, not yet ported). Until those land this stays on
-    scipy's normal approximation. See r-stats-parity-debt.md §2.
+    scipy's normal approximation.
     """
     alt = {"two.sided": "two-sided", "greater": "greater", "less": "less"}[alternative]
     x = _as_array(x)
@@ -353,7 +354,7 @@ def cor_test(
     p-values (AS 89 ``C_pRho`` / ``C_pKendall``); those C kernels
     (``src/prho.c`` / ``src/kendall.c``) are not yet ported, so the
     spearman/kendall p-values here equal R's ``exact = FALSE`` path (which R
-    also uses for large n or with ties). See r-stats-parity-debt.md.
+    also uses for large n or with ties).
     """
     if alternative not in ("two.sided", "less", "greater"):
         raise ValueError(f"cor_test(): unknown alternative {alternative!r}")
@@ -610,7 +611,7 @@ def fisher_test(
     PARITY DEBT (blocked): faithful R parity needs the exact hypergeometric
     (``nmath/dhyper.c``) plus FEXACT for r×c tables and the non-central
     hypergeometric CI (``src/fexact.c``), none yet ported — so this defers
-    to ``scipy.stats.fisher_exact`` (2×2 only). See r-stats-parity-debt.md §2.
+    to ``scipy.stats.fisher_exact`` (2×2 only).
     """
     alt = {"two.sided": "two-sided", "greater": "greater", "less": "less"}[alternative]
     if y is not None:
@@ -889,18 +890,168 @@ def bartlett_test(x, g) -> HTest:
     )
 
 
+def _swilk_poly(cc, nord: int, x: float) -> float:
+    """AS 181.2 — algebraic polynomial of order ``nord-1`` (``src/swilk.c`` ``poly``).
+    Zero-order coefficient is ``cc[0]``; Horner from the top down."""
+    ret = cc[0]
+    if nord > 1:
+        p = x * cc[nord - 1]
+        for j in range(nord - 2, 0, -1):
+            p = (p + cc[j]) * x
+        ret += p
+    return ret
+
+
+def _swilk(x: np.ndarray):
+    """Royston (1995) AS R94 — Shapiro-Wilk W and its p-value.
+
+    Line-by-line port of ``swilk()`` in R's ``src/library/stats/src/swilk.c``.
+    ``x`` must be **sorted ascending** (the R wrapper sorts). Returns
+    ``(W, pw, ifault)``;
+    ``ifault == 7`` is R's benign "sort order" flag and is ignored by the caller.
+    Uses the bit-exact ported ``qnorm5`` / ``pnorm5`` (nmath) for the normal
+    scores and the tail probability, so W and p are 0-ulp to R's ``.Call(C_SWilk)``.
+    """
+    n = int(x.size)
+    nn2 = n // 2
+    a = [0.0] * (nn2 + 1)  # 1-based, as in the Fortran/C original
+
+    small = 1e-19
+    g = (-2.273, 0.459)
+    c1 = (0.0, 0.221157, -0.147981, -2.07119, 4.434685, -2.706056)
+    c2 = (0.0, 0.042981, -0.293762, -1.752461, 5.682633, -3.582633)
+    c3 = (0.544, -0.39978, 0.025054, -6.714e-4)
+    c4 = (1.3822, -0.77857, 0.062767, -0.0020322)
+    c5 = (-1.5861, -0.31082, -0.083751, 0.0038915)
+    c6 = (-0.4803, -0.082676, 0.0030302)
+
+    pw = 1.0
+    if n < 3:
+        return 0.0, pw, 1
+
+    an = float(n)
+
+    if n == 3:
+        a[1] = 0.70710678  # = sqrt(1/2) (the literal R uses)
+    else:
+        an25 = an + 0.25
+        summ2 = 0.0
+        for i in range(1, nn2 + 1):
+            a[i] = _nm.qnorm5((i - 0.375) / an25, 0.0, 1.0, True, False)
+            summ2 += a[i] * a[i]
+        summ2 *= 2.0
+        ssumm2 = math.sqrt(summ2)
+        rsn = 1.0 / math.sqrt(an)
+        a1 = _swilk_poly(c1, 6, rsn) - a[1] / ssumm2
+
+        # Normalize a[]
+        if n > 5:
+            i1 = 3
+            a2 = -a[2] / ssumm2 + _swilk_poly(c2, 6, rsn)
+            fac = math.sqrt((summ2 - 2.0 * (a[1] * a[1]) - 2.0 * (a[2] * a[2]))
+                            / (1.0 - 2.0 * (a1 * a1) - 2.0 * (a2 * a2)))
+            a[2] = a2
+        else:
+            i1 = 2
+            fac = math.sqrt((summ2 - 2.0 * (a[1] * a[1]))
+                            / (1.0 - 2.0 * (a1 * a1)))
+        a[1] = a1
+        for i in range(i1, nn2 + 1):
+            a[i] /= -fac
+
+    # Check for zero range
+    rng = x[n - 1] - x[0]
+    if rng < small:
+        return 0.0, pw, 6
+
+    # Check for correct sort order on range - scaled X
+    ifault = 0
+    xx = x[0] / rng
+    sx = xx
+    sa = -a[1]
+    i = 1
+    j = n - 1
+    while i < n:
+        xi = x[i] / rng
+        if xx - xi > small:
+            ifault = 7
+        sx += xi
+        i += 1
+        if i != j:
+            sa += (1.0 if i > j else -1.0) * a[min(i, j)]
+        xx = xi
+        j -= 1
+    if n > 5000:
+        ifault = 2
+
+    # W statistic as squared correlation between data and coefficients
+    sa /= n
+    sx /= n
+    ssa = ssx = sax = 0.0
+    for i in range(n):
+        j = n - 1 - i
+        if i != j:
+            asa = (1.0 if i > j else -1.0) * a[1 + min(i, j)] - sa
+        else:
+            asa = -sa
+        xsx = x[i] / rng - sx
+        ssa += asa * asa
+        ssx += xsx * xsx
+        sax += asa * xsx
+
+    # W1 = 1-W, computed this way to avoid rounding error for W very near 1
+    ssassx = math.sqrt(ssa * ssx)
+    w1 = (ssassx - sax) * (ssassx + sax) / (ssa * ssx)
+    w = 1.0 - w1
+
+    # Significance level for W
+    if n == 3:  # exact P value
+        pi6 = 1.90985931710274  # = 6/pi
+        stqr = 1.04719755119660  # = asin(sqrt(3/4))
+        pw = pi6 * (math.asin(math.sqrt(w)) - stqr)
+        if pw < 0.0:
+            pw = 0.0
+        return w, pw, ifault
+    y = math.log(w1)
+    xx = math.log(an)
+    if n <= 11:
+        gamma = _swilk_poly(g, 2, an)
+        if y >= gamma:
+            return w, 1e-99, ifault
+        y = -math.log(gamma - y)
+        m = _swilk_poly(c3, 4, an)
+        s = math.exp(_swilk_poly(c4, 4, an))
+    else:  # n >= 12
+        m = _swilk_poly(c5, 4, xx)
+        s = math.exp(_swilk_poly(c6, 3, xx))
+
+    pw = _nm.pnorm5(y, m, s, False, False)  # upper tail
+    return w, pw, ifault
+
+
 def shapiro_test(x) -> HTest:
     """R's ``shapiro.test`` — Shapiro-Wilk normality test.
 
-    PARITY DEBT (blocked): defers to ``scipy.stats.shapiro``. R's Royston
-    AS R94 kernel (``src/swilk.c``) is not yet ported. See r-stats-parity-debt.md §2.
+    Faithful port of R's Royston AS R94 kernel (``src/swilk.c``) — W and its
+    p-value are bit-exact to R's ``.Call(C_SWilk)`` (normal scores + tail via the
+    ported nmath ``qnorm5``/``pnorm5``). The wrapper mirrors ``shapiro.test.R``:
+    drop NAs, sort, require ``3 <= n <= 5000``, and rescale by the range when it
+    is below ``1e-10`` (R's single-precision ``ifault=6`` guard).
     """
-    x_arr = _as_array(x)
-    res = _sps.shapiro(x_arr)
+    x_arr = np.sort(_as_array(x)[~np.isnan(_as_array(x))])
+    n = x_arr.size
+    if n < 3 or n > 5000:
+        raise ValueError("sample size must be between 3 and 5000")
+    rng = x_arr[n - 1] - x_arr[0]
+    if rng == 0:
+        raise ValueError("all 'x' values are identical")
+    if rng < 1e-10:
+        x_arr = x_arr / rng  # rescale to avoid ifault=6 with single version
+    w, pw, _ = _swilk(x_arr)
     return HTest(
         method="Shapiro-Wilk normality test",
-        statistic={"W": float(res.statistic)},
-        p_value=float(res.pvalue),
+        statistic={"W": float(w)},
+        p_value=float(pw),
         alternative="",
         data_name="x",
     )
@@ -920,8 +1071,7 @@ def ks_test(
 
     PARITY DEBT (blocked): defers to ``scipy.stats.kstest`` / ``ks_2samp``
     (asymptotic). R's exact small-n Smirnov / Kolmogorov distributions
-    (``src/ks.c`` — ``psmirnov``/``pkolmogorov``) are not yet ported. See
-    r-stats-parity-debt.md §2.
+    (``src/ks.c`` — ``psmirnov``/``pkolmogorov``) are not yet ported.
     """
     alt = {"two.sided": "two-sided", "greater": "greater", "less": "less"}[alternative]
     x_arr = _as_array(x)

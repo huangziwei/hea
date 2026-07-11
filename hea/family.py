@@ -6902,8 +6902,8 @@ class cnorm(Family):
 
 def _rpow_int(x, k):
     """R's ``x ^ k`` for small positive integer k — the ``R_pow`` the
-    interpreter's POWOP loop calls per element (ref/r-base/
-    arithmetic.c:204-253): k==2 → ``x·x`` for ALL x; k∈{3,4} → the
+    interpreter's POWOP loop calls per element (R's
+    src/main/arithmetic.c:204-253): k==2 → ``x·x`` for ALL x; k∈{3,4} → the
     sequential multiply ONLY for −11 ≤ x ≤ 11, libm ``pow`` otherwise
     (numpy's ``**`` makes neither split — last-ulp drift vs R)."""
     x = np.asarray(x, dtype=float)
@@ -6929,7 +6929,7 @@ def _rpow_int(x, k):
 
 def _rsum(a):
     """R's ``sum()`` over a double vector as compiled on arm64 (LDOUBLE ==
-    double there, ref/r-base/arithmetic.c-style strict left-to-right
+    double there, R's src/main/arithmetic.c-style strict left-to-right
     accumulation): numpy's pairwise ``np.sum`` rounds differently in the
     last ulp; ``cumsum`` accumulates sequentially like R."""
     a = np.asarray(a, dtype=float).ravel()
@@ -7843,7 +7843,7 @@ class clog(Family):
 
 
 def _r_pow_scalar(x, p):
-    """Scalar ``R_pow(x, p)`` (ref/r-base/arithmetic.c:204) for the
+    """Scalar ``R_pow(x, p)`` (R's src/main/arithmetic.c:204) for the
     general-exponent rows ``_rpow`` can't vectorize: the x==1/p==0/x==0
     edges precede libm pow; overflow is C-silent ±Inf."""
     if p == 2.0:

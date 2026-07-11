@@ -8,7 +8,7 @@ pgamma, TOMS 708 pbeta, Loader dpois/dbinom, AS 91/109 qgamma/qbeta) — so
 an exact closed-form port of nmath/{dunif,punif,qunif}.c (no special functions).
 Only the **non-central** variants (``ncp != 0``: nct/ncf/ncx2) still defer to
 ``scipy.stats`` — blocked on the nmath dnt/pnt/qnt, dnf/pnf/qnf, dnchisq/pnchisq/
-qnchisq ports (see .claude/plans/r-stats-parity-debt.md).
+qnchisq ports.
 
 Conventions kept from R: ``lower_tail`` (R's ``lower.tail``) and ``log_p`` /
 ``log`` for p* / q* / d*; ``ncp`` non-centrality where applicable; ``lambda_``

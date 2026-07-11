@@ -1,5 +1,5 @@
 """R's least-squares QR kernel — a mechanical port of the LINPACK routines R
-calls from ``lm.fit`` / ``lm.wfit`` via ``Cdqrls`` (``ref/r-stats/src/lm.c``):
+calls from ``lm.fit`` / ``lm.wfit`` via ``Cdqrls`` (``stats/src/lm.c``):
 
   * ``dqrdc2`` — R's *modification* of LINPACK ``dqrdc`` (``ref/.../dqrdc2.f``):
     Householder QR with a limited column-pivoting strategy that defers
@@ -237,7 +237,7 @@ def dqrls(x: np.ndarray, y: np.ndarray, tol: float = 1e-7):
 
 
 def Cdqrls(x: np.ndarray, y: np.ndarray, tol: float = 1e-7) -> dict:
-    """Port of ``Cdqrls`` (``ref/r-stats/src/lm.c``) — the entry ``lm.fit`` calls.
+    """Port of ``Cdqrls`` (``stats/src/lm.c``) — the entry ``lm.fit`` calls.
     Returns R's list as a dict: ``qr`` (compact factor), ``coefficients`` (pivoted,
     unused→0), ``residuals``, ``effects`` (``Qᵀy``), ``rank``, ``pivot`` (1-based),
     ``qraux``, ``tol``, ``pivoted``."""

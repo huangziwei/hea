@@ -1823,6 +1823,27 @@ def test_shapiro_test_rejects_obvious_nonnormal():
     assert res.p_value < 0.001
 
 
+def test_shapiro_test_bit_exact_vs_r():
+    """W and p are 0-ulp to R's ``.Call(C_SWilk)`` (ported ``src/swilk.c``)."""
+    x = [2.1, 3.4, 1.9, 5.2, 4.8, 2.7, 3.3, 6.1, 0.8, 4.4, 3.9, 2.2, 5.5, 1.1, 3.7]
+    res = shapiro_test(x)
+    xr = "c(" + ",".join(repr(v) for v in x) + ")"
+    _assert_r([
+        (res.statistic["W"], f"shapiro.test({xr})$statistic", 0.97403652031051269),
+        (res.p_value, f"shapiro.test({xr})$p.value", 0.91267650064222361),
+    ])
+
+
+def test_shapiro_test_n3_exact_p_branch():
+    """n == 3 hits swilk's exact closed-form P value; bit-exact to R."""
+    x = [1.0, 2.0, 10.0]
+    res = shapiro_test(x)
+    _assert_r([
+        (res.statistic["W"], "shapiro.test(c(1,2,10))$statistic", 0.8321917808219178),
+        (res.p_value, "shapiro.test(c(1,2,10))$p.value", 0.19391752148144781),
+    ])
+
+
 # ---- ks_test --------------------------------------------------------
 
 

@@ -122,8 +122,8 @@ def _finish_scaled(dist, count, nc):
 
 
 def _r_pow_nonneg(x, y):
-    """``R_pow(x, y)`` for non-negative ``x`` (mirrors R's ``src/main/arithmetic.c``;
-    see ``ref/r-base/arithmetic.c``). ``minkowski`` calls ``R_pow`` -- not bare libm
+    """``R_pow(x, y)`` for non-negative ``x`` (mirrors R's ``src/main/arithmetic.c``).
+    ``minkowski`` calls ``R_pow`` -- not bare libm
     ``pow`` -- so parity requires its special cases: ``y==2`` is ``x*x``, and for
     ``|x|<=11`` ``y==3``/``y==4`` are the *naive* products ``x*x*x``/``x*x*x*x``
     (one/two more roundings than ``pow``, so up to 1 ulp from it); all else is libm
