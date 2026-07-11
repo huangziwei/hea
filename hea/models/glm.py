@@ -19,8 +19,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from scipy.linalg import qr, solve_triangular
-from scipy.stats import t as student_t
 
+from ..R import distributions as _dist
 from ..R import nmath as _nmath
 
 from ..family import (
@@ -550,7 +550,7 @@ class glm:
         with np.errstate(invalid="ignore"):
             if self._test_kind == "z":
                 return 2.0 * _nmath.pnorm5_vec(np.abs(stat), lower_tail=False)
-            return 2.0 * student_t.sf(np.abs(stat), self.df_residual)
+            return 2.0 * _dist.pt(np.abs(stat), self.df_residual, lower_tail=False)
 
     def _compute_ci(self, alpha: float) -> pl.DataFrame:
         # R's confint.default — used as the default `confint` for glm

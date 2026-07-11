@@ -1,12 +1,14 @@
 """R's d* / p* / q* / r* distribution surface, plus ``set.seed`` and ``sample``.
 
 The **central** d/p/q functions (normal, t, F, chi-square, gamma, beta,
-binomial, Poisson, exponential, uniform) route through :mod:`hea.R.nmath` —
-bit-exact ports of R's ``src/nmath/`` C kernels (Cody pnorm, Wichura qnorm,
-Welinder pgamma, TOMS 708 pbeta, Loader dpois/dbinom, AS 91/109 qgamma/qbeta)
-— so ``hea.R`` d/p/q is 0-ulp to R, not scipy's ~1-3 ulp approximations.
+binomial, Poisson, exponential) route through :mod:`hea.R.nmath` — bit-exact
+ports of R's ``src/nmath/`` C kernels (Cody pnorm, Wichura qnorm, Welinder
+pgamma, TOMS 708 pbeta, Loader dpois/dbinom, AS 91/109 qgamma/qbeta) — so
+``hea.R`` d/p/q is 0-ulp to R, not scipy's ~1-3 ulp approximations. ``unif`` is
+an exact closed-form port of nmath/{dunif,punif,qunif}.c (no special functions).
 Only the **non-central** variants (``ncp != 0``: nct/ncf/ncx2) still defer to
-``scipy.stats`` (a separate algorithm family, not yet ported).
+``scipy.stats`` — blocked on the nmath dnt/pnt/qnt, dnf/pnf/qnf, dnchisq/pnchisq/
+qnchisq ports (see .claude/plans/r-stats-parity-debt.md).
 
 Conventions kept from R: ``lower_tail`` (R's ``lower.tail``) and ``log_p`` /
 ``log`` for p* / q* / d*; ``ncp`` non-centrality where applicable; ``lambda_``
@@ -24,11 +26,11 @@ from ._shared import NamedVector
 from .rng import RMersenneTwister
 
 # --- Process-global R Mersenne-Twister backing the r* / sample surface --------
-# R keeps ONE global RNG; ``set_seed`` (R's ``set.seed``) reseeds it and the
-# ported r* families draw from it, so ``set_seed(k); runif(n)`` is bit-exact to
-# R's ``set.seed(k); runif(n)``. Families R hasn't been ported for (rt / rbeta /
-# rchisq / rf, weighted ``sample``) stay on scipy/numpy — reproducible under
-# ``set_seed`` but not R-bit-exact (documented per-function).
+# R keeps ONE global RNG; ``set_seed`` (R's ``set.seed``) reseeds it and every
+# ported r* family draws from it, so ``set_seed(k); runif(n)`` is bit-exact to
+# R's ``set.seed(k); runif(n)``. All of runif / rnorm / rexp / rpois / rbinom /
+# rgamma / rbeta / rchisq / rt / rf and ``sample`` (incl. weighted) route through
+# this one R MT stream — bit-exact, no scipy/numpy RNG in the r* path.
 _R_RNG: RMersenneTwister | None = None
 
 
@@ -255,20 +257,60 @@ def rpois(n, lambda_):
     return rng.rpois_n(lam).astype(np.int64)
 
 
-# uniform
-def dunif(x, min=0, max=1):
-    return _sps.uniform.pdf(x, loc=min, scale=max - min)
+# uniform  (exact closed form — R nmath/{dunif,punif,qunif}.c, no special functions)
+def _scalar_in(*xs) -> bool:
+    return all(np.ndim(x) == 0 for x in xs)
 
 
-def punif(q, min=0, max=1, lower_tail=True):
-    p = _sps.uniform.cdf(q, loc=min, scale=max - min)
-    return p if lower_tail else 1 - p
+def dunif(x, min=0, max=1, log=False):
+    """R's ``dunif`` — exact port of nmath/dunif.c."""
+    x = np.asarray(x, float)
+    a = np.asarray(min, float)
+    b = np.asarray(max, float)
+    inside = (a <= x) & (x <= b)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = np.where(inside, -np.log(b - a), -np.inf) if log \
+            else np.where(inside, 1.0 / (b - a), 0.0)
+    out = np.asarray(out, float)
+    out = np.where((b <= a) | np.isnan(x) | np.isnan(a) | np.isnan(b), np.nan, out)
+    return float(out) if _scalar_in(x, a, b) else out
 
 
-def qunif(p, min=0, max=1, lower_tail=True):
-    if not lower_tail:
-        p = 1 - np.asarray(p)
-    return _sps.uniform.ppf(p, loc=min, scale=max - min)
+def punif(q, min=0, max=1, lower_tail=True, log_p=False):
+    """R's ``punif`` — exact port of nmath/punif.c."""
+    q = np.asarray(q, float)
+    a = np.asarray(min, float)
+    b = np.asarray(max, float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        lower = np.clip((q - a) / (b - a), 0.0, 1.0)  # x>=b -> 1, x<=a -> 0
+    p = lower if lower_tail else 1.0 - lower
+    if log_p:
+        with np.errstate(divide="ignore"):
+            p = np.log(p)
+    p = np.asarray(p, float)
+    bad = (b < a) | ~np.isfinite(a) | ~np.isfinite(b) \
+        | np.isnan(q) | np.isnan(a) | np.isnan(b)
+    p = np.where(bad, np.nan, p)
+    return float(p) if _scalar_in(q, a, b) else p
+
+
+def qunif(p, min=0, max=1, lower_tail=True, log_p=False):
+    """R's ``qunif`` — exact port of nmath/qunif.c."""
+    p = np.asarray(p, float)
+    a = np.asarray(min, float)
+    b = np.asarray(max, float)
+    # R_DT_qIv: map (lower_tail, log_p) back to the lower-tail identity prob.
+    if log_p:
+        pv = np.exp(p) if lower_tail else -np.expm1(p)
+    else:
+        pv = p if lower_tail else 1.0 - p
+    out = np.asarray(a + pv * (b - a), float)
+    # R_Q_P01_check: probability out of [0,1] (identity scale) -> NaN.
+    p01_bad = (pv < 0.0) | (pv > 1.0)
+    bad = p01_bad | (b < a) | ~np.isfinite(a) | ~np.isfinite(b) \
+        | np.isnan(p) | np.isnan(a) | np.isnan(b)
+    out = np.where(bad, np.nan, out)
+    return float(out) if _scalar_in(p, a, b) else out
 
 
 def runif(n, min=0, max=1):

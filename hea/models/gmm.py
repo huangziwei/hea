@@ -6624,7 +6624,7 @@ class gmm:
         constrained-Laplace path. Mirrors the Gaussian :meth:`profile` but over
         the Stage-1 ``[θ, β]`` Laplace devfun (no residual σ axis, ``useSc=0``),
         re-optimising the free coordinates at each grid point with one pinned."""
-        from scipy.stats import chi2
+        from ..R import distributions as _dist
 
         if self._devfun_stage1 is None:
             raise NotImplementedError(
@@ -6635,7 +6635,7 @@ class gmm:
         n_theta = len(theta_hat)
         # useSc=0 for scale-known GLMM ⇒ nptot = #θ + p (no residual σ).
         nptot = n_theta + self.p
-        cutoff = float(np.sqrt(chi2.ppf(1.0 - alphamax, nptot)))
+        cutoff = float(np.sqrt(_dist.qchisq(1.0 - alphamax, nptot)))
         delta = cutoff / 8.0
 
         bar_keys = list(self.sd_re.keys())
@@ -6725,7 +6725,7 @@ class gmm:
         covariances)``}``. For REML fits we first re-fit by ML (lme4's
         convention — the LRT statistic needs ML).
         """
-        from scipy.stats import chi2
+        from ..R import distributions as _dist
 
         if maxpts is not None:
             n_grid = int(maxpts)
@@ -6755,7 +6755,7 @@ class gmm:
         # ``delta = cutoff * delta.cutoff`` (default ``delta.cutoff = 1/8``).
         # ``nptot`` = #θ + 1 (residual σ, since useSc=True for LMM) + p betas.
         nptot = len(theta_hat) + 1 + self.p
-        cutoff = float(np.sqrt(chi2.ppf(1.0 - alphamax, nptot)))
+        cutoff = float(np.sqrt(_dist.qchisq(1.0 - alphamax, nptot)))
         delta = cutoff / 8.0
 
         varcov = (prof_scale == "varcov")
@@ -9388,7 +9388,7 @@ class Profile:
         """
         import matplotlib.pyplot as plt
         from scipy.interpolate import CubicSpline, PchipInterpolator
-        from scipy.stats import chi2
+        from ..R import distributions as _dist
 
         if which is None:
             names = list(self.data.keys())
@@ -9403,7 +9403,7 @@ class Profile:
         if n < 2:
             raise ValueError("plot_pairs needs at least 2 parameters")
 
-        zeta_levels = np.sqrt(chi2.ppf(np.asarray(levels), 2))
+        zeta_levels = np.sqrt(_dist.qchisq(np.asarray(levels), 2))
         mlev = float(zeta_levels.max())
 
         # Per-parameter v-transform. Matches R's log.thpr / logProf:

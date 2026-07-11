@@ -9,6 +9,7 @@ Every test function returns an :class:`HTest`; :func:`aov` returns an
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional, Union
 
@@ -19,6 +20,27 @@ from . import distributions as _dist
 
 from ._shared import _as_array, _fmt, _fmt_pval
 from ..models.lm import lm
+
+
+def _avg_rank(a) -> np.ndarray:
+    """R's ``rank(x)`` with ``ties.method = "average"`` on a numeric vector —
+    stable (mergesort) order, tied runs share their mid-rank. Matches R and
+    ``scipy.stats.rankdata(method="average")`` without the scipy dependency."""
+    a = np.asarray(a, dtype=float)
+    n = a.size
+    order = np.argsort(a, kind="mergesort")
+    sa = a[order]
+    r = np.empty(n, dtype=float)
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and sa[j + 1] == sa[i]:
+            j += 1
+        r[i:j + 1] = (i + j) / 2.0 + 1.0  # 1-based average rank of the tie run
+        i = j + 1
+    out = np.empty(n, dtype=float)
+    out[order] = r
+    return out
 
 
 @dataclass
@@ -124,7 +146,7 @@ def rank(x):
         return x.rank("average")
     if isinstance(x, pl.Series):
         return x.rank("average")
-    return _sps.rankdata(_as_array(x), method="average")
+    return _avg_rank(_as_array(x))
 
 
 def signed_rank(x):
@@ -138,7 +160,7 @@ def signed_rank(x):
     if isinstance(x, pl.Series):
         return x.sign() * x.abs().rank("average")
     arr = _as_array(x)
-    return np.sign(arr) * _sps.rankdata(np.abs(arr), method="average")
+    return np.sign(arr) * _avg_rank(np.abs(arr))
 
 
 # ---- hypothesis tests -----------------------------------------------
@@ -153,68 +175,96 @@ def t_test(
     y=None,
     *,
     paired: bool = False,
-    var_equal: bool = True,
+    var_equal: bool = False,
     mu: float = 0.0,
     alternative: str = "two.sided",
     conf_level: float = 0.95,
 ) -> HTest:
-    """R's ``t.test``.
+    """R's ``t.test`` — faithful port of ``stats:::t.test.default``.
 
-    - ``y=None``                     → one-sample t-test on ``x``.
-    - ``y`` given, ``paired=True``   → paired t-test on ``x - y``.
-    - ``y`` given, ``var_equal=True``→ Student's two-sample (pooled var).
-    - ``y`` given, ``var_equal=False``→ Welch's two-sample.
+    - ``y=None``                       → one-sample t-test on ``x``.
+    - ``y`` given, ``paired=True``     → paired t-test on ``x - y``.
+    - ``y`` given, ``var_equal=False`` → Welch two-sample (**R's default**).
+    - ``y`` given, ``var_equal=True``  → Student's pooled two-sample.
 
-    Always uses Student-t CI on the appropriate df.
+    Statistic, df, the one-/two-sided p-value and the Student-t CI all route
+    through nmath (``pt`` / ``qt``) — 0-ulp to R, no scipy. NAs are dropped
+    per R (``complete.cases`` for the paired branch).
     """
-    alt = {"two.sided": "two-sided", "greater": "greater", "less": "less"}[alternative]
+    if alternative not in ("two.sided", "less", "greater"):
+        raise ValueError(f"t_test(): unknown alternative {alternative!r}")
     x = _as_array(x)
-    if y is None:
-        res = _sps.ttest_1samp(x, mu, alternative=alt)
-        ci = res.confidence_interval(conf_level)
-        return HTest(
-            method="One Sample t-test",
-            statistic={"t": float(res.statistic)},
-            parameter={"df": float(res.df)},
-            p_value=float(res.pvalue),
-            conf_int=(float(ci.low), float(ci.high)),
-            estimate={"mean of x": float(np.mean(x))},
-            null_value=mu,
-            alternative=alternative,
-            conf_level=conf_level,
-            data_name="x",
-        )
-    y = _as_array(y)
+    has_y = y is not None
+    if has_y:
+        y = _as_array(y)
+        if paired:
+            ok = np.isfinite(x) & np.isfinite(y)
+            x, y = x[ok], y[ok]
+        else:
+            x = x[np.isfinite(x)]
+            y = y[np.isfinite(y)]
+    else:
+        if paired:
+            raise ValueError("'y' is missing for paired test")
+        x = x[np.isfinite(x)]
     if paired:
-        d = x - y
-        res = _sps.ttest_1samp(d, mu, alternative=alt)
-        ci = res.confidence_interval(conf_level)
-        return HTest(
-            method="Paired t-test",
-            statistic={"t": float(res.statistic)},
-            parameter={"df": float(res.df)},
-            p_value=float(res.pvalue),
-            conf_int=(float(ci.low), float(ci.high)),
-            estimate={"mean of the differences": float(np.mean(d))},
-            null_value=mu,
-            alternative=alternative,
-            conf_level=conf_level,
-            data_name="x and y",
-        )
-    res = _sps.ttest_ind(x, y, equal_var=var_equal, alternative=alt)
-    ci = res.confidence_interval(conf_level)
-    method = "Two Sample t-test" if var_equal else "Welch Two Sample t-test"
+        x = x - y
+        y = None
+
+    nx = len(x)
+    mx = float(np.mean(x))
+    vx = float(np.var(x, ddof=1))
+    if y is None:
+        if nx < 2:
+            raise ValueError("not enough 'x' observations")
+        df = float(nx - 1)
+        stderr = math.sqrt(vx / nx)
+        tstat = (mx - mu) / stderr
+        method = "Paired t-test" if paired else "One Sample t-test"
+        estimate = {"mean difference" if paired else "mean of x": mx}
+    else:
+        ny = len(y)
+        my = float(np.mean(y))
+        vy = float(np.var(y, ddof=1))
+        method = ("Welch " if not var_equal else "") + "Two Sample t-test"
+        estimate = {"mean of x": mx, "mean of y": my}
+        if var_equal:
+            df = float(nx + ny - 2)
+            v = 0.0
+            if nx > 1:
+                v += (nx - 1) * vx
+            if ny > 1:
+                v += (ny - 1) * vy
+            v /= df
+            stderr = math.sqrt(v * (1.0 / nx + 1.0 / ny))
+        else:
+            sx2, sy2 = vx / nx, vy / ny
+            stderr = math.sqrt(sx2 + sy2)
+            df = stderr ** 4 / (sx2 ** 2 / (nx - 1) + sy2 ** 2 / (ny - 1))
+        tstat = (mx - my - mu) / stderr
+
+    if alternative == "less":
+        pval = float(_dist.pt(tstat, df))
+        cint = (-math.inf, tstat + float(_dist.qt(conf_level, df)))
+    elif alternative == "greater":
+        pval = float(_dist.pt(tstat, df, lower_tail=False))
+        cint = (tstat - float(_dist.qt(conf_level, df)), math.inf)
+    else:
+        pval = float(2.0 * _dist.pt(-abs(tstat), df))
+        c = float(_dist.qt(1.0 - (1.0 - conf_level) / 2.0, df))
+        cint = (tstat - c, tstat + c)
+
     return HTest(
         method=method,
-        statistic={"t": float(res.statistic)},
-        parameter={"df": float(res.df)},
-        p_value=float(res.pvalue),
-        conf_int=(float(ci.low), float(ci.high)),
-        estimate={"mean of x": float(np.mean(x)), "mean of y": float(np.mean(y))},
+        statistic={"t": float(tstat)},
+        parameter={"df": float(df)},
+        p_value=pval,
+        conf_int=(mu + cint[0] * stderr, mu + cint[1] * stderr),
+        estimate=estimate,
         null_value=mu,
         alternative=alternative,
         conf_level=conf_level,
-        data_name="x and y",
+        data_name="x and y" if has_y else "x",
     )
 
 
@@ -231,6 +281,11 @@ def wilcox_test(
     Defaults to continuity correction (``correct=True``). One-sample and
     paired branches use ``scipy.stats.wilcoxon``; the two-sample branch
     uses ``mannwhitneyu`` (R's "Wilcoxon rank-sum" with W statistic).
+
+    PARITY DEBT (blocked): R's *default* uses **exact** p-values for small
+    n via the signed-rank / rank-sum distributions (``nmath/signrank.c`` +
+    ``nmath/wilcox.c``, not yet ported). Until those land this stays on
+    scipy's normal approximation. See r-stats-parity-debt.md §2.
     """
     alt = {"two.sided": "two-sided", "greater": "greater", "less": "less"}[alternative]
     x = _as_array(x)
@@ -271,6 +326,11 @@ def wilcox_test(
     )
 
 
+def _two_sided_min(lo, hi) -> float:
+    """R's ``2 * min(p_lower, p_upper)`` two-sided rule, capped at 1."""
+    return float(min(2.0 * min(lo, hi), 1.0))
+
+
 def cor_test(
     x,
     y,
@@ -278,58 +338,130 @@ def cor_test(
     method: str = "pearson",
     alternative: str = "two.sided",
     conf_level: float = 0.95,
+    continuity: bool = False,
 ) -> HTest:
     """R's ``cor.test`` with ``method`` in {pearson, spearman, kendall}.
 
-    For Pearson, we report ``t``, df = n-2, and Fisher-z CI. Spearman
-    reports ``S`` (rank-sum statistic R's ``cor.test`` shows). Kendall
-    reports ``z``.
+    - **pearson**: ``t``, df = n-2, Fisher-z CI — a faithful nmath port
+      (``pt`` / ``qnorm``), 0-ulp to R.
+    - **spearman**: statistic ``S`` and the **asymptotic** (``exact=FALSE``)
+      t-approximation p-value via nmath ``pt``.
+    - **kendall**: statistic ``z`` and the **asymptotic** normal p-value
+      (tie-corrected variance) via nmath ``pnorm``.
+
+    Parity note: R's *default* for spearman/kendall uses **exact** small-sample
+    p-values (AS 89 ``C_pRho`` / ``C_pKendall``); those C kernels
+    (``src/prho.c`` / ``src/kendall.c``) are not yet ported, so the
+    spearman/kendall p-values here equal R's ``exact = FALSE`` path (which R
+    also uses for large n or with ties). See r-stats-parity-debt.md.
     """
-    alt = {"two.sided": "two-sided", "greater": "greater", "less": "less"}[alternative]
+    if alternative not in ("two.sided", "less", "greater"):
+        raise ValueError(f"cor_test(): unknown alternative {alternative!r}")
     x = _as_array(x)
     y = _as_array(y)
     if len(x) != len(y):
         raise ValueError("'x' and 'y' must have the same length")
     n = len(x)
+
     if method == "pearson":
-        res = _sps.pearsonr(x, y, alternative=alt)
-        r = float(res.statistic)
+        r = float(np.corrcoef(x, y)[0, 1])
         df = n - 2
-        t = r * np.sqrt(df / max(1 - r * r, 1e-300))
-        ci = res.confidence_interval(conf_level)
+        t = math.sqrt(df) * r / math.sqrt(1.0 - r * r)
+        if alternative == "less":
+            pval = float(_dist.pt(t, df))
+        elif alternative == "greater":
+            pval = float(_dist.pt(t, df, lower_tail=False))
+        else:
+            pval = _two_sided_min(float(_dist.pt(t, df)),
+                                  float(_dist.pt(t, df, lower_tail=False)))
+        conf_int = None
+        if n > 3:
+            z = math.atanh(r)
+            sigma = 1.0 / math.sqrt(n - 3)
+            if alternative == "less":
+                cint = (-math.inf, z + sigma * float(_dist.qnorm(conf_level)))
+            elif alternative == "greater":
+                cint = (z - sigma * float(_dist.qnorm(conf_level)), math.inf)
+            else:
+                d = sigma * float(_dist.qnorm((1.0 + conf_level) / 2.0))
+                cint = (z - d, z + d)
+            conf_int = (math.tanh(cint[0]), math.tanh(cint[1]))
         return HTest(
             method="Pearson's product-moment correlation",
             statistic={"t": t},
             parameter={"df": df},
-            p_value=float(res.pvalue),
-            conf_int=(float(ci.low), float(ci.high)),
+            p_value=pval,
+            conf_int=conf_int,
             estimate={"cor": r},
             null_value=0.0,
             alternative=alternative,
             conf_level=conf_level,
             data_name="x and y",
         )
+
     if method == "spearman":
-        res = _sps.spearmanr(x, y, alternative=alt)
-        rho = float(res.statistic)
-        # R reports S = sum((rank(x) - rank(y))^2) for the Spearman test
-        S = float(np.sum((_sps.rankdata(x) - _sps.rankdata(y)) ** 2))
+        rho = float(np.corrcoef(_avg_rank(x), _avg_rank(y))[0, 1])
+        S = (n ** 3 - n) * (1.0 - rho) / 6.0
+
+        def pspearman(q, lower_tail):
+            den = (n ** 3 - n) / 6.0
+            if continuity:
+                den += 1.0
+            rr = 1.0 - q / den
+            return float(_dist.pt(rr / math.sqrt((1.0 - rr * rr) / (n - 2)),
+                                  df=n - 2, lower_tail=not lower_tail))
+
+        if alternative == "greater":
+            pval = pspearman(S, lower_tail=True)
+        elif alternative == "less":
+            pval = pspearman(S, lower_tail=False)
+        else:
+            p = (pspearman(S, lower_tail=False) if S > (n ** 3 - n) / 6.0
+                 else pspearman(S, lower_tail=True))
+            pval = float(min(2.0 * p, 1.0))
         return HTest(
             method="Spearman's rank correlation rho",
-            statistic={"S": S},
-            p_value=float(res.pvalue),
+            statistic={"S": float(S)},
+            p_value=pval,
             estimate={"rho": rho},
             null_value=0.0,
             alternative=alternative,
             data_name="x and y",
         )
+
     if method == "kendall":
-        res = _sps.kendalltau(x, y, alternative=alt)
+        # Kendall score S = sum_{i<j} sign(xi-xj) sign(yi-yj)  (O(n^2)).
+        sx = np.sign(np.subtract.outer(x, x))
+        sy = np.sign(np.subtract.outer(y, y))
+        S = float(np.sum(np.triu(sx * sy, 1)))
+        _, cx = np.unique(x, return_counts=True)
+        _, cy = np.unique(y, return_counts=True)
+        T0 = n * (n - 1) / 2.0
+        T1 = float(np.sum(cx * (cx - 1)) / 2.0)
+        T2 = float(np.sum(cy * (cy - 1)) / 2.0)
+        tau = S / math.sqrt((T0 - T1) * (T0 - T2))
+        v0 = n * (n - 1) * (2 * n + 5)
+        vt = float(np.sum(cx * (cx - 1) * (2 * cx + 5)))
+        vu = float(np.sum(cy * (cy - 1) * (2 * cy + 5)))
+        v1 = float(np.sum(cx * (cx - 1)) * np.sum(cy * (cy - 1)))
+        v2 = float(np.sum(cx * (cx - 1) * (cx - 2)) * np.sum(cy * (cy - 1) * (cy - 2)))
+        var_S = ((v0 - vt - vu) / 18.0
+                 + v1 / (2.0 * n * (n - 1))
+                 + v2 / (9.0 * n * (n - 1) * (n - 2)))
+        Sc = math.copysign(abs(S) - 1.0, S) if continuity else S
+        z = Sc / math.sqrt(var_S)
+        if alternative == "less":
+            pval = float(_dist.pnorm(z))
+        elif alternative == "greater":
+            pval = float(_dist.pnorm(z, lower_tail=False))
+        else:
+            pval = _two_sided_min(float(_dist.pnorm(z)),
+                                  float(_dist.pnorm(z, lower_tail=False)))
         return HTest(
             method="Kendall's rank correlation tau",
-            statistic={"z": float(res.statistic)},
-            p_value=float(res.pvalue),
-            estimate={"tau": float(res.statistic)},
+            statistic={"z": z},
+            p_value=pval,
+            estimate={"tau": tau},
             null_value=0.0,
             alternative=alternative,
             data_name="x and y",
@@ -347,16 +479,26 @@ def kruskal_test(formula: str, data: pl.DataFrame) -> HTest:
     if "~" not in formula:
         raise ValueError("formula must look like 'y ~ group'")
     lhs, rhs = [s.strip() for s in formula.split("~", 1)]
-    groups = [
-        data.filter(pl.col(rhs) == g)[lhs].to_numpy().astype(float)
-        for g in data[rhs].unique().to_list()
-    ]
-    res = _sps.kruskal(*groups)
+    x = data[lhs].to_numpy().astype(float)
+    g = np.asarray(data[rhs].to_list())
+    ok = np.isfinite(x)
+    x, g = x[ok], g[ok]
+    n = len(x)
+    r = _avg_rank(x)
+    glabels = np.unique(g)
+    k = len(glabels)
+    # STATISTIC = sum_j (sum of ranks in group j)^2 / n_j, then H with tie corr.
+    stat = float(sum(r[g == gl].sum() ** 2 / (g == gl).sum() for gl in glabels))
+    _, ties = np.unique(x, return_counts=True)
+    ties = ties.astype(float)
+    H = ((12.0 * stat / (n * (n + 1)) - 3.0 * (n + 1))
+         / (1.0 - np.sum(ties ** 3 - ties) / (n ** 3 - n)))
+    pval = float(_dist.pchisq(H, k - 1, lower_tail=False))
     return HTest(
         method="Kruskal-Wallis rank sum test",
-        statistic={"Kruskal-Wallis chi-squared": float(res.statistic)},
-        parameter={"df": int(len(groups) - 1)},
-        p_value=float(res.pvalue),
+        statistic={"Kruskal-Wallis chi-squared": float(H)},
+        parameter={"df": int(k - 1)},
+        p_value=pval,
         alternative="",
         data_name=f"{lhs} by {rhs}",
     )
@@ -400,14 +542,34 @@ def chisq_test(
     )
 
 
+def _chisq_stat(tbl: np.ndarray, *, correct: bool) -> tuple[float, int, bool]:
+    """Faithful ``chisq.test`` table kernel (nmath, no scipy). Returns
+    ``(X-squared, df, yates_applied)``. Yates' correction applies only to a
+    2×2 table when ``correct`` is set: ``YATES = min(0.5, min|O - E|)`` and
+    ``X² = sum((|O - E| - YATES)² / E)`` — exactly ``stats:::chisq.test``."""
+    tbl = np.asarray(tbl, dtype=float)
+    nr, nc = tbl.shape
+    n = tbl.sum()
+    sr = tbl.sum(axis=1, keepdims=True)
+    sc = tbl.sum(axis=0, keepdims=True)
+    E = sr @ sc / n
+    yates = 0.0
+    is_2x2 = correct and nr == 2 and nc == 2
+    if is_2x2:
+        yates = min(0.5, float(np.min(np.abs(tbl - E))))
+    stat = float(np.sum((np.abs(tbl - E) - yates) ** 2 / E))
+    df = (nr - 1) * (nc - 1)
+    return stat, df, is_2x2 and yates > 0
+
+
 def _chisq_table(tbl: np.ndarray, *, correct: bool, name: str) -> HTest:
-    res = _sps.chi2_contingency(tbl, correction=(correct and tbl.shape == (2, 2)))
+    stat, df, yates = _chisq_stat(np.asarray(tbl, dtype=float), correct=correct)
     return HTest(
         method="Pearson's Chi-squared test"
-        + (" with Yates' continuity correction" if (correct and tbl.shape == (2, 2)) else ""),
-        statistic={"X-squared": float(res.statistic)},
-        parameter={"df": int(res.dof)},
-        p_value=float(res.pvalue),
+        + (" with Yates' continuity correction" if yates else ""),
+        statistic={"X-squared": stat},
+        parameter={"df": df},
+        p_value=float(_dist.pchisq(stat, df, lower_tail=False)),
         alternative="",
         data_name=name,
     )
@@ -444,6 +606,11 @@ def fisher_test(
     Larger tables (R's Monte-Carlo simulation branch) are not supported.
     Returns the odds ratio as the point estimate; CI is omitted (R uses
     inverse non-central hypergeometric, not yet wired).
+
+    PARITY DEBT (blocked): faithful R parity needs the exact hypergeometric
+    (``nmath/dhyper.c``) plus FEXACT for r×c tables and the non-central
+    hypergeometric CI (``src/fexact.c``), none yet ported — so this defers
+    to ``scipy.stats.fisher_exact`` (2×2 only). See r-stats-parity-debt.md §2.
     """
     alt = {"two.sided": "two-sided", "greater": "greater", "less": "less"}[alternative]
     if y is not None:
@@ -524,9 +691,9 @@ def prop_test(
         tbl = np.array([
             [int(x_arr[i]), int(n_arr[i] - x_arr[i])]
             for i in range(k)
-        ])
+        ], dtype=float)
         use_correction = correct and k == 2
-        res = _sps.chi2_contingency(tbl, correction=use_correction)
+        stat, df, _ = _chisq_stat(tbl, correct=use_correction)
         suffix = " with continuity correction" if use_correction else ""
         if k == 2:
             method = f"2-sample test for equality of proportions{suffix}"
@@ -534,9 +701,9 @@ def prop_test(
             method = f"{k}-sample test for equality of proportions{suffix}"
         return HTest(
             method=method,
-            statistic={"X-squared": float(res.statistic)},
-            parameter={"df": int(res.dof)},
-            p_value=float(res.pvalue),
+            statistic={"X-squared": stat},
+            parameter={"df": df},
+            p_value=float(_dist.pchisq(stat, df, lower_tail=False)),
             estimate=estimates,
             alternative=alternative,
             conf_level=conf_level,
@@ -562,7 +729,8 @@ def binom_test(
     vector. ``n`` is the total trials (omitted when ``x`` already has
     both counts).
     """
-    alt = {"two.sided": "two-sided", "greater": "greater", "less": "less"}[alternative]
+    if alternative not in ("two.sided", "less", "greater"):
+        raise ValueError(f"binom_test(): unknown alternative {alternative!r}")
     if n is None:
         x_arr = np.asarray(x, dtype=int)
         if x_arr.shape != (2,):
@@ -574,16 +742,57 @@ def binom_test(
     else:
         x_succ = int(x)
         n = int(n)
-    res = _sps.binomtest(x_succ, n, float(p), alternative=alt)
-    ci = res.proportion_ci(confidence_level=conf_level, method="exact")
+    p = float(p)
+
+    # p-value — faithful stats:::binom.test (exact, nmath dbinom/pbinom).
+    if alternative == "less":
+        pval = float(_dist.pbinom(x_succ, n, p))
+    elif alternative == "greater":
+        pval = float(_dist.pbinom(x_succ - 1, n, p, lower_tail=False))
+    elif p == 0.0:
+        pval = 1.0 if x_succ == 0 else 0.0
+    elif p == 1.0:
+        pval = 1.0 if x_succ == n else 0.0
+    else:
+        rel_err = 1.0 + 1e-7
+        d = float(_dist.dbinom(x_succ, n, p))
+        m = n * p
+        if x_succ == m:
+            pval = 1.0
+        elif x_succ < m:
+            i = np.arange(math.ceil(m), n + 1)
+            yy = int(np.sum(np.asarray(_dist.dbinom(i, n, p)) <= d * rel_err))
+            pval = float(_dist.pbinom(x_succ, n, p)
+                         + _dist.pbinom(n - yy, n, p, lower_tail=False))
+        else:
+            i = np.arange(0, math.floor(m) + 1)
+            yy = int(np.sum(np.asarray(_dist.dbinom(i, n, p)) <= d * rel_err))
+            pval = float(_dist.pbinom(yy - 1, n, p)
+                         + _dist.pbinom(x_succ - 1, n, p, lower_tail=False))
+
+    # Clopper-Pearson CI via qbeta.
+    def p_L(a):
+        return 0.0 if x_succ == 0 else float(_dist.qbeta(a, x_succ, n - x_succ + 1))
+
+    def p_U(a):
+        return 1.0 if x_succ == n else float(_dist.qbeta(1 - a, x_succ + 1, n - x_succ))
+
+    if alternative == "less":
+        conf_int = (0.0, p_U(1 - conf_level))
+    elif alternative == "greater":
+        conf_int = (p_L(1 - conf_level), 1.0)
+    else:
+        a = (1 - conf_level) / 2
+        conf_int = (p_L(a), p_U(a))
+
     return HTest(
         method="Exact binomial test",
         statistic={"number of successes": x_succ},
         parameter={"number of trials": n},
-        p_value=float(res.pvalue),
-        conf_int=(float(ci.low), float(ci.high)),
+        p_value=float(pval),
+        conf_int=conf_int,
         estimate={"probability of success": x_succ / n},
-        null_value=float(p),
+        null_value=p,
         alternative=alternative,
         conf_level=conf_level,
         data_name="x and n",
@@ -658,21 +867,34 @@ def bartlett_test(x, g) -> HTest:
     if x_arr.shape != g_arr.shape:
         raise ValueError("bartlett_test(): x and g must have the same length")
     groups = [x_arr[g_arr == val] for val in np.unique(g_arr)]
-    if len(groups) < 2:
+    k = len(groups)
+    if k < 2:
         raise ValueError("bartlett_test(): need at least 2 groups")
-    res = _sps.bartlett(*groups)
+    ni = np.array([len(gr) - 1 for gr in groups], dtype=float)  # n_i - 1
+    if np.any(ni <= 0):
+        raise ValueError("there must be at least 2 observations in each group")
+    vi = np.array([np.var(gr, ddof=1) for gr in groups], dtype=float)
+    n_total = float(ni.sum())
+    v_total = float(np.sum(ni * vi) / n_total)
+    # stats:::bartlett.test.default
+    stat = ((n_total * math.log(v_total) - np.sum(ni * np.log(vi)))
+            / (1.0 + (np.sum(1.0 / ni) - 1.0 / n_total) / (3.0 * (k - 1))))
     return HTest(
         method="Bartlett test of homogeneity of variances",
-        statistic={"Bartlett's K-squared": float(res.statistic)},
-        parameter={"df": int(len(groups) - 1)},
-        p_value=float(res.pvalue),
+        statistic={"Bartlett's K-squared": float(stat)},
+        parameter={"df": int(k - 1)},
+        p_value=float(_dist.pchisq(stat, k - 1, lower_tail=False)),
         alternative="",
         data_name="x by g",
     )
 
 
 def shapiro_test(x) -> HTest:
-    """R's ``shapiro.test`` — Shapiro-Wilk normality test."""
+    """R's ``shapiro.test`` — Shapiro-Wilk normality test.
+
+    PARITY DEBT (blocked): defers to ``scipy.stats.shapiro``. R's Royston
+    AS R94 kernel (``src/swilk.c``) is not yet ported. See r-stats-parity-debt.md §2.
+    """
     x_arr = _as_array(x)
     res = _sps.shapiro(x_arr)
     return HTest(
@@ -695,6 +917,11 @@ def ks_test(
     ``y`` is either a second sample (two-sample test) or a string naming
     a scipy distribution (one-sample goodness-of-fit). R uses names like
     ``"pnorm"``; we accept either ``"pnorm"`` or scipy's ``"norm"``.
+
+    PARITY DEBT (blocked): defers to ``scipy.stats.kstest`` / ``ks_2samp``
+    (asymptotic). R's exact small-n Smirnov / Kolmogorov distributions
+    (``src/ks.c`` — ``psmirnov``/``pkolmogorov``) are not yet ported. See
+    r-stats-parity-debt.md §2.
     """
     alt = {"two.sided": "two-sided", "greater": "greater", "less": "less"}[alternative]
     x_arr = _as_array(x)
@@ -777,13 +1004,23 @@ def friedman_test(y, groups, blocks) -> HTest:
     })
     wide = df.pivot(values="__y__", index="__b__", on="__g__")
     cols = [c for c in wide.columns if c != "__b__"]
-    samples = [wide[c].to_numpy().astype(float) for c in cols]
-    res = _sps.friedmanchisquare(*samples)
+    # (blocks × groups) matrix; rank within each block-row (R: t(apply(y,1,rank))).
+    mat = np.column_stack([wide[c].to_numpy().astype(float) for c in cols])
+    n, k = mat.shape
+    r = np.vstack([_avg_rank(row) for row in mat])
+    # tie correction: sum over rows of sum(t^3 - t) for tied rank groups.
+    tie_sum = 0.0
+    for row in mat:
+        _, cnt = np.unique(row, return_counts=True)
+        cnt = cnt.astype(float)
+        tie_sum += float(np.sum(cnt ** 3 - cnt))
+    stat = (12.0 * np.sum((r.sum(axis=0) - n * (k + 1) / 2.0) ** 2)
+            / (n * k * (k + 1) - tie_sum / (k - 1)))
     return HTest(
         method="Friedman rank sum test",
-        statistic={"Friedman chi-squared": float(res.statistic)},
-        parameter={"df": int(len(samples) - 1)},
-        p_value=float(res.pvalue),
+        statistic={"Friedman chi-squared": float(stat)},
+        parameter={"df": int(k - 1)},
+        p_value=float(_dist.pchisq(stat, k - 1, lower_tail=False)),
         alternative="",
         data_name="y, groups and blocks",
     )
