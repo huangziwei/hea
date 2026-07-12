@@ -475,6 +475,20 @@ from .diagnostics import (
     rstudent,
 )
 
+# lm / aov extras — least-squares periphery, influence table, design counts
+from .lm_aov_extras import (
+    Infl,
+    cov2cor,
+    covratio,
+    influence_measures,
+    ls_diag,
+    ls_print,
+    lsfit,
+    replications,
+    sigma,
+    weighted_residuals,
+)
+
 # R's RNG (Mersenne-Twister / Inversion / Rejection), bit-exact —
 # set.seed/runif/sample parity for pinning RNG-dependent R results.
 from .rng import RMersenneTwister
@@ -624,6 +638,10 @@ __all__ = [
     "hatvalues", "rstandard", "rstudent",
     "cooks_distance", "dffits", "dfbeta", "dfbetas", "influence",
     "variable_names", "case_names", "labels",
+    # lm / aov extras
+    "sigma", "cov2cor", "weighted_residuals", "covratio",
+    "influence_measures", "Infl", "lsfit", "ls_diag", "ls_print",
+    "replications",
     # time series construction (R's ts())
     "ts",
     # emmeans (CRAN port, parked here until the surface grows)

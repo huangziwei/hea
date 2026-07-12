@@ -410,7 +410,7 @@ def test_factor_labels_rename_matches_R():
 # ---------------------------------------------------------------------------
 # hea-dialect `[y1, y2]` sugar — a pure alias for `cbind(y1, y2)` lowered at
 # parse time. `cbind` stays canonical (deparse always emits it); brackets are
-# an input convenience only. See plans/formula-cbind-bracket-alias.md.
+# an input convenience only.
 # ---------------------------------------------------------------------------
 
 def test_bracket_response_is_cbind_alias():

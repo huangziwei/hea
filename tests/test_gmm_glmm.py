@@ -3432,14 +3432,14 @@ def test_glmer_bates_fm10_contraception_matches_lme4():
 # ``update()``). Transforms: ``age_s = age / (2*sd(age))``; ``ch = factor(
 # livch != 0, labels=c("N","Y"))``. Fits use lme4's DEFAULT optimizer chain
 # ``c("bobyqa","Nelder_Mead")``. Reference values were generated against
-# byte-identical data (``dev/cm_ref/_tmp_cm_ref.R``) — R is never run in CI.
+# byte-identical data — R is never run in CI.
 #
 # Tolerances follow the fm10 precedent: the Laplace objective (deviance /
 # AIC / BIC / logLik) is curvature-independent and pins tight (rel 1e-7);
 # θ̂/β̂ sit on a flat, ill-conditioned surface (age_s / I(age_s^2) / livch
 # correlated 0.5–0.76) where lme4's gradient-free optimiser only resolves
 # ~1e-5, so they pin loose (θ̂ abs 1e-4; β̂ in SE units < 3e-3). The parity
-# investigation (dev/cm_ref/) confirms this is an eval-noise floor, not a
+# investigation confirms this is an eval-noise floor, not a
 # tolerance bug: tightening both sides closes θ̂ to ~5e-7 but leaves the β̂
 # floor on the correlated columns.
 # ----------------------------------------------------------------------
@@ -3658,7 +3658,7 @@ def _parse_drop1(out):
     return rows
 
 
-# Reference: drop1(cm{1,3}, test="Chisq") in lme4 (dev/cm_ref/drop1_ref.R).
+# Reference: drop1(cm{1,3}, test="Chisq") in lme4.
 # LRT = Δ(-2logL); npar = #coefficients removed (livch = 3 dummies).
 _DROP1_REF = {
     "cm1": {

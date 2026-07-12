@@ -2135,7 +2135,7 @@ def _fisher_edf(fit, *, X, XtX, p, family, family_mgcv_extended, y, wt, pls_lwor
 # of re-fitting the full (n+e)×q system per score-eval as the Newton path
 # does. That single reuse is the whole speedup (constant weights ⇒ the QR
 # is valid for every sp). Ported mechanically from src/magic.c; the GCV
-# score is bit-identical to ``_gcv`` (validated, dev/magic_fit_validate.py).
+# score is bit-identical to ``_gcv`` (separately validated).
 
 def _phi_pearson(fit, *, Mp, n, family, wt, y, slots, X, p):
     """The Pearson-Laplace ("REMLish") scale φ = P/(n−Mp) for the

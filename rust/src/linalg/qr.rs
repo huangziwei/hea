@@ -1,6 +1,6 @@
 //! R's least-squares QR kernel — a mechanical port of the LINPACK routines R
 //! calls from `lm.fit`/`lm.wfit` via `Cdqrls`: `dqrdc2` (R's modified pivoted
-//! Householder QR, `ref/r-stats/src/dqrdc2.f`) + `dqrsl` (apply Q, `dqrsl.f`,
+//! Householder QR, `dqrdc2.f`) + `dqrsl` (apply Q, `dqrsl.f`,
 //! the `job=1110` path that `dqrls.f` uses: `Qᵀy`, coef, residuals).
 //!
 //! The point is *determinism + R-faithfulness* (the `chol.rs` precedent): the

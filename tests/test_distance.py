@@ -34,7 +34,7 @@ from hea.R.distance import (
 # minkowski is the only metric using ``pow``, and it is 0-ulp to R only when hea
 # reproduces R's ``R_pow`` exactly: that needs the shared platform scalar libm
 # (macOS: Apple libm) for the general path AND the ported integer special-cases
-# (``x*x*x``/``x*x*x*x`` for ``|x|<=11``; see ref/r-base/arithmetic.c). Off macOS
+# (``x*x*x``/``x*x*x*x`` for ``|x|<=11``; per R's arithmetic.c). Off macOS
 # the libm differs, so ``pow`` drifts a few ulp.
 _STRICT = sys.platform == "darwin"
 _RTOL = 1e-14

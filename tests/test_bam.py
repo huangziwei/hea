@@ -421,7 +421,6 @@ def test_chicago_lag():
 # a continuous by makes bamF ≠ bamT by ~1e-3. Sourcing the raw by under
 # discrete=TRUE would be a parity bug (reproducing bamF under the bamT flag);
 # the bamF check below carries a lower bound to guard against that regression.
-# See .claude/plans/bam-rf1a-binned-by-parity.md.
 
 _RF_BY = Path(__file__).parent / "fixtures" / "bam_rf_by"
 

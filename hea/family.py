@@ -60,7 +60,7 @@ def _polygamma(deriv, x):
 # Rust kernels when present (bit-identical to the pure-Python ones — verified by
 # the T1 parity gate — so the cumsum reduction stays bit-for-bit); the scalar
 # Python path was a measured hot spot (≈16% of a cbpp glmer fit via _bd0/
-# _stirlerr). See plans/rust-port-implementation.md.
+# _stirlerr).
 _rs_dbinom_raw = _rs_fn("dbinom_raw")
 _rs_dpois_raw = _rs_fn("dpois_raw")
 # mgcv coxlpl (coxph.c:141) single-pass risk-set sweeps (deriv 0 → l/lb/lbb,

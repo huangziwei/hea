@@ -179,7 +179,7 @@ fn r_dist_binary(x: &[f64], nc: usize, i1: usize, i2: usize, nonfinite: &AtomicB
 }
 
 /// `R_pow(x, y)` for non-negative `x`, mirroring the pure-Python `_r_pow_nonneg`
-/// (itself a port of R's `src/main/arithmetic.c`; see `ref/r-base/arithmetic.c`).
+/// (itself a port of R's `src/main/arithmetic.c`).
 /// `minkowski` calls `R_pow`, not bare `powf`: R special-cases `y==2` as `x*x`
 /// and, for `|x|<=11`, `y==3`/`y==4` as the naive products `x*x*x`/`x*x*x*x`
 /// (up to 1 ulp from `pow`); everything else is libm `pow`. Here `x` is `|dev|`

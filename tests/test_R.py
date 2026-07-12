@@ -628,6 +628,10 @@ _R_EXPR_SKIP = {
     "isREML", "isLMM", "isGLMM", "isNLMM", "isSingular",
     "hatvalues", "rstandard", "rstudent",
     "cooks_distance", "dffits", "dfbeta", "dfbetas", "influence",
+    # lm / aov extras — operate on fitted models, QR objects, or design frames.
+    "sigma", "cov2cor", "weighted_residuals", "covratio",
+    "influence_measures", "Infl", "lsfit", "ls_diag", "ls_print",
+    "replications",
     # emmeans — model-shaped (operate on fitted models / EmmGrid tables).
     "emmeans", "EmmGrid", "summary_emmgrid_contrasts",
     # Distribution PDFs/CDFs/quantiles/random — scalar in, scalar out.
@@ -2438,6 +2442,153 @@ def test_poly_polym_vs_r():
         (float(M[0, 3]), f"polym({X1}, {X2}, degree=2)[1,4]", 0.197278784766429),
         (float(M[4, 4]), f"polym({X1}, {X2}, degree=2)[5,5]", 0.490729242320852),
     ])
+
+
+from hea.R import (  # noqa: E402  — grouped with the lm/aov-extras tests
+    cov2cor,
+    covratio,
+    influence_measures,
+    ls_diag,
+    ls_print,
+    lsfit,
+    replications,
+    sigma,
+    weighted_residuals,
+)
+
+# Shared design for the lm/aov-extras oracles (built identically in R & hea).
+_AOV_Y = "c(5.1,6.3,4.0,9.9,9.1,12.2,6.8,7.7,14.0,11.1)"
+_AOV_X1 = "c(2.1,3.4,1.9,5.2,4.4,6.1,3.3,2.8,7.0,5.5)"
+_AOV_X2 = "c(1.0,0.5,2.2,1.7,3.1,2.4,0.9,4.0,1.1,2.9)"
+_AOV_DF = f"data.frame(y={_AOV_Y}, x1={_AOV_X1}, x2={_AOV_X2})"
+_AOV_LM = f"lm(y ~ x1 + x2, {_AOV_DF})"
+_AOV_LSF = f"lsfit(cbind({_AOV_X1}, {_AOV_X2}), {_AOV_Y})"
+
+
+def _aov_frame():
+    return pl.DataFrame({
+        "y": [5.1, 6.3, 4.0, 9.9, 9.1, 12.2, 6.8, 7.7, 14.0, 11.1],
+        "x1": [2.1, 3.4, 1.9, 5.2, 4.4, 6.1, 3.3, 2.8, 7.0, 5.5],
+        "x2": [1.0, 0.5, 2.2, 1.7, 3.1, 2.4, 0.9, 4.0, 1.1, 2.9],
+    })
+
+
+def test_sigma_cov2cor_weighted_residuals_covratio_vs_r():
+    from hea.family import Gamma
+    from hea.models.glm import glm
+    from hea.models.lm import lm
+
+    d = _aov_frame()
+    m = lm("y ~ x1 + x2", d)
+    mg = glm("y ~ x1 + x2", d, family=Gamma(link="log"))
+    # sigma / weighted.residuals / covratio go through the lm-QR path → tol.
+    _assert_r_tol([
+        (sigma(m), f"sigma({_AOV_LM})", 0.5716136426669162),
+        (sigma(mg), f"sigma(glm(y ~ x1 + x2, {_AOV_DF}, "
+                    "family = Gamma(link = \"log\")))", 0.099308330006338305),
+        (float(weighted_residuals(m)[6]),
+         f"weighted.residuals({_AOV_LM})[7]", 0.17269690648941216),
+        (float(covratio(m)[7]), f"covratio({_AOV_LM})[8]", 0.36966985150973153),
+        (float(covratio(m)[0]), f"covratio({_AOV_LM})[1]", 1.0813620351622721),
+    ])
+    # cov2cor is pure arithmetic on shared libm → bit-exact.
+    V = np.array([[4.0, 2.0, 1.0], [2.0, 9.0, 3.0], [1.0, 3.0, 16.0]])
+    C = cov2cor(V)
+    MAT = "matrix(c(4,2,1,2,9,3,1,3,16), 3, 3)"
+    _assert_r([
+        (float(C[0, 1]), f"cov2cor({MAT})[1,2]", 1 / 3),
+        (float(C[0, 2]), f"cov2cor({MAT})[1,3]", 0.125),
+        (float(C[1, 2]), f"cov2cor({MAT})[2,3]", 0.25),
+        (float(C[2, 2]), f"cov2cor({MAT})[3,3]", 1.0),
+    ])
+    # weighted lm: weighted.residuals = sqrt(w) * response residual.
+    w = np.array([1.0, 2.0, 1.0, 0.5, 1.0, 1.5, 1.0, 2.0, 1.0, 1.0])
+    mw = lm("y ~ x1 + x2", d, weights=w)
+    WLM = (f"lm(y ~ x1 + x2, {_AOV_DF}, weights = "
+           "c(1,2,1,0.5,1,1.5,1,2,1,1))")
+    _assert_r_tol([
+        (sigma(mw), f"sigma({WLM})", 0.6124170195254237),
+        (float(weighted_residuals(mw)[0]),
+         f"weighted.residuals({WLM})[1]", 0.6295405349324259),
+    ])
+
+
+def test_influence_measures_vs_r():
+    from hea.models.lm import lm
+
+    im = influence_measures(lm("y ~ x1 + x2", _aov_frame()))
+    # column labels are exactly R's (abbreviate: "(Intercept)" -> "1_").
+    assert im.infmat.columns == [
+        "dfb.1_", "dfb.x1", "dfb.x2", "dffit", "cov.r", "cook.d", "hat"]
+    IM = f"influence.measures({_AOV_LM})$infmat"
+    _assert_r_tol([
+        (float(im.infmat["dfb.x1"][7]), f'{IM}[8,"dfb.x1"]', -1.0189642674),
+        (float(im.infmat["dfb.x2"][7]), f'{IM}[8,"dfb.x2"]', 2.2263450877),
+        (float(im.infmat["dffit"][7]), f'{IM}[8,"dffit"]', 2.6996421200),
+        (float(im.infmat["cov.r"][0]), f'{IM}[1,"cov.r"]', 1.0813620352),
+        (float(im.infmat["cook.d"][7]), f'{IM}[8,"cook.d"]', 1.3578356303),
+        (float(im.infmat["hat"][7]), f'{IM}[8,"hat"]', 0.5276606143),
+    ])
+    # is.inf flags are deterministic — compare the whole matrix to R's output.
+    expected = np.zeros((10, 7), dtype=bool)
+    expected[7, [1, 2, 3, 5]] = True          # obs 8: dfb.x1/x2, dffit, cook.d
+    expected[8, 1] = True                      # obs 9: dfb.x1
+    assert np.array_equal(im.is_inf.to_numpy(), expected)
+
+
+def test_lsfit_ls_diag_ls_print_vs_r():
+    d = _aov_frame()
+    x = np.column_stack([d["x1"].to_numpy(), d["x2"].to_numpy()])
+    y = d["y"].to_numpy()
+    ls1 = lsfit(x, y)
+    assert list(ls1["coefficients"].keys()) == ["Intercept", "X1", "X2"]
+    ld = ls_diag(ls1)
+    lp = ls_print(ls1, print_it=False)
+    ct = lp["coef.table"][1]["values"]        # Estimate/Std.Err/t/Pr
+    _assert_r_tol([
+        (float(ls1["coefficients"]["X1"]), f"{_AOV_LSF}$coef[2]", 1.800753384270644),
+        (float(ls1["residuals"][0]), f"{_AOV_LSF}$residuals[1]", 0.59415268407955535),
+        (float(ld["std.dev"]), f"ls.diag({_AOV_LSF})$std.dev", 0.57161364266691617),
+        (float(ld["hat"][0]), f"ls.diag({_AOV_LSF})$hat[1]", 0.33557569172839014),
+        (float(ld["stud.res"][7]),
+         f"ls.diag({_AOV_LSF})$stud.res[8]", 2.5542060912640889),
+        (float(ld["cooks"][7]), f"ls.diag({_AOV_LSF})$cooks[8]", 1.3578356303464223),
+        (float(ld["std.err"].reshape(-1)[1]),
+         f"as.vector(ls.diag({_AOV_LSF})$std.err)[2]", 0.1094608023092585),
+        (float(ld["cov.unscaled"][0, 1]),
+         f"ls.diag({_AOV_LSF})$cov.unscaled[1,2]", -0.1506939600836976201),
+        # ls.print coef.table: t-value & Pr(>|t|) for x1.
+        (float(ct[1, 2]),
+         f"ls.print({_AOV_LSF}, print.it=FALSE)$coef.table[[1]][2,3]",
+         16.45112539174520094),
+        (float(ct[1, 3]),
+         f"ls.print({_AOV_LSF}, print.it=FALSE)$coef.table[[1]][2,4]",
+         7.4798786256017835e-07),
+    ])
+
+
+def test_replications_vs_r():
+    # Balanced design → R returns a named vector (dict of ints here).
+    dd = pl.DataFrame({
+        "A": ["a"] * 6 + ["b"] * 6,
+        "B": ["x", "y", "z"] * 4,
+        "resp": list(range(12)),
+    })
+    assert replications("resp ~ A + B", dd) == {"A": 6, "B": 4}
+    assert replications("resp ~ A*B", dd) == {"A": 6, "B": 4, "A:B": 2}
+    # Unbalanced → R returns a list of tables; hea returns per-term count dicts
+    # in sorted factor-level order (matches R's tapply cell counts).
+    ub = pl.DataFrame({
+        "A": ["a", "a", "a", "b", "b", "b", "b", "b"],
+        "B": ["x", "y", "z", "x", "x", "y", "z", "z"],
+        "resp": list(range(1, 9)),
+    })
+    rep = replications("resp ~ A + B", ub)
+    assert rep["A"] == {"a": 3, "b": 5}
+    assert rep["B"] == {"x": 3, "y": 2, "z": 3}
+    rep_ab = replications("resp ~ A:B", ub)["A:B"]
+    assert rep_ab == {("a", "x"): 1, ("a", "y"): 1, ("a", "z"): 1,
+                      ("b", "x"): 2, ("b", "y"): 1, ("b", "z"): 2}
 
 
 def test_chisq_test_simulate_p_value():

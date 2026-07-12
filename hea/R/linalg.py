@@ -1,13 +1,13 @@
 """R's least-squares QR kernel — a mechanical port of the LINPACK routines R
 calls from ``lm.fit`` / ``lm.wfit`` via ``Cdqrls`` (``stats/src/lm.c``):
 
-  * ``dqrdc2`` — R's *modification* of LINPACK ``dqrdc`` (``ref/.../dqrdc2.f``):
+  * ``dqrdc2`` — R's *modification* of LINPACK ``dqrdc`` (``dqrdc2.f``):
     Householder QR with a limited column-pivoting strategy that defers
     near-dependent columns to the right (so sequential 1-df effects are well
     defined) and reports the rank.
-  * ``dqrsl``  — LINPACK ``dqrsl`` (``ref/.../dqrsl.f``): applies the factored Q
+  * ``dqrsl``  — LINPACK ``dqrsl`` (``dqrsl.f``): applies the factored Q
     to compute ``Qᵀy`` (effects), the coefficients ``b`` and residuals ``rsd``.
-  * ``dqrls``  — the ``dqrdc2`` + ``dqrsl`` wrapper (``ref/.../dqrls.f``).
+  * ``dqrls``  — the ``dqrdc2`` + ``dqrsl`` wrapper (``dqrls.f``).
   * ``Cdqrls`` — the ``lm.c`` entry returning R's ``$qr/$coefficients/$residuals/
     $effects/$rank/$pivot/$qraux/$tol/$pivoted``.
 
