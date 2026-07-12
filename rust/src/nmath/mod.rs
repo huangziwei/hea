@@ -12,13 +12,16 @@ pub mod consts;
 pub mod discrete;
 pub mod exp;
 pub mod gamma;
+pub mod hyper;
 pub mod lgamma;
 pub mod loader;
+pub mod noncentral;
 pub mod norm;
 pub mod psigamma;
 pub mod qbeta;
 pub mod tf;
 pub mod toms708;
+pub mod tukey;
 pub mod util;
 
 /// Register every nmath pyfunction onto the `_rs` module.
@@ -62,6 +65,25 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tf::dt, m)?)?;
     m.add_function(wrap_pyfunction!(tf::pf, m)?)?;
     m.add_function(wrap_pyfunction!(tf::qf, m)?)?;
+    // noncentral chi-square / t / beta / F
+    m.add_function(wrap_pyfunction!(noncentral::pnchisq, m)?)?;
+    m.add_function(wrap_pyfunction!(noncentral::dnchisq, m)?)?;
+    m.add_function(wrap_pyfunction!(noncentral::qnchisq, m)?)?;
+    m.add_function(wrap_pyfunction!(noncentral::pnt, m)?)?;
+    m.add_function(wrap_pyfunction!(noncentral::dnt, m)?)?;
+    m.add_function(wrap_pyfunction!(noncentral::qnt, m)?)?;
+    m.add_function(wrap_pyfunction!(noncentral::pnbeta, m)?)?;
+    m.add_function(wrap_pyfunction!(noncentral::dnbeta, m)?)?;
+    m.add_function(wrap_pyfunction!(noncentral::qnbeta, m)?)?;
+    m.add_function(wrap_pyfunction!(noncentral::pnf, m)?)?;
+    m.add_function(wrap_pyfunction!(noncentral::dnf, m)?)?;
+    m.add_function(wrap_pyfunction!(noncentral::qnf, m)?)?;
+    // studentized range (tukey)
+    m.add_function(wrap_pyfunction!(tukey::ptukey, m)?)?;
+    m.add_function(wrap_pyfunction!(tukey::qtukey, m)?)?;
+    // hypergeometric
+    m.add_function(wrap_pyfunction!(hyper::dhyper, m)?)?;
+    m.add_function(wrap_pyfunction!(hyper::phyper, m)?)?;
     // exponential
     m.add_function(wrap_pyfunction!(exp::dexp, m)?)?;
     m.add_function(wrap_pyfunction!(exp::pexp, m)?)?;

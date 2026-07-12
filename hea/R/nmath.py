@@ -457,6 +457,25 @@ def _dt1(lower_tail, log_p):
     return _NEGINF if log_p else 0.0
 
 
+def _dt_val(x, lower_tail, log_p):
+    # R_DT_val(x) = lower_tail ? R_D_val(x) : R_D_Clog(x)
+    if lower_tail:
+        return math.log(x) if log_p else x
+    return math.log1p(-x) if log_p else (0.5 - x + 0.5)
+
+
+def _dt_qiv(p, lower_tail, log_p):
+    # R_DT_qIv(p): map (lower_tail, log_p) p back to the lower-tail identity prob
+    if log_p:
+        return math.exp(p) if lower_tail else -math.expm1(p)
+    return p if lower_tail else (0.5 - p + 0.5)
+
+
+def _r_forceint(x):
+    # R_forceint(x) = (double) nearbyint(x); Python round() is round-half-to-even
+    return float(round(x))
+
+
 # === Vectorised fast paths (numpy) ===========================================
 # The common case (log_p=False, finite/in-range argument, non-extreme tail) is
 # evaluated with numpy across the whole array; the rare lanes (nan, boundaries,
@@ -5275,3 +5294,1533 @@ def dbeta_vec(x, a, b, give_log=False):
 
 
 _PY_VEC["dbeta"] = dbeta_vec
+
+
+# === ptukey / qtukey — studentized range (nmath/ptukey.c, nmath/qtukey.c) ====
+# CDF (ptukey) and quantile (qtukey) of the maximum of ``rr`` studentized
+# ranges, each on ``cc`` means with ``df`` error d.f. (Copenhaver & Holland
+# 1988). ``wprob`` is Hartley's range integral by 12-point Gauss-Legendre
+# quadrature; ptukey wraps it in a 16-point outer quadrature over the chi
+# density of the error scale; qtukey inverts ptukey by the secant method with
+# an AS 70 (Odeh-Evans) starting value. All d/p flags follow R's dpq macros.
+
+_PTUKEY_XLEG = (  # wprob: 12-point Gauss-Legendre nodes (upper half)
+    0.981560634246719250690549090149,
+    0.904117256370474856678465866119,
+    0.769902674194304687036893833213,
+    0.587317954286617447296702418941,
+    0.367831498998180193752691536644,
+    0.125233408511468915472441369464,
+)
+_PTUKEY_ALEG = (  # wprob: 12-point Gauss-Legendre weights
+    0.047175336386511827194615961485,
+    0.106939325995318430960254718194,
+    0.160078328543346226334652529543,
+    0.203167426723065921749064455810,
+    0.233492536538354808760849898925,
+    0.249147045813402785000562436043,
+)
+_PTUKEY_XLEGQ = (  # ptukey: 16-point Gauss-Legendre nodes (upper half)
+    0.989400934991649932596154173450,
+    0.944575023073232576077988415535,
+    0.865631202387831743880467897712,
+    0.755404408355003033895101194847,
+    0.617876244402643748446671764049,
+    0.458016777657227386342419442984,
+    0.281603550779258913230460501460,
+    0.950125098376374401853193354250e-1,
+)
+_PTUKEY_ALEGQ = (  # ptukey: 16-point Gauss-Legendre weights
+    0.271524594117540948517805724560e-1,
+    0.622535239386478928628438369944e-1,
+    0.951585116824927848099251076022e-1,
+    0.124628971255533872052476282192,
+    0.149595988816576732081501730547,
+    0.169156519395002538189312079030,
+    0.182603415044923588866763667969,
+    0.189450610455068496285396723208,
+)
+
+# R's ``LDOUBLE`` (== C ``long double``): 80-bit x87 extended on x86-64, plain
+# double on arm64. ``np.longdouble`` tracks the platform identically, so the
+# ``wprob`` quadrature accumulators round bit-for-bit to R on either arch.
+_LD = np.longdouble
+
+
+def _wprob(w: float, rr: float, cc: float) -> float:
+    """Probability integral of Hartley's form of the range (``wprob`` in
+    nmath/ptukey.c). ``w`` range value, ``rr`` groups, ``cc`` means."""
+    nleg = 12
+    ihalf = 6
+    C1 = -30.0
+    C2 = -50.0
+    C3 = 60.0
+    bb = 8.0
+    wlar = 3.0
+    wincr1 = 2.0
+    wincr2 = 3.0
+    xleg = _PTUKEY_XLEG
+    aleg = _PTUKEY_ALEG
+
+    qsqz = w * 0.5
+    # if w >= 16 the integral lower bound is ~1, so return 1.
+    if qsqz >= bb:
+        return 1.0
+
+    # first term in integral of Hartley's form: (f(w/2) - 1) ^ cc
+    pr_w = 2 * pnorm5(qsqz, 0.0, 1.0, True, False) - 1.0
+    if pr_w >= math.exp(C2 / cc):
+        pr_w = math.pow(pr_w, cc)
+    else:
+        pr_w = 0.0
+
+    # fewer intervals when w is large (second component then small)
+    wincr = wincr1 if w > wlar else wincr2
+
+    blb = _LD(qsqz)
+    binc = (bb - qsqz) / wincr
+    bub = blb + binc
+    einsum = _LD(0.0)
+
+    cc1 = cc - 1.0
+    for _ in range(int(wincr)):
+        elsum = _LD(0.0)
+        a = float(0.5 * (bub + blb))  # C casts (double)(0.5*(bub+blb))
+        b = float(0.5 * (bub - blb))
+        for jj in range(1, nleg + 1):
+            if ihalf < jj:
+                j = (nleg - jj) + 1
+                xx = xleg[j - 1]
+            else:
+                j = jj
+                xx = -xleg[j - 1]
+            c = b * xx
+            ac = a + c
+            qexpo = ac * ac
+            if qexpo > C3:
+                break
+            pplus = 2 * pnorm5(ac, 0.0, 1.0, True, False)
+            pminus = 2 * pnorm5(ac, w, 1.0, True, False)
+            rinsum = (pplus * 0.5) - (pminus * 0.5)
+            if rinsum >= math.exp(C1 / cc1):
+                rinsum = (aleg[j - 1] * math.exp(-(0.5 * qexpo))) \
+                    * math.pow(rinsum, cc1)
+                elsum += rinsum
+        elsum *= (((2.0 * b) * cc) * _M_1_SQRT_2PI)
+        einsum += elsum
+        blb = bub
+        bub += binc
+
+    pr_w = pr_w + float(einsum)
+    if pr_w <= math.exp(C1 / rr):
+        return 0.0
+    pr_w = math.pow(pr_w, rr)
+    if pr_w >= 1.0:
+        return 1.0
+    return pr_w
+
+
+def ptukey(q: float, rr: float, cc: float, df: float,
+           lower_tail: bool = True, log_p: bool = False) -> float:
+    """R's ``ptukey`` — CDF of the maximum studentized range (nmath/ptukey.c).
+
+    Arguments are in the C order: ``q`` studentized-range value, ``rr`` number
+    of groups/rows, ``cc`` number of means/treatments, ``df`` error degrees of
+    freedom. (R's user-level ``ptukey(q, nmeans, df, nranges)`` maps
+    ``nmeans -> cc`` and ``nranges -> rr``.)  Bit-exact to R via the ported
+    ``pnorm5`` / ``lgammafn``.
+    """
+    nlegq = 16
+    ihalfq = 8
+    eps1 = -30.0
+    eps2 = 1.0e-14
+    dhaf = 100.0
+    dquar = 800.0
+    deigh = 5000.0
+    dlarg = 25000.0
+    ulen1 = 1.0
+    ulen2 = 0.5
+    ulen3 = 0.25
+    ulen4 = 0.125
+    xlegq = _PTUKEY_XLEGQ
+    alegq = _PTUKEY_ALEGQ
+
+    if math.isnan(q) or math.isnan(rr) or math.isnan(cc) or math.isnan(df):
+        return q + rr + cc + df
+
+    if q <= 0:
+        return _dt0(lower_tail, log_p)
+
+    # df must be > 1 and there must be at least two values
+    if df < 2 or rr < 1 or cc < 2:
+        return _NAN
+
+    if not math.isfinite(q):
+        return _dt1(lower_tail, log_p)
+
+    if df > dlarg:
+        return _dt_val(_wprob(q, rr, cc), lower_tail, log_p)
+
+    # leading constant
+    f2 = df * 0.5
+    f2lf = ((f2 * math.log(df)) - (df * _M_LN2)) - _lgammafn(f2)
+    f21 = f2 - 1.0
+
+    ff4 = df * 0.25
+    if df <= dhaf:
+        ulen = ulen1
+    elif df <= dquar:
+        ulen = ulen2
+    elif df <= deigh:
+        ulen = ulen3
+    else:
+        ulen = ulen4
+
+    f2lf += math.log(ulen)
+    ans = 0.0
+    otsum = 0.0
+
+    for i in range(1, 51):
+        otsum = 0.0
+        twa1 = (2 * i - 1) * ulen
+        for jj in range(1, nlegq + 1):
+            if ihalfq < jj:
+                j = jj - ihalfq - 1
+                t1 = (f2lf + (f21 * math.log(twa1 + (xlegq[j] * ulen)))) \
+                    - (((xlegq[j] * ulen) + twa1) * ff4)
+            else:
+                j = jj - 1
+                t1 = (f2lf + (f21 * math.log(twa1 - (xlegq[j] * ulen)))) \
+                    + (((xlegq[j] * ulen) - twa1) * ff4)
+            # if exp(t1) < 9e-14 it does not contribute to the integral
+            if t1 >= eps1:
+                if ihalfq < jj:
+                    qsqz = q * math.sqrt(((xlegq[j] * ulen) + twa1) * 0.5)
+                else:
+                    qsqz = q * math.sqrt(((-(xlegq[j] * ulen)) + twa1) * 0.5)
+                wprb = _wprob(qsqz, rr, cc)
+                rotsum = (wprb * alegq[j]) * math.exp(t1)
+                otsum += rotsum
+        # stop once converged, but do at least 1/ulen intervals
+        if i * ulen >= 1.0 and otsum <= eps2:
+            break
+        ans += otsum
+
+    if ans > 1.0:
+        ans = 1.0
+    return _dt_val(ans, lower_tail, log_p)
+
+
+def _qtukey_qinv(p: float, c: float, v: float) -> float:
+    """AS 70 (Odeh-Evans) starting estimate for the studentized-range
+    quantile (``qinv`` in nmath/qtukey.c)."""
+    p0 = 0.322232421088
+    q0 = 0.993484626060e-01
+    p1 = -1.0
+    q1 = 0.588581570495
+    p2 = -0.342242088547
+    q2 = 0.531103462366
+    p3 = -0.204231210125
+    q3 = 0.103537752850
+    p4 = -0.453642210148e-04
+    q4 = 0.38560700634e-02
+    c1 = 0.8832
+    c2 = 0.2368
+    c3 = 1.214
+    c4 = 1.208
+    c5 = 1.4142
+    vmax = 120.0
+
+    ps = 0.5 - 0.5 * p
+    yi = math.sqrt(math.log(1.0 / (ps * ps)))
+    t = yi + ((((yi * p4 + p3) * yi + p2) * yi + p1) * yi + p0) \
+        / ((((yi * q4 + q3) * yi + q2) * yi + q1) * yi + q0)
+    if v < vmax:
+        t += (t * t * t + t) / v / 4.0
+    q = c1 - c2 * t
+    if v < vmax:
+        q += -c3 / v + c4 * t / v
+    return t * (q * math.log(c - 1.0) + c5)
+
+
+def qtukey(p: float, rr: float, cc: float, df: float,
+           lower_tail: bool = True, log_p: bool = False) -> float:
+    """R's ``qtukey`` — quantile of the maximum studentized range
+    (nmath/qtukey.c). Secant iteration on :func:`ptukey`, AS 70 start value.
+    Arguments in the C order (``rr`` groups, ``cc`` means, ``df`` error d.f.)."""
+    eps = 0.0001
+    maxiter = 50
+
+    if math.isnan(p) or math.isnan(rr) or math.isnan(cc) or math.isnan(df):
+        return p + rr + cc + df
+
+    if df < 2 or rr < 1 or cc < 2:
+        return _NAN
+
+    # R_Q_P01_boundaries(p, 0, ML_POSINF)
+    if log_p:
+        if p > 0:
+            return _NAN
+        if p == 0:
+            return _INF if lower_tail else 0.0
+        if p == _NEGINF:
+            return 0.0 if lower_tail else _INF
+    else:
+        if p < 0 or p > 1:
+            return _NAN
+        if p == 0:
+            return 0.0 if lower_tail else _INF
+        if p == 1:
+            return _INF if lower_tail else 0.0
+
+    # p = R_DT_qIv(p): lower-tail, non-log probability
+    if log_p:
+        p = math.exp(p) if lower_tail else -math.expm1(p)
+    else:
+        p = p if lower_tail else (0.5 - p + 0.5)
+
+    x0 = _qtukey_qinv(p, cc, df)
+    valx0 = ptukey(x0, rr, cc, df, True, False) - p
+
+    # second iterate: 1 less than the first if it overshoots, else 1 more
+    if valx0 > 0.0:
+        x1 = max(0.0, x0 - 1.0)
+    else:
+        x1 = x0 + 1.0
+    valx1 = ptukey(x1, rr, cc, df, True, False) - p
+
+    ans = 0.0
+    for _ in range(1, maxiter):
+        ans = x1 - ((valx1 * (x1 - x0)) / (valx1 - valx0))
+        valx0 = valx1
+        x0 = x1
+        if ans < 0.0:  # new iterate must be >= 0
+            ans = 0.0
+            valx1 = -p
+        valx1 = ptukey(ans, rr, cc, df, True, False) - p
+        x1 = ans
+        if abs(x1 - x0) < eps:
+            return ans
+
+    # did not converge in maxiter iterations
+    return ans
+
+
+# === choose / lchoose — binomial coefficients (nmath/choose.c) ===============
+# Faithful port of R's choose/lchoose (generalized binomial: non-integer n,
+# integer k). Used to normalize the exact Wilcoxon rank-sum distribution.
+
+def _lfastchoose(n, k):
+    return -math.log(n + 1.0) - lbeta(n - k + 1.0, k + 1.0)
+
+
+def _lgammafn_sign(x):
+    """R's ``lgammafn_sign(x, &sgn)`` — log|Gamma(x)| plus the sign of Gamma(x)."""
+    sgn = 1
+    if x < 0 and (math.floor(-x) % 2.0) == 0:
+        sgn = -1
+    return _lgammafn(x), sgn
+
+
+def _lfastchoose2(n, k):
+    """Mathematically == :func:`_lfastchoose`; stable when n-k+1 < 0. Returns
+    ``(value, sign)`` (the sign of Gamma(n-k+1))."""
+    r, s = _lgammafn_sign(n - k + 1.0)
+    return _lgammafn(n + 1.0) - _lgammafn(k + 1.0) - r, s
+
+
+def lchoose(n, k):
+    """R's ``lchoose(n, k)`` = log|choose(n, k)| (nmath/choose.c), bit-exact."""
+    k = _r_forceint(k)
+    if math.isnan(n) or math.isnan(k):
+        return n + k
+    if k < 2:
+        if k < 0:
+            return _NEGINF
+        if k == 0:
+            return 0.0
+        return math.log(abs(n))  # k == 1
+    if n < 0:
+        return lchoose(-n + k - 1, k)
+    elif not _R_nonint(n):
+        n = _r_forceint(n)
+        if n < k:
+            return _NEGINF
+        if n - k < 2:
+            return lchoose(n, n - k)  # symmetry
+        return _lfastchoose(n, k)
+    # non-integer n >= 0
+    if n < k - 1:
+        v, _s = _lfastchoose2(n, k)
+        return v
+    return _lfastchoose(n, k)
+
+
+_CHOOSE_K_SMALL_MAX = 30
+
+
+def choose(n, k):
+    """R's ``choose(n, k)`` — binomial coefficient (nmath/choose.c), bit-exact."""
+    k = _r_forceint(k)
+    if math.isnan(n) or math.isnan(k):
+        return n + k
+    if k < _CHOOSE_K_SMALL_MAX:
+        if (n - k < k) and n >= 0 and (not _R_nonint(n)):
+            k = _r_forceint(n - k)  # symmetry, keep k integer
+        if k < 0:
+            return 0.0
+        if k == 0:
+            return 1.0
+        r = n
+        j = 2
+        while j <= k:
+            r *= (n - j + 1) / j
+            j += 1
+        return _r_forceint(r) if not _R_nonint(n) else r
+    # k >= k_small_max
+    if n < 0:
+        r = choose(-n + k - 1, k)
+        if k != 2 * math.floor(k / 2.0):  # ODD(k)
+            r = -r
+        return r
+    elif not _R_nonint(n):
+        n = _r_forceint(n)
+        if n < k:
+            return 0.0
+        if n - k < _CHOOSE_K_SMALL_MAX:
+            return choose(n, n - k)  # symmetry
+        return _r_forceint(math.exp(_lfastchoose(n, k)))
+    # non-integer n >= 0
+    if n < k - 1:
+        r, s = _lfastchoose2(n, k)
+        return s * math.exp(r)
+    return math.exp(_lfastchoose(n, k))
+
+
+# === Wilcoxon signed-rank distribution (nmath/signrank.c) ====================
+# csignrank(k, n): number of subsets of {1,...,n} summing to k. The count array
+# w[0..floor(u/2)] (u = n(n+1)/2) is built by the partition recurrence and
+# cached per n (mirrors signrank.c's static w[] with w_init_maybe).
+_SIGNRANK_W: dict[int, list] = {}
+
+
+def _signrank_w(n: int) -> list:
+    w = _SIGNRANK_W.get(n)
+    if w is not None:
+        return w
+    u = n * (n + 1) // 2
+    c = u // 2
+    w = [0.0] * (c + 1)
+    w[0] = 1.0
+    w[1] = 1.0
+    for j in range(2, n + 1):
+        end = min(j * (j + 1) // 2, c)
+        for i in range(end, j - 1, -1):
+            w[i] += w[i - j]
+    _SIGNRANK_W[n] = w
+    return w
+
+
+def _csignrank(k: int, n: int) -> float:
+    u = n * (n + 1) // 2
+    c = u // 2
+    if k < 0 or k > u:
+        return 0.0
+    if k > c:
+        k = u - k
+    if n == 1:
+        return 1.0
+    return _signrank_w(n)[k]
+
+
+def dsignrank(x, n, give_log=False):
+    """R's ``dsignrank`` — density of the Wilcoxon signed-rank statistic."""
+    if math.isnan(x) or math.isnan(n):
+        return x + n
+    n = _r_forceint(n)
+    if n <= 0:
+        return _NAN
+    if _R_nonint(x):
+        return _NEGINF if give_log else 0.0  # R_D__0
+    x = _r_forceint(x)
+    if x < 0 or x > (n * (n + 1) / 2):
+        return _NEGINF if give_log else 0.0
+    nn = int(n)
+    logd = math.log(_csignrank(int(x), nn)) - n * _M_LN2
+    return logd if give_log else math.exp(logd)
+
+
+def psignrank(x, n, lower_tail=True, log_p=False):
+    """R's ``psignrank`` — CDF of the Wilcoxon signed-rank statistic."""
+    if math.isnan(x) or math.isnan(n):
+        return x + n
+    if not math.isfinite(n):
+        return _NAN
+    n = _r_forceint(n)
+    if n <= 0:
+        return _NAN
+    x = math.floor(x + 1e-7)
+    if x < 0.0:
+        return _dt0(lower_tail, log_p)
+    if x >= n * (n + 1) / 2:
+        return _dt1(lower_tail, log_p)
+    nn = int(n)
+    f = math.exp(-n * _M_LN2)
+    p = 0.0
+    if x <= (n * (n + 1) / 4):
+        i = 0
+        while i <= x:
+            p += _csignrank(i, nn) * f
+            i += 1
+    else:
+        x = n * (n + 1) / 2 - x
+        i = 0
+        while i < x:
+            p += _csignrank(i, nn) * f
+            i += 1
+        lower_tail = not lower_tail
+    return _dt_val(p, lower_tail, log_p)
+
+
+def qsignrank(x, n, lower_tail=True, log_p=False):
+    """R's ``qsignrank`` — quantile of the Wilcoxon signed-rank statistic."""
+    if math.isnan(x) or math.isnan(n):
+        return x + n
+    if not math.isfinite(x) or not math.isfinite(n):
+        return _NAN
+    if (log_p and x > 0) or ((not log_p) and (x < 0 or x > 1)):  # R_Q_P01_check
+        return _NAN
+    n = _r_forceint(n)
+    if n <= 0:
+        return _NAN
+    if x == _dt0(lower_tail, log_p):
+        return 0.0
+    if x == _dt1(lower_tail, log_p):
+        return n * (n + 1) / 2
+    if log_p or not lower_tail:
+        x = _dt_qiv(x, lower_tail, log_p)
+    nn = int(n)
+    f = math.exp(-n * _M_LN2)
+    p = 0.0
+    q = 0
+    if x <= 0.5:
+        x = x - 10 * _DBL_EPSILON
+        while True:
+            p += _csignrank(q, nn) * f
+            if p >= x:
+                break
+            q += 1
+    else:
+        x = 1 - x + 10 * _DBL_EPSILON
+        while True:
+            p += _csignrank(q, nn) * f
+            if p > x:
+                q = int(n * (n + 1) / 2 - q)
+                break
+            q += 1
+    return float(q)
+
+
+# === Wilcoxon rank-sum (Mann-Whitney) distribution (nmath/wilcox.c) ==========
+# cwilcox(k, m, n): number of ways to choose the rank-sum statistic value k.
+# Loeffler recurrence with the divisor-sum sigma; w[] and sigma[] are cached per
+# reduced (i, j) = (min(m,n), max(m,n)), filled lazily up to k (w_fill_to_k).
+_WILCOX_CACHE: dict = {}
+
+
+def _cwilcox_sigma(k: int, m: int, n: int) -> int:
+    iter1 = m if m < k else k
+    iter2 = (m + n) if (m + n) < k else k
+    s = 0
+    for d in range(1, iter1 + 1):
+        if k % d == 0:
+            s += d
+    for d in range(n + 1, iter2 + 1):
+        if k % d == 0:
+            s -= d
+    return s
+
+
+def _wilcox_fill_to_k(m: int, n: int, new_k: int, cache: dict) -> None:
+    if new_k < cache["max_k"]:
+        return
+    w = cache["w"]
+    sigma = cache["sigma"]
+    for i in range(cache["max_k"] + 1, new_k + 1):
+        sigma[i] = _cwilcox_sigma(i, m, n)
+    for k in range(cache["max_k"] + 1, new_k + 1):
+        if k == 0:
+            w[0] = 1.0
+        else:
+            s = 0.0
+            for i in range(0, k):
+                s += w[i] * sigma[k - i]
+            w[k] = s / k
+    cache["max_k"] = new_k
+
+
+def _cwilcox(k: int, m: int, n: int) -> float:
+    u = m * n
+    if k < 0 or k > u:
+        return 0.0
+    c = u // 2
+    if k > c:
+        k = u - k
+    if m < n:
+        i, j = m, n
+    else:
+        i, j = n, m  # i <= j
+    if i == 0 or j == 0 or k == 0:
+        return 1.0 if k == 0 else 0.0
+    cache = _WILCOX_CACHE.get((i, j))
+    if cache is None:
+        size = (i * j) // 2 + 1
+        cache = {"w": [0.0] * size, "sigma": [0] * size, "max_k": -1}
+        _WILCOX_CACHE[(i, j)] = cache
+    _wilcox_fill_to_k(i, j, k, cache)
+    return cache["w"][k]
+
+
+def dwilcox(x, m, n, give_log=False):
+    """R's ``dwilcox`` — density of the Wilcoxon rank-sum (Mann-Whitney) stat."""
+    if math.isnan(x) or math.isnan(m) or math.isnan(n):
+        return x + m + n
+    m = _r_forceint(m)
+    n = _r_forceint(n)
+    if m <= 0 or n <= 0:
+        return _NAN
+    if _R_nonint(x):
+        return _NEGINF if give_log else 0.0
+    x = _r_forceint(x)
+    if x < 0 or x > m * n:
+        return _NEGINF if give_log else 0.0
+    mm, nn, xx = int(m), int(n), int(x)
+    if give_log:
+        return math.log(_cwilcox(xx, mm, nn)) - lchoose(m + n, n)
+    return _cwilcox(xx, mm, nn) / choose(m + n, n)
+
+
+def pwilcox(q, m, n, lower_tail=True, log_p=False):
+    """R's ``pwilcox`` — CDF of the Wilcoxon rank-sum (Mann-Whitney) statistic."""
+    if math.isnan(q) or math.isnan(m) or math.isnan(n):
+        return q + m + n
+    if not math.isfinite(m) or not math.isfinite(n):
+        return _NAN
+    m = _r_forceint(m)
+    n = _r_forceint(n)
+    if m <= 0 or n <= 0:
+        return _NAN
+    q = math.floor(q + 1e-7)
+    if q < 0.0:
+        return _dt0(lower_tail, log_p)
+    if q >= m * n:
+        return _dt1(lower_tail, log_p)
+    mm, nn = int(m), int(n)
+    c = choose(m + n, n)
+    p = 0.0
+    if q <= (m * n / 2):
+        i = 0
+        while i <= q:
+            p += _cwilcox(i, mm, nn) / c
+            i += 1
+    else:
+        q = m * n - q
+        i = 0
+        while i < q:
+            p += _cwilcox(i, mm, nn) / c
+            i += 1
+        lower_tail = not lower_tail
+    return _dt_val(p, lower_tail, log_p)
+
+
+def qwilcox(x, m, n, lower_tail=True, log_p=False):
+    """R's ``qwilcox`` — quantile of the Wilcoxon rank-sum (Mann-Whitney) stat."""
+    if math.isnan(x) or math.isnan(m) or math.isnan(n):
+        return x + m + n
+    if not (math.isfinite(x) and math.isfinite(m) and math.isfinite(n)):
+        return _NAN
+    if (log_p and x > 0) or ((not log_p) and (x < 0 or x > 1)):  # R_Q_P01_check
+        return _NAN
+    m = _r_forceint(m)
+    n = _r_forceint(n)
+    if m <= 0 or n <= 0:
+        return _NAN
+    if x == _dt0(lower_tail, log_p):
+        return 0.0
+    if x == _dt1(lower_tail, log_p):
+        return m * n
+    if log_p or not lower_tail:
+        x = _dt_qiv(x, lower_tail, log_p)
+    mm, nn = int(m), int(n)
+    c = choose(m + n, n)
+    p = 0.0
+    q = 0
+    if x <= 0.5:
+        x = x - 10 * _DBL_EPSILON
+        while True:
+            p += _cwilcox(q, mm, nn) / c
+            if p >= x:
+                break
+            q += 1
+    else:
+        x = 1 - x + 10 * _DBL_EPSILON
+        while True:
+            p += _cwilcox(q, mm, nn) / c
+            if p > x:
+                q = int(m * n - q)
+                break
+            q += 1
+    return float(q)
+
+
+# === Noncentral chi-square (nmath/pnchisq.c, dnchisq.c, qnchisq.c) ===========
+# CDF (AS 275, Ding 1992), density (Poisson mixture of central chi-squares) and
+# quantile (bisection on the CDF). The series accumulators are C `long double`;
+# `_LD` (np.longdouble) tracks R's LDOUBLE and np.exp/np.log match expl/logl.
+_DBL_MAX = 1.7976931348623157e308
+_PNCH_DBL_MIN_EXP = _M_LN2 * (-1021)  # = M_LN2 * DBL_MIN_EXP (IEEE double)
+
+
+def _pchisq(x, df, lower_tail, log_p):
+    return pgamma(x, df / 2.0, 2.0, lower_tail, log_p)
+
+
+def _dchisq(x, df, give_log):
+    return dgamma(x, df / 2.0, 2.0, give_log)
+
+
+def _qchisq(p, df, lower_tail, log_p):
+    return qgamma(p, df / 2.0, 2.0, lower_tail, log_p)
+
+
+def _pnchisq_raw(x, f, theta, errmax, reltol, itrmax, lower_tail, log_p):
+    """AS 275 noncentral chi-square CDF core (pnchisq.c ``pnchisq_raw``)."""
+    if x <= 0.0:
+        if x == 0.0 and f == 0.0:  # chi^2_0 has point mass at 0
+            _L = -0.5 * theta
+            if lower_tail:
+                return _L if log_p else math.exp(_L)  # R_D_exp(_L)
+            return _R_Log1_Exp(_L) if log_p else -math.expm1(_L)
+        return _dt0(lower_tail, log_p)
+    if not math.isfinite(x):
+        return _dt1(lower_tail, log_p)
+
+    if theta < 80:
+        if (lower_tail and f > 0.0
+                and math.log(x) < _M_LN2 + 2 / f
+                * (_c_lgamma(f / 2.0 + 1) + _PNCH_DBL_MIN_EXP)):
+            # everything would underflow: work in log scale
+            lam = 0.5 * theta
+            pr = -lam
+            log_lam = math.log(lam)
+            sum_ = sum2 = _NEGINF
+            i = 0
+            while i < 110:
+                sum2 = _logspace_add(sum2, pr)
+                sum_ = _logspace_add(sum_, pr + _pchisq(x, f + 2 * i,
+                                                        lower_tail, True))
+                if sum2 >= -1e-15:
+                    break
+                i += 1
+                pr += log_lam - math.log(i)
+            ans = sum_ - sum2
+            return ans if log_p else math.exp(ans)
+        lam = _LD(0.5 * theta)
+        sum_ = _LD(0.0)
+        sum2 = _LD(0.0)
+        pr = np.exp(-lam)
+        i = 0
+        while i < 110:
+            sum2 += pr
+            sum_ += pr * _pchisq(x, f + 2 * i, lower_tail, False)
+            if sum2 >= 1 - 1e-15:
+                break
+            i += 1
+            pr *= lam / i
+        ans = sum_ / sum2
+        return float(np.log(ans)) if log_p else float(ans)
+
+    # theta >= 80: AS 275 series
+    lam = 0.5 * theta
+    lamSml = (-lam < _PNCH_DBL_MIN_EXP)
+    l_lam = -1.0
+    if lamSml:
+        u = _LD(0.0)
+        lu = _LD(-lam)
+        l_lam = math.log(lam)
+    else:
+        u = np.exp(_LD(-lam))
+        lu = _LD(-1.0)
+    v = u
+    x2 = 0.5 * x
+    f2 = 0.5 * f
+    f_x_2n = f - x
+
+    t = _LD(x2 - f2)
+    if (f2 * _DBL_EPSILON > 0.125
+            and np.abs(t) < math.sqrt(_DBL_EPSILON) * f2):
+        lt = (1 - t) * (2 - t / (f2 + 1)) - _M_LN_SQRT_2PI - 0.5 * math.log(f2 + 1)
+    else:
+        lt = _LD(f2 * math.log(x2) - x2 - _lgammafn(f2 + 1))
+
+    l_x = -1.0
+    tSml = (lt < _PNCH_DBL_MIN_EXP)
+    if tSml:
+        if x > f + theta + 5 * math.sqrt(2 * (f + 2 * theta)):
+            return _dt1(lower_tail, log_p)
+        l_x = math.log(x)
+        ans = _LD(0.0)
+        term = 0.0
+        t = _LD(0.0)
+    else:
+        t = np.exp(lt)
+        term = float(v * t)
+        ans = _LD(term)
+
+    n = 1
+    f_2n = f + 2.0
+    f_x_2n += 2.0
+    while n <= itrmax:
+        if f_x_2n > 0:
+            bound = float(t * x / f_x_2n)
+            if bound <= errmax and term <= reltol * ans:
+                break
+        if lamSml:
+            lu += l_lam - math.log(n)
+            if lu >= _PNCH_DBL_MIN_EXP:
+                u = np.exp(lu)
+                v = u
+                lamSml = False
+        else:
+            u *= lam / n
+            v += u
+        if tSml:
+            lt += l_x - math.log(f_2n)
+            if lt >= _PNCH_DBL_MIN_EXP:
+                t = np.exp(lt)
+                tSml = False
+        else:
+            t *= x / f_2n
+        if (not lamSml) and (not tSml):
+            term = float(v * t)
+            ans += term
+        n += 1
+        f_2n += 2
+        f_x_2n += 2
+
+    dans = float(ans)
+    return _dt_val(dans, lower_tail, log_p)
+
+
+def pnchisq(x, df, ncp, lower_tail=True, log_p=False):
+    """R's ``pnchisq`` — noncentral chi-square CDF (nmath/pnchisq.c)."""
+    if math.isnan(x) or math.isnan(df) or math.isnan(ncp):
+        return x + df + ncp
+    if not math.isfinite(df) or not math.isfinite(ncp):
+        return _NAN
+    if df < 0.0 or ncp < 0.0:
+        return _NAN
+    ans = _pnchisq_raw(x, df, ncp, 1e-12, 8 * _DBL_EPSILON, 1000000,
+                       lower_tail, log_p)
+    if x <= 0.0 or x == _INF:
+        return ans
+    if ncp >= 80:
+        if lower_tail:
+            ans = min(ans, 0.0 if log_p else 1.0)  # fmin2(ans, R_D__1)
+        else:
+            if (not log_p) and ans < 0.0:
+                ans = 0.0
+    if (not log_p) or ans < -1e-8:
+        return ans
+    # log_p and ans near 0: recompute via the other tail
+    ans = _pnchisq_raw(x, df, ncp, 1e-12, 8 * _DBL_EPSILON, 1000000,
+                       not lower_tail, False)
+    return math.log1p(-ans)
+
+
+def dnchisq(x, df, ncp, give_log=False):
+    """R's ``dnchisq`` — noncentral chi-square density (nmath/dnchisq.c)."""
+    eps = 5e-15
+    if math.isnan(x) or math.isnan(df) or math.isnan(ncp):
+        return x + df + ncp
+    if not math.isfinite(df) or not math.isfinite(ncp) or ncp < 0 or df < 0:
+        return _NAN
+    if x < 0:
+        return _NEGINF if give_log else 0.0
+    if x == 0 and df < 2.0:
+        return _INF
+    if ncp == 0:
+        return _dchisq(x, df, give_log) if df > 0 else (
+            _NEGINF if give_log else 0.0)
+    if x == _INF:
+        return _NEGINF if give_log else 0.0
+
+    ncp2 = 0.5 * ncp
+    imax = math.ceil((-(2 + df) + math.sqrt((2 - df) * (2 - df)
+                                            + 4 * ncp * x)) / 4)
+    if imax < 0:
+        imax = 0.0
+    imax = float(imax)
+    if math.isfinite(imax):
+        dfmid = df + 2 * imax
+        mid = _dpois_raw(imax, ncp2, False) * _dchisq(x, dfmid, False)
+    else:
+        mid = 0.0
+    if mid == 0:
+        if give_log or ncp > 1000.0:
+            nl = df + ncp
+            ic = nl / (nl + ncp)
+            return _dchisq(x * ic, nl * ic, give_log)
+        return _NEGINF if give_log else 0.0
+
+    sum_ = _LD(mid)
+    # upper tail
+    term = _LD(mid)
+    dfv = dfmid
+    i = imax
+    x2 = x * ncp2
+    while True:
+        i += 1
+        q = x2 / i / dfv
+        dfv += 2
+        term *= q
+        sum_ += term
+        if not (q >= 1 or term * q > (1 - q) * eps or term > 1e-10 * sum_):
+            break
+    # lower tail
+    term = _LD(mid)
+    dfv = dfmid
+    i = imax
+    while i != 0:
+        dfv -= 2
+        q = i * dfv / x2
+        i -= 1
+        term *= q
+        sum_ += term
+        if q < 1 and term * q <= (1 - q) * eps:
+            break
+    dans = float(sum_)
+    return math.log(dans) if give_log else dans
+
+
+def qnchisq(p, df, ncp, lower_tail=True, log_p=False):
+    """R's ``qnchisq`` — noncentral chi-square quantile (nmath/qnchisq.c)."""
+    accu = 1e-13
+    racc = 4 * _DBL_EPSILON
+    Eps = 1e-11
+    rEps = 1e-10
+    if math.isnan(p) or math.isnan(df) or math.isnan(ncp):
+        return p + df + ncp
+    if not math.isfinite(df):
+        return _NAN
+    if df < 0 or ncp < 0:
+        return _NAN
+    # R_Q_P01_boundaries(p, 0, ML_POSINF)
+    if log_p:
+        if p > 0:
+            return _NAN
+        if p == 0:
+            return _INF if lower_tail else 0.0
+        if p == _NEGINF:
+            return 0.0 if lower_tail else _INF
+    else:
+        if p < 0 or p > 1:
+            return _NAN
+        if p == 0:
+            return 0.0 if lower_tail else _INF
+        if p == 1:
+            return _INF if lower_tail else 0.0
+
+    pp = math.exp(p) if log_p else p  # R_D_qIv(p)
+    if pp > 1 - _DBL_EPSILON:
+        return _INF if lower_tail else 0.0
+
+    # Pearson (1959) approximation for the initial bracket
+    b = (ncp * ncp) / (df + 3 * ncp)
+    c = (df + 3 * ncp) / (df + 2 * ncp)
+    ff = (df + 2 * ncp) / (c * c)
+    ux = b + c * _qchisq(p, ff, lower_tail, log_p)
+    if ux <= 0.0:
+        ux = 1.0
+    ux0 = ux
+
+    if (not lower_tail) and ncp >= 80:
+        p = -math.expm1(p) if log_p else (0.5 - p + 0.5)
+        lower_tail = True
+    else:
+        p = pp
+
+    pp = min(1 - _DBL_EPSILON, p * (1 + Eps))
+    if lower_tail:
+        while ux < _DBL_MAX and _pnchisq_raw(
+                ux, df, ncp, Eps, rEps, 10000, True, False) < pp:
+            ux *= 2
+        pp = p * (1 - Eps)
+        lx = min(ux0, _DBL_MAX)
+        while lx > _DBL_MIN and _pnchisq_raw(
+                lx, df, ncp, Eps, rEps, 10000, True, False) > pp:
+            lx *= 0.5
+    else:
+        while ux < _DBL_MAX and _pnchisq_raw(
+                ux, df, ncp, Eps, rEps, 10000, False, False) > pp:
+            ux *= 2
+        pp = p * (1 - Eps)
+        lx = min(ux0, _DBL_MAX)
+        while lx > _DBL_MIN and _pnchisq_raw(
+                lx, df, ncp, Eps, rEps, 10000, False, False) < pp:
+            lx *= 0.5
+
+    if lower_tail:
+        while True:
+            nx = 0.5 * (lx + ux)
+            if _pnchisq_raw(nx, df, ncp, accu, racc, 100000, True, False) > p:
+                ux = nx
+            else:
+                lx = nx
+            if not ((ux - lx) / nx > accu):
+                break
+    else:
+        while True:
+            nx = 0.5 * (lx + ux)
+            if _pnchisq_raw(nx, df, ncp, accu, racc, 100000, False, False) < p:
+                ux = nx
+            else:
+                lx = nx
+            if not ((ux - lx) / nx > accu):
+                break
+    return 0.5 * (ux + lx)
+
+
+# === Noncentral t / beta / F (nmath/{pnt,dnt,qnt,pnbeta,dnbeta,qnbeta,
+# pnf,dnf,qnf}.c) =============================================================
+# Noncentral t: Lenth (1989) AS 243 twin-series. Noncentral beta: AS 226/R84
+# incomplete-beta recursion (feeds noncentral F). Densities/quantiles follow.
+# Series accumulators are C `long double` -> `_LD`; the transcendentals here are
+# the plain double libm ones (no `expl`/`logl` macro in these files), so unlike
+# pnchisq these are fully bit-exact.
+_M_SQRT_2dPI = 0.797884560802865355879892119869  # sqrt(2/pi)
+_M_LN_SQRT_PI = 0.572364942924700087071713675677  # log(sqrt(pi)) = log(pi)/2
+
+
+def pnt(t, df, ncp, lower_tail=True, log_p=False):
+    """R's ``pnt`` — noncentral t CDF (nmath/pnt.c, Lenth 1989 AS 243)."""
+    itrmax = 1000
+    errmax = 1e-12
+    if df <= 0.0:
+        return _NAN
+    if ncp == 0.0:
+        return pt(t, df, lower_tail, log_p)
+    if not math.isfinite(t):
+        return _dt0(lower_tail, log_p) if t < 0 else _dt1(lower_tail, log_p)
+    if t >= 0.0:
+        negdel = False
+        tt = t
+        del_ = ncp
+    else:
+        if ncp > 40 and ((not log_p) or (not lower_tail)):
+            return _dt0(lower_tail, log_p)
+        negdel = True
+        tt = -t
+        del_ = -ncp
+
+    if df > 4e5 or del_ * del_ > 2 * _M_LN2 * 1021:  # -(DBL_MIN_EXP)=1021
+        s = 1.0 / (4.0 * df)
+        return pnorm5(tt * (1.0 - s), del_,
+                      math.sqrt(1.0 + tt * tt * 2.0 * s),
+                      lower_tail != negdel, log_p)
+
+    x = t * t
+    rxb = df / (x + df)
+    x = x / (x + df)
+    if x > 0.0:
+        lambda_ = del_ * del_
+        p = _LD(0.5 * math.exp(-0.5 * lambda_))
+        if p == 0.0:  # underflow: |ncp| too large
+            return _dt0(lower_tail, log_p)
+        q = _M_SQRT_2dPI * p * del_
+        s = 0.5 - p
+        if s < 1e-7:
+            s = _LD(-0.5 * math.expm1(-0.5 * lambda_))
+        a = 0.5
+        b = 0.5 * df
+        rxb = math.pow(rxb, b)
+        albeta = _M_LN_SQRT_PI + _lgammafn(b) - _lgammafn(0.5 + b)
+        xodd = _LD(pbeta(x, a, b, True, False))
+        godd = _LD(2.0 * rxb * math.exp(a * math.log(x) - albeta))
+        tnc = _LD(b * x)
+        xeven = tnc if tnc < _DBL_EPSILON else _LD(1.0 - rxb)
+        geven = tnc * rxb
+        tnc = p * xodd + q * xeven
+        it = 1
+        while it <= itrmax:
+            a += 1.0
+            xodd -= godd
+            xeven -= geven
+            godd *= x * (a + b - 1.0) / a
+            geven *= x * (a + b - 0.5) / (a + 0.5)
+            p *= lambda_ / (2 * it)
+            q *= lambda_ / (2 * it + 1)
+            tnc += p * xodd + q * xeven
+            s -= p
+            if s < -1e-10:
+                break  # non-convergence -> finis
+            if s <= 0 and it > 1:
+                break  # -> finis
+            errbd = float(2.0 * s * (xodd - godd))
+            if abs(errbd) < errmax:
+                break  # convergence
+            it += 1
+    else:  # x = t = 0
+        tnc = _LD(0.0)
+
+    tnc += pnorm5(-del_, 0.0, 1.0, True, False)
+    lower_tail = (lower_tail != negdel)
+    return _dt_val(min(float(tnc), 1.0), lower_tail, log_p)
+
+
+def dnt(x, df, ncp, give_log=False):
+    """R's ``dnt`` — noncentral t density (nmath/dnt.c)."""
+    if math.isnan(x) or math.isnan(df):
+        return x + df
+    if df <= 0.0:
+        return _NAN
+    if ncp == 0.0:
+        return dt(x, df, give_log)
+    if not math.isfinite(x):
+        return _NEGINF if give_log else 0.0
+    if not math.isfinite(df) or df > 1e8:
+        return dnorm5(x, ncp, 1.0, give_log)
+    if abs(x) > math.sqrt(df * _DBL_EPSILON):
+        _d = abs(pnt(x * math.sqrt((df + 2) / df), df + 2, ncp, 1, 0)
+                 - pnt(x, df, ncp, 1, 0))
+        # R's dnt.c evaluates log(fabs(.)); C log(0) = -Inf (density 0), while
+        # Python's math.log(0.) raises — guard to preserve the R/C semantics
+        # when the two pnt values coincide (e.g. deep tails in double).
+        u = (math.log(df) - math.log(abs(x))
+             + (_NEGINF if _d == 0.0 else math.log(_d)))
+    else:
+        u = (_lgammafn((df + 1) / 2) - _lgammafn(df / 2)
+             - (_M_LN_SQRT_PI + 0.5 * (math.log(df) + ncp * ncp)))
+    return u if give_log else math.exp(u)
+
+
+def qnt(p, df, ncp, lower_tail=True, log_p=False):
+    """R's ``qnt`` — noncentral t quantile (nmath/qnt.c)."""
+    accu = 1e-13
+    Eps = 1e-11
+    if math.isnan(p) or math.isnan(df) or math.isnan(ncp):
+        return p + df + ncp
+    if df <= 0.0:
+        return _NAN
+    if ncp == 0.0 and df >= 1.0:
+        return qt(p, df, lower_tail, log_p)
+    # R_Q_P01_boundaries(p, ML_NEGINF, ML_POSINF)
+    if log_p:
+        if p > 0:
+            return _NAN
+        if p == 0:
+            return _INF if lower_tail else _NEGINF
+        if p == _NEGINF:
+            return _NEGINF if lower_tail else _INF
+    else:
+        if p < 0 or p > 1:
+            return _NAN
+        if p == 0:
+            return _NEGINF if lower_tail else _INF
+        if p == 1:
+            return _INF if lower_tail else _NEGINF
+    if not math.isfinite(df):
+        return qnorm5(p, ncp, 1.0, lower_tail, log_p)
+    p = _dt_qiv(p, lower_tail, log_p)
+    if p > 1 - _DBL_EPSILON:
+        return _INF
+    pp = min(1 - _DBL_EPSILON, p * (1 + Eps))
+    ux = max(1.0, ncp)
+    while ux < _DBL_MAX and pnt(ux, df, ncp, True, False) < pp:
+        ux *= 2
+    pp = p * (1 - Eps)
+    lx = min(-1.0, -ncp)
+    while lx > -_DBL_MAX and pnt(lx, df, ncp, True, False) > pp:
+        lx *= 2
+    while True:
+        nx = 0.5 * (lx + ux)
+        if pnt(nx, df, ncp, True, False) > p:
+            ux = nx
+        else:
+            lx = nx
+        if not ((ux - lx) > accu * max(abs(lx), abs(ux))):
+            break
+    return 0.5 * (lx + ux)
+
+
+def _pnbeta_raw(x, o_x, a, b, ncp):
+    """AS 226/R84 noncentral beta CDF core (pnbeta.c ``pnbeta_raw``); LDOUBLE."""
+    errmax = 1.0e-9
+    itrmax = 10000
+    if ncp < 0.0 or a <= 0.0 or b <= 0.0:
+        return _LD(_NAN)
+    if x < 0.0 or o_x > 1.0 or (x == 0.0 and o_x == 1.0):
+        return _LD(0.0)
+    if x > 1.0 or o_x < 0.0 or (x == 1.0 and o_x == 0.0):
+        return _LD(1.0)
+    c = ncp / 2.0
+    x0 = math.floor(max(c - 7.0 * math.sqrt(c), 0.0))
+    a0 = a + x0
+    lBeta = lbeta(a0, b)
+    temp, _tmp_c, _ierr = _bratio(a0, b, x, o_x, False)
+    gx = _LD(math.exp(a0 * math.log(x)
+                      + b * (math.log1p(-x) if x < 0.5 else math.log(o_x))
+                      - lBeta - math.log(a0)))
+    if a0 > a:
+        q = _LD(math.exp(-c + x0 * math.log(c) - _lgammafn(x0 + 1.0)))
+    else:
+        q = _LD(math.exp(-c))
+    sumq = 1.0 - q
+    ans = ax = q * temp
+    j = math.floor(x0)
+    while True:
+        j += 1
+        temp -= float(gx)
+        gx *= x * (a + b + j - 1.0) / (a + j)
+        q *= c / j
+        sumq -= q
+        ax = temp * q
+        ans += ax
+        errbd = float((temp - gx) * sumq)
+        if not (errbd > errmax and j < itrmax + x0):
+            break
+    return ans
+
+
+def _pnbeta2(x, o_x, a, b, ncp, lower_tail, log_p):
+    ans = _pnbeta_raw(x, o_x, a, b, ncp)
+    if lower_tail:
+        return float(np.log(ans)) if log_p else float(ans)
+    if ans > 1.0:
+        ans = _LD(1.0)
+    return float(np.log1p(-ans)) if log_p else float(1.0 - ans)
+
+
+def pnbeta(x, a, b, ncp, lower_tail=True, log_p=False):
+    """R's ``pnbeta`` — noncentral beta CDF (nmath/pnbeta.c)."""
+    if math.isnan(x) or math.isnan(a) or math.isnan(b) or math.isnan(ncp):
+        return x + a + b + ncp
+    if x <= 0.0:  # R_P_bounds_01(x, 0., 1.)
+        return _dt0(lower_tail, log_p)
+    if x >= 1.0:
+        return _dt1(lower_tail, log_p)
+    return _pnbeta2(x, 1 - x, a, b, ncp, lower_tail, log_p)
+
+
+def dnbeta(x, a, b, ncp, give_log=False):
+    """R's ``dnbeta`` — noncentral beta density (nmath/dnbeta.c)."""
+    eps = 1.0e-15
+    if math.isnan(x) or math.isnan(a) or math.isnan(b) or math.isnan(ncp):
+        return x + a + b + ncp
+    if ncp < 0 or a <= 0 or b <= 0:
+        return _NAN
+    if not math.isfinite(a) or not math.isfinite(b) or not math.isfinite(ncp):
+        return _NAN
+    if x < 0 or x > 1:
+        return _NEGINF if give_log else 0.0
+    if ncp == 0:
+        return dbeta(x, a, b, give_log)
+    ncp2 = math.ldexp(ncp, -1)
+    dx2 = ncp2 * x
+    d = math.ldexp(dx2 - a - 1, -1)
+    D = d * d + dx2 * (a + b) - a
+    if D <= 0:
+        kMax = 0
+    else:
+        D = math.ceil(d + math.sqrt(D))
+        kMax = int(D) if D > 0 else 0
+    term = _LD(dbeta(x, a + kMax, b, True))
+    p_k = _LD(_dpois_raw(kMax, ncp2, True))
+    if x == 0.0 or not np.isfinite(term) or not math.isfinite(float(p_k)):
+        v = float(p_k + term)
+        return v if give_log else math.exp(v)  # R_D_exp
+    p_k = p_k + term
+    sum_ = term = _LD(1.0)
+    k = float(kMax)
+    while k > 0 and term > sum_ * eps:
+        k -= 1
+        q = (k + 1) * (k + a) / (k + a + b) / dx2
+        term *= q
+        sum_ += term
+    term = _LD(1.0)
+    k = float(kMax)
+    while True:
+        q = dx2 * (k + a + b) / (k + a) / (k + 1)
+        k += 1
+        term *= q
+        sum_ += term
+        if not (term > sum_ * eps):
+            break
+    v = float(p_k + np.log(sum_))
+    return v if give_log else math.exp(v)  # R_D_exp
+
+
+def qnbeta(p, a, b, ncp, lower_tail=True, log_p=False):
+    """R's ``qnbeta`` — noncentral beta quantile (nmath/qnbeta.c)."""
+    accu = 1e-15
+    Eps = 1e-14
+    if math.isnan(p) or math.isnan(a) or math.isnan(b) or math.isnan(ncp):
+        return p + a + b + ncp
+    if not math.isfinite(a):
+        return _NAN
+    if ncp < 0.0 or a <= 0.0 or b <= 0.0:
+        return _NAN
+    # R_Q_P01_boundaries(p, 0, 1)
+    if log_p:
+        if p > 0:
+            return _NAN
+        if p == 0:
+            return 1.0 if lower_tail else 0.0
+        if p == _NEGINF:
+            return 0.0 if lower_tail else 1.0
+    else:
+        if p < 0 or p > 1:
+            return _NAN
+        if p == 0:
+            return 0.0 if lower_tail else 1.0
+        if p == 1:
+            return 1.0 if lower_tail else 0.0
+    p = _dt_qiv(p, lower_tail, log_p)
+    if p > 1 - _DBL_EPSILON:
+        return 1.0
+    pp = min(1 - _DBL_EPSILON, p * (1 + Eps))
+    ux = 0.5
+    while ux < 1 - _DBL_EPSILON and pnbeta(ux, a, b, ncp, True, False) < pp:
+        ux = 0.5 * (1 + ux)
+    pp = p * (1 - Eps)
+    lx = 0.5
+    while lx > _DBL_MIN and pnbeta(lx, a, b, ncp, True, False) > pp:
+        lx *= 0.5
+    while True:
+        nx = 0.5 * (lx + ux)
+        if pnbeta(nx, a, b, ncp, True, False) > p:
+            ux = nx
+        else:
+            lx = nx
+        if not ((ux - lx) / nx > accu):
+            break
+    return 0.5 * (ux + lx)
+
+
+def pnf(x, df1, df2, ncp, lower_tail=True, log_p=False):
+    """R's ``pnf`` — noncentral F CDF (nmath/pnf.c)."""
+    if (math.isnan(x) or math.isnan(df1) or math.isnan(df2) or math.isnan(ncp)):
+        return x + df2 + df1 + ncp
+    if df1 <= 0.0 or df2 <= 0.0 or ncp < 0:
+        return _NAN
+    if not math.isfinite(ncp):
+        return _NAN
+    if not math.isfinite(df1) and not math.isfinite(df2):
+        return _NAN
+    if x <= 0.0:  # R_P_bounds_01(x, 0., ML_POSINF)
+        return _dt0(lower_tail, log_p)
+    if x == _INF:
+        return _dt1(lower_tail, log_p)
+    if df2 > 1e8:
+        return pnchisq(x * df1, df1, ncp, lower_tail, log_p)
+    y = (df1 / df2) * x
+    return _pnbeta2(y / (1.0 + y), 1.0 / (1.0 + y), df1 / 2.0, df2 / 2.0,
+                    ncp, lower_tail, log_p)
+
+
+def dnf(x, df1, df2, ncp, give_log=False):
+    """R's ``dnf`` — noncentral F density (nmath/dnf.c)."""
+    if (math.isnan(x) or math.isnan(df1) or math.isnan(df2) or math.isnan(ncp)):
+        return x + df2 + df1 + ncp
+    if df1 <= 0.0 or df2 <= 0.0 or ncp < 0:
+        return _NAN
+    if x < 0.0:
+        return _NEGINF if give_log else 0.0
+    if not math.isfinite(ncp):
+        return _NAN
+    if not math.isfinite(df1) and not math.isfinite(df2):
+        if x == 1.0:
+            return _INF
+        return _NEGINF if give_log else 0.0
+    if not math.isfinite(df2):
+        return df1 * dnchisq(x * df1, df1, ncp, give_log)
+    if df1 > 1e14 and ncp < 1e7:
+        f = 1 + ncp / df1
+        z = dgamma(1.0 / x / f, df2 / 2, 2.0 / df2, give_log)
+        return (z - 2 * math.log(x) - math.log(f)) if give_log \
+            else z / (x * x) / f
+    y = (df1 / df2) * x
+    z = dnbeta(y / (1 + y), df1 / 2.0, df2 / 2.0, ncp, give_log)
+    return (z + math.log(df1) - math.log(df2) - 2 * math.log1p(y)) if give_log \
+        else z * (df1 / df2) / (1 + y) / (1 + y)
+
+
+def qnf(p, df1, df2, ncp, lower_tail=True, log_p=False):
+    """R's ``qnf`` — noncentral F quantile (nmath/qnf.c)."""
+    if (math.isnan(p) or math.isnan(df1) or math.isnan(df2) or math.isnan(ncp)):
+        return p + df1 + df2 + ncp
+    if df1 <= 0.0 or df2 <= 0.0 or ncp < 0:
+        return _NAN
+    if not math.isfinite(ncp):
+        return _NAN
+    if not math.isfinite(df1) and not math.isfinite(df2):
+        return _NAN
+    # R_Q_P01_boundaries(p, 0, ML_POSINF)
+    if log_p:
+        if p > 0:
+            return _NAN
+        if p == 0:
+            return _INF if lower_tail else 0.0
+        if p == _NEGINF:
+            return 0.0 if lower_tail else _INF
+    else:
+        if p < 0 or p > 1:
+            return _NAN
+        if p == 0:
+            return 0.0 if lower_tail else _INF
+        if p == 1:
+            return _INF if lower_tail else 0.0
+    if df2 > 1e8:
+        return qnchisq(p, df1, ncp, lower_tail, log_p) / df1
+    y = qnbeta(p, df1 / 2.0, df2 / 2.0, ncp, lower_tail, log_p)
+    return y / (1 - y) * (df2 / df1)
+
+
+# === Hypergeometric (nmath/dhyper.c, phyper.c) ===============================
+# Sampling n balls from r red + b black; x are red. Feeds fisher.test (2x2).
+
+def dhyper(x, r, b, n, give_log=False):
+    """R's ``dhyper`` — hypergeometric density (nmath/dhyper.c)."""
+    if math.isnan(x) or math.isnan(r) or math.isnan(b) or math.isnan(n):
+        return x + r + b + n
+    if ((r < 0 or _R_nonint(r)) or (b < 0 or _R_nonint(b))
+            or (n < 0 or _R_nonint(n)) or n > r + b):
+        return _NAN
+    if x < 0:
+        return _NEGINF if give_log else 0.0
+    if _R_nonint(x):  # R_D_nonint_check
+        return _NEGINF if give_log else 0.0
+    x = _r_forceint(x)
+    r = _r_forceint(r)
+    b = _r_forceint(b)
+    n = _r_forceint(n)
+    if n < x or r < x or n - x > b:
+        return _NEGINF if give_log else 0.0
+    if n == 0:
+        return (0.0 if give_log else 1.0) if x == 0 else (
+            _NEGINF if give_log else 0.0)
+    p = n / (r + b)
+    q = (r + b - n) / (r + b)
+    p1 = float(_dbinom_raw(x, r, p, q, give_log))
+    p2 = float(_dbinom_raw(n - x, b, p, q, give_log))
+    p3 = float(_dbinom_raw(n, r + b, p, q, give_log))
+    return (p1 + p2 - p3) if give_log else p1 * p2 / p3
+
+
+def _pdhyper(x, NR, NB, n, log_p):
+    """phyper/dhyper ratio via a converging LDOUBLE series (phyper.c)."""
+    sum_ = _LD(0.0)
+    term = _LD(1.0)
+    while x > 0 and term >= _DBL_EPSILON * sum_:
+        term *= x * (NB - n + x) / (n + 1 - x) / (NR + 1 - x)
+        sum_ += term
+        x -= 1
+    ss = float(sum_)
+    return math.log1p(ss) if log_p else 1 + ss
+
+
+def phyper(x, NR, NB, n, lower_tail=True, log_p=False):
+    """R's ``phyper`` — hypergeometric CDF (nmath/phyper.c)."""
+    if math.isnan(x) or math.isnan(NR) or math.isnan(NB) or math.isnan(n):
+        return x + NR + NB + n
+    x = math.floor(x + 1e-7)
+    NR = _r_forceint(NR)
+    NB = _r_forceint(NB)
+    n = _r_forceint(n)
+    if NR < 0 or NB < 0 or not math.isfinite(NR + NB) or n < 0 or n > NR + NB:
+        return _NAN
+    if x * (NR + NB) > n * NR:  # swap tails
+        NR, NB = NB, NR
+        x = n - x - 1
+        lower_tail = not lower_tail
+    if x < 0 or x < n - NB:
+        return _dt0(lower_tail, log_p)
+    if x >= NR or x >= n:
+        return _dt1(lower_tail, log_p)
+    d = dhyper(x, NR, NB, n, log_p)
+    if (not log_p and d == 0.0) or (log_p and d == _NEGINF):
+        return _dt0(lower_tail, log_p)
+    pd = _pdhyper(x, NR, NB, n, log_p)
+    if log_p:  # R_DT_Log(d + pd)
+        return (d + pd) if lower_tail else _R_Log1_Exp(d + pd)
+    return (d * pd) if lower_tail else (0.5 - d * pd + 0.5)  # R_D_Lval
+
+
+# === Brent root-finder (src/zeroin.c R_zeroin2) — backs uniroot =============
+def _zeroin2(ax, bx, fa, fb, f, tol, maxit):
+    """Port of R's ``R_zeroin2`` (src/zeroin.c) — Brent's method. Returns the
+    root; ``fa``/``fb`` are the pre-computed endpoint values."""
+    a = ax
+    b = bx
+    c = a
+    fc = fa
+    maxit_ = maxit + 1
+    if fa == 0.0:
+        return a
+    if fb == 0.0:
+        return b
+    eps = _DBL_EPSILON
+    while maxit_:
+        maxit_ -= 1
+        prev_step = b - a
+        if abs(fc) < abs(fb):
+            a = b
+            b = c
+            c = a
+            fa = fb
+            fb = fc
+            fc = fa
+        tol_act = 2 * eps * abs(b) + tol / 2
+        new_step = (c - b) / 2
+        if abs(new_step) <= tol_act or fb == 0.0:
+            return b
+        if abs(prev_step) >= tol_act and abs(fa) > abs(fb):
+            cb = c - b
+            if a == c:
+                t1 = fb / fa
+                p = cb * t1
+                q = 1.0 - t1
+            else:
+                q = fa / fc
+                t1 = fb / fc
+                t2 = fb / fa
+                p = t2 * (cb * q * (q - t1) - (b - a) * (t1 - 1.0))
+                q = (q - 1.0) * (t1 - 1.0) * (t2 - 1.0)
+            if p > 0.0:
+                q = -q
+            else:
+                p = -p
+            if (p < (0.75 * cb * q - abs(tol_act * q) / 2)
+                    and p < abs(prev_step * q / 2)):
+                new_step = p / q
+        if abs(new_step) < tol_act:
+            new_step = tol_act if new_step > 0.0 else -tol_act
+        a = b
+        fa = fb
+        b += new_step
+        fb = f(b)
+        if (fb > 0 and fc > 0) or (fb < 0 and fc < 0):
+            c = a
+            fc = fa
+    return b
+
+
+def uniroot(f, lower, upper, tol=None, maxiter=1000):
+    """R's ``uniroot`` (default ``extendInt="no"``) — Brent root of ``f`` on
+    ``[lower, upper]`` (requires a sign change). ``tol`` defaults to R's
+    ``.Machine$double.eps^0.25``."""
+    if tol is None:
+        tol = _DBL_EPSILON ** 0.25
+    fl = f(lower)
+    fu = f(upper)
+    return _zeroin2(lower, upper, fl, fu, f, tol, maxiter)

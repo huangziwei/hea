@@ -611,8 +611,8 @@ def _liu2(x: float, lb: np.ndarray, h: np.ndarray) -> float:
     arg = t * sigX + muX
     if delta == 0.0:
         return float(_dist.pchisq(arg, df=l_df, lower_tail=False))
-    from scipy.stats import ncx2
-    return float(ncx2.sf(arg, df=l_df, nc=delta))
+    # noncentral chi-square upper tail via ported nmath pnchisq (bit-exact to R)
+    return float(_dist.pchisq(arg, df=l_df, ncp=delta, lower_tail=False))
 
 
 def psum_chisq(q: float, lb: np.ndarray, df: np.ndarray | None = None,

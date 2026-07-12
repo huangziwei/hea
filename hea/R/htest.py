@@ -15,7 +15,6 @@ from typing import Optional, Union
 
 import numpy as np
 import polars as pl
-from scipy import stats as _sps
 from . import distributions as _dist
 from . import nmath as _nm
 
@@ -269,67 +268,414 @@ def t_test(
     )
 
 
+# --- Streitberg-Röhmel exact permutation densities (src/permdist.c) ----------
+# Used for the exact Wilcoxon p-value in the presence of ties/zeroes, where the
+# plain signrank/wilcox distributions no longer apply.
+
+def _rsum_ld(arr) -> float:
+    """R's ``sum()`` over a double vector: strict left-to-right accumulation in
+    ``LDOUBLE`` (80-bit x87 on x86-64), which ``np.sum`` (pairwise) does not
+    reproduce. Needed so the summed permutation-density tail is 0-ulp to R."""
+    acc = np.longdouble(0.0)
+    for v in np.asarray(arr, dtype=float):
+        acc += v
+    return float(acc)
+
+def _dpermdist1(scores) -> list:
+    """One-sample permutation density (permdist.c ``dpermdist1``): density of
+    the sum of the positive elements over all sign-flips, for integer
+    ``scores``. Returns the density over ``0 .. sum(scores)``."""
+    n = len(scores)
+    sum_a = int(sum(scores))
+    dH = [0.0] * (sum_a + 1)
+    dH[0] = 1.0
+    s_a = 0
+    for k in range(n):
+        sk = int(scores[k])
+        s_a += sk
+        for i in range(s_a, sk - 1, -1):
+            dH[i] += dH[i - sk]
+    msum = 0.0
+    for i in range(sum_a + 1):
+        msum += dH[i]
+    return [v / msum for v in dH]
+
+
+def _dpermdist2(scores, m: int) -> list:
+    """Two-sample permutation density (permdist.c ``dpermdist2``): density of
+    ``sum(scores[first m])`` over all splits, for sorted integer ``scores``.
+    Returns the density over the support ``min(scores) .. sum(scores)``."""
+    n = len(scores)
+    sum_a = m
+    sum_b = 0
+    for i in range(n - sum_a, n):
+        sum_b += int(scores[i])
+    sum_bp1 = sum_b + 1
+    dH = [0.0] * ((sum_a + 1) * sum_bp1)
+    dH[0] = 1.0
+    s_a = 0
+    s_b = 0
+    for k in range(n):
+        sk = int(scores[k])
+        s_a += 1
+        s_b += sk
+        min_b = min(sum_b, s_b)
+        for i in range(min(sum_a, s_a), 0, -1):
+            idx = i * sum_bp1
+            idx2 = (i - 1) * sum_bp1 - sk
+            for j in range(min_b, sk - 1, -1):
+                dH[idx + j] += dH[idx2 + j]
+    idx = sum_a * sum_bp1 + 1
+    ret = [dH[idx + j] for j in range(sum_b)]
+    msum = 0.0  # naive sequential double (C's `double msum`); not Python sum()
+    for v in ret:
+        msum += v
+    return [v / msum for v in ret]
+
+
+def _dsignrank_z(s, z) -> np.ndarray:
+    """R's internal ``.dsignrank(s, n, z)`` — signed-rank density on support
+    ``s`` given the rank vector ``z`` (ties/zeroes present)."""
+    z = np.asarray(z, dtype=float)
+    f = 2 - int(np.all(z == np.floor(z)))  # 1 if integer ranks, else 2
+    scores = np.sort((f * z).astype(np.int64)).tolist()
+    d = _dpermdist1(scores)
+    out = np.zeros(len(s))
+    xv = f * np.asarray(s, dtype=float)
+    for idx, val in enumerate(xv):
+        iv = int(round(val))
+        if abs(val - iv) < 1e-9 and 0 <= iv < len(d):
+            out[idx] = d[iv]
+    return out
+
+
+def _psignrank_z(q, n, z, lower_tail=True) -> float:
+    """R's internal ``.psignrank(q, n, z)`` — signed-rank CDF with ties."""
+    if z is None:
+        return float(_nm.psignrank(q, n, lower_tail, False))
+    if np.all(z == np.floor(z)):
+        s = np.arange(0, int(n * (n + 1) / 2) + 1, dtype=float)
+    else:
+        s = np.arange(0, int(n * (n + 1)) + 1, dtype=float) / 2.0
+    d = _dsignrank_z(s, z)
+    y = _rsum_ld(d[s < q + 1e-8])
+    return y if lower_tail else 1.0 - y
+
+
+def _dwilcox_z(s, m, n, z) -> np.ndarray:
+    """R's internal ``.dwilcox(s, m, n, z)`` — rank-sum density with ties."""
+    z = np.asarray(z, dtype=float)
+    f = 2 - int(np.all(z == np.floor(z)))
+    scores = np.sort((f * z).astype(np.int64)).tolist()
+    d = _dpermdist2(scores, int(m))
+    out = np.zeros(len(s))
+    xv = f * (np.asarray(s, dtype=float) + m * (m + 1) / 2.0)
+    for idx, val in enumerate(xv):
+        iv = int(round(val))
+        if abs(val - iv) < 1e-9 and 1 <= iv <= len(d):
+            out[idx] = d[iv - 1]
+    return out
+
+
+def _pwilcox_z(q, m, n, z, lower_tail=True) -> float:
+    """R's internal ``.pwilcox(q, m, n, z)`` — rank-sum CDF with ties."""
+    if z is None:
+        return float(_nm.pwilcox(q, m, n, lower_tail, False))
+    if np.all(z == np.floor(z)):
+        s = np.arange(0, int(m * n) + 1, dtype=float)
+    else:
+        s = np.arange(0, int(2 * m * n) + 1, dtype=float) / 2.0
+    d = _dwilcox_z(s, m, n, z)
+    y = _rsum_ld(d[s < q + 1e-8])
+    return y if lower_tail else 1.0 - y
+
+
+def _wilcox_correct_level(correct) -> int:
+    """R's ``correct`` normalization: logical TRUE→0 / FALSE→-1 (continuity
+    on / off); an integer 0..3 selects the Edgeworth-expansion order."""
+    if isinstance(correct, bool):
+        return (1 if correct else 0) - 1
+    ic = int(correct)
+    if ic not in (0, 1, 2, 3):
+        raise ValueError("'correct' must be an integer between 0 and 3")
+    return ic
+
+
 def wilcox_test(
     x,
     y=None,
     *,
+    mu: float = 0.0,
     paired: bool = False,
     alternative: str = "two.sided",
-    correct: bool = True,
+    exact: Optional[bool] = None,
+    correct=True,
 ) -> HTest:
-    """R's ``wilcox.test``.
+    """R's ``wilcox.test`` — Wilcoxon signed-rank / rank-sum test.
 
-    Defaults to continuity correction (``correct=True``). One-sample and
-    paired branches use ``scipy.stats.wilcoxon``; the two-sample branch
-    uses ``mannwhitneyu`` (R's "Wilcoxon rank-sum" with W statistic).
+    Faithful port of ``wilcox.test.default``: statistic (``V`` signed-rank /
+    ``W`` rank-sum) and p-value are bit-exact to R. The p-value uses R's default
+    **exact** distribution for small samples (``exact = (n < 50)``, resp.
+    ``n.x < 50 && n.y < 50``) via the ported nmath ``psignrank``/``pwilcox``;
+    with ties or zeroes it uses the exact permutation distribution
+    (Streitberg-Röhmel, ``src/permdist.c``). Otherwise it uses R's
+    continuity-corrected normal approximation with the tie-corrected variance.
 
-    PARITY DEBT (blocked): R's *default* uses **exact** p-values for small
-    n via the signed-rank / rank-sum distributions (``nmath/signrank.c`` +
-    ``nmath/wilcox.c``, not yet ported). Until those land this stays on
-    scipy's normal approximation.
+    ``correct`` follows R: ``True`` (default) applies the continuity correction,
+    ``False`` disables it, and an integer 0..3 selects the Edgeworth-expansion
+    order for the asymptotic tail.
+
+    Note: ``conf.int`` (the Hodges-Lehmann estimate / exact CI) is not computed.
     """
-    alt = {"two.sided": "two-sided", "greater": "greater", "less": "less"}[alternative]
+    if alternative not in ("two.sided", "less", "greater"):
+        raise ValueError(f"wilcox_test(): unknown alternative {alternative!r}")
+    icorrect = _wilcox_correct_level(correct)
     x = _as_array(x)
-    if y is None:
-        res = _sps.wilcoxon(x, alternative=alt, correction=correct, zero_method="wilcox")
+
+    if y is not None:
+        y = _as_array(y)
+        data_name = "x and y"
+        if paired:
+            if len(x) != len(y):
+                raise ValueError("'x' and 'y' must have the same length")
+            ok = ~np.isnan(x) & ~np.isnan(y)
+            x = x[ok] - y[ok]
+            y = None
+        else:
+            y = y[~np.isnan(y)]
+    else:
+        data_name = "x"
+        if paired:
+            raise ValueError("'y' is missing for paired test")
+    x = x[~np.isnan(x)]
+    if len(x) < 1:
+        raise ValueError("not enough (non-missing) 'x' observations")
+
+    if y is None:  # one-sample / paired: Wilcoxon signed-rank
+        method = "Wilcoxon signed rank test"
+        n = float(len(x))
+        use_exact = (n < 50) if exact is None else exact
+        xm = x - mu
+        if use_exact:
+            zero = np.any(xm == 0)
+            r = _avg_rank(np.abs(xm))
+            ties = len(np.unique(r)) != len(r)
+            V = float(np.sum(r[xm > 0]))
+            z = r[xm != 0] if (ties or zero) else None
+            method = "Wilcoxon signed rank exact test"
+            if alternative == "two.sided":
+                m = (float(np.sum(z)) / 2.0) if z is not None else n * (n + 1) / 4
+                p = (_psignrank_z(V - 0.25, n, z, lower_tail=False) if V > m
+                     else _psignrank_z(V, n, z))
+                pval = min(2.0 * p, 1.0)
+            elif alternative == "greater":
+                pval = _psignrank_z(V - 0.25, n, z, lower_tail=False)
+            else:  # less
+                pval = _psignrank_z(V, n, z)
+        else:
+            zero = np.any(xm == 0)
+            if zero:
+                xm = xm[xm != 0]
+                n = float(len(xm))
+            r = _avg_rank(np.abs(xm))
+            ties = len(np.unique(r)) != len(r)
+            V = float(np.sum(r[xm > 0]))
+            mean = n * (n + 1) / 4.0
+            nties = np.unique(r, return_counts=True)[1].astype(float)
+            sigma = math.sqrt(n * (n + 1) * (2 * n + 1) / 24.0
+                              - np.sum(nties**3 - nties) / 48.0)
+            ic = 0 if (icorrect > 0 and (ties or zero)) else icorrect
+            pval = _wilcox_pval_asymp(V - mean, sigma, alternative, ic, n=n)
+            if icorrect >= 0:
+                method += " with continuity correction"
         return HTest(
-            method="Wilcoxon signed rank test"
-            + (" with continuity correction" if correct else ""),
-            statistic={"V": float(res.statistic)},
-            p_value=float(res.pvalue),
-            null_value=0.0,
+            method=method,
+            statistic={"V": V},
+            p_value=float(pval),
+            null_value=float(mu),
             alternative=alternative,
-            data_name="x",
+            data_name=data_name,
         )
-    y = _as_array(y)
-    if paired:
-        res = _sps.wilcoxon(x, y, alternative=alt, correction=correct, zero_method="wilcox")
-        return HTest(
-            method="Wilcoxon signed rank test"
-            + (" with continuity correction" if correct else ""),
-            statistic={"V": float(res.statistic)},
-            p_value=float(res.pvalue),
-            null_value=0.0,
-            alternative=alternative,
-            data_name="x and y",
-        )
-    res = _sps.mannwhitneyu(
-        x, y, alternative=alt, use_continuity=correct, method="asymptotic"
-    )
+
+    # two-sample: Wilcoxon rank-sum (Mann-Whitney)
+    if len(y) < 1:
+        raise ValueError("not enough 'y' observations")
+    method = "Wilcoxon rank sum test"
+    n_x = float(len(x))
+    n_y = float(len(y))
+    use_exact = ((n_x < 50) and (n_y < 50)) if exact is None else exact
+    r = _avg_rank(np.concatenate([x - mu, y]))
+    ties = len(np.unique(r)) != len(r)
+    W = float(np.sum(r[:len(x)]) - n_x * (n_x + 1) / 2.0)
+    if use_exact:
+        z = r if ties else None
+        method = "Wilcoxon rank sum exact test"
+        if alternative == "two.sided":
+            pval = min(2.0 * _pwilcox_z(W, n_x, n_y, z),
+                       2.0 * _pwilcox_z(W - 0.25, n_x, n_y, z, lower_tail=False),
+                       1.0)
+        elif alternative == "greater":
+            pval = _pwilcox_z(W - 0.25, n_x, n_y, z, lower_tail=False)
+        else:  # less
+            pval = _pwilcox_z(W, n_x, n_y, z)
+    else:
+        mean = n_x * n_y / 2.0
+        nties = np.unique(r, return_counts=True)[1].astype(float)
+        sigma = math.sqrt((n_x * n_y / 12.0)
+                          * ((n_x + n_y + 1)
+                             - np.sum(nties**3 - nties)
+                             / ((n_x + n_y) * (n_x + n_y - 1))))
+        ic = 0 if (icorrect > 0 and ties) else icorrect
+        pval = _wilcox_pval_asymp(W - mean, sigma, alternative, ic,
+                                  m=n_x, n=n_y)
+        if icorrect >= 0:
+            method += " with continuity correction"
     return HTest(
-        method="Wilcoxon rank sum test"
-        + (" with continuity correction" if correct else ""),
-        statistic={"W": float(res.statistic)},
-        p_value=float(res.pvalue),
-        null_value=0.0,
+        method=method,
+        statistic={"W": W},
+        p_value=float(pval),
+        null_value=float(mu),
         alternative=alternative,
-        data_name="x and y",
+        data_name=data_name,
     )
+
+
+def _wilcox_pval_asymp(zdiff, sigma, alternative, icorrect, *, n, m=None):
+    """R's ``.wilcox_test_*_pval_asymp`` tail: continuity-corrected normal, with
+    the Fellingham-Stoker Edgeworth expansion when ``icorrect >= 1``.
+    ``m`` distinguishes the two-sample (``m`` set) from one-sample kernel."""
+    if icorrect >= 0:
+        correction = {"two.sided": math.copysign(0.5, zdiff) if zdiff != 0 else 0.0,
+                      "greater": 0.5, "less": -0.5}[alternative]
+    else:
+        correction = 0.0
+    z = (zdiff - correction) / sigma
+
+    def F(zz, lower_tail=True):
+        y = float(_nm.pnorm5(zz, 0.0, 1.0, lower_tail, False))
+        if icorrect < 1:
+            return y
+        if m is None:  # one-sample signed-rank Edgeworth
+            n4 = 12 * (3 * n**2 + 3 * n - 1)
+            d4 = 5 * n * (n + 1) * (2 * n + 1)
+            l4 = -n4 / d4
+            n6 = 576 * (3 * n**4 + 6 * n**2 - 3 * n + 1)
+            d6 = 7 * (n * (n + 1) * (2 * n + 1))**2
+            l6 = n6 / d6
+        else:  # two-sample rank-sum Edgeworth
+            n4 = m**2 + n**2 + m * n + m + n
+            d4 = 20 * m * n * (m + n + 1)
+            l4 = -n4 / d4
+            n6 = (2 * (m**4 + n**4) + 4 * m * n * (m**2 + n**2)
+                  + 6 * m**2 * n**2 + 4 * (m**3 + n**3)
+                  + 7 * m * n * (m + n) + (m**2 + n**2) + 2 * m * n - (m + n))
+            d6 = 210 * m**2 * n**2 * (m + n + 1)**2
+            l6 = n6 / d6
+        e = l4 / 24 * zz * (zz**2 - 3)
+        if icorrect > 1:
+            e += l6 / 720 * zz * (zz**4 - 10 * zz**2 + 15)
+        if icorrect > 2:
+            e += 35 * l4**2 / 40320 * zz * (zz**6 - 21 * zz**4
+                                            + 105 * zz**2 - 105)
+        return (y - e) if lower_tail else (y + e)
+
+    if alternative == "less":
+        return F(z)
+    if alternative == "greater":
+        return F(z, lower_tail=False)
+    p = F(z)
+    return 2.0 * min(p, 1.0 - p)
 
 
 def _two_sided_min(lo, hi) -> float:
     """R's ``2 * min(p_lower, p_upper)`` two-sided rule, capped at 1."""
     return float(min(2.0 * min(lo, hi), 1.0))
+
+
+# --- Exact Spearman (AS 89, src/prho.c) & Kendall (src/kendall.c) ------------
+_PRHO_C = (.2274, .2531, .1745, .0758, .1033, .3932,
+           .0879, .0151, .0072, .0831, .0131, 4.6e-4)
+
+
+def _prho(n, is_, lower_tail):
+    """AS 89 (src/prho.c) — Pr[S >= is] (or Pr[S < is] if ``lower_tail``) for the
+    Spearman statistic S = (n^3-n)(1-rho)/6. Exact for n <= 9, Edgeworth else."""
+    (c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12) = _PRHO_C
+    n_small = 9
+    pv = 0.0 if lower_tail else 1.0
+    if n <= 1:
+        return pv
+    if is_ <= 0.0:
+        return pv
+    n3 = float(n)
+    n3 *= (n3 * n3 - 1.0) / 3.0  # (n^3 - n)/3
+    if is_ > n3:
+        return 1 - pv
+    if n <= n_small:  # exact by full permutation enumeration
+        import itertools
+        nfac = math.factorial(n)
+        if is_ == n3:
+            ifr = 1
+        else:
+            ifr = 0
+            for perm in itertools.permutations(range(1, n + 1)):
+                ise = 0
+                for i in range(n):
+                    d = i + 1 - perm[i]
+                    ise += d * d
+                if is_ <= ise:
+                    ifr += 1
+        return (nfac - ifr if lower_tail else ifr) / nfac
+    # Edgeworth series expansion
+    y = float(n)
+    b = 1 / y
+    x = (6.0 * (is_ - 1) * b / (y * y - 1) - 1) * math.sqrt(y - 1)
+    y = x * x
+    u = x * b * (c1 + b * (c2 + c3 * b)
+                 + y * (-c4 + b * (c5 + c6 * b)
+                        - y * b * (c7 + c8 * b
+                                   - y * (c9 - c10 * b + y * b * (c11 - c12 * y)))))
+    y = u / math.exp(y / 2.0)
+    pv = (-y if lower_tail else y) + _nm.pnorm5(x, 0.0, 1.0, lower_tail, False)
+    if pv < 0:
+        pv = 0.0
+    if pv > 1:
+        pv = 1.0
+    return pv
+
+
+def _ckendall(k, n, w):
+    """Count permutations of size n with T = k concordant pairs (kendall.c)."""
+    u = n * (n - 1) // 2
+    if k < 0 or k > u:
+        return 0.0
+    if w[n] is None:
+        w[n] = [-1.0] * (u + 1)
+    if w[n][k] < 0:
+        if n == 1:
+            w[n][k] = 1.0 if k == 0 else 0.0
+        else:
+            s = 0.0
+            for i in range(n):
+                s += _ckendall(k - i, n - 1, w)
+            w[n][k] = s
+    return w[n][k]
+
+
+def _pkendall(q, n):
+    """R's ``pKendall`` (src/kendall.c) — P(T <= q) for Kendall's exact stat."""
+    q = math.floor(q + 1e-7)
+    if q < 0:
+        return 0.0
+    if q > n * (n - 1) // 2:
+        return 1.0
+    w = [None] * (n + 1)
+    p = 0.0
+    j = 0
+    while j <= q:
+        p += _ckendall(j, n, w)
+        j += 1
+    return p / _nm.gammafn(n + 1)
 
 
 def cor_test(
@@ -340,21 +686,25 @@ def cor_test(
     alternative: str = "two.sided",
     conf_level: float = 0.95,
     continuity: bool = False,
+    exact: Optional[bool] = None,
 ) -> HTest:
     """R's ``cor.test`` with ``method`` in {pearson, spearman, kendall}.
 
-    - **pearson**: ``t``, df = n-2, Fisher-z CI — a faithful nmath port
-      (``pt`` / ``qnorm``), 0-ulp to R.
-    - **spearman**: statistic ``S`` and the **asymptotic** (``exact=FALSE``)
-      t-approximation p-value via nmath ``pt``.
-    - **kendall**: statistic ``z`` and the **asymptotic** normal p-value
-      (tie-corrected variance) via nmath ``pnorm``.
+    - **pearson**: ``t``, df = n-2, Fisher-z CI (``pt`` / ``qnorm``).
+    - **spearman**: statistic ``S``; R's default **exact** p-value (AS 89
+      ``src/prho.c``) for n <= 1290 with no ties, else the asymptotic
+      t-approximation via nmath ``pt``.
+    - **kendall**: R's default **exact** p-value (``src/kendall.c``) for n < 50
+      with no ties — statistic ``T`` (# concordant pairs); else the asymptotic
+      normal (tie-corrected variance) with statistic ``z`` via nmath ``pnorm``.
 
-    Parity note: R's *default* for spearman/kendall uses **exact** small-sample
-    p-values (AS 89 ``C_pRho`` / ``C_pKendall``); those C kernels
-    (``src/prho.c`` / ``src/kendall.c``) are not yet ported, so the
-    spearman/kendall p-values here equal R's ``exact = FALSE`` path (which R
-    also uses for large n or with ties).
+    ``exact`` overrides R's default exact/asymptotic selection.
+
+    The **exact-path p-values are bit-exact** to R (the ``round(S)`` / ``round(T)``
+    feeding the exact kernels absorbs any last-ulp noise). The reported
+    ``rho``/``S``/``tau`` estimate — and, in rare cases, the *asymptotic*
+    p-value — may differ from R by <=1 ulp: R's ``cor`` (``src/cov.c``) centers
+    with the system ``sqrtl``, which numpy's long-double sqrt does not reproduce.
     """
     if alternative not in ("two.sided", "less", "greater"):
         raise ValueError(f"cor_test(): unknown alternative {alternative!r}")
@@ -363,6 +713,7 @@ def cor_test(
     if len(x) != len(y):
         raise ValueError("'x' and 'y' must have the same length")
     n = len(x)
+    ties = min(len(np.unique(x)), len(np.unique(y))) < n
 
     if method == "pearson":
         r = float(np.corrcoef(x, y)[0, 1])
@@ -403,8 +754,13 @@ def cor_test(
     if method == "spearman":
         rho = float(np.corrcoef(_avg_rank(x), _avg_rank(y))[0, 1])
         S = (n ** 3 - n) * (1.0 - rho) / 6.0
+        use_exact = True if exact is None else exact
+        if ties and use_exact:
+            use_exact = False  # cannot compute exact p-value with ties
 
         def pspearman(q, lower_tail):
+            if n <= 1290 and use_exact:
+                return float(_prho(n, round(q) + 2 * int(lower_tail), lower_tail))
             den = (n ** 3 - n) / 6.0
             if continuity:
                 den += 1.0
@@ -441,6 +797,29 @@ def cor_test(
         T1 = float(np.sum(cx * (cx - 1)) / 2.0)
         T2 = float(np.sum(cy * (cy - 1)) / 2.0)
         tau = S / math.sqrt((T0 - T1) * (T0 - T2))
+        use_exact = (n < 50) if exact is None else exact
+        if use_exact and not ties:
+            q = round((tau + 1) * n * (n - 1) / 4)
+            if alternative == "two.sided":
+                if q > n * (n - 1) / 4:
+                    p = 1 - _pkendall(q - 1, n)
+                else:
+                    p = _pkendall(q, n)
+                pval = float(min(2.0 * p, 1.0))
+            elif alternative == "greater":
+                pval = float(1 - _pkendall(q - 1, n))
+            else:  # less
+                pval = float(_pkendall(q, n))
+            return HTest(
+                method="Kendall's rank correlation tau",
+                statistic={"T": float(q)},
+                p_value=pval,
+                estimate={"tau": tau},
+                null_value=0.0,
+                alternative=alternative,
+                data_name="x and y",
+            )
+        # asymptotic normal with tie-corrected variance
         v0 = n * (n - 1) * (2 * n + 5)
         vt = float(np.sum(cx * (cx - 1) * (2 * cx + 5)))
         vu = float(np.sum(cy * (cy - 1) * (2 * cy + 5)))
@@ -474,8 +853,9 @@ def kruskal_test(formula: str, data: pl.DataFrame) -> HTest:
     """R's ``kruskal.test(y ~ group, data)``.
 
     Only the formula form is supported here — that's what the notebook
-    uses. The numeric LHS is grouped by the RHS factor and passed to
-    ``scipy.stats.kruskal``.
+    uses. The numeric LHS is grouped by the RHS factor; the tie-corrected H
+    statistic and its p-value (nmath ``pchisq``) match ``kruskal.test.R`` —
+    bit-exact to R, no scipy.
     """
     if "~" not in formula:
         raise ValueError("formula must look like 'y ~ group'")
@@ -600,38 +980,144 @@ def fisher_test(
     y=None,
     *,
     alternative: str = "two.sided",
+    or_: float = 1.0,
+    conf_int: bool = True,
+    conf_level: float = 0.95,
 ) -> HTest:
     """R's ``fisher.test`` — Fisher's exact test for a 2×2 contingency table.
 
-    ``x`` may be a 2×2 array/matrix or a 1-D vector paired with ``y``.
-    Larger tables (R's Monte-Carlo simulation branch) are not supported.
-    Returns the odds ratio as the point estimate; CI is omitted (R uses
-    inverse non-central hypergeometric, not yet wired).
+    Faithful port of the 2×2 branch of ``fisher.test.R``: the p-value (via the
+    conditional non-central hypergeometric on the ported nmath ``dhyper`` /
+    ``phyper``), the conditional-MLE odds ratio, and its confidence interval
+    (inverting the non-central hypergeometric with the ported ``uniroot`` /
+    Brent ``zeroin``) are all bit-exact to R. ``or_`` is R's ``or`` (the null
+    odds ratio, default 1).
 
-    PARITY DEBT (blocked): faithful R parity needs the exact hypergeometric
-    (``nmath/dhyper.c``) plus FEXACT for r×c tables and the non-central
-    hypergeometric CI (``src/fexact.c``), none yet ported — so this defers
-    to ``scipy.stats.fisher_exact`` (2×2 only).
+    ``x`` is a 2×2 array/matrix, or a 1-D vector paired with ``y``. Larger r×c
+    tables (R's FEXACT network algorithm, ``src/fexact.c``) and the
+    ``simulate.p.value`` Monte-Carlo branch are not yet ported.
     """
-    alt = {"two.sided": "two-sided", "greater": "greater", "less": "less"}[alternative]
+    if alternative not in ("two.sided", "less", "greater"):
+        raise ValueError(f"fisher_test(): unknown alternative {alternative!r}")
     if y is not None:
-        tbl = _crosstab(x, y)
+        tbl = np.asarray(_crosstab(x, y), dtype=float)
         name = "x and y"
     else:
-        tbl = np.asarray(x)
+        tbl = np.asarray(x, dtype=float)
         name = "x"
     if tbl.shape != (2, 2):
         raise NotImplementedError(
-            f"fisher_test(): only 2x2 tables supported (got {tbl.shape})"
+            "fisher_test(): only 2x2 tables are supported "
+            f"(got {tbl.shape}); r×c needs FEXACT, not yet ported"
         )
-    res = _sps.fisher_exact(tbl, alternative=alt)
-    odds = float(res.statistic)
+
+    m = tbl[0, 0] + tbl[1, 0]  # sum(x[, 1])
+    n = tbl[0, 1] + tbl[1, 1]  # sum(x[, 2])
+    k = tbl[0, 0] + tbl[0, 1]  # sum(x[1, ])
+    xx = tbl[0, 0]
+    lo = max(0.0, k - n)
+    hi = min(k, m)
+    support = np.arange(lo, hi + 1)
+    logdc = np.array([_nm.dhyper(s, m, n, k, True) for s in support])
+
+    def dnhyper(ncp):
+        # R's sum() is a sequential LDOUBLE accumulation; np.sum is pairwise —
+        # use _rsum_ld so the normalized density (and everything downstream:
+        # p-value, MLE, CI via uniroot) is bit-exact to R.
+        d = logdc + math.log(ncp) * support
+        d = np.exp(d - np.max(d))
+        return d / _rsum_ld(d)
+
+    def mnhyper(ncp):
+        if ncp == 0:
+            return lo
+        if ncp == math.inf:
+            return hi
+        return _rsum_ld(support * dnhyper(ncp))
+
+    def pnhyper(q, ncp=1.0, upper_tail=False):
+        if ncp == 1.0:
+            if upper_tail:
+                return float(_nm.phyper(xx - 1, m, n, k, False, False))
+            return float(_nm.phyper(xx, m, n, k, True, False))
+        if ncp == 0:
+            return float(q <= lo) if upper_tail else float(q >= lo)
+        if ncp == math.inf:
+            return float(q <= hi) if upper_tail else float(q >= hi)
+        d = dnhyper(ncp)
+        mask = support >= q if upper_tail else support <= q
+        return _rsum_ld(d[mask])
+
+    eps = _nm._DBL_EPSILON
+    if alternative == "less":
+        pval = pnhyper(xx, or_)
+    elif alternative == "greater":
+        pval = pnhyper(xx, or_, upper_tail=True)
+    elif or_ == 0:
+        pval = float(xx == lo)
+    elif or_ == math.inf:
+        pval = float(xx == hi)
+    else:
+        rel_err = 1 + 1e-7  # a little fuzz
+        d = dnhyper(or_)
+        pval = _rsum_ld(d[d <= d[int(xx - lo)] * rel_err])
+
+    def mle(val):
+        if val == lo:
+            return 0.0
+        if val == hi:
+            return math.inf
+        mu = mnhyper(1.0)
+        if mu > val:
+            return _nm.uniroot(lambda t: mnhyper(t) - val, 0.0, 1.0)
+        if mu < val:
+            return 1.0 / _nm.uniroot(lambda t: mnhyper(1.0 / t) - val, eps, 1.0)
+        return 1.0
+
+    or_est = mle(xx)
+
+    conf = None
+    if conf_int:
+        def ncp_u(val, alpha):
+            if val == hi:
+                return math.inf
+            p = pnhyper(val, 1.0)
+            if p < alpha:
+                return _nm.uniroot(lambda t: pnhyper(val, t) - alpha, 0.0, 1.0)
+            if p > alpha:
+                return 1.0 / _nm.uniroot(
+                    lambda t: pnhyper(val, 1.0 / t) - alpha, eps, 1.0)
+            return 1.0
+
+        def ncp_l(val, alpha):
+            if val == lo:
+                return 0.0
+            p = pnhyper(val, 1.0, upper_tail=True)
+            if p > alpha:
+                return _nm.uniroot(
+                    lambda t: pnhyper(val, t, upper_tail=True) - alpha, 0.0, 1.0)
+            if p < alpha:
+                return 1.0 / _nm.uniroot(
+                    lambda t: pnhyper(val, 1.0 / t, upper_tail=True) - alpha,
+                    eps, 1.0)
+            return 1.0
+
+        if alternative == "less":
+            conf = (0.0, ncp_u(xx, 1 - conf_level))
+        elif alternative == "greater":
+            conf = (ncp_l(xx, 1 - conf_level), math.inf)
+        else:
+            a = (1 - conf_level) / 2
+            conf = (ncp_l(xx, a), ncp_u(xx, a))
+
     return HTest(
         method="Fisher's Exact Test for Count Data",
-        p_value=float(res.pvalue),
-        estimate={"odds ratio": odds},
-        null_value=1.0,
+        p_value=float(pval),
+        conf_int=conf,
+        estimate={"odds ratio": float(or_est)},
+        null_value=float(or_),
         alternative=alternative,
+        conf_level=conf_level,
         data_name=name,
     )
 
@@ -1057,39 +1543,402 @@ def shapiro_test(x) -> HTest:
     )
 
 
+# --- Kolmogorov-Smirnov exact / asymptotic distributions (src/ks.c) ----------
+_KS_M_PI_2 = math.pi / 2.0
+_KS_M_PI_4 = math.pi / 4.0
+
+
+def _R_pow_di(x, n: int) -> float:
+    """R's ``R_pow_di(x, n)`` — x**n for integer n by repeated squaring."""
+    p = 1.0
+    if math.isnan(x):
+        return x
+    if n != 0:
+        if not math.isfinite(x):
+            return math.pow(x, float(n))
+        is_neg = n < 0
+        if is_neg:
+            n = -n
+        while True:
+            if n & 1:
+                p *= x
+            n >>= 1
+            if n:
+                x *= x
+            else:
+                break
+        if is_neg:
+            p = 1.0 / p
+    return p
+
+
+def _ks_K2l(x, lower, tol):
+    """Two-sided asymptotic KS / Smirnov limit distribution (ks.c ``K2l``)."""
+    if x <= 0.0:
+        return 0.0 if lower else 1.0
+    if x < 1.0:
+        k_max = int(math.sqrt(2 - math.log(tol)))
+        w = math.log(x)
+        z = -(_KS_M_PI_2 * _KS_M_PI_4) / (x * x)
+        s = 0.0
+        k = 1
+        while k < k_max:
+            s += math.exp(k * k * z - w)
+            k += 2
+        p = s / _nm._M_1_SQRT_2PI
+        if not lower:
+            p = 1 - p
+    else:
+        z = -2 * x * x
+        s = -1.0
+        if lower:
+            k = 1
+            new = 1.0
+        else:
+            k = 2
+            new = 2 * math.exp(z)
+        old = 0.0
+        while abs(old - new) > tol:
+            old = new
+            new += 2 * s * math.exp(z * k * k)
+            s *= -1
+            k += 1
+        p = new
+    return p
+
+
+def _ks_m_multiply(A, B, m):
+    C = [0.0] * (m * m)
+    for i in range(m):
+        for j in range(m):
+            s = 0.0
+            for k in range(m):
+                s += A[i * m + k] * B[k * m + j]
+            C[i * m + j] = s
+    return C
+
+
+def _ks_m_power(A, eA, m, n):
+    """Matrix power with scaling (ks.c ``m_power``). Returns (V, eV)."""
+    if n == 1:
+        return list(A), eA
+    V, eV = _ks_m_power(A, eA, m, n // 2)
+    B = _ks_m_multiply(V, V, m)
+    eB = 2 * eV
+    if n % 2 == 0:
+        V = B
+        eV = eB
+    else:
+        V = _ks_m_multiply(A, B, m)
+        eV = eA + eB
+    if V[(m // 2) * m + (m // 2)] > 1e140:
+        for i in range(m * m):
+            V[i] = V[i] * 1e-140
+        eV += 140
+    return V, eV
+
+
+def _ks_K2x(n: int, d: float) -> float:
+    """One-sample two-sided exact Kolmogorov distribution (ks.c ``K2x``,
+    Marsaglia-Tsang-Wang 2003 matrix method)."""
+    k = int(n * d) + 1
+    m = 2 * k - 1
+    h = k - n * d
+    H = [0.0] * (m * m)
+    for i in range(m):
+        for j in range(m):
+            H[i * m + j] = 0.0 if (i - j + 1 < 0) else 1.0
+    for i in range(m):
+        H[i * m] -= _R_pow_di(h, i + 1)
+        H[(m - 1) * m + i] -= _R_pow_di(h, m - i)
+    H[(m - 1) * m] += (_R_pow_di(2 * h - 1, m) if (2 * h - 1 > 0) else 0.0)
+    for i in range(m):
+        for j in range(m):
+            if i - j + 1 > 0:
+                for g in range(1, i - j + 1 + 1):
+                    H[i * m + j] /= g
+    Q, eQ = _ks_m_power(H, 0, m, n)
+    s = Q[(k - 1) * m + k - 1]
+    for i in range(1, n + 1):
+        s = s * i / n
+        if s < 1e-140:
+            s *= 1e140
+            eQ -= 140
+    s *= _R_pow_di(10.0, eQ)
+    return s
+
+
+def _pkolmogorov_one_exact(q, n, lower_tail=True):
+    """One-sided one-sample exact Kolmogorov (Birnbaum-Tingey 1951)."""
+    jmax = int(math.floor(n * (1 - q)))
+    terms = [math.exp(_nm.lchoose(n, j)
+                      + (n - j) * math.log(1 - q - j / n)
+                      + (j - 1) * math.log(q + j / n))
+             for j in range(0, jmax + 1)]
+    p = q * _rsum_ld(terms)
+    return (1 - p) if lower_tail else p
+
+
+def _pkolmogorov(q, size, two_sided=True, exact=True, lower_tail=True):
+    """R's internal ``pkolmogorov`` — P(D < q), one-sample (ks.test.R)."""
+    if math.isnan(q):
+        return math.nan
+    if q <= 0:
+        return 1 - lower_tail
+    if q > 1:
+        return float(lower_tail)
+    if exact:
+        if two_sided:
+            p = _ks_K2x(int(size), q)
+            return p if lower_tail else 1 - p
+        return _pkolmogorov_one_exact(q, size, lower_tail)
+    if two_sided:
+        return _ks_K2l(math.sqrt(size) * q, lower_tail, 1e-6)
+    # R: exp(- 2 * n * q^2); q^2 == q*q, unary- binds above * → (-2*n)*(q*q)
+    p = math.exp((-2 * size) * (q * q))
+    return (1 - p) if lower_tail else p
+
+
+def _ks_test_two(q, r, s, two):
+    return (abs(r - s) >= q) if two else ((r - s) >= q)
+
+
+def _psmirnov_exact_uniq(q, m, n, two, lower):
+    """Two-sample exact Smirnov, distinct values (ks.c uniq_lower/upper)."""
+    md = float(m)
+    nd = float(n)
+    if lower:
+        u = [0.0] * (n + 1)
+        u[0] = 1.0
+        for j in range(1, n + 1):
+            u[j] = 0.0 if _ks_test_two(q, 0.0, j / nd, two) else u[j - 1]
+        for i in range(1, m + 1):
+            w = i / (i + n)
+            if _ks_test_two(q, i / md, 0.0, two):
+                u[0] = 0.0
+            else:
+                u[0] = w * u[0]
+            for j in range(1, n + 1):
+                if _ks_test_two(q, i / md, j / nd, two):
+                    u[j] = 0.0
+                else:
+                    u[j] = w * u[j] + u[j - 1]
+        return u[n]
+    # upper
+    u = [0.0] * (n + 1)
+    u[0] = 0.0
+    for j in range(1, n + 1):
+        u[j] = 1.0 if _ks_test_two(q, 0.0, j / nd, two) else u[j - 1]
+    for i in range(1, m + 1):
+        if _ks_test_two(q, i / md, 0.0, two):
+            u[0] = 1.0
+        for j in range(1, n + 1):
+            if _ks_test_two(q, i / md, j / nd, two):
+                u[j] = 1.0
+            else:
+                v = i / (i + j)
+                w = j / (i + j)
+                u[j] = v * u[j] + w * u[j - 1]
+    return u[n]
+
+
+def _psmirnov_exact_ties(q, m, n, z, two, lower):
+    """Two-sample exact Smirnov with ties (ks.c ties_lower/upper); ``z`` is the
+    length-(m+n+1) integer tie-boundary indicator."""
+    md = float(m)
+    nd = float(n)
+    u = [0.0] * (n + 1)
+    if lower:
+        u[0] = 1.0
+        for j in range(1, n + 1):
+            if _ks_test_two(q, 0.0, j / nd, two) and z[j]:
+                u[j] = 0.0
+            else:
+                u[j] = u[j - 1]
+        for i in range(1, m + 1):
+            w = i / (i + n)
+            if _ks_test_two(q, i / md, 0.0, two) and z[i]:
+                u[0] = 0.0
+            else:
+                u[0] = w * u[0]
+            for j in range(1, n + 1):
+                if _ks_test_two(q, i / md, j / nd, two) and z[i + j]:
+                    u[j] = 0.0
+                else:
+                    u[j] = w * u[j] + u[j - 1]
+        return u[n]
+    # upper
+    u[0] = 0.0
+    for j in range(1, n + 1):
+        if _ks_test_two(q, 0.0, j / nd, two) and z[j]:
+            u[j] = 1.0
+        else:
+            u[j] = u[j - 1]
+    for i in range(1, m + 1):
+        if _ks_test_two(q, i / md, 0.0, two) and z[i]:
+            u[0] = 1.0
+        for j in range(1, n + 1):
+            if _ks_test_two(q, i / md, j / nd, two) and z[i + j]:
+                u[j] = 1.0
+            else:
+                v = i / (i + j)
+                w = j / (i + j)
+                u[j] = v * u[j] + w * u[j - 1]
+    return u[n]
+
+
+def _psmirnov(q, n_x, n_y, w_combined, alternative, exact, lower_tail=True):
+    """R's ``psmirnov`` (ks.test.R) — two-sample Smirnov CDF P(D < q).
+
+    ``w_combined`` is the concatenated sample (for the ties path) or ``None``."""
+    if q <= 0:
+        return 1 - lower_tail
+    if q > 1:
+        return float(lower_tail)
+    two = (alternative == "two.sided")
+    n = n_x * n_y / (n_x + n_y)
+    if not exact:  # asymptotic
+        if two:
+            return _ks_K2l(math.sqrt(n) * q, lower_tail, 1e-6)
+        ret = -math.expm1((-2 * n) * (q * q))  # R: -expm1(- 2 * n * q^2)
+        return ret if lower_tail else 1 - ret
+    # exact
+    m_, nn = int(n_x), int(n_y)
+    if alternative == "less":
+        m_, nn = nn, m_
+    qa = (0.5 + math.floor(q * m_ * nn - 1e-7)) / (m_ * nn)
+    if w_combined is not None:  # ties
+        sw = np.sort(w_combined)
+        zdiff = (np.diff(sw) != 0).astype(int)
+        if zdiff.any():
+            z = [0] + list(zdiff) + [1]  # c(0L, z, 1L)
+        else:
+            z = None
+        if z is not None:
+            if lower_tail:
+                return _psmirnov_exact_ties(qa, m_, nn, z, two, True)
+            return _psmirnov_exact_ties(qa, m_, nn, z, two, False)
+    if lower_tail:
+        return _psmirnov_exact_uniq(qa, m_, nn, two, True)
+    return _psmirnov_exact_uniq(qa, m_, nn, two, False)
+
+
+_KS_CDF_NAMES = {
+    "pnorm": "pnorm", "punif": "punif", "pexp": "pexp", "pgamma": "pgamma",
+    "pbeta": "pbeta", "plnorm": None, "pchisq": "pchisq", "pt": "pt",
+    "pf": "pf", "ppois": "ppois", "pbinom": "pbinom", "pcauchy": None,
+    "pweibull": None, "plogis": None,
+}
+
+
+def _ks_resolve_cdf(y):
+    """Resolve ``y`` (a callable or R-style ``"pnorm"`` name) to a CDF."""
+    if callable(y):
+        return y
+    name = _KS_CDF_NAMES.get(y, None)
+    if name is not None and hasattr(_dist, name):
+        return getattr(_dist, name)
+    raise ValueError(
+        f"ks_test(): 'y' must be a second sample, a CDF callable, or a "
+        f"supported distribution name; got {y!r}")
+
+
 def ks_test(
     x,
     y,
-    *,
+    *args,
     alternative: str = "two.sided",
+    exact: Optional[bool] = None,
+    **kwargs,
 ) -> HTest:
-    """R's ``ks.test`` — Kolmogorov-Smirnov test.
+    """R's ``ks.test`` — Kolmogorov-Smirnov test, faithful to ``ks.test.R``.
 
-    ``y`` is either a second sample (two-sample test) or a string naming
-    a scipy distribution (one-sample goodness-of-fit). R uses names like
-    ``"pnorm"``; we accept either ``"pnorm"`` or scipy's ``"norm"``.
-
-    PARITY DEBT (blocked): defers to ``scipy.stats.kstest`` / ``ks_2samp``
-    (asymptotic). R's exact small-n Smirnov / Kolmogorov distributions
-    (``src/ks.c`` — ``psmirnov``/``pkolmogorov``) are not yet ported.
+    Two-sample (``y`` a numeric sample) or one-sample goodness-of-fit (``y`` a
+    CDF callable or an R-style name such as ``"pnorm"``; extra ``*args`` /
+    ``**kwargs`` are passed to the CDF, as R passes ``...``). The statistic
+    (``D`` / ``D^+`` / ``D^-``) and p-value are bit-exact to R: exact small-n
+    distributions via the ported ``src/ks.c`` kernels (Marsaglia-Tsang-Wang
+    ``K2x`` one-sample; Schröer-Trenkler / Viehmann recursion two-sample;
+    Birnbaum-Tingey one-sided), asymptotic (``K2l``) otherwise. R's default
+    ``exact`` selection is used unless overridden.
     """
-    alt = {"two.sided": "two-sided", "greater": "greater", "less": "less"}[alternative]
-    x_arr = _as_array(x)
-    if isinstance(y, str):
-        dist_name = y[1:] if y.startswith("p") and len(y) > 1 else y
-        res = _sps.kstest(x_arr, dist_name, alternative=alt)
-        method = "One-sample Kolmogorov-Smirnov test"
+    if alternative not in ("two.sided", "less", "greater"):
+        raise ValueError(f"ks_test(): unknown alternative {alternative!r}")
+    x_arr = _as_array(x).astype(float)
+    x_arr = x_arr[~np.isnan(x_arr)]
+    n = len(x_arr)
+    if n < 1:
+        raise ValueError("not enough 'x' data")
+    nm_alt = {
+        "two.sided": "two-sided",
+        "less": "the CDF of x lies below that of y",
+        "greater": "the CDF of x lies above that of y",
+    }[alternative]
+    stat_name = {"two.sided": "D", "greater": "D^+", "less": "D^-"}[alternative]
+
+    if isinstance(y, str) or callable(y):  # one-sample
+        cdf = _ks_resolve_cdf(y)
+        ties = len(np.unique(x_arr)) < n
+        use_exact = ((n < 100) and not ties) if exact is None else exact
+        method = ("Exact" if use_exact else "Asymptotic") \
+            + " one-sample Kolmogorov-Smirnov test"
+        xs = np.asarray(cdf(np.sort(x_arr), *args, **kwargs), float) \
+            - np.arange(n) / n
+        if alternative == "two.sided":
+            stat = float(max(np.max(xs), np.max(1.0 / n - xs)))
+        elif alternative == "greater":
+            stat = float(np.max(1.0 / n - xs))
+        else:
+            stat = float(np.max(xs))
+        pval = _pkolmogorov(stat, n, two_sided=(alternative == "two.sided"),
+                            exact=use_exact, lower_tail=False)
+        nm_alt = {
+            "two.sided": "two-sided",
+            "less": "the CDF of x lies below the null hypothesis",
+            "greater": "the CDF of x lies above the null hypothesis",
+        }[alternative]
         data_name = "x"
-    else:
-        y_arr = _as_array(y)
-        res = _sps.ks_2samp(x_arr, y_arr, alternative=alt)
-        method = "Two-sample Kolmogorov-Smirnov test"
+    else:  # two-sample (Smirnov)
+        y_arr = _as_array(y).astype(float)
+        y_arr = y_arr[~np.isnan(y_arr)]
+        n_y = len(y_arr)
+        if n_y < 1:
+            raise ValueError("not enough 'y' data")
+        n_x = n
+        use_exact = (n_x * n_y < 10000) if exact is None else exact
+        method = ("Exact" if use_exact else "Asymptotic") \
+            + " two-sample Kolmogorov-Smirnov test"
+        w = np.concatenate([x_arr, y_arr])
+        order = np.argsort(w, kind="stable")
+        vals = np.where(order < n_x, 1.0 / n_x, -1.0 / n_y)
+        # R's cumsum() accumulates in LDOUBLE (src/main/cum.c), storing each
+        # partial as a double; np.cumsum is plain double — replicate for parity.
+        acc = np.longdouble(0.0)
+        z = np.empty(len(vals))
+        for _i, _v in enumerate(vals):
+            acc += _v
+            z[_i] = float(acc)
+        ties = len(np.unique(w)) < (n_x + n_y)
+        if ties:
+            keep = np.concatenate([np.where(np.diff(np.sort(w)) != 0)[0],
+                                   [n_x + n_y - 1]])
+            z = z[keep]
+        if alternative == "two.sided":
+            stat = float(np.max(np.abs(z)))
+        elif alternative == "greater":
+            stat = float(np.max(z))
+        else:
+            stat = float(-np.min(z))
+        pval = _psmirnov(stat, n_x, n_y, w if ties else None,
+                         alternative, use_exact, lower_tail=False)
         data_name = "x and y"
+
+    pval = min(1.0, max(0.0, pval))
     return HTest(
         method=method,
-        statistic={"D": float(res.statistic)},
-        p_value=float(res.pvalue),
-        alternative=alternative,
+        statistic={stat_name: stat},
+        p_value=float(pval),
+        alternative=nm_alt,
         data_name=data_name,
     )
 
@@ -1134,8 +1983,9 @@ def friedman_test(y, groups, blocks) -> HTest:
     """R's ``friedman.test(y, groups, blocks)`` — Friedman rank-sum test.
 
     ``y`` is the value vector, ``groups`` and ``blocks`` are parallel
-    label vectors. The data is reshaped into ``(blocks × groups)`` wide
-    form before being passed to ``scipy.stats.friedmanchisquare``.
+    label vectors. The data is reshaped into ``(blocks × groups)`` wide form;
+    the tie-corrected Friedman statistic and its p-value (nmath ``pchisq``)
+    are computed as in ``friedman.test.R`` — bit-exact to R, no scipy.
     """
     y_arr = _as_array(y)
     g_arr = np.asarray(groups)

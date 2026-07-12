@@ -1093,7 +1093,7 @@ fn grat_r(a: f64, x: f64, log_r: f64, eps: f64) -> f64 {
     }
 }
 
-fn logspace_add(logx: f64, logy: f64) -> f64 {
+pub(crate) fn logspace_add(logx: f64, logy: f64) -> f64 {
     logx.max(logy) + (-(logx - logy).abs()).exp().ln_1p()
 }
 

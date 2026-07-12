@@ -3295,7 +3295,7 @@ def _bobyqa_driver(calfun, x0, lower, upper, *,
 # ``nloptwrap`` = NLopt's ``NLOPT_LN_BOBYQA`` (utilities.R:836-839,
 # ``xtol_abs=ftol_abs=1e-8, maxeval=1e5``). That is Powell's BOBYQA — the SAME
 # core as the minqa port above — wrapped with three NLopt-specific pieces
-# (ported verbatim from ``ref/nlopt/``): (1) a per-axis variable rescaling so
+# (ported verbatim from NLopt's source): (1) a per-axis variable rescaling so
 # the initial steps are equal (rescale.c), (2) a default initial-step heuristic
 # from the bounds (options.c ``nlopt_set_default_initial_step``), and (3) an
 # ``ftol_abs`` stopping test woven into the trust-region loop (stop.c

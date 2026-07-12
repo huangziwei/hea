@@ -6,9 +6,17 @@ ports of R's ``src/nmath/`` C kernels (Cody pnorm, Wichura qnorm, Welinder
 pgamma, TOMS 708 pbeta, Loader dpois/dbinom, AS 91/109 qgamma/qbeta) — so
 ``hea.R`` d/p/q is 0-ulp to R, not scipy's ~1-3 ulp approximations. ``unif`` is
 an exact closed-form port of nmath/{dunif,punif,qunif}.c (no special functions).
-Only the **non-central** variants (``ncp != 0``: nct/ncf/ncx2) still defer to
-``scipy.stats`` — blocked on the nmath dnt/pnt/qnt, dnf/pnf/qnf, dnchisq/pnchisq/
-qnchisq ports.
+The **non-central** variants (``ncp != 0``), the studentized range
+(``ptukey``/``qtukey``) and the hypergeometric (``dhyper``/``phyper``) are also
+ported from nmath (dnt/pnt/qnt, dnf/pnf/qnf, dnchisq/pnchisq/qnchisq, pnbeta,
+ptukey/qtukey, dhyper/phyper). The pure-Python reference is 0-ulp to R (except a
+≤1-ulp residual on the ncp>=80 far-lower-tail of pnchisq). When the ``hea._rs``
+extension is built these route through a Rust **f64** fast path (~100-2500x
+faster — at or near R's C speed): R accumulates these AS-275/AS-226/AS-243/
+Copenhaver-Holland series in 80-bit ``LDOUBLE`` and Rust std has no 80-bit
+float, so the f64 result matches R to a few ulp (extreme tails degrade more),
+not bit-for-bit. Absent the extension, the 0-ulp Python path runs unchanged.
+No ``scipy.stats`` in the d/p/q path.
 
 Conventions kept from R: ``lower_tail`` (R's ``lower.tail``) and ``log_p`` /
 ``log`` for p* / q* / d*; ``ncp`` non-centrality where applicable; ``lambda_``
@@ -19,7 +27,6 @@ omitted — ``df`` is too common as a DataFrame variable; use
 from __future__ import annotations
 
 import numpy as np
-from scipy import stats as _sps
 
 from . import nmath as _nm
 from ._shared import NamedVector
@@ -101,27 +108,24 @@ def rnorm(n, mean=0, sd=1):
 
 # Student's t  (df = degrees of freedom, ncp = non-centrality)
 def dt(x, df, ncp=0, log=False):
-    """R's ``dt`` — central case bit-exact via ported dt (nmath/dt.c)."""
+    """R's ``dt`` — bit-exact via ported dt / dnt (nmath/dt.c, dnt.c)."""
     if np.all(np.asarray(ncp) == 0):
         return _nm._disp("dt", _nm.dt, [x, df], (log,))
-    return _sps.nct.pdf(x, df=df, nc=ncp)
+    return _nm._disp("dnt", _nm.dnt, [x, df, ncp], (log,))
 
 
 def pt(q, df, ncp=0, lower_tail=True, log_p=False):
-    """R's ``pt`` — central case bit-exact via ported pt (nmath/pt.c)."""
+    """R's ``pt`` — bit-exact via ported pt / pnt (nmath/pt.c, pnt.c AS 243)."""
     if np.all(np.asarray(ncp) == 0):
         return _nm._disp("pt", _nm.pt, [q, df], (lower_tail, log_p))
-    p = _sps.nct.cdf(q, df=df, nc=ncp)
-    return p if lower_tail else 1 - p
+    return _nm._disp("pnt", _nm.pnt, [q, df, ncp], (lower_tail, log_p))
 
 
 def qt(p, df, ncp=0, lower_tail=True, log_p=False):
-    """R's ``qt`` — central case bit-exact via ported qt (nmath/qt.c)."""
+    """R's ``qt`` — bit-exact via ported qt / qnt (nmath/qt.c, qnt.c)."""
     if np.all(np.asarray(ncp) == 0):
         return _nm._disp("qt", _nm.qt, [p, df], (lower_tail, log_p))
-    if not lower_tail:
-        p = 1 - np.asarray(p)
-    return _sps.nct.ppf(p, df=df, nc=ncp)
+    return _nm._disp("qnt", _nm.qnt, [p, df, ncp], (lower_tail, log_p))
 
 
 def rt(n, df, ncp=0):
@@ -140,20 +144,17 @@ def rt(n, df, ncp=0):
 
 # F  (df() PDF intentionally omitted — clashes with `df` variable name)
 def pf(q, df1, df2, ncp=0, lower_tail=True, log_p=False):
-    """R's ``pf`` — central case bit-exact via ported pf (nmath/pf.c)."""
+    """R's ``pf`` — bit-exact via ported pf / pnf (nmath/pf.c, pnf.c)."""
     if np.all(np.asarray(ncp) == 0):
         return _nm._disp("pf", _nm.pf, [q, df1, df2], (lower_tail, log_p))
-    p = _sps.ncf.cdf(q, df1, df2, nc=ncp)
-    return p if lower_tail else 1 - p
+    return _nm._disp("pnf", _nm.pnf, [q, df1, df2, ncp], (lower_tail, log_p))
 
 
 def qf(p, df1, df2, ncp=0, lower_tail=True, log_p=False):
-    """R's ``qf`` — central case bit-exact via ported qf (nmath/qf.c)."""
+    """R's ``qf`` — bit-exact via ported qf / qnf (nmath/qf.c, qnf.c)."""
     if np.all(np.asarray(ncp) == 0):
         return _nm._disp("qf", _nm.qf, [p, df1, df2], (lower_tail, log_p))
-    if not lower_tail:
-        p = 1 - np.asarray(p)
-    return _sps.ncf.ppf(p, df1, df2, nc=ncp)
+    return _nm._disp("qnf", _nm.qnf, [p, df1, df2, ncp], (lower_tail, log_p))
 
 
 def rf(n, df1, df2, ncp=0):
@@ -172,30 +173,29 @@ def rf(n, df1, df2, ncp=0):
     return num / den
 
 
-# chi-squared
+# chi-squared  (ncp != 0 via ported nmath dnchisq/pnchisq/qnchisq — bit-exact to
+# R except a ≤1-ulp residual on the ncp>=80 far-lower-tail, where numpy's long-
+# double exp differs from the system expl R links; still far tighter than scipy.)
 def dchisq(x, df, ncp=0):
     # central chi-square = gamma(shape=df/2, scale=2) — bit-exact via nmath.
     if np.all(np.asarray(ncp) == 0):
         return _nm._disp("dgamma", _nm.dgamma, [x, np.asarray(df, float) / 2.0, 2.0],
                          (False,))
-    return _sps.ncx2.pdf(x, df=df, nc=ncp)
+    return _nm._disp("dnchisq", _nm.dnchisq, [x, df, ncp], (False,))
 
 
 def pchisq(q, df, ncp=0, lower_tail=True):
     if np.all(np.asarray(ncp) == 0):
         return _nm._disp("pgamma", _nm.pgamma, [q, np.asarray(df, float) / 2.0, 2.0],
                          (lower_tail, False))
-    p = _sps.ncx2.cdf(q, df=df, nc=ncp)
-    return p if lower_tail else 1 - p
+    return _nm._disp("pnchisq", _nm.pnchisq, [q, df, ncp], (lower_tail, False))
 
 
 def qchisq(p, df, ncp=0, lower_tail=True):
     if np.all(np.asarray(ncp) == 0):
         return _nm._disp("qgamma", _nm.qgamma, [p, np.asarray(df, float) / 2.0, 2.0],
                          (lower_tail, False))
-    if not lower_tail:
-        p = 1 - np.asarray(p)
-    return _sps.ncx2.ppf(p, df=df, nc=ncp)
+    return _nm._disp("qnchisq", _nm.qnchisq, [p, df, ncp], (lower_tail, False))
 
 
 def rchisq(n, df, ncp=0):
@@ -402,6 +402,72 @@ def rbeta(n, shape1, shape2):
     s1 = _recycle(shape1, nn)
     s2 = _recycle(shape2, nn)
     return rng.rbeta_n(s1, s2)
+
+
+# Wilcoxon signed-rank distribution (exact; nmath/signrank.c)
+def dsignrank(x, n, log=False):
+    """R's ``dsignrank`` — density of the Wilcoxon signed-rank statistic."""
+    return _nm._vec(lambda xx, nn: _nm.dsignrank(xx, nn, log), x, n)
+
+
+def psignrank(q, n, lower_tail=True, log_p=False):
+    """R's ``psignrank`` — CDF of the Wilcoxon signed-rank statistic."""
+    return _nm._vec(lambda qq, nn: _nm.psignrank(qq, nn, lower_tail, log_p), q, n)
+
+
+def qsignrank(p, n, lower_tail=True, log_p=False):
+    """R's ``qsignrank`` — quantile of the Wilcoxon signed-rank statistic."""
+    return _nm._vec(lambda pp, nn: _nm.qsignrank(pp, nn, lower_tail, log_p), p, n)
+
+
+# Wilcoxon rank-sum (Mann-Whitney) distribution (exact; nmath/wilcox.c)
+def dwilcox(x, m, n, log=False):
+    """R's ``dwilcox`` — density of the Wilcoxon rank-sum (Mann-Whitney) stat."""
+    return _nm._vec(lambda xx, mm, nn: _nm.dwilcox(xx, mm, nn, log), x, m, n)
+
+
+def pwilcox(q, m, n, lower_tail=True, log_p=False):
+    """R's ``pwilcox`` — CDF of the Wilcoxon rank-sum (Mann-Whitney) statistic."""
+    return _nm._vec(
+        lambda qq, mm, nn: _nm.pwilcox(qq, mm, nn, lower_tail, log_p), q, m, n)
+
+
+def qwilcox(p, m, n, lower_tail=True, log_p=False):
+    """R's ``qwilcox`` — quantile of the Wilcoxon rank-sum (Mann-Whitney) stat."""
+    return _nm._vec(
+        lambda pp, mm, nn: _nm.qwilcox(pp, mm, nn, lower_tail, log_p), p, m, n)
+
+
+# hypergeometric  (R: dhyper(x, m, n, k) — m white, n black, k drawn)
+def dhyper(x, m, n, k, log=False):
+    """R's ``dhyper`` — hypergeometric density (nmath/dhyper.c); R-parity."""
+    return _nm._disp("dhyper", _nm.dhyper, [x, m, n, k], (log,))
+
+
+def phyper(q, m, n, k, lower_tail=True, log_p=False):
+    """R's ``phyper`` — hypergeometric CDF (nmath/phyper.c); R-parity."""
+    return _nm._disp("phyper", _nm.phyper, [q, m, n, k], (lower_tail, log_p))
+
+
+# studentized range (Tukey)  — R exposes only the CDF / quantile (no d*/r*)
+def ptukey(q, nmeans, df, nranges=1, lower_tail=True, log_p=False):
+    """R's ``ptukey`` — CDF of the studentized range distribution.
+
+    ``nmeans`` is the number of groups/treatments, ``df`` the error degrees of
+    freedom, ``nranges`` the number of independent ranges (default 1). R-parity
+    via the ported nmath ``ptukey`` (Copenhaver-Holland Gauss-Legendre
+    quadrature); see the module docstring on the Rust f64 fast path."""
+    return _nm._disp("ptukey", _nm.ptukey, [q, nranges, nmeans, df],
+                     (lower_tail, log_p))
+
+
+def qtukey(p, nmeans, df, nranges=1, lower_tail=True, log_p=False):
+    """R's ``qtukey`` — quantile of the studentized range distribution.
+
+    Inverse of :func:`ptukey` (secant iteration off an AS 70 start value);
+    R-parity via the ported nmath ``qtukey``."""
+    return _nm._disp("qtukey", _nm.qtukey, [p, nranges, nmeans, df],
+                     (lower_tail, log_p))
 
 
 def set_seed(seed):

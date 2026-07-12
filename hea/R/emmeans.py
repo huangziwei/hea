@@ -37,7 +37,6 @@ from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
-from scipy import stats as _sps
 from . import distributions as _dist
 
 
@@ -340,15 +339,10 @@ def _p_adjust(p_raw, t_vals, dfs, method, k_levels) -> np.ndarray:
         m = len(p_raw)
         return np.minimum(np.asarray(p_raw) * m, 1.0)
     if method == "tukey":
-        # Studentized range for ``k_levels`` groups.
+        # Studentized range upper tail for ``k_levels`` groups — R's
+        # ptukey(q, nmeans, df, lower.tail=FALSE), bit-exact via nmath.
         q = np.abs(t_vals) * np.sqrt(2.0)
-        try:
-            sr = _sps.studentized_range
-            return 1.0 - sr.cdf(q, k_levels, dfs)
-        except AttributeError:
-            # Older scipy fallback — Bonferroni is a conservative proxy.
-            m = len(p_raw)
-            return np.minimum(np.asarray(p_raw) * m, 1.0)
+        return _dist.ptukey(q, k_levels, dfs, lower_tail=False)
     raise ValueError(f"emmeans: unknown adjust={method!r}")
 
 

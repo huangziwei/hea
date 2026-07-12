@@ -37,7 +37,7 @@ Wood, Goude & Shaw (2015), "Generalized additive models for large data
 sets", JRSS C 64(1):139-155.
 Wood (2017), *Generalized Additive Models* (2nd ed.), §6.5.
 
-mgcv source: ``ref/mgcv/R/bam.r`` (1.9-4).
+mgcv source: ``mgcv/R/bam.r`` (1.9-4).
 """
 
 from __future__ import annotations

@@ -19,6 +19,7 @@ from conftest import have_rscript, r_scalar_values
 
 import hea
 from hea import R as R_mod
+from hea.R import nmath as _nm
 from hea.R import (
     as_character, as_integer, as_logical, as_numeric,
     colnames, complete_cases, cor, cov, cumsum, cummax, cummin, cumprod,
@@ -34,7 +35,10 @@ from hea.R import (
     tabulate, unique, var, which, which_max, which_min,
     # distributions (a representative subset; full grid checked elsewhere)
     dnorm, pnorm, qnorm, rnorm,
-    pt, qt, qchisq, pchisq, qf, pf,
+    dt, pt, qt, dchisq, qchisq, pchisq, qf, pf,
+    ptukey, qtukey,
+    dhyper, phyper,
+    dsignrank, psignrank, qsignrank, dwilcox, pwilcox, qwilcox,
     dbinom, pbinom, dpois, ppois, punif, qexp, pgamma, pbeta,
     set_seed,
 )
@@ -612,6 +616,10 @@ _R_EXPR_SKIP = {
     "dbinom", "pbinom", "qbinom", "rbinom",
     "dpois", "ppois", "qpois", "rpois",
     "dunif", "punif", "qunif", "runif",
+    "ptukey", "qtukey",
+    "dsignrank", "psignrank", "qsignrank",
+    "dwilcox", "pwilcox", "qwilcox",
+    "dhyper", "phyper",
     "dexp", "pexp", "qexp", "rexp",
     "dgamma", "pgamma", "qgamma", "rgamma",
     "dbeta", "pbeta", "qbeta", "rbeta",
@@ -790,6 +798,75 @@ def test_f_distribution():
     _assert_r([
         (qf(0.95, 2, 10), "qf(0.95, 2, 10)", 4.1028210151304005),
         (pf(4.102821, 2, 10), "pf(4.102821, 2, 10)", 0.94999999958445847),
+    ])
+
+
+def test_tukey_studentized_range():
+    # ptukey/qtukey bit-exact to R via the Python nmath reference (ptukey.c/
+    # qtukey.c). The nmath scalar takes (q, rr=nranges, cc=nmeans, df); R's
+    # user signature is ptukey(q, nmeans, df, nranges=1). The public ptukey/
+    # qtukey add a Rust f64 fast path (≤ few ulp), covered in test_rs_parity.
+    _assert_r([
+        (float(_nm.ptukey(3.5, 1, 4, 20, True, False)),
+         "ptukey(3.5, 4, 20)", 0.90504154945144333),
+        (float(_nm.ptukey(3.5, 1, 4, 20, False, False)),
+         "ptukey(3.5, 4, 20, lower.tail=FALSE)", 0.094958450548556672),
+        (float(_nm.ptukey(3.5, 2, 4, 20, True, False)),
+         "ptukey(3.5, 4, 20, nranges=2)", 0.82597563005997021),
+        (float(_nm.qtukey(0.95, 1, 4, 20, True, False)),
+         "qtukey(0.95, 4, 20)", 3.9582934614503928),
+        (float(_nm.qtukey(0.99, 1, 6, 30, True, False)),
+         "qtukey(0.99, 6, 30)", 5.2418260490366073),
+    ])
+
+
+def test_noncentral_t_f_chisq():
+    # Noncentral t / F / chi-square d/p/q bit-exact to R via the Python nmath
+    # reference (pnt/pnf/pnchisq etc.). The public pt/pf/pchisq(ncp!=0) add a
+    # Rust f64 fast path (≤ few ulp), covered in test_rs_parity.
+    _assert_r([
+        (float(_nm.pnt(2, 10, 1, True, False)), "pt(2, 10, ncp=1)", 0.80761156253031108),
+        (float(_nm.qnt(0.9, 10, 1, True, False)), "qt(0.9, 10, ncp=1)", 2.5260798970603702),
+        (float(_nm.dnt(2, 10, 1, False)), "dt(2, 10, ncp=1)", 0.22542404659006754),
+        (float(_nm.pnf(3, 4, 20, 5, True, False)), "pf(3, 4, 20, ncp=5)", 0.70573017245554626),
+        (float(_nm.qnf(0.9, 4, 20, 5, True, False)), "qf(0.9, 4, 20, ncp=5)", 4.7522167215545368),
+        (float(_nm.pnchisq(10, 5, 3, True, False)), "pchisq(10, 5, ncp=3)", 0.71723684643114338),
+        (float(_nm.dnchisq(10, 5, 3, False)), "dchisq(10, 5, ncp=3)", 0.061806315927121186),
+        (float(_nm.qnchisq(0.9, 5, 3, True, False)), "qchisq(0.9, 5, ncp=3)", 14.322122198979427),
+    ])
+
+
+def test_noncentral_tukey_hyper_rs_fast_path():
+    # The public noncentral / tukey / hyper surface routes through the Rust f64
+    # `_rs` fast path when built. It is ≤ a few ulp from R (f64 accumulators vs
+    # R's 80-bit LDOUBLE) — verified here to a tight tolerance; the 0-ulp Python
+    # reference is asserted above, and _rs-vs-R at scale in test_rs_parity.
+    cases = [
+        (float(pt(2, 10, ncp=1)), 0.80761156253031108),
+        (float(dt(2, 10, ncp=1)), 0.22542404659006754),
+        (float(pf(3, 4, 20, ncp=5)), 0.70573017245554626),
+        (float(pchisq(10, 5, ncp=3)), 0.71723684643114338),
+        (float(dchisq(10, 5, ncp=3)), 0.061806315927121186),
+        (float(qchisq(0.9, 5, ncp=3)), 14.322122198979427),
+        (float(ptukey(3.5, 4, 20)), 0.90504154945144333),
+        (float(qtukey(0.95, 4, 20)), 3.9582934614503928),
+        (float(phyper(5, 20, 25, 15)), 0.22989638312676378),
+        (float(dhyper(5, 20, 25, 15)), 0.14695170166964935),
+    ]
+    for got, ref in cases:
+        assert math.isclose(got, ref, rel_tol=1e-9), f"{got!r} !~ R {ref!r}"
+
+
+def test_signrank_wilcox_distributions():
+    # Exact Wilcoxon signed-rank / rank-sum d/p/q, bit-exact to R
+    # (ported nmath signrank.c / wilcox.c).
+    _assert_r([
+        (float(psignrank(10, 8)), "psignrank(10, 8)", 0.15625000000000003),
+        (float(dsignrank(10, 8)), "dsignrank(10, 8)", 0.03125),
+        (float(qsignrank(0.975, 12)), "qsignrank(0.975, 12)", 64.0),
+        (float(pwilcox(20, 6, 8)), "pwilcox(20, 6, 8)", 0.33100233100233101),
+        (float(dwilcox(20, 6, 8)), "dwilcox(20, 6, 8)", 0.044622044622044624),
+        (float(qwilcox(0.1, 10, 10)), "qwilcox(0.1, 10, 10)", 33.0),
     ])
 
 
@@ -1634,9 +1711,10 @@ def test_weighted_lm_rstudent_dffits_consistent(gala):
 
 from hea.R import (  # noqa: E402  — grouped with the test-batch tests
     HTest,
-    bartlett_test, binom_test, chisq_test, fisher_test, friedman_test, ks_test,
+    bartlett_test, binom_test, chisq_test, cor_test, fisher_test,
+    friedman_test, ks_test,
     mcnemar_test, prop_test, shapiro_test,
-    t_test, var_test,
+    t_test, var_test, wilcox_test,
 )
 
 
@@ -1657,17 +1735,28 @@ def test_chisq_test_still_works():
 # ---- fisher_test ----------------------------------------------------
 
 
-def test_fisher_test_2x2_matches_scipy():
-    """Fisher exact on a 2×2 should match ``scipy.stats.fisher_exact``."""
-    from scipy import stats as ss
+def test_fisher_test_2x2_bit_exact_vs_r():
+    """Fisher exact 2×2: p-value, conditional-MLE odds ratio, and CI all
+    bit-exact to R (ported dhyper / phyper / uniroot). Note R's odds ratio is
+    the conditional MLE, not scipy's sample ad/bc."""
     tbl = np.array([[8, 2], [1, 5]])
     res = fisher_test(tbl)
-    expected = ss.fisher_exact(tbl)
-    assert isinstance(res, HTest)
     assert res.method == "Fisher's Exact Test for Count Data"
-    assert res.estimate["odds ratio"] == pytest.approx(expected.statistic)
-    assert res.p_value == pytest.approx(expected.pvalue)
     assert res.null_value == 1.0
+    _assert_r([
+        (res.p_value, "fisher.test(matrix(c(8,1,2,5),2,2))$p.value",
+         0.034965034965034968),
+        (res.estimate["odds ratio"],
+         "fisher.test(matrix(c(8,1,2,5),2,2))$estimate", 15.469687462886908),
+        (res.conf_int[0], "fisher.test(matrix(c(8,1,2,5),2,2))$conf.int[1]",
+         1.008849380396617),
+        (res.conf_int[1], "fisher.test(matrix(c(8,1,2,5),2,2))$conf.int[2]",
+         1049.7914461317548),
+    ])
+    res_g = fisher_test(tbl, alternative="greater")
+    _assert_r([(res_g.p_value,
+                'fisher.test(matrix(c(8,1,2,5),2,2), alternative="greater")$p.value',
+                0.024475524475524479)])
 
 
 def test_fisher_test_from_two_vectors():
@@ -1823,6 +1912,87 @@ def test_shapiro_test_rejects_obvious_nonnormal():
     assert res.p_value < 0.001
 
 
+def test_cor_test_spearman_exact():
+    """Spearman exact p-value (AS 89, src/prho.c) — bit-exact to R.
+
+    (The reported ``S`` may differ from R by <=1 ulp: R's ``cor`` centers via
+    the system ``sqrtl`` which numpy's long-double sqrt does not reproduce; the
+    p-value uses ``round(S)`` so it is unaffected.)
+    """
+    x = [3.1, 1.5, 4.2, 2.8, 5.9, 0.7, 3.3, 4.8, 1.1, 2.2]
+    y = [2.9, 1.8, 5.1, 2.2, 6.3, 1.2, 2.7, 4.4, 0.9, 3.0]
+    xr = "c(" + ",".join(repr(v) for v in x) + ")"
+    yr = "c(" + ",".join(repr(v) for v in y) + ")"
+    res = cor_test(x, y, method="spearman")
+    _assert_r([(res.p_value,
+                f'cor.test({xr}, {yr}, method="spearman")$p.value',
+                0.0013802671414576686)])
+    res_g = cor_test(x, y, method="spearman", alternative="greater")
+    _assert_r([(res_g.p_value,
+                f'cor.test({xr}, {yr}, method="spearman", '
+                f'alternative="greater")$p.value', 0.00069013357072883431)])
+
+
+def test_cor_test_kendall_exact():
+    """Kendall exact p-value + integer T statistic (src/kendall.c), bit-exact."""
+    x = [3.1, 1.5, 4.2, 2.8, 5.9, 0.7, 3.3, 4.8, 1.1, 2.2]
+    y = [2.9, 1.8, 5.1, 2.2, 6.3, 1.2, 2.7, 4.4, 0.9, 3.0]
+    xr = "c(" + ",".join(repr(v) for v in x) + ")"
+    yr = "c(" + ",".join(repr(v) for v in y) + ")"
+    res = cor_test(x, y, method="kendall")
+    assert res.statistic["T"] == 39.0
+    _assert_r([(res.p_value, f'cor.test({xr}, {yr}, method="kendall")$p.value',
+                0.0022128527336859882)])
+    res_l = cor_test(x, y, method="kendall", alternative="less")
+    _assert_r([(res_l.p_value,
+                f'cor.test({xr}, {yr}, method="kendall", '
+                f'alternative="less")$p.value', 0.99952684082892418)])
+
+
+def test_wilcox_test_one_sample_exact():
+    """One-sample signed-rank, exact, no ties — bit-exact to R."""
+    x = [1.83, 0.50, 1.62, 2.48, 1.68, 1.88, 1.55, 3.06, 1.30]
+    xr = "c(" + ",".join(repr(v) for v in x) + ")"
+    res = wilcox_test(x, mu=1)
+    assert res.statistic["V"] == 43.0
+    assert res.method == "Wilcoxon signed rank exact test"
+    _assert_r([(res.p_value, f"wilcox.test({xr}, mu=1)$p.value", 0.01171875)])
+
+
+def test_wilcox_test_ties_permutation_exact():
+    """Ties trigger R's exact permutation distribution (src/permdist.c)."""
+    x = [1.0, 2, 2, 3, 3, 3, 4, 5, 5, 1]
+    xr = "c(" + ",".join(repr(v) for v in x) + ")"
+    res = wilcox_test(x, mu=3)
+    assert res.statistic["V"] == 22.0
+    _assert_r([(res.p_value,
+                f"suppressWarnings(wilcox.test({xr}, mu=3))$p.value", 0.9375)])
+
+
+def test_wilcox_test_two_sample_exact():
+    """Two-sample rank-sum, exact, no ties — bit-exact to R."""
+    x = [0.80, 0.83, 1.89, 1.04, 1.45, 1.38, 1.91, 1.64, 0.73, 1.46]
+    y = [1.15, 0.88, 0.90, 0.74, 1.21]
+    xr = "c(" + ",".join(repr(v) for v in x) + ")"
+    yr = "c(" + ",".join(repr(v) for v in y) + ")"
+    res = wilcox_test(x, y)
+    assert res.statistic["W"] == 35.0
+    _assert_r([(res.p_value, f"wilcox.test({xr}, {yr})$p.value",
+                0.2544122544122544)])
+
+
+def test_wilcox_test_two_sample_asymptotic():
+    """Large n uses R's continuity-corrected normal (tie-corrected sd)."""
+    rng = np.random.default_rng(7)
+    x = rng.normal(size=60)
+    y = rng.normal(size=65) + 0.3
+    xr = "c(" + ",".join(repr(float(v)) for v in x) + ")"
+    yr = "c(" + ",".join(repr(float(v)) for v in y) + ")"
+    res = wilcox_test(x, y)
+    assert "with continuity correction" in res.method
+    _assert_r([(res.p_value, f"wilcox.test({xr}, {yr})$p.value", res.p_value)])
+
+
 def test_shapiro_test_bit_exact_vs_r():
     """W and p are 0-ulp to R's ``.Call(C_SWilk)`` (ported ``src/swilk.c``)."""
     x = [2.1, 3.4, 1.9, 5.2, 4.8, 2.7, 3.3, 6.1, 0.8, 4.4, 3.9, 2.2, 5.5, 1.1, 3.7]
@@ -1847,25 +2017,52 @@ def test_shapiro_test_n3_exact_p_branch():
 # ---- ks_test --------------------------------------------------------
 
 
-def test_ks_test_two_sample_matches_scipy():
-    from scipy import stats as ss
-    rng = np.random.default_rng(6)
-    x = rng.normal(0, 1, 100)
-    y = rng.normal(1, 1, 100)  # shifted
-    res = ks_test(x, y)
-    expected = ss.ks_2samp(x, y)
-    assert res.statistic["D"] == pytest.approx(expected.statistic)
-    assert res.p_value == pytest.approx(expected.pvalue)
+def test_ks_test_two_sample_exact_bit_exact_vs_r():
+    """Two-sample exact Smirnov (nx*ny < 10000) — D and p bit-exact to R."""
+    a = [0.80, 1.83, 0.50, 1.62, 2.48, 1.68, 0.55, 1.30]
+    b = [1.15, 0.88, 0.90, 0.74, 1.21, 2.05, 1.53]
+    ar = "c(" + ",".join(repr(v) for v in a) + ")"
+    br = "c(" + ",".join(repr(v) for v in b) + ")"
+    res = ks_test(a, b)
+    assert "Exact" in res.method
+    _assert_r([
+        (res.statistic["D"], f"ks.test({ar}, {br})$statistic", 0.3571428571428571),
+        (res.p_value, f"ks.test({ar}, {br})$p.value", 0.58461538461538454),
+    ])
 
 
-def test_ks_test_one_sample_with_pnorm_string():
-    """R-style 'pnorm' string should map onto scipy's 'norm'."""
-    from scipy import stats as ss
-    rng = np.random.default_rng(7)
-    x = rng.normal(0, 1, 100)
+def test_ks_test_two_sample_ties_bit_exact_vs_r():
+    """Ties trigger R's exact ties recursion (src/ks.c); bit-exact to R."""
+    a = [1.0, 2, 2, 3, 3, 4, 5, 1]
+    b = [2.0, 3, 3, 3, 4, 5, 6]
+    ar = "c(" + ",".join(repr(v) for v in a) + ")"
+    br = "c(" + ",".join(repr(v) for v in b) + ")"
+    res = ks_test(a, b)
+    _assert_r([
+        (res.statistic["D"],
+         f"suppressWarnings(ks.test({ar}, {br}))$statistic", 0.35714285714285715),
+        (res.p_value,
+         f"suppressWarnings(ks.test({ar}, {br}))$p.value", 0.51048951048951052),
+    ])
+
+
+def test_ks_test_one_sample_exact_bit_exact_vs_r():
+    """One-sample exact (n < 100, no ties) vs pnorm — D and p bit-exact to R."""
+    x = [-0.62, 0.41, 1.30, -1.05, 0.72, -0.31, 2.10, 0.05, -1.44, 0.88,
+         0.19, -0.77, 1.61, -0.23, 0.50]
+    xr = "c(" + ",".join(repr(v) for v in x) + ")"
     res = ks_test(x, "pnorm")
-    expected = ss.kstest(x, "norm")
-    assert res.statistic["D"] == pytest.approx(expected.statistic)
+    assert "Exact" in res.method
+    _assert_r([
+        (res.statistic["D"], f'ks.test({xr}, "pnorm")$statistic',
+         0.12576369289434408),
+        (res.p_value, f'ks.test({xr}, "pnorm")$p.value', 0.94765241386502763),
+    ])
+    res_g = ks_test(x, "pnorm", alternative="greater")
+    _assert_r([
+        (res_g.p_value, f'ks.test({xr}, "pnorm", alternative="greater")$p.value',
+         0.97710988321079739),
+    ])
 
 
 # ---- mcnemar_test ---------------------------------------------------

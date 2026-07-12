@@ -32,7 +32,7 @@ import sys
 import numpy as np
 import pytest
 
-from conftest import have_rscript, run_rs_r_oracle
+from conftest import have_rscript, r_scalar_values, run_rs_r_oracle
 
 rs = pytest.importorskip("hea._rs")
 
@@ -383,6 +383,86 @@ def test_rs_matches_r(case, r_oracle):
     name, fn, arrays, flags = case
     got = getattr(rs, fn)(*arrays, *flags)
     _assert_bit_exact(got, r_oracle[name])
+
+
+# ---------------------------------------------------------------------------
+# Noncentral / studentized-range / hypergeometric _rs kernels — these
+# accumulate their AS-275 / AS-226 / AS-243 / Copenhaver-Holland series in f64
+# where R uses 80-bit LDOUBLE (Rust std has no 80-bit float). So unlike the
+# strict gate above they match R to a TIGHT TOLERANCE, not 0-ulp; this pins port
+# correctness (catches any O(1) transcription bug or gross regression). The
+# 0-ulp Python reference for these is pinned in test_R.py; per-kernel ulp
+# characterization is documented in the rust-perf plan.
+# ---------------------------------------------------------------------------
+def _grid(*axes):
+    out = [[]]
+    for ax in axes:
+        out = [row + [v] for row in out for v in ax]
+    cols = list(zip(*out))
+    return [np.array(c, dtype=float) for c in cols], out
+
+
+def _build_f64_cases():
+    cases = []
+    # noncentral chi-square (bulk grid)
+    (X, D, N), g = _grid([0.5, 3.0, 10.0, 30.0, 60.0], [2.0, 5.0, 12.0], [2.0, 8.0, 40.0])
+    cases.append(("pnchisq", "pnchisq", (X, D, N), (True, False),
+                  [f"pchisq({x},{d},ncp={n})" for x, d, n in g]))
+    cases.append(("dnchisq", "dnchisq", (X, D, N), (False,),
+                  [f"dchisq({x},{d},ncp={n})" for x, d, n in g]))
+    (P, D, N), g = _grid([0.1, 0.3, 0.5, 0.7, 0.9], [2.0, 5.0, 12.0], [2.0, 8.0, 40.0])
+    cases.append(("qnchisq", "qnchisq", (P, D, N), (True, False),
+                  [f"qchisq({p},{d},ncp={n})" for p, d, n in g]))
+    # noncentral t (bulk — extreme far tails excluded; they degrade in f64)
+    (T, D, N), g = _grid([-2.0, -0.5, 0.5, 2.0, 5.0], [5.0, 12.0, 40.0], [1.0, 3.0, 8.0])
+    cases.append(("pnt", "pnt", (T, D, N), (True, False),
+                  [f"pt({t},{d},ncp={n})" for t, d, n in g]))
+    (P, D, N), g = _grid([0.1, 0.3, 0.5, 0.7, 0.9], [5.0, 12.0, 40.0], [1.0, 3.0, 8.0])
+    cases.append(("qnt", "qnt", (P, D, N), (True, False),
+                  [f"qt({p},{d},ncp={n})" for p, d, n in g]))
+    # noncentral F
+    (X, A, B, N), g = _grid([0.5, 1.0, 2.5], [3.0, 10.0], [5.0, 20.0], [2.0, 8.0])
+    cases.append(("pnf", "pnf", (X, A, B, N), (True, False),
+                  [f"pf({x},{a},{b},ncp={n})" for x, a, b, n in g]))
+    (P, A, B, N), g = _grid([0.1, 0.5, 0.9], [3.0, 10.0], [5.0, 20.0], [2.0, 8.0])
+    cases.append(("qnf", "qnf", (P, A, B, N), (True, False),
+                  [f"qf({p},{a},{b},ncp={n})" for p, a, b, n in g]))
+    # noncentral beta
+    (X, A, B, N), g = _grid([0.1, 0.3, 0.6, 0.9], [2.0, 5.0], [2.0, 5.0], [2.0, 20.0])
+    cases.append(("pnbeta", "pnbeta", (X, A, B, N), (True, False),
+                  [f"pbeta({x},{a},{b},ncp={n})" for x, a, b, n in g]))
+    # studentized range (rr = nranges = 1)
+    (Q, R_, C, D), g = _grid([2.0, 3.0, 4.0], [1.0], [3.0, 5.0, 10.0], [10.0, 20.0, 60.0])
+    cases.append(("ptukey", "ptukey", (Q, R_, C, D), (True, False),
+                  [f"ptukey({q},{c},{d})" for q, _r, c, d in g]))
+    (P, R_, C, D), g = _grid([0.5, 0.9, 0.95], [1.0], [3.0, 5.0, 10.0], [10.0, 20.0, 60.0])
+    cases.append(("qtukey", "qtukey", (P, R_, C, D), (True, False),
+                  [f"qtukey({p},{c},{d})" for p, _r, c, d in g]))
+    # hypergeometric (m=20 red, n=25 black, k=15 drawn)
+    xs = [float(x) for x in range(0, 16)]
+    X = np.array(xs)
+
+    def ones(v):
+        return np.full(len(xs), float(v))
+    cases.append(("dhyper", "dhyper", (X, ones(20), ones(25), ones(15)), (False,),
+                  [f"dhyper({int(x)},20,25,15)" for x in xs]))
+    cases.append(("phyper", "phyper", (X, ones(20), ones(25), ones(15)), (True, False),
+                  [f"phyper({int(x)},20,25,15)" for x in xs]))
+    return cases
+
+
+_F64_CASES = _build_f64_cases()
+
+
+@pytest.mark.parametrize("case", _F64_CASES, ids=[c[0] for c in _F64_CASES])
+def test_rs_noncentral_f64_matches_r_tol(case):
+    _label, fn, arrays, flags, exprs = case
+    got = np.asarray(getattr(rs, fn)(*[np.ascontiguousarray(a) for a in arrays], *flags),
+                     dtype=float)
+    ref = r_scalar_values(exprs)
+    exp = np.array([ref[e] for e in exprs])
+    # f64 accumulators vs R's 80-bit LDOUBLE — tight tolerance, not 0-ulp.
+    np.testing.assert_allclose(got, exp, rtol=1e-6, atol=1e-9, equal_nan=True)
 
 
 _FMA_CASES = [c for c in CASES if c[0].startswith("fma_")]
