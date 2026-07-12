@@ -94,6 +94,7 @@ _I2_32M1 = 2.328306437080797e-10
 # rbeta (rbeta.c) overflow guard: expmax = DBL_MAX_EXP * M_LN2, and DBL_MAX.
 _EXPMAX = 1024 * 0.6931471805599453
 _DBL_MAX = 1.7976931348623157e308
+_INT_MAX = 2147483647            # C INT_MAX — rhyper's large-n threshold
 
 # qnorm5 — R's normal quantile (nmath/qnorm.c, Wichura 1988 AS-241): the exact
 # rational-approx coefficients + Horner nesting R uses. norm_rand's Inversion
@@ -263,6 +264,31 @@ def _mroot_chol(V: np.ndarray) -> np.ndarray:
     oo = np.argsort(piv, kind="stable")   # order(attr(L, "pivot")), 0-based
     Lp = U[:, oo]                         # un-pivot columns: t(Lp) Lp == V
     return Lp.T.copy()                    # t(L[1:rank,]) with rank == ncol(V)
+
+
+# log(sqrt(2*pi)) — R's M_LN_SQRT_2PI, used by rhyper's Stirling afc().
+_M_LN_SQRT_2PI = 0.918938533204672741780329736406
+
+# ln(i!) table for i = 0..7 (rhyper.c `afc`), exact to the printed digits.
+_AFC_AL = (
+    0.0, 0.0,
+    0.69314718055994530941723212145817,
+    1.79175946922805500081247735838070,
+    3.17805383034794561964694160129705,
+    4.78749174278204599424770093452324,
+    6.57925121201010099506017829290394,
+    8.52516136106541430016553103634712,
+)
+
+
+def _afc(i: int) -> float:
+    """``afc(i) = ln(i!)`` (rhyper.c) — table lookup for i <= 7, else Stirling."""
+    if i <= 7:
+        return _AFC_AL[i]
+    di = float(i)
+    i2 = di * di
+    return ((di + 0.5) * math.log(di) - di + _M_LN_SQRT_2PI
+            + (0.0833333333333333 - 0.00277777777777778 / i2) / di)
 
 
 class RMersenneTwister:
@@ -890,6 +916,371 @@ class RMersenneTwister:
             if r + alpha * math.log(alpha / (b + w)) >= t:
                 break
         return b / (b + w) if aa != a else w / (b + w)
+
+    def rnbinom_prob(self, size: float, prob: float) -> float:
+        """R's ``rnbinom(size, prob)`` — Poisson-Gamma mixture
+        ``rpois(rgamma(size, (1-prob)/prob))`` (rnbinom.c). The mu-parameterised
+        variant is :meth:`rnbinom`."""
+        if (not math.isfinite(prob) or math.isnan(size) or size <= 0.0
+                or prob <= 0.0 or prob > 1.0):
+            return math.nan
+        if not math.isfinite(size):
+            size = _DBL_MAX / 2.0
+        if prob == 1.0:
+            return 0.0
+        return self.rpois(self.rgamma(size, scale=(1.0 - prob) / prob))
+
+    # ------------------------------------------------------------------
+    # Rank-statistic + hypergeometric + multinomial variates — ports of R's
+    # rsignrank/rwilcox (signrank.c/wilcox.c), rhyper (rhyper.c, H2PE) and
+    # rmultinom (rmultinom.c). Each consumes the uniform stream in the same
+    # order as the C code (via the primitive draws above), so set.seed() is
+    # bit-exact. No _impl branch: the primitives already route through Rust.
+    # ------------------------------------------------------------------
+
+    def rsignrank(self, n: float) -> float:
+        """R's ``rsignrank(nn)`` — one Wilcoxon signed-rank variate,
+        ``sum_{i=1}^{n} i * floor(unif_rand() + 0.5)`` (signrank.c)."""
+        if math.isnan(n):
+            return n
+        n = float(np.rint(n))
+        if n < 0.0:
+            return math.nan
+        if n == 0.0:
+            return 0.0
+        r = 0.0
+        for i in range(1, int(n) + 1):
+            r += i * math.floor(self.unif_rand() + 0.5)
+        return r
+
+    def rwilcox(self, m: float, n: float) -> float:
+        """R's ``rwilcox(m, n)`` — one Wilcoxon rank-sum variate via a partial
+        Fisher-Yates draw of ``n`` ranks from ``0..m+n-1`` (wilcox.c)."""
+        if math.isnan(m) or math.isnan(n):
+            return m + n
+        m = float(np.rint(m))
+        n = float(np.rint(n))
+        if m < 0.0 or n < 0.0:
+            return math.nan
+        if m == 0.0 or n == 0.0:
+            return 0.0
+        r = 0.0
+        k = int(m + n)
+        x = list(range(k))
+        nn = int(n)
+        for _ in range(nn):
+            j = self.unif_index(k)
+            r += x[j]
+            k -= 1
+            x[j] = x[k]
+        return r - n * (n - 1.0) / 2.0
+
+    def rmultinom(self, n: int, size: int, prob) -> np.ndarray:
+        """R's ``rmultinom(n, size, prob)`` — a (K x n) integer matrix whose
+        columns are independent Multinomial(size, prob) draws (rmultinom.c).
+        ``prob`` is normalised via ``FixupProb`` (plain-double sum of the
+        positive entries), then each column fills the first K-1 cells with
+        sequential ``rbinom`` on the shrinking remainder."""
+        p = np.asarray(prob, dtype=float).ravel()
+        K = p.size
+        s = 0.0                                   # FixupProb: sum only p[i] > 0
+        for x in p:
+            if not math.isfinite(x):
+                raise ValueError("NA in probability vector")
+            if x < 0.0:
+                raise ValueError("negative probability")
+            if x > 0.0:
+                s += x
+        if s == 0.0:
+            raise ValueError("no positive probabilities")
+        p = p / s
+        nn = int(n)
+        out = np.zeros((K, nn), dtype=np.int64)
+        for col in range(nn):
+            out[:, col] = self._rmultinom_col(int(size), p, K)
+        return out
+
+    def _rmultinom_col(self, size: int, prob: np.ndarray, K: int) -> np.ndarray:
+        """One Multinomial column: rN[0:K], sum == size (rmultinom.c inner)."""
+        rN = [0] * K
+        p_tot = np.longdouble(0.0)                # R accumulates in LDOUBLE
+        for k in range(K):
+            p_tot += np.longdouble(prob[k])
+        n = size
+        if n == 0:
+            return np.array(rN, dtype=np.int64)
+        if K == 1 and p_tot == 0.0:
+            return np.array(rN, dtype=np.int64)
+        for k in range(K - 1):
+            if prob[k] != 0.0:
+                pp = float(np.longdouble(prob[k]) / p_tot)
+                rN[k] = n if pp >= 1.0 else int(self.rbinom(n, pp))
+                n -= rN[k]
+            else:
+                rN[k] = 0
+            if n <= 0:                            # all drawn
+                return np.array(rN, dtype=np.int64)
+            p_tot -= np.longdouble(prob[k])
+        rN[K - 1] = n
+        return np.array(rN, dtype=np.int64)
+
+    def rhyper(self, nn1in: float, nn2in: float, kkin: float) -> float:
+        """R's ``rhyper(m, n, k)`` — number of white balls when ``k`` are drawn
+        from an urn of ``m`` white + ``n`` black (rhyper.c, Kachitvichyanukul-
+        Schmeiser H2PE). Consumes the uniform stream in the same order as C."""
+        if not (math.isfinite(nn1in) and math.isfinite(nn2in)
+                and math.isfinite(kkin)):
+            return math.nan
+        nn1in = float(np.rint(nn1in))
+        nn2in = float(np.rint(nn2in))
+        kkin = float(np.rint(kkin))
+        if nn1in < 0 or nn2in < 0 or kkin < 0 or kkin > nn1in + nn2in:
+            return math.nan
+        if nn1in >= _INT_MAX or nn2in >= _INT_MAX or kkin >= _INT_MAX:
+            # large n: evade int overflow / inappropriate algorithms
+            if kkin == 1.0:
+                return self.rbinom(kkin, nn1in / (nn1in + nn2in))
+            from . import nmath as _nm
+            return _nm.qhyper(self.unif_rand(), nn1in, nn2in, kkin, False, False)
+
+        nn1 = int(nn1in)
+        nn2 = int(nn2in)
+        kk = int(kkin)
+        # --- setup (always, on fresh parameters) ---
+        N = nn1 + float(nn2)
+        if nn1 <= nn2:
+            n1, n2 = nn1, nn2
+        else:
+            n1, n2 = nn2, nn1
+        k = int(N - kk) if (kk + kk >= N) else kk       # now k < N/2
+        m = int((k + 1.0) * (n1 + 1.0) / (N + 2.0))     # floor(adjusted mean)
+        minjx = max(0, k - n2)
+        maxjx = min(n1, k)
+
+        if minjx == maxjx:                              # I: degenerate
+            ix = maxjx
+        elif m - minjx < 10:                            # II: scaled HIN inverse
+            con = 57.5646273248511421
+            scale = 1e25
+            if k < n2:
+                lw = _afc(n2) + _afc(n1 + n2 - k) - _afc(n2 - k) - _afc(n1 + n2)
+            else:
+                lw = _afc(n1) + _afc(k) - _afc(k - n2) - _afc(n1 + n2)
+            w = math.exp(lw + con)
+            while True:                                 # L10
+                p = w
+                ix = minjx
+                u = self.unif_rand() * scale
+                resample = False
+                while u > p:
+                    u -= p
+                    p *= (float(n1) - ix) * (k - ix)
+                    ix += 1
+                    p = p / ix / (n2 - k + ix)
+                    if ix > maxjx:
+                        resample = True
+                        break
+                if not resample:
+                    break
+        else:                                           # III: H2PE
+            s = math.sqrt((N - k) * k * n1 * n2 / (N - 1) / N / N)
+            d = float(int(1.5 * s)) + 0.5
+            xl = m - d + 0.5
+            xr = m + d + 0.5
+            a = _afc(m) + _afc(n1 - m) + _afc(k - m) + _afc(n2 - k + m)
+            kl = math.exp(a - _afc(int(xl)) - _afc(int(n1 - xl))
+                          - _afc(int(k - xl)) - _afc(int(n2 - k + xl)))
+            kr = math.exp(a - _afc(int(xr - 1)) - _afc(int(n1 - xr + 1))
+                          - _afc(int(k - xr + 1)) - _afc(int(n2 - k + xr - 1)))
+            lamdl = -math.log(xl * (n2 - k + xl) / (n1 - xl + 1) / (k - xl + 1))
+            lamdr = -math.log((n1 - xr + 1) * (k - xr + 1) / xr / (n2 - k + xr))
+            p1 = d + d
+            p2 = p1 + kl / lamdl
+            p3 = p2 + kr / lamdr
+            n_uv = 0
+            while True:                                 # L30: accept/reject
+                u = self.unif_rand() * p3
+                v = self.unif_rand()
+                n_uv += 1
+                if n_uv >= 10000:
+                    return math.nan
+                if u < p1:                              # rectangular
+                    ix = int(xl + u)
+                elif u <= p2:                           # left tail
+                    ix = int(xl + math.log(v) / lamdl)
+                    if ix < minjx:
+                        continue
+                    v = v * (u - p1) * lamdl
+                else:                                   # right tail
+                    ix = int(xr - math.log(v) / lamdr)
+                    if ix > maxjx:
+                        continue
+                    v = v * (u - p2) * lamdr
+                if m < 100 or ix <= 50:                 # explicit evaluation
+                    f = 1.0
+                    if m < ix:
+                        for i in range(m + 1, ix + 1):
+                            f = f * (n1 - i + 1) * (k - i + 1) / (n2 - k + i) / i
+                    elif m > ix:
+                        for i in range(ix + 1, m + 1):
+                            f = f * i * (n2 - k + i) / (n1 - i + 1) / (k - i + 1)
+                    if v <= f:
+                        break
+                    continue
+                # squeeze using upper and lower bounds
+                deltal = 0.0078
+                deltau = 0.0034
+                y = float(ix)
+                y1 = y + 1.0
+                ym = y - m
+                yn = n1 - y + 1.0
+                yk = k - y + 1.0
+                nk = n2 - k + y1
+                r = -ym / y1
+                sq = ym / yn
+                t = ym / yk
+                e = -ym / nk
+                g = yn * yk / (y1 * nk) - 1.0
+                dg = 1.0 + g if g < 0.0 else 1.0
+                gu = g * (1.0 + g * (-0.5 + g / 3.0))
+                gl = gu - 0.25 * (g * g * g * g) / dg
+                xm = m + 0.5
+                xn = n1 - m + 0.5
+                xk = k - m + 0.5
+                nm = n2 - k + xm
+                ub = (y * gu - m * gl + deltau
+                      + xm * r * (1.0 + r * (-0.5 + r / 3.0))
+                      + xn * sq * (1.0 + sq * (-0.5 + sq / 3.0))
+                      + xk * t * (1.0 + t * (-0.5 + t / 3.0))
+                      + nm * e * (1.0 + e * (-0.5 + e / 3.0)))
+                alv = math.log(v)
+                if alv > ub:                            # test upper bound
+                    continue
+                dr = xm * (r * r * r * r)
+                if r < 0.0:
+                    dr /= (1.0 + r)
+                ds = xn * (sq * sq * sq * sq)
+                if sq < 0.0:
+                    ds /= (1.0 + sq)
+                dt = xk * (t * t * t * t)
+                if t < 0.0:
+                    dt /= (1.0 + t)
+                de = nm * (e * e * e * e)
+                if e < 0.0:
+                    de /= (1.0 + e)
+                if alv < ub - 0.25 * (dr + ds + dt + de) + (y + m) * (gl - gu) - deltal:
+                    break                               # test lower bound
+                # Stirling to machine accuracy
+                if alv <= (a - _afc(ix) - _afc(n1 - ix)
+                           - _afc(k - ix) - _afc(n2 - k + ix)):
+                    break
+                # else reject → redraw
+
+        # --- L_finis: map ix back to the original parameterisation ---
+        if kk + kk >= N:
+            ix = (kk - nn2 + ix) if (nn1 > nn2) else (nn1 - ix)
+        elif nn1 > nn2:
+            ix = kk - ix
+        return float(ix)
+
+    # ------------------------------------------------------------------
+    # Multivariate variates: rcont2 (AS 159, backs r2dtable) and the
+    # standardized Wishart Bartlett factor (backs rWishart). ``fact`` (the
+    # log-factorial table) is supplied by the caller so this stays nmath-free.
+    # ------------------------------------------------------------------
+
+    def rcont2(self, nrowt, ncolt, ntotal, fact):
+        """R's ``rcont2`` (rcont.c, AS 159) — one random 2-way table with the
+        given row/column margins. ``fact[i] = lgamma(i+1)``. Returns an
+        nrow×ncol integer matrix; consumes the uniform stream as the C code."""
+        nrowt = [int(v) for v in nrowt]
+        ncolt = [int(v) for v in ncolt]
+        nrow = len(nrowt)
+        ncol = len(ncolt)
+        nr_1 = nrow - 1
+        nc_1 = ncol - 1
+        jwork = [0] * ncol
+        for j in range(nc_1):
+            jwork[j] = ncolt[j]
+        matrix = [[0] * ncol for _ in range(nrow)]
+        ib = 0
+        jc = ntotal
+        for lr in range(nr_1):                      # rows 0..nrow-2
+            ia = nrowt[lr]
+            ic = jc
+            jc -= ia
+            for m in range(nc_1):
+                id_ = jwork[m]
+                ie = ic
+                ib = ie - ia
+                ii = ib - id_
+                ic -= id_
+                if ie == 0:                         # row full → zero the rest
+                    for j in range(m, nc_1):
+                        matrix[lr][j] = 0
+                    ia = 0
+                    break
+                u = self.unif_rand()
+                nlm = self._rcont2_cell(ia, id_, ie, ii, ib, ic, u, fact)
+                matrix[lr][m] = nlm
+                ia -= nlm
+                jwork[m] -= nlm
+            matrix[lr][nc_1] = ia                   # last column of row lr
+        for m in range(nc_1):                       # last row = leftover margins
+            matrix[nr_1][m] = jwork[m]
+        matrix[nr_1][nc_1] = ib - matrix[nr_1][nc_1 - 1]
+        return matrix
+
+    def _rcont2_cell(self, ia, id_, ie, ii, ib, ic, u, fact):
+        """The AS 159 inner search for one cell value (rcont.c 'Outer Loop')."""
+        while True:                                 # (A) outer loop
+            nlm = int(ia * (id_ / float(ie)) + 0.5)
+            x = math.exp(fact[ia] + fact[ib] + fact[ic] + fact[id_]
+                         - fact[ie] - fact[nlm] - fact[id_ - nlm]
+                         - fact[ia - nlm] - fact[ii + nlm])
+            if x >= u:
+                return nlm
+            if x == 0.0:
+                raise RuntimeError("rcont2: exp underflow to 0; algorithm failure")
+            sumprb = x
+            y = x
+            nll = nlm
+            lsp = False
+            while not lsp:                          # (B) do..while(!lsp)
+                j = (id_ - nlm) * float(ia - nlm)
+                lsp = (nlm == ia) or (nlm == id_)
+                if not lsp:
+                    nlm += 1
+                    x *= j / (float(nlm) * (ii + nlm))
+                    sumprb += x
+                    if sumprb >= u:
+                        return nlm
+                lsm = False
+                while not lsm:                      # (C) do..while(!lsm)
+                    j = nll * float(ii + nll)
+                    lsm = (nll == 0)
+                    if not lsm:
+                        nll -= 1
+                        y *= j / (float(id_ - nll) * (ia - nll))
+                        sumprb += y
+                        if sumprb >= u:
+                            return nll              # nlm = nll; goto L160
+                        if not lsp:
+                            break                   # back to (B) condition
+            u = sumprb * self.unif_rand()
+
+    def std_rwishart_factor(self, nu: float, p: int) -> np.ndarray:
+        """R's ``std_rWishart_factor(nu, p, upper=1)`` (rWishart.c) — a p×p
+        upper-triangular Bartlett factor: diagonal ``sqrt(rchisq(nu-j))``,
+        strict-upper ``norm_rand()``. Draw order matches the C column sweep."""
+        if nu < float(p) or p <= 0:
+            raise ValueError("inconsistent degrees of freedom and dimension")
+        ans = np.zeros((p, p), dtype=float)         # column-major (i, j) → ans[i, j]
+        for j in range(p):                          # jth column
+            ans[j, j] = math.sqrt(self.rchisq(nu - float(j)))
+            for i in range(j):
+                ans[i, j] = self.norm_rand()        # upper triangle
+        return ans
 
     # ------------------------------------------------------------------
     # Batch samplers — the whole per-element loop runs in one call (Rust when

@@ -1823,6 +1823,174 @@ def _psmirnov(q, n_x, n_y, w_combined, alternative, exact, lower_tail=True):
     return _psmirnov_exact_uniq(qa, m_, nn, two, False)
 
 
+# --- public Smirnov distribution surface (R: psmirnov/qsmirnov/rsmirnov) -----
+_DBL_EPS = 2.220446049250313e-16
+
+
+def _psmirnov_exact_p(q, n_x, n_y, z, alternative, lower_tail):
+    """R's ``psmirnov_exact`` probability (no log) — the exact branch of
+    :func:`_psmirnov`, factored for the public ``psmirnov``."""
+    two = (alternative == "two.sided")
+    m_, nn = int(n_x), int(n_y)
+    if alternative == "less":
+        m_, nn = nn, m_
+    qa = (0.5 + math.floor(q * m_ * nn - 1e-7)) / (m_ * nn)
+    if z is not None:
+        sw = np.sort(np.asarray(z, dtype=float))
+        zdiff = (np.diff(sw) != 0).astype(int)
+        if zdiff.any():
+            zind = [0] + list(zdiff) + [1]
+            return _psmirnov_exact_ties(qa, m_, nn, zind, two, lower_tail)
+    return _psmirnov_exact_uniq(qa, m_, nn, two, lower_tail)
+
+
+def _psmirnov_asymp_r(q, n_x, n_y, alternative, lower_tail, log_p):
+    """R's ``psmirnov_asymp`` (ks.test.R) with faithful log/tail handling."""
+    n = n_x * n_y / (n_x + n_y)
+    if alternative == "two.sided":
+        ret = _ks_K2l(math.sqrt(n) * q, lower_tail, 1e-6)
+        return math.log(ret) if log_p else ret
+    ret = -math.expm1((-2 * n) * (q * q))          # R: -expm1(-2 n q^2)
+    if log_p:
+        return math.log(ret) if lower_tail else math.log1p(-ret)
+    return ret if lower_tail else 1 - ret
+
+
+def _smirnov_sim(nrowt, ncolt, B, twosided, rng):
+    """R's ``Smirnov_sim`` (ks.c) — ``B`` simulated Smirnov D statistics from
+    random 2-way tables (rcont2) with the given margins. ``fact`` is the
+    *cumulative* log-factorial (``fact[i]=fact[i-1]+log(i)``), matching the C."""
+    nrow = len(nrowt)
+    n = int(sum(nrowt))
+    fact = [0.0] * (n + 1)
+    for i in range(2, n + 1):
+        fact[i] = fact[i - 1] + math.log(i)
+    c0 = ncolt[0]
+    c1 = ncolt[1]
+    results = np.empty(B, dtype=float)
+    for it in range(B):
+        observed = rng.rcont2(nrowt, ncolt, n, fact)
+        s = 0.0
+        cs0 = 0
+        cs1 = 0
+        for j in range(nrow):
+            cs0 += observed[j][0]
+            cs1 += observed[j][1]
+            diff = cs0 / c0 - cs1 / c1
+            if twosided:
+                diff = abs(diff)
+            if diff > s:
+                s = diff
+        results[it] = s
+    return results
+
+
+def _psmirnov_ecdf(dsim, q, lower_tail, log_p):
+    """R's ``psmirnov_simul`` tail: ``ecdf(Dsim)(q - sqrt(eps))``."""
+    thr = q - math.sqrt(_DBL_EPS)
+    r = float(np.count_nonzero(dsim <= thr)) / dsim.size
+    if log_p:
+        return math.log(r) if lower_tail else math.log1p(-r)
+    return r if lower_tail else 1 - r
+
+
+def rsmirnov(n, sizes, z=None, alternative="two.sided"):
+    """R's ``rsmirnov(n, sizes, z, alternative)`` (ks.test.R + ks.c
+    ``Smirnov_sim``) — ``n`` variates from the two-sample Smirnov distribution,
+    on R's MT stream (bit-exact). ``sizes = (n_x, n_y)``; ``z`` is the pooled
+    sample when there are ties (else ``None``)."""
+    if n is None or int(n) == 0:
+        return np.array([])
+    if n < 0:
+        raise ValueError("invalid arguments")
+    B = int(math.floor(n))
+    n_x = int(math.floor(sizes[0]))
+    n_y = int(math.floor(sizes[1]))
+    if n_x < 1:
+        raise ValueError("not enough 'x' data")
+    if n_y < 1:
+        raise ValueError("not enough 'y' data")
+    if z is None:
+        rt = [1] * (n_x + n_y)                      # rep.int(1L, n_x + n_y)
+    else:
+        _, counts = np.unique(np.asarray(z), return_counts=True)  # table(z)
+        rt = [int(v) for v in counts]
+    cols = [n_y, n_x] if alternative == "less" else [n_x, n_y]
+    two = (alternative == "two.sided")
+    return _smirnov_sim(rt, cols, B, two, _dist._r_rng())
+
+
+def psmirnov(q, sizes, z=None, alternative="two.sided", exact=True,
+             simulate=False, B=2000, lower_tail=True, log_p=False):
+    """R's ``psmirnov(q, sizes, z, alternative, exact, simulate, B, lower.tail,
+    log.p)`` — the two-sample Smirnov CDF ``P(D < q)`` (ks.test.R). Exact
+    (Schröer-Trenkler recursion, incl. ties) and asymptotic branches are
+    bit-exact; ``simulate=True`` draws ``B`` Monte-Carlo variates via
+    :func:`rsmirnov` (stream bit-exact to R)."""
+    qarr = np.atleast_1d(np.asarray(q, dtype=float))
+    n_x = int(math.floor(sizes[0]))
+    n_y = int(math.floor(sizes[1]))
+    exact = exact and not simulate
+    dsim = rsmirnov(B, sizes, z, alternative) if simulate else None
+    ret = np.empty(qarr.shape, dtype=float)
+    for i, qi in enumerate(qarr):
+        if math.isnan(qi):
+            ret[i] = math.nan
+            continue
+        if qi <= 0:
+            p0 = 1.0 - lower_tail
+        elif qi > 1:
+            p0 = float(lower_tail)
+        else:
+            p0 = None
+        if p0 is not None:
+            ret[i] = ((math.log(p0) if p0 > 0 else -math.inf) if log_p else p0)
+        elif simulate:
+            ret[i] = _psmirnov_ecdf(dsim, qi, lower_tail, log_p)
+        elif not exact:
+            ret[i] = _psmirnov_asymp_r(qi, n_x, n_y, alternative, lower_tail, log_p)
+        else:
+            pp = _psmirnov_exact_p(qi, n_x, n_y, z, alternative, lower_tail)
+            if not math.isfinite(pp):               # exact failed → MC fallback
+                if dsim is None:
+                    dsim = rsmirnov(B, sizes, z, alternative)
+                ret[i] = _psmirnov_ecdf(dsim, qi, lower_tail, log_p)
+            else:
+                ret[i] = math.log(pp) if log_p else pp
+    return float(ret[0]) if np.ndim(q) == 0 else ret
+
+
+def qsmirnov(p, sizes, z=None, alternative="two.sided", exact=True,
+             simulate=False, B=2000):
+    """R's ``qsmirnov(p, sizes, z, alternative, exact, simulate, B)`` — the
+    Smirnov quantile: the smallest support point ``d`` with ``psmirnov(d) >= p``
+    (ks.test.R). With ``p=None`` returns the ``{stat, prob}`` support table."""
+    n_x = int(math.floor(sizes[0]))
+    n_y = int(math.floor(sizes[1]))
+    if n_x * n_y < 1e4:
+        stat = np.unique(np.subtract.outer(
+            np.arange(n_x + 1) / n_x, np.arange(n_y + 1) / n_y).ravel())
+    else:
+        stat = np.arange(-10000, 10001) / (1e4 + 1)
+    if alternative == "two.sided":
+        stat = np.abs(stat)
+    prb = np.atleast_1d(psmirnov(stat, sizes, z=z, alternative=alternative,
+                                 exact=exact, simulate=simulate, B=B,
+                                 lower_tail=True, log_p=False))
+    if p is None:
+        return {"stat": stat, "prob": prb}
+    pa = np.atleast_1d(np.asarray(p, dtype=float))
+    ret = np.array(pa, dtype=float)
+    bad = np.isnan(pa) | (pa < 0) | (pa > 1)
+    ret[bad] = np.nan
+    for i in range(pa.size):
+        if bad[i]:
+            continue
+        cand = stat[prb >= pa[i]]
+        ret[i] = float(np.min(cand)) if cand.size else math.inf
+    return float(ret[0]) if np.ndim(p) == 0 else ret
+
+
 _KS_CDF_NAMES = {
     "pnorm": "pnorm", "punif": "punif", "pexp": "pexp", "pgamma": "pgamma",
     "pbeta": "pbeta", "plnorm": None, "pchisq": "pchisq", "pt": "pt",

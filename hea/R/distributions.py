@@ -26,6 +26,8 @@ omitted — ``df`` is too common as a DataFrame variable; use
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from . import nmath as _nm
@@ -692,3 +694,200 @@ def sample(x, size=None, replace=False, prob=None):
     if names is not None:
         return NamedVector([names[i] for i in idx], values[idx])
     return values[idx]
+
+
+# ======================================================================
+# Combinatorial / multivariate distributions (2nd-half Tier-1 add-ons).
+# The r* generators draw from the process-global R MT stream (bit-exact to
+# set.seed); the closed-form pbirthday/qbirthday/dmultinom are pure R ports.
+# ======================================================================
+
+# negative binomial variates (R: rnbinom(n, size, prob | mu); rnbinom.c)
+def rnbinom(n, size, prob=None, mu=None):
+    """R: ``rnbinom(n, size, prob | mu)`` — negative-binomial variates,
+    ``rpois(rgamma(size, ·))`` on R's MT stream (bit-exact). Supply ``prob`` or
+    ``mu`` (mu is the ``rnbinom(size, mu)`` parameterisation)."""
+    rng = _r_rng()
+    nn = int(n)
+    sz = _recycle(size, nn)
+    if mu is not None:
+        mm = _recycle(mu, nn)
+        return np.array([rng.rnbinom(float(sz[i]), float(mm[i]))
+                         for i in range(nn)])
+    pr = _recycle(prob, nn)
+    return np.array([rng.rnbinom_prob(float(sz[i]), float(pr[i]))
+                     for i in range(nn)])
+
+
+# hypergeometric variates (R: rhyper(nn, m, n, k); rhyper.c, H2PE)
+def rhyper(nn, m, n, k):
+    """R: ``rhyper(nn, m, n, k)`` — ``nn`` hypergeometric variates: white balls
+    drawn when ``k`` are taken from ``m`` white + ``n`` black, on R's MT stream
+    (rhyper.c, Kachitvichyanukul-Schmeiser H2PE); bit-exact."""
+    rng = _r_rng()
+    ln = int(nn)
+    ms = _recycle(m, ln)
+    ns = _recycle(n, ln)
+    ks = _recycle(k, ln)
+    return np.array([rng.rhyper(float(ms[i]), float(ns[i]), float(ks[i]))
+                     for i in range(ln)])
+
+
+# Wilcoxon signed-rank + rank-sum variates (signrank.c / wilcox.c)
+def rsignrank(nn, n):
+    """R: ``rsignrank(nn, n)`` — ``nn`` Wilcoxon signed-rank variates for a
+    sample of size ``n``, on R's MT stream (signrank.c); bit-exact."""
+    rng = _r_rng()
+    m = int(nn)
+    ns = _recycle(n, m)
+    return np.array([rng.rsignrank(float(ns[i])) for i in range(m)])
+
+
+def rwilcox(nn, m, n):
+    """R: ``rwilcox(nn, m, n)`` — ``nn`` Wilcoxon rank-sum variates for samples
+    of size ``m`` and ``n``, on R's MT stream (wilcox.c); bit-exact."""
+    rng = _r_rng()
+    ln = int(nn)
+    ms = _recycle(m, ln)
+    ns = _recycle(n, ln)
+    return np.array([rng.rwilcox(float(ms[i]), float(ns[i])) for i in range(ln)])
+
+
+# multinomial variates (R: rmultinom(n, size, prob); rmultinom.c)
+def rmultinom(n, size, prob):
+    """R: ``rmultinom(n, size, prob)`` — a (K x n) integer matrix of independent
+    Multinomial(size, prob) columns, on R's MT stream (rmultinom.c); bit-exact.
+    ``prob`` is normalised via FixupProb (as R does)."""
+    return _r_rng().rmultinom(int(n), int(size), prob)
+
+
+# random 2-way contingency tables (R: r2dtable(n, r, c); rcont.c, AS 159)
+def r2dtable(n, r, c):
+    """R: ``r2dtable(n, r, c)`` — ``n`` random 2-way tables with fixed row
+    (``r``) and column (``c``) margins, on R's MT stream (rcont.c, AS 159);
+    bit-exact. Returns a list of integer matrices."""
+    r = np.asarray(r, dtype=np.int64).ravel()
+    c = np.asarray(c, dtype=np.int64).ravel()
+    if r.size <= 1 or np.any(r < 0):
+        raise ValueError("invalid argument 'r'")
+    if c.size <= 1 or np.any(c < 0):
+        raise ValueError("invalid argument 'c'")
+    if int(r.sum()) != int(c.sum()):
+        raise ValueError("arguments 'r' and 'c' must have the same sums")
+    ntotal = int(r.sum())
+    fact = [0.0] * (ntotal + 1)
+    for i in range(1, ntotal + 1):
+        fact[i] = _nm._lgammafn(float(i + 1))
+    rng = _r_rng()
+    return [np.array(rng.rcont2(r.tolist(), c.tolist(), ntotal, fact),
+                     dtype=np.int64)
+            for _ in range(int(n))]
+
+
+# Wishart matrices (R: rWishart(n, df, Sigma); rWishart.c, Bartlett)
+def rWishart(n, df, Sigma):
+    """R: ``rWishart(n, df, Sigma)`` — ``n`` draws from Wishart(df, Sigma) on R's
+    MT stream (rWishart.c, Bartlett decomposition). Returns a (p, p, n) array.
+    The RNG stream is bit-exact; the Cholesky/crossprod carry platform-BLAS
+    rounding (a few ulp vs R's reference BLAS, not a port discrepancy)."""
+    from scipy.linalg import cholesky
+    Sigma = np.asarray(Sigma, dtype=float)
+    if Sigma.ndim != 2 or Sigma.shape[0] != Sigma.shape[1]:
+        raise ValueError("'Sigma' must be a square, real matrix")
+    p = Sigma.shape[0]
+    nn = int(n)
+    if nn <= 0:
+        nn = 1
+    r_chol = cholesky(Sigma, lower=False)          # dpotrf "U": R'R = Sigma
+    rng = _r_rng()
+    out = np.empty((p, p, nn), dtype=float)
+    for j in range(nn):
+        a = rng.std_rwishart_factor(float(df), p)  # upper-tri Bartlett factor
+        m = a @ r_chol                             # tmp = A · R  (dtrmm)
+        out[:, :, j] = m.T @ m                     # crossprod (dsyrk)
+    return out
+
+
+# --- closed-form (no RNG): birthday problem + multinomial density -----------
+def pbirthday(n, classes=365, coincident=2):
+    """R's ``pbirthday(n, classes, coincident)`` (birthday.R) — probability of a
+    coincidence of at least ``coincident`` among ``n`` items over ``classes``
+    equiprobable categories (Diaconis-Mosteller); bit-exact scalar."""
+    k = coincident
+    c = classes
+    if k < 2:
+        return 1.0
+    if k == 2:
+        acc = np.longdouble(1.0)                    # R's prod → long double
+        for i in range(int(n)):
+            acc *= np.longdouble((c - i) / c)
+        return float(1.0 - acc)
+    if k > n:
+        return 0.0
+    if n > c * (k - 1):
+        return 1.0
+    lhs = n * math.exp(-n / (c * k)) / (1 - n / (c * (k + 1))) ** (1.0 / k)
+    lxx = k * math.log(lhs) - (k - 1) * math.log(c) - _nm._lgammafn(k + 1)
+    return float(-math.expm1(-math.exp(lxx)))
+
+
+def qbirthday(prob=0.5, classes=365, coincident=2):
+    """R's ``qbirthday(prob, classes, coincident)`` (birthday.R) — smallest ``n``
+    with ``pbirthday(n) >= prob`` (crude Diaconis-Mosteller inversion, then a
+    linear search); returns an int, bit-exact to R."""
+    k = coincident
+    c = classes
+    p = prob
+    if p <= 0:
+        return 1
+    if p >= 1:
+        return int(c * (k - 1) + 1)
+    nn = math.exp(((k - 1) * math.log(c) + _nm._lgammafn(k + 1)
+                   + math.log(-math.log1p(-p))) / k)
+    nn = math.ceil(nn)
+    if pbirthday(nn, c, k) < prob:
+        nn += 1
+        while pbirthday(nn, c, k) < prob:
+            nn += 1
+    elif pbirthday(nn - 1, c, k) >= prob:
+        nn -= 1
+        while pbirthday(nn - 1, c, k) >= prob:
+            nn -= 1
+    return int(nn)
+
+
+def dmultinom(x, size=None, prob=None, log=False):
+    """R's ``dmultinom(x, size=None, prob, log=False)`` (distn.R) — the
+    multinomial pmf at count vector ``x``; bit-exact (log-gamma via nmath,
+    R's long-double sum)."""
+    x = np.asarray(x, dtype=float).ravel()
+    prob = np.asarray(prob, dtype=float).ravel()
+    if x.size != prob.size:
+        raise ValueError("x[] and prob[] must be equal length vectors.")
+    if not np.all(np.isfinite(prob)) or np.any(prob < 0):
+        raise ValueError("probabilities must be finite, non-negative and not all 0")
+    s = float(prob.sum())
+    if s == 0:
+        raise ValueError("probabilities must be finite, non-negative and not all 0")
+    prob = prob / s
+    x = np.floor(x + 0.5).astype(np.int64)         # as.integer(x + 0.5)
+    if np.any(x < 0):
+        raise ValueError("'x' must be non-negative")
+    total = int(x.sum())
+    if size is None:
+        size = total
+    elif size != total:
+        raise ValueError("size != sum(x), i.e. one is wrong")
+    i0 = prob == 0
+    if i0.any():
+        if np.any(x[i0] != 0):
+            return -math.inf if log else 0.0
+        if i0.all():
+            return 0.0 if log else 1.0
+        x = x[~i0]
+        prob = prob[~i0]
+    acc = np.longdouble(0.0)                        # R: sum(...) in long double
+    for xi, pi in zip(x, prob):
+        acc += np.longdouble(xi * math.log(pi) - _nm._lgammafn(float(xi) + 1))
+    r = _nm._lgammafn(float(size) + 1) + float(acc)
+    return r if log else math.exp(r)

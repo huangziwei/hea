@@ -46,6 +46,9 @@ from hea.R import (
     dweibull, pweibull, qweibull, rweibull,
     dgeom, pgeom, qgeom, rgeom,
     qhyper, dnbinom, pnbinom, qnbinom,
+    rnbinom, rhyper, rsignrank, rwilcox, rmultinom,
+    r2dtable, rWishart, dmultinom, pbirthday, qbirthday,
+    psmirnov, qsmirnov, rsmirnov,
     set_seed,
 )
 
@@ -623,10 +626,13 @@ _R_EXPR_SKIP = {
     "dpois", "ppois", "qpois", "rpois",
     "dunif", "punif", "qunif", "runif",
     "ptukey", "qtukey",
-    "dsignrank", "psignrank", "qsignrank",
-    "dwilcox", "pwilcox", "qwilcox",
-    "dhyper", "phyper", "qhyper",
-    "dnbinom", "pnbinom", "qnbinom",
+    "dsignrank", "psignrank", "qsignrank", "rsignrank",
+    "dwilcox", "pwilcox", "qwilcox", "rwilcox",
+    "dhyper", "phyper", "qhyper", "rhyper",
+    "dnbinom", "pnbinom", "qnbinom", "rnbinom",
+    # combinatorial / multivariate + Smirnov distribution surface.
+    "dmultinom", "rmultinom", "pbirthday", "qbirthday", "r2dtable", "rWishart",
+    "psmirnov", "qsmirnov", "rsmirnov",
     "dexp", "pexp", "qexp", "rexp",
     "dgamma", "pgamma", "qgamma", "rgamma",
     "dbeta", "pbeta", "qbeta", "rbeta",
@@ -933,6 +939,74 @@ def test_r_generators_cauchy_weibull_geom():
     assert float(rweibull(3, 1.7, 2.3)[0]) == pytest.approx(1.2236370854093777, rel=1e-12)
     set_seed(101)
     assert rgeom(4, 0.08).astype(int).tolist() == [7, 23, 9, 9]
+
+
+def test_pbirthday_qbirthday_dmultinom():
+    # Closed-form combinatorial densities — pure R ports (birthday.R / distn.R),
+    # bit-exact (long-double sum/prod + nmath lgammafn).
+    _assert_r([
+        (float(pbirthday(23)), "pbirthday(23)", 0.5072972343239854),
+        (float(pbirthday(10, 365, 3)),
+         "pbirthday(10, 365, 3)", 0.0012248510714326258),
+        (float(qbirthday(0.5)), "qbirthday(0.5)", 23.0),
+        (float(qbirthday(0.9, 365, 3)), "qbirthday(0.9, 365, 3)", 135.0),
+        (float(dmultinom([1, 2, 3], prob=[0.2, 0.3, 0.5])),
+         "dmultinom(c(1,2,3), prob=c(0.2,0.3,0.5))", 0.13499999999999993),
+        (float(dmultinom([1, 2, 3], prob=[0.2, 0.3, 0.5], log=True)),
+         "dmultinom(c(1,2,3), prob=c(0.2,0.3,0.5), log=TRUE)", -2.002480500543708),
+    ])
+
+
+def test_psmirnov_qsmirnov():
+    # Two-sample Smirnov CDF (exact recursion + asymptotic) and quantile,
+    # bit-exact to R (reuses the ks.test exact kernels; ties via z=).
+    _assert_r([
+        (float(psmirnov(0.5, (5, 8))), "psmirnov(0.5, c(5,8))", 0.6837606837606837),
+        (float(psmirnov(0.4, (5, 8), alternative="greater")),
+         "psmirnov(0.4, c(5,8), alternative='greater')", 0.7016317016317015),
+        (float(psmirnov(0.5, (5, 8), lower_tail=False)),
+         "psmirnov(0.5, c(5,8), lower.tail=FALSE)", 0.3162393162393162),
+        (float(psmirnov(0.5, (12, 15), exact=False)),
+         "psmirnov(0.5, c(12,15), exact=FALSE)", 0.9286552524988926),
+        (float(psmirnov(0.5, (5, 5), z=[1, 1, 2, 3, 3, 4, 5, 6, 7, 7])),
+         "psmirnov(0.5, c(5,5), z=c(1,1,2,3,3,4,5,6,7,7))", 0.6428571428571428),
+        (float(qsmirnov(0.95, (5, 8))), "qsmirnov(0.95, c(5,8))", 0.75),
+    ])
+
+
+def test_r_generators_nbinom_hyper_rank():
+    # r* draws bit-exact to R's set.seed MT stream: rnbinom (prob + mu via
+    # rpois∘rgamma), rhyper (H2PE), rsignrank/rwilcox (rank statistics).
+    set_seed(42)
+    assert rnbinom(6, 5, prob=0.4).astype(int).tolist() == [9, 4, 8, 7, 4, 4]
+    set_seed(7)
+    assert rnbinom(6, 5, mu=3).astype(int).tolist() == [3, 1, 5, 0, 0, 7]
+    set_seed(42)
+    assert rhyper(8, 20, 25, 15).astype(int).tolist() == [9, 9, 6, 8, 7, 7, 8, 5]
+    set_seed(42)
+    assert rsignrank(5, 8).astype(int).tolist() == [25, 20, 25, 27, 21]
+    set_seed(42)
+    assert rwilcox(5, 6, 8).astype(int).tolist() == [17, 15, 15, 11, 39]
+
+
+def test_r_multinom_2dtable_wishart_smirnov():
+    # Multivariate r* generators bit-exact to R's set.seed stream (rmultinom.c
+    # sequential rbinom, rcont.c AS 159, ks.c Smirnov_sim). rWishart's RNG
+    # stream is exact; its chol/crossprod carry ≤ few ulp of platform-BLAS.
+    set_seed(42)
+    assert rmultinom(4, 10, [0.2, 0.3, 0.5]).tolist() == [
+        [4, 1, 2, 3], [4, 5, 3, 1], [2, 4, 5, 6]]
+    set_seed(7)
+    tabs = r2dtable(2, [3, 2], [2, 3])
+    assert [t.tolist() for t in tabs] == [[[0, 3], [2, 0]], [[1, 2], [1, 1]]]
+    set_seed(101)
+    assert rsmirnov(6, (5, 8)).tolist() == pytest.approx(
+        [0.25, 0.4, 0.4, 0.2, 0.3, 0.675])
+    set_seed(7)
+    w = rWishart(1, 5, [[2.0, 0.5], [0.5, 1.0]])[:, :, 0]
+    assert w.ravel().tolist() == pytest.approx(
+        [26.17012340132881, 10.434953805570906,
+         10.434953805570906, 4.8473550148401925])
 
 
 def test_binom():
