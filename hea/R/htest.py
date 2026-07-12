@@ -164,6 +164,88 @@ def signed_rank(x):
     return np.sign(arr) * _avg_rank(np.abs(arr))
 
 
+p_adjust_methods = ("holm", "hochberg", "hommel", "bonferroni",
+                    "BH", "BY", "fdr", "none")
+
+
+def p_adjust(p, method: str = "holm", n: Optional[int] = None):
+    """Adjust p-values for multiple comparisons — R's ``p.adjust``.
+
+    Faithful port of ``stats::p.adjust`` (``p.adjust.R``). ``method`` is
+    one of :data:`p_adjust_methods` (``"fdr"`` is an alias for ``"BH"``);
+    ``n`` is the number of comparisons and defaults to the count of
+    non-``NaN`` entries in ``p`` (matching R's lazy-evaluated
+    ``n = length(p)`` after ``NA`` removal). ``NaN`` p-values pass through
+    unchanged. Returns an :class:`numpy.ndarray`.
+    """
+    if method not in p_adjust_methods:
+        raise ValueError(
+            f"p_adjust: 'method' must be one of {p_adjust_methods!r}")
+    if method == "fdr":  # back compatibility
+        method = "BH"
+    p0 = np.asarray(p, dtype=float).ravel().copy()  # output holder
+    nna = ~np.isnan(p0)
+    all_nna = bool(nna.all())
+    pv = p0 if all_nna else p0[nna]
+    lp = pv.size
+    if n is None:
+        n = lp
+    if n < lp:
+        raise ValueError("p_adjust: n >= length(p) is not TRUE")
+    if n <= 1:
+        return p0
+    if n == 2 and method == "hommel":
+        method = "hochberg"
+
+    if method == "bonferroni":
+        out = np.minimum(1.0, n * pv)
+    elif method == "holm":
+        i = np.arange(1, lp + 1)
+        o = np.argsort(pv, kind="stable")
+        ro = np.argsort(o)
+        out = np.minimum(1.0, np.maximum.accumulate((n + 1 - i) * pv[o]))[ro]
+    elif method == "hommel":
+        if n > lp:
+            pv = np.concatenate([pv, np.ones(n - lp)])
+        i = np.arange(1, n + 1)
+        o = np.argsort(pv, kind="stable")
+        pv = pv[o]
+        ro = np.argsort(o)
+        qval = np.min(n * pv / i)
+        q = np.full(n, qval)
+        pa = q.copy()
+        for j in range(n - 1, 1, -1):
+            ij = np.arange(0, n - j + 1)
+            i2 = np.arange(n - j + 1, n)
+            q1 = np.min(j * pv[i2] / np.arange(2, j + 1))
+            q[ij] = np.minimum(j * pv[ij], q1)
+            q[i2] = q[n - j]
+            pa = np.maximum(pa, q)
+        res = np.maximum(pa, pv)
+        out = res[ro[:lp]] if lp < n else res[ro]
+    elif method == "hochberg":
+        i = np.arange(lp, 0, -1)
+        o = np.argsort(-pv, kind="stable")
+        ro = np.argsort(o)
+        out = np.minimum(1.0, np.minimum.accumulate((n + 1 - i) * pv[o]))[ro]
+    elif method == "BH":
+        i = np.arange(lp, 0, -1)
+        o = np.argsort(-pv, kind="stable")
+        ro = np.argsort(o)
+        out = np.minimum(1.0, np.minimum.accumulate(n / i * pv[o]))[ro]
+    elif method == "BY":
+        i = np.arange(lp, 0, -1)
+        o = np.argsort(-pv, kind="stable")
+        ro = np.argsort(o)
+        qsum = _rsum_ld(1.0 / np.arange(1, n + 1))  # R's sum() is LDOUBLE
+        out = np.minimum(1.0, np.minimum.accumulate(qsum * n / i * pv[o]))[ro]
+    else:  # "none"
+        out = pv
+
+    p0[nna] = out
+    return p0
+
+
 # ---- hypothesis tests -----------------------------------------------
 #
 # Every function returns an :class:`HTest`. R parameter names are
@@ -281,6 +363,40 @@ def _rsum_ld(arr) -> float:
     for v in np.asarray(arr, dtype=float):
         acc += v
     return float(acc)
+
+
+def _rmean(arr) -> float:
+    """R's ``mean.default`` / cov.c ``MEAN``: two-pass LDOUBLE mean.
+
+    First pass ``tmp = Σx / n`` (LDOUBLE); second pass adds the LDOUBLE
+    correction ``Σ(x − tmp) / n``; the result is truncated to ``double``.
+    ``np.mean`` (pairwise, no correction) does not reproduce this."""
+    a = np.asarray(arr, dtype=float)
+    n = a.size
+    s = np.longdouble(0.0)
+    for v in a:
+        s += v
+    tmp = s / n
+    if np.isfinite(np.float64(tmp)):
+        s = np.longdouble(0.0)
+        for v in a:
+            s += v - tmp
+        tmp = tmp + s / n
+    return float(tmp)
+
+
+def _rvar(arr) -> float:
+    """R's ``var`` (cov.c self-covariance): ``Σ(x − x̄)² / (n − 1)`` accumulated
+    in LDOUBLE, with ``x̄`` the ``double``-truncated two-pass :func:`_rmean`."""
+    a = np.asarray(arr, dtype=float)
+    n = a.size
+    xbar = np.longdouble(_rmean(a))
+    s = np.longdouble(0.0)
+    for v in a:
+        d = np.longdouble(v) - xbar
+        s += d * d
+    return float(s / (n - 1))
+
 
 def _dpermdist1(scores) -> list:
     """One-sample permutation density (permdist.c ``dpermdist1``): density of
@@ -2388,6 +2504,1174 @@ def friedman_test(y, groups, blocks) -> HTest:
         alternative="",
         data_name="y, groups and blocks",
     )
+
+
+def _rmedian(arr) -> float:
+    """R's ``median.default``: middle order statistic for odd ``n``, else the
+    :func:`_rmean` (two-pass) of the two middle values."""
+    a = np.sort(np.asarray(arr, dtype=float))
+    n = a.size
+    half = (n + 1) // 2  # 1-based
+    if n % 2 == 1:
+        return float(a[half - 1])
+    return _rmean([a[half - 1], a[half]])
+
+
+def oneway_test(formula: str, data: pl.DataFrame, *,
+                var_equal: bool = False) -> HTest:
+    """R's ``oneway.test`` — test for equal means across groups.
+
+    Welch's ANOVA by default (``var_equal=False``, not assuming equal
+    variances); classical one-way ANOVA F-test when ``var_equal=True``.
+    Faithful port of ``oneway.test.R`` — F statistic and p-value (nmath
+    ``pf``) bit-exact to R.
+    """
+    if "~" not in formula:
+        raise ValueError("formula must look like 'y ~ group'")
+    lhs, rhs = (s.strip() for s in formula.split("~", 1))
+    y = data[lhs].to_numpy().astype(float)
+    g = np.asarray(data[rhs].to_list())
+    ok = np.isfinite(y) & np.array([gi is not None for gi in g])
+    y, g = y[ok], g[ok]
+    glabels = np.unique(g)
+    k = len(glabels)
+    if k < 2:
+        raise ValueError("not enough groups")
+    groups = [y[g == gl] for gl in glabels]
+    n_i = np.array([len(gr) for gr in groups], dtype=float)
+    if np.any(n_i < 2):
+        raise ValueError("not enough observations")
+    m_i = np.array([_rmean(gr) for gr in groups])
+    v_i = np.array([_rvar(gr) for gr in groups])
+    w_i = n_i / v_i
+    sum_w = _rsum_ld(w_i)
+    tmp = _rsum_ld((1 - w_i / sum_w) ** 2 / (n_i - 1)) / (k ** 2 - 1)
+    if var_equal:
+        n = _rsum_ld(n_i)
+        grand = _rmean(y)
+        stat = ((_rsum_ld(n_i * (m_i - grand) ** 2) / (k - 1))
+                / (_rsum_ld((n_i - 1) * v_i) / (n - k)))
+        df1, df2 = float(k - 1), float(n - k)
+        method = "One-way analysis of means"
+    else:
+        m = _rsum_ld(w_i * m_i) / sum_w
+        stat = (_rsum_ld(w_i * (m_i - m) ** 2)
+                / ((k - 1) * (1 + 2 * (k - 2) * tmp)))
+        df1, df2 = float(k - 1), 1.0 / (3 * tmp)
+        method = "One-way analysis of means (not assuming equal variances)"
+    pval = float(_dist.pf(stat, df1, df2, lower_tail=False))
+    return HTest(
+        method=method,
+        statistic={"F": float(stat)},
+        parameter={"num df": df1, "denom df": df2},
+        p_value=pval,
+        alternative="",
+        data_name=f"{lhs} and {rhs}",
+    )
+
+
+def fligner_test(x, g) -> HTest:
+    """R's ``fligner.test`` — Fligner-Killeen test of homogeneity of variances.
+
+    ``x`` is the values vector, ``g`` the parallel group labels. Groups are
+    median-centred, absolute-rank normal scores are formed, and the χ²
+    statistic (nmath ``pchisq``) is returned. Faithful port of
+    ``fligner.test.R`` — bit-exact to R.
+    """
+    x = _as_array(x).astype(float)
+    g = np.asarray(g)
+    if x.shape != g.shape:
+        raise ValueError("fligner_test(): x and g must have the same length")
+    ok = np.isfinite(x) & np.array([gi is not None for gi in g])
+    x, g = x[ok], g[ok]
+    glabels = np.unique(g)
+    k = len(glabels)
+    if k < 2:
+        raise ValueError("all observations are in the same group")
+    n = len(x)
+    if n < 2:
+        raise ValueError("not enough observations")
+    # x <- x - tapply(x, g, median)[g]  (centre each group by its median)
+    med = {gl: _rmedian(x[g == gl]) for gl in glabels}
+    xc = x - np.array([med[gi] for gi in g])
+    a = _dist.qnorm((1 + _avg_rank(np.abs(xc)) / (n + 1)) / 2)
+    a = a - _rmean(a)
+    v = _rsum_ld(a ** 2) / (n - 1)
+    stat = _rsum_ld([len(a[g == gl]) * _rmean(a[g == gl]) ** 2
+                     for gl in glabels]) / v
+    df = k - 1
+    return HTest(
+        method="Fligner-Killeen test of homogeneity of variances",
+        statistic={"Fligner-Killeen:med chi-squared": float(stat)},
+        parameter={"df": int(df)},
+        p_value=float(_dist.pchisq(stat, df, lower_tail=False)),
+        alternative="",
+        data_name="x and g",
+    )
+
+
+def mood_test(x, y, alternative: str = "two.sided") -> HTest:
+    """R's ``mood.test`` — Mood two-sample test of scale.
+
+    Faithful port of ``mood.test.R``: the no-ties statistic follows Conover
+    (1971); with ties, the mid-rank expressions of Mielke (1967). The
+    standardised statistic Z and its normal p-value are bit-exact to R.
+    """
+    if alternative not in ("two.sided", "less", "greater"):
+        raise ValueError(f"mood_test(): unknown alternative {alternative!r}")
+    x = _as_array(x).astype(float)
+    y = _as_array(y).astype(float)
+    x = x[np.isfinite(x)]
+    y = y[np.isfinite(y)]
+    m = len(x)
+    n = len(y)
+    N = m + n
+    if N < 3:
+        raise ValueError("not enough observations")
+    E = m * (N ** 2 - 1) / 12
+    v = (1 / 180) * m * n * (N + 1) * (N + 2) * (N - 2)
+    z = np.concatenate([x, y])
+    if len(np.unique(z)) == len(z):
+        r = _avg_rank(z)
+        T = _rsum_ld((r[:m] - (N + 1) / 2) ** 2)
+    else:
+        u = np.unique(z)  # sort(unique(z))
+        a = np.bincount(np.searchsorted(u, x), minlength=len(u)).astype(float)
+        t = np.bincount(np.searchsorted(u, z), minlength=len(u)).astype(float)
+        p = np.cumsum((np.arange(1, N + 1) - (N + 1) / 2) ** 2)
+        ct = np.cumsum(t)
+        v = v - (m * n) / (180 * N * (N - 1)) * _rsum_ld(
+            t * (t ** 2 - 1) * (t ** 2 - 4 + 15 * (N - 2 * ct + t) ** 2))
+        pcum = p[(ct).astype(int) - 1]
+        dp = np.diff(np.concatenate([[0.0], pcum]))
+        T = _rsum_ld(a * dp / t)
+    zstat = (T - E) / math.sqrt(v)
+    p = float(_dist.pnorm(zstat))
+    if alternative == "less":
+        pval = p
+    elif alternative == "greater":
+        pval = 1 - p
+    else:
+        pval = 2 * min(p, 1 - p)
+    return HTest(
+        method="Mood two-sample test of scale",
+        statistic={"Z": float(zstat)},
+        p_value=pval,
+        null_value=None,
+        alternative=alternative,
+        data_name="x and y",
+    )
+
+
+def quade_test(y, groups=None, blocks=None) -> HTest:
+    """R's ``quade.test`` — Quade test for unreplicated block designs.
+
+    Accepts either a ``(blocks × treatments)`` matrix ``y`` or parallel
+    ``y``/``groups``/``blocks`` vectors (like :func:`friedman_test`).
+    Faithful port of ``quade.test.R`` — the Quade F statistic and its
+    p-value (nmath ``pf``) are bit-exact to R; the degenerate ``A == B``
+    case returns ``NaN`` with ``PVAL = gamma(k+1)^(1-b)``.
+    """
+    y_arr = np.asarray(y, dtype=float) if not isinstance(y, np.ndarray) \
+        else y.astype(float)
+    if y_arr.ndim == 2 and groups is None and blocks is None:
+        mat = y_arr
+        dname = "y"
+    else:
+        yv = _as_array(y).astype(float)
+        gv = np.asarray(groups)
+        bv = np.asarray(blocks)
+        if not (yv.shape == gv.shape == bv.shape):
+            raise ValueError(
+                "quade_test(): y, groups, blocks must have the same length")
+        glabels = np.unique(gv)
+        blabels = np.unique(bv)
+        mat = np.full((len(blabels), len(glabels)), np.nan)
+        bpos = {bl: i for i, bl in enumerate(blabels)}
+        gpos = {gl: j for j, gl in enumerate(glabels)}
+        for yi, gi, bi in zip(yv, gv, bv):
+            mat[bpos[bi], gpos[gi]] = yi
+        dname = "y, groups and blocks"
+    mat = mat[np.all(np.isfinite(mat), axis=1)]
+    b, k = mat.shape
+    r = np.vstack([_avg_rank(row) for row in mat])
+    ranges = np.array([row.max() - row.min() for row in mat])
+    q = _avg_rank(ranges)
+    s = q[:, None] * (r - (k + 1) / 2)
+    A = _rsum_ld(s.ravel() ** 2)
+    B = _rsum_ld(s.sum(axis=0) ** 2) / b
+    if A == B:
+        stat = float("nan")
+        df1 = df2 = float("nan")
+        pval = float(_nm.gammafn(k + 1) ** (1 - b))
+    else:
+        stat = (b - 1) * B / (A - B)
+        df1, df2 = float(k - 1), float((b - 1) * (k - 1))
+        pval = float(_dist.pf(stat, df1, df2, lower_tail=False))
+    return HTest(
+        method="Quade test",
+        statistic={"Quade F": float(stat)},
+        parameter={"num df": df1, "denom df": df2},
+        p_value=pval,
+        alternative="",
+        data_name=dname,
+    )
+
+
+def poisson_test(x, T=1.0, r=1.0, alternative: str = "two.sided",
+                 conf_level: float = 0.95) -> HTest:
+    """R's ``poisson.test`` — exact test for one or two Poisson rates.
+
+    One count (``k = 1``): exact test of the rate against ``r`` on time base
+    ``T`` (two-sided uses R's opposite-tail density sum; CI via ``qgamma``).
+    Two counts (``k = 2``): comparison of rates, delegated to
+    :func:`binom_test` with the rate-ratio reparametrisation. Faithful port
+    of ``poisson.test.R`` — bit-exact to R.
+    """
+    if alternative not in ("two.sided", "less", "greater"):
+        raise ValueError(f"poisson_test(): unknown alternative {alternative!r}")
+    x = np.atleast_1d(np.asarray(x, dtype=float))
+    T = np.atleast_1d(np.asarray(T, dtype=float))
+    lx = len(x)
+    if len(T) != lx:
+        if len(T) == 1:
+            T = np.repeat(T, lx)
+        else:
+            raise ValueError("'x' and 'T' have incompatible length")
+    xr = np.rint(x)
+    if np.any(~np.isfinite(x) | (x < 0)) or np.max(np.abs(x - xr)) > 1e-7:
+        raise ValueError("'x' must be finite, nonnegative, and integer")
+    x = xr
+    if np.any(np.isnan(T) | (T < 0)):
+        raise ValueError("'T' must be nonnegative")
+    k = lx
+    if k < 1:
+        raise ValueError("not enough data")
+    if k > 2:
+        raise ValueError("the case k > 2 is unimplemented")
+    r = float(r)
+    if r < 0:
+        raise ValueError("'r' must be a single positive number")
+
+    if k == 2:
+        prob = r * T[0] / (r * T[0] + T[1])
+        rval = binom_test([int(x[0]), int(x[1])], p=prob,
+                          alternative=alternative, conf_level=conf_level)
+        pp = rval.conf_int
+        ci = (pp[0] / (1 - pp[0]) * T[1] / T[0],
+              pp[1] / (1 - pp[1]) * T[1] / T[0])
+        return HTest(
+            method="Comparison of Poisson rates",
+            statistic={"count1": float(x[0])},
+            parameter={"expected count1":
+                       float(x.sum() * r * T[0] / (T[0] + T[1] * r))},
+            p_value=rval.p_value,
+            conf_int=ci,
+            estimate={"rate ratio": float((x[0] / T[0]) / (x[1] / T[1]))},
+            null_value={"rate ratio": r},
+            alternative=alternative,
+            conf_level=conf_level,
+            data_name="x time base: T",
+        )
+
+    xx = float(x[0])
+    TT = float(T[0])
+    m = r * TT
+    if alternative == "less":
+        pval = float(_dist.ppois(xx, m))
+    elif alternative == "greater":
+        pval = float(_dist.ppois(xx - 1, m, lower_tail=False))
+    else:  # two.sided
+        if m == 0:
+            pval = float(xx == 0)
+        else:
+            rel_err = 1 + 1e-7
+            d = float(_dist.dpois(xx, m))
+            if xx == m:
+                pval = 1.0
+            elif xx < m:
+                N = math.ceil(2 * m - xx)
+                while float(_dist.dpois(N, m)) > d:
+                    N = 2 * N
+                i = np.arange(math.ceil(m), N + 1)
+                y = int(np.sum(np.asarray(_dist.dpois(i, m)) <= d * rel_err))
+                pval = (float(_dist.ppois(xx, m))
+                        + float(_dist.ppois(N - y, m, lower_tail=False)))
+            else:  # xx > m
+                i = np.arange(0, math.floor(m) + 1)
+                y = int(np.sum(np.asarray(_dist.dpois(i, m)) <= d * rel_err))
+                pval = (float(_dist.ppois(y - 1, m))
+                        + float(_dist.ppois(xx - 1, m, lower_tail=False)))
+
+    def p_L(xv, alpha):
+        return 0.0 if xv == 0 else float(_dist.qgamma(alpha, xv))
+
+    def p_U(xv, alpha):
+        return float(_dist.qgamma(1 - alpha, xv + 1))
+
+    if alternative == "less":
+        ci = (0.0, p_U(xx, 1 - conf_level) / TT)
+    elif alternative == "greater":
+        ci = (p_L(xx, 1 - conf_level) / TT, float("inf"))
+    else:
+        alpha = (1 - conf_level) / 2
+        ci = (p_L(xx, alpha) / TT, p_U(xx, alpha) / TT)
+    return HTest(
+        method="Exact Poisson test",
+        statistic={"number of events": xx},
+        parameter={"time base": TT},
+        p_value=float(pval),
+        conf_int=ci,
+        estimate={"event rate": xx / TT},
+        null_value={"event rate": r},
+        alternative=alternative,
+        conf_level=conf_level,
+        data_name="x time base: T",
+    )
+
+
+def prop_trend_test(x, n, score=None) -> HTest:
+    """R's ``prop.trend.test`` — chi-squared test for trend in proportions.
+
+    ``x`` successes out of ``n`` trials at ordinal ``score`` (default
+    ``1..length(x)``). Faithful port of ``prop.trend.test.R``: the statistic
+    is the weighted-regression sum of squares for ``score`` — computed here
+    via hea's ``lm`` exactly as R computes ``anova(lm(freq ~ score,
+    weights = n/p/(1-p)))["score", "Sum Sq"]``. It therefore inherits the
+    documented lm QR ≤1-ulp residual (gfortran ``dqrdc2`` FMA contraction),
+    otherwise bit-exact; the p-value is nmath ``pchisq``.
+    """
+    x = np.asarray(x, dtype=float).ravel()
+    n = np.asarray(n, dtype=float).ravel()
+    if score is None:
+        score = np.arange(1, len(x) + 1, dtype=float)
+    else:
+        score = np.asarray(score, dtype=float).ravel()
+    p = _rsum_ld(x) / _rsum_ld(n)
+    w = n / p / (1 - p)
+    freq = x / n
+    fit = lm("freq ~ score",
+             pl.DataFrame({"freq": freq, "score": score}), weights=w)
+    chisq = float(np.asarray(fit.effects)[1]) ** 2
+    score_str = " ".join(
+        str(int(s)) if float(s).is_integer() else repr(float(s))
+        for s in score)
+    return HTest(
+        method="Chi-squared Test for Trend in Proportions",
+        statistic={"X-squared": chisq},
+        parameter={"df": 1},
+        p_value=float(_dist.pchisq(chisq, 1, lower_tail=False)),
+        alternative="",
+        data_name=f"x out of n,\n using scores: {score_str}",
+    )
+
+
+def _cansari(k: int, m: int, n: int, memo: dict) -> float:
+    """Count of Ansari-Bradley configurations with statistic ``k`` for group
+    sizes ``m``, ``n`` — memoised recursion from ``ansari.c`` ``cansari``."""
+    lo = (m + 1) * (m + 1) // 4
+    up = lo + m * n // 2
+    if k < lo or k > up:
+        return 0.0
+    key = (m, n, k)
+    v = memo.get(key)
+    if v is not None:
+        return v
+    if m == 0:
+        v = 1.0 if k == 0 else 0.0
+    elif n == 0:
+        v = 1.0 if k == lo else 0.0
+    else:
+        v = (_cansari(k, m, n - 1, memo)
+             + _cansari(k - (m + n + 1) // 2, m - 1, n, memo))
+    memo[key] = v
+    return v
+
+
+def _pansari(q, m: int, n: int) -> float:
+    """Exact Ansari-Bradley CDF ``P(AB <= q)`` — ``ansari.c`` ``pansari``."""
+    memo: dict = {}
+    lo = (m + 1) * (m + 1) // 4
+    up = lo + m * n // 2
+    c = _nm.choose(m + n, m)
+    qq = math.floor(q + 1e-7)
+    if qq < lo:
+        return 0.0
+    if qq > up:
+        return 1.0
+    p = 0.0
+    for j in range(lo, qq + 1):
+        p += _cansari(j, m, n, memo)
+    return p / c
+
+
+def ansari_test(x, y, alternative: str = "two.sided",
+                exact: Optional[bool] = None) -> HTest:
+    """R's ``ansari.test`` — Ansari-Bradley two-sample test of scale.
+
+    Faithful port of ``ansari.test.R`` (p-value only; ``conf.int`` is not
+    computed). The AB statistic is the sum of the folded mid-ranks of ``x``.
+    Without ties and with ``exact`` (default when both sizes < 50), the
+    p-value uses the exact distribution (``ansari.c`` recursion, ported to
+    :func:`_cansari`/:func:`_pansari`); otherwise the normal approximation
+    (Conover no-ties variance, or the mid-rank variance with ties). Bit-exact
+    to R.
+    """
+    if alternative not in ("two.sided", "less", "greater"):
+        raise ValueError(f"ansari_test(): unknown alternative {alternative!r}")
+    x = _as_array(x).astype(float)
+    y = _as_array(y).astype(float)
+    x = x[np.isfinite(x)]
+    y = y[np.isfinite(y)]
+    m = len(x)
+    n = len(y)
+    if m < 1:
+        raise ValueError("not enough 'x' observations")
+    if n < 1:
+        raise ValueError("not enough 'y' observations")
+    N = m + n
+    r = _avg_rank(np.concatenate([x, y]))
+    ab = np.minimum(r, N - r + 1)
+    stat = _rsum_ld(ab[:m])
+    ties = len(np.unique(r)) != len(r)
+    if exact is None:
+        exact = (m < 50) and (n < 50)
+
+    if exact and not ties:
+        si = int(round(stat))
+        if alternative == "two.sided":
+            thr = (m + 1) ** 2 // 4 + ((m * n) // 2) / 2
+            if si > thr:
+                p = 1 - _pansari(si - 1, m, n)
+            else:
+                p = _pansari(si, m, n)
+            pval = min(2 * p, 1.0)
+        elif alternative == "less":
+            pval = 1 - _pansari(si - 1, m, n)
+        else:  # greater
+            pval = _pansari(si, m, n)
+    else:
+        even = (N % 2) == 0
+        if not ties:
+            z = stat - (m * (N + 2) / 4 if even else m * (N + 1) ** 2 / (4 * N))
+            sigma = (math.sqrt((m * n * (N + 2) * (N - 2)) / (48 * (N - 1)))
+                     if even else
+                     math.sqrt((m * n * (N + 1) * (3 + N ** 2)) / (48 * N ** 2)))
+        else:
+            z = stat - m * _rmean(ab)
+            sigma = math.sqrt(m * n * _rvar(ab) / N)
+        p = float(_dist.pnorm(z / sigma))
+        if alternative == "two.sided":
+            pval = 2 * min(p, 1 - p)
+        elif alternative == "less":
+            pval = 1 - p
+        else:
+            pval = p
+        if exact and ties:
+            import warnings
+            warnings.warn("cannot compute exact p-value with ties")
+
+    return HTest(
+        method="Ansari-Bradley test",
+        statistic={"AB": float(stat)},
+        p_value=float(pval),
+        null_value={"ratio of scales": 1.0},
+        alternative=alternative,
+        data_name="x and y",
+    )
+
+
+def _d2x2xk(K: int, m, n, t):
+    """Density of ``S = Σ_k x[1,1,k]`` on its support, by convolution across the
+    ``K`` strata of the central product-hypergeometric — port of ``d2x2xk.c``
+    ``int_d2x2xk`` (uses nmath ``dhyper``). ``m``/``n``/``t`` are the per-stratum
+    column-1, column-2, and row-1 totals."""
+    c = [[1.0]]
+    length = 0
+    for i in range(K):
+        y = max(0, int(t[i] - n[i]))
+        z = min(int(m[i]), int(t[i]))
+        ci = [0.0] * (length + z - y + 1)
+        prev = c[i]
+        for j in range(z - y + 1):
+            u = float(_nm.dhyper(j + y, m[i], n[i], t[i], False))
+            for w in range(length + 1):
+                ci[w + j] += prev[w] * u
+        c.append(ci)
+        length = length + z - y
+    total = 0.0
+    for j in range(length + 1):
+        total += c[K][j]
+    return np.array([c[K][j] / total for j in range(length + 1)])
+
+
+def _mh_table_from_factors(x, y, z):
+    """Build the ``I×J×K`` count array R's ``table(x, y, z)`` produces from
+    parallel factor vectors (levels sorted ascending)."""
+    x = np.asarray(x)
+    y = np.asarray(y)
+    z = np.asarray(z)
+    xl, yl, zl = np.unique(x), np.unique(y), np.unique(z)
+    arr = np.zeros((len(xl), len(yl), len(zl)))
+    xi = {v: i for i, v in enumerate(xl)}
+    yi = {v: i for i, v in enumerate(yl)}
+    zi = {v: i for i, v in enumerate(zl)}
+    for a, b, c in zip(x, y, z):
+        arr[xi[a], yi[b], zi[c]] += 1
+    return arr
+
+
+def _mantelhaen_exact(arr, ns, alternative, conf_level) -> HTest:
+    """Exact conditional 2×2×k test (``mantelhaen.test.R`` ``exact`` branch):
+    the common-odds-ratio p-value, MLE and CI from the product-hypergeometric
+    density (:func:`_d2x2xk`) inverted with the ported ``uniroot`` — mirrors
+    fisher_test's non-central hypergeometric machinery."""
+    mn = arr.sum(axis=0)               # (2, K): column totals per stratum
+    m_ = mn[0, :]
+    n_ = mn[1, :]
+    t_ = arr.sum(axis=1)[0, :]         # row-1 totals per stratum
+    s = _rsum_ld(arr[0, 0, :])
+    lo = _rsum_ld(np.maximum(0.0, t_ - n_))
+    hi = _rsum_ld(np.minimum(m_, t_))
+    support = np.arange(lo, hi + 1)
+    dc = _d2x2xk(ns, m_, n_, t_)
+    logdc = np.log(dc)
+    eps = _nm._DBL_EPSILON
+
+    def dn(ncp):
+        if ncp == 1.0:
+            return dc
+        d = logdc + math.log(ncp) * support
+        d = np.exp(d - np.max(d))
+        return d / _rsum_ld(d)
+
+    def mn_(ncp):
+        if ncp == 0:
+            return lo
+        if ncp == math.inf:
+            return hi
+        return _rsum_ld(support * dn(ncp))
+
+    def pn(q, ncp=1.0, upper_tail=False):
+        if ncp == 0:
+            return float(q <= lo) if upper_tail else float(q >= lo)
+        if ncp == math.inf:
+            return float(q <= hi) if upper_tail else float(q >= hi)
+        d = dn(ncp)
+        mask = support >= q if upper_tail else support <= q
+        return _rsum_ld(d[mask])
+
+    if alternative == "less":
+        pval = pn(s, 1.0)
+    elif alternative == "greater":
+        pval = pn(s, 1.0, upper_tail=True)
+    else:
+        rel_err = 1 + 1e-7
+        pval = _rsum_ld(dc[dc <= dc[int(s - lo)] * rel_err])
+
+    def mle(val):
+        if val == lo:
+            return 0.0
+        if val == hi:
+            return math.inf
+        mu = mn_(1.0)
+        if mu > val:
+            return _nm.uniroot(lambda tt: mn_(tt) - val, 0.0, 1.0)
+        if mu < val:
+            return 1.0 / _nm.uniroot(lambda tt: mn_(1.0 / tt) - val, eps, 1.0)
+        return 1.0
+
+    estimate = mle(s)
+
+    def ncp_u(val, alpha):
+        if val == hi:
+            return math.inf
+        p = pn(val, 1.0)
+        if p < alpha:
+            return _nm.uniroot(lambda tt: pn(val, tt) - alpha, 0.0, 1.0)
+        if p > alpha:
+            return 1.0 / _nm.uniroot(
+                lambda tt: pn(val, 1.0 / tt) - alpha, eps, 1.0)
+        return 1.0
+
+    def ncp_l(val, alpha):
+        if val == lo:
+            return 0.0
+        p = pn(val, 1.0, upper_tail=True)
+        if p > alpha:
+            return _nm.uniroot(
+                lambda tt: pn(val, tt, upper_tail=True) - alpha, 0.0, 1.0)
+        if p < alpha:
+            return 1.0 / _nm.uniroot(
+                lambda tt: pn(val, 1.0 / tt, upper_tail=True) - alpha, eps, 1.0)
+        return 1.0
+
+    if alternative == "less":
+        ci = (0.0, ncp_u(s, 1 - conf_level))
+    elif alternative == "greater":
+        ci = (ncp_l(s, 1 - conf_level), math.inf)
+    else:
+        alpha = (1 - conf_level) / 2
+        ci = (ncp_l(s, alpha), ncp_u(s, alpha))
+    return HTest(
+        method="Exact conditional test of independence in 2 x 2 x k tables",
+        statistic={"S": float(s)},
+        p_value=float(pval),
+        conf_int=ci,
+        estimate={"common odds ratio": float(estimate)},
+        null_value={"common odds ratio": 1.0},
+        alternative=alternative,
+        conf_level=conf_level,
+        data_name="x",
+    )
+
+
+def mantelhaen_test(x, y=None, z=None, alternative: str = "two.sided",
+                    correct: bool = True, exact: bool = False,
+                    conf_level: float = 0.95) -> HTest:
+    """R's ``mantelhaen.test`` — Cochran-Mantel-Haenszel test.
+
+    ``x`` is an ``I×J×K`` array of stratified counts (or parallel factor
+    vectors ``x``/``y``/``z``). For ``2×2×K`` tables the classical
+    Mantel-Haenszel χ² (optional Yates correction) is returned with the
+    Mantel-Haenszel common odds-ratio estimate and Robins-Breslow-Greenland
+    CI; otherwise the generalized CMH statistic. Faithful port of
+    ``mantelhaen.test.R`` — the ``2×2×K`` path is bit-exact; the generalized
+    quadratic form inherits a ≤1-ulp residual from the linear solve.
+    ``exact=True`` (``2×2×K`` only) gives the exact conditional test via the
+    product-hypergeometric density (:func:`_d2x2xk`) — S, p-value, MLE odds
+    ratio and CI all bit-exact.
+    """
+    if y is not None or z is not None:
+        arr = _mh_table_from_factors(x, y, z).astype(float)
+    else:
+        arr = np.asarray(x, dtype=float)
+    if arr.ndim != 3:
+        raise ValueError("'x' must be a 3-dimensional array")
+    if np.any(np.asarray(arr.shape) < 2):
+        raise ValueError("each dimension in table must be >= 2")
+    if np.any(arr.sum(axis=(0, 1)) < 2):
+        raise ValueError("sample size in each stratum must be > 1")
+    nr, nc, ns = arr.shape
+
+    if nr == 2 and nc == 2:
+        if exact:
+            return _mantelhaen_exact(arr, ns, alternative, conf_level)
+        s_x = arr.sum(axis=1)          # (2, K): row totals per stratum
+        s_y = arr.sum(axis=0)          # (2, K): col totals per stratum
+        n = arr.sum(axis=(0, 1))       # (K,): stratum totals
+        DELTA = _rsum_ld(arr[0, 0, :] - s_x[0, :] * s_y[0, :] / n)
+        YATES = 0.5 if (correct and abs(DELTA) >= 0.5) else 0.0
+        denom = _rsum_ld(s_x[0, :] * s_x[1, :] * s_y[0, :] * s_y[1, :]
+                         / (n ** 2 * (n - 1)))
+        stat = (abs(DELTA) - YATES) ** 2 / denom
+        if alternative == "two.sided":
+            pval = float(_dist.pchisq(stat, 1, lower_tail=False))
+        else:
+            zv = math.copysign(math.sqrt(stat), DELTA)
+            pval = float(_dist.pnorm(zv, lower_tail=(alternative == "less")))
+        method = ("Mantel-Haenszel chi-squared test "
+                  + ("with" if YATES else "without")
+                  + " continuity correction")
+        x11, x12 = arr[0, 0, :], arr[0, 1, :]
+        x21, x22 = arr[1, 0, :], arr[1, 1, :]
+        s_diag = _rsum_ld(x11 * x22 / n)
+        s_offd = _rsum_ld(x12 * x21 / n)
+        estimate = s_diag / s_offd
+        sd = math.sqrt(
+            _rsum_ld((x11 + x22) * x11 * x22 / n ** 2) / (2 * s_diag ** 2)
+            + _rsum_ld(((x11 + x22) * x12 * x21 + (x12 + x21) * x11 * x22)
+                       / n ** 2) / (2 * s_diag * s_offd)
+            + _rsum_ld((x12 + x21) * x12 * x21 / n ** 2) / (2 * s_offd ** 2))
+        qn = _dist.qnorm
+        if alternative == "less":
+            ci = (0.0, estimate * math.exp(float(qn(conf_level)) * sd))
+        elif alternative == "greater":
+            ci = (estimate * math.exp(float(qn(conf_level, lower_tail=False))
+                                      * sd), float("inf"))
+        else:
+            q = float(qn((1 - conf_level) / 2))
+            ci = (estimate * math.exp(q * sd), estimate * math.exp(-q * sd))
+        return HTest(
+            method=method,
+            statistic={"Mantel-Haenszel X-squared": float(stat)},
+            parameter={"df": 1},
+            p_value=pval,
+            conf_int=ci,
+            estimate={"common odds ratio": float(estimate)},
+            null_value={"common odds ratio": 1.0},
+            alternative=alternative,
+            conf_level=conf_level,
+            data_name="x",
+        )
+
+    # Generalized Cochran-Mantel-Haenszel I x J x K test.
+    df = (nr - 1) * (nc - 1)
+    nvec = np.zeros(df)
+    mvec = np.zeros(df)
+    V = np.zeros((df, df))
+    for k in range(ns):
+        f = arr[:, :, k]
+        ntot = f.sum()
+        rowsums = f.sum(axis=1)[:nr - 1]
+        colsums = f.sum(axis=0)[:nc - 1]
+        nvec = nvec + f[:nr - 1, :nc - 1].flatten(order="F")
+        mvec = mvec + np.outer(rowsums, colsums).flatten(order="F") / ntot
+        A_J = np.diag(ntot * colsums) - np.outer(colsums, colsums)
+        A_I = np.diag(ntot * rowsums) - np.outer(rowsums, rowsums)
+        V = V + np.kron(A_J, A_I) / (ntot ** 2 * (ntot - 1))
+    nvec = nvec - mvec
+    stat = float(nvec @ np.linalg.solve(V, nvec))
+    pval = float(_dist.pchisq(stat, df, lower_tail=False))
+    return HTest(
+        method="Cochran-Mantel-Haenszel test",
+        statistic={"Cochran-Mantel-Haenszel M^2": stat},
+        parameter={"df": int(df)},
+        p_value=pval,
+        alternative="",
+        data_name="x",
+    )
+
+
+@dataclass
+class PairwiseHTest:
+    """R's ``pairwise.htest`` — a table of adjusted pairwise p-values.
+
+    ``p_value`` is the ``(k-1)×(k-1)`` lower-triangular matrix R prints
+    (upper triangle ``NaN``); ``row_names``/``col_names`` label it.
+    """
+
+    method: str
+    p_value: np.ndarray
+    row_names: list
+    col_names: list
+    p_adjust_method: str
+    data_name: str = ""
+
+    def __repr__(self) -> str:
+        out = ["", f"\tPairwise comparisons using {self.method} ", ""]
+        if self.data_name:
+            out.append(f"data:  {self.data_name} ")
+        out.append("")
+        cw = max(8, max((len(str(c)) for c in self.col_names), default=1) + 1)
+        rw = max((len(str(r)) for r in self.row_names), default=1)
+        out.append(" " * rw + "".join(f"{str(c):>{cw}}" for c in self.col_names))
+        for i, rn in enumerate(self.row_names):
+            cells = []
+            for j in range(len(self.col_names)):
+                v = self.p_value[i, j]
+                cells.append("-" if (v is None or math.isnan(v))
+                             else _fmt_pval(v))
+            out.append(f"{str(rn):<{rw}}"
+                       + "".join(f"{c:>{cw}}" for c in cells))
+        out.append("")
+        out.append(f"P value adjustment method: {self.p_adjust_method} ")
+        return "\n".join(out)
+
+
+def _pairwise_table(compare_levels, level_names, method):
+    """R's ``pairwise.table``: fill the lower triangle (incl. diagonal) by
+    ``compare_levels(row_level, col_level)`` (1-based level indices), then
+    :func:`p_adjust` the flattened lower triangle jointly."""
+    k = len(level_names)
+    pp = np.full((k - 1, k - 1), np.nan)
+    for p0 in range(k - 1):
+        for q0 in range(k - 1):
+            if p0 >= q0:
+                pp[p0, q0] = compare_levels(p0 + 2, q0 + 1)
+    idx = [(i, j) for j in range(k - 1) for i in range(k - 1) if i >= j]
+    adj = p_adjust(np.array([pp[i, j] for i, j in idx]), method)
+    for (i, j), v in zip(idx, adj):
+        pp[i, j] = v
+    return pp
+
+
+def pairwise_t_test(x, g, p_adjust_method: str = "holm", pool_sd=None,
+                    paired: bool = False,
+                    alternative: str = "two.sided") -> PairwiseHTest:
+    """R's ``pairwise.t.test`` — pairwise t-tests with p-value adjustment.
+
+    ``pool_sd`` (default ``not paired``) uses a single pooled SD across all
+    groups; otherwise each pair is a separate :func:`t_test`. Faithful port of
+    ``pairwise.t.test`` — the pooled-SD p-values (nmath ``pt``) and the adjusted
+    table (:func:`p_adjust`) are bit-exact to R.
+    """
+    if pool_sd is None:
+        pool_sd = not paired
+    if paired and pool_sd:
+        raise ValueError("pooling of SD is incompatible with paired tests")
+    x = _as_array(x).astype(float)
+    g = np.asarray(g)
+    glabels = np.unique(g)
+    if pool_sd:
+        method_str = "t tests with pooled SD"
+        xbar, s, nn = [], [], []
+        for gl in glabels:
+            xi = x[g == gl]
+            xi = xi[np.isfinite(xi)]
+            xbar.append(_rmean(xi))
+            s.append(math.sqrt(_rvar(xi)) if len(xi) > 1 else float("nan"))
+            nn.append(len(xi))
+        xbar = np.array(xbar)
+        s = np.array(s)
+        nn = np.array(nn, dtype=float)
+        degf = nn - 1
+        total_degf = _rsum_ld(degf)
+        pooled_sd = math.sqrt(
+            _rsum_ld(np.where(degf != 0, s ** 2, 0.0) * degf) / total_degf)
+
+        def compare(i, j):
+            dif = xbar[i - 1] - xbar[j - 1]
+            se = pooled_sd * math.sqrt(1 / nn[i - 1] + 1 / nn[j - 1])
+            tval = dif / se
+            if alternative == "two.sided":
+                return 2 * float(_dist.pt(-abs(tval), total_degf))
+            return float(_dist.pt(tval, total_degf,
+                                  lower_tail=(alternative == "less")))
+    else:
+        method_str = "paired t tests" if paired else "t tests with non-pooled SD"
+
+        def compare(i, j):
+            xi = x[g == glabels[i - 1]]
+            xj = x[g == glabels[j - 1]]
+            return t_test(xi, xj, paired=paired,
+                          alternative=alternative).p_value
+
+    pp = _pairwise_table(compare, glabels, p_adjust_method)
+    return PairwiseHTest(method_str, pp, list(glabels[1:]),
+                         list(glabels[:-1]), p_adjust_method, "x and g")
+
+
+def pairwise_wilcox_test(x, g, p_adjust_method: str = "holm",
+                         paired: bool = False, **kwargs) -> PairwiseHTest:
+    """R's ``pairwise.wilcox.test`` — pairwise Wilcoxon tests with adjustment.
+
+    Each pair is a :func:`wilcox_test`; the p-value table is :func:`p_adjust`-ed
+    jointly. ``**kwargs`` (e.g. ``exact=``, ``correct=``) pass through. Faithful
+    port of ``pairwise.wilcox.test`` — bit-exact to R.
+    """
+    x = _as_array(x).astype(float)
+    g = np.asarray(g)
+    glabels = np.unique(g)
+    holder = [None]
+
+    def compare(i, j):
+        xi = x[g == glabels[i - 1]]
+        xj = x[g == glabels[j - 1]]
+        wt = wilcox_test(xi, xj, paired=paired, **kwargs)
+        if holder[0] is None:
+            holder[0] = wt.method
+        return wt.p_value
+
+    pp = _pairwise_table(compare, glabels, p_adjust_method)
+    return PairwiseHTest(holder[0], pp, list(glabels[1:]),
+                         list(glabels[:-1]), p_adjust_method, "x and g")
+
+
+def pairwise_prop_test(x, n=None, p_adjust_method: str = "holm",
+                       **kwargs) -> PairwiseHTest:
+    """R's ``pairwise.prop.test`` — pairwise comparison of proportions.
+
+    ``x`` is a length-``k`` success vector with trial counts ``n`` (or a
+    ``k×2`` matrix of successes/failures). Each pair is a 2-sample
+    :func:`prop_test`; the table is :func:`p_adjust`-ed jointly. Faithful port
+    of ``pairwise.prop.test`` — inherits ``prop_test``'s ≤2-ulp X²/``pchisq``
+    residual, otherwise matches R.
+    """
+    x = np.asarray(x)
+    if x.ndim == 2:
+        if x.shape[1] != 2:
+            raise ValueError("'x' must have 2 columns")
+        n = x.sum(axis=1).astype(float)
+        x = x[:, 0].astype(float)
+    else:
+        x = x.astype(float)
+        n = np.asarray(n, dtype=float)
+        if len(x) != len(n):
+            raise ValueError("'x' and 'n' must have the same length")
+    ok = np.isfinite(x) & np.isfinite(n)
+    x, n = x[ok], n[ok]
+    if len(x) < 2:
+        raise ValueError("too few groups")
+    level_names = list(range(1, len(x) + 1))
+
+    def compare(i, j):
+        return prop_test([x[i - 1], x[j - 1]], [n[i - 1], n[j - 1]],
+                         **kwargs).p_value
+
+    pp = _pairwise_table(compare, level_names, p_adjust_method)
+    return PairwiseHTest("Pairwise comparison of proportions", pp,
+                         level_names[1:], level_names[:-1],
+                         p_adjust_method, "x")
+
+
+_DBL_XMAX = float(np.finfo(float).max)
+
+
+def _sign(x: float) -> float:
+    return (x > 0) - (x < 0)
+
+
+def _uniroot_ext(f, lower, upper, extend_int="no", tol=None, maxiter=1000):
+    """R's ``uniroot`` including ``extendInt`` (``nlm.R``): extend
+    ``[lower, upper]`` until ``f`` changes sign, then Brent-solve via the ported
+    ``zeroin2``. ``extend_int`` ∈ {"no","yes","downX","upX"}."""
+    if tol is None:
+        tol = _nm._DBL_EPSILON ** 0.25
+    if not (lower < upper):
+        raise ValueError("lower < upper is not fulfilled")
+    f_lower = f(lower)
+    f_upper = f(upper)
+    if math.isnan(f_lower) or math.isnan(f_upper):
+        raise ValueError("f() value at an endpoint is NA")
+    sig = {"yes": None, "downX": -1, "no": 0, "upX": 1}[extend_int]
+
+    def truncate(x):
+        return max(min(x, _DBL_XMAX), -_DBL_XMAX)
+
+    f_low = truncate(f_lower)
+    f_upp = truncate(f_upper)
+    do_x = ((sig is None and f_low * f_upp > 0)
+            or (sig is not None and (sig * f_low > 0 or sig * f_upp < 0)))
+    it = 0
+    if do_x:
+        def delta_of(u):
+            return 0.01 * max(1e-4, abs(u))
+        if sig is None:
+            dl, du = delta_of(lower), delta_of(upper)
+            while (f_lower * f_upper > 0
+                   and (math.isfinite(lower) or math.isfinite(upper))):
+                it += 1
+                if it > maxiter:
+                    raise ValueError(
+                        f"no sign change found in {it - 1} iterations")
+                if math.isfinite(lower):
+                    ol, of = lower, f_lower
+                    lower = lower - dl
+                    f_lower = f(lower)
+                    if math.isnan(f_lower):
+                        lower, f_lower, dl = ol, of, dl / 4
+                if math.isfinite(upper):
+                    ou, ofu = upper, f_upper
+                    upper = upper + du
+                    f_upper = f(upper)
+                    if math.isnan(f_upper):
+                        upper, f_upper, du = ou, ofu, du / 4
+                dl, du = 2 * dl, 2 * du
+        else:
+            d = delta_of(lower)
+            while sig * f_lower > 0:
+                it += 1
+                if it > maxiter:
+                    raise ValueError(
+                        f"no sign change found in {it - 1} iterations")
+                lower = lower - d
+                f_lower = f(lower)
+                d *= 2
+            d = delta_of(upper)
+            while sig * f_upper < 0:
+                it += 1
+                if it > maxiter:
+                    raise ValueError(
+                        f"no sign change found in {it - 1} iterations")
+                upper = upper + d
+                f_upper = f(upper)
+                d *= 2
+    if not (_sign(f_lower) * _sign(f_upper) <= 0):
+        raise ValueError("f() values at end points not of opposite sign")
+    if do_x and it:
+        f_low = truncate(f_lower)
+        f_upp = truncate(f_upper)
+    return _nm._zeroin2(lower, upper, f_low, f_upp, f, tol, maxiter)
+
+
+@dataclass
+class PowerHTest:
+    """R's ``power.htest`` — the result of a power calculation.
+
+    ``params`` holds the solved parameters in R's print order (the one that
+    was ``None`` on input is now filled in)."""
+
+    method: str
+    params: dict
+    note: Optional[str] = None
+
+    def __repr__(self) -> str:
+        out = ["", f"     {self.method}", ""]
+        for k, v in self.params.items():
+            out.append(f"{k:>15} = {_fmt(v) if isinstance(v, float) else v}")
+        out.append(f"\nNOTE: {self.note}\n" if self.note else "")
+        return "\n".join(out)
+
+
+def _assert_prob(x, name):
+    if x is not None and (not np.isreal(x) or x < 0 or x > 1):
+        raise ValueError(f"'{name}' must be numeric in [0, 1]")
+
+
+def power_t_test(n=None, delta=None, sd=1.0, sig_level=0.05, power=None,
+                 type: str = "two.sample", alternative: str = "two.sided",
+                 strict: bool = False, tol=None) -> PowerHTest:
+    """R's ``power.t.test`` — power of the one/two-sample/paired t-test.
+
+    Exactly one of ``n``, ``delta``, ``sd``, ``power``, ``sig_level`` must be
+    ``None`` and is solved for (via the ported ``uniroot`` with ``extendInt``);
+    the rest are given. Faithful port of ``power.t.test`` using the ported
+    noncentral-t ``pt``/``qt`` — bit-exact to R.
+    """
+    if sum(v is None for v in (n, delta, sd, power, sig_level)) != 1:
+        raise ValueError("exactly one of 'n', 'delta', 'sd', 'power', and "
+                         "'sig_level' must be None")
+    _assert_prob(sig_level, "sig_level")
+    _assert_prob(power, "power")
+    tsample = {"one.sample": 1, "two.sample": 2, "paired": 1}[type]
+    tside = {"one.sided": 1, "two.sided": 2}[alternative]
+    if tside == 2 and delta is not None:
+        delta = abs(delta)
+
+    def pbody(n_, delta_, sd_, sig_):
+        nu = max(1e-7, n_ - 1) * tsample
+        ncp = math.sqrt(n_ / tsample) * delta_ / sd_
+        qu = float(_dist.qt(sig_ / tside, nu, lower_tail=False))
+        val = float(_dist.pt(qu, nu, ncp=ncp, lower_tail=False))
+        if strict and tside == 2:
+            val += float(_dist.pt(-qu, nu, ncp=ncp, lower_tail=True))
+        return val
+
+    if power is None:
+        power = pbody(n, delta, sd, sig_level)
+    elif n is None:
+        n = _uniroot_ext(lambda v: pbody(v, delta, sd, sig_level) - power,
+                         2, 1e7, "upX", tol)
+    elif sd is None:
+        sd = _uniroot_ext(lambda v: pbody(n, delta, v, sig_level) - power,
+                          delta * 1e-7, delta * 1e7, "downX", tol)
+    elif delta is None:
+        delta = _uniroot_ext(lambda v: pbody(n, v, sd, sig_level) - power,
+                             sd * 1e-7, sd * 1e7, "upX", tol)
+    else:  # sig_level is None
+        sig_level = _uniroot_ext(
+            lambda v: pbody(n, delta, sd, v) - power, 1e-10, 1 - 1e-10,
+            "yes", tol)
+    note = {"paired": "n is number of *pairs*, sd is std.dev. of "
+            "*differences* within pairs",
+            "two.sample": "n is number in *each* group"}.get(type)
+    method = ({"one.sample": "One-sample", "two.sample": "Two-sample",
+               "paired": "Paired"}[type] + " t test power calculation")
+    return PowerHTest(method, {"n": n, "delta": delta, "sd": sd,
+                               "sig.level": sig_level, "power": power,
+                               "alternative": alternative}, note)
+
+
+def power_prop_test(n=None, p1=None, p2=None, sig_level=0.05, power=None,
+                    alternative: str = "two.sided", strict: bool = False,
+                    tol=None) -> PowerHTest:
+    """R's ``power.prop.test`` — power of the two-sample proportion test.
+
+    Exactly one of ``n``, ``p1``, ``p2``, ``power``, ``sig_level`` must be
+    ``None`` and is solved for. Faithful port of ``power.prop.test`` using the
+    ported ``pnorm``/``qnorm`` — bit-exact to R.
+    """
+    if sum(v is None for v in (n, p1, p2, power, sig_level)) != 1:
+        raise ValueError("exactly one of 'n', 'p1', 'p2', 'power', and "
+                         "'sig_level' must be None")
+    _assert_prob(sig_level, "sig_level")
+    _assert_prob(power, "power")
+    tside = {"one.sided": 1, "two.sided": 2}[alternative]
+
+    def pbody(n_, p1_, p2_, sig_):
+        qu = float(_dist.qnorm(sig_ / tside, lower_tail=False))
+        d = abs(p1_ - p2_)
+        if strict and tside == 2:
+            pbar = (p1_ + p2_) / 2
+            vbar = pbar * (1 - pbar)
+            v1 = p1_ * (1 - p1_)
+            v2 = p2_ * (1 - p2_)
+            denom = math.sqrt(v1 + v2)
+            return (float(_dist.pnorm(
+                        (math.sqrt(n_) * d - qu * math.sqrt(2 * vbar)) / denom))
+                    + float(_dist.pnorm(
+                        (math.sqrt(n_) * d + qu * math.sqrt(2 * vbar)) / denom,
+                        lower_tail=False)))
+        return float(_dist.pnorm(
+            (math.sqrt(n_) * d - qu * math.sqrt((p1_ + p2_)
+                                                * (1 - (p1_ + p2_) / 2)))
+            / math.sqrt(p1_ * (1 - p1_) + p2_ * (1 - p2_))))
+
+    if power is None:
+        power = pbody(n, p1, p2, sig_level)
+    elif n is None:
+        n = _uniroot_ext(lambda v: pbody(v, p1, p2, sig_level) - power,
+                         1, 1e7, "upX", tol)
+    elif p1 is None:
+        p1 = _uniroot_ext(lambda v: pbody(n, v, p2, sig_level) - power,
+                          0, p2, "yes", tol)
+    elif p2 is None:
+        p2 = _uniroot_ext(lambda v: pbody(n, p1, v, sig_level) - power,
+                          p1, 1, "yes", tol)
+    else:  # sig_level is None
+        sig_level = _uniroot_ext(
+            lambda v: pbody(n, p1, p2, v) - power, 1e-10, 1 - 1e-10, "upX", tol)
+    return PowerHTest(
+        "Two-sample comparison of proportions power calculation",
+        {"n": n, "p1": p1, "p2": p2, "sig.level": sig_level, "power": power,
+         "alternative": alternative}, "n is number in *each* group")
+
+
+def power_anova_test(groups=None, n=None, between_var=None, within_var=None,
+                     sig_level=0.05, power=None) -> PowerHTest:
+    """R's ``power.anova.test`` — power of the balanced one-way ANOVA F-test.
+
+    Exactly one of ``groups``, ``n``, ``between_var``, ``within_var``,
+    ``power``, ``sig_level`` must be ``None`` and is solved for. Faithful port
+    of ``power.anova.test`` using the ported noncentral-F ``pf``/``qf`` —
+    bit-exact to R.
+    """
+    if sum(v is None for v in (groups, n, between_var, within_var, power,
+                               sig_level)) != 1:
+        raise ValueError("exactly one of 'groups', 'n', 'between_var', "
+                         "'within_var', 'power', and 'sig_level' must be None")
+    if groups is not None and groups < 2:
+        raise ValueError("number of groups must be at least 2")
+    if n is not None and n < 2:
+        raise ValueError("number of observations in each group must be >= 2")
+    _assert_prob(sig_level, "sig_level")
+    _assert_prob(power, "power")
+
+    def pbody(groups_, n_, bv, wv, sig_):
+        lam = (groups_ - 1) * n_ * (bv / wv)
+        qf_ = float(_dist.qf(sig_, groups_ - 1, (n_ - 1) * groups_,
+                             lower_tail=False))
+        return float(_dist.pf(qf_, groups_ - 1, (n_ - 1) * groups_, ncp=lam,
+                              lower_tail=False))
+
+    if power is None:
+        power = pbody(groups, n, between_var, within_var, sig_level)
+    elif groups is None:
+        groups = _uniroot_ext(
+            lambda v: pbody(v, n, between_var, within_var, sig_level) - power,
+            2, 1e2)
+    elif n is None:
+        n = _uniroot_ext(
+            lambda v: pbody(groups, v, between_var, within_var, sig_level)
+            - power, 2, 1e5)
+    elif within_var is None:
+        within_var = _uniroot_ext(
+            lambda v: pbody(groups, n, between_var, v, sig_level) - power,
+            between_var * 1e-7, between_var * 1e7)
+    elif between_var is None:
+        between_var = _uniroot_ext(
+            lambda v: pbody(groups, n, v, within_var, sig_level) - power,
+            within_var * 1e-7, within_var * 1e7)
+    else:  # sig_level is None
+        sig_level = _uniroot_ext(
+            lambda v: pbody(groups, n, between_var, within_var, v) - power,
+            1e-10, 1 - 1e-10)
+    return PowerHTest(
+        "Balanced one-way analysis of variance power calculation",
+        {"groups": groups, "n": n, "between.var": between_var,
+         "within.var": within_var, "sig.level": sig_level, "power": power},
+        "n is number in each group")
 
 
 def aov(formula: str, data: pl.DataFrame, *, type: str = "II") -> AnovaTable:

@@ -600,8 +600,14 @@ _R_EXPR_SKIP = {
     "t_test", "wilcox_test", "cor_test", "kruskal_test", "chisq_test",
     "fisher_test", "prop_test", "binom_test", "var_test", "bartlett_test",
     "shapiro_test", "ks_test", "mcnemar_test", "friedman_test", "aov",
+    "oneway_test", "fligner_test", "mood_test", "quade_test",
+    "poisson_test", "prop_trend_test", "mantelhaen_test", "ansari_test",
+    "pairwise_t_test", "pairwise_wilcox_test", "pairwise_prop_test",
+    "power_t_test", "power_prop_test", "power_anova_test",
+    # Multiple-comparison p-value adjustment — vector in / vector out, not Expr.
+    "p_adjust", "p_adjust_methods",
     # Result classes — not callable in the vector-shape sense.
-    "HTest", "AnovaTable", "Terms",
+    "HTest", "AnovaTable", "PairwiseHTest", "PowerHTest", "Terms",
     # Model generics — operate on fitted models, not columns.
     "coef", "coefficients", "fixef", "ranef", "refit", "refitML",
     "resid", "residuals", "fitted", "fitted_values",
@@ -1850,9 +1856,15 @@ def test_weighted_lm_rstudent_dffits_consistent(gala):
 
 from hea.R import (  # noqa: E402  — grouped with the test-batch tests
     HTest,
+    ansari_test,
     bartlett_test, binom_test, chisq_test, cor_test, fisher_test,
-    friedman_test, ks_test,
-    mcnemar_test, prop_test, shapiro_test,
+    fligner_test, friedman_test, ks_test,
+    mantelhaen_test, mcnemar_test, mood_test, oneway_test,
+    p_adjust,
+    pairwise_prop_test, pairwise_t_test, pairwise_wilcox_test,
+    poisson_test, power_anova_test, power_prop_test, power_t_test,
+    prop_test, prop_trend_test, quade_test,
+    shapiro_test,
     t_test, var_test, wilcox_test,
 )
 
@@ -1968,6 +1980,291 @@ def test_fisher_test_exact_rejects_bad_input():
         fisher_test(np.array([[1, 2, 3]]))
     with pytest.raises(ValueError, match="nonnegative"):
         fisher_test(np.array([[1, -2, 3], [4, 5, 6]]))
+
+
+def test_p_adjust_bit_exact_vs_r():
+    # p.adjust — all 8 methods, NAs (default n = non-NA count), explicit n.
+    # order(decreasing=TRUE) keeps ties in original order; BY's harmonic sum
+    # q <- sum(1/(1:n)) uses R's sequential LDOUBLE accumulator.
+    p = [0.01, 0.015, 0.005, 0.04, 0.03, 0.2, 0.5, 0.001]
+    pv = "c(0.01,0.015,0.005,0.04,0.03,0.2,0.5,0.001)"
+    holm = p_adjust(p, "holm")
+    homm = p_adjust(p, "hommel")
+    hoch = p_adjust(p, "hochberg")
+    bh = p_adjust(p, "BH")
+    by = p_adjust(p, "BY")
+    bonf = p_adjust(p, "bonferroni")
+    # NAs: R keeps NA slots, default n = count of non-NA.
+    pna = [0.01, float("nan"), 0.04, 0.03, float("nan"), 0.001]
+    pnav = "c(0.01,NA,0.04,0.03,NA,0.001)"
+    holm_na = p_adjust(pna, "holm")
+    # explicit n larger than length(p).
+    by10 = p_adjust(p, "BY", n=10)
+    _assert_r([
+        (holm[0], f'p.adjust({pv},"holm")[1]', 0.0599999999999999978),
+        (holm[2], f'p.adjust({pv},"holm")[3]', 0.0350000000000000033),
+        (homm[0], f'p.adjust({pv},"hommel")[1]', 0.0500000000000000028),
+        (homm[1], f'p.adjust({pv},"hommel")[2]', 0.0666666666666666657),
+        (homm[4], f'p.adjust({pv},"hommel")[5]', 0.0899999999999999967),
+        (hoch[1], f'p.adjust({pv},"hochberg")[2]', 0.0749999999999999972),
+        (bh[0], f'p.adjust({pv},"BH")[1]', 0.0266666666666666649),
+        (bh[5], f'p.adjust({pv},"BH")[6]', 0.2285714285714285643),
+        (by[0], f'p.adjust({pv},"BY")[1]', 0.072476190476190472),
+        (by[5], f'p.adjust({pv},"BY")[6]', 0.621224489795918378),
+        (by[7], f'p.adjust({pv},"BY")[8]', 0.021742857142857144),
+        (bonf[3], f'p.adjust({pv},"bonferroni")[4]', 0.3200000000000000067),
+        (holm_na[0], f'p.adjust({pnav},"holm")[1]', 0.0299999999999999989),
+        (holm_na[2], f'p.adjust({pnav},"holm")[3]', 0.0599999999999999978),
+        (by10[0], f'p.adjust({pv},"BY",n=10)[1]', 0.097632275132275126),
+    ])
+    # NA slots pass through unchanged; fdr aliases BH.
+    assert math.isnan(holm_na[1]) and math.isnan(holm_na[4])
+    assert np.array_equal(p_adjust(p, "fdr"), p_adjust(p, "BH"))
+    # n <= 1 returns input untouched; n == 2 hommel -> hochberg.
+    assert np.array_equal(p_adjust([0.3], "holm"), np.array([0.3]))
+    assert np.array_equal(p_adjust([0.02, 0.03], "hommel"),
+                          p_adjust([0.02, 0.03], "hochberg"))
+    with pytest.raises(ValueError, match="one of"):
+        p_adjust(p, "bogus")
+
+
+def test_oneway_fligner_mood_quade_bit_exact_vs_r():
+    OW = ('y<-c(23,25,21,30,28,35,33,31,40,42,38,29);'
+          'g<-factor(c("a","a","a","a","b","b","b","b","c","c","c","c"))')
+    yv = [23., 25, 21, 30, 28, 35, 33, 31, 40, 42, 38, 29]
+    gv = ["a", "a", "a", "a", "b", "b", "b", "b", "c", "c", "c", "c"]
+    df = pl.DataFrame({"y": yv, "g": gv})
+    ow = oneway_test("y ~ g", df)
+    owe = oneway_test("y ~ g", df, var_equal=True)
+    fl = fligner_test(np.array(yv), np.array(gv))
+    md = mood_test([1.1, 2.3, 4.5, 6.7, 8.9, 3.2],
+                   [2.2, 3.3, 5.5, 7.7, 1.6, 9.9, 10.1])
+    md2 = mood_test([1., 2, 2, 3, 4, 4], [2., 3, 3, 4, 5, 5, 1],
+                    alternative="greater")
+    M = np.array([[10., 12, 11, 9], [8, 7, 9, 6], [14, 15, 13, 12],
+                  [6, 5, 7, 8], [11, 13, 10, 9]])
+    qd = quade_test(M)
+    MQ = ('matrix(c(10,12,11,9, 8,7,9,6, 14,15,13,12, 6,5,7,8, 11,13,10,9),'
+          'ncol=4, byrow=TRUE)')
+    x1 = "c(1.1,2.3,4.5,6.7,8.9,3.2)"
+    y1 = "c(2.2,3.3,5.5,7.7,1.6,9.9,10.1)"
+    _assert_r([
+        (ow.statistic["F"], f'{{{OW}; oneway.test(y~g)$statistic}}',
+         6.7440675723575758),
+        (ow.parameter["denom df"], f'{{{OW}; oneway.test(y~g)$parameter[2]}}',
+         5.6748644038767537),
+        (ow.p_value, f'{{{OW}; oneway.test(y~g)$p.value}}', 0.03165150611520811),
+        (owe.statistic["F"],
+         f'{{{OW}; oneway.test(y~g,var.equal=TRUE)$statistic}}',
+         8.2995594713656384),
+        (owe.p_value, f'{{{OW}; oneway.test(y~g,var.equal=TRUE)$p.value}}',
+         0.0090589676833099844),
+        (fl.statistic["Fligner-Killeen:med chi-squared"],
+         f'{{{OW}; fligner.test(y,g)$statistic}}', 0.16629686472457417),
+        (fl.p_value, f'{{{OW}; fligner.test(y,g)$p.value}}',
+         0.92021454746337228),
+        (md.statistic["Z"], f'mood.test({x1},{y1})$statistic',
+         -0.64609573838092205),
+        (md.p_value, f'mood.test({x1},{y1})$p.value', 0.51821735512522893),
+        (md2.statistic["Z"],
+         'mood.test(c(1,2,2,3,4,4),c(2,3,3,4,5,5,1),alternative="greater")'
+         '$statistic', -0.65547418123743129),
+        (md2.p_value,
+         'mood.test(c(1,2,2,3,4,4),c(2,3,3,4,5,5,1),alternative="greater")'
+         '$p.value', 0.74391874786547685),
+        (qd.statistic["Quade F"], f'quade.test({MQ})$statistic',
+         1.4794520547945205),
+        (qd.p_value, f'quade.test({MQ})$p.value', 0.26972896132077295),
+    ])
+
+
+def test_poisson_test_bit_exact_vs_r():
+    p1 = poisson_test(10, 2.0, 4.0)
+    p2 = poisson_test(137, 24.19893, 1.0)
+    p3 = poisson_test(20, 2.0, 4.0)
+    pl_ = poisson_test(10, 2.0, 4.0, alternative="less")
+    pg = poisson_test(10, 2.0, 4.0, alternative="greater")
+    p2s = poisson_test([11, 21], [800.0, 3011.0])
+    _assert_r([
+        (p1.p_value, "poisson.test(10,2,4)$p.value", 0.47461180335261433),
+        (p1.conf_int[0], "poisson.test(10,2,4)$conf.int[1]",
+         2.3976943480662172),
+        (p1.conf_int[1], "poisson.test(10,2,4)$conf.int[2]",
+         9.1951780210088891),
+        (p2.p_value, "poisson.test(137,24.19893,1)$p.value",
+         2.8452272641144545e-56),
+        (p3.p_value, "poisson.test(20,2,4)$p.value", 0.00025293940209195688),
+        (pl_.p_value, 'poisson.test(10,2,4,alternative="less")$p.value',
+         0.81588579255854643),
+        (pg.p_value, 'poisson.test(10,2,4,alternative="greater")$p.value',
+         0.28337574127298909),
+        (p2s.p_value, "poisson.test(c(11,21),c(800,3011))$p.value",
+         0.079668633033329522),
+        (p2s.estimate["rate ratio"],
+         "poisson.test(c(11,21),c(800,3011))$estimate", 1.9714880952380953),
+    ])
+
+
+def test_ansari_test_bit_exact_vs_r():
+    X = "c(-3.1,-1.2,0.4,2.3,4.8,-0.7)"
+    Y = "c(-5.2,-2.1,1.6,3.9,6.1,-4.3,0.9)"
+    xv = [-3.1, -1.2, 0.4, 2.3, 4.8, -0.7]
+    yv = [-5.2, -2.1, 1.6, 3.9, 6.1, -4.3, 0.9]
+    ex = ansari_test(xv, yv)
+    exl = ansari_test(xv, yv, alternative="less")
+    exg = ansari_test(xv, yv, alternative="greater")
+    an = ansari_test(xv, yv, exact=False)
+    xt = [1., 2, 3, 4, 5, 6, 3, 4]
+    yt = [2., 3, 4, 5, 6, 7, 4, 5, 3]
+    with pytest.warns(UserWarning, match="exact p-value with ties"):
+        at = ansari_test(xt, yt, exact=True)
+    _assert_r([
+        (ex.statistic["AB"], f"ansari.test({X},{Y})$statistic", 27.0),
+        (ex.p_value, f"ansari.test({X},{Y})$p.value", 0.28205128205128216),
+        (exl.p_value, f'ansari.test({X},{Y},alternative="less")$p.value',
+         0.14102564102564108),
+        (exg.p_value, f'ansari.test({X},{Y},alternative="greater")$p.value',
+         0.91491841491841497),
+        (an.p_value, f"ansari.test({X},{Y},exact=FALSE)$p.value",
+         0.21431993135166527),
+        (at.p_value,
+         "suppressWarnings(ansari.test(c(1,2,3,4,5,6,3,4),"
+         "c(2,3,4,5,6,7,4,5,3),exact=TRUE))$p.value", 0.99117150596872883),
+    ])
+
+
+def test_mantelhaen_test_bit_exact_vs_r():
+    # array(c(10,3,5,12, 8,6,4,9, 11,2,3,14), dim=c(2,2,3)) — column-major fill.
+    arr = np.zeros((2, 2, 3))
+    arr[:, :, 0] = [[10, 5], [3, 12]]
+    arr[:, :, 1] = [[8, 4], [6, 9]]
+    arr[:, :, 2] = [[11, 3], [2, 14]]
+    mh = mantelhaen_test(arr)
+    mh0 = mantelhaen_test(arr, correct=False)
+    mhl = mantelhaen_test(arr, alternative="less")
+    ex = mantelhaen_test(arr, exact=True)
+    exg = mantelhaen_test(arr, exact=True, alternative="greater")
+    A = "array(c(10,3,5,12, 8,6,4,9, 11,2,3,14), dim=c(2,2,3))"
+    _assert_r([
+        (ex.statistic["S"], f"mantelhaen.test({A},exact=TRUE)$statistic", 29.0),
+        (ex.p_value, f"mantelhaen.test({A},exact=TRUE)$p.value",
+         1.5526722709029144e-05),
+        (ex.estimate["common odds ratio"],
+         f"mantelhaen.test({A},exact=TRUE)$estimate", 7.4243814778423571),
+        (ex.conf_int[0], f"mantelhaen.test({A},exact=TRUE)$conf.int[1]",
+         2.6804881596601513),
+        (ex.conf_int[1], f"mantelhaen.test({A},exact=TRUE)$conf.int[2]",
+         22.364348508028733),
+        (exg.conf_int[0],
+         f'mantelhaen.test({A},exact=TRUE,alternative="greater")$conf.int[1]',
+         3.0849851900035081),
+        (mh.statistic["Mantel-Haenszel X-squared"],
+         f"mantelhaen.test({A})$statistic", 17.052628013619071),
+        (mh.p_value, f"mantelhaen.test({A})$p.value", 3.6358023465528321e-05),
+        (mh.estimate["common odds ratio"],
+         f"mantelhaen.test({A})$estimate", 7.4265734265734276),
+        (mh.conf_int[0], f"mantelhaen.test({A})$conf.int[1]",
+         2.8608907863756419),
+        (mh.conf_int[1], f"mantelhaen.test({A})$conf.int[2]",
+         19.278608300234751),
+        (mh0.statistic["Mantel-Haenszel X-squared"],
+         f"mantelhaen.test({A},correct=FALSE)$statistic", 18.853825186038229),
+        (mhl.p_value, f'mantelhaen.test({A},alternative="less")$p.value',
+         0.99998182098826727),
+    ])
+
+
+def test_prop_trend_and_cmh_generalized_vs_r():
+    # prop.trend.test goes through a weighted lm/anova → inherits the lm QR
+    # ≤2-ulp/FMA residual; the generalized CMH quadratic form inherits a
+    # ≤1-ulp residual from the linear solve. Both checked to a tight tol.
+    pt = prop_trend_test([10, 15, 20, 25], [50, 55, 60, 50])
+    assert math.isclose(pt.statistic["X-squared"], 10.499880346588514,
+                        rel_tol=1e-12)
+    assert math.isclose(pt.p_value, 0.0011938227500706187, rel_tol=1e-10)
+    arr = np.zeros((3, 3, 2))
+    arr[:, :, 0] = [[12, 5, 7], [3, 9, 4], [6, 2, 8]]
+    arr[:, :, 1] = [[4, 11, 3], [8, 5, 10], [2, 7, 6]]
+    cmh = mantelhaen_test(arr)
+    assert cmh.parameter["df"] == 4
+    assert math.isclose(cmh.statistic["Cochran-Mantel-Haenszel M^2"],
+                        3.7347477319105886, rel_tol=1e-12)
+
+
+def test_pairwise_tests_bit_exact_vs_r():
+    xv = [23., 25, 21, 30, 28, 35, 33, 31, 40, 42, 38, 29]
+    gv = ["a", "a", "a", "a", "b", "b", "b", "b", "c", "c", "c", "c"]
+    X = "c(23,25,21,30, 28,35,33,31, 40,42,38,29)"
+    G = ('factor(c("a","a","a","a","b","b","b","b","c","c","c","c"))')
+    pt = pairwise_t_test(xv, gv)                              # pooled, holm
+    ptb = pairwise_t_test(xv, gv, p_adjust_method="bonferroni",
+                          pool_sd=False)
+    pw = pairwise_wilcox_test(xv, gv, p_adjust_method="BH")
+    xs, ns = [83, 90, 129, 70], [86, 93, 136, 82]
+    pp = pairwise_prop_test(xs, ns)
+    _assert_r([
+        # pooled-SD t: p[c,a] (row 3, col 1) and p[b,a] (row 2, col 1).
+        (pt.p_value[1, 0], f'pairwise.t.test({X},{G})$p.value[2,1]',
+         0.0084690099067981413),
+        (pt.p_value[0, 0], f'pairwise.t.test({X},{G})$p.value[1,1]',
+         0.0977468778971883612),
+        (pt.p_value[1, 1], f'pairwise.t.test({X},{G})$p.value[2,2]',
+         0.10734866167519812),
+        (ptb.p_value[1, 0],
+         f'pairwise.t.test({X},{G},p.adjust.method="bonferroni",'
+         'pool.sd=FALSE)$p.value[2,1]', 0.042118794320873593),
+        (pw.p_value[1, 0],
+         f'suppressWarnings(pairwise.wilcox.test({X},{G},'
+         'p.adjust.method="BH"))$p.value[2,1]', 0.085714285714285715),
+    ])
+    # pairwise.prop.test inherits the underlying prop.test X²/pchisq ≤2-ulp
+    # residual → tolerance rather than strict bit-exact.
+    assert math.isclose(pp.p_value[2, 0], 0.1185648198595505, rel_tol=1e-12)
+    assert math.isclose(pp.p_value[0, 0], 1.0, rel_tol=1e-12)
+    # upper triangle is NaN.
+    assert math.isnan(pt.p_value[0, 1])
+    assert pt.method == "t tests with pooled SD"
+    assert pw.method == "Wilcoxon rank sum exact test"
+
+
+def test_power_tests_vs_r():
+    # power.* solve for the one NULL arg via the ported uniroot(extendInt=).
+    # power.t.test / power.anova.test use the noncentral pt/pf kernels, so on
+    # the default Rust _rs f64 path they carry the documented ≤ few-ulp residual
+    # (the pure-Python path is 0-ulp to R); power.prop.test uses only central
+    # pnorm/qnorm. Committed values are live-R 4.6.0; checked to a tight tol.
+    cases = [
+        (power_t_test(n=20, delta=1.0).params["power"], 0.86895280169249778),
+        (power_t_test(delta=1.0, power=0.8).params["n"], 16.714768142328293),
+        (power_t_test(n=20, delta=1.0, power=0.8, sd=None).params["sd"],
+         1.0999518232527679),
+        (power_t_test(n=20, delta=1.0, power=0.8,
+                      sig_level=None).params["sig.level"],
+         0.026623103259687371),
+        (power_t_test(n=20, delta=1.0, type="one.sample").params["power"],
+         0.98859129454456529),
+        (power_t_test(n=20, delta=1.0, strict=True).params["power"],
+         0.8689530277245856),
+        (power_t_test(n=20, delta=1.0,
+                      alternative="one.sided").params["power"],
+         0.92790247339534171),
+        (power_prop_test(n=50, p1=0.5, p2=0.75).params["power"],
+         0.74016590133138793),
+        (power_prop_test(p1=0.5, p2=0.75, power=0.9).params["n"],
+         76.706930114107664),
+        (power_prop_test(n=50, p1=0.5, power=0.8, p2=None).params["p2"],
+         0.76683004417656397),
+        (power_anova_test(groups=4, n=20, between_var=1.0,
+                          within_var=3.0).params["power"],
+         0.96790221226003825),
+        (power_anova_test(groups=4, between_var=1.0, within_var=3.0,
+                          power=0.8).params["n"], 11.926130957735564),
+    ]
+    for got, ref in cases:
+        assert math.isclose(got, ref, rel_tol=1e-12), f"{got!r} !~ R {ref!r}"
+    # exactly-one-NULL guard.
+    with pytest.raises(ValueError, match="exactly one"):
+        power_t_test(n=20, delta=1.0, power=0.8)
 
 
 def test_chisq_test_simulate_p_value():
