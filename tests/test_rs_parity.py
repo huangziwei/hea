@@ -1460,3 +1460,41 @@ def test_lbfgsb_rs_python_parity():
                 assert py[0] == val and py[1] == fail
                 assert py[2] == fnc and py[3] == grc
                 assert py[4] == msg
+
+
+# ---------------------------------------------------------------------------
+# FEXACT — Fisher's exact test for r×c tables (network algorithm).
+# rs.fexact == the pure-Python _Fexact port, which tests/test_R.py pins
+# bit-exact to R's fisher.test(x)$p.value. Both sides do scalar-libm f64
+# arithmetic, so this is 0-ulp on the same machine (strict on macOS).
+# ---------------------------------------------------------------------------
+def test_fexact_rs_matches_python():
+    from hea.R import _fexact
+
+    # (table, workspace, mult, expect, percnt, emin)
+    cases = [
+        ([[3, 5, 2], [7, 2, 8], [4, 6, 1]], 200000, 30, -1.0, 100.0, 0.0),
+        ([[1, 9, 3], [8, 2, 4]], 200000, 30, -1.0, 100.0, 0.0),
+        ([[1, 8], [5, 3], [10, 1]], 200000, 30, -1.0, 100.0, 0.0),
+        ([[10, 2, 3], [1, 8, 4], [2, 3, 9], [5, 1, 2]], 200000, 30, -1.0, 100.0, 0.0),
+        ([[0, 3, 2], [5, 1, 4], [2, 2, 6]], 200000, 30, -1.0, 100.0, 0.0),
+        ([[1, 8, 5, 4, 4, 2, 2], [5, 3, 3, 4, 3, 1, 0],
+          [10, 1, 4, 0, 0, 0, 0]], 200000, 30, -1.0, 100.0, 0.0),
+        ([[1, 2, 1, 0], [3, 3, 6, 1], [10, 10, 14, 9],
+          [6, 7, 12, 11]], 200000, 30, -1.0, 100.0, 0.0),
+        # a mid-size table at two workspaces / mult — different ldkey, both agree
+        ([[1, 3, 2, 1], [4, 3, 5, 4], [5, 3, 6, 6], [6, 7, 4, 6],
+          [8, 0, 5, 6]], 200000, 30, -1.0, 100.0, 0.0),
+        ([[1, 3, 2, 1], [4, 3, 5, 4], [5, 3, 6, 6], [6, 7, 4, 6],
+          [8, 0, 5, 6]], 2000000, 30, -1.0, 100.0, 0.0),
+        ([[3, 5, 2], [7, 2, 8], [4, 6, 1]], 200000, 50, -1.0, 100.0, 0.0),
+        # hybrid asymptotic-χ² path (expect > 0)
+        ([[3, 5, 2], [7, 2, 8], [4, 6, 1]], 200000, 30, 5.0, 80.0, 1.0),
+        ([[12, 5, 3, 2], [1, 9, 4, 3], [0, 2, 8, 6]], 200000, 30, 5.0, 80.0, 1.0),
+    ]
+    for m, ws, mult, expect, percnt, emin in cases:
+        nr, nc = len(m), len(m[0])
+        py = _fexact._Fexact(nr, nc, m, expect, percnt, emin, ws, mult).run()
+        flat = [int(v) for row in m for v in row]
+        got = rs.fexact(nr, nc, flat, expect, percnt, emin, ws, mult)
+        _assert_bit_exact(got, py)

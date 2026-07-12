@@ -15,6 +15,7 @@ from typing import Optional, Union
 
 import numpy as np
 import polars as pl
+from . import _fexact
 from . import distributions as _dist
 from . import nmath as _nm
 
@@ -1120,6 +1121,43 @@ def _fisher_test_simulate(tbl, name, B):
     )
 
 
+def _fisher_test_exact(tbl, name, *, workspace, hybrid, hybrid_pars, mult):
+    """R's ``fisher.test`` exact/hybrid p-value for an r×c table via the ported
+    FEXACT network algorithm (:func:`hea.R._fexact.fexact`). ``expect < 0`` (the
+    default) is the exact p-value; ``hybrid=True`` uses the asymptotic-χ² hybrid
+    with ``hybrid_pars = (expect, percent, Emin)``. Bit-exact to R."""
+    tbl = np.asarray(tbl, dtype=float)
+    if tbl.ndim != 2 or min(tbl.shape) < 2:
+        raise ValueError("'x' must have at least 2 rows and columns")
+    if np.any(tbl < 0) or not np.all(np.isfinite(tbl)):
+        raise ValueError("all entries of 'x' must be nonnegative and finite")
+    xi = np.rint(tbl).astype(np.int64)          # R rounds to integer storage
+    if np.any(xi > _fexact._INT_MAX):
+        raise ValueError("'x' has entries too large to be integer")
+    nr, nc = xi.shape
+    table = xi.tolist()
+    if hybrid:
+        expect, percnt, emin = (float(hybrid_pars[0]), float(hybrid_pars[1]),
+                                float(hybrid_pars[2]))
+        method = ("Fisher's Exact Test for Count Data hybrid using "
+                  "asym.chisq. iff (exp=%g, perc=%g, Emin=%g)"
+                  % (expect, percnt, emin))
+    else:
+        expect, percnt, emin = -1.0, 100.0, 0.0
+        method = "Fisher's Exact Test for Count Data"
+    pval = _fexact.fexact(nr, nc, table, expect, percnt, emin,
+                          workspace=int(workspace), mult=int(mult))
+    pval = max(0.0, min(1.0, pval))
+    return HTest(
+        method=method,
+        statistic={},
+        parameter={},
+        p_value=pval,
+        alternative="",
+        data_name=name,
+    )
+
+
 def fisher_test(
     x,
     y=None,
@@ -1130,6 +1168,10 @@ def fisher_test(
     conf_level: float = 0.95,
     simulate_p_value: bool = False,
     B: int = 2000,
+    workspace: int = 200000,
+    hybrid: bool = False,
+    hybrid_pars: tuple = (5.0, 80.0, 1.0),
+    mult: int = 30,
 ) -> HTest:
     """R's ``fisher.test`` — Fisher's exact test for contingency tables.
 
@@ -1141,11 +1183,14 @@ def fisher_test(
     odds ratio, default 1).
 
     ``x`` is a 2×2 array/matrix, or a 1-D vector paired with ``y``. For **r×c**
-    tables, ``simulate_p_value=True`` gives the Monte-Carlo p-value (``B``
-    replicates via ``Fisher_sim``/rcont2) — bit-exact to R's ``set.seed();``
-    ``fisher.test(..., simulate.p.value=TRUE)``. The r×c **exact** p-value (R's
-    FEXACT network algorithm, ``src/fexact.c``, 2082 L) remains deferred; use
-    the simulated p-value for larger tables.
+    tables the **exact** p-value is computed via the ported FEXACT network
+    algorithm (R's ``src/fexact.c``; see :mod:`hea.R._fexact`) — bit-exact to
+    ``fisher.test(x)``. ``hybrid=True`` selects R's hybrid asymptotic-χ²
+    approximation (``hybrid_pars = (expect, percent, Emin)``); ``workspace`` and
+    ``mult`` size the FEXACT hash tables exactly as R's. Alternatively
+    ``simulate_p_value=True`` gives the Monte-Carlo p-value (``B`` replicates via
+    ``Fisher_sim``/rcont2), bit-exact to ``set.seed(); fisher.test(...,``
+    ``simulate.p.value=TRUE)`` — cheaper for large, dense tables.
     """
     if alternative not in ("two.sided", "less", "greater"):
         raise ValueError(f"fisher_test(): unknown alternative {alternative!r}")
@@ -1158,11 +1203,9 @@ def fisher_test(
     if tbl.shape != (2, 2):
         if simulate_p_value:
             return _fisher_test_simulate(tbl, name, int(B))
-        raise NotImplementedError(
-            "fisher_test(): exact r×c needs FEXACT (src/fexact.c), not yet "
-            f"ported (got {tbl.shape}); pass simulate_p_value=True for the "
-            "Monte-Carlo p-value"
-        )
+        return _fisher_test_exact(
+            tbl, name, workspace=int(workspace), hybrid=hybrid,
+            hybrid_pars=hybrid_pars, mult=int(mult))
 
     m = tbl[0, 0] + tbl[1, 0]  # sum(x[, 1])
     n = tbl[0, 1] + tbl[1, 1]  # sum(x[, 2])

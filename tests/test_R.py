@@ -1907,10 +1907,67 @@ def test_fisher_test_from_two_vectors():
     assert "odds ratio" in res.estimate
 
 
-def test_fisher_test_rejects_non_2x2():
-    # Exact r×c (FEXACT) is still deferred; without simulate_p_value it raises.
-    with pytest.raises(NotImplementedError, match="FEXACT"):
-        fisher_test(np.array([[1, 2, 3], [4, 5, 6]]))
+def test_fisher_test_exact_rxc_bit_exact_vs_r():
+    """r×c Fisher **exact** p-value via the ported FEXACT network algorithm
+    (src/fexact.c) — bit-exact to R's fisher.test(x)$p.value across shapes,
+    sparsity, transposes, and zero cells."""
+    r = fisher_test(np.array([[3, 5, 2], [7, 2, 8], [4, 6, 1]]))
+    assert r.method == "Fisher's Exact Test for Count Data"
+    assert not r.statistic and not r.parameter        # p-value-only, df = NA
+    _assert_r([
+        (r.p_value,
+         "fisher.test(matrix(c(3,5,2,7,2,8,4,6,1),3,3,byrow=TRUE))$p.value",
+         0.07481072655669109),
+        (fisher_test(np.array([[1, 9, 3], [8, 2, 4]])).p_value,
+         "fisher.test(matrix(c(1,9,3,8,2,4),2,3,byrow=TRUE))$p.value",
+         0.0068231106325061432),
+        (fisher_test(np.array([[1, 8], [5, 3], [10, 1]])).p_value,
+         "fisher.test(matrix(c(1,8,5,3,10,1),3,2,byrow=TRUE))$p.value",
+         0.0010927377463923423),
+        (fisher_test(np.array([[10, 2, 3], [1, 8, 4],
+                               [2, 3, 9], [5, 1, 2]])).p_value,
+         "fisher.test(matrix(c(10,2,3,1,8,4,2,3,9,5,1,2),4,3,byrow=TRUE))$p.value",
+         0.0016923070283238997),
+        (fisher_test(np.array([[1, 8, 5, 4, 4, 2, 2], [5, 3, 3, 4, 3, 1, 0],
+                               [10, 1, 4, 0, 0, 0, 0]])).p_value,
+         "fisher.test(matrix(c(1,8,5,4,4,2,2,5,3,3,4,3,1,0,"
+         "10,1,4,0,0,0,0),3,7,byrow=TRUE))$p.value",
+         0.0035599802033163706),
+        (fisher_test(np.array([[0, 3, 2], [5, 1, 4], [2, 2, 6]])).p_value,
+         "fisher.test(matrix(c(0,3,2,5,1,4,2,2,6),3,3,byrow=TRUE))$p.value",
+         0.17749332374450155),
+        (fisher_test(np.array([[1, 2, 1, 0], [3, 3, 6, 1], [10, 10, 14, 9],
+                               [6, 7, 12, 11]])).p_value,
+         "fisher.test(matrix(c(1,2,1,0,3,3,6,1,10,10,14,9,6,7,12,11),"
+         "4,4,byrow=TRUE))$p.value",
+         0.78268493896653246),
+    ])
+    # transpose invariance (the algorithm sorts/swaps margins internally)
+    a = fisher_test(np.array([[1, 9, 3], [8, 2, 4]])).p_value
+    b = fisher_test(np.array([[1, 8], [9, 2], [3, 4]])).p_value
+    assert a == b
+
+
+def test_fisher_test_exact_hybrid_vs_r():
+    """r×c Fisher hybrid (asymptotic-χ²) p-value — bit-exact to R's
+    fisher.test(x, hybrid=TRUE)."""
+    m = np.array([[3, 5, 2], [7, 2, 8], [4, 6, 1]])
+    r = fisher_test(m, hybrid=True)
+    assert "hybrid using asym.chisq." in r.method
+    _assert_r([
+        (r.p_value,
+         "fisher.test(matrix(c(3,5,2,7,2,8,4,6,1),3,3,byrow=TRUE),"
+         "hybrid=TRUE)$p.value",
+         0.07481072655669109),
+    ])
+
+
+def test_fisher_test_exact_rejects_bad_input():
+    # < 2 rows/cols and negative entries are rejected as in R.
+    with pytest.raises(ValueError, match="at least 2 rows"):
+        fisher_test(np.array([[1, 2, 3]]))
+    with pytest.raises(ValueError, match="nonnegative"):
+        fisher_test(np.array([[1, -2, 3], [4, 5, 6]]))
 
 
 def test_chisq_test_simulate_p_value():
