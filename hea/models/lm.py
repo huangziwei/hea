@@ -956,7 +956,7 @@ class lm:
             self.r_squared_adjusted,
         ) = self.compute_goodness_of_fit()
 
-        # compute F-statistics with scipy.stats.f.sf
+        # compute F-statistic; p-value via the ported nmath _dist.pf (no scipy)
         # H0: all coefficients == 0
         # H1: at least one coefficient != 0
         self.fstats, self.f_p_value = self.compute_fstats()
@@ -1384,7 +1384,7 @@ class lm:
         return _row_frame(t_values, self.column_names)
 
     def compute_p_values(self):
-        # compute p values of model coefficients with scipy.stats.t.sf
+        # coefficient p-values via the ported nmath _dist.pt (no scipy)
         # H0: βi==0
         # H1: βi!=0
         with np.errstate(divide="ignore", invalid="ignore"):

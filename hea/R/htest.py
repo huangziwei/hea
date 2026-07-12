@@ -891,26 +891,64 @@ def chisq_test(
     *,
     p=None,
     correct: bool = True,
+    rescale_p: bool = False,
+    simulate_p_value: bool = False,
+    B: int = 2000,
 ) -> HTest:
     """R's ``chisq.test``.
 
     - 1-D ``x`` (and no ``y``)         → goodness-of-fit against ``p`` (uniform if None).
     - 2-D ``x`` (matrix or 2-D array)  → contingency-table test.
     - 1-D ``x`` and 1-D ``y``          → contingency on ``crosstab(x, y)``.
+
+    ``simulate_p_value=True`` gives a Monte-Carlo p-value (``B`` replicates): for
+    a table, random tables with fixed margins (rcont2); for goodness-of-fit,
+    weighted ``sample.int``. Both draw from R's MT stream — bit-exact to
+    ``set.seed(); chisq.test(..., simulate.p.value=TRUE)``.
     """
     arr = np.asarray(x)
     if y is not None:
         tbl = _crosstab(x, y)
-        return _chisq_table(tbl, correct=correct, name="x and y")
+        return _chisq_table(tbl, correct=correct, name="x and y",
+                            simulate_p_value=simulate_p_value, B=B)
     if arr.ndim == 2:
-        return _chisq_table(arr, correct=correct, name="x")
+        return _chisq_table(arr, correct=correct, name="x",
+                            simulate_p_value=simulate_p_value, B=B)
     # goodness of fit
     counts = arr.astype(float)
     if p is None:
         p = np.full_like(counts, 1.0 / len(counts))
     p = np.asarray(p, dtype=float)
-    expected = counts.sum() * p
+    if abs(p.sum() - 1.0) > math.sqrt(_nm._DBL_EPSILON):
+        if rescale_p:
+            p = p / p.sum()
+        else:
+            raise ValueError("probabilities must sum to 1.")
+    total = counts.sum()
+    expected = total * p
     stat = float(np.sum((counts - expected) ** 2 / expected))
+    if simulate_p_value:
+        # R: sm <- matrix(sample.int(nx, B*n, TRUE, prob=p), nrow=n); per column
+        # ss <- sum((tabulate(col) - E)^2 / E); PVAL uses almost.1 * STATISTIC.
+        nx = len(counts)
+        nn = int(total)
+        idx = _dist._r_rng().sample_prob(p, B * nn, replace=True)
+        sm = np.asarray(idx).reshape((B, nn))          # each row = one replicate
+        almost_1 = 1.0 - 64.0 * _nm._DBL_EPSILON
+        ss = np.empty(B, dtype=float)
+        for b in range(B):
+            tab = np.bincount(sm[b], minlength=nx).astype(float)
+            ss[b] = float(np.sum((tab - expected) ** 2 / expected))
+        pval = (1.0 + float(np.count_nonzero(ss >= almost_1 * stat))) / (B + 1)
+        return HTest(
+            method="Chi-squared test for given probabilities with simulated "
+            f"p-value\n\t (based on {B} replicates)",
+            statistic={"X-squared": stat},
+            parameter={},
+            p_value=pval,
+            alternative="",
+            data_name="x",
+        )
     df = len(counts) - 1
     pval = float(_dist.pchisq(stat, df, lower_tail=False))
     return HTest(
@@ -943,8 +981,31 @@ def _chisq_stat(tbl: np.ndarray, *, correct: bool) -> tuple[float, int, bool]:
     return stat, df, is_2x2 and yates > 0
 
 
-def _chisq_table(tbl: np.ndarray, *, correct: bool, name: str) -> HTest:
-    stat, df, yates = _chisq_stat(np.asarray(tbl, dtype=float), correct=correct)
+def _chisq_table(tbl: np.ndarray, *, correct: bool, name: str,
+                 simulate_p_value: bool = False, B: int = 2000) -> HTest:
+    tbl = np.asarray(tbl, dtype=float)
+    nr, nc = tbl.shape
+    n = tbl.sum()
+    sr = tbl.sum(axis=1)
+    sc = tbl.sum(axis=0)
+    if simulate_p_value and np.all(sr > 0) and np.all(sc > 0):
+        e = np.outer(sr, sc) / n
+        # STATISTIC: sorted-descending LDOUBLE sum (R's PR#3486 idiom).
+        resid2 = ((tbl - e) ** 2 / e).ravel()
+        stat = _rsum_ld(np.sort(resid2)[::-1])
+        tmp = _chisq_sim(sr, sc, int(B), e, _dist._r_rng())
+        almost_1 = 1.0 - 64.0 * _nm._DBL_EPSILON
+        pval = (1.0 + float(np.count_nonzero(tmp >= almost_1 * stat))) / (B + 1)
+        return HTest(
+            method="Pearson's Chi-squared test with simulated p-value\n\t "
+            f"(based on {B} replicates)",
+            statistic={"X-squared": float(stat)},
+            parameter={},                           # df = NA for the MC test
+            p_value=pval,
+            alternative="",
+            data_name=name,
+        )
+    stat, df, yates = _chisq_stat(tbl, correct=correct)
     return HTest(
         method="Pearson's Chi-squared test"
         + (" with Yates' continuity correction" if yates else ""),
@@ -975,6 +1036,90 @@ def _crosstab(x, y) -> np.ndarray:
     )
 
 
+def _mc_fact(n):
+    """Cumulative log-factorial ``fact[i] = fact[i-1] + log(i)`` — the exact
+    array chisqsim.c/Smirnov_sim build (NOT ``lgammafn``)."""
+    fact = [0.0] * (n + 1)
+    for i in range(2, n + 1):
+        fact[i] = fact[i - 1] + math.log(i)
+    return fact
+
+
+def _chisq_sim(sr, sc, B, expected, rng):
+    """R's ``chisq_sim`` (chisqsim.c) — ``B`` Pearson X² statistics from random
+    tables (rcont2) with the given margins. Column-major cell traversal and the
+    cumulative ``fact`` match the C, so the stream is bit-exact to ``set.seed``."""
+    sr = [int(v) for v in sr]
+    sc = [int(v) for v in sc]
+    n = int(sum(sr))
+    fact = _mc_fact(n)
+    e = np.asarray(expected, dtype=float)
+    nrow = len(sr)
+    ncol = len(sc)
+    out = np.empty(B, dtype=float)
+    for it in range(B):
+        obs = rng.rcont2(sr, sc, n, fact)
+        chisq = 0.0
+        for j in range(ncol):                       # column-major, as C
+            for i in range(nrow):
+                ev = e[i, j]
+                ov = obs[i][j]
+                chisq += (ov - ev) * (ov - ev) / ev
+        out[it] = chisq
+    return out
+
+
+def _fisher_sim(sr, sc, B, rng):
+    """R's ``fisher_sim`` (chisqsim.c) — ``B`` log-probability statistics
+    ``-sum(log(obs_ij!))`` from random tables (rcont2). Bit-exact stream."""
+    sr = [int(v) for v in sr]
+    sc = [int(v) for v in sc]
+    n = int(sum(sr))
+    fact = _mc_fact(n)
+    nrow = len(sr)
+    ncol = len(sc)
+    out = np.empty(B, dtype=float)
+    for it in range(B):
+        obs = rng.rcont2(sr, sc, n, fact)
+        ans = 0.0
+        for j in range(ncol):                       # column-major, as C
+            for i in range(nrow):
+                ans -= fact[obs[i][j]]
+        out[it] = ans
+    return out
+
+
+def _fisher_test_simulate(tbl, name, B):
+    """R's ``fisher.test(..., simulate.p.value=TRUE)`` for an r×c table — the
+    Monte-Carlo p-value via ``Fisher_sim`` (rcont2). Drops all-zero rows/cols,
+    then compares each replicate's log-prob to the observed. Bit-exact stream."""
+    tbl = np.asarray(tbl, dtype=float)
+    sr = tbl.sum(axis=1)
+    sc = tbl.sum(axis=0)
+    x2 = tbl[sr > 0][:, sc > 0]                     # drop all-zero margins
+    nr, nc = x2.shape
+    if nr <= 1:
+        raise ValueError("need 2 or more non-zero row marginals")
+    if nc <= 1:
+        raise ValueError("need 2 or more non-zero column marginals")
+    # STATISTIC = -sum(lfactorial(x)) = -sum(lgamma(x+1)); R sums in LDOUBLE.
+    stat = -_rsum_ld(np.array([_nm._lgammafn(float(v) + 1.0)
+                               for v in x2.ravel()]))
+    tmp = _fisher_sim(x2.sum(axis=1), x2.sum(axis=0), B, _dist._r_rng())
+    almost_1 = 1.0 + 64.0 * _nm._DBL_EPSILON        # PR#10558: STATISTIC < 0
+    pval = (1.0 + float(np.count_nonzero(tmp <= stat / almost_1))) / (B + 1)
+    pval = max(0.0, min(1.0, pval))
+    return HTest(
+        method="Fisher's Exact Test for Count Data with simulated p-value"
+        f"\n\t (based on {B} replicates)",
+        statistic={},
+        parameter={},
+        p_value=pval,
+        alternative="",
+        data_name=name,
+    )
+
+
 def fisher_test(
     x,
     y=None,
@@ -983,8 +1128,10 @@ def fisher_test(
     or_: float = 1.0,
     conf_int: bool = True,
     conf_level: float = 0.95,
+    simulate_p_value: bool = False,
+    B: int = 2000,
 ) -> HTest:
-    """R's ``fisher.test`` — Fisher's exact test for a 2×2 contingency table.
+    """R's ``fisher.test`` — Fisher's exact test for contingency tables.
 
     Faithful port of the 2×2 branch of ``fisher.test.R``: the p-value (via the
     conditional non-central hypergeometric on the ported nmath ``dhyper`` /
@@ -993,9 +1140,12 @@ def fisher_test(
     Brent ``zeroin``) are all bit-exact to R. ``or_`` is R's ``or`` (the null
     odds ratio, default 1).
 
-    ``x`` is a 2×2 array/matrix, or a 1-D vector paired with ``y``. Larger r×c
-    tables (R's FEXACT network algorithm, ``src/fexact.c``) and the
-    ``simulate.p.value`` Monte-Carlo branch are not yet ported.
+    ``x`` is a 2×2 array/matrix, or a 1-D vector paired with ``y``. For **r×c**
+    tables, ``simulate_p_value=True`` gives the Monte-Carlo p-value (``B``
+    replicates via ``Fisher_sim``/rcont2) — bit-exact to R's ``set.seed();``
+    ``fisher.test(..., simulate.p.value=TRUE)``. The r×c **exact** p-value (R's
+    FEXACT network algorithm, ``src/fexact.c``, 2082 L) remains deferred; use
+    the simulated p-value for larger tables.
     """
     if alternative not in ("two.sided", "less", "greater"):
         raise ValueError(f"fisher_test(): unknown alternative {alternative!r}")
@@ -1006,9 +1156,12 @@ def fisher_test(
         tbl = np.asarray(x, dtype=float)
         name = "x"
     if tbl.shape != (2, 2):
+        if simulate_p_value:
+            return _fisher_test_simulate(tbl, name, int(B))
         raise NotImplementedError(
-            "fisher_test(): only 2x2 tables are supported "
-            f"(got {tbl.shape}); r×c needs FEXACT, not yet ported"
+            "fisher_test(): exact r×c needs FEXACT (src/fexact.c), not yet "
+            f"ported (got {tbl.shape}); pass simulate_p_value=True for the "
+            "Monte-Carlo p-value"
         )
 
     m = tbl[0, 0] + tbl[1, 0]  # sum(x[, 1])

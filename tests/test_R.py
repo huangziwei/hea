@@ -1908,8 +1908,37 @@ def test_fisher_test_from_two_vectors():
 
 
 def test_fisher_test_rejects_non_2x2():
-    with pytest.raises(NotImplementedError, match="2x2"):
+    # Exact r×c (FEXACT) is still deferred; without simulate_p_value it raises.
+    with pytest.raises(NotImplementedError, match="FEXACT"):
         fisher_test(np.array([[1, 2, 3], [4, 5, 6]]))
+
+
+def test_chisq_test_simulate_p_value():
+    # Monte-Carlo chisq.test bit-exact to R's set.seed stream: table path via
+    # rcont2 (chisq_sim), goodness-of-fit via weighted sample.int.
+    m = np.array([[10, 20, 30], [15, 25, 10], [5, 12, 18]])
+    set_seed(42)
+    r = chisq_test(m, simulate_p_value=True, B=2000)
+    assert r.statistic["X-squared"] == pytest.approx(13.124269005847953)
+    assert r.p_value == pytest.approx(0.00849575212393803)
+    assert "df" not in r.parameter  # df = NA for the MC test
+    set_seed(7)
+    r2 = chisq_test([12, 20, 8, 15], p=[0.25, 0.25, 0.25, 0.25],
+                    simulate_p_value=True, B=1000)
+    assert r2.statistic["X-squared"] == pytest.approx(5.581818181818182)
+    assert r2.p_value == pytest.approx(0.13886113886113885)
+
+
+def test_fisher_test_simulate_p_value():
+    # r×c fisher.test via Monte-Carlo (Fisher_sim / rcont2), bit-exact to R.
+    m = np.array([[3, 5, 2], [7, 2, 8], [4, 6, 1]])
+    set_seed(42)
+    r = fisher_test(m, simulate_p_value=True, B=2000)
+    assert r.p_value == pytest.approx(0.06896551724137931)
+    m2 = np.array([[10, 2, 3], [1, 8, 4], [2, 3, 9], [5, 1, 2]])
+    set_seed(99)
+    r2 = fisher_test(m2, simulate_p_value=True, B=5000)
+    assert r2.p_value == pytest.approx(0.0023995200959808036)
 
 
 # ---- prop_test ------------------------------------------------------
