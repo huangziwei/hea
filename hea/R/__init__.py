@@ -439,6 +439,30 @@ from .model_generics import (
     rePCA,
 )
 
+# Formula / model-frame helpers (base-R stats: models.R, nafns.R, contr.poly.R)
+from .formula_helpers import (
+    DF2formula,
+    MFclass,
+    NAAction,
+    Poly,
+    as_formula,
+    delete_response,
+    drop_terms,
+    get_all_vars,
+    na_action,
+    na_exclude,
+    na_fail,
+    na_pass,
+    napredict,
+    naprint,
+    naresid,
+    poly,
+    polym,
+    predict_poly,
+    reformulate,
+    update_formula,
+)
+
 # Regression diagnostics
 from .diagnostics import (
     cooks_distance,
@@ -590,6 +614,12 @@ __all__ = [
     # lme4 merMod accessors (VarCorr / getME / predicates / getData / rePCA)
     "VarCorr", "getME", "getData", "extractAIC", "rePCA",
     "isREML", "isLMM", "isGLMM", "isNLMM", "isSingular",
+    # formula / model-frame helpers (models.R, nafns.R, contr.poly.R)
+    "reformulate", "as_formula", "update_formula", "delete_response",
+    "drop_terms", "DF2formula", "get_all_vars",
+    "na_pass", "na_fail", "na_exclude", "na_action",
+    "naresid", "napredict", "naprint", "NAAction",
+    "MFclass", "poly", "polym", "predict_poly", "Poly",
     # regression diagnostics
     "hatvalues", "rstandard", "rstudent",
     "cooks_distance", "dffits", "dfbeta", "dfbetas", "influence",

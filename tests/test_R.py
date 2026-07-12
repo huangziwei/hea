@@ -608,6 +608,13 @@ _R_EXPR_SKIP = {
     "p_adjust", "p_adjust_methods",
     # Result classes — not callable in the vector-shape sense.
     "HTest", "AnovaTable", "PairwiseHTest", "PowerHTest", "Terms",
+    # Formula / model-frame helpers — operate on formula strings, frames, or
+    # na.action objects; poly/polym build basis matrices (multi-arg). Not Exprs.
+    "reformulate", "as_formula", "update_formula", "delete_response",
+    "drop_terms", "DF2formula", "get_all_vars",
+    "na_pass", "na_fail", "na_exclude", "na_action",
+    "naresid", "napredict", "naprint", "NAAction",
+    "MFclass", "poly", "polym", "predict_poly", "Poly",
     # Model generics — operate on fitted models, not columns.
     "coef", "coefficients", "fixef", "ranef", "refit", "refitML",
     "resid", "residuals", "fitted", "fitted_values",
@@ -781,6 +788,21 @@ def _assert_r(checks, *, rel_tol=1e-12):
     else:
         for got, expr, fb in checks:
             assert math.isclose(got, fb, rel_tol=rel_tol), f"{expr}: {got!r} !~ R {fb!r}"
+
+
+def _assert_r_tol(checks, *, rel_tol=1e-12):
+    """Like :func:`_assert_r` but compares with ``math.isclose`` on both paths —
+    for kernels that carry a documented sub-ulp residual vs R (e.g. anything
+    through the lm-QR/FMA path), so a strict ``==`` would spuriously fail."""
+    if _R_BITEXACT:
+        ref = r_scalar_values([e for _, e, _ in checks])
+        for got, expr, _ in checks:
+            assert math.isclose(got, ref[expr], rel_tol=rel_tol), \
+                f"{expr}: {got!r} !~ live R {ref[expr]!r}"
+    else:
+        for got, expr, fb in checks:
+            assert math.isclose(got, fb, rel_tol=rel_tol), \
+                f"{expr}: {got!r} !~ R {fb!r}"
 
 
 def test_dnorm_pnorm_qnorm():
@@ -2265,6 +2287,157 @@ def test_power_tests_vs_r():
     # exactly-one-NULL guard.
     with pytest.raises(ValueError, match="exactly one"):
         power_t_test(n=20, delta=1.0, power=0.8)
+
+
+from hea.R import (  # noqa: E402  — grouped with the formula-helper tests
+    DF2formula,
+    MFclass,
+    NAAction,
+    as_formula,
+    delete_response,
+    drop_terms,
+    factor as R_factor,
+    get_all_vars,
+    ordered as R_ordered,
+    na_exclude,
+    na_fail,
+    na_pass,
+    napredict,
+    naprint,
+    naresid,
+    poly,
+    polym,
+    predict_poly,
+    reformulate,
+    update_formula,
+)
+
+
+def test_formula_algebra_helpers_vs_r():
+    # Deparse strings are deterministic / platform-independent; committed values
+    # are live R 4.6.0 (reformulate / update.formula / delete.response /
+    # drop.terms / DF2formula / as.formula).
+    assert reformulate(["x1", "x2"], "y") == "y ~ x1 + x2"
+    assert reformulate(["x1", "x2"]) == "~x1 + x2"
+    assert reformulate("x", intercept=False) == "~x - 1"
+    assert reformulate(["x1", "x2"], "y", intercept=False) == "y ~ x1 + x2 - 1"
+    assert reformulate([], "y") == "y ~ 1"
+    assert reformulate(["log(x)", "z:w"], "y") == "y ~ log(x) + z:w"
+    assert as_formula("y~x1*x2") == "y ~ x1 * x2"
+    assert delete_response("y ~ a*b") == "~a * b"
+    assert delete_response("y ~ x1 + x2") == "~x1 + x2"
+    assert drop_terms("y~a+b+c", 2, keep_response=True) == "y ~ a + c"
+    assert drop_terms("y~a+b+c", [1, 3], keep_response=True) == "y ~ b"
+    assert drop_terms("y~a+b+c", 2, keep_response=False) == "~a + c"
+    assert DF2formula(pl.DataFrame({"a": [1], "b": [2], "c": [3]})) == "a ~ b + c"
+    assert DF2formula(pl.DataFrame({"only": [1]})) == "~only"
+    # update.formula: `.` substitution + terms.formula(simplify=TRUE)
+    assert update_formula("y ~ x1 + x2", ". ~ . + x3") == "y ~ x1 + x2 + x3"
+    assert update_formula("y ~ x1 + x2", ". ~ . - x2") == "y ~ x1"
+    assert update_formula("y ~ a*b", ". ~ . - a:b") == "y ~ a + b"
+    assert update_formula("y ~ x1 + x2", "z ~ .") == "z ~ x1 + x2"
+    assert update_formula("y ~ x1 + x2", ". ~ . - 1") == "y ~ x1 + x2 - 1"
+    assert update_formula("y ~ x1*x2", ". ~ .") == "y ~ x1 + x2 + x1:x2"
+    assert update_formula("y ~ x", "~ . + z") == "y ~ x + z"
+    assert update_formula("y ~ x", ". ~ . - x") == "y ~ 1"
+    assert update_formula("y ~ x - 1", ". ~ . - x") == "y ~ 1 - 1"
+    assert update_formula("y ~ a + b", ". ~ . + a") == "y ~ a + b"
+    assert update_formula("y ~ poly(x,2)", ". ~ . + z") == "y ~ poly(x, 2) + z"
+
+
+def test_get_all_vars_na_family_mfclass_vs_r():
+    # get_all_vars: all.vars columns (log(x2) → raw x2), first-appearance order
+    gv = get_all_vars(
+        "y ~ x1 + log(x2)",
+        pl.DataFrame({"y": [1, 2], "x1": [3, 4], "x2": [5, 6], "junk": [7, 8]}),
+    )
+    assert gv.columns == ["y", "x1", "x2"]
+
+    # naresid / napredict.exclude: pad back to full length with NaN. R's
+    # na.exclude on rows 2,4,5 (1-based) → omit positions {1,3,4} (0-based).
+    oa = NAAction(np.array([1, 3, 4]), kind="exclude")
+    got = naresid(oa, np.array([10.0, 30.0, 60.0]))
+    exp = [10.0, None, 30.0, None, None, 60.0]
+    assert [None if np.isnan(v) else v for v in got] == exp
+    got2 = napredict(oa, np.array([10.0, 30.0, 60.0]))
+    assert [None if np.isnan(v) else v for v in got2] == exp
+    # naprint singular / plural, matching R's ngettext.
+    assert naprint(oa) == "3 observations deleted due to missingness"
+    assert naprint(NAAction(np.array([2]))) == \
+        "1 observation deleted due to missingness"
+    assert naprint(None) == ""
+
+    # na.pass / na.fail
+    assert na_pass([1, None, 3]) == [1, None, 3]
+    with pytest.raises(ValueError, match="missing values in object"):
+        na_fail(pl.Series([1.0, None, 3.0]))
+    assert na_fail(pl.Series([1.0, 2.0, 3.0])) is not None
+    cleaned, act = na_exclude(
+        pl.DataFrame({"y": [1.0, None, 3.0, 4.0, None, 6.0],
+                      "x": [1.0, 2.0, 3.0, None, 5.0, 6.0]}))
+    assert cleaned.height == 3
+    assert list(act.omit) == [1, 3, 4] and act.kind == "exclude"
+
+    # .MFclass
+    assert MFclass(pl.Series([1.0, 2.0])) == "numeric"
+    assert MFclass(pl.Series([1, 2, 3])) == "numeric"
+    assert MFclass(pl.Series([True, False])) == "logical"
+    assert MFclass(pl.Series(["a", "b"])) == "character"
+    assert MFclass(np.ones((2, 3))) == "nmatrix.3"
+    # hea stores factor & ordered both as polars Enum; the ordered marker
+    # (from ordered()) must still read back as "ordered", plain factor as
+    # "factor" — matching R's .MFclass.
+    assert MFclass(R_factor(["a", "b", "c"])) == "factor"
+    assert MFclass(R_ordered(["a", "b", "c"])) == "ordered"
+
+
+def test_poly_polym_vs_r():
+    # poly non-raw fit runs R's exact qr() (dqrdc2 + qr.qy), so it carries the
+    # documented ≤2-ulp lm-QR/FMA residual → tolerance-checked. The raw path
+    # (integer powers) and the prediction recurrence are 0-ulp given identical
+    # coefs. Committed fallbacks are live R 4.6.0.
+    X = "c(1,2.5,3,4.2,5.1,6.9,8,9.3,10,11.4)"
+    x = np.array([1.0, 2.5, 3.0, 4.2, 5.1, 6.9, 8.0, 9.3, 10.0, 11.4])
+    P = poly(x, 3)
+    assert P.shape == (10, 3)
+    assert P.colnames == ["1", "2", "3"]
+    _assert_r_tol([
+        (float(P[0, 0]), f"poly({X}, 3)[1,1]", -0.48794634266742815),
+        (float(P[0, 2]), f"poly({X}, 3)[1,3]", -0.48225328622075542),
+        (float(P[4, 1]), f"poly({X}, 3)[5,2]", -0.3374283855661212),
+        (float(P[9, 2]), f"poly({X}, 3)[10,3]", 0.47507769323390081),
+        (float(P.coefs["alpha"][2]),
+         f'attr(poly({X}, 3), "coefs")$alpha[3]', 6.1187536040618369),
+        (float(P.coefs["norm2"][2]),
+         f'attr(poly({X}, 3), "coefs")$norm2[3]', 110.96400000000006),
+    ])
+    # raw = integer powers — 0-ulp.
+    Rraw = poly(x, 3, raw=True)
+    _assert_r_tol([
+        (float(Rraw[1, 2]), f"poly({X}, 3, raw=TRUE)[2,3]", 15.625),
+        (float(Rraw[3, 1]), f"poly({X}, 3, raw=TRUE)[4,2]", 17.64),
+    ])
+    # predict.poly via the stored coefs (recurrence).
+    pred = predict_poly(P, np.array([2.0, 5.5, 9.9]))
+    _assert_r_tol([
+        (float(pred[0, 2]),
+         f"predict(poly({X}, 3), c(2,5.5,9.9))[1,3]", 0.045658390552303328),
+        (float(pred[2, 0]),
+         f"predict(poly({X}, 3), c(2,5.5,9.9))[3,1]", 0.35694129346877995),
+    ])
+    # polym: tensor product, degree tuples as column names.
+    X1 = "c(1,2,3,4,5)"
+    X2 = "c(2,1,4,3,6)"
+    x1 = np.array([1.0, 2, 3, 4, 5])
+    x2 = np.array([2.0, 1, 4, 3, 6])
+    M = polym(x1, x2, degree=2)
+    assert M.colnames == ["1.0", "2.0", "0.1", "1.1", "0.2"]
+    assert M.shape == (5, 5)
+    _assert_r_tol([
+        (float(M[0, 0]), f"polym({X1}, {X2}, degree=2)[1,1]", -0.632455532033676),
+        (float(M[0, 3]), f"polym({X1}, {X2}, degree=2)[1,4]", 0.197278784766429),
+        (float(M[4, 4]), f"polym({X1}, {X2}, degree=2)[5,5]", 0.490729242320852),
+    ])
 
 
 def test_chisq_test_simulate_p_value():
