@@ -404,6 +404,149 @@ def rbeta(n, shape1, shape2):
     return rng.rbeta_n(s1, s2)
 
 
+# cauchy
+def dcauchy(x, location=0, scale=1, log=False):
+    """R's ``dcauchy`` — Cauchy density (nmath/dcauchy.c); bit-exact."""
+    return _nm._disp("dcauchy", _nm.dcauchy, [x, location, scale], (log,))
+
+
+def pcauchy(q, location=0, scale=1, lower_tail=True, log_p=False):
+    """R's ``pcauchy`` — Cauchy CDF (nmath/pcauchy.c); bit-exact."""
+    return _nm._disp("pcauchy", _nm.pcauchy, [q, location, scale],
+                     (lower_tail, log_p))
+
+
+def qcauchy(p, location=0, scale=1, lower_tail=True, log_p=False):
+    """R's ``qcauchy`` — Cauchy quantile (nmath/qcauchy.c); bit-exact."""
+    return _nm._disp("qcauchy", _nm.qcauchy, [p, location, scale],
+                     (lower_tail, log_p))
+
+
+def rcauchy(n, location=0, scale=1):
+    """R: ``rcauchy(n, location=0, scale=1)`` — ``location + scale*tan(pi*U)``
+    on R's MT stream (bit-exact for finite location, scale > 0)."""
+    rng = _r_rng()
+    nn = int(n)
+    loc = _recycle(location, nn)
+    sc = _recycle(scale, nn)
+    u = np.asarray(rng.unif_rand(nn), dtype=float)
+    return loc + sc * np.tan(np.pi * u)
+
+
+# logistic
+def dlogis(x, location=0, scale=1, log=False):
+    """R's ``dlogis`` — logistic density (nmath/dlogis.c); bit-exact."""
+    return _nm._disp("dlogis", _nm.dlogis, [x, location, scale], (log,))
+
+
+def plogis(q, location=0, scale=1, lower_tail=True, log_p=False):
+    """R's ``plogis`` — logistic CDF (nmath/plogis.c); bit-exact."""
+    return _nm._disp("plogis", _nm.plogis, [q, location, scale],
+                     (lower_tail, log_p))
+
+
+def qlogis(p, location=0, scale=1, lower_tail=True, log_p=False):
+    """R's ``qlogis`` — logistic quantile (nmath/qlogis.c); bit-exact."""
+    return _nm._disp("qlogis", _nm.qlogis, [p, location, scale],
+                     (lower_tail, log_p))
+
+
+def rlogis(n, location=0, scale=1):
+    """R: ``rlogis(n, location=0, scale=1)`` — ``location + scale*log(U/(1-U))``
+    on R's MT stream (bit-exact for finite location, scale > 0)."""
+    rng = _r_rng()
+    nn = int(n)
+    loc = _recycle(location, nn)
+    sc = _recycle(scale, nn)
+    u = np.asarray(rng.unif_rand(nn), dtype=float)
+    return loc + sc * np.log(u / (1. - u))
+
+
+# log-normal
+def dlnorm(x, meanlog=0, sdlog=1, log=False):
+    """R's ``dlnorm`` — log-normal density (nmath/dlnorm.c); bit-exact."""
+    return _nm._disp("dlnorm", _nm.dlnorm, [x, meanlog, sdlog], (log,))
+
+
+def plnorm(q, meanlog=0, sdlog=1, lower_tail=True, log_p=False):
+    """R's ``plnorm`` — log-normal CDF (nmath/plnorm.c → pnorm); bit-exact."""
+    return _nm._disp("plnorm", _nm.plnorm, [q, meanlog, sdlog],
+                     (lower_tail, log_p))
+
+
+def qlnorm(p, meanlog=0, sdlog=1, lower_tail=True, log_p=False):
+    """R's ``qlnorm`` — log-normal quantile (nmath/qlnorm.c → qnorm); bit-exact."""
+    return _nm._disp("qlnorm", _nm.qlnorm, [p, meanlog, sdlog],
+                     (lower_tail, log_p))
+
+
+def rlnorm(n, meanlog=0, sdlog=1):
+    """R: ``rlnorm(n, meanlog=0, sdlog=1)`` — ``exp(rnorm(meanlog, sdlog))`` on
+    R's MT stream (bit-exact)."""
+    return np.exp(rnorm(n, meanlog, sdlog))
+
+
+# weibull
+def dweibull(x, shape, scale=1, log=False):
+    """R's ``dweibull`` — Weibull density (nmath/dweibull.c); bit-exact."""
+    return _nm._disp("dweibull", _nm.dweibull, [x, shape, scale], (log,))
+
+
+def pweibull(q, shape, scale=1, lower_tail=True, log_p=False):
+    """R's ``pweibull`` — Weibull CDF (nmath/pweibull.c); bit-exact."""
+    return _nm._disp("pweibull", _nm.pweibull, [q, shape, scale],
+                     (lower_tail, log_p))
+
+
+def qweibull(p, shape, scale=1, lower_tail=True, log_p=False):
+    """R's ``qweibull`` — Weibull quantile (nmath/qweibull.c); bit-exact."""
+    return _nm._disp("qweibull", _nm.qweibull, [p, shape, scale],
+                     (lower_tail, log_p))
+
+
+def rweibull(n, shape, scale=1):
+    """R: ``rweibull(n, shape, scale=1)`` — ``scale*(-log(U))^(1/shape)`` on R's
+    MT stream (bit-exact for shape, scale > 0)."""
+    rng = _r_rng()
+    nn = int(n)
+    sh = _recycle(shape, nn)
+    sc = _recycle(scale, nn)
+    u = np.asarray(rng.unif_rand(nn), dtype=float)
+    return sc * np.power(-np.log(u), 1.0 / sh)
+
+
+# geometric  (R: dgeom(x, prob) — Pr(X=x) = prob*(1-prob)^x, x = 0,1,2,...)
+def dgeom(x, prob, log=False):
+    """R's ``dgeom`` — geometric density (nmath/dgeom.c); bit-exact."""
+    return _nm._disp("dgeom", _nm.dgeom, [x, prob], (log,))
+
+
+def pgeom(q, prob, lower_tail=True, log_p=False):
+    """R's ``pgeom`` — geometric CDF (nmath/pgeom.c); bit-exact."""
+    return _nm._disp("pgeom", _nm.pgeom, [q, prob], (lower_tail, log_p))
+
+
+def qgeom(p, prob, lower_tail=True, log_p=False):
+    """R's ``qgeom`` — geometric quantile (nmath/qgeom.c); bit-exact."""
+    return _nm._disp("qgeom", _nm.qgeom, [p, prob], (lower_tail, log_p))
+
+
+def rgeom(n, prob):
+    """R: ``rgeom(n, prob)`` — ``rpois(exp_rand()*(1-p)/p)`` on R's MT stream
+    (bit-exact). Per-element interleaved exp/pois draws match R's rgeom.c."""
+    rng = _r_rng()
+    nn = int(n)
+    pr = _recycle(prob, nn)
+    out = np.empty(nn)
+    for i in range(nn):
+        p = float(pr[i])
+        if not np.isfinite(p) or p <= 0 or p > 1:
+            out[i] = np.nan
+        else:
+            out[i] = rng.rpois(rng.exp_rand() * ((1 - p) / p))
+    return out
+
+
 # Wilcoxon signed-rank distribution (exact; nmath/signrank.c)
 def dsignrank(x, n, log=False):
     """R's ``dsignrank`` — density of the Wilcoxon signed-rank statistic."""
@@ -447,6 +590,35 @@ def dhyper(x, m, n, k, log=False):
 def phyper(q, m, n, k, lower_tail=True, log_p=False):
     """R's ``phyper`` — hypergeometric CDF (nmath/phyper.c); R-parity."""
     return _nm._disp("phyper", _nm.phyper, [q, m, n, k], (lower_tail, log_p))
+
+
+def qhyper(p, m, n, k, lower_tail=True, log_p=False):
+    """R's ``qhyper`` — hypergeometric quantile (nmath/qhyper.c); bit-exact."""
+    return _nm._disp("qhyper", _nm.qhyper, [p, m, n, k], (lower_tail, log_p))
+
+
+# negative binomial  (R accepts EITHER prob OR mu; mu → the (size, mu) kernels)
+def dnbinom(x, size, prob=None, mu=None, log=False):
+    """R's ``dnbinom(x, size, prob | mu)`` (nmath/dnbinom.c); bit-exact."""
+    if mu is not None:
+        return _nm._disp("dnbinom_mu", _nm.dnbinom_mu, [x, size, mu], (log,))
+    return _nm._disp("dnbinom", _nm.dnbinom, [x, size, prob], (log,))
+
+
+def pnbinom(q, size, prob=None, mu=None, lower_tail=True, log_p=False):
+    """R's ``pnbinom(q, size, prob | mu)`` (nmath/pnbinom.c → pbeta); bit-exact."""
+    if mu is not None:
+        return _nm._disp("pnbinom_mu", _nm.pnbinom_mu, [q, size, mu],
+                         (lower_tail, log_p))
+    return _nm._disp("pnbinom", _nm.pnbinom, [q, size, prob], (lower_tail, log_p))
+
+
+def qnbinom(p, size, prob=None, mu=None, lower_tail=True, log_p=False):
+    """R's ``qnbinom(p, size, prob | mu)`` (nmath/qnbinom.c); bit-exact."""
+    if mu is not None:
+        return _nm._disp("qnbinom_mu", _nm.qnbinom_mu, [p, size, mu],
+                         (lower_tail, log_p))
+    return _nm._disp("qnbinom", _nm.qnbinom, [p, size, prob], (lower_tail, log_p))
 
 
 # studentized range (Tukey)  — R exposes only the CDF / quantile (no d*/r*)

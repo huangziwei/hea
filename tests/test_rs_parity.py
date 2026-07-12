@@ -365,6 +365,87 @@ def _build_cases():
                    26.535897932384626]),
          np.zeros(3), np.ones(3)], (False,))
 
+    # --- cauchy / logis / lnorm / weibull / geom (closed-form → strict 0-ulp) ---
+    xc = np.array([-1e6, -100.0, -3.0, -1.0, -0.2, 0.0, 0.5, 1.0, 3.0, 100.0, 1e6])
+    for (loc, scl) in [(0.0, 1.0), (0.5, 2.0), (-2.0, 0.5)]:
+        lo, sc = np.full_like(xc, loc), np.full_like(xc, scl)
+        for lt in (True, False):
+            for lp in (True, False):
+                add(f"pcauchy_{loc}_{scl}_{lt}_{lp}", "pcauchy", [xc, lo, sc], (lt, lp))
+                add(f"plogis_{loc}_{scl}_{lt}_{lp}", "plogis", [xc, lo, sc], (lt, lp))
+        for gl in (True, False):
+            add(f"dcauchy_{loc}_{scl}_{gl}", "dcauchy", [xc, lo, sc], (gl,))
+            add(f"dlogis_{loc}_{scl}_{gl}", "dlogis", [xc, lo, sc], (gl,))
+    pc = np.array([1e-10, 1e-4, 0.01, 0.1, 0.3, 0.5, 0.7, 0.9, 0.99, 0.9999, 1 - 1e-12])
+    for lt in (True, False):
+        for lp in (True, False):
+            pp = np.log(pc) if lp else pc
+            add(f"qcauchy_{lt}_{lp}", "qcauchy",
+                [pp, np.zeros_like(pc), np.ones_like(pc)], (lt, lp))
+            add(f"qlogis_{lt}_{lp}", "qlogis",
+                [pp, np.zeros_like(pc), np.ones_like(pc)], (lt, lp))
+    xp = np.array([1e-8, 0.001, 0.1, 0.5, 1.0, 2.0, 5.0, 12.0, 100.0, 1e6])
+    for (m, s) in [(0.0, 1.0), (0.5, 0.8), (-1.0, 2.0)]:
+        mm, ss = np.full_like(xp, m), np.full_like(xp, s)
+        for lt in (True, False):
+            for lp in (True, False):
+                add(f"plnorm_{m}_{s}_{lt}_{lp}", "plnorm", [xp, mm, ss], (lt, lp))
+        for gl in (True, False):
+            add(f"dlnorm_{m}_{s}_{gl}", "dlnorm", [xp, mm, ss], (gl,))
+    xw = np.array([0.0, 1e-8, 0.001, 0.1, 0.5, 1.0, 2.0, 5.0, 12.0, 100.0])
+    for (sh, scl) in [(0.5, 1.0), (1.0, 1.3), (2.0, 0.7), (5.0, 2.0)]:
+        shh, scc = np.full_like(xw, sh), np.full_like(xw, scl)
+        for lt in (True, False):
+            for lp in (True, False):
+                add(f"pweibull_{sh}_{scl}_{lt}_{lp}", "pweibull", [xw, shh, scc], (lt, lp))
+        for gl in (True, False):
+            add(f"dweibull_{sh}_{scl}_{gl}", "dweibull", [xw, shh, scc], (gl,))
+    for lt in (True, False):
+        for lp in (True, False):
+            pp = np.log(pc) if lp else pc
+            add(f"qlnorm_{lt}_{lp}", "qlnorm",
+                [pp, np.zeros_like(pc), np.ones_like(pc)], (lt, lp))
+            add(f"qweibull_{lt}_{lp}", "qweibull",
+                [pp, np.full_like(pc, 2.0), np.full_like(pc, 1.3)], (lt, lp))
+    xk = np.array([0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 50.0, 100.0])
+    for pr in (0.05, 0.3, 0.5, 0.8, 0.99):
+        prr = np.full_like(xk, pr)
+        for lt in (True, False):
+            for lp in (True, False):
+                add(f"pgeom_{pr}_{lt}_{lp}", "pgeom", [xk, prr], (lt, lp))
+        for gl in (True, False):
+            add(f"dgeom_{pr}_{gl}", "dgeom", [xk, prr], (gl,))
+    for lt in (True, False):
+        for lp in (True, False):
+            pp = np.log(pc) if lp else pc
+            add(f"qgeom_{lt}_{lp}", "qgeom", [pp, np.full_like(pc, 0.3)], (lt, lp))
+
+    # --- nbinom (prob + mu) / qhyper (f64 discrete → strict 0-ulp) ---
+    xnb = np.array([0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 40.0, 100.0])
+    for (sz, pr) in [(1.0, 0.3), (5.0, 0.5), (10.0, 0.7), (0.5, 0.2), (20.0, 0.9)]:
+        szz, prr = np.full_like(xnb, sz), np.full_like(xnb, pr)
+        for lt in (True, False):
+            for lp in (True, False):
+                add(f"pnbinom_{sz}_{pr}_{lt}_{lp}", "pnbinom", [xnb, szz, prr], (lt, lp))
+        for gl in (True, False):
+            add(f"dnbinom_{sz}_{pr}_{gl}", "dnbinom", [xnb, szz, prr], (gl,))
+    for (sz, m) in [(1.0, 2.0), (5.0, 8.0), (10.0, 3.0), (0.5, 20.0)]:
+        szz, mm = np.full_like(xnb, sz), np.full_like(xnb, m)
+        for gl in (True, False):
+            add(f"dnbinom_mu_{sz}_{m}_{gl}", "dnbinom_mu", [xnb, szz, mm], (gl,))
+    for lt in (True, False):
+        for lp in (True, False):
+            pp = np.log(pc) if lp else pc
+            add(f"qnbinom_{lt}_{lp}", "qnbinom",
+                [pp, np.full_like(pc, 5.0), np.full_like(pc, 0.4)], (lt, lp))
+    m_h = np.array([10.0, 20.0, 5.0, 30.0, 15.0, 8.0, 25.0, 12.0, 40.0, 7.0, 100.0])
+    n_h = np.array([15.0, 25.0, 10.0, 20.0, 12.0, 14.0, 18.0, 22.0, 30.0, 13.0, 50.0])
+    k_h = np.array([8.0, 15.0, 6.0, 25.0, 10.0, 9.0, 20.0, 16.0, 35.0, 11.0, 80.0])
+    for lt in (True, False):
+        for lp in (True, False):
+            pp = np.log(pc) if lp else pc
+            add(f"qhyper_{lt}_{lp}", "qhyper", [pp, m_h, n_h, k_h], (lt, lp))
+
     return C
 
 

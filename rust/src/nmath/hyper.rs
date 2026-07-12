@@ -8,9 +8,10 @@
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
 
-use super::gamma::r_log1_exp;
+use super::gamma::{r_dt_qiv, r_log1_exp};
 use super::loader::dbinom_raw;
 use super::norm::{dt0, dt1};
+use super::toms708::lbeta_scalar;
 
 #[inline]
 fn r_nonint(x: f64) -> bool {
@@ -133,6 +134,87 @@ pub(crate) fn phyper_scalar(
     }
 }
 
+#[inline]
+fn lfastchoose(n: f64, k: f64) -> f64 {
+    // choose.c: lfastchoose(n, k) = -log(n+1) - lbeta(n-k+1, k+1)
+    -(n + 1.0).ln() - lbeta_scalar(n - k + 1.0, k + 1.0)
+}
+
+pub(crate) fn qhyper_scalar(
+    mut p: f64,
+    mut nr: f64,
+    mut nb: f64,
+    mut n: f64,
+    lower_tail: bool,
+    log_p: bool,
+) -> f64 {
+    if p.is_nan() || nr.is_nan() || nb.is_nan() || n.is_nan() {
+        return p + nr + nb + n;
+    }
+    if !p.is_finite() || !nr.is_finite() || !nb.is_finite() || !n.is_finite() {
+        return f64::NAN;
+    }
+    nr = r_forceint(nr);
+    nb = r_forceint(nb);
+    let nn = nr + nb; // N
+    n = r_forceint(n);
+    if nr < 0.0 || nb < 0.0 || n < 0.0 || n > nn {
+        return f64::NAN;
+    }
+    // Find xr (= #red in sample) with phyper(xr) >= p > phyper(xr-1).
+    let xstart = 0.0f64.max(n - nb);
+    let xend = n.min(nr);
+    // R_Q_P01_boundaries(p, xstart, xend)
+    if log_p {
+        if p > 0.0 {
+            return f64::NAN;
+        }
+        if p == 0.0 {
+            return if lower_tail { xend } else { xstart };
+        }
+        if p == f64::NEG_INFINITY {
+            return if lower_tail { xstart } else { xend };
+        }
+    } else {
+        if p < 0.0 || p > 1.0 {
+            return f64::NAN;
+        }
+        if p == 0.0 {
+            return if lower_tail { xstart } else { xend };
+        }
+        if p == 1.0 {
+            return if lower_tail { xend } else { xstart };
+        }
+    }
+    let mut xr = xstart;
+    let mut xb = n - xr; // #black in sample
+    let small_n = nn < 1000.0; // no underflow in the product below
+    let mut term = lfastchoose(nr, xr) + lfastchoose(nb, xb) - lfastchoose(nn, n);
+    if small_n {
+        term = term.exp();
+    }
+    nr -= xr;
+    nb -= xb;
+    if !lower_tail || log_p {
+        p = r_dt_qiv(p, lower_tail, log_p);
+    }
+    p *= 1.0 - 1000.0 * f64::EPSILON; // was 64, but failed on FreeBSD sometimes
+    let mut sum = if small_n { term } else { term.exp() };
+    while sum < p && xr < xend {
+        xr += 1.0;
+        nb += 1.0;
+        if small_n {
+            term *= (nr / xr) * (xb / nb);
+        } else {
+            term += ((nr / xr) * (xb / nb)).ln();
+        }
+        sum += if small_n { term } else { term.exp() };
+        xb -= 1.0;
+        nr -= 1.0;
+    }
+    xr
+}
+
 // === PyO3 wrappers ===========================================================
 #[pyfunction]
 #[pyo3(name = "dhyper", signature = (x, r, b, n, give_log=false))]
@@ -173,6 +255,28 @@ pub fn phyper<'py>(
         nb.as_slice().unwrap(),
         n.as_slice().unwrap(),
         |x, nr, nb, n| phyper_scalar(x, nr, nb, n, lower_tail, log_p),
+    );
+    v.into_pyarray(py)
+}
+
+#[pyfunction]
+#[pyo3(name = "qhyper", signature = (p, nr, nb, n, lower_tail=true, log_p=false))]
+pub fn qhyper<'py>(
+    py: Python<'py>,
+    p: PyReadonlyArray1<'py, f64>,
+    nr: PyReadonlyArray1<'py, f64>,
+    nb: PyReadonlyArray1<'py, f64>,
+    n: PyReadonlyArray1<'py, f64>,
+    lower_tail: bool,
+    log_p: bool,
+) -> Bound<'py, PyArray1<f64>> {
+    let v = crate::par::map4(
+        py,
+        p.as_slice().unwrap(),
+        nr.as_slice().unwrap(),
+        nb.as_slice().unwrap(),
+        n.as_slice().unwrap(),
+        |p, nr, nb, n| qhyper_scalar(p, nr, nb, n, lower_tail, log_p),
     );
     v.into_pyarray(py)
 }

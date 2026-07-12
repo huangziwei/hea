@@ -3798,6 +3798,91 @@ def pnbinom_mu(x, size, mu, lower_tail=True, log_p=False):
     return w if lower_tail else wc
 
 
+def dnbinom(x, size, prob, give_log=False):
+    """R's ``dnbinom(x, size, prob)`` (nmath/dnbinom.c), bit-exact."""
+    if math.isnan(x) or math.isnan(size) or math.isnan(prob):
+        return x + size + prob
+    if prob <= 0 or prob > 1 or size < 0:
+        return _NAN
+    rd0 = _NEGINF if give_log else 0.0
+    if _R_nonint(x):
+        return rd0
+    if x < 0 or not math.isfinite(x):
+        return rd0
+    x = _r_forceint(x)
+    if x == 0:                   # limiting case as size -> 0: point mass at 0
+        if size == 0:
+            return 0.0 if give_log else 1.0
+        return (size * math.log(prob)) if give_log else math.pow(prob, size)
+    if not math.isfinite(size):
+        size = _DBL_MAX
+    if x < 1e-10 * size:         # 2 terms of Abramowitz & Stegun (6.1.47)
+        xx2s = (math.ldexp(x * (x - 1), -1) / size) if x < math.sqrt(_DBL_MAX) \
+            else x * (math.ldexp(x, -1) / size)
+        v = (size * math.log(prob) + x * (math.log(size) + math.log1p(-prob))
+             - _lgamma1p(x) + math.log1p(xx2s))
+        return v if give_log else math.exp(v)
+    if give_log:
+        p = math.log1p(-x / (size + x)) if x < size else math.log(size / (size + x))
+    else:
+        p = size / (size + x)
+    ans = _dbinom_raw(size, x + size, prob, 1 - prob, give_log)
+    return (p + ans) if give_log else p * ans
+
+
+def dnbinom_mu(x, size, mu, give_log=False):
+    """R's ``dnbinom(x, size, mu=)`` (nmath/dnbinom.c ``dnbinom_mu``), bit-exact."""
+    if math.isnan(x) or math.isnan(size) or math.isnan(mu):
+        return x + size + mu
+    if mu < 0 or size < 0:
+        return _NAN
+    rd0 = _NEGINF if give_log else 0.0
+    if _R_nonint(x):
+        return rd0
+    if x < 0 or not math.isfinite(x):
+        return rd0
+    if x == 0 and size == 0:
+        return 0.0 if give_log else 1.0
+    x = _r_forceint(x)
+    if not math.isfinite(size):        # limit case: Poisson
+        return _dpois_raw(x, mu, give_log)
+    if x == 0:
+        v = size * (math.log(size / (size + mu)) if size < mu
+                    else math.log1p(-mu / (size + mu)))
+        return v if give_log else math.exp(v)
+    if x < 1e-10 * size:
+        p = (math.log(size / (1 + size / mu)) if size < mu
+             else math.log(mu / (1 + mu / size)))
+        xx2s = (math.ldexp(x * (x - 1), -1) / size) if x < math.sqrt(_DBL_MAX) \
+            else x * (math.ldexp(x, -1) / size)
+        v = x * p - mu - _lgamma1p(x) + math.log1p(xx2s)
+        return v if give_log else math.exp(v)
+    if give_log:
+        p = math.log1p(-x / (size + x)) if x < size else math.log(size / (size + x))
+    else:
+        p = size / (size + x)
+    ans = _dbinom_raw(size, x + size, size / (size + mu), mu / (size + mu), give_log)
+    return (p + ans) if give_log else p * ans
+
+
+def pnbinom(x, size, prob, lower_tail=True, log_p=False):
+    """R's ``pnbinom(x, size, prob)`` (nmath/pnbinom.c → pbeta), bit-exact."""
+    if math.isnan(x) or math.isnan(size) or math.isnan(prob):
+        return x + size + prob
+    if not math.isfinite(size) or not math.isfinite(prob):
+        return _NAN
+    if size < 0 or prob <= 0 or prob > 1:
+        return _NAN
+    if size == 0:                # limiting case: point mass at zero
+        return _dt1(lower_tail, log_p) if x >= 0 else _dt0(lower_tail, log_p)
+    if x < 0:
+        return _dt0(lower_tail, log_p)
+    if not math.isfinite(x):
+        return _dt1(lower_tail, log_p)
+    x = math.floor(x + 1e-7)
+    return pbeta(prob, size, x + 1.0, lower_tail, log_p)
+
+
 # === qbeta — beta quantile (nmath/qbeta.c, AS 109 + Newton) ==================
 _DBL_very_MIN = 2.2250738585072014e-308 / 4.
 _DBL_log_v_MIN = _M_LN2 * (-1021 - 2)
@@ -4608,6 +4693,43 @@ def qnbinom_mu(p, size, mu, lower_tail=True, log_p=False):
     return _q_discrete(p, lower_tail, log_p, mu, sigma, gamma, _cdf, None)
 
 
+def qnbinom(p, size, prob, lower_tail=True, log_p=False):
+    """R's ``qnbinom(p, size, prob)`` (nmath/qnbinom.c) — discrete search,
+    bit-exact."""
+    if math.isnan(p) or math.isnan(size) or math.isnan(prob):
+        return p + size + prob
+    if prob == 0 and size == 0:     # (mu, size) path: prob = size/(size+mu)
+        return 0.
+    if prob <= 0 or prob > 1 or size < 0:
+        return _NAN
+    if prob == 1 or size == 0:
+        return 0.
+    # R_Q_P01_boundaries(p, 0, ML_POSINF)
+    if log_p:
+        if p > 0:
+            return _NAN
+        if p == 0:
+            return _INF if lower_tail else 0.
+        if p == _NEGINF:
+            return 0. if lower_tail else _INF
+    else:
+        if p < 0 or p > 1:
+            return _NAN
+        if p == 0:
+            return 0. if lower_tail else _INF
+        if p == 1:
+            return _INF if lower_tail else 0.
+    Q = 1.0 / prob
+    P = (1.0 - prob) * Q            # = (1-prob)/prob = Q-1
+    mu = size * P
+    sigma = math.sqrt(size * P * Q)
+    gamma = (Q + P) / sigma
+
+    def _cdf(y, lt, lg):
+        return pnbinom(y, size, prob, lt, lg)
+    return _q_discrete(p, lower_tail, log_p, mu, sigma, gamma, _cdf, None)
+
+
 # === dexp / pexp / qexp (nmath dexp.c / pexp.c / qexp.c) =====================
 def dexp(x, scale, give_log=False):
     if math.isnan(x) or math.isnan(scale):
@@ -4643,6 +4765,288 @@ def qexp(p, scale, lower_tail=True, log_p=False):
     if p == _dt0(lower_tail, log_p):
         return 0.
     return -scale * _R_DT_Clog(p, lower_tail, log_p)
+
+
+# === cauchy / logistic / log-normal / weibull / geom ========================
+# nmath dcauchy.c/pcauchy.c/qcauchy.c, dlogis.c/plogis.c/qlogis.c,
+# dlnorm.c/plnorm.c/qlnorm.c, dweibull.c/pweibull.c/qweibull.c,
+# dgeom.c/pgeom.c/qgeom.c. Closed-form (no LDOUBLE series) → 0-ulp to R.
+def _R_D_Clog(p, log_p):
+    # R_D_Clog(p) = log_p ? log1p(-p) : (0.5 - p + 0.5)
+    return math.log1p(-p) if log_p else (0.5 - p + 0.5)
+
+
+def _log1pexp(x):
+    # R's log1pexp (plogis.c): overflow-safe log(1 + exp(x))
+    if x <= 18.:
+        return math.log1p(math.exp(x))
+    if x > 33.3:
+        return x
+    return x + math.exp(-x)
+
+
+def _c_log(x):
+    # C log() semantics (no exception): log(0) = -Inf, log(neg) = NaN.
+    if x > 0:
+        return math.log(x)
+    return _NEGINF if x == 0 else _NAN
+
+
+def _q_p01_boundaries(p, lower_tail, log_p, left, right):
+    # R_Q_P01_boundaries(p, left, right): boundary value, or None to continue.
+    if log_p:
+        if p > 0:
+            return _NAN
+        if p == 0.:
+            return right if lower_tail else left
+        if p == _NEGINF:
+            return left if lower_tail else right
+    else:
+        if p < 0 or p > 1:
+            return _NAN
+        if p == 0.:
+            return left if lower_tail else right
+        if p == 1.:
+            return right if lower_tail else left
+    return None
+
+
+def dcauchy(x, location=0.0, scale=1.0, give_log=False):
+    if math.isnan(x) or math.isnan(location) or math.isnan(scale):
+        return x + location + scale
+    if scale <= 0.:
+        return _NAN
+    y = (x - location) / scale
+    return (-math.log(math.pi * scale * (1. + y * y))) if give_log \
+        else 1. / (math.pi * scale * (1. + y * y))
+
+
+def pcauchy(x, location=0.0, scale=1.0, lower_tail=True, log_p=False):
+    if math.isnan(x) or math.isnan(location) or math.isnan(scale):
+        return x + location + scale
+    if scale <= 0.:
+        return _NAN
+    x = (x - location) / scale
+    if math.isnan(x):
+        return _NAN
+    if not math.isfinite(x):
+        return _dt0(lower_tail, log_p) if x < 0 else _dt1(lower_tail, log_p)
+    if not lower_tail:
+        x = -x
+    # Installed R (no HAVE_ATANPI) uses the atan(1/x)/M_PI branch.
+    if abs(x) > 1:
+        y = math.atan(1 / x) / math.pi
+        if x > 0:
+            return _R_D_Clog(y, log_p)
+        return math.log(-y) if log_p else -y
+    v = 0.5 + math.atan(x) / math.pi
+    return math.log(v) if log_p else v
+
+
+def qcauchy(p, location=0.0, scale=1.0, lower_tail=True, log_p=False):
+    if math.isnan(p) or math.isnan(location) or math.isnan(scale):
+        return p + location + scale
+    if (log_p and p > 0) or ((not log_p) and (p < 0 or p > 1)):
+        return _NAN
+    if scale <= 0. or not math.isfinite(scale):
+        if scale == 0.:
+            return location
+        return _NAN
+    my_inf = location + (scale if lower_tail else -scale) * _INF
+    if log_p:
+        if p > -1:
+            if p == 0.:
+                return my_inf
+            lower_tail = not lower_tail
+            p = -math.expm1(p)
+        else:
+            p = math.exp(p)
+    elif p > 0.5:
+        if p == 1.:
+            return my_inf
+        p = 1 - p
+        lower_tail = not lower_tail
+    if p == 0.5:
+        return location
+    if p == 0.:
+        return location + (scale if lower_tail else -scale) * _NEGINF
+    return location + (-scale if lower_tail else scale) / tanpi(p)
+
+
+def dlogis(x, location=0.0, scale=1.0, give_log=False):
+    if math.isnan(x) or math.isnan(location) or math.isnan(scale):
+        return x + location + scale
+    if scale <= 0.:
+        return _NAN
+    x = abs((x - location) / scale)
+    e = math.exp(-x)
+    f = 1. + e
+    return (-(x + math.log(scale * f * f))) if give_log else e / (scale * f * f)
+
+
+def plogis(x, location=0.0, scale=1.0, lower_tail=True, log_p=False):
+    if math.isnan(x) or math.isnan(location) or math.isnan(scale):
+        return x + location + scale
+    if scale <= 0.:
+        return _NAN
+    x = (x - location) / scale
+    if math.isnan(x):
+        return _NAN
+    if not math.isfinite(x):  # R_P_bounds_Inf_01
+        return _dt1(lower_tail, log_p) if x > 0 else _dt0(lower_tail, log_p)
+    if log_p:
+        return -_log1pexp(-x if lower_tail else x)
+    return 1. / (1. + math.exp(-x if lower_tail else x))
+
+
+def qlogis(p, location=0.0, scale=1.0, lower_tail=True, log_p=False):
+    if math.isnan(p) or math.isnan(location) or math.isnan(scale):
+        return p + location + scale
+    b = _q_p01_boundaries(p, lower_tail, log_p, _NEGINF, _INF)
+    if b is not None:
+        return b
+    if scale < 0.:
+        return _NAN
+    if scale == 0.:
+        return location
+    if log_p:
+        p = (p - _R_Log1_Exp(p)) if lower_tail else (_R_Log1_Exp(p) - p)
+    else:
+        p = math.log((p / (1. - p)) if lower_tail else ((1. - p) / p))
+    return location + scale * p
+
+
+def dlnorm(x, meanlog=0.0, sdlog=1.0, give_log=False):
+    if math.isnan(x) or math.isnan(meanlog) or math.isnan(sdlog):
+        return x + meanlog + sdlog
+    if sdlog < 0:
+        return _NAN
+    if (not math.isfinite(x)) and _c_log(x) == meanlog:
+        return _NAN  # log(x) - meanlog is NaN
+    rd0 = _NEGINF if give_log else 0.0
+    if sdlog == 0.:
+        return _INF if _c_log(x) == meanlog else rd0
+    if x <= 0:
+        return rd0
+    y = (math.log(x) - meanlog) / sdlog
+    if give_log:
+        return -(_M_LN_SQRT_2PI + 0.5 * y * y + math.log(x * sdlog))
+    return _M_1_SQRT_2PI * math.exp(-0.5 * y * y) / (x * sdlog)
+
+
+def plnorm(x, meanlog=0.0, sdlog=1.0, lower_tail=True, log_p=False):
+    if math.isnan(x) or math.isnan(meanlog) or math.isnan(sdlog):
+        return x + meanlog + sdlog
+    if sdlog < 0:
+        return _NAN
+    if x > 0:
+        return pnorm5(math.log(x), meanlog, sdlog, lower_tail, log_p)
+    return _dt0(lower_tail, log_p)
+
+
+def qlnorm(p, meanlog=0.0, sdlog=1.0, lower_tail=True, log_p=False):
+    if math.isnan(p) or math.isnan(meanlog) or math.isnan(sdlog):
+        return p + meanlog + sdlog
+    b = _q_p01_boundaries(p, lower_tail, log_p, 0.0, _INF)
+    if b is not None:
+        return b
+    return math.exp(qnorm5(p, meanlog, sdlog, lower_tail, log_p))
+
+
+def dweibull(x, shape, scale=1.0, give_log=False):
+    if math.isnan(x) or math.isnan(shape) or math.isnan(scale):
+        return x + shape + scale
+    if shape <= 0 or scale <= 0:
+        return _NAN
+    rd0 = _NEGINF if give_log else 0.0
+    if x < 0:
+        return rd0
+    if not math.isfinite(x):
+        return rd0
+    if x == 0 and shape < 1:
+        return _INF
+    tmp1 = math.pow(x / scale, shape - 1)
+    tmp2 = tmp1 * (x / scale)
+    if give_log:
+        return -tmp2 + math.log(shape * tmp1 / scale)
+    return shape * tmp1 * math.exp(-tmp2) / scale
+
+
+def pweibull(x, shape, scale=1.0, lower_tail=True, log_p=False):
+    if math.isnan(x) or math.isnan(shape) or math.isnan(scale):
+        return x + shape + scale
+    if shape <= 0 or scale <= 0:
+        return _NAN
+    if x <= 0:
+        return _dt0(lower_tail, log_p)
+    x = -math.pow(x / scale, shape)
+    if lower_tail:
+        return _R_Log1_Exp(x) if log_p else -math.expm1(x)
+    return x if log_p else math.exp(x)
+
+
+def qweibull(p, shape, scale=1.0, lower_tail=True, log_p=False):
+    if math.isnan(p) or math.isnan(shape) or math.isnan(scale):
+        return p + shape + scale
+    if shape <= 0 or scale <= 0:
+        return _NAN
+    b = _q_p01_boundaries(p, lower_tail, log_p, 0.0, _INF)
+    if b is not None:
+        return b
+    return scale * math.pow(-_R_DT_Clog(p, lower_tail, log_p), 1. / shape)
+
+
+def dgeom(x, p, give_log=False):
+    if math.isnan(x) or math.isnan(p):
+        return x + p
+    if p <= 0 or p > 1:
+        return _NAN
+    rd0 = _NEGINF if give_log else 0.0
+    if _R_nonint(x):  # R_D_nonint_check
+        return rd0
+    if x < 0 or not math.isfinite(x) or p == 0:
+        return rd0
+    x = _r_forceint(x)
+    prob = _dbinom_raw(0., x, p, 1 - p, give_log)  # (1-p)^x, stable for small p
+    return (math.log(p) + prob) if give_log else p * prob
+
+
+def pgeom(x, p, lower_tail=True, log_p=False):
+    if math.isnan(x) or math.isnan(p):
+        return x + p
+    if p <= 0 or p > 1:
+        return _NAN
+    if x < 0.:
+        return _dt0(lower_tail, log_p)
+    if not math.isfinite(x):
+        return _dt1(lower_tail, log_p)
+    x = math.floor(x + 1e-7)
+    if p == 1.:  # we cannot assume IEEE
+        xv = 1. if lower_tail else 0.
+        if log_p:
+            return math.log(xv) if xv > 0 else _NEGINF
+        return xv
+    x = math.log1p(-p) * (x + 1)
+    if log_p:
+        return _R_DT_Clog(x, lower_tail, log_p)
+    return -math.expm1(x) if lower_tail else math.exp(x)
+
+
+def qgeom(p, prob, lower_tail=True, log_p=False):
+    if math.isnan(p) or math.isnan(prob):
+        return p + prob
+    if prob <= 0 or prob > 1:
+        return _NAN
+    if (log_p and p > 0) or ((not log_p) and (p < 0 or p > 1)):  # R_Q_P01_check
+        return _NAN
+    if prob == 1.:
+        return 0.
+    b = _q_p01_boundaries(p, lower_tail, log_p, 0.0, _INF)
+    if b is not None:
+        return b
+    # add a fuzz to ensure left continuity, but value must be >= 0
+    return max(0., math.ceil(
+        _R_DT_Clog(p, lower_tail, log_p) / math.log1p(-prob) - 1 - 1e-12))
 
 
 # ============================================================================
@@ -6754,6 +7158,62 @@ def phyper(x, NR, NB, n, lower_tail=True, log_p=False):
     if log_p:  # R_DT_Log(d + pd)
         return (d + pd) if lower_tail else _R_Log1_Exp(d + pd)
     return (d * pd) if lower_tail else (0.5 - d * pd + 0.5)  # R_D_Lval
+
+
+def qhyper(p, NR, NB, n, lower_tail=True, log_p=False):
+    """R's ``qhyper(p, m, n, k)`` (nmath/qhyper.c) — hypergeometric quantile,
+    bit-exact. Native arg order (p, NR=m white, NB=n black, n=k drawn)."""
+    if math.isnan(p) or math.isnan(NR) or math.isnan(NB) or math.isnan(n):
+        return p + NR + NB + n
+    if not (math.isfinite(p) and math.isfinite(NR) and math.isfinite(NB)
+            and math.isfinite(n)):
+        return _NAN
+    NR = _r_forceint(NR)
+    NB = _r_forceint(NB)
+    N = NR + NB
+    n = _r_forceint(n)
+    if NR < 0 or NB < 0 or n < 0 or n > N:
+        return _NAN
+    xstart = max(0.0, n - NB)
+    xend = min(n, NR)
+    # R_Q_P01_boundaries(p, xstart, xend)
+    if log_p:
+        if p > 0:
+            return _NAN
+        if p == 0:
+            return xend if lower_tail else xstart
+        if p == _NEGINF:
+            return xstart if lower_tail else xend
+    else:
+        if p < 0 or p > 1:
+            return _NAN
+        if p == 0:
+            return xstart if lower_tail else xend
+        if p == 1:
+            return xend if lower_tail else xstart
+    xr = xstart
+    xb = n - xr                  # = #{black balls in sample}
+    small_N = N < 1000           # won't underflow in the product below
+    term = _lfastchoose(NR, xr) + _lfastchoose(NB, xb) - _lfastchoose(N, n)
+    if small_N:
+        term = math.exp(term)
+    NR -= xr
+    NB -= xb
+    if (not lower_tail) or log_p:
+        p = _R_DT_qIv(p, lower_tail, log_p)
+    p *= 1 - 1000 * _DBL_EPSILON  # was 64, but failed on FreeBSD sometimes
+    ssum = term if small_N else math.exp(term)
+    while ssum < p and xr < xend:
+        xr += 1
+        NB += 1
+        if small_N:
+            term *= (NR / xr) * (xb / NB)
+        else:
+            term += math.log((NR / xr) * (xb / NB))
+        ssum += term if small_N else math.exp(term)
+        xb -= 1
+        NR -= 1
+    return xr
 
 
 # === Brent root-finder (src/zeroin.c R_zeroin2) — backs uniroot =============

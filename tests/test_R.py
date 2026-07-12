@@ -40,6 +40,12 @@ from hea.R import (
     dhyper, phyper,
     dsignrank, psignrank, qsignrank, dwilcox, pwilcox, qwilcox,
     dbinom, pbinom, dpois, ppois, punif, qexp, pgamma, pbeta,
+    dcauchy, pcauchy, qcauchy, rcauchy,
+    dlogis, plogis, qlogis,
+    dlnorm, plnorm, qlnorm,
+    dweibull, pweibull, qweibull, rweibull,
+    dgeom, pgeom, qgeom, rgeom,
+    qhyper, dnbinom, pnbinom, qnbinom,
     set_seed,
 )
 
@@ -619,10 +625,16 @@ _R_EXPR_SKIP = {
     "ptukey", "qtukey",
     "dsignrank", "psignrank", "qsignrank",
     "dwilcox", "pwilcox", "qwilcox",
-    "dhyper", "phyper",
+    "dhyper", "phyper", "qhyper",
+    "dnbinom", "pnbinom", "qnbinom",
     "dexp", "pexp", "qexp", "rexp",
     "dgamma", "pgamma", "qgamma", "rgamma",
     "dbeta", "pbeta", "qbeta", "rbeta",
+    "dcauchy", "pcauchy", "qcauchy", "rcauchy",
+    "dlogis", "plogis", "qlogis", "rlogis",
+    "dlnorm", "plnorm", "qlnorm", "rlnorm",
+    "dweibull", "pweibull", "qweibull", "rweibull",
+    "dgeom", "pgeom", "qgeom", "rgeom",
     "set_seed",
     # Frame-meta — operate on the DataFrame, not a column.
     "nrow", "ncol", "dim", "length", "colnames", "names",
@@ -868,6 +880,59 @@ def test_signrank_wilcox_distributions():
         (float(dwilcox(20, 6, 8)), "dwilcox(20, 6, 8)", 0.044622044622044624),
         (float(qwilcox(0.1, 10, 10)), "qwilcox(0.1, 10, 10)", 33.0),
     ])
+
+
+def test_cauchy_logis_lnorm_weibull_geom():
+    # Second-half continuous + geometric families. Closed-form (no LDOUBLE
+    # series) → the public API (Rust f64 _rs fast path) is itself 0-ulp to R,
+    # so assert it directly (unlike the noncentral f64 kernels).
+    _assert_r([
+        (float(dcauchy(1.5, 0, 2)), "dcauchy(1.5, 0, 2)", 0.10185916357881301),
+        (float(pcauchy(1.5, 0, 2)), "pcauchy(1.5, 0, 2)", 0.70483276469913347),
+        (float(qcauchy(0.9, 0, 2)), "qcauchy(0.9, 0, 2)", 6.1553670743505089),
+        (float(dlogis(1.0)), "dlogis(1)", 0.19661193324148188),
+        (float(plogis(1.0)), "plogis(1)", 0.7310585786300049),
+        (float(qlogis(0.8)), "qlogis(0.8)", 1.3862943611198908),
+        (float(dlnorm(2.0)), "dlnorm(2)", 0.15687401927898109),
+        (float(plnorm(2.0)), "plnorm(2)", 0.75589140421441725),
+        (float(qlnorm(0.9)), "qlnorm(0.9)", 3.6022244792791591),
+        (float(dweibull(1.5, 2, 1.3)), "dweibull(1.5, 2, 1.3)", 0.46884775144958446),
+        (float(pweibull(1.5, 2, 1.3)), "pweibull(1.5, 2, 1.3)", 0.73588243335006742),
+        (float(qweibull(0.9, 2, 1.3)), "qweibull(0.9, 2, 1.3)", 1.9726552682006904),
+        (float(dgeom(3, 0.4)), "dgeom(3, 0.4)", 0.086399999999999991),
+        (float(pgeom(3, 0.4)), "pgeom(3, 0.4)", 0.87040000000000006),
+        (float(qgeom(0.9, 0.4)), "qgeom(0.9, 0.4)", 4.0),
+    ])
+
+
+def test_nbinom_qhyper():
+    # Negative binomial (prob + mu parameterizations) and hypergeometric
+    # quantile. f64 discrete kernels → the public _rs path is 0-ulp to R.
+    _assert_r([
+        (float(dnbinom(3, 5, 0.4)), "dnbinom(3, 5, 0.4)", 0.077414399999999994),
+        (float(dnbinom(3, 5, mu=8)), "dnbinom(3, 5, mu=8)", 0.068650105431054348),
+        (float(pnbinom(3, 5, 0.4)), "pnbinom(3, 5, 0.4)", 0.17367040000000014),
+        (float(pnbinom(3, 5, mu=8)), "pnbinom(3, 5, mu=8)", 0.15077356023716559),
+        (float(qnbinom(0.9, 5, 0.4)), "qnbinom(0.9, 5, 0.4)", 13.0),
+        (float(qnbinom(0.9, 5, mu=8)), "qnbinom(0.9, 5, mu=8)", 14.0),
+        (float(dnbinom(3, 5, 0.4, log=True)),
+         "dnbinom(3, 5, 0.4, log=TRUE)", -2.558582469179334),
+        (float(pnbinom(10, 5, 0.4, lower_tail=False)),
+         "pnbinom(10, 5, 0.4, lower.tail=FALSE)", 0.2172777056501759),
+        (float(qhyper(0.9, 20, 25, 15)), "qhyper(0.9, 20, 25, 15)", 9.0),
+        (float(qhyper(0.5, 8, 14, 9)), "qhyper(0.5, 8, 14, 9)", 3.0),
+    ])
+
+
+def test_r_generators_cauchy_weibull_geom():
+    # r* draws bit-exact to R's set.seed MT stream (rcauchy/rweibull consume one
+    # uniform per variate; rgeom interleaves exp_rand + rpois per rgeom.c).
+    set_seed(42)
+    assert float(rcauchy(3, 1, 2)[0]) == pytest.approx(0.45155182574632846, rel=1e-12)
+    set_seed(13)
+    assert float(rweibull(3, 1.7, 2.3)[0]) == pytest.approx(1.2236370854093777, rel=1e-12)
+    set_seed(101)
+    assert rgeom(4, 0.08).astype(int).tolist() == [7, 23, 9, 9]
 
 
 def test_binom():

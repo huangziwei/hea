@@ -9,6 +9,7 @@ use pyo3::wrap_pyfunction;
 pub mod bd0_scale;
 pub mod coeffs;
 pub mod consts;
+pub mod contin;
 pub mod discrete;
 pub mod exp;
 pub mod gamma;
@@ -58,7 +59,15 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(discrete::qbinom, m)?)?;
     m.add_function(wrap_pyfunction!(discrete::pnbinom_mu, m)?)?;
     m.add_function(wrap_pyfunction!(discrete::qnbinom_mu, m)?)?;
+    m.add_function(wrap_pyfunction!(discrete::dnbinom, m)?)?;
+    m.add_function(wrap_pyfunction!(discrete::dnbinom_mu, m)?)?;
+    m.add_function(wrap_pyfunction!(discrete::pnbinom, m)?)?;
+    m.add_function(wrap_pyfunction!(discrete::qnbinom, m)?)?;
     m.add_function(wrap_pyfunction!(discrete::dbeta, m)?)?;
+    // geometric
+    m.add_function(wrap_pyfunction!(discrete::dgeom, m)?)?;
+    m.add_function(wrap_pyfunction!(discrete::pgeom, m)?)?;
+    m.add_function(wrap_pyfunction!(discrete::qgeom, m)?)?;
     // t / F
     m.add_function(wrap_pyfunction!(tf::pt, m)?)?;
     m.add_function(wrap_pyfunction!(tf::qt, m)?)?;
@@ -84,9 +93,23 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // hypergeometric
     m.add_function(wrap_pyfunction!(hyper::dhyper, m)?)?;
     m.add_function(wrap_pyfunction!(hyper::phyper, m)?)?;
+    m.add_function(wrap_pyfunction!(hyper::qhyper, m)?)?;
     // exponential
     m.add_function(wrap_pyfunction!(exp::dexp, m)?)?;
     m.add_function(wrap_pyfunction!(exp::pexp, m)?)?;
     m.add_function(wrap_pyfunction!(exp::qexp, m)?)?;
+    // cauchy / logistic / log-normal / weibull
+    m.add_function(wrap_pyfunction!(contin::dcauchy, m)?)?;
+    m.add_function(wrap_pyfunction!(contin::pcauchy, m)?)?;
+    m.add_function(wrap_pyfunction!(contin::qcauchy, m)?)?;
+    m.add_function(wrap_pyfunction!(contin::dlogis, m)?)?;
+    m.add_function(wrap_pyfunction!(contin::plogis, m)?)?;
+    m.add_function(wrap_pyfunction!(contin::qlogis, m)?)?;
+    m.add_function(wrap_pyfunction!(contin::dlnorm, m)?)?;
+    m.add_function(wrap_pyfunction!(contin::plnorm, m)?)?;
+    m.add_function(wrap_pyfunction!(contin::qlnorm, m)?)?;
+    m.add_function(wrap_pyfunction!(contin::dweibull, m)?)?;
+    m.add_function(wrap_pyfunction!(contin::pweibull, m)?)?;
+    m.add_function(wrap_pyfunction!(contin::qweibull, m)?)?;
     Ok(())
 }
