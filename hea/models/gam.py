@@ -98,6 +98,11 @@ _PLS_EMPTY = np.empty(0, dtype=np.float64)
 # negligible at small n. Matches the rust TSQR block threshold (n_blocks).
 _PLS_RS_MIN_N = 1024
 
+# plot.gam's 1-D confidence-band multiplier. mgcv sets ``clev <- .95`` for a
+# 1-D term (plots.r:952) and widens by ``se.mult <- -qnorm((1-clev)/2)``
+# (plots.r:1417) — 1.959964, not 2.
+_SE_MULT_1D = -float(_nmath.qnorm5((1.0 - 0.95) / 2.0))
+
 __all__ = ["gam", "gam_control"]
 
 
@@ -9817,11 +9822,17 @@ class gam:
     # Internals
     # -----------------------------------------------------------------------
 
-    def _block_predict_mat(self, block, grid_df) -> np.ndarray:
+    def _block_predict_mat(
+        self, block, grid_df, *, apply_by: bool = True
+    ) -> np.ndarray:
         """Block basis at grid points, with the identifiability drop
         applied (predict-time bases rebuild the full columns; the fitted
-        coefficients live on the reduced ones)."""
-        B = np.asarray(block.spec.predict_mat(grid_df), dtype=float)
+        coefficients live on the reduced ones).
+
+        ``apply_by=False`` holds a ``by=`` variable at 1 — mgcv's
+        plot-time convention (plots.r:933); see
+        :meth:`BasisSpec.predict_mat`."""
+        B = np.asarray(block.spec.predict_mat(grid_df, apply_by=apply_by), dtype=float)
         if self._block_keep is not None:
             i = next(j for j, b in enumerate(self._blocks) if b is block)
             B = B[:, self._block_keep[i]]
@@ -15537,6 +15548,8 @@ class gam:
         band_alpha=0.2,
         rug=True,
         partial_residuals=False,
+        by_resids: bool = False,
+        n_grid_1d: int = 100,
         n_grid: int = 40,
         too_far: float = 0.1,
         zlim=None,
@@ -15549,8 +15562,9 @@ class gam:
 
         Auto-dispatches by smooth dimensionality:
 
-        - **1D** ``s(x)`` → curve of ``f̂(x_i)`` with a 2·SE band, optional
-          rug and partial residuals.
+        - **1D** ``s(x)`` → curve of ``f̂`` over an evenly spaced grid of
+          ``n_grid_1d`` points spanning the covariate range, with a
+          1.96·SE band, optional rug and partial residuals.
         - **2D** ``s(x,y)`` / ``te(x,y)`` → contour plot of ``f̂(x,y)``
           (default, ``scheme=0``) or a 3D persp wireframe (``scheme=1``).
           Contour: bold = f̂, dashed = f̂−SE, dotted = f̂+SE (matches
@@ -15566,7 +15580,9 @@ class gam:
 
         - Factor term → horizontal-bar termplot, one bar per level
           (reference level pinned at 0), with ±SE dashed bars and a rug.
-        - Numeric term → linear partial effect ``β·x`` with a 2·SE band.
+        - Numeric term → linear partial effect ``β·x`` with a 2·SE band
+          (mgcv routes these to ``termplot``, which keeps the ±2·SE
+          convention rather than the 1.96 the smooth panels use).
 
         Multi-block factor-by smooths (e.g. ``s(x, by=g)`` for each level
         of ``g``) appear as separate panels — same as mgcv.
@@ -15597,9 +15613,18 @@ class gam:
         n_cols : int
             Columns in the grid layout when ``ax`` is None.
         partial_residuals : bool
-            (1D only) Overlay partial residuals (working residual + ``f̂_i``).
+            (1D only) Overlay partial residuals (working residual + the
+            term's fitted value at each data row).
+        by_resids : bool
+            (1D only) Also draw partial residuals on panels for ``by=``
+            smooths. Off by default, like mgcv's ``by.resids``: such a
+            term contributes 0 outside its level, so the residuals for
+            those rows carry no information about the curve.
         rug : bool
             (1D only) Draw a rug of x-values at the bottom of each panel.
+        n_grid_1d : int
+            (1D only) Number of x points the curve is evaluated at.
+            Default 100, matching mgcv's ``n``.
         n_grid : int
             (2D only) Per-axis grid resolution. Default 40 (mgcv uses 30).
         too_far : float
@@ -15717,8 +15742,10 @@ class gam:
                         band_alpha=band_alpha,
                         rug=rug,
                         partial_residuals=partial_residuals,
+                        by_resids=by_resids,
                         wr_all=wr_all,
                         ylabel=title,
+                        n_grid_1d=n_grid_1d,
                     )
                 elif sch == 1:
                     self._plot_smooth_2d_persp(
@@ -15936,60 +15963,85 @@ class gam:
         band_alpha,
         rug,
         partial_residuals,
+        by_resids,
         wr_all,
         ylabel,
+        n_grid_1d,
     ):
-        """1D smooth panel: curve + 2·SE band + optional rug / partial residuals."""
+        """1D smooth panel: curve + 1.96·SE band + optional rug / partial residuals.
+
+        Port of mgcv's ``plot.mgcv.smooth`` ``dim==1`` branch
+        (plots.r:929-956) plus the fit/se assembly ``plot.gam`` does around
+        it (plots.r:1391-1409). The curve is evaluated on a fresh
+        ``PredictMat`` over an evenly spaced grid spanning the covariate
+        range — ``seq(min(raw), max(raw), length=n)`` — *not* on the
+        stored model matrix. ``block.X`` has one row per row the fitter
+        saw, which equals the data only for ``gam()``: ``bam()`` keeps the
+        last ``chunk.size`` block and ``bam(discrete=TRUE)`` keeps the
+        compressed unique-covariate-value design, so indexing it by data
+        row is wrong there.
+
+        ``raw`` (rug and partial-residual x positions) stays the full data
+        column, unfiltered — mgcv takes it straight from the model frame.
+        """
         cov_name = block.term[0]
-        x = self.data[cov_name].to_numpy().astype(float).flatten()
-        B = block.X
+        # `raw <- data[x$term][[1]]` — the untouched model-frame column.
+        raw = self.data[cov_name].to_numpy().astype(float).ravel()
+        xx = np.linspace(np.nanmin(raw), np.nanmax(raw), n_grid_1d)
+        grid_df = pl.DataFrame({cov_name: xx})
+        # by held at 1, so a factor-by panel shows its level's curve rather
+        # than the mask-zeroed basis.
+        B = self._block_predict_mat(block, grid_df, apply_by=False)
         beta = self._beta[a:bcol]
         Vp = self.Vp[a:bcol, a:bcol]
         fhat = B @ beta
-        # Var(f̂_i) = B_i · Vp · B_iᵀ; rowwise.
+        # se.fit = sqrt(pmax(0, rowSums((X %*% Vp) * X))) (plots.r:1409).
         var_f = ((B @ Vp) * B).sum(axis=1)
         se_f = np.sqrt(np.clip(var_f, 0.0, None))
 
-        # Factor-by basis is zero outside the level: filter to where
-        # the smooth is actually evaluated, otherwise we get a flat-0
-        # line through the masked rows.
-        active = np.any(np.abs(B) > 0, axis=1)
-        xa = x[active]
-        fa = fhat[active]
-        sa = se_f[active]
-
-        order = np.argsort(xa)
-        xs, fs, ses = xa[order], fa[order], sa[order]
-
         ax.axhline(0, color="black", linestyle="--", linewidth=0.5)
         ax.fill_between(
-            xs,
-            fs - 2 * ses,
-            fs + 2 * ses,
+            xx,
+            fhat - _SE_MULT_1D * se_f,
+            fhat + _SE_MULT_1D * se_f,
             color=band_color,
             alpha=band_alpha,
             linewidth=0,
         )
-        ax.plot(xs, fs, color=color, linewidth=1.0)
+        ax.plot(xx, fhat, color=color, linewidth=1.0)
 
-        if partial_residuals:
-            pr = wr_all[active] + fa
-            ax.scatter(
-                xa,
-                pr,
-                facecolor="none",
-                edgecolor="grey",
-                s=10,
-                alpha=0.5,
-            )
+        # `partial.resids && (by.resids || x$by=="NA")` (plots.r:1097): a
+        # by-variable term contributes 0 to rows outside its level, so its
+        # partial residuals are off unless asked for.
+        if partial_residuals and (by_resids or block.spec.by is None):
+            # `fv.terms[,i] + w.resid` — the term evaluated at the DATA
+            # rows (predict type="terms", by applied), not on the grid.
+            f_data = self._block_predict_mat(block, self.data) @ beta
+            if raw.shape[0] != f_data.shape[0]:
+                import warnings
+
+                warnings.warn(
+                    "Partial residuals do not have a natural x-axis "
+                    "location for linear functional terms",
+                    stacklevel=2,
+                )
+            else:
+                ax.scatter(
+                    raw,
+                    wr_all + f_data,
+                    facecolor="none",
+                    edgecolor="grey",
+                    s=10,
+                    alpha=0.5,
+                )
 
         if rug:
             # Anchor at axes-fraction y=0 (data x) so the rug follows any
             # later ylim change instead of stranding at the original ymin.
             trans = blended_transform_factory(ax.transData, ax.transAxes)
             ax.plot(
-                xa,
-                np.zeros_like(xa),
+                raw,
+                np.zeros_like(raw),
                 "|",
                 transform=trans,
                 color="black",

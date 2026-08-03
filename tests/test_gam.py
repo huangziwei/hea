@@ -1310,6 +1310,128 @@ def test_plot_smooth_ax_3d_required_for_persp():
     assert out is ax3d
 
 
+def _plot_curve(m, **kw):
+    """The (x, y) polyline ``plot_smooth`` actually draws for a 1D panel."""
+    fig, ax = plt.subplots()
+    m.plot_smooth(ax=ax, **kw)
+    curve = [ln for ln in ax.lines if len(ln.get_xdata()) > 2][0]
+    xs = np.asarray(curve.get_xdata(), dtype=float)
+    ys = np.asarray(curve.get_ydata(), dtype=float)
+    plt.close(fig)
+    return xs, ys
+
+
+def test_plot_smooth_1d_evaluates_on_a_grid_not_the_stored_design():
+    """1D panels must rebuild the basis on an ``n_grid_1d`` grid spanning the
+    covariate range (mgcv ``plot.mgcv.smooth`` plots.r:929-956), never index
+    ``block.X`` by data row.
+
+    ``block.X`` has one row per row the *fitter* saw, which equals the data
+    only for ``gam()``. ``bam()`` keeps the last ``chunk_size`` block and
+    ``bam(discrete=True)`` keeps the compressed unique-covariate-value
+    design, so the old data-row indexing raised ``IndexError`` on both.
+    Values are pinned against ``mgcv::plot(bam(..., discrete=TRUE), n=100)``.
+    """
+    from hea.models.bam import bam
+
+    rng = np.random.default_rng(11)
+    n = 2000
+    x = np.round(rng.uniform(0, 1, n), 2)  # 101 unique values -> real compression
+    d = pl.DataFrame({"x": x, "y": np.sin(2 * np.pi * x) + rng.normal(0, 0.3, n)})
+
+    m = bam("y ~ s(x, k=10)", d, discrete=True)
+    assert np.shape(m._blocks[0].X)[0] != d.height  # the compressed mini-frame
+
+    xs, ys = _plot_curve(m, select=0, rug=False)
+    assert len(xs) == 100  # mgcv's n
+    np.testing.assert_allclose(xs[[0, -1]], [x.min(), x.max()], rtol=1e-12)
+    idx = [0, 24, 49, 74, 99]
+    np.testing.assert_allclose(
+        xs[idx],
+        [0.0, 0.24242424242424243, 0.49494949494949497, 0.74747474747474751, 1.0],
+        rtol=1e-12,
+    )
+    # Pinned against mgcv; atol (not rtol) because two of the five grid
+    # points sit near a zero crossing of f̂.
+    np.testing.assert_allclose(
+        ys[idx],
+        [
+            -0.083890896283563457,
+            0.99266179501224905,
+            0.00050279336478448655,
+            -1.0007728914105209,
+            0.0084398854201928053,
+        ],
+        rtol=0,
+        atol=1e-6,
+    )
+
+    # n_grid_1d is honoured, and a chunked dense bam (basis built from a
+    # 200-row subsample, not the 2000 data rows) plots too.
+    assert len(_plot_curve(m, select=0, rug=False, n_grid_1d=37)[0]) == 37
+    m_dense = bam("y ~ s(x, k=10)", d, discrete=False, chunk_size=200)
+    assert np.shape(m_dense._blocks[0].X)[0] != d.height
+    assert len(_plot_curve(m_dense, select=0, rug=False)[0]) == 100
+
+
+def test_plot_smooth_1d_band_is_1p96_se():
+    """mgcv widens the 1D band by ``-qnorm((1-clev)/2)`` with ``clev=.95``
+    (plots.r:952/1417) — 1.959964, not 2."""
+    from hea.models.gam import _SE_MULT_1D
+
+    np.testing.assert_allclose(_SE_MULT_1D, 1.9599639845400534, rtol=1e-14)
+
+    rng = np.random.default_rng(11)
+    n = 600
+    x = np.round(rng.uniform(0, 1, n), 2)
+    d = pl.DataFrame({"x": x, "y": np.sin(2 * np.pi * x) + rng.normal(0, 0.3, n)})
+    m = gam("y ~ s(x, k=10)", d)
+
+    fig, ax = plt.subplots()
+    m.plot_smooth(select=0, ax=ax, rug=False)
+    xs, ys = _plot_curve(m, select=0, rug=False)
+    band = ax.collections[0].get_paths()[0].vertices
+    lo = band[1 : len(xs) + 1, 1]
+    hi = band[len(xs) + 2 : 2 * len(xs) + 2, 1][::-1]
+    plt.close(fig)
+
+    B = m._block_predict_mat(m._blocks[0], pl.DataFrame({"x": xs}), apply_by=False)
+    a, b = m._block_col_ranges[0]
+    se = np.sqrt(((B @ m.Vp[a:b, a:b]) * B).sum(axis=1))
+    np.testing.assert_allclose(hi - ys, _SE_MULT_1D * se, rtol=1e-12)
+    np.testing.assert_allclose(ys - lo, _SE_MULT_1D * se, rtol=1e-12)
+
+
+def test_plot_smooth_1d_by_panel_rug_and_resids():
+    """For a ``by=`` smooth mgcv rugs the *whole* model-frame column
+    (``raw <- data[x$term][[1]]``, plots.r:930 — no level filter) and skips
+    partial residuals unless ``by.resids=TRUE`` (plots.r:1097)."""
+    rng = np.random.default_rng(3)
+    n = 400
+    x = rng.uniform(0, 1, n)
+    g = rng.choice(["a", "b"], n)
+    y = np.where(g == "a", np.sin(2 * np.pi * x), np.cos(2 * np.pi * x)) + rng.normal(
+        0, 0.3, n
+    )
+    d = pl.DataFrame({"x": x, "g": g, "y": y}).with_columns(
+        pl.col("g").cast(pl.Categorical)
+    )
+    m = gam("y ~ g + s(x, by=g, k=8)", d)
+
+    fig, ax = plt.subplots()
+    m.plot_smooth(select=0, ax=ax, rug=True, partial_residuals=True)
+    rug = [ln for ln in ax.lines if ln.get_marker() == "|"][0]
+    assert len(rug.get_xdata()) == n  # not just the 'a' rows
+    assert not [c for c in ax.collections if c.get_offsets().shape[0] > 10]
+    plt.close(fig)
+
+    fig, ax = plt.subplots()
+    m.plot_smooth(select=0, ax=ax, rug=False, partial_residuals=True, by_resids=True)
+    pts = [c for c in ax.collections if c.get_offsets().shape[0] > 10]
+    assert len(pts) == 1 and pts[0].get_offsets().shape[0] == n
+    plt.close(fig)
+
+
 def test_gam_gamma_validation():
     d = load_dataset("R", "iris")
     with pytest.raises(ValueError, match="gamma"):

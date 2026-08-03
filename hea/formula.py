@@ -3260,7 +3260,17 @@ class BasisSpec:
     summation_dim: Optional[int] = None
     matrix_vars: Optional[tuple[str, ...]] = None
 
-    def predict_mat(self, data: pl.DataFrame) -> np.ndarray:
+    def predict_mat(self, data: pl.DataFrame, *, apply_by: bool = True) -> np.ndarray:
+        # ``apply_by=False`` skips the ``by=`` step, reproducing mgcv's
+        # plot-time convention of evaluating the term with the by variable
+        # held at 1 (``by <- rep(1,n)``, plots.r:933/976). ``PredictMat``
+        # then takes its numeric branch and multiplies through by 1
+        # (smooth.r:4350), so the basis comes back unmasked/unscaled even
+        # for a factor by. Doing it here rather than by synthesising a
+        # by column covers the comparison forms ``_eval_by_col`` accepts
+        # (``g == "a"``, ``as.numeric(...)``), which have no single
+        # column to set.
+        #
         # mgcv applies the summation convention from the PREDICT data's SHAPE,
         # not a stored flag: ``PredictMat`` row-sums the model matrix down to
         # ``n`` points only when it has more than ``n`` rows (smooth.r:4361),
@@ -3280,7 +3290,7 @@ class BasisSpec:
             long_data, n, m = long_form_view(data, list(matrix_vars))
             raw = self.predict_raw if self.predict_raw is not None else self.raw
             X = raw.eval(long_data)
-            if self.by is not None:
+            if self.by is not None and apply_by:
                 X = self.by.apply(X, long_data)
             # Row-block sum FIRST, then absorb. Sweep-drop's de-mean is
             # non-linear, and mgcv computes both the drop column and the
@@ -3293,7 +3303,7 @@ class BasisSpec:
             return X
         raw = self.predict_raw if self.predict_raw is not None else self.raw
         X = raw.eval(data)
-        if self.by is not None:
+        if self.by is not None and apply_by:
             X = self.by.apply(X, data)
         if self.absorb is not None:
             X = self.absorb.apply(X)
