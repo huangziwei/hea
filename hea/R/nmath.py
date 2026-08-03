@@ -4792,6 +4792,15 @@ def _c_log(x):
     return _NEGINF if x == 0 else _NAN
 
 
+def _c_div(a, b):
+    # C `/` semantics (no exception): x/0 = +-Inf by the sign rule, 0/0 = NaN.
+    if b != 0.0 or math.isnan(a):
+        return a / b
+    if a == 0.0:
+        return _NAN
+    return math.copysign(_INF, a) * math.copysign(1.0, b)
+
+
 def _q_p01_boundaries(p, lower_tail, log_p, left, right):
     # R_Q_P01_boundaries(p, left, right): boundary value, or None to continue.
     if log_p:
@@ -4930,7 +4939,10 @@ def dlnorm(x, meanlog=0.0, sdlog=1.0, give_log=False):
         return rd0
     y = (math.log(x) - meanlog) / sdlog
     if give_log:
-        return -(_M_LN_SQRT_2PI + 0.5 * y * y + math.log(x * sdlog))
+        # dlnorm.c:47 `-(M_LN_SQRT_2PI + 0.5*y*y + log(x*sdlog))`: clang fuses
+        # `M_LN_SQRT_2PI + (0.5*y)*y` into one fmadd on arm64 (same shape as
+        # dnorm4 above), so `_rfma` keeps this 0-ulp to R on both arches.
+        return -(_rfma(0.5 * y, y, _M_LN_SQRT_2PI) + math.log(x * sdlog))
     return _M_1_SQRT_2PI * math.exp(-0.5 * y * y) / (x * sdlog)
 
 
@@ -5865,9 +5877,11 @@ def ptukey(q: float, rr: float, cc: float, df: float,
     if df > dlarg:
         return _dt_val(_wprob(q, rr, cc), lower_tail, log_p)
 
-    # leading constant
+    # leading constant.  clang contracts the *leading* multiply of each
+    # `a*b ± c` into an fmadd on arm64, so `_rfma` (= plain `a*b+c` on x86)
+    # is what keeps this whole quadrature 0-ulp to R on both arches.
     f2 = df * 0.5
-    f2lf = ((f2 * math.log(df)) - (df * _M_LN2)) - _lgammafn(f2)
+    f2lf = _rfma(f2, math.log(df), -(df * _M_LN2)) - _lgammafn(f2)
     f21 = f2 - 1.0
 
     ff4 = df * 0.25
@@ -5890,17 +5904,21 @@ def ptukey(q: float, rr: float, cc: float, df: float,
         for jj in range(1, nlegq + 1):
             if ihalfq < jj:
                 j = jj - ihalfq - 1
-                t1 = (f2lf + (f21 * math.log(twa1 + (xlegq[j] * ulen)))) \
-                    - (((xlegq[j] * ulen) + twa1) * ff4)
+                xu1 = _rfma(xlegq[j], ulen, twa1)
+                t1 = _rfma(-xu1, ff4,
+                           _rfma(f21, math.log(xu1), f2lf))
             else:
                 j = jj - 1
-                t1 = (f2lf + (f21 * math.log(twa1 - (xlegq[j] * ulen)))) \
-                    + (((xlegq[j] * ulen) - twa1) * ff4)
+                t1 = _rfma(_rfma(xlegq[j], ulen, -twa1), ff4,
+                           _rfma(f21, math.log(
+                               _rfma(-xlegq[j], ulen, twa1)), f2lf))
             # if exp(t1) < 9e-14 it does not contribute to the integral
             if t1 >= eps1:
                 if ihalfq < jj:
-                    qsqz = q * math.sqrt(((xlegq[j] * ulen) + twa1) * 0.5)
+                    qsqz = q * math.sqrt(_rfma(xlegq[j], ulen, twa1) * 0.5)
                 else:
+                    # `(-(xlegq[j]*ulen)) + twa1`: the negation makes the LHS an
+                    # fneg, not an fmul, so clang leaves this one uncontracted.
                     qsqz = q * math.sqrt(((-(xlegq[j] * ulen)) + twa1) * 0.5)
                 wprb = _wprob(qsqz, rr, cc)
                 rotsum = (wprb * alegq[j]) * math.exp(t1)
@@ -5935,16 +5953,17 @@ def _qtukey_qinv(p: float, c: float, v: float) -> float:
     c5 = 1.4142
     vmax = 120.0
 
+    # Every `a*b + c` below is one fmadd in R's arm64 build (see ptukey above).
     ps = 0.5 - 0.5 * p
     yi = math.sqrt(math.log(1.0 / (ps * ps)))
-    t = yi + ((((yi * p4 + p3) * yi + p2) * yi + p1) * yi + p0) \
-        / ((((yi * q4 + q3) * yi + q2) * yi + q1) * yi + q0)
+    t = yi + _rfma(_rfma(_rfma(_rfma(yi, p4, p3), yi, p2), yi, p1), yi, p0) \
+        / _rfma(_rfma(_rfma(_rfma(yi, q4, q3), yi, q2), yi, q1), yi, q0)
     if v < vmax:
-        t += (t * t * t + t) / v / 4.0
-    q = c1 - c2 * t
+        t += _rfma(t * t, t, t) / v / 4.0
+    q = _rfma(-c2, t, c1)
     if v < vmax:
         q += -c3 / v + c4 * t / v
-    return t * (q * math.log(c - 1.0) + c5)
+    return t * _rfma(q, math.log(c - 1.0), c5)
 
 
 def qtukey(p: float, rr: float, cc: float, df: float,
@@ -5995,7 +6014,10 @@ def qtukey(p: float, rr: float, cc: float, df: float,
 
     ans = 0.0
     for _ in range(1, maxiter):
-        ans = x1 - ((valx1 * (x1 - x0)) / (valx1 - valx0))
+        # `_c_div`: two equal successive ptukey values make the secant
+        # denominator 0, where C yields Inf/NaN (R then warns and returns NaN)
+        # rather than raising -- e.g. qtukey(0.5, nmeans=20, df=500, nranges=2).
+        ans = x1 - _c_div(valx1 * (x1 - x0), valx1 - valx0)
         valx0 = valx1
         x0 = x1
         if ans < 0.0:  # new iterate must be >= 0

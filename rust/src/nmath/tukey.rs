@@ -15,6 +15,7 @@ use pyo3::prelude::*;
 use super::consts::M_LN2;
 use super::lgamma::lgammafn;
 use super::norm::{dt0, dt1, pnorm5_scalar};
+use super::util::rfma;
 
 const M_1_SQRT_2PI: f64 = 0.398942280401432677939946059934; // 1/sqrt(2pi)
 
@@ -173,8 +174,11 @@ pub(crate) fn ptukey_scalar(q: f64, rr: f64, cc: f64, df: f64, lower_tail: bool,
         return r_dt_val(wprob(q, rr, cc), lower_tail, log_p);
     }
 
+    // clang contracts the *leading* multiply of each `a*b ± c` into one fmadd
+    // on arm64, so `rfma` (= plain `a*b+c` on x86) is what keeps this whole
+    // quadrature 0-ulp to R on both arches.
     let f2 = df * 0.5;
-    let mut f2lf = (f2 * df.ln() - df * M_LN2) - lgammafn(f2);
+    let mut f2lf = rfma(f2, df.ln(), -(df * M_LN2)) - lgammafn(f2);
     let f21 = f2 - 1.0;
     let ff4 = df * 0.25;
     let ulen: f64 = if df <= dhaf {
@@ -197,17 +201,22 @@ pub(crate) fn ptukey_scalar(q: f64, rr: f64, cc: f64, df: f64, lower_tail: bool,
             let t1;
             if ihalfq < jj {
                 j = jj - ihalfq - 1;
-                t1 = (f2lf + (f21 * (twa1 + (XLEGQ[j] * ulen)).ln()))
-                    - (((XLEGQ[j] * ulen) + twa1) * ff4);
+                let xu1 = rfma(XLEGQ[j], ulen, twa1);
+                t1 = rfma(-xu1, ff4, rfma(f21, xu1.ln(), f2lf));
             } else {
                 j = jj - 1;
-                t1 = (f2lf + (f21 * (twa1 - (XLEGQ[j] * ulen)).ln()))
-                    + (((XLEGQ[j] * ulen) - twa1) * ff4);
+                t1 = rfma(
+                    rfma(XLEGQ[j], ulen, -twa1),
+                    ff4,
+                    rfma(f21, rfma(-XLEGQ[j], ulen, twa1).ln(), f2lf),
+                );
             }
             if t1 >= eps1 {
                 let qsqz = if ihalfq < jj {
-                    q * (((XLEGQ[j] * ulen) + twa1) * 0.5).sqrt()
+                    q * (rfma(XLEGQ[j], ulen, twa1) * 0.5).sqrt()
                 } else {
+                    // `(-(XLEGQ[j]*ulen)) + twa1`: the negation makes the LHS an
+                    // fneg, not an fmul, so clang leaves this one uncontracted.
                     q * (((-(XLEGQ[j] * ulen)) + twa1) * 0.5).sqrt()
                 };
                 let wprb = wprob(qsqz, rr, cc);
@@ -244,19 +253,20 @@ fn qtukey_qinv(p: f64, c: f64, v: f64) -> f64 {
     let c5 = 1.4142;
     let vmax = 120.0;
 
+    // Every `a*b + c` below is one fmadd in R's arm64 build (see ptukey above).
     let ps = 0.5 - 0.5 * p;
     let yi = (1.0 / (ps * ps)).ln().sqrt();
     let mut t = yi
-        + ((((yi * p4 + p3) * yi + p2) * yi + p1) * yi + p0)
-            / ((((yi * q4 + q3) * yi + q2) * yi + q1) * yi + q0);
+        + rfma(rfma(rfma(rfma(yi, p4, p3), yi, p2), yi, p1), yi, p0)
+            / rfma(rfma(rfma(rfma(yi, q4, q3), yi, q2), yi, q1), yi, q0);
     if v < vmax {
-        t += (t * t * t + t) / v / 4.0;
+        t += rfma(t * t, t, t) / v / 4.0;
     }
-    let mut q = c1 - c2 * t;
+    let mut q = rfma(-c2, t, c1);
     if v < vmax {
         q += -c3 / v + c4 * t / v;
     }
-    t * (q * (c - 1.0).ln() + c5)
+    t * rfma(q, (c - 1.0).ln(), c5)
 }
 
 pub(crate) fn qtukey_scalar(p: f64, rr: f64, cc: f64, df: f64, lower_tail: bool, log_p: bool) -> f64 {

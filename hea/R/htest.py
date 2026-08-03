@@ -19,7 +19,7 @@ from . import _fexact
 from . import distributions as _dist
 from . import nmath as _nm
 
-from ._shared import _as_array, _fmt, _fmt_pval
+from ._shared import _as_array, _fmt, _fmt_pval, _rfma
 from ..models.lm import lm
 
 
@@ -725,7 +725,7 @@ def _prho(n, is_, lower_tail):
     if is_ <= 0.0:
         return pv
     n3 = float(n)
-    n3 *= (n3 * n3 - 1.0) / 3.0  # (n^3 - n)/3
+    n3 *= _rfma(n3, n3, -1.0) / 3.0  # (n^3 - n)/3
     if is_ > n3:
         return 1 - pv
     if n <= n_small:  # exact by full permutation enumeration
@@ -743,15 +743,23 @@ def _prho(n, is_, lower_tail):
                 if is_ <= ise:
                     ifr += 1
         return (nfac - ifr if lower_tail else ifr) / nfac
-    # Edgeworth series expansion
+    # Edgeworth series expansion.  Every `a*b ± c` in prho.c's nested Horner is
+    # one fmadd in R's arm64 build (clang contracts the leading multiply, or the
+    # trailing one when the leading operand is not itself a product), so the
+    # nesting below is `_rfma` in exactly those places -- on x86 `_rfma` is the
+    # plain expression, keeping this 0-ulp to R on both arches.
     y = float(n)
     b = 1 / y
-    x = (6.0 * (is_ - 1) * b / (y * y - 1) - 1) * math.sqrt(y - 1)
+    x = (6.0 * (is_ - 1) * b / _rfma(y, y, -1.0) - 1) * math.sqrt(y - 1)
     y = x * x
-    u = x * b * (c1 + b * (c2 + c3 * b)
-                 + y * (-c4 + b * (c5 + c6 * b)
-                        - y * b * (c7 + c8 * b
-                                   - y * (c9 - c10 * b + y * b * (c11 - c12 * y)))))
+    u = x * b * _rfma(
+        y,
+        _rfma(-(y * b),
+              _rfma(-y,
+                    _rfma(y * b, _rfma(-c12, y, c11), _rfma(-c10, b, c9)),
+                    _rfma(c8, b, c7)),
+              _rfma(b, _rfma(c6, b, c5), -c4)),
+        _rfma(b, _rfma(c3, b, c2), c1))
     y = u / math.exp(y / 2.0)
     pv = (-y if lower_tail else y) + _nm.pnorm5(x, 0.0, 1.0, lower_tail, False)
     if pv < 0:
@@ -2016,7 +2024,12 @@ def _ks_test_two(q, r, s, two):
 
 
 def _psmirnov_exact_uniq(q, m, n, two, lower):
-    """Two-sample exact Smirnov, distinct values (ks.c uniq_lower/upper)."""
+    """Two-sample exact Smirnov, distinct values (ks.c uniq_lower/upper).
+
+    The recursion steps use ``_rfma`` because clang contracts ks.c's
+    ``w*u[j] + u[j-1]`` / ``v*u[j] + w*u[j-1]`` into one fmadd on arm64; on x86
+    ``_rfma`` is the plain expression, so this is 0-ulp to R on both arches.
+    """
     md = float(m)
     nd = float(n)
     if lower:
@@ -2034,7 +2047,7 @@ def _psmirnov_exact_uniq(q, m, n, two, lower):
                 if _ks_test_two(q, i / md, j / nd, two):
                     u[j] = 0.0
                 else:
-                    u[j] = w * u[j] + u[j - 1]
+                    u[j] = _rfma(w, u[j], u[j - 1])
         return u[n]
     # upper
     u = [0.0] * (n + 1)
@@ -2050,13 +2063,14 @@ def _psmirnov_exact_uniq(q, m, n, two, lower):
             else:
                 v = i / (i + j)
                 w = j / (i + j)
-                u[j] = v * u[j] + w * u[j - 1]
+                u[j] = _rfma(v, u[j], w * u[j - 1])
     return u[n]
 
 
 def _psmirnov_exact_ties(q, m, n, z, two, lower):
     """Two-sample exact Smirnov with ties (ks.c ties_lower/upper); ``z`` is the
-    length-(m+n+1) integer tie-boundary indicator."""
+    length-(m+n+1) integer tie-boundary indicator.  ``_rfma`` for the same
+    contraction reason as :func:`_psmirnov_exact_uniq`."""
     md = float(m)
     nd = float(n)
     u = [0.0] * (n + 1)
@@ -2077,7 +2091,7 @@ def _psmirnov_exact_ties(q, m, n, z, two, lower):
                 if _ks_test_two(q, i / md, j / nd, two) and z[i + j]:
                     u[j] = 0.0
                 else:
-                    u[j] = w * u[j] + u[j - 1]
+                    u[j] = _rfma(w, u[j], u[j - 1])
         return u[n]
     # upper
     u[0] = 0.0
@@ -2095,7 +2109,7 @@ def _psmirnov_exact_ties(q, m, n, z, two, lower):
             else:
                 v = i / (i + j)
                 w = j / (i + j)
-                u[j] = v * u[j] + w * u[j - 1]
+                u[j] = _rfma(v, u[j], w * u[j - 1])
     return u[n]
 
 
@@ -2985,7 +2999,11 @@ def _d2x2xk(K: int, m, n, t):
     """Density of ``S = Σ_k x[1,1,k]`` on its support, by convolution across the
     ``K`` strata of the central product-hypergeometric — port of ``d2x2xk.c``
     ``int_d2x2xk`` (uses nmath ``dhyper``). ``m``/``n``/``t`` are the per-stratum
-    column-1, column-2, and row-1 totals."""
+    column-1, column-2, and row-1 totals.
+
+    The convolution step is ``_rfma`` because clang contracts d2x2xk.c's
+    ``c[i+1][w+j] += c[i][w] * u`` into one fmadd on arm64; on x86 ``_rfma`` is
+    the plain expression, so the density is 0-ulp to R on both arches."""
     c = [[1.0]]
     length = 0
     for i in range(K):
@@ -2996,7 +3014,7 @@ def _d2x2xk(K: int, m, n, t):
         for j in range(z - y + 1):
             u = float(_nm.dhyper(j + y, m[i], n[i], t[i], False))
             for w in range(length + 1):
-                ci[w + j] += prev[w] * u
+                ci[w + j] = _rfma(prev[w], u, ci[w + j])
         c.append(ci)
         length = length + z - y
     total = 0.0

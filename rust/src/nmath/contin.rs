@@ -13,6 +13,7 @@ use super::consts::{M_1_SQRT_2PI, M_LN_SQRT_2PI};
 use super::gamma::{r_dt_clog, r_log1_exp};
 use super::norm::{dt0, dt1, pnorm5_scalar, qnorm5_scalar};
 use super::tf::tanpi;
+use super::util::rfma;
 
 // --- dpq.h helpers not already centralised -----------------------------------
 #[inline]
@@ -276,7 +277,10 @@ pub(crate) fn dlnorm_scalar(x: f64, meanlog: f64, sdlog: f64, give_log: bool) ->
     }
     let y = (x.ln() - meanlog) / sdlog;
     if give_log {
-        -(M_LN_SQRT_2PI + 0.5 * y * y + (x * sdlog).ln())
+        // R: `-(M_LN_SQRT_2PI + 0.5 * y * y + log(x * sdlog))`; clang contracts
+        // `M_LN_SQRT_2PI + (0.5*y)*y` into one fmadd on arm64, so `rfma` (=
+        // plain `a*b+c` on x86) is what keeps this 0-ulp to R on both arches.
+        -(rfma(0.5 * y, y, M_LN_SQRT_2PI) + (x * sdlog).ln())
     } else {
         M_1_SQRT_2PI * (-0.5 * y * y).exp() / (x * sdlog)
     }
